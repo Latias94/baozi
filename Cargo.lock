@@ -82,6 +82,7 @@ version = "0.1.0"
 dependencies = [
  "baozi-core",
  "baozi-import",
+ "baozi-io",
  "baozi-test-support",
 ]
 

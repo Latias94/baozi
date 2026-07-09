@@ -1,10 +1,14 @@
 #![forbid(unsafe_code)]
 
-use baozi_core::{BaoziError, Result, Scene};
+mod detect;
+mod parser;
+
+use baozi_core::{Result, Scene};
 use baozi_import::{
     CapabilityStatus, FormatCapability, FormatEncoding, FormatImporter, FormatInfo, FormatMaturity,
-    FormatSidecarPolicy, ImportContext, ImporterRegistry,
+    FormatSidecarPolicy, ImportContext, ImporterRegistry, ReadConfidence, ReadHint,
 };
+use baozi_io::ReadSeek;
 
 pub struct PlyImporter;
 
@@ -15,9 +19,9 @@ pub fn format_info() -> FormatInfo {
         .with_sidecar_policy(FormatSidecarPolicy::None)
         .with_maturity(FormatMaturity::Experimental)
         .with_capabilities(&[
-            (FormatCapability::Geometry, CapabilityStatus::Unknown),
-            (FormatCapability::Hierarchy, CapabilityStatus::Unknown),
-            (FormatCapability::Materials, CapabilityStatus::Unknown),
+            (FormatCapability::Geometry, CapabilityStatus::Supported),
+            (FormatCapability::Hierarchy, CapabilityStatus::Partial),
+            (FormatCapability::Materials, CapabilityStatus::Unsupported),
             (FormatCapability::Textures, CapabilityStatus::Unsupported),
             (
                 FormatCapability::CamerasLights,
@@ -29,7 +33,7 @@ pub fn format_info() -> FormatInfo {
                 FormatCapability::MorphTargets,
                 CapabilityStatus::Unsupported,
             ),
-            (FormatCapability::Metadata, CapabilityStatus::Unknown),
+            (FormatCapability::Metadata, CapabilityStatus::Partial),
             (
                 FormatCapability::CompressionContainers,
                 CapabilityStatus::Unsupported,
@@ -38,10 +42,13 @@ pub fn format_info() -> FormatInfo {
                 FormatCapability::CoordinatesUnits,
                 CapabilityStatus::Unknown,
             ),
-            (FormatCapability::Diagnostics, CapabilityStatus::Unknown),
-            (FormatCapability::ResourceLimits, CapabilityStatus::Unknown),
+            (FormatCapability::Diagnostics, CapabilityStatus::Supported),
+            (
+                FormatCapability::ResourceLimits,
+                CapabilityStatus::Supported,
+            ),
         ])
-        .with_notes("planned PLY importer shell; parsing is not implemented yet")
+        .with_notes("experimental PLY importer for ASCII and binary vertex/face geometry")
         .with_docs_path("docs/formats/ply.md")
 }
 
@@ -54,8 +61,12 @@ impl FormatImporter for PlyImporter {
         format_info()
     }
 
-    fn read(&self, _ctx: &mut ImportContext<'_>) -> Result<Scene> {
-        Err(BaoziError::unsupported_format("ply parser not implemented"))
+    fn can_read(&self, input: &mut dyn ReadSeek, hint: &ReadHint) -> Result<ReadConfidence> {
+        detect::can_read(input, hint)
+    }
+
+    fn read(&self, ctx: &mut ImportContext<'_>) -> Result<Scene> {
+        parser::read_ply(ctx)
     }
 }
 

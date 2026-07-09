@@ -4,26 +4,37 @@
 
 - Format: PLY
 - Crate: `baozi-format-ply`
-- Maturity: Experimental shell
+- Maturity: Experimental
 - Default feature: not enabled by `default-formats`
-- Parser backend: not implemented yet
+- Parser backend: Baozi-owned parser
 - Supported extensions: `.ply`
 - Supported media types: `model/ply`
-- Encoding: text or binary planned
+- Encoding: ASCII, binary little-endian, binary big-endian
 - Sidecar policy: none
 
 ## Current Status
 
-`baozi-format-ply` is a descriptor-only crate. It is present so the workspace can define the crate boundary, feature flag, support-matrix row, and parser policy before implementation starts. It is marked `publish = false` until it imports fixtures into `Scene` with validation, snapshots, malformed tests, and fuzz coverage.
+`baozi-format-ply` imports common vertex and face geometry into Baozi's owned IR. It is marked
+`publish = false` while fixture coverage, fuzzing, and format maturity evidence are still growing.
 
-## Planned Scope
+## Supported MVP
 
-- ASCII PLY and binary little-endian PLY geometry.
-- Point clouds and triangle/polygon meshes.
-- Common vertex properties as typed SoA streams.
-- Unknown vertex properties through `VertexAttribute`.
-- Resource limits, diagnostics, and corpus fuzzing before promotion beyond shell status.
+- ASCII, binary little-endian, and binary big-endian PLY.
+- Vertex positions from `x`, `y`, `z`.
+- Optional normals from `nx`, `ny`, `nz`.
+- Optional vertex colors from `red/green/blue/alpha` or `r/g/b/a`.
+- Optional texture coordinates from `s/t`, `u/v`, or `texture_u/texture_v`.
+- Point clouds when no face element is present.
+- Triangle faces and polygon faces from `vertex_indices` or `vertex_index` list properties.
+- Unknown scalar vertex properties preserved as `ply:<name>` custom vertex attributes when they map
+  to Baozi's current typed attribute model.
+- Comments and `obj_info` lines preserved as mesh metadata.
+- Resource-limit checks for primary bytes, header line/token/string sizes, vertex count, face count,
+  list lengths, mesh count, and diagnostics.
 
 ## Known Non-Support
 
-Calling the current importer returns `UnsupportedFormat`. Users should not enable `format-ply` expecting model loading yet.
+- Materials, textures, cameras, lights, skinning, morph targets, and animation.
+- Non-scalar custom properties and non-geometry elements are skipped with diagnostics.
+- Coordinate system and unit metadata are not standardized by the format and remain `Unknown`.
+- The parser is still Experimental until fuzz coverage and broader fixture evidence land.
