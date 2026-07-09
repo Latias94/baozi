@@ -73,36 +73,10 @@ impl FormatImporter for PlyImporter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use baozi_test_support::{SupportMatrixColumn, assert_support_matrix_row};
+    use baozi_test_support::assert_support_matrix_row;
 
     #[test]
     fn support_matrix_matches_format_info() {
-        assert_support_matrix_row(
-            "baozi-format-ply",
-            &format_info(),
-            &[
-                (SupportMatrixColumn::Geometry, FormatCapability::Geometry),
-                (SupportMatrixColumn::Materials, FormatCapability::Materials),
-                (SupportMatrixColumn::Textures, FormatCapability::Textures),
-                (SupportMatrixColumn::Animation, FormatCapability::Animation),
-                (SupportMatrixColumn::Skinning, FormatCapability::Skinning),
-                (
-                    SupportMatrixColumn::CamerasLights,
-                    FormatCapability::CamerasLights,
-                ),
-                (
-                    SupportMatrixColumn::MorphTargets,
-                    FormatCapability::MorphTargets,
-                ),
-                (
-                    SupportMatrixColumn::ResourceLimits,
-                    FormatCapability::ResourceLimits,
-                ),
-                (
-                    SupportMatrixColumn::Diagnostics,
-                    FormatCapability::Diagnostics,
-                ),
-            ],
-        );
+        assert_support_matrix_row("baozi-format-ply", &format_info());
     }
 }

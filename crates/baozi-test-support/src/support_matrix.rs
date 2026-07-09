@@ -7,12 +7,16 @@ const SUPPORT_MATRIX: &str = include_str!("../../../docs/formats/support-matrix.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SupportMatrixColumn {
     Geometry,
+    Hierarchy,
     Materials,
     Textures,
+    CamerasLights,
     Animation,
     Skinning,
-    CamerasLights,
     MorphTargets,
+    Metadata,
+    CompressionContainers,
+    CoordinatesUnits,
     ResourceLimits,
     Diagnostics,
 }
@@ -21,36 +25,75 @@ impl SupportMatrixColumn {
     fn index(self) -> usize {
         match self {
             Self::Geometry => 3,
-            Self::Materials => 4,
-            Self::Textures => 5,
-            Self::Animation => 6,
-            Self::Skinning => 7,
-            Self::CamerasLights => 8,
-            Self::MorphTargets => 9,
-            Self::ResourceLimits => 10,
-            Self::Diagnostics => 12,
+            Self::Hierarchy => 4,
+            Self::Materials => 5,
+            Self::Textures => 6,
+            Self::CamerasLights => 7,
+            Self::Animation => 8,
+            Self::Skinning => 9,
+            Self::MorphTargets => 10,
+            Self::Metadata => 11,
+            Self::CompressionContainers => 12,
+            Self::CoordinatesUnits => 13,
+            Self::ResourceLimits => 14,
+            Self::Diagnostics => 16,
         }
     }
 }
 
-pub fn assert_support_matrix_row(
-    crate_name: &str,
-    info: &FormatInfo,
-    expectations: &[(SupportMatrixColumn, FormatCapability)],
-) {
+const MATRIX_CAPABILITY_COLUMNS: &[(SupportMatrixColumn, FormatCapability)] = &[
+    (SupportMatrixColumn::Geometry, FormatCapability::Geometry),
+    (SupportMatrixColumn::Hierarchy, FormatCapability::Hierarchy),
+    (SupportMatrixColumn::Materials, FormatCapability::Materials),
+    (SupportMatrixColumn::Textures, FormatCapability::Textures),
+    (
+        SupportMatrixColumn::CamerasLights,
+        FormatCapability::CamerasLights,
+    ),
+    (SupportMatrixColumn::Animation, FormatCapability::Animation),
+    (SupportMatrixColumn::Skinning, FormatCapability::Skinning),
+    (
+        SupportMatrixColumn::MorphTargets,
+        FormatCapability::MorphTargets,
+    ),
+    (SupportMatrixColumn::Metadata, FormatCapability::Metadata),
+    (
+        SupportMatrixColumn::CompressionContainers,
+        FormatCapability::CompressionContainers,
+    ),
+    (
+        SupportMatrixColumn::CoordinatesUnits,
+        FormatCapability::CoordinatesUnits,
+    ),
+    (
+        SupportMatrixColumn::ResourceLimits,
+        FormatCapability::ResourceLimits,
+    ),
+    (
+        SupportMatrixColumn::Diagnostics,
+        FormatCapability::Diagnostics,
+    ),
+];
+
+pub fn assert_support_matrix_row(crate_name: &str, info: &FormatInfo) {
     let row = support_matrix_row(crate_name);
     let columns = parse_markdown_row(row);
     let expected_crate = format!("`{crate_name}`");
 
+    assert_eq!(
+        columns.len(),
+        18,
+        "support matrix column count drifted for {crate_name}"
+    );
     assert_eq!(columns[1], expected_crate);
     assert_eq!(columns[2], maturity_label(info.maturity()));
     assert_eq!(
-        columns[11],
+        columns[15],
         sidecar_label(info.sidecar_policy()),
         "support matrix Sidecars/archives column drifted for {crate_name}"
     );
 
-    for (column, capability) in expectations {
+    for (column, capability) in MATRIX_CAPABILITY_COLUMNS {
         let expected = capability_label(capability_status(info, *capability));
         assert_eq!(
             columns[column.index()],

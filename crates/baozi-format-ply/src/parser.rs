@@ -88,6 +88,8 @@ fn parse_header(ctx: &ImportContext<'_>, bytes: &[u8]) -> Result<Header> {
     let mut current_element: Option<Element> = None;
     let mut comments = Vec::new();
     let mut obj_infos = Vec::new();
+    let mut saw_vertex_element = false;
+    let mut saw_face_element = false;
 
     loop {
         let line_offset = offset;
@@ -127,7 +129,21 @@ fn parse_header(ctx: &ImportContext<'_>, bytes: &[u8]) -> Result<Header> {
         }
         let tokens = checked_tokens(ctx, line)?;
         match tokens.as_slice() {
-            ["format", value, _version] => {
+            ["format", value, version] => {
+                if format.is_some() {
+                    return Err(ply_parse_error(
+                        ctx,
+                        Some(line_offset),
+                        "PLY header has multiple format lines",
+                    ));
+                }
+                if *version != "1.0" {
+                    return Err(ply_parse_error(
+                        ctx,
+                        Some(line_offset),
+                        format!("unsupported PLY version '{version}'"),
+                    ));
+                }
                 format = Some(match *value {
                     "ascii" => PlyFormat::Ascii,
                     "binary_little_endian" => PlyFormat::BinaryLittleEndian,
@@ -146,13 +162,36 @@ fn parse_header(ctx: &ImportContext<'_>, bytes: &[u8]) -> Result<Header> {
                     elements.push(element);
                 }
                 let count = parse_count(ctx, count, line_offset)?;
-                if *name == "vertex" && count > ctx.limits().max_vertices {
-                    return Err(BaoziError::LimitExceeded {
-                        limit: "max_vertices",
-                    });
-                }
-                if *name == "face" && count > ctx.limits().max_faces {
-                    return Err(BaoziError::LimitExceeded { limit: "max_faces" });
+                match *name {
+                    "vertex" => {
+                        if saw_vertex_element {
+                            return Err(ply_parse_error(
+                                ctx,
+                                Some(line_offset),
+                                "multiple PLY vertex elements are not supported",
+                            ));
+                        }
+                        saw_vertex_element = true;
+                        if count > ctx.limits().max_vertices {
+                            return Err(BaoziError::LimitExceeded {
+                                limit: "max_vertices",
+                            });
+                        }
+                    }
+                    "face" => {
+                        if saw_face_element {
+                            return Err(ply_parse_error(
+                                ctx,
+                                Some(line_offset),
+                                "multiple PLY face elements are not supported",
+                            ));
+                        }
+                        saw_face_element = true;
+                        if count > ctx.limits().max_faces {
+                            return Err(BaoziError::LimitExceeded { limit: "max_faces" });
+                        }
+                    }
+                    _ => {}
                 }
                 current_element = Some(Element {
                     name: bounded_string(ctx, name, "element name")?,
@@ -220,7 +259,7 @@ fn parse_body(ctx: &mut ImportContext<'_>, bytes: &[u8], header: &Header) -> Res
     }
 
     let mut parsed = ParsedPly {
-        positions: Vec::with_capacity(vertex_element.count),
+        positions: Vec::new(),
         normals: Vec::new(),
         texcoords: Vec::new(),
         colors: Vec::new(),
@@ -827,7 +866,23 @@ fn custom_accumulators(
     ctx: &mut ImportContext<'_>,
     element: &Element,
 ) -> Result<Vec<VertexAttribute>> {
+    validate_custom_attribute_budget(ctx, element)?;
+    let custom_scalar_count = element
+        .properties
+        .iter()
+        .filter(|property| {
+            let Property::Scalar { name, .. } = property else {
+                return false;
+            };
+            !is_builtin_vertex_property(name)
+        })
+        .count();
     let mut attributes = Vec::new();
+    attributes
+        .try_reserve_exact(custom_scalar_count)
+        .map_err(|_| BaoziError::LimitExceeded {
+            limit: "max_vertex_attribute_cells",
+        })?;
     for property in &element.properties {
         let Property::Scalar { name, ty } = property else {
             continue;
@@ -836,14 +891,12 @@ fn custom_accumulators(
             continue;
         }
         let data = match ty {
-            ScalarType::F32 | ScalarType::F64 => {
-                VertexAttributeData::F32(Vec::with_capacity(element.count))
-            }
+            ScalarType::F32 | ScalarType::F64 => VertexAttributeData::F32(Vec::new()),
             ScalarType::U8 | ScalarType::U16 | ScalarType::U32 => {
-                VertexAttributeData::U32(Vec::with_capacity(element.count))
+                VertexAttributeData::U32(Vec::new())
             }
             ScalarType::I8 | ScalarType::I16 | ScalarType::I32 => {
-                VertexAttributeData::I32(Vec::with_capacity(element.count))
+                VertexAttributeData::I32(Vec::new())
             }
         };
         let attr_name = format!("ply:{name}");
@@ -854,12 +907,37 @@ fn custom_accumulators(
             metadata: MetadataMap::new(),
         });
     }
-    if attributes.len() > ctx.limits().max_token_bytes {
+    Ok(attributes)
+}
+
+fn validate_custom_attribute_budget(ctx: &ImportContext<'_>, element: &Element) -> Result<()> {
+    let custom_scalar_count = element
+        .properties
+        .iter()
+        .filter(|property| {
+            let Property::Scalar { name, .. } = property else {
+                return false;
+            };
+            !is_builtin_vertex_property(name)
+        })
+        .count();
+    if custom_scalar_count > ctx.limits().max_vertex_attribute_streams {
         return Err(BaoziError::LimitExceeded {
-            limit: "max_token_bytes",
+            limit: "max_vertex_attribute_streams",
         });
     }
-    Ok(attributes)
+    let cells =
+        custom_scalar_count
+            .checked_mul(element.count)
+            .ok_or(BaoziError::LimitExceeded {
+                limit: "max_vertex_attribute_cells",
+            })?;
+    if cells > ctx.limits().max_vertex_attribute_cells {
+        return Err(BaoziError::LimitExceeded {
+            limit: "max_vertex_attribute_cells",
+        });
+    }
+    Ok(())
 }
 
 fn push_custom_scalar(parsed: &mut ParsedPly, name: &str, value: ScalarValue) -> Result<()> {

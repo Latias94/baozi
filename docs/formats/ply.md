@@ -29,8 +29,8 @@
 - Unknown scalar vertex properties preserved as `ply:<name>` custom vertex attributes when they map
   to Baozi's current typed attribute model.
 - Comments and `obj_info` lines preserved as mesh metadata.
-- Resource-limit checks for primary bytes, header line/token/string sizes, vertex count, face count,
-  list lengths, mesh count, and diagnostics.
+- Resource-limit checks for primary bytes, header line/token/string sizes, vertex count, custom
+  vertex attribute stream/cell counts, face count, list lengths, mesh count, and diagnostics.
 
 ## Known Non-Support
 
