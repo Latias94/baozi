@@ -203,7 +203,7 @@ impl SceneBuilder {
     }
 
     pub fn add_node(&mut self, node: Node) -> NodeId {
-        self.push_node(None, node)
+        self.push_node(Some(self.scene.root), node)
     }
 
     pub fn add_child_node(&mut self, parent: NodeId, node: Node) -> Result<NodeId> {
