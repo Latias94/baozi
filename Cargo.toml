@@ -7,10 +7,10 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.95"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/frankorz/baozi"
-homepage = "https://github.com/frankorz/baozi"
+repository = "https://github.com/Latias94/baozi"
+homepage = "https://github.com/Latias94/baozi"
 documentation = "https://docs.rs/baozi"
-authors = ["Baozi Contributors"]
+authors = ["Mingzhen Zhuang <superfrankie621@gmail.com>"]
 
 [workspace.dependencies]
 baozi-core = { path = "crates/baozi-core" }
