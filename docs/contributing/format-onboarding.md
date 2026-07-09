@@ -18,6 +18,10 @@ Use this checklist before adding or promoting a `baozi-format-*` crate.
 - Convert parser errors into `BaoziError` and diagnostics.
 - Do not expose backend parser types in public Baozi APIs.
 - Do not silently normalize coordinates, UVs, winding, materials, normals, or tangents.
+- Keep facade examples public-API-only. Examples must import from `baozi`, not from private format
+  crates or internal workspace crates.
+- Keep sanitizer fuzz claims truthful. A target with a third-party backend that can abort under
+  `cargo fuzz run` may stay as check-only, but must not be listed as stable sanitizer evidence.
 
 ## Required Evidence by Stable Promotion
 
@@ -29,6 +33,9 @@ Use this checklist before adding or promoting a `baozi-format-*` crate.
 - Support matrix row.
 - Dependency and license notes.
 - Passing GitHub Actions CI gates for workflow lint, docs, WASM, dependency policy, and fuzz smoke.
+- A facade example or README snippet showing the supported public import path.
+- A Criterion baseline or an explicit note explaining why this format is excluded from import
+  benchmarks.
 - Oracle comparison or documented reason it is not useful yet.
 - Successful sanitizer smoke run on Linux CI for stable promotion.
 
@@ -40,3 +47,11 @@ Use this checklist before adding or promoting a `baozi-format-*` crate.
 - No `unsafe` without a local safety comment and tests.
 - No FFI dependency in default features.
 - Windows sanitizer failures are recorded as toolchain evidence, not parser evidence.
+
+## Facade and Benchmark Checklist
+
+- `cargo check -p baozi --examples --all-features`
+- `cargo bench -p baozi --bench import_baseline --no-run --all-features`
+- If the format needs sidecars, add an in-memory `MemoryAssetIo` example or test.
+- If the format participates in post-processing, add a pipeline example or benchmark case that
+  exercises the supported pass sequence.

@@ -23,6 +23,7 @@ fn bench_obj_quad_postprocess(c: &mut Criterion) {
     let importer = Importer::new();
     let pipeline = PostProcessPipeline::new([
         PostProcessStep::Triangulate,
+        PostProcessStep::GenerateNormals,
         PostProcessStep::GenerateBoundingBoxes,
     ]);
     let bytes = b"o quad
