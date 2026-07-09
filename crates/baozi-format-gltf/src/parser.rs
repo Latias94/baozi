@@ -437,8 +437,10 @@ fn validate_primitive_contract(
         mesh_index,
         primitive_index,
         "POSITION",
-        &[json::accessor::ComponentType::F32],
-        &[json::accessor::Type::Vec3],
+        AccessorContract {
+            components: &[json::accessor::ComponentType::F32],
+            dimensions: &[json::accessor::Type::Vec3],
+        },
     )?;
 
     for (semantic, accessor) in &primitive.attributes {
@@ -460,49 +462,48 @@ fn validate_primitive_contract(
                 ));
             }
         };
-        let (components, dimensions): (&[json::accessor::ComponentType], &[json::accessor::Type]) =
-            match semantic {
-                Checked::Valid(json::mesh::Semantic::Normals) => (
-                    &[json::accessor::ComponentType::F32],
-                    &[json::accessor::Type::Vec3],
-                ),
-                Checked::Valid(json::mesh::Semantic::Tangents) => (
-                    &[json::accessor::ComponentType::F32],
-                    &[json::accessor::Type::Vec4],
-                ),
-                Checked::Valid(json::mesh::Semantic::TexCoords(_)) => (
-                    &[
-                        json::accessor::ComponentType::F32,
-                        json::accessor::ComponentType::U8,
-                        json::accessor::ComponentType::U16,
-                    ],
-                    &[json::accessor::Type::Vec2],
-                ),
-                Checked::Valid(json::mesh::Semantic::Colors(_)) => (
-                    &[
-                        json::accessor::ComponentType::F32,
-                        json::accessor::ComponentType::U8,
-                        json::accessor::ComponentType::U16,
-                    ],
-                    &[json::accessor::Type::Vec3, json::accessor::Type::Vec4],
-                ),
-                Checked::Valid(json::mesh::Semantic::Joints(_)) => (
-                    &[
-                        json::accessor::ComponentType::U8,
-                        json::accessor::ComponentType::U16,
-                    ],
-                    &[json::accessor::Type::Vec4],
-                ),
-                Checked::Valid(json::mesh::Semantic::Weights(_)) => (
-                    &[
-                        json::accessor::ComponentType::F32,
-                        json::accessor::ComponentType::U8,
-                        json::accessor::ComponentType::U16,
-                    ],
-                    &[json::accessor::Type::Vec4],
-                ),
-                _ => continue,
-            };
+        let contract = match semantic {
+            Checked::Valid(json::mesh::Semantic::Normals) => AccessorContract {
+                components: &[json::accessor::ComponentType::F32],
+                dimensions: &[json::accessor::Type::Vec3],
+            },
+            Checked::Valid(json::mesh::Semantic::Tangents) => AccessorContract {
+                components: &[json::accessor::ComponentType::F32],
+                dimensions: &[json::accessor::Type::Vec4],
+            },
+            Checked::Valid(json::mesh::Semantic::TexCoords(_)) => AccessorContract {
+                components: &[
+                    json::accessor::ComponentType::F32,
+                    json::accessor::ComponentType::U8,
+                    json::accessor::ComponentType::U16,
+                ],
+                dimensions: &[json::accessor::Type::Vec2],
+            },
+            Checked::Valid(json::mesh::Semantic::Colors(_)) => AccessorContract {
+                components: &[
+                    json::accessor::ComponentType::F32,
+                    json::accessor::ComponentType::U8,
+                    json::accessor::ComponentType::U16,
+                ],
+                dimensions: &[json::accessor::Type::Vec3, json::accessor::Type::Vec4],
+            },
+            Checked::Valid(json::mesh::Semantic::Joints(_)) => AccessorContract {
+                components: &[
+                    json::accessor::ComponentType::U8,
+                    json::accessor::ComponentType::U16,
+                ],
+                dimensions: &[json::accessor::Type::Vec4],
+            },
+            Checked::Valid(json::mesh::Semantic::Weights(_)) => AccessorContract {
+                components: &[
+                    json::accessor::ComponentType::F32,
+                    json::accessor::ComponentType::U8,
+                    json::accessor::ComponentType::U16,
+                ],
+                dimensions: &[json::accessor::Type::Vec4],
+            },
+            _ => continue,
+        };
         validate_accessor(
             ctx,
             gltf,
@@ -510,8 +511,7 @@ fn validate_primitive_contract(
             mesh_index,
             primitive_index,
             label,
-            components,
-            dimensions,
+            contract,
         )?;
     }
 
@@ -523,12 +523,14 @@ fn validate_primitive_contract(
             mesh_index,
             primitive_index,
             "indices",
-            &[
-                json::accessor::ComponentType::U8,
-                json::accessor::ComponentType::U16,
-                json::accessor::ComponentType::U32,
-            ],
-            &[json::accessor::Type::Scalar],
+            AccessorContract {
+                components: &[
+                    json::accessor::ComponentType::U8,
+                    json::accessor::ComponentType::U16,
+                    json::accessor::ComponentType::U32,
+                ],
+                dimensions: &[json::accessor::Type::Scalar],
+            },
         )?)
     } else {
         None
@@ -608,6 +610,12 @@ fn checked_primitive_mode(
     }
 }
 
+#[derive(Clone, Copy)]
+struct AccessorContract<'a> {
+    components: &'a [json::accessor::ComponentType],
+    dimensions: &'a [json::accessor::Type],
+}
+
 fn validate_accessor(
     ctx: &ImportContext<'_>,
     gltf: &gltf::Gltf,
@@ -615,8 +623,7 @@ fn validate_accessor(
     mesh_index: usize,
     primitive_index: usize,
     label: &str,
-    components: &[json::accessor::ComponentType],
-    dimensions: &[json::accessor::Type],
+    contract: AccessorContract<'_>,
 ) -> Result<usize> {
     let accessor = gltf
         .as_json()
@@ -653,7 +660,7 @@ fn validate_accessor(
             ));
         }
     };
-    if !components.contains(&component) || !dimensions.contains(&dimension) {
+    if !contract.components.contains(&component) || !contract.dimensions.contains(&dimension) {
         return Err(BaoziError::parse(
             ctx.source().to_string(),
             None,
