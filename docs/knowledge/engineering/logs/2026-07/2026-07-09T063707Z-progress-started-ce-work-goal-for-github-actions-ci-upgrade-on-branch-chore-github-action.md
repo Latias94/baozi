@@ -12,3 +12,7 @@ Started ce-work goal for GitHub Actions CI upgrade on branch chore/github-action
 # Impact
 
 # Citations
+
+- Plan: `docs/plans/2026-07-09-003-chore-github-actions-ci-upgrade-plan.md`
+- Branch: `chore/github-actions-ci-upgrade`
+- Initial plan commit: `c333962`

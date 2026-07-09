@@ -16,18 +16,18 @@ must be recorded as toolchain evidence rather than parser evidence.
 
 ```powershell
 cargo check --manifest-path fuzz\Cargo.toml
-cargo +nightly fuzz check stl_import
-cargo +nightly fuzz run stl_import -- -runs=256
+cargo +nightly-2026-05-27 fuzz check stl_import
+cargo +nightly-2026-05-27 fuzz run stl_import -- -runs=256
 ```
 
 ## Windows MSVC Setup
 
-On Windows, `cargo +nightly fuzz run` may fail before executing the target if the
+On Windows, `cargo +nightly-2026-05-27 fuzz run` may fail before executing the target if the
 AddressSanitizer runtime DLL is missing. Match the LLVM major/minor version from
 the active nightly:
 
 ```powershell
-rustc +nightly -Vv
+rustc +nightly-2026-05-27 -Vv
 ```
 
 The CI fuzz job currently pins `nightly-2026-05-27` and `cargo-fuzz` 0.13.2.
@@ -43,7 +43,7 @@ Invoke-WebRequest -Uri $downloadUrl -OutFile $installerPath
 Start-Process -FilePath $installerPath -ArgumentList @('/S', "/D=$installRoot") -Wait -WindowStyle Hidden
 
 $env:PATH = "$installRoot\bin;$installRoot\lib\clang\22\lib\windows;$env:PATH"
-cargo +nightly fuzz run stl_import -- -runs=256
+cargo +nightly-2026-05-27 fuzz run stl_import -- -runs=256
 ```
 
 Known Windows outcomes:

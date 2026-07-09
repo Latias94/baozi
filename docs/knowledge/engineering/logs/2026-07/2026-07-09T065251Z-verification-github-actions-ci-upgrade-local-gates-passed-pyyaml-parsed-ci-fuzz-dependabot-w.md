@@ -12,3 +12,7 @@ GitHub Actions CI upgrade local gates passed: PyYAML parsed ci/fuzz/dependabot w
 # Impact
 
 # Citations
+
+- Plan: `docs/plans/2026-07-09-003-chore-github-actions-ci-upgrade-plan.md`
+- Implementation commit under verification: `5a06aca`
+- Commands: PyYAML parse for `.github/workflows/ci.yml`, `.github/workflows/fuzz.yml`, and `.github/dependabot.yml`; `actionlint`; `git diff --check`; Rust fmt/check/clippy/nextest/doctest/doc/feature/WASM/WASI/deny gates; `cargo +nightly fuzz check stl_import`.

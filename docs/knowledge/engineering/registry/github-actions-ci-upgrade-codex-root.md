@@ -20,7 +20,7 @@ Active on branch `chore/github-actions-ci-upgrade`. Initial plan and work regist
 
 # Latest Links
 
-- [Plan](../../plans/2026-07-09-003-chore-github-actions-ci-upgrade-plan.md)
+- [Plan](../../../plans/2026-07-09-003-chore-github-actions-ci-upgrade-plan.md)
 - [Start log](../logs/2026-07/2026-07-09T063707Z-progress-started-ce-work-goal-for-github-actions-ci-upgrade-on-branch-chore-github-action.md)
 - [Local verification log](../logs/2026-07/2026-07-09T065251Z-verification-github-actions-ci-upgrade-local-gates-passed-pyyaml-parsed-ci-fuzz-dependabot-w.md)
 

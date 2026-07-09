@@ -29,6 +29,7 @@ environment variables.
 Review these pins when changing CI, investigating tooling failures, or promoting parser maturity:
 
 - `ACTIONLINT_VERSION` in `.github/workflows/ci.yml`
+- `GO_VERSION` in `.github/workflows/ci.yml`
 - `CARGO_FUZZ_VERSION` in `.github/workflows/ci.yml` and `.github/workflows/fuzz.yml`
 - `RUST_FUZZ_NIGHTLY` in `.github/workflows/ci.yml` and `.github/workflows/fuzz.yml`
 
@@ -44,7 +45,7 @@ cargo fmt --all -- --check
 cargo check --workspace --all-targets
 cargo clippy --workspace --all-targets -- -D warnings
 cargo nextest run --workspace
-cargo test --doc --workspace
+cargo test --doc --workspace --all-features
 $env:RUSTDOCFLAGS = '-D warnings'
 cargo doc --workspace --all-features --no-deps
 cargo deny check

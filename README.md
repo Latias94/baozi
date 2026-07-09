@@ -54,7 +54,7 @@ cargo fmt --all -- --check
 cargo check --workspace --all-targets
 cargo clippy --workspace --all-targets -- -D warnings
 cargo nextest run --workspace
-cargo test --doc --workspace
+cargo test --doc --workspace --all-features
 cargo deny check
 ```
 

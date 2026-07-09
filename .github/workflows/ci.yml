@@ -17,6 +17,7 @@ env:
   RUST_FUZZ_NIGHTLY: nightly-2026-05-27
   CARGO_FUZZ_VERSION: 0.13.2
   ACTIONLINT_VERSION: v1.7.12
+  GO_VERSION: 1.26.x
 
 jobs:
   actionlint:
@@ -32,7 +33,7 @@ jobs:
       - name: Install Go
         uses: actions/setup-go@v6
         with:
-          go-version: stable
+          go-version: ${{ env.GO_VERSION }}
 
       - name: Check workflow syntax
         run: go run github.com/rhysd/actionlint/cmd/actionlint@${ACTIONLINT_VERSION}
@@ -74,7 +75,7 @@ jobs:
         run: cargo nextest run --workspace
 
       - name: Test documentation examples
-        run: cargo test --doc --workspace
+        run: cargo test --doc --workspace --all-features
 
       - name: Check documentation
         env:
