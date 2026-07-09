@@ -179,6 +179,8 @@ source weights, then validator or post-process can normalize them.
 Rules:
 
 - four influences per vertex is a common renderer view, not the core limit
+- fixed `[u16; 4]` joint indices plus `[f32; 4]` weights may be offered by a renderer helper or
+  influence-compaction pass, but must not be the only canonical IR representation
 - the core IR may store more influences when formats provide them
 - post-process presets may compact to a target influence limit
 - zero or non-finite weights are invalid unless repaired with diagnostics
@@ -221,8 +223,10 @@ Interpolation modes:
 - quaternion spherical interpolation for rotation helpers
 - source-specific interpolation in metadata when not supported
 
-Baozi should not silently resample animation during import. Resampling belongs in post-process or a
-future animation utility crate.
+Baozi should not silently resample animation during import. Runtime sampling, blending, IK, retiming,
+and animation playback belong in game engines, DCC tools, post-process passes, or future animation
+utility crates. Raw import stores keyframe times, values, target bindings, interpolation declarations,
+and source timing metadata; it does not evaluate those tracks into transforms.
 
 ## Validation Invariants
 
@@ -291,6 +295,24 @@ Cons:
 - Users must learn every source layout.
 
 Decision: rejected.
+
+### Option B2: Make runtime-friendly four-influence skinning and evaluated animation canonical
+
+Pros:
+
+- Matches a common real-time renderer upload path.
+- Makes simple examples easy to feed into shaders.
+
+Cons:
+
+- Loses source influence counts from formats that provide more than four weights.
+- Forces importer-time weight pruning and renormalization that should be diagnostic post-process work.
+- Encourages Baozi to implement animation sampling and interpolation semantics that engines already
+  own.
+- Makes high-fidelity tooling, conversion, and round-trip workflows weaker.
+
+Decision: rejected for raw IR. Compact four-influence streams and evaluated transforms belong in
+helpers or post-process outputs.
 
 ### Option C: Use source-preserving topology plus normalized vertex-indexed attributes
 

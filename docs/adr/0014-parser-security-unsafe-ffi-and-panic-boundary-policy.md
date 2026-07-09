@@ -111,8 +111,20 @@ Rules:
 - wrap foreign errors into `BaoziError`
 - treat FFI panics, aborts, and memory errors as backend risks
 - keep pure-Rust or safe fallback paths where practical
+- keep language-binding ABIs out of `baozi-core` and the default facade
 
 FFI may be appropriate for complex codecs or external ecosystems, but not for the core import pipeline.
+
+### Foreign Language Bindings
+
+Baozi's Rust-native IR is not required to be `#[repr(C)]`, and core scene structs should not be
+flattened or weakened only to satisfy C, C#, Python, or Unity binding constraints. Rust users should
+get the most idiomatic owned scene model first.
+
+If Baozi exposes cross-language bindings later, they should live in a dedicated wrapper crate such
+as `baozi-c-api` or `baozi-ffi` with explicit ownership functions, opaque handles, stable C structs
+or accessor functions, and separate ABI/version documentation. That crate may translate from the
+Rust IR into an FFI-safe view, but the translation boundary must be explicit and feature-gated.
 
 ## Panic Boundary
 
@@ -203,6 +215,7 @@ Decision: chosen.
 | Unsafe visibility | every unsafe block has safety comment and review note | code review / lint |
 | Limit enforcement | declared oversized counts fail before allocation | limit tests |
 | FFI isolation | FFI dependencies are absent from default feature tree | `cargo tree -e features` |
+| Binding isolation | C/Python/C#/Unity bindings use wrapper crates, not core IR layout promises | API review |
 | Fuzz coverage | every stable parser has fuzz target and regression corpus | fuzz inventory |
 | Error structure | parser failures map to `BaoziError` and diagnostics | snapshot tests |
 
@@ -213,6 +226,7 @@ Decision: chosen.
 | Parser authors use `unwrap` during early work | Medium | High | Clippy review and malformed fixtures |
 | Limits reject legitimate huge assets | Medium | Medium | Make limits configurable and document defaults |
 | FFI backend destabilizes builds | High | Medium | Keep FFI opt-in and isolated |
+| Binding requirements distort Rust API | Medium | Medium | Keep Rust-native IR canonical and translate in wrapper crates |
 | Unsafe optimization introduces UB | High | Low | Require narrow blocks, comments, tests, fuzz, and safe fallback |
 | Fuzzing is not run long enough | Medium | Medium | Add smoke CI and scheduled deeper runs |
 | Third-party parser panics | Medium | Medium | Backend wrapper, regression tests, and replacement policy |
@@ -234,6 +248,7 @@ Decision: chosen.
 ### Phase 2: Advanced Backends
 
 - Add optional FFI policy docs before first FFI backend.
+- Add a separate binding ADR before creating any stable `baozi-c-api` or language-specific wrapper.
 - Add feature tree checks for default dependency hygiene.
 
 ## Consequences
