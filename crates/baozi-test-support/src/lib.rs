@@ -1,4 +1,8 @@
+pub mod snapshot;
+
 use baozi_core::Scene;
+
+pub use snapshot::{SceneSnapshot, SnapshotOptions};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SceneSummary {
