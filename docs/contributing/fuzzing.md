@@ -1,8 +1,9 @@
 # Fuzzing
 
 Baozi parser fuzzing uses `cargo-fuzz` and libFuzzer. The canonical sanitizer
-smoke run is the Linux CI job in `.github/workflows/ci.yml` because Rust nightly,
-compiler-rt, and sanitizer runtime availability are predictable there.
+smoke run is the Linux CI job in `.github/workflows/ci.yml` because the Rust
+nightly, compiler-rt, and sanitizer runtime are pinned and run in a predictable
+Linux environment there.
 
 Local fuzzing is still useful for quick parser work, but local platform failures
 must be recorded as toolchain evidence rather than parser evidence.
@@ -25,8 +26,9 @@ the active nightly:
 rustc +nightly -Vv
 ```
 
-For the 2026-05-27 nightly currently used by this repo, Rust reports LLVM
-22.1.6. A matching local LLVM install can be placed outside the repo:
+The CI fuzz job currently pins `nightly-2026-05-27` and `cargo-fuzz` 0.13.2.
+That nightly reports LLVM 22.1.6. A matching local LLVM install can be placed
+outside the repo:
 
 ```powershell
 $installRoot = 'F:\MySoftware\LLVM-22.1.6'
