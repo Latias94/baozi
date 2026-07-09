@@ -130,9 +130,14 @@ Do not make every importer async by default. Many parsers are CPU-bound after by
 
 Baozi should separate thread safety from parallel execution:
 
-- Core data types should be `Send + Sync` when practical.
+- Public owned result types must stay `Send + Sync` unless a future ADR accepts a narrow exception.
+- `Scene`, `Node`, `Mesh`, `Material`, `Texture`, `Camera`, `Light`, importer registry, IO handles,
+  post-process configuration, and facade result types must have compile-time `Send + Sync`
+  assertions.
+- Parser-internal scratch state may be single-threaded when it does not escape the import call.
 - Importer implementations should be stateless or use per-import context.
-- `Importer` sessions may own mutable options and diagnostics and are not required to be `Sync`.
+- `Importer` sessions may own mutable options and diagnostics; if the public facade type remains
+  clone-free and immutable between calls, it should also satisfy `Send + Sync`.
 - Parser and post-process algorithms can use scoped parallelism internally only when enabled.
 - No global thread pool should be mandatory.
 
@@ -372,7 +377,7 @@ Decision: chosen.
 
 - Add `BaoziError`, `Diagnostic`, `SourceLocation`, `ImportStats`, `ImportReport`.
 - Add `CancellationToken`, `ProgressSink`, `ParallelPolicy`, and no-op profiler traits.
-- Add compile-time trait assertions for key core types.
+- Add compile-time trait assertions for key public result, importer, IO, and post-process types.
 
 ### Phase 1: Runtime-Neutral Core
 

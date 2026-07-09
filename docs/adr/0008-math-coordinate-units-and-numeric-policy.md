@@ -148,7 +148,9 @@ SceneSpace
 └── source_format_notes
 ```
 
-Importers must not silently normalize unless the import options request it.
+Importers must not silently normalize unless the import options request it. Baozi deliberately does
+not make the raw unified IR always Y-up, right-handed, and meters. That target is the normalized
+post-process output, not the default parser output.
 
 ## Units Policy
 
@@ -242,6 +244,24 @@ Cons:
 - `mint` does not cover every advanced math operation.
 
 Decision: chosen.
+
+### Option D: Always normalize during parsing
+
+Pros:
+
+- Renderer-oriented users get consistently oriented assets by default.
+- Simple examples have fewer visible options.
+
+Cons:
+
+- Tooling, conversion, and diagnostics lose the source-authored coordinate data.
+- STL, OBJ, and other unitless formats require guesses that can be wrong.
+- Cameras, lights, skins, animations, tangents, normal maps, and winding must be converted together;
+  doing this format-by-format inside parsers risks inconsistent behavior.
+- Users cannot compare raw importer output against source files or external oracles cleanly.
+
+Decision: rejected as the default. Keep raw import source-preserving; provide explicit coordinate and
+unit normalization post-process steps targeting right-handed, Y-up, meters.
 
 ## Success Metrics
 

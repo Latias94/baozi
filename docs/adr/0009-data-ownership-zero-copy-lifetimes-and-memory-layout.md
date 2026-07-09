@@ -39,6 +39,8 @@ Core policy:
 - IDs and arenas provide stable references inside a scene
 - public memory layout is not an ABI promise
 - zero-copy is an internal optimization boundary, not a public contract
+- parsers must preallocate when source counts are trusted enough and bounded by `ResourceLimits`
+- typed byte casting is allowed only behind explicit endian, alignment, length, and plain-data checks
 
 ## Architecture
 
@@ -147,6 +149,18 @@ Allowed:
 - image payloads are carried as `Arc<[u8]>` without decoding
 - format backend AST borrows internally before conversion
 
+Typed byte casting helpers such as `bytemuck` may be introduced behind parser-private modules or
+optional backends when all checks are true:
+
+- source byte order matches the target representation, or conversion is performed explicitly
+- buffer length is an exact multiple of the target element size
+- alignment is valid, or the helper safely handles unaligned input without undefined behavior
+- target type has a reviewed plain-data contract
+- the cast does not create public ABI or serialization promises
+- malformed input cannot trigger panic or unchecked slicing
+
+When these checks are not true, parsers must use explicit decoding such as `from_le_bytes`.
+
 Not allowed in the main public API:
 
 - `Scene<'a>` borrowing from input
@@ -168,6 +182,17 @@ Rules:
 
 SIMD backends may use internal aligned buffers or structure-of-arrays transformations. These must not
 change public `Scene` semantics.
+
+## Allocation Policy
+
+Parsers must avoid unbounded growth patterns on large assets:
+
+- validate declared counts before `Vec::with_capacity`
+- use `with_capacity` for positions, normals, indices, faces, strings, and diagnostics when the
+  bounded count is known
+- prefer checked arithmetic for `count * element_size` and related derived counts
+- return `BaoziError::LimitExceeded` before allocation when counts exceed `ResourceLimits`
+- record benchmark evidence before adding complex pooling or custom allocators
 
 ## Mutation Policy
 

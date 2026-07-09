@@ -53,11 +53,21 @@ The decision remains per format. Passing this checklist does not make a tool a p
 
 - [ ] Declared counts, offsets, lengths, and nested structures are checked before allocation.
 - [ ] Parser memory is bounded by `ResourceLimits`.
+- [ ] Known bounded counts use preallocation instead of repeated unbounded growth.
 - [ ] Full-buffer parsing is justified for the format size and target use case.
 - [ ] Large text/container formats have an incremental, event, or bounded-AST plan.
 - [ ] Recursive grammar or include behavior has a depth limit.
 - [ ] Diagnostic flooding is capped by `max_diagnostics`.
 - [ ] Pathological inputs have tests or fuzz seeds for CPU and allocation behavior.
+
+## Typed Byte Casting
+
+- [ ] Any `bytemuck`, `zerocopy`, or equivalent casting use is private to the parser/backend.
+- [ ] Endianness is checked or explicitly converted.
+- [ ] Alignment and length preconditions are tested.
+- [ ] Target type has a reviewed plain-data contract.
+- [ ] Fallback explicit decoding exists when casting preconditions are not met.
+- [ ] Casting does not create a public ABI, serialization, or cache-file layout promise.
 
 ## Diagnostics and Error Recovery
 

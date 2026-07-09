@@ -33,6 +33,8 @@ Core policy:
 
 - raw import may represent points, lines, triangles, polygons, and patches
 - triangle-only views are helper APIs, not the canonical raw model
+- mesh vertex data is stored as structure-of-arrays attribute streams, not fixed
+  `struct Vertex` arrays
 - vertex attributes are associated by vertex index after importer normalization into Baozi IR
 - multiple UV, color, and custom channels are first-class
 - skinning is represented as explicit skins, joints, inverse bind matrices, and vertex influences
@@ -108,6 +110,26 @@ one primitive per mesh.
 Baozi normalizes imported vertex data into a vertex-indexed attribute model. Formats with separate
 position, normal, UV, and color indices must expand or remap data during import, with diagnostics
 when expansion is large.
+
+Attribute storage is structure-of-arrays (SoA):
+
+```text
+Mesh
+├── positions: Vec<Vec3>
+├── normals: Vec<Vec3>
+├── tangents: Vec<Vec4>
+├── texcoords: Vec<Vec<Vec2>>
+├── colors: Vec<Vec<Color>>
+└── indices: Vec<u32>
+```
+
+Baozi will not use a fixed public AoS type such as `Vertex { position, normal, uv }` as the canonical
+IR. Fixed AoS layouts fail for common source assets that have missing normals, multiple UV sets,
+multiple color sets, separate attribute indices, or custom attributes.
+
+Renderer-facing interleaved buffers are helper outputs. A future helper may pack selected SoA
+channels into an AoS byte buffer for `wgpu`, Vulkan, OpenGL, or engine upload, but that helper must
+be derived from the owned mesh streams and must not replace the canonical raw IR layout.
 
 Standard attributes:
 
@@ -236,6 +258,23 @@ Cons:
 - Makes tooling and round-trip workflows weaker.
 
 Decision: rejected.
+
+### Option A2: Store a fixed AoS vertex struct
+
+Pros:
+
+- Convenient for simple renderers.
+- One `Vec<Vertex>` can be uploaded directly after choosing a GPU layout.
+
+Cons:
+
+- Does not represent missing or multiple attribute channels well.
+- Forces early interleaving for formats that store attribute streams separately.
+- Makes OBJ-style separate indices and glTF-style accessor views harder to preserve or diagnose.
+- Couples raw import to one renderer layout.
+
+Decision: rejected for canonical IR. Interleaved renderer buffers belong in helper APIs or
+post-process output.
 
 ### Option B: Mirror each source format's native attribute model
 
