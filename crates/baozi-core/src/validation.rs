@@ -8,9 +8,9 @@ pub fn validate_scene(scene: &Scene) -> Result<()> {
     validate_root(scene)?;
     validate_materials(scene)?;
     validate_textures(scene)?;
-    validate_meshes(scene)?;
     validate_nodes(scene)?;
     validate_skins(scene)?;
+    validate_meshes(scene)?;
     validate_cameras(scene)?;
     validate_lights(scene)?;
     validate_animations(scene)?;
@@ -57,9 +57,14 @@ fn validate_nodes(scene: &Scene) -> Result<()> {
             }
         }
 
-        for mesh in &node.meshes {
-            if mesh.index() >= scene.meshes.len() {
+        for binding in &node.mesh_bindings {
+            if binding.mesh.index() >= scene.meshes.len() {
                 return invalid(format!("node {index} mesh reference is out of range"));
+            }
+            if let Some(skin) = binding.skin
+                && skin.index() >= scene.skins.len()
+            {
+                return invalid(format!("node {index} skin reference is out of range"));
             }
         }
 
@@ -193,13 +198,40 @@ fn validate_texture_id(
 }
 
 fn validate_meshes(scene: &Scene) -> Result<()> {
+    let bound_skins = mesh_bound_skins(scene);
     for (index, mesh) in scene.meshes.iter().enumerate() {
-        validate_mesh(index, mesh, scene.materials.len(), &scene.skins)?;
+        validate_mesh(
+            index,
+            mesh,
+            scene.materials.len(),
+            &scene.skins,
+            &bound_skins[index],
+        )?;
     }
     Ok(())
 }
 
-fn validate_mesh(index: usize, mesh: &Mesh, material_count: usize, skins: &[Skin]) -> Result<()> {
+fn mesh_bound_skins(scene: &Scene) -> Vec<Vec<crate::SkinId>> {
+    let mut bound_skins = vec![Vec::new(); scene.meshes.len()];
+    for node in &scene.nodes {
+        for binding in &node.mesh_bindings {
+            if binding.mesh.index() < bound_skins.len()
+                && let Some(skin) = binding.skin
+            {
+                bound_skins[binding.mesh.index()].push(skin);
+            }
+        }
+    }
+    bound_skins
+}
+
+fn validate_mesh(
+    index: usize,
+    mesh: &Mesh,
+    material_count: usize,
+    skins: &[Skin],
+    bound_skin_ids: &[crate::SkinId],
+) -> Result<()> {
     let vertex_count = mesh.positions.len();
     if vertex_count == 0 {
         return invalid(format!("mesh {index} is empty: no positions"));
@@ -210,13 +242,6 @@ fn validate_mesh(index: usize, mesh: &Mesh, material_count: usize, skins: &[Skin
     {
         return invalid(format!("mesh {index} material reference is out of range"));
     }
-    if let Some(skin) = mesh.skin
-        && skin.index() >= skins.len()
-    {
-        return invalid(format!("mesh {index} skin reference is out of range"));
-    }
-    let skin = mesh.skin.and_then(|skin| skins.get(skin.index()));
-
     validate_vec3_channel(index, "positions", &mesh.positions, Some(vertex_count))?;
     validate_vec3_channel(
         index,
@@ -246,7 +271,7 @@ fn validate_mesh(index: usize, mesh: &Mesh, material_count: usize, skins: &[Skin
             Some(vertex_count),
         )?;
     }
-    validate_joint_channels(index, vertex_count, mesh, skin)?;
+    validate_joint_channels(index, vertex_count, mesh, skins, bound_skin_ids)?;
     for (target_index, target) in mesh.morph_targets.iter().enumerate() {
         validate_vec3_channel(
             index,
@@ -302,7 +327,8 @@ fn validate_joint_channels(
     mesh_index: usize,
     vertex_count: usize,
     mesh: &Mesh,
-    skin: Option<&Skin>,
+    skins: &[Skin],
+    bound_skin_ids: &[crate::SkinId],
 ) -> Result<()> {
     if mesh.joint_indices.is_empty() && mesh.joint_weights.is_empty() {
         return Ok(());
@@ -312,17 +338,24 @@ fn validate_joint_channels(
             "mesh {mesh_index} joint indices and weights must both match positions length"
         ));
     }
-    let Some(skin) = skin else {
+    if bound_skin_ids.is_empty() {
         return invalid(format!("mesh {mesh_index} joint channels require a skin"));
-    };
+    }
+    let mut min_joint_count = usize::MAX;
+    for skin in bound_skin_ids {
+        let Some(skin) = skins.get(skin.index()) else {
+            return invalid(format!("mesh {mesh_index} skin reference is out of range"));
+        };
+        min_joint_count = min_joint_count.min(skin.joints.len());
+    }
     for (vertex, joints) in mesh.joint_indices.iter().enumerate() {
         if let Some(joint) = joints
             .iter()
             .copied()
-            .find(|joint| *joint as usize >= skin.joints.len())
+            .find(|joint| *joint as usize >= min_joint_count)
         {
             return invalid(format!(
-                "mesh {mesh_index} joint index {joint} for vertex {vertex} is out of range for its skin"
+                "mesh {mesh_index} joint index {joint} for vertex {vertex} is out of range for a bound skin"
             ));
         }
     }

@@ -1,8 +1,8 @@
 use crate::detect::{StlKind, detect_bytes};
 use crate::{ascii, binary};
 use baozi_core::{
-    Aabb, BaoziError, Color, Material, Mesh, MetadataValue, Node, PrimitiveTopology, Result, Scene,
-    SceneBuilder, Vec3,
+    Aabb, BaoziError, Color, Material, Mesh, MeshBinding, MetadataValue, Node, PrimitiveTopology,
+    Result, Scene, SceneBuilder, Vec3,
 };
 use baozi_import::ImportContext;
 
@@ -85,7 +85,7 @@ fn scene_from_parsed(ctx: &ImportContext<'_>, parsed: ParsedStl) -> Result<Scene
             builder.root(),
             Node {
                 name: parsed_mesh.name,
-                meshes: vec![mesh_id],
+                mesh_bindings: vec![MeshBinding::new(mesh_id)],
                 ..Node::default()
             },
         )?;

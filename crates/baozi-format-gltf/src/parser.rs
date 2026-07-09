@@ -1,8 +1,8 @@
 use baozi_core::scene::{Axis, Handedness};
 use baozi_core::{
     Aabb, AlphaMode, BaoziError, Camera, CameraProjection, Color, ColorSpace, Diagnostic,
-    DiagnosticCode, DiagnosticSeverity, Mat4, Material, MaterialProperty, Mesh, MetadataMap,
-    MetadataValue, Node, PrimitiveTopology, Result, Scene, SceneBuilder, SceneSpace,
+    DiagnosticCode, DiagnosticSeverity, Mat4, Material, MaterialProperty, Mesh, MeshBinding,
+    MetadataMap, MetadataValue, Node, PrimitiveTopology, Result, Scene, SceneBuilder, SceneSpace,
     SourceLocation, Texture, TextureFilterMode, TextureRole, TextureSampler, TextureSlot,
     TextureSource, TextureTransform, TextureWrapMode, Vec2, Vec3, Vec4,
 };
@@ -486,9 +486,10 @@ fn add_node_recursive(
     node: gltf::Node<'_>,
     mesh_ids_by_gltf_mesh: &[Vec<baozi_core::MeshId>],
 ) -> Result<baozi_core::NodeId> {
-    let meshes = node
+    let mesh_bindings = node
         .mesh()
         .and_then(|mesh| mesh_ids_by_gltf_mesh.get(mesh.index()).cloned())
+        .map(|meshes| meshes.into_iter().map(MeshBinding::new).collect())
         .unwrap_or_default();
     let camera = node
         .camera()
@@ -511,7 +512,7 @@ fn add_node_recursive(
             transform: Mat4 {
                 cols: node.transform().matrix(),
             },
-            meshes,
+            mesh_bindings,
             camera,
             ..Node::default()
         },

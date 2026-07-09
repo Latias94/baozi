@@ -1,7 +1,7 @@
 use baozi_core::{
     Animation, AnimationValues, Camera, CameraProjection, Color, Diagnostic, DiagnosticSeverity,
-    Light, Material, Mesh, MetadataMap, Node, Scene, Skin, SourceLocation, Texture, TextureSource,
-    VertexAttributeData,
+    Light, Material, Mesh, MeshBinding, MetadataMap, Node, Scene, Skin, SourceLocation, Texture,
+    TextureSource, VertexAttributeData,
 };
 use std::fmt;
 
@@ -123,7 +123,7 @@ fn write_node(text: &mut String, index: usize, node: &Node) {
             optional_str(node.name.as_deref()),
             optional_id(node.parent.map(|id| id.as_u32())),
             id_list(node.children.iter().map(|id| id.as_u32())),
-            id_list(node.meshes.iter().map(|id| id.as_u32())),
+            mesh_bindings(&node.mesh_bindings),
             optional_id(node.camera.map(|id| id.as_u32())),
             optional_id(node.light.map(|id| id.as_u32())),
             metadata_keys(&node.metadata)
@@ -135,7 +135,7 @@ fn write_mesh(text: &mut String, index: usize, mesh: &Mesh, options: SnapshotOpt
     line(
         text,
         format_args!(
-            "mesh {index} name={} topology={:?} vertices={} indices={} faces={} material={} skin={} joints={} morph_targets={} custom_attributes={} metadata={} bounds={}",
+            "mesh {index} name={} topology={:?} vertices={} indices={} faces={} material={} joints={} morph_targets={} custom_attributes={} metadata={} bounds={}",
             optional_str(mesh.name.as_deref()),
             mesh.topology,
             mesh.positions.len(),
@@ -143,7 +143,6 @@ fn write_mesh(text: &mut String, index: usize, mesh: &Mesh, options: SnapshotOpt
             mesh.polygon_face_count()
                 .map_or_else(|| "<fixed>".to_owned(), |count| count.to_string()),
             optional_id(mesh.material.map(|id| id.as_u32())),
-            optional_id(mesh.skin.map(|id| id.as_u32())),
             mesh.joint_indices.len(),
             mesh.morph_targets.len(),
             mesh.custom_attributes.len(),
@@ -264,6 +263,21 @@ fn write_skin(text: &mut String, index: usize, skin: &Skin) {
             metadata_keys(&skin.metadata)
         ),
     );
+}
+
+fn mesh_bindings(bindings: &[MeshBinding]) -> String {
+    if bindings.is_empty() {
+        return "[]".to_owned();
+    }
+    let values = bindings
+        .iter()
+        .map(|binding| match binding.skin {
+            Some(skin) => format!("mesh:{} skin:{}", binding.mesh.as_u32(), skin.as_u32()),
+            None => format!("mesh:{} skin:-", binding.mesh.as_u32()),
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    format!("[{values}]")
 }
 
 fn write_camera(text: &mut String, index: usize, camera: &Camera, precision: usize) {

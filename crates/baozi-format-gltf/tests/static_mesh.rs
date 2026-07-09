@@ -1,8 +1,8 @@
 mod common;
 
 use baozi_core::{
-    AlphaMode, BaoziError, ColorSpace, PrimitiveTopology, Result, TextureFilterMode, TextureRole,
-    TextureSource, TextureWrapMode, Vec2, Vec3,
+    AlphaMode, BaoziError, ColorSpace, MeshBinding, PrimitiveTopology, Result, TextureFilterMode,
+    TextureRole, TextureSource, TextureWrapMode, Vec2, Vec3,
 };
 use baozi_test_support::SceneSnapshot;
 use common::{
@@ -26,7 +26,10 @@ fn imports_static_mesh_material_texture_uri_and_hierarchy() -> Result<()> {
     assert_eq!(scene.nodes[1].name.as_deref(), Some("Root"));
     assert_eq!(scene.nodes[2].name.as_deref(), Some("TriangleNode"));
     assert_eq!(scene.nodes[1].children, vec![baozi_core::NodeId::new(2)]);
-    assert_eq!(scene.nodes[2].meshes, vec![baozi_core::MeshId::new(0)]);
+    assert_eq!(
+        scene.nodes[2].mesh_bindings,
+        vec![MeshBinding::new(baozi_core::MeshId::new(0))]
+    );
 
     let mesh = &scene.meshes[0];
     assert_eq!(mesh.name.as_deref(), Some("Triangle"));
@@ -104,7 +107,9 @@ fn gltf_scene_snapshot_covers_imported_ir() -> Result<()> {
     assert!(snapshot.contains("scene nodes=3 meshes=1 materials=1 textures=1"));
     assert!(snapshot.contains("space handedness=Right up=Some(PositiveY)"));
     assert!(snapshot.contains("metadata keys=[gltf:version]"));
-    assert!(snapshot.contains("node 2 name=TriangleNode parent=1 children=[] meshes=[0]"));
+    assert!(
+        snapshot.contains("node 2 name=TriangleNode parent=1 children=[] meshes=[mesh:0 skin:-]")
+    );
     assert!(snapshot.contains("mesh 0 name=Triangle topology=Triangles vertices=3"));
     assert!(snapshot.contains("texcoords[0] count=3 shown=3"));
     assert!(snapshot.contains("texture 0 name=BaseTex source=external:models/textures/base.png"));

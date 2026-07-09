@@ -1,9 +1,10 @@
 use baozi_core::{
     Animation, AnimationChannel, AnimationInterpolation, AnimationProperty, AnimationTarget,
     AnimationValues, Camera, CameraId, CameraProjection, ColorSpace, Light, LightId, LightKind,
-    Material, MaterialId, MaterialProperty, Mesh, MeshId, Node, NodeId, PrimitiveTopology,
-    SceneBuilder, Skin, Texture, TextureId, TextureRole, TextureSlot, TextureSource, Vec3,
-    VertexAttribute, VertexAttributeData, VertexAttributeSemantic, validate_scene,
+    Material, MaterialId, MaterialProperty, Mesh, MeshBinding, MeshId, Node, NodeId,
+    PrimitiveTopology, SceneBuilder, Skin, Texture, TextureId, TextureRole, TextureSlot,
+    TextureSource, Vec3, VertexAttribute, VertexAttributeData, VertexAttributeSemantic,
+    validate_scene,
 };
 
 fn valid_triangle_scene() -> baozi_core::Scene {
@@ -23,7 +24,7 @@ fn valid_triangle_scene() -> baozi_core::Scene {
         .add_child_node(
             builder.root(),
             Node {
-                meshes: vec![mesh],
+                mesh_bindings: vec![MeshBinding::new(mesh)],
                 ..Node::default()
             },
         )
@@ -49,7 +50,7 @@ fn valid_polygon_scene() -> baozi_core::Scene {
         .add_child_node(
             builder.root(),
             Node {
-                meshes: vec![mesh],
+                mesh_bindings: vec![MeshBinding::new(mesh)],
                 ..Node::default()
             },
         )
@@ -165,7 +166,7 @@ fn material_texture_slot_reference_is_valid() {
         .add_child_node(
             builder.root(),
             Node {
-                meshes: vec![mesh],
+                mesh_bindings: vec![MeshBinding::new(mesh)],
                 ..Node::default()
             },
         )
@@ -244,9 +245,9 @@ fn joint_channels_require_skin() {
 }
 
 #[test]
-fn mesh_skin_reference_out_of_range_fails() {
+fn node_skin_reference_out_of_range_fails() {
     let mut scene = valid_triangle_scene();
-    scene.meshes[0].skin = Some(baozi_core::SkinId::new(99));
+    scene.nodes[1].mesh_bindings[0].skin = Some(baozi_core::SkinId::new(99));
 
     assert_invalid(&scene, "skin reference");
 }
@@ -258,11 +259,53 @@ fn mesh_joint_indices_must_reference_skin_joints() {
         joints: vec![NodeId::new(1)],
         ..Skin::default()
     });
-    scene.meshes[0].skin = Some(baozi_core::SkinId::new(0));
+    scene.nodes[1].mesh_bindings[0].skin = Some(baozi_core::SkinId::new(0));
     scene.meshes[0].joint_indices = vec![[0, 1, 0, 0]; 3];
     scene.meshes[0].joint_weights = vec![[1.0, 0.0, 0.0, 0.0]; 3];
 
     assert_invalid(&scene, "joint index");
+}
+
+#[test]
+fn mesh_joint_indices_must_reference_every_bound_skin() {
+    let mut scene = valid_triangle_scene();
+    scene.skins.push(Skin {
+        joints: vec![NodeId::new(1), NodeId::new(0)],
+        ..Skin::default()
+    });
+    scene.skins.push(Skin {
+        joints: vec![NodeId::new(1)],
+        ..Skin::default()
+    });
+    scene.nodes[1].mesh_bindings[0].skin = Some(baozi_core::SkinId::new(0));
+    scene.nodes[0]
+        .mesh_bindings
+        .push(baozi_core::MeshBinding::skinned(
+            MeshId::new(0),
+            baozi_core::SkinId::new(1),
+        ));
+    scene.meshes[0].joint_indices = vec![[1, 0, 0, 0]; 3];
+    scene.meshes[0].joint_weights = vec![[1.0, 0.0, 0.0, 0.0]; 3];
+
+    assert_invalid(&scene, "bound skin");
+}
+
+#[test]
+fn joint_weights_must_be_finite() {
+    let mut scene = valid_triangle_scene();
+    scene.skins.push(Skin {
+        joints: vec![NodeId::new(1)],
+        ..Skin::default()
+    });
+    scene.nodes[1].mesh_bindings[0].skin = Some(baozi_core::SkinId::new(0));
+    scene.meshes[0].joint_indices = vec![[0, 0, 0, 0]; 3];
+    scene.meshes[0].joint_weights = vec![
+        [1.0, 0.0, 0.0, 0.0],
+        [f32::NAN, 0.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0, 0.0],
+    ];
+
+    assert_invalid(&scene, "joint weights");
 }
 
 #[test]
@@ -272,9 +315,47 @@ fn skin_joint_reference_out_of_range_fails() {
         joints: vec![NodeId::new(99)],
         ..Skin::default()
     });
-    scene.meshes[0].skin = Some(baozi_core::SkinId::new(0));
+    scene.nodes[1].mesh_bindings[0].skin = Some(baozi_core::SkinId::new(0));
 
     assert_invalid(&scene, "joint reference");
+}
+
+#[test]
+fn skin_skeleton_root_out_of_range_fails() {
+    let mut scene = valid_triangle_scene();
+    scene.skins.push(Skin {
+        joints: vec![NodeId::new(1)],
+        skeleton_root: Some(NodeId::new(99)),
+        ..Skin::default()
+    });
+
+    assert_invalid(&scene, "skeleton root");
+}
+
+#[test]
+fn skin_inverse_bind_matrix_count_must_match_joints() {
+    let mut scene = valid_triangle_scene();
+    scene.skins.push(Skin {
+        joints: vec![NodeId::new(1)],
+        inverse_bind_matrices: vec![baozi_core::Mat4::IDENTITY, baozi_core::Mat4::IDENTITY],
+        ..Skin::default()
+    });
+
+    assert_invalid(&scene, "inverse bind matrix count");
+}
+
+#[test]
+fn skin_inverse_bind_matrices_must_be_finite() {
+    let mut scene = valid_triangle_scene();
+    let mut matrix = baozi_core::Mat4::IDENTITY;
+    matrix.cols[0][0] = f32::NAN;
+    scene.skins.push(Skin {
+        joints: vec![NodeId::new(1)],
+        inverse_bind_matrices: vec![matrix],
+        ..Skin::default()
+    });
+
+    assert_invalid(&scene, "inverse bind matrices");
 }
 
 #[test]
@@ -384,7 +465,7 @@ fn animation_value_kind_must_match_target_property() {
 #[test]
 fn mesh_reference_out_of_range_fails() {
     let mut scene = valid_triangle_scene();
-    scene.nodes[1].meshes[0] = MeshId::new(99);
+    scene.nodes[1].mesh_bindings[0].mesh = MeshId::new(99);
 
     assert_invalid(&scene, "mesh");
 }

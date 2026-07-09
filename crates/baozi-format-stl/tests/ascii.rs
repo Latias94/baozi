@@ -14,7 +14,7 @@ fn imports_one_triangle_ascii_stl() -> Result<()> {
 
     assert!(text.contains("scene nodes=2 meshes=1 materials=1"));
     assert!(text.contains(
-        "node 1 name=triangle parent=0 children=[] meshes=[0] camera=<none> light=<none> metadata=[]"
+        "node 1 name=triangle parent=0 children=[] meshes=[mesh:0 skin:-] camera=<none> light=<none> metadata=[]"
     ));
     assert!(text.contains("mesh 0 name=triangle topology=Triangles"));
     assert!(text.contains("vertices=3 indices=3 faces=<fixed> material=0"));

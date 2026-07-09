@@ -199,7 +199,7 @@ fn postprocess_error(step: &'static str, message: impl Into<String>) -> BaoziErr
 #[cfg(test)]
 mod tests {
     use super::*;
-    use baozi_core::{Mesh, Node};
+    use baozi_core::{Mesh, MeshBinding, Node};
 
     #[test]
     fn pipeline_uses_canonical_order() {
@@ -255,7 +255,7 @@ mod tests {
             .add_child_node(
                 builder.root(),
                 Node {
-                    meshes: vec![mesh],
+                    mesh_bindings: vec![MeshBinding::new(mesh)],
                     ..Node::default()
                 },
             )
@@ -286,7 +286,7 @@ mod tests {
             .add_child_node(
                 builder.root(),
                 Node {
-                    meshes: vec![mesh],
+                    mesh_bindings: vec![MeshBinding::new(mesh)],
                     ..Node::default()
                 },
             )

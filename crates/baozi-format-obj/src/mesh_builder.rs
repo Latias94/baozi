@@ -1,7 +1,7 @@
 use crate::mtl::{self, MaterialLibrary, ParsedMaterial};
 use crate::obj::{Face, FaceVertex, ParsedObj};
 use baozi_core::{
-    Aabb, AlphaMode, BaoziError, ColorSpace, Material, MaterialId, Mesh, MetadataMap,
+    Aabb, AlphaMode, BaoziError, ColorSpace, Material, MaterialId, Mesh, MeshBinding, MetadataMap,
     MetadataValue, Node, PrimitiveTopology, Result, Scene, SceneBuilder, ShadingModel, Texture,
     TextureRole, TextureSlot, TextureSource, Vec2, Vec3,
 };
@@ -316,7 +316,7 @@ fn flush_segment(
         builder.root(),
         Node {
             name,
-            meshes: vec![mesh_id],
+            mesh_bindings: vec![MeshBinding::new(mesh_id)],
             ..Node::default()
         },
     )?;

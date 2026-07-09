@@ -20,8 +20,8 @@ pub use math::{Aabb, Color, Mat4, Quat, Vec2, Vec3, Vec4};
 pub use scene::{
     Animation, AnimationChannel, AnimationId, AnimationInterpolation, AnimationProperty,
     AnimationTarget, AnimationValues, Camera, CameraId, CameraProjection, Light, LightId,
-    LightKind, MaterialId, Mesh, MeshId, MetadataMap, MetadataValue, MorphTarget, Node, NodeId,
-    PrimitiveTopology, Scene, SceneBuilder, SceneSpace, Skin, SkinId, TextureId, VertexAttribute,
-    VertexAttributeData, VertexAttributeSemantic,
+    LightKind, MaterialId, Mesh, MeshBinding, MeshId, MetadataMap, MetadataValue, MorphTarget,
+    Node, NodeId, PrimitiveTopology, Scene, SceneBuilder, SceneSpace, Skin, SkinId, TextureId,
+    VertexAttribute, VertexAttributeData, VertexAttributeSemantic,
 };
 pub use validation::validate_scene;

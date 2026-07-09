@@ -1,3 +1,4 @@
+use baozi_core::MeshBinding;
 use baozi_core::{
     Animation, AnimationChannel, AnimationInterpolation, AnimationProperty, AnimationTarget,
     AnimationValues, Camera, CameraProjection, ColorSpace, Diagnostic, DiagnosticCode,
@@ -30,7 +31,7 @@ fn triangle_scene() -> Scene {
         .add_child_node(
             builder.root(),
             Node {
-                meshes: vec![mesh],
+                mesh_bindings: vec![MeshBinding::new(mesh)],
                 ..Node::default()
             },
         )
@@ -82,7 +83,7 @@ fn polygon_snapshot_includes_face_counts() {
         .add_child_node(
             builder.root(),
             Node {
-                meshes: vec![mesh],
+                mesh_bindings: vec![MeshBinding::new(mesh)],
                 ..Node::default()
             },
         )
@@ -144,7 +145,7 @@ fn material_texture_snapshot_includes_reviewable_fields() {
         .add_child_node(
             builder.root(),
             Node {
-                meshes: vec![mesh],
+                mesh_bindings: vec![MeshBinding::new(mesh)],
                 ..Node::default()
             },
         )
@@ -214,7 +215,6 @@ fn extended_ir_snapshot_includes_reviewable_fields() {
         ],
         joint_indices: vec![[0, 0, 0, 0]; 3],
         joint_weights: vec![[1.0, 0.0, 0.0, 0.0]; 3],
-        skin: Some(skin),
         custom_attributes: vec![VertexAttribute {
             name: "ply:temperature".to_owned(),
             semantic: VertexAttributeSemantic::Custom("temperature".to_owned()),
@@ -228,7 +228,7 @@ fn extended_ir_snapshot_includes_reviewable_fields() {
             child,
             Node {
                 name: Some("MeshNode".to_owned()),
-                meshes: vec![mesh],
+                mesh_bindings: vec![MeshBinding::skinned(mesh, skin)],
                 ..Node::default()
             },
         )

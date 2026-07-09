@@ -88,13 +88,38 @@ pub enum MetadataValue {
 
 pub type MetadataMap = BTreeMap<String, MetadataValue>;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct MeshBinding {
+    pub mesh: MeshId,
+    pub skin: Option<SkinId>,
+}
+
+impl MeshBinding {
+    pub fn new(mesh: MeshId) -> Self {
+        Self { mesh, skin: None }
+    }
+
+    pub fn skinned(mesh: MeshId, skin: SkinId) -> Self {
+        Self {
+            mesh,
+            skin: Some(skin),
+        }
+    }
+}
+
+impl From<MeshId> for MeshBinding {
+    fn from(mesh: MeshId) -> Self {
+        Self::new(mesh)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Node {
     pub name: Option<String>,
     pub transform: Mat4,
     pub parent: Option<NodeId>,
     pub children: Vec<NodeId>,
-    pub meshes: Vec<MeshId>,
+    pub mesh_bindings: Vec<MeshBinding>,
     pub camera: Option<CameraId>,
     pub light: Option<LightId>,
     pub metadata: MetadataMap,
@@ -107,7 +132,7 @@ impl Default for Node {
             transform: Mat4::IDENTITY,
             parent: None,
             children: Vec::new(),
-            meshes: Vec::new(),
+            mesh_bindings: Vec::new(),
             camera: None,
             light: None,
             metadata: MetadataMap::new(),
@@ -185,7 +210,6 @@ pub struct Mesh {
     pub indices: Vec<u32>,
     pub face_vertex_counts: Vec<u32>,
     pub material: Option<MaterialId>,
-    pub skin: Option<SkinId>,
     pub joint_indices: Vec<[u16; 4]>,
     pub joint_weights: Vec<[f32; 4]>,
     pub morph_targets: Vec<MorphTarget>,
@@ -221,7 +245,6 @@ impl Default for Mesh {
             indices: Vec::new(),
             face_vertex_counts: Vec::new(),
             material: None,
-            skin: None,
             joint_indices: Vec::new(),
             joint_weights: Vec::new(),
             morph_targets: Vec::new(),
@@ -485,7 +508,7 @@ mod tests {
             .add_child_node(
                 builder.root(),
                 Node {
-                    meshes: vec![mesh],
+                    mesh_bindings: vec![MeshBinding::new(mesh)],
                     ..Node::default()
                 },
             )
@@ -494,7 +517,10 @@ mod tests {
         let scene = builder.finish().unwrap();
         assert_eq!(scene.root, NodeId::new(0));
         assert_eq!(scene.nodes[scene.root.index()].children, vec![node]);
-        assert_eq!(scene.nodes[node.index()].meshes, vec![mesh]);
+        assert_eq!(
+            scene.nodes[node.index()].mesh_bindings,
+            vec![MeshBinding::new(mesh)]
+        );
         assert_eq!(scene.meshes[mesh.index()].material, Some(material));
     }
 }
