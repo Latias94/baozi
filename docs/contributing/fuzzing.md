@@ -5,6 +5,10 @@ smoke run is the Linux CI job in `.github/workflows/ci.yml` because the Rust
 nightly, compiler-rt, and sanitizer runtime are pinned and run in a predictable
 Linux environment there.
 
+Longer fuzz campaigns run from `.github/workflows/fuzz.yml` on a schedule and
+through manual dispatch. That workflow is Linux-only, has a bounded job timeout,
+and uploads `fuzz/artifacts/stl_import/**` only when the run fails.
+
 Local fuzzing is still useful for quick parser work, but local platform failures
 must be recorded as toolchain evidence rather than parser evidence.
 
@@ -12,18 +16,18 @@ must be recorded as toolchain evidence rather than parser evidence.
 
 ```powershell
 cargo check --manifest-path fuzz\Cargo.toml
-cargo +nightly fuzz check stl_import
-cargo +nightly fuzz run stl_import -- -runs=256
+cargo +nightly-2026-05-27 fuzz check stl_import
+cargo +nightly-2026-05-27 fuzz run stl_import -- -runs=256
 ```
 
 ## Windows MSVC Setup
 
-On Windows, `cargo +nightly fuzz run` may fail before executing the target if the
+On Windows, `cargo +nightly-2026-05-27 fuzz run` may fail before executing the target if the
 AddressSanitizer runtime DLL is missing. Match the LLVM major/minor version from
 the active nightly:
 
 ```powershell
-rustc +nightly -Vv
+rustc +nightly-2026-05-27 -Vv
 ```
 
 The CI fuzz job currently pins `nightly-2026-05-27` and `cargo-fuzz` 0.13.2.
@@ -39,7 +43,7 @@ Invoke-WebRequest -Uri $downloadUrl -OutFile $installerPath
 Start-Process -FilePath $installerPath -ArgumentList @('/S', "/D=$installRoot") -Wait -WindowStyle Hidden
 
 $env:PATH = "$installRoot\bin;$installRoot\lib\clang\22\lib\windows;$env:PATH"
-cargo +nightly fuzz run stl_import -- -runs=256
+cargo +nightly-2026-05-27 fuzz run stl_import -- -runs=256
 ```
 
 Known Windows outcomes:
@@ -65,3 +69,14 @@ Experimental parser slices need:
 
 Stable promotion additionally needs a successful sanitizer fuzz smoke run on a
 supported Linux CI runner.
+
+## CI Tool Pinning
+
+The fuzz workflows intentionally pin:
+
+- `RUST_FUZZ_NIGHTLY=nightly-2026-05-27`
+- `CARGO_FUZZ_VERSION=0.13.2`
+
+Dependabot does not update these shell-level pins. Review them when changing
+fuzz infrastructure or promoting a parser support tier. Broader CI policy lives
+in [CI Policy](ci.md).

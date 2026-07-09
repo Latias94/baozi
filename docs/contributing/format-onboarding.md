@@ -7,6 +7,7 @@ Use this checklist before adding or promoting a `baozi-format-*` crate.
 - Read [ADR 0004](../adr/0004-parser-backend-and-format-coverage-policy.md).
 - Read [ADR 0011](../adr/0011-format-support-tiers-and-compatibility-charter.md).
 - Read [ADR 0014](../adr/0014-parser-security-unsafe-ffi-and-panic-boundary-policy.md).
+- Read [CI Policy](ci.md) before adding parser jobs, fuzz targets, or workflow tooling.
 - Copy `docs/formats/_template.md` to `docs/formats/<format>.md`.
 - Decide whether the first backend is Baozi-owned, wrapped, or temporary.
 
@@ -27,6 +28,7 @@ Use this checklist before adding or promoting a `baozi-format-*` crate.
 - Fuzz target.
 - Support matrix row.
 - Dependency and license notes.
+- Passing GitHub Actions CI gates for workflow lint, docs, WASM, dependency policy, and fuzz smoke.
 - Oracle comparison or documented reason it is not useful yet.
 - Successful sanitizer smoke run on Linux CI for stable promotion.
 

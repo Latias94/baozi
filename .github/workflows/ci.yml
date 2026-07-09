@@ -6,38 +6,61 @@ on:
       - main
   pull_request:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
 env:
-  RUST_STABLE_VERSION: 1.95.0
   RUST_FUZZ_NIGHTLY: nightly-2026-05-27
   CARGO_FUZZ_VERSION: 0.13.2
+  ACTIONLINT_VERSION: v1.7.12
+  GO_VERSION: 1.26.x
 
 jobs:
+  actionlint:
+    name: Workflow lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Install Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Check workflow syntax
+        run: go run "github.com/rhysd/actionlint/cmd/actionlint@${ACTIONLINT_VERSION}"
+
   rust:
     name: Rust checks
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       - name: Install Rust 1.95
-        uses: dtolnay/rust-toolchain@master
+        uses: dtolnay/rust-toolchain@1.95.0
         with:
-          toolchain: ${{ env.RUST_STABLE_VERSION }}
           components: clippy, rustfmt
           targets: wasm32-unknown-unknown, wasm32-wasip1
 
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
 
-      - name: Install nextest
-        uses: taiki-e/install-action@nextest
-
-      - name: Install cargo-deny
-        uses: taiki-e/install-action@cargo-deny
+      - name: Install cargo tools
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest,cargo-deny
 
       - name: Check formatting
         run: cargo fmt --all -- --check
@@ -50,6 +73,14 @@ jobs:
 
       - name: Test workspace
         run: cargo nextest run --workspace
+
+      - name: Test documentation examples
+        run: cargo test --doc --workspace --all-features
+
+      - name: Check documentation
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --workspace --all-features --no-deps
 
       - name: Check no-default facade
         run: cargo check -p baozi --no-default-features
@@ -72,9 +103,13 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       - name: Install pinned nightly Rust
+        # Dated nightly toolchains use the action's explicit toolchain input path.
+        # See docs/contributing/fuzzing.md for why Linux CI is the sanitizer authority.
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ env.RUST_FUZZ_NIGHTLY }}

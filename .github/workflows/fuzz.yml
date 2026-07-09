@@ -1,0 +1,59 @@
+name: Scheduled Fuzz
+
+on:
+  schedule:
+    - cron: "17 3 * * 1"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  RUST_FUZZ_NIGHTLY: nightly-2026-05-27
+  CARGO_FUZZ_VERSION: 0.13.2
+
+jobs:
+  stl:
+    name: STL scheduled fuzz
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Install pinned nightly Rust
+        # Dated nightly toolchains use the action's explicit toolchain input path.
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_FUZZ_NIGHTLY }}
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --version "${CARGO_FUZZ_VERSION}" --locked
+
+      - name: Check STL fuzz target
+        run: cargo fuzz check stl_import
+
+      - name: Run STL scheduled fuzz
+        run: |
+          mkdir -p fuzz/artifacts/stl_import
+          set -o pipefail
+          cargo fuzz run stl_import -- -max_total_time=120 2>&1 | tee fuzz/artifacts/stl_import/fuzz.log
+
+      - name: Upload STL fuzz artifacts
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: stl-fuzz-artifacts
+          path: |
+            fuzz/artifacts/stl_import/**
+          if-no-files-found: ignore
+          retention-days: 14
