@@ -37,6 +37,15 @@ impl AssetPath {
         &self.0
     }
 
+    pub fn extension(&self) -> Option<&str> {
+        self.0
+            .rsplit_once('/')
+            .map_or(self.0.as_str(), |(_, file_name)| file_name)
+            .rsplit_once('.')
+            .map(|(_, extension)| extension)
+            .filter(|extension| !extension.is_empty())
+    }
+
     pub fn join(&self, relative: &str) -> Result<Self> {
         let base = if self.0.is_empty() {
             String::new()
@@ -77,6 +86,26 @@ impl AssetScope {
             .filter(|part| !part.is_empty())
             .fold(self.root.clone(), |path, part| path.join(part))
     }
+
+    pub fn resolve_existing(&self, asset_path: &AssetPath) -> Result<PathBuf> {
+        let root = self
+            .root
+            .canonicalize()
+            .map_err(|error| BaoziError::io(self.root.display().to_string(), error.to_string()))?;
+        let candidate = self.to_filesystem_path(asset_path);
+        let resolved = candidate
+            .canonicalize()
+            .map_err(|error| BaoziError::io(asset_path.to_string(), error.to_string()))?;
+
+        if !resolved.starts_with(&root) {
+            return Err(BaoziError::io(
+                asset_path.to_string(),
+                "asset path escapes filesystem scope",
+            ));
+        }
+
+        Ok(resolved)
+    }
 }
 
 fn normalize_logical(path: &str) -> Result<String> {
@@ -116,6 +145,11 @@ mod tests {
     #[test]
     fn rejects_scope_escape() {
         assert!(AssetPath::new("../secret").is_err());
+    }
+
+    #[test]
+    fn rejects_absolute_path() {
+        assert!(AssetPath::new("/secret").is_err());
     }
 
     #[test]

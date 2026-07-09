@@ -12,6 +12,7 @@ authors.workspace = true
 [features]
 default = ["std", "default-formats"]
 std = []
+native-fs = ["std", "baozi-io/fs"]
 default-formats = ["format-stl", "format-obj", "format-ply"]
 all-formats = ["format-stl", "format-obj", "format-ply", "format-gltf"]
 format-stl = ["dep:baozi-format-stl"]

@@ -9,5 +9,9 @@ homepage.workspace = true
 documentation.workspace = true
 authors.workspace = true
 
+[features]
+default = []
+fs = []
+
 [dependencies]
 baozi-core.workspace = true

@@ -11,6 +11,12 @@ pub enum BaoziError {
     #[error("unsupported format: {hint}")]
     UnsupportedFormat { hint: String },
 
+    #[error("ambiguous format for {hint}: {}", candidates.join(", "))]
+    AmbiguousFormat {
+        hint: String,
+        candidates: Vec<String>,
+    },
+
     #[error("parse error in {asset}{location}: {message}")]
     Parse {
         asset: String,
@@ -44,6 +50,16 @@ impl BaoziError {
 
     pub fn unsupported_format(hint: impl Into<String>) -> Self {
         Self::UnsupportedFormat { hint: hint.into() }
+    }
+
+    pub fn ambiguous_format(
+        hint: impl Into<String>,
+        candidates: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        Self::AmbiguousFormat {
+            hint: hint.into(),
+            candidates: candidates.into_iter().map(Into::into).collect(),
+        }
     }
 
     pub fn parse(

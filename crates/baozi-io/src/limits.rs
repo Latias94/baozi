@@ -10,6 +10,12 @@ pub struct ResourceLimits {
     pub max_data_uri_bytes: u64,
     pub max_path_length: usize,
     pub max_string_bytes: usize,
+    pub max_line_bytes: usize,
+    pub max_token_bytes: usize,
+    pub max_meshes: usize,
+    pub max_vertices: usize,
+    pub max_faces: usize,
+    pub max_solids: usize,
     pub max_diagnostics: usize,
 }
 
@@ -26,6 +32,12 @@ impl Default for ResourceLimits {
             max_data_uri_bytes: 64 * 1024 * 1024,
             max_path_length: 4096,
             max_string_bytes: 16 * 1024 * 1024,
+            max_line_bytes: 1024 * 1024,
+            max_token_bytes: 1024 * 1024,
+            max_meshes: 1_000_000,
+            max_vertices: 50_000_000,
+            max_faces: 50_000_000,
+            max_solids: 1_000_000,
             max_diagnostics: 10_000,
         }
     }

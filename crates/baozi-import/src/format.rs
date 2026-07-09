@@ -59,7 +59,7 @@ pub trait FormatImporter: Send + Sync + 'static {
     fn info(&self) -> FormatInfo;
 
     fn can_read(&self, _input: &mut dyn ReadSeek, _hint: &ReadHint) -> Result<ReadConfidence> {
-        Ok(ReadConfidence::Maybe)
+        Ok(ReadConfidence::No)
     }
 
     fn read(&self, ctx: &mut ImportContext<'_>) -> Result<Scene>;

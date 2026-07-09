@@ -1,10 +1,12 @@
 //! Runtime-neutral asset IO contracts for Baozi importers.
 
+#[cfg(feature = "fs")]
 pub mod fs;
 pub mod limits;
 pub mod memory;
 pub mod path;
 
+#[cfg(feature = "fs")]
 pub use fs::FileSystemAssetIo;
 pub use limits::ResourceLimits;
 pub use memory::MemoryAssetIo;

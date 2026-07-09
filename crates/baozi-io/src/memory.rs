@@ -37,3 +37,23 @@ impl AssetIo for MemoryAssetIo {
         base.join(relative)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Read;
+
+    #[test]
+    fn opens_inserted_memory_asset() {
+        let path = AssetPath::new("models/triangle.stl").unwrap();
+        let mut io = MemoryAssetIo::new();
+        io.insert(path.clone(), b"solid test".as_slice());
+
+        let mut reader = io.open(&path).unwrap();
+        let mut bytes = Vec::new();
+        reader.read_to_end(&mut bytes).unwrap();
+
+        assert_eq!(bytes, b"solid test");
+        assert!(io.exists(&path));
+    }
+}
