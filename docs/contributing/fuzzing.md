@@ -5,6 +5,10 @@ smoke run is the Linux CI job in `.github/workflows/ci.yml` because the Rust
 nightly, compiler-rt, and sanitizer runtime are pinned and run in a predictable
 Linux environment there.
 
+Longer fuzz campaigns run from `.github/workflows/fuzz.yml` on a schedule and
+through manual dispatch. That workflow is Linux-only, has a bounded job timeout,
+and uploads `fuzz/artifacts/stl_import/**` only when the run fails.
+
 Local fuzzing is still useful for quick parser work, but local platform failures
 must be recorded as toolchain evidence rather than parser evidence.
 
@@ -65,3 +69,14 @@ Experimental parser slices need:
 
 Stable promotion additionally needs a successful sanitizer fuzz smoke run on a
 supported Linux CI runner.
+
+## CI Tool Pinning
+
+The fuzz workflows intentionally pin:
+
+- `RUST_FUZZ_NIGHTLY=nightly-2026-05-27`
+- `CARGO_FUZZ_VERSION=0.13.2`
+
+Dependabot does not update these shell-level pins. Review them when changing
+fuzz infrastructure or promoting a parser support tier. Broader CI policy lives
+in [CI Policy](ci.md).

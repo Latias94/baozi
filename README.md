@@ -54,12 +54,15 @@ cargo fmt --all -- --check
 cargo check --workspace --all-targets
 cargo clippy --workspace --all-targets -- -D warnings
 cargo nextest run --workspace
+cargo test --doc --workspace
 cargo deny check
 ```
 
 Use `cargo nextest` for tests where available. Keep parser behavior limit-aware and panic-averse.
 Parser fuzzing commands and Windows sanitizer notes live in
 [`docs/contributing/fuzzing.md`](docs/contributing/fuzzing.md).
+GitHub Actions policy, workflow linting, and CI tool pinning are documented in
+[`docs/contributing/ci.md`](docs/contributing/ci.md).
 
 ## License
 
