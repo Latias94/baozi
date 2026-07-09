@@ -261,7 +261,7 @@ mod tests {
         }
 
         fn read(&self, _ctx: &mut ImportContext<'_>) -> Result<Scene> {
-            Ok(SceneBuilder::new().finish())
+            SceneBuilder::new().finish()
         }
     }
 
@@ -290,7 +290,7 @@ mod tests {
         }
 
         fn read(&self, _ctx: &mut ImportContext<'_>) -> Result<Scene> {
-            Ok(SceneBuilder::new().finish())
+            SceneBuilder::new().finish()
         }
     }
 
@@ -319,7 +319,7 @@ mod tests {
         }
 
         fn read(&self, _ctx: &mut ImportContext<'_>) -> Result<Scene> {
-            Ok(SceneBuilder::new().finish())
+            SceneBuilder::new().finish()
         }
     }
 

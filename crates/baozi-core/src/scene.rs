@@ -1,5 +1,7 @@
+use crate::Result;
 use crate::material::{Material, Texture};
 use crate::math::{Aabb, Color, Mat4, Vec2, Vec3, Vec4};
+use crate::validation::validate_scene;
 use std::collections::BTreeMap;
 
 macro_rules! id_type {
@@ -196,9 +198,32 @@ impl SceneBuilder {
         }
     }
 
+    pub fn root(&self) -> NodeId {
+        self.scene.root
+    }
+
     pub fn add_node(&mut self, node: Node) -> NodeId {
+        self.push_node(None, node)
+    }
+
+    pub fn add_child_node(&mut self, parent: NodeId, node: Node) -> Result<NodeId> {
+        if parent.index() >= self.scene.nodes.len() {
+            return Err(crate::BaoziError::InvalidScene {
+                message: "parent node is out of range".to_owned(),
+            });
+        }
+        Ok(self.push_node(Some(parent), node))
+    }
+
+    fn push_node(&mut self, parent: Option<NodeId>, mut node: Node) -> NodeId {
         let id = NodeId::new(self.scene.nodes.len() as u32);
+        node.parent = parent;
         self.scene.nodes.push(node);
+        if let Some(parent) = parent {
+            if let Some(parent_node) = self.scene.nodes.get_mut(parent.index()) {
+                parent_node.children.push(id);
+            }
+        }
         id
     }
 
@@ -214,8 +239,9 @@ impl SceneBuilder {
         id
     }
 
-    pub fn finish(self) -> Scene {
-        self.scene
+    pub fn finish(self) -> Result<Scene> {
+        validate_scene(&self.scene)?;
+        Ok(self.scene)
     }
 }
 
@@ -229,16 +255,26 @@ mod tests {
         let material = builder.add_material(Material::default());
         let mesh = builder.add_mesh(Mesh {
             material: Some(material),
-            positions: vec![Vec3::new(0.0, 0.0, 0.0)],
+            positions: vec![
+                Vec3::new(0.0, 0.0, 0.0),
+                Vec3::new(1.0, 0.0, 0.0),
+                Vec3::new(0.0, 1.0, 0.0),
+            ],
             ..Mesh::default()
         });
-        let node = builder.add_node(Node {
-            meshes: vec![mesh],
-            ..Node::default()
-        });
+        let node = builder
+            .add_child_node(
+                builder.root(),
+                Node {
+                    meshes: vec![mesh],
+                    ..Node::default()
+                },
+            )
+            .unwrap();
 
-        let scene = builder.finish();
+        let scene = builder.finish().unwrap();
         assert_eq!(scene.root, NodeId::new(0));
+        assert_eq!(scene.nodes[scene.root.index()].children, vec![node]);
         assert_eq!(scene.nodes[node.index()].meshes, vec![mesh]);
         assert_eq!(scene.meshes[mesh.index()].material, Some(material));
     }

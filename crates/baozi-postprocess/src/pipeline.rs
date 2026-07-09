@@ -1,4 +1,4 @@
-use baozi_core::{Result, Scene};
+use baozi_core::{Result, Scene, validate_scene};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PostProcessStage {
@@ -68,6 +68,11 @@ impl PostProcessPipeline {
     }
 
     pub fn run(&self, scene: Scene) -> Result<Scene> {
+        for step in &self.steps {
+            if step == &PostProcessStep::ValidateScene {
+                validate_scene(&scene)?;
+            }
+        }
         Ok(scene)
     }
 }

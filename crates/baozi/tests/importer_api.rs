@@ -29,7 +29,7 @@ fn dummy_info(id: &'static str, extensions: &'static [&'static str]) -> FormatIn
 
 fn read_scene(ctx: &mut ImportContext<'_>) -> Result<Scene> {
     ctx.push_diagnostic(Diagnostic::warning("test.imported", "dummy importer ran"));
-    Ok(SceneBuilder::new().finish())
+    SceneBuilder::new().finish()
 }
 
 impl FormatImporter for ExtensionOnlyImporter {

@@ -5,6 +5,7 @@ pub mod error;
 pub mod material;
 pub mod math;
 pub mod scene;
+pub mod validation;
 
 pub use diagnostic::{Diagnostic, DiagnosticCode, DiagnosticSeverity, SourceLocation};
 pub use error::{BaoziError, Result};
@@ -17,3 +18,4 @@ pub use scene::{
     MetadataMap, MetadataValue, Node, NodeId, PrimitiveTopology, Scene, SceneBuilder, SceneSpace,
     TextureId,
 };
+pub use validation::validate_scene;
