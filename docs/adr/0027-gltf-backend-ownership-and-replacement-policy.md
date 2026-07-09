@@ -36,7 +36,7 @@ Rules:
 
 - no `gltf-rs` type may appear in public Baozi API, `ImportReport`, diagnostics, options, snapshots,
   or IR fields
-- all IO, external buffers, GLB payloads, future data URIs, and future image buffers must enter
+- all IO, external buffers, GLB payloads, buffer data URIs, and future image buffers must enter
   through `ImportContext`
 - all output must be converted into Baozi `Scene` IR before leaving the format crate
 - every supported glTF feature must have happy-path fixtures, malformed fixtures, snapshot coverage,
@@ -112,13 +112,18 @@ Before promoting glTF support beyond `Experimental`, Baozi must have:
 
 - GLB BIN payload import fixture
 - external `.gltf` buffer fixture through `ImportContext`
+- base64 buffer data URI fixture with resource-ledger assertions
+- skin fixture covering node-level mesh binding, joint streams, joint nodes, skeleton root, inverse
+  bind matrices, and malformed skin validation
 - snapshot coverage for hierarchy, mesh streams, material, texture reference, scene space, and
   diagnostics
-- malformed fixtures for missing buffers, short buffers, invalid JSON/GLB, missing POSITION, and
-  unsupported primitive modes
+- malformed fixtures for missing buffers, short buffers, invalid JSON/GLB, invalid accessor roots,
+  invalid accessor component/type contracts, missing POSITION, unsupported primitive modes, and
+  malformed skin data
 - resource ledger assertions for primary bytes, sidecar bytes, total bytes, opened assets, generated
-  vertices, and generated faces
-- fuzz target that mutates both primary glTF/GLB bytes and external buffer bytes
+  vertices, generated faces, and data URI bytes
+- fuzz target that mutates primary glTF/GLB bytes, external buffer bytes, buffer data URIs, and skin
+  data
 - documented unsupported features with diagnostics or fatal errors, not silent drops
 
 ## Consequences

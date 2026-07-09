@@ -3,7 +3,7 @@ use baozi_core::{
     Aabb, AlphaMode, BaoziError, Camera, CameraProjection, Color, ColorSpace, Diagnostic,
     DiagnosticCode, DiagnosticSeverity, Mat4, Material, MaterialProperty, Mesh, MeshBinding,
     MetadataMap, MetadataValue, Node, PrimitiveTopology, Result, Scene, SceneBuilder, SceneSpace,
-    SourceLocation, Texture, TextureFilterMode, TextureRole, TextureSampler, TextureSlot,
+    Skin, SourceLocation, Texture, TextureFilterMode, TextureRole, TextureSampler, TextureSlot,
     TextureSource, TextureTransform, TextureWrapMode, Vec2, Vec3, Vec4,
 };
 use baozi_import::{ExternalReferencePolicy, ImportContext};
@@ -208,7 +208,9 @@ fn scene_from_document(
 
     add_cameras(ctx, &mut builder, gltf);
     add_unsupported_domain_diagnostics(ctx, gltf);
-    add_scene_nodes(ctx, &mut builder, gltf, &mesh_ids_by_gltf_mesh)?;
+    let node_imports = add_scene_nodes(ctx, &mut builder, gltf, &mesh_ids_by_gltf_mesh)?;
+    let skin_ids = add_skins(ctx, &mut builder, gltf, buffers, &node_imports.node_ids)?;
+    attach_node_skins(ctx, &mut builder, &node_imports.node_skins, &skin_ids)?;
 
     let mut scene = builder.finish()?;
     scene.space = SceneSpace {
@@ -858,18 +860,42 @@ fn add_scene_nodes(
     builder: &mut SceneBuilder,
     gltf: &gltf::Gltf,
     mesh_ids_by_gltf_mesh: &[Vec<baozi_core::MeshId>],
-) -> Result<()> {
+) -> Result<NodeImportMaps> {
+    let mut imports = NodeImportMaps {
+        node_ids: vec![None; gltf.nodes().count()],
+        node_skins: Vec::new(),
+    };
     let root = builder.root();
     if let Some(scene) = gltf.default_scene().or_else(|| gltf.scenes().next()) {
         for node in scene.nodes() {
-            add_node_recursive(ctx, builder, root, node, mesh_ids_by_gltf_mesh)?;
+            add_node_recursive(
+                ctx,
+                builder,
+                root,
+                node,
+                mesh_ids_by_gltf_mesh,
+                &mut imports,
+            )?;
         }
     } else {
         for node in gltf.nodes() {
-            add_node_recursive(ctx, builder, root, node, mesh_ids_by_gltf_mesh)?;
+            add_node_recursive(
+                ctx,
+                builder,
+                root,
+                node,
+                mesh_ids_by_gltf_mesh,
+                &mut imports,
+            )?;
         }
     }
-    Ok(())
+    Ok(imports)
+}
+
+#[derive(Debug, Default)]
+struct NodeImportMaps {
+    node_ids: Vec<Option<baozi_core::NodeId>>,
+    node_skins: Vec<(baozi_core::NodeId, usize)>,
 }
 
 fn add_node_recursive(
@@ -878,25 +904,15 @@ fn add_node_recursive(
     parent: baozi_core::NodeId,
     node: gltf::Node<'_>,
     mesh_ids_by_gltf_mesh: &[Vec<baozi_core::MeshId>],
+    imports: &mut NodeImportMaps,
 ) -> Result<baozi_core::NodeId> {
-    let mesh_bindings = node
-        .mesh()
+    let mesh = safe_gltf(ctx, "glTF node mesh", || node.mesh())?;
+    let mesh_bindings = mesh
         .and_then(|mesh| mesh_ids_by_gltf_mesh.get(mesh.index()).cloned())
         .map(|meshes| meshes.into_iter().map(MeshBinding::new).collect())
         .unwrap_or_default();
-    let camera = node
-        .camera()
+    let camera = safe_gltf(ctx, "glTF node camera", || node.camera())?
         .map(|camera| baozi_core::CameraId::new(camera.index() as u32));
-
-    if node.skin().is_some() {
-        push_warning(
-            ctx,
-            ctx.source().to_string(),
-            None,
-            "gltf.skin_ignored",
-            format!("skin on node {} was ignored", node.index()),
-        );
-    }
 
     let node_id = builder.add_child_node(
         parent,
@@ -910,10 +926,115 @@ fn add_node_recursive(
             ..Node::default()
         },
     )?;
-    for child in node.children() {
-        add_node_recursive(ctx, builder, node_id, child, mesh_ids_by_gltf_mesh)?;
+    if let Some(slot) = imports.node_ids.get_mut(node.index()) {
+        *slot = Some(node_id);
+    }
+    if let Some(skin) = safe_gltf(ctx, "glTF node skin", || node.skin())? {
+        imports.node_skins.push((node_id, skin.index()));
+    }
+    let children = safe_gltf(ctx, "glTF node children", || {
+        node.children().collect::<Vec<_>>()
+    })?;
+    for child in children {
+        add_node_recursive(ctx, builder, node_id, child, mesh_ids_by_gltf_mesh, imports)?;
     }
     Ok(node_id)
+}
+
+fn add_skins(
+    ctx: &mut ImportContext<'_>,
+    builder: &mut SceneBuilder,
+    gltf: &gltf::Gltf,
+    buffers: &[Vec<u8>],
+    node_ids: &[Option<baozi_core::NodeId>],
+) -> Result<Vec<baozi_core::SkinId>> {
+    let mut skin_ids = Vec::with_capacity(gltf.skins().count());
+    for skin in gltf.skins() {
+        let joints = safe_gltf(ctx, "glTF skin joints", || {
+            skin.joints().collect::<Vec<_>>()
+        })?;
+        let mut mapped_joints = Vec::with_capacity(joints.len());
+        for joint in joints {
+            let Some(Some(node_id)) = node_ids.get(joint.index()) else {
+                return Err(BaoziError::parse(
+                    ctx.source().to_string(),
+                    None,
+                    format!(
+                        "glTF skin {} references joint node {} outside the imported scene",
+                        skin.index(),
+                        joint.index()
+                    ),
+                ));
+            };
+            mapped_joints.push(*node_id);
+        }
+
+        let skeleton_root = match safe_gltf(ctx, "glTF skin skeleton root", || skin.skeleton())? {
+            Some(root) => match node_ids.get(root.index()).copied().flatten() {
+                Some(node_id) => Some(node_id),
+                None => {
+                    return Err(BaoziError::parse(
+                        ctx.source().to_string(),
+                        None,
+                        format!(
+                            "glTF skin {} references skeleton root node {} outside the imported scene",
+                            skin.index(),
+                            root.index()
+                        ),
+                    ));
+                }
+            },
+            None => None,
+        };
+
+        let reader = skin.reader(|buffer| buffers.get(buffer.index()).map(Vec::as_slice));
+        let inverse_bind_matrices = safe_gltf(ctx, "glTF inverse bind matrix reader", || {
+            reader
+                .read_inverse_bind_matrices()
+                .map(|matrices| matrices.map(|cols| Mat4 { cols }).collect::<Vec<_>>())
+                .unwrap_or_default()
+        })?;
+
+        let skin_id = builder.add_skin(Skin {
+            name: optional_name(skin.name(), ctx.limits().max_string_bytes)?,
+            joints: mapped_joints,
+            inverse_bind_matrices,
+            skeleton_root,
+            metadata: MetadataMap::new(),
+        });
+        skin_ids.push(skin_id);
+    }
+    Ok(skin_ids)
+}
+
+fn attach_node_skins(
+    ctx: &ImportContext<'_>,
+    builder: &mut SceneBuilder,
+    node_skins: &[(baozi_core::NodeId, usize)],
+    skin_ids: &[baozi_core::SkinId],
+) -> Result<()> {
+    for (node_id, skin_index) in node_skins {
+        let Some(skin_id) = skin_ids.get(*skin_index).copied() else {
+            return Err(BaoziError::parse(
+                ctx.source().to_string(),
+                None,
+                format!(
+                    "glTF node {} references skin {} out of range",
+                    node_id.as_u32(),
+                    skin_index
+                ),
+            ));
+        };
+        let Some(node) = builder.node_mut(*node_id) else {
+            return Err(BaoziError::InvalidScene {
+                message: format!("node {} is out of range", node_id.as_u32()),
+            });
+        };
+        for binding in &mut node.mesh_bindings {
+            binding.skin = Some(skin_id);
+        }
+    }
+    Ok(())
 }
 
 fn add_cameras(ctx: &mut ImportContext<'_>, builder: &mut SceneBuilder, gltf: &gltf::Gltf) {
@@ -962,16 +1083,7 @@ fn add_unsupported_domain_diagnostics(ctx: &mut ImportContext<'_>, gltf: &gltf::
             ctx.source().to_string(),
             None,
             "gltf.animations_ignored",
-            "animation channels are not imported by the static mesh MVP",
-        );
-    }
-    if gltf.skins().next().is_some() {
-        push_warning(
-            ctx,
-            ctx.source().to_string(),
-            None,
-            "gltf.skins_ignored",
-            "skin objects are not imported by the static mesh MVP",
+            "animation channels are not imported by the glTF MVP",
         );
     }
 }

@@ -96,4 +96,4 @@ infrastructure or promoting a parser support tier. Broader CI policy lives in [C
 | `stl_import` | `baozi-format-stl` | Binary and ASCII STL facade import. |
 | `obj_import` | `baozi-format-obj` | OBJ facade import plus optional MTL sidecar bytes split by the first NUL byte. |
 | `obj_postprocess` | `baozi-format-obj` | OBJ facade import followed by triangulation and bounding-box postprocess. |
-| `gltf_import` | `baozi-format-gltf` | glTF/GLB facade import plus external buffer bytes split by the first NUL byte. |
+| `gltf_import` | `baozi-format-gltf` | glTF/GLB facade import. Inputs beginning with the `glTF` magic are treated as whole GLB bytes; other inputs use primary `.gltf` bytes plus external `buffer.bin` bytes split by the first NUL byte. |

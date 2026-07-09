@@ -120,6 +120,95 @@ pub fn triangle_bin() -> Vec<u8> {
     bytes
 }
 
+pub fn skinned_triangle_gltf() -> Vec<u8> {
+    br#"{
+  "asset": { "version": "2.0", "generator": "baozi-skin-test" },
+  "scene": 0,
+  "scenes": [{ "nodes": [0] }],
+  "nodes": [
+    { "name": "RigRoot", "children": [1, 2] },
+    { "name": "Joint0", "children": [3] },
+    { "name": "MeshNode", "mesh": 0, "skin": 0 },
+    { "name": "Joint1" }
+  ],
+  "buffers": [{ "uri": "skin.bin", "byteLength": 244 }],
+  "bufferViews": [
+    { "buffer": 0, "byteOffset": 0, "byteLength": 36, "target": 34962 },
+    { "buffer": 0, "byteOffset": 36, "byteLength": 6, "target": 34963 },
+    { "buffer": 0, "byteOffset": 42, "byteLength": 24, "target": 34962 },
+    { "buffer": 0, "byteOffset": 68, "byteLength": 48, "target": 34962 },
+    { "buffer": 0, "byteOffset": 116, "byteLength": 128 }
+  ],
+  "accessors": [
+    { "bufferView": 0, "componentType": 5126, "count": 3, "type": "VEC3", "min": [0, 0, 0], "max": [1, 1, 0] },
+    { "bufferView": 1, "componentType": 5123, "count": 3, "type": "SCALAR" },
+    { "bufferView": 2, "componentType": 5123, "count": 3, "type": "VEC4" },
+    { "bufferView": 3, "componentType": 5126, "count": 3, "type": "VEC4" },
+    { "bufferView": 4, "componentType": 5126, "count": 2, "type": "MAT4" }
+  ],
+  "skins": [{ "name": "Skin", "joints": [1, 3], "skeleton": 1, "inverseBindMatrices": 4 }],
+  "meshes": [{
+    "name": "SkinnedTriangle",
+    "primitives": [{
+      "attributes": { "POSITION": 0, "JOINTS_0": 2, "WEIGHTS_0": 3 },
+      "indices": 1,
+      "mode": 4
+    }]
+  }]
+}"#
+    .to_vec()
+}
+
+pub fn skinned_triangle_without_inverse_bind_matrices_gltf() -> Vec<u8> {
+    String::from_utf8(skinned_triangle_gltf())
+        .expect("fixture is valid utf-8")
+        .replace(r#", "inverseBindMatrices": 4"#, "")
+        .into_bytes()
+}
+
+pub fn skinned_triangle_bin() -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(244);
+    for value in [
+        0.0f32, 0.0, 0.0, //
+        1.0, 0.0, 0.0, //
+        0.0, 1.0, 0.0,
+    ] {
+        bytes.extend_from_slice(&value.to_le_bytes());
+    }
+    for index in [0u16, 1, 2] {
+        bytes.extend_from_slice(&index.to_le_bytes());
+    }
+    for joint in [
+        0u16, 0, 0, 0, //
+        1, 0, 0, 0, //
+        0, 1, 0, 0,
+    ] {
+        bytes.extend_from_slice(&joint.to_le_bytes());
+    }
+    bytes.resize(68, 0);
+    for weight in [
+        1.0f32, 0.0, 0.0, 0.0, //
+        1.0, 0.0, 0.0, 0.0, //
+        0.5, 0.5, 0.0, 0.0,
+    ] {
+        bytes.extend_from_slice(&weight.to_le_bytes());
+    }
+    for _ in 0..2 {
+        for value in baozi_core::Mat4::IDENTITY.cols.iter().flatten() {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+    }
+    bytes.resize(244, 0);
+    bytes
+}
+
+pub fn skinned_triangle_bin_with_joint_index(index: u16) -> Vec<u8> {
+    let mut bytes = skinned_triangle_bin();
+    let offset = 42;
+    bytes[offset..offset + 2].copy_from_slice(&index.to_le_bytes());
+    bytes
+}
+
 pub fn triangle_glb() -> Vec<u8> {
     let json = br#"{
   "asset": { "version": "2.0", "generator": "baozi-test" },

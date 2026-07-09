@@ -445,6 +445,10 @@ impl SceneBuilder {
         id
     }
 
+    pub fn node_mut(&mut self, id: NodeId) -> Option<&mut Node> {
+        self.scene.nodes.get_mut(id.index())
+    }
+
     pub fn add_material(&mut self, material: Material) -> MaterialId {
         let id = MaterialId::new(self.scene.materials.len() as u32);
         self.scene.materials.push(material);

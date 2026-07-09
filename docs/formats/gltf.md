@@ -9,15 +9,16 @@
 - Parser backend: `gltf-rs` 1.4.x as an internal bootstrap dependency
 - Supported extensions: `.gltf`, `.glb`
 - Supported media types: `model/gltf+json`, `model/gltf-binary`
-- Encoding: JSON plus binary buffers, or GLB container
-- Sidecar policy: external buffers through `ImportContext`; GLB BIN payloads supported
+- Encoding: JSON plus binary buffers, base64 buffer data URIs, or GLB container
+- Sidecar policy: external buffers through `ImportContext`; base64 buffer data URIs and GLB BIN
+  payloads supported
 
 ## Current Status
 
-`baozi-format-gltf` imports a static mesh MVP into Baozi's owned IR. It supports common `.gltf`
-files with external binary buffers and `.glb` files with BIN payloads. External buffers are loaded
-only through `ImportContext`, so resource limits, path resolution, diagnostics, and strict mode stay
-under Baozi control.
+`baozi-format-gltf` imports a mesh, material, camera, and skinning MVP into Baozi's owned IR. It
+supports common `.gltf` files with external binary buffers, base64 buffer data URIs, and `.glb`
+files with BIN payloads. External buffers and data URIs are loaded only through `ImportContext`, so
+resource limits, path resolution, diagnostics, and strict mode stay under Baozi control.
 
 The dependency on `gltf-rs` is intentionally hidden inside this crate. Baozi does not expose
 `gltf-rs` types in public API, so the backend can later be forked or replaced by a Baozi-owned parser
@@ -32,19 +33,20 @@ are in place.
 - Static primitives using points, lines, or triangles.
 - Positions, normals, tangents, texture coordinates, colors, indices, `JOINTS_0`, and `WEIGHTS_0`
   streams when present.
-- Node hierarchy, node transforms, mesh binding, and camera binding.
+- Node hierarchy, node transforms, mesh binding, node-level skin binding, and camera binding.
+- Skins with joint node references, optional skeleton root, and optional inverse bind matrices.
 - Perspective and orthographic camera projection data.
 - PBR metallic-roughness material factors.
 - Base color, metallic-roughness, normal, occlusion, and emissive texture URI references.
 - Y-up, right-handed, meters scene space metadata.
-- Resource ledger accounting for primary assets, external buffers, GLB BIN payloads, and diagnostics.
-- Quality gates for GLB import, snapshots, malformed external buffers, facade ledger stats, and a
-  glTF fuzz target.
+- Resource ledger accounting for primary assets, external buffers, base64 buffer data URIs, GLB BIN
+  payloads, and diagnostics.
+- Quality gates for GLB import, snapshots, malformed external buffers/data URIs, facade ledger
+  stats, skin validation, and a glTF fuzz target.
 
 ## Known Non-Support
 
-- Buffer data URIs are explicitly unsupported for now.
 - Embedded image buffer views and texture data URIs are diagnosed and skipped.
 - Triangle strips, triangle fans, line strips, and line loops are not expanded yet.
-- Skins, morph targets, and animation channels are diagnosed but not imported into final IR yet.
+- Morph targets and animation channels are diagnosed but not imported into final IR yet.
 - The current backend is useful for bootstrapping, not the long-term parser ownership boundary.
