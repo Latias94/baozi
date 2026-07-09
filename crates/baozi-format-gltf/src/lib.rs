@@ -30,7 +30,7 @@ pub fn format_info() -> FormatInfo {
             ),
             (
                 FormatCapability::Skinning,
-                CapabilityStatus::IgnoredWithDiagnostic,
+                CapabilityStatus::Partial,
             ),
             (
                 FormatCapability::MorphTargets,
@@ -51,7 +51,7 @@ pub fn format_info() -> FormatInfo {
                 CapabilityStatus::Supported,
             ),
         ])
-        .with_notes("experimental glTF 2.0 importer for static meshes, hierarchy, camera projection, PBR material factors, and texture URI references")
+        .with_notes("experimental glTF 2.0 importer for mesh, hierarchy, camera projection, skin MVP, PBR material factors, and texture URI references")
         .with_docs_path("docs/formats/gltf.md")
 }
 
@@ -88,6 +88,19 @@ mod tests {
                 (SupportMatrixColumn::Materials, FormatCapability::Materials),
                 (SupportMatrixColumn::Textures, FormatCapability::Textures),
                 (SupportMatrixColumn::Animation, FormatCapability::Animation),
+                (SupportMatrixColumn::Skinning, FormatCapability::Skinning),
+                (
+                    SupportMatrixColumn::CamerasLights,
+                    FormatCapability::CamerasLights,
+                ),
+                (
+                    SupportMatrixColumn::MorphTargets,
+                    FormatCapability::MorphTargets,
+                ),
+                (
+                    SupportMatrixColumn::ResourceLimits,
+                    FormatCapability::ResourceLimits,
+                ),
                 (
                     SupportMatrixColumn::Diagnostics,
                     FormatCapability::Diagnostics,

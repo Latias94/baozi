@@ -92,6 +92,19 @@ mod tests {
                 (SupportMatrixColumn::Materials, FormatCapability::Materials),
                 (SupportMatrixColumn::Textures, FormatCapability::Textures),
                 (SupportMatrixColumn::Animation, FormatCapability::Animation),
+                (SupportMatrixColumn::Skinning, FormatCapability::Skinning),
+                (
+                    SupportMatrixColumn::CamerasLights,
+                    FormatCapability::CamerasLights,
+                ),
+                (
+                    SupportMatrixColumn::MorphTargets,
+                    FormatCapability::MorphTargets,
+                ),
+                (
+                    SupportMatrixColumn::ResourceLimits,
+                    FormatCapability::ResourceLimits,
+                ),
                 (
                     SupportMatrixColumn::Diagnostics,
                     FormatCapability::Diagnostics,

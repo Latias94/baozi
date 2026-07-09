@@ -10,6 +10,10 @@ pub enum SupportMatrixColumn {
     Materials,
     Textures,
     Animation,
+    Skinning,
+    CamerasLights,
+    MorphTargets,
+    ResourceLimits,
     Diagnostics,
 }
 
@@ -20,7 +24,11 @@ impl SupportMatrixColumn {
             Self::Materials => 4,
             Self::Textures => 5,
             Self::Animation => 6,
-            Self::Diagnostics => 8,
+            Self::Skinning => 7,
+            Self::CamerasLights => 8,
+            Self::MorphTargets => 9,
+            Self::ResourceLimits => 10,
+            Self::Diagnostics => 12,
         }
     }
 }
@@ -37,7 +45,7 @@ pub fn assert_support_matrix_row(
     assert_eq!(columns[1], expected_crate);
     assert_eq!(columns[2], maturity_label(info.maturity()));
     assert_eq!(
-        columns[7],
+        columns[11],
         sidecar_label(info.sidecar_policy()),
         "support matrix Sidecars/archives column drifted for {crate_name}"
     );
