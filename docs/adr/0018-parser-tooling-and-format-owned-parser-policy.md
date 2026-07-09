@@ -9,6 +9,8 @@ related:
   - docs/adr/0007-workspace-crate-graph-feature-flags-msrv-and-ci-gates.md
   - docs/adr/0010-asset-io-virtual-filesystem-uri-archive-and-path-security.md
   - docs/adr/0014-parser-security-unsafe-ffi-and-panic-boundary-policy.md
+  - docs/adr/0019-parser-diagnostic-streaming-and-generated-code-contract.md
+  - docs/architecture/parser-tool-audit-checklist.md
 ---
 
 # ADR 0018: Parser Tooling and Format-Owned Parser Policy
@@ -33,7 +35,7 @@ Current metadata observed from crates.io API on 2026-07-09:
 | `nom` | 8.0.0 | MIT | 1.65.0 | Mature alternative to `winnow`; use when it fits local style better |
 | `pest` | 2.8.7 | MIT OR Apache-2.0 | 1.83 | Candidate for grammar-shaped text formats after audit |
 | `logos` | 0.16.1 | MIT OR Apache-2.0 | 1.80.0 | Candidate lexer for token-heavy text formats |
-| `lalrpop` | 0.23.1 | Apache-2.0 OR MIT | 1.86 | Defer as a default dependency while Baozi MSRV is 1.85 |
+| `lalrpop` | 0.23.1 | Apache-2.0 OR MIT | 1.86 | Eligible after format-specific audit; no longer blocked by Baozi MSRV 1.95 |
 
 ## Decision
 
@@ -47,9 +49,9 @@ Core rules:
 - simple formats should start with small hand-written parsers when that yields clearer limits and
   diagnostics
 - mature parsing crates may be used when they reduce real complexity without weakening resource
-  limits, WASM compileability, MSRV, or panic safety
-- `lalrpop` is not eligible as a default dependency while its latest metadata requires a higher Rust
-  version than Baozi's documented MSRV
+  limits, WASM compileability, the documented MSRV 1.95, or panic safety
+- parser generators such as `lalrpop` are allowed by MSRV policy, but still require per-format audit
+  because generated code can make resource limits and error mapping less obvious
 - generated parsers must be checked in only when generation is deterministic and the generator is
   also available through a documented development workflow
 - parser tools must not bypass `ImportContext`, `AssetIo`, `ResourceLimits`, or `SceneBuilder`
@@ -105,7 +107,7 @@ sequenceDiagram
 A parser tool may be added to a production crate only when all checks pass:
 
 - license fits Baozi's downstream `MIT OR Apache-2.0` intent or is explicitly documented as compatible
-- MSRV does not exceed Baozi's documented MSRV unless a separate MSRV decision accepts the raise
+- MSRV does not exceed Baozi's documented MSRV 1.95 unless a separate MSRV decision accepts the raise
 - `wasm32-unknown-unknown` bytes-path build passes for the relevant format feature
 - dependency does not add native FFI, process-global runtime, threads, or filesystem assumptions to
   the default parser path
@@ -113,6 +115,13 @@ A parser tool may be added to a production crate only when all checks pass:
 - parser resource usage is bounded by `ResourceLimits`
 - parser output is private and converted into Baozi IR immediately
 - tests cover happy path, malformed input, resource limits, and at least one snapshot
+
+Diagnostic, streaming, and generated-code requirements are defined in
+[`ADR 0019`](0019-parser-diagnostic-streaming-and-generated-code-contract.md). The operational
+review checklist lives in
+[`docs/architecture/parser-tool-audit-checklist.md`](../architecture/parser-tool-audit-checklist.md).
+That checklist covers generated-code workflow, source-span diagnostics, full-buffer versus streaming
+parsing, supply-chain review, and tool-specific pain points.
 
 ## Alternatives Considered
 

@@ -34,7 +34,7 @@ items:
     focus: mature parser-combinator candidate; MIT; alternative to winnow
   - name: image
     category: rust_crate
-    focus: optional image decoding; MIT OR Apache-2.0; MSRV 1.88 on latest metadata, so not suitable for current MSRV 1.85 default
+    focus: optional image decoding; MIT OR Apache-2.0; MSRV 1.88 on latest metadata fits the updated Rust 1.95 policy, but decoding remains optional
   - name: meshopt
     category: rust_crate
     focus: optional mesh optimization; MIT OR Apache-2.0; FFI/native risk means optional only

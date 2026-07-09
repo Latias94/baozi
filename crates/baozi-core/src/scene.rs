@@ -219,10 +219,10 @@ impl SceneBuilder {
         let id = NodeId::new(self.scene.nodes.len() as u32);
         node.parent = parent;
         self.scene.nodes.push(node);
-        if let Some(parent) = parent {
-            if let Some(parent_node) = self.scene.nodes.get_mut(parent.index()) {
-                parent_node.children.push(id);
-            }
+        if let Some(parent) = parent
+            && let Some(parent_node) = self.scene.nodes.get_mut(parent.index())
+        {
+            parent_node.children.push(id);
         }
         id
     }

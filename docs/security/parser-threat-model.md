@@ -43,6 +43,8 @@ Baozi parsers process untrusted input. This document summarizes the threat model
 - Return `BaoziError` and diagnostics instead of panicking.
 - Add malformed fixtures for every stable parser.
 - Add fuzz targets before stable promotion.
+- Keep experimental parser slices, such as STL, covered by malformed tests and a compileable fuzz
+  target even before stable promotion.
 - Keep FFI out of default features.
 - Keep remote fetching outside core Baozi.
 

@@ -33,10 +33,10 @@ fn validate_nodes(scene: &Scene) -> Result<()> {
             ));
         }
 
-        if let Some(parent) = node.parent {
-            if parent.index() >= scene.nodes.len() {
-                return invalid(format!("node {index} parent is out of range"));
-            }
+        if let Some(parent) = node.parent
+            && parent.index() >= scene.nodes.len()
+        {
+            return invalid(format!("node {index} parent is out of range"));
         }
 
         for child in &node.children {
@@ -121,10 +121,10 @@ fn validate_mesh(index: usize, mesh: &Mesh, material_count: usize) -> Result<()>
         return invalid(format!("mesh {index} is empty: no positions"));
     }
 
-    if let Some(material) = mesh.material {
-        if material.index() >= material_count {
-            return invalid(format!("mesh {index} material reference is out of range"));
-        }
+    if let Some(material) = mesh.material
+        && material.index() >= material_count
+    {
+        return invalid(format!("mesh {index} material reference is out of range"));
     }
 
     validate_vec3_channel(index, "positions", &mesh.positions, Some(vertex_count))?;
@@ -256,12 +256,12 @@ fn validate_channel_len(
     actual_len: usize,
     expected_len: Option<usize>,
 ) -> Result<()> {
-    if let Some(expected_len) = expected_len {
-        if actual_len != expected_len {
-            return invalid(format!(
-                "mesh {mesh_index} {name} length {actual_len} does not match positions length {expected_len}"
-            ));
-        }
+    if let Some(expected_len) = expected_len
+        && actual_len != expected_len
+    {
+        return invalid(format!(
+            "mesh {mesh_index} {name} length {actual_len} does not match positions length {expected_len}"
+        ));
     }
     Ok(())
 }
@@ -273,8 +273,8 @@ fn validate_topology(
 ) -> Result<()> {
     match topology {
         PrimitiveTopology::Points => Ok(()),
-        PrimitiveTopology::Lines if element_count % 2 == 0 => Ok(()),
-        PrimitiveTopology::Triangles if element_count % 3 == 0 => Ok(()),
+        PrimitiveTopology::Lines if element_count.is_multiple_of(2) => Ok(()),
+        PrimitiveTopology::Triangles if element_count.is_multiple_of(3) => Ok(()),
         PrimitiveTopology::Lines => invalid(format!(
             "mesh {mesh_index} line topology element count is not divisible by 2"
         )),
@@ -288,10 +288,10 @@ fn validate_topology(
 }
 
 fn validate_space(scene: &Scene) -> Result<()> {
-    if let Some(scale) = scene.space.unit_scale_to_meters {
-        if !scale.is_finite() || scale <= 0.0 {
-            return invalid("scene unit scale must be finite and positive");
-        }
+    if let Some(scale) = scene.space.unit_scale_to_meters
+        && (!scale.is_finite() || scale <= 0.0)
+    {
+        return invalid("scene unit scale must be finite and positive");
     }
     Ok(())
 }

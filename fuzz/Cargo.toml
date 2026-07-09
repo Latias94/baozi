@@ -1,0 +1,22 @@
+[package]
+name = "baozi-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+rust-version = "1.95"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+baozi = { path = "../crates/baozi", default-features = false, features = ["format-stl"] }
+libfuzzer-sys = "0.4"
+
+[[bin]]
+name = "stl_import"
+path = "fuzz_targets/stl_import.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]

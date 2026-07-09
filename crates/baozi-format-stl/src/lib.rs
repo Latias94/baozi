@@ -1,8 +1,16 @@
-use baozi_core::{BaoziError, Result, Scene};
+#![forbid(unsafe_code)]
+
+mod ascii;
+mod binary;
+mod detect;
+mod parser;
+
+use baozi_core::{Result, Scene};
 use baozi_import::{
     CapabilityStatus, FormatCapability, FormatImporter, FormatInfo, FormatMaturity, ImportContext,
-    ImporterRegistry,
+    ImporterRegistry, ReadConfidence, ReadHint,
 };
+use baozi_io::ReadSeek;
 
 pub struct StlImporter;
 
@@ -12,8 +20,22 @@ pub fn format_info() -> FormatInfo {
         display_name: "STL",
         extensions: &["stl"],
         maturity: FormatMaturity::Experimental,
-        capabilities: &[(FormatCapability::Geometry, CapabilityStatus::Unknown)],
-        notes: "planned STL importer shell; parsing is not implemented yet",
+        capabilities: &[
+            (FormatCapability::Geometry, CapabilityStatus::Supported),
+            (FormatCapability::Hierarchy, CapabilityStatus::Partial),
+            (FormatCapability::Materials, CapabilityStatus::Partial),
+            (FormatCapability::Metadata, CapabilityStatus::Partial),
+            (
+                FormatCapability::CoordinatesUnits,
+                CapabilityStatus::ParsedLossy,
+            ),
+            (FormatCapability::Diagnostics, CapabilityStatus::Supported),
+            (
+                FormatCapability::ResourceLimits,
+                CapabilityStatus::Supported,
+            ),
+        ],
+        notes: "experimental STL importer for binary and ASCII triangle meshes",
     }
 }
 
@@ -26,8 +48,12 @@ impl FormatImporter for StlImporter {
         format_info()
     }
 
-    fn read(&self, _ctx: &mut ImportContext<'_>) -> Result<Scene> {
-        Err(BaoziError::unsupported_format("stl parser not implemented"))
+    fn can_read(&self, input: &mut dyn ReadSeek, hint: &ReadHint) -> Result<ReadConfidence> {
+        detect::can_read(input, hint)
+    }
+
+    fn read(&self, ctx: &mut ImportContext<'_>) -> Result<Scene> {
+        parser::read_stl(ctx)
     }
 }
 

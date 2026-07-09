@@ -29,7 +29,7 @@ dependency or fixture has an audited license.
 | `gltf` | Strong future glTF parser candidate | MIT OR Apache-2.0 and mature; still normalize immediately into Baozi IR |
 | `winnow` / `nom` | Future text parser infrastructure | Useful for OBJ/MTL/PLY-style parsing after the STL slice proves contracts |
 | `binrw` | Future binary parser candidate | Useful, but macro-generated parsing needs security and audit review |
-| `image` | Optional future image decoding | Latest metadata observed MSRV 1.88, so it should not enter current MSRV 1.85 defaults |
+| `image` | Optional future image decoding | Latest metadata observed MSRV 1.88, which now fits Baozi's Rust 1.95 policy; keep optional because decoding should remain separate from core import |
 | `meshopt` | Optional postprocess backend | License fits, but FFI/native risk keeps it behind an explicit feature |
 | `mikktspace` | Optional tangent generation backend | Useful for glTF-style tangent basis after mesh attributes and validation are stable |
 

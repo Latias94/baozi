@@ -20,7 +20,7 @@ Capability values:
 
 | Format | Crate | Maturity | Geometry | Materials | Textures | Animation | Sidecars/archives | Diagnostics | Notes |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| STL | `baozi-format-stl` | Planned | Unknown | Unsupported | Unsupported | Unsupported | Unsupported | Unknown | First simple mesh format |
+| STL | `baozi-format-stl` | Experimental | Supported | Partial | Unsupported | Unsupported | Unsupported | Supported | Binary and ASCII triangle meshes; see [STL details](stl.md) |
 | OBJ/MTL | `baozi-format-obj` | Planned | Unknown | Unknown | Unknown | Unsupported | Unknown | Unknown | First text and sidecar format |
 | PLY | `baozi-format-ply` | Planned | Unknown | Partial | Unsupported | Unsupported | Unsupported | Unknown | Exercises flexible vertex properties |
 | glTF2/GLB | `baozi-format-gltf` | Planned | Unknown | Unknown | Unknown | Unknown | Unknown | Unknown | First modern PBR scene format |

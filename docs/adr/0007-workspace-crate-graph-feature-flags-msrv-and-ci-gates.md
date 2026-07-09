@@ -40,7 +40,8 @@ The workspace root will use:
 - Rust edition `2024`
 - workspace-inherited package metadata
 - `MIT OR Apache-2.0` for clean-room Baozi crates
-- MSRV `1.85` initially, because edition 2024 requires Rust 1.85 or newer
+- MSRV `1.95` initially for parser-tooling and ecosystem flexibility; edition 2024 requires Rust
+  1.85 or newer, but the project accepts a newer pre-1.0 floor
 
 Before `1.0`, MSRV may be raised in minor releases when the benefit is meaningful and documented in
 the changelog. After `1.0`, MSRV changes are release-noted compatibility changes.
@@ -183,13 +184,14 @@ Rules:
 Initial MSRV:
 
 ```text
-Rust 1.85
+Rust 1.95
 Edition 2024
 ```
 
 Policy:
 
-- Before `1.0`, MSRV may be raised with a changelog note.
+- Before `1.0`, MSRV may be raised with a changelog note; the user has explicitly accepted raises
+  up to Rust 1.95 for this early architecture phase.
 - After `1.0`, MSRV raises require release notes and should be tied to a concrete benefit.
 - CI should test stable Rust and the documented MSRV when practical.
 - Dependencies should not be allowed to raise MSRV accidentally without review.
