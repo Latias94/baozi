@@ -71,6 +71,87 @@ fn loads_mtllib_sidecar_and_binds_usemtl() -> Result<()> {
 }
 
 #[test]
+fn loads_multiple_mtllib_tokens_from_one_statement() -> Result<()> {
+    let obj = b"mtllib unused.mtl material.mtl\nusemtl red\nv 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n";
+    let unused = b"newmtl blue\nKd 0 0 1\n";
+    let material = b"newmtl red\nKd 1 0 0\n";
+
+    let (scene, diagnostics) = import_assets(
+        "model.obj",
+        [
+            ("model.obj", obj.as_slice()),
+            ("unused.mtl", unused.as_slice()),
+            ("material.mtl", material.as_slice()),
+        ],
+        sidecar_options(),
+    )?;
+
+    assert!(diagnostics.is_empty());
+    assert_eq!(scene.materials[0].name.as_deref(), Some("red"));
+    assert_eq!(scene.materials[0].base_color.r, 1.0);
+    Ok(())
+}
+
+#[test]
+fn mtl_utf8_bom_is_accepted() -> Result<()> {
+    let obj = b"mtllib material.mtl\nusemtl red\nv 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n";
+    let material = b"\xEF\xBB\xBFnewmtl red\nKd 1 0 0\n";
+
+    let (scene, diagnostics) = import_assets(
+        "model.obj",
+        [
+            ("model.obj", obj.as_slice()),
+            ("material.mtl", material.as_slice()),
+        ],
+        sidecar_options(),
+    )?;
+
+    assert!(diagnostics.is_empty());
+    assert_eq!(scene.materials[0].name.as_deref(), Some("red"));
+    Ok(())
+}
+
+#[test]
+fn unknown_mtl_statement_warns_and_keeps_geometry() -> Result<()> {
+    let obj = b"mtllib material.mtl\nusemtl red\nv 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n";
+    let material = b"newmtl red\nfoo bar\nKd 1 0 0\n";
+
+    let (scene, diagnostics) = import_assets(
+        "model.obj",
+        [
+            ("model.obj", obj.as_slice()),
+            ("material.mtl", material.as_slice()),
+        ],
+        sidecar_options(),
+    )?;
+
+    assert_eq!(scene.meshes.len(), 1);
+    assert_eq!(diagnostics.len(), 1);
+    assert_eq!(diagnostics[0].code.0, "obj.mtl_unknown_statement");
+    Ok(())
+}
+
+#[test]
+fn unsupported_texture_map_option_warns_but_finds_texture_path() -> Result<()> {
+    let obj = b"mtllib material.mtl\nusemtl red\nv 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n";
+    let material = b"newmtl red\nmap_Kd -unknown ignored textures/red.png\n";
+
+    let (scene, diagnostics) = import_assets(
+        "model.obj",
+        [
+            ("model.obj", obj.as_slice()),
+            ("material.mtl", material.as_slice()),
+        ],
+        sidecar_options(),
+    )?;
+
+    assert_eq!(scene.textures.len(), 1);
+    assert_eq!(diagnostics.len(), 1);
+    assert_eq!(diagnostics[0].code.0, "obj.mtl_unsupported_texture_option");
+    Ok(())
+}
+
+#[test]
 fn denied_mtl_is_warning_not_geometry_failure() -> Result<()> {
     let obj = b"mtllib material.mtl\nusemtl red\nv 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n";
 

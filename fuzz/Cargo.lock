@@ -13,7 +13,6 @@ name = "baozi"
 version = "0.1.0"
 dependencies = [
  "baozi-core",
- "baozi-format-stl",
  "baozi-import",
  "baozi-io",
  "baozi-postprocess",
@@ -24,6 +23,15 @@ name = "baozi-core"
 version = "0.1.0"
 dependencies = [
  "thiserror",
+]
+
+[[package]]
+name = "baozi-format-obj"
+version = "0.1.0"
+dependencies = [
+ "baozi-core",
+ "baozi-import",
+ "baozi-io",
 ]
 
 [[package]]
@@ -40,6 +48,8 @@ name = "baozi-fuzz"
 version = "0.0.0"
 dependencies = [
  "baozi",
+ "baozi-format-obj",
+ "baozi-format-stl",
  "libfuzzer-sys",
 ]
 

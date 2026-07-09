@@ -9,12 +9,21 @@ rust-version = "1.95"
 cargo-fuzz = true
 
 [dependencies]
-baozi = { path = "../crates/baozi", default-features = false, features = ["format-stl"] }
+baozi = { path = "../crates/baozi", default-features = false }
+baozi-format-obj = { path = "../crates/baozi-format-obj" }
+baozi-format-stl = { path = "../crates/baozi-format-stl" }
 libfuzzer-sys = "0.4"
 
 [[bin]]
 name = "stl_import"
 path = "fuzz_targets/stl_import.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "obj_import"
+path = "fuzz_targets/obj_import.rs"
 test = false
 doc = false
 bench = false

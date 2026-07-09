@@ -90,18 +90,24 @@ jobs:
         run: cargo check -p baozi --features all-formats,native-fs
 
       - name: Check browser WASM bytes path
-        run: cargo check -p baozi --target wasm32-unknown-unknown --no-default-features --features format-stl
+        run: cargo check -p baozi --target wasm32-unknown-unknown --no-default-features --features format-stl,format-obj
 
       - name: Check WASI native-fs path
-        run: cargo check -p baozi --target wasm32-wasip1 --no-default-features --features format-stl,native-fs
+        run: cargo check -p baozi --target wasm32-wasip1 --no-default-features --features format-stl,format-obj,native-fs
 
       - name: Check dependency policy
         run: cargo deny check
 
   fuzz:
-    name: STL sanitizer fuzz smoke
+    name: ${{ matrix.target }} sanitizer fuzz smoke
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - stl_import
+          - obj_import
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -121,8 +127,8 @@ jobs:
       - name: Install cargo-fuzz
         run: cargo install cargo-fuzz --version "${CARGO_FUZZ_VERSION}" --locked
 
-      - name: Check STL fuzz target
-        run: cargo fuzz check stl_import
+      - name: Check fuzz target
+        run: cargo fuzz check "${{ matrix.target }}"
 
-      - name: Run STL fuzz smoke
-        run: cargo fuzz run stl_import -- -runs=256
+      - name: Run fuzz smoke
+        run: cargo fuzz run "${{ matrix.target }}" -- -runs=256

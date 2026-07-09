@@ -111,8 +111,10 @@ impl ObjParser<'_, '_> {
                 Ok(())
             }
             "mtllib" => {
-                if let Some(path) = trailing_text_after_first_token(line, &tokens) {
-                    self.parsed.mtllibs.push(checked_string(self.ctx, path)?);
+                for token in &tokens[1..] {
+                    self.parsed
+                        .mtllibs
+                        .push(checked_string(self.ctx, token.text)?);
                 }
                 Ok(())
             }

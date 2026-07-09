@@ -53,6 +53,8 @@ Exit criteria:
 
 Recommended target: OBJ with MTL.
 
+Status: first experimental slice implemented.
+
 Why OBJ second:
 
 - separate indices force vertex remapping decisions
@@ -62,12 +64,12 @@ Why OBJ second:
 
 Exit criteria:
 
-- OBJ geometry, groups, smoothing metadata, and MTL references are represented
+- OBJ geometry, groups, smoothing metadata, and MTL references are represented for static face meshes
 - importer preserves polygons before requested triangulation
 - core `Mesh` face-boundary data and triangulation postprocess remain sufficient for OBJ polygons
 - sidecar loading obeys `AssetIo` scope rules
-- material mapping is documented against ADR 0012
-- snapshots cover raw and post-processed scenes
+- material mapping is documented against ADR 0012 and the OBJ format page
+- snapshots or direct field assertions cover raw and post-processed scenes
 
 ## Milestone 3: Flexible Vertex Properties
 

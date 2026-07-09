@@ -7,7 +7,7 @@ Linux environment there.
 
 Longer fuzz campaigns run from `.github/workflows/fuzz.yml` on a schedule and
 through manual dispatch. That workflow is Linux-only, has a bounded job timeout,
-and uploads `fuzz/artifacts/stl_import/**` only when the run fails.
+and uploads `fuzz/artifacts/<target>/**` only when the run fails.
 
 Local fuzzing is still useful for quick parser work, but local platform failures
 must be recorded as toolchain evidence rather than parser evidence.
@@ -18,6 +18,8 @@ must be recorded as toolchain evidence rather than parser evidence.
 cargo check --manifest-path fuzz\Cargo.toml
 cargo +nightly-2026-05-27 fuzz check stl_import
 cargo +nightly-2026-05-27 fuzz run stl_import -- -runs=256
+cargo +nightly-2026-05-27 fuzz check obj_import
+cargo +nightly-2026-05-27 fuzz run obj_import -- -runs=256
 ```
 
 ## Windows MSVC Setup
@@ -44,6 +46,7 @@ Start-Process -FilePath $installerPath -ArgumentList @('/S', "/D=$installRoot") 
 
 $env:PATH = "$installRoot\bin;$installRoot\lib\clang\22\lib\windows;$env:PATH"
 cargo +nightly-2026-05-27 fuzz run stl_import -- -runs=256
+cargo +nightly-2026-05-27 fuzz run obj_import -- -runs=256
 ```
 
 Known Windows outcomes:
@@ -80,3 +83,10 @@ The fuzz workflows intentionally pin:
 Dependabot does not update these shell-level pins. Review them when changing
 fuzz infrastructure or promoting a parser support tier. Broader CI policy lives
 in [CI Policy](ci.md).
+
+## Targets
+
+| Target | Format crate | Coverage focus |
+| --- | --- | --- |
+| `stl_import` | `baozi-format-stl` | Binary and ASCII STL facade import. |
+| `obj_import` | `baozi-format-obj` | OBJ facade import plus optional MTL sidecar bytes split by the first NUL byte. |

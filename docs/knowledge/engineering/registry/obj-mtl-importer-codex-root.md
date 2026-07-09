@@ -4,7 +4,7 @@ title: "OBJ MTL importer"
 description: "Active implementation workstream for the OBJ/MTL importer vertical slice."
 timestamp: 2026-07-09T08:38:06Z
 status: "active"
-last_seen: 2026-07-09T08:38:06Z
+last_seen: 2026-07-09T09:45:00Z
 producer_id: "codex-root"
 related_plan: "docs/plans/2026-07-09-005-feat-obj-mtl-importer-plan.md"
 git_branch: "main"
@@ -17,7 +17,7 @@ Implement the OBJ/MTL importer plan: replace the OBJ shell with a Baozi-owned pa
 
 # Current Claim
 
-Goal-mode execution started from canonical plan `docs/plans/2026-07-09-005-feat-obj-mtl-importer-plan.md`.
+Goal-mode execution is in the shipping tail for canonical plan `docs/plans/2026-07-09-005-feat-obj-mtl-importer-plan.md`.
 The working tree also contains an untracked duplicate-looking plan `docs/plans/2026-07-09-005-feat-obj-mtl-importer-vertical-slice-plan.md`; do not treat it as canonical unless the user explicitly asks to adopt it.
 
 # Latest Links
@@ -25,10 +25,14 @@ The working tree also contains an untracked duplicate-looking plan `docs/plans/2
 - [Plan](../../../plans/2026-07-09-005-feat-obj-mtl-importer-plan.md)
 - [Planning findings](../subagents/2026-07-09T083806Z-obj-mtl-importer-planning-findings.md)
 - [Start log](../logs/2026-07/2026-07-09T083806Z-progress-started-obj-mtl-importer-goal.md)
+- [U6-U8 progress](../progress/2026-07-09T091605Z-obj-mtl-importer-u6-u8-progress.md)
+- [Local verification](../verification/2026-07-09T091605Z-obj-mtl-importer-verification.md)
 
 # Handoff
 
-Next action is to execute U1 from the plan: core material/texture and snapshot support, starting with failing tests for `SceneBuilder::add_texture`, material metadata, texture slot validation, and snapshot visibility.
+U1-U8 are implemented in the working tree. Review findings have been applied for MTL diagnostics, multi-`mtllib`, MTL BOM, texture path string limits, single-format fuzz registries, resource-limit coverage, facade diagnostics/capability/read_path tests, and memory freshness.
+
+Next action is to rerun final verification, commit only the relevant files, push `main`, and watch GitHub Actions. Keep `docs/plans/2026-07-09-005-feat-obj-mtl-importer-vertical-slice-plan.md` unstaged unless the user explicitly adopts it.
 
 # Citations
 

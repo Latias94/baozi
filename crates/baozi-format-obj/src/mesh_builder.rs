@@ -218,10 +218,8 @@ pub(crate) fn scene_from_parsed(
     for face in &parsed.faces {
         let key = SegmentKey::from_face(face);
         let should_flush = current.as_ref().is_some_and(|segment| segment.key != key);
-        if should_flush {
-            if let Some(segment) = current.take() {
-                flush_segment(ctx, &mut builder, &mut material_ids, library, segment)?;
-            }
+        if should_flush && let Some(segment) = current.take() {
+            flush_segment(ctx, &mut builder, &mut material_ids, library, segment)?;
         }
         if current.is_none() {
             current = Some(SegmentBuilder::new(key));
@@ -262,10 +260,11 @@ fn flush_segment(
         });
     }
 
-    let material = match segment.key.material.clone() {
-        Some(name) => Some(resolve_material(ctx, builder, material_ids, library, &name)),
-        None => None,
-    };
+    let material = segment
+        .key
+        .material
+        .clone()
+        .map(|name| resolve_material(ctx, builder, material_ids, library, &name));
     let mesh = segment.finish(material);
     let name = mesh.name.clone();
     let mesh_id = builder.add_mesh(mesh);

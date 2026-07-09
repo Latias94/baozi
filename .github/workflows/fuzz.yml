@@ -17,10 +17,16 @@ env:
   CARGO_FUZZ_VERSION: 0.13.2
 
 jobs:
-  stl:
-    name: STL scheduled fuzz
+  fuzz:
+    name: ${{ matrix.target }} scheduled fuzz
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - stl_import
+          - obj_import
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -39,21 +45,21 @@ jobs:
       - name: Install cargo-fuzz
         run: cargo install cargo-fuzz --version "${CARGO_FUZZ_VERSION}" --locked
 
-      - name: Check STL fuzz target
-        run: cargo fuzz check stl_import
+      - name: Check fuzz target
+        run: cargo fuzz check "${{ matrix.target }}"
 
-      - name: Run STL scheduled fuzz
+      - name: Run scheduled fuzz
         run: |
-          mkdir -p fuzz/artifacts/stl_import
+          mkdir -p "fuzz/artifacts/${{ matrix.target }}"
           set -o pipefail
-          cargo fuzz run stl_import -- -max_total_time=120 2>&1 | tee fuzz/artifacts/stl_import/fuzz.log
+          cargo fuzz run "${{ matrix.target }}" -- -max_total_time=120 2>&1 | tee "fuzz/artifacts/${{ matrix.target }}/fuzz.log"
 
-      - name: Upload STL fuzz artifacts
+      - name: Upload fuzz artifacts
         if: failure()
         uses: actions/upload-artifact@v7
         with:
-          name: stl-fuzz-artifacts
+          name: ${{ matrix.target }}-fuzz-artifacts
           path: |
-            fuzz/artifacts/stl_import/**
+            fuzz/artifacts/${{ matrix.target }}/**
           if-no-files-found: ignore
           retention-days: 14

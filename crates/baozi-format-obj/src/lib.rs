@@ -22,11 +22,36 @@ pub fn format_info() -> FormatInfo {
         extensions: &["obj"],
         maturity: FormatMaturity::Experimental,
         capabilities: &[
-            (FormatCapability::Geometry, CapabilityStatus::Unknown),
-            (FormatCapability::Materials, CapabilityStatus::Unknown),
-            (FormatCapability::Textures, CapabilityStatus::Unknown),
+            (FormatCapability::Geometry, CapabilityStatus::Supported),
+            (FormatCapability::Hierarchy, CapabilityStatus::Partial),
+            (FormatCapability::Materials, CapabilityStatus::Partial),
+            (FormatCapability::Textures, CapabilityStatus::Partial),
+            (
+                FormatCapability::CamerasLights,
+                CapabilityStatus::Unsupported,
+            ),
+            (FormatCapability::Animation, CapabilityStatus::Unsupported),
+            (FormatCapability::Skinning, CapabilityStatus::Unsupported),
+            (
+                FormatCapability::MorphTargets,
+                CapabilityStatus::Unsupported,
+            ),
+            (FormatCapability::Metadata, CapabilityStatus::Partial),
+            (
+                FormatCapability::CompressionContainers,
+                CapabilityStatus::Unsupported,
+            ),
+            (
+                FormatCapability::CoordinatesUnits,
+                CapabilityStatus::ParsedLossy,
+            ),
+            (FormatCapability::Diagnostics, CapabilityStatus::Supported),
+            (
+                FormatCapability::ResourceLimits,
+                CapabilityStatus::Supported,
+            ),
         ],
-        notes: "planned OBJ/MTL importer shell; parsing is not implemented yet",
+        notes: "experimental OBJ/MTL importer for static face meshes and external texture URI references",
     }
 }
 

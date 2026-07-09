@@ -1,6 +1,6 @@
 use baozi_core::{
-    AlphaMode, BaoziError, Color, Diagnostic, DiagnosticCode, DiagnosticSeverity, MetadataMap,
-    MetadataValue, Result, SourceLocation,
+    AlphaMode, Color, Diagnostic, DiagnosticCode, DiagnosticSeverity, MetadataMap, MetadataValue,
+    Result, SourceLocation,
 };
 use baozi_import::{ExternalReferencePolicy, ImportContext};
 use baozi_io::AssetPath;
@@ -153,6 +153,7 @@ fn parse_mtl(
     text: &str,
     library: &mut MaterialLibrary,
 ) {
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     let mut current = None;
 
     for (line_index, raw_line) in text.lines().enumerate() {
@@ -268,22 +269,47 @@ fn parse_mtl(
             }
             "map_Kd" => {
                 if let Some(material) = current.as_mut() {
-                    match texture_path_from_map(&tokens[1..]) {
-                        Some(texture_path) => match ctx.io.resolve(path, &texture_path) {
-                            Ok(resolved) => {
-                                material.diffuse_texture = Some(ParsedTexture {
-                                    uri: resolved.to_string(),
-                                    source_key: "map_Kd",
-                                });
+                    match texture_path_from_map(ctx, path, &tokens[1..], line_number) {
+                        Some(texture_path) => {
+                            if texture_path.len() > ctx.options.limits.max_string_bytes {
+                                push_warning(
+                                    ctx,
+                                    path.to_string(),
+                                    Some(SourceLocation::line_column(line_number, 1)),
+                                    "obj.mtl_texture_path_limit",
+                                    "MTL map_Kd texture path exceeded max_string_bytes",
+                                );
+                                continue;
                             }
-                            Err(error) => push_warning(
-                                ctx,
-                                path.to_string(),
-                                Some(SourceLocation::line_column(line_number, 1)),
-                                "obj.mtl_texture_resolve_failed",
-                                format!("MTL map_Kd texture could not be resolved: {error}"),
-                            ),
-                        },
+
+                            match ctx.io.resolve(path, &texture_path) {
+                                Ok(resolved) => {
+                                    let uri = resolved.to_string();
+                                    if uri.len() > ctx.options.limits.max_string_bytes {
+                                        push_warning(
+                                            ctx,
+                                            path.to_string(),
+                                            Some(SourceLocation::line_column(line_number, 1)),
+                                            "obj.mtl_texture_path_limit",
+                                            "resolved MTL map_Kd texture URI exceeded max_string_bytes",
+                                        );
+                                        continue;
+                                    }
+
+                                    material.diffuse_texture = Some(ParsedTexture {
+                                        uri,
+                                        source_key: "map_Kd",
+                                    });
+                                }
+                                Err(error) => push_warning(
+                                    ctx,
+                                    path.to_string(),
+                                    Some(SourceLocation::line_column(line_number, 1)),
+                                    "obj.mtl_texture_resolve_failed",
+                                    format!("MTL map_Kd texture could not be resolved: {error}"),
+                                ),
+                            }
+                        }
                         None => push_warning(
                             ctx,
                             path.to_string(),
@@ -294,7 +320,13 @@ fn parse_mtl(
                     }
                 }
             }
-            _ => {}
+            keyword => push_warning(
+                ctx,
+                path.to_string(),
+                Some(SourceLocation::line_column(line_number, 1)),
+                "obj.mtl_unknown_statement",
+                format!("MTL statement '{keyword}' is not recognized"),
+            ),
         }
     }
 
@@ -469,17 +501,38 @@ fn parse_f32_warning(
     Some(value)
 }
 
-fn texture_path_from_map(tokens: &[&str]) -> Option<String> {
+fn texture_path_from_map(
+    ctx: &mut ImportContext<'_>,
+    path: &AssetPath,
+    tokens: &[&str],
+    line_number: u32,
+) -> Option<String> {
     let mut index = 0usize;
     while index < tokens.len() {
         let token = tokens[index];
         if token.starts_with('-') {
+            if !is_known_map_option(token) {
+                push_warning(
+                    ctx,
+                    path.to_string(),
+                    Some(SourceLocation::line_column(line_number, 1)),
+                    "obj.mtl_unsupported_texture_option",
+                    format!("MTL map_Kd option '{token}' is not supported"),
+                );
+            }
             index = index.saturating_add(1 + map_option_arity(token));
         } else {
             return Some(tokens[index..].join(" "));
         }
     }
     None
+}
+
+fn is_known_map_option(option: &str) -> bool {
+    matches!(
+        option,
+        "-s" | "-o" | "-t" | "-mm" | "-bm" | "-boost" | "-clamp" | "-type" | "-texres"
+    )
 }
 
 fn map_option_arity(option: &str) -> usize {
@@ -511,13 +564,4 @@ pub(crate) fn push_warning(
         location,
         message: message.into(),
     });
-}
-
-#[allow(dead_code)]
-fn _parse_error(
-    source: impl Into<String>,
-    location: Option<SourceLocation>,
-    message: impl Into<String>,
-) -> BaoziError {
-    BaoziError::parse(source, location, message)
 }
