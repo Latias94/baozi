@@ -111,6 +111,7 @@ pub enum ImportStage {
 pub struct ImportStats {
     primary_asset_bytes: u64,
     sidecar_asset_bytes: u64,
+    data_uri_bytes: u64,
     total_asset_bytes: u64,
     opened_assets: usize,
     generated_meshes: usize,
@@ -129,6 +130,10 @@ impl ImportStats {
 
     pub const fn sidecar_asset_bytes(&self) -> u64 {
         self.sidecar_asset_bytes
+    }
+
+    pub const fn data_uri_bytes(&self) -> u64 {
+        self.data_uri_bytes
     }
 
     pub const fn total_asset_bytes(&self) -> u64 {
@@ -308,6 +313,38 @@ impl ResourceLedger {
                 })?;
         let total = self.checked_total_bytes(bytes, limits)?;
         self.stats.sidecar_asset_bytes = sidecar;
+        self.stats.total_asset_bytes = total;
+        Ok(())
+    }
+
+    fn check_data_uri_bytes(&self, bytes: u64, limits: &ResourceLimits) -> Result<()> {
+        let data_uri =
+            self.stats
+                .data_uri_bytes
+                .checked_add(bytes)
+                .ok_or(BaoziError::LimitExceeded {
+                    limit: "max_data_uri_bytes",
+                })?;
+        if data_uri > limits.max_data_uri_bytes {
+            return Err(BaoziError::LimitExceeded {
+                limit: "max_data_uri_bytes",
+            });
+        }
+        self.checked_total_bytes(bytes, limits)?;
+        Ok(())
+    }
+
+    fn debit_data_uri_bytes(&mut self, bytes: u64, limits: &ResourceLimits) -> Result<()> {
+        self.check_data_uri_bytes(bytes, limits)?;
+        let data_uri =
+            self.stats
+                .data_uri_bytes
+                .checked_add(bytes)
+                .ok_or(BaoziError::LimitExceeded {
+                    limit: "max_data_uri_bytes",
+                })?;
+        let total = self.checked_total_bytes(bytes, limits)?;
+        self.stats.data_uri_bytes = data_uri;
         self.stats.total_asset_bytes = total;
         Ok(())
     }
@@ -545,6 +582,16 @@ impl<'a> ImportContext<'a> {
         self.ledger
             .debit_sidecar_bytes(bytes.len() as u64, &self.options.limits)?;
         Ok(bytes)
+    }
+
+    pub fn check_data_uri_bytes(&self, bytes: u64) -> Result<()> {
+        self.ledger
+            .check_data_uri_bytes(bytes, &self.options.limits)
+    }
+
+    pub fn record_data_uri_bytes(&mut self, bytes: u64) -> Result<()> {
+        self.ledger
+            .debit_data_uri_bytes(bytes, &self.options.limits)
     }
 
     pub fn resolve_source_relative(&self, relative: &str) -> Result<AssetPath> {

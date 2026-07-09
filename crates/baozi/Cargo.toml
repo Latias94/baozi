@@ -15,7 +15,7 @@ default = ["std", "default-formats"]
 std = []
 native-fs = ["std", "baozi-io/fs"]
 default-formats = ["format-stl", "format-obj"]
-all-formats = ["format-stl", "format-obj", "format-ply", "format-gltf"]
+all-formats = ["format-stl", "format-obj"]
 format-stl = ["dep:baozi-format-stl"]
 format-obj = ["dep:baozi-format-obj"]
 format-ply = ["dep:baozi-format-ply"]
@@ -35,6 +35,7 @@ baozi-format-gltf = { workspace = true, optional = true }
 tracing = { workspace = true, optional = true }
 
 [dev-dependencies]
+base64.workspace = true
 criterion.workspace = true
 
 [[bench]]

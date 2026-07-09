@@ -15,6 +15,7 @@ publish = false
 baozi-core.workspace = true
 baozi-import.workspace = true
 baozi-io.workspace = true
+base64.workspace = true
 gltf.workspace = true
 
 [dev-dependencies]

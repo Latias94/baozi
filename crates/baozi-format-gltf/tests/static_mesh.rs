@@ -7,7 +7,7 @@ use baozi_core::{
 use baozi_test_support::SceneSnapshot;
 use common::{
     data_uri_gltf, expected_error, import_assets, import_assets_result, sidecar_options,
-    triangle_bin, triangle_glb, triangle_gltf,
+    triangle_bin, triangle_glb, triangle_gltf, triangle_gltf_with_buffer_uri,
 };
 
 #[test]
@@ -189,17 +189,152 @@ fn unsupported_primitive_mode_is_fatal() -> Result<()> {
 }
 
 #[test]
-fn data_uri_buffers_are_explicitly_unsupported() -> Result<()> {
+fn malformed_accessor_root_is_parse_error_not_panic() -> Result<()> {
+    let gltf = String::from_utf8(triangle_gltf())
+        .expect("fixture is valid utf-8")
+        .replace(r#""accessors""#, r#""acceOsors""#)
+        .into_bytes();
     let (result, diagnostics) = import_assets_result(
-        "scene.gltf",
-        [("scene.gltf", data_uri_gltf())],
+        "models/scene.gltf",
+        [
+            ("models/scene.gltf", gltf),
+            ("models/triangle.bin", triangle_bin()),
+        ],
         sidecar_options(),
     )?;
     let error = expected_error(result)?;
 
     assert!(diagnostics.is_empty());
+    assert!(matches!(error, BaoziError::Parse { .. }));
+    Ok(())
+}
+
+#[test]
+fn invalid_index_accessor_type_is_parse_error_not_panic() -> Result<()> {
+    let gltf = String::from_utf8(triangle_gltf())
+        .expect("fixture is valid utf-8")
+        .replace(
+            r#"{ "bufferView": 3, "componentType": 5123, "count": 3, "type": "SCALAR" }"#,
+            r#"{ "bufferView": 3, "componentType": 5126, "count": 3, "type": "SCALAR" }"#,
+        )
+        .into_bytes();
+    let (result, diagnostics) = import_assets_result(
+        "models/scene.gltf",
+        [
+            ("models/scene.gltf", gltf),
+            ("models/triangle.bin", triangle_bin()),
+        ],
+        sidecar_options(),
+    )?;
+    let error = expected_error(result)?;
+
+    assert!(diagnostics.is_empty());
+    assert!(matches!(error, BaoziError::Parse { .. }));
+    assert!(error.to_string().contains("indices accessor type"));
+    Ok(())
+}
+
+#[test]
+fn imports_base64_buffer_data_uri() -> Result<()> {
+    let (scene, diagnostics) = import_assets(
+        "scene.gltf",
+        [("scene.gltf", data_uri_gltf())],
+        sidecar_options(),
+    )?;
+
+    assert!(diagnostics.is_empty());
+    assert_eq!(scene.meshes.len(), 1);
+    assert_eq!(scene.meshes[0].positions.len(), 3);
+    assert_eq!(scene.meshes[0].indices, vec![0, 1, 2]);
+    Ok(())
+}
+
+#[test]
+fn data_uri_byte_limit_is_enforced_before_decode() -> Result<()> {
+    let mut options = sidecar_options();
+    options.limits.max_data_uri_bytes = 103;
+    let (result, diagnostics) =
+        import_assets_result("scene.gltf", [("scene.gltf", data_uri_gltf())], options)?;
+    let error = expected_error(result)?;
+
+    assert!(diagnostics.is_empty());
+    assert!(matches!(
+        error,
+        BaoziError::LimitExceeded {
+            limit: "max_data_uri_bytes"
+        }
+    ));
+    Ok(())
+}
+
+#[test]
+fn data_uri_counts_against_total_asset_limit() -> Result<()> {
+    let gltf = data_uri_gltf();
+    let mut options = sidecar_options();
+    options.limits.max_total_asset_bytes = gltf.len() as u64;
+    let (result, diagnostics) =
+        import_assets_result("scene.gltf", [("scene.gltf", gltf)], options)?;
+    let error = expected_error(result)?;
+
+    assert!(diagnostics.is_empty());
+    assert!(matches!(
+        error,
+        BaoziError::LimitExceeded {
+            limit: "max_total_asset_bytes"
+        }
+    ));
+    Ok(())
+}
+
+#[test]
+fn malformed_data_uri_is_parse_error() -> Result<()> {
+    let gltf = triangle_gltf_with_buffer_uri("data:application/octet-stream;base64AAAA", 104);
+    let (result, diagnostics) =
+        import_assets_result("scene.gltf", [("scene.gltf", gltf)], sidecar_options())?;
+    let error = expected_error(result)?;
+
+    assert!(diagnostics.is_empty());
+    assert!(matches!(error, BaoziError::Parse { .. }));
+    assert!(error.to_string().contains("comma"));
+    Ok(())
+}
+
+#[test]
+fn non_base64_data_uri_is_unsupported() -> Result<()> {
+    let gltf = triangle_gltf_with_buffer_uri("data:application/octet-stream,AAAA", 104);
+    let (result, diagnostics) =
+        import_assets_result("scene.gltf", [("scene.gltf", gltf)], sidecar_options())?;
+    let error = expected_error(result)?;
+
+    assert!(diagnostics.is_empty());
     assert!(matches!(error, BaoziError::FeatureUnsupported { .. }));
-    assert!(error.to_string().contains("data URIs"));
+    assert!(error.to_string().contains("non-base64"));
+    Ok(())
+}
+
+#[test]
+fn invalid_base64_data_uri_is_parse_error() -> Result<()> {
+    let gltf = triangle_gltf_with_buffer_uri("data:application/octet-stream;base64,@@@=", 104);
+    let (result, diagnostics) =
+        import_assets_result("scene.gltf", [("scene.gltf", gltf)], sidecar_options())?;
+    let error = expected_error(result)?;
+
+    assert!(diagnostics.is_empty());
+    assert!(matches!(error, BaoziError::Parse { .. }));
+    assert!(error.to_string().contains("invalid base64"));
+    Ok(())
+}
+
+#[test]
+fn short_data_uri_buffer_is_parse_error() -> Result<()> {
+    let gltf = triangle_gltf_with_buffer_uri("data:application/octet-stream;base64,AAAA", 104);
+    let (result, diagnostics) =
+        import_assets_result("scene.gltf", [("scene.gltf", gltf)], sidecar_options())?;
+    let error = expected_error(result)?;
+
+    assert!(diagnostics.is_empty());
+    assert!(matches!(error, BaoziError::Parse { .. }));
+    assert!(error.to_string().contains("declares 104 bytes"));
     Ok(())
 }
 
@@ -222,6 +357,34 @@ fn vertex_limit_is_enforced_from_accessor_count() -> Result<()> {
         BaoziError::LimitExceeded {
             limit: "max_vertices"
         }
+    ));
+    Ok(())
+}
+
+#[test]
+fn face_limit_is_enforced_from_index_accessor_count() -> Result<()> {
+    let gltf = String::from_utf8(triangle_gltf())
+        .expect("fixture is valid utf-8")
+        .replace(
+            r#"{ "bufferView": 3, "componentType": 5123, "count": 3, "type": "SCALAR" }"#,
+            r#"{ "bufferView": 3, "componentType": 5123, "count": 300, "type": "SCALAR" }"#,
+        )
+        .into_bytes();
+    let mut options = sidecar_options();
+    options.limits.max_faces = 1;
+    let (result, _) = import_assets_result(
+        "models/scene.gltf",
+        [
+            ("models/scene.gltf", gltf),
+            ("models/triangle.bin", triangle_bin()),
+        ],
+        options,
+    )?;
+    let error = expected_error(result)?;
+
+    assert!(matches!(
+        error,
+        BaoziError::LimitExceeded { limit: "max_faces" }
     ));
     Ok(())
 }

@@ -545,7 +545,7 @@ fn numeric_option_arity(tokens: &[&str], max: usize) -> usize {
     tokens
         .iter()
         .take(max)
-        .take_while(|token| !token.starts_with('-') && token.parse::<f32>().is_ok())
+        .take_while(|token| token.parse::<f32>().is_ok())
         .count()
 }
 

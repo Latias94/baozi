@@ -1,9 +1,7 @@
 use baozi_core::{BaoziError, Result};
 use baozi_import::{ReadConfidence, ReadHint};
 use baozi_io::ReadSeek;
-use std::io::{Read, SeekFrom};
-
-const PROBE_BYTES: u64 = 4096;
+use std::io::{ErrorKind, SeekFrom};
 
 pub(crate) fn can_read(input: &mut dyn ReadSeek, hint: &ReadHint) -> Result<ReadConfidence> {
     let original = input
@@ -23,11 +21,7 @@ pub(crate) fn can_read(input: &mut dyn ReadSeek, hint: &ReadHint) -> Result<Read
 }
 
 fn detect_stream(input: &mut dyn ReadSeek, hint: &ReadHint) -> Result<ReadConfidence> {
-    let mut bytes = Vec::new();
-    let mut limited = input.take(PROBE_BYTES);
-    limited
-        .read_to_end(&mut bytes)
-        .map_err(|error| BaoziError::io(hint.display_hint(), error.to_string()))?;
+    let bytes = read_probe_bytes(input, hint)?;
 
     let extension_match = hint.extension.as_deref().is_some_and(|extension| {
         extension.eq_ignore_ascii_case("gltf") || extension.eq_ignore_ascii_case("glb")
@@ -42,6 +36,24 @@ fn detect_stream(input: &mut dyn ReadSeek, hint: &ReadHint) -> Result<ReadConfid
     } else {
         Ok(ReadConfidence::No)
     }
+}
+
+fn read_probe_bytes(input: &mut dyn ReadSeek, hint: &ReadHint) -> Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    let mut buffer = [0u8; 8192];
+    loop {
+        match input.read(&mut buffer) {
+            Ok(0) => return Ok(bytes),
+            Ok(read) => bytes.extend_from_slice(&buffer[..read]),
+            Err(error) if is_probe_limit_error(&error) => return Ok(bytes),
+            Err(error) => return Err(BaoziError::io(hint.display_hint(), error.to_string())),
+        }
+    }
+}
+
+fn is_probe_limit_error(error: &std::io::Error) -> bool {
+    error.kind() == ErrorKind::InvalidData
+        && error.to_string() == "format probe byte limit exceeded"
 }
 
 fn looks_like_gltf_json(bytes: &[u8]) -> bool {

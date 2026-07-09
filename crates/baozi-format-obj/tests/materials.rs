@@ -175,6 +175,29 @@ fn variable_length_texture_transform_options_do_not_swallow_texture_path() -> Re
 }
 
 #[test]
+fn negative_texture_transform_option_values_do_not_swallow_texture_path() -> Result<()> {
+    let obj = b"mtllib material.mtl\nusemtl red\nv 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n";
+    let material = b"newmtl red\nmap_Kd -o -1 0 textures/red.png\n";
+
+    let (scene, diagnostics) = import_assets(
+        "model.obj",
+        [
+            ("model.obj", obj.as_slice()),
+            ("material.mtl", material.as_slice()),
+        ],
+        sidecar_options(),
+    )?;
+
+    assert!(diagnostics.is_empty());
+    assert_eq!(scene.textures.len(), 1);
+    match &scene.textures[0].source {
+        TextureSource::External { uri } => assert_eq!(uri, "textures/red.png"),
+        other => panic!("expected external texture, got {other:?}"),
+    }
+    Ok(())
+}
+
+#[test]
 fn denied_mtl_is_warning_not_geometry_failure() -> Result<()> {
     let obj = b"mtllib material.mtl\nusemtl red\nv 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n";
 

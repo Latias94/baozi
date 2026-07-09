@@ -7,14 +7,22 @@ use baozi_core::{
     TextureSource, TextureTransform, TextureWrapMode, Vec2, Vec3, Vec4,
 };
 use baozi_import::{ExternalReferencePolicy, ImportContext};
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use gltf::buffer::Source as BufferSource;
 use gltf::image::Source as ImageSource;
-use gltf::mesh::{Mode, Semantic};
+use gltf::json;
+use gltf::json::validation::Checked;
+use gltf::mesh::Mode;
 use gltf::texture::{MagFilter, MinFilter, WrappingMode};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 
 pub(crate) fn read_gltf(ctx: &mut ImportContext<'_>) -> Result<Scene> {
     let bytes = ctx.read_primary_to_end()?;
-    let gltf = gltf::Gltf::from_slice(&bytes).map_err(|error| {
+    let gltf = safe_gltf(ctx, "glTF document parse", || {
+        gltf::Gltf::from_slice(&bytes)
+    })?
+    .map_err(|error| {
         BaoziError::parse(
             ctx.source().to_string(),
             None,
@@ -37,10 +45,7 @@ fn load_buffers(ctx: &mut ImportContext<'_>, gltf: &gltf::Gltf) -> Result<Vec<Ve
                 )
             })?,
             BufferSource::Uri(uri) if is_data_uri(uri) => {
-                return Err(BaoziError::FeatureUnsupported {
-                    format: "gltf",
-                    feature: "buffer data URIs are not implemented yet".to_owned(),
-                });
+                load_data_uri_buffer(ctx, uri, buffer.index())?
             }
             BufferSource::Uri(uri) => load_external_buffer(ctx, uri)?,
         };
@@ -63,6 +68,87 @@ fn load_buffers(ctx: &mut ImportContext<'_>, gltf: &gltf::Gltf) -> Result<Vec<Ve
     Ok(buffers)
 }
 
+fn load_data_uri_buffer(
+    ctx: &mut ImportContext<'_>,
+    uri: &str,
+    buffer_index: usize,
+) -> Result<Vec<u8>> {
+    if uri.len() > ctx.limits().max_string_bytes {
+        return Err(BaoziError::LimitExceeded {
+            limit: "max_string_bytes",
+        });
+    }
+    let Some(payload) = uri.strip_prefix("data:") else {
+        return Err(gltf_parse_error(
+            ctx,
+            format!("glTF buffer {buffer_index} has an invalid data URI"),
+        ));
+    };
+    let Some((metadata, encoded)) = payload.split_once(',') else {
+        return Err(gltf_parse_error(
+            ctx,
+            format!("glTF buffer {buffer_index} data URI has no comma separator"),
+        ));
+    };
+    if !metadata
+        .split(';')
+        .any(|part| part.eq_ignore_ascii_case("base64"))
+    {
+        return Err(BaoziError::FeatureUnsupported {
+            format: "gltf",
+            feature: format!("buffer {buffer_index} uses a non-base64 data URI"),
+        });
+    }
+
+    let decoded_len = base64_decoded_len(ctx, encoded, buffer_index)?;
+    ctx.check_data_uri_bytes(decoded_len)?;
+    let decoded = BASE64_STANDARD.decode(encoded).map_err(|error| {
+        gltf_parse_error(
+            ctx,
+            format!("glTF buffer {buffer_index} data URI has invalid base64: {error}"),
+        )
+    })?;
+    ctx.record_data_uri_bytes(decoded.len() as u64)?;
+    Ok(decoded)
+}
+
+fn base64_decoded_len(ctx: &ImportContext<'_>, encoded: &str, buffer_index: usize) -> Result<u64> {
+    if encoded.is_empty() {
+        return Ok(0);
+    }
+    if encoded.bytes().any(|byte| byte.is_ascii_whitespace()) {
+        return Err(gltf_parse_error(
+            ctx,
+            format!("glTF buffer {buffer_index} data URI base64 contains whitespace"),
+        ));
+    }
+    if !encoded.len().is_multiple_of(4) {
+        return Err(gltf_parse_error(
+            ctx,
+            format!("glTF buffer {buffer_index} data URI base64 length is not padded"),
+        ));
+    }
+    let padding = encoded
+        .as_bytes()
+        .iter()
+        .rev()
+        .take_while(|byte| **byte == b'=')
+        .count();
+    if padding > 2 || encoded[..encoded.len() - padding].contains('=') {
+        return Err(gltf_parse_error(
+            ctx,
+            format!("glTF buffer {buffer_index} data URI base64 padding is invalid"),
+        ));
+    }
+    let groups = (encoded.len() / 4) as u64;
+    groups
+        .checked_mul(3)
+        .and_then(|bytes| bytes.checked_sub(padding as u64))
+        .ok_or(BaoziError::LimitExceeded {
+            limit: "max_data_uri_bytes",
+        })
+}
+
 fn load_external_buffer(ctx: &mut ImportContext<'_>, uri: &str) -> Result<Vec<u8>> {
     if matches!(
         ctx.io_options().external_references,
@@ -83,6 +169,10 @@ fn load_external_buffer(ctx: &mut ImportContext<'_>, uri: &str) -> Result<Vec<u8
     ctx.read_sidecar_to_end(&path)
 }
 
+fn gltf_parse_error(ctx: &ImportContext<'_>, message: impl Into<String>) -> BaoziError {
+    BaoziError::parse(ctx.source().to_string(), None, message)
+}
+
 fn scene_from_document(
     ctx: &mut ImportContext<'_>,
     gltf: &gltf::Gltf,
@@ -96,17 +186,20 @@ fn scene_from_document(
 
     let mut mesh_ids_by_gltf_mesh = Vec::with_capacity(gltf.meshes().count());
     let mut total_vertices = 0usize;
+    let mut total_faces = 0usize;
     for mesh in gltf.meshes() {
         let mut primitive_meshes = Vec::new();
         for primitive in mesh.primitives() {
             let mesh_id = add_primitive_mesh(
                 ctx,
                 &mut builder,
+                gltf,
                 &material_ids,
                 buffers,
                 &mesh,
                 primitive,
                 &mut total_vertices,
+                &mut total_faces,
             )?;
             primitive_meshes.push(mesh_id);
         }
@@ -305,45 +398,323 @@ fn add_texture_slot(
     Ok(())
 }
 
+#[derive(Debug, Clone, Copy)]
+struct PrimitiveContract {
+    mode: Mode,
+    position_count: usize,
+    material_index: Option<usize>,
+}
+
+fn validate_primitive_contract(
+    ctx: &ImportContext<'_>,
+    gltf: &gltf::Gltf,
+    mesh_index: usize,
+    primitive_index: usize,
+    material_count: usize,
+    total_faces: &mut usize,
+) -> Result<PrimitiveContract> {
+    let primitive = json_primitive(ctx, gltf, mesh_index, primitive_index)?;
+    let mode = checked_primitive_mode(ctx, mesh_index, primitive_index, primitive.mode)?;
+    let position_index = primitive
+        .attributes
+        .get(&Checked::Valid(json::mesh::Semantic::Positions))
+        .ok_or_else(|| {
+            BaoziError::parse(
+                ctx.source().to_string(),
+                None,
+                format!(
+                    "glTF mesh {mesh_index} primitive {primitive_index} has no POSITION attribute"
+                ),
+            )
+        })?
+        .value();
+    let position_count = validate_accessor(
+        ctx,
+        gltf,
+        position_index,
+        mesh_index,
+        primitive_index,
+        "POSITION",
+        &[json::accessor::ComponentType::F32],
+        &[json::accessor::Type::Vec3],
+    )?;
+
+    for (semantic, accessor) in &primitive.attributes {
+        let label = match semantic {
+            Checked::Valid(json::mesh::Semantic::Positions) => continue,
+            Checked::Valid(json::mesh::Semantic::Normals) => "NORMAL",
+            Checked::Valid(json::mesh::Semantic::Tangents) => "TANGENT",
+            Checked::Valid(json::mesh::Semantic::TexCoords(_)) => "TEXCOORD",
+            Checked::Valid(json::mesh::Semantic::Colors(_)) => "COLOR",
+            Checked::Valid(json::mesh::Semantic::Joints(_)) => "JOINTS",
+            Checked::Valid(json::mesh::Semantic::Weights(_)) => "WEIGHTS",
+            Checked::Invalid => {
+                return Err(BaoziError::parse(
+                    ctx.source().to_string(),
+                    None,
+                    format!(
+                        "glTF mesh {mesh_index} primitive {primitive_index} has an invalid attribute semantic"
+                    ),
+                ));
+            }
+        };
+        let (components, dimensions): (&[json::accessor::ComponentType], &[json::accessor::Type]) =
+            match semantic {
+                Checked::Valid(json::mesh::Semantic::Normals) => (
+                    &[json::accessor::ComponentType::F32],
+                    &[json::accessor::Type::Vec3],
+                ),
+                Checked::Valid(json::mesh::Semantic::Tangents) => (
+                    &[json::accessor::ComponentType::F32],
+                    &[json::accessor::Type::Vec4],
+                ),
+                Checked::Valid(json::mesh::Semantic::TexCoords(_)) => (
+                    &[
+                        json::accessor::ComponentType::F32,
+                        json::accessor::ComponentType::U8,
+                        json::accessor::ComponentType::U16,
+                    ],
+                    &[json::accessor::Type::Vec2],
+                ),
+                Checked::Valid(json::mesh::Semantic::Colors(_)) => (
+                    &[
+                        json::accessor::ComponentType::F32,
+                        json::accessor::ComponentType::U8,
+                        json::accessor::ComponentType::U16,
+                    ],
+                    &[json::accessor::Type::Vec3, json::accessor::Type::Vec4],
+                ),
+                Checked::Valid(json::mesh::Semantic::Joints(_)) => (
+                    &[
+                        json::accessor::ComponentType::U8,
+                        json::accessor::ComponentType::U16,
+                    ],
+                    &[json::accessor::Type::Vec4],
+                ),
+                Checked::Valid(json::mesh::Semantic::Weights(_)) => (
+                    &[
+                        json::accessor::ComponentType::F32,
+                        json::accessor::ComponentType::U8,
+                        json::accessor::ComponentType::U16,
+                    ],
+                    &[json::accessor::Type::Vec4],
+                ),
+                _ => continue,
+            };
+        validate_accessor(
+            ctx,
+            gltf,
+            accessor.value(),
+            mesh_index,
+            primitive_index,
+            label,
+            components,
+            dimensions,
+        )?;
+    }
+
+    let index_count = if let Some(index_accessor) = primitive.indices {
+        Some(validate_accessor(
+            ctx,
+            gltf,
+            index_accessor.value(),
+            mesh_index,
+            primitive_index,
+            "indices",
+            &[
+                json::accessor::ComponentType::U8,
+                json::accessor::ComponentType::U16,
+                json::accessor::ComponentType::U32,
+            ],
+            &[json::accessor::Type::Scalar],
+        )?)
+    } else {
+        None
+    };
+    let primitive_faces = match mode {
+        Mode::Triangles => index_count.unwrap_or(position_count) / 3,
+        Mode::Points | Mode::Lines => 0,
+        Mode::LineLoop | Mode::LineStrip | Mode::TriangleStrip | Mode::TriangleFan => 0,
+    };
+    *total_faces = total_faces
+        .checked_add(primitive_faces)
+        .ok_or(BaoziError::LimitExceeded { limit: "max_faces" })?;
+    if *total_faces > ctx.limits().max_faces {
+        return Err(BaoziError::LimitExceeded { limit: "max_faces" });
+    }
+
+    let material_index = primitive.material.map(|material| material.value());
+    if let Some(material_index) = material_index
+        && material_index >= material_count
+    {
+        return Err(BaoziError::parse(
+            ctx.source().to_string(),
+            None,
+            format!(
+                "glTF mesh {mesh_index} primitive {primitive_index} material reference is out of range"
+            ),
+        ));
+    }
+
+    Ok(PrimitiveContract {
+        mode,
+        position_count,
+        material_index,
+    })
+}
+
+fn json_primitive<'a>(
+    ctx: &ImportContext<'_>,
+    gltf: &'a gltf::Gltf,
+    mesh_index: usize,
+    primitive_index: usize,
+) -> Result<&'a json::mesh::Primitive> {
+    gltf.as_json()
+        .meshes
+        .get(mesh_index)
+        .and_then(|mesh| mesh.primitives.get(primitive_index))
+        .ok_or_else(|| {
+            BaoziError::parse(
+                ctx.source().to_string(),
+                None,
+                format!("glTF mesh {mesh_index} primitive {primitive_index} is out of range"),
+            )
+        })
+}
+
+fn checked_primitive_mode(
+    ctx: &ImportContext<'_>,
+    mesh_index: usize,
+    primitive_index: usize,
+    mode: Checked<json::mesh::Mode>,
+) -> Result<Mode> {
+    match mode {
+        Checked::Valid(json::mesh::Mode::Points) => Ok(Mode::Points),
+        Checked::Valid(json::mesh::Mode::Lines) => Ok(Mode::Lines),
+        Checked::Valid(json::mesh::Mode::LineLoop) => Ok(Mode::LineLoop),
+        Checked::Valid(json::mesh::Mode::LineStrip) => Ok(Mode::LineStrip),
+        Checked::Valid(json::mesh::Mode::Triangles) => Ok(Mode::Triangles),
+        Checked::Valid(json::mesh::Mode::TriangleStrip) => Ok(Mode::TriangleStrip),
+        Checked::Valid(json::mesh::Mode::TriangleFan) => Ok(Mode::TriangleFan),
+        Checked::Invalid => Err(BaoziError::parse(
+            ctx.source().to_string(),
+            None,
+            format!(
+                "glTF mesh {mesh_index} primitive {primitive_index} has an invalid primitive mode"
+            ),
+        )),
+    }
+}
+
+fn validate_accessor(
+    ctx: &ImportContext<'_>,
+    gltf: &gltf::Gltf,
+    accessor_index: usize,
+    mesh_index: usize,
+    primitive_index: usize,
+    label: &str,
+    components: &[json::accessor::ComponentType],
+    dimensions: &[json::accessor::Type],
+) -> Result<usize> {
+    let accessor = gltf
+        .as_json()
+        .accessors
+        .get(accessor_index)
+        .ok_or_else(|| {
+            BaoziError::parse(
+                ctx.source().to_string(),
+                None,
+                format!("glTF mesh {mesh_index} primitive {primitive_index} {label} accessor reference is out of range"),
+            )
+        })?;
+    let component = match accessor.component_type {
+        Checked::Valid(component) => component.0,
+        Checked::Invalid => {
+            return Err(BaoziError::parse(
+                ctx.source().to_string(),
+                None,
+                format!(
+                    "glTF mesh {mesh_index} primitive {primitive_index} {label} accessor has an invalid component type"
+                ),
+            ));
+        }
+    };
+    let dimension = match accessor.type_ {
+        Checked::Valid(dimension) => dimension,
+        Checked::Invalid => {
+            return Err(BaoziError::parse(
+                ctx.source().to_string(),
+                None,
+                format!(
+                    "glTF mesh {mesh_index} primitive {primitive_index} {label} accessor has an invalid type"
+                ),
+            ));
+        }
+    };
+    if !components.contains(&component) || !dimensions.contains(&dimension) {
+        return Err(BaoziError::parse(
+            ctx.source().to_string(),
+            None,
+            format!(
+                "glTF mesh {mesh_index} primitive {primitive_index} {label} accessor type is unsupported"
+            ),
+        ));
+    }
+    usize::try_from(accessor.count.0).map_err(|_| BaoziError::LimitExceeded {
+        limit: "max_vertices",
+    })
+}
+
+fn safe_gltf<T>(
+    ctx: &ImportContext<'_>,
+    operation: &'static str,
+    f: impl FnOnce() -> T,
+) -> Result<T> {
+    catch_unwind(AssertUnwindSafe(f)).map_err(|_| {
+        BaoziError::parse(
+            ctx.source().to_string(),
+            None,
+            format!("{operation} panicked on malformed glTF input"),
+        )
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 fn add_primitive_mesh(
     ctx: &mut ImportContext<'_>,
     builder: &mut SceneBuilder,
+    gltf: &gltf::Gltf,
     material_ids: &[baozi_core::MaterialId],
     buffers: &[Vec<u8>],
     mesh: &gltf::Mesh<'_>,
     primitive: gltf::Primitive<'_>,
     total_vertices: &mut usize,
+    total_faces: &mut usize,
 ) -> Result<baozi_core::MeshId> {
-    let topology = match map_topology(primitive.mode()) {
+    let contract = validate_primitive_contract(
+        ctx,
+        gltf,
+        mesh.index(),
+        primitive.index(),
+        material_ids.len(),
+        total_faces,
+    )?;
+    let topology = match map_topology(contract.mode) {
         Some(topology) => topology,
         None => {
             return Err(BaoziError::FeatureUnsupported {
                 format: "gltf",
-                feature: format!(
-                    "primitive mode {:?} is not implemented yet",
-                    primitive.mode()
-                ),
+                feature: format!("primitive mode {:?} is not implemented yet", contract.mode),
             });
         }
     };
 
-    let position_accessor = primitive.get(&Semantic::Positions).ok_or_else(|| {
-        BaoziError::parse(
-            ctx.source().to_string(),
-            None,
-            format!(
-                "glTF mesh {} primitive {} has no POSITION attribute",
-                mesh.index(),
-                primitive.index()
-            ),
-        )
-    })?;
-    *total_vertices = total_vertices
-        .checked_add(position_accessor.count())
-        .ok_or(BaoziError::LimitExceeded {
-            limit: "max_vertices",
-        })?;
+    *total_vertices =
+        total_vertices
+            .checked_add(contract.position_count)
+            .ok_or(BaoziError::LimitExceeded {
+                limit: "max_vertices",
+            })?;
     if *total_vertices > ctx.limits().max_vertices {
         return Err(BaoziError::LimitExceeded {
             limit: "max_vertices",
@@ -356,59 +727,82 @@ fn add_primitive_mesh(
     }
 
     let reader = primitive.reader(|buffer| buffers.get(buffer.index()).map(Vec::as_slice));
-    let positions: Vec<_> = reader
-        .read_positions()
-        .ok_or_else(|| {
-            BaoziError::parse(
-                ctx.source().to_string(),
-                None,
-                format!(
-                    "glTF mesh {} primitive {} POSITION accessor could not be read",
-                    mesh.index(),
-                    primitive.index()
-                ),
-            )
-        })?
-        .map(vec3)
-        .collect();
+    let positions: Vec<_> = safe_gltf(ctx, "glTF POSITION reader", || {
+        reader
+            .read_positions()
+            .map(|positions| positions.map(vec3).collect::<Vec<_>>())
+    })?
+    .ok_or_else(|| {
+        BaoziError::parse(
+            ctx.source().to_string(),
+            None,
+            format!(
+                "glTF mesh {} primitive {} POSITION accessor could not be read",
+                mesh.index(),
+                primitive.index()
+            ),
+        )
+    })?;
     let bounds = compute_bounds(&positions);
-    let normals: Vec<_> = reader
-        .read_normals()
-        .map(|iter| iter.map(vec3).collect())
-        .unwrap_or_default();
-    let tangents: Vec<_> = reader
-        .read_tangents()
-        .map(|iter| iter.map(vec4).collect())
-        .unwrap_or_default();
-    let indices: Vec<_> = reader
-        .read_indices()
-        .map(|indices| indices.into_u32().collect())
-        .unwrap_or_default();
+    let normals: Vec<_> = safe_gltf(ctx, "glTF NORMAL reader", || {
+        reader
+            .read_normals()
+            .map(|iter| iter.map(vec3).collect::<Vec<_>>())
+    })?
+    .unwrap_or_default();
+    let tangents: Vec<_> = safe_gltf(ctx, "glTF TANGENT reader", || {
+        reader
+            .read_tangents()
+            .map(|iter| iter.map(vec4).collect::<Vec<_>>())
+    })?
+    .unwrap_or_default();
+    let indices: Vec<_> = safe_gltf(ctx, "glTF indices reader", || {
+        reader
+            .read_indices()
+            .map(|indices| indices.into_u32().collect::<Vec<_>>())
+    })?
+    .unwrap_or_default();
 
     let mut texcoords = Vec::new();
     for set in 0..8 {
-        let Some(values) = reader.read_tex_coords(set) else {
+        let Some(values) = safe_gltf(ctx, "glTF TEXCOORD reader", || {
+            reader
+                .read_tex_coords(set)
+                .map(|values| values.into_f32().map(vec2).collect::<Vec<_>>())
+        })?
+        else {
             break;
         };
-        texcoords.push(values.into_f32().map(vec2).collect());
+        texcoords.push(values);
     }
     let mut colors = Vec::new();
     for set in 0..8 {
-        let Some(values) = reader.read_colors(set) else {
+        let Some(values) = safe_gltf(ctx, "glTF COLOR reader", || {
+            reader
+                .read_colors(set)
+                .map(|values| values.into_rgba_f32().map(color).collect::<Vec<_>>())
+        })?
+        else {
             break;
         };
-        colors.push(values.into_rgba_f32().map(color).collect());
+        colors.push(values);
     }
-    let joint_indices = reader
-        .read_joints(0)
-        .map(|values| values.into_u16().collect())
-        .unwrap_or_default();
-    let joint_weights = reader
-        .read_weights(0)
-        .map(|values| values.into_f32().collect())
-        .unwrap_or_default();
+    let joint_indices = safe_gltf(ctx, "glTF JOINTS reader", || {
+        reader
+            .read_joints(0)
+            .map(|values| values.into_u16().collect::<Vec<_>>())
+    })?
+    .unwrap_or_default();
+    let joint_weights = safe_gltf(ctx, "glTF WEIGHTS reader", || {
+        reader
+            .read_weights(0)
+            .map(|values| values.into_f32().collect::<Vec<_>>())
+    })?
+    .unwrap_or_default();
 
-    if primitive.morph_targets().next().is_some() {
+    if safe_gltf(ctx, "glTF morph target iterator", || {
+        primitive.morph_targets().next().is_some()
+    })? {
         push_warning(
             ctx,
             ctx.source().to_string(),
@@ -432,9 +826,8 @@ fn add_primitive_mesh(
         MetadataValue::I64(primitive.index() as i64),
     );
 
-    let material = primitive
-        .material()
-        .index()
+    let material = contract
+        .material_index
         .and_then(|index| material_ids.get(index).copied());
     let mesh_name = primitive_name(
         mesh.name(),

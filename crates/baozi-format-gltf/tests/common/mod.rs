@@ -4,6 +4,7 @@ use baozi_core::{BaoziError, Diagnostic, Result, Scene};
 use baozi_format_gltf::GltfImporter;
 use baozi_import::{FormatImporter, ImportContext, ImportOptions};
 use baozi_io::{AssetPath, MemoryAssetIo};
+use base64::Engine as _;
 use std::sync::Arc;
 
 pub fn import_assets(
@@ -177,9 +178,18 @@ fn padded_chunk(bytes: &[u8], pad: u8) -> Vec<u8> {
 }
 
 pub fn data_uri_gltf() -> Vec<u8> {
-    br#"{
-  "asset": { "version": "2.0" },
-  "buffers": [{ "uri": "data:application/octet-stream;base64,AAAA", "byteLength": 3 }]
-}"#
-    .to_vec()
+    let encoded = base64::engine::general_purpose::STANDARD.encode(triangle_bin());
+    triangle_gltf_with_buffer_uri(
+        &format!("data:application/octet-stream;base64,{encoded}"),
+        104,
+    )
+}
+
+pub fn triangle_gltf_with_buffer_uri(uri: &str, byte_length: usize) -> Vec<u8> {
+    let text = String::from_utf8(triangle_gltf()).expect("fixture is valid utf-8");
+    text.replace(
+        r#""uri": "triangle.bin", "byteLength": 104"#,
+        &format!(r#""uri": "{uri}", "byteLength": {byte_length}"#),
+    )
+    .into_bytes()
 }

@@ -3,6 +3,7 @@
 use baozi::{
     AssetPath, ExternalReferencePolicy, ImportOptions, ImportStage, Importer, MemoryAssetIo, Result,
 };
+use base64::Engine as _;
 
 fn triangle_gltf() -> Vec<u8> {
     br#"{
@@ -45,6 +46,16 @@ fn triangle_bin() -> Vec<u8> {
     bytes
 }
 
+fn triangle_data_uri_gltf() -> Vec<u8> {
+    let encoded = base64::engine::general_purpose::STANDARD.encode(triangle_bin());
+    let text = String::from_utf8(triangle_gltf()).expect("fixture is valid utf-8");
+    text.replace(
+        r#""uri": "triangle.bin", "byteLength": 42"#,
+        &format!(r#""uri": "data:application/octet-stream;base64,{encoded}", "byteLength": 42"#),
+    )
+    .into_bytes()
+}
+
 #[test]
 fn facade_reports_gltf_resource_ledger_stats() -> Result<()> {
     let source = AssetPath::new("models/scene.gltf")?;
@@ -68,6 +79,7 @@ fn facade_reports_gltf_resource_ledger_stats() -> Result<()> {
     assert_eq!(report.scene().meshes.len(), 1);
     assert_eq!(report.stats().primary_asset_bytes(), primary_len);
     assert_eq!(report.stats().sidecar_asset_bytes(), sidecar_len);
+    assert_eq!(report.stats().data_uri_bytes(), 0);
     assert_eq!(
         report.stats().total_asset_bytes(),
         primary_len + sidecar_len
@@ -76,5 +88,31 @@ fn facade_reports_gltf_resource_ledger_stats() -> Result<()> {
     assert_eq!(report.stats().generated_meshes(), 1);
     assert_eq!(report.stats().generated_vertices(), 3);
     assert_eq!(report.stats().generated_faces(), 1);
+    Ok(())
+}
+
+#[test]
+fn facade_reports_gltf_data_uri_resource_ledger_stats() -> Result<()> {
+    let source = AssetPath::new("models/scene.gltf")?;
+    let gltf = triangle_data_uri_gltf();
+    let primary_len = gltf.len() as u64;
+    let data_uri_len = triangle_bin().len() as u64;
+
+    let mut io = MemoryAssetIo::new();
+    io.insert(source.clone(), gltf);
+
+    let report = Importer::new().read_asset_with_options(&io, source, ImportOptions::memory())?;
+
+    assert_eq!(report.format().id(), "gltf");
+    assert!(report.diagnostics().is_empty());
+    assert_eq!(report.scene().meshes.len(), 1);
+    assert_eq!(report.stats().primary_asset_bytes(), primary_len);
+    assert_eq!(report.stats().sidecar_asset_bytes(), 0);
+    assert_eq!(report.stats().data_uri_bytes(), data_uri_len);
+    assert_eq!(
+        report.stats().total_asset_bytes(),
+        primary_len + data_uri_len
+    );
+    assert_eq!(report.stats().opened_assets(), 1);
     Ok(())
 }
