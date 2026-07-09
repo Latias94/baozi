@@ -1,0 +1,26 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/frankorz/baozi"
+homepage = "https://github.com/frankorz/baozi"
+documentation = "https://docs.rs/baozi"
+authors = ["Baozi Contributors"]
+
+[workspace.dependencies]
+baozi-core = { path = "crates/baozi-core" }
+baozi-io = { path = "crates/baozi-io" }
+baozi-import = { path = "crates/baozi-import" }
+baozi-postprocess = { path = "crates/baozi-postprocess" }
+baozi-format-stl = { path = "crates/baozi-format-stl" }
+baozi-format-obj = { path = "crates/baozi-format-obj" }
+baozi-format-ply = { path = "crates/baozi-format-ply" }
+baozi-format-gltf = { path = "crates/baozi-format-gltf" }
+thiserror = "2"
+tracing = "0.1"
+mint = "0.5"

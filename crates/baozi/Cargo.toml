@@ -1,0 +1,36 @@
+[package]
+name = "baozi"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+authors.workspace = true
+
+[features]
+default = ["std", "default-formats"]
+std = []
+default-formats = ["format-stl", "format-obj", "format-ply"]
+all-formats = ["format-stl", "format-obj", "format-ply", "format-gltf"]
+format-stl = ["dep:baozi-format-stl"]
+format-obj = ["dep:baozi-format-obj"]
+format-ply = ["dep:baozi-format-ply"]
+format-gltf = ["dep:baozi-format-gltf"]
+parallel = []
+simd = []
+async = []
+tracing = ["dep:tracing"]
+mint = ["baozi-core/mint"]
+
+[dependencies]
+baozi-core.workspace = true
+baozi-import.workspace = true
+baozi-io.workspace = true
+baozi-postprocess.workspace = true
+baozi-format-stl = { workspace = true, optional = true }
+baozi-format-obj = { workspace = true, optional = true }
+baozi-format-ply = { workspace = true, optional = true }
+baozi-format-gltf = { workspace = true, optional = true }
+tracing = { workspace = true, optional = true }
