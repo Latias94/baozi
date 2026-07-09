@@ -416,6 +416,7 @@ fn validate_primitive_contract(
     total_faces: &mut usize,
 ) -> Result<PrimitiveContract> {
     let primitive = json_primitive(ctx, gltf, mesh_index, primitive_index)?;
+    let owner = format!("glTF mesh {mesh_index} primitive {primitive_index}");
     let mode = checked_primitive_mode(ctx, mesh_index, primitive_index, primitive.mode)?;
     let position_index = primitive
         .attributes
@@ -434,15 +435,17 @@ fn validate_primitive_contract(
         ctx,
         gltf,
         position_index,
-        mesh_index,
-        primitive_index,
+        &owner,
         "POSITION",
-        AccessorContract {
-            components: &[json::accessor::ComponentType::F32],
-            dimensions: &[json::accessor::Type::Vec3],
-        },
-    )?;
+        AccessorContract::vertex(
+            &[json::accessor::ComponentType::F32],
+            &[json::accessor::Type::Vec3],
+        ),
+    )?
+    .count;
 
+    let mut has_joints = false;
+    let mut has_weights = false;
     for (semantic, accessor) in &primitive.attributes {
         let label = match semantic {
             Checked::Valid(json::mesh::Semantic::Positions) => continue,
@@ -463,75 +466,95 @@ fn validate_primitive_contract(
             }
         };
         let contract = match semantic {
-            Checked::Valid(json::mesh::Semantic::Normals) => AccessorContract {
-                components: &[json::accessor::ComponentType::F32],
-                dimensions: &[json::accessor::Type::Vec3],
-            },
-            Checked::Valid(json::mesh::Semantic::Tangents) => AccessorContract {
-                components: &[json::accessor::ComponentType::F32],
-                dimensions: &[json::accessor::Type::Vec4],
-            },
-            Checked::Valid(json::mesh::Semantic::TexCoords(_)) => AccessorContract {
-                components: &[
+            Checked::Valid(json::mesh::Semantic::Normals) => AccessorContract::vertex(
+                &[json::accessor::ComponentType::F32],
+                &[json::accessor::Type::Vec3],
+            ),
+            Checked::Valid(json::mesh::Semantic::Tangents) => AccessorContract::vertex(
+                &[json::accessor::ComponentType::F32],
+                &[json::accessor::Type::Vec4],
+            ),
+            Checked::Valid(json::mesh::Semantic::TexCoords(_)) => AccessorContract::vertex(
+                &[
                     json::accessor::ComponentType::F32,
                     json::accessor::ComponentType::U8,
                     json::accessor::ComponentType::U16,
                 ],
-                dimensions: &[json::accessor::Type::Vec2],
-            },
-            Checked::Valid(json::mesh::Semantic::Colors(_)) => AccessorContract {
-                components: &[
+                &[json::accessor::Type::Vec2],
+            )
+            .require_normalized_integer(),
+            Checked::Valid(json::mesh::Semantic::Colors(_)) => AccessorContract::vertex(
+                &[
                     json::accessor::ComponentType::F32,
                     json::accessor::ComponentType::U8,
                     json::accessor::ComponentType::U16,
                 ],
-                dimensions: &[json::accessor::Type::Vec3, json::accessor::Type::Vec4],
-            },
-            Checked::Valid(json::mesh::Semantic::Joints(_)) => AccessorContract {
-                components: &[
+                &[json::accessor::Type::Vec3, json::accessor::Type::Vec4],
+            )
+            .require_normalized_integer(),
+            Checked::Valid(json::mesh::Semantic::Joints(_)) => AccessorContract::vertex(
+                &[
                     json::accessor::ComponentType::U8,
                     json::accessor::ComponentType::U16,
                 ],
-                dimensions: &[json::accessor::Type::Vec4],
-            },
-            Checked::Valid(json::mesh::Semantic::Weights(_)) => AccessorContract {
-                components: &[
+                &[json::accessor::Type::Vec4],
+            ),
+            Checked::Valid(json::mesh::Semantic::Weights(_)) => AccessorContract::vertex(
+                &[
                     json::accessor::ComponentType::F32,
                     json::accessor::ComponentType::U8,
                     json::accessor::ComponentType::U16,
                 ],
-                dimensions: &[json::accessor::Type::Vec4],
-            },
+                &[json::accessor::Type::Vec4],
+            )
+            .require_normalized_integer(),
             _ => continue,
         };
-        validate_accessor(
-            ctx,
-            gltf,
-            accessor.value(),
-            mesh_index,
-            primitive_index,
-            label,
-            contract,
-        )?;
+        let info = validate_accessor(ctx, gltf, accessor.value(), &owner, label, contract)?;
+        if info.count != position_count {
+            return Err(BaoziError::parse(
+                ctx.source().to_string(),
+                None,
+                format!(
+                    "{owner} {label} accessor count {} does not match POSITION count {position_count}",
+                    info.count
+                ),
+            ));
+        }
+        if matches!(semantic, Checked::Valid(json::mesh::Semantic::Joints(_))) {
+            has_joints = true;
+        }
+        if matches!(semantic, Checked::Valid(json::mesh::Semantic::Weights(_))) {
+            has_weights = true;
+        }
+    }
+    if has_joints != has_weights {
+        return Err(BaoziError::parse(
+            ctx.source().to_string(),
+            None,
+            format!("{owner} JOINTS and WEIGHTS attributes must be provided together"),
+        ));
     }
 
     let index_count = if let Some(index_accessor) = primitive.indices {
-        Some(validate_accessor(
-            ctx,
-            gltf,
-            index_accessor.value(),
-            mesh_index,
-            primitive_index,
-            "indices",
-            AccessorContract {
-                components: &[
-                    json::accessor::ComponentType::U8,
-                    json::accessor::ComponentType::U16,
-                    json::accessor::ComponentType::U32,
-                ],
-                dimensions: &[json::accessor::Type::Scalar],
-            },
-        )?)
+        Some(
+            validate_accessor(
+                ctx,
+                gltf,
+                index_accessor.value(),
+                &owner,
+                "indices",
+                AccessorContract::tightly_packed(
+                    &[
+                        json::accessor::ComponentType::U8,
+                        json::accessor::ComponentType::U16,
+                        json::accessor::ComponentType::U32,
+                    ],
+                    &[json::accessor::Type::Scalar],
+                ),
+            )?
+            .count,
+        )
     } else {
         None
     };
@@ -611,20 +634,57 @@ fn checked_primitive_mode(
 }
 
 #[derive(Clone, Copy)]
-struct AccessorContract<'a> {
-    components: &'a [json::accessor::ComponentType],
-    dimensions: &'a [json::accessor::Type],
+struct AccessorContract {
+    components: &'static [json::accessor::ComponentType],
+    dimensions: &'static [json::accessor::Type],
+    allow_stride: bool,
+    require_normalized_integer: bool,
+}
+
+impl AccessorContract {
+    fn vertex(
+        components: &'static [json::accessor::ComponentType],
+        dimensions: &'static [json::accessor::Type],
+    ) -> Self {
+        Self {
+            components,
+            dimensions,
+            allow_stride: true,
+            require_normalized_integer: false,
+        }
+    }
+
+    fn tightly_packed(
+        components: &'static [json::accessor::ComponentType],
+        dimensions: &'static [json::accessor::Type],
+    ) -> Self {
+        Self {
+            components,
+            dimensions,
+            allow_stride: false,
+            require_normalized_integer: false,
+        }
+    }
+
+    fn require_normalized_integer(mut self) -> Self {
+        self.require_normalized_integer = true;
+        self
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct AccessorInfo {
+    count: usize,
 }
 
 fn validate_accessor(
     ctx: &ImportContext<'_>,
     gltf: &gltf::Gltf,
     accessor_index: usize,
-    mesh_index: usize,
-    primitive_index: usize,
+    owner: &str,
     label: &str,
-    contract: AccessorContract<'_>,
-) -> Result<usize> {
+    contract: AccessorContract,
+) -> Result<AccessorInfo> {
     let accessor = gltf
         .as_json()
         .accessors
@@ -633,7 +693,7 @@ fn validate_accessor(
             BaoziError::parse(
                 ctx.source().to_string(),
                 None,
-                format!("glTF mesh {mesh_index} primitive {primitive_index} {label} accessor reference is out of range"),
+                format!("{owner} {label} accessor reference is out of range"),
             )
         })?;
     let component = match accessor.component_type {
@@ -642,9 +702,7 @@ fn validate_accessor(
             return Err(BaoziError::parse(
                 ctx.source().to_string(),
                 None,
-                format!(
-                    "glTF mesh {mesh_index} primitive {primitive_index} {label} accessor has an invalid component type"
-                ),
+                format!("{owner} {label} accessor has an invalid component type"),
             ));
         }
     };
@@ -654,9 +712,7 @@ fn validate_accessor(
             return Err(BaoziError::parse(
                 ctx.source().to_string(),
                 None,
-                format!(
-                    "glTF mesh {mesh_index} primitive {primitive_index} {label} accessor has an invalid type"
-                ),
+                format!("{owner} {label} accessor has an invalid type"),
             ));
         }
     };
@@ -664,14 +720,242 @@ fn validate_accessor(
         return Err(BaoziError::parse(
             ctx.source().to_string(),
             None,
+            format!("{owner} {label} accessor type is unsupported"),
+        ));
+    }
+    if accessor.sparse.is_some() {
+        return Err(BaoziError::FeatureUnsupported {
+            format: "gltf",
+            feature: format!("{label} sparse accessor"),
+        });
+    }
+    if accessor.normalized && component == json::accessor::ComponentType::F32 {
+        return Err(BaoziError::parse(
+            ctx.source().to_string(),
+            None,
+            format!("{owner} float {label} accessor must not be normalized"),
+        ));
+    }
+    if contract.require_normalized_integer
+        && component != json::accessor::ComponentType::F32
+        && !accessor.normalized
+    {
+        return Err(BaoziError::parse(
+            ctx.source().to_string(),
+            None,
+            format!("{owner} integer {label} accessor must be normalized"),
+        ));
+    }
+    validate_accessor_layout(
+        ctx,
+        gltf,
+        AccessorLayoutCheck {
+            accessor,
+            owner,
+            label,
+            component,
+            dimension,
+            contract,
+        },
+    )?;
+
+    let count = usize::try_from(accessor.count.0).map_err(|_| BaoziError::LimitExceeded {
+        limit: "max_vertices",
+    })?;
+    Ok(AccessorInfo { count })
+}
+
+#[derive(Clone, Copy)]
+struct AccessorLayoutCheck<'a> {
+    accessor: &'a json::accessor::Accessor,
+    owner: &'a str,
+    label: &'a str,
+    component: json::accessor::ComponentType,
+    dimension: json::accessor::Type,
+    contract: AccessorContract,
+}
+
+fn validate_accessor_layout(
+    ctx: &ImportContext<'_>,
+    gltf: &gltf::Gltf,
+    check: AccessorLayoutCheck<'_>,
+) -> Result<()> {
+    let buffer_view_index = check
+        .accessor
+        .buffer_view
+        .ok_or_else(|| {
+            BaoziError::parse(
+                ctx.source().to_string(),
+                None,
+                format!("{} {} accessor has no bufferView", check.owner, check.label),
+            )
+        })?
+        .value();
+    let buffer_view = gltf
+        .as_json()
+        .buffer_views
+        .get(buffer_view_index)
+        .ok_or_else(|| {
+            BaoziError::parse(
+                ctx.source().to_string(),
+                None,
+                format!(
+                    "{} {} bufferView reference is out of range",
+                    check.owner, check.label
+                ),
+            )
+        })?;
+    let buffer_index = buffer_view.buffer.value();
+    let buffer = gltf.as_json().buffers.get(buffer_index).ok_or_else(|| {
+        BaoziError::parse(
+            ctx.source().to_string(),
+            None,
             format!(
-                "glTF mesh {mesh_index} primitive {primitive_index} {label} accessor type is unsupported"
+                "{} {} buffer reference is out of range",
+                check.owner, check.label
+            ),
+        )
+    })?;
+
+    let component_size = component_size(check.component);
+    let element_size = element_size(check.component, check.dimension)?;
+    let stride = match buffer_view.byte_stride {
+        Some(_) if !check.contract.allow_stride => {
+            return Err(BaoziError::parse(
+                ctx.source().to_string(),
+                None,
+                format!(
+                    "{} {} accessor uses byteStride where it is unsupported",
+                    check.owner, check.label
+                ),
+            ));
+        }
+        Some(stride) => stride.0 as u64,
+        None => element_size,
+    };
+    if stride < element_size {
+        return Err(BaoziError::parse(
+            ctx.source().to_string(),
+            None,
+            format!(
+                "{} {} byteStride is smaller than the accessor element size",
+                check.owner, check.label
             ),
         ));
     }
-    usize::try_from(accessor.count.0).map_err(|_| BaoziError::LimitExceeded {
-        limit: "max_vertices",
-    })
+    if !stride.is_multiple_of(component_size) {
+        return Err(BaoziError::parse(
+            ctx.source().to_string(),
+            None,
+            format!(
+                "{} {} byteStride is not aligned to component size",
+                check.owner, check.label
+            ),
+        ));
+    }
+
+    let view_offset = buffer_view.byte_offset.map_or(0, |offset| offset.0);
+    let view_length = buffer_view.byte_length.0;
+    let accessor_offset = check.accessor.byte_offset.map_or(0, |offset| offset.0);
+    let absolute_offset = view_offset.checked_add(accessor_offset).ok_or_else(|| {
+        gltf_parse_error(
+            ctx,
+            format!("{} {} byte offset overflow", check.owner, check.label),
+        )
+    })?;
+    if !absolute_offset.is_multiple_of(component_size) {
+        return Err(BaoziError::parse(
+            ctx.source().to_string(),
+            None,
+            format!(
+                "{} {} byte offset is not aligned to component size",
+                check.owner, check.label
+            ),
+        ));
+    }
+
+    let view_end = view_offset.checked_add(view_length).ok_or_else(|| {
+        gltf_parse_error(
+            ctx,
+            format!("{} {} bufferView range overflow", check.owner, check.label),
+        )
+    })?;
+    if view_end > buffer.byte_length.0 {
+        return Err(BaoziError::parse(
+            ctx.source().to_string(),
+            None,
+            format!(
+                "{} {} bufferView exceeds declared buffer byteLength",
+                check.owner, check.label
+            ),
+        ));
+    }
+
+    let required = required_accessor_bytes(check.accessor.count.0, element_size, stride)
+        .ok_or_else(|| {
+            gltf_parse_error(
+                ctx,
+                format!("{} {} byte range overflow", check.owner, check.label),
+            )
+        })?;
+    let accessor_end = accessor_offset.checked_add(required).ok_or_else(|| {
+        gltf_parse_error(
+            ctx,
+            format!("{} {} accessor range overflow", check.owner, check.label),
+        )
+    })?;
+    if accessor_end > view_length {
+        return Err(BaoziError::parse(
+            ctx.source().to_string(),
+            None,
+            format!(
+                "{} {} bufferView byteLength does not cover accessor data",
+                check.owner, check.label
+            ),
+        ));
+    }
+
+    Ok(())
+}
+
+fn component_size(component: json::accessor::ComponentType) -> u64 {
+    match component {
+        json::accessor::ComponentType::I8 | json::accessor::ComponentType::U8 => 1,
+        json::accessor::ComponentType::I16 | json::accessor::ComponentType::U16 => 2,
+        json::accessor::ComponentType::U32 | json::accessor::ComponentType::F32 => 4,
+    }
+}
+
+fn component_count(dimension: json::accessor::Type) -> u64 {
+    match dimension {
+        json::accessor::Type::Scalar => 1,
+        json::accessor::Type::Vec2 => 2,
+        json::accessor::Type::Vec3 => 3,
+        json::accessor::Type::Vec4 | json::accessor::Type::Mat2 => 4,
+        json::accessor::Type::Mat3 => 9,
+        json::accessor::Type::Mat4 => 16,
+    }
+}
+
+fn element_size(
+    component: json::accessor::ComponentType,
+    dimension: json::accessor::Type,
+) -> Result<u64> {
+    component_size(component)
+        .checked_mul(component_count(dimension))
+        .ok_or(BaoziError::LimitExceeded {
+            limit: "max_vertices",
+        })
+}
+
+fn required_accessor_bytes(count: u64, element_size: u64, stride: u64) -> Option<u64> {
+    if count == 0 {
+        return Some(0);
+    }
+    count
+        .checked_sub(1)?
+        .checked_mul(stride)?
+        .checked_add(element_size)
 }
 
 fn safe_gltf<T>(
@@ -994,6 +1278,8 @@ fn add_skins(
             None => None,
         };
 
+        let has_inverse_bind_matrices =
+            validate_skin_inverse_bind_accessor(ctx, gltf, skin.index(), mapped_joints.len())?;
         let reader = skin.reader(|buffer| buffers.get(buffer.index()).map(Vec::as_slice));
         let inverse_bind_matrices = safe_gltf(ctx, "glTF inverse bind matrix reader", || {
             reader
@@ -1001,6 +1287,16 @@ fn add_skins(
                 .map(|matrices| matrices.map(|cols| Mat4 { cols }).collect::<Vec<_>>())
                 .unwrap_or_default()
         })?;
+        if has_inverse_bind_matrices && inverse_bind_matrices.len() != mapped_joints.len() {
+            return Err(BaoziError::parse(
+                ctx.source().to_string(),
+                None,
+                format!(
+                    "glTF skin {} inverse bind matrix count does not match joint count",
+                    skin.index()
+                ),
+            ));
+        }
 
         let skin_id = builder.add_skin(Skin {
             name: optional_name(skin.name(), ctx.limits().max_string_bytes)?,
@@ -1012,6 +1308,47 @@ fn add_skins(
         skin_ids.push(skin_id);
     }
     Ok(skin_ids)
+}
+
+fn validate_skin_inverse_bind_accessor(
+    ctx: &ImportContext<'_>,
+    gltf: &gltf::Gltf,
+    skin_index: usize,
+    joint_count: usize,
+) -> Result<bool> {
+    let json_skin = gltf.as_json().skins.get(skin_index).ok_or_else(|| {
+        BaoziError::parse(
+            ctx.source().to_string(),
+            None,
+            format!("glTF skin {skin_index} is out of range"),
+        )
+    })?;
+    let Some(accessor) = json_skin.inverse_bind_matrices else {
+        return Ok(false);
+    };
+    let owner = format!("glTF skin {skin_index}");
+    let info = validate_accessor(
+        ctx,
+        gltf,
+        accessor.value(),
+        &owner,
+        "inverseBindMatrices",
+        AccessorContract::tightly_packed(
+            &[json::accessor::ComponentType::F32],
+            &[json::accessor::Type::Mat4],
+        ),
+    )?;
+    if info.count != joint_count {
+        return Err(BaoziError::parse(
+            ctx.source().to_string(),
+            None,
+            format!(
+                "{owner} inverse bind matrix count {} does not match joint count {joint_count}",
+                info.count
+            ),
+        ));
+    }
+    Ok(true)
 }
 
 fn attach_node_skins(

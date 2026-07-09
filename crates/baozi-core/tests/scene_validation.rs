@@ -245,6 +245,23 @@ fn joint_channels_require_skin() {
 }
 
 #[test]
+fn joint_channels_reject_unskinned_mesh_binding() {
+    let mut scene = valid_triangle_scene();
+    scene.skins.push(Skin {
+        joints: vec![NodeId::new(1)],
+        ..Skin::default()
+    });
+    scene.nodes[1].mesh_bindings[0].skin = Some(baozi_core::SkinId::new(0));
+    scene.nodes[0]
+        .mesh_bindings
+        .push(MeshBinding::new(MeshId::new(0)));
+    scene.meshes[0].joint_indices = vec![[0, 0, 0, 0]; 3];
+    scene.meshes[0].joint_weights = vec![[1.0, 0.0, 0.0, 0.0]; 3];
+
+    assert_invalid(&scene, "unskinned mesh binding");
+}
+
+#[test]
 fn node_skin_reference_out_of_range_fails() {
     let mut scene = valid_triangle_scene();
     scene.nodes[1].mesh_bindings[0].skin = Some(baozi_core::SkinId::new(99));

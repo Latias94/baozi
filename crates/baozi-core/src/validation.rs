@@ -198,31 +198,41 @@ fn validate_texture_id(
 }
 
 fn validate_meshes(scene: &Scene) -> Result<()> {
-    let bound_skins = mesh_bound_skins(scene);
+    let binding_usage = mesh_binding_usage(scene);
     for (index, mesh) in scene.meshes.iter().enumerate() {
         validate_mesh(
             index,
             mesh,
             scene.materials.len(),
             &scene.skins,
-            &bound_skins[index],
+            &binding_usage[index],
         )?;
     }
     Ok(())
 }
 
-fn mesh_bound_skins(scene: &Scene) -> Vec<Vec<crate::SkinId>> {
-    let mut bound_skins = vec![Vec::new(); scene.meshes.len()];
+#[derive(Debug, Default)]
+struct MeshBindingUsage {
+    skins: Vec<crate::SkinId>,
+    has_unskinned_binding: bool,
+}
+
+fn mesh_binding_usage(scene: &Scene) -> Vec<MeshBindingUsage> {
+    let mut usage = (0..scene.meshes.len())
+        .map(|_| MeshBindingUsage::default())
+        .collect::<Vec<_>>();
     for node in &scene.nodes {
         for binding in &node.mesh_bindings {
-            if binding.mesh.index() < bound_skins.len()
-                && let Some(skin) = binding.skin
-            {
-                bound_skins[binding.mesh.index()].push(skin);
+            if let Some(mesh_usage) = usage.get_mut(binding.mesh.index()) {
+                if let Some(skin) = binding.skin {
+                    mesh_usage.skins.push(skin);
+                } else {
+                    mesh_usage.has_unskinned_binding = true;
+                }
             }
         }
     }
-    bound_skins
+    usage
 }
 
 fn validate_mesh(
@@ -230,7 +240,7 @@ fn validate_mesh(
     mesh: &Mesh,
     material_count: usize,
     skins: &[Skin],
-    bound_skin_ids: &[crate::SkinId],
+    binding_usage: &MeshBindingUsage,
 ) -> Result<()> {
     let vertex_count = mesh.positions.len();
     if vertex_count == 0 {
@@ -271,7 +281,7 @@ fn validate_mesh(
             Some(vertex_count),
         )?;
     }
-    validate_joint_channels(index, vertex_count, mesh, skins, bound_skin_ids)?;
+    validate_joint_channels(index, vertex_count, mesh, skins, binding_usage)?;
     for (target_index, target) in mesh.morph_targets.iter().enumerate() {
         validate_vec3_channel(
             index,
@@ -328,7 +338,7 @@ fn validate_joint_channels(
     vertex_count: usize,
     mesh: &Mesh,
     skins: &[Skin],
-    bound_skin_ids: &[crate::SkinId],
+    binding_usage: &MeshBindingUsage,
 ) -> Result<()> {
     if mesh.joint_indices.is_empty() && mesh.joint_weights.is_empty() {
         return Ok(());
@@ -338,11 +348,16 @@ fn validate_joint_channels(
             "mesh {mesh_index} joint indices and weights must both match positions length"
         ));
     }
-    if bound_skin_ids.is_empty() {
+    if binding_usage.skins.is_empty() {
         return invalid(format!("mesh {mesh_index} joint channels require a skin"));
     }
+    if binding_usage.has_unskinned_binding {
+        return invalid(format!(
+            "mesh {mesh_index} joint channels cannot be used by an unskinned mesh binding"
+        ));
+    }
     let mut min_joint_count = usize::MAX;
-    for skin in bound_skin_ids {
+    for skin in &binding_usage.skins {
         let Some(skin) = skins.get(skin.index()) else {
             return invalid(format!("mesh {mesh_index} skin reference is out of range"));
         };

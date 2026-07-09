@@ -235,6 +235,162 @@ fn invalid_index_accessor_type_is_parse_error_not_panic() -> Result<()> {
 }
 
 #[test]
+fn mismatched_attribute_count_is_parse_error_before_reader() -> Result<()> {
+    let gltf = String::from_utf8(triangle_gltf())
+        .expect("fixture is valid utf-8")
+        .replace(
+            r#"{ "bufferView": 1, "componentType": 5126, "count": 3, "type": "VEC3" }"#,
+            r#"{ "bufferView": 1, "componentType": 5126, "count": 2, "type": "VEC3" }"#,
+        )
+        .into_bytes();
+    let (result, diagnostics) = import_assets_result(
+        "models/scene.gltf",
+        [
+            ("models/scene.gltf", gltf),
+            ("models/triangle.bin", triangle_bin()),
+        ],
+        sidecar_options(),
+    )?;
+    let error = expected_error(result)?;
+
+    assert!(diagnostics.is_empty());
+    assert!(matches!(error, BaoziError::Parse { .. }));
+    assert!(error.to_string().contains("NORMAL accessor count"));
+    Ok(())
+}
+
+#[test]
+fn integer_texcoord_must_be_normalized_before_reader() -> Result<()> {
+    let gltf = String::from_utf8(triangle_gltf())
+        .expect("fixture is valid utf-8")
+        .replace(
+            r#"{ "bufferView": 2, "componentType": 5126, "count": 3, "type": "VEC2" }"#,
+            r#"{ "bufferView": 2, "componentType": 5123, "count": 3, "type": "VEC2" }"#,
+        )
+        .into_bytes();
+    let (result, diagnostics) = import_assets_result(
+        "models/scene.gltf",
+        [
+            ("models/scene.gltf", gltf),
+            ("models/triangle.bin", triangle_bin()),
+        ],
+        sidecar_options(),
+    )?;
+    let error = expected_error(result)?;
+
+    assert!(diagnostics.is_empty());
+    assert!(matches!(error, BaoziError::Parse { .. }));
+    assert!(error.to_string().contains("integer TEXCOORD accessor"));
+    Ok(())
+}
+
+#[test]
+fn short_buffer_view_is_parse_error_before_reader() -> Result<()> {
+    let gltf = String::from_utf8(triangle_gltf())
+        .expect("fixture is valid utf-8")
+        .replace(
+            r#"{ "buffer": 0, "byteOffset": 0, "byteLength": 36, "target": 34962 }"#,
+            r#"{ "buffer": 0, "byteOffset": 0, "byteLength": 24, "target": 34962 }"#,
+        )
+        .into_bytes();
+    let (result, diagnostics) = import_assets_result(
+        "models/scene.gltf",
+        [
+            ("models/scene.gltf", gltf),
+            ("models/triangle.bin", triangle_bin()),
+        ],
+        sidecar_options(),
+    )?;
+    let error = expected_error(result)?;
+
+    assert!(diagnostics.is_empty());
+    assert!(matches!(error, BaoziError::Parse { .. }));
+    assert!(error.to_string().contains("byteLength does not cover"));
+    Ok(())
+}
+
+#[test]
+fn index_accessor_byte_stride_is_parse_error_before_reader() -> Result<()> {
+    let gltf = String::from_utf8(triangle_gltf())
+        .expect("fixture is valid utf-8")
+        .replace(
+            r#"{ "buffer": 0, "byteOffset": 96, "byteLength": 6, "target": 34963 }"#,
+            r#"{ "buffer": 0, "byteOffset": 96, "byteLength": 6, "byteStride": 4, "target": 34963 }"#,
+        )
+        .into_bytes();
+    let (result, diagnostics) = import_assets_result(
+        "models/scene.gltf",
+        [
+            ("models/scene.gltf", gltf),
+            ("models/triangle.bin", triangle_bin()),
+        ],
+        sidecar_options(),
+    )?;
+    let error = expected_error(result)?;
+
+    assert!(diagnostics.is_empty());
+    assert!(matches!(error, BaoziError::Parse { .. }));
+    assert!(error.to_string().contains("byteStride"));
+    Ok(())
+}
+
+#[test]
+fn sparse_accessor_is_explicitly_unsupported_before_reader() -> Result<()> {
+    let gltf = String::from_utf8(triangle_gltf())
+        .expect("fixture is valid utf-8")
+        .replace(r#""byteLength": 104"#, r#""byteLength": 116"#)
+        .replace(
+            r#"{ "buffer": 0, "byteOffset": 96, "byteLength": 6, "target": 34963 }"#,
+            r#"{ "buffer": 0, "byteOffset": 96, "byteLength": 6, "target": 34963 },
+    { "buffer": 0, "byteOffset": 102, "byteLength": 2 },
+    { "buffer": 0, "byteOffset": 104, "byteLength": 12 }"#,
+        )
+        .replace(
+            r#"{ "bufferView": 0, "componentType": 5126, "count": 3, "type": "VEC3", "min": [0, 0, 0], "max": [1, 1, 0] }"#,
+            r#"{ "bufferView": 0, "componentType": 5126, "count": 3, "type": "VEC3", "min": [0, 0, 0], "max": [1, 1, 0], "sparse": { "count": 1, "indices": { "bufferView": 4, "componentType": 5123 }, "values": { "bufferView": 5 } } }"#,
+        )
+        .into_bytes();
+    let mut bin = triangle_bin();
+    bin.resize(116, 0);
+    let (result, diagnostics) = import_assets_result(
+        "models/scene.gltf",
+        [("models/scene.gltf", gltf), ("models/triangle.bin", bin)],
+        sidecar_options(),
+    )?;
+    let error = expected_error(result)?;
+
+    assert!(diagnostics.is_empty());
+    assert!(matches!(error, BaoziError::FeatureUnsupported { .. }));
+    assert!(error.to_string().contains("sparse accessor"));
+    Ok(())
+}
+
+#[test]
+fn float_accessor_must_not_be_normalized_before_reader() -> Result<()> {
+    let gltf = String::from_utf8(triangle_gltf())
+        .expect("fixture is valid utf-8")
+        .replace(
+            r#"{ "bufferView": 0, "componentType": 5126, "count": 3, "type": "VEC3", "min": [0, 0, 0], "max": [1, 1, 0] }"#,
+            r#"{ "bufferView": 0, "componentType": 5126, "count": 3, "type": "VEC3", "normalized": true, "min": [0, 0, 0], "max": [1, 1, 0] }"#,
+        )
+        .into_bytes();
+    let (result, diagnostics) = import_assets_result(
+        "models/scene.gltf",
+        [
+            ("models/scene.gltf", gltf),
+            ("models/triangle.bin", triangle_bin()),
+        ],
+        sidecar_options(),
+    )?;
+    let error = expected_error(result)?;
+
+    assert!(diagnostics.is_empty());
+    assert!(matches!(error, BaoziError::Parse { .. }));
+    assert!(error.to_string().contains("float POSITION accessor"));
+    Ok(())
+}
+
+#[test]
 fn imports_base64_buffer_data_uri() -> Result<()> {
     let (scene, diagnostics) = import_assets(
         "scene.gltf",
@@ -365,6 +521,11 @@ fn vertex_limit_is_enforced_from_accessor_count() -> Result<()> {
 fn face_limit_is_enforced_from_index_accessor_count() -> Result<()> {
     let gltf = String::from_utf8(triangle_gltf())
         .expect("fixture is valid utf-8")
+        .replace(r#""byteLength": 104"#, r#""byteLength": 700"#)
+        .replace(
+            r#"{ "buffer": 0, "byteOffset": 96, "byteLength": 6, "target": 34963 }"#,
+            r#"{ "buffer": 0, "byteOffset": 96, "byteLength": 600, "target": 34963 }"#,
+        )
         .replace(
             r#"{ "bufferView": 3, "componentType": 5123, "count": 3, "type": "SCALAR" }"#,
             r#"{ "bufferView": 3, "componentType": 5123, "count": 300, "type": "SCALAR" }"#,
@@ -376,7 +537,7 @@ fn face_limit_is_enforced_from_index_accessor_count() -> Result<()> {
         "models/scene.gltf",
         [
             ("models/scene.gltf", gltf),
-            ("models/triangle.bin", triangle_bin()),
+            ("models/triangle.bin", vec![0; 700]),
         ],
         options,
     )?;

@@ -36,14 +36,27 @@ Baozi currently treats these `gltf-rs` reader calls as untrusted backend boundar
 The long-term target is to make predictable malformed cases fail in Baozi-owned preflight before these reader calls.
 `safe_gltf` remains a last-resort boundary, not the first line of parser validation.
 
-### Preflight Gaps To Close
+### Closed Preflight Checks
 
-- Attribute counts for NORMAL, TANGENT, TEXCOORD, COLOR, JOINTS, and WEIGHTS must equal POSITION count before collection.
-- Index accessor count must enforce `max_faces` before collection.
-- Inverse bind matrix accessor must be F32/MAT4 and either absent or equal to the skin joint count before collection.
-- Accessor and bufferView byte ranges must prove `byteOffset`, `byteStride`, element size, alignment, and `byteLength` coverage.
-- Sparse accessors must be supported or rejected explicitly before `gltf-rs` reader behavior decides the outcome.
-- Integer TEXCOORD, COLOR, and WEIGHTS accessors need an explicit normalized-value policy before conversion.
+The 2026-07-09 format beta hardening slice added Baozi-owned checks for:
+
+- attribute counts for NORMAL, TANGENT, TEXCOORD, COLOR, JOINTS, and WEIGHTS matching POSITION count before collection
+- index accessor count enforcing `max_faces` before index reader collection
+- inverse bind matrix accessor type/count checks before collection
+- accessor and bufferView `byteOffset`, `byteStride`, element size, alignment, declared buffer length, and `byteLength` coverage
+- explicit sparse accessor rejection before reader behavior decides the outcome
+- integer TEXCOORD, COLOR, and WEIGHTS normalized-value policy before conversion
+- JOINTS/WEIGHTS pairing before reader calls
+- core scene validation rejecting joint-stream meshes that are also referenced by unskinned mesh bindings
+
+### Remaining Preflight Gaps
+
+- Run `gltf_import` under Linux sanitizer after the new preflight checks and inspect whether the
+  original abort class is gone.
+- Add more real Khronos sample smoke coverage for interleaved and skinned assets before promoting
+  the target back to sanitizer-run CI.
+- Decide whether morph target iterator validation should become a fatal unsupported path rather
+  than a warning after the core morph IR policy is exercised by fixtures.
 
 ## Fork Or Replacement Triggers
 

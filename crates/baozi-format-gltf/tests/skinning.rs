@@ -77,7 +77,7 @@ fn joint_index_outside_skin_palette_is_invalid_scene() -> Result<()> {
 }
 
 #[test]
-fn inverse_bind_matrix_count_mismatch_is_invalid_scene() -> Result<()> {
+fn inverse_bind_matrix_count_mismatch_is_parse_error_before_reader() -> Result<()> {
     let gltf = String::from_utf8(skinned_triangle_gltf())
         .expect("fixture is valid utf-8")
         .replace(
@@ -96,7 +96,54 @@ fn inverse_bind_matrix_count_mismatch_is_invalid_scene() -> Result<()> {
     let error = expected_error(result)?;
 
     assert!(diagnostics.is_empty());
-    assert!(matches!(error, BaoziError::InvalidScene { .. }));
+    assert!(matches!(error, BaoziError::Parse { .. }));
     assert!(error.to_string().contains("inverse bind matrix count"));
+    Ok(())
+}
+
+#[test]
+fn inverse_bind_matrix_type_mismatch_is_parse_error_before_reader() -> Result<()> {
+    let gltf = String::from_utf8(skinned_triangle_gltf())
+        .expect("fixture is valid utf-8")
+        .replace(
+            r#"{ "bufferView": 4, "componentType": 5126, "count": 2, "type": "MAT4" }"#,
+            r#"{ "bufferView": 4, "componentType": 5126, "count": 2, "type": "VEC4" }"#,
+        )
+        .into_bytes();
+    let (result, diagnostics) = import_assets_result(
+        "models/skin.gltf",
+        [
+            ("models/skin.gltf", gltf),
+            ("models/skin.bin", skinned_triangle_bin()),
+        ],
+        sidecar_options(),
+    )?;
+    let error = expected_error(result)?;
+
+    assert!(diagnostics.is_empty());
+    assert!(matches!(error, BaoziError::Parse { .. }));
+    assert!(error.to_string().contains("inverseBindMatrices accessor"));
+    Ok(())
+}
+
+#[test]
+fn joint_and_weight_attributes_must_be_paired() -> Result<()> {
+    let gltf = String::from_utf8(skinned_triangle_gltf())
+        .expect("fixture is valid utf-8")
+        .replace(r#", "WEIGHTS_0": 3"#, "")
+        .into_bytes();
+    let (result, diagnostics) = import_assets_result(
+        "models/skin.gltf",
+        [
+            ("models/skin.gltf", gltf),
+            ("models/skin.bin", skinned_triangle_bin()),
+        ],
+        sidecar_options(),
+    )?;
+    let error = expected_error(result)?;
+
+    assert!(diagnostics.is_empty());
+    assert!(matches!(error, BaoziError::Parse { .. }));
+    assert!(error.to_string().contains("JOINTS and WEIGHTS"));
     Ok(())
 }
