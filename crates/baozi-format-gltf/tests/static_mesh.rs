@@ -4,9 +4,10 @@ use baozi_core::{
     AlphaMode, BaoziError, ColorSpace, PrimitiveTopology, Result, TextureFilterMode, TextureRole,
     TextureSource, TextureWrapMode, Vec2, Vec3,
 };
+use baozi_test_support::SceneSnapshot;
 use common::{
     data_uri_gltf, expected_error, import_assets, import_assets_result, sidecar_options,
-    triangle_bin, triangle_gltf,
+    triangle_bin, triangle_glb, triangle_gltf,
 };
 
 #[test]
@@ -71,6 +72,48 @@ fn imports_static_mesh_material_texture_uri_and_hierarchy() -> Result<()> {
 }
 
 #[test]
+fn imports_glb_static_mesh_from_bin_chunk() -> Result<()> {
+    let (scene, diagnostics) = import_assets(
+        "models/scene.glb",
+        [("models/scene.glb", triangle_glb())],
+        baozi_import::ImportOptions::memory(),
+    )?;
+
+    assert!(diagnostics.is_empty());
+    assert_eq!(scene.meshes.len(), 1);
+    assert_eq!(scene.nodes[1].name.as_deref(), Some("TriangleNode"));
+    assert_eq!(scene.meshes[0].positions.len(), 3);
+    assert_eq!(scene.meshes[0].positions[1], Vec3::new(1.0, 0.0, 0.0));
+    assert_eq!(scene.meshes[0].indices, vec![0, 1, 2]);
+    Ok(())
+}
+
+#[test]
+fn gltf_scene_snapshot_covers_imported_ir() -> Result<()> {
+    let (scene, diagnostics) = import_assets(
+        "models/scene.gltf",
+        [
+            ("models/scene.gltf", triangle_gltf()),
+            ("models/triangle.bin", triangle_bin()),
+        ],
+        sidecar_options(),
+    )?;
+
+    let snapshot = SceneSnapshot::from_scene_with_diagnostics(&scene, &diagnostics).into_string();
+
+    assert!(snapshot.contains("scene nodes=3 meshes=1 materials=1 textures=1"));
+    assert!(snapshot.contains("space handedness=Right up=Some(PositiveY)"));
+    assert!(snapshot.contains("metadata keys=[gltf:version]"));
+    assert!(snapshot.contains("node 2 name=TriangleNode parent=1 children=[] meshes=[0]"));
+    assert!(snapshot.contains("mesh 0 name=Triangle topology=Triangles vertices=3"));
+    assert!(snapshot.contains("texcoords[0] count=3 shown=3"));
+    assert!(snapshot.contains("texture 0 name=BaseTex source=external:models/textures/base.png"));
+    assert!(snapshot.contains("material 0 name=Red shading=PbrMetallicRoughness"));
+    assert!(snapshot.contains("diagnostics count=0"));
+    Ok(())
+}
+
+#[test]
 fn external_buffer_denied_is_fatal() -> Result<()> {
     let (result, diagnostics) = import_assets_result(
         "models/scene.gltf",
@@ -82,6 +125,61 @@ fn external_buffer_denied_is_fatal() -> Result<()> {
     assert!(diagnostics.is_empty());
     assert!(matches!(error, BaoziError::Parse { .. }));
     assert!(error.to_string().contains("external buffer"));
+    Ok(())
+}
+
+#[test]
+fn missing_external_buffer_is_fatal() -> Result<()> {
+    let (result, diagnostics) = import_assets_result(
+        "models/scene.gltf",
+        [("models/scene.gltf", triangle_gltf())],
+        sidecar_options(),
+    )?;
+    let error = expected_error(result)?;
+
+    assert!(diagnostics.is_empty());
+    assert!(matches!(error, BaoziError::Io { .. }));
+    assert!(error.to_string().contains("triangle.bin"));
+    Ok(())
+}
+
+#[test]
+fn short_external_buffer_is_fatal() -> Result<()> {
+    let (result, diagnostics) = import_assets_result(
+        "models/scene.gltf",
+        [
+            ("models/scene.gltf", triangle_gltf()),
+            ("models/triangle.bin", vec![0; 10]),
+        ],
+        sidecar_options(),
+    )?;
+    let error = expected_error(result)?;
+
+    assert!(diagnostics.is_empty());
+    assert!(matches!(error, BaoziError::Parse { .. }));
+    assert!(error.to_string().contains("declares 104 bytes"));
+    Ok(())
+}
+
+#[test]
+fn unsupported_primitive_mode_is_fatal() -> Result<()> {
+    let gltf = String::from_utf8(triangle_gltf())
+        .map_err(|error| BaoziError::parse("test", None, error.to_string()))?
+        .replace("\"mode\": 4", "\"mode\": 5")
+        .into_bytes();
+    let (result, diagnostics) = import_assets_result(
+        "models/scene.gltf",
+        [
+            ("models/scene.gltf", gltf),
+            ("models/triangle.bin", triangle_bin()),
+        ],
+        sidecar_options(),
+    )?;
+    let error = expected_error(result)?;
+
+    assert!(diagnostics.is_empty());
+    assert!(matches!(error, BaoziError::FeatureUnsupported { .. }));
+    assert!(error.to_string().contains("TriangleStrip"));
     Ok(())
 }
 

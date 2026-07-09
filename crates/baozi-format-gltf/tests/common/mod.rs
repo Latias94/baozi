@@ -119,6 +119,63 @@ pub fn triangle_bin() -> Vec<u8> {
     bytes
 }
 
+pub fn triangle_glb() -> Vec<u8> {
+    let json = br#"{
+  "asset": { "version": "2.0", "generator": "baozi-test" },
+  "scene": 0,
+  "scenes": [{ "nodes": [0] }],
+  "nodes": [{ "name": "TriangleNode", "mesh": 0 }],
+  "buffers": [{ "byteLength": 104 }],
+  "bufferViews": [
+    { "buffer": 0, "byteOffset": 0, "byteLength": 36, "target": 34962 },
+    { "buffer": 0, "byteOffset": 36, "byteLength": 36, "target": 34962 },
+    { "buffer": 0, "byteOffset": 72, "byteLength": 24, "target": 34962 },
+    { "buffer": 0, "byteOffset": 96, "byteLength": 6, "target": 34963 }
+  ],
+  "accessors": [
+    { "bufferView": 0, "componentType": 5126, "count": 3, "type": "VEC3", "min": [0, 0, 0], "max": [1, 1, 0] },
+    { "bufferView": 1, "componentType": 5126, "count": 3, "type": "VEC3" },
+    { "bufferView": 2, "componentType": 5126, "count": 3, "type": "VEC2" },
+    { "bufferView": 3, "componentType": 5123, "count": 3, "type": "SCALAR" }
+  ],
+  "meshes": [{
+    "name": "Triangle",
+    "primitives": [{
+      "attributes": { "POSITION": 0, "NORMAL": 1, "TEXCOORD_0": 2 },
+      "indices": 3,
+      "mode": 4
+    }]
+  }]
+}"#;
+    make_glb(json, &triangle_bin())
+}
+
+fn make_glb(json: &[u8], bin: &[u8]) -> Vec<u8> {
+    let json = padded_chunk(json, b' ');
+    let bin = padded_chunk(bin, 0);
+    let total_len = 12 + 8 + json.len() + 8 + bin.len();
+
+    let mut bytes = Vec::with_capacity(total_len);
+    bytes.extend_from_slice(b"glTF");
+    bytes.extend_from_slice(&2_u32.to_le_bytes());
+    bytes.extend_from_slice(&(total_len as u32).to_le_bytes());
+    bytes.extend_from_slice(&(json.len() as u32).to_le_bytes());
+    bytes.extend_from_slice(b"JSON");
+    bytes.extend_from_slice(&json);
+    bytes.extend_from_slice(&(bin.len() as u32).to_le_bytes());
+    bytes.extend_from_slice(b"BIN\0");
+    bytes.extend_from_slice(&bin);
+    bytes
+}
+
+fn padded_chunk(bytes: &[u8], pad: u8) -> Vec<u8> {
+    let mut chunk = bytes.to_vec();
+    while !chunk.len().is_multiple_of(4) {
+        chunk.push(pad);
+    }
+    chunk
+}
+
 pub fn data_uri_gltf() -> Vec<u8> {
     br#"{
   "asset": { "version": "2.0" },

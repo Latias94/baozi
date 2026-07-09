@@ -22,6 +22,8 @@ cargo +nightly-2026-05-27 fuzz check obj_import
 cargo +nightly-2026-05-27 fuzz run obj_import -- -runs=256
 cargo +nightly-2026-05-27 fuzz check obj_postprocess
 cargo +nightly-2026-05-27 fuzz run obj_postprocess -- -runs=256
+cargo +nightly-2026-05-27 fuzz check gltf_import
+cargo +nightly-2026-05-27 fuzz run gltf_import -- -runs=256
 ```
 
 ## Windows MSVC Setup
@@ -50,6 +52,7 @@ $env:PATH = "$installRoot\bin;$installRoot\lib\clang\22\lib\windows;$env:PATH"
 cargo +nightly-2026-05-27 fuzz run stl_import -- -runs=256
 cargo +nightly-2026-05-27 fuzz run obj_import -- -runs=256
 cargo +nightly-2026-05-27 fuzz run obj_postprocess -- -runs=256
+cargo +nightly-2026-05-27 fuzz run gltf_import -- -runs=256
 ```
 
 Known Windows outcomes:
@@ -94,3 +97,4 @@ in [CI Policy](ci.md).
 | `stl_import` | `baozi-format-stl` | Binary and ASCII STL facade import. |
 | `obj_import` | `baozi-format-obj` | OBJ facade import plus optional MTL sidecar bytes split by the first NUL byte. |
 | `obj_postprocess` | `baozi-format-obj` | OBJ facade import followed by triangulation and bounding-box postprocess. |
+| `gltf_import` | `baozi-format-gltf` | glTF/GLB facade import plus external buffer bytes split by the first NUL byte. |

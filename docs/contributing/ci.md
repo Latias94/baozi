@@ -62,9 +62,9 @@ unpinned installer.
 
 ## Fuzz Gates
 
-Normal PR CI runs short Linux sanitizer smoke targets for `stl_import`, `obj_import`, and
-`obj_postprocess`. The scheduled/manual fuzz workflow runs longer Linux-only campaigns and uploads
-bounded crash artifacts only on failure.
+Normal PR CI runs short Linux sanitizer smoke targets for `stl_import`, `obj_import`,
+`obj_postprocess`, and `gltf_import`. The scheduled/manual fuzz workflow runs longer Linux-only
+campaigns and uploads bounded crash artifacts only on failure.
 
 Windows fuzzing is useful for local parser work, but Windows sanitizer setup failures are toolchain
 evidence, not parser evidence. Linux GitHub Actions remains the promotion gate for sanitizer fuzz

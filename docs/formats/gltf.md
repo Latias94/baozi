@@ -21,10 +21,11 @@ under Baozi control.
 
 The dependency on `gltf-rs` is intentionally hidden inside this crate. Baozi does not expose
 `gltf-rs` types in public API, so the backend can later be forked or replaced by a Baozi-owned parser
-without changing facade users.
+without changing facade users. The ownership and replacement boundary is defined in
+[`ADR 0027`](../adr/0027-gltf-backend-ownership-and-replacement-policy.md).
 
-The crate remains `publish = false` until snapshot coverage, malformed fixtures, fuzz targets, and a
-broader conformance corpus are in place.
+The crate remains `publish = false` until the ADR 0027 quality gates and a broader conformance corpus
+are in place.
 
 ## Supported MVP
 
@@ -37,6 +38,8 @@ broader conformance corpus are in place.
 - Base color, metallic-roughness, normal, occlusion, and emissive texture URI references.
 - Y-up, right-handed, meters scene space metadata.
 - Resource ledger accounting for primary assets, external buffers, GLB BIN payloads, and diagnostics.
+- Quality gates for GLB import, snapshots, malformed external buffers, facade ledger stats, and a
+  glTF fuzz target.
 
 ## Known Non-Support
 

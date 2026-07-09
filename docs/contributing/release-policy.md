@@ -19,7 +19,8 @@ Crates intentionally not published yet:
 
 - `baozi-test-support`: test-only helpers
 - `baozi-format-ply`: descriptor-only shell
-- `baozi-format-gltf`: static mesh MVP, held back until snapshots, fuzz, and broader fixtures land
+- `baozi-format-gltf`: static mesh MVP, held back until ADR 0027 gates and broader conformance
+  fixtures land
 - `baozi-fuzz`: cargo-fuzz workspace
 
 Shell format crates must stay `publish = false` until they import representative fixtures into
@@ -44,6 +45,10 @@ First release order:
 Package leaf crates first with `cargo package -p <crate> --allow-dirty --no-verify`. Package the
 facade only after the dependency versions are available from the registry. Optional format crates
 with `publish = false` must not be included in release feature sets.
+
+CI packages `baozi-core` as the only crate that can be validated before the first registry publish.
+The dependent crates must be package-checked in publish order after their internal dependencies exist
+on crates.io at the matching version.
 
 ## Release Checklist
 

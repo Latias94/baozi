@@ -33,8 +33,8 @@ Current gates:
   lights, and animation channels.
 - `SceneSnapshot` prints counts and compact previews for omitted-heavy channels such as tangents,
   custom attributes, skins, cameras, lights, and animations.
-- Fuzz smoke targets cover STL import, OBJ import with MTL sidecars, and OBJ import plus
-  postprocess.
+- Fuzz smoke targets cover STL import, OBJ import with MTL sidecars, OBJ import plus postprocess,
+  and glTF/GLB import with external buffer mutation.
 - Support-matrix rows are checked against `FormatInfo` capabilities.
 
 ## Consequences
