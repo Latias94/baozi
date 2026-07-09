@@ -9,6 +9,7 @@ related:
   - docs/adr/0004-parser-backend-and-format-coverage-policy.md
   - docs/adr/0005-testing-fuzzing-and-differential-oracle-strategy.md
   - docs/adr/0010-asset-io-virtual-filesystem-uri-archive-and-path-security.md
+  - docs/adr/0018-parser-tooling-and-format-owned-parser-policy.md
 ---
 
 # ADR 0014: Parser Security, Unsafe, FFI, and Panic Boundary Policy

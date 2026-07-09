@@ -7,6 +7,7 @@ decision_type: architecture
 related:
   - docs/adr/0001-baozi-assimp-compatible-architecture.md
   - docs/adr/0003-core-scene-ir-and-material-model.md
+  - docs/adr/0018-parser-tooling-and-format-owned-parser-policy.md
 ---
 
 # ADR 0004: Parser Backend and Format Coverage Policy
@@ -27,6 +28,8 @@ Baozi will use a hybrid parser strategy:
 
 - self-write parsers when the format is small, diagnostics matter, or ecosystem crates are immature
 - wrap ecosystem crates when they are well licensed, useful, and replaceable behind Baozi traits
+- use parser tooling such as parser combinators, binary parsers, lexers, or parser generators only
+  behind the format-owned parser boundary defined in ADR 0018
 - use Assimp only as a behavioral or migration oracle, not as Baozi's architecture source
 - expose only Baozi-owned `Scene`, options, diagnostics, and importer traits
 - document coverage and limitations per format before marking a format stable
