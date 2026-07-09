@@ -28,6 +28,32 @@ fn valid_triangle_scene() -> baozi_core::Scene {
     builder.finish().unwrap()
 }
 
+fn valid_polygon_scene() -> baozi_core::Scene {
+    let mut builder = SceneBuilder::new();
+    let mesh = builder.add_mesh(Mesh {
+        topology: PrimitiveTopology::Polygons,
+        positions: vec![
+            Vec3::new(0.0, 0.0, 0.0),
+            Vec3::new(1.0, 0.0, 0.0),
+            Vec3::new(1.0, 1.0, 0.0),
+            Vec3::new(0.0, 1.0, 0.0),
+        ],
+        indices: vec![0, 1, 2, 3],
+        face_vertex_counts: vec![4],
+        ..Mesh::default()
+    });
+    builder
+        .add_child_node(
+            builder.root(),
+            Node {
+                meshes: vec![mesh],
+                ..Node::default()
+            },
+        )
+        .unwrap();
+    builder.finish().unwrap()
+}
+
 fn assert_invalid(scene: &baozi_core::Scene, expected: &str) {
     let error = validate_scene(scene).unwrap_err();
     let message = error.to_string();
@@ -49,6 +75,46 @@ fn valid_triangle_scene_is_valid() {
     let scene = valid_triangle_scene();
 
     validate_scene(&scene).unwrap();
+}
+
+#[test]
+fn valid_polygon_scene_is_valid() {
+    let scene = valid_polygon_scene();
+
+    validate_scene(&scene).unwrap();
+}
+
+#[test]
+fn polygon_without_face_counts_fails() {
+    let mut scene = valid_polygon_scene();
+    scene.meshes[0].face_vertex_counts.clear();
+
+    assert_invalid(&scene, "face range");
+}
+
+#[test]
+fn polygon_face_count_mismatch_fails() {
+    let mut scene = valid_polygon_scene();
+    scene.meshes[0].face_vertex_counts = vec![3];
+
+    assert_invalid(&scene, "does not match");
+}
+
+#[test]
+fn polygon_face_with_too_few_vertices_fails() {
+    let mut scene = valid_polygon_scene();
+    scene.meshes[0].indices = vec![0, 1];
+    scene.meshes[0].face_vertex_counts = vec![2];
+
+    assert_invalid(&scene, "fewer than 3 vertices");
+}
+
+#[test]
+fn non_polygon_face_counts_fail() {
+    let mut scene = valid_triangle_scene();
+    scene.meshes[0].face_vertex_counts = vec![3];
+
+    assert_invalid(&scene, "only valid for polygon");
 }
 
 #[test]

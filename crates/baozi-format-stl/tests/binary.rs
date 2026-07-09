@@ -13,7 +13,10 @@ fn imports_one_triangle_binary_stl() -> Result<()> {
     let text = snapshot.as_str();
 
     assert!(text.contains("scene nodes=2 meshes=1 materials=1"));
-    assert!(text.contains("mesh 0 name=<STL_BINARY> topology=Triangles vertices=3 indices=3 material=0 metadata=[stl.source,stl.storage]"));
+    assert!(text.contains("mesh 0 name=<STL_BINARY> topology=Triangles"));
+    assert!(text.contains("vertices=3 indices=3 faces=<fixed> material=0"));
+    assert!(text.contains("metadata=[stl.source,stl.storage]"));
+    assert!(text.contains("face_vertex_counts=[]"));
     assert!(text.contains("positions[1]=(1.000000,0.000000,0.000000)"));
     assert!(text.contains("normals[0]=(0.000000,0.000000,1.000000)"));
     assert!(text.contains("diagnostics count=0"));

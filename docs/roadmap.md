@@ -64,6 +64,7 @@ Exit criteria:
 
 - OBJ geometry, groups, smoothing metadata, and MTL references are represented
 - importer preserves polygons before requested triangulation
+- core `Mesh` face-boundary data and triangulation postprocess remain sufficient for OBJ polygons
 - sidecar loading obeys `AssetIo` scope rules
 - material mapping is documented against ADR 0012
 - snapshots cover raw and post-processed scenes

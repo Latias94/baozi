@@ -57,6 +57,40 @@ fn triangle_snapshot_includes_core_mesh_fields() {
     assert!(snapshot.contains("positions count=3 shown=3"));
     assert!(snapshot.contains("normals count=3 shown=3"));
     assert!(snapshot.contains("indices=[0,1,2]"));
+    assert!(snapshot.contains("face_vertex_counts=[]"));
+}
+
+#[test]
+fn polygon_snapshot_includes_face_counts() {
+    let mut builder = SceneBuilder::new();
+    let mesh = builder.add_mesh(Mesh {
+        topology: PrimitiveTopology::Polygons,
+        positions: vec![
+            Vec3::new(0.0, 0.0, 0.0),
+            Vec3::new(1.0, 0.0, 0.0),
+            Vec3::new(1.0, 1.0, 0.0),
+            Vec3::new(0.0, 1.0, 0.0),
+        ],
+        indices: vec![0, 1, 2, 3],
+        face_vertex_counts: vec![4],
+        ..Mesh::default()
+    });
+    builder
+        .add_child_node(
+            builder.root(),
+            Node {
+                meshes: vec![mesh],
+                ..Node::default()
+            },
+        )
+        .unwrap();
+    let scene = builder.finish().unwrap();
+
+    let snapshot = SceneSnapshot::from_scene(&scene).into_string();
+
+    assert!(snapshot.contains("topology=Polygons"));
+    assert!(snapshot.contains("faces=1"));
+    assert!(snapshot.contains("face_vertex_counts=[4]"));
 }
 
 #[test]

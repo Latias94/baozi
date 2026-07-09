@@ -116,9 +116,24 @@ pub struct Mesh {
     pub texcoords: Vec<Vec<Vec2>>,
     pub colors: Vec<Vec<Color>>,
     pub indices: Vec<u32>,
+    pub face_vertex_counts: Vec<u32>,
     pub material: Option<MaterialId>,
     pub bounds: Option<Aabb>,
     pub metadata: MetadataMap,
+}
+
+impl Mesh {
+    pub fn element_count(&self) -> usize {
+        if self.indices.is_empty() {
+            self.positions.len()
+        } else {
+            self.indices.len()
+        }
+    }
+
+    pub fn polygon_face_count(&self) -> Option<usize> {
+        (self.topology == PrimitiveTopology::Polygons).then_some(self.face_vertex_counts.len())
+    }
 }
 
 impl Default for Mesh {
@@ -132,6 +147,7 @@ impl Default for Mesh {
             texcoords: Vec::new(),
             colors: Vec::new(),
             indices: Vec::new(),
+            face_vertex_counts: Vec::new(),
             material: None,
             bounds: None,
             metadata: MetadataMap::new(),

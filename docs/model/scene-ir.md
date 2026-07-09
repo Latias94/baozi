@@ -84,7 +84,7 @@ Mesh responsibilities:
 - tangents
 - texture coordinate channels
 - color channels
-- indices or face descriptors
+- indices and polygon face descriptors
 - material binding
 - bounds when known or generated
 - metadata
@@ -95,6 +95,21 @@ Source-preserving behavior:
 - PLY point clouds should not pretend to be triangle meshes.
 - Separate source attribute indices may be remapped into Baozi's vertex-indexed model.
 - Remapping that expands data significantly should emit diagnostics.
+
+Implemented topology fields:
+
+```text
+Mesh
+├── topology: PrimitiveTopology
+├── indices: Vec<u32>
+└── face_vertex_counts: Vec<u32>
+```
+
+For `Points`, `Lines`, and `Triangles`, `face_vertex_counts` is empty and topology width is fixed.
+For `Polygons`, each `face_vertex_counts` entry records one face's vertex count. The sum must match
+the flat element stream: `indices.len()` for indexed meshes, or `positions.len()` for non-indexed
+meshes. The triangulation post-process pass consumes polygon face counts and emits triangle-list
+indices.
 
 Renderer-facing helpers can expose triangle views later, but those helpers are not the raw import
 contract.
@@ -239,7 +254,7 @@ extension metadata.
 Near-term code should evolve toward:
 
 - `SceneBuilder::finish()` returning `Result<Scene, BaoziError>` after validation
-- richer `PrimitiveTopology` and primitive descriptors
+- richer `PrimitiveTopology`, polygon face counts, and eventually primitive descriptors
 - typed attribute channel metadata
 - first-class skin and animation channel structs
 - snapshot support in `baozi-test-support`

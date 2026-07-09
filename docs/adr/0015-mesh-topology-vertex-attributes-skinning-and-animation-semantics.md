@@ -95,7 +95,7 @@ The raw mesh representation may keep face descriptors instead of only a flat ind
 MeshPrimitive
 ├── topology
 ├── indices
-├── face_ranges for polygonal data
+├── face_vertex_counts for polygonal data
 ├── material binding
 ├── attribute set
 └── source metadata
@@ -104,6 +104,13 @@ MeshPrimitive
 Baozi should allow one `Mesh` to contain multiple primitives only if each primitive has distinct
 topology or material binding semantics. Otherwise, importers should keep the model simple and use
 one primitive per mesh.
+
+The current implemented `Mesh` shape keeps a single primitive per mesh and stores polygon face
+boundaries as `face_vertex_counts: Vec<u32>`. Empty `face_vertex_counts` means fixed-width topology;
+non-empty `face_vertex_counts` is valid only for `PrimitiveTopology::Polygons`, where the sum of
+counts must match the flat element stream (`indices.len()` when indexed, otherwise
+`positions.len()`). This intentionally solves OBJ-style polygon preservation before introducing a
+larger `MeshPrimitive` list.
 
 ## Vertex Attributes
 
@@ -120,7 +127,8 @@ Mesh
 ├── tangents: Vec<Vec4>
 ├── texcoords: Vec<Vec<Vec2>>
 ├── colors: Vec<Vec<Color>>
-└── indices: Vec<u32>
+├── indices: Vec<u32>
+└── face_vertex_counts: Vec<u32>
 ```
 
 Baozi will not use a fixed public AoS type such as `Vertex { position, normal, uv }` as the canonical
@@ -355,7 +363,7 @@ Decision: chosen.
 
 ### Phase 0: Type Design
 
-- Add primitive descriptors and face ranges to `baozi-core`.
+- Add primitive descriptors and face boundaries to `baozi-core`.
 - Add attribute channel descriptors and semantic names.
 - Add skin, joint, morph target, and animation channel structs.
 

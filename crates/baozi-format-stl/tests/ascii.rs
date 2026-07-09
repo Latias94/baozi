@@ -14,8 +14,11 @@ fn imports_one_triangle_ascii_stl() -> Result<()> {
 
     assert!(text.contains("scene nodes=2 meshes=1 materials=1"));
     assert!(text.contains("node 1 name=triangle parent=0 children=[] meshes=[0] metadata=[]"));
-    assert!(text.contains("mesh 0 name=triangle topology=Triangles vertices=3 indices=3 material=0 metadata=[stl.source,stl.storage]"));
+    assert!(text.contains("mesh 0 name=triangle topology=Triangles"));
+    assert!(text.contains("vertices=3 indices=3 faces=<fixed> material=0"));
+    assert!(text.contains("metadata=[stl.source,stl.storage]"));
     assert!(text.contains("indices=[0,1,2]"));
+    assert!(text.contains("face_vertex_counts=[]"));
     assert!(text.contains("diagnostics count=0"));
     Ok(())
 }

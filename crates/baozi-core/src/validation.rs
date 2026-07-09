@@ -166,11 +166,8 @@ fn validate_mesh(index: usize, mesh: &Mesh, material_count: usize) -> Result<()>
     validate_topology(
         index,
         mesh.topology,
-        if mesh.indices.is_empty() {
-            vertex_count
-        } else {
-            mesh.indices.len()
-        },
+        mesh.element_count(),
+        &mesh.face_vertex_counts,
     )?;
 
     if let Some(bounds) = mesh.bounds {
@@ -270,8 +267,16 @@ fn validate_topology(
     mesh_index: usize,
     topology: PrimitiveTopology,
     element_count: usize,
+    face_vertex_counts: &[u32],
 ) -> Result<()> {
     match topology {
+        PrimitiveTopology::Points | PrimitiveTopology::Lines | PrimitiveTopology::Triangles
+            if !face_vertex_counts.is_empty() =>
+        {
+            invalid(format!(
+                "mesh {mesh_index} face counts are only valid for polygon topology"
+            ))
+        }
         PrimitiveTopology::Points => Ok(()),
         PrimitiveTopology::Lines if element_count.is_multiple_of(2) => Ok(()),
         PrimitiveTopology::Triangles if element_count.is_multiple_of(3) => Ok(()),
@@ -281,10 +286,44 @@ fn validate_topology(
         PrimitiveTopology::Triangles => invalid(format!(
             "mesh {mesh_index} triangle topology element count is not divisible by 3"
         )),
-        PrimitiveTopology::Polygons => invalid(format!(
-            "mesh {mesh_index} polygon topology lacks face range data"
-        )),
+        PrimitiveTopology::Polygons => {
+            validate_polygon_faces(mesh_index, element_count, face_vertex_counts)
+        }
     }
+}
+
+fn validate_polygon_faces(
+    mesh_index: usize,
+    element_count: usize,
+    face_vertex_counts: &[u32],
+) -> Result<()> {
+    if face_vertex_counts.is_empty() {
+        return invalid(format!(
+            "mesh {mesh_index} polygon topology lacks face range data"
+        ));
+    }
+
+    let mut total = 0usize;
+    for (face_index, count) in face_vertex_counts.iter().copied().enumerate() {
+        if count < 3 {
+            return invalid(format!(
+                "mesh {mesh_index} polygon face {face_index} has fewer than 3 vertices"
+            ));
+        }
+        total = total
+            .checked_add(count as usize)
+            .ok_or_else(|| BaoziError::InvalidScene {
+                message: format!("mesh {mesh_index} polygon face counts overflow"),
+            })?;
+    }
+
+    if total != element_count {
+        return invalid(format!(
+            "mesh {mesh_index} polygon face counts total {total} does not match element count {element_count}"
+        ));
+    }
+
+    Ok(())
 }
 
 fn validate_space(scene: &Scene) -> Result<()> {

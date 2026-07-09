@@ -115,11 +115,13 @@ fn write_mesh(text: &mut String, index: usize, mesh: &Mesh, options: SnapshotOpt
     line(
         text,
         format_args!(
-            "mesh {index} name={} topology={:?} vertices={} indices={} material={} metadata={} bounds={}",
+            "mesh {index} name={} topology={:?} vertices={} indices={} faces={} material={} metadata={} bounds={}",
             optional_str(mesh.name.as_deref()),
             mesh.topology,
             mesh.positions.len(),
             mesh.indices.len(),
+            mesh.polygon_face_count()
+                .map_or_else(|| "<fixed>".to_owned(), |count| count.to_string()),
             optional_id(mesh.material.map(|id| id.0)),
             metadata_keys(&mesh.metadata),
             bounds(mesh, options.float_precision)
@@ -132,6 +134,13 @@ fn write_mesh(text: &mut String, index: usize, mesh: &Mesh, options: SnapshotOpt
         write_color_rows(text, &format!("colors[{channel}]"), colors, options);
     }
     line(text, format_args!("  indices={}", u32_list(&mesh.indices)));
+    line(
+        text,
+        format_args!(
+            "  face_vertex_counts={}",
+            u32_list(&mesh.face_vertex_counts)
+        ),
+    );
 }
 
 fn write_material(text: &mut String, index: usize, material: &Material, precision: usize) {
