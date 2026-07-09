@@ -1,5 +1,5 @@
 use crate::math::Color;
-use crate::scene::TextureId;
+use crate::scene::{MetadataMap, TextureId};
 use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -84,6 +84,7 @@ pub struct Material {
     pub alpha_cutoff: f32,
     pub double_sided: bool,
     pub texture_slots: Vec<TextureSlot>,
+    pub metadata: MetadataMap,
 }
 
 impl Default for Material {
@@ -99,6 +100,7 @@ impl Default for Material {
             alpha_cutoff: 0.5,
             double_sided: false,
             texture_slots: Vec::new(),
+            metadata: MetadataMap::new(),
         }
     }
 }

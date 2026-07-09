@@ -1,6 +1,6 @@
 use baozi_core::{
-    Material, MaterialId, Mesh, MeshId, Node, NodeId, PrimitiveTopology, SceneBuilder, Vec3,
-    validate_scene,
+    ColorSpace, Material, MaterialId, Mesh, MeshId, Node, NodeId, PrimitiveTopology, SceneBuilder,
+    Texture, TextureId, TextureRole, TextureSlot, TextureSource, Vec3, validate_scene,
 };
 
 fn valid_triangle_scene() -> baozi_core::Scene {
@@ -123,6 +123,65 @@ fn missing_material_reference_fails() {
     scene.meshes[0].material = Some(MaterialId::new(99));
 
     assert_invalid(&scene, "material");
+}
+
+#[test]
+fn material_texture_slot_reference_is_valid() {
+    let mut builder = SceneBuilder::new();
+    let texture = builder.add_texture(Texture {
+        name: Some("diffuse".to_owned()),
+        source: TextureSource::External {
+            uri: "textures/diffuse.png".to_owned(),
+        },
+    });
+    let material = builder.add_material(Material {
+        texture_slots: vec![TextureSlot {
+            texture,
+            role: TextureRole::Diffuse,
+            color_space: ColorSpace::Srgb,
+            uv_set: 0,
+            scale: 1.0,
+            source_key: Some("map_Kd".to_owned()),
+        }],
+        ..Material::default()
+    });
+    let mesh = builder.add_mesh(Mesh {
+        topology: PrimitiveTopology::Triangles,
+        positions: vec![
+            Vec3::new(0.0, 0.0, 0.0),
+            Vec3::new(1.0, 0.0, 0.0),
+            Vec3::new(0.0, 1.0, 0.0),
+        ],
+        material: Some(material),
+        ..Mesh::default()
+    });
+    builder
+        .add_child_node(
+            builder.root(),
+            Node {
+                meshes: vec![mesh],
+                ..Node::default()
+            },
+        )
+        .unwrap();
+    let scene = builder.finish().unwrap();
+
+    validate_scene(&scene).unwrap();
+}
+
+#[test]
+fn material_texture_slot_out_of_range_fails() {
+    let mut scene = valid_triangle_scene();
+    scene.materials[0].texture_slots.push(TextureSlot {
+        texture: TextureId::new(99),
+        role: TextureRole::Diffuse,
+        color_space: ColorSpace::Srgb,
+        uv_set: 0,
+        scale: 1.0,
+        source_key: Some("map_Kd".to_owned()),
+    });
+
+    assert_invalid(&scene, "texture reference");
 }
 
 #[test]

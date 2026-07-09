@@ -1,5 +1,6 @@
 use baozi_core::{
-    Color, Diagnostic, DiagnosticSeverity, Material, Mesh, MetadataMap, Node, Scene, SourceLocation,
+    Color, Diagnostic, DiagnosticSeverity, Material, Mesh, MetadataMap, Node, Scene,
+    SourceLocation, Texture, TextureSource,
 };
 use std::fmt;
 
@@ -74,6 +75,9 @@ impl SceneSnapshot {
         for (index, mesh) in scene.meshes.iter().enumerate() {
             write_mesh(&mut text, index, mesh, options);
         }
+        for (index, texture) in scene.textures.iter().enumerate() {
+            write_texture(&mut text, index, texture);
+        }
         for (index, material) in scene.materials.iter().enumerate() {
             write_material(&mut text, index, material, options.float_precision);
         }
@@ -130,6 +134,9 @@ fn write_mesh(text: &mut String, index: usize, mesh: &Mesh, options: SnapshotOpt
 
     write_vec3_rows(text, "positions", &mesh.positions, options);
     write_vec3_rows(text, "normals", &mesh.normals, options);
+    for (channel, texcoords) in mesh.texcoords.iter().enumerate() {
+        write_vec2_rows(text, &format!("texcoords[{channel}]"), texcoords, options);
+    }
     for (channel, colors) in mesh.colors.iter().enumerate() {
         write_color_rows(text, &format!("colors[{channel}]"), colors, options);
     }
@@ -143,11 +150,22 @@ fn write_mesh(text: &mut String, index: usize, mesh: &Mesh, options: SnapshotOpt
     );
 }
 
+fn write_texture(text: &mut String, index: usize, texture: &Texture) {
+    line(
+        text,
+        format_args!(
+            "texture {index} name={} source={}",
+            optional_str(texture.name.as_deref()),
+            texture_source(&texture.source)
+        ),
+    );
+}
+
 fn write_material(text: &mut String, index: usize, material: &Material, precision: usize) {
     line(
         text,
         format_args!(
-            "material {index} name={} shading={:?} base={} metallic={} roughness={} emissive={} alpha={:?} double_sided={} textures={}",
+            "material {index} name={} shading={:?} base={} metallic={} roughness={} emissive={} alpha={:?} double_sided={} textures={} metadata={}",
             optional_str(material.name.as_deref()),
             material.shading_model,
             color(material.base_color, precision),
@@ -156,9 +174,24 @@ fn write_material(text: &mut String, index: usize, material: &Material, precisio
             color(material.emissive, precision),
             material.alpha_mode,
             material.double_sided,
-            material.texture_slots.len()
+            material.texture_slots.len(),
+            metadata_keys(&material.metadata)
         ),
     );
+    for (slot_index, slot) in material.texture_slots.iter().enumerate() {
+        line(
+            text,
+            format_args!(
+                "  slot {slot_index} texture={} role={:?} color_space={:?} uv_set={} scale={} source_key={}",
+                slot.texture.0,
+                slot.role,
+                slot.color_space,
+                slot.uv_set,
+                f32_value(slot.scale, precision),
+                optional_str(slot.source_key.as_deref())
+            ),
+        );
+    }
 }
 
 fn write_diagnostics(text: &mut String, diagnostics: &[Diagnostic]) {
@@ -210,6 +243,28 @@ fn write_vec3_rows(
     }
 }
 
+fn write_vec2_rows(
+    text: &mut String,
+    name: &str,
+    values: &[baozi_core::Vec2],
+    options: SnapshotOptions,
+) {
+    let shown = values.len().min(options.max_vertices_per_mesh);
+    line(
+        text,
+        format_args!("  {name} count={} shown={shown}", values.len()),
+    );
+    for (index, value) in values.iter().take(shown).enumerate() {
+        line(
+            text,
+            format_args!(
+                "    {name}[{index}]={}",
+                vec2(*value, options.float_precision)
+            ),
+        );
+    }
+}
+
 fn write_color_rows(text: &mut String, name: &str, values: &[Color], options: SnapshotOptions) {
     let shown = values.len().min(options.max_vertices_per_mesh);
     line(
@@ -253,6 +308,27 @@ fn id_list(values: impl Iterator<Item = u32>) -> String {
 fn u32_list(values: &[u32]) -> String {
     let values: Vec<_> = values.iter().map(u32::to_string).collect();
     format!("[{}]", values.join(","))
+}
+
+fn texture_source(source: &TextureSource) -> String {
+    match source {
+        TextureSource::External { uri } => format!("external:{uri}"),
+        TextureSource::Embedded { bytes, mime_type } => {
+            format!(
+                "embedded:bytes={} mime={}",
+                bytes.len(),
+                optional_str(mime_type.as_deref())
+            )
+        }
+    }
+}
+
+fn vec2(value: baozi_core::Vec2, precision: usize) -> String {
+    format!(
+        "({},{})",
+        f32_value(value.x, precision),
+        f32_value(value.y, precision)
+    )
 }
 
 fn vec3(value: baozi_core::Vec3, precision: usize) -> String {

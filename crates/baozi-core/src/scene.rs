@@ -218,6 +218,10 @@ impl SceneBuilder {
         self.scene.root
     }
 
+    pub fn mesh_count(&self) -> usize {
+        self.scene.meshes.len()
+    }
+
     pub fn add_node(&mut self, node: Node) -> NodeId {
         self.push_node(Some(self.scene.root), node)
     }
@@ -252,6 +256,12 @@ impl SceneBuilder {
     pub fn add_material(&mut self, material: Material) -> MaterialId {
         let id = MaterialId::new(self.scene.materials.len() as u32);
         self.scene.materials.push(material);
+        id
+    }
+
+    pub fn add_texture(&mut self, texture: Texture) -> TextureId {
+        let id = TextureId::new(self.scene.textures.len() as u32);
+        self.scene.textures.push(texture);
         id
     }
 

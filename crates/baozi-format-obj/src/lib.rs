@@ -1,8 +1,17 @@
-use baozi_core::{BaoziError, Result, Scene};
+#![forbid(unsafe_code)]
+
+mod detect;
+mod mesh_builder;
+mod mtl;
+mod obj;
+mod parser;
+
+use baozi_core::{Result, Scene};
 use baozi_import::{
     CapabilityStatus, FormatCapability, FormatImporter, FormatInfo, FormatMaturity, ImportContext,
-    ImporterRegistry,
+    ImporterRegistry, ReadConfidence, ReadHint,
 };
+use baozi_io::ReadSeek;
 
 pub struct ObjImporter;
 
@@ -30,7 +39,11 @@ impl FormatImporter for ObjImporter {
         format_info()
     }
 
-    fn read(&self, _ctx: &mut ImportContext<'_>) -> Result<Scene> {
-        Err(BaoziError::unsupported_format("obj parser not implemented"))
+    fn can_read(&self, input: &mut dyn ReadSeek, hint: &ReadHint) -> Result<ReadConfidence> {
+        detect::can_read(input, hint)
+    }
+
+    fn read(&self, ctx: &mut ImportContext<'_>) -> Result<Scene> {
+        parser::read_obj(ctx)
     }
 }

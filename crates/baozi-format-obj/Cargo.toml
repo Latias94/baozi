@@ -12,3 +12,4 @@ authors.workspace = true
 [dependencies]
 baozi-core.workspace = true
 baozi-import.workspace = true
+baozi-io.workspace = true
