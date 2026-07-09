@@ -19,11 +19,31 @@ Crates intentionally not published yet:
 
 - `baozi-test-support`: test-only helpers
 - `baozi-format-ply`: descriptor-only shell
-- `baozi-format-gltf`: descriptor-only shell
+- `baozi-format-gltf`: static mesh MVP, held back until snapshots, fuzz, and broader fixtures land
 - `baozi-fuzz`: cargo-fuzz workspace
 
 Shell format crates must stay `publish = false` until they import representative fixtures into
 `Scene` with validation, snapshots, malformed tests, resource limits, and fuzz coverage.
+
+## Publish Order
+
+The facade crate `baozi` depends on workspace crates that do not exist on crates.io before the first
+release. A direct `cargo package -p baozi` cannot pass until those dependencies have already been
+published at the matching version.
+
+First release order:
+
+1. `baozi-core`
+2. `baozi-io`
+3. `baozi-import`
+4. `baozi-postprocess`
+5. `baozi-format-stl`
+6. `baozi-format-obj`
+7. `baozi`
+
+Package leaf crates first with `cargo package -p <crate> --allow-dirty --no-verify`. Package the
+facade only after the dependency versions are available from the registry. Optional format crates
+with `publish = false` must not be included in release feature sets.
 
 ## Release Checklist
 
@@ -39,6 +59,7 @@ Before any crate publish:
 - fuzz smoke for public parser crates in Linux CI
 - `CHANGELOG.md` updated
 - support matrix and format docs updated
+- workspace path dependencies include matching `version` fields
 - security-impacting parser changes called out in release notes
 
 ## MSRV

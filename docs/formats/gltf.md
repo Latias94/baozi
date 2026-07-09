@@ -4,27 +4,44 @@
 
 - Format: glTF 2.0 / GLB
 - Crate: `baozi-format-gltf`
-- Maturity: Experimental shell
+- Maturity: Experimental
 - Default feature: not enabled by `default-formats`
-- Parser backend: not implemented yet
+- Parser backend: `gltf-rs` 1.4.x as an internal bootstrap dependency
 - Supported extensions: `.gltf`, `.glb`
 - Supported media types: `model/gltf+json`, `model/gltf-binary`
 - Encoding: JSON plus binary buffers, or GLB container
-- Sidecar policy: external buffers planned
+- Sidecar policy: external buffers through `ImportContext`; GLB BIN payloads supported
 
 ## Current Status
 
-`baozi-format-gltf` is a descriptor-only crate. It is present so Baozi can reserve the format crate, descriptor metadata, feature flag, and support matrix while the core IR grows the required material, texture, skinning, morph target, camera, light, and animation shapes.
+`baozi-format-gltf` imports a static mesh MVP into Baozi's owned IR. It supports common `.gltf`
+files with external binary buffers and `.glb` files with BIN payloads. External buffers are loaded
+only through `ImportContext`, so resource limits, path resolution, diagnostics, and strict mode stay
+under Baozi control.
 
-The crate is marked `publish = false` until it imports representative glTF fixtures into `Scene` with validation, snapshots, malformed fixtures, resource-ledger accounting, and fuzz coverage.
+The dependency on `gltf-rs` is intentionally hidden inside this crate. Baozi does not expose
+`gltf-rs` types in public API, so the backend can later be forked or replaced by a Baozi-owned parser
+without changing facade users.
 
-## Planned Scope
+The crate remains `publish = false` until snapshot coverage, malformed fixtures, fuzz targets, and a
+broader conformance corpus are in place.
 
-- `.gltf` JSON with external buffers and data URIs subject to `ResourceLimits`.
-- `.glb` binary container.
-- Static geometry, materials, textures as URI/buffer references, skins, morph targets, cameras, lights, and raw animation channels.
-- Strict path/data URI accounting through `ImportContext`.
+## Supported MVP
+
+- Static primitives using points, lines, or triangles.
+- Positions, normals, tangents, texture coordinates, colors, indices, `JOINTS_0`, and `WEIGHTS_0`
+  streams when present.
+- Node hierarchy, node transforms, mesh binding, and camera binding.
+- Perspective and orthographic camera projection data.
+- PBR metallic-roughness material factors.
+- Base color, metallic-roughness, normal, occlusion, and emissive texture URI references.
+- Y-up, right-handed, meters scene space metadata.
+- Resource ledger accounting for primary assets, external buffers, GLB BIN payloads, and diagnostics.
 
 ## Known Non-Support
 
-Calling the current importer returns `UnsupportedFormat`. Users should not enable `format-gltf` expecting model loading yet.
+- Buffer data URIs are explicitly unsupported for now.
+- Embedded image buffer views and texture data URIs are diagnosed and skipped.
+- Triangle strips, triangle fans, line strips, and line loops are not expanded yet.
+- Skins, morph targets, and animation channels are diagnosed but not imported into final IR yet.
+- The current backend is useful for bootstrapping, not the long-term parser ownership boundary.

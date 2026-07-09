@@ -61,6 +61,8 @@ struct SegmentBuilder {
     face_vertex_counts: Vec<u32>,
     has_texcoords: bool,
     has_normals: bool,
+    missing_texcoords: bool,
+    missing_normals: bool,
     has_polygon: bool,
 }
 
@@ -76,6 +78,8 @@ impl SegmentBuilder {
             face_vertex_counts: Vec::new(),
             has_texcoords: false,
             has_normals: false,
+            missing_texcoords: false,
+            missing_normals: false,
             has_polygon: false,
         }
     }
@@ -130,14 +134,53 @@ impl SegmentBuilder {
 
         let index = self.positions.len() as u32;
         self.positions.push(parsed.positions[key.position]);
-        self.texcoords
-            .push(key.texcoord.map_or(Vec2::ZERO, |idx| parsed.texcoords[idx]));
-        self.normals
-            .push(key.normal.map_or(Vec3::ZERO, |idx| parsed.normals[idx]));
+        match key.texcoord {
+            Some(idx) => self.texcoords.push(parsed.texcoords[idx]),
+            None => {
+                self.texcoords.push(Vec2::ZERO);
+                self.missing_texcoords = true;
+            }
+        }
+        match key.normal {
+            Some(idx) => self.normals.push(parsed.normals[idx]),
+            None => {
+                self.normals.push(Vec3::ZERO);
+                self.missing_normals = true;
+            }
+        }
         self.has_texcoords |= key.texcoord.is_some();
         self.has_normals |= key.normal.is_some();
         self.vertex_map.insert(key, index);
         Ok(index)
+    }
+
+    fn warn_partial_attributes(&self, ctx: &mut ImportContext<'_>) {
+        let segment = self
+            .key
+            .display_name()
+            .unwrap_or_else(|| "<unnamed>".to_owned());
+        if self.has_texcoords && self.missing_texcoords {
+            mtl::push_warning(
+                ctx,
+                ctx.source().to_string(),
+                None,
+                "obj.partial_texcoord_channel",
+                format!(
+                    "OBJ segment '{segment}' mixes vertices with and without texture coordinates; the partial texture coordinate channel was omitted"
+                ),
+            );
+        }
+        if self.has_normals && self.missing_normals {
+            mtl::push_warning(
+                ctx,
+                ctx.source().to_string(),
+                None,
+                "obj.partial_normal_channel",
+                format!(
+                    "OBJ segment '{segment}' mixes vertices with and without normals; the partial normal channel was omitted"
+                ),
+            );
+        }
     }
 
     fn finish(self, material: Option<MaterialId>) -> Mesh {
@@ -179,12 +222,12 @@ impl SegmentBuilder {
             topology,
             bounds: compute_bounds(&self.positions),
             positions: self.positions,
-            normals: if self.has_normals {
+            normals: if self.has_normals && !self.missing_normals {
                 self.normals
             } else {
                 Vec::new()
             },
-            texcoords: if self.has_texcoords {
+            texcoords: if self.has_texcoords && !self.missing_texcoords {
                 vec![self.texcoords]
             } else {
                 Vec::new()
@@ -265,6 +308,7 @@ fn flush_segment(
         .material
         .clone()
         .map(|name| resolve_material(ctx, builder, material_ids, library, &name));
+    segment.warn_partial_attributes(ctx);
     let mesh = segment.finish(material);
     let name = mesh.name.clone();
     let mesh_id = builder.add_mesh(mesh);

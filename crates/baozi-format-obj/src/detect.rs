@@ -1,9 +1,7 @@
 use baozi_core::{BaoziError, Result};
 use baozi_import::{ReadConfidence, ReadHint};
 use baozi_io::ReadSeek;
-use std::io::{Read, SeekFrom};
-
-const PROBE_BYTES: u64 = 4096;
+use std::io::SeekFrom;
 
 pub(crate) fn can_read(input: &mut dyn ReadSeek, hint: &ReadHint) -> Result<ReadConfidence> {
     let original = input
@@ -24,8 +22,7 @@ pub(crate) fn can_read(input: &mut dyn ReadSeek, hint: &ReadHint) -> Result<Read
 
 fn detect_stream(input: &mut dyn ReadSeek, hint: &ReadHint) -> Result<ReadConfidence> {
     let mut bytes = Vec::new();
-    let mut limited = input.take(PROBE_BYTES);
-    limited
+    input
         .read_to_end(&mut bytes)
         .map_err(|error| BaoziError::io(hint.display_hint(), error.to_string()))?;
 

@@ -194,17 +194,12 @@ fn validate_texture_id(
 
 fn validate_meshes(scene: &Scene) -> Result<()> {
     for (index, mesh) in scene.meshes.iter().enumerate() {
-        validate_mesh(index, mesh, scene.materials.len(), scene.skins.len())?;
+        validate_mesh(index, mesh, scene.materials.len(), &scene.skins)?;
     }
     Ok(())
 }
 
-fn validate_mesh(
-    index: usize,
-    mesh: &Mesh,
-    material_count: usize,
-    skin_count: usize,
-) -> Result<()> {
+fn validate_mesh(index: usize, mesh: &Mesh, material_count: usize, skins: &[Skin]) -> Result<()> {
     let vertex_count = mesh.positions.len();
     if vertex_count == 0 {
         return invalid(format!("mesh {index} is empty: no positions"));
@@ -216,10 +211,11 @@ fn validate_mesh(
         return invalid(format!("mesh {index} material reference is out of range"));
     }
     if let Some(skin) = mesh.skin
-        && skin.index() >= skin_count
+        && skin.index() >= skins.len()
     {
         return invalid(format!("mesh {index} skin reference is out of range"));
     }
+    let skin = mesh.skin.and_then(|skin| skins.get(skin.index()));
 
     validate_vec3_channel(index, "positions", &mesh.positions, Some(vertex_count))?;
     validate_vec3_channel(
@@ -250,7 +246,7 @@ fn validate_mesh(
             Some(vertex_count),
         )?;
     }
-    validate_joint_channels(index, vertex_count, mesh)?;
+    validate_joint_channels(index, vertex_count, mesh, skin)?;
     for (target_index, target) in mesh.morph_targets.iter().enumerate() {
         validate_vec3_channel(
             index,
@@ -302,7 +298,12 @@ fn validate_mesh(
     Ok(())
 }
 
-fn validate_joint_channels(mesh_index: usize, vertex_count: usize, mesh: &Mesh) -> Result<()> {
+fn validate_joint_channels(
+    mesh_index: usize,
+    vertex_count: usize,
+    mesh: &Mesh,
+    skin: Option<&Skin>,
+) -> Result<()> {
     if mesh.joint_indices.is_empty() && mesh.joint_weights.is_empty() {
         return Ok(());
     }
@@ -310,6 +311,20 @@ fn validate_joint_channels(mesh_index: usize, vertex_count: usize, mesh: &Mesh) 
         return invalid(format!(
             "mesh {mesh_index} joint indices and weights must both match positions length"
         ));
+    }
+    let Some(skin) = skin else {
+        return invalid(format!("mesh {mesh_index} joint channels require a skin"));
+    };
+    for (vertex, joints) in mesh.joint_indices.iter().enumerate() {
+        if let Some(joint) = joints
+            .iter()
+            .copied()
+            .find(|joint| *joint as usize >= skin.joints.len())
+        {
+            return invalid(format!(
+                "mesh {mesh_index} joint index {joint} for vertex {vertex} is out of range for its skin"
+            ));
+        }
     }
     for (vertex, weights) in mesh.joint_weights.iter().enumerate() {
         if weights.iter().any(|weight| !weight.is_finite()) {
@@ -677,6 +692,7 @@ fn validate_animation(
         validate_animation_values(
             animation_index,
             channel_index,
+            channel.target.property,
             channel.interpolation,
             channel.times_seconds.len(),
             &channel.values,
@@ -688,10 +704,17 @@ fn validate_animation(
 fn validate_animation_values(
     animation_index: usize,
     channel_index: usize,
+    property: crate::AnimationProperty,
     interpolation: crate::AnimationInterpolation,
     keyframes: usize,
     values: &AnimationValues,
 ) -> Result<()> {
+    if !animation_values_match_property(property, values) {
+        return invalid(format!(
+            "animation {animation_index} channel {channel_index} value kind does not match target property"
+        ));
+    }
+
     let sample_count = match values {
         AnimationValues::Translations(values) => {
             if values.iter().any(|value| !value.is_finite()) {
@@ -752,6 +775,26 @@ fn validate_animation_values(
         ));
     }
     Ok(())
+}
+
+fn animation_values_match_property(
+    property: crate::AnimationProperty,
+    values: &AnimationValues,
+) -> bool {
+    matches!(
+        (property, values),
+        (
+            crate::AnimationProperty::Translation,
+            AnimationValues::Translations(_)
+        ) | (
+            crate::AnimationProperty::Rotation,
+            AnimationValues::Rotations(_)
+        ) | (crate::AnimationProperty::Scale, AnimationValues::Scales(_))
+            | (
+                crate::AnimationProperty::MorphWeights,
+                AnimationValues::MorphWeights { .. }
+            )
+    )
 }
 
 fn validate_space(scene: &Scene) -> Result<()> {

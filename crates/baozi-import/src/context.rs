@@ -168,8 +168,35 @@ impl ImportStats {
     }
 
     pub fn record_scene_counts(&mut self, scene: &Scene) -> Result<()> {
-        self.generated_meshes = scene.meshes.len();
-        self.generated_vertices = scene
+        let counts = SceneCounts::from_scene(scene)?;
+        counts.apply_to(self);
+        Ok(())
+    }
+
+    pub fn record_scene_counts_with_limits(
+        &mut self,
+        scene: &Scene,
+        limits: &ResourceLimits,
+    ) -> Result<()> {
+        let counts = SceneCounts::from_scene(scene)?;
+        counts.validate(limits)?;
+        counts.apply_to(self);
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SceneCounts {
+    meshes: usize,
+    vertices: usize,
+    faces: usize,
+    materials: usize,
+    textures: usize,
+}
+
+impl SceneCounts {
+    fn from_scene(scene: &Scene) -> Result<Self> {
+        let vertices = scene
             .meshes
             .iter()
             .try_fold(0usize, |total, mesh| {
@@ -178,16 +205,45 @@ impl ImportStats {
             .ok_or(BaoziError::LimitExceeded {
                 limit: "max_vertices",
             })?;
-        self.generated_faces = scene
+        let faces = scene
             .meshes
             .iter()
             .try_fold(0usize, |total, mesh| {
                 total.checked_add(mesh_face_count(mesh))
             })
             .ok_or(BaoziError::LimitExceeded { limit: "max_faces" })?;
-        self.generated_materials = scene.materials.len();
-        self.generated_textures = scene.textures.len();
+        Ok(Self {
+            meshes: scene.meshes.len(),
+            vertices,
+            faces,
+            materials: scene.materials.len(),
+            textures: scene.textures.len(),
+        })
+    }
+
+    fn validate(self, limits: &ResourceLimits) -> Result<()> {
+        if self.meshes > limits.max_meshes {
+            return Err(BaoziError::LimitExceeded {
+                limit: "max_meshes",
+            });
+        }
+        if self.vertices > limits.max_vertices {
+            return Err(BaoziError::LimitExceeded {
+                limit: "max_vertices",
+            });
+        }
+        if self.faces > limits.max_faces {
+            return Err(BaoziError::LimitExceeded { limit: "max_faces" });
+        }
         Ok(())
+    }
+
+    fn apply_to(self, stats: &mut ImportStats) {
+        stats.generated_meshes = self.meshes;
+        stats.generated_vertices = self.vertices;
+        stats.generated_faces = self.faces;
+        stats.generated_materials = self.materials;
+        stats.generated_textures = self.textures;
     }
 }
 
@@ -224,14 +280,17 @@ impl ResourceLedger {
                 limit: "max_primary_asset_bytes",
             });
         }
-        self.stats.primary_asset_bytes =
+        let primary =
             self.stats
                 .primary_asset_bytes
                 .checked_add(bytes)
                 .ok_or(BaoziError::LimitExceeded {
                     limit: "max_primary_asset_bytes",
                 })?;
-        self.debit_total_bytes(bytes, limits)
+        let total = self.checked_total_bytes(bytes, limits)?;
+        self.stats.primary_asset_bytes = primary;
+        self.stats.total_asset_bytes = total;
+        Ok(())
     }
 
     fn debit_sidecar_bytes(&mut self, bytes: u64, limits: &ResourceLimits) -> Result<()> {
@@ -240,17 +299,20 @@ impl ResourceLedger {
                 limit: "max_sidecar_asset_bytes",
             });
         }
-        self.stats.sidecar_asset_bytes =
+        let sidecar =
             self.stats
                 .sidecar_asset_bytes
                 .checked_add(bytes)
                 .ok_or(BaoziError::LimitExceeded {
                     limit: "max_sidecar_asset_bytes",
                 })?;
-        self.debit_total_bytes(bytes, limits)
+        let total = self.checked_total_bytes(bytes, limits)?;
+        self.stats.sidecar_asset_bytes = sidecar;
+        self.stats.total_asset_bytes = total;
+        Ok(())
     }
 
-    fn debit_total_bytes(&mut self, bytes: u64, limits: &ResourceLimits) -> Result<()> {
+    fn checked_total_bytes(&self, bytes: u64, limits: &ResourceLimits) -> Result<u64> {
         let next =
             self.stats
                 .total_asset_bytes
@@ -263,47 +325,22 @@ impl ResourceLedger {
                 limit: "max_total_asset_bytes",
             });
         }
-        self.stats.total_asset_bytes = next;
-        Ok(())
+        Ok(next)
+    }
+
+    fn remaining_total_bytes(&self, limits: &ResourceLimits) -> Result<u64> {
+        limits
+            .max_total_asset_bytes
+            .checked_sub(self.stats.total_asset_bytes)
+            .ok_or(BaoziError::LimitExceeded {
+                limit: "max_total_asset_bytes",
+            })
     }
 
     fn record_scene(&mut self, scene: &Scene, limits: &ResourceLimits) -> Result<()> {
-        let vertices = scene
-            .meshes
-            .iter()
-            .try_fold(0usize, |total, mesh| {
-                total.checked_add(mesh.positions.len())
-            })
-            .ok_or(BaoziError::LimitExceeded {
-                limit: "max_vertices",
-            })?;
-        let faces = scene
-            .meshes
-            .iter()
-            .try_fold(0usize, |total, mesh| {
-                total.checked_add(mesh_face_count(mesh))
-            })
-            .ok_or(BaoziError::LimitExceeded { limit: "max_faces" })?;
-
-        if scene.meshes.len() > limits.max_meshes {
-            return Err(BaoziError::LimitExceeded {
-                limit: "max_meshes",
-            });
-        }
-        if vertices > limits.max_vertices {
-            return Err(BaoziError::LimitExceeded {
-                limit: "max_vertices",
-            });
-        }
-        if faces > limits.max_faces {
-            return Err(BaoziError::LimitExceeded { limit: "max_faces" });
-        }
-
-        self.stats.generated_meshes = scene.meshes.len();
-        self.stats.generated_vertices = vertices;
-        self.stats.generated_faces = faces;
-        self.stats.generated_materials = scene.materials.len();
-        self.stats.generated_textures = scene.textures.len();
+        let counts = SceneCounts::from_scene(scene)?;
+        counts.validate(limits)?;
+        counts.apply_to(&mut self.stats);
         Ok(())
     }
 
@@ -382,6 +419,19 @@ impl ImportReport {
         self.stage = stage;
         Ok(self)
     }
+
+    pub fn map_scene_with_limits(
+        mut self,
+        stage: ImportStage,
+        limits: &ResourceLimits,
+        process: impl FnOnce(Scene) -> Result<Scene>,
+    ) -> Result<Self> {
+        self.scene = process(self.scene)?;
+        self.stats
+            .record_scene_counts_with_limits(&self.scene, limits)?;
+        self.stage = stage;
+        Ok(self)
+    }
 }
 
 pub struct ImportContext<'a> {
@@ -389,6 +439,7 @@ pub struct ImportContext<'a> {
     source: AssetPath,
     options: ImportOptions,
     diagnostics: Vec<Diagnostic>,
+    strict_violation: Option<Diagnostic>,
     ledger: ResourceLedger,
 }
 
@@ -403,6 +454,7 @@ impl<'a> ImportContext<'a> {
             source,
             options,
             diagnostics: Vec::new(),
+            strict_violation: None,
             ledger: ResourceLedger::default(),
         }
     }
@@ -428,6 +480,11 @@ impl<'a> ImportContext<'a> {
     }
 
     pub fn push_diagnostic(&mut self, diagnostic: Diagnostic) {
+        if diagnostic.severity != baozi_core::DiagnosticSeverity::Info
+            && self.strict_violation.is_none()
+        {
+            self.strict_violation = Some(diagnostic.clone());
+        }
         if self.diagnostics.len() < self.options.limits.max_diagnostics {
             self.diagnostics.push(diagnostic);
             self.ledger.record_diagnostic(true);
@@ -447,10 +504,7 @@ impl<'a> ImportContext<'a> {
     pub fn into_report(mut self, scene: Scene, format: FormatInfo) -> Result<ImportReport> {
         self.ledger.record_scene(&scene, &self.options.limits)?;
         if self.options.diagnostics.strict
-            && let Some(diagnostic) = self
-                .diagnostics
-                .iter()
-                .find(|diagnostic| diagnostic.severity != baozi_core::DiagnosticSeverity::Info)
+            && let Some(diagnostic) = self.strict_violation.as_ref()
         {
             return Err(BaoziError::parse(
                 diagnostic
@@ -472,22 +526,22 @@ impl<'a> ImportContext<'a> {
 
     pub fn read_primary_to_end(&mut self) -> Result<Vec<u8>> {
         let source = self.source.clone();
-        let bytes = self.read_asset_to_end(
-            &source,
+        let (limit, limit_name) = self.effective_asset_read_limit(
             self.options.limits.max_primary_asset_bytes,
             "max_primary_asset_bytes",
         )?;
+        let bytes = self.read_asset_to_end(&source, limit, limit_name)?;
         self.ledger
             .debit_primary_bytes(bytes.len() as u64, &self.options.limits)?;
         Ok(bytes)
     }
 
     pub fn read_sidecar_to_end(&mut self, path: &AssetPath) -> Result<Vec<u8>> {
-        let bytes = self.read_asset_to_end(
-            path,
+        let (limit, limit_name) = self.effective_asset_read_limit(
             self.options.limits.max_sidecar_asset_bytes,
             "max_sidecar_asset_bytes",
         )?;
+        let bytes = self.read_asset_to_end(path, limit, limit_name)?;
         self.ledger
             .debit_sidecar_bytes(bytes.len() as u64, &self.options.limits)?;
         Ok(bytes)
@@ -499,6 +553,19 @@ impl<'a> ImportContext<'a> {
 
     pub fn resolve_relative(&self, base: &AssetPath, relative: &str) -> Result<AssetPath> {
         self.io.resolve(base, relative)
+    }
+
+    fn effective_asset_read_limit(
+        &self,
+        per_asset_limit: u64,
+        per_asset_limit_name: &'static str,
+    ) -> Result<(u64, &'static str)> {
+        let remaining_total = self.ledger.remaining_total_bytes(&self.options.limits)?;
+        if remaining_total < per_asset_limit {
+            Ok((remaining_total, "max_total_asset_bytes"))
+        } else {
+            Ok((per_asset_limit, per_asset_limit_name))
+        }
     }
 
     fn read_asset_to_end(

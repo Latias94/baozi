@@ -1,4 +1,6 @@
-use baozi_import::{CapabilityStatus, FormatCapability, FormatInfo, FormatMaturity};
+use baozi_import::{
+    CapabilityStatus, FormatCapability, FormatInfo, FormatMaturity, FormatSidecarPolicy,
+};
 
 const SUPPORT_MATRIX: &str = include_str!("../../../docs/formats/support-matrix.md");
 
@@ -34,6 +36,11 @@ pub fn assert_support_matrix_row(
 
     assert_eq!(columns[1], expected_crate);
     assert_eq!(columns[2], maturity_label(info.maturity()));
+    assert_eq!(
+        columns[7],
+        sidecar_label(info.sidecar_policy()),
+        "support matrix Sidecars/archives column drifted for {crate_name}"
+    );
 
     for (column, capability) in expectations {
         let expected = capability_label(capability_status(info, *capability));
@@ -88,5 +95,14 @@ fn capability_label(status: CapabilityStatus) -> &'static str {
         CapabilityStatus::IgnoredWithDiagnostic => "IgnoredWithDiagnostic",
         CapabilityStatus::Unsupported => "Unsupported",
         CapabilityStatus::Unknown => "Unknown",
+    }
+}
+
+fn sidecar_label(policy: FormatSidecarPolicy) -> &'static str {
+    match policy {
+        FormatSidecarPolicy::None => "Unsupported",
+        FormatSidecarPolicy::Optional | FormatSidecarPolicy::ExternalBuffers => "Partial",
+        FormatSidecarPolicy::Required | FormatSidecarPolicy::ArchiveEntries => "Supported",
+        FormatSidecarPolicy::Unknown => "Unknown",
     }
 }

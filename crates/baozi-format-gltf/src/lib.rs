@@ -1,10 +1,14 @@
 #![forbid(unsafe_code)]
 
-use baozi_core::{BaoziError, Result, Scene};
+mod detect;
+mod parser;
+
+use baozi_core::{Result, Scene};
 use baozi_import::{
     CapabilityStatus, FormatCapability, FormatEncoding, FormatImporter, FormatInfo, FormatMaturity,
-    FormatSidecarPolicy, ImportContext, ImporterRegistry,
+    FormatSidecarPolicy, ImportContext, ImporterRegistry, ReadConfidence, ReadHint,
 };
+use baozi_io::ReadSeek;
 
 pub struct GltfImporter;
 
@@ -15,27 +19,39 @@ pub fn format_info() -> FormatInfo {
         .with_sidecar_policy(FormatSidecarPolicy::ExternalBuffers)
         .with_maturity(FormatMaturity::Experimental)
         .with_capabilities(&[
-            (FormatCapability::Geometry, CapabilityStatus::Unknown),
-            (FormatCapability::Hierarchy, CapabilityStatus::Unknown),
-            (FormatCapability::Materials, CapabilityStatus::Unknown),
-            (FormatCapability::Textures, CapabilityStatus::Unknown),
-            (FormatCapability::CamerasLights, CapabilityStatus::Unknown),
-            (FormatCapability::Animation, CapabilityStatus::Unknown),
-            (FormatCapability::Skinning, CapabilityStatus::Unknown),
-            (FormatCapability::MorphTargets, CapabilityStatus::Unknown),
-            (FormatCapability::Metadata, CapabilityStatus::Unknown),
+            (FormatCapability::Geometry, CapabilityStatus::Supported),
+            (FormatCapability::Hierarchy, CapabilityStatus::Partial),
+            (FormatCapability::Materials, CapabilityStatus::Partial),
+            (FormatCapability::Textures, CapabilityStatus::Partial),
+            (FormatCapability::CamerasLights, CapabilityStatus::Partial),
+            (
+                FormatCapability::Animation,
+                CapabilityStatus::IgnoredWithDiagnostic,
+            ),
+            (
+                FormatCapability::Skinning,
+                CapabilityStatus::IgnoredWithDiagnostic,
+            ),
+            (
+                FormatCapability::MorphTargets,
+                CapabilityStatus::IgnoredWithDiagnostic,
+            ),
+            (FormatCapability::Metadata, CapabilityStatus::Partial),
             (
                 FormatCapability::CompressionContainers,
-                CapabilityStatus::Unknown,
+                CapabilityStatus::Partial,
             ),
             (
                 FormatCapability::CoordinatesUnits,
-                CapabilityStatus::Unknown,
+                CapabilityStatus::Supported,
             ),
-            (FormatCapability::Diagnostics, CapabilityStatus::Unknown),
-            (FormatCapability::ResourceLimits, CapabilityStatus::Unknown),
+            (FormatCapability::Diagnostics, CapabilityStatus::Supported),
+            (
+                FormatCapability::ResourceLimits,
+                CapabilityStatus::Supported,
+            ),
         ])
-        .with_notes("planned glTF importer shell; parsing is not implemented yet")
+        .with_notes("experimental glTF 2.0 importer for static meshes, hierarchy, camera projection, PBR material factors, and texture URI references")
         .with_docs_path("docs/formats/gltf.md")
 }
 
@@ -48,10 +64,12 @@ impl FormatImporter for GltfImporter {
         format_info()
     }
 
-    fn read(&self, _ctx: &mut ImportContext<'_>) -> Result<Scene> {
-        Err(BaoziError::unsupported_format(
-            "gltf parser not implemented",
-        ))
+    fn can_read(&self, input: &mut dyn ReadSeek, hint: &ReadHint) -> Result<ReadConfidence> {
+        detect::can_read(input, hint)
+    }
+
+    fn read(&self, ctx: &mut ImportContext<'_>) -> Result<Scene> {
+        parser::read_gltf(ctx)
     }
 }
 

@@ -84,7 +84,7 @@ fn load_library(
         }
     };
 
-    let Some(bytes) = read_sidecar_bytes(ctx, &path) else {
+    let Some(bytes) = read_sidecar_bytes(ctx, &path)? else {
         return Ok(());
     };
     let text = match std::str::from_utf8(&bytes) {
@@ -105,9 +105,10 @@ fn load_library(
     Ok(())
 }
 
-fn read_sidecar_bytes(ctx: &mut ImportContext<'_>, path: &AssetPath) -> Option<Vec<u8>> {
+fn read_sidecar_bytes(ctx: &mut ImportContext<'_>, path: &AssetPath) -> Result<Option<Vec<u8>>> {
     match ctx.read_sidecar_to_end(path) {
-        Ok(bytes) => Some(bytes),
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(error @ baozi_core::BaoziError::LimitExceeded { .. }) => Err(error),
         Err(error) => {
             push_warning(
                 ctx,
@@ -116,7 +117,7 @@ fn read_sidecar_bytes(ctx: &mut ImportContext<'_>, path: &AssetPath) -> Option<V
                 sidecar_read_error_code(&error),
                 sidecar_read_error_message(path, &error),
             );
-            None
+            Ok(None)
         }
     }
 }
@@ -516,7 +517,7 @@ fn texture_path_from_map(
                     format!("MTL map_Kd option '{token}' is not supported"),
                 );
             }
-            index = index.saturating_add(1 + map_option_arity(token));
+            index = index.saturating_add(1 + map_option_arity(token, &tokens[index + 1..]));
         } else {
             return Some(tokens[index..].join(" "));
         }
@@ -531,13 +532,21 @@ fn is_known_map_option(option: &str) -> bool {
     )
 }
 
-fn map_option_arity(option: &str) -> usize {
+fn map_option_arity(option: &str, following: &[&str]) -> usize {
     match option {
-        "-s" | "-o" | "-t" => 3,
-        "-mm" => 2,
+        "-s" | "-o" | "-t" => numeric_option_arity(following, 3),
+        "-mm" => numeric_option_arity(following, 2),
         "-bm" | "-boost" | "-clamp" | "-type" | "-texres" => 1,
         _ => 1,
     }
+}
+
+fn numeric_option_arity(tokens: &[&str], max: usize) -> usize {
+    tokens
+        .iter()
+        .take(max)
+        .take_while(|token| !token.starts_with('-') && token.parse::<f32>().is_ok())
+        .count()
 }
 
 fn trailing_text_after_keyword<'line>(line: &'line str, keyword: &str) -> Option<&'line str> {

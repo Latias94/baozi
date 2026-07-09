@@ -235,11 +235,34 @@ fn joint_channels_must_match_vertex_count() {
 }
 
 #[test]
+fn joint_channels_require_skin() {
+    let mut scene = valid_triangle_scene();
+    scene.meshes[0].joint_indices = vec![[0, 0, 0, 0]; 3];
+    scene.meshes[0].joint_weights = vec![[1.0, 0.0, 0.0, 0.0]; 3];
+
+    assert_invalid(&scene, "require a skin");
+}
+
+#[test]
 fn mesh_skin_reference_out_of_range_fails() {
     let mut scene = valid_triangle_scene();
     scene.meshes[0].skin = Some(baozi_core::SkinId::new(99));
 
     assert_invalid(&scene, "skin reference");
+}
+
+#[test]
+fn mesh_joint_indices_must_reference_skin_joints() {
+    let mut scene = valid_triangle_scene();
+    scene.skins.push(Skin {
+        joints: vec![NodeId::new(1)],
+        ..Skin::default()
+    });
+    scene.meshes[0].skin = Some(baozi_core::SkinId::new(0));
+    scene.meshes[0].joint_indices = vec![[0, 1, 0, 0]; 3];
+    scene.meshes[0].joint_weights = vec![[1.0, 0.0, 0.0, 0.0]; 3];
+
+    assert_invalid(&scene, "joint index");
 }
 
 #[test]
@@ -336,6 +359,26 @@ fn animation_value_count_mismatch_fails() {
     });
 
     assert_invalid(&scene, "value count");
+}
+
+#[test]
+fn animation_value_kind_must_match_target_property() {
+    let mut scene = valid_triangle_scene();
+    scene.animations.push(Animation {
+        channels: vec![AnimationChannel {
+            target: AnimationTarget {
+                node: NodeId::new(0),
+                property: AnimationProperty::Translation,
+            },
+            interpolation: AnimationInterpolation::Linear,
+            times_seconds: vec![0.0],
+            values: AnimationValues::Rotations(vec![baozi_core::Vec4::new(0.0, 0.0, 0.0, 1.0)]),
+            metadata: Default::default(),
+        }],
+        ..Animation::default()
+    });
+
+    assert_invalid(&scene, "value kind");
 }
 
 #[test]

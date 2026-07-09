@@ -148,6 +148,22 @@ fn strict_diagnostics_promote_warning_to_error() {
 }
 
 #[test]
+fn strict_diagnostics_cannot_be_bypassed_by_diagnostic_cap() {
+    let mut importer = Importer::empty();
+    importer.register(ExtensionOnlyImporter).unwrap();
+    let mut options = baozi::ImportOptions::memory();
+    options.diagnostics.strict = true;
+    options.limits.max_diagnostics = 0;
+
+    let error = importer
+        .read_bytes_with_options("model.dum", b"opaque bytes", options)
+        .unwrap_err();
+
+    assert!(matches!(error, BaoziError::Parse { .. }));
+    assert!(error.to_string().contains("test.imported"));
+}
+
+#[test]
 fn extension_hint_does_not_select_importer_that_rejects_content() {
     let mut importer = Importer::empty();
     importer.register(RefusingImporter).unwrap();

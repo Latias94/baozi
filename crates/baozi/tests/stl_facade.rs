@@ -111,6 +111,6 @@ fn facade_reads_stl_from_native_path() -> Result<()> {
         return Err(BaoziError::io("temp stl cleanup", error.to_string()));
     }
 
-    assert_eq!(report?.scene.meshes.len(), 1);
+    assert_eq!(report?.scene().meshes.len(), 1);
     Ok(())
 }

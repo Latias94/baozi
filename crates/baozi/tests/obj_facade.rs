@@ -1,7 +1,7 @@
 use baozi::{
-    AssetPath, CapabilityStatus, ExternalReferencePolicy, FormatCapability, ImportOptions,
-    ImportStage, Importer, MemoryAssetIo, PostProcessPipeline, PostProcessStep, PrimitiveTopology,
-    Result, TextureSource,
+    AssetPath, BaoziError, CapabilityStatus, ExternalReferencePolicy, FormatCapability,
+    ImportOptions, ImportStage, Importer, MemoryAssetIo, PostProcessPipeline, PostProcessStep,
+    PrimitiveTopology, Result, TextureSource,
 };
 
 fn triangle_obj() -> &'static [u8] {
@@ -197,5 +197,28 @@ f 1 2 3 4
     );
     assert_eq!(report.scene().meshes[0].indices, vec![0, 1, 2, 0, 2, 3]);
     assert_eq!(report.stats().generated_faces(), 2);
+    Ok(())
+}
+
+#[test]
+fn postprocess_output_must_still_obey_resource_limits() -> Result<()> {
+    let source = b"v 0 0 0
+v 1 0 0
+v 1 1 0
+v 0 1 0
+f 1 2 3 4
+";
+    let mut options = ImportOptions::memory();
+    options.limits.max_faces = 1;
+    let pipeline = PostProcessPipeline::new([PostProcessStep::Triangulate]);
+
+    let error = Importer::new()
+        .read_bytes_with_postprocess("quad.obj", source, options, &pipeline)
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        BaoziError::LimitExceeded { limit: "max_faces" }
+    ));
     Ok(())
 }

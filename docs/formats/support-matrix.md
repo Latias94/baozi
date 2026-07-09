@@ -23,6 +23,6 @@ Capability values:
 | STL | `baozi-format-stl` | Experimental | Supported | Partial | Unsupported | Unsupported | Unsupported | Supported | Binary and ASCII triangle meshes; see [STL details](stl.md) |
 | OBJ/MTL | `baozi-format-obj` | Experimental | Supported | Partial | Partial | Unsupported | Partial | Supported | Static face meshes and MTL texture URI references; see [OBJ details](obj.md) |
 | PLY | `baozi-format-ply` | Experimental | Unknown | Unknown | Unsupported | Unsupported | Unsupported | Unknown | Planned parser shell for flexible vertex properties |
-| glTF2/GLB | `baozi-format-gltf` | Experimental | Unknown | Unknown | Unknown | Unknown | Unknown | Unknown | Planned parser shell for the first modern PBR scene format |
+| glTF2/GLB | `baozi-format-gltf` | Experimental | Supported | Partial | Partial | IgnoredWithDiagnostic | Partial | Supported | Static mesh MVP for `.gltf` external buffers and GLB BIN payloads; data URIs, skins, morph targets, and animation are deferred |
 
 Promotion to `Stable` requires the gate defined in [ADR 0011](../adr/0011-format-support-tiers-and-compatibility-charter.md).

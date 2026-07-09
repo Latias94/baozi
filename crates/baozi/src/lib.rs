@@ -92,8 +92,9 @@ impl Importer {
         options: ImportOptions,
         pipeline: &PostProcessPipeline,
     ) -> Result<ImportReport> {
+        let limits = options.limits.clone();
         let report = self.read_bytes_with_options(source, bytes, options)?;
-        Self::apply_postprocess(report, pipeline)
+        Self::apply_postprocess(report, pipeline, &limits)
     }
 
     pub fn read_asset(&self, io: &dyn AssetIo, source: AssetPath) -> Result<ImportReport> {
@@ -125,8 +126,9 @@ impl Importer {
         options: ImportOptions,
         pipeline: &PostProcessPipeline,
     ) -> Result<ImportReport> {
+        let limits = options.limits.clone();
         let report = self.read_asset_with_options(io, source, options)?;
-        Self::apply_postprocess(report, pipeline)
+        Self::apply_postprocess(report, pipeline, &limits)
     }
 
     #[cfg(feature = "native-fs")]
@@ -162,15 +164,17 @@ impl Importer {
         options: ImportOptions,
         pipeline: &PostProcessPipeline,
     ) -> Result<ImportReport> {
+        let limits = options.limits.clone();
         let report = self.read_path_with_options(path, options)?;
-        Self::apply_postprocess(report, pipeline)
+        Self::apply_postprocess(report, pipeline, &limits)
     }
 
     fn apply_postprocess(
         report: ImportReport,
         pipeline: &PostProcessPipeline,
+        limits: &ResourceLimits,
     ) -> Result<ImportReport> {
-        report.map_scene(ImportStage::PostProcessed, |scene| {
+        report.map_scene_with_limits(ImportStage::PostProcessed, limits, |scene| {
             let scene = pipeline.run(scene)?;
             validate_scene(&scene)?;
             Ok(scene)

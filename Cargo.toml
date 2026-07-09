@@ -11,18 +11,20 @@ repository = "https://github.com/Latias94/baozi"
 homepage = "https://github.com/Latias94/baozi"
 documentation = "https://docs.rs/baozi"
 authors = ["Mingzhen Zhuang <superfrankie621@gmail.com>"]
+description = "Rust-native asset import crates for loading 3D model formats into an owned scene IR"
 
 [workspace.dependencies]
-baozi-core = { path = "crates/baozi-core" }
-baozi-io = { path = "crates/baozi-io", default-features = false }
-baozi-import = { path = "crates/baozi-import", default-features = false }
-baozi-postprocess = { path = "crates/baozi-postprocess" }
-baozi-format-stl = { path = "crates/baozi-format-stl" }
-baozi-format-obj = { path = "crates/baozi-format-obj" }
-baozi-format-ply = { path = "crates/baozi-format-ply" }
-baozi-format-gltf = { path = "crates/baozi-format-gltf" }
-baozi-test-support = { path = "crates/baozi-test-support" }
+baozi-core = { path = "crates/baozi-core", version = "0.1.0" }
+baozi-io = { path = "crates/baozi-io", version = "0.1.0", default-features = false }
+baozi-import = { path = "crates/baozi-import", version = "0.1.0", default-features = false }
+baozi-postprocess = { path = "crates/baozi-postprocess", version = "0.1.0" }
+baozi-format-stl = { path = "crates/baozi-format-stl", version = "0.1.0" }
+baozi-format-obj = { path = "crates/baozi-format-obj", version = "0.1.0" }
+baozi-format-ply = { path = "crates/baozi-format-ply", version = "0.1.0" }
+baozi-format-gltf = { path = "crates/baozi-format-gltf", version = "0.1.0" }
+baozi-test-support = { path = "crates/baozi-test-support", version = "0.1.0" }
 thiserror = "2"
 tracing = "0.1"
 mint = "0.5"
 criterion = { version = "0.5", default-features = false }
+gltf = { version = "1.4.1", default-features = false, features = ["names", "utils"] }

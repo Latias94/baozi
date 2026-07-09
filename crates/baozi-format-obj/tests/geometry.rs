@@ -66,3 +66,27 @@ fn supports_negative_face_indices() -> Result<()> {
     assert_eq!(mesh.face_vertex_counts, vec![4]);
     Ok(())
 }
+
+#[test]
+fn partial_uv_and_normal_channels_are_diagnosed_and_omitted() -> Result<()> {
+    let bytes =
+        b"g mixed\nv 0 0 0\nv 1 0 0\nv 0 1 0\nvt 0 0\nvt 1 0\nvt 0 1\nvn 0 0 1\nf 1/1/1 2/2 3//1\n";
+
+    let (scene, diagnostics) = import_bytes("partial.obj", bytes)?;
+
+    assert_eq!(scene.meshes.len(), 1);
+    assert!(scene.meshes[0].texcoords.is_empty());
+    assert!(scene.meshes[0].normals.is_empty());
+    assert_eq!(diagnostics.len(), 2);
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code.0 == "obj.partial_texcoord_channel")
+    );
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code.0 == "obj.partial_normal_channel")
+    );
+    Ok(())
+}
