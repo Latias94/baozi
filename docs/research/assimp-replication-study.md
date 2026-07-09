@@ -186,9 +186,9 @@ The current Rust ecosystem helps, but does not remove the need for a Baozi-owned
 
 ### Existing Assimp bindings
 
-Crates found: `assimp`, `russimp`, `russimp-ng`, `asset-importer`, `assimp-sys`, `russimp-sys`.
+Crates found: `assimp`, `russimp`, `russimp-ng`, `assimp-sys`, `russimp-sys`.
 
-Use them only as optional compatibility or differential-test tools. They wrap C/C++ Assimp and therefore do not satisfy the goal of a Rust-native reimplementation. `asset-importer` is the user's existing Assimp Rust binding and should be treated as an owned bridge/oracle, not as a source architecture for Baozi.
+Use them only as optional compatibility or differential-test tools. They wrap C/C++ Assimp and therefore do not satisfy the goal of a Rust-native reimplementation.
 
 ### Format-specific parser crates
 

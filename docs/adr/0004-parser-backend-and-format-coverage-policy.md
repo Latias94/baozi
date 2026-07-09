@@ -27,8 +27,7 @@ Baozi will use a hybrid parser strategy:
 
 - self-write parsers when the format is small, diagnostics matter, or ecosystem crates are immature
 - wrap ecosystem crates when they are well licensed, useful, and replaceable behind Baozi traits
-- use Assimp and the user's existing `asset-importer` binding only as behavioral or migration oracles,
-  not as Baozi's architecture source
+- use Assimp only as a behavioral or migration oracle, not as Baozi's architecture source
 - expose only Baozi-owned `Scene`, options, diagnostics, and importer traits
 - document coverage and limitations per format before marking a format stable
 
@@ -62,7 +61,7 @@ flowchart LR
     FormatCrate --> Backend{Parser backend}
     Backend -->|self-written| Owned[Owned parser]
     Backend -->|wrapped crate| ThirdParty[Third-party parser]
-    Backend -->|oracle only| Oracle[Assimp / asset-importer comparison]
+    Backend -->|oracle only| Oracle[Assimp comparison]
     Owned --> Converter[Converter to SceneBuilder]
     ThirdParty --> Converter
     Converter --> Builder[SceneBuilder]

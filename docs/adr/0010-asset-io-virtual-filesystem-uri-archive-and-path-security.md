@@ -127,6 +127,20 @@ ExternalReferencePolicy
 The default should be `WithinScope` for filesystem reads and `Deny` for memory reads without a
 bundle.
 
+## Target and Feature Boundary
+
+Baozi's portable import path is bytes-first:
+
+- `read_bytes` and memory-backed `AssetIo` must compile for `wasm32-unknown-unknown`
+- bytes import must not imply filesystem, sidecar, URI, archive, or remote-fetch access
+- native filesystem helpers are facade conveniences behind `native-fs`
+- `baozi-io` gates filesystem adapters behind its narrower `fs` feature
+- format crates must resolve every dependency through `ImportContext` and `AssetIo`, never through
+  direct `std::fs` calls
+
+This keeps browser WASM support mechanical instead of aspirational: if a format can parse a byte
+buffer without sidecars, it should remain buildable without native IO features.
+
 ## Resource Limits
 
 Every import should carry resource limits:

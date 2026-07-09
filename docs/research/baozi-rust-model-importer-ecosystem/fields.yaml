@@ -1,0 +1,45 @@
+fields:
+  - name: name
+    category: identity
+    description: Object, crate, format, platform, or architecture topic name.
+    detail_level: brief
+  - name: category
+    category: identity
+    description: Reference project, Rust crate, format, testing tool, architectural decision, platform target, or risk.
+    detail_level: brief
+  - name: current_activity
+    category: ecosystem
+    description: Release or maintenance signal as of the current research window.
+    detail_level: brief
+  - name: license
+    category: ecosystem
+    description: Declared license and whether it fits Baozi's MIT OR Apache-2.0 downstream intent.
+    detail_level: detailed
+  - name: maturity
+    category: ecosystem
+    description: Production-ready, useful but narrow, experimental, stale, or unsuitable for default dependency use.
+    detail_level: brief
+  - name: wasm_compatibility
+    category: platform
+    description: Known or inferred compatibility with wasm32-unknown-unknown and wasm32-wasip1, including std/fs/thread/native dependency risks.
+    detail_level: detailed
+  - name: useful_for_baozi
+    category: architecture
+    description: Concrete value for parser, IO, IR, postprocess, tests, docs, oracle, or fixtures.
+    detail_level: detailed
+  - name: integration_risk
+    category: architecture
+    description: API stability, unsafe/FFI, license, performance, maintenance, security, feature bloat, or MSRV risk.
+    detail_level: detailed
+  - name: recommended_use
+    category: decision
+    description: Default dependency, optional feature, dev-dependency, behavior oracle, reference-only, or avoid.
+    detail_level: brief
+  - name: plan_impact
+    category: decision
+    description: How the finding changes the next Baozi implementation plan.
+    detail_level: detailed
+uncertain:
+  - serde-ply latest version license and feature details need a stable metadata lookup before dependency decisions.
+  - Per-crate wasm behavior should be confirmed with target-specific cargo checks before promotion from candidate to dependency.
+  - External fixture licenses must be audited before any third-party asset is copied into Baozi.

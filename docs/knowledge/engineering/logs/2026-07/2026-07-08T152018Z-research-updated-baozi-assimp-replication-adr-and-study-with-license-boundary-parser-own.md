@@ -7,7 +7,7 @@ event_kind: "Research"
 ---
 # Event
 
-Updated Baozi Assimp replication ADR and study with license boundary, parser ownership policy, and user correction that the unrelated third-party Rust implementation is not a reference while `asset-importer` is the user's Assimp binding.
+Updated Baozi Assimp replication ADR and study with license boundary, parser ownership policy, and user correction that unrelated Rust bindings are not architecture references.
 
 # Impact
 

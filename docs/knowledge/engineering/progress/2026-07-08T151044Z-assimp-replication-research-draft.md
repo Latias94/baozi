@@ -21,7 +21,7 @@ Drafted the initial Baozi research and ADR for an Assimp-like Rust-native asset 
 - Subagent finding retained: Assimp has about 51 registered importers, an ordered post-process pipeline, per-format test assets, unit tests, and fuzz targets.
 - Added license policy: Assimp is permissive BSD-3-Clause style, but copied/translated source needs retained notices and assets need separate license review.
 - Added dependency policy: ecosystem crates are allowed as internal backends, but Baozi owns public IR, traits, diagnostics, and post-process semantics.
-- User correction applied: removed the unrelated third-party Rust implementation as a reference; `asset-importer` is the user's Assimp Rust binding and only an optional oracle/bridge.
+- User correction applied: removed unrelated Rust bindings as architecture references; Assimp bindings are only optional oracles or migration bridges.
 
 # Next Action
 

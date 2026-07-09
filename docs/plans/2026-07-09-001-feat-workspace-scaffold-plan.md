@@ -56,7 +56,7 @@ Deferred to follow-up work:
 Outside this scaffold:
 
 - Copying Assimp source or test assets into Baozi.
-- Using `asset-importer` as an architecture source.
+- Using Assimp bindings as architecture sources.
 - Adding remote HTTP(S) asset fetching to core IO.
 
 ---

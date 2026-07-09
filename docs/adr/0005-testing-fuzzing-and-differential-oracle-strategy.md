@@ -40,7 +40,7 @@ Baozi will use layered verification:
 - malformed fixture tests for errors and diagnostics
 - fuzz targets for every public parser
 - round-trip tests only where exporters are intentionally supported
-- differential tests against Assimp or the user's existing `asset-importer` binding when available
+- differential tests against Assimp when available
 - benchmark tests for large assets and post-process algorithms
 
 The oracle is used to find behavior differences, not to force Baozi to copy Assimp's memory layout or
@@ -51,7 +51,7 @@ every compatibility quirk.
 ```mermaid
 flowchart TD
     Fixture[Fixture asset] --> Baozi[Baozi importer]
-    Fixture --> Oracle[Assimp / asset-importer oracle]
+    Fixture --> Oracle[Assimp oracle]
 
     Baozi --> BaoziScene[Scene]
     Oracle --> OracleScene[Oracle scene]
@@ -366,7 +366,7 @@ Decision: chosen.
 
 ### Phase 3: Differential Compatibility
 
-- Add optional Assimp or `asset-importer` oracle test feature.
+- Add optional Assimp oracle test feature.
 - Define normalized comparison model.
 - Start with STL/OBJ/PLY/glTF compatibility reports.
 

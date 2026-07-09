@@ -30,7 +30,7 @@ Every format crate must publish:
 - golden normalized scene snapshots
 - resource-limit tests
 - fuzz targets for public parsers
-- optional oracle comparison against Assimp or `asset-importer` where practical
+- optional oracle comparison against Assimp where practical
 
 ## Architecture
 

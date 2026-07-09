@@ -163,7 +163,7 @@ Current ecosystem observations from `cargo search` / `cargo info` on 2026-07-08:
 
 | Area | Candidate crates | Observed license | Recommended use |
 | --- | --- | --- | --- |
-| Assimp bindings | `assimp`, `russimp-ng`, `asset-importer` | varies by crate | Test oracle or migration bridge only; `asset-importer` is the user's existing Assimp Rust binding, not Baozi architecture input |
+| Assimp bindings | `assimp`, `russimp-ng` | varies by crate | Test oracle or migration bridge only; bindings are not Baozi architecture input |
 | glTF2 | `gltf` 1.4.1 | MIT OR Apache-2.0 | Acceptable early backend or reference parser; normalize into Baozi IR |
 | OBJ | `tobj` 4.0.4 | MIT | Useful reference or optional backend; self-written parser is also reasonable |
 | STL | `stl_io` 0.11.0 | MIT | Good accelerator for basic STL; keep Baozi validation and diagnostics |

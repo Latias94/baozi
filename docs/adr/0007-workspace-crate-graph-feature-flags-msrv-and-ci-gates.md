@@ -143,6 +143,7 @@ Recommended facade features:
 ```text
 default = ["std", "default-formats"]
 std
+native-fs
 default-formats
 all-formats
 format-obj
@@ -171,6 +172,11 @@ Rules:
 - Feature flags must not silently change public scene semantics.
 - `std` is default. `no_std` is not promised yet; avoid unnecessary `std` use in `baozi-core` when it
   costs little, but do not design around `no_std` prematurely.
+- Filesystem convenience APIs are controlled by `native-fs` in the facade. The feature should expand
+  to `std` plus the underlying `baozi-io/fs` filesystem adapter feature; browser-oriented builds can
+  use bytes and memory IO with `--no-default-features --features format-stl`.
+- WASM support starts as byte-buffer import on `wasm32-unknown-unknown`. `wasm32-wasip1` may use
+  `native-fs` when the target runtime provides filesystem capabilities.
 
 ## MSRV Policy
 
@@ -205,6 +211,8 @@ Additional gates once dependencies and features exist:
 cargo check --workspace --no-default-features
 cargo check -p baozi --features default-formats
 cargo check -p baozi --features all-formats
+cargo check -p baozi --target wasm32-unknown-unknown --no-default-features --features format-stl
+cargo check -p baozi --target wasm32-wasip1 --no-default-features --features format-stl,native-fs
 cargo deny check
 cargo test --doc --workspace
 ```

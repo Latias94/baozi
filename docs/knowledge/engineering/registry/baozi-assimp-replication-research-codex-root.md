@@ -36,7 +36,7 @@ Current direction:
 - Keep Baozi Rust-native: owned scene model, id handles, typed options, structured errors and diagnostics.
 - License boundary: Assimp is permissive BSD-3-Clause style, but copied/translated code needs retained notices; test assets must be curated, especially `test/models-nonbsd`.
 - Dependency boundary: third-party crates may be internal parser/algorithm backends, but cannot define Baozi public API.
-- User correction: remove the unrelated third-party Rust implementation as a reference; `asset-importer` is the user's existing Assimp Rust binding and may be used only as a bridge/oracle, not architecture input.
+- User correction: remove unrelated Rust bindings as architecture references; Assimp bindings may be used only as bridge/oracle inputs, not architecture input.
 
 
 # Citations

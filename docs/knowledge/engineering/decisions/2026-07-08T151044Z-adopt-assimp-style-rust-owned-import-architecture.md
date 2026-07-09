@@ -30,7 +30,7 @@ The user also clarified:
 
 - Existing ecosystem crates may be used if useful, but immature crates are not a blocker because Baozi can self-write parsers.
 - The unrelated third-party Rust implementation should not be used as a reference.
-- `asset-importer` is the user's existing Assimp Rust binding, so it is only a possible oracle/bridge, not architecture input.
+- Assimp bindings are only possible oracles or migration bridges, not architecture input.
 
 # Alternatives
 
