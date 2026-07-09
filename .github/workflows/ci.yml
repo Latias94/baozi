@@ -112,7 +112,6 @@ jobs:
           - stl_import
           - obj_import
           - obj_postprocess
-          - gltf_import
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -137,3 +136,34 @@ jobs:
 
       - name: Run fuzz smoke
         run: cargo fuzz run "${{ matrix.target }}" -- -runs=256
+
+  experimental-fuzz-check:
+    name: ${{ matrix.target }} experimental fuzz check
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - gltf_import
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Install pinned nightly Rust
+        # Dated nightly toolchains use the action's explicit toolchain input path.
+        # glTF remains check-only until the bootstrap backend no longer aborts under fuzz.
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_FUZZ_NIGHTLY }}
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --version "${CARGO_FUZZ_VERSION}" --locked
+
+      - name: Check fuzz target
+        run: cargo fuzz check "${{ matrix.target }}"

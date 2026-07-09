@@ -52,6 +52,7 @@ Replacement triggers:
 | --- | --- |
 | Cannot enforce Baozi resource limits before large allocation | Replace or wrap the affected loader path |
 | Cannot expose enough source context for diagnostics | Add Baozi-owned validation/diagnostic layer or replace parser slice |
+| Dependency panic aborts under sanitizer fuzz before Baozi can return an error | Add Baozi-owned preflight, fork the affected validation path, or replace the parser slice before enabling sanitizer-run promotion |
 | Unsupported required glTF 2.0 core feature blocks Beta maturity | Fork or self-write that slice |
 | Dependency becomes incompatible with Baozi MSRV, WASM, license, or unsafe policy | Replace dependency or gate the affected backend |
 | Extension support requires architecture not available upstream | Implement Baozi-owned extension parsing in the format crate |
@@ -124,6 +125,8 @@ Before promoting glTF support beyond `Experimental`, Baozi must have:
   vertices, generated faces, and data URI bytes
 - fuzz target that mutates primary glTF/GLB bytes, external buffer bytes, buffer data URIs, and skin
   data
+- successful Linux sanitizer fuzz smoke for `gltf_import`; `cargo fuzz check` alone is only an
+  experimental-target compile gate while the bootstrap backend can abort on malformed validation
 - documented unsupported features with diagnostics or fatal errors, not silent drops
 
 ## Consequences
@@ -139,3 +142,16 @@ Negative:
 - Some early behavior is constrained by the bootstrap dependency.
 - Baozi must maintain wrapper tests around upstream behavior until it owns more parsing code.
 - Contributors need to add conformance and malformed fixtures with each glTF feature.
+
+## Current Backend Risk Exception
+
+As of 2026-07-09, `gltf_import` is excluded from mandatory CI sanitizer runs and kept as an
+experimental `cargo fuzz check` target. A fuzz smoke found that malformed inputs can reach
+`gltf-rs`/`gltf-json` validation paths that panic or abort under libFuzzer before Baozi's
+`catch_unwind` boundary produces a normal parse error. This exception is a safety truthfulness
+measure, not a parser success signal.
+
+Re-enable the sanitizer run only after Baozi prevalidates the affected accessor, buffer, and layout
+paths or replaces/forks the backend slice so malformed glTF inputs cannot abort the fuzz process.
+The active backend notes live in
+[`docs/research/gltf-rs-backend-notes.md`](../research/gltf-rs-backend-notes.md).

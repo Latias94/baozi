@@ -28,6 +28,12 @@ without changing facade users. The ownership and replacement boundary is defined
 The crate remains `publish = false` until the ADR 0027 quality gates and a broader conformance corpus
 are in place.
 
+The `gltf_import` fuzz target currently compiles in CI but is not part of the mandatory sanitizer-run
+matrix. Malformed input can still trigger a `gltf-rs` validation panic in cargo-fuzz builds where the
+panic aborts before Baozi's `catch_unwind` fallback can return `BaoziError`. This is tracked in
+[glTF Backend Notes](../research/gltf-rs-backend-notes.md); sanitizer-run promotion requires a
+Baozi-owned preflight or backend fork that prevents this abort class.
+
 ## Supported MVP
 
 - Static primitives using points, lines, or triangles.
@@ -42,7 +48,7 @@ are in place.
 - Resource ledger accounting for primary assets, external buffers, base64 buffer data URIs, GLB BIN
   payloads, and diagnostics.
 - Quality gates for GLB import, snapshots, malformed external buffers/data URIs, facade ledger
-  stats, skin validation, and a glTF fuzz target.
+  stats, skin validation, and a check-only glTF fuzz target.
 
 ## Known Non-Support
 
@@ -50,3 +56,4 @@ are in place.
 - Triangle strips, triangle fans, line strips, and line loops are not expanded yet.
 - Morph targets and animation channels are diagnosed but not imported into final IR yet.
 - The current backend is useful for bootstrapping, not the long-term parser ownership boundary.
+- `gltf_import` sanitizer fuzz run is disabled until known backend aborts are removed or isolated.

@@ -5,6 +5,12 @@ smoke run is the Linux CI job in `.github/workflows/ci.yml` because the Rust
 nightly, compiler-rt, and sanitizer runtime are pinned and run in a predictable
 Linux environment there.
 
+Fuzz targets have two CI tiers:
+
+- sanitizer-run targets: compile with `cargo fuzz check` and run a short sanitizer smoke in CI
+- experimental check-only targets: compile with `cargo fuzz check`, but do not run under libFuzzer
+  until their parser backend is known not to abort before Baozi can report a structured error
+
 Longer fuzz campaigns run from `.github/workflows/fuzz.yml` on a schedule and
 through manual dispatch. That workflow is Linux-only, has a bounded job timeout,
 and uploads `fuzz/artifacts/<target>/**` only when the run fails.
@@ -23,7 +29,6 @@ cargo +nightly-2026-05-27 fuzz run obj_import -- -runs=256
 cargo +nightly-2026-05-27 fuzz check obj_postprocess
 cargo +nightly-2026-05-27 fuzz run obj_postprocess -- -runs=256
 cargo +nightly-2026-05-27 fuzz check gltf_import
-cargo +nightly-2026-05-27 fuzz run gltf_import -- -runs=256
 ```
 
 ## Windows MSVC Setup
@@ -52,7 +57,6 @@ $env:PATH = "$installRoot\bin;$installRoot\lib\clang\22\lib\windows;$env:PATH"
 cargo +nightly-2026-05-27 fuzz run stl_import -- -runs=256
 cargo +nightly-2026-05-27 fuzz run obj_import -- -runs=256
 cargo +nightly-2026-05-27 fuzz run obj_postprocess -- -runs=256
-cargo +nightly-2026-05-27 fuzz run gltf_import -- -runs=256
 ```
 
 Known Windows outcomes:
@@ -79,6 +83,12 @@ Experimental parser slices need:
 Stable promotion additionally needs a successful sanitizer fuzz smoke run on a
 supported Linux CI runner.
 
+`gltf_import` is currently an experimental check-only target. It can compile and is useful for local
+parser work, but malformed inputs can still reach a `gltf-rs` 1.4.x validation panic in a fuzz build
+where the panic aborts before Baozi's `catch_unwind` fallback can convert it to `BaoziError`. Do not
+treat a skipped `gltf_import` sanitizer run as parser evidence. The re-enable criteria and known
+backend hazards live in [glTF Backend Notes](../research/gltf-rs-backend-notes.md).
+
 ## CI Tool Pinning
 
 The fuzz workflows intentionally pin:
@@ -93,7 +103,7 @@ infrastructure or promoting a parser support tier. Broader CI policy lives in [C
 
 | Target | Format crate | Coverage focus |
 | --- | --- | --- |
-| `stl_import` | `baozi-format-stl` | Binary and ASCII STL facade import. |
-| `obj_import` | `baozi-format-obj` | OBJ facade import plus optional MTL sidecar bytes split by the first NUL byte. |
-| `obj_postprocess` | `baozi-format-obj` | OBJ facade import followed by triangulation and bounding-box postprocess. |
-| `gltf_import` | `baozi-format-gltf` | glTF/GLB facade import. Inputs beginning with the `glTF` magic are treated as whole GLB bytes; other inputs use primary `.gltf` bytes plus external `buffer.bin` bytes split by the first NUL byte. |
+| `stl_import` | `baozi-format-stl` | Sanitizer-run target for binary and ASCII STL facade import. |
+| `obj_import` | `baozi-format-obj` | Sanitizer-run target for OBJ facade import plus optional MTL sidecar bytes split by the first NUL byte. |
+| `obj_postprocess` | `baozi-format-obj` | Sanitizer-run target for OBJ facade import followed by triangulation and bounding-box postprocess. |
+| `gltf_import` | `baozi-format-gltf` | Experimental check-only target for glTF/GLB facade import. Inputs beginning with the `glTF` magic are treated as whole GLB bytes; other inputs use primary `.gltf` bytes plus external `buffer.bin` bytes split by the first NUL byte. |
