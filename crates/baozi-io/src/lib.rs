@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 //! Runtime-neutral asset IO contracts for Baozi importers.
 
 #[cfg(feature = "fs")]

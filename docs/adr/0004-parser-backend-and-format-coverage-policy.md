@@ -196,6 +196,10 @@ Feature flags should express capability, not implementation trivia:
 - `default-formats`
 - `all-formats`
 
+`default-formats` must stay conservative: it includes only implemented, CI-gated, low-surprise
+formats. Planned parser shells can be compiled through their explicit `format-*` features, but they
+must not enter the default set until they import real assets and their support document is accurate.
+
 Backend-specific features may exist inside format crates, but the facade should avoid exposing them
 unless users need explicit control:
 

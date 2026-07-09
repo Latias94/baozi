@@ -1,7 +1,7 @@
 use baozi::{
     AssetPath, CapabilityStatus, ExternalReferencePolicy, FormatCapability, ImportOptions,
-    Importer, MemoryAssetIo, PostProcessPipeline, PostProcessStep, PrimitiveTopology, Result,
-    TextureSource,
+    ImportStage, Importer, MemoryAssetIo, PostProcessPipeline, PostProcessStep, PrimitiveTopology,
+    Result, TextureSource,
 };
 
 fn triangle_obj() -> &'static [u8] {
@@ -17,13 +17,13 @@ f 1 2 3
 fn facade_reads_obj_from_bytes() -> Result<()> {
     let report = Importer::new().read_bytes("facade.obj", triangle_obj())?;
 
-    assert_eq!(report.format.id, "obj");
-    assert_eq!(report.scene.meshes.len(), 1);
+    assert_eq!(report.format().id(), "obj");
+    assert_eq!(report.scene().meshes.len(), 1);
     assert_eq!(
-        report.scene.meshes[0].topology,
+        report.scene().meshes[0].topology,
         PrimitiveTopology::Triangles
     );
-    assert!(report.diagnostics.is_empty());
+    assert!(report.diagnostics().is_empty());
     Ok(())
 }
 
@@ -33,23 +33,23 @@ fn facade_reports_obj_capabilities() -> Result<()> {
 
     assert!(
         report
-            .format
-            .capabilities
+            .format()
+            .capabilities()
             .contains(&(FormatCapability::Geometry, CapabilityStatus::Supported))
     );
     assert!(
         report
-            .format
-            .capabilities
+            .format()
+            .capabilities()
             .contains(&(FormatCapability::Materials, CapabilityStatus::Partial))
     );
     assert!(
         report
-            .format
-            .capabilities
+            .format()
+            .capabilities()
             .contains(&(FormatCapability::Diagnostics, CapabilityStatus::Supported))
     );
-    assert!(report.format.capabilities.contains(&(
+    assert!(report.format().capabilities().contains(&(
         FormatCapability::ResourceLimits,
         CapabilityStatus::Supported
     )));
@@ -62,10 +62,10 @@ fn same_importer_reads_obj_repeatedly() -> Result<()> {
     let first = importer.read_bytes("first.obj", triangle_obj())?;
     let second = importer.read_bytes("second.obj", triangle_obj())?;
 
-    assert_eq!(first.format.id, "obj");
-    assert_eq!(second.format.id, "obj");
-    assert_eq!(first.scene.meshes.len(), 1);
-    assert_eq!(second.scene.meshes.len(), 1);
+    assert_eq!(first.format().id(), "obj");
+    assert_eq!(second.format().id(), "obj");
+    assert_eq!(first.scene().meshes.len(), 1);
+    assert_eq!(second.scene().meshes.len(), 1);
     Ok(())
 }
 
@@ -73,8 +73,8 @@ fn same_importer_reads_obj_repeatedly() -> Result<()> {
 fn facade_detects_obj_content_with_unknown_extension() -> Result<()> {
     let report = Importer::new().read_bytes("facade.mesh", triangle_obj())?;
 
-    assert_eq!(report.format.id, "obj");
-    assert_eq!(report.scene.meshes.len(), 1);
+    assert_eq!(report.format().id(), "obj");
+    assert_eq!(report.scene().meshes.len(), 1);
     Ok(())
 }
 
@@ -94,11 +94,11 @@ f 1 2 3
 
     let report = Importer::new().read_asset_with_options(&io, obj_path, options)?;
 
-    assert_eq!(report.format.id, "obj");
-    assert_eq!(report.scene.meshes.len(), 1);
+    assert_eq!(report.format().id(), "obj");
+    assert_eq!(report.scene().meshes.len(), 1);
     assert!(
         report
-            .diagnostics
+            .diagnostics()
             .iter()
             .any(|diagnostic| diagnostic.code.0 == "obj.mtl_missing")
     );
@@ -126,8 +126,8 @@ fn facade_reads_obj_from_path() -> Result<()> {
     let _ = std::fs::remove_dir(&root);
     let report = report?;
 
-    assert_eq!(report.format.id, "obj");
-    assert_eq!(report.scene.meshes.len(), 1);
+    assert_eq!(report.format().id(), "obj");
+    assert_eq!(report.scene().meshes.len(), 1);
     Ok(())
 }
 
@@ -154,10 +154,10 @@ map_Kd textures/red.png
 
     let report = Importer::new().read_asset_with_options(&io, obj_path, options)?;
 
-    assert_eq!(report.format.id, "obj");
-    assert!(report.diagnostics.is_empty());
-    assert_eq!(report.scene.materials[0].name.as_deref(), Some("red"));
-    match &report.scene.textures[0].source {
+    assert_eq!(report.format().id(), "obj");
+    assert!(report.diagnostics().is_empty());
+    assert_eq!(report.scene().materials[0].name.as_deref(), Some("red"));
+    match &report.scene().textures[0].source {
         TextureSource::External { uri } => {
             assert_eq!(uri, "models/materials/textures/red.png");
         }
@@ -168,21 +168,34 @@ map_Kd textures/red.png
 
 #[test]
 fn facade_obj_quad_can_be_triangulated_by_postprocess() -> Result<()> {
-    let report = Importer::new().read_bytes(
-        "quad.obj",
-        b"v 0 0 0
+    let source = b"v 0 0 0
 v 1 0 0
 v 1 1 0
 v 0 1 0
 f 1 2 3 4
-",
-    )?;
-    assert_eq!(report.scene.meshes[0].topology, PrimitiveTopology::Polygons);
+";
+    let importer = Importer::new();
+    let report = importer.read_bytes("quad.obj", source)?;
+    assert_eq!(report.stage(), ImportStage::ValidatedImported);
+    assert_eq!(
+        report.scene().meshes[0].topology,
+        PrimitiveTopology::Polygons
+    );
 
     let pipeline = PostProcessPipeline::new([PostProcessStep::Triangulate]);
-    let scene = pipeline.run(report.scene)?;
+    let report = importer.read_bytes_with_postprocess(
+        "quad.obj",
+        source,
+        ImportOptions::memory(),
+        &pipeline,
+    )?;
 
-    assert_eq!(scene.meshes[0].topology, PrimitiveTopology::Triangles);
-    assert_eq!(scene.meshes[0].indices, vec![0, 1, 2, 0, 2, 3]);
+    assert_eq!(report.stage(), ImportStage::PostProcessed);
+    assert_eq!(
+        report.scene().meshes[0].topology,
+        PrimitiveTopology::Triangles
+    );
+    assert_eq!(report.scene().meshes[0].indices, vec![0, 1, 2, 0, 2, 3]);
+    assert_eq!(report.stats().generated_faces(), 2);
     Ok(())
 }

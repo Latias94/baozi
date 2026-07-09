@@ -1,8 +1,12 @@
+#![forbid(unsafe_code)]
+
 pub mod snapshot;
+pub mod support_matrix;
 
 use baozi_core::Scene;
 
 pub use snapshot::{SceneSnapshot, SnapshotOptions};
+pub use support_matrix::{SupportMatrixColumn, assert_support_matrix_row};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SceneSummary {

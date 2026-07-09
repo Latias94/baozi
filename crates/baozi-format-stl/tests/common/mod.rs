@@ -60,7 +60,8 @@ pub fn import_bytes_result(
     io.insert(path.clone(), Arc::<[u8]>::from(bytes));
     let mut ctx = ImportContext::with_options(&io, path, options);
     let result = StlImporter.read(&mut ctx);
-    Ok((result, ctx.diagnostics))
+    let diagnostics = ctx.into_diagnostics();
+    Ok((result, diagnostics))
 }
 
 pub fn expected_error(result: Result<Scene>) -> Result<BaoziError> {

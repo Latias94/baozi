@@ -40,11 +40,20 @@ impl ImporterRegistry {
         Self::default()
     }
 
-    pub fn register<I>(&mut self, importer: I)
+    pub fn register<I>(&mut self, importer: I) -> Result<()>
     where
         I: FormatImporter,
     {
+        let info = importer.info();
+        if self
+            .importers
+            .iter()
+            .any(|existing| existing.info().id() == info.id())
+        {
+            return Err(BaoziError::duplicate_format_id(info.id()));
+        }
         self.importers.push(Box::new(importer));
+        Ok(())
     }
 
     pub fn formats(&self) -> impl Iterator<Item = FormatInfo> + '_ {
@@ -57,7 +66,7 @@ impl ImporterRegistry {
             .iter()
             .filter_map(|importer| {
                 let info = importer.info();
-                info.extensions
+                info.extensions()
                     .iter()
                     .any(|candidate| candidate.eq_ignore_ascii_case(&extension))
                     .then_some(importer.as_ref())
@@ -185,7 +194,7 @@ fn rewind(input: &mut dyn ReadSeek, hint: &ReadHint) -> Result<()> {
 fn extension_matches(info: &FormatInfo, hint: &ReadHint) -> bool {
     hint.extension.as_deref().is_some_and(|extension| {
         let extension = extension.trim_start_matches('.');
-        info.extensions
+        info.extensions()
             .iter()
             .any(|candidate| candidate.eq_ignore_ascii_case(extension))
     })
@@ -211,7 +220,7 @@ fn select_best<'a>(
 
             Err(BaoziError::ambiguous_format(
                 hint.display_hint(),
-                many.iter().map(|candidate| candidate.info.id),
+                many.iter().map(|candidate| candidate.info.id()),
             ))
         }
     }
@@ -242,14 +251,10 @@ mod tests {
 
     impl FormatImporter for DummyImporter {
         fn info(&self) -> FormatInfo {
-            FormatInfo {
-                id: "dummy",
-                display_name: "Dummy",
-                extensions: &["dum"],
-                maturity: FormatMaturity::Experimental,
-                capabilities: &[(FormatCapability::Geometry, CapabilityStatus::Unknown)],
-                notes: "test importer",
-            }
+            FormatInfo::new("dummy", "Dummy", &["dum"])
+                .with_maturity(FormatMaturity::Experimental)
+                .with_capabilities(&[(FormatCapability::Geometry, CapabilityStatus::Unknown)])
+                .with_notes("test importer")
         }
 
         fn can_read(
@@ -267,14 +272,10 @@ mod tests {
 
     impl FormatImporter for ReadsOneByteImporter {
         fn info(&self) -> FormatInfo {
-            FormatInfo {
-                id: "reads-one-byte",
-                display_name: "Reads One Byte",
-                extensions: &["one"],
-                maturity: FormatMaturity::Experimental,
-                capabilities: &[(FormatCapability::Geometry, CapabilityStatus::Unknown)],
-                notes: "test importer",
-            }
+            FormatInfo::new("reads-one-byte", "Reads One Byte", &["one"])
+                .with_maturity(FormatMaturity::Experimental)
+                .with_capabilities(&[(FormatCapability::Geometry, CapabilityStatus::Unknown)])
+                .with_notes("test importer")
         }
 
         fn can_read(
@@ -296,14 +297,10 @@ mod tests {
 
     impl FormatImporter for GreedyImporter {
         fn info(&self) -> FormatInfo {
-            FormatInfo {
-                id: "greedy",
-                display_name: "Greedy",
-                extensions: &["greedy"],
-                maturity: FormatMaturity::Experimental,
-                capabilities: &[(FormatCapability::Geometry, CapabilityStatus::Unknown)],
-                notes: "test importer",
-            }
+            FormatInfo::new("greedy", "Greedy", &["greedy"])
+                .with_maturity(FormatMaturity::Experimental)
+                .with_capabilities(&[(FormatCapability::Geometry, CapabilityStatus::Unknown)])
+                .with_notes("test importer")
         }
 
         fn can_read(
@@ -326,15 +323,25 @@ mod tests {
     #[test]
     fn finds_importer_by_extension() {
         let mut registry = ImporterRegistry::new();
-        registry.register(DummyImporter);
+        registry.register(DummyImporter).unwrap();
         assert_eq!(registry.by_extension("dum").len(), 1);
         assert!(registry.by_extension("obj").is_empty());
     }
 
     #[test]
+    fn rejects_duplicate_format_ids() {
+        let mut registry = ImporterRegistry::new();
+
+        registry.register(DummyImporter).unwrap();
+        let error = registry.register(DummyImporter).unwrap_err();
+
+        assert_eq!(error.kind(), baozi_core::BaoziErrorKind::DuplicateFormatId);
+    }
+
+    #[test]
     fn detect_rewinds_input_after_probe() {
         let mut registry = ImporterRegistry::new();
-        registry.register(ReadsOneByteImporter);
+        registry.register(ReadsOneByteImporter).unwrap();
         let source = AssetPath::new("mesh.one").unwrap();
         let hint = ReadHint::from_source(source);
         let mut input = Cursor::new(vec![42, 43, 44]);
@@ -347,7 +354,7 @@ mod tests {
     #[test]
     fn detect_enforces_probe_byte_limit() {
         let mut registry = ImporterRegistry::new();
-        registry.register(GreedyImporter);
+        registry.register(GreedyImporter).unwrap();
         let source = AssetPath::new("mesh.greedy").unwrap();
         let hint = ReadHint::from_source(source);
         let mut input = Cursor::new(vec![1, 2, 3]);

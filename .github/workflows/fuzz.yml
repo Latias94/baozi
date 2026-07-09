@@ -27,6 +27,7 @@ jobs:
         target:
           - stl_import
           - obj_import
+          - obj_postprocess
     steps:
       - name: Checkout
         uses: actions/checkout@v7

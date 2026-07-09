@@ -8,20 +8,20 @@ mod parser;
 
 use baozi_core::{Result, Scene};
 use baozi_import::{
-    CapabilityStatus, FormatCapability, FormatImporter, FormatInfo, FormatMaturity, ImportContext,
-    ImporterRegistry, ReadConfidence, ReadHint,
+    CapabilityStatus, FormatCapability, FormatEncoding, FormatImporter, FormatInfo, FormatMaturity,
+    FormatSidecarPolicy, ImportContext, ImporterRegistry, ReadConfidence, ReadHint,
 };
 use baozi_io::ReadSeek;
 
 pub struct ObjImporter;
 
 pub fn format_info() -> FormatInfo {
-    FormatInfo {
-        id: "obj",
-        display_name: "Wavefront OBJ",
-        extensions: &["obj"],
-        maturity: FormatMaturity::Experimental,
-        capabilities: &[
+    FormatInfo::new("obj", "Wavefront OBJ", &["obj"])
+        .with_media_types(&["model/obj", "text/plain"])
+        .with_encoding(FormatEncoding::Text)
+        .with_sidecar_policy(FormatSidecarPolicy::Optional)
+        .with_maturity(FormatMaturity::Experimental)
+        .with_capabilities(&[
             (FormatCapability::Geometry, CapabilityStatus::Supported),
             (FormatCapability::Hierarchy, CapabilityStatus::Partial),
             (FormatCapability::Materials, CapabilityStatus::Partial),
@@ -50,13 +50,13 @@ pub fn format_info() -> FormatInfo {
                 FormatCapability::ResourceLimits,
                 CapabilityStatus::Supported,
             ),
-        ],
-        notes: "experimental OBJ/MTL importer for static face meshes and external texture URI references",
-    }
+        ])
+        .with_notes("experimental OBJ/MTL importer for static face meshes and external texture URI references")
+        .with_docs_path("docs/formats/obj.md")
 }
 
-pub fn register(registry: &mut ImporterRegistry) {
-    registry.register(ObjImporter);
+pub fn register(registry: &mut ImporterRegistry) -> Result<()> {
+    registry.register(ObjImporter)
 }
 
 impl FormatImporter for ObjImporter {
@@ -70,5 +70,29 @@ impl FormatImporter for ObjImporter {
 
     fn read(&self, ctx: &mut ImportContext<'_>) -> Result<Scene> {
         parser::read_obj(ctx)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use baozi_test_support::{SupportMatrixColumn, assert_support_matrix_row};
+
+    #[test]
+    fn support_matrix_matches_format_info() {
+        assert_support_matrix_row(
+            "baozi-format-obj",
+            &format_info(),
+            &[
+                (SupportMatrixColumn::Geometry, FormatCapability::Geometry),
+                (SupportMatrixColumn::Materials, FormatCapability::Materials),
+                (SupportMatrixColumn::Textures, FormatCapability::Textures),
+                (SupportMatrixColumn::Animation, FormatCapability::Animation),
+                (
+                    SupportMatrixColumn::Diagnostics,
+                    FormatCapability::Diagnostics,
+                ),
+            ],
+        );
     }
 }

@@ -27,7 +27,7 @@ fuzz_target!(|data: &[u8]| {
     options.io.external_references = ExternalReferencePolicy::CustomResolver;
 
     let mut importer = Importer::empty();
-    importer.register(baozi_format_obj::ObjImporter);
+    importer.register(baozi_format_obj::ObjImporter).unwrap();
 
     let _ = importer.read_asset_with_options(&io, obj_path, options);
 });

@@ -13,15 +13,12 @@ authors.workspace = true
 default = ["std", "default-formats"]
 std = []
 native-fs = ["std", "baozi-io/fs"]
-default-formats = ["format-stl", "format-obj", "format-ply"]
+default-formats = ["format-stl", "format-obj"]
 all-formats = ["format-stl", "format-obj", "format-ply", "format-gltf"]
 format-stl = ["dep:baozi-format-stl"]
 format-obj = ["dep:baozi-format-obj"]
 format-ply = ["dep:baozi-format-ply"]
 format-gltf = ["dep:baozi-format-gltf"]
-parallel = []
-simd = []
-async = []
 tracing = ["dep:tracing"]
 mint = ["baozi-core/mint"]
 
@@ -35,3 +32,10 @@ baozi-format-obj = { workspace = true, optional = true }
 baozi-format-ply = { workspace = true, optional = true }
 baozi-format-gltf = { workspace = true, optional = true }
 tracing = { workspace = true, optional = true }
+
+[dev-dependencies]
+criterion.workspace = true
+
+[[bench]]
+name = "import_baseline"
+harness = false

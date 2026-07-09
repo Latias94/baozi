@@ -3,6 +3,19 @@ use thiserror::Error;
 
 pub type Result<T> = std::result::Result<T, BaoziError>;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum BaoziErrorKind {
+    Io,
+    UnsupportedFormat,
+    DuplicateFormatId,
+    AmbiguousFormat,
+    Parse,
+    InvalidScene,
+    PostProcess,
+    FeatureUnsupported,
+    LimitExceeded,
+}
+
 #[derive(Debug, Error, Clone, PartialEq)]
 pub enum BaoziError {
     #[error("io error while reading {asset}: {message}")]
@@ -10,6 +23,9 @@ pub enum BaoziError {
 
     #[error("unsupported format: {hint}")]
     UnsupportedFormat { hint: String },
+
+    #[error("duplicate format id: {id}")]
+    DuplicateFormatId { id: String },
 
     #[error("ambiguous format for {hint}: {}", candidates.join(", "))]
     AmbiguousFormat {
@@ -41,6 +57,20 @@ pub enum BaoziError {
 }
 
 impl BaoziError {
+    pub const fn kind(&self) -> BaoziErrorKind {
+        match self {
+            Self::Io { .. } => BaoziErrorKind::Io,
+            Self::UnsupportedFormat { .. } => BaoziErrorKind::UnsupportedFormat,
+            Self::DuplicateFormatId { .. } => BaoziErrorKind::DuplicateFormatId,
+            Self::AmbiguousFormat { .. } => BaoziErrorKind::AmbiguousFormat,
+            Self::Parse { .. } => BaoziErrorKind::Parse,
+            Self::InvalidScene { .. } => BaoziErrorKind::InvalidScene,
+            Self::PostProcess { .. } => BaoziErrorKind::PostProcess,
+            Self::FeatureUnsupported { .. } => BaoziErrorKind::FeatureUnsupported,
+            Self::LimitExceeded { .. } => BaoziErrorKind::LimitExceeded,
+        }
+    }
+
     pub fn io(source: impl Into<String>, message: impl Into<String>) -> Self {
         Self::Io {
             asset: source.into(),
@@ -50,6 +80,10 @@ impl BaoziError {
 
     pub fn unsupported_format(hint: impl Into<String>) -> Self {
         Self::UnsupportedFormat { hint: hint.into() }
+    }
+
+    pub fn duplicate_format_id(id: impl Into<String>) -> Self {
+        Self::DuplicateFormatId { id: id.into() }
     }
 
     pub fn ambiguous_format(
@@ -71,6 +105,64 @@ impl BaoziError {
             asset: source.into(),
             location: SourceLocationDisplay(location),
             message: message.into(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn error_variants_have_machine_readable_kinds() {
+        let cases = [
+            (BaoziError::io("asset", "denied"), BaoziErrorKind::Io),
+            (
+                BaoziError::unsupported_format("foo"),
+                BaoziErrorKind::UnsupportedFormat,
+            ),
+            (
+                BaoziError::duplicate_format_id("obj"),
+                BaoziErrorKind::DuplicateFormatId,
+            ),
+            (
+                BaoziError::ambiguous_format("mesh", ["a", "b"]),
+                BaoziErrorKind::AmbiguousFormat,
+            ),
+            (
+                BaoziError::parse("mesh", None, "bad"),
+                BaoziErrorKind::Parse,
+            ),
+            (
+                BaoziError::InvalidScene {
+                    message: "bad scene".to_owned(),
+                },
+                BaoziErrorKind::InvalidScene,
+            ),
+            (
+                BaoziError::PostProcess {
+                    step: "Triangulate",
+                    message: "bad".to_owned(),
+                },
+                BaoziErrorKind::PostProcess,
+            ),
+            (
+                BaoziError::FeatureUnsupported {
+                    format: "obj",
+                    feature: "curves".to_owned(),
+                },
+                BaoziErrorKind::FeatureUnsupported,
+            ),
+            (
+                BaoziError::LimitExceeded {
+                    limit: "max_vertices",
+                },
+                BaoziErrorKind::LimitExceeded,
+            ),
+        ];
+
+        for (error, expected) in cases {
+            assert_eq!(error.kind(), expected);
         }
     }
 }

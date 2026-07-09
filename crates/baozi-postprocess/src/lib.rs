@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 //! Baozi post-process pipeline contracts.
 
 pub mod pipeline;

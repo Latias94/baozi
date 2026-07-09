@@ -8,7 +8,7 @@
 - Default feature: `format-stl`
 - Parser backend: Baozi-owned hand-written parser
 - Supported extensions: `.stl`
-- Supported media types: none declared by this crate
+- Supported media types: `model/stl`, `application/sla`
 - Primary references: STL de facto ASCII and binary encodings; Assimp STL behavior as a clean-room behavior reference only
 
 ## Capability Matrix

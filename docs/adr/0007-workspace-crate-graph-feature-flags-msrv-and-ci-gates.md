@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: accepted
 date: 2026-07-09
 authors:
   - Codex
@@ -164,7 +164,10 @@ tracing
 
 Rules:
 
-- `default-formats` includes only stable, low-surprise formats.
+- Capability flags are added only when they have behavior, tests, and dependency semantics. Planned
+  async, SIMD, and parallel support must not be published as empty facade features.
+- `default-formats` includes only implemented, CI-gated, low-surprise formats. Planned stubs must
+  stay opt-in through their explicit `format-*` feature until they import real assets.
 - `all-formats` includes supported pure-Rust non-FFI formats, not experimental or heavyweight native
   dependencies by default.
 - FFI-backed importers must be opt-in with explicit feature names.
@@ -213,8 +216,8 @@ Additional gates once dependencies and features exist:
 cargo check --workspace --no-default-features
 cargo check -p baozi --features default-formats
 cargo check -p baozi --features all-formats
-cargo check -p baozi --target wasm32-unknown-unknown --no-default-features --features format-stl
-cargo check -p baozi --target wasm32-wasip1 --no-default-features --features format-stl,native-fs
+cargo check -p baozi --target wasm32-unknown-unknown --no-default-features --features format-stl,format-obj
+cargo check -p baozi --target wasm32-wasip1 --no-default-features --features format-stl,format-obj,native-fs
 cargo deny check
 cargo test --doc --workspace
 ```

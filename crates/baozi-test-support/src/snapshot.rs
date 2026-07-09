@@ -1,6 +1,7 @@
 use baozi_core::{
-    Color, Diagnostic, DiagnosticSeverity, Material, Mesh, MetadataMap, Node, Scene,
-    SourceLocation, Texture, TextureSource,
+    Animation, AnimationValues, Camera, CameraProjection, Color, Diagnostic, DiagnosticSeverity,
+    Light, Material, Mesh, MetadataMap, Node, Scene, Skin, SourceLocation, Texture, TextureSource,
+    VertexAttributeData,
 };
 use std::fmt;
 
@@ -43,17 +44,18 @@ impl SceneSnapshot {
         line(
             &mut text,
             format_args!(
-                "scene nodes={} meshes={} materials={} textures={} animations={} cameras={} lights={}",
+                "scene nodes={} meshes={} materials={} textures={} animations={} cameras={} lights={} skins={}",
                 scene.nodes.len(),
                 scene.meshes.len(),
                 scene.materials.len(),
                 scene.textures.len(),
                 scene.animations.len(),
                 scene.cameras.len(),
-                scene.lights.len()
+                scene.lights.len(),
+                scene.skins.len()
             ),
         );
-        line(&mut text, format_args!("root {}", scene.root.0));
+        line(&mut text, format_args!("root {}", scene.root.as_u32()));
         line(
             &mut text,
             format_args!(
@@ -81,6 +83,18 @@ impl SceneSnapshot {
         for (index, material) in scene.materials.iter().enumerate() {
             write_material(&mut text, index, material, options.float_precision);
         }
+        for (index, skin) in scene.skins.iter().enumerate() {
+            write_skin(&mut text, index, skin);
+        }
+        for (index, camera) in scene.cameras.iter().enumerate() {
+            write_camera(&mut text, index, camera, options.float_precision);
+        }
+        for (index, light) in scene.lights.iter().enumerate() {
+            write_light(&mut text, index, light, options.float_precision);
+        }
+        for (index, animation) in scene.animations.iter().enumerate() {
+            write_animation(&mut text, index, animation);
+        }
         write_diagnostics(&mut text, diagnostics);
 
         Self { text }
@@ -105,11 +119,13 @@ fn write_node(text: &mut String, index: usize, node: &Node) {
     line(
         text,
         format_args!(
-            "node {index} name={} parent={} children={} meshes={} metadata={}",
+            "node {index} name={} parent={} children={} meshes={} camera={} light={} metadata={}",
             optional_str(node.name.as_deref()),
-            optional_id(node.parent.map(|id| id.0)),
-            id_list(node.children.iter().map(|id| id.0)),
-            id_list(node.meshes.iter().map(|id| id.0)),
+            optional_id(node.parent.map(|id| id.as_u32())),
+            id_list(node.children.iter().map(|id| id.as_u32())),
+            id_list(node.meshes.iter().map(|id| id.as_u32())),
+            optional_id(node.camera.map(|id| id.as_u32())),
+            optional_id(node.light.map(|id| id.as_u32())),
             metadata_keys(&node.metadata)
         ),
     );
@@ -119,14 +135,18 @@ fn write_mesh(text: &mut String, index: usize, mesh: &Mesh, options: SnapshotOpt
     line(
         text,
         format_args!(
-            "mesh {index} name={} topology={:?} vertices={} indices={} faces={} material={} metadata={} bounds={}",
+            "mesh {index} name={} topology={:?} vertices={} indices={} faces={} material={} skin={} joints={} morph_targets={} custom_attributes={} metadata={} bounds={}",
             optional_str(mesh.name.as_deref()),
             mesh.topology,
             mesh.positions.len(),
             mesh.indices.len(),
             mesh.polygon_face_count()
                 .map_or_else(|| "<fixed>".to_owned(), |count| count.to_string()),
-            optional_id(mesh.material.map(|id| id.0)),
+            optional_id(mesh.material.map(|id| id.as_u32())),
+            optional_id(mesh.skin.map(|id| id.as_u32())),
+            mesh.joint_indices.len(),
+            mesh.morph_targets.len(),
+            mesh.custom_attributes.len(),
             metadata_keys(&mesh.metadata),
             bounds(mesh, options.float_precision)
         ),
@@ -134,6 +154,7 @@ fn write_mesh(text: &mut String, index: usize, mesh: &Mesh, options: SnapshotOpt
 
     write_vec3_rows(text, "positions", &mesh.positions, options);
     write_vec3_rows(text, "normals", &mesh.normals, options);
+    write_vec4_rows(text, "tangents", &mesh.tangents, options);
     for (channel, texcoords) in mesh.texcoords.iter().enumerate() {
         write_vec2_rows(text, &format!("texcoords[{channel}]"), texcoords, options);
     }
@@ -148,15 +169,47 @@ fn write_mesh(text: &mut String, index: usize, mesh: &Mesh, options: SnapshotOpt
             u32_list(&mesh.face_vertex_counts)
         ),
     );
+    for (target_index, target) in mesh.morph_targets.iter().enumerate() {
+        line(
+            text,
+            format_args!(
+                "  morph_target {target_index} name={} positions={} normals={} tangents={} metadata={}",
+                optional_str(target.name.as_deref()),
+                target.positions.len(),
+                target.normals.len(),
+                target.tangents.len(),
+                metadata_keys(&target.metadata)
+            ),
+        );
+    }
+    for (attribute_index, attribute) in mesh.custom_attributes.iter().enumerate() {
+        line(
+            text,
+            format_args!(
+                "  custom_attribute {attribute_index} name={} semantic={:?} len={} metadata={}",
+                attribute.name,
+                attribute.semantic,
+                attribute.data.len(),
+                metadata_keys(&attribute.metadata)
+            ),
+        );
+        write_attribute_preview(text, attribute_index, &attribute.data, options);
+    }
 }
 
 fn write_texture(text: &mut String, index: usize, texture: &Texture) {
     line(
         text,
         format_args!(
-            "texture {index} name={} source={}",
+            "texture {index} name={} source={} sampler=mag:{:?},min:{:?},wrap:{:?}/{:?}/{:?} metadata={}",
             optional_str(texture.name.as_deref()),
-            texture_source(&texture.source)
+            texture_source(&texture.source),
+            texture.sampler.mag_filter,
+            texture.sampler.min_filter,
+            texture.sampler.wrap_s,
+            texture.sampler.wrap_t,
+            texture.sampler.wrap_r,
+            metadata_keys(&texture.metadata)
         ),
     );
 }
@@ -165,7 +218,7 @@ fn write_material(text: &mut String, index: usize, material: &Material, precisio
     line(
         text,
         format_args!(
-            "material {index} name={} shading={:?} base={} metallic={} roughness={} emissive={} alpha={:?} double_sided={} textures={} metadata={}",
+            "material {index} name={} shading={:?} base={} metallic={} roughness={} emissive={} alpha={:?} double_sided={} textures={} properties={} metadata={}",
             optional_str(material.name.as_deref()),
             material.shading_model,
             color(material.base_color, precision),
@@ -175,6 +228,7 @@ fn write_material(text: &mut String, index: usize, material: &Material, precisio
             material.alpha_mode,
             material.double_sided,
             material.texture_slots.len(),
+            property_keys(material),
             metadata_keys(&material.metadata)
         ),
     );
@@ -182,13 +236,85 @@ fn write_material(text: &mut String, index: usize, material: &Material, precisio
         line(
             text,
             format_args!(
-                "  slot {slot_index} texture={} role={:?} color_space={:?} uv_set={} scale={} source_key={}",
-                slot.texture.0,
+                "  slot {slot_index} texture={} role={:?} color_space={:?} uv_set={} scale={} transform=offset{} rotation={} scale{} texcoord={} source_key={}",
+                slot.texture.as_u32(),
                 slot.role,
                 slot.color_space,
                 slot.uv_set,
                 f32_value(slot.scale, precision),
+                vec2(slot.transform.offset, precision),
+                f32_value(slot.transform.rotation_radians, precision),
+                vec2(slot.transform.scale, precision),
+                optional_id(slot.transform.texcoord),
                 optional_str(slot.source_key.as_deref())
+            ),
+        );
+    }
+}
+
+fn write_skin(text: &mut String, index: usize, skin: &Skin) {
+    line(
+        text,
+        format_args!(
+            "skin {index} name={} joints={} inverse_bind_matrices={} skeleton_root={} metadata={}",
+            optional_str(skin.name.as_deref()),
+            id_list(skin.joints.iter().map(|id| id.as_u32())),
+            skin.inverse_bind_matrices.len(),
+            optional_id(skin.skeleton_root.map(|id| id.as_u32())),
+            metadata_keys(&skin.metadata)
+        ),
+    );
+}
+
+fn write_camera(text: &mut String, index: usize, camera: &Camera, precision: usize) {
+    line(
+        text,
+        format_args!(
+            "camera {index} name={} projection={} metadata={}",
+            optional_str(camera.name.as_deref()),
+            camera_projection(&camera.projection, precision),
+            metadata_keys(&camera.metadata)
+        ),
+    );
+}
+
+fn write_light(text: &mut String, index: usize, light: &Light, precision: usize) {
+    line(
+        text,
+        format_args!(
+            "light {index} name={} kind={:?} color={} intensity={} range={} cones={}/{} metadata={}",
+            optional_str(light.name.as_deref()),
+            light.kind,
+            color(light.color, precision),
+            f32_value(light.intensity, precision),
+            optional_f32(light.range, precision),
+            optional_f32(light.inner_cone_angle, precision),
+            optional_f32(light.outer_cone_angle, precision),
+            metadata_keys(&light.metadata)
+        ),
+    );
+}
+
+fn write_animation(text: &mut String, index: usize, animation: &Animation) {
+    line(
+        text,
+        format_args!(
+            "animation {index} name={} channels={} metadata={}",
+            optional_str(animation.name.as_deref()),
+            animation.channels.len(),
+            metadata_keys(&animation.metadata)
+        ),
+    );
+    for (channel_index, channel) in animation.channels.iter().enumerate() {
+        line(
+            text,
+            format_args!(
+                "  channel {channel_index} node={} property={:?} interpolation={:?} times={} values={}",
+                channel.target.node.as_u32(),
+                channel.target.property,
+                channel.interpolation,
+                channel.times_seconds.len(),
+                animation_value_count(&channel.values)
             ),
         );
     }
@@ -243,6 +369,28 @@ fn write_vec3_rows(
     }
 }
 
+fn write_vec4_rows(
+    text: &mut String,
+    name: &str,
+    values: &[baozi_core::Vec4],
+    options: SnapshotOptions,
+) {
+    let shown = values.len().min(options.max_vertices_per_mesh);
+    line(
+        text,
+        format_args!("  {name} count={} shown={shown}", values.len()),
+    );
+    for (index, value) in values.iter().take(shown).enumerate() {
+        line(
+            text,
+            format_args!(
+                "    {name}[{index}]={}",
+                vec4(*value, options.float_precision)
+            ),
+        );
+    }
+}
+
 fn write_vec2_rows(
     text: &mut String,
     name: &str,
@@ -262,6 +410,88 @@ fn write_vec2_rows(
                 vec2(*value, options.float_precision)
             ),
         );
+    }
+}
+
+fn write_attribute_preview(
+    text: &mut String,
+    attribute_index: usize,
+    data: &VertexAttributeData,
+    options: SnapshotOptions,
+) {
+    let shown = data.len().min(options.max_vertices_per_mesh);
+    match data {
+        VertexAttributeData::F32(values) => {
+            for (index, value) in values.iter().take(shown).enumerate() {
+                line(
+                    text,
+                    format_args!(
+                        "    custom_attribute[{attribute_index}][{index}]={}",
+                        f32_value(*value, options.float_precision)
+                    ),
+                );
+            }
+        }
+        VertexAttributeData::Vec2(values) => {
+            for (index, value) in values.iter().take(shown).enumerate() {
+                line(
+                    text,
+                    format_args!(
+                        "    custom_attribute[{attribute_index}][{index}]={}",
+                        vec2(*value, options.float_precision)
+                    ),
+                );
+            }
+        }
+        VertexAttributeData::Vec3(values) => {
+            for (index, value) in values.iter().take(shown).enumerate() {
+                line(
+                    text,
+                    format_args!(
+                        "    custom_attribute[{attribute_index}][{index}]={}",
+                        vec3(*value, options.float_precision)
+                    ),
+                );
+            }
+        }
+        VertexAttributeData::Vec4(values) => {
+            for (index, value) in values.iter().take(shown).enumerate() {
+                line(
+                    text,
+                    format_args!(
+                        "    custom_attribute[{attribute_index}][{index}]={}",
+                        vec4(*value, options.float_precision)
+                    ),
+                );
+            }
+        }
+        VertexAttributeData::U16x4(values) => {
+            for (index, value) in values.iter().take(shown).enumerate() {
+                line(
+                    text,
+                    format_args!(
+                        "    custom_attribute[{attribute_index}][{index}]=[{},{},{},{}]",
+                        value[0], value[1], value[2], value[3]
+                    ),
+                );
+            }
+        }
+        VertexAttributeData::U32(values) => {
+            for (index, value) in values.iter().take(shown).enumerate() {
+                line(
+                    text,
+                    format_args!("    custom_attribute[{attribute_index}][{index}]={value}"),
+                );
+            }
+        }
+        VertexAttributeData::I32(values) => {
+            for (index, value) in values.iter().take(shown).enumerate() {
+                line(
+                    text,
+                    format_args!("    custom_attribute[{attribute_index}][{index}]={value}"),
+                );
+            }
+        }
     }
 }
 
@@ -297,6 +527,11 @@ fn bounds(mesh: &Mesh, precision: usize) -> String {
 
 fn metadata_keys(metadata: &MetadataMap) -> String {
     let keys: Vec<_> = metadata.keys().map(String::as_str).collect();
+    format!("[{}]", keys.join(","))
+}
+
+fn property_keys(material: &Material) -> String {
+    let keys: Vec<_> = material.properties.keys().map(String::as_str).collect();
     format!("[{}]", keys.join(","))
 }
 
@@ -340,6 +575,16 @@ fn vec3(value: baozi_core::Vec3, precision: usize) -> String {
     )
 }
 
+fn vec4(value: baozi_core::Vec4, precision: usize) -> String {
+    format!(
+        "({},{},{},{})",
+        f32_value(value.x, precision),
+        f32_value(value.y, precision),
+        f32_value(value.z, precision),
+        f32_value(value.w, precision)
+    )
+}
+
 fn color(value: Color, precision: usize) -> String {
     format!(
         "({},{},{},{})",
@@ -348,6 +593,54 @@ fn color(value: Color, precision: usize) -> String {
         f32_value(value.b, precision),
         f32_value(value.a, precision)
     )
+}
+
+fn camera_projection(projection: &CameraProjection, precision: usize) -> String {
+    match projection {
+        CameraProjection::Perspective {
+            yfov_radians,
+            aspect_ratio,
+            znear,
+            zfar,
+        } => format!(
+            "perspective:yfov={} aspect={} znear={} zfar={}",
+            f32_value(*yfov_radians, precision),
+            optional_f32(*aspect_ratio, precision),
+            f32_value(*znear, precision),
+            optional_f32(*zfar, precision)
+        ),
+        CameraProjection::Orthographic {
+            xmag,
+            ymag,
+            znear,
+            zfar,
+        } => format!(
+            "orthographic:xmag={} ymag={} znear={} zfar={}",
+            f32_value(*xmag, precision),
+            f32_value(*ymag, precision),
+            f32_value(*znear, precision),
+            f32_value(*zfar, precision)
+        ),
+        CameraProjection::Unknown => "unknown".to_owned(),
+    }
+}
+
+fn animation_value_count(values: &AnimationValues) -> usize {
+    match values {
+        AnimationValues::Translations(values) => values.len(),
+        AnimationValues::Rotations(values) => values.len(),
+        AnimationValues::Scales(values) => values.len(),
+        AnimationValues::MorphWeights {
+            values,
+            weights_per_keyframe,
+        } => {
+            if *weights_per_keyframe == 0 {
+                0
+            } else {
+                values.len() / weights_per_keyframe
+            }
+        }
+    }
 }
 
 fn optional_f32(value: Option<f32>, precision: usize) -> String {

@@ -1,8 +1,8 @@
 use baozi::{
     AssetPath, AssetScope, BaoziError, Camera, Diagnostic, ImportOptions, ImportReport, Importer,
-    ImporterRegistry, Light, Material, MemoryAssetIo, Mesh, Node, PostProcessPipeline, Scene,
-    Texture,
+    Light, Material, MemoryAssetIo, Mesh, Node, PostProcessPipeline, Scene, Texture,
 };
+use baozi_import::ImporterRegistry;
 
 fn assert_send_sync<T: Send + Sync>() {}
 

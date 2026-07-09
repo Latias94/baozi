@@ -8,7 +8,7 @@
 - Default feature: `format-obj`
 - Parser backend: Baozi-owned hand-written parser
 - Supported extensions: `.obj`
-- Supported media types: none declared by this crate
+- Supported media types: `model/obj`, `text/plain`
 - Primary references: Wavefront OBJ/MTL text conventions; Assimp OBJ/MTL behavior as a clean-room behavior reference only
 
 ## Capability Matrix
@@ -64,7 +64,7 @@ MTL remains optional enrichment. Missing, denied, malformed, or oversized sideca
 - OBJ points, polylines, free-form curves, surfaces, parameter spaces, bevel/interp directives, and exporter behavior are not implemented in this slice.
 - The importer does not repair degenerate faces, generate normals, normalize coordinates, infer units, flip winding, decode image files, or fetch remote assets.
 - `map_Kd` option parsing is intentionally minimal: common option arities are skipped to find the texture path, but option semantics are not applied.
-- MTL PBR extensions are not modeled as first-class material fields yet.
+- MTL PBR extensions are preserved through namespaced material metadata/properties where possible, but are not promoted to first-class PBR fields yet.
 - OBJ and MTL input must be UTF-8 for this experimental support tier.
 
 ## Security Notes

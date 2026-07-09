@@ -8,7 +8,11 @@ repository.workspace = true
 homepage.workspace = true
 documentation.workspace = true
 authors.workspace = true
+publish = false
 
 [dependencies]
 baozi-core.workspace = true
 baozi-import.workspace = true
+
+[dev-dependencies]
+baozi-test-support.workspace = true

@@ -1,6 +1,9 @@
 use baozi_core::{
-    ColorSpace, Material, MaterialId, Mesh, MeshId, Node, NodeId, PrimitiveTopology, SceneBuilder,
-    Texture, TextureId, TextureRole, TextureSlot, TextureSource, Vec3, validate_scene,
+    Animation, AnimationChannel, AnimationInterpolation, AnimationProperty, AnimationTarget,
+    AnimationValues, Camera, CameraId, CameraProjection, ColorSpace, Light, LightId, LightKind,
+    Material, MaterialId, MaterialProperty, Mesh, MeshId, Node, NodeId, PrimitiveTopology,
+    SceneBuilder, Skin, Texture, TextureId, TextureRole, TextureSlot, TextureSource, Vec3,
+    VertexAttribute, VertexAttributeData, VertexAttributeSemantic, validate_scene,
 };
 
 fn valid_triangle_scene() -> baozi_core::Scene {
@@ -133,6 +136,8 @@ fn material_texture_slot_reference_is_valid() {
         source: TextureSource::External {
             uri: "textures/diffuse.png".to_owned(),
         },
+        sampler: Default::default(),
+        metadata: Default::default(),
     });
     let material = builder.add_material(Material {
         texture_slots: vec![TextureSlot {
@@ -141,6 +146,7 @@ fn material_texture_slot_reference_is_valid() {
             color_space: ColorSpace::Srgb,
             uv_set: 0,
             scale: 1.0,
+            transform: Default::default(),
             source_key: Some("map_Kd".to_owned()),
         }],
         ..Material::default()
@@ -178,10 +184,158 @@ fn material_texture_slot_out_of_range_fails() {
         color_space: ColorSpace::Srgb,
         uv_set: 0,
         scale: 1.0,
+        transform: Default::default(),
         source_key: Some("map_Kd".to_owned()),
     });
 
     assert_invalid(&scene, "texture reference");
+}
+
+#[test]
+fn material_property_texture_out_of_range_fails() {
+    let mut scene = valid_triangle_scene();
+    scene.materials[0].properties.insert(
+        "obj:diffuse_texture".to_owned(),
+        MaterialProperty::Texture(TextureId::new(99)),
+    );
+
+    assert_invalid(&scene, "texture reference");
+}
+
+#[test]
+fn unnamespaced_material_property_key_fails() {
+    let mut scene = valid_triangle_scene();
+    scene.materials[0]
+        .properties
+        .insert("roughness".to_owned(), MaterialProperty::F64(1.0));
+
+    assert_invalid(&scene, "must be namespaced");
+}
+
+#[test]
+fn custom_attribute_length_mismatch_fails() {
+    let mut scene = valid_triangle_scene();
+    scene.meshes[0].custom_attributes.push(VertexAttribute {
+        name: "ply:temperature".to_owned(),
+        semantic: VertexAttributeSemantic::Custom("temperature".to_owned()),
+        data: VertexAttributeData::F32(vec![1.0, 2.0]),
+        metadata: Default::default(),
+    });
+
+    assert_invalid(&scene, "length");
+}
+
+#[test]
+fn joint_channels_must_match_vertex_count() {
+    let mut scene = valid_triangle_scene();
+    scene.meshes[0].joint_indices = vec![[0, 1, 2, 3]];
+    scene.meshes[0].joint_weights = vec![[1.0, 0.0, 0.0, 0.0]];
+
+    assert_invalid(&scene, "joint indices and weights");
+}
+
+#[test]
+fn mesh_skin_reference_out_of_range_fails() {
+    let mut scene = valid_triangle_scene();
+    scene.meshes[0].skin = Some(baozi_core::SkinId::new(99));
+
+    assert_invalid(&scene, "skin reference");
+}
+
+#[test]
+fn skin_joint_reference_out_of_range_fails() {
+    let mut scene = valid_triangle_scene();
+    scene.skins.push(Skin {
+        joints: vec![NodeId::new(99)],
+        ..Skin::default()
+    });
+    scene.meshes[0].skin = Some(baozi_core::SkinId::new(0));
+
+    assert_invalid(&scene, "joint reference");
+}
+
+#[test]
+fn node_camera_reference_out_of_range_fails() {
+    let mut scene = valid_triangle_scene();
+    scene.nodes[1].camera = Some(CameraId::new(99));
+
+    assert_invalid(&scene, "camera reference");
+}
+
+#[test]
+fn node_light_reference_out_of_range_fails() {
+    let mut scene = valid_triangle_scene();
+    scene.nodes[1].light = Some(LightId::new(99));
+
+    assert_invalid(&scene, "light reference");
+}
+
+#[test]
+fn camera_projection_values_are_validated() {
+    let mut scene = valid_triangle_scene();
+    scene.cameras.push(Camera {
+        projection: CameraProjection::Perspective {
+            yfov_radians: f32::NAN,
+            aspect_ratio: None,
+            znear: 0.1,
+            zfar: Some(100.0),
+        },
+        ..Camera::default()
+    });
+
+    assert_invalid(&scene, "yfov");
+}
+
+#[test]
+fn light_values_are_validated() {
+    let mut scene = valid_triangle_scene();
+    scene.lights.push(Light {
+        kind: LightKind::Point,
+        intensity: -1.0,
+        ..Light::default()
+    });
+
+    assert_invalid(&scene, "intensity");
+}
+
+#[test]
+fn animation_target_and_sample_counts_are_validated() {
+    let mut scene = valid_triangle_scene();
+    scene.animations.push(Animation {
+        channels: vec![AnimationChannel {
+            target: AnimationTarget {
+                node: NodeId::new(99),
+                property: AnimationProperty::Translation,
+            },
+            interpolation: AnimationInterpolation::Linear,
+            times_seconds: vec![0.0],
+            values: AnimationValues::Translations(vec![Vec3::new(0.0, 0.0, 0.0)]),
+            metadata: Default::default(),
+        }],
+        ..Animation::default()
+    });
+
+    assert_invalid(&scene, "target node");
+}
+
+#[test]
+fn animation_value_count_mismatch_fails() {
+    let mut scene = valid_triangle_scene();
+    scene.animations.push(Animation {
+        channels: vec![AnimationChannel {
+            target: AnimationTarget {
+                node: NodeId::new(0),
+                property: AnimationProperty::Translation,
+            },
+            interpolation: AnimationInterpolation::Linear,
+            times_seconds: vec![0.0, 1.0],
+            values: AnimationValues::Translations(vec![Vec3::new(0.0, 0.0, 0.0)]),
+            metadata: Default::default(),
+        }],
+        ..Animation::default()
+    });
+
+    assert_invalid(&scene, "value count");
 }
 
 #[test]

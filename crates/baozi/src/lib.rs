@@ -1,10 +1,12 @@
+#![forbid(unsafe_code)]
+
 //! Public Baozi facade.
 
 pub use baozi_core::*;
 pub use baozi_import::{
     CapabilityStatus, DetectionOptions, DiagnosticOptions, ExternalReferencePolicy,
-    FormatCapability, FormatImporter, FormatInfo, FormatMaturity, ImportContext, ImportOptions,
-    ImportReport, ImporterRegistry, IoOptions, ReadConfidence, ReadHint,
+    FormatCapability, FormatEncoding, FormatInfo, FormatMaturity, FormatSidecarPolicy,
+    ImportOptions, ImportReport, ImportStage, ImportStats, IoOptions,
 };
 #[cfg(feature = "native-fs")]
 pub use baozi_io::FileSystemAssetIo;
@@ -15,7 +17,7 @@ pub use baozi_postprocess::{
     PostProcessPipeline, PostProcessPreset, PostProcessStage, PostProcessStep,
 };
 
-use baozi_import::ImporterRegistry as Registry;
+use baozi_import::{FormatImporter, ImportContext, ImporterRegistry as Registry, ReadHint};
 use std::sync::Arc;
 
 #[cfg(feature = "native-fs")]
@@ -49,11 +51,11 @@ impl Importer {
         &mut self.registry
     }
 
-    pub fn register<I>(&mut self, importer: I)
+    pub fn register<I>(&mut self, importer: I) -> Result<()>
     where
         I: FormatImporter,
     {
-        self.registry.register(importer);
+        self.registry.register(importer)
     }
 
     pub fn read_bytes(
@@ -83,6 +85,17 @@ impl Importer {
         self.read_asset_with_options(&io, source, options)
     }
 
+    pub fn read_bytes_with_postprocess(
+        &self,
+        source: impl AsRef<str>,
+        bytes: impl AsRef<[u8]>,
+        options: ImportOptions,
+        pipeline: &PostProcessPipeline,
+    ) -> Result<ImportReport> {
+        let report = self.read_bytes_with_options(source, bytes, options)?;
+        Self::apply_postprocess(report, pipeline)
+    }
+
     pub fn read_asset(&self, io: &dyn AssetIo, source: AssetPath) -> Result<ImportReport> {
         self.read_asset_with_options(io, source, ImportOptions::memory())
     }
@@ -102,7 +115,18 @@ impl Importer {
 
         let mut ctx = ImportContext::with_options(io, source, options);
         let scene = selected.importer.read(&mut ctx)?;
-        Ok(ctx.into_report(scene, selected.info))
+        ctx.into_report(scene, selected.info)
+    }
+
+    pub fn read_asset_with_postprocess(
+        &self,
+        io: &dyn AssetIo,
+        source: AssetPath,
+        options: ImportOptions,
+        pipeline: &PostProcessPipeline,
+    ) -> Result<ImportReport> {
+        let report = self.read_asset_with_options(io, source, options)?;
+        Self::apply_postprocess(report, pipeline)
     }
 
     #[cfg(feature = "native-fs")]
@@ -131,21 +155,44 @@ impl Importer {
         self.read_asset_with_options(&io, AssetPath::new(file_name)?, options)
     }
 
+    #[cfg(feature = "native-fs")]
+    pub fn read_path_with_postprocess(
+        &self,
+        path: impl AsRef<Path>,
+        options: ImportOptions,
+        pipeline: &PostProcessPipeline,
+    ) -> Result<ImportReport> {
+        let report = self.read_path_with_options(path, options)?;
+        Self::apply_postprocess(report, pipeline)
+    }
+
+    fn apply_postprocess(
+        report: ImportReport,
+        pipeline: &PostProcessPipeline,
+    ) -> Result<ImportReport> {
+        report.map_scene(ImportStage::PostProcessed, |scene| {
+            let scene = pipeline.run(scene)?;
+            validate_scene(&scene)?;
+            Ok(scene)
+        })
+    }
+
     fn register_default_formats(&mut self) {
         #[cfg(feature = "format-stl")]
-        baozi_format_stl::register(&mut self.registry);
+        baozi_format_stl::register(&mut self.registry).expect("built-in format ids must be unique");
         #[cfg(feature = "format-obj")]
-        baozi_format_obj::register(&mut self.registry);
+        baozi_format_obj::register(&mut self.registry).expect("built-in format ids must be unique");
         #[cfg(feature = "format-ply")]
-        baozi_format_ply::register(&mut self.registry);
+        baozi_format_ply::register(&mut self.registry).expect("built-in format ids must be unique");
         #[cfg(feature = "format-gltf")]
-        baozi_format_gltf::register(&mut self.registry);
+        baozi_format_gltf::register(&mut self.registry)
+            .expect("built-in format ids must be unique");
     }
 }
 
 #[cfg(feature = "native-fs")]
 pub fn load_scene(path: impl AsRef<Path>) -> Result<Scene> {
-    Ok(Importer::new().read_path(path)?.scene)
+    Ok(Importer::new().read_path(path)?.into_scene())
 }
 
 #[cfg(test)]

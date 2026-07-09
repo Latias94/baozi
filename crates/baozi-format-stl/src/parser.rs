@@ -5,7 +5,6 @@ use baozi_core::{
     SceneBuilder, Vec3,
 };
 use baozi_import::ImportContext;
-use std::io::Read;
 
 pub(crate) struct ParsedStl {
     pub storage: &'static str,
@@ -21,13 +20,13 @@ pub(crate) struct ParsedMesh {
 }
 
 pub(crate) fn read_stl(ctx: &mut ImportContext<'_>) -> Result<Scene> {
-    let bytes = read_primary_bytes(ctx)?;
+    let bytes = ctx.read_primary_to_end()?;
     let parsed = match detect_bytes(&bytes) {
         Some(StlKind::Binary { facets }) => binary::parse(ctx, &bytes, facets)?,
         Some(StlKind::Ascii) => ascii::parse(ctx, &bytes)?,
         None => {
             return Err(BaoziError::parse(
-                ctx.source.to_string(),
+                ctx.source().to_string(),
                 None,
                 "input is not recognized as binary or ASCII STL",
             ));
@@ -37,33 +36,15 @@ pub(crate) fn read_stl(ctx: &mut ImportContext<'_>) -> Result<Scene> {
     scene_from_parsed(ctx, parsed)
 }
 
-fn read_primary_bytes(ctx: &ImportContext<'_>) -> Result<Vec<u8>> {
-    let limit = ctx.options.limits.max_primary_asset_bytes;
-    let mut reader = ctx.io.open(&ctx.source)?;
-    let mut bytes = Vec::new();
-    let mut limited = reader.by_ref().take(limit.saturating_add(1));
-    limited
-        .read_to_end(&mut bytes)
-        .map_err(|error| BaoziError::io(ctx.source.to_string(), error.to_string()))?;
-
-    if bytes.len() as u64 > limit {
-        return Err(BaoziError::LimitExceeded {
-            limit: "max_primary_asset_bytes",
-        });
-    }
-
-    Ok(bytes)
-}
-
 fn scene_from_parsed(ctx: &ImportContext<'_>, parsed: ParsedStl) -> Result<Scene> {
     if parsed.meshes.is_empty() {
         return Err(BaoziError::parse(
-            ctx.source.to_string(),
+            ctx.source().to_string(),
             None,
             "STL contains no non-empty solids or facets",
         ));
     }
-    if parsed.meshes.len() > ctx.options.limits.max_meshes {
+    if parsed.meshes.len() > ctx.limits().max_meshes {
         return Err(BaoziError::LimitExceeded {
             limit: "max_meshes",
         });
@@ -85,7 +66,7 @@ fn scene_from_parsed(ctx: &ImportContext<'_>, parsed: ParsedStl) -> Result<Scene
         );
         metadata.insert(
             "stl.source".to_owned(),
-            MetadataValue::String(ctx.source.to_string()),
+            MetadataValue::String(ctx.source().to_string()),
         );
         let mesh = Mesh {
             name: parsed_mesh.name.clone(),

@@ -25,3 +25,4 @@ baozi-test-support = { path = "crates/baozi-test-support" }
 thiserror = "2"
 tracing = "0.1"
 mint = "0.5"
+criterion = { version = "0.5", default-features = false }

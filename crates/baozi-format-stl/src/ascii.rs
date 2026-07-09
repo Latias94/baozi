@@ -7,7 +7,7 @@ use baozi_import::ImportContext;
 pub(crate) fn parse(ctx: &mut ImportContext<'_>, bytes: &[u8]) -> Result<ParsedStl> {
     let text = std::str::from_utf8(bytes).map_err(|error| {
         BaoziError::parse(
-            ctx.source.to_string(),
+            ctx.source().to_string(),
             Some(SourceLocation::byte(error.valid_up_to() as u64)),
             "ASCII STL is not valid UTF-8",
         )
@@ -59,7 +59,7 @@ impl<'ctx, 'import> AsciiParser<'ctx, 'import> {
     }
 
     fn parse_line(&mut self, line: &str, line_number: u32) -> Result<()> {
-        if line.len() > self.ctx.options.limits.max_line_bytes {
+        if line.len() > self.ctx.limits().max_line_bytes {
             return Err(BaoziError::LimitExceeded {
                 limit: "max_line_bytes",
             });
@@ -194,7 +194,7 @@ impl<'ctx, 'import> AsciiParser<'ctx, 'import> {
             .ok_or(BaoziError::LimitExceeded {
                 limit: "max_solids",
             })?;
-        if self.solid_count > self.ctx.options.limits.max_solids {
+        if self.solid_count > self.ctx.limits().max_solids {
             return Err(BaoziError::LimitExceeded {
                 limit: "max_solids",
             });
@@ -220,7 +220,7 @@ impl<'ctx, 'import> AsciiParser<'ctx, 'import> {
             self.ctx.push_diagnostic(Diagnostic {
                 severity: DiagnosticSeverity::Warning,
                 code: DiagnosticCode("stl.empty_solid"),
-                source: Some(self.ctx.source.to_string()),
+                source: Some(self.ctx.source().to_string()),
                 location: Some(current.start),
                 message: "ASCII STL solid contains no facets".to_owned(),
             });
@@ -233,7 +233,7 @@ impl<'ctx, 'import> AsciiParser<'ctx, 'import> {
                     .ok_or(BaoziError::LimitExceeded {
                         limit: "max_meshes",
                     })?;
-            if next_meshes > self.ctx.options.limits.max_meshes {
+            if next_meshes > self.ctx.limits().max_meshes {
                 return Err(BaoziError::LimitExceeded {
                     limit: "max_meshes",
                 });
@@ -255,7 +255,7 @@ impl<'ctx, 'import> AsciiParser<'ctx, 'import> {
             .total_faces
             .checked_add(1)
             .ok_or(BaoziError::LimitExceeded { limit: "max_faces" })?;
-        if next_faces > self.ctx.options.limits.max_faces {
+        if next_faces > self.ctx.limits().max_faces {
             return Err(BaoziError::LimitExceeded { limit: "max_faces" });
         }
 
@@ -265,7 +265,7 @@ impl<'ctx, 'import> AsciiParser<'ctx, 'import> {
                 .ok_or(BaoziError::LimitExceeded {
                     limit: "max_vertices",
                 })?;
-        if next_vertices > self.ctx.options.limits.max_vertices {
+        if next_vertices > self.ctx.limits().max_vertices {
             return Err(BaoziError::LimitExceeded {
                 limit: "max_vertices",
             });
@@ -273,7 +273,7 @@ impl<'ctx, 'import> AsciiParser<'ctx, 'import> {
 
         let Some(current) = self.current.as_mut() else {
             return Err(BaoziError::parse(
-                self.ctx.source.to_string(),
+                self.ctx.source().to_string(),
                 None,
                 "facet encountered outside ASCII STL solid",
             ));
@@ -290,22 +290,22 @@ impl<'ctx, 'import> AsciiParser<'ctx, 'import> {
         match &self.state {
             State::Start => Ok(()),
             State::InSolid => Err(BaoziError::parse(
-                self.ctx.source.to_string(),
+                self.ctx.source().to_string(),
                 None,
                 "ASCII STL ended before endsolid",
             )),
             State::NeedOuterLoop { .. } => Err(BaoziError::parse(
-                self.ctx.source.to_string(),
+                self.ctx.source().to_string(),
                 None,
                 "ASCII STL ended before outer loop",
             )),
             State::InLoop { .. } => Err(BaoziError::parse(
-                self.ctx.source.to_string(),
+                self.ctx.source().to_string(),
                 None,
                 "ASCII STL ended inside facet vertices",
             )),
             State::NeedEndFacet { .. } => Err(BaoziError::parse(
-                self.ctx.source.to_string(),
+                self.ctx.source().to_string(),
                 None,
                 "ASCII STL ended before endfacet",
             )),
@@ -314,7 +314,7 @@ impl<'ctx, 'import> AsciiParser<'ctx, 'import> {
 
     fn parse_error(&self, line: u32, column: u32, message: impl Into<String>) -> BaoziError {
         BaoziError::parse(
-            self.ctx.source.to_string(),
+            self.ctx.source().to_string(),
             Some(location(line, column)),
             message,
         )
@@ -391,7 +391,7 @@ fn push_token<'line>(
     _line_number: u32,
 ) -> Result<()> {
     let text = &line[start..end];
-    if text.len() > ctx.options.limits.max_token_bytes {
+    if text.len() > ctx.limits().max_token_bytes {
         return Err(BaoziError::LimitExceeded {
             limit: "max_token_bytes",
         });
@@ -410,7 +410,7 @@ fn parse_facet_normal(
 ) -> Result<Vec3> {
     if tokens.len() != 5 || !tokens_match(&tokens[..2], &["facet", "normal"]) {
         return Err(BaoziError::parse(
-            ctx.source.to_string(),
+            ctx.source().to_string(),
             tokens
                 .first()
                 .map(|token| location(line_number, token.column)),
@@ -428,7 +428,7 @@ fn parse_vec3(
 ) -> Result<Vec3> {
     if tokens.len() != 4 || !keyword_is(&tokens[0], keyword) {
         return Err(BaoziError::parse(
-            ctx.source.to_string(),
+            ctx.source().to_string(),
             tokens
                 .first()
                 .map(|token| location(line_number, token.column)),
@@ -454,14 +454,14 @@ fn parse_vec3_components(
 fn parse_f32(ctx: &ImportContext<'_>, token: Token<'_>, line_number: u32) -> Result<f32> {
     let value = token.text.parse::<f32>().map_err(|_| {
         BaoziError::parse(
-            ctx.source.to_string(),
+            ctx.source().to_string(),
             Some(location(line_number, token.column)),
             format!("invalid ASCII STL float '{}'", token.text),
         )
     })?;
     if !value.is_finite() {
         return Err(BaoziError::parse(
-            ctx.source.to_string(),
+            ctx.source().to_string(),
             Some(location(line_number, token.column)),
             "ASCII STL float is non-finite",
         ));
@@ -470,7 +470,7 @@ fn parse_f32(ctx: &ImportContext<'_>, token: Token<'_>, line_number: u32) -> Res
 }
 
 fn checked_name(ctx: &ImportContext<'_>, name: &str) -> Result<String> {
-    if name.len() > ctx.options.limits.max_string_bytes {
+    if name.len() > ctx.limits().max_string_bytes {
         return Err(BaoziError::LimitExceeded {
             limit: "max_string_bytes",
         });

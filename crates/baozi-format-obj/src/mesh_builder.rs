@@ -88,7 +88,7 @@ impl SegmentBuilder {
     ) -> Result<()> {
         if face.vertices.len() < 3 {
             return Err(BaoziError::parse(
-                ctx.source.to_string(),
+                ctx.source().to_string(),
                 None,
                 "OBJ face must have at least three vertices",
             ));
@@ -122,7 +122,7 @@ impl SegmentBuilder {
             .ok_or(BaoziError::LimitExceeded {
                 limit: "max_vertices",
             })?;
-        if next > ctx.options.limits.max_vertices || next > u32::MAX as usize {
+        if next > ctx.limits().max_vertices || next > u32::MAX as usize {
             return Err(BaoziError::LimitExceeded {
                 limit: "max_vertices",
             });
@@ -205,7 +205,7 @@ pub(crate) fn scene_from_parsed(
 ) -> Result<Scene> {
     if parsed.faces.is_empty() {
         return Err(BaoziError::parse(
-            ctx.source.to_string(),
+            ctx.source().to_string(),
             None,
             "OBJ contains no faces",
         ));
@@ -226,7 +226,7 @@ pub(crate) fn scene_from_parsed(
         }
         let Some(segment) = current.as_mut() else {
             return Err(BaoziError::parse(
-                ctx.source.to_string(),
+                ctx.source().to_string(),
                 None,
                 "OBJ mesh segment could not be created",
             ));
@@ -254,7 +254,7 @@ fn flush_segment(
         .ok_or(BaoziError::LimitExceeded {
             limit: "max_meshes",
         })?;
-    if next_meshes > ctx.options.limits.max_meshes {
+    if next_meshes > ctx.limits().max_meshes {
         return Err(BaoziError::LimitExceeded {
             limit: "max_meshes",
         });
@@ -295,7 +295,7 @@ fn resolve_material(
     } else {
         mtl::push_warning(
             ctx,
-            ctx.source.to_string(),
+            ctx.source().to_string(),
             None,
             "obj.material_missing",
             format!("OBJ material '{name}' was referenced but not defined"),
@@ -331,6 +331,8 @@ fn material_from_parsed(builder: &mut SceneBuilder, parsed: &ParsedMaterial) -> 
             source: TextureSource::External {
                 uri: texture.uri.clone(),
             },
+            sampler: Default::default(),
+            metadata: Default::default(),
         });
         material.texture_slots.push(TextureSlot {
             texture: texture_id,
@@ -338,6 +340,7 @@ fn material_from_parsed(builder: &mut SceneBuilder, parsed: &ParsedMaterial) -> 
             color_space: ColorSpace::Srgb,
             uv_set: 0,
             scale: 1.0,
+            transform: Default::default(),
             source_key: Some(texture.source_key.to_owned()),
         });
     }

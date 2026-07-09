@@ -45,6 +45,31 @@ impl PostProcessStep {
     pub fn is_destructive(self) -> bool {
         !matches!(self, Self::ValidateScene | Self::GenerateBoundingBoxes)
     }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::ValidateScene => "ValidateScene",
+            Self::ApplyGlobalScale => "ApplyGlobalScale",
+            Self::NormalizeCoordinates => "NormalizeCoordinates",
+            Self::Triangulate => "Triangulate",
+            Self::SortByPrimitiveType => "SortByPrimitiveType",
+            Self::FindDegenerates => "FindDegenerates",
+            Self::FindInvalidData => "FindInvalidData",
+            Self::JoinIdenticalVertices => "JoinIdenticalVertices",
+            Self::GenerateNormals => "GenerateNormals",
+            Self::GenerateTangents => "GenerateTangents",
+            Self::GenerateBoundingBoxes => "GenerateBoundingBoxes",
+            Self::OptimizeMeshes => "OptimizeMeshes",
+            Self::OptimizeGraph => "OptimizeGraph",
+        }
+    }
+
+    pub fn is_implemented(self) -> bool {
+        matches!(
+            self,
+            Self::ValidateScene | Self::Triangulate | Self::GenerateBoundingBoxes
+        )
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -73,7 +98,12 @@ impl PostProcessPipeline {
                 PostProcessStep::ValidateScene => validate_scene(&scene)?,
                 PostProcessStep::Triangulate => triangulate_scene(&mut scene)?,
                 PostProcessStep::GenerateBoundingBoxes => generate_bounding_boxes(&mut scene)?,
-                _ => {}
+                step => {
+                    return Err(postprocess_error(
+                        step.name(),
+                        "postprocess step is not implemented yet",
+                    ));
+                }
             }
         }
         Ok(scene)
@@ -185,6 +215,22 @@ mod tests {
                 PostProcessStep::Triangulate,
                 PostProcessStep::GenerateNormals
             ]
+        );
+    }
+
+    #[test]
+    fn unsupported_steps_return_error_instead_of_noop() {
+        let scene = baozi_core::SceneBuilder::new().finish().unwrap();
+        let pipeline = PostProcessPipeline::new([PostProcessStep::GenerateNormals]);
+
+        let error = pipeline.run(scene).unwrap_err();
+
+        assert_eq!(
+            error,
+            BaoziError::PostProcess {
+                step: "GenerateNormals",
+                message: "postprocess step is not implemented yet".to_owned()
+            }
         );
     }
 

@@ -7,11 +7,15 @@ use std::collections::BTreeMap;
 macro_rules! id_type {
     ($name:ident) => {
         #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-        pub struct $name(pub u32);
+        pub struct $name(u32);
 
         impl $name {
             pub const fn new(index: u32) -> Self {
                 Self(index)
+            }
+
+            pub const fn as_u32(self) -> u32 {
+                self.0
             }
 
             pub const fn index(self) -> usize {
@@ -28,6 +32,7 @@ id_type!(TextureId);
 id_type!(AnimationId);
 id_type!(CameraId);
 id_type!(LightId);
+id_type!(SkinId);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PrimitiveTopology {
@@ -90,6 +95,8 @@ pub struct Node {
     pub parent: Option<NodeId>,
     pub children: Vec<NodeId>,
     pub meshes: Vec<MeshId>,
+    pub camera: Option<CameraId>,
+    pub light: Option<LightId>,
     pub metadata: MetadataMap,
 }
 
@@ -101,9 +108,69 @@ impl Default for Node {
             parent: None,
             children: Vec::new(),
             meshes: Vec::new(),
+            camera: None,
+            light: None,
             metadata: MetadataMap::new(),
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum VertexAttributeSemantic {
+    Position,
+    Normal,
+    Tangent,
+    Texcoord(u32),
+    Color(u32),
+    Joints(u32),
+    Weights(u32),
+    Custom(String),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum VertexAttributeData {
+    F32(Vec<f32>),
+    Vec2(Vec<Vec2>),
+    Vec3(Vec<Vec3>),
+    Vec4(Vec<Vec4>),
+    U16x4(Vec<[u16; 4]>),
+    U32(Vec<u32>),
+    I32(Vec<i32>),
+}
+
+impl VertexAttributeData {
+    pub fn len(&self) -> usize {
+        match self {
+            Self::F32(values) => values.len(),
+            Self::Vec2(values) => values.len(),
+            Self::Vec3(values) => values.len(),
+            Self::Vec4(values) => values.len(),
+            Self::U16x4(values) => values.len(),
+            Self::U32(values) => values.len(),
+            Self::I32(values) => values.len(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct VertexAttribute {
+    pub name: String,
+    pub semantic: VertexAttributeSemantic,
+    pub data: VertexAttributeData,
+    pub metadata: MetadataMap,
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct MorphTarget {
+    pub name: Option<String>,
+    pub positions: Vec<Vec3>,
+    pub normals: Vec<Vec3>,
+    pub tangents: Vec<Vec4>,
+    pub metadata: MetadataMap,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -118,6 +185,11 @@ pub struct Mesh {
     pub indices: Vec<u32>,
     pub face_vertex_counts: Vec<u32>,
     pub material: Option<MaterialId>,
+    pub skin: Option<SkinId>,
+    pub joint_indices: Vec<[u16; 4]>,
+    pub joint_weights: Vec<[f32; 4]>,
+    pub morph_targets: Vec<MorphTarget>,
+    pub custom_attributes: Vec<VertexAttribute>,
     pub bounds: Option<Aabb>,
     pub metadata: MetadataMap,
 }
@@ -149,25 +221,120 @@ impl Default for Mesh {
             indices: Vec::new(),
             face_vertex_counts: Vec::new(),
             material: None,
+            skin: None,
+            joint_indices: Vec::new(),
+            joint_weights: Vec::new(),
+            morph_targets: Vec::new(),
+            custom_attributes: Vec::new(),
             bounds: None,
             metadata: MetadataMap::new(),
         }
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AnimationInterpolation {
+    Step,
+    Linear,
+    CubicSpline,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AnimationProperty {
+    Translation,
+    Rotation,
+    Scale,
+    MorphWeights,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct AnimationTarget {
+    pub node: NodeId,
+    pub property: AnimationProperty,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum AnimationValues {
+    Translations(Vec<Vec3>),
+    Rotations(Vec<Vec4>),
+    Scales(Vec<Vec3>),
+    MorphWeights {
+        values: Vec<f32>,
+        weights_per_keyframe: usize,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct AnimationChannel {
+    pub target: AnimationTarget,
+    pub interpolation: AnimationInterpolation,
+    pub times_seconds: Vec<f32>,
+    pub values: AnimationValues,
+    pub metadata: MetadataMap,
+}
+
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Animation {
     pub name: Option<String>,
+    pub channels: Vec<AnimationChannel>,
+    pub metadata: MetadataMap,
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub enum CameraProjection {
+    Perspective {
+        yfov_radians: f32,
+        aspect_ratio: Option<f32>,
+        znear: f32,
+        zfar: Option<f32>,
+    },
+    Orthographic {
+        xmag: f32,
+        ymag: f32,
+        znear: f32,
+        zfar: f32,
+    },
+    #[default]
+    Unknown,
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Camera {
     pub name: Option<String>,
+    pub projection: CameraProjection,
+    pub metadata: MetadataMap,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum LightKind {
+    Directional,
+    Point,
+    Spot,
+    Area,
+    #[default]
+    Unknown,
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Light {
     pub name: Option<String>,
+    pub kind: LightKind,
+    pub color: Color,
+    pub intensity: f32,
+    pub range: Option<f32>,
+    pub inner_cone_angle: Option<f32>,
+    pub outer_cone_angle: Option<f32>,
+    pub metadata: MetadataMap,
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Skin {
+    pub name: Option<String>,
+    pub joints: Vec<NodeId>,
+    pub inverse_bind_matrices: Vec<Mat4>,
+    pub skeleton_root: Option<NodeId>,
+    pub metadata: MetadataMap,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -180,6 +347,7 @@ pub struct Scene {
     pub animations: Vec<Animation>,
     pub cameras: Vec<Camera>,
     pub lights: Vec<Light>,
+    pub skins: Vec<Skin>,
     pub metadata: MetadataMap,
     pub space: SceneSpace,
 }
@@ -208,6 +376,7 @@ impl SceneBuilder {
                 animations: Vec::new(),
                 cameras: Vec::new(),
                 lights: Vec::new(),
+                skins: Vec::new(),
                 metadata: MetadataMap::new(),
                 space: SceneSpace::default(),
             },
@@ -262,6 +431,30 @@ impl SceneBuilder {
     pub fn add_texture(&mut self, texture: Texture) -> TextureId {
         let id = TextureId::new(self.scene.textures.len() as u32);
         self.scene.textures.push(texture);
+        id
+    }
+
+    pub fn add_animation(&mut self, animation: Animation) -> AnimationId {
+        let id = AnimationId::new(self.scene.animations.len() as u32);
+        self.scene.animations.push(animation);
+        id
+    }
+
+    pub fn add_camera(&mut self, camera: Camera) -> CameraId {
+        let id = CameraId::new(self.scene.cameras.len() as u32);
+        self.scene.cameras.push(camera);
+        id
+    }
+
+    pub fn add_light(&mut self, light: Light) -> LightId {
+        let id = LightId::new(self.scene.lights.len() as u32);
+        self.scene.lights.push(light);
+        id
+    }
+
+    pub fn add_skin(&mut self, skin: Skin) -> SkinId {
+        let id = SkinId::new(self.scene.skins.len() as u32);
+        self.scene.skins.push(skin);
         id
     }
 

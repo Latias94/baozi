@@ -140,6 +140,12 @@ impl Color {
     }
 }
 
+impl Default for Color {
+    fn default() -> Self {
+        Self::WHITE
+    }
+}
+
 #[cfg(feature = "mint")]
 impl From<mint::Vector3<f32>> for Vec3 {
     fn from(value: mint::Vector3<f32>) -> Self {

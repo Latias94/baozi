@@ -42,6 +42,7 @@ Scene
 ├── animations: Vec<Animation>
 ├── cameras: Vec<Camera>
 ├── lights: Vec<Light>
+├── skins: Vec<Skin>
 ├── metadata: MetadataMap
 └── space: SceneSpace
 ```
@@ -58,6 +59,7 @@ Node responsibilities:
 - local transform
 - parent and child relationships
 - mesh attachments
+- camera and light attachments
 - names and metadata
 
 Validator responsibilities:
@@ -67,6 +69,7 @@ Validator responsibilities:
 - no hierarchy cycles
 - parent and child links agree
 - mesh references are valid
+- camera and light references are valid
 
 The default public model should treat the hierarchy as a tree unless a future ADR introduces shared
 node graphs.
@@ -86,6 +89,9 @@ Mesh responsibilities:
 - color channels
 - indices and polygon face descriptors
 - material binding
+- skin binding, joint indices, and joint weights
+- morph targets
+- custom vertex attributes
 - bounds when known or generated
 - metadata
 
@@ -114,9 +120,13 @@ indices.
 Renderer-facing helpers can expose triangle views later, but those helpers are not the raw import
 contract.
 
+Custom attributes use `VertexAttribute` with a namespaced name, semantic, and typed data payload.
+This is the escape hatch for PLY properties and glTF extension attributes that are useful but not
+yet first-class Baozi fields.
+
 ## Materials and Textures
 
-Materials combine typed common fields with namespaced extension metadata.
+Materials combine typed common fields, namespaced property bags, and extension metadata.
 
 Typed fields are for common behavior:
 
@@ -125,6 +135,7 @@ Typed fields are for common behavior:
 - alpha policy
 - two-sided policy
 - texture slots
+- material properties for source-specific typed values
 
 Extension metadata is for source-specific details:
 
@@ -134,7 +145,8 @@ gltf:alpha_cutoff
 fbx:layered_texture_blend_mode
 ```
 
-Textures may refer to external assets or embedded bytes. Importing a model should not require image
+Texture slots record role, color space, UV set, scalar scale, UV transform, and source key. Textures
+record external URI or embedded bytes plus sampler state. Importing a model should not require image
 decoding unless a caller explicitly enables a helper or post-import step.
 
 ## Scene Space
@@ -165,14 +177,15 @@ Skinning concepts:
 
 - skins reference joint nodes
 - inverse bind matrices match joint count when present
-- vertex influences reference joints by index
+- mesh vertex influences use `joint_indices: Vec<[u16; 4]>` and `joint_weights: Vec<[f32; 4]>`
 - influence compaction is post-process behavior
 
 Animation concepts:
 
 - public time is normalized to seconds
 - source ticks or frames are preserved in metadata
-- channels target nodes, morph weights, or future supported properties
+- channels target node translation, rotation, scale, or morph weights
+- interpolation mode is recorded but Baozi does not evaluate animation curves
 - import does not silently resample animation
 
 Morph target concepts:

@@ -5,7 +5,7 @@ use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
     let mut importer = Importer::empty();
-    importer.register(baozi_format_stl::StlImporter);
+    importer.register(baozi_format_stl::StlImporter).unwrap();
 
     let _ = importer.read_bytes("fuzz.stl", data);
 });

@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: accepted
 date: 2026-07-09
 authors:
   - Codex
@@ -23,6 +23,11 @@ Baozi already has ADR-level commitments to a post-process crate. This ADR define
 Baozi will keep importers source-preserving by default and move normalization into ordered post-process steps. Importers may perform only format-required decoding and structural repair. They must not silently triangulate, flip coordinates, generate normals, merge vertices, or drop unsupported features unless the format requires it and emits diagnostics.
 
 Post-process steps operate on owned `Scene` values and return a new validated stage result. Implementations may mutate internally while they own the scene, but public APIs must make stage transitions explicit.
+
+Requested steps must never be silent no-ops. If a caller requests a known `PostProcessStep` whose
+algorithm is not implemented, the pipeline returns a `PostProcess` error naming that step. Presets
+must include only implemented steps; future preset expansion happens when the corresponding steps
+land with tests.
 
 ## Architecture
 
@@ -161,15 +166,17 @@ Tangent policy:
 
 Baozi may expose Assimp-inspired presets, but they are Baozi-defined contracts:
 
-| Preset | Intent |
-| --- | --- |
-| Raw | no normalization beyond importer-required decoding and validation |
-| RealtimeFast | triangulate, validate, bounding boxes, basic coordinate/unit options |
-| RealtimeQuality | RealtimeFast plus normals/tangents where missing and degeneracy diagnostics |
-| RealtimeMaxQuality | RealtimeQuality plus vertex joining and mesh/graph optimization |
-| ToolingPreserve | validate and enrich while preserving source topology as much as possible |
+| Preset | Long-term intent | Current pre-1.0 implemented subset |
+| --- | --- | --- |
+| Raw | no normalization beyond importer-required decoding and validation | validate scene |
+| RealtimeFast | triangulate, validate, bounding boxes, basic coordinate/unit options | validate, triangulate, bounding boxes |
+| RealtimeQuality | RealtimeFast plus normals/tangents where missing and degeneracy diagnostics | same implemented subset as `RealtimeFast` |
+| RealtimeMaxQuality | RealtimeQuality plus vertex joining and mesh/graph optimization | same implemented subset as `RealtimeFast` |
+| ToolingPreserve | validate and enrich while preserving source topology as much as possible | validate and bounding boxes |
 
-Presets expand to explicit step lists. Users can inspect and customize the list.
+Presets expand to explicit step lists. Users can inspect and customize the list. A preset may be a
+supported subset of its long-term intent while Baozi is pre-1.0, but it must not include an
+unimplemented step just to advertise future behavior.
 
 ## Idempotence and Determinism
 
@@ -251,6 +258,7 @@ Decision: chosen.
 | Destructive steps lose source data unexpectedly | High | Medium | Mark destructive steps and keep raw snapshots in tests |
 | Coordinate conversion misses cameras or animation | High | Medium | Add complex fixtures before stabilizing coordinate normalization |
 | Presets drift from docs | Medium | Medium | Test preset expansion |
+| Unimplemented step silently passes | High | Medium | Return `PostProcess` error for explicit requests and keep presets implemented-only |
 
 ## Implementation Plan
 
@@ -283,6 +291,7 @@ Negative:
 - More initial pipeline code.
 - Presets require maintenance.
 - Some transformations need complex fixtures to prove.
+- Callers see early errors for requested future steps instead of accidentally shipping unchanged data.
 
 ## Open Questions
 

@@ -5,7 +5,6 @@ use baozi_core::{
 use baozi_import::{ExternalReferencePolicy, ImportContext};
 use baozi_io::AssetPath;
 use std::collections::BTreeMap;
-use std::io::Read;
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct MaterialLibrary {
@@ -58,12 +57,12 @@ fn load_library(
     library: &mut MaterialLibrary,
 ) -> Result<()> {
     if matches!(
-        ctx.options.io.external_references,
+        ctx.io_options().external_references,
         ExternalReferencePolicy::Deny
     ) {
         push_warning(
             ctx,
-            ctx.source.to_string(),
+            ctx.source().to_string(),
             None,
             "obj.mtl_denied",
             format!("MTL sidecar '{mtllib}' was not loaded because external references are denied"),
@@ -71,12 +70,12 @@ fn load_library(
         return Ok(());
     }
 
-    let path = match ctx.io.resolve(&ctx.source, mtllib) {
+    let path = match ctx.resolve_source_relative(mtllib) {
         Ok(path) => path,
         Err(error) => {
             push_warning(
                 ctx,
-                ctx.source.to_string(),
+                ctx.source().to_string(),
                 None,
                 "obj.mtl_resolve_failed",
                 format!("MTL sidecar '{mtllib}' could not be resolved: {error}"),
@@ -107,44 +106,41 @@ fn load_library(
 }
 
 fn read_sidecar_bytes(ctx: &mut ImportContext<'_>, path: &AssetPath) -> Option<Vec<u8>> {
-    let mut reader = match ctx.io.open(path) {
-        Ok(reader) => reader,
+    match ctx.read_sidecar_to_end(path) {
+        Ok(bytes) => Some(bytes),
         Err(error) => {
             push_warning(
                 ctx,
                 path.to_string(),
                 None,
-                "obj.mtl_missing",
-                format!("MTL sidecar '{path}' could not be opened: {error}"),
+                sidecar_read_error_code(&error),
+                sidecar_read_error_message(path, &error),
             );
-            return None;
+            None
         }
-    };
+    }
+}
 
-    let limit = ctx.options.limits.max_sidecar_asset_bytes;
-    let mut bytes = Vec::new();
-    let mut limited = reader.by_ref().take(limit.saturating_add(1));
-    if let Err(error) = limited.read_to_end(&mut bytes) {
-        push_warning(
-            ctx,
-            path.to_string(),
-            None,
-            "obj.mtl_read_failed",
-            format!("MTL sidecar '{path}' could not be read: {error}"),
-        );
-        return None;
+fn sidecar_read_error_code(error: &baozi_core::BaoziError) -> &'static str {
+    match error {
+        baozi_core::BaoziError::LimitExceeded {
+            limit: "max_sidecar_asset_bytes",
+        } => "obj.mtl_limit_exceeded",
+        baozi_core::BaoziError::Io { .. } => "obj.mtl_missing",
+        _ => "obj.mtl_read_failed",
     }
-    if bytes.len() as u64 > limit {
-        push_warning(
-            ctx,
-            path.to_string(),
-            None,
-            "obj.mtl_limit_exceeded",
-            "MTL sidecar exceeded max_sidecar_asset_bytes and was ignored",
-        );
-        return None;
+}
+
+fn sidecar_read_error_message(path: &AssetPath, error: &baozi_core::BaoziError) -> String {
+    match error {
+        baozi_core::BaoziError::LimitExceeded {
+            limit: "max_sidecar_asset_bytes",
+        } => "MTL sidecar exceeded max_sidecar_asset_bytes and was ignored".to_owned(),
+        baozi_core::BaoziError::Io { .. } => {
+            format!("MTL sidecar '{path}' could not be opened: {error}")
+        }
+        _ => format!("MTL sidecar '{path}' could not be read: {error}"),
     }
-    Some(bytes)
 }
 
 fn parse_mtl(
@@ -158,7 +154,7 @@ fn parse_mtl(
 
     for (line_index, raw_line) in text.lines().enumerate() {
         let line_number = (line_index + 1) as u32;
-        if raw_line.len() > ctx.options.limits.max_line_bytes {
+        if raw_line.len() > ctx.limits().max_line_bytes {
             push_warning(
                 ctx,
                 path.to_string(),
@@ -190,7 +186,7 @@ fn parse_mtl(
                         "obj.mtl_empty_name",
                         "MTL newmtl has no material name",
                     );
-                } else if name.len() > ctx.options.limits.max_string_bytes {
+                } else if name.len() > ctx.limits().max_string_bytes {
                     push_warning(
                         ctx,
                         path.to_string(),
@@ -271,7 +267,7 @@ fn parse_mtl(
                 if let Some(material) = current.as_mut() {
                     match texture_path_from_map(ctx, path, &tokens[1..], line_number) {
                         Some(texture_path) => {
-                            if texture_path.len() > ctx.options.limits.max_string_bytes {
+                            if texture_path.len() > ctx.limits().max_string_bytes {
                                 push_warning(
                                     ctx,
                                     path.to_string(),
@@ -282,10 +278,10 @@ fn parse_mtl(
                                 continue;
                             }
 
-                            match ctx.io.resolve(path, &texture_path) {
+                            match ctx.resolve_relative(path, &texture_path) {
                                 Ok(resolved) => {
                                     let uri = resolved.to_string();
-                                    if uri.len() > ctx.options.limits.max_string_bytes {
+                                    if uri.len() > ctx.limits().max_string_bytes {
                                         push_warning(
                                             ctx,
                                             path.to_string(),
@@ -368,7 +364,7 @@ fn tokenize_mtl<'line>(
 ) -> Option<Vec<&'line str>> {
     let mut tokens = Vec::new();
     for token in line.split_whitespace() {
-        if token.len() > ctx.options.limits.max_token_bytes {
+        if token.len() > ctx.limits().max_token_bytes {
             push_warning(
                 ctx,
                 path.to_string(),

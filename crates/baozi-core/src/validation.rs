@@ -1,13 +1,19 @@
 use crate::{
-    BaoziError, Color, Material, Mesh, PrimitiveTopology, Result, Scene, TextureId, Vec2, Vec3,
-    Vec4,
+    Animation, AnimationValues, BaoziError, Camera, CameraProjection, Color, Light, Material,
+    MaterialProperty, Mesh, PrimitiveTopology, Result, Scene, Skin, Texture, TextureId, Vec2, Vec3,
+    Vec4, VertexAttributeData,
 };
 
 pub fn validate_scene(scene: &Scene) -> Result<()> {
     validate_root(scene)?;
     validate_materials(scene)?;
+    validate_textures(scene)?;
     validate_meshes(scene)?;
     validate_nodes(scene)?;
+    validate_skins(scene)?;
+    validate_cameras(scene)?;
+    validate_lights(scene)?;
+    validate_animations(scene)?;
     validate_space(scene)?;
     Ok(())
 }
@@ -46,7 +52,7 @@ fn validate_nodes(scene: &Scene) -> Result<()> {
             if child_node.parent != Some(crate::NodeId::new(index as u32)) {
                 return invalid(format!(
                     "node {} parent does not point back to node {index}",
-                    child.0
+                    child.as_u32()
                 ));
             }
         }
@@ -55,6 +61,17 @@ fn validate_nodes(scene: &Scene) -> Result<()> {
             if mesh.index() >= scene.meshes.len() {
                 return invalid(format!("node {index} mesh reference is out of range"));
             }
+        }
+
+        if let Some(camera) = node.camera
+            && camera.index() >= scene.cameras.len()
+        {
+            return invalid(format!("node {index} camera reference is out of range"));
+        }
+        if let Some(light) = node.light
+            && light.index() >= scene.lights.len()
+        {
+            return invalid(format!("node {index} light reference is out of range"));
         }
     }
 
@@ -87,11 +104,78 @@ fn validate_material(index: usize, material: &Material, texture_count: usize) ->
 
     for slot in &material.texture_slots {
         validate_texture_id(index, slot.texture, texture_count)?;
-        if !slot.scale.is_finite() {
-            return invalid(format!("material {index} texture scale is non-finite"));
+        if !slot.scale.is_finite()
+            || !slot.transform.offset.is_finite()
+            || !slot.transform.rotation_radians.is_finite()
+            || !slot.transform.scale.is_finite()
+        {
+            return invalid(format!(
+                "material {index} texture slot contains a non-finite value"
+            ));
         }
     }
 
+    for (key, property) in &material.properties {
+        validate_namespaced_key("material property", key)?;
+        validate_material_property(index, key, property, texture_count)?;
+    }
+
+    Ok(())
+}
+
+fn validate_material_property(
+    material_index: usize,
+    key: &str,
+    property: &MaterialProperty,
+    texture_count: usize,
+) -> Result<()> {
+    match property {
+        MaterialProperty::Bool(_) | MaterialProperty::I64(_) | MaterialProperty::String(_) => {
+            Ok(())
+        }
+        MaterialProperty::F64(value) if value.is_finite() => Ok(()),
+        MaterialProperty::F64(_) => invalid(format!(
+            "material {material_index} property {key} contains a non-finite value"
+        )),
+        MaterialProperty::Color(value) if color_is_finite(*value) => Ok(()),
+        MaterialProperty::Color(_)
+        | MaterialProperty::Vec2(_)
+        | MaterialProperty::Vec3(_)
+        | MaterialProperty::Vec4(_) => {
+            let finite = match property {
+                MaterialProperty::Color(value) => color_is_finite(*value),
+                MaterialProperty::Vec2(value) => value.is_finite(),
+                MaterialProperty::Vec3(value) => value.is_finite(),
+                MaterialProperty::Vec4(value) => value.is_finite(),
+                _ => true,
+            };
+            if finite {
+                Ok(())
+            } else {
+                invalid(format!(
+                    "material {material_index} property {key} contains a non-finite value"
+                ))
+            }
+        }
+        MaterialProperty::Texture(texture) => {
+            validate_texture_id(material_index, *texture, texture_count)
+        }
+    }
+}
+
+fn validate_textures(scene: &Scene) -> Result<()> {
+    for (index, texture) in scene.textures.iter().enumerate() {
+        validate_texture(index, texture)?;
+    }
+    Ok(())
+}
+
+fn validate_texture(index: usize, texture: &Texture) -> Result<()> {
+    if let crate::TextureSource::External { uri } = &texture.source
+        && uri.is_empty()
+    {
+        return invalid(format!("texture {index} external uri is empty"));
+    }
     Ok(())
 }
 
@@ -110,12 +194,17 @@ fn validate_texture_id(
 
 fn validate_meshes(scene: &Scene) -> Result<()> {
     for (index, mesh) in scene.meshes.iter().enumerate() {
-        validate_mesh(index, mesh, scene.materials.len())?;
+        validate_mesh(index, mesh, scene.materials.len(), scene.skins.len())?;
     }
     Ok(())
 }
 
-fn validate_mesh(index: usize, mesh: &Mesh, material_count: usize) -> Result<()> {
+fn validate_mesh(
+    index: usize,
+    mesh: &Mesh,
+    material_count: usize,
+    skin_count: usize,
+) -> Result<()> {
     let vertex_count = mesh.positions.len();
     if vertex_count == 0 {
         return invalid(format!("mesh {index} is empty: no positions"));
@@ -125,6 +214,11 @@ fn validate_mesh(index: usize, mesh: &Mesh, material_count: usize) -> Result<()>
         && material.index() >= material_count
     {
         return invalid(format!("mesh {index} material reference is out of range"));
+    }
+    if let Some(skin) = mesh.skin
+        && skin.index() >= skin_count
+    {
+        return invalid(format!("mesh {index} skin reference is out of range"));
     }
 
     validate_vec3_channel(index, "positions", &mesh.positions, Some(vertex_count))?;
@@ -156,6 +250,31 @@ fn validate_mesh(index: usize, mesh: &Mesh, material_count: usize) -> Result<()>
             Some(vertex_count),
         )?;
     }
+    validate_joint_channels(index, vertex_count, mesh)?;
+    for (target_index, target) in mesh.morph_targets.iter().enumerate() {
+        validate_vec3_channel(
+            index,
+            &format!("morph_targets[{target_index}].positions"),
+            &target.positions,
+            optional_len(vertex_count, &target.positions),
+        )?;
+        validate_vec3_channel(
+            index,
+            &format!("morph_targets[{target_index}].normals"),
+            &target.normals,
+            optional_len(vertex_count, &target.normals),
+        )?;
+        validate_vec4_channel(
+            index,
+            &format!("morph_targets[{target_index}].tangents"),
+            &target.tangents,
+            optional_len(vertex_count, &target.tangents),
+        )?;
+    }
+    for (attribute_index, attribute) in mesh.custom_attributes.iter().enumerate() {
+        validate_namespaced_key("custom vertex attribute", &attribute.name)?;
+        validate_vertex_attribute(index, attribute_index, vertex_count, &attribute.data)?;
+    }
 
     for index_value in &mesh.indices {
         if *index_value as usize >= vertex_count {
@@ -181,6 +300,62 @@ fn validate_mesh(index: usize, mesh: &Mesh, material_count: usize) -> Result<()>
     }
 
     Ok(())
+}
+
+fn validate_joint_channels(mesh_index: usize, vertex_count: usize, mesh: &Mesh) -> Result<()> {
+    if mesh.joint_indices.is_empty() && mesh.joint_weights.is_empty() {
+        return Ok(());
+    }
+    if mesh.joint_indices.len() != vertex_count || mesh.joint_weights.len() != vertex_count {
+        return invalid(format!(
+            "mesh {mesh_index} joint indices and weights must both match positions length"
+        ));
+    }
+    for (vertex, weights) in mesh.joint_weights.iter().enumerate() {
+        if weights.iter().any(|weight| !weight.is_finite()) {
+            return invalid(format!(
+                "mesh {mesh_index} joint weights for vertex {vertex} contain a non-finite value"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_vertex_attribute(
+    mesh_index: usize,
+    attribute_index: usize,
+    vertex_count: usize,
+    data: &VertexAttributeData,
+) -> Result<()> {
+    validate_channel_len(
+        mesh_index,
+        &format!("custom_attributes[{attribute_index}]"),
+        data.len(),
+        Some(vertex_count),
+    )?;
+    match data {
+        VertexAttributeData::F32(values) if values.iter().any(|value| !value.is_finite()) => {
+            invalid(format!(
+                "mesh {mesh_index} custom attribute {attribute_index} contains a non-finite value"
+            ))
+        }
+        VertexAttributeData::Vec2(values) if values.iter().any(|value| !value.is_finite()) => {
+            invalid(format!(
+                "mesh {mesh_index} custom attribute {attribute_index} contains a non-finite value"
+            ))
+        }
+        VertexAttributeData::Vec3(values) if values.iter().any(|value| !value.is_finite()) => {
+            invalid(format!(
+                "mesh {mesh_index} custom attribute {attribute_index} contains a non-finite value"
+            ))
+        }
+        VertexAttributeData::Vec4(values) if values.iter().any(|value| !value.is_finite()) => {
+            invalid(format!(
+                "mesh {mesh_index} custom attribute {attribute_index} contains a non-finite value"
+            ))
+        }
+        _ => Ok(()),
+    }
 }
 
 fn optional_len<T>(vertex_count: usize, values: &[T]) -> Option<usize> {
@@ -326,6 +501,259 @@ fn validate_polygon_faces(
     Ok(())
 }
 
+fn validate_skins(scene: &Scene) -> Result<()> {
+    for (index, skin) in scene.skins.iter().enumerate() {
+        validate_skin(index, skin, scene.nodes.len())?;
+    }
+    Ok(())
+}
+
+fn validate_skin(index: usize, skin: &Skin, node_count: usize) -> Result<()> {
+    if let Some(root) = skin.skeleton_root
+        && root.index() >= node_count
+    {
+        return invalid(format!("skin {index} skeleton root is out of range"));
+    }
+    for joint in &skin.joints {
+        if joint.index() >= node_count {
+            return invalid(format!("skin {index} joint reference is out of range"));
+        }
+    }
+    if !skin.inverse_bind_matrices.is_empty()
+        && skin.inverse_bind_matrices.len() != skin.joints.len()
+    {
+        return invalid(format!(
+            "skin {index} inverse bind matrix count does not match joint count"
+        ));
+    }
+    if skin
+        .inverse_bind_matrices
+        .iter()
+        .any(|matrix| !matrix.is_finite())
+    {
+        return invalid(format!(
+            "skin {index} inverse bind matrices contain a non-finite value"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_cameras(scene: &Scene) -> Result<()> {
+    for (index, camera) in scene.cameras.iter().enumerate() {
+        validate_camera(index, camera)?;
+    }
+    Ok(())
+}
+
+fn validate_camera(index: usize, camera: &Camera) -> Result<()> {
+    match camera.projection {
+        CameraProjection::Perspective {
+            yfov_radians,
+            aspect_ratio,
+            znear,
+            zfar,
+        } => {
+            if !yfov_radians.is_finite() || yfov_radians <= 0.0 {
+                return invalid(format!("camera {index} perspective yfov is invalid"));
+            }
+            if let Some(aspect_ratio) = aspect_ratio
+                && (!aspect_ratio.is_finite() || aspect_ratio <= 0.0)
+            {
+                return invalid(format!(
+                    "camera {index} perspective aspect ratio is invalid"
+                ));
+            }
+            validate_positive_depth(index, "znear", znear)?;
+            if let Some(zfar) = zfar {
+                validate_positive_depth(index, "zfar", zfar)?;
+                if zfar <= znear {
+                    return invalid(format!("camera {index} zfar must exceed znear"));
+                }
+            }
+        }
+        CameraProjection::Orthographic {
+            xmag,
+            ymag,
+            znear,
+            zfar,
+        } => {
+            if !xmag.is_finite() || xmag <= 0.0 || !ymag.is_finite() || ymag <= 0.0 {
+                return invalid(format!(
+                    "camera {index} orthographic magnification is invalid"
+                ));
+            }
+            validate_positive_depth(index, "znear", znear)?;
+            validate_positive_depth(index, "zfar", zfar)?;
+            if zfar <= znear {
+                return invalid(format!("camera {index} zfar must exceed znear"));
+            }
+        }
+        CameraProjection::Unknown => {}
+    }
+    Ok(())
+}
+
+fn validate_positive_depth(camera_index: usize, name: &str, value: f32) -> Result<()> {
+    if !value.is_finite() || value <= 0.0 {
+        return invalid(format!("camera {camera_index} {name} is invalid"));
+    }
+    Ok(())
+}
+
+fn validate_lights(scene: &Scene) -> Result<()> {
+    for (index, light) in scene.lights.iter().enumerate() {
+        validate_light(index, light)?;
+    }
+    Ok(())
+}
+
+fn validate_light(index: usize, light: &Light) -> Result<()> {
+    if !color_is_finite(light.color) || !light.intensity.is_finite() {
+        return invalid(format!("light {index} contains a non-finite value"));
+    }
+    if light.intensity < 0.0 {
+        return invalid(format!("light {index} intensity is negative"));
+    }
+    if let Some(range) = light.range
+        && (!range.is_finite() || range < 0.0)
+    {
+        return invalid(format!("light {index} range is invalid"));
+    }
+    if let Some(angle) = light.inner_cone_angle
+        && (!angle.is_finite() || angle < 0.0)
+    {
+        return invalid(format!("light {index} inner cone angle is invalid"));
+    }
+    if let Some(angle) = light.outer_cone_angle
+        && (!angle.is_finite() || angle < 0.0)
+    {
+        return invalid(format!("light {index} outer cone angle is invalid"));
+    }
+    if let (Some(inner), Some(outer)) = (light.inner_cone_angle, light.outer_cone_angle)
+        && inner > outer
+    {
+        return invalid(format!(
+            "light {index} inner cone angle exceeds outer cone angle"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_animations(scene: &Scene) -> Result<()> {
+    for (index, animation) in scene.animations.iter().enumerate() {
+        validate_animation(index, animation, scene.nodes.len())?;
+    }
+    Ok(())
+}
+
+fn validate_animation(
+    animation_index: usize,
+    animation: &Animation,
+    node_count: usize,
+) -> Result<()> {
+    for (channel_index, channel) in animation.channels.iter().enumerate() {
+        if channel.target.node.index() >= node_count {
+            return invalid(format!(
+                "animation {animation_index} channel {channel_index} target node is out of range"
+            ));
+        }
+        if channel.times_seconds.is_empty() {
+            return invalid(format!(
+                "animation {animation_index} channel {channel_index} has no keyframe times"
+            ));
+        }
+        if channel.times_seconds.iter().any(|time| !time.is_finite()) {
+            return invalid(format!(
+                "animation {animation_index} channel {channel_index} contains a non-finite time"
+            ));
+        }
+        for window in channel.times_seconds.windows(2) {
+            if window[0] > window[1] {
+                return invalid(format!(
+                    "animation {animation_index} channel {channel_index} times are not sorted"
+                ));
+            }
+        }
+        validate_animation_values(
+            animation_index,
+            channel_index,
+            channel.interpolation,
+            channel.times_seconds.len(),
+            &channel.values,
+        )?;
+    }
+    Ok(())
+}
+
+fn validate_animation_values(
+    animation_index: usize,
+    channel_index: usize,
+    interpolation: crate::AnimationInterpolation,
+    keyframes: usize,
+    values: &AnimationValues,
+) -> Result<()> {
+    let sample_count = match values {
+        AnimationValues::Translations(values) => {
+            if values.iter().any(|value| !value.is_finite()) {
+                return invalid(format!(
+                    "animation {animation_index} channel {channel_index} translations contain a non-finite value"
+                ));
+            }
+            values.len()
+        }
+        AnimationValues::Rotations(values) => {
+            if values.iter().any(|value| !value.is_finite()) {
+                return invalid(format!(
+                    "animation {animation_index} channel {channel_index} rotations contain a non-finite value"
+                ));
+            }
+            values.len()
+        }
+        AnimationValues::Scales(values) => {
+            if values.iter().any(|value| !value.is_finite()) {
+                return invalid(format!(
+                    "animation {animation_index} channel {channel_index} scales contain a non-finite value"
+                ));
+            }
+            values.len()
+        }
+        AnimationValues::MorphWeights {
+            values,
+            weights_per_keyframe,
+        } => {
+            if *weights_per_keyframe == 0 {
+                return invalid(format!(
+                    "animation {animation_index} channel {channel_index} has zero morph weights per keyframe"
+                ));
+            }
+            if values.iter().any(|value| !value.is_finite()) {
+                return invalid(format!(
+                    "animation {animation_index} channel {channel_index} morph weights contain a non-finite value"
+                ));
+            }
+            if values.len() % weights_per_keyframe != 0 {
+                return invalid(format!(
+                    "animation {animation_index} channel {channel_index} morph weight sample count is invalid"
+                ));
+            }
+            values.len() / weights_per_keyframe
+        }
+    };
+
+    let expected = match interpolation {
+        crate::AnimationInterpolation::CubicSpline => keyframes.saturating_mul(3),
+        crate::AnimationInterpolation::Step
+        | crate::AnimationInterpolation::Linear
+        | crate::AnimationInterpolation::Unknown => keyframes,
+    };
+    if sample_count != expected {
+        return invalid(format!(
+            "animation {animation_index} channel {channel_index} value count does not match keyframe times"
+        ));
+    }
+    Ok(())
+}
+
 fn validate_space(scene: &Scene) -> Result<()> {
     if let Some(scale) = scene.space.unit_scale_to_meters
         && (!scale.is_finite() || scale <= 0.0)
@@ -361,6 +789,13 @@ fn visit_node(scene: &Scene, index: usize, state: &mut [VisitState]) -> Result<(
 
 fn color_is_finite(color: Color) -> bool {
     color.r.is_finite() && color.g.is_finite() && color.b.is_finite() && color.a.is_finite()
+}
+
+fn validate_namespaced_key(kind: &str, key: &str) -> Result<()> {
+    if key.is_empty() || !(key.contains(':') || key.contains('.')) {
+        return invalid(format!("{kind} key {key:?} must be namespaced"));
+    }
+    Ok(())
 }
 
 fn invalid<T>(message: impl Into<String>) -> Result<T> {

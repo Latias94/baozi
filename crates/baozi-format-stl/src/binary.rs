@@ -15,27 +15,27 @@ pub(crate) fn parse(ctx: &mut ImportContext<'_>, bytes: &[u8], facets: u32) -> R
         .ok_or(BaoziError::LimitExceeded { limit: "max_faces" })?;
     if expected != bytes.len() {
         return Err(BaoziError::parse(
-            ctx.source.to_string(),
+            ctx.source().to_string(),
             None,
             "binary STL facet count does not match file size",
         ));
     }
     if facets == 0 {
         return Err(BaoziError::parse(
-            ctx.source.to_string(),
+            ctx.source().to_string(),
             None,
             "binary STL contains no facets",
         ));
     }
 
     let face_count = facets as usize;
-    if face_count > ctx.options.limits.max_faces {
+    if face_count > ctx.limits().max_faces {
         return Err(BaoziError::LimitExceeded { limit: "max_faces" });
     }
     let vertex_count = face_count.checked_mul(3).ok_or(BaoziError::LimitExceeded {
         limit: "max_vertices",
     })?;
-    if vertex_count > ctx.options.limits.max_vertices {
+    if vertex_count > ctx.limits().max_vertices {
         return Err(BaoziError::LimitExceeded {
             limit: "max_vertices",
         });
@@ -43,7 +43,7 @@ pub(crate) fn parse(ctx: &mut ImportContext<'_>, bytes: &[u8], facets: u32) -> R
 
     let Some(header) = bytes.get(..HEADER_BYTES) else {
         return Err(BaoziError::parse(
-            ctx.source.to_string(),
+            ctx.source().to_string(),
             None,
             "binary STL is too small for header",
         ));
@@ -58,7 +58,7 @@ pub(crate) fn parse(ctx: &mut ImportContext<'_>, bytes: &[u8], facets: u32) -> R
         let offset = BINARY_PREAMBLE_BYTES + face_index * FACET_BYTES;
         let Some(record) = bytes.get(offset..offset + FACET_BYTES) else {
             return Err(BaoziError::parse(
-                ctx.source.to_string(),
+                ctx.source().to_string(),
                 Some(SourceLocation::byte(offset as u64)),
                 "binary STL ended inside a facet record",
             ));
@@ -72,7 +72,7 @@ pub(crate) fn parse(ctx: &mut ImportContext<'_>, bytes: &[u8], facets: u32) -> R
 
         let Some(attribute_bytes) = record.get(48..50) else {
             return Err(BaoziError::parse(
-                ctx.source.to_string(),
+                ctx.source().to_string(),
                 Some(SourceLocation::byte((offset + 48) as u64)),
                 "binary STL ended inside a facet attribute",
             ));
@@ -128,7 +128,7 @@ fn f32_at(
 ) -> Result<f32> {
     let Some(chunk) = record.get(offset..offset + 4) else {
         return Err(BaoziError::parse(
-            ctx.source.to_string(),
+            ctx.source().to_string(),
             Some(SourceLocation::byte(byte_offset as u64)),
             "binary STL ended inside a float",
         ));

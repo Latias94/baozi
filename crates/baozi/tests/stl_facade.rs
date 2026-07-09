@@ -32,9 +32,9 @@ fn binary_triangle() -> Vec<u8> {
 fn facade_reads_ascii_stl_from_bytes() -> Result<()> {
     let report = Importer::new().read_bytes("facade.stl", ascii_triangle())?;
 
-    assert_eq!(report.format.id, "stl");
-    assert_eq!(report.scene.meshes.len(), 1);
-    assert!(report.diagnostics.is_empty());
+    assert_eq!(report.format().id(), "stl");
+    assert_eq!(report.scene().meshes.len(), 1);
+    assert!(report.diagnostics().is_empty());
     Ok(())
 }
 
@@ -44,10 +44,10 @@ fn same_importer_reads_stl_repeatedly() -> Result<()> {
     let first = importer.read_bytes("first.stl", ascii_triangle())?;
     let second = importer.read_bytes("second.stl", ascii_triangle())?;
 
-    assert_eq!(first.format.id, "stl");
-    assert_eq!(second.format.id, "stl");
-    assert_eq!(first.scene.meshes.len(), 1);
-    assert_eq!(second.scene.meshes.len(), 1);
+    assert_eq!(first.format().id(), "stl");
+    assert_eq!(second.format().id(), "stl");
+    assert_eq!(first.scene().meshes.len(), 1);
+    assert_eq!(second.scene().meshes.len(), 1);
     Ok(())
 }
 
@@ -59,9 +59,9 @@ fn facade_preserves_successful_stl_diagnostics() -> Result<()> {
 
     let report = Importer::new().read_bytes("diagnostic.stl", &bytes)?;
 
-    assert_eq!(report.scene.meshes.len(), 1);
-    assert_eq!(report.diagnostics.len(), 1);
-    assert_eq!(report.diagnostics[0].code.0, "stl.empty_solid");
+    assert_eq!(report.scene().meshes.len(), 1);
+    assert_eq!(report.diagnostics().len(), 1);
+    assert_eq!(report.diagnostics()[0].code.0, "stl.empty_solid");
     Ok(())
 }
 
@@ -70,8 +70,8 @@ fn facade_content_detection_beats_unknown_extension() -> Result<()> {
     let bytes = binary_triangle();
     let report = Importer::new().read_bytes("facade.bin", &bytes)?;
 
-    assert_eq!(report.format.id, "stl");
-    assert_eq!(report.scene.meshes.len(), 1);
+    assert_eq!(report.format().id(), "stl");
+    assert_eq!(report.scene().meshes.len(), 1);
     Ok(())
 }
 

@@ -1,9 +1,10 @@
 use baozi::DiagnosticSeverity;
 use baozi::ReadSeek;
 use baozi::{
-    BaoziError, CapabilityStatus, Diagnostic, FormatCapability, FormatImporter, FormatInfo,
-    FormatMaturity, ImportContext, Importer, ReadConfidence, ReadHint, Result, Scene, SceneBuilder,
+    BaoziError, CapabilityStatus, Diagnostic, FormatCapability, FormatInfo, FormatMaturity,
+    ImportStage, Importer, Result, Scene, SceneBuilder,
 };
+use baozi_import::{FormatImporter, ImportContext, ReadConfidence, ReadHint};
 
 struct ExtensionOnlyImporter;
 struct RefusingImporter;
@@ -17,14 +18,10 @@ static ONE_EXTENSIONS: &[&str] = &["one"];
 static TWO_EXTENSIONS: &[&str] = &["two"];
 
 fn dummy_info(id: &'static str, extensions: &'static [&'static str]) -> FormatInfo {
-    FormatInfo {
-        id,
-        display_name: id,
-        extensions,
-        maturity: FormatMaturity::Experimental,
-        capabilities: &[(FormatCapability::Geometry, CapabilityStatus::Unknown)],
-        notes: "test importer",
-    }
+    FormatInfo::new(id, id, extensions)
+        .with_maturity(FormatMaturity::Experimental)
+        .with_capabilities(&[(FormatCapability::Geometry, CapabilityStatus::Unknown)])
+        .with_notes("test importer")
 }
 
 fn read_scene(ctx: &mut ImportContext<'_>) -> Result<Scene> {
@@ -121,19 +118,39 @@ fn unknown_bytes_report_unsupported_format() {
 #[test]
 fn extension_hint_selects_importer_when_content_does_not_contradict() {
     let mut importer = Importer::empty();
-    importer.register(ExtensionOnlyImporter);
+    importer.register(ExtensionOnlyImporter).unwrap();
 
     let report = importer.read_bytes("model.dum", b"opaque bytes").unwrap();
 
-    assert_eq!(report.scene.nodes.len(), 1);
-    assert_eq!(report.diagnostics.len(), 1);
-    assert_eq!(report.diagnostics[0].severity, DiagnosticSeverity::Warning);
+    assert_eq!(report.scene().nodes.len(), 1);
+    assert_eq!(report.diagnostics().len(), 1);
+    assert_eq!(
+        report.diagnostics()[0].severity,
+        DiagnosticSeverity::Warning
+    );
+    assert_eq!(report.stage(), ImportStage::ValidatedImported);
+    assert_eq!(report.stats().diagnostics_emitted(), 1);
+}
+
+#[test]
+fn strict_diagnostics_promote_warning_to_error() {
+    let mut importer = Importer::empty();
+    importer.register(ExtensionOnlyImporter).unwrap();
+    let mut options = baozi::ImportOptions::memory();
+    options.diagnostics.strict = true;
+
+    let error = importer
+        .read_bytes_with_options("model.dum", b"opaque bytes", options)
+        .unwrap_err();
+
+    assert!(matches!(error, BaoziError::Parse { .. }));
+    assert!(error.to_string().contains("test.imported"));
 }
 
 #[test]
 fn extension_hint_does_not_select_importer_that_rejects_content() {
     let mut importer = Importer::empty();
-    importer.register(RefusingImporter);
+    importer.register(RefusingImporter).unwrap();
 
     let error = importer
         .read_bytes("model.dum", b"contradiction")
@@ -145,19 +162,19 @@ fn extension_hint_does_not_select_importer_that_rejects_content() {
 #[test]
 fn content_detection_beats_wrong_extension() {
     let mut importer = Importer::empty();
-    importer.register(ExtensionOnlyImporter);
-    importer.register(ContentImporter);
+    importer.register(ExtensionOnlyImporter).unwrap();
+    importer.register(ContentImporter).unwrap();
 
     let report = importer.read_bytes("model.dum", b"baozi payload").unwrap();
 
-    assert_eq!(report.format.id, "content");
+    assert_eq!(report.format().id(), "content");
 }
 
 #[test]
 fn ambiguous_top_confidence_matches_return_error() {
     let mut importer = Importer::empty();
-    importer.register(AmbiguousOne);
-    importer.register(AmbiguousTwo);
+    importer.register(AmbiguousOne).unwrap();
+    importer.register(AmbiguousTwo).unwrap();
 
     let error = importer.read_bytes("model.bin", b"anything").unwrap_err();
 

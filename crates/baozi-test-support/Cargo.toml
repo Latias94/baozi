@@ -12,3 +12,4 @@ publish = false
 
 [dependencies]
 baozi-core.workspace = true
+baozi-import.workspace = true

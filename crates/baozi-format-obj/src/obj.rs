@@ -69,7 +69,7 @@ struct Token<'line> {
 
 impl ObjParser<'_, '_> {
     fn parse_line(&mut self, raw_line: &str, line_number: u32) -> Result<()> {
-        if raw_line.len() > self.ctx.options.limits.max_line_bytes {
+        if raw_line.len() > self.ctx.limits().max_line_bytes {
             return Err(BaoziError::LimitExceeded {
                 limit: "max_line_bytes",
             });
@@ -119,7 +119,7 @@ impl ObjParser<'_, '_> {
                 Ok(())
             }
             keyword if is_unsupported_statement(keyword) => {
-                let source = self.ctx.source.to_string();
+                let source = self.ctx.source().to_string();
                 mtl::push_warning(
                     self.ctx,
                     source,
@@ -130,7 +130,7 @@ impl ObjParser<'_, '_> {
                 Ok(())
             }
             keyword => {
-                let source = self.ctx.source.to_string();
+                let source = self.ctx.source().to_string();
                 mtl::push_warning(
                     self.ctx,
                     source,
@@ -153,7 +153,7 @@ impl ObjParser<'_, '_> {
             .ok_or(BaoziError::LimitExceeded {
                 limit: "max_vertices",
             })?;
-        if next > self.ctx.options.limits.max_vertices {
+        if next > self.ctx.limits().max_vertices {
             return Err(BaoziError::LimitExceeded {
                 limit: "max_vertices",
             });
@@ -204,7 +204,7 @@ impl ObjParser<'_, '_> {
             .len()
             .checked_add(1)
             .ok_or(BaoziError::LimitExceeded { limit: "max_faces" })?;
-        if next > self.ctx.options.limits.max_faces {
+        if next > self.ctx.limits().max_faces {
             return Err(BaoziError::LimitExceeded { limit: "max_faces" });
         }
 
@@ -261,7 +261,7 @@ fn push_token<'line>(
     line_number: u32,
 ) -> Result<()> {
     let text = &line[start..end];
-    if text.len() > ctx.options.limits.max_token_bytes {
+    if text.len() > ctx.limits().max_token_bytes {
         return Err(BaoziError::LimitExceeded {
             limit: "max_token_bytes",
         });
@@ -395,7 +395,7 @@ fn enforce_stream_limit(ctx: &ImportContext<'_>, current_len: usize) -> Result<(
         .ok_or(BaoziError::LimitExceeded {
             limit: "max_vertices",
         })?;
-    if next > ctx.options.limits.max_vertices {
+    if next > ctx.limits().max_vertices {
         return Err(BaoziError::LimitExceeded {
             limit: "max_vertices",
         });
@@ -423,7 +423,7 @@ fn parse_f32(ctx: &ImportContext<'_>, token: Token<'_>, line_number: u32) -> Res
 
 fn checked_string(ctx: &ImportContext<'_>, text: &str) -> Result<String> {
     let text = text.trim();
-    if text.len() > ctx.options.limits.max_string_bytes {
+    if text.len() > ctx.limits().max_string_bytes {
         return Err(BaoziError::LimitExceeded {
             limit: "max_string_bytes",
         });
@@ -446,7 +446,7 @@ fn parse_error(
     location: Option<SourceLocation>,
     message: impl Into<String>,
 ) -> BaoziError {
-    BaoziError::parse(ctx.source.to_string(), location, message)
+    BaoziError::parse(ctx.source().to_string(), location, message)
 }
 
 fn location(line: u32, column: u32) -> SourceLocation {

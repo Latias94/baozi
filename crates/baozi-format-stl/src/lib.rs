@@ -7,24 +7,39 @@ mod parser;
 
 use baozi_core::{Result, Scene};
 use baozi_import::{
-    CapabilityStatus, FormatCapability, FormatImporter, FormatInfo, FormatMaturity, ImportContext,
-    ImporterRegistry, ReadConfidence, ReadHint,
+    CapabilityStatus, FormatCapability, FormatEncoding, FormatImporter, FormatInfo, FormatMaturity,
+    FormatSidecarPolicy, ImportContext, ImporterRegistry, ReadConfidence, ReadHint,
 };
 use baozi_io::ReadSeek;
 
 pub struct StlImporter;
 
 pub fn format_info() -> FormatInfo {
-    FormatInfo {
-        id: "stl",
-        display_name: "STL",
-        extensions: &["stl"],
-        maturity: FormatMaturity::Experimental,
-        capabilities: &[
+    FormatInfo::new("stl", "STL", &["stl"])
+        .with_media_types(&["model/stl", "application/sla"])
+        .with_encoding(FormatEncoding::TextOrBinary)
+        .with_sidecar_policy(FormatSidecarPolicy::None)
+        .with_maturity(FormatMaturity::Experimental)
+        .with_capabilities(&[
             (FormatCapability::Geometry, CapabilityStatus::Supported),
             (FormatCapability::Hierarchy, CapabilityStatus::Partial),
             (FormatCapability::Materials, CapabilityStatus::Partial),
+            (FormatCapability::Textures, CapabilityStatus::Unsupported),
+            (
+                FormatCapability::CamerasLights,
+                CapabilityStatus::Unsupported,
+            ),
+            (FormatCapability::Animation, CapabilityStatus::Unsupported),
+            (FormatCapability::Skinning, CapabilityStatus::Unsupported),
+            (
+                FormatCapability::MorphTargets,
+                CapabilityStatus::Unsupported,
+            ),
             (FormatCapability::Metadata, CapabilityStatus::Partial),
+            (
+                FormatCapability::CompressionContainers,
+                CapabilityStatus::Unsupported,
+            ),
             (
                 FormatCapability::CoordinatesUnits,
                 CapabilityStatus::ParsedLossy,
@@ -34,13 +49,13 @@ pub fn format_info() -> FormatInfo {
                 FormatCapability::ResourceLimits,
                 CapabilityStatus::Supported,
             ),
-        ],
-        notes: "experimental STL importer for binary and ASCII triangle meshes",
-    }
+        ])
+        .with_notes("experimental STL importer for binary and ASCII triangle meshes")
+        .with_docs_path("docs/formats/stl.md")
 }
 
-pub fn register(registry: &mut ImporterRegistry) {
-    registry.register(StlImporter);
+pub fn register(registry: &mut ImporterRegistry) -> Result<()> {
+    registry.register(StlImporter)
 }
 
 impl FormatImporter for StlImporter {
@@ -60,9 +75,28 @@ impl FormatImporter for StlImporter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use baozi_test_support::{SupportMatrixColumn, assert_support_matrix_row};
 
     #[test]
     fn reports_experimental_maturity() {
-        assert_eq!(format_info().maturity, FormatMaturity::Experimental);
+        assert_eq!(format_info().maturity(), FormatMaturity::Experimental);
+    }
+
+    #[test]
+    fn support_matrix_matches_format_info() {
+        assert_support_matrix_row(
+            "baozi-format-stl",
+            &format_info(),
+            &[
+                (SupportMatrixColumn::Geometry, FormatCapability::Geometry),
+                (SupportMatrixColumn::Materials, FormatCapability::Materials),
+                (SupportMatrixColumn::Textures, FormatCapability::Textures),
+                (SupportMatrixColumn::Animation, FormatCapability::Animation),
+                (
+                    SupportMatrixColumn::Diagnostics,
+                    FormatCapability::Diagnostics,
+                ),
+            ],
+        );
     }
 }

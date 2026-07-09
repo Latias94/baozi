@@ -21,29 +21,35 @@ impl PostProcessPreset {
             Self::RealtimeQuality => &[
                 PostProcessStep::ValidateScene,
                 PostProcessStep::Triangulate,
-                PostProcessStep::FindDegenerates,
-                PostProcessStep::FindInvalidData,
-                PostProcessStep::GenerateNormals,
-                PostProcessStep::GenerateTangents,
                 PostProcessStep::GenerateBoundingBoxes,
             ],
             Self::RealtimeMaxQuality => &[
                 PostProcessStep::ValidateScene,
                 PostProcessStep::Triangulate,
-                PostProcessStep::FindDegenerates,
-                PostProcessStep::FindInvalidData,
-                PostProcessStep::JoinIdenticalVertices,
-                PostProcessStep::GenerateNormals,
-                PostProcessStep::GenerateTangents,
                 PostProcessStep::GenerateBoundingBoxes,
-                PostProcessStep::OptimizeMeshes,
-                PostProcessStep::OptimizeGraph,
             ],
             Self::ToolingPreserve => &[
                 PostProcessStep::ValidateScene,
-                PostProcessStep::FindInvalidData,
                 PostProcessStep::GenerateBoundingBoxes,
             ],
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn presets_only_include_implemented_steps() {
+        for preset in [
+            PostProcessPreset::Raw,
+            PostProcessPreset::RealtimeFast,
+            PostProcessPreset::RealtimeQuality,
+            PostProcessPreset::RealtimeMaxQuality,
+            PostProcessPreset::ToolingPreserve,
+        ] {
+            assert!(preset.steps().iter().all(|step| step.is_implemented()));
         }
     }
 }
