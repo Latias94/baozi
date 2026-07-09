@@ -9,6 +9,8 @@ git_branch: main
 
 # Passed Gates
 
+## Local
+
 - `cargo fmt --all -- --check`
 - `actionlint`
 - `cargo check --workspace --all-targets`
@@ -26,6 +28,10 @@ git_branch: main
 - `cargo +nightly-2026-05-27 fuzz check stl_import`
 - Focused OBJ/facade tests: `cargo test -p baozi-format-obj -- --nocapture` and `cargo test -p baozi --test obj_facade -- --nocapture`
 - Native filesystem facade test: `cargo test -p baozi --features native-fs --test obj_facade -- --nocapture`
+
+## Remote CI
+
+- GitHub Actions CI run `29009062587` passed on `main` for commit `309ead2`.
 
 # Environment-Limited Gate
 
