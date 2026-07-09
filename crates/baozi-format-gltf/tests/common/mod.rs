@@ -120,6 +120,55 @@ pub fn triangle_bin() -> Vec<u8> {
     bytes
 }
 
+pub fn interleaved_triangle_gltf() -> Vec<u8> {
+    br#"{
+  "asset": { "version": "2.0", "generator": "baozi-interleaved-test" },
+  "scene": 0,
+  "scenes": [{ "nodes": [0] }],
+  "nodes": [{ "name": "InterleavedTriangleNode", "mesh": 0 }],
+  "buffers": [{ "uri": "interleaved.bin", "byteLength": 80 }],
+  "bufferViews": [
+    { "buffer": 0, "byteOffset": 0, "byteLength": 72, "byteStride": 24, "target": 34962 },
+    { "buffer": 0, "byteOffset": 72, "byteLength": 6, "target": 34963 }
+  ],
+  "accessors": [
+    { "bufferView": 0, "byteOffset": 0, "componentType": 5126, "count": 3, "type": "VEC3", "min": [0, 0, 0], "max": [1, 1, 0] },
+    { "bufferView": 0, "byteOffset": 12, "componentType": 5126, "count": 3, "type": "VEC3" },
+    { "bufferView": 1, "componentType": 5123, "count": 3, "type": "SCALAR" }
+  ],
+  "meshes": [{
+    "name": "InterleavedTriangle",
+    "primitives": [{
+      "attributes": { "POSITION": 0, "NORMAL": 1 },
+      "indices": 2,
+      "mode": 4
+    }]
+  }]
+}"#
+    .to_vec()
+}
+
+pub fn interleaved_triangle_bin() -> Vec<u8> {
+    let mut bytes = Vec::new();
+    for vertex in [
+        ([0.0f32, 0.0, 0.0], [0.0f32, 0.0, 1.0]),
+        ([1.0f32, 0.0, 0.0], [0.0f32, 0.0, 1.0]),
+        ([0.0f32, 1.0, 0.0], [0.0f32, 0.0, 1.0]),
+    ] {
+        for value in vertex.0 {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        for value in vertex.1 {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+    }
+    for index in [0u16, 1, 2] {
+        bytes.extend_from_slice(&index.to_le_bytes());
+    }
+    bytes.resize(80, 0);
+    bytes
+}
+
 pub fn skinned_triangle_gltf() -> Vec<u8> {
     br#"{
   "asset": { "version": "2.0", "generator": "baozi-skin-test" },

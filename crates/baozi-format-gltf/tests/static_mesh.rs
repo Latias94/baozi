@@ -6,8 +6,9 @@ use baozi_core::{
 };
 use baozi_test_support::SceneSnapshot;
 use common::{
-    data_uri_gltf, expected_error, import_assets, import_assets_result, sidecar_options,
-    triangle_bin, triangle_glb, triangle_gltf, triangle_gltf_with_buffer_uri,
+    data_uri_gltf, expected_error, import_assets, import_assets_result, interleaved_triangle_bin,
+    interleaved_triangle_gltf, sidecar_options, triangle_bin, triangle_glb, triangle_gltf,
+    triangle_gltf_with_buffer_uri,
 };
 
 #[test]
@@ -88,6 +89,28 @@ fn imports_glb_static_mesh_from_bin_chunk() -> Result<()> {
     assert_eq!(scene.meshes[0].positions.len(), 3);
     assert_eq!(scene.meshes[0].positions[1], Vec3::new(1.0, 0.0, 0.0));
     assert_eq!(scene.meshes[0].indices, vec![0, 1, 2]);
+    Ok(())
+}
+
+#[test]
+fn imports_interleaved_byte_stride_mesh() -> Result<()> {
+    let (scene, diagnostics) = import_assets(
+        "models/interleaved.gltf",
+        [
+            ("models/interleaved.gltf", interleaved_triangle_gltf()),
+            ("models/interleaved.bin", interleaved_triangle_bin()),
+        ],
+        sidecar_options(),
+    )?;
+
+    assert!(diagnostics.is_empty());
+    let mesh = &scene.meshes[0];
+    assert_eq!(mesh.name.as_deref(), Some("InterleavedTriangle"));
+    assert_eq!(mesh.positions.len(), 3);
+    assert_eq!(mesh.positions[1], Vec3::new(1.0, 0.0, 0.0));
+    assert_eq!(mesh.normals.len(), 3);
+    assert_eq!(mesh.normals[2], Vec3::new(0.0, 0.0, 1.0));
+    assert_eq!(mesh.indices, vec![0, 1, 2]);
     Ok(())
 }
 
