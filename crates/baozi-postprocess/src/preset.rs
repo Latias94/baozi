@@ -21,11 +21,13 @@ impl PostProcessPreset {
             Self::RealtimeQuality => &[
                 PostProcessStep::ValidateScene,
                 PostProcessStep::Triangulate,
+                PostProcessStep::GenerateNormals,
                 PostProcessStep::GenerateBoundingBoxes,
             ],
             Self::RealtimeMaxQuality => &[
                 PostProcessStep::ValidateScene,
                 PostProcessStep::Triangulate,
+                PostProcessStep::GenerateNormals,
                 PostProcessStep::GenerateBoundingBoxes,
             ],
             Self::ToolingPreserve => &[

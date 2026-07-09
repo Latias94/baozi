@@ -6,8 +6,11 @@ use libfuzzer_sys::fuzz_target;
 fuzz_target!(|data: &[u8]| {
     let mut importer = Importer::empty();
     importer.register(baozi_format_obj::ObjImporter).unwrap();
-    let pipeline =
-        PostProcessPipeline::new([PostProcessStep::Triangulate, PostProcessStep::GenerateBoundingBoxes]);
+    let pipeline = PostProcessPipeline::new([
+        PostProcessStep::Triangulate,
+        PostProcessStep::GenerateNormals,
+        PostProcessStep::GenerateBoundingBoxes,
+    ]);
 
     let _ = importer.read_bytes_with_postprocess(
         "fuzz.obj",

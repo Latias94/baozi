@@ -67,7 +67,10 @@ impl PostProcessStep {
     pub fn is_implemented(self) -> bool {
         matches!(
             self,
-            Self::ValidateScene | Self::Triangulate | Self::GenerateBoundingBoxes
+            Self::ValidateScene
+                | Self::Triangulate
+                | Self::GenerateNormals
+                | Self::GenerateBoundingBoxes
         )
     }
 }
@@ -97,6 +100,7 @@ impl PostProcessPipeline {
             match step {
                 PostProcessStep::ValidateScene => validate_scene(&scene)?,
                 PostProcessStep::Triangulate => triangulate_scene(&mut scene)?,
+                PostProcessStep::GenerateNormals => generate_normals(&mut scene)?,
                 PostProcessStep::GenerateBoundingBoxes => generate_bounding_boxes(&mut scene)?,
                 step => {
                     return Err(postprocess_error(
@@ -164,6 +168,77 @@ fn implicit_indices(element_count: usize) -> Result<Vec<u32>> {
     Ok((0..element_count as u32).collect())
 }
 
+fn generate_normals(scene: &mut Scene) -> Result<()> {
+    validate_scene(scene)?;
+
+    for (mesh_index, mesh) in scene.meshes.iter_mut().enumerate() {
+        if !mesh.normals.is_empty() {
+            continue;
+        }
+        if mesh.topology != PrimitiveTopology::Triangles {
+            return Err(postprocess_error(
+                "GenerateNormals",
+                format!(
+                    "mesh {mesh_index} has {:?} topology; triangulate before generating normals",
+                    mesh.topology
+                ),
+            ));
+        }
+
+        let mut normals = vec![None; mesh.positions.len()];
+        if mesh.indices.is_empty() {
+            for (triangle_index, triangle) in mesh.positions.chunks_exact(3).enumerate() {
+                let normal = triangle_normal(
+                    mesh_index,
+                    triangle_index,
+                    triangle[0],
+                    triangle[1],
+                    triangle[2],
+                )?;
+                for vertex_offset in 0..3 {
+                    let vertex_index = triangle_index * 3 + vertex_offset;
+                    assign_normal(&mut normals[vertex_index], normal, mesh_index, vertex_index)?;
+                }
+            }
+        } else {
+            for (triangle_index, triangle) in mesh.indices.chunks_exact(3).enumerate() {
+                let indices = [
+                    triangle[0] as usize,
+                    triangle[1] as usize,
+                    triangle[2] as usize,
+                ];
+                let normal = triangle_normal(
+                    mesh_index,
+                    triangle_index,
+                    mesh.positions[indices[0]],
+                    mesh.positions[indices[1]],
+                    mesh.positions[indices[2]],
+                )?;
+                for vertex_index in indices {
+                    assign_normal(&mut normals[vertex_index], normal, mesh_index, vertex_index)?;
+                }
+            }
+        }
+
+        mesh.normals = normals
+            .into_iter()
+            .enumerate()
+            .map(|(vertex_index, normal)| {
+                normal.ok_or_else(|| {
+                    postprocess_error(
+                        "GenerateNormals",
+                        format!(
+                            "mesh {mesh_index} vertex {vertex_index} is not referenced by any triangle"
+                        ),
+                    )
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+    }
+
+    validate_scene(scene)
+}
+
 fn generate_bounding_boxes(scene: &mut Scene) -> Result<()> {
     validate_scene(scene)?;
     for mesh in &mut scene.meshes {
@@ -187,6 +262,72 @@ fn compute_bounds(positions: &[Vec3]) -> Option<Aabb> {
         max.z = max.z.max(position.z);
     }
     Some(Aabb { min, max })
+}
+
+fn triangle_normal(
+    mesh_index: usize,
+    triangle_index: usize,
+    a: Vec3,
+    b: Vec3,
+    c: Vec3,
+) -> Result<Vec3> {
+    let ab = sub_vec3(b, a);
+    let ac = sub_vec3(c, a);
+    let normal = cross_vec3(ab, ac);
+    let length_squared = dot_vec3(normal, normal);
+    if length_squared <= 1.0e-20 || !length_squared.is_finite() {
+        return Err(postprocess_error(
+            "GenerateNormals",
+            format!("mesh {mesh_index} triangle {triangle_index} is degenerate"),
+        ));
+    }
+    Ok(scale_vec3(normal, length_squared.sqrt().recip()))
+}
+
+fn assign_normal(
+    slot: &mut Option<Vec3>,
+    normal: Vec3,
+    mesh_index: usize,
+    vertex_index: usize,
+) -> Result<()> {
+    if let Some(existing) = *slot {
+        if normals_compatible(existing, normal) {
+            return Ok(());
+        }
+        return Err(postprocess_error(
+            "GenerateNormals",
+            format!(
+                "mesh {mesh_index} shared vertex {vertex_index} needs multiple generated normals"
+            ),
+        ));
+    }
+    *slot = Some(normal);
+    Ok(())
+}
+
+fn normals_compatible(a: Vec3, b: Vec3) -> bool {
+    let delta = sub_vec3(a, b);
+    dot_vec3(delta, delta) <= 1.0e-10
+}
+
+fn sub_vec3(a: Vec3, b: Vec3) -> Vec3 {
+    Vec3::new(a.x - b.x, a.y - b.y, a.z - b.z)
+}
+
+fn scale_vec3(value: Vec3, scale: f32) -> Vec3 {
+    Vec3::new(value.x * scale, value.y * scale, value.z * scale)
+}
+
+fn cross_vec3(a: Vec3, b: Vec3) -> Vec3 {
+    Vec3::new(
+        a.y * b.z - a.z * b.y,
+        a.z * b.x - a.x * b.z,
+        a.x * b.y - a.y * b.x,
+    )
+}
+
+fn dot_vec3(a: Vec3, b: Vec3) -> f32 {
+    a.x * b.x + a.y * b.y + a.z * b.z
 }
 
 fn postprocess_error(step: &'static str, message: impl Into<String>) -> BaoziError {
@@ -221,14 +362,14 @@ mod tests {
     #[test]
     fn unsupported_steps_return_error_instead_of_noop() {
         let scene = baozi_core::SceneBuilder::new().finish().unwrap();
-        let pipeline = PostProcessPipeline::new([PostProcessStep::GenerateNormals]);
+        let pipeline = PostProcessPipeline::new([PostProcessStep::GenerateTangents]);
 
         let error = pipeline.run(scene).unwrap_err();
 
         assert_eq!(
             error,
             BaoziError::PostProcess {
-                step: "GenerateNormals",
+                step: "GenerateTangents",
                 message: "postprocess step is not implemented yet".to_owned()
             }
         );
@@ -299,5 +440,157 @@ mod tests {
 
         assert_eq!(bounds.min, Vec3::new(-3.0, -1.0, -2.0));
         assert_eq!(bounds.max, Vec3::new(2.0, 4.0, 1.5));
+    }
+
+    #[test]
+    fn generate_normals_fills_indexed_triangle_mesh() {
+        let scene = scene_with_mesh(Mesh {
+            topology: PrimitiveTopology::Triangles,
+            positions: vec![
+                Vec3::new(0.0, 0.0, 0.0),
+                Vec3::new(1.0, 0.0, 0.0),
+                Vec3::new(0.0, 1.0, 0.0),
+            ],
+            indices: vec![0, 1, 2],
+            ..Mesh::default()
+        });
+        let pipeline = PostProcessPipeline::new([PostProcessStep::GenerateNormals]);
+
+        let scene = pipeline.run(scene).unwrap();
+
+        assert_eq!(scene.meshes[0].normals, vec![Vec3::new(0.0, 0.0, 1.0); 3]);
+    }
+
+    #[test]
+    fn generate_normals_fills_implicit_triangle_mesh() {
+        let scene = scene_with_mesh(Mesh {
+            topology: PrimitiveTopology::Triangles,
+            positions: vec![
+                Vec3::new(0.0, 0.0, 0.0),
+                Vec3::new(1.0, 0.0, 0.0),
+                Vec3::new(0.0, 1.0, 0.0),
+            ],
+            ..Mesh::default()
+        });
+        let pipeline = PostProcessPipeline::new([PostProcessStep::GenerateNormals]);
+
+        let scene = pipeline.run(scene).unwrap();
+
+        assert_eq!(scene.meshes[0].normals, vec![Vec3::new(0.0, 0.0, 1.0); 3]);
+    }
+
+    #[test]
+    fn generate_normals_does_not_overwrite_existing_normals() {
+        let existing = vec![Vec3::new(0.0, 1.0, 0.0); 3];
+        let scene = scene_with_mesh(Mesh {
+            topology: PrimitiveTopology::Triangles,
+            positions: vec![
+                Vec3::new(0.0, 0.0, 0.0),
+                Vec3::new(1.0, 0.0, 0.0),
+                Vec3::new(0.0, 1.0, 0.0),
+            ],
+            normals: existing.clone(),
+            indices: vec![0, 1, 2],
+            ..Mesh::default()
+        });
+        let pipeline = PostProcessPipeline::new([PostProcessStep::GenerateNormals]);
+
+        let scene = pipeline.run(scene).unwrap();
+
+        assert_eq!(scene.meshes[0].normals, existing);
+    }
+
+    #[test]
+    fn triangulate_then_generate_normals_handles_quad_polygon() {
+        let scene = scene_with_mesh(Mesh {
+            topology: PrimitiveTopology::Polygons,
+            positions: vec![
+                Vec3::new(0.0, 0.0, 0.0),
+                Vec3::new(1.0, 0.0, 0.0),
+                Vec3::new(1.0, 1.0, 0.0),
+                Vec3::new(0.0, 1.0, 0.0),
+            ],
+            indices: vec![0, 1, 2, 3],
+            face_vertex_counts: vec![4],
+            ..Mesh::default()
+        });
+        let pipeline = PostProcessPipeline::new([
+            PostProcessStep::Triangulate,
+            PostProcessStep::GenerateNormals,
+        ]);
+
+        let scene = pipeline.run(scene).unwrap();
+
+        assert_eq!(scene.meshes[0].topology, PrimitiveTopology::Triangles);
+        assert_eq!(scene.meshes[0].indices, vec![0, 1, 2, 0, 2, 3]);
+        assert_eq!(scene.meshes[0].normals, vec![Vec3::new(0.0, 0.0, 1.0); 4]);
+    }
+
+    #[test]
+    fn generate_normals_rejects_degenerate_triangle() {
+        let scene = scene_with_mesh(Mesh {
+            topology: PrimitiveTopology::Triangles,
+            positions: vec![
+                Vec3::new(0.0, 0.0, 0.0),
+                Vec3::new(1.0, 0.0, 0.0),
+                Vec3::new(2.0, 0.0, 0.0),
+            ],
+            indices: vec![0, 1, 2],
+            ..Mesh::default()
+        });
+        let pipeline = PostProcessPipeline::new([PostProcessStep::GenerateNormals]);
+
+        let error = pipeline.run(scene).unwrap_err();
+
+        assert_eq!(
+            error,
+            BaoziError::PostProcess {
+                step: "GenerateNormals",
+                message: "mesh 0 triangle 0 is degenerate".to_owned()
+            }
+        );
+    }
+
+    #[test]
+    fn generate_normals_rejects_polygon_mesh_without_triangulate() {
+        let scene = scene_with_mesh(Mesh {
+            topology: PrimitiveTopology::Polygons,
+            positions: vec![
+                Vec3::new(0.0, 0.0, 0.0),
+                Vec3::new(1.0, 0.0, 0.0),
+                Vec3::new(1.0, 1.0, 0.0),
+                Vec3::new(0.0, 1.0, 0.0),
+            ],
+            indices: vec![0, 1, 2, 3],
+            face_vertex_counts: vec![4],
+            ..Mesh::default()
+        });
+        let pipeline = PostProcessPipeline::new([PostProcessStep::GenerateNormals]);
+
+        let error = pipeline.run(scene).unwrap_err();
+
+        assert_eq!(
+            error,
+            BaoziError::PostProcess {
+                step: "GenerateNormals",
+                message: "mesh 0 has Polygons topology; triangulate before generating normals"
+                    .to_owned()
+            }
+        );
+    }
+
+    fn scene_with_mesh(mesh: Mesh) -> Scene {
+        let mut builder = baozi_core::SceneBuilder::new();
+        let mesh = builder.add_mesh(mesh);
+        builder
+            .add_child_node(
+                builder.root(),
+                Node {
+                    mesh_bindings: vec![MeshBinding::new(mesh)],
+                    ..Node::default()
+                },
+            )
+            .unwrap();
+        builder.finish().unwrap()
     }
 }
