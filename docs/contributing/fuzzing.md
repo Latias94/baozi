@@ -86,9 +86,8 @@ The fuzz workflows intentionally pin:
 - `RUST_FUZZ_NIGHTLY=nightly-2026-05-27`
 - `CARGO_FUZZ_VERSION=0.13.2`
 
-Dependabot does not update these shell-level pins. Review them when changing
-fuzz infrastructure or promoting a parser support tier. Broader CI policy lives
-in [CI Policy](ci.md).
+Dependency automation is currently disabled, so review these pins manually when changing fuzz
+infrastructure or promoting a parser support tier. Broader CI policy lives in [CI Policy](ci.md).
 
 ## Targets
 

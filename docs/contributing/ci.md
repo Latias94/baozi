@@ -22,9 +22,11 @@ required after checkout.
 
 ## Manually Pinned Tools
 
-Dependabot tracks GitHub Actions and Cargo manifests, including the workspace-adjacent `fuzz/`
-package. It does not automatically update every version embedded in shell commands or workflow
-environment variables.
+Dependency automation is intentionally disabled while Baozi is in rapid foundational development.
+GitHub Actions, Cargo manifests, and the workspace-adjacent `fuzz/` package are reviewed manually to
+avoid noisy update PRs while parser/API churn is high.
+
+Shell-level workflow pins also need manual review because they do not live in a Cargo manifest.
 
 Review these pins when changing CI, investigating tooling failures, or promoting parser maturity:
 
