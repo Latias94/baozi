@@ -1,7 +1,7 @@
 ---
 type: "Memory Event"
 title: "Verification: Added CI fuzz gate and audited Windows LLVM 22 ASan runtime"
-description: "Added Linux CI for Rust checks and STL sanitizer fuzz smoke. Installed LLVM 22.1.6 under F:\\MySoftware, but Windows MSVC fuzz run still failed with ASan entry-point mismatch."
+description: "Added Linux CI for Rust checks and STL sanitizer fuzz smoke. Installed LLVM 22.1.6 outside the repo, but Windows MSVC fuzz run still failed with ASan entry-point mismatch."
 timestamp: 2026-07-09T05:03:04Z
 event_kind: "Verification"
 related_plan: "docs/plans/2026-07-09-002-feat-stl-importer-vertical-slice-plan.md"
@@ -12,9 +12,9 @@ Added `.github/workflows/ci.yml` with a Linux Rust job for fmt, check, clippy, n
 checks, WASM checks, and cargo-deny, plus a Linux nightly `cargo-fuzz` smoke job for
 `stl_import`.
 
-Installed official LLVM 22.1.6 to `F:\MySoftware\LLVM-22.1.6` because `rustc +nightly -Vv` reports
-LLVM 22.1.6. The expected ASan DLL exists at
-`F:\MySoftware\LLVM-22.1.6\lib\clang\22\lib\windows\clang_rt.asan_dynamic-x86_64.dll`, but
+Installed official LLVM 22.1.6 to a machine-local directory outside the repo because
+`rustc +nightly -Vv` reports LLVM 22.1.6. The expected ASan DLL exists under that LLVM install at
+`lib\clang\22\lib\windows\clang_rt.asan_dynamic-x86_64.dll`, but
 `cargo +nightly fuzz run stl_import -- -runs=256` still exits with
 `STATUS_ENTRYPOINT_NOT_FOUND`.
 

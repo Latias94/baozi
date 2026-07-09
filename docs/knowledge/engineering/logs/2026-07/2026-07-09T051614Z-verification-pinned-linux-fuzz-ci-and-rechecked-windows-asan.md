@@ -11,7 +11,7 @@ related_plan: "docs/plans/2026-07-09-002-feat-stl-importer-vertical-slice-plan.m
 The CI workflow now declares the MSRV, fuzz nightly, and `cargo-fuzz` version explicitly. The Rust
 job uses `RUST_STABLE_VERSION=1.95.0`; the fuzz job uses
 `RUST_FUZZ_NIGHTLY=nightly-2026-05-27` and `CARGO_FUZZ_VERSION=0.13.2`, matching the local LLVM
-22.1.6 sanitizer runtime that was installed under `F:\MySoftware\LLVM-22.1.6`.
+22.1.6 sanitizer runtime that was installed in a machine-local directory outside the repo.
 
 Local verification passed for:
 
@@ -32,7 +32,8 @@ cargo clippy -p baozi-format-stl --all-targets -- -D warnings -D clippy::unwrap_
 Local Windows sanitizer execution was retried with:
 
 ```powershell
-$env:PATH='F:\MySoftware\LLVM-22.1.6\bin;F:\MySoftware\LLVM-22.1.6\lib\clang\22\lib\windows;' + $env:PATH
+$installRoot = '<machine-local-LLVM-22.1.6>'
+$env:PATH = "$installRoot\bin;$installRoot\lib\clang\22\lib\windows;$env:PATH"
 cargo +nightly-2026-05-27 fuzz run stl_import -- -runs=256
 ```
 
