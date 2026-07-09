@@ -118,6 +118,9 @@ sequenceDiagram
   Linux CI runner where libFuzzer and sanitizer runtime availability are predictable.
 - Windows sanitizer runs are useful but not required as the canonical gate because AddressSanitizer
   runtime DLL availability can depend on local Visual Studio or LLVM installation details.
+- Matching the Windows LLVM/compiler-rt version to `rustc +nightly -Vv` is the first local fix for
+  missing sanitizer DLLs, but an entry-point mismatch after that remains toolchain evidence rather
+  than parser evidence.
 - If a local fuzz smoke run cannot start because of a missing sanitizer runtime, record it as an
   environment failure, not parser evidence.
 - `cargo check --manifest-path fuzz/Cargo.toml`, `cargo +nightly fuzz check <target>`, and malformed

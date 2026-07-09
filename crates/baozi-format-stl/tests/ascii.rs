@@ -93,6 +93,23 @@ fn line_limit_is_enforced() -> Result<()> {
 }
 
 #[test]
+fn token_limit_is_enforced() -> Result<()> {
+    let bytes = ascii_triangle("triangle");
+    let mut options = ImportOptions::memory();
+    options.limits.max_token_bytes = 3;
+    let (result, _) = import_bytes_result("token-limit.stl", bytes.as_bytes(), options)?;
+    let error = expected_error(result)?;
+
+    assert!(matches!(
+        error,
+        BaoziError::LimitExceeded {
+            limit: "max_token_bytes"
+        }
+    ));
+    Ok(())
+}
+
+#[test]
 fn face_limit_is_enforced() -> Result<()> {
     let bytes = ascii_triangle("triangle");
     let mut options = ImportOptions::memory();
@@ -103,6 +120,23 @@ fn face_limit_is_enforced() -> Result<()> {
     assert!(matches!(
         error,
         BaoziError::LimitExceeded { limit: "max_faces" }
+    ));
+    Ok(())
+}
+
+#[test]
+fn solid_limit_is_enforced() -> Result<()> {
+    let bytes = format!("{}{}", ascii_triangle("left"), ascii_triangle("right"));
+    let mut options = ImportOptions::memory();
+    options.limits.max_solids = 1;
+    let (result, _) = import_bytes_result("solid-limit.stl", bytes.as_bytes(), options)?;
+    let error = expected_error(result)?;
+
+    assert!(matches!(
+        error,
+        BaoziError::LimitExceeded {
+            limit: "max_solids"
+        }
     ));
     Ok(())
 }

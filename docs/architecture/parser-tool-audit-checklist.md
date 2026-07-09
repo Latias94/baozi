@@ -134,6 +134,7 @@ exercise the same parser entry point.
 - [ ] `fuzz/target` and `fuzz/artifacts` are ignored.
 - [ ] `cargo check --manifest-path fuzz/Cargo.toml` passes.
 - [ ] `cargo +nightly fuzz check <target>` passes when nightly is installed.
+- [ ] Linux sanitizer CI includes the target before stable promotion.
 - [ ] Sanitizer smoke run status is recorded:
   - command attempted
   - host OS and toolchain

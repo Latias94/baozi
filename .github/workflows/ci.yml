@@ -1,0 +1,84 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  rust:
+    name: Rust checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust 1.95
+        uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          components: clippy, rustfmt
+          targets: wasm32-unknown-unknown, wasm32-wasip1
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install nextest
+        uses: taiki-e/install-action@nextest
+
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@cargo-deny
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Check workspace
+        run: cargo check --workspace --all-targets
+
+      - name: Lint workspace
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Test workspace
+        run: cargo nextest run --workspace
+
+      - name: Check no-default facade
+        run: cargo check -p baozi --no-default-features
+
+      - name: Check all format features
+        run: cargo check -p baozi --features all-formats,native-fs
+
+      - name: Check browser WASM bytes path
+        run: cargo check -p baozi --target wasm32-unknown-unknown --no-default-features --features format-stl
+
+      - name: Check WASI native-fs path
+        run: cargo check -p baozi --target wasm32-wasip1 --no-default-features --features format-stl,native-fs
+
+      - name: Check dependency policy
+        run: cargo deny check
+
+  fuzz:
+    name: STL sanitizer fuzz smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install nightly Rust
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+
+      - name: Check STL fuzz target
+        run: cargo +nightly fuzz check stl_import
+
+      - name: Run STL fuzz smoke
+        run: cargo +nightly fuzz run stl_import -- -runs=256

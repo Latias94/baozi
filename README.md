@@ -58,6 +58,8 @@ cargo deny check
 ```
 
 Use `cargo nextest` for tests where available. Keep parser behavior limit-aware and panic-averse.
+Parser fuzzing commands and Windows sanitizer notes live in
+[`docs/contributing/fuzzing.md`](docs/contributing/fuzzing.md).
 
 ## License
 

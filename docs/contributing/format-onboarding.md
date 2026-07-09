@@ -28,6 +28,7 @@ Use this checklist before adding or promoting a `baozi-format-*` crate.
 - Support matrix row.
 - Dependency and license notes.
 - Oracle comparison or documented reason it is not useful yet.
+- Successful sanitizer smoke run on Linux CI for stable promotion.
 
 ## Security Review
 
@@ -36,3 +37,4 @@ Use this checklist before adding or promoting a `baozi-format-*` crate.
 - No path traversal through sidecars.
 - No `unsafe` without a local safety comment and tests.
 - No FFI dependency in default features.
+- Windows sanitizer failures are recorded as toolchain evidence, not parser evidence.

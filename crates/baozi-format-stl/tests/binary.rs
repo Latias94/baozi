@@ -97,6 +97,21 @@ fn binary_facet_colors_expand_to_vertex_color_channel() -> Result<()> {
     Ok(())
 }
 
+#[test]
+fn materialise_facet_color_uses_materialise_channel_order() -> Result<()> {
+    let mut facet = BinaryFacet::unit_triangle();
+    facet.attribute = 0x8000 | 31;
+    let bytes = binary_stl(b"COLOR=\x20\x40\x80\xff", &[facet]);
+    let (scene, _) = import_bytes("materialise-facet-color.stl", &bytes)?;
+
+    assert_eq!(scene.meshes[0].colors.len(), 1);
+    assert_color_close(
+        scene.meshes[0].colors[0][0],
+        Color::linear_rgba(1.0, 0.0, 0.0, 1.0),
+    );
+    Ok(())
+}
+
 fn assert_color_close(actual: Color, expected: Color) {
     let epsilon = 0.000_001;
     assert!((actual.r - expected.r).abs() < epsilon);
