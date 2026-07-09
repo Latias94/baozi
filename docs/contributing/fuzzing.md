@@ -28,6 +28,8 @@ cargo +nightly-2026-05-27 fuzz check obj_import
 cargo +nightly-2026-05-27 fuzz run obj_import -- -runs=256
 cargo +nightly-2026-05-27 fuzz check obj_postprocess
 cargo +nightly-2026-05-27 fuzz run obj_postprocess -- -runs=256
+cargo +nightly-2026-05-27 fuzz check ply_import
+cargo +nightly-2026-05-27 fuzz run ply_import -- -runs=256
 cargo +nightly-2026-05-27 fuzz check gltf_import
 ```
 
@@ -57,6 +59,7 @@ $env:PATH = "$installRoot\bin;$installRoot\lib\clang\22\lib\windows;$env:PATH"
 cargo +nightly-2026-05-27 fuzz run stl_import -- -runs=256
 cargo +nightly-2026-05-27 fuzz run obj_import -- -runs=256
 cargo +nightly-2026-05-27 fuzz run obj_postprocess -- -runs=256
+cargo +nightly-2026-05-27 fuzz run ply_import -- -runs=256
 ```
 
 Known Windows outcomes:
@@ -106,4 +109,5 @@ infrastructure or promoting a parser support tier. Broader CI policy lives in [C
 | `stl_import` | `baozi-format-stl` | Sanitizer-run target for binary and ASCII STL facade import. |
 | `obj_import` | `baozi-format-obj` | Sanitizer-run target for OBJ facade import plus optional MTL sidecar bytes split by the first NUL byte. |
 | `obj_postprocess` | `baozi-format-obj` | Sanitizer-run target for OBJ facade import followed by triangulation and bounding-box postprocess. |
+| `ply_import` | `baozi-format-ply` | Sanitizer-run target for PLY ASCII and binary facade import. |
 | `gltf_import` | `baozi-format-gltf` | Experimental check-only target for glTF/GLB facade import. Inputs beginning with the `glTF` magic are treated as whole GLB bytes; other inputs use primary `.gltf` bytes plus external `buffer.bin` bytes split by the first NUL byte. |

@@ -46,6 +46,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "baozi-format-ply"
+version = "0.1.0"
+dependencies = [
+ "baozi-core",
+ "baozi-import",
+ "baozi-io",
+]
+
+[[package]]
 name = "baozi-format-stl"
 version = "0.1.0"
 dependencies = [
@@ -61,6 +70,7 @@ dependencies = [
  "baozi",
  "baozi-format-gltf",
  "baozi-format-obj",
+ "baozi-format-ply",
  "baozi-format-stl",
  "libfuzzer-sys",
 ]

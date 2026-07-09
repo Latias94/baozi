@@ -1,0 +1,5 @@
+ply
+format ascii 1.0
+element vertex nope
+property float x
+end_header

@@ -90,7 +90,7 @@ jobs:
         run: cargo check -p baozi --features all-formats,native-fs
 
       - name: Check browser WASM bytes path
-        run: cargo check -p baozi --target wasm32-unknown-unknown --no-default-features --features format-stl,format-obj
+        run: cargo check -p baozi --target wasm32-unknown-unknown --no-default-features --features format-stl,format-obj,format-ply
 
       - name: Check WASI native-fs path
         run: cargo check -p baozi --target wasm32-wasip1 --no-default-features --features format-stl,format-obj,native-fs
@@ -112,6 +112,7 @@ jobs:
           - stl_import
           - obj_import
           - obj_postprocess
+          - ply_import
     steps:
       - name: Checkout
         uses: actions/checkout@v7
