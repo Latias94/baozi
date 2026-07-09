@@ -36,7 +36,7 @@ jobs:
           go-version: ${{ env.GO_VERSION }}
 
       - name: Check workflow syntax
-        run: go run github.com/rhysd/actionlint/cmd/actionlint@${ACTIONLINT_VERSION}
+        run: go run "github.com/rhysd/actionlint/cmd/actionlint@${ACTIONLINT_VERSION}"
 
   rust:
     name: Rust checks
