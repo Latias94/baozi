@@ -1,6 +1,7 @@
 use baozi::{
-    AssetPath, AssetScope, BaoziError, Camera, Diagnostic, ImportOptions, ImportReport, Importer,
-    Light, Material, MemoryAssetIo, Mesh, Node, PostProcessPipeline, Scene, Texture,
+    AssetPath, AssetScope, BaoziError, Camera, Diagnostic, ImportFailure, ImportOptions,
+    ImportReport, Importer, Light, Material, MemoryAssetIo, Mesh, Node, PostProcessPipeline, Scene,
+    Texture,
 };
 use baozi_import::ImporterRegistry;
 
@@ -23,8 +24,10 @@ fn importer_surface_types_are_send_sync() {
     assert_send_sync::<ImporterRegistry>();
     assert_send_sync::<ImportOptions>();
     assert_send_sync::<ImportReport>();
+    assert_send_sync::<baozi::ImportResult<ImportReport>>();
     assert_send_sync::<Diagnostic>();
     assert_send_sync::<BaoziError>();
+    assert_send_sync::<ImportFailure>();
 }
 
 #[test]

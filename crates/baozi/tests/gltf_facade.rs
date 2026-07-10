@@ -1,7 +1,8 @@
 #![cfg(feature = "format-gltf")]
 
 use baozi::{
-    AssetPath, ExternalReferencePolicy, ImportOptions, ImportStage, Importer, MemoryAssetIo, Result,
+    AssetPath, BaoziError, ExternalReferencePolicy, ImportFailure, ImportOptions, ImportStage,
+    Importer, MemoryAssetIo, ResourceLimits, Result,
 };
 use base64::Engine as _;
 
@@ -54,6 +55,57 @@ fn triangle_data_uri_gltf() -> Vec<u8> {
         &format!(r#""uri": "data:application/octet-stream;base64,{encoded}", "byteLength": 42"#),
     )
     .into_bytes()
+}
+
+fn implicit_root_gltf() -> &'static [u8] {
+    br#"{
+  "asset": { "version": "2.0" },
+  "nodes": [{}]
+}"#
+}
+
+#[test]
+fn facade_enforces_exact_canonical_gltf_graph_limits() -> Result<()> {
+    let importer = Importer::new();
+    let mut exact = ImportOptions::memory();
+    exact.limits.max_graph_nodes = 2;
+    exact.limits.max_graph_edges = 1;
+    exact.limits.max_graph_depth = 2;
+    exact.limits.max_graph_work = 3;
+
+    let report = importer.read_bytes_with_options("graph.gltf", implicit_root_gltf(), exact)?;
+    assert_eq!(report.scene().nodes.len(), 2);
+
+    for (expected_limit, configure) in [
+        (
+            "max_graph_nodes",
+            (|limits: &mut ResourceLimits| limits.max_graph_nodes = 1) as fn(&mut ResourceLimits),
+        ),
+        ("max_graph_edges", |limits: &mut ResourceLimits| {
+            limits.max_graph_edges = 0;
+        }),
+        ("max_graph_depth", |limits: &mut ResourceLimits| {
+            limits.max_graph_depth = 1;
+        }),
+        ("max_graph_work", |limits: &mut ResourceLimits| {
+            limits.max_graph_work = 2;
+        }),
+    ] {
+        let mut options = ImportOptions::memory();
+        configure(&mut options.limits);
+        let error = importer
+            .read_bytes_with_options("graph.gltf", implicit_root_gltf(), options)
+            .expect_err("canonical synthetic-root limits must be enforced");
+
+        assert!(matches!(
+            error,
+            ImportFailure::Operation {
+                error: BaoziError::LimitExceeded { limit },
+                ..
+            } if limit == expected_limit
+        ));
+    }
+    Ok(())
 }
 
 #[test]

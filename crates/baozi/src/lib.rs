@@ -4,9 +4,11 @@
 
 pub use baozi_core::*;
 pub use baozi_import::{
-    CapabilityStatus, DetectionOptions, DiagnosticOptions, ExternalReferencePolicy,
+    CapabilityStatus, DetectionEvidence, DetectionFailure, DetectionFault, DetectionInconclusive,
+    DetectionOptions, DetectionOutcome, DiagnosticOptions, ExternalReferencePolicy,
     FormatCapability, FormatEncoding, FormatInfo, FormatMaturity, FormatSidecarPolicy,
-    ImportOptions, ImportReport, ImportStage, ImportStats, IoOptions,
+    ImportFailure, ImportOptions, ImportReport, ImportResult, ImportStage, ImportStats, IoOptions,
+    PrimaryProbeOperation, ReadConfidence,
 };
 #[cfg(feature = "native-fs")]
 pub use baozi_io::FileSystemAssetIo;
@@ -18,14 +20,22 @@ pub use baozi_postprocess::{
 };
 
 use baozi_import::{FormatImporter, ImportContext, ImporterRegistry as Registry, ReadHint};
+use std::any::Any;
 use std::sync::Arc;
+
+pub type Result<T> = ImportResult<T>;
 
 #[cfg(feature = "native-fs")]
 use std::path::Path;
 
-#[derive(Default)]
 pub struct Importer {
     registry: Registry,
+}
+
+impl Default for Importer {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Importer {
@@ -51,7 +61,7 @@ impl Importer {
         &mut self.registry
     }
 
-    pub fn register<I>(&mut self, importer: I) -> Result<()>
+    pub fn register<I>(&mut self, importer: I) -> baozi_core::Result<()>
     where
         I: FormatImporter,
     {
@@ -76,7 +86,14 @@ impl Importer {
         if bytes.len() as u64 > options.limits.max_primary_asset_bytes {
             return Err(BaoziError::LimitExceeded {
                 limit: "max_primary_asset_bytes",
-            });
+            }
+            .into());
+        }
+        if bytes.len() as u64 > options.limits.max_total_asset_bytes {
+            return Err(BaoziError::LimitExceeded {
+                limit: "max_total_asset_bytes",
+            }
+            .into());
         }
 
         let source = AssetPath::new(source.as_ref())?;
@@ -92,9 +109,8 @@ impl Importer {
         options: ImportOptions,
         pipeline: &PostProcessPipeline,
     ) -> Result<ImportReport> {
-        let limits = options.limits.clone();
         let report = self.read_bytes_with_options(source, bytes, options)?;
-        Self::apply_postprocess(report, pipeline, &limits)
+        Self::apply_postprocess(report, pipeline)
     }
 
     pub fn read_asset(&self, io: &dyn AssetIo, source: AssetPath) -> Result<ImportReport> {
@@ -111,12 +127,32 @@ impl Importer {
         let hint = ReadHint::from_source(source.clone());
         let selected = self
             .registry
-            .detect_with_options(&mut *input, &hint, &options.detection)?;
+            .detect_with_options(&mut *input, &hint, &options.detection)
+            .map_err(ImportFailure::from_detection)?;
         drop(input);
 
+        let (format_importer, format, _confidence, detection_evidence) = selected.into_parts();
+
+        let source_name = source.to_string();
         let mut ctx = ImportContext::with_options(io, source, options);
-        let scene = selected.importer.read(&mut ctx)?;
-        ctx.into_report(scene, selected.info)
+        let scene = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            format_importer.read(&mut ctx)
+        }))
+        .map_err(|panic| {
+            BaoziError::parse(
+                source_name,
+                None,
+                format!(
+                    "format importer {} panicked: {}",
+                    format.id(),
+                    panic_message(panic.as_ref())
+                ),
+            )
+        })
+        .and_then(|result| result)
+        .map_err(|error| ImportFailure::operation(error, detection_evidence.clone()))?;
+        ctx.finish_import(scene, format, detection_evidence.clone())
+            .map_err(|error| ImportFailure::operation(error, detection_evidence))
     }
 
     pub fn read_asset_with_postprocess(
@@ -126,9 +162,8 @@ impl Importer {
         options: ImportOptions,
         pipeline: &PostProcessPipeline,
     ) -> Result<ImportReport> {
-        let limits = options.limits.clone();
         let report = self.read_asset_with_options(io, source, options)?;
-        Self::apply_postprocess(report, pipeline, &limits)
+        Self::apply_postprocess(report, pipeline)
     }
 
     #[cfg(feature = "native-fs")]
@@ -164,21 +199,15 @@ impl Importer {
         options: ImportOptions,
         pipeline: &PostProcessPipeline,
     ) -> Result<ImportReport> {
-        let limits = options.limits.clone();
         let report = self.read_path_with_options(path, options)?;
-        Self::apply_postprocess(report, pipeline, &limits)
+        Self::apply_postprocess(report, pipeline)
     }
 
     fn apply_postprocess(
         report: ImportReport,
         pipeline: &PostProcessPipeline,
-        limits: &ResourceLimits,
     ) -> Result<ImportReport> {
-        report.map_scene_with_limits(ImportStage::PostProcessed, limits, |scene| {
-            let scene = pipeline.run(scene)?;
-            validate_scene(&scene)?;
-            Ok(scene)
-        })
+        report.apply_postprocess(|scene| pipeline.run(scene))
     }
 
     fn register_default_formats(&mut self) {
@@ -194,9 +223,12 @@ impl Importer {
     }
 }
 
-#[cfg(feature = "native-fs")]
-pub fn load_scene(path: impl AsRef<Path>) -> Result<Scene> {
-    Ok(Importer::new().read_path(path)?.into_scene())
+fn panic_message(payload: &(dyn Any + Send)) -> &str {
+    payload
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| payload.downcast_ref::<&'static str>().copied())
+        .unwrap_or("unknown panic payload")
 }
 
 #[cfg(test)]
@@ -204,10 +236,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn facade_reports_unsupported_until_parsers_exist() {
+    fn unknown_content_returns_typed_unsupported_format() {
         let error = Importer::new()
             .read_bytes("model.unknown", b"not a supported model")
             .unwrap_err();
-        assert!(matches!(error, BaoziError::UnsupportedFormat { .. }));
+        assert!(matches!(error, ImportFailure::UnsupportedFormat { .. }));
     }
 }

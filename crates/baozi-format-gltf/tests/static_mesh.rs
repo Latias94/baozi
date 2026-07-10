@@ -4,12 +4,40 @@ use baozi_core::{
     AlphaMode, BaoziError, ColorSpace, MeshBinding, PrimitiveTopology, Result, TextureFilterMode,
     TextureRole, TextureSource, TextureWrapMode, Vec2, Vec3,
 };
+use baozi_format_gltf::GltfImporter;
+use baozi_import::{FormatImporter, ImportContext};
+use baozi_io::{AssetIo, AssetPath, MemoryAssetIo, ReadSeek};
 use baozi_test_support::SceneSnapshot;
 use common::{
     data_uri_gltf, expected_error, import_assets, import_assets_result, interleaved_triangle_bin,
     interleaved_triangle_gltf, sidecar_options, triangle_bin, triangle_glb, triangle_gltf,
     triangle_gltf_with_buffer_uri,
 };
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+struct CountingTextureResolver {
+    assets: MemoryAssetIo,
+    texture_resolves: AtomicUsize,
+}
+
+impl AssetIo for CountingTextureResolver {
+    fn open(&self, path: &AssetPath) -> Result<Box<dyn ReadSeek + Send>> {
+        self.assets.open(path)
+    }
+
+    fn exists(&self, path: &AssetPath) -> bool {
+        self.assets.exists(path)
+    }
+
+    fn resolve(&self, base: &AssetPath, relative: &str) -> Result<AssetPath> {
+        if relative == "textures/base.png" {
+            self.texture_resolves.fetch_add(1, Ordering::Relaxed);
+            return AssetPath::new("canonical/textures/base.png");
+        }
+        self.assets.resolve(base, relative)
+    }
+}
 
 #[test]
 fn imports_static_mesh_material_texture_uri_and_hierarchy() -> Result<()> {
@@ -72,6 +100,83 @@ fn imports_static_mesh_material_texture_uri_and_hierarchy() -> Result<()> {
         TextureSource::External { uri } => assert_eq!(uri, "models/textures/base.png"),
         other => panic!("expected external texture, got {other:?}"),
     }
+    Ok(())
+}
+
+#[test]
+fn external_texture_uri_is_resolved_once_and_reused() -> Result<()> {
+    let source = AssetPath::new("models/deep/scene.gltf")?;
+    let mut assets = MemoryAssetIo::new();
+    let document = String::from_utf8(triangle_gltf())
+        .expect("fixture is valid utf-8")
+        .replace(
+            r#""name": "Red","#,
+            r#""name": "Red",
+    "emissiveTexture": { "index": 0 },"#,
+        )
+        .into_bytes();
+    assets.insert(source.clone(), Arc::<[u8]>::from(document));
+    assets.insert(
+        AssetPath::new("models/deep/triangle.bin")?,
+        Arc::<[u8]>::from(triangle_bin()),
+    );
+    let io = CountingTextureResolver {
+        assets,
+        texture_resolves: AtomicUsize::new(0),
+    };
+    let mut ctx = ImportContext::with_options(&io, source, sidecar_options());
+
+    let result = GltfImporter.read(&mut ctx);
+    let diagnostics = ctx.into_diagnostics();
+    let scene = result?;
+
+    assert!(diagnostics.is_empty());
+    assert_eq!(io.texture_resolves.load(Ordering::Relaxed), 1);
+    assert_eq!(scene.textures.len(), 2);
+    assert!(scene.textures.iter().all(|texture| matches!(
+        &texture.source,
+        TextureSource::External { uri } if uri == "canonical/textures/base.png"
+    )));
+    Ok(())
+}
+
+#[test]
+fn repeated_resolved_texture_uri_uses_canonical_budget() -> Result<()> {
+    let source = AssetPath::new("models/deep/scene.gltf")?;
+    let mut assets = MemoryAssetIo::new();
+    let document = String::from_utf8(triangle_gltf())
+        .expect("fixture is valid utf-8")
+        .replace(
+            r#""name": "Red","#,
+            r#""name": "Red",
+    "emissiveTexture": { "index": 0 },"#,
+        )
+        .into_bytes();
+    assets.insert(source.clone(), Arc::<[u8]>::from(document));
+    assets.insert(
+        AssetPath::new("models/deep/triangle.bin")?,
+        Arc::<[u8]>::from(triangle_bin()),
+    );
+    let io = CountingTextureResolver {
+        assets,
+        texture_resolves: AtomicUsize::new(0),
+    };
+    let mut options = sidecar_options();
+    options.limits.max_canonical_string_bytes = 160;
+    let mut ctx = ImportContext::with_options(&io, source, options);
+
+    let result = GltfImporter.read(&mut ctx);
+    let diagnostics = ctx.into_diagnostics();
+    let error = expected_error(result)?;
+
+    assert!(diagnostics.is_empty());
+    assert_eq!(io.texture_resolves.load(Ordering::Relaxed), 1);
+    assert_eq!(
+        error,
+        BaoziError::LimitExceeded {
+            limit: "max_canonical_string_bytes"
+        }
+    );
     Ok(())
 }
 
@@ -153,6 +258,152 @@ fn external_buffer_denied_is_fatal() -> Result<()> {
     assert!(diagnostics.is_empty());
     assert!(matches!(error, BaoziError::Parse { .. }));
     assert!(error.to_string().contains("external buffer"));
+    assert!(!error.to_string().contains("triangle.bin"));
+    Ok(())
+}
+
+#[test]
+fn overlong_external_buffer_uri_hits_the_string_limit_before_policy_errors() -> Result<()> {
+    let uri = "x".repeat(4_096);
+    let document = triangle_gltf_with_buffer_uri(&uri, 104);
+    let mut options = baozi_import::ImportOptions::memory();
+    options.limits.max_string_bytes = 32;
+
+    let (result, diagnostics) = import_assets_result(
+        "models/scene.gltf",
+        [("models/scene.gltf", document)],
+        options,
+    )?;
+    let error = expected_error(result)?;
+
+    assert!(diagnostics.is_empty());
+    assert_eq!(
+        error,
+        BaoziError::LimitExceeded {
+            limit: "max_string_bytes"
+        }
+    );
+    assert!(error.to_string().len() < 128);
+    Ok(())
+}
+
+#[test]
+fn repeated_mesh_name_amplification_is_rejected_before_sidecar_io() -> Result<()> {
+    const PRIMITIVE_COUNT: usize = 8;
+    const NAME_BYTES: usize = 4_096;
+
+    let primitive = r#"{
+      "attributes": { "POSITION": 0, "NORMAL": 1, "TEXCOORD_0": 2 },
+      "indices": 3,
+      "material": 0,
+      "mode": 4
+    }"#;
+    let primitives = (0..PRIMITIVE_COUNT)
+        .map(|_| primitive)
+        .collect::<Vec<_>>()
+        .join(",");
+    let long_name = "n".repeat(NAME_BYTES);
+    let document = String::from_utf8(triangle_gltf())
+        .expect("fixture is valid utf-8")
+        .replace(
+            r#""name": "Triangle",
+    "primitives""#,
+            &format!(
+                r#""name": "{long_name}",
+    "primitives""#
+            ),
+        )
+        .replace(primitive, &primitives)
+        .into_bytes();
+    let mut options = baozi_import::ImportOptions::memory();
+    options.limits.max_canonical_string_bytes = NAME_BYTES * PRIMITIVE_COUNT - 1;
+
+    let (result, diagnostics) = import_assets_result(
+        "models/repeated-name.gltf",
+        [("models/repeated-name.gltf", document)],
+        options,
+    )?;
+    let error = expected_error(result)?;
+
+    assert!(diagnostics.is_empty());
+    assert_eq!(
+        error,
+        BaoziError::LimitExceeded {
+            limit: "max_canonical_string_bytes"
+        }
+    );
+    Ok(())
+}
+
+#[test]
+fn generated_primitive_name_suffix_is_limited_before_sidecar_io() -> Result<()> {
+    const PRIMITIVE_COUNT: usize = 11;
+
+    let primitive = r#"{
+      "attributes": { "POSITION": 0, "NORMAL": 1, "TEXCOORD_0": 2 },
+      "indices": 3,
+      "material": 0,
+      "mode": 4
+    }"#;
+    let primitives = (0..PRIMITIVE_COUNT)
+        .map(|_| primitive)
+        .collect::<Vec<_>>()
+        .join(",");
+    let document = String::from_utf8(triangle_gltf())
+        .expect("fixture is valid utf-8")
+        .replace(
+            r#""name": "Triangle",
+    "primitives""#,
+            r#""name": "n",
+    "primitives""#,
+        )
+        .replace(primitive, &primitives)
+        .into_bytes();
+    let mut options = baozi_import::ImportOptions::memory();
+    options.limits.max_string_bytes = 3;
+
+    let (result, diagnostics) = import_assets_result(
+        "models/generated-name.gltf",
+        [("models/generated-name.gltf", document)],
+        options,
+    )?;
+    let error = expected_error(result)?;
+
+    assert!(diagnostics.is_empty());
+    assert_eq!(
+        error,
+        BaoziError::LimitExceeded {
+            limit: "max_string_bytes"
+        }
+    );
+    Ok(())
+}
+
+#[test]
+fn ignored_overlong_texture_uri_does_not_consume_canonical_string_budget() -> Result<()> {
+    let long_uri = "x".repeat(128);
+    let document = String::from_utf8(triangle_gltf())
+        .expect("fixture is valid utf-8")
+        .replace("textures/base.png", &long_uri)
+        .into_bytes();
+    let mut options = sidecar_options();
+    options.limits.max_string_bytes = 32;
+    options.limits.max_canonical_string_bytes = 100;
+
+    let (result, diagnostics) = import_assets_result(
+        "models/ignored-texture.gltf",
+        [
+            ("models/ignored-texture.gltf", document),
+            ("models/triangle.bin", triangle_bin()),
+        ],
+        options,
+    )?;
+    let scene = result?;
+
+    assert!(scene.textures.is_empty());
+    assert!(scene.materials[0].texture_slots.is_empty());
+    assert_eq!(diagnostics.len(), 1);
+    assert_eq!(diagnostics[0].code.0, "gltf.texture_uri_limit");
     Ok(())
 }
 
@@ -186,6 +437,90 @@ fn short_external_buffer_is_fatal() -> Result<()> {
     assert!(diagnostics.is_empty());
     assert!(matches!(error, BaoziError::Parse { .. }));
     assert!(error.to_string().contains("declares 104 bytes"));
+    Ok(())
+}
+
+#[test]
+fn required_external_buffer_resource_limits_are_fatal() -> Result<()> {
+    let gltf = triangle_gltf();
+    let bin = triangle_bin();
+
+    let mut sidecar_limit = sidecar_options();
+    sidecar_limit.limits.max_sidecar_asset_bytes = bin.len() as u64 - 1;
+
+    let mut total_limit = sidecar_options();
+    total_limit.limits.max_total_asset_bytes = (gltf.len() + bin.len() - 1) as u64;
+
+    let mut open_limit = sidecar_options();
+    open_limit.limits.max_open_assets = 1;
+
+    for (options, expected_limit) in [
+        (sidecar_limit, "max_sidecar_asset_bytes"),
+        (total_limit, "max_total_asset_bytes"),
+        (open_limit, "max_open_assets"),
+    ] {
+        let (result, diagnostics) = import_assets_result(
+            "models/scene.gltf",
+            [
+                ("models/scene.gltf", gltf.clone()),
+                ("models/triangle.bin", bin.clone()),
+            ],
+            options,
+        )?;
+        let error = expected_error(result)?;
+
+        assert!(diagnostics.is_empty());
+        assert_eq!(
+            error,
+            BaoziError::LimitExceeded {
+                limit: expected_limit
+            }
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn indexed_point_topology_cells_are_bounded_before_reader_allocation() -> Result<()> {
+    let document = String::from_utf8(triangle_gltf())
+        .expect("fixture is valid utf-8")
+        .replace("\"mode\": 4", "\"mode\": 0")
+        .into_bytes();
+    let buffer = triangle_bin();
+
+    let mut exact = sidecar_options();
+    exact.limits.max_total_topology_cells = 3;
+    let (result, diagnostics) = import_assets_result(
+        "models/points.gltf",
+        [
+            ("models/points.gltf", document.clone()),
+            ("models/triangle.bin", buffer.clone()),
+        ],
+        exact,
+    )?;
+    let scene = result?;
+    assert!(diagnostics.is_empty());
+    assert_eq!(scene.meshes[0].topology, PrimitiveTopology::Points);
+    assert_eq!(scene.meshes[0].indices.len(), 3);
+
+    let mut excess = sidecar_options();
+    excess.limits.max_total_topology_cells = 2;
+    let (result, diagnostics) = import_assets_result(
+        "models/points.gltf",
+        [
+            ("models/points.gltf", document),
+            ("models/triangle.bin", buffer),
+        ],
+        excess,
+    )?;
+    let error = expected_error(result)?;
+    assert!(diagnostics.is_empty());
+    assert_eq!(
+        error,
+        BaoziError::LimitExceeded {
+            limit: "max_total_topology_cells"
+        }
+    );
     Ok(())
 }
 

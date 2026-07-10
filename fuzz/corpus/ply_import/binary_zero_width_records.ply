@@ -1,0 +1,4 @@
+ply
+format binary_little_endian 1.0
+element metadata 4294967295
+end_header

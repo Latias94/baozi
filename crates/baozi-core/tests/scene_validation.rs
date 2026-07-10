@@ -1,7 +1,7 @@
 use baozi_core::{
     Animation, AnimationChannel, AnimationInterpolation, AnimationProperty, AnimationTarget,
     AnimationValues, Camera, CameraId, CameraProjection, ColorSpace, Light, LightId, LightKind,
-    Material, MaterialId, MaterialProperty, Mesh, MeshBinding, MeshId, Node, NodeId,
+    Material, MaterialId, MaterialProperty, Mesh, MeshBinding, MeshId, MorphTarget, Node, NodeId,
     PrimitiveTopology, SceneBuilder, Skin, Texture, TextureId, TextureRole, TextureSlot,
     TextureSource, Vec3, VertexAttribute, VertexAttributeData, VertexAttributeSemantic,
     validate_scene,
@@ -72,6 +72,46 @@ fn root_only_scene_is_valid() {
     let scene = SceneBuilder::new().finish().unwrap();
 
     validate_scene(&scene).unwrap();
+}
+
+#[test]
+fn deeply_nested_scene_is_validated_without_recursion() {
+    const NODE_COUNT: usize = 100_000;
+
+    let mut scene = SceneBuilder::new().finish().unwrap();
+    scene.nodes = (0..NODE_COUNT)
+        .map(|index| Node {
+            parent: (index > 0).then(|| NodeId::new((index - 1) as u32)),
+            children: if index + 1 < NODE_COUNT {
+                vec![NodeId::new((index + 1) as u32)]
+            } else {
+                Vec::new()
+            },
+            ..Node::default()
+        })
+        .collect();
+
+    validate_scene(&scene).unwrap();
+}
+
+#[test]
+fn duplicate_child_reference_is_rejected() {
+    let mut scene = SceneBuilder::new().finish().unwrap();
+    scene.nodes.push(Node {
+        parent: Some(NodeId::new(0)),
+        ..Node::default()
+    });
+    scene.nodes[0].children = vec![NodeId::new(1), NodeId::new(1)];
+
+    assert_invalid(&scene, "more than once");
+}
+
+#[test]
+fn unreachable_node_is_rejected() {
+    let mut scene = SceneBuilder::new().finish().unwrap();
+    scene.nodes.push(Node::default());
+
+    assert_invalid(&scene, "not reachable");
 }
 
 #[test]
@@ -224,6 +264,14 @@ fn custom_attribute_length_mismatch_fails() {
     });
 
     assert_invalid(&scene, "length");
+}
+
+#[test]
+fn empty_morph_target_fails() {
+    let mut scene = valid_triangle_scene();
+    scene.meshes[0].morph_targets.push(MorphTarget::default());
+
+    assert_invalid(&scene, "has no delta channels");
 }
 
 #[test]

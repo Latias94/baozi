@@ -1,75 +1,94 @@
 mod common;
 
-use baozi_core::{BaoziErrorKind, Result};
 use baozi_format_gltf::GltfImporter;
-use baozi_import::{DetectionOptions, FormatImporter, ImporterRegistry, ReadConfidence, ReadHint};
+use baozi_import::{
+    DetectionFailure, DetectionInconclusive, DetectionOptions, DetectionOutcome, ImporterRegistry,
+    ReadConfidence, ReadHint,
+};
 use baozi_io::AssetPath;
 use common::triangle_gltf;
-use std::io::{Cursor, Seek};
+use std::io::Cursor;
 
-#[test]
-fn detects_gltf_json() -> Result<()> {
-    let source = AssetPath::new("scene.gltf")?;
-    let hint = ReadHint::from_source(source);
-    let mut input = Cursor::new(triangle_gltf());
-
-    let confidence = GltfImporter.can_read(&mut input, &hint)?;
-
-    assert_eq!(confidence, ReadConfidence::Likely);
-    Ok(())
+fn detect(
+    source: &str,
+    bytes: Vec<u8>,
+    max_probe_bytes: u64,
+) -> std::result::Result<ReadConfidence, DetectionFailure> {
+    let mut registry = ImporterRegistry::new();
+    registry
+        .register(GltfImporter)
+        .expect("unique glTF importer");
+    let hint = ReadHint::from_source(AssetPath::new(source).expect("valid test path"));
+    let mut input = Cursor::new(bytes);
+    registry
+        .detect_with_options(&mut input, &hint, &DetectionOptions { max_probe_bytes })
+        .map(|selected| selected.confidence)
 }
 
 #[test]
-fn detects_glb_magic() -> Result<()> {
-    let source = AssetPath::new("scene.glb")?;
-    let hint = ReadHint::from_source(source);
-    let mut input = Cursor::new(b"glTF\x02\0\0\0".to_vec());
+fn detects_gltf_json() {
+    let confidence = detect("scene.gltf", triangle_gltf(), 4096).expect("glTF JSON is detected");
 
-    let confidence = GltfImporter.can_read(&mut input, &hint)?;
+    assert_eq!(confidence, ReadConfidence::Likely);
+}
+
+#[test]
+fn detects_glb_magic() {
+    let confidence =
+        detect("scene.glb", b"glTF\x02\0\0\0".to_vec(), 4096).expect("GLB magic is detected");
 
     assert_eq!(confidence, ReadConfidence::Certain);
-    Ok(())
 }
 
 #[test]
-fn can_read_rewinds_input() -> Result<()> {
-    let source = AssetPath::new("scene.gltf")?;
-    let hint = ReadHint::from_source(source);
-    let mut input = Cursor::new(triangle_gltf());
-    input.set_position(7);
+fn glb_magic_requires_all_four_bytes() {
+    let bytes = b"glTF\x02\0\0\0".to_vec();
+    let error = detect("scene.mesh", bytes.clone(), 3)
+        .expect_err("three bytes cannot establish the GLB magic");
+    let DetectionFailure::NoMatch { evidence, .. } = error else {
+        panic!("expected structured detection evidence");
+    };
+    assert!(matches!(
+        evidence.as_slice(),
+        [evidence]
+            if evidence.outcome()
+                == &DetectionOutcome::Inconclusive(
+                    DetectionInconclusive::ProbeExhausted
+                )
+    ));
 
-    let confidence = GltfImporter.can_read(&mut input, &hint)?;
+    let confidence = detect("scene.mesh", bytes, 4).expect("four bytes establish the GLB magic");
+    assert_eq!(confidence, ReadConfidence::Certain);
+}
 
+#[test]
+fn completed_json_signature_survives_a_probe_cut_inside_utf8() {
+    let mut bytes = br#"{"asset":{"version":"2.0"},"name":""#.to_vec();
+    bytes.extend_from_slice("包".as_bytes());
+    bytes.extend_from_slice(br#""}"#);
+
+    let confidence = detect("scene.mesh", bytes.clone(), (bytes.len() - 3) as u64)
+        .expect("the completed glTF signature precedes the truncated UTF-8 value");
     assert_eq!(confidence, ReadConfidence::Likely);
-    assert_eq!(input.stream_position().unwrap(), 7);
-    Ok(())
 }
 
 #[test]
-fn registry_probe_limit_bounds_content_detection() -> Result<()> {
-    let mut registry = ImporterRegistry::new();
-    registry.register(GltfImporter)?;
-    let hint = ReadHint::from_source(AssetPath::new("scene.mesh")?);
+fn registry_probe_limit_bounds_content_detection() {
+    let error =
+        detect("scene.mesh", triangle_gltf(), 1).expect_err("one byte cannot establish glTF JSON");
+    let DetectionFailure::NoMatch { evidence, .. } = error else {
+        panic!("expected structured detection evidence");
+    };
+    assert!(matches!(
+        evidence.as_slice(),
+        [evidence]
+            if evidence.outcome()
+                == &DetectionOutcome::Inconclusive(
+                    DetectionInconclusive::ProbeExhausted
+                )
+    ));
 
-    let mut too_short = Cursor::new(triangle_gltf());
-    let error = registry
-        .detect_with_options(
-            &mut too_short,
-            &hint,
-            &DetectionOptions { max_probe_bytes: 1 },
-        )
-        .unwrap_err();
-    assert_eq!(error.kind(), BaoziErrorKind::UnsupportedFormat);
-
-    let mut enough = Cursor::new(triangle_gltf());
-    let selected = registry.detect_with_options(
-        &mut enough,
-        &hint,
-        &DetectionOptions {
-            max_probe_bytes: 4096,
-        },
-    )?;
-    assert_eq!(selected.info.id(), "gltf");
-    assert_eq!(selected.confidence, ReadConfidence::Likely);
-    Ok(())
+    let confidence = detect("scene.mesh", triangle_gltf(), 4096)
+        .expect("the default probe exposes glTF metadata");
+    assert_eq!(confidence, ReadConfidence::Likely);
 }

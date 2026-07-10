@@ -84,7 +84,7 @@ fn load_library(
         }
     };
 
-    let Some(bytes) = read_sidecar_bytes(ctx, &path)? else {
+    let Some(bytes) = read_sidecar_bytes(ctx, &path) else {
         return Ok(());
     };
     let text = match std::str::from_utf8(&bytes) {
@@ -105,10 +105,9 @@ fn load_library(
     Ok(())
 }
 
-fn read_sidecar_bytes(ctx: &mut ImportContext<'_>, path: &AssetPath) -> Result<Option<Vec<u8>>> {
+fn read_sidecar_bytes(ctx: &mut ImportContext<'_>, path: &AssetPath) -> Option<Vec<u8>> {
     match ctx.read_sidecar_to_end(path) {
-        Ok(bytes) => Ok(Some(bytes)),
-        Err(error @ baozi_core::BaoziError::LimitExceeded { .. }) => Err(error),
+        Ok(bytes) => Some(bytes),
         Err(error) => {
             push_warning(
                 ctx,
@@ -117,16 +116,14 @@ fn read_sidecar_bytes(ctx: &mut ImportContext<'_>, path: &AssetPath) -> Result<O
                 sidecar_read_error_code(&error),
                 sidecar_read_error_message(path, &error),
             );
-            Ok(None)
+            None
         }
     }
 }
 
 fn sidecar_read_error_code(error: &baozi_core::BaoziError) -> &'static str {
     match error {
-        baozi_core::BaoziError::LimitExceeded {
-            limit: "max_sidecar_asset_bytes",
-        } => "obj.mtl_limit_exceeded",
+        baozi_core::BaoziError::LimitExceeded { .. } => "obj.mtl_limit_exceeded",
         baozi_core::BaoziError::Io { .. } => "obj.mtl_missing",
         _ => "obj.mtl_read_failed",
     }
@@ -134,9 +131,9 @@ fn sidecar_read_error_code(error: &baozi_core::BaoziError) -> &'static str {
 
 fn sidecar_read_error_message(path: &AssetPath, error: &baozi_core::BaoziError) -> String {
     match error {
-        baozi_core::BaoziError::LimitExceeded {
-            limit: "max_sidecar_asset_bytes",
-        } => "MTL sidecar exceeded max_sidecar_asset_bytes and was ignored".to_owned(),
+        baozi_core::BaoziError::LimitExceeded { .. } => {
+            format!("MTL sidecar '{path}' was ignored: {error}")
+        }
         baozi_core::BaoziError::Io { .. } => {
             format!("MTL sidecar '{path}' could not be opened: {error}")
         }

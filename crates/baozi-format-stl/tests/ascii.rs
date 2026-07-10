@@ -130,6 +130,73 @@ fn face_limit_is_enforced() -> Result<()> {
 }
 
 #[test]
+fn topology_cell_limit_is_checked_before_sequential_indices_are_allocated() -> Result<()> {
+    let bytes = ascii_triangle("triangle");
+
+    let mut exact = ImportOptions::memory();
+    exact.limits.max_total_topology_cells = 3;
+    let (result, diagnostics) = import_bytes_result("topology-exact.stl", bytes.as_bytes(), exact)?;
+    let scene = result?;
+    assert!(diagnostics.is_empty());
+    assert_eq!(scene.meshes[0].indices.len(), 3);
+
+    let mut excess = ImportOptions::memory();
+    excess.limits.max_total_topology_cells = 2;
+    let (result, diagnostics) =
+        import_bytes_result("topology-excess.stl", bytes.as_bytes(), excess)?;
+    let error = expected_error(result)?;
+    assert!(diagnostics.is_empty());
+    assert_eq!(
+        error,
+        BaoziError::LimitExceeded {
+            limit: "max_total_topology_cells"
+        }
+    );
+    Ok(())
+}
+
+#[test]
+fn canonical_string_budget_bounds_repeated_source_metadata() -> Result<()> {
+    let names = ["left", "right"];
+    let source = "string-budget.stl";
+    let bytes = names
+        .iter()
+        .map(|name| ascii_triangle(name))
+        .collect::<String>();
+    let exact_bytes = "STL Default Material".len()
+        + names
+            .iter()
+            .map(|name| {
+                2 * name.len()
+                    + "stl.storage".len()
+                    + "ascii".len()
+                    + "stl.source".len()
+                    + source.len()
+            })
+            .sum::<usize>();
+
+    let mut exact = ImportOptions::memory();
+    exact.limits.max_canonical_string_bytes = exact_bytes;
+    let (result, diagnostics) = import_bytes_result(source, bytes.as_bytes(), exact)?;
+    let scene = result?;
+    assert!(diagnostics.is_empty());
+    assert_eq!(scene.meshes.len(), names.len());
+
+    let mut excess = ImportOptions::memory();
+    excess.limits.max_canonical_string_bytes = exact_bytes - 1;
+    let (result, diagnostics) = import_bytes_result(source, bytes.as_bytes(), excess)?;
+    let error = expected_error(result)?;
+    assert!(diagnostics.is_empty());
+    assert_eq!(
+        error,
+        BaoziError::LimitExceeded {
+            limit: "max_canonical_string_bytes"
+        }
+    );
+    Ok(())
+}
+
+#[test]
 fn solid_limit_is_enforced() -> Result<()> {
     let bytes = format!("{}{}", ascii_triangle("left"), ascii_triangle("right"));
     let mut options = ImportOptions::memory();

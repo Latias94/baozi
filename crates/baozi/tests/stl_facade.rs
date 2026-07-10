@@ -1,4 +1,6 @@
-use baozi::{BaoziError, Importer, Result};
+#![cfg(feature = "format-stl")]
+
+use baozi::{BaoziError, ImportFailure, Importer, Result};
 
 fn ascii_triangle() -> &'static [u8] {
     b"solid facade
@@ -79,16 +81,18 @@ fn facade_content_detection_beats_unknown_extension() -> Result<()> {
 fn malformed_stl_bytes_return_error() -> Result<()> {
     let error = match Importer::new().read_bytes("bad.stl", b"solid bad") {
         Ok(_) => {
-            return Err(BaoziError::parse(
-                "test",
-                None,
-                "expected malformed STL to fail",
-            ));
+            return Err(BaoziError::parse("test", None, "expected malformed STL to fail").into());
         }
         Err(error) => error,
     };
 
-    assert!(matches!(error, BaoziError::Parse { .. }));
+    assert!(matches!(
+        error,
+        ImportFailure::Operation {
+            error: BaoziError::Parse { .. },
+            ..
+        }
+    ));
     Ok(())
 }
 
@@ -108,7 +112,7 @@ fn facade_reads_stl_from_native_path() -> Result<()> {
     let report = Importer::new().read_path(&path);
     let cleanup = fs::remove_file(&path);
     if let Err(error) = cleanup {
-        return Err(BaoziError::io("temp stl cleanup", error.to_string()));
+        return Err(BaoziError::io("temp stl cleanup", error.to_string()).into());
     }
 
     assert_eq!(report?.scene().meshes.len(), 1);

@@ -1,21 +1,27 @@
 use baozi::DiagnosticSeverity;
-use baozi::ReadSeek;
 use baozi::{
-    BaoziError, CapabilityStatus, Diagnostic, FormatCapability, FormatInfo, FormatMaturity,
-    ImportStage, Importer, Result, Scene, SceneBuilder,
+    BaoziError, CapabilityStatus, DetectionFailure, Diagnostic, FormatCapability, FormatInfo,
+    FormatMaturity, ImportFailure, ImportStage, Importer, Scene, SceneBuilder,
 };
-use baozi_import::{FormatImporter, ImportContext, ReadConfidence, ReadHint};
+use baozi_core::Result as CoreResult;
+use baozi_import::{
+    DetectionOutcome, FormatImporter, ImportContext, Probe, ReadConfidence, ReadHint,
+};
 
 struct ExtensionOnlyImporter;
 struct RefusingImporter;
 struct ContentImporter;
 struct AmbiguousOne;
 struct AmbiguousTwo;
+struct FaultingDetector;
+struct InconclusiveDetector;
+struct ParseFailImporter;
 
 static DUM_EXTENSIONS: &[&str] = &["dum"];
 static BIN_EXTENSIONS: &[&str] = &["bin"];
 static ONE_EXTENSIONS: &[&str] = &["one"];
 static TWO_EXTENSIONS: &[&str] = &["two"];
+static FAIL_EXTENSIONS: &[&str] = &["fail"];
 
 fn dummy_info(id: &'static str, extensions: &'static [&'static str]) -> FormatInfo {
     FormatInfo::new(id, id, extensions)
@@ -24,7 +30,7 @@ fn dummy_info(id: &'static str, extensions: &'static [&'static str]) -> FormatIn
         .with_notes("test importer")
 }
 
-fn read_scene(ctx: &mut ImportContext<'_>) -> Result<Scene> {
+fn read_scene(ctx: &mut ImportContext<'_>) -> CoreResult<Scene> {
     ctx.push_diagnostic(Diagnostic::warning("test.imported", "dummy importer ran"));
     SceneBuilder::new().finish()
 }
@@ -34,11 +40,11 @@ impl FormatImporter for ExtensionOnlyImporter {
         dummy_info("extension-only", DUM_EXTENSIONS)
     }
 
-    fn can_read(&self, _input: &mut dyn ReadSeek, _hint: &ReadHint) -> Result<ReadConfidence> {
-        Ok(ReadConfidence::Maybe)
+    fn can_read(&self, _probe: &Probe<'_>, _hint: &ReadHint) -> DetectionOutcome {
+        DetectionOutcome::Match(ReadConfidence::Maybe)
     }
 
-    fn read(&self, ctx: &mut ImportContext<'_>) -> Result<Scene> {
+    fn read(&self, ctx: &mut ImportContext<'_>) -> CoreResult<Scene> {
         read_scene(ctx)
     }
 }
@@ -48,11 +54,11 @@ impl FormatImporter for RefusingImporter {
         dummy_info("refusing", DUM_EXTENSIONS)
     }
 
-    fn can_read(&self, _input: &mut dyn ReadSeek, _hint: &ReadHint) -> Result<ReadConfidence> {
-        Ok(ReadConfidence::No)
+    fn can_read(&self, _probe: &Probe<'_>, _hint: &ReadHint) -> DetectionOutcome {
+        DetectionOutcome::NoMatch
     }
 
-    fn read(&self, ctx: &mut ImportContext<'_>) -> Result<Scene> {
+    fn read(&self, ctx: &mut ImportContext<'_>) -> CoreResult<Scene> {
         read_scene(ctx)
     }
 }
@@ -62,16 +68,15 @@ impl FormatImporter for ContentImporter {
         dummy_info("content", BIN_EXTENSIONS)
     }
 
-    fn can_read(&self, input: &mut dyn ReadSeek, _hint: &ReadHint) -> Result<ReadConfidence> {
-        let mut bytes = [0; 5];
-        match input.read_exact(&mut bytes) {
-            Ok(()) if &bytes == b"baozi" => Ok(ReadConfidence::Certain),
-            Ok(()) => Ok(ReadConfidence::No),
-            Err(_) => Ok(ReadConfidence::No),
+    fn can_read(&self, probe: &Probe<'_>, _hint: &ReadHint) -> DetectionOutcome {
+        if probe.bytes().starts_with(b"baozi") {
+            DetectionOutcome::Match(ReadConfidence::Certain)
+        } else {
+            DetectionOutcome::NoMatch
         }
     }
 
-    fn read(&self, ctx: &mut ImportContext<'_>) -> Result<Scene> {
+    fn read(&self, ctx: &mut ImportContext<'_>) -> CoreResult<Scene> {
         read_scene(ctx)
     }
 }
@@ -81,11 +86,11 @@ impl FormatImporter for AmbiguousOne {
         dummy_info("ambiguous-one", ONE_EXTENSIONS)
     }
 
-    fn can_read(&self, _input: &mut dyn ReadSeek, _hint: &ReadHint) -> Result<ReadConfidence> {
-        Ok(ReadConfidence::Likely)
+    fn can_read(&self, _probe: &Probe<'_>, _hint: &ReadHint) -> DetectionOutcome {
+        DetectionOutcome::Match(ReadConfidence::Likely)
     }
 
-    fn read(&self, ctx: &mut ImportContext<'_>) -> Result<Scene> {
+    fn read(&self, ctx: &mut ImportContext<'_>) -> CoreResult<Scene> {
         read_scene(ctx)
     }
 }
@@ -95,12 +100,58 @@ impl FormatImporter for AmbiguousTwo {
         dummy_info("ambiguous-two", TWO_EXTENSIONS)
     }
 
-    fn can_read(&self, _input: &mut dyn ReadSeek, _hint: &ReadHint) -> Result<ReadConfidence> {
-        Ok(ReadConfidence::Likely)
+    fn can_read(&self, _probe: &Probe<'_>, _hint: &ReadHint) -> DetectionOutcome {
+        DetectionOutcome::Match(ReadConfidence::Likely)
     }
 
-    fn read(&self, ctx: &mut ImportContext<'_>) -> Result<Scene> {
+    fn read(&self, ctx: &mut ImportContext<'_>) -> CoreResult<Scene> {
         read_scene(ctx)
+    }
+}
+
+impl FormatImporter for FaultingDetector {
+    fn info(&self) -> FormatInfo {
+        dummy_info("a-fault", &[])
+    }
+
+    fn can_read(&self, _probe: &Probe<'_>, _hint: &ReadHint) -> DetectionOutcome {
+        DetectionOutcome::fault("detector failed")
+    }
+
+    fn read(&self, ctx: &mut ImportContext<'_>) -> CoreResult<Scene> {
+        read_scene(ctx)
+    }
+}
+
+impl FormatImporter for InconclusiveDetector {
+    fn info(&self) -> FormatInfo {
+        dummy_info("z-inconclusive", &[])
+    }
+
+    fn can_read(&self, _probe: &Probe<'_>, _hint: &ReadHint) -> DetectionOutcome {
+        DetectionOutcome::Inconclusive(baozi::DetectionInconclusive::ProbeExhausted)
+    }
+
+    fn read(&self, ctx: &mut ImportContext<'_>) -> CoreResult<Scene> {
+        read_scene(ctx)
+    }
+}
+
+impl FormatImporter for ParseFailImporter {
+    fn info(&self) -> FormatInfo {
+        dummy_info("parse-fail", FAIL_EXTENSIONS)
+    }
+
+    fn can_read(&self, _probe: &Probe<'_>, _hint: &ReadHint) -> DetectionOutcome {
+        DetectionOutcome::Match(ReadConfidence::Certain)
+    }
+
+    fn read(&self, ctx: &mut ImportContext<'_>) -> CoreResult<Scene> {
+        Err(BaoziError::parse(
+            ctx.source().to_string(),
+            None,
+            "intentional parse failure",
+        ))
     }
 }
 
@@ -112,7 +163,30 @@ fn unknown_bytes_report_unsupported_format() {
         .read_bytes("model.unknown", b"not a model")
         .unwrap_err();
 
-    assert!(matches!(error, BaoziError::UnsupportedFormat { .. }));
+    assert!(matches!(
+        error,
+        ImportFailure::UnsupportedFormat { evidence, .. } if evidence.is_empty()
+    ));
+}
+
+#[test]
+fn in_memory_total_byte_limit_is_checked_before_detection() {
+    let mut options = baozi::ImportOptions::memory();
+    options.limits.max_total_asset_bytes = 1;
+
+    let error = Importer::empty()
+        .read_bytes_with_options("model.bin", b"too large", options)
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        ImportFailure::Operation {
+            error: BaoziError::LimitExceeded {
+                limit: "max_total_asset_bytes"
+            },
+            evidence,
+        } if evidence.is_empty()
+    ));
 }
 
 #[test]
@@ -143,7 +217,13 @@ fn strict_diagnostics_promote_warning_to_error() {
         .read_bytes_with_options("model.dum", b"opaque bytes", options)
         .unwrap_err();
 
-    assert!(matches!(error, BaoziError::Parse { .. }));
+    assert!(matches!(
+        error,
+        ImportFailure::Operation {
+            error: BaoziError::Parse { .. },
+            ..
+        }
+    ));
     assert!(error.to_string().contains("test.imported"));
 }
 
@@ -159,7 +239,13 @@ fn strict_diagnostics_cannot_be_bypassed_by_diagnostic_cap() {
         .read_bytes_with_options("model.dum", b"opaque bytes", options)
         .unwrap_err();
 
-    assert!(matches!(error, BaoziError::Parse { .. }));
+    assert!(matches!(
+        error,
+        ImportFailure::Operation {
+            error: BaoziError::Parse { .. },
+            ..
+        }
+    ));
     assert!(error.to_string().contains("test.imported"));
 }
 
@@ -172,27 +258,114 @@ fn extension_hint_does_not_select_importer_that_rejects_content() {
         .read_bytes("model.dum", b"contradiction")
         .unwrap_err();
 
-    assert!(matches!(error, BaoziError::UnsupportedFormat { .. }));
+    assert!(matches!(
+        error,
+        ImportFailure::UnsupportedFormat { evidence, .. }
+            if evidence.len() == 1
+                && evidence[0].outcome() == &DetectionOutcome::NoMatch
+    ));
 }
 
 #[test]
 fn content_detection_beats_wrong_extension() {
     let mut importer = Importer::empty();
+    importer.register(FaultingDetector).unwrap();
     importer.register(ExtensionOnlyImporter).unwrap();
     importer.register(ContentImporter).unwrap();
+    importer.register(InconclusiveDetector).unwrap();
 
     let report = importer.read_bytes("model.dum", b"baozi payload").unwrap();
 
     assert_eq!(report.format().id(), "content");
+    assert_eq!(
+        report
+            .detection_evidence()
+            .iter()
+            .map(|item| item.format_id())
+            .collect::<Vec<_>>(),
+        ["a-fault", "content", "extension-only", "z-inconclusive"]
+    );
+    assert!(matches!(
+        report.detection_evidence()[0].outcome(),
+        DetectionOutcome::Fault(_)
+    ));
+    assert_eq!(
+        report.detection_evidence()[1].outcome(),
+        &DetectionOutcome::Match(ReadConfidence::Certain)
+    );
+    assert!(matches!(
+        report.detection_evidence()[3].outcome(),
+        DetectionOutcome::Inconclusive(_)
+    ));
+}
+
+#[test]
+fn non_definitive_detection_is_not_reported_as_unsupported() {
+    let mut importer = Importer::empty();
+    importer.register(FaultingDetector).unwrap();
+    importer.register(ExtensionOnlyImporter).unwrap();
+    importer.register(InconclusiveDetector).unwrap();
+
+    let error = importer.read_bytes("model.unknown", b"opaque").unwrap_err();
+
+    let ImportFailure::Detection(DetectionFailure::NoMatch { evidence, .. }) = error else {
+        panic!("expected a typed aggregate detection failure");
+    };
+    assert_eq!(
+        evidence
+            .iter()
+            .map(|item| item.format_id())
+            .collect::<Vec<_>>(),
+        ["a-fault", "extension-only", "z-inconclusive"]
+    );
+    assert!(matches!(evidence[0].outcome(), DetectionOutcome::Fault(_)));
+    assert_eq!(
+        evidence[1].outcome(),
+        &DetectionOutcome::Match(ReadConfidence::Maybe)
+    );
+    assert!(matches!(
+        evidence[2].outcome(),
+        DetectionOutcome::Inconclusive(_)
+    ));
+}
+
+#[test]
+fn selected_format_failure_preserves_detection_evidence() {
+    let mut importer = Importer::empty();
+    importer.register(FaultingDetector).unwrap();
+    importer.register(ParseFailImporter).unwrap();
+
+    let error = importer.read_bytes("model.fail", b"opaque").unwrap_err();
+
+    let ImportFailure::Operation { error, evidence } = error else {
+        panic!("expected a selected-format operation failure");
+    };
+    assert!(matches!(error, BaoziError::Parse { .. }));
+    assert_eq!(
+        evidence
+            .iter()
+            .map(|item| item.format_id())
+            .collect::<Vec<_>>(),
+        ["a-fault", "parse-fail"]
+    );
 }
 
 #[test]
 fn ambiguous_top_confidence_matches_return_error() {
     let mut importer = Importer::empty();
+    importer.register(FaultingDetector).unwrap();
     importer.register(AmbiguousOne).unwrap();
     importer.register(AmbiguousTwo).unwrap();
+    importer.register(InconclusiveDetector).unwrap();
 
     let error = importer.read_bytes("model.bin", b"anything").unwrap_err();
 
-    assert!(matches!(error, BaoziError::AmbiguousFormat { .. }));
+    assert!(matches!(
+        error,
+        ImportFailure::Detection(DetectionFailure::Ambiguous {
+            candidates,
+            evidence,
+            ..
+        }) if candidates == ["ambiguous-one", "ambiguous-two"] && evidence.len() == 4
+    ));
 }

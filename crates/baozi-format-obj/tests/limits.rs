@@ -95,6 +95,38 @@ fn vertex_limit_is_enforced() -> Result<()> {
 }
 
 #[test]
+fn generated_vertex_limit_is_aggregate_across_segments() -> Result<()> {
+    let bytes = b"v 0 0 0\nv 1 0 0\nv 0 1 0\ng left\nf 1 2 3\ng right\nf 1 2 3\n";
+
+    let mut exact = ImportOptions::memory();
+    exact.limits.max_vertices = 6;
+    let (result, diagnostics) = import_bytes_result("vertices-exact.obj", bytes, exact)?;
+    let scene = result?;
+    assert!(diagnostics.is_empty());
+    assert_eq!(
+        scene
+            .meshes
+            .iter()
+            .map(|mesh| mesh.positions.len())
+            .sum::<usize>(),
+        6
+    );
+
+    let mut excess = ImportOptions::memory();
+    excess.limits.max_vertices = 5;
+    let (result, diagnostics) = import_bytes_result("vertices-excess.obj", bytes, excess)?;
+    let error = expected_error(result)?;
+    assert!(diagnostics.is_empty());
+    assert_eq!(
+        error,
+        BaoziError::LimitExceeded {
+            limit: "max_vertices"
+        }
+    );
+    Ok(())
+}
+
+#[test]
 fn face_limit_is_enforced() -> Result<()> {
     let mut options = ImportOptions::memory();
     options.limits.max_faces = 0;
@@ -107,6 +139,31 @@ fn face_limit_is_enforced() -> Result<()> {
         error,
         BaoziError::LimitExceeded { limit: "max_faces" }
     ));
+    Ok(())
+}
+
+#[test]
+fn topology_cell_limit_is_enforced_before_face_storage() -> Result<()> {
+    let bytes = b"v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n";
+
+    let mut exact = ImportOptions::memory();
+    exact.limits.max_total_topology_cells = 3;
+    let (result, diagnostics) = import_bytes_result("topology-exact.obj", bytes, exact)?;
+    let scene = result?;
+    assert!(diagnostics.is_empty());
+    assert_eq!(scene.meshes[0].indices.len(), 3);
+
+    let mut excess = ImportOptions::memory();
+    excess.limits.max_total_topology_cells = 2;
+    let (result, diagnostics) = import_bytes_result("topology-excess.obj", bytes, excess)?;
+    let error = expected_error(result)?;
+    assert!(diagnostics.is_empty());
+    assert_eq!(
+        error,
+        BaoziError::LimitExceeded {
+            limit: "max_total_topology_cells"
+        }
+    );
     Ok(())
 }
 
@@ -125,6 +182,42 @@ fn mesh_limit_is_enforced_after_group_split() -> Result<()> {
             limit: "max_meshes"
         }
     ));
+    Ok(())
+}
+
+#[test]
+fn canonical_string_budget_is_charged_before_segment_materialization() -> Result<()> {
+    const NAME_BYTES: usize = 4_096;
+    const SEGMENT_COUNT: usize = 8;
+
+    let object = "x".repeat(NAME_BYTES);
+    let mut document = format!("o {object}\nv 0 0 0\nv 1 0 0\nv 0 1 0\n");
+    for segment in 0..SEGMENT_COUNT {
+        let smoothing = if segment.is_multiple_of(2) { "a" } else { "b" };
+        document.push_str(&format!("s {smoothing}\nf 1 2 3\n"));
+    }
+    let exact_bytes = SEGMENT_COUNT * (3 * NAME_BYTES + 24);
+
+    let mut exact = ImportOptions::memory();
+    exact.limits.max_canonical_string_bytes = exact_bytes;
+    let (result, diagnostics) =
+        import_bytes_result("canonical-strings.obj", document.as_bytes(), exact)?;
+    let scene = result?;
+    assert!(diagnostics.is_empty());
+    assert_eq!(scene.meshes.len(), SEGMENT_COUNT);
+
+    let mut excess = ImportOptions::memory();
+    excess.limits.max_canonical_string_bytes = exact_bytes - 1;
+    let (result, diagnostics) =
+        import_bytes_result("canonical-strings.obj", document.as_bytes(), excess)?;
+    let error = expected_error(result)?;
+    assert!(diagnostics.is_empty());
+    assert_eq!(
+        error,
+        BaoziError::LimitExceeded {
+            limit: "max_canonical_string_bytes"
+        }
+    );
     Ok(())
 }
 

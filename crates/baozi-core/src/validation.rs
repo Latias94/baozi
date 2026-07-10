@@ -30,7 +30,13 @@ fn validate_root(scene: &Scene) -> Result<()> {
 }
 
 fn validate_nodes(scene: &Scene) -> Result<()> {
-    let mut state = vec![VisitState::Unvisited; scene.nodes.len()];
+    let mut state = Vec::new();
+    state
+        .try_reserve_exact(scene.nodes.len())
+        .map_err(|_| BaoziError::LimitExceeded {
+            limit: "max_graph_nodes",
+        })?;
+    state.resize(scene.nodes.len(), VisitState::Unvisited);
 
     for (index, node) in scene.nodes.iter().enumerate() {
         if !node.transform.is_finite() {
@@ -283,6 +289,11 @@ fn validate_mesh(
     }
     validate_joint_channels(index, vertex_count, mesh, skins, binding_usage)?;
     for (target_index, target) in mesh.morph_targets.iter().enumerate() {
+        if target.positions.is_empty() && target.normals.is_empty() && target.tangents.is_empty() {
+            return invalid(format!(
+                "mesh {index} morph target {target_index} has no delta channels"
+            ));
+        }
         validate_vec3_channel(
             index,
             &format!("morph_targets[{target_index}].positions"),
@@ -866,15 +877,49 @@ fn visit_node(scene: &Scene, index: usize, state: &mut [VisitState]) -> Result<(
         VisitState::Visiting => {
             return invalid(format!("node hierarchy contains a cycle at node {index}"));
         }
-        VisitState::Visited => return Ok(()),
+        VisitState::Visited => {
+            return invalid(format!(
+                "node hierarchy reaches node {index} more than once"
+            ));
+        }
         VisitState::Unvisited => {}
     }
 
     state[index] = VisitState::Visiting;
-    for child in &scene.nodes[index].children {
-        visit_node(scene, child.index(), state)?;
+    let mut stack = Vec::new();
+    stack
+        .try_reserve_exact(state.len())
+        .map_err(|_| BaoziError::LimitExceeded {
+            limit: "max_graph_nodes",
+        })?;
+    stack.push((index, 0_usize));
+    while let Some((node_index, next_child)) = stack.last_mut() {
+        let children = &scene.nodes[*node_index].children;
+        let Some(child) = children.get(*next_child) else {
+            state[*node_index] = VisitState::Visited;
+            stack.pop();
+            continue;
+        };
+        *next_child += 1;
+
+        let child_index = child.index();
+        match state[child_index] {
+            VisitState::Visiting => {
+                return invalid(format!(
+                    "node hierarchy contains a cycle at node {child_index}"
+                ));
+            }
+            VisitState::Visited => {
+                return invalid(format!(
+                    "node hierarchy reaches node {child_index} more than once"
+                ));
+            }
+            VisitState::Unvisited => {
+                state[child_index] = VisitState::Visiting;
+                stack.push((child_index, 0));
+            }
+        }
     }
-    state[index] = VisitState::Visited;
     Ok(())
 }
 

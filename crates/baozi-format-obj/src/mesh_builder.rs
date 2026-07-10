@@ -7,13 +7,34 @@ use baozi_core::{
 };
 use baozi_import::ImportContext;
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 struct SegmentKey {
-    object: Option<String>,
-    group: Option<String>,
-    material: Option<String>,
-    smoothing: Option<String>,
+    object: Option<Arc<str>>,
+    group: Option<Arc<str>>,
+    material: Option<Arc<str>>,
+    smoothing: Option<Arc<str>>,
+}
+
+impl PartialEq for SegmentKey {
+    fn eq(&self, other: &Self) -> bool {
+        same_interned_state(&self.object, &other.object)
+            && same_interned_state(&self.group, &other.group)
+            && same_interned_state(&self.material, &other.material)
+            && same_interned_state(&self.smoothing, &other.smoothing)
+    }
+}
+
+impl Eq for SegmentKey {}
+
+// ObjParser interns state names, so pointer identity is semantic equality here.
+fn same_interned_state(left: &Option<Arc<str>>, right: &Option<Arc<str>>) -> bool {
+    match (left, right) {
+        (Some(left), Some(right)) => Arc::ptr_eq(left, right),
+        (None, None) => true,
+        _ => false,
+    }
 }
 
 impl SegmentKey {
@@ -26,11 +47,11 @@ impl SegmentKey {
         }
     }
 
-    fn display_name(&self) -> Option<String> {
+    fn display_name(&self) -> Option<&str> {
         self.group
-            .clone()
-            .or_else(|| self.object.clone())
-            .or_else(|| self.material.clone())
+            .as_deref()
+            .or(self.object.as_deref())
+            .or(self.material.as_deref())
     }
 }
 
@@ -66,6 +87,80 @@ struct SegmentBuilder {
     has_polygon: bool,
 }
 
+#[derive(Debug)]
+struct CanonicalStringBudget {
+    used: usize,
+    limit: usize,
+}
+
+impl CanonicalStringBudget {
+    fn new(limit: usize) -> Self {
+        Self { used: 0, limit }
+    }
+
+    fn debit_segment(&mut self, key: &SegmentKey) -> Result<()> {
+        let mut bytes = 0usize;
+        if let Some(name) = key.display_name() {
+            checked_add_string_bytes(&mut bytes, name.len())?;
+            checked_add_string_bytes(&mut bytes, name.len())?;
+        }
+        for (metadata_key, value) in [
+            ("obj.object", key.object.as_deref()),
+            ("obj.group", key.group.as_deref()),
+            ("obj.material", key.material.as_deref()),
+            ("obj.smoothing", key.smoothing.as_deref()),
+        ] {
+            if let Some(value) = value {
+                checked_add_string_bytes(&mut bytes, metadata_key.len())?;
+                checked_add_string_bytes(&mut bytes, value.len())?;
+            }
+        }
+
+        self.used = self
+            .used
+            .checked_add(bytes)
+            .ok_or(BaoziError::LimitExceeded {
+                limit: "max_canonical_string_bytes",
+            })?;
+        if self.used > self.limit {
+            return Err(BaoziError::LimitExceeded {
+                limit: "max_canonical_string_bytes",
+            });
+        }
+        Ok(())
+    }
+}
+
+fn checked_add_string_bytes(total: &mut usize, bytes: usize) -> Result<()> {
+    *total = total.checked_add(bytes).ok_or(BaoziError::LimitExceeded {
+        limit: "max_canonical_string_bytes",
+    })?;
+    Ok(())
+}
+
+fn owned_canonical_string(value: &str) -> Result<String> {
+    let mut owned = String::new();
+    owned
+        .try_reserve_exact(value.len())
+        .map_err(|_| BaoziError::LimitExceeded {
+            limit: "max_canonical_string_bytes",
+        })?;
+    owned.push_str(value);
+    Ok(owned)
+}
+
+fn insert_string_metadata(
+    metadata: &mut MetadataMap,
+    key: &'static str,
+    value: &str,
+) -> Result<()> {
+    metadata.insert(
+        owned_canonical_string(key)?,
+        MetadataValue::String(owned_canonical_string(value)?),
+    );
+    Ok(())
+}
+
 impl SegmentBuilder {
     fn new(key: SegmentKey) -> Self {
         Self {
@@ -89,6 +184,7 @@ impl SegmentBuilder {
         ctx: &ImportContext<'_>,
         parsed: &ParsedObj,
         face: &Face,
+        generated_vertices: &mut usize,
     ) -> Result<()> {
         if face.vertices.len() < 3 {
             return Err(BaoziError::parse(
@@ -103,7 +199,7 @@ impl SegmentBuilder {
         self.face_vertex_counts.push(face.vertices.len() as u32);
 
         for vertex in &face.vertices {
-            let index = self.vertex_index(ctx, parsed, (*vertex).into())?;
+            let index = self.vertex_index(ctx, parsed, (*vertex).into(), generated_vertices)?;
             self.indices.push(index);
         }
         Ok(())
@@ -114,6 +210,7 @@ impl SegmentBuilder {
         ctx: &ImportContext<'_>,
         parsed: &ParsedObj,
         key: VertexKey,
+        generated_vertices: &mut usize,
     ) -> Result<u32> {
         if let Some(index) = self.vertex_map.get(&key) {
             return Ok(*index);
@@ -126,11 +223,23 @@ impl SegmentBuilder {
             .ok_or(BaoziError::LimitExceeded {
                 limit: "max_vertices",
             })?;
-        if next > ctx.limits().max_vertices || next > u32::MAX as usize {
+        if next > u32::MAX as usize {
             return Err(BaoziError::LimitExceeded {
                 limit: "max_vertices",
             });
         }
+        let next_generated =
+            generated_vertices
+                .checked_add(1)
+                .ok_or(BaoziError::LimitExceeded {
+                    limit: "max_vertices",
+                })?;
+        if next_generated > ctx.limits().max_vertices {
+            return Err(BaoziError::LimitExceeded {
+                limit: "max_vertices",
+            });
+        }
+        *generated_vertices = next_generated;
 
         let index = self.positions.len() as u32;
         self.positions.push(parsed.positions[key.position]);
@@ -155,19 +264,13 @@ impl SegmentBuilder {
     }
 
     fn warn_partial_attributes(&self, ctx: &mut ImportContext<'_>) {
-        let segment = self
-            .key
-            .display_name()
-            .unwrap_or_else(|| "<unnamed>".to_owned());
         if self.has_texcoords && self.missing_texcoords {
             mtl::push_warning(
                 ctx,
                 ctx.source().to_string(),
                 None,
                 "obj.partial_texcoord_channel",
-                format!(
-                    "OBJ segment '{segment}' mixes vertices with and without texture coordinates; the partial texture coordinate channel was omitted"
-                ),
+                "OBJ segment mixes vertices with and without texture coordinates; the partial texture coordinate channel was omitted",
             );
         }
         if self.has_normals && self.missing_normals {
@@ -176,14 +279,17 @@ impl SegmentBuilder {
                 ctx.source().to_string(),
                 None,
                 "obj.partial_normal_channel",
-                format!(
-                    "OBJ segment '{segment}' mixes vertices with and without normals; the partial normal channel was omitted"
-                ),
+                "OBJ segment mixes vertices with and without normals; the partial normal channel was omitted",
             );
         }
     }
 
-    fn finish(self, material: Option<MaterialId>) -> Mesh {
+    fn finish(self, material: Option<MaterialId>) -> Result<Mesh> {
+        let name = self
+            .key
+            .display_name()
+            .map(owned_canonical_string)
+            .transpose()?;
         let topology = if self.has_polygon {
             PrimitiveTopology::Polygons
         } else {
@@ -196,29 +302,20 @@ impl SegmentBuilder {
         };
         let mut metadata = MetadataMap::new();
         if let Some(object) = &self.key.object {
-            metadata.insert(
-                "obj.object".to_owned(),
-                MetadataValue::String(object.clone()),
-            );
+            insert_string_metadata(&mut metadata, "obj.object", object)?;
         }
         if let Some(group) = &self.key.group {
-            metadata.insert("obj.group".to_owned(), MetadataValue::String(group.clone()));
+            insert_string_metadata(&mut metadata, "obj.group", group)?;
         }
         if let Some(material) = &self.key.material {
-            metadata.insert(
-                "obj.material".to_owned(),
-                MetadataValue::String(material.clone()),
-            );
+            insert_string_metadata(&mut metadata, "obj.material", material)?;
         }
         if let Some(smoothing) = &self.key.smoothing {
-            metadata.insert(
-                "obj.smoothing".to_owned(),
-                MetadataValue::String(smoothing.clone()),
-            );
+            insert_string_metadata(&mut metadata, "obj.smoothing", smoothing)?;
         }
 
-        Mesh {
-            name: self.key.display_name(),
+        Ok(Mesh {
+            name,
             topology,
             bounds: compute_bounds(&self.positions),
             positions: self.positions,
@@ -237,7 +334,7 @@ impl SegmentBuilder {
             material,
             metadata,
             ..Mesh::default()
-        }
+        })
     }
 }
 
@@ -257,12 +354,23 @@ pub(crate) fn scene_from_parsed(
     let mut builder = SceneBuilder::new();
     let mut current: Option<SegmentBuilder> = None;
     let mut material_ids = BTreeMap::new();
+    let mut string_budget = CanonicalStringBudget::new(ctx.limits().max_canonical_string_bytes);
+    let mut topology_cells = 0usize;
+    let mut generated_vertices = 0usize;
 
     for face in &parsed.faces {
         let key = SegmentKey::from_face(face);
         let should_flush = current.as_ref().is_some_and(|segment| segment.key != key);
         if should_flush && let Some(segment) = current.take() {
-            flush_segment(ctx, &mut builder, &mut material_ids, library, segment)?;
+            flush_segment(
+                ctx,
+                &mut builder,
+                &mut material_ids,
+                library,
+                segment,
+                &mut string_budget,
+                &mut topology_cells,
+            )?;
         }
         if current.is_none() {
             current = Some(SegmentBuilder::new(key));
@@ -274,11 +382,19 @@ pub(crate) fn scene_from_parsed(
                 "OBJ mesh segment could not be created",
             ));
         };
-        segment.push_face(ctx, &parsed, face)?;
+        segment.push_face(ctx, &parsed, face, &mut generated_vertices)?;
     }
 
     if let Some(segment) = current {
-        flush_segment(ctx, &mut builder, &mut material_ids, library, segment)?;
+        flush_segment(
+            ctx,
+            &mut builder,
+            &mut material_ids,
+            library,
+            segment,
+            &mut string_budget,
+            &mut topology_cells,
+        )?;
     }
 
     builder.finish()
@@ -290,6 +406,8 @@ fn flush_segment(
     material_ids: &mut BTreeMap<String, MaterialId>,
     library: &MaterialLibrary,
     segment: SegmentBuilder,
+    string_budget: &mut CanonicalStringBudget,
+    topology_cells: &mut usize,
 ) -> Result<()> {
     let next_meshes = builder
         .mesh_count()
@@ -303,14 +421,42 @@ fn flush_segment(
         });
     }
 
+    let segment_topology_cells = segment
+        .indices
+        .len()
+        .checked_add(if segment.has_polygon {
+            segment.face_vertex_counts.len()
+        } else {
+            0
+        })
+        .ok_or(BaoziError::LimitExceeded {
+            limit: "max_total_topology_cells",
+        })?;
+    *topology_cells =
+        topology_cells
+            .checked_add(segment_topology_cells)
+            .ok_or(BaoziError::LimitExceeded {
+                limit: "max_total_topology_cells",
+            })?;
+    if *topology_cells > ctx.limits().max_total_topology_cells {
+        return Err(BaoziError::LimitExceeded {
+            limit: "max_total_topology_cells",
+        });
+    }
+    string_budget.debit_segment(&segment.key)?;
+
     let material = segment
         .key
         .material
-        .clone()
-        .map(|name| resolve_material(ctx, builder, material_ids, library, &name));
+        .as_deref()
+        .map(|name| resolve_material(ctx, builder, material_ids, library, name));
     segment.warn_partial_attributes(ctx);
-    let mesh = segment.finish(material);
-    let name = mesh.name.clone();
+    let mesh = segment.finish(material)?;
+    let name = mesh
+        .name
+        .as_deref()
+        .map(owned_canonical_string)
+        .transpose()?;
     let mesh_id = builder.add_mesh(mesh);
     builder.add_child_node(
         builder.root(),
@@ -405,4 +551,35 @@ fn compute_bounds(positions: &[Vec3]) -> Option<Aabb> {
         max.z = max.z.max(position.z);
     }
     Some(Aabb { min, max })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn key_with_object(object: Arc<str>) -> SegmentKey {
+        SegmentKey {
+            object: Some(object),
+            group: None,
+            material: None,
+            smoothing: None,
+        }
+    }
+
+    #[test]
+    fn segment_keys_compare_interned_identity_in_constant_time() {
+        let long_name = format!("object-{}", "x".repeat(64 * 1024));
+        let interned = Arc::<str>::from(long_name.as_str());
+        let same_identity = Arc::clone(&interned);
+        let equal_content_with_distinct_identity = Arc::<str>::from(long_name.as_str());
+
+        assert_eq!(
+            key_with_object(Arc::clone(&interned)),
+            key_with_object(same_identity)
+        );
+        assert_ne!(
+            key_with_object(interned),
+            key_with_object(equal_content_with_distinct_identity)
+        );
+    }
 }

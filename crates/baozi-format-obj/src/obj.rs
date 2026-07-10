@@ -1,6 +1,7 @@
 use crate::mtl;
 use baozi_core::{BaoziError, Result, SourceLocation, Vec2, Vec3};
 use baozi_import::ImportContext;
+use std::{collections::HashSet, sync::Arc};
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ParsedObj {
@@ -14,10 +15,10 @@ pub(crate) struct ParsedObj {
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Face {
     pub vertices: Vec<FaceVertex>,
-    pub object: Option<String>,
-    pub group: Option<String>,
-    pub material: Option<String>,
-    pub smoothing: Option<String>,
+    pub object: Option<Arc<str>>,
+    pub group: Option<Arc<str>>,
+    pub material: Option<Arc<str>>,
+    pub smoothing: Option<Arc<str>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -42,6 +43,8 @@ pub(crate) fn parse(ctx: &mut ImportContext<'_>, text: &str) -> Result<ParsedObj
         group: None,
         material: None,
         smoothing: None,
+        state_names: HashSet::new(),
+        topology_cells: 0,
     };
 
     for (line_index, raw_line) in text.lines().enumerate() {
@@ -55,10 +58,12 @@ pub(crate) fn parse(ctx: &mut ImportContext<'_>, text: &str) -> Result<ParsedObj
 struct ObjParser<'ctx, 'import> {
     ctx: &'ctx mut ImportContext<'import>,
     parsed: ParsedObj,
-    object: Option<String>,
-    group: Option<String>,
-    material: Option<String>,
-    smoothing: Option<String>,
+    object: Option<Arc<str>>,
+    group: Option<Arc<str>>,
+    material: Option<Arc<str>>,
+    smoothing: Option<Arc<str>>,
+    state_names: HashSet<Arc<str>>,
+    topology_cells: usize,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -88,25 +93,25 @@ impl ObjParser<'_, '_> {
             "f" => self.parse_face(&tokens, line_number),
             "o" => {
                 self.object = trailing_text_after_first_token(line, &tokens)
-                    .map(|name| checked_string(self.ctx, name))
+                    .map(|name| self.intern_state_name(name))
                     .transpose()?;
                 Ok(())
             }
             "g" => {
                 self.group = trailing_text_after_first_token(line, &tokens)
-                    .map(|name| checked_string(self.ctx, name))
+                    .map(|name| self.intern_state_name(name))
                     .transpose()?;
                 Ok(())
             }
             "usemtl" => {
                 self.material = trailing_text_after_first_token(line, &tokens)
-                    .map(|name| checked_string(self.ctx, name))
+                    .map(|name| self.intern_state_name(name))
                     .transpose()?;
                 Ok(())
             }
             "s" => {
                 self.smoothing = trailing_text_after_first_token(line, &tokens)
-                    .map(|name| checked_string(self.ctx, name))
+                    .map(|name| self.intern_state_name(name))
                     .transpose()?;
                 Ok(())
             }
@@ -208,7 +213,25 @@ impl ObjParser<'_, '_> {
             return Err(BaoziError::LimitExceeded { limit: "max_faces" });
         }
 
-        let mut vertices = Vec::with_capacity(tokens.len() - 1);
+        let face_vertex_count = tokens.len() - 1;
+        let next_topology_cells = self.topology_cells.checked_add(face_vertex_count).ok_or(
+            BaoziError::LimitExceeded {
+                limit: "max_total_topology_cells",
+            },
+        )?;
+        if next_topology_cells > self.ctx.limits().max_total_topology_cells {
+            return Err(BaoziError::LimitExceeded {
+                limit: "max_total_topology_cells",
+            });
+        }
+        self.topology_cells = next_topology_cells;
+
+        let mut vertices = Vec::new();
+        vertices
+            .try_reserve_exact(face_vertex_count)
+            .map_err(|_| BaoziError::LimitExceeded {
+                limit: "max_total_topology_cells",
+            })?;
         for token in &tokens[1..] {
             vertices.push(parse_face_vertex(
                 self.ctx,
@@ -225,6 +248,17 @@ impl ObjParser<'_, '_> {
             smoothing: self.smoothing.clone(),
         });
         Ok(())
+    }
+
+    fn intern_state_name(&mut self, text: &str) -> Result<Arc<str>> {
+        let text = checked_text(self.ctx, text)?;
+        if let Some(interned) = self.state_names.get(text) {
+            return Ok(Arc::clone(interned));
+        }
+
+        let interned = Arc::<str>::from(text);
+        self.state_names.insert(Arc::clone(&interned));
+        Ok(interned)
     }
 }
 
@@ -422,13 +456,17 @@ fn parse_f32(ctx: &ImportContext<'_>, token: Token<'_>, line_number: u32) -> Res
 }
 
 fn checked_string(ctx: &ImportContext<'_>, text: &str) -> Result<String> {
+    Ok(checked_text(ctx, text)?.to_owned())
+}
+
+fn checked_text<'text>(ctx: &ImportContext<'_>, text: &'text str) -> Result<&'text str> {
     let text = text.trim();
     if text.len() > ctx.limits().max_string_bytes {
         return Err(BaoziError::LimitExceeded {
             limit: "max_string_bytes",
         });
     }
-    Ok(text.to_owned())
+    Ok(text)
 }
 
 fn trailing_text_after_first_token<'line>(
@@ -471,4 +509,78 @@ fn is_unsupported_statement(keyword: &str) -> bool {
             | "bmat"
             | "step"
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use baozi_io::{AssetPath, MemoryAssetIo};
+
+    fn parse_text(text: &str) -> ParsedObj {
+        let io = MemoryAssetIo::new();
+        let source = AssetPath::new("shared-state.obj").expect("valid test path");
+        let mut ctx = ImportContext::new(&io, source);
+        parse(&mut ctx, text).expect("valid OBJ fixture")
+    }
+
+    #[test]
+    fn faces_share_long_declared_state_allocations() {
+        const FACE_COUNT: usize = 2_048;
+
+        let long_suffix = "x".repeat(64 * 1024);
+        let object_name = format!("object-{long_suffix}");
+        let group_name = format!("group-{long_suffix}");
+        let material_name = format!("material-{long_suffix}");
+        let smoothing_name = format!("smoothing-{long_suffix}");
+        let mut text = format!(
+            "o {object_name}\ng {group_name}\nusemtl {material_name}\ns {smoothing_name}\n\
+             v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n\
+             o {object_name}\ng {group_name}\nusemtl {material_name}\ns {smoothing_name}\n"
+        );
+        for _ in 1..FACE_COUNT {
+            text.push_str("f 1 2 3\n");
+        }
+
+        let parsed = parse_text(&text);
+        assert_eq!(parsed.faces.len(), FACE_COUNT);
+
+        let first = &parsed.faces[0];
+        let first_object = first.object.as_ref().expect("object state");
+        let first_group = first.group.as_ref().expect("group state");
+        let first_material = first.material.as_ref().expect("material state");
+        let first_smoothing = first.smoothing.as_ref().expect("smoothing state");
+        assert_eq!(first_object.as_ref(), object_name);
+
+        for face in &parsed.faces[1..] {
+            assert!(Arc::ptr_eq(
+                first_object,
+                face.object.as_ref().expect("object state")
+            ));
+            assert!(Arc::ptr_eq(
+                first_group,
+                face.group.as_ref().expect("group state")
+            ));
+            assert!(Arc::ptr_eq(
+                first_material,
+                face.material.as_ref().expect("material state")
+            ));
+            assert!(Arc::ptr_eq(
+                first_smoothing,
+                face.smoothing.as_ref().expect("smoothing state")
+            ));
+        }
+
+        assert_eq!(Arc::strong_count(first_object), FACE_COUNT);
+        assert_eq!(Arc::strong_count(first_group), FACE_COUNT);
+        assert_eq!(Arc::strong_count(first_material), FACE_COUNT);
+        assert_eq!(Arc::strong_count(first_smoothing), FACE_COUNT);
+    }
+
+    #[test]
+    fn parsed_obj_and_faces_are_send_and_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+
+        assert_send_sync::<Face>();
+        assert_send_sync::<ParsedObj>();
+    }
 }

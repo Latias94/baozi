@@ -15,6 +15,7 @@ use gltf::json;
 use gltf::json::validation::Checked;
 use gltf::mesh::Mode;
 use gltf::texture::{MagFilter, MinFilter, WrappingMode};
+use std::collections::{BTreeMap, btree_map::Entry};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 pub(crate) fn read_gltf(ctx: &mut ImportContext<'_>) -> Result<Scene> {
@@ -29,8 +30,176 @@ pub(crate) fn read_gltf(ctx: &mut ImportContext<'_>) -> Result<Scene> {
             format!("invalid glTF: {error}"),
         )
     })?;
+    let node_graph = preflight_node_graph(ctx, &gltf)?;
+    let repeated_mesh_string_bytes = preflight_repeated_mesh_names(ctx, &gltf)?;
     let buffers = load_buffers(ctx, &gltf)?;
-    scene_from_document(ctx, &gltf, &buffers)
+    scene_from_document(
+        ctx,
+        &gltf,
+        &buffers,
+        &node_graph,
+        repeated_mesh_string_bytes,
+    )
+}
+
+fn preflight_repeated_mesh_names(ctx: &ImportContext<'_>, gltf: &gltf::Gltf) -> Result<usize> {
+    safe_gltf(ctx, "glTF repeated mesh name preflight", || {
+        let mut bytes = 0usize;
+        let limit = ctx.limits().max_canonical_string_bytes;
+
+        for mesh in gltf.meshes() {
+            if let Some(name) = mesh.name() {
+                for (primitive_index, _) in mesh.primitives().enumerate() {
+                    let generated_len = primitive_name_len(name, primitive_index)?;
+                    if generated_len > ctx.limits().max_string_bytes {
+                        return Err(BaoziError::LimitExceeded {
+                            limit: "max_string_bytes",
+                        });
+                    }
+                    add_repeated_string_bytes(&mut bytes, generated_len, limit)?;
+                }
+            }
+        }
+
+        Ok(bytes)
+    })?
+}
+
+type ResolvedTextureUris = BTreeMap<usize, String>;
+
+fn preflight_texture_strings(
+    ctx: &ImportContext<'_>,
+    gltf: &gltf::Gltf,
+    repeated_mesh_string_bytes: usize,
+) -> Result<ResolvedTextureUris> {
+    safe_gltf(ctx, "glTF texture string preflight", || {
+        let mut bytes = repeated_mesh_string_bytes;
+        let limit = ctx.limits().max_canonical_string_bytes;
+        let mut resolved_uris = ResolvedTextureUris::new();
+
+        for material in gltf.materials() {
+            if let Some(name) = material.name() {
+                if name.len() > ctx.limits().max_string_bytes {
+                    return Err(BaoziError::LimitExceeded {
+                        limit: "max_string_bytes",
+                    });
+                }
+                add_repeated_string_bytes(&mut bytes, name.len(), limit)?;
+            }
+            add_repeated_string_bytes(&mut bytes, "gltf:material_index".len(), limit)?;
+
+            let pbr = material.pbr_metallic_roughness();
+            if let Some(info) = pbr.base_color_texture() {
+                preflight_texture_reference(
+                    ctx,
+                    &mut bytes,
+                    limit,
+                    info.texture(),
+                    "baseColorTexture",
+                    &mut resolved_uris,
+                )?;
+            }
+            if let Some(info) = pbr.metallic_roughness_texture() {
+                preflight_texture_reference(
+                    ctx,
+                    &mut bytes,
+                    limit,
+                    info.texture(),
+                    "metallicRoughnessTexture",
+                    &mut resolved_uris,
+                )?;
+            }
+            if let Some(info) = material.normal_texture() {
+                preflight_texture_reference(
+                    ctx,
+                    &mut bytes,
+                    limit,
+                    info.texture(),
+                    "normalTexture",
+                    &mut resolved_uris,
+                )?;
+            }
+            if let Some(info) = material.occlusion_texture() {
+                preflight_texture_reference(
+                    ctx,
+                    &mut bytes,
+                    limit,
+                    info.texture(),
+                    "occlusionTexture",
+                    &mut resolved_uris,
+                )?;
+            }
+            if let Some(info) = material.emissive_texture() {
+                preflight_texture_reference(
+                    ctx,
+                    &mut bytes,
+                    limit,
+                    info.texture(),
+                    "emissiveTexture",
+                    &mut resolved_uris,
+                )?;
+            }
+        }
+
+        Ok(resolved_uris)
+    })?
+}
+
+fn preflight_texture_reference(
+    ctx: &ImportContext<'_>,
+    bytes: &mut usize,
+    limit: usize,
+    texture: gltf::texture::Texture<'_>,
+    source_key: &'static str,
+    resolved_uris: &mut ResolvedTextureUris,
+) -> Result<()> {
+    let image = texture.source();
+    let image_name = image.name();
+    if image_name.is_some_and(|name| name.len() > ctx.limits().max_string_bytes) {
+        return Err(BaoziError::LimitExceeded {
+            limit: "max_string_bytes",
+        });
+    }
+
+    let ImageSource::Uri { uri, .. } = image.source() else {
+        return Ok(());
+    };
+    if is_data_uri(uri) || uri.len() > ctx.limits().max_string_bytes {
+        return Ok(());
+    }
+
+    let image_index = image.index();
+    let resolved_uri = match resolved_uris.entry(image_index) {
+        Entry::Occupied(entry) => entry.into_mut(),
+        Entry::Vacant(entry) => entry.insert(ctx.resolve_source_relative(uri)?.to_string()),
+    };
+
+    let texture_name = texture.name();
+    if texture_name.is_some_and(|name| name.len() > ctx.limits().max_string_bytes) {
+        return Err(BaoziError::LimitExceeded {
+            limit: "max_string_bytes",
+        });
+    }
+    if let Some(name) = texture_name.or(image_name) {
+        add_repeated_string_bytes(bytes, name.len(), limit)?;
+    }
+    add_repeated_string_bytes(bytes, resolved_uri.len(), limit)?;
+    add_repeated_string_bytes(bytes, source_key.len(), limit)?;
+    add_repeated_string_bytes(bytes, "gltf:".len(), limit)?;
+    add_repeated_string_bytes(bytes, source_key.len(), limit)?;
+    Ok(())
+}
+
+fn add_repeated_string_bytes(bytes: &mut usize, amount: usize, limit: usize) -> Result<()> {
+    *bytes = bytes.checked_add(amount).ok_or(BaoziError::LimitExceeded {
+        limit: "max_canonical_string_bytes",
+    })?;
+    if *bytes > limit {
+        return Err(BaoziError::LimitExceeded {
+            limit: "max_canonical_string_bytes",
+        });
+    }
+    Ok(())
 }
 
 fn load_buffers(ctx: &mut ImportContext<'_>, gltf: &gltf::Gltf) -> Result<Vec<Vec<u8>>> {
@@ -47,7 +216,7 @@ fn load_buffers(ctx: &mut ImportContext<'_>, gltf: &gltf::Gltf) -> Result<Vec<Ve
             BufferSource::Uri(uri) if is_data_uri(uri) => {
                 load_data_uri_buffer(ctx, uri, buffer.index())?
             }
-            BufferSource::Uri(uri) => load_external_buffer(ctx, uri)?,
+            BufferSource::Uri(uri) => load_external_buffer(ctx, uri, buffer.index())?,
         };
 
         if bytes.len() < buffer.length() {
@@ -149,7 +318,16 @@ fn base64_decoded_len(ctx: &ImportContext<'_>, encoded: &str, buffer_index: usiz
         })
 }
 
-fn load_external_buffer(ctx: &mut ImportContext<'_>, uri: &str) -> Result<Vec<u8>> {
+fn load_external_buffer(
+    ctx: &mut ImportContext<'_>,
+    uri: &str,
+    buffer_index: usize,
+) -> Result<Vec<u8>> {
+    if uri.len() > ctx.limits().max_string_bytes {
+        return Err(BaoziError::LimitExceeded {
+            limit: "max_string_bytes",
+        });
+    }
     if matches!(
         ctx.io_options().external_references,
         ExternalReferencePolicy::Deny
@@ -157,13 +335,8 @@ fn load_external_buffer(ctx: &mut ImportContext<'_>, uri: &str) -> Result<Vec<u8
         return Err(BaoziError::parse(
             ctx.source().to_string(),
             None,
-            format!("glTF external buffer '{uri}' was denied by ImportOptions"),
+            format!("glTF external buffer {buffer_index} was denied by ImportOptions"),
         ));
-    }
-    if uri.len() > ctx.limits().max_string_bytes {
-        return Err(BaoziError::LimitExceeded {
-            limit: "max_string_bytes",
-        });
     }
     let path = ctx.resolve_source_relative(uri)?;
     ctx.read_sidecar_to_end(&path)
@@ -177,16 +350,25 @@ fn scene_from_document(
     ctx: &mut ImportContext<'_>,
     gltf: &gltf::Gltf,
     buffers: &[Vec<u8>],
+    node_graph: &NodeGraph<'_>,
+    repeated_mesh_string_bytes: usize,
 ) -> Result<Scene> {
+    let resolved_texture_uris = preflight_texture_strings(ctx, gltf, repeated_mesh_string_bytes)?;
     let mut builder = SceneBuilder::new();
     let mut material_ids = Vec::with_capacity(gltf.materials().count());
     for material in gltf.materials() {
-        material_ids.push(add_material(ctx, &mut builder, material)?);
+        material_ids.push(add_material(
+            ctx,
+            &mut builder,
+            material,
+            &resolved_texture_uris,
+        )?);
     }
 
     let mut mesh_ids_by_gltf_mesh = Vec::with_capacity(gltf.meshes().count());
     let mut total_vertices = 0usize;
     let mut total_faces = 0usize;
+    let mut total_topology_cells = 0usize;
     for mesh in gltf.meshes() {
         let mut primitive_meshes = Vec::new();
         for primitive in mesh.primitives() {
@@ -200,6 +382,7 @@ fn scene_from_document(
                 primitive,
                 &mut total_vertices,
                 &mut total_faces,
+                &mut total_topology_cells,
             )?;
             primitive_meshes.push(mesh_id);
         }
@@ -208,8 +391,15 @@ fn scene_from_document(
 
     add_cameras(ctx, &mut builder, gltf);
     add_unsupported_domain_diagnostics(ctx, gltf);
-    let node_imports = add_scene_nodes(ctx, &mut builder, gltf, &mesh_ids_by_gltf_mesh)?;
-    let skin_ids = add_skins(ctx, &mut builder, gltf, buffers, &node_imports.node_ids)?;
+    let node_imports = add_scene_nodes(ctx, &mut builder, node_graph, &mesh_ids_by_gltf_mesh)?;
+    let skin_ids = add_skins(
+        ctx,
+        &mut builder,
+        gltf,
+        buffers,
+        &node_imports.node_ids,
+        &node_imports.node_skins,
+    )?;
     attach_node_skins(ctx, &mut builder, &node_imports.node_skins, &skin_ids)?;
 
     let mut scene = builder.finish()?;
@@ -230,6 +420,7 @@ fn add_material(
     ctx: &mut ImportContext<'_>,
     builder: &mut SceneBuilder,
     material: gltf::Material<'_>,
+    resolved_texture_uris: &ResolvedTextureUris,
 ) -> Result<baozi_core::MaterialId> {
     let pbr = material.pbr_metallic_roughness();
     let base = pbr.base_color_factor();
@@ -258,6 +449,7 @@ fn add_material(
         add_texture_slot(
             ctx,
             builder,
+            resolved_texture_uris,
             &mut material_out,
             info.texture(),
             info.tex_coord(),
@@ -271,6 +463,7 @@ fn add_material(
         add_texture_slot(
             ctx,
             builder,
+            resolved_texture_uris,
             &mut material_out,
             info.texture(),
             info.tex_coord(),
@@ -284,6 +477,7 @@ fn add_material(
         add_texture_slot(
             ctx,
             builder,
+            resolved_texture_uris,
             &mut material_out,
             info.texture(),
             info.tex_coord(),
@@ -297,6 +491,7 @@ fn add_material(
         add_texture_slot(
             ctx,
             builder,
+            resolved_texture_uris,
             &mut material_out,
             info.texture(),
             info.tex_coord(),
@@ -310,6 +505,7 @@ fn add_material(
         add_texture_slot(
             ctx,
             builder,
+            resolved_texture_uris,
             &mut material_out,
             info.texture(),
             info.tex_coord(),
@@ -327,6 +523,7 @@ fn add_material(
 fn add_texture_slot(
     ctx: &mut ImportContext<'_>,
     builder: &mut SceneBuilder,
+    resolved_texture_uris: &ResolvedTextureUris,
     material: &mut Material,
     texture: gltf::texture::Texture<'_>,
     tex_coord: u32,
@@ -361,9 +558,15 @@ fn add_texture_slot(
                 );
                 return Ok(());
             }
-            let resolved = ctx.resolve_source_relative(uri)?;
+            let image_index = image.index();
+            let resolved = resolved_texture_uris.get(&image_index).ok_or_else(|| {
+                gltf_parse_error(
+                    ctx,
+                    format!("glTF texture resolution plan is missing image {image_index}"),
+                )
+            })?;
             TextureSource::External {
-                uri: resolved.to_string(),
+                uri: resolved.clone(),
             }
         }
         ImageSource::View { mime_type, .. } => {
@@ -414,6 +617,7 @@ fn validate_primitive_contract(
     primitive_index: usize,
     material_count: usize,
     total_faces: &mut usize,
+    total_topology_cells: &mut usize,
 ) -> Result<PrimitiveContract> {
     let primitive = json_primitive(ctx, gltf, mesh_index, primitive_index)?;
     let owner = format!("glTF mesh {mesh_index} primitive {primitive_index}");
@@ -558,6 +762,16 @@ fn validate_primitive_contract(
     } else {
         None
     };
+    *total_topology_cells = total_topology_cells
+        .checked_add(index_count.unwrap_or_default())
+        .ok_or(BaoziError::LimitExceeded {
+            limit: "max_total_topology_cells",
+        })?;
+    if *total_topology_cells > ctx.limits().max_total_topology_cells {
+        return Err(BaoziError::LimitExceeded {
+            limit: "max_total_topology_cells",
+        });
+    }
     let primitive_faces = match mode {
         Mode::Triangles => index_count.unwrap_or(position_count) / 3,
         Mode::Points | Mode::Lines => 0,
@@ -983,6 +1197,7 @@ fn add_primitive_mesh(
     primitive: gltf::Primitive<'_>,
     total_vertices: &mut usize,
     total_faces: &mut usize,
+    total_topology_cells: &mut usize,
 ) -> Result<baozi_core::MeshId> {
     let contract = validate_primitive_contract(
         ctx,
@@ -991,6 +1206,7 @@ fn add_primitive_mesh(
         primitive.index(),
         material_ids.len(),
         total_faces,
+        total_topology_cells,
     )?;
     let topology = match map_topology(contract.mode) {
         Some(topology) => topology,
@@ -1149,38 +1365,346 @@ fn add_primitive_mesh(
 fn add_scene_nodes(
     ctx: &mut ImportContext<'_>,
     builder: &mut SceneBuilder,
-    gltf: &gltf::Gltf,
+    graph: &NodeGraph<'_>,
     mesh_ids_by_gltf_mesh: &[Vec<baozi_core::MeshId>],
 ) -> Result<NodeImportMaps> {
     let mut imports = NodeImportMaps {
-        node_ids: vec![None; gltf.nodes().count()],
+        node_ids: vec![None; graph.nodes.len()],
         node_skins: Vec::new(),
     };
     let root = builder.root();
-    if let Some(scene) = gltf.default_scene().or_else(|| gltf.scenes().next()) {
-        for node in scene.nodes() {
-            add_node_recursive(
+    let mut pending = Vec::with_capacity(graph.nodes.len());
+    pending.extend(
+        graph
+            .roots
+            .iter()
+            .rev()
+            .copied()
+            .map(|node_index| (node_index, root)),
+    );
+
+    while let Some((node_index, parent)) = pending.pop() {
+        let node = graph.nodes.get(node_index).ok_or_else(|| {
+            gltf_parse_error(
                 ctx,
-                builder,
-                root,
-                node,
-                mesh_ids_by_gltf_mesh,
-                &mut imports,
-            )?;
-        }
-    } else {
-        for node in gltf.nodes() {
-            add_node_recursive(
-                ctx,
-                builder,
-                root,
-                node,
-                mesh_ids_by_gltf_mesh,
-                &mut imports,
-            )?;
+                format!("glTF node graph references missing node {node_index}"),
+            )
+        })?;
+        let node_id = add_node(
+            ctx,
+            builder,
+            parent,
+            node,
+            mesh_ids_by_gltf_mesh,
+            &mut imports,
+        )?;
+        for child_index in graph.children[node_index].iter().rev().copied() {
+            pending.push((child_index, node_id));
         }
     }
     Ok(imports)
+}
+
+#[derive(Debug)]
+struct NodeGraph<'a> {
+    nodes: Vec<gltf::Node<'a>>,
+    children: Vec<Vec<usize>>,
+    roots: Vec<usize>,
+}
+
+fn preflight_node_graph<'a>(
+    ctx: &ImportContext<'_>,
+    gltf: &'a gltf::Gltf,
+) -> Result<NodeGraph<'a>> {
+    let node_count = safe_gltf(ctx, "glTF node count", || gltf.nodes().len())?;
+    if node_count > ctx.limits().max_graph_nodes {
+        return Err(BaoziError::LimitExceeded {
+            limit: "max_graph_nodes",
+        });
+    }
+
+    let mut graph_work = 0usize;
+    charge_graph_work(ctx, &mut graph_work, node_count)?;
+    let nodes = safe_gltf(ctx, "glTF nodes", || gltf.nodes().collect::<Vec<_>>())?;
+    let mut children = Vec::with_capacity(node_count);
+    let mut parents = vec![None; node_count];
+    let mut edge_count = 0usize;
+
+    for (parent_index, node) in nodes.iter().enumerate() {
+        let child_count = safe_gltf(ctx, "glTF node child count", || node.children().len())?;
+        edge_count = edge_count
+            .checked_add(child_count)
+            .ok_or(BaoziError::LimitExceeded {
+                limit: "max_graph_edges",
+            })?;
+        if edge_count > ctx.limits().max_graph_edges {
+            return Err(BaoziError::LimitExceeded {
+                limit: "max_graph_edges",
+            });
+        }
+        charge_graph_work(ctx, &mut graph_work, child_count)?;
+
+        let child_indices = safe_gltf(ctx, "glTF node children", || {
+            node.children()
+                .map(|child| child.index())
+                .collect::<Vec<_>>()
+        })?;
+        for &child_index in &child_indices {
+            if child_index >= node_count {
+                return Err(gltf_parse_error(
+                    ctx,
+                    format!("glTF node {parent_index} references missing child {child_index}"),
+                ));
+            }
+            if child_index == parent_index {
+                return Err(gltf_parse_error(
+                    ctx,
+                    format!("glTF node graph contains a cycle at node {parent_index}"),
+                ));
+            }
+            if let Some(existing_parent) = parents[child_index] {
+                return Err(gltf_parse_error(
+                    ctx,
+                    format!(
+                        "glTF node {child_index} has multiple parents ({existing_parent} and {parent_index})"
+                    ),
+                ));
+            }
+            parents[child_index] = Some(parent_index);
+        }
+        children.push(child_indices);
+    }
+
+    validate_graph_depth_and_cycles(ctx, &children, &parents)?;
+    let roots = select_and_validate_scene_roots(ctx, gltf, &parents, &mut graph_work)?;
+    validate_canonical_graph_limits(ctx, &children, &roots)?;
+
+    Ok(NodeGraph {
+        nodes,
+        children,
+        roots,
+    })
+}
+
+fn validate_canonical_graph_limits(
+    ctx: &ImportContext<'_>,
+    children: &[Vec<usize>],
+    roots: &[usize],
+) -> Result<()> {
+    let mut node_count = 1usize;
+    if node_count > ctx.limits().max_graph_nodes {
+        return Err(BaoziError::LimitExceeded {
+            limit: "max_graph_nodes",
+        });
+    }
+    if ctx.limits().max_graph_depth == 0 {
+        return Err(BaoziError::LimitExceeded {
+            limit: "max_graph_depth",
+        });
+    }
+
+    let mut edge_count = roots.len();
+    if edge_count > ctx.limits().max_graph_edges {
+        return Err(BaoziError::LimitExceeded {
+            limit: "max_graph_edges",
+        });
+    }
+    validate_canonical_graph_work(ctx, node_count, edge_count)?;
+
+    let mut pending = Vec::new();
+    pending
+        .try_reserve_exact(roots.len())
+        .map_err(|_| BaoziError::LimitExceeded {
+            limit: "max_graph_nodes",
+        })?;
+    pending.extend(roots.iter().rev().copied().map(|root| (root, 2usize)));
+
+    while let Some((node_index, depth)) = pending.pop() {
+        node_count = node_count.checked_add(1).ok_or(BaoziError::LimitExceeded {
+            limit: "max_graph_nodes",
+        })?;
+        if node_count > ctx.limits().max_graph_nodes {
+            return Err(BaoziError::LimitExceeded {
+                limit: "max_graph_nodes",
+            });
+        }
+        if depth > ctx.limits().max_graph_depth {
+            return Err(BaoziError::LimitExceeded {
+                limit: "max_graph_depth",
+            });
+        }
+
+        let node_children = children.get(node_index).ok_or_else(|| {
+            gltf_parse_error(
+                ctx,
+                format!("glTF node graph references missing node {node_index}"),
+            )
+        })?;
+        edge_count =
+            edge_count
+                .checked_add(node_children.len())
+                .ok_or(BaoziError::LimitExceeded {
+                    limit: "max_graph_edges",
+                })?;
+        if edge_count > ctx.limits().max_graph_edges {
+            return Err(BaoziError::LimitExceeded {
+                limit: "max_graph_edges",
+            });
+        }
+        validate_canonical_graph_work(ctx, node_count, edge_count)?;
+
+        let child_depth = depth.checked_add(1).ok_or(BaoziError::LimitExceeded {
+            limit: "max_graph_depth",
+        })?;
+        pending
+            .try_reserve(node_children.len())
+            .map_err(|_| BaoziError::LimitExceeded {
+                limit: "max_graph_nodes",
+            })?;
+        pending.extend(
+            node_children
+                .iter()
+                .rev()
+                .copied()
+                .map(|child| (child, child_depth)),
+        );
+    }
+
+    Ok(())
+}
+
+fn validate_canonical_graph_work(
+    ctx: &ImportContext<'_>,
+    node_count: usize,
+    edge_count: usize,
+) -> Result<()> {
+    let work = node_count
+        .checked_add(edge_count)
+        .ok_or(BaoziError::LimitExceeded {
+            limit: "max_graph_work",
+        })?;
+    if work > ctx.limits().max_graph_work {
+        return Err(BaoziError::LimitExceeded {
+            limit: "max_graph_work",
+        });
+    }
+    Ok(())
+}
+
+fn charge_graph_work(ctx: &ImportContext<'_>, graph_work: &mut usize, amount: usize) -> Result<()> {
+    *graph_work = graph_work
+        .checked_add(amount)
+        .ok_or(BaoziError::LimitExceeded {
+            limit: "max_graph_work",
+        })?;
+    if *graph_work > ctx.limits().max_graph_work {
+        return Err(BaoziError::LimitExceeded {
+            limit: "max_graph_work",
+        });
+    }
+    Ok(())
+}
+
+fn validate_graph_depth_and_cycles(
+    ctx: &ImportContext<'_>,
+    children: &[Vec<usize>],
+    parents: &[Option<usize>],
+) -> Result<()> {
+    let mut depths = vec![0usize; parents.len()];
+    let mut queue = Vec::with_capacity(parents.len());
+    for (node_index, parent) in parents.iter().enumerate() {
+        if parent.is_none() {
+            depths[node_index] = 1;
+            queue.push(node_index);
+        }
+    }
+
+    let mut cursor = 0usize;
+    while cursor < queue.len() {
+        let node_index = queue[cursor];
+        cursor += 1;
+        let depth = depths[node_index];
+        if depth > ctx.limits().max_graph_depth {
+            return Err(BaoziError::LimitExceeded {
+                limit: "max_graph_depth",
+            });
+        }
+        for &child_index in &children[node_index] {
+            let child_depth = depth.checked_add(1).ok_or(BaoziError::LimitExceeded {
+                limit: "max_graph_depth",
+            })?;
+            depths[child_index] = child_depth;
+            queue.push(child_index);
+        }
+    }
+
+    if queue.len() != parents.len() {
+        return Err(gltf_parse_error(ctx, "glTF node graph contains a cycle"));
+    }
+    Ok(())
+}
+
+fn select_and_validate_scene_roots(
+    ctx: &ImportContext<'_>,
+    gltf: &gltf::Gltf,
+    parents: &[Option<usize>],
+    graph_work: &mut usize,
+) -> Result<Vec<usize>> {
+    let scene_count = safe_gltf(ctx, "glTF scene count", || gltf.scenes().len())?;
+    charge_graph_work(ctx, graph_work, scene_count)?;
+    let mut scene_roots = Vec::with_capacity(scene_count);
+
+    for scene in gltf.scenes() {
+        let root_count = safe_gltf(ctx, "glTF scene root count", || scene.nodes().len())?;
+        charge_graph_work(ctx, graph_work, root_count)?;
+        let roots = safe_gltf(ctx, "glTF scene roots", || {
+            scene.nodes().map(|node| node.index()).collect::<Vec<_>>()
+        })?;
+        scene_roots.push(roots);
+    }
+
+    let mut seen_in_scene = vec![usize::MAX; parents.len()];
+    for (scene_index, roots) in scene_roots.iter().enumerate() {
+        for &root_index in roots {
+            let Some(parent) = parents.get(root_index) else {
+                return Err(gltf_parse_error(
+                    ctx,
+                    format!("glTF scene {scene_index} references missing root node {root_index}"),
+                ));
+            };
+            if seen_in_scene[root_index] == scene_index {
+                return Err(gltf_parse_error(
+                    ctx,
+                    format!("glTF scene {scene_index} contains duplicate root node {root_index}"),
+                ));
+            }
+            seen_in_scene[root_index] = scene_index;
+            if parent.is_some() {
+                return Err(gltf_parse_error(
+                    ctx,
+                    format!("glTF scene {scene_index} root node {root_index} has a parent"),
+                ));
+            }
+        }
+    }
+
+    let default_scene_index = safe_gltf(ctx, "glTF default scene", || {
+        gltf.default_scene().map(|scene| scene.index())
+    })?;
+    let selected_scene_index = default_scene_index.or((scene_count > 0).then_some(0));
+    match selected_scene_index {
+        Some(scene_index) => scene_roots.get(scene_index).cloned().ok_or_else(|| {
+            gltf_parse_error(
+                ctx,
+                format!("glTF default scene index {scene_index} is out of range"),
+            )
+        }),
+        None => Ok(parents
+            .iter()
+            .enumerate()
+            .filter_map(|(node_index, parent)| parent.is_none().then_some(node_index))
+            .collect()),
+    }
 }
 
 #[derive(Debug, Default)]
@@ -1189,11 +1713,11 @@ struct NodeImportMaps {
     node_skins: Vec<(baozi_core::NodeId, usize)>,
 }
 
-fn add_node_recursive(
+fn add_node(
     ctx: &mut ImportContext<'_>,
     builder: &mut SceneBuilder,
     parent: baozi_core::NodeId,
-    node: gltf::Node<'_>,
+    node: &gltf::Node<'_>,
     mesh_ids_by_gltf_mesh: &[Vec<baozi_core::MeshId>],
     imports: &mut NodeImportMaps,
 ) -> Result<baozi_core::NodeId> {
@@ -1217,17 +1741,19 @@ fn add_node_recursive(
             ..Node::default()
         },
     )?;
-    if let Some(slot) = imports.node_ids.get_mut(node.index()) {
-        *slot = Some(node_id);
+    let node_index = node.index();
+    let slot = imports.node_ids.get_mut(node_index).ok_or_else(|| {
+        gltf_parse_error(ctx, format!("glTF node index {node_index} is out of range"))
+    })?;
+    if slot.is_some() {
+        return Err(gltf_parse_error(
+            ctx,
+            format!("glTF node {node_index} was constructed more than once"),
+        ));
     }
+    *slot = Some(node_id);
     if let Some(skin) = safe_gltf(ctx, "glTF node skin", || node.skin())? {
         imports.node_skins.push((node_id, skin.index()));
-    }
-    let children = safe_gltf(ctx, "glTF node children", || {
-        node.children().collect::<Vec<_>>()
-    })?;
-    for child in children {
-        add_node_recursive(ctx, builder, node_id, child, mesh_ids_by_gltf_mesh, imports)?;
     }
     Ok(node_id)
 }
@@ -1238,9 +1764,37 @@ fn add_skins(
     gltf: &gltf::Gltf,
     buffers: &[Vec<u8>],
     node_ids: &[Option<baozi_core::NodeId>],
-) -> Result<Vec<baozi_core::SkinId>> {
-    let mut skin_ids = Vec::with_capacity(gltf.skins().count());
+    node_skins: &[(baozi_core::NodeId, usize)],
+) -> Result<Vec<Option<baozi_core::SkinId>>> {
+    let skin_count = safe_gltf(ctx, "glTF skin count", || gltf.skins().len())?;
+    let mut referenced_skins = vec![false; skin_count];
+    for (node_id, skin_index) in node_skins {
+        let Some(referenced) = referenced_skins.get_mut(*skin_index) else {
+            return Err(gltf_parse_error(
+                ctx,
+                format!(
+                    "glTF node {} references skin {} out of range",
+                    node_id.as_u32(),
+                    skin_index
+                ),
+            ));
+        };
+        *referenced = true;
+    }
+
+    let mut skin_ids = vec![None; skin_count];
     for skin in gltf.skins() {
+        let skin_index = skin.index();
+        let Some(is_referenced) = referenced_skins.get(skin_index).copied() else {
+            return Err(gltf_parse_error(
+                ctx,
+                format!("glTF skin index {skin_index} is out of range"),
+            ));
+        };
+        if !is_referenced {
+            continue;
+        }
+
         let joints = safe_gltf(ctx, "glTF skin joints", || {
             skin.joints().collect::<Vec<_>>()
         })?;
@@ -1305,7 +1859,13 @@ fn add_skins(
             skeleton_root,
             metadata: MetadataMap::new(),
         });
-        skin_ids.push(skin_id);
+        let Some(slot) = skin_ids.get_mut(skin_index) else {
+            return Err(gltf_parse_error(
+                ctx,
+                format!("glTF skin index {skin_index} is out of range"),
+            ));
+        };
+        *slot = Some(skin_id);
     }
     Ok(skin_ids)
 }
@@ -1355,15 +1915,25 @@ fn attach_node_skins(
     ctx: &ImportContext<'_>,
     builder: &mut SceneBuilder,
     node_skins: &[(baozi_core::NodeId, usize)],
-    skin_ids: &[baozi_core::SkinId],
+    skin_ids: &[Option<baozi_core::SkinId>],
 ) -> Result<()> {
     for (node_id, skin_index) in node_skins {
-        let Some(skin_id) = skin_ids.get(*skin_index).copied() else {
+        let Some(imported_skin_id) = skin_ids.get(*skin_index) else {
             return Err(BaoziError::parse(
                 ctx.source().to_string(),
                 None,
                 format!(
                     "glTF node {} references skin {} out of range",
+                    node_id.as_u32(),
+                    skin_index
+                ),
+            ));
+        };
+        let Some(skin_id) = *imported_skin_id else {
+            return Err(gltf_parse_error(
+                ctx,
+                format!(
+                    "glTF node {} references skin {} that was not imported",
                     node_id.as_u32(),
                     skin_index
                 ),
@@ -1508,18 +2078,42 @@ fn primitive_name(
     let Some(mesh_name) = mesh_name else {
         return Ok(None);
     };
+    let name_len = primitive_name_len(mesh_name, primitive_index)?;
+    if name_len > max_string_bytes {
+        return Err(BaoziError::LimitExceeded {
+            limit: "max_string_bytes",
+        });
+    }
     let name = if primitive_index == 0 {
         mesh_name.to_owned()
     } else {
         format!("{mesh_name}#{primitive_index}")
     };
-    if name.len() > max_string_bytes {
-        Err(BaoziError::LimitExceeded {
+    debug_assert_eq!(name.len(), name_len);
+    Ok(Some(name))
+}
+
+fn primitive_name_len(mesh_name: &str, primitive_index: usize) -> Result<usize> {
+    let suffix_len = if primitive_index == 0 {
+        0
+    } else {
+        1 + decimal_digits(primitive_index)
+    };
+    mesh_name
+        .len()
+        .checked_add(suffix_len)
+        .ok_or(BaoziError::LimitExceeded {
             limit: "max_string_bytes",
         })
-    } else {
-        Ok(Some(name))
+}
+
+fn decimal_digits(mut value: usize) -> usize {
+    let mut digits = 1;
+    while value >= 10 {
+        value /= 10;
+        digits += 1;
     }
+    digits
 }
 
 fn optional_name(value: Option<&str>, max_string_bytes: usize) -> Result<Option<String>> {

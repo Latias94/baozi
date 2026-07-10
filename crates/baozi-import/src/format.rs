@@ -1,6 +1,5 @@
 use crate::context::{ImportContext, ReadHint};
 use baozi_core::{Result, Scene};
-use baozi_io::ReadSeek;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FormatMaturity {
@@ -177,17 +176,76 @@ impl FormatInfo {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ReadConfidence {
-    No,
     Maybe,
     Likely,
     Certain,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DetectionInconclusive {
+    ProbeExhausted,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DetectionFault {
+    message: String,
+}
+
+impl DetectionFault {
+    pub fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DetectionOutcome {
+    Match(ReadConfidence),
+    NoMatch,
+    Inconclusive(DetectionInconclusive),
+    Fault(DetectionFault),
+}
+
+impl DetectionOutcome {
+    pub fn fault(message: impl Into<String>) -> Self {
+        Self::Fault(DetectionFault::new(message))
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct Probe<'a> {
+    bytes: &'a [u8],
+    source_len: u64,
+}
+
+impl<'a> Probe<'a> {
+    pub(crate) const fn new(bytes: &'a [u8], source_len: u64) -> Self {
+        Self { bytes, source_len }
+    }
+
+    pub const fn bytes(&self) -> &'a [u8] {
+        self.bytes
+    }
+
+    pub const fn source_len(&self) -> u64 {
+        self.source_len
+    }
+
+    pub fn is_complete(&self) -> bool {
+        self.bytes.len() as u64 == self.source_len
+    }
+}
+
 pub trait FormatImporter: Send + Sync + 'static {
     fn info(&self) -> FormatInfo;
 
-    fn can_read(&self, _input: &mut dyn ReadSeek, _hint: &ReadHint) -> Result<ReadConfidence> {
-        Ok(ReadConfidence::No)
+    fn can_read(&self, _probe: &Probe<'_>, _hint: &ReadHint) -> DetectionOutcome {
+        DetectionOutcome::NoMatch
     }
 
     fn read(&self, ctx: &mut ImportContext<'_>) -> Result<Scene>;

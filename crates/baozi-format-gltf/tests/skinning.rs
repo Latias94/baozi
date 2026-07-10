@@ -7,6 +7,20 @@ use common::{
     skinned_triangle_without_inverse_bind_matrices_gltf,
 };
 
+fn replace_fixture_fragment(source: String, from: &str, to: &str) -> String {
+    assert!(source.contains(from), "fixture fragment not found: {from}");
+    source.replacen(from, to, 1)
+}
+
+fn skinned_triangle_with_unselected_joint() -> String {
+    replace_fixture_fragment(
+        String::from_utf8(skinned_triangle_gltf()).expect("fixture is valid utf-8"),
+        r#"{ "name": "Joint1" }"#,
+        r#"{ "name": "Joint1" },
+    { "name": "UnselectedJoint" }"#,
+    )
+}
+
 #[test]
 fn imports_skinned_triangle_with_node_level_binding() -> Result<()> {
     let (scene, diagnostics) = import_assets(
@@ -35,6 +49,109 @@ fn imports_skinned_triangle_with_node_level_binding() -> Result<()> {
     assert_eq!(scene.meshes[0].joint_weights.len(), 3);
     assert_eq!(scene.meshes[0].joint_indices[1], [1, 0, 0, 0]);
     assert_eq!(scene.meshes[0].joint_weights[2], [0.5, 0.5, 0.0, 0.0]);
+    Ok(())
+}
+
+#[test]
+fn imports_only_the_selected_scenes_referenced_skin() -> Result<()> {
+    let gltf = replace_fixture_fragment(
+        skinned_triangle_with_unselected_joint(),
+        r#""scene": 0,
+  "scenes": [{ "nodes": [0] }],"#,
+        r#""scene": 1,
+  "scenes": [{ "nodes": [4] }, { "nodes": [0] }],"#,
+    );
+    let gltf = replace_fixture_fragment(
+        gltf,
+        r#"{ "name": "MeshNode", "mesh": 0, "skin": 0 }"#,
+        r#"{ "name": "MeshNode", "mesh": 0, "skin": 1 }"#,
+    );
+    let gltf = replace_fixture_fragment(
+        gltf,
+        r#""skins": [{ "name": "Skin", "joints": [1, 3], "skeleton": 1, "inverseBindMatrices": 4 }]"#,
+        r#""skins": [
+    { "name": "UnusedSkin", "joints": [4], "skeleton": 4 },
+    { "name": "Skin", "joints": [1, 3], "skeleton": 1, "inverseBindMatrices": 4 }
+  ]"#,
+    )
+    .into_bytes();
+    let (scene, diagnostics) = import_assets(
+        "models/skin.gltf",
+        [
+            ("models/skin.gltf", gltf),
+            ("models/skin.bin", skinned_triangle_bin()),
+        ],
+        sidecar_options(),
+    )?;
+
+    assert!(diagnostics.is_empty());
+    assert_eq!(scene.nodes.len(), 5);
+    assert_eq!(scene.skins.len(), 1);
+    assert_eq!(scene.skins[0].name.as_deref(), Some("Skin"));
+    assert_eq!(scene.skins[0].joints, vec![NodeId::new(2), NodeId::new(3)]);
+    assert_eq!(
+        scene.nodes[4].mesh_bindings,
+        vec![MeshBinding::skinned(
+            baozi_core::MeshId::new(0),
+            SkinId::new(0)
+        )]
+    );
+    Ok(())
+}
+
+#[test]
+fn selected_skin_rejects_a_joint_outside_the_imported_scene() -> Result<()> {
+    let gltf = replace_fixture_fragment(
+        skinned_triangle_with_unselected_joint(),
+        r#""joints": [1, 3]"#,
+        r#""joints": [1, 4]"#,
+    )
+    .into_bytes();
+    let (result, diagnostics) = import_assets_result(
+        "models/skin.gltf",
+        [
+            ("models/skin.gltf", gltf),
+            ("models/skin.bin", skinned_triangle_bin()),
+        ],
+        sidecar_options(),
+    )?;
+    let error = expected_error(result)?;
+
+    assert!(diagnostics.is_empty());
+    assert!(matches!(error, BaoziError::Parse { .. }));
+    assert!(
+        error
+            .to_string()
+            .contains("joint node 4 outside the imported scene")
+    );
+    Ok(())
+}
+
+#[test]
+fn selected_skin_rejects_a_skeleton_outside_the_imported_scene() -> Result<()> {
+    let gltf = replace_fixture_fragment(
+        skinned_triangle_with_unselected_joint(),
+        r#""skeleton": 1"#,
+        r#""skeleton": 4"#,
+    )
+    .into_bytes();
+    let (result, diagnostics) = import_assets_result(
+        "models/skin.gltf",
+        [
+            ("models/skin.gltf", gltf),
+            ("models/skin.bin", skinned_triangle_bin()),
+        ],
+        sidecar_options(),
+    )?;
+    let error = expected_error(result)?;
+
+    assert!(diagnostics.is_empty());
+    assert!(matches!(error, BaoziError::Parse { .. }));
+    assert!(
+        error
+            .to_string()
+            .contains("skeleton root node 4 outside the imported scene")
+    );
     Ok(())
 }
 

@@ -3,6 +3,7 @@ type: "Work Registration"
 title: "Baozi canonical architecture fearless refactor"
 description: "Execute the Assimp-informed canonical architecture plan through U1-U9."
 timestamp: 2026-07-10T02:32:41Z
+record_id: "02fc53d0ab5c49c7a561f9fed5b6f669"
 status: "active"
 last_seen: 2026-07-10T02:32:41Z
 registration_id: "baozi-canonical-architecture-refactor-codex-root"

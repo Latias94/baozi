@@ -1,6 +1,6 @@
 mod common;
 
-use baozi_core::{PrimitiveTopology, Result, Vec2, Vec3};
+use baozi_core::{MetadataValue, PrimitiveTopology, Result, Vec2, Vec3};
 use common::import_bytes;
 
 #[test]
@@ -87,6 +87,37 @@ fn partial_uv_and_normal_channels_are_diagnosed_and_omitted() -> Result<()> {
         diagnostics
             .iter()
             .any(|diagnostic| diagnostic.code.0 == "obj.partial_normal_channel")
+    );
+    Ok(())
+}
+
+#[test]
+fn state_changes_split_meshes_and_preserve_material_bindings() -> Result<()> {
+    let bytes = b"o first-object\ng first-group\nusemtl red\ns 1\n\
+        v 0 0 0\nv 1 0 0\nv 0 1 0\nv 2 0 0\nv 3 0 0\nv 2 1 0\n\
+        f 1 2 3\no second-object\ng second-group\nusemtl blue\ns off\nf 4 5 6\n";
+
+    let (scene, diagnostics) = import_bytes("state-switch.obj", bytes)?;
+
+    assert_eq!(scene.meshes.len(), 2);
+    assert_eq!(scene.materials.len(), 2);
+    assert_eq!(diagnostics.len(), 2);
+
+    let first = &scene.meshes[0];
+    let second = &scene.meshes[1];
+    assert_eq!(first.name.as_deref(), Some("first-group"));
+    assert_eq!(second.name.as_deref(), Some("second-group"));
+    assert_eq!(first.material.map(|id| id.index()), Some(0));
+    assert_eq!(second.material.map(|id| id.index()), Some(1));
+    assert_eq!(scene.materials[0].name.as_deref(), Some("red"));
+    assert_eq!(scene.materials[1].name.as_deref(), Some("blue"));
+    assert_eq!(
+        first.metadata.get("obj.object"),
+        Some(&MetadataValue::String("first-object".to_owned()))
+    );
+    assert_eq!(
+        second.metadata.get("obj.smoothing"),
+        Some(&MetadataValue::String("off".to_owned()))
     );
     Ok(())
 }

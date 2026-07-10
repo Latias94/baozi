@@ -2,7 +2,7 @@ mod common;
 
 use baozi_core::{AlphaMode, ColorSpace, MetadataValue, Result, TextureRole, TextureSource, Vec3};
 use baozi_import::{ExternalReferencePolicy, ImportOptions};
-use common::{expected_error, import_assets, import_assets_result};
+use common::import_assets;
 
 fn sidecar_options() -> ImportOptions {
     let mut options = ImportOptions::memory();
@@ -240,13 +240,13 @@ fn missing_mtl_is_warning_not_geometry_failure() -> Result<()> {
 }
 
 #[test]
-fn sidecar_byte_limit_is_fatal() -> Result<()> {
+fn sidecar_byte_limit_warns_and_keeps_geometry() -> Result<()> {
     let obj = b"mtllib material.mtl\nv 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n";
     let mtl = b"newmtl red\nKd 1 0 0\n";
     let mut options = sidecar_options();
     options.limits.max_sidecar_asset_bytes = 4;
 
-    let (result, diagnostics) = import_assets_result(
+    let (scene, diagnostics) = import_assets(
         "model.obj",
         [
             ("model.obj", obj.as_slice()),
@@ -254,26 +254,21 @@ fn sidecar_byte_limit_is_fatal() -> Result<()> {
         ],
         options,
     )?;
-    let error = expected_error(result)?;
-
-    assert!(diagnostics.is_empty());
-    assert!(matches!(
-        error,
-        baozi_core::BaoziError::LimitExceeded {
-            limit: "max_sidecar_asset_bytes"
-        }
-    ));
+    assert_eq!(scene.meshes.len(), 1);
+    assert_eq!(diagnostics.len(), 1);
+    assert_eq!(diagnostics[0].code.0, "obj.mtl_limit_exceeded");
+    assert!(diagnostics[0].message.contains("max_sidecar_asset_bytes"));
     Ok(())
 }
 
 #[test]
-fn sidecar_total_byte_limit_is_fatal() -> Result<()> {
+fn sidecar_total_byte_limit_warns_and_keeps_geometry() -> Result<()> {
     let obj = b"mtllib material.mtl\nv 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n";
     let mtl = b"newmtl red\nKd 1 0 0\n";
     let mut options = sidecar_options();
     options.limits.max_total_asset_bytes = obj.len() as u64 + 4;
 
-    let (result, diagnostics) = import_assets_result(
+    let (scene, diagnostics) = import_assets(
         "model.obj",
         [
             ("model.obj", obj.as_slice()),
@@ -281,26 +276,21 @@ fn sidecar_total_byte_limit_is_fatal() -> Result<()> {
         ],
         options,
     )?;
-    let error = expected_error(result)?;
-
-    assert!(diagnostics.is_empty());
-    assert!(matches!(
-        error,
-        baozi_core::BaoziError::LimitExceeded {
-            limit: "max_total_asset_bytes"
-        }
-    ));
+    assert_eq!(scene.meshes.len(), 1);
+    assert_eq!(diagnostics.len(), 1);
+    assert_eq!(diagnostics[0].code.0, "obj.mtl_limit_exceeded");
+    assert!(diagnostics[0].message.contains("max_total_asset_bytes"));
     Ok(())
 }
 
 #[test]
-fn sidecar_open_asset_limit_is_fatal() -> Result<()> {
+fn sidecar_open_asset_limit_warns_and_keeps_geometry() -> Result<()> {
     let obj = b"mtllib material.mtl\nv 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n";
     let mtl = b"newmtl red\nKd 1 0 0\n";
     let mut options = sidecar_options();
     options.limits.max_open_assets = 1;
 
-    let (result, diagnostics) = import_assets_result(
+    let (scene, diagnostics) = import_assets(
         "model.obj",
         [
             ("model.obj", obj.as_slice()),
@@ -308,14 +298,9 @@ fn sidecar_open_asset_limit_is_fatal() -> Result<()> {
         ],
         options,
     )?;
-    let error = expected_error(result)?;
-
-    assert!(diagnostics.is_empty());
-    assert!(matches!(
-        error,
-        baozi_core::BaoziError::LimitExceeded {
-            limit: "max_open_assets"
-        }
-    ));
+    assert_eq!(scene.meshes.len(), 1);
+    assert_eq!(diagnostics.len(), 1);
+    assert_eq!(diagnostics[0].code.0, "obj.mtl_limit_exceeded");
+    assert!(diagnostics[0].message.contains("max_open_assets"));
     Ok(())
 }

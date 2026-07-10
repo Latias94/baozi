@@ -1,7 +1,9 @@
+#![cfg(feature = "format-obj")]
+
 use baozi::{
     AssetPath, BaoziError, CapabilityStatus, ExternalReferencePolicy, FormatCapability,
-    ImportOptions, ImportStage, Importer, MemoryAssetIo, PostProcessPipeline, PostProcessStep,
-    PrimitiveTopology, Result, TextureSource,
+    ImportFailure, ImportOptions, ImportStage, Importer, MemoryAssetIo, PostProcessPipeline,
+    PostProcessStep, PrimitiveTopology, Result, TextureSource,
 };
 
 fn triangle_obj() -> &'static [u8] {
@@ -105,6 +107,37 @@ f 1 2 3
     Ok(())
 }
 
+#[test]
+fn repeated_oversized_mtl_references_do_not_refund_read_budget() -> Result<()> {
+    let obj_path = AssetPath::new("models/repeated-mtl.obj")?;
+    let mtl_path = AssetPath::new("models/material.mtl")?;
+    let obj = b"mtllib material.mtl\nmtllib material.mtl\nv 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n";
+    let mtl = b"newmtl red\nKd 1 0 0\n";
+    let mut io = MemoryAssetIo::new();
+    io.insert(obj_path.clone(), obj.as_slice());
+    io.insert(mtl_path, mtl.as_slice());
+    let mut options = ImportOptions::memory();
+    options.io.external_references = ExternalReferencePolicy::CustomResolver;
+    options.limits.max_sidecar_asset_bytes = 4;
+    options.limits.max_total_asset_bytes = obj.len() as u64 + 4;
+
+    let report = Importer::new().read_asset_with_options(&io, obj_path, options)?;
+
+    assert_eq!(report.scene().meshes.len(), 1);
+    assert_eq!(report.stats().opened_assets(), 2);
+    assert_eq!(report.stats().sidecar_asset_bytes(), 5);
+    assert_eq!(report.stats().total_asset_bytes(), obj.len() as u64 + 5);
+    assert_eq!(
+        report
+            .diagnostics()
+            .iter()
+            .filter(|diagnostic| diagnostic.code.0 == "obj.mtl_limit_exceeded")
+            .count(),
+        2
+    );
+    Ok(())
+}
+
 #[cfg(feature = "native-fs")]
 #[test]
 fn facade_reads_obj_from_path() -> Result<()> {
@@ -181,6 +214,7 @@ f 1 2 3 4
         report.scene().meshes[0].topology,
         PrimitiveTopology::Polygons
     );
+    let detection_evidence = report.detection_evidence().to_vec();
 
     let pipeline = PostProcessPipeline::new([PostProcessStep::Triangulate]);
     let report = importer.read_bytes_with_postprocess(
@@ -197,6 +231,7 @@ f 1 2 3 4
     );
     assert_eq!(report.scene().meshes[0].indices, vec![0, 1, 2, 0, 2, 3]);
     assert_eq!(report.stats().generated_faces(), 2);
+    assert_eq!(report.detection_evidence(), detection_evidence);
     Ok(())
 }
 
@@ -218,7 +253,10 @@ f 1 2 3 4
 
     assert!(matches!(
         error,
-        BaoziError::LimitExceeded { limit: "max_faces" }
+        ImportFailure::Operation {
+            error: BaoziError::LimitExceeded { limit: "max_faces" },
+            ..
+        }
     ));
     Ok(())
 }

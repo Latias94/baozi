@@ -49,6 +49,19 @@ fn scene_from_parsed(ctx: &ImportContext<'_>, parsed: ParsedStl) -> Result<Scene
             limit: "max_meshes",
         });
     }
+    let topology_cells = parsed.meshes.iter().try_fold(0usize, |total, mesh| {
+        total
+            .checked_add(mesh.positions.len())
+            .ok_or(BaoziError::LimitExceeded {
+                limit: "max_total_topology_cells",
+            })
+    })?;
+    if topology_cells > ctx.limits().max_total_topology_cells {
+        return Err(BaoziError::LimitExceeded {
+            limit: "max_total_topology_cells",
+        });
+    }
+    validate_canonical_string_budget(ctx, &parsed)?;
 
     let mut builder = SceneBuilder::new();
     let material = builder.add_material(Material {
@@ -100,7 +113,46 @@ fn sequential_indices(vertex_count: usize) -> Result<Vec<u32>> {
             limit: "max_vertices",
         });
     }
-    Ok((0..vertex_count as u32).collect())
+    let mut indices = Vec::new();
+    indices
+        .try_reserve_exact(vertex_count)
+        .map_err(|_| BaoziError::LimitExceeded {
+            limit: "max_total_topology_cells",
+        })?;
+    indices.extend(0..vertex_count as u32);
+    Ok(indices)
+}
+
+fn validate_canonical_string_budget(ctx: &ImportContext<'_>, parsed: &ParsedStl) -> Result<()> {
+    let mut bytes = "STL Default Material".len();
+    for mesh in &parsed.meshes {
+        if let Some(name) = &mesh.name {
+            bytes = bytes
+                .checked_add(name.len())
+                .and_then(|total| total.checked_add(name.len()))
+                .ok_or(BaoziError::LimitExceeded {
+                    limit: "max_canonical_string_bytes",
+                })?;
+        }
+        for value in [parsed.storage, ctx.source().as_str()] {
+            bytes = bytes
+                .checked_add(value.len())
+                .ok_or(BaoziError::LimitExceeded {
+                    limit: "max_canonical_string_bytes",
+                })?;
+        }
+        bytes = bytes
+            .checked_add("stl.storage".len() + "stl.source".len())
+            .ok_or(BaoziError::LimitExceeded {
+                limit: "max_canonical_string_bytes",
+            })?;
+        if bytes > ctx.limits().max_canonical_string_bytes {
+            return Err(BaoziError::LimitExceeded {
+                limit: "max_canonical_string_bytes",
+            });
+        }
+    }
+    Ok(())
 }
 
 fn compute_bounds(positions: &[Vec3]) -> Option<Aabb> {

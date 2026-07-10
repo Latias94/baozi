@@ -5,10 +5,10 @@ mod parser;
 
 use baozi_core::{Result, Scene};
 use baozi_import::{
-    CapabilityStatus, FormatCapability, FormatEncoding, FormatImporter, FormatInfo, FormatMaturity,
-    FormatSidecarPolicy, ImportContext, ImporterRegistry, ReadConfidence, ReadHint,
+    CapabilityStatus, DetectionOutcome, FormatCapability, FormatEncoding, FormatImporter,
+    FormatInfo, FormatMaturity, FormatSidecarPolicy, ImportContext, ImporterRegistry, Probe,
+    ReadHint,
 };
-use baozi_io::ReadSeek;
 
 pub struct PlyImporter;
 
@@ -61,8 +61,8 @@ impl FormatImporter for PlyImporter {
         format_info()
     }
 
-    fn can_read(&self, input: &mut dyn ReadSeek, hint: &ReadHint) -> Result<ReadConfidence> {
-        detect::can_read(input, hint)
+    fn can_read(&self, probe: &Probe<'_>, hint: &ReadHint) -> DetectionOutcome {
+        detect::can_read(probe, hint)
     }
 
     fn read(&self, ctx: &mut ImportContext<'_>) -> Result<Scene> {

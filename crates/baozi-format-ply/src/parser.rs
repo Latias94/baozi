@@ -36,6 +36,7 @@ enum Property {
     Scalar {
         name: String,
         ty: ScalarType,
+        custom_attribute: Option<usize>,
     },
     List {
         name: String,
@@ -68,6 +69,7 @@ struct ParsedPly {
     colors: Vec<Color>,
     indices: Vec<u32>,
     face_vertex_counts: Vec<u32>,
+    has_polygon: bool,
     custom_attributes: Vec<VertexAttribute>,
 }
 
@@ -224,6 +226,7 @@ fn parse_header(ctx: &ImportContext<'_>, bytes: &[u8]) -> Result<Header> {
                 element.properties.push(Property::Scalar {
                     name: bounded_string(ctx, name, "property name")?,
                     ty: parse_scalar_type(ctx, ty, line_offset)?,
+                    custom_attribute: None,
                 });
             }
             _ => {
@@ -236,14 +239,169 @@ fn parse_header(ctx: &ImportContext<'_>, bytes: &[u8]) -> Result<Header> {
         }
     }
 
+    bind_custom_attribute_slots(&mut elements)?;
+    validate_face_topology_schemas(ctx, &elements)?;
+
+    let format =
+        format.ok_or_else(|| ply_parse_error(ctx, None, "PLY header has no format line"))?;
+    if format != PlyFormat::Ascii {
+        validate_binary_record_schema(ctx, &elements)?;
+    }
+    validate_record_budget(ctx, &elements)?;
+    if format != PlyFormat::Ascii {
+        validate_binary_minimum_payload(ctx, bytes, offset, &elements)?;
+    }
+
     Ok(Header {
-        format: format
-            .ok_or_else(|| ply_parse_error(ctx, None, "PLY header has no format line"))?,
+        format,
         elements,
         comments,
         obj_infos,
         data_start: offset,
     })
+}
+
+fn bind_custom_attribute_slots(elements: &mut [Element]) -> Result<()> {
+    let Some(vertex) = elements.iter_mut().find(|element| element.name == "vertex") else {
+        return Ok(());
+    };
+
+    let mut next_slot = 0usize;
+    for property in &mut vertex.properties {
+        let Property::Scalar {
+            name,
+            custom_attribute,
+            ..
+        } = property
+        else {
+            continue;
+        };
+        if is_builtin_vertex_property(name) {
+            continue;
+        }
+        *custom_attribute = Some(next_slot);
+        next_slot = next_slot.checked_add(1).ok_or(BaoziError::LimitExceeded {
+            limit: "max_vertex_attribute_streams_per_mesh",
+        })?;
+    }
+    Ok(())
+}
+
+fn validate_face_topology_schemas(ctx: &ImportContext<'_>, elements: &[Element]) -> Result<()> {
+    for element in elements.iter().filter(|element| element.name == "face") {
+        let topology_properties = element
+            .properties
+            .iter()
+            .filter(|property| {
+                matches!(
+                    property,
+                    Property::List { name, .. }
+                        if name == "vertex_indices" || name == "vertex_index"
+                )
+            })
+            .count();
+        if topology_properties != 1 {
+            return Err(ply_parse_error(
+                ctx,
+                None,
+                "PLY face element must declare exactly one topology list property ('vertex_indices' or 'vertex_index')",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_binary_record_schema(ctx: &ImportContext<'_>, elements: &[Element]) -> Result<()> {
+    for element in elements {
+        if element.count != 0 && element.properties.is_empty() {
+            return Err(ply_parse_error(
+                ctx,
+                None,
+                format!(
+                    "PLY binary element '{}' has no properties for {} declared records",
+                    element.name, element.count
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_record_budget(ctx: &ImportContext<'_>, elements: &[Element]) -> Result<()> {
+    let declared_records = elements.iter().try_fold(0usize, |total, element| {
+        total
+            .checked_add(element.count)
+            .ok_or(BaoziError::LimitExceeded {
+                limit: "max_records",
+            })
+    })?;
+    if declared_records > ctx.limits().max_records {
+        return Err(BaoziError::LimitExceeded {
+            limit: "max_records",
+        });
+    }
+    Ok(())
+}
+
+fn validate_binary_minimum_payload(
+    ctx: &ImportContext<'_>,
+    bytes: &[u8],
+    data_start: usize,
+    elements: &[Element],
+) -> Result<()> {
+    let mut minimum_payload_bytes = 0usize;
+
+    for element in elements {
+        let mut minimum_record_bytes = 0usize;
+        for property in &element.properties {
+            let property_bytes = match property {
+                Property::Scalar { ty, .. } => scalar_width(*ty),
+                Property::List { count_ty, .. } => scalar_width(*count_ty),
+            };
+            minimum_record_bytes = minimum_record_bytes.checked_add(property_bytes).ok_or(
+                BaoziError::LimitExceeded {
+                    limit: "max_primary_asset_bytes",
+                },
+            )?;
+        }
+        let element_bytes =
+            minimum_record_bytes
+                .checked_mul(element.count)
+                .ok_or(BaoziError::LimitExceeded {
+                    limit: "max_primary_asset_bytes",
+                })?;
+        minimum_payload_bytes =
+            minimum_payload_bytes
+                .checked_add(element_bytes)
+                .ok_or(BaoziError::LimitExceeded {
+                    limit: "max_primary_asset_bytes",
+                })?;
+    }
+
+    let payload_bytes = bytes.len().checked_sub(data_start).ok_or_else(|| {
+        ply_parse_error(
+            ctx,
+            Some(data_start),
+            "PLY binary payload starts outside the input",
+        )
+    })?;
+    if minimum_payload_bytes > payload_bytes {
+        return Err(ply_parse_error(
+            ctx,
+            Some(data_start),
+            "PLY binary payload is shorter than the declared element records require",
+        ));
+    }
+    Ok(())
+}
+
+fn scalar_width(ty: ScalarType) -> usize {
+    match ty {
+        ScalarType::I8 | ScalarType::U8 => 1,
+        ScalarType::I16 | ScalarType::U16 => 2,
+        ScalarType::I32 | ScalarType::U32 | ScalarType::F32 => 4,
+        ScalarType::F64 => 8,
+    }
 }
 
 fn parse_body(ctx: &mut ImportContext<'_>, bytes: &[u8], header: &Header) -> Result<ParsedPly> {
@@ -265,6 +423,7 @@ fn parse_body(ctx: &mut ImportContext<'_>, bytes: &[u8], header: &Header) -> Res
         colors: Vec::new(),
         indices: Vec::new(),
         face_vertex_counts: Vec::new(),
+        has_polygon: false,
         custom_attributes: custom_accumulators(ctx, vertex_element)?,
     };
 
@@ -285,7 +444,8 @@ fn parse_ascii_body(
 ) -> Result<()> {
     let mut offset = header.data_start;
     for element in &header.elements {
-        for row_index in 0..element.count {
+        warn_for_element_schema(ctx, element);
+        for _ in 0..element.count {
             let line_offset = offset;
             let line = next_line(bytes, &mut offset).ok_or_else(|| {
                 ply_parse_error(
@@ -310,7 +470,7 @@ fn parse_ascii_body(
             })?;
             let tokens = checked_tokens(ctx, text)?;
             let mut cursor = AsciiRow::new(&tokens, line_offset);
-            parse_row(ctx, element, row_index, &mut cursor, parsed)?;
+            parse_row(ctx, element, &mut cursor, parsed)?;
             cursor.finish(ctx, &element.name)?;
         }
     }
@@ -326,8 +486,9 @@ fn parse_binary_body(
 ) -> Result<()> {
     let mut cursor = BinaryCursor::new(bytes, header.data_start, big_endian);
     for element in &header.elements {
-        for row_index in 0..element.count {
-            parse_row(ctx, element, row_index, &mut cursor, parsed)?;
+        warn_for_element_schema(ctx, element);
+        for _ in 0..element.count {
+            parse_row(ctx, element, &mut cursor, parsed)?;
         }
     }
     Ok(())
@@ -336,23 +497,111 @@ fn parse_binary_body(
 fn parse_row(
     ctx: &mut ImportContext<'_>,
     element: &Element,
-    row_index: usize,
     reader: &mut dyn RowReader,
     parsed: &mut ParsedPly,
 ) -> Result<()> {
     if element.name == "vertex" {
-        parse_vertex_row(ctx, element, row_index, reader, parsed)
+        parse_vertex_row(ctx, element, reader, parsed)
     } else if element.name == "face" {
-        parse_face_row(ctx, element, row_index, reader, parsed)
+        parse_face_row(ctx, element, reader, parsed)
     } else {
         skip_unknown_row(ctx, element, reader)
+    }
+}
+
+fn warn_for_element_schema(ctx: &mut ImportContext<'_>, element: &Element) {
+    if element.count == 0 {
+        return;
+    }
+
+    match element.name.as_str() {
+        "vertex" => warn_for_vertex_schema(ctx, element),
+        "face" => warn_for_face_schema(ctx, element),
+        _ => warn(
+            ctx,
+            "ply.element_ignored",
+            format!("PLY element '{}' was ignored", element.name),
+        ),
+    }
+}
+
+fn warn_for_vertex_schema(ctx: &mut ImportContext<'_>, element: &Element) {
+    let mut has_nx = false;
+    let mut has_ny = false;
+    let mut has_nz = false;
+    let mut has_s = false;
+    let mut has_t = false;
+    let mut has_red = false;
+    let mut has_green = false;
+    let mut has_blue = false;
+
+    for property in &element.properties {
+        match property {
+            Property::Scalar { name, .. } => match name.as_str() {
+                "nx" => has_nx = true,
+                "ny" => has_ny = true,
+                "nz" => has_nz = true,
+                "s" | "u" | "texture_u" => has_s = true,
+                "t" | "v" | "texture_v" => has_t = true,
+                "red" | "r" => has_red = true,
+                "green" | "g" => has_green = true,
+                "blue" | "b" => has_blue = true,
+                _ => {}
+            },
+            Property::List { name, .. } => warn(
+                ctx,
+                "ply.vertex_list_property_ignored",
+                format!("PLY vertex list property '{name}' was ignored"),
+            ),
+        }
+    }
+
+    let normal_components = usize::from(has_nx) + usize::from(has_ny) + usize::from(has_nz);
+    if normal_components != 0 && normal_components != 3 {
+        warn(
+            ctx,
+            "ply.partial_normals_ignored",
+            "PLY vertex has partial normal properties; normals were ignored",
+        );
+    }
+    if has_s != has_t {
+        warn(
+            ctx,
+            "ply.partial_texcoords_ignored",
+            "PLY vertex has partial texture coordinate properties; texcoords were ignored",
+        );
+    }
+    let color_components = usize::from(has_red) + usize::from(has_green) + usize::from(has_blue);
+    if color_components != 0 && color_components != 3 {
+        warn(
+            ctx,
+            "ply.partial_colors_ignored",
+            "PLY vertex has partial color properties; colors were ignored",
+        );
+    }
+}
+
+fn warn_for_face_schema(ctx: &mut ImportContext<'_>, element: &Element) {
+    for property in &element.properties {
+        match property {
+            Property::List { name, .. } if name == "vertex_indices" || name == "vertex_index" => {}
+            Property::List { name, .. } => warn(
+                ctx,
+                "ply.face_list_property_ignored",
+                format!("PLY face list property '{name}' was ignored"),
+            ),
+            Property::Scalar { name, .. } => warn(
+                ctx,
+                "ply.face_scalar_property_ignored",
+                format!("PLY face scalar property '{name}' was ignored"),
+            ),
+        }
     }
 }
 
 fn parse_vertex_row(
     ctx: &mut ImportContext<'_>,
     element: &Element,
-    _row_index: usize,
     reader: &mut dyn RowReader,
     parsed: &mut ParsedPly,
 ) -> Result<()> {
@@ -371,7 +620,11 @@ fn parse_vertex_row(
 
     for property in &element.properties {
         match property {
-            Property::Scalar { name, ty } => {
+            Property::Scalar {
+                name,
+                ty,
+                custom_attribute,
+            } => {
                 let value = reader.read_scalar(ctx, *ty)?;
                 match name.as_str() {
                     "x" => x = Some(value.to_f32(ctx, "x")?),
@@ -386,19 +639,21 @@ fn parse_vertex_row(
                     "green" | "g" => green = Some(value.to_color_component(ctx, *ty, name)?),
                     "blue" | "b" => blue = Some(value.to_color_component(ctx, *ty, name)?),
                     "alpha" | "a" => alpha = Some(value.to_color_component(ctx, *ty, name)?),
-                    _ => push_custom_scalar(parsed, name, value)?,
+                    _ => {
+                        let Some(attribute_index) = *custom_attribute else {
+                            return Err(ply_parse_error(
+                                ctx,
+                                None,
+                                format!("PLY custom property '{name}' has no bound attribute slot"),
+                            ));
+                        };
+                        push_custom_scalar(parsed, attribute_index, name, value)?;
+                    }
                 }
             }
             Property::List {
-                name,
-                count_ty,
-                item_ty,
+                count_ty, item_ty, ..
             } => {
-                warn(
-                    ctx,
-                    "ply.vertex_list_property_ignored",
-                    format!("PLY vertex list property '{name}' was ignored"),
-                );
                 skip_list(ctx, reader, *count_ty, *item_ty)?;
             }
         }
@@ -421,20 +676,12 @@ fn parse_vertex_row(
     match (nx, ny, nz) {
         (Some(nx), Some(ny), Some(nz)) => parsed.normals.push(Vec3::new(nx, ny, nz)),
         (None, None, None) => {}
-        _ => warn(
-            ctx,
-            "ply.partial_normals_ignored",
-            "PLY vertex has partial normal properties; normals were ignored",
-        ),
+        _ => {}
     }
     match (s, t) {
         (Some(s), Some(t)) => parsed.texcoords.push(Vec2::new(s, t)),
         (None, None) => {}
-        _ => warn(
-            ctx,
-            "ply.partial_texcoords_ignored",
-            "PLY vertex has partial texture coordinate properties; texcoords were ignored",
-        ),
+        _ => {}
     }
     match (red, green, blue) {
         (Some(red), Some(green), Some(blue)) => {
@@ -443,11 +690,7 @@ fn parse_vertex_row(
                 .push(Color::linear_rgba(red, green, blue, alpha.unwrap_or(1.0)))
         }
         (None, None, None) => {}
-        _ => warn(
-            ctx,
-            "ply.partial_colors_ignored",
-            "PLY vertex has partial color properties; colors were ignored",
-        ),
+        _ => {}
     }
     Ok(())
 }
@@ -455,7 +698,6 @@ fn parse_vertex_row(
 fn parse_face_row(
     ctx: &mut ImportContext<'_>,
     element: &Element,
-    _row_index: usize,
     reader: &mut dyn RowReader,
     parsed: &mut ParsedPly,
 ) -> Result<()> {
@@ -481,30 +723,47 @@ fn parse_face_row(
                         limit: "max_vertices",
                     });
                 }
+                let next_indices =
+                    parsed
+                        .indices
+                        .len()
+                        .checked_add(count)
+                        .ok_or(BaoziError::LimitExceeded {
+                            limit: "max_total_topology_cells",
+                        })?;
+                let next_face_counts = parsed.face_vertex_counts.len().checked_add(1).ok_or(
+                    BaoziError::LimitExceeded {
+                        limit: "max_total_topology_cells",
+                    },
+                )?;
+                let has_polygon = parsed.has_polygon || count != 3;
+                let canonical_cells = if has_polygon {
+                    next_indices
+                        .checked_add(next_face_counts)
+                        .ok_or(BaoziError::LimitExceeded {
+                            limit: "max_total_topology_cells",
+                        })?
+                } else {
+                    next_indices
+                };
+                if canonical_cells > ctx.limits().max_total_topology_cells {
+                    return Err(BaoziError::LimitExceeded {
+                        limit: "max_total_topology_cells",
+                    });
+                }
                 parsed.face_vertex_counts.push(count as u32);
                 for _ in 0..count {
                     let index = reader.read_scalar(ctx, *item_ty)?.to_u32(ctx, name)?;
                     parsed.indices.push(index);
                 }
+                parsed.has_polygon = has_polygon;
             }
             Property::List {
-                name,
-                count_ty,
-                item_ty,
+                count_ty, item_ty, ..
             } => {
-                warn(
-                    ctx,
-                    "ply.face_list_property_ignored",
-                    format!("PLY face list property '{name}' was ignored"),
-                );
                 skip_list(ctx, reader, *count_ty, *item_ty)?;
             }
-            Property::Scalar { name, ty } => {
-                warn(
-                    ctx,
-                    "ply.face_scalar_property_ignored",
-                    format!("PLY face scalar property '{name}' was ignored"),
-                );
+            Property::Scalar { ty, .. } => {
                 let _ = reader.read_scalar(ctx, *ty)?;
             }
         }
@@ -520,15 +779,10 @@ fn parse_face_row(
 }
 
 fn skip_unknown_row(
-    ctx: &mut ImportContext<'_>,
+    ctx: &ImportContext<'_>,
     element: &Element,
     reader: &mut dyn RowReader,
 ) -> Result<()> {
-    warn(
-        ctx,
-        "ply.element_ignored",
-        format!("PLY element '{}' was ignored", element.name),
-    );
     for property in &element.properties {
         match property {
             Property::Scalar { ty, .. } => {
@@ -573,12 +827,24 @@ fn scene_from_parsed(
 
     let topology = if parsed.indices.is_empty() {
         PrimitiveTopology::Points
-    } else if parsed.face_vertex_counts.iter().all(|count| *count == 3) {
+    } else if !parsed.has_polygon {
         parsed.face_vertex_counts.clear();
         PrimitiveTopology::Triangles
     } else {
         PrimitiveTopology::Polygons
     };
+    let topology_cells = parsed
+        .indices
+        .len()
+        .checked_add(parsed.face_vertex_counts.len())
+        .ok_or(BaoziError::LimitExceeded {
+            limit: "max_total_topology_cells",
+        })?;
+    if topology_cells > ctx.limits().max_total_topology_cells {
+        return Err(BaoziError::LimitExceeded {
+            limit: "max_total_topology_cells",
+        });
+    }
     let bounds = compute_bounds(&parsed.positions);
 
     let mut metadata = MetadataMap::new();
@@ -871,22 +1137,37 @@ fn custom_accumulators(
         .properties
         .iter()
         .filter(|property| {
-            let Property::Scalar { name, .. } = property else {
-                return false;
-            };
-            !is_builtin_vertex_property(name)
+            matches!(
+                property,
+                Property::Scalar {
+                    custom_attribute: Some(_),
+                    ..
+                }
+            )
         })
         .count();
     let mut attributes = Vec::new();
     attributes
         .try_reserve_exact(custom_scalar_count)
         .map_err(|_| BaoziError::LimitExceeded {
-            limit: "max_vertex_attribute_cells",
+            limit: "max_vertex_attribute_streams_per_mesh",
         })?;
     for property in &element.properties {
-        let Property::Scalar { name, ty } = property else {
+        let Property::Scalar {
+            name,
+            ty,
+            custom_attribute: Some(attribute_index),
+        } = property
+        else {
             continue;
         };
+        if *attribute_index != attributes.len() {
+            return Err(ply_parse_error(
+                ctx,
+                None,
+                format!("PLY custom property '{name}' has an invalid attribute slot"),
+            ));
+        }
         if is_builtin_vertex_property(name) {
             continue;
         }
@@ -915,39 +1196,73 @@ fn validate_custom_attribute_budget(ctx: &ImportContext<'_>, element: &Element) 
         .properties
         .iter()
         .filter(|property| {
-            let Property::Scalar { name, .. } = property else {
-                return false;
-            };
-            !is_builtin_vertex_property(name)
+            matches!(
+                property,
+                Property::Scalar {
+                    custom_attribute: Some(_),
+                    ..
+                }
+            )
         })
         .count();
-    if custom_scalar_count > ctx.limits().max_vertex_attribute_streams {
+    let has_property = |names: &[&str]| {
+        names.iter().any(|expected| {
+            element.properties.iter().any(
+                |property| matches!(property, Property::Scalar { name, .. } if name == expected),
+            )
+        })
+    };
+    let builtin_streams = 1usize
+        + usize::from(has_property(&["nx"]) && has_property(&["ny"]) && has_property(&["nz"]))
+        + usize::from(
+            has_property(&["s", "u", "texture_u"]) && has_property(&["t", "v", "texture_v"]),
+        )
+        + usize::from(
+            has_property(&["red", "r"])
+                && has_property(&["green", "g"])
+                && has_property(&["blue", "b"]),
+        );
+    let stream_count =
+        builtin_streams
+            .checked_add(custom_scalar_count)
+            .ok_or(BaoziError::LimitExceeded {
+                limit: "max_vertex_attribute_streams_per_mesh",
+            })?;
+    if stream_count > ctx.limits().max_vertex_attribute_streams_per_mesh {
         return Err(BaoziError::LimitExceeded {
-            limit: "max_vertex_attribute_streams",
+            limit: "max_vertex_attribute_streams_per_mesh",
         });
     }
-    let cells =
-        custom_scalar_count
-            .checked_mul(element.count)
-            .ok_or(BaoziError::LimitExceeded {
-                limit: "max_vertex_attribute_cells",
-            })?;
-    if cells > ctx.limits().max_vertex_attribute_cells {
+    if stream_count > ctx.limits().max_total_vertex_attribute_streams {
         return Err(BaoziError::LimitExceeded {
-            limit: "max_vertex_attribute_cells",
+            limit: "max_total_vertex_attribute_streams",
+        });
+    }
+    let cells = stream_count
+        .checked_mul(element.count)
+        .ok_or(BaoziError::LimitExceeded {
+            limit: "max_total_vertex_attribute_cells",
+        })?;
+    if cells > ctx.limits().max_total_vertex_attribute_cells {
+        return Err(BaoziError::LimitExceeded {
+            limit: "max_total_vertex_attribute_cells",
         });
     }
     Ok(())
 }
 
-fn push_custom_scalar(parsed: &mut ParsedPly, name: &str, value: ScalarValue) -> Result<()> {
-    let attr_name = format!("ply:{name}");
-    let Some(attribute) = parsed
-        .custom_attributes
-        .iter_mut()
-        .find(|attribute| attribute.name == attr_name)
-    else {
-        return Ok(());
+fn push_custom_scalar(
+    parsed: &mut ParsedPly,
+    attribute_index: usize,
+    name: &str,
+    value: ScalarValue,
+) -> Result<()> {
+    let Some(attribute) = parsed.custom_attributes.get_mut(attribute_index) else {
+        return Err(BaoziError::parse(
+            "ply",
+            None,
+            format!("PLY custom property '{name}' references a missing attribute slot"),
+        ));
     };
     match (&mut attribute.data, value) {
         (VertexAttributeData::F32(values), ScalarValue::F64(value)) => values.push(value as f32),

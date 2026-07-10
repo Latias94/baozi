@@ -6,9 +6,7 @@ pub type Result<T> = std::result::Result<T, BaoziError>;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BaoziErrorKind {
     Io,
-    UnsupportedFormat,
     DuplicateFormatId,
-    AmbiguousFormat,
     Parse,
     InvalidScene,
     PostProcess,
@@ -21,17 +19,8 @@ pub enum BaoziError {
     #[error("io error while reading {asset}: {message}")]
     Io { asset: String, message: String },
 
-    #[error("unsupported format: {hint}")]
-    UnsupportedFormat { hint: String },
-
     #[error("duplicate format id: {id}")]
     DuplicateFormatId { id: String },
-
-    #[error("ambiguous format for {hint}: {}", candidates.join(", "))]
-    AmbiguousFormat {
-        hint: String,
-        candidates: Vec<String>,
-    },
 
     #[error("parse error in {asset}{location}: {message}")]
     Parse {
@@ -60,9 +49,7 @@ impl BaoziError {
     pub const fn kind(&self) -> BaoziErrorKind {
         match self {
             Self::Io { .. } => BaoziErrorKind::Io,
-            Self::UnsupportedFormat { .. } => BaoziErrorKind::UnsupportedFormat,
             Self::DuplicateFormatId { .. } => BaoziErrorKind::DuplicateFormatId,
-            Self::AmbiguousFormat { .. } => BaoziErrorKind::AmbiguousFormat,
             Self::Parse { .. } => BaoziErrorKind::Parse,
             Self::InvalidScene { .. } => BaoziErrorKind::InvalidScene,
             Self::PostProcess { .. } => BaoziErrorKind::PostProcess,
@@ -78,22 +65,8 @@ impl BaoziError {
         }
     }
 
-    pub fn unsupported_format(hint: impl Into<String>) -> Self {
-        Self::UnsupportedFormat { hint: hint.into() }
-    }
-
     pub fn duplicate_format_id(id: impl Into<String>) -> Self {
         Self::DuplicateFormatId { id: id.into() }
-    }
-
-    pub fn ambiguous_format(
-        hint: impl Into<String>,
-        candidates: impl IntoIterator<Item = impl Into<String>>,
-    ) -> Self {
-        Self::AmbiguousFormat {
-            hint: hint.into(),
-            candidates: candidates.into_iter().map(Into::into).collect(),
-        }
     }
 
     pub fn parse(
@@ -118,16 +91,8 @@ mod tests {
         let cases = [
             (BaoziError::io("asset", "denied"), BaoziErrorKind::Io),
             (
-                BaoziError::unsupported_format("foo"),
-                BaoziErrorKind::UnsupportedFormat,
-            ),
-            (
                 BaoziError::duplicate_format_id("obj"),
                 BaoziErrorKind::DuplicateFormatId,
-            ),
-            (
-                BaoziError::ambiguous_format("mesh", ["a", "b"]),
-                BaoziErrorKind::AmbiguousFormat,
             ),
             (
                 BaoziError::parse("mesh", None, "bad"),
