@@ -1,5 +1,5 @@
 ---
-title: Baozi Architecture V2 Fearless Refactor - Plan
+title: Baozi Canonical Architecture Fearless Refactor - Plan
 type: refactor
 date: 2026-07-10
 deepened: 2026-07-10
@@ -9,7 +9,7 @@ product_contract_source: ce-plan-bootstrap
 execution: code
 ---
 
-# Baozi Architecture V2 Fearless Refactor - Plan
+# Baozi Canonical Architecture Fearless Refactor - Plan
 
 ## Goal Capsule
 
@@ -28,7 +28,7 @@ execution: code
 ### Summary
 
 This plan hardens the current four-format importer, replaces the public Scene and import lifecycle contracts, migrates every built-in producer and consumer, and turns architecture claims into machine-enforced tests, fuzzing, CI, and release evidence.
-It deliberately prioritizes bounded failure and canonical source semantics over compatibility with the current 0.1.0 API.
+It deliberately deletes the current prototype API and makes the replacement Baozi's first canonical public contract, with no compatibility layer or version-suffixed duplicate model.
 
 ### Problem Frame
 
@@ -56,7 +56,7 @@ Assimp demonstrates the maintenance cost of those constraints; Baozi should borr
 - R7. Resource accounting must distinguish monotonic attempted/consumed work, releasable live reservations, and committed output; it must bound snapshot, decoded, canonical, scratch, peak-live, graph, attribute, animation, metadata, and diagnostic bytes/cells before material allocations or loops.
 - R8. Serializable import options, typed per-format options, conformance/recovery/loss profiles, and runtime-only cancellation/progress/tracing controls must have separate ownership and precedence.
 
-**Canonical Scene IR v2**
+**Canonical Scene IR**
 
 - R9. A logical Mesh must own one or more primitives; topology, indices, material binding, face/corner data, and primitive bounds must not be conflated with logical mesh identity.
 - R10. Attributes must declare semantic, storage format, normalization, and domain (`Vertex`, `Corner`, `Face`, or `Instance`) with deterministic cardinality validation and remapping.
@@ -67,7 +67,7 @@ Assimp demonstrates the maintenance cost of those constraints; Baozi should borr
 
 **Format and postprocess behavior**
 
-- R15. STL, OBJ/MTL, PLY, and glTF must migrate to IR v2 without silently dropping known source semantics, required extensions, corner/smoothing data, typed scalar ranges, multiple primitives, variable influences, or resource failures.
+- R15. STL, OBJ/MTL, PLY, and glTF must migrate to the canonical IR without silently dropping known source semantics, required extensions, corner/smoothing data, typed scalar ranges, multiple primitives, variable influences, or resource failures.
 - R16. Postprocess requests must compile into a typed plan with parameters, dependencies, conflicts, loss policy, cancellation and budget checks before consuming a Scene.
 - R17. Every successful postprocess run must return structured diagnostics, per-step statistics, losses, remaps, and a final validated output; geometry changes must invalidate or recompute affected derived data.
 - R18. Triangulation must handle supported concave simple polygons robustly, preserve winding and domain data, and reject unsupported self-intersecting or materially non-planar polygons instead of emitting plausible but wrong geometry.
@@ -142,7 +142,7 @@ Assimp demonstrates the maintenance cost of those constraints; Baozi should borr
 
 ### Assumptions
 
-- A1. No downstream stable consumer requires source compatibility with the current 0.1.0 API; release notes and migration documentation are sufficient.
+- A1. Baozi has not shipped a stable consumer contract. Delete the prototype API, tests, and documentation in the same cutover; do not add compatibility shims, migration APIs, `V2` suffixes, or a v1-to-v2 guide. The replacement is canonical v1 behavior.
 - A2. `default-formats` remains a curated maturity set, while `all-formats` literally includes every first-party format regardless of maturity.
 - A3. A primary asset may be buffered into one bounded immutable snapshot because every current importer already reads the primary asset fully; a future true-streaming API is a separate contract.
 - A4. Optional resources may be skipped only when the format contract classifies them optional and the resulting loss is diagnosed; strict fail-on-loss can promote that diagnostic.
@@ -178,7 +178,7 @@ flowchart TB
   Execute -->|failure or cancel| ProcessFailure
 ```
 
-#### Scene IR v2 relationships
+#### Canonical Scene IR relationships
 
 ```mermaid
 flowchart TB
@@ -219,7 +219,7 @@ flowchart TB
 flowchart TB
   U1[U1 Safety and correctness hotfixes] --> U2[U2 ADR and contract authority]
   U2 --> U3[U3 Import session and resource governance]
-  U3 --> U4[U4 Scene IR v2 atomic cutover]
+  U3 --> U4[U4 canonical Scene IR atomic cutover]
   U4 --> U5[U5 STL OBJ PLY semantic migration]
   U4 --> U6[U6 glTF semantic migration]
   U5 --> U7[U7 Typed loss-aware postprocess]
@@ -287,7 +287,7 @@ flowchart TB
 - **Test scenarios:** Probe limits at zero, one below, exact, and above budget; large valid STL/PLY/glTF with OBJ registered; every registration-order permutation with greedy, faulting, and valid detectors; out-of-range probe reads; PLY nonzero count with zero properties and huge count; glTF self-cycle, mutual cycle, many roots sharing a subtree, layered diamond, wide fan-out, duplicate root, and exact/excess node/edge/depth/work budgets; trusted importer invalid Scene or unwindable panic; sidecar Deny before IO; optional MTL missing/denied/over-budget; required glTF buffer control case; `Default` and `empty` registry behavior.
 - **Verification:** Focused import, facade, OBJ, PLY, and glTF tests pass; new corpus cases terminate within the configured test timeout; the full workspace remains green.
 
-### U2. Establish ADR Authority and Architecture V2 Contracts
+### U2. Establish ADR Authority and Canonical Architecture Contracts
 
 - **Goal:** Make the decisions governing the breaking implementation unambiguous before new public types land.
 - **Requirements:** R8-R21.
@@ -311,21 +311,21 @@ flowchart TB
 - **Test scenarios:** Typed option envelope round-trip/default/precedence plus unknown, disabled, duplicate, version-mismatched, and wrong-format rejection before IO while FormatImporter stays object-safe; primary open once with a mutable backend and no snapshot duplication; repeated normalized dependency identity reuses the first snapshot/failure even when the backend later changes; shared probe cursor isolation; open/detection failures finalize once; forced format success and contradiction; optional and required dependency classification; repeated oversized/truncated/erroring optional sidecars consume aggregate IO/work even when skipped; Deny before backend IO; scoped/custom resolver handles and identities; path NUL/control/absolute/drive/UNC/ADS/length, Win32/NT device namespaces and reserved basename aliases, plus authorize/open symlink, junction, and reparse replacement; attempted/live/committed accounting and peak-live phase release; checked count-times-element-size allocation; conservative opaque-backend allowance and separate RSS failure; overlong/control-character/path-bearing diagnostics; failure retains bounded diagnostics/stats/stage/detection evidence; cancel before and during parsing; monotonic progress; callback panic containment policy; external code cannot construct a validated stage; every existing fuzz target compiles against the new session/options API.
 - **Verification:** Import/IO/facade contract tests pass, all format crates compile against the new session, and production parser code has no direct policy-bypassing IO access.
 
-### U4. Cut Over the Entire Workspace to Scene IR V2
+### U4. Cut Over the Entire Workspace to the Canonical Scene IR
 
 - **Goal:** Atomically replace the old geometry, material/texture, skin/morph/animation, identity, validation, and derived-data model and restore a green workspace before semantic format work continues.
 - **Requirements:** R9-R14, R19, R21, AE7-AE10, AE12, AE17.
 - **Dependencies:** U3.
 - **Files:** `crates/baozi-core/src/scene.rs`, `crates/baozi-core/src/material.rs`, `crates/baozi-core/src/validation.rs`, `crates/baozi-core/src/lib.rs`, new focused core modules under `crates/baozi-core/src/`, `crates/baozi-core/tests/scene_validation.rs`, new tests under `crates/baozi-core/tests/`, `crates/baozi-test-support/src/snapshot.rs`, `crates/baozi-import/src/`, `crates/baozi-postprocess/src/`, `crates/baozi-format-stl/src/`, `crates/baozi-format-obj/src/`, `crates/baozi-format-ply/src/`, `crates/baozi-format-gltf/src/`, `crates/baozi/src/`, affected `fuzz/fuzz_targets/`.
 - **Approach:** Use SceneBuilder as the only pre-validation construction API and ValidatedScene as the invariant-bearing result; model logical Mesh and MeshPrimitive under the ownership/cardinality table above; provide one domain-aware attribute representation with zero-copy typed public views; preserve variable influences, explicit skin spaces, sparse/dense morphs and default/instance weights, `f64` animation curves, separate Image/Texture/Sampler, complete SceneSpace, bounded metadata/provenance, and scene-local IDs; implement SceneEdit transactions that consume proof and return new proof, remaps, and invalidation; make ValidationReport iterative O(nodes + edges) under cell/byte budgets. Mechanically migrate every consumer and delete the old fields, direct structural mutation, and validators rather than keeping dual storage.
-- **Execution note:** This is the only intentionally broad schema cutover, but execute it through internal green milestones: private v2 core/validator; snapshot/import/postprocess consumers; one end-to-end OBJ corner/smoothing tracer and one glTF multi-primitive/skin/morph tracer through the facade; remaining format/facade mechanical consumers; then public switch and legacy deletion. Migration scaffolding may exist only inside U4 and the U4 exit gate must prove it is gone; U5/U6 retain the remaining semantic breadth.
+- **Execution note:** This is the only intentionally broad schema cutover, but execute it through internal green milestones: private replacement core/validator; snapshot/import/postprocess consumers; one end-to-end OBJ corner/smoothing tracer and one glTF multi-primitive/skin/morph tracer through the facade; remaining format/facade mechanical consumers; then expose the replacement as canonical v1 and delete every legacy type and temporary adapter. Migration scaffolding may exist only inside U4 and the U4 exit gate must prove it is gone; U5/U6 retain the remaining semantic breadth.
 - **Patterns to follow:** Owned vectors, typed IDs, deterministic BTreeMap ordering, boundary validation, and existing snapshot normalization; split large modules by domain without creating a generic framework crate.
 - **Test scenarios:** Multi-primitive logical mesh; OBJ Corner and glTF multi-primitive/morph/skin fixtures at the core boundary and through the facade; mixed topology/material; valid and invalid domain cardinality; one/two/three component UV storage; over-four influences and invalid offsets/joints/weights; skin matrix-space invariants; sparse/dense morph and defaults; Image/Texture/Sampler sharing; all SceneSpace conventions; long `f64` times, node TRS/morph targets, interpolation/extrapolation; provenance aliases and lineage; multiple ValidationIssues in stable order; deep, wide, shared-subtree, and diamond graphs with deterministic linear work counts; large aggregate attribute/influence/morph/animation cell budgets; public API compile-fail coverage for proof forgery/direct structural mutation and a common-workflow facade test that never handles proof or ledger internals; edit remaps and derived-data invalidation; all affected fuzz targets compile after the public cutover.
 - **Verification:** Core and snapshot tests pass, all workspace crates compile, legacy symbol/API searches are empty, old fixed-four/single-primitive/conflated-texture and direct-mutation paths are absent, validation/remap scale counters stay within their declared envelope, and the full workspace test suite is green at the unit boundary.
 
 ### U5. Migrate STL, OBJ, and PLY Source Semantics
 
-- **Goal:** Use IR v2 to preserve the simple formats' real source semantics and eliminate parser-local lossy workarounds.
+- **Goal:** Use the canonical IR to preserve the simple formats' real source semantics and eliminate parser-local lossy workarounds.
 - **Requirements:** R2, R7, R8, R10, R15, R20, AE2, AE5, AE8.
 - **Dependencies:** U4.
 - **Files:** `crates/baozi-format-stl/src/`, `crates/baozi-format-stl/tests/`, `crates/baozi-format-obj/src/`, `crates/baozi-format-obj/tests/`, `crates/baozi-format-ply/src/`, `crates/baozi-format-ply/tests/`, `crates/baozi/tests/stl_facade.rs`, `crates/baozi/tests/obj_facade.rs`, `crates/baozi/tests/ply_facade.rs`, `fuzz/fuzz_targets/stl_import.rs`, `fuzz/fuzz_targets/obj_import.rs`, `fuzz/fuzz_targets/ply_import.rs`, their corpora, `docs/formats/stl.md`, `docs/formats/obj.md`, `docs/formats/ply.md`.
@@ -365,7 +365,7 @@ flowchart TB
 - **Requirements:** R2, R4, R7, R9-R21, AE1-AE12, AE15-AE17.
 - **Dependencies:** U1-U7.
 - **Files:** `crates/baozi-test-support/src/snapshot.rs`, `crates/baozi-test-support/tests/`, format and facade tests under `crates/*/tests/`, checked-in goldens under format test directories, `fuzz/Cargo.toml`, `fuzz/fuzz_targets/`, `fuzz/corpus/`, `docs/security/parser-threat-model.md`, `docs/testing/snapshot-and-fixture-policy.md`, `docs/contributing/fuzzing.md`.
-- **Approach:** Version snapshot schema v2; traverse canonical values once into a versioned/domain-separated digest sink and bounded preview sink without materializing full normalized text; use checked-in raw and processed goldens; consolidate U5/U6 source expectations into a Baozi-owned normalized differential harness and explicit tolerated-difference records so importer-generated snapshots are not their own only oracle; keep optional Assimp comparison non-authoritative and run it only as an opt-in external subprocess over explicitly trusted fixtures with no network, minimal read-only input scope, bounded output/time/memory, and validation of untrusted results; never link it in-process or feed it fuzz/arbitrary user corpora; migrate substring/count assertions; add shared facade contract harnesses; fuzz registry detection, import session/sidecars, Scene validation, and generic postprocess; make successful fuzz outputs validate; add small-budget and injected IO failure modes; document corpus provenance and crash-to-regression policy.
+- **Approach:** Replace the prototype snapshot format in place with canonical snapshot schema v1; traverse canonical values once into a versioned/domain-separated digest sink and bounded preview sink without materializing full normalized text; use checked-in raw and processed goldens; consolidate U5/U6 source expectations into a Baozi-owned normalized differential harness and explicit tolerated-difference records so importer-generated snapshots are not their own only oracle; keep optional Assimp comparison non-authoritative and run it only as an opt-in external subprocess over explicitly trusted fixtures with no network, minimal read-only input scope, bounded output/time/memory, and validation of untrusted results; never link it in-process or feed it fuzz/arbitrary user corpora; delete old substring/count assertions instead of supporting both schemas; add shared facade contract harnesses; fuzz registry detection, import session/sidecars, Scene validation, and generic postprocess; make successful fuzz outputs validate; add small-budget and injected IO failure modes; document corpus provenance and crash-to-regression policy.
 - **Execution note:** Each behavior-bearing field must gain validator, snapshot, direct test, and parser-reachable fuzz evidence in the same unit that exposes it; U8 closes systemic gaps rather than postponing all tests.
 - **Patterns to follow:** Existing deterministic snapshot ordering and float normalization; existing per-format fuzz target layout; Linux sanitizer as execution authority.
 - **Test scenarios:** Mutation beyond preview changes digest; million-scale indices/attributes keep snapshot text and auxiliary memory bounded; digest schema/domain separation has known vectors; transform, metadata value, material property, embedded image, inverse bind matrices, influences, morph and animation values are visible; golden equality across platforms; detection fuzz does not poison candidates; repeated sidecar and PLY/glTF admission/graph corpora; arbitrary invalid Scene terminates under bounds; postprocess success validates; duplicate/minimized corpus handling.
@@ -376,11 +376,11 @@ flowchart TB
 - **Goal:** Turn the completed architecture into CI and release gates that cannot be bypassed by editing one feature, maturity value, or document row.
 - **Requirements:** R19-R21, AE13-AE14, AE17.
 - **Dependencies:** U8.
-- **Files:** `Cargo.toml`, `Cargo.lock`, `crates/baozi/Cargo.toml`, all publishable crate manifests, `crates/baozi-xtask/`, `.github/workflows/ci.yml`, `.github/workflows/fuzz.yml`, `deny.toml`, `fuzz/Cargo.toml`, `fuzz/Cargo.lock`, `docs/formats/evidence.toml`, `docs/formats/support-matrix.md`, `docs/contributing/ci.md`, `docs/contributing/release-policy.md`, `docs/migration/architecture-v2.md`, `README.md`, `docs/roadmap.md`, `CHANGELOG.md`.
-- **Approach:** Make all-formats complete and default-formats curated; run default, per-feature, all-formats, and all-features tests; add bounded cargo-hack powerset coverage; define target tiers and run Linux/MSRV/stable, Windows, macOS, WASM, and WASI jobs; audit root and fuzz workspaces; make PLY/glTF publishable or remove them from release surface, with this plan choosing publishable topological packaging; extend the U2 xtask with feature/format registry, maturity evidence, support matrix, corpus manifest, and isolated packaged-consumer checks; require independent conformance/differential evidence and tolerated-difference records for maturity promotion; verify the packaged common-workflow consumer from AE17; publish a v1-to-v2 migration guide and release notes; add API baseline/semver gates at the first publish boundary; remove empty or misleading features and stale docs.
+- **Files:** `Cargo.toml`, `Cargo.lock`, `crates/baozi/Cargo.toml`, all publishable crate manifests, `crates/baozi-xtask/`, `.github/workflows/ci.yml`, `.github/workflows/fuzz.yml`, `deny.toml`, `fuzz/Cargo.toml`, `fuzz/Cargo.lock`, `docs/formats/evidence.toml`, `docs/formats/support-matrix.md`, `docs/contributing/ci.md`, `docs/contributing/release-policy.md`, `docs/architecture/public-api.md`, `README.md`, `docs/roadmap.md`, `CHANGELOG.md`.
+- **Approach:** Make all-formats complete and default-formats curated; run default, per-feature, all-formats, and all-features tests; add bounded cargo-hack powerset coverage; define target tiers and run Linux/MSRV/stable, Windows, macOS, WASM, and WASI jobs; audit root and fuzz workspaces; make PLY/glTF publishable or remove them from release surface, with this plan choosing publishable topological packaging; extend the U2 xtask with feature/format registry, maturity evidence, support matrix, corpus manifest, and isolated packaged-consumer checks; require independent conformance/differential evidence and tolerated-difference records for maturity promotion; verify the packaged common-workflow consumer from AE17; document only the canonical v1 public workflow and record the pre-release reset in the changelog; add API baseline/semver gates at the first publish boundary; remove empty or misleading features, migration language, and stale docs.
 - **Execution note:** Treat CI configuration as behavior. Prove negative cases locally in xtask tests before relying on workflow YAML.
 - **Patterns to follow:** Existing pinned workflow tool versions, actionlint validation, feature-specific WASM checks, and conservative support matrix; keep long sanitizer/powerset campaigns scheduled while PR gates retain representative smoke coverage.
-- **Test scenarios:** all-formats equals every first-party format feature; each public feature executes tests; no-default and single-feature builds; critical powersets; supported target compilation and golden consistency; both deny checks; unpacked `.crate` consumer builds in dependency order and exercises AE17; migration-guide snippets compile against packaged artifacts; missing maturity or independent-oracle evidence fails; ADR status/link drift and future-ADR promotion without tracer evidence fail; unpublished dependency in facade fails; corpus without provenance fails.
+- **Test scenarios:** all-formats equals every first-party format feature; each public feature executes tests; no-default and single-feature builds; critical powersets; supported target compilation and golden consistency; both deny checks; unpacked `.crate` consumer builds in dependency order and exercises AE17; canonical public-API snippets compile against packaged artifacts; missing maturity or independent-oracle evidence fails; ADR status/link drift and future-ADR promotion without tracer evidence fail; unpublished dependency in facade fails; corpus without provenance fails; no public symbol or document contains a `V2` compatibility model.
 - **Verification:** The full Verification Contract passes locally where platform-appropriate, workflow lint passes, package simulation succeeds, and CI definitions contain every declared target and evidence gate.
 
 ---
@@ -419,9 +419,9 @@ flowchart TB
 - The parser threat model distinguishes hostile data from trusted in-process extension code, filesystem authorization is bound to the opened object on supported native tiers, and attempted work cannot be refunded through optional-resource failures.
 - Stable input, backend decode, normalized models, canonical output, transactional replacements, and snapshot generation obey checked allocation and peak-live budgets; graph/remap/digest scale gates prove their declared linear work bounds.
 - STL, OBJ/MTL, PLY, and glTF pass parser-local, facade/session, golden, malformed, limit, and fuzz gates on their declared support tiers.
-- ADR 0006 is the public compatibility authority, ADR 0024 is superseded, the new v2 ADRs are indexed and internally consistent, and transient verification status lives outside durable decisions.
+- ADR 0006 is the public compatibility authority, ADR 0024 is superseded, the new canonical-architecture ADRs are indexed and internally consistent, and transient verification status lives outside durable decisions.
 - Default, per-format, all-formats, all-features, MSRV, supported native targets, WASM/WASI, root/fuzz dependency audits, sanitizer smoke, maturity evidence, and isolated package-consumer gates pass.
-- README, roadmap, architecture-v2 migration guide, format pages, security/threat model, testing/fuzzing, CI, release policy, and changelog describe the implemented behavior without stale parser-shell or milestone claims.
+- README, roadmap, canonical public-API guide, format pages, security/threat model, testing/fuzzing, CI, release policy, and changelog describe the implemented behavior without versioned compatibility language, stale parser-shell, or milestone claims.
 - A final full code review has no unresolved P0/P1 findings, and accepted lower-severity residuals are recorded explicitly rather than hidden.
 
 ---

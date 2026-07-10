@@ -1,13 +1,13 @@
 ---
 type: "Verification Evidence"
-title: "Baozi architecture v2 plan review passed"
+title: "Baozi canonical architecture plan review passed"
 description: "Two ce-doc-review headless rounds resolved all actionable plan findings before implementation."
 timestamp: 2026-07-10T02:32:59Z
-tags: ["baozi", "architecture-v2", "ce-plan", "doc-review"]
+tags: ["baozi", "canonical-architecture", "ce-plan", "doc-review"]
 status: "passed"
 source_session: "019f4919-ef38-7b32-a0b7-476f42d35dd1"
-related_plan: "docs/plans/2026-07-10-001-refactor-baozi-architecture-v2-plan.md"
-git_branch: "refactor/baozi-architecture-v2"
+related_plan: "docs/plans/2026-07-10-001-refactor-baozi-canonical-architecture-plan.md"
+git_branch: "refactor/baozi-canonical-architecture"
 verified_by: "ce-doc-review headless rounds 1 and 2 plus plan contract checks"
 ---
 
@@ -21,7 +21,7 @@ verified_by: "ce-doc-review headless rounds 1 and 2 plus plan contract checks"
 
 # Result
 
-Passed. No unresolved P0/P1 plan finding remains. The plan is ready for ce-work on `refactor/baozi-architecture-v2`.
+Passed. No unresolved P0/P1 plan finding remains. The plan is ready for ce-work on `refactor/baozi-canonical-architecture`.
 
 # Evidence
 
@@ -35,5 +35,5 @@ Create the feature branch, commit the plan and memory artifacts, then begin U1 w
 
 # Citations
 
-- [Architecture v2 implementation plan](../../../plans/2026-07-10-001-refactor-baozi-architecture-v2-plan.md)
-- [Planning and deepening findings](../subagents/2026-07-10T012721Z-baozi-architecture-v2-planning-and-deepening-findings.md)
+- [Canonical architecture implementation plan](../../../plans/2026-07-10-001-refactor-baozi-canonical-architecture-plan.md)
+- [Planning and deepening findings](../subagents/2026-07-10T012721Z-baozi-canonical-architecture-planning-and-deepening-findings.md)
