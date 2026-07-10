@@ -5,6 +5,9 @@
 This file is a derived view of immutable shards. It is refreshed only during integration.
 
 ## 2026-07-10
+* **Work Registration**: [Baozi canonical architecture fearless refactor](registry/2026-07/2026-07-10T124450Z-baozi-canonical-architecture-refactor-codex-root-dc0e27ca15a34c1eac4e5e546a51b106.md) - Execute the Assimp-informed canonical architecture plan through U1-U9.
+* **Verification Evidence**: [Canonical architecture U2 verification](verification/2026-07/2026-07-10T124045Z-canonical-architecture-u2-verification-6b124e2bbe514eb8a66867bb87e3b00a.md) - ADR governance, workspace, feature, documentation, fuzz-check, and independent review gates passed for U2.
+* **Work Progress**: [Canonical architecture U2 authority contracts complete](progress/2026-07/2026-07-10T124041Z-canonical-architecture-u2-authority-contracts-complete-2cc663e9dac544c4ac0100eacdea427a.md) - U2 canonical authority, ADR governance, Scene IR contracts, and glTF quarantine are complete and review-clean.
 * **Legacy Rollup Snapshot**: [Legacy rollup log.md before derived adoption](legacy/2026-07/2026-07-10T062216Z-legacy-rollup-log-md-before-derived-adoption-2fda6e0f2dac4ecd8f15b87c33c1914f.md) - Preserved log.md before derived rollup adoption.
 * **Legacy Rollup Snapshot**: [Legacy rollup current-state.md before derived adoption](legacy/2026-07/2026-07-10T062216Z-legacy-rollup-current-state-md-before-derived-adoption-26c5a9b42b93439c9f919e76bf906321.md) - Preserved current-state.md before derived rollup adoption.
 * **Work Registration**: [Baozi canonical architecture fearless refactor](registry/2026-07/2026-07-10T061956Z-baozi-canonical-architecture-refactor-codex-root-cb5ab5b4c71649508725e5facbec0282.md) - Execute the Assimp-informed canonical architecture plan through U1-U9.

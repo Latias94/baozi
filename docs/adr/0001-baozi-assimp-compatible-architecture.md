@@ -1,416 +1,289 @@
 ---
-status: proposed
+status: accepted
 date: 2026-07-08
+updated: 2026-07-10
 authors:
   - Codex
 decision_type: architecture
+related:
+  - docs/adr/0002-runtime-concurrency-observability.md
+  - docs/adr/0003-core-scene-ir-and-material-model.md
+  - docs/adr/0004-parser-backend-and-format-coverage-policy.md
+  - docs/adr/0005-testing-fuzzing-and-differential-oracle-strategy.md
+  - docs/adr/0006-public-api-versioning-and-crate-stability-policy.md
+  - docs/adr/0007-workspace-crate-graph-feature-flags-msrv-and-ci-gates.md
+  - docs/adr/0010-asset-io-virtual-filesystem-uri-archive-and-path-security.md
+  - docs/adr/0013-post-process-pipeline-semantics-presets-and-mutation-model.md
+  - docs/adr/0014-parser-security-unsafe-ffi-and-panic-boundary-policy.md
+  - docs/adr/0022-per-import-resource-ledger-and-budget-accounting.md
+  - docs/adr/0033-operation-control-and-observability.md
+evidence:
+  - docs/plans/2026-07-10-001-refactor-baozi-canonical-architecture-plan.md
+  - crates/baozi/src/lib.rs
+  - crates/baozi-core/src/lib.rs
+  - crates/baozi-import/src/lib.rs
 ---
 
-# ADR 0001: Assimp-Compatible Architecture for Baozi
+# ADR 0001: Rust-Owned Canonical Import Architecture
+
+## Status and Scope
+
+This accepted decision defines Baozi's top-level architecture and ownership boundaries. It does not
+claim implementation completion. Current progress, verification results, and known gaps live in the
+canonical refactor plan and engineering evidence records linked below.
+
+Assimp is a mature comparative input for behavior, format breadth, failure cases, and test design.
+It is not Baozi's architecture source, public compatibility target, or implementation dependency.
+Baozi owns its contracts and arrives at its Rust implementation independently.
 
 ## Context
 
-Baozi aims to become a Rust library for loading many 3D model formats with an Assimp-like capability surface.
-The repository is currently an empty Rust crate, while `repo-ref/assimp` provides a mature C++ reference implementation.
+A multi-format 3D importer needs more than a collection of parsers. Formats share concerns that
+must have one owner: source identity, dependency access, resource accounting, diagnostics, scene
+invariants, postprocess loss, public outcomes, and evidence of format maturity. If each parser owns
+those concerns, behavior diverges and hostile inputs find bypasses. If a third-party parser or
+Assimp model leaks outward, replacing that backend becomes a public breaking change.
 
-Assimp's strength is not only the number of parsers. Its durable architecture is:
-
-- A shared scene graph and asset model rooted at `aiScene`.
-- A format importer registry with per-format capability metadata.
-- An IO abstraction for paths, memory buffers, archives, and external assets.
-- A typed-ish property/configuration channel used by importers and post-processing.
-- A post-processing pipeline that normalizes, validates, and optimizes imported scenes.
-- Export, round-trip, test asset, and fuzz infrastructure that exercise the same canonical scene model.
-
-References:
-
-- Assimp public goal and format breadth: [Readme.md](../../repo-ref/assimp/Readme.md)
-- Importer API and lifetime model: [Importer.hpp](../../repo-ref/assimp/include/assimp/Importer.hpp)
-- Importer plug-in contract: [BaseImporter.h](../../repo-ref/assimp/include/assimp/BaseImporter.h)
-- Importer registry: [ImporterRegistry.cpp](../../repo-ref/assimp/code/Common/ImporterRegistry.cpp)
-- Post-process contract: [BaseProcess.h](../../repo-ref/assimp/code/Common/BaseProcess.h)
-- Post-process registry: [PostStepRegistry.cpp](../../repo-ref/assimp/code/Common/PostStepRegistry.cpp)
-- Canonical scene structures: [scene.h](../../repo-ref/assimp/include/assimp/scene.h), [mesh.h](../../repo-ref/assimp/include/assimp/mesh.h)
-- Format list: [Fileformats.md](../../repo-ref/assimp/doc/Fileformats.md)
-
-Related Baozi decisions:
-
-- [ADR 0002: Runtime, Concurrency, SIMD, Errors, and Observability Contracts](0002-runtime-concurrency-observability.md)
-- [ADR 0003: Core Scene IR and Material Model](0003-core-scene-ir-and-material-model.md)
-- [ADR 0004: Parser Backend and Format Coverage Policy](0004-parser-backend-and-format-coverage-policy.md)
-- [ADR 0005: Testing, Fuzzing, and Differential Oracle Strategy](0005-testing-fuzzing-and-differential-oracle-strategy.md)
-- [ADR 0006: Public API, Versioning, and Crate Stability Policy](0006-public-api-versioning-and-crate-stability-policy.md)
-- [ADR 0007: Workspace Crate Graph, Feature Flags, MSRV, and CI Gates](0007-workspace-crate-graph-feature-flags-msrv-and-ci-gates.md)
-- [ADR 0008: Math Types, Coordinate Systems, Units, and Numeric Policy](0008-math-coordinate-units-and-numeric-policy.md)
-- [ADR 0009: Data Ownership, Zero-Copy, Lifetimes, and Memory Layout](0009-data-ownership-zero-copy-lifetimes-and-memory-layout.md)
-- [ADR 0010: Asset IO, Virtual Filesystem, URI, Archive, and Path Security](0010-asset-io-virtual-filesystem-uri-archive-and-path-security.md)
-- [ADR 0011: Format Support Tiers and Compatibility Charter](0011-format-support-tiers-and-compatibility-charter.md)
-- [ADR 0012: Material, Texture, Image, and Color-Space Policy](0012-material-texture-image-and-color-space-policy.md)
-- [ADR 0013: Post-Process Pipeline Semantics, Presets, and Mutation Model](0013-post-process-pipeline-semantics-presets-and-mutation-model.md)
-- [ADR 0014: Parser Security, Unsafe, FFI, and Panic Boundary Policy](0014-parser-security-unsafe-ffi-and-panic-boundary-policy.md)
-
-## License and Clean-Room Boundary
-
-Assimp is distributed under a modified BSD / BSD-3-Clause style license. Baozi can study Assimp, compare behavior, and port implementation ideas when the required copyright notices and license text are preserved. The practical boundary for this project is:
-
-- Treat Assimp as an architectural and behavioral oracle by default.
-- Prefer independent Rust implementations for parsers, scene builders, and post-processing.
-- If a file or algorithm is translated from Assimp source, mark the derived file clearly and preserve Assimp's license notice in a third-party notices document.
-- Do not use Assimp's name or contributors to endorse Baozi.
-- Do not copy Assimp test assets wholesale. `repo-ref/assimp/test/models-nonbsd` has additional asset-specific licensing, and even BSD-compatible fixtures should be curated with attribution.
-
-This is an engineering policy, not legal advice. The safe default is to cite Assimp as reference material and keep Baozi-owned code independently authored.
-
-## Project License Recommendation
-
-Baozi-owned clean-room code can be licensed as `MIT OR Apache-2.0`. A Rust-native reimplementation of Assimp's public behavior, data concepts, and architecture does not by itself force Baozi users to accept Assimp's BSD-3-Clause terms.
-
-If Baozi includes translated, copied, or mechanically derived Assimp source, that derived portion must keep Assimp's BSD-3-Clause-style notices and disclaimer. In that case:
-
-- Baozi's original code may still be `MIT OR Apache-2.0`.
-- The package or affected crate becomes a mixed-license distribution for practical purposes.
-- Use an SPDX expression such as `(MIT OR Apache-2.0) AND BSD-3-Clause` for crates that always include BSD-derived code.
-- Keep `THIRD_PARTY_NOTICES.md` with Assimp attribution and license text.
-- Prefer isolating any derived code in a clearly named crate or module so downstream users can understand what terms apply.
-
-Recommendation: make the default Baozi crates clean-room `MIT OR Apache-2.0`. Add BSD-3-Clause only to crates/files that actually contain Assimp-derived implementation or bundled Assimp assets.
+Baozi therefore needs one canonical Rust scene contract and an import lifecycle whose capabilities
+narrow as data moves from untrusted bytes to validated output.
 
 ## Decision
 
-Baozi will use a Rust workspace with a Rust-native canonical scene model, explicit format registry, typed import/export options, and ordered post-processing pipeline.
+Baozi uses a Rust-owned modular workspace with:
 
-The initial workspace shape should be:
+- one canonical, source-preserving scene intermediate representation (IR)
+- a facade that composes the common import, inspect, and postprocess workflow
+- a single import session that owns input snapshots, detection evidence, policy, budgets, and final
+  outcomes
+- one runtime-neutral operation substrate shared by validation, import, and postprocess without an
+  upward crate dependency
+- format-private parsers and converters that receive only bounded capabilities
+- central iterative validation that creates the invariant-bearing result
+- a typed, ordered, loss-aware postprocess pipeline
+- structured format descriptors and executable maturity evidence
 
-```text
-baozi/
-├── Cargo.toml
-├── crates/
-│   ├── baozi/                 # public facade: load APIs, default feature set
-│   ├── baozi-core/            # scene model, math aliases, errors, IO traits, metadata
-│   ├── baozi-import/          # registry, detection, import context, diagnostics
-│   ├── baozi-postprocess/     # validation, triangulation, normals, transforms
-│   ├── baozi-export/          # optional exporters and round-trip support
-│   ├── baozi-format-obj/      # first text importer
-│   ├── baozi-format-stl/      # first simple binary/text importer
-│   ├── baozi-format-ply/      # compact mesh-focused importer
-│   └── baozi-format-gltf/     # first modern scene/material importer
-├── tests/
-│   ├── assets/
-│   ├── golden/
-│   ├── formats/
-│   └── roundtrip/
-├── fuzz/
-└── docs/
-```
+The public replacement is the canonical v1 contract governed by ADR 0006. Baozi does not preserve
+the unpublished prototype through compatibility shims, parallel scene types, or version-suffixed
+replacement names.
 
-The public facade should expose simple APIs first:
+### Crate Ownership
 
-```rust
-let scene = baozi::load("model.gltf")?;
+| Crate/family | Sole architectural ownership | Must not own or expose |
+| --- | --- | --- |
+| `baozi-operation` | runtime-neutral operation control/coordinator, common ledger and linear reservation mechanisms, bounded event delivery primitives, and shared control/resource causes | Scene or format semantics, IO, import/postprocess phase vocabularies, diagnostic codes, or final outcomes |
+| `baozi-core` | canonical IR, scene-local IDs, validation proof, domain errors, provenance/remap types | parser ASTs, IO handles, import policy, backend errors |
+| `baozi-io` | normalized asset identities, byte sources, scoped resolver/backends, opened handles, IO errors | format semantics, Scene construction, final import outcomes |
+| `baozi-import` | import session, immutable probe, parser capability scope, option compilation, policy, import phase/dimension vocabulary, import diagnostic codes, detection, and import outcomes | canonical format semantics, postprocess algorithms, shared operation mechanisms, public facade composition |
+| `baozi-postprocess` | typed plans, dependency/conflict/loss rules, postprocess phase/dimension vocabulary, postprocess diagnostic codes, transactional operations, and step reports | parser behavior, IO access, shared operation mechanisms, direct publication of unvalidated Scene state |
+| `baozi-format-*` | format grammar, private backend, source-semantic conversion, format-owned typed options | public Scene variants, raw AssetIo access, report finalization, backend type leakage |
+| `baozi` | public workflow, built-in feature composition, composite public error/outcome presentation | parser internals, mutable import context, validation-proof construction, budget ledger |
+| test/fuzz support | fixtures, semantic snapshots, differential normalization, adversarial harnesses | production authority or alternate canonical models |
 
-let scene = baozi::Importer::new()
-    .with_postprocess(PostProcess::target_realtime_quality())
-    .read_path("model.obj")?;
-```
+`baozi-operation` is a foundation crate with no dependency on another production Baozi crate.
+`baozi-core`, `baozi-import`, and `baozi-postprocess` may depend on it and expose only the narrower
+capabilities their domain requires. ADR 0022 owns ledger semantics and ADR 0033 owns control and
+delivery semantics. Import and postprocess map shared causes into their own phase-aware failures and
+remain the only owners of their reports; the operation layer cannot finalize either outcome.
 
-The internal architecture should preserve Assimp's proven separations without copying its C ABI shape:
+Future archive/container and exporter contracts require their own accepted decisions and
+implementation tracers. Their proposed designs do not extend this accepted import architecture
+until promoted through ADR lifecycle governance.
+
+### Import Lifecycle
 
 ```mermaid
 flowchart LR
-    User[User API] --> Facade[baozi facade]
-    Facade --> Registry[Importer Registry]
-    Facade --> Options[Typed Options]
-    Registry --> Detector[Format Detection]
-    Detector --> Format[Format Importer Crate]
-    Options --> Format
-    Io[Asset IO] --> Format
-    Format --> Scene[baozi-core Scene]
-    Scene --> Validate[Scene Validator]
-    Validate --> Pipeline[Post-process Pipeline]
-    Pipeline --> Result[Scene Result]
-    Result --> Export[Optional Exporters]
+    Caller[Caller] --> Facade[baozi facade]
+    Facade --> Session[Import session]
+    Session --> Snapshot[Bounded immutable primary snapshot]
+    Snapshot --> Probe[Shared immutable probe]
+    Probe --> Registry[Deterministic detector selection]
+    Registry --> Scope[Capability-limited parse scope]
+    Scope --> Format[Format-private parser and converter]
+    Format --> Builder[Internal SceneBuilder]
+    Builder --> Validate[Bounded central validator]
+    Validate --> Validated[Validated canonical Scene]
+    Validated --> Process[Optional typed postprocess plan]
+    Process --> Final[Validated result and structured report]
+    Session --> Failure[Structured failure with bounded evidence]
+    Session -. control and accounting .-> Operation[baozi-operation]
+    Validate -. checkpoints and reservations .-> Operation
+    Process -. control and accounting .-> Operation
 ```
 
-The import flow should be:
+The session exists before primary IO. Detection and parsing share the same stable input identity;
+detectors do not own stream rewinding. Parsers cannot construct public reports, assign lifecycle
+stages, forge validation, or reach policy-bypassing IO. Every success passes central validation.
 
-```mermaid
-sequenceDiagram
-    participant App
-    participant Importer
-    participant Registry
-    participant IO
-    participant Format
-    participant Post
-    participant Validator
+### Canonical Scene Boundary
 
-    App->>Importer: read_path/read_memory + options
-    Importer->>Registry: candidates by extension and sniffing
-    Registry->>IO: open primary asset
-    Registry->>Format: can_read(source, hint)
-    Format->>IO: load dependent assets
-    Format-->>Importer: Scene
-    Importer->>Validator: validate imported invariants
-    Importer->>Post: run requested ordered steps
-    Post->>Validator: optional strict validation after each step
-    Importer-->>App: owned Scene + diagnostics
-```
+The canonical IR preserves source semantics needed across current and future formats. It is not a
+GPU layout, runtime entity graph, or mirror of Assimp's pointer-based `aiScene` structures.
 
-## Dependency and Parser Ownership Policy
+Core rules:
 
-Baozi may use ecosystem crates to accelerate specific format support or algorithms, but public APIs must remain Baozi-owned. No third-party parser crate may define `Scene`, `Mesh`, `Material`, importer traits, diagnostics, or post-process semantics.
+- scene-local typed IDs connect owned collections without self-referential lifetimes
+- logical meshes contain one or more primitives rather than recovering identity from names
+- attributes carry explicit domains and storage semantics
+- image, texture, and sampler identities remain distinct
+- skin, morph, animation, hierarchy, material, metadata, space, and provenance data remain explicit
+- lossy lowering or normalization is a postprocess operation requiring caller authority and a loss
+  record
+- structural mutation consumes validation proof and returns a new validated result, complete remaps,
+  and derived-data invalidation
 
-Current ecosystem observations from `cargo search` / `cargo info` on 2026-07-08:
+Detailed ownership and cardinality belong to the Scene IR ADRs; this ADR fixes only the top-level
+role and direction of dependency.
 
-| Area | Candidate crates | Observed license | Recommended use |
-| --- | --- | --- | --- |
-| Assimp bindings | `assimp`, `russimp-ng` | varies by crate | Test oracle or migration bridge only; bindings are not Baozi architecture input |
-| glTF2 | `gltf` 1.4.1 | MIT OR Apache-2.0 | Acceptable early backend or reference parser; normalize into Baozi IR |
-| OBJ | `tobj` 4.0.4 | MIT | Useful reference or optional backend; self-written parser is also reasonable |
-| STL | `stl_io` 0.11.0 | MIT | Good accelerator for basic STL; keep Baozi validation and diagnostics |
-| PLY | `ply-rs` 0.1.3, `ply-rs-bw` | MIT / crate-specific | Evaluate before adoption; PLY is small enough to self-write |
-| Collada | `collada` 0.17.0, `dae-parser` | MIT / crate-specific | Reference or temporary backend; likely needs Baozi-owned normalization |
-| FBX | `fbxcel`, `fbx`, `fbx_direct` | MIT OR Apache-2.0 | Low-level references only; Assimp-like FBX needs a dedicated Baozi parser/converter |
-| USD | `rust-usd`, `usd`, `oxideav-usdz` | mostly Apache-2.0 / crate-specific | Defer; use backend abstraction before choosing OpenUSD FFI or pure Rust |
-| 3MF | `lib3mf-core`, `threemf` | BSD-2-Clause / crate-specific | Evaluate; 3MF can also be implemented with `zip` + XML |
-| XML/containers | `quick-xml`, `zip` | MIT / crate-specific | Good infrastructure for Collada, 3MF, X3D, and zipped assets |
-| Binary parsing | `binrw`, `byteorder`, `nom` | MIT | Good implementation tools, not public model dependencies |
-| Tangents and optimization | `mikktspace`, `meshopt`, `draco-core` | MIT/Apache-2.0, Apache-2.0 | Optional post-process or codec backends behind feature flags |
+### Options, Diagnostics, and Outcomes
 
-Adoption rule:
+- Common options are typed and frozen before the session begins.
+- Format-owned options cross object-safe importer boundaries through versioned Baozi-owned
+  envelopes and codecs, not string property bags or backend types.
+- Diagnostics use stable codes, bounded messages, severity, source/object paths, and structured
+  causes where applicable.
+- Failure evidence is an outcome, not discarded error text.
+- Reports expose immutable evidence and statistics; parsers do not finalize them.
 
-1. Prefer self-written parser when the format is small, diagnostics matter, or existing crates are immature.
-2. Use a crate when it is mature, well-licensed, actively useful, and can be wrapped behind Baozi-owned traits.
-3. Keep every importer responsible for converting third-party data into Baozi IR immediately.
-4. Record per-format dependency decisions in `docs/formats/<format>.md` before adding a parser backend.
+### Assimp and Clean-Room Boundary
 
-## Core Contracts
+Baozi may study Assimp to identify capability categories, malformed-input classes, algorithmic
+trade-offs, and expected normalized behavior. Optional differential tests may compare Baozi-owned
+fixtures through a normalized external oracle.
 
-### Scene Model
+Baozi does not:
 
-`baozi-core` owns the canonical scene model. It should be Rust-native, index-based, and stable enough for all importers:
+- copy Assimp's C/C++ API or memory model into the canonical Rust design
+- link Assimp into the default architecture
+- treat Assimp output as the sole correctness oracle
+- copy or mechanically translate Assimp source into the canonical implementation
+- copy Assimp fixtures into Baozi's corpus, even when their license appears permissive
 
-- `Scene`: root node, meshes, materials, textures, animations, cameras, lights, skeletons, metadata, diagnostics.
-- `Node`: name, transform, children, mesh references, metadata.
-- `Mesh`: primitive topology, positions, normals, tangents, colors, texture coordinates, faces/indices, bones, material reference, bounding box.
-- `Material`: typed common PBR/Phong fields plus an extension property map for format-specific keys.
-- `Texture`: embedded bytes or external asset reference.
-- `Animation`: node, mesh, morph, and skeletal channels.
-- `Metadata`: typed values keyed by stable strings, used for IFC-like and format-specific data.
+The canonical implementation and Baozi-owned fixtures are independently authored and intended for
+`MIT OR Apache-2.0` licensing. `repo-ref/assimp` remains read-only study material. Any future request
+to vendor, copy, or mechanically translate Assimp material requires a separate accepted ADR,
+license review, isolation plan, and explicit change to this boundary. This engineering policy is not
+legal advice.
 
-Use index handles (`MeshId`, `MaterialId`, `NodeId`) instead of raw references. This matches Assimp's array-reference pattern while keeping Rust ownership simple.
-
-### Importers
-
-Each format crate implements a trait similar to:
-
-```rust
-pub trait FormatImporter: Send + Sync + 'static {
-    fn info(&self) -> FormatInfo;
-    fn can_read(&self, input: &mut dyn ReadSeek, hint: &ReadHint) -> Result<ReadConfidence>;
-    fn read(&self, ctx: &mut ImportContext<'_>) -> Result<Scene>;
-}
-```
-
-`FormatInfo` must include id, display name, extensions, text/binary/compressed support, maturity, and known limitations. This is the Rust equivalent of Assimp's `aiImporterDesc`.
-
-### IO
-
-Baozi should expose an `AssetIo` abstraction rather than only `Path` APIs:
-
-- `open(&self, path: &AssetPath) -> Result<Box<dyn ReadSeek>>`
-- `exists(&self, path: &AssetPath) -> bool`
-- `resolve(&self, base: &AssetPath, relative: &str) -> AssetPath`
-
-Default implementations should cover filesystem and memory bundles. Archive/container support can be added behind the same trait.
-
-### Options
-
-Baozi should not mirror Assimp's string macro property table directly. Instead:
-
-- Public options are typed Rust structs and builders.
-- Format-specific options live in each format crate and can be inserted into an `Options` bag by type.
-- Low-level extension options can use a namespaced key/value map only as an escape hatch.
-
-### Post-Processing
-
-Post-processing is a first-class crate, not ad hoc helper code inside importers. Initial steps:
-
-- `ValidateScene`
-- `Triangulate`
-- `JoinIdenticalVertices`
-- `GenerateNormals`
-- `GenerateTangents`
-- `FlipUvs`
-- `MakeLeftHanded`
-- `SortByPrimitiveType`
-- `FindDegenerates`
-- `FindInvalidData`
-- `GenerateBoundingBoxes`
-- `GlobalScale`
-
-Steps run in a deterministic order. Presets can mirror Assimp-style `target_realtime_fast`, `target_realtime_quality`, and `target_realtime_max_quality`, but the public API should use Rust `bitflags` or typed step lists.
+Useful comparative references at the audited Assimp revision include its
+[importer contract](https://github.com/assimp/assimp/blob/bcc62230fc0471475528d732f4ad108a59bb7f6c/include/assimp/BaseImporter.h),
+[registry](https://github.com/assimp/assimp/blob/bcc62230fc0471475528d732f4ad108a59bb7f6c/code/Common/ImporterRegistry.cpp),
+[scene structures](https://github.com/assimp/assimp/blob/bcc62230fc0471475528d732f4ad108a59bb7f6c/include/assimp/scene.h),
+and
+[postprocess registry](https://github.com/assimp/assimp/blob/bcc62230fc0471475528d732f4ad108a59bb7f6c/code/Common/PostStepRegistry.cpp).
+These permalinks are study inputs, not normative Baozi implementation sources.
 
 ## Alternatives Considered
 
-### Option A: Rust-native scene model and modular workspace (recommended)
+### Option A: Rust-owned canonical model and capability-limited modular pipeline
 
 Pros:
 
-- Fits Rust ownership and type safety.
-- Keeps the public API clean while preserving Assimp's importer/postprocess separation.
-- Lets format crates evolve independently.
-- Allows `no_std` or WASM-friendly subsets later if the core stays disciplined.
+- aligns ownership, error handling, and invariants with Rust
+- keeps parser backends replaceable
+- centralizes safety, validation, postprocess, and evidence contracts
+- scales format breadth without exposing parser-specific models
 
 Cons:
 
-- Requires an explicit compatibility mapping from Assimp concepts to Baozi concepts.
-- Some advanced Assimp behavior cannot be copied mechanically.
+- requires explicit normalization and crate-boundary design
+- creates more initial infrastructure than a one-format loader
 
-Decision: chosen as the long-term architecture.
+Decision: chosen.
 
-### Option B: Directly mirror Assimp's C structs and flags
+### Option B: Mirror Assimp's structs, flags, and importer API
 
 Pros:
 
-- Easier to compare against Assimp behavior line by line.
-- Simplifies future FFI compatibility if we expose C ABI.
-- Test golden data can be closer to Assimp's layout.
+- simplifies superficial field-by-field comparisons
+- may ease a future compatibility adapter
 
 Cons:
 
-- Imports C++ pointer-array lifetime patterns into Rust.
-- Makes safe APIs harder.
-- Encourages compatibility hacks before Baozi has its own domain model.
+- imports pointer-array lifetime and mutation assumptions into Rust
+- makes source-preserving semantics depend on a foreign model
+- confuses comparative behavior with public compatibility
 
-Decision: rejected for the internal model. A compatibility layer can be added later if needed.
+Decision: rejected. A future isolated adapter requires its own decision.
 
-### Option C: One crate with parsers and no registry/postprocess split
+### Option C: One crate with parser-owned scene outputs
 
 Pros:
 
-- Fastest way to load one or two formats.
-- Fewer crates and less initial boilerplate.
+- fastest path to a small demonstration
+- minimal workspace wiring
 
 Cons:
 
-- Does not scale to Assimp-level breadth.
-- Makes feature flags, testing, and format ownership messy.
-- Pushes normalization into parsers, causing duplicated behavior.
+- duplicates validation, limits, diagnostics, and sidecar behavior
+- makes feature isolation and backend replacement difficult
+- cannot enforce one success/failure contract across formats
 
-Decision: rejected because it conflicts with the project goal.
+Decision: rejected.
 
-### Option D: Thin Rust wrapper around Assimp
+### Option D: Thin Rust facade over Assimp
 
 Pros:
 
-- Immediate format coverage.
-- Mature behavior and fuzz history.
+- immediate broad format coverage
+- inherits a mature implementation history
 
 Cons:
 
-- Not a Rust-native reimplementation.
-- Inherits C++ build, ABI, dependency, and safety concerns.
-- Does not create Baozi's own architecture.
+- retains C++ build, ABI, safety, and deployment costs
+- does not produce a Rust-owned architecture
+- prevents the clean-room and WASM-first boundaries Baozi requires
 
-Decision: rejected for Baozi core. It can remain useful as an oracle in compatibility tests.
-
-## Success Metrics
-
-| Metric | Initial Target | Measurement |
-| --- | --- | --- |
-| Workspace structure | Public facade plus core/import/postprocess and 2 format crates | `cargo metadata` and crate graph review |
-| Test runner | All Rust tests run through nextest where available | `cargo nextest run` |
-| Core invariants | Scene validator covers mesh, node, material, texture, animation, and index integrity | Validator unit tests and malformed fixtures |
-| Format milestone 1 | OBJ and STL load simple mesh fixtures into the same `Scene` model | Golden scene snapshots |
-| Format milestone 2 | PLY and glTF2/GLB load representative materials, textures, and hierarchy | Format integration tests |
-| Fuzzing | Parser fuzz targets exist for every public importer crate | `cargo fuzz list` and CI job |
-| Round-trip | Export-enabled formats compare through a scene differ, not byte equality | Round-trip tests |
-| Documentation | Each supported format documents coverage and limitations | `docs/formats/*.md` |
-
-## Risks and Mitigations
-
-| Risk | Severity | Likelihood | Mitigation |
-| --- | --- | --- | --- |
-| Scope explodes before the core stabilizes | High | High | Freeze the core scene model and importer trait before adding many formats |
-| Rust model misses features needed by FBX/IFC/animation-heavy formats | High | Medium | Study complex Assimp importers before finalizing animation, metadata, and skeleton APIs |
-| Test assets have unclear licenses | High | Medium | Keep imported samples quarantined with attribution and avoid copying non-BSD assets blindly |
-| Third-party parser crate becomes Baozi's de facto public model | High | Medium | Wrap dependencies inside format crates and convert immediately into Baozi IR |
-| Post-process behavior diverges silently between formats | Medium | High | Run validators before and after postprocess; add golden snapshots at each stage |
-| Dynamic plugin ambitions slow down first implementation | Medium | Medium | Use compile-time feature crates first; revisit dynamic plugins after stable traits |
-| Performance regressions from over-normalized data | Medium | Medium | Benchmark large meshes and keep zero-copy parsing paths where feasible |
-| API becomes Assimp-shaped instead of Rust-shaped | Medium | Medium | Keep compatibility in adapters; keep core model idiomatic |
-
-## Implementation Plan
-
-### Phase 0: Architecture and Safety Rails
-
-- Convert root to a Cargo workspace.
-- Create `baozi-core`, `baozi-import`, `baozi-postprocess`, and `baozi` facade crates.
-- Define `Scene`, index handles, `AssetIo`, `Options`, `Diagnostics`, and `Error`.
-- Add a strict `ValidateScene` implementation.
-- Add nextest configuration and initial unit/property tests.
-
-### Phase 1: Minimal Import Loop
-
-- Implement explicit registry with built-in format registration.
-- Implement filesystem and in-memory IO.
-- Add OBJ importer as the first text importer.
-- Add STL importer as the first simple binary/text importer.
-- Add golden fixtures and scene snapshots.
-
-### Phase 2: Normalization Pipeline
-
-- Add triangulation, normals, bounding boxes, left-handed conversion, UV flip, and degeneracy checks.
-- Add Assimp-style presets as typed Baozi presets.
-- Add stage snapshots: raw import, validated import, postprocessed output.
-
-### Phase 3: Modern Scene Formats
-
-- Add PLY for mesh coverage.
-- Add glTF2/GLB for hierarchy, PBR materials, buffers, textures, skins, and animation.
-- Add round-trip only after the import model is stable.
-
-### Phase 4: Broad Compatibility
-
-- Add Collada, FBX, 3MF, USD, IFC, and legacy game formats by priority.
-- Use Assimp as a behavioral oracle where license and build constraints allow.
-- Maintain `docs/formats/<format>.md` with support matrix and known limitations.
+Decision: rejected for production architecture. A sandboxed external oracle remains optional test
+infrastructure.
 
 ## Consequences
 
 Positive:
 
-- Format importers stay small and focused.
-- The core model can be tested independently from parsing.
-- Post-processing becomes reusable across all formats.
-- Baozi can grow toward Assimp-level breadth without making the facade unstable.
+- every cross-format concern has a single owner
+- importers remain focused on grammar and source semantics
+- central validation and loss-aware postprocess apply consistently
+- public APIs stay Baozi-owned as backends change
+- mature-project lessons can inform tests without dictating implementation shape
 
 Negative:
 
-- More upfront crate and trait design than a minimal loader.
-- Some early examples require more wiring.
-- Compatibility tests need normalization rules because Baozi will not mirror `aiScene` memory layout.
+- broad schema and lifecycle changes require coordinated workspace cutovers
+- converters must translate private backend data into canonical IR
+- evidence and format documentation are part of the cost of adding support
 
-## Open Questions
+## Risks and Mitigations
 
-1. Which math backend should `baozi-core` expose: custom lightweight types, `glam`, or `nalgebra`?
-   Recommendation: start with small public newtypes or re-exported aliases, and avoid leaking a heavy dependency until benchmarks and API ergonomics are clearer.
-2. Should `repo-ref/assimp/test/models` assets be copied into Baozi tests?
-   Recommendation: do not copy wholesale. Curate fixtures by license and create Baozi-owned minimal fixtures first.
-3. Should Baozi support exporters in the first milestone?
-   Recommendation: keep exporter traits designed, but implement export after import and validation are stable.
-4. Should importers be dynamically loadable plugins?
-   Recommendation: no for now. Use compile-time features and static registration first.
-5. Should Baozi rely on ecosystem parser crates?
-   Recommendation: allow them as internal backends when useful, but design every format crate so replacing the backend does not change Baozi's public API.
+| Risk | Severity | Likelihood | Mitigation |
+| --- | --- | --- | --- |
+| Canonical IR omits complex-format semantics | High | Medium | Validate the model against multi-primitive, skin, morph, animation, metadata, and provenance tracers before stability promotion |
+| Parser bypasses session policy | Critical | Medium | Pass only a capability-limited parse scope and enforce facade-path integration/fuzz tests |
+| Backend model leaks into public API | High | Medium | Rustdoc/API review and format replacement conformance tests |
+| Assimp study becomes untracked derivation | High | Low | Clean-room review, fixture provenance, and third-party notice gates |
+| Central abstractions become shallow wrappers | Medium | Medium | Assign sole ownership and reject duplicate parser-local policy/model paths |
+| Architecture status is confused with implementation completion | Medium | High | Keep accepted decisions separate from linked progress and verification evidence |
 
-## Traceability
+## Acceptance Criteria
 
-| Requirement | Design Element | Evidence |
-| --- | --- | --- |
-| Load many formats | Format crates and registry | [ImporterRegistry.cpp](../../repo-ref/assimp/code/Common/ImporterRegistry.cpp), [Fileformats.md](../../repo-ref/assimp/doc/Fileformats.md) |
-| Normalize imported data | Post-process pipeline | [BaseProcess.h](../../repo-ref/assimp/code/Common/BaseProcess.h), [PostStepRegistry.cpp](../../repo-ref/assimp/code/Common/PostStepRegistry.cpp) |
-| Support custom IO | `AssetIo` trait | [IOSystem.hpp](../../repo-ref/assimp/include/assimp/IOSystem.hpp), [IOStream.hpp](../../repo-ref/assimp/include/assimp/IOStream.hpp) |
-| Support importer-specific settings | Typed options bag | [config.h.in](../../repo-ref/assimp/include/assimp/config.h.in), [Importer.hpp](../../repo-ref/assimp/include/assimp/Importer.hpp) |
-| Validate shared scene invariants | `ValidateScene` | [ValidateDataStructure.cpp](../../repo-ref/assimp/code/PostProcessing/ValidateDataStructure.cpp), [utValidateDataStructure.cpp](../../repo-ref/assimp/test/unit/utValidateDataStructure.cpp) |
-| Scale test coverage with formats | Golden, round-trip, fuzz, property tests | [test/unit](../../repo-ref/assimp/test/unit), [test/models](../../repo-ref/assimp/test/models), [fuzz](../../repo-ref/assimp/fuzz) |
+| Contract | Measurable evidence |
+| --- | --- |
+| Ownership | architecture checker and crate review find one owner for IR, IO, session, postprocess, facade, and format parsing |
+| Stable input | facade tests prove one bounded primary snapshot feeds detection and parse without reopen/rewind ownership |
+| Validation boundary | every successful import and postprocess result carries non-forgeable validation evidence |
+| Backend isolation | public API/rustdoc contains no third-party parser or Assimp implementation type |
+| Canonical workflow | packaged consumer imports, inspects logical primitives/typed attributes, optionally processes, and handles structured failure using canonical v1 names |
+| Clean-room evidence | every external fixture or derived file has provenance and license metadata |
+| Format breadth discipline | each promoted format has facade tests, semantic snapshots, malformed/limit cases, fuzz evidence, and a truthful support document |
+
+## Implementation Evidence
+
+Implementation and verification change over time; consult these evidence locations rather than
+editing the accepted decision to report transient status:
+
+- [Canonical architecture refactor plan](../plans/2026-07-10-001-refactor-baozi-canonical-architecture-plan.md)
+- [Facade source](../../crates/baozi/src/lib.rs)
+- [Core source](../../crates/baozi-core/src/lib.rs)
+- [Import source](../../crates/baozi-import/src/lib.rs)
+- [Format support documents](../formats/)
+- [Engineering memory index](../knowledge/engineering/index.md)

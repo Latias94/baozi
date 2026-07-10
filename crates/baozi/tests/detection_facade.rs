@@ -1,10 +1,6 @@
 #![cfg(feature = "format-obj")]
 
-#[cfg(any(
-    feature = "format-stl",
-    feature = "format-ply",
-    feature = "format-gltf"
-))]
+#[cfg(any(feature = "format-stl", feature = "format-ply"))]
 use baozi::{Importer, Result};
 
 #[cfg(all(feature = "format-obj", feature = "format-stl"))]
@@ -64,23 +60,5 @@ end_header\n\
 
     assert_eq!(report.format().id(), "ply");
     assert_eq!(report.scene().meshes.len(), 1);
-    Ok(())
-}
-
-#[cfg(all(feature = "format-obj", feature = "format-gltf"))]
-#[test]
-fn greedy_obj_detection_does_not_block_large_gltf() -> Result<()> {
-    let mut bytes = br#"{
-  "asset": { "version": "2.0" },
-  "scene": 0,
-  "scenes": [{ "nodes": [] }]
-}"#
-    .to_vec();
-    bytes.resize(8192, b' ');
-
-    let report = Importer::new().read_bytes("large.mesh", bytes)?;
-
-    assert_eq!(report.format().id(), "gltf");
-    assert!(report.scene().meshes.is_empty());
     Ok(())
 }

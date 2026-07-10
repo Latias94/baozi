@@ -4,206 +4,258 @@ date: 2026-07-09
 authors:
   - Codex
 decision_type: architecture
-related:
-  - docs/adr/0002-runtime-concurrency-observability.md
+depends_on:
   - docs/adr/0004-parser-backend-and-format-coverage-policy.md
   - docs/adr/0005-testing-fuzzing-and-differential-oracle-strategy.md
   - docs/adr/0010-asset-io-virtual-filesystem-uri-archive-and-path-security.md
+related:
+  - docs/adr/0002-runtime-concurrency-observability.md
   - docs/adr/0018-parser-tooling-and-format-owned-parser-policy.md
+  - docs/adr/0022-per-import-resource-ledger-and-budget-accounting.md
+  - docs/adr/0033-operation-control-and-observability.md
+  - docs/security/parser-threat-model.md
+tracers:
+  - crates/baozi-import/src/registry.rs
+  - crates/baozi-io/src/lib.rs
+  - fuzz/Cargo.toml
 ---
 
-# ADR 0014: Parser Security, Unsafe, FFI, and Panic Boundary Policy
+# ADR 0014: Parser Security, Unsafe, FFI, and Panic Boundaries
+
+## Status and Authority
+
+This accepted ADR owns the parser hostile-data, unsafe, FFI, and panic-boundary policy. Acceptance is
+a normative implementation gate. A first-party path must pass baseline admission safety before it is
+registered or inventoried, while later maturity evidence may still be incomplete.
 
 ## Context
 
-Baozi parses untrusted, complex, often malformed files. Rust gives memory safety, but parser bugs can still cause panics, unbounded allocation, integer overflow, path abuse through sidecars, denial of service, or unsafe FFI failures.
+Baozi parses hostile, complex bytes. Rust memory safety removes many corruption classes, but it does
+not prevent panics, allocation aborts, integer overflow, algorithmic denial of service, path abuse,
+semantic corruption, or failures in unsafe dependencies.
 
-ADR 0010 covers IO and path security. This ADR covers parser-internal security, unsafe usage, FFI isolation, panic behavior, and fuzzing gates.
+Two trust boundaries must not be conflated:
+
+1. Asset bytes, names, counts, offsets, and dependency references are hostile data.
+2. Code registered inside the host process is trusted code with bugs, not sandboxed adversary code.
+
+A facade validation boundary can reject a bad Scene returned by an extension. It cannot prevent that
+extension from calling `std::fs`, using `unsafe`, exhausting the process, deadlocking, aborting, or
+reading unrelated memory. Adversarial code requires process isolation owned by the host.
 
 ## Decision
 
-Baozi parser crates must be safe-by-default, panic-averse, limit-aware, and fuzzable. `unsafe` and FFI are allowed only behind explicit review boundaries and feature gates. Library code must return structured errors instead of panicking on malformed input.
-
-Core policy:
-
-- no `unsafe` in core or parser crates unless justified with a safety comment and test/fuzz coverage
-- no `unwrap`, `expect`, unchecked indexing, or debug-only validation on untrusted input paths
-- all counts and byte sizes are checked with overflow-safe arithmetic
-- every parser reads `ResourceLimits`
-- parser panics are bugs
-- FFI backends live in isolated opt-in crates or modules
-- fuzz targets are required before parser maturity reaches stable
-
-## Architecture
+First-party parser paths are safe-by-default, panic-averse, limit-aware, and fuzzable. Baozi catches
+unwindable panics at the extension/facade boundary to preserve failure evidence, but a caught panic is
+still a bug. Unsafe and FFI are allowed only in isolated, opt-in, reviewed boundaries. No Baozi API
+claims to sandbox in-process code.
 
 ```mermaid
 flowchart TD
-    Input[Untrusted asset input] --> Limits[ResourceLimits]
-    Limits --> Parser[Safe parser boundary]
-    Parser --> Checked[Checked arithmetic and bounds]
-    Parser --> Diagnostics[Structured errors and diagnostics]
-    Parser --> Builder[SceneBuilder]
+    Bytes[Hostile bytes and names] --> Session[Bounded import session]
+    Session --> Parser[First-party safe parser]
+    Parser --> Builder[Private Scene builder]
+    Builder --> Validate[Central validation]
+    Validate --> Result[Validated result or structured failure]
 
-    Parser --> OptionalFFI[Optional FFI backend]
-    OptionalFFI --> FFIGate[Feature gate and wrapper]
-    FFIGate --> Diagnostics
+    Extension[Trusted in-process extension] --> Unwind[Unwind boundary]
+    Unwind --> Validate
+    Extension -. ambient process authority .-> Host[Host process]
 
-    Parser --> Fuzz[Fuzz target]
-    Fuzz --> Regression[Regression fixtures]
+    Adversarial[Adversarial parser or oracle] --> Sandbox[Host-owned subprocess sandbox]
+    Sandbox --> Wire[Bounded untrusted result]
+    Wire --> Validate
 ```
 
-```mermaid
-sequenceDiagram
-    participant Parser
-    participant Limits
-    participant Alloc
-    participant Builder
+### First-Party Admission Is Not a Maturity Tier
 
-    Parser->>Limits: check declared counts and bytes
-    Limits-->>Parser: allowed or LimitExceeded
-    Parser->>Alloc: allocate bounded buffers
-    Parser->>Parser: parse with checked offsets
-    Parser->>Builder: emit owned validated data
-    Builder-->>Parser: Scene or InvalidScene
-```
+ADR 0004 owns parser/backend admission, ADR 0007 owns first-party inventory, and ADR 0011 owns
+maturity. A known panic, abort, unbounded attacker-controlled allocation/recursion, ambient-IO bypass,
+or invalid-success path must be disabled and unregistered, rejected/replaced, or isolated outside the
+in-process first-party inventory. It cannot remain reachable through a format feature or
+`all-formats` merely because the descriptor says Experimental.
 
-## Parser Safety Rules
+After that baseline passes, missing non-safety evidence such as broader semantic conformance, an
+independent oracle, sustained fuzz/RSS history, target promotion, or packaged-consumer proof may keep
+the format Experimental. An opaque-backend allowance accounts for expected memory; it does not prove
+or waive admission safety. A finite Baozi-enforced preflight envelope or an admitted process boundary
+is required when the backend cannot enforce the hostile-data bounds itself.
 
-All parser crates must follow:
+## Hostile-Data Rules
 
-- reject malformed input through `BaoziError` or diagnostics
-- never panic for expected malformed input
-- use `checked_add`, `checked_mul`, and bounded conversions for size calculations
-- validate offsets before slicing
-- validate declared counts before allocation
-- validate recursion depth
-- validate text encoding where required
-- keep resource accounting centralized through `ImportContext`
-- convert third-party parser failures into Baozi errors
+All public and backend parser paths must:
 
-`panic!`, `unwrap`, and `expect` are allowed only in tests, examples, or unreachable internal invariant checks that cannot be triggered by user input. Prefer returning `InvalidScene`, `Parse`, or `LimitExceeded`.
+- validate declared counts, strides, offsets, and ranges before allocation or slicing
+- use checked arithmetic for byte and cell calculations
+- use fallible reservation before input-sized growth
+- make every input-controlled loop consume input or spend a bounded work budget
+- implement graph traversal iteratively with separate node, edge, depth, and work limits
+- validate required text encodings and bound recovery diagnostics
+- route dependencies through the session capability in ADR 0010
+- open potentially special filesystem objects without blocking and validate regular-file type from
+  the same authorized handle, never from path metadata followed by a second open
+- preserve monotonic attempted work when optional resources fail
+- convert dependency errors into Baozi-owned structured failures
+- validate every successful Scene centrally, including third-party results
 
-## Unsafe Policy
-
-Default: no `unsafe`.
-
-`unsafe` may be accepted only when:
-
-1. safe Rust cannot meet the measured need
-2. the block is small and encapsulated
-3. the safety invariant is documented immediately above the block
-4. tests cover normal and malformed cases
-5. fuzzing covers the public parser path
-6. a safe fallback exists when practical
-
-Do not use `unsafe` for convenience or premature micro-optimization.
-
-## FFI Policy
-
-FFI-backed importers or codecs must be opt-in.
-
-Rules:
-
-- isolate FFI in a dedicated crate or private backend module
-- keep facade feature names explicit
-- never make FFI part of `default-formats`
-- document native build requirements and licenses
-- wrap foreign errors into `BaoziError`
-- treat FFI panics, aborts, and memory errors as backend risks
-- keep pure-Rust or safe fallback paths where practical
-- keep language-binding ABIs out of `baozi-core` and the default facade
-
-FFI may be appropriate for complex codecs or external ecosystems, but not for the core import pipeline.
-
-### Foreign Language Bindings
-
-Baozi's Rust-native IR is not required to be `#[repr(C)]`, and core scene structs should not be
-flattened or weakened only to satisfy C, C#, Python, or Unity binding constraints. Rust users should
-get the most idiomatic owned scene model first.
-
-If Baozi exposes cross-language bindings later, they should live in a dedicated wrapper crate such
-as `baozi-c-api` or `baozi-ffi` with explicit ownership functions, opaque handles, stable C structs
-or accessor functions, and separate ABI/version documentation. That crate may translate from the
-Rust IR into an FFI-safe view, but the translation boundary must be explicit and feature-gated.
+`unwrap`, `expect`, unchecked indexing, `unreachable_unchecked`, and debug-only assertions are not
+allowed on paths reachable from hostile data. They are allowed in tests and in genuinely
+construction-proven internal invariants only when the proof is local and cannot be invalidated by a
+public extension.
 
 ## Panic Boundary
 
-Baozi should not use `catch_unwind` as a normal parser control flow mechanism. Panics are bugs and should become regression tests.
+First-party parser panics are defects and become minimized regression tests. `catch_unwind` is not
+parser control flow.
 
-Potential exception:
+The facade invokes object-safe extension code behind an unwind boundary when the build uses
+`panic = "unwind"`. A caught payload is discarded, converted to a bounded backend failure, and the
+report retains stage, diagnostics, detection evidence, and resource statistics. The boundary must
+not expose panic text that can contain secrets or unbounded attacker data.
 
-- optional third-party or FFI backend wrappers may use panic boundaries defensively if the backend has known unwind behavior and Rust safety permits it
+This boundary has explicit limits:
 
-Even then, caught panics must become diagnostics or backend errors, and the backend must remain opt-in.
+- it cannot catch `panic = "abort"`
+- it cannot catch process aborts, stack overflow, OOM abort, signals, access violations, or UB
+- it does not roll back extension side effects
+- `UnwindSafe` is not evidence that hostile code is isolated
+- poisoned shared state remains a host concern
 
-## Allocation and OOM Policy
+## Unsafe Policy
 
-Rust cannot reliably recover from all out-of-memory cases. Baozi should prevent obvious unbounded allocation:
+Baozi-owned core, IO contracts, import orchestration, and first-party format crates use
+`#![forbid(unsafe_code)]` by default. An exception requires all of the following:
 
-- enforce declared count limits before allocation
-- cap total asset bytes and decompressed bytes
-- cap vertex, face, material, texture, animation, and metadata counts
-- reject suspicious count/stride combinations
-- prefer streaming or chunked parsing for large text formats where feasible
+1. a measured need that safe code or an admitted dependency cannot satisfy
+2. a dedicated private module or crate with the smallest practical API
+3. a safety invariant immediately adjacent to every unsafe operation
+4. malformed, boundary, and concurrency tests that exercise the invariant
+5. parser-reachable fuzz coverage and applicable sanitizer execution
+6. an ownership and lifetime model reviewed independently
+7. feature isolation and a safe default path
 
-## Fuzzing and Regression Policy
+`unsafe` in transitive dependencies remains part of the trusted computing base. Dependency admission
+must check license, MSRV, target support, maintenance, advisories, unsafe scope, panic behavior, and
+replacement cost. A crate-level `forbid` lint is not a dependency-tree security claim.
 
-Every public parser crate needs:
+For a security-sensitive dependency, admission attaches to the complete target-specific resolved
+closure, not only to a top-level semver requirement. The repository records exact package versions,
+sources, checksums, enabled features, and relevant unsafe/native entry points, and compares the
+lockfile resolution against that record in CI. An update that changes path resolution, unsafe scope,
+native calls, panic behavior, target support, or the resolved security-sensitive closure reopens
+admission before merge.
 
-- one fuzz target for raw parser entry
-- one malformed fixture suite for stable formats
-- regression fixtures for every fuzz-found panic or infinite loop
-- CI smoke fuzz or scheduled fuzz workflow when practical
+Security-relevant flag constants are dependencies too. When the native filesystem adapter needs
+Unix `O_NONBLOCK` to prevent a hostile FIFO from blocking before type validation, it uses exact
+direct `rustix` 1.1.4 only for `OFlags::NONBLOCK` and passes the value through the admitted
+`cap-std` open-options API. Numeric flags, documentation-hidden transitive APIs, and an unreviewed
+extension crate do not satisfy this admission rule.
 
-Crashes from fuzzing must not be dismissed as "invalid input." Invalid input is the primary parser threat model.
+## FFI Policy
+
+FFI parsers and codecs are never part of default formats. They live in dedicated opt-in backend
+crates and must document native build requirements, linked licenses, ABI ownership, thread safety,
+and failure behavior.
+
+In-process FFI cannot be made safe by `catch_unwind`; foreign exceptions, memory faults, aborts, and
+undefined behavior can terminate or corrupt the host. For a backend expected to receive adversarial
+assets, the preferred boundary is a separate executable with:
+
+- no network
+- only explicitly preopened read-only inputs
+- bounded request and response frames
+- wall-clock, CPU, memory, process, and output limits
+- termination on timeout or protocol violation
+- Baozi validation of every returned result as untrusted bytes
+
+The host owns this sandbox and admission control. Baozi may provide a protocol later, but does not
+promise process isolation in the library facade.
+
+## Allocation and Availability
+
+Rust cannot reliably recover from every allocator failure. Baozi therefore bounds predictable work
+before allocation and keeps an explicit conservative allowance for opaque backend decoding. Limits
+cover at least snapshots, decoded bytes, canonical output, scratch, peak-live storage, graph work,
+attribute and topology cells, animation, metadata, strings, and diagnostics.
+
+A known path that can allocate or recurse without a Baozi-enforced finite envelope is not made safe by
+reserving an allowance or recording RSS after the fact. It fails first-party admission until disabled,
+bounded, replaced, or process-isolated.
+
+Per-import budgets do not cap aggregate process use. A service accepting concurrent imports must
+enforce host-level queue depth, concurrency, memory, CPU, and deadline admission. Cancellation inside
+the library is cooperative; a hard deadline or hard RSS ceiling requires process isolation.
+
+ADR 0002 owns concurrent-session admission and ADR 0033 owns cooperative operation controls. This ADR
+records their security consequence rather than defining a second concurrency or cancellation API.
+
+## Diagnostics and Confidentiality
+
+- Diagnostic count and total bytes are bounded.
+- Host paths, panic payloads, environment values, and arbitrary backend messages are not exposed by
+  default.
+- Hostile strings are escaped for control characters and truncated with explicit evidence.
+- Failure reports preserve useful source identity without revealing an absolute scope root.
+- Telemetry callbacks are trusted host code; callback panics are contained where possible and never
+  run while security-critical locks are held.
+
+## Fuzz and Regression Gates
+
+Every public parser must have parser-local malformed tests and a facade/session-reachable fuzz path.
+Baseline admission includes deterministic malformed/limit evidence and no unresolved known crash,
+hang, invalid success, excessive allocation, or non-linear work finding. Any such finding disables the
+affected first-party path until fixed and regressed. Sustained sanitizer campaigns on the declared
+authority platform are additional maturity evidence; fuzz-target compilation alone cannot promote a
+format. Every finding becomes a minimized corpus seed and a deterministic regression test.
+
+Fuzz inputs are hostile bytes. External differential tools are not loaded in-process for arbitrary
+fuzz corpora; they run only as bounded subprocesses over explicitly trusted fixtures.
 
 ## Alternatives Considered
 
-### Option A: Rely on Rust memory safety alone
+### Option A: Rely on Rust memory safety and validation after parsing
 
 Pros:
 
-- Less process.
-- Faster parser implementation.
-- Rust prevents many memory corruption bugs.
+- Minimal process and implementation cost.
+- Rust prevents common use-after-free and data-race defects.
 
 Cons:
 
-- Panics, OOM, integer overflow, and denial of service remain possible.
-- FFI and unsafe can bypass safety.
-- Security posture becomes inconsistent.
+- Does not prevent panic, OOM, CPU exhaustion, path abuse, or semantic corruption.
+- Validation after unbounded allocation is too late.
+- Unsafe dependencies and FFI can bypass language guarantees.
 
 Decision: rejected.
 
-### Option B: Ban all unsafe and FFI permanently
+### Option B: Treat all registered code as adversarial inside the library
 
 Pros:
 
-- Strongest safety message.
-- Simpler audits.
-- Avoids native build complexity.
+- Appears to offer a single strong security promise.
+- Encourages defensive validation around extensions.
 
 Cons:
 
-- May block useful codecs or future complex formats.
-- Some performance backends may need narrow unsafe internals.
-- Not pragmatic for an Assimp-class ecosystem.
+- Impossible in a shared native process: code already has process authority.
+- `catch_unwind` is not a sandbox and cannot contain abort or UB.
+- Creates misleading guarantees for hosts processing truly hostile plugins.
 
-Decision: rejected as permanent policy.
+Decision: rejected. Registered code is trusted but fallible; hostile code runs out of process.
 
-### Option C: Safe default with reviewed unsafe and isolated opt-in FFI
+### Option C: Safe first-party core, bounded data boundary, isolated optional native backends
 
 Pros:
 
-- Keeps core safe and portable.
-- Allows pragmatic backends when justified.
-- Makes security posture auditable.
+- Gives hostile bytes enforceable limits and centralized validation.
+- Keeps the default dependency and failure surface auditable.
+- Preserves a path to complex codecs without misrepresenting in-process isolation.
 
 Cons:
 
-- Requires review discipline.
-- FFI features need separate CI and docs.
-- Some performance optimizations may wait for proof.
+- Requires continuous test, fuzz, and dependency-review work.
+- Hard availability guarantees require a host subprocess.
+- Some optimizations wait for evidence and review.
 
 Decision: chosen.
 
@@ -211,63 +263,46 @@ Decision: chosen.
 
 | Metric | Target | Measurement |
 | --- | --- | --- |
-| Panic-free malformed input | malformed fixtures return errors, not panics | parser tests |
-| Unsafe visibility | every unsafe block has safety comment and review note | code review / lint |
-| Limit enforcement | declared oversized counts fail before allocation | limit tests |
-| FFI isolation | FFI dependencies are absent from default feature tree | `cargo tree -e features` |
-| Binding isolation | C/Python/C#/Unity bindings use wrapper crates, not core IR layout promises | API review |
-| Fuzz coverage | every stable parser has fuzz target and regression corpus | fuzz inventory |
-| Error structure | parser failures map to `BaoziError` and diagnostics | snapshot tests |
+| Malformed input | no panic, hang, invalid success, or unbounded growth | fixtures, fuzz, and scale tests |
+| Admission boundary | baseline-unsafe parser/backend paths have no first-party registration, inventory entry, or facade feature | negative inventory and feature-graph fixtures |
+| Checked work | input-sized loops and allocations have explicit budgets | review and counter assertions |
+| Extension boundary | invalid or unwind-panicking importers never return validated success | facade contract tests |
+| Unsafe visibility | Baozi-owned exceptions have ADR, safety comments, tests, and fuzz evidence | lint and audit |
+| Dependency closure | security-sensitive resolved packages, features, sources, and checksums match their admission record | lockfile admission checker |
+| Default FFI | absent from default dependency and feature trees | `cargo tree -e features` |
+| Filesystem availability | hostile directory, FIFO, socket, and device entries return typed failures without blocking or pathname reopen | per-target same-handle and deadline tests |
+| Failure confidentiality | diagnostics are bounded, escaped, and root-redacted | snapshot tests |
+| Concurrency honesty | docs and APIs assign aggregate admission to host | threat-model and API review |
 
 ## Risks and Mitigations
 
 | Risk | Severity | Likelihood | Mitigation |
 | --- | --- | --- | --- |
-| Parser authors use `unwrap` during early work | Medium | High | Clippy review and malformed fixtures |
-| Limits reject legitimate huge assets | Medium | Medium | Make limits configurable and document defaults |
-| FFI backend destabilizes builds | High | Medium | Keep FFI opt-in and isolated |
-| Binding requirements distort Rust API | Medium | Medium | Keep Rust-native IR canonical and translate in wrapper crates |
-| Unsafe optimization introduces UB | High | Low | Require narrow blocks, comments, tests, fuzz, and safe fallback |
-| Fuzzing is not run long enough | Medium | Medium | Add smoke CI and scheduled deeper runs |
-| Third-party parser panics | Medium | Medium | Backend wrapper, regression tests, and replacement policy |
-
-## Implementation Plan
-
-### Phase 0: Guardrails
-
-- Add parser security rules to contributor docs.
-- Add clippy lints and review checklist for parser crates.
-- Define `ResourceLimits` in import context.
-
-### Phase 1: First Parsers
-
-- Implement STL/OBJ/PLY with checked counts and malformed fixtures.
-- Add fuzz targets before beta/stable promotion.
-- Convert parser failures to structured diagnostics.
-
-### Phase 2: Advanced Backends
-
-- Add optional FFI policy docs before first FFI backend.
-- Add a separate binding ADR before creating any stable `baozi-c-api` or language-specific wrapper.
-- Add feature tree checks for default dependency hygiene.
+| Panic boundary is mistaken for a sandbox | Critical | Medium | explicit non-goal and subprocess guidance |
+| Opaque parser allocates before Baozi admission | High | Medium | disable/unregister until finite preflight bounds or process isolation exist; allowance and RSS maturity tests are not waivers |
+| Host runs too many individually bounded imports | High | High | host queue/concurrency admission and process limits |
+| Unsafe dependency regresses | Critical | Low | exact resolved-closure gate, advisory/license audit, upgrade re-admission, and fuzz/sanitizer gates |
+| Special-file open hangs before parser limits apply | Critical | Medium | capability-relative nonblocking open, same-handle regular-file validation, and deadline regression tests |
+| Fuzz smoke is too shallow | High | Medium | regression corpus plus scheduled sustained campaigns |
+| Diagnostics leak host data | High | Medium | typed errors, escaping, truncation, and root redaction |
 
 ## Consequences
 
 Positive:
 
-- Parser code starts with a clear threat model.
-- Fuzzing and limits are not afterthoughts.
-- FFI remains possible without contaminating core.
+- The hostile-data contract is strong without making impossible claims about native code.
+- Parser failures preserve evidence and remain testable.
+- Unsafe and FFI costs are visible and isolated.
 
 Negative:
 
-- Parser implementation is slower than quick-and-dirty loaders.
-- Some optimizations require proof before adoption.
-- FFI users need explicit feature configuration.
+- Security gates add implementation and CI work to every parser.
+- Hosts needing hard availability or hostile plugins must operate subprocesses.
+- Dependency updates can require security re-admission.
 
-## Open Questions
+## Sources
 
-1. Should Baozi deny `unsafe_code` at crate level initially?
-   Recommendation: yes for core crates; allow parser crates to opt out only with a documented reason.
-2. Should `catch_unwind` wrap all third-party parser backends?
-   Recommendation: no by default; use only where a backend has known unwind-safe behavior and value.
+- [Rust `catch_unwind` limitations](https://doc.rust-lang.org/std/panic/fn.catch_unwind.html)
+- [Rust Nomicon: FFI](https://doc.rust-lang.org/nomicon/ffi.html)
+- [Rust Reference: panic behavior](https://doc.rust-lang.org/reference/panic.html)
+- [Baozi parser threat model](../security/parser-threat-model.md)

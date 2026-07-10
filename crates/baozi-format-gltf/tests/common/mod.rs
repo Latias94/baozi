@@ -1,8 +1,8 @@
 #![allow(dead_code)]
 
 use baozi_core::{BaoziError, Diagnostic, Result, Scene};
-use baozi_format_gltf::GltfImporter;
-use baozi_import::{FormatImporter, ImportContext, ImportOptions};
+use baozi_format_gltf::read_for_development;
+use baozi_import::{ImportContext, ImportOptions};
 use baozi_io::{AssetPath, MemoryAssetIo};
 use base64::Engine as _;
 use std::sync::Arc;
@@ -27,7 +27,7 @@ pub fn import_assets_result(
         io.insert(AssetPath::new(path)?, Arc::<[u8]>::from(bytes));
     }
     let mut ctx = ImportContext::with_options(&io, source_path, options);
-    let result = GltfImporter.read(&mut ctx);
+    let result = read_for_development(&mut ctx);
     let diagnostics = ctx.into_diagnostics();
     Ok((result, diagnostics))
 }

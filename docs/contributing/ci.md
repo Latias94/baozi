@@ -47,6 +47,7 @@ cargo fmt --all -- --check
 cargo check --workspace --all-targets
 cargo clippy --workspace --all-targets -- -D warnings
 cargo nextest run --workspace
+cargo nextest run --workspace --all-features
 cargo test --doc --workspace --all-features
 $env:RUSTDOCFLAGS = '-D warnings'
 cargo doc --workspace --all-features --no-deps
@@ -65,11 +66,10 @@ unpinned installer.
 ## Fuzz Gates
 
 Normal PR CI runs short Linux sanitizer smoke targets for `stl_import`, `obj_import`,
-`obj_postprocess`, and `ply_import`. Experimental fuzz targets that are not yet sanitizer-run safe
-still compile in a separate check-only job; `gltf_import` is in that tier until the private
-`gltf-rs` bootstrap backend no longer aborts under fuzz panic settings. The scheduled/manual fuzz
-workflow follows the same split: stable targets run longer Linux-only campaigns, while experimental
-targets run `cargo fuzz check`.
+`obj_postprocess`, and `ply_import`. Non-admitted candidate targets compile in a separate check-only
+job; `gltf_import` stays in that tier until the private `gltf-rs` bootstrap backend no longer aborts
+under fuzz panic settings. The scheduled/manual workflow follows the same split: admitted targets
+run Linux-only sanitizer campaigns, while non-admitted candidates run `cargo fuzz check` only.
 
 Windows fuzzing is useful for local parser work, but Windows sanitizer setup failures are toolchain
 evidence, not parser evidence. Linux GitHub Actions remains the promotion gate for sanitizer fuzz

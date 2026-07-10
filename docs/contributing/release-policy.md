@@ -14,13 +14,16 @@ Crates intended for eventual publication:
 - `baozi-postprocess`
 - `baozi-format-stl`
 - `baozi-format-obj`
+- `baozi-format-ply`
 
 Crates intentionally not published yet:
 
 - `baozi-test-support`: test-only helpers
-- `baozi-format-ply`: descriptor-only shell
-- `baozi-format-gltf`: static mesh MVP, held back until ADR 0027 gates and broader conformance
-  fixtures land
+- `baozi-xtask`: repository-only governance tooling
+- `baozi-format-ply`: admitted Experimental importer; source builds include it in `all-formats`, but
+  publication remains disabled until its package and release evidence is complete
+- `baozi-format-gltf`: internal candidate, not facade-admitted or publishable until ADR 0027 baseline
+  gates pass; broader conformance governs maturity only after admission
 - `baozi-fuzz`: cargo-fuzz workspace
 
 Shell format crates must stay `publish = false` until they import representative fixtures into
@@ -40,11 +43,15 @@ First release order:
 4. `baozi-postprocess`
 5. `baozi-format-stl`
 6. `baozi-format-obj`
-7. `baozi`
+7. `baozi-format-ply` after its publication gate is complete
+8. `baozi`
 
 Package leaf crates first with `cargo package -p <crate> --allow-dirty --no-verify`. Package the
 facade only after the dependency versions are available from the registry. Optional format crates
-with `publish = false` must not be included in release feature sets.
+with `publish = false` prevent packaging the facade manifest even when their feature is disabled;
+therefore every admitted facade dependency must be published first or removed from the release
+manifest by an explicit architecture decision. The preferred first-release path is to complete PLY's
+publication evidence and publish it before `baozi`.
 
 CI packages `baozi-core` as the only crate that can be validated before the first registry publish.
 The dependent crates must be package-checked in publish order after their internal dependencies exist
@@ -58,6 +65,7 @@ Before any crate publish:
 - `cargo check --workspace --all-targets`
 - `cargo clippy --workspace --all-targets -- -D warnings`
 - `cargo nextest run --workspace`
+- `cargo nextest run --workspace --all-features`
 - `cargo test --doc --workspace --all-features`
 - `cargo doc --workspace --all-features --no-deps` with `RUSTDOCFLAGS=-D warnings`
 - `cargo deny check`

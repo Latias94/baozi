@@ -1,54 +1,74 @@
 ---
-status: accepted
+status: superseded
 date: 2026-07-09
+updated: 2026-07-10
 authors:
   - Codex
 decision_type: architecture
-related:
+superseded_by:
   - docs/adr/0003-core-scene-ir-and-material-model.md
-  - docs/adr/0015-mesh-topology-vertex-attributes-skinning-and-animation-semantics.md
+  - docs/adr/0032-postprocess-remap-and-derived-data-contract.md
+related:
+  - docs/adr/0030-logical-mesh-primitive-and-attribute-domain.md
+  - docs/adr/0031-animation-skin-morph-and-deformer-contract.md
 ---
 
 # ADR 0025: Scene IR Invariants and Validation Boundaries
 
 ## Context
 
-Baozi's `Scene` is an owned Rust IR, not a C pointer graph. Users still need to inspect and adapt
-scene data after import, so making the entire IR immutable would make legitimate tooling harder.
-The risk is that public fields can be edited into invalid states unless validation boundaries are
-clear.
+This ADR previously allowed direct mutation of public `Scene` fields and required callers to
+remember `validate_scene` before returning data to Baozi. That made validation a convention rather
+than a state property, allowed stale bounds and IDs, and directly contradicted ADR 0003's validated
+result contract.
 
-## Decision
+## Supersession Decision
 
-`Scene` remains an editable owned data package, with validation enforced at construction and import
-boundaries:
+ADR 0003 now owns the `SceneBuilder -> ValidatedScene -> SceneEdit` state model. ADR 0032 owns
+transactional commit, remap publication, and derived-data invalidation. Direct mutation of a
+validated scene is no longer part of the canonical API.
 
-- ID newtypes have private tuple fields and expose `as_u32()` / `index()` accessors.
-- `SceneBuilder::finish()` validates before returning `Scene`.
-- Facade import returns only validated scenes.
-- Facade postprocess helpers validate output before returning `PostProcessed`.
-- Direct user mutation is allowed, but callers must run `validate_scene` before handing scenes back
-  to Baozi processing.
+```mermaid
+stateDiagram-v2
+    DirectMutation: Public mutable Scene
+    DirectMutation --> InvalidUnknown: caller forgets validation
+    ValidatedScene --> SceneEdit: explicit transaction
+    SceneEdit --> ValidatedNext: central commit validation
+    SceneEdit --> ValidatedScene: failure publishes nothing
+```
 
-The validator owns IR invariants:
+## Historical Options
 
-- root node range and parent rules
-- node parent/child consistency and acyclic reachability
-- mesh/material/texture/camera/light/skin references
-- topology and index consistency
-- SoA channel lengths for built-in streams, joints, morph targets, and custom attributes
-- finite numeric payloads for geometry, materials, cameras, lights, skins, and animations
-- animation target ranges, sorted times, and value counts
+### Option A: Public mutation followed by optional validation
+
+This was convenient but made every consumer responsible for proof freshness and was therefore
+rejected by the replacement ADRs.
+
+### Option B: No editing after import
+
+This preserves invariants but is unsuitable for asset tools and postprocessing. Rejected.
+
+### Option C: Isolated edits with mandatory commit validation
+
+This is the replacement decision in ADRs 0003 and 0032.
 
 ## Consequences
 
-Positive:
+- This ADR is historical and no longer authorizes public mutable collections.
+- `validate_scene(&Scene) -> bool/result` may exist as an internal diagnostic primitive, but it does
+  not manufacture a public validation proof.
+- Compile-fail tests and edit rollback tests replace reliance on caller discipline.
 
-- Tooling can edit scenes without fighting opaque builders.
-- Import/postprocess boundaries remain safe.
-- Invalid future fields should fail tests as soon as they are exposed.
+## Residual Risks
 
-Negative:
+| Risk | Severity | Mitigation |
+| --- | --- | --- |
+| Public fields accidentally recreate unchecked mutation | Critical | Public-API and compile-fail tests enforce read-only validated storage. |
+| Internal validation result is mistaken for a public proof | High | Proof construction stays private and only builder finish/edit commit can publish it. |
 
-- Downstream users can still construct invalid scenes manually.
-- New IR fields must update validator and snapshot code in the same change.
+## Supersession Acceptance
+
+- Governance checks reciprocal supersession links to ADRs 0003 and 0032.
+- No accepted ADR normatively depends on this document.
+- Mutation rollback tests prove failure, cancellation, and invalid output leave the input generation
+  and digest unchanged.

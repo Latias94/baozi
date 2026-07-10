@@ -1,6 +1,7 @@
 ---
 status: accepted
 date: 2026-07-08
+updated: 2026-07-10
 authors:
   - Codex
 decision_type: architecture
@@ -8,9 +9,26 @@ related:
   - docs/adr/0001-baozi-assimp-compatible-architecture.md
   - docs/adr/0003-core-scene-ir-and-material-model.md
   - docs/adr/0004-parser-backend-and-format-coverage-policy.md
+  - docs/adr/0011-format-support-tiers-and-compatibility-charter.md
+  - docs/adr/0026-validation-snapshot-and-fuzz-gates.md
+evidence:
+  - docs/plans/2026-07-10-001-refactor-baozi-canonical-architecture-plan.md
+tracers:
+  - crates/baozi-test-support/src/snapshot.rs
+  - fuzz/fuzz_targets
 ---
 
 # ADR 0005: Testing, Fuzzing, and Differential Oracle Strategy
+
+## Status and Authority
+
+This accepted ADR owns Baozi's layered test portfolio, fixture provenance policy, and external-oracle
+sandbox policy. ADR 0026 is the sole authority for per-field validator/snapshot/direct/fuzz evidence
+and golden encoding mechanics. ADR 0011 composes both into format maturity gates.
+
+Acceptance does not claim that every current format already has every layer. Current test counts,
+fuzz campaign results, and implementation gaps live in the canonical refactor plan and verification
+records.
 
 ## Context
 
@@ -25,10 +43,10 @@ Baozi's implementation and asset corpus license-clean.
 
 Assimp reference points:
 
-- unit tests: [test/unit](../../repo-ref/assimp/test/unit)
-- model fixtures: [test/models](../../repo-ref/assimp/test/models)
-- non-BSD model fixtures: [test/models-nonbsd](../../repo-ref/assimp/test/models-nonbsd)
-- fuzzing setup: [fuzz](../../repo-ref/assimp/fuzz)
+- unit tests: [test/unit](https://github.com/assimp/assimp/tree/bcc62230fc0471475528d732f4ad108a59bb7f6c/test/unit)
+- model fixtures: [test/models](https://github.com/assimp/assimp/tree/bcc62230fc0471475528d732f4ad108a59bb7f6c/test/models)
+- non-BSD model fixtures: [test/models-nonbsd](https://github.com/assimp/assimp/tree/bcc62230fc0471475528d732f4ad108a59bb7f6c/test/models-nonbsd)
+- fuzzing setup: [fuzz](https://github.com/assimp/assimp/tree/bcc62230fc0471475528d732f4ad108a59bb7f6c/fuzz)
 
 ## Decision
 
@@ -36,34 +54,39 @@ Baozi will use layered verification:
 
 - unit tests for core invariants and algorithms
 - property tests for scene builders, validators, and post-process passes
-- golden scene snapshots for representative fixtures
+- versioned golden records whose stable digest covers complete canonical values and whose human
+  preview stays bounded
 - malformed fixture tests for errors and diagnostics
 - fuzz targets for every public parser
-- round-trip tests only where exporters are intentionally supported
-- differential tests against Assimp when available
+- round-trip tests only after the exporter contract is Accepted with an implementation tracer; no
+  exporter or round-trip authority is active merely because this test layer exists
+- independent normalized differential tests, with Assimp available only as a sandboxed external
+  oracle over trusted fixtures
 - benchmark tests for large assets and post-process algorithms
 
-The oracle is used to find behavior differences, not to force Baozi to copy Assimp's memory layout or
-every compatibility quirk.
+The oracle is used to find behavior differences, not to force Baozi to copy Assimp's memory layout
+or compatibility quirks. Importer-generated output and snapshots of that same output are not the
+only oracle for a semantic claim.
 
 ## Architecture
 
 ```mermaid
 flowchart TD
     Fixture[Fixture asset] --> Baozi[Baozi importer]
-    Fixture --> Oracle[Assimp oracle]
+    Fixture --> Oracle[Sandboxed external oracle]
 
     Baozi --> BaoziScene[Scene]
     Oracle --> OracleScene[Oracle scene]
 
-    BaoziScene --> NormalizeA[Normalize to comparison model]
-    OracleScene --> NormalizeB[Normalize to comparison model]
+    BaoziScene --> NormalizeA[Normalize complete canonical semantics]
+    OracleScene --> NormalizeB[Normalize independently]
 
     NormalizeA --> Differ[Scene differ]
     NormalizeB --> Differ
     Differ --> Report[Compatibility report]
 
-    BaoziScene --> Snapshot[Golden snapshot]
+    BaoziScene --> Digest[Versioned full-value digest]
+    BaoziScene --> Preview[Bounded preview]
     Baozi --> Diagnostics[Diagnostic snapshots]
 ```
 
@@ -77,8 +100,8 @@ sequenceDiagram
 
     Test->>Baozi: import fixture
     Baozi-->>Test: ImportReport
-    Test->>Snapshot: assert normalized Baozi scene
-    Test->>Oracle: import same fixture when available
+    Test->>Snapshot: assert full-value digest and bounded preview
+    Test->>Oracle: spawn bounded external process when enabled
     Oracle-->>Test: oracle scene
     Test->>Differ: compare normalized scenes
     Differ-->>Test: pass, tolerated difference, or regression
@@ -112,16 +135,20 @@ Property tests cover:
 
 Candidate crates: `proptest` or `quickcheck`. The exact choice can be made during implementation.
 
-### Golden Snapshots
+### Golden Records
 
-Golden snapshots compare normalized scene summaries, not raw binary output.
+Golden records must satisfy ADR 0026: a versioned, domain-separated stable digest covers complete
+behavior-bearing canonical values while human preview and auxiliary memory remain bounded. Counts,
+field names, selected prefixes, and summaries alone are insufficient.
+
+ADR 0026 is the sole authority for snapshot encoding, field coverage, traversal, resource/scale
+bounds, mutation tests, and known vectors. This ADR owns only the role of golden records in the
+broader layered test portfolio and the requirement to keep raw-import and processed evidence
+distinct.
 
 Snapshot rules:
 
-- stable ordering for maps and metadata
-- floating-point epsilon and formatting rules
-- explicit omission of volatile fields such as source absolute paths
-- separate snapshots for raw import and post-processed result when useful
+- separate records for raw import and post-processed result
 - review workflow for intentional changes
 
 Suggested layout:
@@ -154,20 +181,18 @@ Every parser must include invalid inputs:
 - recursive includes
 - missing sidecar files
 - oversized declared counts
-- archive path traversal
+- archive path traversal where an Accepted archive/container ADR and implementation tracer make the
+  path active
 - unsupported but valid feature use
 
 Expected diagnostics should be snapshot-tested so error quality does not regress.
 
 ### Fuzzing
 
-Each parser crate should add at least one fuzz target:
+Each public parser has at least one production-path fuzz target:
 
 ```text
-fuzz/fuzz_targets/fuzz_obj.rs
-fuzz/fuzz_targets/fuzz_stl.rs
-fuzz/fuzz_targets/fuzz_ply.rs
-fuzz/fuzz_targets/fuzz_gltf.rs
+fuzz/fuzz_targets/<format>_import.rs
 ```
 
 Fuzz goals:
@@ -177,23 +202,24 @@ Fuzz goals:
 - no infinite loops
 - no unsafe memory bugs if unsafe is ever introduced
 - parser errors remain structured
+- every successful output passes the central validator
+- sidecar, graph, diagnostic, allocation, and operation budgets remain effective
+- minimized crashes become regression fixtures with corpus provenance
 
 Fuzzing should run in CI on a time budget and locally for deeper campaigns.
 
 ### Differential Oracle Tests
 
-Differential tests normalize Baozi and oracle output into a comparison model:
+Differential tests normalize Baozi and independently obtained expectations into a complete semantic
+comparison model. The model covers object identity and hierarchy, transforms, topology, every
+geometry attribute value, materials, images/textures/samplers, skins, morphs, animation curves,
+cameras/lights, metadata/provenance, scene space, diagnostics, and explicit losses applicable to the
+fixture. Counts and summaries are navigation aids, not comparison authority.
 
-```text
-ComparisonScene
-├── node count and hierarchy
-├── mesh primitive counts
-├── vertex/index counts
-├── material summary
-├── texture reference summary
-├── animation channel summary
-└── diagnostics / unsupported feature notes
-```
+The preferred primary oracle is a Baozi-owned normalized expectation derived from the source-format
+semantics. An independent parser may provide another differential view. Assimp is optional and
+non-authoritative: disagreement triggers classification and investigation rather than automatic
+acceptance of either output.
 
 Allowed differences must be explicit:
 
@@ -211,6 +237,12 @@ intentional Baozi deviations. The differ report should classify:
 - Baozi regression
 - oracle limitation
 - unsupported feature
+
+When Assimp is used, the harness runs it as an external process with no network, a minimal read-only
+trusted-fixture scope, bounded time/memory/output, and validation of the returned comparison data.
+It is never linked into Baozi, never receives arbitrary fuzz corpora, and never reads application
+paths outside its explicit fixture scope. An unavailable oracle skips only that optional comparison;
+Baozi-owned semantic evidence remains mandatory.
 
 ### Performance and Benchmark Tests
 
@@ -236,9 +268,10 @@ Test assets are source material, not disposable data. Every committed third-part
 - modifications, if any
 - attribution text when required
 
-Assimp's `test/models-nonbsd` must not be copied into Baozi. BSD-compatible Assimp fixtures still
-need attribution if copied, and the safer default is to create Baozi-owned minimal fixtures for core
-behavior.
+Baozi does not copy fixtures from Assimp, including `test/models` and `test/models-nonbsd`. The
+reference checkout remains read-only study material. Create Baozi-owned minimal fixtures for core
+behavior. Independently sourced third-party fixtures require explicit redistribution permission,
+provenance, attribution, and a concrete semantic purpose.
 
 Recommended asset metadata:
 
@@ -261,9 +294,10 @@ Fallback:
 cargo test
 ```
 
-Suggested tools:
+Tooling:
 
-- `insta` for snapshots
+- `baozi-test-support` implements ADR 0026's golden contract and this ADR's normalized differ; a
+  snapshot crate may assist review but is not an evidence authority
 - `proptest` for property tests
 - `cargo-fuzz` for fuzzing
 - `criterion` for benchmarks
@@ -299,7 +333,7 @@ Pros:
 Cons:
 
 - Can copy oracle bugs.
-- Requires external native dependencies or bindings.
+- Requires a separately installed, sandboxed external oracle.
 - Does not define Baozi-owned invariants.
 
 Decision: rejected as the only strategy. Use differential testing as one layer.
@@ -326,7 +360,7 @@ Decision: chosen.
 | --- | --- | --- |
 | Parser test baseline | Every stable format has valid and malformed fixtures | test inventory |
 | Fuzz coverage | Every public parser crate has a fuzz target | `cargo fuzz list` |
-| Snapshot stability | Golden snapshots are deterministic across platforms | CI matrix |
+| Golden completeness | Raw and processed records satisfy ADR 0026's complete-value and bounded-review contract | ADR 0026 evidence gate |
 | Oracle usefulness | Differential reports classify differences, not only pass/fail | oracle test output |
 | Asset license clarity | Every committed third-party fixture has license metadata | docs check |
 | Validator confidence | Invalid scenes cannot be produced by public builders without error | unit/property tests |
@@ -336,39 +370,12 @@ Decision: chosen.
 
 | Risk | Severity | Likelihood | Mitigation |
 | --- | --- | --- | --- |
-| Snapshot churn hides regressions | Medium | Medium | Normalize snapshots and require review for updates |
+| A compact golden omits semantic values | High | Medium | require ADR 0026 field evidence; summaries and preview-only records fail promotion |
 | Oracle dependency is hard to build in CI | Medium | Medium | Make oracle tests optional and keep Baozi-owned tests mandatory |
 | Fixture licenses are unclear | High | Medium | Require asset metadata before committing fixtures |
 | Fuzzing finds many bugs but no one triages | Medium | Medium | Keep corpus small at first and add regression tests for crashes |
 | Performance benchmarks become flaky | Medium | Medium | Use benchmarks for trends, not strict CI gates initially |
 | Tests overfit Assimp behavior | Medium | Medium | Classify tolerated differences and keep Baozi invariants primary |
-
-## Implementation Plan
-
-### Phase 0: Test Infrastructure
-
-- Add nextest configuration if needed.
-- Add test support crate for scene normalization and differ helpers.
-- Add asset license metadata template.
-- Add first validator unit tests.
-
-### Phase 1: First Format Tests
-
-- Add owned STL, OBJ, and PLY fixtures.
-- Add malformed fixtures for each parser.
-- Add golden snapshots for raw and post-processed imports.
-
-### Phase 2: Fuzz and Property Tests
-
-- Add cargo-fuzz harnesses for first parser crates.
-- Add property tests for `SceneBuilder`, validator, and post-process algorithms.
-- Convert any fuzz crash into a regression fixture.
-
-### Phase 3: Differential Compatibility
-
-- Add optional Assimp oracle test feature.
-- Define normalized comparison model.
-- Start with STL/OBJ/PLY/glTF compatibility reports.
 
 ## Consequences
 
@@ -385,11 +392,19 @@ Negative:
 - Oracle tests may be optional on some developer machines.
 - Snapshot review process must be maintained.
 
-## Open Questions
+## Fixed Implementation Constraints
 
-1. Which snapshot crate should Baozi use?
-   Recommendation: `insta`, unless workspace policy prefers plain files with a custom differ.
-2. Should oracle tests run in default CI?
-   Recommendation: no at first. Run them in an optional workflow because native setup may be heavy.
-3. Should fuzzing be in the main workspace or separate package?
-   Recommendation: keep a top-level `fuzz/` workspace-adjacent setup.
+- Golden mechanics, field coverage, digest schema, preview bounds, and scale gates are owned by ADR
+  0026; `baozi-test-support` is their implementation owner.
+- The external oracle runs in an optional/scheduled sandbox workflow; Baozi-owned semantic evidence
+  remains mandatory in ordinary gates.
+- Fuzzing stays in the workspace-adjacent top-level `fuzz/` package so production dependencies do
+  not absorb fuzz-only tooling.
+
+## Implementation Evidence
+
+Implementation sequence and current verification live in the
+[canonical architecture refactor plan](../plans/2026-07-10-001-refactor-baozi-canonical-architecture-plan.md),
+the `baozi-test-support` tracer, format/facade test suites, fuzz workspace, and engineering
+verification records. Those artifacts demonstrate progress without changing this accepted
+strategy.

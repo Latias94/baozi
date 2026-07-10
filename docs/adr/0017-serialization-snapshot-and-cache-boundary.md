@@ -4,179 +4,142 @@ date: 2026-07-09
 authors:
   - Codex
 decision_type: architecture
-related:
+depends_on:
   - docs/adr/0003-core-scene-ir-and-material-model.md
   - docs/adr/0005-testing-fuzzing-and-differential-oracle-strategy.md
   - docs/adr/0006-public-api-versioning-and-crate-stability-policy.md
   - docs/adr/0009-data-ownership-zero-copy-lifetimes-and-memory-layout.md
+related:
+  - docs/adr/0026-validation-snapshot-and-fuzz-gates.md
+  - docs/adr/0038-export-transaction-and-loss-contract.md
+tracers:
+  - crates/baozi-test-support/src/snapshot.rs
 ---
 
 # ADR 0017: Serialization, Snapshot, and Cache Boundary
 
 ## Context
 
-Baozi needs several representations of imported scenes:
+Baozi needs several representations of an imported Scene:
 
-- public Rust structs used by applications
-- normalized test snapshots used for golden fixtures and differential testing
-- possible serialized configs for CLI and tooling
-- possible binary caches for faster repeated imports
-- possible interchange exports in future crates
+- public Rust types used by applications
+- normalized test snapshots used for golden and differential evidence
+- optional serialized options or tooling data
+- a possible binary cache for repeated imports
 
-These are different contracts. If Baozi treats `serde` output of public structs as a stable file
-format, early internal changes will become breaking changes. If snapshots are too close to debug
-output, tests will become noisy and hard to review.
+These representations have different compatibility and security contracts. Treating derived serde or
+debug output as a stable schema would freeze early implementation details. Treating snapshots as a
+cache would make test readability and runtime performance compete.
+
+Interchange export is outside this ADR. ADR 0038 is a non-authoritative proposal until an exporter
+implementation tracer exists; no accepted serialization or cache decision implies export behavior.
 
 ## Decision
 
-Baozi will separate public API, test snapshot format, and cache format.
+Baozi separates the public Rust API, normalized snapshot schema, and internal cache schema.
 
-Policy:
+- Public Scene types are not a stable serialized file format.
+- Serde support is opt-in and feature-gated; derived representations are unstable unless a separate
+  schema explicitly says otherwise.
+- Golden snapshots use a dedicated normalized representation owned by test support.
+- A persistent cache, if added, is a separately versioned internal artifact and is always validated
+  after decode.
+- Snapshot and cache readers treat their bytes as untrusted input.
+- Neither representation is interchange export.
 
-- public `Scene` structs are the Rust API, not a stable serialized schema
-- `serde` support is optional and feature-gated
-- golden snapshots use a dedicated normalized text schema
-- binary cache is an internal versioned artifact, not an interchange format
-- cache compatibility is scoped to Baozi version, feature set, options, and source content hash
-- exporters are separate future crates and must not rely on debug or snapshot output
-
-## Architecture
+ADR 0026 is the sole authority for snapshot field coverage, schema/domain versioning, digest
+behavior, float normalization, redaction, deterministic ordering, memory bounds, mutation tests, and
+scale gates. This ADR owns only the separation between representations and does not restate that
+evidence contract.
 
 ```mermaid
 flowchart TD
-    Source[Source asset] --> Import[Importer]
-    Import --> Scene[Public Scene API]
-    Scene --> Snapshot[Normalized snapshot schema]
+    Import[Validated import result] --> Scene[Public Rust Scene]
+    Scene --> Snapshot[Bounded normalized snapshot]
     Scene --> Cache[Versioned internal cache]
-    Scene --> Exporter[Future exporter crates]
-    Options[Import options] --> CacheKey[Cache key]
-    SourceHash[Source hash] --> CacheKey
-    FeatureSet[Feature set] --> CacheKey
+    Options[Options and backend identity] --> CacheKey[Cache key]
+    Sources[Primary and dependency digests] --> CacheKey
     CacheKey --> Cache
+    Snapshot --> Tests[Golden and differential tests]
+    Cache --> Validate[Central validation after decode]
 ```
 
-```mermaid
-sequenceDiagram
-    participant Test
-    participant Importer
-    participant Normalize
-    participant Snapshot
+## Public API and Serde Boundary
 
-    Test->>Importer: import fixture
-    Importer-->>Normalize: Scene + diagnostics
-    Normalize->>Normalize: sort stable fields and round floats
-    Normalize-->>Snapshot: deterministic text
-    Snapshot-->>Test: compare golden file
-```
+- Source compatibility follows ADR 0006, not a derived field layout.
+- `Debug` output is diagnostic convenience and never a golden or cache schema.
+- Core types do not derive serialization by default.
+- A feature-gated serde representation may change before a separately declared stable schema exists.
+- Stable serialized envelopes have their own version, unknown-field policy, size limits, and tests.
 
-## Public Rust API Boundary
+## Snapshot Boundary
 
-The Rust API is source-compatible according to ADR 0006, but its derived serialization is not stable
-unless a schema version says so.
+Snapshots are test-support representations rather than `Debug`, derived serde, cache, or public
+interchange schemas. Applications must not consume them as compatibility artifacts. ADR 0026 owns
+what snapshot evidence contains and how its determinism, digest, normalization, redaction, bounds,
+mutation sensitivity, and scale behavior are verified.
 
-Rules:
+## Cache Contract
 
-- do not promise stable `serde_json` for `Scene`
-- do not use `Debug` output for tests
-- avoid deriving `Serialize` and `Deserialize` by default on all core types
-- add `serde` only behind a feature flag when a crate has a clear use case
-- document every stable serialized schema separately
+A persistent cache requires a separate implementation decision before introduction. Its key includes:
 
-## Snapshot Schema
+- Baozi and cache schema versions
+- primary and normalized dependency content digests
+- frozen import and postprocess option digests
+- format/backend identity and relevant feature set
+- target representation identity only when bytes are target-dependent
 
-Golden snapshots are designed for tests and review. They should be:
+Cache decode is an untrusted parser path with byte, allocation, graph, string, metadata, and work
+limits. A cache hit does not bypass central Scene validation. Corruption or incompatibility falls back
+to import unless the caller explicitly requested cache-only behavior.
 
-- deterministic
-- compact enough to review
-- stable across irrelevant allocation/order changes
-- explicit about lossy normalization
-- independent from `Debug`
-
-Snapshot normalization should include:
-
-- stable object ordering by IDs
-- stable metadata key ordering
-- rounded float formatting with documented epsilon
-- explicit omitted fields for empty/default values
-- deterministic diagnostics ordering
-- source path redaction where required
-
-Snapshot files are test artifacts, not a user interchange format.
-
-## Cache Format
-
-Binary cache may be introduced later to skip repeated parsing. The cache must include:
-
-- Baozi crate version
-- cache schema version
-- source content hash and sidecar hashes
-- import options hash
-- post-process pipeline hash
-- feature set or backend identity
-- target architecture only if representation is architecture-dependent
-
-Cache read failures must fall back to import unless the caller explicitly asks for cache-only mode.
-
-Cache files must not execute code, load arbitrary plugins, or bypass `AssetIo` path policy.
-
-## Export Boundary
-
-Exporters are future work and should live in explicit crates, for example:
-
-- `baozi-export-gltf`
-- `baozi-export-obj`
-- `baozi-cache`
-
-Exporter output is a format contract. Snapshot and cache output are not exporter output.
+The cache cannot open plugins, resolve ambient paths, execute code, or carry a forged validation
+proof. Cache storage and eviction belong to the host unless a future cache component is admitted.
 
 ## Alternatives Considered
 
-### Option A: Derive `serde` on every public type and call it stable
+### Option A: Derive serde for every public type and treat it as stable
 
 Pros:
 
-- Fast to implement.
-- Useful for tools and debugging.
-- Familiar to Rust users.
+- Minimal implementation work.
+- Convenient for tools and debugging.
 
 Cons:
 
-- Freezes internal structure too early.
-- Makes harmless refactors breaking.
-- Produces poor golden tests without normalization.
+- Freezes internal ownership and field layout.
+- Lacks explicit schema, resource, and unknown-field policy.
+- Produces noisy or incomplete golden evidence.
 
 Decision: rejected.
 
-### Option B: Use one binary representation for snapshots, cache, and interchange
+### Option B: Use one binary format for snapshots and caches
 
 Pros:
 
-- One implementation.
-- Potentially fast.
-- Avoids writing multiple schemas.
+- One encoder and decoder.
+- Compact and potentially fast.
 
 Cons:
 
-- Hard to review in tests.
-- Confuses internal cache with external compatibility.
-- Makes security and compatibility policy harder.
+- Binary fixtures are difficult to review.
+- Snapshot normalization can hide information needed for cache reconstruction.
+- Cache performance changes would destabilize test evidence.
 
 Decision: rejected.
 
-### Option C: Separate Rust API, normalized snapshots, internal cache, and exporter contracts
+### Option C: Separate public types, review snapshots, and versioned cache
 
 Pros:
 
-- Keeps each representation honest.
-- Allows internal API evolution.
-- Produces reviewable tests.
-- Leaves room for fast caches later.
+- Each representation has one purpose and honest compatibility.
+- Internal refactoring does not automatically change golden or cache policy.
+- Security limits can match each parser/encoder path.
 
 Cons:
 
-- More documentation and tooling.
-- Snapshot schema needs maintenance.
-- Cache and exporter crates require separate versioning.
+- More than one schema and tool may need maintenance.
+- Behavior-complete snapshots require deliberate design.
 
 Decision: chosen.
 
@@ -184,66 +147,32 @@ Decision: chosen.
 
 | Metric | Target | Measurement |
 | --- | --- | --- |
-| Snapshot determinism | same fixture and options produce identical snapshot text | golden tests |
-| Public API freedom | internal field reordering does not break snapshot tests | refactor tests |
-| Cache safety | stale or mismatched cache never silently returns wrong scene | cache key tests |
-| Serde clarity | crates without `serde` feature do not expose serialization deps | feature checks |
-| Review quality | snapshot diffs are readable in code review | fixture review |
-| Export separation | no exporter uses `Debug` or snapshot schema as format output | API review |
+| Representation separation | snapshots are produced by test-support adapters, never `Debug` or derived serde | dependency/source audit |
+| Evidence delegation | snapshot schema, digest, coverage, and bounds have one authority in ADR 0026 | ADR checker and review |
+| Cache safety | corrupt, stale, incompatible, or over-budget cache never returns unvalidated success | malformed/cache-key tests |
+| Feature isolation | builds without serde/cache behavior omit their dependencies | feature-tree checks |
+| Boundary honesty | docs and APIs do not describe snapshot/cache/serde as export | ADR/doc checker |
 
 ## Risks and Mitigations
 
 | Risk | Severity | Likelihood | Mitigation |
 | --- | --- | --- | --- |
-| Snapshot schema becomes another public API by accident | Medium | Medium | Document it as test-only and keep path under test-support docs |
-| Too much normalization hides real bugs | High | Medium | Keep raw values available and document epsilon rules |
-| Cache invalidation misses sidecars | High | Medium | Include resolved dependency hashes from `AssetIo` |
-| Optional `serde` feature causes version churn | Medium | Medium | Keep it additive and avoid promising stable schema |
-| Binary cache has security issues | High | Low | Treat cache as untrusted input and validate after decode |
-
-## Implementation Plan
-
-### Phase 0: Snapshot Policy
-
-- Add `baozi-test-support` snapshot data model.
-- Document float rounding and deterministic ordering.
-- Add first snapshots for empty scene and simple mesh fixtures.
-
-### Phase 1: Optional Serde
-
-- Add feature-gated `serde` only where needed.
-- Document that derived representation is unstable unless schema-versioned.
-
-### Phase 2: Cache Design
-
-- Create a separate cache ADR before implementing persistent binary cache.
-- Include source dependency hashing and option hashing in the design.
-
-### Phase 3: Exporter Boundary
-
-- Add exporter crate policy before first exporter implementation.
-- Keep exporter tests independent from snapshot internals.
+| Snapshot becomes accidental public schema | Medium | Medium | keep test-support ownership and explicit non-goal |
+| Snapshot evidence rules drift between ADRs | High | Medium | delegate all evidence semantics and gates exclusively to ADR 0026 |
+| Cache key misses dependencies/options | Critical | Medium | derive key from session dependency table and frozen option identities |
+| Cache decode bypasses validation | Critical | Low | internal proof constructors and mandatory central validation |
+| Proposed export is mistaken for accepted behavior | High | Medium | only nonnormative related link to Proposed ADR 0038 |
 
 ## Consequences
 
 Positive:
 
-- Tests can be stable without freezing internals.
-- Future cache work has a clear safety boundary.
-- Users are not misled into treating debug output as an interchange format.
+- Tests remain reviewable without freezing the Rust model.
+- A future cache has an explicit validation and invalidation boundary.
+- Users are not misled into treating implementation output as interchange format.
 
 Negative:
 
-- More than one representation must be maintained.
-- Snapshot tooling must be designed before many fixtures are added.
-- `serde` users need clear caveats.
-
-## Open Questions
-
-1. Should normalized snapshots be TOML, JSON, RON, or a custom text format?
-   Recommendation: start with deterministic JSON or RON in `baozi-test-support`, then revisit after
-   real fixture diffs.
-2. Should cache be a workspace crate or facade feature?
-   Recommendation: separate crate, because cache policy and dependencies will grow.
-3. Should public `Scene` support stable schema export in 1.0?
-   Recommendation: only if there is a concrete user story beyond testing.
+- Snapshot and future cache tooling have separate schemas.
+- Optional serde users receive no implicit stable file-format promise.
+- Persistent cache implementation remains deferred pending its own tracer and decision.

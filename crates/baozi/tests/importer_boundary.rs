@@ -685,8 +685,6 @@ fn default_and_new_register_the_same_built_in_formats() {
         "obj",
         #[cfg(feature = "format-ply")]
         "ply",
-        #[cfg(feature = "format-gltf")]
-        "gltf",
     ]
     .into_iter()
     .collect();

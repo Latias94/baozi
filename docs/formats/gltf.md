@@ -1,40 +1,41 @@
-# glTF Format Support
+# glTF Development Candidate
 
 ## Summary
 
 - Format: glTF 2.0 / GLB
 - Crate: `baozi-format-gltf`
-- Maturity: Experimental
-- Default feature: not enabled by `default-formats`
+- Admission: blocked; internal development candidate only
+- Public facade feature: none
 - Parser backend: `gltf-rs` 1.4.x as an internal bootstrap dependency
-- Supported extensions: `.gltf`, `.glb`
-- Supported media types: `model/gltf+json`, `model/gltf-binary`
+- Candidate extensions: `.gltf`, `.glb`
+- Candidate media types: `model/gltf+json`, `model/gltf-binary`
 - Encoding: JSON plus binary buffers, base64 buffer data URIs, or GLB container
-- Sidecar policy: external buffers through `ImportContext`; base64 buffer data URIs and GLB BIN
-  payloads supported
+- Sidecar policy: external buffers through the selected `ParseScope` dependency resolver; base64
+  buffer data URIs and GLB BIN payloads supported by the current development harness
 
 ## Current Status
 
-`baozi-format-gltf` imports a mesh, material, camera, and skinning MVP into Baozi's owned IR. It
-supports common `.gltf` files with external binary buffers, base64 buffer data URIs, and `.glb`
-files with BIN payloads. External buffers and data URIs are loaded only through `ImportContext`, so
-resource limits, path resolution, diagnostics, and strict mode stay under Baozi control.
+`baozi-format-gltf` contains an internal mesh, material, camera, and skinning development slice, but
+it is not a first-party inventory entry and is not registered by the public `baozi` facade. The
+crate remains in the workspace so its preflight, normalized-model, and sanitizer work can proceed
+without presenting the backend as admitted support.
 
 The dependency on `gltf-rs` is intentionally hidden inside this crate. Baozi does not expose
 `gltf-rs` types in public API, so the backend can later be forked or replaced by a Baozi-owned parser
 without changing facade users. The ownership and replacement boundary is defined in
 [`ADR 0027`](../adr/0027-gltf-backend-ownership-and-replacement-policy.md).
 
-The crate remains `publish = false` until the ADR 0027 quality gates and a broader conformance corpus
-are in place.
+The crate remains `publish = false`. A public facade feature may be reintroduced only after the ADR
+0027 baseline admission gates pass; broader non-safety maturity evidence then determines whether the
+admitted format is Experimental, Beta, or Stable.
 
-The `gltf_import` fuzz target currently compiles in CI but is not part of the mandatory sanitizer-run
-matrix. Malformed input can still trigger a `gltf-rs` validation panic in cargo-fuzz builds where the
-panic aborts before Baozi's `catch_unwind` fallback can return `BaoziError`. This is tracked in
-[glTF Backend Notes](../research/gltf-rs-backend-notes.md); sanitizer-run promotion requires a
-Baozi-owned preflight or backend fork that prevents this abort class.
+The `gltf_import` development fuzz target currently compiles but is not accepted as parser evidence.
+Malformed input can trigger a `gltf-rs` validation panic in cargo-fuzz builds where panic aborts
+before Baozi's `catch_unwind` fallback can return an error. This known baseline failure is why the
+format is disabled at the facade rather than labeled Experimental. The blocker and replacement
+criteria are tracked in [glTF Backend Notes](../research/gltf-rs-backend-notes.md).
 
-## Supported MVP
+## Implemented Development Slice
 
 - Static primitives using points, lines, or triangles.
 - Positions, normals, tangents, texture coordinates, colors, indices, `JOINTS_0`, and `WEIGHTS_0`
@@ -45,15 +46,16 @@ Baozi-owned preflight or backend fork that prevents this abort class.
 - PBR metallic-roughness material factors.
 - Base color, metallic-roughness, normal, occlusion, and emissive texture URI references.
 - Y-up, right-handed, meters scene space metadata.
-- Resource ledger accounting for primary assets, external buffers, base64 buffer data URIs, GLB BIN
-  payloads, and diagnostics.
-- Quality gates for GLB import, snapshots, malformed external buffers/data URIs, facade ledger
-  stats, skin validation, and a check-only glTF fuzz target.
+- Development resource-limit coverage for primary assets, external buffers, base64 buffer data URIs,
+  GLB BIN payloads, and diagnostics.
+- Development gates for GLB import, snapshots, malformed external buffers/data URIs, skin validation,
+  and a check-only glTF fuzz target. These are not facade admission evidence.
 
-## Known Non-Support
+## Admission Blockers And Missing Semantics
 
 - Embedded image buffer views and texture data URIs are diagnosed and skipped.
 - Triangle strips, triangle fans, line strips, and line loops are not expanded yet.
 - Morph targets and animation channels are diagnosed but not imported into final IR yet.
 - The current backend is useful for bootstrapping, not the long-term parser ownership boundary.
-- `gltf_import` sanitizer fuzz run is disabled until known backend aborts are removed or isolated.
+- `gltf_import` is a non-admitted development target until known backend aborts are removed or
+  process-isolated and the complete baseline admission matrix passes.

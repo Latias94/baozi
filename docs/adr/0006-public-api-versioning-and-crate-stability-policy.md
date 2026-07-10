@@ -1,320 +1,305 @@
 ---
-status: proposed
+status: accepted
 date: 2026-07-08
+updated: 2026-07-10
 authors:
   - Codex
 decision_type: architecture
+supersedes:
+  - docs/adr/0024-public-api-hardening-and-stability-tiers.md
+evidence:
+  - docs/plans/2026-07-10-001-refactor-baozi-canonical-architecture-plan.md
+  - crates/baozi/src/lib.rs
+  - crates/baozi-import/src/lib.rs
 related:
   - docs/adr/0001-baozi-assimp-compatible-architecture.md
   - docs/adr/0003-core-scene-ir-and-material-model.md
   - docs/adr/0004-parser-backend-and-format-coverage-policy.md
+  - docs/adr/0007-workspace-crate-graph-feature-flags-msrv-and-ci-gates.md
+  - docs/adr/0011-format-support-tiers-and-compatibility-charter.md
+  - docs/adr/0021-extension-registry-and-format-descriptor-governance.md
+  - docs/adr/0025-scene-ir-invariants-and-validation-boundaries.md
+  - docs/adr/0028-adr-lifecycle-and-evidence-governance.md
 ---
 
 # ADR 0006: Public API, Versioning, and Crate Stability Policy
 
+## Status and Authority
+
+This ADR is Baozi's single authority for public compatibility promises, stability tiers, breaking
+changes, crate publication, and versioning. Other ADRs may define domain semantics, ownership, or
+extension behavior, but they must link here rather than create a second compatibility policy.
+
+`Accepted` means that this decision governs new work. It does not claim that every current symbol,
+crate manifest, document, or release gate already conforms. Implementation status and verification
+belong in the canonical refactor plan and its evidence records, not in this durable decision.
+
+ADR 0024 is superseded by this document. Its useful intent is incorporated here; it is not a second
+source of public API rules.
+
 ## Context
 
-Baozi is starting from an empty Rust crate but aims for an Assimp-class capability surface. That goal
-creates pressure to expose many APIs early: scene structs, importer traits, format crates,
-post-process flags, async adapters, parser options, metadata, exporters, and test helpers.
+Baozi needs an ergonomic Rust facade, a source-preserving canonical scene model, deliberately
+extensible import infrastructure, and replaceable format backends. These surfaces have different
+costs of change. Treating every `pub` item as equally stable would freeze prototype contracts;
+treating every surface as indefinitely unstable would make the library unusable.
 
-If all APIs are treated as stable too early, Baozi will be forced to preserve mistakes. If everything
-is unstable forever, users cannot build on it. The project needs an explicit stability policy before
-workspace crates and public traits are created.
+Baozi has not shipped a stable consumer contract. The canonical reset therefore replaces prototype
+APIs through one atomic cutover instead of preserving them through aliases, version suffixes, or
+parallel models.
 
 ## Decision
 
-Baozi will use tiered API stability:
+### Canonical v1 Reset
 
-- public facade APIs are the most stable surface
-- core data structures are reviewed carefully but may evolve during `0.x`
-- importer and post-process extension traits are initially sealed or marked experimental
-- format crates expose only Baozi-owned options and `FormatInfo`
-- internal crates and modules may change freely before `1.0`
-- feature flags are treated as part of the user contract once documented
+The replacement public model is canonical v1 behavior. Here, "v1" names the first coherent Baozi
+contract; it does not assert that the Cargo package has reached SemVer `1.0.0`.
 
-Pre-`1.0`, Baozi does not promise full SemVer stability, but breaking changes must still be
-intentional, documented, and motivated by ADRs or changelog entries.
+For this pre-release canonical reset:
 
-After `1.0`, public facade APIs, stable core scene fields, stable feature names, and stable format
-contracts follow SemVer.
+- replace incorrect prototype APIs in place and delete their implementations, tests, and examples
+- do not add version-suffixed replacement types or modules, version-to-version adapters,
+  deprecated aliases, compatibility shims, or parallel old/new scene models
+- do not retain an unpublished API solely because code in this repository used it
+- land each replacement as one coherent contract, with callers and tests updated atomically in the
+  same cutover
+- use ordinary domain names such as `Scene`, `Importer`, and `ImportReport` for the replacement
+
+After a public contract is actually released, the release policy below governs subsequent breaks.
+This one-time reset is not permission to bypass review, evidence, or crate ownership boundaries.
+
+### Stability Tiers
+
+| Tier | Owned surface | Pre-release promise | Promotion requirement | Released promise |
+| --- | --- | --- | --- | --- |
+| Facade | common import, inspect, and process workflow from `baozi` | coherent and documented; breaks are intentional | packaged consumer test plus public docs | SemVer after declared stable |
+| Canonical model | invariant-bearing scene types and read-only typed views from `baozi-core` | may break only through an accepted semantic ADR and atomic cutover | validation, snapshot, format, and public workflow evidence | SemVer for fields/types marked stable |
+| Extension | custom importer, IO, option codec, and postprocess contracts in owning crates | experimental; may break without compatibility adapters | multiple real implementations, object-safety/API review, and examples | SemVer only after explicit promotion |
+| Internal/backend | parser ASTs, conversion scratch data, ledgers, builders, proofs, registries, and backend helpers | no compatibility promise | not eligible; expose a narrower owned contract instead | no promise even when its crate is published |
+| Test support | differs, fixtures, fuzz helpers, and snapshot internals | workspace-private by default | separate publication and stability decision | no promise unless explicitly published |
+
+An item is not promoted merely because Rust requires it to be `pub` across workspace crate
+boundaries. Stability is an explicit documented property, not a visibility inference.
+
+### Public Facade Boundary
+
+The `baozi` facade owns the normal workflow:
+
+1. select a source and typed import options
+2. receive a validated scene or a structured failure carrying bounded evidence
+3. inspect logical meshes, primitives, attributes, materials, hierarchy, and provenance through
+   canonical types
+4. optionally run a typed postprocess plan and inspect its report
+
+The facade may expose immutable descriptors and structured outcome evidence needed for this
+workflow. It must not expose parser-backend types, raw probes, mutable import contexts, registry
+internals, validation-proof constructors, budget ledgers, process-runtime types, native handles, or
+SIMD-specific storage.
+
+A deliberate extension entry point may refer to an experimental trait owned by another Baozi
+crate. Its documentation and versioning follow the extension tier; appearing on an `Importer`
+method does not silently promote the trait to facade stability.
+
+### Construction and Invariants
+
+- Report and descriptor families with expected future fields use constructors and read-only
+  accessors rather than public struct literals.
+- Canonical scene construction and validation-proof creation remain internal capabilities.
+- Public structural edits use the transaction/remap contract owned by the scene-invariant ADR;
+  callers cannot assign an import stage or forge validation.
+- Duplicate registration and other caller-controlled conflicts return structured errors rather
+  than panic.
+- Public APIs expose Baozi-owned domain and error types, never third-party parser or Assimp types.
+
+### Error and Diagnostic Compatibility
+
+Structured categories, stable diagnostic codes, object/source paths, severity, and typed evidence
+are compatibility candidates. English message prose, debug formatting, and backend-specific causes
+are not compatibility identifiers.
+
+Tests of stable contracts assert structured fields. Full-message snapshots are allowed for user
+experience review but do not create a permanent message-string promise unless a separate contract
+says so.
+
+### Feature Compatibility
+
+Documented facade features are public API only after their capability is real and promotion gates
+pass. Before promotion, misleading or empty features are deleted rather than preserved.
+
+Once released as stable:
+
+- renaming or removing a feature is a breaking change
+- changing a feature's semantics or adding material dependency/runtime cost requires release notes
+- default-feature changes require an explicit compatibility review
+- backend-selection features remain private to format crates and cannot change canonical semantics
+
+Parser backend admission lives in ADR 0004, feature composition in ADR 0007, and format
+maturity/evidence in ADR 0011. This ADR owns only their compatibility consequences.
+
+### Crate Publication
+
+Workspace decomposition does not imply independent public products. A crate remains
+`publish = false` until it has a documented consumer reason, complete dependency topology, package
+simulation, license metadata, public documentation, and an assigned stability tier.
+
+The facade and every published transitive dependency must be packageable together. Internal shell
+crates are deleted or kept unpublished; they are not published to make a feature graph appear
+complete.
+
+### Release Versioning
+
+Before the first public release:
+
+- breaking changes are allowed and should favor the correct canonical design
+- the old prototype is deleted instead of deprecated
+- the architecture plan and Conventional Commits provide implementation history
+
+For published `0.x` releases:
+
+- user-visible breaks are intentional, called out in the changelog, and shipped in an appropriate
+  minor release
+- no stability tier is promoted implicitly
+- short deprecation windows are optional when replacement is genuinely useful; they are not
+  required for an incorrect or unsafe experimental contract
+
+After `1.0.0`:
+
+- stable facade, canonical-model surfaces, promoted extension contracts, documented features, and
+  published crate topology follow SemVer
+- removals normally follow deprecation and replacement guidance
+- exceptions require a security or correctness rationale, an ADR, and explicit release notes
 
 ## Architecture
 
 ```mermaid
 flowchart TD
-    User[User code] --> Facade[baozi facade]
-    User --> CoreStable[Stable core types]
-    Advanced[Advanced users] --> Experimental[Experimental extension APIs]
-
-    Facade --> Import[baozi-import]
-    Facade --> Core[baozi-core]
-    Facade --> Post[baozi-postprocess]
-    Import --> Formats[baozi-format-*]
-    Formats --> Internal[backend modules]
-
-    CoreStable -. reviewed changes .-> Core
-    Experimental -. may break in 0.x .-> Import
-    Internal -. no stability promise .-> Formats
+    Consumer[Consumer code] --> Facade[baozi facade tier]
+    Consumer --> Core[canonical model tier]
+    Advanced[Deliberate extension author] --> Extension[extension tier]
+    Facade --> Core
+    Facade --> Outcome[structured outcome evidence]
+    Extension --> Import[baozi-import contracts]
+    Import --> Format[format-private implementation]
+    Format --> Backend[replaceable parser backend]
+    Format --> Builder[internal builder and proof boundary]
+    Builder --> Core
+    Ledger[budget and runtime internals] --> Import
 ```
 
-```mermaid
-sequenceDiagram
-    participant User
-    participant Facade
-    participant StableCore
-    participant ExperimentalTrait
-    participant Internal
-
-    User->>Facade: baozi::load / Importer
-    Facade-->>User: ImportReport
-    User->>StableCore: inspect Scene
-    User->>ExperimentalTrait: optional custom importer
-    ExperimentalTrait->>Internal: hidden backend details
-```
-
-## Stability Tiers
-
-| Tier | Examples | Stability promise before `1.0` | Stability promise after `1.0` |
-| --- | --- | --- | --- |
-| Facade | `baozi::load`, `Importer`, `ImportReport` | avoid churn, document breaks | SemVer stable |
-| Core stable | IDs, `Scene`, common mesh/material fields | reviewed changes only | SemVer stable |
-| Core experimental | animation details, metadata extensions, edit APIs | may change with changelog | SemVer stable only when promoted |
-| Extension traits | custom importer, custom post-process | sealed or experimental | SemVer stable when unsealed |
-| Format options | `ObjOptions`, `GltfOptions` | may evolve by format maturity | SemVer stable for stable formats |
-| Internal backend | parser ASTs, converter helpers | no promise | no promise |
-| Test support | scene differ, snapshot helpers | may change | versioned separately if public |
-
-## Public API Rules
-
-### Facade First
-
-The facade should optimize common use:
-
-```rust
-let scene = baozi::load_scene("asset.gltf")?;
-let report = baozi::Importer::new().read_path("asset.obj")?;
-```
-
-Advanced APIs should be reachable but not required for the first user experience.
-
-### Sealed Traits First
-
-Traits that define extension contracts should be sealed until the project has enough real format
-implementations:
-
-- `FormatImporter`
-- `PostProcessStep`
-- `AssetIo` may need to be public earlier, but should have conservative method shape
-
-Unsealing a trait is a stability commitment. Adding required trait methods after unsealing is a
-breaking change.
-
-### No Backend Type Leakage
-
-Public APIs must not expose:
-
-- parser crate AST types
-- Assimp C/C++ types
-- native FFI handles
-- Rayon/Tokio types in core APIs
-- SIMD-specific vector types
-
-Optional adapters can expose integration types in integration crates, not in `baozi-core`.
-
-### Feature Flag Stability
-
-Documented user-facing feature names are API:
-
-- renaming a feature is a breaking change after `1.0`
-- changing a feature to pull large new dependencies needs changelog entry
-- default feature changes require release notes and migration guidance
-
-Feature flags should be additive when possible.
-
-### Error and Diagnostic Stability
-
-`BaoziError` categories should be stable earlier than message strings. Tests should avoid asserting
-full English messages unless they are user-facing snapshots.
-
-Stable fields:
-
-- category
-- source path identity where available
-- source location
-- diagnostic code
-- severity
-
-Message text may evolve before `1.0`.
-
-## Crate Publishing Policy
-
-Initial workspace can contain many crates, but publication should be conservative.
-
-Recommended publish order:
-
-1. `baozi-core`
-2. `baozi-import`
-3. `baozi-postprocess`
-4. `baozi`
-5. stable `baozi-format-*` crates
-6. optional `baozi-cli`
-7. optional `baozi-test-support`
-
-Crates that are purely internal can remain unpublished until their API earns a reason to exist
-outside the workspace.
-
-## Versioning Policy
-
-Pre-`1.0`:
-
-- breaking changes are allowed
-- every breaking change should be listed in `CHANGELOG.md`
-- major architecture changes should cite an ADR
-- avoid long deprecation windows; fix the API while the project is young
-- keep migration notes for user-visible changes
-
-Post-`1.0`:
-
-- SemVer applies to public APIs and documented features
-- deprecate before removing when practical
-- use compile-time deprecation attributes for Rust APIs
-- provide migration examples for common changes
-
-## Documentation Policy
-
-Each public API family needs:
-
-- crate-level docs
-- quick start examples
-- error and diagnostic examples
-- feature flag table
-- supported format table
-- stability note for experimental APIs
-
-Each ADR should answer "why", not restate every function signature.
+Compatibility flows outward only through owned contracts. Internal visibility does not flow a
+stability promise back to consumers.
 
 ## Alternatives Considered
 
-### Option A: Stabilize public traits immediately
+### Option A: Preserve the prototype alongside version-suffixed replacements
 
 Pros:
 
-- Friendly to early plugin authors.
-- Clear extension story.
-- Avoids changing user code later.
+- minimizes immediate call-site churn
+- permits old and new models to coexist temporarily
 
 Cons:
 
-- Freezes importer and post-process contracts before Baozi understands enough formats.
-- Makes async, diagnostics, and resource limits harder to add.
-- Requires compatibility burden too early.
+- doubles the model, validation, documentation, and test surface
+- creates adapters that can silently lose semantics
+- spends compatibility budget on an unpublished contract
 
-Decision: rejected. Seal extension traits first.
+Decision: rejected. Baozi performs one canonical v1 replacement and deletes the prototype.
 
-### Option B: Keep everything internal until `1.0`
+### Option B: Treat every public workspace item as stable
 
 Pros:
 
-- Maximum freedom to refactor.
-- No early compatibility burden.
-- Simple release messaging.
+- simple rule for users to understand
+- enables early third-party extension work
 
 Cons:
 
-- Users cannot integrate custom IO, custom formats, or post-process steps.
-- Less feedback on real extension needs.
-- Does not fit a library intended to become ecosystem infrastructure.
+- Rust cross-crate visibility accidentally freezes internal mechanics
+- makes resource, proof, and backend boundaries expensive to correct
+- prevents format evidence from shaping extension contracts
 
-Decision: rejected as too closed.
+Decision: rejected. Stability is assigned by tier and explicit promotion.
 
-### Option C: Tiered stability with facade-first public API
+### Option C: Keep every API unstable until `1.0`
 
 Pros:
 
-- Gives normal users a usable API early.
-- Preserves design freedom for advanced extension traits.
-- Makes stability promises explicit per surface.
-- Fits Rust workspace publication strategy.
+- maximum refactoring freedom
+- minimal release process before `1.0`
 
 Cons:
 
-- Requires documentation discipline.
-- Users must understand experimental API labels.
-- Some APIs may need promotion work before `1.0`.
+- gives early consumers no dependable common workflow
+- obscures which breaks are architectural and which are accidental
+- delays packaging and documentation discipline
+
+Decision: rejected. The facade and canonical model earn stability progressively.
+
+### Option D: Tiered stability with an atomic canonical v1 reset
+
+Pros:
+
+- fixes the model while Baozi has no stable consumers
+- gives common workflows a smaller, reviewable contract
+- keeps parser and extension internals replaceable
+- provides a clear path to SemVer stability
+
+Cons:
+
+- requires explicit promotion evidence and documentation ownership
+- downstream prototype users must update without a compatibility adapter
 
 Decision: chosen.
-
-## Success Metrics
-
-| Metric | Target | Measurement |
-| --- | --- | --- |
-| Facade clarity | Loading a file needs one or two obvious calls | crate docs and examples |
-| API boundary | Public API has no backend parser, runtime, or SIMD leakage | public API review |
-| Stability docs | Each public crate documents stability tier and feature flags | docs check |
-| Breaking changes | Every breaking change before `1.0` has changelog entry | release checklist |
-| Trait discipline | Extension traits remain sealed until at least three real implementations prove shape | API review |
-| Error stability | Tests assert structured fields, not only string messages | test review |
-| SemVer readiness | `cargo-semver-checks` can run once APIs approach `1.0` | CI job |
-
-## Risks and Mitigations
-
-| Risk | Severity | Likelihood | Mitigation |
-| --- | --- | --- | --- |
-| Users depend on experimental APIs anyway | Medium | High | Label docs clearly and use module names like `experimental` |
-| Sealed traits block legitimate use cases | Medium | Medium | Provide controlled extension points and promote after real examples |
-| Public facade is too small for advanced users | Medium | Medium | Expose advanced builders behind explicit modules |
-| Feature flags become chaotic | High | Medium | Keep a documented feature matrix and avoid backend names in facade features |
-| Pre-`1.0` breaking changes feel surprising | Medium | Medium | Maintain changelog and migration notes even before `1.0` |
-| Internal crates become accidentally public | Medium | Medium | Set `publish = false` until publication is intentional |
-
-## Implementation Plan
-
-### Phase 0: Workspace Metadata
-
-- Add crate-level stability notes.
-- Add `publish = false` for internal crates until publication is intentional.
-- Add feature flag matrix to the facade docs.
-
-### Phase 1: Facade and Core API
-
-- Implement `baozi::load_scene` and `baozi::Importer`.
-- Keep `SceneBuilder` advanced but documented.
-- Add public API review in CI or release checklist.
-
-### Phase 2: Extension API Hardening
-
-- Keep `FormatImporter` sealed while STL, OBJ, PLY, and glTF prove the trait.
-- Keep `PostProcessStep` sealed while initial steps prove ordering and diagnostics.
-- Promote extension APIs only with examples and tests.
-
-### Phase 3: Release Discipline
-
-- Add `CHANGELOG.md`.
-- Add migration notes for breaking changes.
-- Add `cargo-semver-checks` before `1.0` stabilization.
 
 ## Consequences
 
 Positive:
 
-- Baozi can be useful before `1.0` without freezing every internal decision.
-- Core API boundaries remain intentional.
-- Users can tell which APIs are safe to build on.
-- Future crate publication is less likely to expose accidental internals.
+- the project can make necessary breaking corrections without carrying two architectures
+- consumers can distinguish supported workflows from merely public workspace mechanics
+- backend replacement does not determine public versioning
+- stability promotion becomes an evidence-backed engineering decision
 
 Negative:
 
-- More documentation and release process.
-- Plugin authors may need to wait for unsealed traits.
-- Some pre-`1.0` migrations are still expected.
+- prototype call sites and tests must be updated atomically as part of the cutover
+- extension authors accept churn until their contracts are promoted
+- release tooling must understand features, crate topology, and API tiers
 
-## Open Questions
+## Risks and Mitigations
 
-1. Should `baozi-core` expose all fields publicly or use accessor methods?
-   Recommendation: prefer public read-only fields only when invariants cannot be broken, otherwise use
-   constructors/accessors.
-2. Should `baozi-test-support` be published?
-   Recommendation: keep it internal until external format authors appear.
-3. Should custom importers be supported before `1.0`?
-   Recommendation: yes experimentally, but sealed stable traits should wait.
+| Risk | Severity | Likelihood | Mitigation |
+| --- | --- | --- | --- |
+| A second ADR recreates a compatibility policy | High | Medium | ADR index/checker treats this ADR as the sole authority and requires links from related decisions |
+| A `pub` internal type is mistaken for stable API | High | High | Crate docs label tiers; package/API review checks facade and published crates |
+| Canonical reset leaves old aliases or dual storage | High | Medium | Repository-wide source, API, documentation, and package gates reject replacement suffixes, adapters, legacy symbols, and duplicate models |
+| Facade exposes proof, ledger, or backend details | High | Medium | Compile-fail tests and public API review enforce construction/capability boundaries |
+| Experimental users are surprised by a break | Medium | High | Mark extension tiers explicitly and record user-visible `0.x` breaks after publication |
+| Feature names promise unavailable behavior | Medium | Medium | Promotion requires executable feature and packaged-consumer evidence; delete empty features |
+
+## Acceptance Criteria
+
+| Contract | Measurable evidence |
+| --- | --- |
+| One authority | ADR checker finds exactly one accepted public compatibility authority and resolves ADR 0024's `superseded_by` link |
+| No parallel compatibility model | repository search and API baseline contain no version-suffixed replacement, old/new adapter, or duplicate Scene model |
+| Facade boundary | public API review exposes the common workflow and bounded evidence without registry, probe, context, proof-construction, or ledger internals |
+| Invariant boundary | compile-fail tests prove callers cannot forge validation or directly publish an invalid structural edit |
+| Backend isolation | public API and rustdoc contain no third-party parser or Assimp implementation types |
+| Feature truthfulness | each documented feature has observable behavior and passes its isolated test/package gate |
+| Release readiness | packaged consumer imports, inspects, and optionally processes a scene using only canonical v1 names |
+
+## Implementation Evidence
+
+Conformance is demonstrated through the following durable evidence locations. Their contents record
+implementation state but do not alter this decision's authority:
+
+- [Canonical architecture refactor plan](../plans/2026-07-10-001-refactor-baozi-canonical-architecture-plan.md)
+- [Facade source](../../crates/baozi/src/lib.rs)
+- [Import contracts](../../crates/baozi-import/src/lib.rs)
+- [Core scene contracts](../../crates/baozi-core/src/lib.rs)
+- [Engineering memory index](../knowledge/engineering/index.md)
+
+Transient pass/fail counts, current symbol gaps, and work-unit completion belong in those evidence
+records. They must not change this ADR's accepted decision status.

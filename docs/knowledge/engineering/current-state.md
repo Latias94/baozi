@@ -3,7 +3,7 @@ type: "Current State"
 title: "Current Engineering State"
 description: "Derived summary of immutable engineering-memory shards."
 tags: ["engineering-memory", "derived"]
-source_fingerprint: "c31f8ebea3ba043a84ce5383863121571e1e11b63c517fdcc921ed92adc38d1b"
+source_fingerprint: "6d06bc3656f90f26fe1a873048eb8b2626c4627ce084237e2f00ac8cce8a13e8"
 ---
 
 # Current State
@@ -12,16 +12,18 @@ source_fingerprint: "c31f8ebea3ba043a84ce5383863121571e1e11b63c517fdcc921ed92adc
 
 This file is derived from immutable shards. Record new facts in shards, then render during integration.
 
-- Source fingerprint: `c31f8ebea3ba043a84ce5383863121571e1e11b63c517fdcc921ed92adc38d1b`
-- Immutable records: 63
+- Source fingerprint: `6d06bc3656f90f26fe1a873048eb8b2626c4627ce084237e2f00ac8cce8a13e8`
+- Immutable records: 66
 - Active lane heads: 1
 
 # Active Registrations
 
-- [Baozi canonical architecture fearless refactor](registry/2026-07/2026-07-10T061956Z-baozi-canonical-architecture-refactor-codex-root-cb5ab5b4c71649508725e5facbec0282.md): `active` (baozi-canonical-architecture-refactor-codex-root; producer `codex-root`)
+- [Baozi canonical architecture fearless refactor](registry/2026-07/2026-07-10T124450Z-baozi-canonical-architecture-refactor-codex-root-dc0e27ca15a34c1eac4e5e546a51b106.md): `active` (baozi-canonical-architecture-refactor-codex-root; producer `codex-root`)
 
 # Recent Evidence
 
+- **Verification Evidence**: [Canonical architecture U2 verification](verification/2026-07/2026-07-10T124045Z-canonical-architecture-u2-verification-6b124e2bbe514eb8a66867bb87e3b00a.md) - ADR governance, workspace, feature, documentation, fuzz-check, and independent review gates passed for U2.
+- **Work Progress**: [Canonical architecture U2 authority contracts complete](progress/2026-07/2026-07-10T124041Z-canonical-architecture-u2-authority-contracts-complete-2cc663e9dac544c4ac0100eacdea427a.md) - U2 canonical authority, ADR governance, Scene IR contracts, and glTF quarantine are complete and review-clean.
 - **Legacy Rollup Snapshot**: [Legacy rollup log.md before derived adoption](legacy/2026-07/2026-07-10T062216Z-legacy-rollup-log-md-before-derived-adoption-2fda6e0f2dac4ecd8f15b87c33c1914f.md) - Preserved log.md before derived rollup adoption.
 - **Legacy Rollup Snapshot**: [Legacy rollup current-state.md before derived adoption](legacy/2026-07/2026-07-10T062216Z-legacy-rollup-current-state-md-before-derived-adoption-26c5a9b42b93439c9f919e76bf906321.md) - Preserved current-state.md before derived rollup adoption.
 - **Verification Evidence**: [Canonical architecture U1 verification](verification/2026-07/2026-07-10T061726Z-canonical-architecture-u1-verification-f54fee89d9ba41548b6ffd29304e3ef3.md) - Workspace, feature-isolation, fuzz compile, parser corpus, and independent review gates passed for U1.
@@ -32,8 +34,6 @@ This file is derived from immutable shards. Record new facts in shards, then ren
 - **Progress Log**: [Progress: import governance foundation code and docs](logs/2026-07/2026-07-09T185649Z-progress-import-governance-foundation-code-and-docs.md) - Hardened Baozi import registry/report APIs, expanded IR validation/snapshots, added postprocess facade path, fuzz target, examples, benches, release/security docs, and ADRs.
 - **Verification Evidence**: [Format beta postprocess final verification](verification/2026-07-09T163757Z-format-beta-postprocess-final-verification.md) - Verification Evidence for Format beta postprocess final verification.
 - **Memory Event**: [Progress: Addressed PLY parser review findings: strict PLY version 1.0, duplicate vertex/f](logs/2026-07/2026-07-09T162801Z-progress-addressed-ply-parser-review-findings-strict-ply-version-1-0-duplicate-vertex-f.md) - Addressed PLY parser review findings: strict PLY version 1.0, duplicate vertex/face elements rejected, custom vertex attribute stream/cell R
-- **Memory Event**: [Progress: U7 facade examples and benchmark anchors](logs/2026-07/2026-07-09T160607Z-progress-u7-facade-examples-readme-quick-start-format-onboarding-checklist-and-import.md) - Added public facade examples, README quick start, format onboarding checklist, and import baseline bench coverage.
-- **Memory Event**: [Progress: U6 GenerateNormals implemented: triangle normals now fill missing streams, prese](logs/2026-07/2026-07-09T155416Z-progress-u6-generatenormals-implemented-triangle-normals-now-fill-missing-streams-prese.md) - U6 GenerateNormals implemented: triangle normals now fill missing streams, preserve existing normals, reject degenerate/non-triangulated/con
 
 # Integration Notes
 

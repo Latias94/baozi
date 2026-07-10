@@ -217,9 +217,6 @@ impl Importer {
         baozi_format_obj::register(&mut self.registry).expect("built-in format ids must be unique");
         #[cfg(feature = "format-ply")]
         baozi_format_ply::register(&mut self.registry).expect("built-in format ids must be unique");
-        #[cfg(feature = "format-gltf")]
-        baozi_format_gltf::register(&mut self.registry)
-            .expect("built-in format ids must be unique");
     }
 }
 

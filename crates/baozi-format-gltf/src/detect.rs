@@ -1,17 +1,17 @@
-use baozi_import::{DetectionInconclusive, DetectionOutcome, Probe, ReadConfidence, ReadHint};
+use baozi_import::{DetectionInconclusive, DetectionOutcome, ReadConfidence, ReadHint};
 
-pub(crate) fn can_read(probe: &Probe<'_>, hint: &ReadHint) -> DetectionOutcome {
+pub(crate) fn can_read(bytes: &[u8], source_len: u64, hint: &ReadHint) -> DetectionOutcome {
     let extension_match = hint.extension.as_deref().is_some_and(|extension| {
         extension.eq_ignore_ascii_case("gltf") || extension.eq_ignore_ascii_case("glb")
     });
 
-    if probe.bytes().starts_with(b"glTF") {
+    if bytes.starts_with(b"glTF") {
         DetectionOutcome::Match(ReadConfidence::Certain)
-    } else if looks_like_gltf_json(probe.bytes()) {
+    } else if looks_like_gltf_json(bytes) {
         DetectionOutcome::Match(ReadConfidence::Likely)
     } else if extension_match {
         DetectionOutcome::Match(ReadConfidence::Maybe)
-    } else if !probe.is_complete() {
+    } else if bytes.len() as u64 != source_len {
         DetectionOutcome::Inconclusive(DetectionInconclusive::ProbeExhausted)
     } else {
         DetectionOutcome::NoMatch

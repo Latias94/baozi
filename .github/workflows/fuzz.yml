@@ -66,8 +66,8 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
-  experimental-check:
-    name: ${{ matrix.target }} experimental check
+  non-admitted-check:
+    name: ${{ matrix.target }} non-admitted candidate check
     runs-on: ubuntu-latest
     timeout-minutes: 20
     strategy:
@@ -82,7 +82,7 @@ jobs:
           persist-credentials: false
 
       - name: Install pinned nightly Rust
-        # glTF is check-only until the bootstrap backend no longer aborts under fuzz.
+        # glTF is not facade-admitted until the bootstrap backend no longer aborts under fuzz.
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ env.RUST_FUZZ_NIGHTLY }}

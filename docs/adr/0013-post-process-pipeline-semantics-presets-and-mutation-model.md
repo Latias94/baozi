@@ -1,301 +1,367 @@
 ---
 status: accepted
 date: 2026-07-09
+updated: 2026-07-10
 authors:
   - Codex
 decision_type: architecture
-related:
-  - docs/adr/0002-runtime-concurrency-observability.md
+depends_on:
   - docs/adr/0003-core-scene-ir-and-material-model.md
   - docs/adr/0008-math-coordinate-units-and-numeric-policy.md
+  - docs/adr/0030-logical-mesh-primitive-and-attribute-domain.md
+  - docs/adr/0032-postprocess-remap-and-derived-data-contract.md
+  - docs/adr/0033-operation-control-and-observability.md
+evidence:
+  - docs/research/triangulation-backend-admission.md
+related:
+  - docs/adr/0014-parser-security-unsafe-ffi-and-panic-boundary-policy.md
+  - docs/adr/0020-import-lifecycle-and-report-contract.md
+  - docs/adr/0022-per-import-resource-ledger-and-budget-accounting.md
 ---
 
-# ADR 0013: Post-Process Pipeline Semantics, Presets, and Mutation Model
+# ADR 0013: Compiled Post-Process Pipelines and Triangulation Boundary
 
 ## Context
 
-Assimp's post-processing pipeline is a major part of its value. Importers produce raw scenes, and post-process steps normalize, validate, repair, optimize, and adapt data for common rendering or tooling workflows.
+Importers must preserve source meaning while post-processing performs explicit normalization,
+repair, derivation, and renderer-oriented lowering. The previous pipeline represented operations as
+unit enum flags, silently reordered them through one fixed global list, and mutated an owned `Scene`
+directly. That model could not express parameters, loss policy, conflicts, remaps, cancellation, or
+derived-data invalidation. It also made validation look like an optional pipeline step even though a
+successful scene must already carry a validation proof.
 
-Baozi already has ADR-level commitments to a post-process crate. This ADR defines stage semantics, ordering, mutability, presets, and the boundary between importer behavior and post-process behavior.
+Triangulation is the first operation that makes those defects unsafe. A triangle fan is wrong for
+concave polygons, while a mature tessellator can still silently accept self-intersection, non-finite
+coordinates, or a different winding. Baozi therefore needs both a backend-neutral geometry boundary
+and an admitted implementation behind Baozi-owned checks.
+
+## Authority Boundary
+
+This ADR owns the importer/post-process separation, request compilation, preset rules, execution
+orchestration, and triangulation backend admission. It imports, rather than redefines, these
+authorities:
+
+| Contract | Authority |
+| --- | --- |
+| `SceneBuilder`, `ValidatedScene`, and `SceneEdit` states | ADR 0003 |
+| scene-space and numeric conventions | ADR 0008 |
+| primitive topology and Vertex/Corner/Face/Instance domains | ADR 0030 |
+| operation descriptors, read/write sets, remaps, loss records, invalidation, and `SceneEdit` transaction/commit/rollback | ADR 0032 |
+| cancellation, progress, callback safety, and work checkpoints | ADR 0033 |
+
+Terms from those contracts retain exactly the meaning assigned by their authority.
 
 ## Decision
 
-Baozi will keep importers source-preserving by default and move normalization into ordered post-process steps. Importers may perform only format-required decoding and structural repair. They must not silently triangulate, flip coordinates, generate normals, merge vertices, or drop unsupported features unless the format requires it and emits diagnostics.
+### Importer Boundary
 
-Post-process steps operate on owned `Scene` values and return a new validated stage result. Implementations may mutate internally while they own the scene, but public APIs must make stage transitions explicit.
+Importers produce source-preserving validated scenes. They may decode format-required structures,
+resolve declared dependencies, preserve source topology, perform bounded structural repair required
+by the format, and reject unsafe input. Any repair is diagnosed.
 
-Requested steps must never be silent no-ops. If a caller requests a known `PostProcessStep` whose
-algorithm is not implemented, the pipeline returns a `PostProcess` error naming that step. Presets
-must include only implemented steps; future preset expansion happens when the corresponding steps
-land with tests.
+Importers do not silently triangulate polygons, normalize coordinates or units, flip winding or UVs,
+generate normals or tangents, merge vertices, optimize graphs, or remove degenerates for renderer
+convenience. A format-required exception must be documented by that format and represented in
+provenance or diagnostics.
 
-## Architecture
+### Typed Requests Compile Before Editing
+
+A caller submits parameterized operation requests, a loss policy, and operation limits. The compiler
+inspects the input `ValidatedScene` read-only and either returns a `CompiledPostProcessPlan` or a typed
+compile failure before a `SceneEdit` begins.
+
+Each request resolves to the ADR 0032 operation descriptor. The compiler:
+
+1. canonicalizes composable duplicates and rejects every other duplicate or contradictory request;
+2. validates every parameter and required input capability;
+3. checks dependencies, conflicts, declared losses, read/write sets, and invalidation obligations;
+4. calculates checked output, scratch, peak-live, and work bounds before reserving or mutating;
+5. builds a dependency directed acyclic graph and rejects cycles; and
+6. emits one deterministic topological order, using stable operation key and then canonical
+   parameter key as tie-breakers for independent operations.
+
+There is no fixed global operation order. Dependencies cause visible plan edges; conflicts are
+compile errors rather than hidden reordering. Request order is not a semantic tie-breaker. Operations
+that are not provably independent through their descriptors must declare a dependency or conflict.
+A canonical parameter key is a schema-defined typed total order, never `Debug` text, map iteration,
+or a process-random hash. Duplicate composition must be order-independent; otherwise duplicates are
+rejected.
+A validator is not a user-requestable transformation: the input is already validated, and successful
+`SceneEdit` commit performs final central validation.
+
+Public request types contain only implemented operations. A future operation lands together with its
+typed parameters, descriptor, implementation, report schema, and tests; an unimplemented enum value
+or silent no-op is forbidden.
 
 ```mermaid
 flowchart LR
-    RawBytes[Raw asset bytes] --> Importer[Format importer]
-    Importer --> RawScene[Raw imported Scene]
-    RawScene --> Validate0[Validate imported invariants]
-    Validate0 --> Pipeline[Ordered postprocess pipeline]
-    Pipeline --> ValidateN[Validate final invariants]
-    ValidateN --> Report[ImportReport]
+    Request[Typed requests + loss policy + limits] --> Compile[Compile against read-only ValidatedScene]
+    Compile -->|invalid| CompileFailure[Typed compile failure]
+    Compile -->|valid| Plan[Deterministic dependency plan]
+    Plan --> Edit[Execute through ADR 0032 SceneEdit boundary]
+    Edit --> Steps[Bounded operation adapters]
+    Steps --> Edit
+    Edit --> Outcome[Committed result or failure under ADR 0032]
 ```
+
+### Execution Orchestration and Reports
+
+The pipeline executes the complete compiled plan only through the `SceneEdit` transaction owned by
+ADR 0032; it never mutates canonical scene storage directly. The pipeline coordinates operation
+adapters and report assembly. ADR 0032 exclusively defines staging, commit, rollback, remap
+publication, derived-data validity, and preservation of the input generation on failure.
+
+A successful `PostProcessReport` contains the expanded plan and deterministic orchestration
+statistics, then incorporates without reinterpretation the diagnostics, losses, remaps,
+derived-data outcomes, resource evidence, and validated generation defined by ADRs 0032 and 0033.
+Post-processing does not mutate, relabel, or return an `ImportReport`; import outcome ownership
+remains separate.
 
 ```mermaid
 sequenceDiagram
-    participant App
-    participant Importer
+    participant Caller
     participant Pipeline
-    participant Step
-    participant Validator
+    participant Compiler
+    participant Edit as SceneEdit
+    participant Step as Operation adapter
 
-    App->>Importer: read with postprocess options
-    Importer-->>Pipeline: raw Scene + diagnostics
-    Pipeline->>Validator: validate before destructive steps
-    loop ordered steps
-        Pipeline->>Step: run owned Scene
-        Step-->>Pipeline: Scene + diagnostics
+    Caller->>Pipeline: execute requests + policy + limits on validated input
+    Pipeline->>Compiler: compile against read-only input view
+    alt compile failure
+        Compiler-->>Pipeline: typed compile failure
+        Pipeline-->>Caller: PostProcessFailure
+    else compiled plan
+        Compiler-->>Pipeline: deterministic plan
+        Pipeline->>Edit: execute through ADR 0032 transaction
+        loop dependency order
+            Edit->>Step: bounded operation
+            Step-->>Edit: declared operation effects
+        end
+        Edit-->>Pipeline: committed result or failure under ADR 0032
+        Pipeline-->>Caller: PostProcessReport or PostProcessFailure
     end
-    Pipeline->>Validator: validate final scene
-    Pipeline-->>App: ImportReport
 ```
 
-## Scene Stages
+### Presets Are Inspectable Recipes
 
-Baozi recognizes these conceptual stages:
+`Raw` means no post-process request; import validation is already mandatory. Other convenience
+presets are constructors for explicit typed requests, not special execution paths. Their expansion
+is inspectable before execution and repeated in the report.
 
-| Stage | Meaning |
-| --- | --- |
-| RawImported | source-preserving scene produced by importer |
-| ValidatedImported | raw scene passed structural validation |
-| PostProcessed | requested steps applied |
-| ValidatedOutput | final scene passed output validation |
+A named preset is exposed only when every operation in its expansion is implemented. Preset names
+must not advertise future behavior, multiple quality names must not alias the same placeholder
+subset, and expansion changes require snapshot and integration-test updates. Callers may edit the
+expanded requests before compilation.
 
-The type system may not need distinct types for every stage initially, but diagnostics and tests should name stages.
+### Triangulation Contract
 
-## Importer Boundary
+Triangulation operates per polygon face and keeps the public and core boundary independent of any
+tessellation crate. The private adapter accepts one projected simple ring and returns only indices
+into its working ring. Canonical positions remain owned by the primitive.
 
-Importers may:
+Before calling a backend, Baozi must:
 
-- decode file-level structures
-- resolve sidecar files through `AssetIo`
-- create source coordinate metadata
-- preserve source topology where possible
-- repair minor format-specific inconsistencies with diagnostics
-- reject structurally unsafe input
+- enforce per-polygon corner, scratch, output, work, and cancellation bounds, including a
+  conservative peak-live allowance for backend-internal buffers before entry;
+- validate all source indices and finite 3D positions;
+- compute a stable plane and reject a degenerate or materially non-planar ring under a documented,
+  scale-aware tolerance;
+- project in `f64`, retain a working-corner to source-corner map, and prove a non-zero signed area;
+- reject non-adjacent intersections, overlapping edges, and other non-simple rings;
+- handle consecutive duplicate or zero-length edges only through an explicit reject-or-repair
+  option whose repair is admitted by the loss policy and recorded in the corner remap; and
+- keep long collinear boundary chains when they still form a valid simple polygon, without relying
+  on the backend to diagnose degeneracy.
 
-Importers must not silently:
+After the backend returns for a retained working ring of `n` corners, Baozi checks all of the
+following inside the declared postflight work cap:
 
-- triangulate all polygons
-- flip winding or handedness
-- generate normals or tangents
-- merge vertices
-- optimize meshes
-- remove degenerate geometry
-- normalize units
-- decode images
+- exactly `n - 2` triangles for the simple no-hole ring, with checked arithmetic;
+- every index in range, three distinct corners per triangle, and finite non-zero triangle area;
+- every retained working corner, and therefore every non-repaired source corner, referenced by at
+  least one triangle; repaired-away corners remain visible in loss/remap evidence;
+- every ring boundary edge used exactly once in source direction after reorientation, and every
+  interior edge used exactly twice in opposite directions;
+- the triangulated disk satisfies `V - E + F = 1`, with `F` counting output triangles and excluding
+  the exterior face;
+- no improper crossing or overlap between output edges, no triangle interior outside the projected
+  ring, and no pair of triangle interiors overlapping; and
+- consistent source winding, polygon/triangle area agreement within the declared scale-aware
+  tolerance, and deterministic indices.
 
-Exceptions must be documented per format.
+These index, incidence, Euler, intersection, winding, and area checks are cross-validation rather
+than interchangeable heuristics. Backend output is reoriented to match source face winding before
+the directed-edge checks. Any failed postcondition is a typed backend fault handled by the ADR 0032
+transaction.
 
-## Step Ordering
+Triangulation leaves vertex-domain attributes unchanged, maps every output corner to its source
+corner, duplicates face-domain values and material binding for each produced triangle, and publishes
+the one-source-face-to-many-output-faces remap required by ADR 0032. It may not silently invent or
+drop domain data.
 
-Initial canonical order:
+Canonical polygon faces do not currently model interior holes. Adding holed faces requires a new
+canonical topology decision and a repeated admission test; the private backend's hole API is not a
+public promise.
 
-1. `ValidateScene`
-2. `ApplyGlobalScale`
-3. `NormalizeCoordinates`
-4. `Triangulate`
-5. `SortByPrimitiveType`
-6. `FindDegenerates`
-7. `FindInvalidData`
-8. `JoinIdenticalVertices`
-9. `GenerateNormals`
-10. `GenerateTangents`
-11. `GenerateBoundingBoxes`
-12. `OptimizeMeshes`
-13. `OptimizeGraph`
-14. final `ValidateScene`
+### Admitted Backend
 
-Not every requested pipeline runs every step. The order is the conflict-resolution rule when multiple requested steps interact.
+The admitted backend is GeoRust `earcut` version 0.4.10 behind the private adapter. Its exact
+[crates.io package artifact](https://crates.io/api/v1/crates/earcut/0.4.10/download) checksum is
+`7d71866fffb1c6d539cc36ef323109416cdc5686e17df0252d98c5e83641efc8`; the reviewed upstream
+implementation is fixed at commit
+[`a381ffb8cf93db0eaa62ca7dadd52b7985c7e8ce`](https://github.com/georust/earcut/blob/a381ffb8cf93db0eaa62ca7dadd52b7985c7e8ce/src/lib.rs).
+The decision is conditional on all Baozi preconditions and postconditions above; `earcut` is not an
+input validator and no public type names it.
 
-## Destructive and Non-Destructive Steps
+The admission evidence establishes that version 0.4.10:
 
-Steps must declare whether they are destructive:
+- exposes generic `Float` input and compiles with `Earcut::<f64>`;
+- preserves input index identity for valid single rings;
+- is `no_std`, has a small pure-Rust dependency graph, and compiles for
+  `wasm32-unknown-unknown` on Baozi's Rust 1.95 MSRV;
+- declares `MIT OR Apache-2.0`, bundles the upstream `LICENSE-ISC` notice for Mapbox-derived
+  portions, and passes the repository dependency policy; source packages and release artifacts must
+  preserve that bundled notice; and
+- is maintained in a non-archived GeoRust repository with a 2026-05-07 release.
 
-| Step | Destructive? | Notes |
-| --- | --- | --- |
-| ValidateScene | no | emits diagnostics or errors |
-| GenerateBoundingBoxes | no | adds derived data |
-| ApplyGlobalScale | yes | changes geometry and transforms |
-| NormalizeCoordinates | yes | changes axes, transforms, cameras, lights, animation |
-| Triangulate | yes | replaces polygon topology |
-| JoinIdenticalVertices | yes | changes vertex identity and indices |
-| GenerateNormals | yes when replacing, no when filling missing | mode must be explicit |
-| GenerateTangents | yes when replacing, no when filling missing | tangent basis must be documented |
-| FindDegenerates | optionally destructive | remove or diagnose mode |
-| OptimizeMeshes | yes | may merge or split meshes |
-| OptimizeGraph | yes | changes node graph |
+The same evidence also proves why the wrapper is mandatory: 0.4.10 normalizes output winding,
+returns `()` rather than `Result`, silently emits output for self-intersecting and non-finite rings,
+and documents panics for malformed hole indices or excessive vertex counts. Its implementation is
+pure Rust/no FFI but contains internal `unsafe` indexed-node access. Baozi makes the documented panic
+preconditions unreachable with an empty hole list and much smaller resource cap, contains unwindable
+backend panics where the platform permits, validates every output, and keeps dependency sanitizer and
+audit gates. Correctness never depends on panic containment under `panic=abort`.
 
-Destructive steps must emit diagnostics or stats describing what changed.
+The backend exposes no cooperative checkpoint inside one call. The adapter charges a checked
+conservative quadratic work envelope, reserves its peak-live allowance, and polls cancellation
+immediately before and after entry. It does not advertise bounded mid-call cancellation; the strict
+per-ring cap is the backstop required by ADR 0033.
 
-## Coordinate, Winding, UV, and Tangent Policy
+There is no automatic second backend. Divergent runtime fallback would make output depend on a hidden
+failure path. `lyon_tessellation` remains a documented replacement candidate only; selecting it
+requires a new admission result through the same adapter conformance suite.
 
-Coordinate normalization is a post-process step. Raw import preserves source coordinates.
-
-Default normalized target:
-
-- right-handed
-- Y-up
-- meters
-- counter-clockwise front faces unless a target option says otherwise
-
-UV policy:
-
-- raw scene records source UV origin when known
-- `FlipUvs` or target preset converts UV origin explicitly
-- no importer silently flips UVs for renderer convenience
-
-Tangent policy:
-
-- generated tangents use a documented basis
-- MikkTSpace can be an optional backend
-- tangent handedness is stored in tangent `w`
-- coordinate conversion must update tangent basis or invalidate tangents with diagnostics
-
-## Presets
-
-Baozi may expose Assimp-inspired presets, but they are Baozi-defined contracts:
-
-| Preset | Long-term intent | Current pre-1.0 implemented subset |
-| --- | --- | --- |
-| Raw | no normalization beyond importer-required decoding and validation | validate scene |
-| RealtimeFast | triangulate, validate, bounding boxes, basic coordinate/unit options | validate, triangulate, bounding boxes |
-| RealtimeQuality | RealtimeFast plus normals/tangents where missing and degeneracy diagnostics | same implemented subset as `RealtimeFast` |
-| RealtimeMaxQuality | RealtimeQuality plus vertex joining and mesh/graph optimization | same implemented subset as `RealtimeFast` |
-| ToolingPreserve | validate and enrich while preserving source topology as much as possible | validate and bounding boxes |
-
-Presets expand to explicit step lists. Users can inspect and customize the list. A preset may be a
-supported subset of its long-term intent while Baozi is pre-1.0, but it must not include an
-unimplemented step just to advertise future behavior.
-
-## Idempotence and Determinism
-
-Each step must document idempotence:
-
-- idempotent: repeated runs produce no further changes
-- stable-with-options: repeated runs are stable only with same options
-- destructive-non-idempotent: repeated runs may further alter data and should be guarded
-
-Tests must cover deterministic output for supported steps, including parallel backends.
+Before the backend is used in a canonical implementation, and after every dependency refresh, the
+resolved package must match the admitted identity and pass the lockfile, MSRV/WASM, dependency-policy,
+bundled-`LICENSE-ISC`, and complete adapter-conformance gates. Any `earcut` package version, feature
+set, source, fork, checksum, or reviewed source-commit drift reopens the complete backend selection
+and admission matrix. Transitive dependency drift does not silently reuse old evidence: it reruns the
+lockfile, policy, portability, notice, and adapter-conformance gates.
 
 ## Alternatives Considered
 
-### Option A: Let importers normalize however they want
+### Option A: GeoRust `earcut` behind Baozi validation and output checks
 
 Pros:
 
-- Simpler first parsers.
-- Less pipeline machinery.
-- Format-specific quirks can be handled locally.
+- Correct concave simple-ring results in both source windings after adapter reorientation.
+- Native `f64`, source indices, reusable buffers, `no_std`, and a small dependency graph.
+- Maintenance captured by the admission record, compatible license, MSRV, and WASM evidence.
 
 Cons:
 
-- Behavior differs by format.
-- Post-process tests become impossible to reason about.
-- Users cannot choose raw versus normalized output.
+- Unit-returning API does not report invalid geometry.
+- Invalid rings can produce plausible but wrong triangles.
+- Internal unsafe code and documented panic preconditions require a narrow audited boundary.
 
-Decision: rejected.
+Decision: chosen conditionally behind the mandatory adapter.
 
-### Option B: Always return fully normalized scenes
+### Option B: `lyon_tessellation`
 
 Pros:
 
-- Easy for renderers.
-- Fewer options for users.
-- Similar to a game-engine asset pipeline.
+- Mature, maintained fill tessellator with a typed error enum.
+- Handles path intersections for graphics filling and compiles for WASM.
 
 Cons:
 
-- Loses source information.
-- Bad for tools, converters, diagnostics, and round-trip workflows.
-- Makes compatibility comparison harder.
+- Core path/tessellation coordinates are `f32`.
+- It emits a generated vertex buffer rather than source-corner indices and may add an intersection
+  vertex for a self-intersecting path.
+- Debug and release behavior differed for non-finite spike inputs; infinity succeeded in release.
+- The dependency graph and mapping adapter are materially larger than `earcut` for this use case.
 
-Decision: rejected.
+Decision: rejected as the initial backend; retained only as an explicit future replacement candidate.
 
-### Option C: Source-preserving import plus explicit ordered post-process
+### Option C: `i_triangle`
 
 Pros:
 
-- Separates parsing from transformation.
-- Lets users choose raw or renderer-friendly output.
-- Makes destructive changes testable.
+- Actively maintained pure-Rust project with robust integer geometry machinery and `f64` input.
+- Repairs complex outlines and can produce high-quality triangulations.
 
 Cons:
 
-- More API surface.
-- Some users must pick a preset.
-- Pipeline order must be maintained carefully.
+- Float input is quantized into an integer core, reordered, and returned with a new point buffer.
+- Default validation repairs a bow-tie by inserting intersection points instead of rejecting it.
+- Duplicate and collinear points are removed, so source-corner identity is not preserved directly.
+- Its larger overlay/tree/sort stack solves a broader problem than Baozi needs.
 
-Decision: chosen.
+Decision: rejected for the source-preserving post-process boundary.
 
-## Success Metrics
+### Option D: Keep the hand-written triangle fan or replace it with local ear clipping
 
-| Metric | Target | Measurement |
-| --- | --- | --- |
-| Importer discipline | first format importers do not silently normalize renderer conveniences | code review and snapshots |
-| Stage visibility | raw and postprocessed snapshots can be compared | golden tests |
-| Order determinism | requested steps run in canonical order | pipeline unit tests |
-| Destructive visibility | destructive steps report stats or diagnostics | step tests |
-| Coordinate correctness | normalized target applies to nodes, meshes, cameras, lights, animation | integration fixtures |
-| Parallel equivalence | parallel and scalar step results match within tolerance | backend tests |
+Pros:
 
-## Risks and Mitigations
+- No external dependency and complete local control.
 
-| Risk | Severity | Likelihood | Mitigation |
-| --- | --- | --- | --- |
-| Pipeline feels heavy for simple users | Low | Medium | Provide facade presets and `load_scene` convenience |
-| Step order is wrong for some assets | Medium | Medium | Keep order documented and add per-step dependency tests |
-| Destructive steps lose source data unexpectedly | High | Medium | Mark destructive steps and keep raw snapshots in tests |
-| Coordinate conversion misses cameras or animation | High | Medium | Add complex fixtures before stabilizing coordinate normalization |
-| Presets drift from docs | Medium | Medium | Test preset expansion |
-| Unimplemented step silently passes | High | Medium | Return `PostProcess` error for explicit requests and keep presets implemented-only |
+Cons:
 
-## Implementation Plan
+- A fan is incorrect for concave polygons.
+- A robust local implementation would recreate intersection, degeneracy, numeric, hole, and fuzz
+  work already maintained by geometry projects.
+- Baozi would own an additional security-sensitive algorithm without independent corpus evidence.
 
-### Phase 0: Pipeline Core
-
-- Define `PostProcessStep`, `PostProcessPipeline`, step metadata, and presets.
-- Add stage diagnostics and stats.
-- Add validator before and after the pipeline.
-
-### Phase 1: First Steps
-
-- Implement validation, bounding boxes, triangulation, coordinate/unit normalization, and basic normals.
-- Add raw versus processed snapshots.
-
-### Phase 2: Quality Steps
-
-- Add tangent generation, vertex joining, degeneracy handling, and optimization.
-- Add scalar/parallel equivalence tests.
+Decision: rejected; the canonical cutover deletes the triangle-fan implementation.
 
 ## Consequences
 
 Positive:
 
-- Importer behavior stays consistent.
-- Raw and normalized workflows are both supported.
-- Assimp-like post-process value is designed into Baozi.
+- Parsing and transformation remain independently testable and source-preserving.
+- Operation order, loss, budgets, and capability failures are visible before mutation.
+- Failed pipelines cannot publish partially transformed or falsely validated scenes.
+- Concave polygon support uses a maintained implementation without leaking it into the public API.
 
 Negative:
 
-- More initial pipeline code.
-- Presets require maintenance.
-- Some transformations need complex fixtures to prove.
-- Callers see early errors for requested future steps instead of accidentally shipping unchanged data.
+- Every operation needs a descriptor, compile rules, staging implementation, and report evidence.
+- Triangulation pays for Baozi-owned planarity, simplicity, mapping, and output checks in addition to
+  backend work.
+- Preset expansion is a compatibility surface that requires tests and documentation.
 
-## Open Questions
+## Risks and Mitigations
 
-1. Should `NormalizeCoordinates` be included in realtime presets by default?
-   Recommendation: no initially; make target coordinate presets explicit.
-2. Should destructive steps keep reverse maps?
-   Recommendation: only in debug or tooling options if real use cases appear.
+| Risk | Severity | Likelihood | Mitigation |
+| --- | --- | --- | --- |
+| Hidden plan reorder changes semantics | High | Medium | Dependency DAG plus deterministic visible expansion; conflicts fail compilation. |
+| A step leaves stale derived data | High | Medium | ADR 0032 read/write and invalidation enforcement at compile and commit. |
+| Pipeline bypasses transactional publication | Critical | Low | Require the ADR 0032 `SceneEdit` boundary and integration tests that reject direct storage mutation. |
+| Backend accepts malformed geometry | High | High | Baozi finite/planar/simple preflight and checked output/area/winding postflight. |
+| Tessellation work becomes quadratic denial of service | High | Medium | Per-ring corner/work caps, checked reservations, cancellation checkpoints, scale tests. |
+| Dependency unsafe code regresses | High | Low | Exact resolved-version gate, sanitizer/fuzz execution, advisory/source audit, narrow adapter. |
+| A source or release artifact drops the upstream ISC notice | High | Low | Inspect the exact admitted dependency package and require third-party notice preservation in every package/release gate. |
+| Presets drift or advertise no-ops | Medium | Medium | Implemented-only recipes and expansion snapshots; remove aliases with no semantic difference. |
+
+## Acceptance Criteria
+
+| Contract | Testable acceptance |
+| --- | --- |
+| Compile before mutation | Invalid parameters, dependencies, conflicts, loss, or budgets fail with the input generation/digest unchanged. |
+| Deterministic plan | Request permutations with the same dependency semantics compile to the documented stable order and visible edges. |
+| Transactional integration | Injected step failure, cancellation, budget exhaustion, backend panic, and final validation failure prove the pipeline uses ADR 0032 without publishing staging. |
+| Evidence completeness | Every success returns operation stats, diagnostics, losses, remaps, invalidation/recompute evidence, and a valid output proof. |
+| Preset honesty | Every exposed preset expands only to implemented typed requests and its expansion is snapshot tested. |
+| Concave geometry | Clockwise and counter-clockwise fixtures match source area and winding after triangulation. |
+| Domain preservation | Material, Face, Corner, and Vertex data plus source-face remaps survive triangulation deterministically. |
+| Explicit rejection | Self-intersecting, overlapping, materially non-planar, non-finite, and degenerate rings fail before publication. |
+| Bounded work | Zero/exact/excess corner, output, scratch, peak-live, and tessellation-work limits are exercised without unchecked allocation. |
+| Backend portability and notices | Resolved backend passes the adapter conformance suite, Rust 1.95 native and `wasm32-unknown-unknown` checks, repository `cargo deny` policy, and exact-package/source/release notice-preservation gates. |
+
+## Atomic Cutover Contract
+
+The canonical cutover replaces the old flags, canonical-order list, direct owned-scene mutation,
+explicit validation step, triangle fan, and placeholder preset aliases as one breaking change. The
+replacement begins with failing compiled-plan, concave/remap, malformed-ring, and rollback tests.
+Backend algorithm details remain private; every dependency refresh reruns adapter conformance and
+reopens full backend admission on identity drift as described above.

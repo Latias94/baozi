@@ -1,276 +1,328 @@
 ---
-status: proposed
+status: accepted
 date: 2026-07-09
+updated: 2026-07-10
 authors:
   - Codex
 decision_type: architecture
+depends_on: []
 related:
   - docs/adr/0002-runtime-concurrency-observability.md
-  - docs/adr/0004-parser-backend-and-format-coverage-policy.md
-  - docs/adr/0010-asset-io-virtual-filesystem-uri-archive-and-path-security.md
-  - docs/adr/0013-post-process-pipeline-semantics-presets-and-mutation-model.md
+  - docs/adr/0020-import-lifecycle-and-report-contract.md
+  - docs/adr/0021-extension-registry-and-format-descriptor-governance.md
+  - docs/adr/0029-format-detection-stable-input-and-failure-contract.md
+  - docs/adr/0035-text-decoding-conformance-and-recovery.md
 ---
 
 # ADR 0016: Import Options, Presets, and Configuration Precedence
 
 ## Context
 
-Assimp exposes many importer and post-process options. Baozi needs comparable power without turning
-the public API into stringly typed global state. Options affect security limits, IO behavior, format
-detection, parser quirks, coordinate normalization, post-process steps, logging, and diagnostics.
+Import policy spans common limits, dependency access, diagnostics, format selection, operation
+control, post-processing, and format-owned parser behavior. A global property bag is unsafe under
+concurrency and gives misspelled or disabled options surprising runtime behavior. Directly adding a
+generic typed method to `FormatImporter` would make the registry trait non-object-safe, while exposing
+every format's option type from the facade would couple the public crate graph to optional formats.
 
-Without an explicit precedence model, options will drift by crate. That creates hard-to-debug behavior
-when a facade preset, caller override, environment default, and format-specific option disagree.
+The configuration must be immutable by session start, reject invalid format configuration before any
+IO, and let each format crate own its concrete type without weakening the registry boundary.
 
 ## Decision
 
-Baozi will use immutable per-import option values with explicit precedence. There will be no mutable
-process-global importer configuration.
+Baozi uses typed common option overlays plus versioned, format-keyed envelopes and importer-provided
+object-safe codecs. Registry freeze compiles and caches every importer's bounded typed default once.
+Each request compiles only the preset/caller format envelopes it actually submitted, against those
+cached defaults, before `ImportSession` or asset IO.
 
-Precedence from lowest to highest:
+Accepted means this transport and precedence are authoritative; it does not claim the replacement API
+has already landed.
 
-1. Baozi built-in defaults
-2. format default profile
-3. facade preset
-4. caller import options
-5. explicit per-call format options
+### Common Configuration
 
-Higher layers override lower layers only for fields they set. Unknown options are rejected in strict
-mode and reported as diagnostics in permissive mode.
+`baozi-import` owns the canonical `ImportConfig`, request `ResourceLimits`, effective import budget,
+`ConformancePolicy`, and `LossPolicy` types. The facade may construct or re-export those types but may
+not define a second semantic representation. `baozi-io` owns only path/backend/handle policy and
+non-configurable backend-local hard caps; it enforces effective limits carried by an authorized
+session capability. Common fields use explicit overlay types. Absence is represented by `None`;
+equality with a default value never means "unset".
 
-## Architecture
+Common precedence, from lowest to highest, is:
 
-```mermaid
-flowchart TD
-    Defaults[Baozi defaults] --> Merge[Option merge]
-    Format[Format defaults] --> Merge
-    Preset[Facade preset] --> Merge
-    Caller[Caller ImportOptions] --> Merge
-    FormatSpecific[Per-call format options] --> Merge
-    Merge --> Frozen[Frozen ImportConfig]
-    Frozen --> Context[ImportContext]
-    Context --> Parser[Format importer]
-    Context --> Pipeline[Post-process pipeline]
+1. Baozi built-in defaults;
+2. the fully inspectable preset overlay; and
+3. the caller's explicit per-request overlay.
+
+The result is one immutable `ImportConfig`. Library code never reads environment variables, mutable
+process globals, or configuration files. CLI applications may translate those sources into an
+explicit request before calling Baozi.
+
+Common `ImportConfig` fields are merged directly by `baozi-import`; they never pass through a format
+codec. Registry default compilation and request format-envelope compilation therefore cannot alter,
+duplicate, or charge codec work for common configuration.
+
+Operation cancellation and progress callbacks are live capabilities, not configuration values; ADR
+0033 owns them.
+
+`ConformancePolicy` and `LossPolicy` are common frozen semantic configuration and use this same
+default/preset/caller precedence. They decide whether a format-permitted recovery or loss may be
+accepted. The concrete recovery mode is format-owned configuration because only the selected format
+can define its legal choices and source semantics.
+
+### Format-Owned Typed Options
+
+Each registered importer exposes an object-safe codec and owns its concrete option type and schema.
+`baozi-import` owns the codec capability, registry-build/request-compile scopes, sealed runtime type
+key, compiled-value wrapper, store, and error transports; each format crate owns its codec
+implementation and concrete option value:
+
+```rust
+pub struct FormatOptionEnvelope {
+    pub format: FormatId,
+    pub schema: FormatOptionSchemaId,
+    pub version: u32,
+    pub payload: Box<[u8]>,
+}
+
+pub trait FormatOptionCodec: Send + Sync {
+    fn descriptor(&self) -> FormatOptionSchema;
+    fn runtime_type_key(&self) -> OptionRuntimeTypeKey;
+    fn compile_defaults(
+        &self,
+        scope: &mut RegistryBuildScope<'_>,
+    ) -> Result<CompiledFormatOptions, OptionCompileError>;
+    fn compile_layers(
+        &self,
+        scope: &mut OptionCompileScope<'_>,
+        defaults: &CompiledFormatOptions,
+        layers: FormatOptionLayers<'_>,
+    ) -> Result<CompiledFormatOptions, OptionCompileError>;
+}
 ```
 
-```mermaid
-sequenceDiagram
-    participant App
-    participant Facade
-    participant Registry
-    participant Importer
-    participant Post
+These names illustrate the contract, not public layout. The required properties are:
 
-    App->>Facade: read_path(path, options)
-    Facade->>Registry: detect format
-    Registry-->>Facade: importer and format defaults
-    Facade->>Facade: merge defaults, preset, caller, format options
-    Facade->>Importer: import with frozen config
-    Importer-->>Post: raw scene and diagnostics
-    Post-->>App: final report
+- `FormatImporter` remains object-safe;
+- schema identity is the stable tuple `(owner FormatId, local schema ID)`, and schema version is
+  explicit in every envelope;
+- payload decoding is deterministic and size-bounded;
+- `RegistryBuildScope` independently bounds default compilation for every registration, including
+  aggregate/per-codec work, decoded cells/bytes, recursion, fallible live reservations, panic detail,
+  and result size;
+- `OptionCompileScope` is the only request-time admission path for submitted payload reads, decoded
+  cells/bytes, recursion, codec work, fallible live reservations, and bounded error detail; it exposes
+  no asset IO, import outcome, registry mutation, or session diagnostic capability;
+- the request compiler consumes public envelopes and presents an opaque, precedence-ordered
+  `FormatOptionLayers` view; codecs obtain payload ranges/readers only through the compile scope and
+  never receive an unrestricted envelope payload slice;
+- the codec compiles typed defaults through the registry scope and applies typed preset/caller overlay
+  merge through the request scope against that immutable compiled default;
+- `OptionRuntimeTypeKey` is a sealed process-local identity derived from the concrete `'static` type;
+  it is never serialized or used as schema identity;
+- the importer expectation, codec descriptor, and actual erased value carry the same runtime type
+  key, and the wrapper verifies the erased value's concrete identity before store insertion;
+- the immutable registry snapshot stores one `Arc<CompiledFormatOptions>` default per importer, while
+  the per-request `FormatOptionStore` has no public constructor and stores only submitted-target
+  overrides accepted from registered codecs; and
+- only the selected importer's `ParseScope` may checked-downcast its compiled value to the concrete
+  format-owned type.
+
+### Registry Defaults and Request Overrides
+
+`RegistryBuilder::freeze` runs inside a bounded `RegistryBuildScope`. In stable `FormatId` order it
+invokes `compile_defaults` for every registered codec, verifies the returned runtime type key and
+erased concrete type, and stores the result as an immutable `Arc<CompiledFormatOptions>` in the new
+snapshot. An unwindable panic, type mismatch, or build-scope budget/allocation failure is a bounded
+`RegistryBuildError`; freeze is atomic and returns no partial snapshot, so the bad plugin never enters
+an immutable registry snapshot.
+
+Request compilation receives an already frozen snapshot. It groups and validates only format-specific
+envelopes actually present in the expanded preset or caller request. For each submitted target it calls
+`compile_layers` once with that target's cached default and precedence-ordered submitted layers. It
+validates every submitted target before creating a session, even if automatic detection later selects
+a different format. Unknown, disabled, duplicate, schema/version/owner/type failures and unwindable
+request-time codec panic are bounded `RequestError` values with zero session and asset IO.
+
+When a request supplies no format-specific layer for a candidate, request compilation neither invokes
+nor probes that codec. If the candidate is later selected, `ParseScope` reads the snapshot's precompiled
+default `Arc` directly. The request option store therefore contains only compiled overrides and falls
+back to the selected descriptor's snapshot default. An irrelevant/stateful codec cannot poison a
+request merely by being present in the registry, and request codec work is
+`O(submitted envelope count + submitted payload bytes/work)`, not `O(registry size)`.
+
+Both scopes may reuse runtime-neutral checked reservation and counter mechanisms from
+`baozi-operation`, but neither is an import ledger, creates session evidence, or transfers counters
+into a later session. First-party and admitted extension codecs must perform input-derived work and
+decoded-model allocation through their active scope, using checked work charges plus live
+reservations or a reviewed conservative allowance. This is a cooperative in-process contract
+enforced by API shape, conformance tests, dependency review, and promotion evidence; Rust cannot
+prevent trusted extension code from allocating through the global allocator. A codec that is not
+trusted to honor this contract must run behind a process boundary with host-enforced limits.
+
+The format-specific precedence is the snapshot's compiled codec default, then an optional preset
+envelope, then an optional caller envelope. More than one envelope for the same `(layer, FormatId)` is
+a duplicate request error; order within a collection never changes the result.
+
+A typed envelope factory seals its owner `FormatId`. On dynamic input, the request compiler resolves
+the schema identity first and verifies that its owner exactly equals the envelope target before
+selecting a codec. Relabeling an OBJ schema/payload as glTF, or any equivalent cross-format pairing,
+is `WrongFormatOptions`; it is not offered to the target codec as malformed local data.
+
+The public library API has no generic string property bag. A CLI or plugin manifest may decode a
+versioned external representation, but it must produce the same envelope and pass the same codec
+before session creation.
+
+### Pre-IO Compilation Failures
+
+The complete common request plus every submitted format envelope is validated and compiled against
+one immutable registry snapshot before any primary or dependency open. Multiple submitted format
+targets are all compiled before session creation; request compilation does not stop after a forced or
+likely target and does not defer validation until detection. The following are typed request errors in
+every mode:
+
+- unknown or malformed `FormatId`;
+- option target not registered or disabled by the feature graph;
+- unknown schema, unsupported schema version, or malformed payload;
+- schema owner or sealed typed-envelope owner different from the target `FormatId`;
+- duplicate envelope at one precedence layer;
+- a format envelope attempting to set a common security, IO, budget, or lifecycle field; and
+- codec output whose runtime type does not match the importer's declared option type.
+
+An unwindable codec panic while compiling submitted layers is `RequestError::CodecPanic` with target
+format/schema identity and bounded detail. It creates no `ImportSession`, import ledger, diagnostic
+stream, or `ImportFailure`, and performs zero asset IO. A default-compilation panic occurred earlier at
+registry freeze and is instead `RegistryBuildError::CodecPanic`; it cannot surface from an otherwise
+valid snapshot during a request with no layer for that format. Abort, process exit, infinite loops, and
+arbitrary allocation by trusted extension code remain outside in-process containment.
+
+There is no permissive path that converts these programming/configuration errors into parser
+diagnostics. Strictness controls source recovery, not request validity.
+
+### Conformance, Loss, Recovery, and Serialization
+
+The top-level serializable request has its own explicit configuration schema version. Its common
+section serializes `ConformancePolicy` and `LossPolicy`; each format recovery profile remains inside
+that format's versioned envelope. For example, ADR 0035's OBJ/MTL invalid-UTF-8 recovery can be chosen
+only by the OBJ-owned typed option, then is accepted only if the common conformance/loss policies
+allow it. glTF's descriptor exposes no such recovery choice.
+
+A descriptor `TextProfile` owns lexical rules and immutable format hard caps, not a competing request
+budget. For every matching dimension the effective decoder limit is
+`min(TextProfile hard cap, ImportConfig ResourceLimits)`. A format envelope may select only an
+advertised recovery mode and may never raise either bound.
+
+Serialization uses stable field/variant identifiers defined by the configuration schema, canonical
+map ordering, bounded payload sizes, and strict unknown-field/version rejection. A Rust `serde`
+derive or struct layout is not itself a stable config contract. Decode followed by encode is
+canonical; encode followed by decode reproduces an equal frozen semantic request.
+
+### Presets
+
+Presets are named, pure overlay constructors. Expansion is inspectable before execution and produces
+the same common and format-envelope layers a caller could build explicitly. Presets may select a
+post-process plan and a loss policy, but may not enable FFI, external resource access, or an unsafe
+backend outside fields visibly present in the expanded request.
+
+```mermaid
+flowchart TB
+    Registrations[Importer codec registrations] --> BuildScope[Bounded RegistryBuildScope]
+    BuildScope --> CompiledDefaults[Compile and type-check every format default]
+    CompiledDefaults --> Snapshot[Immutable registry snapshot with Arc defaults]
+    CommonDefaults[Built-in common defaults] --> CommonMerge[Typed common merge]
+    Preset[Inspectable preset overlays] --> CommonMerge
+    Caller[Caller common overlay] --> CommonMerge
+    PresetEnvelope[Submitted preset format envelopes] --> Submitted[Group submitted targets only]
+    CallerEnvelope[Submitted caller format envelopes] --> Submitted
+    Snapshot --> Submitted
+    Submitted --> RequestScope[Bounded OptionCompileScope]
+    RequestScope --> Store[Private override-only FormatOptionStore]
+    CommonMerge --> Frozen[Frozen ImportConfig]
+    Store --> Validate[Validate complete request before IO]
+    Frozen --> Validate
+    Validate --> Session[ImportSession]
+    Snapshot --> Session
+    Session --> Scope[Selected importer ParseScope]
+    Store --> Scope
+    Scope --> Typed[Checked concrete option view]
 ```
 
-## Option Categories
+## Ownership Matrix
 
-Baozi options are grouped by ownership:
-
-| Category | Owner | Examples |
+| Option family | Owner | Format codecs may do |
 | --- | --- | --- |
-| Resource limits | `baozi-io` / `baozi-import` | max bytes, max vertices, max recursion depth |
-| IO policy | `baozi-io` | sidecar access, archive access, allowed URI schemes |
-| Detection | `baozi-import` | extension hints, magic confidence threshold |
-| Parser behavior | format crates | OBJ smoothing groups, PLY property policy |
-| Post-process | `baozi-postprocess` | triangulate, coordinate target, generate normals |
-| Diagnostics | facade/import | strictness, warning level, source location retention |
-| Observability | facade/import | tracing spans, profile counters |
-
-Each option must have one owner crate. Cross-crate options are represented in the facade by composing
-owned option structs, not by duplicating fields.
-
-## Typed and Format-Specific Options
-
-Common options are typed Rust fields:
-
-```rust
-pub struct ImportOptions {
-    pub limits: ResourceLimits,
-    pub io: IoOptions,
-    pub detection: DetectionOptions,
-    pub postprocess: PostProcessPipeline,
-    pub diagnostics: DiagnosticOptions,
-}
-```
-
-Format-specific options use typed structs when the format crate is linked:
-
-```rust
-pub struct ObjOptions {
-    pub parse_mtl: bool,
-    pub preserve_smoothing_groups: bool,
-}
-```
-
-The facade may also support a namespaced dynamic option map for plugin or CLI use:
-
-```text
-obj:parse_mtl = true
-gltf:load_buffers = external
-```
-
-Dynamic options must be parsed into typed format options before parser execution.
-
-## Presets
-
-Presets are named option overlays, not hidden code paths:
-
-- `Raw`
-- `ToolingPreserve`
-- `RealtimeFast`
-- `RealtimeQuality`
-- `RealtimeMaxQuality`
-
-Users must be able to inspect the expanded preset as an explicit `ImportOptions` value. Presets may
-set post-process steps, coordinate targets, diagnostics, and default IO policy, but they must not
-silently enable unsafe or FFI backends.
-
-## Strict and Permissive Modes
-
-Strict mode:
-
-- unknown options are errors
-- lossy parser behavior is an error unless explicitly allowed
-- resource limit defaults are conservative
-- validation failures stop import
-
-Permissive mode:
-
-- unknown dynamic options become diagnostics
-- recoverable parser issues become warnings
-- lossy behavior is allowed only with diagnostics
-- structurally unsafe scenes still fail
-
-Permissive mode is not a security bypass. Resource limits and path policy still apply.
-
-## Serialization of Options
-
-Options may support `serde` behind a feature flag, but the serialized representation is not stable
-until Baozi declares a config schema version. CLI tools and test fixtures should include an explicit
-schema version when serializing options.
+| Request resource limits and effective import budget | `baozi-import` | Read the frozen values only |
+| Backend-local hard caps and path/handle validity | `baozi-io` | Nothing; formats receive only authorized resources |
+| Dependency optionality, scope, and session policy | `baozi-import` | Request a classified dependency through `ParseScope` |
+| Detection and forced/preferred format | Import registry/session | Nothing |
+| Conformance and loss policy | `baozi-import`; facade constructs/re-exports only | Emit coded source facts; never override policy |
+| Parser semantics and format-permitted recovery | Individual format crate | Define and compile typed options within descriptor capabilities |
+| Post-process requests | Postprocess crate | Nothing during parsing |
+| Cancellation/progress/deadline mechanism | `baozi-operation`; owning operation supplies policy | Poll/report through capability-limited scope |
 
 ## Alternatives Considered
 
-### Option A: Global mutable importer configuration
+### Option A: Mutable global property map
 
-Pros:
+It resembles legacy importer APIs and is easy for a CLI, but is nondeterministic under concurrency,
+stringly typed, and impossible to validate before IO reliably. Rejected.
 
-- Similar to many legacy C/C++ libraries.
-- Easy for quick examples.
-- Avoids passing options through every layer.
+### Option B: Generic option methods on `FormatImporter`
 
-Cons:
+This gives direct static typing but destroys trait object safety or requires one facade enum containing
+all optional format types. Rejected.
 
-- Bad for parallel imports.
-- Hard to test.
-- Surprising behavior in libraries and services.
+### Option C: Versioned envelopes compiled by object-safe format codecs
 
-Decision: rejected.
-
-### Option B: Single string-key option map
-
-Pros:
-
-- Flexible and easy to expose in a CLI.
-- Format crates can add options without facade changes.
-- Similar to some Assimp property patterns.
-
-Cons:
-
-- Weak type safety.
-- Runtime errors for typos.
-- Difficult documentation and completion.
-
-Decision: rejected as the primary API.
-
-### Option C: Typed common options with typed format extensions and optional dynamic bridge
-
-Pros:
-
-- Strong Rust API for library users.
-- Still supports CLI/plugin use cases.
-- Clear owner and precedence rules.
-
-Cons:
-
-- More boilerplate.
-- Dynamic options need parsing and diagnostics.
-- Facade must coordinate feature-gated option types.
-
-Decision: chosen.
-
-## Success Metrics
-
-| Metric | Target | Measurement |
-| --- | --- | --- |
-| Deterministic merge | same inputs always produce same frozen config | unit tests |
-| No global state | concurrent imports cannot mutate shared options | API review and tests |
-| Unknown option policy | strict and permissive modes behave differently and predictably | option tests |
-| Preset transparency | presets can be expanded and inspected | facade tests |
-| Format option isolation | disabling a format removes its typed options from default API surface where practical | feature checks |
-| Resource limit consistency | all parsers receive the same frozen limits | importer contract tests |
-
-## Risks and Mitigations
-
-| Risk | Severity | Likelihood | Mitigation |
-| --- | --- | --- | --- |
-| Option structs grow too large | Medium | High | Group by ownership and use builders |
-| Feature-gated format options complicate facade docs | Medium | Medium | Generate option docs from crate metadata later |
-| Dynamic option bridge becomes a second API | Medium | Medium | Parse dynamic keys into typed structs before execution |
-| Presets hide destructive behavior | High | Medium | Require preset expansion and post-process diagnostics |
-| Strict mode rejects useful real-world files | Medium | High | Keep permissive mode documented but limit-aware |
-
-## Implementation Plan
-
-### Phase 0: Common Option Types
-
-- Add `ImportOptions`, `DiagnosticOptions`, `DetectionOptions`, and `IoOptions`.
-- Make `ResourceLimits` part of the per-import configuration.
-- Add immutable `ImportConfig` produced by merging options.
-
-### Phase 1: Presets
-
-- Implement preset expansion to explicit options.
-- Add tests for precedence and canonical post-process order.
-
-### Phase 2: Format Options
-
-- Add typed options to first parser crates as needed.
-- Add dynamic namespaced option parsing for CLI and plugin use.
-
-### Phase 3: Documentation and Tooling
-
-- Document all common options.
-- Add snapshot tests for preset expansion.
-- Consider schema-versioned config serialization.
+This keeps format ownership and static concrete types behind an object-safe registry, provides a
+versioned external boundary, and fails invalid requests before IO. Chosen.
 
 ## Consequences
 
 Positive:
 
-- Parallel imports remain deterministic.
-- Library users get type-safe configuration.
-- Format-specific behavior can evolve without global state.
+- Concurrent sessions cannot observe configuration mutation.
+- Format crates evolve typed options without leaking parser types through the facade.
+- Unknown, disabled, duplicate, and version-mismatched configuration fails before touching assets.
+- Broken codec defaults are rejected before a registry snapshot exists, while unrelated codecs are not
+  invoked for requests that submit no layer for them.
+- Request codec cost scales with submitted envelopes rather than registry size.
+- Presets remain inspectable rather than becoming hidden code paths.
 
 Negative:
 
-- Initial option plumbing is more work.
-- Facade API needs careful feature-gated documentation.
-- Some users may still want a simple property map.
+- Every configurable format maintains a schema and object-safe codec.
+- Registry freeze must compile every format default and may reject the entire proposed snapshot.
+- External configuration needs an explicit versioned serialization layer.
+- Adding a format option requires merge and round-trip conformance tests.
 
-## Open Questions
+## Risks and Mitigations
 
-1. Should `ImportOptions::default()` be strict or permissive?
-   Recommendation: use safe permissive parsing with conservative limits, plus `Strict` preset.
-2. Should environment variables affect library imports?
-   Recommendation: no for library APIs; only CLI tools may read environment variables.
-3. Should format detection options be per-import or registry-wide?
-   Recommendation: per-import, with registry only storing capabilities.
+| Risk | Severity | Mitigation |
+| --- | --- | --- |
+| A type-erased value is forged or downcast by the wrong importer | High | Private store constructors, registry-issued selected-importer capability, and checked type identity. |
+| Envelope payloads become an allocation attack | High | Bound envelope count and bytes, use fallible decoding, and compile before IO. |
+| Broken or stateful plugin poisons unrelated requests | High | Compile defaults at bounded atomic freeze; request compiler invokes only submitted targets and otherwise reuses cached defaults. |
+| Large registry makes every request linear in format count | High | Store defaults in the snapshot and build an override-only request store keyed from submitted envelopes. |
+| Preset and caller precedence becomes field-order dependent | Medium | Explicit overlay fields and all-permutation merge tests. |
+| Schema version changes silently reinterpret data | High | Stable schema identity, exact version checks, and explicit new-version codecs. |
+| Dynamic CLI keys become a second semantic API | Medium | CLI translation ends at the canonical envelope; no dynamic map reaches parsers. |
+
+## Acceptance Criteria
+
+| Contract | Testable acceptance |
+| --- | --- |
+| Object safety | A registry stores heterogeneous `dyn FormatImporter` values while each format reads its concrete options. |
+| Precedence | Default/preset/caller permutations produce one deterministic frozen value per field. |
+| Pre-IO rejection | Unknown, disabled, duplicate, wrong-schema, wrong-version, malformed, and cross-relabeled wrong-format envelopes cause zero backend opens. |
+| Registry default gate | Every registered codec compiles its empty/default layers under `RegistryBuildScope`; panic, budget, allocation, or type failure yields `RegistryBuildError` and no partial snapshot. |
+| Cached defaults | A no-envelope automatic request invokes zero codecs and the selected parser observes the exact snapshot-cached `Arc<CompiledFormatOptions>`. |
+| Submitted-only cost | Instrumented registries of different sizes perform equal codec calls/work for the same submitted envelope set; complexity follows submitted count/bytes, not registry size. |
+| Multi-target admission | Preset/caller envelopes for several formats all compile before session/IO even when forced or automatic detection later selects only one. |
+| Bounded codec execution | Oversized decoded cells/bytes, recursion, work, and live capacity fail through the phase-appropriate build/request scope before snapshot or session. |
+| Runtime type agreement | Registry default and submitted-layer compilation reject importer/codec/value type-key disagreement before snapshot/session; a parser never discovers it after primary IO. |
+| Codec panic phase | Default panic is bounded `RegistryBuildError::CodecPanic`; submitted-layer panic is bounded `RequestError::CodecPanic`; neither creates a session or opens an asset. |
+| Irrelevant codec isolation | A codec with no submitted request layer is never called during request compilation and cannot poison that request. |
+| Common config isolation | Starting from the same frozen snapshot, changing only common defaults/preset/caller fields invokes zero format codecs. |
+| Type isolation | A selected importer cannot access another format's compiled value; a wrong downcast is an internal contract failure. |
+| No global input | Parallel tests prove environment or another request cannot change a session config. |
+| Preset transparency | Expanding a preset and supplying the resulting overlays explicitly yields an equal frozen request. |
+| Serializable profiles | Versioned common conformance/loss and format recovery profiles pass canonical round-trip, unknown-field, and version-mismatch tests. |

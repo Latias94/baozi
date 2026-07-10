@@ -19,7 +19,9 @@ It is not a public API contract; ADR 0027 remains the architectural policy.
 
 - **Observed:** `cargo +nightly-2026-05-27 fuzz run gltf_import -- -runs=256` can trigger a panic in `gltf-json` 1.4.1 validation while parsing malformed glTF input.
 - **Why `catch_unwind` is insufficient:** cargo-fuzz/libFuzzer builds can abort on panic before unwinding reaches Baozi's `safe_gltf` wrapper.
-- **Current CI policy:** `gltf_import` is an experimental check-only target. CI runs `cargo fuzz check gltf_import`, but it does not run `cargo fuzz run gltf_import` as mandatory sanitizer smoke.
+- **Current CI policy:** `gltf_import` is a non-admitted internal check-only target. CI may run
+  `cargo fuzz check gltf_import`, but the target is not facade, sanitizer, or maturity evidence.
+  The public facade has no glTF feature while this baseline abort remains reproducible.
 - **Re-enable condition:** Baozi must prevent this abort class before the backend validation call, or fork/replace the affected parser/validation slice so malformed input returns a structured error.
 - **Local artifact policy:** crash artifacts under `fuzz/artifacts/gltf_import/` are gitignored. Record the hash/name in issue or verification notes when useful, but do not commit generated crash files.
 

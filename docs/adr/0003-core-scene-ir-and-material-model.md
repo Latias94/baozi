@@ -1,366 +1,168 @@
 ---
 status: accepted
 date: 2026-07-08
+updated: 2026-07-10
 authors:
   - Codex
 decision_type: architecture
+supersedes:
+  - docs/adr/0025-scene-ir-invariants-and-validation-boundaries.md
 related:
   - docs/adr/0001-baozi-assimp-compatible-architecture.md
-  - docs/adr/0002-runtime-concurrency-observability.md
+  - docs/adr/0008-math-coordinate-units-and-numeric-policy.md
+  - docs/adr/0012-material-texture-image-and-color-space-policy.md
+  - docs/adr/0030-logical-mesh-primitive-and-attribute-domain.md
+  - docs/adr/0031-animation-skin-morph-and-deformer-contract.md
+  - docs/adr/0032-postprocess-remap-and-derived-data-contract.md
+  - docs/adr/0036-source-identity-provenance-and-metadata.md
 ---
 
-# ADR 0003: Core Scene IR and Material Model
+# ADR 0003: Canonical Scene IR Ownership and State Model
 
 ## Context
 
-Baozi's central risk is not only parser count. It is whether all importers can converge into one
-loss-aware, Rust-native intermediate representation (IR) without repeatedly changing the public
-scene API. Assimp succeeds because many importers target the same `aiScene` family of structures,
-then post-processing can operate across formats.
+Every importer and postprocess operation needs one broad, loss-aware scene model. The previous
+decision called `Scene` immutable while ADR 0025 allowed arbitrary direct mutation of its public
+collections. That contradiction made a successful import indistinguishable from a scene that had
+been invalidated by a caller.
 
-Baozi should learn from that shape without copying Assimp's C/C++ pointer-array ABI. The scene IR
-must support simple triangle meshes, modern PBR assets, skeletal animation, morph targets, metadata
-heavy formats, embedded textures, and importer diagnostics. It also must remain ergonomic for Rust
-users.
-
-Assimp reference points:
-
-- `aiScene`: [scene.h](../../repo-ref/assimp/include/assimp/scene.h)
-- `aiMesh`: [mesh.h](../../repo-ref/assimp/include/assimp/mesh.h)
-- `aiMaterial`: [material.h](../../repo-ref/assimp/include/assimp/material.h)
-- validation behavior: [ValidateDataStructure.cpp](../../repo-ref/assimp/code/PostProcessing/ValidateDataStructure.cpp)
+Assimp's fixed-revision [`aiScene`](https://github.com/assimp/assimp/blob/bcc62230fc0471475528d732f4ad108a59bb7f6c/include/assimp/scene.h)
+demonstrates the value of one common aggregate, while its public pointer arrays and separate
+[`ValidateDataStructure`](https://github.com/assimp/assimp/blob/bcc62230fc0471475528d732f4ad108a59bb7f6c/code/PostProcessing/ValidateDataStructure.cpp)
+pass also demonstrate how mutable storage can exist outside a fresh validation boundary. Baozi
+keeps the common aggregate and rejects that mutation model.
 
 ## Decision
 
-`baozi-core` will own a canonical scene IR. Format crates must convert into this IR immediately.
-Third-party parser types, Assimp types, and file-format-specific object models must not become public
-Baozi scene types.
+`baozi-core` owns the only canonical scene IR. Format backend models remain private and must be
+converted before crossing the format crate boundary. The canonical lifecycle has three distinct
+capabilities:
 
-The IR will use:
+- `SceneBuilder` owns an unvalidated draft and is the construction API for importers and trusted
+  producers.
+- `ValidatedScene` owns a scene generation plus an unforgeable validation proof. The core central
+  validator is the only proof constructor. Import, postprocess, and downstream code may invoke that
+  validator, but cannot construct a proof or `ValidatedScene` directly or bypass full validation.
+- `SceneEdit` isolates mutations from an existing `ValidatedScene`. Commit validates and returns a
+  new generation; failure or cancellation publishes no partial state.
 
-- index handles instead of references for cross-object links
-- a `SceneBuilder` for importer mutation and a validated `Scene` for results
-- typed common material fields plus an extension property bag
-- source locations and diagnostics attached outside the core object identity
-- explicit slots for animation, skeletons, morph targets, cameras, lights, and metadata from day one
-- stable numeric tolerances and normalization rules for testing
-
-The initial public model should look conceptually like this:
-
-```rust
-pub struct Scene {
-    pub root: NodeId,
-    pub nodes: Arena<Node>,
-    pub meshes: Arena<Mesh>,
-    pub materials: Arena<Material>,
-    pub textures: Arena<Texture>,
-    pub animations: Arena<Animation>,
-    pub cameras: Arena<Camera>,
-    pub lights: Arena<Light>,
-    pub metadata: MetadataMap,
-}
-```
-
-The actual arena implementation is not part of this ADR. The important contract is stable IDs and
-validated references.
-
-## Architecture
+`Scene` collections are not publicly mutable. Read-only accessors and typed iterators provide the
+common inspect workflow. `ImportReport::scene()` exposes a read view, so callers that only import and
+inspect never handle proof internals. A caller opts into `SceneEdit` only when changing content.
 
 ```mermaid
-flowchart TD
-    Parser[Format parser] --> Builder[SceneBuilder]
-    Builder --> Validator[Scene validator]
-    Validator --> Scene[Scene]
-
-    Scene --> Nodes[Node arena]
-    Scene --> Meshes[Mesh arena]
-    Scene --> Materials[Material arena]
-    Scene --> Textures[Texture arena]
-    Scene --> Animations[Animation arena]
-    Scene --> Cameras[Cameras]
-    Scene --> Lights[Lights]
-    Scene --> Metadata[Namespaced metadata]
-
-    Nodes --> MeshRefs[MeshId refs]
-    Meshes --> MatRef[MaterialId ref]
-    Materials --> TexRefs[TextureId refs]
-    Animations --> NodeRefs[NodeId refs]
+stateDiagram-v2
+    [*] --> Draft: SceneBuilder
+    Draft --> Validated: finish and validate
+    Draft --> [*]: reject
+    Validated --> Editing: begin edit
+    Editing --> ValidatedNext: commit and validate
+    Editing --> Validated: cancel or fail
+    ValidatedNext --> Editing: begin another edit
 ```
 
-```mermaid
-sequenceDiagram
-    participant Format
-    participant Builder
-    participant Validator
-    participant Post
-    participant App
+The aggregate owns these collections:
 
-    Format->>Builder: push nodes, meshes, materials, textures
-    Format->>Builder: attach source locations and diagnostics
-    Builder->>Validator: finish()
-    Validator-->>Builder: validated Scene or InvalidScene
-    Builder-->>Post: Scene
-    Post->>Validator: validate after destructive passes
-    Post-->>App: Scene + diagnostics
-```
+| Owner | Owned concepts | Cross-references |
+| --- | --- | --- |
+| Scene | scene space, nodes, mesh instances, logical meshes, materials, images, samplers, textures, skins, animations, cameras, lights, metadata, provenance arena, derived scene bounds | generation-qualified dense IDs |
+| Node | local transform, ordered children, camera/light attachments | node, camera, and light IDs |
+| Logical mesh | primitives, morph target definitions, default morph weights, derived logical-mesh bounds | owner-qualified local IDs and primitive-local data |
+| Primitive | topology, indices, vertex/corner/face attributes, material, derived primitive bounds | material ID |
+| Mesh instance | owner node, logical mesh, optional skin, morph overrides, instance attributes | node, mesh, and skin IDs |
+| Material | typed common fields, texture bindings, bounded extensions | texture IDs |
 
-## Core Object Contracts
+The node hierarchy is one rooted tree. A node canonically stores its ordered child IDs; parent lookup
+is a derived index/view rather than a reciprocal stored field. The root has no derived parent, every
+other node appears in exactly one parent's child list, and every node is reachable exactly once. Each
+scene-owned mesh instance stores exactly one owner `NodeId`; node-to-instance iteration is likewise a
+derived index/view, not a second reciprocal list. Shared geometry uses multiple mesh instances rather
+than shared child nodes. A future DAG hierarchy would require a new decision because transform
+evaluation, animation targets, provenance, and edit remaps all depend on this ownership rule.
 
-### Scene and Node
+Logical mesh and attribute rules are authoritative in ADR 0030; deformation and animation in ADR
+0031; transactional edits, remaps, and derived-data invalidation in ADR 0032; persistent source
+identity and provenance in ADR 0036.
 
-`Scene` is the immutable import result returned to users. It may use internal `Vec` or arena storage,
-but callers should interact through stable ID newtypes:
+Every published scene owns an opaque `SceneGenerationId` that is collision-free within the runtime
+generation domain. Builder finish and every successful edit commit expose a fresh token; ADR 0032
+also assigns never-reused tokens to private step states without granting them a proof. Two edits
+branched from the same input therefore receive distinct tokens rather than both being identified
+only as `G + 1`; equal scene content does not imply equal generation identity. Generation tokens are
+runtime capabilities, not persistence keys or source identities.
 
-- `NodeId`
-- `MeshId`
-- `MaterialId`
-- `TextureId`
-- `AnimationId`
-- `CameraId`
-- `LightId`
+Scene-wide dense IDs are typed pairs of `(SceneGenerationId, dense_index)`. Primitive and morph
+target handles are owner-qualified triples of
+`(SceneGenerationId, logical_mesh_index, local_index)`. Their fields and constructors are private.
+Every lookup checks kind, generation,
+owner where applicable, and range before returning a view. A handle from another generation or
+logical mesh is a typed stale/foreign-ID error even when its numeric index happens to be in range.
+Generation-changing APIs return explicit remaps; callers cannot opt into unchecked numeric reuse.
 
-`Node` contains:
+Canonical storage keeps private typed index components for intra-scene references; a read accessor
+combines the owning scene's generation token with an index to form the public handle above. Thus a
+new generation does not require rewriting every unchanged stored edge merely to change its token,
+while no unqualified index crosses the read/edit/remap API boundary. Owner-qualified local accessors
+similarly derive the mesh component from the actual owner rather than accepting it from a caller.
 
-- name
-- local transform
-- parent link or root-only invariant
-- child `NodeId` list
-- mesh references
-- metadata
+Validation proves collection ownership, reference integrity, graph invariants, cardinality, numeric
+policy, derived-data state, and extension bounds together; there is no public API that constructs a
+proof from a boolean or unchecked `Scene`. ADR 0032 defines the exact `Derived<T>` state and
+generation-qualified remap contract.
 
-The validator must enforce that the graph is a tree unless a later ADR explicitly introduces shared
-node graphs.
+## Considered Options
 
-### Mesh
+### Option A: Public mutable vectors with caller-invoked validation
 
-`Mesh` contains:
+This is convenient for ad hoc tooling and resembles the current code, but any function receiving a
+`Scene` must defensively revalidate it. Cached bounds and remaps can silently become stale, and stage
+claims are forgeable. Rejected.
 
-- primitive topology: points, lines, triangles, polygons before triangulation, or patches if needed
-- positions
-- normals
-- tangents and bitangents
-- colors
-- texture coordinates
-- indices or face lists
-- bone weights
-- morph targets
-- material reference
-- bounding box cache, generated by validator or post-process
-- metadata
+### Option B: Immutable scenes with full rebuilds for every change
 
-The core IR must support non-triangulated faces so importers can preserve raw data before
-post-processing. Triangulation is a post-process step, not a hidden importer requirement.
+This makes invariants simple, but large tools would clone unrelated buffers and cannot express
+transactional failure efficiently. Rejected.
 
-### Material
+### Option C: Builder, validated generation, and isolated edit transaction
 
-Material design must avoid two extremes: a string-only property table that is hard to use, and a
-glTF-only PBR model that cannot represent older formats.
+This keeps the success state trustworthy, permits focused copy-on-write replacement, and gives
+postprocess one atomic mutation boundary. Chosen.
 
-Use a layered material:
+## Consequences
 
-```text
-Material
-├── name
-├── shading model
-├── pbr metallic-roughness fields
-├── legacy Phong/Blinn fields
-├── texture slots
-├── alpha and two-sided policy
-├── normal, occlusion, emissive, displacement, lightmap slots
-└── extension property bag
-```
+- All format crates target the same Rust-owned aggregate without leaking backend types.
+- Breaking changes are required: direct field mutation and constructors for validated result types
+  are removed rather than preserved behind compatibility aliases.
+- Validation is mandatory at builder finish and edit commit, even when an operation believes its
+  local checks are sufficient.
+- Editors must retain or consume explicit remaps when they keep IDs across generations.
 
-Common fields should be typed. Format-specific or rarely used fields go into a namespaced property
-bag:
+## Risks and Mitigations
 
-```text
-gltf:alpha_cutoff
-obj:illum
-fbx:layered_texture_blend_mode
-collada:effect_profile
-```
-
-The property bag is not a replacement for typed fields. It is an escape hatch for loss awareness and
-round-trip support.
-
-### Texture and Asset References
-
-`Texture` supports:
-
-- embedded bytes
-- external asset path resolved through `AssetIo`
-- decoded image metadata when available
-- raw MIME or format hint
-- source location and original URI where safe to expose
-
-Baozi should not require decoding image bytes during model import. Decoding is an optional
-post-import operation or helper layer.
-
-### Animation, Skeleton, and Morph Targets
-
-Even if first milestones focus on mesh formats, the IR reserves:
-
-- node animation channels
-- skeletal bones and inverse bind matrices
-- mesh morph targets
-- animation timing units
-- interpolation type
-
-Deferring these fields entirely would make glTF, FBX, Collada, and game formats force a later IR
-rewrite.
-
-### Math Types
-
-Do not expose CPU-specific SIMD vector types in the public IR.
-
-Initial recommendation:
-
-- use small Baozi-owned math structs for public fields, or
-- use thin aliases behind a controlled compatibility module
-
-If Baozi later chooses `glam` or `nalgebra` as a public dependency, that should be a separate ADR.
-For now, public IR stability matters more than adopting a large math API.
-
-## Validation Invariants
-
-The validator must check at least:
-
-- every ID reference points to an existing object
-- root node exists and is reachable
-- no cycles in the node hierarchy
-- mesh attribute lengths are compatible
-- face indices are in range
-- material and texture references are valid
-- bone weights reference valid bones or node bindings
-- animation channels target existing nodes or meshes
-- numeric values are finite unless a field explicitly allows sentinel values
-- resource limits have not been exceeded
-
-Invalid import data should usually become diagnostics plus repair when possible. A structurally
-unsafe scene must become `BaoziError::InvalidScene`.
-
-## Alternatives Considered
-
-### Option A: Mirror Assimp's `aiScene` layout
-
-Pros:
-
-- Easier one-to-one comparison against Assimp.
-- Easier future C ABI compatibility.
-- Familiar to users who already know Assimp.
-
-Cons:
-
-- Imports raw pointer and ownership assumptions into Rust.
-- Pushes Baozi toward C-compatible representation before Rust ergonomics are understood.
-- Makes safe mutation and validation harder.
-
-Decision: rejected for the core IR. A compatibility adapter can be added later.
-
-### Option B: Make glTF2 the canonical IR
-
-Pros:
-
-- Modern PBR, animation, buffers, and images are well specified.
-- Good fit for web and engine pipelines.
-- Existing Rust glTF ecosystem is usable.
-
-Cons:
-
-- OBJ, STL, PLY, FBX, Collada, IFC, and CAD-like metadata do not map cleanly.
-- Turns a file format into Baozi's domain model.
-- Makes Assimp-level breadth harder.
-
-Decision: rejected. glTF should be a high-priority format, not the core model.
-
-### Option C: Rust-native broad IR with typed common fields and extension bags
-
-Pros:
-
-- Fits Rust ownership.
-- Supports both old and modern formats.
-- Keeps loss awareness without exposing every format as a public type.
-- Allows post-processing to be format-independent.
-
-Cons:
-
-- Requires careful validation and documentation.
-- Some fields will remain unused by simple formats.
-- Extension bag discipline must be enforced.
-
-Decision: chosen.
+| Risk | Severity | Mitigation |
+| --- | --- | --- |
+| Read-only access feels cumbersome | Medium | Provide typed slices, iterators, lookups, and convenience views for positions and triangle data. |
+| Edit transactions duplicate large data | High | Share unchanged storage and allocate only affected replacements; peak-live accounting remains mandatory. |
+| Internal code bypasses proof construction | High | Keep proof constructors private, expose only the central validating function as the legal minting path, and add compile-fail/public-API tests. |
+| Validator and IR drift | High | Every new field lands with invariant tests and validator coverage in the same change. |
 
 ## Success Metrics
 
 | Metric | Target | Measurement |
 | --- | --- | --- |
-| ID integrity | All cross-object references are validated | validator unit tests |
-| Simple mesh coverage | STL, OBJ, and PLY can map without format-specific public types | importer integration tests |
-| Modern scene coverage | glTF hierarchy, materials, textures, skins, and animation have IR slots | glTF fixture tests |
-| Loss awareness | Unsupported but parsed properties can be preserved in namespaced metadata | snapshot tests |
-| Public type independence | Public `Scene` API exposes no third-party parser model | `cargo public-api` or API review |
-| Deterministic snapshots | Normalized scenes produce stable text snapshots with epsilon rules | golden tests |
+| Generation isolation | Stale, foreign-owner, and sibling-branch handles are rejected before lookup | exact/stale/branch API tests |
+| Validation complexity | Complete validation visits each graph edge, entity, reference, and payload cell at most a constant number of times | deterministic validator work counters |
+| Publication integrity | Only builder finish and edit commit can produce a public proof | compile-fail and rollback tests |
 
-## Risks and Mitigations
+## Acceptance Criteria
 
-| Risk | Severity | Likelihood | Mitigation |
-| --- | --- | --- | --- |
-| IR becomes too broad and hard to use | Medium | Medium | Keep simple convenience iterators and facade APIs |
-| Extension bag becomes untyped junk drawer | High | Medium | Require namespace prefixes and promote repeated fields into typed fields |
-| Animation model is underspecified | High | Medium | Study glTF, FBX, and Collada before stabilizing animation APIs |
-| Material model loses format details | High | Medium | Preserve original keys in metadata and document conversion rules per format |
-| Math dependency choice causes API churn | Medium | Medium | Use Baozi-owned public math types until a dedicated ADR chooses otherwise |
-| Validator is too strict for real-world assets | Medium | High | Support strict and permissive validation modes with diagnostics |
-
-## Implementation Plan
-
-### Phase 0: IR Skeleton
-
-- Define ID newtypes.
-- Define `SceneBuilder` and validated `Scene`.
-- Add node, mesh, material, texture, metadata, and diagnostic containers.
-- Add validator with structural checks.
-
-### Phase 1: Mesh and Material Baseline
-
-- Implement STL, OBJ, and PLY mapping against the same mesh model.
-- Add typed PBR and legacy material fields.
-- Add texture references without requiring image decoding.
-
-### Phase 2: Complex Scene Readiness
-
-- Add skeleton, animation, camera, light, and morph target structures.
-- Prove the model against representative glTF fixtures.
-- Add scene differ and normalized snapshot format.
-
-### Phase 3: Stabilization
-
-- Document IR conversion rules in `docs/model/scene-ir.md`.
-- Add public API tests for core types.
-- Freeze only the facade and stable core fields after importer experience.
-
-## Consequences
-
-Positive:
-
-- Baozi owns its domain model.
-- Format crates remain replaceable.
-- Post-processing can operate uniformly across imported assets.
-- Users get typed access to common fields without losing unknown data.
-
-Negative:
-
-- More core design work before the first parser feels complete.
-- Simple mesh formats carry unused scene fields.
-- Material conversion will need careful per-format documentation.
-
-## Open Questions
-
-1. Should `Scene` be fully immutable after validation, or should advanced users get controlled mutable
-   access?
-   Recommendation: make `SceneBuilder` mutable and `Scene` mostly immutable, with explicit edit APIs
-   later.
-2. Should metadata values support arbitrary binary blobs?
-   Recommendation: allow bytes only when attached to a typed source and size-limited.
-3. Should Baozi expose both face lists and index buffers?
-   Recommendation: yes internally; facade helpers can present common triangle views.
+- External code cannot mutate a validated collection or construct `ValidatedScene` directly; it can
+  obtain one only by passing a draft through the central validator.
+- Every importer success and postprocess success contains a valid proof from the central validator.
+- Root, reachability, unique derived parentage, duplicate child edges, and every dense reference are
+  centrally validated.
+- Failed or cancelled edits preserve the input scene digest and generation.
+- Stale dense IDs require an explicit remap before use with a new generation.
+- Primitive and morph-target handles from another logical mesh fail even when the local index exists.
+- Sibling edits from one input publish different generation IDs and distinct remap endpoints.
+- Public API tests prove the import-inspect path does not require builder, proof, or ledger internals.

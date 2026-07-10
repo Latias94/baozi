@@ -24,8 +24,17 @@ The decision remains per format. Passing this checklist does not make a tool a p
 ## Architecture Boundary
 
 - [ ] Tool types do not appear in public Baozi APIs, re-exports, diagnostics, or scene IR.
-- [ ] Tool errors are converted to `BaoziError` or Baozi diagnostics at the format boundary.
-- [ ] Tool ASTs are private, short-lived, and converted into `SceneBuilder` calls or private events.
+- [ ] Tool errors are converted to stable format-owned causes admitted through the selected
+  `ParseScope`, or to bounded Baozi diagnostics/loss facts.
+- [ ] Session-terminal capability-produced `ScopeAbort` values are propagated unchanged and are never
+  caught or reclassified as format failures.
+- [ ] Permitted optional-dependency unavailability is handled only through the resolver's explicit
+  non-abort outcome after bounded diagnostic/loss evidence is recorded; parser code never simulates
+  optional continuation by catching `ParseFailure`.
+- [ ] Tool ASTs are private, short-lived, and converted into a format-private normalized model or
+  Baozi-owned `SceneDraft` data through the Scene construction capability.
+- [ ] Parser code cannot return `ValidatedScene`; the import session always performs central
+  validation after receiving `SceneDraft`.
 - [ ] Public behavior is documented in `docs/formats/<format>.md`, not in tool-specific terms.
 - [ ] Disabling the format or optional backend removes the tool from the dependency tree.
 
@@ -52,7 +61,10 @@ The decision remains per format. Passing this checklist does not make a tool a p
 ## Resource Limits and Memory Model
 
 - [ ] Declared counts, offsets, lengths, and nested structures are checked before allocation.
-- [ ] Parser memory is bounded by `ResourceLimits`.
+- [ ] First-party/admitted parser work and allocation use checked work charges plus live
+  reservations or a reviewed conservative allowance before opaque backend allocation.
+- [ ] The trust model is explicit: an extension that may ignore cooperative accounting runs behind a
+  process boundary with host-enforced limits.
 - [ ] Known bounded counts use preallocation instead of repeated unbounded growth.
 - [ ] Full-buffer parsing is justified for the format size and target use case.
 - [ ] Large text/container formats have an incremental, event, or bounded-AST plan.
@@ -74,8 +86,8 @@ The decision remains per format. Passing this checklist does not make a tool a p
 - [ ] Errors include byte offsets or line/column locations where the input representation allows it.
 - [ ] Tool-specific error trees are collapsed into stable Baozi diagnostic codes/messages.
 - [ ] Strict versus permissive behavior is documented for the format.
-- [ ] Recoverable errors are intentionally chosen; unrecoverable structural errors return hard
-  `BaoziError`.
+- [ ] Recoverable errors are intentionally chosen; unrecoverable structural errors return a stable
+  format-owned cause through the selected `ParseScope`.
 - [ ] Malformed fixture tests cover incomplete records, invalid numbers, invalid encoding, bad
   counts, and unexpected EOF.
 

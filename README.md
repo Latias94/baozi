@@ -4,8 +4,9 @@ Baozi is a Rust workspace for a model import library inspired by Assimp's breadt
 around Rust ownership, typed errors, explicit post-processing, and a source-preserving scene IR.
 
 Current status: experimental parser foundation. STL, OBJ/MTL, and PLY have owned parser paths with
-fixture and fuzz coverage. glTF/GLB is available behind an experimental private backend while Baozi
-keeps the public API independent from `gltf-rs`.
+fixture and fuzz coverage. The glTF/GLB crate is an internal, non-admitted backend candidate: it has
+no facade feature, built-in registration, or first-party support entry until its baseline sanitizer
+and resource-admission gates pass.
 
 ## Goals
 
@@ -24,11 +25,12 @@ keeps the public API independent from `gltf-rs`.
 | `baozi-io` | Asset IO, URI/path policy, resource limits |
 | `baozi-import` | Format importer traits, registry, capability metadata |
 | `baozi-postprocess` | Post-process pipeline contracts and presets |
-| `baozi-format-stl` | STL importer crate shell |
-| `baozi-format-obj` | OBJ/MTL importer crate shell |
-| `baozi-format-ply` | PLY importer crate shell |
-| `baozi-format-gltf` | glTF/GLB importer crate shell |
+| `baozi-format-stl` | STL importer |
+| `baozi-format-obj` | OBJ/MTL importer |
+| `baozi-format-ply` | PLY importer; admitted for source builds but not yet published |
+| `baozi-format-gltf` | Internal glTF/GLB backend candidate; not facade-admitted |
 | `baozi-test-support` | Test snapshots and fixture helpers |
+| `baozi-xtask` | Repository governance checks, including ADR validation |
 
 ## Format Status
 
@@ -75,6 +77,7 @@ cargo bench -p baozi --bench import_baseline --no-run --all-features
 Start here:
 
 - [`docs/research/assimp-replication-study.md`](docs/research/assimp-replication-study.md)
+- [`docs/adr/README.md`](docs/adr/README.md)
 - [`docs/adr/0001-baozi-assimp-compatible-architecture.md`](docs/adr/0001-baozi-assimp-compatible-architecture.md)
 - [`docs/model/scene-ir.md`](docs/model/scene-ir.md)
 - [`docs/model/coordinate-and-render-conventions.md`](docs/model/coordinate-and-render-conventions.md)
@@ -88,6 +91,7 @@ cargo fmt --all -- --check
 cargo check --workspace --all-targets
 cargo clippy --workspace --all-targets -- -D warnings
 cargo nextest run --workspace
+cargo nextest run --workspace --all-features
 cargo test --doc --workspace --all-features
 cargo check -p baozi --examples --all-features
 cargo deny check

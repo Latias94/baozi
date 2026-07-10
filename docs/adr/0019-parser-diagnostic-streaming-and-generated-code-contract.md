@@ -1,248 +1,193 @@
 ---
 status: accepted
 date: 2026-07-09
+updated: 2026-07-10
 authors:
   - Codex
 decision_type: architecture
-related:
+depends_on:
   - docs/adr/0014-parser-security-unsafe-ffi-and-panic-boundary-policy.md
+  - docs/adr/0022-per-import-resource-ledger-and-budget-accounting.md
+  - docs/adr/0035-text-decoding-conformance-and-recovery.md
+  - docs/adr/0036-source-identity-provenance-and-metadata.md
+related:
   - docs/adr/0018-parser-tooling-and-format-owned-parser-policy.md
-  - docs/architecture/parser-tool-audit-checklist.md
+  - docs/adr/0020-import-lifecycle-and-report-contract.md
+  - docs/adr/0027-gltf-backend-ownership-and-replacement-policy.md
 ---
 
-# ADR 0019: Parser Diagnostic, Streaming, and Generated-Code Contract
+# ADR 0019: Parser Diagnostics, Input Consumption, and Generated Code
 
 ## Context
 
-ADR 0018 allows Baozi format crates to use parser tools selectively. That decision is necessary but
-not sufficient. Parser tools usually spend engineering time in places that are easy to underestimate:
+Hand-written parsers, generated grammars, and third-party decoder backends expose different error,
+location, allocation, and recovery models. If those models escape a format crate, public behavior
+changes whenever a parser tool is replaced. Unbounded recovery diagnostics or a generated parser's
+hidden AST can also defeat otherwise correct resource limits.
 
-- mapping tool-specific errors into stable Baozi diagnostics
-- preserving useful byte, line, and column locations
-- keeping resource limits visible when macros or generated parsers hide allocation paths
-- deciding whether a format may be parsed from a full byte buffer or needs incremental parsing
-- keeping generated grammar output deterministic and reviewable
-- avoiding tool-specific ASTs becoming the real internal architecture
-- defining what fuzz sanitizer evidence means across nightly, Windows, Linux, and CI environments
-
-Baozi needs a shared contract before OBJ, PLY, glTF, archive containers, and future grammar-heavy
-formats add their own parser styles.
+Baozi's canonical primary input is an immutable bounded snapshot. The word "streaming" therefore
+describes how a parser consumes that snapshot or dependency snapshots; it does not authorize a parser
+to reopen the primary source, own a seek cursor, or bypass the import session.
 
 ## Decision
 
-Baozi will require every production parser implementation, hand-written or tool-assisted, to satisfy
-the same diagnostic, resource, streaming, generated-code, and verification contract.
+Every production parser, whether hand-written, generated, or dependency-backed, satisfies one
+Baozi-owned contract for input consumption, diagnostics, recovery, allocation, and verification.
+Tool-specific types and messages remain private.
 
-Format crates must document these choices before promotion beyond experimental:
+Accepted records the required contract, not the implementation maturity of every format.
 
-- input mode: full-buffer, bounded chunk, event stream, or hybrid
-- diagnostic model: fail-fast, recoverable warnings, or strict/permissive split
-- location model: byte offset, line/column, both, or explicitly unavailable
-- allocation model: where counts, offsets, strings, and AST containers are bounded
-- generated-code workflow, when a grammar or code generator is used
-- fuzz and sanitizer evidence required for the format tier
-- fallback/replacement plan if the parser tool becomes unsuitable
+### Allowed Input Consumption Modes
 
-Simple bounded formats may use full-buffer parsing. Large text, archive, container, or sidecar-heavy
-formats should prefer incremental or event-oriented parsing unless a format-specific review justifies
-bounded full-buffer parsing.
+| Mode | Suitable for | Contract |
+| --- | --- | --- |
+| Snapshot view | Small/simple bounded binary or text formats | Borrow the immutable primary/dependency bytes; no copy for cursor ownership. |
+| Bounded cursor | Binary records and random access | Cursor state is parser-local over a snapshot and every range is checked. |
+| Incremental tokenizer/event decoder | Large line/record-oriented syntax | Retain bounded token/event state; do not build an unnecessary full AST. |
+| Hybrid normalized model | Containers such as glTF | Backend state is private and converted into a bounded format-owned model. |
 
-## Architecture
+True one-pass IO streaming, where the complete primary snapshot never exists, is a separate future
+contract. A parser may not claim streaming merely because a library exposes an iterator over an
+already unbounded AST.
 
-```mermaid
-flowchart TB
-    Bytes[AssetIo bytes] --> Mode{Input mode}
-    Mode -->|small bounded file| FullBuffer[Full-buffer parser]
-    Mode -->|large text/container| Incremental[Incremental or event parser]
-    Mode -->|grammar tool| Generated[Generated parser adapter]
-    FullBuffer --> Limits[ResourceLimits checks]
-    Incremental --> Limits
-    Generated --> Limits
-    Limits --> Private[Private events or AST]
-    Private --> Diagnostics[Baozi diagnostics]
-    Private --> Builder[SceneBuilder]
-    Builder --> Validator[Scene validator]
-```
+### Diagnostic Contract
 
-```mermaid
-sequenceDiagram
-    participant Parser as Format parser
-    participant Tool as Parser tool
-    participant Adapter as Baozi adapter
-    participant Diag as Diagnostics
-    participant Scene as SceneBuilder
+Parser diagnostics are structured events sent through `ParseScope`; parsers do not log source
+warnings or construct final reports. Each stored diagnostic contains:
 
-    Parser->>Tool: parse bounded input
-    Tool-->>Parser: private result or tool error
-    Parser->>Adapter: normalize private data
-    Adapter->>Diag: emit stable code and location
-    Adapter->>Scene: build Baozi IR
-```
+- a stable Baozi-owned code and severity;
+- the import phase and normalized source identity;
+- a raw byte range when the format can identify one;
+- line and column only as a derived view from bounded line-index data;
+- an optional canonical object/property path;
+- a bounded, escaped human message; and
+- structured bounded details when callers need machine-readable values.
 
-## Contract
+Backend exception names, host absolute paths, debug dumps, source substrings, and unbounded offending
+tokens do not become public diagnostic fields. Byte ranges remain authoritative after text recovery;
+ADR 0035 defines decoding and raw-to-decoded span mapping.
 
-### Diagnostics
+Diagnostics have both a count limit and a total encoded-byte limit. Attempted diagnostic count and
+bytes are monotonic ledger counters even after storage is full. Once capped, the sink increments
+`dropped` counters and does not allocate the omitted messages. A bounded summary in the report exposes
+the number dropped. Strict/loss policy may promote a diagnostic to failure, but promotion does not
+erase earlier diagnostics or ledger evidence.
 
-- Tool-specific errors must be converted to Baozi-owned diagnostic codes and `BaoziError`.
-- Malformed input should include byte offset or line/column location when the parser representation
-  makes it possible.
-- Strict mode may fail fast; permissive mode may recover only when the resulting `Scene` still passes
-  validation.
-- Diagnostic flooding must be capped by `ResourceLimits::max_diagnostics`.
-- Public documentation must describe which malformed cases are hard errors and which are warnings.
+### Error and Recovery Boundary
 
-### Streaming and Memory
+The parser distinguishes:
 
-- Full-buffer parsing is acceptable for small formats such as STL when `max_primary_asset_bytes`
-  bounds the input and parser allocation is checked before growth.
-- Text formats with unbounded lines, repeated records, or sidecars must enforce line, token, name,
-  vertex, face, mesh, and diagnostic limits during parsing.
-- Container and archive formats must enforce entry count, decompressed byte, path, nesting, and
-  recursion limits before extracting data into memory.
-- Parser tools that allocate ASTs or pair trees must be justified against the expected asset size and
-  WASM memory budget.
+- fatal structural or required-resource failures, returned as typed causes;
+- recoverable source quality or explicitly authorized loss, emitted as diagnostics; and
+- internal/backend contract failures, translated at the trusted extension boundary.
+
+Recovery is permitted only when the format policy names it, the caller authorizes it, and the
+resulting draft can pass central validation. A generated parser's automatic recovery mode is disabled
+unless its exact skip/insert behavior has stable codes, work bounds, and conformance fixtures. A
+parser cannot downgrade a resource, cancellation, path-policy, or invariant failure to a warning.
+
+### Allocation and Progress
+
+Before growing a token buffer, AST collection, decoded record array, or generated parser stack, the
+adapter must perform checked arithmetic and acquire the appropriate live reservation. Counts derived
+from input are charged as attempted work before the operation that uses them. Tooling that allocates
+an uninspectable unbounded structure before Baozi can reserve it is unsuitable for an in-process
+production path.
+
+Every potentially long loop consumes deterministic work units and checks cancellation at the bound
+defined by ADR 0033. Empty or zero-width successful records must still advance source position or
+terminate; non-progress is a parser error.
 
 ### Generated Code
 
-- Grammar files must be committed and reviewed.
-- Generated parser files may be committed only when regeneration is deterministic and documented.
-- CI must either regenerate and diff committed generated files or build from grammar sources.
-- Generator dependencies must remain build-time or feature-local and must not leak into unrelated
-  format features.
-- Generated parsers are subject to the same malformed-input and fuzz gates as hand-written parsers.
+- Grammar sources and generator configuration are version-controlled.
+- Regeneration is deterministic; CI either regenerates and diffs or builds directly from the grammar.
+- Generated files are private to the format crate and receive normal review, lint, malformed-input,
+  fuzz, and resource-limit coverage.
+- Generator dependencies remain build-time or format-feature-local.
+- Generated public symbols, error types, ASTs, and feature flags do not leak from Baozi's API.
+- A generator upgrade is reviewed as a parser-backend change, including output size, unsafe code,
+  MSRV, WASM, recovery, and allocation behavior.
 
-### Fuzz and Sanitizer Evidence
+```mermaid
+flowchart TB
+    Snapshot[Immutable bounded snapshot] --> Adapter[Format-owned parser adapter]
+    Adapter --> Hand[Hand-written cursor or tokenizer]
+    Adapter --> Generated[Generated parser]
+    Adapter --> Backend[Private decoder backend]
+    Hand --> Normalized[Format-private events or normalized model]
+    Generated --> Normalized
+    Backend --> Normalized
+    Adapter --> Scope[ParseScope capabilities]
+    Scope --> Budget[Work and live reservations]
+    Scope --> Diagnostics[Bounded diagnostic sink]
+    Scope --> Control[Cancellation and progress]
+    Normalized --> Builder[SceneBuilder]
+    Builder --> Validate[Central validation outside parser]
+```
 
-- Parser fuzz targets must compile before a parser can be promoted beyond experimental.
-- Stable-promotion fuzz smoke runs should use nightly Rust with sanitizer support, preferably on a
-  Linux CI runner where libFuzzer and sanitizer runtime availability are predictable.
-- Windows sanitizer runs are useful but not required as the canonical gate because AddressSanitizer
-  runtime DLL availability can depend on local Visual Studio or LLVM installation details.
-- Matching the Windows LLVM/compiler-rt version to `rustc +nightly -Vv` is the first local fix for
-  missing sanitizer DLLs, but an entry-point mismatch after that remains toolchain evidence rather
-  than parser evidence.
-- If a local fuzz smoke run cannot start because of a missing sanitizer runtime, record it as an
-  environment failure, not parser evidence.
-- `cargo check --manifest-path fuzz/Cargo.toml`, `cargo +nightly fuzz check <target>`, and malformed
-  regression tests are acceptable experimental-slice evidence, but they do not replace sanitizer
-  fuzz smoke evidence for stable promotion.
-- Useful seed corpora may be committed; generated artifacts and target directories must stay ignored.
+## Format Review Record
 
-### Tool-Specific Reviews
+Before promotion beyond Experimental, each format records and tests:
 
-- `binrw` review focuses on hidden allocations from count fields, seek behavior, endian declarations,
-  and offset validation.
-- `winnow` and `nom` review focuses on span choice, backtracking cost, lifetime complexity, and error
-  quality.
-- `pest` and `lalrpop` review focuses on grammar ambiguity, generated-code workflow, error recovery,
-  and line/column mapping.
-- `logos` review focuses on invalid-token policy, source spans, and the ownership of the parser state
-  machine after lexing.
-- XML, JSON, and archive libraries review focuses on entity expansion, recursion, path normalization,
-  external references, and decompression bombs.
+- its selected input mode and retained intermediate structures;
+- location precision and line-index strategy;
+- all allowed recovery modes and losses;
+- bounds for lines, tokens, nesting, records, strings, diagnostics, and AST/model storage;
+- generated-code or backend regeneration/update workflow;
+- malformed corpus and sanitizer evidence; and
+- the replacement trigger when a tool cannot satisfy this ADR.
 
 ## Alternatives Considered
 
-### Option A: Let ADR 0018 cover this implicitly
+### Option A: Expose each parser tool's native errors and recovery
 
-Pros:
+This minimizes adapter code but makes public behavior backend-dependent and bypasses uniform limits.
+Rejected.
 
-- fewer architecture documents
-- parser implementation remains flexible
+### Option B: Require one parser framework for every format
 
-Cons:
+This creates surface consistency but forces binary, line-oriented, and container formats into an
+ill-fitting allocation model. Rejected.
 
-- future format crates may choose incompatible diagnostic and memory models
-- generated parser workflow remains ambiguous
-- full-buffer parsing can spread to formats where it is not acceptable
+### Option C: Format-selected tools behind one Baozi parser contract
 
-Decision: rejected. ADR 0018 answers tool ownership; this ADR answers parser delivery contracts.
-
-### Option B: Ban parser tools and require all parsers to be hand-written
-
-Pros:
-
-- maximum control over memory and diagnostics
-- no generated-code lifecycle
-- smallest parser dependency graph
-
-Cons:
-
-- poor fit for grammar-heavy formats
-- slower implementation of complex text/container formats
-- still does not automatically solve streaming, diagnostics, or recovery policy
-
-Decision: rejected. Hand-written parsing remains preferred for small formats, not a universal rule.
-
-### Option C: Require a separate ADR for every parser tool adoption
-
-Pros:
-
-- strong traceability
-- forces explicit per-format decisions
-
-Cons:
-
-- too heavy for small optional subparsers
-- duplicates common audit questions
-- discourages low-risk improvements
-
-Decision: rejected as the default. A separate ADR is required only when a parser tool changes public
-support promises, default dependency policy, MSRV, FFI posture, or streaming architecture.
-
-### Option D: Shared contract plus per-format checklist
-
-Pros:
-
-- keeps the architecture rule stable
-- gives implementers a mechanical review path
-- scales from hand-written STL to grammar-heavy future formats
-- leaves room for separate ADRs when a parser choice is genuinely architectural
-
-Cons:
-
-- requires checklist discipline
-- does not remove the need for format-specific judgement
-
-Decision: chosen.
-
-## Success Metrics
-
-| Metric | Target | Measurement |
-| --- | --- | --- |
-| Diagnostic stability | Public errors use Baozi codes/messages, not tool-specific types | API and docs review |
-| Location quality | Malformed fixtures assert byte or line/column locations where possible | parser tests |
-| Memory control | Oversized input hits `ResourceLimits` before unbounded allocation | limit tests and fuzz seeds |
-| Streaming fit | Large formats document why they are incremental or bounded full-buffer | format docs |
-| Generated-code reproducibility | Grammar/generated output workflow is deterministic | CI or documented regen check |
-| Tool isolation | Parser dependency is feature-local and private | `cargo tree -e features` |
-
-## Risks and Mitigations
-
-| Risk | Severity | Likelihood | Mitigation |
-| --- | --- | --- | --- |
-| Checklist becomes paperwork | Medium | Medium | Require tests and feature-tree evidence, not prose-only approval |
-| Full-buffer parsing spreads too far | High | Medium | Require input-mode documentation and bounded-memory justification |
-| Generated parser drift | Medium | Medium | CI regeneration/diff or build-from-grammar workflow |
-| Tool error model leaks into Baozi docs/API | High | Low | Keep adapters private and review public exports |
-| Recovery mode returns invalid scenes | High | Medium | `SceneBuilder::finish` and `ValidateScene` remain mandatory safety gates |
-| Sanitizer availability differs by host OS | Medium | High | Make Linux nightly sanitizer CI canonical and record local Windows runtime failures explicitly |
+This preserves format-specific engineering choices while freezing diagnostics, budgets, and public
+behavior. Chosen.
 
 ## Consequences
 
 Positive:
 
-- Parser choices remain replaceable even when tools differ by format.
-- Diagnostics and resource limits stay consistent across hand-written and generated parsers.
-- Future tool adoption has a clear review path.
+- Parser backends remain replaceable without changing public outcomes.
+- Diagnostics and source locations are comparable across formats.
+- Generated and hand-written code face the same security and fuzz gates.
+- Snapshot, tokenizer, and normalized-model implementations can be chosen by format.
 
 Negative:
 
-- Parser changes require more up-front documentation.
-- Some convenient parser crates may be rejected if they cannot expose useful spans or bounded memory
-  behavior.
+- Format adapters must translate backend errors and locations.
+- Some convenient parser libraries are inadmissible due to opaque allocation or recovery.
+- Generated-code upgrades require conformance review rather than a dependency-only bump.
 
-## Operational Checklist
+## Risks and Mitigations
 
-Use [`docs/architecture/parser-tool-audit-checklist.md`](../architecture/parser-tool-audit-checklist.md)
-for the per-format audit record.
+| Risk | Severity | Mitigation |
+| --- | --- | --- |
+| Diagnostic flooding consumes memory after the count cap | High | Enforce count and encoded-byte caps before message allocation; count drops monotonically. |
+| Derived line/column scans become quadratic | High | Build a bounded line index once or maintain line state during tokenization. |
+| Automatic recovery publishes fabricated semantics | High | Disable by default; require named recovery, loss evidence, and central validation. |
+| Generated parser allocates before budget checks | High | Inspect generated paths, wrap with admission, or reject/replace the tool. |
+| Tool-specific wording breaks snapshots | Medium | Snapshot stable codes, locations, and bounded structured details rather than native messages. |
+
+## Acceptance Criteria
+
+| Contract | Testable acceptance |
+| --- | --- |
+| Backend isolation | Public API and rustdoc contain no parser-backend error, AST, or generated type. |
+| Bounded diagnostics | Huge repeated errors respect count/byte caps and report exact attempted/stored/dropped counters. |
+| Location stability | Malformed fixtures assert byte ranges and deterministic derived line/column values. |
+| Non-progress safety | Empty repeated productions and zero-width records terminate with bounded work. |
+| Allocation admission | Oversized token/record/AST counts fail before capacity growth in instrumented tests. |
+| Cancellation | Large loops stop within the declared work interval and preserve diagnostics/stats. |
+| Generated reproducibility | Regeneration produces no diff and all generated parser fuzz targets compile and execute in the required sanitizer tier. |

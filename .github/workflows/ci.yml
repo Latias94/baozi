@@ -75,6 +75,9 @@ jobs:
       - name: Test workspace
         run: cargo nextest run --workspace
 
+      - name: Test all workspace features
+        run: cargo nextest run --workspace --all-features
+
       - name: Test documentation examples
         run: cargo test --doc --workspace --all-features
 
@@ -138,8 +141,8 @@ jobs:
       - name: Run fuzz smoke
         run: cargo fuzz run "${{ matrix.target }}" -- -runs=256
 
-  experimental-fuzz-check:
-    name: ${{ matrix.target }} experimental fuzz check
+  non-admitted-fuzz-check:
+    name: ${{ matrix.target }} non-admitted candidate fuzz check
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
@@ -155,7 +158,7 @@ jobs:
 
       - name: Install pinned nightly Rust
         # Dated nightly toolchains use the action's explicit toolchain input path.
-        # glTF remains check-only until the bootstrap backend no longer aborts under fuzz.
+        # glTF is not facade-admitted until the bootstrap backend no longer aborts under fuzz.
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ env.RUST_FUZZ_NIGHTLY }}

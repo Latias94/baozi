@@ -4,8 +4,8 @@ use baozi_core::{
     AlphaMode, BaoziError, ColorSpace, MeshBinding, PrimitiveTopology, Result, TextureFilterMode,
     TextureRole, TextureSource, TextureWrapMode, Vec2, Vec3,
 };
-use baozi_format_gltf::GltfImporter;
-use baozi_import::{FormatImporter, ImportContext};
+use baozi_format_gltf::read_for_development;
+use baozi_import::ImportContext;
 use baozi_io::{AssetIo, AssetPath, MemoryAssetIo, ReadSeek};
 use baozi_test_support::SceneSnapshot;
 use common::{
@@ -126,7 +126,7 @@ fn external_texture_uri_is_resolved_once_and_reused() -> Result<()> {
     };
     let mut ctx = ImportContext::with_options(&io, source, sidecar_options());
 
-    let result = GltfImporter.read(&mut ctx);
+    let result = read_for_development(&mut ctx);
     let diagnostics = ctx.into_diagnostics();
     let scene = result?;
 
@@ -165,7 +165,7 @@ fn repeated_resolved_texture_uri_uses_canonical_budget() -> Result<()> {
     options.limits.max_canonical_string_bytes = 160;
     let mut ctx = ImportContext::with_options(&io, source, options);
 
-    let result = GltfImporter.read(&mut ctx);
+    let result = read_for_development(&mut ctx);
     let diagnostics = ctx.into_diagnostics();
     let error = expected_error(result)?;
 

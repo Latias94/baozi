@@ -4,82 +4,28 @@ mod detect;
 mod parser;
 
 use baozi_core::{Result, Scene};
-use baozi_import::{
-    CapabilityStatus, DetectionOutcome, FormatCapability, FormatEncoding, FormatImporter,
-    FormatInfo, FormatMaturity, FormatSidecarPolicy, ImportContext, ImporterRegistry, Probe,
-    ReadHint,
-};
+use baozi_import::{DetectionOutcome, ImportContext, ImportOptions, ReadHint};
+use baozi_io::{AssetIo, AssetPath};
 
-pub struct GltfImporter;
-
-pub fn format_info() -> FormatInfo {
-    FormatInfo::new("gltf", "glTF 2.0", &["gltf", "glb"])
-        .with_media_types(&["model/gltf+json", "model/gltf-binary"])
-        .with_encoding(FormatEncoding::TextOrBinary)
-        .with_sidecar_policy(FormatSidecarPolicy::ExternalBuffers)
-        .with_maturity(FormatMaturity::Experimental)
-        .with_capabilities(&[
-            (FormatCapability::Geometry, CapabilityStatus::Supported),
-            (FormatCapability::Hierarchy, CapabilityStatus::Partial),
-            (FormatCapability::Materials, CapabilityStatus::Partial),
-            (FormatCapability::Textures, CapabilityStatus::Partial),
-            (FormatCapability::CamerasLights, CapabilityStatus::Partial),
-            (
-                FormatCapability::Animation,
-                CapabilityStatus::IgnoredWithDiagnostic,
-            ),
-            (
-                FormatCapability::Skinning,
-                CapabilityStatus::Partial,
-            ),
-            (
-                FormatCapability::MorphTargets,
-                CapabilityStatus::IgnoredWithDiagnostic,
-            ),
-            (FormatCapability::Metadata, CapabilityStatus::Partial),
-            (
-                FormatCapability::CompressionContainers,
-                CapabilityStatus::Partial,
-            ),
-            (
-                FormatCapability::CoordinatesUnits,
-                CapabilityStatus::Supported,
-            ),
-            (FormatCapability::Diagnostics, CapabilityStatus::Supported),
-            (
-                FormatCapability::ResourceLimits,
-                CapabilityStatus::Supported,
-            ),
-        ])
-        .with_notes("experimental glTF 2.0 importer for mesh, hierarchy, camera projection, skin MVP, PBR material factors, and texture URI references")
-        .with_docs_path("docs/formats/gltf.md")
+/// Classifies bytes for the non-admitted development harness.
+#[doc(hidden)]
+pub fn detect_for_development(bytes: &[u8], source_len: u64, hint: &ReadHint) -> DetectionOutcome {
+    detect::can_read(bytes, source_len, hint)
 }
 
-pub fn register(registry: &mut ImporterRegistry) -> Result<()> {
-    registry.register(GltfImporter)
+/// Runs the non-admitted parser through an existing test context.
+#[doc(hidden)]
+pub fn read_for_development(ctx: &mut ImportContext<'_>) -> Result<Scene> {
+    parser::read_gltf(ctx)
 }
 
-impl FormatImporter for GltfImporter {
-    fn info(&self) -> FormatInfo {
-        format_info()
-    }
-
-    fn can_read(&self, probe: &Probe<'_>, hint: &ReadHint) -> DetectionOutcome {
-        detect::can_read(probe, hint)
-    }
-
-    fn read(&self, ctx: &mut ImportContext<'_>) -> Result<Scene> {
-        parser::read_gltf(ctx)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use baozi_test_support::assert_support_matrix_row;
-
-    #[test]
-    fn support_matrix_matches_format_info() {
-        assert_support_matrix_row("baozi-format-gltf", &format_info());
-    }
+/// Runs the non-admitted parser without registering it in a facade registry.
+#[doc(hidden)]
+pub fn read_asset_for_development(
+    io: &dyn AssetIo,
+    source: AssetPath,
+    options: ImportOptions,
+) -> Result<Scene> {
+    let mut ctx = ImportContext::with_options(io, source, options);
+    read_for_development(&mut ctx)
 }

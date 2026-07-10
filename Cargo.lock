@@ -34,14 +34,12 @@ name = "baozi"
 version = "0.1.0"
 dependencies = [
  "baozi-core",
- "baozi-format-gltf",
  "baozi-format-obj",
  "baozi-format-ply",
  "baozi-format-stl",
  "baozi-import",
  "baozi-io",
  "baozi-postprocess",
- "base64",
  "criterion",
  "tracing",
 ]
@@ -125,6 +123,10 @@ dependencies = [
  "baozi-core",
  "baozi-import",
 ]
+
+[[package]]
+name = "baozi-xtask"
+version = "0.1.0"
 
 [[package]]
 name = "base64"

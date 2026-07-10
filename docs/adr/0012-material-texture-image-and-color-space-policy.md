@@ -1,276 +1,148 @@
 ---
 status: accepted
 date: 2026-07-09
+updated: 2026-07-10
 authors:
   - Codex
 decision_type: architecture
-related:
+depends_on:
   - docs/adr/0003-core-scene-ir-and-material-model.md
   - docs/adr/0008-math-coordinate-units-and-numeric-policy.md
-  - docs/adr/0011-format-support-tiers-and-compatibility-charter.md
+related:
+  - docs/adr/0023-material-and-custom-attribute-extension-model.md
+  - docs/adr/0036-source-identity-provenance-and-metadata.md
 ---
 
-# ADR 0012: Material, Texture, Image, and Color-Space Policy
+# ADR 0012: Material, Image, Texture, Sampler, and Color-Space Policy
 
 ## Context
 
-Many importers appear to work until rendered. Geometry can be correct while colors, alpha, normal maps, packed PBR textures, or legacy Phong properties are wrong. Baozi needs a material and texture policy before public `Material` fields become hard to change.
-
-ADR 0003 defines a typed material model plus extension bags. This ADR defines color-space, texture role, image decoding, and legacy-to-PBR mapping rules.
+The previous model combined image source bytes and sampler state in one `Texture`, then repeated a
+new texture for each material slot. Assimp likewise exposes embedded bytes through
+[`aiTexture`](https://github.com/assimp/assimp/blob/bcc62230fc0471475528d732f4ad108a59bb7f6c/include/assimp/texture.h)
+and sampling/usage through material properties. That broad compatibility is useful evidence, but
+conflating resource identity, sampling behavior, and material interpretation prevents faithful
+reuse when one image is sampled in multiple ways or used once as color and once as data.
 
 ## Decision
 
-Baozi will preserve source material data, expose typed common material fields, and record color-space semantics explicitly. Image decoding is not required during model import. Texture bytes and references are carried as assets; decoding and GPU upload are separate concerns.
+The canonical scene has three separate dense identities:
 
-Core decisions:
+- `Image` identifies one immutable owned encoded-image payload. `ImagePayload::Encoded` is a bounded
+  shared byte buffer plus media/encoding hints and an optional content digest. Dimensions or encoded
+  metadata may be present when known. Decoded pixels are not required for model import success and,
+  if introduced as a cache, use ADR 0032's derived-data contract.
+- `Sampler` identifies minification, magnification, mip filtering, and address modes. An explicit
+  canonical default sampler exists when the source omits one.
+- `Texture` pairs exactly one `ImageId` with one `SamplerId`. It has no material role or color-space
+  interpretation.
 
-- material colors are stored as linear values unless a field explicitly represents encoded source data
-- base color and emissive color textures are treated as sRGB color textures by default when the source format says so or convention is clear
-- normal, metallic, roughness, occlusion, height, displacement, and mask textures are data textures and must not receive sRGB conversion
-- texture role, UV set, transform, wrap, filter, channel packing, and color-space metadata are part of the texture slot
-- embedded textures are preserved as bytes with MIME/format hints
-- image decoding is optional and not part of core import success
-- legacy material fields are preserved and mapped to PBR only through documented conversion helpers
-
-## Architecture
-
-```mermaid
-flowchart TD
-    SourceMaterial[Source material] --> Converter[Format material converter]
-    Converter --> Common[Typed common material fields]
-    Converter --> TextureSlots[Texture slots with role and color-space]
-    Converter --> Legacy[Legacy fields]
-    Converter --> Extensions[Namespaced property bag]
-    TextureSlots --> AssetRef[External or embedded texture asset]
-    AssetRef --> OptionalDecode[Optional image decode layer]
-```
+A material `TextureBinding` references `TextureId` and owns usage semantics: role, UV or other
+mapping source, coordinate set, transform, channel mapping, color interpretation, scale/strength,
+blend operation when representable, and bounded source key.
 
 ```mermaid
-sequenceDiagram
-    participant Format
-    participant MaterialBuilder
-    participant AssetIo
-    participant Scene
-    participant Renderer
+erDiagram
+    IMAGE ||--o{ TEXTURE : sampled_by
+    SAMPLER ||--o{ TEXTURE : configures
+    TEXTURE ||--o{ TEXTURE_BINDING : used_by
+    MATERIAL ||--o{ TEXTURE_BINDING : owns
 
-    Format->>MaterialBuilder: map source material
-    Format->>AssetIo: resolve texture references
-    MaterialBuilder->>Scene: store slots, roles, color-space, bytes/URI
-    Scene-->>Renderer: typed material and texture descriptors
-    Renderer->>Renderer: decode images and upload with correct color-space
+    IMAGE {
+      ImageId id
+      ImagePayload encoded
+      SourceIdentity source
+      MediaType media_type
+    }
+    SAMPLER {
+      SamplerId id
+      Filter filter
+      AddressMode address
+    }
+    TEXTURE {
+      TextureId id
+      ImageId image
+      SamplerId sampler
+    }
+    TEXTURE_BINDING {
+      TextureRole role
+      ColorInterpretation color
+      AttributeSemantic coordinates
+      ChannelMapping channels
+    }
 ```
 
-## Material Model
+Material factors are linear numeric values. A binding declares whether sampled values are sRGB
+color, linear color, or uninterpreted data. Base-color, diffuse, and emissive bindings default to
+sRGB only when the format specifies that rule or the format's normative convention does. Normal,
+metallic, roughness, occlusion, mask, height, and displacement bindings are data. Image-level ICC,
+transfer, or encoding metadata records what bytes claim; it does not replace the binding's usage
+interpretation.
 
-`Material` should have these layers:
+Typed material fields cover stable cross-format concepts. Legacy fields remain source truth and PBR
+approximations never erase them. Rare or source-specific properties use ADR 0023's bounded,
+namespaced extension values. A source texture behavior without a canonical role remains a typed
+binding with a validated namespaced role and representable usage parameters. If its behavior cannot
+be represented, import returns structured unsupported/loss evidence under caller policy; metadata
+alone never pretends to preserve rendering behavior and no unknown role is mislabeled as known.
 
-- identity: name, source format, metadata
-- shading model: unlit, legacy Phong/Blinn, metallic-roughness PBR, specular-glossiness, unknown
-- PBR common fields: base color, metallic, roughness, emissive, normal scale, occlusion strength, alpha mode
-- legacy fields: diffuse, specular, ambient, shininess, opacity, reflectivity
-- texture slots: role-specific descriptors
-- extension property bag: namespaced loss-aware data
+Embedded and external images use the same owned payload shape. External resolution occurs through
+the import session, which authorizes and snapshots the exact encoded bytes before transferring them
+to the scene. An optional sanitized `ReloadHint` and source identity remain provenance only: they are
+not a resolver capability, do not promise equal future content, and are not required for result
+availability. The canonical scene does not require PNG, JPEG, WebP, KTX, DDS, or EXR decoding.
 
-PBR fields should not erase legacy fields. A user should be able to inspect both the source legacy data and Baozi's best-effort common interpretation.
+## Considered Options
 
-## Texture Slot Semantics
+### Option A: One texture object per material slot
 
-Each texture slot should record:
+This is easy for importers, but duplicates image bytes and sampler state and cannot express shared
+identity accurately. Rejected.
 
-- role
-- asset reference or embedded texture ID
-- UV set index
-- UV transform
-- wrap mode
-- filter hint
-- coordinate set source when known
-- color-space
-- channel mapping
-- scale/strength factor
-- original source key
+### Option B: Image plus role-specific texture objects
 
-Texture roles include:
+This separates bytes but still puts color space and role on a reusable texture, making the same
+image/sampler pairing impossible to use with different interpretations. Rejected.
 
-- base color
-- diffuse
-- specular
-- metallic
-- roughness
-- metallic-roughness packed
-- normal
-- occlusion
-- emissive
-- opacity
-- height
-- displacement
-- lightmap
-- sheen
-- clearcoat
-- transmission
-- unknown
+### Option C: Image, sampler, texture, and material binding
 
-Unknown roles are allowed only with diagnostics or extension metadata.
+This mirrors the independent concepts used by modern formats while still representing Assimp-style
+legacy slots and embedded payloads. Chosen.
 
-## Color-Space Policy
+## Consequences
 
-Default assumptions:
+- Importers deduplicate identities only when the source identities are genuinely shared; matching
+  filenames alone are insufficient.
+- Material snapshot tests must cover the full binding, not just a URI and role.
+- Image decode and GPU upload stay outside canonical import success.
+- The breaking cutover deletes the combined image/sampler `TextureSource` model rather than keeping
+  parallel legacy types.
 
-| Data | Default interpretation |
-| --- | --- |
-| base color factor | linear |
-| diffuse factor | linear |
-| emissive factor | linear |
-| base color texture | sRGB color |
-| diffuse texture | sRGB color |
-| emissive texture | sRGB color |
-| normal texture | linear data |
-| metallic/roughness/occlusion texture | linear data |
-| opacity/mask texture | linear data |
-| height/displacement texture | linear data |
+## Risks and Mitigations
 
-If a format specifies a different rule, the format rule wins and must be documented.
-
-Baozi should not convert texture pixels during import unless an explicit post-import image processing API is used. It records enough metadata for the caller to decode correctly.
-
-## Image Decoding Policy
-
-Core import succeeds when Baozi can resolve and preserve image references or embedded bytes. Decoding PNG, JPEG, WebP, KTX, DDS, or EXR is optional.
-
-Rules:
-
-- `baozi-core` stores texture asset descriptors, not decoded image pixels by default
-- optional image helper crates may decode bytes into image data
-- failed optional image decode is a diagnostic unless the caller requested strict decode
-- compressed GPU-ready texture payloads should be preserved without forced CPU decode
-
-## Legacy to PBR Mapping
-
-Legacy material mapping is best-effort and must be explicit:
-
-- Phong diffuse maps to base color only as an approximation
-- specular and shininess can inform roughness/specular helpers but must not erase original fields
-- opacity maps to alpha factor and alpha mode with documented heuristics
-- MTL `illum` is preserved in extension metadata and influences shading model only through documented rules
-- unknown source keys go into namespaced metadata
-
-## Normal Map and Tangent Basis Policy
-
-Normal maps are data textures. Baozi records normal scale and tangent-space convention metadata where known.
-
-Initial policy:
-
-- do not flip normal map green channel implicitly during import
-- coordinate-system post-process may update tangent basis metadata when it changes handedness
-- tangent generation uses a documented basis, with MikkTSpace as an optional backend
-- tangent handedness is stored in `Vec4.w` when tangents exist
-
-## Alternatives Considered
-
-### Option A: Store only a stringly Assimp-like material property table
-
-Pros:
-
-- Maximum flexibility.
-- Easy to preserve unknown source keys.
-- Similar to Assimp's broad material property model.
-
-Cons:
-
-- Hard for Rust users to consume safely.
-- Color-space and texture role semantics stay implicit.
-- Repeated conversions become ad hoc.
-
-Decision: rejected as the only model. Keep extension bags, but promote common fields to typed API.
-
-### Option B: Make glTF PBR the only material model
-
-Pros:
-
-- Clean modern renderer path.
-- Matches many current asset pipelines.
-- Simple for real-time graphics.
-
-Cons:
-
-- Loses legacy and DCC-specific material data.
-- Forces OBJ/MTL, FBX, Collada, and CAD materials into approximations.
-- Makes round-trip and diagnostics weaker.
-
-Decision: rejected. Use PBR as a common layer, not the only truth.
-
-### Option C: Typed common material plus source-preserving extensions
-
-Pros:
-
-- Ergonomic common rendering path.
-- Preserves source data and unknown fields.
-- Lets format docs define mapping quality.
-
-Cons:
-
-- More fields and conversion rules to maintain.
-- Requires careful snapshot tests.
-- Some users must inspect both common and source-specific layers.
-
-Decision: chosen.
+| Risk | Severity | Mitigation |
+| --- | --- | --- |
+| More IDs complicate simple rendering | Low | Provide convenience access from a binding to its texture, sampler, and image. |
+| Color interpretation conflicts with embedded profiles | High | Preserve both claims, diagnose conflict, and never transform pixels implicitly. |
+| External resource identity leaks host paths | High | Use sanitized logical resource identity and keep backend handles/report details private. |
+| Legacy blend semantics are not representable | Medium | Preserve a typed extension and record conversion loss instead of inventing a close role. |
 
 ## Success Metrics
 
 | Metric | Target | Measurement |
 | --- | --- | --- |
-| Color-space clarity | texture slots identify color vs data textures | material snapshot tests |
-| Source preservation | legacy material fields remain inspectable after PBR mapping | OBJ/MTL and Collada/FBX-style fixtures |
-| Decode separation | import can preserve image bytes without decoding | embedded/external texture tests |
-| Normal correctness | normal maps are never sRGB-converted by default | material conversion tests |
-| Mapping docs | each stable format documents material conversion | `docs/formats/*.md` |
-| Extension hygiene | unknown fields are namespaced | validator tests |
+| Identity separation | One image can participate in multiple sampler pairs and binding interpretations without byte duplication | shared-image fixture and allocation counts |
+| Session independence | Every published image's encoded bytes remain readable after import resources are dropped | external/embedded/data-URI lifetime tests |
+| Color correctness | Color/data interpretation exists only on bindings and never silently transforms encoded bytes | binding snapshots and decode-spy tests |
 
-## Risks and Mitigations
+## Acceptance Criteria
 
-| Risk | Severity | Likelihood | Mitigation |
-| --- | --- | --- | --- |
-| Material model becomes too large | Medium | Medium | Keep common fields typed and push rare fields to namespaced extensions |
-| Color-space mistakes become silent rendering bugs | High | Medium | Snapshot texture slot roles and color-space metadata |
-| Legacy-to-PBR mapping misleads users | Medium | Medium | Preserve original legacy fields and label approximations |
-| Optional image decoding becomes mandatory by accident | Medium | Medium | Keep decode APIs outside core import success |
-| Normal map conventions vary by source | Medium | Medium | Store convention metadata and avoid implicit green-channel flips |
-
-## Implementation Plan
-
-### Phase 0: Material Types
-
-- Define `Material`, `ShadingModel`, `TextureSlot`, `TextureRole`, `ColorSpace`, and alpha modes.
-- Add typed legacy and PBR fields.
-- Add namespaced extension properties.
-
-### Phase 1: Format Mapping
-
-- Implement STL default material, OBJ/MTL legacy material, PLY color attributes, and glTF PBR mapping.
-- Add material snapshots.
-- Document mapping in format docs.
-
-### Phase 2: Optional Decode Helpers
-
-- Add optional image decode helper only after texture descriptors are stable.
-- Keep compressed texture payloads preserved.
-
-## Consequences
-
-Positive:
-
-- Renderers get a usable common material path.
-- Format-specific data is not silently discarded.
-- Color-space semantics become testable.
-
-Negative:
-
-- Material API is broader than minimal mesh loaders.
-- Mapping rules need ongoing documentation.
-- Image decoding remains a separate step for users who need pixels.
-
-## Open Questions
-
-1. Should Baozi include direct image decoding in the facade?
-   Recommendation: no initially; provide optional helpers later.
-2. Should material factors store HDR values?
-   Recommendation: allow values above 1.0 for emissive and source-preserving fields.
+- A fixture reuses one image with two samplers without duplicating image content.
+- A fixture reuses one texture as both color and data through two bindings with distinct semantics.
+- Embedded compressed image import succeeds without image decoding.
+- External encoded image bytes remain owned and usable after the import session and resolver are
+  dropped; changing the reload target does not change the published payload.
+- Normal/data bindings never receive implicit sRGB conversion.
+- An unknown source texture behavior remains a namespaced typed binding or produces explicit
+  unsupported/loss evidence; metadata-only preservation fails the contract.
+- Every texture, image, sampler, and binding reference is range-validated and resource-bounded.

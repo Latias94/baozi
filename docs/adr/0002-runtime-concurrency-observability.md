@@ -1,429 +1,174 @@
 ---
-status: proposed
+status: accepted
 date: 2026-07-08
+updated: 2026-07-10
 authors:
   - Codex
 decision_type: architecture
-supersedes: []
+depends_on: []
 related:
-  - docs/adr/0001-baozi-assimp-compatible-architecture.md
+  - docs/adr/0014-parser-security-unsafe-ffi-and-panic-boundary-policy.md
+  - docs/adr/0020-import-lifecycle-and-report-contract.md
+  - docs/adr/0022-per-import-resource-ledger-and-budget-accounting.md
+  - docs/adr/0033-operation-control-and-observability.md
 ---
 
-# ADR 0002: Runtime, Concurrency, SIMD, Errors, and Observability Contracts
+# ADR 0002: Runtime Neutrality, Host Concurrency, and Execution Backends
 
 ## Context
 
-Baozi aims to become an Assimp-class Rust asset import library. The first architecture ADR defines the scene IR, importer registry, IO abstraction, and post-processing pipeline. The next architectural risk is not one file format; it is the set of cross-cutting choices that can force large rewrites later:
+Baozi is embedded in command-line tools, build systems, editors, game engines, servers, and WASM
+applications. Those hosts already own incompatible async runtimes, worker pools, admission queues,
+tracing subscribers, and shutdown rules. A library-owned global runtime or concurrent-import
+semaphore would hide contention, create priority inversion, and make cancellation and capacity
+planning impossible for the host.
 
-- asynchronous loading
-- multi-threaded parsing and post-processing
-- SIMD acceleration
-- structured errors and recoverable diagnostics
-- logging and tracing
-- profiling and benchmarks
-- cancellation and progress reporting
-
-These concerns must be designed before the first importer traits are stabilized. They should not force every Baozi user to accept a runtime, thread pool, profiler, or CPU-specific backend.
+At the same time, parsing and post-processing need a deterministic scalar baseline and room for
+parallel and SIMD acceleration. Thread safety must therefore be separated from permission to create
+or schedule work.
 
 ## Decision
 
-Baozi will keep its public core synchronous, runtime-neutral, instrumentable, and data-parallel-ready. Async, parallelism, SIMD, profiling, and heavyweight telemetry will be opt-in layers or feature-gated backends over the same core contracts.
+Baozi's canonical core is synchronous, runtime-neutral, and deterministic. The host owns admission
+of concurrent import sessions and the capacity on which they execute. Baozi owns only work inside an
+admitted session, subject to the session's frozen budget and operation control.
 
-The stable direction is:
+Accepted means this contract is authoritative. It does not claim that every adapter or optimization
+described here is implemented.
 
-- `baozi-core` remains runtime-free and thread-safe by design.
-- `baozi-io` defines synchronous IO first, plus optional async adapters later.
-- `baozi-import` exposes a synchronous import path as the canonical path.
-- Async APIs are adapters, not the only implementation path.
-- Parallelism is explicit through import/postprocess options and internal executors, not hidden global state.
-- SIMD is isolated behind algorithm backends and CPU feature detection.
-- Errors are precise and structured; warnings are diagnostics, not string logs.
-- `tracing` spans are allowed inside library code, but subscriber setup belongs to applications and CLI tools.
-- Profiling hooks use a small Baozi-owned abstraction; concrete profilers are feature-gated.
+### Ownership Boundary
 
-## Architecture
+| Concern | Owner | Contract |
+| --- | --- | --- |
+| Concurrent-session admission | Host application | The host decides when a session may start and how many may coexist. |
+| Async runtime and blocking isolation | Host adapter | Core crates expose no Tokio, async-executor, or reactor types. |
+| Per-session work plan | Baozi | Work is deterministic and bounded by the session budget. |
+| Intra-session executor capacity | Host or explicit adapter | Parallel work requires an explicitly supplied executor/capacity; no mandatory global pool. |
+| Runtime-neutral operation control, reservations, ledger state machine, and coordinator | `baozi-operation` | ADRs 0022 and 0033 are authoritative; the crate owns mechanisms, never domain phases or outcomes. |
+| Import/post-process phase policy and outcome conversion | The owning `baozi-import` or `baozi-postprocess` operation | Each owner supplies phase keys, limits, and domain causes to `baozi-operation`. |
+| Trace collection and formatting | Host application | Library code may emit spans but never installs a subscriber. |
+| SIMD selection | Private algorithm backend | Public Scene and math types never expose CPU-specific vector types. |
+
+Baozi must not create a process-global semaphore, queue, runtime, thread pool, tracing subscriber,
+profiler, or mutable execution policy. A convenience facade may construct a scoped executor owned by
+that facade call, but it cannot silently consume a process-global pool or govern other sessions.
+
+`baozi-operation` is a dependency-leaf workspace crate. It depends on neither `baozi-core`,
+`baozi-io`, `baozi-import`, `baozi-postprocess`, nor the facade. `baozi-core`, `baozi-import`, and
+`baozi-postprocess` may depend on it for the shared capability and accounting mechanisms. This
+direction lets core validation poll and reserve work without depending upward on the import domain,
+and lets import and post-processing use one state machine without depending on each other.
+
+### Thread-Safety Is Not Scheduling Authority
+
+Public immutable configuration, registry snapshots, owned reports, failures, diagnostics, and
+validated scenes must satisfy `Send + Sync`. Parser-local scratch state may remain single-threaded
+when it cannot escape its session. Trusted extension implementations must be `Send + Sync`, but that
+bound is not a sandbox and does not authorize Baozi to invoke one implementation concurrently unless
+its contract says so.
+
+The default execution mode is single-threaded. Parallel algorithms must:
+
+- be explicitly enabled after host admission;
+- use stage-local output or deterministic partitioning rather than shared structural mutation;
+- consume the same operation and live-memory budgets as scalar execution;
+- preserve stable ordering and produce equivalent results within the algorithm's documented numeric
+  tolerance; and
+- stop scheduling new work after cancellation.
+
+### Async and IO Adapters
+
+An async adapter creates the same canonical import session before acquisition, then fulfills that
+session's primary/dependency requests asynchronously. It must produce the same outcomes as the
+synchronous path. It may not pre-open outside the session, create a second parser implementation, or
+expose runtime-specific types from `baozi-core`, `baozi-import`, or format crates. CPU-bound parsing
+must be isolated according to host policy rather than run accidentally on a reactor thread.
+
+### Scalar and SIMD Backends
+
+The scalar implementation is the correctness oracle and is always available. SIMD and other
+accelerated backends are private, feature- and target-gated, and selected without changing canonical
+IR types. Runtime feature detection is required when a compiled binary may run on CPUs below the
+build host's feature set.
 
 ```mermaid
-flowchart TD
-    App[Application] --> Facade[baozi facade]
-    Facade --> Sync[Canonical sync import API]
-    Facade --> Async[Optional async adapter]
-    Sync --> Core[Runtime-neutral core]
-    Async --> Core
-    Core --> IO[Asset IO traits]
-    Core --> Import[Importer registry]
-    Import --> Parser[Format parser backend]
-    Parser --> Builder[SceneBuilder]
-    Builder --> Scene[Scene]
-    Scene --> PP[Postprocess pipeline]
-    PP --> Algorithms[Scalar / SIMD / Parallel algorithms]
-    Core --> Diag[Diagnostics]
-    Core --> Trace[tracing spans]
-    Core --> Profile[Profile hooks]
+flowchart LR
+    Host[Host scheduler and admission] -->|admits one request| Session[ImportSession]
+    Host --> Async[Optional async IO adapter]
+    Async --> Session
+    Host --> Executor[Explicit executor capacity]
+    Session --> Scalar[Deterministic scalar path]
+    Session -->|authorized| Parallel[Parallel stage plan]
+    Executor --> Parallel
+    Scalar --> Result[Canonical outcome]
+    Parallel --> Result
+    Session --> Control[OperationControl]
+    Session --> Trace[Library spans]
+    Trace --> Subscriber[Host-owned subscriber]
 ```
 
-```mermaid
-sequenceDiagram
-    participant App
-    participant Importer
-    participant IO
-    participant Format
-    participant Post
-    participant Observe
+## Crate Contract
 
-    App->>Importer: read_path(options)
-    Importer->>Observe: span(import)
-    Importer->>IO: open source
-    Importer->>Format: parse with cancellation/progress context
-    Format-->>Importer: SceneBuilder + diagnostics
-    Importer->>Post: run ordered processors
-    Post->>Observe: profile processor spans
-    Post-->>Importer: Scene
-    Importer-->>App: ImportReport { scene, diagnostics, profile? }
-```
-
-## Core Contracts
-
-### Runtime Neutrality
-
-The primary public API should stay synchronous:
-
-```rust
-let report = baozi::Importer::new()
-    .with_postprocess(PostProcessPreset::RealtimeQuality)
-    .read_path("model.gltf")?;
-```
-
-Async support should be layered:
-
-```rust
-let report = baozi::AsyncImporter::new()
-    .read_path("model.gltf")
-    .await?;
-```
-
-The async facade may use `tokio` behind a feature, but `baozi-core`, `baozi-import`, and format crates should not require Tokio types in their public contracts.
-
-### IO
-
-Use sync IO as the canonical trait:
-
-```rust
-pub trait AssetIo: Send + Sync {
-    fn open(&self, path: &AssetPath) -> Result<Box<dyn ReadSeek + Send>, BaoziError>;
-    fn exists(&self, path: &AssetPath) -> bool;
-    fn resolve(&self, base: &AssetPath, relative: &str) -> AssetPath;
-}
-```
-
-Async IO should be a separate adapter trait:
-
-```rust
-pub trait AsyncAssetIo: Send + Sync {
-    async fn open(&self, path: &AssetPath) -> Result<Box<dyn AsyncReadSeek + Send + Unpin>, BaoziError>;
-}
-```
-
-Do not make every importer async by default. Many parsers are CPU-bound after bytes are available.
-
-### Concurrency
-
-Baozi should separate thread safety from parallel execution:
-
-- Public owned result types must stay `Send + Sync` unless a future ADR accepts a narrow exception.
-- `Scene`, `Node`, `Mesh`, `Material`, `Texture`, `Camera`, `Light`, importer registry, IO handles,
-  post-process configuration, and facade result types must have compile-time `Send + Sync`
-  assertions.
-- Parser-internal scratch state may be single-threaded when it does not escape the import call.
-- Importer implementations should be stateless or use per-import context.
-- `Importer` sessions may own mutable options and diagnostics; if the public facade type remains
-  clone-free and immutable between calls, it should also satisfy `Send + Sync`.
-- Parser and post-process algorithms can use scoped parallelism internally only when enabled.
-- No global thread pool should be mandatory.
-
-Recommended default:
-
-- single-threaded deterministic import
-- optional `parallel` feature using Rayon-like data parallelism for large meshes and post-process passes
-- explicit `ParallelPolicy` in options:
-
-```rust
-pub enum ParallelPolicy {
-    Off,
-    Auto,
-    MaxThreads(usize),
-}
-```
-
-### SIMD
-
-SIMD must be an implementation detail. Public math and scene types should not expose CPU-specific vector types.
-
-Recommended design:
-
-- scalar implementation is always present and tested
-- optimized algorithms use feature gates and runtime CPU detection where needed
-- algorithm traits are internal, for example `NormalGeneratorBackend` or `TransformBackend`
-- SIMD backends must produce results within documented floating-point tolerance
-
-Candidate SIMD-sensitive areas:
-
-- transform application
-- normal and tangent generation
-- bounding boxes
-- vertex dedup hashing support
-- skinning-weight normalization
-- mesh optimization
-
-### Errors and Diagnostics
-
-Use typed errors for failed operations and diagnostics for recoverable issues.
-
-```rust
-#[derive(Debug, thiserror::Error)]
-pub enum BaoziError {
-    #[error("io error while reading {source}: {kind}")]
-    Io { source: AssetPath, kind: IoErrorKind },
-
-    #[error("unsupported format: {hint}")]
-    UnsupportedFormat { hint: String },
-
-    #[error("parse error in {source} at {location}: {message}")]
-    Parse {
-        source: AssetPath,
-        location: SourceLocation,
-        message: String,
-    },
-
-    #[error("invalid scene: {message}")]
-    InvalidScene { message: String },
-
-    #[error("postprocess {step} failed: {message}")]
-    PostProcess { step: &'static str, message: String },
-
-    #[error("feature unsupported by {format}: {feature}")]
-    FeatureUnsupported { format: &'static str, feature: String },
-
-    #[error("configured limit exceeded: {limit}")]
-    LimitExceeded { limit: &'static str },
-}
-```
-
-Diagnostics should carry severity, source, format, location, and machine-readable codes:
-
-```rust
-pub struct Diagnostic {
-    pub severity: DiagnosticSeverity,
-    pub code: DiagnosticCode,
-    pub source: Option<AssetPath>,
-    pub location: Option<SourceLocation>,
-    pub message: String,
-}
-```
-
-Do not use logs as the only way to surface importer warnings. Logs are for operators; diagnostics are for callers.
-
-### Tracing
-
-Library code may emit `tracing` spans and events, but must never install a global subscriber.
-
-Minimum span conventions:
-
-- `baozi.import`
-- `baozi.probe`
-- `baozi.parse`
-- `baozi.asset_io`
-- `baozi.postprocess`
-- `baozi.export`
-
-Fields should avoid high-cardinality full paths by default. Use file names, format ids, byte sizes, mesh counts, and diagnostic counts. Full source paths can be exposed in diagnostics and debug-level events when users opt in.
-
-### Profiling
-
-Profiling should be explicit and cheap when disabled:
-
-```rust
-pub trait Profiler {
-    fn begin(&mut self, name: &'static str, fields: ProfileFields) -> ProfileScope;
-}
-```
-
-The default profiler is a no-op. Optional backends can support:
-
-- `tracing` timing layers
-- Chrome trace export
-- Tracy integration
-- Criterion benchmarks for development
-
-Import results can expose coarse timings only when profiling is enabled:
-
-```rust
-pub struct ImportReport {
-    pub scene: Scene,
-    pub diagnostics: Vec<Diagnostic>,
-    pub stats: ImportStats,
-}
-```
-
-### Cancellation and Progress
-
-Long-running importers need cancellation and progress without binding to async runtimes:
-
-```rust
-pub trait CancellationToken: Send + Sync {
-    fn is_cancelled(&self) -> bool;
-}
-
-pub trait ProgressSink: Send {
-    fn report(&mut self, event: ProgressEvent);
-}
-```
-
-Every parser loop and expensive post-process pass should check cancellation at bounded intervals.
-
-## Crate Implications
-
-| Crate | Required policy |
-| --- | --- |
-| `baozi-core` | No runtime, no profiler backend, no global logging setup, no SIMD-specific public types |
-| `baozi-io` | Sync IO first; async IO behind feature or separate crate |
-| `baozi-import` | Canonical sync importer; optional async facade delegates to sync or async IO adapters |
-| `baozi-postprocess` | Scalar baseline; optional `parallel`, `simd`, `meshopt`, `mikktspace` features |
-| `baozi-format-*` | Stateless importers where possible; no global mutable parser state |
-| `baozi-cli` | Owns `tracing-subscriber`, CLI formatting, profiling output, and async runtime if needed |
-| `baozi-test-support` | Scene differ, snapshot helpers, fuzz harness support, benchmark fixtures |
+| Crate | Must | Must not |
+| --- | --- | --- |
+| `baozi-operation` | Own runtime-neutral control, coordinator, reservation, and ledger state-machine primitives | Own format policy, Scene semantics, import/post-process phases, reports, IO, a scheduler, or global state |
+| `baozi-core` | Own runtime-independent IR, validation, and scalar contracts | Depend on runtimes, executors, subscribers, or CPU-specific public types |
+| `baozi-io` | Provide synchronous canonical IO and separately gated adapters | Select an application runtime |
+| `baozi-import` | Run one admitted session, define import phases/policy, and honor explicit operation capabilities | Reimplement operation mechanisms, admit other sessions, or own a global queue |
+| `baozi-format-*` | Keep all mutable state session-local | Spawn untracked threads or use mutable globals |
+| `baozi-postprocess` | Define post-process phases/reports, compile deterministic plans, and use supplied operation capabilities | Reimplement operation mechanisms, depend on `baozi-import`, hide global parallelism, or use nondeterministic ordering |
+| `baozi` facade | Compose explicit adapters | Change execution mode based on ambient process state |
 
 ## Alternatives Considered
 
-### Option A: Async-first API everywhere
+### Option A: Async-first API and Tokio throughout the workspace
 
-Pros:
+This is convenient for network services, but it leaks one runtime into CPU-bound parsers, complicates
+WASM and host integration, and does not solve blocking work. Rejected.
 
-- Natural for applications that load many remote or virtual assets.
-- Good fit for game/editor asset pipelines with concurrent loading.
-- Avoids adding async later.
+### Option B: Baozi-owned global pool and concurrent-session semaphore
 
-Cons:
+This provides simple automatic parallelism, but competes with host scheduling, hides aggregate memory
+pressure, and cannot express host priorities. Rejected.
 
-- Forces a runtime story before most parsers need it.
-- Makes simple CPU-bound parsing more complex.
-- Leaks async trait complexity into every format crate.
-- Risks tying Baozi to Tokio or boxed futures too early.
+### Option C: Runtime-neutral core with host admission and explicit execution capacity
 
-Decision: rejected for the core. Provide async adapters over runtime-neutral contracts.
-
-### Option B: Hidden global thread pool and automatic parallelism
-
-Pros:
-
-- Faster on large assets without user setup.
-- Simple API.
-
-Cons:
-
-- Can fight host engines, editors, and build systems that already manage threads.
-- Reduces reproducibility for tests and profiling.
-- Makes cancellation and resource limits harder.
-
-Decision: rejected as default. Parallelism must be explicit and configurable.
-
-### Option C: Runtime-neutral sync core with opt-in async/parallel/SIMD layers
-
-Pros:
-
-- Keeps core API stable.
-- Works in CLI, game engine, build tool, server, WASM, and embedded-ish environments.
-- Lets high-performance backends evolve without breaking public contracts.
-- Makes deterministic tests easier.
-
-Cons:
-
-- More upfront design.
-- Some adapters duplicate glue code.
-- Users must opt into performance features.
-
-Decision: chosen.
-
-## Success Metrics
-
-| Metric | Target | Measurement |
-| --- | --- | --- |
-| Runtime independence | `baozi-core` and first import crates compile without Tokio/Rayon/tracing-subscriber | `cargo tree -p baozi-core` and feature audit |
-| Thread safety | `Scene`, importer registry, and post-process configs satisfy expected `Send + Sync` bounds | compile-time trait assertion tests |
-| Determinism | Single-threaded and parallel postprocess output match within documented epsilon | snapshot/property tests |
-| Error quality | Parser failures include source identity and location when format supports it | error snapshot tests |
-| Diagnostics | Recoverable importer issues are visible without enabling logs | integration tests over malformed fixtures |
-| Observability | Import and postprocess spans appear when caller installs a tracing subscriber | tracing capture tests |
-| Profiling overhead | No-op profiling adds negligible overhead to representative import | benchmark threshold |
-| Cancellation | Large parser/postprocess loops can stop within bounded work after cancellation | cancellation tests |
-| SIMD safety | Scalar and SIMD backends pass the same conformance fixtures | backend equivalence tests |
-
-## Risks and Mitigations
-
-| Risk | Severity | Likelihood | Mitigation |
-| --- | --- | --- | --- |
-| Async added later breaks importer traits | High | Medium | Define async as adapter now and keep sync core canonical |
-| Parallel mutation corrupts scene invariants | High | Medium | Use stage-local buffers, validate after parallel passes, and avoid shared mutable scene access |
-| SIMD causes platform-specific output drift | Medium | Medium | Keep scalar oracle and epsilon-based backend equivalence tests |
-| Logging becomes the only diagnostics channel | High | Medium | Require diagnostics for user-visible warnings and keep logs operational |
-| Profiling hooks add overhead | Medium | Medium | No-op profiler by default; benchmark with and without profiling |
-| Public API leaks backend crates | High | Medium | Keep backend crates behind feature-gated modules and convert into Baozi-owned types |
-| Thread pool fights host application | Medium | Medium | Use explicit `ParallelPolicy`; do not create mandatory global pools |
-| Error enum becomes too broad or stringly | Medium | Medium | Keep top-level categories stable and format-specific detail in structured fields |
-
-## Implementation Plan
-
-### Phase 0: Contract Types
-
-- Add `BaoziError`, `Diagnostic`, `SourceLocation`, `ImportStats`, `ImportReport`.
-- Add `CancellationToken`, `ProgressSink`, `ParallelPolicy`, and no-op profiler traits.
-- Add compile-time trait assertions for key public result, importer, IO, and post-process types.
-
-### Phase 1: Runtime-Neutral Core
-
-- Keep `AssetIo` sync-first.
-- Implement filesystem and memory IO.
-- Add tracing spans in importer and postprocess code without subscriber setup.
-- Add deterministic validator and scalar postprocess baseline.
-
-### Phase 2: Optional Performance Features
-
-- Add `parallel` feature for large postprocess passes.
-- Add `mikktspace` feature for tangent generation.
-- Add `meshopt` feature for cache optimization.
-- Add SIMD backends only after scalar algorithms and conformance tests are stable.
-
-### Phase 3: Async and Profiling Adapters
-
-- Add async facade only after sync importer contracts are proven.
-- Add CLI-owned `tracing-subscriber` setup.
-- Add Chrome trace or Tracy integration behind feature gates.
-- Add Criterion benchmarks for representative fixtures.
+This adds adapter plumbing but preserves deterministic behavior, makes capacity ownership visible,
+and works across all declared host classes. Chosen.
 
 ## Consequences
 
 Positive:
 
-- Baozi can grow into async/multi-threaded/profilable usage without redesigning core types.
-- Format parsers stay simple while CPU-heavy algorithms can still become fast.
-- Users keep control over runtimes, thread pools, and observability setup.
-- Diagnostics remain testable and user-facing.
+- Hosts can coordinate Baozi with their own memory, priority, and shutdown policies.
+- Format crates remain testable without an async runtime or worker pool.
+- Scalar, parallel, and SIMD implementations share one semantic contract.
+- No ambient process configuration can change an import silently.
 
 Negative:
 
-- More explicit options and context types in early APIs.
-- Async support is not the first implementation path.
-- Some performance features require feature flags and backend-specific tests.
+- Applications wanting concurrent imports must perform admission explicitly.
+- Async and parallel integrations require adapters and feature-specific tests.
+- Baozi cannot promise to interrupt an opaque in-process backend that does not cooperate.
 
-## Open Questions
+## Risks and Mitigations
 
-1. Should `tracing` be an unconditional lightweight dependency or feature-gated?
-   Recommendation: allow `tracing` in library crates, but keep subscriber and formatting in CLI/application crates.
-2. Should async IO live in `baozi-io` behind a feature or in `baozi-io-async`?
-   Recommendation: start with a feature while APIs are unstable; split later if dependency pressure becomes real.
-3. Should Rayon be the first parallel backend?
-   Recommendation: likely yes for CPU-bound postprocess, but hide it behind `ParallelPolicy` and a `parallel` feature.
-4. Should SIMD start with `std::simd` or backend crates?
-   Recommendation: defer until scalar correctness and benchmarks identify hotspots.
-5. Should importers return `Scene` directly or `ImportReport`?
-   Recommendation: public facade should return `ImportReport`, with `baozi::load_scene()` convenience returning only `Scene`.
+| Risk | Severity | Mitigation |
+| --- | --- | --- |
+| An adapter accidentally starts unlimited blocking work | High | Require host admission before session creation and integration tests with a bounded executor. |
+| Parallel output differs by worker count | High | Stable partition/merge rules and scalar-versus-parallel conformance tests. |
+| A global pool enters through a dependency | Medium | Feature-tree review and tests that run with no parallel feature. |
+| SIMD changes floating-point behavior | Medium | Scalar oracle, documented tolerances, and cross-backend fixtures. |
+| Users mistake `Send + Sync` for plugin isolation | High | Keep the trusted-extension threat boundary explicit and require process isolation for hostile code. |
+
+## Acceptance Criteria
+
+| Contract | Testable acceptance |
+| --- | --- |
+| Runtime independence | Core/import/format crates compile without Tokio, Rayon, or a subscriber dependency in their canonical feature set. |
+| Dependency direction | The crate graph permits core/import/postprocess to depend on `baozi-operation`; `baozi-operation` has no upward workspace dependency and postprocess does not depend on import. |
+| Host admission | An instrumented host gate is the only authority that permits N sessions to enter; changing N changes observed concurrency, while Baozi creates no global semaphore, queue, or admission token. |
+| Thread safety | Compile-time assertions cover registry snapshots, frozen config, reports, failures, and validated scenes. |
+| Determinism | Scalar output and each parallel worker-count variant have identical stable ordering and equivalent values. |
+| Explicit parallelism | With no executor/capacity supplied, no worker thread is created; dependency and symbol checks find no hidden global pool. |
+| Subscriber ownership | Captured spans work with a test subscriber, while library initialization never changes the global subscriber. |

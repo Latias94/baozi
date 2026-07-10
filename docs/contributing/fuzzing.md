@@ -8,8 +8,8 @@ Linux environment there.
 Fuzz targets have two CI tiers:
 
 - sanitizer-run targets: compile with `cargo fuzz check` and run a short sanitizer smoke in CI
-- experimental check-only targets: compile with `cargo fuzz check`, but do not run under libFuzzer
-  until their parser backend is known not to abort before Baozi can report a structured error
+- non-admitted candidate targets: compile with `cargo fuzz check`, but do not run under libFuzzer or
+  count as parser evidence until their backend passes baseline admission
 
 Longer fuzz campaigns run from `.github/workflows/fuzz.yml` on a schedule and
 through manual dispatch. That workflow is Linux-only, has a bounded job timeout,
@@ -76,19 +76,21 @@ Known Windows outcomes:
 
 ## Evidence Policy
 
-Experimental parser slices need:
+Every admitted parser slice, including Experimental, needs:
 
 - a compiling fuzz target
 - committed seed corpus entries
 - malformed regression tests through the same parser entry point
-- a recorded local fuzz check or environment failure
+- a successful baseline sanitizer smoke on the authoritative Linux runner
 
-Stable promotion additionally needs a successful sanitizer fuzz smoke run on a
-supported Linux CI runner.
+Stable promotion additionally needs sustained fuzz/security campaign evidence for the declared
+support subset. A local toolchain failure is environment evidence only and never substitutes for the
+baseline Linux sanitizer gate.
 
-`gltf_import` is currently an experimental check-only target. It can compile and is useful for local
-parser work, but malformed inputs can still reach a `gltf-rs` 1.4.x validation panic in a fuzz build
-where the panic aborts before Baozi's `catch_unwind` fallback can convert it to `BaoziError`. Do not
+`gltf_import` is currently a non-admitted, check-only development target. It can compile and is
+useful for local parser work, but malformed inputs can still reach a `gltf-rs` 1.4.x validation panic
+in a fuzz build where the panic aborts before Baozi's `catch_unwind` fallback can convert it to
+`BaoziError`. Do not
 treat a skipped `gltf_import` sanitizer run as parser evidence. The re-enable criteria and known
 backend hazards live in [glTF Backend Notes](../research/gltf-rs-backend-notes.md).
 
@@ -110,4 +112,4 @@ infrastructure or promoting a parser support tier. Broader CI policy lives in [C
 | `obj_import` | `baozi-format-obj` | Sanitizer-run target for OBJ facade import plus optional MTL sidecar bytes split by the first NUL byte. |
 | `obj_postprocess` | `baozi-format-obj` | Sanitizer-run target for OBJ facade import followed by triangulation and bounding-box postprocess. |
 | `ply_import` | `baozi-format-ply` | Sanitizer-run target for PLY ASCII and binary facade import. |
-| `gltf_import` | `baozi-format-gltf` | Experimental check-only target for glTF/GLB facade import. Inputs beginning with the `glTF` magic are treated as whole GLB bytes; other inputs use primary `.gltf` bytes plus external `buffer.bin` bytes split by the first NUL byte. |
+| `gltf_import` | `baozi-format-gltf` | Non-admitted check-only target for the internal glTF/GLB candidate. Inputs beginning with the `glTF` magic are treated as whole GLB bytes; other inputs use primary `.gltf` bytes plus external `buffer.bin` bytes split by the first NUL byte. It is not facade or sanitizer evidence. |
