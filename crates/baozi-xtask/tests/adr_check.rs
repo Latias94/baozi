@@ -1,3 +1,4 @@
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -42,12 +43,32 @@ fn checked_in_repository_passes_cli_gate() {
         .to_path_buf();
 
     let output = run_cli(&repository_root, &["adr-check"]);
+    let adr_count = checked_in_adr_count(&repository_root);
+    let expected = format!("ADR governance check passed ({adr_count} ADRs)");
 
     assert_eq!(output.status.code(), Some(0), "{output:#?}");
     assert!(
-        String::from_utf8_lossy(&output.stdout).contains("ADR governance check passed (38 ADRs)"),
+        String::from_utf8_lossy(&output.stdout).contains(&expected),
         "{output:#?}"
     );
+}
+
+fn checked_in_adr_count(repository_root: &Path) -> usize {
+    fs::read_dir(repository_root.join("docs/adr"))
+        .expect("read checked-in ADR directory")
+        .map(|entry| entry.expect("read checked-in ADR entry"))
+        .filter(|entry| {
+            let file_name = entry.file_name();
+            let Some(file_name) = file_name.to_str() else {
+                return false;
+            };
+            let bytes = file_name.as_bytes();
+            bytes.len() > 8
+                && bytes[..4].iter().all(u8::is_ascii_digit)
+                && bytes[4] == b'-'
+                && bytes.ends_with(b".md")
+        })
+        .count()
 }
 
 fn run_cli(current_directory: &Path, arguments: &[&str]) -> Output {
