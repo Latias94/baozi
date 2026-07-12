@@ -1,6 +1,7 @@
 # Third-Party Notices
 
-Baozi-owned clean-room code is intended to be licensed as `MIT OR Apache-2.0`.
+Baozi-owned clean-room code is licensed as `MIT OR Apache-2.0`. The complete terms are in
+`LICENSE-MIT` and `LICENSE-APACHE`.
 
 Add notices here when Baozi includes:
 

@@ -105,6 +105,7 @@ GitHub Actions policy, workflow linting, and CI tool pinning are documented in
 
 ## License
 
-Baozi is intended to be distributed under `MIT OR Apache-2.0`. See
+Baozi is licensed under either of
+[Apache License, Version 2.0](LICENSE-APACHE) or [MIT License](LICENSE-MIT) at your option. See
 [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) for current third-party and reference-source
 policy.
