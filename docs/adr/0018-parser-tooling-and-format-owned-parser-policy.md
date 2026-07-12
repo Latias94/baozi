@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-07-09
-updated: 2026-07-10
+updated: 2026-07-13
 authors:
   - Codex
 decision_type: architecture
@@ -9,6 +9,7 @@ depends_on:
   - docs/adr/0019-parser-diagnostic-streaming-and-generated-code-contract.md
   - docs/adr/0020-import-lifecycle-and-report-contract.md
 related:
+  - docs/adr/0003-core-scene-ir-and-material-model.md
   - docs/adr/0004-parser-backend-and-format-coverage-policy.md
   - docs/adr/0007-workspace-crate-graph-feature-flags-msrv-and-ci-gates.md
   - docs/adr/0010-asset-io-virtual-filesystem-uri-archive-and-path-security.md
@@ -48,8 +49,8 @@ Core rules:
 
 - every parser remains format-owned and converts tool-native state into a format-private normalized
   model, Baozi-owned diagnostics/loss facts, and a `SceneDraft` through the selected `ParseScope`
-- parser tooling is private implementation detail unless a format-specific feature explicitly exposes
-  an optional backend
+- parser tooling and backend selection are private implementation details; public features select
+  admitted format capabilities and never expose a backend choice
 - simple formats should start with small hand-written parsers when that yields clearer limits and
   diagnostics
 - mature parsing crates may be used when they reduce real complexity without weakening resource
@@ -61,8 +62,9 @@ Core rules:
 - parser adapters obtain primary/dependency snapshots, selected options, work charges, live
   reservations, diagnostics, cancellation, progress, and Scene construction only through their
   selected `ParseScope`; they receive no raw `AssetIo` or mutable import coordinator
-- `SceneBuilder` produces only `SceneDraft`; the import session invokes the core validator and is the
-  sole authority that can publish `ValidatedScene`
+- `SceneBuilder` produces only `SceneDraft`; the core central validator is the sole proof constructor
+  and the import session invokes it for import results without excluding postprocess or downstream
+  callers from validating their own drafts
 - first-party and admitted parser paths cooperatively honor checked charges/reservations or reviewed
   conservative allowances; hostile or untrusted parser code requires process isolation because an
   in-process API cannot prevent arbitrary allocation, looping, abort, or process exit
