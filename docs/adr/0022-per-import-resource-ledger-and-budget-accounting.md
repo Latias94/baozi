@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-07-09
-updated: 2026-07-10
+updated: 2026-07-12
 authors:
   - Codex
 decision_type: architecture
@@ -38,7 +38,7 @@ output. It records phase ownership and the maximum simultaneous live amount. For
 post-process steps cannot create private substitutes for shared dimensions, and a composed facade
 does not merge distinct operation histories into one ambiguous total.
 
-`baozi-operation` owns the runtime-neutral reservation types, transfer/commit state machine, checked
+`baozi-operation` owns the runtime-neutral reservation types, transfer/pending-publication/atomic-publish state machine, checked
 counter primitives, generic ledger engine, and owner-neutral ledger-evidence snapshot machinery.
 `baozi-import` owns request `ResourceLimits`, the effective import budget, import dimensions/phases,
 and interpretation in import outcomes. `baozi-postprocess` owns its operation limits,
@@ -59,7 +59,7 @@ Accepted freezes these semantics; conformance requires executable implementation
 | --- | --- | --- | --- |
 | Attempted | Cumulative requested/untrusted work charged before an action | Never decreases | open attempts, logical references, declared decode cells, requested bytes, diagnostic bytes proposed |
 | Consumed | Cumulative work/bytes actually completed or observed | Never decreases | bytes physically read/decoded, tokens scanned, graph edges visited, diagnostics encoded |
-| Live reservation | Capacity or conservative allowance owned right now | Released only when storage/allowance is actually gone | snapshot capacity, backend decode allowance, normalized model, SceneBuilder, staging buffers, diagnostics |
+| Live reservation | Capacity or conservative allowance owned right now | Released only when storage/allowance is actually gone | snapshot capacity, materialized decoded text, backend decode allowance, normalized model, SceneBuilder, staging buffers, diagnostics, retained bounded failure sources |
 | Committed output | Canonical cells/bytes accepted for publication | Monotonic after commit | validated nodes, primitives, attribute cells, strings, images, animation keys |
 
 `attempted` is charged before an external action or count-driven loop when possible. `consumed` is a
@@ -67,6 +67,13 @@ separate counter charged only as bytes/work actually complete. For comparable di
 `consumed <= attempted`; a denied open increases attempted opens but not consumed opens, while a
 truncated read retains its actual consumed byte count. Neither class is rolled back when an optional
 dependency, parser recovery, cancellation, or transaction fails.
+
+When completion cannot be known at admission time, the owner issues a linear work permit. Creating a
+permit first polls operation control and charges attempted work; successful `complete()` charges
+consumed work. A domain may require a subsequent poll, as detection does before returning from
+`complete()`. Dropping or forgetting an unfinished permit never refunds the attempt or fabricates
+consumption and is a terminal capability-contract violation. A domain may further require only one
+outstanding permit, as detection does under ADR 0020.
 
 Committed output remains part of current live memory until the successful result leaves its owning
 operation. Transferring a reservation from SceneBuilder or SceneEdit to committed output changes its
@@ -96,6 +103,12 @@ typed limit failure before the allocation attempt.
 The generic reservation type is defined by `baozi-operation`; only the owning import or post-process
 ledger instance can issue it. A reservation is branded to that instance so it cannot be transferred
 between an import ledger and a post-process ledger or committed under the wrong domain outcome.
+
+Bounded terminal evidence remains operation-owned live storage until it is finalized into an outcome.
+For a format failure, the outer source payload and packed details are admitted and reserved before
+trusted source callbacks. A retained source may not hide attacker-sized `String`, `Vec`, or other
+unmetered capacity: it uses bounded inline storage or separately reserves every owned heap capacity.
+The 4 KiB outer-source admission bound does not excuse nested allocation accounting.
 
 ### Pre-Session Request Admission
 
@@ -145,7 +158,8 @@ state.
 
 The ledger supports byte and non-byte dimensions. At minimum it accounts for:
 
-- primary, dependency, archive, compressed, decompressed, data-URI, and embedded payload bytes;
+- primary, dependency, archive, compressed, decompressed, data-URI, embedded payload, and decoded
+  UTF-8 text-surface bytes;
 - physical open/read attempts and logical dependency references;
 - diagnostic attempted/stored/dropped count and encoded bytes;
 - tokens, records, graph nodes/edges/depth/work, and decode work;
@@ -161,16 +175,25 @@ of that cap and the matching `baozi-import::ResourceLimits` value. The descripto
 request budget, an envelope cannot raise either value, and an IO backend-local hard cap may only lower
 what its backend accepts.
 
+`max_decoded_utf8_bytes` applies to the complete semantic text surface: the whole input for ASCII STL,
+ASCII PLY, and plain glTF; only the header through `end_header` for binary PLY; and only the JSON chunk
+for GLB. Binary STL facets, binary PLY bodies, and GLB binary chunks are excluded. A borrowed validated
+slice consumes the text-surface limit without inventing live allocation. A materialized copy also
+reserves its actual allocator capacity in the storage class that owns that copy; STL's retained ASCII
+buffer, PLY's temporary profiled lines, and glTF's borrowed JSON surface therefore have distinct live
+footprints while obeying the same decoded-text limit.
+
 Archive/compressed/decompressed/nesting dimensions are reserved accounting vocabulary only. Their
 presence does not authorize archive/container support. ADR 0037 is currently Proposed and
 non-authoritative; a future accepted decision must separately authorize activation.
 
 ### Dependencies, Optional Failure, and Caching
 
-The normalized dependency identity caches the first immutable snapshot or identity-terminal failure.
-Identity-terminal means stable for subsequent references to that identity, not automatically fatal to
-the import session. Physical open and byte consumption is charged once for the cached attempt; every
-logical reference and its validation/decode work is charged on every use. A denied, missing,
+ADR 0010's authority-qualified dependency key caches the first immutable snapshot or
+identity-terminal failure only after each logical reference has passed authorization.
+Identity-terminal means stable for subsequent authorized references to that key, not automatically
+fatal to the import session. Physical open and byte consumption is charged once for the cached
+attempt; every logical reference and its validation/decode work is charged on every use. A denied, missing,
 truncated, oversized, or malformed optional resource still consumes its attempted counters. Only
 unused live capacity may be released.
 
@@ -274,10 +297,14 @@ Negative:
 | Live release | Dropping each phase buffer reduces current live while preserving its high-water mark. |
 | Peak overlap | Tests retaining snapshot + backend + normalized + Scene storage observe their sum, not their maximum. |
 | Checked admission | Count-times-size overflow and over-budget growth fail before allocator/backend entry. |
+| Linear work accounting | Permit creation polls and charges attempted work, completion charges consumed, detection performs its required post-work poll, and unfinished permits retain attempted-only evidence while terminating their owning capability. |
+| Decoded text surfaces | Exact and one-byte-under tests cover whole-text inputs, mixed text/binary headers, and container JSON chunks; borrowed validation creates no fictitious live bytes, while materialized copies reserve actual capacity. |
+| Retained format source | Source payload above 4 KiB fails before trusted callbacks; admitted packed details plus bounded source storage remain reserved through failure finalization, and retained sources contain no unmetered heap capacity. |
 | Opaque-backend admission | A known abort, unbounded recursion, or pre-admission allocation path has no first-party registration; safely bounded opaque paths distinguish baseline admission from later maturity evidence. |
-| Transfer correctness | Committing a reserved output neither drops it from live nor counts it twice. |
-| Dependency accounting | Repeated normalized identity charges one physical read and N logical references/work units. |
+| Transfer correctness | Preparing publication neither drops live storage nor counts it twice; one successful atomic publication records all committed evidence and releases operation-owned live reservations together, while any pre-publication failure leaves committed output at zero. |
+| Dependency accounting | Repeated authorized references to one authority-qualified identity charge one physical read and N logical references/work units; equal logical names in different authority domains remain separate. |
 | Failure evidence | Cancellation and parse failures retain bounded stats, attempted counters, and peak-live by phase. |
+| Finalization invariant evidence | If ledger finalization detects live or pending state, its typed error retains the real immutable snapshot; callers cannot replace it with a zero or pre-finalization fallback snapshot or discard the original operation cause. |
 | Operation separation | A composed import plus postprocess result exposes two ledgers; neither operation changes or refunds the other's counters. |
 | Dependency leaf | Graph checks prove `baozi-operation` has no upward workspace dependency, core does not depend on import, and postprocess does not depend on import. |
 | Branded reservations | Compile-fail/runtime tests reject cloning, forging, cross-ledger transfer, and commit under the wrong operation owner. |

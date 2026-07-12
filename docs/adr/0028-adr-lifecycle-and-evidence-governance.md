@@ -1,6 +1,7 @@
 ---
 status: accepted
 date: 2026-07-10
+updated: 2026-07-11
 authors:
   - Codex
 decision_type: architecture
@@ -33,8 +34,12 @@ checker.
 
 ### Authority
 
-Only an ADR with `status: accepted` is normative. Proposed ADRs describe candidate decisions but do
-not authorize implementation. Superseded and Rejected ADRs are historical records.
+Only an ADR with `status: accepted` is normative for production architecture, default behavior,
+publication, or a user-facing promise. Proposed ADRs describe candidate decisions and do not grant
+production authority; repository review may approve an explicitly isolated controlled trial whose
+purpose is to produce reviewable evidence. A trial is not permission to route the default path
+through the candidate, publish its contract, or make other Accepted ADRs conform to it. Superseded
+and Rejected ADRs are historical records.
 
 Plans, research notes, engineering-memory records, source code, and tests are evidence or execution
 state. They do not override an Accepted ADR. If code and an Accepted ADR disagree, the repository is
@@ -50,6 +55,7 @@ document cannot claim authority through narrative wording alone.
 ```mermaid
 stateDiagram-v2
     [*] --> Proposed
+    Proposed --> Proposed: isolated controlled trial evidence
     Proposed --> Accepted: decision approved
     Proposed --> Rejected: candidate declined
     Accepted --> Superseded: accepted replacement names it
@@ -59,6 +65,8 @@ stateDiagram-v2
 
 The legal status values are `proposed`, `accepted`, `superseded`, and `rejected`. Accepted ADRs may
 become Superseded, but they are not rewritten as Rejected. Historical documents remain in place.
+`Trial` is deliberately not a fifth lifecycle status: it is bounded execution work under a Proposed
+ADR, and the proposal remains non-authoritative outside that review scope.
 
 ### Canonical frontmatter
 
@@ -127,10 +135,23 @@ ADR Markdown uses inline `[label](target)` links. CommonMark reference-style lin
 are rejected explicitly so every accepted destination passes through the same path validator.
 
 An evidence link does not promote an ADR. Promotion is a deliberate status change reviewed with its
-required evidence. ADR 0037 and ADR 0038 propose future archive and export boundaries, so each must
-retain `promotion_requires: implementation_tracer`. They remain Proposed until a future vertical
-tracer exists. If either becomes Accepted without a non-empty, resolving `tracers` list, the checker
-fails.
+required evidence. A Proposed ADR may list a repository-local trial tracer so reviewers can inspect
+the candidate implementation, tests, and measurements before deciding. In the Proposed state that
+path proves only that a controlled trial exists; it is not an accepted implementation tracer and
+creates no production authority.
+
+Promotion may be one atomic reviewed change containing the candidate implementation, conformance
+evidence, tracer metadata, and the `status: accepted` transition. It does not require an Accepted
+ADR to exist before its implementation can be developed. At the promotion boundary the checker and
+review evaluate the post-change repository state: every required implementation tracer is tracked or
+staged, directly exercises the accepted behavior, and is consistent with the decision. The same path
+may therefore move from trial evidence while Proposed to an accepted implementation tracer in the
+atomic promotion change; its authority changes only when the ADR becomes Accepted.
+
+ADR 0037 and ADR 0038 propose future archive and export boundaries, so each must retain
+`promotion_requires: implementation_tracer`. They remain Proposed until a future vertical tracer and
+its evidence are ready for atomic promotion. If either becomes Accepted without a non-empty,
+resolving `tracers` list, the checker fails.
 
 ### Decision ownership
 
@@ -145,26 +166,26 @@ catalog is:
 | Canonical Scene aggregate, builder/proof/edit states, and scene-local identity | ADR 0003 | Geometry, deformation, mutation, and persistent identity are delegated below. |
 | Parser backend admission, isolation, and replacement | ADR 0004 | Does not own format maturity or facade features. |
 | Test layers, fixture provenance, independent oracles, and external-oracle safety | ADR 0005 | Per-field evidence mechanics belong to ADR 0026. |
-| Public compatibility, stability tiers, breaking changes, crate publication, and versioning | ADR 0006 | Domain ADRs define semantics but cannot create a second compatibility policy. |
-| Production crate graph, facade feature algebra, MSRV, and baseline CI membership | ADR 0007 | Format maturity and target promises remain separate decisions. |
-| Math semantics, numeric storage, units, transforms, and `SceneSpace` | ADR 0008 | Memory layout remains private under ADR 0009. |
+| Public compatibility, stability tiers, breaking changes, lockstep release topology, publication recovery, and versioning | ADR 0006 | Domain ADRs define semantics but cannot create a second compatibility or release policy. |
+| Production crate graph allowed/required/forbidden edges, facade feature algebra, MSRV, and baseline CI membership | ADR 0007 | Format maturity and target promises remain separate decisions. |
+| Math semantics, numeric storage, units, transforms, `SceneSpace`, and the high-precision CAD exclusion/reopening gate | ADR 0008 | Memory layout remains private under ADR 0009. |
 | Ownership representation, borrowing/lifetimes, zero-copy boundaries, and memory layout | ADR 0009 | Does not redefine semantic Scene ownership. |
 | Asset IO capabilities, logical paths, object-bound authorization, and physical resource opening | ADR 0010 | Public source provenance belongs to ADR 0036. |
 | Format maturity, capability status, promotion, demotion, and support claims | ADR 0011 | Composes evidence owned by test, feature, backend, and target ADRs. |
 | Material, image, sampler, texture, binding, and color interpretation | ADR 0012 | Source-specific bounded extensions belong to ADR 0023. |
 | Import/postprocess separation, typed plan compilation, presets, orchestration, and triangulation admission | ADR 0013 | Transaction/remap mechanics belong to ADR 0032. |
 | Parser trust boundaries, panic containment, unsafe code, native FFI, and isolation claims | ADR 0014 | Hostile in-process code is never treated as sandboxed. |
-| Common/format options, serialization envelope, codecs, and precedence | ADR 0016 | Live cancellation/progress remains outside frozen options. |
+| Common/format option envelopes, precedence, codec compilation semantics/scopes, typed compiled store, and ordinary compile failures | ADR 0016 | Registry lifecycle, unwind mapping, and permanent poison belong to ADR 0021; live control remains outside frozen options. |
 | Rust API serialization, test snapshot, and future cache-schema boundaries | ADR 0017 | Snapshot encoding and coverage mechanics belong to ADR 0026. |
 | Format-owned parser tooling and generator selection | ADR 0018 | Backend admission remains under ADR 0004. |
 | Diagnostic shape, parser input-consumption modes, recovery delivery, and generated-code contract | ADR 0019 | Outcome finalization belongs to the owning operation. |
 | Import lifecycle, `ParseScope`, phase evidence, `ImportReport`, and `ImportFailure` | ADR 0020 | Postprocess has a distinct lifecycle and result. |
-| Registry, format descriptor, importer extension trait, and option-codec governance | ADR 0021 | Public compatibility remains under ADR 0006. |
+| Registry/descriptor/extension lifecycle, snapshot/unload semantics, callable trust, unwind mapping, shared health latch, and permanent poison | ADR 0021 | Option envelopes, precedence, typed compilation, and ordinary codec errors belong to ADR 0016; public compatibility remains under ADR 0006. |
 | Attempted/consumed/live/committed resource semantics and ledger dimensions | ADR 0022 | `baozi-operation` provides the shared mechanism; import and postprocess own phase vocabularies. |
 | Material/custom-attribute descriptors and bounded namespaced extensions | ADR 0023 | Canonical typed fields remain owned by their semantic ADRs. |
 | Per-field validation, stable digest, bounded preview, direct tests, and fuzz reachability | ADR 0026 | Broader portfolio/oracle policy remains under ADR 0005. |
 | glTF semantic ownership and private backend replacement boundary | ADR 0027 | General backend admission remains under ADR 0004. |
-| ADR lifecycle, authority, evidence identity, supersession, and this catalog | ADR 0028 | Implementation state cannot override an Accepted decision. |
+| ADR lifecycle, controlled trials, atomic promotion, authority, evidence identity, supersession, and this catalog | ADR 0028 | Trial implementation cannot create production authority before Accepted promotion. |
 | Format detection, shared stable probe/input, selection, and detection failure evidence | ADR 0029 | Import finalization remains under ADR 0020. |
 | Logical mesh, primitive topology, attribute domains, and their cardinality | ADR 0030 | Deformer semantics belong to ADR 0031. |
 | Skin, influence, morph, animation, and deformer semantics | ADR 0031 | Structural edit/remap behavior belongs to ADR 0032. |
@@ -245,6 +266,7 @@ checker, but they must preserve this authority model.
 | Existing local reference links pass on one workstation | High | Medium | Require exact path casing and reject symlink/junction/reparse components; reject `repo-ref`; require fixed source/package/spec identities or a dated digest for living official documents. |
 | Reciprocal supersession is mechanically valid but semantically incomplete | High | Low | Require the replacing ADR to describe scope and review overlapping Accepted ADRs. |
 | A tracer path exists but does not prove behavior | High | Medium | Require a tracked implementation/test/CI file, name the behavior it proves during promotion review, and extend evidence checks without weakening this definition. |
+| A Proposed trial is mistaken for production authority | Critical | Medium | Keep the trial isolated from defaults/releases, label its evidence as trial-only, and grant authority only through an atomic Accepted promotion. |
 | The checker becomes an unmaintainable general Markdown parser | Medium | Low | Keep the index and frontmatter canonical subset small and test malformed inputs explicitly. |
 
 ## Acceptance Criteria
@@ -256,6 +278,7 @@ checker, but they must preserve this authority model.
 | Promotion cannot bypass deferred tracers | Mutating ADR 0037 or ADR 0038 to Accepted without `tracers` produces a checker violation. |
 | Clean checkout paths are durable | Missing, wrong-case, Git-ignored, `repo-ref`, and physically escaping local paths produce checker violations. |
 | Tracer semantics are durable | Every promotion tracer is a tracked implementation, test, or CI file with a reviewed direct connection to the promoted behavior. |
+| Trial and promotion cannot self-lock | A Proposed ADR can carry isolated trial code; one atomic change can promote status, implementation, evidence, and tracked tracers, while the Proposed state creates no production promise. |
 | External evidence is reproducible | Code/packages/versioned specifications use immutable identities; living official documents record retrieval date, response length, and SHA-256. |
 | Decision ownership is complete | Every active concern maps to exactly one Accepted ADR; Proposed, Superseded, and Rejected ADRs own none. |
 | Rust quality gates remain clean | Format, test, check, and strict Clippy commands pass for `baozi-xtask`. |

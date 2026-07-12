@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-07-09
-updated: 2026-07-10
+updated: 2026-07-11
 authors:
   - Codex
 decision_type: architecture
@@ -16,6 +16,8 @@ related:
 evidence:
   - Cargo.toml
   - crates/baozi/Cargo.toml
+  - crates/baozi-xtask/src/crate_graph.rs
+  - crates/baozi-xtask/tests/crate_graph.rs
   - .github/workflows/ci.yml
   - docs/plans/2026-07-10-001-refactor-baozi-canonical-architecture-plan.md
 ---
@@ -57,7 +59,7 @@ flowchart TD
     Facade[baozi facade] --> Core[baozi-core]
     Facade --> IO[baozi-io]
     Facade --> Import[baozi-import]
-    Facade --> Operation[baozi-operation]
+    Facade -. allowed when directly consumed; not required .-> Operation[baozi-operation]
     Facade --> Post[baozi-postprocess]
     Facade --> Formats[enabled baozi-format-* crates]
     Core --> Operation
@@ -70,8 +72,8 @@ flowchart TD
     Formats --> Import
     Formats -. only when required .-> IO
     Xtask[baozi-xtask] -. metadata/docs only .-> Workspace[workspace artifacts]
-    Test[baozi-test-support] --> Facade
-    Test --> Core
+    Test[baozi-test-support] --> Core
+    Test --> Import
 ```
 
 Hard rules:
@@ -79,9 +81,9 @@ Hard rules:
 - `baozi-operation` is a runtime-neutral dependency leaf. It owns control, coordinator, checked
   reservation, and ledger state-machine mechanisms; it depends on no upward Baozi production crate
   and owns no domain phase, policy, dimension, report, outcome, Scene, IO, scheduler, or worker pool.
-- `baozi-core` may depend only on `baozi-operation` among Baozi production crates; it has no
-  dependency on IO, import, postprocess, format, runtime, or parser crates and owns only
-  canonical/domain errors.
+- `baozi-core` directly depends on `baozi-operation` for shared checked-capacity mechanisms and may
+  depend on no other Baozi production crate; it has no dependency on IO, import, postprocess, format,
+  runtime, or parser crates and owns only canonical/domain errors.
 - `baozi-io` owns asset identities, IO capabilities, and `IoError`; it has no production Baozi-crate
   dependency and must not reuse a core or facade aggregate error as its error type.
 - `baozi-import` depends on core, IO, and operation, maps their distinct errors into import causes,
@@ -90,11 +92,27 @@ Hard rules:
 - `baozi-postprocess` depends on core, operation, and private algorithm backends; it supplies its own
   ledger semantics and does not depend on import, IO, or formats.
 - each `baozi-format-*` crate depends only on core/import and IO when its source contract requires
-  dependency access; it does not depend on the facade or postprocess.
-- the facade composes core, IO, import, postprocess, and enabled first-party formats.
+  dependency access; it never depends directly on operation, the facade, or postprocess. Shared
+  parser-facing operation mechanisms are exposed through the capability-limited import boundary.
+- the facade composes core, IO, import, postprocess, and enabled first-party formats. A direct
+  facade-to-operation edge is an allowed direction only when facade code directly consumes a shared
+  mechanism; it is not a required graph edge and must not be added merely to mirror the diagram.
 - production crates never depend on `baozi-test-support`, fuzz packages, xtask, examples, or CLI
   tools.
 - no workspace production dependency cycle is allowed.
+
+The graph checker distinguishes three facts that must not be conflated:
+
+1. **Allowed direction:** core, import, postprocess, and the facade are the only crates permitted to
+   depend directly on operation.
+2. **Required actual edge:** core, import, and postprocess must each have one non-optional,
+   unconditional production edge because their accepted contracts directly consume operation
+   mechanisms. The facade is not in this set.
+3. **Forbidden direction:** every format crate and every other production crate is rejected if it
+   depends directly on operation, including optional, target-specific, and build dependencies.
+
+Changing a required edge to merely allowed requires updating the owning ADR and implementation in
+the same reviewed change; an architectural direction diagram alone never manufactures a dependency.
 
 Archive/container and exporter crates are not created until their own accepted ADR and
 implementation tracer make the responsibility active. Workspace decomposition does not by itself
@@ -283,6 +301,7 @@ Negative:
 | Feature powerset becomes too expensive | Medium | High | bounded PR pairs plus scheduled cargo-hack powersets; never skip promotion evidence |
 | Optional dependency leaks into disabled builds | Medium | Medium | isolated `cargo tree`/package checks for no-default and single features |
 | Crate graph develops a cycle or reverse dependency | High | Low | metadata graph gate enforces the direction table |
+| An allowed edge is mistaken for a mandatory dependency | High | Medium | checker keeps allowed consumers separate from required actual consumers and tests facade presence/absence independently |
 | Transitive dependency raises MSRV | High | Medium | MSRV job and dependency admission review |
 | Platform exception corrupts feature meaning | High | Low | keep target support in ADR 0034 and require complete membership independently |
 
@@ -295,7 +314,7 @@ Negative:
 | Default subset | xtask proves `default-formats` is a deliberate subset with ADR 0011 evidence for every member |
 | One-to-one wiring | each format feature maps to one optional dependency, registration path, descriptor, support entry, and isolated test |
 | No empty/leaky features | negative fixtures reject public empty features, backend selectors, and silent semantic switches |
-| Dependency direction | Cargo metadata proves `baozi-operation` has no upward Baozi edge, core/import/postprocess may depend downward on it, IO does not depend on core, postprocess does not depend on import, and no forbidden edge or production cycle exists |
+| Dependency direction | Cargo metadata proves `baozi-operation` has no upward Baozi edge; core/import/postprocess have their required direct edges; the facade passes with or without a canonical direct edge; formats cannot directly depend on operation; IO does not depend on core; postprocess does not depend on import; and no forbidden edge or production cycle exists |
 | MSRV | workspace and every declared feature compile on Rust 1.95 |
 | Complete behavior surface | default, no-default, individual formats, `all-formats`, and `all-features` gates pass at their declared target tiers |
 
@@ -307,5 +326,7 @@ passes:
 - [Workspace manifest](../../Cargo.toml)
 - [Facade manifest](../../crates/baozi/Cargo.toml)
 - [CI workflow](../../.github/workflows/ci.yml)
+- [Crate graph checker](../../crates/baozi-xtask/src/crate_graph.rs)
+- [Crate graph checker tests](../../crates/baozi-xtask/tests/crate_graph.rs)
 - [Canonical architecture refactor plan](../plans/2026-07-10-001-refactor-baozi-canonical-architecture-plan.md)
 - [Format support matrix](../formats/support-matrix.md)

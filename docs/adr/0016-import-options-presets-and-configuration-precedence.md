@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-07-09
-updated: 2026-07-10
+updated: 2026-07-11
 authors:
   - Codex
 decision_type: architecture
@@ -30,12 +30,27 @@ IO, and let each format crate own its concrete type without weakening the regist
 ## Decision
 
 Baozi uses typed common option overlays plus versioned, format-keyed envelopes and importer-provided
-object-safe codecs. Registry freeze compiles and caches every importer's bounded typed default once.
-Each request compiles only the preset/caller format envelopes it actually submitted, against those
-cached defaults, before `ImportSession` or asset IO.
+object-safe codecs. Each codec compiles one bounded typed default for a registry snapshot, and each
+request compiles only the preset/caller format envelopes it actually submitted against that default,
+before `ImportSession` or asset IO. ADR 0021 owns when registry freeze invokes default compilation,
+snapshot publication, and registration health.
 
 Accepted means this transport and precedence are authoritative; it does not claim the replacement API
 has already landed.
+
+### Canonical Ownership Boundary
+
+This ADR is the sole owner of common and format envelope shape, schema/version transport, precedence,
+`FormatOptionCodec` input/output semantics, `RegistryBuildScope` and `OptionCompileScope` resource
+contracts, compiled-value type verification, the private request option store, and normal typed
+compile errors. A format ADR may define its concrete option type and local schema, but cannot define a
+second envelope, precedence chain, compiler scope, or store.
+
+ADR 0021 is the sole owner of registry builder/freeze/snapshot/unload lifecycle, callable extension
+trust, unwind containment and phase mapping for codec panics, the shared registration health latch,
+and permanent poison. A codec unwind is therefore not a second option-compilation policy in this ADR:
+the registry/request integration delegates it to ADR 0021. ADR 0020 owns session lifecycle after
+successful request compilation, and ADR 0033 owns live operation control.
 
 ### Common Configuration
 
@@ -106,8 +121,8 @@ These names illustrate the contract, not public layout. The required properties 
   explicit in every envelope;
 - payload decoding is deterministic and size-bounded;
 - `RegistryBuildScope` independently bounds default compilation for every registration, including
-  aggregate/per-codec work, decoded cells/bytes, recursion, fallible live reservations, panic detail,
-  and result size;
+  aggregate/per-codec work, decoded cells/bytes, recursion, fallible live reservations, bounded
+  ordinary error detail, and result size;
 - `OptionCompileScope` is the only request-time admission path for submitted payload reads, decoded
   cells/bytes, recursion, codec work, fallible live reservations, and bounded error detail; it exposes
   no asset IO, import outcome, registry mutation, or session diagnostic capability;
@@ -126,26 +141,25 @@ These names illustrate the contract, not public layout. The required properties 
 - only the selected importer's `ParseScope` may checked-downcast its compiled value to the concrete
   format-owned type.
 
-### Registry Defaults and Request Overrides
+### Typed Default and Request Compilation
 
-`RegistryBuilder::freeze` runs inside a bounded `RegistryBuildScope`. In stable `FormatId` order it
-invokes `compile_defaults` for every registered codec, verifies the returned runtime type key and
-erased concrete type, and stores the result as an immutable `Arc<CompiledFormatOptions>` in the new
-snapshot. An unwindable panic, type mismatch, or build-scope budget/allocation failure is a bounded
-`RegistryBuildError`; freeze is atomic and returns no partial snapshot, so the bad plugin never enters
-an immutable registry snapshot.
+When ADR 0021's registry freeze invokes `compile_defaults`, this ADR requires the call to run inside a
+bounded `RegistryBuildScope`, verify the returned runtime type key and erased concrete type, and
+produce one immutable `Arc<CompiledFormatOptions>` candidate. Type mismatch and build-scope
+budget/allocation failure are bounded typed failures. ADR 0021 exclusively defines stable iteration,
+atomic snapshot publication, panic mapping, and registration poisoning.
 
 Request compilation receives an already frozen snapshot. It groups and validates only format-specific
 envelopes actually present in the expanded preset or caller request. For each submitted target it calls
 `compile_layers` once with that target's cached default and precedence-ordered submitted layers. It
 validates every submitted target before creating a session, even if automatic detection later selects
-a different format. Unknown, disabled, duplicate, schema/version/owner/type failures and unwindable
-request-time codec panic are bounded `RequestError` values with zero session and asset IO.
+a different format. Unknown, disabled, duplicate, and schema/version/owner/type failures are bounded
+typed request errors with zero session and asset IO; ADR 0021 owns the distinct unwind path.
 
 When a request supplies no format-specific layer for a candidate, request compilation neither invokes
 nor probes that codec. If the candidate is later selected, `ParseScope` reads the snapshot's precompiled
 default `Arc` directly. The request option store therefore contains only compiled overrides and falls
-back to the selected descriptor's snapshot default. An irrelevant/stateful codec cannot poison a
+back to the selected descriptor's snapshot default. An irrelevant unsubmitted codec cannot poison a
 request merely by being present in the registry, and request codec work is
 `O(submitted envelope count + submitted payload bytes/work)`, not `O(registry size)`.
 
@@ -187,12 +201,12 @@ every mode:
 - a format envelope attempting to set a common security, IO, budget, or lifecycle field; and
 - codec output whose runtime type does not match the importer's declared option type.
 
-An unwindable codec panic while compiling submitted layers is `RequestError::CodecPanic` with target
-format/schema identity and bounded detail. It creates no `ImportSession`, import ledger, diagnostic
-stream, or `ImportFailure`, and performs zero asset IO. A default-compilation panic occurred earlier at
-registry freeze and is instead `RegistryBuildError::CodecPanic`; it cannot surface from an otherwise
-valid snapshot during a request with no layer for that format. Abort, process exit, infinite loops, and
-arbitrary allocation by trusted extension code remain outside in-process containment.
+A codec must report ordinary payload/schema/type failures through the typed compile result. If it
+unwinds instead, ADR 0021 owns containment, phase-specific error mapping, registration poisoning, and
+the no-reinvocation rule. The composed request boundary still creates no `ImportSession`, import
+ledger, diagnostic stream, or `ImportFailure`, and performs zero asset IO. Abort, process exit,
+infinite loops, and arbitrary allocation by trusted extension code remain outside in-process
+containment.
 
 There is no permissive path that converts these programming/configuration errors into parser
 diagnostics. Strictness controls source recovery, not request validity.
@@ -290,7 +304,8 @@ Positive:
 Negative:
 
 - Every configurable format maintains a schema and object-safe codec.
-- Registry freeze must compile every format default and may reject the entire proposed snapshot.
+- Every codec must expose a bounded compilable default; ADR 0021's freeze may reject the proposed
+  snapshot when that integration fails.
 - External configuration needs an explicit versioned serialization layer.
 - Adding a format option requires merge and round-trip conformance tests.
 
@@ -300,7 +315,7 @@ Negative:
 | --- | --- | --- |
 | A type-erased value is forged or downcast by the wrong importer | High | Private store constructors, registry-issued selected-importer capability, and checked type identity. |
 | Envelope payloads become an allocation attack | High | Bound envelope count and bytes, use fallible decoding, and compile before IO. |
-| Broken or stateful plugin poisons unrelated requests | High | Compile defaults at bounded atomic freeze; request compiler invokes only submitted targets and otherwise reuses cached defaults. |
+| Invalid options for one target affect unrelated requests | High | Request compiler invokes only submitted targets and otherwise reuses cached defaults; ADR 0021 owns extension health and poison behavior. |
 | Large registry makes every request linear in format count | High | Store defaults in the snapshot and build an override-only request store keyed from submitted envelopes. |
 | Preset and caller precedence becomes field-order dependent | Medium | Explicit overlay fields and all-permutation merge tests. |
 | Schema version changes silently reinterpret data | High | Stable schema identity, exact version checks, and explicit new-version codecs. |
@@ -313,13 +328,13 @@ Negative:
 | Object safety | A registry stores heterogeneous `dyn FormatImporter` values while each format reads its concrete options. |
 | Precedence | Default/preset/caller permutations produce one deterministic frozen value per field. |
 | Pre-IO rejection | Unknown, disabled, duplicate, wrong-schema, wrong-version, malformed, and cross-relabeled wrong-format envelopes cause zero backend opens. |
-| Registry default gate | Every registered codec compiles its empty/default layers under `RegistryBuildScope`; panic, budget, allocation, or type failure yields `RegistryBuildError` and no partial snapshot. |
+| Default compile contract | Every codec default compilation uses `RegistryBuildScope`, returns a type-checked immutable value, and reports budget/allocation/type failure through bounded typed results; ADR 0021 tests atomic snapshot and unwind behavior. |
 | Cached defaults | A no-envelope automatic request invokes zero codecs and the selected parser observes the exact snapshot-cached `Arc<CompiledFormatOptions>`. |
 | Submitted-only cost | Instrumented registries of different sizes perform equal codec calls/work for the same submitted envelope set; complexity follows submitted count/bytes, not registry size. |
 | Multi-target admission | Preset/caller envelopes for several formats all compile before session/IO even when forced or automatic detection later selects only one. |
 | Bounded codec execution | Oversized decoded cells/bytes, recursion, work, and live capacity fail through the phase-appropriate build/request scope before snapshot or session. |
 | Runtime type agreement | Registry default and submitted-layer compilation reject importer/codec/value type-key disagreement before snapshot/session; a parser never discovers it after primary IO. |
-| Codec panic phase | Default panic is bounded `RegistryBuildError::CodecPanic`; submitted-layer panic is bounded `RequestError::CodecPanic`; neither creates a session or opens an asset. |
+| Codec unwind delegation | Cross-ADR tests prove default and submitted-layer unwinds follow ADR 0021's phase mapping and permanent-poison contract; this ADR defines no competing panic or health state. |
 | Irrelevant codec isolation | A codec with no submitted request layer is never called during request compilation and cannot poison that request. |
 | Common config isolation | Starting from the same frozen snapshot, changing only common defaults/preset/caller fields invokes zero format codecs. |
 | Type isolation | A selected importer cannot access another format's compiled value; a wrong downcast is an internal contract failure. |

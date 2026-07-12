@@ -29,8 +29,14 @@ tracers:
 
 This accepted ADR is the authority for asset IO capabilities, path authorization, and binding an
 authorization decision to the opened object. Acceptance defines the required replacement contract;
-it does not certify the prototype path-based filesystem adapter. `native-fs` cannot claim
-conformance until the bound-handle adapter implements and passes the platform-local admission gates.
+it does not certify a filesystem adapter. No target currently has a release-registered `native-fs`
+capability. The machine-readable registered-target set is empty. Runtime candidate code exists only
+for `x86_64-unknown-linux-gnu`, `x86_64-pc-windows-msvc`, and `aarch64-apple-darwin`, exposed under
+`baozi-io/fs-candidate` and facade `native-fs-candidate`; those names must not be described as
+conformance or release support. `x86_64-unknown-freebsd` is dependency-audit-only research evidence,
+not a runtime candidate, and enabling the candidate feature for it must fail closed.
+All exact target predicates bind `target_abi = ""`; GNU x32 and any other ABI variant are outside the
+candidate universe even when architecture, vendor, operating system, and environment match.
 
 ## Context
 
@@ -61,7 +67,17 @@ The canonical rules are:
 - on Windows, Baozi opens every root capability without `FILE_SHARE_DELETE`; a handle whose share
   mode cannot be verified never enters the public native adapter
 - the first successful open yields the exact handle from which bytes are read and snapshotted
-- the first identity-terminal failure for a normalized dependency identity is cached for the session
+- an opened backend reports length as either `Exact` or `Hint`; immutable memory resources may use
+  `Exact`, while native same-handle metadata is only a `Hint` because the object can change during a
+  read. Exact length is enforced at EOF and overrun, a hint is never an upper bound, and neither can
+  raise the session or backend hard limit
+- an opened reader returning more bytes than the provided buffer, overflowing its cumulative count,
+  or violating an exact-length contract fails as a typed trusted-backend contract error before the
+  import layer slices or allocates from that value
+- the first snapshot or identity-terminal failure is cached only under an authority-qualified
+  dependency key `(authority domain, normalized resource identity)`
+- every logical reference is normalized, role-checked, and authorized before a cache lookup; a cache
+  hit never bypasses the current reference's policy or loss decision
 - `exists` and metadata probes are advisory only and never authorize a later open
 - filesystem, memory, and custom backends share the same identity, limit, and evidence contract
 - remote fetching is host-owned and excluded from the Baozi facade
@@ -71,7 +87,7 @@ Authority is split deliberately:
 
 | Authority | Owned decision |
 | --- | --- |
-| ADR 0010 | `AssetIo` capabilities, path authorization, authorize/open object binding, and the physical dependency-open/cache mechanism keyed by normalized identity |
+| ADR 0010 | `AssetIo` capabilities, path authorization, authorize/open object binding, and the physical dependency-open/cache mechanism keyed by authority-qualified identity |
 | ADR 0020 | session construction before IO, stage ownership, and one final outcome |
 | ADR 0029 | primary snapshot, Probe behavior, detect/parse byte sharing, and detection failure evidence |
 | ADR 0022 | attempted/consumed/live/committed accounting and refund semantics |
@@ -100,10 +116,11 @@ sequenceDiagram
     participant Scope
     participant Ledger
 
-    Parser->>Session: open_dependency(base, reference, requiredness)
-    Session->>Session: normalize identity and consult cache
-    Session->>Policy: authorize logical reference
-    Policy-->>Session: scoped capability, deny, or resolver result
+    Parser->>Session: open_dependency(base, reference, admitted role)
+    Session->>Session: normalize hostile reference and validate role
+    Session->>Policy: authorize this logical reference
+    Policy-->>Session: authority domain plus normalized resource identity, deny, or authorized result
+    Session->>Session: consult authority-qualified physical cache
     Session->>Scope: open relative to root capability
     Scope-->>Session: already-open object handle
     Session->>Ledger: reserve and read bounded bytes from that handle
@@ -117,8 +134,9 @@ Baozi distinguishes four concepts:
 | Concept | Purpose | Security meaning |
 | --- | --- | --- |
 | Raw reference | Text from a source file or caller | Hostile data; no authority |
-| `AssetPath` | Bounded, normalized logical identity | Cache and diagnostics key only |
+| `AssetPath` | Bounded, normalized logical identity | One component of cache and diagnostic identity; never authority |
 | `AssetScope` | Open root capability or memory namespace | Authority ceiling |
+| Authority-qualified dependency key | Opaque authority-domain identity plus normalized resource identity | Session-local physical cache key only; not public provenance |
 | Opened resource | Handle plus immutable session snapshot | Object authorized for parsing |
 
 An `AssetUri` can label a source, but URI syntax does not grant access. `file:`, drive, UNC, NT
@@ -146,19 +164,26 @@ Defaults:
 - optional dependency denial produces bounded evidence and may preserve geometry
 - a required structural dependency failure is fatal
 
-Policy evaluation happens before backend IO. The open, byte limit, immutable snapshot, identity
-cache, and required/optional classification are one session operation so format crates cannot bypass
-part of the policy.
+Policy evaluation happens before both cache lookup and backend IO. Each logical reference first
+validates its hostile spelling and descriptor-admitted role, then policy selects an authorized scope
+or resolver namespace and produces an authority-qualified resource identity. Only that key may query
+the physical snapshot/failure cache. Two scopes or resolver namespaces with the same logical path
+never share a cache entry, and a previously authorized alias cannot satisfy a later denied reference.
+Requiredness and loss disposition are deliberately not part of the physical key; they are evaluated
+for every logical reference after observing the shared physical result. The open, byte limit,
+immutable snapshot, cache, and required/optional classification remain one session operation so
+format crates cannot bypass part of the policy.
 
-The cache's first failure is terminal only for that normalized dependency identity: it prevents a
-second physical open but does not itself end the import. ADR 0020 owns disposition. An optional failure
-accepted by format and loss policy is a non-abort unavailable outcome; a required or policy-rejected
-failure becomes a session-terminal `ScopeAbort`.
+The cache's first failure is terminal only for that authority-qualified dependency identity: it
+prevents a second physical open in that authority domain but does not itself end the import. ADR 0020
+owns disposition. An optional failure accepted by format and loss policy is a non-abort unavailable
+outcome; a required or policy-rejected failure becomes a session-terminal `ScopeAbort`.
 
 ## Native Filesystem Admission
 
-The admitted implementation direction is `cap-std` 4.0.2 behind `baozi-io/fs`, with an exact direct
-`rustix` 1.1.4 dependency used only for the portable `OFlags::NONBLOCK` value on Unix-like targets.
+The admitted implementation direction is `cap-std` 4.0.2 behind `baozi-io/fs-candidate`, with an
+exact direct `rustix` 1.1.4 dependency used only for the portable `OFlags::NONBLOCK` value on
+Unix-like targets.
 The adapter passes that value through `cap_std::fs::OpenOptionsExt`; it does not use a numeric flag,
 a documentation-hidden dependency API, or an additional filesystem extension crate. The detailed
 blocking review is recorded in
@@ -169,15 +194,33 @@ The adapter's conformance gate must machine-lock the reviewed `cap-std`, `cap-pr
 before the adapter can claim conformance. A path-resolution, open-flag, special-file, unsafe-scope,
 or target-relevant closure change reopens dependency admission.
 
+Dependency admission is necessary but does not register a platform. Registration adds the release
+features `baozi-io/fs` and facade `native-fs` only after a platform-local, no-skip adversarial matrix
+passes and durable evidence is linked. The current blockers are explicit:
+
+| Runtime candidate | Missing conformance evidence |
+| --- | --- |
+| `x86_64-unknown-linux-gnu` | explicit `openat2`/fallback selection, magic-link escape, mount/race behavior, and the complete no-skip acceptance matrix |
+| `x86_64-pc-windows-msvc` | self-contained unknown-reparse construction/rejection, verified root share-mode behavior, reparse replacement races, and the complete no-skip acceptance matrix |
+| `aarch64-apple-darwin` | component-handle walk/link behavior, replacement races, and the complete no-skip acceptance matrix on a real runner |
+
+CI runs the reliably constructible candidate fixtures only on those three exact host triples and
+rejects a runner whose `rustc -vV` host differs from its declared target. Fixture setup failure fails
+those jobs; it cannot print `SKIP` and return success. Unknown Windows reparse tags cannot yet be
+constructed reliably with the safe, unprivileged runner surface, so that case remains a documented
+blocker rather than a passing or skipped test. The `x86_64-unknown-freebsd` closure remains
+supply-chain evidence and future implementation research only. Its FreeBSD 13/14+ matrix below is a
+prerequisite for any future proposal to add a runtime candidate, not current runtime coverage.
+
 Required behavior by platform family:
 
 | Platform | Bound-open strategy | Fail-closed boundary |
 | --- | --- | --- |
 | Linux 5.6+ | directory fd plus `openat2(RESOLVE_BENEATH)`; magic-link protection is mandatory | no path-based reopen; unsupported resolution flags cannot be silently dropped |
 | Older Linux and macOS | component-at-a-time relative opens while retaining directory handles and handling links inside the capability root | a backend unable to prove containment returns an error; `realpath` is not a substitute |
-| FreeBSD with proven semantics | runtime-check `openat(O_RESOLVE_BENEATH)` behavior, normally on FreeBSD 14+, and otherwise use the capability handle walk | FreeBSD 13's incompatible `..` behavior and historical `O_BENEATH` are not accepted as proof |
+| Future FreeBSD proposal, not a current runtime candidate | runtime-check `openat(O_RESOLVE_BENEATH)` behavior, normally on FreeBSD 14+, and otherwise use the capability handle walk | FreeBSD 13's incompatible `..` behavior and historical `O_BENEATH` are not accepted as proof |
 | Windows MSVC | relative `NtCreateFile`/`RootDirectory` handle opens with explicit reparse handling | Win32/NT device namespaces, alternate streams, reserved device aliases, and ambiguous trailing-dot/space names are rejected before IO |
-| Other targets | memory/custom `AssetIo` only unless separately admitted | enabling `native-fs` must not fall back to `std::fs::canonicalize` |
+| Other targets | memory/custom `AssetIo` only unless separately admitted | a candidate feature must fail closed and must not fall back to `std::fs::canonicalize` |
 
 Baozi additionally rejects NUL and control characters, absolute and drive-relative paths, UNC paths,
 Win32 extended/device prefixes, NT object-manager paths, alternate data stream separators, reserved
@@ -193,7 +236,7 @@ FIFO, socket, and device handles produce typed failures, and deadline tests must
 rejection does not wait for a writer. Windows likewise validates regular-file type on the exact
 handle returned by the capability-relative native open; it never reopens a validated pathname.
 
-The public native adapter's root-taking constructor accepts only Baozi's opaque
+The candidate native adapter's root-taking constructor accepts only Baozi's opaque
 `NativeDirectoryCapability`. The only path-taking root convenience constructs that capability,
 validates the root, and returns it before hostile references are processed; facade path helpers may
 delegate to that operation. In particular, Baozi does not wrap an arbitrary `std::fs::File`, raw file
@@ -221,8 +264,9 @@ implementations must satisfy these IO integration constraints within one import 
 
 1. The primary object is opened once and read into one bounded immutable backing store.
 2. Detection and parsing use views over that same snapshot.
-3. A normalized dependency identity is resolved and opened at most once physically.
-4. The first snapshot or identity-terminal failure is reused for repeated logical references.
+3. Each logical dependency reference is role-checked and authorized before cache lookup.
+4. One authority-qualified dependency identity is resolved and opened at most once physically; its
+   first snapshot or identity-terminal failure is reused only inside that authority domain.
 5. Attempted IO and work remain monotonic even when an optional resource is skipped.
 
 These rules prevent detect/parse byte drift and repeated-open replacement. They do not make a mutable
@@ -282,7 +326,9 @@ and a separate unsafe review.
 
 Pros:
 
-- Binds relative opens to directory handles across Linux, macOS, Windows, and FreeBSD.
+- Upstream binds relative opens to directory handles across Linux, macOS, Windows, and FreeBSD;
+  Baozi currently runs the adapter only on its three exact runtime candidates and audits the
+  FreeBSD dependency closure without exporting runtime code.
 - Supports in-root symlinks without authorizing escapes.
 - Compatible license and MSRV; used as a WASI capability foundation.
 - Keeps ambient opening and platform `unsafe` at an explicit adapter boundary.
@@ -302,6 +348,7 @@ Decision: chosen, subject to the executable acceptance gates in the admission re
 | Ambient IO | no first-party format crate opens host paths | dependency and source audit |
 | Object binding | authorization and reads use the same opened object | injected replacement/race tests |
 | Session stability | primary and repeated dependencies reuse their first snapshot/failure | mutable-backend integration tests |
+| Cache authority isolation | equal logical paths in different scopes/resolver namespaces never share bytes or failures, and a denied alias never hits an allowed cache entry | dual-scope, resolver-namespace, and allowed-then-denied tests |
 | Deny ordering | denied references cause zero backend opens | recording-backend tests |
 | Platform path safety | escape, symlink, junction, reparse, namespace, and device cases fail | per-target adversarial suites |
 | Special-file availability | directory, FIFO, socket, and device inputs fail by deadline without a blocking pathname preflight | same-handle type and deadline tests |
@@ -332,6 +379,9 @@ Decision: chosen, subject to the executable acceptance gates in the admission re
 - On Windows, construct root and descendant directory handles without `FILE_SHARE_DELETE` and test
   that textual root replacement cannot redirect the retained capability.
 - Make dependency resolution return an authorized resource operation, not a reopenable path.
+- Derive the physical dependency cache key from the selected authority domain and normalized resource
+  identity only after authorization; authorize every logical reference before lookup, while keeping
+  requiredness and loss disposition outside the physical key.
 - Remove authorization use of `exists`.
 - On Unix-like targets, open through `cap-std` with `O_RDONLY | O_NONBLOCK`, sourcing
   `OFlags::NONBLOCK` from direct `rustix` 1.1.4, then validate regular-file type on the returned
@@ -342,15 +392,18 @@ Decision: chosen, subject to the executable acceptance gates in the admission re
 - Charge path-component work and the admitted backend's conservative retry allowance before opening.
 - Add deterministic path, non-regular-file deadline, and concurrent replacement tests from the
   admission record.
-- Keep `cap-std` and direct `rustix` behind `baozi-io/fs` and facade `native-fs`; verify them and
-  transitive `cap-primitives` are absent from byte-only/WASM dependency trees.
+- Keep `cap-std` and direct `rustix` behind `baozi-io/fs-candidate` and facade
+  `native-fs-candidate`; verify them and transitive `cap-primitives` are absent from byte-only/WASM
+  dependency trees. Keep release features `fs` and `native-fs` absent until promotion.
 - Pin direct `rustix` to exactly 1.1.4 and verify its crates.io checksum
   `b6fe4565b9518b83ef4f91bb47ce29620ca828bd32cb7e408f0062e9930ba190`.
-- Resolve `cap-std` with default features disabled on admitted Linux, Windows MSVC, macOS, and
-  FreeBSD targets. Resolve direct `rustix` only on admitted Unix-like targets with default features
-  disabled and exactly the `std` and `fs` features; Windows obtains no direct `rustix` edge.
-- Check the complete resolved native-filesystem dependency closure for Linux, Windows MSVC, macOS,
-  and FreeBSD against the admitted versions, features, sources, and checksums; any
+- Resolve `cap-std` with default features disabled on the exact dependency-audit triples
+  `x86_64-unknown-linux-gnu`, `x86_64-pc-windows-msvc`, `aarch64-apple-darwin`, and
+  `x86_64-unknown-freebsd`. Resolve direct `rustix` only on the three Unix-like audit triples with
+  default features disabled and exactly the `std` and `fs` features; Windows obtains no direct
+  `rustix` edge. Resolving the FreeBSD edge does not compile or export the runtime adapter.
+- Check the complete resolved native-filesystem dependency closure for those four exact audit
+  triples against the admitted versions, features, sources, and checksums; any
   path-resolution-, open-flag-, special-file-, or target-relevant change reopens admission.
 - Fail CI if a format crate uses direct `std::fs` outside an approved adapter.
 

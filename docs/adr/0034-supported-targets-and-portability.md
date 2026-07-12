@@ -42,10 +42,12 @@ flowchart TD
     Change[Code or dependency change] --> Portable[Portable core gates]
     Portable --> Native[Native tested targets]
     Portable --> Wasm[Portable byte targets]
-    Native --> Fs[Native filesystem adversarial tests]
+    Native --> CandidateFs[Native filesystem candidate tests]
     Native --> Golden[Golden and facade tests]
     Wasm --> NoFs[No ambient filesystem dependency]
-    Fs --> Release[Release evidence]
+    CandidateFs --> Promotion[No-skip platform promotion]
+    Promotion --> NativeFsRelease[Registered native-fs evidence]
+    NativeFsRelease --> Release[Product release evidence]
     Golden --> Release
     NoFs --> Release
 ```
@@ -54,7 +56,7 @@ flowchart TD
 
 | Profile | Targets | Required evidence | Capability promise |
 | --- | --- | --- | --- |
-| Native Tested | `x86_64-unknown-linux-gnu`, `x86_64-pc-windows-msvc`, `aarch64-apple-darwin` | build, unit/facade/golden tests, docs, platform filesystem adversarial tests | byte, memory, custom IO, and admitted `native-fs` |
+| Native Tested | `x86_64-unknown-linux-gnu`, `x86_64-pc-windows-msvc`, `aarch64-apple-darwin` | build, unit/facade/golden tests and docs | byte, memory, and custom IO; native filesystem remains an unregistered candidate |
 | Portable Byte | `wasm32-unknown-unknown`, `wasm32-wasip1` | no-default compile, per-format compile, representative runtime tests where runner support exists | byte and memory/custom IO; no Baozi ambient filesystem helper |
 | Build Monitored | `aarch64-unknown-linux-gnu`, `x86_64-apple-darwin` | scheduled or release compile and selected tests on real hosts | no release-blocking runtime promise until promoted |
 | Unlisted | all other Rust targets | best effort only | no compatibility, filesystem, or performance promise |
@@ -78,9 +80,20 @@ Baozi does not create a broader operating-system promise than Rust's own target 
 
 ### Native Filesystem
 
-`native-fs` is available only where ADR 0010 has an admitted bound-handle strategy. Unsupported
-platforms fail to compile that adapter or return a typed capability-unavailable error; they never
-substitute `canonicalize + open`.
+The release `native-fs` capability is currently unregistered on every target. Cargo therefore has no
+`native-fs` or low-level `fs` feature. Candidate implementations use the explicitly non-release
+`native-fs-candidate` and `fs-candidate` features only on `x86_64-unknown-linux-gnu`,
+`x86_64-pc-windows-msvc`, and `aarch64-apple-darwin`; all other targets fail to compile the candidate
+adapter with one stable diagnostic. In particular, Build Monitored `x86_64-apple-darwin` and
+dependency-audit-only `x86_64-unknown-freebsd` must fail closed. No candidate may substitute
+`canonicalize + open`.
+The predicates also bind an empty `target_abi`, so `x86_64-unknown-linux-gnux32` is not accidentally
+treated as `x86_64-unknown-linux-gnu`.
+
+`NATIVE_FS_SUPPORT_STATUS`, `NATIVE_FS_REGISTERED_TARGETS`, and
+`NATIVE_FS_CANDIDATE_TARGETS` expose this distinction to code. Repository governance rejects a
+release feature while the registered-target set is empty and keeps the candidate dependency closure
+separate from runtime conformance evidence.
 
 Every supported native adapter opens and validates one object handle. Unix-like adapters use a
 capability-relative `O_RDONLY | O_NONBLOCK` open before checking regular-file metadata on that
@@ -88,7 +101,7 @@ same handle, so a hostile FIFO cannot hang before rejection. Windows performs th
 on the handle returned by its relative native open. No target may use path metadata followed by an
 open, or reopen a path after validating it.
 
-The filesystem test authority is platform-local:
+The filesystem promotion authority is platform-local and must be no-skip:
 
 - Linux tests `openat2` and fallback behavior, symlink/magic-link escapes, rename replacement, and
   deadline-bounded FIFO/socket/device rejection.
@@ -97,13 +110,15 @@ The filesystem test authority is platform-local:
   rejection.
 - macOS tests component-relative handle walking, symlink escape, concurrent rename replacement, and
   deadline-bounded FIFO/socket/device rejection.
-- FreeBSD implementation evidence covers both incompatible FreeBSD 13 and accepted FreeBSD 14+
-  `O_RESOLVE_BENEATH` behavior plus the capability-walk fallback and nonblocking special-file suite;
-  it is not a Native Tested support claim until promoted under this ADR.
+- A future FreeBSD runtime-candidate proposal must cover both incompatible FreeBSD 13 and accepted
+  FreeBSD 14+ `O_RESOLVE_BENEATH` behavior plus the capability-walk fallback and nonblocking
+  special-file suite. The current FreeBSD profile audits dependency resolution only and grants no
+  runtime or Native Tested claim.
 
-Target-filtered dependency checks pin `cap-std` 4.0.2, `cap-primitives` 4.0.2, and direct `rustix`
-1.1.4 with their admitted checksums and features. The two Portable Byte targets must resolve none of
-those native filesystem dependencies in their byte-only graphs.
+Target-filtered candidate dependency checks pin `cap-std` 4.0.2, `cap-primitives` 4.0.2, and direct
+`rustix` 1.1.4 with their admitted checksums and features for the three runtime candidates plus the
+`x86_64-unknown-freebsd` audit-only profile. The two Portable Byte targets must resolve none of those
+native filesystem dependencies in their byte-only graphs.
 
 Filesystem guarantees apply to objects opened through Baozi's scoped adapter. They do not sandbox a
 malicious `AssetIo`, plugin, host process, kernel driver, or writable mount controlled by the host.
@@ -192,13 +207,13 @@ Decision: chosen.
 
 | Metric | Target | Measurement |
 | --- | --- | --- |
-| Native evidence | every Native Tested target executes facade and filesystem security tests | CI/release matrix |
+| Native filesystem evidence | every release-registered target executes its complete no-skip filesystem security matrix; currently none are registered | CI/release matrix and registered-target constant |
 | WASM isolation | byte-only builds contain no native filesystem or network dependency | feature tree and target builds |
 | Determinism | shared golden digests match across tested native targets | cross-platform golden jobs |
 | Target honesty | every documented profile maps to a machine gate | ADR/CI checker |
 | Dependency portability | default and all-format pure-Rust trees compile for portable byte targets | per-feature target checks |
 | Failure behavior | unsupported native adapters fail closed | compile-fail or runtime capability tests |
-| Special-file behavior | native directories, FIFOs, sockets, and devices fail without blocking and without pathname reopen | platform-local deadline and same-handle tests |
+| Candidate special-file behavior | reliably constructible directories, FIFOs, sockets, and devices fail without blocking and without pathname reopen | platform-local candidate deadline and same-handle tests; not promotion by itself |
 
 ## Risks and Mitigations
 

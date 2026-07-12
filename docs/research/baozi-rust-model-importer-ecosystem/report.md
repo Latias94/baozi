@@ -38,10 +38,11 @@ dependency or fixture has an audited license.
 WASM support must be part of the first importer slice:
 
 - expose bytes and memory import APIs before path-only convenience APIs
-- keep filesystem helpers behind facade feature `native-fs`
+- keep filesystem helpers behind the unregistered facade feature `native-fs-candidate` until a
+  platform completes the no-skip conformance gate
 - keep `baozi-io` filesystem adapters behind `fs`
 - make `wasm32-unknown-unknown` compile checks target the bytes path
-- keep WASI filesystem checks separate with `native-fs`
+- keep WASI byte/custom-IO checks separate; `native-fs-candidate` must fail closed on WASI
 - avoid mandatory threads, native SIMD, FFI, or process-global runtimes in parser crates
 
 ## Plan Impact

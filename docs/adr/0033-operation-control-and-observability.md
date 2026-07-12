@@ -1,6 +1,7 @@
 ---
 status: accepted
 date: 2026-07-10
+updated: 2026-07-12
 authors:
   - Codex
 decision_type: architecture
@@ -75,7 +76,8 @@ The actual public layout may differ. Required behavior is:
 - a deadline is a backstop and does not replace deterministic work budgets;
 - absence of a control capability behaves as a no-op control, without global lookup;
 - polling and progress use bounded deterministic work intervals;
-- callback invocation happens without internal allocator, registry, or operation-owner locks held;
+- callback invocation happens without any Baozi-owned registry, ledger, cache, resolver, IO-wrapper,
+  allocator, or outcome lock held;
   and
 - control capabilities cannot open resources, construct diagnostics, alter budgets, or finalize an
   outcome.
@@ -93,8 +95,26 @@ inversion preserves the crate direction: core/import/postprocess may depend on `
 
 ### Cancellation Bound
 
-Every parser loop, graph traversal, decode adapter, validation pass, and post-process step declares a
-maximum `work units between cancellation checks`. Tests assert work counts, not wall-clock latency.
+Every primary/dependency snapshot read loop, detector boundary and bounded detector scan, parser loop,
+graph traversal, decode adapter, SceneBuilder loop, validation pass, and post-process step declares a
+maximum `work units between cancellation checks`. The owner performs another checkpoint after final
+validation and after any final phase-complete progress delivery but before publishing success. An
+observer cancellation request at either point is terminal and cannot race with success publication.
+Tests assert work counts, not wall-clock latency.
+
+Detection uses the session-created `DetectionScope` rather than charging the coordinator around an
+opaque detector call. Only one `DetectionWorkPermit` may be outstanding. `begin_work(amount)` polls,
+rejects zero or more than 4 KiB, then charges attempted `DetectionWork`. `complete()` charges consumed
+work first, clears the outstanding permit, and performs the post-work poll, so cancellation after the
+chunk preserves its consumed evidence. Zero/repeated work admission, polling during a live permit,
+dropping it unfinished, or returning with it outstanding latches the first terminal cause. A detector
+cannot catch the opaque abort and return a match to suppress that latch.
+
+Byte-oriented text profile, UTF-8, token-boundary, and owned-string copy loops poll at least once per
+4 KiB quantum unless they declare a stricter record boundary. Collection loops use a separately
+declared item quantum. The bound applies independently to repeated passes: validating, tokenizing, and
+copying the same surface each require their own checkpoints rather than borrowing another pass's poll.
+
 On cancellation, the coordinator stops work and returns a typed control cause. The owning operation
 discards unpublished staging, releases live reservations, and finalizes its own failure retaining
 prior diagnostics and ledger evidence. Post-process cancellation leaves the input `ValidatedScene`
@@ -232,10 +252,14 @@ Negative:
 | Contract | Testable acceptance |
 | --- | --- |
 | Cancellation latency | Each large loop stops within its declared maximum additional work units. |
+| Full-stage cancellation | Cancellation before/during primary read, between/during detectors, during dependency read, parse, Scene construction, validation, and the pre-publication checkpoint returns failure; final progress-event cancellation cannot publish success. |
+| Detector capability | Detector work is single-outstanding and at most 4 KiB; begin polls then charges attempted, complete charges consumed then post-polls, and zero/repeated/poll-during/drop/forgotten-permit violations preserve the first terminal latch. |
+| Text and collection checkpoints | UTF-8/profile scans, tokenizer passes, and owned-string copies poll independently at no more than 4 KiB byte intervals; collection loops prove their declared item interval. |
 | Monotonic progress | Recorded events are phase-ordered and completed/total values never regress. |
 | Bounded delivery | Huge inputs respect event count/byte caps while ledger work remains exact. |
 | Callback containment | An unwindable observer panic yields the owner's typed failure and retained evidence; postprocess publishes no staging and preserves input proof. |
 | Parallel serialization | A multi-worker test proves the observer is never invoked concurrently. |
+| Callback lock freedom | An observer may start a nested operation without deadlocking because delivery holds no Baozi-owned registry, ledger, cache, resolver, IO-wrapper, allocator, or outcome lock. |
 | Trace independence | With no subscriber, all semantic outputs equal a captured-tracing run. |
 | Sensitive fields | Captured normal-level spans contain no host root, source bytes, or unbounded asset names. |
 | Dependency direction | Workspace graph checks prove `baozi-operation` is a leaf, core does not depend on import, and postprocess does not depend on import. |

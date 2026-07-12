@@ -1,13 +1,16 @@
 ---
 status: accepted
 date: 2026-07-09
-updated: 2026-07-10
+updated: 2026-07-11
 authors:
   - Codex
 decision_type: architecture
 depends_on:
   - docs/adr/0003-core-scene-ir-and-material-model.md
 related:
+  - docs/adr/0006-public-api-versioning-and-crate-stability-policy.md
+  - docs/adr/0011-format-support-tiers-and-compatibility-charter.md
+  - docs/adr/0028-adr-lifecycle-and-evidence-governance.md
   - docs/adr/0031-animation-skin-morph-and-deformer-contract.md
   - docs/adr/0032-postprocess-remap-and-derived-data-contract.md
 ---
@@ -103,6 +106,32 @@ space descriptor and geometric orientation together before commit.
 Floating-point snapshots use deterministic ordering and per-field documented absolute/relative or
 angular tolerances. Tolerances are test comparison policy, not permission to clamp imported data.
 
+### High-Precision CAD Scope
+
+High-precision computer-aided design (CAD) and engineering geometry are explicitly excluded from
+Baozi's long-term product scope under this accepted decision. “Assimp-class format breadth” means
+broad source ingestion for the canonical graphics/asset IR; it does not imply STEP/IGES/B-rep,
+manufacturing tolerance, exact topology, or source-coordinate precision beyond the declared `f32`
+geometry contract. A format path that requires those guarantees must be rejected or report explicit
+policy-governed precision loss; it cannot claim source-preserving support by storing narrowed values.
+
+That exclusion may change only by reopening this ADR before admitting or implementing a CAD-oriented
+format or workflow. The review must define and provide evidence for all of the following together:
+
+- target domains and formats, dimensional/unit semantics, model extents, and an explicit absolute,
+  relative, and topology-sensitive error budget;
+- one canonical scalar/storage strategy (`f64`, a distinct CAD IR, or another reviewed model) and the
+  compatibility/migration boundary with the graphics IR;
+- robust-predicate and tolerance semantics for validation, topology, triangulation, transforms,
+  derived data, snapshot/digest, serialization, and postprocess;
+- measured memory, throughput, and cross-platform determinism costs; and
+- independent precision, round-trip, adversarial, and large-coordinate fixtures proving that values
+  which matter to the declared CAD contract do not collapse or change topology.
+
+Adding a generic scalar parameter, silently widening selected fields, or relying on parser-backend
+`f64` values does not satisfy this gate. Until an accepted amendment lands, roadmap, format maturity,
+facade, and release claims must treat high-precision CAD as out of scope.
+
 ## Considered Options
 
 ### Option A: Expose one ecosystem math crate
@@ -127,7 +156,7 @@ Chosen.
 - Matrix and tangent conventions become normative and tested rather than comments on individual
   importers.
 - High-precision CAD geometry is outside this canonical IR; supporting it requires a separate
-  domain decision, not a generic scalar parameter.
+  reopening of this decision and complete precision evidence, not a generic scalar parameter.
 
 ## Risks and Mitigations
 
@@ -137,6 +166,7 @@ Chosen.
 | Partial coordinate conversion corrupts animation or skinning | High | Use operation read/write sets and integration fixtures containing all spatial domains. |
 | Unknown source conventions invite caller guesses | Medium | Preserve `Unknown`, allow explicit caller-supplied source overrides, and record them in provenance. |
 | Platform float behavior changes snapshots | Medium | Use scalar reference tests, deterministic ordering, and field-specific tolerances. |
+| Format breadth language silently expands into CAD guarantees | Critical | Keep CAD explicitly excluded from roadmap/maturity/release claims until this ADR is reopened with scalar, tolerance, topology, migration, and conformance evidence. |
 
 ## Success Metrics
 
@@ -145,6 +175,7 @@ Chosen.
 | Time fidelity | Distinct authored `f64` times never collapse through `f32` conversion | long-time and close-key fixtures |
 | Space completeness | A complete-space claim has no unknown or contradictory convention | exact/excess field validation tests |
 | Conversion completeness | Every declared spatial domain is converted or the transaction fails | all-domain coordinate fixture and invalidation report |
+| Scope truthfulness | No support or release claim implies high-precision CAD under the `f32` canonical geometry contract | roadmap, format-matrix, facade-doc, and release-doc checks |
 
 ## Acceptance Criteria
 
@@ -154,3 +185,5 @@ Chosen.
   and derived-data invalidation in one transaction.
 - Animation times that differ below `f32` precision remain distinct after import.
 - NaN, infinity, invalid unit scales, and invalid quaternions fail validation deterministically.
+- CAD-oriented format/workflow admission fails governance review unless an accepted update to this
+  ADR supplies the complete precision and migration evidence above.

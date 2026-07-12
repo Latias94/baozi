@@ -51,6 +51,12 @@ identity. For dependencies it is the resolver's normalized identity relative to 
 Absolute host roots, credentials, query secrets, and backend implementation handles are excluded
 from public output.
 
+This public resource identity is distinct from ADR 0010's session-local physical dependency cache
+key. The latter additionally includes an opaque authority-domain identity so equal logical names in
+different scopes or resolver namespaces cannot share bytes or failures. That capability identity is
+authorization machinery and is not serialized into Scene provenance; public resolver identity is
+sanitized separately under this ADR.
+
 A source object locator is format-defined, deterministic, and typed: for example a glTF document
 index plus object kind, an OBJ statement/segment identity, or a PLY element row. Names may be
 included for display but are never the sole identity when a stable source index exists. A content
@@ -68,6 +74,12 @@ display name, and optional content digest reference. It contains no host path or
 object. Unknown locator kinds require a registered bounded namespaced schema; an untyped free-form
 string is evidence text, not identity. Equality excludes display text and keeps content digest
 separate so identity continuity and byte equality remain different questions.
+
+The locator's stable format owner uses the bounded `baozi-core::FormatId` value object. Core owns only
+that lowercase ASCII/reverse-DNS value grammar so a validated Scene can retain provenance without
+depending on import. ADR 0021 keeps sole authority over registry membership, descriptor and option
+schemas, namespace claims, selection, and extension capability; constructing a syntactically valid
+`FormatId` never registers or authorizes a format.
 
 ### Provenance
 

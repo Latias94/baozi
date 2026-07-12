@@ -26,15 +26,15 @@
 | Metadata | Partial | Stores OBJ/MTL context such as group names, smoothing flags, and MTL-only material values as namespaced metadata. | geometry and material tests |
 | Compression or containers | Unsupported | Raw `.obj` and sidecar `.mtl` assets only; archives are outside this crate. | not applicable |
 | Coordinate and unit metadata | ParsedLossy | OBJ is imported as-authored. Baozi does not infer units, axis conventions, or winding changes in raw import. | docs/model conventions |
-| Malformed input diagnostics | Supported | Structural geometry errors are fatal; recoverable sidecar/material/unsupported-statement issues produce diagnostics. | `malformed.rs`, `limits.rs` |
-| Resource limits | Supported | Enforces primary bytes, sidecar bytes, line/token/string bytes, vertices, faces, meshes, and diagnostics caps. | `limits.rs` |
+| Malformed input diagnostics | Supported | Structural geometry and strict text failures are fatal. Declared format warnings and explicitly authorized optional-dependency unavailability produce bounded diagnostics. | `malformed.rs`, `limits.rs`, `text_recovery.rs` |
+| Resource limits | Supported | Enforces primary and dependency bytes, decoded/index/token/string bytes, vertices, faces, meshes, diagnostics, recovery attempts, and loss-evidence caps. | `limits.rs`, `text_recovery.rs` |
 
 Status values: `Supported`, `Partial`, `ParsedLossy`, `IgnoredWithDiagnostic`, `Unsupported`, `Unknown`.
 
 ## Import Behavior
 
 - Detection: `.obj` extension gives a positive signal, and lightweight content probes recognize common `v`, `vt`, `vn`, `f`, `o`, `g`, `s`, `mtllib`, and `usemtl` records.
-- Text encoding: this experimental slice expects UTF-8. UTF-8 BOM and CRLF line endings are accepted.
+- Text encoding: OBJ and MTL use UTF-8. `ObjTextDecodingMode::RejectInvalid` is the default; UTF-8 BOM and CRLF line endings are accepted.
 - Raw coordinate behavior: positions, normals, and texture coordinates are imported unchanged.
 - Unit handling: OBJ is treated as unitless; Baozi does not infer meters, centimeters, or inches.
 - Winding handling: face order is preserved as-authored.
@@ -43,9 +43,30 @@ Status values: `Supported`, `Partial`, `ParsedLossy`, `IgnoredWithDiagnostic`, `
 - Attribute remapping: OBJ's separate position/UV/normal indices are remapped into Baozi's vertex-indexed SoA mesh streams by unique `(position, texcoord, normal)` tuples.
 - Mesh splitting: material, object/group, and topology boundaries may split one OBJ file into multiple Baozi meshes to preserve the one-material-per-mesh contract.
 
+### Text Decoding and Recovery
+
+Invalid UTF-8 is rejected by default. A caller that needs declared legacy-text recovery must submit the OBJ-owned typed option `ObjImportOptions` with `ObjTextDecodingMode::ReplaceInvalidUtf8`. Recovery is not a global permissive-decoding switch: replacement is applied per Unicode maximal subpart and succeeds only when all four authorities allow it:
+
+1. The typed OBJ option selects `ReplaceInvalidUtf8`.
+2. The OBJ format descriptor advertises that decoding mode in its `TextProfile`.
+3. The request conformance policy allows declared recovery, for example `ConformancePolicy::AllowDeclaredRecovery`.
+4. The loss policy allows `ImportLossKind::FormatRecovery`.
+
+Even with all four gates enabled, replacement is limited to these textual value ranges:
+
+- OBJ values following `o`, `g`, `usemtl`, `s`, and `mtllib`.
+- MTL values following `newmtl`, and the `map_Kd` path after its option operands have valid arity and required numeric syntax.
+
+OBJ/MTL keywords, numeric fields, face references, `map_Kd` option operands, and all other required syntax remain strict. Invalid UTF-8 in those regions is terminal rather than replaced. When replacement is applied, the import report records a bounded `obj.invalid_utf8_replaced` diagnostic and `FormatRecovery` loss evidence with the original raw-byte range. Recovery count/raw bytes and loss-evidence count/bytes are charged through the import ledger; exhausting any applicable limit is terminal. In replacement mode, invalid bytes wholly inside a discarded `#` comment tail are ignored without a diagnostic, loss evidence, or recovery-ledger charge. In the default `RejectInvalid` mode, invalid UTF-8 is rejected before comment-tail recovery filtering.
+
 ## MTL Mapping
 
-`mtllib` paths resolve relative to the OBJ asset through `AssetIo`. Texture paths inside MTL resolve relative to the MTL asset. `Importer::read_bytes` uses memory IO and denies external references by default; use `read_asset` or `read_path` with an explicit IO policy when sidecars should load.
+`mtllib` paths resolve relative to the OBJ asset through `AssetIo`. Texture paths inside MTL resolve relative to the MTL asset. Resolver behavior depends on the facade entry point:
+
+- `Importer::read_bytes` admits only the caller-owned primary byte snapshot and uses `baozi_import::DenyDependencies`; it cannot load MTL sidecars.
+- `Importer::read_asset` uses `baozi_import::SameAuthorityResolver`, so MTL sidecars are authorized against the same `AssetIo` authority as the primary OBJ.
+- `Importer::read_path` is available only with `native-fs-candidate`. It opens a native-directory capability rooted at the OBJ file's parent directory, then uses the same-authority behavior of `read_asset` for sidecars.
+- `Importer::read_asset_with_resolver` accepts a prepared request and an explicit `DependencyResolver`. Use it when dependencies need a caller-defined authority policy, including `baozi_import::DenyDependencies` when every sidecar must be rejected before backend IO.
 
 | MTL field | Baozi mapping |
 | --- | --- |
@@ -57,7 +78,9 @@ Status values: `Supported`, `Partial`, `ParsedLossy`, `IgnoredWithDiagnostic`, `
 | `Ns`, `Ni`, `illum`, `Ka`, `Ks` | namespaced `Material.metadata` entries |
 | `map_Kd` | `TextureSource::External` URI plus diffuse/base-color material texture slot |
 
-MTL remains optional enrichment. Missing, denied, malformed, or oversized sidecars emit diagnostics while valid OBJ geometry continues when safe. Unknown `usemtl` references create a placeholder material with a warning so the mesh can keep a stable material binding.
+MTL is optional enrichment only at the dependency-acquisition boundary. A missing, policy-denied, unreadable, or acquisition-budget-exhausted MTL may be represented as unavailable, emit structured optional-dependency diagnostics, and preserve valid OBJ geometry only when the request loss policy explicitly allows `ImportLossKind::OptionalDependencyUnavailable`. Without that authorization, the dependency failure is terminal.
+
+Once an MTL snapshot is available, it is parsed under the same text, resource, and operation controls as the primary OBJ. Any failure returned while decoding or parsing that snapshot is terminal and cannot be reclassified as optional unavailability. In particular, invalid UTF-8 is terminal in `RejectInvalid` mode and invalid UTF-8 outside the narrowly recoverable `newmtl` and `map_Kd` path values is terminal in every mode. Statements that the MTL parser explicitly classifies as warnings may continue, but malformed sidecars do not receive a blanket optional-dependency waiver. Unknown `usemtl` references create a placeholder material with a warning so the mesh can keep a stable material binding.
 
 ## Known Limitations
 
@@ -65,13 +88,14 @@ MTL remains optional enrichment. Missing, denied, malformed, or oversized sideca
 - The importer does not repair degenerate faces, generate normals, normalize coordinates, infer units, flip winding, decode image files, or fetch remote assets.
 - `map_Kd` option parsing is intentionally minimal: common option arities are skipped to find the texture path, but option semantics are not applied.
 - MTL PBR extensions are preserved through namespaced material metadata/properties where possible, but are not promoted to first-class PBR fields yet.
-- OBJ and MTL input must be UTF-8 for this experimental support tier.
+- OBJ/MTL syntax is UTF-8 and strict by default. The only encoding recovery is the explicitly gated `ReplaceInvalidUtf8` behavior for the textual value ranges listed above.
 
 ## Security Notes
 
 - Resource limits: primary asset bytes, sidecar bytes, line length, token length, string length, vertices, faces, meshes, and diagnostics are bounded by `ResourceLimits`.
 - Path constraints: sidecars and textures resolve through `AssetIo` and `AssetPath`; the format crate does not call filesystem APIs directly.
-- External reference policy: `ExternalReferencePolicy::Deny` prevents MTL sidecar reads and records a warning.
+- Dependency policy: passing `baozi_import::DenyDependencies` to `Importer::read_asset_with_resolver` rejects every MTL dependency before backend IO. The importer may preserve the OBJ geometry and report diagnosed optional unavailability only when the prepared request uses `LossPolicy::preserve_or_fail().allow(ImportLossKind::OptionalDependencyUnavailable)`; otherwise the denial is terminal. `read_bytes` applies the same resolver policy implicitly.
+- Cancellation: operation cancellation is always terminal and is never converted into optional MTL unavailability. UTF-8/line scans poll in bounded byte chunks, and material/mesh comparison work polls in bounded work chunks.
 - Archive constraints: raw OBJ/MTL only; archive handling is outside this crate.
 - Fuzz targets: `fuzz/fuzz_targets/obj_import.rs`.
 - Malformed fixtures: `crates/baozi-format-obj/tests/malformed.rs`, `limits.rs`, and parser integration tests.

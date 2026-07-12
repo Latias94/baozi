@@ -21,6 +21,11 @@ ADR frontmatter is a strict schema defined by ADR 0028. Required fields are `sta
 and `superseded_by` lists. ADR 0037 and ADR 0038 cannot become Accepted without repository-local
 implementation tracers.
 
+A Proposed ADR may carry an explicitly isolated controlled-trial implementation and trial tracer.
+That evidence creates no default, publication, compatibility, or production authority. Promotion may
+atomically change the implementation, evidence, tracked tracer, and ADR status in one reviewed change;
+only the resulting Accepted state makes the tracer authoritative.
+
 ## Decision ownership
 
 Overlapping decisions must identify one canonical owner instead of relying on file number or date.
@@ -32,23 +37,23 @@ The key cross-cutting owners are:
 | Runtime neutrality and host concurrency admission | `0002` |
 | Scene state, validation proof, and collection ownership | `0003` |
 | Test layers, independent oracles, and external-oracle safety | `0005` |
-| Public compatibility and canonical v1 policy | `0006` |
+| Public compatibility, canonical v1, lockstep release topology, and publish recovery | `0006` |
 | Per-field validation, complete digest, preview, and fuzz evidence | `0026` |
 | Format maturity and promotion evidence | `0011` |
-| Workspace feature composition and CI membership | `0007` |
+| Workspace allowed/required/forbidden edges, feature composition, and CI membership | `0007` |
 | Parser backend admission and replacement | `0004` |
-| Math types, SceneSpace, units, and numeric policy | `0008` |
+| Math types, SceneSpace, units, numeric policy, and high-precision CAD exclusion | `0008` |
 | Data ownership, borrowing, and memory layout | `0009` |
 | Asset IO, capability roots, and path security | `0010` |
 | Material, image, texture, and sampler identity | `0012` |
 | Postprocess plan compilation and algorithm admission | `0013` |
 | Parser security, panic, unsafe, and FFI admission | `0014` |
-| Import option precedence and typed option transport | `0016` |
+| Option envelopes, precedence, typed compilation scopes/store, and ordinary codec errors | `0016` |
 | Serialization, snapshots, and cache boundaries | `0017` |
 | Parser tooling and generated-parser ownership | `0018` |
 | Parser diagnostics, input consumption, and generated code | `0019` |
 | Import lifecycle, stage proof, outcome, and failure transport | `0020` |
-| Extension registry and format descriptors | `0021` |
+| Extension registry lifecycle, descriptors, trust, unwind mapping, health, and permanent poison | `0021` |
 | Resource ledger and phase accounting | `0022` |
 | Custom material and attribute extension schema | `0023` |
 | glTF backend ownership and replacement | `0027` |
@@ -60,7 +65,7 @@ The key cross-cutting owners are:
 | Supported targets and portability tiers | `0034` |
 | Text decoding and recovery | `0035` |
 | Source identity, provenance, and metadata | `0036` |
-| ADR lifecycle and authority | `0028` |
+| ADR lifecycle, controlled trials, atomic promotion, and authority | `0028` |
 
 ADRs 0037 and 0038 are Proposed future contracts. They do not own current archive or export behavior
 and cannot become authorities until their declared implementation tracers exist.
@@ -80,18 +85,18 @@ contract must update the owning ADR before changing the implementation plan.
 | R5 - stable primary and dependency snapshots | [ADR 0010](0010-asset-io-virtual-filesystem-uri-archive-and-path-security.md), [ADR 0020](0020-import-lifecycle-and-report-contract.md), [ADR 0029](0029-format-detection-stable-input-and-failure-contract.md) | U3 |
 | R6 - success and failure evidence | [ADR 0020](0020-import-lifecycle-and-report-contract.md), [ADR 0029](0029-format-detection-stable-input-and-failure-contract.md), [ADR 0036](0036-source-identity-provenance-and-metadata.md) | U3 |
 | R7 - attempted, live, committed, and peak accounting | [ADR 0022](0022-per-import-resource-ledger-and-budget-accounting.md) | U3-U8 |
-| R8 - configuration and runtime-control ownership | [ADR 0016](0016-import-options-presets-and-configuration-precedence.md), [ADR 0033](0033-operation-control-and-observability.md), [ADR 0035](0035-text-decoding-conformance-and-recovery.md) | U3, U5-U6 |
+| R8 - configuration, registry-health, and runtime-control ownership | [ADR 0016](0016-import-options-presets-and-configuration-precedence.md), [ADR 0021](0021-extension-registry-and-format-descriptor-governance.md), [ADR 0033](0033-operation-control-and-observability.md), [ADR 0035](0035-text-decoding-conformance-and-recovery.md) | U3, U5-U6 |
 | R9 - logical meshes and primitives | [ADR 0030](0030-logical-mesh-primitive-and-attribute-domain.md) | U4 |
 | R10 - domain-aware attributes | [ADR 0030](0030-logical-mesh-primitive-and-attribute-domain.md), [ADR 0023](0023-material-and-custom-attribute-extension-model.md) | U4-U7 |
 | R11 - variable skin influences and matrix spaces | [ADR 0031](0031-animation-skin-morph-and-deformer-contract.md) | U4, U6-U7 |
 | R12 - morph and animation preservation | [ADR 0031](0031-animation-skin-morph-and-deformer-contract.md) | U4, U6 |
-| R13 - image identities and scene space | [ADR 0012](0012-material-texture-image-and-color-space-policy.md), [ADR 0008](0008-math-coordinate-units-and-numeric-policy.md) | U4, U6 |
+| R13 - image identities, scene space, and numeric-scope boundary | [ADR 0012](0012-material-texture-image-and-color-space-policy.md), [ADR 0008](0008-math-coordinate-units-and-numeric-policy.md) | U4, U6 |
 | R14 - identity, provenance, proof, remap, and invalidation | [ADR 0003](0003-core-scene-ir-and-material-model.md), [ADR 0032](0032-postprocess-remap-and-derived-data-contract.md), [ADR 0036](0036-source-identity-provenance-and-metadata.md) | U4, U7 |
 | R15 - first-party format semantic preservation | [ADR 0004](0004-parser-backend-and-format-coverage-policy.md), [ADR 0011](0011-format-support-tiers-and-compatibility-charter.md) | U5-U6 |
 | R16 - compiled typed postprocess plans | [ADR 0013](0013-post-process-pipeline-semantics-presets-and-mutation-model.md), [ADR 0033](0033-operation-control-and-observability.md) | U7 |
 | R17 - postprocess evidence and validated output | [ADR 0013](0013-post-process-pipeline-semantics-presets-and-mutation-model.md), [ADR 0032](0032-postprocess-remap-and-derived-data-contract.md) | U7 |
 | R18 - robust bounded triangulation | [ADR 0013](0013-post-process-pipeline-semantics-presets-and-mutation-model.md), [ADR 0032](0032-postprocess-remap-and-derived-data-contract.md) | U7 |
-| R19 - architecture and release governance | [ADR 0028](0028-adr-lifecycle-and-evidence-governance.md), [ADR 0006](0006-public-api-versioning-and-crate-stability-policy.md), [ADR 0034](0034-supported-targets-and-portability.md) | U2, U9 |
+| R19 - architecture lifecycle, release topology/recovery, and target governance | [ADR 0028](0028-adr-lifecycle-and-evidence-governance.md), [ADR 0006](0006-public-api-versioning-and-crate-stability-policy.md), [ADR 0034](0034-supported-targets-and-portability.md) | U2, U9 |
 | R20 - executable quality and maturity evidence | [ADR 0005](0005-testing-fuzzing-and-differential-oracle-strategy.md), [ADR 0006](0006-public-api-versioning-and-crate-stability-policy.md), [ADR 0007](0007-workspace-crate-graph-feature-flags-msrv-and-ci-gates.md), [ADR 0011](0011-format-support-tiers-and-compatibility-charter.md), [ADR 0026](0026-validation-snapshot-and-fuzz-gates.md), [ADR 0034](0034-supported-targets-and-portability.md) | U5-U9 |
 | R21 - progressive canonical public workflow | [ADR 0006](0006-public-api-versioning-and-crate-stability-policy.md), [ADR 0020](0020-import-lifecycle-and-report-contract.md) | U4, U9 |
 

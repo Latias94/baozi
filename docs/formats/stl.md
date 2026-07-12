@@ -27,13 +27,16 @@
 | Compression or containers | Unsupported | Raw `.stl` bytes only; archive/container handling is outside this crate. | not applicable |
 | Coordinate and unit metadata | ParsedLossy | STL is unitless and has no reliable up/front axis. Baozi preserves coordinates as-authored. | docs/model tests by convention |
 | Malformed input diagnostics | Supported | Parse errors include line/column or byte offsets where available; empty ASCII solids emit diagnostics. | malformed, ASCII, binary tests |
-| Resource limits | Supported | Enforces primary bytes, line/token/name bytes, solids, meshes, faces, vertices, and diagnostics caps. | ASCII/binary limit tests |
+| Resource limits | Supported | Enforces primary and decoded UTF-8 bytes, line/token/name bytes, solids, meshes, faces, vertices, diagnostics, and bounded cancellation checkpoints. | `crates/baozi-format-stl/tests/limits.rs` |
 
 Status values: `Supported`, `Partial`, `ParsedLossy`, `IgnoredWithDiagnostic`, `Unsupported`, `Unknown`.
 
 ## Import Behavior
 
-- Raw import behavior: binary STL is detected by exact `84 + 50 * facet_count` length; ASCII STL is detected by a leading `solid` token after optional UTF-8 BOM and whitespace. Binary detection wins when a binary header starts with `solid`.
+- Raw import behavior: binary STL is detected by exact `84 + 50 * facet_count` length; the detector
+  recognizes an ASCII candidate by a leading `solid` token after optional UTF-8 BOM and whitespace.
+  Binary detection wins when a binary header starts with `solid`; a selected ASCII parser still
+  rejects the BOM under its stricter text profile.
 - Default coordinate behavior: coordinates are imported unchanged.
 - Unit handling: STL is unitless; Baozi does not infer meters, millimeters, or inches.
 - UV origin handling: STL has no UV data.
@@ -80,6 +83,22 @@ Baozi supports multiple top-level `solid ... endsolid` blocks. Each non-empty so
 and one child node. Empty solids emit a warning diagnostic; if every solid is empty, import fails
 because there is no renderable STL geometry.
 
+## Resource Accounting and Cancellation
+
+- The complete ASCII STL input is the decoded text surface. Its exact byte length is admitted against
+  `max_decoded_utf8_bytes`, materialized into an owned `String`, and retained under a live
+  `DecodedText` reservation while the ASCII parser uses it. Allocator slack is reserved separately.
+- Binary STL has no decoded text surface and consumes zero decoded-text attempted, consumed, or live
+  evidence, including when the binary header begins with `solid`.
+- ASCII profile validation and decoded-text copying poll operation control for every at-most-4-KiB
+  chunk. Owned solid-name and other string copies use UTF-8-boundary-safe chunks with the same bound.
+- Binary facet parsing checks control at each 50-byte record. The optional facet-color expansion pass
+  checks control at least once per 4096 facets.
+
+Exact decoded-text admission, one-byte-under rejection, binary-zero accounting, distant profile
+failure cancellation, long solid-name copying, per-facet cancellation, and color-expansion bounds are
+covered by `crates/baozi-format-stl/tests/limits.rs`.
+
 ## Known Limitations
 
 - STL remains experimental and is not yet promoted under ADR 0011.
@@ -92,8 +111,9 @@ because there is no renderable STL geometry.
 
 ## Security Notes
 
-- Resource limits: primary asset bytes, line length, token length, name length, solids, meshes,
-  faces, vertices, and diagnostics are bounded by `ResourceLimits`.
+- Resource limits: primary asset bytes, decoded UTF-8 bytes, line length, token length, name length,
+  solids, meshes, faces, vertices, diagnostics, and cooperative work intervals are bounded by
+  `ResourceLimits` and the parser's fixed checkpoint quanta.
 - Path and sidecar constraints: STL does not open external resources. `Importer::read_bytes` uses
   memory IO and denies external references by default.
 - Archive constraints: raw STL only; archive handling is outside this crate.

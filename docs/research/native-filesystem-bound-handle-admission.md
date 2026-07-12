@@ -2,12 +2,16 @@
 
 **Decision date:** 2026-07-10
 
-**Decision:** Admit `cap-std` 4.0.2 as the capability backend for the `baozi-io/fs` implementation in
+**Decision:** Admit `cap-std` 4.0.2 as the capability backend for the
+`baozi-io/fs-candidate` implementation in
 U3 and exact direct `rustix` 1.1.4 solely as the source of Unix `OFlags::NONBLOCK`, subject to the
 acceptance suite below. Baozi passes that flag through `cap_std::fs::OpenOptionsExt`; it does not use
 a numeric flag, a documentation-hidden transitive API, or `cap-fs-ext`. This admits dependencies and
 an implementation direction; it does not claim the current Baozi adapter already has bound-handle
-behavior. Do not retain or fall back to `canonicalize + starts_with + File::open`.
+behavior. Runtime candidate code is limited to `x86_64-unknown-linux-gnu`,
+`x86_64-pc-windows-msvc`, and `aarch64-apple-darwin`. `x86_64-unknown-freebsd` remains in the exact
+dependency audit and future implementation research only; its candidate adapter must fail closed.
+Do not retain or fall back to `canonicalize + starts_with + File::open`.
 
 ## Question
 
@@ -48,7 +52,7 @@ race.
 | Baozi unsafe | Baozi-owned crates retain `forbid(unsafe_code)` |
 | License | compatible with `MIT OR Apache-2.0` project distribution |
 | MSRV | no higher than Rust 1.95 |
-| Targets | Linux, Windows MSVC, macOS, and FreeBSD implementation; portable byte builds remain isolated, and target support claims remain governed by ADR 0034 |
+| Targets | exact runtime candidates `x86_64-unknown-linux-gnu`, `x86_64-pc-windows-msvc`, and `aarch64-apple-darwin`; exact dependency audit additionally includes `x86_64-unknown-freebsd`; portable byte builds remain isolated, and target support claims remain governed by ADR 0034 |
 | Failure | unavailable security primitive fails closed with no path-based fallback |
 | Maintenance | active upstream, advisories auditable, backend replaceable behind `AssetIo` |
 | Resolved closure | exact reviewed versions, sources, checksums, target features, and security-sensitive transitive packages are machine-checked |
@@ -82,18 +86,21 @@ The manifest-level admission is exact:
 
 | Package edge | Target condition | Version requirement | Enabled features |
 | --- | --- | --- | --- |
-| direct `cap-std` | Linux, Windows MSVC, macOS, FreeBSD | `=4.0.2` | `default-features = false`; no optional crate features |
+| direct `cap-std` | exact Linux, Windows MSVC, Apple ARM64, and FreeBSD audit triples | `=4.0.2` | `default-features = false`; no optional crate features |
 | transitive `cap-primitives` | target-filtered through `cap-std` | resolved exactly to `4.0.2` by the lockfile and admission checker | only features reachable from the admitted `cap-std` edge |
-| direct `rustix` | Linux, macOS, FreeBSD only | `=1.1.4` | `default-features = false`, `features = ["std", "fs"]` |
+| direct `rustix` | exact Linux, Apple ARM64, and FreeBSD audit triples only | `=1.1.4` | `default-features = false`, `features = ["std", "fs"]` |
 
-Other targets do not resolve these edges from `baozi-io`. In particular, Windows does not gain a
-direct `rustix` dependency, and byte-only WebAssembly graphs contain none of the three packages
-through the native-filesystem feature path. The checker compares target-filtered normal and build
-dependency reachability rather than only searching the lockfile package union.
+No target outside the four exact dependency-audit triples resolves these edges from `baozi-io`.
+The FreeBSD edge is resolved for supply-chain review but does not enable runtime code. Windows does
+not gain a direct `rustix` dependency, and byte-only WebAssembly graphs contain none of the three
+packages through the native-filesystem feature path. The checker compares target-filtered normal and
+build dependency reachability rather than only searching the lockfile package union.
+Every admitted predicate binds `target_abi = ""`; in particular, GNU x32 does not share the Linux
+runtime candidate or dependency-audit edge.
 
 The reviewed tag resolves to commit `715e4ed607ae9a93c7446b0fa63296f7898831c2`. Source inspection
 and a Windows smoke spike are evidence for admission. U3 must still run the complete race/reparse
-matrix before replacing the prototype and may not describe `native-fs` as conforming before that gate.
+matrix before promotion and may not add or describe release `native-fs` as conforming before that gate.
 
 The reviewed Windows path includes `unsafe` inside `cap-primitives`, notably the relative
 `NtCreateFile` wrapper and Windows open implementation. This code is outside Baozi-owned crates but
@@ -188,7 +195,7 @@ Regular-file validation on Windows reads metadata from the exact handle returned
 native open. A path metadata query cannot authorize or classify a later open. Directories, devices,
 pipes, and unresolved reparse objects return typed failures without a pathname reopen.
 
-### macOS and Other POSIX/BSD Systems
+### macOS and Future POSIX/BSD Candidates
 
 POSIX `openat` binds one relative lookup to a directory fd, and `O_NOFOLLOW` protects the final
 component only. macOS has no `openat2` equivalent that applies a beneath policy to an entire path.
@@ -199,6 +206,7 @@ inspects links without following them, and handles link destinations inside the 
 name a replacement. `fstatat` is also not enough if code later reopens by name; the admitted result is
 the already-open handle.
 
+The FreeBSD details below record future runtime-candidate requirements, not current runtime support.
 FreeBSD 13 introduced `O_RESOLVE_BENEATH`, but its `..` behavior does not satisfy `cap-std`'s
 containment expectation. `cap-std` performs a runtime semantic check and uses
 `O_RESOLVE_BENEATH` only when that check succeeds, normally on FreeBSD 14 and later; otherwise it
@@ -238,7 +246,8 @@ Baozi's public facade:
 - Allowlisted roots are allowlisted directory capabilities, not canonical path prefixes.
 - A custom resolver returns immutable bytes or an authorized opener plus stable identity, not a path
   for Baozi to reopen.
-- `cap-std` remains private to `baozi-io` and is enabled only by `fs`/facade `native-fs`.
+- `cap-std` remains private to `baozi-io` and is enabled only by `fs-candidate`/facade
+  `native-fs-candidate`; release `fs`/`native-fs` features remain absent before promotion.
 - Unsupported targets expose memory/custom IO and fail closed for the native adapter.
 
 ## Executable Acceptance Matrix
@@ -249,8 +258,8 @@ Baozi's public facade:
 | Linux | in-root and escaping symlinks, absolute symlink, `/proc/self/fd` magic link, directory swap, final-file swap, exact retry/work limit |
 | Windows | drive/UNC/device/NT namespaces, ADS, reserved names with extensions/case/trailing aliases, case and 8.3 alias two-state oracle, symlink, junction, mount-point/unknown reparse, reparse swap, final-file swap |
 | macOS | in-root/escaping symlink, multi-link chain, directory rename/swap, final-file swap, search-permission failure |
-| FreeBSD | FreeBSD 13 incompatible `..` behavior, FreeBSD 14+ runtime `O_RESOLVE_BENEATH` acceptance, forced capability-walk fallback, symlink escape, directory/final-file swap |
-| Unix special files | Linux, macOS, and FreeBSD reject FIFO-without-writer by deadline and reject socket/device/directory handles after the capability-relative `O_NONBLOCK` open |
+| Future FreeBSD candidate | FreeBSD 13 incompatible `..` behavior, FreeBSD 14+ runtime `O_RESOLVE_BENEATH` acceptance, forced capability-walk fallback, symlink escape, directory/final-file swap before any runtime-candidate proposal |
+| Unix special files | Current Linux/macOS candidates reject FIFO-without-writer by deadline and reject socket/device/directory handles after the capability-relative `O_NONBLOCK` open; a future FreeBSD candidate must pass the same gate |
 | Object type and availability | regular file accepted; directory, FIFO/socket/device/reparse object returns a typed failure from same-handle validation; FIFO without a writer completes before the platform test deadline |
 | Root lifetime | replacing the textual root after scope construction does not change the held root capability |
 | Root construction | non-directory roots fail; raw/std handles cannot enter the public API; Windows roots and descendants exclude `FILE_SHARE_DELETE` |
@@ -313,9 +322,11 @@ tests remain mandatory U3 gates.
 No dependency was added during this research. U3 owns the manifest and lockfile change after tests are
 in place. The U3 change must also commit a machine-readable resolved-closure baseline and a check that
 rejects a version, source, checksum, or relevant feature mismatch before `native-fs` can conform.
-The baseline must model target-filtered normal/build reachability for Linux, Windows MSVC, macOS, and
-FreeBSD rather than treating the union in `Cargo.lock` as proof that each target enables the reviewed
-features. Byte-only WebAssembly graphs are negative fixtures.
+Schema 2 of the baseline must keep `runtime_candidate_targets` (three exact triples),
+`dependency_audit_profiles` (those three plus exact FreeBSD), and the empty
+`release_registered_targets` set separate. It models target-filtered normal/build reachability rather
+than treating the union in `Cargo.lock` as proof that each target enables the reviewed features.
+Byte-only WebAssembly graphs are negative fixtures.
 
 ## Living Official Document Capture
 

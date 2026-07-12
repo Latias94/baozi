@@ -46,10 +46,43 @@ criteria are tracked in [glTF Backend Notes](../research/gltf-rs-backend-notes.m
 - PBR metallic-roughness material factors.
 - Base color, metallic-roughness, normal, occlusion, and emissive texture URI references.
 - Y-up, right-handed, meters scene space metadata.
-- Development resource-limit coverage for primary assets, external buffers, base64 buffer data URIs,
-  GLB BIN payloads, and diagnostics.
+- Development resource-limit coverage for primary assets, decoded JSON text surfaces, external
+  buffers, base64 buffer data URIs, GLB BIN payloads, diagnostics, and cooperative cancellation.
 - Development gates for GLB import, snapshots, malformed external buffers/data URIs, skin validation,
-  and a check-only glTF fuzz target. These are not facade admission evidence.
+  text preflight, bounded format failures, and a check-only glTF fuzz target. These are not facade
+  admission evidence.
+
+## Text Preflight, Resource Accounting, and Cancellation
+
+- Plain `.gltf` counts the complete JSON document against `max_decoded_utf8_bytes`. GLB counts only
+  its JSON chunk; the 12-byte container header, chunk header, and BIN chunks are excluded from the
+  decoded-text surface.
+- JSON UTF-8 validation is incremental and polls for every at-most-4096-byte window. An incomplete
+  code point at a window edge carries its at-most-three-byte prefix into the next validation window.
+  The JSON slice remains borrowed, so decoded-text admission creates no fictitious live allocation;
+  the opaque `gltf-rs` document graph is covered separately by its conservative backend allowance.
+- A leading UTF-8 BOM is forbidden on the JSON surface. Invalid UTF-8 and BOM evidence use raw
+  container-relative offsets: zero-based within a plain `.gltf`, and based at the GLB JSON payload
+  offset within `.glb`.
+- Base64 data-URI whitespace/padding validation is a single forward scan with a control poll for every
+  at-most-4096 encoded bytes. Decoding uses independent 4096-byte chunks, a multiple of four, and
+  polls before each chunk. Offset-bearing decode errors add the chunk start to the library-local
+  offset before producing format evidence.
+
+These contracts are exercised by `crates/baozi-format-gltf/tests/text_preflight.rs` and
+`crates/baozi-format-gltf/tests/limits.rs`. They are development safety evidence only and do not
+promote glTF into the public facade inventory.
+
+## Bounded Format Failure Source
+
+`GltfFailure` is retained as the concrete `FormatFailureEnvelope` source and remains available through
+typed outer-source downcast. Its human reason uses a sanitized 70-byte inline buffer rather than a
+heap-backed `String`; the complete failure is smaller than 128 bytes and needs no drop glue. Invalid
+UTF-8 may retain a private glTF source wrapper and `std::str::Utf8Error` behind that outer source. The
+envelope's stable code/details and `Debug`/`Display` remain independent of the private source chain.
+
+The inline storage, truncation/sanitization, size, and standard source-chain behavior are covered by
+the unit tests in `crates/baozi-format-gltf/src/error.rs`.
 
 ## Admission Blockers And Missing Semantics
 

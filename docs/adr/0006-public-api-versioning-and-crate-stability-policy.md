@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-07-08
-updated: 2026-07-10
+updated: 2026-07-11
 authors:
   - Codex
 decision_type: architecture
@@ -11,6 +11,7 @@ evidence:
   - docs/plans/2026-07-10-001-refactor-baozi-canonical-architecture-plan.md
   - crates/baozi/src/lib.rs
   - crates/baozi-import/src/lib.rs
+  - crates/baozi-operation/Cargo.toml
 related:
   - docs/adr/0001-baozi-assimp-compatible-architecture.md
   - docs/adr/0003-core-scene-ir-and-material-model.md
@@ -146,6 +147,59 @@ The facade and every published transitive dependency must be packageable togethe
 crates are deleted or kept unpublished; they are not published to make a feature graph appear
 complete.
 
+The first public product is the `baozi` facade. Its release unit is one lockstep version containing
+every production package reachable from the facade through required or optional Cargo dependencies:
+`baozi-operation`, `baozi-core`, `baozi-io`, `baozi-import`, `baozi-postprocess`, every admitted
+first-party `baozi-format-*` package wired by a facade feature, and the facade itself. A facade feature
+cannot name an unpublished registry dependency. `baozi-test-support`, `baozi-xtask`, fuzz packages,
+fixtures, and reference trees are never members of this release unit without a future explicit
+publication decision.
+
+`baozi-operation` is a public supporting package because published core/import/postprocess packages
+need a registry-resolvable dependency. It is not a primary end-user product or alternate facade. Its
+cross-crate mechanism APIs remain Internal/backend tier unless an explicit compatibility review
+promotes a narrower surface. Publication therefore makes it packageable and versioned; it does not
+silently promise direct-consumer stability for every public item.
+
+Publication follows dependency order and the facade is always last:
+
+```mermaid
+flowchart LR
+    Operation[baozi-operation] --> Core[baozi-core]
+    Core --> Import[baozi-import]
+    Operation --> Import
+    IO[baozi-io] --> Import
+    Core --> Post[baozi-postprocess]
+    Operation --> Post
+    Import --> Formats[admitted baozi-format-*]
+    Core --> Formats
+    IO -. when required .-> Formats
+    Formats --> Facade[baozi facade published last]
+    Core --> Facade
+    IO --> Facade
+    Import --> Facade
+    Post --> Facade
+```
+
+Before the first publish command, CI packages every member, tests the extracted packages against
+registry-style dependencies, verifies license/readme/repository metadata and documentation, and
+proves that the version and dependency requirements form one closed release train. After each
+supporting package publish, automation verifies its immutable registry artifact before continuing.
+
+Registry publication is not transactional, so recovery is explicit:
+
+- on any supporting-package failure, stop immediately and do not publish the facade;
+- never overwrite or rebuild an already published version, and never loosen dependency requirements
+  merely to continue a partial train;
+- if the remaining packages can be corrected without changing published bytes or versioned
+  contracts, resume the same dependency-ordered train after registry verification;
+- otherwise mark the train aborted, advance the lockstep version for every release-unit package,
+  rebuild and reverify the complete train, then publish the replacement train from the leaves;
+- an orphaned supporting version may be yanked only with a recorded reason after a usable replacement
+  exists; yanking is not rollback and cannot justify reusing that version; and
+- if a faulty facade was already published, recovery is a new SemVer release and release note, never
+  mutation of the published artifact.
+
 ### Release Versioning
 
 Before the first public release:
@@ -161,6 +215,8 @@ For published `0.x` releases:
 - no stability tier is promoted implicitly
 - short deprecation windows are optional when replacement is genuinely useful; they are not
   required for an incorrect or unsafe experimental contract
+- release-unit package versions move in lockstep; a supporting crate cannot drift ahead or behind the
+  facade train even when its direct-consumer surface remains experimental
 
 After `1.0.0`:
 
@@ -277,6 +333,8 @@ Negative:
 | Facade exposes proof, ledger, or backend details | High | Medium | Compile-fail tests and public API review enforce construction/capability boundaries |
 | Experimental users are surprised by a break | Medium | High | Mark extension tiers explicitly and record user-visible `0.x` breaks after publication |
 | Feature names promise unavailable behavior | Medium | Medium | Promotion requires executable feature and packaged-consumer evidence; delete empty features |
+| Registry publish fails after supporting crates are immutable | High | Medium | publish in dependency order with facade last; stop the train, never reuse bytes/version, and advance the complete lockstep train when same-version recovery is impossible |
+| Supporting package visibility is mistaken for product stability | High | Medium | identify `baozi-operation` and similar crates as packageable support with Internal/backend-tier APIs until explicit promotion |
 
 ## Acceptance Criteria
 
@@ -289,6 +347,8 @@ Negative:
 | Backend isolation | public API and rustdoc contain no third-party parser or Assimp implementation types |
 | Feature truthfulness | each documented feature has observable behavior and passes its isolated test/package gate |
 | Release readiness | packaged consumer imports, inspects, and optionally processes a scene using only canonical v1 names |
+| Closed release topology | package simulation proves every required and optional facade dependency is registry-publishable at one lockstep version, with licenses, metadata, docs, and extracted-package tests |
+| Failure recovery | release automation publishes the facade last and a dry-run fault injection proves a partial supporting train cannot publish the facade or cause version drift/reuse |
 
 ## Implementation Evidence
 

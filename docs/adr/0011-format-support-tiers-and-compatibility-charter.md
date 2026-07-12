@@ -50,7 +50,7 @@ object with plausible counts.
 ## Decision
 
 Every first-party format inventory entry has exactly one maturity level, a complete capability
-matrix, a durable support page, structured machine-readable evidence, and code-side `FormatInfo`.
+matrix, a durable support page, structured machine-readable evidence, and code-side `FormatDescriptor`.
 Those views must agree before promotion or release.
 
 ADR 0004 owns parser/backend admission. ADR 0005 and ADR 0026 own test and snapshot mechanisms. ADR
@@ -61,7 +61,7 @@ maturity decision without redefining those underlying contracts.
 
 ```mermaid
 flowchart TD
-    Descriptor[FormatInfo descriptor] --> Checker[Maturity checker]
+    Descriptor[FormatDescriptor] --> Checker[Maturity checker]
     Support[Format support page] --> Checker
     Structured[Structured evidence manifest] --> Checker
     Fixtures[Provenanced valid and malformed fixtures] --> Tests[Executable gates]
@@ -197,7 +197,7 @@ Demotion rules:
 ### Support Matrix
 
 The support matrix is derived from or mechanically checked against structured evidence and
-`FormatInfo`. It is a human-readable view, not an independent authority. Hand-editing a maturity
+`FormatDescriptor`. It is a human-readable view, not an independent authority. Hand-editing a maturity
 cell without matching evidence must fail the checker.
 
 ## Alternatives Considered

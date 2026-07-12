@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-07-09
-updated: 2026-07-10
+updated: 2026-07-12
 authors:
   - Codex
 decision_type: architecture
@@ -123,6 +123,25 @@ phases; they do not fabricate lifecycle milestones. Failure retains the last bou
 the failing work. Outcome finalization does not create a later public phase because the report or
 failure itself proves finalization.
 
+### DetectionScope Capabilities
+
+Every detector invocation receives the same immutable `Probe` and hint plus a session-created
+`DetectionScope`. The scope exposes only cancellation/deadline polling and linear detection-work
+admission; it cannot open resources, mutate detection evidence, inspect another registration, or
+construct an outcome/failure category.
+
+`DetectionScope::begin_work(amount)` first verifies that the session is active, rejects a second
+outstanding permit, polls operation control, rejects zero or more than 4 KiB of work, and charges
+attempted `DetectionWork`. Exactly one linear permit represents that admitted chunk. Calling
+`complete()` charges consumed work before a post-work control poll. Polling while a permit is live,
+requesting zero work, requesting another permit, dropping an unfinished permit, or leaving a permit
+outstanding when the detector returns is a descriptor-contract violation and latches the session.
+
+The first control, ledger, reentrancy, or permit-contract failure is retained as the terminal scope
+cause. `DetectionAbort` is opaque and non-constructible by extensions. Catching or discarding it and
+returning a match cannot recover the session: the session checks the latch before accepting the
+detector result, and an abort without a latched cause is itself a descriptor-contract failure.
+
 ### ParseScope Capabilities
 
 `ParseScope` is valid only for the selected importer and session lifetime. It may expose:
@@ -166,14 +185,18 @@ Requiredness tokens, outcome/evidence constructors, and loss disposition are pri
 resolver. Format code may submit only a dependency role admitted by its frozen descriptor contract;
 it cannot forge `Unavailable`, relabel a required role, or attach a fabricated lower-layer cause.
 
-The normalized dependency table caches the first immutable snapshot or identity-terminal failure.
-Here *identity-terminal* means that later logical references to the same normalized identity observe
-the same snapshot or failure without another physical open; it does not by itself make the import
-session terminal. A required request for a cached failure, an optional omission rejected by format or
-loss policy, cancellation/deadline, or any capability failure for which safe continuation is forbidden
-is instead returned as a session-terminal `ScopeAbort` and latched before control returns to the
-importer. Required and optional requests therefore share one cache without conflating cache stability
-with outcome finalization.
+After every logical reference has independently passed role and policy authorization, the dependency
+table caches the first immutable snapshot or identity-terminal failure by ADR 0010's
+authority-qualified key `(authority domain, normalized resource identity)`. Here
+*identity-terminal* means that later authorized references to that same key observe the same snapshot
+or failure without another physical open; it does not by itself make the import session terminal.
+References in another scope or resolver namespace never share the entry, and a denied alias cannot
+consult it. Requiredness and loss disposition remain per-reference decisions outside the physical
+key. A required request for a cached failure, an optional omission rejected by format or loss policy,
+cancellation/deadline, or any capability failure for which safe continuation is forbidden is instead
+returned as a session-terminal `ScopeAbort` and latched before control returns to the importer.
+Required and optional requests therefore share one physical result only inside one authority domain
+without conflating cache stability with outcome finalization.
 
 Rust has no friend-crate visibility. A format crate can call the same public core validator as any
 downstream crate, but `FormatImporter::parse` has no `ValidatedScene` return path and the session never
@@ -209,11 +232,12 @@ session-internal branches with distinct cause ownership:
    an IO error remains IO-owned, cancellation remains operation-owned, and a builder/core error remains
    core-owned rather than becoming a format parse error. A permitted optional-dependency `Unavailable`
    outcome is deliberately outside this branch.
-2. `FormatFailureEnvelope` contains a concrete format-owned Baozi cause implementing the object-safe
-   `FormatFailureSource` contract. A format crate hands that source to a controlled constructor on its
-   selected `ParseScope` (or an equivalent capability-bearing `From` implementation). The constructor
-   seals the selected `FormatId`, validates the stable code, and admits bounded structured detail. No
-   generic `From<dyn Error>` or arbitrary category constructor exists.
+2. `FormatFailureEnvelope` seals the selected descriptor identity, a validated stable code, bounded
+   packed structured details, and the selected format's concrete `FormatFailureSource`. Before
+   invoking either trusted source callback, the selected `ParseScope` rejects an outer source payload
+   larger than 4 KiB and reserves the source plus packed-detail storage. It then validates the code,
+   visits and packs the admitted details fallibly, and retains the source as the envelope's direct
+   standard error source. No generic `From<dyn Error>` or arbitrary category constructor exists.
 
 A failure returned by the session's final central-validator call is not parser transport and does not
 enter `ParseFailure`; it remains a core-owned validation cause finalized directly by `ImportSession`.
@@ -227,10 +251,17 @@ cannot turn the operation into success; the finalizer observes the first termina
 contrast, an importer continues after `OptionalDependencyOutcome::Unavailable` through an explicit
 success branch, never by catching or suppressing `ParseFailure`.
 
-`FormatFailureSource` exposes detail through a bounded visitor/writer supplied by `ParseScope` rather
-than returning a preformatted input-sized `String`. Format-owned causes retain stable enums, bounded
-scalars, IDs, and ranges; input previews and human detail are escaped and admitted before storage.
-Backend-native errors are translated inside the format crate and never implement this interface.
+`FormatFailureSource` is both a retained format-owned cause and a bounded evidence producer. Its
+`visit_details` method writes stable enums, bounded scalars, IDs, ranges, and admitted strings through
+the scope-owned sink rather than returning an input-sized preformatted `String`. Retained sources use
+bounded inline storage or account every owned heap capacity under ADR 0022; constructing a source is
+not an escape from the operation ledger.
+
+`Error::source(&FormatFailureEnvelope)` returns the retained format source directly, and
+`downcast_ref<T: FormatFailureSource>()` provides read-only access to its concrete outer type. The
+format source may preserve a standard backend or library source chain behind it. Stable inspection
+and serialization remain descriptor/code/details based: envelope `Debug` and `Display` do not expose
+the private source chain, and concrete backend types do not appear in public fields or stable schemas.
 
 The import finalizer consumes `ParseFailure` and preserves its branch, cause owner, accumulated phase,
 diagnostics, and ledger evidence in `ImportFailure`. The facade composes that failure rather than
@@ -290,8 +321,8 @@ does not mutate an `ImportReport.stage` field.
 | `baozi-operation` | Runtime-neutral control/coordinator and reservation/ledger state-machine mechanisms | Borrowed checkpoint/reservation capabilities and owner-neutral ledger-evidence snapshots | Scene, IO, request policy, import/post-process phases, format causes, or outcomes |
 | `baozi-core` | Scene draft/build capability, the public central validator, validation proof, domain validation/edit errors | Typed core causes and `ValidatedScene`; downstream callers may validate drafts through the central API | IO, import phase/provenance, registry, parser policy, facade-composed error |
 | `baozi-io` | Asset identity/path, bound handles/snapshots, backend IO errors | Typed IO causes and capability-bound resources | Optionality/loss, Scene, import outcome |
-| `baozi-import` | Request config/policy, session, import phase vocabularies, Probe, ParseScope, resolver, effective budgets, diagnostics, private `ParseFailure` classification/transport, detection and import outcomes | Typed request/import failure and report evidence | Validation-proof construction, shared operation mechanism duplication, format-private model, post-process stage, public facade error duplication |
-| `baozi-format-*` | Private decode/normalized model and concrete Baozi format causes/codes | `ParseResult<SceneDraft>`; controlled conversion of `FormatFailureSource` through selected ParseScope | Raw IO, parser-supplied proof/outcome, arbitrary `ParseFailure` classification, phase/provenance construction, public backend types |
+| `baozi-import` | Request config/policy, session, import phase vocabularies, Probe, DetectionScope, ParseScope, resolver, effective budgets, diagnostics, private detection/parse failure classification, and detection/import outcomes | Typed request/import failure and report evidence | Validation-proof construction, shared operation mechanism duplication, format-private model, post-process stage, public facade error duplication |
+| `baozi-format-*` | Private decode/normalized model and bounded Baozi format causes/codes | `DetectionResult<DetectionOutcome>` and `ParseResult<SceneDraft>`; controlled retention and packing of `FormatFailureSource` through the selected ParseScope | Raw IO, parser-supplied proof/outcome, arbitrary detection/parse failure classification, phase/provenance construction, or backend types in public fields/stable schemas |
 | `baozi-postprocess` | Post-process phase vocabularies, effective operation budget, compiled plans, step transactions, remaps/losses, report/cause | Distinct typed post-process result using `baozi-operation` mechanisms | Dependency on `baozi-import`, import phase/outcome, shared operation mechanism duplication, or format-private state |
 | `baozi` facade | Public request composition and public error composition | Stable ergonomic API preserving lower structured causes | Duplicate domain state or bypass constructors |
 
@@ -338,6 +369,7 @@ Negative:
 | ParseScope grows back into a raw service locator | High | Capability allowlist, private fields, and compile-fail boundary tests. |
 | Failure conversion drops lower-layer cause/evidence | High | Exhaustive outcome tests at every lifecycle phase. |
 | Public core validator is mistaken for import authority | High | The validator is the sole proof constructor, but accepts/returns no import phase or provenance; the session always validates the returned draft itself. |
+| Detector catches a scope abort and returns a match | Critical | `DetectionScope` latches the first terminal cause; zero/repeated/oversized work, polling during work, and unfinished permits are terminal even when the opaque abort is discarded. |
 | Parser catches a session-terminal capability abort and returns success | Critical | Capability methods latch the first opaque `ScopeAbort`; finalization fails even if trusted parser code discards the returned value. Permitted optional unavailability uses an explicit non-abort outcome. |
 | Import and postprocess authorities overlap | Medium | Import ends at validated raw report; postprocess owns a distinct operation/report. |
 
@@ -348,15 +380,18 @@ Negative:
 | Session-before-IO | Invalid requests create no session and perform zero IO; a primary-open failure observes one created session and one finalizer. |
 | Pre-session panic | Submitted-layer codec panic is one bounded `RequestError`; default-codec panic prevents snapshot creation as `RegistryBuildError`; both have zero sessions, finalizers, import ledgers, diagnostic streams, and asset opens. |
 | Single finalization | After session creation, success, every failure phase, cancellation, and unwind call the outcome finalizer exactly once. |
-| Capability boundary | Compile-fail/API-shape tests prove parsers cannot reach raw IO, other options, reports, phases, arbitrary `ParseFailure`/optional-outcome constructors, dependency-requiredness relabeling, or a parser-supplied proof return path. |
+| Capability boundary | Compile-fail/API-shape tests prove detectors and parsers cannot reach raw IO, other options, reports, phases, arbitrary detection/parse failure constructors, dependency-requiredness relabeling, or a parser-supplied proof return path. |
+| DetectionResult shape | A heterogeneous `dyn FormatImporter` receives `Probe`, `ReadHint`, and `DetectionScope` and returns exactly `DetectionResult<DetectionOutcome>`; its opaque abort cannot be constructed, sent, or used to suppress the session latch. |
+| Detector work permit | Detection permits are single-outstanding and bounded to 4 KiB; begin polls then charges attempted work, complete charges consumed then polls, and zero/repeated/poll-during/drop/forgotten-permit violations latch the first terminal cause. |
 | Core proof authority | Public/downstream code can obtain `ValidatedScene` by calling the core validator, while direct proof construction/forgery fails to compile. |
 | Import validation authority | A trusted importer may call the public validator internally, but `parse` can return only a draft; the session revalidates it, and an invalid returned draft cannot produce success. |
 | ParseResult shape | A heterogeneous `dyn FormatImporter` returns exactly `ParseResult<SceneDraft>`; capability methods compose with `?` without erasing the lower cause owner. |
-| Optional dependency continuation | Missing, denied, failed-open, and per-attempt or aggregate-budget-exhausted optional acquisition fixtures return `Unavailable` only when descriptor optionality and loss policy permit; they retain identity/cause/accounting evidence, emit bounded loss diagnostics, preserve geometry, and perform one physical attempt per normalized identity. |
-| Identity versus session terminality | Repeated references reuse an identity-terminal cached failure without reopening; requesting that failure as required or rejecting its optional loss produces and latches a session-terminal `ScopeAbort`. |
+| Optional dependency continuation | Missing, denied, failed-open, and per-attempt or aggregate-budget-exhausted optional acquisition fixtures return `Unavailable` only when descriptor optionality and loss policy permit; they retain identity/cause/accounting evidence, emit bounded loss diagnostics, preserve geometry, and perform one physical attempt per authority-qualified identity. |
+| Identity versus session terminality | Repeated authorized references in one authority domain reuse an identity-terminal cached failure without reopening; requesting that failure as required or rejecting its optional loss produces and latches a session-terminal `ScopeAbort`. |
+| Cache authorization | Equal logical names in two scopes or resolver namespaces remain isolated; every alias and role is authorized before lookup, so an allowed cache entry cannot satisfy a later denied reference. |
 | Scope abort latch | Required dependency, IO, budget, cancel, diagnostic, builder, and core session-terminal abort fixtures retain their owning cause/phase and force final failure even when a test importer catches the opaque `ParseFailure`. |
 | Evidence preservation | Every post-detection failure retains identical selection evidence plus bounded diagnostics/stats. |
 | Phase separation | Tests independently advance ledger/progress phases and prove `last_completed` changes only after the mapped atomic lifecycle boundary succeeds. |
-| Format cause transport | Heterogeneous format-owned causes enter only through the selected-scope constructor and pass through the format envelope with stable owner/code/detail, preserved source chaining, and no backend type leakage. |
+| Format evidence transport | Heterogeneous bounded format sources enter only through the selected-scope constructor; each envelope retains descriptor/code/details plus the concrete source, exposes the standard source chain and typed outer-source downcast, omits private sources from `Debug`/`Display`, and rejects an outer source payload above 4 KiB before trusted callbacks. |
 | No legacy transition | Production/public symbol search finds no `map_scene*`, assignable import stage, or parser-owned report constructor. |
-| Crate ownership | Dependency and public-API checks find no backend type leakage, `baozi-operation` upward dependency, postprocess-to-import edge, or reversed core dependency. |
+| Crate ownership | Dependency and public-API checks find no backend type in public fields or stable schemas, no `baozi-operation` upward dependency, no postprocess-to-import edge, and no reversed core dependency; private backend causes may remain reachable only through a retained format-owned standard source chain. |

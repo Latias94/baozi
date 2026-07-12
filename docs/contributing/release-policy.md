@@ -8,6 +8,7 @@ IR, parser security model, or public API boundary.
 Crates intended for eventual publication:
 
 - `baozi`
+- `baozi-operation`
 - `baozi-core`
 - `baozi-io`
 - `baozi-import`
@@ -16,12 +17,12 @@ Crates intended for eventual publication:
 - `baozi-format-obj`
 - `baozi-format-ply`
 
-Crates intentionally not published yet:
+Crates intentionally not published from the current repository state:
 
 - `baozi-test-support`: test-only helpers
 - `baozi-xtask`: repository-only governance tooling
-- `baozi-format-ply`: admitted Experimental importer; source builds include it in `all-formats`, but
-  publication remains disabled until its package and release evidence is complete
+- `baozi-format-ply`: intended for the release unit, but publication remains disabled until its
+  package and release evidence is complete
 - `baozi-format-gltf`: internal candidate, not facade-admitted or publishable until ADR 0027 baseline
   gates pass; broader conformance governs maturity only after admission
 - `baozi-fuzz`: cargo-fuzz workspace
@@ -37,14 +38,15 @@ published at the matching version.
 
 First release order:
 
-1. `baozi-core`
-2. `baozi-io`
-3. `baozi-import`
-4. `baozi-postprocess`
-5. `baozi-format-stl`
-6. `baozi-format-obj`
-7. `baozi-format-ply` after its publication gate is complete
-8. `baozi`
+1. `baozi-operation`
+2. `baozi-core`
+3. `baozi-io`
+4. `baozi-import`
+5. `baozi-postprocess`
+6. `baozi-format-stl`
+7. `baozi-format-obj`
+8. `baozi-format-ply` after its publication gate is complete
+9. `baozi`
 
 Package leaf crates first with `cargo package -p <crate> --allow-dirty --no-verify`. Package the
 facade only after the dependency versions are available from the registry. Optional format crates
@@ -53,9 +55,10 @@ therefore every admitted facade dependency must be published first or removed fr
 manifest by an explicit architecture decision. The preferred first-release path is to complete PLY's
 publication evidence and publish it before `baozi`.
 
-CI packages `baozi-core` as the only crate that can be validated before the first registry publish.
-The dependent crates must be package-checked in publish order after their internal dependencies exist
-on crates.io at the matching version.
+CI packages `baozi-operation` as the only release-unit leaf that can be validated before the first
+registry publish. The dependent crates must be package-checked in publish order after their internal
+dependencies exist on crates.io at the matching version. U9 adds an extracted-package simulation for
+the complete release unit before any real publish command is allowed.
 
 ## Release Checklist
 
