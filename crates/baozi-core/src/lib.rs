@@ -2,18 +2,27 @@
 
 //! Canonical Baozi scene, math, material, diagnostic, and domain error types.
 
+mod animation;
+mod appearance;
 mod attribute;
+mod deform;
+mod derived;
 pub mod diagnostic;
+mod entity;
 pub mod error;
 mod extension;
 mod format_id;
+mod geometry;
 mod identity;
+mod image;
 pub mod material;
 pub mod math;
 mod namespaced;
 mod ordered_map;
 mod provenance;
+mod remap;
 pub mod scene;
+mod scene_space;
 mod scene_storage;
 mod shared_storage;
 mod validation;
