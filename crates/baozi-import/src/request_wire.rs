@@ -1,3 +1,8 @@
+//! Experimental pre-release import-request transport.
+//!
+//! BZIR v1 has deterministic regression vectors, but it is not a facade, semver, persistence, or
+//! network compatibility promise. ADR 0016 requires explicit promotion evidence before release.
+
 use crate::config::{
     ConformancePolicy, DetectionOptions, DetectionOptionsError, FormatSelection,
     ImportConfigOverlay, ImportRequest, ImportRequestBuildError, ImportRequestLayer, LossPolicy,
@@ -16,7 +21,7 @@ const MAGIC: &[u8; 4] = b"BZIR";
 const SCHEMA_VERSION: u16 = 1;
 const TLV_HEADER_BYTES: u64 = 10;
 
-/// Independent admission limits for the stable import-request wire format.
+/// Independent admission limits for the experimental import-request wire format.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RequestWireLimits {
     max_encoded_bytes: u64,
@@ -69,7 +74,7 @@ pub enum RequestWireScope {
     FormatOptionEnvelope,
 }
 
-/// Stable failure returned by BZIR v1 encoding and decoding.
+/// Bounded typed failure returned by BZIR v1 encoding and decoding.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum RequestWireError {

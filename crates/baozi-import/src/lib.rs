@@ -78,6 +78,7 @@ pub use registry::{
     RegistrySnapshot,
 };
 pub use request::{PreparedImportRequest, RequestError};
+#[doc(hidden)]
 pub use request_wire::{
     RequestWireError, RequestWireLimits, RequestWireScope, SerializedImportRequest,
 };

@@ -116,7 +116,7 @@ fn empty_request_wire() -> Vec<u8> {
 }
 
 #[test]
-fn empty_request_has_a_stable_bzir_v1_vector() {
+fn empty_request_has_a_canonical_experimental_bzir_v1_vector() {
     let encoded =
         SerializedImportRequest::encode(&ImportRequest::new(), RequestWireLimits::default())
             .unwrap();
@@ -166,6 +166,34 @@ fn request_wire_roundtrip_is_semantic_and_canonicalizes_envelope_order() {
             .collect::<Vec<_>>(),
         ["org.example.a", "org.example.z"]
     );
+}
+
+#[test]
+fn request_wire_roundtrips_each_loss_authority_independently() {
+    let kinds = [
+        ImportLossKind::OptionalDependencyUnavailable,
+        ImportLossKind::FormatRecovery,
+        ImportLossKind::SourceSemanticLoss,
+        ImportLossKind::ProvenanceEvidenceLoss,
+    ];
+
+    for allowed in kinds {
+        let policy = LossPolicy::preserve_or_fail().allow(allowed);
+        let request = ImportRequest::from_layers(
+            ImportRequestLayer::new(ImportConfigOverlay::default().with_loss_policy(policy)),
+            ImportRequestLayer::default(),
+        );
+        let encoded =
+            SerializedImportRequest::encode(&request, RequestWireLimits::default()).unwrap();
+        let decoded =
+            SerializedImportRequest::decode(encoded.as_bytes(), RequestWireLimits::default())
+                .unwrap();
+        let decoded_policy = decoded.preset().config().loss_policy.unwrap();
+
+        for kind in kinds {
+            assert_eq!(decoded_policy.allows(kind), kind == allowed);
+        }
+    }
 }
 
 fn all_resource_limit_fields() -> ResourceLimitsOverlay {
@@ -220,7 +248,7 @@ fn all_resource_limit_fields() -> ResourceLimitsOverlay {
 }
 
 #[test]
-fn every_resource_limit_field_roundtrips_as_a_stable_u64() {
+fn every_resource_limit_field_roundtrips_as_a_canonical_u64() {
     let overlay = all_resource_limit_fields();
     let request = ImportRequest::from_layers(
         ImportRequestLayer::new(
@@ -491,4 +519,24 @@ fn usize_resource_limits_use_checked_u64_decoding() {
             Some(usize::MAX)
         );
     }
+}
+
+#[test]
+fn request_wire_rejects_unknown_loss_policy_bits() {
+    let config = object(&[(3, vec![1 << 4])]);
+    let preset = object(&[(1, config)]);
+    let caller = object(&[]);
+    let root = object(&[(1, preset), (2, caller)]);
+    let mut bytes = b"BZIR".to_vec();
+    bytes.extend_from_slice(&1_u16.to_be_bytes());
+    bytes.extend_from_slice(&root);
+
+    assert!(matches!(
+        SerializedImportRequest::decode(&bytes, RequestWireLimits::default()),
+        Err(RequestWireError::InvalidEnumValue {
+            scope: RequestWireScope::Config,
+            field_id: 3,
+            value: 16,
+        })
+    ));
 }

@@ -73,13 +73,14 @@ pub enum ConformancePolicy {
     AllowDeclaredRecovery,
 }
 
-/// A stable category of semantic loss that may require caller authority.
+/// A stable category of source-semantic or retained-evidence loss that requires caller authority.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum ImportLossKind {
     OptionalDependencyUnavailable,
     FormatRecovery,
     SourceSemanticLoss,
+    ProvenanceEvidenceLoss,
 }
 
 /// Common authority for accepting explicitly classified import loss.
@@ -92,8 +93,11 @@ impl LossPolicy {
     const OPTIONAL_DEPENDENCY_UNAVAILABLE: u8 = 1 << 0;
     const FORMAT_RECOVERY: u8 = 1 << 1;
     const SOURCE_SEMANTIC_LOSS: u8 = 1 << 2;
-    pub(crate) const ALL_KNOWN: u8 =
-        Self::OPTIONAL_DEPENDENCY_UNAVAILABLE | Self::FORMAT_RECOVERY | Self::SOURCE_SEMANTIC_LOSS;
+    const PROVENANCE_EVIDENCE_LOSS: u8 = 1 << 3;
+    pub(crate) const ALL_KNOWN: u8 = Self::OPTIONAL_DEPENDENCY_UNAVAILABLE
+        | Self::FORMAT_RECOVERY
+        | Self::SOURCE_SEMANTIC_LOSS
+        | Self::PROVENANCE_EVIDENCE_LOSS;
 
     pub const fn preserve_or_fail() -> Self {
         Self { allowed: 0 }
@@ -133,6 +137,7 @@ const fn loss_kind_bit(kind: ImportLossKind) -> u8 {
         }
         ImportLossKind::FormatRecovery => LossPolicy::FORMAT_RECOVERY,
         ImportLossKind::SourceSemanticLoss => LossPolicy::SOURCE_SEMANTIC_LOSS,
+        ImportLossKind::ProvenanceEvidenceLoss => LossPolicy::PROVENANCE_EVIDENCE_LOSS,
     }
 }
 
