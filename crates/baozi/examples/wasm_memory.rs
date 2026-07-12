@@ -1,8 +1,13 @@
+#![allow(
+    clippy::result_large_err,
+    reason = "facade examples preserve complete bounded terminal evidence by value"
+)]
+
 use baozi::{Importer, Result};
 
 fn import_from_memory(bytes: &[u8]) -> Result<usize> {
-    let report = Importer::new().read_bytes("wasm-triangle.obj", bytes)?;
-    Ok(report.scene().meshes.len())
+    let report = Importer::new()?.read_bytes("wasm-triangle.obj", bytes)?;
+    Ok(report.scene().meshes().len())
 }
 
 fn main() -> Result<()> {

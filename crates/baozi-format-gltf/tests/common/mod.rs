@@ -1,52 +1,250 @@
 #![allow(dead_code)]
 
-use baozi_core::{BaoziError, Diagnostic, Result, Scene};
-use baozi_format_gltf::read_for_development;
-use baozi_import::{ImportContext, ImportOptions};
+use baozi_core::FormatId;
+use baozi_format_gltf::{FORMAT_ID, GltfFailureCode, GltfImporter};
+use baozi_import::{
+    DenyDependencies, DetectionOptions, DetectionOutcome, FormatFailureDetailValue,
+    FormatFailureEnvelope, FormatSelection, ImportCause, ImportConfigOverlay, ImportDiagnostic,
+    ImportFailure, ImportOperationControl, ImportReport, ImportRequest, ImportRequestLayer,
+    ImportResult, OptionCompileLimits, PreparedImportRequest, RegistryBuildLimits, RegistryBuilder,
+    ResourceLimits, ResourceLimitsOverlay, ScopeAbortCause, import_asset,
+    import_asset_with_resolver,
+};
 use baozi_io::{AssetPath, MemoryAssetIo};
 use base64::Engine as _;
+use std::error::Error;
+use std::io;
 use std::sync::Arc;
+
+pub type TestResult<T> = std::result::Result<T, Box<dyn Error + Send + Sync>>;
+
+#[derive(Debug, Clone)]
+pub struct GltfTestOptions {
+    pub limits: ResourceLimits,
+    allow_dependencies: bool,
+}
+
+impl GltfTestOptions {
+    pub fn memory() -> Self {
+        Self {
+            limits: ResourceLimits::default(),
+            allow_dependencies: false,
+        }
+    }
+}
 
 pub fn import_assets(
     source: &str,
     assets: impl IntoIterator<Item = (&'static str, Vec<u8>)>,
-    options: ImportOptions,
-) -> Result<(Scene, Vec<Diagnostic>)> {
-    let (scene, diagnostics) = import_assets_result(source, assets, options)?;
-    Ok((scene?, diagnostics))
+    options: GltfTestOptions,
+) -> TestResult<(ImportReport, Vec<ImportDiagnostic>)> {
+    let (result, diagnostics) = import_assets_result(source, assets, options)?;
+    let report = result?;
+    Ok((report, diagnostics))
 }
 
 pub fn import_assets_result(
     source: &str,
     assets: impl IntoIterator<Item = (&'static str, Vec<u8>)>,
-    options: ImportOptions,
-) -> Result<(Result<Scene>, Vec<Diagnostic>)> {
+    options: GltfTestOptions,
+) -> TestResult<(ImportResult<ImportReport>, Vec<ImportDiagnostic>)> {
+    import_assets_result_with_control(source, assets, options, ImportOperationControl::default())
+}
+
+pub fn import_assets_result_with_control(
+    source: &str,
+    assets: impl IntoIterator<Item = (&'static str, Vec<u8>)>,
+    options: GltfTestOptions,
+    control: ImportOperationControl,
+) -> TestResult<(ImportResult<ImportReport>, Vec<ImportDiagnostic>)> {
     let source_path = AssetPath::new(source)?;
-    let mut io = MemoryAssetIo::new();
+    let io = MemoryAssetIo::new();
     for (path, bytes) in assets {
-        io.insert(AssetPath::new(path)?, Arc::<[u8]>::from(bytes));
+        let _replaced = io.try_insert(AssetPath::new(path)?, Arc::<[u8]>::from(bytes))?;
     }
-    let mut ctx = ImportContext::with_options(&io, source_path, options);
-    let result = read_for_development(&mut ctx);
-    let diagnostics = ctx.into_diagnostics();
+    let request = prepared_request(options.limits)?;
+    let result = if options.allow_dependencies {
+        import_asset(&request, &io, source_path, control)
+    } else {
+        import_asset_with_resolver(&request, &io, source_path, &DenyDependencies, control)
+    };
+    let diagnostics = match &result {
+        Ok(report) => report.diagnostics().to_vec(),
+        Err(error) => error
+            .operation_failure()
+            .map(|failure| failure.diagnostics().to_vec())
+            .unwrap_or_default(),
+    };
     Ok((result, diagnostics))
 }
 
-pub fn expected_error(result: Result<Scene>) -> Result<BaoziError> {
+fn prepared_request(limits: ResourceLimits) -> TestResult<PreparedImportRequest> {
+    let mut registry = RegistryBuilder::new();
+    registry.register(GltfImporter)?;
+    let snapshot = registry.freeze(RegistryBuildLimits::default())?;
+    let format = FormatId::new(FORMAT_ID)?;
+    Ok(snapshot.compile_request(
+        &ImportRequest::from_layers(
+            ImportRequestLayer::default(),
+            ImportRequestLayer::new(
+                ImportConfigOverlay::default()
+                    .with_resource_limits(ResourceLimitsOverlay::from_limits(limits))
+                    .with_format_selection(FormatSelection::Forced(format)),
+            ),
+        ),
+        OptionCompileLimits::default(),
+    )?)
+}
+
+pub fn detection_outcome(
+    source: &str,
+    bytes: Vec<u8>,
+    max_probe_bytes: u64,
+) -> TestResult<DetectionOutcome> {
+    let source_path = AssetPath::new(source)?;
+    let io = MemoryAssetIo::new();
+    let _replaced = io.try_insert(source_path.clone(), Arc::<[u8]>::from(bytes))?;
+
+    let mut registry = RegistryBuilder::new();
+    registry.register(GltfImporter)?;
+    let snapshot = registry.freeze(RegistryBuildLimits::default())?;
+    let request = snapshot.compile_request(
+        &ImportRequest::from_layers(
+            ImportRequestLayer::default(),
+            ImportRequestLayer::new(
+                ImportConfigOverlay::default()
+                    .with_detection_options(DetectionOptions::new(max_probe_bytes)?),
+            ),
+        ),
+        OptionCompileLimits::default(),
+    )?;
+    let result = import_asset(
+        &request,
+        &io,
+        source_path,
+        ImportOperationControl::default(),
+    );
+    let evidence = match &result {
+        Ok(report) => report.detection_evidence(),
+        Err(error) => error
+            .operation_failure()
+            .map(ImportFailure::detection_evidence)
+            .unwrap_or_default(),
+    };
+    evidence
+        .iter()
+        .find(|entry| entry.format().as_str() == FORMAT_ID)
+        .map(|entry| entry.outcome().clone())
+        .ok_or_else(|| io::Error::other("glTF detection evidence was not retained").into())
+}
+
+pub fn expected_error(result: ImportResult<ImportReport>) -> TestResult<ImportFailure> {
     match result {
-        Ok(_) => Err(BaoziError::parse(
-            "test",
-            None,
-            "expected glTF import to fail",
-        )),
-        Err(error) => Ok(error),
+        Ok(_) => Err(io::Error::other("expected glTF import to fail").into()),
+        Err(error) => Ok(error.into_operation_failure()?),
     }
 }
 
-pub fn sidecar_options() -> ImportOptions {
-    let mut options = ImportOptions::memory();
-    options.io.external_references = baozi_import::ExternalReferencePolicy::CustomResolver;
+pub fn sidecar_options() -> GltfTestOptions {
+    let mut options = GltfTestOptions::memory();
+    options.allow_dependencies = true;
     options
+}
+
+pub fn gltf_failure(error: &ImportFailure) -> TestResult<&FormatFailureEnvelope> {
+    match error.cause() {
+        ImportCause::Format(envelope) if envelope.format().as_str() == FORMAT_ID => Ok(envelope),
+        ImportCause::Format(envelope) => Err(io::Error::other(format!(
+            "expected {FORMAT_ID} format failure, got {}",
+            envelope.format()
+        ))
+        .into()),
+        cause => Err(io::Error::other(format!("expected format failure, got {cause:?}")).into()),
+    }
+}
+
+pub fn gltf_failure_reason(error: &ImportFailure) -> TestResult<&str> {
+    let envelope = gltf_failure(error)?;
+    envelope
+        .details()
+        .iter()
+        .find_map(|detail| {
+            if detail.key() != "reason" {
+                return None;
+            }
+            match detail.value() {
+                FormatFailureDetailValue::String(value) => Some(value.as_str()),
+                _ => None,
+            }
+        })
+        .ok_or_else(|| {
+            io::Error::other("glTF failure did not preserve a string reason detail").into()
+        })
+}
+
+pub fn assert_gltf_failure(
+    error: &ImportFailure,
+    expected_code: GltfFailureCode,
+    expected_reason: Option<&str>,
+) -> TestResult<()> {
+    let envelope = gltf_failure(error)?;
+    assert_eq!(envelope.code(), expected_code.as_str());
+    if let Some(expected_reason) = expected_reason {
+        let reason = gltf_failure_reason(error)?;
+        assert!(
+            reason.contains(expected_reason),
+            "expected reason containing {expected_reason:?}, got {:?}",
+            reason
+        );
+    }
+    Ok(())
+}
+
+pub fn assert_resource_limit(error: &ImportFailure, expected: &str) {
+    let ImportCause::Scope(abort) = error.cause() else {
+        panic!(
+            "expected scope-owned resource failure, got {:?}",
+            error.cause()
+        );
+    };
+    match abort.cause() {
+        ScopeAbortCause::ResourceLimit { resource, .. } => {
+            let expected_resource = match expected {
+                "max_dependency_asset_bytes" | "max_primary_asset_bytes" => "asset-bytes",
+                other => other,
+            };
+            assert_eq!(*resource, expected_resource);
+        }
+        ScopeAbortCause::Ledger(cause) => {
+            let expected_dimension = match expected {
+                "max_canonical_payload_bytes" => "CanonicalOutputBytes",
+                "max_canonical_string_bytes" => "CanonicalStringBytes",
+                "max_data_uri_bytes" => "DataUriBytes",
+                "max_decode_work" => "DecodeWork",
+                "max_dependency_asset_bytes" => "DependencyBytes",
+                "max_faces" => "Faces",
+                "max_graph_depth" => "GraphDepth",
+                "max_graph_edges" => "GraphEdges",
+                "max_graph_nodes" => "GraphNodes",
+                "max_graph_work" => "GraphWork",
+                "max_meshes" => "Meshes",
+                "max_open_assets" => "AssetOpen",
+                "max_primary_asset_bytes" => "PrimaryBytes",
+                "max_primitives" => "Primitives",
+                "max_live_bytes" => "ScratchBytes",
+                "max_total_asset_bytes" => "TotalAssetBytes",
+                "max_total_topology_cells" => "TopologyCells",
+                "max_total_vertex_attribute_streams" => "AttributeStreams",
+                "max_vertices" => "Vertices",
+                other => other,
+            };
+            assert!(
+                format!("{cause:?}").contains(expected_dimension),
+                "expected {expected} ({expected_dimension}), got {cause:?}"
+            );
+        }
+        cause => panic!("expected resource limit {expected}, got {cause:?}"),
+    }
 }
 
 pub fn triangle_gltf() -> Vec<u8> {

@@ -1,7 +1,7 @@
 use baozi_core::{
     Animation, AnimationValues, Camera, CameraProjection, Color, Diagnostic, DiagnosticSeverity,
-    Light, Material, Mesh, MeshBinding, MetadataMap, Node, Scene, Skin, SourceLocation, Texture,
-    TextureSource, VertexAttributeData,
+    Light, Material, Mesh, MeshBinding, MetadataMap, Node, Skin, SourceLocation, Texture,
+    TextureSource, ValidatedScene, VertexAttributeData,
 };
 use std::fmt;
 
@@ -26,16 +26,16 @@ pub struct SceneSnapshot {
 }
 
 impl SceneSnapshot {
-    pub fn from_scene(scene: &Scene) -> Self {
+    pub fn from_scene(scene: &ValidatedScene) -> Self {
         Self::from_scene_with_options(scene, &[], SnapshotOptions::default())
     }
 
-    pub fn from_scene_with_diagnostics(scene: &Scene, diagnostics: &[Diagnostic]) -> Self {
+    pub fn from_scene_with_diagnostics(scene: &ValidatedScene, diagnostics: &[Diagnostic]) -> Self {
         Self::from_scene_with_options(scene, diagnostics, SnapshotOptions::default())
     }
 
     pub fn from_scene_with_options(
-        scene: &Scene,
+        scene: &ValidatedScene,
         diagnostics: &[Diagnostic],
         options: SnapshotOptions,
     ) -> Self {
@@ -45,54 +45,55 @@ impl SceneSnapshot {
             &mut text,
             format_args!(
                 "scene nodes={} meshes={} materials={} textures={} animations={} cameras={} lights={} skins={}",
-                scene.nodes.len(),
-                scene.meshes.len(),
-                scene.materials.len(),
-                scene.textures.len(),
-                scene.animations.len(),
-                scene.cameras.len(),
-                scene.lights.len(),
-                scene.skins.len()
+                scene.nodes().len(),
+                scene.meshes().len(),
+                scene.materials().len(),
+                scene.textures().len(),
+                scene.animations().len(),
+                scene.cameras().len(),
+                scene.lights().len(),
+                scene.skins().len()
             ),
         );
-        line(&mut text, format_args!("root {}", scene.root.as_u32()));
+        line(&mut text, format_args!("root {}", scene.root().as_u32()));
+        let space = scene.space();
         line(
             &mut text,
             format_args!(
                 "space handedness={:?} up={:?} front={:?} unit={}",
-                scene.space.handedness,
-                scene.space.up_axis,
-                scene.space.front_axis,
-                optional_f32(scene.space.unit_scale_to_meters, options.float_precision)
+                space.handedness,
+                space.up_axis,
+                space.front_axis,
+                optional_f32(space.unit_scale_to_meters, options.float_precision)
             ),
         );
         line(
             &mut text,
-            format_args!("metadata keys={}", metadata_keys(&scene.metadata)),
+            format_args!("metadata keys={}", metadata_keys(scene.metadata())),
         );
 
-        for (index, node) in scene.nodes.iter().enumerate() {
+        for (index, node) in scene.nodes().iter().enumerate() {
             write_node(&mut text, index, node);
         }
-        for (index, mesh) in scene.meshes.iter().enumerate() {
+        for (index, mesh) in scene.meshes().iter().enumerate() {
             write_mesh(&mut text, index, mesh, options);
         }
-        for (index, texture) in scene.textures.iter().enumerate() {
+        for (index, texture) in scene.textures().iter().enumerate() {
             write_texture(&mut text, index, texture);
         }
-        for (index, material) in scene.materials.iter().enumerate() {
+        for (index, material) in scene.materials().iter().enumerate() {
             write_material(&mut text, index, material, options.float_precision);
         }
-        for (index, skin) in scene.skins.iter().enumerate() {
+        for (index, skin) in scene.skins().iter().enumerate() {
             write_skin(&mut text, index, skin);
         }
-        for (index, camera) in scene.cameras.iter().enumerate() {
+        for (index, camera) in scene.cameras().iter().enumerate() {
             write_camera(&mut text, index, camera, options.float_precision);
         }
-        for (index, light) in scene.lights.iter().enumerate() {
+        for (index, light) in scene.lights().iter().enumerate() {
             write_light(&mut text, index, light, options.float_precision);
         }
-        for (index, animation) in scene.animations.iter().enumerate() {
+        for (index, animation) in scene.animations().iter().enumerate() {
             write_animation(&mut text, index, animation);
         }
         write_diagnostics(&mut text, diagnostics);

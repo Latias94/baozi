@@ -1,39 +1,63 @@
-use baozi_format_obj::ObjImporter;
+use baozi_format_obj::{FORMAT_ID, ObjImporter};
 use baozi_import::{
-    DetectionFailure, DetectionInconclusive, DetectionOptions, DetectionOutcome, ImporterRegistry,
-    ReadConfidence, ReadHint,
+    DetectionInconclusive, DetectionOptions, DetectionOutcome, ImportConfigOverlay,
+    ImportOperationControl, ImportRequest, ImportRequestLayer, OptionCompileLimits, ReadConfidence,
+    RegistryBuildLimits, RegistryBuilder, import_asset,
 };
-use baozi_io::AssetPath;
-use std::io::Cursor;
+use baozi_io::{AssetPath, MemoryAssetIo};
+use std::sync::Arc;
 
-fn detect(
-    source: &str,
-    bytes: &[u8],
-    max_probe_bytes: u64,
-) -> std::result::Result<ReadConfidence, DetectionFailure> {
-    let mut registry = ImporterRegistry::new();
+fn detect(source: &str, bytes: &[u8], max_probe_bytes: u64) -> DetectionOutcome {
+    let source = AssetPath::new(source).expect("valid test path");
+    let io = MemoryAssetIo::new();
+    io.try_insert(source.clone(), Arc::<[u8]>::from(bytes))
+        .expect("test asset insertion succeeds");
+    let mut registry = RegistryBuilder::new();
     registry.register(ObjImporter).expect("unique OBJ importer");
-    let hint = ReadHint::from_source(AssetPath::new(source).expect("valid test path"));
-    let mut input = Cursor::new(bytes.to_vec());
-    registry
-        .detect_with_options(&mut input, &hint, &DetectionOptions { max_probe_bytes })
-        .map(|selected| selected.confidence)
+    let snapshot = registry
+        .freeze(RegistryBuildLimits::default())
+        .expect("valid registry");
+    let request = snapshot
+        .compile_request(
+            &ImportRequest::from_layers(
+                ImportRequestLayer::default(),
+                ImportRequestLayer::new(ImportConfigOverlay::default().with_detection_options(
+                    DetectionOptions::new(max_probe_bytes).expect("bounded probe size"),
+                )),
+            ),
+            OptionCompileLimits::default(),
+        )
+        .expect("valid request");
+    let evidence = match import_asset(&request, &io, source, ImportOperationControl::default()) {
+        Ok(report) => report.detection_evidence().to_vec(),
+        Err(error) => error
+            .into_operation_failure()
+            .unwrap_or_else(|source| panic!("OBJ detection session could not initialize: {source}"))
+            .detection_evidence()
+            .to_vec(),
+    };
+    evidence
+        .into_iter()
+        .find(|evidence| evidence.format().as_str() == FORMAT_ID)
+        .expect("OBJ detector evidence")
+        .outcome()
+        .clone()
 }
 
 #[test]
 fn obj_extension_is_candidate() {
-    let confidence = detect("mesh.obj", b"not enough content", 4096)
-        .expect("the extension is weak positive evidence");
-
-    assert_eq!(confidence, ReadConfidence::Maybe);
+    assert_eq!(
+        detect("mesh.obj", b"not enough content", 4096),
+        DetectionOutcome::Match(ReadConfidence::Maybe)
+    );
 }
 
 #[test]
 fn obj_like_content_is_likely() {
-    let confidence = detect("mesh.txt", b"v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n", 4096)
-        .expect("OBJ content is detected");
-
-    assert_eq!(confidence, ReadConfidence::Likely);
+    assert_eq!(
+        detect("mesh.txt", b"v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n", 4096),
+        DetectionOutcome::Match(ReadConfidence::Likely)
+    );
 }
 
 #[test]
@@ -44,58 +68,45 @@ fn complete_vertex_prefix_is_strong_obj_evidence_before_the_first_face() {
         .position(|window| window == b"f ")
         .expect("fixture contains a face");
 
-    let confidence = detect("mesh.bin", bytes, face_offset as u64)
-        .expect("three complete position records establish OBJ syntax");
-    assert_eq!(confidence, ReadConfidence::Likely);
+    assert_eq!(
+        detect("mesh.bin", bytes, face_offset as u64),
+        DetectionOutcome::Match(ReadConfidence::Likely)
+    );
 }
 
 #[test]
 fn weak_obj_statements_do_not_outweigh_content_from_other_formats() {
     let bytes = b"o object\ng group\ns 1\nmtllib material.mtl\nusemtl material\n";
-    let error = detect("mesh.bin", bytes, 4096)
-        .expect_err("OBJ metadata statements are not geometry evidence");
 
-    assert!(matches!(error, DetectionFailure::NoMatch { .. }));
+    assert_eq!(detect("mesh.bin", bytes, 4096), DetectionOutcome::NoMatch);
 }
 
 #[test]
 fn malformed_geometry_statements_are_not_obj_evidence() {
     let bytes = b"v x y z\nf one two three\n";
-    let error = detect("mesh.bin", bytes, 4096)
-        .expect_err("geometry keywords without valid arguments are insufficient");
 
-    assert!(matches!(error, DetectionFailure::NoMatch { .. }));
+    assert_eq!(detect("mesh.bin", bytes, 4096), DetectionOutcome::NoMatch);
 }
 
 #[test]
 fn non_finite_positions_are_not_obj_evidence() {
     let bytes = b"v NaN 0 0\nv NaN 1 0\nv NaN 0 1\n";
-    let error = detect("mesh.bin", bytes, 4096)
-        .expect_err("non-finite coordinates cannot establish valid OBJ geometry");
 
-    assert!(matches!(error, DetectionFailure::NoMatch { .. }));
+    assert_eq!(detect("mesh.bin", bytes, 4096), DetectionOutcome::NoMatch);
 }
 
 #[test]
 fn unterminated_probe_tail_is_not_counted_as_a_complete_face() {
     let bytes = b"v 0 0 0\nf 1 2 3\n";
-    let error = detect("mesh.bin", bytes, (bytes.len() - 1) as u64)
-        .expect_err("the final face may still be extended inside the source");
-    let DetectionFailure::NoMatch { evidence, .. } = error else {
-        panic!("expected structured detection evidence");
-    };
-    assert!(matches!(
-        evidence.as_slice(),
-        [evidence]
-            if evidence.outcome()
-                == &DetectionOutcome::Inconclusive(
-                    DetectionInconclusive::ProbeExhausted
-                )
-    ));
 
-    let confidence = detect("mesh.bin", &bytes[..bytes.len() - 1], 4096)
-        .expect("an unterminated final line is complete when it reaches end of source");
-    assert_eq!(confidence, ReadConfidence::Likely);
+    assert_eq!(
+        detect("mesh.bin", bytes, (bytes.len() - 1) as u64),
+        DetectionOutcome::Inconclusive(DetectionInconclusive::ProbeExhausted)
+    );
+    assert_eq!(
+        detect("mesh.bin", &bytes[..bytes.len() - 1], 4096),
+        DetectionOutcome::Match(ReadConfidence::Likely)
+    );
 }
 
 #[test]
@@ -104,33 +115,24 @@ fn completed_obj_evidence_survives_a_probe_cut_inside_utf8() {
     bytes.extend_from_slice("mesh name".as_bytes());
     bytes.extend_from_slice("包".as_bytes());
 
-    let confidence = detect("mesh.bin", &bytes, (bytes.len() - 1) as u64)
-        .expect("completed geometry lines precede the truncated UTF-8 comment");
-    assert_eq!(confidence, ReadConfidence::Likely);
+    assert_eq!(
+        detect("mesh.bin", &bytes, (bytes.len() - 1) as u64),
+        DetectionOutcome::Match(ReadConfidence::Likely)
+    );
 }
 
 #[test]
 fn random_text_is_not_obj_without_extension() {
-    let error = detect("notes.txt", b"this is not a model\n", 4096)
-        .expect_err("random text must not match OBJ");
-
-    assert!(matches!(error, DetectionFailure::NoMatch { .. }));
+    assert_eq!(
+        detect("notes.txt", b"this is not a model\n", 4096),
+        DetectionOutcome::NoMatch
+    );
 }
 
 #[test]
 fn exhausted_obj_probe_is_inconclusive_without_poisoning_the_registry() {
-    let error = detect("mesh.txt", b"v 0 0 0\nf 1 1 1\n", 1)
-        .expect_err("one byte cannot establish or reject OBJ content");
-
-    let DetectionFailure::NoMatch { evidence, .. } = error else {
-        panic!("expected structured detection evidence");
-    };
-    assert!(matches!(
-        evidence.as_slice(),
-        [evidence]
-            if evidence.outcome()
-                == &DetectionOutcome::Inconclusive(
-                    DetectionInconclusive::ProbeExhausted
-                )
-    ));
+    assert_eq!(
+        detect("mesh.txt", b"v 0 0 0\nf 1 1 1\n", 1),
+        DetectionOutcome::Inconclusive(DetectionInconclusive::ProbeExhausted)
+    );
 }

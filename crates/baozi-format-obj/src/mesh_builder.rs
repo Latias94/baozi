@@ -1,57 +1,36 @@
+use crate::ObjFailure;
+use crate::allocation::{LiveStorage, usize_to_u64 as usize_amount};
 use crate::mtl::{self, MaterialLibrary, ParsedMaterial};
-use crate::obj::{Face, FaceVertex, ParsedObj};
+use crate::obj::{Face, FaceVertex, ParsedObj, StateNameId};
 use baozi_core::{
-    Aabb, AlphaMode, BaoziError, ColorSpace, Material, MaterialId, Mesh, MeshBinding, MetadataMap,
-    MetadataValue, Node, PrimitiveTopology, Result, Scene, SceneBuilder, ShadingModel, Texture,
-    TextureRole, TextureSlot, TextureSource, Vec2, Vec3,
+    Aabb, AlphaMode, ColorSpace, Material, MaterialId, Mesh, MeshBinding, MetadataMap,
+    MetadataValue, Node, PrimitiveTopology, SceneDraft, ShadingModel, Texture, TextureRole,
+    TextureSlot, TextureSource, Vec2, Vec3,
 };
-use baozi_import::ImportContext;
-use std::collections::BTreeMap;
-use std::sync::Arc;
+use baozi_import::{
+    ImportStorageClass, ImportWorkClass, ParseResult, ParseScope, ScopedSceneBuilder,
+};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct SegmentKey {
-    object: Option<Arc<str>>,
-    group: Option<Arc<str>>,
-    material: Option<Arc<str>>,
-    smoothing: Option<Arc<str>>,
-}
-
-impl PartialEq for SegmentKey {
-    fn eq(&self, other: &Self) -> bool {
-        same_interned_state(&self.object, &other.object)
-            && same_interned_state(&self.group, &other.group)
-            && same_interned_state(&self.material, &other.material)
-            && same_interned_state(&self.smoothing, &other.smoothing)
-    }
-}
-
-impl Eq for SegmentKey {}
-
-// ObjParser interns state names, so pointer identity is semantic equality here.
-fn same_interned_state(left: &Option<Arc<str>>, right: &Option<Arc<str>>) -> bool {
-    match (left, right) {
-        (Some(left), Some(right)) => Arc::ptr_eq(left, right),
-        (None, None) => true,
-        _ => false,
-    }
+    object: Option<StateNameId>,
+    group: Option<StateNameId>,
+    material: Option<StateNameId>,
+    smoothing: Option<StateNameId>,
 }
 
 impl SegmentKey {
     fn from_face(face: &Face) -> Self {
         Self {
-            object: face.object.clone(),
-            group: face.group.clone(),
-            material: face.material.clone(),
-            smoothing: face.smoothing.clone(),
+            object: face.object,
+            group: face.group,
+            material: face.material,
+            smoothing: face.smoothing,
         }
     }
 
-    fn display_name(&self) -> Option<&str> {
-        self.group
-            .as_deref()
-            .or(self.object.as_deref())
-            .or(self.material.as_deref())
+    fn display_name(self) -> Option<StateNameId> {
+        self.group.or(self.object).or(self.material)
     }
 }
 
@@ -72,442 +51,809 @@ impl From<FaceVertex> for VertexKey {
     }
 }
 
-struct SegmentBuilder {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct IndexedVertexKey {
+    key: VertexKey,
+    occurrence: usize,
+}
+
+struct SegmentBuilder<'scope> {
     key: SegmentKey,
-    vertex_map: BTreeMap<VertexKey, u32>,
-    positions: Vec<Vec3>,
-    texcoords: Vec<Vec2>,
-    normals: Vec<Vec3>,
-    indices: Vec<u32>,
+    vertex_keys: Vec<VertexKey>,
     face_vertex_counts: Vec<u32>,
-    has_texcoords: bool,
-    has_normals: bool,
-    missing_texcoords: bool,
-    missing_normals: bool,
     has_polygon: bool,
+    storage: SegmentStorage<'scope>,
 }
 
-#[derive(Debug)]
-struct CanonicalStringBudget {
-    used: usize,
-    limit: usize,
+struct SegmentStorage<'scope> {
+    vertex_keys: LiveStorage<'scope>,
+    face_vertex_counts: LiveStorage<'scope>,
 }
 
-impl CanonicalStringBudget {
-    fn new(limit: usize) -> Self {
-        Self { used: 0, limit }
+fn state_name<'parsed>(
+    scope: &ParseScope<'_>,
+    parsed: &'parsed ParsedObj<'_>,
+    id: StateNameId,
+) -> ParseResult<&'parsed str> {
+    parsed.state_name(id).ok_or_else(|| {
+        scope.format_failure(ObjFailure::internal("segment-state-name-id-out-of-range"))
+    })
+}
+
+fn charge_segment_strings(
+    scope: &ParseScope<'_>,
+    parsed: &ParsedObj<'_>,
+    key: &SegmentKey,
+) -> ParseResult<()> {
+    let mut bytes = 0usize;
+    if let Some(id) = key.display_name() {
+        let name = state_name(scope, parsed, id)?;
+        checked_add_string_bytes(scope, &mut bytes, name.len())?;
+        checked_add_string_bytes(scope, &mut bytes, name.len())?;
+    }
+    for (metadata_key, id) in [
+        ("obj:object", key.object),
+        ("obj:group", key.group),
+        ("obj:material", key.material),
+        ("obj:smoothing", key.smoothing),
+    ] {
+        if let Some(id) = id {
+            let value = state_name(scope, parsed, id)?;
+            checked_add_string_bytes(scope, &mut bytes, metadata_key.len())?;
+            checked_add_string_bytes(scope, &mut bytes, value.len())?;
+        }
     }
 
-    fn debit_segment(&mut self, key: &SegmentKey) -> Result<()> {
-        let mut bytes = 0usize;
-        if let Some(name) = key.display_name() {
-            checked_add_string_bytes(&mut bytes, name.len())?;
-            checked_add_string_bytes(&mut bytes, name.len())?;
-        }
-        for (metadata_key, value) in [
-            ("obj.object", key.object.as_deref()),
-            ("obj.group", key.group.as_deref()),
-            ("obj.material", key.material.as_deref()),
-            ("obj.smoothing", key.smoothing.as_deref()),
-        ] {
-            if let Some(value) = value {
-                checked_add_string_bytes(&mut bytes, metadata_key.len())?;
-                checked_add_string_bytes(&mut bytes, value.len())?;
-            }
-        }
-
-        self.used = self
-            .used
-            .checked_add(bytes)
-            .ok_or(BaoziError::LimitExceeded {
-                limit: "max_canonical_string_bytes",
-            })?;
-        if self.used > self.limit {
-            return Err(BaoziError::LimitExceeded {
-                limit: "max_canonical_string_bytes",
-            });
-        }
-        Ok(())
-    }
+    scope
+        .begin_work(
+            ImportWorkClass::CanonicalStringBytes,
+            usize_amount(scope, bytes, "obj-canonical-string-bytes")?,
+        )?
+        .complete()
 }
 
-fn checked_add_string_bytes(total: &mut usize, bytes: usize) -> Result<()> {
-    *total = total.checked_add(bytes).ok_or(BaoziError::LimitExceeded {
-        limit: "max_canonical_string_bytes",
-    })?;
+fn checked_add_string_bytes(
+    scope: &ParseScope<'_>,
+    total: &mut usize,
+    bytes: usize,
+) -> ParseResult<()> {
+    *total = total
+        .checked_add(bytes)
+        .ok_or_else(|| scope.allocation_failure("obj-canonical-string-counter"))?;
     Ok(())
 }
 
-fn owned_canonical_string(value: &str) -> Result<String> {
-    let mut owned = String::new();
-    owned
-        .try_reserve_exact(value.len())
-        .map_err(|_| BaoziError::LimitExceeded {
-            limit: "max_canonical_string_bytes",
-        })?;
-    owned.push_str(value);
-    Ok(owned)
+fn owned_canonical_string<'scope>(
+    scope: &'scope ParseScope<'_>,
+    storage: &mut LiveStorage<'scope>,
+    value: &str,
+) -> ParseResult<String> {
+    storage.copy_string(scope, value, "obj-canonical-string")
 }
 
-fn insert_string_metadata(
+fn warn_partial_attributes(
+    scope: &ParseScope<'_>,
+    has_texcoords: bool,
+    missing_texcoords: bool,
+    has_normals: bool,
+    missing_normals: bool,
+) -> ParseResult<()> {
+    if has_texcoords && missing_texcoords {
+        mtl::push_warning(
+            scope,
+            None,
+            "obj.partial_texcoord_channel",
+            format_args!(
+                "OBJ segment mixes vertices with and without texture coordinates; the partial texture coordinate channel was omitted"
+            ),
+        )?;
+    }
+    if has_normals && missing_normals {
+        mtl::push_warning(
+            scope,
+            None,
+            "obj.partial_normal_channel",
+            format_args!(
+                "OBJ segment mixes vertices with and without normals; the partial normal channel was omitted"
+            ),
+        )?;
+    }
+    Ok(())
+}
+
+fn insert_string_metadata<'scope>(
+    scope: &'scope ParseScope<'_>,
+    storage: &mut LiveStorage<'scope>,
     metadata: &mut MetadataMap,
     key: &'static str,
     value: &str,
-) -> Result<()> {
-    metadata.insert(
-        owned_canonical_string(key)?,
-        MetadataValue::String(owned_canonical_string(value)?),
-    );
+) -> ParseResult<()> {
+    let key = owned_canonical_string(scope, storage, key)?;
+    let value = MetadataValue::String(owned_canonical_string(scope, storage, value)?);
+    storage.insert_ordered_map(scope, metadata, key, value, "obj-mesh-metadata-map")?;
     Ok(())
 }
 
-impl SegmentBuilder {
+impl<'scope> SegmentBuilder<'scope> {
     fn new(key: SegmentKey) -> Self {
         Self {
             key,
-            vertex_map: BTreeMap::new(),
-            positions: Vec::new(),
-            texcoords: Vec::new(),
-            normals: Vec::new(),
-            indices: Vec::new(),
+            vertex_keys: Vec::new(),
             face_vertex_counts: Vec::new(),
-            has_texcoords: false,
-            has_normals: false,
-            missing_texcoords: false,
-            missing_normals: false,
             has_polygon: false,
+            storage: SegmentStorage {
+                vertex_keys: LiveStorage::new(ImportStorageClass::FormatNormalization),
+                face_vertex_counts: LiveStorage::new(ImportStorageClass::SceneConstruction),
+            },
         }
     }
 
-    fn push_face(
-        &mut self,
-        ctx: &ImportContext<'_>,
-        parsed: &ParsedObj,
-        face: &Face,
-        generated_vertices: &mut usize,
-    ) -> Result<()> {
-        if face.vertices.len() < 3 {
-            return Err(BaoziError::parse(
-                ctx.source().to_string(),
-                None,
-                "OBJ face must have at least three vertices",
-            ));
+    fn push_face(&mut self, scope: &'scope ParseScope<'_>, face: &Face) -> ParseResult<()> {
+        let face_vertex_count = face.vertices.len();
+        if face_vertex_count < 3 {
+            return Err(
+                scope.format_failure(ObjFailure::internal("normalized-face-has-too-few-vertices"))
+            );
         }
-        if face.vertices.len() > 3 {
+        let face_count_cells = if self.has_polygon {
+            1
+        } else if face_vertex_count > 3 {
+            self.face_vertex_counts
+                .len()
+                .checked_add(1)
+                .ok_or_else(|| scope.allocation_failure("obj-canonical-topology-counter"))?
+        } else {
+            0
+        };
+        let canonical_topology_cells = face_vertex_count
+            .checked_add(face_count_cells)
+            .ok_or_else(|| scope.allocation_failure("obj-canonical-topology-counter"))?;
+        let topology_permit = scope.begin_work(
+            ImportWorkClass::TopologyCells,
+            usize_amount(
+                scope,
+                canonical_topology_cells,
+                "obj-canonical-topology-cells",
+            )?,
+        )?;
+
+        if face_vertex_count > 3 {
             self.has_polygon = true;
         }
-        self.face_vertex_counts.push(face.vertices.len() as u32);
+        self.storage.face_vertex_counts.reserve_vec(
+            scope,
+            &mut self.face_vertex_counts,
+            1,
+            "obj-face-vertex-counts",
+        )?;
+        self.storage.vertex_keys.reserve_vec(
+            scope,
+            &mut self.vertex_keys,
+            face_vertex_count,
+            "obj-segment-vertex-keys",
+        )?;
+        self.face_vertex_counts.push(
+            u32::try_from(face_vertex_count)
+                .map_err(|_| scope.allocation_failure("obj-face-vertex-count"))?,
+        );
 
-        for vertex in &face.vertices {
-            let index = self.vertex_index(ctx, parsed, (*vertex).into(), generated_vertices)?;
-            self.indices.push(index);
-        }
-        Ok(())
-    }
-
-    fn vertex_index(
-        &mut self,
-        ctx: &ImportContext<'_>,
-        parsed: &ParsedObj,
-        key: VertexKey,
-        generated_vertices: &mut usize,
-    ) -> Result<u32> {
-        if let Some(index) = self.vertex_map.get(&key) {
-            return Ok(*index);
-        }
-
-        let next = self
-            .positions
-            .len()
-            .checked_add(1)
-            .ok_or(BaoziError::LimitExceeded {
-                limit: "max_vertices",
-            })?;
-        if next > u32::MAX as usize {
-            return Err(BaoziError::LimitExceeded {
-                limit: "max_vertices",
-            });
-        }
-        let next_generated =
-            generated_vertices
-                .checked_add(1)
-                .ok_or(BaoziError::LimitExceeded {
-                    limit: "max_vertices",
-                })?;
-        if next_generated > ctx.limits().max_vertices {
-            return Err(BaoziError::LimitExceeded {
-                limit: "max_vertices",
-            });
-        }
-        *generated_vertices = next_generated;
-
-        let index = self.positions.len() as u32;
-        self.positions.push(parsed.positions[key.position]);
-        match key.texcoord {
-            Some(idx) => self.texcoords.push(parsed.texcoords[idx]),
-            None => {
-                self.texcoords.push(Vec2::ZERO);
-                self.missing_texcoords = true;
+        for chunk in face.vertices.chunks(64) {
+            scope.poll()?;
+            for vertex in chunk {
+                self.vertex_keys.push((*vertex).into());
             }
         }
-        match key.normal {
-            Some(idx) => self.normals.push(parsed.normals[idx]),
-            None => {
-                self.normals.push(Vec3::ZERO);
-                self.missing_normals = true;
+        topology_permit.complete()
+    }
+
+    fn materialize_vertices(
+        &self,
+        scope: &'scope ParseScope<'_>,
+        parsed: &ParsedObj<'_>,
+    ) -> ParseResult<BuiltVertexStreams<'scope>> {
+        if self.vertex_keys.is_empty() {
+            return Err(
+                scope.format_failure(ObjFailure::internal("segment-has-no-vertex-references"))
+            );
+        }
+
+        let mut sorted_storage = LiveStorage::new(ImportStorageClass::FormatNormalization);
+        let mut sorted_keys = Vec::new();
+        sorted_storage.reserve_vec(
+            scope,
+            &mut sorted_keys,
+            self.vertex_keys.len(),
+            "obj-sorted-vertex-keys",
+        )?;
+        for (chunk_index, chunk) in self.vertex_keys.chunks(64).enumerate() {
+            scope.poll()?;
+            let chunk_start = chunk_index
+                .checked_mul(64)
+                .ok_or_else(|| scope.allocation_failure("obj-vertex-key-copy-offset"))?;
+            for (relative, key) in chunk.iter().copied().enumerate() {
+                let occurrence = chunk_start
+                    .checked_add(relative)
+                    .ok_or_else(|| scope.allocation_failure("obj-vertex-key-copy-offset"))?;
+                sorted_keys.push(IndexedVertexKey { key, occurrence });
             }
         }
-        self.has_texcoords |= key.texcoord.is_some();
-        self.has_normals |= key.normal.is_some();
-        self.vertex_map.insert(key, index);
-        Ok(index)
+        mtl::interruptible_sort_by(scope, &mut sorted_keys, |_work, left, right| {
+            Ok(left.cmp(right))
+        })?;
+        let mut first_storage = LiveStorage::new(ImportStorageClass::FormatNormalization);
+        let mut first_occurrences = Vec::new();
+        first_storage.reserve_vec(
+            scope,
+            &mut first_occurrences,
+            self.vertex_keys.len(),
+            "obj-first-vertex-occurrences",
+        )?;
+        mtl::for_work_chunks(
+            scope,
+            self.vertex_keys.len(),
+            "obj-first-vertex-occurrence-init-work",
+            |range| {
+                first_occurrences.resize(range.end, false);
+                Ok(())
+            },
+        )?;
+
+        let mut has_texcoords = false;
+        let mut has_normals = false;
+        let mut missing_texcoords = false;
+        let mut missing_normals = false;
+        let mut unique_count = 0usize;
+        let mut previous_key = None;
+        mtl::for_work_chunks(
+            scope,
+            sorted_keys.len(),
+            "obj-vertex-grouping-work",
+            |range| {
+                for cursor in range {
+                    let indexed = sorted_keys[cursor];
+                    let is_first = previous_key != Some(indexed.key);
+                    previous_key = Some(indexed.key);
+                    if !is_first {
+                        continue;
+                    }
+                    first_occurrences[indexed.occurrence] = true;
+                    unique_count = unique_count
+                        .checked_add(1)
+                        .ok_or_else(|| scope.allocation_failure("obj-unique-vertex-count"))?;
+                    has_texcoords |= indexed.key.texcoord.is_some();
+                    has_normals |= indexed.key.normal.is_some();
+                    missing_texcoords |= indexed.key.texcoord.is_none();
+                    missing_normals |= indexed.key.normal.is_none();
+                }
+                Ok(())
+            },
+        )?;
+        warn_partial_attributes(
+            scope,
+            has_texcoords,
+            missing_texcoords,
+            has_normals,
+            missing_normals,
+        )?;
+        let keep_texcoords = has_texcoords && !missing_texcoords;
+        let keep_normals = has_normals && !missing_normals;
+
+        let vertex_permit = scope.begin_work(
+            ImportWorkClass::Vertices,
+            usize_amount(scope, unique_count, "obj-canonical-vertices")?,
+        )?;
+        let channel_count = usize::from(keep_texcoords) + usize::from(keep_normals);
+        let attribute_cells = unique_count
+            .checked_mul(channel_count)
+            .ok_or_else(|| scope.allocation_failure("obj-canonical-attribute-cells"))?;
+        let attribute_permit = scope.begin_work(
+            ImportWorkClass::AttributeCells,
+            usize_amount(scope, attribute_cells, "obj-canonical-attribute-cells")?,
+        )?;
+        let mut positions_storage = LiveStorage::new(ImportStorageClass::SceneConstruction);
+        let mut texcoords_storage = LiveStorage::new(ImportStorageClass::SceneConstruction);
+        let mut normals_storage = LiveStorage::new(ImportStorageClass::SceneConstruction);
+        let mut indices_storage = LiveStorage::new(ImportStorageClass::SceneConstruction);
+        let mut positions = Vec::new();
+        let mut texcoords = Vec::new();
+        let mut normals = Vec::new();
+        let mut indices = Vec::new();
+        positions_storage.reserve_vec(
+            scope,
+            &mut positions,
+            unique_count,
+            "obj-segment-positions",
+        )?;
+        if keep_texcoords {
+            texcoords_storage.reserve_vec(
+                scope,
+                &mut texcoords,
+                unique_count,
+                "obj-segment-texcoords",
+            )?;
+        }
+        if keep_normals {
+            normals_storage.reserve_vec(
+                scope,
+                &mut normals,
+                unique_count,
+                "obj-segment-normals",
+            )?;
+        }
+        indices_storage.reserve_vec(
+            scope,
+            &mut indices,
+            self.vertex_keys.len(),
+            "obj-segment-indices",
+        )?;
+        mtl::for_work_chunks(
+            scope,
+            self.vertex_keys.len(),
+            "obj-vertex-index-init-work",
+            |range| {
+                indices.resize(range.end, 0);
+                Ok(())
+            },
+        )?;
+
+        mtl::for_work_chunks(
+            scope,
+            self.vertex_keys.len(),
+            "obj-vertex-materialization-work",
+            |range| {
+                for occurrence in range {
+                    let key = &self.vertex_keys[occurrence];
+                    if !first_occurrences[occurrence] {
+                        continue;
+                    }
+                    let canonical_index = u32::try_from(positions.len())
+                        .map_err(|_| scope.allocation_failure("obj-vertex-index-space"))?;
+                    indices[occurrence] = canonical_index;
+                    positions.push(parsed.positions[key.position]);
+                    if keep_texcoords {
+                        let Some(index) = key.texcoord else {
+                            return Err(scope.format_failure(ObjFailure::internal(
+                                "complete-texcoord-channel-has-missing-index",
+                            )));
+                        };
+                        texcoords.push(parsed.texcoords[index]);
+                    }
+                    if keep_normals {
+                        let Some(index) = key.normal else {
+                            return Err(scope.format_failure(ObjFailure::internal(
+                                "complete-normal-channel-has-missing-index",
+                            )));
+                        };
+                        normals.push(parsed.normals[index]);
+                    }
+                }
+                Ok(())
+            },
+        )?;
+        let mut current_key = None;
+        let mut canonical_index = 0u32;
+        mtl::for_work_chunks(scope, sorted_keys.len(), "obj-vertex-remap-work", |range| {
+            for cursor in range {
+                let indexed = sorted_keys[cursor];
+                if current_key != Some(indexed.key) {
+                    current_key = Some(indexed.key);
+                    canonical_index = indices[indexed.occurrence];
+                } else {
+                    indices[indexed.occurrence] = canonical_index;
+                }
+            }
+            Ok(())
+        })?;
+
+        attribute_permit.complete()?;
+        vertex_permit.complete()?;
+        drop(first_occurrences);
+        drop(first_storage);
+        drop(sorted_keys);
+        drop(sorted_storage);
+        Ok(BuiltVertexStreams {
+            positions,
+            texcoords,
+            normals,
+            indices,
+            storage: VertexStreamStorage {
+                positions: positions_storage,
+                texcoords: keep_texcoords.then_some(texcoords_storage),
+                normals: keep_normals.then_some(normals_storage),
+                indices: indices_storage,
+            },
+        })
     }
 
-    fn warn_partial_attributes(&self, ctx: &mut ImportContext<'_>) {
-        if self.has_texcoords && self.missing_texcoords {
-            mtl::push_warning(
-                ctx,
-                ctx.source().to_string(),
-                None,
-                "obj.partial_texcoord_channel",
-                "OBJ segment mixes vertices with and without texture coordinates; the partial texture coordinate channel was omitted",
-            );
-        }
-        if self.has_normals && self.missing_normals {
-            mtl::push_warning(
-                ctx,
-                ctx.source().to_string(),
-                None,
-                "obj.partial_normal_channel",
-                "OBJ segment mixes vertices with and without normals; the partial normal channel was omitted",
-            );
-        }
-    }
-
-    fn finish(self, material: Option<MaterialId>) -> Result<Mesh> {
-        let name = self
-            .key
-            .display_name()
-            .map(owned_canonical_string)
-            .transpose()?;
-        let topology = if self.has_polygon {
+    fn finish(
+        self,
+        scope: &'scope ParseScope<'_>,
+        parsed: &ParsedObj<'_>,
+        material: Option<MaterialId>,
+    ) -> ParseResult<FinishedSegment<'scope>> {
+        let streams = self.materialize_vertices(scope, parsed)?;
+        let keep_face_counts = self.has_polygon;
+        let SegmentBuilder {
+            key,
+            vertex_keys,
+            face_vertex_counts,
+            has_polygon,
+            storage,
+        } = self;
+        let SegmentStorage {
+            vertex_keys: vertex_keys_storage,
+            face_vertex_counts: face_counts_storage,
+        } = storage;
+        drop(vertex_keys);
+        drop(vertex_keys_storage);
+        let BuiltVertexStreams {
+            positions,
+            texcoords,
+            normals,
+            indices,
+            storage: stream_storage,
+        } = streams;
+        let mut dynamic_storage = LiveStorage::new(ImportStorageClass::SceneConstruction);
+        let name = if let Some(id) = key.display_name() {
+            Some(owned_canonical_string(
+                scope,
+                &mut dynamic_storage,
+                state_name(scope, parsed, id)?,
+            )?)
+        } else {
+            None
+        };
+        let topology = if has_polygon {
             PrimitiveTopology::Polygons
         } else {
             PrimitiveTopology::Triangles
         };
-        let face_vertex_counts = if self.has_polygon {
-            self.face_vertex_counts
+        let (face_vertex_counts, face_counts_storage) = if keep_face_counts {
+            (face_vertex_counts, Some(face_counts_storage))
         } else {
-            Vec::new()
+            drop(face_vertex_counts);
+            drop(face_counts_storage);
+            (Vec::new(), None)
         };
         let mut metadata = MetadataMap::new();
-        if let Some(object) = &self.key.object {
-            insert_string_metadata(&mut metadata, "obj.object", object)?;
+        if let Some(id) = key.object {
+            insert_string_metadata(
+                scope,
+                &mut dynamic_storage,
+                &mut metadata,
+                "obj:object",
+                state_name(scope, parsed, id)?,
+            )?;
         }
-        if let Some(group) = &self.key.group {
-            insert_string_metadata(&mut metadata, "obj.group", group)?;
+        if let Some(id) = key.group {
+            insert_string_metadata(
+                scope,
+                &mut dynamic_storage,
+                &mut metadata,
+                "obj:group",
+                state_name(scope, parsed, id)?,
+            )?;
         }
-        if let Some(material) = &self.key.material {
-            insert_string_metadata(&mut metadata, "obj.material", material)?;
+        if let Some(id) = key.material {
+            insert_string_metadata(
+                scope,
+                &mut dynamic_storage,
+                &mut metadata,
+                "obj:material",
+                state_name(scope, parsed, id)?,
+            )?;
         }
-        if let Some(smoothing) = &self.key.smoothing {
-            insert_string_metadata(&mut metadata, "obj.smoothing", smoothing)?;
+        if let Some(id) = key.smoothing {
+            insert_string_metadata(
+                scope,
+                &mut dynamic_storage,
+                &mut metadata,
+                "obj:smoothing",
+                state_name(scope, parsed, id)?,
+            )?;
         }
+        let texcoords = if texcoords.is_empty() {
+            Vec::new()
+        } else {
+            let mut channels = Vec::new();
+            dynamic_storage.reserve_vec(
+                scope,
+                &mut channels,
+                1,
+                "obj-texture-coordinate-channels",
+            )?;
+            channels.push(texcoords);
+            channels
+        };
+        let bounds = compute_bounds(scope, &positions)?;
 
-        Ok(Mesh {
-            name,
-            topology,
-            bounds: compute_bounds(&self.positions),
-            positions: self.positions,
-            normals: if self.has_normals && !self.missing_normals {
-                self.normals
-            } else {
-                Vec::new()
+        Ok(FinishedSegment {
+            mesh: Mesh {
+                name,
+                topology,
+                bounds,
+                positions,
+                normals,
+                texcoords,
+                indices,
+                face_vertex_counts,
+                material,
+                metadata,
+                ..Mesh::default()
             },
-            texcoords: if self.has_texcoords && !self.missing_texcoords {
-                vec![self.texcoords]
-            } else {
-                Vec::new()
+            storage: FinishedSegmentStorage {
+                streams: stream_storage,
+                face_vertex_counts: face_counts_storage,
+                dynamic: dynamic_storage,
             },
-            indices: self.indices,
-            face_vertex_counts,
-            material,
-            metadata,
-            ..Mesh::default()
         })
     }
 }
 
-pub(crate) fn scene_from_parsed(
-    ctx: &mut ImportContext<'_>,
-    parsed: ParsedObj,
-    library: &MaterialLibrary,
-) -> Result<Scene> {
+struct BuiltVertexStreams<'scope> {
+    positions: Vec<Vec3>,
+    texcoords: Vec<Vec2>,
+    normals: Vec<Vec3>,
+    indices: Vec<u32>,
+    storage: VertexStreamStorage<'scope>,
+}
+
+struct VertexStreamStorage<'scope> {
+    positions: LiveStorage<'scope>,
+    texcoords: Option<LiveStorage<'scope>>,
+    normals: Option<LiveStorage<'scope>>,
+    indices: LiveStorage<'scope>,
+}
+
+impl VertexStreamStorage<'_> {
+    fn adopt(self, builder: &mut ScopedSceneBuilder<'_, '_>) -> ParseResult<()> {
+        self.positions.adopt(builder)?;
+        if let Some(storage) = self.texcoords {
+            storage.adopt(builder)?;
+        }
+        if let Some(storage) = self.normals {
+            storage.adopt(builder)?;
+        }
+        self.indices.adopt(builder)
+    }
+}
+
+struct FinishedSegment<'scope> {
+    mesh: Mesh,
+    storage: FinishedSegmentStorage<'scope>,
+}
+
+struct FinishedSegmentStorage<'scope> {
+    streams: VertexStreamStorage<'scope>,
+    face_vertex_counts: Option<LiveStorage<'scope>>,
+    dynamic: LiveStorage<'scope>,
+}
+
+impl FinishedSegmentStorage<'_> {
+    fn adopt(self, builder: &mut ScopedSceneBuilder<'_, '_>) -> ParseResult<()> {
+        self.streams.adopt(builder)?;
+        if let Some(storage) = self.face_vertex_counts {
+            storage.adopt(builder)?;
+        }
+        self.dynamic.adopt(builder)
+    }
+}
+
+pub(crate) fn scene_from_parsed<'scope>(
+    scope: &'scope ParseScope<'_>,
+    parsed: ParsedObj<'scope>,
+    library: &MaterialLibrary<'scope>,
+) -> ParseResult<SceneDraft> {
     if parsed.faces.is_empty() {
-        return Err(BaoziError::parse(
-            ctx.source().to_string(),
-            None,
-            "OBJ contains no faces",
-        ));
+        return Err(scope.format_failure(ObjFailure::empty_geometry()));
     }
 
-    let mut builder = SceneBuilder::new();
-    let mut current: Option<SegmentBuilder> = None;
-    let mut material_ids = BTreeMap::new();
-    let mut string_budget = CanonicalStringBudget::new(ctx.limits().max_canonical_string_bytes);
-    let mut topology_cells = 0usize;
-    let mut generated_vertices = 0usize;
+    let mut builder = scope.scene_builder()?;
+    let material_bindings = prepare_material_bindings(scope, &mut builder, library, &parsed)?;
+    let mut current: Option<SegmentBuilder<'scope>> = None;
 
     for face in &parsed.faces {
         let key = SegmentKey::from_face(face);
         let should_flush = current.as_ref().is_some_and(|segment| segment.key != key);
         if should_flush && let Some(segment) = current.take() {
-            flush_segment(
-                ctx,
-                &mut builder,
-                &mut material_ids,
-                library,
-                segment,
-                &mut string_budget,
-                &mut topology_cells,
-            )?;
+            flush_segment(scope, &mut builder, &material_bindings, &parsed, segment)?;
         }
         if current.is_none() {
             current = Some(SegmentBuilder::new(key));
         }
         let Some(segment) = current.as_mut() else {
-            return Err(BaoziError::parse(
-                ctx.source().to_string(),
-                None,
-                "OBJ mesh segment could not be created",
-            ));
+            return Err(scope.format_failure(ObjFailure::internal(
+                "mesh-segment-missing-after-initialization",
+            )));
         };
-        segment.push_face(ctx, &parsed, face, &mut generated_vertices)?;
+        segment.push_face(scope, face)?;
     }
 
     if let Some(segment) = current {
-        flush_segment(
-            ctx,
-            &mut builder,
-            &mut material_ids,
-            library,
-            segment,
-            &mut string_budget,
-            &mut topology_cells,
-        )?;
+        flush_segment(scope, &mut builder, &material_bindings, &parsed, segment)?;
     }
 
-    builder.finish()
+    drop(material_bindings);
+    builder.finish_draft()
 }
 
-fn flush_segment(
-    ctx: &mut ImportContext<'_>,
-    builder: &mut SceneBuilder,
-    material_ids: &mut BTreeMap<String, MaterialId>,
-    library: &MaterialLibrary,
-    segment: SegmentBuilder,
-    string_budget: &mut CanonicalStringBudget,
-    topology_cells: &mut usize,
-) -> Result<()> {
-    let next_meshes = builder
-        .mesh_count()
-        .checked_add(1)
-        .ok_or(BaoziError::LimitExceeded {
-            limit: "max_meshes",
-        })?;
-    if next_meshes > ctx.limits().max_meshes {
-        return Err(BaoziError::LimitExceeded {
-            limit: "max_meshes",
-        });
-    }
+fn flush_segment<'scope>(
+    scope: &'scope ParseScope<'_>,
+    builder: &mut ScopedSceneBuilder<'_, '_>,
+    material_bindings: &MaterialBindings<'scope, '_>,
+    parsed: &ParsedObj<'_>,
+    segment: SegmentBuilder<'scope>,
+) -> ParseResult<()> {
+    let mesh_permit = scope.begin_work(ImportWorkClass::Meshes, 1)?;
+    charge_segment_strings(scope, parsed, &segment.key)?;
 
-    let segment_topology_cells = segment
-        .indices
-        .len()
-        .checked_add(if segment.has_polygon {
-            segment.face_vertex_counts.len()
-        } else {
-            0
-        })
-        .ok_or(BaoziError::LimitExceeded {
-            limit: "max_total_topology_cells",
-        })?;
-    *topology_cells =
-        topology_cells
-            .checked_add(segment_topology_cells)
-            .ok_or(BaoziError::LimitExceeded {
-                limit: "max_total_topology_cells",
-            })?;
-    if *topology_cells > ctx.limits().max_total_topology_cells {
-        return Err(BaoziError::LimitExceeded {
-            limit: "max_total_topology_cells",
-        });
-    }
-    string_budget.debit_segment(&segment.key)?;
-
-    let material = segment
-        .key
-        .material
-        .as_deref()
-        .map(|name| resolve_material(ctx, builder, material_ids, library, name));
-    segment.warn_partial_attributes(ctx);
-    let mesh = segment.finish(material)?;
-    let name = mesh
+    let material = if let Some(id) = segment.key.material {
+        let name = state_name(scope, parsed, id)?;
+        Some(material_bindings.find(scope, name)?.ok_or_else(|| {
+            scope.format_failure(ObjFailure::internal(
+                "segment-material-missing-from-prepared-bindings",
+            ))
+        })?)
+    } else {
+        None
+    };
+    let finished = segment.finish(scope, parsed, material)?;
+    let mut node_storage = LiveStorage::new(ImportStorageClass::SceneConstruction);
+    let name = finished
+        .mesh
         .name
         .as_deref()
-        .map(owned_canonical_string)
+        .map(|value| owned_canonical_string(scope, &mut node_storage, value))
         .transpose()?;
-    let mesh_id = builder.add_mesh(mesh);
+    finished.storage.adopt(builder)?;
+    let mesh_id = builder.add_mesh(finished.mesh)?;
+    let mut mesh_bindings = Vec::new();
+    node_storage.reserve_vec(scope, &mut mesh_bindings, 1, "obj-node-mesh-bindings")?;
+    mesh_bindings.push(MeshBinding::new(mesh_id));
+    node_storage.adopt(builder)?;
     builder.add_child_node(
         builder.root(),
         Node {
             name,
-            mesh_bindings: vec![MeshBinding::new(mesh_id)],
+            mesh_bindings,
             ..Node::default()
         },
     )?;
+    mesh_permit.complete()?;
     Ok(())
 }
 
-fn resolve_material(
-    ctx: &mut ImportContext<'_>,
-    builder: &mut SceneBuilder,
-    material_ids: &mut BTreeMap<String, MaterialId>,
-    library: &MaterialLibrary,
-    name: &str,
-) -> MaterialId {
-    if let Some(id) = material_ids.get(name) {
-        return *id;
-    }
-
-    let material = if let Some(parsed) = library.materials.get(name) {
-        material_from_parsed(builder, parsed)
-    } else {
-        mtl::push_warning(
-            ctx,
-            ctx.source().to_string(),
-            None,
-            "obj.material_missing",
-            format!("OBJ material '{name}' was referenced but not defined"),
-        );
-        Material {
-            name: Some(name.to_owned()),
-            ..Material::default()
-        }
-    };
-    let id = builder.add_material(material);
-    material_ids.insert(name.to_owned(), id);
-    id
+struct MaterialBinding<'parsed> {
+    name: &'parsed str,
+    first_use: usize,
+    id: Option<MaterialId>,
 }
 
-fn material_from_parsed(builder: &mut SceneBuilder, parsed: &ParsedMaterial) -> Material {
+struct MaterialBindings<'scope, 'parsed> {
+    values: Vec<MaterialBinding<'parsed>>,
+    _storage: LiveStorage<'scope>,
+}
+
+impl MaterialBindings<'_, '_> {
+    fn find(&self, scope: &ParseScope<'_>, name: &str) -> ParseResult<Option<MaterialId>> {
+        let index = mtl::interruptible_binary_search_by(scope, &self.values, |work, binding| {
+            work.compare_str(binding.name, name)
+        })?;
+        Ok(index.and_then(|index| self.values[index].id))
+    }
+}
+
+fn prepare_material_bindings<'scope, 'parsed>(
+    scope: &'scope ParseScope<'_>,
+    builder: &mut ScopedSceneBuilder<'_, '_>,
+    library: &MaterialLibrary<'scope>,
+    parsed: &'parsed ParsedObj<'_>,
+) -> ParseResult<MaterialBindings<'scope, 'parsed>> {
+    let faces = &parsed.faces;
+    let mut storage = LiveStorage::new(ImportStorageClass::FormatNormalization);
+    let mut values = Vec::new();
+    mtl::for_work_chunks(
+        scope,
+        faces.len(),
+        "obj-material-binding-scan-work",
+        |range| {
+            for first_use in range {
+                let Some(id) = faces[first_use].material else {
+                    continue;
+                };
+                storage.reserve_vec(scope, &mut values, 1, "obj-material-bindings")?;
+                values.push(MaterialBinding {
+                    name: state_name(scope, parsed, id)?,
+                    first_use,
+                    id: None,
+                });
+            }
+            Ok(())
+        },
+    )?;
+
+    mtl::interruptible_sort_by(scope, &mut values, |work, left, right| {
+        Ok(work
+            .compare_str(left.name, right.name)?
+            .then_with(|| left.first_use.cmp(&right.first_use)))
+    })?;
+    mtl::interruptible_dedup_by(scope, &mut values, |work, previous, current| {
+        Ok(work.compare_str(previous.name, current.name)? == std::cmp::Ordering::Equal)
+    })?;
+    mtl::interruptible_sort_by(scope, &mut values, |_work, left, right| {
+        Ok(left.first_use.cmp(&right.first_use))
+    })?;
+
+    mtl::for_work_chunks(
+        scope,
+        values.len(),
+        "obj-material-binding-build-work",
+        |range| {
+            for index in range {
+                let name = values[index].name;
+                let id = build_material(scope, builder, library, name)?;
+                values[index].id = Some(id);
+            }
+            Ok(())
+        },
+    )?;
+    mtl::interruptible_sort_by(scope, &mut values, |work, left, right| {
+        work.compare_str(left.name, right.name)
+    })?;
+    Ok(MaterialBindings {
+        values,
+        _storage: storage,
+    })
+}
+
+fn build_material<'scope>(
+    scope: &'scope ParseScope<'_>,
+    builder: &mut ScopedSceneBuilder<'_, '_>,
+    library: &MaterialLibrary<'scope>,
+    name: &str,
+) -> ParseResult<MaterialId> {
+    let built = if let Some(parsed) = library.find(scope, name)? {
+        material_from_parsed(scope, builder, parsed)?
+    } else {
+        mtl::push_warning(
+            scope,
+            None,
+            "obj.material_missing",
+            format_args!("OBJ material '{name}' was referenced but not defined"),
+        )?;
+        charge_canonical_string_bytes(scope, name.len())?;
+        let mut storage = LiveStorage::new(ImportStorageClass::SceneConstruction);
+        BuiltMaterial {
+            material: Material {
+                name: Some(owned_canonical_string(scope, &mut storage, name)?),
+                ..Material::default()
+            },
+            storage,
+        }
+    };
+    built.storage.adopt(builder)?;
+    builder.add_material(built.material)
+}
+
+struct BuiltMaterial<'scope> {
+    material: Material,
+    storage: LiveStorage<'scope>,
+}
+
+fn material_from_parsed<'scope>(
+    scope: &'scope ParseScope<'_>,
+    builder: &mut ScopedSceneBuilder<'_, '_>,
+    parsed: &ParsedMaterial<'_>,
+) -> ParseResult<BuiltMaterial<'scope>> {
+    charge_material_strings(scope, parsed)?;
+    let mut storage = LiveStorage::new(ImportStorageClass::SceneConstruction);
     let mut material = Material {
-        name: Some(parsed.name.clone()),
+        name: Some(owned_canonical_string(scope, &mut storage, &parsed.name)?),
         shading_model: ShadingModel::Phong,
         base_color: parsed.base_color,
         emissive: parsed.emissive,
         alpha_mode: parsed.alpha_mode,
-        metadata: parsed.metadata.clone(),
+        metadata: clone_metadata(scope, &mut storage, &parsed.metadata)?,
         ..Material::default()
     };
 
@@ -516,14 +862,27 @@ fn material_from_parsed(builder: &mut SceneBuilder, parsed: &ParsedMaterial) -> 
     }
 
     if let Some(texture) = &parsed.diffuse_texture {
-        let texture_id = builder.add_texture(Texture {
-            name: Some(texture.uri.clone()),
+        let mut texture_storage = LiveStorage::new(ImportStorageClass::SceneConstruction);
+        let texture_value = Texture {
+            name: Some(owned_canonical_string(
+                scope,
+                &mut texture_storage,
+                &texture.uri,
+            )?),
             source: TextureSource::External {
-                uri: texture.uri.clone(),
+                uri: owned_canonical_string(scope, &mut texture_storage, &texture.uri)?,
             },
             sampler: Default::default(),
             metadata: Default::default(),
-        });
+        };
+        texture_storage.adopt(builder)?;
+        let texture_id = builder.add_texture(texture_value)?;
+        storage.reserve_vec(
+            scope,
+            &mut material.texture_slots,
+            1,
+            "obj-material-texture-slots",
+        )?;
         material.texture_slots.push(TextureSlot {
             texture: texture_id,
             role: TextureRole::Diffuse,
@@ -531,33 +890,102 @@ fn material_from_parsed(builder: &mut SceneBuilder, parsed: &ParsedMaterial) -> 
             uv_set: 0,
             scale: 1.0,
             transform: Default::default(),
-            source_key: Some(texture.source_key.to_owned()),
+            source_key: Some(owned_canonical_string(
+                scope,
+                &mut storage,
+                texture.source_key,
+            )?),
         });
     }
 
-    material
+    Ok(BuiltMaterial { material, storage })
 }
 
-fn compute_bounds(positions: &[Vec3]) -> Option<Aabb> {
-    let first = *positions.first()?;
+fn charge_canonical_string_bytes(scope: &ParseScope<'_>, bytes: usize) -> ParseResult<()> {
+    scope
+        .begin_work(
+            ImportWorkClass::CanonicalStringBytes,
+            usize_amount(scope, bytes, "obj-canonical-string-bytes")?,
+        )?
+        .complete()
+}
+
+fn charge_material_strings(scope: &ParseScope<'_>, parsed: &ParsedMaterial<'_>) -> ParseResult<()> {
+    let mut bytes = parsed.name.len();
+    let mut metadata = parsed.metadata.iter();
+    mtl::for_work_chunks(
+        scope,
+        parsed.metadata.len(),
+        "obj-material-string-scan-work",
+        |range| {
+            for _ in range {
+                let (key, value) = metadata.next().ok_or_else(|| {
+                    scope.format_failure(ObjFailure::internal("material-metadata-scan-ended-early"))
+                })?;
+                checked_add_string_bytes(scope, &mut bytes, key.len())?;
+                if let MetadataValue::String(value) = value {
+                    checked_add_string_bytes(scope, &mut bytes, value.len())?;
+                }
+            }
+            Ok(())
+        },
+    )?;
+    if let Some(texture) = &parsed.diffuse_texture {
+        let scan_permit = scope.begin_work(ImportWorkClass::WorkUnits, 1)?;
+        checked_add_string_bytes(scope, &mut bytes, texture.uri.len())?;
+        checked_add_string_bytes(scope, &mut bytes, texture.uri.len())?;
+        checked_add_string_bytes(scope, &mut bytes, texture.source_key.len())?;
+        scan_permit.complete()?;
+    }
+    charge_canonical_string_bytes(scope, bytes)
+}
+
+fn clone_metadata<'scope>(
+    scope: &'scope ParseScope<'_>,
+    storage: &mut LiveStorage<'scope>,
+    source: &MetadataMap,
+) -> ParseResult<MetadataMap> {
+    let mut output = MetadataMap::new();
+    for (key, value) in source {
+        let key = owned_canonical_string(scope, storage, key)?;
+        let value = match value {
+            MetadataValue::Bool(value) => MetadataValue::Bool(*value),
+            MetadataValue::I64(value) => MetadataValue::I64(*value),
+            MetadataValue::F64(value) => MetadataValue::F64(*value),
+            MetadataValue::String(value) => {
+                MetadataValue::String(owned_canonical_string(scope, storage, value)?)
+            }
+        };
+        storage.insert_ordered_map(scope, &mut output, key, value, "obj-material-metadata-map")?;
+    }
+    Ok(output)
+}
+
+fn compute_bounds(scope: &ParseScope<'_>, positions: &[Vec3]) -> ParseResult<Option<Aabb>> {
+    let Some(first) = positions.first().copied() else {
+        return Ok(None);
+    };
     let mut min = first;
     let mut max = first;
-    for position in positions.iter().copied().skip(1) {
-        min.x = min.x.min(position.x);
-        min.y = min.y.min(position.y);
-        min.z = min.z.min(position.z);
-        max.x = max.x.max(position.x);
-        max.y = max.y.max(position.y);
-        max.z = max.z.max(position.z);
-    }
-    Some(Aabb { min, max })
+    mtl::for_work_chunks(scope, positions.len(), "obj-bounds-work", |range| {
+        for position in positions[range].iter().copied() {
+            min.x = min.x.min(position.x);
+            min.y = min.y.min(position.y);
+            min.z = min.z.min(position.z);
+            max.x = max.x.max(position.x);
+            max.y = max.y.max(position.y);
+            max.z = max.z.max(position.z);
+        }
+        Ok(())
+    })?;
+    Ok(Some(Aabb { min, max }))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn key_with_object(object: Arc<str>) -> SegmentKey {
+    fn key_with_object(object: StateNameId) -> SegmentKey {
         SegmentKey {
             object: Some(object),
             group: None,
@@ -567,19 +995,14 @@ mod tests {
     }
 
     #[test]
-    fn segment_keys_compare_interned_identity_in_constant_time() {
-        let long_name = format!("object-{}", "x".repeat(64 * 1024));
-        let interned = Arc::<str>::from(long_name.as_str());
-        let same_identity = Arc::clone(&interned);
-        let equal_content_with_distinct_identity = Arc::<str>::from(long_name.as_str());
-
+    fn segment_keys_compare_state_ids_in_constant_time() {
         assert_eq!(
-            key_with_object(Arc::clone(&interned)),
-            key_with_object(same_identity)
+            key_with_object(StateNameId::from_index(7)),
+            key_with_object(StateNameId::from_index(7))
         );
         assert_ne!(
-            key_with_object(interned),
-            key_with_object(equal_content_with_distinct_identity)
+            key_with_object(StateNameId::from_index(7)),
+            key_with_object(StateNameId::from_index(8))
         );
     }
 }

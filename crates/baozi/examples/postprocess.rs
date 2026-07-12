@@ -1,6 +1,11 @@
-use baozi::{ImportOptions, Importer, PostProcessPipeline, PostProcessStep, Result};
+#![allow(
+    clippy::result_large_err,
+    reason = "facade examples preserve complete bounded terminal evidence by value"
+)]
 
-fn main() -> Result<()> {
+use baozi::{Importer, PostProcessPipeline, PostProcessStep, ProcessedImportResult};
+
+fn main() -> ProcessedImportResult<()> {
     let bytes = b"o quad
 v 0 0 0
 v 1 0 0
@@ -12,14 +17,10 @@ f 1 2 3 4
         PostProcessStep::Triangulate,
         PostProcessStep::GenerateNormals,
         PostProcessStep::GenerateBoundingBoxes,
-    ]);
-    let report = Importer::new().read_bytes_with_postprocess(
-        "quad.obj",
-        bytes,
-        ImportOptions::memory(),
-        &pipeline,
-    )?;
-    let Some(mesh) = report.scene().meshes.first() else {
+    ])
+    .expect("the static example post-process plan must be valid");
+    let report = Importer::new()?.read_bytes_with_postprocess("quad.obj", bytes, &pipeline)?;
+    let Some(mesh) = report.scene().meshes().first() else {
         println!("postprocess completed without meshes");
         return Ok(());
     };
@@ -29,8 +30,8 @@ f 1 2 3 4
     };
 
     println!(
-        "stage={:?} topology={:?} vertices={} indices={} normals={} bounds=({}, {}, {})..({}, {}, {})",
-        report.stage(),
+        "import_phase={:?} topology={:?} vertices={} indices={} normals={} bounds=({}, {}, {})..({}, {}, {})",
+        report.import().last_completed().phase(),
         mesh.topology,
         mesh.positions.len(),
         mesh.indices.len(),

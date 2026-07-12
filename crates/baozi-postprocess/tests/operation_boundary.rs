@@ -1,0 +1,502 @@
+use baozi_core::{
+    Mesh, MeshBinding, Node, PrimitiveTopology, ValidatedScene, Vec3, validate_scene,
+};
+use baozi_operation::{
+    CancellationOrigin, CancellationToken, ControlCause, ProgressDecision, ProgressDeliveryLimits,
+    ProgressEvent,
+};
+use baozi_postprocess::{
+    PostProcessControl, PostProcessDimension, PostProcessError, PostProcessFailure,
+    PostProcessLedgerPhase, PostProcessLedgerSnapshot, PostProcessLimits, PostProcessPipeline,
+    PostProcessProgressPhase, PostProcessProgressUnit, PostProcessRunError, PostProcessStep,
+    PostProcessSuccess,
+};
+use std::error::Error;
+use std::sync::{Arc, Mutex};
+
+#[test]
+fn partial_staging_is_rolled_back_on_step_failure() {
+    let scene = scene_with_meshes([
+        triangle_mesh(),
+        Mesh {
+            positions: vec![
+                Vec3::new(0.0, 0.0, 0.0),
+                Vec3::new(1.0, 0.0, 0.0),
+                Vec3::new(2.0, 0.0, 0.0),
+            ],
+            indices: vec![0, 1, 2],
+            ..Mesh::default()
+        },
+    ]);
+    let generation = scene.generation();
+
+    let failure = PostProcessPipeline::new([PostProcessStep::GenerateNormals])
+        .unwrap()
+        .run(&scene)
+        .unwrap_err()
+        .into_operation_failure()
+        .expect("operation should initialize");
+
+    assert_eq!(scene.generation(), generation);
+    assert!(scene.meshes()[0].normals.is_empty());
+    assert!(scene.meshes()[1].normals.is_empty());
+    assert_eq!(failure.ledger().current_live_bytes(), 0);
+    assert!(failure.ledger().peak_live_bytes() > 0);
+}
+
+#[test]
+fn pre_cancelled_operation_returns_a_typed_control_source() {
+    let scene = scene_with_meshes([triangle_mesh()]);
+    let cancellation = CancellationToken::new();
+    cancellation.cancel();
+    let control = PostProcessControl::default().with_cancellation(cancellation);
+
+    let run_error = PostProcessPipeline::new([PostProcessStep::GenerateNormals])
+        .unwrap()
+        .run_with_control(&scene, control)
+        .unwrap_err();
+    assert!(
+        Error::source(&run_error)
+            .and_then(|source| source.downcast_ref::<PostProcessFailure>())
+            .is_some()
+    );
+    let failure = run_error
+        .into_operation_failure()
+        .expect("operation should initialize");
+
+    assert!(matches!(
+        failure.error(),
+        PostProcessError::Control {
+            source: ControlCause::Cancelled {
+                origin: CancellationOrigin::Signal
+            }
+        }
+    ));
+    let domain_source = Error::source(&failure)
+        .and_then(|source| source.downcast_ref::<PostProcessError>())
+        .expect("failure source should retain the post-process error");
+    assert!(
+        Error::source(domain_source)
+            .and_then(|source| source.downcast_ref::<ControlCause>())
+            .is_some()
+    );
+    assert_eq!(failure.ledger().current_live_bytes(), 0);
+    assert!(scene.meshes()[0].normals.is_empty());
+}
+
+#[test]
+fn observer_panic_discards_live_staging() {
+    let scene = scene_with_meshes([triangle_mesh()]);
+    let control = PostProcessControl::default().with_progress_observer(
+        |event: ProgressEvent<PostProcessProgressPhase, PostProcessProgressUnit>| {
+            if event.phase() == PostProcessProgressPhase::Transform && event.completed() >= 2 {
+                panic!("observer failure");
+            }
+            ProgressDecision::Continue
+        },
+    );
+
+    let failure = PostProcessPipeline::new([PostProcessStep::GenerateNormals])
+        .unwrap()
+        .run_with_control(&scene, control)
+        .unwrap_err()
+        .into_operation_failure()
+        .expect("operation should initialize");
+
+    assert!(matches!(
+        failure.error(),
+        PostProcessError::Control {
+            source: ControlCause::ObserverPanicked
+        }
+    ));
+    assert_eq!(failure.ledger().current_live_bytes(), 0);
+    assert!(failure.ledger().peak_live_bytes() > 0);
+    assert!(scene.meshes()[0].normals.is_empty());
+}
+
+#[test]
+fn observer_cancellation_stops_transform_work_and_rolls_back() {
+    let scene = scene_with_meshes([triangle_mesh()]);
+    let generation = scene.generation();
+    let control = PostProcessControl::default().with_progress_observer(
+        |event: ProgressEvent<PostProcessProgressPhase, PostProcessProgressUnit>| {
+            if event.phase() == PostProcessProgressPhase::Transform && event.completed() >= 2 {
+                ProgressDecision::Cancel
+            } else {
+                ProgressDecision::Continue
+            }
+        },
+    );
+
+    let failure = PostProcessPipeline::new([PostProcessStep::GenerateNormals])
+        .unwrap()
+        .run_with_control(&scene, control)
+        .unwrap_err()
+        .into_operation_failure()
+        .expect("operation should initialize");
+
+    assert!(matches!(
+        failure.error(),
+        PostProcessError::Control {
+            source: ControlCause::Cancelled {
+                origin: CancellationOrigin::Observer
+            }
+        }
+    ));
+    assert_eq!(scene.generation(), generation);
+    assert!(scene.meshes()[0].normals.is_empty());
+    assert_eq!(failure.ledger().current_live_bytes(), 0);
+    assert!(failure.ledger().peak_live_bytes() > 0);
+}
+
+#[test]
+fn cancellation_after_validation_does_not_publish_the_candidate() {
+    let scene = scene_with_meshes([triangle_mesh()]);
+    let generation = scene.generation();
+    let control = PostProcessControl::default().with_progress_observer(
+        |event: ProgressEvent<PostProcessProgressPhase, PostProcessProgressUnit>| {
+            if event.phase() == PostProcessProgressPhase::Validate && event.completed() == 1 {
+                ProgressDecision::Cancel
+            } else {
+                ProgressDecision::Continue
+            }
+        },
+    );
+
+    let failure = PostProcessPipeline::new([PostProcessStep::GenerateNormals])
+        .unwrap()
+        .run_with_control(&scene, control)
+        .unwrap_err()
+        .into_operation_failure()
+        .expect("operation should initialize");
+
+    assert!(matches!(
+        failure.error(),
+        PostProcessError::Control {
+            source: ControlCause::Cancelled {
+                origin: CancellationOrigin::Observer
+            }
+        }
+    ));
+    assert_eq!(scene.generation(), generation);
+    assert!(scene.meshes()[0].normals.is_empty());
+    assert_eq!(failure.ledger().current_live_bytes(), 0);
+    assert!(
+        failure
+            .ledger()
+            .phase(PostProcessLedgerPhase::Validate)
+            .is_some_and(|phase| phase.peak_live_bytes() > 0)
+    );
+}
+
+#[test]
+fn final_observer_cancellation_bypasses_exhausted_transient_quota_and_rolls_back() {
+    let scene = scene_with_meshes([triangle_mesh()]);
+    let generation = scene.generation();
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let observed = Arc::clone(&events);
+    let control = PostProcessControl::default()
+        .with_progress_limits(ProgressDeliveryLimits::new(1, usize::MAX, 0))
+        .with_progress_observer(
+            move |event: ProgressEvent<PostProcessProgressPhase, PostProcessProgressUnit>| {
+                observed
+                    .lock()
+                    .unwrap()
+                    .push((event.phase(), event.completed()));
+                if event.phase() == PostProcessProgressPhase::Validate && event.completed() == 1 {
+                    ProgressDecision::Cancel
+                } else {
+                    ProgressDecision::Continue
+                }
+            },
+        );
+
+    let failure = PostProcessPipeline::new([PostProcessStep::GenerateNormals])
+        .unwrap()
+        .run_with_control(&scene, control)
+        .unwrap_err()
+        .into_operation_failure()
+        .expect("operation should initialize");
+
+    assert!(matches!(
+        failure.error(),
+        PostProcessError::Control {
+            source: ControlCause::Cancelled {
+                origin: CancellationOrigin::Observer
+            }
+        }
+    ));
+    assert_eq!(scene.generation(), generation);
+    assert!(scene.meshes()[0].normals.is_empty());
+    assert_eq!(failure.ledger().current_live_bytes(), 0);
+    assert_eq!(
+        failure
+            .ledger()
+            .dimension(PostProcessDimension::CanonicalBytes)
+            .expect("canonical dimension should be frozen")
+            .committed(),
+        0
+    );
+    assert_eq!(
+        *events.lock().unwrap(),
+        vec![
+            (PostProcessProgressPhase::Transform, 0),
+            (PostProcessProgressPhase::Validate, 1),
+        ]
+    );
+}
+
+#[test]
+fn cancellation_is_polled_inside_central_validation() {
+    let scene = scene_with_meshes([triangle_mesh()]);
+    let cancellation = CancellationToken::new();
+    let observer_cancellation = cancellation.clone();
+    let control = PostProcessControl::default()
+        .with_cancellation(cancellation)
+        .with_progress_observer(
+            move |event: ProgressEvent<PostProcessProgressPhase, PostProcessProgressUnit>| {
+                if event.phase() == PostProcessProgressPhase::Validate && event.completed() == 0 {
+                    observer_cancellation.cancel();
+                }
+                ProgressDecision::Continue
+            },
+        );
+
+    let failure = PostProcessPipeline::new([PostProcessStep::GenerateNormals])
+        .unwrap()
+        .run_with_control(&scene, control)
+        .unwrap_err()
+        .into_operation_failure()
+        .expect("operation should initialize");
+
+    assert!(matches!(
+        failure.error(),
+        PostProcessError::Control {
+            source: ControlCause::Cancelled {
+                origin: CancellationOrigin::Signal
+            }
+        }
+    ));
+    assert!(scene.meshes()[0].normals.is_empty());
+    assert_eq!(failure.ledger().current_live_bytes(), 0);
+}
+
+#[test]
+fn progress_is_monotonic_across_distinct_owner_phases() {
+    let scene = scene_with_meshes([triangle_mesh()]);
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let observed = Arc::clone(&events);
+    let control = PostProcessControl::default().with_progress_observer(
+        move |event: ProgressEvent<PostProcessProgressPhase, PostProcessProgressUnit>| {
+            observed.lock().unwrap().push((
+                event.phase(),
+                event.completed(),
+                event.total(),
+                event.sequence(),
+            ));
+            ProgressDecision::Continue
+        },
+    );
+
+    let success = PostProcessPipeline::new([PostProcessStep::GenerateNormals])
+        .unwrap()
+        .run_with_control(&scene, control)
+        .unwrap();
+
+    let committed = success
+        .ledger()
+        .dimension(PostProcessDimension::CanonicalBytes)
+        .expect("canonical dimension should be frozen")
+        .committed();
+    assert_eq!(
+        committed,
+        success.scene().footprint().accounted_payload_bytes()
+    );
+    assert!(success.ledger().peak_live_bytes() > committed);
+    assert_eq!(success.ledger().current_live_bytes(), 0);
+
+    let events = events.lock().unwrap();
+    assert!(!events.is_empty());
+    for pair in events.windows(2) {
+        let (left_phase, left_completed, _, left_sequence) = pair[0];
+        let (right_phase, right_completed, _, right_sequence) = pair[1];
+        assert!(right_sequence > left_sequence);
+        assert!(phase_order(right_phase) >= phase_order(left_phase));
+        if right_phase == left_phase {
+            assert!(right_completed >= left_completed);
+        }
+    }
+}
+
+#[test]
+fn empty_plan_publishes_an_accounted_generation() {
+    let scene = scene_with_meshes([triangle_mesh()]);
+
+    let success = PostProcessPipeline::new([]).unwrap().run(&scene).unwrap();
+
+    assert_ne!(success.scene().generation(), scene.generation());
+    assert_eq!(success.ledger().current_live_bytes(), 0);
+    assert!(success.ledger().peak_live_bytes() > 0);
+    assert_eq!(
+        success
+            .ledger()
+            .dimension(PostProcessDimension::CanonicalBytes)
+            .expect("canonical dimension should be frozen")
+            .committed(),
+        success.scene().footprint().accounted_payload_bytes()
+    );
+}
+
+#[test]
+fn no_op_path_honors_final_observer_cancellation() {
+    let scene = scene_with_meshes([triangle_mesh()]);
+    let generation = scene.generation();
+    let control = PostProcessControl::default().with_progress_observer(
+        |event: ProgressEvent<PostProcessProgressPhase, PostProcessProgressUnit>| {
+            if event.phase() == PostProcessProgressPhase::Validate && event.completed() == 1 {
+                ProgressDecision::Cancel
+            } else {
+                ProgressDecision::Continue
+            }
+        },
+    );
+
+    let failure = PostProcessPipeline::new([])
+        .unwrap()
+        .run_with_control(&scene, control)
+        .unwrap_err()
+        .into_operation_failure()
+        .expect("operation should initialize");
+
+    assert!(matches!(
+        failure.error(),
+        PostProcessError::Control {
+            source: ControlCause::Cancelled {
+                origin: CancellationOrigin::Observer
+            }
+        }
+    ));
+    assert_eq!(scene.generation(), generation);
+    assert_eq!(failure.ledger().current_live_bytes(), 0);
+    assert_eq!(
+        failure
+            .ledger()
+            .dimension(PostProcessDimension::CanonicalBytes)
+            .expect("canonical dimension should be frozen")
+            .committed(),
+        0
+    );
+}
+
+#[test]
+fn unchanged_transform_path_honors_final_observer_cancellation() {
+    let mut mesh = triangle_mesh();
+    mesh.normals = vec![Vec3::new(0.0, 0.0, 1.0); mesh.positions.len()];
+    let scene = scene_with_meshes([mesh]);
+    let generation = scene.generation();
+    let control = PostProcessControl::default().with_progress_observer(
+        |event: ProgressEvent<PostProcessProgressPhase, PostProcessProgressUnit>| {
+            if event.phase() == PostProcessProgressPhase::Validate && event.completed() == 1 {
+                ProgressDecision::Cancel
+            } else {
+                ProgressDecision::Continue
+            }
+        },
+    );
+
+    let failure = PostProcessPipeline::new([PostProcessStep::GenerateNormals])
+        .unwrap()
+        .run_with_control(&scene, control)
+        .unwrap_err()
+        .into_operation_failure()
+        .expect("operation should initialize");
+
+    assert!(matches!(
+        failure.error(),
+        PostProcessError::Control {
+            source: ControlCause::Cancelled {
+                origin: CancellationOrigin::Observer
+            }
+        }
+    ));
+    assert_eq!(scene.generation(), generation);
+    assert_eq!(failure.ledger().current_live_bytes(), 0);
+    assert_eq!(
+        failure
+            .ledger()
+            .dimension(PostProcessDimension::CanonicalBytes)
+            .expect("canonical dimension should be frozen")
+            .committed(),
+        0
+    );
+}
+
+#[test]
+fn work_limit_failure_releases_staging() {
+    let scene = scene_with_meshes([triangle_mesh()]);
+    let pipeline = PostProcessPipeline::new([PostProcessStep::GenerateNormals])
+        .unwrap()
+        .with_limits(PostProcessLimits::new(2, 1024 * 1024));
+
+    let failure = pipeline
+        .run(&scene)
+        .unwrap_err()
+        .into_operation_failure()
+        .expect("operation should initialize");
+
+    assert!(matches!(
+        failure.error(),
+        PostProcessError::Accounting { .. }
+    ));
+    assert_eq!(failure.ledger().current_live_bytes(), 0);
+    assert!(scene.meshes()[0].normals.is_empty());
+}
+
+#[test]
+fn public_result_types_are_send_and_sync() {
+    fn assert_send_sync<T: Send + Sync>() {}
+
+    assert_send_sync::<PostProcessError>();
+    assert_send_sync::<PostProcessFailure>();
+    assert_send_sync::<PostProcessLedgerSnapshot>();
+    assert_send_sync::<PostProcessPipeline>();
+    assert_send_sync::<PostProcessRunError>();
+    assert_send_sync::<PostProcessSuccess>();
+}
+
+fn triangle_mesh() -> Mesh {
+    Mesh {
+        topology: PrimitiveTopology::Triangles,
+        positions: vec![
+            Vec3::new(0.0, 0.0, 0.0),
+            Vec3::new(1.0, 0.0, 0.0),
+            Vec3::new(0.0, 1.0, 0.0),
+        ],
+        indices: vec![0, 1, 2],
+        ..Mesh::default()
+    }
+}
+
+fn phase_order(phase: PostProcessProgressPhase) -> u8 {
+    match phase {
+        PostProcessProgressPhase::Transform => 0,
+        PostProcessProgressPhase::Validate => 1,
+    }
+}
+
+fn scene_with_meshes<const N: usize>(meshes: [Mesh; N]) -> ValidatedScene {
+    let mut builder = baozi_core::SceneBuilder::try_new().expect("test scene builder allocation");
+    for mesh in meshes {
+        let mesh = builder.add_mesh(mesh).expect("test mesh id should fit");
+        builder
+            .add_child_node(
+                builder.root(),
+                Node {
+                    mesh_bindings: vec![MeshBinding::new(mesh)],
+                    ..Node::default()
+                },
+            )
+            .expect("test node should be valid");
+    }
+    validate_scene(builder.finish_draft()).expect("test scene should be valid")
+}

@@ -1,39 +1,300 @@
 #![allow(dead_code)]
 
-use baozi_core::{BaoziError, Diagnostic, Result, Scene};
-use baozi_format_ply::PlyImporter;
-use baozi_import::{FormatImporter, ImportContext, ImportOptions};
+use baozi_format_ply::{PlyFailureCode, PlyImporter};
+use baozi_import::{
+    CauseOwner, DetectionOptions, FormatFailureDetailValue, FormatFailureEnvelope, FormatSelection,
+    ImportCause, ImportConfigOverlay, ImportDimension, ImportFailure, ImportOperationControl,
+    ImportReport, ImportRequest, ImportRequestLayer, ImportResult, ImportRunError,
+    OptionCompileLimits, RegistryBuildLimits, RegistryBuilder, ResourceLimits,
+    ResourceLimitsOverlay, ScopeAbortCause, import_asset,
+};
 use baozi_io::{AssetPath, MemoryAssetIo};
+use std::error::Error;
+use std::fmt;
 use std::sync::Arc;
 
-pub fn import_bytes(source: &str, bytes: &[u8]) -> Result<(Scene, Vec<Diagnostic>)> {
-    let (scene, diagnostics) = import_bytes_result(source, bytes, ImportOptions::memory())?;
-    Ok((scene?, diagnostics))
+pub type TestResult<T> = Result<T, TestError>;
+
+#[derive(Debug)]
+pub struct TestError(Box<str>);
+
+impl TestError {
+    fn setup(stage: &'static str, error: impl fmt::Display) -> Self {
+        Self(format!("{stage}: {error}").into_boxed_str())
+    }
+
+    fn unexpected_failure(failure: ImportRunError) -> Self {
+        Self(format!("unexpected import failure: {failure:?}").into_boxed_str())
+    }
+}
+
+impl fmt::Display for TestError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl Error for TestError {}
+
+pub fn import_bytes(source: &str, bytes: &[u8]) -> TestResult<ImportReport> {
+    run_import(
+        source,
+        bytes,
+        ResourceLimits::default(),
+        DetectionOptions::default(),
+    )
+    .and_then(|result| result.map_err(TestError::unexpected_failure))
 }
 
 pub fn import_bytes_result(
     source: &str,
     bytes: &[u8],
-    options: ImportOptions,
-) -> Result<(Result<Scene>, Vec<Diagnostic>)> {
-    let path = AssetPath::new(source)?;
-    let mut io = MemoryAssetIo::new();
-    io.insert(path.clone(), Arc::<[u8]>::from(bytes));
-    let mut ctx = ImportContext::with_options(&io, path, options);
-    let result = PlyImporter.read(&mut ctx);
-    let diagnostics = ctx.into_diagnostics();
-    Ok((result, diagnostics))
+    limits: ResourceLimits,
+) -> TestResult<ImportResult<ImportReport>> {
+    run_import(source, bytes, limits, DetectionOptions::default())
 }
 
-pub fn expected_error(result: Result<Scene>) -> Result<BaoziError> {
-    match result {
-        Ok(_) => Err(BaoziError::parse(
-            "test",
-            None,
-            "expected PLY import to fail",
-        )),
-        Err(error) => Ok(error),
+pub fn import_bytes_forced_result(
+    source: &str,
+    bytes: &[u8],
+    limits: ResourceLimits,
+) -> TestResult<ImportResult<ImportReport>> {
+    import_bytes_forced_result_with_control(
+        source,
+        bytes,
+        limits,
+        ImportOperationControl::default(),
+    )
+}
+
+pub fn import_bytes_forced_result_with_control(
+    source: &str,
+    bytes: &[u8],
+    limits: ResourceLimits,
+    control: ImportOperationControl,
+) -> TestResult<ImportResult<ImportReport>> {
+    let format = baozi_core::FormatId::new("org.baozi.ply").expect("static PLY format id is valid");
+    run_import_with_selection_and_control(
+        source,
+        bytes,
+        limits,
+        DetectionOptions::default(),
+        Some(FormatSelection::Forced(format)),
+        control,
+    )
+}
+
+pub fn import_bytes_with_detection(
+    source: &str,
+    bytes: &[u8],
+    limits: ResourceLimits,
+    detection: DetectionOptions,
+) -> TestResult<ImportResult<ImportReport>> {
+    run_import(source, bytes, limits, detection)
+}
+
+fn run_import(
+    source: &str,
+    bytes: &[u8],
+    limits: ResourceLimits,
+    detection: DetectionOptions,
+) -> TestResult<ImportResult<ImportReport>> {
+    run_import_with_selection(source, bytes, limits, detection, None)
+}
+
+fn run_import_with_selection(
+    source: &str,
+    bytes: &[u8],
+    limits: ResourceLimits,
+    detection: DetectionOptions,
+    format_selection: Option<FormatSelection>,
+) -> TestResult<ImportResult<ImportReport>> {
+    run_import_with_selection_and_control(
+        source,
+        bytes,
+        limits,
+        detection,
+        format_selection,
+        ImportOperationControl::default(),
+    )
+}
+
+fn run_import_with_selection_and_control(
+    source: &str,
+    bytes: &[u8],
+    limits: ResourceLimits,
+    detection: DetectionOptions,
+    format_selection: Option<FormatSelection>,
+    control: ImportOperationControl,
+) -> TestResult<ImportResult<ImportReport>> {
+    let path = AssetPath::new(source).map_err(|error| TestError::setup("source path", error))?;
+    let io = MemoryAssetIo::new();
+    io.try_insert(path.clone(), Arc::<[u8]>::from(bytes))
+        .map_err(|error| TestError::setup("memory asset insertion", error))?;
+
+    let mut registry = RegistryBuilder::new();
+    registry
+        .register(PlyImporter)
+        .map_err(|error| TestError::setup("PLY registration", error))?;
+    let snapshot = registry
+        .freeze(RegistryBuildLimits::default())
+        .map_err(|error| TestError::setup("registry freeze", error))?;
+    let mut config = ImportConfigOverlay::default()
+        .with_resource_limits(ResourceLimitsOverlay::from_limits(limits))
+        .with_detection_options(detection);
+    if let Some(selection) = format_selection {
+        config = config.with_format_selection(selection);
     }
+    let request = snapshot
+        .compile_request(
+            &ImportRequest::from_layers(
+                ImportRequestLayer::default(),
+                ImportRequestLayer::new(config),
+            ),
+            OptionCompileLimits::default(),
+        )
+        .map_err(|error| TestError::setup("request compilation", error))?;
+
+    Ok(import_asset(&request, &io, path, control))
+}
+
+pub fn expected_error(result: ImportResult<ImportReport>) -> TestResult<ImportFailure> {
+    match result {
+        Ok(report) => Err(TestError(
+            format!(
+                "expected PLY import to fail, but {} published generation {:?}",
+                report.source(),
+                report.scene().generation()
+            )
+            .into_boxed_str(),
+        )),
+        Err(error) => operation_failure(error),
+    }
+}
+
+pub fn operation_failure(error: ImportRunError) -> TestResult<ImportFailure> {
+    error
+        .into_operation_failure()
+        .map_err(|source| TestError::setup("import initialization", source))
+}
+
+pub fn expected_report(result: ImportResult<ImportReport>) -> TestResult<ImportReport> {
+    result.map_err(TestError::unexpected_failure)
+}
+
+pub fn expected_ply_failure(
+    failure: &ImportFailure,
+    expected_code: PlyFailureCode,
+) -> &FormatFailureEnvelope {
+    let expected_format =
+        baozi_core::FormatId::new("org.baozi.ply").expect("static PLY format id is valid");
+    assert_eq!(
+        failure.cause().owner(),
+        CauseOwner::Format(expected_format.clone())
+    );
+    let ImportCause::Format(envelope) = failure.cause() else {
+        panic!("expected PLY format envelope, got {:?}", failure.cause());
+    };
+    assert_eq!(envelope.format(), &expected_format);
+    assert_eq!(envelope.code(), expected_code.as_str());
+    assert_ply_detail_schema(envelope);
+    envelope
+}
+
+pub fn ply_string_detail<'a>(envelope: &'a FormatFailureEnvelope, key: &str) -> Option<&'a str> {
+    let detail = envelope
+        .details()
+        .iter()
+        .find(|detail| detail.key() == key)?;
+    let FormatFailureDetailValue::String(value) = detail.value() else {
+        panic!("PLY detail {key} is not a string: {:?}", detail.value());
+    };
+    Some(value.as_str())
+}
+
+pub fn ply_unsigned_detail(envelope: &FormatFailureEnvelope, key: &str) -> Option<u64> {
+    let detail = envelope
+        .details()
+        .iter()
+        .find(|detail| detail.key() == key)?;
+    let FormatFailureDetailValue::Unsigned(value) = detail.value() else {
+        panic!("PLY detail {key} is not unsigned: {:?}", detail.value());
+    };
+    Some(value)
+}
+
+fn assert_ply_detail_schema(envelope: &FormatFailureEnvelope) {
+    let details = envelope.details();
+    for (index, detail) in details.iter().enumerate() {
+        assert!(
+            !details.as_slice()[..index]
+                .iter()
+                .any(|prior| prior.key() == detail.key()),
+            "PLY format envelope contains duplicate detail key {}",
+            detail.key()
+        );
+        match detail.key() {
+            "context" => assert!(
+                matches!(detail.value(), FormatFailureDetailValue::String(_)),
+                "PLY context detail must be a string"
+            ),
+            "byte_offset" | "expected" | "actual" => assert!(
+                matches!(detail.value(), FormatFailureDetailValue::Unsigned(_)),
+                "PLY numeric detail {} must be unsigned",
+                detail.key()
+            ),
+            key => panic!("unexpected PLY format detail key {key}"),
+        }
+    }
+}
+
+pub fn assert_resource_limit(failure: &ImportFailure, expected_resource: &'static str) {
+    assert_eq!(failure.cause().owner(), CauseOwner::Import);
+    let ImportCause::Scope(abort) = failure.cause() else {
+        panic!(
+            "expected scope-owned resource failure, got {:?}",
+            failure.cause()
+        );
+    };
+    assert_eq!(abort.owner(), CauseOwner::Import);
+    let expected_dimension = match expected_resource {
+        "max_vertices" => ImportDimension::Vertices,
+        "max_primitives" => ImportDimension::Primitives,
+        "max_records" => ImportDimension::Records,
+        "max_total_topology_cells" => ImportDimension::TopologyCells,
+        "max_vertex_attribute_streams_per_mesh" => ImportDimension::AttributeStreams,
+        "max_total_vertex_attribute_cells" => ImportDimension::AttributeCells,
+        other => panic!("test helper has no dimension mapping for {other}"),
+    };
+    match abort.cause() {
+        ScopeAbortCause::ResourceLimit { resource, .. } => {
+            assert_eq!(*resource, expected_resource);
+        }
+        ScopeAbortCause::Ledger(baozi_import::LedgerCause::LimitExceeded { dimension, .. }) => {
+            assert_eq!(*dimension, expected_dimension);
+        }
+        cause => panic!("expected scope-owned resource failure, got {cause:?}"),
+    }
+}
+
+pub fn assert_scope_resource_limit(
+    failure: &ImportFailure,
+    expected_resource: &'static str,
+    expected_limit: u64,
+) {
+    assert_eq!(failure.cause().owner(), CauseOwner::Import);
+    let ImportCause::Scope(abort) = failure.cause() else {
+        panic!(
+            "expected scope-owned resource failure, got {:?}",
+            failure.cause()
+        );
+    };
+    assert_eq!(abort.owner(), CauseOwner::Import);
+    assert!(matches!(
+        abort.cause(),
+        ScopeAbortCause::ResourceLimit { resource, limit }
+            if *resource == expected_resource && *limit == expected_limit
+    ));
 }
 
 pub fn ascii_triangle() -> &'static [u8] {

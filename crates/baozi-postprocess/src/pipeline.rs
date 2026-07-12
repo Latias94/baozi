@@ -1,267 +1,1224 @@
-use baozi_core::{Aabb, BaoziError, PrimitiveTopology, Result, Scene, Vec3, validate_scene};
+use crate::error::{
+    PostProcessError, PostProcessFailure, PostProcessPlanError, PostProcessRunError,
+    PostProcessStepIssue, PostProcessSuccess, Result, StepResult,
+};
+use crate::operation::{
+    PostProcessControl, PostProcessDimension, PostProcessLedgerPhase, PostProcessLimits,
+    PostProcessOwner, PostProcessProgressPhase, PostProcessProgressUnit,
+};
+use baozi_core::{
+    Aabb, PrimitiveTopology, SceneEdit, SceneReservationKind, SceneValidationControl,
+    SceneValidationFailure, SceneValidationLimits, SceneValidationSuccess, SceneValidationWork,
+    ValidatedScene, Vec3,
+};
+use baozi_operation::{
+    CapacityPlan, CapacityPlanError, Commitment, ControlCause, FinalProgress, LedgerCause,
+    LedgerLimits, LedgerLimitsError, LiveReservation, OperationCoordinator, PublicationCause,
+};
+use std::mem::size_of;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum PostProcessStage {
-    RawImported,
-    ValidatedImported,
-    PostProcessed,
-    ValidatedOutput,
-}
+type Coordinator = OperationCoordinator<
+    PostProcessOwner,
+    PostProcessLedgerPhase,
+    PostProcessProgressPhase,
+    PostProcessProgressUnit,
+    PostProcessDimension,
+>;
+type BufferReservation =
+    LiveReservation<PostProcessOwner, PostProcessLedgerPhase, PostProcessDimension>;
 
+/// A currently implemented post-process transformation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PostProcessStep {
-    ValidateScene,
-    ApplyGlobalScale,
-    NormalizeCoordinates,
     Triangulate,
-    SortByPrimitiveType,
-    FindDegenerates,
-    FindInvalidData,
-    JoinIdenticalVertices,
     GenerateNormals,
-    GenerateTangents,
     GenerateBoundingBoxes,
-    OptimizeMeshes,
-    OptimizeGraph,
 }
 
 impl PostProcessStep {
+    pub const COUNT: usize = 3;
+    pub const MAX_REQUESTED_ENTRIES: usize = 64;
     pub const CANONICAL_ORDER: &'static [Self] = &[
-        Self::ValidateScene,
-        Self::ApplyGlobalScale,
-        Self::NormalizeCoordinates,
         Self::Triangulate,
-        Self::SortByPrimitiveType,
-        Self::FindDegenerates,
-        Self::FindInvalidData,
-        Self::JoinIdenticalVertices,
         Self::GenerateNormals,
-        Self::GenerateTangents,
         Self::GenerateBoundingBoxes,
-        Self::OptimizeMeshes,
-        Self::OptimizeGraph,
     ];
 
-    pub fn is_destructive(self) -> bool {
-        !matches!(self, Self::ValidateScene | Self::GenerateBoundingBoxes)
+    pub const fn is_destructive(self) -> bool {
+        matches!(self, Self::Triangulate | Self::GenerateNormals)
     }
 
-    pub fn name(self) -> &'static str {
+    pub const fn name(self) -> &'static str {
         match self {
-            Self::ValidateScene => "ValidateScene",
-            Self::ApplyGlobalScale => "ApplyGlobalScale",
-            Self::NormalizeCoordinates => "NormalizeCoordinates",
             Self::Triangulate => "Triangulate",
-            Self::SortByPrimitiveType => "SortByPrimitiveType",
-            Self::FindDegenerates => "FindDegenerates",
-            Self::FindInvalidData => "FindInvalidData",
-            Self::JoinIdenticalVertices => "JoinIdenticalVertices",
             Self::GenerateNormals => "GenerateNormals",
-            Self::GenerateTangents => "GenerateTangents",
             Self::GenerateBoundingBoxes => "GenerateBoundingBoxes",
-            Self::OptimizeMeshes => "OptimizeMeshes",
-            Self::OptimizeGraph => "OptimizeGraph",
         }
     }
 
-    pub fn is_implemented(self) -> bool {
-        matches!(
-            self,
-            Self::ValidateScene
-                | Self::Triangulate
-                | Self::GenerateNormals
-                | Self::GenerateBoundingBoxes
-        )
+    const fn bit(self) -> u8 {
+        match self {
+            Self::Triangulate => 1 << 0,
+            Self::GenerateNormals => 1 << 1,
+            Self::GenerateBoundingBoxes => 1 << 2,
+        }
     }
 }
 
+/// An ordered post-process invocation with hard resource limits.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PostProcessPipeline {
-    steps: Vec<PostProcessStep>,
+    steps: [PostProcessStep; PostProcessStep::COUNT],
+    step_count: u8,
+    limits: PostProcessLimits,
 }
 
 impl PostProcessPipeline {
-    pub fn new(steps: impl IntoIterator<Item = PostProcessStep>) -> Self {
-        let requested: Vec<_> = steps.into_iter().collect();
-        let steps = PostProcessStep::CANONICAL_ORDER
-            .iter()
-            .copied()
-            .filter(|step| requested.contains(step))
-            .collect();
-        Self { steps }
+    pub fn new(
+        steps: impl IntoIterator<Item = PostProcessStep>,
+    ) -> std::result::Result<Self, PostProcessPlanError> {
+        let mut mask = 0_u8;
+        for (index, step) in steps.into_iter().enumerate() {
+            if index == PostProcessStep::MAX_REQUESTED_ENTRIES {
+                return Err(PostProcessPlanError::TooManyRequestedEntries {
+                    maximum: PostProcessStep::MAX_REQUESTED_ENTRIES,
+                });
+            }
+            mask |= step.bit();
+            if mask.count_ones() as usize == PostProcessStep::COUNT {
+                break;
+            }
+        }
+
+        let mut ordered = [PostProcessStep::Triangulate; PostProcessStep::COUNT];
+        let mut step_count = 0_usize;
+        for step in PostProcessStep::CANONICAL_ORDER.iter().copied() {
+            if mask & step.bit() != 0 {
+                ordered[step_count] = step;
+                step_count += 1;
+            }
+        }
+
+        Ok(Self {
+            steps: ordered,
+            step_count: step_count as u8,
+            limits: PostProcessLimits::default(),
+        })
+    }
+
+    /// Replaces the default hard operation limits.
+    pub fn with_limits(mut self, limits: PostProcessLimits) -> Self {
+        self.limits = limits;
+        self
     }
 
     pub fn steps(&self) -> &[PostProcessStep] {
-        &self.steps
+        &self.steps[..usize::from(self.step_count)]
     }
 
-    pub fn run(&self, mut scene: Scene) -> Result<Scene> {
-        for step in &self.steps {
+    pub const fn limits(&self) -> PostProcessLimits {
+        self.limits
+    }
+
+    /// Runs with no cancellation signal, observer, or deadline.
+    #[allow(
+        clippy::result_large_err,
+        reason = "terminal post-process failures retain complete bounded evidence without heap indirection"
+    )]
+    pub fn run(&self, input: &ValidatedScene) -> Result<PostProcessSuccess> {
+        self.run_with_control(input, PostProcessControl::default())
+    }
+
+    /// Runs transactionally with invocation-local operation control.
+    ///
+    /// The input is never mutated. Every owned output is published only after
+    /// a controlled clone, full central-validation commit, and final checkpoint.
+    #[allow(
+        clippy::result_large_err,
+        reason = "terminal post-process failures retain complete bounded evidence without heap indirection"
+    )]
+    pub fn run_with_control(
+        &self,
+        input: &ValidatedScene,
+        control: PostProcessControl,
+    ) -> Result<PostProcessSuccess> {
+        self.run_with_control_and_ledger_limits(input, control, self.limits.try_ledger_limits())
+    }
+
+    #[allow(
+        clippy::result_large_err,
+        reason = "terminal post-process failures retain complete bounded evidence without heap indirection"
+    )]
+    fn run_with_control_and_ledger_limits(
+        &self,
+        input: &ValidatedScene,
+        control: PostProcessControl,
+        ledger_limits: std::result::Result<
+            LedgerLimits<PostProcessDimension>,
+            LedgerLimitsError<PostProcessDimension>,
+        >,
+    ) -> Result<PostProcessSuccess> {
+        let ledger_limits = ledger_limits.map_err(PostProcessRunError::initialization)?;
+        #[cfg(feature = "tracing")]
+        let _span = tracing::info_span!("baozi.postprocess").entered();
+
+        let mut coordinator = Coordinator::new(control, ledger_limits);
+        let outcome = self.execute(input, &mut coordinator);
+
+        match outcome {
+            Ok(output) => {
+                finish_success(coordinator, output).map_err(PostProcessRunError::operation)
+            }
+            Err(error) => Err(PostProcessRunError::operation(finish_failure(
+                coordinator,
+                error,
+            ))),
+        }
+    }
+
+    fn execute(
+        &self,
+        input: &ValidatedScene,
+        coordinator: &mut Coordinator,
+    ) -> StepResult<ValidatedScene> {
+        coordinator.poll().map_err(control_error)?;
+
+        let mut state = ExecutionState::new(coordinator);
+        state.begin_transform()?;
+        let validation_limits = ExecutionState::validation_limits();
+        let mut edit = input
+            .begin_edit_with(validation_limits, &mut state)
+            .map_err(validation_failure_error)?;
+        for step in self.steps() {
             match step {
-                PostProcessStep::ValidateScene => validate_scene(&scene)?,
-                PostProcessStep::Triangulate => triangulate_scene(&mut scene)?,
-                PostProcessStep::GenerateNormals => generate_normals(&mut scene)?,
-                PostProcessStep::GenerateBoundingBoxes => generate_bounding_boxes(&mut scene)?,
-                step => {
-                    return Err(postprocess_error(
-                        step.name(),
-                        "postprocess step is not implemented yet",
-                    ));
+                PostProcessStep::Triangulate => {
+                    triangulate_scene(&mut edit, &mut state)?;
+                }
+                PostProcessStep::GenerateNormals => {
+                    generate_normals(&mut edit, &mut state)?;
+                }
+                PostProcessStep::GenerateBoundingBoxes => {
+                    generate_bounding_boxes(&mut edit, &mut state)?;
                 }
             }
         }
-        Ok(scene)
+
+        state.begin_validation()?;
+        let validated = edit
+            .commit_with(validation_limits, &mut state)
+            .map_err(validation_failure_error)?;
+        state.publish(validated)
     }
 }
 
-fn triangulate_scene(scene: &mut Scene) -> Result<()> {
-    validate_scene(scene)?;
+#[allow(
+    clippy::result_large_err,
+    reason = "terminal post-process failures retain complete bounded evidence without heap indirection"
+)]
+fn finish_success(
+    coordinator: Coordinator,
+    output: ValidatedScene,
+) -> std::result::Result<PostProcessSuccess, PostProcessFailure> {
+    match coordinator.finish() {
+        Ok(ledger) => Ok(PostProcessSuccess::new(output, ledger)),
+        Err(finalization_error) => Err(PostProcessFailure::with_finalization_error(
+            PostProcessError::LedgerFinalization,
+            finalization_error,
+        )),
+    }
+}
 
-    for mesh in &mut scene.meshes {
+fn finish_failure(coordinator: Coordinator, error: PostProcessError) -> PostProcessFailure {
+    match coordinator.finish() {
+        Ok(ledger) => PostProcessFailure::new(error, ledger),
+        Err(finalization_error) => {
+            PostProcessFailure::with_finalization_error(error, finalization_error)
+        }
+    }
+}
+
+struct SceneReservation {
+    kind: SceneReservationKind,
+    primary: Option<BufferReservation>,
+    retained: ReservationList,
+}
+
+struct ReservationList {
+    values: Vec<BufferReservation>,
+    capacity: Option<BufferReservation>,
+}
+
+impl ReservationList {
+    const fn new() -> Self {
+        Self {
+            values: Vec::new(),
+            capacity: None,
+        }
+    }
+
+    fn is_vacant(&self) -> bool {
+        self.values.is_empty() && self.capacity.is_none()
+    }
+
+    fn ensure_slots(
+        &mut self,
+        coordinator: &mut Coordinator,
+        phase: PostProcessLedgerPhase,
+        additional: usize,
+        context: &'static str,
+        resource: &'static str,
+    ) -> StepResult<()> {
+        let required = self
+            .values
+            .len()
+            .checked_add(additional)
+            .ok_or(PostProcessError::CapacityExceeded { context, resource })?;
+        if required <= self.values.capacity() {
+            return Ok(());
+        }
+
+        let desired = required.max(4);
+        let plan = CapacityPlan::for_type::<BufferReservation>(
+            self.values.len(),
+            self.values.capacity(),
+            desired,
+        )
+        .map_err(|_| PostProcessError::CapacityExceeded { context, resource })?;
+        let admitted = plan
+            .envelope_delta_bytes()
+            .map_err(|_| PostProcessError::CapacityExceeded { context, resource })?;
+        let existing = measured_capacity_bytes::<BufferReservation>(self.values.capacity())
+            .map_err(|_| PostProcessError::CapacityExceeded { context, resource })?;
+        let envelope = existing
+            .checked_add(admitted)
+            .ok_or(PostProcessError::CapacityExceeded { context, resource })?;
+
+        resize_or_reserve(
+            coordinator,
+            &mut self.capacity,
+            phase,
+            PostProcessDimension::StagingBytes,
+            envelope,
+        )?;
+        plan.verify_preflight(self.values.len(), self.values.capacity())
+            .map_err(|_| PostProcessError::ValidationControlInvariant {
+                message: "reservation-list capacity plan became stale before allocator entry",
+            })?;
+        self.values
+            .try_reserve_exact(plan.allocator_additional())
+            .map_err(|_| PostProcessError::CapacityExceeded { context, resource })?;
+        let retained = plan
+            .finish(self.values.len(), self.values.capacity())
+            .map_err(|_| PostProcessError::ValidationControlInvariant {
+                message: "reservation-list allocator violated the qualified capacity envelope",
+            })?;
+        let actual = existing
+            .checked_add(retained)
+            .ok_or(PostProcessError::CapacityExceeded { context, resource })?;
+        resize_or_reserve(
+            coordinator,
+            &mut self.capacity,
+            phase,
+            PostProcessDimension::StagingBytes,
+            actual,
+        )
+    }
+
+    fn transfer_all(
+        &mut self,
+        coordinator: &mut Coordinator,
+        phase: PostProcessLedgerPhase,
+    ) -> StepResult<()> {
+        for reservation in &mut self.values {
+            coordinator.poll().map_err(control_error)?;
+            coordinator
+                .transfer_reservation(reservation, phase)
+                .map_err(accounting_error)?;
+        }
+        if let Some(capacity) = &mut self.capacity {
+            coordinator.poll().map_err(control_error)?;
+            coordinator
+                .transfer_reservation(capacity, phase)
+                .map_err(accounting_error)?;
+        }
+        Ok(())
+    }
+
+    fn payload_bytes(&self) -> StepResult<u64> {
+        self.values.iter().try_fold(0_u64, |total, token| {
+            total.checked_add(token.bytes()).ok_or_else(|| {
+                accounting_error(LedgerCause::ArithmeticOverflow {
+                    class: baozi_operation::CounterClass::Live,
+                    dimension: PostProcessDimension::CanonicalBytes,
+                })
+            })
+        })
+    }
+
+    fn into_publication(
+        mut self,
+        primary: Option<BufferReservation>,
+    ) -> StepResult<Vec<BufferReservation>> {
+        let additional = usize::from(primary.is_some()) + usize::from(self.capacity.is_some());
+        let required = self.values.len().checked_add(additional).ok_or(
+            PostProcessError::ValidationControlInvariant {
+                message: "publication reservation count overflowed",
+            },
+        )?;
+        if required > self.values.capacity() {
+            return Err(PostProcessError::ValidationControlInvariant {
+                message: "publication reservation slots were not pre-admitted",
+            });
+        }
+        if let Some(primary) = primary {
+            self.values.push(primary);
+        }
+        if let Some(capacity) = self.capacity.take() {
+            self.values.push(capacity);
+        }
+        Ok(self.values)
+    }
+}
+
+impl Default for ReservationList {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+struct ExecutionState<'a> {
+    coordinator: &'a mut Coordinator,
+    completed_work: u64,
+    retained_output: ReservationList,
+    failed_transition: Option<SceneReservation>,
+}
+
+impl<'a> ExecutionState<'a> {
+    fn new(coordinator: &'a mut Coordinator) -> Self {
+        Self {
+            coordinator,
+            completed_work: 0,
+            retained_output: ReservationList::new(),
+            failed_transition: None,
+        }
+    }
+
+    fn validation_limits() -> SceneValidationLimits {
+        SceneValidationLimits::default()
+            .with_max_work(u64::MAX)
+            .with_max_canonical_bytes(u64::MAX)
+            .with_max_scratch_bytes(u64::MAX)
+    }
+
+    fn begin_transform(&mut self) -> StepResult<()> {
+        self.coordinator
+            .report_progress(
+                PostProcessProgressPhase::Transform,
+                PostProcessProgressUnit::WorkItems,
+                0,
+                None,
+            )
+            .map_err(control_error)
+    }
+
+    fn start_work(&mut self, amount: u64) -> StepResult<()> {
+        let mut checkpoint = self.coordinator.checkpoint();
+        checkpoint.poll().map_err(control_error)?;
+        checkpoint
+            .charge_attempted(PostProcessDimension::WorkItems, amount)
+            .map_err(accounting_error)
+    }
+
+    fn finish_work(&mut self, amount: u64) -> StepResult<()> {
+        self.completed_work = self.completed_work.checked_add(amount).ok_or_else(|| {
+            accounting_error(LedgerCause::ArithmeticOverflow {
+                class: baozi_operation::CounterClass::Consumed,
+                dimension: PostProcessDimension::WorkItems,
+            })
+        })?;
+        let mut checkpoint = self.coordinator.checkpoint();
+        checkpoint
+            .charge_consumed(PostProcessDimension::WorkItems, amount)
+            .map_err(accounting_error)?;
+        checkpoint
+            .report_progress(
+                PostProcessProgressPhase::Transform,
+                PostProcessProgressUnit::WorkItems,
+                self.completed_work,
+                None,
+            )
+            .map_err(control_error)
+    }
+
+    fn perform<T>(&mut self, action: impl FnOnce() -> StepResult<T>) -> StepResult<T> {
+        self.start_work(1)?;
+        let value = action()?;
+        self.finish_work(1)?;
+        Ok(value)
+    }
+
+    fn reserve_staging(&mut self, bytes: u64) -> StepResult<Option<BufferReservation>> {
+        if bytes == 0 {
+            return Ok(None);
+        }
+        let mut checkpoint = self.coordinator.checkpoint();
+        checkpoint.poll().map_err(control_error)?;
+        checkpoint
+            .reserve(
+                PostProcessLedgerPhase::Transform,
+                PostProcessDimension::StagingBytes,
+                bytes,
+            )
+            .map(Some)
+            .map_err(accounting_error)
+    }
+
+    fn begin_validation(&mut self) -> StepResult<()> {
+        self.retained_output
+            .transfer_all(self.coordinator, PostProcessLedgerPhase::Validate)?;
+        self.coordinator
+            .report_progress(
+                PostProcessProgressPhase::Validate,
+                PostProcessProgressUnit::WorkItems,
+                0,
+                Some(1),
+            )
+            .map_err(control_error)
+    }
+
+    fn ensure_output_slot(&mut self, step: PostProcessStep) -> StepResult<()> {
+        self.retained_output.ensure_slots(
+            self.coordinator,
+            PostProcessLedgerPhase::Transform,
+            1,
+            step.name(),
+            "staging reservation evidence",
+        )
+    }
+
+    fn retain_output(&mut self, reservation: Option<BufferReservation>) {
+        if let Some(reservation) = reservation {
+            self.retained_output.values.push(reservation);
+        }
+    }
+
+    fn publish(
+        &mut self,
+        validated: SceneValidationSuccess<SceneReservation>,
+    ) -> StepResult<ValidatedScene> {
+        let canonical_bytes = validated.stats().footprint().accounted_payload_bytes();
+        validated.try_publish(|reservation| {
+            if !self.retained_output.is_vacant() {
+                return Err(PostProcessError::ValidationControlInvariant {
+                    message: "canonical transition did not absorb retained output reservations",
+                });
+            }
+            if reservation.kind != SceneReservationKind::CanonicalOutput {
+                return Err(PostProcessError::ValidationControlInvariant {
+                    message: "publication received a non-canonical scene reservation",
+                });
+            }
+            let reservations = reservation.retained.into_publication(reservation.primary)?;
+            let publication = self
+                .coordinator
+                .prepare_publication(
+                    reservations,
+                    &[Commitment::new(
+                        PostProcessDimension::CanonicalBytes,
+                        canonical_bytes,
+                    )],
+                )
+                .map_err(accounting_error)?;
+            self.coordinator
+                .publish(
+                    publication,
+                    FinalProgress::new(
+                        PostProcessProgressPhase::Validate,
+                        PostProcessProgressUnit::WorkItems,
+                        1,
+                    ),
+                )
+                .map_err(publication_error)
+        })
+    }
+
+    fn transition_scene_reservation(
+        &mut self,
+        reservation: &mut SceneReservation,
+        from: SceneReservationKind,
+        to: SceneReservationKind,
+        required_bytes: u64,
+    ) -> StepResult<()> {
+        if reservation.kind != from {
+            return Err(PostProcessError::ValidationControlInvariant {
+                message: "core reservation transition source did not match its live token",
+            });
+        }
+        if from == to {
+            return Err(PostProcessError::ValidationControlInvariant {
+                message: "core used a classification transition for a same-class resize",
+            });
+        }
+
+        let absorbs_output = from == SceneReservationKind::EditCandidate
+            && to == SceneReservationKind::CanonicalOutput;
+        if absorbs_output {
+            if !reservation.retained.is_vacant() {
+                return Err(PostProcessError::ValidationControlInvariant {
+                    message: "edit reservation already retained output evidence",
+                });
+            }
+            reservation.retained = std::mem::take(&mut self.retained_output);
+        }
+
+        if to == SceneReservationKind::CanonicalOutput {
+            reservation.retained.ensure_slots(
+                self.coordinator,
+                PostProcessLedgerPhase::Validate,
+                2,
+                "publication",
+                "publication reservation evidence",
+            )?;
+        }
+
+        let primary_bytes = reservation
+            .primary
+            .as_ref()
+            .map_or(0, BufferReservation::bytes);
+        let available = primary_bytes
+            .checked_add(reservation.retained.payload_bytes()?)
+            .ok_or_else(|| {
+                accounting_error(LedgerCause::ArithmeticOverflow {
+                    class: baozi_operation::CounterClass::Live,
+                    dimension: PostProcessDimension::CanonicalBytes,
+                })
+            })?;
+        if available < required_bytes {
+            return Err(PostProcessError::ValidationControlInvariant {
+                message: "scene reservation transition did not cover the required footprint",
+            });
+        }
+
+        let (source_phase, source_dimension) = reservation_class(from);
+        let (target_phase, target_dimension) = reservation_class(to);
+        let mut remaining = required_bytes;
+        if let Some(source) = reservation.primary.take() {
+            let source_bytes = source.bytes();
+            let target_bytes = source_bytes.min(remaining);
+            remaining -= target_bytes;
+            match self.coordinator.transition_reservation(
+                source,
+                target_phase,
+                target_dimension,
+                target_bytes,
+            ) {
+                Ok(target) => {
+                    if target_bytes != 0 {
+                        reservation.primary = Some(target);
+                    }
+                }
+                Err(error) => {
+                    reservation.primary = Some(
+                        self.coordinator
+                            .checkpoint()
+                            .reserve(source_phase, source_dimension, source_bytes)
+                            .map_err(accounting_error)?,
+                    );
+                    return Err(accounting_error(error));
+                }
+            }
+        }
+
+        let retained_count = reservation.retained.values.len();
+        let retained_source_phase = if absorbs_output {
+            PostProcessLedgerPhase::Validate
+        } else {
+            source_phase
+        };
+        for _ in 0..retained_count {
+            let source = reservation.retained.values.remove(0);
+            let source_bytes = source.bytes();
+            let target_bytes = source_bytes.min(remaining);
+            remaining -= target_bytes;
+            match self.coordinator.transition_reservation(
+                source,
+                target_phase,
+                target_dimension,
+                target_bytes,
+            ) {
+                Ok(target) => {
+                    if target_bytes != 0 {
+                        reservation.retained.values.push(target);
+                    }
+                }
+                Err(error) => {
+                    let restored = self
+                        .coordinator
+                        .checkpoint()
+                        .reserve(
+                            retained_source_phase,
+                            PostProcessDimension::StagingBytes,
+                            source_bytes,
+                        )
+                        .map_err(accounting_error)?;
+                    reservation.retained.values.insert(0, restored);
+                    return Err(accounting_error(error));
+                }
+            }
+        }
+        if remaining != 0 {
+            return Err(PostProcessError::ValidationControlInvariant {
+                message: "scene reservation transition left required bytes uncovered",
+            });
+        }
+        reservation.kind = to;
+        Ok(())
+    }
+}
+
+impl SceneValidationControl for ExecutionState<'_> {
+    type Error = PostProcessError;
+    type Reservation = SceneReservation;
+
+    fn poll(&mut self) -> std::result::Result<(), Self::Error> {
+        self.coordinator.poll().map_err(control_error)
+    }
+
+    fn charge_work(
+        &mut self,
+        _work: SceneValidationWork,
+        amount: u64,
+    ) -> std::result::Result<(), Self::Error> {
+        let mut checkpoint = self.coordinator.checkpoint();
+        checkpoint
+            .charge_attempted(PostProcessDimension::WorkItems, amount)
+            .map_err(accounting_error)?;
+        checkpoint
+            .charge_consumed(PostProcessDimension::WorkItems, amount)
+            .map_err(accounting_error)
+    }
+
+    fn reserve(
+        &mut self,
+        kind: SceneReservationKind,
+        bytes: u64,
+    ) -> std::result::Result<Self::Reservation, Self::Error> {
+        let (phase, dimension) = reservation_class(kind);
+        let primary = if bytes == 0 {
+            None
+        } else {
+            Some(
+                self.coordinator
+                    .checkpoint()
+                    .reserve(phase, dimension, bytes)
+                    .map_err(accounting_error)?,
+            )
+        };
+        Ok(SceneReservation {
+            kind,
+            primary,
+            retained: ReservationList::new(),
+        })
+    }
+
+    fn resize_reservation(
+        &mut self,
+        reservation: &mut Self::Reservation,
+        kind: SceneReservationKind,
+        required_bytes: u64,
+    ) -> std::result::Result<(), Self::Error> {
+        if reservation.kind != kind {
+            return Err(PostProcessError::ValidationControlInvariant {
+                message: "core reservation resize kind did not match its live token",
+            });
+        }
+
+        match &mut reservation.primary {
+            None if required_bytes == 0 => Ok(()),
+            None => {
+                let (phase, dimension) = reservation_class(kind);
+                let token = self
+                    .coordinator
+                    .checkpoint()
+                    .reserve(phase, dimension, required_bytes)
+                    .map_err(accounting_error)?;
+                reservation.primary = Some(token);
+                Ok(())
+            }
+            Some(token) => {
+                self.coordinator
+                    .resize_reservation(token, required_bytes)
+                    .map_err(accounting_error)?;
+                if required_bytes == 0 {
+                    reservation.primary = None;
+                }
+                Ok(())
+            }
+        }
+    }
+
+    fn transition_reservation(
+        &mut self,
+        mut reservation: Self::Reservation,
+        from: SceneReservationKind,
+        to: SceneReservationKind,
+        required_bytes: u64,
+    ) -> std::result::Result<Self::Reservation, Self::Error> {
+        match self.transition_scene_reservation(&mut reservation, from, to, required_bytes) {
+            Ok(()) => Ok(reservation),
+            Err(error) => {
+                if self.failed_transition.is_none() {
+                    self.failed_transition = Some(reservation);
+                    Err(error)
+                } else {
+                    Err(PostProcessError::ValidationControlInvariant {
+                        message: "multiple scene reservation transitions failed in one invocation",
+                    })
+                }
+            }
+        }
+    }
+}
+
+fn resize_or_reserve(
+    coordinator: &mut Coordinator,
+    reservation: &mut Option<BufferReservation>,
+    phase: PostProcessLedgerPhase,
+    dimension: PostProcessDimension,
+    required_bytes: u64,
+) -> StepResult<()> {
+    match reservation {
+        Some(token) => {
+            coordinator
+                .resize_reservation(token, required_bytes)
+                .map_err(accounting_error)?;
+            if required_bytes == 0 {
+                *reservation = None;
+            }
+            Ok(())
+        }
+        None if required_bytes == 0 => Ok(()),
+        None => {
+            *reservation = Some(
+                coordinator
+                    .checkpoint()
+                    .reserve(phase, dimension, required_bytes)
+                    .map_err(accounting_error)?,
+            );
+            Ok(())
+        }
+    }
+}
+
+fn measured_capacity_bytes<T>(capacity: usize) -> std::result::Result<u64, CapacityPlanError> {
+    let plan = CapacityPlan::for_type::<T>(0, 0, capacity)?;
+    plan.finish(0, capacity)
+}
+
+fn reservation_class(kind: SceneReservationKind) -> (PostProcessLedgerPhase, PostProcessDimension) {
+    match kind {
+        SceneReservationKind::EditCandidate => (
+            PostProcessLedgerPhase::Transform,
+            PostProcessDimension::StagingBytes,
+        ),
+        SceneReservationKind::ValidationScratch => (
+            PostProcessLedgerPhase::Validate,
+            PostProcessDimension::StagingBytes,
+        ),
+        SceneReservationKind::CanonicalOutput => (
+            PostProcessLedgerPhase::Validate,
+            PostProcessDimension::CanonicalBytes,
+        ),
+    }
+}
+
+fn triangulate_scene(
+    edit: &mut SceneEdit<SceneReservation>,
+    state: &mut ExecutionState<'_>,
+) -> StepResult<bool> {
+    let mut changed = false;
+    for mesh_index in 0..edit.meshes().len() {
+        state.perform(|| Ok(()))?;
+        let mesh = edit.meshes_mut().get_mut(mesh_index).ok_or_else(|| {
+            PostProcessError::step(
+                PostProcessStep::Triangulate,
+                PostProcessStepIssue::MeshMissing { mesh: mesh_index },
+            )
+        })?;
         if mesh.topology != PrimitiveTopology::Polygons {
             continue;
         }
 
-        let source_elements: Vec<u32> = if mesh.indices.is_empty() {
-            implicit_indices(mesh.element_count())?
+        let uses_implicit_indices = mesh.indices.is_empty();
+        let source_len = if uses_implicit_indices {
+            mesh.element_count()
         } else {
-            mesh.indices.clone()
+            mesh.indices.len()
         };
-
-        let triangle_index_count = mesh
-            .face_vertex_counts
-            .iter()
-            .try_fold(0usize, |total, count| {
-                total.checked_add((*count as usize - 2).checked_mul(3)?)
-            })
-            .ok_or_else(|| postprocess_error("Triangulate", "triangle index count overflow"))?;
-        let mut triangulated = Vec::with_capacity(triangle_index_count);
-        let mut cursor = 0usize;
-
-        for count in &mesh.face_vertex_counts {
-            let count = *count as usize;
-            let face = source_elements
-                .get(cursor..cursor + count)
-                .ok_or_else(|| postprocess_error("Triangulate", "polygon face range is invalid"))?;
-            let anchor = face[0];
-            for index in 1..count - 1 {
-                triangulated.extend([anchor, face[index], face[index + 1]]);
-            }
-            cursor += count;
+        if uses_implicit_indices && source_len > u32::MAX as usize {
+            return Err(PostProcessError::step(
+                PostProcessStep::Triangulate,
+                PostProcessStepIssue::ImplicitIndexOutOfRange {
+                    mesh: mesh_index,
+                    index: source_len.saturating_sub(1),
+                },
+            ));
         }
 
+        let (_source_reservation, mut source_elements) = allocate_vec::<u32>(
+            state,
+            source_len,
+            PostProcessStep::Triangulate,
+            "polygon indices",
+        )?;
+        if uses_implicit_indices {
+            for index in 0..source_len {
+                let index = state.perform(|| {
+                    u32::try_from(index).map_err(|_| {
+                        PostProcessError::step(
+                            PostProcessStep::Triangulate,
+                            PostProcessStepIssue::ImplicitIndexOutOfRange {
+                                mesh: mesh_index,
+                                index,
+                            },
+                        )
+                    })
+                })?;
+                source_elements.push(index);
+            }
+        } else {
+            for index in mesh.indices.iter().copied() {
+                state.perform(|| Ok(()))?;
+                source_elements.push(index);
+            }
+        }
+
+        let mut triangle_index_count = 0usize;
+        for (face_index, count) in mesh.face_vertex_counts.iter().copied().enumerate() {
+            state.start_work(1)?;
+            let count = usize::try_from(count).map_err(|_| {
+                PostProcessError::step(
+                    PostProcessStep::Triangulate,
+                    PostProcessStepIssue::PolygonCornerCountOutOfRange {
+                        mesh: mesh_index,
+                        face: face_index,
+                    },
+                )
+            })?;
+            let triangles = count.checked_sub(2).and_then(|count| count.checked_mul(3));
+            triangle_index_count = triangle_index_count
+                .checked_add(triangles.ok_or_else(|| {
+                    PostProcessError::step(
+                        PostProcessStep::Triangulate,
+                        PostProcessStepIssue::TriangleIndexCountOverflow { mesh: mesh_index },
+                    )
+                })?)
+                .ok_or_else(|| {
+                    PostProcessError::step(
+                        PostProcessStep::Triangulate,
+                        PostProcessStepIssue::TriangleIndexCountOverflow { mesh: mesh_index },
+                    )
+                })?;
+            state.finish_work(1)?;
+        }
+
+        let (reservation, mut triangulated) = allocate_vec::<u32>(
+            state,
+            triangle_index_count,
+            PostProcessStep::Triangulate,
+            "triangulated indices",
+        )?;
+        let mut cursor = 0usize;
+        for (face_index, count) in mesh.face_vertex_counts.iter().copied().enumerate() {
+            let count = usize::try_from(count).map_err(|_| {
+                PostProcessError::step(
+                    PostProcessStep::Triangulate,
+                    PostProcessStepIssue::PolygonCornerCountOutOfRange {
+                        mesh: mesh_index,
+                        face: face_index,
+                    },
+                )
+            })?;
+            let end = cursor.checked_add(count).ok_or_else(|| {
+                PostProcessError::step(
+                    PostProcessStep::Triangulate,
+                    PostProcessStepIssue::PolygonFaceRangeOverflow {
+                        mesh: mesh_index,
+                        face: face_index,
+                    },
+                )
+            })?;
+            let face = source_elements.get(cursor..end).ok_or_else(|| {
+                PostProcessError::step(
+                    PostProcessStep::Triangulate,
+                    PostProcessStepIssue::PolygonFaceRangeInvalid {
+                        mesh: mesh_index,
+                        face: face_index,
+                        end,
+                        available: source_elements.len(),
+                    },
+                )
+            })?;
+            let anchor = face.first().copied().ok_or_else(|| {
+                PostProcessError::step(
+                    PostProcessStep::Triangulate,
+                    PostProcessStepIssue::PolygonFaceEmpty {
+                        mesh: mesh_index,
+                        face: face_index,
+                    },
+                )
+            })?;
+            for index in 1..count.saturating_sub(1) {
+                state.start_work(1)?;
+                let second = face.get(index).copied().ok_or_else(|| {
+                    PostProcessError::step(
+                        PostProcessStep::Triangulate,
+                        PostProcessStepIssue::PolygonCornerMissing {
+                            mesh: mesh_index,
+                            face: face_index,
+                            corner: index,
+                        },
+                    )
+                })?;
+                let third = face.get(index + 1).copied().ok_or_else(|| {
+                    PostProcessError::step(
+                        PostProcessStep::Triangulate,
+                        PostProcessStepIssue::PolygonCornerMissing {
+                            mesh: mesh_index,
+                            face: face_index,
+                            corner: index + 1,
+                        },
+                    )
+                })?;
+                triangulated.extend([anchor, second, third]);
+                state.finish_work(1)?;
+            }
+            cursor = end;
+        }
+        if cursor != source_elements.len() {
+            return Err(PostProcessError::step(
+                PostProcessStep::Triangulate,
+                PostProcessStepIssue::PolygonFaceCountsMismatch {
+                    mesh: mesh_index,
+                    consumed: cursor,
+                    available: source_elements.len(),
+                },
+            ));
+        }
+
+        if reservation.is_some() {
+            state.ensure_output_slot(PostProcessStep::Triangulate)?;
+        }
+        state.retain_output(reservation);
         mesh.topology = PrimitiveTopology::Triangles;
         mesh.indices = triangulated;
         mesh.face_vertex_counts.clear();
+        changed = true;
     }
-
-    validate_scene(scene)
+    Ok(changed)
 }
 
-fn implicit_indices(element_count: usize) -> Result<Vec<u32>> {
-    if element_count > u32::MAX as usize {
-        return Err(postprocess_error(
-            "Triangulate",
-            "implicit polygon indices exceed u32 range",
-        ));
-    }
-    Ok((0..element_count as u32).collect())
-}
-
-fn generate_normals(scene: &mut Scene) -> Result<()> {
-    validate_scene(scene)?;
-
-    for (mesh_index, mesh) in scene.meshes.iter_mut().enumerate() {
+fn generate_normals(
+    edit: &mut SceneEdit<SceneReservation>,
+    state: &mut ExecutionState<'_>,
+) -> StepResult<bool> {
+    let mut changed = false;
+    for mesh_index in 0..edit.meshes().len() {
+        state.perform(|| Ok(()))?;
+        let mesh = edit.meshes_mut().get_mut(mesh_index).ok_or_else(|| {
+            PostProcessError::step(
+                PostProcessStep::GenerateNormals,
+                PostProcessStepIssue::MeshMissing { mesh: mesh_index },
+            )
+        })?;
         if !mesh.normals.is_empty() {
             continue;
         }
         if mesh.topology != PrimitiveTopology::Triangles {
-            return Err(postprocess_error(
-                "GenerateNormals",
-                format!(
-                    "mesh {mesh_index} has {:?} topology; triangulate before generating normals",
-                    mesh.topology
-                ),
+            return Err(PostProcessError::step(
+                PostProcessStep::GenerateNormals,
+                PostProcessStepIssue::RequiresTriangles {
+                    mesh: mesh_index,
+                    topology: mesh.topology,
+                },
             ));
         }
 
-        let mut normals = vec![None; mesh.positions.len()];
+        let (_scratch_reservation, mut normals) = allocate_vec::<Option<Vec3>>(
+            state,
+            mesh.positions.len(),
+            PostProcessStep::GenerateNormals,
+            "normal scratch slots",
+        )?;
+        for _ in 0..mesh.positions.len() {
+            state.perform(|| Ok(()))?;
+            normals.push(None);
+        }
+
         if mesh.indices.is_empty() {
             for (triangle_index, triangle) in mesh.positions.chunks_exact(3).enumerate() {
-                let normal = triangle_normal(
-                    mesh_index,
-                    triangle_index,
-                    triangle[0],
-                    triangle[1],
-                    triangle[2],
-                )?;
+                state.start_work(1)?;
+                let &[a, b, c] = triangle else {
+                    return Err(PostProcessError::step(
+                        PostProcessStep::GenerateNormals,
+                        PostProcessStepIssue::TriangleArityMismatch {
+                            mesh: mesh_index,
+                            triangle: triangle_index,
+                            indexed: false,
+                        },
+                    ));
+                };
+                let normal = triangle_normal(mesh_index, triangle_index, a, b, c)?;
                 for vertex_offset in 0..3 {
-                    let vertex_index = triangle_index * 3 + vertex_offset;
-                    assign_normal(&mut normals[vertex_index], normal, mesh_index, vertex_index)?;
+                    let vertex_index = triangle_index
+                        .checked_mul(3)
+                        .and_then(|index| index.checked_add(vertex_offset))
+                        .ok_or_else(|| {
+                            PostProcessError::step(
+                                PostProcessStep::GenerateNormals,
+                                PostProcessStepIssue::VertexIndexOverflow {
+                                    mesh: mesh_index,
+                                    triangle: triangle_index,
+                                },
+                            )
+                        })?;
+                    let normal_count = normals.len();
+                    let slot = normals.get_mut(vertex_index).ok_or_else(|| {
+                        PostProcessError::step(
+                            PostProcessStep::GenerateNormals,
+                            PostProcessStepIssue::VertexIndexOutOfRange {
+                                mesh: mesh_index,
+                                triangle: triangle_index,
+                                vertex: vertex_index,
+                                upper_bound: normal_count,
+                            },
+                        )
+                    })?;
+                    assign_normal(slot, normal, mesh_index, vertex_index)?;
                 }
+                state.finish_work(1)?;
             }
         } else {
             for (triangle_index, triangle) in mesh.indices.chunks_exact(3).enumerate() {
-                let indices = [
-                    triangle[0] as usize,
-                    triangle[1] as usize,
-                    triangle[2] as usize,
-                ];
+                state.start_work(1)?;
+                let &[a, b, c] = triangle else {
+                    return Err(PostProcessError::step(
+                        PostProcessStep::GenerateNormals,
+                        PostProcessStepIssue::TriangleArityMismatch {
+                            mesh: mesh_index,
+                            triangle: triangle_index,
+                            indexed: true,
+                        },
+                    ));
+                };
+                let indices = [a as usize, b as usize, c as usize];
+                let position = |index| {
+                    mesh.positions.get(index).copied().ok_or_else(|| {
+                        PostProcessError::step(
+                            PostProcessStep::GenerateNormals,
+                            PostProcessStepIssue::VertexIndexOutOfRange {
+                                mesh: mesh_index,
+                                triangle: triangle_index,
+                                vertex: index,
+                                upper_bound: mesh.positions.len(),
+                            },
+                        )
+                    })
+                };
                 let normal = triangle_normal(
                     mesh_index,
                     triangle_index,
-                    mesh.positions[indices[0]],
-                    mesh.positions[indices[1]],
-                    mesh.positions[indices[2]],
+                    position(a as usize)?,
+                    position(b as usize)?,
+                    position(c as usize)?,
                 )?;
                 for vertex_index in indices {
-                    assign_normal(&mut normals[vertex_index], normal, mesh_index, vertex_index)?;
+                    let normal_count = normals.len();
+                    let slot = normals.get_mut(vertex_index).ok_or_else(|| {
+                        PostProcessError::step(
+                            PostProcessStep::GenerateNormals,
+                            PostProcessStepIssue::VertexIndexOutOfRange {
+                                mesh: mesh_index,
+                                triangle: triangle_index,
+                                vertex: vertex_index,
+                                upper_bound: normal_count,
+                            },
+                        )
+                    })?;
+                    assign_normal(slot, normal, mesh_index, vertex_index)?;
                 }
+                state.finish_work(1)?;
             }
         }
 
-        mesh.normals = normals
-            .into_iter()
-            .enumerate()
-            .map(|(vertex_index, normal)| {
-                normal.ok_or_else(|| {
-                    postprocess_error(
-                        "GenerateNormals",
-                        format!(
-                            "mesh {mesh_index} vertex {vertex_index} is not referenced by any triangle"
-                        ),
-                    )
-                })
-            })
-            .collect::<Result<Vec<_>>>()?;
+        let (reservation, mut generated) = allocate_vec::<Vec3>(
+            state,
+            normals.len(),
+            PostProcessStep::GenerateNormals,
+            "generated normals",
+        )?;
+        for (vertex_index, normal) in normals.into_iter().enumerate() {
+            state.start_work(1)?;
+            generated.push(normal.ok_or_else(|| {
+                PostProcessError::step(
+                    PostProcessStep::GenerateNormals,
+                    PostProcessStepIssue::UnreferencedVertex {
+                        mesh: mesh_index,
+                        vertex: vertex_index,
+                    },
+                )
+            })?);
+            state.finish_work(1)?;
+        }
+        if reservation.is_some() {
+            state.ensure_output_slot(PostProcessStep::GenerateNormals)?;
+        }
+        state.retain_output(reservation);
+        mesh.normals = generated;
+        changed = true;
     }
-
-    validate_scene(scene)
+    Ok(changed)
 }
 
-fn generate_bounding_boxes(scene: &mut Scene) -> Result<()> {
-    validate_scene(scene)?;
-    for mesh in &mut scene.meshes {
+fn generate_bounding_boxes(
+    edit: &mut SceneEdit<SceneReservation>,
+    state: &mut ExecutionState<'_>,
+) -> StepResult<bool> {
+    let mut changed = false;
+    for mesh_index in 0..edit.meshes().len() {
+        state.perform(|| Ok(()))?;
+        let mesh = edit.meshes_mut().get_mut(mesh_index).ok_or_else(|| {
+            PostProcessError::step(
+                PostProcessStep::GenerateBoundingBoxes,
+                PostProcessStepIssue::MeshMissing { mesh: mesh_index },
+            )
+        })?;
         if mesh.bounds.is_none() {
-            mesh.bounds = compute_bounds(&mesh.positions);
+            mesh.bounds = compute_bounds(&mesh.positions, state)?;
+            changed |= mesh.bounds.is_some();
         }
     }
-    validate_scene(scene)
+    Ok(changed)
 }
 
-fn compute_bounds(positions: &[Vec3]) -> Option<Aabb> {
-    let first = *positions.first()?;
+fn compute_bounds(positions: &[Vec3], state: &mut ExecutionState<'_>) -> StepResult<Option<Aabb>> {
+    let Some(first) = positions.first().copied() else {
+        return Ok(None);
+    };
+    state.perform(|| Ok(()))?;
     let mut min = first;
     let mut max = first;
     for position in positions.iter().copied().skip(1) {
+        state.start_work(1)?;
         min.x = min.x.min(position.x);
         min.y = min.y.min(position.y);
         min.z = min.z.min(position.z);
         max.x = max.x.max(position.x);
         max.y = max.y.max(position.y);
         max.z = max.z.max(position.z);
+        state.finish_work(1)?;
     }
-    Some(Aabb { min, max })
+    Ok(Some(Aabb { min, max }))
 }
 
 fn triangle_normal(
@@ -270,15 +1227,18 @@ fn triangle_normal(
     a: Vec3,
     b: Vec3,
     c: Vec3,
-) -> Result<Vec3> {
+) -> StepResult<Vec3> {
     let ab = sub_vec3(b, a);
     let ac = sub_vec3(c, a);
     let normal = cross_vec3(ab, ac);
     let length_squared = dot_vec3(normal, normal);
     if length_squared <= 1.0e-20 || !length_squared.is_finite() {
-        return Err(postprocess_error(
-            "GenerateNormals",
-            format!("mesh {mesh_index} triangle {triangle_index} is degenerate"),
+        return Err(PostProcessError::step(
+            PostProcessStep::GenerateNormals,
+            PostProcessStepIssue::DegenerateTriangle {
+                mesh: mesh_index,
+                triangle: triangle_index,
+            },
         ));
     }
     Ok(scale_vec3(normal, length_squared.sqrt().recip()))
@@ -289,16 +1249,17 @@ fn assign_normal(
     normal: Vec3,
     mesh_index: usize,
     vertex_index: usize,
-) -> Result<()> {
+) -> StepResult<()> {
     if let Some(existing) = *slot {
         if normals_compatible(existing, normal) {
             return Ok(());
         }
-        return Err(postprocess_error(
-            "GenerateNormals",
-            format!(
-                "mesh {mesh_index} shared vertex {vertex_index} needs multiple generated normals"
-            ),
+        return Err(PostProcessError::step(
+            PostProcessStep::GenerateNormals,
+            PostProcessStepIssue::ConflictingGeneratedNormal {
+                mesh: mesh_index,
+                vertex: vertex_index,
+            },
         ));
     }
     *slot = Some(normal);
@@ -308,6 +1269,90 @@ fn assign_normal(
 fn normals_compatible(a: Vec3, b: Vec3) -> bool {
     let delta = sub_vec3(a, b);
     dot_vec3(delta, delta) <= 1.0e-10
+}
+
+fn allocate_vec<T>(
+    state: &mut ExecutionState<'_>,
+    element_count: usize,
+    step: PostProcessStep,
+    resource: &'static str,
+) -> StepResult<(Option<BufferReservation>, Vec<T>)> {
+    let plan = CapacityPlan::for_type::<T>(0, 0, element_count)
+        .map_err(|error| capacity_plan_error::<T>(step, element_count, error))?;
+    let admitted = plan
+        .envelope_delta_bytes()
+        .map_err(|error| capacity_plan_error::<T>(step, element_count, error))?;
+    let mut reservation = state.reserve_staging(admitted)?;
+    let mut values = Vec::new();
+    plan.verify_preflight(values.len(), values.capacity())
+        .map_err(|_| PostProcessError::ValidationControlInvariant {
+            message: "staging capacity plan became stale before allocator entry",
+        })?;
+    values
+        .try_reserve_exact(plan.allocator_additional())
+        .map_err(|_| PostProcessError::CapacityExceeded {
+            context: step.name(),
+            resource,
+        })?;
+    let actual = plan.finish(values.len(), values.capacity()).map_err(|_| {
+        PostProcessError::ValidationControlInvariant {
+            message: "staging allocator violated the qualified capacity envelope",
+        }
+    })?;
+    if let Some(token) = &mut reservation {
+        state
+            .coordinator
+            .resize_reservation(token, actual)
+            .map_err(accounting_error)?;
+        if actual == 0 {
+            reservation = None;
+        }
+    }
+    Ok((reservation, values))
+}
+
+fn capacity_plan_error<T>(
+    step: PostProcessStep,
+    element_count: usize,
+    error: CapacityPlanError,
+) -> PostProcessError {
+    match error {
+        CapacityPlanError::CapacityOverflow | CapacityPlanError::AllocationTooLarge { .. } => {
+            PostProcessError::step(
+                step,
+                PostProcessStepIssue::CapacityByteCountOverflow {
+                    element_count,
+                    element_size: size_of::<T>(),
+                },
+            )
+        }
+        _ => PostProcessError::ValidationControlInvariant {
+            message: "staging capacity plan violated its source or platform invariant",
+        },
+    }
+}
+
+fn control_error(source: ControlCause) -> PostProcessError {
+    PostProcessError::Control { source }
+}
+
+fn accounting_error(source: LedgerCause<PostProcessDimension>) -> PostProcessError {
+    PostProcessError::Accounting { source }
+}
+
+fn publication_error(source: PublicationCause<PostProcessDimension>) -> PostProcessError {
+    match source {
+        PublicationCause::Control(source) => control_error(source),
+        PublicationCause::Ledger(source) => accounting_error(source),
+        source => PostProcessError::Publication { source },
+    }
+}
+
+fn validation_failure_error(source: SceneValidationFailure<PostProcessError>) -> PostProcessError {
+    match source {
+        SceneValidationFailure::Scene(source) => PostProcessError::Validation { source },
+        SceneValidationFailure::Control(source) => source,
+    }
 }
 
 fn sub_vec3(a: Vec3, b: Vec3) -> Vec3 {
@@ -330,267 +1375,291 @@ fn dot_vec3(a: Vec3, b: Vec3) -> f32 {
     a.x * b.x + a.y * b.y + a.z * b.z
 }
 
-fn postprocess_error(step: &'static str, message: impl Into<String>) -> BaoziError {
-    BaoziError::PostProcess {
-        step,
-        message: message.into(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use baozi_core::{Mesh, MeshBinding, Node};
+    use baozi_core::{SceneBuilder, validate_scene};
+    use baozi_operation::{LedgerEvidenceError, LedgerEvidencePurpose, LedgerLimitsError};
+    use std::error::Error;
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
 
     #[test]
-    fn pipeline_uses_canonical_order() {
-        let pipeline = PostProcessPipeline::new([
+    #[allow(
+        clippy::result_large_err,
+        reason = "the unwind boundary exercises the complete by-value run error"
+    )]
+    fn ledger_initialization_failure_is_typed_and_does_not_start_the_operation() {
+        let scene = validate_scene(
+            SceneBuilder::try_new()
+                .expect("test scene builder allocation")
+                .finish_draft(),
+        )
+        .expect("empty test scene should be valid");
+        let generation = scene.generation();
+        let node_count = scene.nodes().len();
+        let observer_calls = Arc::new(AtomicUsize::new(0));
+        let observed_calls = Arc::clone(&observer_calls);
+        let control = PostProcessControl::default().with_progress_observer(move |_| {
+            observed_calls.fetch_add(1, Ordering::SeqCst);
+            baozi_operation::ProgressDecision::Continue
+        });
+        let injected = LedgerLimitsError::Evidence {
+            cause: LedgerEvidenceError::AllocationFailed {
+                purpose: LedgerEvidencePurpose::Dimensions,
+                requested_bytes: 128,
+            },
+        };
+        let pipeline = PostProcessPipeline::new([]).expect("empty plan should compile");
+
+        let outcome = catch_unwind(AssertUnwindSafe(|| {
+            pipeline.run_with_control_and_ledger_limits(&scene, control, Err(injected.clone()))
+        }));
+        let error = outcome
+            .expect("ledger initialization failure must not unwind")
+            .expect_err("injected ledger initialization must fail");
+
+        assert!(matches!(
+            &error,
+            PostProcessRunError::Initialization { source } if source == &injected
+        ));
+        let limits_source = Error::source(&error)
+            .and_then(|source| source.downcast_ref::<LedgerLimitsError<PostProcessDimension>>())
+            .expect("run error must retain the typed limits source");
+        assert_eq!(limits_source, &injected);
+        assert!(
+            Error::source(limits_source)
+                .and_then(|source| source.downcast_ref::<LedgerEvidenceError>())
+                .is_some_and(|source| {
+                    matches!(
+                        source,
+                        LedgerEvidenceError::AllocationFailed {
+                            purpose: LedgerEvidencePurpose::Dimensions,
+                            requested_bytes: 128,
+                        }
+                    )
+                })
+        );
+        assert_eq!(observer_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(scene.generation(), generation);
+        assert_eq!(scene.nodes().len(), node_count);
+    }
+
+    #[test]
+    fn finalization_invariant_preserves_primary_error_and_exact_snapshot() {
+        let limits = PostProcessLimits::new(8, 64);
+        let mut coordinator = Coordinator::new(
+            PostProcessControl::default(),
+            limits
+                .try_ledger_limits()
+                .expect("test ledger limits should freeze"),
+        );
+        let reservation = coordinator
+            .checkpoint()
+            .reserve(
+                PostProcessLedgerPhase::Transform,
+                PostProcessDimension::StagingBytes,
+                32,
+            )
+            .expect("test reservation should fit");
+        let primary = PostProcessError::step(
             PostProcessStep::GenerateNormals,
-            PostProcessStep::Triangulate,
-            PostProcessStep::ValidateScene,
-        ]);
-        assert_eq!(
-            pipeline.steps(),
-            &[
-                PostProcessStep::ValidateScene,
-                PostProcessStep::Triangulate,
-                PostProcessStep::GenerateNormals
-            ]
+            PostProcessStepIssue::DegenerateTriangle {
+                mesh: 7,
+                triangle: 11,
+            },
         );
-    }
 
-    #[test]
-    fn unsupported_steps_return_error_instead_of_noop() {
-        let scene = baozi_core::SceneBuilder::new().finish().unwrap();
-        let pipeline = PostProcessPipeline::new([PostProcessStep::GenerateTangents]);
-
-        let error = pipeline.run(scene).unwrap_err();
+        let failure = finish_failure(coordinator, primary);
 
         assert_eq!(
-            error,
-            BaoziError::PostProcess {
-                step: "GenerateTangents",
-                message: "postprocess step is not implemented yet".to_owned()
-            }
-        );
-    }
-
-    #[test]
-    fn triangulate_converts_polygon_faces_to_triangle_indices() {
-        let mut builder = baozi_core::SceneBuilder::new();
-        let mesh = builder.add_mesh(Mesh {
-            topology: PrimitiveTopology::Polygons,
-            positions: vec![
-                Vec3::new(0.0, 0.0, 0.0),
-                Vec3::new(1.0, 0.0, 0.0),
-                Vec3::new(1.0, 1.0, 0.0),
-                Vec3::new(0.0, 1.0, 0.0),
-                Vec3::new(2.0, 0.0, 0.0),
-                Vec3::new(2.0, 1.0, 0.0),
-            ],
-            indices: vec![0, 1, 2, 3, 1, 4, 5],
-            face_vertex_counts: vec![4, 3],
-            ..Mesh::default()
-        });
-        builder
-            .add_child_node(
-                builder.root(),
-                Node {
-                    mesh_bindings: vec![MeshBinding::new(mesh)],
-                    ..Node::default()
+            failure.error(),
+            &PostProcessError::step(
+                PostProcessStep::GenerateNormals,
+                PostProcessStepIssue::DegenerateTriangle {
+                    mesh: 7,
+                    triangle: 11,
                 },
             )
-            .unwrap();
-        let scene = builder.finish().unwrap();
-        let pipeline = PostProcessPipeline::new([PostProcessStep::Triangulate]);
+        );
+        let finalization = failure
+            .finalization_error()
+            .expect("live storage must retain a finalization invariant");
+        assert!(matches!(
+            finalization.cause(),
+            LedgerCause::LiveReservationsRemain { bytes: 32 }
+        ));
+        assert_eq!(finalization.snapshot().current_live_bytes(), 32);
+        assert_eq!(failure.ledger(), finalization.snapshot());
 
-        let scene = pipeline.run(scene).unwrap();
-        let mesh = &scene.meshes[0];
-
-        assert_eq!(mesh.topology, PrimitiveTopology::Triangles);
-        assert_eq!(mesh.face_vertex_counts, Vec::<u32>::new());
-        assert_eq!(mesh.indices, vec![0, 1, 2, 0, 2, 3, 1, 4, 5]);
-    }
-
-    #[test]
-    fn generate_bounding_boxes_fills_missing_bounds() {
-        let mut builder = baozi_core::SceneBuilder::new();
-        let mesh = builder.add_mesh(Mesh {
-            positions: vec![
-                Vec3::new(2.0, -1.0, 0.5),
-                Vec3::new(-3.0, 4.0, 1.5),
-                Vec3::new(0.0, 2.0, -2.0),
-            ],
-            ..Mesh::default()
-        });
-        builder
-            .add_child_node(
-                builder.root(),
-                Node {
-                    mesh_bindings: vec![MeshBinding::new(mesh)],
-                    ..Node::default()
+        let (actual_primary, snapshot, finalization) = failure.into_parts();
+        assert_eq!(
+            actual_primary,
+            PostProcessError::step(
+                PostProcessStep::GenerateNormals,
+                PostProcessStepIssue::DegenerateTriangle {
+                    mesh: 7,
+                    triangle: 11,
                 },
             )
-            .unwrap();
-        let scene = builder.finish().unwrap();
-        let pipeline = PostProcessPipeline::new([PostProcessStep::GenerateBoundingBoxes]);
-
-        let scene = pipeline.run(scene).unwrap();
-        let bounds = scene.meshes[0].bounds.unwrap();
-
-        assert_eq!(bounds.min, Vec3::new(-3.0, -1.0, -2.0));
-        assert_eq!(bounds.max, Vec3::new(2.0, 4.0, 1.5));
-    }
-
-    #[test]
-    fn generate_normals_fills_indexed_triangle_mesh() {
-        let scene = scene_with_mesh(Mesh {
-            topology: PrimitiveTopology::Triangles,
-            positions: vec![
-                Vec3::new(0.0, 0.0, 0.0),
-                Vec3::new(1.0, 0.0, 0.0),
-                Vec3::new(0.0, 1.0, 0.0),
-            ],
-            indices: vec![0, 1, 2],
-            ..Mesh::default()
-        });
-        let pipeline = PostProcessPipeline::new([PostProcessStep::GenerateNormals]);
-
-        let scene = pipeline.run(scene).unwrap();
-
-        assert_eq!(scene.meshes[0].normals, vec![Vec3::new(0.0, 0.0, 1.0); 3]);
-    }
-
-    #[test]
-    fn generate_normals_fills_implicit_triangle_mesh() {
-        let scene = scene_with_mesh(Mesh {
-            topology: PrimitiveTopology::Triangles,
-            positions: vec![
-                Vec3::new(0.0, 0.0, 0.0),
-                Vec3::new(1.0, 0.0, 0.0),
-                Vec3::new(0.0, 1.0, 0.0),
-            ],
-            ..Mesh::default()
-        });
-        let pipeline = PostProcessPipeline::new([PostProcessStep::GenerateNormals]);
-
-        let scene = pipeline.run(scene).unwrap();
-
-        assert_eq!(scene.meshes[0].normals, vec![Vec3::new(0.0, 0.0, 1.0); 3]);
-    }
-
-    #[test]
-    fn generate_normals_does_not_overwrite_existing_normals() {
-        let existing = vec![Vec3::new(0.0, 1.0, 0.0); 3];
-        let scene = scene_with_mesh(Mesh {
-            topology: PrimitiveTopology::Triangles,
-            positions: vec![
-                Vec3::new(0.0, 0.0, 0.0),
-                Vec3::new(1.0, 0.0, 0.0),
-                Vec3::new(0.0, 1.0, 0.0),
-            ],
-            normals: existing.clone(),
-            indices: vec![0, 1, 2],
-            ..Mesh::default()
-        });
-        let pipeline = PostProcessPipeline::new([PostProcessStep::GenerateNormals]);
-
-        let scene = pipeline.run(scene).unwrap();
-
-        assert_eq!(scene.meshes[0].normals, existing);
-    }
-
-    #[test]
-    fn triangulate_then_generate_normals_handles_quad_polygon() {
-        let scene = scene_with_mesh(Mesh {
-            topology: PrimitiveTopology::Polygons,
-            positions: vec![
-                Vec3::new(0.0, 0.0, 0.0),
-                Vec3::new(1.0, 0.0, 0.0),
-                Vec3::new(1.0, 1.0, 0.0),
-                Vec3::new(0.0, 1.0, 0.0),
-            ],
-            indices: vec![0, 1, 2, 3],
-            face_vertex_counts: vec![4],
-            ..Mesh::default()
-        });
-        let pipeline = PostProcessPipeline::new([
-            PostProcessStep::Triangulate,
-            PostProcessStep::GenerateNormals,
-        ]);
-
-        let scene = pipeline.run(scene).unwrap();
-
-        assert_eq!(scene.meshes[0].topology, PrimitiveTopology::Triangles);
-        assert_eq!(scene.meshes[0].indices, vec![0, 1, 2, 0, 2, 3]);
-        assert_eq!(scene.meshes[0].normals, vec![Vec3::new(0.0, 0.0, 1.0); 4]);
-    }
-
-    #[test]
-    fn generate_normals_rejects_degenerate_triangle() {
-        let scene = scene_with_mesh(Mesh {
-            topology: PrimitiveTopology::Triangles,
-            positions: vec![
-                Vec3::new(0.0, 0.0, 0.0),
-                Vec3::new(1.0, 0.0, 0.0),
-                Vec3::new(2.0, 0.0, 0.0),
-            ],
-            indices: vec![0, 1, 2],
-            ..Mesh::default()
-        });
-        let pipeline = PostProcessPipeline::new([PostProcessStep::GenerateNormals]);
-
-        let error = pipeline.run(scene).unwrap_err();
-
-        assert_eq!(
-            error,
-            BaoziError::PostProcess {
-                step: "GenerateNormals",
-                message: "mesh 0 triangle 0 is degenerate".to_owned()
-            }
         );
+        let finalization = finalization.expect("finalization failure must remain owned evidence");
+        assert!(matches!(
+            finalization,
+            LedgerCause::LiveReservationsRemain { bytes: 32 }
+        ));
+        assert_eq!(snapshot.current_live_bytes(), 32);
+        drop(reservation);
     }
 
     #[test]
-    fn generate_normals_rejects_polygon_mesh_without_triangulate() {
-        let scene = scene_with_mesh(Mesh {
-            topology: PrimitiveTopology::Polygons,
-            positions: vec![
-                Vec3::new(0.0, 0.0, 0.0),
-                Vec3::new(1.0, 0.0, 0.0),
-                Vec3::new(1.0, 1.0, 0.0),
-                Vec3::new(0.0, 1.0, 0.0),
-            ],
-            indices: vec![0, 1, 2, 3],
-            face_vertex_counts: vec![4],
-            ..Mesh::default()
-        });
-        let pipeline = PostProcessPipeline::new([PostProcessStep::GenerateNormals]);
-
-        let error = pipeline.run(scene).unwrap_err();
-
-        assert_eq!(
-            error,
-            BaoziError::PostProcess {
-                step: "GenerateNormals",
-                message: "mesh 0 has Polygons topology; triangulate before generating normals"
-                    .to_owned()
-            }
+    fn rejected_scene_reservation_resize_preserves_the_live_token() {
+        let limits = PostProcessLimits::new(8, 8);
+        let mut coordinator = Coordinator::new(
+            PostProcessControl::default(),
+            limits
+                .try_ledger_limits()
+                .expect("test ledger limits should freeze"),
         );
+        let mut state = ExecutionState::new(&mut coordinator);
+        let mut reservation = state
+            .reserve(SceneReservationKind::EditCandidate, 8)
+            .expect("initial reservation should fit");
+
+        let error = state
+            .resize_reservation(&mut reservation, SceneReservationKind::EditCandidate, 9)
+            .expect_err("growth above the frozen limit must fail");
+
+        assert!(matches!(
+            error,
+            PostProcessError::Accounting {
+                source: LedgerCause::LimitExceeded {
+                    dimension: PostProcessDimension::StagingBytes,
+                    value: 9,
+                    limit: 8,
+                    ..
+                }
+            }
+        ));
+        assert_eq!(
+            reservation.primary.as_ref().map(BufferReservation::bytes),
+            Some(8)
+        );
+        assert!(reservation.retained.is_vacant());
+
+        drop(reservation);
+        drop(state);
+        let ledger = coordinator
+            .finish()
+            .expect("dropping the preserved token should finalize cleanly");
+        assert_eq!(ledger.current_live_bytes(), 0);
+        assert_eq!(ledger.peak_live_bytes(), 8);
     }
 
-    fn scene_with_mesh(mesh: Mesh) -> Scene {
-        let mut builder = baozi_core::SceneBuilder::new();
-        let mesh = builder.add_mesh(mesh);
-        builder
-            .add_child_node(
-                builder.root(),
-                Node {
-                    mesh_bindings: vec![MeshBinding::new(mesh)],
-                    ..Node::default()
-                },
+    #[test]
+    fn rejected_reservation_list_growth_keeps_previous_capacity_coverage() {
+        let initial_bytes = CapacityPlan::for_type::<BufferReservation>(0, 0, 4)
+            .and_then(CapacityPlan::envelope_delta_bytes)
+            .expect("test evidence capacity should be representable");
+        let limits = PostProcessLimits::new(8, initial_bytes);
+        let mut coordinator = Coordinator::new(
+            PostProcessControl::default(),
+            limits
+                .try_ledger_limits()
+                .expect("test ledger limits should freeze"),
+        );
+        let mut reservations = ReservationList::new();
+        reservations
+            .ensure_slots(
+                &mut coordinator,
+                PostProcessLedgerPhase::Transform,
+                1,
+                "test",
+                "reservation evidence",
             )
-            .unwrap();
-        builder.finish().unwrap()
+            .expect("initial evidence allocation should fit");
+        let original_capacity = reservations.values.capacity();
+        let original_bytes = reservations
+            .capacity
+            .as_ref()
+            .map(BufferReservation::bytes)
+            .expect("allocated evidence must retain a capacity token");
+
+        let error = reservations
+            .ensure_slots(
+                &mut coordinator,
+                PostProcessLedgerPhase::Transform,
+                original_capacity + 1,
+                "test",
+                "reservation evidence",
+            )
+            .expect_err("growth beyond the frozen live limit must fail");
+
+        assert!(matches!(
+            error,
+            PostProcessError::Accounting {
+                source: LedgerCause::LimitExceeded { .. }
+            }
+        ));
+        assert_eq!(reservations.values.capacity(), original_capacity);
+        assert_eq!(
+            reservations.capacity.as_ref().map(BufferReservation::bytes),
+            Some(original_bytes)
+        );
+
+        drop(reservations);
+        let ledger = coordinator
+            .finish()
+            .expect("dropping capacity evidence should finalize cleanly");
+        assert_eq!(ledger.current_live_bytes(), 0);
+    }
+
+    #[test]
+    fn rejected_scene_transition_is_retained_until_execution_state_drops() {
+        let limits = PostProcessLimits::new(8, 1024 * 1024);
+        let mut coordinator = Coordinator::new(
+            PostProcessControl::default(),
+            limits
+                .try_ledger_limits()
+                .expect("test ledger limits should freeze"),
+        );
+        let mut state = ExecutionState::new(&mut coordinator);
+        let reservation = state
+            .reserve(SceneReservationKind::EditCandidate, 8)
+            .expect("initial reservation should fit");
+
+        let error = match state.transition_reservation(
+            reservation,
+            SceneReservationKind::EditCandidate,
+            SceneReservationKind::CanonicalOutput,
+            9,
+        ) {
+            Ok(_) => panic!("an under-covered transition must fail"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(
+            error,
+            PostProcessError::ValidationControlInvariant { .. }
+        ));
+        let retained = state
+            .failed_transition
+            .as_ref()
+            .expect("failed transition evidence must remain owned by execution state");
+        assert_eq!(
+            retained.primary.as_ref().map(BufferReservation::bytes),
+            Some(8)
+        );
+        assert!(retained.retained.capacity.is_some());
+
+        drop(state);
+        let ledger = coordinator
+            .finish()
+            .expect("dropping rollback evidence should finalize cleanly");
+        assert_eq!(ledger.current_live_bytes(), 0);
+        assert!(ledger.peak_live_bytes() > 8);
     }
 }

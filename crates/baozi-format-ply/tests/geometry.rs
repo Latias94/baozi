@@ -1,21 +1,28 @@
 mod common;
 
-use baozi_core::{BaoziError, PrimitiveTopology, Result, Vec2, Vec3, VertexAttributeData};
+use baozi_core::{PrimitiveTopology, Vec2, Vec3, VertexAttributeData};
+use baozi_format_ply::PlyFailureCode;
+use baozi_import::ResourceLimits;
 use common::{
-    ascii_point_cloud, ascii_quad, ascii_triangle, binary_triangle, expected_error, import_bytes,
-    import_bytes_result,
+    TestResult, ascii_point_cloud, ascii_quad, ascii_triangle, assert_resource_limit,
+    binary_triangle, expected_error, expected_ply_failure, import_bytes, import_bytes_result,
+    ply_unsigned_detail,
 };
 
 #[test]
-fn imports_ascii_triangle_with_common_vertex_streams() -> Result<()> {
-    let (scene, diagnostics) = import_bytes("triangle.ply", ascii_triangle())?;
+fn imports_ascii_triangle_with_common_vertex_streams() -> TestResult<()> {
+    let report = import_bytes("triangle.ply", ascii_triangle())?;
+    let scene = report.scene();
 
-    assert!(diagnostics.is_empty());
-    assert_eq!(scene.meshes.len(), 1);
-    assert_eq!(scene.nodes.len(), 2);
-    assert_eq!(scene.nodes[1].name.as_deref(), Some("PLY"));
+    assert!(report.diagnostics().is_empty());
+    assert_eq!(report.format().id().as_str(), "org.baozi.ply");
+    assert_eq!(report.source().as_str(), "triangle.ply");
+    assert!(report.ledger().current_live_bytes() == 0);
+    assert_eq!(scene.meshes().len(), 1);
+    assert_eq!(scene.nodes().len(), 2);
+    assert_eq!(scene.nodes()[1].name.as_deref(), Some("PLY"));
 
-    let mesh = &scene.meshes[0];
+    let mesh = &scene.meshes()[0];
     assert_eq!(mesh.name.as_deref(), Some("PLY Mesh"));
     assert_eq!(mesh.topology, PrimitiveTopology::Triangles);
     assert_eq!(
@@ -34,11 +41,11 @@ fn imports_ascii_triangle_with_common_vertex_streams() -> Result<()> {
     assert_eq!(mesh.indices, vec![0, 1, 2]);
     assert!(mesh.face_vertex_counts.is_empty());
     assert_eq!(
-        mesh.metadata.get("ply.format"),
+        mesh.metadata.get("ply:format"),
         Some(&baozi_core::MetadataValue::String("ascii".to_owned()))
     );
     assert_eq!(
-        mesh.metadata.get("ply.comment.0"),
+        mesh.metadata.get("ply:comment.0"),
         Some(&baozi_core::MetadataValue::String(
             "fixture triangle".to_owned()
         ))
@@ -54,11 +61,11 @@ fn imports_ascii_triangle_with_common_vertex_streams() -> Result<()> {
 }
 
 #[test]
-fn imports_ascii_point_cloud_without_faces() -> Result<()> {
-    let (scene, diagnostics) = import_bytes("points.ply", ascii_point_cloud())?;
+fn imports_ascii_point_cloud_without_faces() -> TestResult<()> {
+    let report = import_bytes("points.ply", ascii_point_cloud())?;
 
-    assert!(diagnostics.is_empty());
-    let mesh = &scene.meshes[0];
+    assert!(report.diagnostics().is_empty());
+    let mesh = &report.scene().meshes()[0];
     assert_eq!(mesh.topology, PrimitiveTopology::Points);
     assert_eq!(mesh.positions.len(), 2);
     assert!(mesh.indices.is_empty());
@@ -67,11 +74,11 @@ fn imports_ascii_point_cloud_without_faces() -> Result<()> {
 }
 
 #[test]
-fn imports_ascii_quad_as_polygon() -> Result<()> {
-    let (scene, diagnostics) = import_bytes("quad.ply", ascii_quad())?;
+fn imports_ascii_quad_as_polygon() -> TestResult<()> {
+    let report = import_bytes("quad.ply", ascii_quad())?;
 
-    assert!(diagnostics.is_empty());
-    let mesh = &scene.meshes[0];
+    assert!(report.diagnostics().is_empty());
+    let mesh = &report.scene().meshes()[0];
     assert_eq!(mesh.topology, PrimitiveTopology::Polygons);
     assert_eq!(mesh.indices, vec![0, 1, 2, 3]);
     assert_eq!(mesh.face_vertex_counts, vec![4]);
@@ -79,17 +86,17 @@ fn imports_ascii_quad_as_polygon() -> Result<()> {
 }
 
 #[test]
-fn imports_binary_little_endian_triangle() -> Result<()> {
+fn imports_binary_little_endian_triangle() -> TestResult<()> {
     let bytes = binary_triangle(true);
-    let (scene, diagnostics) = import_bytes("triangle-le.ply", &bytes)?;
+    let report = import_bytes("triangle-le.ply", &bytes)?;
 
-    assert!(diagnostics.is_empty());
-    let mesh = &scene.meshes[0];
+    assert!(report.diagnostics().is_empty());
+    let mesh = &report.scene().meshes()[0];
     assert_eq!(mesh.topology, PrimitiveTopology::Triangles);
     assert_eq!(mesh.positions[1], Vec3::new(1.0, 0.0, 0.0));
     assert_eq!(mesh.indices, vec![0, 1, 2]);
     assert_eq!(
-        mesh.metadata.get("ply.format"),
+        mesh.metadata.get("ply:format"),
         Some(&baozi_core::MetadataValue::String(
             "binary_little_endian".to_owned()
         ))
@@ -98,17 +105,17 @@ fn imports_binary_little_endian_triangle() -> Result<()> {
 }
 
 #[test]
-fn imports_binary_big_endian_triangle() -> Result<()> {
+fn imports_binary_big_endian_triangle() -> TestResult<()> {
     let bytes = binary_triangle(false);
-    let (scene, diagnostics) = import_bytes("triangle-be.ply", &bytes)?;
+    let report = import_bytes("triangle-be.ply", &bytes)?;
 
-    assert!(diagnostics.is_empty());
-    let mesh = &scene.meshes[0];
+    assert!(report.diagnostics().is_empty());
+    let mesh = &report.scene().meshes()[0];
     assert_eq!(mesh.topology, PrimitiveTopology::Triangles);
     assert_eq!(mesh.positions[2], Vec3::new(0.0, 1.0, 0.0));
     assert_eq!(mesh.indices, vec![0, 1, 2]);
     assert_eq!(
-        mesh.metadata.get("ply.format"),
+        mesh.metadata.get("ply:format"),
         Some(&baozi_core::MetadataValue::String(
             "binary_big_endian".to_owned()
         ))
@@ -117,33 +124,29 @@ fn imports_binary_big_endian_triangle() -> Result<()> {
 }
 
 #[test]
-fn malformed_header_is_parse_error() -> Result<()> {
-    let (result, diagnostics) = import_bytes_result(
+fn malformed_header_is_parse_error() -> TestResult<()> {
+    let result = import_bytes_result(
         "bad.ply",
         b"not-ply\nformat ascii 1.0\nend_header\n",
-        Default::default(),
+        ResourceLimits::default(),
     )?;
     let error = expected_error(result)?;
 
-    assert!(diagnostics.is_empty());
-    assert!(matches!(error, BaoziError::Parse { .. }));
-    assert!(error.to_string().contains("must start"));
+    assert!(error.diagnostics().is_empty());
+    let envelope = expected_ply_failure(&error, PlyFailureCode::InvalidHeader);
+    assert_eq!(ply_unsigned_detail(envelope, "byte_offset"), Some(0));
+    assert_eq!(envelope.details().len(), 1);
     Ok(())
 }
 
 #[test]
-fn vertex_limit_is_enforced_from_header() -> Result<()> {
-    let mut options = baozi_import::ImportOptions::memory();
-    options.limits.max_vertices = 1;
-    let (result, diagnostics) = import_bytes_result("points.ply", ascii_point_cloud(), options)?;
+fn vertex_limit_is_enforced_from_header() -> TestResult<()> {
+    let mut limits = ResourceLimits::default();
+    limits.max_vertices = 1;
+    let result = import_bytes_result("points.ply", ascii_point_cloud(), limits)?;
     let error = expected_error(result)?;
 
-    assert!(diagnostics.is_empty());
-    assert!(matches!(
-        error,
-        BaoziError::LimitExceeded {
-            limit: "max_vertices"
-        }
-    ));
+    assert!(error.diagnostics().is_empty());
+    assert_resource_limit(&error, "max_vertices");
     Ok(())
 }

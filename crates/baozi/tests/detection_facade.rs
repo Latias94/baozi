@@ -1,3 +1,7 @@
+#![allow(
+    clippy::result_large_err,
+    reason = "facade tests preserve complete bounded terminal evidence by value"
+)]
 #![cfg(feature = "format-obj")]
 
 #[cfg(any(feature = "format-stl", feature = "format-ply"))]
@@ -27,10 +31,10 @@ fn greedy_obj_detection_does_not_block_large_binary_stl() -> Result<()> {
     let bytes = large_binary_stl(100);
     assert!(bytes.len() > 4096);
 
-    let report = Importer::new().read_bytes("large.mesh", bytes)?;
+    let report = Importer::new()?.read_bytes("large.mesh", bytes)?;
 
-    assert_eq!(report.format().id(), "stl");
-    assert_eq!(report.scene().meshes.len(), 1);
+    assert_eq!(report.format().id().as_str(), "org.baozi.stl");
+    assert_eq!(report.scene().meshes().len(), 1);
     Ok(())
 }
 
@@ -56,9 +60,9 @@ end_header\n\
     );
     assert!(bytes.len() > 4096);
 
-    let report = Importer::new().read_bytes("large.mesh", bytes)?;
+    let report = Importer::new()?.read_bytes("large.mesh", bytes)?;
 
-    assert_eq!(report.format().id(), "ply");
-    assert_eq!(report.scene().meshes.len(), 1);
+    assert_eq!(report.format().id().as_str(), "org.baozi.ply");
+    assert_eq!(report.scene().meshes().len(), 1);
     Ok(())
 }

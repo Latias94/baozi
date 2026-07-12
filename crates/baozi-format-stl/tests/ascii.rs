@@ -1,214 +1,293 @@
 mod common;
 
-use baozi_core::{BaoziError, Result};
-use baozi_import::ImportOptions;
-use baozi_test_support::SceneSnapshot;
-use common::{ascii_triangle, expected_error, import_bytes, import_bytes_result};
+use baozi_format_stl::StlFailureCode;
+use baozi_import::{ImportCause, ImportDimension, ResourceLimits, ScopeAbortCause};
+use common::{
+    ascii_triangle, expected_stl_failure, import_bytes, import_bytes_with_limits,
+    stl_string_detail, stl_unsigned_detail,
+};
+use std::error::Error;
+
+type TestResult = Result<(), Box<dyn Error + Send + Sync>>;
 
 #[test]
-fn imports_one_triangle_ascii_stl() -> Result<()> {
+fn imports_one_triangle_ascii_stl_through_session() -> TestResult {
     let bytes = ascii_triangle("triangle");
-    let (scene, diagnostics) = import_bytes("triangle.stl", bytes.as_bytes())?;
-    let snapshot = SceneSnapshot::from_scene_with_diagnostics(&scene, &diagnostics);
-    let text = snapshot.as_str();
+    let report = import_bytes("triangle.stl", bytes.as_bytes())?;
+    let scene = report.scene();
 
-    assert!(text.contains("scene nodes=2 meshes=1 materials=1"));
-    assert!(text.contains(
-        "node 1 name=triangle parent=0 children=[] meshes=[mesh:0 skin:-] camera=<none> light=<none> metadata=[]"
-    ));
-    assert!(text.contains("mesh 0 name=triangle topology=Triangles"));
-    assert!(text.contains("vertices=3 indices=3 faces=<fixed> material=0"));
-    assert!(text.contains("metadata=[stl.source,stl.storage]"));
-    assert!(text.contains("indices=[0,1,2]"));
-    assert!(text.contains("face_vertex_counts=[]"));
-    assert!(text.contains("diagnostics count=0"));
+    assert_eq!(report.format().id().as_str(), "org.baozi.stl");
+    assert_eq!(scene.nodes().len(), 2);
+    assert_eq!(scene.meshes().len(), 1);
+    assert_eq!(scene.materials().len(), 1);
+    assert_eq!(scene.nodes()[1].name.as_deref(), Some("triangle"));
+    assert_eq!(scene.meshes()[0].positions.len(), 3);
+    assert_eq!(scene.meshes()[0].indices, [0, 1, 2]);
+    assert!(report.diagnostics().is_empty());
+    assert_eq!(report.ledger().current_live_bytes(), 0);
+    assert!(
+        report
+            .ledger()
+            .dimension(ImportDimension::ScratchBytes)
+            .expect("STL normalization storage")
+            .peak_live_bytes()
+            > 0
+    );
+    assert!(
+        report
+            .ledger()
+            .dimension(ImportDimension::CanonicalOutputBytes)
+            .expect("STL scene storage")
+            .peak_live_bytes()
+            > 0
+    );
+    assert!(
+        report
+            .ledger()
+            .dimension(ImportDimension::DecodeWork)
+            .expect("STL decode work")
+            .consumed()
+            >= bytes.len() as u64
+    );
+    for (dimension, consumed) in [
+        (ImportDimension::Solids, 1),
+        (ImportDimension::Primitives, 1),
+        (ImportDimension::AttributeStreams, 2),
+        (ImportDimension::GraphNodes, 1),
+        (ImportDimension::GraphEdges, 1),
+    ] {
+        assert_eq!(
+            report
+                .ledger()
+                .dimension(dimension)
+                .expect("STL work dimension")
+                .consumed(),
+            consumed
+        );
+    }
     Ok(())
 }
 
 #[test]
-fn imports_multiple_ascii_solids_as_multiple_meshes() -> Result<()> {
+fn imports_multiple_ascii_solids_as_multiple_meshes() -> TestResult {
     let bytes = format!("{}{}", ascii_triangle("left"), ascii_triangle("right"));
-    let (scene, _) = import_bytes("multi.stl", bytes.as_bytes())?;
+    let report = import_bytes("multi.stl", bytes.as_bytes())?;
+    let scene = report.scene();
 
-    assert_eq!(scene.meshes.len(), 2);
-    assert_eq!(scene.nodes.len(), 3);
-    assert_eq!(scene.nodes[1].name.as_deref(), Some("left"));
-    assert_eq!(scene.nodes[2].name.as_deref(), Some("right"));
+    assert_eq!(scene.meshes().len(), 2);
+    assert_eq!(scene.nodes().len(), 3);
+    assert_eq!(scene.nodes()[1].name.as_deref(), Some("left"));
+    assert_eq!(scene.nodes()[2].name.as_deref(), Some("right"));
     Ok(())
 }
 
 #[test]
-fn empty_ascii_solid_emits_diagnostic_and_fails_without_meshes() -> Result<()> {
-    let bytes = b"solid empty\nendsolid empty\n";
-    let (result, diagnostics) =
-        import_bytes_result("empty-ascii.stl", bytes, ImportOptions::memory())?;
-    let error = expected_error(result)?;
+fn empty_ascii_solid_preserves_diagnostic_and_typed_failure() {
+    let failure = import_bytes_with_limits(
+        "empty-ascii.stl",
+        b"\n  solid empty\nendsolid empty\n",
+        ResourceLimits::default(),
+    )
+    .expect_err("empty STL must fail");
 
-    assert!(matches!(error, BaoziError::Parse { .. }));
-    assert_eq!(diagnostics.len(), 1);
-    assert_eq!(diagnostics[0].code.0, "stl.empty_solid");
-    Ok(())
+    assert_eq!(
+        expected_stl_failure(&failure).code(),
+        StlFailureCode::EmptyGeometry.as_str()
+    );
+    assert!(matches!(failure.cause(), ImportCause::Format(_)));
+    assert_eq!(failure.diagnostics().len(), 1);
+    assert_eq!(failure.diagnostics()[0].code().as_str(), "stl.empty_solid");
+    assert_eq!(
+        failure.diagnostics()[0]
+            .line_column()
+            .expect("empty solid location")
+            .line(),
+        2
+    );
+    assert_eq!(
+        failure.diagnostics()[0]
+            .line_column()
+            .expect("empty solid location")
+            .column(),
+        3
+    );
+    let byte_range = failure.diagnostics()[0]
+        .byte_range()
+        .expect("empty solid byte range");
+    assert_eq!((byte_range.start(), byte_range.end()), (3, 8));
+    assert_eq!(failure.diagnostics()[0].details()[0].key(), "facet_count");
 }
 
 #[test]
-fn facet_with_too_few_vertices_is_parse_error() -> Result<()> {
-    let bytes = b"solid bad\nfacet normal 0 0 1\nouter loop\nvertex 0 0 0\nvertex 1 0 0\nendloop\nendfacet\nendsolid bad\n";
-    let (result, _) = import_bytes_result("bad-vertices.stl", bytes, ImportOptions::memory())?;
-    let error = expected_error(result)?;
-
-    assert!(matches!(error, BaoziError::Parse { .. }));
-    Ok(())
-}
-
-#[test]
-fn missing_endsolid_is_parse_error() -> Result<()> {
-    let bytes = b"solid missing\nfacet normal 0 0 1\nouter loop\nvertex 0 0 0\nvertex 1 0 0\nvertex 0 1 0\nendloop\nendfacet\n";
-    let (result, _) = import_bytes_result("missing-endsolid.stl", bytes, ImportOptions::memory())?;
-    let error = expected_error(result)?;
-
-    assert!(matches!(error, BaoziError::Parse { .. }));
-    Ok(())
-}
-
-#[test]
-fn invalid_float_is_parse_error() -> Result<()> {
+fn malformed_ascii_preserves_stl_owned_location() {
     let bytes = b"solid bad\nfacet normal 0 0 nope\nouter loop\nvertex 0 0 0\nvertex 1 0 0\nvertex 0 1 0\nendloop\nendfacet\nendsolid bad\n";
-    let (result, _) = import_bytes_result("invalid-float.stl", bytes, ImportOptions::memory())?;
-    let error = expected_error(result)?;
+    let failure = import_bytes_with_limits("invalid-float.stl", bytes, ResourceLimits::default())
+        .expect_err("invalid float must fail");
+    let envelope = expected_stl_failure(&failure);
 
-    assert!(matches!(error, BaoziError::Parse { .. }));
-    Ok(())
+    assert_eq!(envelope.format().as_str(), "org.baozi.stl");
+    assert_eq!(envelope.code(), StlFailureCode::InvalidNumber.as_str());
+    assert_eq!(stl_unsigned_detail(envelope, "line"), Some(2));
+    assert_eq!(stl_unsigned_detail(envelope, "column"), Some(18));
+    assert_eq!(stl_string_detail(envelope, "reason"), Some("invalid-float"));
 }
 
 #[test]
-fn line_limit_is_enforced() -> Result<()> {
-    let bytes = ascii_triangle("triangle");
-    let mut options = ImportOptions::memory();
-    options.limits.max_line_bytes = 5;
-    let (result, _) = import_bytes_result("line-limit.stl", bytes.as_bytes(), options)?;
-    let error = expected_error(result)?;
+fn ascii_numeric_grammar_uses_dot_and_rejects_locale_decimal_comma() {
+    let dotted = ascii_triangle("dotted").replace("vertex 1 0 0", "vertex 1.5 0 0");
+    let report =
+        import_bytes_with_limits("dotted.stl", dotted.as_bytes(), ResourceLimits::default())
+            .expect("Rust ASCII float grammar must accept a decimal point");
+    assert_eq!(report.scene().meshes()[0].positions[1].x, 1.5);
 
-    assert!(matches!(
-        error,
-        BaoziError::LimitExceeded {
-            limit: "max_line_bytes"
-        }
-    ));
-    Ok(())
-}
-
-#[test]
-fn token_limit_is_enforced() -> Result<()> {
-    let bytes = ascii_triangle("triangle");
-    let mut options = ImportOptions::memory();
-    options.limits.max_token_bytes = 3;
-    let (result, _) = import_bytes_result("token-limit.stl", bytes.as_bytes(), options)?;
-    let error = expected_error(result)?;
-
-    assert!(matches!(
-        error,
-        BaoziError::LimitExceeded {
-            limit: "max_token_bytes"
-        }
-    ));
-    Ok(())
-}
-
-#[test]
-fn face_limit_is_enforced() -> Result<()> {
-    let bytes = ascii_triangle("triangle");
-    let mut options = ImportOptions::memory();
-    options.limits.max_faces = 0;
-    let (result, _) = import_bytes_result("face-limit.stl", bytes.as_bytes(), options)?;
-    let error = expected_error(result)?;
-
-    assert!(matches!(
-        error,
-        BaoziError::LimitExceeded { limit: "max_faces" }
-    ));
-    Ok(())
-}
-
-#[test]
-fn topology_cell_limit_is_checked_before_sequential_indices_are_allocated() -> Result<()> {
-    let bytes = ascii_triangle("triangle");
-
-    let mut exact = ImportOptions::memory();
-    exact.limits.max_total_topology_cells = 3;
-    let (result, diagnostics) = import_bytes_result("topology-exact.stl", bytes.as_bytes(), exact)?;
-    let scene = result?;
-    assert!(diagnostics.is_empty());
-    assert_eq!(scene.meshes[0].indices.len(), 3);
-
-    let mut excess = ImportOptions::memory();
-    excess.limits.max_total_topology_cells = 2;
-    let (result, diagnostics) =
-        import_bytes_result("topology-excess.stl", bytes.as_bytes(), excess)?;
-    let error = expected_error(result)?;
-    assert!(diagnostics.is_empty());
+    let comma = ascii_triangle("comma").replace("vertex 1 0 0", "vertex 1,5 0 0");
+    let failure =
+        import_bytes_with_limits("comma.stl", comma.as_bytes(), ResourceLimits::default())
+            .expect_err("Rust ASCII float grammar must reject a locale decimal comma");
     assert_eq!(
-        error,
-        BaoziError::LimitExceeded {
-            limit: "max_total_topology_cells"
-        }
+        expected_stl_failure(&failure).code(),
+        StlFailureCode::InvalidNumber.as_str()
     );
-    Ok(())
 }
 
 #[test]
-fn canonical_string_budget_bounds_repeated_source_metadata() -> Result<()> {
-    let names = ["left", "right"];
-    let source = "string-budget.stl";
-    let bytes = names
-        .iter()
-        .map(|name| ascii_triangle(name))
-        .collect::<String>();
-    let exact_bytes = "STL Default Material".len()
-        + names
-            .iter()
-            .map(|name| {
-                2 * name.len()
-                    + "stl.storage".len()
-                    + "ascii".len()
-                    + "stl.source".len()
-                    + source.len()
-            })
-            .sum::<usize>();
+fn facet_with_too_few_vertices_is_typed_format_failure() {
+    let bytes = b"solid bad\nfacet normal 0 0 1\nouter loop\nvertex 0 0 0\nvertex 1 0 0\nendloop\nendfacet\nendsolid bad\n";
+    let failure = import_bytes_with_limits("bad-vertices.stl", bytes, ResourceLimits::default())
+        .expect_err("short facet must fail");
 
-    let mut exact = ImportOptions::memory();
-    exact.limits.max_canonical_string_bytes = exact_bytes;
-    let (result, diagnostics) = import_bytes_result(source, bytes.as_bytes(), exact)?;
-    let scene = result?;
-    assert!(diagnostics.is_empty());
-    assert_eq!(scene.meshes.len(), names.len());
-
-    let mut excess = ImportOptions::memory();
-    excess.limits.max_canonical_string_bytes = exact_bytes - 1;
-    let (result, diagnostics) = import_bytes_result(source, bytes.as_bytes(), excess)?;
-    let error = expected_error(result)?;
-    assert!(diagnostics.is_empty());
     assert_eq!(
-        error,
-        BaoziError::LimitExceeded {
-            limit: "max_canonical_string_bytes"
-        }
+        expected_stl_failure(&failure).code(),
+        StlFailureCode::InvalidStructure.as_str()
     );
+}
+
+#[test]
+fn missing_endsolid_is_typed_format_failure() {
+    let bytes = b"solid missing\nfacet normal 0 0 1\nouter loop\nvertex 0 0 0\nvertex 1 0 0\nvertex 0 1 0\nendloop\nendfacet\n";
+    let failure =
+        import_bytes_with_limits("missing-endsolid.stl", bytes, ResourceLimits::default())
+            .expect_err("unterminated solid must fail");
+
+    let envelope = expected_stl_failure(&failure);
+    assert_eq!(
+        stl_string_detail(envelope, "reason"),
+        Some("ended-before-endsolid")
+    );
+}
+
+#[test]
+fn typed_line_and_token_limits_are_session_owned() {
+    let bytes = ascii_triangle("triangle");
+    for (resource, line_limit, token_limit) in [
+        ("line-bytes", Some(5), None),
+        ("token-bytes", None, Some(3)),
+    ] {
+        let mut limits = ResourceLimits::default();
+        if let Some(limit) = line_limit {
+            limits.max_line_bytes = limit;
+        }
+        if let Some(limit) = token_limit {
+            limits.max_token_bytes = limit;
+        }
+        let failure = import_bytes_with_limits("limited.stl", bytes.as_bytes(), limits)
+            .expect_err("parser work limit must fail");
+        let ImportCause::Scope(abort) = failure.cause() else {
+            panic!("expected scope-owned resource failure")
+        };
+        assert!(matches!(
+            abort.cause(),
+            ScopeAbortCause::ResourceLimit { resource: actual, .. } if actual == &resource
+        ));
+    }
+}
+
+#[test]
+fn decode_work_is_admitted_before_ascii_reclassification() {
+    let bytes = ascii_triangle("triangle");
+    let mut limits = ResourceLimits::default();
+    limits.max_decode_work = bytes.len() as u64 - 1;
+    let failure = import_bytes_with_limits("decode-limit.stl", bytes.as_bytes(), limits)
+        .expect_err("decode work limit must fail before parser scanning");
+
+    assert!(matches!(failure.cause(), ImportCause::Scope(_)));
+    let decode = failure
+        .ledger()
+        .dimension(ImportDimension::DecodeWork)
+        .expect("decode dimension");
+    assert_eq!(decode.attempted(), bytes.len() as u64);
+    assert_eq!(decode.consumed(), 0);
+}
+
+#[test]
+fn face_limit_is_charged_before_geometry_growth() {
+    let bytes = ascii_triangle("triangle");
+    let mut limits = ResourceLimits::default();
+    limits.max_faces = 0;
+    let failure = import_bytes_with_limits("face-limit.stl", bytes.as_bytes(), limits)
+        .expect_err("face limit must fail");
+
+    assert!(matches!(failure.cause(), ImportCause::Scope(_)));
+    let faces = failure
+        .ledger()
+        .dimension(ImportDimension::Faces)
+        .expect("face dimension");
+    assert_eq!(faces.attempted(), 1);
+    assert_eq!(faces.consumed(), 0);
+}
+
+#[test]
+fn topology_cells_are_charged_before_index_allocation() -> TestResult {
+    let bytes = ascii_triangle("triangle");
+    let mut exact = ResourceLimits::default();
+    exact.max_total_topology_cells = 3;
+    let report = import_bytes_with_limits("topology-exact.stl", bytes.as_bytes(), exact)
+        .expect("the exact topology limit must succeed");
+    assert_eq!(report.scene().meshes()[0].indices.len(), 3);
+
+    let mut excess = ResourceLimits::default();
+    excess.max_total_topology_cells = 2;
+    let failure = import_bytes_with_limits("topology-excess.stl", bytes.as_bytes(), excess)
+        .expect_err("topology limit must fail");
+    assert!(matches!(failure.cause(), ImportCause::Scope(_)));
     Ok(())
 }
 
 #[test]
-fn solid_limit_is_enforced() -> Result<()> {
+fn solid_limit_is_checked_before_second_name_allocation() {
     let bytes = format!("{}{}", ascii_triangle("left"), ascii_triangle("right"));
-    let mut options = ImportOptions::memory();
-    options.limits.max_solids = 1;
-    let (result, _) = import_bytes_result("solid-limit.stl", bytes.as_bytes(), options)?;
-    let error = expected_error(result)?;
+    let mut limits = ResourceLimits::default();
+    limits.max_solids = 1;
+    let failure = import_bytes_with_limits("solid-limit.stl", bytes.as_bytes(), limits)
+        .expect_err("solid limit must fail");
 
+    assert!(matches!(failure.cause(), ImportCause::Scope(_)));
+}
+
+#[test]
+fn live_byte_limit_is_exact_across_parse_and_scene_handoff() -> TestResult {
+    let bytes = ascii_triangle("bounded");
+    let source = "live-limit.stl";
+    let baseline = import_bytes(source, bytes.as_bytes())?;
+    let exact_peak = baseline.ledger().peak_live_bytes();
+    assert!(exact_peak > bytes.len() as u64);
+    assert_eq!(baseline.ledger().current_live_bytes(), 0);
+
+    let mut exact = ResourceLimits::default();
+    exact.max_live_bytes = exact_peak;
+    let exact_report = import_bytes_with_limits(source, bytes.as_bytes(), exact)
+        .expect("the exact live-byte limit must succeed");
+    assert_eq!(exact_report.ledger().peak_live_bytes(), exact_peak);
+
+    let excess_limit = exact_peak - 1;
+    let mut excess = ResourceLimits::default();
+    excess.max_live_bytes = excess_limit;
+    let failure = import_bytes_with_limits(source, bytes.as_bytes(), excess)
+        .expect_err("one byte below the observed peak must fail");
     assert!(matches!(
-        error,
-        BaoziError::LimitExceeded {
-            limit: "max_solids"
-        }
+        failure.cause(),
+        ImportCause::Scope(abort) if matches!(abort.cause(), ScopeAbortCause::Ledger(_))
     ));
+    assert_eq!(failure.ledger().current_live_bytes(), 0);
     Ok(())
 }

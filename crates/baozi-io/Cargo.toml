@@ -12,7 +12,13 @@ description.workspace = true
 
 [features]
 default = []
-fs = []
+fs-candidate = ["dep:cap-std", "dep:rustix"]
 
 [dependencies]
-baozi-core.workspace = true
+thiserror.workspace = true
+
+[target.'cfg(any(all(target_arch = "x86_64", target_vendor = "unknown", target_os = "linux", target_env = "gnu", target_abi = ""), all(target_arch = "x86_64", target_vendor = "pc", target_os = "windows", target_env = "msvc", target_abi = ""), all(target_arch = "aarch64", target_vendor = "apple", target_os = "macos", target_env = "", target_abi = ""), all(target_arch = "x86_64", target_vendor = "unknown", target_os = "freebsd", target_env = "", target_abi = "")))'.dependencies]
+cap-std = { workspace = true, optional = true }
+
+[target.'cfg(any(all(target_arch = "x86_64", target_vendor = "unknown", target_os = "linux", target_env = "gnu", target_abi = ""), all(target_arch = "aarch64", target_vendor = "apple", target_os = "macos", target_env = "", target_abi = ""), all(target_arch = "x86_64", target_vendor = "unknown", target_os = "freebsd", target_env = "", target_abi = "")))'.dependencies]
+rustix = { workspace = true, optional = true, features = ["std", "fs"] }

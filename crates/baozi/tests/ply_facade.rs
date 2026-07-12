@@ -1,3 +1,7 @@
+#![allow(
+    clippy::result_large_err,
+    reason = "facade tests preserve complete bounded terminal evidence by value"
+)]
 #![cfg(feature = "format-ply")]
 
 use baozi::{CapabilityStatus, FormatCapability, Importer, PrimitiveTopology, Result, Vec3};
@@ -21,10 +25,10 @@ end_header
 
 #[test]
 fn facade_reads_ply_from_bytes() -> Result<()> {
-    let report = Importer::new().read_bytes("facade.ply", triangle_ply())?;
+    let report = Importer::new()?.read_bytes("facade.ply", triangle_ply())?;
 
-    assert_eq!(report.format().id(), "ply");
-    let mesh = &report.scene().meshes[0];
+    assert_eq!(report.format().id().as_str(), "org.baozi.ply");
+    let mesh = &report.scene().meshes()[0];
     assert_eq!(mesh.topology, PrimitiveTopology::Triangles);
     assert_eq!(mesh.positions[1], Vec3::new(1.0, 0.0, 0.0));
     assert_eq!(mesh.indices, vec![0, 1, 2]);
@@ -34,23 +38,25 @@ fn facade_reads_ply_from_bytes() -> Result<()> {
 
 #[test]
 fn facade_reports_ply_capabilities() -> Result<()> {
-    let report = Importer::new().read_bytes("facade.ply", triangle_ply())?;
+    let report = Importer::new()?.read_bytes("facade.ply", triangle_ply())?;
 
-    assert!(
+    assert_eq!(
         report
             .format()
-            .capabilities()
-            .contains(&(FormatCapability::Geometry, CapabilityStatus::Supported))
+            .capability_status(FormatCapability::Geometry),
+        Some(CapabilityStatus::Supported)
     );
-    assert!(
+    assert_eq!(
         report
             .format()
-            .capabilities()
-            .contains(&(FormatCapability::Diagnostics, CapabilityStatus::Supported))
+            .capability_status(FormatCapability::Diagnostics),
+        Some(CapabilityStatus::Supported)
     );
-    assert!(report.format().capabilities().contains(&(
-        FormatCapability::ResourceLimits,
-        CapabilityStatus::Supported
-    )));
+    assert_eq!(
+        report
+            .format()
+            .capability_status(FormatCapability::ResourceLimits),
+        Some(CapabilityStatus::Supported)
+    );
     Ok(())
 }

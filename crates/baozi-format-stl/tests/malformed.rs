@@ -1,12 +1,11 @@
 mod common;
 
-use baozi_core::Result;
-use baozi_import::ImportOptions;
-use common::import_bytes_result;
+use baozi_import::ResourceLimits;
+use common::import_bytes_with_limits;
 use std::panic;
 
 #[test]
-fn malformed_inputs_do_not_panic() -> Result<()> {
+fn malformed_inputs_do_not_panic_through_real_session() {
     let cases: &[&[u8]] = &[
         b"",
         b"solid",
@@ -18,9 +17,8 @@ fn malformed_inputs_do_not_panic() -> Result<()> {
 
     for case in cases {
         let outcome = panic::catch_unwind(|| {
-            let _ = import_bytes_result("malformed.stl", case, ImportOptions::memory());
+            let _ = import_bytes_with_limits("malformed.stl", case, ResourceLimits::default());
         });
         assert!(outcome.is_ok());
     }
-    Ok(())
 }

@@ -1,8 +1,11 @@
 mod common;
 
-use baozi_core::{BaoziError, Result};
-use baozi_import::ImportOptions;
-use common::{expected_error, import_assets, import_assets_result};
+use baozi_format_gltf::GltfFailureCode;
+use baozi_import::{ImportReport, ImportResult};
+use common::{
+    GltfTestOptions, TestResult, assert_gltf_failure, assert_resource_limit, expected_error,
+    import_assets, import_assets_result,
+};
 
 fn graph_document(scene_fields: &str, nodes: &str) -> Vec<u8> {
     format!(
@@ -24,116 +27,114 @@ fn scene_with_roots(roots: &str, nodes: &str) -> Vec<u8> {
 
 fn import_graph_result(
     document: Vec<u8>,
-    options: ImportOptions,
-) -> Result<Result<baozi_core::Scene>> {
+    options: GltfTestOptions,
+) -> TestResult<ImportResult<ImportReport>> {
     let (result, diagnostics) =
         import_assets_result("graph.gltf", [("graph.gltf", document)], options)?;
     assert!(diagnostics.is_empty());
     Ok(result)
 }
 
-fn assert_parse_failure(document: Vec<u8>, expected_message: &str) -> Result<()> {
-    let error = expected_error(import_graph_result(document, ImportOptions::memory())?)?;
-    assert!(matches!(error, BaoziError::Parse { .. }));
-    assert!(
-        error.to_string().contains(expected_message),
-        "unexpected error: {error}"
-    );
-    Ok(())
+fn assert_parse_failure(document: Vec<u8>, expected_message: &str) -> TestResult<()> {
+    let error = expected_error(import_graph_result(document, GltfTestOptions::memory())?)?;
+    assert_gltf_failure(
+        &error,
+        GltfFailureCode::InvalidDocument,
+        Some(expected_message),
+    )
 }
 
 fn assert_limit_failure(
     document: Vec<u8>,
-    options: ImportOptions,
+    options: GltfTestOptions,
     expected_limit: &'static str,
-) -> Result<()> {
+) -> TestResult<()> {
     let error = expected_error(import_graph_result(document, options)?)?;
-    assert_eq!(
-        error,
-        BaoziError::LimitExceeded {
-            limit: expected_limit
-        }
-    );
+    assert_resource_limit(&error, expected_limit);
     Ok(())
 }
 
 #[test]
-fn imports_valid_forest_once_without_a_declared_scene() -> Result<()> {
+fn imports_valid_forest_once_without_a_declared_scene() -> TestResult<()> {
     let document = graph_document(
         "",
         r#"{ "name": "RootA", "children": [1] },
            { "name": "ChildA" },
            { "name": "RootB" }"#,
     );
-    let (scene, diagnostics) = import_assets(
+    let (report, diagnostics) = import_assets(
         "graph.gltf",
         [("graph.gltf", document)],
-        ImportOptions::memory(),
+        GltfTestOptions::memory(),
     )?;
 
     assert!(diagnostics.is_empty());
-    assert_eq!(scene.nodes.len(), 4);
-    assert_eq!(scene.nodes[0].children.len(), 2);
-    assert_eq!(scene.nodes[1].name.as_deref(), Some("RootA"));
-    assert_eq!(scene.nodes[1].children, vec![baozi_core::NodeId::new(2)]);
-    assert_eq!(scene.nodes[2].name.as_deref(), Some("ChildA"));
-    assert_eq!(scene.nodes[3].name.as_deref(), Some("RootB"));
+    let scene = report.scene();
+    assert_eq!(scene.nodes().len(), 4);
+    assert_eq!(scene.nodes()[0].children.len(), 2);
+    assert_eq!(scene.nodes()[1].name.as_deref(), Some("RootA"));
+    assert_eq!(scene.nodes()[1].children, vec![baozi_core::NodeId::new(2)]);
+    assert_eq!(scene.nodes()[2].name.as_deref(), Some("ChildA"));
+    assert_eq!(scene.nodes()[3].name.as_deref(), Some("RootB"));
     Ok(())
 }
 
 #[test]
-fn uses_the_first_scene_when_no_default_scene_is_declared() -> Result<()> {
+fn uses_the_first_scene_when_no_default_scene_is_declared() -> TestResult<()> {
     let document = graph_document(
         r#""scenes": [{ "nodes": [1] }],"#,
         r#"{ "name": "Unselected" }, { "name": "Selected" }"#,
     );
-    let (scene, diagnostics) = import_assets(
+    let (report, diagnostics) = import_assets(
         "graph.gltf",
         [("graph.gltf", document)],
-        ImportOptions::memory(),
+        GltfTestOptions::memory(),
     )?;
 
     assert!(diagnostics.is_empty());
-    assert_eq!(scene.nodes.len(), 2);
-    assert_eq!(scene.nodes[1].name.as_deref(), Some("Selected"));
+    let scene = report.scene();
+    assert_eq!(scene.nodes().len(), 2);
+    assert_eq!(scene.nodes()[1].name.as_deref(), Some("Selected"));
     Ok(())
 }
 
 #[test]
-fn allows_the_same_root_in_multiple_scenes() -> Result<()> {
+fn allows_the_same_root_in_multiple_scenes() -> TestResult<()> {
     let document = graph_document(
         r#""scene": 1, "scenes": [{ "nodes": [0] }, { "nodes": [0] }],"#,
         r#"{ "name": "SharedRoot" }"#,
     );
-    let (scene, diagnostics) = import_assets(
+    let (report, diagnostics) = import_assets(
         "graph.gltf",
         [("graph.gltf", document)],
-        ImportOptions::memory(),
+        GltfTestOptions::memory(),
     )?;
 
     assert!(diagnostics.is_empty());
-    assert_eq!(scene.nodes.len(), 2);
-    assert_eq!(scene.nodes[1].name.as_deref(), Some("SharedRoot"));
+    let scene = report.scene();
+    assert_eq!(scene.nodes().len(), 2);
+    assert_eq!(scene.nodes()[1].name.as_deref(), Some("SharedRoot"));
     Ok(())
 }
 
 #[test]
-fn preserves_selected_scene_root_and_child_order() -> Result<()> {
+fn preserves_selected_scene_root_and_child_order() -> TestResult<()> {
     let document = graph_document(
         r#""scene": 0, "scenes": [{ "nodes": [2, 0] }],"#,
         r#"{ "name": "RootA", "children": [1] },
            { "name": "ChildA" },
            { "name": "RootB" }"#,
     );
-    let (scene, diagnostics) = import_assets(
+    let (report, diagnostics) = import_assets(
         "graph.gltf",
         [("graph.gltf", document)],
-        ImportOptions::memory(),
+        GltfTestOptions::memory(),
     )?;
 
     assert!(diagnostics.is_empty());
+    let scene = report.scene();
     let names = scene
-        .nodes
+        .nodes()
         .iter()
         .skip(1)
         .map(|node| node.name.as_deref())
@@ -143,7 +144,7 @@ fn preserves_selected_scene_root_and_child_order() -> Result<()> {
 }
 
 #[test]
-fn rejects_a_self_cycle() -> Result<()> {
+fn rejects_a_self_cycle() -> TestResult<()> {
     assert_parse_failure(
         scene_with_roots("0", r#"{ "name": "Loop", "children": [0] }"#),
         "cycle",
@@ -151,7 +152,7 @@ fn rejects_a_self_cycle() -> Result<()> {
 }
 
 #[test]
-fn rejects_a_mutual_cycle() -> Result<()> {
+fn rejects_a_mutual_cycle() -> TestResult<()> {
     assert_parse_failure(
         scene_with_roots(
             "0",
@@ -163,7 +164,7 @@ fn rejects_a_mutual_cycle() -> Result<()> {
 }
 
 #[test]
-fn rejects_a_shared_child() -> Result<()> {
+fn rejects_a_shared_child() -> TestResult<()> {
     assert_parse_failure(
         scene_with_roots(
             "0, 1",
@@ -176,7 +177,7 @@ fn rejects_a_shared_child() -> Result<()> {
 }
 
 #[test]
-fn graph_fuzz_corpus_terminates_with_structured_failures() -> Result<()> {
+fn graph_fuzz_corpus_terminates_with_structured_failures() -> TestResult<()> {
     for (document, expected) in [
         (
             include_bytes!("../../../fuzz/corpus/gltf_import/node_self_cycle.gltf").as_slice(),
@@ -193,7 +194,7 @@ fn graph_fuzz_corpus_terminates_with_structured_failures() -> Result<()> {
 }
 
 #[test]
-fn rejects_many_roots_sharing_one_child() -> Result<()> {
+fn rejects_many_roots_sharing_one_child() -> TestResult<()> {
     let parent_count = 32usize;
     let roots = (0..parent_count)
         .map(|index| index.to_string())
@@ -209,7 +210,7 @@ fn rejects_many_roots_sharing_one_child() -> Result<()> {
 }
 
 #[test]
-fn rejects_a_layered_diamond() -> Result<()> {
+fn rejects_a_layered_diamond() -> TestResult<()> {
     assert_parse_failure(
         scene_with_roots(
             "0",
@@ -223,7 +224,7 @@ fn rejects_a_layered_diamond() -> Result<()> {
 }
 
 #[test]
-fn rejects_an_invalid_graph_before_opening_required_buffers() -> Result<()> {
+fn rejects_an_invalid_graph_before_opening_required_buffers() -> TestResult<()> {
     let document = br#"{
   "asset": { "version": "2.0" },
   "scene": 0,
@@ -237,7 +238,7 @@ fn rejects_an_invalid_graph_before_opening_required_buffers() -> Result<()> {
 }
 
 #[test]
-fn rejects_a_duplicate_scene_root() -> Result<()> {
+fn rejects_a_duplicate_scene_root() -> TestResult<()> {
     assert_parse_failure(
         scene_with_roots("0, 0", r#"{ "name": "Duplicated" }"#),
         "duplicate root",
@@ -245,7 +246,7 @@ fn rejects_a_duplicate_scene_root() -> Result<()> {
 }
 
 #[test]
-fn rejects_a_scene_root_that_is_also_a_child() -> Result<()> {
+fn rejects_a_scene_root_that_is_also_a_child() -> TestResult<()> {
     assert_parse_failure(
         scene_with_roots(
             "0, 1",
@@ -257,7 +258,7 @@ fn rejects_a_scene_root_that_is_also_a_child() -> Result<()> {
 }
 
 #[test]
-fn builds_a_wide_fanout_without_duplicate_nodes() -> Result<()> {
+fn builds_a_wide_fanout_without_duplicate_nodes() -> TestResult<()> {
     let child_count = 64usize;
     let roots = (1..=child_count)
         .map(|index| index.to_string())
@@ -271,71 +272,73 @@ fn builds_a_wide_fanout_without_duplicate_nodes() -> Result<()> {
         "0",
         &format!(r#"{{ "name": "Root", "children": [{roots}] }},{children}"#),
     );
-    let (scene, diagnostics) = import_assets(
+    let (report, diagnostics) = import_assets(
         "graph.gltf",
         [("graph.gltf", document)],
-        ImportOptions::memory(),
+        GltfTestOptions::memory(),
     )?;
 
     assert!(diagnostics.is_empty());
-    assert_eq!(scene.nodes.len(), child_count + 2);
-    assert_eq!(scene.nodes[1].children.len(), child_count);
+    let scene = report.scene();
+    assert_eq!(scene.nodes().len(), child_count + 2);
+    assert_eq!(scene.nodes()[1].children.len(), child_count);
     Ok(())
 }
 
 #[test]
-fn accepts_exact_graph_limits() -> Result<()> {
+fn accepts_exact_graph_limits() -> TestResult<()> {
     let document = scene_with_roots(
         "0",
         r#"{ "name": "Root", "children": [1] },
            { "name": "Middle", "children": [2] },
            { "name": "Leaf" }"#,
     );
-    let mut options = ImportOptions::memory();
+    let mut options = GltfTestOptions::memory();
     options.limits.max_graph_nodes = 4;
     options.limits.max_graph_edges = 3;
     options.limits.max_graph_depth = 4;
     options.limits.max_graph_work = 7;
 
-    let scene = import_graph_result(document, options)??;
-    assert_eq!(scene.nodes.len(), 4);
+    let report = import_graph_result(document, options)??;
+    let scene = report.scene();
+    assert_eq!(scene.nodes().len(), 4);
     Ok(())
 }
 
 #[test]
-fn rejects_graph_node_limit_excess() -> Result<()> {
+fn rejects_graph_node_limit_excess() -> TestResult<()> {
     let document = scene_with_roots("0", r#"{}"#);
-    let mut options = ImportOptions::memory();
+    let mut options = GltfTestOptions::memory();
     options.limits.max_graph_nodes = 1;
     assert_limit_failure(document, options, "max_graph_nodes")
 }
 
 #[test]
-fn rejects_graph_edge_limit_excess() -> Result<()> {
+fn rejects_graph_edge_limit_excess() -> TestResult<()> {
     let document = scene_with_roots("0", r#"{}"#);
-    let mut options = ImportOptions::memory();
+    let mut options = GltfTestOptions::memory();
     options.limits.max_graph_edges = 0;
     assert_limit_failure(document, options, "max_graph_edges")
 }
 
 #[test]
-fn rejects_graph_depth_limit_excess() -> Result<()> {
+fn rejects_graph_depth_limit_excess() -> TestResult<()> {
     let document = scene_with_roots("0", r#"{}"#);
-    let mut options = ImportOptions::memory();
+    let mut options = GltfTestOptions::memory();
     options.limits.max_graph_depth = 1;
     assert_limit_failure(document, options, "max_graph_depth")
 }
 
 #[test]
-fn rejects_graph_work_limit_excess() -> Result<()> {
+fn rejects_graph_work_limit_excess() -> TestResult<()> {
     let document = graph_document("", r#"{}"#);
-    let mut options = ImportOptions::memory();
+    let mut options = GltfTestOptions::memory();
     options.limits.max_graph_work = 2;
     assert_limit_failure(document, options, "max_graph_work")
 }
 
 #[test]
-fn rejects_synthetic_edges_for_many_isolated_roots_before_scene_construction() -> Result<()> {
+fn rejects_synthetic_edges_for_many_isolated_roots_before_scene_construction() -> TestResult<()> {
     let node_count = 64usize;
     let roots = (0..node_count)
         .map(|index| index.to_string())
@@ -343,7 +346,7 @@ fn rejects_synthetic_edges_for_many_isolated_roots_before_scene_construction() -
         .join(", ");
     let nodes = (0..node_count).map(|_| "{}").collect::<Vec<_>>().join(", ");
     let document = scene_with_roots(&roots, &nodes);
-    let mut options = ImportOptions::memory();
+    let mut options = GltfTestOptions::memory();
     options.limits.max_graph_edges = 0;
 
     assert_limit_failure(document, options, "max_graph_edges")

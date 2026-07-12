@@ -1,6 +1,5 @@
 use crate::math::{Color, Vec2, Vec3, Vec4};
 use crate::scene::{MetadataMap, TextureId};
-use std::collections::BTreeMap;
 use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -164,7 +163,7 @@ pub enum MaterialProperty {
     Texture(TextureId),
 }
 
-pub type MaterialPropertyMap = BTreeMap<String, MaterialProperty>;
+pub type MaterialPropertyMap = crate::OrderedMap<String, MaterialProperty>;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Material {

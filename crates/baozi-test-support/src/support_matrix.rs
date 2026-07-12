@@ -1,5 +1,5 @@
 use baozi_import::{
-    CapabilityStatus, FormatCapability, FormatInfo, FormatMaturity, FormatSidecarPolicy,
+    CapabilityStatus, DependencyRequirement, FormatCapability, FormatDescriptor, FormatMaturity,
 };
 
 const SUPPORT_MATRIX: &str = include_str!("../../../docs/formats/support-matrix.md");
@@ -75,7 +75,7 @@ const MATRIX_CAPABILITY_COLUMNS: &[(SupportMatrixColumn, FormatCapability)] = &[
     ),
 ];
 
-pub fn assert_support_matrix_row(crate_name: &str, info: &FormatInfo) {
+pub fn assert_support_matrix_row(crate_name: &str, descriptor: &FormatDescriptor) {
     let row = support_matrix_row(crate_name);
     let columns = parse_markdown_row(row);
     let expected_crate = format!("`{crate_name}`");
@@ -86,15 +86,15 @@ pub fn assert_support_matrix_row(crate_name: &str, info: &FormatInfo) {
         "support matrix column count drifted for {crate_name}"
     );
     assert_eq!(columns[1], expected_crate);
-    assert_eq!(columns[2], maturity_label(info.maturity()));
+    assert_eq!(columns[2], maturity_label(descriptor.maturity()));
     assert_eq!(
         columns[15],
-        sidecar_label(info.sidecar_policy()),
+        sidecar_label(descriptor),
         "support matrix Sidecars/archives column drifted for {crate_name}"
     );
 
     for (column, capability) in MATRIX_CAPABILITY_COLUMNS {
-        let expected = capability_label(capability_status(info, *capability));
+        let expected = capability_label(capability_status(descriptor, *capability));
         assert_eq!(
             columns[column.index()],
             expected,
@@ -120,11 +120,14 @@ fn parse_markdown_row(row: &str) -> Vec<String> {
         .collect()
 }
 
-fn capability_status(info: &FormatInfo, capability: FormatCapability) -> CapabilityStatus {
-    info.capability_status(capability).unwrap_or_else(|| {
+fn capability_status(
+    descriptor: &FormatDescriptor,
+    capability: FormatCapability,
+) -> CapabilityStatus {
+    descriptor.capability_status(capability).unwrap_or_else(|| {
         panic!(
-            "FormatInfo for {} does not declare {capability:?}",
-            info.id()
+            "FormatDescriptor for {} does not declare {capability:?}",
+            descriptor.id()
         )
     })
 }
@@ -135,6 +138,7 @@ fn maturity_label(maturity: FormatMaturity) -> &'static str {
         FormatMaturity::Beta => "Beta",
         FormatMaturity::Stable => "Stable",
         FormatMaturity::Deprecated => "Deprecated",
+        _ => "Unknown",
     }
 }
 
@@ -146,14 +150,22 @@ fn capability_label(status: CapabilityStatus) -> &'static str {
         CapabilityStatus::IgnoredWithDiagnostic => "IgnoredWithDiagnostic",
         CapabilityStatus::Unsupported => "Unsupported",
         CapabilityStatus::Unknown => "Unknown",
+        _ => "Unknown",
     }
 }
 
-fn sidecar_label(policy: FormatSidecarPolicy) -> &'static str {
-    match policy {
-        FormatSidecarPolicy::None => "Unsupported",
-        FormatSidecarPolicy::Optional | FormatSidecarPolicy::ExternalBuffers => "Partial",
-        FormatSidecarPolicy::Required | FormatSidecarPolicy::ArchiveEntries => "Supported",
-        FormatSidecarPolicy::Unknown => "Unknown",
+fn sidecar_label(descriptor: &FormatDescriptor) -> &'static str {
+    let mut roles = descriptor
+        .dependency_roles()
+        .map(|(_, requirement)| requirement);
+    let Some(first) = roles.next() else {
+        return "Unsupported";
+    };
+    if first == DependencyRequirement::Optional
+        || roles.any(|requirement| requirement == DependencyRequirement::Optional)
+    {
+        "Partial"
+    } else {
+        "Supported"
     }
 }

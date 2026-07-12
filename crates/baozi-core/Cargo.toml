@@ -14,7 +14,10 @@ description.workspace = true
 default = ["std"]
 std = []
 mint = ["dep:mint"]
+tracing = ["dep:tracing"]
 
 [dependencies]
+baozi-operation.workspace = true
 mint = { workspace = true, optional = true }
 thiserror.workspace = true
+tracing = { workspace = true, optional = true }

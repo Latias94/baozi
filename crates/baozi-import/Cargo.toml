@@ -10,6 +10,12 @@ documentation.workspace = true
 authors.workspace = true
 description.workspace = true
 
+[features]
+default = []
+tracing = ["dep:tracing", "baozi-core/tracing"]
+
 [dependencies]
 baozi-core.workspace = true
 baozi-io.workspace = true
+baozi-operation.workspace = true
+tracing = { workspace = true, optional = true }
