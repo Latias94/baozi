@@ -17,6 +17,7 @@ related:
   - docs/adr/0013-post-process-pipeline-semantics-presets-and-mutation-model.md
   - docs/adr/0014-parser-security-unsafe-ffi-and-panic-boundary-policy.md
   - docs/adr/0025-scene-ir-invariants-and-validation-boundaries.md
+  - docs/adr/0039-source-document-scene-selection-and-import-closure.md
 ---
 
 # ADR 0020: Import Lifecycle, ParseScope, and Outcome Contract
@@ -36,9 +37,9 @@ proof is not an assignable lifecycle stage.
 ## Decision
 
 After request/options compilation, Baozi creates one `ImportSession` before primary open or detection.
-The session owns the only outcome builder, stable primary input, selected-format evidence, dependency
-resolver, ledger, bounded diagnostics, and operation control. It grants the selected trusted importer
-only a capability-limited `ParseScope`.
+The session owns the only outcome builder, stable primary input, selected-format evidence, optional
+source-scope evidence, dependency resolver, ledger, bounded diagnostics, and operation control. It
+grants the selected trusted importer only a capability-limited `ParseScope`.
 
 The parser returns `ParseResult<SceneDraft>`. The public central validator in `baozi-core` is the only
 constructor of `ValidatedScene` proof; downstream code may legitimately call it, but cannot directly
@@ -151,6 +152,7 @@ detector result, and an abort without a latched cause is itself a descriptor-con
 - the selected importer's checked concrete option view;
 - checked work charging and live reservations;
 - bounded diagnostic emission and loss facts;
+- one sealed, bounded source-scope evidence submission;
 - cancellation polling and progress reporting; and
 - a Scene construction capability whose output is only `SceneDraft` and cannot mint or submit
   validation proof.
@@ -158,6 +160,47 @@ detector result, and an abort without a latched cause is itself a descriptor-con
 It does not expose raw `AssetIo`, unrestricted path resolution, registry mutation, another format's
 options, the outcome builder, report/failure constructors, lifecycle advancement, validation-proof
 constructors, or post-process execution.
+
+### Source-Scope Evidence Transport
+
+This ADR owns the concrete `SourceScopeRecord`, its fallible ledger-charged builder, the sealed
+`ParseScope` submission capability, and storage in both `ImportReport` and `ImportFailure`. ADR 0039
+owns the meaning and completeness of source-scene selection, retained/omitted object-kind counts, and
+scope-versus-loss classification. ADR 0036 owns the source identities, stable digests, provenance,
+and loss representations carried by the record.
+
+An import has zero or one finalized source-scope record. Zero means the selected format has not
+declared a source-scope projection or selection did not complete; it never means an empty projection.
+The builder is an incremental, ledger-bound capability borrowed from `ParseScope`; it checks and
+charges count, detail-cell, string, digest-work, and live-capacity growth before copying caller data.
+The mandatory outcome, exact typed retained/omitted counts, and stable digest are never collapsed.
+Optional identity/detail retention has exactly two fidelity states:
+
+```text
+SourceScopeEvidenceFidelity =
+    Exact
+  | DigestCollapsed(ProvenanceEvidenceLossId)
+
+ImportLossSubject =
+    RawRange(SourceIdentity, ByteRange)
+  | SourceScope(DocumentIdentity, SourceScopeDigest)
+```
+
+The names describe the required semantic shape, not a frozen public Rust layout. A source-scope
+collapse uses the typed `SourceScope` subject and never fabricates a raw byte range. It is permitted
+only when the frozen `LossPolicy` allows `ImportLossKind::ProvenanceEvidenceLoss`; otherwise budget
+exhaustion latches a session-terminal scope cause. An authorized collapse retains exact counts and
+digest, emits one bounded loss fact and diagnostic, and records that loss ID in the fidelity state.
+It does not authorize ADR 0039 source-semantic loss.
+
+Finalization prepares and reserves the record, loss fact, diagnostic, and all container growth before
+publishing any of them. If validation, charging, reservation, allocation, loss-evidence retention, or
+diagnostic preparation fails, no partial record is submitted and the first cause is latched. Final
+submission is one-way: a duplicate, invalid, or uncharged record also latches a session-terminal scope
+cause. Once submitted, the parser cannot replace it, and any later parse, construction, validation,
+cancellation, or finalization failure retains the same record in the terminal `ImportFailure`. This
+channel does not change the normative
+`ParseResult<SceneDraft>` return shape or grant the parser access to an outcome constructor.
 
 Dependency access has two result domains. The names below describe the required semantic shape, not
 the public Rust layout:
@@ -391,6 +434,7 @@ Negative:
 | Cache authorization | Equal logical names in two scopes or resolver namespaces remain isolated; every alias and role is authorized before lookup, so an allowed cache entry cannot satisfy a later denied reference. |
 | Scope abort latch | Required dependency, IO, budget, cancel, diagnostic, builder, and core session-terminal abort fixtures retain their owning cause/phase and force final failure even when a test importer catches the opaque `ParseFailure`. |
 | Evidence preservation | Every post-detection failure retains identical selection evidence plus bounded diagnostics/stats. |
+| Source-scope evidence | No-record, one-record, empty projection, exact-budget success, preserve-or-fail excess rejection, authorized detail collapse, loss-evidence/diagnostic-budget failure before submission, duplicate/invalid submission, success, and failure-after-submission fixtures prove one sealed record with exact typed counts/digest, typed fidelity/loss subject, atomic publication, and unchanged `ParseResult<SceneDraft>` shape. |
 | Phase separation | Tests independently advance ledger/progress phases and prove `last_completed` changes only after the mapped atomic lifecycle boundary succeeds. |
 | Format evidence transport | Heterogeneous bounded format sources enter only through the selected-scope constructor; each envelope retains descriptor/code/details plus the concrete source, exposes the standard source chain and typed outer-source downcast, omits private sources from `Debug`/`Display`, and rejects an outer source payload above 4 KiB before trusted callbacks. |
 | No legacy transition | Production/public symbol search finds no `map_scene*`, assignable import stage, or parser-owned report constructor. |

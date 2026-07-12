@@ -87,9 +87,13 @@ Imported entities record one or more source identities. Generated, split, merged
 normalized entities record an operation identity, option digest, input provenance references, and
 loss/diagnostic references. Lineage is deterministic and resource-bounded. Lossless structural
 deduplication and interning are allowed, but the default policy preserves complete lineage or fails
-before publication when the provenance budget is exhausted. Digest-plus-preview collapse is lossy:
-it requires explicit caller loss authority, emits a structured provenance-loss record, and strict
-loss policy rejects it. Generated entities do not receive forged source identities.
+before publication when the provenance budget is exhausted. Digest-plus-preview collapse is
+`ImportLossKind::ProvenanceEvidenceLoss`: it requires that exact caller authority, emits a structured
+provenance-loss record with a typed provenance or source-scope subject, and
+`LossPolicy::preserve_or_fail()` rejects it. `SourceSemanticLoss` alone never authorizes evidence
+collapse. A subject without one contiguous source range uses its stable document/provenance identity
+and digest rather than a forged byte range. Generated entities do not receive forged source
+identities.
 
 Each Scene owns one immutable `ProvenanceArena`. Its private `ProvenanceNodeId` values are arena
 addresses, not public source identities or cross-generation handles. The arena is a directed acyclic
@@ -189,8 +193,9 @@ This makes each lifetime and trust boundary explicit while retaining source trac
 - Split, merge, generated, and deleted entity fixtures produce deterministic bounded lineage.
 - Cyclic, forward, duplicate, foreign-generation, and out-of-range lineage/reference cases fail
   iteratively before publication.
-- Exact provenance budget succeeds; excess fails without publication under the default/strict loss
-  policy; an explicitly authorized digest/preview collapse emits structured loss evidence.
+- Exact provenance budget succeeds; excess fails without publication under
+  `LossPolicy::preserve_or_fail()`; an explicitly authorized `ProvenanceEvidenceLoss` collapse emits
+  structured loss evidence with a typed subject while retaining exact counts and digest.
 - Public reports never expose absolute host paths, credentials, backend handles, or unsanitized URI
   components.
 - Re-import fixtures distinguish stable identity from content digest changes.

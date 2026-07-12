@@ -273,6 +273,14 @@ declares a plugin reusable. Panic containment still cannot contain abort, infini
 arbitrary filesystem access, or unbounded allocation by code already executing in the process.
 Hostile extensions require host-managed process isolation.
 
+The shared poison latch applies only to registry-owned codec, detector, and parser registrations that
+Baozi retains and may invoke across operations. Host-supplied `AssetIo`, resolver, and per-operation
+observer capabilities are not silently enrolled in that registry or retained by Baozi for later
+reuse. ADRs 0020 and 0033 own their operation-local failure outcomes; the host decides whether to
+reuse or retire its own object after the operation. If Baozi later introduces a shared registry for
+those capabilities, an Accepted architecture update must assign its health owner and linearization
+rules before reuse.
+
 ```mermaid
 flowchart TB
     Builtin[Built-in importer] --> Builder[Registry builder]

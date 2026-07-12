@@ -2,6 +2,7 @@
 title: glTF Resource Ledger and Skin MVP - Plan
 type: feat
 date: 2026-07-09
+superseded_by: docs/plans/2026-07-10-001-refactor-baozi-canonical-architecture-plan.md
 artifact_contract: ce-unified-plan/v1
 artifact_readiness: implementation-ready
 product_contract_source: ce-plan-bootstrap
@@ -9,6 +10,8 @@ execution: code
 ---
 
 # glTF Resource Ledger and Skin MVP - Plan
+
+> Superseded by the [canonical architecture fearless refactor plan](2026-07-10-001-refactor-baozi-canonical-architecture-plan.md). This file is historical execution context and must not guide current glTF or Scene semantics.
 
 ## Goal Capsule
 
@@ -111,7 +114,7 @@ This plan fixes the architecture now, while Baozi can still break APIs, instead 
 - KTD1. **Node-level mesh binding is the IR contract.** `Mesh.skin` is structurally wrong for glTF and should be removed or made non-authoritative now. The durable shape is `Node.mesh_bindings: Vec<MeshBinding>`.
 - KTD2. **Meshes stay geometry/material streams.** Skin is an instance binding. Joint streams can remain on `Mesh`, but validation must evaluate them through the bindings that reference that mesh.
 - KTD3. **glTF parser uses two-phase scene assembly.** Build a glTF node-index to Baozi `NodeId` map first, create skins from that map, then attach mesh bindings to nodes. This avoids cloning geometry just to express per-node skin.
-- KTD4. **Out-of-scene joint nodes are not ignored silently.** If a skin references a joint/skeleton node not imported into the selected scene, the importer must either import that node under the Baozi root with a diagnostic or fail with a parse error. MVP should choose the smallest correct implementation and document it.
+- KTD4. **Historical cross-scene joint choice, superseded.** This plan originally allowed importing an out-of-scene joint or failing. ADR 0039 now requires failure when a selected skin references a joint or skeleton root outside the structural closure; the adapter never expands the projection by importing that node.
 - KTD5. **Data URI bytes are ledger-owned.** Format code may decode, but budget checks and stats recording live on `ImportContext`; parser code should not update stats directly.
 - KTD6. **Data URI MVP supports base64 buffers.** Non-base64 data URIs may return a named unsupported/parse error until percent-decoding is intentionally implemented.
 - KTD7. **`gltf-rs` remains a private backend.** Tests assert Baozi behavior and owned IR, not `gltf-rs` type names or quirks.

@@ -52,7 +52,7 @@ The key cross-cutting owners are:
 | Serialization, snapshots, and cache boundaries | `0017` |
 | Parser tooling and generated-parser ownership | `0018` |
 | Parser diagnostics, input consumption, and generated code | `0019` |
-| Import lifecycle, stage proof, outcome, and failure transport | `0020` |
+| Import lifecycle, stage proof, source-scope record transport, outcome, and failure transport | `0020` |
 | Extension registry lifecycle, descriptors, trust, unwind mapping, health, and permanent poison | `0021` |
 | Resource ledger and phase accounting | `0022` |
 | Custom material and attribute extension schema | `0023` |
@@ -65,7 +65,8 @@ The key cross-cutting owners are:
 | Supported targets and portability tiers | `0034` |
 | Text decoding and recovery | `0035` |
 | Source identity, provenance, and metadata | `0036` |
-| ADR lifecycle, controlled trials, atomic promotion, and authority | `0028` |
+| Source-scene selection, import closure, and source-scope evidence | `0039` |
+| ADR lifecycle, controlled trials, authority, and implementation-conformance axes | `0028` |
 
 ADRs 0037 and 0038 are Proposed future contracts. They do not own current archive or export behavior
 and cannot become authorities until their declared implementation tracers exist.
@@ -83,20 +84,20 @@ contract must update the owning ADR before changing the implementation plan.
 | R3 - object-bound dependency access | [ADR 0010](0010-asset-io-virtual-filesystem-uri-archive-and-path-security.md), [ADR 0020](0020-import-lifecycle-and-report-contract.md) | U3 |
 | R4 - non-bypassable final validation | [ADR 0003](0003-core-scene-ir-and-material-model.md), [ADR 0020](0020-import-lifecycle-and-report-contract.md) | U1, U3-U4 |
 | R5 - stable primary and dependency snapshots | [ADR 0010](0010-asset-io-virtual-filesystem-uri-archive-and-path-security.md), [ADR 0020](0020-import-lifecycle-and-report-contract.md), [ADR 0029](0029-format-detection-stable-input-and-failure-contract.md) | U3 |
-| R6 - success and failure evidence | [ADR 0020](0020-import-lifecycle-and-report-contract.md), [ADR 0029](0029-format-detection-stable-input-and-failure-contract.md), [ADR 0036](0036-source-identity-provenance-and-metadata.md) | U3 |
+| R6 - success and failure evidence | [ADR 0020](0020-import-lifecycle-and-report-contract.md), [ADR 0029](0029-format-detection-stable-input-and-failure-contract.md), [ADR 0036](0036-source-identity-provenance-and-metadata.md), [ADR 0039](0039-source-document-scene-selection-and-import-closure.md) | U3, U3.5, U4, U6 |
 | R7 - attempted, live, committed, and peak accounting | [ADR 0022](0022-per-import-resource-ledger-and-budget-accounting.md) | U3-U8 |
-| R8 - configuration, registry-health, and runtime-control ownership | [ADR 0016](0016-import-options-presets-and-configuration-precedence.md), [ADR 0021](0021-extension-registry-and-format-descriptor-governance.md), [ADR 0033](0033-operation-control-and-observability.md), [ADR 0035](0035-text-decoding-conformance-and-recovery.md) | U3, U5-U6 |
+| R8 - configuration, registry-health, and runtime-control ownership | [ADR 0016](0016-import-options-presets-and-configuration-precedence.md), [ADR 0021](0021-extension-registry-and-format-descriptor-governance.md), [ADR 0033](0033-operation-control-and-observability.md), [ADR 0035](0035-text-decoding-conformance-and-recovery.md), [ADR 0039](0039-source-document-scene-selection-and-import-closure.md) | U3, U3.5, U5-U6, U9 |
 | R9 - logical meshes and primitives | [ADR 0030](0030-logical-mesh-primitive-and-attribute-domain.md) | U4 |
 | R10 - domain-aware attributes | [ADR 0030](0030-logical-mesh-primitive-and-attribute-domain.md), [ADR 0023](0023-material-and-custom-attribute-extension-model.md) | U4-U7 |
 | R11 - variable skin influences and matrix spaces | [ADR 0031](0031-animation-skin-morph-and-deformer-contract.md) | U4, U6-U7 |
-| R12 - morph and animation preservation | [ADR 0031](0031-animation-skin-morph-and-deformer-contract.md) | U4, U6 |
-| R13 - image identities, scene space, and numeric-scope boundary | [ADR 0012](0012-material-texture-image-and-color-space-policy.md), [ADR 0008](0008-math-coordinate-units-and-numeric-policy.md) | U4, U6 |
+| R12 - morph and animation preservation | [ADR 0031](0031-animation-skin-morph-and-deformer-contract.md) | U3.5, U4, U6 |
+| R13 - image identities, scene space, and numeric-scope boundary | [ADR 0012](0012-material-texture-image-and-color-space-policy.md), [ADR 0008](0008-math-coordinate-units-and-numeric-policy.md) | U3.5, U4, U6 |
 | R14 - identity, provenance, proof, remap, and invalidation | [ADR 0003](0003-core-scene-ir-and-material-model.md), [ADR 0032](0032-postprocess-remap-and-derived-data-contract.md), [ADR 0036](0036-source-identity-provenance-and-metadata.md) | U4, U7 |
-| R15 - first-party format semantic preservation | [ADR 0004](0004-parser-backend-and-format-coverage-policy.md), [ADR 0011](0011-format-support-tiers-and-compatibility-charter.md) | U5-U6 |
+| R15 - first-party format semantic preservation | [ADR 0004](0004-parser-backend-and-format-coverage-policy.md), [ADR 0011](0011-format-support-tiers-and-compatibility-charter.md), [ADR 0039](0039-source-document-scene-selection-and-import-closure.md) | U3.5, U5-U6 |
 | R16 - compiled typed postprocess plans | [ADR 0013](0013-post-process-pipeline-semantics-presets-and-mutation-model.md), [ADR 0033](0033-operation-control-and-observability.md) | U7 |
 | R17 - postprocess evidence and validated output | [ADR 0013](0013-post-process-pipeline-semantics-presets-and-mutation-model.md), [ADR 0032](0032-postprocess-remap-and-derived-data-contract.md) | U7 |
 | R18 - robust bounded triangulation | [ADR 0013](0013-post-process-pipeline-semantics-presets-and-mutation-model.md), [ADR 0032](0032-postprocess-remap-and-derived-data-contract.md) | U7 |
-| R19 - architecture lifecycle, release topology/recovery, and target governance | [ADR 0028](0028-adr-lifecycle-and-evidence-governance.md), [ADR 0006](0006-public-api-versioning-and-crate-stability-policy.md), [ADR 0034](0034-supported-targets-and-portability.md) | U2, U9 |
+| R19 - architecture lifecycle, release topology/recovery, and target governance | [ADR 0028](0028-adr-lifecycle-and-evidence-governance.md), [ADR 0006](0006-public-api-versioning-and-crate-stability-policy.md), [ADR 0034](0034-supported-targets-and-portability.md) | U2, U3.5, U9 |
 | R20 - executable quality and maturity evidence | [ADR 0005](0005-testing-fuzzing-and-differential-oracle-strategy.md), [ADR 0006](0006-public-api-versioning-and-crate-stability-policy.md), [ADR 0007](0007-workspace-crate-graph-feature-flags-msrv-and-ci-gates.md), [ADR 0011](0011-format-support-tiers-and-compatibility-charter.md), [ADR 0026](0026-validation-snapshot-and-fuzz-gates.md), [ADR 0034](0034-supported-targets-and-portability.md) | U5-U9 |
 | R21 - progressive canonical public workflow | [ADR 0006](0006-public-api-versioning-and-crate-stability-policy.md), [ADR 0020](0020-import-lifecycle-and-report-contract.md) | U4, U9 |
 
@@ -142,3 +143,4 @@ contract must update the owning ADR before changing the implementation plan.
 | [0036](0036-source-identity-provenance-and-metadata.md) | Source Identity, Provenance, and Metadata | Accepted | Normative |
 | [0037](0037-archive-and-container-security.md) | Archive and Container Security | Proposed | Non-authoritative |
 | [0038](0038-export-transaction-and-loss-contract.md) | Export Transaction and Loss Contract | Proposed | Non-authoritative |
+| [0039](0039-source-document-scene-selection-and-import-closure.md) | Source Document Scene Selection and Import Closure | Accepted | Normative |

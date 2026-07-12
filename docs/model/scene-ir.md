@@ -57,7 +57,7 @@ edge:
 | Owner | Canonical contents | References or local ownership |
 | --- | --- | --- |
 | Scene | scene space, nodes, mesh instances, logical meshes, materials, images, samplers, textures, skins, animation clips, cameras, lights, metadata, provenance arena, scene bounds | generation-qualified scene IDs |
-| Node | local transform, ordered child IDs, optional camera/light attachments | node, camera, and light IDs |
+| Node | authored matrix-or-TRS base transform, ordered child IDs, optional camera/light attachments | node, camera, and light IDs |
 | Logical mesh | one or more primitives, morph target definitions, default morph weights, logical-mesh bounds | owner-qualified primitive and morph-target IDs |
 | Primitive | topology, optional index stream, vertex/corner/face attributes, optional material, morph deltas, influence rows, primitive bounds | primitive-local domains and material ID |
 | Mesh instance | one owner node, one logical mesh, optional skin, optional morph overrides, instance attributes | node, logical-mesh, and skin IDs |
@@ -65,6 +65,13 @@ edge:
 
 Reciprocal storage is not canonical. Derived indexes may accelerate reverse queries, but validation
 can rebuild them from the owner edge and they do not become a second source of truth.
+
+The local matrix exposed by a node view is derived from its preserved authored transform form. TRS
+animation overlays only TRS-authored base-pose components; it does not implicitly decompose a
+matrix-authored node. Source documents with scene declarations follow
+[ADR 0039](../adr/0039-source-document-scene-selection-and-import-closure.md): every selected
+projection receives one identity-TRS synthetic root with generated provenance, and its selected
+source roots become ordered children.
 
 ## Identity and Handles
 

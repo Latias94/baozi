@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-07-08
-updated: 2026-07-10
+updated: 2026-07-12
 authors:
   - Codex
 decision_type: architecture
@@ -15,6 +15,7 @@ related:
   - docs/adr/0031-animation-skin-morph-and-deformer-contract.md
   - docs/adr/0032-postprocess-remap-and-derived-data-contract.md
   - docs/adr/0036-source-identity-provenance-and-metadata.md
+  - docs/adr/0039-source-document-scene-selection-and-import-closure.md
 ---
 
 # ADR 0003: Canonical Scene IR Ownership and State Model
@@ -66,7 +67,7 @@ The aggregate owns these collections:
 | Owner | Owned concepts | Cross-references |
 | --- | --- | --- |
 | Scene | scene space, nodes, mesh instances, logical meshes, materials, images, samplers, textures, skins, animations, cameras, lights, metadata, provenance arena, derived scene bounds | generation-qualified dense IDs |
-| Node | local transform, ordered children, camera/light attachments | node, camera, and light IDs |
+| Node | authored base transform, ordered children, camera/light attachments | node, camera, and light IDs |
 | Logical mesh | primitives, morph target definitions, default morph weights, derived logical-mesh bounds | owner-qualified local IDs and primitive-local data |
 | Primitive | topology, indices, vertex/corner/face attributes, material, derived primitive bounds | material ID |
 | Mesh instance | owner node, logical mesh, optional skin, morph overrides, instance attributes | node, mesh, and skin IDs |
@@ -83,6 +84,14 @@ evaluation, animation targets, provenance, and edit remaps all depend on this ow
 Logical mesh and attribute rules are authoritative in ADR 0030; deformation and animation in ADR
 0031; transactional edits, remaps, and derived-data invalidation in ADR 0032; persistent source
 identity and provenance in ADR 0036.
+
+A node preserves its authored base-transform representation as either an authored local matrix or
+materialized translation, rotation, and scale (TRS). A computed local matrix is a derived inspection
+and evaluation value, not a replacement for the authored representation. The builder and validator
+must therefore reject an animation channel that targets a matrix-authored node unless the applicable
+format contract has explicitly lowered it to TRS with provenance and authorized representation loss.
+ADR 0008 defines matrix/TRS numeric semantics, and ADR 0031 defines the base-pose and channel-overlay
+rules. This distinction is part of the canonical aggregate rather than a glTF-only adapter detail.
 
 Every published scene owns an opaque `SceneGenerationId` that is collision-free within the runtime
 generation domain. Builder finish and every successful edit commit expose a fresh token; ADR 0032
@@ -165,4 +174,6 @@ postprocess one atomic mutation boundary. Chosen.
 - Stale dense IDs require an explicit remap before use with a new generation.
 - Primitive and morph-target handles from another logical mesh fail even when the local index exists.
 - Sibling edits from one input publish different generation IDs and distinct remap endpoints.
+- A node view distinguishes authored matrix from authored TRS, while its derived local matrix follows
+  ADR 0008 without changing the preserved source representation.
 - Public API tests prove the import-inspect path does not require builder, proof, or ledger internals.

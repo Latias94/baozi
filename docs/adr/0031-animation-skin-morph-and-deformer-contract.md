@@ -1,6 +1,7 @@
 ---
 status: accepted
 date: 2026-07-10
+updated: 2026-07-12
 authors:
   - Codex
 decision_type: architecture
@@ -13,6 +14,7 @@ supersedes:
 related:
   - docs/adr/0032-postprocess-remap-and-derived-data-contract.md
   - docs/adr/0036-source-identity-provenance-and-metadata.md
+  - docs/adr/0039-source-document-scene-selection-and-import-closure.md
 ---
 
 # ADR 0031: Animation, Skin, Morph, and Deformer Contract
@@ -121,6 +123,19 @@ finite `f64` values in the authored domain. The time domain records seconds, fra
 ticks with an optional ticks-per-second rate, or a validated namespaced source unit. A seconds view
 exists only when conversion is defined; import never resamples keys merely to normalize units.
 
+#### Base Pose And Authored Transform
+
+The node base pose is the immutable authored transform preserved by ADR 0003 and ADR 0008. A TRS
+channel overlays only its named component on a TRS-authored node; components without a channel retain
+the materialized base-pose values. Evaluating a clip produces an evaluation result and never mutates
+the stored base pose, provenance, or authored representation.
+
+Matrix-authored nodes have no implicit TRS animation target. A format that permits a matrix together
+with component animation must either lower that node to TRS through a documented, provenance-bearing
+representation-loss path authorized by the caller, or reject it before canonical construction. glTF
+already excludes that combination. `Matrix` is not a channel target variant and no evaluator may
+decompose a matrix merely because a component channel is requested.
+
 Every channel declares:
 
 - a current producer-backed target: node translation, node rotation, node scale, or mesh-instance
@@ -131,6 +146,18 @@ Every channel declares:
   producer-backed namespaced behavior
 - strictly increasing key times, typed values, and interpolation-specific tangent payloads
 - provenance and bounded source timing metadata
+
+`SourceDefault` extrapolation is target-specific and immutable. For a node component it evaluates to
+that component of the materialized TRS base pose. For mesh-instance morph weights it evaluates to the
+instance override when present, otherwise to the logical-mesh default weights. It never means zero,
+the nearest key, or mutable state left by another clip. A format with a different source-defined
+behavior must preserve it through an admitted namespaced extrapolation instead of overloading
+`SourceDefault`.
+
+Within one clip, `(target owner, target semantic)` is unique. Two channels cannot both write the same
+node translation, rotation, or scale, or the same mesh-instance morph-weight vector. Baozi does not
+invent precedence or blending inside one canonical clip; duplicate targets are rejected or resolved
+by an explicit format recovery before canonical construction.
 
 Current channel payloads are closed and have deterministic per-key cardinality:
 
@@ -217,3 +244,10 @@ This preserves authoring truth while keeping renderer conversion explicit and me
   without normalization; morph tangent vectors match target count exactly.
 - Invalid joint rows, palette indices, target counts, time domains, interpolation payloads, and
   target IDs fail before a validated scene is published.
+- Translation-only, rotation-only, and scale-only channels retain the other base-pose TRS components;
+  matrix-authored nodes reject component-target channels unless a format-owned authorized lowering
+  record exists.
+- Duplicate `(target owner, target semantic)` channels fail before publication; no storage order or
+  source order becomes an implicit blend rule.
+- `SourceDefault` extrapolation resolves to the immutable target base value, including instance-then-
+  logical-mesh fallback for morph weights, and never observes another evaluation result.

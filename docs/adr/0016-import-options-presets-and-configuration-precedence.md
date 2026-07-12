@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-07-09
-updated: 2026-07-11
+updated: 2026-07-12
 authors:
   - Codex
 decision_type: architecture
@@ -35,8 +35,9 @@ request compiles only the preset/caller format envelopes it actually submitted a
 before `ImportSession` or asset IO. ADR 0021 owns when registry freeze invokes default compilation,
 snapshot publication, and registration health.
 
-Accepted means this transport and precedence are authoritative; it does not claim the replacement API
-has already landed.
+Accepted makes the typed envelopes, precedence, codec compilation, and private request store
+authoritative. It does not make a top-level serialized request wire a stable public, persistence, or
+network contract.
 
 ### Canonical Ownership Boundary
 
@@ -82,6 +83,14 @@ Operation cancellation and progress callbacks are live capabilities, not configu
 default/preset/caller precedence. They decide whether a format-permitted recovery or loss may be
 accepted. The concrete recovery mode is format-owned configuration because only the selected format
 can define its legal choices and source semantics.
+
+`ImportLossKind` keeps independent authorities for optional-dependency omission, format recovery,
+source-semantic loss, and provenance-evidence loss. `ProvenanceEvidenceLoss` authorizes replacing
+otherwise complete source/provenance detail with an exact typed count plus stable digest; it does not
+authorize dropping retained source semantics, filtering a retained animation channel, or accepting a
+format recovery. Conversely, `SourceSemanticLoss` does not authorize provenance/detail collapse.
+`LossPolicy::preserve_or_fail()` denies every category. Each additional category is an explicit
+caller choice rather than an implication of `ConformancePolicy` or another allowed loss kind.
 
 ### Format-Owned Typed Options
 
@@ -213,21 +222,26 @@ diagnostics. Strictness controls source recovery, not request validity.
 
 ### Conformance, Loss, Recovery, and Serialization
 
-The top-level serializable request has its own explicit configuration schema version. Its common
-section serializes `ConformancePolicy` and `LossPolicy`; each format recovery profile remains inside
-that format's versioned envelope. For example, ADR 0035's OBJ/MTL invalid-UTF-8 recovery can be chosen
-only by the OBJ-owned typed option, then is accepted only if the common conformance/loss policies
-allow it. glTF's descriptor exposes no such recovery choice.
+The current top-level BZIR request encoding is an experimental pre-release transport with an explicit
+configuration schema version. Its common section serializes `ConformancePolicy` and `LossPolicy`;
+each format recovery profile remains inside that format's versioned envelope. For example, ADR
+0035's OBJ/MTL invalid-UTF-8 recovery can be chosen only by the OBJ-owned typed option, then is
+accepted only if the common conformance/loss policies allow it. glTF's descriptor exposes no such
+recovery choice.
 
 A descriptor `TextProfile` owns lexical rules and immutable format hard caps, not a competing request
 budget. For every matching dimension the effective decoder limit is
 `min(TextProfile hard cap, ImportConfig ResourceLimits)`. A format envelope may select only an
 advertised recovery mode and may never raise either bound.
 
-Serialization uses stable field/variant identifiers defined by the configuration schema, canonical
-map ordering, bounded payload sizes, and strict unknown-field/version rejection. A Rust `serde`
-derive or struct layout is not itself a stable config contract. Decode followed by encode is
-canonical; encode followed by decode reproduces an equal frozen semantic request.
+An admitted serialization uses explicit field/variant identifiers defined by its configuration
+schema, canonical map ordering, bounded payload sizes, and strict unknown-field/version rejection. A
+Rust `serde` derive or struct layout is not itself a config contract. BZIR v1 currently pins canonical
+vectors for regression and evaluation only; those vectors do not create a facade, semver, persistence,
+or network compatibility promise. Before the first release, U9 removes its public package-API
+reachability and retains the vectors only as internal regression evidence. Any later stable request
+wire requires a new Accepted architecture update, a real facade or production consumer, packaged-
+consumer tests, compatibility vectors, version-evolution rules, and public documentation.
 
 ### Presets
 
@@ -284,10 +298,11 @@ stringly typed, and impossible to validate before IO reliably. Rejected.
 This gives direct static typing but destroys trait object safety or requires one facade enum containing
 all optional format types. Rejected.
 
-### Option C: Versioned envelopes compiled by object-safe format codecs
+### Option C: Versioned typed envelopes compiled by object-safe format codecs
 
 This keeps format ownership and static concrete types behind an object-safe registry, provides a
-versioned external boundary, and fails invalid requests before IO. Chosen.
+versioned typed boundary, and fails invalid requests before IO without forcing a stable top-level
+wire. Chosen.
 
 ## Consequences
 
@@ -306,7 +321,7 @@ Negative:
 - Every configurable format maintains a schema and object-safe codec.
 - Every codec must expose a bounded compilable default; ADR 0021's freeze may reject the proposed
   snapshot when that integration fails.
-- External configuration needs an explicit versioned serialization layer.
+- External configuration needs a separately admitted versioned serialization layer.
 - Adding a format option requires merge and round-trip conformance tests.
 
 ## Risks and Mitigations
@@ -340,4 +355,5 @@ Negative:
 | Type isolation | A selected importer cannot access another format's compiled value; a wrong downcast is an internal contract failure. |
 | No global input | Parallel tests prove environment or another request cannot change a session config. |
 | Preset transparency | Expanding a preset and supplying the resulting overlays explicitly yields an equal frozen request. |
-| Serializable profiles | Versioned common conformance/loss and format recovery profiles pass canonical round-trip, unknown-field, and version-mismatch tests. |
+| Loss authority separation | Allowing one loss kind never authorizes another; provenance/detail collapse requires `ProvenanceEvidenceLoss`, while filtered retained-domain semantics require `SourceSemanticLoss`. |
+| Experimental wire boundary | BZIR vectors pass canonical round-trip, unknown-field, and version-mismatch tests but are not re-exported by the facade or described as a stable public contract; U9 removes public package reachability before publication. |

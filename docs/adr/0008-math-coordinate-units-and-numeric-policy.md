@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-07-09
-updated: 2026-07-11
+updated: 2026-07-12
 authors:
   - Codex
 decision_type: architecture
@@ -13,6 +13,7 @@ related:
   - docs/adr/0028-adr-lifecycle-and-evidence-governance.md
   - docs/adr/0031-animation-skin-morph-and-deformer-contract.md
   - docs/adr/0032-postprocess-remap-and-derived-data-contract.md
+  - docs/adr/0039-source-document-scene-selection-and-import-closure.md
 ---
 
 # ADR 0008: Math Types, Scene Space, Units, and Numeric Policy
@@ -76,6 +77,24 @@ orientation must agree with its declared normal/UV axes and handedness encoding.
 quaternion field, including future static TRS fields, obeys the same finite-unit rule; normalization
 outside tolerance is an explicit diagnosed recovery, not a constructor side effect.
 
+The canonical node base transform preserves one of two authored forms:
+
+- `Matrix`: a finite affine local-to-parent matrix in the convention above; and
+- `Trs`: finite translation, finite unit rotation, and finite scale, with format-defined omitted
+  components materialized as translation zero, rotation identity, and scale one.
+
+For `Trs`, the canonical local matrix is derived as `T * R * S` under the column-vector convention.
+For `Matrix`, it is the preserved authored matrix. Neither form is silently rewritten into the other:
+format rules decide whether a source matrix must be decomposable or exclude shear, and a conversion
+from matrix to TRS requires an explicit format contract plus provenance and authorized
+representation loss. A derived matrix view never changes which form the source authored.
+
+The canonical `Matrix` invariant is evaluated under the deterministic numeric predicate owned by the
+admitting format contract. That contract must publish its arithmetic width, operation order,
+absolute/relative tolerances, singular-scale and reflection behavior, and boundary fixtures. A
+tolerance classifies the source value; it never authorizes clamping, component rewriting, backend-
+specific decomposition, or changing the stored authored matrix bits.
+
 The unit-quaternion rule applies to rotation sample values, not cubic interpolation derivatives.
 Rotation cubic tangents are finite `Vec4<f32>` derivatives in authored component order and are not
 normalized or interpreted as rotations. ADR 0031 owns channel cardinality and tangent layout.
@@ -105,6 +124,13 @@ space descriptor and geometric orientation together before commit.
 
 Floating-point snapshots use deterministic ordering and per-field documented absolute/relative or
 angular tolerances. Tolerances are test comparison policy, not permission to clamp imported data.
+
+When a format contract uses a numeric predicate to admit an authored matrix, that format ADR must
+freeze the predicate, promotion precision, operation order, inclusive/exclusive comparisons,
+absolute/relative tolerances, zero-scale behavior, and reflection/negative-scale behavior. The
+predicate is Baozi-owned and runs before canonical construction. A backend decomposition routine or
+its test epsilon is not normative, and a successful predicate never rewrites or clamps the authored
+matrix. ADR 0027 supplies the concrete glTF predicate.
 
 ### High-Precision CAD Scope
 
@@ -185,5 +211,9 @@ Chosen.
   and derived-data invalidation in one transaction.
 - Animation times that differ below `f32` precision remain distinct after import.
 - NaN, infinity, invalid unit scales, and invalid quaternions fail validation deterministically.
+- Matrix-authored and TRS-authored nodes retain distinct authored forms while producing the same
+  documented local-matrix view where their numeric transforms are equivalent.
+- Format-owned matrix admission publishes one backend-independent numeric predicate with fixed
+  boundary, zero-scale, and reflection fixtures.
 - CAD-oriented format/workflow admission fails governance review unless an accepted update to this
   ADR supplies the complete precision and migration evidence above.

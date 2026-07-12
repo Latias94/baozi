@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-07-09
-updated: 2026-07-10
+updated: 2026-07-12
 authors:
   - Codex
 decision_type: architecture
@@ -17,6 +17,7 @@ depends_on:
   - docs/adr/0031-animation-skin-morph-and-deformer-contract.md
   - docs/adr/0035-text-decoding-conformance-and-recovery.md
   - docs/adr/0036-source-identity-provenance-and-metadata.md
+  - docs/adr/0039-source-document-scene-selection-and-import-closure.md
 related:
   - docs/formats/gltf.md
   - docs/research/gltf-rs-backend-notes.md
@@ -80,7 +81,8 @@ flowchart TB
 The exact Rust layout is private and may change freely. It must nevertheless represent every admitted
 source concept needed by canonical conversion without consulting backend objects:
 
-- document/scenes/nodes and explicit source indices;
+- document/default scene, every declared scene and root list, node membership, and explicit source
+  indices;
 - logical meshes and primitives, modes, indices, and accessor contracts;
 - buffer, view, accessor, sparse accessor, stride, normalization, and range semantics;
 - domain-aware vertex/corner/face attributes and custom semantic identity;
@@ -111,6 +113,64 @@ Accessors are admitted before materialization: checked offset/stride/count/compo
 buffer-range bounds, sparse indices/values, normalized conversion, and output cell/byte reservation.
 Unsupported core semantics are fatal. Optional extension or resource loss is allowed only when the
 format contract and caller loss policy authorize it, with a diagnostic and loss record.
+
+### Source Scene Projection
+
+ADR 0039 owns the generic source-scene selection and import-closure contract. For glTF, the
+format-owned typed options expose an explicit selection by declared scene index or
+`DocumentDefault`. `DocumentDefault` selects the document's declared default, selects the sole
+declared scene when there is exactly one, and fails with a typed selection-required error when two or
+more scenes exist without a default. It never falls back to scene index zero.
+
+When a document declares no scenes, the adapter selects all validated parentless nodes as projection
+roots and records `ParentlessNodeProjection`; the required synthetic canonical root then owns those
+roots exactly as it does for a declared scene. For a declared scene, the selected roots and their
+descendants define the structural closure. Only
+resources reachable from that closure enter the canonical Scene. Skin joints and skeleton roots must
+remain within the selected closure; a cross-selection skin reference fails rather than importing an
+extra node or silently changing the hierarchy. Animation clips with target channels outside the
+closure either fail or omit only the authorized channels with stable loss and provenance records.
+Shared source nodes are never cloned merely because they are listed in an unselected scene.
+Every projection receives one identity-TRS synthetic canonical root with generated scene-level
+provenance; selected source roots are its ordered children as required by ADR 0039.
+
+### glTF Node Transform Admission
+
+A glTF node uses either `matrix` or any subset of TRS properties, never both. An authored matrix must
+be finite, affine, decomposable as translation, rotation, and scale under ADR 0008, and contain no
+skew or shear; decomposition is an admission check and does not replace the preserved authored
+`Matrix` form. Omitted TRS properties materialize to translation zero, rotation identity, and scale
+one while the canonical node remains authored `Trs`.
+
+Any animation channel targeting translation, rotation, or scale requires a TRS-authored node. A
+matrix-authored target, a matrix/TRS combination, or a matrix that fails the decomposability and
+no-shear rules is a hard glTF conformance error before canonical construction; the adapter does not
+silently decompose, repair, or loss-authorize those invalid glTF cases.
+
+The glTF predicate is Baozi-owned and independent of `gltf-rs::Transform::decomposed`. It promotes
+each finite authored `f32` cell exactly to `f64` and evaluates products and sums in fixed x/y/z order
+without fused `mul_add`. The frozen constants are:
+
+```text
+AFFINE_ABS_TOLERANCE = 8 * f32::EPSILON
+ORTHOGONAL_REL_TOLERANCE = 64 * f32::EPSILON
+```
+
+For column-major matrix `m`, affine admission requires
+`abs(m[0][3])`, `abs(m[1][3])`, and `abs(m[2][3])` to be at most
+`AFFINE_ABS_TOLERANCE`, and `abs(m[3][3] - 1)` to be at most that tolerance. Let `c0`, `c1`, and `c2`
+be the three spatial columns. Every pair of nonzero columns must satisfy the inclusive squared test
+`dot(ci, cj)^2 <= ORTHOGONAL_REL_TOLERANCE^2 * norm2(ci) * norm2(cj)`. An exactly zero column is a
+valid zero scale and requires no normalization; a near-zero nonzero column uses the same relative
+test and is never coerced to zero.
+
+This predicate defines Baozi's accepted floating-point representation of decomposable `R * S`
+columns without choosing a decomposition. Consequently one, two, or three zero scales are valid, and
+a negative determinant/reflection is valid because glTF permits negative scale. The predicate neither
+rejects determinant zero nor chooses an axis to carry a negative sign. The authored matrix cells,
+including signed zero, remain unchanged.
+Raw admission rejects matrix plus any TRS property before the backend accessor can hide that
+combination; the complete animation-reference pass rejects every matrix-authored target.
 
 ### Backend Admission and Maturity
 
@@ -206,5 +266,7 @@ Negative:
 | Admission | Oversized/deep/dense JSON, invalid GLB lengths, accessor overflow, and sparse ranges fail before unsafe allocation/materialization. |
 | Admission versus maturity | A baseline-unsafe backend slice is absent from first-party registration/all-formats, while fixtures with only missing non-safety evidence remain eligible for Experimental. |
 | Semantic breadth | Fixtures cover multi-primitive meshes, attributes, material/texture sharing, skins, morphs, and animations through normalized and facade layers. |
+| Scene projection | Multi-scene fixtures prove default, explicit, missing-default, shared-root, skin, and animation-closure behavior with source-scope evidence. |
+| Node transforms | Matrix/TRS mutual exclusion, fixed affine/orthogonality fixtures at 0.5x, exactly 1x inclusive, the next representable value above 1x, and 2x each threshold, one/two/three zero scales, nonzero near-zero scales, odd/even negative scales, matrix decomposability/no-shear, omitted TRS defaults, bit-preserving authored-form retention, backend-independent classification, and matrix-target animation rejection have positive and negative fixtures. |
 | Replacement equivalence | Any alternate backend passes identical normalized-model and canonical golden/digest tests. |
 | Maturity truthfulness | Linux sanitizer and subprocess RSS/timeout gates execute before promotion; compile-only evidence cannot satisfy them. |

@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-07-10
-updated: 2026-07-11
+updated: 2026-07-12
 authors:
   - Codex
 decision_type: architecture
@@ -49,6 +49,38 @@ supersede the old authority.
 ADR number, file date, and merge order do not establish precedence between overlapping Accepted
 ADRs. The overlap must be removed, or one Accepted ADR must explicitly supersede the other. A newer
 document cannot claim authority through narrative wording alone.
+
+### Independent Conformance And Maturity Axes
+
+ADR status answers whether a decision is authoritative; it does not claim that implementation or a
+release has reached that decision. Baozi tracks four independent axes:
+
+| Axis | Canonical owner | Meaning |
+| --- | --- | --- |
+| Decision authority | this ADR and each numbered ADR status | which contract governs work |
+| Implementation conformance | repository conformance inventory, direct tracers, and executable gates | whether current code satisfies each accepted contract |
+| Format maturity | ADR 0011 and format evidence | how much format behavior has proved its support tier |
+| Publication readiness | ADR 0006 and release/package gates | whether artifacts may be published and supported |
+
+An Accepted ADR may therefore be planned, partially implemented, conforming, or currently
+nonconforming. Only the first axis is encoded in ADR `status`. A machine-readable conformance
+inventory must name each checked contract, its Accepted authority, direct implementation/test/CI
+tracers, and the gate that proves it. A `conforming` entry without durable tracers and an executable
+gate is invalid; a known code/ADR disagreement is recorded as partial or nonconforming until fixed.
+
+The U9 inventory schema has these minimum fields: a stable `contract_id`; one Accepted
+`authority_adr`; `conformance_status` (`unassessed`, `partial`, `conforming`, or `nonconforming`);
+separate tracked `implementation_tracers`, `test_tracers`, and `ci_tracers`; and one or more stable
+`gate_ids` resolved through the xtask gate catalog. `conforming` requires every tracer class applicable
+to that contract plus at least one executable gate; an empty path, missing tracked file, unknown gate,
+non-Accepted authority, or self-reported status without gate results fails closed. Format maturity and
+publication fields do not enter this schema; their independent inventories reference the same stable
+contract IDs where needed.
+
+Implementation state is not added to ADR frontmatter because a self-declared field beside the
+decision can become a stale assertion. U9 owns the conformance inventory and checker. Before that
+inventory lands, plans and progress records may locate incomplete work but cannot claim conformance,
+maturity, or release readiness.
 
 ### Lifecycle
 
@@ -194,6 +226,7 @@ catalog is:
 | Supported target profiles, portability promises, and promotion/demotion | ADR 0034 | Feature inventory and CI wiring remain under ADR 0007. |
 | Text decoding, source mapping, conformance, and deterministic recovery | ADR 0035 | Format options authorize only format-declared recovery. |
 | Persistent source identity, provenance, lineage, aliases, redaction, and metadata | ADR 0036 | Dense scene-local identity remains under ADR 0003. |
+| Source-document scene selection, projection closure, cross-scene references, and source-scope evidence semantics | ADR 0039 | Format ADRs own concrete selector identities; ADR 0020 owns the record type/builder/sealed report transport, ADR 0036 owns identity/digest/provenance/loss representations, and ADR 0003 owns the canonical aggregate. |
 | Archive/container support | None while ADR 0037 is Proposed | ADR 0037 owns no crate, feature, capability, or public promise until Accepted with a tracer. |
 | Export transactions and export loss | None while ADR 0038 is Proposed | ADR 0038 owns no crate, feature, capability, or public promise until Accepted with a tracer. |
 
@@ -267,6 +300,7 @@ checker, but they must preserve this authority model.
 | Reciprocal supersession is mechanically valid but semantically incomplete | High | Low | Require the replacing ADR to describe scope and review overlapping Accepted ADRs. |
 | A tracer path exists but does not prove behavior | High | Medium | Require a tracked implementation/test/CI file, name the behavior it proves during promotion review, and extend evidence checks without weakening this definition. |
 | A Proposed trial is mistaken for production authority | Critical | Medium | Keep the trial isolated from defaults/releases, label its evidence as trial-only, and grant authority only through an atomic Accepted promotion. |
+| Accepted is mistaken for implemented or released | Critical | High | Keep conformance, maturity, and publication as independent checked axes; require direct tracers and executable gates for a conforming claim. |
 | The checker becomes an unmaintainable general Markdown parser | Medium | Low | Keep the index and frontmatter canonical subset small and test malformed inputs explicitly. |
 
 ## Acceptance Criteria
@@ -281,4 +315,5 @@ checker, but they must preserve this authority model.
 | Trial and promotion cannot self-lock | A Proposed ADR can carry isolated trial code; one atomic change can promote status, implementation, evidence, and tracked tracers, while the Proposed state creates no production promise. |
 | External evidence is reproducible | Code/packages/versioned specifications use immutable identities; living official documents record retrieval date, response length, and SHA-256. |
 | Decision ownership is complete | Every active concern maps to exactly one Accepted ADR; Proposed, Superseded, and Rejected ADRs own none. |
+| Conformance claims are independent | The U9 conformance inventory rejects missing authority, direct tracer, executable gate, and false `conforming` claims without changing ADR lifecycle status. |
 | Rust quality gates remain clean | Format, test, check, and strict Clippy commands pass for `baozi-xtask`. |
