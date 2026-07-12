@@ -1,16 +1,22 @@
 #![no_main]
 
-use baozi::{AssetPath, ExternalReferencePolicy, ImportOptions, Importer, MemoryAssetIo};
+mod support;
+
+use baozi_core::ValidatedScene;
+use baozi_format_obj::{FORMAT_ID, ObjImporter};
+use baozi_import::{
+    ImportOperationControl, PreparedImportRequest, SameAuthorityResolver,
+    import_asset_with_resolver,
+};
+use baozi_io::{AssetPath, MemoryAssetIo};
 use libfuzzer_sys::fuzz_target;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 fuzz_target!(|data: &[u8]| {
-    let Some(obj_path) = AssetPath::new("fuzz.obj").ok() else {
-        return;
-    };
-    let Some(mtl_path) = AssetPath::new("fuzz.mtl").ok() else {
-        return;
-    };
+    static REQUEST: OnceLock<PreparedImportRequest> = OnceLock::new();
+    let request = REQUEST.get_or_init(|| support::prepared_request(ObjImporter, FORMAT_ID));
+    let obj_path = AssetPath::new("fuzz.obj").expect("the static fuzz path must be valid");
+    let mtl_path = AssetPath::new("fuzz.mtl").expect("the static fuzz path must be valid");
 
     let split = data
         .iter()
@@ -19,15 +25,19 @@ fuzz_target!(|data: &[u8]| {
     let obj_bytes = &data[..split];
     let mtl_bytes = data.get(split.saturating_add(1)..).unwrap_or(&[]);
 
-    let mut io = MemoryAssetIo::new();
-    io.insert(obj_path.clone(), Arc::<[u8]>::from(obj_bytes));
-    io.insert(mtl_path, Arc::<[u8]>::from(mtl_bytes));
+    let io = MemoryAssetIo::new();
+    io.try_insert(obj_path.clone(), Arc::<[u8]>::from(obj_bytes))
+        .expect("the primary fuzz asset insertion must succeed");
+    io.try_insert(mtl_path, Arc::<[u8]>::from(mtl_bytes))
+        .expect("the dependency fuzz asset insertion must succeed");
 
-    let mut options = ImportOptions::memory();
-    options.io.external_references = ExternalReferencePolicy::CustomResolver;
-
-    let mut importer = Importer::empty();
-    importer.register(baozi_format_obj::ObjImporter).unwrap();
-
-    let _ = importer.read_asset_with_options(&io, obj_path, options);
+    if let Ok(report) = import_asset_with_resolver(
+        request,
+        &io,
+        obj_path,
+        &SameAuthorityResolver,
+        ImportOperationControl::default(),
+    ) {
+        let _: &ValidatedScene = report.scene();
+    }
 });

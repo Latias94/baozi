@@ -21,14 +21,45 @@ env:
 
 jobs:
   actionlint:
-    name: Workflow lint
-    runs-on: ubuntu-latest
+    name: Workflow and runner contracts
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - name: Checkout
         uses: actions/checkout@v7
         with:
           persist-credentials: false
+
+      - name: Parse scale runner
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Set-StrictMode -Version Latest
+          $parseTokens = $null
+          $parseErrors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile(
+            (Resolve-Path -LiteralPath './scripts/run-scale-profile.ps1').Path,
+            [ref] $parseTokens,
+            [ref] $parseErrors
+          ) | Out-Null
+          if ($parseErrors.Count -ne 0) {
+            throw ($parseErrors.Message -join "`n")
+          }
+
+      - name: Validate scale runner contract
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Set-StrictMode -Version Latest
+          $validationRoot = "target/scale-runner-validation-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          ./scripts/run-scale-profile.ps1 -ValidateOnly -ArtifactRoot $validationRoot
+          $validationPath = Join-Path $validationRoot 'validation.json'
+          $validationReport = Get-Content -Raw -LiteralPath $validationPath | ConvertFrom-Json
+          if ($validationReport.schema -ne 'baozi-scale-report/v1' -or
+              $validationReport.execution_mode -ne 'validate_only' -or
+              $validationReport.status -ne 'passed') {
+            throw 'scale runner validation did not produce a passing validation report'
+          }
 
       - name: Install Go
         uses: actions/setup-go@v6
@@ -53,7 +84,7 @@ jobs:
         uses: dtolnay/rust-toolchain@1.95.0
         with:
           components: clippy, rustfmt
-          targets: wasm32-unknown-unknown, wasm32-wasip1
+          targets: wasm32-unknown-unknown, wasm32-wasip1, x86_64-apple-darwin, x86_64-unknown-freebsd, x86_64-unknown-linux-gnux32
 
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
@@ -70,7 +101,7 @@ jobs:
         run: cargo check --workspace --all-targets
 
       - name: Lint workspace
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
       - name: Test workspace
         run: cargo nextest run --workspace
@@ -89,20 +120,128 @@ jobs:
       - name: Check no-default facade
         run: cargo check -p baozi --no-default-features
 
-      - name: Check all format features
-        run: cargo check -p baozi --features all-formats,native-fs
+      - name: Check exact Linux native filesystem candidate facade
+        run: cargo check -p baozi --target x86_64-unknown-linux-gnu --no-default-features --features all-formats,native-fs-candidate
 
       - name: Check browser WASM bytes path
-        run: cargo check -p baozi --target wasm32-unknown-unknown --no-default-features --features format-stl,format-obj,format-ply
+        run: cargo check -p baozi --target wasm32-unknown-unknown --no-default-features --features all-formats
 
-      - name: Check WASI native-fs path
-        run: cargo check -p baozi --target wasm32-wasip1 --no-default-features --features format-stl,format-obj,native-fs
+      - name: Check WASI bytes and custom-IO path
+        run: cargo check -p baozi --target wasm32-wasip1 --no-default-features --features all-formats
+
+      - name: Prove non-candidate native filesystem targets fail closed
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $expectedDiagnostic = 'baozi-io/fs-candidate is available only on exact runtime candidate targets: x86_64-unknown-linux-gnu, x86_64-pc-windows-msvc, aarch64-apple-darwin; use memory or custom IO'
+          $negativeTargets = @(
+            'wasm32-unknown-unknown'
+            'wasm32-wasip1'
+            'x86_64-apple-darwin'
+            'x86_64-unknown-freebsd'
+            'x86_64-unknown-linux-gnux32'
+          )
+          $installedTargets = @(rustup target list --installed)
+          if ($LASTEXITCODE -ne 0) {
+            throw 'failed to list installed Rust targets'
+          }
+          foreach ($targetTriple in $negativeTargets) {
+            if ($installedTargets -notcontains $targetTriple) {
+              throw "negative target is not installed: $targetTriple"
+            }
+            $cargoOutput = cargo check --color never -p baozi --target $targetTriple --no-default-features --features all-formats,native-fs-candidate 2>&1 | Out-String
+            $cargoStatus = $LASTEXITCODE
+            if ($cargoStatus -eq 0) {
+              throw "native-fs-candidate unexpectedly compiled for $targetTriple"
+            }
+            if ($cargoOutput.Contains("can't find crate for")) {
+              Write-Host $cargoOutput
+              throw "native-fs-candidate failed because target $targetTriple was not installed"
+            }
+            if (-not $cargoOutput.Contains($expectedDiagnostic)) {
+              Write-Host $cargoOutput
+              throw "native-fs-candidate failed for $targetTriple without the fail-closed diagnostic"
+            }
+          }
+
+      - name: Check crate dependency architecture
+        run: cargo run -p baozi-xtask -- crate-graph-check
+
+      - name: Check runtime neutrality and host admission
+        run: cargo run -p baozi-xtask -- runtime-admission-check
+
+      - name: Check ADR governance
+        run: cargo run -p baozi-xtask -- adr-check
+
+      - name: Check native filesystem dependency admission
+        run: cargo run -p baozi-xtask -- native-fs-check
 
       - name: Check dependency policy
         run: cargo deny check
 
-      - name: Package root publish crate
-        run: cargo package -p baozi-core --no-verify
+      - name: Check fuzz dependency policy
+        run: cargo deny --manifest-path fuzz/Cargo.toml check
+
+      - name: Package release leaf crate
+        run: cargo package -p baozi-operation --no-verify
+
+  native-fs-candidate:
+    name: Native filesystem candidate (${{ matrix.target }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+          - runner: windows-2025
+            target: x86_64-pc-windows-msvc
+          - runner: macos-15
+            target: aarch64-apple-darwin
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Install Rust 1.95
+        uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Verify exact runner host
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $rustcHostLines = @(rustc -vV | Where-Object { $_ -like 'host: *' })
+          if ($LASTEXITCODE -ne 0 -or $rustcHostLines.Count -ne 1) {
+            throw 'rustc -vV did not report exactly one host triple'
+          }
+          $rustcHostTriple = $rustcHostLines[0].Substring('host: '.Length)
+          if ($rustcHostTriple -ne '${{ matrix.target }}') {
+            throw "runner host $rustcHostTriple does not match matrix target ${{ matrix.target }}"
+          }
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+
+      - name: Check native filesystem dependency admission
+        run: cargo run -p baozi-xtask --target "${{ matrix.target }}" -- native-fs-check
+
+      - name: Check native filesystem candidate facade wiring
+        run: cargo check -p baozi --target "${{ matrix.target }}" --no-default-features --features all-formats,native-fs-candidate
+
+      - name: Test native filesystem candidate facade
+        run: cargo nextest run --target "${{ matrix.target }}" -p baozi --no-default-features --features all-formats,native-fs-candidate
+
+      - name: Test capability-bound native filesystem candidate without skipped fixtures
+        run: cargo nextest run --target "${{ matrix.target }}" -p baozi-io --features fs-candidate
 
   fuzz:
     name: ${{ matrix.target }} sanitizer fuzz smoke
@@ -116,6 +255,8 @@ jobs:
           - obj_import
           - obj_postprocess
           - ply_import
+          - registry_detection
+          - scene_validation
     steps:
       - name: Checkout
         uses: actions/checkout@v7

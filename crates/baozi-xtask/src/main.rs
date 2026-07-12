@@ -6,10 +6,115 @@ fn main() -> ExitCode {
     let mut arguments = env::args().skip(1);
     match (arguments.next().as_deref(), arguments.next()) {
         (Some("adr-check"), None) => run_adr_check(),
+        (Some("crate-graph-check"), None) => run_crate_graph_check(),
+        (Some("native-fs-check"), None) => run_native_fs_check(),
+        (Some("runtime-admission-check"), None) => run_runtime_admission_check(),
         _ => {
-            eprintln!("usage: cargo run -p baozi-xtask -- adr-check");
+            eprintln!(
+                "usage: cargo run -p baozi-xtask -- <adr-check|crate-graph-check|native-fs-check|runtime-admission-check>"
+            );
             ExitCode::from(2)
         }
+    }
+}
+
+fn run_runtime_admission_check() -> ExitCode {
+    let current_directory = match env::current_dir() {
+        Ok(path) => path,
+        Err(error) => {
+            eprintln!("failed to read the current directory: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let Some(repository_root) = find_repository_root(&current_directory) else {
+        eprintln!("failed to find a Baozi repository root from {current_directory:?}");
+        return ExitCode::FAILURE;
+    };
+
+    let report = baozi_xtask::runtime_admission::check_repository(&repository_root);
+    if report.violations.is_empty() {
+        println!(
+            "Runtime admission check passed ({} production packages, {} source files)",
+            report.production_packages_checked, report.production_source_files_checked
+        );
+        ExitCode::SUCCESS
+    } else {
+        for violation in &report.violations {
+            eprintln!("{violation}");
+        }
+        eprintln!(
+            "Runtime admission check failed ({} violations across {} production packages and {} source files)",
+            report.violations.len(),
+            report.production_packages_checked,
+            report.production_source_files_checked
+        );
+        ExitCode::FAILURE
+    }
+}
+
+fn run_native_fs_check() -> ExitCode {
+    let current_directory = match env::current_dir() {
+        Ok(path) => path,
+        Err(error) => {
+            eprintln!("failed to read the current directory: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let Some(repository_root) = find_repository_root(&current_directory) else {
+        eprintln!("failed to find a Baozi repository root from {current_directory:?}");
+        return ExitCode::FAILURE;
+    };
+
+    let report = baozi_xtask::native_fs::check_repository(&repository_root);
+    if report.violations.is_empty() {
+        println!(
+            "Native filesystem dependency check passed ({} target profiles)",
+            report.profiles_checked
+        );
+        ExitCode::SUCCESS
+    } else {
+        for violation in &report.violations {
+            eprintln!("{violation}");
+        }
+        eprintln!(
+            "Native filesystem dependency check failed ({} violations across {} target profiles)",
+            report.violations.len(),
+            report.profiles_checked
+        );
+        ExitCode::FAILURE
+    }
+}
+
+fn run_crate_graph_check() -> ExitCode {
+    let current_directory = match env::current_dir() {
+        Ok(path) => path,
+        Err(error) => {
+            eprintln!("failed to read the current directory: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let Some(repository_root) = find_repository_root(&current_directory) else {
+        eprintln!("failed to find a Baozi repository root from {current_directory:?}");
+        return ExitCode::FAILURE;
+    };
+
+    let report = baozi_xtask::crate_graph::check_repository(&repository_root);
+    if report.violations.is_empty() {
+        println!(
+            "Crate graph check passed ({} workspace packages)",
+            report.packages_checked
+        );
+        ExitCode::SUCCESS
+    } else {
+        for violation in &report.violations {
+            eprintln!("{violation}");
+        }
+        eprintln!(
+            "Crate graph check failed ({} violations across {} workspace packages)",
+            report.violations.len(),
+            report.packages_checked
+        );
+        ExitCode::FAILURE
     }
 }
 

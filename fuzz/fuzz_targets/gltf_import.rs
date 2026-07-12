@@ -1,28 +1,39 @@
 #![no_main]
 
-use baozi::{AssetPath, ExternalReferencePolicy, ImportOptions, MemoryAssetIo, validate_scene};
-use baozi_format_gltf::read_asset_for_development;
+mod support;
+
+use baozi_core::ValidatedScene;
+use baozi_format_gltf::{FORMAT_ID, GltfImporter};
+use baozi_import::{
+    ImportOperationControl, PreparedImportRequest, SameAuthorityResolver,
+    import_asset_with_resolver,
+};
+use baozi_io::{AssetPath, MemoryAssetIo};
 use libfuzzer_sys::fuzz_target;
+use std::sync::{Arc, OnceLock};
 
 fuzz_target!(|data: &[u8]| {
+    static REQUEST: OnceLock<PreparedImportRequest> = OnceLock::new();
+    let request = REQUEST.get_or_init(|| support::prepared_request(GltfImporter, FORMAT_ID));
     let (source_name, primary_bytes, buffer_bytes) = split_fuzz_input(data);
 
-    let Some(source_path) = AssetPath::new(source_name).ok() else {
-        return;
-    };
-    let Some(buffer_path) = AssetPath::new("buffer.bin").ok() else {
-        return;
-    };
+    let source_path = AssetPath::new(source_name).expect("the static fuzz path must be valid");
+    let buffer_path = AssetPath::new("buffer.bin").expect("the static fuzz path must be valid");
 
-    let mut io = MemoryAssetIo::new();
-    io.insert(source_path.clone(), primary_bytes);
-    io.insert(buffer_path, buffer_bytes);
+    let io = MemoryAssetIo::new();
+    io.try_insert(source_path.clone(), Arc::<[u8]>::from(primary_bytes))
+        .expect("the primary fuzz asset insertion must succeed");
+    io.try_insert(buffer_path, Arc::<[u8]>::from(buffer_bytes))
+        .expect("the dependency fuzz asset insertion must succeed");
 
-    let mut options = ImportOptions::memory();
-    options.io.external_references = ExternalReferencePolicy::CustomResolver;
-
-    if let Ok(scene) = read_asset_for_development(&io, source_path, options) {
-        let _ = validate_scene(&scene);
+    if let Ok(report) = import_asset_with_resolver(
+        request,
+        &io,
+        source_path,
+        &SameAuthorityResolver,
+        ImportOperationControl::default(),
+    ) {
+        let _: &ValidatedScene = report.scene();
     }
 });
 

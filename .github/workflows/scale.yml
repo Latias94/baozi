@@ -1,0 +1,160 @@
+name: Scheduled Scale Gate
+
+on:
+  schedule:
+    - cron: "43 4 * * 3"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  scale:
+    name: U3 import time and RSS scale evidence
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    env:
+      SCALE_ARTIFACT_ROOT: target/scale-artifacts/${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Install Rust 1.95
+        uses: dtolnay/rust-toolchain@1.95.0
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+
+      - name: Check deterministic scale contract
+        id: correctness
+        timeout-minutes: 15
+        run: >-
+          cargo nextest run --locked -p baozi --test import_scale_contract
+          --all-features --features format-obj
+
+      - name: Collect Criterion and subprocess RSS evidence
+        id: collect
+        if: ${{ steps.correctness.outcome == 'success' }}
+        shell: pwsh
+        timeout-minutes: 45
+        run: >-
+          ./scripts/run-scale-profile.ps1
+          -ArtifactRoot $env:SCALE_ARTIFACT_ROOT
+
+      - name: Validate successful scale evidence
+        if: ${{ steps.collect.outcome == 'success' }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Set-StrictMode -Version Latest
+          $reportPath = Join-Path $env:SCALE_ARTIFACT_ROOT 'report.json'
+          $reportJson = Get-Content -Raw -LiteralPath $reportPath
+          $schemaPath = Join-Path $PWD 'ci/scale-profile-report.schema.json'
+          if (-not (Test-Json -Json $reportJson -SchemaFile $schemaPath -ErrorAction Stop)) {
+            throw 'Successful scale collection emitted a report that does not satisfy its schema.'
+          }
+          $report = $reportJson | ConvertFrom-Json
+          if (
+            $report.schema -ne 'baozi-scale-report/v1' -or
+            $report.execution_mode -ne 'collection' -or
+            $report.status -ne 'passed'
+          ) {
+            throw 'Successful scale collection must emit a passed collection report.'
+          }
+
+      - name: Ensure failure evidence exists
+        if: ${{ always() && (steps.correctness.outcome != 'success' || steps.collect.outcome != 'success') }}
+        shell: pwsh
+        env:
+          CORRECTNESS_OUTCOME: ${{ steps.correctness.outcome }}
+          COLLECTION_OUTCOME: ${{ steps.collect.outcome }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Set-StrictMode -Version Latest
+          $artifactRoot = [System.IO.Path]::GetFullPath($env:SCALE_ARTIFACT_ROOT)
+          New-Item -ItemType Directory -Path $artifactRoot -Force | Out-Null
+          $reportPath = Join-Path $artifactRoot 'report.json'
+          $reportIsValid = $false
+          try {
+            $reportJson = Get-Content -Raw -LiteralPath $reportPath
+            $schemaPath = Join-Path $PWD 'ci/scale-profile-report.schema.json'
+            $reportMatchesSchema = Test-Json `
+              -Json $reportJson `
+              -SchemaFile $schemaPath `
+              -ErrorAction Stop
+            $existingReport = $reportJson | ConvertFrom-Json
+            $reportIsValid = $reportMatchesSchema -and
+              $existingReport.schema -eq 'baozi-scale-report/v1' -and
+              $existingReport.execution_mode -eq 'collection' -and
+              $existingReport.status -in @('failed', 'error')
+          } catch {
+            $reportIsValid = $false
+          }
+          if (-not $reportIsValid) {
+            $finishedAt = [DateTimeOffset]::UtcNow.ToString('O')
+            $failedStep = if ($env:CORRECTNESS_OUTCOME -ne 'success') {
+              'deterministic_scale_contract'
+            } else {
+              'scale_collection'
+            }
+            $failureReport = [ordered]@{
+              schema = 'baozi-scale-report/v1'
+              execution_mode = 'collection'
+              status = 'error'
+              profile_id = 'u3-obj-import-v1'
+              started_at = $finishedAt
+              finished_at = $finishedAt
+              git = [ordered]@{
+                sha = [string] $env:GITHUB_SHA
+                ref = [string] $env:GITHUB_REF
+                run_id = [string] $env:GITHUB_RUN_ID
+                run_attempt = [string] $env:GITHUB_RUN_ATTEMPT
+              }
+              runner = [ordered]@{
+                os = [string] $env:RUNNER_OS
+                arch = [string] $env:RUNNER_ARCH
+                image = [ordered]@{
+                  os = [string] $env:ImageOS
+                  version = [string] $env:ImageVersion
+                }
+              }
+              tools = $null
+              policy = $null
+              samples = @()
+              time_slopes = @()
+              checks = @()
+              advisory_regressions = 0
+              workflow = [ordered]@{
+                correctness_outcome = [string] $env:CORRECTNESS_OUTCOME
+                collection_outcome = [string] $env:COLLECTION_OUTCOME
+              }
+              failure = [ordered]@{
+                step = $failedStep
+                exception_type = 'github_actions_step_failure'
+                message = 'A prerequisite or scale collection step did not complete successfully.'
+                message_truncated = $false
+              }
+            }
+            $failureReport | ConvertTo-Json -Depth 12 |
+              Set-Content -LiteralPath $reportPath -Encoding utf8NoBOM
+          }
+
+      - name: Upload scale evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: baozi-scale-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.SCALE_ARTIFACT_ROOT }}/**
+          if-no-files-found: error
+          retention-days: 90

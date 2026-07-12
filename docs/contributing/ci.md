@@ -45,14 +45,63 @@ Run the core Rust gates before opening a PR:
 ```powershell
 cargo fmt --all -- --check
 cargo check --workspace --all-targets
-cargo clippy --workspace --all-targets -- -D warnings
+cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo nextest run --workspace
 cargo nextest run --workspace --all-features
 cargo test --doc --workspace --all-features
 $env:RUSTDOCFLAGS = '-D warnings'
 cargo doc --workspace --all-features --no-deps
 cargo deny check
+cargo deny --manifest-path fuzz/Cargo.toml check
+cargo check -p baozi --target x86_64-pc-windows-msvc --no-default-features --features all-formats,native-fs-candidate
+cargo nextest run --target x86_64-pc-windows-msvc -p baozi-io --features fs-candidate
+cargo check -p baozi --target wasm32-unknown-unknown --no-default-features --features all-formats
+cargo check -p baozi --target wasm32-wasip1 --no-default-features --features all-formats
+cargo run -p baozi-xtask -- adr-check
+cargo run -p baozi-xtask -- crate-graph-check
+cargo run -p baozi-xtask -- native-fs-check
 ```
+
+There is currently no release-registered `native-fs` or low-level `fs` feature. The explicitly
+non-release `native-fs-candidate`/`fs-candidate` features preserve implementation and test access
+while `NATIVE_FS_REGISTERED_TARGETS` remains empty. This is a breaking migration: callers must not
+replace `native-fs` with the candidate feature in production or treat successful candidate tests as
+a support promise.
+
+GitHub Actions binds each runtime candidate to one fixed runner and exact target:
+`ubuntu-24.04` / `x86_64-unknown-linux-gnu`, `windows-2025` /
+`x86_64-pc-windows-msvc`, and `macos-15` / `aarch64-apple-darwin`. Each job first compares the
+`rustc -vV` host with its matrix target, then passes that target explicitly to every Cargo and
+nextest command. Candidate fixture setup is fail-closed; the suite contains no `SKIP` path.
+
+Browser WASM and WASI builds exercise byte and custom-IO imports without enabling the candidate.
+CI also requires the candidate feature to fail with the same explicit Baozi diagnostic on
+`wasm32-unknown-unknown`, `wasm32-wasip1`, Build Monitored `x86_64-apple-darwin`, and audit-only
+`x86_64-unknown-freebsd`, plus ABI-distinct `x86_64-unknown-linux-gnux32`, after first proving each
+target is installed. The `native-fs-check` command separately compares normal/build dependency
+closures for the three runtime candidates plus the FreeBSD audit profile against schema 2 of
+[`native-filesystem-resolved-closure.json`](../research/native-filesystem-resolved-closure.json),
+whose `runtime_candidate_targets`, `dependency_audit_profiles`, and
+`release_registered_targets` fields keep those universes distinct. It also checks package sources,
+lockfile checksums, resolved features, direct target edges, and the version-bound review basis for
+the Windows directory share-mode boundary. Native filesystem
+dependencies remain private to `baozi-io`. The checker also rejects `cap-std`, `cap-primitives`,
+`rustix`, or `cap-fs-ext`, and rejects activation of either registered or candidate native filesystem
+features in byte-only WebAssembly graphs. The separate `crate-graph-check` traverses every workspace
+normal/build dependency edge, including optional, renamed, and target-conditional declarations. It
+enforces the complete ADR 0007 production direction table, rejects unclassified production crates,
+support/tool dependencies, reverse paths, and production cycles, while allowing dev-only test edges.
+The `adr-check` command validates the real ADR index, lifecycle, link, and supersession graph rather
+than relying only on xtask's fixture tests.
+
+A green dependency or candidate runner gate is not filesystem-conformance evidence. The three exact
+runtime candidates still require the complete platform-local race, link/reparse,
+special-file, and same-handle acceptance matrix from
+[`native-filesystem-bound-handle-admission.md`](../research/native-filesystem-bound-handle-admission.md).
+The FreeBSD closure is resolved in CI, but it is not a runtime candidate and no hosted FreeBSD
+runtime job is claimed by this workflow.
+Windows unknown-reparse construction is likewise still a promotion blocker; it is not represented by
+an environment-dependent passing or skipped test.
 
 Run workflow lint locally when Go is available:
 

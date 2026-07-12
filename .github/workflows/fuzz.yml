@@ -29,6 +29,8 @@ jobs:
           - obj_import
           - obj_postprocess
           - ply_import
+          - registry_detection
+          - scene_validation
     steps:
       - name: Checkout
         uses: actions/checkout@v7

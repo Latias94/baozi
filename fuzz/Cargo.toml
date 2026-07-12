@@ -4,16 +4,20 @@ version = "0.0.0"
 publish = false
 edition = "2024"
 rust-version = "1.95"
+license = "MIT OR Apache-2.0"
 
 [package.metadata]
 cargo-fuzz = true
 
 [dependencies]
-baozi = { path = "../crates/baozi", default-features = false }
+baozi-core = { path = "../crates/baozi-core" }
 baozi-format-gltf = { path = "../crates/baozi-format-gltf" }
 baozi-format-obj = { path = "../crates/baozi-format-obj" }
 baozi-format-ply = { path = "../crates/baozi-format-ply" }
 baozi-format-stl = { path = "../crates/baozi-format-stl" }
+baozi-import = { path = "../crates/baozi-import" }
+baozi-io = { path = "../crates/baozi-io" }
+baozi-postprocess = { path = "../crates/baozi-postprocess" }
 libfuzzer-sys = "0.4"
 
 [[bin]]
@@ -47,6 +51,20 @@ bench = false
 [[bin]]
 name = "ply_import"
 path = "fuzz_targets/ply_import.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "registry_detection"
+path = "fuzz_targets/registry_detection.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "scene_validation"
+path = "fuzz_targets/scene_validation.rs"
 test = false
 doc = false
 bench = false

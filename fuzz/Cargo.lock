@@ -9,19 +9,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c3d036a3c4ab069c7b410a2ce876bd74808d2d0888a82667669f8e783a898bf1"
 
 [[package]]
-name = "baozi"
-version = "0.1.0"
-dependencies = [
- "baozi-core",
- "baozi-import",
- "baozi-io",
- "baozi-postprocess",
-]
-
-[[package]]
 name = "baozi-core"
 version = "0.1.0"
 dependencies = [
+ "baozi-operation",
  "thiserror",
 ]
 
@@ -31,7 +22,6 @@ version = "0.1.0"
 dependencies = [
  "baozi-core",
  "baozi-import",
- "baozi-io",
  "base64",
  "gltf",
 ]
@@ -51,7 +41,6 @@ version = "0.1.0"
 dependencies = [
  "baozi-core",
  "baozi-import",
- "baozi-io",
 ]
 
 [[package]]
@@ -60,18 +49,20 @@ version = "0.1.0"
 dependencies = [
  "baozi-core",
  "baozi-import",
- "baozi-io",
 ]
 
 [[package]]
 name = "baozi-fuzz"
 version = "0.0.0"
 dependencies = [
- "baozi",
+ "baozi-core",
  "baozi-format-gltf",
  "baozi-format-obj",
  "baozi-format-ply",
  "baozi-format-stl",
+ "baozi-import",
+ "baozi-io",
+ "baozi-postprocess",
  "libfuzzer-sys",
 ]
 
@@ -81,20 +72,27 @@ version = "0.1.0"
 dependencies = [
  "baozi-core",
  "baozi-io",
+ "baozi-operation",
 ]
 
 [[package]]
 name = "baozi-io"
 version = "0.1.0"
 dependencies = [
- "baozi-core",
+ "thiserror",
 ]
+
+[[package]]
+name = "baozi-operation"
+version = "0.1.0"
 
 [[package]]
 name = "baozi-postprocess"
 version = "0.1.0"
 dependencies = [
  "baozi-core",
+ "baozi-operation",
+ "thiserror",
 ]
 
 [[package]]

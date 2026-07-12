@@ -33,6 +33,23 @@ fn checked_in_fixture_and_cli_exit_contract_are_valid() {
     );
 }
 
+#[test]
+fn checked_in_repository_passes_cli_gate() {
+    let repository_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("xtask crate must be under the workspace root")
+        .to_path_buf();
+
+    let output = run_cli(&repository_root, &["adr-check"]);
+
+    assert_eq!(output.status.code(), Some(0), "{output:#?}");
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("ADR governance check passed (38 ADRs)"),
+        "{output:#?}"
+    );
+}
+
 fn run_cli(current_directory: &Path, arguments: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_baozi-xtask"))
         .args(arguments)
