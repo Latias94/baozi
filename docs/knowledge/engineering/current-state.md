@@ -3,7 +3,7 @@ type: "Current State"
 title: "Current Engineering State"
 description: "Derived summary of immutable engineering-memory shards."
 tags: ["engineering-memory", "derived"]
-source_fingerprint: "6d06bc3656f90f26fe1a873048eb8b2626c4627ce084237e2f00ac8cce8a13e8"
+source_fingerprint: "56ec5587e72ce9d9ab5900943595c947aa86d43f4c534a3d7698f7efb6c22fd6"
 ---
 
 # Current State
@@ -12,8 +12,8 @@ source_fingerprint: "6d06bc3656f90f26fe1a873048eb8b2626c4627ce084237e2f00ac8cce8
 
 This file is derived from immutable shards. Record new facts in shards, then render during integration.
 
-- Source fingerprint: `6d06bc3656f90f26fe1a873048eb8b2626c4627ce084237e2f00ac8cce8a13e8`
-- Immutable records: 66
+- Source fingerprint: `56ec5587e72ce9d9ab5900943595c947aa86d43f4c534a3d7698f7efb6c22fd6`
+- Immutable records: 68
 - Active lane heads: 1
 
 # Active Registrations
@@ -22,6 +22,8 @@ This file is derived from immutable shards. Record new facts in shards, then ren
 
 # Recent Evidence
 
+- **Memory Event**: [Decision: Decision: registry registration now enforces qualified reverse-DNS FormatId for ](logs/2026-07/2026-07-10T160411Z-decision-decision-registry-registration-now-enforces-qualified-reverse-dns-formatid-for-6a91d1ba5b994a97b0487290045bf166.md) - Decision: registry registration now enforces qualified reverse-DNS FormatId for every importer, including built-ins (`org.baozi.stl`, `.obj`
+- **Memory Event**: [Session Handoff: Resumed canonical architecture goal 019f4919-ef38-7b32-a0b7-476f42d35dd1 after a](logs/2026-07/2026-07-10T153320Z-session-handoff-resumed-canonical-architecture-goal-019f4919-ef38-7b32-a0b7-476f42d35dd1-after-a-912c2a2fe10744ad81fd549916eca145.md) - Resumed canonical architecture goal 019f4919-ef38-7b32-a0b7-476f42d35dd1 after agent-tree reset; commits 595d413 and efd1fb3 remain authorit
 - **Verification Evidence**: [Canonical architecture U2 verification](verification/2026-07/2026-07-10T124045Z-canonical-architecture-u2-verification-6b124e2bbe514eb8a66867bb87e3b00a.md) - ADR governance, workspace, feature, documentation, fuzz-check, and independent review gates passed for U2.
 - **Work Progress**: [Canonical architecture U2 authority contracts complete](progress/2026-07/2026-07-10T124041Z-canonical-architecture-u2-authority-contracts-complete-2cc663e9dac544c4ac0100eacdea427a.md) - U2 canonical authority, ADR governance, Scene IR contracts, and glTF quarantine are complete and review-clean.
 - **Legacy Rollup Snapshot**: [Legacy rollup log.md before derived adoption](legacy/2026-07/2026-07-10T062216Z-legacy-rollup-log-md-before-derived-adoption-2fda6e0f2dac4ecd8f15b87c33c1914f.md) - Preserved log.md before derived rollup adoption.
@@ -32,8 +34,6 @@ This file is derived from immutable shards. Record new facts in shards, then ren
 - **Subagent Finding**: [Baozi canonical architecture planning and deepening findings](subagents/2026-07-10T012721Z-baozi-canonical-architecture-planning-and-deepening-findings.md) - Distilled architecture, security, performance, and Assimp comparison findings that changed the implementation plan.
 - **Verification Log**: [Verification: import governance foundation local gates](logs/2026-07/2026-07-09T192000Z-verification-import-governance-foundation-local-gates.md) - Local verification for the import-governance foundation refactor before commit and push.
 - **Progress Log**: [Progress: import governance foundation code and docs](logs/2026-07/2026-07-09T185649Z-progress-import-governance-foundation-code-and-docs.md) - Hardened Baozi import registry/report APIs, expanded IR validation/snapshots, added postprocess facade path, fuzz target, examples, benches, release/security docs, and ADRs.
-- **Verification Evidence**: [Format beta postprocess final verification](verification/2026-07-09T163757Z-format-beta-postprocess-final-verification.md) - Verification Evidence for Format beta postprocess final verification.
-- **Memory Event**: [Progress: Addressed PLY parser review findings: strict PLY version 1.0, duplicate vertex/f](logs/2026-07/2026-07-09T162801Z-progress-addressed-ply-parser-review-findings-strict-ply-version-1-0-duplicate-vertex-f.md) - Addressed PLY parser review findings: strict PLY version 1.0, duplicate vertex/face elements rejected, custom vertex attribute stream/cell R
 
 # Integration Notes
 
