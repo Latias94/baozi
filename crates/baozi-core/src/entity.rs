@@ -1,12 +1,15 @@
 //! Scene-owned hierarchy, camera, and light values.
 
 use crate::extension::{
-    ExtensionEntry, ExtensionEntryValidationError, validate_unique_extension_entry_keys,
+    ControlledRetainedFootprintError, ExtensionEntry, ExtensionEntryValidationError,
+    extension_entries_retained_allocation_bytes_controlled, validate_unique_extension_entry_keys,
 };
 use crate::identity::{CameraIndex, LightIndex, NodeIndex};
 use crate::math::{Color, Mat4, Quat, Vec3};
 use crate::provenance::{Provenance, ProvenanceAttachments};
+use std::convert::Infallible;
 use std::fmt;
+use std::mem::size_of;
 use thiserror::Error;
 
 /// Maximum UTF-8 bytes in one entity display name.
@@ -306,6 +309,10 @@ impl Node {
         self.children.iter().copied()
     }
 
+    pub(crate) fn child_at(&self, index: usize) -> Option<NodeIndex> {
+        self.children.get(index).copied()
+    }
+
     pub const fn camera_index(&self) -> Option<CameraIndex> {
         self.camera
     }
@@ -320,6 +327,33 @@ impl Node {
 
     pub fn extensions(&self) -> impl ExactSizeIterator<Item = &ExtensionEntry> {
         self.extensions.iter()
+    }
+
+    pub(crate) fn retained_allocation_bytes(&self) -> Result<usize, EntityRetainedFootprintError> {
+        unwrap_uncontrolled_retained_footprint(
+            self.retained_allocation_bytes_controlled(&mut || Ok::<(), Infallible>(())),
+        )
+    }
+
+    pub(crate) fn retained_allocation_bytes_controlled<E>(
+        &self,
+        charge_work: &mut impl FnMut() -> Result<(), E>,
+    ) -> Result<usize, ControlledRetainedFootprintError<E>> {
+        let name_bytes = self.name.as_ref().map_or(0, EntityName::capacity);
+        let child_bytes = self
+            .children
+            .capacity()
+            .checked_mul(size_of::<NodeIndex>())
+            .ok_or(ControlledRetainedFootprintError::AccountingOverflow)?;
+        name_bytes
+            .checked_add(child_bytes)
+            .and_then(|bytes| bytes.checked_add(self.provenance.retained_allocation_bytes()))
+            .ok_or(ControlledRetainedFootprintError::AccountingOverflow)?
+            .checked_add(extension_entries_retained_allocation_bytes_controlled(
+                &self.extensions,
+                charge_work,
+            )?)
+            .ok_or(ControlledRetainedFootprintError::AccountingOverflow)
     }
 }
 
@@ -510,6 +544,19 @@ impl Camera {
     pub fn extensions(&self) -> impl ExactSizeIterator<Item = &ExtensionEntry> {
         self.extensions.iter()
     }
+
+    pub(crate) fn retained_allocation_bytes(&self) -> Result<usize, EntityRetainedFootprintError> {
+        unwrap_uncontrolled_retained_footprint(
+            self.retained_allocation_bytes_controlled(&mut || Ok::<(), Infallible>(())),
+        )
+    }
+
+    pub(crate) fn retained_allocation_bytes_controlled<E>(
+        &self,
+        charge_work: &mut impl FnMut() -> Result<(), E>,
+    ) -> Result<usize, ControlledRetainedFootprintError<E>> {
+        owner_retained_bytes_controlled(self.name.as_ref(), &self.extensions, charge_work)
+    }
 }
 
 /// A source-preserving canonical light category.
@@ -624,6 +671,50 @@ impl Light {
 
     pub fn extensions(&self) -> impl ExactSizeIterator<Item = &ExtensionEntry> {
         self.extensions.iter()
+    }
+
+    pub(crate) fn retained_allocation_bytes(&self) -> Result<usize, EntityRetainedFootprintError> {
+        unwrap_uncontrolled_retained_footprint(
+            self.retained_allocation_bytes_controlled(&mut || Ok::<(), Infallible>(())),
+        )
+    }
+
+    pub(crate) fn retained_allocation_bytes_controlled<E>(
+        &self,
+        charge_work: &mut impl FnMut() -> Result<(), E>,
+    ) -> Result<usize, ControlledRetainedFootprintError<E>> {
+        owner_retained_bytes_controlled(self.name.as_ref(), &self.extensions, charge_work)
+    }
+}
+
+#[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EntityRetainedFootprintError {
+    #[error("entity retained-footprint accounting overflowed")]
+    Overflow,
+}
+
+fn owner_retained_bytes_controlled<E>(
+    name: Option<&EntityName>,
+    extensions: &Vec<ExtensionEntry>,
+    charge_work: &mut impl FnMut() -> Result<(), E>,
+) -> Result<usize, ControlledRetainedFootprintError<E>> {
+    name.map_or(0, EntityName::capacity)
+        .checked_add(extension_entries_retained_allocation_bytes_controlled(
+            extensions,
+            charge_work,
+        )?)
+        .ok_or(ControlledRetainedFootprintError::AccountingOverflow)
+}
+
+fn unwrap_uncontrolled_retained_footprint(
+    result: Result<usize, ControlledRetainedFootprintError<Infallible>>,
+) -> Result<usize, EntityRetainedFootprintError> {
+    match result {
+        Ok(bytes) => Ok(bytes),
+        Err(ControlledRetainedFootprintError::AccountingOverflow) => {
+            Err(EntityRetainedFootprintError::Overflow)
+        }
+        Err(ControlledRetainedFootprintError::Control(error)) => match error {},
     }
 }
 

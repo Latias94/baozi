@@ -7,15 +7,18 @@
 
 use crate::entity::EntityName;
 use crate::extension::{
-    ExtensionEntry, ExtensionEntryValidationError, ExtensionSchemaId, ExtensionSchemaOwner,
-    validate_unique_extension_entry_keys,
+    ControlledRetainedFootprintError, ExtensionEntry, ExtensionEntryValidationError,
+    ExtensionSchemaId, ExtensionSchemaOwner,
+    extension_entries_retained_allocation_bytes_controlled, validate_unique_extension_entry_keys,
 };
 use crate::identity::{SceneEntityKind, SceneGenerationId, TextureId, TextureIndex};
 use crate::math::{Color, Vec2, Vec3};
 use crate::provenance::Provenance;
 use baozi_operation::CapacityPlan;
 use std::collections::HashMap;
+use std::convert::Infallible;
 use std::fmt;
+use std::mem::size_of;
 use thiserror::Error;
 
 /// Maximum material texture bindings retained by one canonical material.
@@ -1301,6 +1304,21 @@ impl TextureBinding {
         .flatten()
     }
 
+    pub(crate) fn retained_allocation_bytes(
+        &self,
+    ) -> Result<usize, AppearanceRetainedFootprintError> {
+        unwrap_uncontrolled_retained_footprint(
+            self.retained_allocation_bytes_controlled(&mut || Ok::<(), Infallible>(())),
+        )
+    }
+
+    pub(crate) fn retained_allocation_bytes_controlled<E>(
+        &self,
+        charge_work: &mut impl FnMut() -> Result<(), E>,
+    ) -> Result<usize, ControlledRetainedFootprintError<E>> {
+        extension_entries_retained_allocation_bytes_controlled(&self.extensions, charge_work)
+    }
+
     pub(crate) const fn view(&self, generation: SceneGenerationId) -> TextureBindingView<'_> {
         TextureBindingView {
             binding: self,
@@ -1472,6 +1490,41 @@ impl Material {
         .flatten()
     }
 
+    pub(crate) fn retained_allocation_bytes(
+        &self,
+    ) -> Result<usize, AppearanceRetainedFootprintError> {
+        unwrap_uncontrolled_retained_footprint(
+            self.retained_allocation_bytes_controlled(&mut || Ok::<(), Infallible>(())),
+        )
+    }
+
+    pub(crate) fn retained_allocation_bytes_controlled<E>(
+        &self,
+        charge_work: &mut impl FnMut() -> Result<(), E>,
+    ) -> Result<usize, ControlledRetainedFootprintError<E>> {
+        let mut bytes = self.name.as_ref().map_or(0, EntityName::capacity);
+        bytes = bytes
+            .checked_add(
+                self.texture_bindings
+                    .capacity()
+                    .checked_mul(size_of::<TextureBinding>())
+                    .ok_or(ControlledRetainedFootprintError::AccountingOverflow)?,
+            )
+            .ok_or(ControlledRetainedFootprintError::AccountingOverflow)?;
+        for binding in &self.texture_bindings {
+            charge_work().map_err(ControlledRetainedFootprintError::Control)?;
+            bytes = bytes
+                .checked_add(binding.retained_allocation_bytes_controlled(charge_work)?)
+                .ok_or(ControlledRetainedFootprintError::AccountingOverflow)?;
+        }
+        bytes
+            .checked_add(extension_entries_retained_allocation_bytes_controlled(
+                &self.extensions,
+                charge_work,
+            )?)
+            .ok_or(ControlledRetainedFootprintError::AccountingOverflow)
+    }
+
     pub(crate) const fn view(&self, generation: SceneGenerationId) -> MaterialView<'_> {
         MaterialView {
             material: self,
@@ -1615,6 +1668,24 @@ pub enum AppearanceBuildError {
 
     #[error("appearance allocation failed for {resource:?}")]
     AllocationFailed { resource: AppearanceBuildResource },
+}
+
+#[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AppearanceRetainedFootprintError {
+    #[error("appearance retained-footprint accounting overflowed")]
+    Overflow,
+}
+
+fn unwrap_uncontrolled_retained_footprint(
+    result: Result<usize, ControlledRetainedFootprintError<Infallible>>,
+) -> Result<usize, AppearanceRetainedFootprintError> {
+    match result {
+        Ok(bytes) => Ok(bytes),
+        Err(ControlledRetainedFootprintError::AccountingOverflow) => {
+            Err(AppearanceRetainedFootprintError::Overflow)
+        }
+        Err(ControlledRetainedFootprintError::Control(error)) => match error {},
+    }
 }
 
 fn validate_required_factor_group(

@@ -10,9 +10,10 @@ use crate::attribute::AttributeDomain;
 use crate::identity::SceneEntityKind;
 use crate::math::{Color, Mat4, Vec2, Vec3, Vec4};
 use crate::namespaced::{NamespacedName, NamespacedNameError};
-use crate::provenance::Provenance;
+use crate::provenance::{MAX_SOURCE_LOCATOR_LEN, Provenance};
 use baozi_operation::CapacityPlan;
 use std::collections::HashMap;
+use std::convert::Infallible;
 use std::fmt;
 use std::num::{NonZeroU8, NonZeroU16, NonZeroU32};
 use thiserror::Error;
@@ -948,6 +949,48 @@ impl fmt::Debug for ExtensionEntry {
     }
 }
 
+#[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ExtensionRetainedFootprintError {
+    #[error("extension retained-footprint accounting overflowed")]
+    Overflow,
+}
+
+pub(crate) enum ControlledRetainedFootprintError<E> {
+    AccountingOverflow,
+    Control(E),
+}
+
+pub(crate) fn extension_entries_retained_allocation_bytes(
+    entries: &Vec<ExtensionEntry>,
+) -> Result<usize, ExtensionRetainedFootprintError> {
+    match extension_entries_retained_allocation_bytes_controlled(entries, &mut || {
+        Ok::<(), Infallible>(())
+    }) {
+        Ok(bytes) => Ok(bytes),
+        Err(ControlledRetainedFootprintError::AccountingOverflow) => {
+            Err(ExtensionRetainedFootprintError::Overflow)
+        }
+        Err(ControlledRetainedFootprintError::Control(error)) => match error {},
+    }
+}
+
+pub(crate) fn extension_entries_retained_allocation_bytes_controlled<E>(
+    entries: &Vec<ExtensionEntry>,
+    charge_work: &mut impl FnMut() -> Result<(), E>,
+) -> Result<usize, ControlledRetainedFootprintError<E>> {
+    let mut bytes = entries
+        .capacity()
+        .checked_mul(std::mem::size_of::<ExtensionEntry>())
+        .ok_or(ControlledRetainedFootprintError::AccountingOverflow)?;
+    for entry in entries {
+        charge_work().map_err(ControlledRetainedFootprintError::Control)?;
+        bytes = bytes
+            .checked_add(entry.value().retained_allocation_bytes())
+            .ok_or(ControlledRetainedFootprintError::AccountingOverflow)?;
+    }
+    Ok(bytes)
+}
+
 /// Deterministically validates owner-local extension-key uniqueness.
 ///
 /// The first duplicate in input order is returned. Hash-table iteration order
@@ -1028,6 +1071,7 @@ pub enum ExtensionSchemaIdError {
 pub enum ExtensionSchemaOwner {
     Scene,
     SceneSpace,
+    SourceIdentity,
     Entity(SceneEntityKind),
     Attribute,
     TextureBinding,
@@ -1320,7 +1364,53 @@ const fn sign_not_zero(value: f32) -> f32 {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ExtensionSchemaBehavior {
     None,
+    Canonical(ExtensionBehaviorKind),
     PackedAttribute(PackedAttributeEncodingSchema),
+}
+
+/// The exact core-owned use authorized by a behavior schema.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ExtensionBehaviorKind {
+    SourceObjectLocator,
+    SceneSpaceTangentBasis,
+    SceneSpaceTangentHandednessEncoding,
+    MaterialShadingModel,
+    MaterialAlphaMode,
+    TextureRole,
+    TextureCoordinateSource,
+    TextureChannelMapping,
+    TextureColorInterpretation,
+    TextureBlendOperation,
+    AttributeSignedNormalization,
+    AttributeUnsignedNormalization,
+    AnimationTimeDomain,
+    AnimationExtrapolation,
+}
+
+impl ExtensionBehaviorKind {
+    pub const fn expected_owner(self) -> ExtensionSchemaOwner {
+        match self {
+            Self::SourceObjectLocator => ExtensionSchemaOwner::SourceIdentity,
+            Self::SceneSpaceTangentBasis | Self::SceneSpaceTangentHandednessEncoding => {
+                ExtensionSchemaOwner::SceneSpace
+            }
+            Self::MaterialShadingModel | Self::MaterialAlphaMode => {
+                ExtensionSchemaOwner::Entity(SceneEntityKind::Material)
+            }
+            Self::TextureRole
+            | Self::TextureCoordinateSource
+            | Self::TextureChannelMapping
+            | Self::TextureColorInterpretation
+            | Self::TextureBlendOperation => ExtensionSchemaOwner::TextureBinding,
+            Self::AttributeSignedNormalization | Self::AttributeUnsignedNormalization => {
+                ExtensionSchemaOwner::Attribute
+            }
+            Self::AnimationTimeDomain => {
+                ExtensionSchemaOwner::Entity(SceneEntityKind::AnimationClip)
+            }
+            Self::AnimationExtrapolation => ExtensionSchemaOwner::AnimationChannel,
+        }
+    }
 }
 
 /// The closed value shape admitted by one declarative schema.
@@ -1470,7 +1560,15 @@ impl ExtensionSchema {
         invalidation: ExtensionInvalidationRule,
     ) -> Result<Self, ExtensionSchemaError> {
         validate_schema_value_limits(&value)?;
-        validate_schema_behavior(owner, &value, behavior)?;
+        validate_schema_behavior(
+            owner,
+            &value,
+            behavior,
+            cardinality,
+            reference,
+            remap,
+            invalidation,
+        )?;
         validate_reference_rule(reference)?;
         validate_remap_rule(cardinality, reference, remap)?;
         validate_invalidation_rule(reference, invalidation)?;
@@ -1505,7 +1603,7 @@ impl ExtensionSchema {
     pub const fn packed_attribute_encoding(&self) -> Option<PackedAttributeEncodingSchema> {
         match self.behavior {
             ExtensionSchemaBehavior::PackedAttribute(encoding) => Some(encoding),
-            ExtensionSchemaBehavior::None => None,
+            ExtensionSchemaBehavior::None | ExtensionSchemaBehavior::Canonical(_) => None,
         }
     }
 
@@ -1602,6 +1700,16 @@ pub enum ExtensionSchemaError {
 
     #[error("packed attribute behavior does not match the schema's logical value shape")]
     PackedAttributeValueShapeMismatch,
+
+    #[error("extension behavior {behavior:?} requires owner {expected:?}, found {actual:?}")]
+    BehaviorOwnerMismatch {
+        behavior: ExtensionBehaviorKind,
+        expected: ExtensionSchemaOwner,
+        actual: ExtensionSchemaOwner,
+    },
+
+    #[error("source-object locator schema does not match the closed canonical contract")]
+    SourceObjectLocatorContractMismatch,
 }
 
 /// A core hard limit that a declarative schema may only tighten.
@@ -1637,23 +1745,57 @@ fn validate_schema_behavior(
     owner: ExtensionSchemaOwner,
     value: &ExtensionValueSchema,
     behavior: ExtensionSchemaBehavior,
+    cardinality: ExtensionCardinality,
+    reference: ExtensionReferenceRule,
+    remap: ExtensionRemapRule,
+    invalidation: ExtensionInvalidationRule,
 ) -> Result<(), ExtensionSchemaError> {
-    if matches!(behavior, ExtensionSchemaBehavior::None) {
-        return Ok(());
+    match behavior {
+        ExtensionSchemaBehavior::None => Ok(()),
+        ExtensionSchemaBehavior::Canonical(behavior) => {
+            let expected = behavior.expected_owner();
+            if owner != expected {
+                return Err(ExtensionSchemaError::BehaviorOwnerMismatch {
+                    behavior,
+                    expected,
+                    actual: owner,
+                });
+            }
+            if behavior == ExtensionBehaviorKind::SourceObjectLocator
+                && !matches!(
+                    value,
+                    ExtensionValueSchema::String { max_bytes }
+                        if usize::try_from(*max_bytes).is_ok_and(|maximum| maximum <= MAX_SOURCE_LOCATOR_LEN)
+                )
+            {
+                return Err(ExtensionSchemaError::SourceObjectLocatorContractMismatch);
+            }
+            if behavior == ExtensionBehaviorKind::SourceObjectLocator
+                && (cardinality != ExtensionCardinality::ExactlyOne
+                    || reference != ExtensionReferenceRule::None
+                    || remap != ExtensionRemapRule::Preserve
+                    || invalidation != ExtensionInvalidationRule::Never)
+            {
+                return Err(ExtensionSchemaError::SourceObjectLocatorContractMismatch);
+            }
+            Ok(())
+        }
+        ExtensionSchemaBehavior::PackedAttribute(packed) => {
+            if owner != ExtensionSchemaOwner::Attribute {
+                return Err(ExtensionSchemaError::PackedAttributeOwnerRequired);
+            }
+            let value_shape_matches = match packed.decoded_kind() {
+                PackedAttributeDecodedKind::F32Vec3 => {
+                    matches!(value, ExtensionValueSchema::Vec3)
+                }
+            };
+            if value_shape_matches {
+                Ok(())
+            } else {
+                Err(ExtensionSchemaError::PackedAttributeValueShapeMismatch)
+            }
+        }
     }
-    if owner != ExtensionSchemaOwner::Attribute {
-        return Err(ExtensionSchemaError::PackedAttributeOwnerRequired);
-    }
-    let ExtensionSchemaBehavior::PackedAttribute(packed) = behavior else {
-        return Ok(());
-    };
-    let value_shape_matches = match packed.decoded_kind() {
-        PackedAttributeDecodedKind::F32Vec3 => matches!(value, ExtensionValueSchema::Vec3),
-    };
-    if !value_shape_matches {
-        return Err(ExtensionSchemaError::PackedAttributeValueShapeMismatch);
-    }
-    Ok(())
 }
 
 fn validate_schema_limit(
@@ -2266,6 +2408,45 @@ mod tests {
         let clone = first.try_clone().unwrap();
         assert_eq!(clone, first);
         assert_eq!(clone.provenance(), provenance);
+    }
+
+    #[test]
+    fn controlled_retained_footprint_stops_at_the_failed_entry() {
+        let (_arena, provenance) = test_provenance_fixture();
+        let entries = vec![
+            ExtensionEntry::descriptive_metadata(
+                NamespacedName::new("test:first").unwrap(),
+                ExtensionValue::from_bool(true),
+                provenance,
+            ),
+            ExtensionEntry::descriptive_metadata(
+                NamespacedName::new("test:second").unwrap(),
+                ExtensionValue::from_bool(true),
+                provenance,
+            ),
+            ExtensionEntry::descriptive_metadata(
+                NamespacedName::new("test:third").unwrap(),
+                ExtensionValue::from_bool(true),
+                provenance,
+            ),
+        ];
+        let mut visited = 0;
+
+        let error = extension_entries_retained_allocation_bytes_controlled(&entries, &mut || {
+            visited += 1;
+            if visited == 2 {
+                Err("cancelled")
+            } else {
+                Ok(())
+            }
+        })
+        .expect_err("the second callback should stop traversal");
+
+        assert!(matches!(
+            error,
+            ControlledRetainedFootprintError::Control("cancelled")
+        ));
+        assert_eq!(visited, 2);
     }
 
     #[test]

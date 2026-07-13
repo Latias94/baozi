@@ -5,8 +5,11 @@
 mod animation;
 mod appearance;
 mod attribute;
+mod canonical_scene;
+mod canonical_validation;
 mod deform;
 mod derived;
+mod derived_input;
 pub mod diagnostic;
 mod entity;
 pub mod error;

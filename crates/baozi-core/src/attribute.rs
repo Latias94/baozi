@@ -2283,6 +2283,52 @@ mod tests {
     }
 
     #[test]
+    fn built_in_normal_rejects_registered_packing_but_custom_semantic_accepts_it() {
+        let (_arena, provenance) = test_provenance_fixture();
+        let schema_id = ExtensionSchemaId::new("example:packed-unit-normal", 1).unwrap();
+        let snapshot = packed_schema_snapshot(schema_id.clone(), PackedByteOrder::LittleEndian);
+        let encoding = RegisteredPackedEncoding::try_from_schema(&snapshot, schema_id.clone())
+            .expect("test packed schema should be registered");
+        let format =
+            AttributeFormat::new(ComponentType::F32, 3, Normalization::None, Some(encoding))
+                .unwrap();
+        let packed_bytes = vec![0x00, 0x00, 0x00, 0x00];
+
+        let normal = Attribute::new(
+            AttributeSemantic::Normal,
+            AttributeDomain::Vertex,
+            format.clone(),
+            AttributePayload::dense(
+                AttributeBuffer::from_packed(format.clone(), packed_bytes.clone()).unwrap(),
+            ),
+            provenance,
+        );
+        assert_eq!(
+            normal.unwrap_err(),
+            AttributeError::Schema(AttributeSchemaError::InvalidFormat {
+                semantic: AttributeSemanticKind::Normal,
+            })
+        );
+
+        let custom = Attribute::new(
+            AttributeSemantic::Custom(CustomAttributeSemantic::from_name(schema_id.name().clone())),
+            AttributeDomain::Vertex,
+            format.clone(),
+            AttributePayload::dense(AttributeBuffer::from_packed(format, packed_bytes).unwrap()),
+            provenance,
+        )
+        .expect("a namespaced custom semantic should admit registered packing");
+        assert_eq!(
+            custom
+                .format()
+                .packed_encoding()
+                .expect("custom packed format should retain its encoding")
+                .schema_id(),
+            &schema_id
+        );
+    }
+
+    #[test]
     fn canonicalizes_large_capacity_small_length_attribute_storage() {
         let mut values = Vec::with_capacity(1_024);
         values.push(1.0_f32);

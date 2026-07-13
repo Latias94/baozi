@@ -530,6 +530,14 @@ impl SourceObjectLocator {
         }
     }
 
+    /// Returns the bounded payload for a format-owned locator, when present.
+    pub const fn namespaced_value(&self) -> Option<&SourceLocatorValue> {
+        match self {
+            Self::Indexed { .. } => None,
+            Self::Namespaced(locator) => Some(locator.value()),
+        }
+    }
+
     /// Fallibly copies a locator when it owns a namespaced text payload.
     pub fn try_clone(&self) -> Result<Self, SourceLocatorValueError> {
         match self {
@@ -955,7 +963,9 @@ impl OperationIdentity {
         })
     }
 
-    fn checked_dynamic_allocation_bytes(&self) -> Result<usize, ProvenanceFootprintError> {
+    pub(crate) fn checked_dynamic_allocation_bytes(
+        &self,
+    ) -> Result<usize, ProvenanceFootprintError> {
         checked_capacity_bytes::<OperationEvidenceSummary>(self.evidence.capacity())
     }
 }
@@ -2390,6 +2400,39 @@ pub fn validate_provenance_arena_with_limits(
     arena: &ProvenanceArena,
     limits: ProvenanceLimits,
 ) -> Result<ValidatedProvenanceArena<'_>, ProvenanceValidationError> {
+    match validate_provenance_arena_with_limits_controlled(arena, limits, &mut || {
+        Ok::<(), std::convert::Infallible>(())
+    }) {
+        Ok(validated) => Ok(validated),
+        Err(ControlledProvenanceValidationError::Validation(error)) => Err(error),
+        Err(ControlledProvenanceValidationError::Control(error)) => match error {},
+    }
+}
+
+#[derive(Debug)]
+pub(crate) enum ControlledProvenanceValidationError<E> {
+    Validation(ProvenanceValidationError),
+    Control(E),
+}
+
+impl<E> From<ProvenanceValidationError> for ControlledProvenanceValidationError<E> {
+    fn from(error: ProvenanceValidationError) -> Self {
+        Self::Validation(error)
+    }
+}
+
+pub(crate) fn validate_provenance_arena_controlled<'arena, E>(
+    arena: &'arena ProvenanceArena,
+    charge_work: &mut impl FnMut() -> Result<(), E>,
+) -> Result<ValidatedProvenanceArena<'arena>, ControlledProvenanceValidationError<E>> {
+    validate_provenance_arena_with_limits_controlled(arena, arena.limits, charge_work)
+}
+
+fn validate_provenance_arena_with_limits_controlled<'arena, E>(
+    arena: &'arena ProvenanceArena,
+    limits: ProvenanceLimits,
+    charge_work: &mut impl FnMut() -> Result<(), E>,
+) -> Result<ValidatedProvenanceArena<'arena>, ControlledProvenanceValidationError<E>> {
     let outer_node_bytes = checked_capacity_bytes::<SharedStorage<ProvenanceNode>>(
         arena.nodes.capacity(),
     )
@@ -2401,13 +2444,13 @@ pub fn validate_provenance_arena_with_limits(
     })?;
     let mut stats = ProvenanceValidationStats::with_outer_node_bytes(outer_node_bytes);
     if outer_node_bytes > limits.max_retained_bytes {
-        return Err(ProvenanceValidationError::new(
+        return Err(controlled_validation_error(
             ProvenanceValidationIssue::RetainedBytesLimitExceeded,
             stats,
         ));
     }
     if arena.nodes.len() > limits.max_nodes {
-        return Err(ProvenanceValidationError::new(
+        return Err(controlled_validation_error(
             ProvenanceValidationIssue::NodeLimitExceeded,
             stats,
         ));
@@ -2416,7 +2459,7 @@ pub fn validate_provenance_arena_with_limits(
     let mut observed_edges = 0usize;
     let mut observed_node_bytes = 0usize;
     for (child_index, stored) in arena.nodes.iter().enumerate() {
-        charge_validation_work(&mut stats, limits.max_validation_work)?;
+        charge_validation_work(&mut stats, limits.max_validation_work, charge_work)?;
         stats.node_count += 1;
 
         let node_bytes = checked_stored_node_retained_bytes(stored).map_err(|_| {
@@ -2441,7 +2484,7 @@ pub fn validate_provenance_arena_with_limits(
                 },
             )?;
         if stats.retained_footprint.total_bytes() > limits.max_retained_bytes {
-            return Err(ProvenanceValidationError::new(
+            return Err(controlled_validation_error(
                 ProvenanceValidationIssue::RetainedBytesLimitExceeded,
                 stats,
             ));
@@ -2452,13 +2495,13 @@ pub fn validate_provenance_arena_with_limits(
             ProvenanceNodePayload::Source(_) => 1,
             ProvenanceNodePayload::Operation { identity, parents } => {
                 if identity.evidence.len() > limits.max_evidence_summaries {
-                    return Err(ProvenanceValidationError::new(
+                    return Err(controlled_validation_error(
                         ProvenanceValidationIssue::EvidenceLimitExceeded,
                         stats,
                     ));
                 }
                 if parents.len() > limits.max_parents_per_operation {
-                    return Err(ProvenanceValidationError::new(
+                    return Err(controlled_validation_error(
                         ProvenanceValidationIssue::ParentLimitExceeded,
                         stats,
                     ));
@@ -2467,7 +2510,7 @@ pub fn validate_provenance_arena_with_limits(
                 let mut previous = None;
                 let mut maximum_parent_depth = 0usize;
                 for parent in parents {
-                    charge_validation_work(&mut stats, limits.max_validation_work)?;
+                    charge_validation_work(&mut stats, limits.max_validation_work, charge_work)?;
                     observed_edges = observed_edges.checked_add(1).ok_or_else(|| {
                         ProvenanceValidationError::new(
                             ProvenanceValidationIssue::EdgeCountOverflow,
@@ -2476,31 +2519,31 @@ pub fn validate_provenance_arena_with_limits(
                     })?;
                     stats.edge_count = observed_edges;
                     if observed_edges > limits.max_edges {
-                        return Err(ProvenanceValidationError::new(
+                        return Err(controlled_validation_error(
                             ProvenanceValidationIssue::EdgeLimitExceeded,
                             stats,
                         ));
                     }
                     if parent.0 >= arena.nodes.len() {
-                        return Err(ProvenanceValidationError::new(
+                        return Err(controlled_validation_error(
                             ProvenanceValidationIssue::ParentOutOfRange,
                             stats,
                         ));
                     }
                     if parent.0 >= child_index {
-                        return Err(ProvenanceValidationError::new(
+                        return Err(controlled_validation_error(
                             ProvenanceValidationIssue::ParentNotBeforeChild,
                             stats,
                         ));
                     }
                     if previous == Some(*parent) {
-                        return Err(ProvenanceValidationError::new(
+                        return Err(controlled_validation_error(
                             ProvenanceValidationIssue::DuplicateParent,
                             stats,
                         ));
                     }
                     if previous.is_some_and(|previous| previous > *parent) {
-                        return Err(ProvenanceValidationError::new(
+                        return Err(controlled_validation_error(
                             ProvenanceValidationIssue::ParentOrderNotCanonical,
                             stats,
                         ));
@@ -2518,13 +2561,13 @@ pub fn validate_provenance_arena_with_limits(
             }
         };
         if expected_depth > limits.max_depth {
-            return Err(ProvenanceValidationError::new(
+            return Err(controlled_validation_error(
                 ProvenanceValidationIssue::DepthLimitExceeded,
                 stats,
             ));
         }
         if node.depth != expected_depth {
-            return Err(ProvenanceValidationError::new(
+            return Err(controlled_validation_error(
                 ProvenanceValidationIssue::StoredDepthMismatch,
                 stats,
             ));
@@ -2533,13 +2576,13 @@ pub fn validate_provenance_arena_with_limits(
     }
 
     if observed_edges != arena.edge_count {
-        return Err(ProvenanceValidationError::new(
+        return Err(controlled_validation_error(
             ProvenanceValidationIssue::EdgeCountMismatch,
             stats,
         ));
     }
     if observed_node_bytes != arena.retained_node_bytes {
-        return Err(ProvenanceValidationError::new(
+        return Err(controlled_validation_error(
             ProvenanceValidationIssue::RetainedFootprintMismatch,
             stats,
         ));
@@ -2547,20 +2590,32 @@ pub fn validate_provenance_arena_with_limits(
     Ok(ValidatedProvenanceArena { arena, stats })
 }
 
-fn charge_validation_work(
+fn charge_validation_work<E>(
     stats: &mut ProvenanceValidationStats,
     maximum: usize,
-) -> Result<(), ProvenanceValidationError> {
+    charge_work: &mut impl FnMut() -> Result<(), E>,
+) -> Result<(), ControlledProvenanceValidationError<E>> {
     if stats.work_units >= maximum {
-        return Err(ProvenanceValidationError::new(
+        return Err(controlled_validation_error(
             ProvenanceValidationIssue::WorkLimitExceeded,
             *stats,
         ));
     }
+    charge_work().map_err(ControlledProvenanceValidationError::Control)?;
     stats.work_units = stats.work_units.checked_add(1).ok_or_else(|| {
-        ProvenanceValidationError::new(ProvenanceValidationIssue::WorkLimitExceeded, *stats)
+        ControlledProvenanceValidationError::Validation(ProvenanceValidationError::new(
+            ProvenanceValidationIssue::WorkLimitExceeded,
+            *stats,
+        ))
     })?;
     Ok(())
+}
+
+fn controlled_validation_error<E>(
+    issue: ProvenanceValidationIssue,
+    stats: ProvenanceValidationStats,
+) -> ControlledProvenanceValidationError<E> {
+    ControlledProvenanceValidationError::Validation(ProvenanceValidationError::new(issue, stats))
 }
 
 /// Deterministic evidence from a bounded linear provenance validation pass.
@@ -3264,6 +3319,52 @@ mod tests {
             error.to_string(),
             "invalid provenance arena: provenance parent does not precede its child"
         );
+    }
+
+    #[test]
+    fn controlled_validation_charges_partial_work_before_failure_or_cancellation() {
+        let source = source_node(source_identity("models/a.obj", "A"));
+        let operation = operation_node(
+            operation(OperationKind::Merge),
+            vec![ProvenanceNodeId(1)],
+            2,
+        );
+        let arena = arena_from_nodes(vec![source, operation], 1);
+
+        let mut semantic_work = 0usize;
+        let semantic_error = validate_provenance_arena_controlled(&arena, &mut || {
+            semantic_work += 1;
+            Ok::<(), &'static str>(())
+        })
+        .unwrap_err();
+        match semantic_error {
+            ControlledProvenanceValidationError::Validation(error) => {
+                assert_eq!(
+                    error.issue(),
+                    ProvenanceValidationIssue::ParentNotBeforeChild
+                );
+                assert_eq!(error.stats().work_units(), semantic_work);
+            }
+            ControlledProvenanceValidationError::Control(error) => {
+                panic!("semantic failure must not become a control failure: {error}")
+            }
+        }
+
+        let mut cancelled_work = 0usize;
+        let cancellation = validate_provenance_arena_controlled(&arena, &mut || {
+            cancelled_work += 1;
+            if cancelled_work == 2 {
+                Err("cancelled")
+            } else {
+                Ok(())
+            }
+        })
+        .unwrap_err();
+        assert!(matches!(
+            cancellation,
+            ControlledProvenanceValidationError::Control("cancelled")
+        ));
+        assert_eq!(cancelled_work, 2);
     }
 
     #[test]

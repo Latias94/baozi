@@ -1,5 +1,6 @@
 use crate::identity::SceneGenerationId;
-use crate::provenance::OperationIdentity;
+use crate::provenance::{OperationIdentity, ProvenanceFootprintError};
+use sha2::{Digest, Sha256};
 use std::fmt;
 use thiserror::Error;
 
@@ -38,6 +39,66 @@ impl fmt::Debug for InputStamp {
 impl AsRef<[u8]> for InputStamp {
     fn as_ref(&self) -> &[u8] {
         self.as_bytes()
+    }
+}
+
+const INPUT_STAMP_DOMAIN: &[u8] = b"baozi-input-stamp\0";
+
+/// Versioned, allocation-free SHA-256 framing for declared derived inputs.
+pub(crate) struct InputStampBuilder {
+    digest: Sha256,
+}
+
+impl InputStampBuilder {
+    pub(crate) fn new(domain: &[u8], dependency_schema_version: u32) -> Self {
+        let mut builder = Self {
+            digest: Sha256::new(),
+        };
+        builder.digest.update(INPUT_STAMP_DOMAIN);
+        builder.write_bytes(domain);
+        builder.write_u32(dependency_schema_version);
+        builder
+    }
+
+    pub(crate) fn write_tag(&mut self, value: u8) {
+        self.digest.update([value]);
+    }
+
+    pub(crate) fn write_u32(&mut self, value: u32) {
+        self.digest.update(value.to_le_bytes());
+    }
+
+    pub(crate) fn write_u64(&mut self, value: u64) {
+        self.digest.update(value.to_le_bytes());
+    }
+
+    fn write_usize(&mut self, value: usize) {
+        self.write_u64(value as u64);
+    }
+
+    pub(crate) fn write_f32(&mut self, value: f32) {
+        self.write_u32(value.to_bits());
+    }
+
+    pub(crate) fn write_f64(&mut self, value: f64) {
+        self.write_u64(value.to_bits());
+    }
+
+    pub(crate) fn write_bytes(&mut self, value: &[u8]) {
+        self.write_usize(value.len());
+        self.digest.update(value);
+    }
+
+    pub(crate) fn write_bytes_len(&mut self, len: usize) {
+        self.write_usize(len);
+    }
+
+    pub(crate) fn write_raw_bytes(&mut self, value: &[u8]) {
+        self.digest.update(value);
+    }
+
+    pub(crate) fn finish(self) -> InputStamp {
+        InputStamp::from_bytes(self.digest.finalize().into())
     }
 }
 
@@ -98,6 +159,15 @@ impl DerivedProducer {
         match &self.state {
             DerivedProducerState::Source => None,
             DerivedProducerState::Operation(operation_identity) => Some(operation_identity),
+        }
+    }
+
+    pub(crate) fn retained_allocation_bytes(&self) -> Result<usize, ProvenanceFootprintError> {
+        match &self.state {
+            DerivedProducerState::Source => Ok(0),
+            DerivedProducerState::Operation(operation_identity) => {
+                operation_identity.checked_dynamic_allocation_bytes()
+            }
         }
     }
 }
@@ -193,6 +263,13 @@ impl<T> Derived<T> {
             DerivedState::Absent { .. } => None,
             DerivedState::Valid { producer, .. } => Some(producer),
         }
+    }
+
+    pub(crate) fn retained_producer_allocation_bytes(
+        &self,
+    ) -> Result<usize, ProvenanceFootprintError> {
+        self.producer()
+            .map_or(Ok(0), DerivedProducer::retained_allocation_bytes)
     }
 
     pub(crate) fn valid(
@@ -314,6 +391,24 @@ mod tests {
 
     fn stamp(byte: u8) -> InputStamp {
         InputStamp::from_bytes([byte; INPUT_STAMP_BYTES])
+    }
+
+    #[test]
+    fn input_stamp_builder_is_domain_version_and_frame_sensitive() {
+        fn build(domain: &[u8], version: u32, parts: &[&[u8]]) -> InputStamp {
+            let mut builder = InputStampBuilder::new(domain, version);
+            for part in parts {
+                builder.write_bytes(part);
+            }
+            builder.finish()
+        }
+
+        let baseline = build(b"primitive-bounds", 1, &[b"ab", b"c"]);
+        assert_eq!(baseline, build(b"primitive-bounds", 1, &[b"ab", b"c"]));
+        assert_ne!(baseline, build(b"logical-bounds", 1, &[b"ab", b"c"]));
+        assert_ne!(baseline, build(b"primitive-bounds", 2, &[b"ab", b"c"]));
+        assert_ne!(baseline, build(b"primitive-bounds", 1, &[b"a", b"bc"]));
+        assert_ne!(baseline, build(b"primitive-bounds", 1, &[b"abc"]));
     }
 
     #[test]

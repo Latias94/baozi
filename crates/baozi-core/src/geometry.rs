@@ -12,6 +12,7 @@ use crate::identity::{LogicalMeshIndex, MaterialIndex, NodeIndex, SkinIndex};
 use crate::math::Aabb;
 use crate::provenance::ProvenanceAttachments;
 use baozi_operation::CapacityPlan;
+use std::convert::Infallible;
 use std::fmt;
 use std::mem::size_of;
 use thiserror::Error;
@@ -34,11 +35,13 @@ pub enum GeometryAllocation {
     PrimitiveAttributes,
     PrimitiveInfluences,
     PrimitiveMorphTargets,
+    PrimitiveBoundsProducer,
     PrimitiveProvenanceAttachments,
     LogicalMeshName,
     LogicalMeshPrimitives,
     LogicalMeshMorphTargets,
     LogicalMeshDefaultMorphWeights,
+    LogicalMeshBoundsProducer,
     LogicalMeshProvenanceAttachments,
     MeshInstanceMorphWeights,
     MeshInstanceAttributes,
@@ -59,6 +62,27 @@ pub enum GeometryStorageError {
 
     #[error("retained geometry footprint overflow for {resource:?}")]
     RetainedFootprintOverflow { resource: GeometryAllocation },
+}
+
+pub(crate) enum ControlledGeometryStorageError<E> {
+    Storage(GeometryStorageError),
+    Control(E),
+}
+
+impl<E> From<GeometryStorageError> for ControlledGeometryStorageError<E> {
+    fn from(error: GeometryStorageError) -> Self {
+        Self::Storage(error)
+    }
+}
+
+fn unwrap_uncontrolled_footprint<T>(
+    result: Result<T, ControlledGeometryStorageError<Infallible>>,
+) -> Result<T, GeometryStorageError> {
+    match result {
+        Ok(value) => Ok(value),
+        Err(ControlledGeometryStorageError::Storage(error)) => Err(error),
+        Err(ControlledGeometryStorageError::Control(error)) => match error {},
+    }
 }
 
 /// Allocator-visible capacity retained by one canonical geometry owner.
@@ -564,7 +588,7 @@ pub enum GeometryBoundsError {
     Inverted { axis: BoundsAxis },
 }
 
-fn validate_aabb(bounds: Aabb) -> Result<(), GeometryBoundsError> {
+pub(crate) fn validate_aabb(bounds: Aabb) -> Result<(), GeometryBoundsError> {
     for (axis, minimum, maximum) in [
         (BoundsAxis::X, bounds.min.x, bounds.max.x),
         (BoundsAxis::Y, bounds.min.y, bounds.max.y),
@@ -964,6 +988,13 @@ impl MeshPrimitive {
     }
 
     pub fn retained_footprint(&self) -> Result<GeometryRetainedFootprint, GeometryStorageError> {
+        unwrap_uncontrolled_footprint(self.retained_footprint_controlled(&mut || Ok(())))
+    }
+
+    pub(crate) fn retained_footprint_controlled<E>(
+        &self,
+        charge_work: &mut impl FnMut() -> Result<(), E>,
+    ) -> Result<GeometryRetainedFootprint, ControlledGeometryStorageError<E>> {
         let mut footprint = self.topology.retained_footprint()?;
         footprint.try_merge(
             self.index_stream.retained_footprint()?,
@@ -974,6 +1005,7 @@ impl MeshPrimitive {
             GeometryAllocation::PrimitiveAttributes,
         )?;
         for attribute in &self.attributes {
+            charge_work().map_err(ControlledGeometryStorageError::Control)?;
             footprint.try_add_bytes(
                 attribute.payload().retained_allocation_bytes(),
                 GeometryAllocation::PrimitiveAttributes,
@@ -991,12 +1023,22 @@ impl MeshPrimitive {
             GeometryAllocation::PrimitiveMorphTargets,
         )?;
         for target in &self.morph_targets {
+            charge_work().map_err(ControlledGeometryStorageError::Control)?;
             footprint.try_add_nested(
                 target.retained_cell_capacity(),
                 target.retained_allocation_bytes(),
                 GeometryAllocation::PrimitiveMorphTargets,
             )?;
         }
+        footprint.try_add_bytes(
+            self.bounds
+                .derived()
+                .retained_producer_allocation_bytes()
+                .map_err(|_| GeometryStorageError::RetainedFootprintOverflow {
+                    resource: GeometryAllocation::PrimitiveBoundsProducer,
+                })?,
+            GeometryAllocation::PrimitiveBoundsProducer,
+        )?;
         footprint.try_add_nested(
             self.provenance.retained_allocation_cells(),
             self.provenance.retained_allocation_bytes(),
@@ -1142,6 +1184,13 @@ impl LogicalMesh {
     }
 
     pub fn retained_footprint(&self) -> Result<GeometryRetainedFootprint, GeometryStorageError> {
+        unwrap_uncontrolled_footprint(self.retained_footprint_controlled(&mut || Ok(())))
+    }
+
+    pub(crate) fn retained_footprint_controlled<E>(
+        &self,
+        charge_work: &mut impl FnMut() -> Result<(), E>,
+    ) -> Result<GeometryRetainedFootprint, ControlledGeometryStorageError<E>> {
         let mut footprint = GeometryRetainedFootprint::default();
         if let Some(name) = &self.name {
             footprint.try_add_bytes(name.capacity(), GeometryAllocation::LogicalMeshName)?;
@@ -1151,8 +1200,9 @@ impl LogicalMesh {
             GeometryAllocation::LogicalMeshPrimitives,
         )?;
         for primitive in &self.primitives {
+            charge_work().map_err(ControlledGeometryStorageError::Control)?;
             footprint.try_merge(
-                primitive.retained_footprint()?,
+                primitive.retained_footprint_controlled(charge_work)?,
                 GeometryAllocation::LogicalMeshPrimitives,
             )?;
         }
@@ -1161,6 +1211,7 @@ impl LogicalMesh {
             GeometryAllocation::LogicalMeshMorphTargets,
         )?;
         for target in &self.morph_targets {
+            charge_work().map_err(ControlledGeometryStorageError::Control)?;
             footprint.try_add_bytes(
                 target.retained_allocation_bytes(),
                 GeometryAllocation::LogicalMeshMorphTargets,
@@ -1169,6 +1220,15 @@ impl LogicalMesh {
         footprint.try_add_capacity::<f32>(
             self.default_morph_weights.capacity(),
             GeometryAllocation::LogicalMeshDefaultMorphWeights,
+        )?;
+        footprint.try_add_bytes(
+            self.bounds
+                .derived()
+                .retained_producer_allocation_bytes()
+                .map_err(|_| GeometryStorageError::RetainedFootprintOverflow {
+                    resource: GeometryAllocation::LogicalMeshBoundsProducer,
+                })?,
+            GeometryAllocation::LogicalMeshBoundsProducer,
         )?;
         footprint.try_add_nested(
             self.provenance.retained_allocation_cells(),
@@ -1348,6 +1408,13 @@ impl MeshInstance {
     }
 
     pub fn retained_footprint(&self) -> Result<GeometryRetainedFootprint, GeometryStorageError> {
+        unwrap_uncontrolled_footprint(self.retained_footprint_controlled(&mut || Ok(())))
+    }
+
+    pub(crate) fn retained_footprint_controlled<E>(
+        &self,
+        charge_work: &mut impl FnMut() -> Result<(), E>,
+    ) -> Result<GeometryRetainedFootprint, ControlledGeometryStorageError<E>> {
         let mut footprint = GeometryRetainedFootprint::default();
         if let Some(weights) = &self.morph_weight_override {
             footprint.try_add_capacity::<f32>(
@@ -1360,6 +1427,7 @@ impl MeshInstance {
             GeometryAllocation::MeshInstanceAttributes,
         )?;
         for attribute in &self.attributes {
+            charge_work().map_err(ControlledGeometryStorageError::Control)?;
             footprint.try_add_bytes(
                 attribute.payload().retained_allocation_bytes(),
                 GeometryAllocation::MeshInstanceAttributes,

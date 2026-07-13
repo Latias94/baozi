@@ -45,6 +45,8 @@ pub struct SceneValidationLimits {
     max_metadata_string_bytes: usize,
     max_canonical_bytes: u64,
     max_scratch_bytes: u64,
+    max_diagnostic_issues: u64,
+    max_diagnostic_bytes: u64,
 }
 
 impl SceneValidationLimits {
@@ -113,6 +115,16 @@ impl SceneValidationLimits {
         self
     }
 
+    pub const fn with_max_diagnostic_issues(mut self, value: u64) -> Self {
+        self.max_diagnostic_issues = value;
+        self
+    }
+
+    pub const fn with_max_diagnostic_bytes(mut self, value: u64) -> Self {
+        self.max_diagnostic_bytes = value;
+        self
+    }
+
     pub const fn max_nodes(self) -> u64 {
         self.max_nodes
     }
@@ -164,6 +176,14 @@ impl SceneValidationLimits {
     pub const fn max_scratch_bytes(self) -> u64 {
         self.max_scratch_bytes
     }
+
+    pub const fn max_diagnostic_issues(self) -> u64 {
+        self.max_diagnostic_issues
+    }
+
+    pub const fn max_diagnostic_bytes(self) -> u64 {
+        self.max_diagnostic_bytes
+    }
 }
 
 impl Default for SceneValidationLimits {
@@ -182,6 +202,8 @@ impl Default for SceneValidationLimits {
             max_metadata_string_bytes: 1024 * 1024,
             max_canonical_bytes: 4 * 1024 * 1024 * 1024,
             max_scratch_bytes: 512 * 1024 * 1024,
+            max_diagnostic_issues: 4_096,
+            max_diagnostic_bytes: 4 * 1024 * 1024,
         }
     }
 }
