@@ -1012,12 +1012,27 @@ struct ArenaNonce(NonZeroU64);
 
 static NEXT_ARENA_NONCE: AtomicU64 = AtomicU64::new(1);
 
+#[cfg(test)]
+thread_local! {
+    static FAIL_NEXT_ARENA_NONCE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+fn fail_next_arena_nonce_for_test() {
+    FAIL_NEXT_ARENA_NONCE.with(|flag| flag.set(true));
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ArenaNonceError {
     Exhausted,
 }
 
 fn next_arena_nonce() -> Result<ArenaNonce, ArenaNonceError> {
+    #[cfg(test)]
+    if FAIL_NEXT_ARENA_NONCE.with(|flag| flag.replace(false)) {
+        return Err(ArenaNonceError::Exhausted);
+    }
+
     let candidate = NEXT_ARENA_NONCE
         .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |candidate| {
             NonZeroU64::new(candidate).and_then(|_| candidate.checked_add(1))
@@ -1601,7 +1616,7 @@ impl ProvenanceArenaBuilder {
         self.limits
     }
 
-    /// Returns checked retained capacity, including shared-node allocations.
+    /// Returns checked retained capacity, including shared nodes and coupled fork control storage.
     pub fn retained_footprint(
         &self,
     ) -> Result<ProvenanceRetainedFootprint, ProvenanceFootprintError> {
@@ -2179,7 +2194,7 @@ pub enum ProvenanceLimitsError {
     },
 }
 
-/// Checked heap capacity retained by one provenance arena or builder.
+/// Checked heap capacity retained by one provenance arena, builder, or coupled fork state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ProvenanceRetainedFootprint {
     control_storage_bytes: usize,
@@ -2573,6 +2588,8 @@ impl ProvenanceArena {
         let snapshot_bytes =
             checked_capacity_bytes::<ProvenanceSegmentSnapshot>(snapshots.capacity())
                 .map_err(|_| ProvenanceForkError::AccountingOverflow)?;
+        let target = next_arena_nonce()
+            .map_err(|ArenaNonceError::Exhausted| ProvenanceForkError::ArenaIdentityExhausted)?;
         let source_segments = SharedStorage::try_new_prepared(snapshots, snapshot_bytes).map_err(
             |error| match error {
                 SharedStorageError::AllocationFailed => ProvenanceForkError::AllocationFailed {
@@ -2582,8 +2599,6 @@ impl ProvenanceArena {
             },
         )?;
         let fork_control_storage_bytes = source_segments.retained_allocation_bytes();
-        let target = next_arena_nonce()
-            .map_err(|ArenaNonceError::Exhausted| ProvenanceForkError::ArenaIdentityExhausted)?;
         Ok(ProvenanceArenaFork {
             builder: ProvenanceArenaBuilder {
                 nonce: target,
@@ -4322,6 +4337,29 @@ mod tests {
         let mapped = fork.remap_attachment(&source).unwrap();
         let (branch, _) = fork.finish().unwrap();
         assert!(branch.contains(&mapped));
+    }
+
+    #[test]
+    fn fork_identity_failure_precedes_snapshot_shared_allocation() {
+        let (arena, source) = test_provenance_fixture();
+        let before = arena.validate().unwrap().stats();
+        fail_next_arena_nonce_for_test();
+        fail_next_allocation_for_test();
+
+        assert_eq!(
+            arena.try_fork().unwrap_err(),
+            ProvenanceForkError::ArenaIdentityExhausted
+        );
+        assert!(arena.contains(&source));
+        assert_eq!(arena.validate().unwrap().stats(), before);
+        match SharedStorage::try_new(()) {
+            Err(error) => assert_eq!(
+                error,
+                SharedStorageError::AllocationFailed,
+                "identity rejection must leave the snapshot allocation sentinel untouched"
+            ),
+            Ok(_) => panic!("identity rejection consumed the snapshot allocation sentinel"),
+        }
     }
 
     #[test]
