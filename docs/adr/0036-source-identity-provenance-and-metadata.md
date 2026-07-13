@@ -95,16 +95,25 @@ collapse. A subject without one contiguous source range uses its stable document
 and digest rather than a forged byte range. Generated entities do not receive forged source
 identities.
 
-Each Scene owns one immutable `ProvenanceArena`. Its private `ProvenanceNodeId` values are arena
-addresses, not public source identities or cross-generation handles. The arena is a directed acyclic
-graph stored in deterministic topological order: every parent index is smaller than its child,
+Each Scene owns one immutable `ProvenanceArena` view over a persistent segmented DAG. A branch shares
+its immutable ancestor segments and appends changes in a segment with a fresh process-unique nonce.
+An ancestor attachment therefore remains valid in every descendant that retains that segment,
+whereas an attachment created in one sibling branch is foreign to every other sibling. Segment
+ordinal, segment nonce, local node address, and global topological index are validated together
+before range access. A private `ProvenanceNodeId` is meaningful only inside that qualified address;
+it is not a public source identity or an independently reusable cross-generation handle.
+An identity-preserving fork remap retains a bounded source-segment snapshot and remains bound to one
+target branch; the source arena or another sibling cannot substitute as its publication target.
+
+The DAG is stored in deterministic topological order: every parent index is smaller than its child,
 references are in range, duplicate parent edges are invalid, and structurally identical nodes may be
 losslessly interned. Source leaves contain `SourceIdentity`; operation nodes contain operation kind,
-option digest, ordered parent IDs, and bounded durable evidence summaries. Those summaries use typed
-codes/digests owned by the provenance node; they are never dangling IDs into an import or
-postprocess report. A report may contain richer diagnostics while the scene remains independently
-inspectable. Central validation walks the arena iteratively in `O(nodes + edges)` work and rejects
-cycles, forward references, invalid owners, and excess lineage before publication.
+option digest, ordered qualified parent attachments, and bounded durable evidence summaries. Those
+summaries use typed codes/digests owned by the provenance node; they are never dangling IDs into an
+import or postprocess report. A report may contain richer diagnostics while the scene remains
+independently inspectable. Central validation walks the arena iteratively in `O(nodes + edges)` work
+and rejects cycles, forward references, invalid owners, foreign segments, and excess lineage before
+publication.
 
 Provenance coverage is mandatory for all canonical identity or behavior owners:
 

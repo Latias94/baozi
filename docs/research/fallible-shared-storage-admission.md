@@ -13,8 +13,9 @@ triomphe = { version = "=0.1.16", default-features = false }
 ```
 
 The initial consumer is `baozi-core` provenance storage. Baozi remains
-responsible for budget admission, fallible payload cloning, fresh arena
-identity, attachment rebinding, and transactional publication.
+responsible for budget admission, fallible payload construction, fresh branch
+segment identity, segment-qualified attachment validation, and transactional
+publication.
 
 ## Package Identity
 
@@ -43,13 +44,13 @@ reproducible correspondence rather than signed provenance.
 The Baozi wrapper may use only these ownership operations:
 
 - `Arc::try_new` to publish already prepared storage;
-- `Arc::get_mut` when uniqueness has already been established;
+- `Arc::get_mut` only in `#[cfg(test)]` code that deliberately corrupts private fixtures;
 - `Arc::clone` for allocation-free reference-count increments;
 - ordinary borrow, dereference, and drop operations.
 
-The wrapper must not expose `triomphe` types. It must not call `Arc::new`,
-`make_mut`, `make_unique`, infallible conversion or deserialization paths, or
-any API that clones a payload behind an infallible interface.
+The wrapper must not expose `triomphe` types or a production mutable/COW API. It must not call
+`Arc::new`, `make_mut`, `make_unique`, infallible conversion or deserialization paths, or any API
+that clones a payload behind an infallible interface.
 
 ## Failure Semantics
 
@@ -63,9 +64,14 @@ Baozi must therefore complete these steps before publication:
 
 1. admit the complete retained-capacity and work envelope;
 2. build any replacement payload with Baozi-owned `try_reserve` paths;
-3. mint fresh scene or arena identity where the contract requires it;
-4. rebind every opaque attachment and derived relation;
+3. mint fresh scene or branch-segment identity where the contract requires it;
+4. preserve shared ancestor attachments while rejecting foreign sibling attachments, and rebind
+   generation-qualified derived relations;
 5. call `Arc::try_new` and publish only after every prior step succeeds.
+
+Identity-preserving provenance remaps retain a bounded source-segment snapshot in shared storage and
+remain qualified to one target branch. Cloning that remap increments only shared reference counts;
+it neither allocates nor weakens source/target validation.
 
 `Arc::clone` does not allocate. Its reference-count overflow guard aborts after
 `isize::MAX` references; Baozi accepts that unreachable process-liveness edge
