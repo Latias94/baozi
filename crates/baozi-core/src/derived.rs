@@ -1,5 +1,6 @@
 use crate::identity::SceneGenerationId;
 use crate::provenance::{OperationIdentity, ProvenanceFootprintError};
+use crate::shared_storage::{SharedStorage, SharedStorageError};
 use sha2::{Digest, Sha256};
 use std::fmt;
 use thiserror::Error;
@@ -185,17 +186,70 @@ impl fmt::Debug for DerivedProducer {
 }
 
 #[derive(Debug, PartialEq, Eq)]
+struct DerivedPayload<T> {
+    value: T,
+    producer: DerivedProducer,
+}
+
 enum DerivedState<T> {
     Absent {
         reason: DerivedAbsenceReason,
     },
     Valid {
-        value: T,
+        payload: SharedStorage<DerivedPayload<T>>,
         generation: SceneGenerationId,
         input_stamp: InputStamp,
-        producer: DerivedProducer,
     },
 }
+
+impl<T: fmt::Debug> fmt::Debug for DerivedState<T> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Absent { reason } => formatter
+                .debug_struct("Absent")
+                .field("reason", reason)
+                .finish(),
+            Self::Valid {
+                payload,
+                generation,
+                input_stamp,
+            } => formatter
+                .debug_struct("Valid")
+                .field("value", &payload.as_ref().value)
+                .field("generation", generation)
+                .field("input_stamp", input_stamp)
+                .field("producer", &payload.as_ref().producer)
+                .finish(),
+        }
+    }
+}
+
+impl<T: PartialEq> PartialEq for DerivedState<T> {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Absent { reason: left }, Self::Absent { reason: right }) => left == right,
+            (
+                Self::Valid {
+                    payload: left_payload,
+                    generation: left_generation,
+                    input_stamp: left_stamp,
+                },
+                Self::Valid {
+                    payload: right_payload,
+                    generation: right_generation,
+                    input_stamp: right_stamp,
+                },
+            ) => {
+                left_payload.as_ref() == right_payload.as_ref()
+                    && left_generation == right_generation
+                    && left_stamp == right_stamp
+            }
+            _ => false,
+        }
+    }
+}
+
+impl<T: Eq> Eq for DerivedState<T> {}
 
 /// An optional derived value with explicit generation and input validity.
 ///
@@ -234,10 +288,10 @@ impl<T> Derived<T> {
     }
 
     /// Returns the derived payload only when it is valid.
-    pub const fn value(&self) -> Option<&T> {
+    pub fn value(&self) -> Option<&T> {
         match &self.state {
             DerivedState::Absent { .. } => None,
-            DerivedState::Valid { value, .. } => Some(value),
+            DerivedState::Valid { payload, .. } => Some(&payload.as_ref().value),
         }
     }
 
@@ -258,74 +312,112 @@ impl<T> Derived<T> {
     }
 
     /// Returns the producer identity only when the value is valid.
-    pub const fn producer(&self) -> Option<&DerivedProducer> {
+    pub fn producer(&self) -> Option<&DerivedProducer> {
         match &self.state {
             DerivedState::Absent { .. } => None,
-            DerivedState::Valid { producer, .. } => Some(producer),
+            DerivedState::Valid { payload, .. } => Some(&payload.as_ref().producer),
         }
     }
 
     pub(crate) fn retained_producer_allocation_bytes(
         &self,
     ) -> Result<usize, ProvenanceFootprintError> {
-        self.producer()
-            .map_or(Ok(0), DerivedProducer::retained_allocation_bytes)
+        let DerivedState::Valid { payload, .. } = &self.state else {
+            return Ok(0);
+        };
+        Ok(payload.retained_allocation_bytes())
     }
 
+    pub(crate) fn try_valid(
+        value: T,
+        generation: SceneGenerationId,
+        input_stamp: InputStamp,
+        producer: DerivedProducer,
+    ) -> Result<Self, DerivedStorageError> {
+        let producer_allocation_bytes = producer.retained_allocation_bytes().map_err(
+            |ProvenanceFootprintError::AccountingOverflow| DerivedStorageError::AccountingOverflow,
+        )?;
+        let payload = SharedStorage::try_new_prepared(
+            DerivedPayload { value, producer },
+            producer_allocation_bytes,
+        )
+        .map_err(|error| match error {
+            SharedStorageError::AllocationFailed => DerivedStorageError::AllocationFailed,
+            SharedStorageError::AccountingOverflow => DerivedStorageError::AccountingOverflow,
+        })?;
+        Ok(Self {
+            state: DerivedState::Valid {
+                payload,
+                generation,
+                input_stamp,
+            },
+        })
+    }
+
+    #[cfg(test)]
     pub(crate) fn valid(
         value: T,
         generation: SceneGenerationId,
         input_stamp: InputStamp,
         producer: DerivedProducer,
     ) -> Self {
-        Self {
-            state: DerivedState::Valid {
-                value,
-                generation,
-                input_stamp,
-                producer,
-            },
-        }
+        Self::try_valid(value, generation, input_stamp, producer)
+            .expect("test derived payload allocation should succeed")
     }
 
-    pub(crate) fn rebind_generation(
-        &mut self,
+    pub(crate) fn try_rebind_generation(
+        &self,
         expected_from: SceneGenerationId,
         to: SceneGenerationId,
         expected_stamp: InputStamp,
-    ) -> Result<(), DerivedRebindError> {
-        let (generation, input_stamp) = match &mut self.state {
+    ) -> Result<Self, DerivedRebindError> {
+        let (payload, generation, input_stamp) = match &self.state {
             DerivedState::Absent { reason } => {
                 return Err(DerivedRebindError::Absent { reason: *reason });
             }
             DerivedState::Valid {
+                payload,
                 generation,
                 input_stamp,
-                ..
-            } => (generation, input_stamp),
+            } => (payload, *generation, *input_stamp),
         };
 
-        if *generation != expected_from {
+        if generation != expected_from {
             return Err(DerivedRebindError::GenerationMismatch {
                 expected: expected_from,
-                actual: *generation,
+                actual: generation,
             });
         }
-        if *input_stamp != expected_stamp {
+        if input_stamp != expected_stamp {
             return Err(DerivedRebindError::InputStampMismatch {
                 expected: expected_stamp,
-                actual: *input_stamp,
+                actual: input_stamp,
             });
         }
 
-        *generation = to;
-        Ok(())
+        Ok(Self {
+            state: DerivedState::Valid {
+                payload: payload.clone(),
+                generation: to,
+                input_stamp,
+            },
+        })
     }
 
     pub(crate) fn invalidate(self, reason: DerivedAbsenceReason) -> Self {
         drop(self);
         Self::absent(reason)
     }
+}
+
+/// Why immutable storage for a derived payload could not be created.
+#[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DerivedStorageError {
+    #[error("derived payload allocation failed")]
+    AllocationFailed,
+
+    #[error("derived payload retained-footprint accounting overflowed")]
+    AccountingOverflow,
 }
 
 impl<T> Default for Derived<T> {
@@ -359,7 +451,11 @@ pub(crate) enum DerivedRebindError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::provenance::{OperationIdentity, OperationKind, OptionsDigest};
+    use crate::namespaced::NamespacedName;
+    use crate::provenance::{
+        OperationEvidenceSummary, OperationIdentity, OperationKind, OptionsDigest,
+    };
+    use crate::shared_storage::fail_next_allocation_for_test;
     use std::cell::Cell;
     use std::rc::Rc;
 
@@ -427,12 +523,114 @@ mod tests {
     }
 
     #[test]
+    fn valid_payload_allocation_failure_is_typed_and_drops_unpublished_value() {
+        #[derive(Debug, PartialEq, Eq)]
+        struct DropProbe(Rc<Cell<u32>>);
+
+        impl Drop for DropProbe {
+            fn drop(&mut self) {
+                self.0.set(self.0.get() + 1);
+            }
+        }
+
+        let drop_count = Rc::new(Cell::new(0));
+        fail_next_allocation_for_test();
+
+        let result = Derived::try_valid(
+            DropProbe(Rc::clone(&drop_count)),
+            generation(),
+            stamp(8),
+            DerivedProducer::source(),
+        );
+
+        assert_eq!(result.unwrap_err(), DerivedStorageError::AllocationFailed);
+        assert_eq!(drop_count.get(), 1);
+    }
+
+    #[test]
+    fn preservation_rebinds_only_the_wrapper_and_shares_non_clone_payload() {
+        #[derive(Debug, PartialEq, Eq)]
+        struct NonCloneValue(u64);
+
+        let input_generation = generation();
+        let output_generation = generation();
+        let input_stamp = stamp(9);
+        let source = Derived::try_valid(
+            NonCloneValue(23),
+            input_generation,
+            input_stamp,
+            DerivedProducer::operation(OperationIdentity::without_evidence(
+                OperationKind::Transform,
+                OptionsDigest::sha256([17; 32]),
+            )),
+        )
+        .unwrap();
+
+        fail_next_allocation_for_test();
+        let rebound = source
+            .try_rebind_generation(input_generation, output_generation, input_stamp)
+            .unwrap();
+
+        assert_eq!(source.generation(), Some(input_generation));
+        assert_eq!(rebound.generation(), Some(output_generation));
+        assert!(std::ptr::eq(
+            source.value().unwrap(),
+            rebound.value().unwrap()
+        ));
+        assert!(std::ptr::eq(
+            source.producer().unwrap(),
+            rebound.producer().unwrap()
+        ));
+        assert_eq!(
+            Derived::try_valid(
+                NonCloneValue(99),
+                output_generation,
+                stamp(10),
+                DerivedProducer::source(),
+            )
+            .unwrap_err(),
+            DerivedStorageError::AllocationFailed,
+            "preservation must not consume the next shared-storage allocation attempt"
+        );
+    }
+
+    #[test]
+    fn retained_footprint_caches_shared_payload_and_producer_allocations() {
+        let evidence = OperationEvidenceSummary::new(
+            NamespacedName::new("baozi:test-evidence").unwrap(),
+            1,
+            None,
+        )
+        .unwrap();
+        let producer = DerivedProducer::operation(
+            OperationIdentity::new(
+                OperationKind::Transform,
+                OptionsDigest::sha256([19; 32]),
+                [evidence],
+            )
+            .unwrap(),
+        );
+        let producer_bytes = producer.retained_allocation_bytes().unwrap();
+        assert!(producer_bytes > 0);
+        let derived = Derived::try_valid(31_u64, generation(), stamp(11), producer).unwrap();
+        let expected = SharedStorage::<DerivedPayload<u64>>::checked_layout_footprint()
+            .unwrap()
+            .checked_add(producer_bytes)
+            .unwrap();
+
+        assert_eq!(
+            derived.retained_producer_allocation_bytes().unwrap(),
+            expected
+        );
+    }
+
+    #[test]
     fn wrong_generation_precedes_input_stamp_mismatch() {
         let actual_generation = generation();
         let wrong_generation = generation();
         let output_generation = generation();
         let original_stamp = stamp(1);
-        let mut derived = Derived::valid(
+        let derived = Derived::valid(
             "bounds",
             actual_generation,
             original_stamp,
@@ -440,7 +638,7 @@ mod tests {
         );
 
         assert_eq!(
-            derived.rebind_generation(wrong_generation, output_generation, stamp(2)),
+            derived.try_rebind_generation(wrong_generation, output_generation, stamp(2)),
             Err(DerivedRebindError::GenerationMismatch {
                 expected: wrong_generation,
                 actual: actual_generation,
@@ -456,7 +654,7 @@ mod tests {
         let output_generation = generation();
         let original_stamp = stamp(3);
         let expected_stamp = stamp(4);
-        let mut derived = Derived::valid(
+        let derived = Derived::valid(
             "normals",
             input_generation,
             original_stamp,
@@ -464,7 +662,7 @@ mod tests {
         );
 
         assert_eq!(
-            derived.rebind_generation(input_generation, output_generation, expected_stamp),
+            derived.try_rebind_generation(input_generation, output_generation, expected_stamp),
             Err(DerivedRebindError::InputStampMismatch {
                 expected: expected_stamp,
                 actual: original_stamp,
@@ -475,7 +673,7 @@ mod tests {
     }
 
     #[test]
-    fn operation_producer_consumes_and_retains_identity() {
+    fn operation_producer_is_shared_and_retains_identity() {
         let input_generation = generation();
         let output_generation = generation();
         let input_stamp = stamp(5);
@@ -483,21 +681,65 @@ mod tests {
         let operation_identity =
             OperationIdentity::without_evidence(OperationKind::Transform, options_digest);
         let producer = DerivedProducer::operation(operation_identity);
-        let mut derived = Derived::valid(17_u64, input_generation, input_stamp, producer);
+        let derived = Derived::valid(17_u64, input_generation, input_stamp, producer);
 
-        derived
-            .rebind_generation(input_generation, output_generation, input_stamp)
+        let rebound = derived
+            .try_rebind_generation(input_generation, output_generation, input_stamp)
             .expect("matching preservation evidence should rebind");
 
-        assert_eq!(derived.value(), Some(&17));
-        assert_eq!(derived.generation(), Some(output_generation));
-        assert_eq!(derived.input_stamp(), Some(&input_stamp));
-        let producer = derived.producer().expect("valid value has a producer");
+        assert_eq!(derived.generation(), Some(input_generation));
+        assert_eq!(rebound.value(), Some(&17));
+        assert_eq!(rebound.generation(), Some(output_generation));
+        assert_eq!(rebound.input_stamp(), Some(&input_stamp));
+        let producer = rebound.producer().expect("valid value has a producer");
         let operation_identity = producer
             .operation_identity()
             .expect("operation producer retains its identity");
         assert_eq!(operation_identity.kind(), &OperationKind::Transform);
         assert_eq!(operation_identity.options_digest(), &options_digest);
+    }
+
+    #[test]
+    fn absent_value_cannot_be_preserved() {
+        let reason = DerivedAbsenceReason::Invalidated;
+        let derived = Derived::<u64>::absent(reason);
+
+        assert_eq!(
+            derived.try_rebind_generation(generation(), generation(), stamp(12)),
+            Err(DerivedRebindError::Absent { reason })
+        );
+    }
+
+    #[test]
+    fn shared_payload_is_dropped_after_the_last_wrapper() {
+        #[derive(Debug, PartialEq, Eq)]
+        struct DropProbe(Rc<Cell<u32>>);
+
+        impl Drop for DropProbe {
+            fn drop(&mut self) {
+                self.0.set(self.0.get() + 1);
+            }
+        }
+
+        let drop_count = Rc::new(Cell::new(0));
+        let input_generation = generation();
+        let input_stamp = stamp(13);
+        let source = Derived::valid(
+            DropProbe(Rc::clone(&drop_count)),
+            input_generation,
+            input_stamp,
+            DerivedProducer::source(),
+        );
+        let rebound = source
+            .try_rebind_generation(input_generation, generation(), input_stamp)
+            .unwrap();
+
+        let absent = source.invalidate(DerivedAbsenceReason::Invalidated);
+        assert_eq!(drop_count.get(), 0);
+        assert!(absent.is_absent());
+
+        drop(rebound);
+        assert_eq!(drop_count.get(), 1);
     }
 
     #[test]

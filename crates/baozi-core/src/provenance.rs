@@ -1028,15 +1028,18 @@ fn next_arena_nonce() -> Result<ArenaNonce, ArenaNonceError> {
         .ok_or(ArenaNonceError::Exhausted)
 }
 
-/// An opaque, non-empty attachment to one node in one provenance arena.
+/// An opaque, non-empty attachment to one immutable provenance node.
 ///
-/// The arena nonce and node address are intentionally private and absent from
-/// every public accessor and debug representation. Attachments are meaningful
-/// only with the immutable arena produced by their builder.
+/// The segment nonce and node address are intentionally private and absent
+/// from every public accessor and debug representation. Forks preserve
+/// ancestor attachments by identity while assigning fresh nonces only to
+/// branch-local segments.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Provenance {
     arena: ArenaNonce,
+    segment: usize,
     node: ProvenanceNodeId,
+    topological_index: usize,
 }
 
 impl std::fmt::Debug for Provenance {
@@ -1233,20 +1236,48 @@ enum ProvenanceNodePayload {
     Source(SourceIdentity),
     Operation {
         identity: OperationIdentity,
-        parents: Vec<ProvenanceNodeId>,
+        parents: Vec<Provenance>,
     },
 }
 
-fn try_clone_nodes_for_fork(
-    nodes: &[SharedStorage<ProvenanceNode>],
-) -> Result<Vec<SharedStorage<ProvenanceNode>>, ProvenanceForkError> {
+struct ProvenanceSegment {
+    nonce: ArenaNonce,
+    ordinal: usize,
+    start: usize,
+    nodes: Vec<SharedStorage<ProvenanceNode>>,
+    retained_node_bytes: usize,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+struct ProvenanceSegmentSnapshot {
+    nonce: ArenaNonce,
+    ordinal: usize,
+    start: usize,
+    node_count: usize,
+}
+
+fn try_clone_segments_for_fork(
+    segments: &[SharedStorage<ProvenanceSegment>],
+) -> Result<Vec<SharedStorage<ProvenanceSegment>>, ProvenanceForkError> {
+    let desired_capacity = segments
+        .len()
+        .checked_add(1)
+        .ok_or(ProvenanceForkError::AccountingOverflow)?;
+    let capacity_plan =
+        CapacityPlan::for_type::<SharedStorage<ProvenanceSegment>>(0, 0, desired_capacity)
+            .map_err(|_| ProvenanceForkError::AccountingOverflow)?;
     let mut cloned = Vec::new();
     try_reserve_for_fork(
         &mut cloned,
-        nodes.len(),
-        ProvenanceAllocation::ForkArenaNodes,
+        capacity_plan.allocator_additional(),
+        ProvenanceAllocation::ForkSegments,
     )?;
-    cloned.extend(nodes.iter().cloned());
+    capacity_plan.finish(0, cloned.capacity()).map_err(|_| {
+        ProvenanceForkError::AllocationFailed {
+            resource: ProvenanceAllocation::ForkSegments,
+        }
+    })?;
+    cloned.extend(segments.iter().cloned());
     Ok(cloned)
 }
 
@@ -1287,11 +1318,7 @@ fn checked_node_retained_bytes(node: &ProvenanceNode) -> Result<usize, Provenanc
 fn checked_stored_node_retained_bytes(
     node: &SharedStorage<ProvenanceNode>,
 ) -> Result<usize, ProvenanceFootprintError> {
-    let allocation = node
-        .checked_allocation_footprint()
-        .map_err(ProvenanceFootprintError::from_shared_storage)?;
-    let node: &ProvenanceNode = node.borrow();
-    checked_add_footprint(allocation, checked_node_dynamic_bytes(node)?)
+    Ok(node.retained_allocation_bytes())
 }
 
 fn checked_node_dynamic_bytes(node: &ProvenanceNode) -> Result<usize, ProvenanceFootprintError> {
@@ -1299,7 +1326,7 @@ fn checked_node_dynamic_bytes(node: &ProvenanceNode) -> Result<usize, Provenance
         ProvenanceNodePayload::Source(identity) => identity.checked_dynamic_allocation_bytes(),
         ProvenanceNodePayload::Operation { identity, parents } => checked_add_footprint(
             identity.checked_dynamic_allocation_bytes()?,
-            checked_capacity_bytes::<ProvenanceNodeId>(parents.capacity())?,
+            checked_capacity_bytes::<Provenance>(parents.capacity())?,
         ),
     }
 }
@@ -1312,22 +1339,23 @@ fn checked_operation_node_retained_bytes(
         .map_err(ProvenanceFootprintError::from_shared_storage)?;
     let dynamic = checked_add_footprint(
         identity.checked_dynamic_allocation_bytes()?,
-        checked_capacity_bytes::<ProvenanceNodeId>(parent_capacity)?,
+        checked_capacity_bytes::<Provenance>(parent_capacity)?,
     )?;
     checked_add_footprint(allocation, dynamic)
 }
 
-fn checked_nodes_retained_footprint(
-    nodes: &[SharedStorage<ProvenanceNode>],
+fn checked_segments_retained_footprint(
+    segments: &[SharedStorage<ProvenanceSegment>],
     outer_capacity: usize,
+    retained_node_bytes: usize,
 ) -> Result<ProvenanceRetainedFootprint, ProvenanceFootprintError> {
-    let outer_node_bytes = checked_capacity_bytes::<SharedStorage<ProvenanceNode>>(outer_capacity)?;
-    let mut shared_node_bytes = 0usize;
-    for node in nodes {
-        shared_node_bytes =
-            checked_add_footprint(shared_node_bytes, checked_stored_node_retained_bytes(node)?)?;
+    let mut control_storage_bytes =
+        checked_capacity_bytes::<SharedStorage<ProvenanceSegment>>(outer_capacity)?;
+    for segment in segments {
+        control_storage_bytes =
+            checked_add_footprint(control_storage_bytes, segment.retained_allocation_bytes())?;
     }
-    ProvenanceRetainedFootprint::try_new(outer_node_bytes, shared_node_bytes)
+    ProvenanceRetainedFootprint::try_new(control_storage_bytes, retained_node_bytes)
 }
 
 #[cfg(test)]
@@ -1372,15 +1400,21 @@ fn arena_capacity_for_qualification(actual: usize, _envelope: usize) -> usize {
 #[derive(Debug, Clone, Copy)]
 struct PreparedProvenanceNode {
     retained_node_bytes: usize,
-    outer_capacity: CapacityPlan,
+    node_dynamic_bytes: usize,
+    local_capacity: CapacityPlan,
+    segment_capacity: Option<CapacityPlan>,
 }
 
 /// A scene-local builder that creates a topologically ordered provenance DAG.
 pub struct ProvenanceArenaBuilder {
     nonce: ArenaNonce,
-    nodes: Vec<SharedStorage<ProvenanceNode>>,
+    segments: Vec<SharedStorage<ProvenanceSegment>>,
+    local_nodes: Vec<SharedStorage<ProvenanceNode>>,
+    local_retained_node_bytes: usize,
+    node_count: usize,
     edge_count: usize,
     retained_node_bytes: usize,
+    fork_control_storage_bytes: usize,
     limits: ProvenanceLimits,
 }
 
@@ -1396,9 +1430,13 @@ impl ProvenanceArenaBuilder {
             nonce: next_arena_nonce().map_err(|ArenaNonceError::Exhausted| {
                 ProvenanceBuildError::ArenaIdentityExhausted
             })?,
-            nodes: Vec::new(),
+            segments: Vec::new(),
+            local_nodes: Vec::new(),
+            local_retained_node_bytes: 0,
+            node_count: 0,
             edge_count: 0,
             retained_node_bytes: 0,
+            fork_control_storage_bytes: 0,
             limits,
         })
     }
@@ -1418,7 +1456,9 @@ impl ProvenanceArenaBuilder {
         let node = self.commit_node(node_value, prepared)?;
         Ok(Provenance {
             arena: self.nonce,
+            segment: self.segments.len(),
             node,
+            topological_index: self.node_count - 1,
         })
     }
 
@@ -1491,13 +1531,7 @@ impl ProvenanceArenaBuilder {
             }
 
             let parent = *parent.borrow();
-            if parent.arena != self.nonce {
-                return Err(ProvenanceBuildError::ArenaMismatch);
-            }
-            if parent.node.0 >= self.nodes.len() {
-                return Err(ProvenanceBuildError::ParentOutOfRange);
-            }
-            let parent_node: &ProvenanceNode = self.nodes[parent.node.0].borrow();
+            let parent_node = self.resolve_parent(&parent)?;
             maximum_parent_depth = maximum_parent_depth.max(parent_node.depth);
             if canonical_parents.len() == canonical_parents.capacity() {
                 let doubled = canonical_parents
@@ -1510,10 +1544,10 @@ impl ProvenanceArenaBuilder {
                     .min(edge_remaining);
                 self.try_reserve_operation_parents(&identity, &mut canonical_parents, target)?;
             }
-            canonical_parents.push(parent.node);
+            canonical_parents.push(parent);
         }
 
-        canonical_parents.sort_unstable();
+        canonical_parents.sort_unstable_by_key(|parent| parent.topological_index);
         if canonical_parents.windows(2).any(|pair| pair[0] == pair[1]) {
             return Err(ProvenanceBuildError::DuplicateParent);
         }
@@ -1546,13 +1580,15 @@ impl ProvenanceArenaBuilder {
         self.edge_count = edge_count;
         Ok(Provenance {
             arena: self.nonce,
+            segment: self.segments.len(),
             node,
+            topological_index: self.node_count - 1,
         })
     }
 
     /// Returns the number of nodes currently owned by the builder.
     pub fn node_count(&self) -> usize {
-        self.nodes.len()
+        self.node_count
     }
 
     /// Returns the number of parent edges currently owned by the builder.
@@ -1569,17 +1605,83 @@ impl ProvenanceArenaBuilder {
     pub fn retained_footprint(
         &self,
     ) -> Result<ProvenanceRetainedFootprint, ProvenanceFootprintError> {
-        ProvenanceRetainedFootprint::try_new(
-            checked_capacity_bytes::<SharedStorage<ProvenanceNode>>(self.nodes.capacity())?,
+        let mut footprint = checked_segments_retained_footprint(
+            &self.segments,
+            self.segments.capacity(),
             self.retained_node_bytes,
-        )
+        )?;
+        if !self.local_nodes.is_empty() {
+            let control_storage_bytes = checked_add_footprint(
+                footprint.control_storage_bytes(),
+                SharedStorage::<ProvenanceSegment>::checked_layout_footprint()
+                    .map_err(ProvenanceFootprintError::from_shared_storage)?,
+            )?;
+            let control_storage_bytes = checked_add_footprint(
+                control_storage_bytes,
+                checked_capacity_bytes::<SharedStorage<ProvenanceNode>>(
+                    self.local_nodes.capacity(),
+                )?,
+            )?;
+            footprint = ProvenanceRetainedFootprint::try_new(
+                control_storage_bytes,
+                self.retained_node_bytes,
+            )?;
+        }
+        let control_storage_bytes = checked_add_footprint(
+            footprint.control_storage_bytes(),
+            self.fork_control_storage_bytes,
+        )?;
+        ProvenanceRetainedFootprint::try_new(control_storage_bytes, self.retained_node_bytes)
     }
 
     /// Validates and freezes the arena in deterministic topological order.
-    pub fn finish(self) -> Result<ProvenanceArena, ProvenanceValidationError> {
+    pub fn finish(mut self) -> Result<ProvenanceArena, ProvenanceValidationError> {
+        if !self.local_nodes.is_empty() {
+            let start = self
+                .node_count
+                .checked_sub(self.local_nodes.len())
+                .ok_or_else(|| {
+                    ProvenanceValidationError::new(
+                        ProvenanceValidationIssue::RetainedFootprintMismatch,
+                        ProvenanceValidationStats::empty(),
+                    )
+                })?;
+            let nested_allocation_bytes = checked_capacity_bytes::<SharedStorage<ProvenanceNode>>(
+                self.local_nodes.capacity(),
+            )
+            .map_err(|_| {
+                ProvenanceValidationError::new(
+                    ProvenanceValidationIssue::RetainedFootprintOverflow,
+                    ProvenanceValidationStats::empty(),
+                )
+            })?;
+            let segment = SharedStorage::try_new_prepared(
+                ProvenanceSegment {
+                    nonce: self.nonce,
+                    ordinal: self.segments.len(),
+                    start,
+                    nodes: self.local_nodes,
+                    retained_node_bytes: self.local_retained_node_bytes,
+                },
+                nested_allocation_bytes,
+            )
+            .map_err(|error| {
+                let issue = match error {
+                    SharedStorageError::AllocationFailed => {
+                        ProvenanceValidationIssue::AllocationFailed
+                    }
+                    SharedStorageError::AccountingOverflow => {
+                        ProvenanceValidationIssue::RetainedFootprintOverflow
+                    }
+                };
+                ProvenanceValidationError::new(issue, ProvenanceValidationStats::empty())
+            })?;
+            self.segments.push(segment);
+        }
         let arena = ProvenanceArena {
             nonce: self.nonce,
-            nodes: self.nodes,
+            segments: self.segments,
+            node_count: self.node_count,
             edge_count: self.edge_count,
             retained_node_bytes: self.retained_node_bytes,
             limits: self.limits,
@@ -1591,15 +1693,14 @@ impl ProvenanceArenaBuilder {
     fn try_reserve_operation_parents(
         &self,
         identity: &OperationIdentity,
-        parents: &mut Vec<ProvenanceNodeId>,
+        parents: &mut Vec<Provenance>,
         desired: usize,
     ) -> Result<(), ProvenanceBuildError> {
         if desired <= parents.capacity() {
             return Ok(());
         }
-        let plan =
-            CapacityPlan::for_type::<ProvenanceNodeId>(parents.len(), parents.capacity(), desired)
-                .map_err(|_| ProvenanceBuildError::AccountingOverflow)?;
+        let plan = CapacityPlan::for_type::<Provenance>(parents.len(), parents.capacity(), desired)
+            .map_err(|_| ProvenanceBuildError::AccountingOverflow)?;
         let node_bytes = checked_operation_node_retained_bytes(identity, plan.envelope_capacity())
             .map_err(ProvenanceBuildError::from_footprint)?;
         self.prepare_retained_capacity(node_bytes)?;
@@ -1622,8 +1723,7 @@ impl ProvenanceArenaBuilder {
         node_bytes: usize,
     ) -> Result<PreparedProvenanceNode, ProvenanceBuildError> {
         let next_len = self
-            .nodes
-            .len()
+            .node_count
             .checked_add(1)
             .ok_or(ProvenanceBuildError::AccountingOverflow)?;
         if next_len > self.limits.max_nodes {
@@ -1661,8 +1761,7 @@ impl ProvenanceArenaBuilder {
         node_bytes: usize,
     ) -> Result<PreparedProvenanceNode, ProvenanceBuildError> {
         let next_len = self
-            .nodes
-            .len()
+            .node_count
             .checked_add(1)
             .ok_or(ProvenanceBuildError::AccountingOverflow)?;
         if next_len > self.limits.max_nodes {
@@ -1675,20 +1774,52 @@ impl ProvenanceArenaBuilder {
             .retained_node_bytes
             .checked_add(node_bytes)
             .ok_or(ProvenanceBuildError::AccountingOverflow)?;
-        let outer_capacity = CapacityPlan::for_type::<SharedStorage<ProvenanceNode>>(
-            self.nodes.len(),
-            self.nodes.capacity(),
-            next_len,
+        let local_capacity = CapacityPlan::for_type::<SharedStorage<ProvenanceNode>>(
+            self.local_nodes.len(),
+            self.local_nodes.capacity(),
+            self.local_nodes.len() + 1,
         )
         .map_err(|_| ProvenanceBuildError::AccountingOverflow)?;
-        let projected = ProvenanceRetainedFootprint::try_new(
-            checked_capacity_bytes::<SharedStorage<ProvenanceNode>>(
-                outer_capacity.envelope_capacity(),
+        let segment_capacity = if self.local_nodes.is_empty() {
+            Some(
+                CapacityPlan::for_type::<SharedStorage<ProvenanceSegment>>(
+                    self.segments.len(),
+                    self.segments.capacity(),
+                    self.segments.len() + 1,
+                )
+                .map_err(|_| ProvenanceBuildError::AccountingOverflow)?,
             )
-            .map_err(ProvenanceBuildError::from_footprint)?,
-            retained_node_bytes,
-        )
-        .map_err(ProvenanceBuildError::from_footprint)?;
+        } else {
+            None
+        };
+        let segment_pointer_capacity = segment_capacity
+            .as_ref()
+            .map_or(self.segments.capacity(), |plan| plan.envelope_capacity());
+        let mut outer_bytes =
+            checked_capacity_bytes::<SharedStorage<ProvenanceSegment>>(segment_pointer_capacity)
+                .map_err(ProvenanceBuildError::from_footprint)?;
+        let segment_allocation = SharedStorage::<ProvenanceSegment>::checked_layout_footprint()
+            .map_err(|_| ProvenanceBuildError::AccountingOverflow)?;
+        for segment in &self.segments {
+            outer_bytes = outer_bytes
+                .checked_add(segment.retained_allocation_bytes())
+                .ok_or(ProvenanceBuildError::AccountingOverflow)?;
+        }
+        outer_bytes = outer_bytes
+            .checked_add(segment_allocation)
+            .and_then(|bytes| {
+                checked_capacity_bytes::<SharedStorage<ProvenanceNode>>(
+                    local_capacity.envelope_capacity(),
+                )
+                .ok()
+                .and_then(|local| bytes.checked_add(local))
+            })
+            .ok_or(ProvenanceBuildError::AccountingOverflow)?;
+        outer_bytes = outer_bytes
+            .checked_add(self.fork_control_storage_bytes)
+            .ok_or(ProvenanceBuildError::AccountingOverflow)?;
+        let projected = ProvenanceRetainedFootprint::try_new(outer_bytes, retained_node_bytes)
+            .map_err(ProvenanceBuildError::from_footprint)?;
         if projected.total_bytes() > self.limits.max_retained_bytes {
             return Err(ProvenanceBuildError::LimitExceeded {
                 limit: ProvenanceLimit::RetainedBytes,
@@ -1697,7 +1828,14 @@ impl ProvenanceArenaBuilder {
         }
         Ok(PreparedProvenanceNode {
             retained_node_bytes,
-            outer_capacity,
+            node_dynamic_bytes: node_bytes
+                .checked_sub(
+                    SharedStorage::<ProvenanceNode>::checked_layout_footprint()
+                        .map_err(|_| ProvenanceBuildError::AccountingOverflow)?,
+                )
+                .ok_or(ProvenanceBuildError::AccountingOverflow)?,
+            local_capacity,
+            segment_capacity,
         })
     }
 
@@ -1706,65 +1844,151 @@ impl ProvenanceArenaBuilder {
         node_value: ProvenanceNode,
         prepared: PreparedProvenanceNode,
     ) -> Result<ProvenanceNodeId, ProvenanceBuildError> {
+        let stored = SharedStorage::try_new_prepared(node_value, prepared.node_dynamic_bytes)
+            .map_err(|error| match error {
+                SharedStorageError::AllocationFailed => ProvenanceBuildError::AllocationFailed {
+                    resource: ProvenanceAllocation::SharedNode,
+                },
+                SharedStorageError::AccountingOverflow => ProvenanceBuildError::AccountingOverflow,
+            })?;
+
         prepared
-            .outer_capacity
-            .verify_preflight(self.nodes.len(), self.nodes.capacity())
+            .local_capacity
+            .verify_preflight(self.local_nodes.len(), self.local_nodes.capacity())
             .map_err(|_| ProvenanceBuildError::AccountingOverflow)?;
-        let stored = SharedStorage::try_new(node_value).map_err(
-            |SharedStorageError::AllocationFailed| ProvenanceBuildError::AllocationFailed {
-                resource: ProvenanceAllocation::SharedNode,
-            },
-        )?;
-
-        if prepared.outer_capacity.desired_capacity() > self.nodes.capacity() {
-            let replacement_plan = CapacityPlan::for_type::<SharedStorage<ProvenanceNode>>(
-                0,
-                0,
-                prepared.outer_capacity.envelope_capacity(),
-            )
-            .map_err(|_| ProvenanceBuildError::AccountingOverflow)?;
-            let mut replacement = Vec::new();
-            replacement
-                .try_reserve_exact(replacement_plan.allocator_additional())
-                .map_err(|_| ProvenanceBuildError::AllocationFailed {
-                    resource: ProvenanceAllocation::ArenaNodes,
-                })?;
-            let qualified_capacity = arena_capacity_for_qualification(
-                replacement.capacity(),
-                replacement_plan.envelope_capacity(),
-            );
-            replacement_plan
-                .finish(0, qualified_capacity)
-                .map_err(|_| ProvenanceBuildError::AllocationFailed {
-                    resource: ProvenanceAllocation::ArenaNodes,
-                })?;
-            let actual = ProvenanceRetainedFootprint::try_new(
-                checked_capacity_bytes::<SharedStorage<ProvenanceNode>>(replacement.capacity())
-                    .map_err(ProvenanceBuildError::from_footprint)?,
-                prepared.retained_node_bytes,
-            )
-            .map_err(ProvenanceBuildError::from_footprint)?;
-            if actual.total_bytes() > self.limits.max_retained_bytes {
-                return Err(ProvenanceBuildError::LimitExceeded {
-                    limit: ProvenanceLimit::RetainedBytes,
-                    maximum: self.limits.max_retained_bytes,
-                });
+        let segment_replacement = if let Some(segment_plan) = prepared.segment_capacity {
+            segment_plan
+                .verify_preflight(self.segments.len(), self.segments.capacity())
+                .map_err(|_| ProvenanceBuildError::AccountingOverflow)?;
+            if segment_plan.desired_capacity() > self.segments.capacity() {
+                let replacement_plan = CapacityPlan::for_type::<SharedStorage<ProvenanceSegment>>(
+                    0,
+                    0,
+                    segment_plan.envelope_capacity(),
+                )
+                .map_err(|_| ProvenanceBuildError::AccountingOverflow)?;
+                let mut replacement = Vec::new();
+                replacement
+                    .try_reserve_exact(replacement_plan.allocator_additional())
+                    .map_err(|_| ProvenanceBuildError::AllocationFailed {
+                        resource: ProvenanceAllocation::ArenaNodes,
+                    })?;
+                let qualified_capacity = arena_capacity_for_qualification(
+                    replacement.capacity(),
+                    replacement_plan.envelope_capacity(),
+                );
+                replacement_plan
+                    .finish(0, qualified_capacity)
+                    .map_err(|_| ProvenanceBuildError::AllocationFailed {
+                        resource: ProvenanceAllocation::ArenaNodes,
+                    })?;
+                replacement.extend(self.segments.iter().cloned());
+                Some(replacement)
+            } else {
+                None
             }
-            replacement.append(&mut self.nodes);
-            self.nodes = replacement;
         } else {
-            prepared
-                .outer_capacity
-                .finish(self.nodes.len(), self.nodes.capacity())
-                .map_err(|_| ProvenanceBuildError::AllocationFailed {
-                    resource: ProvenanceAllocation::ArenaNodes,
-                })?;
-        }
+            None
+        };
+        let node = ProvenanceNodeId(self.local_nodes.len());
+        let mut local_replacement =
+            if prepared.local_capacity.desired_capacity() > self.local_nodes.capacity() {
+                let replacement_plan = CapacityPlan::for_type::<SharedStorage<ProvenanceNode>>(
+                    0,
+                    0,
+                    prepared.local_capacity.envelope_capacity(),
+                )
+                .map_err(|_| ProvenanceBuildError::AccountingOverflow)?;
+                let mut replacement = Vec::new();
+                replacement
+                    .try_reserve_exact(replacement_plan.allocator_additional())
+                    .map_err(|_| ProvenanceBuildError::AllocationFailed {
+                        resource: ProvenanceAllocation::ArenaNodes,
+                    })?;
+                let qualified_capacity = arena_capacity_for_qualification(
+                    replacement.capacity(),
+                    replacement_plan.envelope_capacity(),
+                );
+                replacement_plan
+                    .finish(0, qualified_capacity)
+                    .map_err(|_| ProvenanceBuildError::AllocationFailed {
+                        resource: ProvenanceAllocation::ArenaNodes,
+                    })?;
+                Some(replacement)
+            } else {
+                prepared
+                    .local_capacity
+                    .finish(self.local_nodes.len(), self.local_nodes.capacity())
+                    .map_err(|_| ProvenanceBuildError::AllocationFailed {
+                        resource: ProvenanceAllocation::ArenaNodes,
+                    })?;
+                None
+            };
 
-        let node = ProvenanceNodeId(self.nodes.len());
-        self.nodes.push(stored);
+        if let Some(replacement) = segment_replacement {
+            self.segments = replacement;
+        }
+        if let Some(mut replacement) = local_replacement.take() {
+            replacement.append(&mut self.local_nodes);
+            self.local_nodes = replacement;
+        }
+        self.local_nodes.push(stored);
+        let ancestor_retained_node_bytes = self
+            .retained_node_bytes
+            .checked_sub(self.local_retained_node_bytes)
+            .ok_or(ProvenanceBuildError::AccountingOverflow)?;
+        self.local_retained_node_bytes = prepared
+            .retained_node_bytes
+            .checked_sub(ancestor_retained_node_bytes)
+            .ok_or(ProvenanceBuildError::AccountingOverflow)?;
+        self.node_count += 1;
         self.retained_node_bytes = prepared.retained_node_bytes;
         Ok(node)
+    }
+
+    fn resolve_parent(
+        &self,
+        provenance: &Provenance,
+    ) -> Result<&ProvenanceNode, ProvenanceBuildError> {
+        if provenance.segment == self.segments.len() {
+            if provenance.arena != self.nonce {
+                return Err(ProvenanceBuildError::ArenaMismatch);
+            }
+            let local_start = self
+                .node_count
+                .checked_sub(self.local_nodes.len())
+                .ok_or(ProvenanceBuildError::AccountingOverflow)?;
+            let expected_topological_index = local_start
+                .checked_add(provenance.node.0)
+                .ok_or(ProvenanceBuildError::ParentOutOfRange)?;
+            if provenance.topological_index != expected_topological_index {
+                return Err(ProvenanceBuildError::ParentOutOfRange);
+            }
+            let node = self
+                .local_nodes
+                .get(provenance.node.0)
+                .ok_or(ProvenanceBuildError::ParentOutOfRange)?;
+            return Ok(node.as_ref());
+        }
+        let Some(segment) = self.segments.get(provenance.segment) else {
+            return Err(ProvenanceBuildError::ArenaMismatch);
+        };
+        let segment = segment.as_ref();
+        if segment.ordinal != provenance.segment || segment.nonce != provenance.arena {
+            return Err(ProvenanceBuildError::ArenaMismatch);
+        }
+        let expected_topological_index = segment
+            .start
+            .checked_add(provenance.node.0)
+            .ok_or(ProvenanceBuildError::ParentOutOfRange)?;
+        if provenance.topological_index != expected_topological_index {
+            return Err(ProvenanceBuildError::ParentOutOfRange);
+        }
+        let node = segment
+            .nodes
+            .get(provenance.node.0)
+            .ok_or(ProvenanceBuildError::ParentOutOfRange)?;
+        Ok(node.as_ref())
     }
 }
 
@@ -1772,7 +1996,7 @@ impl std::fmt::Debug for ProvenanceArenaBuilder {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("ProvenanceArenaBuilder")
-            .field("node_count", &self.nodes.len())
+            .field("node_count", &self.node_count)
             .field("edge_count", &self.edge_count)
             .finish_non_exhaustive()
     }
@@ -1958,25 +2182,25 @@ pub enum ProvenanceLimitsError {
 /// Checked heap capacity retained by one provenance arena or builder.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ProvenanceRetainedFootprint {
-    outer_node_bytes: usize,
+    control_storage_bytes: usize,
     shared_node_bytes: usize,
 }
 
 impl ProvenanceRetainedFootprint {
     fn try_new(
-        outer_node_bytes: usize,
+        control_storage_bytes: usize,
         shared_node_bytes: usize,
     ) -> Result<Self, ProvenanceFootprintError> {
-        checked_add_footprint(outer_node_bytes, shared_node_bytes)?;
+        checked_add_footprint(control_storage_bytes, shared_node_bytes)?;
         Ok(Self {
-            outer_node_bytes,
+            control_storage_bytes,
             shared_node_bytes,
         })
     }
 
-    /// Returns retained capacity of the outer shared-pointer vector.
-    pub const fn outer_node_bytes(self) -> usize {
-        self.outer_node_bytes
+    /// Returns segment, pointer-vector, and fork-control storage bytes.
+    pub const fn control_storage_bytes(self) -> usize {
+        self.control_storage_bytes
     }
 
     /// Returns Arc header/payload and node-owned dynamic capacities.
@@ -1986,7 +2210,7 @@ impl ProvenanceRetainedFootprint {
 
     /// Returns total retained bytes for this arena's ownership view.
     pub const fn total_bytes(self) -> usize {
-        self.outer_node_bytes + self.shared_node_bytes
+        self.control_storage_bytes + self.shared_node_bytes
     }
 }
 
@@ -2023,10 +2247,11 @@ pub enum ProvenanceAllocation {
     ArenaNodes,
     OperationParents,
     SharedNode,
-    ForkArenaNodes,
+    ForkSegments,
+    ForkSnapshot,
 }
 
-/// A fresh-nonce editable clone of one immutable provenance arena.
+/// An editable descendant that shares immutable ancestor segments.
 pub struct ProvenanceArenaFork {
     builder: ProvenanceArenaBuilder,
     remap: ProvenanceForkRemap,
@@ -2043,22 +2268,17 @@ impl ProvenanceArenaFork {
         &mut self.builder
     }
 
-    /// Returns the old-to-new attachment remap for the cloned prefix.
+    /// Returns the source-snapshot validator for identity-preserved attachments.
     pub const fn remap(&self) -> &ProvenanceForkRemap {
         &self.remap
     }
 
-    /// Maps one attachment from the source arena into this fork.
+    /// Validates one identity-preserved source attachment for this fork.
     pub fn remap_attachment(
         &self,
         provenance: &Provenance,
     ) -> Result<Provenance, ProvenanceRemapError> {
         self.remap.remap(provenance)
-    }
-
-    /// Splits the branch-local builder from its immutable prefix remap.
-    pub fn into_parts(self) -> (ProvenanceArenaBuilder, ProvenanceForkRemap) {
-        (self.builder, self.remap)
     }
 
     /// Validates and freezes the fork while retaining its prefix remap.
@@ -2080,32 +2300,84 @@ impl std::fmt::Debug for ProvenanceArenaFork {
     }
 }
 
-/// A typed remap from one immutable arena prefix into a fresh-nonce fork.
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+/// An identity remap validated against one immutable source snapshot.
 pub struct ProvenanceForkRemap {
     source: ArenaNonce,
     target: ArenaNonce,
+    source_segments: SharedStorage<Vec<ProvenanceSegmentSnapshot>>,
     source_node_count: usize,
 }
 
 impl ProvenanceForkRemap {
     /// Maps one source attachment without exposing its private node address.
     pub fn remap(&self, provenance: &Provenance) -> Result<Provenance, ProvenanceRemapError> {
-        if provenance.arena != self.source {
+        let Some(segment) = self.source_segments.as_ref().get(provenance.segment) else {
+            return Err(ProvenanceRemapError::ForeignSourceArena);
+        };
+        if segment.nonce != provenance.arena || segment.ordinal != provenance.segment {
             return Err(ProvenanceRemapError::ForeignSourceArena);
         }
-        if provenance.node.0 >= self.source_node_count {
+        let expected_topological_index = segment
+            .start
+            .checked_add(provenance.node.0)
+            .ok_or(ProvenanceRemapError::StaleSourceAttachment)?;
+        if provenance.topological_index != expected_topological_index
+            || provenance.topological_index >= self.source_node_count
+            || provenance.node.0 >= segment.node_count
+        {
             return Err(ProvenanceRemapError::StaleSourceAttachment);
         }
-        Ok(Provenance {
-            arena: self.target,
-            node: provenance.node,
-        })
+        Ok(*provenance)
     }
 
     /// Returns the number of source nodes covered by this snapshot remap.
     pub const fn mapped_node_count(&self) -> usize {
         self.source_node_count
+    }
+
+    /// Returns retained bytes for the shared immutable source snapshot.
+    pub fn retained_allocation_bytes(&self) -> usize {
+        self.source_segments.retained_allocation_bytes()
+    }
+
+    pub(crate) fn validate_target_arena(
+        &self,
+        arena: &ProvenanceArena,
+    ) -> Result<(), ProvenanceRemapError> {
+        if arena.nonce == self.target {
+            Ok(())
+        } else {
+            Err(ProvenanceRemapError::ForeignTargetArena)
+        }
+    }
+}
+
+impl Clone for ProvenanceForkRemap {
+    fn clone(&self) -> Self {
+        Self {
+            source: self.source,
+            target: self.target,
+            source_segments: self.source_segments.clone(),
+            source_node_count: self.source_node_count,
+        }
+    }
+}
+
+impl PartialEq for ProvenanceForkRemap {
+    fn eq(&self, other: &Self) -> bool {
+        self.source == other.source
+            && self.target == other.target
+            && self.source_node_count == other.source_node_count
+    }
+}
+
+impl Eq for ProvenanceForkRemap {}
+
+impl Hash for ProvenanceForkRemap {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.source.hash(state);
+        self.target.hash(state);
+        self.source_node_count.hash(state);
     }
 }
 
@@ -2187,12 +2459,16 @@ pub enum ProvenanceRemapError {
 
     #[error("provenance attachment is outside the remap source snapshot")]
     StaleSourceAttachment,
+
+    #[error("provenance arena is not the target of this fork remap")]
+    ForeignTargetArena,
 }
 
 /// An immutable scene-owned provenance DAG.
 pub struct ProvenanceArena {
     nonce: ArenaNonce,
-    nodes: Vec<SharedStorage<ProvenanceNode>>,
+    segments: Vec<SharedStorage<ProvenanceSegment>>,
+    node_count: usize,
     edge_count: usize,
     retained_node_bytes: usize,
     limits: ProvenanceLimits,
@@ -2201,7 +2477,7 @@ pub struct ProvenanceArena {
 impl ProvenanceArena {
     /// Returns the number of topologically ordered nodes.
     pub fn node_count(&self) -> usize {
-        self.nodes.len()
+        self.node_count
     }
 
     /// Returns the number of parent edges.
@@ -2218,66 +2494,120 @@ impl ProvenanceArena {
     pub fn retained_footprint(
         &self,
     ) -> Result<ProvenanceRetainedFootprint, ProvenanceFootprintError> {
-        checked_nodes_retained_footprint(&self.nodes, self.nodes.capacity())
+        checked_segments_retained_footprint(
+            &self.segments,
+            self.segments.capacity(),
+            self.retained_node_bytes,
+        )
     }
 
-    /// Fallibly clones this DAG into a builder with a fresh opaque nonce.
+    /// Fallibly forks this DAG while sharing immutable ancestor segments.
     ///
-    /// The returned remap translates attachments from this immutable arena to
-    /// the cloned prefix. Every fork receives a distinct nonce, so sibling
-    /// edits cannot accidentally resolve each other's attachments even though
-    /// their private topological addresses initially have the same shape.
+    /// Existing attachments remain valid by identity in the descendant. A
+    /// fresh opaque nonce is assigned only to the descendant's branch-local
+    /// segment, so sibling-local attachments cannot cross.
     pub fn try_fork(&self) -> Result<ProvenanceArenaFork, ProvenanceForkError> {
         let validated = validate_provenance_arena(self)
             .map_err(|error| ProvenanceForkError::from_validation(error, self.limits))?;
         let shared_node_bytes = validated.stats().retained_footprint().shared_node_bytes();
-        let fork_footprint = ProvenanceRetainedFootprint::try_new(
-            checked_capacity_bytes::<SharedStorage<ProvenanceNode>>(self.nodes.len())
-                .map_err(|_| ProvenanceForkError::AccountingOverflow)?,
+        let segment_capacity = CapacityPlan::for_type::<SharedStorage<ProvenanceSegment>>(
+            0,
+            0,
+            self.segments
+                .len()
+                .checked_add(1)
+                .ok_or(ProvenanceForkError::AccountingOverflow)?,
+        )
+        .map_err(|_| ProvenanceForkError::AccountingOverflow)?;
+        let arena_envelope = checked_segments_retained_footprint(
+            &self.segments,
+            segment_capacity.envelope_capacity(),
             shared_node_bytes,
         )
         .map_err(|_| ProvenanceForkError::AccountingOverflow)?;
-        if fork_footprint.total_bytes() > self.limits.max_retained_bytes {
+        let snapshot_capacity =
+            CapacityPlan::for_type::<ProvenanceSegmentSnapshot>(0, 0, self.segments.len())
+                .map_err(|_| ProvenanceForkError::AccountingOverflow)?;
+        let snapshot_envelope_bytes = checked_capacity_bytes::<ProvenanceSegmentSnapshot>(
+            snapshot_capacity.envelope_capacity(),
+        )
+        .map_err(|_| ProvenanceForkError::AccountingOverflow)?;
+        let snapshot_layout =
+            SharedStorage::<Vec<ProvenanceSegmentSnapshot>>::checked_layout_footprint()
+                .map_err(|_| ProvenanceForkError::AccountingOverflow)?;
+        let snapshot_envelope_bytes = snapshot_layout
+            .checked_add(snapshot_envelope_bytes)
+            .ok_or(ProvenanceForkError::AccountingOverflow)?;
+        let fork_retained_bytes = arena_envelope
+            .total_bytes()
+            .checked_add(snapshot_envelope_bytes)
+            .ok_or(ProvenanceForkError::AccountingOverflow)?;
+        if fork_retained_bytes > self.limits.max_retained_bytes {
             return Err(ProvenanceForkError::LimitExceeded {
                 limit: ProvenanceLimit::RetainedBytes,
                 maximum: self.limits.max_retained_bytes,
             });
         }
 
-        let nodes = try_clone_nodes_for_fork(&self.nodes)?;
-        let actual_footprint = ProvenanceRetainedFootprint::try_new(
-            checked_capacity_bytes::<SharedStorage<ProvenanceNode>>(nodes.capacity())
-                .map_err(|_| ProvenanceForkError::AccountingOverflow)?,
-            shared_node_bytes,
-        )
-        .map_err(|_| ProvenanceForkError::AccountingOverflow)?;
-        if actual_footprint.total_bytes() > self.limits.max_retained_bytes {
-            return Err(ProvenanceForkError::LimitExceeded {
-                limit: ProvenanceLimit::RetainedBytes,
-                maximum: self.limits.max_retained_bytes,
-            });
-        }
+        let segments = try_clone_segments_for_fork(&self.segments)?;
+        let mut snapshots = Vec::new();
+        try_reserve_for_fork(
+            &mut snapshots,
+            snapshot_capacity.allocator_additional(),
+            ProvenanceAllocation::ForkSnapshot,
+        )?;
+        snapshot_capacity
+            .finish(0, snapshots.capacity())
+            .map_err(|_| ProvenanceForkError::AllocationFailed {
+                resource: ProvenanceAllocation::ForkSnapshot,
+            })?;
+        snapshots.extend(self.segments.iter().map(|segment| {
+            let segment = segment.as_ref();
+            ProvenanceSegmentSnapshot {
+                nonce: segment.nonce,
+                ordinal: segment.ordinal,
+                start: segment.start,
+                node_count: segment.nodes.len(),
+            }
+        }));
+        let snapshot_bytes =
+            checked_capacity_bytes::<ProvenanceSegmentSnapshot>(snapshots.capacity())
+                .map_err(|_| ProvenanceForkError::AccountingOverflow)?;
+        let source_segments = SharedStorage::try_new_prepared(snapshots, snapshot_bytes).map_err(
+            |error| match error {
+                SharedStorageError::AllocationFailed => ProvenanceForkError::AllocationFailed {
+                    resource: ProvenanceAllocation::ForkSnapshot,
+                },
+                SharedStorageError::AccountingOverflow => ProvenanceForkError::AccountingOverflow,
+            },
+        )?;
+        let fork_control_storage_bytes = source_segments.retained_allocation_bytes();
         let target = next_arena_nonce()
             .map_err(|ArenaNonceError::Exhausted| ProvenanceForkError::ArenaIdentityExhausted)?;
         Ok(ProvenanceArenaFork {
             builder: ProvenanceArenaBuilder {
                 nonce: target,
-                nodes,
+                segments,
+                local_nodes: Vec::new(),
+                local_retained_node_bytes: 0,
+                node_count: self.node_count,
                 edge_count: self.edge_count,
                 retained_node_bytes: shared_node_bytes,
+                fork_control_storage_bytes,
                 limits: self.limits,
             },
             remap: ProvenanceForkRemap {
                 source: self.nonce,
                 target,
-                source_node_count: self.nodes.len(),
+                source_segments,
+                source_node_count: self.node_count,
             },
         })
     }
 
     /// Returns whether an opaque attachment belongs to this arena and is live.
     pub fn contains(&self, provenance: &Provenance) -> bool {
-        provenance.arena == self.nonce && provenance.node.0 < self.nodes.len()
+        self.resolve(provenance).is_ok()
     }
 
     /// Resolves an opaque attachment without exposing its arena address.
@@ -2285,24 +2615,19 @@ impl ProvenanceArena {
         &self,
         provenance: &Provenance,
     ) -> Result<ProvenanceView<'_>, ProvenanceAccessError> {
-        if provenance.arena != self.nonce {
-            return Err(ProvenanceAccessError::ArenaMismatch);
-        }
-        let node = self
-            .nodes
-            .get(provenance.node.0)
-            .ok_or(ProvenanceAccessError::AttachmentOutOfRange)?;
-        Ok(ProvenanceView {
-            arena: self,
-            node: node.borrow(),
-        })
+        let node = self.resolve(provenance)?;
+        Ok(ProvenanceView { arena: self, node })
     }
 
     /// Iterates nodes in deterministic topological order without numeric IDs.
     pub fn iter(&self) -> ProvenanceIter<'_> {
         ProvenanceIter {
             arena: self,
-            nodes: self.nodes.iter(),
+            front_segment: 0,
+            front_node: 0,
+            back_segment: self.segments.len(),
+            back_node: 0,
+            remaining: self.node_count,
         }
     }
 
@@ -2318,13 +2643,36 @@ impl ProvenanceArena {
     ) -> Result<ValidatedProvenanceArena<'_>, ProvenanceValidationError> {
         validate_provenance_arena_with_limits(self, limits)
     }
+
+    fn resolve(&self, provenance: &Provenance) -> Result<&ProvenanceNode, ProvenanceAccessError> {
+        let segment = self
+            .segments
+            .get(provenance.segment)
+            .ok_or(ProvenanceAccessError::ArenaMismatch)?
+            .as_ref();
+        if segment.ordinal != provenance.segment || segment.nonce != provenance.arena {
+            return Err(ProvenanceAccessError::ArenaMismatch);
+        }
+        let expected_topological_index = segment
+            .start
+            .checked_add(provenance.node.0)
+            .ok_or(ProvenanceAccessError::AttachmentOutOfRange)?;
+        if provenance.topological_index != expected_topological_index {
+            return Err(ProvenanceAccessError::AttachmentOutOfRange);
+        }
+        let node = segment
+            .nodes
+            .get(provenance.node.0)
+            .ok_or(ProvenanceAccessError::AttachmentOutOfRange)?;
+        Ok(node.as_ref())
+    }
 }
 
 impl std::fmt::Debug for ProvenanceArena {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("ProvenanceArena")
-            .field("node_count", &self.nodes.len())
+            .field("node_count", &self.node_count)
             .field("edge_count", &self.edge_count)
             .finish()
     }
@@ -2433,23 +2781,32 @@ fn validate_provenance_arena_with_limits_controlled<'arena, E>(
     limits: ProvenanceLimits,
     charge_work: &mut impl FnMut() -> Result<(), E>,
 ) -> Result<ValidatedProvenanceArena<'arena>, ControlledProvenanceValidationError<E>> {
-    let outer_node_bytes = checked_capacity_bytes::<SharedStorage<ProvenanceNode>>(
-        arena.nodes.capacity(),
-    )
-    .map_err(|_| {
-        ProvenanceValidationError::new(
-            ProvenanceValidationIssue::RetainedFootprintOverflow,
-            ProvenanceValidationStats::empty(),
-        )
-    })?;
-    let mut stats = ProvenanceValidationStats::with_outer_node_bytes(outer_node_bytes);
-    if outer_node_bytes > limits.max_retained_bytes {
+    let mut control_storage_bytes =
+        checked_capacity_bytes::<SharedStorage<ProvenanceSegment>>(arena.segments.capacity())
+            .map_err(|_| {
+                ProvenanceValidationError::new(
+                    ProvenanceValidationIssue::RetainedFootprintOverflow,
+                    ProvenanceValidationStats::empty(),
+                )
+            })?;
+    for segment in &arena.segments {
+        control_storage_bytes = control_storage_bytes
+            .checked_add(segment.retained_allocation_bytes())
+            .ok_or_else(|| {
+                ProvenanceValidationError::new(
+                    ProvenanceValidationIssue::RetainedFootprintOverflow,
+                    ProvenanceValidationStats::empty(),
+                )
+            })?;
+    }
+    let mut stats = ProvenanceValidationStats::with_control_storage_bytes(control_storage_bytes);
+    if control_storage_bytes > limits.max_retained_bytes {
         return Err(controlled_validation_error(
             ProvenanceValidationIssue::RetainedBytesLimitExceeded,
             stats,
         ));
     }
-    if arena.nodes.len() > limits.max_nodes {
+    if arena.node_count > limits.max_nodes {
         return Err(controlled_validation_error(
             ProvenanceValidationIssue::NodeLimitExceeded,
             stats,
@@ -2458,121 +2815,168 @@ fn validate_provenance_arena_with_limits_controlled<'arena, E>(
 
     let mut observed_edges = 0usize;
     let mut observed_node_bytes = 0usize;
-    for (child_index, stored) in arena.nodes.iter().enumerate() {
-        charge_validation_work(&mut stats, limits.max_validation_work, charge_work)?;
-        stats.node_count += 1;
-
-        let node_bytes = checked_stored_node_retained_bytes(stored).map_err(|_| {
-            ProvenanceValidationError::new(
-                ProvenanceValidationIssue::RetainedFootprintOverflow,
-                stats,
-            )
-        })?;
-        observed_node_bytes = observed_node_bytes.checked_add(node_bytes).ok_or_else(|| {
-            ProvenanceValidationError::new(
-                ProvenanceValidationIssue::RetainedFootprintOverflow,
-                stats,
-            )
-        })?;
-        stats.retained_footprint =
-            ProvenanceRetainedFootprint::try_new(outer_node_bytes, observed_node_bytes).map_err(
-                |_| {
-                    ProvenanceValidationError::new(
-                        ProvenanceValidationIssue::RetainedFootprintOverflow,
-                        stats,
-                    )
-                },
-            )?;
-        if stats.retained_footprint.total_bytes() > limits.max_retained_bytes {
+    for (segment_index, stored_segment) in arena.segments.iter().enumerate() {
+        let segment = stored_segment.as_ref();
+        if segment.ordinal != segment_index
+            || segment.start != stats.node_count
+            || segment.nodes.is_empty()
+        {
             return Err(controlled_validation_error(
-                ProvenanceValidationIssue::RetainedBytesLimitExceeded,
+                ProvenanceValidationIssue::SegmentLayoutInvalid,
                 stats,
             ));
         }
+        let segment_start_bytes = observed_node_bytes;
 
-        let node: &ProvenanceNode = stored.borrow();
-        let expected_depth = match &node.payload {
-            ProvenanceNodePayload::Source(_) => 1,
-            ProvenanceNodePayload::Operation { identity, parents } => {
-                if identity.evidence.len() > limits.max_evidence_summaries {
-                    return Err(controlled_validation_error(
-                        ProvenanceValidationIssue::EvidenceLimitExceeded,
-                        stats,
-                    ));
-                }
-                if parents.len() > limits.max_parents_per_operation {
-                    return Err(controlled_validation_error(
-                        ProvenanceValidationIssue::ParentLimitExceeded,
-                        stats,
-                    ));
-                }
+        for stored in &segment.nodes {
+            if stats.node_count == limits.max_nodes {
+                return Err(controlled_validation_error(
+                    ProvenanceValidationIssue::NodeLimitExceeded,
+                    stats,
+                ));
+            }
+            charge_validation_work(&mut stats, limits.max_validation_work, charge_work)?;
+            let child_index = stats.node_count;
+            stats.node_count += 1;
 
-                let mut previous = None;
-                let mut maximum_parent_depth = 0usize;
-                for parent in parents {
-                    charge_validation_work(&mut stats, limits.max_validation_work, charge_work)?;
-                    observed_edges = observed_edges.checked_add(1).ok_or_else(|| {
+            let node_bytes = checked_stored_node_retained_bytes(stored).map_err(|_| {
+                ProvenanceValidationError::new(
+                    ProvenanceValidationIssue::RetainedFootprintOverflow,
+                    stats,
+                )
+            })?;
+            observed_node_bytes = observed_node_bytes.checked_add(node_bytes).ok_or_else(|| {
+                ProvenanceValidationError::new(
+                    ProvenanceValidationIssue::RetainedFootprintOverflow,
+                    stats,
+                )
+            })?;
+            stats.retained_footprint =
+                ProvenanceRetainedFootprint::try_new(control_storage_bytes, observed_node_bytes)
+                    .map_err(|_| {
                         ProvenanceValidationError::new(
-                            ProvenanceValidationIssue::EdgeCountOverflow,
+                            ProvenanceValidationIssue::RetainedFootprintOverflow,
                             stats,
                         )
                     })?;
-                    stats.edge_count = observed_edges;
-                    if observed_edges > limits.max_edges {
-                        return Err(controlled_validation_error(
-                            ProvenanceValidationIssue::EdgeLimitExceeded,
-                            stats,
-                        ));
-                    }
-                    if parent.0 >= arena.nodes.len() {
-                        return Err(controlled_validation_error(
-                            ProvenanceValidationIssue::ParentOutOfRange,
-                            stats,
-                        ));
-                    }
-                    if parent.0 >= child_index {
-                        return Err(controlled_validation_error(
-                            ProvenanceValidationIssue::ParentNotBeforeChild,
-                            stats,
-                        ));
-                    }
-                    if previous == Some(*parent) {
-                        return Err(controlled_validation_error(
-                            ProvenanceValidationIssue::DuplicateParent,
-                            stats,
-                        ));
-                    }
-                    if previous.is_some_and(|previous| previous > *parent) {
-                        return Err(controlled_validation_error(
-                            ProvenanceValidationIssue::ParentOrderNotCanonical,
-                            stats,
-                        ));
-                    }
-                    let parent_node: &ProvenanceNode = arena.nodes[parent.0].borrow();
-                    maximum_parent_depth = maximum_parent_depth.max(parent_node.depth);
-                    previous = Some(*parent);
-                }
-                maximum_parent_depth.checked_add(1).ok_or_else(|| {
-                    ProvenanceValidationError::new(
-                        ProvenanceValidationIssue::DepthLimitExceeded,
-                        stats,
-                    )
-                })?
+            if stats.retained_footprint.total_bytes() > limits.max_retained_bytes {
+                return Err(controlled_validation_error(
+                    ProvenanceValidationIssue::RetainedBytesLimitExceeded,
+                    stats,
+                ));
             }
-        };
-        if expected_depth > limits.max_depth {
+
+            let node: &ProvenanceNode = stored.borrow();
+            let expected_depth = match &node.payload {
+                ProvenanceNodePayload::Source(_) => 1,
+                ProvenanceNodePayload::Operation { identity, parents } => {
+                    if identity.evidence.len() > limits.max_evidence_summaries {
+                        return Err(controlled_validation_error(
+                            ProvenanceValidationIssue::EvidenceLimitExceeded,
+                            stats,
+                        ));
+                    }
+                    if parents.len() > limits.max_parents_per_operation {
+                        return Err(controlled_validation_error(
+                            ProvenanceValidationIssue::ParentLimitExceeded,
+                            stats,
+                        ));
+                    }
+
+                    let mut previous = None;
+                    let mut maximum_parent_depth = 0usize;
+                    for parent in parents {
+                        charge_validation_work(
+                            &mut stats,
+                            limits.max_validation_work,
+                            charge_work,
+                        )?;
+                        observed_edges = observed_edges.checked_add(1).ok_or_else(|| {
+                            ProvenanceValidationError::new(
+                                ProvenanceValidationIssue::EdgeCountOverflow,
+                                stats,
+                            )
+                        })?;
+                        stats.edge_count = observed_edges;
+                        if observed_edges > limits.max_edges {
+                            return Err(controlled_validation_error(
+                                ProvenanceValidationIssue::EdgeLimitExceeded,
+                                stats,
+                            ));
+                        }
+                        let parent_node = arena.resolve(parent).map_err(|_| {
+                            controlled_validation_error(
+                                ProvenanceValidationIssue::ParentOutOfRange,
+                                stats,
+                            )
+                        })?;
+                        if parent.topological_index >= child_index {
+                            return Err(controlled_validation_error(
+                                ProvenanceValidationIssue::ParentNotBeforeChild,
+                                stats,
+                            ));
+                        }
+                        if previous == Some(*parent) {
+                            return Err(controlled_validation_error(
+                                ProvenanceValidationIssue::DuplicateParent,
+                                stats,
+                            ));
+                        }
+                        if previous.is_some_and(|previous: Provenance| {
+                            previous.topological_index > parent.topological_index
+                        }) {
+                            return Err(controlled_validation_error(
+                                ProvenanceValidationIssue::ParentOrderNotCanonical,
+                                stats,
+                            ));
+                        }
+                        maximum_parent_depth = maximum_parent_depth.max(parent_node.depth);
+                        previous = Some(*parent);
+                    }
+                    maximum_parent_depth.checked_add(1).ok_or_else(|| {
+                        ProvenanceValidationError::new(
+                            ProvenanceValidationIssue::DepthLimitExceeded,
+                            stats,
+                        )
+                    })?
+                }
+            };
+            if expected_depth > limits.max_depth {
+                return Err(controlled_validation_error(
+                    ProvenanceValidationIssue::DepthLimitExceeded,
+                    stats,
+                ));
+            }
+            if node.depth != expected_depth {
+                return Err(controlled_validation_error(
+                    ProvenanceValidationIssue::StoredDepthMismatch,
+                    stats,
+                ));
+            }
+            stats.maximum_depth = stats.maximum_depth.max(expected_depth);
+        }
+
+        let observed_segment_bytes = observed_node_bytes
+            .checked_sub(segment_start_bytes)
+            .ok_or_else(|| {
+                ProvenanceValidationError::new(
+                    ProvenanceValidationIssue::RetainedFootprintOverflow,
+                    stats,
+                )
+            })?;
+        if observed_segment_bytes != segment.retained_node_bytes {
             return Err(controlled_validation_error(
-                ProvenanceValidationIssue::DepthLimitExceeded,
+                ProvenanceValidationIssue::RetainedFootprintMismatch,
                 stats,
             ));
         }
-        if node.depth != expected_depth {
-            return Err(controlled_validation_error(
-                ProvenanceValidationIssue::StoredDepthMismatch,
-                stats,
-            ));
-        }
-        stats.maximum_depth = stats.maximum_depth.max(expected_depth);
+    }
+
+    if stats.node_count != arena.node_count {
+        return Err(controlled_validation_error(
+            ProvenanceValidationIssue::NodeCountMismatch,
+            stats,
+        ));
     }
 
     if observed_edges != arena.edge_count {
@@ -2630,17 +3034,17 @@ pub struct ProvenanceValidationStats {
 
 impl ProvenanceValidationStats {
     const fn empty() -> Self {
-        Self::with_outer_node_bytes(0)
+        Self::with_control_storage_bytes(0)
     }
 
-    const fn with_outer_node_bytes(outer_node_bytes: usize) -> Self {
+    const fn with_control_storage_bytes(control_storage_bytes: usize) -> Self {
         Self {
             node_count: 0,
             edge_count: 0,
             maximum_depth: 0,
             work_units: 0,
             retained_footprint: ProvenanceRetainedFootprint {
-                outer_node_bytes,
+                control_storage_bytes,
                 shared_node_bytes: 0,
             },
         }
@@ -2676,7 +3080,10 @@ impl ProvenanceValidationStats {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum ProvenanceValidationIssue {
+    AllocationFailed,
     NodeLimitExceeded,
+    NodeCountMismatch,
+    SegmentLayoutInvalid,
     EdgeLimitExceeded,
     ParentLimitExceeded,
     EvidenceLimitExceeded,
@@ -2697,7 +3104,10 @@ pub enum ProvenanceValidationIssue {
 impl std::fmt::Display for ProvenanceValidationIssue {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(match self {
+            Self::AllocationFailed => "provenance immutable storage allocation failed",
             Self::NodeLimitExceeded => "provenance node limit exceeded",
+            Self::NodeCountMismatch => "provenance node count does not match stored segments",
+            Self::SegmentLayoutInvalid => "provenance segments are not canonically laid out",
             Self::EdgeLimitExceeded => "provenance edge limit exceeded",
             Self::ParentLimitExceeded => "provenance operation parent limit exceeded",
             Self::EvidenceLimitExceeded => "provenance operation evidence limit exceeded",
@@ -2801,7 +3211,7 @@ pub enum ProvenanceNodeView<'a> {
 pub struct OperationProvenanceView<'a> {
     arena: &'a ProvenanceArena,
     identity: &'a OperationIdentity,
-    parents: &'a [ProvenanceNodeId],
+    parents: &'a [Provenance],
 }
 
 impl<'a> OperationProvenanceView<'a> {
@@ -2837,36 +3247,61 @@ impl std::fmt::Debug for OperationProvenanceView<'_> {
 /// A topological iterator that never exposes private node addresses.
 pub struct ProvenanceIter<'a> {
     arena: &'a ProvenanceArena,
-    nodes: std::slice::Iter<'a, SharedStorage<ProvenanceNode>>,
+    front_segment: usize,
+    front_node: usize,
+    back_segment: usize,
+    back_node: usize,
+    remaining: usize,
 }
 
 impl<'a> Iterator for ProvenanceIter<'a> {
     type Item = ProvenanceView<'a>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.nodes.next().map(|node| ProvenanceView {
-            arena: self.arena,
-            node: node.borrow(),
-        })
+        while self.remaining != 0 {
+            let segment = self.arena.segments.get(self.front_segment)?.as_ref();
+            if let Some(node) = segment.nodes.get(self.front_node) {
+                self.front_node += 1;
+                self.remaining -= 1;
+                return Some(ProvenanceView {
+                    arena: self.arena,
+                    node: node.borrow(),
+                });
+            }
+            self.front_segment += 1;
+            self.front_node = 0;
+        }
+        None
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
-        self.nodes.size_hint()
+        (self.remaining, Some(self.remaining))
     }
 }
 
 impl DoubleEndedIterator for ProvenanceIter<'_> {
     fn next_back(&mut self) -> Option<Self::Item> {
-        self.nodes.next_back().map(|node| ProvenanceView {
-            arena: self.arena,
-            node: node.borrow(),
-        })
+        while self.remaining != 0 {
+            if self.back_node == 0 {
+                self.back_segment = self.back_segment.checked_sub(1)?;
+                self.back_node = self.arena.segments[self.back_segment].as_ref().nodes.len();
+                continue;
+            }
+            self.back_node -= 1;
+            let node = &self.arena.segments[self.back_segment].as_ref().nodes[self.back_node];
+            self.remaining -= 1;
+            return Some(ProvenanceView {
+                arena: self.arena,
+                node: node.borrow(),
+            });
+        }
+        None
     }
 }
 
 impl ExactSizeIterator for ProvenanceIter<'_> {
     fn len(&self) -> usize {
-        self.nodes.len()
+        self.remaining
     }
 }
 
@@ -2875,7 +3310,7 @@ impl std::iter::FusedIterator for ProvenanceIter<'_> {}
 /// An iterator over operation parents that yields only validated node views.
 pub struct ProvenanceParentIter<'a> {
     arena: &'a ProvenanceArena,
-    parents: std::slice::Iter<'a, ProvenanceNodeId>,
+    parents: std::slice::Iter<'a, Provenance>,
 }
 
 impl<'a> Iterator for ProvenanceParentIter<'a> {
@@ -2883,10 +3318,10 @@ impl<'a> Iterator for ProvenanceParentIter<'a> {
 
     fn next(&mut self) -> Option<Self::Item> {
         for parent in self.parents.by_ref() {
-            if let Some(node) = self.arena.nodes.get(parent.0) {
+            if let Ok(node) = self.arena.resolve(parent) {
                 return Some(ProvenanceView {
                     arena: self.arena,
-                    node: node.borrow(),
+                    node,
                 });
             }
         }
@@ -2901,10 +3336,10 @@ impl<'a> Iterator for ProvenanceParentIter<'a> {
 impl DoubleEndedIterator for ProvenanceParentIter<'_> {
     fn next_back(&mut self) -> Option<Self::Item> {
         for parent in self.parents.by_ref().rev() {
-            if let Some(node) = self.arena.nodes.get(parent.0) {
+            if let Ok(node) = self.arena.resolve(parent) {
                 return Some(ProvenanceView {
                     arena: self.arena,
-                    node: node.borrow(),
+                    node,
                 });
             }
         }
@@ -2994,25 +3429,70 @@ mod tests {
         parents: Vec<ProvenanceNodeId>,
         depth: usize,
     ) -> ProvenanceNode {
+        let mut mapped_parents = Vec::new();
+        mapped_parents
+            .try_reserve_exact(parents.capacity())
+            .unwrap();
+        mapped_parents.extend(parents.into_iter().map(|node| Provenance {
+            arena: ArenaNonce(NonZeroU64::new(u64::MAX).unwrap()),
+            segment: 0,
+            topological_index: node.0,
+            node,
+        }));
         ProvenanceNode {
             depth,
-            payload: ProvenanceNodePayload::Operation { identity, parents },
+            payload: ProvenanceNodePayload::Operation {
+                identity,
+                parents: mapped_parents,
+            },
         }
     }
 
-    fn arena_from_nodes(nodes: Vec<ProvenanceNode>, edge_count: usize) -> ProvenanceArena {
+    fn arena_from_nodes(mut nodes: Vec<ProvenanceNode>, edge_count: usize) -> ProvenanceArena {
+        let nonce = next_arena_nonce().unwrap();
+        for node in &mut nodes {
+            let ProvenanceNodePayload::Operation { parents, .. } = &mut node.payload else {
+                continue;
+            };
+            for parent in parents {
+                parent.arena = nonce;
+            }
+        }
+
+        let node_count = nodes.len();
         let mut stored = Vec::new();
         stored.try_reserve_exact(nodes.len()).unwrap();
         let mut retained_node_bytes = 0usize;
         for node in nodes {
+            let dynamic_bytes = checked_node_dynamic_bytes(&node).unwrap();
+            let node = SharedStorage::try_new_prepared(node, dynamic_bytes).unwrap();
             retained_node_bytes = retained_node_bytes
-                .checked_add(checked_node_retained_bytes(&node).unwrap())
+                .checked_add(node.retained_allocation_bytes())
                 .unwrap();
-            stored.push(SharedStorage::try_new(node).unwrap());
+            stored.push(node);
+        }
+        let mut segments = Vec::new();
+        if !stored.is_empty() {
+            let nested_bytes =
+                checked_capacity_bytes::<SharedStorage<ProvenanceNode>>(stored.capacity()).unwrap();
+            let segment = SharedStorage::try_new_prepared(
+                ProvenanceSegment {
+                    nonce,
+                    ordinal: 0,
+                    start: 0,
+                    nodes: stored,
+                    retained_node_bytes,
+                },
+                nested_bytes,
+            )
+            .unwrap();
+            segments.try_reserve_exact(1).unwrap();
+            segments.push(segment);
         }
         ProvenanceArena {
-            nonce: next_arena_nonce().unwrap(),
-            nodes: stored,
+            nonce,
+            segments,
+            node_count,
             edge_count,
             retained_node_bytes,
             limits: ProvenanceLimits::hard(),
@@ -3148,7 +3628,9 @@ mod tests {
         let mut builder = ProvenanceArenaBuilder::try_new().unwrap();
         let forward = Provenance {
             arena: builder.nonce,
+            segment: 0,
             node: ProvenanceNodeId(1),
+            topological_index: 1,
         };
 
         assert_eq!(
@@ -3405,13 +3887,21 @@ mod tests {
     #[test]
     fn finish_revalidates_builder_topology_before_publication() {
         let mut builder = ProvenanceArenaBuilder::try_new().unwrap();
-        let node = operation_node(
+        let mut node = operation_node(
             operation(OperationKind::Generated),
             vec![ProvenanceNodeId(0)],
             2,
         );
-        builder.retained_node_bytes = checked_node_retained_bytes(&node).unwrap();
-        builder.nodes.push(SharedStorage::try_new(node).unwrap());
+        let ProvenanceNodePayload::Operation { parents, .. } = &mut node.payload else {
+            unreachable!("test node is an operation");
+        };
+        parents[0].arena = builder.nonce;
+        let dynamic_bytes = checked_node_dynamic_bytes(&node).unwrap();
+        let stored = SharedStorage::try_new_prepared(node, dynamic_bytes).unwrap();
+        builder.retained_node_bytes = stored.retained_allocation_bytes();
+        builder.local_retained_node_bytes = builder.retained_node_bytes;
+        builder.local_nodes.push(stored);
+        builder.node_count = 1;
         builder.edge_count = 1;
 
         assert_eq!(
@@ -3461,11 +3951,11 @@ mod tests {
         assert_eq!(fork.remap().mapped_node_count(), original.node_count());
         assert!(
             original
-                .nodes
+                .segments
                 .iter()
-                .zip(&fork.builder().nodes)
+                .zip(&fork.builder().segments)
                 .all(|(source, target)| source.ptr_eq(target)),
-            "forked prefixes must share immutable node allocations"
+            "forked prefixes must share immutable segment allocations"
         );
         assert_eq!(
             fork.builder()
@@ -3476,22 +3966,18 @@ mod tests {
         );
         let mapped_source = fork.remap_attachment(&source).unwrap();
         let mapped_normalized = fork.remap_attachment(&normalized).unwrap();
+        assert_eq!(mapped_source, source);
+        assert_eq!(mapped_normalized, normalized);
         let repaired = fork
             .builder_mut()
-            .add_operation(operation(OperationKind::Repair), [mapped_normalized])
+            .add_operation(operation(OperationKind::Repair), [normalized])
             .unwrap();
         let (branch, remap) = fork.finish().unwrap();
 
         assert_eq!(branch.node_count(), original.node_count() + 1);
         assert_eq!(remap.remap(&source).unwrap(), mapped_source);
-        assert_eq!(
-            original.view(&mapped_source).unwrap_err(),
-            ProvenanceAccessError::ArenaMismatch
-        );
-        assert_eq!(
-            branch.view(&source).unwrap_err(),
-            ProvenanceAccessError::ArenaMismatch
-        );
+        assert!(original.contains(&mapped_source));
+        assert!(branch.contains(&source));
         let ProvenanceNodeView::Source(mapped_identity) =
             branch.view(&mapped_source).unwrap().node()
         else {
@@ -3531,6 +4017,44 @@ mod tests {
     }
 
     #[test]
+    fn descendant_fork_shares_all_ancestor_segments_and_accepts_their_attachments() {
+        let (root, source) = test_provenance_fixture();
+        let mut first_fork = root.try_fork().unwrap();
+        let normalized = first_fork
+            .builder_mut()
+            .add_operation(operation(OperationKind::Normalize), [source])
+            .unwrap();
+        let (first_branch, _) = first_fork.finish().unwrap();
+        assert_eq!(first_branch.segments.len(), 2);
+
+        let mut descendant = first_branch.try_fork().unwrap();
+        assert_eq!(descendant.remap_attachment(&source).unwrap(), source);
+        assert_eq!(
+            descendant.remap_attachment(&normalized).unwrap(),
+            normalized
+        );
+        assert!(
+            first_branch
+                .segments
+                .iter()
+                .zip(&descendant.builder().segments)
+                .all(|(ancestor, inherited)| ancestor.ptr_eq(inherited))
+        );
+        let repaired = descendant
+            .builder_mut()
+            .add_operation(operation(OperationKind::Repair), [normalized, source])
+            .unwrap();
+        let (second_branch, _) = descendant.finish().unwrap();
+
+        assert_eq!(second_branch.segments.len(), 3);
+        assert!(second_branch.contains(&source));
+        assert!(second_branch.contains(&normalized));
+        assert!(second_branch.contains(&repaired));
+        assert_eq!(second_branch.iter().len(), 3);
+        assert_eq!(second_branch.iter().rev().count(), 3);
+    }
+
+    #[test]
     fn fork_remap_rejects_foreign_and_stale_source_attachments() {
         let (source_arena, source) = test_provenance_fixture();
         let (foreign_arena, foreign) = test_provenance_fixture();
@@ -3542,36 +4066,101 @@ mod tests {
         );
         let stale = Provenance {
             arena: source_arena.nonce,
+            segment: 0,
             node: ProvenanceNodeId(source_arena.node_count()),
+            topological_index: source_arena.node_count(),
         };
         assert_eq!(
             fork.remap_attachment(&stale).unwrap_err(),
             ProvenanceRemapError::StaleSourceAttachment
+        );
+        let stale_topology = Provenance {
+            topological_index: source.topological_index + 1,
+            ..source
+        };
+        assert_eq!(
+            fork.remap_attachment(&stale_topology).unwrap_err(),
+            ProvenanceRemapError::StaleSourceAttachment
+        );
+        assert_eq!(
+            source_arena.view(&stale_topology).unwrap_err(),
+            ProvenanceAccessError::AttachmentOutOfRange
+        );
+        let stale_segment = Provenance {
+            segment: source.segment + 1,
+            ..source
+        };
+        assert_eq!(
+            fork.remap_attachment(&stale_segment).unwrap_err(),
+            ProvenanceRemapError::ForeignSourceArena
         );
         assert!(source_arena.contains(&source));
         assert!(foreign_arena.contains(&foreign));
     }
 
     #[test]
+    fn fork_remap_clone_is_allocation_free_and_preserves_target_qualification() {
+        let (source_arena, source) = test_provenance_fixture();
+        let fork = source_arena.try_fork().unwrap();
+        let remap = fork.remap().clone();
+        let (target_arena, _) = fork.finish().unwrap();
+        fail_next_allocation_for_test();
+
+        let cloned = remap.clone();
+
+        assert_eq!(cloned, remap);
+        assert!(remap.retained_allocation_bytes() > 0);
+        assert_eq!(
+            cloned.retained_allocation_bytes(),
+            remap.retained_allocation_bytes()
+        );
+        assert_eq!(cloned.remap(&source).unwrap(), source);
+        assert_eq!(cloned.validate_target_arena(&target_arena), Ok(()));
+        assert_eq!(
+            cloned.validate_target_arena(&source_arena),
+            Err(ProvenanceRemapError::ForeignTargetArena)
+        );
+        assert_eq!(
+            SharedStorage::try_new(1_u8).err(),
+            Some(SharedStorageError::AllocationFailed),
+            "cloning a fork remap must not consume the next shared allocation attempt"
+        );
+    }
+
+    #[test]
     fn sibling_forks_use_isolated_attachment_namespaces() {
         let (original, source) = test_provenance_fixture();
-        let first = original.try_fork().unwrap();
-        let second = original.try_fork().unwrap();
+        let mut first = original.try_fork().unwrap();
+        let mut second = original.try_fork().unwrap();
         let first_source = first.remap_attachment(&source).unwrap();
         let second_source = second.remap_attachment(&source).unwrap();
 
-        assert_ne!(source, first_source);
-        assert_ne!(first_source, second_source);
+        assert_eq!(source, first_source);
+        assert_eq!(first_source, second_source);
+        let first_local = first
+            .builder_mut()
+            .add_operation(operation(OperationKind::Repair), [source])
+            .unwrap();
+        let second_local = second
+            .builder_mut()
+            .add_operation(operation(OperationKind::Normalize), [source])
+            .unwrap();
         let (first_arena, _) = first.finish().unwrap();
         let (second_arena, _) = second.finish().unwrap();
+        assert!(first_arena.contains(&source));
+        assert!(second_arena.contains(&source));
+        assert!(first_arena.contains(&first_local));
+        assert!(second_arena.contains(&second_local));
+        assert!(!first_arena.contains(&second_local));
+        assert!(!second_arena.contains(&first_local));
         assert!(first_arena.contains(&first_source));
         assert!(second_arena.contains(&second_source));
         assert_eq!(
-            first_arena.view(&second_source).unwrap_err(),
+            first_arena.view(&second_local).unwrap_err(),
             ProvenanceAccessError::ArenaMismatch
         );
         assert_eq!(
-            second_arena.view(&first_source).unwrap_err(),
+            second_arena.view(&first_local).unwrap_err(),
             ProvenanceAccessError::ArenaMismatch
         );
     }
@@ -3580,10 +4169,10 @@ mod tests {
     fn fork_reports_typed_allocation_and_limit_failures() {
         let mut bytes = Vec::<u8>::new();
         assert_eq!(
-            try_reserve_for_fork(&mut bytes, usize::MAX, ProvenanceAllocation::ForkArenaNodes,)
+            try_reserve_for_fork(&mut bytes, usize::MAX, ProvenanceAllocation::ForkSegments,)
                 .unwrap_err(),
             ProvenanceForkError::AllocationFailed {
-                resource: ProvenanceAllocation::ForkArenaNodes,
+                resource: ProvenanceAllocation::ForkSegments,
             }
         );
 
@@ -3702,7 +4291,7 @@ mod tests {
         assert_eq!(
             arena.try_fork().unwrap_err(),
             ProvenanceForkError::AllocationFailed {
-                resource: ProvenanceAllocation::ForkArenaNodes,
+                resource: ProvenanceAllocation::ForkSegments,
             }
         );
         assert!(arena.contains(&source));
@@ -3712,6 +4301,83 @@ mod tests {
         let mapped = fork.remap_attachment(&source).unwrap();
         let (branch, _) = fork.finish().unwrap();
         assert!(branch.contains(&mapped));
+    }
+
+    #[test]
+    fn fork_snapshot_shared_allocation_failure_is_transactional() {
+        let (arena, source) = test_provenance_fixture();
+        let before = arena.validate().unwrap().stats();
+        fail_next_allocation_for_test();
+
+        assert_eq!(
+            arena.try_fork().unwrap_err(),
+            ProvenanceForkError::AllocationFailed {
+                resource: ProvenanceAllocation::ForkSnapshot,
+            }
+        );
+        assert!(arena.contains(&source));
+        assert_eq!(arena.validate().unwrap().stats(), before);
+
+        let fork = arena.try_fork().unwrap();
+        let mapped = fork.remap_attachment(&source).unwrap();
+        let (branch, _) = fork.finish().unwrap();
+        assert!(branch.contains(&mapped));
+    }
+
+    #[test]
+    fn fork_retained_limit_accounts_for_source_snapshot_storage() {
+        let (mut arena, source) = test_provenance_fixture();
+        let segment_capacity = CapacityPlan::for_type::<SharedStorage<ProvenanceSegment>>(
+            0,
+            0,
+            arena.segments.len() + 1,
+        )
+        .unwrap();
+        let arena_envelope = checked_segments_retained_footprint(
+            &arena.segments,
+            segment_capacity.envelope_capacity(),
+            arena.retained_node_bytes,
+        )
+        .unwrap()
+        .total_bytes();
+        let snapshot_capacity =
+            CapacityPlan::for_type::<ProvenanceSegmentSnapshot>(0, 0, arena.segments.len())
+                .unwrap()
+                .envelope_capacity();
+        let snapshot_bytes =
+            SharedStorage::<Vec<ProvenanceSegmentSnapshot>>::checked_layout_footprint()
+                .unwrap()
+                .checked_add(
+                    checked_capacity_bytes::<ProvenanceSegmentSnapshot>(snapshot_capacity).unwrap(),
+                )
+                .unwrap();
+        let exact_bytes = arena_envelope.checked_add(snapshot_bytes).unwrap();
+
+        arena.limits.max_retained_bytes = exact_bytes;
+        let mut fork = arena.try_fork().unwrap();
+        assert_eq!(fork.remap_attachment(&source).unwrap(), source);
+        let exact_branch_bytes = fork.builder().retained_footprint().unwrap().total_bytes();
+        fork.builder_mut().limits.max_retained_bytes = exact_branch_bytes;
+        assert_eq!(
+            fork.builder_mut()
+                .add_source(source_identity("models/over-budget.obj", "Over budget"))
+                .unwrap_err(),
+            ProvenanceBuildError::LimitExceeded {
+                limit: ProvenanceLimit::RetainedBytes,
+                maximum: exact_branch_bytes,
+            }
+        );
+        drop(fork);
+
+        arena.limits.max_retained_bytes = exact_bytes - 1;
+        assert_eq!(
+            arena.try_fork().unwrap_err(),
+            ProvenanceForkError::LimitExceeded {
+                limit: ProvenanceLimit::RetainedBytes,
+                maximum: exact_bytes - 1,
+            }
+        );
+        assert!(arena.contains(&source));
     }
 
     #[test]
@@ -3788,7 +4454,10 @@ mod tests {
             ],
             1,
         );
-        arena.nodes[1].get_mut().unwrap().depth = 3;
+        arena.segments[0].get_mut().unwrap().nodes[1]
+            .get_mut()
+            .unwrap()
+            .depth = 3;
 
         assert_eq!(
             arena.validate().unwrap_err().issue(),
@@ -3836,7 +4505,7 @@ mod tests {
             .unwrap()
             .checked_add(evidence_capacity * std::mem::size_of::<OperationEvidenceSummary>())
             .unwrap()
-            .checked_add(parent_capacity * std::mem::size_of::<ProvenanceNodeId>())
+            .checked_add(parent_capacity * std::mem::size_of::<Provenance>())
             .unwrap();
 
         assert_eq!(footprint.shared_node_bytes(), expected_shared);
@@ -3850,11 +4519,11 @@ mod tests {
 
         let mut builder = ProvenanceArenaBuilder::try_new().unwrap();
         let identity = source_identity("models/repeated.obj", "Repeated");
-        let mut capacity = builder.nodes.capacity();
+        let mut capacity = builder.local_nodes.capacity();
         let mut capacity_growths = 0usize;
         for _ in 0..NODE_COUNT {
             builder.add_source(identity.try_clone().unwrap()).unwrap();
-            let next_capacity = builder.nodes.capacity();
+            let next_capacity = builder.local_nodes.capacity();
             if next_capacity != capacity {
                 capacity_growths += 1;
                 capacity = next_capacity;
@@ -3862,7 +4531,7 @@ mod tests {
         }
 
         assert_eq!(builder.node_count(), NODE_COUNT);
-        assert!(builder.nodes.capacity() >= NODE_COUNT);
+        assert!(builder.local_nodes.capacity() >= NODE_COUNT);
         assert!(capacity_growths <= usize::BITS as usize);
     }
 
@@ -3926,7 +4595,7 @@ mod tests {
                 std::iter::repeat_n(source, limits.max_parents_per_operation()).filter(|_| false),
             )
             .unwrap();
-        let stored: &ProvenanceNode = builder.nodes[operation.node.0].borrow();
+        let stored: &ProvenanceNode = builder.local_nodes[operation.node.0].borrow();
         let ProvenanceNodePayload::Operation { parents, .. } = &stored.payload else {
             panic!("the inserted provenance node must be an operation");
         };

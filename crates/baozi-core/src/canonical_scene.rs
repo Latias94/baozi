@@ -395,8 +395,13 @@ fn try_push_shared<T>(
         .ok_or(CanonicalSceneBuildError::CollectionSizeOverflow { collection })?;
     let plan = CapacityPlan::for_type::<SharedStorage<T>>(values.len(), values.capacity(), desired)
         .map_err(|_| CanonicalSceneBuildError::CollectionSizeOverflow { collection })?;
-    let value = SharedStorage::try_new(value).map_err(|SharedStorageError::AllocationFailed| {
-        CanonicalSceneBuildError::AllocationFailed { collection }
+    let value = SharedStorage::try_new(value).map_err(|error| match error {
+        SharedStorageError::AllocationFailed => {
+            CanonicalSceneBuildError::AllocationFailed { collection }
+        }
+        SharedStorageError::AccountingOverflow => {
+            CanonicalSceneBuildError::CollectionSizeOverflow { collection }
+        }
     })?;
     if desired > values.capacity() {
         values

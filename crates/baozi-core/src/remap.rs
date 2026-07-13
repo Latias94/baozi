@@ -93,6 +93,7 @@ impl DerivationProvenance {
         remap: &ProvenanceForkRemap,
         target_arena: &ProvenanceArena,
     ) -> Result<Self, DerivationProvenanceRebindError> {
+        remap.validate_target_arena(target_arena)?;
         let mapped = remap.remap(&self.0)?;
         Self::try_new(target_arena, mapped).map_err(DerivationProvenanceRebindError::from)
     }
@@ -2914,25 +2915,20 @@ mod tests {
     }
 
     #[test]
-    fn derivation_rebind_requires_the_matching_fork_arena() {
+    fn derivation_rebind_preserves_identity_and_requires_the_matching_fork_arena() {
         let (source_arena, derivation) = generated_derivation(31);
         let fork = source_arena.try_fork().unwrap();
-        let remap = *fork.remap();
+        let remap = fork.remap().clone();
         let (target_arena, finished_remap) = fork.finish().unwrap();
         assert_eq!(remap, finished_remap);
 
         let rebound = derivation.try_rebind(&remap, &target_arena).unwrap();
-        assert_ne!(rebound, derivation);
+        assert_eq!(rebound, derivation);
         assert!(rebound.operation_identity(&target_arena).is_ok());
-        assert_eq!(
-            rebound.operation_identity(&source_arena).unwrap_err(),
-            DerivationProvenanceError::Access(ProvenanceAccessError::ArenaMismatch)
-        );
+        assert!(rebound.operation_identity(&source_arena).is_ok());
         assert_eq!(
             derivation.try_rebind(&remap, &source_arena).unwrap_err(),
-            DerivationProvenanceRebindError::Validation(DerivationProvenanceError::Access(
-                ProvenanceAccessError::ArenaMismatch
-            ))
+            DerivationProvenanceRebindError::Remap(ProvenanceRemapError::ForeignTargetArena)
         );
     }
 
@@ -3168,7 +3164,7 @@ mod tests {
         );
 
         let fork = source_arena.try_fork().unwrap();
-        let remap = *fork.remap();
+        let remap = fork.remap().clone();
         let (target_arena, _) = fork.finish().unwrap();
         let rebound = sequence
             .try_rebind_derivations(&remap, &target_arena)
@@ -3220,18 +3216,12 @@ mod tests {
             .origins(final_endpoints[2])
             .unwrap()
             .derivations()[0];
-        assert_ne!(inherited, first_derivation);
-        assert_ne!(generated, second_derivation);
+        assert_eq!(inherited, first_derivation);
+        assert_eq!(generated, second_derivation);
         assert!(inherited.operation_identity(&target_arena).is_ok());
         assert!(generated.operation_identity(&target_arena).is_ok());
-        assert_eq!(
-            inherited.operation_identity(&source_arena).unwrap_err(),
-            DerivationProvenanceError::Access(ProvenanceAccessError::ArenaMismatch)
-        );
-        assert_eq!(
-            generated.operation_identity(&source_arena).unwrap_err(),
-            DerivationProvenanceError::Access(ProvenanceAccessError::ArenaMismatch)
-        );
+        assert!(inherited.operation_identity(&source_arena).is_ok());
+        assert!(generated.operation_identity(&source_arena).is_ok());
     }
 
     #[test]
@@ -3250,7 +3240,7 @@ mod tests {
         builder.try_generate(target, derivation).unwrap();
         let sequence = RemapSequence::try_new([builder.try_finish().unwrap()]).unwrap();
         let fork = source_arena.try_fork().unwrap();
-        let remap = *fork.remap();
+        let remap = fork.remap().clone();
         let (target_arena, _) = fork.finish().unwrap();
         let limits = RemapLimits::try_new(1, 1, 1, 1).unwrap();
 
