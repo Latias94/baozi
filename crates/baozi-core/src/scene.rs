@@ -1,5 +1,6 @@
 use crate::material::{Material, Texture};
 use crate::math::{Aabb, Color, Mat4, Vec2, Vec3, Vec4};
+use crate::ordered_map::{OrderedMapError, OrderedMapReplacementPlan, PreparedOrderedMapInsert};
 use crate::scene_storage::{clone_scene_data_with, unwrap_uncontrolled};
 use crate::validation_control::NoopSceneValidationControl;
 use crate::{
@@ -73,19 +74,102 @@ impl std::fmt::Display for SceneCollection {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SceneCapacityPlan {
     resource: SceneBuildResource,
-    inner: CapacityPlan,
+    original_len: usize,
+    original_capacity: usize,
+    additional: usize,
+    replacement: Option<CapacityPlan>,
 }
 
 impl SceneCapacityPlan {
-    /// Returns the byte increase that must be admitted before allocator entry.
-    pub fn envelope_delta_bytes(self) -> Result<u64, SceneBuildError> {
-        self.inner
-            .envelope_delta_bytes()
-            .map_err(|cause| SceneBuildError::CapacityPlan {
-                resource: self.resource,
-                cause,
-            })
+    /// Returns the complete candidate-allocation envelope admitted before allocator entry.
+    pub fn envelope_delta_bytes(&self) -> Result<u64, SceneBuildError> {
+        self.replacement.map_or(Ok(0), |plan| {
+            plan.envelope_delta_bytes()
+                .map_err(|cause| SceneBuildError::CapacityPlan {
+                    resource: self.resource,
+                    cause,
+                })
+        })
     }
+
+    pub const fn replaces_allocation(&self) -> bool {
+        self.replacement.is_some()
+    }
+}
+
+/// Coupled plans for inserting a node and linking it into its parent's child list.
+#[derive(Debug)]
+pub struct SceneNodeCapacityPlan {
+    parent: NodeId,
+    nodes: SceneCapacityPlan,
+    parent_children: SceneCapacityPlan,
+}
+
+impl SceneNodeCapacityPlan {
+    pub fn node_envelope_bytes(&self) -> Result<u64, SceneBuildError> {
+        self.nodes.envelope_delta_bytes()
+    }
+
+    pub fn parent_children_envelope_bytes(&self) -> Result<u64, SceneBuildError> {
+        self.parent_children.envelope_delta_bytes()
+    }
+
+    pub const fn replaces_nodes(&self) -> bool {
+        self.nodes.replaces_allocation()
+    }
+
+    pub const fn replaces_parent_children(&self) -> bool {
+        self.parent_children.replaces_allocation()
+    }
+}
+
+/// A fully allocated collection insertion whose commit performs no allocation or callback.
+pub struct PreparedSceneInsert<'owner, T, Id> {
+    owner: &'owner mut Vec<T>,
+    replacement: Option<Vec<T>>,
+    value: Option<T>,
+    id: Id,
+    replacement_bytes: u64,
+}
+
+/// A compound node/parent-child insertion prepared without mutating the builder.
+pub struct PreparedNodeInsert<'owner> {
+    builder: &'owner mut SceneBuilder,
+    node_replacement: Option<Vec<Node>>,
+    child_replacement: Option<Vec<NodeId>>,
+    node: Option<Node>,
+    parent: NodeId,
+    id: NodeId,
+    node_replacement_bytes: u64,
+    child_replacement_bytes: u64,
+}
+
+/// A fully allocated node mesh-binding insertion.
+pub struct PreparedNodeMeshBindingInsert<'owner> {
+    bindings: &'owner mut Vec<MeshBinding>,
+    replacement: Option<Vec<MeshBinding>>,
+    binding: Option<MeshBinding>,
+    replacement_bytes: u64,
+}
+
+/// A full-allocation replacement plan for the scene metadata map.
+pub struct SceneMetadataCapacityPlan {
+    inner: OrderedMapReplacementPlan<String, MetadataValue>,
+}
+
+impl SceneMetadataCapacityPlan {
+    pub fn envelope_bytes(&self) -> Result<u64, OrderedMapError> {
+        self.inner.envelope_bytes()
+    }
+
+    pub const fn replaces_allocation(&self) -> bool {
+        self.inner.replaces_allocation()
+    }
+}
+
+/// A scene metadata insertion prepared without mutating the live map.
+pub struct PreparedSceneMetadataInsert<'owner> {
+    inner: PreparedOrderedMapInsert<'owner, String, MetadataValue>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -441,6 +525,23 @@ pub(crate) struct SceneData {
 #[derive(Debug)]
 pub struct SceneDraft {
     pub(crate) data: SceneData,
+    #[cfg(test)]
+    drop_probe: Option<SceneDraftDropProbe>,
+}
+
+#[cfg(test)]
+#[derive(Debug)]
+struct SceneDraftDropProbe(std::sync::Arc<std::sync::atomic::AtomicU8>);
+
+#[cfg(test)]
+impl Drop for SceneDraftDropProbe {
+    fn drop(&mut self) {
+        assert_eq!(
+            self.0.swap(1, Ordering::SeqCst),
+            0,
+            "the scene draft must be dropped before its reservation"
+        );
+    }
 }
 
 /// The runtime identity of one validated scene generation.
@@ -479,6 +580,26 @@ pub struct ValidatedScene {
     generation: SceneGenerationId,
     data: SceneData,
     validation_stats: SceneValidationStats,
+    #[cfg(test)]
+    drop_probe: Option<ValidatedSceneDropProbe>,
+}
+
+#[cfg(test)]
+#[derive(Debug)]
+struct ValidatedSceneDropProbe(std::sync::Arc<std::sync::atomic::AtomicU8>);
+
+#[cfg(test)]
+impl PartialEq for ValidatedSceneDropProbe {
+    fn eq(&self, other: &Self) -> bool {
+        std::sync::Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+#[cfg(test)]
+impl Drop for ValidatedSceneDropProbe {
+    fn drop(&mut self) {
+        self.0.store(1, Ordering::SeqCst);
+    }
 }
 
 impl ValidatedScene {
@@ -496,7 +617,17 @@ impl ValidatedScene {
             generation,
             data,
             validation_stats,
+            #[cfg(test)]
+            drop_probe: None,
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn install_drop_probe(
+        &mut self,
+        state: std::sync::Arc<std::sync::atomic::AtomicU8>,
+    ) {
+        self.drop_probe = Some(ValidatedSceneDropProbe(state));
     }
 
     pub const fn generation(&self) -> SceneGenerationId {
@@ -635,15 +766,33 @@ pub fn validate_scene_with<C: SceneValidationControl>(
     control: &mut C,
 ) -> Result<SceneValidationSuccess<C::Reservation>, SceneValidationFailure<C::Error>> {
     let stats = crate::validation::validate_scene_data(&scene.data, limits, control)?;
-    let canonical_output = control
+    let reservation = control
         .reserve(
             SceneReservationKind::CanonicalOutput,
             stats.footprint().accounted_payload_bytes(),
         )
         .map_err(SceneValidationFailure::Control)?;
+    let reserved = ReservedSceneDraft { scene, reservation };
     control.poll().map_err(SceneValidationFailure::Control)?;
-    let scene = ValidatedScene::from_validated_data(scene.data, stats)?;
-    Ok(SceneValidationSuccess::new(scene, canonical_output))
+    reserved
+        .into_success(stats)
+        .map_err(SceneValidationFailure::Scene)
+}
+
+struct ReservedSceneDraft<R> {
+    scene: SceneDraft,
+    reservation: R,
+}
+
+impl<R> ReservedSceneDraft<R> {
+    fn into_success(
+        self,
+        stats: SceneValidationStats,
+    ) -> Result<SceneValidationSuccess<R>, SceneValidationError> {
+        let Self { scene, reservation } = self;
+        let scene = ValidatedScene::from_validated_data(scene.data, stats)?;
+        Ok(SceneValidationSuccess::new(scene, reservation))
+    }
 }
 
 /// An isolated mutable candidate derived from a validated scene.
@@ -742,23 +891,24 @@ impl<R> SceneEdit<R> {
     where
         C: SceneValidationControl<Reservation = R>,
     {
-        let Self {
-            base_generation: _,
-            data,
-            reservation,
-        } = self;
-        let stats = crate::validation::validate_scene_data(&data, limits, control)?;
-        let canonical_output = control
+        let mut edit = self;
+        let stats = crate::validation::validate_scene_data(&edit.data, limits, control)?;
+        control
             .transition_reservation(
-                reservation,
+                &mut edit.reservation,
                 SceneReservationKind::EditCandidate,
                 SceneReservationKind::CanonicalOutput,
                 stats.footprint().accounted_payload_bytes(),
             )
             .map_err(SceneValidationFailure::Control)?;
         control.poll().map_err(SceneValidationFailure::Control)?;
+        let Self {
+            base_generation: _,
+            data,
+            reservation,
+        } = edit;
         let scene = ValidatedScene::from_validated_data(data, stats)?;
-        Ok(SceneValidationSuccess::new(scene, canonical_output))
+        Ok(SceneValidationSuccess::new(scene, reservation))
     }
 }
 
@@ -791,7 +941,19 @@ impl SceneBuilder {
     pub fn try_new_with_capacity_plan(plan: SceneCapacityPlan) -> Result<Self, SceneBuildError> {
         let root = NodeId::new(0);
         let mut nodes = Vec::new();
-        apply_capacity_plan(&mut nodes, plan, SceneBuildResource::Nodes)?;
+        let (replacement, _) = allocate_replacement(&mut nodes, plan, SceneBuildResource::Nodes)?;
+        if let Some(replacement) = replacement {
+            nodes = replacement;
+        }
+        if nodes.capacity() == 0 {
+            return Err(SceneBuildError::CapacityPlan {
+                resource: SceneBuildResource::Nodes,
+                cause: baozi_operation::CapacityPlanError::InvalidState {
+                    len: 1,
+                    capacity: 0,
+                },
+            });
+        }
         nodes.push(Node::default());
         Ok(Self {
             data: SceneData {
@@ -858,44 +1020,6 @@ impl SceneBuilder {
         }
     }
 
-    /// Applies an admitted plan and returns the actual retained byte growth.
-    pub fn apply_collection_capacity_plan(
-        &mut self,
-        collection: SceneCollection,
-        plan: SceneCapacityPlan,
-    ) -> Result<u64, SceneBuildError> {
-        match collection {
-            SceneCollection::Nodes => {
-                apply_capacity_plan(&mut self.data.nodes, plan, SceneBuildResource::Nodes)
-            }
-            SceneCollection::Meshes => {
-                apply_capacity_plan(&mut self.data.meshes, plan, SceneBuildResource::Meshes)
-            }
-            SceneCollection::Materials => apply_capacity_plan(
-                &mut self.data.materials,
-                plan,
-                SceneBuildResource::Materials,
-            ),
-            SceneCollection::Textures => {
-                apply_capacity_plan(&mut self.data.textures, plan, SceneBuildResource::Textures)
-            }
-            SceneCollection::Animations => apply_capacity_plan(
-                &mut self.data.animations,
-                plan,
-                SceneBuildResource::Animations,
-            ),
-            SceneCollection::Cameras => {
-                apply_capacity_plan(&mut self.data.cameras, plan, SceneBuildResource::Cameras)
-            }
-            SceneCollection::Lights => {
-                apply_capacity_plan(&mut self.data.lights, plan, SceneBuildResource::Lights)
-            }
-            SceneCollection::Skins => {
-                apply_capacity_plan(&mut self.data.skins, plan, SceneBuildResource::Skins)
-            }
-        }
-    }
-
     pub fn node_children_capacity_plan(
         &self,
         parent: NodeId,
@@ -912,22 +1036,19 @@ impl SceneBuilder {
         capacity_plan(&node.children, additional, SceneBuildResource::NodeChildren)
     }
 
-    pub fn apply_node_children_capacity_plan(
-        &mut self,
+    pub fn node_insert_capacity_plan(
+        &self,
         parent: NodeId,
-        plan: SceneCapacityPlan,
-    ) -> Result<u64, SceneBuildError> {
-        let node_count = self.data.nodes.len();
-        let node = self
-            .data
-            .nodes
-            .get_mut(parent.index())
-            .ok_or(SceneBuildError::ParentNodeOutOfRange { parent, node_count })?;
-        apply_capacity_plan(&mut node.children, plan, SceneBuildResource::NodeChildren)
+    ) -> Result<SceneNodeCapacityPlan, SceneBuildError> {
+        Ok(SceneNodeCapacityPlan {
+            parent,
+            nodes: self.collection_capacity_plan(SceneCollection::Nodes, 1)?,
+            parent_children: self.node_children_capacity_plan(parent, 1)?,
+        })
     }
 
     pub fn add_node(&mut self, node: Node) -> Result<NodeId, SceneBuildError> {
-        self.push_node(Some(self.data.root), node)
+        self.add_child_node(self.data.root, node)
     }
 
     pub fn add_child_node(
@@ -935,45 +1056,147 @@ impl SceneBuilder {
         parent: NodeId,
         node: Node,
     ) -> Result<NodeId, SceneBuildError> {
-        if parent.index() >= self.data.nodes.len() {
+        let plan = self.node_insert_capacity_plan(parent)?;
+        self.prepare_add_child_node(parent, node, plan)
+            .map(PreparedNodeInsert::commit)
+    }
+
+    pub fn prepare_add_child_node(
+        &mut self,
+        parent: NodeId,
+        mut node: Node,
+        plan: SceneNodeCapacityPlan,
+    ) -> Result<PreparedNodeInsert<'_>, SceneBuildError> {
+        if parent != plan.parent || parent.index() >= self.data.nodes.len() {
             return Err(SceneBuildError::ParentNodeOutOfRange {
                 parent,
                 node_count: self.data.nodes.len(),
             });
         }
-        self.push_node(Some(parent), node)
-    }
-
-    fn push_node(
-        &mut self,
-        parent: Option<NodeId>,
-        mut node: Node,
-    ) -> Result<NodeId, SceneBuildError> {
+        if !node.children.is_empty() {
+            return Err(SceneBuildError::InsertedNodeHasChildren);
+        }
         let id = next_id(self.data.nodes.len(), SceneCollection::Nodes).map(NodeId::new)?;
-        if let Some(parent) = parent {
-            let children = &mut self.data.nodes[parent.index()].children;
-            try_reserve_one(children, SceneBuildResource::NodeChildren)?;
-        }
-        try_reserve_one(&mut self.data.nodes, SceneBuildResource::Nodes)?;
-        node.parent = parent;
-        self.data.nodes.push(node);
-        if let Some(parent) = parent
-            && let Some(parent_node) = self.data.nodes.get_mut(parent.index())
-        {
-            parent_node.children.push(id);
-        }
-        Ok(id)
+        node.parent = Some(parent);
+        let (node_replacement, node_replacement_bytes) =
+            allocate_replacement(&mut self.data.nodes, plan.nodes, SceneBuildResource::Nodes)?;
+        ensure_insertion_slot(
+            &self.data.nodes,
+            node_replacement.as_ref(),
+            SceneBuildResource::Nodes,
+        )?;
+        let parent_node = self.data.nodes.get_mut(parent.index()).ok_or(
+            SceneBuildError::ParentNodeOutOfRange {
+                parent,
+                node_count: id.index(),
+            },
+        )?;
+        let (child_replacement, child_replacement_bytes) = allocate_replacement(
+            &mut parent_node.children,
+            plan.parent_children,
+            SceneBuildResource::NodeChildren,
+        )?;
+        ensure_insertion_slot(
+            &parent_node.children,
+            child_replacement.as_ref(),
+            SceneBuildResource::NodeChildren,
+        )?;
+        Ok(PreparedNodeInsert {
+            builder: self,
+            node_replacement,
+            child_replacement,
+            node: Some(node),
+            parent,
+            id,
+            node_replacement_bytes,
+            child_replacement_bytes,
+        })
     }
 
     pub fn add_mesh(&mut self, mesh: Mesh) -> Result<MeshId, SceneBuildError> {
+        let plan = self.collection_capacity_plan(SceneCollection::Meshes, 1)?;
+        self.prepare_add_mesh(mesh, plan)
+            .map(PreparedSceneInsert::commit)
+    }
+
+    pub fn prepare_add_mesh(
+        &mut self,
+        mesh: Mesh,
+        plan: SceneCapacityPlan,
+    ) -> Result<PreparedSceneInsert<'_, Mesh, MeshId>, SceneBuildError> {
         let id = next_id(self.data.meshes.len(), SceneCollection::Meshes).map(MeshId::new)?;
-        try_reserve_one(&mut self.data.meshes, SceneBuildResource::Meshes)?;
-        self.data.meshes.push(mesh);
-        Ok(id)
+        prepare_insert(
+            &mut self.data.meshes,
+            mesh,
+            id,
+            plan,
+            SceneBuildResource::Meshes,
+        )
     }
 
     pub fn node_mut(&mut self, id: NodeId) -> Option<&mut Node> {
         self.data.nodes.get_mut(id.index())
+    }
+
+    pub fn node_mesh_binding_capacity_plan(
+        &self,
+        id: NodeId,
+        additional: usize,
+    ) -> Result<SceneCapacityPlan, SceneBuildError> {
+        let node =
+            self.data
+                .nodes
+                .get(id.index())
+                .ok_or(SceneBuildError::ParentNodeOutOfRange {
+                    parent: id,
+                    node_count: self.data.nodes.len(),
+                })?;
+        capacity_plan(
+            &node.mesh_bindings,
+            additional,
+            SceneBuildResource::NodeMeshBindings,
+        )
+    }
+
+    pub fn prepare_add_node_mesh_binding(
+        &mut self,
+        id: NodeId,
+        binding: MeshBinding,
+        plan: SceneCapacityPlan,
+    ) -> Result<PreparedNodeMeshBindingInsert<'_>, SceneBuildError> {
+        let node_count = self.data.nodes.len();
+        let bindings = &mut self
+            .data
+            .nodes
+            .get_mut(id.index())
+            .ok_or(SceneBuildError::ParentNodeOutOfRange {
+                parent: id,
+                node_count,
+            })?
+            .mesh_bindings;
+        let (replacement, replacement_bytes) =
+            allocate_replacement(bindings, plan, SceneBuildResource::NodeMeshBindings)?;
+        ensure_insertion_slot(
+            bindings,
+            replacement.as_ref(),
+            SceneBuildResource::NodeMeshBindings,
+        )?;
+        Ok(PreparedNodeMeshBindingInsert {
+            bindings,
+            replacement,
+            binding: Some(binding),
+            replacement_bytes,
+        })
+    }
+
+    pub fn add_node_mesh_binding(
+        &mut self,
+        id: NodeId,
+        binding: MeshBinding,
+    ) -> Result<(), SceneBuildError> {
+        let plan = self.node_mesh_binding_capacity_plan(id, 1)?;
+        self.prepare_add_node_mesh_binding(id, binding, plan)
+            .map(PreparedNodeMeshBindingInsert::commit)
     }
 
     pub fn mesh_mut(&mut self, id: MeshId) -> Option<&mut Mesh> {
@@ -981,11 +1204,25 @@ impl SceneBuilder {
     }
 
     pub fn add_material(&mut self, material: Material) -> Result<MaterialId, SceneBuildError> {
+        let plan = self.collection_capacity_plan(SceneCollection::Materials, 1)?;
+        self.prepare_add_material(material, plan)
+            .map(PreparedSceneInsert::commit)
+    }
+
+    pub fn prepare_add_material(
+        &mut self,
+        material: Material,
+        plan: SceneCapacityPlan,
+    ) -> Result<PreparedSceneInsert<'_, Material, MaterialId>, SceneBuildError> {
         let id =
             next_id(self.data.materials.len(), SceneCollection::Materials).map(MaterialId::new)?;
-        try_reserve_one(&mut self.data.materials, SceneBuildResource::Materials)?;
-        self.data.materials.push(material);
-        Ok(id)
+        prepare_insert(
+            &mut self.data.materials,
+            material,
+            id,
+            plan,
+            SceneBuildResource::Materials,
+        )
     }
 
     pub fn material_mut(&mut self, id: MaterialId) -> Option<&mut Material> {
@@ -993,11 +1230,25 @@ impl SceneBuilder {
     }
 
     pub fn add_texture(&mut self, texture: Texture) -> Result<TextureId, SceneBuildError> {
+        let plan = self.collection_capacity_plan(SceneCollection::Textures, 1)?;
+        self.prepare_add_texture(texture, plan)
+            .map(PreparedSceneInsert::commit)
+    }
+
+    pub fn prepare_add_texture(
+        &mut self,
+        texture: Texture,
+        plan: SceneCapacityPlan,
+    ) -> Result<PreparedSceneInsert<'_, Texture, TextureId>, SceneBuildError> {
         let id =
             next_id(self.data.textures.len(), SceneCollection::Textures).map(TextureId::new)?;
-        try_reserve_one(&mut self.data.textures, SceneBuildResource::Textures)?;
-        self.data.textures.push(texture);
-        Ok(id)
+        prepare_insert(
+            &mut self.data.textures,
+            texture,
+            id,
+            plan,
+            SceneBuildResource::Textures,
+        )
     }
 
     pub fn texture_mut(&mut self, id: TextureId) -> Option<&mut Texture> {
@@ -1005,36 +1256,126 @@ impl SceneBuilder {
     }
 
     pub fn add_animation(&mut self, animation: Animation) -> Result<AnimationId, SceneBuildError> {
+        let plan = self.collection_capacity_plan(SceneCollection::Animations, 1)?;
+        self.prepare_add_animation(animation, plan)
+            .map(PreparedSceneInsert::commit)
+    }
+
+    pub fn prepare_add_animation(
+        &mut self,
+        animation: Animation,
+        plan: SceneCapacityPlan,
+    ) -> Result<PreparedSceneInsert<'_, Animation, AnimationId>, SceneBuildError> {
         let id = next_id(self.data.animations.len(), SceneCollection::Animations)
             .map(AnimationId::new)?;
-        try_reserve_one(&mut self.data.animations, SceneBuildResource::Animations)?;
-        self.data.animations.push(animation);
-        Ok(id)
+        prepare_insert(
+            &mut self.data.animations,
+            animation,
+            id,
+            plan,
+            SceneBuildResource::Animations,
+        )
     }
 
     pub fn add_camera(&mut self, camera: Camera) -> Result<CameraId, SceneBuildError> {
+        let plan = self.collection_capacity_plan(SceneCollection::Cameras, 1)?;
+        self.prepare_add_camera(camera, plan)
+            .map(PreparedSceneInsert::commit)
+    }
+
+    pub fn prepare_add_camera(
+        &mut self,
+        camera: Camera,
+        plan: SceneCapacityPlan,
+    ) -> Result<PreparedSceneInsert<'_, Camera, CameraId>, SceneBuildError> {
         let id = next_id(self.data.cameras.len(), SceneCollection::Cameras).map(CameraId::new)?;
-        try_reserve_one(&mut self.data.cameras, SceneBuildResource::Cameras)?;
-        self.data.cameras.push(camera);
-        Ok(id)
+        prepare_insert(
+            &mut self.data.cameras,
+            camera,
+            id,
+            plan,
+            SceneBuildResource::Cameras,
+        )
     }
 
     pub fn add_light(&mut self, light: Light) -> Result<LightId, SceneBuildError> {
+        let plan = self.collection_capacity_plan(SceneCollection::Lights, 1)?;
+        self.prepare_add_light(light, plan)
+            .map(PreparedSceneInsert::commit)
+    }
+
+    pub fn prepare_add_light(
+        &mut self,
+        light: Light,
+        plan: SceneCapacityPlan,
+    ) -> Result<PreparedSceneInsert<'_, Light, LightId>, SceneBuildError> {
         let id = next_id(self.data.lights.len(), SceneCollection::Lights).map(LightId::new)?;
-        try_reserve_one(&mut self.data.lights, SceneBuildResource::Lights)?;
-        self.data.lights.push(light);
-        Ok(id)
+        prepare_insert(
+            &mut self.data.lights,
+            light,
+            id,
+            plan,
+            SceneBuildResource::Lights,
+        )
     }
 
     pub fn add_skin(&mut self, skin: Skin) -> Result<SkinId, SceneBuildError> {
+        let plan = self.collection_capacity_plan(SceneCollection::Skins, 1)?;
+        self.prepare_add_skin(skin, plan)
+            .map(PreparedSceneInsert::commit)
+    }
+
+    pub fn prepare_add_skin(
+        &mut self,
+        skin: Skin,
+        plan: SceneCapacityPlan,
+    ) -> Result<PreparedSceneInsert<'_, Skin, SkinId>, SceneBuildError> {
         let id = next_id(self.data.skins.len(), SceneCollection::Skins).map(SkinId::new)?;
-        try_reserve_one(&mut self.data.skins, SceneBuildResource::Skins)?;
-        self.data.skins.push(skin);
-        Ok(id)
+        prepare_insert(
+            &mut self.data.skins,
+            skin,
+            id,
+            plan,
+            SceneBuildResource::Skins,
+        )
     }
 
     pub fn metadata_mut(&mut self) -> &mut MetadataMap {
         &mut self.data.metadata
+    }
+
+    pub fn metadata_capacity_plan(
+        &self,
+        key: &str,
+    ) -> Result<SceneMetadataCapacityPlan, OrderedMapError> {
+        let additional = usize::from(!self.data.metadata.contains_key(key));
+        self.data
+            .metadata
+            .replacement_plan(additional)
+            .map(|inner| SceneMetadataCapacityPlan { inner })
+    }
+
+    pub fn prepare_insert_metadata(
+        &mut self,
+        key: String,
+        value: MetadataValue,
+        plan: SceneMetadataCapacityPlan,
+    ) -> Result<PreparedSceneMetadataInsert<'_>, OrderedMapError> {
+        self.data
+            .metadata
+            .prepare_replacement_insert(plan.inner, key, value)
+            .map(|inner| PreparedSceneMetadataInsert { inner })
+    }
+
+    pub fn insert_metadata(
+        &mut self,
+        key: String,
+        value: MetadataValue,
+    ) -> Result<Option<MetadataValue>, OrderedMapError> {
+        let plan = self.metadata_capacity_plan(&key)?;
+        self.prepare_insert_metadata(key, value, plan)
+            .map(PreparedSceneMetadataInsert::commit)
+            .map(|retired| retired.map(|(_, value)| value))
     }
 
     pub fn space_mut(&mut self) -> &mut SceneSpace {
@@ -1042,16 +1383,12 @@ impl SceneBuilder {
     }
 
     pub fn finish_draft(self) -> SceneDraft {
-        SceneDraft { data: self.data }
+        SceneDraft {
+            data: self.data,
+            #[cfg(test)]
+            drop_probe: None,
+        }
     }
-}
-
-fn try_reserve_one<T>(
-    collection: &mut Vec<T>,
-    resource: SceneBuildResource,
-) -> Result<(), SceneBuildError> {
-    let plan = capacity_plan(collection, 1, resource)?;
-    apply_capacity_plan(collection, plan, resource).map(|_| ())
 }
 
 fn capacity_plan<T>(
@@ -1059,36 +1396,291 @@ fn capacity_plan<T>(
     additional: usize,
     resource: SceneBuildResource,
 ) -> Result<SceneCapacityPlan, SceneBuildError> {
-    let desired_capacity = collection
+    let required_capacity = collection
         .len()
         .checked_add(additional)
         .ok_or(SceneBuildError::CapacityAccountingOverflow { resource })?;
-    let inner =
-        CapacityPlan::for_type::<T>(collection.len(), collection.capacity(), desired_capacity)
-            .map_err(|cause| SceneBuildError::CapacityPlan { resource, cause })?;
-    Ok(SceneCapacityPlan { resource, inner })
+    let replacement = if required_capacity <= collection.capacity() {
+        None
+    } else {
+        Some(
+            CapacityPlan::for_type::<T>(0, 0, required_capacity)
+                .map_err(|cause| SceneBuildError::CapacityPlan { resource, cause })?,
+        )
+    };
+    Ok(SceneCapacityPlan {
+        resource,
+        original_len: collection.len(),
+        original_capacity: collection.capacity(),
+        additional,
+        replacement,
+    })
 }
 
-fn apply_capacity_plan<T>(
+fn allocate_replacement<T>(
     collection: &mut Vec<T>,
     plan: SceneCapacityPlan,
     resource: SceneBuildResource,
-) -> Result<u64, SceneBuildError> {
+) -> Result<(Option<Vec<T>>, u64), SceneBuildError> {
     if plan.resource != resource {
         return Err(SceneBuildError::CapacityPlanResourceMismatch {
             expected: resource,
             actual: plan.resource,
         });
     }
-    plan.inner
-        .verify_preflight(collection.len(), collection.capacity())
+    if collection.len() != plan.original_len || collection.capacity() != plan.original_capacity {
+        return Err(SceneBuildError::CapacityPlan {
+            resource,
+            cause: baozi_operation::CapacityPlanError::StalePlan {
+                expected_len: plan.original_len,
+                expected_capacity: plan.original_capacity,
+                actual_len: collection.len(),
+                actual_capacity: collection.capacity(),
+            },
+        });
+    }
+    let required_capacity = collection
+        .len()
+        .checked_add(plan.additional)
+        .ok_or(SceneBuildError::CapacityAccountingOverflow { resource })?;
+    let Some(replacement_plan) = plan.replacement else {
+        if required_capacity > collection.capacity() {
+            return Err(SceneBuildError::CapacityPlan {
+                resource,
+                cause: baozi_operation::CapacityPlanError::InvalidState {
+                    len: required_capacity,
+                    capacity: collection.capacity(),
+                },
+            });
+        }
+        return Ok((None, 0));
+    };
+
+    replacement_plan
+        .verify_preflight(0, 0)
         .map_err(|cause| SceneBuildError::CapacityPlan { resource, cause })?;
-    collection
-        .try_reserve_exact(plan.inner.allocator_additional())
+    let mut replacement = Vec::new();
+    replacement
+        .try_reserve_exact(replacement_plan.allocator_additional())
         .map_err(|_| SceneBuildError::AllocationFailed { resource })?;
-    plan.inner
-        .finish(collection.len(), collection.capacity())
-        .map_err(|cause| SceneBuildError::CapacityPlan { resource, cause })
+    let replacement_bytes = replacement_plan
+        .finish(replacement.len(), replacement.capacity())
+        .map_err(|cause| SceneBuildError::CapacityPlan { resource, cause })?;
+    Ok((Some(replacement), replacement_bytes))
+}
+
+fn prepare_insert<'owner, T, Id>(
+    collection: &'owner mut Vec<T>,
+    value: T,
+    id: Id,
+    plan: SceneCapacityPlan,
+    resource: SceneBuildResource,
+) -> Result<PreparedSceneInsert<'owner, T, Id>, SceneBuildError> {
+    let (replacement, replacement_bytes) = allocate_replacement(collection, plan, resource)?;
+    ensure_insertion_slot(collection, replacement.as_ref(), resource)?;
+    Ok(PreparedSceneInsert {
+        owner: collection,
+        replacement,
+        value: Some(value),
+        id,
+        replacement_bytes,
+    })
+}
+
+fn ensure_insertion_slot<T>(
+    collection: &Vec<T>,
+    replacement: Option<&Vec<T>>,
+    resource: SceneBuildResource,
+) -> Result<(), SceneBuildError> {
+    let required_len = collection
+        .len()
+        .checked_add(1)
+        .ok_or(SceneBuildError::CapacityAccountingOverflow { resource })?;
+    let candidate_capacity = replacement.map_or_else(|| collection.capacity(), Vec::capacity);
+    if required_len > candidate_capacity {
+        return Err(SceneBuildError::CapacityPlan {
+            resource,
+            cause: baozi_operation::CapacityPlanError::InvalidState {
+                len: required_len,
+                capacity: candidate_capacity,
+            },
+        });
+    }
+    Ok(())
+}
+
+impl<T, Id> PreparedSceneInsert<'_, T, Id> {
+    pub const fn replacement_bytes(&self) -> u64 {
+        self.replacement_bytes
+    }
+
+    pub const fn replaces_allocation(&self) -> bool {
+        self.replacement.is_some()
+    }
+
+    /// Commits into already admitted storage and releases the retired allocation before returning.
+    pub fn commit(mut self) -> Id {
+        let value = self
+            .value
+            .take()
+            .expect("a prepared scene value is committed exactly once");
+        if let Some(mut replacement) = self.replacement.take() {
+            assert!(
+                replacement.capacity() > self.owner.len(),
+                "a scene replacement must admit every live value and the insertion"
+            );
+            replacement.append(self.owner);
+            replacement.push(value);
+            std::mem::swap(self.owner, &mut replacement);
+            drop(replacement);
+        } else {
+            assert!(
+                self.owner.len() < self.owner.capacity(),
+                "an in-place scene insertion requires an admitted slot"
+            );
+            self.owner.push(value);
+        }
+        self.id
+    }
+}
+
+impl PreparedNodeInsert<'_> {
+    pub const fn node_replacement_bytes(&self) -> u64 {
+        self.node_replacement_bytes
+    }
+
+    pub const fn parent_children_replacement_bytes(&self) -> u64 {
+        self.child_replacement_bytes
+    }
+
+    pub const fn replaces_nodes(&self) -> bool {
+        self.node_replacement.is_some()
+    }
+
+    pub const fn replaces_parent_children(&self) -> bool {
+        self.child_replacement.is_some()
+    }
+
+    /// Commits the node and parent edge as one allocation-free mutation.
+    pub fn commit(mut self) -> NodeId {
+        let node = self
+            .node
+            .take()
+            .expect("a prepared node is committed exactly once");
+        assert!(
+            node.children.is_empty(),
+            "an inserted node cannot pre-own children"
+        );
+        assert!(
+            self.parent.index() < self.builder.data.nodes.len(),
+            "a prepared node parent remains in range while the candidate borrows the builder"
+        );
+        let node_capacity = self
+            .node_replacement
+            .as_ref()
+            .map_or_else(|| self.builder.data.nodes.capacity(), Vec::capacity);
+        assert!(
+            node_capacity > self.builder.data.nodes.len(),
+            "a prepared node insertion requires an admitted slot"
+        );
+        let parent_node = &self.builder.data.nodes[self.parent.index()];
+        let child_capacity = self
+            .child_replacement
+            .as_ref()
+            .map_or_else(|| parent_node.children.capacity(), Vec::capacity);
+        assert!(
+            child_capacity > parent_node.children.len(),
+            "a prepared parent-child insertion requires an admitted slot"
+        );
+
+        if let Some(mut replacement) = self.node_replacement.take() {
+            replacement.append(&mut self.builder.data.nodes);
+            commit_node_insert(
+                &mut replacement,
+                self.parent,
+                self.id,
+                node,
+                self.child_replacement.take(),
+            );
+            std::mem::swap(&mut self.builder.data.nodes, &mut replacement);
+            drop(replacement);
+        } else {
+            commit_node_insert(
+                &mut self.builder.data.nodes,
+                self.parent,
+                self.id,
+                node,
+                self.child_replacement.take(),
+            );
+        }
+        self.id
+    }
+}
+
+fn commit_node_insert(
+    nodes: &mut Vec<Node>,
+    parent: NodeId,
+    id: NodeId,
+    node: Node,
+    child_replacement: Option<Vec<NodeId>>,
+) {
+    let parent_node = &mut nodes[parent.index()];
+    if let Some(mut replacement) = child_replacement {
+        replacement.append(&mut parent_node.children);
+        replacement.push(id);
+        std::mem::swap(&mut parent_node.children, &mut replacement);
+        drop(replacement);
+    } else {
+        parent_node.children.push(id);
+    }
+    nodes.push(node);
+}
+
+impl PreparedNodeMeshBindingInsert<'_> {
+    pub const fn replacement_bytes(&self) -> u64 {
+        self.replacement_bytes
+    }
+
+    pub const fn replaces_allocation(&self) -> bool {
+        self.replacement.is_some()
+    }
+
+    pub fn commit(mut self) {
+        let binding = self
+            .binding
+            .take()
+            .expect("a prepared mesh binding is committed exactly once");
+        if let Some(mut replacement) = self.replacement.take() {
+            assert!(
+                replacement.capacity() > self.bindings.len(),
+                "a mesh-binding replacement must admit every live binding and the insertion"
+            );
+            replacement.append(self.bindings);
+            replacement.push(binding);
+            std::mem::swap(self.bindings, &mut replacement);
+            drop(replacement);
+        } else {
+            assert!(
+                self.bindings.len() < self.bindings.capacity(),
+                "an in-place mesh-binding insertion requires an admitted slot"
+            );
+            self.bindings.push(binding);
+        }
+    }
+}
+
+impl PreparedSceneMetadataInsert<'_> {
+    pub const fn replacement_bytes(&self) -> u64 {
+        self.inner.replacement_bytes()
+    }
+
+    pub const fn replaces_allocation(&self) -> bool {
+        self.inner.replaces_allocation()
+    }
+
+    pub fn commit(self) -> Option<(String, MetadataValue)> {
+        self.inner.commit()
+    }
 }
 
 fn next_id(len: usize, collection: SceneCollection) -> Result<u32, SceneBuildError> {
@@ -1098,6 +1690,146 @@ fn next_id(len: usize, collection: SceneCollection) -> Result<u32, SceneBuildErr
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::error::Error;
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicU8;
+
+    #[derive(Debug)]
+    struct FinalPollError;
+
+    impl fmt::Display for FinalPollError {
+        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("final validation poll rejected")
+        }
+    }
+
+    impl Error for FinalPollError {}
+
+    struct DraftReservationDropProbe(Arc<AtomicU8>);
+
+    impl Drop for DraftReservationDropProbe {
+        fn drop(&mut self) {
+            assert_eq!(
+                self.0.swap(2, Ordering::SeqCst),
+                1,
+                "the scene draft must be dropped before reservation rollback"
+            );
+        }
+    }
+
+    struct FinalPollReservation {
+        _canonical: Option<DraftReservationDropProbe>,
+    }
+
+    struct FinalPollControl {
+        state: Arc<AtomicU8>,
+        reserved: bool,
+        panic_on_final_poll: bool,
+    }
+
+    impl SceneValidationControl for FinalPollControl {
+        type Error = FinalPollError;
+        type Reservation = FinalPollReservation;
+
+        fn poll(&mut self) -> Result<(), Self::Error> {
+            if !self.reserved {
+                return Ok(());
+            }
+            if self.panic_on_final_poll {
+                panic!("final validation poll panic fixture");
+            }
+            Err(FinalPollError)
+        }
+
+        fn charge_work(
+            &mut self,
+            _work: crate::SceneValidationWork,
+            _amount: u64,
+        ) -> Result<(), Self::Error> {
+            Ok(())
+        }
+
+        fn reserve(
+            &mut self,
+            kind: SceneReservationKind,
+            _bytes: u64,
+        ) -> Result<Self::Reservation, Self::Error> {
+            if kind == SceneReservationKind::CanonicalOutput {
+                self.reserved = true;
+                Ok(FinalPollReservation {
+                    _canonical: Some(DraftReservationDropProbe(Arc::clone(&self.state))),
+                })
+            } else {
+                Ok(FinalPollReservation { _canonical: None })
+            }
+        }
+
+        fn resize_reservation(
+            &mut self,
+            _reservation: &mut Self::Reservation,
+            _kind: SceneReservationKind,
+            _required_bytes: u64,
+        ) -> Result<(), Self::Error> {
+            Ok(())
+        }
+
+        fn transition_reservation(
+            &mut self,
+            _reservation: &mut Self::Reservation,
+            _from: SceneReservationKind,
+            _to: SceneReservationKind,
+            _required_bytes: u64,
+        ) -> Result<(), Self::Error> {
+            Ok(())
+        }
+    }
+
+    fn final_poll_draft(state: &Arc<AtomicU8>) -> SceneDraft {
+        let mut draft = SceneBuilder::try_new()
+            .expect("final-poll fixture builder")
+            .finish_draft();
+        draft.drop_probe = Some(SceneDraftDropProbe(Arc::clone(state)));
+        draft
+    }
+
+    #[test]
+    fn failed_final_poll_drops_scene_draft_before_reservation_rollback() {
+        let state = Arc::new(AtomicU8::new(0));
+        let mut control = FinalPollControl {
+            state: Arc::clone(&state),
+            reserved: false,
+            panic_on_final_poll: false,
+        };
+        let error = validate_scene_with(
+            final_poll_draft(&state),
+            SceneValidationLimits::default(),
+            &mut control,
+        )
+        .expect_err("the final poll must reject publication");
+
+        assert!(matches!(error, SceneValidationFailure::Control(_)));
+        assert_eq!(state.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn panicking_final_poll_drops_scene_draft_before_reservation_rollback() {
+        let state = Arc::new(AtomicU8::new(0));
+        let mut control = FinalPollControl {
+            state: Arc::clone(&state),
+            reserved: false,
+            panic_on_final_poll: true,
+        };
+        let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = validate_scene_with(
+                final_poll_draft(&state),
+                SceneValidationLimits::default(),
+                &mut control,
+            );
+        }));
+
+        assert!(unwind.is_err());
+        assert_eq!(state.load(Ordering::SeqCst), 2);
+    }
 
     #[test]
     fn builder_creates_owned_scene() {
@@ -1135,50 +1867,207 @@ mod tests {
     }
 
     #[test]
-    fn builder_exposes_two_phase_capacity_admission() {
+    fn prepared_collection_candidate_preserves_the_owner_until_commit() {
         let mut builder = SceneBuilder::try_new().unwrap();
+        builder
+            .add_mesh(Mesh {
+                name: Some("first".to_owned()),
+                ..Mesh::default()
+            })
+            .unwrap();
+        let original = builder.data.meshes.clone();
         let plan = builder
             .collection_capacity_plan(SceneCollection::Meshes, 1)
             .unwrap();
         let admitted = plan.envelope_delta_bytes().unwrap();
-        let actual = builder
-            .apply_collection_capacity_plan(SceneCollection::Meshes, plan)
+        let prepared = builder
+            .prepare_add_mesh(
+                Mesh {
+                    name: Some("second".to_owned()),
+                    ..Mesh::default()
+                },
+                plan,
+            )
             .unwrap();
+        assert!(prepared.replaces_allocation());
+        assert!(prepared.replacement_bytes() <= admitted);
+        drop(prepared);
+        assert_eq!(builder.data.meshes, original);
 
-        assert!(actual <= admitted);
-        assert_eq!(
-            builder
-                .collection_capacity_plan(SceneCollection::Meshes, 1)
-                .unwrap()
-                .envelope_delta_bytes()
-                .unwrap(),
-            0
-        );
-
-        let child_plan = builder
-            .node_children_capacity_plan(builder.root(), 1)
-            .unwrap();
-        let child_admitted = child_plan.envelope_delta_bytes().unwrap();
-        let child_actual = builder
-            .apply_node_children_capacity_plan(builder.root(), child_plan)
-            .unwrap();
-        assert!(child_actual <= child_admitted);
-    }
-
-    #[test]
-    fn builder_rejects_a_plan_for_the_wrong_collection() {
-        let mut builder = SceneBuilder::try_new().unwrap();
         let plan = builder
             .collection_capacity_plan(SceneCollection::Meshes, 1)
             .unwrap();
+        let id = builder
+            .prepare_add_mesh(
+                Mesh {
+                    name: Some("second".to_owned()),
+                    ..Mesh::default()
+                },
+                plan,
+            )
+            .unwrap()
+            .commit();
 
+        assert_eq!(id, MeshId::new(1));
+        assert_eq!(builder.data.meshes[0].name.as_deref(), Some("first"));
+        assert_eq!(builder.data.meshes[1].name.as_deref(), Some("second"));
+    }
+
+    #[test]
+    fn prepared_node_candidate_commits_node_and_parent_edge_atomically() {
+        let mut builder = SceneBuilder::try_new().unwrap();
+        let root = builder.root();
+        let plan = builder.node_insert_capacity_plan(root).unwrap();
+        let node_admitted = plan.node_envelope_bytes().unwrap();
+        let child_admitted = plan.parent_children_envelope_bytes().unwrap();
+        let prepared = builder
+            .prepare_add_child_node(
+                root,
+                Node {
+                    name: Some("child".to_owned()),
+                    ..Node::default()
+                },
+                plan,
+            )
+            .unwrap();
+        assert!(prepared.replaces_nodes());
+        assert!(prepared.replaces_parent_children());
+        assert!(prepared.node_replacement_bytes() <= node_admitted);
+        assert!(prepared.parent_children_replacement_bytes() <= child_admitted);
+        drop(prepared);
+        assert_eq!(builder.data.nodes.len(), 1);
+        assert!(builder.data.nodes[root.index()].children.is_empty());
+
+        let plan = builder.node_insert_capacity_plan(root).unwrap();
+        let child = builder
+            .prepare_add_child_node(
+                root,
+                Node {
+                    name: Some("child".to_owned()),
+                    ..Node::default()
+                },
+                plan,
+            )
+            .unwrap()
+            .commit();
+        assert_eq!(builder.data.nodes.len(), 2);
+        assert_eq!(builder.data.nodes[root.index()].children, vec![child]);
+        assert_eq!(builder.data.nodes[child.index()].parent, Some(root));
+        assert_eq!(
+            builder.data.nodes[child.index()].name.as_deref(),
+            Some("child")
+        );
+    }
+
+    #[test]
+    fn builder_rejects_wrong_stale_and_under_admitted_plans_without_mutation() {
+        let mut builder = SceneBuilder::try_new().unwrap();
+        let wrong = builder
+            .collection_capacity_plan(SceneCollection::Materials, 1)
+            .unwrap();
+        let wrong_error = match builder.prepare_add_mesh(Mesh::default(), wrong) {
+            Ok(_) => panic!("a material plan must not prepare mesh storage"),
+            Err(error) => error,
+        };
         assert!(matches!(
-            builder.apply_collection_capacity_plan(SceneCollection::Materials, plan),
-            Err(SceneBuildError::CapacityPlanResourceMismatch {
-                expected: SceneBuildResource::Materials,
-                actual: SceneBuildResource::Meshes,
-            })
+            wrong_error,
+            SceneBuildError::CapacityPlanResourceMismatch {
+                expected: SceneBuildResource::Meshes,
+                actual: SceneBuildResource::Materials,
+            }
         ));
+        assert!(builder.data.meshes.is_empty());
+
+        let stale = builder
+            .collection_capacity_plan(SceneCollection::Meshes, 1)
+            .unwrap();
+        builder.add_mesh(Mesh::default()).unwrap();
+        let state = builder.data.meshes.clone();
+        let capacity = builder.data.meshes.capacity();
+        let stale_error = match builder.prepare_add_mesh(Mesh::default(), stale) {
+            Ok(_) => panic!("a stale plan must not prepare replacement storage"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            stale_error,
+            SceneBuildError::CapacityPlan {
+                cause: baozi_operation::CapacityPlanError::StalePlan { .. },
+                ..
+            }
+        ));
+        assert_eq!(builder.data.meshes, state);
+        assert_eq!(builder.data.meshes.capacity(), capacity);
+
+        let mut empty = SceneBuilder::try_new().unwrap();
+        let under_admitted = empty
+            .collection_capacity_plan(SceneCollection::Meshes, 0)
+            .unwrap();
+        let under_admitted_error = match empty.prepare_add_mesh(Mesh::default(), under_admitted) {
+            Ok(_) => panic!("a plan without an insertion slot must be rejected during prepare"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            under_admitted_error,
+            SceneBuildError::CapacityPlan {
+                cause: baozi_operation::CapacityPlanError::InvalidState {
+                    len: 1,
+                    capacity: 0,
+                },
+                ..
+            }
+        ));
+        assert!(empty.data.meshes.is_empty());
+        assert_eq!(empty.data.meshes.capacity(), 0);
+    }
+
+    #[test]
+    fn prepared_metadata_candidate_preserves_sorting_and_returns_retired_storage() {
+        let mut builder = SceneBuilder::try_new().unwrap();
+        builder
+            .insert_metadata("z:key".to_owned(), MetadataValue::I64(1))
+            .unwrap();
+        let original = builder.data.metadata.clone();
+        let plan = builder.metadata_capacity_plan("a:key").unwrap();
+        let admitted = plan.envelope_bytes().unwrap();
+        let prepared = builder
+            .prepare_insert_metadata("a:key".to_owned(), MetadataValue::Bool(true), plan)
+            .unwrap();
+        assert!(prepared.replaces_allocation());
+        assert!(prepared.replacement_bytes() <= admitted);
+        drop(prepared);
+        assert_eq!(builder.data.metadata, original);
+
+        let plan = builder.metadata_capacity_plan("a:key").unwrap();
+        assert_eq!(
+            builder
+                .prepare_insert_metadata("a:key".to_owned(), MetadataValue::Bool(true), plan)
+                .unwrap()
+                .commit(),
+            None
+        );
+        assert_eq!(
+            builder
+                .data
+                .metadata
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            vec!["a:key", "z:key"]
+        );
+
+        let plan = builder.metadata_capacity_plan("a:key").unwrap();
+        let retired = builder
+            .prepare_insert_metadata("a:key".to_owned(), MetadataValue::I64(2), plan)
+            .unwrap()
+            .commit();
+        assert_eq!(
+            retired,
+            Some(("a:key".to_owned(), MetadataValue::Bool(true)))
+        );
+        assert_eq!(
+            builder.data.metadata.get("a:key"),
+            Some(&MetadataValue::I64(2))
+        );
     }
 
     #[test]

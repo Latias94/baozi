@@ -51,10 +51,11 @@ pub use scene::{
     Animation, AnimationChannel, AnimationId, AnimationInterpolation, AnimationProperty,
     AnimationTarget, AnimationValues, Camera, CameraId, CameraProjection, Light, LightId,
     LightKind, MaterialId, Mesh, MeshBinding, MeshId, MetadataMap, MetadataValue, MorphTarget,
-    Node, NodeId, PrimitiveTopology, SceneBuilder, SceneCapacityPlan, SceneCollection, SceneDraft,
-    SceneEdit, SceneGenerationId, SceneSpace, Skin, SkinId, TextureId, ValidatedScene,
-    VertexAttribute, VertexAttributeData, VertexAttributeSemantic, validate_scene,
-    validate_scene_with,
+    Node, NodeId, PreparedNodeInsert, PreparedNodeMeshBindingInsert, PreparedSceneInsert,
+    PreparedSceneMetadataInsert, PrimitiveTopology, SceneBuilder, SceneCapacityPlan,
+    SceneCollection, SceneDraft, SceneEdit, SceneGenerationId, SceneMetadataCapacityPlan,
+    SceneNodeCapacityPlan, SceneSpace, Skin, SkinId, TextureId, ValidatedScene, VertexAttribute,
+    VertexAttributeData, VertexAttributeSemantic, validate_scene, validate_scene_with,
 };
 pub use scene_storage::SceneStorageFootprint;
 pub use validation_control::{

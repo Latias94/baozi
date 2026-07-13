@@ -8,6 +8,9 @@ pub enum SceneBuildError {
     #[error("parent node {parent:?} is out of range for {node_count} nodes")]
     ParentNodeOutOfRange { parent: NodeId, node_count: usize },
 
+    #[error("a newly inserted node cannot already own child edges")]
+    InsertedNodeHasChildren,
+
     #[error("scene {collection} collection exceeds the supported identifier range")]
     IdentifierSpaceExhausted { collection: SceneCollection },
 
@@ -38,6 +41,7 @@ pub enum SceneBuildError {
 pub enum SceneBuildResource {
     Nodes,
     NodeChildren,
+    NodeMeshBindings,
     Meshes,
     Materials,
     Textures,
@@ -45,6 +49,7 @@ pub enum SceneBuildResource {
     Cameras,
     Lights,
     Skins,
+    SceneMetadata,
 }
 
 impl std::fmt::Display for SceneBuildResource {
@@ -52,6 +57,7 @@ impl std::fmt::Display for SceneBuildResource {
         formatter.write_str(match self {
             Self::Nodes => "node capacity",
             Self::NodeChildren => "node-child capacity",
+            Self::NodeMeshBindings => "node mesh-binding capacity",
             Self::Meshes => "mesh capacity",
             Self::Materials => "material capacity",
             Self::Textures => "texture capacity",
@@ -59,6 +65,7 @@ impl std::fmt::Display for SceneBuildResource {
             Self::Cameras => "camera capacity",
             Self::Lights => "light capacity",
             Self::Skins => "skin capacity",
+            Self::SceneMetadata => "scene metadata capacity",
         })
     }
 }

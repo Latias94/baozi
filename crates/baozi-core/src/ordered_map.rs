@@ -47,6 +47,24 @@ pub struct OrderedMapCapacityPlan<K, V> {
     marker: PhantomData<fn() -> (K, V)>,
 }
 
+/// A full-allocation replacement plan that leaves the live map untouched until commit.
+pub(crate) struct OrderedMapReplacementPlan<K, V> {
+    original_len: usize,
+    original_capacity: usize,
+    additional: usize,
+    replacement: Option<CapacityPlan>,
+    marker: PhantomData<fn() -> (K, V)>,
+}
+
+/// A fully allocated map insertion candidate whose commit cannot enter the allocator.
+pub(crate) struct PreparedOrderedMapInsert<'owner, K, V> {
+    owner: &'owner mut OrderedMap<K, V>,
+    replacement: Option<Vec<(K, V)>>,
+    entry: Option<(K, V)>,
+    location: Result<usize, usize>,
+    replacement_bytes: u64,
+}
+
 impl<K, V> Copy for OrderedMapCapacityPlan<K, V> {}
 
 impl<K, V> Clone for OrderedMapCapacityPlan<K, V> {
@@ -78,6 +96,19 @@ impl<K, V> OrderedMapCapacityPlan<K, V> {
         self.inner
             .envelope_delta_bytes()
             .map_err(OrderedMapError::CapacityPlan)
+    }
+}
+
+impl<K, V> OrderedMapReplacementPlan<K, V> {
+    pub(crate) fn envelope_bytes(&self) -> Result<u64, OrderedMapError> {
+        self.replacement.map_or(Ok(0), |plan| {
+            plan.envelope_delta_bytes()
+                .map_err(OrderedMapError::CapacityPlan)
+        })
+    }
+
+    pub(crate) const fn replaces_allocation(&self) -> bool {
+        self.replacement.is_some()
     }
 }
 
@@ -128,6 +159,97 @@ impl<K, V> OrderedMap<K, V> {
         Ok(OrderedMapCapacityPlan {
             inner,
             marker: PhantomData,
+        })
+    }
+
+    /// Plans a complete replacement allocation when the current map has no free insertion slot.
+    pub(crate) fn replacement_plan(
+        &self,
+        additional: usize,
+    ) -> Result<OrderedMapReplacementPlan<K, V>, OrderedMapError> {
+        let required_capacity = self
+            .len()
+            .checked_add(additional)
+            .ok_or(OrderedMapError::CapacityOverflow)?;
+        let replacement = if required_capacity <= self.capacity() {
+            None
+        } else {
+            Some(
+                CapacityPlan::for_type::<(K, V)>(0, 0, required_capacity)
+                    .map_err(OrderedMapError::CapacityPlan)?,
+            )
+        };
+        Ok(OrderedMapReplacementPlan {
+            original_len: self.len(),
+            original_capacity: self.capacity(),
+            additional,
+            replacement,
+            marker: PhantomData,
+        })
+    }
+
+    /// Allocates a replacement without changing the live map or moving the entry into it.
+    pub(crate) fn prepare_replacement_insert(
+        &mut self,
+        plan: OrderedMapReplacementPlan<K, V>,
+        key: K,
+        value: V,
+    ) -> Result<PreparedOrderedMapInsert<'_, K, V>, OrderedMapError>
+    where
+        K: Ord,
+    {
+        if self.len() != plan.original_len || self.capacity() != plan.original_capacity {
+            return Err(OrderedMapError::CapacityPlan(
+                CapacityPlanError::StalePlan {
+                    expected_len: plan.original_len,
+                    expected_capacity: plan.original_capacity,
+                    actual_len: self.len(),
+                    actual_capacity: self.capacity(),
+                },
+            ));
+        }
+
+        let location = self.find(&key);
+        let required_additional = usize::from(location.is_err());
+        if required_additional > plan.additional {
+            return Err(OrderedMapError::CapacityPlan(
+                CapacityPlanError::StalePlan {
+                    expected_len: plan.original_len.saturating_add(plan.additional),
+                    expected_capacity: plan.original_capacity,
+                    actual_len: self.len().saturating_add(required_additional),
+                    actual_capacity: self.capacity(),
+                },
+            ));
+        }
+
+        let (replacement, replacement_bytes) = match plan.replacement {
+            Some(replacement_plan) => {
+                replacement_plan
+                    .verify_preflight(0, 0)
+                    .map_err(OrderedMapError::CapacityPlan)?;
+                let mut replacement = Vec::new();
+                replacement
+                    .try_reserve_exact(replacement_plan.allocator_additional())
+                    .map_err(|_| OrderedMapError::AllocationFailed)?;
+                let replacement_bytes = replacement_plan
+                    .finish(replacement.len(), replacement.capacity())
+                    .map_err(OrderedMapError::CapacityPlan)?;
+                (Some(replacement), replacement_bytes)
+            }
+            None => {
+                if location.is_err() && self.len() == self.capacity() {
+                    return Err(OrderedMapError::CapacityNotReserved);
+                }
+                (None, 0)
+            }
+        };
+
+        Ok(PreparedOrderedMapInsert {
+            owner: self,
+            replacement,
+            entry: Some((key, value)),
+            location,
+            replacement_bytes,
         })
     }
 
@@ -227,6 +349,49 @@ impl<K, V> OrderedMap<K, V> {
     {
         self.entries
             .binary_search_by(|(candidate, _)| candidate.borrow().cmp(key))
+    }
+}
+
+impl<K, V> PreparedOrderedMapInsert<'_, K, V> {
+    pub(crate) const fn replacement_bytes(&self) -> u64 {
+        self.replacement_bytes
+    }
+
+    pub(crate) const fn replaces_allocation(&self) -> bool {
+        self.replacement.is_some()
+    }
+
+    /// Commits by moving values into already admitted storage; no allocator or fallible hook runs.
+    pub(crate) fn commit(mut self) -> Option<(K, V)> {
+        let (key, value) = self
+            .entry
+            .take()
+            .expect("a prepared ordered-map entry is consumed exactly once");
+        match self.location {
+            Ok(index) => Some(std::mem::replace(
+                &mut self.owner.entries[index],
+                (key, value),
+            )),
+            Err(index) => {
+                if let Some(mut replacement) = self.replacement.take() {
+                    assert!(
+                        replacement.capacity() > self.owner.len(),
+                        "a replacement map allocation must admit the inserted entry"
+                    );
+                    replacement.append(&mut self.owner.entries);
+                    replacement.insert(index, (key, value));
+                    std::mem::swap(&mut self.owner.entries, &mut replacement);
+                    drop(replacement);
+                } else {
+                    assert!(
+                        self.owner.len() < self.owner.capacity(),
+                        "an in-place map insertion requires an admitted slot"
+                    );
+                    self.owner.entries.insert(index, (key, value));
+                }
+                None
+            }
+        }
     }
 }
 
@@ -337,5 +502,48 @@ mod tests {
             ))
         ));
         assert_eq!(map.capacity(), capacity);
+    }
+
+    #[test]
+    fn prepared_replacement_drop_leaves_the_live_map_unchanged() {
+        let mut map = OrderedMap::new();
+        map.try_insert("z".to_owned(), 1).unwrap();
+        let original = map.clone();
+        let plan = map.replacement_plan(1).unwrap();
+        let admitted = plan.envelope_bytes().unwrap();
+
+        let prepared = map
+            .prepare_replacement_insert(plan, "a".to_owned(), 2)
+            .unwrap();
+        assert!(prepared.replaces_allocation());
+        assert!(prepared.replacement_bytes() <= admitted);
+        drop(prepared);
+
+        assert_eq!(map, original);
+    }
+
+    #[test]
+    fn prepared_replacement_commits_sorted_storage_and_returns_the_retired_entry() {
+        let mut map = OrderedMap::new();
+        map.try_insert("z".to_owned(), 1).unwrap();
+
+        let insert_plan = map.replacement_plan(1).unwrap();
+        let inserted = map
+            .prepare_replacement_insert(insert_plan, "a".to_owned(), 2)
+            .unwrap()
+            .commit();
+        assert_eq!(inserted, None);
+        assert_eq!(
+            map.iter().collect::<Vec<_>>(),
+            vec![(&"a".to_owned(), &2), (&"z".to_owned(), &1)]
+        );
+
+        let replace_plan = map.replacement_plan(0).unwrap();
+        let retired = map
+            .prepare_replacement_insert(replace_plan, "a".to_owned(), 3)
+            .unwrap()
+            .commit();
+        assert_eq!(retired, Some(("a".to_owned(), 2)));
+        assert_eq!(map.get("a"), Some(&3));
     }
 }
