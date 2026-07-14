@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-07-10
-updated: 2026-07-12
+updated: 2026-07-13
 authors:
   - Codex
 decision_type: architecture
@@ -102,13 +102,10 @@ validation and after any final phase-complete progress delivery but before publi
 observer cancellation request at either point is terminal and cannot race with success publication.
 Tests assert work counts, not wall-clock latency.
 
-Detection uses the session-created `DetectionScope` rather than charging the coordinator around an
-opaque detector call. Only one `DetectionWorkPermit` may be outstanding. `begin_work(amount)` polls,
-rejects zero or more than 4 KiB, then charges attempted `DetectionWork`. `complete()` charges consumed
-work first, clears the outstanding permit, and performs the post-work poll, so cancellation after the
-chunk preserves its consumed evidence. Zero/repeated work admission, polling during a live permit,
-dropping it unfinished, or returning with it outstanding latches the first terminal cause. A detector
-cannot catch the opaque abort and return a match to suppress that latch.
+Detection uses the session-created `DetectionScope` so operation control is observed immediately
+before and after each admitted detector chunk; the coordinator is not charged around one opaque
+detector call. This ADR owns the cancellation/checkpoint guarantee, ADR 0022 owns attempted/consumed
+accounting, and ADR 0020 exclusively owns the permit state machine and terminal latch.
 
 Byte-oriented text profile, UTF-8, token-boundary, and owned-string copy loops poll at least once per
 4 KiB quantum unless they declare a stricter record boundary. Collection loops use a separately
@@ -253,7 +250,7 @@ Negative:
 | --- | --- |
 | Cancellation latency | Each large loop stops within its declared maximum additional work units. |
 | Full-stage cancellation | Cancellation before/during primary read, between/during detectors, during dependency read, parse, Scene construction, validation, and the pre-publication checkpoint returns failure; final progress-event cancellation cannot publish success. |
-| Detector capability | Detector work is single-outstanding and at most 4 KiB; begin polls then charges attempted, complete charges consumed then post-polls, and zero/repeated/poll-during/drop/forgotten-permit violations preserve the first terminal latch. |
+| Detector control integration | Every ADR 0020-admitted detector chunk observes operation control before and after work, and cancellation cannot be hidden by a detector outcome. |
 | Text and collection checkpoints | UTF-8/profile scans, tokenizer passes, and owned-string copies poll independently at no more than 4 KiB byte intervals; collection loops prove their declared item interval. |
 | Monotonic progress | Recorded events are phase-ordered and completed/total values never regress. |
 | Bounded delivery | Huge inputs respect event count/byte caps while ledger work remains exact. |

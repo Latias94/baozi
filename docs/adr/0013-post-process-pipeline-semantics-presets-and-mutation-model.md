@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-07-09
-updated: 2026-07-10
+updated: 2026-07-13
 authors:
   - Codex
 decision_type: architecture
@@ -66,9 +66,14 @@ provenance or diagnostics.
 
 ### Typed Requests Compile Before Editing
 
-A caller submits parameterized operation requests, a loss policy, and operation limits. The compiler
-inspects the input `ValidatedScene` read-only and either returns a `CompiledPostProcessPlan` or a typed
-compile failure before a `SceneEdit` begins.
+A caller submits parameterized operation requests, a postprocess-owned loss policy, and operation
+limits. The compiler inspects the input `ValidatedScene` read-only and either returns a
+`CompiledPostProcessPlan` or a typed compile failure before a `SceneEdit` begins.
+
+`baozi-postprocess` owns its loss-policy, diagnostic, step-outcome, report, and failure vocabulary.
+Those types may reuse runtime-neutral operation mechanisms from `baozi-operation`, but they do not
+depend on or reinterpret `baozi-import` loss, diagnostic, phase, or outcome types. Facade presets may
+compose both domains while preserving their distinct policies and reports.
 
 Each request resolves to the ADR 0032 operation descriptor. The compiler:
 
@@ -93,29 +98,69 @@ Public request types contain only implemented operations. A future operation lan
 typed parameters, descriptor, implementation, report schema, and tests; an unimplemented enum value
 or silent no-op is forbidden.
 
+The public composed outcome distinguishes three successful states:
+
+- `NotRequested`: no postprocess request was submitted; no plan, edit, or postprocess report exists,
+  and the imported validated scene retains its generation;
+- `Unchanged`: postprocess was requested and reports its compiled plan and step outcomes, but no
+  canonical write was required; no `SceneEdit` is committed and the input proof, digest, and
+  generation are returned unchanged; and
+- `Changed`: at least one declared write commits through `SceneEdit`, so ADR 0032 publishes a newly
+  validated scene with a fresh generation.
+
+An operation that is inapplicable or already satisfied may produce an explicit, coded unchanged step
+outcome; it cannot disappear silently. Compile or execution failure remains a failure and publishes
+no new scene. The compiler marks whether a plan has canonical writes before execution so an empty or
+effect-free plan never mints identity merely because the pipeline was invoked.
+
+Replay is determined by normalized operation identity (operation ID, semantic version, and normalized
+parameter digest), the current pre-invocation semantic-input stamp, an ADR 0032-qualified prior
+application record's post-write semantic-input stamp, and its postcondition; a prior-invocation flag
+is never execution authority. Every operation declares whether it is state-idempotent or
+intentionally repeatable.
+
+Every descriptor defines a versioned semantic-input-stamp schema over its complete declared read set
+and a versioned postcondition. The compiler recomputes that deterministic stamp from semantic values,
+not scene-generation tokens or process-local identity, before each invocation. It compares that
+current pre-invocation stamp only with a record selected by ADR 0032's deterministic conservative
+lookup; missing, deleted, or conflicting evidence forces execution, and the prior pre-write stamp is
+audit evidence. Operation identity, stamp schema, and postcondition version are machine-comparable
+parts of the compiled plan and step outcome; an opaque `already-ran` marker is insufficient.
+
+Replaying a state-idempotent operation with the same identity yields a coded unchanged step when its
+current pre-invocation stamp equals the qualified record's post-write stamp and its independently
+recomputed postcondition still holds. It performs no canonical write and appends no provenance. A
+changed declared input, parameter digest, or semantic version requires reevaluation. Missing or
+ambiguous history also reevaluates rather than guessing. A repeatable operation is reevaluated on
+every request and cannot be suppressed solely by matching history. A replayed plan is `Unchanged`
+only when every step is unchanged.
+
 ```mermaid
 flowchart LR
     Request[Typed requests + loss policy + limits] --> Compile[Compile against read-only ValidatedScene]
     Compile -->|invalid| CompileFailure[Typed compile failure]
     Compile -->|valid| Plan[Deterministic dependency plan]
-    Plan --> Edit[Execute through ADR 0032 SceneEdit boundary]
+    Plan --> Preflight{Any canonical write?}
+    Preflight -->|no| Unchanged[Execute read-only checks and report Unchanged]
+    Preflight -->|yes| Edit[Open ADR 0032 SceneEdit]
     Edit --> Steps[Bounded operation adapters]
     Steps --> Edit
-    Edit --> Outcome[Committed result or failure under ADR 0032]
+    Edit --> Outcome[Changed commit or failure under ADR 0032]
 ```
 
 ### Execution Orchestration and Reports
 
-The pipeline executes the complete compiled plan only through the `SceneEdit` transaction owned by
-ADR 0032; it never mutates canonical scene storage directly. The pipeline coordinates operation
-adapters and report assembly. ADR 0032 exclusively defines staging, commit, rollback, remap
-publication, derived-data validity, and preservation of the input generation on failure.
+The pipeline never mutates canonical scene storage directly. It executes read-only/unchanged steps
+without opening an edit, and executes any plan with a canonical write only through the `SceneEdit`
+transaction owned by ADR 0032. The pipeline coordinates operation adapters and report assembly. ADR
+0032 exclusively defines staging, commit, rollback, remap publication, derived-data validity, and
+preservation of the input generation on failure.
 
-A successful `PostProcessReport` contains the expanded plan and deterministic orchestration
-statistics, then incorporates without reinterpretation the diagnostics, losses, remaps,
-derived-data outcomes, resource evidence, and validated generation defined by ADRs 0032 and 0033.
-Post-processing does not mutate, relabel, or return an `ImportReport`; import outcome ownership
-remains separate.
+A successful `PostProcessReport` contains the explicit `Unchanged` or `Changed` outcome, expanded
+plan, deterministic orchestration statistics, postprocess-owned diagnostics and losses, and the
+remaps, derived-data outcomes, resource evidence, and validated generation defined by ADRs 0032 and
+0033. `Unchanged` reports contain no fabricated remap or committed-output evidence. Post-processing
+does not mutate, relabel, or return an `ImportReport`; import outcome ownership remains separate.
 
 ```mermaid
 sequenceDiagram
@@ -132,12 +177,17 @@ sequenceDiagram
         Pipeline-->>Caller: PostProcessFailure
     else compiled plan
         Compiler-->>Pipeline: deterministic plan
-        Pipeline->>Edit: execute through ADR 0032 transaction
-        loop dependency order
-            Edit->>Step: bounded operation
-            Step-->>Edit: declared operation effects
+        alt no canonical writes
+            Pipeline->>Step: execute bounded read-only/unchanged steps
+            Step-->>Pipeline: coded unchanged outcomes
+        else canonical write required
+            Pipeline->>Edit: open ADR 0032 transaction
+            loop dependency order
+                Edit->>Step: bounded operation
+                Step-->>Edit: declared operation effects
+            end
+            Edit-->>Pipeline: Changed commit or failure
         end
-        Edit-->>Pipeline: committed result or failure under ADR 0032
         Pipeline-->>Caller: PostProcessReport or PostProcessFailure
     end
 ```
@@ -342,6 +392,7 @@ Negative:
 | Dependency unsafe code regresses | High | Low | Exact resolved-version gate, sanitizer/fuzz execution, advisory/source audit, narrow adapter. |
 | A source or release artifact drops the upstream ISC notice | High | Low | Inspect the exact admitted dependency package and require third-party notice preservation in every package/release gate. |
 | Presets drift or advertise no-ops | Medium | Medium | Implemented-only recipes and expansion snapshots; remove aliases with no semantic difference. |
+| False idempotence suppresses required work | High | Medium | Bind replay to operation semantic version, normalized parameters, declared input stamp, postcondition, and explicit idempotence class. |
 
 ## Acceptance Criteria
 
@@ -350,7 +401,8 @@ Negative:
 | Compile before mutation | Invalid parameters, dependencies, conflicts, loss, or budgets fail with the input generation/digest unchanged. |
 | Deterministic plan | Request permutations with the same dependency semantics compile to the documented stable order and visible edges. |
 | Transactional integration | Injected step failure, cancellation, budget exhaustion, backend panic, and final validation failure prove the pipeline uses ADR 0032 without publishing staging. |
-| Evidence completeness | Every success returns operation stats, diagnostics, losses, remaps, invalidation/recompute evidence, and a valid output proof. |
+| Evidence completeness | Every requested success returns operation stats, diagnostics, losses, explicit step outcomes, and a valid scene proof; only `Changed` includes committed remaps/invalidation/recompute publication evidence. |
+| Replay semantics | A second state-idempotent call whose current pre-invocation stamp matches an ADR 0032-qualified prior post-write stamp and whose live postcondition holds is fully `Unchanged`; changed input/parameter/version or missing/ambiguous evidence reevaluates it, while repeatable operations always execute. |
 | Preset honesty | Every exposed preset expands only to implemented typed requests and its expansion is snapshot tested. |
 | Concave geometry | Clockwise and counter-clockwise fixtures match source area and winding after triangulation. |
 | Domain preservation | Material, Face, Corner, and Vertex data plus source-face remaps survive triangulation deterministically. |

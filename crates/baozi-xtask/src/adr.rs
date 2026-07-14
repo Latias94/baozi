@@ -235,10 +235,19 @@ pub fn check_repository(repository_root: &Path) -> CheckReport {
     }
 
     let mut path_policy = RepositoryPathPolicy::new(&root);
-    check_contiguous_ids(&adrs, &mut report.violations);
     check_adr_links(&root, &adrs, &mut path_policy, &mut report.violations);
     check_authority_graph(&root, &adrs, &mut path_policy, &mut report.violations);
-    check_index(&root, &adrs, &mut path_policy, &mut report.violations);
+    let retired_ids = check_index(&root, &adrs, &mut path_policy, &mut report.violations);
+    check_id_domain(&adrs, retired_ids.as_ref(), &mut report.violations);
+    if let Some(retired_ids) = retired_ids.as_ref() {
+        check_historical_id_domain(
+            &root,
+            &adrs,
+            retired_ids,
+            &path_policy,
+            &mut report.violations,
+        );
+    }
     report
 }
 
@@ -655,20 +664,272 @@ fn parse_heading(body: &str) -> Option<(u16, String)> {
     (id != 0).then(|| (id, title.to_owned()))
 }
 
-fn check_contiguous_ids(adrs: &BTreeMap<u16, Adr>, violations: &mut Vec<Violation>) {
-    let Some(maximum) = adrs.keys().next_back().copied() else {
+fn check_id_domain(
+    adrs: &BTreeMap<u16, Adr>,
+    retired_ids: Option<&BTreeSet<u16>>,
+    violations: &mut Vec<Violation>,
+) {
+    if adrs.is_empty() {
         violations.push(violation("ADR008", ADR_DIRECTORY, "no ADR files found"));
+    }
+    let Some(retired_ids) = retired_ids else {
         return;
     };
+
+    let Some(maximum) = adrs
+        .keys()
+        .copied()
+        .chain(retired_ids.iter().copied())
+        .max()
+    else {
+        return;
+    };
+
     for id in 1..=maximum {
-        if !adrs.contains_key(&id) {
-            violations.push(violation(
+        match (adrs.get(&id), retired_ids.contains(&id)) {
+            (Some(adr), true) => violations.push(violation(
+                "ADR008",
+                &adr.path,
+                format!("retired ADR ID {id:04} is reused by an active ADR file"),
+            )),
+            (None, false) => violations.push(violation(
                 "ADR008",
                 ADR_DIRECTORY,
-                format!("ADR sequence is missing {id:04}"),
+                format!("ADR ID {id:04} is neither active nor retired"),
+            )),
+            (Some(_), false) | (None, true) => {}
+        }
+    }
+}
+
+fn check_historical_id_domain(
+    root: &Path,
+    adrs: &BTreeMap<u16, Adr>,
+    retired_ids: &BTreeSet<u16>,
+    path_policy: &RepositoryPathPolicy,
+    violations: &mut Vec<Violation>,
+) {
+    match &path_policy.git_worktree {
+        GitWorktree::NotRepository => {
+            violations.push(violation(
+                "ADR008",
+                INDEX_FILE,
+                "cannot verify historical ADR IDs outside a Git worktree",
+            ));
+            return;
+        }
+        GitWorktree::Unavailable(message) => {
+            violations.push(violation(
+                "ADR008",
+                INDEX_FILE,
+                format!("cannot verify historical ADR IDs: {message}"),
+            ));
+            return;
+        }
+        GitWorktree::Available => {}
+    }
+
+    let revision_count = match git_text(root, &["rev-list", "--count", "--all"]).and_then(|value| {
+        value
+            .trim()
+            .parse::<usize>()
+            .map_err(|error| format!("git rev-list returned an invalid revision count: {error}"))
+    }) {
+        Ok(0) => return,
+        Ok(count) => count,
+        Err(message) => {
+            violations.push(violation("ADR008", INDEX_FILE, message));
+            return;
+        }
+    };
+
+    match git_text(root, &["rev-parse", "--is-shallow-repository"]) {
+        Ok(value) if value.trim() == "false" => {}
+        Ok(value) if value.trim() == "true" => {
+            violations.push(violation(
+                "ADR008",
+                INDEX_FILE,
+                format!(
+                    "cannot verify retired-ID permanence from a shallow Git history containing {revision_count} revision(s); fetch complete history"
+                ),
+            ));
+            return;
+        }
+        Ok(value) => {
+            violations.push(violation(
+                "ADR008",
+                INDEX_FILE,
+                format!(
+                    "git rev-parse returned an invalid shallow-repository value: '{}'",
+                    value.trim()
+                ),
+            ));
+            return;
+        }
+        Err(message) => {
+            violations.push(violation("ADR008", INDEX_FILE, message));
+            return;
+        }
+    }
+
+    let additions = match git_text(
+        root,
+        &[
+            "-c",
+            "core.quotepath=false",
+            "log",
+            "--full-history",
+            "--diff-merges=separate",
+            "--format=",
+            "--name-only",
+            "--diff-filter=A",
+            "--no-renames",
+            "HEAD",
+            "--",
+            ADR_DIRECTORY,
+        ],
+    ) {
+        Ok(value) => value,
+        Err(message) => {
+            violations.push(violation("ADR008", INDEX_FILE, message));
+            return;
+        }
+    };
+    let historical_ids = additions
+        .lines()
+        .filter_map(|line| {
+            Path::new(line.trim())
+                .file_name()
+                .and_then(|value| value.to_str())
+                .and_then(parse_file_id)
+        })
+        .collect::<BTreeSet<_>>();
+
+    for id in &historical_ids {
+        if !adrs.contains_key(id) && !retired_ids.contains(id) {
+            violations.push(violation(
+                "ADR008",
+                INDEX_FILE,
+                format!(
+                    "historically assigned ADR ID {id:04} is neither active nor retired in the current registry"
+                ),
             ));
         }
     }
+    if let Some(historical_maximum) = historical_ids.last().copied() {
+        for id in adrs.keys().filter(|id| !historical_ids.contains(id)) {
+            if *id <= historical_maximum {
+                violations.push(violation(
+                    "ADR008",
+                    &adrs[id].path,
+                    format!(
+                        "new ADR ID {id:04} must be greater than historical maximum {historical_maximum:04}"
+                    ),
+                ));
+            }
+        }
+    }
+
+    let git_prefix = match git_text(root, &["rev-parse", "--show-prefix"]) {
+        Ok(value) => value.trim().to_owned(),
+        Err(message) => {
+            violations.push(violation("ADR008", INDEX_FILE, message));
+            return;
+        }
+    };
+    let registry_commits = match git_text(
+        root,
+        &[
+            "log",
+            "--full-history",
+            "--diff-merges=separate",
+            "--diff-filter=AMCRT",
+            "--no-patch",
+            "--format=%H",
+            "HEAD",
+            "--",
+            INDEX_FILE,
+        ],
+    ) {
+        Ok(value) => value,
+        Err(message) => {
+            violations.push(violation("ADR008", INDEX_FILE, message));
+            return;
+        }
+    };
+    let mut historical_retired = BTreeMap::<u16, String>::new();
+    for commit in registry_commits
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+    {
+        if !matches!(commit.len(), 40 | 64) || !commit.bytes().all(|byte| byte.is_ascii_hexdigit())
+        {
+            violations.push(violation(
+                "ADR008",
+                INDEX_FILE,
+                format!("git log returned an invalid commit object ID: '{commit}'"),
+            ));
+            return;
+        }
+        let object = format!("{commit}:{git_prefix}{INDEX_FILE}");
+        let content = match git_text(root, &["show", &object]) {
+            Ok(content) => content,
+            Err(message) => {
+                violations.push(violation(
+                    "ADR008",
+                    INDEX_FILE,
+                    format!(
+                        "cannot read historical retired-ID registry at {}: {message}",
+                        commit.chars().take(12).collect::<String>()
+                    ),
+                ));
+                return;
+            }
+        };
+        let Ok(rows) = parse_retired_id_table(&content) else {
+            continue;
+        };
+        for row in rows {
+            historical_retired
+                .entry(row.id)
+                .or_insert_with(|| commit.chars().take(12).collect());
+        }
+    }
+    for (id, commit) in historical_retired {
+        if !retired_ids.contains(&id) {
+            violations.push(violation(
+                "ADR008",
+                INDEX_FILE,
+                format!(
+                    "retired ADR ID {id:04} recorded in Git history at {commit} must remain retired"
+                ),
+            ));
+        }
+    }
+}
+
+fn git_text(root: &Path, arguments: &[&str]) -> Result<String, String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(arguments)
+        .output()
+        .map_err(|error| format!("cannot execute git {}: {error}", arguments.join(" ")))?;
+    if !output.status.success() {
+        return Err(format!(
+            "git {} failed with status {}: {}",
+            arguments.join(" "),
+            display_status(&output.status),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    String::from_utf8(output.stdout).map_err(|error| {
+        format!(
+            "git {} returned non-UTF-8 output: {error}",
+            arguments.join(" ")
+        )
+    })
 }
 
 #[derive(Debug, Clone)]
@@ -1614,7 +1875,7 @@ fn check_index(
     adrs: &BTreeMap<u16, Adr>,
     path_policy: &mut RepositoryPathPolicy,
     violations: &mut Vec<Violation>,
-) {
+) -> Option<BTreeSet<u16>> {
     let index_path = match path_policy.resolve_target(Path::new(INDEX_FILE)) {
         Ok(path) if path.is_file() => path,
         Ok(_) => {
@@ -1623,7 +1884,7 @@ fn check_index(
                 INDEX_FILE,
                 "ADR index must resolve to a regular repository file",
             ));
-            return;
+            return None;
         }
         Err(message) => {
             violations.push(violation(
@@ -1631,7 +1892,7 @@ fn check_index(
                 INDEX_FILE,
                 format!("ADR index is not a valid repository path: {message}"),
             ));
-            return;
+            return None;
         }
     };
     let content = match fs::read_to_string(&index_path) {
@@ -1642,7 +1903,14 @@ fn check_index(
                 INDEX_FILE,
                 format!("cannot read ADR index: {error}"),
             ));
-            return;
+            return None;
+        }
+    };
+    let retired_ids = match parse_retired_id_table(&content) {
+        Ok(rows) => Some(validate_retired_id_rows(rows, violations)),
+        Err(message) => {
+            violations.push(violation("ADR008", INDEX_FILE, message));
+            None
         }
     };
     let parsed_links = markdown_links(&content);
@@ -1688,12 +1956,27 @@ fn check_index(
         Ok(rows) => rows,
         Err(message) => {
             violations.push(violation("ADR016", INDEX_FILE, message));
-            return;
+            return retired_ids;
         }
     };
     let mut rows = BTreeMap::<u16, Vec<IndexRow>>::new();
     for row in parsed_rows {
         rows.entry(row.id).or_default().push(row);
+    }
+
+    if let Some(retired_ids) = retired_ids.as_ref() {
+        for row in rows.values().flatten() {
+            if retired_ids.contains(&row.id) {
+                violations.push(violation(
+                    "ADR008",
+                    INDEX_FILE,
+                    format!(
+                        "line {}: retired ADR ID {:04} must not appear in the active ADR index",
+                        row.line, row.id
+                    ),
+                ));
+            }
+        }
     }
 
     for (id, adr) in adrs {
@@ -1776,6 +2059,141 @@ fn check_index(
             ));
         }
     }
+    retired_ids
+}
+
+#[derive(Debug)]
+struct RetiredIdRow {
+    id: u16,
+    line: usize,
+}
+
+fn parse_retired_id_table(content: &str) -> Result<Vec<RetiredIdRow>, String> {
+    const HEADING: &str = "## Retired ADR IDs";
+    const HEADER: &str = "| ADR ID | Disposition | Reason |";
+    const SEPARATOR: &str = "| --- | --- | --- |";
+
+    let lines = markdown_visible_lines(content)?;
+    let headings = lines
+        .iter()
+        .enumerate()
+        .filter_map(|(index, (_, line))| (*line == HEADING).then_some(index))
+        .collect::<Vec<_>>();
+    let [heading_index] = headings.as_slice() else {
+        return Err(format!(
+            "ADR index must contain exactly one canonical '{HEADING}' heading"
+        ));
+    };
+    let section_end = lines
+        .iter()
+        .enumerate()
+        .skip(heading_index + 1)
+        .find_map(|(index, (_, line))| line.starts_with("## ").then_some(index))
+        .unwrap_or(lines.len());
+    let headers = lines
+        .iter()
+        .enumerate()
+        .filter_map(|(index, (_, line))| (*line == HEADER).then_some(index))
+        .collect::<Vec<_>>();
+    let [header_index] = headers.as_slice() else {
+        return Err(format!(
+            "retired-ID registry must contain exactly one canonical '{HEADER}' table header"
+        ));
+    };
+    if *header_index <= *heading_index || *header_index >= section_end {
+        return Err("retired-ID registry table must be inside its canonical section".to_owned());
+    }
+    let Some((separator_line, separator)) = lines.get(header_index + 1) else {
+        return Err("retired-ID registry table is missing its separator row".to_owned());
+    };
+    if *separator != SEPARATOR {
+        return Err(format!(
+            "line {separator_line}: retired-ID registry must use canonical separator '{SEPARATOR}'"
+        ));
+    }
+
+    let mut rows = Vec::new();
+    for (line_number, line) in lines.iter().take(section_end).skip(header_index + 2) {
+        if line.is_empty() {
+            break;
+        }
+        if !line.starts_with('|') {
+            if line.trim_start().starts_with('|') {
+                return Err(format!(
+                    "line {line_number}: retired-ID registry rows must not be indented"
+                ));
+            }
+            if line.contains('|') {
+                return Err(format!(
+                    "line {line_number}: retired-ID registry rows must use canonical leading and trailing pipes"
+                ));
+            }
+            break;
+        }
+        let row = parse_retired_id_row(*line_number, line)
+            .ok_or_else(|| format!("line {line_number}: malformed row in retired-ID registry"))?;
+        rows.push(row);
+    }
+    Ok(rows)
+}
+
+fn parse_retired_id_row(line_number: usize, line: &str) -> Option<RetiredIdRow> {
+    let columns = line.split('|').map(str::trim).collect::<Vec<_>>();
+    if columns.len() != 5 || !columns[0].is_empty() || !columns[4].is_empty() {
+        return None;
+    }
+    let id = columns[1];
+    if id.len() != 4
+        || !id.bytes().all(|byte| byte.is_ascii_digit())
+        || columns[2] != "Permanently unassigned"
+        || columns[3].is_empty()
+        || line != format!("| {id} | {} | {} |", columns[2], columns[3])
+    {
+        return None;
+    }
+    let id = id.parse().ok()?;
+    (id != 0).then_some(RetiredIdRow {
+        id,
+        line: line_number,
+    })
+}
+
+fn validate_retired_id_rows(
+    rows: Vec<RetiredIdRow>,
+    violations: &mut Vec<Violation>,
+) -> BTreeSet<u16> {
+    let mut ids = BTreeSet::new();
+    let mut first_lines = BTreeMap::new();
+    let mut previous = None;
+    for row in rows {
+        if let Some(previous_id) = previous
+            && row.id < previous_id
+        {
+            violations.push(violation(
+                "ADR008",
+                INDEX_FILE,
+                format!(
+                    "line {}: retired ADR ID {:04} is not numerically sorted after {:04}",
+                    row.line, row.id, previous_id
+                ),
+            ));
+        }
+        if let Some(first_line) = first_lines.get(&row.id) {
+            violations.push(violation(
+                "ADR008",
+                INDEX_FILE,
+                format!(
+                    "line {}: retired ADR ID {:04} duplicates line {first_line}",
+                    row.line, row.id
+                ),
+            ));
+        } else {
+            first_lines.insert(row.id, row.line);
+        }
+        previous = Some(row.id);
+        ids.insert(row.id);
+    }
+    ids
 }
 
 fn parse_index_table(content: &str) -> Result<Vec<IndexRow>, String> {
@@ -1804,7 +2222,20 @@ fn parse_index_table(content: &str) -> Result<Vec<IndexRow>, String> {
 
     let mut rows = Vec::new();
     for (line_number, line) in lines.iter().skip(header_index + 2) {
-        if line.is_empty() || !line.starts_with('|') {
+        if line.is_empty() {
+            break;
+        }
+        if !line.starts_with('|') {
+            if line.trim_start().starts_with('|') {
+                return Err(format!(
+                    "line {line_number}: active ADR index rows must not be indented"
+                ));
+            }
+            if line.contains('|') {
+                return Err(format!(
+                    "line {line_number}: active ADR index rows must use canonical leading and trailing pipes"
+                ));
+            }
             break;
         }
         let row = parse_index_row(*line_number, line).ok_or_else(|| {
@@ -2282,6 +2713,345 @@ mod tests {
         let report = check_repository(&repository.root);
 
         assert_eq!(report.adrs_checked, 3);
+        assert!(report.violations.is_empty(), "{:#?}", report.violations);
+    }
+
+    #[test]
+    fn accepts_an_internal_gap_registered_as_retired() {
+        let repository = TestRepository::new();
+        repository.write_fixture();
+        repository.write(
+            "docs/adr/0005-later-boundary.md",
+            &proposed_adr_with_identity(5, "Later Boundary"),
+        );
+        let mut rows = fixture_index_rows();
+        rows.push(index_row(
+            5,
+            "0005-later-boundary.md",
+            "Later Boundary",
+            "Proposed",
+        ));
+        repository.write_index_with_retired(&[retired_id_row(4)], &rows);
+
+        let report = check_repository(&repository.root);
+
+        assert!(report.violations.is_empty(), "{:#?}", report.violations);
+    }
+
+    #[test]
+    fn rejects_an_unclassified_id_gap() {
+        let repository = TestRepository::new();
+        repository.write_fixture();
+        repository.write(
+            "docs/adr/0005-later-boundary.md",
+            &proposed_adr_with_identity(5, "Later Boundary"),
+        );
+        let mut rows = fixture_index_rows();
+        rows.push(index_row(
+            5,
+            "0005-later-boundary.md",
+            "Later Boundary",
+            "Proposed",
+        ));
+        repository.write_index(&rows);
+
+        let report = check_repository(&repository.root);
+
+        assert_has_violation(&report, "ADR008", "0004 is neither active nor retired");
+    }
+
+    #[test]
+    fn rejects_active_file_and_index_reuse_of_a_retired_id() {
+        let repository = TestRepository::new();
+        repository.write_fixture();
+        repository.write_index_with_retired(&[retired_id_row(2)], &fixture_index_rows());
+
+        let report = check_repository(&repository.root);
+
+        assert_has_violation(&report, "ADR008", "0002 is reused by an active ADR file");
+        assert_has_violation(
+            &report,
+            "ADR008",
+            "0002 must not appear in the active ADR index",
+        );
+    }
+
+    #[test]
+    fn rejects_index_reuse_of_a_retired_id_without_an_active_file() {
+        let repository = TestRepository::new();
+        repository.write_fixture();
+        let mut rows = fixture_index_rows();
+        rows.push(index_row(
+            4,
+            "0004-retired-decision.md",
+            "Retired Decision",
+            "Rejected",
+        ));
+        repository.write_index_with_retired(&[retired_id_row(4)], &rows);
+
+        let report = check_repository(&repository.root);
+
+        assert_has_violation(
+            &report,
+            "ADR008",
+            "0004 must not appear in the active ADR index",
+        );
+    }
+
+    #[test]
+    fn pipe_delimited_gfm_rows_cannot_escape_active_index_validation() {
+        let repository = TestRepository::new();
+        repository.write_fixture();
+        let mut rows = fixture_index_rows();
+        rows.push(
+            " [0004](0001-old-decision.md) | Retired Reuse | Accepted | Normative |".to_owned(),
+        );
+        repository.write_index_with_retired(&[retired_id_row(4)], &rows);
+
+        let report = check_repository(&repository.root);
+
+        assert_has_violation(
+            &report,
+            "ADR016",
+            "active ADR index rows must use canonical leading and trailing pipes",
+        );
+    }
+
+    #[test]
+    fn rejects_duplicate_and_unsorted_retired_ids() {
+        let duplicate_repository = TestRepository::new();
+        duplicate_repository.write_fixture();
+        duplicate_repository.write_index_with_retired(
+            &[retired_id_row(4), retired_id_row(4)],
+            &fixture_index_rows(),
+        );
+        assert_has_violation(
+            &check_repository(&duplicate_repository.root),
+            "ADR008",
+            "retired ADR ID 0004 duplicates",
+        );
+
+        let unsorted_repository = TestRepository::new();
+        unsorted_repository.write_fixture();
+        unsorted_repository.write_index_with_retired(
+            &[retired_id_row(5), retired_id_row(4)],
+            &fixture_index_rows(),
+        );
+        assert_has_violation(
+            &check_repository(&unsorted_repository.root),
+            "ADR008",
+            "retired ADR ID 0004 is not numerically sorted after 0005",
+        );
+    }
+
+    #[test]
+    fn rejects_noncanonical_retired_id_rows() {
+        for malformed_row in [
+            "| 28 | Permanently unassigned | Missing zero padding. |",
+            "| 0004| Permanently unassigned | Missing canonical spacing. |",
+            "| 0000 | Permanently unassigned | Zero is not an ADR ID. |",
+            "| 0004 | Temporarily unavailable | Disposition is not permanent. |",
+        ] {
+            let repository = TestRepository::new();
+            repository.write_fixture();
+            repository.write_index_with_retired(&[malformed_row.to_owned()], &fixture_index_rows());
+
+            assert_has_violation(
+                &check_repository(&repository.root),
+                "ADR008",
+                "malformed row in retired-ID registry",
+            );
+        }
+    }
+
+    #[test]
+    fn fenced_code_cannot_supply_the_retired_id_registry() {
+        let repository = TestRepository::new();
+        repository.write_fixture();
+        let rows = fixture_index_rows().join("\n");
+        repository.write(
+            "docs/adr/README.md",
+            &format!(
+                "# ADR Index\n\n## Retired ADR IDs\n\n```markdown\n| ADR ID | Disposition | Reason |\n| --- | --- | --- |\n```\n\n## Index\n\n| ADR | Title | Status | Authority |\n| --- | --- | --- | --- |\n{rows}\n"
+            ),
+        );
+
+        let report = check_repository(&repository.root);
+
+        assert_has_violation(
+            &report,
+            "ADR008",
+            "retired-ID registry must contain exactly one canonical",
+        );
+    }
+
+    #[test]
+    fn indented_gfm_rows_cannot_escape_retired_id_validation() {
+        let repository = TestRepository::new();
+        repository.write_fixture();
+        repository.write_index_with_retired(
+            &[
+                retired_id_row(4),
+                " | 0002 | Permanently unassigned | Active ID hidden by indentation. |".to_owned(),
+            ],
+            &fixture_index_rows(),
+        );
+
+        let report = check_repository(&repository.root);
+
+        assert_has_violation(
+            &report,
+            "ADR008",
+            "retired-ID registry rows must not be indented",
+        );
+    }
+
+    #[test]
+    fn pipe_delimited_gfm_rows_cannot_escape_retired_id_validation() {
+        let repository = TestRepository::new();
+        repository.write_fixture();
+        repository.write_index_with_retired(
+            &[
+                retired_id_row(4),
+                "0002 | Permanently unassigned | Active ID without a leading pipe. |".to_owned(),
+            ],
+            &fixture_index_rows(),
+        );
+
+        let report = check_repository(&repository.root);
+
+        assert_has_violation(
+            &report,
+            "ADR008",
+            "retired-ID registry rows must use canonical leading and trailing pipes",
+        );
+    }
+
+    #[test]
+    fn rejects_reuse_after_a_retired_id_is_removed_from_the_worktree_registry() {
+        let repository = TestRepository::new();
+        repository.write_fixture();
+        repository.write(
+            "docs/adr/0004-retired-decision.md",
+            &proposed_adr_with_identity(4, "Retired Decision"),
+        );
+        let mut active_rows = fixture_index_rows();
+        active_rows.push(index_row(
+            4,
+            "0004-retired-decision.md",
+            "Retired Decision",
+            "Proposed",
+        ));
+        repository.write_index(&active_rows);
+        repository.initialize_git();
+        repository.commit_all("add fourth ADR");
+
+        fs::remove_file(repository.root.join("docs/adr/0004-retired-decision.md"))
+            .expect("remove retired ADR fixture");
+        repository.write_index_with_retired(&[retired_id_row(4)], &fixture_index_rows());
+        repository.commit_all("retire fourth ADR");
+
+        repository.write(
+            "docs/adr/0004-retired-decision.md",
+            &proposed_adr_with_identity(4, "Retired Decision"),
+        );
+        repository.write_index(&active_rows);
+
+        let report = check_repository(&repository.root);
+
+        assert_has_violation(
+            &report,
+            "ADR008",
+            "retired ADR ID 0004 recorded in Git history",
+        );
+    }
+
+    #[test]
+    fn rejects_dropping_a_historically_assigned_high_id_without_retiring_it() {
+        let repository = TestRepository::new();
+        repository.write_fixture();
+        repository.initialize_git();
+        repository.commit_all("establish ADR history");
+
+        fs::remove_file(repository.root.join("docs/adr/0003-deferred-boundary.md"))
+            .expect("remove historical ADR fixture");
+        let rows = fixture_index_rows();
+        repository.write_index(&rows[..2]);
+
+        let report = check_repository(&repository.root);
+
+        assert_has_violation(
+            &report,
+            "ADR008",
+            "historically assigned ADR ID 0003 is neither active nor retired",
+        );
+    }
+
+    #[test]
+    fn rejects_a_new_active_id_below_the_historical_maximum() {
+        let repository = TestRepository::new();
+        repository.write_fixture();
+        fs::remove_file(repository.root.join("docs/adr/0002-canonical-decision.md"))
+            .expect("remove low-ID history fixture");
+        let rows = fixture_index_rows();
+        repository.write_index(&[rows[0].clone(), rows[2].clone()]);
+        repository.initialize_git();
+        repository.commit_all("establish history with a low gap");
+
+        repository.write(
+            "docs/adr/0002-canonical-decision.md",
+            &accepted_replacement(),
+        );
+        repository.write_index(&fixture_index_rows());
+
+        let report = check_repository(&repository.root);
+
+        assert_has_violation(
+            &report,
+            "ADR008",
+            "new ADR ID 0002 must be greater than historical maximum 0003",
+        );
+    }
+
+    #[test]
+    fn accepts_reclassifying_a_historical_active_id_as_retired() {
+        let repository = TestRepository::new();
+        repository.write_fixture();
+        repository.initialize_git();
+        repository.commit_all("establish ADR history");
+
+        fs::remove_file(repository.root.join("docs/adr/0003-deferred-boundary.md"))
+            .expect("remove retired ADR fixture");
+        let rows = fixture_index_rows();
+        repository.write_index_with_retired(&[retired_id_row(3)], &rows[..2]);
+
+        let report = check_repository(&repository.root);
+
+        assert!(report.violations.is_empty(), "{:#?}", report.violations);
+    }
+
+    #[test]
+    fn historical_registry_reads_are_relative_to_a_nested_repository_root() {
+        let repository = TestRepository::new();
+        repository.write(
+            "docs/adr/README.md",
+            &index_document(&[retired_id_row(4)], &fixture_index_rows()),
+        );
+        repository.write("nested/Cargo.toml", "[workspace]\n");
+        repository.write("nested/docs/adr/0001-old-decision.md", &superseded_adr());
+        repository.write(
+            "nested/docs/adr/0002-canonical-decision.md",
+            &accepted_replacement(),
+        );
+        repository.write("nested/docs/adr/0003-deferred-boundary.md", &proposed_adr());
+        repository.write(
+            "nested/docs/adr/README.md",
+            &index_document(&[], &fixture_index_rows()),
+        );
+        repository.commit_all("add root and nested ADR registries");
+
+        let report = check_repository(&repository.root.join("nested"));
+
         assert!(report.violations.is_empty(), "{:#?}", report.violations);
     }
 
@@ -3094,6 +3864,17 @@ mod tests {
         );
     }
 
+    fn assert_has_violation(report: &CheckReport, code: &str, message: &str) {
+        assert!(
+            report
+                .violations
+                .iter()
+                .any(|violation| violation.code == code && violation.message.contains(message)),
+            "expected {code} containing '{message}', got {:#?}",
+            report.violations
+        );
+    }
+
     #[cfg(unix)]
     fn create_file_symlink(target: &Path, link: &Path) -> std::io::Result<()> {
         std::os::unix::fs::symlink(target, link)
@@ -3120,7 +3901,9 @@ mod tests {
             }
             fs::create_dir_all(root.join("docs/adr")).expect("create test ADR directory");
             fs::write(root.join("Cargo.toml"), "[workspace]\n").expect("write test workspace");
-            Self { root }
+            let repository = Self { root };
+            repository.initialize_git();
+            repository
         }
 
         fn write_fixture(&self) {
@@ -3130,32 +3913,15 @@ mod tests {
                 &accepted_replacement(),
             );
             self.write("docs/adr/0003-deferred-boundary.md", &proposed_adr());
-            self.write_index(&[
-                index_row(1, "0001-old-decision.md", "Old Decision", "Superseded"),
-                index_row(
-                    2,
-                    "0002-canonical-decision.md",
-                    "Canonical Decision",
-                    "Accepted",
-                ),
-                index_row(
-                    3,
-                    "0003-deferred-boundary.md",
-                    "Deferred Boundary",
-                    "Proposed",
-                ),
-            ]);
+            self.write_index(&fixture_index_rows());
         }
 
         fn write_index(&self, rows: &[String]) {
-            let mut content = String::from(
-                "# ADR Index\n\n| ADR | Title | Status | Authority |\n| --- | --- | --- | --- |\n",
-            );
-            for row in rows {
-                content.push_str(row);
-                content.push('\n');
-            }
-            self.write("docs/adr/README.md", &content);
+            self.write_index_with_retired(&[], rows);
+        }
+
+        fn write_index_with_retired(&self, retired_rows: &[String], rows: &[String]) {
+            self.write("docs/adr/README.md", &index_document(retired_rows, rows));
         }
 
         fn write(&self, relative: &str, content: &str) {
@@ -3192,6 +3958,40 @@ mod tests {
                 String::from_utf8_lossy(&output.stderr)
             );
         }
+
+        fn commit_all(&self, message: &str) {
+            let add = Command::new("git")
+                .args(["add", "--all"])
+                .current_dir(&self.root)
+                .output()
+                .expect("stage test repository");
+            assert!(
+                add.status.success(),
+                "git add failed: {}",
+                String::from_utf8_lossy(&add.stderr)
+            );
+            let commit = Command::new("git")
+                .args([
+                    "-c",
+                    "user.name=Baozi ADR Test",
+                    "-c",
+                    "user.email=adr-test@baozi.invalid",
+                    "-c",
+                    "commit.gpgsign=false",
+                    "commit",
+                    "--quiet",
+                    "-m",
+                    message,
+                ])
+                .current_dir(&self.root)
+                .output()
+                .expect("commit test repository");
+            assert!(
+                commit.status.success(),
+                "git commit failed: {}",
+                String::from_utf8_lossy(&commit.stderr)
+            );
+        }
     }
 
     impl Drop for TestRepository {
@@ -3223,6 +4023,13 @@ mod tests {
             .to_owned()
     }
 
+    fn proposed_adr_with_identity(id: u16, title: &str) -> String {
+        proposed_adr().replace(
+            "# ADR 0003: Deferred Boundary",
+            &format!("# ADR {id:04}: {title}"),
+        )
+    }
+
     fn accepted_deferred_adr_with_identity(id: u16, title: &str, tracer: &str) -> String {
         proposed_adr()
             .replace("status: proposed", "status: accepted")
@@ -3248,5 +4055,45 @@ mod tests {
             _ => "Historical",
         };
         format!("| [{id:04}]({target}) | {title} | {status} | {authority} |")
+    }
+
+    fn retired_id_row(id: u16) -> String {
+        format!("| {id:04} | Permanently unassigned | Removed before the architecture baseline. |")
+    }
+
+    fn fixture_index_rows() -> Vec<String> {
+        vec![
+            index_row(1, "0001-old-decision.md", "Old Decision", "Superseded"),
+            index_row(
+                2,
+                "0002-canonical-decision.md",
+                "Canonical Decision",
+                "Accepted",
+            ),
+            index_row(
+                3,
+                "0003-deferred-boundary.md",
+                "Deferred Boundary",
+                "Proposed",
+            ),
+        ]
+    }
+
+    fn index_document(retired_rows: &[String], rows: &[String]) -> String {
+        let mut content = String::from(
+            "# ADR Index\n\n## Retired ADR IDs\n\n| ADR ID | Disposition | Reason |\n| --- | --- | --- |\n",
+        );
+        for row in retired_rows {
+            content.push_str(row);
+            content.push('\n');
+        }
+        content.push_str(
+            "\n## Index\n\n| ADR | Title | Status | Authority |\n| --- | --- | --- | --- |\n",
+        );
+        for row in rows {
+            content.push_str(row);
+            content.push('\n');
+        }
+        content
     }
 }

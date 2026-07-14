@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-07-09
-updated: 2026-07-12
+updated: 2026-07-13
 authors:
   - Codex
 decision_type: architecture
@@ -141,13 +141,11 @@ execution. Rust visibility cannot prevent a format crate from calling the public
 validator, but this trait has no `ValidatedScene` return path; import authority always receives a draft
 and validates it again under ADR 0020.
 
-Detection receives a session-created `DetectionScope`, not a raw coordinator or ledger. The scope
-admits at most one linear `DetectionWorkPermit` at a time. `begin_work(amount)` polls control, rejects
-zero or more than 4 KiB, and charges attempted detection work; `complete()` charges consumed work and
-then polls again. A second permit, polling while work is outstanding, dropping an unfinished permit,
-or returning with one outstanding latches the first terminal cause. `DetectionAbort` is opaque,
-non-constructible, and neither `Send` nor `Sync`; catching it and returning a normal outcome cannot
-override the session latch.
+For every invoked detector, the registry passes that invocation's session-created `DetectionScope`
+unchanged; it does not wrap the scope with a second coordinator or ledger. ADR 0020 exclusively owns
+the per-invocation scope view, detection permit, abort, and terminal-latch contract. This ADR owns
+registration health and poisoning around the trait invocation, which cannot reinterpret a scope
+abort as registry health or a normal outcome.
 
 The codec is part of the registered importer capability because only that importer can define its
 concrete type and schema. It exposes object-safe schema/version/runtime-type inspection and bounded
@@ -176,19 +174,17 @@ least:
 - session-terminal capability-produced `ScopeAbort`, returned directly by ParseScope dependency/IO/
   budget/control/diagnostic/builder/core methods and normally propagated with `?`; and
 - `FormatFailureEnvelope`, which contains the sealed selected descriptor, stable code, bounded packed
-  details, and the retained concrete format source admitted through the object-safe
-  `FormatFailureSource` interface.
+  details, and no retained format/backend/plugin object.
 
 A format crate creates the second branch only through a selected-scope controlled constructor or an
-equivalent capability-bearing conversion. Before trusted source callbacks, that path rejects an outer
-source payload above 4 KiB and reserves the source plus packed-detail storage. It then visits the
-source through a bounded sink, seals the selected `Arc<FormatDescriptor>` and stable code, packs
-admitted details fallibly, and retains the source as the envelope's direct `Error::source()`. The
-envelope provides read-only `downcast_ref<T: FormatFailureSource>()`; the retained format source may
-preserve a standard backend/library source chain behind it. `Debug` and `Display` omit that private
-chain, and no concrete backend type appears in public fields or stable schemas. There is no general
-`From<dyn Error>`, public enum variant, or constructor that can relabel a scope abort as a format
-failure.
+equivalent capability-bearing conversion. That path reserves bounded packed-detail storage, visits a
+borrowed detail producer synchronously through a bounded sink, seals the selected declarative
+`Arc<FormatDescriptor>` and stable code, and packs admitted details fallibly into Baozi-owned inert
+evidence. The producer and any native backend/library error are not retained. `Error::source()` may
+return only a Baozi-owned inert evidence value; there is no concrete-source downcast or foreign source
+chain. The envelope contains no extension trait object, callback, function pointer, native handle, or
+plugin-owned destructor. There is no general `From<dyn Error>`, public enum variant, or constructor
+that can relabel a scope abort as a format failure.
 
 Scope capability methods latch their first session-terminal abort before returning it. Consequently,
 catching and discarding the opaque value cannot allow a trusted importer to return successful draft
@@ -206,9 +202,25 @@ controlled conversion, validation call, lifecycle evidence, and outcome composit
 private fields and validated construction so extensions cannot publish malformed IDs, duplicate
 extensions, unbounded notes, or impossible maturity/capability combinations.
 
-Human support tables and format pages are derived views or checked mirrors. A maturity claim requires
-the structured evidence owned by the support/maturity contracts; descriptor construction alone cannot
-promote a format.
+Human support tables and format pages are derived views or checked mirrors. Maturity level and
+evidence authority are separate descriptor fields. External registration defaults to `Unverified`;
+an extension may make a visibly issuer-scoped `SelfAttested` claim with its own evidence reference,
+but cannot construct `BaoziVerified`. Only a Baozi-managed evidence-inventory entry for the exact
+format/profile/implementation identity may supply the registry builder with `BaoziVerified`
+authority. Descriptor construction alone cannot promote a format or issue a Baozi Beta/Stable claim;
+ADR 0011 owns the evidence and transition rules.
+
+At freeze, the builder derives the canonical default-profile subject identity from the descriptor,
+compiled defaults, backend/feature composition, and target metadata, then matches any managed
+verification token against both subject and verification-record identities. A registration claiming
+`BaoziVerified` with a missing, stale, ambiguous, or mismatched token fails freeze atomically; it is
+never silently downgraded. Structurally valid `Unverified` and `SelfAttested` registrations may
+freeze and are never implicitly promoted by a nearby inventory entry.
+
+Request compilation derives the actual option-profile identity. A valid request outside the
+descriptor's verified subjects may execute, but its support evidence is `Unverified` or issuer-scoped
+`SelfAttested`. An orphan managed inventory entry is excluded from support publication and fails the
+inventory/release checker without changing an unrelated runtime snapshot.
 
 The descriptor owns the immutable identity of a format's text profile and the set of recovery
 capabilities it may expose. ADR 0035 owns the decoding meaning of those values, while ADR 0016 owns
@@ -243,8 +255,9 @@ snapshots created afterward. Existing requests and sessions retain their origina
 objects and compiled-default `Arc` values. A `SceneBuilder` copies the exact Baozi-owned declarative
 schema subset needed by retained typed descriptors into the resulting scene generation, so a
 `ValidatedScene` can outlive and be edited after the originating plugin code is unloaded. Unloading
-code therefore requires dropping every registry snapshot/session that retains its trait objects, but
-it never invalidates an already validated scene or changes its schema meaning.
+code therefore requires dropping every registry snapshot/session that retains its trait objects.
+Validated scenes and terminal import outcomes contain only Baozi-owned declarative data, so neither
+retains plugin code or becomes invalid after unload.
 
 ### Trust and Stability
 
@@ -340,7 +353,7 @@ Negative:
 
 | Risk | Severity | Mitigation |
 | --- | --- | --- |
-| Descriptor claims unsupported maturity/capability | High | Validated construction plus structured support/evidence checker. |
+| Descriptor claims unsupported maturity/capability | High | Separate maturity from evidence authority, default external claims to `Unverified`, and reserve `BaoziVerified` construction for the structured support/evidence checker. |
 | Registry mutation races an import | High | Freeze immutable snapshot before request compilation; no session mutation API. |
 | Codec type/schema disagrees with parser expectation | High | Registration checks the sealed runtime type key, compile verifies the actual erased type, and selected-importer downcast tests remain a defense in depth. |
 | Broken plugin default enters a snapshot | Critical | Atomic bounded freeze compiles every default, rejects panic, budget, allocation, or type failure as `RegistryBuildError`, and permanently poisons a registration whose codec unwinds. |
@@ -362,6 +375,8 @@ Negative:
 | Object safety | Heterogeneous importers and codecs are stored and called through trait objects whose detector returns exactly `DetectionResult<DetectionOutcome>` with a `DetectionScope` and whose parser returns exactly `ParseResult<SceneDraft>`. |
 | Snapshot immutability | Mutating the builder after snapshot creation cannot affect an existing request/session or its compiled-default `Arc` identity. |
 | Registration validation | Duplicate/invalid ID, malformed descriptor, schema/runtime-type mismatch, and impossible claims fail before IO. |
+| Maturity authority | External registration cannot construct `BaoziVerified`; `Unverified` and issuer-scoped `SelfAttested` claims remain distinguishable, while a managed exact-identity evidence token enables the verified state. |
+| Evidence exact match | A verified descriptor/token mismatch fails freeze atomically, an unverified runtime option profile cannot inherit default-profile authority, and orphan inventory entries fail publication checks. |
 | Atomic default freeze | Every registered codec compiles defaults under bounded `RegistryBuildScope`; any panic/type/budget/allocation error yields `RegistryBuildError`, no partial snapshot, and no bad plugin in a snapshot. A default-codec unwind also poisons the builder registration, so later freezes return `ExtensionPoisoned` without reinvocation. |
 | Namespace ownership | Baozi-owned, external, reserved, child-prefix, shared-schema, duplicate, and conflicting-body fixtures all use qualified IDs and follow the deterministic ownership rules. |
 | Request codec boundary | Submitted-layer scope exhaustion, erased-type disagreement, and unwindable codec panic return bounded pre-session `RequestError` values with zero asset opens. |
@@ -372,12 +387,12 @@ Negative:
 | Stable ordering | All builder insertion permutations produce equal descriptor enumeration and detection evidence. |
 | Snapshot and unload | Builder removal cannot affect an existing snapshot/session; after those objects drop, an imported scene still validates and remaps typed descriptors without plugin code. |
 | Capability limits | Compile-fail/API-shape tests prove a detector/importer cannot access raw IO, registry mutation, report/phase constructors, arbitrary detection/parse failure constructors, another codec's options, or a parser-supplied proof return path. |
-| Detector work transport | Detection admits one outstanding work permit bounded to 4 KiB; begin polls and charges attempted, complete charges consumed and post-polls, while zero/repeated/poll-during/drop/forgotten-permit violations preserve the first terminal latch. |
+| Detector scope transport | Every registry invocation passes its fresh session-created `DetectionScope` view unchanged; ADR 0020 permit failures remain session-terminal and registration health cannot reinterpret them. |
 | Core validator access | A test importer may call the public core validator, but can return only `SceneDraft`; session revalidation rejects a subsequently invalid draft. |
 | Optional dependency transport | Descriptor-authorized optional unavailability accepted by loss policy is an explicit non-abort outcome with cached identity/cause/accounting evidence; required or policy-rejected disposition becomes session-terminal. |
 | Scope abort transport | Every session-terminal capability family composes with `?`, retains its lower cause owner, and forces final failure even when a test importer catches the opaque value. |
-| Format evidence transport | Two distinct bounded format sources enter through selected-scope conversion; each envelope retains its selected descriptor, stable code, packed details, concrete outer source, and standard source chain, with typed outer-source downcast and private-source omission from `Debug`/`Display`. |
-| Backend isolation | Public facade/report/core fields and stable schemas contain no concrete third-party backend types; a private backend cause may remain reachable only behind the retained format-owned standard source chain. |
+| Format evidence transport | Two distinct native format errors enter through selected-scope synchronous packing; each envelope retains only its selected declarative descriptor, stable code, bounded packed details, and optional Baozi-owned inert source, with no concrete-source downcast or foreign object. |
+| Backend isolation | Public facade/report/core fields, terminal errors, and stable schemas contain no concrete or executable third-party backend/plugin object; native errors are consumed only while the adapter call and library lifetime are active. |
 | Trust boundary | An unwindable default-codec panic is `RegistryBuildError`, submitted-layer codec panic is `RequestError`, and detector/parser panic becomes its session-owned typed failure; docs require process isolation for hostile extensions. |
 | Reentrancy | Barrier tests share one snapshot across distinct inputs/options; concurrent results equal their serial baselines, selected options are immutable, and first-party importers contain no session-state fields or hidden serialization mutex. |
 | Panic poisoning | Default-codec, request-codec, detector, and parser panic fixtures are invoked once, poison their registration atomically across the builder and all snapshots, and every later entry path returns `ExtensionPoisoned` without calling the object again. |

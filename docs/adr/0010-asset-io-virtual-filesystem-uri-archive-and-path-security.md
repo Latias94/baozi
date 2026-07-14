@@ -1,14 +1,14 @@
 ---
 status: accepted
 date: 2026-07-09
+updated: 2026-07-13
 authors:
   - Codex
 decision_type: architecture
-depends_on:
-  - docs/adr/0007-workspace-crate-graph-feature-flags-msrv-and-ci-gates.md
 related:
   - docs/adr/0002-runtime-concurrency-observability.md
   - docs/adr/0004-parser-backend-and-format-coverage-policy.md
+  - docs/adr/0007-workspace-crate-graph-feature-flags-msrv-and-ci-gates.md
   - docs/adr/0014-parser-security-unsafe-ffi-and-panic-boundary-policy.md
   - docs/adr/0020-import-lifecycle-and-report-contract.md
   - docs/adr/0022-per-import-resource-ledger-and-budget-accounting.md
@@ -29,14 +29,9 @@ tracers:
 
 This accepted ADR is the authority for asset IO capabilities, path authorization, and binding an
 authorization decision to the opened object. Acceptance defines the required replacement contract;
-it does not certify a filesystem adapter. No target currently has a release-registered `native-fs`
-capability. The machine-readable registered-target set is empty. Runtime candidate code exists only
-for `x86_64-unknown-linux-gnu`, `x86_64-pc-windows-msvc`, and `aarch64-apple-darwin`, exposed under
-`baozi-io/fs-candidate` and facade `native-fs-candidate`; those names must not be described as
-conformance or release support. `x86_64-unknown-freebsd` is dependency-audit-only research evidence,
-not a runtime candidate, and enabling the candidate feature for it must fail closed.
-All exact target predicates bind `target_abi = ""`; GNU x32 and any other ABI variant are outside the
-candidate universe even when architecture, vendor, operating system, and environment match.
+it does not certify a filesystem adapter or target. ADR 0034 exclusively owns candidate/registered
+target sets, exact target predicates, feature support claims, and promotion/demotion. Every target
+that ADR 0034 considers must independently satisfy this ADR's object-bound security contract.
 
 ## Context
 
@@ -158,7 +153,8 @@ ExternalReferencePolicy
 
 Defaults:
 
-- memory imports deny external references unless the caller supplies a memory bundle or resolver
+- direct-byte imports deny external references; callers needing sidecars use an explicit memory
+  bundle or custom `AssetIo` plus resolver entry path
 - native path helpers scope sidecars to the primary asset directory
 - absolute source references and references that escape their logical base are denied
 - optional dependency denial produces bounded evidence and may preserve geometry
@@ -194,23 +190,10 @@ The adapter's conformance gate must machine-lock the reviewed `cap-std`, `cap-pr
 before the adapter can claim conformance. A path-resolution, open-flag, special-file, unsafe-scope,
 or target-relevant closure change reopens dependency admission.
 
-Dependency admission is necessary but does not register a platform. Registration adds the release
-features `baozi-io/fs` and facade `native-fs` only after a platform-local, no-skip adversarial matrix
-passes and durable evidence is linked. The current blockers are explicit:
-
-| Runtime candidate | Missing conformance evidence |
-| --- | --- |
-| `x86_64-unknown-linux-gnu` | explicit `openat2`/fallback selection, magic-link escape, mount/race behavior, and the complete no-skip acceptance matrix |
-| `x86_64-pc-windows-msvc` | self-contained unknown-reparse construction/rejection, verified root share-mode behavior, reparse replacement races, and the complete no-skip acceptance matrix |
-| `aarch64-apple-darwin` | component-handle walk/link behavior, replacement races, and the complete no-skip acceptance matrix on a real runner |
-
-CI runs the reliably constructible candidate fixtures only on those three exact host triples and
-rejects a runner whose `rustc -vV` host differs from its declared target. Fixture setup failure fails
-those jobs; it cannot print `SKIP` and return success. Unknown Windows reparse tags cannot yet be
-constructed reliably with the safe, unprivileged runner surface, so that case remains a documented
-blocker rather than a passing or skipped test. The `x86_64-unknown-freebsd` closure remains
-supply-chain evidence and future implementation research only. Its FreeBSD 13/14+ matrix below is a
-prerequisite for any future proposal to add a runtime candidate, not current runtime coverage.
+Dependency admission is necessary but does not register a platform. ADR 0034 may register a release
+feature only after the target's complete platform-local adversarial matrix below passes without
+skips and durable evidence is linked. Current target membership, blockers, and runner status belong
+to ADR 0034's evidence records rather than this security mechanism contract.
 
 Required behavior by platform family:
 
@@ -262,7 +245,9 @@ path string as authority. ADR 0034 owns exact target support levels.
 The lifecycle, detection, ledger, and public identity details belong to the authorities above. Their
 implementations must satisfy these IO integration constraints within one import session:
 
-1. The primary object is opened once and read into one bounded immutable backing store.
+1. An IO-backed primary is opened once and read into one bounded immutable backing store. Direct
+   bytes perform zero physical opens and are copied once, after admission, into the same kind of
+   session-owned backing store under ADR 0029.
 2. Detection and parsing use views over that same snapshot.
 3. Each logical dependency reference is role-checked and authorized before cache lookup.
 4. One authority-qualified dependency identity is resolved and opened at most once physically; its
@@ -397,13 +382,11 @@ Decision: chosen, subject to the executable acceptance gates in the admission re
   dependency trees. Keep release features `fs` and `native-fs` absent until promotion.
 - Pin direct `rustix` to exactly 1.1.4 and verify its crates.io checksum
   `b6fe4565b9518b83ef4f91bb47ce29620ca828bd32cb7e408f0062e9930ba190`.
-- Resolve `cap-std` with default features disabled on the exact dependency-audit triples
-  `x86_64-unknown-linux-gnu`, `x86_64-pc-windows-msvc`, `aarch64-apple-darwin`, and
-  `x86_64-unknown-freebsd`. Resolve direct `rustix` only on the three Unix-like audit triples with
-  default features disabled and exactly the `std` and `fs` features; Windows obtains no direct
-  `rustix` edge. Resolving the FreeBSD edge does not compile or export the runtime adapter.
-- Check the complete resolved native-filesystem dependency closure for those four exact audit
-  triples against the admitted versions, features, sources, and checksums; any
+- Resolve `cap-std` with default features disabled for every runtime-candidate and audit-only target
+  in the machine-readable admission baseline. Resolve direct `rustix` only where the target uses the
+  admitted Unix flag path, with default features disabled and exactly the reviewed features.
+- Check the complete resolved native-filesystem dependency closure for every target in that baseline
+  against the admitted versions, features, sources, and checksums; any
   path-resolution-, open-flag-, special-file-, or target-relevant change reopens admission.
 - Fail CI if a format crate uses direct `std::fs` outside an approved adapter.
 

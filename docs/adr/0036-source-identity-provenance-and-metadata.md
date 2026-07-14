@@ -1,6 +1,7 @@
 ---
 status: accepted
 date: 2026-07-10
+updated: 2026-07-13
 authors:
   - Codex
 decision_type: architecture
@@ -51,11 +52,13 @@ identity. For dependencies it is the resolver's normalized identity relative to 
 Absolute host roots, credentials, query secrets, and backend implementation handles are excluded
 from public output.
 
-This public resource identity is distinct from ADR 0010's session-local physical dependency cache
-key. The latter additionally includes an opaque authority-domain identity so equal logical names in
-different scopes or resolver namespaces cannot share bytes or failures. That capability identity is
-authorization machinery and is not serialized into Scene provenance; public resolver identity is
-sanitized separately under this ADR.
+This public resource identity is distinct from the session-local authority domain used for
+capability and cache isolation. For dependencies, ADR 0010 combines that opaque domain with logical
+identity so equal names in different scopes or resolver namespaces cannot share bytes or failures.
+For ADR 0029 direct bytes, each session receives a fresh domain even when callers reuse the same
+public source label. The domain is authorization machinery: it is not derived from display text, is
+not serialized into Scene provenance, and does not prove byte equality. Public resolver identity is
+sanitized separately under this ADR, while byte equality requires content-digest evidence.
 
 A source object locator is format-defined, deterministic, and typed: for example a glTF document
 index plus object kind, an OBJ statement/segment identity, or a PLY element row. Names may be

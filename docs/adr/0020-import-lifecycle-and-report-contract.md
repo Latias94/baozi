@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-07-09
-updated: 2026-07-12
+updated: 2026-07-13
 authors:
   - Codex
 decision_type: architecture
@@ -36,7 +36,8 @@ proof is not an assignable lifecycle stage.
 
 ## Decision
 
-After request/options compilation, Baozi creates one `ImportSession` before primary open or detection.
+After request/options compilation, Baozi creates one `ImportSession` before primary binding or
+detection.
 The session owns the only outcome builder, stable primary input, selected-format evidence, optional
 source-scope evidence, dependency resolver, ledger, bounded diagnostics, and operation control. It
 grants the selected trusted importer only a capability-limited `ParseScope`.
@@ -61,7 +62,8 @@ the frozen snapshot. Neither path has an import ledger, lifecycle phase, diagnos
 or asset open.
 
 1. create the session and private outcome builder;
-2. authorize, open, and bind one immutable primary snapshot;
+2. bind one immutable primary snapshot through either policy-authorized IO acquisition or admitted
+   direct-byte copying;
 3. build one shared probe and select/force a format with evidence;
 4. create `ParseScope` for only the selected importer;
 5. acquire required/optional dependencies and parse into format-private state as needed;
@@ -127,7 +129,8 @@ failure itself proves finalization.
 ### DetectionScope Capabilities
 
 Every detector invocation receives the same immutable `Probe` and hint plus a session-created
-`DetectionScope`. The scope exposes only cancellation/deadline polling and linear detection-work
+`DetectionScope`. Each invocation receives a fresh scope view over the session's shared coordinator
+and terminal latch. The scope exposes only cancellation/deadline polling and linear detection-work
 admission; it cannot open resources, mutate detection evidence, inspect another registration, or
 construct an outcome/failure category.
 
@@ -275,12 +278,13 @@ session-internal branches with distinct cause ownership:
    an IO error remains IO-owned, cancellation remains operation-owned, and a builder/core error remains
    core-owned rather than becoming a format parse error. A permitted optional-dependency `Unavailable`
    outcome is deliberately outside this branch.
-2. `FormatFailureEnvelope` seals the selected descriptor identity, a validated stable code, bounded
-   packed structured details, and the selected format's concrete `FormatFailureSource`. Before
-   invoking either trusted source callback, the selected `ParseScope` rejects an outer source payload
-   larger than 4 KiB and reserves the source plus packed-detail storage. It then validates the code,
-   visits and packs the admitted details fallibly, and retains the source as the envelope's direct
-   standard error source. No generic `From<dyn Error>` or arbitrary category constructor exists.
+2. `FormatFailureEnvelope` seals the selected descriptor identity, a validated stable code, and
+   bounded packed structured details into a Baozi-owned inert `FormatFailureEvidence` value. The
+   selected `ParseScope` reserves the packed-detail storage, validates the code, and invokes a
+   borrowed format detail producer synchronously through a bounded sink. It never retains that
+   producer, its concrete format error, a backend/library error, or another object with foreign
+   methods or destruction behavior. No generic `From<dyn Error>` or arbitrary category constructor
+   exists.
 
 A failure returned by the session's final central-validator call is not parser transport and does not
 enter `ParseFailure`; it remains a core-owned validation cause finalized directly by `ImportSession`.
@@ -294,17 +298,18 @@ cannot turn the operation into success; the finalizer observes the first termina
 contrast, an importer continues after `OptionalDependencyOutcome::Unavailable` through an explicit
 success branch, never by catching or suppressing `ParseFailure`.
 
-`FormatFailureSource` is both a retained format-owned cause and a bounded evidence producer. Its
-`visit_details` method writes stable enums, bounded scalars, IDs, ranges, and admitted strings through
-the scope-owned sink rather than returning an input-sized preformatted `String`. Retained sources use
-bounded inline storage or account every owned heap capacity under ADR 0022; constructing a source is
-not an escape from the operation ledger.
+A borrowed detail producer writes only stable enums, bounded scalars, IDs, ranges, and admitted
+strings through the scope-owned sink rather than returning an input-sized preformatted `String`.
+Packing is fallible and bounded by the import diagnostic/detail budget. When the constructor returns,
+no reference to the producer or its native source remains; the adapter drops native errors before
+returning `ParseFailure`.
 
-`Error::source(&FormatFailureEnvelope)` returns the retained format source directly, and
-`downcast_ref<T: FormatFailureSource>()` provides read-only access to its concrete outer type. The
-format source may preserve a standard backend or library source chain behind it. Stable inspection
-and serialization remain descriptor/code/details based: envelope `Debug` and `Display` do not expose
-the private source chain, and concrete backend types do not appear in public fields or stable schemas.
+`FormatFailureEvidence` contains only Baozi-owned declarative data and may implement `Error` so
+`Error::source(&FormatFailureEnvelope)` returns that one inert host-defined cause. The envelope offers
+typed stable code/detail inspection, but no concrete-source downcast and no backend/library source
+chain. It contains no `Box<dyn Error>`, extension trait object, callback, function pointer, native
+handle, or plugin-owned destructor. `Debug`, `Display`, serialization, and reporting all derive from
+the same sanitized descriptor/code/details representation.
 
 The import finalizer consumes `ParseFailure` and preserves its branch, cause owner, accumulated phase,
 diagnostics, and ledger evidence in `ImportFailure`. The facade composes that failure rather than
@@ -365,7 +370,7 @@ does not mutate an `ImportReport.stage` field.
 | `baozi-core` | Scene draft/build capability, the public central validator, validation proof, domain validation/edit errors | Typed core causes and `ValidatedScene`; downstream callers may validate drafts through the central API | IO, import phase/provenance, registry, parser policy, facade-composed error |
 | `baozi-io` | Asset identity/path, bound handles/snapshots, backend IO errors | Typed IO causes and capability-bound resources | Optionality/loss, Scene, import outcome |
 | `baozi-import` | Request config/policy, session, import phase vocabularies, Probe, DetectionScope, ParseScope, resolver, effective budgets, diagnostics, private detection/parse failure classification, and detection/import outcomes | Typed request/import failure and report evidence | Validation-proof construction, shared operation mechanism duplication, format-private model, post-process stage, public facade error duplication |
-| `baozi-format-*` | Private decode/normalized model and bounded Baozi format causes/codes | `DetectionResult<DetectionOutcome>` and `ParseResult<SceneDraft>`; controlled retention and packing of `FormatFailureSource` through the selected ParseScope | Raw IO, parser-supplied proof/outcome, arbitrary detection/parse failure classification, phase/provenance construction, or backend types in public fields/stable schemas |
+| `baozi-format-*` | Private decode/normalized model and bounded Baozi format causes/codes | `DetectionResult<DetectionOutcome>` and `ParseResult<SceneDraft>`; synchronous packing of stable failure facts through the selected ParseScope | Raw IO, parser-supplied proof/outcome, arbitrary detection/parse failure classification, phase/provenance construction, or retaining backend/plugin objects in public outcomes |
 | `baozi-postprocess` | Post-process phase vocabularies, effective operation budget, compiled plans, step transactions, remaps/losses, report/cause | Distinct typed post-process result using `baozi-operation` mechanisms | Dependency on `baozi-import`, import phase/outcome, shared operation mechanism duplication, or format-private state |
 | `baozi` facade | Public request composition and public error composition | Stable ergonomic API preserving lower structured causes | Duplicate domain state or bypass constructors |
 
@@ -436,6 +441,6 @@ Negative:
 | Evidence preservation | Every post-detection failure retains identical selection evidence plus bounded diagnostics/stats. |
 | Source-scope evidence | No-record, one-record, empty projection, exact-budget success, preserve-or-fail excess rejection, authorized detail collapse, loss-evidence/diagnostic-budget failure before submission, duplicate/invalid submission, success, and failure-after-submission fixtures prove one sealed record with exact typed counts/digest, typed fidelity/loss subject, atomic publication, and unchanged `ParseResult<SceneDraft>` shape. |
 | Phase separation | Tests independently advance ledger/progress phases and prove `last_completed` changes only after the mapped atomic lifecycle boundary succeeds. |
-| Format evidence transport | Heterogeneous bounded format sources enter only through the selected-scope constructor; each envelope retains descriptor/code/details plus the concrete source, exposes the standard source chain and typed outer-source downcast, omits private sources from `Debug`/`Display`, and rejects an outer source payload above 4 KiB before trusted callbacks. |
+| Format evidence transport | Heterogeneous format errors enter only through the selected-scope synchronous packing constructor; each envelope retains only descriptor/code/bounded details plus an optional Baozi-owned inert standard source, exposes no concrete-source downcast, and contains no backend/plugin object after construction. |
 | No legacy transition | Production/public symbol search finds no `map_scene*`, assignable import stage, or parser-owned report constructor. |
-| Crate ownership | Dependency and public-API checks find no backend type in public fields or stable schemas, no `baozi-operation` upward dependency, no postprocess-to-import edge, and no reversed core dependency; private backend causes may remain reachable only through a retained format-owned standard source chain. |
+| Crate ownership | Dependency and public-API checks find no backend type or executable backend object in public outcomes/stable schemas, no `baozi-operation` upward dependency, no postprocess-to-import edge, and no reversed core dependency. |

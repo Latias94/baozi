@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-07-09
-updated: 2026-07-10
+updated: 2026-07-13
 authors:
   - Codex
 decision_type: architecture
@@ -49,19 +49,57 @@ object with plausible counts.
 
 ## Decision
 
-Every first-party format inventory entry has exactly one maturity level, a complete capability
-matrix, a durable support page, structured machine-readable evidence, and code-side `FormatDescriptor`.
-Those views must agree before promotion or release.
+Every first-party format inventory entry has an evidence-authority state, a complete capability
+matrix, a durable support page, structured machine-readable evidence, and code-side
+`FormatDescriptor`. Every active Baozi maturity claim has exactly one level and requires
+`BaoziVerified`; an `Unverified` candidate has no Baozi maturity level. Those views must agree before
+promotion or release.
 
 ADR 0004 owns parser/backend admission. ADR 0005 and ADR 0026 own test and snapshot mechanisms. ADR
 0007 owns feature membership. ADR 0034 owns targets. This ADR composes their evidence into a format
 maturity decision without redefining those underlying contracts.
+
+### Evidence Authority
+
+Maturity level answers how mature a declared profile is; evidence authority answers who made and
+verified that claim. They are independent fields with exactly these authority states:
+
+| Authority | Meaning | Baozi support implication |
+| --- | --- | --- |
+| `Unverified` | no currently valid Baozi-managed verification record exists, whether absent, stale, failing, expired, or withdrawn | discovery metadata only; no Baozi maturity claim |
+| `SelfAttested` | a named registrant asserts a level/profile and supplies its own evidence reference | display only with issuer and authority; never presented as Baozi Beta/Stable |
+| `BaoziVerified` | Baozi's managed inventory binds the exact implementation/profile identity to reviewed evidence and passing gates | eligible for first-party maturity and release decisions |
+
+An evidence profile has two canonical, machine-comparable identities. Its subject identity includes
+the format ID and declared specification/subset, importer and backend artifact or source identity,
+enabled feature composition, complete compiled option profile including defaults, recovery and loss
+modes, and target/toolchain set. Its verification-record identity includes the evidence manifest and
+corpus digests plus gate, harness, and oracle versions.
+
+Support and maturity claims are keyed by `(format ID, evidence-profile subject identity)`, never by
+format ID alone. Any subject change that can alter accepted input, canonical output, diagnostics,
+dependency behavior, resource/safety behavior, or loss semantics creates a new unverified subject.
+Adding evidence revises the verification record for the same subject; changing gate semantics
+invalidates the old record until that exact subject passes the new gate. A runtime request outside
+every verified subject remains `Unverified` or issuer-scoped `SelfAttested` and cannot inherit the
+default profile's claim.
+
+Loss of exact identity, an evidence withdrawal/expiry, or a failing required gate atomically removes
+the `BaoziVerified` token and transitions that subject to `Unverified`; the old record remains
+historical evidence only. The public Baozi maturity claim is removed in the same change. If baseline
+safety still holds, the implementation may remain discoverable without a Baozi maturity level while
+verification is rebuilt; a baseline-safety failure follows the disable/unregister rule below.
+
+An external implementation is not permanently barred from `BaoziVerified`, but only Baozi's managed
+inventory can bind one exact subject and verification record to that authority. A runtime descriptor
+or plugin cannot issue `BaoziVerified` to itself.
 
 ### Evidence Flow
 
 ```mermaid
 flowchart TD
     Descriptor[FormatDescriptor] --> Checker[Maturity checker]
+    Authority[Evidence authority and issuer] --> Checker
     Support[Format support page] --> Checker
     Structured[Structured evidence manifest] --> Checker
     Fixtures[Provenanced valid and malformed fixtures] --> Tests[Executable gates]
@@ -145,7 +183,8 @@ contract. Adding detail never permits omitting a generic dimension.
 Each format evidence record identifies exact test targets/artifacts rather than prose such as
 "covered". At minimum it records:
 
-1. format ID, crate, feature, maturity, backend, dependency/license, and supported spec versions
+1. format ID, crate/implementation identity, feature, maturity, evidence authority and issuer,
+   backend, dependency/license, supported spec/profile versions, targets, and gate/tool versions
 2. a support page with complete capability statuses and known limitations
 3. Baozi-owned or explicitly licensed fixture provenance for each declared semantic slice
 4. parser-local grammar tests and facade/session success/failure tests
@@ -180,12 +219,16 @@ Promotion rules:
   recovery, or structured loss before any maturity claim; a panic, abort, unbounded allocation, or
   validation bypass invokes baseline-safety removal rather than merely blocking Beta/Stable
 - Stable requires semantic evidence independent from the implementation under test
+- Baozi Beta/Stable and every first-party maturity claim require `BaoziVerified`; a
+  `SelfAttested` level remains visibly issuer-scoped even when its evidence is extensive
 - Stable makes a format eligible for a released support promise; it does not automatically place it
   in `default-formats`, which ADR 0007 governs
 
 Demotion rules:
 
 - a newly discovered violation updates the evidence and user-facing claim in the same change
+- a stale, expired, withdrawn, or failing required verification record transitions the exact subject
+  to `Unverified` and removes its Baozi maturity claim atomically; a previous level is history only
 - a baseline-safety failure disables and unregisters the affected path or moves it behind an admitted
   process boundary; maturity demotion alone is insufficient
 - a non-safety semantic or evidence regression may demote immediately without a compatibility shim
@@ -283,6 +326,8 @@ Negative:
 | Risk | Severity | Likelihood | Mitigation |
 | --- | --- | --- | --- |
 | Support docs drift from code | High | High | checker joins descriptor, evidence, matrix, feature, and tests by stable format ID |
+| Third-party self-attestation appears to be a Baozi guarantee | High | Medium | store maturity level and evidence authority separately; reserve `BaoziVerified` construction for the managed inventory checker |
+| Evidence is reused across behavior-changing profiles | Critical | Medium | key claims by canonical subject identity including compiled defaults, recovery/loss modes, backend/features, and targets |
 | Snapshot proves only shape/counts | High | Medium | require complete canonical-value digest and mutation tests beyond bounded preview |
 | Oracle reproduces importer/backend assumptions | High | Medium | require independent normalized source expectations and classify tolerated differences |
 | Assimp is treated as ground truth | Medium | Medium | sandbox it externally, keep it optional/non-authoritative, and record oracle limitations |
@@ -296,7 +341,9 @@ Negative:
 | --- | --- |
 | Single maturity authority | ADR checker finds maturity definitions only here and references from backend/feature ADRs point here |
 | Admission before maturity | checker fixtures reject assigning any maturity, including Experimental, to a first-party path that fails baseline admission safety |
-| Complete declaration | every first-party format has exactly one maturity plus every required capability dimension |
+| Complete declaration | every first-party format declares every required capability dimension; each verified Baozi claim has exactly one maturity, while an unverified candidate has none |
+| Evidence authority | external registrations default to `Unverified`, self-attested fixtures retain issuer identity, and only an exact passing managed-inventory entry can construct `BaoziVerified` |
+| Profile identity | changing any default, recovery/loss mode, backend/feature composition, target, or semantic option prevents reuse of the prior verified token; adding corpus evidence revises only the verification record |
 | Evidence reachability | every structured evidence pointer resolves to a test, fixture, golden, fuzz target, provenance record, or reviewed exception |
 | Semantic golden | mutation beyond the bounded preview changes the versioned full-value digest; count-only snapshots fail negative tests |
 | Independent confidence | Beta/Stable gates reject importer-generated snapshots as the sole oracle; Stable has differential/conformance evidence or reviewed equivalent |

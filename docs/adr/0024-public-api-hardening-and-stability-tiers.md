@@ -22,6 +22,9 @@ This document is retained as a historical record of why Baozi introduced explici
 contains no active compatibility rules. ADR 0006 is the sole authority for the canonical v1 reset,
 stability tiers, crate publication, feature compatibility, and release versioning.
 
+The ADR checker enforces status, index, link, and reciprocal supersession shape only. It cannot
+determine whether later prose is normative; reviewers must keep this record historical-only.
+
 ## Historical Context
 
 The initial importer foundation exposed public fields and extension traits before Baozi had enough
@@ -95,7 +98,7 @@ Negative:
 
 | Risk | Severity | Likelihood | Mitigation |
 | --- | --- | --- | --- |
-| New normative text is added here later | Medium | Low | ADR checker rejects active rules or missing `superseded_by` metadata on superseded records |
+| New normative text is added here later | Medium | Low | Treat this file as historical-only in review; `adr-check` validates supersession structure but cannot classify prose as normative. |
 | An old link is mistaken for current authority | Low | Medium | Keep the supersession notice first and link directly to ADR 0006 |
 
 ## Acceptance Criteria

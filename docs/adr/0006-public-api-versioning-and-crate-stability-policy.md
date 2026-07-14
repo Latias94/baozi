@@ -20,7 +20,6 @@ related:
   - docs/adr/0011-format-support-tiers-and-compatibility-charter.md
   - docs/adr/0021-extension-registry-and-format-descriptor-governance.md
   - docs/adr/0025-scene-ir-invariants-and-validation-boundaries.md
-  - docs/adr/0028-adr-lifecycle-and-evidence-governance.md
 ---
 
 # ADR 0006: Public API, Versioning, and Crate Stability Policy

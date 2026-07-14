@@ -8,6 +8,7 @@ decision_type: architecture
 depends_on:
   - docs/adr/0019-parser-diagnostic-streaming-and-generated-code-contract.md
   - docs/adr/0020-import-lifecycle-and-report-contract.md
+  - docs/adr/0022-per-import-resource-ledger-and-budget-accounting.md
 related:
   - docs/adr/0003-core-scene-ir-and-material-model.md
   - docs/adr/0004-parser-backend-and-format-coverage-policy.md
@@ -69,6 +70,13 @@ Core rules:
   conservative allowances; hostile or untrusted parser code requires process isolation because an
   in-process API cannot prevent arbitrary allocation, looping, abort, or process exit
 
+### ParseScope-Bound Metered Storage
+
+Format-owned parsers compose the ParseScope-bound metered storage governed exclusively by ADR 0022.
+Parser tooling does not create a second capacity, reservation, transfer, rollback, or release
+protocol. A format-specific wrapper may add source semantics, but all storage accounting remains
+behind ADR 0022's `baozi-import` interface.
+
 Recommended first choices by format shape:
 
 | Format shape | Preferred approach |
@@ -87,8 +95,10 @@ flowchart LR
     Session[Import session] --> Scope[Selected ParseScope]
     Scope --> Input[Immutable primary/dependency snapshots]
     Scope --> Capabilities[Options, budget, diagnostics, control]
+    Scope --> Storage[ADR 0022-owned metered storage]
     Input --> FormatCrate[baozi-format-*]
     Capabilities --> FormatCrate
+    Storage --> FormatCrate
     FormatCrate --> Tool{Parser implementation}
     Tool -->|hand-written| Owned[Owned scanner/parser]
     Tool -->|combinator| Combinator[winnow / nom]
@@ -120,7 +130,7 @@ sequenceDiagram
     Scope-->>Format: bounded capability views
     Format->>Tool: parse bounded input
     Tool-->>Format: private AST/events/errors
-    Format->>Scope: charge work/reserve storage/emit diagnostics
+    Format->>Scope: charge work/obtain metered storage/emit diagnostics
     Format->>Builder: add Baozi-owned scene data
     Builder-->>Format: SceneDraft
     Format-->>Session: ParseResult<SceneDraft>

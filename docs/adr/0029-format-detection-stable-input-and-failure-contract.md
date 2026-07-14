@@ -1,11 +1,13 @@
 ---
 status: accepted
 date: 2026-07-10
+updated: 2026-07-13
 authors:
   - Codex
 decision_type: architecture
 depends_on:
   - docs/adr/0002-runtime-concurrency-observability.md
+  - docs/adr/0010-asset-io-virtual-filesystem-uri-archive-and-path-security.md
   - docs/adr/0022-per-import-resource-ledger-and-budget-accounting.md
   - docs/adr/0036-source-identity-provenance-and-metadata.md
 related:
@@ -30,11 +32,14 @@ requires a separate ADR and cannot weaken this contract implicitly.
 
 ## Decision
 
-One `ImportSession` opens the primary resource once and performs one logical snapshot acquisition into
-one immutable bounded snapshot. The IO adapter may use multiple bounded chunk reads; it cannot reopen
-or reacquire the source. Every detector receives the same read-only `Probe` derived from that backing
-store and a separate normalized hint. Detectors never own IO, a seek cursor, rewind, report
-construction, or lifecycle advancement.
+One `ImportSession` binds the primary exactly once into one Baozi-owned, immutable, bounded snapshot.
+An IO-backed import performs one policy-authorized open and may use multiple bounded chunk reads
+without reopening or reacquiring the source. A direct-byte import performs no physical open: after
+byte and live-capacity admission, the session copies the caller slice exactly once into its own
+accounted snapshot and never retains or parses from the caller-owned allocation. Every detector
+receives the same read-only `Probe` over that snapshot, and the selected parser borrows the same
+backing allocation. Detectors never own IO, a seek cursor, rewind, report construction, or lifecycle
+advancement.
 
 Detection emits typed outcomes and deterministic evidence. Unsupported, inconclusive, detector fault,
 ambiguity, forced-format contradiction, primary acquisition failure, and selected-parser failure are
@@ -45,10 +50,29 @@ implementation and executable evidence.
 
 ### Stable Primary Input
 
-The session is created before opening the source. It binds the normalized source identity, performs
-one policy-authorized open, enforces the primary byte limit while reading, and stores the first
-immutable snapshot or terminal acquisition failure. The snapshot is shared by probe and parser; it is
-not copied into a second detection buffer or reopened for parsing.
+The session is created before binding the source. Public logical source identity is governed by ADR
+0036 and is independent of the acquisition mechanism. Exactly one of these paths then runs:
+
+- An IO-backed request performs one ADR 0010-authorized open, enforces the primary byte limit while
+  reading, and stores the first immutable snapshot or terminal acquisition failure.
+- A direct-byte request admits the input size and live capacity under ADR 0022, copies the caller
+  slice once into session-owned immutable storage, and retains no borrow of the caller allocation.
+  The caller allocation is not session live memory, and physical-open attempted/consumed evidence is
+  zero.
+
+Both paths expose the same snapshot contract to detection and parsing. The snapshot is never copied
+into a second detection buffer or reacquired for parsing.
+
+Each direct-byte session creates a fresh opaque authority domain for capability and cache isolation.
+That domain is not derived from the caller's public source label, is not serialized, and never enters
+public provenance. Reusing a source label therefore grants no cache or dependency authority and does
+not prove byte equality; ADR 0036 content evidence remains separate.
+
+Direct bytes grant no dependency authority. That entry path is unconditionally ADR 0010 `Deny` and
+cannot be overridden; every sidecar request is rejected before backend IO. A caller that needs
+sidecars uses a different entry path with an explicit memory bundle or custom `AssetIo` plus resolver.
+Optional omission may continue only when the format descriptor declares the dependency optional and
+the caller's loss policy authorizes it; required dependencies fail.
 
 The probe exposes only the admitted prefix/ranges and total source length needed by detection. A read
 beyond admitted probe bytes returns `Inconclusive(ProbeExhausted)` rather than EOF or `NoMatch`.
@@ -135,8 +159,13 @@ sequenceDiagram
     participant Parser
 
     Facade->>Session: create from compiled request
-    Session->>IO: authorize, open, and read primary once
-    IO-->>Session: immutable snapshot or terminal failure
+    alt IO-backed source
+        Session->>IO: authorize, open, and read primary once
+        IO-->>Session: immutable snapshot or terminal failure
+    else direct bytes
+        Facade->>Session: caller slice + public logical identity
+        Session->>Session: admit and copy once into owned snapshot
+    end
     Session->>Registry: immutable registry snapshot
     Registry->>Detectors: same bounded Probe + hint
     Detectors-->>Registry: typed outcomes
@@ -175,6 +204,7 @@ Positive:
 Negative:
 
 - The complete bounded primary snapshot remains live through parsing.
+- Direct-byte import performs one deliberate owned copy instead of borrowing caller memory.
 - Probe admission may produce an inconclusive result that callers must distinguish from unsupported.
 - True streaming requires a future explicit API rather than reuse of this facade.
 
@@ -187,12 +217,16 @@ Negative:
 | Extension hint overrides content | High | Use extension only at equal confidence or unique `Maybe` fallback. |
 | Forced format becomes a validation bypass | High | Forced selection changes only routing; all parse, budget, and validation gates remain. |
 | Detector panic aborts the process | High | Catch unwind where available; document abort/hostile extension need for process isolation. |
+| Direct bytes gain ambient sidecar access | Critical | Give each session a fresh opaque authority domain and deny dependencies unless the caller chooses an explicit IO/bundle entry path. |
 
 ## Acceptance Criteria
 
 | Contract | Testable acceptance |
 | --- | --- |
-| Single backing store | Instrumented mutable IO observes one primary open and one logical snapshot acquisition; parser bytes share the probe allocation identity. |
+| IO-backed snapshot | Instrumented mutable IO observes one physical primary open and one logical acquisition; detector and parser share one backing allocation. |
+| Direct-byte snapshot | Detector and parser observe one identical session-owned allocation distinct from the caller slice; no second detection copy exists. |
+| Direct-byte evidence | Physical-open attempted and consumed are both zero; primary-byte admission precedes the copy, consumed bytes follow only a successful copy, and live capacity covers the owned snapshot. |
+| Direct-byte authority | Reused public source labels do not reuse the fresh session authority domain; dependency requests perform no backend open and required dependencies fail. |
 | Probe boundaries | Zero, below, exact, and above probe limits distinguish `Inconclusive` from `NoMatch`. |
 | Order independence | Every registration permutation yields identical selected format, ambiguity, and sorted evidence. |
 | Fault aggregation | Greedy/faulting/valid detector combinations follow the strongest-match and no-clean-unsupported rules. |

@@ -16,6 +16,7 @@ related:
   - docs/adr/0032-postprocess-remap-and-derived-data-contract.md
   - docs/adr/0036-source-identity-provenance-and-metadata.md
   - docs/adr/0039-source-document-scene-selection-and-import-closure.md
+  - docs/adr/0040-camera-and-light-canonical-semantics.md
 ---
 
 # ADR 0003: Canonical Scene IR Ownership and State Model
@@ -53,8 +54,9 @@ inspect never handle proof internals. A caller opts into `SceneEdit` only when c
 
 ```mermaid
 stateDiagram-v2
-    [*] --> Draft: SceneBuilder
-    Draft --> Validated: finish and validate
+    [*] --> Building: SceneBuilder
+    Building --> Draft: finish
+    Draft --> Validated: central validator
     Draft --> [*]: reject
     Validated --> Editing: begin edit
     Editing --> ValidatedNext: commit and validate
@@ -83,7 +85,7 @@ evaluation, animation targets, provenance, and edit remaps all depend on this ow
 
 Logical mesh and attribute rules are authoritative in ADR 0030; deformation and animation in ADR
 0031; transactional edits, remaps, and derived-data invalidation in ADR 0032; persistent source
-identity and provenance in ADR 0036.
+identity and provenance in ADR 0036; camera and light semantics in ADR 0040.
 
 A node preserves its authored base-transform representation as either an authored local matrix or
 materialized translation, rotation, and scale (TRS). A computed local matrix is a derived inspection
@@ -142,8 +144,9 @@ postprocess one atomic mutation boundary. Chosen.
 - All format crates target the same Rust-owned aggregate without leaking backend types.
 - Breaking changes are required: direct field mutation and constructors for validated result types
   are removed rather than preserved behind compatibility aliases.
-- Validation is mandatory at builder finish and edit commit, even when an operation believes its
-  local checks are sufficient.
+- `SceneBuilder::finish` produces only an owned `SceneDraft`; every publication path passes that
+  draft or an edit candidate through the central validator, even when a producer performed local
+  checks.
 - Editors must retain or consume explicit remaps when they keep IDs across generations.
 
 ## Risks and Mitigations
@@ -161,7 +164,7 @@ postprocess one atomic mutation boundary. Chosen.
 | --- | --- | --- |
 | Generation isolation | Stale, foreign-owner, and sibling-branch handles are rejected before lookup | exact/stale/branch API tests |
 | Validation complexity | Complete validation visits each graph edge, entity, reference, and payload cell at most a constant number of times | deterministic validator work counters |
-| Publication integrity | Only builder finish and edit commit can produce a public proof | compile-fail and rollback tests |
+| Publication integrity | Only the central validator can mint proof; import finalization and edit commit may publish only its successful result | compile-fail and rollback tests |
 
 ## Acceptance Criteria
 

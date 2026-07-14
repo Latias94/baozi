@@ -12,7 +12,6 @@ depends_on:
 related:
   - docs/adr/0004-parser-backend-and-format-coverage-policy.md
   - docs/adr/0006-public-api-versioning-and-crate-stability-policy.md
-  - docs/adr/0028-adr-lifecycle-and-evidence-governance.md
 evidence:
   - Cargo.toml
   - crates/baozi/Cargo.toml

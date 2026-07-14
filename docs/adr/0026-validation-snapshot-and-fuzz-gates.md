@@ -14,8 +14,10 @@ related:
 evidence:
   - docs/plans/2026-07-10-001-refactor-baozi-canonical-architecture-plan.md
 tracers:
+  - crates/baozi-core/tests/scene_validation.rs
   - crates/baozi-test-support/src/snapshot.rs
-  - fuzz/fuzz_targets
+  - crates/baozi-test-support/tests/snapshot.rs
+  - fuzz/fuzz_targets/scene_validation.rs
 ---
 
 # ADR 0026: Validation, Snapshot, and Fuzz Evidence Contract

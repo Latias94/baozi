@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-07-09
-updated: 2026-07-10
+updated: 2026-07-13
 authors:
   - Codex
 decision_type: architecture
@@ -61,7 +61,9 @@ flowchart LR
     Parser --> Borrowed[Internal borrowed views]
     Parser --> Decode[Decode and validate]
     Decode --> Builder[SceneBuilder owns data]
-    Builder --> Scene[Owned ValidatedScene]
+    Builder --> Draft[Owned SceneDraft]
+    Draft --> Validator[Central validator]
+    Validator --> Scene[Owned ValidatedScene]
     Scene --> User[Read views or SceneEdit]
 
     Borrowed -. dropped after import .-> Parser
@@ -73,12 +75,14 @@ sequenceDiagram
     participant Importer
     participant Parser
     participant Builder
+    participant Validator
     participant Scene
 
     User->>Importer: read_memory(&[u8])
     Importer->>Parser: parse with temporary views
     Parser->>Builder: copy/convert into owned buffers
-    Builder->>Scene: finish owned ValidatedScene
+    Builder->>Validator: finish owned SceneDraft
+    Validator->>Scene: validate and mint proof
     Importer-->>User: validated scene with no input lifetime
 ```
 
@@ -161,7 +165,8 @@ Rules:
   0013 postprocess
 - builder records source identity and provenance through ADR 0036 rather than overloading dense IDs
   or names
-- builder finish returns either `ValidatedScene` or structured errors
+- builder finish returns an owned `SceneDraft` or structured construction errors; ADR 0003's central
+  validator alone can turn a draft into `ValidatedScene`
 - builder internals are not stable public memory layout
 
 ## Zero-Copy Policy
@@ -213,9 +218,9 @@ change public `Scene` semantics.
 Parsers must avoid unbounded growth patterns on large assets:
 
 - validate declared counts and checked `count * element_size`/cell totals before reservation
-- reserve attempted/live/committed capacity through the owning domain ledger under ADR 0022 before
-  calling `try_reserve` or `try_reserve_exact`; the shared mechanism does not choose dimensions or
-  policy
+- use ADR 0022's owning-domain protocol: charge attempted work before an action, obtain live capacity
+  reservations before `try_reserve` or `try_reserve_exact`, and record committed output only at
+  successful publication; these evidence classes are never interchangeable
 - propagate allocation failure as a typed resource error; input-derived `Vec::with_capacity` is
   forbidden because capacity allocation may panic or abort outside the failure contract
 - release phase-live reservations when temporary storage is dropped without refunding consumed work
@@ -226,7 +231,8 @@ Parsers must avoid unbounded growth patterns on large assets:
 Canonical public flow:
 
 ```text
-SceneBuilder -> ValidatedScene -> SceneEdit -> new ValidatedScene
+SceneBuilder -> SceneDraft -> central validator -> ValidatedScene
+             -> SceneEdit -> central validator -> new ValidatedScene
 ```
 
 `SceneEdit` is the only canonical mutation transaction. It shares unchanged owned storage, builds

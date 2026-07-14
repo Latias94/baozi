@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-07-09
-updated: 2026-07-12
+updated: 2026-07-13
 authors:
   - Codex
 decision_type: architecture
@@ -147,19 +147,20 @@ matrix-authored target, a matrix/TRS combination, or a matrix that fails the dec
 no-shear rules is a hard glTF conformance error before canonical construction; the adapter does not
 silently decompose, repair, or loss-authorize those invalid glTF cases.
 
-The glTF predicate is Baozi-owned and independent of `gltf-rs::Transform::decomposed`. It promotes
-each finite authored `f32` cell exactly to `f64` and evaluates products and sums in fixed x/y/z order
-without fused `mul_add`. The frozen constants are:
+The glTF predicate is Baozi-owned and independent of `gltf-rs::Transform::decomposed`. The affine
+bottom row must compare exactly to `[0, 0, 0, 1]` before canonical construction; the adapter does not
+recover or normalize a near-affine glTF matrix. For the remaining decomposition/no-shear predicate,
+it promotes each finite authored `f32` cell exactly to `f64` and evaluates products and sums in fixed
+x/y/z order without fused `mul_add`. The frozen constant is:
 
 ```text
-AFFINE_ABS_TOLERANCE = 8 * f32::EPSILON
 ORTHOGONAL_REL_TOLERANCE = 64 * f32::EPSILON
 ```
 
-For column-major matrix `m`, affine admission requires
-`abs(m[0][3])`, `abs(m[1][3])`, and `abs(m[2][3])` to be at most
-`AFFINE_ABS_TOLERANCE`, and `abs(m[3][3] - 1)` to be at most that tolerance. Let `c0`, `c1`, and `c2`
-be the three spatial columns. Every pair of nonzero columns must satisfy the inclusive squared test
+For column-major matrix `m`, affine admission requires `m[0][3]`, `m[1][3]`, and `m[2][3]` to compare
+exactly to zero and `m[3][3]` to compare exactly to one. Signed zero is accepted and preserved. Let
+`c0`, `c1`, and `c2` be the three spatial columns. Every pair of nonzero columns must satisfy the
+inclusive squared test
 `dot(ci, cj)^2 <= ORTHOGONAL_REL_TOLERANCE^2 * norm2(ci) * norm2(cj)`. An exactly zero column is a
 valid zero scale and requires no normalization; a near-zero nonzero column uses the same relative
 test and is never coerced to zero.
@@ -267,6 +268,6 @@ Negative:
 | Admission versus maturity | A baseline-unsafe backend slice is absent from first-party registration/all-formats, while fixtures with only missing non-safety evidence remain eligible for Experimental. |
 | Semantic breadth | Fixtures cover multi-primitive meshes, attributes, material/texture sharing, skins, morphs, and animations through normalized and facade layers. |
 | Scene projection | Multi-scene fixtures prove default, explicit, missing-default, shared-root, skin, and animation-closure behavior with source-scope evidence. |
-| Node transforms | Matrix/TRS mutual exclusion, fixed affine/orthogonality fixtures at 0.5x, exactly 1x inclusive, the next representable value above 1x, and 2x each threshold, one/two/three zero scales, nonzero near-zero scales, odd/even negative scales, matrix decomposability/no-shear, omitted TRS defaults, bit-preserving authored-form retention, backend-independent classification, and matrix-target animation rejection have positive and negative fixtures. |
+| Node transforms | Matrix/TRS mutual exclusion, exact affine bottom-row fixtures including signed zero and next-representable nonzero/away-from-one rejection, orthogonality fixtures at 0.5x, exactly 1x inclusive, the next representable value above 1x, and 2x the threshold, one/two/three zero scales, nonzero near-zero scales, odd/even negative scales, matrix decomposability/no-shear, omitted TRS defaults, bit-preserving authored-form retention, backend-independent classification, and matrix-target animation rejection have positive and negative fixtures. |
 | Replacement equivalence | Any alternate backend passes identical normalized-model and canonical golden/digest tests. |
 | Maturity truthfulness | Linux sanitizer and subprocess RSS/timeout gates execute before promotion; compile-only evidence cannot satisfy them. |

@@ -1,16 +1,24 @@
 ---
 status: accepted
 date: 2026-07-10
+updated: 2026-07-13
 authors:
   - Codex
 decision_type: architecture
-related:
-  - docs/adr/0007-workspace-crate-graph-feature-flags-msrv-and-ci-gates.md
+depends_on:
   - docs/adr/0010-asset-io-virtual-filesystem-uri-archive-and-path-security.md
   - docs/adr/0014-parser-security-unsafe-ffi-and-panic-boundary-policy.md
-tracers:
+related:
+  - docs/adr/0007-workspace-crate-graph-feature-flags-msrv-and-ci-gates.md
+evidence:
   - Cargo.toml
   - crates/baozi/Cargo.toml
+tracers:
+  - crates/baozi-xtask/src/runtime_admission.rs
+  - crates/baozi-xtask/tests/runtime_admission.rs
+  - crates/baozi-xtask/src/native_fs.rs
+  - crates/baozi-xtask/tests/native_fs.rs
+  - .github/workflows/ci.yml
 ---
 
 # ADR 0034: Supported Targets and Portability
@@ -95,30 +103,15 @@ treated as `x86_64-unknown-linux-gnu`.
 release feature while the registered-target set is empty and keeps the candidate dependency closure
 separate from runtime conformance evidence.
 
-Every supported native adapter opens and validates one object handle. Unix-like adapters use a
-capability-relative `O_RDONLY | O_NONBLOCK` open before checking regular-file metadata on that
-same handle, so a hostile FIFO cannot hang before rejection. Windows performs the regular-file check
-on the handle returned by its relative native open. No target may use path metadata followed by an
-open, or reopen a path after validating it.
+Native-filesystem registration is platform-local and no-skip. A target may enter the registered set
+only after it passes ADR 0010's complete object-bound opening and adversarial platform matrix plus ADR
+0014's generic unsafe/dependency admission. ADR 0010 owns open strategies, path/reparse/special-file
+mechanics, exact security-sensitive package closure, and the required fixtures; this ADR owns whether
+their target-specific evidence is sufficient to make or retain a support claim.
 
-The filesystem promotion authority is platform-local and must be no-skip:
-
-- Linux tests `openat2` and fallback behavior, symlink/magic-link escapes, rename replacement, and
-  deadline-bounded FIFO/socket/device rejection.
-- Windows tests drive/UNC/Win32/NT namespaces, reserved device aliases, alternate streams, symlinks,
-  junctions, reparse replacement, case/trailing-dot aliases, and same-handle non-regular-file
-  rejection.
-- macOS tests component-relative handle walking, symlink escape, concurrent rename replacement, and
-  deadline-bounded FIFO/socket/device rejection.
-- A future FreeBSD runtime-candidate proposal must cover both incompatible FreeBSD 13 and accepted
-  FreeBSD 14+ `O_RESOLVE_BENEATH` behavior plus the capability-walk fallback and nonblocking
-  special-file suite. The current FreeBSD profile audits dependency resolution only and grants no
-  runtime or Native Tested claim.
-
-Target-filtered candidate dependency checks pin `cap-std` 4.0.2, `cap-primitives` 4.0.2, and direct
-`rustix` 1.1.4 with their admitted checksums and features for the three runtime candidates plus the
-`x86_64-unknown-freebsd` audit-only profile. The two Portable Byte targets must resolve none of those
-native filesystem dependencies in their byte-only graphs.
+Portable Byte target graphs must resolve no native-filesystem dependencies. Runtime candidates and
+audit-only targets must match the machine-readable target and dependency-admission baselines exactly;
+membership or closure drift removes the claim until the corresponding gates pass again.
 
 Filesystem guarantees apply to objects opened through Baozi's scoped adapter. They do not sandbox a
 malicious `AssetIo`, plugin, host process, kernel driver, or writable mount controlled by the host.

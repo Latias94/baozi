@@ -1,6 +1,7 @@
 ---
 status: accepted
 date: 2026-07-09
+updated: 2026-07-13
 authors:
   - Codex
 decision_type: architecture
@@ -91,9 +92,8 @@ All public and backend parser paths must:
 - make every input-controlled loop consume input or spend a bounded work budget
 - implement graph traversal iteratively with separate node, edge, depth, and work limits
 - validate required text encodings and bound recovery diagnostics
-- route dependencies through the session capability in ADR 0010
-- open potentially special filesystem objects without blocking and validate regular-file type from
-  the same authorized handle, never from path metadata followed by a second open
+- route dependencies through ADR 0010's session capability and object-bound IO contract; this ADR
+  does not define a second filesystem opening algorithm
 - preserve monotonic attempted work when optional resources fail
 - convert dependency errors into Baozi-owned structured failures
 - validate every successful Scene centrally, including third-party results
@@ -145,11 +145,10 @@ lockfile resolution against that record in CI. An update that changes path resol
 native calls, panic behavior, target support, or the resolved security-sensitive closure reopens
 admission before merge.
 
-Security-relevant flag constants are dependencies too. When the native filesystem adapter needs
-Unix `O_NONBLOCK` to prevent a hostile FIFO from blocking before type validation, it uses exact
-direct `rustix` 1.1.4 only for `OFlags::NONBLOCK` and passes the value through the admitted
-`cap-std` open-options API. Numeric flags, documentation-hidden transitive APIs, and an unreviewed
-extension crate do not satisfy this admission rule.
+Security-relevant flag constants are dependencies too; numeric constants, documentation-hidden
+transitive interfaces, and unreviewed extension crates do not satisfy admission. ADR 0010 owns the
+native-filesystem package, version, feature, open-flag, and resolved-closure selection to which this
+generic dependency rule applies.
 
 ## FFI Policy
 
@@ -270,7 +269,7 @@ Decision: chosen.
 | Unsafe visibility | Baozi-owned exceptions have ADR, safety comments, tests, and fuzz evidence | lint and audit |
 | Dependency closure | security-sensitive resolved packages, features, sources, and checksums match their admission record | lockfile admission checker |
 | Default FFI | absent from default dependency and feature trees | `cargo tree -e features` |
-| Filesystem availability | hostile directory, FIFO, socket, and device entries return typed failures without blocking or pathname reopen | per-target same-handle and deadline tests |
+| Filesystem availability | ADR 0010's object-bound IO contract passes its per-target no-skip matrix | same-handle and deadline evidence owned by ADR 0010 |
 | Failure confidentiality | diagnostics are bounded, escaped, and root-redacted | snapshot tests |
 | Concurrency honesty | docs and APIs assign aggregate admission to host | threat-model and API review |
 
@@ -282,7 +281,7 @@ Decision: chosen.
 | Opaque parser allocates before Baozi admission | High | Medium | disable/unregister until finite preflight bounds or process isolation exist; allowance and RSS maturity tests are not waivers |
 | Host runs too many individually bounded imports | High | High | host queue/concurrency admission and process limits |
 | Unsafe dependency regresses | Critical | Low | exact resolved-closure gate, advisory/license audit, upgrade re-admission, and fuzz/sanitizer gates |
-| Special-file open hangs before parser limits apply | Critical | Medium | capability-relative nonblocking open, same-handle regular-file validation, and deadline regression tests |
+| Special-file open hangs before parser limits apply | Critical | Medium | require ADR 0010 object-bound opening and its no-skip deadline evidence before target registration |
 | Fuzz smoke is too shallow | High | Medium | regression corpus plus scheduled sustained campaigns |
 | Diagnostics leak host data | High | Medium | typed errors, escaping, truncation, and root redaction |
 

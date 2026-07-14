@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-07-09
-updated: 2026-07-12
+updated: 2026-07-13
 authors:
   - Codex
 decision_type: architecture
@@ -41,7 +41,10 @@ does not merge distinct operation histories into one ambiguous total.
 `baozi-operation` owns the runtime-neutral reservation types, transfer/pending-publication/atomic-publish state machine, checked
 counter primitives, generic ledger engine, and owner-neutral ledger-evidence snapshot machinery.
 `baozi-import` owns request `ResourceLimits`, the effective import budget, import dimensions/phases,
-and interpretation in import outcomes. `baozi-postprocess` owns its operation limits,
+interpretation in import outcomes, and the single ParseScope-bound metered-storage module that binds
+Baozi-owned parser `Vec`/`String` capacity to import reservations. Format crates compose that module
+and may add semantic wrappers, but cannot own a competing reserve/grow/shrink/transfer/rollback
+implementation. `baozi-postprocess` owns its operation limits,
 dimensions/phases, and interpretation in post-process outcomes. The facade only composes the two
 snapshots. `baozi-io` owns path, backend, handle, IO causes, and immutable backend-local hard caps; it
 does not own a competing aggregate budget.
@@ -58,8 +61,8 @@ Accepted freezes these semantics; conformance requires executable implementation
 | Class | Meaning | Refund rule | Examples |
 | --- | --- | --- | --- |
 | Attempted | Cumulative requested/untrusted work charged before an action | Never decreases | open attempts, logical references, declared decode cells, requested bytes, diagnostic bytes proposed |
-| Consumed | Cumulative work/bytes actually completed or observed | Never decreases | bytes physically read/decoded, tokens scanned, graph edges visited, diagnostics encoded |
-| Live reservation | Capacity or conservative allowance owned right now | Released only when storage/allowance is actually gone | snapshot capacity, materialized decoded text, backend decode allowance, normalized model, SceneBuilder, staging buffers, diagnostics, retained bounded failure sources |
+| Consumed | Cumulative work/bytes actually completed or observed | Never decreases | bytes successfully copied, read, or decoded; tokens scanned; graph edges visited; diagnostics encoded |
+| Live reservation | Capacity or conservative allowance owned right now | Released only when storage/allowance is actually gone | snapshot capacity, materialized decoded text, backend decode allowance, normalized model, SceneBuilder, staging buffers, diagnostics, packed bounded failure evidence |
 | Committed output | Canonical cells/bytes accepted for publication | Monotonic after commit | validated nodes, primitives, attribute cells, strings, images, animation keys |
 
 `attempted` is charged before an external action or count-driven loop when possible. `consumed` is a
@@ -68,12 +71,16 @@ separate counter charged only as bytes/work actually complete. For comparable di
 truncated read retains its actual consumed byte count. Neither class is rolled back when an optional
 dependency, parser recovery, cancellation, or transaction fails.
 
-When completion cannot be known at admission time, the owner issues a linear work permit. Creating a
-permit first polls operation control and charges attempted work; successful `complete()` charges
-consumed work. A domain may require a subsequent poll, as detection does before returning from
-`complete()`. Dropping or forgetting an unfinished permit never refunds the attempt or fabricates
-consumption and is a terminal capability-contract violation. A domain may further require only one
-outstanding permit, as detection does under ADR 0020.
+For direct primary bytes, attempted primary and aggregate bytes are charged before allocation,
+snapshot capacity is reserved before copying, and consumed bytes are charged only after the copy
+succeeds. The caller allocation is not session-owned live storage. Direct binding emits no physical
+open evidence; ADR 0029 owns the input-mode and dependency-authority contract.
+
+When completion cannot be known at admission time, the owner may issue a linear work permit. Creating
+a permit charges attempted work before the admitted action; successful completion charges consumed
+work. Dropping or forgetting unfinished work never refunds the attempt or fabricates consumption.
+The operation owner defines control polling, outstanding-permit, and terminal-transport semantics;
+ADR 0020 exclusively defines those rules for detection.
 
 Committed output remains part of current live memory until the successful result leaves its owning
 operation. Transferring a reservation from SceneBuilder or SceneEdit to committed output changes its
@@ -100,15 +107,23 @@ Reservations are scoped/RAII capabilities issued only by the central ledger. The
 transferred to another phase, or committed, but cannot be cloned or forged. Failure to reserve is a
 typed limit failure before the allocation attempt.
 
+For parser-owned collections, the `baozi-import` metered-storage aggregate owns the backing storage
+and its covering reservation together. Its representation or explicit `Drop` sequence releases the
+allocation before returning the reservation; clearing/truncating logical elements does not release a
+capacity reservation unless the backing capacity is actually relinquished. A failed reserve, resize,
+or transfer leaves both storage and its covering token in the caller-owned pre-transition state so
+the operation may fail or retry without an under-accounted interval. First-party format crates must
+not reproduce this protocol in local helpers.
+
 The generic reservation type is defined by `baozi-operation`; only the owning import or post-process
 ledger instance can issue it. A reservation is branded to that instance so it cannot be transferred
 between an import ledger and a post-process ledger or committed under the wrong domain outcome.
 
 Bounded terminal evidence remains operation-owned live storage until it is finalized into an outcome.
-For a format failure, the outer source payload and packed details are admitted and reserved before
-trusted source callbacks. A retained source may not hide attacker-sized `String`, `Vec`, or other
-unmetered capacity: it uses bounded inline storage or separately reserves every owned heap capacity.
-The 4 KiB outer-source admission bound does not excuse nested allocation accounting.
+For a format failure, packed Baozi-owned detail storage is admitted and reserved before the borrowed
+detail producer is invoked. The producer and any native backend/plugin error are consumed
+synchronously and never retained, so terminal accounting covers only the inert descriptor/code/detail
+evidence that actually outlives the adapter call.
 
 ### Pre-Session Request Admission
 
@@ -281,7 +296,7 @@ Negative:
 
 | Risk | Severity | Mitigation |
 | --- | --- | --- |
-| Reservation drift undercounts actual capacity | Critical | Central wrappers, capacity-based tests, checked arithmetic, and heap/RSS scale gates. |
+| Reservation drift undercounts actual capacity | Critical | One `baozi-import` metered-storage owner, capacity-based tests, checked arithmetic, destructor-order tests, and heap/RSS scale gates. |
 | Transfer double-counts committed buffers | High | Linear reservation capabilities and explicit transfer tests. |
 | Rollback refunds attack work | High | Attempted/consumed counters expose no decrement API. |
 | Conservative backend allowance rejects valid files | Medium | Calibrate with fixtures and RSS profiles; replace opaque paths where precision matters. |
@@ -297,9 +312,10 @@ Negative:
 | Live release | Dropping each phase buffer reduces current live while preserving its high-water mark. |
 | Peak overlap | Tests retaining snapshot + backend + normalized + Scene storage observe their sum, not their maximum. |
 | Checked admission | Count-times-size overflow and over-budget growth fail before allocator/backend entry. |
-| Linear work accounting | Permit creation polls and charges attempted work, completion charges consumed, detection performs its required post-work poll, and unfinished permits retain attempted-only evidence while terminating their owning capability. |
+| Shared metered storage | Compile-time API checks and format-source scans find one `baozi-import` reserve/grow/shrink/transfer/rollback implementation; all first-party parser collections use it, allocation drops before its token, and injected transition failures preserve both owners exactly. |
+| Linear work accounting | Permit admission charges attempted work, completion charges consumed work, and unfinished work retains attempted-only evidence; ADR 0020 fixtures prove detection-specific polling and terminal transport. |
 | Decoded text surfaces | Exact and one-byte-under tests cover whole-text inputs, mixed text/binary headers, and container JSON chunks; borrowed validation creates no fictitious live bytes, while materialized copies reserve actual capacity. |
-| Retained format source | Source payload above 4 KiB fails before trusted callbacks; admitted packed details plus bounded source storage remain reserved through failure finalization, and retained sources contain no unmetered heap capacity. |
+| Packed format failure evidence | Packed descriptor/code/detail capacity is reserved before the borrowed producer runs, remains covered through failure finalization, and the terminal outcome retains no backend/plugin object or hidden foreign allocation. |
 | Opaque-backend admission | A known abort, unbounded recursion, or pre-admission allocation path has no first-party registration; safely bounded opaque paths distinguish baseline admission from later maturity evidence. |
 | Transfer correctness | Preparing publication neither drops live storage nor counts it twice; one successful atomic publication records all committed evidence and releases operation-owned live reservations together, while any pre-publication failure leaves committed output at zero. |
 | Dependency accounting | Repeated authorized references to one authority-qualified identity charge one physical read and N logical references/work units; equal logical names in different authority domains remain separate. |

@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-07-09
-updated: 2026-07-12
+updated: 2026-07-13
 authors:
   - Codex
 decision_type: architecture
@@ -246,9 +246,10 @@ consumer tests, compatibility vectors, version-evolution rules, and public docum
 ### Presets
 
 Presets are named, pure overlay constructors. Expansion is inspectable before execution and produces
-the same common and format-envelope layers a caller could build explicitly. Presets may select a
-post-process plan and a loss policy, but may not enable FFI, external resource access, or an unsafe
-backend outside fields visibly present in the expanded request.
+the same common and format-envelope layers a caller could build explicitly. A facade preset may
+compose an import loss policy with a postprocess plan and its separate postprocess loss policy, but
+this ADR owns only the import-side values and transport. Presets may not enable FFI, external
+resource access, or an unsafe backend outside fields visibly present in the expanded request.
 
 ```mermaid
 flowchart TB
@@ -281,9 +282,9 @@ flowchart TB
 | Backend-local hard caps and path/handle validity | `baozi-io` | Nothing; formats receive only authorized resources |
 | Dependency optionality, scope, and session policy | `baozi-import` | Request a classified dependency through `ParseScope` |
 | Detection and forced/preferred format | Import registry/session | Nothing |
-| Conformance and loss policy | `baozi-import`; facade constructs/re-exports only | Emit coded source facts; never override policy |
+| Import conformance and source-ingestion loss policy | `baozi-import`; facade constructs/re-exports only | Emit coded source facts; never override policy |
 | Parser semantics and format-permitted recovery | Individual format crate | Define and compile typed options within descriptor capabilities |
-| Post-process requests | Postprocess crate | Nothing during parsing |
+| Post-process requests, loss policy, diagnostics, and outcomes | `baozi-postprocess`; facade composes only | Nothing during parsing |
 | Cancellation/progress/deadline mechanism | `baozi-operation`; owning operation supplies policy | Poll/report through capability-limited scope |
 
 ## Alternatives Considered

@@ -15,7 +15,10 @@ evidence:
   - docs/plans/2026-07-10-001-refactor-baozi-canonical-architecture-plan.md
 tracers:
   - crates/baozi-test-support/src/snapshot.rs
-  - fuzz/fuzz_targets
+  - crates/baozi-test-support/tests/snapshot.rs
+  - fuzz/fuzz_targets/registry_detection.rs
+  - .github/workflows/ci.yml
+  - .github/workflows/fuzz.yml
 ---
 
 # ADR 0005: Testing, Fuzzing, and Differential Oracle Strategy

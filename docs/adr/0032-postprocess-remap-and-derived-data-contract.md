@@ -1,6 +1,7 @@
 ---
 status: accepted
 date: 2026-07-10
+updated: 2026-07-13
 authors:
   - Codex
 decision_type: architecture
@@ -49,6 +50,13 @@ generation, assigns a fresh collision-free `SceneGenerationId`, runs central val
 the new `ValidatedScene` plus an edit report. Branched edits from one input never share an output
 generation token.
 Failure, resource exhaustion, or cancellation drops the working set and publishes no scene.
+
+ADR 0013 decides whether a compiled postprocess plan requires a canonical write before opening a
+`SceneEdit`. `NotRequested` and successfully executed `Unchanged` outcomes do not commit an edit and
+therefore preserve the input proof, digest, and `SceneGenerationId`. `Changed` is the only successful
+postprocess outcome that commits; every such commit still creates a fresh generation, including a
+value-only edit whose entity identities remain logically unchanged. A fresh generation is evidence
+of a new immutable state, not a side effect of merely invoking postprocess.
 
 ```mermaid
 sequenceDiagram
@@ -116,6 +124,37 @@ mesh owner. Vertex, corner, and face endpoints additionally identify their ownin
 `PrimitiveId`. A numeric index without its generation and complete required owner chain is not a
 remap endpoint.
 
+Replay evidence is invocation-local. An `Unchanged` replay publishes no generation, remap,
+provenance, derived-data producer, or committed-output change; its scene digest, proof, and producer
+records remain identical even when attempted work is non-zero. A replay that changes state creates a
+fresh generation and fresh remaps from the immediately preceding input generation. Earlier remaps
+are never copied under new endpoints; a cross-invocation relation exists only through explicit
+composition.
+
+Every executed step emits an invocation-local application record containing the full normalized
+operation identity (operation ID, semantic version, and normalized parameter digest), stamp-schema
+version, pre-write semantic-input stamp, post-write semantic-input stamp, and postcondition
+version/result. The post-write stamp is recomputed over the same declared read set on the step's
+validated output; it equals the pre-write stamp for `Unchanged`. Cross-invocation replay compares the
+current pre-invocation stamp with the prior record's post-write stamp. The pre-write stamp records
+what the earlier execution consumed and is audit evidence, not skip authority.
+
+Prior-record lookup is conservative and deterministic. It scans records attached to extant owners
+in the descriptor's declared provenance-carrying write domains in canonical owner order; detached
+reports and deleted owners are not lookup authority. A candidate must match the complete normalized
+operation identity, stamp-schema version, postcondition version, and current pre-invocation stamp to
+recorded post-write stamp. Matching records may collapse only when their normalized records are
+identical. No candidate, conflicting matching candidates, or an unavailable former owner forces
+reevaluation; generation order, timestamps, insertion order, and a notion of "latest" never select a
+winner. Even one matching record is only replay evidence: the executor recomputes the current
+postcondition before returning `Unchanged`.
+
+`Unchanged` retains this record only in the report. For a changed invocation, the edit report retains
+it and only actually changed or generated owners attach it to provenance; this is the comparable
+history carrier for non-derived structural and value writes. Recomputed derived values receive the
+same full producer identity plus their post-write input stamp; preserved derived values retain their
+producer while following the generation-rebinding rule below.
+
 An edit report contains both ordered per-step remaps and one composed input-to-final remap for every
 affected kind/domain. Composition is relational in execution order: deletion terminates an old
 origin, split order remains stable, merges retain all ordered old origins, and generated elements
@@ -139,7 +178,8 @@ Derived<T> =
 
 `generation` equals the owning `ValidatedScene` generation. `input_stamp` is a deterministic digest
 of the field's declared semantic inputs and dependency-schema version; `producer` distinguishes a
-source-preserved value from a named operation and option digest. `Absent` contains no stale value.
+source-preserved value from the complete normalized operation identity including semantic version
+and parameter digest. `Absent` contains no stale value.
 An edit may use a private dirty/invalidated staging marker, but commit must turn it into `Absent` or a
 new `Valid`; `Invalidated` is an edit-report outcome, not a third publishable value-bearing state.
 When an unchanged derived value is preserved, commit verifies its input stamp and rebinds the small
@@ -168,12 +208,13 @@ operation must prove preservation, remap or recompute them, or remove them with 
 invalidation/loss evidence before commit. A validated scene never exposes an attribute marked
 invalid for ordinary reads.
 
-Postprocess success reports ordered steps, diagnostics, losses, resource statistics, entity remaps,
-domain remaps, and derived-data outcomes. Resource semantics are owned by ADR 0022: attempted and
-consumed work remain monotonic on success or failure; peak-live records the transaction high-water;
-and committed output/remaps advance only after final publication. Failure evidence includes the last
-completed step plus attempted, consumed, peak-live, and zero newly committed output without
-presenting private candidate remaps as committed.
+Postprocess success reports its `Unchanged` or `Changed` outcome, ordered steps, diagnostics, losses,
+resource statistics, entity remaps, domain remaps, and derived-data outcomes. `Unchanged` has no
+committed output or remaps and names the preserved input generation. Resource semantics are owned by
+ADR 0022: attempted and consumed work remain monotonic on success or failure; peak-live records the
+transaction high-water; and committed output/remaps advance only after final publication. Failure
+evidence includes the last completed step plus attempted, consumed, peak-live, and zero newly
+committed output without presenting private candidate remaps as committed.
 
 ## Considered Options
 
@@ -208,6 +249,7 @@ tools. Chosen.
 | Remap relations become too large | Medium | Use compact ranges/CSR representations while preserving complete semantics and limits. |
 | Operation forgets a derived dependency | High | Central dependency registry plus mutation tests that compare declared write sets to cache outcomes. |
 | Failure reports imply partial commit | High | Separate attempted step evidence from committed remaps and expose generation IDs on every report. |
+| Replay fabricates a new generation or provenance without a write | High | Make unchanged replay invocation-local and assert bit-identical scene/proof/producer state. |
 
 ## Success Metrics
 
@@ -234,5 +276,15 @@ tools. Chosen.
   input use different output generation endpoints.
 - A compiled plan cannot open an edit unless every operation descriptor covers its writes, remaps,
   invalidation, and structural loss obligations.
+- A second state-idempotent invocation with equal operation identity, a current pre-invocation stamp
+  matching the prior record's post-write stamp, and a satisfied postcondition is `Unchanged` with
+  identical digest, proof, generation, provenance, and derived producers; changing parameters,
+  semantic version, or declared input reevaluates the operation. Tests include an operation that
+  changes its own read set so replay cannot accidentally compare against its prior pre-write stamp.
+- Prior-record lookup fixtures prove canonical traversal, equivalent-record collapse, and
+  reevaluation after carrier deletion, missing evidence, or conflicting matching records; detached
+  reports and recency never authorize a skip.
+- Intentionally repeatable operations are not suppressed by prior history; when they change state,
+  their remaps start at the immediately preceding input generation rather than relabeling old remaps.
 - External code cannot publish a candidate scene or mark derived data valid without commit
   validation.
