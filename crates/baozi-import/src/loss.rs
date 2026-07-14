@@ -10,10 +10,19 @@ pub enum ImportLossDisposition {
     RejectedByLossPolicy,
 }
 
+/// The typed semantic object affected by one retained loss fact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum ImportLossSubject {
+    FormatRecovery,
+    SourceScopeDetails,
+}
+
 /// A bounded, session-authenticated fact about semantic loss or recovery.
 #[derive(Debug)]
 pub struct ImportLossEvidence {
     kind: ImportLossKind,
+    subject: ImportLossSubject,
     code: DiagnosticCode,
     source: AssetPath,
     raw_range: DiagnosticByteRange,
@@ -24,6 +33,7 @@ pub struct ImportLossEvidence {
 impl ImportLossEvidence {
     pub(crate) const fn new(
         kind: ImportLossKind,
+        subject: ImportLossSubject,
         code: DiagnosticCode,
         source: AssetPath,
         raw_range: DiagnosticByteRange,
@@ -32,6 +42,7 @@ impl ImportLossEvidence {
     ) -> Self {
         Self {
             kind,
+            subject,
             code,
             source,
             raw_range,
@@ -42,6 +53,10 @@ impl ImportLossEvidence {
 
     pub const fn kind(&self) -> ImportLossKind {
         self.kind
+    }
+
+    pub const fn subject(&self) -> ImportLossSubject {
+        self.subject
     }
 
     pub const fn code(&self) -> DiagnosticCode {

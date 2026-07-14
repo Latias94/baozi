@@ -779,8 +779,10 @@ impl DiagnosticSink {
         })
     }
 
-    pub(crate) fn discard_prepared(&mut self, _prepared: PreparedDiagnostic) {
-        self.discard_admission();
+    pub(crate) fn discard_prepared(&mut self, prepared: PreparedDiagnostic) {
+        if prepared.is_stored() {
+            self.discard_admission();
+        }
     }
 
     pub(crate) fn try_reserve_storage_slot(
@@ -800,58 +802,46 @@ impl DiagnosticSink {
             .try_reserve(additional, "diagnostic-reservation-list", reserve)
     }
 
-    #[allow(
-        clippy::result_large_err,
-        reason = "rejection must return the prepared diagnostic and both live reservations without allocating"
-    )]
-    pub(crate) fn commit(
+    pub(crate) fn can_commit(
+        &self,
+        prepared: &PreparedDiagnostic,
+        payload: &Option<ImportReservation>,
+        structural: &Option<ImportReservation>,
+    ) -> bool {
+        if prepared.diagnostic.is_none() {
+            return false;
+        }
+        payload.is_some()
+            && structural.is_some()
+            && self.diagnostics.has_slots(1)
+            && self.reservations.has_slots(2)
+    }
+
+    pub(crate) fn commit_reserved_infallible(
         &mut self,
         mut prepared: PreparedDiagnostic,
         payload: Option<ImportReservation>,
         structural: Option<ImportReservation>,
-    ) -> Result<
-        (),
-        (
-            PreparedDiagnostic,
-            Option<ImportReservation>,
-            Option<ImportReservation>,
-        ),
-    > {
-        let Some(diagnostic) = prepared.diagnostic.take() else {
-            return if payload.is_none() && structural.is_none() {
-                Ok(())
-            } else {
-                Err((prepared, payload, structural))
-            };
-        };
-        let (payload, structural) = match (payload, structural) {
-            (Some(payload), Some(structural)) => (payload, structural),
-            (payload, structural) => {
-                prepared.diagnostic = Some(diagnostic);
-                return Err((prepared, payload, structural));
-            }
-        };
-        if !self.diagnostics.has_slots(1) || !self.reservations.has_slots(2) {
-            prepared.diagnostic = Some(diagnostic);
-            return Err((prepared, Some(payload), Some(structural)));
-        }
-        if let Err(diagnostic) = self.diagnostics.try_push_reserved(diagnostic) {
-            prepared.diagnostic = Some(diagnostic);
-            return Err((prepared, Some(payload), Some(structural)));
-        }
-        if let Err((payload, structural)) = self
-            .reservations
-            .try_push_pair_reserved(payload, structural)
-        {
-            prepared.diagnostic = self.diagnostics.pop();
-            return Err((prepared, Some(payload), Some(structural)));
-        }
+    ) {
+        assert!(
+            self.can_commit(&prepared, &payload, &structural),
+            "diagnostic publication must be admitted before its no-fail commit"
+        );
+        let diagnostic = prepared
+            .diagnostic
+            .take()
+            .expect("an admitted stored diagnostic retains its payload");
+        let payload = payload.expect("an admitted stored diagnostic retains its payload token");
+        let structural =
+            structural.expect("an admitted stored diagnostic retains its structural token");
+        self.diagnostics.push_reserved_infallible(diagnostic);
+        self.reservations.push_reserved_infallible(payload);
+        self.reservations.push_reserved_infallible(structural);
         self.summary.stored_count = self.summary.stored_count.saturating_add(1);
         self.summary.stored_bytes = self
             .summary
             .stored_bytes
             .saturating_add(prepared.stored_bytes);
-        Ok(())
     }
 
     fn record_failed_prepare(&mut self, additional_attempted_bytes: u64) {
@@ -1278,7 +1268,7 @@ fn format_control(code: u32, output: &mut [u8; 10]) -> &str {
 mod tests {
     use super::*;
 
-    fn prepare_and_commit(
+    fn prepare(
         sink: &mut DiagnosticSink,
         source: &AssetPath,
         message: fmt::Arguments<'_>,
@@ -1335,10 +1325,9 @@ mod tests {
     fn full_storage_counts_drops_without_storing_messages() {
         let source = AssetPath::new("model.obj").expect("valid path");
         let mut sink = DiagnosticSink::new(0, 0, 0, 128);
-        let prepared = prepare_and_commit(&mut sink, &source, format_args!("bounded"));
+        let prepared = prepare(&mut sink, &source, format_args!("bounded"));
         assert!(!prepared.is_stored());
-        sink.commit(prepared, None, None)
-            .expect("non-stored preparation needs no reservations");
+        drop(prepared);
         assert_eq!(sink.summary().attempted_count(), 1);
         assert_eq!(sink.summary().dropped_count(), 1);
         assert!(sink.diagnostics().is_empty());

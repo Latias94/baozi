@@ -22,6 +22,7 @@ mod request;
 mod request_wire;
 mod scope;
 mod session;
+mod source_scope;
 
 pub use config::{
     ConformancePolicy, DetectionOptions, DetectionOptionsError, FormatSelection, ImportConfig,
@@ -61,7 +62,7 @@ pub use ledger::{
     ImportProgressPhase, ImportProgressUnit,
 };
 pub use limits::{ResourceLimits, ResourceLimitsOverlay};
-pub use loss::{ImportLossDisposition, ImportLossEvidence};
+pub use loss::{ImportLossDisposition, ImportLossEvidence, ImportLossSubject};
 pub use metered_storage::{
     MeteredDecodedText, MeteredMetadataMap, MeteredOpaqueAllowance, MeteredOrderedMap,
     MeteredSceneVec, MeteredString, MeteredVec, PreparedSceneValue, SceneValueParts,
@@ -93,3 +94,8 @@ pub use scope::{
     SkinBuildConfig, TextureBuildConfig, TextureSlotBuildConfig,
 };
 pub use session::{ReadHint, import_asset, import_asset_with_resolver, import_bytes};
+pub use source_scope::{
+    FinalizedSourceScopeRecord, SourceScopeCounts, SourceScopeDetail, SourceScopeDetailState,
+    SourceScopeDetails, SourceScopeDigest, SourceScopeDisposition, SourceScopeEntityKind,
+    SourceScopeRecord, SourceScopeRecordBuilder,
+};

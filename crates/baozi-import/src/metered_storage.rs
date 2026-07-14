@@ -519,15 +519,6 @@ impl<T> AccountedVec<T> {
         self.values.push(value);
     }
 
-    pub(crate) fn try_push_pair_reserved(&mut self, first: T, second: T) -> Result<(), (T, T)> {
-        if !self.has_slots(2) {
-            return Err((first, second));
-        }
-        self.values.push(first);
-        self.values.push(second);
-        Ok(())
-    }
-
     pub(crate) fn try_insert_reserved(&mut self, index: usize, value: T) -> Result<(), T> {
         if index > self.values.len() || !self.has_slots(1) {
             return Err(value);
@@ -709,6 +700,11 @@ std::thread_local! {
 #[cfg(test)]
 fn fail_next_allocation() -> bool {
     FAIL_NEXT_ALLOCATION.with(|fault| fault.replace(false))
+}
+
+#[cfg(test)]
+pub(crate) fn inject_next_accounted_allocation_failure() {
+    FAIL_NEXT_ALLOCATION.with(|fault| fault.set(true));
 }
 
 #[cfg(not(test))]
@@ -1106,34 +1102,6 @@ mod tests {
                 .expect("failed reservation snapshot")
                 .current_live_bytes(),
             original_live
-        );
-    }
-
-    #[test]
-    fn pair_push_is_atomic_when_reserved_capacity_is_exhausted() {
-        let coordinator = coordinator();
-        let mut values = AccountedVec::new();
-        values
-            .try_reserve(2, "pair-push", |bytes| reserve(&coordinator, bytes))
-            .expect("pair capacity");
-        values
-            .try_push_pair_reserved(1_u64, 2_u64)
-            .unwrap_or_else(|_| panic!("reserved pair slots"));
-        let live = coordinator
-            .borrow()
-            .try_ledger_snapshot()
-            .expect("pair snapshot")
-            .current_live_bytes();
-
-        assert_eq!(values.try_push_pair_reserved(3, 4), Err((3, 4)));
-        assert_eq!(&*values, &[1, 2]);
-        assert_eq!(
-            coordinator
-                .borrow()
-                .try_ledger_snapshot()
-                .expect("rejected pair snapshot")
-                .current_live_bytes(),
-            live
         );
     }
 

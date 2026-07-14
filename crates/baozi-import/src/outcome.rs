@@ -5,6 +5,7 @@ use crate::error::ImportCause;
 use crate::format::DetectionOutcome;
 use crate::ledger::{ImportDimension, ImportLedgerSnapshot};
 use crate::loss::ImportLossEvidence;
+use crate::source_scope::SourceScopeRecord;
 use baozi_core::{FormatId, ValidatedScene};
 use baozi_io::AssetPath;
 use baozi_operation::{LedgerCause, LedgerLimitsError};
@@ -140,6 +141,7 @@ pub struct ImportReport {
     diagnostic_summary: DiagnosticSummary,
     optional_dependency_evidence: Vec<OptionalDependencyEvidence>,
     loss_evidence: Vec<ImportLossEvidence>,
+    source_scope_record: Option<SourceScopeRecord>,
     ledger: ImportLedgerSnapshot,
     last_completed: ImportPhaseEvidence,
 }
@@ -153,6 +155,7 @@ pub(crate) struct ImportReportParts {
     pub diagnostic_summary: DiagnosticSummary,
     pub optional_dependency_evidence: Vec<OptionalDependencyEvidence>,
     pub loss_evidence: Vec<ImportLossEvidence>,
+    pub source_scope_record: Option<SourceScopeRecord>,
     pub ledger: ImportLedgerSnapshot,
     pub last_completed: ImportPhaseEvidence,
 }
@@ -168,6 +171,7 @@ impl ImportReport {
             diagnostic_summary: parts.diagnostic_summary,
             optional_dependency_evidence: parts.optional_dependency_evidence,
             loss_evidence: parts.loss_evidence,
+            source_scope_record: parts.source_scope_record,
             ledger: parts.ledger,
             last_completed: parts.last_completed,
         }
@@ -205,6 +209,10 @@ impl ImportReport {
         &self.loss_evidence
     }
 
+    pub const fn source_scope_record(&self) -> Option<&SourceScopeRecord> {
+        self.source_scope_record.as_ref()
+    }
+
     pub const fn ledger(&self) -> &ImportLedgerSnapshot {
         &self.ledger
     }
@@ -228,6 +236,7 @@ impl fmt::Debug for ImportReport {
                 &self.optional_dependency_evidence,
             )
             .field("loss_evidence", &self.loss_evidence)
+            .field("source_scope_record", &self.source_scope_record)
             .field("ledger", &self.ledger)
             .field("last_completed", &self.last_completed)
             .finish_non_exhaustive()
@@ -243,6 +252,7 @@ pub struct ImportFailure {
     diagnostic_summary: DiagnosticSummary,
     optional_dependency_evidence: Vec<OptionalDependencyEvidence>,
     loss_evidence: Vec<ImportLossEvidence>,
+    source_scope_record: Option<SourceScopeRecord>,
     ledger: ImportLedgerSnapshot,
     finalization_cause: Option<LedgerCause<ImportDimension>>,
     last_completed: ImportPhaseEvidence,
@@ -257,6 +267,7 @@ pub(crate) struct ImportFailureParts {
     pub diagnostic_summary: DiagnosticSummary,
     pub optional_dependency_evidence: Vec<OptionalDependencyEvidence>,
     pub loss_evidence: Vec<ImportLossEvidence>,
+    pub source_scope_record: Option<SourceScopeRecord>,
     pub ledger: ImportLedgerSnapshot,
     pub finalization_cause: Option<LedgerCause<ImportDimension>>,
     pub last_completed: ImportPhaseEvidence,
@@ -273,6 +284,7 @@ impl ImportFailure {
             diagnostic_summary: parts.diagnostic_summary,
             optional_dependency_evidence: parts.optional_dependency_evidence,
             loss_evidence: parts.loss_evidence,
+            source_scope_record: parts.source_scope_record,
             ledger: parts.ledger,
             finalization_cause: parts.finalization_cause,
             last_completed: parts.last_completed,
@@ -311,6 +323,10 @@ impl ImportFailure {
         &self.loss_evidence
     }
 
+    pub const fn source_scope_record(&self) -> Option<&SourceScopeRecord> {
+        self.source_scope_record.as_ref()
+    }
+
     pub const fn ledger(&self) -> &ImportLedgerSnapshot {
         &self.ledger
     }
@@ -340,6 +356,7 @@ impl fmt::Debug for ImportFailure {
                 &self.optional_dependency_evidence,
             )
             .field("loss_evidence", &self.loss_evidence)
+            .field("source_scope_record", &self.source_scope_record)
             .field("ledger", &self.ledger)
             .field("finalization_cause", &self.finalization_cause)
             .field("last_completed", &self.last_completed)

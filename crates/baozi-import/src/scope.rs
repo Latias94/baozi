@@ -10,7 +10,7 @@ use crate::descriptor::TextDecodingMode;
 use crate::diagnostic::{
     DiagnosticByteRange, DiagnosticCause, DiagnosticCode, DiagnosticDetailSink,
     DiagnosticLineColumn, DiagnosticPrepareCause, DiagnosticSeverity, DiagnosticSink,
-    DiagnosticSource,
+    DiagnosticSource, PreparedDiagnostic,
 };
 use crate::error::{
     BoundedFormatFailureDetailSink, FormatFailureEnvelope, FormatFailureSource,
@@ -22,7 +22,7 @@ use crate::ledger::{
     ImportReservation,
 };
 use crate::limits::ResourceLimits;
-use crate::loss::{ImportLossDisposition, ImportLossEvidence};
+use crate::loss::{ImportLossDisposition, ImportLossEvidence, ImportLossSubject};
 use crate::metered_storage::{
     AccountedReservationVec, AccountedVec, MeteredDecodedText, MeteredMetadataMap,
     MeteredOpaqueAllowance, MeteredOrderedMap, MeteredSceneVec, MeteredString, MeteredVec,
@@ -30,6 +30,9 @@ use crate::metered_storage::{
 };
 use crate::options::{CompiledFormatOptions, FormatOptionKey};
 use crate::registry::RegistryEntry;
+use crate::source_scope::{
+    FinalizedSourceScopeRecord, LiveSourceScopeRecord, SourceScopeRecordBuilder,
+};
 use baozi_core::{
     Aabb, AlphaMode, Animation, AnimationId, Camera, CameraId, CameraProjection, Color, ColorSpace,
     Light, LightId, Mat4, Material, MaterialId, Mesh, MeshBinding, MeshId, MetadataMap,
@@ -311,6 +314,7 @@ pub struct ParseScope<'session> {
     dependencies: &'session RefCell<DependencyCache>,
     optional_dependency_evidence: &'session RefCell<AccountedVec<OptionalDependencyEvidence>>,
     loss_evidence: &'session RefCell<AccountedVec<ImportLossEvidence>>,
+    source_scope_record: &'session RefCell<Option<LiveSourceScopeRecord>>,
     draft_reservations: &'session RefCell<AccountedVec<ImportReservation>>,
     format_failure_storage: &'session RefCell<Option<ImportReservation>>,
     dependency_failure: RefCell<Option<DependencyResolutionContext>>,
@@ -335,9 +339,63 @@ pub(crate) struct ParseScopeParts<'session> {
     pub dependencies: &'session RefCell<DependencyCache>,
     pub optional_dependency_evidence: &'session RefCell<AccountedVec<OptionalDependencyEvidence>>,
     pub loss_evidence: &'session RefCell<AccountedVec<ImportLossEvidence>>,
+    pub source_scope_record: &'session RefCell<Option<LiveSourceScopeRecord>>,
     pub draft_reservations: &'session RefCell<AccountedVec<ImportReservation>>,
     pub format_failure_storage: &'session RefCell<Option<ImportReservation>>,
     pub terminal: &'session RefCell<Option<ScopeAbortCause>>,
+}
+
+struct PreparedDiagnosticEvent {
+    prepared: PreparedDiagnostic,
+    payload_reservation: Option<ImportReservation>,
+    structural_reservation: Option<ImportReservation>,
+}
+
+impl PreparedDiagnosticEvent {
+    const fn is_stored(&self) -> bool {
+        self.prepared.is_stored()
+    }
+
+    const fn stored_bytes(&self) -> u64 {
+        self.prepared.stored_bytes()
+    }
+
+    fn can_commit_to(&self, diagnostics: &DiagnosticSink) -> bool {
+        diagnostics.can_commit(
+            &self.prepared,
+            &self.payload_reservation,
+            &self.structural_reservation,
+        )
+    }
+
+    fn commit_infallible(self, diagnostics: &mut DiagnosticSink) {
+        diagnostics.commit_reserved_infallible(
+            self.prepared,
+            self.payload_reservation,
+            self.structural_reservation,
+        );
+    }
+
+    fn discard(self, diagnostics: &mut DiagnosticSink) {
+        diagnostics.discard_prepared(self.prepared);
+        drop(self.payload_reservation);
+        drop(self.structural_reservation);
+    }
+}
+
+struct PreparedLossEvidence {
+    evidence: ImportLossEvidence,
+    stored_bytes: u64,
+}
+
+struct DiagnosticEventMetadata<'event> {
+    severity: DiagnosticSeverity,
+    code: DiagnosticCode,
+    phase: ImportProgressPhase,
+    source: &'event AssetPath,
+    byte_range: Option<DiagnosticByteRange>,
+    line_column: Option<DiagnosticLineColumn>,
+    object_path: Option<&'event str>,
 }
 
 impl<'session> ParseScope<'session> {
@@ -359,6 +417,7 @@ impl<'session> ParseScope<'session> {
             dependencies: parts.dependencies,
             optional_dependency_evidence: parts.optional_dependency_evidence,
             loss_evidence: parts.loss_evidence,
+            source_scope_record: parts.source_scope_record,
             draft_reservations: parts.draft_reservations,
             format_failure_storage: parts.format_failure_storage,
             dependency_failure: RefCell::new(None),
@@ -393,6 +452,12 @@ impl<'session> ParseScope<'session> {
 
     pub fn limits(&self) -> &ResourceLimits {
         self.limits
+    }
+
+    /// Starts one incremental source-selection and closure evidence record.
+    pub fn source_scope_builder(&self) -> ParseResult<SourceScopeRecordBuilder<'_, 'session>> {
+        self.preflight_active()?;
+        Ok(SourceScopeRecordBuilder::new(self))
     }
 
     /// Creates vector storage whose backing allocation cannot outlive this parse capability.
@@ -697,7 +762,7 @@ impl<'session> ParseScope<'session> {
         })
     }
 
-    fn reserve_storage_cause(
+    pub(crate) fn reserve_storage_cause(
         &self,
         storage: ImportStorageClass,
         bytes: u64,
@@ -805,7 +870,6 @@ impl<'session> ParseScope<'session> {
                 .and_then(|()| {
                     checkpoint.charge_consumed(ImportDimension::RecoveryRawBytes, raw_bytes)
                 })
-                .and_then(|()| checkpoint.charge_attempted(ImportDimension::LossEvidenceCount, 1))
         };
         if let Err(cause) = charge {
             return Err(self.abort(ScopeAbortCause::Ledger(cause)));
@@ -827,7 +891,14 @@ impl<'session> ParseScope<'session> {
         } else {
             ImportLossDisposition::Applied
         };
-        self.retain_loss_evidence(code, &source, raw_range, disposition)?;
+        self.retain_loss_evidence(
+            ImportLossKind::FormatRecovery,
+            ImportLossSubject::FormatRecovery,
+            code,
+            &source,
+            raw_range,
+            disposition,
+        )?;
         self.emit_diagnostic_with(
             DiagnosticSeverity::Warning,
             code,
@@ -850,13 +921,142 @@ impl<'session> ParseScope<'session> {
         }
     }
 
+    /// Submits one finalized source-scope record to this parse session's sealed slot.
+    pub fn record_source_scope(
+        &self,
+        finalized: FinalizedSourceScopeRecord<'_, 'session>,
+    ) -> ParseResult<()> {
+        self.preflight_active()?;
+        if !finalized.belongs_to(self) {
+            return Err(self.abort(ScopeAbortCause::DescriptorContract {
+                code: "source-scope-record-owner-mismatch",
+            }));
+        }
+        let mut source_scope_slot = self
+            .source_scope_record
+            .try_borrow_mut()
+            .map_err(|_| self.reentrant_capability_failure())?;
+        if source_scope_slot.is_some() {
+            return Err(self.abort(ScopeAbortCause::DescriptorContract {
+                code: "source-scope-record-already-submitted",
+            }));
+        }
+
+        self.source_scope_charge_attempted(ImportDimension::SourceScopeRecordCount, 1)?;
+        let record = finalized.into_record();
+        if !record.is_collapsed() {
+            self.source_scope_charge_consumed(ImportDimension::SourceScopeRecordCount, 1)?;
+            *source_scope_slot = Some(record);
+            return Ok(());
+        }
+
+        let code = DiagnosticCode::new("baozi.source_scope_details_collapsed").map_err(|_| {
+            self.abort(ScopeAbortCause::DescriptorContract {
+                code: "source-scope-collapse-code-invalid",
+            })
+        })?;
+        let diagnostic_source = self.diagnostic_source();
+        let raw_range = DiagnosticByteRange::new(0, 0)
+            .map_err(|cause| self.abort(ScopeAbortCause::Diagnostic(cause)))?;
+        let loss = self.prepare_loss_evidence(
+            ImportLossKind::ProvenanceEvidenceLoss,
+            ImportLossSubject::SourceScopeDetails,
+            code,
+            &diagnostic_source,
+            raw_range,
+            ImportLossDisposition::Applied,
+        )?;
+        let diagnostic = self.prepare_diagnostic_event(
+            DiagnosticEventMetadata {
+                severity: DiagnosticSeverity::Warning,
+                code,
+                phase: ImportProgressPhase::Normalize,
+                source: self.primary_source,
+                byte_range: None,
+                line_column: None,
+                object_path: None,
+            },
+            |details| {
+                details.unsigned("detail_count", record.collapsed_detail_count());
+                details.unsigned("detail_bytes", record.collapsed_detail_bytes());
+            },
+            format_args!("source-scope details were collapsed after explicit caller authority"),
+        )?;
+        if !diagnostic.is_stored() {
+            self.discard_diagnostic_event(diagnostic)?;
+            drop(loss);
+            return Err(self.abort(ScopeAbortCause::ResourceLimit {
+                resource: "source-scope-collapse-diagnostic",
+                limit: self.limits.max_diagnostics,
+            }));
+        }
+
+        let mut loss_evidence = match self.loss_evidence.try_borrow_mut() {
+            Ok(evidence) => evidence,
+            Err(_) => {
+                self.discard_diagnostic_event(diagnostic)?;
+                drop(loss);
+                return Err(self.reentrant_capability_failure());
+            }
+        };
+        let mut diagnostics = match self.diagnostics.try_borrow_mut() {
+            Ok(diagnostics) => diagnostics,
+            Err(_) => {
+                drop(loss_evidence);
+                self.discard_diagnostic_event(diagnostic)?;
+                drop(loss);
+                return Err(self.reentrant_capability_failure());
+            }
+        };
+        if !loss_evidence.has_slots(1) || !diagnostic.can_commit_to(&diagnostics) {
+            diagnostic.discard(&mut diagnostics);
+            drop(loss);
+            return Err(self.abort(ScopeAbortCause::DescriptorContract {
+                code: "source-scope-publication-capacity-not-admitted",
+            }));
+        }
+        if let Err(failure) =
+            self.charge_source_scope_bundle_consumed(loss.stored_bytes, diagnostic.stored_bytes())
+        {
+            diagnostic.discard(&mut diagnostics);
+            drop(loss);
+            return Err(failure);
+        }
+        loss_evidence.push_reserved_infallible(loss.evidence);
+        diagnostic.commit_infallible(&mut diagnostics);
+        *source_scope_slot = Some(record);
+        Ok(())
+    }
+
     fn retain_loss_evidence(
         &self,
+        kind: ImportLossKind,
+        subject: ImportLossSubject,
         code: DiagnosticCode,
         source: &DiagnosticSource<'_>,
         raw_range: DiagnosticByteRange,
         disposition: ImportLossDisposition,
     ) -> ParseResult<()> {
+        let evidence =
+            self.prepare_loss_evidence(kind, subject, code, source, raw_range, disposition)?;
+        self.commit_loss_evidence(evidence)
+    }
+
+    fn prepare_loss_evidence(
+        &self,
+        kind: ImportLossKind,
+        subject: ImportLossSubject,
+        code: DiagnosticCode,
+        source: &DiagnosticSource<'_>,
+        raw_range: DiagnosticByteRange,
+        disposition: ImportLossDisposition,
+    ) -> ParseResult<PreparedLossEvidence> {
+        self.coordinator
+            .try_borrow_mut()
+            .map_err(|_| self.reentrant_capability_failure())?
+            .checkpoint()
+            .charge_attempted(ImportDimension::LossEvidenceCount, 1)
+            .map_err(|cause| self.abort(ScopeAbortCause::Ledger(cause)))?;
         let source_envelope = u64::try_from(source.path().as_str().len())
             .map_err(|_| self.resource_limit_exceeded("loss-evidence-source", u64::MAX))?;
         let mut reservation = self
@@ -924,37 +1124,54 @@ impl<'session> ParseScope<'session> {
                 .try_borrow_mut()
                 .map_err(|_| self.reentrant_capability_failure())?;
             let mut checkpoint = coordinator.checkpoint();
-            checkpoint
-                .charge_attempted(ImportDimension::LossEvidenceBytes, actual_bytes)
-                .and_then(|()| checkpoint.charge_consumed(ImportDimension::LossEvidenceCount, 1))
-                .and_then(|()| {
-                    checkpoint.charge_consumed(ImportDimension::LossEvidenceBytes, actual_bytes)
-                })
+            checkpoint.charge_attempted(ImportDimension::LossEvidenceBytes, actual_bytes)
         };
         if let Err(cause) = charge {
             return Err(self.abort(ScopeAbortCause::Ledger(cause)));
         }
 
         let evidence = ImportLossEvidence::new(
-            ImportLossKind::FormatRecovery,
+            kind,
+            subject,
             code,
             retained_source,
             raw_range,
             disposition,
             reservation,
         );
-        if let Err(evidence) = self
+        Ok(PreparedLossEvidence {
+            evidence,
+            stored_bytes: actual_bytes,
+        })
+    }
+
+    fn commit_loss_evidence(&self, prepared: PreparedLossEvidence) -> ParseResult<()> {
+        let mut loss_evidence = self
             .loss_evidence
             .try_borrow_mut()
-            .map_err(|_| self.reentrant_capability_failure())?
-            .try_push_reserved(evidence)
-        {
-            drop(evidence);
+            .map_err(|_| self.reentrant_capability_failure())?;
+        if !loss_evidence.has_slots(1) {
             return Err(self.abort(ScopeAbortCause::DescriptorContract {
                 code: "loss-evidence-slots-not-admitted",
             }));
         }
+        self.charge_loss_evidence_consumed(prepared.stored_bytes)?;
+        loss_evidence.push_reserved_infallible(prepared.evidence);
         Ok(())
+    }
+
+    fn charge_loss_evidence_consumed(&self, stored_bytes: u64) -> ParseResult<()> {
+        let mut coordinator = self
+            .coordinator
+            .try_borrow_mut()
+            .map_err(|_| self.reentrant_capability_failure())?;
+        let mut checkpoint = coordinator.checkpoint();
+        checkpoint
+            .charge_consumed_batch(&[
+                (ImportDimension::LossEvidenceCount, 1),
+                (ImportDimension::LossEvidenceBytes, stored_bytes),
+            ])
+            .map_err(|cause| self.abort(ScopeAbortCause::Ledger(cause)))
     }
 
     pub fn emit_diagnostic(
@@ -965,13 +1182,15 @@ impl<'session> ParseScope<'session> {
     ) -> ParseResult<()> {
         self.preflight_active()?;
         self.emit_diagnostic_event(
-            severity,
-            code,
-            ImportProgressPhase::Decode,
-            self.primary_source,
-            None,
-            None,
-            None,
+            DiagnosticEventMetadata {
+                severity,
+                code,
+                phase: ImportProgressPhase::Decode,
+                source: self.primary_source,
+                byte_range: None,
+                line_column: None,
+                object_path: None,
+            },
             |_| {},
             message,
         )
@@ -992,31 +1211,45 @@ impl<'session> ParseScope<'session> {
         self.preflight_active()?;
         let line_column = self.derive_line_column(&source, byte_range)?;
         self.emit_diagnostic_event(
-            severity,
-            code,
-            phase,
-            source.path(),
-            byte_range,
-            line_column,
-            object_path,
+            DiagnosticEventMetadata {
+                severity,
+                code,
+                phase,
+                source: source.path(),
+                byte_range,
+                line_column,
+                object_path,
+            },
             details,
             message,
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn emit_diagnostic_event(
         &self,
-        severity: DiagnosticSeverity,
-        code: DiagnosticCode,
-        phase: ImportProgressPhase,
-        source: &AssetPath,
-        byte_range: Option<DiagnosticByteRange>,
-        line_column: Option<DiagnosticLineColumn>,
-        object_path: Option<&str>,
+        metadata: DiagnosticEventMetadata<'_>,
         details: impl FnOnce(&mut dyn DiagnosticDetailSink),
         message: fmt::Arguments<'_>,
     ) -> ParseResult<()> {
+        let prepared = self.prepare_diagnostic_event(metadata, details, message)?;
+        self.commit_diagnostic_event(prepared)
+    }
+
+    fn prepare_diagnostic_event(
+        &self,
+        metadata: DiagnosticEventMetadata<'_>,
+        details: impl FnOnce(&mut dyn DiagnosticDetailSink),
+        message: fmt::Arguments<'_>,
+    ) -> ParseResult<PreparedDiagnosticEvent> {
+        let DiagnosticEventMetadata {
+            severity,
+            code,
+            phase,
+            source,
+            byte_range,
+            line_column,
+            object_path,
+        } = metadata;
         self.preflight_active()?;
         let admission = self
             .diagnostics
@@ -1159,7 +1392,6 @@ impl<'session> ParseScope<'session> {
                     code: "stored-diagnostic-without-reservation",
                 }));
             };
-            let stored_bytes = prepared.stored_bytes();
             let payload_capacity_bytes = prepared.payload_capacity_bytes();
             let structural_bytes = prepared.structural_bytes();
             let mut exact = upper_bound;
@@ -1204,53 +1436,62 @@ impl<'session> ParseScope<'session> {
                 drop(structural_exact);
                 return Err(self.abort(cause));
             }
-            let consumed = self
-                .coordinator
-                .try_borrow_mut()
-                .map_err(|_| ScopeAbortCause::DescriptorContract {
-                    code: "parse-capability-reentered",
-                })
-                .and_then(|mut coordinator| {
-                    let mut checkpoint = coordinator.checkpoint();
-                    checkpoint
-                        .charge_consumed(ImportDimension::DiagnosticCount, 1)
-                        .and_then(|()| {
-                            checkpoint
-                                .charge_consumed(ImportDimension::DiagnosticBytes, stored_bytes)
-                        })
-                        .map_err(ScopeAbortCause::Ledger)
-                });
-            if let Err(cause) = consumed {
-                self.diagnostics.borrow_mut().discard_prepared(prepared);
-                drop(exact);
-                drop(structural_exact);
-                return Err(self.abort(cause));
-            }
             (Some(exact), Some(structural_exact))
         } else {
             (None, None)
         };
+        Ok(PreparedDiagnosticEvent {
+            prepared,
+            payload_reservation,
+            structural_reservation,
+        })
+    }
+
+    fn commit_diagnostic_event(&self, event: PreparedDiagnosticEvent) -> ParseResult<()> {
+        if !event.is_stored() {
+            return Ok(());
+        }
         let mut diagnostics = match self.diagnostics.try_borrow_mut() {
             Ok(diagnostics) => diagnostics,
             Err(_) => {
-                drop(prepared);
-                drop(payload_reservation);
-                drop(structural_reservation);
+                drop(event);
                 return Err(self.reentrant_capability_failure());
             }
         };
-        if let Err((prepared, payload, structural)) =
-            diagnostics.commit(prepared, payload_reservation, structural_reservation)
-        {
-            diagnostics.discard_prepared(prepared);
-            drop(diagnostics);
-            drop(payload);
-            drop(structural);
+        if !event.can_commit_to(&diagnostics) {
+            event.discard(&mut diagnostics);
             return Err(self.abort(ScopeAbortCause::DescriptorContract {
                 code: "diagnostic-storage-slots-not-admitted",
             }));
         }
+        if let Err(failure) = self.charge_diagnostic_consumed(event.stored_bytes()) {
+            event.discard(&mut diagnostics);
+            return Err(failure);
+        }
+        event.commit_infallible(&mut diagnostics);
+        Ok(())
+    }
 
+    fn charge_diagnostic_consumed(&self, stored_bytes: u64) -> ParseResult<()> {
+        let mut coordinator = self
+            .coordinator
+            .try_borrow_mut()
+            .map_err(|_| self.reentrant_capability_failure())?;
+        let mut checkpoint = coordinator.checkpoint();
+        checkpoint
+            .charge_consumed_batch(&[
+                (ImportDimension::DiagnosticCount, 1),
+                (ImportDimension::DiagnosticBytes, stored_bytes),
+            ])
+            .map_err(|cause| self.abort(ScopeAbortCause::Ledger(cause)))
+    }
+
+    fn discard_diagnostic_event(&self, event: PreparedDiagnosticEvent) -> ParseResult<()> {
+        let mut diagnostics = self
+            .diagnostics
+            .try_borrow_mut()
+            .map_err(|_| self.reentrant_capability_failure())?;
+        event.discard(&mut diagnostics);
         Ok(())
     }
 
@@ -2503,6 +2744,79 @@ impl<'session> ParseScope<'session> {
         }
     }
 
+    pub(crate) fn source_scope_preflight(&self) -> ParseResult<()> {
+        self.preflight_active()
+    }
+
+    pub(crate) fn source_scope_abort(&self, cause: ScopeAbortCause) -> ParseFailure {
+        self.abort(cause)
+    }
+
+    pub(crate) fn source_scope_charge_batch(
+        &self,
+        charges: &[(ImportDimension, u64)],
+    ) -> ParseResult<()> {
+        self.preflight_active()?;
+        let mut coordinator = self
+            .coordinator
+            .try_borrow_mut()
+            .map_err(|_| self.reentrant_capability_failure())?;
+        let mut checkpoint = coordinator.checkpoint();
+        checkpoint
+            .charge_observed_batch(charges)
+            .map_err(|cause| self.abort(ScopeAbortCause::Ledger(cause)))
+    }
+
+    fn source_scope_charge_attempted(
+        &self,
+        dimension: ImportDimension,
+        amount: u64,
+    ) -> ParseResult<()> {
+        self.preflight_active()?;
+        self.coordinator
+            .try_borrow_mut()
+            .map_err(|_| self.reentrant_capability_failure())?
+            .checkpoint()
+            .charge_attempted(dimension, amount)
+            .map_err(|cause| self.abort(ScopeAbortCause::Ledger(cause)))
+    }
+
+    fn source_scope_charge_consumed(
+        &self,
+        dimension: ImportDimension,
+        amount: u64,
+    ) -> ParseResult<()> {
+        self.preflight_active()?;
+        self.coordinator
+            .try_borrow_mut()
+            .map_err(|_| self.reentrant_capability_failure())?
+            .checkpoint()
+            .charge_consumed(dimension, amount)
+            .map_err(|cause| self.abort(ScopeAbortCause::Ledger(cause)))
+    }
+
+    fn charge_source_scope_bundle_consumed(
+        &self,
+        loss_bytes: u64,
+        diagnostic_bytes: u64,
+    ) -> ParseResult<()> {
+        self.preflight_active()?;
+        let mut coordinator = self
+            .coordinator
+            .try_borrow_mut()
+            .map_err(|_| self.reentrant_capability_failure())?;
+        let mut checkpoint = coordinator.checkpoint();
+        checkpoint
+            .charge_consumed_batch(&[
+                (ImportDimension::DiagnosticCount, 1),
+                (ImportDimension::DiagnosticBytes, diagnostic_bytes),
+                (ImportDimension::LossEvidenceCount, 1),
+                (ImportDimension::LossEvidenceBytes, loss_bytes),
+                (ImportDimension::SourceScopeRecordCount, 1),
+            ])
+            .map_err(|cause| self.abort(ScopeAbortCause::Ledger(cause)))
+    }
+
     fn reentrant_capability_failure(&self) -> ParseFailure {
         self.abort(ScopeAbortCause::DescriptorContract {
             code: "parse-capability-reentered",
@@ -2604,7 +2918,7 @@ impl ImportStorageClass {
     }
 }
 
-const METERED_COPY_POLL_INTERVAL: usize = 4 * 1024;
+pub(crate) const METERED_COPY_POLL_INTERVAL: usize = 4 * 1024;
 
 fn metered_copy_chunk_len<T>() -> usize {
     METERED_COPY_POLL_INTERVAL

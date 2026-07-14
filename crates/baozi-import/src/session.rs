@@ -26,6 +26,7 @@ use crate::request::PreparedImportRequest;
 use crate::scope::{
     DiagnosticLineIndex, ParseFailureKind, ParseScope, ParseScopeParts, read_opened_asset,
 };
+use crate::source_scope::{LiveSourceScopeRecord, SourceScopeRecord};
 use baozi_core::{
     FormatId, SceneDraft, SceneReservationKind, SceneStorageFootprint, SceneValidationControl,
     SceneValidationFailure, SceneValidationLimits, SceneValidationSuccess, SceneValidationWork,
@@ -199,6 +200,7 @@ struct ImportSession<'a> {
     dependencies: Option<RefCell<DependencyCache>>,
     optional_dependency_evidence: RefCell<AccountedVec<crate::OptionalDependencyEvidence>>,
     loss_evidence: RefCell<AccountedVec<ImportLossEvidence>>,
+    source_scope_record: RefCell<Option<LiveSourceScopeRecord>>,
     terminal: RefCell<Option<ScopeAbortCause>>,
     primary_authority: Option<AuthorityDomain>,
     primary_backend_hard_limit: Option<u64>,
@@ -236,6 +238,7 @@ impl<'a> ImportSession<'a> {
             dependencies: Some(RefCell::new(DependencyCache::new())),
             optional_dependency_evidence: RefCell::new(AccountedVec::new()),
             loss_evidence: RefCell::new(AccountedVec::new()),
+            source_scope_record: RefCell::new(None),
             terminal: RefCell::new(None),
             primary_authority: None,
             primary_backend_hard_limit: None,
@@ -760,6 +763,7 @@ impl<'a> ImportSession<'a> {
                 dependencies: self.dependencies(),
                 optional_dependency_evidence: &self.optional_dependency_evidence,
                 loss_evidence: &self.loss_evidence,
+                source_scope_record: &self.source_scope_record,
                 draft_reservations: &self.draft_reservations,
                 format_failure_storage: &self.format_failure_storage,
                 terminal: &self.terminal,
@@ -1001,6 +1005,7 @@ impl<'a> ImportSession<'a> {
             diagnostic_summary,
             optional_dependency_evidence,
             loss_evidence,
+            source_scope_record,
         } = staging;
         if let Some(cause) = finalization_cause {
             let finalization_cause = Some(cause.clone());
@@ -1013,6 +1018,7 @@ impl<'a> ImportSession<'a> {
                 diagnostic_summary,
                 optional_dependency_evidence,
                 loss_evidence,
+                source_scope_record,
                 ledger,
                 finalization_cause,
                 last_completed: self.last_completed,
@@ -1027,6 +1033,7 @@ impl<'a> ImportSession<'a> {
             diagnostic_summary,
             optional_dependency_evidence,
             loss_evidence,
+            source_scope_record,
             ledger,
             last_completed: self.last_completed,
         }))
@@ -1103,6 +1110,7 @@ impl<'a> ImportSession<'a> {
                 self.optional_dependency_evidence.get_mut(),
             ),
             loss_evidence: std::mem::take(self.loss_evidence.get_mut()),
+            source_scope_record: self.source_scope_record.get_mut().take(),
         }
     }
 
@@ -1208,6 +1216,7 @@ struct LiveReportStaging {
     diagnostics: DiagnosticSink,
     optional_dependency_evidence: AccountedVec<crate::OptionalDependencyEvidence>,
     loss_evidence: AccountedVec<ImportLossEvidence>,
+    source_scope_record: Option<LiveSourceScopeRecord>,
 }
 
 impl LiveReportStaging {
@@ -1221,12 +1230,17 @@ impl LiveReportStaging {
             self.loss_evidence.capacity_reservation_count(),
             |total, evidence| total.checked_add(evidence.reservation_count()),
         )?;
+        let source_scope_reservations = self.source_scope_record.as_ref().map_or(
+            Some(0),
+            LiveSourceScopeRecord::publication_reservation_count,
+        )?;
 
         self.detection
             .capacity_reservation_count()
             .checked_add(self.diagnostics.publication_reservation_count()?)?
             .checked_add(optional_dependency_reservations)?
-            .checked_add(loss_reservations)
+            .checked_add(loss_reservations)?
+            .checked_add(source_scope_reservations)
     }
 
     fn move_publication_reservations_into(&mut self, target: &mut AccountedReservationVec) {
@@ -1249,6 +1263,9 @@ impl LiveReportStaging {
             evidence.move_reservation_into(target);
         }
         self.loss_evidence.move_capacity_reservation_into(target);
+        if let Some(record) = self.source_scope_record.as_mut() {
+            record.move_publication_reservations_into(target);
+        }
     }
 
     fn into_terminal(self) -> TerminalReportEvidence {
@@ -1256,6 +1273,9 @@ impl LiveReportStaging {
         let diagnostics = self.diagnostics.into_terminal();
         let optional_dependency_evidence = self.optional_dependency_evidence.into_terminal();
         let loss_evidence = self.loss_evidence.into_terminal();
+        let source_scope_record = self
+            .source_scope_record
+            .map(LiveSourceScopeRecord::into_terminal);
         let (diagnostics, diagnostic_summary) = diagnostics.into_parts();
         let mut terminal = TerminalReportEvidence {
             detection: detection.into_values(),
@@ -1263,6 +1283,7 @@ impl LiveReportStaging {
             diagnostic_summary,
             optional_dependency_evidence: optional_dependency_evidence.into_values(),
             loss_evidence: loss_evidence.into_values(),
+            source_scope_record,
         };
         for evidence in &mut terminal.optional_dependency_evidence {
             evidence.release_reservations();
@@ -1280,6 +1301,7 @@ struct TerminalReportEvidence {
     diagnostic_summary: crate::DiagnosticSummary,
     optional_dependency_evidence: Vec<crate::OptionalDependencyEvidence>,
     loss_evidence: Vec<ImportLossEvidence>,
+    source_scope_record: Option<SourceScopeRecord>,
 }
 
 struct LiveFailureCause {
@@ -1343,6 +1365,7 @@ impl TerminalFailureStaging {
             diagnostic_summary,
             optional_dependency_evidence,
             loss_evidence,
+            source_scope_record,
         } = self.report;
         ImportFailure::from_parts(ImportFailureParts {
             cause: self.cause.cause,
@@ -1353,6 +1376,7 @@ impl TerminalFailureStaging {
             diagnostic_summary,
             optional_dependency_evidence,
             loss_evidence,
+            source_scope_record,
             ledger,
             finalization_cause,
             last_completed: self.last_completed,

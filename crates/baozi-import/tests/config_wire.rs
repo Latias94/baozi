@@ -244,6 +244,11 @@ fn all_resource_limit_fields() -> ResourceLimitsOverlay {
     overlay.max_attempted_recoveries = Some(44);
     overlay.max_loss_evidence_bytes = Some(45);
     overlay.max_attempted_recovery_bytes = Some(46);
+    overlay.max_source_scope_records = Some(47);
+    overlay.max_source_scope_items = Some(48);
+    overlay.max_source_scope_detail_count = Some(49);
+    overlay.max_source_scope_detail_bytes = Some(50);
+    overlay.max_source_scope_digest_bytes = Some(51);
     overlay
 }
 
@@ -258,7 +263,7 @@ fn every_resource_limit_field_roundtrips_as_a_canonical_u64() {
     );
 
     let encoded = SerializedImportRequest::encode(&request, RequestWireLimits::default()).unwrap();
-    let resource_fields = (1_u16..=46)
+    let resource_fields = (1_u16..=51)
         .map(|field_id| (field_id, u64::from(field_id).to_be_bytes().to_vec()))
         .collect::<Vec<_>>();
     let resource_limits = object(&resource_fields);

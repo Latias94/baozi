@@ -116,6 +116,7 @@ dependencies = [
  "baozi-core",
  "baozi-io",
  "baozi-operation",
+ "sha2",
  "tracing",
 ]
 

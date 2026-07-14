@@ -53,6 +53,11 @@ pub struct ResourceLimits {
     pub max_attempted_recoveries: u64,
     pub max_loss_evidence_bytes: u64,
     pub max_attempted_recovery_bytes: u64,
+    pub max_source_scope_records: u64,
+    pub max_source_scope_items: u64,
+    pub max_source_scope_detail_count: u64,
+    pub max_source_scope_detail_bytes: u64,
+    pub max_source_scope_digest_bytes: u64,
 }
 
 impl Default for ResourceLimits {
@@ -104,6 +109,11 @@ impl Default for ResourceLimits {
             max_attempted_recoveries: 100_000,
             max_loss_evidence_bytes: 4 * 1024 * 1024,
             max_attempted_recovery_bytes: 16 * 1024 * 1024,
+            max_source_scope_records: 1,
+            max_source_scope_items: 4_000_000,
+            max_source_scope_detail_count: 1_000_000,
+            max_source_scope_detail_bytes: 16 * 1024 * 1024,
+            max_source_scope_digest_bytes: 64 * 1024 * 1024,
         }
     }
 }
@@ -189,6 +199,11 @@ define_resource_limits_overlay! {
     max_attempted_recoveries: u64,
     max_loss_evidence_bytes: u64,
     max_attempted_recovery_bytes: u64,
+    max_source_scope_records: u64,
+    max_source_scope_items: u64,
+    max_source_scope_detail_count: u64,
+    max_source_scope_detail_bytes: u64,
+    max_source_scope_digest_bytes: u64,
 }
 
 impl ResourceLimits {

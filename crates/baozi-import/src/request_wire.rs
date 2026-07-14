@@ -488,6 +488,11 @@ fn encoded_resource_limits_size(limits: &ResourceLimitsOverlay) -> Option<u64> {
         limits.max_attempted_recoveries.is_some(),
         limits.max_loss_evidence_bytes.is_some(),
         limits.max_attempted_recovery_bytes.is_some(),
+        limits.max_source_scope_records.is_some(),
+        limits.max_source_scope_items.is_some(),
+        limits.max_source_scope_detail_count.is_some(),
+        limits.max_source_scope_detail_bytes.is_some(),
+        limits.max_source_scope_digest_bytes.is_some(),
     ];
     let count = u64::try_from(fields.into_iter().filter(|is_set| *is_set).count()).ok()?;
     count
@@ -696,6 +701,11 @@ fn encode_resource_limits(limits: &ResourceLimitsOverlay) -> Result<Vec<u8>, Req
     u64_field!(44, max_attempted_recoveries);
     u64_field!(45, max_loss_evidence_bytes);
     u64_field!(46, max_attempted_recovery_bytes);
+    u64_field!(47, max_source_scope_records);
+    u64_field!(48, max_source_scope_items);
+    u64_field!(49, max_source_scope_detail_count);
+    u64_field!(50, max_source_scope_detail_bytes);
+    u64_field!(51, max_source_scope_digest_bytes);
 
     Ok(object.finish())
 }
@@ -961,6 +971,15 @@ fn decode_resource_limits(bytes: &[u8]) -> Result<ResourceLimitsOverlay, Request
             44 => limits.max_attempted_recoveries = Some(decode_u64(value, scope, field_id)?),
             45 => limits.max_loss_evidence_bytes = Some(decode_u64(value, scope, field_id)?),
             46 => limits.max_attempted_recovery_bytes = Some(decode_u64(value, scope, field_id)?),
+            47 => limits.max_source_scope_records = Some(decode_u64(value, scope, field_id)?),
+            48 => limits.max_source_scope_items = Some(decode_u64(value, scope, field_id)?),
+            49 => {
+                limits.max_source_scope_detail_count = Some(decode_u64(value, scope, field_id)?);
+            }
+            50 => {
+                limits.max_source_scope_detail_bytes = Some(decode_u64(value, scope, field_id)?);
+            }
+            51 => limits.max_source_scope_digest_bytes = Some(decode_u64(value, scope, field_id)?),
             _ => return Err(RequestWireError::UnknownField { scope, field_id }),
         }
     }

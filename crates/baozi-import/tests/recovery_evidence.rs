@@ -4,12 +4,12 @@ use baozi_import::{
     DetectionScope, DiagnosticByteRange, DiagnosticCode, FormatCapability, FormatDescriptor,
     FormatEncoding, FormatFailureDetailSink, FormatFailureSource, FormatImporter, ImportCause,
     ImportConfigOverlay, ImportDimension, ImportFailure, ImportLossDisposition, ImportLossKind,
-    ImportOperationControl, ImportProgressPhase, ImportProgressUnit, ImportReport, ImportRequest,
-    ImportRequestLayer, ImportResult, LossPolicy, OptionCompileLimits, ParseResult, ParseScope,
-    PreparedImportRequest, ReadConfidence, ReadHint, RegistryBuildLimits, RegistryBuilder,
-    ResourceLimits, ResourceLimitsOverlay, ScopeAbortCause, TextBomPolicy, TextControlPolicy,
-    TextDecodingMode, TextHardCaps, TextLexicalMode, TextNewline, TextProfile, TextSourceEncoding,
-    import_bytes,
+    ImportLossSubject, ImportOperationControl, ImportProgressPhase, ImportProgressUnit,
+    ImportReport, ImportRequest, ImportRequestLayer, ImportResult, LossPolicy, OptionCompileLimits,
+    ParseResult, ParseScope, PreparedImportRequest, ReadConfidence, ReadHint, RegistryBuildLimits,
+    RegistryBuilder, ResourceLimits, ResourceLimitsOverlay, ScopeAbortCause, TextBomPolicy,
+    TextControlPolicy, TextDecodingMode, TextHardCaps, TextLexicalMode, TextNewline, TextProfile,
+    TextSourceEncoding, import_bytes,
 };
 use baozi_io::AssetPath;
 use baozi_operation::{CancellationToken, ProgressDecision};
@@ -203,6 +203,7 @@ fn assert_recovery_evidence(
     assert_eq!(evidence.len(), 1);
     let evidence = &evidence[0];
     assert_eq!(evidence.kind(), ImportLossKind::FormatRecovery);
+    assert_eq!(evidence.subject(), ImportLossSubject::FormatRecovery);
     assert_eq!(evidence.code().as_str(), RECOVERY_CODE);
     assert_eq!(evidence.source().as_str(), SOURCE);
     assert_eq!(

@@ -97,6 +97,11 @@ pub enum ImportDimension {
     RecoveryRawBytes,
     LossEvidenceCount,
     LossEvidenceBytes,
+    SourceScopeRecordCount,
+    SourceScopeItemCount,
+    SourceScopeDetailCount,
+    SourceScopeDetailBytes,
+    SourceScopeDigestBytes,
     DetectionWork,
     WorkUnits,
     Tokens,
@@ -129,7 +134,7 @@ pub enum ImportDimension {
 }
 
 impl ImportDimension {
-    const ALL: [Self; 43] = [
+    const ALL: [Self; 48] = [
         Self::AssetOpen,
         Self::DependencyReference,
         Self::PrimaryBytes,
@@ -144,6 +149,11 @@ impl ImportDimension {
         Self::RecoveryRawBytes,
         Self::LossEvidenceCount,
         Self::LossEvidenceBytes,
+        Self::SourceScopeRecordCount,
+        Self::SourceScopeItemCount,
+        Self::SourceScopeDetailCount,
+        Self::SourceScopeDetailBytes,
+        Self::SourceScopeDigestBytes,
         Self::DetectionWork,
         Self::WorkUnits,
         Self::Tokens,
@@ -211,6 +221,11 @@ impl ImportDimension {
             Self::RecoveryRawBytes => counter(limits.max_attempted_recovery_bytes),
             Self::LossEvidenceCount => counter(limits.max_loss_evidence),
             Self::LossEvidenceBytes => bytes(limits.max_loss_evidence_bytes),
+            Self::SourceScopeRecordCount => counter(limits.max_source_scope_records),
+            Self::SourceScopeItemCount => counter(limits.max_source_scope_items),
+            Self::SourceScopeDetailCount => counter(limits.max_source_scope_detail_count),
+            Self::SourceScopeDetailBytes => counter(limits.max_source_scope_detail_bytes),
+            Self::SourceScopeDigestBytes => counter(limits.max_source_scope_digest_bytes),
             Self::DetectionWork => counter(limits.max_detection_work),
             Self::WorkUnits => counter(limits.max_work_units),
             Self::Tokens => counter(limits.max_tokens),
