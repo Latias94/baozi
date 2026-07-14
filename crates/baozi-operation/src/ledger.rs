@@ -389,6 +389,8 @@ pub enum LedgerCause<D> {
         consumed: u64,
         attempted: u64,
     },
+    /// An atomic consumed batch was not sorted by dimension.
+    ConsumedBatchOutOfOrder { previous: D, dimension: D },
     /// A reservation was presented to a different ledger instance.
     OwnerMismatch,
     /// A consumed or otherwise inactive reservation was reused.
@@ -451,6 +453,13 @@ impl<D: fmt::Debug> fmt::Display for LedgerCause<D> {
             } => write!(
                 formatter,
                 "consumed {consumed} exceeds attempted {attempted} for {dimension:?}"
+            ),
+            Self::ConsumedBatchOutOfOrder {
+                previous,
+                dimension,
+            } => write!(
+                formatter,
+                "consumed batch dimension {dimension:?} follows later dimension {previous:?}"
             ),
             Self::OwnerMismatch => formatter.write_str("reservation belongs to another ledger"),
             Self::InactiveReservation => formatter.write_str("reservation is no longer active"),
@@ -745,6 +754,90 @@ where
                 value,
                 limit: policy.consumed_limit,
             });
+        }
+        Ok(())
+    }
+
+    /// Atomically charges a batch of completed work without allocating.
+    ///
+    /// Dimensions must be non-decreasing; adjacent repetitions are aggregated before validation.
+    /// Any ordering, dimension, arithmetic, attempted-work, or limit failure leaves every consumed
+    /// counter unchanged.
+    pub fn charge_consumed_batch(&self, charges: &[(D, u64)]) -> Result<(), LedgerCause<D>> {
+        let mut state = lock(&self.state);
+        Self::ensure_open(&state)?;
+
+        let group = |start: usize| {
+            let dimension = charges[start].0;
+            let mut end = start;
+            let mut amount = 0_u64;
+            while let Some((candidate, next)) = charges.get(end).copied() {
+                if candidate != dimension {
+                    break;
+                }
+                amount = amount
+                    .checked_add(next)
+                    .ok_or(LedgerCause::ArithmeticOverflow {
+                        class: CounterClass::Consumed,
+                        dimension,
+                    })?;
+                end += 1;
+            }
+            Ok((end, dimension, amount))
+        };
+
+        let mut index = 0;
+        let mut previous = None;
+        while index < charges.len() {
+            let (next, dimension, amount) = group(index)?;
+            if let Some(previous) = previous
+                && dimension < previous
+            {
+                return Err(LedgerCause::ConsumedBatchOutOfOrder {
+                    previous,
+                    dimension,
+                });
+            }
+            let entry = dimension_entry(&state.dimensions, dimension)
+                .ok_or(LedgerCause::UnknownDimension { dimension })?;
+            let policy = entry.policy;
+            let value = entry.state.consumed.checked_add(amount).ok_or(
+                LedgerCause::ArithmeticOverflow {
+                    class: CounterClass::Consumed,
+                    dimension,
+                },
+            )?;
+            if value > entry.state.attempted {
+                return Err(LedgerCause::ConsumedExceedsAttempted {
+                    dimension,
+                    consumed: value,
+                    attempted: entry.state.attempted,
+                });
+            }
+            if value > policy.consumed_limit {
+                return Err(LedgerCause::LimitExceeded {
+                    class: CounterClass::Consumed,
+                    dimension,
+                    value,
+                    limit: policy.consumed_limit,
+                });
+            }
+            previous = Some(dimension);
+            index = next;
+        }
+
+        index = 0;
+        while index < charges.len() {
+            let (next, dimension, amount) =
+                group(index).expect("validated consumed batch cannot overflow");
+            let entry = dimension_entry_mut(&mut state.dimensions, dimension)
+                .expect("validated consumed batch retains every dimension");
+            entry.state.consumed = entry
+                .state
+                .consumed
+                .checked_add(amount)
+                .expect("validated consumed batch cannot overflow");
+            index = next;
         }
         Ok(())
     }
@@ -2590,6 +2683,7 @@ mod tests {
     #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
     enum Dimension {
         Bytes,
+        Records,
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -2621,12 +2715,84 @@ mod tests {
     fn limits() -> LedgerLimits<Dimension> {
         LedgerLimits::new(
             16,
-            [(
-                Dimension::Bytes,
-                DimensionPolicy::reservable_bytes(16, 16, 16, 16),
-            )],
+            [
+                (
+                    Dimension::Bytes,
+                    DimensionPolicy::reservable_bytes(16, 16, 16, 16),
+                ),
+                (Dimension::Records, DimensionPolicy::counter(16, 16, 16)),
+            ],
         )
         .expect("test policy")
+    }
+
+    #[test]
+    fn consumed_batch_is_atomic_and_aggregates_duplicate_dimensions() {
+        let ledger = Ledger::<Owner, Phase, Dimension>::new(limits());
+        ledger
+            .charge_attempted(Dimension::Bytes, 2)
+            .expect("byte work must be admitted");
+        ledger
+            .charge_attempted(Dimension::Records, 1)
+            .expect("record work must be admitted");
+
+        assert!(matches!(
+            ledger.charge_consumed_batch(&[
+                (Dimension::Bytes, 1),
+                (Dimension::Bytes, 1),
+                (Dimension::Records, 2),
+            ]),
+            Err(LedgerCause::ConsumedExceedsAttempted {
+                dimension: Dimension::Records,
+                consumed: 2,
+                attempted: 1,
+            })
+        ));
+        assert_eq!(
+            ledger
+                .dimension_evidence(Dimension::Bytes)
+                .expect("byte evidence")
+                .consumed(),
+            0,
+            "a later batch failure must not retain an earlier charge"
+        );
+        assert_eq!(
+            ledger
+                .dimension_evidence(Dimension::Records)
+                .expect("record evidence")
+                .consumed(),
+            0
+        );
+
+        assert!(matches!(
+            ledger.charge_consumed_batch(&[(Dimension::Records, 1), (Dimension::Bytes, 1),]),
+            Err(LedgerCause::ConsumedBatchOutOfOrder {
+                previous: Dimension::Records,
+                dimension: Dimension::Bytes,
+            })
+        ));
+
+        ledger
+            .charge_consumed_batch(&[
+                (Dimension::Bytes, 1),
+                (Dimension::Bytes, 1),
+                (Dimension::Records, 1),
+            ])
+            .expect("the admitted batch must commit");
+        assert_eq!(
+            ledger
+                .dimension_evidence(Dimension::Bytes)
+                .expect("byte evidence")
+                .consumed(),
+            2
+        );
+        assert_eq!(
+            ledger
+                .dimension_evidence(Dimension::Records)
+                .expect("record evidence")
+                .consumed(),
+            1
+        );
     }
 
     #[test]

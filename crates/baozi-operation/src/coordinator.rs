@@ -600,6 +600,11 @@ where
         self.coordinator.ledger.charge_consumed(dimension, amount)
     }
 
+    /// Atomically charges completed work across multiple dimensions.
+    pub fn charge_consumed_batch(&mut self, charges: &[(D, u64)]) -> Result<(), LedgerCause<D>> {
+        self.coordinator.ledger.charge_consumed_batch(charges)
+    }
+
     /// Reserves live capacity before allocation or backend entry.
     pub fn reserve(
         &mut self,
