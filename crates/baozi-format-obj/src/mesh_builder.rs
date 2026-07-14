@@ -256,7 +256,7 @@ impl<'scope> SegmentBuilder<'scope> {
         for chunk in face.vertices.as_slice().chunks(64) {
             scope.poll()?;
             for vertex in chunk {
-                self.vertex_keys.try_push((*vertex).into())?;
+                self.vertex_keys.try_push_reserved((*vertex).into())?;
             }
         }
         topology_permit.complete()
@@ -287,7 +287,7 @@ impl<'scope> SegmentBuilder<'scope> {
                 let occurrence = chunk_start
                     .checked_add(relative)
                     .ok_or_else(|| scope.allocation_failure("obj-vertex-key-copy-offset"))?;
-                sorted_keys.try_push(IndexedVertexKey { key, occurrence })?;
+                sorted_keys.try_push_reserved(IndexedVertexKey { key, occurrence })?;
             }
         }
         mtl::interruptible_sort_by(scope, &mut sorted_keys, |_work, left, right| {
@@ -403,14 +403,14 @@ impl<'scope> SegmentBuilder<'scope> {
                     let canonical_index = u32::try_from(positions.len())
                         .map_err(|_| scope.allocation_failure("obj-vertex-index-space"))?;
                     indices.as_mut_slice()[occurrence] = canonical_index;
-                    positions.try_push(parsed.positions.as_slice()[key.position])?;
+                    positions.try_push_reserved(parsed.positions.as_slice()[key.position])?;
                     if keep_texcoords {
                         let Some(index) = key.texcoord else {
                             return Err(scope.format_failure(ObjFailure::internal(
                                 "complete-texcoord-channel-has-missing-index",
                             )));
                         };
-                        texcoords.try_push(parsed.texcoords.as_slice()[index])?;
+                        texcoords.try_push_reserved(parsed.texcoords.as_slice()[index])?;
                     }
                     if keep_normals {
                         let Some(index) = key.normal else {
@@ -418,7 +418,7 @@ impl<'scope> SegmentBuilder<'scope> {
                                 "complete-normal-channel-has-missing-index",
                             )));
                         };
-                        normals.try_push(parsed.normals.as_slice()[index])?;
+                        normals.try_push_reserved(parsed.normals.as_slice()[index])?;
                     }
                 }
                 Ok(())

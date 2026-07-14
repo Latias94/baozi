@@ -127,7 +127,7 @@ pub(crate) fn decode_utf8<'scope>(
                         )));
                     }
                     replacements
-                        .try_push(TextReplacement {
+                        .try_push_reserved(TextReplacement {
                             raw_range,
                             decoded_start,
                             decoded_end,
@@ -585,7 +585,7 @@ fn invalid_utf8_error(
 }
 
 fn append_preallocated_text(output: &mut MeteredDecodedText<'_>, value: &str) -> ParseResult<()> {
-    output.try_push_str(value)
+    output.try_push_str_reserved(value)
 }
 
 fn validate_text_unit(

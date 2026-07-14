@@ -987,24 +987,24 @@ fn parse_vertex_row<'scope>(
             "PLY vertex position contains a non-finite value",
         ));
     }
-    parsed.positions.try_push(position)?;
+    parsed.positions.try_push_reserved(position)?;
 
     match (nx, ny, nz) {
-        (Some(nx), Some(ny), Some(nz)) => parsed.normals.try_push(Vec3::new(nx, ny, nz))?,
+        (Some(nx), Some(ny), Some(nz)) => {
+            parsed.normals.try_push_reserved(Vec3::new(nx, ny, nz))?
+        }
         (None, None, None) => {}
         _ => {}
     }
     match (s, t) {
-        (Some(s), Some(t)) => parsed.texcoords.try_push(Vec2::new(s, t))?,
+        (Some(s), Some(t)) => parsed.texcoords.try_push_reserved(Vec2::new(s, t))?,
         (None, None) => {}
         _ => {}
     }
     match (red, green, blue) {
-        (Some(red), Some(green), Some(blue)) => {
-            parsed
-                .colors
-                .try_push(Color::linear_rgba(red, green, blue, alpha.unwrap_or(1.0)))?
-        }
+        (Some(red), Some(green), Some(blue)) => parsed
+            .colors
+            .try_push_reserved(Color::linear_rgba(red, green, blue, alpha.unwrap_or(1.0)))?,
         (None, None, None) => {}
         _ => {}
     }
@@ -1077,7 +1077,6 @@ fn parse_face_row<'scope>(
                     ctx.limits().max_total_topology_cells,
                     ImportWorkClass::TopologyCells,
                 )?;
-                parsed.face_vertex_counts.try_reserve(1)?;
                 parsed.indices.try_reserve(count)?;
                 let face_count_cells = if !was_polygon && count != 3 {
                     next_face_counts
@@ -1097,7 +1096,7 @@ fn parse_face_row<'scope>(
                     ImportWorkClass::TopologyCells,
                     usize_amount(ctx, charged_cells, "ply-topology-cells")?,
                 )?;
-                parsed.face_vertex_counts.try_push(count as u32)?;
+                parsed.face_vertex_counts.try_push_reserved(count as u32)?;
                 for position in 0..count {
                     if position.is_multiple_of(4096) {
                         ctx.poll()?;
@@ -1105,7 +1104,7 @@ fn parse_face_row<'scope>(
                     let index = reader
                         .read_scalar(ctx, *item_ty)?
                         .to_u32(ctx, name.as_str())?;
-                    parsed.indices.try_push(index)?;
+                    parsed.indices.try_push_reserved(index)?;
                 }
                 parsed.has_polygon = has_polygon;
                 topology.complete()?;
@@ -1679,7 +1678,7 @@ fn custom_accumulators<'scope>(
         );
         semantic_name.try_push_str("ply:")?;
         semantic_name.try_push_str(name.as_str())?;
-        attributes.try_push(CustomAttributeAccumulator {
+        attributes.try_push_reserved(CustomAttributeAccumulator {
             name: attr_name,
             semantic: semantic_name,
             data: RefCell::new(data),
@@ -1784,12 +1783,18 @@ fn push_custom_scalar<'scope>(
         )
     })?;
     match (&mut *data, value) {
-        (CustomAttributeData::F32(values), value) => values.try_push(value.to_f32(ctx, name)?)?,
-        (CustomAttributeData::U32(values), ScalarValue::U32(value)) => values.try_push(value)?,
-        (CustomAttributeData::U32(values), ScalarValue::I32(value)) if value >= 0 => {
-            values.try_push(value as u32)?
+        (CustomAttributeData::F32(values), value) => {
+            values.try_push_reserved(value.to_f32(ctx, name)?)?
         }
-        (CustomAttributeData::I32(values), ScalarValue::I32(value)) => values.try_push(value)?,
+        (CustomAttributeData::U32(values), ScalarValue::U32(value)) => {
+            values.try_push_reserved(value)?
+        }
+        (CustomAttributeData::U32(values), ScalarValue::I32(value)) if value >= 0 => {
+            values.try_push_reserved(value as u32)?
+        }
+        (CustomAttributeData::I32(values), ScalarValue::I32(value)) => {
+            values.try_push_reserved(value)?
+        }
         _ => {
             let _ = name;
             return Err(format_failure(

@@ -2840,6 +2840,33 @@ impl<T> MeteredVec<'_, T> {
         Ok(())
     }
 
+    /// Extends storage admitted by an earlier reserve without polling or entering the allocator.
+    ///
+    /// A caller-owned work boundary must cover the copy. The fixed chunk ceiling prevents one
+    /// call from weakening cancellation latency.
+    pub fn try_extend_from_slice_reserved(&mut self, values: &[T]) -> ParseResult<()>
+    where
+        T: Copy,
+    {
+        let required = self
+            .values
+            .len()
+            .checked_add(values.len())
+            .ok_or_else(|| self.meter.allocation_failure(self.resource))?;
+        if required > self.values.capacity() {
+            return Err(self.meter.abort(ScopeAbortCause::DescriptorContract {
+                code: "metered-vector-capacity-not-reserved",
+            }));
+        }
+        if values.len() > metered_copy_chunk_len::<T>() {
+            return Err(self.meter.abort(ScopeAbortCause::DescriptorContract {
+                code: "metered-vector-copy-chunk-too-large",
+            }));
+        }
+        self.values.extend_from_slice(values);
+        Ok(())
+    }
+
     pub fn try_resize(&mut self, len: usize, value: T) -> ParseResult<()>
     where
         T: Copy,
@@ -2974,6 +3001,36 @@ impl MeteredString<'_> {
         append_metered_string_with_meter(&self.meter, &mut self.value, value)
     }
 
+    /// Appends bytes admitted by an earlier reserve without polling or entering the allocator.
+    ///
+    /// A caller-owned work boundary must cover the copy. The fixed chunk ceiling prevents one
+    /// call from weakening cancellation latency.
+    pub fn try_push_str_reserved(&mut self, value: &str) -> ParseResult<()> {
+        let required = self
+            .value
+            .len()
+            .checked_add(value.len())
+            .ok_or_else(|| self.meter.allocation_failure(self.resource))?;
+        if required > self.value.capacity() {
+            return Err(self.meter.abort(ScopeAbortCause::DescriptorContract {
+                code: "metered-string-capacity-not-reserved",
+            }));
+        }
+        if value.len() > METERED_COPY_POLL_INTERVAL {
+            return Err(self.meter.abort(ScopeAbortCause::DescriptorContract {
+                code: "metered-string-copy-chunk-too-large",
+            }));
+        }
+        self.value.push_str(value);
+        Ok(())
+    }
+
+    /// Appends one character admitted by an earlier reserve without polling or allocation.
+    pub fn try_push_char_reserved(&mut self, value: char) -> ParseResult<()> {
+        let mut encoded = [0_u8; 4];
+        self.try_push_str_reserved(value.encode_utf8(&mut encoded))
+    }
+
     pub fn try_push_char(&mut self, value: char) -> ParseResult<()> {
         let mut encoded = [0_u8; 4];
         let encoded = value.encode_utf8(&mut encoded);
@@ -3024,18 +3081,33 @@ impl fmt::Write for MeteredStringWriter<'_, '_> {
 
 impl MeteredDecodedText<'_> {
     pub fn try_push_str(&mut self, value: &str) -> ParseResult<()> {
-        self.meter.poll()?;
+        self.validate_append(value.len())?;
+        append_metered_string_with_meter(&self.meter, &mut self.value, value)
+    }
+
+    /// Appends decoded bytes under a caller-owned bounded work chunk without polling again.
+    pub fn try_push_str_reserved(&mut self, value: &str) -> ParseResult<()> {
+        self.validate_append(value.len())?;
+        if value.len() > METERED_COPY_POLL_INTERVAL {
+            return Err(self.meter.abort(ScopeAbortCause::DescriptorContract {
+                code: "decoded-text-copy-chunk-too-large",
+            }));
+        }
+        self.value.push_str(value);
+        Ok(())
+    }
+
+    fn validate_append(&self, additional: usize) -> ParseResult<()> {
         let required = self
             .value
             .len()
-            .checked_add(value.len())
+            .checked_add(additional)
             .ok_or_else(|| self.meter.allocation_failure(self.resource))?;
         if required > self.decoded_len || required > self.value.capacity() {
             return Err(self.meter.abort(ScopeAbortCause::DescriptorContract {
                 code: "decoded-text-length-exhausted",
             }));
         }
-        self.value.push_str(value);
         Ok(())
     }
 
@@ -6331,6 +6403,74 @@ mod tests {
                 .current_live_bytes(),
             0
         );
+    }
+
+    #[test]
+    fn reserved_vector_copy_rejects_an_unbounded_chunk_without_mutation() {
+        let limits = ResourceLimits::default();
+        let coordinator = RefCell::new(ImportCoordinator::new(
+            ImportOperationControl::default(),
+            import_ledger_limits(&limits).expect("valid import ledger limits"),
+        ));
+        let terminal = RefCell::new(None);
+        let meter = StorageMeter {
+            coordinator: &coordinator,
+            terminal: &terminal,
+        };
+        let mut values = MeteredVec {
+            values: Vec::new(),
+            capacity: None,
+            meter,
+            class: ImportStorageClass::FormatNormalization,
+            resource: "reserved-vector-copy-bound",
+        };
+        let source = vec![0_u8; METERED_COPY_POLL_INTERVAL + 1];
+        values
+            .try_reserve(source.len())
+            .expect("copy fixture capacity must be admitted");
+
+        assert!(values.try_extend_from_slice_reserved(&source).is_err());
+        assert!(values.is_empty(), "a rejected copy must be atomic");
+        assert!(matches!(
+            terminal.borrow().as_ref(),
+            Some(ScopeAbortCause::DescriptorContract {
+                code: "metered-vector-copy-chunk-too-large",
+            })
+        ));
+    }
+
+    #[test]
+    fn reserved_string_copy_rejects_an_unbounded_chunk_without_mutation() {
+        let limits = ResourceLimits::default();
+        let coordinator = RefCell::new(ImportCoordinator::new(
+            ImportOperationControl::default(),
+            import_ledger_limits(&limits).expect("valid import ledger limits"),
+        ));
+        let terminal = RefCell::new(None);
+        let meter = StorageMeter {
+            coordinator: &coordinator,
+            terminal: &terminal,
+        };
+        let mut value = MeteredString {
+            value: String::new(),
+            capacity: None,
+            meter,
+            class: ImportStorageClass::FormatNormalization,
+            resource: "reserved-string-copy-bound",
+        };
+        let source = "x".repeat(METERED_COPY_POLL_INTERVAL + 1);
+        value
+            .try_reserve(source.len())
+            .expect("copy fixture capacity must be admitted");
+
+        assert!(value.try_push_str_reserved(&source).is_err());
+        assert!(value.is_empty(), "a rejected copy must be atomic");
+        assert!(matches!(
+            terminal.borrow().as_ref(),
+            Some(ScopeAbortCause::DescriptorContract {
+                code: "metered-string-copy-chunk-too-large",
+            })
+        ));
     }
 
     #[test]

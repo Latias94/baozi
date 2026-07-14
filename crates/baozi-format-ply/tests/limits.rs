@@ -2,7 +2,7 @@ mod common;
 
 use baozi_import::{
     ImportCause, ImportDimension, ImportFailure, ImportOperationControl, ImportProgressPhase,
-    ImportProgressUnit, ResourceLimits, ScopeAbortCause,
+    ImportProgressUnit, LedgerCause, ResourceLimits, ScopeAbortCause,
 };
 use baozi_operation::{
     CancellationOrigin, CancellationSignal, ControlCause, ProgressDecision, ProgressEvent,
@@ -17,6 +17,13 @@ use std::sync::{
 };
 
 const SCAN_CHUNK_BYTES: usize = 4 * 1024;
+
+#[derive(Clone, Copy)]
+enum BinaryVertexProfile {
+    PositionsOnly,
+    BuiltinStreams,
+    CustomStreams,
+}
 
 #[derive(Clone)]
 struct ArmedPollCancellation {
@@ -75,6 +82,119 @@ fn dimension_consumed(failure: &ImportFailure, dimension: ImportDimension) -> u6
         .dimension(dimension)
         .expect("tested PLY dimension is configured")
         .consumed()
+}
+
+fn binary_vertex_document(vertex_count: usize, profile: BinaryVertexProfile) -> Vec<u8> {
+    let extra_properties = match profile {
+        BinaryVertexProfile::PositionsOnly => {
+            ["nx", "s", "u", "texture_u", "red", "r", "green", "g"]
+        }
+        BinaryVertexProfile::BuiltinStreams => ["nx", "ny", "nz", "s", "t", "red", "green", "blue"],
+        BinaryVertexProfile::CustomStreams => [
+            "custom_0", "custom_1", "custom_2", "custom_3", "custom_4", "custom_5", "custom_6",
+            "custom_7",
+        ],
+    };
+    let mut bytes = format!(
+        "ply\nformat binary_little_endian 1.0\nelement vertex {vertex_count}\nproperty float x\nproperty float y\nproperty float z\n"
+    )
+    .into_bytes();
+    for property in extra_properties {
+        bytes.extend_from_slice(format!("property float {property}\n").as_bytes());
+    }
+    bytes.extend_from_slice(b"end_header\n");
+    for _ in 0..vertex_count {
+        for _ in 0..11 {
+            bytes.extend_from_slice(&0.0_f32.to_le_bytes());
+        }
+    }
+    bytes
+}
+
+fn binary_face_document(face_count: usize) -> Vec<u8> {
+    let mut bytes = format!(
+        "ply\nformat binary_little_endian 1.0\nelement vertex 3\nproperty float x\nproperty float y\nproperty float z\nelement face {face_count}\nproperty list uchar uint vertex_indices\nend_header\n"
+    )
+    .into_bytes();
+    for position in [[0.0_f32, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]] {
+        for component in position {
+            bytes.extend_from_slice(&component.to_le_bytes());
+        }
+    }
+    let mut face_record = Vec::with_capacity(13);
+    face_record.push(3);
+    for index in [0_u32, 1, 2] {
+        face_record.extend_from_slice(&index.to_le_bytes());
+    }
+    for _ in 0..face_count {
+        bytes.extend_from_slice(&face_record);
+    }
+    bytes
+}
+
+fn polls_until_graph_limit(source: &str, bytes: &[u8]) -> TestResult<usize> {
+    let mut limits = ResourceLimits::default();
+    limits.max_graph_nodes = 0;
+    let (control, polls) = controlled_import(None);
+    let failure = expected_error(import_bytes_forced_result_with_control(
+        source, bytes, limits, control,
+    )?)?;
+
+    assert!(matches!(
+        failure.cause(),
+        ImportCause::Scope(abort)
+            if matches!(
+                abort.cause(),
+                ScopeAbortCause::Ledger(LedgerCause::LimitExceeded {
+                    dimension: ImportDimension::GraphNodes,
+                    limit: 0,
+                    ..
+                })
+            )
+    ));
+    assert_eq!(failure.ledger().current_live_bytes(), 0);
+    Ok(polls.load(Ordering::SeqCst))
+}
+
+#[test]
+fn pre_reserved_vertex_and_face_streams_do_not_add_per_item_polls() -> TestResult<()> {
+    const SMALL_COUNT: usize = 16;
+    const LARGE_COUNT: usize = 32;
+    const ADDITIONAL_ITEMS: usize = LARGE_COUNT - SMALL_COUNT;
+
+    let vertex_poll_delta = |profile, label: &str| -> TestResult<usize> {
+        let small = binary_vertex_document(SMALL_COUNT, profile);
+        let large = binary_vertex_document(LARGE_COUNT, profile);
+        let small_polls = polls_until_graph_limit(&format!("{label}-small.ply"), &small)?;
+        let large_polls = polls_until_graph_limit(&format!("{label}-large.ply"), &large)?;
+        Ok(large_polls
+            .checked_sub(small_polls)
+            .expect("larger binary fixture must not require fewer polls"))
+    };
+
+    let positions_delta = vertex_poll_delta(BinaryVertexProfile::PositionsOnly, "positions-only")?;
+    assert_eq!(positions_delta, ADDITIONAL_ITEMS * 3);
+    assert_eq!(
+        vertex_poll_delta(BinaryVertexProfile::BuiltinStreams, "builtin-streams")?,
+        positions_delta
+    );
+    assert_eq!(
+        vertex_poll_delta(BinaryVertexProfile::CustomStreams, "custom-streams")?,
+        positions_delta
+    );
+
+    let small_faces = binary_face_document(SMALL_COUNT);
+    let large_faces = binary_face_document(LARGE_COUNT);
+    let small_face_polls = polls_until_graph_limit("faces-small.ply", &small_faces)?;
+    let large_face_polls = polls_until_graph_limit("faces-large.ply", &large_faces)?;
+    let face_poll_delta = large_face_polls
+        .checked_sub(small_face_polls)
+        .expect("larger face fixture must not require fewer polls");
+    assert!(
+        face_poll_delta <= ADDITIONAL_ITEMS * 7,
+        "pre-reserved face streams added redundant per-item polls: {face_poll_delta}"
+    );
+    Ok(())
 }
 
 #[test]

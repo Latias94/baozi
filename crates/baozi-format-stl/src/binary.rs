@@ -124,8 +124,8 @@ pub(crate) fn parse<'scope>(
         let v0 = vec3_at(record, 12, scope, offset + 12)?;
         let v1 = vec3_at(record, 24, scope, offset + 24)?;
         let v2 = vec3_at(record, 36, scope, offset + 36)?;
-        positions.try_extend_from_slice(&[v0, v1, v2])?;
-        normals.try_extend_from_slice(&[normal, normal, normal])?;
+        positions.try_extend_from_slice_reserved(&[v0, v1, v2])?;
+        normals.try_extend_from_slice_reserved(&[normal, normal, normal])?;
 
         let Some(attribute_bytes) = record.get(48..50) else {
             return Err(scope.format_failure(
@@ -141,7 +141,7 @@ pub(crate) fn parse<'scope>(
         attribute.copy_from_slice(attribute_bytes);
         let color = facet_color(u16::from_le_bytes(attribute), materialise);
         has_facet_colors |= color.is_some();
-        facet_colors.try_push(color)?;
+        facet_colors.try_push_reserved(color)?;
     }
 
     let colors = if has_facet_colors {
@@ -164,7 +164,7 @@ pub(crate) fn parse<'scope>(
             if index % 4096 == 0 {
                 scope.poll()?;
             }
-            colors.try_extend_from_slice(&[color.unwrap_or(fallback); 3])?;
+            colors.try_extend_from_slice_reserved(&[color.unwrap_or(fallback); 3])?;
         }
         expansion.complete()?;
         color_cells.complete()?;
@@ -185,7 +185,7 @@ pub(crate) fn parse<'scope>(
         1,
         "stl-binary-meshes",
     )?;
-    meshes.try_push(ParsedMesh {
+    meshes.try_push_reserved(ParsedMesh {
         name: Some(name),
         positions,
         normals,

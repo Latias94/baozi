@@ -864,9 +864,13 @@ fn texture_path_from_map<'scope>(
                 scope.poll()?;
                 for token in chunk {
                     if !first {
-                        path.try_push_char(' ')?;
+                        path.try_push_char_reserved(' ')?;
                     }
-                    path.try_push_str(token.text)?;
+                    if token.text.len() <= parser::SCAN_CHUNK_BYTES {
+                        path.try_push_str_reserved(token.text)?;
+                    } else {
+                        path.try_push_str(token.text)?;
+                    }
                     first = false;
                 }
             }

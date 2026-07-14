@@ -197,6 +197,59 @@ fn primary_utf8_and_line_scans_poll_within_fixed_byte_chunks() -> TestResult<()>
 }
 
 #[test]
+fn primary_ascii_decode_adds_only_chunk_bounded_polls() -> TestResult<()> {
+    let short_document = String::from("#");
+    let mut long_document = String::from("#");
+    long_document.push_str(&"x".repeat(SCAN_CHUNK_BYTES * 8 - 1));
+    let extra_chunks = long_document.len().div_ceil(SCAN_CHUNK_BYTES)
+        - short_document.len().div_ceil(SCAN_CHUNK_BYTES);
+    let mut limits = ResourceLimits::default();
+    limits.max_records = 0;
+
+    let (short_control, short_polls) = controlled_import(None);
+    let short_failure = expected_failure(import_assets_result_with_control(
+        "short-ascii.obj",
+        [("short-ascii.obj", short_document.as_bytes())],
+        limits.clone(),
+        false,
+        short_control,
+    )?);
+    let (long_control, long_polls) = controlled_import(None);
+    let long_failure = expected_failure(import_assets_result_with_control(
+        "long-ascii.obj",
+        [("long-ascii.obj", long_document.as_bytes())],
+        limits.clone(),
+        false,
+        long_control,
+    )?);
+
+    assert_ledger_limit(&short_failure, ImportDimension::Records);
+    assert_ledger_limit(&long_failure, ImportDimension::Records);
+    let short_poll_count = short_polls.load(Ordering::SeqCst);
+    let actual_extra_polls = long_polls.load(Ordering::SeqCst) - short_poll_count;
+    assert!(
+        actual_extra_polls >= extra_chunks * 2,
+        "long ASCII decode added {actual_extra_polls} polls, expected at least {} chunk-boundary polls",
+        extra_chunks * 2
+    );
+    assert!(
+        actual_extra_polls <= extra_chunks * 4 + 4,
+        "long ASCII decode added {actual_extra_polls} polls for {extra_chunks} extra chunks"
+    );
+
+    let (cancel_control, _) = controlled_import(Some(short_poll_count + 1));
+    let cancelled = expected_failure(import_assets_result_with_control(
+        "cancelled-long-ascii.obj",
+        [("cancelled-long-ascii.obj", long_document.as_bytes())],
+        limits,
+        false,
+        cancel_control,
+    )?);
+    assert_cancelled(&cancelled);
+    Ok(())
+}
+
+#[test]
 fn chunked_utf8_validation_reports_the_global_byte_offset() -> TestResult<()> {
     let invalid_offset = SCAN_CHUNK_BYTES + 17;
     let mut document = vec![b'#'; invalid_offset + 1];
@@ -756,6 +809,33 @@ fn texture_path_string_limit_warns_and_skips_texture() -> TestResult<()> {
     assert_eq!(
         report.diagnostics()[0].code().as_str(),
         "obj.mtl_texture_path_limit"
+    );
+    Ok(())
+}
+
+#[test]
+fn texture_path_larger_than_one_copy_chunk_uses_chunked_append() -> TestResult<()> {
+    let mut limits = ResourceLimits::default();
+    limits.max_path_length = SCAN_CHUNK_BYTES * 2;
+    let obj = b"mtllib material.mtl\nusemtl red\nv 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n";
+    let texture_path = format!("textures/{}.png", "x".repeat(SCAN_CHUNK_BYTES));
+    let mtl = format!("newmtl red\nmap_Kd {texture_path}\n");
+
+    let report = expected_success(import_assets_result(
+        "model.obj",
+        [
+            ("model.obj", obj.as_slice()),
+            ("material.mtl", mtl.as_bytes()),
+        ],
+        limits,
+        true,
+    )?);
+
+    assert!(scene(&report).textures().is_empty());
+    assert_eq!(report.diagnostics().len(), 1);
+    assert_eq!(
+        report.diagnostics()[0].code().as_str(),
+        "obj.mtl_texture_resolve_failed"
     );
     Ok(())
 }

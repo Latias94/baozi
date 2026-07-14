@@ -249,7 +249,7 @@ impl<'scope> ObjParser<'scope, '_> {
         for chunk in tokens[1..].chunks(64) {
             self.scope.poll()?;
             for token in chunk {
-                vertices.try_push(parse_face_vertex(
+                vertices.try_push_reserved(parse_face_vertex(
                     self.scope,
                     *token,
                     &self.parsed,
