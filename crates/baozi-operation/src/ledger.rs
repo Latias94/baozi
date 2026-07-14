@@ -676,6 +676,14 @@ where
     pub fn charge_attempted(&self, dimension: D, amount: u64) -> Result<(), LedgerCause<D>> {
         let mut state = lock(&self.state);
         Self::ensure_open(&state)?;
+        Self::charge_attempted_open(&mut state, dimension, amount)
+    }
+
+    fn charge_attempted_open(
+        state: &mut LedgerState<P, D>,
+        dimension: D,
+        amount: u64,
+    ) -> Result<(), LedgerCause<D>> {
         let entry = dimension_entry_mut(&mut state.dimensions, dimension)
             .ok_or(LedgerCause::UnknownDimension { dimension })?;
         let policy = entry.policy;
@@ -727,6 +735,14 @@ where
     pub fn charge_consumed(&self, dimension: D, amount: u64) -> Result<(), LedgerCause<D>> {
         let mut state = lock(&self.state);
         Self::ensure_open(&state)?;
+        Self::charge_consumed_open(&mut state, dimension, amount)
+    }
+
+    fn charge_consumed_open(
+        state: &mut LedgerState<P, D>,
+        dimension: D,
+        amount: u64,
+    ) -> Result<(), LedgerCause<D>> {
         let entry = dimension_entry_mut(&mut state.dimensions, dimension)
             .ok_or(LedgerCause::UnknownDimension { dimension })?;
         let policy = entry.policy;
@@ -754,6 +770,20 @@ where
                 value,
                 limit: policy.consumed_limit,
             });
+        }
+        Ok(())
+    }
+
+    /// Charges ordered attempted-and-consumed pairs under one ledger lock.
+    ///
+    /// This preserves the non-refundable semantics of sequential calls: a failure retains every
+    /// completed prefix and the failing counter exactly as observed.
+    pub fn charge_observed_batch(&self, charges: &[(D, u64)]) -> Result<(), LedgerCause<D>> {
+        let mut state = lock(&self.state);
+        Self::ensure_open(&state)?;
+        for &(dimension, amount) in charges {
+            Self::charge_attempted_open(&mut state, dimension, amount)?;
+            Self::charge_consumed_open(&mut state, dimension, amount)?;
         }
         Ok(())
     }
@@ -830,13 +860,8 @@ where
         while index < charges.len() {
             let (next, dimension, amount) =
                 group(index).expect("validated consumed batch cannot overflow");
-            let entry = dimension_entry_mut(&mut state.dimensions, dimension)
-                .expect("validated consumed batch retains every dimension");
-            entry.state.consumed = entry
-                .state
-                .consumed
-                .checked_add(amount)
-                .expect("validated consumed batch cannot overflow");
+            Self::charge_consumed_open(&mut state, dimension, amount)
+                .expect("validated consumed batch must apply without failure");
             index = next;
         }
         Ok(())
@@ -2793,6 +2818,34 @@ mod tests {
                 .consumed(),
             1
         );
+    }
+
+    #[test]
+    fn observed_batch_preserves_the_ordered_non_refundable_prefix_on_failure() {
+        let ledger = Ledger::<Owner, Phase, Dimension>::new(limits());
+        ledger
+            .charge_attempted(Dimension::Records, 16)
+            .expect("record attempted budget must reach its exact limit");
+
+        assert!(matches!(
+            ledger.charge_observed_batch(&[(Dimension::Bytes, 1), (Dimension::Records, 1)]),
+            Err(LedgerCause::LimitExceeded {
+                class: CounterClass::Attempted,
+                dimension: Dimension::Records,
+                value: 17,
+                limit: 16,
+            })
+        ));
+        let bytes = ledger
+            .dimension_evidence(Dimension::Bytes)
+            .expect("byte evidence");
+        assert_eq!(bytes.attempted(), 1);
+        assert_eq!(bytes.consumed(), 1);
+        let records = ledger
+            .dimension_evidence(Dimension::Records)
+            .expect("record evidence");
+        assert_eq!(records.attempted(), 17);
+        assert_eq!(records.consumed(), 0);
     }
 
     #[test]

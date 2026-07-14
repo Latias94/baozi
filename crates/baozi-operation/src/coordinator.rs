@@ -600,6 +600,11 @@ where
         self.coordinator.ledger.charge_consumed(dimension, amount)
     }
 
+    /// Charges ordered attempted-and-consumed pairs while preserving non-refundable prefixes.
+    pub fn charge_observed_batch(&mut self, charges: &[(D, u64)]) -> Result<(), LedgerCause<D>> {
+        self.coordinator.ledger.charge_observed_batch(charges)
+    }
+
     /// Atomically charges completed work across multiple dimensions.
     pub fn charge_consumed_batch(&mut self, charges: &[(D, u64)]) -> Result<(), LedgerCause<D>> {
         self.coordinator.ledger.charge_consumed_batch(charges)
