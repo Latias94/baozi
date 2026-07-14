@@ -25,7 +25,7 @@ pub struct ImportLossEvidence {
     subject: ImportLossSubject,
     code: DiagnosticCode,
     source: AssetPath,
-    raw_range: DiagnosticByteRange,
+    raw_range: Option<DiagnosticByteRange>,
     disposition: ImportLossDisposition,
     reservation: Option<ImportReservation>,
 }
@@ -36,7 +36,7 @@ impl ImportLossEvidence {
         subject: ImportLossSubject,
         code: DiagnosticCode,
         source: AssetPath,
-        raw_range: DiagnosticByteRange,
+        raw_range: Option<DiagnosticByteRange>,
         disposition: ImportLossDisposition,
         reservation: ImportReservation,
     ) -> Self {
@@ -67,7 +67,10 @@ impl ImportLossEvidence {
         &self.source
     }
 
-    pub const fn raw_range(&self) -> DiagnosticByteRange {
+    /// Returns the exact source range when this loss is localized to raw bytes.
+    ///
+    /// Document-level subjects such as source-scope detail collapse return `None`.
+    pub const fn raw_range(&self) -> Option<DiagnosticByteRange> {
         self.raw_range
     }
 

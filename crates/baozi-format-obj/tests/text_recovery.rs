@@ -51,7 +51,9 @@ fn ranges(report: &baozi_import::ImportReport) -> Vec<(u64, u64)> {
         .loss_evidence()
         .iter()
         .map(|evidence| {
-            let range = evidence.raw_range();
+            let range = evidence
+                .raw_range()
+                .expect("text recovery evidence retains a raw byte range");
             (range.start(), range.end())
         })
         .collect()
@@ -340,7 +342,9 @@ fn decoder_groups_truncated_eof_prefixes() -> TestResult<()> {
                 .loss_evidence()
                 .iter()
                 .map(|evidence| {
-                    let range = evidence.raw_range();
+                    let range = evidence
+                        .raw_range()
+                        .expect("text recovery evidence retains a raw byte range");
                     (range.start(), range.end())
                 })
                 .collect::<Vec<_>>(),
@@ -384,7 +388,9 @@ fn decoder_carries_utf8_state_across_four_kib_boundaries() -> TestResult<()> {
             .loss_evidence()
             .iter()
             .map(|evidence| {
-                let range = evidence.raw_range();
+                let range = evidence
+                    .raw_range()
+                    .expect("text recovery evidence retains a raw byte range");
                 (range.start(), range.end())
             })
             .collect::<Vec<_>>(),

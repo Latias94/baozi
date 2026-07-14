@@ -9,8 +9,8 @@ use crate::dependency::{
 use crate::descriptor::TextDecodingMode;
 use crate::diagnostic::{
     DiagnosticByteRange, DiagnosticCause, DiagnosticCode, DiagnosticDetailSink,
-    DiagnosticLineColumn, DiagnosticPrepareCause, DiagnosticSeverity, DiagnosticSink,
-    DiagnosticSource, PreparedDiagnostic,
+    DiagnosticDropReason, DiagnosticLineColumn, DiagnosticPrepareCause, DiagnosticSeverity,
+    DiagnosticSink, DiagnosticSource, PreparedDiagnostic,
 };
 use crate::error::{
     BoundedFormatFailureDetailSink, FormatFailureEnvelope, FormatFailureSource,
@@ -358,6 +358,10 @@ impl PreparedDiagnosticEvent {
 
     const fn stored_bytes(&self) -> u64 {
         self.prepared.stored_bytes()
+    }
+
+    const fn drop_reason(&self) -> Option<DiagnosticDropReason> {
+        self.prepared.drop_reason()
     }
 
     fn can_commit_to(&self, diagnostics: &DiagnosticSink) -> bool {
@@ -956,14 +960,12 @@ impl<'session> ParseScope<'session> {
             })
         })?;
         let diagnostic_source = self.diagnostic_source();
-        let raw_range = DiagnosticByteRange::new(0, 0)
-            .map_err(|cause| self.abort(ScopeAbortCause::Diagnostic(cause)))?;
         let loss = self.prepare_loss_evidence(
             ImportLossKind::ProvenanceEvidenceLoss,
             ImportLossSubject::SourceScopeDetails,
             code,
             &diagnostic_source,
-            raw_range,
+            None,
             ImportLossDisposition::Applied,
         )?;
         let diagnostic = self.prepare_diagnostic_event(
@@ -982,13 +984,20 @@ impl<'session> ParseScope<'session> {
             },
             format_args!("source-scope details were collapsed after explicit caller authority"),
         )?;
-        if !diagnostic.is_stored() {
+        if let Some(reason) = diagnostic.drop_reason() {
             self.discard_diagnostic_event(diagnostic)?;
             drop(loss);
-            return Err(self.abort(ScopeAbortCause::ResourceLimit {
-                resource: "source-scope-collapse-diagnostic",
-                limit: self.limits.max_diagnostics,
-            }));
+            let (resource, limit) = match reason {
+                DiagnosticDropReason::CountLimit => (
+                    "source-scope-collapse-diagnostic-count",
+                    self.limits.max_diagnostics,
+                ),
+                DiagnosticDropReason::StoredByteLimit => (
+                    "source-scope-collapse-diagnostic-bytes",
+                    self.limits.max_diagnostic_bytes,
+                ),
+            };
+            return Err(self.abort(ScopeAbortCause::ResourceLimit { resource, limit }));
         }
 
         let mut loss_evidence = match self.loss_evidence.try_borrow_mut() {
@@ -1038,7 +1047,7 @@ impl<'session> ParseScope<'session> {
         disposition: ImportLossDisposition,
     ) -> ParseResult<()> {
         let evidence =
-            self.prepare_loss_evidence(kind, subject, code, source, raw_range, disposition)?;
+            self.prepare_loss_evidence(kind, subject, code, source, Some(raw_range), disposition)?;
         self.commit_loss_evidence(evidence)
     }
 
@@ -1048,7 +1057,7 @@ impl<'session> ParseScope<'session> {
         subject: ImportLossSubject,
         code: DiagnosticCode,
         source: &DiagnosticSource<'_>,
-        raw_range: DiagnosticByteRange,
+        raw_range: Option<DiagnosticByteRange>,
         disposition: ImportLossDisposition,
     ) -> ParseResult<PreparedLossEvidence> {
         self.coordinator

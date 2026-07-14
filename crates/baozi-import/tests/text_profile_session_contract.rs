@@ -250,7 +250,7 @@ fn assert_recovery_disposition(
     assert_eq!(evidence[0].code().as_str(), RECOVERY_CODE);
     assert_eq!(
         evidence[0].raw_range(),
-        DiagnosticByteRange::new(1, 4).expect("static byte range must be valid")
+        Some(DiagnosticByteRange::new(1, 4).expect("static byte range must be valid"))
     );
     assert_eq!(evidence[0].disposition(), expected);
 }

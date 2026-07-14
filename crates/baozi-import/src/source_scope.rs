@@ -252,7 +252,7 @@ impl<'scope, 'session> SourceScopeRecordBuilder<'scope, 'session> {
         disposition: SourceScopeDisposition,
         identity: &str,
     ) -> ParseResult<()> {
-        self.scope.source_scope_preflight()?;
+        self.scope.poll()?;
         let identity_bytes = u64::try_from(identity.len()).map_err(|_| {
             self.scope
                 .resource_limit_exceeded("source-scope-identity-bytes", u64::MAX)
@@ -281,8 +281,14 @@ impl<'scope, 'session> SourceScopeRecordBuilder<'scope, 'session> {
         // This framing is the v1 digest wire: typed tag, disposition, LE length, then full bytes.
         self.digest.update([kind as u8, disposition as u8]);
         self.digest.update(identity_bytes.to_le_bytes());
-        for chunk in identity.as_bytes().chunks(METERED_COPY_POLL_INTERVAL) {
-            self.scope.poll()?;
+        for (chunk_index, chunk) in identity
+            .as_bytes()
+            .chunks(METERED_COPY_POLL_INTERVAL)
+            .enumerate()
+        {
+            if chunk_index != 0 {
+                self.scope.poll()?;
+            }
             self.digest.update(chunk);
         }
 

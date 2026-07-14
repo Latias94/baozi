@@ -364,6 +364,7 @@ pub(crate) struct DiagnosticAdmission {
     structural_capacity_envelope: u64,
     capacity_plans: Option<DiagnosticCapacityPlans>,
     may_store: bool,
+    drop_reason: Option<DiagnosticDropReason>,
     failure: Option<DiagnosticCause>,
 }
 
@@ -401,9 +402,21 @@ pub(crate) struct DiagnosticPrepareFailure {
     pub additional_attempted_bytes: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DiagnosticDropReason {
+    CountLimit,
+    StoredByteLimit,
+}
+
+#[derive(Debug)]
+enum PreparedDiagnosticPayload {
+    Stored(ImportDiagnostic),
+    Dropped(DiagnosticDropReason),
+}
+
 #[derive(Debug)]
 pub(crate) struct PreparedDiagnostic {
-    diagnostic: Option<ImportDiagnostic>,
+    payload: PreparedDiagnosticPayload,
     additional_attempted_bytes: u64,
     stored_bytes: u64,
     payload_capacity_bytes: u64,
@@ -420,7 +433,14 @@ impl PreparedDiagnostic {
     }
 
     pub(crate) const fn is_stored(&self) -> bool {
-        self.diagnostic.is_some()
+        matches!(&self.payload, PreparedDiagnosticPayload::Stored(_))
+    }
+
+    pub(crate) const fn drop_reason(&self) -> Option<DiagnosticDropReason> {
+        match &self.payload {
+            PreparedDiagnosticPayload::Stored(_) => None,
+            PreparedDiagnosticPayload::Dropped(reason) => Some(*reason),
+        }
     }
 
     pub(crate) const fn payload_capacity_bytes(&self) -> u64 {
@@ -490,9 +510,16 @@ impl DiagnosticSink {
         let stored_remaining = self
             .max_stored_bytes
             .saturating_sub(self.summary.stored_bytes);
-        let semantically_storable = failure.is_none()
-            && self.summary.stored_count < self.max_count
-            && fixed_attempted_bytes <= stored_remaining;
+        let drop_reason = if failure.is_some() {
+            None
+        } else if self.summary.stored_count >= self.max_count {
+            Some(DiagnosticDropReason::CountLimit)
+        } else if fixed_attempted_bytes > stored_remaining {
+            Some(DiagnosticDropReason::StoredByteLimit)
+        } else {
+            None
+        };
+        let semantically_storable = failure.is_none() && drop_reason.is_none();
         let maximum_extra =
             MAX_DIAGNOSTIC_DETAIL_BYTES.saturating_add(self.max_message_bytes as u64);
         let candidate_storage_bytes = if semantically_storable {
@@ -544,6 +571,7 @@ impl DiagnosticSink {
             structural_capacity_envelope,
             capacity_plans,
             may_store,
+            drop_reason,
             failure,
         }
     }
@@ -574,6 +602,7 @@ impl DiagnosticSink {
             });
         }
         let capacity_plans = admission.capacity_plans;
+        let admission_drop_reason = admission.drop_reason;
 
         let detail_storage_limit = admission
             .storage_reservation_bytes
@@ -682,7 +711,9 @@ impl DiagnosticSink {
         if !admission.may_store || !detail_build.storage_fits {
             self.discard_admission();
             return Ok(PreparedDiagnostic {
-                diagnostic: None,
+                payload: PreparedDiagnosticPayload::Dropped(
+                    admission_drop_reason.unwrap_or(DiagnosticDropReason::StoredByteLimit),
+                ),
                 additional_attempted_bytes,
                 stored_bytes: 0,
                 payload_capacity_bytes: 0,
@@ -760,7 +791,7 @@ impl DiagnosticSink {
         let structural_bytes = detail_build.detail_capacity_bytes;
         debug_assert!(structural_bytes <= admission.structural_capacity_envelope);
         Ok(PreparedDiagnostic {
-            diagnostic: Some(ImportDiagnostic {
+            payload: PreparedDiagnosticPayload::Stored(ImportDiagnostic {
                 severity,
                 code,
                 phase,
@@ -808,7 +839,7 @@ impl DiagnosticSink {
         payload: &Option<ImportReservation>,
         structural: &Option<ImportReservation>,
     ) -> bool {
-        if prepared.diagnostic.is_none() {
+        if !prepared.is_stored() {
             return false;
         }
         payload.is_some()
@@ -819,7 +850,7 @@ impl DiagnosticSink {
 
     pub(crate) fn commit_reserved_infallible(
         &mut self,
-        mut prepared: PreparedDiagnostic,
+        prepared: PreparedDiagnostic,
         payload: Option<ImportReservation>,
         structural: Option<ImportReservation>,
     ) {
@@ -827,10 +858,14 @@ impl DiagnosticSink {
             self.can_commit(&prepared, &payload, &structural),
             "diagnostic publication must be admitted before its no-fail commit"
         );
-        let diagnostic = prepared
-            .diagnostic
-            .take()
-            .expect("an admitted stored diagnostic retains its payload");
+        let PreparedDiagnostic {
+            payload: prepared_payload,
+            stored_bytes,
+            ..
+        } = prepared;
+        let PreparedDiagnosticPayload::Stored(diagnostic) = prepared_payload else {
+            unreachable!("an admitted stored diagnostic retains its payload")
+        };
         let payload = payload.expect("an admitted stored diagnostic retains its payload token");
         let structural =
             structural.expect("an admitted stored diagnostic retains its structural token");
@@ -838,10 +873,7 @@ impl DiagnosticSink {
         self.reservations.push_reserved_infallible(payload);
         self.reservations.push_reserved_infallible(structural);
         self.summary.stored_count = self.summary.stored_count.saturating_add(1);
-        self.summary.stored_bytes = self
-            .summary
-            .stored_bytes
-            .saturating_add(prepared.stored_bytes);
+        self.summary.stored_bytes = self.summary.stored_bytes.saturating_add(stored_bytes);
     }
 
     fn record_failed_prepare(&mut self, additional_attempted_bytes: u64) {
@@ -1313,10 +1345,9 @@ mod tests {
             )
             .expect("bounded preparation");
         assert!(prepared.is_stored());
-        let diagnostic = prepared
-            .diagnostic
-            .as_ref()
-            .expect("stored preparation must retain a diagnostic");
+        let PreparedDiagnosticPayload::Stored(diagnostic) = &prepared.payload else {
+            panic!("stored preparation must retain a diagnostic")
+        };
         assert!(diagnostic.is_truncated());
         assert!(!diagnostic.message().contains('\n'));
     }

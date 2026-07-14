@@ -208,7 +208,7 @@ fn assert_recovery_evidence(
     assert_eq!(evidence.source().as_str(), SOURCE);
     assert_eq!(
         evidence.raw_range(),
-        DiagnosticByteRange::new(1, 4).unwrap()
+        Some(DiagnosticByteRange::new(1, 4).unwrap())
     );
     assert_eq!(evidence.disposition(), disposition);
 }
