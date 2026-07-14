@@ -1,21 +1,30 @@
-use crate::animation::AnimationClip;
-use crate::appearance::Material;
+use crate::animation::{AnimationClip, AnimationTimeDomain};
+use crate::appearance::{Material, MaterialView};
+use crate::attribute::{Attribute, AttributeDomain, F32Vec3View};
+use crate::deform::{
+    InfluenceRows, MorphTargetDefinition, PrimitiveMorphTarget, Skin, SkinMatrixSpaces,
+};
 use crate::derived::{Derived, DerivedAbsenceReason};
-use crate::entity::{Camera, Light, Node};
+use crate::entity::{AuthoredTransform, Camera, EntityName, Light, Node};
 use crate::extension::{
     ControlledRetainedFootprintError, ExtensionEntry, ExtensionEntryClassification,
     ExtensionEntryValidationError, ExtensionSchemaSnapshot,
     extension_entries_retained_allocation_bytes_controlled, validate_unique_extension_entry_keys,
 };
-use crate::geometry::{GeometryBoundsError, LogicalMesh, MeshInstance, validate_aabb};
-use crate::identity::{
-    AnimationClipIndex, CameraIndex, ImageIndex, LightIndex, LogicalMeshIndex, MaterialIndex,
-    MeshInstanceIndex, NodeId, NodeIndex, SamplerIndex, SceneGenerationError, SceneGenerationId,
-    SceneLookupError, SceneStorageIndexError, SkinIndex, TextureIndex, lookup_scene_wide,
+use crate::geometry::{
+    GeometryBoundsError, IndexStream, LogicalMesh, LogicalMeshBounds, MeshInstance, MeshPrimitive,
+    PrimitiveBounds, PrimitiveCardinality, Topology, validate_aabb,
 };
-use crate::image::{Image, Sampler, Texture};
-use crate::math::Aabb;
-use crate::provenance::{ProvenanceArena, ProvenanceAttachments};
+use crate::identity::{
+    AnimationClipId, AnimationClipIndex, CameraId, CameraIndex, ImageId, ImageIndex, LightId,
+    LightIndex, LogicalMeshId, LogicalMeshIndex, MaterialId, MaterialIndex, MeshInstanceId,
+    MeshInstanceIndex, MorphTargetId, NodeId, NodeIndex, PrimitiveId, SamplerId, SamplerIndex,
+    SceneGenerationError, SceneGenerationId, SceneLookupError, SceneStorageIndexError, SkinId,
+    SkinIndex, TextureId, TextureIndex, lookup_owned, lookup_scene_wide,
+};
+use crate::image::{Image, ImageView, Sampler, SamplerView, Texture, TextureView};
+use crate::math::{Aabb, Mat4, Vec3};
+use crate::provenance::{Provenance, ProvenanceArena, ProvenanceAttachments};
 use crate::scene_space::SceneSpace;
 use crate::shared_storage::{SharedStorage, SharedStorageError};
 use crate::validation_control::SceneValidationStats;
@@ -451,6 +460,319 @@ pub(crate) struct CanonicalValidatedScene {
     _proof: crate::canonical_validation::CanonicalValidationProof,
 }
 
+struct StableEnumerate<I> {
+    inner: I,
+    next: u32,
+}
+
+impl<I> StableEnumerate<I> {
+    const fn new(inner: I) -> Self {
+        Self { inner, next: 0 }
+    }
+}
+
+impl<I: Iterator> Iterator for StableEnumerate<I> {
+    type Item = (u32, I::Item);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let value = self.inner.next()?;
+        let index = self.next;
+        self.next = self.next.wrapping_add(1);
+        Some((index, value))
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.inner.size_hint()
+    }
+}
+
+impl<I: ExactSizeIterator> ExactSizeIterator for StableEnumerate<I> {}
+impl<I: std::iter::FusedIterator> std::iter::FusedIterator for StableEnumerate<I> {}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct NodeView<'a> {
+    node: &'a Node,
+    generation: SceneGenerationId,
+}
+
+impl<'a> NodeView<'a> {
+    pub(crate) const fn name(self) -> Option<&'a EntityName> {
+        self.node.name()
+    }
+
+    pub(crate) const fn authored_transform(self) -> AuthoredTransform {
+        self.node.authored_transform()
+    }
+
+    pub(crate) fn local_matrix(self) -> Mat4 {
+        self.node.local_matrix()
+    }
+
+    pub(crate) fn children(self) -> impl ExactSizeIterator<Item = NodeId> + 'a {
+        let generation = self.generation;
+        self.node
+            .children()
+            .map(move |child| child.handle(generation))
+    }
+
+    pub(crate) const fn camera(self) -> Option<CameraId> {
+        match self.node.camera_index() {
+            Some(camera) => Some(camera.handle(self.generation)),
+            None => None,
+        }
+    }
+
+    pub(crate) const fn light(self) -> Option<LightId> {
+        match self.node.light_index() {
+            Some(light) => Some(light.handle(self.generation)),
+            None => None,
+        }
+    }
+
+    pub(crate) const fn provenance(self) -> &'a ProvenanceAttachments {
+        self.node.provenance()
+    }
+
+    pub(crate) fn extensions(self) -> impl ExactSizeIterator<Item = &'a ExtensionEntry> {
+        self.node.extensions()
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct MeshInstanceView<'a> {
+    instance: &'a MeshInstance,
+    generation: SceneGenerationId,
+}
+
+impl<'a> MeshInstanceView<'a> {
+    pub(crate) const fn owner(self) -> NodeId {
+        self.instance.owner_index().handle(self.generation)
+    }
+
+    pub(crate) const fn logical_mesh(self) -> LogicalMeshId {
+        self.instance.logical_mesh_index().handle(self.generation)
+    }
+
+    pub(crate) const fn skin(self) -> Option<SkinId> {
+        match self.instance.skin_index() {
+            Some(skin) => Some(skin.handle(self.generation)),
+            None => None,
+        }
+    }
+
+    pub(crate) fn morph_weight_override(self) -> Option<&'a [f32]> {
+        self.instance.morph_weight_override()
+    }
+
+    pub(crate) fn attributes(self) -> &'a [Attribute] {
+        self.instance.attributes()
+    }
+
+    pub(crate) const fn domain_count(self, domain: AttributeDomain) -> Option<u32> {
+        self.instance.domain_count(domain)
+    }
+
+    pub(crate) const fn provenance(self) -> &'a ProvenanceAttachments {
+        self.instance.provenance()
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct LogicalMeshView<'a> {
+    mesh: &'a LogicalMesh,
+    id: LogicalMeshId,
+}
+
+impl<'a> LogicalMeshView<'a> {
+    pub(crate) const fn id(self) -> LogicalMeshId {
+        self.id
+    }
+
+    pub(crate) const fn name(self) -> Option<&'a EntityName> {
+        self.mesh.name()
+    }
+
+    pub(crate) fn primitives(
+        self,
+    ) -> impl ExactSizeIterator<Item = (PrimitiveId, PrimitiveView<'a>)> + 'a {
+        let owner = self.id;
+        StableEnumerate::new(self.mesh.primitives().iter()).map(move |(local, primitive)| {
+            let id = PrimitiveId::new(owner, local);
+            (id, PrimitiveView { primitive, id })
+        })
+    }
+
+    pub(crate) fn primitive(self, id: PrimitiveId) -> Result<PrimitiveView<'a>, SceneLookupError> {
+        lookup_owned(self.id.generation(), self.id, id, self.mesh.primitives())
+            .map(|primitive| PrimitiveView { primitive, id })
+    }
+
+    pub(crate) fn morph_targets(
+        self,
+    ) -> impl ExactSizeIterator<Item = (MorphTargetId, &'a MorphTargetDefinition)> + 'a {
+        let owner = self.id;
+        StableEnumerate::new(self.mesh.morph_target_definitions().iter())
+            .map(move |(local, target)| (MorphTargetId::new(owner, local), target))
+    }
+
+    pub(crate) fn morph_target(
+        self,
+        id: MorphTargetId,
+    ) -> Result<&'a MorphTargetDefinition, SceneLookupError> {
+        lookup_owned(
+            self.id.generation(),
+            self.id,
+            id,
+            self.mesh.morph_target_definitions(),
+        )
+    }
+
+    pub(crate) fn default_morph_weights(self) -> &'a [f32] {
+        self.mesh.default_morph_weights()
+    }
+
+    pub(crate) const fn bounds(self) -> &'a LogicalMeshBounds {
+        self.mesh.bounds()
+    }
+
+    pub(crate) const fn provenance(self) -> &'a ProvenanceAttachments {
+        self.mesh.provenance()
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct PrimitiveView<'a> {
+    primitive: &'a MeshPrimitive,
+    id: PrimitiveId,
+}
+
+impl<'a> PrimitiveView<'a> {
+    pub(crate) const fn id(self) -> PrimitiveId {
+        self.id
+    }
+
+    pub(crate) const fn topology(self) -> &'a Topology {
+        self.primitive.topology()
+    }
+
+    pub(crate) const fn index_stream(self) -> &'a IndexStream {
+        self.primitive.index_stream()
+    }
+
+    pub(crate) const fn cardinality(self) -> PrimitiveCardinality {
+        self.primitive.cardinality()
+    }
+
+    pub(crate) const fn domain_count(self, domain: AttributeDomain) -> Option<u32> {
+        self.primitive.domain_count(domain)
+    }
+
+    pub(crate) const fn material(self) -> Option<MaterialId> {
+        match self.primitive.material_index() {
+            Some(material) => Some(material.handle(self.id.generation())),
+            None => None,
+        }
+    }
+
+    pub(crate) fn attributes(self) -> &'a [Attribute] {
+        self.primitive.attributes()
+    }
+
+    pub(crate) const fn influences(self) -> Option<&'a InfluenceRows> {
+        self.primitive.influences()
+    }
+
+    pub(crate) fn morph_targets(self) -> &'a [PrimitiveMorphTarget] {
+        self.primitive.morph_targets()
+    }
+
+    pub(crate) const fn bounds(self) -> &'a PrimitiveBounds {
+        self.primitive.bounds()
+    }
+
+    pub(crate) const fn provenance(self) -> &'a ProvenanceAttachments {
+        self.primitive.provenance()
+    }
+
+    pub(crate) fn positions(self) -> Option<F32Vec3View<'a>> {
+        self.position_attribute().and_then(Attribute::positions)
+    }
+
+    pub(crate) fn as_dense_positions(self) -> Option<&'a [Vec3]> {
+        self.position_attribute()
+            .and_then(Attribute::as_dense_positions)
+    }
+
+    fn position_attribute(self) -> Option<&'a Attribute> {
+        self.primitive.attributes().iter().find(|attribute| {
+            attribute.semantic() == &crate::attribute::AttributeSemantic::Position
+                && attribute.domain() == AttributeDomain::Vertex
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct SkinView<'a> {
+    skin: &'a Skin,
+    generation: SceneGenerationId,
+}
+
+impl<'a> SkinView<'a> {
+    pub(crate) const fn name(self) -> Option<&'a EntityName> {
+        self.skin.name()
+    }
+
+    pub(crate) fn joints(self) -> impl ExactSizeIterator<Item = NodeId> + 'a {
+        let generation = self.generation;
+        self.skin
+            .joints()
+            .iter()
+            .map(move |joint| joint.handle(generation))
+    }
+
+    pub(crate) fn inverse_bind_matrices(self) -> &'a [Mat4] {
+        self.skin.inverse_bind_matrices()
+    }
+
+    pub(crate) const fn skeleton_root_hint(self) -> Option<NodeId> {
+        match self.skin.skeleton_root_hint() {
+            Some(root) => Some(root.handle(self.generation)),
+            None => None,
+        }
+    }
+
+    pub(crate) const fn matrix_spaces(self) -> SkinMatrixSpaces {
+        self.skin.matrix_spaces()
+    }
+
+    pub(crate) const fn provenance(self) -> Provenance {
+        self.skin.provenance()
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct AnimationClipView<'a> {
+    clip: &'a AnimationClip,
+}
+
+impl<'a> AnimationClipView<'a> {
+    pub(crate) const fn duration(self) -> f64 {
+        self.clip.duration()
+    }
+
+    pub(crate) const fn time_domain(self) -> &'a AnimationTimeDomain {
+        self.clip.time_domain()
+    }
+
+    pub(crate) fn channel_count(self) -> usize {
+        self.clip.channels().len()
+    }
+
+    pub(crate) const fn provenance(self) -> Provenance {
+        self.clip.provenance()
+    }
+}
+
 impl CanonicalValidatedScene {
     pub(super) const fn from_validated_parts(
         data: CanonicalSceneData,
@@ -472,20 +794,230 @@ impl CanonicalValidatedScene {
         self.validation_stats
     }
 
-    pub(crate) fn node(&self, id: NodeId) -> Result<&Node, SceneLookupError> {
-        lookup_scene_wide(self.data.generation, id, &self.data.nodes).map(SharedStorage::as_ref)
+    pub(crate) const fn root(&self) -> Option<NodeId> {
+        match self.data.root {
+            Some(root) => Some(root.handle(self.data.generation)),
+            None => None,
+        }
+    }
+
+    pub(crate) fn nodes(&self) -> impl ExactSizeIterator<Item = (NodeId, NodeView<'_>)> + '_ {
+        let generation = self.data.generation;
+        StableEnumerate::new(self.data.nodes.iter()).map(move |(index, node)| {
+            (
+                NodeId::new(generation, index),
+                NodeView {
+                    node: node.as_ref(),
+                    generation,
+                },
+            )
+        })
+    }
+
+    pub(crate) fn node(&self, id: NodeId) -> Result<NodeView<'_>, SceneLookupError> {
+        lookup_scene_wide(self.data.generation, id, &self.data.nodes).map(|node| NodeView {
+            node: node.as_ref(),
+            generation: self.data.generation,
+        })
+    }
+
+    pub(crate) fn mesh_instances(
+        &self,
+    ) -> impl ExactSizeIterator<Item = (MeshInstanceId, MeshInstanceView<'_>)> + '_ {
+        let generation = self.data.generation;
+        StableEnumerate::new(self.data.mesh_instances.iter()).map(move |(index, instance)| {
+            (
+                MeshInstanceId::new(generation, index),
+                MeshInstanceView {
+                    instance: instance.as_ref(),
+                    generation,
+                },
+            )
+        })
+    }
+
+    pub(crate) fn mesh_instance(
+        &self,
+        id: MeshInstanceId,
+    ) -> Result<MeshInstanceView<'_>, SceneLookupError> {
+        lookup_scene_wide(self.data.generation, id, &self.data.mesh_instances).map(|instance| {
+            MeshInstanceView {
+                instance: instance.as_ref(),
+                generation: self.data.generation,
+            }
+        })
+    }
+
+    pub(crate) fn logical_meshes(
+        &self,
+    ) -> impl ExactSizeIterator<Item = (LogicalMeshId, LogicalMeshView<'_>)> + '_ {
+        let generation = self.data.generation;
+        StableEnumerate::new(self.data.logical_meshes.iter()).map(move |(index, mesh)| {
+            let id = LogicalMeshId::new(generation, index);
+            (
+                id,
+                LogicalMeshView {
+                    mesh: mesh.as_ref(),
+                    id,
+                },
+            )
+        })
+    }
+
+    pub(crate) fn logical_mesh(
+        &self,
+        id: LogicalMeshId,
+    ) -> Result<LogicalMeshView<'_>, SceneLookupError> {
+        lookup_scene_wide(self.data.generation, id, &self.data.logical_meshes).map(|mesh| {
+            LogicalMeshView {
+                mesh: mesh.as_ref(),
+                id,
+            }
+        })
+    }
+
+    pub(crate) fn materials(
+        &self,
+    ) -> impl ExactSizeIterator<Item = (MaterialId, MaterialView<'_>)> + '_ {
+        let generation = self.data.generation;
+        StableEnumerate::new(self.data.materials.iter()).map(move |(index, material)| {
+            (
+                MaterialId::new(generation, index),
+                material.as_ref().view(generation),
+            )
+        })
+    }
+
+    pub(crate) fn material(&self, id: MaterialId) -> Result<MaterialView<'_>, SceneLookupError> {
+        lookup_scene_wide(self.data.generation, id, &self.data.materials)
+            .map(|material| material.as_ref().view(self.data.generation))
+    }
+
+    pub(crate) fn images(&self) -> impl ExactSizeIterator<Item = (ImageId, ImageView<'_>)> + '_ {
+        let generation = self.data.generation;
+        StableEnumerate::new(self.data.images.iter())
+            .map(move |(index, image)| (ImageId::new(generation, index), image.as_ref().view()))
+    }
+
+    pub(crate) fn image(&self, id: ImageId) -> Result<ImageView<'_>, SceneLookupError> {
+        lookup_scene_wide(self.data.generation, id, &self.data.images)
+            .map(|image| image.as_ref().view())
+    }
+
+    pub(crate) fn samplers(
+        &self,
+    ) -> impl ExactSizeIterator<Item = (SamplerId, SamplerView<'_>)> + '_ {
+        let generation = self.data.generation;
+        StableEnumerate::new(self.data.samplers.iter()).map(move |(index, sampler)| {
+            (SamplerId::new(generation, index), sampler.as_ref().view())
+        })
+    }
+
+    pub(crate) fn sampler(&self, id: SamplerId) -> Result<SamplerView<'_>, SceneLookupError> {
+        lookup_scene_wide(self.data.generation, id, &self.data.samplers)
+            .map(|sampler| sampler.as_ref().view())
+    }
+
+    pub(crate) fn textures(&self) -> impl ExactSizeIterator<Item = (TextureId, TextureView)> + '_ {
+        let generation = self.data.generation;
+        StableEnumerate::new(self.data.textures.iter()).map(move |(index, texture)| {
+            (
+                TextureId::new(generation, index),
+                (*texture.as_ref()).view(generation),
+            )
+        })
+    }
+
+    pub(crate) fn texture(&self, id: TextureId) -> Result<TextureView, SceneLookupError> {
+        lookup_scene_wide(self.data.generation, id, &self.data.textures)
+            .map(|texture| (*texture.as_ref()).view(self.data.generation))
+    }
+
+    pub(crate) fn skins(&self) -> impl ExactSizeIterator<Item = (SkinId, SkinView<'_>)> + '_ {
+        let generation = self.data.generation;
+        StableEnumerate::new(self.data.skins.iter()).map(move |(index, skin)| {
+            (
+                SkinId::new(generation, index),
+                SkinView {
+                    skin: skin.as_ref(),
+                    generation,
+                },
+            )
+        })
+    }
+
+    pub(crate) fn skin(&self, id: SkinId) -> Result<SkinView<'_>, SceneLookupError> {
+        lookup_scene_wide(self.data.generation, id, &self.data.skins).map(|skin| SkinView {
+            skin: skin.as_ref(),
+            generation: self.data.generation,
+        })
+    }
+
+    pub(crate) fn animation_clips(
+        &self,
+    ) -> impl ExactSizeIterator<Item = (AnimationClipId, AnimationClipView<'_>)> + '_ {
+        let generation = self.data.generation;
+        StableEnumerate::new(self.data.animation_clips.iter()).map(move |(index, clip)| {
+            (
+                AnimationClipId::new(generation, index),
+                AnimationClipView {
+                    clip: clip.as_ref(),
+                },
+            )
+        })
+    }
+
+    pub(crate) fn animation_clip(
+        &self,
+        id: AnimationClipId,
+    ) -> Result<AnimationClipView<'_>, SceneLookupError> {
+        lookup_scene_wide(self.data.generation, id, &self.data.animation_clips).map(|clip| {
+            AnimationClipView {
+                clip: clip.as_ref(),
+            }
+        })
+    }
+
+    pub(crate) fn cameras(&self) -> impl ExactSizeIterator<Item = (CameraId, &Camera)> + '_ {
+        let generation = self.data.generation;
+        StableEnumerate::new(self.data.cameras.iter())
+            .map(move |(index, camera)| (CameraId::new(generation, index), camera.as_ref()))
+    }
+
+    pub(crate) fn camera(&self, id: CameraId) -> Result<&Camera, SceneLookupError> {
+        lookup_scene_wide(self.data.generation, id, &self.data.cameras).map(SharedStorage::as_ref)
+    }
+
+    pub(crate) fn lights(&self) -> impl ExactSizeIterator<Item = (LightId, &Light)> + '_ {
+        let generation = self.data.generation;
+        StableEnumerate::new(self.data.lights.iter())
+            .map(move |(index, light)| (LightId::new(generation, index), light.as_ref()))
+    }
+
+    pub(crate) fn light(&self, id: LightId) -> Result<&Light, SceneLookupError> {
+        lookup_scene_wide(self.data.generation, id, &self.data.lights).map(SharedStorage::as_ref)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::animation::{AnimationLimits, AnimationTimeDomain};
+    use crate::appearance::{AlphaMode, MaterialFactors, ShadingModel};
+    use crate::attribute::{
+        Attribute, AttributeBuffer, AttributeDomain, AttributeFormat, AttributePayload,
+        AttributeSemantic, ComponentType, Normalization,
+    };
+    use crate::deform::{Skin, SkinMatrixSpaces};
     use crate::derived::DerivedAbsenceReason;
     use crate::entity::{AuthoredTransform, Camera, CameraProjection, Light, LightKind, Node};
     use crate::extension::ExtensionSchemaSnapshot;
+    use crate::geometry::{
+        IndexStream, LogicalMeshBounds, MeshPrimitive, MorphBoundsPolicy, PrimitiveBounds, Topology,
+    };
     use crate::image::{Image, Sampler, Texture};
-    use crate::math::Color;
-    use crate::provenance::test_provenance_fixture;
+    use crate::math::{Color, Mat4, Vec3};
+    use crate::provenance::{Provenance, test_provenance_fixture};
     use crate::scene_space::SceneSpace;
     use crate::validation_control::SceneValidationLimits;
 
@@ -500,6 +1032,191 @@ mod tests {
             [],
         )
         .expect("root node fixture should be valid")
+    }
+
+    fn positions(values: Vec<Vec3>, provenance: Provenance) -> Attribute {
+        Attribute::new(
+            AttributeSemantic::Position,
+            AttributeDomain::Vertex,
+            AttributeFormat::new(ComponentType::F32, 3, Normalization::None, None).unwrap(),
+            AttributePayload::dense(AttributeBuffer::from_f32_vec3(values).unwrap()),
+            provenance,
+        )
+        .unwrap()
+    }
+
+    fn primitive(
+        values: Vec<Vec3>,
+        material: MaterialIndex,
+        provenance: Provenance,
+    ) -> MeshPrimitive {
+        let vertex_count = u32::try_from(values.len()).expect("fixture vertex count should fit");
+        MeshPrimitive::try_new(
+            vertex_count,
+            Topology::Points,
+            IndexStream::non_indexed(),
+            Some(material),
+            vec![positions(values, provenance)],
+            None,
+            Vec::new(),
+            1,
+            PrimitiveBounds::absent(
+                DerivedAbsenceReason::NotProvided,
+                MorphBoundsPolicy::DefaultWeights,
+            ),
+            provenance,
+        )
+        .unwrap()
+    }
+
+    fn fully_populated_scene() -> CanonicalValidatedScene {
+        let (provenance_arena, provenance) = test_provenance_fixture();
+        let mut builder = CanonicalSceneBuilder::try_new(
+            SceneSpace::unknown(),
+            ExtensionSchemaSnapshot::empty(),
+            provenance_arena,
+            provenance,
+            DerivedAbsenceReason::NotProvided,
+        )
+        .unwrap();
+
+        let camera = builder
+            .try_push_camera(
+                Camera::try_new(
+                    None,
+                    CameraProjection::perspective(1.0, None, 0.1, None).unwrap(),
+                    provenance,
+                    [],
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        let light = builder
+            .try_push_light(
+                Light::try_new(
+                    None,
+                    LightKind::Directional,
+                    Color::linear_rgba(1.0, 1.0, 1.0, 1.0),
+                    2.0,
+                    provenance,
+                    [],
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        let root = builder
+            .try_push_node(
+                Node::try_new(
+                    None,
+                    AuthoredTransform::identity_trs(),
+                    [NodeIndex::from_u32(1)],
+                    Some(camera),
+                    Some(light),
+                    provenance,
+                    [],
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        let child = builder.try_push_node(root_node(provenance)).unwrap();
+        assert_eq!(child.as_u32(), 1);
+        builder.set_root(root);
+
+        let image = builder
+            .try_push_image(
+                Image::try_encoded([1, 2, 3], None, None, None, None, provenance).unwrap(),
+            )
+            .unwrap();
+        let sampler = builder
+            .try_push_sampler(Sampler::canonical_default(provenance))
+            .unwrap();
+        builder
+            .try_push_texture(Texture::new(image, sampler, provenance))
+            .unwrap();
+        let material = builder
+            .try_push_material(
+                Material::try_new(
+                    None,
+                    ShadingModel::Unlit,
+                    AlphaMode::Opaque,
+                    false,
+                    MaterialFactors::empty(),
+                    [],
+                    provenance,
+                    [],
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        let logical_mesh = builder
+            .try_push_logical_mesh(
+                LogicalMesh::try_new(
+                    None,
+                    vec![
+                        primitive(
+                            vec![Vec3::new(1.0, 2.0, 3.0), Vec3::new(4.0, 5.0, 6.0)],
+                            material,
+                            provenance,
+                        ),
+                        primitive(vec![Vec3::new(7.0, 8.0, 9.0)], material, provenance),
+                    ],
+                    [crate::deform::MorphTargetDefinition::try_new(None, provenance).unwrap()]
+                        .into(),
+                    vec![0.0],
+                    LogicalMeshBounds::absent(
+                        DerivedAbsenceReason::NotProvided,
+                        MorphBoundsPolicy::DefaultWeights,
+                    ),
+                    provenance,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        let skin = builder
+            .try_push_skin(
+                Skin::try_new(
+                    None,
+                    [root],
+                    [Mat4::IDENTITY],
+                    Some(root),
+                    SkinMatrixSpaces::canonical(),
+                    provenance,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        builder
+            .try_push_mesh_instance(
+                MeshInstance::try_new(
+                    root,
+                    logical_mesh,
+                    Some(skin),
+                    1,
+                    None,
+                    Vec::new(),
+                    provenance,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        builder
+            .try_push_animation_clip(
+                AnimationClip::try_new(
+                    0.0,
+                    AnimationTimeDomain::Seconds,
+                    [],
+                    provenance,
+                    &AnimationLimits::canonical(),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+
+        crate::canonical_validation::validate_canonical_scene(
+            builder.finish_draft(),
+            SceneValidationLimits::default(),
+        )
+        .expect("fully populated canonical scene should validate")
     }
 
     #[test]
@@ -574,5 +1291,162 @@ mod tests {
         assert_eq!(image_index.as_u32(), 0);
         assert_eq!(sampler_index.as_u32(), 0);
         assert_eq!(texture_index.as_u32(), 0);
+    }
+
+    #[test]
+    fn validated_scene_qualifies_every_scene_wide_collection_and_root() {
+        let scene = fully_populated_scene();
+        let generation = scene.generation();
+        let root = scene.root().expect("fixture has one root");
+        assert_eq!(root.generation(), generation);
+
+        let nodes = scene.nodes().collect::<Vec<_>>();
+        assert_eq!(nodes.len(), 2);
+        let (node_id, node) = nodes[0];
+        assert_eq!(node_id, root);
+        assert_eq!(node.children().next(), Some(nodes[1].0));
+        assert_eq!(
+            scene.node(node_id).unwrap().camera().unwrap().generation(),
+            generation
+        );
+        assert_eq!(node.light().unwrap().generation(), generation);
+
+        let (instance_id, instance) = scene.mesh_instances().next().unwrap();
+        assert_eq!(scene.mesh_instance(instance_id).unwrap().owner(), root);
+        assert_eq!(instance.logical_mesh().generation(), generation);
+        assert_eq!(instance.skin().unwrap().generation(), generation);
+
+        let (mesh_id, _) = scene.logical_meshes().next().unwrap();
+        assert_eq!(scene.logical_mesh(mesh_id).unwrap().id(), mesh_id);
+
+        let (material_id, _) = scene.materials().next().unwrap();
+        assert!(!scene.material(material_id).unwrap().double_sided());
+
+        let (image_id, _) = scene.images().next().unwrap();
+        assert_eq!(scene.image(image_id).unwrap().encoded().bytes(), [1, 2, 3]);
+
+        let (sampler_id, _) = scene.samplers().next().unwrap();
+        assert_eq!(
+            scene.sampler(sampler_id).unwrap().state(),
+            crate::image::SamplerState::CANONICAL_DEFAULT
+        );
+
+        let (texture_id, texture) = scene.textures().next().unwrap();
+        assert_eq!(scene.texture(texture_id).unwrap(), texture);
+        assert_eq!(texture.image(), image_id);
+        assert_eq!(texture.sampler(), sampler_id);
+
+        let (skin_id, skin) = scene.skins().next().unwrap();
+        assert_eq!(scene.skin(skin_id).unwrap().joints().next(), Some(root));
+        assert_eq!(skin.skeleton_root_hint(), Some(root));
+
+        let (clip_id, _) = scene.animation_clips().next().unwrap();
+        assert_eq!(scene.animation_clip(clip_id).unwrap().duration(), 0.0);
+
+        let (camera_id, _) = scene.cameras().next().unwrap();
+        assert!(matches!(
+            scene.camera(camera_id).unwrap().projection().kind(),
+            crate::entity::CameraProjectionKind::Perspective
+        ));
+
+        let (light_id, _) = scene.lights().next().unwrap();
+        assert_eq!(scene.light(light_id).unwrap().intensity(), 2.0);
+
+        assert_eq!(scene.nodes().len(), 2);
+        for count in [
+            scene.mesh_instances().len(),
+            scene.logical_meshes().len(),
+            scene.materials().len(),
+            scene.images().len(),
+            scene.samplers().len(),
+            scene.textures().len(),
+            scene.skins().len(),
+            scene.animation_clips().len(),
+            scene.cameras().len(),
+            scene.lights().len(),
+        ] {
+            assert_eq!(count, 1);
+        }
+    }
+
+    #[test]
+    fn logical_mesh_views_preserve_owned_ids_and_typed_position_storage() {
+        let scene = fully_populated_scene();
+        let (mesh_id, mesh) = scene.logical_meshes().next().unwrap();
+        let primitives = mesh.primitives().collect::<Vec<_>>();
+        assert_eq!(primitives.len(), 2);
+
+        for (primitive_id, primitive) in &primitives {
+            assert_eq!(primitive_id.logical_mesh(), mesh_id);
+            assert_eq!(primitive.id(), *primitive_id);
+            assert_eq!(
+                scene
+                    .logical_mesh(mesh_id)
+                    .unwrap()
+                    .primitive(*primitive_id)
+                    .unwrap()
+                    .id(),
+                *primitive_id
+            );
+        }
+
+        let first = scene
+            .logical_mesh(mesh_id)
+            .unwrap()
+            .primitive(primitives[0].0)
+            .unwrap();
+        let typed = first.positions().unwrap();
+        let dense = first.as_dense_positions().unwrap();
+        assert_eq!(typed.as_typed_slice().unwrap().as_ptr(), dense.as_ptr());
+        assert_eq!(typed.get(1), Some(Vec3::new(4.0, 5.0, 6.0)));
+
+        let (morph_id, _) = mesh.morph_targets().next().unwrap();
+        assert_eq!(morph_id.logical_mesh(), mesh_id);
+        assert!(mesh.morph_target(morph_id).is_ok());
+    }
+
+    #[test]
+    fn read_boundary_rejects_stale_out_of_range_and_foreign_owner_handles_first() {
+        let scene = fully_populated_scene();
+        let generation = scene.generation();
+        let foreign_generation = SceneGenerationId::allocate().unwrap();
+        let (mesh_id, mesh) = scene.logical_meshes().next().unwrap();
+
+        assert!(matches!(
+            scene.node(NodeId::new(foreign_generation, u32::MAX)),
+            Err(SceneLookupError::GenerationMismatch { .. })
+        ));
+        assert!(matches!(
+            scene.node(NodeId::new(generation, u32::MAX)),
+            Err(SceneLookupError::OutOfRange { .. })
+        ));
+
+        let stale_owner = LogicalMeshId::new(foreign_generation, u32::MAX);
+        assert!(matches!(
+            mesh.primitive(PrimitiveId::new(stale_owner, u32::MAX)),
+            Err(SceneLookupError::GenerationMismatch { .. })
+        ));
+        assert!(matches!(
+            mesh.morph_target(MorphTargetId::new(stale_owner, u32::MAX)),
+            Err(SceneLookupError::GenerationMismatch { .. })
+        ));
+
+        let foreign_owner = LogicalMeshId::new(generation, mesh_id.index() + 1);
+        assert!(matches!(
+            mesh.primitive(PrimitiveId::new(foreign_owner, u32::MAX)),
+            Err(SceneLookupError::OwnerMismatch { .. })
+        ));
+        assert!(matches!(
+            mesh.morph_target(MorphTargetId::new(foreign_owner, u32::MAX)),
+            Err(SceneLookupError::OwnerMismatch { .. })
+        ));
+        assert!(matches!(
+            mesh.primitive(PrimitiveId::new(mesh_id, u32::MAX)),
+            Err(SceneLookupError::OutOfRange { .. })
+        ));
+        assert!(matches!(
+            mesh.morph_target(MorphTargetId::new(mesh_id, u32::MAX)),
+            Err(SceneLookupError::OutOfRange { .. })
+        ));
     }
 }
