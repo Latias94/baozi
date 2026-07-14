@@ -18,7 +18,7 @@ use baozi_io::{
     AssetIo, AssetLength, AssetOpenError, AssetOpenErrorKind, AssetOpenStage, AssetPath,
     AssetReadError, AssetReadErrorKind, AssetReader, AuthorityDomain, OpenedAsset,
 };
-use baozi_operation::{CancellationToken, ProgressDecision};
+use baozi_operation::{CancellationToken, LedgerCause, ProgressDecision};
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt;
@@ -775,10 +775,15 @@ impl FormatImporter for TerminalLatchImporter {
     }
 
     fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
+        let prepared_mesh = scope.prepare_scene_value(Mesh::default())?;
+        let mut resize_storage = scope.metered_vec::<u8>(
+            ImportStorageClass::BackendDecode,
+            "terminal-latch-resize-storage",
+        );
+        resize_storage.try_push(0)?;
+        let resize_capacity = resize_storage.capacity();
         let mut builder = scope.scene_builder()?;
         let pending_work = scope.begin_work(ImportWorkClass::WorkUnits, 1)?;
-        let mut resize_reservation = scope.reserve_live(ImportStorageClass::BackendDecode, 1)?;
-        let adopt_reservation = scope.reserve_live(ImportStorageClass::BackendDecode, 1)?;
         let first_failure = match self.trigger {
             TerminalLatchTrigger::MissingRequiredDependency => {
                 match scope.required_dependency(&self.required_role, "missing.bin") {
@@ -817,11 +822,11 @@ impl FormatImporter for TerminalLatchImporter {
         record_late_success(pending_work.complete().is_ok());
         record_late_success(
             scope
-                .reserve_live(ImportStorageClass::BackendDecode, 1)
+                .metered_opaque_allowance(ImportStorageClass::BackendDecode, 1)
                 .is_ok(),
         );
-        record_late_success(scope.resize_live(&mut resize_reservation, 2).is_ok());
-        if resize_reservation.bytes() != 1 {
+        record_late_success(resize_storage.try_reserve(resize_capacity).is_ok());
+        if resize_storage.capacity() != resize_capacity {
             self.builder_mutations.fetch_add(1, Ordering::AcqRel);
         }
         record_late_success(
@@ -859,8 +864,7 @@ impl FormatImporter for TerminalLatchImporter {
         );
 
         let mesh_count = builder.mesh_count();
-        record_late_success(builder.adopt_reservation(adopt_reservation).is_ok());
-        record_late_success(builder.add_mesh(Mesh::default()).is_ok());
+        record_late_success(builder.add_prepared_mesh(prepared_mesh).is_ok());
         if builder.mesh_count() != mesh_count {
             self.builder_mutations.fetch_add(1, Ordering::AcqRel);
         }
@@ -1708,7 +1712,7 @@ fn optional_snapshot_exposure_limit_is_cached_after_one_physical_read() {
     let mut limits = ResourceLimits::default();
     // Admit the complete 64 KiB read, then reject the final shared-snapshot
     // exposure reservation. The consumed-byte assertion below guards this seam.
-    limits.max_live_bytes = 66_064;
+    limits.max_live_bytes = 65_976;
     let request = lossy_request_for_with_limits(importer, limits);
     let dependency_bytes = Arc::<[u8]>::from(vec![0x5a; 64 * 1024]);
     let io = SequencedIo::new(source.clone(), [Arc::from(&b"primary"[..])])
@@ -2103,7 +2107,15 @@ fn structured_diagnostic_text_profile() -> TextProfile {
     .expect("static structured-diagnostic text profile must be valid")
 }
 
-struct StructuredDiagnosticImporter;
+struct StructuredDiagnosticImporter {
+    diagnostic_count: usize,
+}
+
+impl StructuredDiagnosticImporter {
+    const fn new(diagnostic_count: usize) -> Self {
+        Self { diagnostic_count }
+    }
+}
 
 impl FormatImporter for StructuredDiagnosticImporter {
     fn descriptor(&self) -> FormatDescriptor {
@@ -2129,27 +2141,55 @@ impl FormatImporter for StructuredDiagnosticImporter {
     }
 
     fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
-        scope.emit_diagnostic_with(
-            baozi_import::DiagnosticSeverity::Warning,
-            baozi_import::DiagnosticCode::new("test.structured_warning").unwrap(),
-            ImportProgressPhase::Decode,
-            scope.diagnostic_source(),
-            Some(baozi_import::DiagnosticByteRange::new(2, 4).unwrap()),
-            Some("/records/0"),
-            |details| {
-                details.unsigned("record", 0);
-                details.string("token", "bad\nvalue");
-            },
-            format_args!("bad\nrecord"),
-        )?;
+        for record in 0..self.diagnostic_count {
+            scope.emit_diagnostic_with(
+                baozi_import::DiagnosticSeverity::Warning,
+                baozi_import::DiagnosticCode::new("test.structured_warning").unwrap(),
+                ImportProgressPhase::Decode,
+                scope.diagnostic_source(),
+                Some(baozi_import::DiagnosticByteRange::new(2, 4).unwrap()),
+                Some("/records/0"),
+                |details| {
+                    details.unsigned(
+                        "record",
+                        u64::try_from(record).expect("bounded diagnostic count"),
+                    );
+                    details.string("token", "bad\nvalue");
+                },
+                format_args!("bad\nrecord"),
+            )?;
+        }
         scope.scene_builder()?.finish_draft()
     }
+}
+
+#[allow(
+    clippy::result_large_err,
+    reason = "the test helper returns the public terminal failure with complete bounded evidence"
+)]
+fn import_structured_diagnostics(
+    diagnostic_count: usize,
+    limits: ResourceLimits,
+) -> Result<ImportReport, ImportFailure> {
+    let source = AssetPath::new("asset.structured-diagnostic").unwrap();
+    let request =
+        request_for_with_limits(StructuredDiagnosticImporter::new(diagnostic_count), limits);
+    let io = SequencedIo::new(source.clone(), [Arc::from(&b"a\nprimary"[..])]);
+    import_asset(&request, &io, source, ImportOperationControl::default())
+}
+
+fn line_index_peak(report: &ImportReport) -> u64 {
+    report
+        .ledger()
+        .dimension(ImportDimension::LineIndexBytes)
+        .expect("line-index evidence")
+        .peak_live_bytes()
 }
 
 #[test]
 fn structured_diagnostic_retains_bounded_location_and_details() {
     let source = AssetPath::new("asset.structured-diagnostic").unwrap();
-    let request = request_for(StructuredDiagnosticImporter);
+    let request = request_for(StructuredDiagnosticImporter::new(1));
     let io = SequencedIo::new(source.clone(), [Arc::from(&b"a\nprimary"[..])]);
 
     let report = import_asset(&request, &io, source, ImportOperationControl::default()).unwrap();
@@ -2172,9 +2212,50 @@ fn structured_diagnostic_retains_bounded_location_and_details() {
 }
 
 #[test]
+fn repeated_diagnostics_for_one_source_reuse_the_accounted_line_index() {
+    let single = import_structured_diagnostics(1, ResourceLimits::default())
+        .expect("single diagnostic import");
+    let repeated = import_structured_diagnostics(2, ResourceLimits::default())
+        .expect("repeated diagnostic import");
+
+    assert_eq!(single.diagnostics().len(), 1);
+    assert_eq!(repeated.diagnostics().len(), 2);
+    assert_eq!(line_index_peak(&repeated), line_index_peak(&single));
+}
+
+#[test]
+fn line_index_storage_honors_the_exact_dimension_budget() {
+    let baseline = import_structured_diagnostics(1, ResourceLimits::default())
+        .expect("baseline line-index import");
+    let required = line_index_peak(&baseline);
+    assert!(required > 0);
+
+    let mut exact_limits = ResourceLimits::default();
+    exact_limits.max_line_index_bytes = required;
+    import_structured_diagnostics(1, exact_limits)
+        .expect("the exact observed line-index budget must succeed");
+
+    let mut insufficient_limits = ResourceLimits::default();
+    insufficient_limits.max_line_index_bytes = required - 1;
+    let failure = import_structured_diagnostics(1, insufficient_limits)
+        .expect_err("one byte below the line-index requirement must fail");
+    assert!(matches!(
+        failure.cause(),
+        ImportCause::Scope(abort)
+            if matches!(
+                abort.cause(),
+                ScopeAbortCause::Ledger(LedgerCause::LimitExceeded {
+                    dimension: ImportDimension::LineIndexBytes,
+                    ..
+                })
+            )
+    ));
+}
+
+#[test]
 fn publication_peak_includes_output_and_retained_diagnostic_storage() {
     let source = AssetPath::new("asset.diagnostic-peak").unwrap();
-    let request = request_for(StructuredDiagnosticImporter);
+    let request = request_for(StructuredDiagnosticImporter::new(1));
     let io = SequencedIo::new(source.clone(), [Arc::from(&b"a\nprimary"[..])]);
 
     let report = import_asset(&request, &io, source, ImportOperationControl::default()).unwrap();

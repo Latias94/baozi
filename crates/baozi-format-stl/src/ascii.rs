@@ -1,12 +1,13 @@
-use crate::allocation::{CHECKPOINT_CHUNK_BYTES, DecodedTextBuffer, LiveStorage};
 use crate::error::{StlFailure, StlFailureCode};
 use crate::parser::{ParsedMesh, ParsedStl};
 use baozi_core::Vec3;
 use baozi_import::{
     DetectionResult, DetectionScope, DiagnosticByteRange, DiagnosticCode, DiagnosticSeverity,
-    ImportProgressPhase, ImportStorageClass, ImportWorkClass, ParseFailure, ParseResult,
-    ParseScope,
+    ImportProgressPhase, ImportStorageClass, ImportWorkClass, MeteredDecodedText, MeteredString,
+    MeteredVec, ParseFailure, ParseResult, ParseScope,
 };
+
+const CHECKPOINT_CHUNK_BYTES: usize = 4 * 1024;
 
 pub(crate) fn parse<'scope>(
     scope: &'scope ParseScope<'_>,
@@ -48,8 +49,8 @@ fn account_detection_work<T>(
 fn validate_text_profile_scoped<'scope>(
     scope: &'scope ParseScope<'_>,
     bytes: &[u8],
-) -> ParseResult<DecodedTextBuffer<'scope>> {
-    let mut decoded = DecodedTextBuffer::try_new(scope, bytes.len(), "stl-decoded-text")?;
+) -> ParseResult<MeteredDecodedText<'scope>> {
+    let mut decoded = scope.metered_decoded_text(bytes.len(), "stl-decoded-text")?;
     let mut start = 0usize;
     while start < bytes.len() {
         scope.poll()?;
@@ -75,11 +76,11 @@ fn validate_text_profile_scoped<'scope>(
                 return Err(scope.format_failure(StlFailure::invalid_utf8_at(source, byte_offset)));
             }
         };
-        decoded.append(scope, chunk, "stl-decoded-text")?;
+        decoded.try_push_str(chunk)?;
         start = end;
     }
 
-    decoded.finish(scope, "stl-decoded-text")
+    decoded.finish_exact()
 }
 
 fn validate_text_profile_range(bytes: &[u8], start: usize, end: usize) -> Result<(), StlFailure> {
@@ -151,8 +152,7 @@ impl<'scope, 'session> AsciiParser<'scope, 'session> {
             scope,
             parsed: ParsedStl {
                 material_color: None,
-                meshes: Vec::new(),
-                reservations: LiveStorage::new(ImportStorageClass::FormatNormalization),
+                meshes: scope.metered_vec(ImportStorageClass::FormatNormalization, "stl-meshes"),
             },
             state: State::Start,
             current: None,
@@ -162,7 +162,7 @@ impl<'scope, 'session> AsciiParser<'scope, 'session> {
     fn parse(mut self, text: &str) -> ParseResult<ParsedStl<'scope>> {
         let mut byte_offset = 0usize;
         let mut line_number = 0u32;
-        let mut token_buffer = TokenBuffer::new();
+        let mut token_buffer = TokenBuffer::new(self.scope);
         while byte_offset < text.len() {
             let record = self.scope.begin_work(ImportWorkClass::Records, 1)?;
             let line_record = next_line(self.scope, text, byte_offset)?;
@@ -333,9 +333,8 @@ impl<'scope, 'session> AsciiParser<'scope, 'session> {
         line_byte_offset: usize,
     ) -> ParseResult<()> {
         let solid = self.scope.begin_work(ImportWorkClass::Solids, 1)?;
-        let mut reservations = LiveStorage::new(ImportStorageClass::SceneConstruction);
         let name = trailing_text_after_first_token(line, tokens)
-            .map(|name| owned_string(self.scope, &mut reservations, name, "stl-solid-name"))
+            .map(|name| owned_string(self.scope, name, "stl-solid-name"))
             .transpose()?;
         let first = required_token(self.scope, tokens, 0)?;
         let token_offset = usize::try_from(first.column)
@@ -347,7 +346,7 @@ impl<'scope, 'session> AsciiParser<'scope, 'session> {
             .checked_add(first.text.len())
             .ok_or_else(|| self.scope.allocation_failure("stl-solid-byte-range"))?;
         let start = diagnostic_range(self.scope, token_offset, token_end)?;
-        self.current = Some(SolidBuilder::new(name, start, reservations));
+        self.current = Some(SolidBuilder::new(self.scope, name, start));
         self.state = State::InSolid;
         solid.complete()?;
         Ok(())
@@ -372,19 +371,12 @@ impl<'scope, 'session> AsciiParser<'scope, 'session> {
             )?;
         } else {
             let mesh = self.scope.begin_work(ImportWorkClass::Meshes, 1)?;
-            self.parsed.reservations.reserve_vec(
-                self.scope,
-                &mut self.parsed.meshes,
-                1,
-                "stl-meshes",
-            )?;
-            self.parsed.meshes.push(ParsedMesh {
+            self.parsed.meshes.try_push(ParsedMesh {
                 name: current.name,
                 positions: current.positions,
                 normals: current.normals,
                 colors: None,
-                reservations: current.reservations,
-            });
+            })?;
             mesh.complete()?;
         }
 
@@ -403,20 +395,10 @@ impl<'scope, 'session> AsciiParser<'scope, 'session> {
                 "outside-solid",
             )));
         };
-        current.reservations.reserve_vec(
-            self.scope,
-            &mut current.positions,
-            3,
-            "stl-ascii-positions",
-        )?;
-        current.reservations.reserve_vec(
-            self.scope,
-            &mut current.normals,
-            3,
-            "stl-ascii-normals",
-        )?;
-        current.positions.extend_from_slice(vertices);
-        current.normals.extend([normal, normal, normal]);
+        current.positions.try_extend_from_slice(vertices)?;
+        current
+            .normals
+            .try_extend_from_slice(&[normal, normal, normal])?;
         current.face_count = current
             .face_count
             .checked_add(1)
@@ -523,27 +505,26 @@ fn next_line<'text>(
 }
 
 struct SolidBuilder<'scope> {
-    name: Option<String>,
-    positions: Vec<Vec3>,
-    normals: Vec<Vec3>,
+    name: Option<MeteredString<'scope>>,
+    positions: MeteredVec<'scope, Vec3>,
+    normals: MeteredVec<'scope, Vec3>,
     face_count: usize,
     start: DiagnosticByteRange,
-    reservations: LiveStorage<'scope>,
 }
 
 impl<'scope> SolidBuilder<'scope> {
     fn new(
-        name: Option<String>,
+        scope: &'scope ParseScope<'_>,
+        name: Option<MeteredString<'scope>>,
         start: DiagnosticByteRange,
-        reservations: LiveStorage<'scope>,
     ) -> Self {
         Self {
             name,
-            positions: Vec::new(),
-            normals: Vec::new(),
+            positions: scope
+                .metered_vec(ImportStorageClass::SceneConstruction, "stl-ascii-positions"),
+            normals: scope.metered_vec(ImportStorageClass::SceneConstruction, "stl-ascii-normals"),
             face_count: 0,
             start,
-            reservations,
         }
     }
 }
@@ -579,15 +560,13 @@ struct TokenSpan {
 }
 
 struct TokenBuffer<'scope> {
-    values: Vec<TokenSpan>,
-    reservations: LiveStorage<'scope>,
+    values: MeteredVec<'scope, TokenSpan>,
 }
 
 impl<'scope> TokenBuffer<'scope> {
-    const fn new() -> Self {
+    fn new(scope: &'scope ParseScope<'_>) -> Self {
         Self {
-            values: Vec::new(),
-            reservations: LiveStorage::new(ImportStorageClass::FormatNormalization),
+            values: scope.metered_vec(ImportStorageClass::FormatNormalization, "stl-tokens"),
         }
     }
 }
@@ -625,7 +604,7 @@ fn tokenize<'line, 'buffer, 'scope>(
     line: &'line str,
     tokens: &'buffer mut TokenBuffer<'scope>,
 ) -> ParseResult<TokenLine<'line, 'buffer>> {
-    tokens.values.clear();
+    tokens.values.truncate(0);
     let mut start = None;
     let mut next_poll = 4096usize;
 
@@ -647,7 +626,7 @@ fn tokenize<'line, 'buffer, 'scope>(
     }
     Ok(TokenLine {
         line,
-        spans: &tokens.values,
+        spans: tokens.values.as_slice(),
     })
 }
 
@@ -664,14 +643,11 @@ fn push_token<'scope>(
         ImportWorkClass::TokenBytes,
         usize_amount(scope, text.len(), "stl-token-bytes")?,
     )?;
-    tokens
-        .reservations
-        .reserve_vec(scope, &mut tokens.values, 1, "stl-tokens")?;
     let column = u32::try_from(start)
         .ok()
         .and_then(|value| value.checked_add(1))
         .ok_or_else(|| scope.allocation_failure("stl-token-column"))?;
-    tokens.values.push(TokenSpan { start, end, column });
+    tokens.values.try_push(TokenSpan { start, end, column })?;
     token_bytes.complete()?;
     token_count.complete()
 }
@@ -768,15 +744,15 @@ fn parse_f32(scope: &ParseScope<'_>, token: Token<'_>, line_number: u32) -> Pars
 
 fn owned_string<'scope>(
     scope: &'scope ParseScope<'_>,
-    reservations: &mut LiveStorage<'scope>,
     value: &str,
     resource: &'static str,
-) -> ParseResult<String> {
+) -> ParseResult<MeteredString<'scope>> {
     let bytes = scope.begin_work(
         ImportWorkClass::StringBytes,
         usize_amount(scope, value.len(), resource)?,
     )?;
-    let owned = reservations.copy_string(scope, value, resource)?;
+    let mut owned = scope.metered_string(ImportStorageClass::SceneConstruction, resource);
+    owned.try_push_str(value)?;
     bytes.complete()?;
     Ok(owned)
 }

@@ -1,6 +1,7 @@
 use crate::diagnostic::DiagnosticSource;
 use crate::error::{CauseOwner, ScopeAbortCause};
 use crate::ledger::ImportReservation;
+use crate::metered_storage::AccountedVec;
 use baozi_io::{AssetIo, AssetPath, AuthorityDomain};
 use baozi_operation::{CapacityPlan, CapacityPlanError};
 use std::collections::hash_map::RandomState;
@@ -8,6 +9,7 @@ use std::error::Error;
 use std::fmt;
 use std::hash::{BuildHasher, Hash};
 use std::marker::PhantomData;
+use std::mem::size_of;
 use std::sync::Arc;
 
 pub const MAX_DEPENDENCY_ROLE_ID_BYTES: usize = 64;
@@ -261,7 +263,7 @@ pub enum DependencyCacheDisposition {
 /// Immutable bytes borrowed from one import session's dependency cache.
 pub struct DependencySnapshot<'scope> {
     identity: DependencyIdentity,
-    bytes: Arc<Vec<u8>>,
+    bytes: Arc<SharedDependencySnapshot>,
     cache_disposition: DependencyCacheDisposition,
     _identity_path_reservation: ImportReservation,
     scope: PhantomData<&'scope ()>,
@@ -270,7 +272,7 @@ pub struct DependencySnapshot<'scope> {
 impl<'scope> DependencySnapshot<'scope> {
     pub(crate) fn new(
         identity: DependencyIdentity,
-        bytes: Arc<Vec<u8>>,
+        bytes: Arc<SharedDependencySnapshot>,
         cache_disposition: DependencyCacheDisposition,
         identity_path_reservation: ImportReservation,
     ) -> Self {
@@ -288,7 +290,7 @@ impl<'scope> DependencySnapshot<'scope> {
     }
 
     pub fn bytes(&self) -> &[u8] {
-        &self.bytes
+        self.bytes.bytes()
     }
 
     pub const fn cache_disposition(&self) -> DependencyCacheDisposition {
@@ -304,6 +306,30 @@ impl<'scope> DependencySnapshot<'scope> {
     }
 }
 
+pub(crate) struct SharedDependencySnapshot {
+    bytes: AccountedVec<u8>,
+    _sharing_reservation: ImportReservation,
+}
+
+pub(crate) fn shared_dependency_snapshot_allocation_bytes() -> Option<usize> {
+    const ARC_CONTROL_WORDS: usize = 4;
+    size_of::<SharedDependencySnapshot>()
+        .checked_add(size_of::<usize>().checked_mul(ARC_CONTROL_WORDS)?)
+}
+
+impl SharedDependencySnapshot {
+    pub(crate) fn new(bytes: AccountedVec<u8>, sharing_reservation: ImportReservation) -> Self {
+        Self {
+            bytes,
+            _sharing_reservation: sharing_reservation,
+        }
+    }
+
+    pub(crate) fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+}
+
 #[derive(Debug)]
 pub struct OptionalDependencyEvidence {
     identity: Option<DependencyIdentity>,
@@ -312,7 +338,6 @@ pub struct OptionalDependencyEvidence {
     cache_disposition: DependencyCacheDisposition,
     _identity_path_reservation: Option<ImportReservation>,
     _normalized_path_reservation: Option<ImportReservation>,
-    _container_capacity_reservation: Option<ImportReservation>,
 }
 
 impl OptionalDependencyEvidence {
@@ -331,36 +356,33 @@ impl OptionalDependencyEvidence {
             cache_disposition,
             _identity_path_reservation: identity_path_reservation,
             _normalized_path_reservation: Some(normalized_path_reservation),
-            _container_capacity_reservation: None,
         }
-    }
-
-    pub(crate) fn retain_container_capacity(&mut self, reservation: ImportReservation) {
-        self._container_capacity_reservation = Some(reservation);
     }
 
     pub(crate) fn reservation_count(&self) -> usize {
         usize::from(self._identity_path_reservation.is_some())
             + usize::from(self._normalized_path_reservation.is_some())
-            + usize::from(self._container_capacity_reservation.is_some())
     }
 
-    pub(crate) fn drain_reservations(&mut self, target: &mut Vec<ImportReservation>) {
+    pub(crate) fn move_reservations_into(
+        &mut self,
+        target: &mut crate::metered_storage::AccountedReservationVec,
+    ) {
+        assert!(
+            target.has_slots(self.reservation_count()),
+            "optional-dependency publication slots must be admitted before moving tokens"
+        );
         if let Some(reservation) = self._identity_path_reservation.take() {
-            target.push(reservation);
+            target.push_reserved_infallible(reservation);
         }
         if let Some(reservation) = self._normalized_path_reservation.take() {
-            target.push(reservation);
-        }
-        if let Some(reservation) = self._container_capacity_reservation.take() {
-            target.push(reservation);
+            target.push_reserved_infallible(reservation);
         }
     }
 
     pub(crate) fn release_reservations(&mut self) {
         drop(self._identity_path_reservation.take());
         drop(self._normalized_path_reservation.take());
-        drop(self._container_capacity_reservation.take());
     }
 
     pub fn identity(&self) -> Option<&DependencyIdentity> {
@@ -642,9 +664,7 @@ impl DependencyCache {
     pub(crate) fn store_available(
         &mut self,
         identity: &DependencyIdentity,
-        bytes: Arc<Vec<u8>>,
-        reservations: Vec<ImportReservation>,
-        sharing_reservation: ImportReservation,
+        bytes: Arc<SharedDependencySnapshot>,
     ) -> bool {
         let Some(entry) = self.entry_mut(identity) else {
             return false;
@@ -652,11 +672,7 @@ impl DependencyCache {
         let DependencyCacheEntry::Resolving = entry else {
             return false;
         };
-        *entry = DependencyCacheEntry::Available(CachedDependencySnapshot {
-            bytes,
-            _reservations: reservations,
-            _sharing_reservation: sharing_reservation,
-        });
+        *entry = DependencyCacheEntry::Available(CachedDependencySnapshot { bytes });
         true
     }
 
@@ -1026,9 +1042,7 @@ pub(crate) enum DependencyCacheEntry {
 }
 
 pub(crate) struct CachedDependencySnapshot {
-    pub(crate) bytes: Arc<Vec<u8>>,
-    _reservations: Vec<ImportReservation>,
-    _sharing_reservation: ImportReservation,
+    pub(crate) bytes: Arc<SharedDependencySnapshot>,
 }
 
 #[cfg(test)]
@@ -1071,6 +1085,18 @@ mod tests {
                 "accepted {invalid:?}"
             );
         }
+    }
+
+    #[test]
+    fn shared_snapshot_allocation_counts_the_complete_arc_payload() {
+        let expected = size_of::<SharedDependencySnapshot>()
+            .checked_add(size_of::<usize>() * 4)
+            .expect("shared snapshot fixture size");
+        let actual = shared_dependency_snapshot_allocation_bytes()
+            .expect("shared snapshot allocation must fit usize");
+
+        assert_eq!(actual, expected);
+        assert!(actual > size_of::<Vec<u8>>() + size_of::<usize>() * 4);
     }
 
     #[test]

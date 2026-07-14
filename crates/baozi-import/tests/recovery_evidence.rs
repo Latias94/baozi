@@ -4,15 +4,18 @@ use baozi_import::{
     DetectionScope, DiagnosticByteRange, DiagnosticCode, FormatCapability, FormatDescriptor,
     FormatEncoding, FormatFailureDetailSink, FormatFailureSource, FormatImporter, ImportCause,
     ImportConfigOverlay, ImportDimension, ImportFailure, ImportLossDisposition, ImportLossKind,
-    ImportOperationControl, ImportReport, ImportRequest, ImportRequestLayer, ImportResult,
-    LossPolicy, OptionCompileLimits, ParseResult, ParseScope, PreparedImportRequest,
-    ReadConfidence, ReadHint, RegistryBuildLimits, RegistryBuilder, ResourceLimits,
-    ResourceLimitsOverlay, ScopeAbortCause, TextBomPolicy, TextControlPolicy, TextDecodingMode,
-    TextHardCaps, TextLexicalMode, TextNewline, TextProfile, TextSourceEncoding, import_bytes,
+    ImportOperationControl, ImportProgressPhase, ImportProgressUnit, ImportReport, ImportRequest,
+    ImportRequestLayer, ImportResult, LossPolicy, OptionCompileLimits, ParseResult, ParseScope,
+    PreparedImportRequest, ReadConfidence, ReadHint, RegistryBuildLimits, RegistryBuilder,
+    ResourceLimits, ResourceLimitsOverlay, ScopeAbortCause, TextBomPolicy, TextControlPolicy,
+    TextDecodingMode, TextHardCaps, TextLexicalMode, TextNewline, TextProfile, TextSourceEncoding,
+    import_bytes,
 };
 use baozi_io::AssetPath;
-use baozi_operation::CancellationToken;
+use baozi_operation::{CancellationToken, ProgressDecision};
 use std::fmt;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 const SOURCE: &str = "scene.recovery";
 const SOURCE_BYTES: &[u8] = b"abcdef";
@@ -246,6 +249,50 @@ fn authorized_recovery_is_published_with_ordered_diagnostic_and_ledger_evidence(
     assert_eq!(evidence_count.attempted(), 1);
     assert_eq!(evidence_count.consumed(), 1);
     assert_eq!(report.ledger().current_live_bytes(), 0);
+}
+
+#[test]
+fn final_observer_cancellation_rolls_back_output_and_retains_recovery_evidence() {
+    let request = request_for(
+        RecoveryExit::Success,
+        None,
+        ConformancePolicy::AllowDeclaredRecovery,
+        recovery_loss_policy(),
+        ResourceLimits::default(),
+    );
+    let final_events = Arc::new(AtomicUsize::new(0));
+    let observed_final_events = Arc::clone(&final_events);
+    let control = ImportOperationControl::default().with_progress_observer(
+        move |event: baozi_operation::ProgressEvent<ImportProgressPhase, ImportProgressUnit>| {
+            if event.phase() == ImportProgressPhase::Finalize {
+                observed_final_events.fetch_add(1, Ordering::AcqRel);
+                ProgressDecision::Cancel
+            } else {
+                ProgressDecision::Continue
+            }
+        },
+    );
+
+    let failure = operation_result(import_bytes(
+        &request,
+        AssetPath::new(SOURCE).unwrap(),
+        SOURCE_BYTES,
+        control,
+    ))
+    .expect_err("final observer cancellation must roll back publication");
+
+    assert_eq!(final_events.load(Ordering::Acquire), 1);
+    assert_recovery_evidence(failure.loss_evidence(), ImportLossDisposition::Applied);
+    assert_eq!(failure.diagnostics().len(), 1);
+    assert_eq!(failure.diagnostics()[0].code().as_str(), RECOVERY_CODE);
+    let output = failure
+        .ledger()
+        .dimension(ImportDimension::CanonicalOutputBytes)
+        .unwrap();
+    assert_eq!(output.committed(), 0);
+    assert_eq!(output.pending_publication(), 0);
+    assert_eq!(failure.ledger().current_live_bytes(), 0);
+    assert!(failure.finalization_cause().is_none());
 }
 
 #[test]

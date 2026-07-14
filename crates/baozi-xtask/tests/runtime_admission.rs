@@ -194,6 +194,29 @@ fn runtime_admission_rejects_global_semaphore_and_worker_pool_state() {
 }
 
 #[test]
+fn runtime_admission_includes_unlinked_format_ownership_sources() {
+    let workspace = TestWorkspace::new("unlinked-format-ownership-source");
+    workspace.write_package("baozi-format-stl", "", "");
+    workspace.write_source(
+        "baozi-format-stl",
+        "src/generated/orphan.rs",
+        "struct HeldReservation;",
+    );
+
+    let report = baozi_xtask::runtime_admission::check_repository(workspace.path());
+
+    assert!(
+        report.violations.iter().any(|violation| {
+            violation.contains("first-party format ownership")
+                && violation.contains("forbidden protocol \"HeldReservation\"")
+                && violation.contains("orphan.rs")
+        }),
+        "{:#?}",
+        report.violations
+    );
+}
+
+#[test]
 fn runtime_admission_cli_checks_the_repository() {
     let repository_root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()

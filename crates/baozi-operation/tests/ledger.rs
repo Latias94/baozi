@@ -1,10 +1,10 @@
 use baozi_operation::{
-    CancellationOrigin, CancellationSignal, CancellationToken, Commitment, ControlCause,
-    CounterClass, DimensionPolicy, FinalProgress, LedgerCause, LedgerEvidenceError,
+    CancellationOrigin, CancellationSignal, CancellationToken, CapacityPlan, Commitment,
+    ControlCause, CounterClass, DimensionPolicy, FinalProgress, LedgerCause, LedgerEvidenceError,
     LedgerEvidencePurpose, LedgerLimits, LedgerLimitsError, LedgerSnapshot, LiveReservation,
     OperationControl, OperationCoordinator, OperationOwner, OperationPoll, ProgressDecision,
     ProgressDeliveryLimits, ProgressEvent, ProgressObserver, ProgressPhase, ProgressUnit,
-    PublicationCause,
+    PublicationCause, PublicationReservationBatch, PublicationReservationBatchErrorKind,
 };
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -64,6 +64,58 @@ enum Dimension {
 
 type Coordinator = OperationCoordinator<TestOwner, Phase, ObserverPhase, Unit, Dimension>;
 type Reservation = LiveReservation<TestOwner, Phase, Dimension>;
+type PublicationBatch = PublicationReservationBatch<TestOwner, Phase, Dimension>;
+
+fn publication_capacity_bytes() -> u64 {
+    CapacityPlan::for_type::<Reservation>(0, 0, 1)
+        .and_then(CapacityPlan::envelope_delta_bytes)
+        .expect("one publication reservation must have a representable capacity envelope")
+}
+
+fn publication_limits(payload_live_bytes: u64) -> LedgerLimits<Dimension> {
+    limits(
+        payload_live_bytes
+            .checked_add(publication_capacity_bytes())
+            .expect("publication test live limit must be representable"),
+    )
+}
+
+fn publication_coordinator(payload_live_bytes: u64) -> Coordinator {
+    Coordinator::new(
+        OperationControl::default(),
+        publication_limits(payload_live_bytes),
+    )
+}
+
+fn publication_batch(
+    coordinator: &mut Coordinator,
+    reservations: [Reservation; 1],
+) -> PublicationBatch {
+    let plan = CapacityPlan::for_type::<Reservation>(0, 0, reservations.len())
+        .expect("publication batch capacity plan");
+    let envelope = plan
+        .envelope_delta_bytes()
+        .expect("publication batch capacity envelope");
+    let mut capacity_reservation = coordinator
+        .checkpoint()
+        .reserve(Phase::Snapshot, Dimension::AssetBytes, envelope)
+        .expect("publication batch capacity reservation");
+    let mut values = Vec::new();
+    plan.verify_preflight(values.len(), values.capacity())
+        .expect("fresh publication batch capacity plan");
+    values
+        .try_reserve_exact(plan.allocator_additional())
+        .expect("publication batch capacity allocation");
+    let actual = plan
+        .finish(values.len(), values.capacity())
+        .expect("qualified publication batch capacity");
+    coordinator
+        .resize_reservation(&mut capacity_reservation, actual)
+        .expect("publication batch actual capacity reservation");
+    values.extend(reservations);
+    PublicationReservationBatch::try_new(values, Some(capacity_reservation))
+        .expect("publication batch allocation is covered")
+}
 
 trait SnapshotTestExt {
     fn ledger_snapshot(&self) -> LedgerSnapshot<Phase, Dimension>;
@@ -99,7 +151,14 @@ fn limits(operation_live_bytes: u64) -> LedgerLimits<Dimension> {
         [
             (
                 Dimension::AssetBytes,
-                DimensionPolicy::reservable_bytes(10, 8, 0, 20),
+                DimensionPolicy::reservable_bytes(
+                    10,
+                    8,
+                    0,
+                    publication_capacity_bytes()
+                        .checked_add(20)
+                        .expect("test asset live limit must be representable"),
+                ),
             ),
             (
                 Dimension::OutputBytes,
@@ -470,13 +529,13 @@ fn reservation_split_conserves_zero_exact_and_excess_bytes() {
 #[test]
 fn reservation_transition_atomically_changes_size_dimension_and_phase() {
     let mut coordinator = coordinator(32);
-    let reservation = coordinator
+    let mut reservation = coordinator
         .checkpoint()
         .reserve(Phase::Snapshot, Dimension::AssetBytes, 8)
         .expect("source reservation");
 
-    let reservation = coordinator
-        .transition_reservation(reservation, Phase::Snapshot, Dimension::AssetBytes, 12)
+    coordinator
+        .transition_reservation(&mut reservation, Phase::Snapshot, Dimension::AssetBytes, 12)
         .expect("same-class growth");
     let grown = coordinator.ledger_snapshot();
     assert_eq!(grown.current_live_bytes(), 12);
@@ -489,9 +548,9 @@ fn reservation_transition_atomically_changes_size_dimension_and_phase() {
         12
     );
 
-    let reservation = coordinator
+    coordinator
         .checkpoint()
-        .transition_reservation(reservation, Phase::Snapshot, Dimension::AssetBytes, 5)
+        .transition_reservation(&mut reservation, Phase::Snapshot, Dimension::AssetBytes, 5)
         .expect("same-class shrink");
     let shrunk = coordinator.ledger_snapshot();
     assert_eq!(shrunk.current_live_bytes(), 5);
@@ -504,8 +563,8 @@ fn reservation_transition_atomically_changes_size_dimension_and_phase() {
         5
     );
 
-    let reservation = coordinator
-        .transition_reservation(reservation, Phase::Output, Dimension::OutputBytes, 10)
+    coordinator
+        .transition_reservation(&mut reservation, Phase::Output, Dimension::OutputBytes, 10)
         .expect("cross-class transition");
     let transitioned = coordinator.ledger_snapshot();
     assert_eq!(transitioned.current_live_bytes(), 10);
@@ -574,15 +633,15 @@ fn reservation_transition_atomically_changes_size_dimension_and_phase() {
 }
 
 #[test]
-fn failed_reservation_transition_releases_source_without_target_pollution() {
+fn failed_reservation_transition_preserves_source_without_target_pollution() {
     let mut dimension_limited = coordinator(32);
-    let source = dimension_limited
+    let mut source = dimension_limited
         .checkpoint()
         .reserve(Phase::Snapshot, Dimension::AssetBytes, 8)
         .expect("dimension-limit source");
     assert_eq!(
         dimension_limited
-            .transition_reservation(source, Phase::Output, Dimension::OutputBytes, 17)
+            .transition_reservation(&mut source, Phase::Output, Dimension::OutputBytes, 17)
             .expect_err("target dimension limit must fail"),
         LedgerCause::LimitExceeded {
             class: CounterClass::Live,
@@ -592,7 +651,8 @@ fn failed_reservation_transition_releases_source_without_target_pollution() {
         }
     );
     let dimension_failure = dimension_limited.ledger_snapshot();
-    assert_eq!(dimension_failure.current_live_bytes(), 0);
+    assert_eq!(source.bytes(), 8);
+    assert_eq!(dimension_failure.current_live_bytes(), 8);
     assert_eq!(dimension_failure.peak_live_bytes(), 8);
     assert_eq!(
         dimension_failure
@@ -602,15 +662,21 @@ fn failed_reservation_transition_releases_source_without_target_pollution() {
         0
     );
     assert!(dimension_failure.phase(Phase::Output).is_none());
+    dimension_limited
+        .transition_reservation(&mut source, Phase::Output, Dimension::OutputBytes, 16)
+        .expect("preserved source can be retried");
+    assert_eq!(source.bytes(), 16);
+    drop(source);
+    assert_eq!(dimension_limited.ledger_snapshot().current_live_bytes(), 0);
 
     let mut operation_limited = coordinator(10);
-    let source = operation_limited
+    let mut source = operation_limited
         .checkpoint()
         .reserve(Phase::Snapshot, Dimension::AssetBytes, 8)
         .expect("operation-limit source");
     assert_eq!(
         operation_limited
-            .transition_reservation(source, Phase::Output, Dimension::OutputBytes, 11)
+            .transition_reservation(&mut source, Phase::Output, Dimension::OutputBytes, 11)
             .expect_err("operation limit must fail"),
         LedgerCause::LimitExceeded {
             class: CounterClass::Live,
@@ -620,7 +686,8 @@ fn failed_reservation_transition_releases_source_without_target_pollution() {
         }
     );
     let operation_failure = operation_limited.ledger_snapshot();
-    assert_eq!(operation_failure.current_live_bytes(), 0);
+    assert_eq!(source.bytes(), 8);
+    assert_eq!(operation_failure.current_live_bytes(), 8);
     assert_eq!(operation_failure.peak_live_bytes(), 8);
     assert_eq!(
         operation_failure
@@ -630,36 +697,292 @@ fn failed_reservation_transition_releases_source_without_target_pollution() {
         0
     );
     assert!(operation_failure.phase(Phase::Output).is_none());
+    drop(source);
+    assert_eq!(operation_limited.ledger_snapshot().current_live_bytes(), 0);
+}
+
+#[test]
+fn failed_batch_transition_preserves_every_source_token_atomically() {
+    let mut coordinator = coordinator(32);
+    let first = coordinator
+        .checkpoint()
+        .reserve(Phase::Snapshot, Dimension::AssetBytes, 4)
+        .expect("first source reservation");
+    let second = coordinator
+        .checkpoint()
+        .reserve(Phase::Snapshot, Dimension::AssetBytes, 4)
+        .expect("second source reservation");
+    let mut sources = [first, second];
+
+    assert_eq!(
+        coordinator
+            .transition_reservations(&mut sources, Phase::Output, Dimension::OutputBytes, 17,)
+            .expect_err("target dimension limit must reject the whole batch"),
+        LedgerCause::LimitExceeded {
+            class: CounterClass::Live,
+            dimension: Dimension::OutputBytes,
+            value: 17,
+            limit: 16,
+        }
+    );
+    assert_eq!(sources[0].bytes(), 4);
+    assert_eq!(sources[1].bytes(), 4);
+    let rejected = coordinator.ledger_snapshot();
+    assert_eq!(rejected.current_live_bytes(), 8);
+    assert_eq!(
+        rejected
+            .dimension(Dimension::AssetBytes)
+            .expect("asset evidence")
+            .current_live_bytes(),
+        8
+    );
+    assert_eq!(
+        rejected
+            .dimension(Dimension::OutputBytes)
+            .expect("output evidence")
+            .peak_live_bytes(),
+        0
+    );
+    assert!(rejected.phase(Phase::Output).is_none());
+
+    coordinator
+        .transition_reservations(&mut sources, Phase::Output, Dimension::OutputBytes, 8)
+        .expect("preserved batch can be retried");
+    assert_eq!(sources[0].bytes(), 4);
+    assert_eq!(sources[1].bytes(), 4);
+    let transitioned = coordinator.ledger_snapshot();
+    assert_eq!(transitioned.current_live_bytes(), 8);
+    assert_eq!(
+        transitioned
+            .dimension(Dimension::AssetBytes)
+            .expect("asset evidence")
+            .current_live_bytes(),
+        0
+    );
+    assert_eq!(
+        transitioned
+            .dimension(Dimension::OutputBytes)
+            .expect("output evidence")
+            .current_live_bytes(),
+        8
+    );
+
+    drop(sources);
+    assert_eq!(coordinator.ledger_snapshot().current_live_bytes(), 0);
+}
+
+#[test]
+fn mixed_batch_transition_conserves_operation_dimension_and_phase_totals() {
+    let mut coordinator = coordinator(32);
+    let first = coordinator
+        .checkpoint()
+        .reserve(Phase::Snapshot, Dimension::AssetBytes, 4)
+        .expect("asset source reservation");
+    let second = coordinator
+        .checkpoint()
+        .reserve(Phase::Decode, Dimension::OutputBytes, 3)
+        .expect("output source reservation");
+    let mut sources = [first, second];
+
+    coordinator
+        .transition_reservations(&mut sources, Phase::Output, Dimension::OutputBytes, 9)
+        .expect("mixed batch transition should fit");
+
+    assert_eq!(sources[0].bytes(), 4);
+    assert_eq!(sources[1].bytes(), 5);
+    let transitioned = coordinator.ledger_snapshot();
+    assert_eq!(transitioned.current_live_bytes(), 9);
+    assert_eq!(transitioned.peak_live_bytes(), 9);
+    assert_eq!(
+        transitioned
+            .dimension(Dimension::AssetBytes)
+            .expect("asset evidence")
+            .current_live_bytes(),
+        0
+    );
+    assert_eq!(
+        transitioned
+            .dimension(Dimension::OutputBytes)
+            .expect("output evidence")
+            .current_live_bytes(),
+        9
+    );
+    assert_eq!(
+        transitioned
+            .phase(Phase::Snapshot)
+            .expect("snapshot evidence")
+            .current_live_bytes(),
+        0
+    );
+    assert_eq!(
+        transitioned
+            .phase(Phase::Decode)
+            .expect("decode evidence")
+            .current_live_bytes(),
+        0
+    );
+    assert_eq!(
+        transitioned
+            .phase(Phase::Output)
+            .expect("output phase evidence")
+            .current_live_bytes(),
+        9
+    );
+
+    drop(sources);
+    assert_eq!(coordinator.ledger_snapshot().current_live_bytes(), 0);
+}
+
+#[test]
+fn failed_batch_target_phase_evidence_admission_preserves_all_source_state() {
+    let mut probe = coordinator(20);
+    let probe_reservation = probe
+        .checkpoint()
+        .reserve(Phase::Snapshot, Dimension::AssetBytes, 1)
+        .expect("one phase should be measurable");
+    let one_phase_evidence_limit = probe.ledger_snapshot().current_evidence_bytes();
+    drop(probe_reservation);
+    probe
+        .finish()
+        .expect("the evidence probe should finalize cleanly");
+
+    let tight = limits(20)
+        .try_with_evidence_byte_limit(one_phase_evidence_limit)
+        .expect("one source phase should fit exactly");
+    let mut coordinator = Coordinator::new(OperationControl::default(), tight);
+    let first = coordinator
+        .checkpoint()
+        .reserve(Phase::Snapshot, Dimension::AssetBytes, 2)
+        .expect("first source reservation");
+    let second = coordinator
+        .checkpoint()
+        .reserve(Phase::Snapshot, Dimension::AssetBytes, 2)
+        .expect("second source reservation");
+    let mut sources = [first, second];
+    let before_dimension = coordinator
+        .dimension_evidence(Dimension::AssetBytes)
+        .expect("source dimension evidence");
+    let before_phase = coordinator
+        .phase_evidence(Phase::Snapshot)
+        .expect("source phase evidence");
+
+    let failure = coordinator
+        .transition_reservations(&mut sources, Phase::Output, Dimension::OutputBytes, 4)
+        .expect_err("the second phase must exceed the exact evidence bound");
+
+    assert!(matches!(
+        failure,
+        LedgerCause::Evidence {
+            cause: LedgerEvidenceError::LimitExceeded {
+                purpose: LedgerEvidencePurpose::Phases,
+                ..
+            }
+        }
+    ));
+    assert_eq!(sources[0].bytes(), 2);
+    assert_eq!(sources[1].bytes(), 2);
+    assert_eq!(
+        coordinator
+            .dimension_evidence(Dimension::AssetBytes)
+            .expect("preserved source dimension evidence"),
+        before_dimension
+    );
+    assert_eq!(
+        coordinator.phase_evidence(Phase::Snapshot),
+        Some(before_phase)
+    );
+    assert!(coordinator.phase_evidence(Phase::Output).is_none());
+
+    drop(sources);
+    coordinator
+        .finish()
+        .expect("preserved source reservations should finalize cleanly");
+}
+
+#[test]
+fn batch_transition_rejects_owner_mismatch_and_pending_mutation_atomically() {
+    let mut owner = coordinator(20);
+    let mut other = coordinator(20);
+    let first = owner
+        .checkpoint()
+        .reserve(Phase::Snapshot, Dimension::AssetBytes, 2)
+        .expect("first owner reservation");
+    let second = owner
+        .checkpoint()
+        .reserve(Phase::Snapshot, Dimension::AssetBytes, 2)
+        .expect("second owner reservation");
+    let mut sources = [first, second];
+    assert_eq!(
+        other
+            .transition_reservations(&mut sources, Phase::Output, Dimension::OutputBytes, 4)
+            .expect_err("another ledger cannot transition the batch"),
+        LedgerCause::OwnerMismatch
+    );
+    assert_eq!(sources[0].bytes(), 2);
+    assert_eq!(sources[1].bytes(), 2);
+    assert_eq!(owner.ledger_snapshot().current_live_bytes(), 4);
+    assert_eq!(other.ledger_snapshot().current_live_bytes(), 0);
+    drop(sources);
+
+    let first = owner
+        .checkpoint()
+        .reserve(Phase::Snapshot, Dimension::AssetBytes, 0)
+        .expect("first zero-byte pending fixture");
+    let second = owner
+        .checkpoint()
+        .reserve(Phase::Snapshot, Dimension::AssetBytes, 0)
+        .expect("second zero-byte pending fixture");
+    let mut zero_sources = [first, second];
+    let mut batch = PublicationBatch::default();
+    let pending = owner
+        .prepare_publication(&mut batch, &[])
+        .expect("zero live bytes are fully covered");
+    assert_eq!(
+        owner
+            .transition_reservations(&mut zero_sources, Phase::Output, Dimension::OutputBytes, 3,)
+            .expect_err("pending publication seals batch transitions"),
+        LedgerCause::PublicationAlreadyPending
+    );
+    assert_eq!(zero_sources[0].bytes(), 0);
+    assert_eq!(zero_sources[1].bytes(), 0);
+    assert_eq!(owner.ledger_snapshot().current_live_bytes(), 0);
+    assert!(owner.phase_evidence(Phase::Output).is_none());
+    drop(zero_sources);
+    pending.rollback();
 }
 
 #[test]
 fn reservation_transition_rejects_owner_mismatch_and_pending_mutation() {
     let mut owner = coordinator(20);
     let mut other = coordinator(20);
-    let source = owner
+    let mut source = owner
         .checkpoint()
         .reserve(Phase::Snapshot, Dimension::AssetBytes, 3)
         .expect("owner source");
     assert_eq!(
         other
-            .transition_reservation(source, Phase::Output, Dimension::OutputBytes, 3)
+            .transition_reservation(&mut source, Phase::Output, Dimension::OutputBytes, 3)
             .expect_err("another ledger cannot transition this token"),
         LedgerCause::OwnerMismatch
     );
-    assert_eq!(owner.ledger_snapshot().current_live_bytes(), 0);
+    assert_eq!(source.bytes(), 3);
+    assert_eq!(owner.ledger_snapshot().current_live_bytes(), 3);
     assert_eq!(other.ledger_snapshot().current_live_bytes(), 0);
+    drop(source);
+    assert_eq!(owner.ledger_snapshot().current_live_bytes(), 0);
 
-    let zero = owner
+    let mut zero = owner
         .checkpoint()
         .reserve(Phase::Snapshot, Dimension::AssetBytes, 0)
         .expect("zero-byte pending fixture");
+    let mut batch = PublicationBatch::default();
     let pending = owner
-        .prepare_publication(Vec::new(), &[])
+        .prepare_publication(&mut batch, &[])
         .expect("zero live bytes are fully covered");
     assert_eq!(
         owner
             .checkpoint()
-            .transition_reservation(zero, Phase::Output, Dimension::OutputBytes, 3)
+            .transition_reservation(&mut zero, Phase::Output, Dimension::OutputBytes, 3)
             .expect_err("pending publication seals transitions"),
         LedgerCause::PublicationAlreadyPending
     );
@@ -674,12 +997,14 @@ fn reservation_transition_rejects_owner_mismatch_and_pending_mutation() {
         0
     );
     assert!(pending_snapshot.phase(Phase::Output).is_none());
+    assert_eq!(zero.bytes(), 0);
+    drop(zero);
     pending.rollback();
 }
 
 #[test]
 fn same_owner_type_cannot_transfer_across_ledger_instances() {
-    let mut owner = coordinator(20);
+    let mut owner = publication_coordinator(20);
     let mut other = coordinator(20);
     let mut reservation = owner
         .checkpoint()
@@ -693,20 +1018,23 @@ fn same_owner_type_cannot_transfer_across_ledger_instances() {
     assert_eq!(owner.ledger_snapshot().current_live_bytes(), 3);
     assert_eq!(other.ledger_snapshot().current_live_bytes(), 0);
 
+    let mut batch = publication_batch(&mut owner, [reservation]);
     assert!(matches!(
-        other.prepare_publication(
-            vec![reservation],
-            &[Commitment::new(Dimension::OutputBytes, 1)],
-        ),
+        other.prepare_publication(&mut batch, &[Commitment::new(Dimension::OutputBytes, 1)],),
         Err(LedgerCause::OwnerMismatch)
     ));
-    assert_eq!(owner.ledger_snapshot().current_live_bytes(), 0);
+    assert_eq!(
+        owner.ledger_snapshot().current_live_bytes(),
+        publication_capacity_bytes() + 3
+    );
     assert_eq!(other.ledger_snapshot().current_live_bytes(), 0);
+    drop(batch);
+    assert_eq!(owner.ledger_snapshot().current_live_bytes(), 0);
 }
 
 #[test]
 fn publication_must_take_every_live_byte_or_commit_nothing() {
-    let mut coordinator = coordinator(20);
+    let mut coordinator = publication_coordinator(20);
     let retained = coordinator
         .checkpoint()
         .reserve(Phase::Snapshot, Dimension::AssetBytes, 2)
@@ -716,16 +1044,20 @@ fn publication_must_take_every_live_byte_or_commit_nothing() {
         .reserve(Phase::Output, Dimension::OutputBytes, 3)
         .expect("submitted output reservation");
 
+    let mut batch = publication_batch(&mut coordinator, [submitted]);
     assert!(matches!(
-        coordinator
-            .prepare_publication(vec![submitted], &[Commitment::new(Dimension::Records, 1)],),
+        coordinator.prepare_publication(&mut batch, &[Commitment::new(Dimension::Records, 1)],),
         Err(LedgerCause::PublicationLiveMismatch {
-            transaction_bytes: 3,
-            ledger_bytes: 5,
-        })
+            transaction_bytes,
+            ledger_bytes,
+        }) if transaction_bytes == publication_capacity_bytes() + 3
+            && ledger_bytes == publication_capacity_bytes() + 5
     ));
     let evidence = coordinator.ledger_snapshot();
-    assert_eq!(evidence.current_live_bytes(), 2);
+    assert_eq!(
+        evidence.current_live_bytes(),
+        publication_capacity_bytes() + 5
+    );
     assert_eq!(
         evidence
             .dimension(Dimension::Records)
@@ -733,6 +1065,8 @@ fn publication_must_take_every_live_byte_or_commit_nothing() {
             .committed(),
         0
     );
+    drop(batch);
+    assert_eq!(coordinator.ledger_snapshot().current_live_bytes(), 2);
     drop(retained);
 }
 
@@ -743,8 +1077,9 @@ fn pending_and_published_boundaries_seal_all_accounting_mutation() {
         .checkpoint()
         .reserve(Phase::Snapshot, Dimension::AssetBytes, 0)
         .expect("zero-byte linear token");
+    let mut first_batch = PublicationBatch::default();
     let pending = coordinator
-        .prepare_publication(Vec::new(), &[Commitment::new(Dimension::Records, 1)])
+        .prepare_publication(&mut first_batch, &[Commitment::new(Dimension::Records, 1)])
         .expect("zero live bytes are fully covered");
 
     assert_eq!(
@@ -774,12 +1109,16 @@ fn pending_and_published_boundaries_seal_all_accounting_mutation() {
         .expect("rollback reopens accounting mutation");
     drop(zero);
 
-    let pending = coordinator
-        .prepare_publication(Vec::new(), &[Commitment::new(Dimension::Records, 1)])
+    let mut replacement_batch = PublicationBatch::default();
+    let mut pending = coordinator
+        .prepare_publication(
+            &mut replacement_batch,
+            &[Commitment::new(Dimension::Records, 1)],
+        )
         .expect("replacement transaction");
     coordinator
         .publish(
-            pending,
+            &mut pending,
             FinalProgress::new(ObserverPhase::Publish, Unit::Work, 1),
         )
         .expect("durable publication");
@@ -793,14 +1132,15 @@ fn pending_and_published_boundaries_seal_all_accounting_mutation() {
 
 #[test]
 fn pending_drop_rolls_back_live_and_commitments_then_allows_reprepare() {
-    let mut coordinator = coordinator(20);
+    let mut coordinator = publication_coordinator(20);
     let reservation = coordinator
         .checkpoint()
         .reserve(Phase::Output, Dimension::OutputBytes, 6)
         .expect("output reservation");
+    let mut batch = publication_batch(&mut coordinator, [reservation]);
     let pending = coordinator
         .prepare_publication(
-            vec![reservation],
+            &mut batch,
             &[
                 Commitment::new(Dimension::OutputBytes, 5),
                 Commitment::new(Dimension::Records, 2),
@@ -809,7 +1149,10 @@ fn pending_drop_rolls_back_live_and_commitments_then_allows_reprepare() {
         .expect("pending output transaction");
 
     let before_drop = coordinator.ledger_snapshot();
-    assert_eq!(before_drop.current_live_bytes(), 6);
+    assert_eq!(
+        before_drop.current_live_bytes(),
+        publication_capacity_bytes() + 6
+    );
     assert_eq!(
         before_drop
             .dimension(Dimension::OutputBytes)
@@ -847,12 +1190,16 @@ fn pending_drop_rolls_back_live_and_commitments_then_allows_reprepare() {
         .checkpoint()
         .reserve(Phase::Output, Dimension::OutputBytes, 4)
         .expect("replacement reservation");
-    let replacement = coordinator
-        .prepare_publication(vec![replacement], &[Commitment::new(Dimension::Records, 1)])
+    let mut replacement_batch = publication_batch(&mut coordinator, [replacement]);
+    let mut replacement = coordinator
+        .prepare_publication(
+            &mut replacement_batch,
+            &[Commitment::new(Dimension::Records, 1)],
+        )
         .expect("rollback reopens publication admission");
     coordinator
         .publish(
-            replacement,
+            &mut replacement,
             FinalProgress::new(ObserverPhase::Publish, Unit::Work, 1),
         )
         .expect("replacement publishes");
@@ -867,15 +1214,125 @@ fn pending_drop_rolls_back_live_and_commitments_then_allows_reprepare() {
 }
 
 #[test]
+fn publication_batch_releases_accounted_vector_capacity_on_rollback_and_publish() {
+    let mut coordinator = publication_coordinator(20);
+    let payload = coordinator
+        .checkpoint()
+        .reserve(Phase::Output, Dimension::OutputBytes, 4)
+        .expect("payload reservation");
+    let mut batch = publication_batch(&mut coordinator, [payload]);
+    let pending = coordinator
+        .prepare_publication(&mut batch, &[Commitment::new(Dimension::Records, 1)])
+        .expect("the batch owns every live byte");
+
+    assert_eq!(
+        coordinator.ledger_snapshot().current_live_bytes(),
+        publication_capacity_bytes() + 4
+    );
+    pending.rollback();
+    assert_eq!(coordinator.ledger_snapshot().current_live_bytes(), 0);
+
+    let payload = coordinator
+        .checkpoint()
+        .reserve(Phase::Output, Dimension::OutputBytes, 5)
+        .expect("replacement payload reservation");
+    let mut batch = publication_batch(&mut coordinator, [payload]);
+    let mut pending = coordinator
+        .prepare_publication(&mut batch, &[Commitment::new(Dimension::Records, 1)])
+        .expect("replacement batch owns every live byte");
+    coordinator
+        .publish(
+            &mut pending,
+            FinalProgress::new(ObserverPhase::Publish, Unit::Work, 1),
+        )
+        .expect("publication releases both reservation classes");
+
+    let snapshot = coordinator
+        .finish()
+        .expect("published capacity leaves no live token");
+    assert_eq!(snapshot.current_live_bytes(), 0);
+    assert_eq!(snapshot.peak_live_bytes(), publication_capacity_bytes() + 5);
+    assert_eq!(
+        snapshot
+            .dimension(Dimension::Records)
+            .expect("record evidence")
+            .committed(),
+        1
+    );
+}
+
+#[test]
+fn publication_batch_rejects_missing_or_insufficient_capacity_coverage() {
+    let mut missing = publication_coordinator(8);
+    let payload = missing
+        .checkpoint()
+        .reserve(Phase::Output, Dimension::OutputBytes, 1)
+        .expect("missing-capacity payload reservation");
+    let error = PublicationReservationBatch::try_new(vec![payload], None)
+        .expect_err("an allocated batch requires a capacity token");
+    assert!(matches!(
+        error.kind(),
+        PublicationReservationBatchErrorKind::MissingCapacityReservation { required_bytes }
+            if required_bytes == publication_capacity_bytes()
+    ));
+    drop(error);
+    assert_eq!(missing.ledger_snapshot().current_live_bytes(), 0);
+
+    let mut insufficient = publication_coordinator(8);
+    let capacity = insufficient
+        .checkpoint()
+        .reserve(Phase::Snapshot, Dimension::AssetBytes, 1)
+        .expect("insufficient capacity token");
+    let payload = insufficient
+        .checkpoint()
+        .reserve(Phase::Output, Dimension::OutputBytes, 1)
+        .expect("insufficient-capacity payload reservation");
+    let error = PublicationReservationBatch::try_new(vec![payload], Some(capacity))
+        .expect_err("an undersized capacity token cannot cover the batch allocation");
+    assert!(matches!(
+        error.kind(),
+        PublicationReservationBatchErrorKind::InsufficientCapacityReservation {
+            required_bytes,
+            reserved_bytes: 1,
+        } if required_bytes == publication_capacity_bytes()
+    ));
+    drop(error);
+    assert_eq!(insufficient.ledger_snapshot().current_live_bytes(), 0);
+}
+
+#[test]
+fn rejected_publication_batch_releases_its_complete_owner_during_unwind() {
+    let mut coordinator = publication_coordinator(8);
+    let capacity = coordinator
+        .checkpoint()
+        .reserve(Phase::Snapshot, Dimension::AssetBytes, 1)
+        .expect("rejected batch capacity token");
+    let payload = coordinator
+        .checkpoint()
+        .reserve(Phase::Output, Dimension::OutputBytes, 1)
+        .expect("rejected batch payload token");
+
+    let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _error = PublicationReservationBatch::try_new(vec![payload], Some(capacity))
+            .expect_err("the capacity token deliberately under-covers the vector");
+        panic!("exercise rejected batch unwind ownership");
+    }));
+
+    assert!(unwind.is_err());
+    assert_eq!(coordinator.ledger_snapshot().current_live_bytes(), 0);
+}
+
+#[test]
 fn publication_aggregates_duplicate_commitments_atomically() {
-    let mut coordinator = coordinator(20);
+    let mut coordinator = publication_coordinator(20);
     let reservation = coordinator
         .checkpoint()
         .reserve(Phase::Output, Dimension::OutputBytes, 9)
         .expect("output reservation");
-    let pending = coordinator
+    let mut batch = publication_batch(&mut coordinator, [reservation]);
+    let mut pending = coordinator
         .prepare_publication(
-            vec![reservation],
+            &mut batch,
             &[
                 Commitment::new(Dimension::OutputBytes, 3),
                 Commitment::new(Dimension::OutputBytes, 4),
@@ -886,7 +1343,7 @@ fn publication_aggregates_duplicate_commitments_atomically() {
 
     coordinator
         .publish(
-            pending,
+            &mut pending,
             FinalProgress::new(ObserverPhase::Publish, Unit::Work, 9),
         )
         .expect("atomic publication");
@@ -895,7 +1352,7 @@ fn publication_aggregates_duplicate_commitments_atomically() {
         .finish()
         .expect("publishing every live token makes finalization infallible");
     assert_eq!(snapshot.current_live_bytes(), 0);
-    assert_eq!(snapshot.peak_live_bytes(), 9);
+    assert_eq!(snapshot.peak_live_bytes(), publication_capacity_bytes() + 9);
     assert_eq!(
         snapshot
             .dimension(Dimension::OutputBytes)
@@ -913,13 +1370,19 @@ fn publication_aggregates_duplicate_commitments_atomically() {
 }
 
 #[test]
-fn commitment_overflow_unknown_dimension_and_limit_failure_release_live() {
+fn commitment_failures_preserve_live_batch_for_retry() {
     let overflow_limits = LedgerLimits::new(
-        8,
-        [(
-            Dimension::OutputBytes,
-            DimensionPolicy::reservable_bytes(8, 8, u64::MAX, 8),
-        )],
+        8 + publication_capacity_bytes(),
+        [
+            (
+                Dimension::AssetBytes,
+                DimensionPolicy::reservable_bytes(0, 0, 0, publication_capacity_bytes()),
+            ),
+            (
+                Dimension::OutputBytes,
+                DimensionPolicy::reservable_bytes(8, 8, u64::MAX, 8),
+            ),
+        ],
     )
     .expect("overflow fixture policy");
     let mut overflow = Coordinator::new(OperationControl::default(), overflow_limits);
@@ -927,9 +1390,10 @@ fn commitment_overflow_unknown_dimension_and_limit_failure_release_live() {
         .checkpoint()
         .reserve(Phase::Output, Dimension::OutputBytes, 1)
         .expect("overflow fixture reservation");
+    let mut batch = publication_batch(&mut overflow, [reservation]);
     assert!(matches!(
         overflow.prepare_publication(
-            vec![reservation],
+            &mut batch,
             &[
                 Commitment::new(Dimension::OutputBytes, u64::MAX),
                 Commitment::new(Dimension::OutputBytes, 1),
@@ -940,31 +1404,49 @@ fn commitment_overflow_unknown_dimension_and_limit_failure_release_live() {
             dimension: Dimension::OutputBytes,
         })
     ));
+    assert_eq!(
+        overflow.ledger_snapshot().current_live_bytes(),
+        publication_capacity_bytes() + 1
+    );
+    assert!(!batch.is_empty());
+    let pending = overflow
+        .prepare_publication(&mut batch, &[Commitment::new(Dimension::OutputBytes, 1)])
+        .expect("overflow failure leaves the batch retryable");
+    assert!(batch.is_empty());
+    pending.rollback();
     assert_eq!(overflow.ledger_snapshot().current_live_bytes(), 0);
 
-    let mut unknown = coordinator(20);
+    let mut unknown = publication_coordinator(20);
     let reservation = unknown
         .checkpoint()
         .reserve(Phase::Output, Dimension::OutputBytes, 1)
         .expect("unknown fixture reservation");
+    let mut batch = publication_batch(&mut unknown, [reservation]);
     assert!(matches!(
-        unknown.prepare_publication(vec![reservation], &[Commitment::new(Dimension::Unknown, 1)],),
+        unknown.prepare_publication(&mut batch, &[Commitment::new(Dimension::Unknown, 1)],),
         Err(LedgerCause::UnknownDimension {
             dimension: Dimension::Unknown,
         })
     ));
+    assert_eq!(
+        unknown.ledger_snapshot().current_live_bytes(),
+        publication_capacity_bytes() + 1
+    );
+    assert!(!batch.is_empty());
+    let pending = unknown
+        .prepare_publication(&mut batch, &[Commitment::new(Dimension::Records, 1)])
+        .expect("unknown-dimension failure leaves the batch retryable");
+    pending.rollback();
     assert_eq!(unknown.ledger_snapshot().current_live_bytes(), 0);
 
-    let mut limited = coordinator(20);
+    let mut limited = publication_coordinator(20);
     let reservation = limited
         .checkpoint()
         .reserve(Phase::Output, Dimension::OutputBytes, 1)
         .expect("limit fixture reservation");
+    let mut batch = publication_batch(&mut limited, [reservation]);
     assert!(matches!(
-        limited.prepare_publication(
-            vec![reservation],
-            &[Commitment::new(Dimension::OutputBytes, 17)],
-        ),
+        limited.prepare_publication(&mut batch, &[Commitment::new(Dimension::OutputBytes, 17)],),
         Err(LedgerCause::LimitExceeded {
             class: CounterClass::Committed,
             dimension: Dimension::OutputBytes,
@@ -973,7 +1455,10 @@ fn commitment_overflow_unknown_dimension_and_limit_failure_release_live() {
         })
     ));
     let evidence = limited.ledger_snapshot();
-    assert_eq!(evidence.current_live_bytes(), 0);
+    assert_eq!(
+        evidence.current_live_bytes(),
+        publication_capacity_bytes() + 1
+    );
     assert_eq!(
         evidence
             .dimension(Dimension::OutputBytes)
@@ -981,43 +1466,111 @@ fn commitment_overflow_unknown_dimension_and_limit_failure_release_live() {
             .committed(),
         0
     );
+    assert!(!batch.is_empty());
+    let pending = limited
+        .prepare_publication(&mut batch, &[Commitment::new(Dimension::OutputBytes, 1)])
+        .expect("commitment-limit failure leaves the batch retryable");
+    pending.rollback();
+    assert_eq!(limited.ledger_snapshot().current_live_bytes(), 0);
+}
+
+#[test]
+fn publication_evidence_failure_preserves_live_batch_for_retry() {
+    let mut probe = publication_coordinator(20);
+    let probe_reservation = probe
+        .checkpoint()
+        .reserve(Phase::Output, Dimension::OutputBytes, 1)
+        .expect("publication evidence probe reservation");
+    let probe_batch = publication_batch(&mut probe, [probe_reservation]);
+    let prepublication_evidence_limit = probe.ledger_snapshot().current_evidence_bytes();
+    drop(probe_batch);
+    probe
+        .finish()
+        .expect("the evidence probe should finalize cleanly");
+
+    let tight_limits = publication_limits(20)
+        .try_with_evidence_byte_limit(prepublication_evidence_limit)
+        .expect("dimension and one phase evidence fit exactly");
+    let mut coordinator = Coordinator::new(OperationControl::default(), tight_limits);
+    let reservation = coordinator
+        .checkpoint()
+        .reserve(Phase::Output, Dimension::OutputBytes, 1)
+        .expect("the prepublication envelope should fit");
+    let mut batch = publication_batch(&mut coordinator, [reservation]);
+
+    assert!(matches!(
+        coordinator.prepare_publication(&mut batch, &[Commitment::new(Dimension::OutputBytes, 1)],),
+        Err(LedgerCause::Evidence {
+            cause: LedgerEvidenceError::LimitExceeded {
+                purpose: LedgerEvidencePurpose::Publication,
+                ..
+            }
+        })
+    ));
+    assert!(!batch.is_empty());
+    let output = coordinator
+        .dimension_evidence(Dimension::OutputBytes)
+        .expect("output evidence");
+    assert_eq!(output.current_live_bytes(), 1);
+    assert_eq!(output.pending_publication(), 0);
+
+    let pending = coordinator
+        .prepare_publication(&mut batch, &[])
+        .expect("the preserved batch remains retryable without commitment evidence");
+    assert!(batch.is_empty());
+    pending.rollback();
+    assert_eq!(
+        coordinator
+            .dimension_evidence(Dimension::OutputBytes)
+            .expect("rolled-back output evidence")
+            .current_live_bytes(),
+        0
+    );
 }
 
 #[test]
 fn only_one_pending_or_published_batch_is_admitted() {
     let mut coordinator = coordinator(20);
+    let mut first_batch = PublicationBatch::default();
     let pending = coordinator
-        .prepare_publication(Vec::new(), &[Commitment::new(Dimension::Records, 1)])
+        .prepare_publication(&mut first_batch, &[Commitment::new(Dimension::Records, 1)])
         .expect("first pending batch");
+    let mut blocked_batch = PublicationBatch::default();
     assert!(matches!(
-        coordinator.prepare_publication(Vec::new(), &[]),
+        coordinator.prepare_publication(&mut blocked_batch, &[]),
         Err(LedgerCause::PublicationAlreadyPending)
     ));
     pending.rollback();
 
-    let pending = coordinator
-        .prepare_publication(Vec::new(), &[Commitment::new(Dimension::Records, 1)])
+    let mut pending = coordinator
+        .prepare_publication(
+            &mut blocked_batch,
+            &[Commitment::new(Dimension::Records, 1)],
+        )
         .expect("rollback permits a replacement batch");
     coordinator
         .publish(
-            pending,
+            &mut pending,
             FinalProgress::new(ObserverPhase::Publish, Unit::Work, 1),
         )
         .expect("first durable batch");
+    let mut completed_batch = PublicationBatch::default();
     assert!(matches!(
-        coordinator
-            .prepare_publication(Vec::new(), &[Commitment::new(Dimension::Unknown, u64::MAX)],),
+        coordinator.prepare_publication(
+            &mut completed_batch,
+            &[Commitment::new(Dimension::Unknown, u64::MAX)],
+        ),
         Err(LedgerCause::PublicationAlreadyCompleted)
     ));
 }
 
 #[test]
-fn wrong_coordinator_rejects_pending_before_progress_and_rolls_it_back() {
+fn wrong_coordinator_rejects_pending_before_progress_and_preserves_it_for_owner() {
     use std::sync::{Arc, Mutex};
 
     let observed = Arc::new(Mutex::new(0usize));
     let observed_by_other = Arc::clone(&observed);
-    let mut owner = coordinator(20);
+    let mut owner = publication_coordinator(20);
     let mut other = Coordinator::new(
         OperationControl::default().with_progress_observer(move |_| {
             *observed_by_other.lock().expect("observer lock") += 1;
@@ -1029,19 +1582,23 @@ fn wrong_coordinator_rejects_pending_before_progress_and_rolls_it_back() {
         .checkpoint()
         .reserve(Phase::Output, Dimension::OutputBytes, 3)
         .expect("owner reservation");
-    let pending = owner
-        .prepare_publication(vec![reservation], &[Commitment::new(Dimension::Records, 1)])
+    let mut batch = publication_batch(&mut owner, [reservation]);
+    let mut pending = owner
+        .prepare_publication(&mut batch, &[Commitment::new(Dimension::Records, 1)])
         .expect("owner pending transaction");
 
     assert_eq!(
         other.publish(
-            pending,
+            &mut pending,
             FinalProgress::new(ObserverPhase::Publish, Unit::Work, 1),
         ),
         Err(PublicationCause::Ledger(LedgerCause::OwnerMismatch))
     );
     assert_eq!(*observed.lock().expect("observer lock"), 0);
-    assert_eq!(owner.ledger_snapshot().current_live_bytes(), 0);
+    assert_eq!(
+        owner.ledger_snapshot().current_live_bytes(),
+        publication_capacity_bytes() + 3
+    );
     assert_eq!(
         owner
             .ledger_snapshot()
@@ -1050,6 +1607,13 @@ fn wrong_coordinator_rejects_pending_before_progress_and_rolls_it_back() {
             .committed(),
         0
     );
+    owner
+        .publish(
+            &mut pending,
+            FinalProgress::new(ObserverPhase::Publish, Unit::Work, 1),
+        )
+        .expect("the owning coordinator can publish the preserved transaction");
+    assert_eq!(owner.ledger_snapshot().current_live_bytes(), 0);
 }
 
 #[test]
@@ -1103,14 +1667,15 @@ fn progress_observers_can_release_same_ledger_reservations_without_blocking() {
         .reserve(Phase::Snapshot, Dimension::AssetBytes, 0)
         .expect("zero-byte final observer reservation");
     *final_slot.lock().expect("final reservation slot") = Some(reservation);
-    let pending = coordinator
-        .prepare_publication(Vec::new(), &[Commitment::new(Dimension::Records, 1)])
+    let mut batch = PublicationBatch::default();
+    let mut pending = coordinator
+        .prepare_publication(&mut batch, &[Commitment::new(Dimension::Records, 1)])
         .expect("final observer pending publication");
 
     let committed = run_with_timeout(move || {
         coordinator
             .publish(
-                pending,
+                &mut pending,
                 FinalProgress::new(ObserverPhase::Publish, Unit::Work, 1),
             )
             .expect("final observer publication");
@@ -1197,7 +1762,7 @@ fn final_observer_decision_bypasses_exhausted_transient_delivery_limits() {
         let control = OperationControl::default()
             .with_progress_observer(observer)
             .with_progress_limits(delivery_limits);
-        let mut coordinator = Coordinator::new(control, limits(20));
+        let mut coordinator = Coordinator::new(control, publication_limits(20));
 
         if let Some(prior_phase) = prior_phase {
             let (completed, total) = match prior_phase {
@@ -1213,13 +1778,14 @@ fn final_observer_decision_bypasses_exhausted_transient_delivery_limits() {
             .checkpoint()
             .reserve(Phase::Output, Dimension::OutputBytes, 3)
             .unwrap_or_else(|error| panic!("{case}: output reservation failed: {error}"));
-        let pending = coordinator
-            .prepare_publication(vec![reservation], &[Commitment::new(Dimension::Records, 1)])
+        let mut batch = publication_batch(&mut coordinator, [reservation]);
+        let mut pending = coordinator
+            .prepare_publication(&mut batch, &[Commitment::new(Dimension::Records, 1)])
             .unwrap_or_else(|error| panic!("{case}: pending publication failed: {error}"));
 
         assert_eq!(
             coordinator.publish(
-                pending,
+                &mut pending,
                 FinalProgress::new(ObserverPhase::Publish, Unit::Work, 3),
             ),
             Err(PublicationCause::Control(ControlCause::Cancelled {
@@ -1233,12 +1799,35 @@ fn final_observer_decision_bypasses_exhausted_transient_delivery_limits() {
             "{case}"
         );
         let snapshot = coordinator.ledger_snapshot();
-        assert_eq!(snapshot.current_live_bytes(), 0, "{case}");
+        assert_eq!(
+            snapshot.current_live_bytes(),
+            publication_capacity_bytes() + 3,
+            "{case}"
+        );
+        assert_eq!(
+            snapshot
+                .dimension(Dimension::Records)
+                .expect("record evidence")
+                .pending_publication(),
+            1,
+            "{case}"
+        );
         assert_eq!(
             snapshot
                 .dimension(Dimension::Records)
                 .expect("record evidence")
                 .committed(),
+            0,
+            "{case}"
+        );
+        drop(pending);
+        let rolled_back = coordinator.ledger_snapshot();
+        assert_eq!(rolled_back.current_live_bytes(), 0, "{case}");
+        assert_eq!(
+            rolled_back
+                .dimension(Dimension::Records)
+                .expect("record evidence")
+                .pending_publication(),
             0,
             "{case}"
         );
@@ -1260,7 +1849,7 @@ fn final_observer_receives_publication_event_after_identical_transient_delivery(
     };
     let mut coordinator = Coordinator::new(
         OperationControl::default().with_progress_observer(observer),
-        limits(20),
+        publication_limits(20),
     );
 
     coordinator
@@ -1270,13 +1859,14 @@ fn final_observer_receives_publication_event_after_identical_transient_delivery(
         .checkpoint()
         .reserve(Phase::Output, Dimension::OutputBytes, 3)
         .expect("output reservation");
-    let pending = coordinator
-        .prepare_publication(vec![reservation], &[Commitment::new(Dimension::Records, 1)])
+    let mut batch = publication_batch(&mut coordinator, [reservation]);
+    let mut pending = coordinator
+        .prepare_publication(&mut batch, &[Commitment::new(Dimension::Records, 1)])
         .expect("pending publication");
 
     assert_eq!(
         coordinator.publish(
-            pending,
+            &mut pending,
             FinalProgress::new(ObserverPhase::Publish, Unit::Work, 3),
         ),
         Err(PublicationCause::Control(ControlCause::Cancelled {
@@ -1291,7 +1881,17 @@ fn final_observer_receives_publication_event_after_identical_transient_delivery(
         ]
     );
     let evidence = coordinator.ledger_snapshot();
-    assert_eq!(evidence.current_live_bytes(), 0);
+    assert_eq!(
+        evidence.current_live_bytes(),
+        publication_capacity_bytes() + 3
+    );
+    assert_eq!(
+        evidence
+            .dimension(Dimension::Records)
+            .expect("record evidence")
+            .pending_publication(),
+        1
+    );
     assert_eq!(
         evidence
             .dimension(Dimension::Records)
@@ -1299,6 +1899,8 @@ fn final_observer_receives_publication_event_after_identical_transient_delivery(
             .committed(),
         0
     );
+    drop(pending);
+    assert_eq!(coordinator.ledger_snapshot().current_live_bytes(), 0);
 }
 
 fn assert_final_control_failure(
@@ -1307,30 +1909,44 @@ fn assert_final_control_failure(
 ) {
     let mut coordinator = Coordinator::new(
         OperationControl::default().with_progress_observer(observer),
-        limits(20),
+        publication_limits(20),
     );
     let reservation = coordinator
         .checkpoint()
         .reserve(Phase::Output, Dimension::OutputBytes, 5)
         .expect("output reservation");
-    let pending = coordinator
-        .prepare_publication(vec![reservation], &[Commitment::new(Dimension::Records, 3)])
+    let mut batch = publication_batch(&mut coordinator, [reservation]);
+    let mut pending = coordinator
+        .prepare_publication(&mut batch, &[Commitment::new(Dimension::Records, 3)])
         .expect("pending transaction");
 
     assert_eq!(
         coordinator.publish(
-            pending,
+            &mut pending,
             FinalProgress::new(ObserverPhase::Publish, Unit::Work, 5),
         ),
         Err(PublicationCause::Control(expected.clone()))
     );
     let evidence = coordinator.ledger_snapshot();
-    assert_eq!(evidence.current_live_bytes(), 0);
+    assert_eq!(
+        evidence.current_live_bytes(),
+        publication_capacity_bytes() + 5
+    );
     let records = evidence
         .dimension(Dimension::Records)
         .expect("record evidence");
-    assert_eq!(records.pending_publication(), 0);
+    assert_eq!(records.pending_publication(), 3);
     assert_eq!(records.committed(), 0);
+    drop(pending);
+    let rolled_back = coordinator.ledger_snapshot();
+    assert_eq!(rolled_back.current_live_bytes(), 0);
+    assert_eq!(
+        rolled_back
+            .dimension(Dimension::Records)
+            .expect("record evidence")
+            .pending_publication(),
+        0
+    );
     assert_eq!(coordinator.poll(), Err(expected));
 }
 
@@ -1353,18 +1969,19 @@ fn final_callback_can_run_nested_work_and_last_poll_observes_its_cancellation() 
     let control = OperationControl::default()
         .with_cancellation(cancellation)
         .with_progress_observer(observer);
-    let mut coordinator = Coordinator::new(control, limits(20));
+    let mut coordinator = Coordinator::new(control, publication_limits(20));
     let reservation = coordinator
         .checkpoint()
         .reserve(Phase::Output, Dimension::OutputBytes, 4)
         .expect("output reservation");
-    let pending = coordinator
-        .prepare_publication(vec![reservation], &[Commitment::new(Dimension::Records, 1)])
+    let mut batch = publication_batch(&mut coordinator, [reservation]);
+    let mut pending = coordinator
+        .prepare_publication(&mut batch, &[Commitment::new(Dimension::Records, 1)])
         .expect("pending transaction");
 
     assert_eq!(
         coordinator.publish(
-            pending,
+            &mut pending,
             FinalProgress::new(ObserverPhase::Publish, Unit::Work, 4),
         ),
         Err(PublicationCause::Control(ControlCause::Cancelled {
@@ -1373,7 +1990,10 @@ fn final_callback_can_run_nested_work_and_last_poll_observes_its_cancellation() 
     );
     assert_eq!(nested_runs.load(Ordering::SeqCst), 1);
     let evidence = coordinator.ledger_snapshot();
-    assert_eq!(evidence.current_live_bytes(), 0);
+    assert_eq!(
+        evidence.current_live_bytes(),
+        publication_capacity_bytes() + 4
+    );
     assert_eq!(
         evidence
             .dimension(Dimension::Records)
@@ -1381,6 +2001,8 @@ fn final_callback_can_run_nested_work_and_last_poll_observes_its_cancellation() 
             .committed(),
         0
     );
+    drop(pending);
+    assert_eq!(coordinator.ledger_snapshot().current_live_bytes(), 0);
 }
 
 #[test]
@@ -1400,18 +2022,19 @@ fn identical_transient_or_invalid_final_progress_cannot_bypass_the_publication_g
     duplicate
         .report_progress(ObserverPhase::Publish, Unit::Work, 5, Some(5))
         .expect("transient progress delivery");
-    let pending = duplicate
-        .prepare_publication(Vec::new(), &[Commitment::new(Dimension::Records, 1)])
+    let mut batch = PublicationBatch::default();
+    let mut pending = duplicate
+        .prepare_publication(&mut batch, &[Commitment::new(Dimension::Records, 1)])
         .expect("pending transaction");
     duplicate
         .publish(
-            pending,
+            &mut pending,
             FinalProgress::new(ObserverPhase::Publish, Unit::Work, 5),
         )
         .expect("identical publication progress is delivered before publication");
     assert_eq!(*deliveries.lock().expect("delivery lock"), 2);
 
-    let mut invalid = coordinator(20);
+    let mut invalid = publication_coordinator(20);
     invalid
         .report_progress(ObserverPhase::Publish, Unit::Work, 5, Some(5))
         .expect("higher prior progress");
@@ -1419,12 +2042,13 @@ fn identical_transient_or_invalid_final_progress_cannot_bypass_the_publication_g
         .checkpoint()
         .reserve(Phase::Output, Dimension::OutputBytes, 3)
         .expect("output reservation");
-    let pending = invalid
-        .prepare_publication(vec![reservation], &[Commitment::new(Dimension::Records, 1)])
+    let mut batch = publication_batch(&mut invalid, [reservation]);
+    let mut pending = invalid
+        .prepare_publication(&mut batch, &[Commitment::new(Dimension::Records, 1)])
         .expect("pending transaction");
     assert!(matches!(
         invalid.publish(
-            pending,
+            &mut pending,
             FinalProgress::new(ObserverPhase::Publish, Unit::Work, 4),
         ),
         Err(PublicationCause::Control(
@@ -1432,7 +2056,10 @@ fn identical_transient_or_invalid_final_progress_cannot_bypass_the_publication_g
         ))
     ));
     let evidence = invalid.ledger_snapshot();
-    assert_eq!(evidence.current_live_bytes(), 0);
+    assert_eq!(
+        evidence.current_live_bytes(),
+        publication_capacity_bytes() + 3
+    );
     assert_eq!(
         evidence
             .dimension(Dimension::Records)
@@ -1440,6 +2067,8 @@ fn identical_transient_or_invalid_final_progress_cannot_bypass_the_publication_g
             .committed(),
         0
     );
+    drop(pending);
+    assert_eq!(invalid.ledger_snapshot().current_live_bytes(), 0);
 }
 
 #[test]
@@ -1460,21 +2089,25 @@ fn finish_error_preserves_real_live_and_pending_evidence() {
     assert_eq!(live_error.snapshot().peak_live_bytes(), 7);
     drop(live);
 
-    let mut combined_coordinator = coordinator(20);
+    let mut combined_coordinator = publication_coordinator(20);
     let combined_live = combined_coordinator
         .checkpoint()
         .reserve(Phase::Output, Dimension::OutputBytes, 4)
         .expect("combined fixture reservation");
+    let mut combined_batch = publication_batch(&mut combined_coordinator, [combined_live]);
     let combined_pending = combined_coordinator
         .prepare_publication(
-            vec![combined_live],
+            &mut combined_batch,
             &[Commitment::new(Dimension::Records, 2)],
         )
         .expect("combined pending transaction");
     let combined_error = combined_coordinator
         .finish()
         .expect_err("pending live output prevents finalization");
-    assert_eq!(combined_error.snapshot().current_live_bytes(), 4);
+    assert_eq!(
+        combined_error.snapshot().current_live_bytes(),
+        publication_capacity_bytes() + 4
+    );
     assert_eq!(
         combined_error
             .snapshot()
@@ -1494,8 +2127,9 @@ fn finish_error_preserves_real_live_and_pending_evidence() {
     drop(combined_pending);
 
     let mut pending_coordinator = coordinator(20);
+    let mut pending_batch = PublicationBatch::default();
     let pending = pending_coordinator
-        .prepare_publication(Vec::new(), &[])
+        .prepare_publication(&mut pending_batch, &[])
         .expect("even an empty transaction has linear pending state");
     let pending_error = pending_coordinator
         .finish()
@@ -1612,7 +2246,7 @@ fn zero_byte_reservation_capabilities_must_be_released_before_clean_finalization
 
 #[test]
 fn evidence_peak_covers_snapshot_and_publication_storage_then_finishes_at_zero() {
-    let mut coordinator = coordinator(20);
+    let mut coordinator = publication_coordinator(20);
     let reservation = coordinator
         .checkpoint()
         .reserve(Phase::Output, Dimension::OutputBytes, 4)
@@ -1623,23 +2257,24 @@ fn evidence_peak_covers_snapshot_and_publication_storage_then_finishes_at_zero()
     assert!(before_publication.current_evidence_bytes() > 0);
     assert!(before_publication.peak_evidence_bytes() > before_publication.current_evidence_bytes());
 
+    let mut batch = publication_batch(&mut coordinator, [reservation]);
+    let before_prepare = coordinator
+        .try_ledger_snapshot()
+        .expect("accounted publication batch evidence");
     let pending = coordinator
-        .prepare_publication(
-            vec![reservation],
-            &[Commitment::new(Dimension::OutputBytes, 4)],
-        )
+        .prepare_publication(&mut batch, &[Commitment::new(Dimension::OutputBytes, 4)])
         .expect("bounded sorted commitment evidence");
     let while_pending = coordinator
         .try_ledger_snapshot()
         .expect("pending evidence snapshot");
-    assert!(while_pending.current_evidence_bytes() > before_publication.current_evidence_bytes());
+    assert!(while_pending.current_evidence_bytes() > before_prepare.current_evidence_bytes());
     drop(pending);
     let after_rollback = coordinator
         .try_ledger_snapshot()
         .expect("rollback evidence snapshot");
     assert_eq!(
         after_rollback.current_evidence_bytes(),
-        before_publication.current_evidence_bytes()
+        before_prepare.current_evidence_bytes()
     );
     let snapshot = coordinator.finish().expect("clean final evidence");
     assert_eq!(snapshot.current_evidence_bytes(), 0);

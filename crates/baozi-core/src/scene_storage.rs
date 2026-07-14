@@ -29,6 +29,104 @@ pub trait SceneStorageFootprint {
     fn storage_footprint(&self) -> Result<SceneFootprint, SceneValidationError>;
 }
 
+/// Retained dynamic storage that must accompany one value inserted into a scene collection.
+///
+/// Collection backing storage accounts for the inline value. Relationship storage created after
+/// insertion is owned by the scene builder's typed replacement inventory rather than by a
+/// prepared value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SceneValueFootprint {
+    payload_bytes: u64,
+}
+
+impl SceneValueFootprint {
+    const fn payload(payload_bytes: u64) -> Self {
+        Self { payload_bytes }
+    }
+
+    /// Returns all retained dynamic storage owned by the prepared value.
+    pub const fn payload_bytes(self) -> u64 {
+        self.payload_bytes
+    }
+}
+
+mod scene_build_value_sealed {
+    pub trait Sealed {}
+}
+
+/// A core-owned value whose retained storage can be proven before scene insertion.
+///
+/// This trait is sealed so external implementations cannot omit hidden canonical storage.
+pub trait SceneBuildValue: scene_build_value_sealed::Sealed {
+    /// Measures only the dynamic storage not covered by the owning scene collection.
+    fn scene_value_footprint(&self) -> Result<SceneValueFootprint, SceneValidationError>;
+}
+
+macro_rules! impl_scene_build_value {
+    ($($type:ty),+ $(,)?) => {
+        $(
+            impl scene_build_value_sealed::Sealed for $type {}
+
+            impl SceneBuildValue for $type {
+                fn scene_value_footprint(
+                    &self,
+                ) -> Result<SceneValueFootprint, SceneValidationError> {
+                    dynamic_value_footprint(self)
+                }
+            }
+        )+
+    };
+}
+
+impl_scene_build_value!(
+    Mesh, Material, Texture, Animation, Camera, Light, Skin, Node
+);
+
+impl scene_build_value_sealed::Sealed for (String, MetadataValue) {}
+
+impl SceneBuildValue for (String, MetadataValue) {
+    fn scene_value_footprint(&self) -> Result<SceneValueFootprint, SceneValidationError> {
+        let key_bytes = u64::try_from(self.0.capacity()).map_err(|_| {
+            SceneValidationError::AccountingOverflow {
+                resource: "scene metadata key capacity",
+            }
+        })?;
+        let value_bytes = match &self.1 {
+            MetadataValue::String(value) => u64::try_from(value.capacity()).map_err(|_| {
+                SceneValidationError::AccountingOverflow {
+                    resource: "scene metadata string capacity",
+                }
+            })?,
+            MetadataValue::Bool(_) | MetadataValue::I64(_) | MetadataValue::F64(_) => 0,
+        };
+        key_bytes
+            .checked_add(value_bytes)
+            .map(SceneValueFootprint::payload)
+            .ok_or(SceneValidationError::AccountingOverflow {
+                resource: "scene metadata entry storage",
+            })
+    }
+}
+
+fn dynamic_value_footprint<T: SceneStorageFootprint>(
+    value: &T,
+) -> Result<SceneValueFootprint, SceneValidationError> {
+    dynamic_value_bytes(value).map(SceneValueFootprint::payload)
+}
+
+fn dynamic_value_bytes<T: SceneStorageFootprint>(value: &T) -> Result<u64, SceneValidationError> {
+    let total = value.storage_footprint()?.accounted_payload_bytes();
+    let inline =
+        u64::try_from(size_of::<T>()).map_err(|_| SceneValidationError::AccountingOverflow {
+            resource: "scene value inline storage",
+        })?;
+    total
+        .checked_sub(inline)
+        .ok_or(SceneValidationError::AccountingOverflow {
+            resource: "scene value dynamic storage",
+        })
+}
+
 macro_rules! impl_storage_footprint {
     ($type:ty, $measure:ident) => {
         impl SceneStorageFootprint for $type {

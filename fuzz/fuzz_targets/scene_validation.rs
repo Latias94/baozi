@@ -272,12 +272,12 @@ impl SceneValidationControl for FuzzValidationControl {
 
     fn transition_reservation(
         &mut self,
-        reservation: Self::Reservation,
+        _reservation: &mut Self::Reservation,
         _from: SceneReservationKind,
         _to: SceneReservationKind,
         _required_bytes: u64,
-    ) -> Result<Self::Reservation, Self::Error> {
-        Ok(reservation)
+    ) -> Result<(), Self::Error> {
+        Ok(())
     }
 }
 

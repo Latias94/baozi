@@ -1,13 +1,13 @@
 use baozi::{
     AssetIo, AssetLength, AssetOpenError, AssetPath, AuthorityDomain, CapabilityStatus, Error,
     FormatCapability, FormatDescriptor, FormatEncoding, FormatId, FormatMaturity, ImportCause,
-    ImportDimension, ImportOperationControl, Importer, Mesh, MeshBinding, PostProcessLimits,
+    ImportDimension, ImportOperationControl, Importer, MeshBinding, PostProcessLimits,
     PostProcessPipeline, PostProcessRunError, PostProcessStep, PrimitiveTopology, ReadConfidence,
     RequestError, Vec3,
 };
 use baozi_import::{
-    CapacityPlan, DetectionOutcome, DetectionResult, DetectionScope, FormatImporter,
-    ImportStorageClass, ParseResult, ParseScope, Probe, ReadHint, SameAuthorityResolver,
+    DetectionOutcome, DetectionResult, DetectionScope, FormatImporter, ImportStorageClass,
+    MeshBuildConfig, ParseResult, ParseScope, Probe, ReadHint, SameAuthorityResolver,
 };
 use baozi_io::OpenedAsset;
 use std::io::Cursor;
@@ -107,32 +107,26 @@ impl FormatImporter for GeometryImporter {
     }
 
     fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<baozi_core::SceneDraft> {
-        let plan = CapacityPlan::for_type::<Vec3>(0, 0, 1)
-            .expect("one test position must have a valid capacity plan");
-        let admitted = plan
-            .envelope_delta_bytes()
-            .expect("one test position must have a bounded capacity envelope");
-        let mut position_storage =
-            scope.reserve_live(ImportStorageClass::SceneConstruction, admitted)?;
-        let mut positions = Vec::new();
-        plan.verify_preflight(positions.len(), positions.capacity())
-            .expect("new test position storage must match its capacity plan");
-        positions
-            .try_reserve_exact(plan.allocator_additional())
-            .map_err(|_| scope.allocation_failure("test-position-storage"))?;
-        let actual = plan
-            .finish(positions.len(), positions.capacity())
-            .expect("test allocator must satisfy the qualified capacity envelope");
-        scope.resize_live(&mut position_storage, actual)?;
-        positions.push(Vec3::ZERO);
+        let mut positions = scope.metered_vec(
+            ImportStorageClass::SceneConstruction,
+            "test-position-storage",
+        );
+        positions.try_push(Vec3::ZERO)?;
+        let name = scope
+            .metered_string(ImportStorageClass::SceneConstruction, "test-mesh-name")
+            .try_into_scene_parts()?
+            .discard_into_none();
+        let mesh = name
+            .into_mesh(MeshBuildConfig {
+                topology: PrimitiveTopology::Points,
+                material: None,
+                bounds: None,
+            })
+            .with_positions(positions.try_into_scene_parts()?)?
+            .finish()?;
 
         let mut builder = scope.scene_builder()?;
-        let mesh = builder.add_mesh(Mesh {
-            topology: PrimitiveTopology::Points,
-            positions,
-            ..Mesh::default()
-        })?;
-        builder.adopt_reservation(position_storage)?;
+        let mesh = builder.add_prepared_mesh(mesh)?;
         builder.add_node_mesh_binding(builder.root(), MeshBinding::new(mesh))?;
         builder.finish_draft()
     }

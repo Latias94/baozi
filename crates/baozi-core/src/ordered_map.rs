@@ -47,6 +47,14 @@ pub struct OrderedMapCapacityPlan<K, V> {
     marker: PhantomData<fn() -> (K, V)>,
 }
 
+/// A fully allocated capacity replacement whose commit cannot enter the allocator.
+pub struct PreparedOrderedMapCapacity<'owner, K, V> {
+    owner: &'owner mut OrderedMap<K, V>,
+    replacement: Option<Vec<(K, V)>>,
+    growth_bytes: u64,
+    allocation_bytes: u64,
+}
+
 /// A full-allocation replacement plan that leaves the live map untouched until commit.
 pub(crate) struct OrderedMapReplacementPlan<K, V> {
     original_len: usize,
@@ -95,6 +103,13 @@ impl<K, V> OrderedMapCapacityPlan<K, V> {
     pub fn envelope_delta_bytes(&self) -> Result<u64, OrderedMapError> {
         self.inner
             .envelope_delta_bytes()
+            .map_err(OrderedMapError::CapacityPlan)
+    }
+
+    /// Returns the complete replacement allocation that must be admitted before preparation.
+    pub fn replacement_envelope_bytes(&self) -> Result<u64, OrderedMapError> {
+        CapacityPlan::for_type::<(K, V)>(0, 0, self.inner.envelope_capacity())
+            .and_then(CapacityPlan::envelope_delta_bytes)
             .map_err(OrderedMapError::CapacityPlan)
     }
 }
@@ -269,6 +284,52 @@ impl<K, V> OrderedMap<K, V> {
             .map_err(OrderedMapError::CapacityPlan)
     }
 
+    /// Allocates and qualifies a complete replacement without changing the live map.
+    ///
+    /// Callers that account live storage must admit [`OrderedMapCapacityPlan::replacement_envelope_bytes`]
+    /// before calling this method. Dropping the returned candidate leaves this map unchanged.
+    pub fn prepare_capacity_replacement(
+        &mut self,
+        plan: OrderedMapCapacityPlan<K, V>,
+    ) -> Result<PreparedOrderedMapCapacity<'_, K, V>, OrderedMapError> {
+        plan.inner
+            .verify_preflight(self.len(), self.capacity())
+            .map_err(OrderedMapError::CapacityPlan)?;
+        if plan.inner.desired_capacity() <= self.capacity() {
+            return Ok(PreparedOrderedMapCapacity {
+                owner: self,
+                replacement: None,
+                growth_bytes: 0,
+                allocation_bytes: 0,
+            });
+        }
+
+        let replacement_plan =
+            CapacityPlan::for_type::<(K, V)>(0, 0, plan.inner.envelope_capacity())
+                .map_err(OrderedMapError::CapacityPlan)?;
+        replacement_plan
+            .verify_preflight(0, 0)
+            .map_err(OrderedMapError::CapacityPlan)?;
+        let mut replacement = Vec::new();
+        replacement
+            .try_reserve_exact(replacement_plan.allocator_additional())
+            .map_err(|_| OrderedMapError::AllocationFailed)?;
+        let allocation_bytes = replacement_plan
+            .finish(replacement.len(), replacement.capacity())
+            .map_err(OrderedMapError::CapacityPlan)?;
+        let growth_bytes = plan
+            .inner
+            .finish(self.len(), replacement.capacity())
+            .map_err(OrderedMapError::CapacityPlan)?;
+
+        Ok(PreparedOrderedMapCapacity {
+            owner: self,
+            replacement: Some(replacement),
+            growth_bytes,
+            allocation_bytes,
+        })
+    }
+
     pub fn iter(&self) -> OrderedMapIter<'_, K, V> {
         OrderedMapIter(self.entries.iter())
     }
@@ -342,6 +403,33 @@ impl<K, V> OrderedMap<K, V> {
         }
     }
 
+    /// Inserts one complete entry without allocation after capacity admission.
+    ///
+    /// Unlike [`Self::insert_reserved`], replacement swaps both the key and value. This is useful
+    /// for callers that couple each entry's owned storage to a separate reservation owner.
+    pub fn insert_entry_reserved(
+        &mut self,
+        key: K,
+        value: V,
+    ) -> Result<Option<(K, V)>, OrderedMapError>
+    where
+        K: Ord,
+    {
+        match self.find(&key) {
+            Ok(index) => Ok(Some(std::mem::replace(
+                &mut self.entries[index],
+                (key, value),
+            ))),
+            Err(index) => {
+                if self.len() == self.capacity() {
+                    return Err(OrderedMapError::CapacityNotReserved);
+                }
+                self.entries.insert(index, (key, value));
+                Ok(None)
+            }
+        }
+    }
+
     fn find<Q>(&self, key: &Q) -> Result<usize, usize>
     where
         K: Borrow<Q> + Ord,
@@ -349,6 +437,32 @@ impl<K, V> OrderedMap<K, V> {
     {
         self.entries
             .binary_search_by(|(candidate, _)| candidate.borrow().cmp(key))
+    }
+}
+
+impl<K, V> PreparedOrderedMapCapacity<'_, K, V> {
+    /// Returns the retained byte growth after the old allocation is released.
+    pub const fn growth_bytes(&self) -> u64 {
+        self.growth_bytes
+    }
+
+    /// Returns the complete retained bytes of the prepared replacement allocation.
+    pub const fn allocation_bytes(&self) -> u64 {
+        self.allocation_bytes
+    }
+
+    /// Commits the qualified replacement without allocation or a fallible hook.
+    pub fn commit(mut self) {
+        let Some(mut replacement) = self.replacement.take() else {
+            return;
+        };
+        assert!(
+            replacement.capacity() >= self.owner.len(),
+            "a prepared ordered-map capacity must retain every live entry"
+        );
+        replacement.append(&mut self.owner.entries);
+        std::mem::swap(&mut self.owner.entries, &mut replacement);
+        drop(replacement);
     }
 }
 
@@ -484,6 +598,19 @@ mod tests {
         map.try_insert("a", 1).unwrap();
         let capacity = map.capacity();
         assert_eq!(map.insert_reserved("a", 2).unwrap(), Some(1));
+        assert_eq!(map.capacity(), capacity);
+        assert_eq!(map.get("a"), Some(&2));
+    }
+
+    #[test]
+    fn complete_entry_replacement_returns_the_retired_key_and_value() {
+        let mut map = OrderedMap::new();
+        map.try_insert("a".to_owned(), 1).unwrap();
+        let capacity = map.capacity();
+
+        let retired = map.insert_entry_reserved("a".to_owned(), 2).unwrap();
+
+        assert_eq!(retired, Some(("a".to_owned(), 1)));
         assert_eq!(map.capacity(), capacity);
         assert_eq!(map.get("a"), Some(&2));
     }

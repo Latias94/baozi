@@ -19,6 +19,7 @@ pub use ledger::{
     Commitment, CounterClass, DEFAULT_LEDGER_EVIDENCE_BYTE_LIMIT, DimensionPolicy,
     DimensionSnapshot, LedgerCause, LedgerEvidenceError, LedgerEvidencePurpose, LedgerFinishError,
     LedgerLimits, LedgerLimitsError, LedgerSnapshot, LiveReservation, PendingPublication,
-    PhaseSnapshot,
+    PhaseSnapshot, PublicationReservationBatch, PublicationReservationBatchError,
+    PublicationReservationBatchErrorKind,
 };
 pub use owner::OperationOwner;

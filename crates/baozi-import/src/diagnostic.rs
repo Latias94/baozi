@@ -1,5 +1,7 @@
+use crate::error::ScopeAbortCause;
 use crate::format::discard_untrusted_panic_payload;
-use crate::ledger::ImportProgressPhase;
+use crate::ledger::{ImportProgressPhase, ImportReservation};
+use crate::metered_storage::{AccountedReservationVec, AccountedVec};
 use baozi_io::{AssetPath, AuthorityDomain};
 use baozi_operation::{CapacityPlan, CapacityPlanError};
 use std::error::Error;
@@ -308,7 +310,6 @@ impl Error for DiagnosticCause {}
 
 #[derive(Debug, Clone, Copy)]
 struct DiagnosticCapacityPlans {
-    diagnostics: CapacityPlan,
     details: CapacityPlan,
     source: CapacityPlan,
     object_path: Option<CapacityPlan>,
@@ -317,21 +318,11 @@ struct DiagnosticCapacityPlans {
 
 impl DiagnosticCapacityPlans {
     fn new(
-        diagnostics_len: usize,
-        diagnostics_capacity: usize,
         source_bytes: usize,
         object_path_bytes: Option<usize>,
         message_bytes: usize,
     ) -> Result<Self, CapacityPlanError> {
-        let diagnostics_required = diagnostics_len
-            .checked_add(1)
-            .ok_or(CapacityPlanError::CapacityOverflow)?;
         Ok(Self {
-            diagnostics: CapacityPlan::for_type::<ImportDiagnostic>(
-                diagnostics_len,
-                diagnostics_capacity,
-                diagnostics_required,
-            )?,
             details: CapacityPlan::for_type::<DiagnosticDetail>(0, 0, MAX_DIAGNOSTIC_DETAILS)?,
             source: CapacityPlan::for_type::<u8>(0, 0, source_bytes)?,
             object_path: object_path_bytes
@@ -360,10 +351,7 @@ impl DiagnosticCapacityPlans {
     }
 
     fn structural_envelope_bytes(self) -> Result<u64, CapacityPlanError> {
-        self.diagnostics
-            .envelope_delta_bytes()?
-            .checked_add(self.details.envelope_delta_bytes()?)
-            .ok_or(CapacityPlanError::CapacityOverflow)
+        self.details.envelope_delta_bytes()
     }
 }
 
@@ -445,7 +433,8 @@ impl PreparedDiagnostic {
 }
 
 pub(crate) struct DiagnosticSink {
-    diagnostics: Vec<ImportDiagnostic>,
+    diagnostics: AccountedVec<ImportDiagnostic>,
+    reservations: AccountedReservationVec,
     summary: DiagnosticSummary,
     max_count: u64,
     max_stored_bytes: u64,
@@ -461,7 +450,8 @@ impl DiagnosticSink {
         max_attempted_bytes: u64,
     ) -> Self {
         Self {
-            diagnostics: Vec::new(),
+            diagnostics: AccountedVec::new(),
+            reservations: AccountedReservationVec::new(),
             summary: DiagnosticSummary::default(),
             max_count,
             max_stored_bytes,
@@ -519,8 +509,6 @@ impl DiagnosticSink {
                 .saturating_sub(fixed_attempted_bytes)
                 .min(self.max_message_bytes as u64) as usize;
             let plans = DiagnosticCapacityPlans::new(
-                self.diagnostics.len(),
-                self.diagnostics.capacity(),
                 source.as_str().len(),
                 object_path.map(str::len),
                 message_bytes,
@@ -769,19 +757,7 @@ impl DiagnosticSink {
                 });
             }
         };
-        let diagnostic_capacity_bytes =
-            match apply_vec_capacity_plan(&mut self.diagnostics, capacity_plans.diagnostics) {
-                Ok(bytes) => bytes,
-                Err(cause) => {
-                    self.discard_admission();
-                    return Err(DiagnosticPrepareFailure {
-                        cause: DiagnosticPrepareCause::Diagnostic(cause),
-                        additional_attempted_bytes,
-                    });
-                }
-            };
-        let structural_bytes =
-            diagnostic_capacity_bytes.saturating_add(detail_build.detail_capacity_bytes);
+        let structural_bytes = detail_build.detail_capacity_bytes;
         debug_assert!(structural_bytes <= admission.structural_capacity_envelope);
         Ok(PreparedDiagnostic {
             diagnostic: Some(ImportDiagnostic {
@@ -807,16 +783,75 @@ impl DiagnosticSink {
         self.discard_admission();
     }
 
-    pub(crate) fn commit(&mut self, mut prepared: PreparedDiagnostic) {
+    pub(crate) fn try_reserve_storage_slot(
+        &mut self,
+        reserve: impl FnOnce(u64) -> Result<ImportReservation, ScopeAbortCause>,
+    ) -> Result<(), ScopeAbortCause> {
+        self.diagnostics
+            .try_reserve(1, "diagnostic-storage", reserve)
+    }
+
+    pub(crate) fn try_reserve_reservation_slots(
+        &mut self,
+        additional: usize,
+        reserve: impl FnOnce(u64) -> Result<ImportReservation, ScopeAbortCause>,
+    ) -> Result<(), ScopeAbortCause> {
+        self.reservations
+            .try_reserve(additional, "diagnostic-reservation-list", reserve)
+    }
+
+    #[allow(
+        clippy::result_large_err,
+        reason = "rejection must return the prepared diagnostic and both live reservations without allocating"
+    )]
+    pub(crate) fn commit(
+        &mut self,
+        mut prepared: PreparedDiagnostic,
+        payload: Option<ImportReservation>,
+        structural: Option<ImportReservation>,
+    ) -> Result<
+        (),
+        (
+            PreparedDiagnostic,
+            Option<ImportReservation>,
+            Option<ImportReservation>,
+        ),
+    > {
         let Some(diagnostic) = prepared.diagnostic.take() else {
-            return;
+            return if payload.is_none() && structural.is_none() {
+                Ok(())
+            } else {
+                Err((prepared, payload, structural))
+            };
         };
-        self.diagnostics.push(diagnostic);
+        let (payload, structural) = match (payload, structural) {
+            (Some(payload), Some(structural)) => (payload, structural),
+            (payload, structural) => {
+                prepared.diagnostic = Some(diagnostic);
+                return Err((prepared, payload, structural));
+            }
+        };
+        if !self.diagnostics.has_slots(1) || !self.reservations.has_slots(2) {
+            prepared.diagnostic = Some(diagnostic);
+            return Err((prepared, Some(payload), Some(structural)));
+        }
+        if let Err(diagnostic) = self.diagnostics.try_push_reserved(diagnostic) {
+            prepared.diagnostic = Some(diagnostic);
+            return Err((prepared, Some(payload), Some(structural)));
+        }
+        if let Err((payload, structural)) = self
+            .reservations
+            .try_push_pair_reserved(payload, structural)
+        {
+            prepared.diagnostic = self.diagnostics.pop();
+            return Err((prepared, Some(payload), Some(structural)));
+        }
         self.summary.stored_count = self.summary.stored_count.saturating_add(1);
         self.summary.stored_bytes = self
             .summary
             .stored_bytes
             .saturating_add(prepared.stored_bytes);
+        Ok(())
     }
 
     fn record_failed_prepare(&mut self, additional_attempted_bytes: u64) {
@@ -837,6 +872,53 @@ impl DiagnosticSink {
         self.summary
     }
 
+    pub(crate) fn publication_reservation_count(&self) -> Option<usize> {
+        self.diagnostics
+            .capacity_reservation_count()
+            .checked_add(self.reservations.publication_reservation_count()?)
+    }
+
+    pub(crate) fn move_publication_reservations_into(
+        &mut self,
+        target: &mut AccountedReservationVec,
+    ) {
+        let additional = self
+            .publication_reservation_count()
+            .expect("diagnostic reservation count must fit usize");
+        assert!(
+            target.has_slots(additional),
+            "diagnostic publication slots must be admitted before moving tokens"
+        );
+        self.reservations.move_publication_reservations_into(target);
+        self.diagnostics.move_capacity_reservation_into(target);
+    }
+
+    pub(crate) fn into_terminal(self) -> TerminalDiagnosticEvidence {
+        let Self {
+            diagnostics,
+            reservations,
+            summary,
+            max_count: _,
+            max_stored_bytes: _,
+            max_message_bytes: _,
+            max_attempted_bytes: _,
+        } = self;
+        let diagnostics = diagnostics.into_terminal();
+        let terminal = TerminalDiagnosticEvidence {
+            diagnostics: diagnostics.into_values(),
+            summary,
+        };
+        drop(reservations);
+        terminal
+    }
+}
+
+pub(crate) struct TerminalDiagnosticEvidence {
+    diagnostics: Vec<ImportDiagnostic>,
+    summary: DiagnosticSummary,
+}
+
+impl TerminalDiagnosticEvidence {
     pub(crate) fn into_parts(self) -> (Vec<ImportDiagnostic>, DiagnosticSummary) {
         (self.diagnostics, self.summary)
     }
@@ -1241,11 +1323,12 @@ mod tests {
             )
             .expect("bounded preparation");
         assert!(prepared.is_stored());
-        sink.commit(prepared);
-        assert_eq!(sink.diagnostics().len(), 1);
-        assert!(sink.diagnostics()[0].is_truncated());
-        assert!(!sink.diagnostics()[0].message().contains('\n'));
-        assert_eq!(sink.summary().stored_count(), 1);
+        let diagnostic = prepared
+            .diagnostic
+            .as_ref()
+            .expect("stored preparation must retain a diagnostic");
+        assert!(diagnostic.is_truncated());
+        assert!(!diagnostic.message().contains('\n'));
     }
 
     #[test]
@@ -1254,7 +1337,8 @@ mod tests {
         let mut sink = DiagnosticSink::new(0, 0, 0, 128);
         let prepared = prepare_and_commit(&mut sink, &source, format_args!("bounded"));
         assert!(!prepared.is_stored());
-        sink.commit(prepared);
+        sink.commit(prepared, None, None)
+            .expect("non-stored preparation needs no reservations");
         assert_eq!(sink.summary().attempted_count(), 1);
         assert_eq!(sink.summary().dropped_count(), 1);
         assert!(sink.diagnostics().is_empty());

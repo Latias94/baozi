@@ -13,7 +13,8 @@ use baozi_core::{
 };
 use baozi_operation::{
     CapacityPlan, CapacityPlanError, Commitment, ControlCause, FinalProgress, LedgerCause,
-    LedgerLimits, LedgerLimitsError, LiveReservation, OperationCoordinator, PublicationCause,
+    LedgerLimits, LedgerLimitsError, LiveReservation, OperationCoordinator, PendingPublication,
+    PublicationCause, PublicationReservationBatch,
 };
 use std::mem::size_of;
 
@@ -26,6 +27,15 @@ type Coordinator = OperationCoordinator<
 >;
 type BufferReservation =
     LiveReservation<PostProcessOwner, PostProcessLedgerPhase, PostProcessDimension>;
+type PublicationBatch =
+    PublicationReservationBatch<PostProcessOwner, PostProcessLedgerPhase, PostProcessDimension>;
+type PublicationBatchError = baozi_operation::PublicationReservationBatchError<
+    PostProcessOwner,
+    PostProcessLedgerPhase,
+    PostProcessDimension,
+>;
+type PostProcessPendingPublication =
+    PendingPublication<PostProcessOwner, PostProcessLedgerPhase, PostProcessDimension>;
 
 /// A currently implemented post-process transformation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -241,6 +251,9 @@ struct SceneReservation {
     kind: SceneReservationKind,
     primary: Option<BufferReservation>,
     retained: ReservationList,
+    publication_batch: Option<PublicationBatch>,
+    rejected_publication_batch: Option<PublicationBatchError>,
+    pending_publication: Option<PostProcessPendingPublication>,
 }
 
 struct ReservationList {
@@ -258,6 +271,13 @@ impl ReservationList {
 
     fn is_vacant(&self) -> bool {
         self.values.is_empty() && self.capacity.is_none()
+    }
+
+    fn has_slots(&self, additional: usize) -> bool {
+        self.values
+            .len()
+            .checked_add(additional)
+            .is_some_and(|required| required <= self.values.capacity())
     }
 
     fn ensure_slots(
@@ -278,50 +298,36 @@ impl ReservationList {
         }
 
         let desired = required.max(4);
-        let plan = CapacityPlan::for_type::<BufferReservation>(
-            self.values.len(),
-            self.values.capacity(),
-            desired,
-        )
-        .map_err(|_| PostProcessError::CapacityExceeded { context, resource })?;
+        let plan = CapacityPlan::for_type::<BufferReservation>(0, 0, desired)
+            .map_err(|_| PostProcessError::CapacityExceeded { context, resource })?;
         let admitted = plan
             .envelope_delta_bytes()
             .map_err(|_| PostProcessError::CapacityExceeded { context, resource })?;
-        let existing = measured_capacity_bytes::<BufferReservation>(self.values.capacity())
-            .map_err(|_| PostProcessError::CapacityExceeded { context, resource })?;
-        let envelope = existing
-            .checked_add(admitted)
-            .ok_or(PostProcessError::CapacityExceeded { context, resource })?;
-
+        let mut candidate = Self::new();
         resize_or_reserve(
             coordinator,
-            &mut self.capacity,
+            &mut candidate.capacity,
             phase,
             PostProcessDimension::StagingBytes,
-            envelope,
+            admitted,
         )?;
-        plan.verify_preflight(self.values.len(), self.values.capacity())
+        plan.verify_preflight(candidate.values.len(), candidate.values.capacity())
             .map_err(|_| PostProcessError::ValidationControlInvariant {
-                message: "reservation-list capacity plan became stale before allocator entry",
+                message: "reservation-list candidate plan became stale before allocator entry",
             })?;
-        self.values
+        candidate
+            .values
             .try_reserve_exact(plan.allocator_additional())
             .map_err(|_| PostProcessError::CapacityExceeded { context, resource })?;
-        let retained = plan
-            .finish(self.values.len(), self.values.capacity())
+        plan.finish(candidate.values.len(), candidate.values.capacity())
             .map_err(|_| PostProcessError::ValidationControlInvariant {
-                message: "reservation-list allocator violated the qualified capacity envelope",
+                message: "reservation-list candidate violated the qualified capacity envelope",
             })?;
-        let actual = existing
-            .checked_add(retained)
-            .ok_or(PostProcessError::CapacityExceeded { context, resource })?;
-        resize_or_reserve(
-            coordinator,
-            &mut self.capacity,
-            phase,
-            PostProcessDimension::StagingBytes,
-            actual,
-        )
+
+        candidate.values.append(&mut self.values);
+        std::mem::swap(self, &mut candidate);
+        drop(candidate);
+        Ok(())
     }
 
     fn transfer_all(
@@ -358,25 +364,16 @@ impl ReservationList {
     fn into_publication(
         mut self,
         primary: Option<BufferReservation>,
-    ) -> StepResult<Vec<BufferReservation>> {
-        let additional = usize::from(primary.is_some()) + usize::from(self.capacity.is_some());
-        let required = self.values.len().checked_add(additional).ok_or(
-            PostProcessError::ValidationControlInvariant {
-                message: "publication reservation count overflowed",
-            },
-        )?;
-        if required > self.values.capacity() {
-            return Err(PostProcessError::ValidationControlInvariant {
-                message: "publication reservation slots were not pre-admitted",
-            });
-        }
+    ) -> std::result::Result<PublicationBatch, PublicationBatchError> {
+        let additional = usize::from(primary.is_some());
+        assert!(
+            self.has_slots(additional),
+            "publication reservation slots must be admitted before conversion"
+        );
         if let Some(primary) = primary {
             self.values.push(primary);
         }
-        if let Some(capacity) = self.capacity.take() {
-            self.values.push(capacity);
-        }
-        Ok(self.values)
+        PublicationReservationBatch::try_new(self.values, self.capacity)
     }
 }
 
@@ -390,7 +387,6 @@ struct ExecutionState<'a> {
     coordinator: &'a mut Coordinator,
     completed_work: u64,
     retained_output: ReservationList,
-    failed_transition: Option<SceneReservation>,
 }
 
 impl<'a> ExecutionState<'a> {
@@ -399,7 +395,6 @@ impl<'a> ExecutionState<'a> {
             coordinator,
             completed_work: 0,
             retained_output: ReservationList::new(),
-            failed_transition: None,
         }
     }
 
@@ -474,6 +469,13 @@ impl<'a> ExecutionState<'a> {
     }
 
     fn begin_validation(&mut self) -> StepResult<()> {
+        self.retained_output.ensure_slots(
+            self.coordinator,
+            PostProcessLedgerPhase::Transform,
+            2,
+            "publication",
+            "publication reservation evidence",
+        )?;
         self.retained_output
             .transfer_all(self.coordinator, PostProcessLedgerPhase::Validate)?;
         self.coordinator
@@ -518,20 +520,57 @@ impl<'a> ExecutionState<'a> {
                     message: "publication received a non-canonical scene reservation",
                 });
             }
-            let reservations = reservation.retained.into_publication(reservation.primary)?;
+            if reservation.publication_batch.is_some()
+                || reservation.rejected_publication_batch.is_some()
+                || reservation.pending_publication.is_some()
+            {
+                return Err(PostProcessError::ValidationControlInvariant {
+                    message: "publication reservation was already prepared",
+                });
+            }
+            let additional = usize::from(reservation.primary.is_some());
+            if !reservation.retained.has_slots(additional) {
+                return Err(PostProcessError::ValidationControlInvariant {
+                    message: "publication reservation slots were not pre-admitted",
+                });
+            }
+
+            let retained = std::mem::take(&mut reservation.retained);
+            let primary = reservation.primary.take();
+            reservation.publication_batch = match retained.into_publication(primary) {
+                Ok(publication_batch) => Some(publication_batch),
+                Err(error) => {
+                    reservation.rejected_publication_batch = Some(error);
+                    return Err(PostProcessError::ValidationControlInvariant {
+                        message: "publication reservation capacity was not fully covered",
+                    });
+                }
+            };
+            let publication_batch = reservation.publication_batch.as_mut().ok_or(
+                PostProcessError::ValidationControlInvariant {
+                    message: "publication batch state was lost",
+                },
+            )?;
             let publication = self
                 .coordinator
                 .prepare_publication(
-                    reservations,
+                    publication_batch,
                     &[Commitment::new(
                         PostProcessDimension::CanonicalBytes,
                         canonical_bytes,
                     )],
                 )
                 .map_err(accounting_error)?;
+            reservation.pending_publication = Some(publication);
+            reservation.publication_batch = None;
+            let pending_publication = reservation.pending_publication.as_mut().ok_or(
+                PostProcessError::ValidationControlInvariant {
+                    message: "pending publication state was lost",
+                },
+            )?;
             self.coordinator
                 .publish(
-                    publication,
+                    pending_publication,
                     FinalProgress::new(
                         PostProcessProgressPhase::Validate,
                         PostProcessProgressUnit::WorkItems,
@@ -562,31 +601,23 @@ impl<'a> ExecutionState<'a> {
 
         let absorbs_output = from == SceneReservationKind::EditCandidate
             && to == SceneReservationKind::CanonicalOutput;
-        if absorbs_output {
-            if !reservation.retained.is_vacant() {
-                return Err(PostProcessError::ValidationControlInvariant {
-                    message: "edit reservation already retained output evidence",
-                });
-            }
-            reservation.retained = std::mem::take(&mut self.retained_output);
+        if absorbs_output && !reservation.retained.is_vacant() {
+            return Err(PostProcessError::ValidationControlInvariant {
+                message: "edit reservation already retained output evidence",
+            });
         }
 
-        if to == SceneReservationKind::CanonicalOutput {
-            reservation.retained.ensure_slots(
-                self.coordinator,
-                PostProcessLedgerPhase::Validate,
-                2,
-                "publication",
-                "publication reservation evidence",
-            )?;
-        }
-
+        let retained = if absorbs_output {
+            &self.retained_output
+        } else {
+            &reservation.retained
+        };
         let primary_bytes = reservation
             .primary
             .as_ref()
             .map_or(0, BufferReservation::bytes);
         let available = primary_bytes
-            .checked_add(reservation.retained.payload_bytes()?)
+            .checked_add(retained.payload_bytes()?)
             .ok_or_else(|| {
                 accounting_error(LedgerCause::ArithmeticOverflow {
                     class: baozi_operation::CounterClass::Live,
@@ -599,78 +630,43 @@ impl<'a> ExecutionState<'a> {
             });
         }
 
-        let (source_phase, source_dimension) = reservation_class(from);
-        let (target_phase, target_dimension) = reservation_class(to);
-        let mut remaining = required_bytes;
-        if let Some(source) = reservation.primary.take() {
-            let source_bytes = source.bytes();
-            let target_bytes = source_bytes.min(remaining);
-            remaining -= target_bytes;
-            match self.coordinator.transition_reservation(
-                source,
-                target_phase,
-                target_dimension,
-                target_bytes,
-            ) {
-                Ok(target) => {
-                    if target_bytes != 0 {
-                        reservation.primary = Some(target);
-                    }
-                }
-                Err(error) => {
-                    reservation.primary = Some(
-                        self.coordinator
-                            .checkpoint()
-                            .reserve(source_phase, source_dimension, source_bytes)
-                            .map_err(accounting_error)?,
-                    );
-                    return Err(accounting_error(error));
-                }
-            }
-        }
-
-        let retained_count = reservation.retained.values.len();
-        let retained_source_phase = if absorbs_output {
-            PostProcessLedgerPhase::Validate
-        } else {
-            source_phase
-        };
-        for _ in 0..retained_count {
-            let source = reservation.retained.values.remove(0);
-            let source_bytes = source.bytes();
-            let target_bytes = source_bytes.min(remaining);
-            remaining -= target_bytes;
-            match self.coordinator.transition_reservation(
-                source,
-                target_phase,
-                target_dimension,
-                target_bytes,
-            ) {
-                Ok(target) => {
-                    if target_bytes != 0 {
-                        reservation.retained.values.push(target);
-                    }
-                }
-                Err(error) => {
-                    let restored = self
-                        .coordinator
-                        .checkpoint()
-                        .reserve(
-                            retained_source_phase,
-                            PostProcessDimension::StagingBytes,
-                            source_bytes,
-                        )
-                        .map_err(accounting_error)?;
-                    reservation.retained.values.insert(0, restored);
-                    return Err(accounting_error(error));
-                }
-            }
-        }
-        if remaining != 0 {
+        let additional_slots = usize::from(reservation.primary.is_some());
+        if !retained.has_slots(additional_slots) {
             return Err(PostProcessError::ValidationControlInvariant {
-                message: "scene reservation transition left required bytes uncovered",
+                message: "scene reservation transition slots were not pre-admitted",
             });
         }
+
+        let mut combined = if absorbs_output {
+            std::mem::take(&mut self.retained_output)
+        } else {
+            std::mem::take(&mut reservation.retained)
+        };
+        let had_primary = reservation.primary.is_some();
+        if let Some(primary) = reservation.primary.take() {
+            combined.values.insert(0, primary);
+        }
+
+        let (target_phase, target_dimension) = reservation_class(to);
+        if let Err(cause) = self.coordinator.transition_reservations(
+            &mut combined.values,
+            target_phase,
+            target_dimension,
+            required_bytes,
+        ) {
+            if had_primary {
+                reservation.primary = Some(combined.values.remove(0));
+            }
+            if absorbs_output {
+                self.retained_output = combined;
+            } else {
+                reservation.retained = combined;
+            }
+            return Err(accounting_error(cause));
+        }
+
+        combined.values.retain(|token| token.bytes() != 0);
+        reservation.retained = combined;
         reservation.kind = to;
         Ok(())
     }
@@ -718,6 +714,9 @@ impl SceneValidationControl for ExecutionState<'_> {
             kind,
             primary,
             retained: ReservationList::new(),
+            publication_batch: None,
+            rejected_publication_batch: None,
+            pending_publication: None,
         })
     }
 
@@ -759,24 +758,12 @@ impl SceneValidationControl for ExecutionState<'_> {
 
     fn transition_reservation(
         &mut self,
-        mut reservation: Self::Reservation,
+        reservation: &mut Self::Reservation,
         from: SceneReservationKind,
         to: SceneReservationKind,
         required_bytes: u64,
-    ) -> std::result::Result<Self::Reservation, Self::Error> {
-        match self.transition_scene_reservation(&mut reservation, from, to, required_bytes) {
-            Ok(()) => Ok(reservation),
-            Err(error) => {
-                if self.failed_transition.is_none() {
-                    self.failed_transition = Some(reservation);
-                    Err(error)
-                } else {
-                    Err(PostProcessError::ValidationControlInvariant {
-                        message: "multiple scene reservation transitions failed in one invocation",
-                    })
-                }
-            }
-        }
+    ) -> std::result::Result<(), Self::Error> {
+        self.transition_scene_reservation(reservation, from, to, required_bytes)
     }
 }
 
@@ -808,11 +795,6 @@ fn resize_or_reserve(
             Ok(())
         }
     }
-}
-
-fn measured_capacity_bytes<T>(capacity: usize) -> std::result::Result<u64, CapacityPlanError> {
-    let plan = CapacityPlan::for_type::<T>(0, 0, capacity)?;
-    plan.finish(0, capacity)
 }
 
 fn reservation_class(kind: SceneReservationKind) -> (PostProcessLedgerPhase, PostProcessDimension) {
@@ -1618,7 +1600,7 @@ mod tests {
     }
 
     #[test]
-    fn rejected_scene_transition_is_retained_until_execution_state_drops() {
+    fn rejected_scene_transition_remains_in_the_callers_reservation() {
         let limits = PostProcessLimits::new(8, 1024 * 1024);
         let mut coordinator = Coordinator::new(
             PostProcessControl::default(),
@@ -1627,12 +1609,12 @@ mod tests {
                 .expect("test ledger limits should freeze"),
         );
         let mut state = ExecutionState::new(&mut coordinator);
-        let reservation = state
+        let mut reservation = state
             .reserve(SceneReservationKind::EditCandidate, 8)
             .expect("initial reservation should fit");
 
         let error = match state.transition_reservation(
-            reservation,
+            &mut reservation,
             SceneReservationKind::EditCandidate,
             SceneReservationKind::CanonicalOutput,
             9,
@@ -1645,21 +1627,123 @@ mod tests {
             error,
             PostProcessError::ValidationControlInvariant { .. }
         ));
-        let retained = state
-            .failed_transition
-            .as_ref()
-            .expect("failed transition evidence must remain owned by execution state");
         assert_eq!(
-            retained.primary.as_ref().map(BufferReservation::bytes),
+            reservation.primary.as_ref().map(BufferReservation::bytes),
             Some(8)
         );
-        assert!(retained.retained.capacity.is_some());
+        assert!(reservation.retained.is_vacant());
+        assert!(state.retained_output.is_vacant());
 
+        drop(reservation);
         drop(state);
         let ledger = coordinator
             .finish()
             .expect("dropping rollback evidence should finalize cleanly");
         assert_eq!(ledger.current_live_bytes(), 0);
-        assert!(ledger.peak_live_bytes() > 8);
+        assert_eq!(ledger.peak_live_bytes(), 8);
+    }
+
+    #[test]
+    fn failed_composite_scene_transition_restores_every_owner_and_can_retry() {
+        let limits = PostProcessLimits::new(8, 1024 * 1024);
+        let mut coordinator = Coordinator::new(
+            PostProcessControl::default(),
+            limits
+                .try_ledger_limits()
+                .expect("test ledger limits should freeze"),
+        );
+        let mut foreign_coordinator = Coordinator::new(
+            PostProcessControl::default(),
+            limits
+                .try_ledger_limits()
+                .expect("foreign ledger limits should freeze"),
+        );
+        let foreign = foreign_coordinator
+            .checkpoint()
+            .reserve(
+                PostProcessLedgerPhase::Validate,
+                PostProcessDimension::StagingBytes,
+                1,
+            )
+            .expect("foreign reservation should fit");
+        let mut state = ExecutionState::new(&mut coordinator);
+        let mut reservation = state
+            .reserve(SceneReservationKind::EditCandidate, 8)
+            .expect("initial reservation should fit");
+        state
+            .retained_output
+            .ensure_slots(
+                state.coordinator,
+                PostProcessLedgerPhase::Validate,
+                3,
+                "test",
+                "composite transition evidence",
+            )
+            .expect("rollback slots should be pre-admitted");
+        state.retained_output.values.push(foreign);
+        let before = state
+            .coordinator
+            .try_ledger_snapshot()
+            .expect("test evidence snapshot must fit");
+
+        let error = state
+            .transition_reservation(
+                &mut reservation,
+                SceneReservationKind::EditCandidate,
+                SceneReservationKind::CanonicalOutput,
+                8,
+            )
+            .expect_err("foreign batch member must reject the whole transition");
+
+        assert!(matches!(
+            error,
+            PostProcessError::Accounting {
+                source: LedgerCause::OwnerMismatch,
+            }
+        ));
+        assert_eq!(
+            state
+                .coordinator
+                .try_ledger_snapshot()
+                .expect("test evidence snapshot must fit"),
+            before
+        );
+        assert_eq!(
+            reservation.primary.as_ref().map(BufferReservation::bytes),
+            Some(8)
+        );
+        assert!(reservation.retained.is_vacant());
+        assert_eq!(state.retained_output.values.len(), 1);
+        assert!(state.retained_output.capacity.is_some());
+
+        let foreign = state
+            .retained_output
+            .values
+            .pop()
+            .expect("foreign reservation remains in the original owner");
+        drop(foreign);
+        state
+            .transition_reservation(
+                &mut reservation,
+                SceneReservationKind::EditCandidate,
+                SceneReservationKind::CanonicalOutput,
+                8,
+            )
+            .expect("restored composite transition can be retried");
+        assert_eq!(reservation.kind, SceneReservationKind::CanonicalOutput);
+        assert!(reservation.primary.is_none());
+        assert_eq!(reservation.retained.values.len(), 1);
+        assert!(state.retained_output.is_vacant());
+
+        drop(reservation);
+        drop(state);
+        let ledger = coordinator
+            .finish()
+            .expect("dropping the transitioned reservation should finalize cleanly");
+        assert_eq!(ledger.current_live_bytes(), 0);
+        let foreign_ledger = foreign_coordinator
+            .finish()
+            .expect("dropping the foreign reservation should finalize cleanly");
+        assert_eq!(foreign_ledger.current_live_bytes(), 0);
     }
 }

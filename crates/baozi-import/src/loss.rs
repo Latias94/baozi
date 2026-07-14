@@ -64,9 +64,16 @@ impl ImportLossEvidence {
         usize::from(self.reservation.is_some())
     }
 
-    pub(crate) fn drain_reservation(&mut self, target: &mut Vec<ImportReservation>) {
+    pub(crate) fn move_reservation_into(
+        &mut self,
+        target: &mut crate::metered_storage::AccountedReservationVec,
+    ) {
+        assert!(
+            target.has_slots(self.reservation_count()),
+            "loss-evidence publication slots must be admitted before moving a token"
+        );
         if let Some(reservation) = self.reservation.take() {
-            target.push(reservation);
+            target.push_reserved_infallible(reservation);
         }
     }
 

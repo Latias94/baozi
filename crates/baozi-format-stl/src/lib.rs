@@ -1,6 +1,5 @@
 #![forbid(unsafe_code)]
 
-mod allocation;
 mod ascii;
 mod binary;
 mod detect;

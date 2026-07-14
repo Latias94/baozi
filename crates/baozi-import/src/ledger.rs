@@ -1,7 +1,8 @@
 use crate::limits::ResourceLimits;
 use baozi_operation::{
     DimensionPolicy, LedgerCause, LedgerLimits, LedgerLimitsError, LedgerSnapshot, LiveReservation,
-    OperationControl, OperationCoordinator, OperationOwner, ProgressPhase, ProgressUnit,
+    OperationControl, OperationCoordinator, OperationOwner, PendingPublication, ProgressPhase,
+    ProgressUnit, PublicationReservationBatch, PublicationReservationBatchError,
 };
 
 #[derive(Debug)]
@@ -287,6 +288,12 @@ pub(crate) fn tighten_selected_format_limits(
 
 pub(crate) type ImportReservation =
     LiveReservation<ImportOperationOwner, ImportLedgerPhase, ImportDimension>;
+pub(crate) type ImportPublicationBatch =
+    PublicationReservationBatch<ImportOperationOwner, ImportLedgerPhase, ImportDimension>;
+pub(crate) type ImportPublicationBatchError =
+    PublicationReservationBatchError<ImportOperationOwner, ImportLedgerPhase, ImportDimension>;
+pub(crate) type ImportPendingPublication =
+    PendingPublication<ImportOperationOwner, ImportLedgerPhase, ImportDimension>;
 
 #[cfg(test)]
 mod tests {

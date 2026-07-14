@@ -324,20 +324,20 @@ pub trait SceneValidationControl {
         required_bytes: u64,
     ) -> Result<(), Self::Error>;
 
-    /// Consumes an existing token and returns the replacement classification.
+    /// Reclassifies an existing token in place.
     ///
-    /// The returned token must cover at least `required_bytes`. An adapter may
-    /// reserve a delta and aggregate multiple underlying tokens, but it must not
-    /// count the old and new classifications as simultaneous storage. `from`
-    /// and `to` represent distinct lifetime classes; same-class byte changes
-    /// must use [`Self::resize_reservation`].
+    /// Success leaves the token covering at least `required_bytes`. Failure must
+    /// leave the source token and its accounting unchanged so storage remains
+    /// covered while the owning candidate unwinds. `from` and `to` represent
+    /// distinct lifetime classes; same-class byte changes must use
+    /// [`Self::resize_reservation`].
     fn transition_reservation(
         &mut self,
-        reservation: Self::Reservation,
+        reservation: &mut Self::Reservation,
         from: SceneReservationKind,
         to: SceneReservationKind,
         required_bytes: u64,
-    ) -> Result<Self::Reservation, Self::Error>;
+    ) -> Result<(), Self::Error>;
 }
 
 /// A central validation failure that preserves adapter-owned causes as sources.
@@ -376,6 +376,63 @@ pub struct SceneValidationSuccess<R> {
     canonical_output: R,
 }
 
+struct CoupledPublication<S, C, R> {
+    scene: S,
+    companion: C,
+    reservation: R,
+}
+
+pub(crate) fn try_publish_coupled<S, R, E>(
+    scene: S,
+    reservation: R,
+    publish_reservation: impl FnOnce(&mut R) -> Result<(), E>,
+) -> Result<S, E> {
+    try_publish_coupled_with(
+        scene,
+        (),
+        reservation,
+        |reservation, ()| publish_reservation(reservation),
+        |error, ()| error,
+    )
+    .map(|(scene, ())| scene)
+}
+
+fn try_publish_coupled_with<S, C, R, E, F>(
+    scene: S,
+    companion: C,
+    reservation: R,
+    publish_reservation: impl FnOnce(&mut R, &mut C) -> Result<(), E>,
+    finalize_failure: impl FnOnce(E, C) -> F,
+) -> Result<(S, C), F> {
+    let mut coupled = CoupledPublication {
+        scene,
+        companion,
+        reservation,
+    };
+    match publish_reservation(&mut coupled.reservation, &mut coupled.companion) {
+        Ok(()) => {
+            let CoupledPublication {
+                scene,
+                companion,
+                reservation,
+            } = coupled;
+            drop(reservation);
+            Ok((scene, companion))
+        }
+        Err(error) => {
+            let CoupledPublication {
+                scene,
+                companion,
+                reservation,
+            } = coupled;
+            drop(scene);
+            let failure = finalize_failure(error, companion);
+            drop(reservation);
+            Err(failure)
+        }
+    }
+}
+
 impl<R> SceneValidationSuccess<R> {
     pub(crate) fn new(scene: ValidatedScene, canonical_output: R) -> Self {
         Self {
@@ -390,18 +447,41 @@ impl<R> SceneValidationSuccess<R> {
 
     /// Publishes the reservation before releasing the owned scene to the caller.
     ///
-    /// If publication fails, both the unpublished scene and the consumed
-    /// reservation are discarded before the error is returned.
+    /// If publication fails, the unpublished scene is discarded before its still-owned
+    /// reservation. The callback must leave rollback state inside the borrowed reservation.
     pub fn try_publish<E>(
         self,
-        publish_reservation: impl FnOnce(R) -> Result<(), E>,
+        publish_reservation: impl FnOnce(&mut R) -> Result<(), E>,
     ) -> Result<ValidatedScene, E> {
         let Self {
             scene,
             canonical_output,
         } = self;
-        publish_reservation(canonical_output)?;
-        Ok(scene)
+        try_publish_coupled(scene, canonical_output, publish_reservation)
+    }
+
+    /// Publishes a reservation while preserving companion storage through every failure path.
+    ///
+    /// The companion is dropped after the unpublished scene but before reservation rollback when
+    /// publication panics. For a returned error, `finalize_failure` runs while the reservation is
+    /// still live so it can transfer the companion into a terminal outcome before rollback.
+    pub fn try_publish_with_companion<C, E, F>(
+        self,
+        companion: C,
+        publish_reservation: impl FnOnce(&mut R, &mut C) -> Result<(), E>,
+        finalize_failure: impl FnOnce(E, C) -> F,
+    ) -> Result<(ValidatedScene, C), F> {
+        let Self {
+            scene,
+            canonical_output,
+        } = self;
+        try_publish_coupled_with(
+            scene,
+            companion,
+            canonical_output,
+            publish_reservation,
+            finalize_failure,
+        )
     }
 }
 
@@ -446,11 +526,11 @@ impl SceneValidationControl for NoopSceneValidationControl {
 
     fn transition_reservation(
         &mut self,
-        _reservation: Self::Reservation,
+        _reservation: &mut Self::Reservation,
         _from: SceneReservationKind,
         _to: SceneReservationKind,
         _required_bytes: u64,
-    ) -> Result<Self::Reservation, Self::Error> {
+    ) -> Result<(), Self::Error> {
         Ok(())
     }
 
@@ -461,5 +541,136 @@ impl SceneValidationControl for NoopSceneValidationControl {
         _required_bytes: u64,
     ) -> Result<(), Self::Error> {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{SceneBuilder, validate_scene};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU8, Ordering};
+
+    struct ReservationDropProbe(Arc<AtomicU8>);
+
+    impl Drop for ReservationDropProbe {
+        fn drop(&mut self) {
+            assert_eq!(
+                self.0.swap(2, Ordering::SeqCst),
+                1,
+                "the validated scene must be dropped before reservation rollback"
+            );
+        }
+    }
+
+    #[derive(Debug)]
+    struct CompanionDropProbe(Arc<AtomicU8>);
+
+    impl Drop for CompanionDropProbe {
+        fn drop(&mut self) {
+            assert_eq!(
+                self.0.swap(2, Ordering::SeqCst),
+                1,
+                "the validated scene must be dropped before companion storage"
+            );
+        }
+    }
+
+    #[derive(Debug)]
+    struct CompanionReservationDropProbe(Arc<AtomicU8>);
+
+    impl Drop for CompanionReservationDropProbe {
+        fn drop(&mut self) {
+            assert_eq!(
+                self.0.swap(3, Ordering::SeqCst),
+                2,
+                "companion storage must be dropped or transferred before reservation rollback"
+            );
+        }
+    }
+
+    fn success_with_drop_probes(
+        state: &Arc<AtomicU8>,
+    ) -> SceneValidationSuccess<ReservationDropProbe> {
+        let mut scene = validate_scene(
+            SceneBuilder::try_new()
+                .expect("drop-order fixture builder")
+                .finish_draft(),
+        )
+        .expect("drop-order fixture scene");
+        scene.install_drop_probe(Arc::clone(state));
+        SceneValidationSuccess::new(scene, ReservationDropProbe(Arc::clone(state)))
+    }
+
+    fn success_with_companion_drop_probes(
+        state: &Arc<AtomicU8>,
+    ) -> SceneValidationSuccess<CompanionReservationDropProbe> {
+        let mut scene = validate_scene(
+            SceneBuilder::try_new()
+                .expect("companion drop-order fixture builder")
+                .finish_draft(),
+        )
+        .expect("companion drop-order fixture scene");
+        scene.install_drop_probe(Arc::clone(state));
+        SceneValidationSuccess::new(scene, CompanionReservationDropProbe(Arc::clone(state)))
+    }
+
+    #[test]
+    fn failed_publication_drops_the_real_validated_scene_before_reservation_rollback() {
+        let state = Arc::new(AtomicU8::new(0));
+        let error = success_with_drop_probes(&state)
+            .try_publish(|_reservation| Err("publication rejected"))
+            .expect_err("publication failure must not expose the scene");
+
+        assert_eq!(error, "publication rejected");
+        assert_eq!(state.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn panicking_publication_drops_the_real_validated_scene_before_reservation_rollback() {
+        let state = Arc::new(AtomicU8::new(0));
+        let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _: Result<ValidatedScene, ()> = success_with_drop_probes(&state)
+                .try_publish(|_reservation| panic!("publication panic fixture"));
+        }));
+
+        assert!(unwind.is_err());
+        assert_eq!(state.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn failed_publication_finalizes_companion_before_reservation_rollback() {
+        let state = Arc::new(AtomicU8::new(0));
+        let error = success_with_companion_drop_probes(&state)
+            .try_publish_with_companion(
+                CompanionDropProbe(Arc::clone(&state)),
+                |_reservation, _companion| Err("publication rejected"),
+                |error, companion| {
+                    drop(companion);
+                    error
+                },
+            )
+            .expect_err("publication failure must not expose scene or companion storage");
+
+        assert_eq!(error, "publication rejected");
+        assert_eq!(state.load(Ordering::SeqCst), 3);
+    }
+
+    #[test]
+    fn panicking_publication_drops_companion_before_reservation_rollback() {
+        let state = Arc::new(AtomicU8::new(0));
+        let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _: Result<(ValidatedScene, CompanionDropProbe), ()> =
+                success_with_companion_drop_probes(&state).try_publish_with_companion(
+                    CompanionDropProbe(Arc::clone(&state)),
+                    |_reservation, _companion| -> Result<(), ()> {
+                        panic!("companion publication panic fixture")
+                    },
+                    |_error: (), _companion| (),
+                );
+        }));
+
+        assert!(unwind.is_err());
+        assert_eq!(state.load(Ordering::SeqCst), 3);
     }
 }

@@ -1,9 +1,11 @@
-use crate::allocation::LiveStorage;
 use crate::detect::{BINARY_PREAMBLE_BYTES, FACET_BYTES, HEADER_BYTES};
 use crate::error::{StlFailure, StlFailureCode};
 use crate::parser::{ParsedMesh, ParsedStl};
 use baozi_core::{Color, Vec3};
-use baozi_import::{ImportStorageClass, ImportWorkClass, ParseFailure, ParseResult, ParseScope};
+use baozi_import::{
+    ImportStorageClass, ImportWorkClass, MeteredString, MeteredVec, ParseFailure, ParseResult,
+    ParseScope,
+};
 
 const MATERIALISE_COLOR_TOKEN: &[u8] = b"COLOR=";
 
@@ -76,23 +78,21 @@ pub(crate) fn parse<'scope>(
         usize_amount(scope, face_count, "stl-binary-records")?,
     )?;
 
-    let mut mesh_reservations = LiveStorage::new(ImportStorageClass::SceneConstruction);
-    let mut scratch_reservations = LiveStorage::new(ImportStorageClass::FormatNormalization);
     let mut positions = try_vec_capacity(
         scope,
-        &mut mesh_reservations,
+        ImportStorageClass::SceneConstruction,
         vertex_count,
         "stl-binary-positions",
     )?;
     let mut normals = try_vec_capacity(
         scope,
-        &mut mesh_reservations,
+        ImportStorageClass::SceneConstruction,
         vertex_count,
         "stl-binary-normals",
     )?;
     let mut facet_colors = try_vec_capacity(
         scope,
-        &mut scratch_reservations,
+        ImportStorageClass::FormatNormalization,
         face_count,
         "stl-binary-facet-colors",
     )?;
@@ -124,8 +124,8 @@ pub(crate) fn parse<'scope>(
         let v0 = vec3_at(record, 12, scope, offset + 12)?;
         let v1 = vec3_at(record, 24, scope, offset + 24)?;
         let v2 = vec3_at(record, 36, scope, offset + 36)?;
-        positions.extend([v0, v1, v2]);
-        normals.extend([normal, normal, normal]);
+        positions.try_extend_from_slice(&[v0, v1, v2])?;
+        normals.try_extend_from_slice(&[normal, normal, normal])?;
 
         let Some(attribute_bytes) = record.get(48..50) else {
             return Err(scope.format_failure(
@@ -141,7 +141,7 @@ pub(crate) fn parse<'scope>(
         attribute.copy_from_slice(attribute_bytes);
         let color = facet_color(u16::from_le_bytes(attribute), materialise);
         has_facet_colors |= color.is_some();
-        facet_colors.push(color);
+        facet_colors.try_push(color)?;
     }
 
     let colors = if has_facet_colors {
@@ -156,15 +156,15 @@ pub(crate) fn parse<'scope>(
         let fallback = material_color.unwrap_or(Color::WHITE);
         let mut colors = try_vec_capacity(
             scope,
-            &mut mesh_reservations,
+            ImportStorageClass::SceneConstruction,
             vertex_count,
             "stl-binary-colors",
         )?;
-        for (index, color) in facet_colors.into_iter().enumerate() {
+        for (index, color) in facet_colors.as_slice().iter().copied().enumerate() {
             if index % 4096 == 0 {
                 scope.poll()?;
             }
-            colors.extend([color.unwrap_or(fallback); 3]);
+            colors.try_extend_from_slice(&[color.unwrap_or(fallback); 3])?;
         }
         expansion.complete()?;
         color_cells.complete()?;
@@ -178,26 +178,23 @@ pub(crate) fn parse<'scope>(
     vertices.complete()?;
     faces.complete()?;
     let mesh = scope.begin_work(ImportWorkClass::Meshes, 1)?;
-    let name = owned_string(
+    let name = owned_string(scope, "<STL_BINARY>", "stl-binary-name")?;
+    let mut meshes = try_vec_capacity(
         scope,
-        &mut mesh_reservations,
-        "<STL_BINARY>",
-        "stl-binary-name",
+        ImportStorageClass::FormatNormalization,
+        1,
+        "stl-binary-meshes",
     )?;
-    let mut parsed_reservations = LiveStorage::new(ImportStorageClass::FormatNormalization);
-    let mut meshes = try_vec_capacity(scope, &mut parsed_reservations, 1, "stl-binary-meshes")?;
-    meshes.push(ParsedMesh {
+    meshes.try_push(ParsedMesh {
         name: Some(name),
         positions,
         normals,
         colors,
-        reservations: mesh_reservations,
-    });
+    })?;
     mesh.complete()?;
     Ok(ParsedStl {
         material_color,
         meshes,
-        reservations: parsed_reservations,
     })
 }
 
@@ -237,26 +234,26 @@ fn f32_at(
 
 fn try_vec_capacity<'scope, T>(
     scope: &'scope ParseScope<'_>,
-    reservations: &mut LiveStorage<'scope>,
+    class: ImportStorageClass,
     capacity: usize,
     resource: &'static str,
-) -> ParseResult<Vec<T>> {
-    let mut values = Vec::new();
-    reservations.reserve_vec(scope, &mut values, capacity, resource)?;
+) -> ParseResult<MeteredVec<'scope, T>> {
+    let mut values = scope.metered_vec(class, resource);
+    values.try_reserve(capacity)?;
     Ok(values)
 }
 
 fn owned_string<'scope>(
     scope: &'scope ParseScope<'_>,
-    reservations: &mut LiveStorage<'scope>,
     value: &str,
     resource: &'static str,
-) -> ParseResult<String> {
+) -> ParseResult<MeteredString<'scope>> {
     let permit = scope.begin_work(
         ImportWorkClass::StringBytes,
         usize_amount(scope, value.len(), resource)?,
     )?;
-    let owned = reservations.copy_string(scope, value, resource)?;
+    let mut owned = scope.metered_string(ImportStorageClass::SceneConstruction, resource);
+    owned.try_push_str(value)?;
     permit.complete()?;
     Ok(owned)
 }

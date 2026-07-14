@@ -14,6 +14,7 @@ mod format;
 mod ledger;
 mod limits;
 mod loss;
+mod metered_storage;
 mod options;
 mod outcome;
 mod registry;
@@ -61,6 +62,10 @@ pub use ledger::{
 };
 pub use limits::{ResourceLimits, ResourceLimitsOverlay};
 pub use loss::{ImportLossDisposition, ImportLossEvidence};
+pub use metered_storage::{
+    MeteredDecodedText, MeteredMetadataMap, MeteredOpaqueAllowance, MeteredOrderedMap,
+    MeteredSceneVec, MeteredString, MeteredVec, PreparedSceneValue, SceneValueParts,
+};
 pub use options::{
     CompiledFormatOptions, FormatOptionCodec, FormatOptionEnvelope, FormatOptionEnvelopeError,
     FormatOptionKey, FormatOptionLayers, FormatOptionPayload, FormatOptionReader,
@@ -83,7 +88,8 @@ pub use request_wire::{
     RequestWireError, RequestWireLimits, RequestWireScope, SerializedImportRequest,
 };
 pub use scope::{
-    ImportLiveReservation, ImportStorageClass, ImportWorkClass, ImportWorkPermit, ParseFailure,
-    ParseResult, ParseScope, ScopedSceneBuilder,
+    CameraBuildConfig, ImportStorageClass, ImportWorkClass, ImportWorkPermit, MaterialBuildConfig,
+    MeshBuildConfig, NodeBuildConfig, ParseFailure, ParseResult, ParseScope, ScopedSceneBuilder,
+    SkinBuildConfig, TextureBuildConfig, TextureSlotBuildConfig,
 };
 pub use session::{ReadHint, import_asset, import_asset_with_resolver, import_bytes};

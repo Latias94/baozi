@@ -95,6 +95,9 @@ pub fn check_repository(repository_root: &Path) -> RuntimeAdmissionReport {
         }
     }
 
+    let ownership_report = crate::format_ownership::check_repository(repository_root);
+    violations.extend(ownership_report.violations);
+
     violations.sort_unstable();
     violations.dedup();
     RuntimeAdmissionReport {

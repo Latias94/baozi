@@ -29,7 +29,7 @@ use crate::shared_storage::SharedStorage;
 use crate::validation_control::{
     NoopSceneValidationControl, SCENE_VALIDATION_POLL_INTERVAL, SceneCanonicalCounts,
     SceneFootprint, SceneReservationKind, SceneValidationControl, SceneValidationLimits,
-    SceneValidationStats, SceneValidationWork,
+    SceneValidationStats, SceneValidationWork, try_publish_coupled,
 };
 use baozi_operation::CapacityPlan;
 use std::error::Error;
@@ -356,30 +356,6 @@ where
 pub(crate) struct CanonicalValidationSuccess<R> {
     scene: CanonicalValidatedScene,
     canonical_output: R,
-}
-
-struct CoupledPublication<S, R> {
-    scene: S,
-    reservation: R,
-}
-
-fn try_publish_coupled<S, R, E>(
-    scene: S,
-    reservation: R,
-    publish_reservation: impl FnOnce(&mut R) -> Result<(), E>,
-) -> Result<S, E> {
-    let mut coupled = CoupledPublication { scene, reservation };
-    match publish_reservation(&mut coupled.reservation) {
-        Ok(()) => {
-            let CoupledPublication { scene, reservation } = coupled;
-            drop(reservation);
-            Ok(scene)
-        }
-        Err(error) => {
-            drop(coupled);
-            Err(error)
-        }
-    }
 }
 
 impl<R> CanonicalValidationSuccess<R> {
@@ -2692,15 +2668,15 @@ mod tests {
 
         fn transition_reservation(
             &mut self,
-            mut reservation: Self::Reservation,
+            reservation: &mut Self::Reservation,
             from: SceneReservationKind,
             to: SceneReservationKind,
             required_bytes: u64,
-        ) -> Result<Self::Reservation, Self::Error> {
+        ) -> Result<(), Self::Error> {
             assert_eq!(reservation.kind, from);
-            self.resize_reservation(&mut reservation, from, required_bytes)?;
+            self.resize_reservation(reservation, from, required_bytes)?;
             reservation.kind = to;
-            Ok(reservation)
+            Ok(())
         }
     }
 

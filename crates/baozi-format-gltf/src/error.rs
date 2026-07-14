@@ -190,15 +190,6 @@ impl GltfFailure {
         )
     }
 
-    pub(crate) fn resource_contract(subject: &'static str, reason: impl fmt::Display) -> Self {
-        Self::new(
-            GltfFailureCode::ResourceContract,
-            Some(subject),
-            None,
-            reason,
-        )
-    }
-
     pub(crate) fn parser_panicked(operation: &'static str) -> Self {
         Self::new(
             GltfFailureCode::ParserPanicked,

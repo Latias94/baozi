@@ -164,7 +164,8 @@ impl FormatImporter for DeepSceneImporter {
     fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
         let mut builder = scope.scene_builder()?;
         for _ in 1..VALIDATION_NODE_COUNT {
-            builder.add_node(Node::default())?;
+            let node = scope.prepare_scene_value(Node::default())?;
+            builder.add_prepared_node(node)?;
         }
         builder.finish_draft()
     }

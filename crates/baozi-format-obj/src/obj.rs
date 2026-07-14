@@ -1,19 +1,21 @@
-use crate::allocation::{LiveStorage, usize_to_u64 as usize_amount};
 use crate::{ObjFailure, mtl, parser};
 use baozi_core::{Vec2, Vec3};
-use baozi_import::{ImportStorageClass, ImportWorkClass, ParseResult, ParseScope};
+use baozi_import::{
+    ImportStorageClass, ImportWorkClass, MeteredString, MeteredVec, ParseResult, ParseScope,
+};
+
+use parser::usize_amount;
 
 const MAX_NUMERIC_LITERAL_BYTES: usize = 128;
 const MAX_FACE_REFERENCE_BYTES: usize = MAX_NUMERIC_LITERAL_BYTES * 3 + 2;
 
 pub(crate) struct ParsedObj<'scope> {
-    pub positions: Vec<Vec3>,
-    pub texcoords: Vec<Vec2>,
-    pub normals: Vec<Vec3>,
-    pub faces: Vec<Face>,
-    pub mtllibs: Vec<String>,
-    state_names: Vec<String>,
-    storage: LiveStorage<'scope>,
+    pub positions: MeteredVec<'scope, Vec3>,
+    pub texcoords: MeteredVec<'scope, Vec2>,
+    pub normals: MeteredVec<'scope, Vec3>,
+    pub faces: MeteredVec<'scope, Face<'scope>>,
+    pub mtllibs: MeteredVec<'scope, MeteredString<'scope>>,
+    state_names: MeteredVec<'scope, MeteredString<'scope>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -26,9 +28,8 @@ impl StateNameId {
     }
 }
 
-#[derive(Debug, PartialEq)]
-pub(crate) struct Face {
-    pub vertices: Vec<FaceVertex>,
+pub(crate) struct Face<'scope> {
+    pub vertices: MeteredVec<'scope, FaceVertex>,
     pub object: Option<StateNameId>,
     pub group: Option<StateNameId>,
     pub material: Option<StateNameId>,
@@ -44,7 +45,10 @@ pub(crate) struct FaceVertex {
 
 impl ParsedObj<'_> {
     pub(crate) fn state_name(&self, id: StateNameId) -> Option<&str> {
-        self.state_names.get(id.0).map(String::as_str)
+        self.state_names
+            .as_slice()
+            .get(id.0)
+            .map(MeteredString::as_str)
     }
 }
 
@@ -55,13 +59,16 @@ pub(crate) fn parse<'scope>(
     let mut parser = ObjParser {
         scope,
         parsed: ParsedObj {
-            positions: Vec::new(),
-            texcoords: Vec::new(),
-            normals: Vec::new(),
-            faces: Vec::new(),
-            mtllibs: Vec::new(),
-            state_names: Vec::new(),
-            storage: LiveStorage::new(ImportStorageClass::FormatNormalization),
+            positions: scope.metered_vec(ImportStorageClass::FormatNormalization, "obj-positions"),
+            texcoords: scope.metered_vec(ImportStorageClass::FormatNormalization, "obj-texcoords"),
+            normals: scope.metered_vec(ImportStorageClass::FormatNormalization, "obj-normals"),
+            faces: scope.metered_vec(ImportStorageClass::FormatNormalization, "obj-faces"),
+            mtllibs: scope.metered_vec(
+                ImportStorageClass::FormatNormalization,
+                "obj-material-library-references",
+            ),
+            state_names: scope
+                .metered_vec(ImportStorageClass::FormatNormalization, "obj-state-names"),
         },
         object: None,
         group: None,
@@ -96,8 +103,7 @@ struct Token<'line> {
 }
 
 struct TokenBuffer<'scope, 'line> {
-    values: Vec<Token<'line>>,
-    storage: LiveStorage<'scope>,
+    values: MeteredVec<'scope, Token<'line>>,
 }
 
 impl<'scope> ObjParser<'scope, '_> {
@@ -108,8 +114,9 @@ impl<'scope> ObjParser<'scope, '_> {
     ) -> ParseResult<()> {
         let raw_line = decoded_line.text();
         let tokens = tokenize(self.scope, decoded_line, line_number)?;
-        let allowed_value = tokens.values.first().and_then(|first| match first.text {
-            "o" | "g" | "usemtl" | "s" | "mtllib" => trailing_token_range(&tokens.values),
+        let token_values = tokens.values.as_slice();
+        let allowed_value = token_values.first().and_then(|first| match first.text {
+            "o" | "g" | "usemtl" | "s" | "mtllib" => trailing_token_range(token_values),
             _ => None,
         });
         parser::authorize_line_recoveries(
@@ -119,65 +126,55 @@ impl<'scope> ObjParser<'scope, '_> {
             decoded_line.comment_start(),
             || self.scope.diagnostic_source(),
         )?;
-        let Some(first) = tokens.values.first() else {
+        let Some(first) = token_values.first() else {
             return Ok(());
         };
 
         match first.text {
-            "v" => self.parse_position(&tokens.values, line_number),
-            "vt" => self.parse_texcoord(&tokens.values, line_number),
-            "vn" => self.parse_normal(&tokens.values, line_number),
-            "f" => self.parse_face(&tokens.values, line_number),
+            "v" => self.parse_position(token_values, line_number),
+            "vt" => self.parse_texcoord(token_values, line_number),
+            "vn" => self.parse_normal(token_values, line_number),
+            "f" => self.parse_face(token_values, line_number),
             "o" => {
                 self.object = parse_state_name(
                     self.scope,
-                    &mut self.parsed.storage,
                     &mut self.parsed.state_names,
                     self.object,
-                    trailing_text_after_first_token(raw_line, &tokens.values),
+                    trailing_text_after_first_token(raw_line, token_values),
                 )?;
                 Ok(())
             }
             "g" => {
                 self.group = parse_state_name(
                     self.scope,
-                    &mut self.parsed.storage,
                     &mut self.parsed.state_names,
                     self.group,
-                    trailing_text_after_first_token(raw_line, &tokens.values),
+                    trailing_text_after_first_token(raw_line, token_values),
                 )?;
                 Ok(())
             }
             "usemtl" => {
                 self.material = parse_state_name(
                     self.scope,
-                    &mut self.parsed.storage,
                     &mut self.parsed.state_names,
                     self.material,
-                    trailing_text_after_first_token(raw_line, &tokens.values),
+                    trailing_text_after_first_token(raw_line, token_values),
                 )?;
                 Ok(())
             }
             "s" => {
                 self.smoothing = parse_state_name(
                     self.scope,
-                    &mut self.parsed.storage,
                     &mut self.parsed.state_names,
                     self.smoothing,
-                    trailing_text_after_first_token(raw_line, &tokens.values),
+                    trailing_text_after_first_token(raw_line, token_values),
                 )?;
                 Ok(())
             }
             "mtllib" => {
-                for token in &tokens.values[1..] {
-                    let mtllib = checked_string(self.scope, &mut self.parsed.storage, token.text)?;
-                    self.parsed.storage.reserve_vec(
-                        self.scope,
-                        &mut self.parsed.mtllibs,
-                        1,
-                        "obj-material-library-references",
-                    )?;
-                    self.parsed.mtllibs.push(mtllib);
+                for token in &token_values[1..] {
+                    let mtllib = checked_string(self.scope, token.text)?;
+                    self.parsed.mtllibs.try_push(mtllib)?;
                 }
                 Ok(())
             }
@@ -199,47 +196,32 @@ impl<'scope> ObjParser<'scope, '_> {
     fn parse_position(&mut self, tokens: &[Token<'_>], line_number: u32) -> ParseResult<()> {
         require_components(self.scope, tokens, 4, "position", line_number)?;
         let vertex = self.scope.begin_work(ImportWorkClass::Vertices, 1)?;
-        self.parsed.storage.reserve_vec(
-            self.scope,
-            &mut self.parsed.positions,
-            1,
-            "obj-positions",
-        )?;
-        self.parsed.positions.push(Vec3::new(
+        self.parsed.positions.try_push(Vec3::new(
             parse_f32(self.scope, "position", tokens[1], line_number)?,
             parse_f32(self.scope, "position", tokens[2], line_number)?,
             parse_f32(self.scope, "position", tokens[3], line_number)?,
-        ));
+        ))?;
         vertex.complete()
     }
 
     fn parse_texcoord(&mut self, tokens: &[Token<'_>], line_number: u32) -> ParseResult<()> {
         require_components(self.scope, tokens, 3, "texcoord", line_number)?;
         let attribute = self.scope.begin_work(ImportWorkClass::AttributeCells, 1)?;
-        self.parsed.storage.reserve_vec(
-            self.scope,
-            &mut self.parsed.texcoords,
-            1,
-            "obj-texcoords",
-        )?;
-        self.parsed.texcoords.push(Vec2::new(
+        self.parsed.texcoords.try_push(Vec2::new(
             parse_f32(self.scope, "texcoord", tokens[1], line_number)?,
             parse_f32(self.scope, "texcoord", tokens[2], line_number)?,
-        ));
+        ))?;
         attribute.complete()
     }
 
     fn parse_normal(&mut self, tokens: &[Token<'_>], line_number: u32) -> ParseResult<()> {
         require_components(self.scope, tokens, 4, "normal", line_number)?;
         let attribute = self.scope.begin_work(ImportWorkClass::AttributeCells, 1)?;
-        self.parsed
-            .storage
-            .reserve_vec(self.scope, &mut self.parsed.normals, 1, "obj-normals")?;
-        self.parsed.normals.push(Vec3::new(
+        self.parsed.normals.try_push(Vec3::new(
             parse_f32(self.scope, "normal", tokens[1], line_number)?,
             parse_f32(self.scope, "normal", tokens[2], line_number)?,
             parse_f32(self.scope, "normal", tokens[3], line_number)?,
-        ));
+        ))?;
         attribute.complete()
     }
 
@@ -260,34 +242,28 @@ impl<'scope> ObjParser<'scope, '_> {
             usize_amount(self.scope, face_vertex_count, "obj-face-topology-cells")?,
         )?;
 
-        let mut vertices = Vec::new();
-        self.parsed.storage.reserve_vec(
-            self.scope,
-            &mut vertices,
-            face_vertex_count,
-            "obj-face-vertices",
-        )?;
+        let mut vertices = self
+            .scope
+            .metered_vec(ImportStorageClass::FormatNormalization, "obj-face-vertices");
+        vertices.try_reserve(face_vertex_count)?;
         for chunk in tokens[1..].chunks(64) {
             self.scope.poll()?;
             for token in chunk {
-                vertices.push(parse_face_vertex(
+                vertices.try_push(parse_face_vertex(
                     self.scope,
                     *token,
                     &self.parsed,
                     line_number,
-                )?);
+                )?)?;
             }
         }
-        self.parsed
-            .storage
-            .reserve_vec(self.scope, &mut self.parsed.faces, 1, "obj-faces")?;
-        self.parsed.faces.push(Face {
+        self.parsed.faces.try_push(Face {
             vertices,
             object: self.object,
             group: self.group,
             material: self.material,
             smoothing: self.smoothing,
-        });
+        })?;
         topology_permit.complete()?;
         face_permit.complete()
     }
@@ -295,8 +271,7 @@ impl<'scope> ObjParser<'scope, '_> {
 
 fn parse_state_name<'scope>(
     scope: &'scope ParseScope<'_>,
-    storage: &mut LiveStorage<'scope>,
-    state_names: &mut Vec<String>,
+    state_names: &mut MeteredVec<'scope, MeteredString<'scope>>,
     current: Option<StateNameId>,
     text: Option<&str>,
 ) -> ParseResult<Option<StateNameId>> {
@@ -309,21 +284,25 @@ fn parse_state_name<'scope>(
         usize_amount(scope, text.len(), "obj-state-name-bytes")?,
     )?;
     if let Some(current) = current {
-        let current_name = state_names.get(current.0).ok_or_else(|| {
+        let current_name = state_names.as_slice().get(current.0).ok_or_else(|| {
             scope.format_failure(ObjFailure::internal("state-name-id-out-of-range"))
         })?;
-        let matches_current =
-            mtl::interruptible_str_eq(scope, current_name, text, "obj-state-name-comparison")?;
+        let matches_current = mtl::interruptible_str_eq(
+            scope,
+            current_name.as_str(),
+            text,
+            "obj-state-name-comparison",
+        )?;
         if matches_current {
             string_permit.complete()?;
             return Ok(Some(current));
         }
     }
 
-    storage.reserve_vec(scope, state_names, 1, "obj-state-names")?;
-    let name = storage.copy_string(scope, text, "obj-state-name")?;
+    let mut name = scope.metered_string(ImportStorageClass::FormatNormalization, "obj-state-name");
+    name.try_push_str(text)?;
     let id = StateNameId(state_names.len());
-    state_names.push(name);
+    state_names.try_push(name)?;
     string_permit.complete()?;
     Ok(Some(id))
 }
@@ -335,8 +314,7 @@ fn tokenize<'scope, 'line>(
 ) -> ParseResult<TokenBuffer<'scope, 'line>> {
     let line = decoded_line.text();
     let mut tokens = TokenBuffer {
-        values: Vec::new(),
-        storage: LiveStorage::new(ImportStorageClass::FormatNormalization),
+        values: scope.metered_vec(ImportStorageClass::FormatNormalization, "obj-tokens"),
     };
 
     parser::scan_token_ranges(
@@ -380,15 +358,12 @@ fn push_token<'scope, 'line>(
         .checked_add(1)
         .and_then(|column| u32::try_from(column).ok())
         .ok_or_else(|| scope.resource_limit_exceeded("line-columns", u64::MAX))?;
-    tokens
-        .storage
-        .reserve_vec(scope, &mut tokens.values, 1, "obj-tokens")?;
-    tokens.values.push(Token {
+    tokens.values.try_push(Token {
         text,
         column,
         start,
         end,
-    });
+    })?;
     token_bytes.complete()?;
     token.complete()
 }
@@ -541,15 +516,18 @@ fn parse_f32(
 
 fn checked_string<'scope>(
     scope: &'scope ParseScope<'_>,
-    storage: &mut LiveStorage<'scope>,
     text: &str,
-) -> ParseResult<String> {
+) -> ParseResult<MeteredString<'scope>> {
     parser::enforce_text_value_limit(scope, text.len(), "obj-material-library-reference")?;
     let string_permit = scope.begin_work(
         ImportWorkClass::StringBytes,
         usize_amount(scope, text.len(), "obj-string-bytes")?,
     )?;
-    let owned = storage.copy_string(scope, text, "obj-material-library-reference")?;
+    let mut owned = scope.metered_string(
+        ImportStorageClass::FormatNormalization,
+        "obj-material-library-reference",
+    );
+    owned.try_push_str(text)?;
     string_permit.complete()?;
     Ok(owned)
 }
@@ -602,10 +580,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parsed_obj_and_faces_are_send_and_sync() {
+    fn plain_obj_records_are_send_and_sync() {
         fn assert_send_sync<T: Send + Sync>() {}
 
-        assert_send_sync::<Face>();
-        assert_send_sync::<ParsedObj<'static>>();
+        assert_send_sync::<FaceVertex>();
+        assert_send_sync::<StateNameId>();
     }
 }

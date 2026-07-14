@@ -110,12 +110,6 @@ impl PlyFailure {
         self
     }
 
-    pub(crate) const fn with_counts(mut self, expected: u64, actual: u64) -> Self {
-        self.expected = Some(expected);
-        self.actual = Some(actual);
-        self
-    }
-
     pub(crate) fn with_utf8_source(mut self, source: Utf8Error) -> Self {
         self.source = Some(PlyFailureSource::Utf8(source));
         self

@@ -10,11 +10,13 @@ use crate::error::{
 use crate::format::{DetectionOutcome, Probe, ReadConfidence, discard_untrusted_panic_payload};
 use crate::ledger::{
     ImportCoordinator, ImportDimension, ImportLedgerPhase, ImportOperationControl,
-    ImportProgressPhase, ImportProgressUnit, ImportReservation, import_ledger_limits,
+    ImportPendingPublication, ImportProgressPhase, ImportProgressUnit, ImportPublicationBatch,
+    ImportPublicationBatchError, ImportReservation, import_ledger_limits,
     tighten_selected_format_limits,
 };
 use crate::limits::ResourceLimits;
 use crate::loss::ImportLossEvidence;
+use crate::metered_storage::{AccountedReservationVec, AccountedVec};
 use crate::outcome::{
     DetectionEvidence, ImportFailure, ImportFailureParts, ImportPhase, ImportPhaseEvidence,
     ImportReport, ImportReportParts, ImportResult, ImportRunError,
@@ -22,8 +24,7 @@ use crate::outcome::{
 use crate::registry::{ParseInvocationError, RegistryEntry};
 use crate::request::PreparedImportRequest;
 use crate::scope::{
-    DiagnosticLineIndex, ParseFailureKind, ParseScope, ParseScopeParts,
-    prepare_snapshot_reservation_list, read_opened_asset,
+    DiagnosticLineIndex, ParseFailureKind, ParseScope, ParseScopeParts, read_opened_asset,
 };
 use baozi_core::{
     FormatId, SceneDraft, SceneReservationKind, SceneStorageFootprint, SceneValidationControl,
@@ -35,8 +36,7 @@ use baozi_io::{
     OpenedAsset,
 };
 use baozi_operation::{
-    CapacityPlan, CapacityPlanError, Commitment, FinalProgress, LedgerCause, LedgerLimits,
-    LedgerLimitsError, PublicationCause,
+    Commitment, FinalProgress, LedgerCause, LedgerLimits, LedgerLimitsError, PublicationCause,
 };
 use std::cell::RefCell;
 use std::marker::PhantomData;
@@ -195,24 +195,19 @@ struct ImportSession<'a> {
     resolver: &'a dyn DependencyResolver,
     coordinator: Option<RefCell<ImportCoordinator>>,
     diagnostics: Option<RefCell<DiagnosticSink>>,
-    diagnostic_reservations: RefCell<Vec<ImportReservation>>,
-    diagnostic_line_indexes: RefCell<Vec<DiagnosticLineIndex>>,
+    diagnostic_line_indexes: RefCell<AccountedVec<DiagnosticLineIndex>>,
     dependencies: Option<RefCell<DependencyCache>>,
-    optional_dependency_evidence: RefCell<Vec<crate::OptionalDependencyEvidence>>,
-    loss_evidence: RefCell<Vec<ImportLossEvidence>>,
+    optional_dependency_evidence: RefCell<AccountedVec<crate::OptionalDependencyEvidence>>,
+    loss_evidence: RefCell<AccountedVec<ImportLossEvidence>>,
     terminal: RefCell<Option<ScopeAbortCause>>,
     primary_authority: Option<AuthorityDomain>,
     primary_backend_hard_limit: Option<u64>,
-    primary_bytes: Option<Vec<u8>>,
-    primary_reservations: Vec<ImportReservation>,
-    draft_reservations: RefCell<Vec<ImportReservation>>,
-    draft_reservation_list_capacity: RefCell<Option<ImportReservation>>,
+    primary_snapshot: Option<AccountedVec<u8>>,
+    draft_reservations: RefCell<AccountedReservationVec>,
     format_failure_storage: RefCell<Option<ImportReservation>>,
     selected: Option<RegistryEntry>,
     effective_limits: Option<ResourceLimits>,
-    detection: Vec<DetectionEvidence>,
-    detection_reservation: Option<ImportReservation>,
-    detection_cause_reservation: Option<ImportReservation>,
+    detection: AccountedVec<DetectionEvidence>,
     last_completed: ImportPhaseEvidence,
 }
 
@@ -237,24 +232,19 @@ impl<'a> ImportSession<'a> {
                 request.limits().max_diagnostic_message_bytes,
                 request.limits().max_attempted_diagnostic_bytes,
             ))),
-            diagnostic_reservations: RefCell::new(Vec::new()),
-            diagnostic_line_indexes: RefCell::new(Vec::new()),
+            diagnostic_line_indexes: RefCell::new(AccountedVec::new()),
             dependencies: Some(RefCell::new(DependencyCache::new())),
-            optional_dependency_evidence: RefCell::new(Vec::new()),
-            loss_evidence: RefCell::new(Vec::new()),
+            optional_dependency_evidence: RefCell::new(AccountedVec::new()),
+            loss_evidence: RefCell::new(AccountedVec::new()),
             terminal: RefCell::new(None),
             primary_authority: None,
             primary_backend_hard_limit: None,
-            primary_bytes: None,
-            primary_reservations: Vec::new(),
-            draft_reservations: RefCell::new(Vec::new()),
-            draft_reservation_list_capacity: RefCell::new(None),
+            primary_snapshot: None,
+            draft_reservations: RefCell::new(AccountedReservationVec::new()),
             format_failure_storage: RefCell::new(None),
             selected: None,
             effective_limits: None,
-            detection: Vec::new(),
-            detection_reservation: None,
-            detection_cause_reservation: None,
+            detection: AccountedVec::new(),
             last_completed: ImportPhaseEvidence::new(ImportPhase::SessionCreated),
         }
     }
@@ -311,7 +301,7 @@ impl<'a> ImportSession<'a> {
         }
         let backend_hard_limit = opened.backend_hard_limit();
         self.charge_open_consumed()?;
-        let (bytes, reservations) = read_opened_asset(
+        let snapshot = read_opened_asset(
             self.coordinator(),
             opened,
             ImportLedgerPhase::PrimarySnapshot,
@@ -323,8 +313,7 @@ impl<'a> ImportSession<'a> {
         .map_err(|cause| self.scope_cause(cause))?;
         self.primary_authority = Some(expected_domain);
         self.primary_backend_hard_limit = backend_hard_limit;
-        self.primary_bytes = Some(bytes);
-        self.primary_reservations = reservations;
+        self.primary_snapshot = Some(snapshot);
         self.last_completed = ImportPhaseEvidence::new(ImportPhase::PrimaryBound);
         Ok(PrimaryBoundProof::new())
     }
@@ -358,32 +347,26 @@ impl<'a> ImportSession<'a> {
             }));
         }
 
-        let mut primary_reservations = if byte_count == 0 {
-            Vec::new()
-        } else {
-            prepare_snapshot_reservation_list(
-                self.coordinator(),
-                ImportLedgerPhase::PrimarySnapshot,
-            )
-            .map_err(|cause| self.scope_cause(cause))?
-        };
-        let mut snapshot = Vec::new();
-        let reservation = reserve_vec_capacity(
-            self.coordinator(),
-            &mut snapshot,
-            bytes.len(),
-            ImportLedgerPhase::PrimarySnapshot,
-            ImportDimension::PrimaryBytes,
-            "direct-primary-snapshot",
-        )
-        .map_err(|cause| self.scope_cause(cause))?;
-        snapshot.extend_from_slice(bytes);
+        let mut snapshot = AccountedVec::new();
+        snapshot
+            .try_reserve(bytes.len(), "direct-primary-snapshot", |capacity_bytes| {
+                reserve_required_bytes(
+                    self.coordinator(),
+                    ImportLedgerPhase::PrimarySnapshot,
+                    ImportDimension::PrimaryBytes,
+                    capacity_bytes,
+                )
+            })
+            .map_err(|cause| self.scope_cause(cause))?;
+        snapshot
+            .try_extend_from_slice_reserved(bytes)
+            .map_err(|()| {
+                self.scope_cause(ScopeAbortCause::DescriptorContract {
+                    code: "direct-primary-snapshot-slots-not-admitted",
+                })
+            })?;
         self.charge_primary_bytes(byte_count, true)?;
-        if let Some(reservation) = reservation {
-            primary_reservations.push(reservation);
-        }
-        self.primary_reservations = primary_reservations;
-        self.primary_bytes = Some(snapshot);
+        self.primary_snapshot = Some(snapshot);
         self.report_boundary_progress(
             ImportProgressPhase::AcquirePrimary,
             ImportProgressUnit::Bytes,
@@ -403,7 +386,7 @@ impl<'a> ImportSession<'a> {
         let _span = tracing::info_span!("baozi.detect").entered();
 
         self.poll_boundary()?;
-        let bytes = self.primary_bytes.as_ref().ok_or_else(|| {
+        let bytes = self.primary_snapshot.as_ref().ok_or_else(|| {
             self.scope_cause(ScopeAbortCause::DescriptorContract {
                 code: "primary-proof-without-snapshot",
             })
@@ -431,24 +414,35 @@ impl<'a> ImportSession<'a> {
                 self.request.snapshot().entries().count()
             }
         };
-        let mut entries = Vec::new();
-        let _entries_reservation = reserve_vec_capacity(
-            self.coordinator(),
-            &mut entries,
-            entry_count,
-            ImportLedgerPhase::Detection,
-            ImportDimension::ScratchBytes,
-            "detection-candidates",
-        )
-        .map_err(|cause| self.scope_cause(cause))?;
+        let mut entries = AccountedVec::new();
+        entries
+            .try_reserve(entry_count, "detection-candidates", |bytes| {
+                reserve_required_bytes(
+                    self.coordinator(),
+                    ImportLedgerPhase::Detection,
+                    ImportDimension::ScratchBytes,
+                    bytes,
+                )
+            })
+            .map_err(|cause| self.scope_cause(cause))?;
         match self.request.config().format_selection() {
             FormatSelection::Forced(id) => {
                 if let Some(entry) = self.request.entry(id) {
-                    entries.push(entry);
+                    entries.try_push_reserved(entry).map_err(|_| {
+                        self.scope_cause(ScopeAbortCause::DescriptorContract {
+                            code: "detection-candidate-slots-not-admitted",
+                        })
+                    })?;
                 }
             }
             FormatSelection::Automatic | FormatSelection::Preferred(_) => {
-                entries.extend(self.request.snapshot().entries())
+                for entry in self.request.snapshot().entries() {
+                    entries.try_push_reserved(entry).map_err(|_| {
+                        self.scope_cause(ScopeAbortCause::DescriptorContract {
+                            code: "detection-candidate-slots-not-admitted",
+                        })
+                    })?;
+                }
             }
         }
         let coordinator = self.coordinator.as_ref().ok_or_else(|| {
@@ -456,21 +450,21 @@ impl<'a> ImportSession<'a> {
                 code: "detection-without-active-coordinator",
             })
         })?;
-        let detection_reservation = reserve_vec_capacity(
-            coordinator,
-            &mut self.detection,
-            entries.len(),
-            ImportLedgerPhase::OutcomeFinalization,
-            ImportDimension::ScratchBytes,
-            "detection-evidence",
-        )
-        .map_err(|cause| self.scope_cause(cause))?;
-        if self.detection_reservation.is_some() {
+        if !self.detection.is_empty() || self.detection.capacity_bytes() != 0 {
             return Err(self.scope_cause(ScopeAbortCause::DescriptorContract {
                 code: "detection-storage-reserved-more-than-once",
             }));
         }
-        self.detection_reservation = detection_reservation;
+        self.detection
+            .try_reserve(entries.len(), "detection-evidence", |bytes| {
+                reserve_required_bytes(
+                    coordinator,
+                    ImportLedgerPhase::OutcomeFinalization,
+                    ImportDimension::ScratchBytes,
+                    bytes,
+                )
+            })
+            .map_err(|cause| self.scope_cause(cause))?;
         let total = entries.len() as u64;
         for (index, entry) in entries.iter().enumerate() {
             self.poll_boundary()?;
@@ -490,7 +484,12 @@ impl<'a> ImportSession<'a> {
                 })
             })?;
             self.detection
-                .push(DetectionEvidence::new(entry.format_id().clone(), outcome));
+                .try_push_reserved(DetectionEvidence::new(entry.format_id().clone(), outcome))
+                .map_err(|_| {
+                    self.scope_cause(ScopeAbortCause::DescriptorContract {
+                        code: "detection-evidence-slots-not-admitted",
+                    })
+                })?;
             self.report_boundary_progress(
                 ImportProgressPhase::Detect,
                 ImportProgressUnit::Candidates,
@@ -535,25 +534,32 @@ impl<'a> ImportSession<'a> {
             };
         }
 
-        let mut candidates = Vec::new();
-        let _candidates_reservation = reserve_vec_capacity(
-            self.coordinator(),
-            &mut candidates,
-            entries.len(),
-            ImportLedgerPhase::Detection,
-            ImportDimension::ScratchBytes,
-            "detection-candidate-ranking",
-        )
-        .map_err(|cause| self.scope_cause(cause))?;
-        candidates.extend(
+        let mut candidates = AccountedVec::new();
+        candidates
+            .try_reserve(entries.len(), "detection-candidate-ranking", |bytes| {
+                reserve_required_bytes(
+                    self.coordinator(),
+                    ImportLedgerPhase::Detection,
+                    ImportDimension::ScratchBytes,
+                    bytes,
+                )
+            })
+            .map_err(|cause| self.scope_cause(cause))?;
+        for candidate in
             entries
                 .iter()
-                .zip(&self.detection)
+                .zip(self.detection.iter())
                 .filter_map(|(entry, evidence)| match evidence.outcome() {
                     DetectionOutcome::Match(confidence) => Some((entry.clone(), *confidence)),
                     _ => None,
-                }),
-        );
+                })
+        {
+            candidates.try_push_reserved(candidate).map_err(|_| {
+                self.scope_cause(ScopeAbortCause::DescriptorContract {
+                    code: "detection-ranking-slots-not-admitted",
+                })
+            })?;
+        }
         let strong = candidates
             .iter()
             .map(|(_, confidence)| *confidence)
@@ -570,7 +576,7 @@ impl<'a> ImportSession<'a> {
 
     fn break_tie(
         &mut self,
-        candidates: Vec<(RegistryEntry, ReadConfidence)>,
+        candidates: AccountedVec<(RegistryEntry, ReadConfidence)>,
         unique_unhinted_allowed: bool,
     ) -> Result<RegistryEntry, ImportCause> {
         if candidates.is_empty() {
@@ -586,25 +592,38 @@ impl<'a> ImportSession<'a> {
         {
             return Ok(entry.clone());
         }
-        let mut extension_matches = Vec::new();
-        let _extension_matches_reservation = reserve_vec_capacity(
-            self.coordinator(),
-            &mut extension_matches,
-            candidates.len(),
-            ImportLedgerPhase::Detection,
-            ImportDimension::ScratchBytes,
-            "extension-detection-candidates",
-        )
-        .map_err(|cause| self.scope_cause(cause))?;
+        let mut extension_matches = AccountedVec::new();
+        extension_matches
+            .try_reserve(
+                candidates.len(),
+                "extension-detection-candidates",
+                |bytes| {
+                    reserve_required_bytes(
+                        self.coordinator(),
+                        ImportLedgerPhase::Detection,
+                        ImportDimension::ScratchBytes,
+                        bytes,
+                    )
+                },
+            )
+            .map_err(|cause| self.scope_cause(cause))?;
         if let Some(extension) = self.source.extension() {
-            extension_matches.extend(candidates.iter().filter(|(entry, _)| {
+            for candidate in candidates.iter().filter(|(entry, _)| {
                 entry
                     .descriptor()
                     .extensions()
                     .any(|candidate| candidate.eq_ignore_ascii_case(extension))
-            }));
+            }) {
+                extension_matches
+                    .try_push_reserved(candidate)
+                    .map_err(|_| {
+                        self.scope_cause(ScopeAbortCause::DescriptorContract {
+                            code: "extension-detection-slots-not-admitted",
+                        })
+                    })?;
+            }
         }
-        match extension_matches.as_slice() {
+        match &*extension_matches {
             [(entry, _)] => Ok((*entry).clone()),
             [] if candidates.len() == 1 && unique_unhinted_allowed => Ok(candidates[0].0.clone()),
             [] if unique_unhinted_allowed => self.ambiguous(candidates),
@@ -639,33 +658,33 @@ impl<'a> ImportSession<'a> {
 
     fn ambiguous(
         &mut self,
-        candidates: Vec<(RegistryEntry, ReadConfidence)>,
+        mut candidates: AccountedVec<(RegistryEntry, ReadConfidence)>,
     ) -> Result<RegistryEntry, ImportCause> {
-        let mut format_ids = Vec::new();
-        let cause_reservation = reserve_vec_capacity(
-            self.coordinator(),
-            &mut format_ids,
-            candidates.len(),
-            ImportLedgerPhase::OutcomeFinalization,
-            ImportDimension::ScratchBytes,
-            "ambiguous-format-candidates",
-        )
-        .map_err(|cause| self.scope_cause(cause))?;
-        format_ids.extend(
-            candidates
-                .into_iter()
-                .map(|(entry, _)| entry.format_id().clone()),
-        );
+        let mut format_ids = AccountedVec::new();
+        format_ids
+            .try_reserve(candidates.len(), "ambiguous-format-candidates", |bytes| {
+                reserve_required_bytes(
+                    self.coordinator(),
+                    ImportLedgerPhase::OutcomeFinalization,
+                    ImportDimension::ScratchBytes,
+                    bytes,
+                )
+            })
+            .map_err(|cause| self.scope_cause(cause))?;
+        while let Some((entry, _)) = candidates.pop() {
+            format_ids
+                .try_push_reserved(entry.format_id().clone())
+                .map_err(|_| {
+                    self.scope_cause(ScopeAbortCause::DescriptorContract {
+                        code: "ambiguous-format-candidate-slots-not-admitted",
+                    })
+                })?;
+        }
         format_ids.sort();
         format_ids.dedup();
-        if self.detection_cause_reservation.is_some() {
-            return Err(self.scope_cause(ScopeAbortCause::DescriptorContract {
-                code: "detection-cause-storage-reserved-more-than-once",
-            }));
-        }
-        self.detection_cause_reservation = cause_reservation;
+        let format_ids = format_ids.into_terminal();
         Err(ImportCause::Detection(DetectionFailure::Ambiguous {
-            candidates: format_ids,
+            candidates: format_ids.into_values(),
         }))
     }
 
@@ -726,7 +745,7 @@ impl<'a> ImportSession<'a> {
                     })
                 })?,
                 primary_source: &self.source,
-                primary_bytes: self.primary_bytes.as_ref().ok_or_else(|| {
+                primary_bytes: self.primary_snapshot.as_ref().ok_or_else(|| {
                     self.scope_cause(ScopeAbortCause::DescriptorContract {
                         code: "selection-proof-without-primary-snapshot",
                     })
@@ -737,13 +756,11 @@ impl<'a> ImportSession<'a> {
                 limits: effective_limits,
                 coordinator: self.coordinator(),
                 diagnostics: self.diagnostics(),
-                diagnostic_reservations: &self.diagnostic_reservations,
                 diagnostic_line_indexes: &self.diagnostic_line_indexes,
                 dependencies: self.dependencies(),
                 optional_dependency_evidence: &self.optional_dependency_evidence,
                 loss_evidence: &self.loss_evidence,
                 draft_reservations: &self.draft_reservations,
-                draft_reservation_list_capacity: &self.draft_reservation_list_capacity,
                 format_failure_storage: &self.format_failure_storage,
                 terminal: &self.terminal,
             });
@@ -839,7 +856,6 @@ impl<'a> ImportSession<'a> {
             let mut control = ImportValidationAdapter {
                 coordinator: self.coordinator(),
                 draft_reservations: &self.draft_reservations,
-                draft_reservation_list_capacity: &self.draft_reservation_list_capacity,
             };
             validate_scene_with(draft, validation_limits, &mut control)
         };
@@ -886,48 +902,100 @@ impl<'a> ImportSession<'a> {
                 code: "validated-proof-without-selected-format",
             }));
         };
-        let mut staging = self.take_report_staging();
+        let staging = self.take_report_staging();
         self.release_transient_live();
         if !self.draft_reservations.get_mut().is_empty()
-            || self.draft_reservation_list_capacity.get_mut().is_some()
+            || self.draft_reservations.get_mut().capacity_bytes() != 0
         {
             let cause = self.scope_cause(ScopeAbortCause::DescriptorContract {
                 code: "validated-output-left-draft-reservations",
             });
             return Err(self.finalize_failure_with_staging(cause, staging));
         }
-        let scene = match validation.try_publish(|output| {
-            let mut reservations = output.into_reservations()?;
-            self.append_staging_reservations(&mut reservations, &mut staging)?;
-            let mut coordinator = self.coordinator().borrow_mut();
-            let publication = coordinator
-                .prepare_publication(
-                    reservations,
-                    &[Commitment::new(
-                        ImportDimension::CanonicalOutputBytes,
-                        output_bytes,
-                    )],
-                )
-                .map_err(ScopeAbortCause::Ledger)?;
-            coordinator
-                .publish(
-                    publication,
-                    FinalProgress::new(
-                        ImportProgressPhase::Finalize,
-                        ImportProgressUnit::CanonicalItems,
-                        1,
-                    ),
-                )
-                .map_err(publication_scope_cause)
-        }) {
-            Ok(scene) => scene,
-            Err(cause) => {
+        let (scene, staging) = match validation.try_publish_with_companion(
+            staging,
+            |output, staging| {
+                let ImportValidationReservation::Bundle(reservations) = output else {
+                    return Err(ScopeAbortCause::DescriptorContract {
+                        code: "publication-received-non-bundle-validation-reservation",
+                    });
+                };
+                let report_reservation_count = staging.publication_reservation_count().ok_or(
+                    ScopeAbortCause::DescriptorContract {
+                        code: "report-publication-reservation-count-overflow",
+                    },
+                )?;
+                reservations.try_reserve(
+                    report_reservation_count,
+                    "report-publication-reservations",
+                    |capacity_bytes| {
+                        reserve_required_bytes(
+                            self.coordinator(),
+                            ImportLedgerPhase::OutcomeFinalization,
+                            ImportDimension::ScratchBytes,
+                            capacity_bytes,
+                        )
+                    },
+                )?;
+                staging.move_publication_reservations_into(reservations);
+                let bundle = std::mem::take(reservations);
+                let publication_batch = match bundle.try_into_publication() {
+                    Ok(publication_batch) => publication_batch,
+                    Err(error) => {
+                        *output =
+                            ImportValidationReservation::RejectedPublicationBatch { _owner: error };
+                        return Err(ScopeAbortCause::DescriptorContract {
+                            code: "publication-reservation-capacity-not-covered",
+                        });
+                    }
+                };
+                *output = ImportValidationReservation::PublicationBatch(publication_batch);
+
+                let mut coordinator = self.coordinator().borrow_mut();
+                let publication = match output {
+                    ImportValidationReservation::PublicationBatch(reservations) => coordinator
+                        .prepare_publication(
+                            reservations,
+                            &[Commitment::new(
+                                ImportDimension::CanonicalOutputBytes,
+                                output_bytes,
+                            )],
+                        )
+                        .map_err(ScopeAbortCause::Ledger)?,
+                    _ => {
+                        return Err(ScopeAbortCause::DescriptorContract {
+                            code: "publication-batch-state-was-lost",
+                        });
+                    }
+                };
+                *output = ImportValidationReservation::PendingPublication(publication);
+                match output {
+                    ImportValidationReservation::PendingPublication(publication) => coordinator
+                        .publish(
+                            publication,
+                            FinalProgress::new(
+                                ImportProgressPhase::Finalize,
+                                ImportProgressUnit::CanonicalItems,
+                                1,
+                            ),
+                        )
+                        .map_err(publication_scope_cause),
+                    _ => Err(ScopeAbortCause::DescriptorContract {
+                        code: "pending-publication-state-was-lost",
+                    }),
+                }
+            },
+            |cause, staging| (cause, staging.into_terminal()),
+        ) {
+            Ok(success) => success,
+            Err((cause, staging)) => {
                 let cause = self.scope_cause(cause);
-                return Err(self.finalize_failure_with_staging(cause, staging));
+                return Err(self.finalize_failure_with_terminal_staging(cause, staging));
             }
         };
+        let staging = staging.into_terminal();
         let (ledger, finalization_cause) = self.finish_ledger();
-        let ReportStaging {
+        let TerminalReportEvidence {
             detection,
             diagnostics,
             diagnostic_summary,
@@ -972,50 +1040,65 @@ impl<'a> ImportSession<'a> {
     fn finalize_failure_with_staging(
         mut self,
         cause: ImportCause,
-        staging: ReportStaging,
+        staging: LiveReportStaging,
     ) -> ImportFailure {
         let selected_format = self
             .selected
             .as_ref()
             .map(|entry| entry.format_id().clone());
-        let mut failure = FailureStaging {
-            cause,
+        let failure = LiveFailureStaging {
+            cause: self.take_failure_cause(cause),
             selected_format,
             report: staging,
             last_completed: self.last_completed,
         };
         self.release_transient_live();
         self.release_draft_live();
-        self.release_staging_reservations(&mut failure.report);
-        drop(self.format_failure_storage.get_mut().take());
+        let failure = failure.into_terminal();
+        let (ledger, finalization_cause) = self.finish_ledger();
+        failure.finish(self.source, ledger, finalization_cause)
+    }
+
+    fn finalize_failure_with_terminal_staging(
+        mut self,
+        cause: ImportCause,
+        staging: TerminalReportEvidence,
+    ) -> ImportFailure {
+        let selected_format = self
+            .selected
+            .as_ref()
+            .map(|entry| entry.format_id().clone());
+        let failure = TerminalFailureStaging {
+            cause: self.take_failure_cause(cause).into_terminal(),
+            selected_format,
+            report: staging,
+            last_completed: self.last_completed,
+        };
+        self.release_transient_live();
+        self.release_draft_live();
         let (ledger, finalization_cause) = self.finish_ledger();
         failure.finish(self.source, ledger, finalization_cause)
     }
 
     fn release_transient_live(&mut self) {
-        self.primary_bytes = None;
-        drop(std::mem::take(&mut self.primary_reservations));
-        drop(std::mem::take(self.diagnostic_line_indexes.get_mut()));
+        drop(self.primary_snapshot.take());
+        drop(self.diagnostic_line_indexes.get_mut().take());
         drop(self.dependencies.take());
     }
 
     fn release_draft_live(&mut self) {
-        let reservations = std::mem::take(self.draft_reservations.get_mut());
-        let reservation_list_capacity = self.draft_reservation_list_capacity.get_mut().take();
-        drop(reservations);
-        drop(reservation_list_capacity);
+        drop(self.draft_reservations.get_mut().take());
     }
 
-    fn take_report_staging(&mut self) -> ReportStaging {
-        let (diagnostics, diagnostic_summary) = self
+    fn take_report_staging(&mut self) -> LiveReportStaging {
+        let diagnostics = self
             .diagnostics
             .take()
-            .map(|diagnostics| diagnostics.into_inner().into_parts())
-            .unwrap_or_default();
-        ReportStaging {
-            detection: std::mem::take(&mut self.detection),
+            .map(RefCell::into_inner)
+            .unwrap_or_else(|| DiagnosticSink::new(0, 0, 0, 0));
+        LiveReportStaging {
+            detection: self.detection.take(),
             diagnostics,
-            diagnostic_summary,
             optional_dependency_evidence: std::mem::take(
                 self.optional_dependency_evidence.get_mut(),
             ),
@@ -1023,86 +1106,10 @@ impl<'a> ImportSession<'a> {
         }
     }
 
-    fn append_staging_reservations(
-        &mut self,
-        reservations: &mut Vec<ImportReservation>,
-        staging: &mut ReportStaging,
-    ) -> Result<(), ScopeAbortCause> {
-        let optional_count = staging
-            .optional_dependency_evidence
-            .iter()
-            .try_fold(0_usize, |total, evidence| {
-                total.checked_add(evidence.reservation_count())
-            })
-            .ok_or(ScopeAbortCause::Allocation {
-                resource: "publication-reservations",
-            })?;
-        let loss_count = staging
-            .loss_evidence
-            .iter()
-            .try_fold(0_usize, |total, evidence| {
-                total.checked_add(evidence.reservation_count())
-            })
-            .ok_or(ScopeAbortCause::Allocation {
-                resource: "publication-reservations",
-            })?;
-        let retained_count = self
-            .diagnostic_reservations
-            .get_mut()
-            .len()
-            .checked_add(optional_count)
-            .and_then(|count| count.checked_add(loss_count))
-            .and_then(|count| count.checked_add(usize::from(self.detection_reservation.is_some())))
-            .and_then(|count| {
-                count.checked_add(usize::from(self.detection_cause_reservation.is_some()))
-            })
-            .ok_or(ScopeAbortCause::Allocation {
-                resource: "publication-reservations",
-            })?;
-        let list_capacity_reservation = if retained_count == 0 {
-            None
-        } else {
-            reserve_vec_capacity(
-                self.coordinator(),
-                reservations,
-                retained_count
-                    .checked_add(1)
-                    .ok_or(ScopeAbortCause::Allocation {
-                        resource: "publication-reservations",
-                    })?,
-                ImportLedgerPhase::OutcomeFinalization,
-                ImportDimension::ScratchBytes,
-                "publication-reservations",
-            )?
-        };
-        if let Some(list_capacity_reservation) = list_capacity_reservation {
-            reservations.push(list_capacity_reservation);
-        }
-        reservations.append(self.diagnostic_reservations.get_mut());
-        if let Some(reservation) = self.detection_reservation.take() {
-            reservations.push(reservation);
-        }
-        if let Some(reservation) = self.detection_cause_reservation.take() {
-            reservations.push(reservation);
-        }
-        for evidence in &mut staging.optional_dependency_evidence {
-            evidence.drain_reservations(reservations);
-        }
-        for evidence in &mut staging.loss_evidence {
-            evidence.drain_reservation(reservations);
-        }
-        Ok(())
-    }
-
-    fn release_staging_reservations(&mut self, staging: &mut ReportStaging) {
-        drop(std::mem::take(self.diagnostic_reservations.get_mut()));
-        drop(self.detection_reservation.take());
-        drop(self.detection_cause_reservation.take());
-        for evidence in &mut staging.optional_dependency_evidence {
-            evidence.release_reservations();
-        }
-        for evidence in &mut staging.loss_evidence {
-            evidence.release_reservation();
+    fn take_failure_cause(&mut self, cause: ImportCause) -> LiveFailureCause {
+        LiveFailureCause {
+            cause,
+            format_failure_storage: self.format_failure_storage.get_mut().take(),
         }
     }
 
@@ -1196,7 +1203,78 @@ impl<'a> ImportSession<'a> {
     }
 }
 
-struct ReportStaging {
+struct LiveReportStaging {
+    detection: AccountedVec<DetectionEvidence>,
+    diagnostics: DiagnosticSink,
+    optional_dependency_evidence: AccountedVec<crate::OptionalDependencyEvidence>,
+    loss_evidence: AccountedVec<ImportLossEvidence>,
+}
+
+impl LiveReportStaging {
+    fn publication_reservation_count(&self) -> Option<usize> {
+        let optional_dependency_reservations = self.optional_dependency_evidence.iter().try_fold(
+            self.optional_dependency_evidence
+                .capacity_reservation_count(),
+            |total, evidence| total.checked_add(evidence.reservation_count()),
+        )?;
+        let loss_reservations = self.loss_evidence.iter().try_fold(
+            self.loss_evidence.capacity_reservation_count(),
+            |total, evidence| total.checked_add(evidence.reservation_count()),
+        )?;
+
+        self.detection
+            .capacity_reservation_count()
+            .checked_add(self.diagnostics.publication_reservation_count()?)?
+            .checked_add(optional_dependency_reservations)?
+            .checked_add(loss_reservations)
+    }
+
+    fn move_publication_reservations_into(&mut self, target: &mut AccountedReservationVec) {
+        let additional = self
+            .publication_reservation_count()
+            .expect("report publication reservation count must fit usize");
+        assert!(
+            target.has_slots(additional),
+            "report publication slots must be admitted before moving tokens"
+        );
+
+        self.detection.move_capacity_reservation_into(target);
+        self.diagnostics.move_publication_reservations_into(target);
+        for evidence in &mut *self.optional_dependency_evidence {
+            evidence.move_reservations_into(target);
+        }
+        self.optional_dependency_evidence
+            .move_capacity_reservation_into(target);
+        for evidence in &mut *self.loss_evidence {
+            evidence.move_reservation_into(target);
+        }
+        self.loss_evidence.move_capacity_reservation_into(target);
+    }
+
+    fn into_terminal(self) -> TerminalReportEvidence {
+        let detection = self.detection.into_terminal();
+        let diagnostics = self.diagnostics.into_terminal();
+        let optional_dependency_evidence = self.optional_dependency_evidence.into_terminal();
+        let loss_evidence = self.loss_evidence.into_terminal();
+        let (diagnostics, diagnostic_summary) = diagnostics.into_parts();
+        let mut terminal = TerminalReportEvidence {
+            detection: detection.into_values(),
+            diagnostics,
+            diagnostic_summary,
+            optional_dependency_evidence: optional_dependency_evidence.into_values(),
+            loss_evidence: loss_evidence.into_values(),
+        };
+        for evidence in &mut terminal.optional_dependency_evidence {
+            evidence.release_reservations();
+        }
+        for evidence in &mut terminal.loss_evidence {
+            evidence.release_reservation();
+        }
+        terminal
+    }
+}
+
+struct TerminalReportEvidence {
     detection: Vec<DetectionEvidence>,
     diagnostics: Vec<crate::ImportDiagnostic>,
     diagnostic_summary: crate::DiagnosticSummary,
@@ -1204,21 +1282,62 @@ struct ReportStaging {
     loss_evidence: Vec<ImportLossEvidence>,
 }
 
-struct FailureStaging {
+struct LiveFailureCause {
     cause: ImportCause,
+    format_failure_storage: Option<ImportReservation>,
+}
+
+impl LiveFailureCause {
+    fn into_terminal(self) -> TerminalFailureCause {
+        let Self {
+            cause,
+            format_failure_storage,
+        } = self;
+        let terminal = TerminalFailureCause { cause };
+        drop(format_failure_storage);
+        terminal
+    }
+}
+
+struct TerminalFailureCause {
+    cause: ImportCause,
+}
+
+struct LiveFailureStaging {
+    cause: LiveFailureCause,
     selected_format: Option<FormatId>,
-    report: ReportStaging,
+    report: LiveReportStaging,
     last_completed: ImportPhaseEvidence,
 }
 
-impl FailureStaging {
+impl LiveFailureStaging {
+    fn into_terminal(self) -> TerminalFailureStaging {
+        let report = self.report.into_terminal();
+        let cause = self.cause.into_terminal();
+        TerminalFailureStaging {
+            cause,
+            selected_format: self.selected_format,
+            report,
+            last_completed: self.last_completed,
+        }
+    }
+}
+
+struct TerminalFailureStaging {
+    cause: TerminalFailureCause,
+    selected_format: Option<FormatId>,
+    report: TerminalReportEvidence,
+    last_completed: ImportPhaseEvidence,
+}
+
+impl TerminalFailureStaging {
     fn finish(
         self,
         source: AssetPath,
         ledger: crate::ImportLedgerSnapshot,
         finalization_cause: Option<LedgerCause<ImportDimension>>,
     ) -> ImportFailure {
-        let ReportStaging {
+        let TerminalReportEvidence {
             detection,
             diagnostics,
             diagnostic_summary,
@@ -1226,7 +1345,7 @@ impl FailureStaging {
             loss_evidence,
         } = self.report;
         ImportFailure::from_parts(ImportFailureParts {
-            cause: self.cause,
+            cause: self.cause.cause,
             source,
             selected_format: self.selected_format,
             detection,
@@ -1283,76 +1402,27 @@ fn reserve_exact_bytes(
         .map_err(ScopeAbortCause::Ledger)
 }
 
-#[allow(clippy::too_many_arguments)]
-fn reserve_vec_capacity<T>(
+fn reserve_required_bytes(
     coordinator: &RefCell<ImportCoordinator>,
-    values: &mut Vec<T>,
-    additional: usize,
     phase: ImportLedgerPhase,
     dimension: ImportDimension,
-    resource: &'static str,
-) -> Result<Option<ImportReservation>, ScopeAbortCause> {
-    let desired_capacity = values
-        .len()
-        .checked_add(additional)
-        .ok_or(ScopeAbortCause::Allocation { resource })?;
-    let plan = CapacityPlan::for_type::<T>(values.len(), values.capacity(), desired_capacity)
-        .map_err(|cause| capacity_plan_cause(resource, cause))?;
-    let admitted_bytes = plan
-        .envelope_delta_bytes()
-        .map_err(|cause| capacity_plan_cause(resource, cause))?;
-    let upper_bound = reserve_exact_bytes(coordinator, phase, dimension, admitted_bytes)?;
-    plan.verify_preflight(values.len(), values.capacity())
-        .map_err(|cause| capacity_plan_cause(resource, cause))?;
-    values
-        .try_reserve_exact(plan.allocator_additional())
-        .map_err(|_| ScopeAbortCause::Allocation { resource })?;
-    let actual_bytes = plan
-        .finish(values.len(), values.capacity())
-        .map_err(|cause| capacity_plan_cause(resource, cause))?;
-    match (upper_bound, actual_bytes) {
-        (Some(upper_bound), 0) => {
-            drop(upper_bound);
-            Ok(None)
-        }
-        (Some(upper_bound), actual_bytes) => coordinator
-            .borrow_mut()
-            .checkpoint()
-            .transition_reservation(upper_bound, phase, dimension, actual_bytes)
-            .map(Some)
-            .map_err(ScopeAbortCause::Ledger),
-        (None, 0) => Ok(None),
-        (None, _) => Err(ScopeAbortCause::DescriptorContract {
-            code: "vector-capacity-growth-without-reservation",
-        }),
+    bytes: u64,
+) -> Result<ImportReservation, ScopeAbortCause> {
+    if bytes == 0 {
+        return Err(ScopeAbortCause::DescriptorContract {
+            code: "zero-byte-required-reservation",
+        });
     }
-}
-
-fn capacity_plan_cause(resource: &'static str, cause: CapacityPlanError) -> ScopeAbortCause {
-    match cause {
-        CapacityPlanError::CapacityOverflow | CapacityPlanError::AllocationTooLarge { .. } => {
-            ScopeAbortCause::ResourceLimit {
-                resource,
-                limit: u64::MAX,
-            }
-        }
-        CapacityPlanError::InvalidState { .. }
-        | CapacityPlanError::StalePlan { .. }
-        | CapacityPlanError::CapacityPlatformUnqualified { .. } => {
-            ScopeAbortCause::DescriptorContract {
-                code: "capacity-plan-contract-failed",
-            }
-        }
-        _ => ScopeAbortCause::DescriptorContract {
-            code: "capacity-plan-error-unknown",
-        },
-    }
+    coordinator
+        .borrow_mut()
+        .checkpoint()
+        .reserve(phase, dimension, bytes)
+        .map_err(ScopeAbortCause::Ledger)
 }
 
 struct ImportValidationAdapter<'a> {
     coordinator: &'a RefCell<ImportCoordinator>,
-    draft_reservations: &'a RefCell<Vec<ImportReservation>>,
-    draft_reservation_list_capacity: &'a RefCell<Option<ImportReservation>>,
+    draft_reservations: &'a RefCell<AccountedReservationVec>,
 }
 
 enum ImportValidationReservation {
@@ -1360,21 +1430,17 @@ enum ImportValidationReservation {
         kind: SceneReservationKind,
         reservation: ImportReservation,
     },
-    Bundle(Vec<ImportReservation>),
+    Bundle(AccountedReservationVec),
+    PublicationBatch(ImportPublicationBatch),
+    RejectedPublicationBatch {
+        _owner: ImportPublicationBatchError,
+    },
+    PendingPublication(ImportPendingPublication),
 }
 
 impl ImportValidationReservation {
     fn one(kind: SceneReservationKind, reservation: ImportReservation) -> Self {
         Self::One { kind, reservation }
-    }
-
-    fn into_reservations(self) -> Result<Vec<ImportReservation>, ScopeAbortCause> {
-        match self {
-            Self::Bundle(reservations) => Ok(reservations),
-            Self::One { .. } => Err(ScopeAbortCause::DescriptorContract {
-                code: "publication-received-single-validation-reservation",
-            }),
-        }
     }
 }
 
@@ -1421,68 +1487,87 @@ impl SceneValidationControl for ImportValidationAdapter<'_> {
             }
         }
 
-        let mut reservations = std::mem::take(&mut *self.draft_reservations.borrow_mut());
-        let _reservation_list_capacity = self.draft_reservation_list_capacity.borrow_mut().take();
-        let source_count = reservations.len();
-        let source_bytes = reservations.iter().try_fold(0_u64, |total, reservation| {
-            total
-                .checked_add(reservation.bytes())
+        let (source_count, source_bytes) = {
+            let reservations = self.draft_reservations.borrow();
+            let bytes = reservations.iter().try_fold(0_u64, |total, reservation| {
+                total
+                    .checked_add(reservation.bytes())
+                    .ok_or(ScopeAbortCause::DescriptorContract {
+                        code: "draft-reservation-bytes-overflow",
+                    })
+            })?;
+            (reservations.len(), bytes)
+        };
+        let target_bytes = source_bytes.max(bytes);
+        let payload_token_count = if source_count == 0 && target_bytes != 0 {
+            1
+        } else {
+            source_count
+        };
+        let mut transitioned = AccountedReservationVec::new();
+        transitioned.try_reserve_capacity(
+            payload_token_count,
+            "validation-reservation-bundle",
+            |capacity_bytes| {
+                reserve_exact_bytes(
+                    self.coordinator,
+                    ImportLedgerPhase::Validation,
+                    ImportDimension::ScratchBytes,
+                    capacity_bytes,
+                )?
                 .ok_or(ScopeAbortCause::DescriptorContract {
-                    code: "draft-reservation-bytes-overflow",
+                    code: "validation-bundle-capacity-without-reservation",
                 })
-        })?;
-        let needs_delta = source_bytes < bytes;
-        let payload_token_count = source_count.checked_add(usize::from(needs_delta)).ok_or(
-            ScopeAbortCause::Allocation {
-                resource: "validation-reservation-bundle",
             },
         )?;
-        let mut transitioned = Vec::new();
-        let list_capacity_reservation = reserve_vec_capacity(
-            self.coordinator,
-            &mut transitioned,
-            payload_token_count
-                .checked_add(1)
-                .ok_or(ScopeAbortCause::Allocation {
-                    resource: "validation-reservation-bundle",
-                })?,
-            ImportLedgerPhase::Validation,
-            ImportDimension::ScratchBytes,
-            "validation-reservation-bundle",
-        )?;
-        if let Some(list_capacity_reservation) = list_capacity_reservation {
-            transitioned.push(list_capacity_reservation);
+
+        if source_count == 0 {
+            if target_bytes != 0 {
+                let reservation = self
+                    .coordinator
+                    .borrow_mut()
+                    .checkpoint()
+                    .reserve(phase, dimension, target_bytes)
+                    .map_err(ScopeAbortCause::Ledger)?;
+                transitioned
+                    .try_push_reserved(reservation)
+                    .map_err(|reservation| {
+                        drop(reservation);
+                        ScopeAbortCause::DescriptorContract {
+                            code: "validation-reservation-slots-not-admitted",
+                        }
+                    })?;
+            }
+        } else {
+            let mut source = self.draft_reservations.borrow_mut();
+            source.try_mutate_without_capacity_change(|reservations| {
+                self.coordinator
+                    .borrow_mut()
+                    .checkpoint()
+                    .transition_reservations(reservations, phase, dimension, target_bytes)
+                    .map_err(ScopeAbortCause::Ledger)
+            })?;
         }
-        while let Some(reservation) = reservations.pop() {
-            let reservation_bytes = reservation.bytes();
-            let replacement = self
-                .coordinator
-                .borrow_mut()
-                .checkpoint()
-                .transition_reservation(reservation, phase, dimension, reservation_bytes)
-                .map_err(ScopeAbortCause::Ledger)?;
-            transitioned.push(replacement);
+
+        let mut source = self.draft_reservations.borrow_mut();
+        if transitioned.try_append_accounted(&mut source).is_err() {
+            return Err(ScopeAbortCause::DescriptorContract {
+                code: "validation-reservation-slots-not-admitted",
+            });
         }
-        if needs_delta {
-            let delta = bytes - source_bytes;
-            let reservation = self
-                .coordinator
-                .borrow_mut()
-                .checkpoint()
-                .reserve(phase, dimension, delta)
-                .map_err(ScopeAbortCause::Ledger)?;
-            transitioned.push(reservation);
-        }
+        let source = source.take();
+        drop(source);
+
         Ok(ImportValidationReservation::Bundle(transitioned))
     }
 
     fn transition_reservation(
         &mut self,
-        reservation: Self::Reservation,
+        reservation: &mut Self::Reservation,
         from: SceneReservationKind,
         to: SceneReservationKind,
         required_bytes: u64,
-    ) -> Result<Self::Reservation, Self::Error> {
+    ) -> Result<(), Self::Error> {
         validation_reservation_accounting(from)?;
         let (phase, dimension) = validation_reservation_accounting(to)?;
         let ImportValidationReservation::One { kind, reservation } = reservation else {
@@ -1490,7 +1575,7 @@ impl SceneValidationControl for ImportValidationAdapter<'_> {
                 code: "multi-token-validation-resize",
             });
         };
-        if kind != from {
+        if *kind != from {
             return Err(ScopeAbortCause::DescriptorContract {
                 code: "validation-reservation-kind-mismatch",
             });
@@ -1499,8 +1584,9 @@ impl SceneValidationControl for ImportValidationAdapter<'_> {
             .borrow_mut()
             .checkpoint()
             .transition_reservation(reservation, phase, dimension, required_bytes)
-            .map(|reservation| ImportValidationReservation::one(to, reservation))
-            .map_err(ScopeAbortCause::Ledger)
+            .map_err(ScopeAbortCause::Ledger)?;
+        *kind = to;
+        Ok(())
     }
 
     fn resize_reservation(
@@ -1793,13 +1879,11 @@ mod tests {
             ImportOperationControl::default(),
             import_ledger_limits(&limits).expect("valid import ledger limits"),
         ));
-        let draft_reservations = RefCell::new(Vec::new());
-        let draft_reservation_list_capacity = RefCell::new(None);
+        let draft_reservations = RefCell::new(AccountedReservationVec::new());
         let reservation = {
             let mut adapter = ImportValidationAdapter {
                 coordinator: &coordinator,
                 draft_reservations: &draft_reservations,
-                draft_reservation_list_capacity: &draft_reservation_list_capacity,
             };
             let mut reservation = adapter
                 .reserve(SceneReservationKind::ValidationScratch, 4)
@@ -1830,11 +1914,124 @@ mod tests {
     }
 
     #[test]
-    fn direct_primary_binding_reserves_its_reservation_list_before_copying() {
+    fn failed_canonical_batch_transition_keeps_draft_storage_reservations_owned() {
+        let limits = ResourceLimits {
+            max_live_bytes: 4096,
+            max_canonical_payload_bytes: 8,
+            ..ResourceLimits::default()
+        };
+        let coordinator = RefCell::new(ImportCoordinator::new(
+            ImportOperationControl::default(),
+            import_ledger_limits(&limits).expect("valid import ledger limits"),
+        ));
+        let mut draft_values = AccountedReservationVec::new();
+        draft_values
+            .try_reserve(1, "test-draft-reservations", |capacity_bytes| {
+                reserve_required_bytes(
+                    &coordinator,
+                    ImportLedgerPhase::SceneConstruction,
+                    ImportDimension::ScratchBytes,
+                    capacity_bytes,
+                )
+            })
+            .expect("draft reservation capacity should be admitted");
+        let source = coordinator
+            .borrow_mut()
+            .checkpoint()
+            .reserve(
+                ImportLedgerPhase::SceneConstruction,
+                ImportDimension::ScratchBytes,
+                4,
+            )
+            .expect("draft source reservation should fit");
+        draft_values
+            .try_push_reserved(source)
+            .expect("the admitted draft list must have one slot");
+        let draft_reservations = RefCell::new(draft_values);
+        let blocker = coordinator
+            .borrow_mut()
+            .checkpoint()
+            .reserve(
+                ImportLedgerPhase::Validation,
+                ImportDimension::CanonicalOutputBytes,
+                8,
+            )
+            .expect("canonical blocker should fit its dimension exactly");
+
+        let failure = {
+            let mut adapter = ImportValidationAdapter {
+                coordinator: &coordinator,
+                draft_reservations: &draft_reservations,
+            };
+            match adapter.reserve(SceneReservationKind::CanonicalOutput, 4) {
+                Ok(_) => panic!("the occupied canonical dimension must reject the batch"),
+                Err(failure) => failure,
+            }
+        };
+
+        assert!(matches!(
+            failure,
+            ScopeAbortCause::Ledger(LedgerCause::LimitExceeded {
+                dimension: ImportDimension::CanonicalOutputBytes,
+                value: 12,
+                limit: 8,
+                ..
+            })
+        ));
+        assert_eq!(draft_reservations.borrow().len(), 1);
+        assert_eq!(draft_reservations.borrow()[0].bytes(), 4);
+        assert!(draft_reservations.borrow().capacity_bytes() > 0);
+        let rejected = coordinator
+            .borrow()
+            .try_ledger_snapshot()
+            .expect("test evidence snapshot must fit");
+        assert_eq!(
+            rejected
+                .dimension(ImportDimension::CanonicalOutputBytes)
+                .expect("canonical evidence")
+                .current_live_bytes(),
+            8
+        );
+        assert_eq!(
+            rejected
+                .dimension(ImportDimension::ScratchBytes)
+                .expect("draft evidence")
+                .current_live_bytes(),
+            4 + draft_reservations.borrow().capacity_bytes()
+        );
+
+        drop(blocker);
+        let transitioned = {
+            let mut adapter = ImportValidationAdapter {
+                coordinator: &coordinator,
+                draft_reservations: &draft_reservations,
+            };
+            adapter
+                .reserve(SceneReservationKind::CanonicalOutput, 4)
+                .expect("the preserved batch can be retried after releasing the blocker")
+        };
+        let ImportValidationReservation::Bundle(bundle) = &transitioned else {
+            panic!("canonical retry must return the reservation bundle")
+        };
+        assert_eq!(bundle.len(), 1);
+        assert_eq!(bundle[0].bytes(), 4);
+        assert!(bundle.capacity_bytes() > 0);
+        assert!(draft_reservations.borrow().is_empty());
+        assert_eq!(draft_reservations.borrow().capacity_bytes(), 0);
+        drop(transitioned);
+        let ledger = coordinator
+            .into_inner()
+            .finish()
+            .expect("preserved source ownership should finalize cleanly");
+        assert_eq!(ledger.current_live_bytes(), 0);
+    }
+
+    #[test]
+    fn direct_primary_binding_rejects_payload_before_copying_when_live_budget_is_too_small() {
         let request = initialization_test_request();
         let io = DirectBytesAuthority::new();
         let limits = ResourceLimits {
-            max_live_bytes: 64,
+            max_live_bytes: 63,
             ..ResourceLimits::default()
         };
         let mut session = ImportSession::new(
@@ -1850,10 +2047,9 @@ mod tests {
             session
                 .bind_primary_bytes(&[0; 64], SessionCreatedProof::new())
                 .is_err(),
-            "the reservation list and payload must be admitted together"
+            "the payload allocation must be admitted before copying"
         );
-        assert!(session.primary_bytes.is_none());
-        assert!(session.primary_reservations.is_empty());
+        assert!(session.primary_snapshot.is_none());
         assert_eq!(session.last_completed.phase(), ImportPhase::SessionCreated);
     }
 }

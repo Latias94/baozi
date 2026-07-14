@@ -4,6 +4,7 @@ use crate::dependency::{
     DependencyCacheDisposition, DependencyCacheEntry, DependencyCacheStorage, DependencyIdentity,
     DependencyReference, DependencyRequirement, DependencyResolver, DependencyRoleId,
     DependencySnapshot, OptionalDependencyEvidence, OptionalDependencyOutcome,
+    SharedDependencySnapshot, shared_dependency_snapshot_allocation_bytes,
 };
 use crate::descriptor::TextDecodingMode;
 use crate::diagnostic::{
@@ -22,13 +23,22 @@ use crate::ledger::{
 };
 use crate::limits::ResourceLimits;
 use crate::loss::{ImportLossDisposition, ImportLossEvidence};
+use crate::metered_storage::{
+    AccountedReservationVec, AccountedVec, MeteredDecodedText, MeteredMetadataMap,
+    MeteredOpaqueAllowance, MeteredOrderedMap, MeteredSceneVec, MeteredString, MeteredVec,
+    PreparedSceneValue, SceneValueParts, SceneValueReservations, StorageMeter,
+};
 use crate::options::{CompiledFormatOptions, FormatOptionKey};
 use crate::registry::RegistryEntry;
 use baozi_core::{
-    Animation, AnimationId, Camera, CameraId, Light, LightId, Material, MaterialId, Mesh,
-    MeshBinding, MeshId, MetadataValue, Node, NodeId, OrderedMapError, SceneBuilder,
-    SceneCollection, SceneDraft, SceneSpace, SceneStorageFootprint, Skin, SkinId, Texture,
-    TextureId,
+    Aabb, AlphaMode, Animation, AnimationId, Camera, CameraId, CameraProjection, Color, ColorSpace,
+    Light, LightId, Mat4, Material, MaterialId, Mesh, MeshBinding, MeshId, MetadataMap,
+    MetadataValue, Node, NodeId, OrderedMap, OrderedMapError, PreparedSceneInsert,
+    PrimitiveTopology, SceneBuildError, SceneBuildValue, SceneBuilder, SceneCapacityPlan,
+    SceneCollection, SceneDraft, SceneSpace, SceneStorageFootprint, SceneValueFootprint,
+    ShadingModel, Skin, SkinId, Texture, TextureId, TextureRole, TextureSampler, TextureSlot,
+    TextureSource, TextureTransform, Vec2, Vec3, Vec4, VertexAttribute, VertexAttributeData,
+    VertexAttributeSemantic,
 };
 use baozi_io::{AssetIo, AssetLength, AssetPath, AuthorityDomain, OpenedAsset, PathError};
 use baozi_operation::{CapacityPlan, CapacityPlanError, CounterClass, LedgerCause};
@@ -41,7 +51,65 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 pub type ParseResult<T> = Result<T, ParseFailure>;
-type AssetSnapshotResult = Result<(Vec<u8>, Vec<ImportReservation>), ScopeAbortCause>;
+type AssetSnapshotResult = Result<AccountedVec<u8>, ScopeAbortCause>;
+
+/// Fixed-size fields used when assembling a metered mesh value.
+#[derive(Debug, Clone, Copy)]
+pub struct MeshBuildConfig {
+    pub topology: PrimitiveTopology,
+    pub material: Option<MaterialId>,
+    pub bounds: Option<Aabb>,
+}
+
+/// Fixed-size fields used when assembling a metered material value.
+#[derive(Debug, Clone, Copy)]
+pub struct MaterialBuildConfig {
+    pub shading_model: ShadingModel,
+    pub base_color: Color,
+    pub metallic: f32,
+    pub roughness: f32,
+    pub emissive: Color,
+    pub alpha_mode: AlphaMode,
+    pub alpha_cutoff: f32,
+    pub double_sided: bool,
+}
+
+/// Fixed-size fields used when assembling a metered node value.
+#[derive(Debug, Clone, Copy)]
+pub struct NodeBuildConfig {
+    pub transform: Mat4,
+    pub camera: Option<CameraId>,
+    pub light: Option<LightId>,
+}
+
+/// Fixed-size fields used when assembling a metered texture value.
+#[derive(Debug, Clone, Copy)]
+pub struct TextureBuildConfig {
+    pub sampler: TextureSampler,
+}
+
+/// Fixed-size fields used when assembling a metered texture-slot value.
+#[derive(Debug, Clone, Copy)]
+pub struct TextureSlotBuildConfig {
+    pub texture: TextureId,
+    pub role: TextureRole,
+    pub color_space: ColorSpace,
+    pub uv_set: u32,
+    pub scale: f32,
+    pub transform: TextureTransform,
+}
+
+/// Fixed-size fields used when assembling a metered skin value.
+#[derive(Debug, Clone, Copy)]
+pub struct SkinBuildConfig {
+    pub skeleton_root: Option<NodeId>,
+}
+
+/// Allocation-free fields used when assembling a metered camera value.
+#[derive(Debug, Clone)]
+pub struct CameraBuildConfig {
+    pub projection: CameraProjection,
+}
 
 /// Opaque parser transport. Only a selected [`ParseScope`] can create it.
 #[derive(Debug)]
@@ -194,9 +262,9 @@ impl ImportWorkPermit<'_, '_> {
 pub(crate) struct DiagnosticLineIndex {
     authority: baozi_io::AuthorityDomain,
     source: AssetPath,
+    _source_reservation: Option<ImportReservation>,
     source_len: u64,
-    line_starts: Vec<u64>,
-    _reservation: ImportReservation,
+    line_starts: AccountedVec<u64>,
 }
 
 impl DiagnosticLineIndex {
@@ -239,13 +307,11 @@ pub struct ParseScope<'session> {
     limits: &'session ResourceLimits,
     coordinator: &'session RefCell<ImportCoordinator>,
     diagnostics: &'session RefCell<DiagnosticSink>,
-    diagnostic_reservations: &'session RefCell<Vec<ImportReservation>>,
-    diagnostic_line_indexes: &'session RefCell<Vec<DiagnosticLineIndex>>,
+    diagnostic_line_indexes: &'session RefCell<AccountedVec<DiagnosticLineIndex>>,
     dependencies: &'session RefCell<DependencyCache>,
-    optional_dependency_evidence: &'session RefCell<Vec<OptionalDependencyEvidence>>,
-    loss_evidence: &'session RefCell<Vec<ImportLossEvidence>>,
-    draft_reservations: &'session RefCell<Vec<ImportReservation>>,
-    draft_reservation_list_capacity: &'session RefCell<Option<ImportReservation>>,
+    optional_dependency_evidence: &'session RefCell<AccountedVec<OptionalDependencyEvidence>>,
+    loss_evidence: &'session RefCell<AccountedVec<ImportLossEvidence>>,
+    draft_reservations: &'session RefCell<AccountedVec<ImportReservation>>,
     format_failure_storage: &'session RefCell<Option<ImportReservation>>,
     dependency_failure: RefCell<Option<DependencyResolutionContext>>,
     terminal: &'session RefCell<Option<ScopeAbortCause>>,
@@ -265,13 +331,11 @@ pub(crate) struct ParseScopeParts<'session> {
     pub limits: &'session ResourceLimits,
     pub coordinator: &'session RefCell<ImportCoordinator>,
     pub diagnostics: &'session RefCell<DiagnosticSink>,
-    pub diagnostic_reservations: &'session RefCell<Vec<ImportReservation>>,
-    pub diagnostic_line_indexes: &'session RefCell<Vec<DiagnosticLineIndex>>,
+    pub diagnostic_line_indexes: &'session RefCell<AccountedVec<DiagnosticLineIndex>>,
     pub dependencies: &'session RefCell<DependencyCache>,
-    pub optional_dependency_evidence: &'session RefCell<Vec<OptionalDependencyEvidence>>,
-    pub loss_evidence: &'session RefCell<Vec<ImportLossEvidence>>,
-    pub draft_reservations: &'session RefCell<Vec<ImportReservation>>,
-    pub draft_reservation_list_capacity: &'session RefCell<Option<ImportReservation>>,
+    pub optional_dependency_evidence: &'session RefCell<AccountedVec<OptionalDependencyEvidence>>,
+    pub loss_evidence: &'session RefCell<AccountedVec<ImportLossEvidence>>,
+    pub draft_reservations: &'session RefCell<AccountedVec<ImportReservation>>,
     pub format_failure_storage: &'session RefCell<Option<ImportReservation>>,
     pub terminal: &'session RefCell<Option<ScopeAbortCause>>,
 }
@@ -291,13 +355,11 @@ impl<'session> ParseScope<'session> {
             limits: parts.limits,
             coordinator: parts.coordinator,
             diagnostics: parts.diagnostics,
-            diagnostic_reservations: parts.diagnostic_reservations,
             diagnostic_line_indexes: parts.diagnostic_line_indexes,
             dependencies: parts.dependencies,
             optional_dependency_evidence: parts.optional_dependency_evidence,
             loss_evidence: parts.loss_evidence,
             draft_reservations: parts.draft_reservations,
-            draft_reservation_list_capacity: parts.draft_reservation_list_capacity,
             format_failure_storage: parts.format_failure_storage,
             dependency_failure: RefCell::new(None),
             terminal: parts.terminal,
@@ -331,6 +393,184 @@ impl<'session> ParseScope<'session> {
 
     pub fn limits(&self) -> &ResourceLimits {
         self.limits
+    }
+
+    /// Creates vector storage whose backing allocation cannot outlive this parse capability.
+    pub fn metered_vec<T>(
+        &self,
+        class: ImportStorageClass,
+        resource: &'static str,
+    ) -> MeteredVec<'_, T> {
+        MeteredVec {
+            values: Vec::new(),
+            capacity: None,
+            meter: self.storage_meter(),
+            class,
+            resource,
+        }
+    }
+
+    /// Creates string storage whose backing allocation cannot outlive this parse capability.
+    pub fn metered_string(
+        &self,
+        class: ImportStorageClass,
+        resource: &'static str,
+    ) -> MeteredString<'_> {
+        MeteredString {
+            value: String::new(),
+            capacity: None,
+            meter: self.storage_meter(),
+            class,
+            resource,
+        }
+    }
+
+    /// Creates ordered-map storage whose backing allocation cannot outlive this parse capability.
+    pub fn metered_ordered_map<K, V>(
+        &self,
+        class: ImportStorageClass,
+        resource: &'static str,
+    ) -> MeteredOrderedMap<'_, K, V> {
+        MeteredOrderedMap {
+            value: OrderedMap::new(),
+            capacity: None,
+            meter: self.storage_meter(),
+            class,
+            resource,
+        }
+    }
+
+    /// Creates a dynamic canonical collection whose element payloads remain coupled to the outer
+    /// collection until it is finished.
+    pub fn metered_scene_vec<T>(&self, resource: &'static str) -> MeteredSceneVec<'_, T> {
+        MeteredSceneVec {
+            values: self.metered_vec(ImportStorageClass::SceneConstruction, resource),
+            reservations: SceneValueReservations::new(),
+        }
+    }
+
+    /// Creates canonical metadata storage with per-entry reservation ownership.
+    pub fn metered_metadata_map(&self, resource: &'static str) -> MeteredMetadataMap<'_> {
+        MeteredMetadataMap {
+            values: self.metered_ordered_map(ImportStorageClass::SceneConstruction, resource),
+            entries: self.metered_vec(ImportStorageClass::SceneConstruction, resource),
+        }
+    }
+
+    /// Reserves an opaque backend allowance that cannot be transferred into a Scene value.
+    pub fn metered_opaque_allowance(
+        &self,
+        class: ImportStorageClass,
+        bytes: u64,
+    ) -> ParseResult<MeteredOpaqueAllowance<'_>> {
+        self.preflight_active()?;
+        let reservation = if bytes == 0 {
+            None
+        } else {
+            Some(
+                self.reserve_storage_cause(class, bytes)
+                    .map_err(|cause| self.abort(cause))?,
+            )
+        };
+        Ok(MeteredOpaqueAllowance {
+            reservation,
+            scope: PhantomData,
+        })
+    }
+
+    /// Creates a decoded text owner with separate logical-length and allocator-slack accounting.
+    pub fn metered_decoded_text(
+        &self,
+        decoded_len: usize,
+        resource: &'static str,
+    ) -> ParseResult<MeteredDecodedText<'_>> {
+        self.preflight_active()?;
+        let plan = CapacityPlan::with_element_size(0, 0, decoded_len, 1)
+            .map_err(|cause| self.capacity_plan_error(resource, cause))?;
+        let envelope = plan
+            .envelope_delta_bytes()
+            .map_err(|cause| self.capacity_plan_error(resource, cause))?;
+        let decoded_bytes =
+            u64::try_from(decoded_len).map_err(|_| self.allocation_failure(resource))?;
+        let slack_bytes = envelope.checked_sub(decoded_bytes).ok_or_else(|| {
+            self.abort(ScopeAbortCause::DescriptorContract {
+                code: "decoded-text-envelope-below-length",
+            })
+        })?;
+        let decoded = if decoded_bytes == 0 {
+            None
+        } else {
+            Some(
+                self.reserve_storage_cause(ImportStorageClass::DecodedText, decoded_bytes)
+                    .map_err(|cause| self.abort(cause))?,
+            )
+        };
+        let mut allocator_slack = if slack_bytes == 0 {
+            None
+        } else {
+            Some(
+                self.reserve_storage_cause(ImportStorageClass::BackendDecode, slack_bytes)
+                    .map_err(|cause| self.abort(cause))?,
+            )
+        };
+
+        let mut value = String::new();
+        plan.verify_preflight(value.len(), value.capacity())
+            .map_err(|cause| self.capacity_plan_error(resource, cause))?;
+        value
+            .try_reserve_exact(plan.allocator_additional())
+            .map_err(|_| self.allocation_failure(resource))?;
+        let actual = plan
+            .finish(value.len(), value.capacity())
+            .map_err(|cause| self.capacity_plan_error(resource, cause))?;
+        let actual_slack = actual.checked_sub(decoded_bytes).ok_or_else(|| {
+            self.abort(ScopeAbortCause::DescriptorContract {
+                code: "decoded-text-capacity-below-length",
+            })
+        })?;
+        if actual_slack == 0 {
+            drop(allocator_slack.take());
+        } else if let Some(reservation) = allocator_slack.as_mut() {
+            self.resize_storage_reservation(reservation, actual_slack)
+                .map_err(|cause| self.abort(cause))?;
+        } else {
+            return Err(self.abort(ScopeAbortCause::DescriptorContract {
+                code: "decoded-text-slack-unreserved",
+            }));
+        }
+
+        Ok(MeteredDecodedText {
+            value,
+            decoded_len,
+            decoded,
+            allocator_slack,
+            meter: self.storage_meter(),
+            resource,
+        })
+    }
+
+    /// Prepares a canonical value with no external metered parts.
+    ///
+    /// Values with retained dynamic storage are rejected because the empty reservation inventory
+    /// cannot prove their allocation ownership.
+    pub fn prepare_scene_value<T: SceneBuildValue>(
+        &self,
+        value: T,
+    ) -> ParseResult<PreparedSceneValue<T>> {
+        validate_prepared_scene_value(
+            self,
+            PreparedSceneValue {
+                value: Some(value),
+                reservations: SceneValueReservations::new(),
+            },
+        )
+    }
+
+    fn storage_meter(&self) -> StorageMeter<'_> {
+        StorageMeter {
+            coordinator: self.coordinator,
+            terminal: self.terminal,
+        }
     }
 
     pub fn options<T: std::any::Any + Send + Sync + std::panic::RefUnwindSafe>(
@@ -442,27 +682,53 @@ impl<'session> ParseScope<'session> {
             .map_err(|cause| self.abort(ScopeAbortCause::Control(cause)))
     }
 
-    pub fn reserve_live(
+    fn reserve_live(
         &self,
         storage: ImportStorageClass,
         bytes: u64,
     ) -> ParseResult<ImportLiveReservation<'_>> {
         self.preflight_active()?;
-        let (phase, dimension) = storage.accounting();
         let reservation = self
-            .coordinator
-            .try_borrow_mut()
-            .map_err(|_| self.reentrant_capability_failure())?
-            .checkpoint()
-            .reserve(phase, dimension, bytes)
-            .map_err(|cause| self.abort(ScopeAbortCause::Ledger(cause)))?;
+            .reserve_storage_cause(storage, bytes)
+            .map_err(|cause| self.abort(cause))?;
         Ok(ImportLiveReservation {
             reservation,
             scope: PhantomData,
         })
     }
 
-    pub fn resize_live(
+    fn reserve_storage_cause(
+        &self,
+        storage: ImportStorageClass,
+        bytes: u64,
+    ) -> Result<ImportReservation, ScopeAbortCause> {
+        let (phase, dimension) = storage.accounting();
+        self.coordinator
+            .try_borrow_mut()
+            .map_err(|_| ScopeAbortCause::DescriptorContract {
+                code: "parse-capability-reentered",
+            })?
+            .checkpoint()
+            .reserve(phase, dimension, bytes)
+            .map_err(ScopeAbortCause::Ledger)
+    }
+
+    fn resize_storage_reservation(
+        &self,
+        reservation: &mut ImportReservation,
+        bytes: u64,
+    ) -> Result<(), ScopeAbortCause> {
+        self.coordinator
+            .try_borrow_mut()
+            .map_err(|_| ScopeAbortCause::DescriptorContract {
+                code: "parse-capability-reentered",
+            })?
+            .checkpoint()
+            .resize_reservation(reservation, bytes)
+            .map_err(ScopeAbortCause::Ledger)
+    }
+
+    fn resize_live(
         &self,
         reservation: &mut ImportLiveReservation<'_>,
         bytes: u64,
@@ -591,30 +857,8 @@ impl<'session> ParseScope<'session> {
         raw_range: DiagnosticByteRange,
         disposition: ImportLossDisposition,
     ) -> ParseResult<()> {
-        let plan = {
-            let evidence = self
-                .loss_evidence
-                .try_borrow()
-                .map_err(|_| self.reentrant_capability_failure())?;
-            let desired = evidence
-                .len()
-                .checked_add(1)
-                .ok_or_else(|| self.resource_limit_exceeded("loss-evidence-capacity", u64::MAX))?;
-            CapacityPlan::for_type::<ImportLossEvidence>(
-                evidence.len(),
-                evidence.capacity(),
-                desired,
-            )
-            .map_err(|cause| self.capacity_plan_error("loss-evidence-capacity", cause))?
-        };
         let source_envelope = u64::try_from(source.path().as_str().len())
             .map_err(|_| self.resource_limit_exceeded("loss-evidence-source", u64::MAX))?;
-        let capacity_envelope = plan
-            .envelope_delta_bytes()
-            .map_err(|cause| self.capacity_plan_error("loss-evidence-capacity", cause))?;
-        let envelope = source_envelope
-            .checked_add(capacity_envelope)
-            .ok_or_else(|| self.resource_limit_exceeded("loss-evidence-bytes", u64::MAX))?;
         let mut reservation = self
             .coordinator
             .try_borrow_mut()
@@ -623,7 +867,7 @@ impl<'session> ParseScope<'session> {
             .reserve(
                 ImportLedgerPhase::FormatNormalization,
                 ImportDimension::LossEvidenceBytes,
-                envelope,
+                source_envelope,
             )
             .map_err(|cause| self.abort(ScopeAbortCause::Ledger(cause)))?;
 
@@ -633,46 +877,47 @@ impl<'session> ParseScope<'session> {
             .map_err(|_| self.allocation_failure("loss-evidence-source"))?;
         let source_bytes = u64::try_from(retained_source.capacity_bytes())
             .map_err(|_| self.resource_limit_exceeded("loss-evidence-source", u64::MAX))?;
-        let allocation_envelope = source_bytes
-            .checked_add(capacity_envelope)
-            .ok_or_else(|| self.resource_limit_exceeded("loss-evidence-bytes", u64::MAX))?;
-        if allocation_envelope != envelope {
+        if source_bytes != source_envelope {
             self.coordinator
                 .try_borrow_mut()
                 .map_err(|_| self.reentrant_capability_failure())?
                 .checkpoint()
-                .resize_reservation(&mut reservation, allocation_envelope)
+                .resize_reservation(&mut reservation, source_bytes)
                 .map_err(|cause| self.abort(ScopeAbortCause::Ledger(cause)))?;
         }
 
-        {
+        let (prior_capacity_bytes, capacity_result) = {
             let mut evidence = self
                 .loss_evidence
                 .try_borrow_mut()
                 .map_err(|_| self.reentrant_capability_failure())?;
-            plan.verify_preflight(evidence.len(), evidence.capacity())
-                .map_err(|cause| self.capacity_plan_error("loss-evidence-capacity", cause))?;
-            evidence
-                .try_reserve_exact(plan.allocator_additional())
-                .map_err(|_| self.allocation_failure("loss-evidence-capacity"))?;
-        }
-        let capacity_bytes = {
-            let evidence = self
-                .loss_evidence
-                .try_borrow()
-                .map_err(|_| self.reentrant_capability_failure())?;
-            plan.finish(evidence.len(), evidence.capacity())
-                .map_err(|cause| self.capacity_plan_error("loss-evidence-capacity", cause))?
+            let prior_capacity_bytes = evidence.capacity_bytes();
+            let result = evidence.try_reserve(1, "loss-evidence-capacity", |capacity_bytes| {
+                self.coordinator
+                    .try_borrow_mut()
+                    .map_err(|_| ScopeAbortCause::DescriptorContract {
+                        code: "parse-capability-reentered",
+                    })?
+                    .checkpoint()
+                    .reserve(
+                        ImportLedgerPhase::FormatNormalization,
+                        ImportDimension::LossEvidenceBytes,
+                        capacity_bytes,
+                    )
+                    .map_err(ScopeAbortCause::Ledger)
+            });
+            (prior_capacity_bytes, result)
         };
+        capacity_result.map_err(|cause| self.abort(cause))?;
+        let capacity_bytes = self
+            .loss_evidence
+            .try_borrow()
+            .map_err(|_| self.reentrant_capability_failure())?
+            .capacity_bytes()
+            .saturating_sub(prior_capacity_bytes);
         let actual_bytes = source_bytes
             .checked_add(capacity_bytes)
             .ok_or_else(|| self.resource_limit_exceeded("loss-evidence-bytes", u64::MAX))?;
-        self.coordinator
-            .try_borrow_mut()
-            .map_err(|_| self.reentrant_capability_failure())?
-            .checkpoint()
-            .resize_reservation(&mut reservation, actual_bytes)
-            .map_err(|cause| self.abort(ScopeAbortCause::Ledger(cause)))?;
         let charge = {
             let mut coordinator = self
                 .coordinator
@@ -690,17 +935,25 @@ impl<'session> ParseScope<'session> {
             return Err(self.abort(ScopeAbortCause::Ledger(cause)));
         }
 
-        self.loss_evidence
+        let evidence = ImportLossEvidence::new(
+            ImportLossKind::FormatRecovery,
+            code,
+            retained_source,
+            raw_range,
+            disposition,
+            reservation,
+        );
+        if let Err(evidence) = self
+            .loss_evidence
             .try_borrow_mut()
             .map_err(|_| self.reentrant_capability_failure())?
-            .push(ImportLossEvidence::new(
-                ImportLossKind::FormatRecovery,
-                code,
-                retained_source,
-                raw_range,
-                disposition,
-                reservation,
-            ));
+            .try_push_reserved(evidence)
+        {
+            drop(evidence);
+            return Err(self.abort(ScopeAbortCause::DescriptorContract {
+                code: "loss-evidence-slots-not-admitted",
+            }));
+        }
         Ok(())
     }
 
@@ -824,7 +1077,20 @@ impl<'session> ParseScope<'session> {
             None
         };
         if reservation.is_some() {
-            self.reserve_diagnostic_reservation_slots(2)?;
+            let mut diagnostics = self
+                .diagnostics
+                .try_borrow_mut()
+                .map_err(|_| self.reentrant_capability_failure())?;
+            diagnostics
+                .try_reserve_storage_slot(|capacity_bytes| {
+                    self.reserve_diagnostic_scratch_cause(capacity_bytes)
+                })
+                .map_err(|cause| self.abort(cause))?;
+            diagnostics
+                .try_reserve_reservation_slots(2, |capacity_bytes| {
+                    self.reserve_diagnostic_scratch_cause(capacity_bytes)
+                })
+                .map_err(|cause| self.abort(cause))?;
         }
 
         let prepared = self
@@ -886,7 +1152,7 @@ impl<'session> ParseScope<'session> {
             return Err(self.abort(ScopeAbortCause::Ledger(cause)));
         }
 
-        if prepared.is_stored() {
+        let (payload_reservation, structural_reservation) = if prepared.is_stored() {
             let Some(upper_bound) = reservation.take() else {
                 self.diagnostics.borrow_mut().discard_prepared(prepared);
                 return Err(self.abort(ScopeAbortCause::DescriptorContract {
@@ -897,110 +1163,113 @@ impl<'session> ParseScope<'session> {
             let payload_capacity_bytes = prepared.payload_capacity_bytes();
             let structural_bytes = prepared.structural_bytes();
             let mut exact = upper_bound;
-            self.coordinator
+            let payload_resize = self
+                .coordinator
                 .try_borrow_mut()
-                .map_err(|_| self.reentrant_capability_failure())?
-                .resize_reservation(&mut exact, payload_capacity_bytes)
-                .map_err(|cause| self.abort(ScopeAbortCause::Ledger(cause)))?;
+                .map_err(|_| ScopeAbortCause::DescriptorContract {
+                    code: "parse-capability-reentered",
+                })
+                .and_then(|mut coordinator| {
+                    coordinator
+                        .resize_reservation(&mut exact, payload_capacity_bytes)
+                        .map_err(ScopeAbortCause::Ledger)
+                });
+            if let Err(cause) = payload_resize {
+                self.diagnostics.borrow_mut().discard_prepared(prepared);
+                drop(exact);
+                return Err(self.abort(cause));
+            }
             let Some(structural_upper_bound) = structural_reservation.take() else {
                 self.diagnostics.borrow_mut().discard_prepared(prepared);
+                drop(exact);
                 return Err(self.abort(ScopeAbortCause::DescriptorContract {
                     code: "stored-diagnostic-without-structural-reservation",
                 }));
             };
             let mut structural_exact = structural_upper_bound;
-            self.coordinator
+            let structural_resize = self
+                .coordinator
                 .try_borrow_mut()
-                .map_err(|_| self.reentrant_capability_failure())?
-                .resize_reservation(&mut structural_exact, structural_bytes)
-                .map_err(|cause| self.abort(ScopeAbortCause::Ledger(cause)))?;
-            let consumed = {
-                let mut coordinator = self
-                    .coordinator
-                    .try_borrow_mut()
-                    .map_err(|_| self.reentrant_capability_failure())?;
-                let mut checkpoint = coordinator.checkpoint();
-                checkpoint
-                    .charge_consumed(ImportDimension::DiagnosticCount, 1)
-                    .and_then(|()| {
-                        checkpoint.charge_consumed(ImportDimension::DiagnosticBytes, stored_bytes)
-                    })
-            };
+                .map_err(|_| ScopeAbortCause::DescriptorContract {
+                    code: "parse-capability-reentered",
+                })
+                .and_then(|mut coordinator| {
+                    coordinator
+                        .resize_reservation(&mut structural_exact, structural_bytes)
+                        .map_err(ScopeAbortCause::Ledger)
+                });
+            if let Err(cause) = structural_resize {
+                self.diagnostics.borrow_mut().discard_prepared(prepared);
+                drop(exact);
+                drop(structural_exact);
+                return Err(self.abort(cause));
+            }
+            let consumed = self
+                .coordinator
+                .try_borrow_mut()
+                .map_err(|_| ScopeAbortCause::DescriptorContract {
+                    code: "parse-capability-reentered",
+                })
+                .and_then(|mut coordinator| {
+                    let mut checkpoint = coordinator.checkpoint();
+                    checkpoint
+                        .charge_consumed(ImportDimension::DiagnosticCount, 1)
+                        .and_then(|()| {
+                            checkpoint
+                                .charge_consumed(ImportDimension::DiagnosticBytes, stored_bytes)
+                        })
+                        .map_err(ScopeAbortCause::Ledger)
+                });
             if let Err(cause) = consumed {
                 self.diagnostics.borrow_mut().discard_prepared(prepared);
-                return Err(self.abort(ScopeAbortCause::Ledger(cause)));
+                drop(exact);
+                drop(structural_exact);
+                return Err(self.abort(cause));
             }
-            let mut reservations = self.diagnostic_reservations.borrow_mut();
-            reservations.push(exact);
-            reservations.push(structural_exact);
+            (Some(exact), Some(structural_exact))
+        } else {
+            (None, None)
+        };
+        let mut diagnostics = match self.diagnostics.try_borrow_mut() {
+            Ok(diagnostics) => diagnostics,
+            Err(_) => {
+                drop(prepared);
+                drop(payload_reservation);
+                drop(structural_reservation);
+                return Err(self.reentrant_capability_failure());
+            }
+        };
+        if let Err((prepared, payload, structural)) =
+            diagnostics.commit(prepared, payload_reservation, structural_reservation)
+        {
+            diagnostics.discard_prepared(prepared);
+            drop(diagnostics);
+            drop(payload);
+            drop(structural);
+            return Err(self.abort(ScopeAbortCause::DescriptorContract {
+                code: "diagnostic-storage-slots-not-admitted",
+            }));
         }
-        self.diagnostics.borrow_mut().commit(prepared);
 
         Ok(())
     }
 
-    fn reserve_diagnostic_reservation_slots(&self, payload_slots: usize) -> ParseResult<()> {
-        let plan = {
-            let reservations = self
-                .diagnostic_reservations
-                .try_borrow()
-                .map_err(|_| self.reentrant_capability_failure())?;
-            let payload_required =
-                reservations
-                    .len()
-                    .checked_add(payload_slots)
-                    .ok_or_else(|| {
-                        self.resource_limit_exceeded("diagnostic-reservation-list", u64::MAX)
-                    })?;
-            if payload_required <= reservations.capacity() {
-                return Ok(());
-            }
-            let additional_slots = payload_slots.checked_add(1).ok_or_else(|| {
-                self.resource_limit_exceeded("diagnostic-reservation-list", u64::MAX)
-            })?;
-            let desired_capacity = reservations
-                .len()
-                .checked_add(additional_slots)
-                .ok_or_else(|| {
-                    self.resource_limit_exceeded("diagnostic-reservation-list", u64::MAX)
-                })?;
-            CapacityPlan::for_type::<ImportReservation>(
-                reservations.len(),
-                reservations.capacity(),
-                desired_capacity,
-            )
-            .map_err(|cause| self.capacity_plan_error("diagnostic-reservation-list", cause))?
-        };
-        let envelope = plan
-            .envelope_delta_bytes()
-            .map_err(|cause| self.capacity_plan_error("diagnostic-reservation-list", cause))?;
-        let mut capacity_reservation =
-            self.reserve_live(ImportStorageClass::FormatNormalization, envelope)?;
-        {
-            let mut reservations = self
-                .diagnostic_reservations
-                .try_borrow_mut()
-                .map_err(|_| self.reentrant_capability_failure())?;
-            plan.verify_preflight(reservations.len(), reservations.capacity())
-                .map_err(|cause| self.capacity_plan_error("diagnostic-reservation-list", cause))?;
-            reservations
-                .try_reserve_exact(plan.allocator_additional())
-                .map_err(|_| self.allocation_failure("diagnostic-reservation-list"))?;
-        }
-        let actual = {
-            let reservations = self
-                .diagnostic_reservations
-                .try_borrow()
-                .map_err(|_| self.reentrant_capability_failure())?;
-            plan.finish(reservations.len(), reservations.capacity())
-                .map_err(|cause| self.capacity_plan_error("diagnostic-reservation-list", cause))?
-        };
-        self.resize_live(&mut capacity_reservation, actual)?;
-        self.diagnostic_reservations
+    fn reserve_diagnostic_scratch_cause(
+        &self,
+        capacity_bytes: u64,
+    ) -> Result<ImportReservation, ScopeAbortCause> {
+        self.coordinator
             .try_borrow_mut()
-            .map_err(|_| self.reentrant_capability_failure())?
-            .push(capacity_reservation.into_reservation());
-        Ok(())
+            .map_err(|_| ScopeAbortCause::DescriptorContract {
+                code: "parse-capability-reentered",
+            })?
+            .checkpoint()
+            .reserve(
+                ImportLedgerPhase::FormatNormalization,
+                ImportDimension::ScratchBytes,
+                capacity_bytes,
+            )
+            .map_err(ScopeAbortCause::Ledger)
     }
 
     fn derive_line_column(
@@ -1055,50 +1324,27 @@ impl<'session> ParseScope<'session> {
                     self.resource_limit_exceeded("diagnostic-line-index-entries", u64::MAX)
                 })?;
         }
-        let line_plan = CapacityPlan::for_type::<u64>(0, 0, line_count)
-            .map_err(|cause| self.capacity_plan_error("diagnostic-line-index", cause))?;
-        let index_plan = {
-            let indexes = self
-                .diagnostic_line_indexes
-                .try_borrow()
-                .map_err(|_| self.reentrant_capability_failure())?;
-            let desired = indexes.len().checked_add(1).ok_or_else(|| {
-                self.resource_limit_exceeded("diagnostic-line-index-cache", u64::MAX)
-            })?;
-            CapacityPlan::for_type::<DiagnosticLineIndex>(
-                indexes.len(),
-                indexes.capacity(),
-                desired,
-            )
-            .map_err(|cause| self.capacity_plan_error("diagnostic-line-index-cache", cause))?
-        };
-        let allocation_bytes = line_plan
+        let source_plan = CapacityPlan::for_type::<u8>(0, 0, source.path().as_str().len())
+            .map_err(|cause| self.capacity_plan_error("diagnostic-line-index-source", cause))?;
+        let source_admitted_bytes = source_plan
             .envelope_delta_bytes()
-            .and_then(|bytes| {
-                index_plan.envelope_delta_bytes().and_then(|index| {
-                    bytes
-                        .checked_add(index)
-                        .ok_or(CapacityPlanError::CapacityOverflow)
-                })
-            })
-            .and_then(|bytes| {
-                bytes
-                    .checked_add(source.path().as_str().len() as u64)
-                    .ok_or(CapacityPlanError::CapacityOverflow)
-            })
-            .map_err(|cause| self.capacity_plan_error("diagnostic-line-index-bytes", cause))?;
-        let mut reservation = self.reserve_live(ImportStorageClass::LineIndex, allocation_bytes)?;
-        let mut line_starts = Vec::new();
-        line_plan
-            .verify_preflight(line_starts.len(), line_starts.capacity())
-            .map_err(|cause| self.capacity_plan_error("diagnostic-line-index", cause))?;
+            .map_err(|cause| self.capacity_plan_error("diagnostic-line-index-source", cause))?;
+        let mut source_reservation = if source_admitted_bytes == 0 {
+            None
+        } else {
+            Some(self.reserve_live(ImportStorageClass::LineIndex, source_admitted_bytes)?)
+        };
+        let mut line_starts = AccountedVec::new();
         line_starts
-            .try_reserve_exact(line_plan.allocator_additional())
-            .map_err(|_| self.allocation_failure("diagnostic-line-index"))?;
-        let line_capacity_bytes = line_plan
-            .finish(line_starts.len(), line_starts.capacity())
-            .map_err(|cause| self.capacity_plan_error("diagnostic-line-index", cause))?;
-        line_starts.push(0);
+            .try_reserve_capacity(line_count, "diagnostic-line-index", |capacity_bytes| {
+                self.reserve_storage_cause(ImportStorageClass::LineIndex, capacity_bytes)
+            })
+            .map_err(|cause| self.abort(cause))?;
+        line_starts.try_push_reserved(0).map_err(|_| {
+            self.abort(ScopeAbortCause::DescriptorContract {
+                code: "diagnostic-line-index-slots-not-admitted",
+            })
+        })?;
         let mut offset = 0_usize;
         for chunk in bytes.chunks(4096) {
             self.poll()?;
@@ -1111,7 +1357,11 @@ impl<'session> ParseScope<'session> {
                         .ok_or_else(|| {
                             self.resource_limit_exceeded("diagnostic-line-index-offset", u64::MAX)
                         })?;
-                    line_starts.push(start);
+                    line_starts.try_push_reserved(start).map_err(|_| {
+                        self.abort(ScopeAbortCause::DescriptorContract {
+                            code: "diagnostic-line-index-slots-not-admitted",
+                        })
+                    })?;
                 }
             }
             offset = offset.checked_add(chunk.len()).ok_or_else(|| {
@@ -1120,37 +1370,55 @@ impl<'session> ParseScope<'session> {
         }
         permit.complete()?;
 
-        let mut indexes = self
-            .diagnostic_line_indexes
-            .try_borrow_mut()
-            .map_err(|_| self.reentrant_capability_failure())?;
-        index_plan
-            .verify_preflight(indexes.len(), indexes.capacity())
-            .map_err(|cause| self.capacity_plan_error("diagnostic-line-index-cache", cause))?;
-        indexes
-            .try_reserve_exact(index_plan.allocator_additional())
-            .map_err(|_| self.allocation_failure("diagnostic-line-index-cache"))?;
-        let index_capacity_bytes = index_plan
-            .finish(indexes.len(), indexes.capacity())
-            .map_err(|cause| self.capacity_plan_error("diagnostic-line-index-cache", cause))?;
-        let actual_bytes = line_capacity_bytes
-            .checked_add(index_capacity_bytes)
-            .and_then(|bytes| bytes.checked_add(source.path().as_str().len() as u64))
-            .ok_or_else(|| {
-                self.resource_limit_exceeded("diagnostic-line-index-actual-bytes", u64::MAX)
-            })?;
-        self.resize_live(&mut reservation, actual_bytes)?;
         let source_path = source
             .path()
             .try_clone()
             .map_err(|_| self.allocation_failure("diagnostic-line-index-source"))?;
-        indexes.push(DiagnosticLineIndex {
+        let source_capacity_bytes = u64::try_from(source_path.capacity_bytes())
+            .map_err(|_| self.resource_limit_exceeded("diagnostic-line-index-source", u64::MAX))?;
+        if source_capacity_bytes > source_admitted_bytes {
+            return Err(self.abort(ScopeAbortCause::DescriptorContract {
+                code: "diagnostic-line-index-reservation-underestimated",
+            }));
+        }
+        let source_reservation = match source_reservation.as_mut() {
+            Some(reservation) if source_capacity_bytes != 0 => {
+                self.resize_live(reservation, source_capacity_bytes)?;
+                source_reservation.map(ImportLiveReservation::into_reservation)
+            }
+            Some(_) => {
+                drop(source_reservation.take());
+                None
+            }
+            None if source_capacity_bytes == 0 => None,
+            None => {
+                return Err(self.abort(ScopeAbortCause::DescriptorContract {
+                    code: "diagnostic-line-index-source-without-reservation",
+                }));
+            }
+        };
+        let index = DiagnosticLineIndex {
             authority: source.authority().clone(),
             source: source_path,
+            _source_reservation: source_reservation,
             source_len,
             line_starts,
-            _reservation: reservation.into_reservation(),
-        });
+        };
+        let mut indexes = self
+            .diagnostic_line_indexes
+            .try_borrow_mut()
+            .map_err(|_| self.reentrant_capability_failure())?;
+        indexes
+            .try_reserve(1, "diagnostic-line-index-cache", |capacity_bytes| {
+                self.reserve_storage_cause(ImportStorageClass::LineIndex, capacity_bytes)
+            })
+            .map_err(|cause| self.abort(cause))?;
+        if let Err(index) = indexes.try_push_reserved(index) {
+            drop(index);
+            return Err(self.abort(ScopeAbortCause::DescriptorContract {
+                code: "diagnostic-line-index-cache-slots-not-admitted",
+            }));
+        }
         indexes
             .last()
             .ok_or_else(|| {
@@ -1197,20 +1465,37 @@ impl<'session> ParseScope<'session> {
         let capacity_bytes = capacity_plan
             .envelope_delta_bytes()
             .map_err(|cause| self.abort(ScopeAbortCause::SceneBuild(cause)))?;
-        let root_bytes = u64::try_from(size_of::<SceneBuilder>())
-            .ok()
-            .and_then(|bytes| bytes.checked_add(capacity_bytes))
-            .ok_or_else(|| self.allocation_failure("scene-builder-root-accounting"))?;
-        let root = self.reserve_live(ImportStorageClass::SceneConstruction, root_bytes)?;
-        let mut scoped = ScopedSceneBuilder {
+        let inline_bytes = u64::try_from(size_of::<SceneBuilder>())
+            .map_err(|_| self.allocation_failure("scene-builder-inline-accounting"))?;
+        let inline = self.reserve_live(ImportStorageClass::SceneConstruction, inline_bytes)?;
+        let nodes = self.reserve_live(ImportStorageClass::SceneConstruction, capacity_bytes)?;
+        let builder = SceneBuilder::try_new_with_capacity_plan(capacity_plan)
+            .map_err(|cause| self.abort(ScopeAbortCause::SceneBuild(cause)))?;
+        let mut node_slots = AccountedVec::new();
+        node_slots
+            .try_reserve(1, "scene-node-reservation-slots", |bytes| {
+                reserve_scene_inventory_capacity(self, bytes)
+            })
+            .map_err(|cause| self.abort(cause))?;
+        node_slots
+            .try_push_reserved(NodeReservationSlots::default())
+            .map_err(|_| {
+                self.abort(ScopeAbortCause::DescriptorContract {
+                    code: "scene-node-reservation-slot-not-admitted",
+                })
+            })?;
+
+        Ok(ScopedSceneBuilder {
             scope: self,
-            builder: SceneBuilder::try_new_with_capacity_plan(capacity_plan)
-                .map_err(|cause| self.abort(ScopeAbortCause::SceneBuild(cause)))?,
-            reservations: Vec::new(),
-            reservation_list_capacity: None,
-        };
-        scoped.adopt_reservation(root)?;
-        Ok(scoped)
+            storage: AccountedSceneStorage {
+                builder,
+                inventory: SceneReservationInventory::new(
+                    inline.into_reservation(),
+                    nodes.into_reservation(),
+                    node_slots,
+                ),
+            },
+        })
     }
 
     pub fn format_failure<S>(&self, source: S) -> ParseFailure
@@ -1669,35 +1954,21 @@ impl<'session> ParseScope<'session> {
             ));
         }
 
-        let acquired =
-            self.open_and_read_dependency(io, &identity)
-                .and_then(|(bytes, reservations)| {
-                    let (snapshot_bytes, sharing_reservation) =
-                        self.share_dependency_snapshot(bytes)?;
-                    let (snapshot_identity, identity_path_reservation) =
-                        self.clone_dependency_identity(&identity)?;
-                    Ok((
-                        snapshot_bytes,
-                        reservations,
-                        sharing_reservation,
-                        snapshot_identity,
-                        identity_path_reservation,
-                    ))
-                });
+        let acquired = self
+            .open_and_read_dependency(io, &identity)
+            .and_then(|bytes| {
+                let snapshot_bytes = self.share_dependency_snapshot(bytes)?;
+                let (snapshot_identity, identity_path_reservation) =
+                    self.clone_dependency_identity(&identity)?;
+                Ok((snapshot_bytes, snapshot_identity, identity_path_reservation))
+            });
         match acquired {
-            Ok((
-                snapshot_bytes,
-                reservations,
-                sharing_reservation,
-                snapshot_identity,
-                identity_path_reservation,
-            )) => {
-                if !self.dependencies.borrow_mut().store_available(
-                    &identity,
-                    Arc::clone(&snapshot_bytes),
-                    reservations,
-                    sharing_reservation,
-                ) {
+            Ok((snapshot_bytes, snapshot_identity, identity_path_reservation)) => {
+                if !self
+                    .dependencies
+                    .borrow_mut()
+                    .store_available(&identity, Arc::clone(&snapshot_bytes))
+                {
                     self.dependencies.borrow_mut().remove(&identity);
                     return Err(self.dependency_failure(
                         Some(identity),
@@ -1791,20 +2062,14 @@ impl<'session> ParseScope<'session> {
 
     fn share_dependency_snapshot(
         &self,
-        bytes: Vec<u8>,
-    ) -> Result<(Arc<Vec<u8>>, ImportReservation), ScopeAbortCause> {
-        const CONTROL_WORDS: usize = 4;
-        let control_bytes = size_of::<Vec<u8>>()
-            .checked_add(size_of::<usize>().checked_mul(CONTROL_WORDS).ok_or(
-                ScopeAbortCause::ResourceLimit {
-                    resource: "dependency-snapshot-sharing",
-                    limit: u64::MAX,
-                },
-            )?)
-            .ok_or(ScopeAbortCause::ResourceLimit {
+        bytes: AccountedVec<u8>,
+    ) -> Result<Arc<SharedDependencySnapshot>, ScopeAbortCause> {
+        let control_bytes = shared_dependency_snapshot_allocation_bytes().ok_or(
+            ScopeAbortCause::ResourceLimit {
                 resource: "dependency-snapshot-sharing",
                 limit: u64::MAX,
-            })?;
+            },
+        )?;
         let reservation =
             self.reserve_dependency_storage_cause(u64::try_from(control_bytes).map_err(|_| {
                 ScopeAbortCause::ResourceLimit {
@@ -1812,7 +2077,7 @@ impl<'session> ParseScope<'session> {
                     limit: u64::MAX,
                 }
             })?)?;
-        Ok((Arc::new(bytes), reservation))
+        Ok(Arc::new(SharedDependencySnapshot::new(bytes, reservation)))
     }
 
     fn clone_dependency_identity(
@@ -2094,21 +2359,30 @@ impl<'session> ParseScope<'session> {
             &owner,
             failure.cache_disposition,
         )?;
-        let mut retained_evidence = self.clone_optional_dependency_evidence(
+        let retained_evidence = self.clone_optional_dependency_evidence(
             failure.identity.as_ref(),
             normalized_path.path(),
             &owner,
             failure.cache_disposition,
         )?;
-        if let Some(reservation) = self.reserve_optional_evidence_capacity()? {
-            retained_evidence.retain_container_capacity(reservation);
-        }
         {
             let mut retained = self
                 .optional_dependency_evidence
                 .try_borrow_mut()
                 .map_err(|_| self.reentrant_capability_failure())?;
-            retained.push(retained_evidence);
+            retained
+                .try_reserve(
+                    1,
+                    "optional-dependency-evidence-capacity",
+                    |capacity_bytes| self.reserve_dependency_storage_cause(capacity_bytes),
+                )
+                .map_err(|cause| self.abort(cause))?;
+            if let Err(retained_evidence) = retained.try_push_reserved(retained_evidence) {
+                drop(retained_evidence);
+                return Err(self.abort(ScopeAbortCause::DescriptorContract {
+                    code: "optional-dependency-evidence-slots-not-admitted",
+                }));
+            }
         }
         self.emit_diagnostic(
             DiagnosticSeverity::Warning,
@@ -2175,67 +2449,6 @@ impl<'session> ParseScope<'session> {
         ))
     }
 
-    fn reserve_optional_evidence_capacity(&self) -> ParseResult<Option<ImportReservation>> {
-        let plan = {
-            let retained = self
-                .optional_dependency_evidence
-                .try_borrow()
-                .map_err(|_| self.reentrant_capability_failure())?;
-            let desired_capacity = retained.len().checked_add(1).ok_or_else(|| {
-                self.resource_limit_exceeded("optional-dependency-evidence-capacity", u64::MAX)
-            })?;
-            CapacityPlan::for_type::<OptionalDependencyEvidence>(
-                retained.len(),
-                retained.capacity(),
-                desired_capacity,
-            )
-            .map_err(|cause| {
-                self.capacity_plan_error("optional-dependency-evidence-capacity", cause)
-            })?
-        };
-        let envelope = plan.envelope_delta_bytes().map_err(|cause| {
-            self.capacity_plan_error("optional-dependency-evidence-capacity", cause)
-        })?;
-        if envelope == 0 {
-            return Ok(None);
-        }
-        let mut reservation = self.reserve_dependency_storage(envelope)?;
-        {
-            let mut retained = self
-                .optional_dependency_evidence
-                .try_borrow_mut()
-                .map_err(|_| self.reentrant_capability_failure())?;
-            plan.verify_preflight(retained.len(), retained.capacity())
-                .map_err(|cause| {
-                    self.capacity_plan_error("optional-dependency-evidence-capacity", cause)
-                })?;
-            retained
-                .try_reserve_exact(plan.allocator_additional())
-                .map_err(|_| {
-                    self.abort(ScopeAbortCause::Allocation {
-                        resource: "optional-dependency-evidence-capacity",
-                    })
-                })?;
-        }
-        let actual = {
-            let retained = self
-                .optional_dependency_evidence
-                .try_borrow()
-                .map_err(|_| self.reentrant_capability_failure())?;
-            plan.finish(retained.len(), retained.capacity())
-                .map_err(|cause| {
-                    self.capacity_plan_error("optional-dependency-evidence-capacity", cause)
-                })?
-        };
-        self.coordinator
-            .try_borrow_mut()
-            .map_err(|_| self.reentrant_capability_failure())?
-            .checkpoint()
-            .resize_reservation(&mut reservation, actual)
-            .map_err(|cause| self.abort(ScopeAbortCause::Ledger(cause)))?;
-        Ok(Some(reservation))
-    }
-
     fn reserve_dependency_storage(&self, bytes: u64) -> ParseResult<ImportReservation> {
         self.reserve_dependency_storage_cause(bytes)
             .map_err(|cause| self.abort(cause))
@@ -2296,125 +2509,61 @@ impl<'session> ParseScope<'session> {
         })
     }
 
-    fn seal_draft_reservations(
+    fn seal_draft_inventory(
         &self,
-        reservations: &mut Vec<ImportReservation>,
+        inventory: &mut SceneReservationInventory,
         required_bytes: u64,
     ) -> ParseResult<()> {
-        let current_bytes = reservations.iter().try_fold(0_u64, |total, reservation| {
-            total.checked_add(reservation.bytes()).ok_or_else(|| {
-                self.abort(ScopeAbortCause::DescriptorContract {
-                    code: "draft-reservation-bytes-overflow",
-                })
-            })
-        })?;
-        if current_bytes < required_bytes {
+        let snapshot = inventory
+            .snapshot()
+            .map_err(|code| self.abort(ScopeAbortCause::DescriptorContract { code }))?;
+        if snapshot.bytes < required_bytes {
             return Err(self.abort(ScopeAbortCause::DescriptorContract {
                 code: "draft-storage-was-not-reserved-before-allocation",
             }));
         }
 
-        self.reserve_draft_reservation_slots(reservations.len())?;
+        let typed_count = inventory
+            .typed_token_count()
+            .map_err(|code| self.abort(ScopeAbortCause::DescriptorContract { code }))?;
+        inventory
+            .payload
+            .try_reserve(
+                typed_count,
+                "scene-reservation-flattening",
+                |capacity_bytes| reserve_scene_inventory_capacity(self, capacity_bytes),
+            )
+            .map_err(|cause| self.abort(cause))?;
+
         let mut session_reservations = self
             .draft_reservations
             .try_borrow_mut()
             .map_err(|_| self.reentrant_capability_failure())?;
-        session_reservations.append(reservations);
-        Ok(())
-    }
-
-    fn reserve_draft_reservation_slots(&self, payload_slots: usize) -> ParseResult<()> {
-        if payload_slots == 0 {
-            return Ok(());
-        }
-        let plan = {
-            let reservations = self
-                .draft_reservations
-                .try_borrow()
-                .map_err(|_| self.reentrant_capability_failure())?;
-            let desired_capacity =
-                reservations
-                    .len()
-                    .checked_add(payload_slots)
-                    .ok_or_else(|| {
-                        self.resource_limit_exceeded("draft-reservation-side-channel", u64::MAX)
-                    })?;
-            CapacityPlan::for_type::<ImportReservation>(
-                reservations.len(),
-                reservations.capacity(),
-                desired_capacity,
+        session_reservations
+            .try_reserve(
+                snapshot.token_count,
+                "draft-reservation-side-channel",
+                |capacity_bytes| {
+                    self.coordinator
+                        .try_borrow_mut()
+                        .map_err(|_| ScopeAbortCause::DescriptorContract {
+                            code: "parse-capability-reentered",
+                        })?
+                        .checkpoint()
+                        .reserve(
+                            ImportLedgerPhase::SceneConstruction,
+                            ImportDimension::ScratchBytes,
+                            capacity_bytes,
+                        )
+                        .map_err(ScopeAbortCause::Ledger)
+                },
             )
-            .map_err(|cause| self.capacity_plan_error("draft-reservation-side-channel", cause))?
-        };
-        let envelope_delta = plan
-            .envelope_delta_bytes()
-            .map_err(|cause| self.capacity_plan_error("draft-reservation-side-channel", cause))?;
-        if envelope_delta == 0 {
-            return Ok(());
+            .map_err(|cause| self.abort(cause))?;
+        if inventory.transfer_into(&mut session_reservations).is_err() {
+            return Err(self.abort(ScopeAbortCause::DescriptorContract {
+                code: "draft-reservation-slots-not-admitted",
+            }));
         }
-        let prior_reservation = self
-            .draft_reservation_list_capacity
-            .try_borrow_mut()
-            .map_err(|_| self.reentrant_capability_failure())?
-            .take();
-        let prior_bytes = prior_reservation
-            .as_ref()
-            .map_or(0, ImportReservation::bytes);
-        let envelope = prior_bytes.checked_add(envelope_delta).ok_or_else(|| {
-            self.resource_limit_exceeded("draft-reservation-side-channel", u64::MAX)
-        })?;
-        let mut reservation = match prior_reservation {
-            Some(mut reservation) => {
-                self.coordinator
-                    .try_borrow_mut()
-                    .map_err(|_| self.reentrant_capability_failure())?
-                    .checkpoint()
-                    .resize_reservation(&mut reservation, envelope)
-                    .map_err(|cause| self.abort(ScopeAbortCause::Ledger(cause)))?;
-                reservation
-            }
-            None => self
-                .coordinator
-                .try_borrow_mut()
-                .map_err(|_| self.reentrant_capability_failure())?
-                .checkpoint()
-                .reserve(
-                    ImportLedgerPhase::SceneConstruction,
-                    ImportDimension::ScratchBytes,
-                    envelope,
-                )
-                .map_err(|cause| self.abort(ScopeAbortCause::Ledger(cause)))?,
-        };
-        let actual_delta = {
-            let mut reservations = self
-                .draft_reservations
-                .try_borrow_mut()
-                .map_err(|_| self.reentrant_capability_failure())?;
-            plan.verify_preflight(reservations.len(), reservations.capacity())
-                .map_err(|cause| {
-                    self.capacity_plan_error("draft-reservation-side-channel", cause)
-                })?;
-            reservations
-                .try_reserve_exact(plan.allocator_additional())
-                .map_err(|_| self.allocation_failure("draft-reservation-side-channel"))?;
-            plan.finish(reservations.len(), reservations.capacity())
-                .map_err(|cause| {
-                    self.capacity_plan_error("draft-reservation-side-channel", cause)
-                })?
-        };
-        let actual = prior_bytes.checked_add(actual_delta).ok_or_else(|| {
-            self.resource_limit_exceeded("draft-reservation-side-channel", u64::MAX)
-        })?;
-        self.coordinator
-            .try_borrow_mut()
-            .map_err(|_| self.reentrant_capability_failure())?
-            .checkpoint()
-            .resize_reservation(&mut reservation, actual)
-            .map_err(|cause| self.abort(ScopeAbortCause::Ledger(cause)))?;
-        *self
-            .draft_reservation_list_capacity
-            .try_borrow_mut()
-            .map_err(|_| self.reentrant_capability_failure())? = Some(reservation);
         Ok(())
     }
 }
@@ -2429,7 +2578,7 @@ pub enum ImportStorageClass {
 }
 
 impl ImportStorageClass {
-    const fn accounting(self) -> (ImportLedgerPhase, ImportDimension) {
+    pub(crate) const fn accounting(self) -> (ImportLedgerPhase, ImportDimension) {
         match self {
             Self::BackendDecode => (
                 ImportLedgerPhase::BackendDecode,
@@ -2455,16 +2604,1304 @@ impl ImportStorageClass {
     }
 }
 
-pub struct ImportLiveReservation<'scope> {
+const METERED_COPY_POLL_INTERVAL: usize = 4 * 1024;
+
+fn metered_copy_chunk_len<T>() -> usize {
+    METERED_COPY_POLL_INTERVAL
+        .checked_div(size_of::<T>())
+        .unwrap_or(METERED_COPY_POLL_INTERVAL)
+        .max(1)
+}
+
+impl StorageMeter<'_> {
+    fn abort(&self, cause: ScopeAbortCause) -> ParseFailure {
+        let mut terminal = self.terminal.borrow_mut();
+        if terminal.is_none() {
+            *terminal = Some(cause);
+        }
+        ParseFailure::scope()
+    }
+
+    fn preflight_active(&self) -> ParseResult<()> {
+        if self.terminal.borrow().is_some() {
+            Err(ParseFailure::scope())
+        } else {
+            Ok(())
+        }
+    }
+
+    fn poll(&self) -> ParseResult<()> {
+        self.preflight_active()?;
+        let result = self
+            .coordinator
+            .try_borrow_mut()
+            .map_err(|_| {
+                self.abort(ScopeAbortCause::DescriptorContract {
+                    code: "parse-capability-reentered",
+                })
+            })?
+            .poll();
+        result.map_err(|cause| self.abort(ScopeAbortCause::Control(cause)))
+    }
+
+    fn reserve(
+        &self,
+        class: ImportStorageClass,
+        bytes: u64,
+    ) -> ParseResult<Option<ImportReservation>> {
+        self.preflight_active()?;
+        if bytes == 0 {
+            return Ok(None);
+        }
+        let (phase, dimension) = class.accounting();
+        self.coordinator
+            .try_borrow_mut()
+            .map_err(|_| {
+                self.abort(ScopeAbortCause::DescriptorContract {
+                    code: "parse-capability-reentered",
+                })
+            })?
+            .checkpoint()
+            .reserve(phase, dimension, bytes)
+            .map(Some)
+            .map_err(|cause| self.abort(ScopeAbortCause::Ledger(cause)))
+    }
+
+    fn reserve_inventory(
+        &self,
+        class: ImportStorageClass,
+        bytes: u64,
+    ) -> Result<ImportReservation, ScopeAbortCause> {
+        let (phase, _) = class.accounting();
+        self.coordinator
+            .try_borrow_mut()
+            .map_err(|_| ScopeAbortCause::DescriptorContract {
+                code: "parse-capability-reentered",
+            })?
+            .checkpoint()
+            .reserve(phase, ImportDimension::ScratchBytes, bytes)
+            .map_err(ScopeAbortCause::Ledger)
+    }
+
+    fn resize_exact(
+        &self,
+        reservation: &mut Option<ImportReservation>,
+        bytes: u64,
+    ) -> ParseResult<()> {
+        match (reservation.as_mut(), bytes) {
+            (None, 0) => Ok(()),
+            (Some(_), 0) => Err(self.abort(ScopeAbortCause::DescriptorContract {
+                code: "metered-storage-unused-capacity-reservation",
+            })),
+            (Some(token), bytes) => self
+                .coordinator
+                .try_borrow_mut()
+                .map_err(|_| {
+                    self.abort(ScopeAbortCause::DescriptorContract {
+                        code: "parse-capability-reentered",
+                    })
+                })?
+                .checkpoint()
+                .resize_reservation(token, bytes)
+                .map_err(|cause| self.abort(ScopeAbortCause::Ledger(cause))),
+            (None, _) => Err(self.abort(ScopeAbortCause::DescriptorContract {
+                code: "metered-storage-capacity-without-reservation",
+            })),
+        }
+    }
+
+    fn capacity_error(&self, resource: &'static str, cause: CapacityPlanError) -> ParseFailure {
+        match cause {
+            CapacityPlanError::CapacityOverflow | CapacityPlanError::AllocationTooLarge { .. } => {
+                self.abort(ScopeAbortCause::ResourceLimit {
+                    resource,
+                    limit: u64::MAX,
+                })
+            }
+            CapacityPlanError::InvalidState { .. }
+            | CapacityPlanError::StalePlan { .. }
+            | CapacityPlanError::CapacityPlatformUnqualified { .. } => {
+                self.abort(ScopeAbortCause::DescriptorContract {
+                    code: "capacity-plan-contract-failed",
+                })
+            }
+            _ => self.abort(ScopeAbortCause::DescriptorContract {
+                code: "capacity-plan-error-unknown",
+            }),
+        }
+    }
+
+    fn allocation_failure(&self, resource: &'static str) -> ParseFailure {
+        self.abort(ScopeAbortCause::Allocation { resource })
+    }
+
+    fn qualification_failure(&self, resource: &'static str) -> ParseFailure {
+        self.capacity_error(
+            resource,
+            CapacityPlanError::CapacityPlatformUnqualified {
+                policy_revision: baozi_operation::CAPACITY_POLICY_REVISION,
+                desired_capacity: 1,
+                envelope_capacity: 1,
+                actual_capacity: 2,
+            },
+        )
+    }
+
+    fn same_owner(&self, other: &Self) -> bool {
+        std::ptr::eq(self.coordinator, other.coordinator)
+            && std::ptr::eq(self.terminal, other.terminal)
+    }
+}
+
+impl<T> MeteredVec<'_, T> {
+    pub fn try_reserve(&mut self, additional: usize) -> ParseResult<()> {
+        self.meter.poll()?;
+        let required = self
+            .values
+            .len()
+            .checked_add(additional)
+            .ok_or_else(|| self.meter.allocation_failure(self.resource))?;
+        if required <= self.values.capacity() {
+            return Ok(());
+        }
+
+        let desired = self
+            .values
+            .capacity()
+            .saturating_mul(2)
+            .max(required)
+            .max(4);
+        let plan = CapacityPlan::for_type::<T>(self.values.len(), self.values.capacity(), desired)
+            .map_err(|cause| self.meter.capacity_error(self.resource, cause))?;
+        let replacement_plan = CapacityPlan::for_type::<T>(0, 0, plan.envelope_capacity())
+            .map_err(|cause| self.meter.capacity_error(self.resource, cause))?;
+        let admitted = replacement_plan
+            .envelope_delta_bytes()
+            .map_err(|cause| self.meter.capacity_error(self.resource, cause))?;
+        let mut token = self.meter.reserve(self.class, admitted)?;
+        plan.verify_preflight(self.values.len(), self.values.capacity())
+            .map_err(|cause| self.meter.capacity_error(self.resource, cause))?;
+        replacement_plan
+            .verify_preflight(0, 0)
+            .map_err(|cause| self.meter.capacity_error(self.resource, cause))?;
+        let mut replacement = Vec::new();
+        replacement
+            .try_reserve_exact(replacement_plan.allocator_additional())
+            .map_err(|_| self.meter.allocation_failure(self.resource))?;
+        let complete_bytes = replacement_plan
+            .finish(replacement.len(), replacement.capacity())
+            .map_err(|cause| self.meter.capacity_error(self.resource, cause))?;
+        plan.finish(self.values.len(), replacement.capacity())
+            .map_err(|cause| self.meter.capacity_error(self.resource, cause))?;
+        self.meter.resize_exact(&mut token, complete_bytes)?;
+        if fail_next_metered_qualification() {
+            return Err(self.meter.qualification_failure(self.resource));
+        }
+        self.meter.poll()?;
+
+        assert!(
+            replacement.capacity() >= self.values.len(),
+            "a prepared metered vector must retain every live element"
+        );
+        replacement.append(&mut self.values);
+        let retired_values = std::mem::replace(&mut self.values, replacement);
+        let retired_token = std::mem::replace(&mut self.capacity, token);
+        drop(retired_values);
+        drop(retired_token);
+        Ok(())
+    }
+
+    pub fn try_push(&mut self, value: T) -> ParseResult<()> {
+        self.try_reserve(1)?;
+        self.values.push(value);
+        Ok(())
+    }
+
+    /// Pushes into a slot admitted by an earlier reserve without polling or entering the allocator.
+    pub fn try_push_reserved(&mut self, value: T) -> ParseResult<()> {
+        if self.values.len() == self.values.capacity() {
+            return Err(self.meter.abort(ScopeAbortCause::DescriptorContract {
+                code: "metered-vector-capacity-not-reserved",
+            }));
+        }
+        self.values.push(value);
+        Ok(())
+    }
+
+    pub fn try_extend_from_slice(&mut self, values: &[T]) -> ParseResult<()>
+    where
+        T: Copy,
+    {
+        self.try_reserve(values.len())?;
+        for chunk in values.chunks(metered_copy_chunk_len::<T>()) {
+            self.meter.poll()?;
+            self.values.extend_from_slice(chunk);
+        }
+        Ok(())
+    }
+
+    pub fn try_resize(&mut self, len: usize, value: T) -> ParseResult<()>
+    where
+        T: Copy,
+    {
+        let additional = len.saturating_sub(self.values.len());
+        self.try_reserve(additional)?;
+        while self.values.len() < len {
+            self.meter.poll()?;
+            let chunk_end = self
+                .values
+                .len()
+                .saturating_add(metered_copy_chunk_len::<T>())
+                .min(len);
+            self.values.resize(chunk_end, value);
+        }
+        self.values.truncate(len);
+        Ok(())
+    }
+
+    /// Runs a fallible heap sort without exposing the backing vector or changing its capacity.
+    pub fn try_sort_unstable_by<E>(
+        &mut self,
+        mut compare: impl FnMut(&T, &T) -> Result<std::cmp::Ordering, E>,
+    ) -> Result<(), E> {
+        if self.values.len() <= 1 {
+            return Ok(());
+        }
+        let len = self.values.len();
+        let mut start = len / 2;
+        while start > 0 {
+            start -= 1;
+            sift_down_fallible(&mut self.values, start, len, &mut compare)?;
+        }
+        let mut end = len;
+        while end > 1 {
+            end -= 1;
+            self.values.swap(0, end);
+            sift_down_fallible(&mut self.values, 0, end, &mut compare)?;
+        }
+        Ok(())
+    }
+
+    /// Partitions adjacent duplicates behind the returned retained length without dropping them.
+    ///
+    /// Callers remain responsible for truncating the duplicate suffix under their own work and
+    /// cancellation policy.
+    pub fn try_partition_dedup_by<E>(
+        &mut self,
+        mut equivalent: impl FnMut(&T, &T) -> Result<bool, E>,
+    ) -> Result<usize, E> {
+        if self.values.len() <= 1 {
+            return Ok(self.values.len());
+        }
+        let mut write = 1;
+        for read in 1..self.values.len() {
+            if equivalent(&self.values[write - 1], &self.values[read])? {
+                continue;
+            }
+            if write != read {
+                self.values.swap(write, read);
+            }
+            write += 1;
+        }
+        Ok(write)
+    }
+
+    /// Consumes values in order while retaining the capacity token until the last value is gone.
+    pub fn try_for_each_owned<E>(
+        mut self,
+        mut visit: impl FnMut(T) -> Result<(), E>,
+    ) -> Result<(), E> {
+        let mut values = std::mem::take(&mut self.values);
+        for value in values.drain(..) {
+            visit(value)?;
+        }
+        Ok(())
+    }
+}
+
+impl MeteredString<'_> {
+    pub fn try_reserve(&mut self, additional: usize) -> ParseResult<()> {
+        self.meter.poll()?;
+        let required = self
+            .value
+            .len()
+            .checked_add(additional)
+            .ok_or_else(|| self.meter.allocation_failure(self.resource))?;
+        if required <= self.value.capacity() {
+            return Ok(());
+        }
+
+        let desired = self.value.capacity().saturating_mul(2).max(required).max(4);
+        let plan =
+            CapacityPlan::with_element_size(self.value.len(), self.value.capacity(), desired, 1)
+                .map_err(|cause| self.meter.capacity_error(self.resource, cause))?;
+        let replacement_plan = CapacityPlan::with_element_size(0, 0, plan.envelope_capacity(), 1)
+            .map_err(|cause| self.meter.capacity_error(self.resource, cause))?;
+        let admitted = replacement_plan
+            .envelope_delta_bytes()
+            .map_err(|cause| self.meter.capacity_error(self.resource, cause))?;
+        let mut token = self.meter.reserve(self.class, admitted)?;
+        plan.verify_preflight(self.value.len(), self.value.capacity())
+            .map_err(|cause| self.meter.capacity_error(self.resource, cause))?;
+        replacement_plan
+            .verify_preflight(0, 0)
+            .map_err(|cause| self.meter.capacity_error(self.resource, cause))?;
+        let mut replacement = String::new();
+        replacement
+            .try_reserve_exact(replacement_plan.allocator_additional())
+            .map_err(|_| self.meter.allocation_failure(self.resource))?;
+        let complete_bytes = replacement_plan
+            .finish(replacement.len(), replacement.capacity())
+            .map_err(|cause| self.meter.capacity_error(self.resource, cause))?;
+        plan.finish(self.value.len(), replacement.capacity())
+            .map_err(|cause| self.meter.capacity_error(self.resource, cause))?;
+        self.meter.resize_exact(&mut token, complete_bytes)?;
+        if fail_next_metered_qualification() {
+            return Err(self.meter.qualification_failure(self.resource));
+        }
+        append_metered_string_with_meter(&self.meter, &mut replacement, &self.value)?;
+        self.meter.poll()?;
+
+        let retired_value = std::mem::replace(&mut self.value, replacement);
+        let retired_token = std::mem::replace(&mut self.capacity, token);
+        drop(retired_value);
+        drop(retired_token);
+        Ok(())
+    }
+
+    pub fn try_push_str(&mut self, value: &str) -> ParseResult<()> {
+        self.try_reserve(value.len())?;
+        append_metered_string_with_meter(&self.meter, &mut self.value, value)
+    }
+
+    pub fn try_push_char(&mut self, value: char) -> ParseResult<()> {
+        let mut encoded = [0_u8; 4];
+        let encoded = value.encode_utf8(&mut encoded);
+        self.try_push_str(encoded)
+    }
+
+    pub fn try_push_usize(&mut self, value: usize) -> ParseResult<()> {
+        self.try_write_fmt(format_args!("{value}"))
+    }
+
+    pub fn try_write_fmt(&mut self, arguments: fmt::Arguments<'_>) -> ParseResult<()> {
+        let mut writer = MeteredStringWriter {
+            value: self,
+            failure: None,
+        };
+        let result = fmt::write(&mut writer, arguments);
+        match (result, writer.failure) {
+            (_, Some(failure)) => Err(failure),
+            (Ok(()), None) => Ok(()),
+            (Err(fmt::Error), None) => {
+                Err(writer
+                    .value
+                    .meter
+                    .abort(ScopeAbortCause::DescriptorContract {
+                        code: "metered-string-format-failed",
+                    }))
+            }
+        }
+    }
+}
+
+struct MeteredStringWriter<'a, 'scope> {
+    value: &'a mut MeteredString<'scope>,
+    failure: Option<ParseFailure>,
+}
+
+impl fmt::Write for MeteredStringWriter<'_, '_> {
+    fn write_str(&mut self, value: &str) -> fmt::Result {
+        match self.value.try_push_str(value) {
+            Ok(()) => Ok(()),
+            Err(failure) => {
+                self.failure = Some(failure);
+                Err(fmt::Error)
+            }
+        }
+    }
+}
+
+impl MeteredDecodedText<'_> {
+    pub fn try_push_str(&mut self, value: &str) -> ParseResult<()> {
+        self.meter.poll()?;
+        let required = self
+            .value
+            .len()
+            .checked_add(value.len())
+            .ok_or_else(|| self.meter.allocation_failure(self.resource))?;
+        if required > self.decoded_len || required > self.value.capacity() {
+            return Err(self.meter.abort(ScopeAbortCause::DescriptorContract {
+                code: "decoded-text-length-exhausted",
+            }));
+        }
+        self.value.push_str(value);
+        Ok(())
+    }
+
+    pub fn finish_exact(self) -> ParseResult<Self> {
+        self.meter.poll()?;
+        if self.value.len() != self.decoded_len {
+            return Err(self.meter.abort(ScopeAbortCause::DescriptorContract {
+                code: "decoded-text-length-mismatch",
+            }));
+        }
+        Ok(self)
+    }
+}
+
+impl<'scope, T> MeteredSceneVec<'scope, T> {
+    pub fn try_push_parts(&mut self, mut parts: SceneValueParts<'scope, T>) -> ParseResult<()> {
+        if !self.values.meter.same_owner(&parts.meter) {
+            return Err(self
+                .values
+                .meter
+                .abort(ScopeAbortCause::DescriptorContract {
+                    code: "scene-collection-owner-mismatch",
+                }));
+        }
+        self.values.try_reserve(1)?;
+        let meter = self.values.meter;
+        self.reservations
+            .try_merge_preserving(
+                &mut parts.reservations,
+                "scene-collection-element-reservations",
+                |bytes| meter.reserve_inventory(ImportStorageClass::SceneConstruction, bytes),
+            )
+            .map_err(|cause| meter.abort(cause))?;
+        let value = parts
+            .value
+            .take()
+            .expect("scene collection parts are consumed exactly once");
+        self.values.values.push(value);
+        Ok(())
+    }
+
+    pub fn try_into_scene_parts(self) -> ParseResult<SceneValueParts<'scope, Vec<T>>> {
+        let Self {
+            values,
+            reservations,
+        } = self;
+        let mut reservations = reservations;
+        // Keep element reservations outside the fallible conversion until the collection value
+        // has an owner that will be dropped first on every early return.
+        let mut parts = values.try_into_scene_parts()?;
+        let meter = parts.meter;
+        parts
+            .reservations
+            .try_merge_preserving(
+                &mut reservations,
+                "scene-collection-final-reservations",
+                |bytes| meter.reserve_inventory(ImportStorageClass::SceneConstruction, bytes),
+            )
+            .map_err(|cause| meter.abort(cause))?;
+        Ok(parts)
+    }
+}
+
+/// Couples the metadata map with both the current and remaining entry owners during finalization.
+/// Field order makes unwind drop the complete map before any unmerged entry reservation.
+struct ScenePartsReservationFinalizer<'scope, T> {
+    parts: SceneValueParts<'scope, T>,
+    current: Option<SceneValueReservations>,
+    entries: MeteredVec<'scope, SceneValueReservations>,
+}
+
+impl<'scope, T> ScenePartsReservationFinalizer<'scope, T> {
+    fn try_finish(mut self) -> ParseResult<SceneValueParts<'scope, T>> {
+        let meter = self.parts.meter;
+        while let Some(reservations) = self.entries.pop() {
+            debug_assert!(self.current.is_none());
+            self.current = Some(reservations);
+            #[cfg(test)]
+            if fail_next_scene_parts_finalization_panic() {
+                panic!("injected scene-parts finalization panic");
+            }
+            self.parts
+                .reservations
+                .try_merge_preserving(
+                    self.current
+                        .as_mut()
+                        .expect("the current metadata entry remains coupled during merge"),
+                    "metadata-map-final-reservations",
+                    |bytes| meter.reserve_inventory(ImportStorageClass::SceneConstruction, bytes),
+                )
+                .map_err(|cause| meter.abort(cause))?;
+            drop(self.current.take());
+        }
+
+        let Self {
+            parts,
+            current,
+            entries,
+        } = self;
+        drop(current);
+        drop(entries);
+        Ok(parts)
+    }
+}
+
+impl<'scope> MeteredMetadataMap<'scope> {
+    pub fn try_insert_parts(
+        &mut self,
+        mut parts: SceneValueParts<'_, (String, MetadataValue)>,
+    ) -> ParseResult<()> {
+        let meter = self.values.meter;
+        if !meter.same_owner(&parts.meter) {
+            return Err(meter.abort(ScopeAbortCause::DescriptorContract {
+                code: "metadata-map-owner-mismatch",
+            }));
+        }
+        meter.poll()?;
+        let (key, _) = parts
+            .value
+            .as_ref()
+            .expect("metadata parts retain their entry before insertion");
+        let position = self
+            .values
+            .value
+            .iter()
+            .position(|(candidate, _)| candidate >= key)
+            .unwrap_or(self.values.len());
+        let is_new = self.values.value.get(key).is_none();
+        if self.entries.len() != self.values.len() {
+            return Err(meter.abort(ScopeAbortCause::DescriptorContract {
+                code: "metadata-map-entry-owner-mismatch",
+            }));
+        }
+        self.values.try_reserve(usize::from(is_new))?;
+        if is_new {
+            self.entries.try_reserve(1)?;
+        }
+        let (key, value) = parts
+            .value
+            .take()
+            .expect("metadata parts are consumed exactly once");
+        let reservations = parts.reservations;
+        let retired = self
+            .values
+            .value
+            .insert_entry_reserved(key, value)
+            .map_err(|_| {
+                meter.abort(ScopeAbortCause::DescriptorContract {
+                    code: "metadata-map-capacity-not-reserved",
+                })
+            })?;
+        if is_new {
+            self.entries.values.insert(position, reservations);
+        } else {
+            let old_reservations =
+                std::mem::replace(&mut self.entries.values[position], reservations);
+            if let Some(value) = retired {
+                crate::metered_storage::RetiredPreparedMetadataEntry {
+                    value,
+                    reservations: old_reservations,
+                }
+                .drop_in_order();
+            } else {
+                drop(old_reservations);
+            }
+        }
+        Ok(())
+    }
+
+    pub fn try_into_scene_parts(self) -> ParseResult<SceneValueParts<'scope, MetadataMap>> {
+        let Self { values, entries } = self;
+        ScenePartsReservationFinalizer {
+            parts: values.try_into_scene_parts()?,
+            current: None,
+            entries,
+        }
+        .try_finish()
+    }
+}
+
+fn sift_down_fallible<T, E>(
+    values: &mut [T],
+    mut root: usize,
+    end: usize,
+    compare: &mut impl FnMut(&T, &T) -> Result<std::cmp::Ordering, E>,
+) -> Result<(), E> {
+    while root < end / 2 {
+        let child = root * 2 + 1;
+        let mut greater = child;
+        if child + 1 < end
+            && compare(&values[child], &values[child + 1])? == std::cmp::Ordering::Less
+        {
+            greater = child + 1;
+        }
+        if compare(&values[root], &values[greater])? != std::cmp::Ordering::Less {
+            return Ok(());
+        }
+        values.swap(root, greater);
+        root = greater;
+    }
+    Ok(())
+}
+
+impl<K: Ord, V> MeteredOrderedMap<'_, K, V> {
+    pub fn try_reserve(&mut self, additional: usize) -> ParseResult<()> {
+        self.meter.poll()?;
+        let required = self
+            .value
+            .len()
+            .checked_add(additional)
+            .ok_or_else(|| self.meter.allocation_failure(self.resource))?;
+        if required <= self.value.capacity() {
+            return Ok(());
+        }
+
+        let plan = self
+            .value
+            .capacity_plan(additional)
+            .map_err(|cause| metered_map_error(&self.meter, self.resource, cause))?;
+        let admitted = plan
+            .replacement_envelope_bytes()
+            .map_err(|cause| metered_map_error(&self.meter, self.resource, cause))?;
+        let mut token = self.meter.reserve(self.class, admitted)?;
+        let replacement = self
+            .value
+            .prepare_capacity_replacement(plan)
+            .map_err(|cause| metered_map_error(&self.meter, self.resource, cause))?;
+        let complete_bytes = replacement.allocation_bytes();
+        self.meter.resize_exact(&mut token, complete_bytes)?;
+        if fail_next_metered_qualification() {
+            return Err(self.meter.qualification_failure(self.resource));
+        }
+        self.meter.poll()?;
+
+        replacement.commit();
+        let retired_token = std::mem::replace(&mut self.capacity, token);
+        drop(retired_token);
+        Ok(())
+    }
+
+    pub fn try_insert(&mut self, key: K, value: V) -> ParseResult<Option<V>> {
+        let additional = usize::from(!self.value.contains_key(&key));
+        self.try_reserve(additional)?;
+        self.value
+            .insert_reserved(key, value)
+            .map_err(|cause| metered_map_error(&self.meter, self.resource, cause))
+    }
+}
+
+fn metered_map_error(
+    meter: &StorageMeter<'_>,
+    resource: &'static str,
+    cause: OrderedMapError,
+) -> ParseFailure {
+    match cause {
+        OrderedMapError::CapacityOverflow => meter.abort(ScopeAbortCause::ResourceLimit {
+            resource,
+            limit: u64::MAX,
+        }),
+        OrderedMapError::AllocationFailed => meter.allocation_failure(resource),
+        OrderedMapError::CapacityNotReserved => meter.abort(ScopeAbortCause::DescriptorContract {
+            code: "metered-ordered-map-capacity-not-reserved",
+        }),
+        _ => meter.abort(ScopeAbortCause::DescriptorContract {
+            code: "metered-ordered-map-capacity-error-unknown",
+        }),
+    }
+}
+
+impl SceneValueReservations {
+    fn try_merge_preserving(
+        &mut self,
+        other: &mut Self,
+        resource: &'static str,
+        reserve: impl FnMut(u64) -> Result<ImportReservation, ScopeAbortCause>,
+    ) -> Result<(), ScopeAbortCause> {
+        let payload_candidate =
+            self.payload
+                .prepare_replacement(other.payload.len(), resource, reserve)?;
+
+        if let Some(candidate) = payload_candidate {
+            candidate.commit();
+        }
+
+        append_accounted_reservations(&mut self.payload, &mut other.payload);
+        drop(other.payload.take());
+        Ok(())
+    }
+}
+
+impl<'scope, T> MeteredVec<'scope, T> {
+    pub fn try_into_scene_parts(mut self) -> ParseResult<SceneValueParts<'scope, Vec<T>>> {
+        let mut reservations = prepare_scene_parts_reservations(
+            &self.meter,
+            self.class,
+            self.capacity.as_ref(),
+            self.resource,
+        )?;
+        let value = std::mem::take(&mut self.values);
+        move_scene_part_capacity(&mut reservations, self.capacity.take());
+        Ok(SceneValueParts {
+            value: Some(value),
+            reservations,
+            meter: self.meter,
+        })
+    }
+}
+
+impl<'scope> MeteredString<'scope> {
+    pub fn try_into_scene_parts(mut self) -> ParseResult<SceneValueParts<'scope, String>> {
+        let mut reservations = prepare_scene_parts_reservations(
+            &self.meter,
+            self.class,
+            self.capacity.as_ref(),
+            self.resource,
+        )?;
+        let value = std::mem::take(&mut self.value);
+        move_scene_part_capacity(&mut reservations, self.capacity.take());
+        Ok(SceneValueParts {
+            value: Some(value),
+            reservations,
+            meter: self.meter,
+        })
+    }
+}
+
+impl<'scope, K, V> MeteredOrderedMap<'scope, K, V> {
+    pub fn try_into_scene_parts(
+        mut self,
+    ) -> ParseResult<SceneValueParts<'scope, OrderedMap<K, V>>> {
+        let mut reservations = prepare_scene_parts_reservations(
+            &self.meter,
+            self.class,
+            self.capacity.as_ref(),
+            self.resource,
+        )?;
+        let value = std::mem::replace(&mut self.value, OrderedMap::new());
+        move_scene_part_capacity(&mut reservations, self.capacity.take());
+        Ok(SceneValueParts {
+            value: Some(value),
+            reservations,
+            meter: self.meter,
+        })
+    }
+}
+
+impl<'scope, T> SceneValueParts<'scope, T> {
+    pub fn zip<U>(
+        mut self,
+        mut other: SceneValueParts<'scope, U>,
+    ) -> ParseResult<SceneValueParts<'scope, (T, U)>> {
+        if !self.meter.same_owner(&other.meter) {
+            return Err(self.meter.abort(ScopeAbortCause::DescriptorContract {
+                code: "scene-value-parts-owner-mismatch",
+            }));
+        }
+        self.meter.poll()?;
+        let meter = self.meter;
+        self.reservations
+            .try_merge_preserving(
+                &mut other.reservations,
+                "scene-value-parts-reservations",
+                |bytes| meter.reserve_inventory(ImportStorageClass::SceneConstruction, bytes),
+            )
+            .map_err(|cause| meter.abort(cause))?;
+        let left = self
+            .value
+            .take()
+            .expect("left scene value parts are combined exactly once");
+        let right = other
+            .value
+            .take()
+            .expect("right scene value parts are combined exactly once");
+        Ok(SceneValueParts {
+            value: Some((left, right)),
+            reservations: self.reservations,
+            meter,
+        })
+    }
+
+    pub fn finish(mut self) -> ParseResult<PreparedSceneValue<T>>
+    where
+        T: SceneBuildValue,
+    {
+        self.meter.poll()?;
+        let value = self
+            .value
+            .take()
+            .expect("scene value parts are finished exactly once");
+        let prepared = PreparedSceneValue {
+            value: Some(value),
+            reservations: self.reservations,
+        };
+        validate_prepared_scene_value_with_meter(&self.meter, prepared)
+    }
+}
+
+impl<'scope> SceneValueParts<'scope, String> {
+    pub fn into_some(self) -> SceneValueParts<'scope, Option<String>> {
+        self.map_owned(Some)
+    }
+
+    pub fn discard_into_none(mut self) -> SceneValueParts<'scope, Option<String>> {
+        let value = self
+            .value
+            .take()
+            .expect("scene string parts are discarded exactly once");
+        drop(value);
+        drop(self.reservations);
+        SceneValueParts {
+            value: Some(None),
+            reservations: SceneValueReservations::new(),
+            meter: self.meter,
+        }
+    }
+
+    pub fn into_external_texture_source(self) -> SceneValueParts<'scope, TextureSource> {
+        self.map_owned(|uri| TextureSource::External { uri })
+    }
+
+    pub fn into_custom_vertex_attribute_semantic(
+        self,
+    ) -> SceneValueParts<'scope, VertexAttributeSemantic> {
+        self.map_owned(VertexAttributeSemantic::Custom)
+    }
+
+    pub fn into_metadata_bool_entry(
+        self,
+        value: bool,
+    ) -> SceneValueParts<'scope, (String, MetadataValue)> {
+        self.map_owned(|key| (key, MetadataValue::Bool(value)))
+    }
+
+    pub fn into_metadata_i64_entry(
+        self,
+        value: i64,
+    ) -> SceneValueParts<'scope, (String, MetadataValue)> {
+        self.map_owned(|key| (key, MetadataValue::I64(value)))
+    }
+
+    pub fn into_metadata_f64_entry(
+        self,
+        value: f64,
+    ) -> SceneValueParts<'scope, (String, MetadataValue)> {
+        self.map_owned(|key| (key, MetadataValue::F64(value)))
+    }
+}
+
+impl<'scope> SceneValueParts<'scope, (String, String)> {
+    pub fn into_metadata_string_entry(self) -> SceneValueParts<'scope, (String, MetadataValue)> {
+        self.map_owned(|(key, value)| (key, MetadataValue::String(value)))
+    }
+}
+
+impl<'scope> SceneValueParts<'scope, Vec<f32>> {
+    pub fn into_vertex_attribute_data(self) -> SceneValueParts<'scope, VertexAttributeData> {
+        self.map_owned(VertexAttributeData::F32)
+    }
+}
+
+impl<'scope> SceneValueParts<'scope, Vec<u32>> {
+    pub fn into_vertex_attribute_data(self) -> SceneValueParts<'scope, VertexAttributeData> {
+        self.map_owned(VertexAttributeData::U32)
+    }
+}
+
+impl<'scope> SceneValueParts<'scope, Vec<i32>> {
+    pub fn into_vertex_attribute_data(self) -> SceneValueParts<'scope, VertexAttributeData> {
+        self.map_owned(VertexAttributeData::I32)
+    }
+}
+
+impl<'scope> SceneValueParts<'scope, ((String, VertexAttributeSemantic), VertexAttributeData)> {
+    pub fn into_vertex_attribute(self) -> SceneValueParts<'scope, VertexAttribute> {
+        self.map_owned(|((name, semantic), data)| VertexAttribute {
+            name,
+            semantic,
+            data,
+            metadata: MetadataMap::new(),
+        })
+    }
+}
+
+impl<'scope> SceneValueParts<'scope, Option<String>> {
+    pub fn into_mesh(self, config: MeshBuildConfig) -> SceneValueParts<'scope, Mesh> {
+        self.map_owned(|name| Mesh {
+            name,
+            topology: config.topology,
+            material: config.material,
+            bounds: config.bounds,
+            ..Mesh::default()
+        })
+    }
+
+    pub fn into_material(self, config: MaterialBuildConfig) -> SceneValueParts<'scope, Material> {
+        self.map_owned(|name| Material {
+            name,
+            shading_model: config.shading_model,
+            base_color: config.base_color,
+            metallic: config.metallic,
+            roughness: config.roughness,
+            emissive: config.emissive,
+            alpha_mode: config.alpha_mode,
+            alpha_cutoff: config.alpha_cutoff,
+            double_sided: config.double_sided,
+            ..Material::default()
+        })
+    }
+
+    pub fn into_node(self, config: NodeBuildConfig) -> SceneValueParts<'scope, Node> {
+        self.map_owned(|name| Node {
+            name,
+            transform: config.transform,
+            camera: config.camera,
+            light: config.light,
+            ..Node::default()
+        })
+    }
+
+    pub fn into_texture_slot(
+        self,
+        config: TextureSlotBuildConfig,
+    ) -> SceneValueParts<'scope, TextureSlot> {
+        self.map_owned(|source_key| TextureSlot {
+            texture: config.texture,
+            role: config.role,
+            color_space: config.color_space,
+            uv_set: config.uv_set,
+            scale: config.scale,
+            transform: config.transform,
+            source_key,
+        })
+    }
+
+    pub fn into_camera(self, config: CameraBuildConfig) -> SceneValueParts<'scope, Camera> {
+        self.map_owned(|name| Camera {
+            name,
+            projection: config.projection,
+            metadata: MetadataMap::new(),
+        })
+    }
+
+    pub fn into_skin(self, config: SkinBuildConfig) -> SceneValueParts<'scope, Skin> {
+        self.map_owned(|name| Skin {
+            name,
+            skeleton_root: config.skeleton_root,
+            ..Skin::default()
+        })
+    }
+}
+
+impl<'scope> SceneValueParts<'scope, (Option<String>, TextureSource)> {
+    pub fn into_texture(self, config: TextureBuildConfig) -> SceneValueParts<'scope, Texture> {
+        self.map_owned(|(name, source)| Texture {
+            name,
+            source,
+            sampler: config.sampler,
+            metadata: MetadataMap::new(),
+        })
+    }
+}
+
+impl<'scope> SceneValueParts<'scope, Mesh> {
+    pub fn with_positions(self, values: SceneValueParts<'scope, Vec<Vec3>>) -> ParseResult<Self> {
+        Ok(self.zip(values)?.map_owned(|(mut mesh, values)| {
+            mesh.positions = values;
+            mesh
+        }))
+    }
+
+    pub fn with_normals(self, values: SceneValueParts<'scope, Vec<Vec3>>) -> ParseResult<Self> {
+        Ok(self.zip(values)?.map_owned(|(mut mesh, values)| {
+            mesh.normals = values;
+            mesh
+        }))
+    }
+
+    pub fn with_tangents(self, values: SceneValueParts<'scope, Vec<Vec4>>) -> ParseResult<Self> {
+        Ok(self.zip(values)?.map_owned(|(mut mesh, values)| {
+            mesh.tangents = values;
+            mesh
+        }))
+    }
+
+    pub fn with_texcoords(
+        self,
+        values: SceneValueParts<'scope, Vec<Vec<Vec2>>>,
+    ) -> ParseResult<Self> {
+        Ok(self.zip(values)?.map_owned(|(mut mesh, values)| {
+            mesh.texcoords = values;
+            mesh
+        }))
+    }
+
+    pub fn with_colors(
+        self,
+        values: SceneValueParts<'scope, Vec<Vec<Color>>>,
+    ) -> ParseResult<Self> {
+        Ok(self.zip(values)?.map_owned(|(mut mesh, values)| {
+            mesh.colors = values;
+            mesh
+        }))
+    }
+
+    pub fn with_indices(self, values: SceneValueParts<'scope, Vec<u32>>) -> ParseResult<Self> {
+        Ok(self.zip(values)?.map_owned(|(mut mesh, values)| {
+            mesh.indices = values;
+            mesh
+        }))
+    }
+
+    pub fn with_face_vertex_counts(
+        self,
+        values: SceneValueParts<'scope, Vec<u32>>,
+    ) -> ParseResult<Self> {
+        Ok(self.zip(values)?.map_owned(|(mut mesh, values)| {
+            mesh.face_vertex_counts = values;
+            mesh
+        }))
+    }
+
+    pub fn with_joint_indices(
+        self,
+        values: SceneValueParts<'scope, Vec<[u16; 4]>>,
+    ) -> ParseResult<Self> {
+        Ok(self.zip(values)?.map_owned(|(mut mesh, values)| {
+            mesh.joint_indices = values;
+            mesh
+        }))
+    }
+
+    pub fn with_joint_weights(
+        self,
+        values: SceneValueParts<'scope, Vec<[f32; 4]>>,
+    ) -> ParseResult<Self> {
+        Ok(self.zip(values)?.map_owned(|(mut mesh, values)| {
+            mesh.joint_weights = values;
+            mesh
+        }))
+    }
+
+    pub fn with_custom_attributes(
+        self,
+        values: SceneValueParts<'scope, Vec<VertexAttribute>>,
+    ) -> ParseResult<Self> {
+        Ok(self.zip(values)?.map_owned(|(mut mesh, values)| {
+            mesh.custom_attributes = values;
+            mesh
+        }))
+    }
+
+    pub fn with_metadata(self, values: SceneValueParts<'scope, MetadataMap>) -> ParseResult<Self> {
+        Ok(self.zip(values)?.map_owned(|(mut mesh, values)| {
+            mesh.metadata = values;
+            mesh
+        }))
+    }
+}
+
+impl<'scope> SceneValueParts<'scope, Material> {
+    pub fn with_texture_slots(
+        self,
+        values: SceneValueParts<'scope, Vec<TextureSlot>>,
+    ) -> ParseResult<Self> {
+        Ok(self.zip(values)?.map_owned(|(mut material, values)| {
+            material.texture_slots = values;
+            material
+        }))
+    }
+
+    pub fn with_metadata(self, values: SceneValueParts<'scope, MetadataMap>) -> ParseResult<Self> {
+        Ok(self.zip(values)?.map_owned(|(mut material, values)| {
+            material.metadata = values;
+            material
+        }))
+    }
+}
+
+impl<'scope> SceneValueParts<'scope, Skin> {
+    pub fn with_joints(self, values: SceneValueParts<'scope, Vec<NodeId>>) -> ParseResult<Self> {
+        Ok(self.zip(values)?.map_owned(|(mut skin, values)| {
+            skin.joints = values;
+            skin
+        }))
+    }
+
+    pub fn with_inverse_bind_matrices(
+        self,
+        values: SceneValueParts<'scope, Vec<Mat4>>,
+    ) -> ParseResult<Self> {
+        Ok(self.zip(values)?.map_owned(|(mut skin, values)| {
+            skin.inverse_bind_matrices = values;
+            skin
+        }))
+    }
+}
+
+fn prepare_scene_parts_reservations(
+    meter: &StorageMeter<'_>,
+    class: ImportStorageClass,
+    capacity: Option<&ImportReservation>,
+    resource: &'static str,
+) -> ParseResult<SceneValueReservations> {
+    if class != ImportStorageClass::SceneConstruction {
+        return Err(meter.abort(ScopeAbortCause::DescriptorContract {
+            code: "non-scene-storage-converted-to-scene-parts",
+        }));
+    }
+    if let Some(capacity) = capacity {
+        meter
+            .coordinator
+            .try_borrow()
+            .map_err(|_| {
+                meter.abort(ScopeAbortCause::DescriptorContract {
+                    code: "parse-capability-reentered",
+                })
+            })?
+            .validate_live_reservation(capacity)
+            .map_err(|cause| meter.abort(ScopeAbortCause::Ledger(cause)))?;
+    }
+    let mut reservations = SceneValueReservations::new();
+    if capacity.is_some() {
+        reservations
+            .payload
+            .try_reserve(1, resource, |bytes| {
+                meter.reserve_inventory(ImportStorageClass::SceneConstruction, bytes)
+            })
+            .map_err(|cause| meter.abort(cause))?;
+    }
+    Ok(reservations)
+}
+
+fn move_scene_part_capacity(
+    reservations: &mut SceneValueReservations,
+    capacity: Option<ImportReservation>,
+) {
+    if let Some(capacity) = capacity {
+        reservations.payload.push_reserved_infallible(capacity);
+    }
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static FAIL_NEXT_METERED_QUALIFICATION: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static PANIC_NEXT_SCENE_PARTS_FINALIZATION: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+fn fail_next_metered_qualification() -> bool {
+    FAIL_NEXT_METERED_QUALIFICATION.with(|fault| fault.replace(false))
+}
+
+#[cfg(not(test))]
+const fn fail_next_metered_qualification() -> bool {
+    false
+}
+
+#[cfg(test)]
+fn fail_next_scene_parts_finalization_panic() -> bool {
+    PANIC_NEXT_SCENE_PARTS_FINALIZATION.with(|fault| fault.replace(false))
+}
+
+fn append_accounted_reservations(
+    target: &mut AccountedReservationVec,
+    source: &mut AccountedReservationVec,
+) {
+    assert!(
+        target.has_slots(source.len()),
+        "reservation merge must be fully admitted before mutation"
+    );
+    target
+        .try_append_accounted(source)
+        .expect("an admitted reservation merge cannot fail");
+}
+
+fn append_metered_string_with_meter(
+    meter: &StorageMeter<'_>,
+    output: &mut String,
+    value: &str,
+) -> ParseResult<()> {
+    let mut start = 0usize;
+    while start < value.len() {
+        meter.poll()?;
+        let mut end = start
+            .checked_add(METERED_COPY_POLL_INTERVAL)
+            .map_or(value.len(), |end| end.min(value.len()));
+        while end > start && !value.is_char_boundary(end) {
+            end -= 1;
+        }
+        output.push_str(&value[start..end]);
+        start = end;
+    }
+    Ok(())
+}
+
+fn validate_prepared_scene_value<T: SceneBuildValue>(
+    scope: &ParseScope<'_>,
+    prepared: PreparedSceneValue<T>,
+) -> ParseResult<PreparedSceneValue<T>> {
+    validate_prepared_scene_value_with_meter(&scope.storage_meter(), prepared)
+}
+
+fn validate_prepared_scene_value_with_meter<T: SceneBuildValue>(
+    meter: &StorageMeter<'_>,
+    prepared: PreparedSceneValue<T>,
+) -> ParseResult<PreparedSceneValue<T>> {
+    meter.poll()?;
+    let footprint = prepared
+        .value
+        .as_ref()
+        .expect("a new prepared scene value owns its value")
+        .scene_value_footprint()
+        .map_err(|cause| meter.abort(ScopeAbortCause::SceneAccounting(cause)))?;
+    validate_scene_value_reservations_with_meter(meter, &prepared.reservations, footprint)?;
+    Ok(prepared)
+}
+
+fn validate_scene_value_reservations(
+    scope: &ParseScope<'_>,
+    reservations: &SceneValueReservations,
+    footprint: SceneValueFootprint,
+) -> ParseResult<()> {
+    validate_scene_value_reservations_with_meter(&scope.storage_meter(), reservations, footprint)
+}
+
+fn validate_scene_value_reservations_with_meter(
+    meter: &StorageMeter<'_>,
+    reservations: &SceneValueReservations,
+    footprint: SceneValueFootprint,
+) -> ParseResult<()> {
+    let coordinator = meter.coordinator.try_borrow().map_err(|_| {
+        meter.abort(ScopeAbortCause::DescriptorContract {
+            code: "parse-capability-reentered",
+        })
+    })?;
+    for reservation in reservations.payload.iter() {
+        coordinator
+            .validate_live_reservation(reservation)
+            .map_err(|cause| meter.abort(ScopeAbortCause::Ledger(cause)))?;
+    }
+    drop(coordinator);
+    let actual = reservation_bytes(&reservations.payload).ok_or_else(|| {
+        meter.abort(ScopeAbortCause::DescriptorContract {
+            code: "scene-value-reservation-bytes-overflow",
+        })
+    })?;
+    if actual != footprint.payload_bytes() {
+        return Err(meter.abort(ScopeAbortCause::DescriptorContract {
+            code: "scene-value-payload-reservation-under-covered",
+        }));
+    }
+    Ok(())
+}
+
+fn reservation_bytes(reservations: &AccountedReservationVec) -> Option<u64> {
+    reservations.iter().try_fold(0u64, |total, reservation| {
+        total.checked_add(reservation.bytes())
+    })
+}
+
+struct ImportLiveReservation<'scope> {
     reservation: ImportReservation,
     scope: PhantomData<&'scope ()>,
 }
 
 impl ImportLiveReservation<'_> {
-    pub fn bytes(&self) -> u64 {
-        self.reservation.bytes()
-    }
-
     fn into_reservation(self) -> ImportReservation {
         self.reservation
     }
@@ -2604,9 +4041,7 @@ pub(crate) fn read_opened_asset(
         }
     }
 
-    let mut bytes = Vec::new();
-    let mut reservations = prepare_snapshot_reservation_list(coordinator, ledger_phase)?;
-    let mut payload_reservation = None;
+    let mut bytes = AccountedVec::new();
     let aggregate_capacity_limit = if exact_length.is_some() {
         u64::MAX
     } else {
@@ -2625,14 +4060,13 @@ pub(crate) fn read_opened_asset(
         let capacity = usize::try_from(capacity_hint).map_err(|_| ScopeAbortCause::Allocation {
             resource: "asset-snapshot",
         })?;
-        reserve_snapshot_capacity(
-            coordinator,
-            &mut bytes,
-            &mut payload_reservation,
-            ledger_phase,
-            dimension,
-            capacity,
-        )?;
+        bytes.try_reserve_capacity(capacity, "asset-snapshot", |capacity_bytes| {
+            coordinator
+                .borrow_mut()
+                .checkpoint()
+                .reserve(ledger_phase, dimension, capacity_bytes)
+                .map_err(ScopeAbortCause::Ledger)
+        })?;
     }
 
     let mut chunk = [0_u8; 16 * 1024];
@@ -2751,16 +4185,19 @@ pub(crate) fn read_opened_asset(
             });
         }
         if bytes.capacity().saturating_sub(bytes.len()) < count {
-            reserve_snapshot_capacity(
-                coordinator,
-                &mut bytes,
-                &mut payload_reservation,
-                ledger_phase,
-                dimension,
-                count,
-            )?;
+            bytes.try_reserve(count, "asset-snapshot", |capacity_bytes| {
+                coordinator
+                    .borrow_mut()
+                    .checkpoint()
+                    .reserve(ledger_phase, dimension, capacity_bytes)
+                    .map_err(ScopeAbortCause::Ledger)
+            })?;
         }
-        bytes.extend_from_slice(&chunk[..count]);
+        bytes
+            .try_extend_from_slice_reserved(&chunk[..count])
+            .map_err(|()| ScopeAbortCause::DescriptorContract {
+                code: "asset-snapshot-slots-not-admitted",
+            })?;
         let mut coordinator = coordinator.borrow_mut();
         let completed = coordinator
             .dimension_evidence(dimension)
@@ -2776,10 +4213,7 @@ pub(crate) fn read_opened_asset(
             .map_err(ScopeAbortCause::Control)?;
     }
 
-    if let Some(reservation) = payload_reservation {
-        reservations.push(reservation);
-    }
-    Ok((bytes, reservations))
+    Ok(bytes)
 }
 
 fn charge_asset_attempted(
@@ -2836,113 +4270,6 @@ fn charge_asset_consumed(
         .charge_consumed(dimension, amount)
         .and_then(|()| checkpoint.charge_consumed(ImportDimension::TotalAssetBytes, amount))
         .map_err(ScopeAbortCause::Ledger)
-}
-
-pub(crate) fn prepare_snapshot_reservation_list(
-    coordinator: &RefCell<ImportCoordinator>,
-    phase: ImportLedgerPhase,
-) -> Result<Vec<ImportReservation>, ScopeAbortCause> {
-    const RESERVATION_SLOTS: usize = 2;
-    let plan = CapacityPlan::for_type::<ImportReservation>(0, 0, RESERVATION_SLOTS)
-        .map_err(|cause| capacity_plan_cause("asset-snapshot-reservation-list", cause))?;
-    let envelope = plan
-        .envelope_delta_bytes()
-        .map_err(|cause| capacity_plan_cause("asset-snapshot-reservation-list", cause))?;
-    let mut reservation = coordinator
-        .borrow_mut()
-        .checkpoint()
-        .reserve(phase, ImportDimension::ScratchBytes, envelope)
-        .map_err(ScopeAbortCause::Ledger)?;
-    let mut reservations = Vec::new();
-    plan.verify_preflight(reservations.len(), reservations.capacity())
-        .map_err(|cause| capacity_plan_cause("asset-snapshot-reservation-list", cause))?;
-    reservations
-        .try_reserve_exact(plan.allocator_additional())
-        .map_err(|_| ScopeAbortCause::Allocation {
-            resource: "asset-snapshot-reservation-list",
-        })?;
-    let actual = plan
-        .finish(reservations.len(), reservations.capacity())
-        .map_err(|cause| capacity_plan_cause("asset-snapshot-reservation-list", cause))?;
-    coordinator
-        .borrow_mut()
-        .checkpoint()
-        .resize_reservation(&mut reservation, actual)
-        .map_err(ScopeAbortCause::Ledger)?;
-    reservations.push(reservation);
-    Ok(reservations)
-}
-
-fn reserve_snapshot_capacity(
-    coordinator: &RefCell<ImportCoordinator>,
-    bytes: &mut Vec<u8>,
-    payload_reservation: &mut Option<ImportReservation>,
-    phase: ImportLedgerPhase,
-    dimension: ImportDimension,
-    additional: usize,
-) -> Result<(), ScopeAbortCause> {
-    let desired_capacity = bytes.len().checked_add(additional).ok_or_else(|| {
-        capacity_plan_cause(
-            "asset-snapshot-capacity",
-            CapacityPlanError::CapacityOverflow,
-        )
-    })?;
-    let plan = CapacityPlan::for_type::<u8>(bytes.len(), bytes.capacity(), desired_capacity)
-        .map_err(|cause| capacity_plan_cause("asset-snapshot-capacity", cause))?;
-    let envelope_delta = plan
-        .envelope_delta_bytes()
-        .map_err(|cause| capacity_plan_cause("asset-snapshot-capacity", cause))?;
-    if envelope_delta == 0 {
-        return Ok(());
-    }
-    let prior_bytes = payload_reservation
-        .as_ref()
-        .map_or(0, ImportReservation::bytes);
-    let envelope = prior_bytes.checked_add(envelope_delta).ok_or_else(|| {
-        capacity_plan_cause(
-            "asset-snapshot-capacity",
-            CapacityPlanError::CapacityOverflow,
-        )
-    })?;
-    if let Some(reservation) = payload_reservation.as_mut() {
-        coordinator
-            .borrow_mut()
-            .checkpoint()
-            .resize_reservation(reservation, envelope)
-            .map_err(ScopeAbortCause::Ledger)?;
-    } else {
-        *payload_reservation = Some(
-            coordinator
-                .borrow_mut()
-                .checkpoint()
-                .reserve(phase, dimension, envelope)
-                .map_err(ScopeAbortCause::Ledger)?,
-        );
-    }
-    plan.verify_preflight(bytes.len(), bytes.capacity())
-        .map_err(|cause| capacity_plan_cause("asset-snapshot-capacity", cause))?;
-    bytes
-        .try_reserve_exact(plan.allocator_additional())
-        .map_err(|_| ScopeAbortCause::Allocation {
-            resource: "asset-snapshot",
-        })?;
-    let actual_delta = plan
-        .finish(bytes.len(), bytes.capacity())
-        .map_err(|cause| capacity_plan_cause("asset-snapshot-capacity", cause))?;
-    let actual = prior_bytes.checked_add(actual_delta).ok_or_else(|| {
-        capacity_plan_cause(
-            "asset-snapshot-capacity",
-            CapacityPlanError::CapacityOverflow,
-        )
-    })?;
-    if let Some(reservation) = payload_reservation.as_mut() {
-        coordinator
-            .borrow_mut()
-            .checkpoint()
-            .resize_reservation(reservation, actual)
-            .map_err(ScopeAbortCause::Ledger)?;
-    }
-    Ok(())
 }
 
 fn capacity_plan_cause(resource: &'static str, cause: CapacityPlanError) -> ScopeAbortCause {
@@ -3059,6 +4386,366 @@ fn dependency_path_cause(cause: PathError) -> ScopeAbortCause {
     }
 }
 
+#[derive(Default)]
+enum SceneCapacityReservation {
+    #[default]
+    Empty,
+    Live(ImportReservation),
+    Replacing {
+        old: Option<ImportReservation>,
+        new: ImportReservation,
+    },
+}
+
+impl SceneCapacityReservation {
+    fn is_stable(&self) -> bool {
+        !matches!(self, Self::Replacing { .. })
+    }
+
+    fn accumulate(&self, snapshot: &mut SceneReservationSnapshot) -> Result<(), &'static str> {
+        match self {
+            Self::Empty => Ok(()),
+            Self::Live(reservation) => snapshot.add(reservation),
+            Self::Replacing { .. } => Err("scene-reservation-replacement-in-progress"),
+        }
+    }
+
+    fn try_begin_replacement(
+        &mut self,
+        new: ImportReservation,
+    ) -> Result<SceneCapacityReplacement<'_>, ImportReservation> {
+        if matches!(self, Self::Replacing { .. }) {
+            return Err(new);
+        }
+        let old = match std::mem::take(self) {
+            Self::Empty => None,
+            Self::Live(old) => Some(old),
+            Self::Replacing { .. } => unreachable!("replacement state was checked before take"),
+        };
+        *self = Self::Replacing { old, new };
+        Ok(SceneCapacityReplacement { slot: self })
+    }
+
+    fn take_live(&mut self) -> Result<Option<ImportReservation>, ()> {
+        match std::mem::take(self) {
+            Self::Empty => Ok(None),
+            Self::Live(reservation) => Ok(Some(reservation)),
+            replacing @ Self::Replacing { .. } => {
+                *self = replacing;
+                Err(())
+            }
+        }
+    }
+
+    fn restore_live(&mut self, reservation: ImportReservation) {
+        debug_assert!(matches!(self, Self::Empty));
+        *self = Self::Live(reservation);
+    }
+}
+
+struct SceneCapacityReplacement<'slot> {
+    slot: &'slot mut SceneCapacityReservation,
+}
+
+impl SceneCapacityReplacement<'_> {
+    fn publish(self) -> Option<ImportReservation> {
+        let SceneCapacityReservation::Replacing { old, new } = std::mem::take(self.slot) else {
+            unreachable!("a replacement guard exclusively owns an armed slot");
+        };
+        *self.slot = SceneCapacityReservation::Live(new);
+        old
+    }
+}
+
+#[derive(Default)]
+struct SceneCollectionReservationSlots {
+    nodes: SceneCapacityReservation,
+    meshes: SceneCapacityReservation,
+    materials: SceneCapacityReservation,
+    textures: SceneCapacityReservation,
+    animations: SceneCapacityReservation,
+    cameras: SceneCapacityReservation,
+    lights: SceneCapacityReservation,
+    skins: SceneCapacityReservation,
+}
+
+impl SceneCollectionReservationSlots {
+    fn get_mut(&mut self, collection: SceneCollection) -> &mut SceneCapacityReservation {
+        match collection {
+            SceneCollection::Nodes => &mut self.nodes,
+            SceneCollection::Meshes => &mut self.meshes,
+            SceneCollection::Materials => &mut self.materials,
+            SceneCollection::Textures => &mut self.textures,
+            SceneCollection::Animations => &mut self.animations,
+            SceneCollection::Cameras => &mut self.cameras,
+            SceneCollection::Lights => &mut self.lights,
+            SceneCollection::Skins => &mut self.skins,
+        }
+    }
+
+    fn slots(&self) -> [&SceneCapacityReservation; 8] {
+        [
+            &self.nodes,
+            &self.meshes,
+            &self.materials,
+            &self.textures,
+            &self.animations,
+            &self.cameras,
+            &self.lights,
+            &self.skins,
+        ]
+    }
+
+    fn slots_mut(&mut self) -> [&mut SceneCapacityReservation; 8] {
+        [
+            &mut self.nodes,
+            &mut self.meshes,
+            &mut self.materials,
+            &mut self.textures,
+            &mut self.animations,
+            &mut self.cameras,
+            &mut self.lights,
+            &mut self.skins,
+        ]
+    }
+}
+
+#[derive(Default)]
+struct NodeReservationSlots {
+    children: SceneCapacityReservation,
+    mesh_bindings: SceneCapacityReservation,
+}
+
+impl NodeReservationSlots {
+    fn slots(&self) -> [&SceneCapacityReservation; 2] {
+        [&self.children, &self.mesh_bindings]
+    }
+
+    fn slots_mut(&mut self) -> [&mut SceneCapacityReservation; 2] {
+        [&mut self.children, &mut self.mesh_bindings]
+    }
+}
+
+#[derive(Default)]
+struct SceneReservationSnapshot {
+    token_count: usize,
+    bytes: u64,
+}
+
+impl SceneReservationSnapshot {
+    fn add(&mut self, reservation: &ImportReservation) -> Result<(), &'static str> {
+        self.token_count = self
+            .token_count
+            .checked_add(1)
+            .ok_or("scene-reservation-count-overflow")?;
+        self.bytes = self
+            .bytes
+            .checked_add(reservation.bytes())
+            .ok_or("draft-reservation-bytes-overflow")?;
+        Ok(())
+    }
+}
+
+struct SceneReservationInventory {
+    inline: SceneCapacityReservation,
+    collections: SceneCollectionReservationSlots,
+    nodes: AccountedVec<NodeReservationSlots>,
+    metadata: SceneCapacityReservation,
+    metadata_entries: AccountedVec<SceneValueReservations>,
+    payload: AccountedReservationVec,
+}
+
+impl SceneReservationInventory {
+    fn new(
+        inline: ImportReservation,
+        root_nodes: ImportReservation,
+        nodes: AccountedVec<NodeReservationSlots>,
+    ) -> Self {
+        Self {
+            inline: SceneCapacityReservation::Live(inline),
+            collections: SceneCollectionReservationSlots {
+                nodes: SceneCapacityReservation::Live(root_nodes),
+                ..SceneCollectionReservationSlots::default()
+            },
+            nodes,
+            metadata: SceneCapacityReservation::Empty,
+            metadata_entries: AccountedVec::new(),
+            payload: AccountedReservationVec::new(),
+        }
+    }
+
+    fn snapshot(&self) -> Result<SceneReservationSnapshot, &'static str> {
+        let mut snapshot = SceneReservationSnapshot::default();
+        self.inline.accumulate(&mut snapshot)?;
+        for slot in self.collections.slots() {
+            slot.accumulate(&mut snapshot)?;
+        }
+        for node in self.nodes.iter() {
+            for slot in node.slots() {
+                slot.accumulate(&mut snapshot)?;
+            }
+        }
+        self.metadata.accumulate(&mut snapshot)?;
+        for entry in self.metadata_entries.iter() {
+            for reservation in entry.payload.iter() {
+                snapshot.add(reservation)?;
+            }
+        }
+        for reservation in self.payload.iter() {
+            snapshot.add(reservation)?;
+        }
+        Ok(snapshot)
+    }
+
+    fn typed_token_count(&self) -> Result<usize, &'static str> {
+        self.snapshot()?
+            .token_count
+            .checked_sub(self.payload.len())
+            .ok_or("scene-reservation-count-underflow")
+    }
+
+    fn transfer_into(&mut self, target: &mut AccountedReservationVec) -> Result<(), ()> {
+        let typed_count = self.typed_token_count().map_err(|_| ())?;
+        if !self.payload.has_slots(typed_count) {
+            return Err(());
+        }
+        let total_count = self.payload.len().checked_add(typed_count).ok_or(())?;
+        if !target.has_slots(total_count) {
+            return Err(());
+        }
+
+        transfer_scene_slot(&mut self.inline, &mut self.payload)?;
+        for slot in self.collections.slots_mut() {
+            transfer_scene_slot(slot, &mut self.payload)?;
+        }
+        for node in self.nodes.iter_mut() {
+            for slot in node.slots_mut() {
+                transfer_scene_slot(slot, &mut self.payload)?;
+            }
+        }
+        transfer_scene_slot(&mut self.metadata, &mut self.payload)?;
+        for entry in self.metadata_entries.iter_mut() {
+            self.payload.try_append_accounted(&mut entry.payload)?;
+        }
+        target.try_append_accounted(&mut self.payload)
+    }
+}
+
+fn transfer_scene_slot(
+    slot: &mut SceneCapacityReservation,
+    target: &mut AccountedReservationVec,
+) -> Result<(), ()> {
+    let Some(reservation) = slot.take_live()? else {
+        return Ok(());
+    };
+    match target.try_push_reserved(reservation) {
+        Ok(()) => Ok(()),
+        Err(reservation) => {
+            slot.restore_live(reservation);
+            Err(())
+        }
+    }
+}
+
+struct AccountedSceneStorage {
+    builder: SceneBuilder,
+    inventory: SceneReservationInventory,
+}
+
+fn reserve_scene_inventory_capacity(
+    scope: &ParseScope<'_>,
+    bytes: u64,
+) -> Result<ImportReservation, ScopeAbortCause> {
+    scope
+        .coordinator
+        .try_borrow_mut()
+        .map_err(|_| ScopeAbortCause::DescriptorContract {
+            code: "parse-capability-reentered",
+        })?
+        .checkpoint()
+        .reserve(
+            ImportLedgerPhase::SceneConstruction,
+            ImportDimension::ScratchBytes,
+            bytes,
+        )
+        .map_err(ScopeAbortCause::Ledger)
+}
+
+fn reserve_scene_candidate<'scope>(
+    scope: &'scope ParseScope<'_>,
+    admitted: u64,
+) -> ParseResult<Option<ImportLiveReservation<'scope>>> {
+    if admitted == 0 {
+        return Ok(None);
+    }
+    scope
+        .reserve_live(ImportStorageClass::SceneConstruction, admitted)
+        .map(Some)
+}
+
+fn qualify_scene_candidate(
+    scope: &ParseScope<'_>,
+    token: &mut Option<ImportLiveReservation<'_>>,
+    admitted: u64,
+    actual: u64,
+) -> ParseResult<()> {
+    if actual > admitted {
+        return Err(scope.abort(ScopeAbortCause::DescriptorContract {
+            code: "scene-builder-capacity-reservation-underestimated",
+        }));
+    }
+    match (token.as_mut(), actual) {
+        (None, 0) => Ok(()),
+        (Some(_), 0) => Err(scope.abort(ScopeAbortCause::DescriptorContract {
+            code: "scene-builder-unused-capacity-reservation",
+        })),
+        (Some(token), bytes) => scope.resize_live(token, bytes),
+        (None, _) => Err(scope.abort(ScopeAbortCause::DescriptorContract {
+            code: "scene-builder-capacity-growth-without-reservation",
+        })),
+    }
+}
+
+fn metadata_error(scope: &ParseScope<'_>, cause: OrderedMapError) -> ParseFailure {
+    match cause {
+        OrderedMapError::CapacityOverflow => {
+            scope.resource_limit_exceeded("scene-metadata-capacity", u64::MAX)
+        }
+        OrderedMapError::AllocationFailed => scope.allocation_failure("scene-metadata-capacity"),
+        OrderedMapError::CapacityNotReserved => scope.abort(ScopeAbortCause::DescriptorContract {
+            code: "scene-metadata-capacity-not-reserved",
+        }),
+        _ => scope.abort(ScopeAbortCause::DescriptorContract {
+            code: "scene-metadata-capacity-error-unknown",
+        }),
+    }
+}
+
+struct AccountedSceneCandidate<'scope, Candidate> {
+    candidate: Candidate,
+    token: Option<ImportLiveReservation<'scope>>,
+}
+
+struct AccountedPreparedSceneCandidate<'scope, Candidate> {
+    candidate: Candidate,
+    reservations: SceneValueReservations,
+    token: Option<ImportLiveReservation<'scope>>,
+}
+
+struct AccountedPreparedNodeCandidate<'scope, Candidate> {
+    candidate: Candidate,
+    reservations: SceneValueReservations,
+    nodes_token: Option<ImportLiveReservation<'scope>>,
+    children_token: Option<ImportLiveReservation<'scope>>,
+}
+
+type SceneInsertPreparer<T, Id> =
+    for<'owner> fn(
+        &'owner mut SceneBuilder,
+        T,
+        SceneCapacityPlan,
+    ) -> Result<PreparedSceneInsert<'owner, T, Id>, SceneBuildError>;
+
 /// Scene construction adapter that latches core builder failures in the scope.
 ///
 /// Collection internals are intentionally unavailable to format implementations.
@@ -3073,183 +4760,167 @@ fn dependency_path_cause(cause: PathError) -> ScopeAbortCause {
 /// ```
 pub struct ScopedSceneBuilder<'scope, 'session> {
     scope: &'scope ParseScope<'session>,
-    builder: SceneBuilder,
-    reservations: Vec<ImportReservation>,
-    reservation_list_capacity: Option<ImportReservation>,
+    storage: AccountedSceneStorage,
 }
 
 impl ScopedSceneBuilder<'_, '_> {
-    /// Transfers live storage that becomes owned by this draft.
-    pub fn adopt_reservation(&mut self, reservation: ImportLiveReservation<'_>) -> ParseResult<()> {
-        self.scope.poll_active()?;
-        self.reserve_reservation_slots(1)?;
-        self.reservations.push(reservation.into_reservation());
-        Ok(())
-    }
-
     pub fn root(&self) -> NodeId {
-        self.builder.root()
+        self.storage.builder.root()
     }
 
     pub fn mesh_count(&self) -> usize {
-        self.builder.mesh_count()
+        self.storage.builder.mesh_count()
     }
 
-    pub fn add_node(&mut self, node: Node) -> ParseResult<NodeId> {
-        self.scope.poll_active()?;
-        self.reserve_node_capacity(self.builder.root())?;
-        self.builder
-            .add_node(node)
-            .map_err(|cause| self.scope.abort(ScopeAbortCause::SceneBuild(cause)))
+    pub fn add_prepared_node(&mut self, node: PreparedSceneValue<Node>) -> ParseResult<NodeId> {
+        self.add_prepared_child_node(self.storage.builder.root(), node)
     }
 
-    pub fn add_child_node(&mut self, parent: NodeId, node: Node) -> ParseResult<NodeId> {
-        self.scope.poll_active()?;
-        self.reserve_node_capacity(parent)?;
-        self.builder
-            .add_child_node(parent, node)
-            .map_err(|cause| self.scope.abort(ScopeAbortCause::SceneBuild(cause)))
+    pub fn add_prepared_child_node(
+        &mut self,
+        parent: NodeId,
+        node: PreparedSceneValue<Node>,
+    ) -> ParseResult<NodeId> {
+        self.add_prepared_node_accounted(parent, node)
     }
 
-    pub fn add_mesh(&mut self, mesh: Mesh) -> ParseResult<MeshId> {
-        self.scope.poll_active()?;
-        self.reserve_collection_capacity(SceneCollection::Meshes)?;
-        self.builder
-            .add_mesh(mesh)
-            .map_err(|cause| self.scope.abort(ScopeAbortCause::SceneBuild(cause)))
+    pub fn add_prepared_mesh(&mut self, mesh: PreparedSceneValue<Mesh>) -> ParseResult<MeshId> {
+        self.add_prepared_collection_accounted(
+            SceneCollection::Meshes,
+            mesh,
+            SceneBuilder::prepare_add_mesh,
+        )
     }
 
-    pub fn add_material(&mut self, material: Material) -> ParseResult<MaterialId> {
-        self.scope.poll_active()?;
-        self.reserve_collection_capacity(SceneCollection::Materials)?;
-        self.builder
-            .add_material(material)
-            .map_err(|cause| self.scope.abort(ScopeAbortCause::SceneBuild(cause)))
+    pub fn add_prepared_material(
+        &mut self,
+        material: PreparedSceneValue<Material>,
+    ) -> ParseResult<MaterialId> {
+        self.add_prepared_collection_accounted(
+            SceneCollection::Materials,
+            material,
+            SceneBuilder::prepare_add_material,
+        )
     }
 
-    pub fn add_texture(&mut self, texture: Texture) -> ParseResult<TextureId> {
-        self.scope.poll_active()?;
-        self.reserve_collection_capacity(SceneCollection::Textures)?;
-        self.builder
-            .add_texture(texture)
-            .map_err(|cause| self.scope.abort(ScopeAbortCause::SceneBuild(cause)))
+    pub fn add_prepared_texture(
+        &mut self,
+        texture: PreparedSceneValue<Texture>,
+    ) -> ParseResult<TextureId> {
+        self.add_prepared_collection_accounted(
+            SceneCollection::Textures,
+            texture,
+            SceneBuilder::prepare_add_texture,
+        )
     }
 
-    pub fn add_animation(&mut self, animation: Animation) -> ParseResult<AnimationId> {
-        self.scope.poll_active()?;
-        self.reserve_collection_capacity(SceneCollection::Animations)?;
-        self.builder
-            .add_animation(animation)
-            .map_err(|cause| self.scope.abort(ScopeAbortCause::SceneBuild(cause)))
+    pub fn add_prepared_animation(
+        &mut self,
+        animation: PreparedSceneValue<Animation>,
+    ) -> ParseResult<AnimationId> {
+        self.add_prepared_collection_accounted(
+            SceneCollection::Animations,
+            animation,
+            SceneBuilder::prepare_add_animation,
+        )
     }
 
-    pub fn add_camera(&mut self, camera: Camera) -> ParseResult<CameraId> {
-        self.scope.poll_active()?;
-        self.reserve_collection_capacity(SceneCollection::Cameras)?;
-        self.builder
-            .add_camera(camera)
-            .map_err(|cause| self.scope.abort(ScopeAbortCause::SceneBuild(cause)))
+    pub fn add_prepared_camera(
+        &mut self,
+        camera: PreparedSceneValue<Camera>,
+    ) -> ParseResult<CameraId> {
+        self.add_prepared_collection_accounted(
+            SceneCollection::Cameras,
+            camera,
+            SceneBuilder::prepare_add_camera,
+        )
     }
 
-    pub fn add_light(&mut self, light: Light) -> ParseResult<LightId> {
-        self.scope.poll_active()?;
-        self.reserve_collection_capacity(SceneCollection::Lights)?;
-        self.builder
-            .add_light(light)
-            .map_err(|cause| self.scope.abort(ScopeAbortCause::SceneBuild(cause)))
+    pub fn add_prepared_light(&mut self, light: PreparedSceneValue<Light>) -> ParseResult<LightId> {
+        self.add_prepared_collection_accounted(
+            SceneCollection::Lights,
+            light,
+            SceneBuilder::prepare_add_light,
+        )
     }
 
-    pub fn add_skin(&mut self, skin: Skin) -> ParseResult<SkinId> {
-        self.scope.poll_active()?;
-        self.reserve_collection_capacity(SceneCollection::Skins)?;
-        self.builder
-            .add_skin(skin)
-            .map_err(|cause| self.scope.abort(ScopeAbortCause::SceneBuild(cause)))
+    pub fn add_prepared_skin(&mut self, skin: PreparedSceneValue<Skin>) -> ParseResult<SkinId> {
+        self.add_prepared_collection_accounted(
+            SceneCollection::Skins,
+            skin,
+            SceneBuilder::prepare_add_skin,
+        )
     }
 
     pub fn node_mesh_binding_count(&mut self, id: NodeId) -> Option<usize> {
         if self.scope.preflight_active().is_err() {
             return None;
         }
-        self.builder
+        self.storage
+            .builder
             .node_mut(id)
             .map(|node| node.mesh_bindings.len())
     }
 
     pub fn add_node_mesh_binding(&mut self, id: NodeId, binding: MeshBinding) -> ParseResult<()> {
-        self.scope.poll_active()?;
-        let (len, capacity) = self
-            .builder
-            .node_mut(id)
-            .map(|node| (node.mesh_bindings.len(), node.mesh_bindings.capacity()))
-            .ok_or_else(|| {
-                self.scope.abort(ScopeAbortCause::DescriptorContract {
-                    code: "node-mesh-binding-node-out-of-range",
-                })
-            })?;
-        let desired_capacity = len.checked_add(1).ok_or_else(|| {
-            self.scope
-                .resource_limit_exceeded("node-mesh-binding-capacity", u64::MAX)
-        })?;
-        let plan = CapacityPlan::for_type::<MeshBinding>(len, capacity, desired_capacity).map_err(
-            |cause| {
-                self.scope
-                    .capacity_plan_error("node-mesh-binding-capacity", cause)
-            },
-        )?;
-        let envelope = plan.envelope_delta_bytes().map_err(|cause| {
-            self.scope
-                .capacity_plan_error("node-mesh-binding-capacity", cause)
-        })?;
-        if envelope == 0 {
-            self.builder
-                .node_mut(id)
-                .ok_or_else(|| {
-                    self.scope.abort(ScopeAbortCause::DescriptorContract {
-                        code: "node-mesh-binding-node-out-of-range",
-                    })
-                })?
-                .mesh_bindings
-                .push(binding);
-            return Ok(());
-        }
-
-        self.reserve_reservation_slots(1)?;
-        let mut reservation = self
-            .scope
-            .reserve_live(ImportStorageClass::SceneConstruction, envelope)?;
-        let node = self.builder.node_mut(id).ok_or_else(|| {
-            self.scope.abort(ScopeAbortCause::DescriptorContract {
+        let scope = self.scope;
+        scope.poll_active()?;
+        let storage = &mut self.storage;
+        let node_slot = storage.inventory.nodes.get(id.index()).ok_or_else(|| {
+            scope.abort(ScopeAbortCause::DescriptorContract {
                 code: "node-mesh-binding-node-out-of-range",
             })
         })?;
-        plan.verify_preflight(node.mesh_bindings.len(), node.mesh_bindings.capacity())
-            .map_err(|cause| {
-                self.scope
-                    .capacity_plan_error("node-mesh-binding-capacity", cause)
-            })?;
-        node.mesh_bindings
-            .try_reserve_exact(plan.allocator_additional())
-            .map_err(|_| self.scope.allocation_failure("node-mesh-binding-capacity"))?;
-        let actual = plan
-            .finish(node.mesh_bindings.len(), node.mesh_bindings.capacity())
-            .map_err(|cause| {
-                self.scope
-                    .capacity_plan_error("node-mesh-binding-capacity", cause)
-            })?;
-        self.scope.resize_live(&mut reservation, actual)?;
-        self.builder
-            .node_mut(id)
-            .ok_or_else(|| {
-                self.scope.abort(ScopeAbortCause::DescriptorContract {
-                    code: "node-mesh-binding-node-out-of-range",
-                })
-            })?
-            .mesh_bindings
-            .push(binding);
-        if actual != 0 {
-            self.reservations.push(reservation.into_reservation());
+        if !node_slot.mesh_bindings.is_stable() {
+            return Err(scope.abort(ScopeAbortCause::DescriptorContract {
+                code: "scene-reservation-replacement-in-progress",
+            }));
         }
+        let plan = storage
+            .builder
+            .node_mesh_binding_capacity_plan(id, 1)
+            .map_err(|cause| scope.abort(ScopeAbortCause::SceneBuild(cause)))?;
+        let admitted = plan
+            .envelope_delta_bytes()
+            .map_err(|cause| scope.abort(ScopeAbortCause::SceneBuild(cause)))?;
+        let token = reserve_scene_candidate(scope, admitted)?;
+        let candidate = storage
+            .builder
+            .prepare_add_node_mesh_binding(id, binding, plan)
+            .map_err(|cause| scope.abort(ScopeAbortCause::SceneBuild(cause)))?;
+        let mut accounted = AccountedSceneCandidate { candidate, token };
+        let actual = accounted.candidate.replacement_bytes();
+        qualify_scene_candidate(scope, &mut accounted.token, admitted, actual)?;
+        let replaces = accounted.candidate.replaces_allocation();
+        if replaces != accounted.token.is_some() {
+            return Err(scope.abort(ScopeAbortCause::DescriptorContract {
+                code: "scene-builder-replacement-token-mismatch",
+            }));
+        }
+        scope.poll_active()?;
+
+        if !replaces {
+            accounted.candidate.commit();
+            return Ok(());
+        }
+        let new = accounted
+            .token
+            .take()
+            .expect("a replacement candidate has a qualified reservation")
+            .into_reservation();
+        let slot = &mut storage.inventory.nodes[id.index()].mesh_bindings;
+        let guard = match slot.try_begin_replacement(new) {
+            Ok(guard) => guard,
+            Err(new) => {
+                drop(accounted.candidate);
+                drop(new);
+                return Err(scope.abort(ScopeAbortCause::DescriptorContract {
+                    code: "scene-reservation-replacement-in-progress",
+                }));
+            }
+        };
+        accounted.candidate.commit();
+        drop(guard.publish());
         Ok(())
     }
 
@@ -3263,6 +4934,7 @@ impl ScopedSceneBuilder<'_, '_> {
             return false;
         }
         let Some(binding) = self
+            .storage
             .builder
             .node_mut(node)
             .and_then(|node| node.mesh_bindings.get_mut(binding_index))
@@ -3275,256 +4947,390 @@ impl ScopedSceneBuilder<'_, '_> {
 
     pub fn set_space(&mut self, space: SceneSpace) -> ParseResult<()> {
         self.scope.poll_active()?;
-        *self.builder.space_mut() = space;
+        *self.storage.builder.space_mut() = space;
         Ok(())
     }
 
-    pub fn insert_metadata(
+    pub fn insert_prepared_metadata(
         &mut self,
-        key: String,
-        value: MetadataValue,
-    ) -> ParseResult<Option<MetadataValue>> {
-        self.scope.poll_active()?;
-        let additional = usize::from(!self.builder.metadata_mut().contains_key(key.as_str()));
-        let plan = self
-            .builder
-            .metadata_mut()
-            .capacity_plan(additional)
-            .map_err(|cause| self.metadata_error(cause))?;
-        let admitted = plan
-            .envelope_delta_bytes()
-            .map_err(|cause| self.metadata_error(cause))?;
-        self.reserve_reservation_slots(usize::from(admitted != 0))?;
-        let token = self.reserve_capacity_token(admitted)?;
-        let actual = self
-            .builder
-            .metadata_mut()
-            .apply_capacity_plan(plan)
-            .map_err(|cause| self.metadata_error(cause))?;
-        self.retain_capacity(token, admitted, actual)?;
-        self.builder
-            .metadata_mut()
-            .insert_reserved(key, value)
-            .map_err(|cause| self.metadata_error(cause))
-    }
-
-    fn metadata_error(&self, cause: OrderedMapError) -> ParseFailure {
-        match cause {
-            OrderedMapError::CapacityOverflow => self
-                .scope
-                .resource_limit_exceeded("scene-metadata-capacity", u64::MAX),
-            OrderedMapError::AllocationFailed => {
-                self.scope.allocation_failure("scene-metadata-capacity")
-            }
-            OrderedMapError::CapacityNotReserved => {
-                self.scope.abort(ScopeAbortCause::DescriptorContract {
-                    code: "scene-metadata-capacity-not-reserved",
-                })
-            }
-            _ => self.scope.abort(ScopeAbortCause::DescriptorContract {
-                code: "scene-metadata-capacity-error-unknown",
-            }),
+        mut prepared: PreparedSceneValue<(String, MetadataValue)>,
+    ) -> ParseResult<()> {
+        let scope = self.scope;
+        scope.poll_active()?;
+        let footprint = prepared
+            .value
+            .as_ref()
+            .expect("a prepared metadata entry is inserted exactly once")
+            .scene_value_footprint()
+            .map_err(|cause| scope.abort(ScopeAbortCause::SceneAccounting(cause)))?;
+        validate_scene_value_reservations(scope, &prepared.reservations, footprint)?;
+        let storage = &mut self.storage;
+        let (is_new, position, metadata_len) = {
+            let key = &prepared
+                .value
+                .as_ref()
+                .expect("a prepared metadata entry retains its key before insertion")
+                .0;
+            let metadata = storage.builder.metadata_mut();
+            let position = metadata
+                .keys()
+                .position(|candidate| candidate.as_str() >= key.as_str())
+                .unwrap_or(metadata.len());
+            (
+                !metadata.contains_key(key.as_str()),
+                position,
+                metadata.len(),
+            )
+        };
+        if storage.inventory.metadata_entries.len() != metadata_len
+            || !storage.inventory.metadata.is_stable()
+        {
+            return Err(scope.abort(ScopeAbortCause::DescriptorContract {
+                code: "scene-metadata-reservation-inventory-mismatch",
+            }));
         }
+        if is_new {
+            storage
+                .inventory
+                .metadata_entries
+                .try_reserve(1, "scene-metadata-reservation-slots", |bytes| {
+                    reserve_scene_inventory_capacity(scope, bytes)
+                })
+                .map_err(|cause| scope.abort(cause))?;
+        }
+        let key = &prepared
+            .value
+            .as_ref()
+            .expect("a prepared metadata entry retains its key during admission")
+            .0;
+        let plan = storage
+            .builder
+            .metadata_capacity_plan(key)
+            .map_err(|cause| metadata_error(scope, cause))?;
+        let admitted = plan
+            .envelope_bytes()
+            .map_err(|cause| metadata_error(scope, cause))?;
+        let token = reserve_scene_candidate(scope, admitted)?;
+        let (key, value) = prepared.take_value();
+        let candidate = storage
+            .builder
+            .prepare_insert_metadata(key, value, plan)
+            .map_err(|cause| metadata_error(scope, cause))?;
+        let mut accounted = AccountedPreparedSceneCandidate {
+            candidate,
+            reservations: prepared.take_reservations(),
+            token,
+        };
+        let actual = accounted.candidate.replacement_bytes();
+        qualify_scene_candidate(scope, &mut accounted.token, admitted, actual)?;
+        let replaces = accounted.candidate.replaces_allocation();
+        if replaces != accounted.token.is_some() {
+            return Err(scope.abort(ScopeAbortCause::DescriptorContract {
+                code: "scene-builder-replacement-token-mismatch",
+            }));
+        }
+        scope.poll_active()?;
+        if is_new
+            && storage
+                .inventory
+                .metadata_entries
+                .try_insert_reserved(position, SceneValueReservations::new())
+                .is_err()
+        {
+            return Err(scope.abort(ScopeAbortCause::DescriptorContract {
+                code: "scene-metadata-reservation-slot-not-admitted",
+            }));
+        }
+
+        let guard = if replaces {
+            let new = accounted
+                .token
+                .take()
+                .expect("a metadata replacement has a qualified reservation")
+                .into_reservation();
+            match storage.inventory.metadata.try_begin_replacement(new) {
+                Ok(guard) => Some(guard),
+                Err(new) => {
+                    drop(accounted.candidate);
+                    drop(new);
+                    return Err(scope.abort(ScopeAbortCause::DescriptorContract {
+                        code: "scene-reservation-replacement-in-progress",
+                    }));
+                }
+            }
+        } else {
+            None
+        };
+        let retired = accounted.candidate.commit();
+        let retired_reservations = std::mem::replace(
+            &mut storage.inventory.metadata_entries[position],
+            accounted.reservations,
+        );
+        if let Some(value) = retired {
+            crate::metered_storage::RetiredPreparedMetadataEntry {
+                value,
+                reservations: retired_reservations,
+            }
+            .drop_in_order();
+        } else {
+            drop(retired_reservations);
+        }
+        let retired_metadata_capacity = guard.and_then(SceneCapacityReplacement::publish);
+        drop(retired_metadata_capacity);
+        Ok(())
     }
 
-    fn reserve_collection_capacity(&mut self, collection: SceneCollection) -> ParseResult<()> {
-        self.scope.preflight_active()?;
-        let plan = self
+    fn add_prepared_collection_accounted<T, Id>(
+        &mut self,
+        collection: SceneCollection,
+        mut prepared: PreparedSceneValue<T>,
+        prepare: SceneInsertPreparer<T, Id>,
+    ) -> ParseResult<Id>
+    where
+        T: SceneBuildValue,
+    {
+        let scope = self.scope;
+        scope.poll_active()?;
+        let footprint = prepared
+            .value
+            .as_ref()
+            .expect("a prepared scene value is inserted exactly once")
+            .scene_value_footprint()
+            .map_err(|cause| scope.abort(ScopeAbortCause::SceneAccounting(cause)))?;
+        validate_scene_value_reservations(scope, &prepared.reservations, footprint)?;
+        let storage = &mut self.storage;
+        if !storage
+            .inventory
+            .collections
+            .get_mut(collection)
+            .is_stable()
+        {
+            return Err(scope.abort(ScopeAbortCause::DescriptorContract {
+                code: "scene-reservation-replacement-in-progress",
+            }));
+        }
+        let payload_count = prepared.reservations.payload.len();
+        storage
+            .inventory
+            .payload
+            .try_reserve(
+                payload_count,
+                "scene-builder-prepared-payload-reservations",
+                |bytes| reserve_scene_inventory_capacity(scope, bytes),
+            )
+            .map_err(|cause| scope.abort(cause))?;
+        let plan = storage
             .builder
             .collection_capacity_plan(collection, 1)
-            .map_err(|cause| self.scope.abort(ScopeAbortCause::SceneBuild(cause)))?;
+            .map_err(|cause| scope.abort(ScopeAbortCause::SceneBuild(cause)))?;
         let admitted = plan
             .envelope_delta_bytes()
-            .map_err(|cause| self.scope.abort(ScopeAbortCause::SceneBuild(cause)))?;
-        self.reserve_reservation_slots(usize::from(admitted != 0))?;
-        let token = self.reserve_capacity_token(admitted)?;
-        let actual = self
-            .builder
-            .apply_collection_capacity_plan(collection, plan)
-            .map_err(|cause| self.scope.abort(ScopeAbortCause::SceneBuild(cause)))?;
-        self.retain_capacity(token, admitted, actual)
-    }
-
-    fn reserve_node_capacity(&mut self, parent: NodeId) -> ParseResult<()> {
-        self.scope.preflight_active()?;
-        let node_plan = self
-            .builder
-            .collection_capacity_plan(SceneCollection::Nodes, 1)
-            .map_err(|cause| self.scope.abort(ScopeAbortCause::SceneBuild(cause)))?;
-        let node_admitted = node_plan
-            .envelope_delta_bytes()
-            .map_err(|cause| self.scope.abort(ScopeAbortCause::SceneBuild(cause)))?;
-        let child_plan = self
-            .builder
-            .node_children_capacity_plan(parent, 1)
-            .map_err(|cause| self.scope.abort(ScopeAbortCause::SceneBuild(cause)))?;
-        let child_admitted = child_plan
-            .envelope_delta_bytes()
-            .map_err(|cause| self.scope.abort(ScopeAbortCause::SceneBuild(cause)))?;
-        let token_count = usize::from(node_admitted != 0) + usize::from(child_admitted != 0);
-        self.reserve_reservation_slots(token_count)?;
-        let node_token = self.reserve_capacity_token(node_admitted)?;
-        let child_token = self.reserve_capacity_token(child_admitted)?;
-
-        let node_actual = self
-            .builder
-            .apply_collection_capacity_plan(SceneCollection::Nodes, node_plan)
-            .map_err(|cause| self.scope.abort(ScopeAbortCause::SceneBuild(cause)))?;
-        self.retain_capacity(node_token, node_admitted, node_actual)?;
-        let child_actual = self
-            .builder
-            .apply_node_children_capacity_plan(parent, child_plan)
-            .map_err(|cause| self.scope.abort(ScopeAbortCause::SceneBuild(cause)))?;
-        self.retain_capacity(child_token, child_admitted, child_actual)
-    }
-
-    fn reserve_reservation_slots(&mut self, payload_slots: usize) -> ParseResult<()> {
-        self.scope.preflight_active()?;
-        if payload_slots == 0 {
-            return Ok(());
-        }
-        let desired_capacity = self
-            .reservations
-            .len()
-            .checked_add(payload_slots)
-            .ok_or_else(|| {
-                self.scope
-                    .resource_limit_exceeded("scene-builder-reservation-list", u64::MAX)
-            })?;
-        let plan = CapacityPlan::for_type::<ImportReservation>(
-            self.reservations.len(),
-            self.reservations.capacity(),
-            desired_capacity,
-        )
-        .map_err(|cause| {
-            self.scope
-                .capacity_plan_error("scene-builder-reservation-list", cause)
-        })?;
-        let envelope_delta = plan.envelope_delta_bytes().map_err(|cause| {
-            self.scope
-                .capacity_plan_error("scene-builder-reservation-list", cause)
-        })?;
-        if envelope_delta == 0 {
-            return Ok(());
-        }
-        let prior_reservation = self.reservation_list_capacity.take();
-        let prior_bytes = prior_reservation
-            .as_ref()
-            .map_or(0, ImportReservation::bytes);
-        let envelope = prior_bytes.checked_add(envelope_delta).ok_or_else(|| {
-            self.scope
-                .resource_limit_exceeded("scene-builder-reservation-list", u64::MAX)
-        })?;
-        let mut reservation = match prior_reservation {
-            Some(mut reservation) => {
-                self.scope
-                    .coordinator
-                    .try_borrow_mut()
-                    .map_err(|_| self.scope.reentrant_capability_failure())?
-                    .checkpoint()
-                    .resize_reservation(&mut reservation, envelope)
-                    .map_err(|cause| self.scope.abort(ScopeAbortCause::Ledger(cause)))?;
-                reservation
-            }
-            None => self
-                .scope
-                .coordinator
-                .try_borrow_mut()
-                .map_err(|_| self.scope.reentrant_capability_failure())?
-                .checkpoint()
-                .reserve(
-                    ImportLedgerPhase::SceneConstruction,
-                    ImportDimension::ScratchBytes,
-                    envelope,
-                )
-                .map_err(|cause| self.scope.abort(ScopeAbortCause::Ledger(cause)))?,
+            .map_err(|cause| scope.abort(ScopeAbortCause::SceneBuild(cause)))?;
+        let token = reserve_scene_candidate(scope, admitted)?;
+        let value = prepared.take_value();
+        let candidate = prepare(&mut storage.builder, value, plan)
+            .map_err(|cause| scope.abort(ScopeAbortCause::SceneBuild(cause)))?;
+        let mut accounted = AccountedPreparedSceneCandidate {
+            candidate,
+            reservations: prepared.take_reservations(),
+            token,
         };
-        plan.verify_preflight(self.reservations.len(), self.reservations.capacity())
-            .map_err(|cause| {
-                self.scope
-                    .capacity_plan_error("scene-builder-reservation-list", cause)
-            })?;
-        self.reservations
-            .try_reserve_exact(plan.allocator_additional())
-            .map_err(|_| {
-                self.scope
-                    .allocation_failure("scene-builder-reservation-list")
-            })?;
-        let actual_delta = plan
-            .finish(self.reservations.len(), self.reservations.capacity())
-            .map_err(|cause| {
-                self.scope
-                    .capacity_plan_error("scene-builder-reservation-list", cause)
-            })?;
-        let actual = prior_bytes.checked_add(actual_delta).ok_or_else(|| {
-            self.scope
-                .resource_limit_exceeded("scene-builder-reservation-list", u64::MAX)
-        })?;
-        self.scope
-            .coordinator
-            .try_borrow_mut()
-            .map_err(|_| self.scope.reentrant_capability_failure())?
-            .checkpoint()
-            .resize_reservation(&mut reservation, actual)
-            .map_err(|cause| self.scope.abort(ScopeAbortCause::Ledger(cause)))?;
-        self.reservation_list_capacity = Some(reservation);
-        Ok(())
-    }
-
-    fn reserve_capacity_token(&self, admitted: u64) -> ParseResult<Option<ImportReservation>> {
-        self.scope.preflight_active()?;
-        if admitted == 0 {
-            return Ok(None);
+        let actual = accounted.candidate.replacement_bytes();
+        qualify_scene_candidate(scope, &mut accounted.token, admitted, actual)?;
+        let replaces = accounted.candidate.replaces_allocation();
+        if replaces != accounted.token.is_some() {
+            return Err(scope.abort(ScopeAbortCause::DescriptorContract {
+                code: "scene-builder-replacement-token-mismatch",
+            }));
         }
-        self.scope
-            .reserve_live(ImportStorageClass::SceneConstruction, admitted)
-            .map(|reservation| Some(reservation.into_reservation()))
+        scope.poll_active()?;
+
+        let replacement = if replaces {
+            let new = accounted
+                .token
+                .take()
+                .expect("a prepared collection replacement has a qualified reservation")
+                .into_reservation();
+            Some(
+                storage
+                    .inventory
+                    .collections
+                    .get_mut(collection)
+                    .try_begin_replacement(new)
+                    .expect("the prepared collection slot was prevalidated as stable"),
+            )
+        } else {
+            None
+        };
+        storage
+            .inventory
+            .payload
+            .try_append_accounted(&mut accounted.reservations.payload)
+            .expect("prepared payload reservation slots were admitted before commit");
+        let id = accounted.candidate.commit();
+        let retired = replacement.and_then(SceneCapacityReplacement::publish);
+        drop(retired);
+        Ok(id)
     }
 
-    fn retain_capacity(
+    fn add_prepared_node_accounted(
         &mut self,
-        token: Option<ImportReservation>,
-        admitted: u64,
-        actual: u64,
-    ) -> ParseResult<()> {
-        self.scope.preflight_active()?;
-        if actual > admitted {
-            return Err(self.scope.abort(ScopeAbortCause::DescriptorContract {
-                code: "scene-builder-capacity-reservation-underestimated",
+        parent: NodeId,
+        mut prepared: PreparedSceneValue<Node>,
+    ) -> ParseResult<NodeId> {
+        let scope = self.scope;
+        scope.poll_active()?;
+        let node = prepared
+            .value
+            .as_ref()
+            .expect("a prepared node is inserted exactly once");
+        if node.parent.is_some() || !node.children.is_empty() || !node.mesh_bindings.is_empty() {
+            return Err(scope.abort(ScopeAbortCause::DescriptorContract {
+                code: "prepared-node-must-not-preown-relationships",
             }));
         }
-        let Some(mut token) = token else {
-            if actual == 0 {
-                return Ok(());
-            }
-            return Err(self.scope.abort(ScopeAbortCause::DescriptorContract {
-                code: "scene-builder-capacity-growth-without-reservation",
+        let footprint = node
+            .scene_value_footprint()
+            .map_err(|cause| scope.abort(ScopeAbortCause::SceneAccounting(cause)))?;
+        validate_scene_value_reservations(scope, &prepared.reservations, footprint)?;
+        let storage = &mut self.storage;
+        if !storage.inventory.collections.nodes.is_stable()
+            || !storage
+                .inventory
+                .nodes
+                .get(parent.index())
+                .is_some_and(|slots| slots.children.is_stable())
+            || storage.inventory.nodes.len() != storage.builder.node_count()
+        {
+            return Err(scope.abort(ScopeAbortCause::DescriptorContract {
+                code: "scene-node-reservation-inventory-mismatch",
             }));
+        }
+        let payload_count = prepared.reservations.payload.len();
+        storage
+            .inventory
+            .payload
+            .try_reserve(
+                payload_count,
+                "scene-builder-prepared-node-payload-reservations",
+                |bytes| reserve_scene_inventory_capacity(scope, bytes),
+            )
+            .map_err(|cause| scope.abort(cause))?;
+        let plan = storage
+            .builder
+            .node_insert_capacity_plan(parent)
+            .map_err(|cause| scope.abort(ScopeAbortCause::SceneBuild(cause)))?;
+        let nodes_admitted = plan
+            .node_envelope_bytes()
+            .map_err(|cause| scope.abort(ScopeAbortCause::SceneBuild(cause)))?;
+        let children_admitted = plan
+            .parent_children_envelope_bytes()
+            .map_err(|cause| scope.abort(ScopeAbortCause::SceneBuild(cause)))?;
+        storage
+            .inventory
+            .nodes
+            .try_reserve(1, "scene-node-reservation-slots", |bytes| {
+                reserve_scene_inventory_capacity(scope, bytes)
+            })
+            .map_err(|cause| scope.abort(cause))?;
+        let nodes_token = reserve_scene_candidate(scope, nodes_admitted)?;
+        let children_token = reserve_scene_candidate(scope, children_admitted)?;
+        let node = prepared.take_value();
+        let candidate = storage
+            .builder
+            .prepare_add_child_node(parent, node, plan)
+            .map_err(|cause| scope.abort(ScopeAbortCause::SceneBuild(cause)))?;
+        let mut accounted = AccountedPreparedNodeCandidate {
+            candidate,
+            reservations: prepared.take_reservations(),
+            nodes_token,
+            children_token,
         };
-        if actual == 0 {
-            return Ok(());
+        let nodes_actual = accounted.candidate.node_replacement_bytes();
+        let children_actual = accounted.candidate.parent_children_replacement_bytes();
+        qualify_scene_candidate(
+            scope,
+            &mut accounted.nodes_token,
+            nodes_admitted,
+            nodes_actual,
+        )?;
+        qualify_scene_candidate(
+            scope,
+            &mut accounted.children_token,
+            children_admitted,
+            children_actual,
+        )?;
+        let replaces_nodes = accounted.candidate.replaces_nodes();
+        let replaces_children = accounted.candidate.replaces_parent_children();
+        if replaces_nodes != accounted.nodes_token.is_some()
+            || replaces_children != accounted.children_token.is_some()
+        {
+            return Err(scope.abort(ScopeAbortCause::DescriptorContract {
+                code: "scene-builder-replacement-token-mismatch",
+            }));
         }
-        self.scope
-            .coordinator
-            .try_borrow_mut()
-            .map_err(|_| self.scope.reentrant_capability_failure())?
-            .checkpoint()
-            .resize_reservation(&mut token, actual)
-            .map_err(|cause| self.scope.abort(ScopeAbortCause::Ledger(cause)))?;
-        self.reservations.push(token);
-        Ok(())
+        scope.poll_active()?;
+
+        storage
+            .inventory
+            .nodes
+            .push_reserved_infallible(NodeReservationSlots::default());
+        let nodes_replacement = if replaces_nodes {
+            let token = accounted
+                .nodes_token
+                .take()
+                .expect("a prepared node replacement has a qualified reservation")
+                .into_reservation();
+            Some(
+                storage
+                    .inventory
+                    .collections
+                    .nodes
+                    .try_begin_replacement(token)
+                    .expect("the prepared node collection slot was prevalidated as stable"),
+            )
+        } else {
+            None
+        };
+        let children_replacement = if replaces_children {
+            let token = accounted
+                .children_token
+                .take()
+                .expect("a prepared parent-child replacement has a qualified reservation")
+                .into_reservation();
+            Some(
+                storage.inventory.nodes[parent.index()]
+                    .children
+                    .try_begin_replacement(token)
+                    .expect("the prepared parent-child slot was prevalidated as stable"),
+            )
+        } else {
+            None
+        };
+        storage
+            .inventory
+            .payload
+            .try_append_accounted(&mut accounted.reservations.payload)
+            .expect("prepared node payload slots were admitted before commit");
+        let id = accounted.candidate.commit();
+        let retired_nodes = nodes_replacement.and_then(SceneCapacityReplacement::publish);
+        let retired_children = children_replacement.and_then(SceneCapacityReplacement::publish);
+        drop(retired_nodes);
+        drop(retired_children);
+        Ok(id)
     }
 
     pub fn finish_draft(mut self) -> ParseResult<SceneDraft> {
         self.scope.poll_active()?;
         let footprint = self
+            .storage
             .builder
             .storage_footprint()
             .map_err(|cause| self.scope.abort(ScopeAbortCause::SceneAccounting(cause)))?
             .accounted_payload_bytes();
         self.scope
-            .seal_draft_reservations(&mut self.reservations, footprint)?;
-        Ok(self.builder.finish_draft())
+            .seal_draft_inventory(&mut self.storage.inventory, footprint)?;
+        Ok(self.storage.builder.finish_draft())
     }
 }
 
@@ -3532,8 +5338,490 @@ impl ScopedSceneBuilder<'_, '_> {
 mod tests {
     use super::*;
     use crate::ledger::{ImportOperationControl, import_ledger_limits};
+    use crate::{
+        CapabilityStatus, DetectionOutcome, DetectionResult, DetectionScope, FormatCapability,
+        FormatDescriptor, FormatEncoding, FormatImporter, ImportRequest, OptionCompileLimits,
+        ReadConfidence, ReadHint, RegistryBuildLimits, RegistryBuilder,
+    };
+    use baozi_core::{FormatId, SceneDraft, Vec2, Vec3};
+    use baozi_io::AssetPath;
     use baozi_io::{AssetLength, AuthorityDomain};
     use std::io::Cursor;
+
+    #[derive(Clone, Copy)]
+    enum QualificationContainer {
+        Vec,
+        String,
+        OrderedMap,
+    }
+
+    struct QualificationFailureImporter {
+        container: QualificationContainer,
+    }
+
+    struct ScenePartsImporter;
+
+    struct PreparedMetadataImporter;
+
+    #[derive(Clone, Copy)]
+    enum PreparedNodeCase {
+        Success,
+        PreownedParent,
+        PreownedChild,
+        PreownedMeshBinding,
+    }
+
+    struct PreparedNodeImporter {
+        case: PreparedNodeCase,
+    }
+
+    impl FormatImporter for QualificationFailureImporter {
+        fn descriptor(&self) -> FormatDescriptor {
+            FormatDescriptor::builder(
+                FormatId::new("dev.baozi.test.metered-qualification")
+                    .expect("valid test format id"),
+                "Metered Qualification Test",
+            )
+            .extensions(["metered-qualification"])
+            .encoding(FormatEncoding::Binary)
+            .capabilities([(FormatCapability::Geometry, CapabilityStatus::Supported)])
+            .build()
+            .expect("valid test descriptor")
+        }
+
+        fn detect(
+            &self,
+            _probe: &crate::Probe<'_>,
+            _hint: &ReadHint,
+            _scope: &DetectionScope<'_>,
+        ) -> DetectionResult<DetectionOutcome> {
+            Ok(DetectionOutcome::Match(ReadConfidence::Certain))
+        }
+
+        fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
+            let failure = match self.container {
+                QualificationContainer::Vec => {
+                    let mut values = scope.metered_vec(
+                        ImportStorageClass::FormatNormalization,
+                        "owned-metered-test-vec",
+                    );
+                    values.try_push(7_u32)?;
+                    let capacity = values.capacity();
+                    let token_bytes = values.capacity.as_ref().map(ImportReservation::bytes);
+                    FAIL_NEXT_METERED_QUALIFICATION.with(|fault| fault.set(true));
+                    let result = values.try_reserve(capacity);
+                    assert_eq!(values.as_slice(), [7]);
+                    assert_eq!(values.capacity(), capacity);
+                    assert_eq!(
+                        values.capacity.as_ref().map(ImportReservation::bytes),
+                        token_bytes
+                    );
+                    parse_failure(result)
+                }
+                QualificationContainer::String => {
+                    let mut value = scope.metered_string(
+                        ImportStorageClass::FormatNormalization,
+                        "owned-metered-test-string",
+                    );
+                    value.try_push_str("x")?;
+                    let capacity = value.capacity();
+                    let token_bytes = value.capacity.as_ref().map(ImportReservation::bytes);
+                    FAIL_NEXT_METERED_QUALIFICATION.with(|fault| fault.set(true));
+                    let result = value.try_reserve(capacity);
+                    assert_eq!(value.as_str(), "x");
+                    assert_eq!(value.capacity(), capacity);
+                    assert_eq!(
+                        value.capacity.as_ref().map(ImportReservation::bytes),
+                        token_bytes
+                    );
+                    parse_failure(result)
+                }
+                QualificationContainer::OrderedMap => {
+                    let mut values = scope.metered_ordered_map(
+                        ImportStorageClass::FormatNormalization,
+                        "owned-metered-test-ordered-map",
+                    );
+                    values.try_insert(3_u32, 11_u32)?;
+                    let capacity = values.capacity();
+                    let token_bytes = values.capacity.as_ref().map(ImportReservation::bytes);
+                    FAIL_NEXT_METERED_QUALIFICATION.with(|fault| fault.set(true));
+                    let result = values.try_reserve(capacity);
+                    assert_eq!(values.get(&3), Some(&11));
+                    assert_eq!(values.len(), 1);
+                    assert_eq!(values.capacity(), capacity);
+                    assert_eq!(
+                        values.capacity.as_ref().map(ImportReservation::bytes),
+                        token_bytes
+                    );
+                    parse_failure(result)
+                }
+            };
+            Err(failure)
+        }
+    }
+
+    impl FormatImporter for ScenePartsImporter {
+        fn descriptor(&self) -> FormatDescriptor {
+            FormatDescriptor::builder(
+                FormatId::new("dev.baozi.test.scene-parts").expect("valid test format id"),
+                "Scene Parts Test",
+            )
+            .extensions(["scene-parts"])
+            .encoding(FormatEncoding::Binary)
+            .capabilities([(FormatCapability::Geometry, CapabilityStatus::Supported)])
+            .build()
+            .expect("valid test descriptor")
+        }
+
+        fn detect(
+            &self,
+            _probe: &crate::Probe<'_>,
+            _hint: &ReadHint,
+            _scope: &DetectionScope<'_>,
+        ) -> DetectionResult<DetectionOutcome> {
+            Ok(DetectionOutcome::Match(ReadConfidence::Certain))
+        }
+
+        fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
+            let allowance = scope.metered_opaque_allowance(ImportStorageClass::BackendDecode, 7)?;
+            assert_eq!(allowance.bytes(), 7);
+            drop(allowance);
+
+            let mut decoded = scope.metered_decoded_text(7, "scene-parts-decoded-text")?;
+            decoded.try_push_str("fixture")?;
+            let decoded = decoded.finish_exact()?;
+            assert_eq!(decoded.as_str(), "fixture");
+            assert_eq!(decoded.decoded_bytes(), 7);
+            assert_eq!(
+                decoded
+                    .decoded_bytes()
+                    .checked_add(decoded.allocator_slack_bytes()),
+                u64::try_from(decoded.value.capacity()).ok()
+            );
+            drop(decoded);
+
+            let mut name = scope.metered_string(
+                ImportStorageClass::SceneConstruction,
+                "scene-parts-mesh-name",
+            );
+            name.try_push_str("metered mesh ")?;
+            name.try_push_usize(1)?;
+            name.try_push_char('!')?;
+            let mut positions = scope.metered_vec(
+                ImportStorageClass::SceneConstruction,
+                "scene-parts-positions",
+            );
+            positions.try_extend_from_slice(&[
+                Vec3::new(0.0, 0.0, 0.0),
+                Vec3::new(1.0, 0.0, 0.0),
+                Vec3::new(0.0, 1.0, 0.0),
+            ])?;
+
+            let mut texcoords = scope.metered_scene_vec("scene-parts-texcoords");
+            for channel in [
+                [
+                    Vec2::new(0.0, 0.0),
+                    Vec2::new(1.0, 0.0),
+                    Vec2::new(0.0, 1.0),
+                ],
+                [
+                    Vec2::new(0.5, 0.5),
+                    Vec2::new(1.0, 0.5),
+                    Vec2::new(0.5, 1.0),
+                ],
+            ] {
+                let mut values = scope.metered_vec(
+                    ImportStorageClass::SceneConstruction,
+                    "scene-parts-texcoord-channel",
+                );
+                values.try_extend_from_slice(&channel)?;
+                texcoords.try_push_parts(values.try_into_scene_parts()?)?;
+            }
+
+            let mut metadata = scope.metered_metadata_map("scene-parts-metadata");
+            let mut key = scope.metered_string(
+                ImportStorageClass::SceneConstruction,
+                "scene-parts-metadata-key",
+            );
+            key.try_push_str("source:label")?;
+            let mut value = scope.metered_string(
+                ImportStorageClass::SceneConstruction,
+                "scene-parts-metadata-value",
+            );
+            value.try_push_str("original")?;
+            metadata.try_insert_parts(
+                key.try_into_scene_parts()?
+                    .zip(value.try_into_scene_parts()?)?
+                    .into_metadata_string_entry(),
+            )?;
+
+            let mut replacement_key = scope.metered_string(
+                ImportStorageClass::SceneConstruction,
+                "scene-parts-metadata-replacement-key",
+            );
+            replacement_key.try_push_str("source:label")?;
+            let mut replacement_value = scope.metered_string(
+                ImportStorageClass::SceneConstruction,
+                "scene-parts-metadata-replacement-value",
+            );
+            replacement_value.try_push_str("replacement")?;
+            metadata.try_insert_parts(
+                replacement_key
+                    .try_into_scene_parts()?
+                    .zip(replacement_value.try_into_scene_parts()?)?
+                    .into_metadata_string_entry(),
+            )?;
+
+            let mut numeric_key = scope.metered_string(
+                ImportStorageClass::SceneConstruction,
+                "scene-parts-numeric-metadata-key",
+            );
+            numeric_key.try_push_str("source:index")?;
+            metadata.try_insert_parts(
+                numeric_key
+                    .try_into_scene_parts()?
+                    .into_metadata_i64_entry(1),
+            )?;
+
+            let prepared = name
+                .try_into_scene_parts()?
+                .into_some()
+                .into_mesh(MeshBuildConfig {
+                    topology: PrimitiveTopology::Triangles,
+                    material: None,
+                    bounds: None,
+                })
+                .with_positions(positions.try_into_scene_parts()?)?
+                .with_texcoords(texcoords.try_into_scene_parts()?)?
+                .with_metadata(metadata.try_into_scene_parts()?)?
+                .finish()?;
+            let footprint = prepared
+                .value
+                .as_ref()
+                .expect("prepared mesh value")
+                .scene_value_footprint()
+                .expect("prepared mesh footprint")
+                .payload_bytes();
+            assert_eq!(
+                reservation_bytes(&prepared.reservations.payload),
+                Some(footprint)
+            );
+            let mut builder = scope.scene_builder()?;
+            let mesh = builder.add_prepared_mesh(prepared)?;
+            assert_eq!(mesh, MeshId::new(0));
+            builder.finish_draft()
+        }
+    }
+
+    impl FormatImporter for PreparedMetadataImporter {
+        fn descriptor(&self) -> FormatDescriptor {
+            FormatDescriptor::builder(
+                FormatId::new("dev.baozi.test.prepared-metadata").expect("valid test format id"),
+                "Prepared Metadata Test",
+            )
+            .extensions(["prepared-metadata"])
+            .encoding(FormatEncoding::Binary)
+            .capabilities([(FormatCapability::Metadata, CapabilityStatus::Supported)])
+            .build()
+            .expect("valid test descriptor")
+        }
+
+        fn detect(
+            &self,
+            _probe: &crate::Probe<'_>,
+            _hint: &ReadHint,
+            _scope: &DetectionScope<'_>,
+        ) -> DetectionResult<DetectionOutcome> {
+            Ok(DetectionOutcome::Match(ReadConfidence::Certain))
+        }
+
+        fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
+            let mut key = scope.metered_string(
+                ImportStorageClass::SceneConstruction,
+                "prepared-metadata-key",
+            );
+            key.try_push_str("source:label")?;
+            let mut value = scope.metered_string(
+                ImportStorageClass::SceneConstruction,
+                "prepared-metadata-value",
+            );
+            value.try_push_str("fixture")?;
+            let prepared = key
+                .try_into_scene_parts()?
+                .zip(value.try_into_scene_parts()?)?
+                .into_metadata_string_entry()
+                .finish()?;
+            let mut builder = scope.scene_builder()?;
+            builder.insert_prepared_metadata(prepared)?;
+
+            let mut replacement_key = scope.metered_string(
+                ImportStorageClass::SceneConstruction,
+                "prepared-metadata-replacement-key",
+            );
+            replacement_key.try_push_str("source:label")?;
+            let mut replacement_value = scope.metered_string(
+                ImportStorageClass::SceneConstruction,
+                "prepared-metadata-replacement-value",
+            );
+            replacement_value.try_push_str("replacement")?;
+            let replacement = replacement_key
+                .try_into_scene_parts()?
+                .zip(replacement_value.try_into_scene_parts()?)?
+                .into_metadata_string_entry()
+                .finish()?;
+            builder.insert_prepared_metadata(replacement)?;
+            builder.finish_draft()
+        }
+    }
+
+    impl FormatImporter for PreparedNodeImporter {
+        fn descriptor(&self) -> FormatDescriptor {
+            FormatDescriptor::builder(
+                FormatId::new("dev.baozi.test.prepared-node").expect("valid test format id"),
+                "Prepared Node Test",
+            )
+            .extensions(["prepared-node"])
+            .encoding(FormatEncoding::Binary)
+            .capabilities([(FormatCapability::Geometry, CapabilityStatus::Supported)])
+            .build()
+            .expect("valid test descriptor")
+        }
+
+        fn detect(
+            &self,
+            _probe: &crate::Probe<'_>,
+            _hint: &ReadHint,
+            _scope: &DetectionScope<'_>,
+        ) -> DetectionResult<DetectionOutcome> {
+            Ok(DetectionOutcome::Match(ReadConfidence::Certain))
+        }
+
+        fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
+            let mut name =
+                scope.metered_string(ImportStorageClass::SceneConstruction, "prepared-node-name");
+            name.try_push_str("metered node")?;
+            let mut prepared = name
+                .try_into_scene_parts()?
+                .into_some()
+                .into_node(NodeBuildConfig {
+                    transform: Mat4::IDENTITY,
+                    camera: None,
+                    light: None,
+                })
+                .finish()?;
+            let mut builder = scope.scene_builder()?;
+
+            if matches!(self.case, PreparedNodeCase::Success) {
+                let node = builder.add_prepared_node(prepared)?;
+                assert_eq!(node, NodeId::new(1));
+                return builder.finish_draft();
+            }
+
+            let node = prepared
+                .value
+                .as_mut()
+                .expect("the prepared node remains owned before insertion");
+            match self.case {
+                PreparedNodeCase::Success => unreachable!("success returned above"),
+                PreparedNodeCase::PreownedParent => node.parent = Some(builder.root()),
+                PreparedNodeCase::PreownedChild => node.children.push(builder.root()),
+                PreparedNodeCase::PreownedMeshBinding => {
+                    node.mesh_bindings.push(MeshBinding::new(MeshId::new(0)));
+                }
+            }
+            let prepared_live_bytes = prepared
+                .reservations
+                .payload
+                .capacity_bytes()
+                .checked_add(
+                    reservation_bytes(&prepared.reservations.payload)
+                        .expect("prepared node reservation bytes"),
+                )
+                .expect("prepared node live bytes fit u64");
+            let live_before = scope
+                .coordinator
+                .borrow()
+                .try_ledger_snapshot()
+                .expect("pre-rejection ledger snapshot")
+                .current_live_bytes();
+            let failure = builder
+                .add_prepared_node(prepared)
+                .expect_err("a prepared node cannot pre-own scene relationships");
+            let live_after = scope
+                .coordinator
+                .borrow()
+                .try_ledger_snapshot()
+                .expect("post-rejection ledger snapshot")
+                .current_live_bytes();
+            assert_eq!(
+                live_before.checked_sub(live_after),
+                Some(prepared_live_bytes),
+                "rejection must release the complete prepared-node owner"
+            );
+            Err(failure)
+        }
+    }
+
+    fn parse_failure(result: ParseResult<()>) -> ParseFailure {
+        match result {
+            Ok(()) => panic!("the injected qualification failure must be observed"),
+            Err(failure) => failure,
+        }
+    }
+
+    fn reserve_test_storage(
+        coordinator: &RefCell<ImportCoordinator>,
+        bytes: u64,
+    ) -> Result<ImportReservation, ScopeAbortCause> {
+        coordinator
+            .borrow_mut()
+            .checkpoint()
+            .reserve(
+                ImportLedgerPhase::SceneConstruction,
+                ImportDimension::ScratchBytes,
+                bytes,
+            )
+            .map_err(ScopeAbortCause::Ledger)
+    }
+
+    fn fill_reservation_lane(
+        coordinator: &RefCell<ImportCoordinator>,
+        lane: &mut AccountedReservationVec,
+        payload_bytes: u64,
+    ) {
+        lane.try_reserve(1, "merge-fixture-capacity", |bytes| {
+            reserve_test_storage(coordinator, bytes)
+        })
+        .expect("merge fixture capacity must be admitted");
+        while lane.len() < lane.capacity() {
+            let reservation = reserve_test_storage(coordinator, payload_bytes)
+                .expect("merge fixture payload must be admitted");
+            lane.try_push_reserved(reservation)
+                .unwrap_or_else(|_| panic!("merge fixture slot must remain available"));
+        }
+    }
+
+    fn fill_reservation_inventory(
+        coordinator: &RefCell<ImportCoordinator>,
+        inventory: &mut SceneValueReservations,
+    ) {
+        fill_reservation_lane(coordinator, &mut inventory.payload, 11);
+    }
+
+    fn reservation_inventory_state(
+        inventory: &SceneValueReservations,
+    ) -> (usize, usize, u64, Vec<u64>) {
+        (
+            inventory.payload.len(),
+            inventory.payload.capacity(),
+            inventory.payload.capacity_bytes(),
+            inventory
+                .payload
+                .iter()
+                .map(ImportReservation::bytes)
+                .collect(),
+        )
+    }
 
     fn assert_not_send_sync<T: ?Sized>() {
         let _ = std::any::type_name::<T>();
@@ -3542,6 +5830,131 @@ mod tests {
     #[test]
     fn parse_scope_is_intentionally_session_local() {
         assert_not_send_sync::<ParseScope<'_>>();
+    }
+
+    #[test]
+    fn metered_growth_qualification_failure_preserves_every_live_owner() {
+        for container in [
+            QualificationContainer::Vec,
+            QualificationContainer::String,
+            QualificationContainer::OrderedMap,
+        ] {
+            let mut registry = RegistryBuilder::new();
+            registry
+                .register(QualificationFailureImporter { container })
+                .expect("the test importer must register");
+            let snapshot = registry
+                .freeze(RegistryBuildLimits::default())
+                .expect("the test registry must freeze");
+            let request = snapshot
+                .compile_request(&ImportRequest::new(), OptionCompileLimits::default())
+                .expect("the test request must compile");
+            let result = crate::session::import_bytes(
+                &request,
+                AssetPath::new("asset.metered-qualification").expect("valid test path"),
+                b"fixture",
+                ImportOperationControl::default(),
+            );
+            assert!(
+                result.is_err(),
+                "the injected allocator qualification failure must terminate the import"
+            );
+        }
+    }
+
+    #[test]
+    fn scene_parts_keep_storage_and_tokens_coupled_through_terminal_composition() {
+        let mut registry = RegistryBuilder::new();
+        registry
+            .register(ScenePartsImporter)
+            .expect("the scene-parts importer must register");
+        let snapshot = registry
+            .freeze(RegistryBuildLimits::default())
+            .expect("the scene-parts registry must freeze");
+        let request = snapshot
+            .compile_request(&ImportRequest::new(), OptionCompileLimits::default())
+            .expect("the scene-parts request must compile");
+        let result = crate::session::import_bytes(
+            &request,
+            AssetPath::new("asset.scene-parts").expect("valid test path"),
+            b"fixture",
+            ImportOperationControl::default(),
+        );
+        assert!(
+            result.is_ok(),
+            "scene-parts composition must remain importable"
+        );
+    }
+
+    #[test]
+    fn prepared_metadata_keeps_key_value_and_map_ownership_coupled() {
+        let mut registry = RegistryBuilder::new();
+        registry
+            .register(PreparedMetadataImporter)
+            .expect("the prepared-metadata importer must register");
+        let snapshot = registry
+            .freeze(RegistryBuildLimits::default())
+            .expect("the prepared-metadata registry must freeze");
+        let request = snapshot
+            .compile_request(&ImportRequest::new(), OptionCompileLimits::default())
+            .expect("the prepared-metadata request must compile");
+        let result = crate::session::import_bytes(
+            &request,
+            AssetPath::new("asset.prepared-metadata").expect("valid test path"),
+            b"fixture",
+            ImportOperationControl::default(),
+        );
+        assert!(
+            result.is_ok(),
+            "prepared metadata must retain its key and value reservations through publication"
+        );
+    }
+
+    #[test]
+    fn prepared_node_transfers_metered_payload_into_the_scene() {
+        let result = import_prepared_node(PreparedNodeCase::Success);
+        assert!(
+            result.is_ok(),
+            "a relationship-free prepared node must publish"
+        );
+    }
+
+    #[test]
+    fn prepared_node_rejects_every_preowned_relationship_without_leaking_storage() {
+        for case in [
+            PreparedNodeCase::PreownedParent,
+            PreparedNodeCase::PreownedChild,
+            PreparedNodeCase::PreownedMeshBinding,
+        ] {
+            let result = import_prepared_node(case);
+            assert!(
+                result.is_err(),
+                "a prepared node with a preowned relationship must fail"
+            );
+        }
+    }
+
+    #[allow(
+        clippy::result_large_err,
+        reason = "the test exercises the public terminal outcome without adding heap indirection"
+    )]
+    fn import_prepared_node(case: PreparedNodeCase) -> crate::ImportResult<crate::ImportReport> {
+        let mut registry = RegistryBuilder::new();
+        registry
+            .register(PreparedNodeImporter { case })
+            .expect("the prepared-node importer must register");
+        let snapshot = registry
+            .freeze(RegistryBuildLimits::default())
+            .expect("the prepared-node registry must freeze");
+        let request = snapshot
+            .compile_request(&ImportRequest::new(), OptionCompileLimits::default())
+            .expect("the prepared-node request must compile");
+        crate::session::import_bytes(
+            &request,
+            AssetPath::new("asset.prepared-node").expect("valid test path"),
+            b"fixture",
+            ImportOperationControl::default(),
+        )
     }
 
     #[test]
@@ -3571,7 +5984,7 @@ mod tests {
             Some(AssetLength::Exact(payload.len() as u64)),
         );
 
-        let (snapshot, reservations) = read_opened_asset(
+        let snapshot = read_opened_asset(
             &coordinator,
             opened,
             ImportLedgerPhase::PrimarySnapshot,
@@ -3582,9 +5995,8 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(snapshot, payload);
-        assert_eq!(reservations.len(), 2);
-        assert!(reservations.capacity() >= reservations.len());
+        assert_eq!(&*snapshot, payload.as_slice());
+        assert!(snapshot.capacity_bytes() >= payload.len() as u64);
         assert!(
             coordinator
                 .borrow()
@@ -3595,7 +6007,6 @@ mod tests {
         );
 
         drop(snapshot);
-        drop(reservations);
         assert_eq!(
             coordinator
                 .borrow()
@@ -3604,5 +6015,371 @@ mod tests {
                 .current_live_bytes(),
             0
         );
+    }
+
+    struct OwnedIterationDropProbe<'a> {
+        id: u8,
+        coordinator: &'a RefCell<ImportCoordinator>,
+        observations: &'a RefCell<Vec<(u8, bool)>>,
+    }
+
+    impl Drop for OwnedIterationDropProbe<'_> {
+        fn drop(&mut self) {
+            let capacity_is_live = self
+                .coordinator
+                .borrow()
+                .try_ledger_snapshot()
+                .expect("owned-iteration drop-order snapshot")
+                .dimension(ImportDimension::CanonicalOutputBytes)
+                .expect("canonical-output dimension")
+                .current_live_bytes()
+                > 0;
+            self.observations
+                .borrow_mut()
+                .push((self.id, capacity_is_live));
+        }
+    }
+
+    fn assert_owned_iteration_drop_observations(
+        observations: &RefCell<Vec<(u8, bool)>>,
+        coordinator: &RefCell<ImportCoordinator>,
+    ) {
+        let mut observations = observations.borrow().clone();
+        observations.sort_unstable_by_key(|(id, _)| *id);
+        assert_eq!(
+            observations,
+            vec![(0, true), (1, true), (2, true)],
+            "the current and remaining elements must all drop under the live capacity reservation"
+        );
+        assert_eq!(
+            coordinator
+                .borrow()
+                .try_ledger_snapshot()
+                .expect("released owned-iteration snapshot")
+                .current_live_bytes(),
+            0
+        );
+    }
+
+    #[test]
+    fn owned_iteration_error_drops_current_and_remaining_elements_before_capacity() {
+        let limits = ResourceLimits::default();
+        let coordinator = RefCell::new(ImportCoordinator::new(
+            ImportOperationControl::default(),
+            import_ledger_limits(&limits).expect("valid import ledger limits"),
+        ));
+        let terminal = RefCell::new(None);
+        let meter = StorageMeter {
+            coordinator: &coordinator,
+            terminal: &terminal,
+        };
+        let observations = RefCell::new(Vec::new());
+        let mut values = MeteredVec {
+            values: Vec::new(),
+            capacity: None,
+            meter,
+            class: ImportStorageClass::SceneConstruction,
+            resource: "owned-iteration-error",
+        };
+        for id in 0..3 {
+            values
+                .try_push(OwnedIterationDropProbe {
+                    id,
+                    coordinator: &coordinator,
+                    observations: &observations,
+                })
+                .expect("owned-iteration fixture capacity");
+        }
+
+        let result = values.try_for_each_owned(|probe| {
+            assert_eq!(probe.id, 0, "the first visitor call must inject failure");
+            Err::<(), _>("injected visitor failure")
+        });
+
+        assert_eq!(result, Err("injected visitor failure"));
+        assert_owned_iteration_drop_observations(&observations, &coordinator);
+    }
+
+    #[test]
+    fn owned_iteration_panic_drops_current_and_remaining_elements_before_capacity() {
+        let limits = ResourceLimits::default();
+        let coordinator = RefCell::new(ImportCoordinator::new(
+            ImportOperationControl::default(),
+            import_ledger_limits(&limits).expect("valid import ledger limits"),
+        ));
+        let terminal = RefCell::new(None);
+        let meter = StorageMeter {
+            coordinator: &coordinator,
+            terminal: &terminal,
+        };
+        let observations = RefCell::new(Vec::new());
+        let mut values = MeteredVec {
+            values: Vec::new(),
+            capacity: None,
+            meter,
+            class: ImportStorageClass::SceneConstruction,
+            resource: "owned-iteration-panic",
+        };
+        for id in 0..3 {
+            values
+                .try_push(OwnedIterationDropProbe {
+                    id,
+                    coordinator: &coordinator,
+                    observations: &observations,
+                })
+                .expect("owned-iteration fixture capacity");
+        }
+
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            let _ = values.try_for_each_owned(|probe| -> Result<(), ()> {
+                assert_eq!(probe.id, 0, "the first visitor call must inject panic");
+                panic!("injected owned-iteration visitor panic");
+            });
+        }));
+
+        assert!(result.is_err(), "the visitor panic must be observed");
+        assert_owned_iteration_drop_observations(&observations, &coordinator);
+    }
+
+    #[test]
+    fn reservation_merge_failure_preserves_both_payload_owners() {
+        let limits = ResourceLimits::default();
+        let coordinator = RefCell::new(ImportCoordinator::new(
+            ImportOperationControl::default(),
+            import_ledger_limits(&limits).expect("valid import ledger limits"),
+        ));
+        let mut target = SceneValueReservations::new();
+        let mut source = SceneValueReservations::new();
+        fill_reservation_inventory(&coordinator, &mut target);
+        fill_reservation_inventory(&coordinator, &mut source);
+        let target_before = reservation_inventory_state(&target);
+        let source_before = reservation_inventory_state(&source);
+        let live_before = coordinator
+            .borrow()
+            .try_ledger_snapshot()
+            .expect("pre-merge snapshot")
+            .current_live_bytes();
+        let mut calls = 0usize;
+
+        let failure = target
+            .try_merge_preserving(&mut source, "merge-failure-fixture", |_| {
+                calls += 1;
+                Err(ScopeAbortCause::Allocation {
+                    resource: "merge-failure-fixture",
+                })
+            })
+            .expect_err("the injected payload-lane admission must fail");
+
+        assert!(matches!(
+            failure,
+            ScopeAbortCause::Allocation {
+                resource: "merge-failure-fixture"
+            }
+        ));
+        assert_eq!(calls, 1);
+        assert_eq!(reservation_inventory_state(&target), target_before);
+        assert_eq!(reservation_inventory_state(&source), source_before);
+        assert_eq!(
+            coordinator
+                .borrow()
+                .try_ledger_snapshot()
+                .expect("post-merge snapshot")
+                .current_live_bytes(),
+            live_before
+        );
+
+        drop(target);
+        drop(source);
+        let ledger = coordinator
+            .into_inner()
+            .finish()
+            .expect("preserved merge owners must finalize cleanly");
+        assert_eq!(ledger.current_live_bytes(), 0);
+    }
+
+    #[test]
+    fn scene_parts_finalizer_drops_value_before_current_and_remaining_reservations_on_panic() {
+        struct FinalizationDropProbe<'a> {
+            coordinator: &'a RefCell<ImportCoordinator>,
+            observed_current_reservation: &'a std::cell::Cell<bool>,
+            observed_remaining_reservation: &'a std::cell::Cell<bool>,
+        }
+
+        impl Drop for FinalizationDropProbe<'_> {
+            fn drop(&mut self) {
+                let snapshot = self
+                    .coordinator
+                    .borrow()
+                    .try_ledger_snapshot()
+                    .expect("drop-order snapshot");
+                self.observed_current_reservation.set(
+                    snapshot
+                        .dimension(ImportDimension::DecodedTextBytes)
+                        .expect("decoded-text dimension")
+                        .current_live_bytes()
+                        == 7,
+                );
+                self.observed_remaining_reservation.set(
+                    snapshot
+                        .dimension(ImportDimension::LineIndexBytes)
+                        .expect("line-index dimension")
+                        .current_live_bytes()
+                        == 11,
+                );
+            }
+        }
+
+        fn entry_owner(
+            coordinator: &RefCell<ImportCoordinator>,
+            resource: &'static str,
+            phase: ImportLedgerPhase,
+            dimension: ImportDimension,
+            bytes: u64,
+        ) -> SceneValueReservations {
+            let mut entry = SceneValueReservations::new();
+            entry
+                .payload
+                .try_reserve(1, resource, |capacity_bytes| {
+                    reserve_test_storage(coordinator, capacity_bytes)
+                })
+                .expect("entry reservation capacity");
+            entry
+                .payload
+                .try_push_reserved(
+                    coordinator
+                        .borrow_mut()
+                        .checkpoint()
+                        .reserve(phase, dimension, bytes)
+                        .expect("entry payload reservation"),
+                )
+                .unwrap_or_else(|_| panic!("entry reservation slot"));
+            entry
+        }
+
+        let limits = ResourceLimits::default();
+        let coordinator = RefCell::new(ImportCoordinator::new(
+            ImportOperationControl::default(),
+            import_ledger_limits(&limits).expect("valid import ledger limits"),
+        ));
+        let terminal = RefCell::new(None);
+        let meter = StorageMeter {
+            coordinator: &coordinator,
+            terminal: &terminal,
+        };
+        let observed_current_reservation = std::cell::Cell::new(false);
+        let observed_remaining_reservation = std::cell::Cell::new(false);
+        let parts = SceneValueParts {
+            value: Some(FinalizationDropProbe {
+                coordinator: &coordinator,
+                observed_current_reservation: &observed_current_reservation,
+                observed_remaining_reservation: &observed_remaining_reservation,
+            }),
+            reservations: SceneValueReservations::new(),
+            meter,
+        };
+        let remaining_entry = entry_owner(
+            &coordinator,
+            "finalizer-remaining-entry-capacity",
+            ImportLedgerPhase::FormatNormalization,
+            ImportDimension::LineIndexBytes,
+            11,
+        );
+        let current_entry = entry_owner(
+            &coordinator,
+            "finalizer-current-entry-capacity",
+            ImportLedgerPhase::BackendDecode,
+            ImportDimension::DecodedTextBytes,
+            7,
+        );
+        let mut entries = MeteredVec {
+            values: Vec::new(),
+            capacity: None,
+            meter,
+            class: ImportStorageClass::SceneConstruction,
+            resource: "finalizer-entry-owners",
+        };
+        entries
+            .try_push(remaining_entry)
+            .expect("remaining entry owner capacity");
+        entries
+            .try_push(current_entry)
+            .expect("current entry owner capacity");
+
+        PANIC_NEXT_SCENE_PARTS_FINALIZATION.with(|fault| fault.set(true));
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            let _ = ScenePartsReservationFinalizer {
+                parts,
+                current: None,
+                entries,
+            }
+            .try_finish();
+        }));
+        assert!(result.is_err(), "the finalization panic must be injected");
+        assert!(
+            observed_current_reservation.get(),
+            "the canonical value must drop while the current entry reservation is still live"
+        );
+        assert!(
+            observed_remaining_reservation.get(),
+            "the canonical value must drop while the remaining entry reservation is still live"
+        );
+        assert_eq!(
+            coordinator
+                .borrow()
+                .try_ledger_snapshot()
+                .expect("released finalizer snapshot")
+                .current_live_bytes(),
+            0
+        );
+    }
+
+    #[test]
+    fn dedup_partition_defers_duplicate_drops_to_the_caller() {
+        struct DedupDropProbe<'a> {
+            key: u8,
+            drops: &'a std::cell::Cell<usize>,
+        }
+
+        impl Drop for DedupDropProbe<'_> {
+            fn drop(&mut self) {
+                self.drops.set(self.drops.get() + 1);
+            }
+        }
+
+        let limits = ResourceLimits::default();
+        let coordinator = RefCell::new(ImportCoordinator::new(
+            ImportOperationControl::default(),
+            import_ledger_limits(&limits).expect("valid import ledger limits"),
+        ));
+        let terminal = RefCell::new(None);
+        let meter = StorageMeter {
+            coordinator: &coordinator,
+            terminal: &terminal,
+        };
+        let drops = std::cell::Cell::new(0usize);
+        let mut values = MeteredVec {
+            values: Vec::new(),
+            capacity: None,
+            meter,
+            class: ImportStorageClass::FormatNormalization,
+            resource: "dedup-partition",
+        };
+        for key in [1, 1, 2, 2] {
+            values
+                .try_push(DedupDropProbe { key, drops: &drops })
+                .expect("dedup fixture capacity");
+        }
+
+        let retained = values
+            .try_partition_dedup_by(|left, right| Ok::<_, ()>(left.key == right.key))
+            .expect("dedup comparison");
+        assert_eq!(retained, 2);
+        assert_eq!(values.len(), 4);
+        assert_eq!(drops.get(), 0, "partitioning must not run destructors");
+
+        values.truncate(retained);
+        assert_eq!(drops.get(), 2);
+        drop(values);
+        assert_eq!(drops.get(), 4);
     }
 }

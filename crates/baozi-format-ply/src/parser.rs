@@ -1,13 +1,15 @@
-use crate::allocation::{LiveStorage, decimal_digits};
 use crate::{PlyFailure, PlyFailureCode};
 use baozi_core::{
-    Aabb, Color, Mesh, MeshBinding, MetadataMap, MetadataValue, Node, PrimitiveTopology,
-    SceneDraft, Vec2, Vec3, VertexAttribute, VertexAttributeData, VertexAttributeSemantic,
+    Aabb, Color, Mat4, MeshBinding, PrimitiveTopology, SceneDraft, Vec2, Vec3, VertexAttribute,
+    VertexAttributeData,
 };
 use baozi_import::{
     DiagnosticByteRange, DiagnosticCode, DiagnosticSeverity, ImportProgressPhase,
-    ImportStorageClass, ImportWorkClass, ParseFailure, ParseResult, ParseScope,
+    ImportStorageClass, ImportWorkClass, MeshBuildConfig, MeteredMetadataMap, MeteredSceneVec,
+    MeteredString, MeteredVec, NodeBuildConfig, ParseFailure, ParseResult, ParseScope,
+    SceneValueParts,
 };
+use std::cell::RefCell;
 use std::fmt;
 
 const SCAN_QUANTUM: usize = 4 * 1024;
@@ -56,50 +58,58 @@ enum ScalarType {
     F64,
 }
 
-#[derive(Debug, Clone)]
-enum Property {
+enum Property<'scope> {
     Scalar {
-        name: String,
+        name: MeteredString<'scope>,
         ty: ScalarType,
         custom_attribute: Option<usize>,
         source_offset: usize,
     },
     List {
-        name: String,
+        name: MeteredString<'scope>,
         count_ty: ScalarType,
         item_ty: ScalarType,
         source_offset: usize,
     },
 }
 
-#[derive(Debug, Clone)]
-struct Element {
-    name: String,
+struct Element<'scope> {
+    name: MeteredString<'scope>,
     count: usize,
-    properties: Vec<Property>,
+    properties: MeteredVec<'scope, Property<'scope>>,
+    next_custom_attribute: usize,
     source_offset: usize,
 }
 
 struct Header<'scope> {
     format: PlyFormat,
-    elements: Vec<Element>,
-    comments: Vec<String>,
-    obj_infos: Vec<String>,
+    elements: MeteredVec<'scope, Element<'scope>>,
+    comments: MeteredVec<'scope, MeteredString<'scope>>,
+    obj_infos: MeteredVec<'scope, MeteredString<'scope>>,
     data_start: usize,
-    _storage: LiveStorage<'scope>,
 }
 
 struct ParsedPly<'scope> {
-    positions: Vec<Vec3>,
-    normals: Vec<Vec3>,
-    texcoords: Vec<Vec2>,
-    colors: Vec<Color>,
-    indices: Vec<u32>,
-    face_vertex_counts: Vec<u32>,
+    positions: MeteredVec<'scope, Vec3>,
+    normals: MeteredVec<'scope, Vec3>,
+    texcoords: MeteredVec<'scope, Vec2>,
+    colors: MeteredVec<'scope, Color>,
+    indices: MeteredVec<'scope, u32>,
+    face_vertex_counts: MeteredVec<'scope, u32>,
     has_polygon: bool,
-    custom_attributes: Vec<VertexAttribute>,
-    storage: LiveStorage<'scope>,
-    face_count_storage: LiveStorage<'scope>,
+    custom_attributes: MeteredVec<'scope, CustomAttributeAccumulator<'scope>>,
+}
+
+struct CustomAttributeAccumulator<'scope> {
+    name: MeteredString<'scope>,
+    semantic: MeteredString<'scope>,
+    data: RefCell<CustomAttributeData<'scope>>,
+}
+
+enum CustomAttributeData<'scope> {
+    F32(MeteredVec<'scope, f32>),
+    U32(MeteredVec<'scope, u32>),
+    I32(MeteredVec<'scope, i32>),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -117,13 +127,12 @@ struct VertexPropertyProfile {
 }
 
 struct ProfiledAsciiLine<'scope> {
-    value: String,
-    _storage: LiveStorage<'scope>,
+    value: MeteredString<'scope>,
 }
 
 impl ProfiledAsciiLine<'_> {
     fn as_str(&self) -> &str {
-        &self.value
+        self.value.as_str()
     }
 }
 
@@ -155,11 +164,19 @@ fn parse_header<'scope>(ctx: &'scope ParseScope<'_>, bytes: &[u8]) -> ParseResul
     drop(first);
 
     let mut format = None;
-    let mut elements = Vec::new();
-    let mut current_element: Option<Element> = None;
-    let mut comments = Vec::new();
-    let mut obj_infos = Vec::new();
-    let mut storage = LiveStorage::new(ImportStorageClass::FormatNormalization);
+    let mut elements = ctx.metered_vec(
+        ImportStorageClass::FormatNormalization,
+        "ply-header-elements",
+    );
+    let mut current_element: Option<Element<'scope>> = None;
+    let mut comments = ctx.metered_vec(
+        ImportStorageClass::FormatNormalization,
+        "ply-header-comments",
+    );
+    let mut obj_infos = ctx.metered_vec(
+        ImportStorageClass::FormatNormalization,
+        "ply-header-obj-infos",
+    );
     let mut saw_vertex_element = false;
     let mut saw_face_element = false;
 
@@ -190,21 +207,18 @@ fn parse_header<'scope>(ctx: &'scope ParseScope<'_>, bytes: &[u8]) -> ParseResul
         }
         if line.as_str() == "end_header" {
             if let Some(element) = current_element.take() {
-                storage.reserve_vec(ctx, &mut elements, 1, "ply-header-elements")?;
-                elements.push(element);
+                elements.try_push(element)?;
             }
             break;
         }
         if let Some(comment) = line.as_str().strip_prefix("comment ") {
-            let comment = bounded_string(ctx, &mut storage, comment, "comment")?;
-            storage.reserve_vec(ctx, &mut comments, 1, "ply-header-comments")?;
-            comments.push(comment);
+            let comment = bounded_string(ctx, comment, "comment")?;
+            comments.try_push(comment)?;
             continue;
         }
         if let Some(info) = line.as_str().strip_prefix("obj_info ") {
-            let info = bounded_string(ctx, &mut storage, info, "obj_info")?;
-            storage.reserve_vec(ctx, &mut obj_infos, 1, "ply-header-obj-infos")?;
-            obj_infos.push(info);
+            let info = bounded_string(ctx, info, "obj_info")?;
+            obj_infos.try_push(info)?;
             continue;
         }
         let tokens = checked_tokens(ctx, line.as_str())?;
@@ -245,8 +259,7 @@ fn parse_header<'scope>(ctx: &'scope ParseScope<'_>, bytes: &[u8]) -> ParseResul
             }
             ["element", name, count] => {
                 if let Some(element) = current_element.take() {
-                    storage.reserve_vec(ctx, &mut elements, 1, "ply-header-elements")?;
-                    elements.push(element);
+                    elements.try_push(element)?;
                 }
                 let count = parse_count(ctx, count, line_offset)?;
                 match *name {
@@ -287,9 +300,13 @@ fn parse_header<'scope>(ctx: &'scope ParseScope<'_>, bytes: &[u8]) -> ParseResul
                     _ => {}
                 }
                 current_element = Some(Element {
-                    name: bounded_string(ctx, &mut storage, name, "element name")?,
+                    name: bounded_string(ctx, name, "element name")?,
                     count,
-                    properties: Vec::new(),
+                    properties: ctx.metered_vec(
+                        ImportStorageClass::FormatNormalization,
+                        "ply-header-properties",
+                    ),
+                    next_custom_attribute: 0,
                     source_offset: line_offset,
                 });
             }
@@ -303,13 +320,12 @@ fn parse_header<'scope>(ctx: &'scope ParseScope<'_>, bytes: &[u8]) -> ParseResul
                     ));
                 };
                 let property = Property::List {
-                    name: bounded_string(ctx, &mut storage, name, "property name")?,
+                    name: bounded_string(ctx, name, "property name")?,
                     count_ty: parse_scalar_type(ctx, count_ty, line_offset)?,
                     item_ty: parse_scalar_type(ctx, item_ty, line_offset)?,
                     source_offset: line_offset,
                 };
-                storage.reserve_vec(ctx, &mut element.properties, 1, "ply-header-properties")?;
-                element.properties.push(property);
+                element.properties.try_push(property)?;
             }
             ["property", ty, name] => {
                 let Some(element) = current_element.as_mut() else {
@@ -320,14 +336,29 @@ fn parse_header<'scope>(ctx: &'scope ParseScope<'_>, bytes: &[u8]) -> ParseResul
                         "PLY property appeared before an element",
                     ));
                 };
+                let name = bounded_string(ctx, name, "property name")?;
+                let custom_attribute = if element.name.as_str() == "vertex"
+                    && !is_builtin_vertex_property(name.as_str())
+                {
+                    let slot = element.next_custom_attribute;
+                    element.next_custom_attribute = slot.checked_add(1).ok_or_else(|| {
+                        resource_limit_failure(
+                            ctx,
+                            "max_vertex_attribute_streams_per_mesh",
+                            ctx.limits().max_vertex_attribute_streams_per_mesh,
+                        )
+                    })?;
+                    Some(slot)
+                } else {
+                    None
+                };
                 let property = Property::Scalar {
-                    name: bounded_string(ctx, &mut storage, name, "property name")?,
+                    name,
                     ty: parse_scalar_type(ctx, ty, line_offset)?,
-                    custom_attribute: None,
+                    custom_attribute,
                     source_offset: line_offset,
                 };
-                storage.reserve_vec(ctx, &mut element.properties, 1, "ply-header-properties")?;
-                element.properties.push(property);
+                element.properties.try_push(property)?;
             }
             _ => {
                 return Err(format_failure(
@@ -341,8 +372,7 @@ fn parse_header<'scope>(ctx: &'scope ParseScope<'_>, bytes: &[u8]) -> ParseResul
         }
     }
 
-    bind_custom_attribute_slots(ctx, &mut elements)?;
-    validate_face_topology_schemas(ctx, &elements)?;
+    validate_face_topology_schemas(ctx, elements.as_slice())?;
 
     let format = format.ok_or_else(|| {
         ply_parse_error(
@@ -353,11 +383,11 @@ fn parse_header<'scope>(ctx: &'scope ParseScope<'_>, bytes: &[u8]) -> ParseResul
         )
     })?;
     if format != PlyFormat::Ascii {
-        validate_binary_record_schema(ctx, &elements)?;
+        validate_binary_record_schema(ctx, elements.as_slice())?;
     }
-    validate_record_budget(ctx, &elements)?;
+    validate_record_budget(ctx, elements.as_slice())?;
     if format != PlyFormat::Ascii {
-        validate_binary_minimum_payload(ctx, bytes, offset, &elements)?;
+        validate_binary_minimum_payload(ctx, bytes, offset, elements.as_slice())?;
     }
 
     Ok(Header {
@@ -366,58 +396,18 @@ fn parse_header<'scope>(ctx: &'scope ParseScope<'_>, bytes: &[u8]) -> ParseResul
         comments,
         obj_infos,
         data_start: offset,
-        _storage: storage,
     })
-}
-
-fn bind_custom_attribute_slots(ctx: &ParseScope<'_>, elements: &mut [Element]) -> ParseResult<()> {
-    let mut vertex = None;
-    for (element_index, element) in elements.iter_mut().enumerate() {
-        poll_collection(ctx, element_index)?;
-        if element.name == "vertex" {
-            vertex = Some(element);
-            break;
-        }
-    }
-    let Some(vertex) = vertex else {
-        return Ok(());
-    };
-
-    let mut next_slot = 0usize;
-    for (property_index, property) in vertex.properties.iter_mut().enumerate() {
-        poll_collection(ctx, property_index)?;
-        let Property::Scalar {
-            name,
-            custom_attribute,
-            ..
-        } = property
-        else {
-            continue;
-        };
-        if is_builtin_vertex_property(name) {
-            continue;
-        }
-        *custom_attribute = Some(next_slot);
-        next_slot = next_slot.checked_add(1).ok_or_else(|| {
-            resource_limit_failure(
-                ctx,
-                "max_vertex_attribute_streams_per_mesh",
-                ctx.limits().max_vertex_attribute_streams_per_mesh,
-            )
-        })?;
-    }
-    Ok(())
 }
 
 fn validate_face_topology_schemas(ctx: &ParseScope<'_>, elements: &[Element]) -> ParseResult<()> {
     for (element_index, element) in elements.iter().enumerate() {
         poll_collection(ctx, element_index)?;
-        if element.name != "face" {
+        if element.name.as_str() != "face" {
             continue;
         }
         let mut topology_properties = 0usize;
         let mut topology_types = None;
-        for (property_index, property) in element.properties.iter().enumerate() {
+        for (property_index, property) in element.properties.as_slice().iter().enumerate() {
             poll_collection(ctx, property_index)?;
             let Property::List {
                 name,
@@ -428,7 +418,7 @@ fn validate_face_topology_schemas(ctx: &ParseScope<'_>, elements: &[Element]) ->
             else {
                 continue;
             };
-            if name != "vertex_indices" && name != "vertex_index" {
+            if name.as_str() != "vertex_indices" && name.as_str() != "vertex_index" {
                 continue;
             }
             topology_properties = topology_properties.checked_add(1).ok_or_else(|| {
@@ -511,7 +501,7 @@ fn validate_binary_minimum_payload(
     for (element_index, element) in elements.iter().enumerate() {
         poll_collection(ctx, element_index)?;
         let mut minimum_record_bytes = 0usize;
-        for (property_index, property) in element.properties.iter().enumerate() {
+        for (property_index, property) in element.properties.as_slice().iter().enumerate() {
             poll_collection(ctx, property_index)?;
             let property_bytes = match property {
                 Property::Scalar { ty, .. } => scalar_width(*ty),
@@ -562,11 +552,11 @@ fn scalar_width(ty: ScalarType) -> usize {
 fn parse_body<'scope>(
     ctx: &'scope ParseScope<'_>,
     bytes: &[u8],
-    header: &Header<'_>,
+    header: &Header<'scope>,
 ) -> ParseResult<ParsedPly<'scope>> {
     let mut vertex_element = None;
     let mut face_count = 0usize;
-    for (element_index, element) in header.elements.iter().enumerate() {
+    for (element_index, element) in header.elements.as_slice().iter().enumerate() {
         poll_collection(ctx, element_index)?;
         match element.name.as_str() {
             "vertex" => vertex_element = Some(element),
@@ -601,42 +591,35 @@ fn parse_body<'scope>(
     let vertex_count = vertex_element.count;
     let vertex_profile = vertex_property_profile(ctx, vertex_element)?;
     validate_vertex_attribute_budget(ctx, vertex_count, vertex_profile.stream_count)?;
-    let mut storage = LiveStorage::new(ImportStorageClass::SceneConstruction);
-    let mut positions = Vec::new();
-    storage.reserve_vec(ctx, &mut positions, vertex_count, "ply-positions")?;
-    let mut normals = Vec::new();
+    let mut positions = ctx.metered_vec(ImportStorageClass::SceneConstruction, "ply-positions");
+    positions.try_reserve(vertex_count)?;
+    let mut normals = ctx.metered_vec(ImportStorageClass::SceneConstruction, "ply-normals");
     let channels = vertex_profile.channels;
     if channels.normals {
-        storage.reserve_vec(ctx, &mut normals, vertex_count, "ply-normals")?;
+        normals.try_reserve(vertex_count)?;
     }
-    let mut texcoords = Vec::new();
+    let mut texcoords = ctx.metered_vec(ImportStorageClass::SceneConstruction, "ply-texcoords");
     if channels.texcoords {
-        storage.reserve_vec(ctx, &mut texcoords, vertex_count, "ply-texcoords")?;
+        texcoords.try_reserve(vertex_count)?;
     }
-    let mut colors = Vec::new();
+    let mut colors = ctx.metered_vec(ImportStorageClass::SceneConstruction, "ply-colors");
     if channels.colors {
-        storage.reserve_vec(ctx, &mut colors, vertex_count, "ply-colors")?;
+        colors.try_reserve(vertex_count)?;
     }
-    let mut face_count_storage = LiveStorage::new(ImportStorageClass::SceneConstruction);
-    let mut face_vertex_counts = Vec::new();
-    face_count_storage.reserve_vec(ctx, &mut face_vertex_counts, face_count, "ply-face-counts")?;
-    let custom_attributes = custom_accumulators(
-        ctx,
-        vertex_element,
-        vertex_profile.custom_scalar_count,
-        &mut storage,
-    )?;
+    let mut face_vertex_counts =
+        ctx.metered_vec(ImportStorageClass::SceneConstruction, "ply-face-counts");
+    face_vertex_counts.try_reserve(face_count)?;
+    let custom_attributes =
+        custom_accumulators(ctx, vertex_element, vertex_profile.custom_scalar_count)?;
     let mut parsed = ParsedPly {
         positions,
         normals,
         texcoords,
         colors,
-        indices: Vec::new(),
+        indices: ctx.metered_vec(ImportStorageClass::SceneConstruction, "ply-indices"),
         face_vertex_counts,
         has_polygon: false,
         custom_attributes,
-        storage,
-        face_count_storage,
     };
 
     match header.format {
@@ -655,7 +638,7 @@ fn parse_ascii_body<'scope>(
     parsed: &mut ParsedPly<'scope>,
 ) -> ParseResult<()> {
     let mut offset = header.data_start;
-    for (element_index, element) in header.elements.iter().enumerate() {
+    for (element_index, element) in header.elements.as_slice().iter().enumerate() {
         poll_collection(ctx, element_index)?;
         warn_for_element_schema(ctx, element)?;
         for record_index in 0..element.count {
@@ -680,7 +663,7 @@ fn parse_ascii_body<'scope>(
             )?;
             let mut cursor = AsciiRow::new(text.as_str(), line_offset);
             parse_row(ctx, element, &mut cursor, parsed)?;
-            cursor.finish(ctx, &element.name)?;
+            cursor.finish(ctx, element.name.as_str())?;
             record.complete()?;
         }
     }
@@ -695,7 +678,7 @@ fn parse_binary_body<'scope>(
     parsed: &mut ParsedPly<'scope>,
 ) -> ParseResult<()> {
     let mut cursor = BinaryCursor::new(bytes, header.data_start, big_endian);
-    for (element_index, element) in header.elements.iter().enumerate() {
+    for (element_index, element) in header.elements.as_slice().iter().enumerate() {
         poll_collection(ctx, element_index)?;
         warn_for_element_schema(ctx, element)?;
         for record_index in 0..element.count {
@@ -714,11 +697,11 @@ fn parse_row<'scope>(
     reader: &mut dyn RowReader,
     parsed: &mut ParsedPly<'scope>,
 ) -> ParseResult<()> {
-    if element.name == "vertex" {
+    if element.name.as_str() == "vertex" {
         let vertex = ctx.begin_work(ImportWorkClass::Vertices, 1)?;
         parse_vertex_row(ctx, element, reader, parsed)?;
         vertex.complete()
-    } else if element.name == "face" {
+    } else if element.name.as_str() == "face" {
         let face = ctx.begin_work(ImportWorkClass::Faces, 1)?;
         parse_face_row(ctx, element, reader, parsed)?;
         face.complete()
@@ -739,7 +722,7 @@ fn warn_for_element_schema(ctx: &ParseScope<'_>, element: &Element) -> ParseResu
             ctx,
             "ply.element_ignored",
             Some(element.source_offset),
-            format_args!("PLY element '{}' was ignored", element.name),
+            format_args!("PLY element '{}' was ignored", element.name.as_str()),
         ),
     }
 }
@@ -754,7 +737,7 @@ fn warn_for_vertex_schema(ctx: &ParseScope<'_>, element: &Element) -> ParseResul
     let mut has_green = false;
     let mut has_blue = false;
 
-    for (property_index, property) in element.properties.iter().enumerate() {
+    for (property_index, property) in element.properties.as_slice().iter().enumerate() {
         poll_collection(ctx, property_index)?;
         match property {
             Property::Scalar { name, .. } => match name.as_str() {
@@ -776,7 +759,7 @@ fn warn_for_vertex_schema(ctx: &ParseScope<'_>, element: &Element) -> ParseResul
                 ctx,
                 "ply.vertex_list_property_ignored",
                 Some(*source_offset),
-                format_args!("PLY vertex list property '{name}' was ignored"),
+                format_args!("PLY vertex list property '{}' was ignored", name.as_str()),
             )?,
         }
     }
@@ -826,7 +809,7 @@ fn vertex_property_profile(
     let mut has_blue = false;
     let mut custom_scalar_count = 0usize;
 
-    for (property_index, property) in element.properties.iter().enumerate() {
+    for (property_index, property) in element.properties.as_slice().iter().enumerate() {
         poll_collection(ctx, property_index)?;
         let Property::Scalar {
             name,
@@ -891,10 +874,11 @@ fn vertex_property_profile(
 }
 
 fn warn_for_face_schema(ctx: &ParseScope<'_>, element: &Element) -> ParseResult<()> {
-    for (property_index, property) in element.properties.iter().enumerate() {
+    for (property_index, property) in element.properties.as_slice().iter().enumerate() {
         poll_collection(ctx, property_index)?;
         match property {
-            Property::List { name, .. } if name == "vertex_indices" || name == "vertex_index" => {}
+            Property::List { name, .. }
+                if name.as_str() == "vertex_indices" || name.as_str() == "vertex_index" => {}
             Property::List {
                 name,
                 source_offset,
@@ -903,7 +887,7 @@ fn warn_for_face_schema(ctx: &ParseScope<'_>, element: &Element) -> ParseResult<
                 ctx,
                 "ply.face_list_property_ignored",
                 Some(*source_offset),
-                format_args!("PLY face list property '{name}' was ignored"),
+                format_args!("PLY face list property '{}' was ignored", name.as_str()),
             )?,
             Property::Scalar {
                 name,
@@ -913,7 +897,7 @@ fn warn_for_face_schema(ctx: &ParseScope<'_>, element: &Element) -> ParseResult<
                 ctx,
                 "ply.face_scalar_property_ignored",
                 Some(*source_offset),
-                format_args!("PLY face scalar property '{name}' was ignored"),
+                format_args!("PLY face scalar property '{}' was ignored", name.as_str()),
             )?,
         }
     }
@@ -939,7 +923,7 @@ fn parse_vertex_row<'scope>(
     let mut blue = None;
     let mut alpha = None;
 
-    for (property_index, property) in element.properties.iter().enumerate() {
+    for (property_index, property) in element.properties.as_slice().iter().enumerate() {
         poll_collection(ctx, property_index)?;
         match property {
             Property::Scalar {
@@ -956,12 +940,18 @@ fn parse_vertex_row<'scope>(
                     "nx" => nx = Some(value.to_f32(ctx, "nx")?),
                     "ny" => ny = Some(value.to_f32(ctx, "ny")?),
                     "nz" => nz = Some(value.to_f32(ctx, "nz")?),
-                    "s" | "u" | "texture_u" => s = Some(value.to_f32(ctx, name)?),
-                    "t" | "v" | "texture_v" => t = Some(value.to_f32(ctx, name)?),
-                    "red" | "r" => red = Some(value.to_color_component(ctx, *ty, name)?),
-                    "green" | "g" => green = Some(value.to_color_component(ctx, *ty, name)?),
-                    "blue" | "b" => blue = Some(value.to_color_component(ctx, *ty, name)?),
-                    "alpha" | "a" => alpha = Some(value.to_color_component(ctx, *ty, name)?),
+                    "s" | "u" | "texture_u" => s = Some(value.to_f32(ctx, name.as_str())?),
+                    "t" | "v" | "texture_v" => t = Some(value.to_f32(ctx, name.as_str())?),
+                    "red" | "r" => red = Some(value.to_color_component(ctx, *ty, name.as_str())?),
+                    "green" | "g" => {
+                        green = Some(value.to_color_component(ctx, *ty, name.as_str())?)
+                    }
+                    "blue" | "b" => {
+                        blue = Some(value.to_color_component(ctx, *ty, name.as_str())?)
+                    }
+                    "alpha" | "a" => {
+                        alpha = Some(value.to_color_component(ctx, *ty, name.as_str())?)
+                    }
                     _ => {
                         let Some(attribute_index) = *custom_attribute else {
                             return Err(format_failure(
@@ -972,7 +962,7 @@ fn parse_vertex_row<'scope>(
                                 Some("custom-attribute-slot"),
                             ));
                         };
-                        push_custom_scalar(ctx, parsed, attribute_index, name, value)?;
+                        push_custom_scalar(ctx, parsed, attribute_index, name.as_str(), value)?;
                     }
                 }
             }
@@ -997,15 +987,15 @@ fn parse_vertex_row<'scope>(
             "PLY vertex position contains a non-finite value",
         ));
     }
-    parsed.positions.push(position);
+    parsed.positions.try_push(position)?;
 
     match (nx, ny, nz) {
-        (Some(nx), Some(ny), Some(nz)) => parsed.normals.push(Vec3::new(nx, ny, nz)),
+        (Some(nx), Some(ny), Some(nz)) => parsed.normals.try_push(Vec3::new(nx, ny, nz))?,
         (None, None, None) => {}
         _ => {}
     }
     match (s, t) {
-        (Some(s), Some(t)) => parsed.texcoords.push(Vec2::new(s, t)),
+        (Some(s), Some(t)) => parsed.texcoords.try_push(Vec2::new(s, t))?,
         (None, None) => {}
         _ => {}
     }
@@ -1013,7 +1003,7 @@ fn parse_vertex_row<'scope>(
         (Some(red), Some(green), Some(blue)) => {
             parsed
                 .colors
-                .push(Color::linear_rgba(red, green, blue, alpha.unwrap_or(1.0)))
+                .try_push(Color::linear_rgba(red, green, blue, alpha.unwrap_or(1.0)))?
         }
         (None, None, None) => {}
         _ => {}
@@ -1028,7 +1018,7 @@ fn parse_face_row<'scope>(
     parsed: &mut ParsedPly<'scope>,
 ) -> ParseResult<()> {
     let mut found_vertices = false;
-    for (property_index, property) in element.properties.iter().enumerate() {
+    for (property_index, property) in element.properties.as_slice().iter().enumerate() {
         poll_collection(ctx, property_index)?;
         match property {
             Property::List {
@@ -1036,7 +1026,7 @@ fn parse_face_row<'scope>(
                 count_ty,
                 item_ty,
                 ..
-            } if name == "vertex_indices" || name == "vertex_index" => {
+            } if name.as_str() == "vertex_indices" || name.as_str() == "vertex_index" => {
                 found_vertices = true;
                 let count = read_list_count(ctx, reader, *count_ty)?;
                 if count < 3 {
@@ -1087,15 +1077,8 @@ fn parse_face_row<'scope>(
                     ctx.limits().max_total_topology_cells,
                     ImportWorkClass::TopologyCells,
                 )?;
-                parsed.face_count_storage.reserve_vec(
-                    ctx,
-                    &mut parsed.face_vertex_counts,
-                    1,
-                    "ply-face-counts",
-                )?;
-                parsed
-                    .storage
-                    .reserve_vec(ctx, &mut parsed.indices, count, "ply-indices")?;
+                parsed.face_vertex_counts.try_reserve(1)?;
+                parsed.indices.try_reserve(count)?;
                 let face_count_cells = if !was_polygon && count != 3 {
                     next_face_counts
                 } else if was_polygon {
@@ -1114,13 +1097,15 @@ fn parse_face_row<'scope>(
                     ImportWorkClass::TopologyCells,
                     usize_amount(ctx, charged_cells, "ply-topology-cells")?,
                 )?;
-                parsed.face_vertex_counts.push(count as u32);
+                parsed.face_vertex_counts.try_push(count as u32)?;
                 for position in 0..count {
                     if position.is_multiple_of(4096) {
                         ctx.poll()?;
                     }
-                    let index = reader.read_scalar(ctx, *item_ty)?.to_u32(ctx, name)?;
-                    parsed.indices.push(index);
+                    let index = reader
+                        .read_scalar(ctx, *item_ty)?
+                        .to_u32(ctx, name.as_str())?;
+                    parsed.indices.try_push(index)?;
                 }
                 parsed.has_polygon = has_polygon;
                 topology.complete()?;
@@ -1151,7 +1136,7 @@ fn skip_unknown_row(
     element: &Element,
     reader: &mut dyn RowReader,
 ) -> ParseResult<()> {
-    for (property_index, property) in element.properties.iter().enumerate() {
+    for (property_index, property) in element.properties.as_slice().iter().enumerate() {
         poll_collection(ctx, property_index)?;
         match property {
             Property::Scalar { ty, .. } => {
@@ -1213,7 +1198,7 @@ fn scene_from_parsed<'scope>(
         ImportWorkClass::WorkUnits,
         usize_amount(ctx, parsed.indices.len(), "ply-index-validation-work")?,
     )?;
-    for (position, index) in parsed.indices.iter().enumerate() {
+    for (position, index) in parsed.indices.as_slice().iter().enumerate() {
         if position.is_multiple_of(4096) {
             ctx.poll()?;
         }
@@ -1257,18 +1242,16 @@ fn scene_from_parsed<'scope>(
         ctx.limits().max_total_topology_cells,
         ImportWorkClass::TopologyCells,
     )?;
-    let bounds = compute_bounds(ctx, &parsed.positions)?;
+    let bounds = compute_bounds(ctx, parsed.positions.as_slice())?;
 
     let canonical_string_bytes = canonical_string_bytes(ctx, &header)?;
     let canonical_strings = ctx.begin_work(
         ImportWorkClass::CanonicalStringBytes,
         usize_amount(ctx, canonical_string_bytes, "ply-canonical-string-bytes")?,
     )?;
-    let mut mesh_storage = LiveStorage::new(ImportStorageClass::SceneConstruction);
-    let mut metadata = MetadataMap::new();
+    let mut metadata = ctx.metered_metadata_map("ply-metadata-entry");
     insert_string_metadata(
         ctx,
-        &mut mesh_storage,
         &mut metadata,
         "ply:format",
         match header.format {
@@ -1277,36 +1260,25 @@ fn scene_from_parsed<'scope>(
             PlyFormat::BinaryBigEndian => "binary_big_endian",
         },
     )?;
-    insert_string_metadata(
-        ctx,
-        &mut mesh_storage,
-        &mut metadata,
-        "ply:source",
-        ctx.source().as_str(),
-    )?;
-    for (index, comment) in header.comments.iter().enumerate() {
+    insert_string_metadata(ctx, &mut metadata, "ply:source", ctx.source().as_str())?;
+    for (index, comment) in header.comments.as_slice().iter().enumerate() {
         poll_collection(ctx, index)?;
         insert_indexed_string_metadata(
             ctx,
-            &mut mesh_storage,
             &mut metadata,
             "ply:comment.",
             index,
-            comment,
+            comment.as_str(),
         )?;
     }
-    for (index, info) in header.obj_infos.iter().enumerate() {
+    for (index, info) in header.obj_infos.as_slice().iter().enumerate() {
         poll_collection(ctx, index)?;
-        insert_indexed_string_metadata(
-            ctx,
-            &mut mesh_storage,
-            &mut metadata,
-            "ply:obj_info.",
-            index,
-            info,
-        )?;
+        insert_indexed_string_metadata(ctx, &mut metadata, "ply:obj_info.", index, info.as_str())?;
     }
-    let mesh_name = mesh_storage.copy_string(ctx, "PLY Mesh", "ply-mesh-name")?;
+    let mut mesh_name = ctx.metered_string(ImportStorageClass::SceneConstruction, "ply-mesh-name");
+    mesh_name.try_push_str("PLY Mesh")?;
+    let mut node_name = ctx.metered_string(ImportStorageClass::SceneConstruction, "ply-node-name");
+    node_name.try_push_str("PLY")?;
     canonical_strings.complete()?;
     drop(header);
 
@@ -1318,60 +1290,55 @@ fn scene_from_parsed<'scope>(
         indices,
         face_vertex_counts,
         custom_attributes,
-        storage,
-        face_count_storage,
         ..
     } = parsed;
     let face_vertex_counts = if keep_face_counts {
-        face_vertex_counts
+        face_vertex_counts.try_into_scene_parts()?
     } else {
-        Vec::new()
+        drop(face_vertex_counts);
+        ctx.metered_vec::<u32>(ImportStorageClass::SceneConstruction, "ply-face-counts")
+            .try_into_scene_parts()?
     };
-    let face_count_storage = keep_face_counts.then_some(face_count_storage);
-    let texcoords =
-        optional_nested_stream(ctx, &mut mesh_storage, texcoords, "ply-texcoord-streams")?;
-    let colors = optional_nested_stream(ctx, &mut mesh_storage, colors, "ply-color-streams")?;
-    let mesh = Mesh {
-        name: Some(mesh_name),
-        topology,
-        positions,
-        normals: optional_stream(normals),
-        texcoords,
-        colors,
-        indices,
-        face_vertex_counts,
-        custom_attributes,
-        bounds,
-        metadata,
-        ..Mesh::default()
-    };
+    let texcoords = optional_nested_stream(ctx, texcoords, "ply-texcoord-streams")?;
+    let colors = optional_nested_stream(ctx, colors, "ply-color-streams")?;
+    let custom_attributes = finish_custom_attributes(ctx, custom_attributes)?;
+
+    let mut mesh_parts = mesh_name
+        .try_into_scene_parts()?
+        .into_some()
+        .into_mesh(MeshBuildConfig {
+            topology,
+            material: None,
+            bounds,
+        });
+    mesh_parts = mesh_parts.with_positions(positions.try_into_scene_parts()?)?;
+    mesh_parts = mesh_parts.with_normals(normals.try_into_scene_parts()?)?;
+    mesh_parts = mesh_parts.with_texcoords(texcoords)?;
+    mesh_parts = mesh_parts.with_colors(colors)?;
+    mesh_parts = mesh_parts.with_indices(indices.try_into_scene_parts()?)?;
+    mesh_parts = mesh_parts.with_face_vertex_counts(face_vertex_counts)?;
+    mesh_parts = mesh_parts.with_custom_attributes(custom_attributes)?;
+    mesh_parts = mesh_parts.with_metadata(metadata.try_into_scene_parts()?)?;
+    let mesh = mesh_parts.finish()?;
+    let node = node_name
+        .try_into_scene_parts()?
+        .into_some()
+        .into_node(NodeBuildConfig {
+            transform: Mat4::IDENTITY,
+            camera: None,
+            light: None,
+        })
+        .finish()?;
 
     let mesh_permit = ctx.begin_work(ImportWorkClass::Meshes, 1)?;
     let primitive_permit = ctx.begin_work(ImportWorkClass::Primitives, 1)?;
     let mut builder = ctx.scene_builder()?;
-    storage.adopt(&mut builder)?;
-    if let Some(face_count_storage) = face_count_storage {
-        face_count_storage.adopt(&mut builder)?;
-    }
-    mesh_storage.adopt(&mut builder)?;
-    let mesh_id = builder.add_mesh(mesh)?;
-    let mut node_storage = LiveStorage::new(ImportStorageClass::SceneConstruction);
-    let node_name = node_storage.copy_string(ctx, "PLY", "ply-node-name")?;
-    let mut mesh_bindings = Vec::new();
-    node_storage.reserve_vec(ctx, &mut mesh_bindings, 1, "ply-mesh-bindings")?;
-    mesh_bindings.push(MeshBinding::new(mesh_id));
+    let mesh_id = builder.add_prepared_mesh(mesh)?;
     let graph_nodes = ctx.begin_work(ImportWorkClass::GraphNodes, 2)?;
     let graph_edges = ctx.begin_work(ImportWorkClass::GraphEdges, 1)?;
     let graph_depth = ctx.begin_work(ImportWorkClass::GraphDepth, 2)?;
-    node_storage.adopt(&mut builder)?;
-    builder.add_child_node(
-        builder.root(),
-        Node {
-            name: Some(node_name),
-            mesh_bindings,
-            ..Node::default()
-        },
-    )?;
+    let node_id = builder.add_prepared_node(node)?;
+    builder.add_node_mesh_binding(node_id, MeshBinding::new(mesh_id))?;
     graph_depth.complete()?;
     graph_edges.complete()?;
     graph_nodes.complete()?;
@@ -1625,18 +1592,15 @@ fn skip_list(
 
 fn custom_accumulators<'scope>(
     ctx: &'scope ParseScope<'_>,
-    element: &Element,
+    element: &Element<'scope>,
     custom_scalar_count: usize,
-    storage: &mut LiveStorage<'scope>,
-) -> ParseResult<Vec<VertexAttribute>> {
-    let mut attributes = Vec::new();
-    storage.reserve_vec(
-        ctx,
-        &mut attributes,
-        custom_scalar_count,
+) -> ParseResult<MeteredVec<'scope, CustomAttributeAccumulator<'scope>>> {
+    let mut attributes = ctx.metered_vec(
+        ImportStorageClass::SceneConstruction,
         "ply-custom-attributes",
-    )?;
-    for (property_index, property) in element.properties.iter().enumerate() {
+    );
+    attributes.try_reserve(custom_scalar_count)?;
+    for (property_index, property) in element.properties.as_slice().iter().enumerate() {
         poll_collection(ctx, property_index)?;
         let Property::Scalar {
             name,
@@ -1656,24 +1620,33 @@ fn custom_accumulators<'scope>(
                 Some("custom-attribute-slot"),
             ));
         }
-        if is_builtin_vertex_property(name) {
+        if is_builtin_vertex_property(name.as_str()) {
             continue;
         }
         let data = match ty {
             ScalarType::F32 | ScalarType::F64 => {
-                let mut values = Vec::new();
-                storage.reserve_vec(ctx, &mut values, element.count, "ply-custom-f32-values")?;
-                VertexAttributeData::F32(values)
+                let mut values = ctx.metered_vec(
+                    ImportStorageClass::SceneConstruction,
+                    "ply-custom-f32-values",
+                );
+                values.try_reserve(element.count)?;
+                CustomAttributeData::F32(values)
             }
             ScalarType::U8 | ScalarType::U16 | ScalarType::U32 => {
-                let mut values = Vec::new();
-                storage.reserve_vec(ctx, &mut values, element.count, "ply-custom-u32-values")?;
-                VertexAttributeData::U32(values)
+                let mut values = ctx.metered_vec(
+                    ImportStorageClass::SceneConstruction,
+                    "ply-custom-u32-values",
+                );
+                values.try_reserve(element.count)?;
+                CustomAttributeData::U32(values)
             }
             ScalarType::I8 | ScalarType::I16 | ScalarType::I32 => {
-                let mut values = Vec::new();
-                storage.reserve_vec(ctx, &mut values, element.count, "ply-custom-i32-values")?;
-                VertexAttributeData::I32(values)
+                let mut values = ctx.metered_vec(
+                    ImportStorageClass::SceneConstruction,
+                    "ply-custom-i32-values",
+                );
+                values.try_reserve(element.count)?;
+                CustomAttributeData::I32(values)
             }
         };
         let attr_name_bytes = "ply:".len().checked_add(name.len()).ok_or_else(|| {
@@ -1694,19 +1667,60 @@ fn custom_accumulators<'scope>(
             ImportWorkClass::CanonicalStringBytes,
             usize_amount(ctx, canonical_bytes, "ply-custom-attribute-name")?,
         )?;
-        let attr_name =
-            storage.copy_prefixed_string(ctx, "ply:", name, "ply-custom-attribute-name")?;
-        let semantic_name =
-            storage.copy_prefixed_string(ctx, "ply:", name, "ply-custom-attribute-semantic")?;
-        attributes.push(VertexAttribute {
+        let mut attr_name = ctx.metered_string(
+            ImportStorageClass::SceneConstruction,
+            "ply-custom-attribute-name",
+        );
+        attr_name.try_push_str("ply:")?;
+        attr_name.try_push_str(name.as_str())?;
+        let mut semantic_name = ctx.metered_string(
+            ImportStorageClass::SceneConstruction,
+            "ply-custom-attribute-semantic",
+        );
+        semantic_name.try_push_str("ply:")?;
+        semantic_name.try_push_str(name.as_str())?;
+        attributes.try_push(CustomAttributeAccumulator {
             name: attr_name,
-            semantic: VertexAttributeSemantic::Custom(semantic_name),
-            data,
-            metadata: MetadataMap::new(),
-        });
+            semantic: semantic_name,
+            data: RefCell::new(data),
+        })?;
         canonical_strings.complete()?;
     }
     Ok(attributes)
+}
+
+impl<'scope> CustomAttributeAccumulator<'scope> {
+    fn try_into_scene_parts(self) -> ParseResult<SceneValueParts<'scope, VertexAttribute>> {
+        let name = self.name.try_into_scene_parts()?;
+        let semantic = self
+            .semantic
+            .try_into_scene_parts()?
+            .into_custom_vertex_attribute_semantic();
+        let data = self.data.into_inner().try_into_scene_parts()?;
+        Ok(name.zip(semantic)?.zip(data)?.into_vertex_attribute())
+    }
+}
+
+impl<'scope> CustomAttributeData<'scope> {
+    fn try_into_scene_parts(self) -> ParseResult<SceneValueParts<'scope, VertexAttributeData>> {
+        match self {
+            Self::F32(values) => Ok(values.try_into_scene_parts()?.into_vertex_attribute_data()),
+            Self::U32(values) => Ok(values.try_into_scene_parts()?.into_vertex_attribute_data()),
+            Self::I32(values) => Ok(values.try_into_scene_parts()?.into_vertex_attribute_data()),
+        }
+    }
+}
+
+fn finish_custom_attributes<'scope>(
+    ctx: &'scope ParseScope<'_>,
+    attributes: MeteredVec<'scope, CustomAttributeAccumulator<'scope>>,
+) -> ParseResult<SceneValueParts<'scope, Vec<VertexAttribute>>> {
+    let mut canonical: MeteredSceneVec<'scope, VertexAttribute> =
+        ctx.metered_scene_vec("ply-custom-attributes");
+    attributes.try_for_each_owned(|attribute| {
+        canonical.try_push_parts(attribute.try_into_scene_parts()?)
+    })?;
+    canonical.try_into_scene_parts()
 }
 
 fn validate_vertex_attribute_budget(
@@ -1750,7 +1764,7 @@ fn push_custom_scalar<'scope>(
     name: &str,
     value: ScalarValue,
 ) -> ParseResult<()> {
-    let Some(attribute) = parsed.custom_attributes.get_mut(attribute_index) else {
+    let Some(attribute) = parsed.custom_attributes.as_slice().get(attribute_index) else {
         let _ = name;
         return Err(format_failure(
             ctx,
@@ -1760,13 +1774,22 @@ fn push_custom_scalar<'scope>(
             Some("custom-attribute-slot"),
         ));
     };
-    match (&mut attribute.data, value) {
-        (VertexAttributeData::F32(values), value) => values.push(value.to_f32(ctx, name)?),
-        (VertexAttributeData::U32(values), ScalarValue::U32(value)) => values.push(value),
-        (VertexAttributeData::U32(values), ScalarValue::I32(value)) if value >= 0 => {
-            values.push(value as u32)
+    let mut data = attribute.data.try_borrow_mut().map_err(|_| {
+        format_failure(
+            ctx,
+            PlyFailureCode::InternalInvariant,
+            "PLY custom attribute storage was reentered",
+            None,
+            Some("custom-attribute-storage"),
+        )
+    })?;
+    match (&mut *data, value) {
+        (CustomAttributeData::F32(values), value) => values.try_push(value.to_f32(ctx, name)?)?,
+        (CustomAttributeData::U32(values), ScalarValue::U32(value)) => values.try_push(value)?,
+        (CustomAttributeData::U32(values), ScalarValue::I32(value)) if value >= 0 => {
+            values.try_push(value as u32)?
         }
-        (VertexAttributeData::I32(values), ScalarValue::I32(value)) => values.push(value),
+        (CustomAttributeData::I32(values), ScalarValue::I32(value)) => values.try_push(value)?,
         _ => {
             let _ = name;
             return Err(format_failure(
@@ -1911,13 +1934,12 @@ fn parse_count(ctx: &ParseScope<'_>, token: &str, line_offset: usize) -> ParseRe
 }
 
 struct CheckedTokens<'line, 'scope> {
-    values: Vec<&'line str>,
-    _storage: LiveStorage<'scope>,
+    values: MeteredVec<'scope, &'line str>,
 }
 
 impl<'line> CheckedTokens<'line, '_> {
     fn as_slice(&self) -> &[&'line str] {
-        &self.values
+        self.values.as_slice()
     }
 }
 
@@ -1925,17 +1947,12 @@ fn checked_tokens<'line, 'scope>(
     ctx: &'scope ParseScope<'_>,
     line: &'line str,
 ) -> ParseResult<CheckedTokens<'line, 'scope>> {
-    let mut storage = LiveStorage::new(ImportStorageClass::BackendDecode);
-    let mut values = Vec::new();
+    let mut values = ctx.metered_vec(ImportStorageClass::BackendDecode, "ply-tokens");
     let mut byte_index = 0usize;
     while let Some(token) = next_checked_token(ctx, line, &mut byte_index)? {
-        storage.reserve_vec(ctx, &mut values, 1, "ply-tokens")?;
-        values.push(token);
+        values.try_push(token)?;
     }
-    Ok(CheckedTokens {
-        values,
-        _storage: storage,
-    })
+    Ok(CheckedTokens { values })
 }
 
 fn next_checked_token<'line>(
@@ -1991,10 +2008,9 @@ fn next_checked_token<'line>(
 
 fn bounded_string<'scope>(
     ctx: &'scope ParseScope<'_>,
-    storage: &mut LiveStorage<'scope>,
     value: &str,
     label: &'static str,
-) -> ParseResult<String> {
+) -> ParseResult<MeteredString<'scope>> {
     let permit = ctx.begin_work(
         ImportWorkClass::StringBytes,
         usize_amount(ctx, value.len(), "ply-string-bytes")?,
@@ -2008,29 +2024,25 @@ fn bounded_string<'scope>(
             Some(label),
         ));
     }
-    let value = storage.copy_string(ctx, value, "ply-header-string")?;
+    let mut output =
+        ctx.metered_string(ImportStorageClass::FormatNormalization, "ply-header-string");
+    output.try_push_str(value)?;
     permit.complete()?;
-    Ok(value)
-}
-
-fn optional_stream<T>(values: Vec<T>) -> Vec<T> {
-    values
+    Ok(output)
 }
 
 fn optional_nested_stream<'scope, T>(
     ctx: &'scope ParseScope<'_>,
-    storage: &mut LiveStorage<'scope>,
-    values: Vec<T>,
+    values: MeteredVec<'scope, T>,
     resource: &'static str,
-) -> ParseResult<Vec<Vec<T>>> {
+) -> ParseResult<SceneValueParts<'scope, Vec<Vec<T>>>> {
+    let mut nested: MeteredSceneVec<'scope, Vec<T>> = ctx.metered_scene_vec(resource);
     if values.is_empty() {
-        Ok(Vec::new())
+        drop(values);
     } else {
-        let mut nested = Vec::new();
-        storage.reserve_vec(ctx, &mut nested, 1, resource)?;
-        nested.push(values);
-        Ok(nested)
+        nested.try_push_parts(values.try_into_scene_parts()?)?;
     }
+    nested.try_into_scene_parts()
 }
 
 fn compute_bounds(ctx: &ParseScope<'_>, positions: &[Vec3]) -> ParseResult<Option<Aabb>> {
@@ -2157,9 +2169,9 @@ fn ascii_profile_line<'scope>(
         .len()
         .checked_sub(usize::from(strips_trailing_cr))
         .ok_or_else(|| ctx.resource_limit_exceeded("ply-profiled-line-bytes", u64::MAX))?;
-    let mut storage = LiveStorage::new(ImportStorageClass::BackendDecode);
     let mut value =
-        storage.empty_string_with_capacity(ctx, output_length, "ply-profiled-ascii-line")?;
+        ctx.metered_string(ImportStorageClass::BackendDecode, "ply-profiled-ascii-line");
+    value.try_reserve(output_length)?;
 
     let mut chunk_start = 0usize;
     while chunk_start < raw_line.len() {
@@ -2247,7 +2259,7 @@ fn ascii_profile_line<'scope>(
         } else {
             chunk_text
         };
-        value.push_str(chunk_text);
+        value.try_push_str(chunk_text)?;
         chunk_start = chunk_end;
     }
     if value.len() != output_length {
@@ -2259,10 +2271,7 @@ fn ascii_profile_line<'scope>(
             Some("profiled-line-copy"),
         ));
     }
-    Ok(ProfiledAsciiLine {
-        value,
-        _storage: storage,
-    })
+    Ok(ProfiledAsciiLine { value })
 }
 
 fn line_terminated_by_lf(bytes: &[u8], offset: usize) -> bool {
@@ -2347,6 +2356,12 @@ fn usize_amount(ctx: &ParseScope<'_>, value: usize, resource: &'static str) -> P
     u64::try_from(value).map_err(|_| ctx.resource_limit_exceeded(resource, u64::MAX))
 }
 
+fn decimal_digits(value: usize) -> usize {
+    value
+        .checked_ilog10()
+        .map_or(1, |exponent| exponent as usize + 1)
+}
+
 fn resource_limit_failure(
     ctx: &ParseScope<'_>,
     resource: &'static str,
@@ -2372,57 +2387,42 @@ fn preflight_limit(
 
 fn insert_string_metadata<'scope>(
     ctx: &'scope ParseScope<'_>,
-    storage: &mut LiveStorage<'scope>,
-    metadata: &mut MetadataMap,
+    metadata: &mut MeteredMetadataMap<'scope>,
     key: &str,
     value: &str,
 ) -> ParseResult<()> {
-    storage.reserve_ordered_map(ctx, metadata, 1, "ply-metadata-entry")?;
-    let key = storage.copy_string(ctx, key, "ply-metadata-key")?;
-    let value = storage.copy_string(ctx, value, "ply-metadata-value")?;
-    insert_reserved_metadata(ctx, metadata, key, value)
+    let mut key_storage =
+        ctx.metered_string(ImportStorageClass::SceneConstruction, "ply-metadata-key");
+    key_storage.try_push_str(key)?;
+    let mut value_storage =
+        ctx.metered_string(ImportStorageClass::SceneConstruction, "ply-metadata-value");
+    value_storage.try_push_str(value)?;
+    insert_metadata_parts(ctx, metadata, key_storage, value_storage)
 }
 
 fn insert_indexed_string_metadata<'scope>(
     ctx: &'scope ParseScope<'_>,
-    storage: &mut LiveStorage<'scope>,
-    metadata: &mut MetadataMap,
+    metadata: &mut MeteredMetadataMap<'scope>,
     prefix: &str,
     index: usize,
     value: &str,
 ) -> ParseResult<()> {
-    storage.reserve_ordered_map(ctx, metadata, 1, "ply-metadata-entry")?;
-    let key = storage.copy_indexed_string(ctx, prefix, index, "ply-metadata-key")?;
-    let value = storage.copy_string(ctx, value, "ply-metadata-value")?;
-    insert_reserved_metadata(ctx, metadata, key, value)
+    let mut key = ctx.metered_string(ImportStorageClass::SceneConstruction, "ply-metadata-key");
+    key.try_push_str(prefix)?;
+    key.try_push_usize(index)?;
+    let mut value_storage =
+        ctx.metered_string(ImportStorageClass::SceneConstruction, "ply-metadata-value");
+    value_storage.try_push_str(value)?;
+    insert_metadata_parts(ctx, metadata, key, value_storage)
 }
 
-fn insert_reserved_metadata(
+fn insert_metadata_parts<'scope>(
     ctx: &ParseScope<'_>,
-    metadata: &mut MetadataMap,
-    key: String,
-    value: String,
+    metadata: &mut MeteredMetadataMap<'scope>,
+    key: MeteredString<'scope>,
+    value: MeteredString<'scope>,
 ) -> ParseResult<()> {
-    let insertion_work = metadata.len().checked_add(1).ok_or_else(|| {
-        ctx.resource_limit_exceeded("max_work_units", ctx.limits().max_work_units)
-    })?;
-    let insertion = ctx.begin_work(
-        ImportWorkClass::WorkUnits,
-        usize_amount(ctx, insertion_work, "ply-metadata-insertion-work")?,
-    )?;
-    let replaced = metadata
-        .insert_reserved(key, MetadataValue::String(value))
-        .map_err(|_| {
-            format_failure(
-                ctx,
-                PlyFailureCode::InternalInvariant,
-                "PLY metadata insertion violated its reserved-capacity contract",
-                None,
-                Some("metadata-capacity"),
-            )
-        })?;
-    insertion.complete()?;
-    if replaced.is_some() {
+    if metadata.get(key.as_str()).is_some() {
         return Err(format_failure(
             ctx,
             PlyFailureCode::InternalInvariant,
@@ -2431,6 +2431,19 @@ fn insert_reserved_metadata(
             Some("metadata-key"),
         ));
     }
+    let insertion_work = metadata.len().checked_add(1).ok_or_else(|| {
+        ctx.resource_limit_exceeded("max_work_units", ctx.limits().max_work_units)
+    })?;
+    let insertion = ctx.begin_work(
+        ImportWorkClass::WorkUnits,
+        usize_amount(ctx, insertion_work, "ply-metadata-insertion-work")?,
+    )?;
+    let entry = key
+        .try_into_scene_parts()?
+        .zip(value.try_into_scene_parts()?)?
+        .into_metadata_string_entry();
+    metadata.try_insert_parts(entry)?;
+    insertion.complete()?;
     Ok(())
 }
 
@@ -2454,7 +2467,7 @@ fn canonical_string_bytes(ctx: &ParseScope<'_>, header: &Header<'_>) -> ParseRes
                 ctx.limits().max_canonical_string_bytes,
             )
         })?;
-    for (index, comment) in header.comments.iter().enumerate() {
+    for (index, comment) in header.comments.as_slice().iter().enumerate() {
         poll_collection(ctx, index)?;
         let key_len = "ply:comment."
             .len()
@@ -2477,7 +2490,7 @@ fn canonical_string_bytes(ctx: &ParseScope<'_>, header: &Header<'_>) -> ParseRes
                 )
             })?;
     }
-    for (index, info) in header.obj_infos.iter().enumerate() {
+    for (index, info) in header.obj_infos.as_slice().iter().enumerate() {
         poll_collection(ctx, index)?;
         let key_len = "ply:obj_info."
             .len()

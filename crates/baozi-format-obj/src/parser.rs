@@ -1,22 +1,27 @@
-use crate::allocation::{LiveStorage, usize_to_u64 as usize_amount};
 use crate::options::{ObjTextDecodingMode, obj_import_option_key};
 use crate::{ObjFailure, mesh_builder, mtl, obj};
 use baozi_core::SceneDraft;
 use baozi_import::{
     DiagnosticByteRange, DiagnosticCode, DiagnosticSource, ImportStorageClass, ImportWorkClass,
-    ParseFailure, ParseResult, ParseScope,
+    MeteredDecodedText, MeteredVec, ParseFailure, ParseResult, ParseScope,
 };
 use std::ops::Range;
 use std::str::Utf8Error;
 
-pub(crate) const SCAN_CHUNK_BYTES: usize = crate::allocation::CHECKPOINT_CHUNK_BYTES;
+pub(crate) const SCAN_CHUNK_BYTES: usize = 4 * 1024;
+
+pub(crate) fn usize_amount(
+    scope: &ParseScope<'_>,
+    value: usize,
+    resource: &'static str,
+) -> ParseResult<u64> {
+    u64::try_from(value).map_err(|_| scope.allocation_failure(resource))
+}
 
 pub(crate) struct DecodedText<'scope> {
-    text: String,
+    text: MeteredDecodedText<'scope>,
     line_count: usize,
-    replacements: Vec<TextReplacement>,
-    _text_storage: LiveStorage<'scope>,
-    _index_storage: LiveStorage<'scope>,
+    replacements: MeteredVec<'scope, TextReplacement>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -60,19 +65,13 @@ pub(crate) fn decode_utf8<'scope>(
     let input_start = usize::from(bytes.starts_with(&[0xef, 0xbb, 0xbf])) * 3;
     let plan = plan_decode(scope, bytes, input_start, replace_invalid, resource)?;
 
-    let mut text_storage = LiveStorage::new(ImportStorageClass::DecodedText);
-    let mut text = text_storage
-        .allocate_string(scope, plan.decoded_bytes, resource)
+    let mut text = scope
+        .metered_decoded_text(plan.decoded_bytes, resource)
         .map_err(TextDecodeFailure::Scope)?;
-    let mut index_storage = LiveStorage::new(ImportStorageClass::LineIndex);
-    let mut replacements = Vec::new();
-    index_storage
-        .reserve_vec(
-            scope,
-            &mut replacements,
-            plan.replacement_count,
-            "obj-text-replacement-index",
-        )
+    let mut replacements =
+        scope.metered_vec(ImportStorageClass::LineIndex, "obj-text-replacement-index");
+    replacements
+        .try_reserve(plan.replacement_count)
         .map_err(TextDecodeFailure::Scope)?;
 
     let mut offset = 0usize;
@@ -100,7 +99,7 @@ pub(crate) fn decode_utf8<'scope>(
                     })?;
                     let decoded = std::str::from_utf8(unit)
                         .map_err(|_| invalid_utf8_error(scope, bytes, offset, resource))?;
-                    append_preallocated_text(scope, &mut text, decoded, resource)
+                    append_preallocated_text(&mut text, decoded)
                         .map_err(TextDecodeFailure::Scope)?;
                     offset = unit_end;
                 }
@@ -119,7 +118,7 @@ pub(crate) fn decode_utf8<'scope>(
                             )))
                         })?;
                     let decoded_start = text.len();
-                    append_preallocated_text(scope, &mut text, "\u{fffd}", resource)
+                    append_preallocated_text(&mut text, "\u{fffd}")
                         .map_err(TextDecodeFailure::Scope)?;
                     let decoded_end = text.len();
                     if replacements.len() >= replacements.capacity() {
@@ -127,11 +126,13 @@ pub(crate) fn decode_utf8<'scope>(
                             ObjFailure::internal("replacement-plan-capacity-exhausted"),
                         )));
                     }
-                    replacements.push(TextReplacement {
-                        raw_range,
-                        decoded_start,
-                        decoded_end,
-                    });
+                    replacements
+                        .try_push(TextReplacement {
+                            raw_range,
+                            decoded_start,
+                            decoded_end,
+                        })
+                        .map_err(TextDecodeFailure::Scope)?;
                     offset = usize::try_from(raw_end).map_err(|_| {
                         TextDecodeFailure::Scope(scope.allocation_failure(resource))
                     })?;
@@ -148,11 +149,9 @@ pub(crate) fn decode_utf8<'scope>(
     }
 
     Ok(DecodedText {
-        text,
+        text: text.finish_exact().map_err(TextDecodeFailure::Scope)?,
         line_count: plan.line_count,
         replacements,
-        _text_storage: text_storage,
-        _index_storage: index_storage,
     })
 }
 
@@ -161,7 +160,8 @@ pub(crate) fn scan_lines(
     text: &DecodedText<'_>,
     mut visit: impl FnMut(DecodedLine<'_>, u32) -> ParseResult<()>,
 ) -> ParseResult<()> {
-    let bytes = text.text.as_bytes();
+    let decoded = text.text.as_str();
+    let bytes = decoded.as_bytes();
     let mut line_start = 0usize;
     let mut line_number = 1u32;
     let mut replacement_start = 0usize;
@@ -187,9 +187,13 @@ pub(crate) fn scan_lines(
             } else {
                 newline
             };
-            let replacement_end =
-                replacement_end_for_line(scope, &text.replacements, replacement_start, line_end)?;
-            let line_text = text.text.get(line_start..line_end).ok_or_else(|| {
+            let replacement_end = replacement_end_for_line(
+                scope,
+                text.replacements.as_slice(),
+                replacement_start,
+                line_end,
+            )?;
+            let line_text = decoded.get(line_start..line_end).ok_or_else(|| {
                 scope.format_failure(ObjFailure::internal("text-line-range-out-of-bounds"))
             })?;
             visit(
@@ -198,6 +202,7 @@ pub(crate) fn scan_lines(
                     decoded_start: line_start,
                     replacements: text
                         .replacements
+                        .as_slice()
                         .get(replacement_start..replacement_end)
                         .ok_or_else(|| {
                             scope.format_failure(ObjFailure::internal(
@@ -221,14 +226,14 @@ pub(crate) fn scan_lines(
         scan_start = scan_end;
     }
 
-    if line_start < text.text.len() {
+    if line_start < decoded.len() {
         let replacement_end = replacement_end_for_line(
             scope,
-            &text.replacements,
+            text.replacements.as_slice(),
             replacement_start,
-            text.text.len(),
+            decoded.len(),
         )?;
-        let line_text = text.text.get(line_start..).ok_or_else(|| {
+        let line_text = decoded.get(line_start..).ok_or_else(|| {
             scope.format_failure(ObjFailure::internal("text-line-range-out-of-bounds"))
         })?;
         visit(
@@ -237,6 +242,7 @@ pub(crate) fn scan_lines(
                 decoded_start: line_start,
                 replacements: text
                     .replacements
+                    .as_slice()
                     .get(replacement_start..replacement_end)
                     .ok_or_else(|| {
                         scope.format_failure(ObjFailure::internal(
@@ -391,7 +397,7 @@ pub(crate) fn read_obj(scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
     };
     let parsed = obj::parse(scope, &text)?;
     drop(text);
-    let materials = mtl::load_libraries(scope, &parsed.mtllibs)?;
+    let materials = mtl::load_libraries(scope, parsed.mtllibs.as_slice())?;
 
     mesh_builder::scene_from_parsed(scope, parsed, &materials)
 }
@@ -578,23 +584,8 @@ fn invalid_utf8_error(
     }
 }
 
-fn append_preallocated_text(
-    scope: &ParseScope<'_>,
-    output: &mut String,
-    value: &str,
-    resource: &'static str,
-) -> ParseResult<()> {
-    let required = output
-        .len()
-        .checked_add(value.len())
-        .ok_or_else(|| scope.allocation_failure(resource))?;
-    if required > output.capacity() {
-        return Err(
-            scope.format_failure(ObjFailure::internal("decoded-text-plan-capacity-exhausted"))
-        );
-    }
-    output.push_str(value);
-    Ok(())
+fn append_preallocated_text(output: &mut MeteredDecodedText<'_>, value: &str) -> ParseResult<()> {
+    output.try_push_str(value)
 }
 
 fn validate_text_unit(

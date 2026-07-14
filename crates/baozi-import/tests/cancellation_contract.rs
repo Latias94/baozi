@@ -1,6 +1,6 @@
 use baozi_core::{
-    Animation, Camera, FormatId, Light, Material, Mesh, MeshBinding, MetadataMap, MetadataValue,
-    Node, SceneDraft, Skin, Texture, TextureSampler, TextureSource,
+    Animation, Camera, FormatId, Light, Material, Mesh, MeshBinding, MetadataMap, Node, SceneDraft,
+    Skin, Texture, TextureSampler, TextureSource,
 };
 use baozi_import::{
     AuthorizedDependency, CapabilityStatus, CauseOwner, DependencyPolicyError, DependencyReference,
@@ -76,16 +76,15 @@ struct RequiredDependencyImporter {
 
 #[derive(Debug, Clone, Copy)]
 enum BuilderAction {
-    AdoptReservation,
-    AddNode,
-    AddChildNode,
-    AddMesh,
-    AddMaterial,
-    AddTexture,
-    AddAnimation,
-    AddCamera,
-    AddLight,
-    AddSkin,
+    AddPreparedNode,
+    AddPreparedChildNode,
+    AddPreparedMesh,
+    AddPreparedMaterial,
+    AddPreparedTexture,
+    AddPreparedAnimation,
+    AddPreparedCamera,
+    AddPreparedLight,
+    AddPreparedSkin,
     AddNodeMeshBinding,
     SetNodeMeshBindingSkin,
     SetSpace,
@@ -197,87 +196,83 @@ impl FormatImporter for BuilderCancellationImporter {
 
     fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
         match self.action {
-            BuilderAction::AdoptReservation => {
-                let reservation = scope.reserve_live(ImportStorageClass::SceneConstruction, 1)?;
+            BuilderAction::AddPreparedNode => {
+                let node = scope.prepare_scene_value(Node::default())?;
                 let mut builder = scope.scene_builder()?;
                 self.cancel();
-                self.record_late_success(builder.adopt_reservation(reservation).is_ok());
+                self.record_late_success(builder.add_prepared_node(node).is_ok());
             }
-            BuilderAction::AddNode => {
-                let mut builder = scope.scene_builder()?;
-                let node = Node::default();
-                self.cancel();
-                self.record_late_success(builder.add_node(node).is_ok());
-            }
-            BuilderAction::AddChildNode => {
+            BuilderAction::AddPreparedChildNode => {
+                let node = scope.prepare_scene_value(Node::default())?;
                 let mut builder = scope.scene_builder()?;
                 let parent = builder.root();
-                let node = Node::default();
                 self.cancel();
-                self.record_late_success(builder.add_child_node(parent, node).is_ok());
+                self.record_late_success(builder.add_prepared_child_node(parent, node).is_ok());
             }
-            BuilderAction::AddMesh => {
+            BuilderAction::AddPreparedMesh => {
+                let mesh = scope.prepare_scene_value(Mesh::default())?;
                 let mut builder = scope.scene_builder()?;
-                let mesh = Mesh::default();
                 self.cancel();
-                self.record_late_success(builder.add_mesh(mesh).is_ok());
+                self.record_late_success(builder.add_prepared_mesh(mesh).is_ok());
             }
-            BuilderAction::AddMaterial => {
+            BuilderAction::AddPreparedMaterial => {
+                let material = scope.prepare_scene_value(Material::default())?;
                 let mut builder = scope.scene_builder()?;
-                let material = Material::default();
                 self.cancel();
-                self.record_late_success(builder.add_material(material).is_ok());
+                self.record_late_success(builder.add_prepared_material(material).is_ok());
             }
-            BuilderAction::AddTexture => {
-                let mut builder = scope.scene_builder()?;
+            BuilderAction::AddPreparedTexture => {
                 let texture = Texture {
                     name: None,
-                    source: TextureSource::External {
-                        uri: String::from("texture.bin"),
-                    },
+                    source: TextureSource::External { uri: String::new() },
                     sampler: TextureSampler::default(),
                     metadata: MetadataMap::new(),
                 };
-                self.cancel();
-                self.record_late_success(builder.add_texture(texture).is_ok());
-            }
-            BuilderAction::AddAnimation => {
+                let texture = scope.prepare_scene_value(texture)?;
                 let mut builder = scope.scene_builder()?;
-                let animation = Animation::default();
                 self.cancel();
-                self.record_late_success(builder.add_animation(animation).is_ok());
+                self.record_late_success(builder.add_prepared_texture(texture).is_ok());
             }
-            BuilderAction::AddCamera => {
+            BuilderAction::AddPreparedAnimation => {
+                let animation = scope.prepare_scene_value(Animation::default())?;
                 let mut builder = scope.scene_builder()?;
-                let camera = Camera::default();
                 self.cancel();
-                self.record_late_success(builder.add_camera(camera).is_ok());
+                self.record_late_success(builder.add_prepared_animation(animation).is_ok());
             }
-            BuilderAction::AddLight => {
+            BuilderAction::AddPreparedCamera => {
+                let camera = scope.prepare_scene_value(Camera::default())?;
                 let mut builder = scope.scene_builder()?;
-                let light = Light::default();
                 self.cancel();
-                self.record_late_success(builder.add_light(light).is_ok());
+                self.record_late_success(builder.add_prepared_camera(camera).is_ok());
             }
-            BuilderAction::AddSkin => {
+            BuilderAction::AddPreparedLight => {
+                let light = scope.prepare_scene_value(Light::default())?;
                 let mut builder = scope.scene_builder()?;
-                let skin = Skin::default();
                 self.cancel();
-                self.record_late_success(builder.add_skin(skin).is_ok());
+                self.record_late_success(builder.add_prepared_light(light).is_ok());
+            }
+            BuilderAction::AddPreparedSkin => {
+                let skin = scope.prepare_scene_value(Skin::default())?;
+                let mut builder = scope.scene_builder()?;
+                self.cancel();
+                self.record_late_success(builder.add_prepared_skin(skin).is_ok());
             }
             BuilderAction::AddNodeMeshBinding => {
+                let mesh = scope.prepare_scene_value(Mesh::default())?;
                 let mut builder = scope.scene_builder()?;
                 let node = builder.root();
-                let mesh = builder.add_mesh(Mesh::default())?;
+                let mesh = builder.add_prepared_mesh(mesh)?;
                 let binding = MeshBinding::new(mesh);
                 self.cancel();
                 self.record_late_success(builder.add_node_mesh_binding(node, binding).is_ok());
             }
             BuilderAction::SetNodeMeshBindingSkin => {
+                let mesh = scope.prepare_scene_value(Mesh::default())?;
+                let skin = scope.prepare_scene_value(Skin::default())?;
                 let mut builder = scope.scene_builder()?;
                 let node = builder.root();
-                let mesh = builder.add_mesh(Mesh::default())?;
-                let skin = builder.add_skin(Skin::default())?;
+                let mesh = builder.add_prepared_mesh(mesh)?;
+                let skin = builder.add_prepared_skin(skin)?;
                 builder.add_node_mesh_binding(node, MeshBinding::new(mesh))?;
                 self.cancel();
                 self.record_late_success(builder.set_node_mesh_binding_skin(node, 0, skin));
@@ -290,11 +285,18 @@ impl FormatImporter for BuilderCancellationImporter {
                 );
             }
             BuilderAction::InsertMetadata => {
+                let mut key = scope.metered_string(
+                    ImportStorageClass::SceneConstruction,
+                    "cancelled-metadata-key",
+                );
+                key.try_push_str("cancelled")?;
+                let prepared = key
+                    .try_into_scene_parts()?
+                    .into_metadata_bool_entry(true)
+                    .finish()?;
                 let mut builder = scope.scene_builder()?;
-                let key = String::from("cancelled");
-                let value = MetadataValue::Bool(true);
                 self.cancel();
-                self.record_late_success(builder.insert_metadata(key, value).is_ok());
+                self.record_late_success(builder.insert_prepared_metadata(prepared).is_ok());
             }
             BuilderAction::FinishDraft => {
                 let builder = scope.scene_builder()?;
@@ -589,16 +591,15 @@ fn dependency_open_cancellation_precedes_exact_length_charge_capacity_and_reader
 #[test]
 fn cancellation_is_admitted_before_every_builder_side_effect() {
     for action in [
-        BuilderAction::AdoptReservation,
-        BuilderAction::AddNode,
-        BuilderAction::AddChildNode,
-        BuilderAction::AddMesh,
-        BuilderAction::AddMaterial,
-        BuilderAction::AddTexture,
-        BuilderAction::AddAnimation,
-        BuilderAction::AddCamera,
-        BuilderAction::AddLight,
-        BuilderAction::AddSkin,
+        BuilderAction::AddPreparedNode,
+        BuilderAction::AddPreparedChildNode,
+        BuilderAction::AddPreparedMesh,
+        BuilderAction::AddPreparedMaterial,
+        BuilderAction::AddPreparedTexture,
+        BuilderAction::AddPreparedAnimation,
+        BuilderAction::AddPreparedCamera,
+        BuilderAction::AddPreparedLight,
+        BuilderAction::AddPreparedSkin,
         BuilderAction::AddNodeMeshBinding,
         BuilderAction::SetNodeMeshBindingSkin,
         BuilderAction::SetSpace,

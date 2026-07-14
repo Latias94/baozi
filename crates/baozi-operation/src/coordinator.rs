@@ -6,7 +6,7 @@ use crate::control::{
 };
 use crate::ledger::{
     Commitment, Ledger, LedgerCause, LedgerEvidenceError, LedgerFinishError, LedgerLimits,
-    LedgerSnapshot, LiveReservation, PendingPublication,
+    LedgerSnapshot, LiveReservation, PendingPublication, PublicationReservationBatch,
 };
 use std::fmt;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -432,26 +432,37 @@ where
 
     /// Atomically replaces a reservation's phase, dimension, and byte capacity.
     ///
-    /// This consumes the source token. A failed transition releases its original reservation
-    /// without recording target live or peak evidence.
+    /// A failed transition preserves the source token and all accounting unchanged.
     pub fn transition_reservation(
         &mut self,
-        reservation: LiveReservation<O, LP, D>,
+        reservation: &mut LiveReservation<O, LP, D>,
         phase: LP,
         dimension: D,
         bytes: u64,
-    ) -> Result<LiveReservation<O, LP, D>, LedgerCause<D>> {
+    ) -> Result<(), LedgerCause<D>> {
         self.ledger
             .transition_reservation(reservation, phase, dimension, bytes)
     }
 
+    /// Atomically reclassifies a reservation batch, preserving every source on failure.
+    pub fn transition_reservations(
+        &mut self,
+        reservations: &mut [LiveReservation<O, LP, D>],
+        phase: LP,
+        dimension: D,
+        bytes: u64,
+    ) -> Result<(), LedgerCause<D>> {
+        self.ledger
+            .transition_reservations(reservations, phase, dimension, bytes)
+    }
+
     /// Begins an atomic publication transaction without changing durable committed evidence.
     ///
-    /// The supplied reservations must own every current live byte in this ledger. Admission seals
-    /// further accounting mutation until the transaction is rolled back or published.
+    /// Success empties `reservations`. Failure leaves it untouched so a storage owner can keep the
+    /// reservation alive until the covered storage has been discarded or transferred.
     pub fn prepare_publication(
         &mut self,
-        reservations: Vec<LiveReservation<O, LP, D>>,
+        reservations: &mut PublicationReservationBatch<O, LP, D>,
         commitments: &[Commitment<D>],
     ) -> Result<PendingPublication<O, LP, D>, LedgerCause<D>> {
         self.ledger.prepare_publication(reservations, commitments)
@@ -459,17 +470,15 @@ where
 
     /// Delivers final progress, performs the last control poll, and atomically publishes output.
     ///
-    /// No ledger mutex is held while the observer or cancellation signal runs. If either control
-    /// step fails, the consumed pending transaction is dropped, which rolls back all pending
-    /// commitments and releases its live reservations before this method returns. A successful
-    /// return leaves no operation-owned live bytes, so [`Self::finish`] cannot later turn durable
-    /// committed output into a live-reservation failure.
+    /// On error `publication` remains active. The caller must retain it until the covered output
+    /// storage has been dropped, then explicitly roll it back or let it drop. A final observer may
+    /// already have seen the event, so callers must not retry blindly.
     pub fn publish(
         &mut self,
-        publication: PendingPublication<O, LP, D>,
+        publication: &mut PendingPublication<O, LP, D>,
         final_progress: FinalProgress<PP, U>,
     ) -> Result<(), PublicationCause<D>> {
-        self.ledger.check_publication(&publication)?;
+        self.ledger.check_publication(publication)?;
         self.report_final_progress(
             final_progress.phase,
             final_progress.unit,
@@ -487,6 +496,14 @@ where
         bytes: u64,
     ) -> Result<LiveReservation<O, LP, D>, LedgerCause<D>> {
         self.ledger.split(reservation, bytes)
+    }
+
+    /// Verifies that a live reservation belongs to this operation without mutating accounting.
+    pub fn validate_live_reservation(
+        &self,
+        reservation: &LiveReservation<O, LP, D>,
+    ) -> Result<(), LedgerCause<D>> {
+        self.ledger.validate_live_reservation(reservation)
     }
 
     /// Finalizes the generic ledger after operation-owned live storage reaches zero.
@@ -606,17 +623,30 @@ where
 
     /// Atomically replaces a reservation's phase, dimension, and byte capacity.
     ///
-    /// A failed transition consumes and releases the source reservation.
+    /// A failed transition preserves the source token and all accounting unchanged.
     pub fn transition_reservation(
         &mut self,
-        reservation: LiveReservation<O, LP, D>,
+        reservation: &mut LiveReservation<O, LP, D>,
         phase: LP,
         dimension: D,
         bytes: u64,
-    ) -> Result<LiveReservation<O, LP, D>, LedgerCause<D>> {
+    ) -> Result<(), LedgerCause<D>> {
         self.coordinator
             .ledger
             .transition_reservation(reservation, phase, dimension, bytes)
+    }
+
+    /// Atomically reclassifies a reservation batch, preserving every source on failure.
+    pub fn transition_reservations(
+        &mut self,
+        reservations: &mut [LiveReservation<O, LP, D>],
+        phase: LP,
+        dimension: D,
+        bytes: u64,
+    ) -> Result<(), LedgerCause<D>> {
+        self.coordinator
+            .ledger
+            .transition_reservations(reservations, phase, dimension, bytes)
     }
 
     /// Splits a reservation without changing live or peak accounting.

@@ -980,6 +980,10 @@ impl SceneBuilder {
         self.data.meshes.len()
     }
 
+    pub fn node_count(&self) -> usize {
+        self.data.nodes.len()
+    }
+
     /// Plans a deterministic capacity envelope for one scene collection.
     pub fn collection_capacity_plan(
         &self,

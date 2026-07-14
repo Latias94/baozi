@@ -1,18 +1,18 @@
-use crate::allocation::LiveStorage;
 use crate::{GltfFailure, external_buffer_role};
 use baozi_core::scene::{Axis, Handedness};
 use baozi_core::{
-    Aabb, AlphaMode, Camera, CameraProjection, Color, ColorSpace, Mat4, Material, Mesh,
-    MeshBinding, MetadataMap, Node, PrimitiveTopology, SceneDraft, SceneSpace, Skin, Texture,
-    TextureFilterMode, TextureRole, TextureSampler, TextureSlot, TextureSource, TextureTransform,
-    TextureWrapMode, Vec2, Vec3, Vec4,
+    Aabb, AlphaMode, CameraProjection, Color, ColorSpace, Mat4, MeshBinding, PrimitiveTopology,
+    SceneDraft, SceneSpace, TextureFilterMode, TextureRole, TextureSampler, TextureSlot,
+    TextureTransform, TextureWrapMode, Vec2, Vec3, Vec4,
 };
 use baozi_import::{
-    DiagnosticCode, DiagnosticSeverity, ImportStorageClass, ImportWorkClass, ParseFailure,
-    ParseResult, ParseScope, ScopedSceneBuilder,
+    CameraBuildConfig, DiagnosticCode, DiagnosticSeverity, ImportStorageClass, ImportWorkClass,
+    MaterialBuildConfig, MeshBuildConfig, MeteredOrderedMap, MeteredSceneVec, MeteredString,
+    MeteredVec, NodeBuildConfig, ParseFailure, ParseResult, ParseScope, SceneValueParts,
+    ScopedSceneBuilder, SkinBuildConfig, TextureBuildConfig, TextureSlotBuildConfig,
 };
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
-use base64::{DecodeError, Engine as _};
+use base64::{DecodeError, DecodeSliceError, Engine as _};
 use gltf::buffer::Source as BufferSource;
 use gltf::image::Source as ImageSource;
 use gltf::json;
@@ -148,8 +148,8 @@ fn read_gltf_inner(ctx: &ParseScope<'_>) -> Result<SceneDraft> {
         preflight_json_utf8(ctx, bytes, 0)?;
     }
     let backend_allowance = gltf_backend_allocation_allowance(ctx, bytes)?;
-    let _document_reservation =
-        ctx.reserve_live(ImportStorageClass::BackendDecode, backend_allowance)?;
+    let _document_allowance =
+        ctx.metered_opaque_allowance(ImportStorageClass::BackendDecode, backend_allowance)?;
     let parsed = safe_gltf(ctx, "glTF document parse", || gltf::Gltf::from_slice(bytes))?;
     decode_work.complete()?;
     let gltf = parsed
@@ -272,10 +272,9 @@ fn preflight_canonical_base_strings(
             }
         }
 
-        let mut storage = LiveStorage::new(ImportStorageClass::FormatNormalization);
         let mut visited = try_vec_filled(
             ctx,
-            &mut storage,
+            ImportStorageClass::FormatNormalization,
             graph.nodes.len(),
             false,
             "gltf-canonical-string-node-membership",
@@ -283,32 +282,32 @@ fn preflight_canonical_base_strings(
         let skin_count = gltf.skins().len();
         let mut referenced_skins = try_vec_filled(
             ctx,
-            &mut storage,
+            ImportStorageClass::FormatNormalization,
             skin_count,
             false,
             "gltf-canonical-string-skin-membership",
         )?;
         let mut pending = try_vec_capacity(
             ctx,
-            &mut storage,
+            ImportStorageClass::FormatNormalization,
             graph.nodes.len(),
             "gltf-canonical-string-node-stack",
         )?;
-        for (root_ordinal, root) in graph.roots.iter().rev().copied().enumerate() {
+        for (root_ordinal, root) in graph.roots.as_slice().iter().rev().copied().enumerate() {
             poll_parser_loop(ctx, root_ordinal)?;
-            pending.push(root);
+            pending.try_push_reserved(root)?;
         }
         let mut selected_count = 0usize;
         while let Some(node_index) = pending.pop() {
             poll_parser_loop(ctx, selected_count)?;
             selected_count += 1;
-            let Some(node) = graph.nodes.get(node_index) else {
+            let Some(node) = graph.nodes.as_slice().get(node_index) else {
                 return Err(gltf_parse_error(
                     ctx,
                     format!("glTF node graph references missing node {node_index}"),
                 ));
             };
-            let Some(seen) = visited.get_mut(node_index) else {
+            let Some(seen) = visited.as_mut_slice().get_mut(node_index) else {
                 return Err(gltf_parse_error(
                     ctx,
                     format!("glTF node graph references missing node {node_index}"),
@@ -329,7 +328,7 @@ fn preflight_canonical_base_strings(
             }
             if let Some(skin) = node.skin() {
                 let skin_index = skin.index();
-                let Some(referenced) = referenced_skins.get_mut(skin_index) else {
+                let Some(referenced) = referenced_skins.as_mut_slice().get_mut(skin_index) else {
                     return Err(gltf_parse_error(
                         ctx,
                         format!("glTF node {node_index} references skin {skin_index} out of range"),
@@ -337,17 +336,21 @@ fn preflight_canonical_base_strings(
                 };
                 *referenced = true;
             }
-            for (child_ordinal, child) in
-                graph.children[node_index].iter().rev().copied().enumerate()
+            for (child_ordinal, child) in graph.children.as_slice()[node_index]
+                .as_slice()
+                .iter()
+                .rev()
+                .copied()
+                .enumerate()
             {
                 poll_parser_loop(ctx, child_ordinal)?;
-                pending.push(child);
+                pending.try_push_reserved(child)?;
             }
         }
 
         for (skin_index, skin) in gltf.skins().enumerate() {
             poll_parser_loop(ctx, skin_index)?;
-            if referenced_skins.get(skin_index).copied() != Some(true) {
+            if referenced_skins.as_slice().get(skin_index).copied() != Some(true) {
                 continue;
             }
             if let Some(name) = skin.name() {
@@ -375,13 +378,12 @@ fn preflight_canonical_base_strings(
 }
 
 struct ResolvedTextureUris<'scope> {
-    values: Vec<Option<String>>,
-    _storage: LiveStorage<'scope>,
+    values: MeteredOrderedMap<'scope, usize, MeteredString<'scope>>,
 }
 
 impl ResolvedTextureUris<'_> {
-    fn get(&self, image_index: &usize) -> Option<&String> {
-        self.values.get(*image_index)?.as_ref()
+    fn get(&self, image_index: &usize) -> Option<&str> {
+        self.values.get(image_index).map(MeteredString::as_str)
     }
 }
 
@@ -393,15 +395,11 @@ fn preflight_texture_strings<'scope>(
     safe_gltf(ctx, "glTF texture string preflight", || {
         let mut bytes = repeated_mesh_string_bytes;
         let limit = ctx.limits().max_canonical_string_bytes;
-        let mut storage = LiveStorage::new(ImportStorageClass::FormatNormalization);
         let image_count = safe_gltf(ctx, "glTF image count", || gltf.images().len())?;
-        let mut resolved_uris = try_vec_filled(
-            ctx,
-            &mut storage,
-            image_count,
-            None,
+        let mut resolved_uris = ctx.metered_ordered_map(
+            ImportStorageClass::FormatNormalization,
             "gltf-resolved-texture-uris",
-        )?;
+        );
 
         for (material_index, material) in gltf.materials().enumerate() {
             poll_parser_loop(ctx, material_index)?;
@@ -423,7 +421,7 @@ fn preflight_texture_strings<'scope>(
                     info.texture(),
                     "baseColorTexture",
                     &mut resolved_uris,
-                    &mut storage,
+                    image_count,
                 )?;
             }
             if let Some(info) = pbr.metallic_roughness_texture() {
@@ -434,7 +432,7 @@ fn preflight_texture_strings<'scope>(
                     info.texture(),
                     "metallicRoughnessTexture",
                     &mut resolved_uris,
-                    &mut storage,
+                    image_count,
                 )?;
             }
             if let Some(info) = material.normal_texture() {
@@ -445,7 +443,7 @@ fn preflight_texture_strings<'scope>(
                     info.texture(),
                     "normalTexture",
                     &mut resolved_uris,
-                    &mut storage,
+                    image_count,
                 )?;
             }
             if let Some(info) = material.occlusion_texture() {
@@ -456,7 +454,7 @@ fn preflight_texture_strings<'scope>(
                     info.texture(),
                     "occlusionTexture",
                     &mut resolved_uris,
-                    &mut storage,
+                    image_count,
                 )?;
             }
             if let Some(info) = material.emissive_texture() {
@@ -467,7 +465,7 @@ fn preflight_texture_strings<'scope>(
                     info.texture(),
                     "emissiveTexture",
                     &mut resolved_uris,
-                    &mut storage,
+                    image_count,
                 )?;
             }
         }
@@ -477,7 +475,6 @@ fn preflight_texture_strings<'scope>(
         canonical_strings.complete()?;
         Ok(ResolvedTextureUris {
             values: resolved_uris,
-            _storage: storage,
         })
     })?
 }
@@ -488,8 +485,8 @@ fn preflight_texture_reference<'scope>(
     limit: usize,
     texture: gltf::texture::Texture<'_>,
     source_key: &'static str,
-    resolved_uris: &mut [Option<String>],
-    storage: &mut LiveStorage<'scope>,
+    resolved_uris: &mut MeteredOrderedMap<'scope, usize, MeteredString<'scope>>,
+    image_count: usize,
 ) -> Result<()> {
     let image = texture.source();
     let image_name = image.name();
@@ -510,15 +507,16 @@ fn preflight_texture_reference<'scope>(
     }
 
     let image_index = image.index();
-    let slot = resolved_uris.get_mut(image_index).ok_or_else(|| {
-        gltf_parse_error(
+    if image_index >= image_count {
+        return Err(gltf_parse_error(
             ctx,
             format!("glTF texture references missing image {image_index}"),
-        )
-    })?;
-    if slot.is_none() {
-        let mut resolution_storage = LiveStorage::new(ImportStorageClass::FormatNormalization);
-        resolution_storage.reserve_bytes(ctx, texture_path_resolution_allowance(ctx, uri)?)?;
+        ));
+    }
+    if !resolved_uris.contains_key(&image_index) {
+        let resolution_bytes = texture_path_resolution_allowance(ctx, uri)?;
+        let _resolution_allowance = ctx
+            .metered_opaque_allowance(ImportStorageClass::FormatNormalization, resolution_bytes)?;
         let resolution_work = ctx.begin_work(
             ImportWorkClass::WorkUnits,
             to_u64(ctx.source().as_str().len().saturating_add(uri.len())),
@@ -528,10 +526,14 @@ fn preflight_texture_reference<'scope>(
         })?;
         resolution_work.complete()?;
         ctx.poll()?;
-        let resolved = storage.copy_string(ctx, resolved.as_str(), "gltf-resolved-texture-uri")?;
-        *slot = Some(resolved);
+        let mut resolved_uri = ctx.metered_string(
+            ImportStorageClass::FormatNormalization,
+            "gltf-resolved-texture-uri",
+        );
+        resolved_uri.try_push_str(resolved.as_str())?;
+        resolved_uris.try_insert(image_index, resolved_uri)?;
     }
-    let resolved_uri = slot.as_ref().ok_or_else(|| {
+    let resolved_uri = resolved_uris.get(&image_index).ok_or_else(|| {
         gltf_parse_error(
             ctx,
             format!("glTF texture resolution plan is missing image {image_index}"),
@@ -591,24 +593,22 @@ fn add_repeated_string_bytes(
 }
 
 struct BufferData<'scope> {
-    bytes: Vec<u8>,
-    _storage: LiveStorage<'scope>,
+    bytes: MeteredVec<'scope, u8>,
 }
 
 impl BufferData<'_> {
     fn as_slice(&self) -> &[u8] {
-        &self.bytes
+        self.bytes.as_slice()
     }
 }
 
 struct BufferSet<'scope> {
-    values: Vec<BufferData<'scope>>,
-    _storage: LiveStorage<'scope>,
+    values: MeteredVec<'scope, BufferData<'scope>>,
 }
 
 impl BufferSet<'_> {
     fn as_slice(&self) -> &[BufferData<'_>] {
-        &self.values
+        self.values.as_slice()
     }
 }
 
@@ -617,9 +617,8 @@ fn load_buffers<'scope>(
     gltf: &gltf::Gltf,
 ) -> Result<BufferSet<'scope>> {
     let buffer_count = safe_gltf(ctx, "glTF buffer count", || gltf.buffers().count())?;
-    let mut storage = LiveStorage::new(ImportStorageClass::BackendDecode);
-    let mut buffers = Vec::new();
-    storage.reserve_vec(ctx, &mut buffers, buffer_count, "gltf-buffer-list")?;
+    let mut buffers = ctx.metered_vec(ImportStorageClass::BackendDecode, "gltf-buffer-list");
+    buffers.try_reserve(buffer_count)?;
     for (ordinal, buffer) in gltf.buffers().enumerate() {
         poll_parser_loop(ctx, ordinal)?;
         let mut loaded = match buffer.source() {
@@ -652,12 +651,9 @@ fn load_buffers<'scope>(
             ));
         }
         loaded.bytes.truncate(buffer.length());
-        buffers.push(loaded);
+        buffers.try_push_reserved(loaded)?;
     }
-    Ok(BufferSet {
-        values: buffers,
-        _storage: storage,
-    })
+    Ok(BufferSet { values: buffers })
 }
 
 fn load_data_uri_buffer<'scope>(
@@ -699,31 +695,45 @@ fn load_data_uri_buffer<'scope>(
         ImportWorkClass::DecodeWork,
         u64::try_from(encoded.len()).unwrap_or(u64::MAX),
     )?;
-    let mut storage = LiveStorage::new(ImportStorageClass::BackendDecode);
     let decoded_capacity = base64::decoded_len_estimate(encoded.len());
-    let mut decoded = Vec::new();
-    storage.reserve_vec(ctx, &mut decoded, decoded_capacity, "gltf-data-uri-buffer")?;
+    let mut decoded = ctx.metered_vec(ImportStorageClass::BackendDecode, "gltf-data-uri-buffer");
+    decoded.try_reserve(decoded_capacity)?;
+    let mut written = 0usize;
     for (chunk_index, chunk) in encoded.as_bytes().chunks(PARSER_POLL_INTERVAL).enumerate() {
         ctx.poll()?;
         let chunk_start = chunk_index * PARSER_POLL_INTERVAL;
+        let chunk_capacity = base64::decoded_len_estimate(chunk.len());
+        let chunk_end = written
+            .checked_add(chunk_capacity)
+            .ok_or_else(|| ctx.allocation_failure("gltf-data-uri-buffer"))?;
+        decoded.try_resize(chunk_end, 0_u8)?;
         let outcome = catch_unwind(AssertUnwindSafe(|| {
-            BASE64_STANDARD.decode_vec(chunk, &mut decoded)
+            BASE64_STANDARD.decode_slice(chunk, &mut decoded.as_mut_slice()[written..chunk_end])
         }));
-        finish_gltf_operation("glTF base64 buffer decode", outcome)?.map_err(|error| {
-            let error = offset_base64_decode_error(error, chunk_start);
-            GltfFailure::invalid_reference(
-                "data-uri-buffer",
-                Some(buffer_index),
-                format_args!("invalid base64: {error}"),
-            )
-        })?;
+        let chunk_written =
+            finish_gltf_operation("glTF base64 buffer decode", outcome)?.map_err(|error| {
+                match error {
+                    DecodeSliceError::DecodeError(error) => {
+                        let error = offset_base64_decode_error(error, chunk_start);
+                        GltfFailure::invalid_reference(
+                            "data-uri-buffer",
+                            Some(buffer_index),
+                            format_args!("invalid base64: {error}"),
+                        )
+                    }
+                    DecodeSliceError::OutputSliceTooSmall => {
+                        GltfFailure::internal("base64 decoder exceeded its preflight capacity")
+                    }
+                }
+            })?;
+        written = written
+            .checked_add(chunk_written)
+            .ok_or_else(|| ctx.allocation_failure("gltf-data-uri-buffer"))?;
+        decoded.truncate(written);
     }
     data_uri_work.complete()?;
     decode_work.complete()?;
-    Ok(BufferData {
-        bytes: decoded,
-        _storage: storage,
-    })
+    Ok(BufferData { bytes: decoded })
 }
 
 fn base64_decoded_len(ctx: &ParseScope<'_>, encoded: &str, buffer_index: usize) -> Result<u64> {
@@ -807,18 +817,14 @@ fn copy_buffer<'scope>(
     allocation: &'static str,
 ) -> Result<BufferData<'scope>> {
     let copy_work = ctx.begin_work(ImportWorkClass::DecodeWork, to_u64(source.len()))?;
-    let mut storage = LiveStorage::new(ImportStorageClass::BackendDecode);
-    let mut copied = Vec::new();
-    storage.reserve_vec(ctx, &mut copied, source.len(), allocation)?;
+    let mut copied = ctx.metered_vec(ImportStorageClass::BackendDecode, allocation);
+    copied.try_reserve(source.len())?;
     for (chunk_index, chunk) in source.chunks(PARSER_POLL_INTERVAL).enumerate() {
         poll_parser_loop(ctx, chunk_index * PARSER_POLL_INTERVAL)?;
-        copied.extend_from_slice(chunk);
+        copied.try_extend_from_slice(chunk)?;
     }
     copy_work.complete()?;
-    Ok(BufferData {
-        bytes: copied,
-        _storage: storage,
-    })
+    Ok(BufferData { bytes: copied })
 }
 
 fn gltf_parse_error(ctx: &ParseScope<'_>, message: impl Into<String>) -> ContentError {
@@ -834,28 +840,27 @@ fn scene_from_document(
 ) -> Result<SceneDraft> {
     let resolved_texture_uris = preflight_texture_strings(ctx, gltf, repeated_mesh_string_bytes)?;
     let mut builder = ctx.scene_builder()?;
-    let mut normalization_storage = LiveStorage::new(ImportStorageClass::FormatNormalization);
     let material_count = safe_gltf(ctx, "glTF material count", || gltf.materials().count())?;
     let mut material_ids = try_vec_capacity(
         ctx,
-        &mut normalization_storage,
+        ImportStorageClass::FormatNormalization,
         material_count,
         "gltf-material-id-map",
     )?;
     for (material_index, material) in gltf.materials().enumerate() {
         poll_parser_loop(ctx, material_index)?;
-        material_ids.push(add_material(
+        material_ids.try_push_reserved(add_material(
             ctx,
             &mut builder,
             material,
             &resolved_texture_uris,
-        )?);
+        )?)?;
     }
 
     let mesh_count = safe_gltf(ctx, "glTF mesh count", || gltf.meshes().count())?;
     let mut mesh_ids_by_gltf_mesh = try_vec_capacity(
         ctx,
-        &mut normalization_storage,
+        ImportStorageClass::FormatNormalization,
         mesh_count,
         "gltf-mesh-id-map",
     )?;
@@ -864,7 +869,7 @@ fn scene_from_document(
         let primitive_count = safe_gltf(ctx, "glTF primitive count", || mesh.primitives().len())?;
         let mut primitive_meshes = try_vec_capacity(
             ctx,
-            &mut normalization_storage,
+            ImportStorageClass::FormatNormalization,
             primitive_count,
             "gltf-primitive-mesh-id-map",
         )?;
@@ -874,35 +879,38 @@ fn scene_from_document(
                 ctx,
                 &mut builder,
                 gltf,
-                &material_ids,
+                material_ids.as_slice(),
                 buffers,
                 &mesh,
                 primitive,
             )?;
-            primitive_meshes.push(mesh_id);
+            primitive_meshes.try_push_reserved(mesh_id)?;
         }
-        mesh_ids_by_gltf_mesh.push(primitive_meshes);
+        mesh_ids_by_gltf_mesh.try_push_reserved(primitive_meshes)?;
     }
 
     add_cameras(ctx, &mut builder, gltf)?;
     add_unsupported_domain_diagnostics(ctx, gltf)?;
     let node_imports = add_scene_nodes(
         ctx,
-        &mut normalization_storage,
         &mut builder,
         node_graph,
-        &mesh_ids_by_gltf_mesh,
+        mesh_ids_by_gltf_mesh.as_slice(),
     )?;
     let skin_ids = add_skins(
         ctx,
-        &mut normalization_storage,
         &mut builder,
         gltf,
         buffers,
-        &node_imports.node_ids,
-        &node_imports.node_skins,
+        node_imports.node_ids.as_slice(),
+        node_imports.node_skins.as_slice(),
     )?;
-    attach_node_skins(ctx, &mut builder, &node_imports.node_skins, &skin_ids)?;
+    attach_node_skins(
+        ctx,
+        &mut builder,
+        node_imports.node_skins.as_slice(),
+        skin_ids.as_slice(),
+    )?;
 
     builder.set_space(SceneSpace {
         handedness: Handedness::Right,
@@ -922,28 +930,14 @@ fn add_material(
     let pbr = material.pbr_metallic_roughness();
     let base = pbr.base_color_factor();
     let emissive = material.emissive_factor();
-    let mut storage = LiveStorage::new(ImportStorageClass::SceneConstruction);
-
-    let mut material_out = Material {
-        name: optional_name(ctx, &mut storage, material.name())?,
-        shading_model: baozi_core::ShadingModel::PbrMetallicRoughness,
-        base_color: Color::linear_rgba(base[0], base[1], base[2], base[3]),
-        metallic: pbr.metallic_factor(),
-        roughness: pbr.roughness_factor(),
-        emissive: Color::linear_rgba(emissive[0], emissive[1], emissive[2], 1.0),
-        alpha_mode: map_alpha_mode(material.alpha_mode()),
-        alpha_cutoff: material.alpha_cutoff().unwrap_or(0.5),
-        double_sided: material.double_sided(),
-        ..Material::default()
-    };
+    let mut texture_slots = ctx.metered_scene_vec("gltf-material-texture-slots");
 
     if let Some(info) = pbr.base_color_texture() {
         add_texture_slot(
             ctx,
             builder,
             resolved_texture_uris,
-            &mut storage,
-            &mut material_out,
+            &mut texture_slots,
             info.texture(),
             info.tex_coord(),
             TextureRole::BaseColor,
@@ -957,8 +951,7 @@ fn add_material(
             ctx,
             builder,
             resolved_texture_uris,
-            &mut storage,
-            &mut material_out,
+            &mut texture_slots,
             info.texture(),
             info.tex_coord(),
             TextureRole::MetallicRoughness,
@@ -972,8 +965,7 @@ fn add_material(
             ctx,
             builder,
             resolved_texture_uris,
-            &mut storage,
-            &mut material_out,
+            &mut texture_slots,
             info.texture(),
             info.tex_coord(),
             TextureRole::Normal,
@@ -987,8 +979,7 @@ fn add_material(
             ctx,
             builder,
             resolved_texture_uris,
-            &mut storage,
-            &mut material_out,
+            &mut texture_slots,
             info.texture(),
             info.tex_coord(),
             TextureRole::Occlusion,
@@ -1002,8 +993,7 @@ fn add_material(
             ctx,
             builder,
             resolved_texture_uris,
-            &mut storage,
-            &mut material_out,
+            &mut texture_slots,
             info.texture(),
             info.tex_coord(),
             TextureRole::Emissive,
@@ -1013,9 +1003,22 @@ fn add_material(
         )?;
     }
 
-    let material_id = builder.add_material(material_out)?;
-    storage.adopt(builder)?;
-    Ok(material_id)
+    let name = optional_name_parts(ctx, material.name())?;
+    let texture_slots = texture_slots.try_into_scene_parts()?;
+    let prepared = name
+        .into_material(MaterialBuildConfig {
+            shading_model: baozi_core::ShadingModel::PbrMetallicRoughness,
+            base_color: Color::linear_rgba(base[0], base[1], base[2], base[3]),
+            metallic: pbr.metallic_factor(),
+            roughness: pbr.roughness_factor(),
+            emissive: Color::linear_rgba(emissive[0], emissive[1], emissive[2], 1.0),
+            alpha_mode: map_alpha_mode(material.alpha_mode()),
+            alpha_cutoff: material.alpha_cutoff().unwrap_or(0.5),
+            double_sided: material.double_sided(),
+        })
+        .with_texture_slots(texture_slots)?
+        .finish()?;
+    Ok(builder.add_prepared_material(prepared)?)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1023,8 +1026,7 @@ fn add_texture_slot<'scope>(
     ctx: &'scope ParseScope<'_>,
     builder: &mut ScopedSceneBuilder,
     resolved_texture_uris: &ResolvedTextureUris<'_>,
-    material_storage: &mut LiveStorage<'scope>,
-    material: &mut Material,
+    texture_slots: &mut MeteredSceneVec<'scope, TextureSlot>,
     texture: gltf::texture::Texture<'_>,
     tex_coord: u32,
     role: TextureRole,
@@ -1034,7 +1036,6 @@ fn add_texture_slot<'scope>(
 ) -> Result<()> {
     let image = texture.source();
     let image_name = image.name();
-    let mut texture_storage = LiveStorage::new(ImportStorageClass::SceneConstruction);
     let source = match image.source() {
         ImageSource::Uri { uri, .. } if is_data_uri(uri) => {
             push_warning(
@@ -1062,9 +1063,12 @@ fn add_texture_slot<'scope>(
                     format!("glTF texture resolution plan is missing image {image_index}"),
                 )
             })?;
-            TextureSource::External {
-                uri: texture_storage.copy_string(ctx, resolved, "gltf-texture-source-uri")?,
-            }
+            let mut uri = ctx.metered_string(
+                ImportStorageClass::SceneConstruction,
+                "gltf-texture-source-uri",
+            );
+            uri.try_push_str(resolved)?;
+            uri.try_into_scene_parts()?.into_external_texture_source()
         }
         ImageSource::View { mime_type, .. } => {
             push_warning(
@@ -1076,30 +1080,32 @@ fn add_texture_slot<'scope>(
         }
     };
 
-    let texture_id = builder.add_texture(Texture {
-        name: optional_name(ctx, &mut texture_storage, texture.name().or(image_name))?,
-        source,
-        sampler: map_sampler(texture.sampler()),
-        metadata: MetadataMap::new(),
-    })?;
-    texture_storage.adopt(builder)?;
-    material_storage.reserve_vec(
-        ctx,
-        &mut material.texture_slots,
-        1,
-        "gltf-material-texture-slots",
-    )?;
-    let source_key =
-        material_storage.copy_string(ctx, source_key, "gltf-texture-slot-source-key")?;
-    material.texture_slots.push(TextureSlot {
-        texture: texture_id,
-        role,
-        color_space,
-        uv_set: tex_coord,
-        scale,
-        transform: TextureTransform::default(),
-        source_key: Some(source_key),
-    });
+    let name = optional_name_parts(ctx, texture.name().or(image_name))?;
+    let prepared = name
+        .zip(source)?
+        .into_texture(TextureBuildConfig {
+            sampler: map_sampler(texture.sampler()),
+        })
+        .finish()?;
+    let texture_id = builder.add_prepared_texture(prepared)?;
+
+    let mut source_key_value = ctx.metered_string(
+        ImportStorageClass::SceneConstruction,
+        "gltf-texture-slot-source-key",
+    );
+    source_key_value.try_push_str(source_key)?;
+    let slot = source_key_value
+        .try_into_scene_parts()?
+        .into_some()
+        .into_texture_slot(TextureSlotBuildConfig {
+            texture: texture_id,
+            role,
+            color_space,
+            uv_set: tex_coord,
+            scale,
+            transform: TextureTransform::default(),
+        });
+    texture_slots.try_push_parts(slot)?;
     Ok(())
 }
 
@@ -1719,13 +1725,13 @@ fn poll_parser_loop(ctx: &ParseScope<'_>, completed: usize) -> Result<()> {
 
 fn collect_exact<'scope, T>(
     ctx: &'scope ParseScope<'_>,
-    storage: &mut LiveStorage<'scope>,
+    class: ImportStorageClass,
     expected: usize,
     allocation: &'static str,
     values: impl Iterator<Item = T>,
-) -> Result<Vec<T>> {
-    let mut collected = Vec::new();
-    storage.reserve_vec(ctx, &mut collected, expected, allocation)?;
+) -> Result<MeteredVec<'scope, T>> {
+    let mut collected = ctx.metered_vec(class, allocation);
+    collected.try_reserve(expected)?;
     for value in values {
         poll_parser_loop(ctx, collected.len())?;
         if collected.len() == expected {
@@ -1734,7 +1740,7 @@ fn collect_exact<'scope, T>(
                 format!("{allocation} produced more than {expected} values"),
             ));
         }
-        collected.push(value);
+        collected.try_push_reserved(value)?;
     }
     if collected.len() != expected {
         return Err(gltf_parse_error(
@@ -1750,24 +1756,24 @@ fn collect_exact<'scope, T>(
 
 fn try_vec_capacity<'scope, T>(
     ctx: &'scope ParseScope<'_>,
-    storage: &mut LiveStorage<'scope>,
+    class: ImportStorageClass,
     capacity: usize,
     allocation: &'static str,
-) -> Result<Vec<T>> {
-    let mut values = Vec::new();
-    storage.reserve_vec(ctx, &mut values, capacity, allocation)?;
+) -> Result<MeteredVec<'scope, T>> {
+    let mut values = ctx.metered_vec(class, allocation);
+    values.try_reserve(capacity)?;
     Ok(values)
 }
 
-fn try_vec_filled<'scope, T: Clone>(
+fn try_vec_filled<'scope, T: Copy>(
     ctx: &'scope ParseScope<'_>,
-    storage: &mut LiveStorage<'scope>,
+    class: ImportStorageClass,
     length: usize,
     value: T,
     allocation: &'static str,
-) -> Result<Vec<T>> {
-    let mut values = try_vec_capacity(ctx, storage, length, allocation)?;
-    values.resize(length, value);
+) -> Result<MeteredVec<'scope, T>> {
+    let mut values = try_vec_capacity(ctx, class, length, allocation)?;
+    values.try_resize(length, value)?;
     Ok(values)
 }
 
@@ -1816,16 +1822,14 @@ fn add_primitive_mesh(
         ImportWorkClass::AttributeCells,
         to_u64(attribute_cell_count),
     )?;
-    let mut mesh_storage = LiveStorage::new(ImportStorageClass::SceneConstruction);
-
     let reader = safe_gltf(ctx, "glTF primitive reader construction", || {
         primitive.reader(|buffer| buffers.get(buffer.index()).map(BufferData::as_slice))
     })?;
-    let positions: Vec<_> = safe_gltf(ctx, "glTF POSITION reader", || {
+    let positions = safe_gltf(ctx, "glTF POSITION reader", || {
         reader.read_positions().map(|positions| {
             collect_exact(
                 ctx,
-                &mut mesh_storage,
+                ImportStorageClass::SceneConstruction,
                 contract.position_count,
                 "gltf-position-values",
                 positions.map(vec3),
@@ -1844,12 +1848,12 @@ fn add_primitive_mesh(
             ),
         )
     })?;
-    let bounds = compute_bounds(ctx, &positions)?;
-    let normals: Vec<_> = safe_gltf(ctx, "glTF NORMAL reader", || {
+    let bounds = compute_bounds(ctx, positions.as_slice())?;
+    let normals = safe_gltf(ctx, "glTF NORMAL reader", || {
         reader.read_normals().map(|values| {
             collect_exact(
                 ctx,
-                &mut mesh_storage,
+                ImportStorageClass::SceneConstruction,
                 contract.position_count,
                 "gltf-normal-values",
                 values.map(vec3),
@@ -1857,12 +1861,14 @@ fn add_primitive_mesh(
         })
     })?
     .transpose()?
-    .unwrap_or_default();
-    let tangents: Vec<_> = safe_gltf(ctx, "glTF TANGENT reader", || {
+    .unwrap_or_else(|| {
+        ctx.metered_vec(ImportStorageClass::SceneConstruction, "gltf-normal-values")
+    });
+    let tangents = safe_gltf(ctx, "glTF TANGENT reader", || {
         reader.read_tangents().map(|values| {
             collect_exact(
                 ctx,
-                &mut mesh_storage,
+                ImportStorageClass::SceneConstruction,
                 contract.position_count,
                 "gltf-tangent-values",
                 values.map(vec4),
@@ -1870,12 +1876,14 @@ fn add_primitive_mesh(
         })
     })?
     .transpose()?
-    .unwrap_or_default();
-    let indices: Vec<_> = safe_gltf(ctx, "glTF indices reader", || {
+    .unwrap_or_else(|| {
+        ctx.metered_vec(ImportStorageClass::SceneConstruction, "gltf-tangent-values")
+    });
+    let indices = safe_gltf(ctx, "glTF indices reader", || {
         reader.read_indices().map(|indices| {
             collect_exact(
                 ctx,
-                &mut mesh_storage,
+                ImportStorageClass::SceneConstruction,
                 contract.index_count,
                 "gltf-index-values",
                 indices.into_u32(),
@@ -1883,15 +1891,15 @@ fn add_primitive_mesh(
         })
     })?
     .transpose()?
-    .unwrap_or_default();
+    .unwrap_or_else(|| ctx.metered_vec(ImportStorageClass::SceneConstruction, "gltf-index-values"));
 
-    let mut texcoords = try_vec_capacity(ctx, &mut mesh_storage, 8, "gltf-texcoord-streams")?;
+    let mut texcoords = ctx.metered_scene_vec("gltf-texcoord-streams");
     for set in 0..8 {
         let Some(values) = safe_gltf(ctx, "glTF TEXCOORD reader", || {
             reader.read_tex_coords(set).map(|values| {
                 collect_exact(
                     ctx,
-                    &mut mesh_storage,
+                    ImportStorageClass::SceneConstruction,
                     contract.position_count,
                     "gltf-texcoord-values",
                     values.into_f32().map(vec2),
@@ -1902,15 +1910,15 @@ fn add_primitive_mesh(
         else {
             break;
         };
-        texcoords.push(values);
+        texcoords.try_push_parts(values.try_into_scene_parts()?)?;
     }
-    let mut colors = try_vec_capacity(ctx, &mut mesh_storage, 8, "gltf-color-streams")?;
+    let mut colors = ctx.metered_scene_vec("gltf-color-streams");
     for set in 0..8 {
         let Some(values) = safe_gltf(ctx, "glTF COLOR reader", || {
             reader.read_colors(set).map(|values| {
                 collect_exact(
                     ctx,
-                    &mut mesh_storage,
+                    ImportStorageClass::SceneConstruction,
                     contract.position_count,
                     "gltf-color-values",
                     values.into_rgba_f32().map(color),
@@ -1921,13 +1929,13 @@ fn add_primitive_mesh(
         else {
             break;
         };
-        colors.push(values);
+        colors.try_push_parts(values.try_into_scene_parts()?)?;
     }
     let joint_indices = safe_gltf(ctx, "glTF JOINTS reader", || {
         reader.read_joints(0).map(|values| {
             collect_exact(
                 ctx,
-                &mut mesh_storage,
+                ImportStorageClass::SceneConstruction,
                 contract.position_count,
                 "gltf-joint-index-values",
                 values.into_u16(),
@@ -1935,12 +1943,17 @@ fn add_primitive_mesh(
         })
     })?
     .transpose()?
-    .unwrap_or_default();
+    .unwrap_or_else(|| {
+        ctx.metered_vec(
+            ImportStorageClass::SceneConstruction,
+            "gltf-joint-index-values",
+        )
+    });
     let joint_weights = safe_gltf(ctx, "glTF WEIGHTS reader", || {
         reader.read_weights(0).map(|values| {
             collect_exact(
                 ctx,
-                &mut mesh_storage,
+                ImportStorageClass::SceneConstruction,
                 contract.position_count,
                 "gltf-joint-weight-values",
                 values.into_f32(),
@@ -1948,7 +1961,12 @@ fn add_primitive_mesh(
         })
     })?
     .transpose()?
-    .unwrap_or_default();
+    .unwrap_or_else(|| {
+        ctx.metered_vec(
+            ImportStorageClass::SceneConstruction,
+            "gltf-joint-weight-values",
+        )
+    });
 
     if safe_gltf(ctx, "glTF morph target iterator", || {
         primitive.morph_targets().next().is_some()
@@ -1967,25 +1985,22 @@ fn add_primitive_mesh(
     let material = contract
         .material_index
         .and_then(|index| material_ids.get(index).copied());
-    let mesh_name = primitive_name(ctx, &mut mesh_storage, mesh.name(), primitive.index())?;
-    let mesh_out = Mesh {
-        name: mesh_name,
-        topology,
-        positions,
-        normals,
-        tangents,
-        texcoords,
-        colors,
-        indices,
-        material,
-        joint_indices,
-        joint_weights,
-        bounds,
-        metadata: MetadataMap::new(),
-        ..Mesh::default()
-    };
-    let mesh_id = builder.add_mesh(mesh_out)?;
-    mesh_storage.adopt(builder)?;
+    let mesh_name = primitive_name_parts(ctx, mesh.name(), primitive.index())?;
+    let mesh_parts = mesh_name
+        .into_mesh(MeshBuildConfig {
+            topology,
+            material,
+            bounds,
+        })
+        .with_positions(positions.try_into_scene_parts()?)?
+        .with_normals(normals.try_into_scene_parts()?)?
+        .with_tangents(tangents.try_into_scene_parts()?)?
+        .with_texcoords(texcoords.try_into_scene_parts()?)?
+        .with_colors(colors.try_into_scene_parts()?)?
+        .with_indices(indices.try_into_scene_parts()?)?
+        .with_joint_indices(joint_indices.try_into_scene_parts()?)?
+        .with_joint_weights(joint_weights.try_into_scene_parts()?)?;
+    let mesh_id = builder.add_prepared_mesh(mesh_parts.finish()?)?;
     attribute_cell_work.complete()?;
     attribute_stream_work.complete()?;
     topology_work.complete()?;
@@ -1998,22 +2013,21 @@ fn add_primitive_mesh(
 
 fn add_scene_nodes<'scope>(
     ctx: &'scope ParseScope<'_>,
-    normalization_storage: &mut LiveStorage<'scope>,
     builder: &mut ScopedSceneBuilder,
     graph: &NodeGraph<'_, '_>,
-    mesh_ids_by_gltf_mesh: &[Vec<baozi_core::MeshId>],
-) -> Result<NodeImportMaps> {
+    mesh_ids_by_gltf_mesh: &[MeteredVec<'_, baozi_core::MeshId>],
+) -> Result<NodeImportMaps<'scope>> {
     let mut imports = NodeImportMaps {
         node_ids: try_vec_filled(
             ctx,
-            normalization_storage,
+            ImportStorageClass::FormatNormalization,
             graph.nodes.len(),
             None,
             "gltf-node-id-map",
         )?,
         node_skins: try_vec_capacity(
             ctx,
-            normalization_storage,
+            ImportStorageClass::FormatNormalization,
             graph.nodes.len(),
             "gltf-node-skin-map",
         )?,
@@ -2021,20 +2035,20 @@ fn add_scene_nodes<'scope>(
     let root = builder.root();
     let mut pending = try_vec_capacity(
         ctx,
-        normalization_storage,
+        ImportStorageClass::FormatNormalization,
         graph.nodes.len(),
         "gltf-node-build-stack",
     )?;
-    for (root_ordinal, node_index) in graph.roots.iter().rev().copied().enumerate() {
+    for (root_ordinal, node_index) in graph.roots.as_slice().iter().rev().copied().enumerate() {
         poll_parser_loop(ctx, root_ordinal)?;
-        pending.push((node_index, root));
+        pending.try_push_reserved((node_index, root))?;
     }
 
     let mut constructed = 0usize;
     while let Some((node_index, parent)) = pending.pop() {
         poll_parser_loop(ctx, constructed)?;
         constructed += 1;
-        let node = graph.nodes.get(node_index).ok_or_else(|| {
+        let node = graph.nodes.as_slice().get(node_index).ok_or_else(|| {
             gltf_parse_error(
                 ctx,
                 format!("glTF node graph references missing node {node_index}"),
@@ -2048,21 +2062,24 @@ fn add_scene_nodes<'scope>(
             mesh_ids_by_gltf_mesh,
             &mut imports,
         )?;
-        for (child_ordinal, child_index) in
-            graph.children[node_index].iter().rev().copied().enumerate()
+        for (child_ordinal, child_index) in graph.children.as_slice()[node_index]
+            .as_slice()
+            .iter()
+            .rev()
+            .copied()
+            .enumerate()
         {
             poll_parser_loop(ctx, child_ordinal)?;
-            pending.push((child_index, node_id));
+            pending.try_push_reserved((child_index, node_id))?;
         }
     }
     Ok(imports)
 }
 
 struct NodeGraph<'document, 'scope> {
-    nodes: Vec<gltf::Node<'document>>,
-    children: Vec<Vec<usize>>,
-    roots: Vec<usize>,
-    _storage: LiveStorage<'scope>,
+    nodes: MeteredVec<'scope, gltf::Node<'document>>,
+    children: MeteredVec<'scope, MeteredVec<'scope, usize>>,
+    roots: MeteredVec<'scope, usize>,
 }
 
 fn preflight_node_graph<'document, 'scope>(
@@ -2079,28 +2096,31 @@ fn preflight_node_graph<'document, 'scope>(
 
     let mut graph_work = 0usize;
     charge_graph_work(ctx, &mut graph_work, node_count)?;
-    let mut graph_storage = LiveStorage::new(ImportStorageClass::FormatNormalization);
-    let mut scratch_storage = LiveStorage::new(ImportStorageClass::FormatNormalization);
     let nodes = safe_gltf(ctx, "glTF nodes", || {
         collect_exact(
             ctx,
-            &mut graph_storage,
+            ImportStorageClass::FormatNormalization,
             node_count,
             "gltf-node-list",
             gltf.nodes(),
         )
     })??;
-    let mut children = try_vec_capacity(ctx, &mut graph_storage, node_count, "gltf-node-children")?;
+    let mut children = try_vec_capacity(
+        ctx,
+        ImportStorageClass::FormatNormalization,
+        node_count,
+        "gltf-node-children",
+    )?;
     let mut parents = try_vec_filled(
         ctx,
-        &mut scratch_storage,
+        ImportStorageClass::FormatNormalization,
         node_count,
         None,
         "gltf-node-parents",
     )?;
     let mut edge_count = 0usize;
 
-    for (parent_index, node) in nodes.iter().enumerate() {
+    for (parent_index, node) in nodes.as_slice().iter().enumerate() {
         poll_parser_loop(ctx, parent_index)?;
         let child_count = safe_gltf(ctx, "glTF node child count", || node.children().len())?;
         edge_count = checked_add_with_limit(
@@ -2115,13 +2135,13 @@ fn preflight_node_graph<'document, 'scope>(
         let child_indices = safe_gltf(ctx, "glTF node children", || {
             collect_exact(
                 ctx,
-                &mut graph_storage,
+                ImportStorageClass::FormatNormalization,
                 child_count,
                 "gltf-node-child-list",
                 node.children().map(|child| child.index()),
             )
         })??;
-        for (child_ordinal, &child_index) in child_indices.iter().enumerate() {
+        for (child_ordinal, &child_index) in child_indices.as_slice().iter().enumerate() {
             poll_parser_loop(ctx, child_ordinal)?;
             if child_index >= node_count {
                 return Err(gltf_parse_error(
@@ -2135,7 +2155,7 @@ fn preflight_node_graph<'document, 'scope>(
                     format!("glTF node graph contains a cycle at node {parent_index}"),
                 ));
             }
-            if let Some(existing_parent) = parents[child_index] {
+            if let Some(existing_parent) = parents.as_slice()[child_index] {
                 return Err(gltf_parse_error(
                     ctx,
                     format!(
@@ -2143,22 +2163,20 @@ fn preflight_node_graph<'document, 'scope>(
                     ),
                 ));
             }
-            parents[child_index] = Some(parent_index);
+            parents.as_mut_slice()[child_index] = Some(parent_index);
         }
-        children.push(child_indices);
+        children.try_push_reserved(child_indices)?;
     }
 
-    validate_graph_depth_and_cycles(ctx, &children, &parents)?;
-    let roots =
-        select_and_validate_scene_roots(ctx, &mut graph_storage, gltf, &parents, &mut graph_work)?;
-    let usage = validate_canonical_graph_limits(ctx, &children, &roots)?;
+    validate_graph_depth_and_cycles(ctx, children.as_slice(), parents.as_slice())?;
+    let roots = select_and_validate_scene_roots(ctx, gltf, parents.as_slice(), &mut graph_work)?;
+    let usage = validate_canonical_graph_limits(ctx, children.as_slice(), roots.as_slice())?;
     charge_canonical_graph(ctx, usage)?;
 
     Ok(NodeGraph {
         nodes,
         children,
         roots,
-        _storage: graph_storage,
     })
 }
 
@@ -2172,7 +2190,7 @@ struct CanonicalGraphUsage {
 
 fn validate_canonical_graph_limits(
     ctx: &ParseScope<'_>,
-    children: &[Vec<usize>],
+    children: &[MeteredVec<'_, usize>],
     roots: &[usize],
 ) -> Result<CanonicalGraphUsage> {
     let mut node_count = 1usize;
@@ -2199,12 +2217,15 @@ fn validate_canonical_graph_limits(
     )?;
     validate_canonical_graph_work(ctx, node_count, edge_count)?;
 
-    let mut storage = LiveStorage::new(ImportStorageClass::FormatNormalization);
-    let mut pending =
-        try_vec_capacity(ctx, &mut storage, roots.len(), "gltf-canonical-graph-stack")?;
+    let mut pending = try_vec_capacity(
+        ctx,
+        ImportStorageClass::FormatNormalization,
+        roots.len(),
+        "gltf-canonical-graph-stack",
+    )?;
     for (root_ordinal, root) in roots.iter().rev().copied().enumerate() {
         poll_parser_loop(ctx, root_ordinal)?;
-        pending.push((root, 2usize));
+        pending.try_push_reserved((root, 2usize))?;
     }
 
     while let Some((node_index, depth)) = pending.pop() {
@@ -2237,15 +2258,10 @@ fn validate_canonical_graph_limits(
         let child_depth = depth
             .checked_add(1)
             .ok_or_else(|| ctx.allocation_failure("gltf-graph-depth-counter"))?;
-        storage.reserve_vec(
-            ctx,
-            &mut pending,
-            node_children.len(),
-            "gltf-canonical-graph-stack",
-        )?;
-        for (child_ordinal, child) in node_children.iter().rev().copied().enumerate() {
+        pending.try_reserve(node_children.len())?;
+        for (child_ordinal, child) in node_children.as_slice().iter().rev().copied().enumerate() {
             poll_parser_loop(ctx, child_ordinal)?;
-            pending.push((child, child_depth));
+            pending.try_push_reserved((child, child_depth))?;
         }
     }
 
@@ -2297,33 +2313,43 @@ fn charge_graph_work(ctx: &ParseScope<'_>, graph_work: &mut usize, amount: usize
 
 fn validate_graph_depth_and_cycles(
     ctx: &ParseScope<'_>,
-    children: &[Vec<usize>],
+    children: &[MeteredVec<'_, usize>],
     parents: &[Option<usize>],
 ) -> Result<()> {
-    let mut storage = LiveStorage::new(ImportStorageClass::FormatNormalization);
-    let mut depths = try_vec_filled(ctx, &mut storage, parents.len(), 0usize, "gltf-node-depths")?;
-    let mut queue = try_vec_capacity(ctx, &mut storage, parents.len(), "gltf-node-depth-queue")?;
+    let mut depths = try_vec_filled(
+        ctx,
+        ImportStorageClass::FormatNormalization,
+        parents.len(),
+        0usize,
+        "gltf-node-depths",
+    )?;
+    let mut queue = try_vec_capacity(
+        ctx,
+        ImportStorageClass::FormatNormalization,
+        parents.len(),
+        "gltf-node-depth-queue",
+    )?;
     for (node_index, parent) in parents.iter().enumerate() {
         if parent.is_none() {
-            depths[node_index] = 1;
-            queue.push(node_index);
+            depths.as_mut_slice()[node_index] = 1;
+            queue.try_push_reserved(node_index)?;
         }
     }
 
     let mut cursor = 0usize;
     while cursor < queue.len() {
         poll_parser_loop(ctx, cursor)?;
-        let node_index = queue[cursor];
+        let node_index = queue.as_slice()[cursor];
         cursor += 1;
-        let depth = depths[node_index];
+        let depth = depths.as_slice()[node_index];
         enforce_usize_limit(ctx, "max_graph_depth", depth, ctx.limits().max_graph_depth)?;
-        for (child_ordinal, &child_index) in children[node_index].iter().enumerate() {
+        for (child_ordinal, &child_index) in children[node_index].as_slice().iter().enumerate() {
             poll_parser_loop(ctx, child_ordinal)?;
             let child_depth = depth
                 .checked_add(1)
                 .ok_or_else(|| ctx.allocation_failure("gltf-graph-depth-counter"))?;
-            depths[child_index] = child_depth;
-            queue.push(child_index);
+            depths.as_mut_slice()[child_index] = child_depth;
+            queue.try_push_reserved(child_index)?;
         }
     }
 
@@ -2335,17 +2361,15 @@ fn validate_graph_depth_and_cycles(
 
 fn select_and_validate_scene_roots<'scope>(
     ctx: &'scope ParseScope<'_>,
-    result_storage: &mut LiveStorage<'scope>,
     gltf: &gltf::Gltf,
     parents: &[Option<usize>],
     graph_work: &mut usize,
-) -> Result<Vec<usize>> {
+) -> Result<MeteredVec<'scope, usize>> {
     let scene_count = safe_gltf(ctx, "glTF scene count", || gltf.scenes().len())?;
     charge_graph_work(ctx, graph_work, scene_count)?;
-    let mut scratch_storage = LiveStorage::new(ImportStorageClass::FormatNormalization);
     let mut scene_roots = try_vec_capacity(
         ctx,
-        &mut scratch_storage,
+        ImportStorageClass::FormatNormalization,
         scene_count,
         "gltf-scene-root-lists",
     )?;
@@ -2357,24 +2381,24 @@ fn select_and_validate_scene_roots<'scope>(
         let roots = safe_gltf(ctx, "glTF scene roots", || {
             collect_exact(
                 ctx,
-                &mut scratch_storage,
+                ImportStorageClass::FormatNormalization,
                 root_count,
                 "gltf-scene-roots",
                 scene.nodes().map(|node| node.index()),
             )
         })??;
-        scene_roots.push(roots);
+        scene_roots.try_push_reserved(roots)?;
     }
 
     let mut seen_in_scene = try_vec_filled(
         ctx,
-        &mut scratch_storage,
+        ImportStorageClass::FormatNormalization,
         parents.len(),
         usize::MAX,
         "gltf-scene-root-membership",
     )?;
-    for (scene_index, roots) in scene_roots.iter().enumerate() {
-        for (root_ordinal, &root_index) in roots.iter().enumerate() {
+    for (scene_index, roots) in scene_roots.as_slice().iter().enumerate() {
+        for (root_ordinal, &root_index) in roots.as_slice().iter().enumerate() {
             poll_parser_loop(ctx, root_ordinal)?;
             let Some(parent) = parents.get(root_index) else {
                 return Err(gltf_parse_error(
@@ -2382,13 +2406,13 @@ fn select_and_validate_scene_roots<'scope>(
                     format!("glTF scene {scene_index} references missing root node {root_index}"),
                 ));
             };
-            if seen_in_scene[root_index] == scene_index {
+            if seen_in_scene.as_slice()[root_index] == scene_index {
                 return Err(gltf_parse_error(
                     ctx,
                     format!("glTF scene {scene_index} contains duplicate root node {root_index}"),
                 ));
             }
-            seen_in_scene[root_index] = scene_index;
+            seen_in_scene.as_mut_slice()[root_index] = scene_index;
             if parent.is_some() {
                 return Err(gltf_parse_error(
                     ctx,
@@ -2404,7 +2428,7 @@ fn select_and_validate_scene_roots<'scope>(
     let selected_scene_index = default_scene_index.or((scene_count > 0).then_some(0));
     match selected_scene_index {
         Some(scene_index) => {
-            let selected = scene_roots.get(scene_index).ok_or_else(|| {
+            let selected = scene_roots.as_slice().get(scene_index).ok_or_else(|| {
                 gltf_parse_error(
                     ctx,
                     format!("glTF default scene index {scene_index} is out of range"),
@@ -2412,27 +2436,27 @@ fn select_and_validate_scene_roots<'scope>(
             })?;
             let mut roots = try_vec_capacity(
                 ctx,
-                result_storage,
+                ImportStorageClass::FormatNormalization,
                 selected.len(),
                 "gltf-selected-scene-roots",
             )?;
-            for (root_ordinal, root) in selected.iter().copied().enumerate() {
+            for (root_ordinal, root) in selected.as_slice().iter().copied().enumerate() {
                 poll_parser_loop(ctx, root_ordinal)?;
-                roots.push(root);
+                roots.try_push_reserved(root)?;
             }
             Ok(roots)
         }
         None => {
             let mut roots = try_vec_capacity(
                 ctx,
-                result_storage,
+                ImportStorageClass::FormatNormalization,
                 parents.len(),
                 "gltf-derived-scene-roots",
             )?;
             for (node_index, parent) in parents.iter().enumerate() {
                 poll_parser_loop(ctx, node_index)?;
                 if parent.is_none() {
-                    roots.push(node_index);
+                    roots.try_push_reserved(node_index)?;
                 }
             }
             Ok(roots)
@@ -2440,56 +2464,48 @@ fn select_and_validate_scene_roots<'scope>(
     }
 }
 
-#[derive(Debug, Default)]
-struct NodeImportMaps {
-    node_ids: Vec<Option<baozi_core::NodeId>>,
-    node_skins: Vec<(baozi_core::NodeId, usize)>,
+struct NodeImportMaps<'scope> {
+    node_ids: MeteredVec<'scope, Option<baozi_core::NodeId>>,
+    node_skins: MeteredVec<'scope, (baozi_core::NodeId, usize)>,
 }
 
-fn add_node(
-    ctx: &ParseScope<'_>,
+fn add_node<'scope>(
+    ctx: &'scope ParseScope<'_>,
     builder: &mut ScopedSceneBuilder,
     parent: baozi_core::NodeId,
     node: &gltf::Node<'_>,
-    mesh_ids_by_gltf_mesh: &[Vec<baozi_core::MeshId>],
-    imports: &mut NodeImportMaps,
+    mesh_ids_by_gltf_mesh: &[MeteredVec<'_, baozi_core::MeshId>],
+    imports: &mut NodeImportMaps<'scope>,
 ) -> Result<baozi_core::NodeId> {
     let mesh = safe_gltf(ctx, "glTF node mesh", || node.mesh())?;
     let mesh_ids = mesh.and_then(|mesh| mesh_ids_by_gltf_mesh.get(mesh.index()));
-    let binding_count = mesh_ids.map_or(0, Vec::len);
-    let mut node_storage = LiveStorage::new(ImportStorageClass::SceneConstruction);
-    let mut mesh_bindings = try_vec_capacity(
-        ctx,
-        &mut node_storage,
-        binding_count,
-        "gltf-node-mesh-bindings",
-    )?;
-    if let Some(mesh_ids) = mesh_ids {
-        for (mesh_ordinal, mesh_id) in mesh_ids.iter().copied().enumerate() {
-            poll_parser_loop(ctx, mesh_ordinal)?;
-            mesh_bindings.push(MeshBinding::new(mesh_id));
-        }
-    }
     let camera = safe_gltf(ctx, "glTF node camera", || node.camera())?
         .map(|camera| baozi_core::CameraId::new(camera.index() as u32));
     let node_name = safe_gltf(ctx, "glTF node name", || node.name())?;
     let transform = safe_gltf(ctx, "glTF node transform", || node.transform().matrix())?;
 
-    let node_id = builder.add_child_node(
-        parent,
-        Node {
-            name: optional_name(ctx, &mut node_storage, node_name)?,
+    let prepared = optional_name_parts(ctx, node_name)?
+        .into_node(NodeBuildConfig {
             transform: Mat4 { cols: transform },
-            mesh_bindings,
             camera,
-            ..Node::default()
-        },
-    )?;
-    node_storage.adopt(builder)?;
+            light: None,
+        })
+        .finish()?;
+    let node_id = builder.add_prepared_child_node(parent, prepared)?;
+    if let Some(mesh_ids) = mesh_ids {
+        for (mesh_ordinal, mesh_id) in mesh_ids.as_slice().iter().copied().enumerate() {
+            poll_parser_loop(ctx, mesh_ordinal)?;
+            builder.add_node_mesh_binding(node_id, MeshBinding::new(mesh_id))?;
+        }
+    }
     let node_index = node.index();
-    let slot = imports.node_ids.get_mut(node_index).ok_or_else(|| {
-        gltf_parse_error(ctx, format!("glTF node index {node_index} is out of range"))
-    })?;
+    let slot = imports
+        .node_ids
+        .as_mut_slice()
+        .get_mut(node_index)
+        .ok_or_else(|| {
+            gltf_parse_error(ctx, format!("glTF node index {node_index} is out of range"))
+        })?;
     if slot.is_some() {
         return Err(gltf_parse_error(
             ctx,
@@ -2498,31 +2514,32 @@ fn add_node(
     }
     *slot = Some(node_id);
     if let Some(skin) = safe_gltf(ctx, "glTF node skin", || node.skin())? {
-        imports.node_skins.push((node_id, skin.index()));
+        imports
+            .node_skins
+            .try_push_reserved((node_id, skin.index()))?;
     }
     Ok(node_id)
 }
 
 fn add_skins<'scope>(
     ctx: &'scope ParseScope<'_>,
-    normalization_storage: &mut LiveStorage<'scope>,
     builder: &mut ScopedSceneBuilder,
     gltf: &gltf::Gltf,
     buffers: &[BufferData<'_>],
     node_ids: &[Option<baozi_core::NodeId>],
     node_skins: &[(baozi_core::NodeId, usize)],
-) -> Result<Vec<Option<baozi_core::SkinId>>> {
+) -> Result<MeteredVec<'scope, Option<baozi_core::SkinId>>> {
     let skin_count = safe_gltf(ctx, "glTF skin count", || gltf.skins().len())?;
     let mut referenced_skins = try_vec_filled(
         ctx,
-        normalization_storage,
+        ImportStorageClass::FormatNormalization,
         skin_count,
         false,
         "gltf-referenced-skins",
     )?;
     for (binding_ordinal, (node_id, skin_index)) in node_skins.iter().enumerate() {
         poll_parser_loop(ctx, binding_ordinal)?;
-        let Some(referenced) = referenced_skins.get_mut(*skin_index) else {
+        let Some(referenced) = referenced_skins.as_mut_slice().get_mut(*skin_index) else {
             return Err(gltf_parse_error(
                 ctx,
                 format!(
@@ -2537,7 +2554,7 @@ fn add_skins<'scope>(
 
     let mut skin_ids = try_vec_filled(
         ctx,
-        normalization_storage,
+        ImportStorageClass::FormatNormalization,
         skin_count,
         None,
         "gltf-skin-id-map",
@@ -2545,7 +2562,7 @@ fn add_skins<'scope>(
     for (ordinal, skin) in gltf.skins().enumerate() {
         poll_parser_loop(ctx, ordinal)?;
         let skin_index = skin.index();
-        let Some(is_referenced) = referenced_skins.get(skin_index).copied() else {
+        let Some(is_referenced) = referenced_skins.as_slice().get(skin_index).copied() else {
             return Err(gltf_parse_error(
                 ctx,
                 format!("glTF skin index {skin_index} is out of range"),
@@ -2556,24 +2573,22 @@ fn add_skins<'scope>(
         }
 
         let joint_count = safe_gltf(ctx, "glTF skin joint count", || skin.joints().len())?;
-        let mut joint_storage = LiveStorage::new(ImportStorageClass::FormatNormalization);
         let joints = safe_gltf(ctx, "glTF skin joints", || {
             collect_exact(
                 ctx,
-                &mut joint_storage,
+                ImportStorageClass::FormatNormalization,
                 joint_count,
                 "gltf-skin-joints",
                 skin.joints(),
             )
         })??;
-        let mut skin_storage = LiveStorage::new(ImportStorageClass::SceneConstruction);
         let mut mapped_joints = try_vec_capacity(
             ctx,
-            &mut skin_storage,
+            ImportStorageClass::SceneConstruction,
             joints.len(),
             "gltf-mapped-skin-joints",
         )?;
-        for (joint_ordinal, joint) in joints.into_iter().enumerate() {
+        for (joint_ordinal, joint) in joints.as_slice().iter().enumerate() {
             poll_parser_loop(ctx, joint_ordinal)?;
             let Some(Some(node_id)) = node_ids.get(joint.index()) else {
                 return Err(ContentError::parse(
@@ -2586,9 +2601,8 @@ fn add_skins<'scope>(
                     ),
                 ));
             };
-            mapped_joints.push(*node_id);
+            mapped_joints.try_push_reserved(*node_id)?;
         }
-        drop(joint_storage);
 
         let skeleton_root = match safe_gltf(ctx, "glTF skin skeleton root", || skin.skeleton())? {
             Some(root) => match node_ids.get(root.index()).copied().flatten() {
@@ -2619,7 +2633,7 @@ fn add_skins<'scope>(
                 .map(|matrices| {
                     collect_exact(
                         ctx,
-                        &mut skin_storage,
+                        ImportStorageClass::SceneConstruction,
                         mapped_joints.len(),
                         "gltf-inverse-bind-matrices",
                         matrices.map(|cols| Mat4 { cols }),
@@ -2627,7 +2641,12 @@ fn add_skins<'scope>(
                 })
                 .transpose()
         })??
-        .unwrap_or_default();
+        .unwrap_or_else(|| {
+            ctx.metered_vec(
+                ImportStorageClass::SceneConstruction,
+                "gltf-inverse-bind-matrices",
+            )
+        });
         if has_inverse_bind_matrices && inverse_bind_matrices.len() != mapped_joints.len() {
             return Err(ContentError::parse(
                 ctx.source().to_string(),
@@ -2639,15 +2658,16 @@ fn add_skins<'scope>(
             ));
         }
 
-        let skin_id = builder.add_skin(Skin {
-            name: optional_name(ctx, &mut skin_storage, skin.name())?,
-            joints: mapped_joints,
-            inverse_bind_matrices,
-            skeleton_root,
-            metadata: MetadataMap::new(),
-        })?;
-        skin_storage.adopt(builder)?;
-        let Some(slot) = skin_ids.get_mut(skin_index) else {
+        let name = optional_name_parts(ctx, skin.name())?;
+        let mapped_joints = mapped_joints.try_into_scene_parts()?;
+        let inverse_bind_matrices = inverse_bind_matrices.try_into_scene_parts()?;
+        let prepared = name
+            .into_skin(SkinBuildConfig { skeleton_root })
+            .with_joints(mapped_joints)?
+            .with_inverse_bind_matrices(inverse_bind_matrices)?
+            .finish()?;
+        let skin_id = builder.add_prepared_skin(prepared)?;
+        let Some(slot) = skin_ids.as_mut_slice().get_mut(skin_index) else {
             return Err(gltf_parse_error(
                 ctx,
                 format!("glTF skin index {skin_index} is out of range"),
@@ -2775,7 +2795,6 @@ fn add_cameras(
                 }
             }
         })?;
-        let mut camera_storage = LiveStorage::new(ImportStorageClass::SceneConstruction);
         let name = match camera.name() {
             Some(name) if name.len() > ctx.limits().max_string_bytes => {
                 push_warning(
@@ -2783,16 +2802,14 @@ fn add_cameras(
                     "gltf.camera_name_limit",
                     "camera name exceeded max_string_bytes and was ignored",
                 )?;
-                None
+                optional_name_parts(ctx, None)?
             }
-            name => optional_name(ctx, &mut camera_storage, name)?,
+            name => optional_name_parts(ctx, name)?,
         };
-        builder.add_camera(Camera {
-            name,
-            projection,
-            ..Camera::default()
-        })?;
-        camera_storage.adopt(builder)?;
+        let prepared = name
+            .into_camera(CameraBuildConfig { projection })
+            .finish()?;
+        builder.add_prepared_camera(prepared)?;
     }
     Ok(())
 }
@@ -2881,33 +2898,24 @@ fn map_wrap(wrap: WrappingMode) -> TextureWrapMode {
     }
 }
 
-fn primitive_name<'scope>(
+fn primitive_name_parts<'scope>(
     ctx: &'scope ParseScope<'_>,
-    storage: &mut LiveStorage<'scope>,
     mesh_name: Option<&str>,
     primitive_index: usize,
-) -> Result<Option<String>> {
+) -> Result<SceneValueParts<'scope, Option<String>>> {
+    let mut name = ctx.metered_string(ImportStorageClass::SceneConstruction, "gltf-primitive-name");
     let Some(mesh_name) = mesh_name else {
-        return Ok(None);
+        return Ok(name.try_into_scene_parts()?.discard_into_none());
     };
     let name_len = primitive_name_len(ctx, mesh_name, primitive_index)?;
-    let mut name = String::new();
-    storage.reserve_string(ctx, &mut name, name_len, "gltf-primitive-name")?;
-    let mut next_poll = 0usize;
-    for (byte_index, character) in mesh_name.char_indices() {
-        if byte_index >= next_poll {
-            ctx.poll()?;
-            next_poll = byte_index.saturating_add(PARSER_POLL_INTERVAL);
-        }
-        name.push(character);
-    }
+    name.try_reserve(name_len)?;
+    name.try_push_str(mesh_name)?;
     if primitive_index != 0 {
-        use std::fmt::Write as _;
-        write!(&mut name, "#{primitive_index}")
-            .map_err(|_| ctx.allocation_failure("gltf-primitive-name"))?;
+        name.try_push_char('#')?;
+        name.try_push_usize(primitive_index)?;
     }
     debug_assert_eq!(name.len(), name_len);
-    Ok(Some(name))
+    Ok(name.try_into_scene_parts()?.into_some())
 }
 
 fn primitive_name_len(
@@ -2938,22 +2946,22 @@ fn decimal_digits(mut value: usize) -> usize {
     digits
 }
 
-fn optional_name<'scope>(
+fn optional_name_parts<'scope>(
     ctx: &'scope ParseScope<'_>,
-    storage: &mut LiveStorage<'scope>,
     value: Option<&str>,
-) -> Result<Option<String>> {
-    value
-        .map(|value| {
-            enforce_usize_limit(
-                ctx,
-                "max_string_bytes",
-                value.len(),
-                ctx.limits().max_string_bytes,
-            )?;
-            Ok(storage.copy_string(ctx, value, "gltf-name")?)
-        })
-        .transpose()
+) -> Result<SceneValueParts<'scope, Option<String>>> {
+    let mut name = ctx.metered_string(ImportStorageClass::SceneConstruction, "gltf-name");
+    let Some(value) = value else {
+        return Ok(name.try_into_scene_parts()?.discard_into_none());
+    };
+    enforce_usize_limit(
+        ctx,
+        "max_string_bytes",
+        value.len(),
+        ctx.limits().max_string_bytes,
+    )?;
+    name.try_push_str(value)?;
+    Ok(name.try_into_scene_parts()?.into_some())
 }
 
 fn is_data_uri(uri: &str) -> bool {

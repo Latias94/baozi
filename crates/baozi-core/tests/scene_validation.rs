@@ -222,11 +222,11 @@ impl SceneValidationControl for TestControl {
 
     fn transition_reservation(
         &mut self,
-        mut reservation: Self::Reservation,
+        reservation: &mut Self::Reservation,
         from: SceneReservationKind,
         to: SceneReservationKind,
         required_bytes: u64,
-    ) -> Result<Self::Reservation, Self::Error> {
+    ) -> Result<(), Self::Error> {
         if reservation.kind != from {
             return Err(TestControlError::WrongReservationKind);
         }
@@ -243,7 +243,7 @@ impl SceneValidationControl for TestControl {
         self.record_live(without_old.checked_add(required_bytes).unwrap());
         reservation.kind = to;
         reservation.bytes = required_bytes;
-        Ok(reservation)
+        Ok(())
     }
 }
 
@@ -960,7 +960,6 @@ fn validation_success_owns_exact_scene_evidence_and_a_live_reservation() {
                 control.live_bytes(),
                 stats.footprint().accounted_payload_bytes()
             );
-            drop(reservation);
             Ok::<(), TestControlError>(())
         })
         .unwrap();
@@ -980,10 +979,7 @@ fn rejected_publication_releases_the_scene_reservation_without_returning_a_scene
     .unwrap();
 
     let error = success
-        .try_publish(|reservation| {
-            drop(reservation);
-            Err(TestControlError::PublicationRejected)
-        })
+        .try_publish(|_reservation| Err(TestControlError::PublicationRejected))
         .unwrap_err();
 
     assert_eq!(error, TestControlError::PublicationRejected);
@@ -1002,10 +998,7 @@ fn mesh_binding_scratch_remains_reserved_during_mesh_validation() {
 
     assert!(control.verified_scratch_lifetime);
     success
-        .try_publish(|reservation| {
-            drop(reservation);
-            Ok::<(), TestControlError>(())
-        })
+        .try_publish(|_reservation| Ok::<(), TestControlError>(()))
         .unwrap();
 }
 
@@ -1280,10 +1273,7 @@ fn successful_edit_transitions_one_candidate_reservation_without_double_counting
                 .unwrap()
     );
     success
-        .try_publish(|reservation| {
-            drop(reservation);
-            Ok::<(), TestControlError>(())
-        })
+        .try_publish(|_reservation| Ok::<(), TestControlError>(()))
         .unwrap();
     assert_eq!(control.live_bytes(), 0);
 }

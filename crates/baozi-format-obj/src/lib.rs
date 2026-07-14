@@ -1,6 +1,5 @@
 #![forbid(unsafe_code)]
 
-mod allocation;
 mod detect;
 mod error;
 mod mesh_builder;

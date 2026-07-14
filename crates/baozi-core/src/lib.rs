@@ -46,7 +46,9 @@ pub use material::{
     TextureWrapMode,
 };
 pub use math::{Aabb, Color, Mat4, Quat, Vec2, Vec3, Vec4};
-pub use ordered_map::{OrderedMap, OrderedMapCapacityPlan, OrderedMapError, OrderedMapIter};
+pub use ordered_map::{
+    OrderedMap, OrderedMapCapacityPlan, OrderedMapError, OrderedMapIter, PreparedOrderedMapCapacity,
+};
 pub use scene::{
     Animation, AnimationChannel, AnimationId, AnimationInterpolation, AnimationProperty,
     AnimationTarget, AnimationValues, Camera, CameraId, CameraProjection, Light, LightId,
@@ -57,7 +59,7 @@ pub use scene::{
     SceneNodeCapacityPlan, SceneSpace, Skin, SkinId, TextureId, ValidatedScene, VertexAttribute,
     VertexAttributeData, VertexAttributeSemantic, validate_scene, validate_scene_with,
 };
-pub use scene_storage::SceneStorageFootprint;
+pub use scene_storage::{SceneBuildValue, SceneStorageFootprint, SceneValueFootprint};
 pub use validation_control::{
     SCENE_VALIDATION_POLL_INTERVAL, SceneCanonicalCounts, SceneFootprint, SceneReservationKind,
     SceneValidationControl, SceneValidationFailure, SceneValidationLimits, SceneValidationStats,

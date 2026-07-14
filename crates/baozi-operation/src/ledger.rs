@@ -947,16 +947,71 @@ where
 
     /// Atomically replaces one reservation's phase, dimension, and byte capacity.
     ///
-    /// The source reservation is consumed. If transition admission fails, its original live bytes
-    /// are released automatically without recording target live or peak evidence.
+    /// Admission failure leaves the source token and every live/peak counter unchanged, so the
+    /// caller may keep storage covered by the original reservation while unwinding or retrying.
     pub fn transition_reservation(
         &self,
-        mut reservation: LiveReservation<O, P, D>,
+        reservation: &mut LiveReservation<O, P, D>,
         phase: P,
         dimension: D,
         bytes: u64,
-    ) -> Result<LiveReservation<O, P, D>, LedgerCause<D>> {
-        self.check_reservation(&reservation)?;
+    ) -> Result<(), LedgerCause<D>> {
+        self.transition_reservations(std::slice::from_mut(reservation), phase, dimension, bytes)
+    }
+
+    /// Atomically reclassifies a reservation batch into one phase and dimension.
+    ///
+    /// `bytes` is distributed in source order, preserving each token's current size until the
+    /// requested total is exhausted. The last token absorbs any requested growth. Admission or
+    /// evidence failure leaves every token and every live current/peak counter unchanged.
+    pub fn transition_reservations(
+        &self,
+        reservations: &mut [LiveReservation<O, P, D>],
+        phase: P,
+        dimension: D,
+        bytes: u64,
+    ) -> Result<(), LedgerCause<D>> {
+        if reservations.is_empty() && bytes != 0 {
+            return Err(LedgerCause::SplitExceedsReservation {
+                requested: bytes,
+                available: 0,
+            });
+        }
+        for reservation in reservations.iter() {
+            self.check_reservation(reservation)?;
+        }
+
+        let source_bytes = reservations.iter().try_fold(0_u64, |total, reservation| {
+            total
+                .checked_add(reservation.bytes)
+                .ok_or(LedgerCause::ArithmeticOverflow {
+                    class: CounterClass::Live,
+                    dimension,
+                })
+        })?;
+        let target_dimension_source = reservations
+            .iter()
+            .filter(|reservation| reservation.dimension == dimension)
+            .try_fold(0_u64, |total, reservation| {
+                total
+                    .checked_add(reservation.bytes)
+                    .ok_or(LedgerCause::ArithmeticOverflow {
+                        class: CounterClass::Live,
+                        dimension,
+                    })
+            })?;
+        let target_phase_source = reservations
+            .iter()
+            .filter(|reservation| reservation.phase == phase)
+            .try_fold(0_u64, |total, reservation| {
+                total
+                    .checked_add(reservation.bytes)
+                    .ok_or(LedgerCause::ArithmeticOverflow {
+                        class: CounterClass::Live,
+                        dimension,
+                    })
+            })?;
+
         let mut state = lock(&self.state);
         Self::ensure_open(&state)?;
         let dimension_limit = dimension_entry(&state.dimensions, dimension)
@@ -964,30 +1019,23 @@ where
             .policy
             .live_byte_limit
             .ok_or(LedgerCause::DimensionNotReservable { dimension })?;
-        let project = |current: u64, remove_source: bool| {
-            let without_source = if remove_source {
-                current
-                    .checked_sub(reservation.bytes)
-                    .ok_or(LedgerCause::ArithmeticOverflow {
-                        class: CounterClass::Live,
-                        dimension,
-                    })?
-            } else {
-                current
-            };
-            without_source
-                .checked_add(bytes)
+        let project = |current: u64, source: u64| {
+            current
+                .checked_sub(source)
+                .and_then(|without_source| without_source.checked_add(bytes))
                 .ok_or(LedgerCause::ArithmeticOverflow {
                     class: CounterClass::Live,
                     dimension,
                 })
         };
 
-        let current_dimension = dimension_entry(&state.dimensions, dimension)
-            .expect("validated dimensions remain present")
-            .state
-            .current_live_bytes;
-        let dimension_live = project(current_dimension, reservation.dimension == dimension)?;
+        let dimension_live = project(
+            dimension_entry(&state.dimensions, dimension)
+                .expect("validated dimensions remain present")
+                .state
+                .current_live_bytes,
+            target_dimension_source,
+        )?;
         if dimension_live > dimension_limit {
             return Err(LedgerCause::LimitExceeded {
                 class: CounterClass::Live,
@@ -996,8 +1044,7 @@ where
                 limit: dimension_limit,
             });
         }
-
-        let operation_live = project(state.current_live_bytes, true)?;
+        let operation_live = project(state.current_live_bytes, source_bytes)?;
         if operation_live > self.operation_live_byte_limit {
             return Err(LedgerCause::LimitExceeded {
                 class: CounterClass::Live,
@@ -1006,19 +1053,21 @@ where
                 limit: self.operation_live_byte_limit,
             });
         }
-
-        let current_phase =
-            phase_entry(&state.phases, phase).map_or(0, |entry| entry.state.current_live_bytes);
-        let phase_live = project(current_phase, reservation.phase == phase)?;
-
+        let phase_live = project(
+            phase_entry(&state.phases, phase).map_or(0, |entry| entry.state.current_live_bytes),
+            target_phase_source,
+        )?;
         let phase_position =
             ensure_phase(&mut state, phase).map_err(|cause| LedgerCause::Evidence { cause })?;
-        release_bytes_locked(
-            &mut state,
-            reservation.phase,
-            reservation.dimension,
-            reservation.bytes,
-        );
+
+        for reservation in reservations.iter() {
+            release_bytes_locked(
+                &mut state,
+                reservation.phase,
+                reservation.dimension,
+                reservation.bytes,
+            );
+        }
         let dimension_state = &mut dimension_entry_mut(&mut state.dimensions, dimension)
             .expect("validated dimensions remain present")
             .state;
@@ -1029,12 +1078,23 @@ where
         phase_state.peak_live_bytes = phase_state.peak_live_bytes.max(phase_live);
         state.current_live_bytes = operation_live;
         state.peak_live_bytes = state.peak_live_bytes.max(operation_live);
-
-        reservation.phase = phase;
-        reservation.dimension = dimension;
-        reservation.bytes = bytes;
         drop(state);
-        Ok(reservation)
+
+        let last = reservations.len().saturating_sub(1);
+        let mut remaining = bytes;
+        for (index, reservation) in reservations.iter_mut().enumerate() {
+            let target_bytes = if index == last {
+                remaining
+            } else {
+                reservation.bytes.min(remaining)
+            };
+            remaining -= target_bytes;
+            reservation.phase = phase;
+            reservation.dimension = dimension;
+            reservation.bytes = target_bytes;
+        }
+        debug_assert_eq!(remaining, 0);
+        Ok(())
     }
 
     /// Splits bytes into a second reservation without changing live or peak accounting.
@@ -1073,22 +1133,30 @@ where
         })
     }
 
+    /// Verifies that a live reservation belongs to this operation without mutating accounting.
+    pub fn validate_live_reservation(
+        &self,
+        reservation: &LiveReservation<O, P, D>,
+    ) -> Result<(), LedgerCause<D>> {
+        self.check_reservation(reservation)
+    }
+
     /// Atomically validates a durable commitment batch and begins pending publication.
     ///
     /// Durable committed evidence is unchanged until the owning coordinator publishes the returned
-    /// transaction. Any error drops the supplied reservations, and dropping the returned
-    /// transaction rolls back its pending headroom and releases all live byte capacity. The batch
-    /// must take ownership of every current live byte; once admitted, no accounting mutation can
-    /// race the final control boundary.
+    /// transaction. Success moves every reservation into the returned transaction and empties the
+    /// submitted batch. Failure leaves the batch untouched so its owner can drop the covered
+    /// storage before releasing the reservations. The batch must own every current live byte; once
+    /// admitted, no accounting mutation can race the final control boundary.
     pub fn prepare_publication(
         &self,
-        reservations: Vec<LiveReservation<O, P, D>>,
+        reservations: &mut PublicationReservationBatch<O, P, D>,
         commitments: &[Commitment<D>],
     ) -> Result<PendingPublication<O, P, D>, LedgerCause<D>> {
-        for reservation in &reservations {
+        for reservation in reservations.iter() {
             self.check_reservation(reservation)?;
         }
-        let transaction_live_bytes = Self::reservation_bytes(&reservations)?;
+        let transaction_live_bytes = Self::reservation_bytes(reservations)?;
 
         let mut state = lock(&self.state);
         match state.publication {
@@ -1110,6 +1178,7 @@ where
             AggregateCommitmentError::Evidence(cause) => LedgerCause::Evidence { cause },
         })?;
         if let Err(cause) = validate_commitments(&state.dimensions, &aggregate) {
+            drop(aggregate);
             release_evidence(&mut state, evidence_bytes);
             return Err(cause);
         }
@@ -1127,7 +1196,7 @@ where
 
         Ok(PendingPublication {
             owner: Arc::clone(&self.state),
-            reservations,
+            reservations: std::mem::take(reservations),
             commitments: aggregate,
             evidence_bytes,
             pending: true,
@@ -1263,9 +1332,9 @@ where
 
     pub(crate) fn publish(
         &self,
-        mut publication: PendingPublication<O, P, D>,
+        publication: &mut PendingPublication<O, P, D>,
     ) -> Result<(), LedgerCause<D>> {
-        self.check_publication(&publication)?;
+        self.check_publication(publication)?;
         let mut state = lock(&self.state);
         if state.publication != PublicationState::Pending {
             return Err(LedgerCause::InactivePublication);
@@ -1304,15 +1373,8 @@ where
             entry.pending_publication -= *amount;
             entry.committed += *amount;
         }
-        for reservation in &mut publication.reservations {
-            release_locked(
-                &mut state,
-                reservation.phase,
-                reservation.dimension,
-                reservation.bytes,
-            );
-            reservation.active = false;
-        }
+        publication.reservations.release_locked(&mut state);
+        drop(std::mem::take(&mut publication.commitments));
         release_evidence(&mut state, publication.evidence_bytes);
         publication.evidence_bytes = 0;
         state.publication = PublicationState::Published;
@@ -1328,7 +1390,9 @@ where
         }
     }
 
-    fn reservation_bytes(reservations: &[LiveReservation<O, P, D>]) -> Result<u64, LedgerCause<D>> {
+    fn reservation_bytes(
+        reservations: &PublicationReservationBatch<O, P, D>,
+    ) -> Result<u64, LedgerCause<D>> {
         reservations.iter().try_fold(0u64, |total, reservation| {
             total
                 .checked_add(reservation.bytes)
@@ -1484,6 +1548,265 @@ where
     }
 }
 
+/// Live reservations submitted as one publication transaction.
+///
+/// A reservation that accounts for the backing allocation of `reservations` must remain outside
+/// that vector. This type preserves the required storage-before-reservation drop order on
+/// admission failure, rollback, and successful publication.
+#[must_use = "submit the batch for publication or drop it to release its reservations"]
+pub struct PublicationReservationBatch<O, P, D>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+{
+    reservations: Vec<LiveReservation<O, P, D>>,
+    capacity_reservation: Option<LiveReservation<O, P, D>>,
+}
+
+/// Why a reservation batch could not prove coverage of its backing allocation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum PublicationReservationBatchErrorKind {
+    CapacityOverflow {
+        capacity: usize,
+        element_size: usize,
+    },
+    MissingCapacityReservation {
+        required_bytes: u64,
+    },
+    UnexpectedCapacityReservation {
+        reserved_bytes: u64,
+    },
+    InsufficientCapacityReservation {
+        required_bytes: u64,
+        reserved_bytes: u64,
+    },
+}
+
+impl fmt::Display for PublicationReservationBatchErrorKind {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::CapacityOverflow {
+                capacity,
+                element_size,
+            } => write!(
+                formatter,
+                "reservation batch capacity {capacity} at {element_size} bytes per element overflowed"
+            ),
+            Self::MissingCapacityReservation { required_bytes } => write!(
+                formatter,
+                "reservation batch allocation requires a {required_bytes}-byte capacity reservation"
+            ),
+            Self::UnexpectedCapacityReservation { reserved_bytes } => write!(
+                formatter,
+                "an allocation-free reservation batch carried an unexpected {reserved_bytes}-byte capacity reservation"
+            ),
+            Self::InsufficientCapacityReservation {
+                required_bytes,
+                reserved_bytes,
+            } => write!(
+                formatter,
+                "reservation batch allocation requires {required_bytes} bytes but its capacity reservation covers {reserved_bytes}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for PublicationReservationBatchErrorKind {}
+
+/// A rejected batch that keeps its backing allocation ahead of its capacity token in drop order.
+#[must_use = "recover or drop the rejected batch so every reservation is released"]
+pub struct PublicationReservationBatchError<O, P, D>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+{
+    reservations: Vec<LiveReservation<O, P, D>>,
+    capacity_reservation: Option<LiveReservation<O, P, D>>,
+    kind: PublicationReservationBatchErrorKind,
+}
+
+impl<O, P, D> PublicationReservationBatchError<O, P, D>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+{
+    pub const fn kind(&self) -> PublicationReservationBatchErrorKind {
+        self.kind
+    }
+}
+
+impl<O, P, D> Drop for PublicationReservationBatchError<O, P, D>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+{
+    fn drop(&mut self) {
+        drop(std::mem::take(&mut self.reservations));
+        drop(self.capacity_reservation.take());
+    }
+}
+
+impl<O, P, D> fmt::Debug for PublicationReservationBatchError<O, P, D>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+{
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PublicationReservationBatchError")
+            .field("reservation_count", &self.reservations.len())
+            .field("reservation_capacity", &self.reservations.capacity())
+            .field("kind", &self.kind)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<O, P, D> fmt::Display for PublicationReservationBatchError<O, P, D>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+{
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.kind.fmt(formatter)
+    }
+}
+
+impl<O, P, D> std::error::Error for PublicationReservationBatchError<O, P, D>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+{
+}
+
+impl<O, P, D> PublicationReservationBatch<O, P, D>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+{
+    /// Checks that the supplied token covers the complete reservations-vector allocation.
+    pub fn try_new(
+        reservations: Vec<LiveReservation<O, P, D>>,
+        capacity_reservation: Option<LiveReservation<O, P, D>>,
+    ) -> Result<Self, PublicationReservationBatchError<O, P, D>> {
+        let Some(required_bytes) = reservations
+            .capacity()
+            .checked_mul(size_of::<LiveReservation<O, P, D>>())
+            .and_then(|bytes| u64::try_from(bytes).ok())
+        else {
+            return Err(PublicationReservationBatchError {
+                kind: PublicationReservationBatchErrorKind::CapacityOverflow {
+                    capacity: reservations.capacity(),
+                    element_size: size_of::<LiveReservation<O, P, D>>(),
+                },
+                reservations,
+                capacity_reservation,
+            });
+        };
+        let invalid = match (required_bytes, capacity_reservation.as_ref()) {
+            (0, None) => None,
+            (0, Some(capacity)) => Some(
+                PublicationReservationBatchErrorKind::UnexpectedCapacityReservation {
+                    reserved_bytes: capacity.bytes(),
+                },
+            ),
+            (_, None) => Some(
+                PublicationReservationBatchErrorKind::MissingCapacityReservation { required_bytes },
+            ),
+            (_, Some(capacity)) if capacity.bytes() < required_bytes => Some(
+                PublicationReservationBatchErrorKind::InsufficientCapacityReservation {
+                    required_bytes,
+                    reserved_bytes: capacity.bytes(),
+                },
+            ),
+            (_, Some(_)) => None,
+        };
+        if let Some(kind) = invalid {
+            return Err(PublicationReservationBatchError {
+                reservations,
+                capacity_reservation,
+                kind,
+            });
+        }
+        Ok(Self {
+            reservations,
+            capacity_reservation,
+        })
+    }
+
+    /// Returns whether publication has moved every reservation out of this batch.
+    pub fn is_empty(&self) -> bool {
+        self.reservations.is_empty() && self.capacity_reservation.is_none()
+    }
+
+    fn iter(&self) -> impl Iterator<Item = &LiveReservation<O, P, D>> {
+        self.reservations
+            .iter()
+            .chain(self.capacity_reservation.iter())
+    }
+
+    fn release_locked(&mut self, state: &mut LedgerState<P, D>) {
+        for reservation in &mut self.reservations {
+            release_locked(
+                state,
+                reservation.phase,
+                reservation.dimension,
+                reservation.bytes,
+            );
+            reservation.active = false;
+        }
+
+        // Free the accounted vector allocation before releasing the token that covers it.
+        drop(std::mem::take(&mut self.reservations));
+        if let Some(capacity_reservation) = &mut self.capacity_reservation {
+            release_locked(
+                state,
+                capacity_reservation.phase,
+                capacity_reservation.dimension,
+                capacity_reservation.bytes,
+            );
+            capacity_reservation.active = false;
+        }
+    }
+}
+
+impl<O, P, D> Default for PublicationReservationBatch<O, P, D>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+{
+    fn default() -> Self {
+        Self {
+            reservations: Vec::new(),
+            capacity_reservation: None,
+        }
+    }
+}
+
+impl<O, P, D> fmt::Debug for PublicationReservationBatch<O, P, D>
+where
+    O: OperationOwner,
+    P: Copy + Ord + fmt::Debug,
+    D: Copy + Ord + fmt::Debug,
+{
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PublicationReservationBatch")
+            .field("reservations", &self.reservations)
+            .field("capacity_reservation", &self.capacity_reservation)
+            .finish()
+    }
+}
+
 /// A reversible publication transaction that still owns its live byte capacity.
 #[must_use = "publish or roll back the pending output transaction"]
 pub struct PendingPublication<O, P, D>
@@ -1493,7 +1816,7 @@ where
     D: Copy + Ord,
 {
     owner: Arc<Mutex<LedgerState<P, D>>>,
-    reservations: Vec<LiveReservation<O, P, D>>,
+    reservations: PublicationReservationBatch<O, P, D>,
     commitments: Vec<(D, u64)>,
     evidence_bytes: u64,
     pending: bool,
@@ -1547,18 +1870,11 @@ where
                     entry.state.pending_publication.saturating_sub(*amount);
             }
         }
-        for reservation in &mut self.reservations {
-            release_locked(
-                &mut state,
-                reservation.phase,
-                reservation.dimension,
-                reservation.bytes,
-            );
-            reservation.active = false;
-        }
+        self.reservations.release_locked(&mut state);
         if state.publication == PublicationState::Pending {
             state.publication = PublicationState::Open;
         }
+        drop(std::mem::take(&mut self.commitments));
         release_evidence(&mut state, self.evidence_bytes);
         self.evidence_bytes = 0;
         self.pending = false;
@@ -2052,6 +2368,7 @@ where
         LedgerEvidencePurpose::Publication,
     ) {
         let retained = capacity_bytes(&aggregate).unwrap_or(0);
+        drop(aggregate);
         release_evidence(state, retained);
         return Err(AggregateCommitmentError::Evidence(cause));
     }
@@ -2063,6 +2380,7 @@ where
     })?;
     for commitment in commitments {
         if dimension_entry(&state.dimensions, commitment.dimension).is_none() {
+            drop(aggregate);
             release_evidence(state, evidence_bytes);
             return Err(AggregateCommitmentError::Ledger(
                 LedgerCause::UnknownDimension {
@@ -2072,16 +2390,17 @@ where
         }
         match aggregate.binary_search_by_key(&commitment.dimension, |(dimension, _)| *dimension) {
             Ok(position) => {
-                aggregate[position].1 = aggregate[position]
-                    .1
-                    .checked_add(commitment.amount)
-                    .ok_or_else(|| {
-                        release_evidence(state, evidence_bytes);
-                        AggregateCommitmentError::Ledger(LedgerCause::ArithmeticOverflow {
+                let Some(amount) = aggregate[position].1.checked_add(commitment.amount) else {
+                    drop(aggregate);
+                    release_evidence(state, evidence_bytes);
+                    return Err(AggregateCommitmentError::Ledger(
+                        LedgerCause::ArithmeticOverflow {
                             class: CounterClass::PendingPublication,
                             dimension: commitment.dimension,
-                        })
-                    })?;
+                        },
+                    ));
+                };
+                aggregate[position].1 = amount;
             }
             Err(position) => aggregate.insert(position, (commitment.dimension, commitment.amount)),
         }

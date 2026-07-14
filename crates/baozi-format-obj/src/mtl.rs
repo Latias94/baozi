@@ -1,14 +1,16 @@
-use crate::allocation::{LiveStorage, append_string_chunked, usize_to_u64 as usize_amount};
 use crate::material_library_role;
 use crate::parser::{self, TextDecodeFailure};
-use baozi_core::{AlphaMode, Color, MetadataMap, MetadataValue};
+use baozi_core::{AlphaMode, Color};
 use baozi_import::{
     DependencySnapshot, DiagnosticCode, DiagnosticSeverity, ImportProgressPhase,
-    ImportStorageClass, ImportWorkClass, ImportWorkPermit, ParseResult, ParseScope,
+    ImportStorageClass, ImportWorkClass, ImportWorkPermit, MeteredOrderedMap, MeteredString,
+    MeteredVec, ParseFailure, ParseResult, ParseScope,
 };
 use baozi_io::AssetPath;
 use std::cmp::Ordering;
 use std::fmt;
+
+use parser::usize_amount;
 
 const INTERRUPTIBLE_WORK_CHUNK: u64 = 64;
 const MAX_NUMERIC_LITERAL_BYTES: usize = 128;
@@ -62,7 +64,7 @@ impl<'scope, 'session> ComparisonWork<'scope, 'session> {
 
 pub(crate) fn interruptible_sort_by<'scope, 'session, T>(
     scope: &'scope ParseScope<'session>,
-    values: &mut [T],
+    values: &mut MeteredVec<'_, T>,
     mut compare: impl FnMut(&mut ComparisonWork<'scope, 'session>, &T, &T) -> ParseResult<Ordering>,
 ) -> ParseResult<()> {
     if values.len() <= 1 {
@@ -70,52 +72,40 @@ pub(crate) fn interruptible_sort_by<'scope, 'session, T>(
     }
 
     let mut work = ComparisonWork::new(scope);
-    let mut start = values.len() / 2;
-    while start > 0 {
-        start -= 1;
-        sift_down(values, start, values.len(), &mut work, &mut compare)?;
-    }
-    let mut end = values.len();
-    while end > 1 {
-        end -= 1;
-        values.swap(0, end);
-        sift_down(values, 0, end, &mut work, &mut compare)?;
-    }
+    let result: Result<(), ParseFailure> = values.try_sort_unstable_by(|left, right| {
+        work.step()?;
+        compare(&mut work, left, right)
+    });
+    result?;
     work.finish()
 }
 
 pub(crate) fn interruptible_dedup_by<'scope, 'session, T>(
     scope: &'scope ParseScope<'session>,
-    values: &mut Vec<T>,
+    values: &mut MeteredVec<'_, T>,
     mut equivalent: impl FnMut(&mut ComparisonWork<'scope, 'session>, &T, &T) -> ParseResult<bool>,
 ) -> ParseResult<()> {
     if values.len() <= 1 {
         return Ok(());
     }
 
+    let previous_len = values.len();
     let mut work = ComparisonWork::new(scope);
-    let mut write = 1usize;
-    for read in 1..values.len() {
+    let result: Result<usize, ParseFailure> = values.try_partition_dedup_by(|previous, current| {
         work.step()?;
-        if equivalent(&mut work, &values[write - 1], &values[read])? {
-            continue;
-        }
-        if write != read {
-            values.swap(write, read);
-        }
-        write += 1;
-    }
+        equivalent(&mut work, previous, current)
+    });
+    let retained_len = result?;
     work.finish()?;
-    while values.len() > write {
-        let drop_count = (values.len() - write).min(INTERRUPTIBLE_WORK_CHUNK as usize);
-        let permit = scope.begin_work(
-            ImportWorkClass::WorkUnits,
-            usize_amount(scope, drop_count, "obj-dedup-drop-work")?,
-        )?;
-        values.truncate(values.len() - drop_count);
-        permit.complete()?;
-    }
-    Ok(())
+    for_work_chunks(
+        scope,
+        previous_len - retained_len,
+        "obj-dedup-drop-work",
+        |range| {
+            values.truncate(values.len() - range.len());
+            Ok(())
+        },
+    )
 }
 
 pub(crate) fn interruptible_binary_search_by<'scope, 'session, T>(
@@ -192,84 +182,100 @@ fn begin_comparison_work<'scope, 'session>(
     scope.begin_work(ImportWorkClass::WorkUnits, INTERRUPTIBLE_WORK_CHUNK)
 }
 
-fn sift_down<'scope, 'session, T>(
-    values: &mut [T],
-    mut root: usize,
-    end: usize,
-    work: &mut ComparisonWork<'scope, 'session>,
-    compare: &mut impl FnMut(&mut ComparisonWork<'scope, 'session>, &T, &T) -> ParseResult<Ordering>,
-) -> ParseResult<()> {
-    while root < end / 2 {
-        let child = root * 2 + 1;
-        let mut greater = child;
-        if child + 1 < end {
-            work.step()?;
-            if compare(work, &values[child], &values[child + 1])? == Ordering::Less {
-                greater = child + 1;
-            }
-        }
-        work.step()?;
-        if compare(work, &values[root], &values[greater])? != Ordering::Less {
-            return Ok(());
-        }
-        values.swap(root, greater);
-        root = greater;
-    }
-    Ok(())
-}
-
 pub(crate) struct MaterialLibrary<'scope> {
-    materials: Vec<ParsedMaterial<'scope>>,
+    materials: MeteredVec<'scope, ParsedMaterial<'scope>>,
     next_order: usize,
-    storage: LiveStorage<'scope>,
 }
 
 pub(crate) struct ParsedMaterial<'scope> {
-    pub name: String,
+    pub name: MeteredString<'scope>,
     order: usize,
     pub base_color: Color,
     pub emissive: Color,
     pub alpha_mode: AlphaMode,
-    pub metadata: MetadataMap,
+    pub metadata: ParsedMetadata<'scope>,
     pub diffuse_texture: Option<ParsedTexture<'scope>>,
-    retired_metadata_strings: Vec<String>,
-    storage: LiveStorage<'scope>,
 }
 
 pub(crate) struct ParsedTexture<'scope> {
-    pub uri: String,
+    pub uri: MeteredString<'scope>,
     pub source_key: &'static str,
-    _storage: LiveStorage<'scope>,
+}
+
+pub(crate) struct ParsedMetadata<'scope> {
+    entries: MeteredOrderedMap<'scope, ParsedString<'scope>, ParsedMetadataValue<'scope>>,
+}
+
+struct ParsedString<'scope>(MeteredString<'scope>);
+
+pub(crate) enum ParsedMetadataValue<'scope> {
+    I64(i64),
+    F64(f64),
+    String(MeteredString<'scope>),
+}
+
+impl PartialEq for ParsedString<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.as_str() == other.0.as_str()
+    }
+}
+
+impl Eq for ParsedString<'_> {}
+
+impl PartialOrd for ParsedString<'_> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for ParsedString<'_> {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.0.as_str().cmp(other.0.as_str())
+    }
 }
 
 impl<'scope> ParsedMaterial<'scope> {
-    fn new(name: String, order: usize, storage: LiveStorage<'scope>) -> Self {
+    fn new(scope: &'scope ParseScope<'_>, name: MeteredString<'scope>, order: usize) -> Self {
         Self {
             name,
             order,
             base_color: Color::WHITE,
             emissive: Color::linear_rgba(0.0, 0.0, 0.0, 1.0),
             alpha_mode: AlphaMode::Opaque,
-            metadata: MetadataMap::new(),
+            metadata: ParsedMetadata {
+                entries: scope.metered_ordered_map(
+                    ImportStorageClass::FormatNormalization,
+                    "obj-mtl-metadata-entries",
+                ),
+            },
             diffuse_texture: None,
-            retired_metadata_strings: Vec::new(),
-            storage,
         }
+    }
+}
+
+impl ParsedMetadata<'_> {
+    pub(crate) fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub(crate) fn iter(&self) -> impl ExactSizeIterator<Item = (&str, &ParsedMetadataValue<'_>)> {
+        self.entries
+            .iter()
+            .map(|(key, value)| (key.0.as_str(), value))
     }
 }
 
 pub(crate) fn load_libraries<'scope>(
     scope: &'scope ParseScope<'_>,
-    mtllibs: &[String],
+    mtllibs: &[MeteredString<'scope>],
 ) -> ParseResult<MaterialLibrary<'scope>> {
     let role = material_library_role();
     let mut library = MaterialLibrary {
-        materials: Vec::new(),
+        materials: scope.metered_vec(ImportStorageClass::FormatNormalization, "obj-mtl-materials"),
         next_order: 0,
-        storage: LiveStorage::new(ImportStorageClass::FormatNormalization),
     };
     for mtllib in mtllibs {
-        let outcome = scope.optional_dependency(&role, mtllib)?;
+        let outcome = scope.optional_dependency(&role, mtllib.as_str())?;
         if let Some(snapshot) = outcome.snapshot() {
             let text = match parser::decode_utf8(scope, snapshot.bytes(), "obj-mtl-text") {
                 Ok(text) => text,
@@ -317,10 +323,11 @@ impl<'scope> MaterialLibrary<'scope> {
         scope: &ParseScope<'_>,
         name: &str,
     ) -> ParseResult<Option<&'library ParsedMaterial<'scope>>> {
-        let index = interruptible_binary_search_by(scope, &self.materials, |work, material| {
-            work.compare_str(&material.name, name)
-        })?;
-        Ok(index.map(|index| &self.materials[index]))
+        let index =
+            interruptible_binary_search_by(scope, self.materials.as_slice(), |work, material| {
+                work.compare_str(material.name.as_str(), name)
+            })?;
+        Ok(index.map(|index| &self.materials.as_slice()[index]))
     }
 }
 
@@ -381,9 +388,8 @@ fn parse_mtl<'scope>(
                         .next_order
                         .checked_add(1)
                         .ok_or_else(|| scope.allocation_failure("obj-mtl-material-order"))?;
-                    let mut storage = LiveStorage::new(ImportStorageClass::FormatNormalization);
-                    let name = owned_string(scope, &mut storage, name, "obj-mtl-material-name")?;
-                    current = Some(ParsedMaterial::new(name, order, storage));
+                    let name = owned_string(scope, name, "obj-mtl-material-name")?;
+                    current = Some(ParsedMaterial::new(scope, name, order));
                 }
             }
             "Kd" => {
@@ -434,7 +440,7 @@ fn parse_mtl<'scope>(
                         scope,
                         material,
                         metadata_key,
-                        MetadataValue::F64(value as f64),
+                        ParsedMetadataValue::F64(value as f64),
                     )?;
                 }
             }
@@ -442,31 +448,32 @@ fn parse_mtl<'scope>(
                 if let Some(material) = current.as_mut()
                     && let Some(value) = parse_i64(scope, snapshot, &tokens, line_number, "illum")?
                 {
-                    insert_metadata(scope, material, "obj:illum", MetadataValue::I64(value))?;
+                    insert_metadata(
+                        scope,
+                        material,
+                        "obj:illum",
+                        ParsedMetadataValue::I64(value),
+                    )?;
                 }
             }
             "Ka" | "Ks" => {
                 if let Some(material) = current.as_mut()
-                    && let Some(value) = parse_vec_metadata(
-                        scope,
-                        &mut material.storage,
-                        snapshot,
-                        &tokens,
-                        line_number,
-                        keyword,
-                    )?
+                    && let Some(value) =
+                        parse_vec_metadata(scope, snapshot, &tokens, line_number, keyword)?
                 {
                     let metadata_key = if keyword == "Ka" { "obj:ka" } else { "obj:ks" };
-                    insert_metadata(scope, material, metadata_key, MetadataValue::String(value))?;
+                    insert_metadata(
+                        scope,
+                        material,
+                        metadata_key,
+                        ParsedMetadataValue::String(value),
+                    )?;
                 }
             }
             "map_Kd" => {
                 if let Some(material) = current.as_mut() {
                     match texture_path_from_map(scope, snapshot, &tokens[1..], line_number)? {
-                        TexturePathOutcome::Value {
-                            path: texture_path,
-                            storage: texture_path_storage,
-                        } => {
+                        TexturePathOutcome::Value(texture_path) => {
                             let path_work = path
                                 .as_str()
                                 .len()
@@ -478,14 +485,15 @@ fn parse_mtl<'scope>(
                                 ImportWorkClass::WorkUnits,
                                 usize_amount(scope, path_work, "obj-mtl-texture-path-work")?,
                             )?;
-                            let mut resolution_storage =
-                                LiveStorage::new(ImportStorageClass::FormatNormalization);
-                            resolution_storage.reserve_bytes(
-                                scope,
-                                path_resolution_allowance(scope, path, &texture_path)?,
-                                "obj-mtl-texture-path-resolution",
+                            let resolution_allowance = scope.metered_opaque_allowance(
+                                ImportStorageClass::FormatNormalization,
+                                usize_amount(
+                                    scope,
+                                    path_resolution_allowance(scope, path, texture_path.as_str())?,
+                                    "obj-mtl-texture-path-resolution",
+                                )?,
                             )?;
-                            let resolved = path.resolve_from_file(&texture_path);
+                            let resolved = path.resolve_from_file(texture_path.as_str());
                             resolution_work.complete()?;
                             match resolved {
                                 Ok(resolved) => {
@@ -501,19 +509,14 @@ fn parse_mtl<'scope>(
                                             ),
                                         )?;
                                     } else {
-                                        let mut texture_storage = LiveStorage::new(
-                                            ImportStorageClass::FormatNormalization,
-                                        );
                                         let uri = owned_string(
                                             scope,
-                                            &mut texture_storage,
                                             resolved.as_str(),
                                             "obj-mtl-texture-uri",
                                         )?;
                                         material.diffuse_texture = Some(ParsedTexture {
                                             uri,
                                             source_key: "map_Kd",
-                                            _storage: texture_storage,
                                         });
                                     }
                                 }
@@ -527,9 +530,8 @@ fn parse_mtl<'scope>(
                                     ),
                                 )?,
                             }
-                            drop(resolution_storage);
+                            drop(resolution_allowance);
                             drop(texture_path);
-                            drop(texture_path_storage);
                         }
                         TexturePathOutcome::TooLong => push_dependency_warning(
                             scope,
@@ -563,18 +565,14 @@ fn parse_mtl<'scope>(
 }
 
 fn flush_material<'scope>(
-    scope: &'scope ParseScope<'_>,
+    _scope: &'scope ParseScope<'_>,
     library: &mut MaterialLibrary<'scope>,
     material: Option<ParsedMaterial<'scope>>,
 ) -> ParseResult<()> {
     let Some(material) = material else {
         return Ok(());
     };
-    library
-        .storage
-        .reserve_vec(scope, &mut library.materials, 1, "obj-mtl-materials")?;
-    library.materials.push(material);
-    Ok(())
+    library.materials.try_push(material)
 }
 
 fn finalize_materials(
@@ -587,11 +585,12 @@ fn finalize_materials(
 
     interruptible_sort_by(scope, &mut library.materials, |work, left, right| {
         Ok(work
-            .compare_str(&left.name, &right.name)?
+            .compare_str(left.name.as_str(), right.name.as_str())?
             .then_with(|| right.order.cmp(&left.order)))
     })?;
     interruptible_dedup_by(scope, &mut library.materials, |work, previous, current| {
-        let duplicate = work.compare_str(&previous.name, &current.name)? == Ordering::Equal;
+        let duplicate =
+            work.compare_str(previous.name.as_str(), current.name.as_str())? == Ordering::Equal;
         if duplicate {
             push_warning(
                 scope,
@@ -599,7 +598,7 @@ fn finalize_materials(
                 "obj.mtl_duplicate_material",
                 format_args!(
                     "MTL material '{}' was redefined; using the last definition",
-                    previous.name
+                    previous.name.as_str()
                 ),
             )?;
         }
@@ -611,30 +610,10 @@ fn insert_metadata<'scope>(
     scope: &'scope ParseScope<'_>,
     material: &mut ParsedMaterial<'scope>,
     key: &'static str,
-    value: MetadataValue,
+    value: ParsedMetadataValue<'scope>,
 ) -> ParseResult<()> {
-    if let Some(existing) = material.metadata.get_mut(key) {
-        let previous = std::mem::replace(existing, value);
-        if let MetadataValue::String(previous) = previous {
-            material.storage.reserve_vec(
-                scope,
-                &mut material.retired_metadata_strings,
-                1,
-                "obj-mtl-retired-metadata-strings",
-            )?;
-            material.retired_metadata_strings.push(previous);
-        }
-        return Ok(());
-    }
-
-    let key = owned_string(scope, &mut material.storage, key, "obj-mtl-metadata-key")?;
-    material.storage.insert_ordered_map(
-        scope,
-        &mut material.metadata,
-        key,
-        value,
-        "obj-mtl-metadata-map",
-    )?;
+    let key = ParsedString(owned_string(scope, key, "obj-mtl-metadata-key")?);
+    drop(material.metadata.entries.try_insert(key, value)?);
     Ok(())
 }
 
@@ -646,15 +625,14 @@ struct MtlToken<'line> {
 }
 
 struct MtlTokenBuffer<'scope, 'line> {
-    values: Vec<MtlToken<'line>>,
-    storage: LiveStorage<'scope>,
+    values: MeteredVec<'scope, MtlToken<'line>>,
 }
 
 impl<'line> std::ops::Deref for MtlTokenBuffer<'_, 'line> {
     type Target = [MtlToken<'line>];
 
     fn deref(&self) -> &Self::Target {
-        &self.values
+        self.values.as_slice()
     }
 }
 
@@ -664,8 +642,7 @@ fn tokenize_mtl<'scope, 'line>(
 ) -> ParseResult<MtlTokenBuffer<'scope, 'line>> {
     let line = decoded_line.text();
     let mut tokens = MtlTokenBuffer {
-        values: Vec::new(),
-        storage: LiveStorage::new(ImportStorageClass::FormatNormalization),
+        values: scope.metered_vec(ImportStorageClass::FormatNormalization, "obj-mtl-tokens"),
     };
     parser::scan_token_ranges(
         scope,
@@ -678,14 +655,11 @@ fn tokenize_mtl<'scope, 'line>(
                 ImportWorkClass::TokenBytes,
                 usize_amount(scope, end - start, "obj-mtl-token-bytes")?,
             )?;
-            tokens
-                .storage
-                .reserve_vec(scope, &mut tokens.values, 1, "obj-mtl-tokens")?;
-            tokens.values.push(MtlToken {
+            tokens.values.try_push(MtlToken {
                 text: &line[start..end],
                 start,
                 end,
-            });
+            })?;
             token_bytes.complete()?;
             token_permit.complete()
         },
@@ -789,21 +763,15 @@ fn parse_i64(
 
 fn parse_vec_metadata<'scope>(
     scope: &'scope ParseScope<'_>,
-    storage: &mut LiveStorage<'scope>,
     snapshot: &DependencySnapshot<'_>,
     tokens: &[MtlToken<'_>],
     line_number: u32,
     keyword: &str,
-) -> ParseResult<Option<String>> {
+) -> ParseResult<Option<MeteredString<'scope>>> {
     let Some(color) = parse_color(scope, snapshot, tokens, line_number, keyword)? else {
         return Ok(None);
     };
-    owned_format(
-        scope,
-        storage,
-        format_args!("{} {} {}", color.r, color.g, color.b),
-    )
-    .map(Some)
+    owned_format(scope, format_args!("{} {} {}", color.r, color.g, color.b)).map(Some)
 }
 
 fn parse_f32_warning(
@@ -886,21 +854,24 @@ fn texture_path_from_map<'scope>(
                 ImportWorkClass::StringBytes,
                 usize_amount(scope, length, "obj-mtl-texture-path-bytes")?,
             )?;
-            let mut storage = LiveStorage::new(ImportStorageClass::FormatNormalization);
-            let mut path = storage.allocate_string(scope, length, "obj-mtl-texture-path")?;
+            let mut path = scope.metered_string(
+                ImportStorageClass::FormatNormalization,
+                "obj-mtl-texture-path",
+            );
+            path.try_reserve(length)?;
             let mut first = true;
             for chunk in tokens[index..].chunks(64) {
                 scope.poll()?;
                 for token in chunk {
                     if !first {
-                        path.push(' ');
+                        path.try_push_char(' ')?;
                     }
-                    append_string_chunked(scope, &mut path, token.text)?;
+                    path.try_push_str(token.text)?;
                     first = false;
                 }
             }
             string_permit.complete()?;
-            return Ok(TexturePathOutcome::Value { path, storage });
+            return Ok(TexturePathOutcome::Value(path));
         }
     }
     Ok(TexturePathOutcome::Missing)
@@ -909,10 +880,7 @@ fn texture_path_from_map<'scope>(
 enum TexturePathOutcome<'scope> {
     Missing,
     TooLong,
-    Value {
-        path: String,
-        storage: LiveStorage<'scope>,
-    },
+    Value(MeteredString<'scope>),
 }
 
 fn path_resolution_allowance(
@@ -950,25 +918,24 @@ fn path_resolution_allowance(
 
 fn owned_string<'scope>(
     scope: &'scope ParseScope<'_>,
-    storage: &mut LiveStorage<'scope>,
     value: &str,
     resource: &'static str,
-) -> ParseResult<String> {
+) -> ParseResult<MeteredString<'scope>> {
     parser::enforce_text_value_limit(scope, value.len(), resource)?;
     let string_permit = scope.begin_work(
         ImportWorkClass::StringBytes,
         usize_amount(scope, value.len(), resource)?,
     )?;
-    let output = storage.copy_string(scope, value, resource)?;
+    let mut output = scope.metered_string(ImportStorageClass::FormatNormalization, resource);
+    output.try_push_str(value)?;
     string_permit.complete()?;
     Ok(output)
 }
 
 fn owned_format<'scope>(
     scope: &'scope ParseScope<'_>,
-    storage: &mut LiveStorage<'scope>,
     arguments: fmt::Arguments<'_>,
-) -> ParseResult<String> {
+) -> ParseResult<MeteredString<'scope>> {
     use fmt::Write as _;
 
     let mut counter = FormatByteCounter::default();
@@ -980,10 +947,12 @@ fn owned_format<'scope>(
         ImportWorkClass::StringBytes,
         usize_amount(scope, counter.bytes, "obj-mtl-formatted-string-bytes")?,
     )?;
-    let mut output = storage.allocate_string(scope, counter.bytes, "obj-mtl-formatted-string")?;
-    output
-        .write_fmt(arguments)
-        .map_err(|_| scope.allocation_failure("obj-mtl-formatted-string"))?;
+    let mut output = scope.metered_string(
+        ImportStorageClass::FormatNormalization,
+        "obj-mtl-formatted-string",
+    );
+    output.try_reserve(counter.bytes)?;
+    output.try_write_fmt(arguments)?;
     string_permit.complete()?;
     Ok(output)
 }
