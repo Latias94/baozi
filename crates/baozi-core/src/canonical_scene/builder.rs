@@ -94,6 +94,7 @@ impl<T, Id> CanonicalPreparedSceneInsert for PreparedCanonicalSceneInsert<'_, T,
     }
 }
 
+pub(crate) mod node_batch;
 pub(crate) struct CanonicalSceneBuilder {
     pub(super) data: CanonicalSceneData,
 }

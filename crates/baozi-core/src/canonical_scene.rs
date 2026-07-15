@@ -9,7 +9,9 @@ use crate::deform::{
     InfluenceRows, MorphTargetDefinition, PrimitiveMorphTarget, Skin, SkinMatrixSpaces,
 };
 use crate::derived::{Derived, DerivedAbsenceReason};
-use crate::entity::{AuthoredTransform, Camera, EntityName, Light, Node};
+use crate::entity::{
+    AuthoredTransform, Camera, EntityName, Light, Node, NodeError, NodePreparedParts,
+};
 use crate::extension::{
     ControlledRetainedFootprintError, ExtensionEntry, ExtensionEntryClassification,
     ExtensionEntryValidationError, ExtensionSchemaSnapshot,
@@ -241,6 +243,8 @@ pub(crate) enum CanonicalSceneBuildError {
     Generation(#[from] SceneGenerationError),
     #[error(transparent)]
     Index(#[from] SceneStorageIndexError),
+    #[error(transparent)]
+    Node(#[from] NodeError),
     #[error("canonical scene collection size overflowed for {collection:?}")]
     CollectionSizeOverflow {
         collection: CanonicalSceneCollection,
@@ -269,6 +273,36 @@ pub(crate) enum CanonicalSceneBuildError {
         admitted: u64,
         actual: u64,
     },
+    #[error(
+        "canonical node batch requires pristine node storage, observed len/capacity {length}/{capacity} and root_set={root_set}"
+    )]
+    NodeBatchNotPristine {
+        length: usize,
+        capacity: usize,
+        root_set: bool,
+    },
+    #[error("canonical node batch must contain at least one node")]
+    EmptyNodeBatch,
+    #[error("canonical node batch plan belongs to a different scene generation")]
+    ForeignNodeBatchPlan,
+    #[error("node slot belongs to a different scoped batch")]
+    ForeignNodeBatchSlot,
+    #[error("node slot {actual} is out of range for a batch of {node_count} nodes")]
+    NodeBatchSlotOutOfRange { actual: usize, node_count: usize },
+    #[error(
+        "node batch must initialize batch ordinals monotonically; expected {expected}, observed {actual}"
+    )]
+    NodeBatchInitializationOrder { expected: usize, actual: usize },
+    #[error(
+        "prepared node child count differs from its plan; expected {expected}, observed {actual}"
+    )]
+    NodeBatchChildrenCountMismatch { expected: usize, actual: usize },
+    #[error("node batch initialized {actual} of {expected} declared nodes")]
+    IncompleteNodeBatch { expected: usize, actual: usize },
+    #[error("complete node batch did not select a root")]
+    MissingNodeBatchRoot,
+    #[error("node batch root was already selected")]
+    DuplicateNodeBatchRoot,
     #[error("canonical provenance arena shared allocation failed")]
     ProvenanceArenaAllocationFailed,
     #[error("canonical provenance arena shared allocation accounting overflowed")]

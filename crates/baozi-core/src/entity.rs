@@ -4,13 +4,10 @@ use crate::extension::{
     ControlledRetainedFootprintError, ExtensionEntry, ExtensionEntryValidationError,
     extension_entries_retained_allocation_bytes_controlled, validate_unique_extension_entry_keys,
 };
-use crate::identity::{CameraIndex, LightIndex, NodeIndex};
 use crate::math::{Color, Mat4, Quat, Vec3};
-use crate::provenance::{Provenance, ProvenanceAttachments};
-use crate::shared_storage::{SharedStorage, SharedStorageError};
+use crate::provenance::Provenance;
 use std::convert::Infallible;
 use std::fmt;
-use std::mem::size_of;
 use thiserror::Error;
 
 /// Maximum UTF-8 bytes in one entity display name.
@@ -288,185 +285,10 @@ pub enum AuthoredTransformError {
     ScaleNotFinite,
 }
 
-/// One hierarchy node.
-///
-/// Parent and mesh-instance lookups are derived scene indexes. The only
-/// canonical hierarchy edge stored here is the ordered child list.
-#[derive(Debug, PartialEq)]
-struct NodePayload {
-    name: Option<EntityName>,
-    children: Vec<NodeIndex>,
-    camera: Option<CameraIndex>,
-    light: Option<LightIndex>,
-    provenance: ProvenanceAttachments,
-    extensions: Vec<ExtensionEntry>,
-}
+mod node;
 
-pub struct Node {
-    authored_transform: AuthoredTransform,
-    payload: SharedStorage<NodePayload>,
-}
-
-impl Node {
-    /// Creates a node and validates all leaf-level invariants.
-    pub fn try_new(
-        name: Option<EntityName>,
-        authored_transform: AuthoredTransform,
-        children: impl IntoIterator<Item = NodeIndex>,
-        camera: Option<CameraIndex>,
-        light: Option<LightIndex>,
-        provenance: impl Into<ProvenanceAttachments>,
-        extensions: impl IntoIterator<Item = ExtensionEntry>,
-    ) -> Result<Self, NodeError> {
-        let children =
-            try_collect_bounded(children, MAX_NODE_CHILDREN, EntityAllocation::NodeChildren)?;
-        let extensions = try_collect_extensions(extensions)?;
-        let provenance = provenance.into();
-
-        let payload = SharedStorage::try_new(NodePayload {
-            name,
-            children,
-            camera,
-            light,
-            provenance,
-            extensions,
-        })
-        .map_err(|error| match error {
-            SharedStorageError::AllocationFailed => NodeError::PayloadAllocationFailed,
-            SharedStorageError::AccountingOverflow => NodeError::PayloadAccountingOverflow,
-        })?;
-
-        Ok(Self {
-            authored_transform,
-            payload,
-        })
-    }
-
-    pub fn name(&self) -> Option<&EntityName> {
-        self.payload.as_ref().name.as_ref()
-    }
-
-    pub const fn authored_transform(&self) -> AuthoredTransform {
-        self.authored_transform
-    }
-
-    pub fn local_matrix(&self) -> Mat4 {
-        self.authored_transform.local_matrix()
-    }
-
-    pub fn children(&self) -> impl ExactSizeIterator<Item = NodeIndex> + '_ {
-        self.payload.as_ref().children.iter().copied()
-    }
-
-    pub(crate) fn child_at(&self, index: usize) -> Option<NodeIndex> {
-        self.payload.as_ref().children.get(index).copied()
-    }
-
-    pub fn camera_index(&self) -> Option<CameraIndex> {
-        self.payload.as_ref().camera
-    }
-
-    pub fn light_index(&self) -> Option<LightIndex> {
-        self.payload.as_ref().light
-    }
-
-    pub fn provenance(&self) -> &ProvenanceAttachments {
-        &self.payload.as_ref().provenance
-    }
-
-    pub fn extensions(&self) -> impl ExactSizeIterator<Item = &ExtensionEntry> {
-        self.payload.as_ref().extensions.iter()
-    }
-
-    pub(crate) fn with_authored_transform(&self, authored_transform: AuthoredTransform) -> Self {
-        Self {
-            authored_transform,
-            payload: self.payload.clone(),
-        }
-    }
-
-    pub(crate) fn fork(&self) -> Self {
-        self.with_authored_transform(self.authored_transform)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn shares_payload_with(&self, other: &Self) -> bool {
-        self.payload.ptr_eq(&other.payload)
-    }
-
-    pub(crate) fn retained_allocation_bytes(&self) -> Result<usize, EntityRetainedFootprintError> {
-        unwrap_uncontrolled_retained_footprint(
-            self.retained_allocation_bytes_controlled(&mut || Ok::<(), Infallible>(())),
-        )
-    }
-
-    pub(crate) fn retained_allocation_bytes_controlled<E>(
-        &self,
-        charge_work: &mut impl FnMut() -> Result<(), E>,
-    ) -> Result<usize, ControlledRetainedFootprintError<E>> {
-        let payload = self.payload.as_ref();
-        let name_bytes = payload.name.as_ref().map_or(0, EntityName::capacity);
-        let child_bytes = payload
-            .children
-            .capacity()
-            .checked_mul(size_of::<NodeIndex>())
-            .ok_or(ControlledRetainedFootprintError::AccountingOverflow)?;
-        self.payload
-            .retained_allocation_bytes()
-            .checked_add(name_bytes)
-            .and_then(|bytes| bytes.checked_add(child_bytes))
-            .and_then(|bytes| bytes.checked_add(payload.provenance.retained_allocation_bytes()))
-            .ok_or(ControlledRetainedFootprintError::AccountingOverflow)?
-            .checked_add(extension_entries_retained_allocation_bytes_controlled(
-                &payload.extensions,
-                charge_work,
-            )?)
-            .ok_or(ControlledRetainedFootprintError::AccountingOverflow)
-    }
-}
-
-impl fmt::Debug for Node {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let payload = self.payload.as_ref();
-        formatter
-            .debug_struct("Node")
-            .field("name", &payload.name)
-            .field("authored_transform", &self.authored_transform)
-            .field("children", &payload.children)
-            .field("camera", &payload.camera)
-            .field("light", &payload.light)
-            .field("provenance", &payload.provenance)
-            .field("extensions", &payload.extensions)
-            .finish()
-    }
-}
-
-impl PartialEq for Node {
-    fn eq(&self, other: &Self) -> bool {
-        self.authored_transform == other.authored_transform
-            && self.payload.as_ref() == other.payload.as_ref()
-    }
-}
-
-/// Why a node could not enter canonical storage.
-#[derive(Debug, Error, PartialEq, Eq)]
-pub enum NodeError {
-    #[error(transparent)]
-    Extension(#[from] ExtensionEntryValidationError),
-
-    #[error("node storage limit exceeded for {resource:?}; maximum {maximum}")]
-    LimitExceeded {
-        resource: EntityAllocation,
-        maximum: usize,
-    },
-
-    #[error("node allocation failed for {resource:?}")]
-    AllocationFailed { resource: EntityAllocation },
-    #[error("node shared payload allocation failed")]
-    PayloadAllocationFailed,
-    #[error("node shared payload allocation accounting overflowed")]
-    PayloadAccountingOverflow,
-}
+pub(crate) use node::NodePreparedParts;
+pub use node::{Node, NodeError};
 
 /// The supported camera projection category.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -892,20 +714,6 @@ fn try_collect_bounded<T>(
         collected.push(value);
     }
     Ok(collected)
-}
-
-impl From<EntityCollectionError> for NodeError {
-    fn from(error: EntityCollectionError) -> Self {
-        match error {
-            EntityCollectionError::Extension(error) => Self::Extension(error),
-            EntityCollectionError::LimitExceeded { resource, maximum } => {
-                Self::LimitExceeded { resource, maximum }
-            }
-            EntityCollectionError::AllocationFailed { resource } => {
-                Self::AllocationFailed { resource }
-            }
-        }
-    }
 }
 
 #[cfg(test)]
