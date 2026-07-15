@@ -20,6 +20,7 @@ enum TestControlError {
     PublicationRejected,
     ResizeRejected,
     ScratchReservationReleasedEarly,
+    WrongReservationOwner,
     WrongReservationKind,
 }
 
@@ -32,6 +33,7 @@ impl fmt::Display for TestControlError {
             Self::ScratchReservationReleasedEarly => {
                 "scratch reservation released before its payload"
             }
+            Self::WrongReservationOwner => "reservation belongs to another control owner",
             Self::WrongReservationKind => "wrong reservation kind",
         })
     }
@@ -191,6 +193,20 @@ impl SceneValidationControl for TestControl {
             live_bytes: Rc::clone(&self.live_bytes),
             live_scratch_reservations: Rc::clone(&self.live_scratch_reservations),
         })
+    }
+
+    fn validate_reservation(
+        &self,
+        reservation: &Self::Reservation,
+        kind: SceneReservationKind,
+    ) -> Result<(), Self::Error> {
+        if !Rc::ptr_eq(&self.live_bytes, &reservation.live_bytes) {
+            return Err(TestControlError::WrongReservationOwner);
+        }
+        if reservation.kind != kind {
+            return Err(TestControlError::WrongReservationKind);
+        }
+        Ok(())
     }
 
     fn resize_reservation(
@@ -929,6 +945,38 @@ fn cancelled_edit_preserves_the_input_scene_and_generation() {
     assert_eq!(input.generation(), input_generation);
     assert_eq!(input.mesh(MeshId::new(0)).unwrap(), &input_mesh);
     assert_eq!(control.live_bytes(), 0);
+}
+
+#[test]
+fn wrong_owner_edit_commit_is_rejected_before_foreign_validation_work() {
+    let input = valid_triangle_scene();
+    let input_generation = input.generation();
+    let input_mesh = input.mesh(MeshId::new(0)).unwrap().clone();
+    let mut owner = TestControl::new();
+    let edit = input
+        .begin_edit_with(SceneValidationLimits::default(), &mut owner)
+        .unwrap();
+    assert!(owner.live_bytes() > 0);
+    let mut foreign = TestControl::new();
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        edit.commit_with(SceneValidationLimits::default(), &mut foreign)
+    }));
+    let error = result
+        .expect("wrong-owner commit must return a typed error rather than panic")
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        SceneValidationFailure::Control(TestControlError::WrongReservationOwner)
+    ));
+    assert_eq!(foreign.polls, 0);
+    assert_eq!(foreign.work, 0);
+    assert!(foreign.events.is_empty());
+    assert_eq!(foreign.live_bytes(), 0);
+    assert_eq!(owner.live_bytes(), 0);
+    assert_eq!(input.generation(), input_generation);
+    assert_eq!(input.mesh(MeshId::new(0)).unwrap(), &input_mesh);
 }
 
 #[test]

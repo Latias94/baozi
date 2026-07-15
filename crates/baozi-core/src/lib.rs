@@ -5,6 +5,7 @@
 mod animation;
 mod appearance;
 mod attribute;
+mod canonical_edit;
 mod canonical_scene;
 mod canonical_validation;
 mod deform;

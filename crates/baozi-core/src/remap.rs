@@ -154,6 +154,7 @@ macro_rules! define_primitive_domain_endpoint {
             pub const fn domain_index(self) -> u32 {
                 self.domain_index
             }
+
         }
     };
 }
@@ -358,6 +359,79 @@ pub enum RemapChange {
     ExplicitlyUnchanged,
 }
 
+/// A zero-allocation identity relation across two scene generations.
+///
+/// Scene-edit reports use this marker when a remap subject is known to be
+/// structurally unchanged. Callers may rebind an endpoint they already proved
+/// belongs to the input scene without materializing the complete endpoint
+/// universe in the report.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ExplicitUnchangedRemap<S: RemapSpace> {
+    from_generation: SceneGenerationId,
+    to_generation: SceneGenerationId,
+    marker: PhantomData<S>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RemapGenerationBoundary {
+    from_generation: SceneGenerationId,
+    to_generation: SceneGenerationId,
+}
+
+impl RemapGenerationBoundary {
+    pub(crate) fn try_new(
+        from_generation: SceneGenerationId,
+        to_generation: SceneGenerationId,
+    ) -> Result<Self, RemapGenerationBoundaryError> {
+        if from_generation == to_generation {
+            return Err(RemapGenerationBoundaryError::SameGeneration);
+        }
+        Ok(Self {
+            from_generation,
+            to_generation,
+        })
+    }
+}
+
+#[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RemapGenerationBoundaryError {
+    #[error("a remap boundary requires distinct scene generations")]
+    SameGeneration,
+}
+
+impl<S: RemapSpace> ExplicitUnchangedRemap<S> {
+    pub(crate) const fn from_boundary(boundary: RemapGenerationBoundary) -> Self {
+        Self {
+            from_generation: boundary.from_generation,
+            to_generation: boundary.to_generation,
+            marker: PhantomData,
+        }
+    }
+
+    pub(crate) const fn input_generation(&self) -> SceneGenerationId {
+        self.from_generation
+    }
+
+    pub(crate) const fn output_generation(&self) -> SceneGenerationId {
+        self.to_generation
+    }
+
+    pub(crate) const fn change(&self) -> RemapChange {
+        RemapChange::ExplicitlyUnchanged
+    }
+
+    pub(crate) fn try_rebind(
+        &self,
+        endpoint: S::Endpoint,
+    ) -> Result<S::Endpoint, RemapError<S::Endpoint>> {
+        validate_endpoint_generation(RemapSide::From, endpoint, self.from_generation)?;
+        Ok(<S::Endpoint as sealed::Endpoint>::rebind(
+            endpoint,
+            self.to_generation,
+        ))
+    }
+}
+
 /// A bounded allocation category used by remap errors.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RemapAllocation {
@@ -373,6 +447,8 @@ pub enum RemapAllocation {
     ForwardTargets,
     ReverseHeaders,
     ReverseOrigins,
+    UnchangedInputs,
+    UnchangedOutputs,
     Derivations,
     IntermediateIndex,
     CompositionDeduplication,
@@ -736,12 +812,15 @@ impl<S: RemapSpace> RemapBuilder<S> {
             &mut work,
         )?;
         let from_index = build_endpoint_index(
-            &from_obligations,
+            from_obligations.iter().copied(),
             RemapAllocation::ObligationIndex,
             &mut work,
         )?;
-        let to_index =
-            build_endpoint_index(&to_obligations, RemapAllocation::ObligationIndex, &mut work)?;
+        let to_index = build_endpoint_index(
+            to_obligations.iter().copied(),
+            RemapAllocation::ObligationIndex,
+            &mut work,
+        )?;
         let from_seen = try_false_vec::<S::Endpoint>(from_obligations.len())?;
         let to_seen = try_false_vec::<S::Endpoint>(to_obligations.len())?;
 
@@ -1185,16 +1264,20 @@ where
     Ok(collected)
 }
 
-fn build_endpoint_index<E: sealed::Endpoint>(
-    endpoints: &[E],
+fn build_endpoint_index<E, I>(
+    endpoints: I,
     resource: RemapAllocation,
     work: &mut WorkCounter,
-) -> Result<HashMap<E, usize>, RemapError<E>> {
+) -> Result<HashMap<E, usize>, RemapError<E>>
+where
+    E: sealed::Endpoint,
+    I: ExactSizeIterator<Item = E>,
+{
     let mut index = HashMap::new();
     try_reserve_map::<E, usize, E>(&mut index, endpoints.len(), resource)?;
-    for (position, endpoint) in endpoints.iter().copied().enumerate() {
+    work.spend::<E>(endpoints.len())?;
+    for (position, endpoint) in endpoints.enumerate() {
         index.insert(endpoint, position);
-        work.spend::<E>(1)?;
     }
     Ok(index)
 }
@@ -1267,6 +1350,20 @@ struct ReverseHeader<E> {
     derivations: Range<usize>,
 }
 
+#[derive(Debug)]
+enum RemapRelation<E> {
+    General {
+        forward: Vec<ForwardHeader<E>>,
+        forward_targets: Vec<E>,
+        reverse: Vec<ReverseHeader<E>>,
+        reverse_origins: Vec<E>,
+    },
+    ExplicitlyUnchanged {
+        inputs: Vec<E>,
+        outputs: Vec<E>,
+    },
+}
+
 /// One complete generation-qualified relation for one typed remap space.
 ///
 /// The type intentionally does not implement `Clone`: reports retain large
@@ -1275,11 +1372,7 @@ struct ReverseHeader<E> {
 pub struct RemapEnvelope<S: RemapSpace> {
     from_generation: SceneGenerationId,
     to_generation: SceneGenerationId,
-    change: RemapChange,
-    forward: Vec<ForwardHeader<S::Endpoint>>,
-    forward_targets: Vec<S::Endpoint>,
-    reverse: Vec<ReverseHeader<S::Endpoint>>,
-    reverse_origins: Vec<S::Endpoint>,
+    relation: RemapRelation<S::Endpoint>,
     derivations: Vec<DerivationProvenance>,
     work_units: usize,
     derivation_rebind_work_units: usize,
@@ -1373,10 +1466,10 @@ impl<S: RemapSpace> fmt::Debug for RemapEnvelope<S> {
             .field("subject", &S::SUBJECT)
             .field("from_generation", &self.from_generation)
             .field("to_generation", &self.to_generation)
-            .field("change", &self.change)
-            .field("from_endpoints", &self.forward.len())
-            .field("to_endpoints", &self.reverse.len())
-            .field("relation_cells", &self.forward_targets.len())
+            .field("change", &self.change())
+            .field("from_endpoints", &self.input_endpoint_count())
+            .field("to_endpoints", &self.output_endpoint_count())
+            .field("relation_cells", &self.relation_cell_count())
             .field("derivations", &self.derivations.len())
             .field("work_units", &self.work_units)
             .field(
@@ -1401,23 +1494,37 @@ impl<S: RemapSpace> RemapEnvelope<S> {
     }
 
     pub const fn change(&self) -> RemapChange {
-        self.change
+        match &self.relation {
+            RemapRelation::General { .. } => RemapChange::Changed,
+            RemapRelation::ExplicitlyUnchanged { .. } => RemapChange::ExplicitlyUnchanged,
+        }
     }
 
     pub const fn is_explicitly_unchanged(&self) -> bool {
-        matches!(self.change, RemapChange::ExplicitlyUnchanged)
+        matches!(&self.relation, RemapRelation::ExplicitlyUnchanged { .. })
     }
 
     pub fn input_endpoint_count(&self) -> usize {
-        self.forward.len()
+        match &self.relation {
+            RemapRelation::General { forward, .. } => forward.len(),
+            RemapRelation::ExplicitlyUnchanged { inputs, .. } => inputs.len(),
+        }
     }
 
     pub fn output_endpoint_count(&self) -> usize {
-        self.reverse.len()
+        match &self.relation {
+            RemapRelation::General { reverse, .. } => reverse.len(),
+            RemapRelation::ExplicitlyUnchanged { outputs, .. } => outputs.len(),
+        }
     }
 
     pub fn relation_cell_count(&self) -> usize {
-        self.forward_targets.len()
+        match &self.relation {
+            RemapRelation::General {
+                forward_targets, ..
+            } => forward_targets.len(),
+            RemapRelation::ExplicitlyUnchanged { inputs, .. } => inputs.len(),
+        }
     }
 
     pub fn derivation_count(&self) -> usize {
@@ -1436,10 +1543,23 @@ impl<S: RemapSpace> RemapEnvelope<S> {
     /// Measures all allocator-retained vector capacity owned by this envelope.
     pub fn retained_footprint(&self) -> Result<RemapRetainedFootprint, RemapError<S::Endpoint>> {
         let mut footprint = RemapRetainedFootprint::default();
-        footprint.try_add::<ForwardHeader<S::Endpoint>, S::Endpoint>(self.forward.capacity())?;
-        footprint.try_add::<S::Endpoint, S::Endpoint>(self.forward_targets.capacity())?;
-        footprint.try_add::<ReverseHeader<S::Endpoint>, S::Endpoint>(self.reverse.capacity())?;
-        footprint.try_add::<S::Endpoint, S::Endpoint>(self.reverse_origins.capacity())?;
+        match &self.relation {
+            RemapRelation::General {
+                forward,
+                forward_targets,
+                reverse,
+                reverse_origins,
+            } => {
+                footprint.try_add::<ForwardHeader<S::Endpoint>, S::Endpoint>(forward.capacity())?;
+                footprint.try_add::<S::Endpoint, S::Endpoint>(forward_targets.capacity())?;
+                footprint.try_add::<ReverseHeader<S::Endpoint>, S::Endpoint>(reverse.capacity())?;
+                footprint.try_add::<S::Endpoint, S::Endpoint>(reverse_origins.capacity())?;
+            }
+            RemapRelation::ExplicitlyUnchanged { inputs, outputs } => {
+                footprint.try_add::<S::Endpoint, S::Endpoint>(inputs.capacity())?;
+                footprint.try_add::<S::Endpoint, S::Endpoint>(outputs.capacity())?;
+            }
+        }
         footprint.try_add::<DerivationProvenance, S::Endpoint>(self.derivations.capacity())?;
         Ok(footprint)
     }
@@ -1482,13 +1602,16 @@ impl<S: RemapSpace> RemapEnvelope<S> {
         endpoint: S::Endpoint,
     ) -> Result<OriginMappingView<'_, S::Endpoint>, RemapError<S::Endpoint>> {
         validate_endpoint_generation(RemapSide::From, endpoint, self.from_generation)?;
-        let index = self
-            .forward
-            .binary_search_by_key(&endpoint, |header| header.endpoint)
-            .map_err(|_| RemapError::UnknownObligation {
-                side: RemapSide::From,
-                endpoint,
-            })?;
+        let index = match &self.relation {
+            RemapRelation::General { forward, .. } => {
+                forward.binary_search_by_key(&endpoint, |header| header.endpoint)
+            }
+            RemapRelation::ExplicitlyUnchanged { inputs, .. } => inputs.binary_search(&endpoint),
+        }
+        .map_err(|_| RemapError::UnknownObligation {
+            side: RemapSide::From,
+            endpoint,
+        })?;
         Ok(self.origin_view(index))
     }
 
@@ -1498,42 +1621,70 @@ impl<S: RemapSpace> RemapEnvelope<S> {
         endpoint: S::Endpoint,
     ) -> Result<TargetMappingView<'_, S::Endpoint>, RemapError<S::Endpoint>> {
         validate_endpoint_generation(RemapSide::To, endpoint, self.to_generation)?;
-        let index = self
-            .reverse
-            .binary_search_by_key(&endpoint, |header| header.endpoint)
-            .map_err(|_| RemapError::UnknownObligation {
-                side: RemapSide::To,
-                endpoint,
-            })?;
+        let index = match &self.relation {
+            RemapRelation::General { reverse, .. } => {
+                reverse.binary_search_by_key(&endpoint, |header| header.endpoint)
+            }
+            RemapRelation::ExplicitlyUnchanged { outputs, .. } => outputs.binary_search(&endpoint),
+        }
+        .map_err(|_| RemapError::UnknownObligation {
+            side: RemapSide::To,
+            endpoint,
+        })?;
         Ok(self.target_view(index))
     }
 
     /// Iterates input dispositions in canonical endpoint order.
     pub fn outcomes(&self) -> impl ExactSizeIterator<Item = OriginMappingView<'_, S::Endpoint>> {
-        (0..self.forward.len()).map(|index| self.origin_view(index))
+        (0..self.input_endpoint_count()).map(|index| self.origin_view(index))
     }
 
     /// Iterates output origins in canonical endpoint order.
     pub fn target_origins(
         &self,
     ) -> impl ExactSizeIterator<Item = TargetMappingView<'_, S::Endpoint>> {
-        (0..self.reverse.len()).map(|index| self.target_view(index))
+        (0..self.output_endpoint_count()).map(|index| self.target_view(index))
     }
 
     fn origin_view(&self, index: usize) -> OriginMappingView<'_, S::Endpoint> {
-        let header = &self.forward[index];
-        OriginMappingView {
-            endpoint: header.endpoint,
-            targets: &self.forward_targets[header.targets.clone()],
+        match &self.relation {
+            RemapRelation::General {
+                forward,
+                forward_targets,
+                ..
+            } => {
+                let header = &forward[index];
+                OriginMappingView {
+                    endpoint: header.endpoint,
+                    targets: &forward_targets[header.targets.clone()],
+                }
+            }
+            RemapRelation::ExplicitlyUnchanged { inputs, outputs } => OriginMappingView {
+                endpoint: inputs[index],
+                targets: &outputs[index..index + 1],
+            },
         }
     }
 
     fn target_view(&self, index: usize) -> TargetMappingView<'_, S::Endpoint> {
-        let header = &self.reverse[index];
-        TargetMappingView {
-            endpoint: header.endpoint,
-            origins: &self.reverse_origins[header.origins.clone()],
-            derivations: &self.derivations[header.derivations.clone()],
+        match &self.relation {
+            RemapRelation::General {
+                reverse,
+                reverse_origins,
+                ..
+            } => {
+                let header = &reverse[index];
+                TargetMappingView {
+                    endpoint: header.endpoint,
+                    origins: &reverse_origins[header.origins.clone()],
+                    derivations: &self.derivations[header.derivations.clone()],
+                }
+            }
+            RemapRelation::ExplicitlyUnchanged { inputs, outputs } => TargetMappingView {
+                endpoint: outputs[index],
+                origins: &inputs[index..index + 1],
+                derivations: &self.derivations[0..0],
+            },
         }
     }
 }
@@ -1703,11 +1854,12 @@ fn build_changed_envelope<S: RemapSpace>(
         envelope: RemapEnvelope {
             from_generation: builder.from_generation,
             to_generation: builder.to_generation,
-            change: RemapChange::Changed,
-            forward,
-            forward_targets,
-            reverse,
-            reverse_origins,
+            relation: RemapRelation::General {
+                forward,
+                forward_targets,
+                reverse,
+                reverse_origins,
+            },
             derivations,
             work_units: builder.work.used,
             derivation_rebind_work_units: 0,
@@ -1824,42 +1976,13 @@ fn build_unchanged_envelope<S: RemapSpace>(
             maximum: builder.limits.relation_cells,
         });
     }
-    let mut forward = Vec::new();
-    let mut forward_targets = Vec::new();
-    let mut reverse = Vec::new();
-    let mut reverse_origins = Vec::new();
-    try_reserve_vec::<_, S::Endpoint>(&mut forward, count, RemapAllocation::ForwardHeaders)?;
-    try_reserve_vec::<_, S::Endpoint>(
-        &mut forward_targets,
-        count,
-        RemapAllocation::ForwardTargets,
-    )?;
-    try_reserve_vec::<_, S::Endpoint>(&mut reverse, count, RemapAllocation::ReverseHeaders)?;
-    try_reserve_vec::<_, S::Endpoint>(
-        &mut reverse_origins,
-        count,
-        RemapAllocation::ReverseOrigins,
-    )?;
-
     for (origin, expected_target) in builder.from_obligations.iter().zip(&builder.to_obligations) {
-        let target = <S::Endpoint as sealed::Endpoint>::rebind(*origin, builder.to_generation);
-        if target != *expected_target {
-            return Err(RemapError::ExplicitUnchangedEndpointMismatch { endpoint: target });
-        }
-        let forward_start = forward_targets.len();
-        forward_targets.push(target);
-        forward.push(ForwardHeader {
-            endpoint: *origin,
-            targets: forward_start..forward_targets.len(),
-        });
-        let reverse_start = reverse_origins.len();
-        reverse_origins.push(*origin);
-        let derivation_start = 0;
-        reverse.push(ReverseHeader {
-            endpoint: target,
-            origins: reverse_start..reverse_origins.len(),
-            derivations: derivation_start..derivation_start,
-        });
+        validate_explicitly_unchanged_pair::<S>(
+            *origin,
+            *expected_target,
+            builder.from_generation,
+            builder.to_generation,
+        )?;
         builder.work.spend::<S::Endpoint>(1)?;
     }
 
@@ -1867,13 +1990,113 @@ fn build_unchanged_envelope<S: RemapSpace>(
         envelope: RemapEnvelope {
             from_generation: builder.from_generation,
             to_generation: builder.to_generation,
-            change: RemapChange::ExplicitlyUnchanged,
-            forward,
-            forward_targets,
-            reverse,
-            reverse_origins,
+            relation: RemapRelation::ExplicitlyUnchanged {
+                inputs: builder.from_obligations,
+                outputs: builder.to_obligations,
+            },
             derivations: Vec::new(),
             work_units: builder.work.used,
+            derivation_rebind_work_units: 0,
+            marker: PhantomData,
+        },
+    })
+}
+
+fn validate_explicitly_unchanged_pair<S: RemapSpace>(
+    origin: S::Endpoint,
+    expected_target: S::Endpoint,
+    from_generation: SceneGenerationId,
+    to_generation: SceneGenerationId,
+) -> Result<(), RemapError<S::Endpoint>> {
+    validate_endpoint_generation(RemapSide::From, origin, from_generation)?;
+    validate_endpoint_generation(RemapSide::To, expected_target, to_generation)?;
+    let target = <S::Endpoint as sealed::Endpoint>::rebind(origin, to_generation);
+    if target != expected_target {
+        return Err(RemapError::ExplicitUnchangedEndpointMismatch { endpoint: target });
+    }
+    Ok(())
+}
+
+fn compose_explicitly_unchanged_pair<S: RemapSpace>(
+    left: &RemapEnvelope<S>,
+    right: &RemapEnvelope<S>,
+    work: &mut WorkCounter,
+) -> Result<ComposedRemap<S>, RemapError<S::Endpoint>> {
+    let RemapRelation::ExplicitlyUnchanged {
+        inputs: left_inputs,
+        outputs: left_outputs,
+    } = &left.relation
+    else {
+        return Err(RemapError::AccountingOverflow);
+    };
+    let RemapRelation::ExplicitlyUnchanged {
+        inputs: right_inputs,
+        outputs: right_outputs,
+    } = &right.relation
+    else {
+        return Err(RemapError::AccountingOverflow);
+    };
+
+    let mut right_index = 0;
+    let mut first_missing_from = None;
+    for &left_endpoint in left_outputs {
+        while let Some(&right_endpoint) = right_inputs.get(right_index)
+            && right_endpoint < left_endpoint
+        {
+            work.spend::<S::Endpoint>(1)?;
+            first_missing_from.get_or_insert(right_endpoint);
+            right_index += 1;
+        }
+        work.spend::<S::Endpoint>(1)?;
+        match right_inputs.get(right_index) {
+            Some(&right_endpoint) if right_endpoint == left_endpoint => {
+                right_index += 1;
+            }
+            Some(_) | None => {
+                return Err(RemapError::MissingIntermediateEndpoint {
+                    side: RemapSide::To,
+                    endpoint: left_endpoint,
+                });
+            }
+        }
+    }
+    if let Some(endpoint) = first_missing_from {
+        return Err(RemapError::MissingIntermediateEndpoint {
+            side: RemapSide::From,
+            endpoint,
+        });
+    }
+    if let Some(&endpoint) = right_inputs.get(right_index) {
+        return Err(RemapError::MissingIntermediateEndpoint {
+            side: RemapSide::From,
+            endpoint,
+        });
+    }
+
+    let mut inputs = Vec::new();
+    try_reserve_vec::<S::Endpoint, S::Endpoint>(
+        &mut inputs,
+        left_inputs.len(),
+        RemapAllocation::UnchangedInputs,
+    )?;
+    work.spend::<S::Endpoint>(left_inputs.len())?;
+    inputs.extend_from_slice(left_inputs);
+    let mut outputs = Vec::new();
+    try_reserve_vec::<S::Endpoint, S::Endpoint>(
+        &mut outputs,
+        right_outputs.len(),
+        RemapAllocation::UnchangedOutputs,
+    )?;
+    work.spend::<S::Endpoint>(right_outputs.len())?;
+    outputs.extend_from_slice(right_outputs);
+
+    Ok(ComposedRemap {
+        envelope: RemapEnvelope {
+            from_generation: left.from_generation,
+            to_generation: right.to_generation,
+            relation: RemapRelation::ExplicitlyUnchanged { inputs, outputs },
+            derivations: Vec::new(),
+            work_units: work.used,
             derivation_rebind_work_units: 0,
             marker: PhantomData,
         },
@@ -1897,35 +2120,39 @@ fn compose_pair<S: RemapSpace>(
     check_composition_envelope_limits(left, limits)?;
     check_composition_envelope_limits(right, limits)?;
 
-    let left_reverse_index = build_header_index(
-        &left.reverse,
+    if matches!(&left.relation, RemapRelation::ExplicitlyUnchanged { .. })
+        && matches!(&right.relation, RemapRelation::ExplicitlyUnchanged { .. })
+    {
+        return compose_explicitly_unchanged_pair(left, right, work);
+    }
+
+    let left_reverse_index = build_endpoint_index(
+        left.target_origins().map(TargetMappingView::endpoint),
         RemapAllocation::IntermediateIndex,
         work,
-        |header| header.endpoint,
     )?;
-    let right_forward_index = build_header_index(
-        &right.forward,
+    let right_forward_index = build_endpoint_index(
+        right.outcomes().map(OriginMappingView::endpoint),
         RemapAllocation::IntermediateIndex,
         work,
-        |header| header.endpoint,
     )?;
 
     // Validate complete adjacent-step coverage before following a relation.
-    for header in &left.reverse {
+    for mapping in left.target_origins() {
         work.spend::<S::Endpoint>(1)?;
-        if !right_forward_index.contains_key(&header.endpoint) {
+        if !right_forward_index.contains_key(&mapping.endpoint()) {
             return Err(RemapError::MissingIntermediateEndpoint {
                 side: RemapSide::To,
-                endpoint: header.endpoint,
+                endpoint: mapping.endpoint(),
             });
         }
     }
-    for header in &right.forward {
+    for mapping in right.outcomes() {
         work.spend::<S::Endpoint>(1)?;
-        if !left_reverse_index.contains_key(&header.endpoint) {
+        if !left_reverse_index.contains_key(&mapping.endpoint()) {
             return Err(RemapError::MissingIntermediateEndpoint {
                 side: RemapSide::From,
-                endpoint: header.endpoint,
+                endpoint: mapping.endpoint(),
             });
         }
     }
@@ -1937,32 +2164,32 @@ fn compose_pair<S: RemapSpace>(
     let mut derivations = Vec::new();
     try_reserve_vec::<_, S::Endpoint>(
         &mut forward,
-        left.forward.len(),
+        left.input_endpoint_count(),
         RemapAllocation::ForwardHeaders,
     )?;
     try_reserve_vec::<_, S::Endpoint>(
         &mut reverse,
-        right.reverse.len(),
+        right.output_endpoint_count(),
         RemapAllocation::ReverseHeaders,
     )?;
 
     let mut target_marks = HashMap::new();
     try_reserve_map::<S::Endpoint, usize, S::Endpoint>(
         &mut target_marks,
-        right.reverse.len(),
+        right.output_endpoint_count(),
         RemapAllocation::CompositionDeduplication,
     )?;
-    for (origin_ordinal, left_header) in left.forward.iter().enumerate() {
+    for (origin_ordinal, left_mapping) in left.outcomes().enumerate() {
         work.spend::<S::Endpoint>(1)?;
         let epoch = origin_ordinal
             .checked_add(1)
             .ok_or(RemapError::AccountingOverflow)?;
         let start = forward_targets.len();
-        for intermediate in &left.forward_targets[left_header.targets.clone()] {
+        for intermediate in left_mapping.targets() {
             work.spend::<S::Endpoint>(1)?;
             let right_index = right_forward_index[intermediate];
-            let right_header = &right.forward[right_index];
-            for target in &right.forward_targets[right_header.targets.clone()] {
+            let right_mapping = right.origin_view(right_index);
+            for target in right_mapping.targets() {
                 work.spend::<S::Endpoint>(1)?;
                 if mark_once(&mut target_marks, *target, epoch) {
                     push_bounded_cell(
@@ -1975,12 +2202,12 @@ fn compose_pair<S: RemapSpace>(
             }
         }
         forward.push(ForwardHeader {
-            endpoint: left_header.endpoint,
+            endpoint: left_mapping.endpoint(),
             targets: start..forward_targets.len(),
         });
     }
 
-    let origin_capacity = left.forward.len();
+    let origin_capacity = left.input_endpoint_count();
     let derivation_capacity = left
         .derivations
         .len()
@@ -2005,18 +2232,18 @@ fn compose_pair<S: RemapSpace>(
         RemapAllocation::CompositionDeduplication,
     )?;
 
-    for (target_ordinal, right_header) in right.reverse.iter().enumerate() {
+    for (target_ordinal, right_mapping) in right.target_origins().enumerate() {
         work.spend::<S::Endpoint>(1)?;
         let epoch = target_ordinal
             .checked_add(1)
             .ok_or(RemapError::AccountingOverflow)?;
         let origin_start = reverse_origins.len();
         let derivation_start = derivations.len();
-        for intermediate in &right.reverse_origins[right_header.origins.clone()] {
+        for intermediate in right_mapping.origins() {
             work.spend::<S::Endpoint>(1)?;
             let left_index = left_reverse_index[intermediate];
-            let left_header = &left.reverse[left_index];
-            for origin in &left.reverse_origins[left_header.origins.clone()] {
+            let left_mapping = left.target_view(left_index);
+            for origin in left_mapping.origins() {
                 work.spend::<S::Endpoint>(1)?;
                 if mark_once(&mut origin_marks, *origin, epoch) {
                     push_bounded_cell(
@@ -2027,7 +2254,7 @@ fn compose_pair<S: RemapSpace>(
                     )?;
                 }
             }
-            for derivation in &left.derivations[left_header.derivations.clone()] {
+            for derivation in left_mapping.derivations() {
                 work.spend::<S::Endpoint>(1)?;
                 if mark_once(&mut derivation_marks, *derivation, epoch) {
                     push_bounded_cell(
@@ -2040,7 +2267,7 @@ fn compose_pair<S: RemapSpace>(
             }
         }
         // Right-side originless contributions occur after inherited left-side paths.
-        for derivation in &right.derivations[right_header.derivations.clone()] {
+        for derivation in right_mapping.derivations() {
             work.spend::<S::Endpoint>(1)?;
             if mark_once(&mut derivation_marks, *derivation, epoch) {
                 push_bounded_cell(
@@ -2052,7 +2279,7 @@ fn compose_pair<S: RemapSpace>(
             }
         }
         reverse.push(ReverseHeader {
-            endpoint: right_header.endpoint,
+            endpoint: right_mapping.endpoint(),
             origins: origin_start..reverse_origins.len(),
             derivations: derivation_start..derivations.len(),
         });
@@ -2062,15 +2289,12 @@ fn compose_pair<S: RemapSpace>(
         envelope: RemapEnvelope {
             from_generation: left.from_generation,
             to_generation: right.to_generation,
-            change: if left.is_explicitly_unchanged() && right.is_explicitly_unchanged() {
-                RemapChange::ExplicitlyUnchanged
-            } else {
-                RemapChange::Changed
+            relation: RemapRelation::General {
+                forward,
+                forward_targets,
+                reverse,
+                reverse_origins,
             },
-            forward,
-            forward_targets,
-            reverse,
-            reverse_origins,
             derivations,
             work_units: work.used,
             derivation_rebind_work_units: 0,
@@ -2083,16 +2307,15 @@ fn check_composition_envelope_limits<S: RemapSpace>(
     envelope: &RemapEnvelope<S>,
     limits: RemapLimits,
 ) -> Result<(), RemapError<S::Endpoint>> {
-    if envelope.forward.len() > limits.endpoints_per_side
-        || envelope.reverse.len() > limits.endpoints_per_side
+    if envelope.input_endpoint_count() > limits.endpoints_per_side
+        || envelope.output_endpoint_count() > limits.endpoints_per_side
     {
         return Err(RemapError::LimitExceeded {
             limit: RemapLimit::EndpointsPerSide,
             maximum: limits.endpoints_per_side,
         });
     }
-    if envelope.forward_targets.len() > limits.relation_cells
-        || envelope.reverse_origins.len() > limits.relation_cells
+    if envelope.relation_cell_count() > limits.relation_cells
         || envelope.derivations.len() > limits.relation_cells
     {
         return Err(RemapError::LimitExceeded {
@@ -2101,25 +2324,6 @@ fn check_composition_envelope_limits<S: RemapSpace>(
         });
     }
     Ok(())
-}
-
-fn build_header_index<E, H, F>(
-    headers: &[H],
-    resource: RemapAllocation,
-    work: &mut WorkCounter,
-    endpoint: F,
-) -> Result<HashMap<E, usize>, RemapError<E>>
-where
-    E: sealed::Endpoint,
-    F: Fn(&H) -> E,
-{
-    let mut index = HashMap::new();
-    try_reserve_map::<E, usize, E>(&mut index, headers.len(), resource)?;
-    for (position, header) in headers.iter().enumerate() {
-        index.insert(endpoint(header), position);
-        work.spend::<E>(1)?;
-    }
-    Ok(index)
 }
 
 fn mark_once<K: Copy + Eq + Hash>(marks: &mut HashMap<K, usize>, key: K, epoch: usize) -> bool {
@@ -2892,6 +3096,37 @@ mod tests {
     }
 
     #[test]
+    fn compact_unchanged_marker_rebinds_the_complete_owner_chain() {
+        let from_generation = generation();
+        let to_generation = generation();
+        let endpoint = VertexEndpoint::new(primitive(from_generation, 7, 3), 11);
+        let boundary = RemapGenerationBoundary::try_new(from_generation, to_generation)
+            .expect("distinct generations should admit an unchanged boundary");
+        let marker = ExplicitUnchangedRemap::<VertexRemapSpace>::from_boundary(boundary);
+
+        let rebound = marker
+            .try_rebind(endpoint)
+            .expect("input endpoint should rebind");
+        assert_eq!(marker.input_generation(), from_generation);
+        assert_eq!(marker.output_generation(), to_generation);
+        assert_eq!(marker.change(), RemapChange::ExplicitlyUnchanged);
+        assert_eq!(rebound.primitive().generation(), to_generation);
+        assert_eq!(rebound.primitive().logical_mesh().index(), 7);
+        assert_eq!(rebound.primitive().local(), 3);
+        assert_eq!(rebound.domain_index(), 11);
+
+        let foreign = VertexEndpoint::new(primitive(generation(), 7, 3), 11);
+        assert!(matches!(
+            marker.try_rebind(foreign),
+            Err(RemapError::EndpointGenerationMismatch {
+                side: RemapSide::From,
+                expected,
+                ..
+            }) if expected == from_generation
+        ));
+    }
+
+    #[test]
     fn derivation_provenance_rejects_source_and_foreign_attachments() {
         let (source_arena, source) = test_provenance_fixture();
         assert_eq!(
@@ -3008,6 +3243,98 @@ mod tests {
         assert!(generated.is_originless());
         assert_eq!(generated.derivations(), &[second_derivation]);
         assert!(sequence.composition_work_units() > 0);
+    }
+
+    #[test]
+    fn nonempty_unchanged_then_changed_composition_preserves_right_hand_semantics() {
+        let generation_0 = generation();
+        let generation_1 = generation();
+        let generation_2 = generation();
+        let old = [vertex(generation_0, 0), vertex(generation_0, 1)];
+        let middle = [vertex(generation_1, 0), vertex(generation_1, 1)];
+        let final_endpoints = [
+            vertex(generation_2, 0),
+            vertex(generation_2, 1),
+            vertex(generation_2, 2),
+            vertex(generation_2, 3),
+        ];
+        let (_arena, generated) = generated_derivation(71);
+        let unchanged =
+            RemapBuilder::<VertexRemapSpace>::try_new(generation_0, generation_1, old, middle)
+                .unwrap()
+                .try_finish_explicitly_unchanged()
+                .unwrap();
+        let mut changed = RemapBuilder::<VertexRemapSpace>::try_new(
+            generation_1,
+            generation_2,
+            middle,
+            final_endpoints,
+        )
+        .unwrap();
+        changed
+            .try_split(middle[0], [final_endpoints[1], final_endpoints[0]])
+            .unwrap();
+        changed.try_map(middle[1], final_endpoints[2]).unwrap();
+        changed.try_generate(final_endpoints[3], generated).unwrap();
+
+        let sequence = RemapSequence::try_new([unchanged, changed.try_finish().unwrap()]).unwrap();
+        let composed = sequence.composed();
+        assert_eq!(composed.input_generation(), generation_0);
+        assert_eq!(composed.output_generation(), generation_2);
+        assert_eq!(composed.change(), RemapChange::Changed);
+        assert_eq!(
+            composed.outcome(old[0]).unwrap().targets(),
+            &[final_endpoints[1], final_endpoints[0]]
+        );
+        assert_eq!(
+            composed.origins(final_endpoints[1]).unwrap().origins(),
+            &[old[0]]
+        );
+        let generated_output = composed.origins(final_endpoints[3]).unwrap();
+        assert!(generated_output.is_originless());
+        assert_eq!(generated_output.derivations(), &[generated]);
+    }
+
+    #[test]
+    fn nonempty_changed_then_unchanged_composition_carries_left_hand_derivation() {
+        let generation_0 = generation();
+        let generation_1 = generation();
+        let generation_2 = generation();
+        let old = [vertex(generation_0, 0), vertex(generation_0, 1)];
+        let middle = [vertex(generation_1, 0), vertex(generation_1, 1)];
+        let final_endpoints = [vertex(generation_2, 0), vertex(generation_2, 1)];
+        let (_arena, generated) = generated_derivation(72);
+        let mut changed =
+            RemapBuilder::<VertexRemapSpace>::try_new(generation_0, generation_1, old, middle)
+                .unwrap();
+        changed.try_merge([old[1], old[0]], middle[0]).unwrap();
+        changed.try_generate(middle[1], generated).unwrap();
+        let unchanged = RemapBuilder::<VertexRemapSpace>::try_new(
+            generation_1,
+            generation_2,
+            middle,
+            final_endpoints,
+        )
+        .unwrap()
+        .try_finish_explicitly_unchanged()
+        .unwrap();
+
+        let sequence = RemapSequence::try_new([changed.try_finish().unwrap(), unchanged]).unwrap();
+        let composed = sequence.composed();
+        assert_eq!(composed.input_generation(), generation_0);
+        assert_eq!(composed.output_generation(), generation_2);
+        assert_eq!(composed.change(), RemapChange::Changed);
+        assert_eq!(
+            composed.outcome(old[1]).unwrap().targets(),
+            &[final_endpoints[0]]
+        );
+        assert_eq!(
+            composed.origins(final_endpoints[0]).unwrap().origins(),
+            &[old[1], old[0]]
+        );
+        let generated_output = composed.origins(final_endpoints[1]).unwrap();
+        assert!(generated_output.is_originless());
+        assert_eq!(generated_output.derivations(), &[generated]);
     }
 
     fn merge_split_chain(size: u32) -> RemapSequence<VertexRemapSpace> {
@@ -3271,22 +3598,30 @@ mod tests {
         builder.try_generate(target, derivation).unwrap();
         let mut envelope = builder.try_finish().unwrap();
         envelope.envelope.derivations.try_reserve_exact(64).unwrap();
-        envelope.envelope.forward.try_reserve_exact(64).unwrap();
+        let RemapRelation::General {
+            forward,
+            forward_targets,
+            reverse,
+            reverse_origins,
+        } = &mut envelope.envelope.relation
+        else {
+            panic!("a generated relation must use general storage");
+        };
+        forward.try_reserve_exact(64).unwrap();
 
-        let logical_cells = envelope.envelope.forward.len()
-            + envelope.envelope.forward_targets.len()
-            + envelope.envelope.reverse.len()
-            + envelope.envelope.reverse_origins.len()
+        let logical_cells = forward.len()
+            + forward_targets.len()
+            + reverse.len()
+            + reverse_origins.len()
             + envelope.envelope.derivations.len();
-        let envelope_footprint = envelope.retained_footprint().unwrap();
-        let expected_envelope_bytes = envelope.envelope.forward.capacity()
+        let expected_envelope_bytes = forward.capacity()
             * std::mem::size_of::<ForwardHeader<VertexEndpoint>>()
-            + envelope.envelope.forward_targets.capacity() * std::mem::size_of::<VertexEndpoint>()
-            + envelope.envelope.reverse.capacity()
-                * std::mem::size_of::<ReverseHeader<VertexEndpoint>>()
-            + envelope.envelope.reverse_origins.capacity() * std::mem::size_of::<VertexEndpoint>()
+            + forward_targets.capacity() * std::mem::size_of::<VertexEndpoint>()
+            + reverse.capacity() * std::mem::size_of::<ReverseHeader<VertexEndpoint>>()
+            + reverse_origins.capacity() * std::mem::size_of::<VertexEndpoint>()
             + envelope.envelope.derivations.capacity()
                 * std::mem::size_of::<DerivationProvenance>();
+        let envelope_footprint = envelope.retained_footprint().unwrap();
         assert!(envelope_footprint.cells() > logical_cells);
         assert_eq!(envelope_footprint.bytes(), expected_envelope_bytes);
 
@@ -3401,9 +3736,52 @@ mod tests {
         .unwrap();
         let sequence = RemapSequence::try_new([first, second]).unwrap();
         assert!(sequence.composed().is_explicitly_unchanged());
+        assert!(matches!(
+            &sequence.composed().relation,
+            RemapRelation::ExplicitlyUnchanged { inputs, outputs }
+                if inputs == &[old] && outputs == &[final_endpoint]
+        ));
+        assert_eq!(sequence.composed().retained_footprint().unwrap().cells(), 2);
         assert_eq!(
             sequence.composed().outcome(old).unwrap().targets(),
             &[final_endpoint]
+        );
+    }
+
+    #[test]
+    fn unchanged_composition_reports_missing_to_before_missing_from() {
+        let generation_0 = generation();
+        let generation_1 = generation();
+        let generation_2 = generation();
+        let old = NodeId::new(generation_0, 1);
+        let missing_to = NodeId::new(generation_1, 1);
+        let first = RemapBuilder::<NodeRemapSpace>::try_new(
+            generation_0,
+            generation_1,
+            [old],
+            [missing_to],
+        )
+        .unwrap()
+        .try_finish_explicitly_unchanged()
+        .unwrap();
+        let right_inputs = [NodeId::new(generation_1, 0), NodeId::new(generation_1, 2)];
+        let right_outputs = [NodeId::new(generation_2, 0), NodeId::new(generation_2, 2)];
+        let second = RemapBuilder::<NodeRemapSpace>::try_new(
+            generation_1,
+            generation_2,
+            right_inputs,
+            right_outputs,
+        )
+        .unwrap()
+        .try_finish_explicitly_unchanged()
+        .unwrap();
+
+        assert_eq!(
+            RemapSequence::try_new([first, second]).unwrap_err(),
+            RemapError::MissingIntermediateEndpoint {
+                side: RemapSide::To,
+                endpoint: missing_to,
+            }
         );
     }
 

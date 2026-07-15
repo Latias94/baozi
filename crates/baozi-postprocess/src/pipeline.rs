@@ -665,7 +665,15 @@ impl<'a> ExecutionState<'a> {
             return Err(accounting_error(cause));
         }
 
-        combined.values.retain(|token| token.bytes() != 0);
+        debug_assert!(
+            !combined.values.is_empty(),
+            "a successful scene transition must retain an owner capability"
+        );
+        if required_bytes == 0 {
+            combined.values.truncate(1);
+        } else {
+            combined.values.retain(|token| token.bytes() != 0);
+        }
         reservation.retained = combined;
         reservation.kind = to;
         Ok(())
@@ -700,16 +708,12 @@ impl SceneValidationControl for ExecutionState<'_> {
         bytes: u64,
     ) -> std::result::Result<Self::Reservation, Self::Error> {
         let (phase, dimension) = reservation_class(kind);
-        let primary = if bytes == 0 {
-            None
-        } else {
-            Some(
-                self.coordinator
-                    .checkpoint()
-                    .reserve(phase, dimension, bytes)
-                    .map_err(accounting_error)?,
-            )
-        };
+        let primary = Some(
+            self.coordinator
+                .checkpoint()
+                .reserve(phase, dimension, bytes)
+                .map_err(accounting_error)?,
+        );
         Ok(SceneReservation {
             kind,
             primary,
@@ -718,6 +722,45 @@ impl SceneValidationControl for ExecutionState<'_> {
             rejected_publication_batch: None,
             pending_publication: None,
         })
+    }
+
+    fn validate_reservation(
+        &self,
+        reservation: &Self::Reservation,
+        kind: SceneReservationKind,
+    ) -> std::result::Result<(), Self::Error> {
+        if reservation.kind != kind {
+            return Err(PostProcessError::ValidationControlInvariant {
+                message: "core reservation validation kind did not match its live token",
+            });
+        }
+        if reservation.publication_batch.is_some()
+            || reservation.rejected_publication_batch.is_some()
+            || reservation.pending_publication.is_some()
+        {
+            return Err(PostProcessError::ValidationControlInvariant {
+                message: "published reservation state cannot re-enter core validation",
+            });
+        }
+
+        let mut has_capability = false;
+        for token in reservation
+            .primary
+            .iter()
+            .chain(reservation.retained.values.iter())
+            .chain(reservation.retained.capacity.iter())
+        {
+            self.coordinator
+                .validate_live_reservation(token)
+                .map_err(accounting_error)?;
+            has_capability = true;
+        }
+        if !has_capability {
+            return Err(PostProcessError::ValidationControlInvariant {
+                message: "stateful scene reservation lost its owner capability",
+            });
+        }
+        Ok(())
     }
 
     fn resize_reservation(
@@ -733,24 +776,13 @@ impl SceneValidationControl for ExecutionState<'_> {
         }
 
         match &mut reservation.primary {
-            None if required_bytes == 0 => Ok(()),
-            None => {
-                let (phase, dimension) = reservation_class(kind);
-                let token = self
-                    .coordinator
-                    .checkpoint()
-                    .reserve(phase, dimension, required_bytes)
-                    .map_err(accounting_error)?;
-                reservation.primary = Some(token);
-                Ok(())
-            }
+            None => Err(PostProcessError::ValidationControlInvariant {
+                message: "scene reservation resize lost its owner capability",
+            }),
             Some(token) => {
                 self.coordinator
                     .resize_reservation(token, required_bytes)
                     .map_err(accounting_error)?;
-                if required_bytes == 0 {
-                    reservation.primary = None;
-                }
                 Ok(())
             }
         }
@@ -1539,6 +1571,233 @@ mod tests {
             .expect("dropping the preserved token should finalize cleanly");
         assert_eq!(ledger.current_live_bytes(), 0);
         assert_eq!(ledger.peak_live_bytes(), 8);
+    }
+
+    #[test]
+    fn zero_byte_scene_reservation_retains_owner_capability() {
+        let limits = PostProcessLimits::new(8, 1024 * 1024);
+        let mut owner_coordinator = Coordinator::new(
+            PostProcessControl::default(),
+            limits
+                .try_ledger_limits()
+                .expect("owner ledger limits should freeze"),
+        );
+        let mut owner_state = ExecutionState::new(&mut owner_coordinator);
+        let mut reservation = owner_state
+            .reserve(SceneReservationKind::EditCandidate, 0)
+            .expect("zero-byte candidate capability should be admitted");
+        assert_eq!(
+            reservation.primary.as_ref().map(BufferReservation::bytes),
+            Some(0)
+        );
+        let wrong_kind = owner_state
+            .validate_reservation(&reservation, SceneReservationKind::CanonicalOutput)
+            .expect_err("the owner must reject a mismatched reservation kind");
+        assert!(matches!(
+            wrong_kind,
+            PostProcessError::ValidationControlInvariant {
+                message: "core reservation validation kind did not match its live token",
+            }
+        ));
+        assert_eq!(reservation.kind, SceneReservationKind::EditCandidate);
+        assert_eq!(
+            reservation.primary.as_ref().map(BufferReservation::bytes),
+            Some(0)
+        );
+        owner_state
+            .validate_reservation(&reservation, SceneReservationKind::EditCandidate)
+            .expect("wrong-kind rejection must preserve the owner capability");
+        drop(owner_state);
+
+        let mut foreign_coordinator = Coordinator::new(
+            PostProcessControl::default(),
+            limits
+                .try_ledger_limits()
+                .expect("foreign ledger limits should freeze"),
+        );
+        let mut foreign_state = ExecutionState::new(&mut foreign_coordinator);
+        let validation_error = foreign_state
+            .validate_reservation(&reservation, SceneReservationKind::EditCandidate)
+            .expect_err("a foreign coordinator must reject the owner capability before work");
+        assert!(matches!(
+            validation_error,
+            PostProcessError::Accounting {
+                source: LedgerCause::OwnerMismatch,
+            }
+        ));
+        let error = foreign_state
+            .resize_reservation(&mut reservation, SceneReservationKind::EditCandidate, 1)
+            .expect_err("a foreign coordinator must not adopt the zero-byte capability");
+        assert!(matches!(
+            error,
+            PostProcessError::Accounting {
+                source: LedgerCause::OwnerMismatch,
+            }
+        ));
+        assert_eq!(
+            reservation.primary.as_ref().map(BufferReservation::bytes),
+            Some(0)
+        );
+
+        drop(foreign_state);
+        let mut owner_state = ExecutionState::new(&mut owner_coordinator);
+        owner_state
+            .retained_output
+            .ensure_slots(
+                owner_state.coordinator,
+                PostProcessLedgerPhase::Validate,
+                3,
+                "test",
+                "zero-byte owner capability evidence",
+            )
+            .expect("zero-byte transition slots should be admitted");
+        for _ in 0..2 {
+            let retained = owner_state
+                .coordinator
+                .checkpoint()
+                .reserve(
+                    PostProcessLedgerPhase::Validate,
+                    PostProcessDimension::CanonicalBytes,
+                    0,
+                )
+                .expect("additional zero-byte capability should be admitted");
+            owner_state.retain_output(Some(retained));
+        }
+        owner_state
+            .transition_reservation(
+                &mut reservation,
+                SceneReservationKind::EditCandidate,
+                SceneReservationKind::CanonicalOutput,
+                0,
+            )
+            .expect("zero-byte transition should preserve its owner capability");
+        assert_eq!(reservation.kind, SceneReservationKind::CanonicalOutput);
+        assert!(reservation.primary.is_none());
+        assert_eq!(reservation.retained.values.len(), 1);
+        assert_eq!(reservation.retained.values[0].bytes(), 0);
+        owner_state
+            .validate_reservation(&reservation, SceneReservationKind::CanonicalOutput)
+            .expect("the original coordinator should retain owner validation");
+        drop(owner_state);
+
+        let foreign_state = ExecutionState::new(&mut foreign_coordinator);
+        let error = foreign_state
+            .validate_reservation(&reservation, SceneReservationKind::CanonicalOutput)
+            .expect_err("transitioned zero-byte capability must still reject a foreign owner");
+        assert!(matches!(
+            error,
+            PostProcessError::Accounting {
+                source: LedgerCause::OwnerMismatch,
+            }
+        ));
+        drop(foreign_state);
+        drop(reservation);
+        assert_eq!(
+            owner_coordinator
+                .finish()
+                .expect("owner capability should roll back cleanly")
+                .current_live_bytes(),
+            0
+        );
+        assert_eq!(
+            foreign_coordinator
+                .finish()
+                .expect("foreign ledger should remain untouched")
+                .current_live_bytes(),
+            0
+        );
+    }
+
+    #[test]
+    fn zero_byte_scene_reservation_completes_publication() {
+        let limits = PostProcessLimits::new(8, 1024 * 1024);
+        let mut coordinator = Coordinator::new(
+            PostProcessControl::default(),
+            limits
+                .try_ledger_limits()
+                .expect("test ledger limits should freeze"),
+        );
+        let mut state = ExecutionState::new(&mut coordinator);
+        state
+            .begin_transform()
+            .expect("test transform phase should start");
+        let mut reservation = state
+            .reserve(SceneReservationKind::EditCandidate, 0)
+            .expect("zero-byte candidate capability should be admitted");
+        state
+            .retained_output
+            .ensure_slots(
+                state.coordinator,
+                PostProcessLedgerPhase::Transform,
+                3,
+                "test",
+                "zero-byte publication capabilities",
+            )
+            .expect("zero-byte publication slots should be admitted");
+        for _ in 0..2 {
+            let retained = state
+                .coordinator
+                .checkpoint()
+                .reserve(
+                    PostProcessLedgerPhase::Transform,
+                    PostProcessDimension::StagingBytes,
+                    0,
+                )
+                .expect("additional zero-byte capability should be admitted");
+            state.retain_output(Some(retained));
+        }
+        state
+            .begin_validation()
+            .expect("test validation phase should start");
+        state
+            .transition_reservation(
+                &mut reservation,
+                SceneReservationKind::EditCandidate,
+                SceneReservationKind::CanonicalOutput,
+                0,
+            )
+            .expect("zero-byte transition should preserve one owner capability");
+        assert_eq!(reservation.retained.values.len(), 1);
+
+        let retained = std::mem::take(&mut reservation.retained);
+        let primary = reservation.primary.take();
+        let mut batch = retained
+            .into_publication(primary)
+            .expect("compacted zero-byte batch should retain capacity coverage");
+        let mut publication = state
+            .coordinator
+            .prepare_publication(
+                &mut batch,
+                &[Commitment::new(PostProcessDimension::CanonicalBytes, 0)],
+            )
+            .expect("zero-byte publication should prepare");
+        state
+            .coordinator
+            .publish(
+                &mut publication,
+                FinalProgress::new(
+                    PostProcessProgressPhase::Validate,
+                    PostProcessProgressUnit::WorkItems,
+                    1,
+                ),
+            )
+            .expect("zero-byte publication should commit");
+        drop(publication);
+        drop(reservation);
+        drop(state);
+
+        let ledger = coordinator
+            .finish()
+            .expect("published zero-byte ledger should finalize cleanly");
+        assert_eq!(ledger.active_reservations(), 0);
+        assert_eq!(ledger.current_live_bytes(), 0);
+        assert_eq!(
+            ledger
+                .dimension(PostProcessDimension::CanonicalBytes)
+                .expect("canonical dimension should be frozen")
+                .committed(),
+            0
+        );
     }
 
     #[test]

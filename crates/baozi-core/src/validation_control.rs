@@ -296,7 +296,8 @@ impl SceneValidationStats {
 /// `Reservation` is a linear RAII token or token bundle. Core holds it for the
 /// complete storage lifetime and returns the canonical token to the caller on
 /// success. Dropping a failed validation or edit must therefore release every
-/// live reservation without a core-to-ledger dependency.
+/// live reservation without a core-to-ledger dependency. Stateful adapters must
+/// retain owner and kind identity even for zero-byte reservations.
 pub trait SceneValidationControl {
     type Error: Error + Send + Sync + 'static;
     type Reservation;
@@ -310,6 +311,19 @@ pub trait SceneValidationControl {
         kind: SceneReservationKind,
         bytes: u64,
     ) -> Result<Self::Reservation, Self::Error>;
+
+    /// Verifies that a live token belongs to this control and has the expected kind.
+    ///
+    /// This check must not poll, charge work, mutate the token, or change ledger
+    /// state. Edit transactions call it before any work so a foreign control
+    /// cannot adopt storage or obscure an owner mismatch with another failure.
+    /// Zero-byte reservations remain linear capabilities and require the same
+    /// owner validation as non-empty reservations.
+    fn validate_reservation(
+        &self,
+        reservation: &Self::Reservation,
+        kind: SceneReservationKind,
+    ) -> Result<(), Self::Error>;
 
     /// Resizes one live token without consuming it on failure.
     ///
@@ -521,6 +535,14 @@ impl SceneValidationControl for NoopSceneValidationControl {
         _kind: SceneReservationKind,
         _bytes: u64,
     ) -> Result<Self::Reservation, Self::Error> {
+        Ok(())
+    }
+
+    fn validate_reservation(
+        &self,
+        _reservation: &Self::Reservation,
+        _kind: SceneReservationKind,
+    ) -> Result<(), Self::Error> {
         Ok(())
     }
 

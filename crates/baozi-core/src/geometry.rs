@@ -6,11 +6,12 @@ use crate::deform::{
     InfluenceRows, MorphDeltaSemantic, MorphTargetDefinition, MorphWeightOverrideError,
     PrimitiveMorphTarget, validate_morph_weight_override,
 };
-use crate::derived::{Derived, DerivedAbsenceReason};
+use crate::derived::{Derived, DerivedAbsenceReason, DerivedRebindError};
 use crate::entity::EntityName;
 use crate::identity::{LogicalMeshIndex, MaterialIndex, NodeIndex, SkinIndex};
 use crate::math::Aabb;
 use crate::provenance::ProvenanceAttachments;
+use crate::shared_storage::{SharedStorage, SharedStorageError};
 use baozi_operation::CapacityPlan;
 use std::convert::Infallible;
 use std::fmt;
@@ -35,12 +36,14 @@ pub enum GeometryAllocation {
     PrimitiveAttributes,
     PrimitiveInfluences,
     PrimitiveMorphTargets,
+    PrimitivePayload,
     PrimitiveBoundsProducer,
     PrimitiveProvenanceAttachments,
     LogicalMeshName,
     LogicalMeshPrimitives,
     LogicalMeshMorphTargets,
     LogicalMeshDefaultMorphWeights,
+    LogicalMeshPayload,
     LogicalMeshBoundsProducer,
     LogicalMeshProvenanceAttachments,
     MeshInstanceMorphWeights,
@@ -188,6 +191,54 @@ fn try_compact_geometry_vec<T>(
         .map_err(|_| GeometryStorageError::AllocationFailed { resource })?;
     compact.extend(values);
     Ok(compact)
+}
+
+fn empty_geometry_vec_capacity_plan<T>(
+    desired_capacity: usize,
+    resource: GeometryAllocation,
+) -> Result<CapacityPlan, GeometryStorageError> {
+    CapacityPlan::for_type::<T>(0, 0, desired_capacity)
+        .map_err(|_| GeometryStorageError::CollectionSizeOverflow { resource })
+}
+
+fn try_empty_geometry_vec_with_plan<T>(
+    plan: CapacityPlan,
+    resource: GeometryAllocation,
+) -> Result<Vec<T>, GeometryStorageError> {
+    let mut values = Vec::new();
+    values
+        .try_reserve_exact(plan.allocator_additional())
+        .map_err(|_| GeometryStorageError::AllocationFailed { resource })?;
+    plan.finish(values.len(), values.capacity())
+        .map_err(|_| GeometryStorageError::AllocationFailed { resource })?;
+    Ok(values)
+}
+
+fn geometry_vec_rebuild_capacity_bytes<T>(
+    source_capacity: usize,
+    output_plan: CapacityPlan,
+    resource: GeometryAllocation,
+) -> Result<(u64, u64), GeometryStorageError> {
+    let source_bytes = source_capacity
+        .checked_mul(size_of::<T>())
+        .and_then(|bytes| u64::try_from(bytes).ok())
+        .ok_or(GeometryStorageError::CollectionSizeOverflow { resource })?;
+    let output_bytes = output_plan
+        .envelope_delta_bytes()
+        .map_err(|_| GeometryStorageError::CollectionSizeOverflow { resource })?;
+    Ok((source_bytes, output_bytes))
+}
+
+fn try_shared_geometry_payload<T>(
+    payload: T,
+    resource: GeometryAllocation,
+) -> Result<SharedStorage<T>, GeometryStorageError> {
+    SharedStorage::try_new(payload).map_err(|error| match error {
+        SharedStorageError::AllocationFailed => GeometryStorageError::AllocationFailed { resource },
+        SharedStorageError::AccountingOverflow => {
+            GeometryStorageError::RetainedFootprintOverflow { resource }
+        }
+    })
 }
 
 /// A collection cannot be addressed by the canonical dense-index domain.
@@ -613,6 +664,17 @@ pub(crate) fn validate_aabb(bounds: Aabb) -> Result<(), GeometryBoundsError> {
     Ok(())
 }
 
+fn try_rebind_validated_bounds_derived(
+    derived: &Derived<Aabb>,
+    expected_from: crate::identity::SceneGenerationId,
+    to: crate::identity::SceneGenerationId,
+) -> Result<Derived<Aabb>, DerivedRebindError> {
+    match derived.reason() {
+        Some(reason) => Ok(Derived::absent(reason)),
+        None => derived.try_rebind_validated_generation(expected_from, to),
+    }
+}
+
 /// Primitive-local derived bounds. Its distinct owner type prevents accidental
 /// substitution for logical-mesh or scene-space bounds.
 #[derive(Debug, PartialEq)]
@@ -652,6 +714,17 @@ impl PrimitiveBounds {
 
     pub const fn morph_policy(&self) -> MorphBoundsPolicy {
         self.morph_policy
+    }
+
+    pub(crate) fn try_rebind_validated_generation(
+        &self,
+        expected_from: crate::identity::SceneGenerationId,
+        to: crate::identity::SceneGenerationId,
+    ) -> Result<Self, DerivedRebindError> {
+        Ok(Self {
+            derived: try_rebind_validated_bounds_derived(&self.derived, expected_from, to)?,
+            morph_policy: self.morph_policy,
+        })
     }
 }
 
@@ -703,6 +776,17 @@ impl LogicalMeshBounds {
 
     pub const fn morph_policy(&self) -> MorphBoundsPolicy {
         self.morph_policy
+    }
+
+    pub(crate) fn try_rebind_validated_generation(
+        &self,
+        expected_from: crate::identity::SceneGenerationId,
+        to: crate::identity::SceneGenerationId,
+    ) -> Result<Self, DerivedRebindError> {
+        Ok(Self {
+            derived: try_rebind_validated_bounds_derived(&self.derived, expected_from, to)?,
+            morph_policy: self.morph_policy,
+        })
     }
 }
 
@@ -884,7 +968,7 @@ fn validate_primitive_morph_targets(
 ///
 /// Cross-entity references use crate-private storage indexes. A public Scene
 /// read view qualifies them with the owning generation and logical mesh.
-pub struct MeshPrimitive {
+struct MeshPrimitivePayload {
     topology: Topology,
     index_stream: IndexStream,
     cardinality: PrimitiveCardinality,
@@ -892,8 +976,12 @@ pub struct MeshPrimitive {
     attributes: Vec<Attribute>,
     influences: Option<InfluenceRows>,
     morph_targets: Vec<PrimitiveMorphTarget>,
-    bounds: PrimitiveBounds,
     provenance: ProvenanceAttachments,
+}
+
+pub struct MeshPrimitive {
+    payload: SharedStorage<MeshPrimitivePayload>,
+    bounds: PrimitiveBounds,
 }
 
 impl MeshPrimitive {
@@ -930,61 +1018,78 @@ impl MeshPrimitive {
             try_compact_geometry_vec(morph_targets, GeometryAllocation::PrimitiveMorphTargets)?;
         let provenance = provenance.into();
 
-        Ok(Self {
-            topology,
-            index_stream,
-            cardinality,
-            material,
-            attributes,
-            influences,
-            morph_targets,
-            bounds,
-            provenance,
-        })
+        let payload = try_shared_geometry_payload(
+            MeshPrimitivePayload {
+                topology,
+                index_stream,
+                cardinality,
+                material,
+                attributes,
+                influences,
+                morph_targets,
+                provenance,
+            },
+            GeometryAllocation::PrimitivePayload,
+        )?;
+
+        Ok(Self { payload, bounds })
     }
 
-    pub const fn topology(&self) -> &Topology {
-        &self.topology
+    pub fn topology(&self) -> &Topology {
+        &self.payload.as_ref().topology
     }
 
-    pub const fn index_stream(&self) -> &IndexStream {
-        &self.index_stream
+    pub fn index_stream(&self) -> &IndexStream {
+        &self.payload.as_ref().index_stream
     }
 
-    pub const fn cardinality(&self) -> PrimitiveCardinality {
-        self.cardinality
+    pub fn cardinality(&self) -> PrimitiveCardinality {
+        self.payload.as_ref().cardinality
     }
 
-    pub const fn domain_count(&self, domain: AttributeDomain) -> Option<u32> {
-        self.cardinality.domain_count(domain)
+    pub fn domain_count(&self, domain: AttributeDomain) -> Option<u32> {
+        self.payload.as_ref().cardinality.domain_count(domain)
     }
 
-    pub const fn has_material(&self) -> bool {
-        self.material.is_some()
+    pub fn has_material(&self) -> bool {
+        self.payload.as_ref().material.is_some()
     }
 
-    pub(crate) const fn material_index(&self) -> Option<MaterialIndex> {
-        self.material
+    pub(crate) fn material_index(&self) -> Option<MaterialIndex> {
+        self.payload.as_ref().material
     }
 
     pub fn attributes(&self) -> &[Attribute] {
-        &self.attributes
+        &self.payload.as_ref().attributes
     }
 
-    pub const fn influences(&self) -> Option<&InfluenceRows> {
-        self.influences.as_ref()
+    pub fn influences(&self) -> Option<&InfluenceRows> {
+        self.payload.as_ref().influences.as_ref()
     }
 
     pub fn morph_targets(&self) -> &[PrimitiveMorphTarget] {
-        &self.morph_targets
+        &self.payload.as_ref().morph_targets
     }
 
     pub const fn bounds(&self) -> &PrimitiveBounds {
         &self.bounds
     }
 
-    pub const fn provenance(&self) -> &ProvenanceAttachments {
-        &self.provenance
+    pub fn provenance(&self) -> &ProvenanceAttachments {
+        &self.payload.as_ref().provenance
+    }
+
+    pub(crate) fn try_rebind_validated_generation(
+        &self,
+        expected_from: crate::identity::SceneGenerationId,
+        to: crate::identity::SceneGenerationId,
+    ) -> Result<Self, DerivedRebindError> {
+        Ok(Self {
+            payload: self.payload.clone(),
+            bounds: self
+                .bounds
+                .try_rebind_validated_generation(expected_from, to)?,
+        })
     }
 
     pub fn retained_footprint(&self) -> Result<GeometryRetainedFootprint, GeometryStorageError> {
@@ -995,23 +1100,28 @@ impl MeshPrimitive {
         &self,
         charge_work: &mut impl FnMut() -> Result<(), E>,
     ) -> Result<GeometryRetainedFootprint, ControlledGeometryStorageError<E>> {
-        let mut footprint = self.topology.retained_footprint()?;
+        let payload = self.payload.as_ref();
+        let mut footprint = payload.topology.retained_footprint()?;
+        footprint.try_add_bytes(
+            self.payload.retained_allocation_bytes(),
+            GeometryAllocation::PrimitivePayload,
+        )?;
         footprint.try_merge(
-            self.index_stream.retained_footprint()?,
+            payload.index_stream.retained_footprint()?,
             GeometryAllocation::IndexElements,
         )?;
         footprint.try_add_capacity::<Attribute>(
-            self.attributes.capacity(),
+            payload.attributes.capacity(),
             GeometryAllocation::PrimitiveAttributes,
         )?;
-        for attribute in &self.attributes {
+        for attribute in &payload.attributes {
             charge_work().map_err(ControlledGeometryStorageError::Control)?;
             footprint.try_add_bytes(
                 attribute.payload().retained_allocation_bytes(),
                 GeometryAllocation::PrimitiveAttributes,
             )?;
         }
-        if let Some(influences) = &self.influences {
+        if let Some(influences) = &payload.influences {
             footprint.try_add_nested(
                 influences.retained_cell_capacity(),
                 influences.retained_allocation_bytes(),
@@ -1019,10 +1129,10 @@ impl MeshPrimitive {
             )?;
         }
         footprint.try_add_capacity::<PrimitiveMorphTarget>(
-            self.morph_targets.capacity(),
+            payload.morph_targets.capacity(),
             GeometryAllocation::PrimitiveMorphTargets,
         )?;
-        for target in &self.morph_targets {
+        for target in &payload.morph_targets {
             charge_work().map_err(ControlledGeometryStorageError::Control)?;
             footprint.try_add_nested(
                 target.retained_cell_capacity(),
@@ -1040,8 +1150,8 @@ impl MeshPrimitive {
             GeometryAllocation::PrimitiveBoundsProducer,
         )?;
         footprint.try_add_nested(
-            self.provenance.retained_allocation_cells(),
-            self.provenance.retained_allocation_bytes(),
+            payload.provenance.retained_allocation_cells(),
+            payload.provenance.retained_allocation_bytes(),
             GeometryAllocation::PrimitiveProvenanceAttachments,
         )?;
         Ok(footprint)
@@ -1050,17 +1160,18 @@ impl MeshPrimitive {
 
 impl fmt::Debug for MeshPrimitive {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let payload = self.payload.as_ref();
         formatter
             .debug_struct("MeshPrimitive")
-            .field("topology", &self.topology.kind())
-            .field("indexed", &self.index_stream.is_indexed())
-            .field("cardinality", &self.cardinality)
-            .field("has_material", &self.material.is_some())
-            .field("attribute_count", &self.attributes.len())
-            .field("has_influences", &self.influences.is_some())
-            .field("morph_target_count", &self.morph_targets.len())
+            .field("topology", &payload.topology.kind())
+            .field("indexed", &payload.index_stream.is_indexed())
+            .field("cardinality", &payload.cardinality)
+            .field("has_material", &payload.material.is_some())
+            .field("attribute_count", &payload.attributes.len())
+            .field("has_influences", &payload.influences.is_some())
+            .field("morph_target_count", &payload.morph_targets.len())
             .field("bounds", &self.bounds)
-            .field("provenance", &self.provenance)
+            .field("provenance", &payload.provenance)
             .finish()
     }
 }
@@ -1087,13 +1198,33 @@ pub enum MeshPrimitiveError {
 }
 
 /// One source-level mesh identity owning one or more homogeneous primitives.
-pub struct LogicalMesh {
+struct LogicalMeshPayload {
     name: Option<EntityName>,
-    primitives: Vec<MeshPrimitive>,
     morph_targets: Vec<MorphTargetDefinition>,
     default_morph_weights: Vec<f32>,
-    bounds: LogicalMeshBounds,
     provenance: ProvenanceAttachments,
+}
+
+pub struct LogicalMesh {
+    payload: SharedStorage<LogicalMeshPayload>,
+    primitives: Vec<MeshPrimitive>,
+    bounds: LogicalMeshBounds,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct LogicalMeshGenerationRebindCapacity {
+    source_bytes: u64,
+    output_envelope_bytes: u64,
+}
+
+impl LogicalMeshGenerationRebindCapacity {
+    pub(crate) const fn source_bytes(self) -> u64 {
+        self.source_bytes
+    }
+
+    pub(crate) const fn output_envelope_bytes(self) -> u64 {
+        self.output_envelope_bytes
+    }
 }
 
 impl LogicalMesh {
@@ -1149,18 +1280,25 @@ impl LogicalMesh {
         )?;
         let provenance = provenance.into();
 
+        let payload = try_shared_geometry_payload(
+            LogicalMeshPayload {
+                name,
+                morph_targets,
+                default_morph_weights,
+                provenance,
+            },
+            GeometryAllocation::LogicalMeshPayload,
+        )?;
+
         Ok(Self {
-            name,
+            payload,
             primitives,
-            morph_targets,
-            default_morph_weights,
             bounds,
-            provenance,
         })
     }
 
-    pub const fn name(&self) -> Option<&EntityName> {
-        self.name.as_ref()
+    pub fn name(&self) -> Option<&EntityName> {
+        self.payload.as_ref().name.as_ref()
     }
 
     pub fn primitives(&self) -> &[MeshPrimitive] {
@@ -1168,19 +1306,82 @@ impl LogicalMesh {
     }
 
     pub fn morph_target_definitions(&self) -> &[MorphTargetDefinition] {
-        &self.morph_targets
+        &self.payload.as_ref().morph_targets
     }
 
     pub fn default_morph_weights(&self) -> &[f32] {
-        &self.default_morph_weights
+        &self.payload.as_ref().default_morph_weights
     }
 
     pub const fn bounds(&self) -> &LogicalMeshBounds {
         &self.bounds
     }
 
-    pub const fn provenance(&self) -> &ProvenanceAttachments {
-        &self.provenance
+    pub fn provenance(&self) -> &ProvenanceAttachments {
+        &self.payload.as_ref().provenance
+    }
+
+    fn primitive_generation_rebind_capacity_plan(
+        &self,
+    ) -> Result<CapacityPlan, GeometryStorageError> {
+        empty_geometry_vec_capacity_plan::<MeshPrimitive>(
+            self.primitives.len(),
+            GeometryAllocation::LogicalMeshPrimitives,
+        )
+    }
+
+    pub(crate) fn generation_rebind_capacity(
+        &self,
+    ) -> Result<LogicalMeshGenerationRebindCapacity, LogicalMeshGenerationRebindError> {
+        let plan = self.primitive_generation_rebind_capacity_plan()?;
+        let (source_bytes, output_envelope_bytes) =
+            geometry_vec_rebuild_capacity_bytes::<MeshPrimitive>(
+                self.primitives.capacity(),
+                plan,
+                GeometryAllocation::LogicalMeshPrimitives,
+            )
+            .map_err(LogicalMeshGenerationRebindError::from)?;
+        Ok(LogicalMeshGenerationRebindCapacity {
+            source_bytes,
+            output_envelope_bytes,
+        })
+    }
+
+    pub(crate) fn try_rebind_validated_generation_controlled<E>(
+        &self,
+        expected_from: crate::identity::SceneGenerationId,
+        to: crate::identity::SceneGenerationId,
+        mut charge_work: impl FnMut() -> Result<(), E>,
+    ) -> Result<Self, ControlledLogicalMeshGenerationRebindError<E>> {
+        let primitive_plan = self
+            .primitive_generation_rebind_capacity_plan()
+            .map_err(LogicalMeshGenerationRebindError::from)
+            .map_err(ControlledLogicalMeshGenerationRebindError::Rebind)?;
+        let mut primitives = try_empty_geometry_vec_with_plan(
+            primitive_plan,
+            GeometryAllocation::LogicalMeshPrimitives,
+        )
+        .map_err(LogicalMeshGenerationRebindError::from)
+        .map_err(ControlledLogicalMeshGenerationRebindError::Rebind)?;
+        for primitive in &self.primitives {
+            charge_work().map_err(ControlledLogicalMeshGenerationRebindError::Control)?;
+            primitives.push(
+                primitive
+                    .try_rebind_validated_generation(expected_from, to)
+                    .map_err(LogicalMeshGenerationRebindError::from)
+                    .map_err(ControlledLogicalMeshGenerationRebindError::Rebind)?,
+            );
+        }
+
+        Ok(Self {
+            payload: self.payload.clone(),
+            primitives,
+            bounds: self
+                .bounds
+                .try_rebind_validated_generation(expected_from, to)
+                .map_err(LogicalMeshGenerationRebindError::from)
+                .map_err(ControlledLogicalMeshGenerationRebindError::Rebind)?,
+        })
     }
 
     pub fn retained_footprint(&self) -> Result<GeometryRetainedFootprint, GeometryStorageError> {
@@ -1191,8 +1392,13 @@ impl LogicalMesh {
         &self,
         charge_work: &mut impl FnMut() -> Result<(), E>,
     ) -> Result<GeometryRetainedFootprint, ControlledGeometryStorageError<E>> {
+        let payload = self.payload.as_ref();
         let mut footprint = GeometryRetainedFootprint::default();
-        if let Some(name) = &self.name {
+        footprint.try_add_bytes(
+            self.payload.retained_allocation_bytes(),
+            GeometryAllocation::LogicalMeshPayload,
+        )?;
+        if let Some(name) = &payload.name {
             footprint.try_add_bytes(name.capacity(), GeometryAllocation::LogicalMeshName)?;
         }
         footprint.try_add_capacity::<MeshPrimitive>(
@@ -1207,10 +1413,10 @@ impl LogicalMesh {
             )?;
         }
         footprint.try_add_capacity::<MorphTargetDefinition>(
-            self.morph_targets.capacity(),
+            payload.morph_targets.capacity(),
             GeometryAllocation::LogicalMeshMorphTargets,
         )?;
-        for target in &self.morph_targets {
+        for target in &payload.morph_targets {
             charge_work().map_err(ControlledGeometryStorageError::Control)?;
             footprint.try_add_bytes(
                 target.retained_allocation_bytes(),
@@ -1218,7 +1424,7 @@ impl LogicalMesh {
             )?;
         }
         footprint.try_add_capacity::<f32>(
-            self.default_morph_weights.capacity(),
+            payload.default_morph_weights.capacity(),
             GeometryAllocation::LogicalMeshDefaultMorphWeights,
         )?;
         footprint.try_add_bytes(
@@ -1231,8 +1437,8 @@ impl LogicalMesh {
             GeometryAllocation::LogicalMeshBoundsProducer,
         )?;
         footprint.try_add_nested(
-            self.provenance.retained_allocation_cells(),
-            self.provenance.retained_allocation_bytes(),
+            payload.provenance.retained_allocation_cells(),
+            payload.provenance.retained_allocation_bytes(),
             GeometryAllocation::LogicalMeshProvenanceAttachments,
         )?;
         Ok(footprint)
@@ -1241,17 +1447,18 @@ impl LogicalMesh {
 
 impl fmt::Debug for LogicalMesh {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let payload = self.payload.as_ref();
         formatter
             .debug_struct("LogicalMesh")
-            .field("name", &self.name)
+            .field("name", &payload.name)
             .field("primitive_count", &self.primitives.len())
-            .field("morph_target_count", &self.morph_targets.len())
+            .field("morph_target_count", &payload.morph_targets.len())
             .field(
                 "default_morph_weight_count",
-                &self.default_morph_weights.len(),
+                &payload.default_morph_weights.len(),
             )
             .field("bounds", &self.bounds)
-            .field("provenance", &self.provenance)
+            .field("provenance", &payload.provenance)
             .finish()
     }
 }
@@ -1282,6 +1489,19 @@ pub enum LogicalMeshError {
 
     #[error(transparent)]
     Storage(#[from] GeometryStorageError),
+}
+
+#[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LogicalMeshGenerationRebindError {
+    #[error(transparent)]
+    Derived(#[from] DerivedRebindError),
+    #[error(transparent)]
+    Storage(#[from] GeometryStorageError),
+}
+
+pub(crate) enum ControlledLogicalMeshGenerationRebindError<E> {
+    Rebind(LogicalMeshGenerationRebindError),
+    Control(E),
 }
 
 #[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
@@ -2337,12 +2557,13 @@ mod tests {
             provenance,
         )
         .unwrap();
-        assert!(primitive.attributes.capacity() < 1_024);
-        assert!(primitive.morph_targets.capacity() < 1_024);
+        assert!(primitive.payload.as_ref().attributes.capacity() < 1_024);
+        assert!(primitive.payload.as_ref().morph_targets.capacity() < 1_024);
         let primitive_footprint = primitive.retained_footprint().unwrap();
         assert!(
             primitive_footprint.bytes()
-                >= primitive.attributes.capacity() * std::mem::size_of::<Attribute>()
+                >= primitive.payload.as_ref().attributes.capacity()
+                    * std::mem::size_of::<Attribute>()
         );
 
         let mut primitives = Vec::with_capacity(1_024);
@@ -2364,8 +2585,8 @@ mod tests {
         )
         .unwrap();
         assert!(mesh.primitives.capacity() < 1_024);
-        assert!(mesh.morph_targets.capacity() < 1_024);
-        assert!(mesh.default_morph_weights.capacity() < 1_024);
+        assert!(mesh.payload.as_ref().morph_targets.capacity() < 1_024);
+        assert!(mesh.payload.as_ref().default_morph_weights.capacity() < 1_024);
         assert!(mesh.retained_footprint().unwrap().bytes() >= primitive_footprint.bytes());
 
         let mut override_weights = Vec::with_capacity(1_024);

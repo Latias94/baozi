@@ -891,6 +891,9 @@ impl<R> SceneEdit<R> {
     where
         C: SceneValidationControl<Reservation = R>,
     {
+        control
+            .validate_reservation(&self.reservation, SceneReservationKind::EditCandidate)
+            .map_err(SceneValidationFailure::Control)?;
         let mut edit = self;
         let stats = crate::validation::validate_scene_data(&edit.data, limits, control)?;
         control
@@ -1722,6 +1725,7 @@ mod tests {
     }
 
     struct FinalPollReservation {
+        kind: SceneReservationKind,
         _canonical: Option<DraftReservationDropProbe>,
     }
 
@@ -1761,11 +1765,26 @@ mod tests {
             if kind == SceneReservationKind::CanonicalOutput {
                 self.reserved = true;
                 Ok(FinalPollReservation {
+                    kind,
                     _canonical: Some(DraftReservationDropProbe(Arc::clone(&self.state))),
                 })
             } else {
-                Ok(FinalPollReservation { _canonical: None })
+                Ok(FinalPollReservation {
+                    kind,
+                    _canonical: None,
+                })
             }
+        }
+
+        fn validate_reservation(
+            &self,
+            reservation: &Self::Reservation,
+            kind: SceneReservationKind,
+        ) -> Result<(), Self::Error> {
+            if reservation.kind != kind {
+                return Err(FinalPollError);
+            }
+            Ok(())
         }
 
         fn resize_reservation(

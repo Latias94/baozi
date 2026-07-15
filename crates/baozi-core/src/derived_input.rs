@@ -285,7 +285,6 @@ pub(crate) fn scene_bounds_input_stamp_controlled<E>(
 
     encoder.write_len(data.nodes.len())?;
     for node in &data.nodes {
-        let node = node.as_ref();
         write_authored_transform(&mut encoder, node.authored_transform())?;
         encoder.write_len(node.children().len())?;
         for child in node.children() {
@@ -295,7 +294,6 @@ pub(crate) fn scene_bounds_input_stamp_controlled<E>(
 
     encoder.write_len(data.logical_meshes.len())?;
     for logical_mesh in &data.logical_meshes {
-        let logical_mesh = logical_mesh.as_ref();
         let logical_stamp =
             logical_mesh_bounds_input_stamp_controlled(logical_mesh, encoder.charge_work)?;
         encoder.absorb_work(logical_stamp.work())?;

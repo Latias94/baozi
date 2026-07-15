@@ -396,12 +396,16 @@ struct ValidationEvidence<'a, C: SceneValidationControl> {
 }
 
 impl<'a, C: SceneValidationControl> ValidationEvidence<'a, C> {
-    fn new(limits: SceneValidationLimits, control: &'a mut C) -> Self {
+    fn with_initial_work(
+        limits: SceneValidationLimits,
+        control: &'a mut C,
+        initial_work: u64,
+    ) -> Self {
         Self {
             control,
             limits,
             counts: SceneCanonicalCounts::default(),
-            work: 0,
+            work: initial_work,
             maximum_depth: 0,
             canonical_bytes: 0,
             scratch_peak_bytes: 0,
@@ -530,12 +534,6 @@ impl<'a, C: SceneValidationControl> ValidationEvidence<'a, C> {
             .map_err(CanonicalValidationFailure::Control)
     }
 
-    fn reserve_canonical_output(&mut self) -> ControlledValidationResult<C::Reservation, C> {
-        self.control
-            .reserve(SceneReservationKind::CanonicalOutput, self.canonical_bytes)
-            .map_err(CanonicalValidationFailure::Control)
-    }
-
     fn stats(&self) -> SceneValidationStats {
         SceneValidationStats::new(
             self.counts,
@@ -565,8 +563,63 @@ pub(crate) fn validate_canonical_scene_with<C: SceneValidationControl>(
     control: &mut C,
 ) -> ControlledValidationResult<CanonicalValidationSuccess<C::Reservation>, C> {
     let data = draft.data;
+    let certificate = validate_canonical_scene_data_with(data, limits, control)?;
+    let canonical_output = control
+        .reserve(
+            SceneReservationKind::CanonicalOutput,
+            certificate.stats().footprint().accounted_payload_bytes(),
+        )
+        .map_err(CanonicalValidationFailure::Control)?;
+    let scene = certificate.into_scene();
+    let success = CanonicalValidationSuccess {
+        scene,
+        canonical_output,
+    };
+    control
+        .poll()
+        .map_err(CanonicalValidationFailure::Control)?;
+    Ok(success)
+}
+
+pub(crate) struct CanonicalValidationCertificate {
+    data: CanonicalSceneData,
+    stats: SceneValidationStats,
+    proof: CanonicalValidationProof,
+}
+
+impl CanonicalValidationCertificate {
+    pub(crate) const fn stats(&self) -> SceneValidationStats {
+        self.stats
+    }
+
+    pub(crate) fn into_scene(self) -> CanonicalValidatedScene {
+        CanonicalValidatedScene::from_validated_parts(self.data, self.stats, self.proof)
+    }
+}
+
+pub(crate) fn validate_canonical_scene_data_with<C: SceneValidationControl>(
+    data: CanonicalSceneData,
+    limits: SceneValidationLimits,
+    control: &mut C,
+) -> ControlledValidationResult<CanonicalValidationCertificate, C> {
+    validate_canonical_scene_data_with_initial_work(data, limits, 0, control)
+}
+
+pub(crate) fn validate_canonical_scene_data_with_initial_work<C: SceneValidationControl>(
+    data: CanonicalSceneData,
+    limits: SceneValidationLimits,
+    initial_work: u64,
+    control: &mut C,
+) -> ControlledValidationResult<CanonicalValidationCertificate, C> {
+    if initial_work > limits.max_work() {
+        return Err(CanonicalValidationError::WorkLimitExceeded {
+            actual: initial_work,
+            maximum: limits.max_work(),
+        }
+        .into());
+    }
     let mut issues = IssueCollector::new(limits);
-    let mut evidence = ValidationEvidence::new(limits, control);
+    let mut evidence = ValidationEvidence::with_initial_work(limits, control, initial_work);
     evidence.poll_now()?;
     measure_top_level_counts(&data, &mut evidence)?;
     enforce_top_level_limits(&mut issues, &evidence, limits)?;
@@ -582,23 +635,7 @@ pub(crate) fn validate_canonical_scene_with<C: SceneValidationControl>(
     if let Err(error) = data.scene_space.validate() {
         record_issue(&mut issues, CanonicalValidationIssue::SceneSpace(error))?;
     }
-    let provenance_footprint_bytes =
-        match validate_provenance_arena_controlled(&data.provenance_arena, &mut || {
-            evidence.add_work(1)
-        }) {
-            Ok(validated) => validated.stats().retained_footprint().total_bytes(),
-            Err(error) => match error {
-                ControlledProvenanceValidationError::Validation(error) => {
-                    record_issue(
-                        &mut issues,
-                        CanonicalValidationIssue::ProvenanceArena(error.issue()),
-                    )?;
-                    0
-                }
-                ControlledProvenanceValidationError::Control(error) => return Err(error),
-            },
-        };
-    measure_retained_footprint(&data, provenance_footprint_bytes, &mut evidence)?;
+    measure_provenance_and_retained_footprint(&data, &mut issues, &mut evidence)?;
     validate_derived_bounds(&data, &mut issues, &mut evidence)?;
     validate_scene_payloads(&data, limits, &mut issues, &mut evidence)?;
     validate_hierarchy(&data, &mut issues, &mut evidence)?;
@@ -615,19 +652,36 @@ pub(crate) fn validate_canonical_scene_with<C: SceneValidationControl>(
         .into());
     }
 
-    let canonical_output = evidence.reserve_canonical_output()?;
     let stats = evidence.stats();
-    let scene = CanonicalValidatedScene::from_validated_parts(
+    Ok(CanonicalValidationCertificate {
         data,
         stats,
-        CanonicalValidationProof { _private: () },
-    );
-    let success = CanonicalValidationSuccess {
-        scene,
-        canonical_output,
-    };
-    evidence.poll_now()?;
-    Ok(success)
+        proof: CanonicalValidationProof { _private: () },
+    })
+}
+
+fn measure_provenance_and_retained_footprint<C: SceneValidationControl>(
+    data: &CanonicalSceneData,
+    issues: &mut IssueCollector,
+    evidence: &mut ValidationEvidence<'_, C>,
+) -> ControlledValidationResult<(), C> {
+    let provenance_footprint_bytes =
+        match validate_provenance_arena_controlled(data.provenance_arena.as_ref(), &mut || {
+            evidence.add_work(1)
+        }) {
+            Ok(validated) => validated.stats().retained_footprint().total_bytes(),
+            Err(error) => match error {
+                ControlledProvenanceValidationError::Validation(error) => {
+                    record_issue(
+                        issues,
+                        CanonicalValidationIssue::ProvenanceArena(error.issue()),
+                    )?;
+                    0
+                }
+                ControlledProvenanceValidationError::Control(error) => return Err(error),
+            },
+        };
+    measure_retained_footprint(data, provenance_footprint_bytes, evidence)
 }
 
 fn validate_derived_bounds<C: SceneValidationControl>(
@@ -636,7 +690,6 @@ fn validate_derived_bounds<C: SceneValidationControl>(
     evidence: &mut ValidationEvidence<'_, C>,
 ) -> ControlledValidationResult<(), C> {
     for (logical_mesh_index, logical_mesh) in data.logical_meshes.iter().enumerate() {
-        let logical_mesh = logical_mesh.as_ref();
         for (primitive_index, primitive) in logical_mesh.primitives().iter().enumerate() {
             validate_derived_value(
                 primitive.bounds().derived(),
@@ -789,7 +842,7 @@ fn measure_retained_footprint<C: SceneValidationControl>(
     provenance_footprint_bytes: usize,
     evidence: &mut ValidationEvidence<'_, C>,
 ) -> ControlledValidationResult<(), C> {
-    let mut canonical_bytes = shared_collection_bytes(&data.nodes, evidence, |node, evidence| {
+    let mut canonical_bytes = owned_collection_bytes(&data.nodes, evidence, |node, evidence| {
         let mut charge_work = || evidence.add_work(1);
         unwrap_controlled_retained_footprint::<C>(
             node.retained_allocation_bytes_controlled(&mut charge_work),
@@ -806,7 +859,7 @@ fn measure_retained_footprint<C: SceneValidationControl>(
     )?;
     canonical_bytes = checked_add_bytes(
         canonical_bytes,
-        shared_collection_bytes(&data.logical_meshes, evidence, |mesh, evidence| {
+        owned_collection_bytes(&data.logical_meshes, evidence, |mesh, evidence| {
             let mut charge_work = || evidence.add_work(1);
             unwrap_controlled_geometry_footprint::<C>(
                 mesh.retained_footprint_controlled(&mut charge_work),
@@ -868,19 +921,23 @@ fn measure_retained_footprint<C: SceneValidationControl>(
     )?;
     canonical_bytes = checked_add_bytes(
         canonical_bytes,
-        data.extension_schemas.retained_allocation_bytes(),
+        shared_value_bytes(&data.extension_schemas, evidence)?,
     )?;
-    canonical_bytes =
-        checked_add_bytes(canonical_bytes, data.provenance.retained_allocation_bytes())?;
-    let metadata_bytes = {
-        let mut charge_work = || evidence.add_work(1);
-        unwrap_controlled_retained_footprint::<C>(
-            data.metadata
-                .retained_allocation_bytes_controlled(&mut charge_work),
-        )?
-    };
-    canonical_bytes = checked_add_bytes(canonical_bytes, metadata_bytes)?;
+    canonical_bytes = checked_add_bytes(
+        canonical_bytes,
+        shared_value_bytes(&data.provenance, evidence)?,
+    )?;
+    canonical_bytes = checked_add_bytes(
+        canonical_bytes,
+        shared_value_bytes(&data.metadata, evidence)?,
+    )?;
     canonical_bytes = checked_add_bytes(canonical_bytes, provenance_footprint_bytes)?;
+    canonical_bytes = checked_add_bytes(
+        canonical_bytes,
+        data.provenance_arena
+            .checked_allocation_footprint()
+            .map_err(|_| CanonicalValidationError::AccountingOverflow)?,
+    )?;
     canonical_bytes = checked_add_bytes(
         canonical_bytes,
         data.scene_bounds
@@ -914,6 +971,32 @@ fn shared_collection_bytes<T, C: SceneValidationControl>(
     Ok(bytes)
 }
 
+fn owned_collection_bytes<T, C: SceneValidationControl>(
+    values: &Vec<T>,
+    evidence: &mut ValidationEvidence<'_, C>,
+    mut nested_bytes: impl FnMut(
+        &T,
+        &mut ValidationEvidence<'_, C>,
+    ) -> ControlledValidationResult<usize, C>,
+) -> ControlledValidationResult<usize, C> {
+    let mut bytes = outer_vec_bytes(values)?;
+    for value in values {
+        evidence.add_work(1)?;
+        bytes = checked_add_bytes(bytes, nested_bytes(value, evidence)?)?;
+    }
+    Ok(bytes)
+}
+
+fn shared_value_bytes<T, C: SceneValidationControl>(
+    value: &SharedStorage<T>,
+    evidence: &mut ValidationEvidence<'_, C>,
+) -> ControlledValidationResult<usize, C> {
+    evidence.add_work(1)?;
+    value
+        .checked_allocation_footprint()
+        .map_err(|_| CanonicalValidationError::AccountingOverflow.into())
+}
+
 fn validate_scene_payloads<C: SceneValidationControl>(
     data: &CanonicalSceneData,
     limits: SceneValidationLimits,
@@ -923,7 +1006,7 @@ fn validate_scene_payloads<C: SceneValidationControl>(
     validate_provenance_attachments(
         data,
         CanonicalOwner::Scene,
-        &data.provenance,
+        data.provenance.as_ref(),
         issues,
         evidence,
     )?;
@@ -951,7 +1034,7 @@ fn validate_scene_payloads<C: SceneValidationControl>(
     validate_extension_provenance(
         data,
         CanonicalExtensionOwner::SceneMetadata,
-        data.metadata.entries(),
+        data.metadata.as_ref().entries(),
         limits,
         issues,
         evidence,
@@ -962,14 +1045,14 @@ fn validate_scene_payloads<C: SceneValidationControl>(
             kind: SceneEntityKind::Node,
             index: node_index,
         };
-        validate_provenance_attachments(data, owner, node.as_ref().provenance(), issues, evidence)?;
+        validate_provenance_attachments(data, owner, node.provenance(), issues, evidence)?;
         validate_extension_provenance(
             data,
             CanonicalExtensionOwner::Entity {
                 kind: SceneEntityKind::Node,
                 index: node_index,
             },
-            node.as_ref().extensions(),
+            node.extensions(),
             limits,
             issues,
             evidence,
@@ -1006,7 +1089,6 @@ fn validate_scene_payloads<C: SceneValidationControl>(
     }
 
     for (logical_mesh_index, logical_mesh) in data.logical_meshes.iter().enumerate() {
-        let logical_mesh = logical_mesh.as_ref();
         evidence.add_payload_cells(logical_mesh.default_morph_weights().len())?;
         evidence.add_entities(
             logical_mesh
@@ -1471,7 +1553,7 @@ fn validate_attribute_schema<C: SceneValidationControl>(
     }
     if let Some(packed) = attribute.format().packed_encoding() {
         evidence.add_reference()?;
-        if let Err(reason) = packed.validate_against_snapshot(&data.extension_schemas) {
+        if let Err(reason) = packed.validate_against_snapshot(data.extension_schemas.as_ref()) {
             record_issue(
                 issues,
                 CanonicalValidationIssue::PackedAttributeSchemaMismatch { owner, reason },
@@ -1490,7 +1572,7 @@ fn validate_schema_use<'a, C: SceneValidationControl>(
     evidence: &mut ValidationEvidence<'_, C>,
 ) -> ControlledValidationResult<Option<&'a ExtensionSchema>, C> {
     evidence.add_reference()?;
-    let Some(schema) = data.extension_schemas.get(schema_id) else {
+    let Some(schema) = data.extension_schemas.as_ref().get(schema_id) else {
         record_issue(
             issues,
             CanonicalValidationIssue::ExtensionSchemaMissing {
@@ -1547,7 +1629,7 @@ fn validate_provenance_schema_closure<C: SceneValidationControl>(
     issues: &mut IssueCollector,
     evidence: &mut ValidationEvidence<'_, C>,
 ) -> ControlledValidationResult<(), C> {
-    for (provenance_node, node) in data.provenance_arena.iter().enumerate() {
+    for (provenance_node, node) in data.provenance_arena.as_ref().iter().enumerate() {
         evidence.add_work(1)?;
         let ProvenanceNodeView::Source(identity) = node.node() else {
             continue;
@@ -1669,7 +1751,7 @@ fn validate_provenance<C: SceneValidationControl>(
     evidence: &mut ValidationEvidence<'_, C>,
 ) -> ControlledValidationResult<(), C> {
     evidence.add_reference()?;
-    if !data.provenance_arena.contains(&provenance) {
+    if !data.provenance_arena.as_ref().contains(&provenance) {
         record_issue(
             issues,
             CanonicalValidationIssue::ForeignProvenance { owner },
@@ -1723,7 +1805,7 @@ fn validate_hierarchy<C: SceneValidationControl>(
 
     validate_node_payloads(data, issues, evidence)?;
     for (node_index, node) in data.nodes.iter().enumerate() {
-        for child in node.as_ref().children() {
+        for child in node.children() {
             evidence.add_edge()?;
             evidence.add_reference()?;
             let child_u32 = child.as_u32();
@@ -1806,7 +1888,7 @@ fn traverse_component<C: SceneValidationControl>(
 
     while let Some(frame) = stack.last_mut() {
         evidence.add_work(1)?;
-        let child = data.nodes[frame.node].as_ref().child_at(frame.next_child);
+        let child = data.nodes[frame.node].child_at(frame.next_child);
         let Some(child) = child else {
             state[frame.node] = 2;
             stack.pop();
@@ -1857,7 +1939,7 @@ fn validate_node_payloads<C: SceneValidationControl>(
 ) -> ControlledValidationResult<(), C> {
     for (node_index, node) in data.nodes.iter().enumerate() {
         evidence.add_work(1)?;
-        if let Some(camera) = node.as_ref().camera_index() {
+        if let Some(camera) = node.camera_index() {
             validate_reference(
                 CanonicalOwner::Entity {
                     kind: SceneEntityKind::Node,
@@ -1869,7 +1951,7 @@ fn validate_node_payloads<C: SceneValidationControl>(
                 evidence,
             )?;
         }
-        if let Some(light) = node.as_ref().light_index() {
+        if let Some(light) = node.light_index() {
             validate_reference(
                 CanonicalOwner::Entity {
                     kind: SceneEntityKind::Node,
@@ -1961,7 +2043,7 @@ fn validate_entity_references<C: SceneValidationControl>(
     }
 
     for (logical_mesh_index, logical_mesh) in data.logical_meshes.iter().enumerate() {
-        for (primitive_index, primitive) in logical_mesh.as_ref().primitives().iter().enumerate() {
+        for (primitive_index, primitive) in logical_mesh.primitives().iter().enumerate() {
             if let Some(material) = primitive.material_index() {
                 validate_reference(
                     CanonicalOwner::Primitive {
@@ -2006,8 +2088,7 @@ fn validate_entity_references<C: SceneValidationControl>(
                     if let Some(target_node) = node
                         .get(&data.nodes)
                         .map_err(|_| CanonicalValidationError::AccountingOverflow)?
-                        && target_node.as_ref().authored_transform().kind()
-                            == AuthoredTransformKind::Matrix
+                        && target_node.authored_transform().kind() == AuthoredTransformKind::Matrix
                     {
                         record_issue(
                             issues,
@@ -2037,7 +2118,7 @@ fn validate_entity_references<C: SceneValidationControl>(
                         && let AnimationValuesView::MorphWeights { width, .. } =
                             channel.values().view()
                     {
-                        let expected = mesh.as_ref().morph_target_definitions().len();
+                        let expected = mesh.morph_target_definitions().len();
                         if width != expected {
                             record_issue(
                                 issues,
@@ -2097,7 +2178,7 @@ fn build_mesh_palette_summaries<C: SceneValidationControl>(
     )?;
 
     for (logical_mesh, summary) in data.logical_meshes.iter().zip(&mut values) {
-        for (primitive_index, primitive) in logical_mesh.as_ref().primitives().iter().enumerate() {
+        for (primitive_index, primitive) in logical_mesh.primitives().iter().enumerate() {
             let Some(influences) = primitive.influences() else {
                 continue;
             };
@@ -2141,7 +2222,7 @@ fn validate_instance_owner_contracts(
         .logical_mesh_index()
         .try_to_usize()
         .map_err(|_| CanonicalValidationError::AccountingOverflow)?;
-    let expected_morph_width = mesh.as_ref().morph_target_definitions().len();
+    let expected_morph_width = mesh.morph_target_definitions().len();
     if let Some(weights) = instance.morph_weight_override()
         && weights.len() != expected_morph_width
     {
@@ -2385,10 +2466,10 @@ fn checked_sum_lengths(values: &[usize]) -> Result<u64, CanonicalValidationError
     })
 }
 
-fn outer_vec_bytes<T>(values: &Vec<SharedStorage<T>>) -> Result<usize, CanonicalValidationError> {
+fn outer_vec_bytes<T>(values: &Vec<T>) -> Result<usize, CanonicalValidationError> {
     values
         .capacity()
-        .checked_mul(size_of::<SharedStorage<T>>())
+        .checked_mul(size_of::<T>())
         .ok_or(CanonicalValidationError::AccountingOverflow)
 }
 
@@ -2478,6 +2559,7 @@ mod tests {
     enum TestControlError {
         Cancelled,
         ReservationRejected,
+        ReservationKindMismatch,
         ResizeRejected,
     }
 
@@ -2486,6 +2568,7 @@ mod tests {
             formatter.write_str(match self {
                 Self::Cancelled => "cancelled by test control",
                 Self::ReservationRejected => "reservation rejected by test control",
+                Self::ReservationKindMismatch => "reservation kind mismatch",
                 Self::ResizeRejected => "reservation resize rejected by test control",
             })
         }
@@ -2639,6 +2722,17 @@ mod tests {
                 bytes,
                 live_bytes: Rc::clone(&self.live_bytes),
             })
+        }
+
+        fn validate_reservation(
+            &self,
+            reservation: &Self::Reservation,
+            kind: SceneReservationKind,
+        ) -> Result<(), Self::Error> {
+            if reservation.kind != kind {
+                return Err(TestControlError::ReservationKindMismatch);
+            }
+            Ok(())
         }
 
         fn resize_reservation(
@@ -3937,25 +4031,49 @@ mod tests {
     }
 
     #[test]
-    fn canonical_footprint_includes_shared_storage_allocations() {
+    fn canonical_footprint_includes_owner_local_node_payload() {
         let draft = draft_with_children(&[&[]]);
         let outer_node_bytes = draft
             .data
             .nodes
             .capacity()
-            .checked_mul(std::mem::size_of::<SharedStorage<Node>>())
+            .checked_mul(std::mem::size_of::<Node>())
             .unwrap();
-        let node_allocation_bytes = draft.data.nodes[0].checked_allocation_footprint().unwrap();
+        let node_allocation_bytes = draft.data.nodes[0].retained_allocation_bytes().unwrap();
         let provenance_bytes = draft
             .data
             .provenance_arena
+            .as_ref()
             .retained_footprint()
             .unwrap()
             .total_bytes();
+        let provenance_allocation_bytes = draft
+            .data
+            .provenance_arena
+            .checked_allocation_footprint()
+            .unwrap();
+        let scene_payload_bytes = draft
+            .data
+            .provenance
+            .checked_allocation_footprint()
+            .unwrap()
+            .checked_add(
+                draft
+                    .data
+                    .extension_schemas
+                    .checked_allocation_footprint()
+                    .unwrap(),
+            )
+            .and_then(|bytes| {
+                bytes.checked_add(draft.data.metadata.checked_allocation_footprint().unwrap())
+            })
+            .unwrap();
         let exact = u64::try_from(
             outer_node_bytes
                 .checked_add(node_allocation_bytes)
                 .and_then(|bytes| bytes.checked_add(provenance_bytes))
+                .and_then(|bytes| bytes.checked_add(provenance_allocation_bytes))
+                .and_then(|bytes| bytes.checked_add(scene_payload_bytes))
                 .unwrap(),
         )
         .unwrap();
@@ -3979,6 +4097,70 @@ mod tests {
         )
         .err()
         .expect("one byte below the retained footprint must fail validation");
+        assert!(
+            issue_set(&error).contains(&CanonicalValidationIssue::LimitExceeded {
+                limit: CanonicalValidationLimit::CanonicalBytes,
+                actual: exact,
+                maximum: exact - 1,
+            })
+        );
+    }
+
+    #[test]
+    fn owned_logical_mesh_slots_use_their_real_type_size() {
+        fn draft_with_logical_mesh() -> (CanonicalSceneDraft, usize) {
+            let mut draft = draft_with_children(&[&[]]);
+            let provenance = draft
+                .data
+                .provenance
+                .as_ref()
+                .iter()
+                .next()
+                .expect("fixture scene provenance");
+            let mesh = mesh_with_influences_and_two_morphs(provenance);
+            let nested_bytes = mesh.retained_footprint().unwrap().bytes();
+            draft.data.logical_meshes.push(mesh);
+            let outer_bytes = draft
+                .data
+                .logical_meshes
+                .capacity()
+                .checked_mul(std::mem::size_of::<LogicalMesh>())
+                .unwrap();
+            (draft, outer_bytes.checked_add(nested_bytes).unwrap())
+        }
+
+        let baseline = validate_canonical_scene(
+            draft_with_children(&[&[]]),
+            SceneValidationLimits::default(),
+        )
+        .unwrap()
+        .validation_stats()
+        .footprint()
+        .accounted_payload_bytes();
+        let (draft, logical_mesh_bytes) = draft_with_logical_mesh();
+        let exact = baseline
+            .checked_add(u64::try_from(logical_mesh_bytes).unwrap())
+            .unwrap();
+
+        let scene = validate_canonical_scene(
+            draft,
+            SceneValidationLimits::default().with_max_canonical_bytes(exact),
+        )
+        .expect("the exact owned logical-mesh footprint should be admitted");
+        assert_eq!(
+            scene
+                .validation_stats()
+                .footprint()
+                .accounted_payload_bytes(),
+            exact
+        );
+
+        let error = validate_canonical_scene(
+            draft_with_logical_mesh().0,
+            SceneValidationLimits::default().with_max_canonical_bytes(exact - 1),
+        )
+        .err()
+        .expect("one byte below the owned logical-mesh footprint must fail");
         assert!(
             issue_set(&error).contains(&CanonicalValidationIssue::LimitExceeded {
                 limit: CanonicalValidationLimit::CanonicalBytes,
@@ -4265,7 +4447,7 @@ mod tests {
             .unwrap();
             let root = builder.try_push_node(node(provenance, [])).unwrap();
             builder.set_root(root);
-            builder.set_metadata(metadata);
+            builder.set_metadata(metadata).unwrap();
             builder.finish_draft()
         };
         let aggregate_bytes = u64::try_from(key.len() + value.len()).unwrap();

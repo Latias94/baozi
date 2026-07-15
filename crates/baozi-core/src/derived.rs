@@ -371,6 +371,28 @@ impl<T> Derived<T> {
         to: SceneGenerationId,
         expected_stamp: InputStamp,
     ) -> Result<Self, DerivedRebindError> {
+        self.try_rebind_generation_inner(expected_from, to, Some(expected_stamp))
+    }
+
+    /// Rebinds evidence already proven by the central validator.
+    ///
+    /// The final validator still recomputes the declared-input stamp before the
+    /// rebound value can be published. This entry point avoids hashing the same
+    /// immutable payload a second time while constructing an edit candidate.
+    pub(crate) fn try_rebind_validated_generation(
+        &self,
+        expected_from: SceneGenerationId,
+        to: SceneGenerationId,
+    ) -> Result<Self, DerivedRebindError> {
+        self.try_rebind_generation_inner(expected_from, to, None)
+    }
+
+    fn try_rebind_generation_inner(
+        &self,
+        expected_from: SceneGenerationId,
+        to: SceneGenerationId,
+        expected_stamp: Option<InputStamp>,
+    ) -> Result<Self, DerivedRebindError> {
         let (payload, generation, input_stamp) = match &self.state {
             DerivedState::Absent { reason } => {
                 return Err(DerivedRebindError::Absent { reason: *reason });
@@ -388,7 +410,9 @@ impl<T> Derived<T> {
                 actual: generation,
             });
         }
-        if input_stamp != expected_stamp {
+        if let Some(expected_stamp) = expected_stamp
+            && input_stamp != expected_stamp
+        {
             return Err(DerivedRebindError::InputStampMismatch {
                 expected: expected_stamp,
                 actual: input_stamp,

@@ -261,6 +261,14 @@ impl SceneValidationControl for FuzzValidationControl {
         Ok(())
     }
 
+    fn validate_reservation(
+        &self,
+        _reservation: &Self::Reservation,
+        _kind: SceneReservationKind,
+    ) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
     fn resize_reservation(
         &mut self,
         _reservation: &mut Self::Reservation,

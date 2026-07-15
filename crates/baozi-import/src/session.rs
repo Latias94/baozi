@@ -1463,8 +1463,44 @@ enum ImportValidationReservation {
 }
 
 impl ImportValidationReservation {
-    fn one(kind: SceneReservationKind, reservation: ImportReservation) -> Self {
+    fn new_one(kind: SceneReservationKind, reservation: ImportReservation) -> Self {
         Self::One { kind, reservation }
+    }
+
+    fn one(
+        &self,
+        expected: SceneReservationKind,
+        multi_token_code: &'static str,
+    ) -> Result<&ImportReservation, ScopeAbortCause> {
+        let Self::One { kind, reservation } = self else {
+            return Err(ScopeAbortCause::DescriptorContract {
+                code: multi_token_code,
+            });
+        };
+        if *kind != expected {
+            return Err(ScopeAbortCause::DescriptorContract {
+                code: "validation-reservation-kind-mismatch",
+            });
+        }
+        Ok(reservation)
+    }
+
+    fn one_mut(
+        &mut self,
+        expected: SceneReservationKind,
+        multi_token_code: &'static str,
+    ) -> Result<(&mut SceneReservationKind, &mut ImportReservation), ScopeAbortCause> {
+        let Self::One { kind, reservation } = self else {
+            return Err(ScopeAbortCause::DescriptorContract {
+                code: multi_token_code,
+            });
+        };
+        if *kind != expected {
+            return Err(ScopeAbortCause::DescriptorContract {
+                code: "validation-reservation-kind-mismatch",
+            });
+        }
+        Ok((kind, reservation))
     }
 }
 
@@ -1506,7 +1542,7 @@ impl SceneValidationControl for ImportValidationAdapter<'_> {
             if kind != SceneReservationKind::CanonicalOutput {
                 return checkpoint
                     .reserve(phase, dimension, bytes)
-                    .map(|reservation| ImportValidationReservation::one(kind, reservation))
+                    .map(|reservation| ImportValidationReservation::new_one(kind, reservation))
                     .map_err(ScopeAbortCause::Ledger);
             }
         }
@@ -1585,6 +1621,19 @@ impl SceneValidationControl for ImportValidationAdapter<'_> {
         Ok(ImportValidationReservation::Bundle(transitioned))
     }
 
+    fn validate_reservation(
+        &self,
+        reservation: &Self::Reservation,
+        kind: SceneReservationKind,
+    ) -> Result<(), Self::Error> {
+        validation_reservation_accounting(kind)?;
+        let reservation = reservation.one(kind, "multi-token-validation-owner-check")?;
+        self.coordinator
+            .borrow()
+            .validate_live_reservation(reservation)
+            .map_err(ScopeAbortCause::Ledger)
+    }
+
     fn transition_reservation(
         &mut self,
         reservation: &mut Self::Reservation,
@@ -1594,16 +1643,7 @@ impl SceneValidationControl for ImportValidationAdapter<'_> {
     ) -> Result<(), Self::Error> {
         validation_reservation_accounting(from)?;
         let (phase, dimension) = validation_reservation_accounting(to)?;
-        let ImportValidationReservation::One { kind, reservation } = reservation else {
-            return Err(ScopeAbortCause::DescriptorContract {
-                code: "multi-token-validation-resize",
-            });
-        };
-        if *kind != from {
-            return Err(ScopeAbortCause::DescriptorContract {
-                code: "validation-reservation-kind-mismatch",
-            });
-        }
+        let (kind, reservation) = reservation.one_mut(from, "multi-token-validation-transition")?;
         self.coordinator
             .borrow_mut()
             .checkpoint()
@@ -1620,20 +1660,7 @@ impl SceneValidationControl for ImportValidationAdapter<'_> {
         required_bytes: u64,
     ) -> Result<(), Self::Error> {
         validation_reservation_accounting(kind)?;
-        let ImportValidationReservation::One {
-            kind: reserved_kind,
-            reservation,
-        } = reservation
-        else {
-            return Err(ScopeAbortCause::DescriptorContract {
-                code: "multi-token-validation-resize",
-            });
-        };
-        if *reserved_kind != kind {
-            return Err(ScopeAbortCause::DescriptorContract {
-                code: "validation-reservation-kind-mismatch",
-            });
-        }
+        let (_, reservation) = reservation.one_mut(kind, "multi-token-validation-resize")?;
         self.coordinator
             .borrow_mut()
             .checkpoint()

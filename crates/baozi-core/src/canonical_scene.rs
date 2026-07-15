@@ -1,6 +1,10 @@
 use crate::animation::{AnimationClip, AnimationTimeDomain};
 use crate::appearance::{Material, MaterialView};
 use crate::attribute::{Attribute, AttributeDomain, F32Vec3View};
+use crate::canonical_edit::{
+    CanonicalEditError, CanonicalEditFailure, CanonicalNodeTransformEdit,
+    CanonicalNodeTransformEditStart,
+};
 use crate::deform::{
     InfluenceRows, MorphTargetDefinition, PrimitiveMorphTarget, Skin, SkinMatrixSpaces,
 };
@@ -27,7 +31,9 @@ use crate::math::{Aabb, Mat4, Vec3};
 use crate::provenance::{Provenance, ProvenanceArena, ProvenanceAttachments};
 use crate::scene_space::SceneSpace;
 use crate::shared_storage::{SharedStorage, SharedStorageError};
-use crate::validation_control::SceneValidationStats;
+use crate::validation_control::{
+    SceneValidationControl, SceneValidationLimits, SceneValidationStats,
+};
 use baozi_operation::CapacityPlan;
 use std::convert::Infallible;
 use thiserror::Error;
@@ -178,10 +184,10 @@ pub(crate) struct CanonicalSceneData {
     pub(crate) generation: SceneGenerationId,
     pub(crate) root: Option<NodeIndex>,
     pub(crate) scene_space: SceneSpace,
-    pub(crate) provenance: ProvenanceAttachments,
-    pub(crate) nodes: Vec<SharedStorage<Node>>,
+    pub(crate) provenance: SharedStorage<ProvenanceAttachments>,
+    pub(crate) nodes: Vec<Node>,
     pub(crate) mesh_instances: Vec<SharedStorage<MeshInstance>>,
-    pub(crate) logical_meshes: Vec<SharedStorage<LogicalMesh>>,
+    pub(crate) logical_meshes: Vec<LogicalMesh>,
     pub(crate) materials: Vec<SharedStorage<Material>>,
     pub(crate) images: Vec<SharedStorage<Image>>,
     pub(crate) samplers: Vec<SharedStorage<Sampler>>,
@@ -190,9 +196,9 @@ pub(crate) struct CanonicalSceneData {
     pub(crate) animation_clips: Vec<SharedStorage<AnimationClip>>,
     pub(crate) cameras: Vec<SharedStorage<Camera>>,
     pub(crate) lights: Vec<SharedStorage<Light>>,
-    pub(crate) extension_schemas: ExtensionSchemaSnapshot,
-    pub(crate) metadata: SceneMetadata,
-    pub(crate) provenance_arena: ProvenanceArena,
+    pub(crate) extension_schemas: SharedStorage<ExtensionSchemaSnapshot>,
+    pub(crate) metadata: SharedStorage<SceneMetadata>,
+    pub(crate) provenance_arena: SharedStorage<ProvenanceArena>,
     pub(crate) scene_bounds: SceneBounds,
 }
 
@@ -212,12 +218,39 @@ impl CanonicalSceneBuilder {
         provenance: impl Into<ProvenanceAttachments>,
         absent_scene_bounds: DerivedAbsenceReason,
     ) -> Result<Self, CanonicalSceneBuildError> {
+        let provenance = provenance.into();
+        let provenance_retained_bytes = provenance.retained_allocation_bytes();
+        let provenance = try_share_scene_payload(
+            provenance,
+            provenance_retained_bytes,
+            CanonicalSceneSharedPayload::Provenance,
+        )?;
+        let extension_schema_retained_bytes = extension_schemas.retained_allocation_bytes();
+        let extension_schemas = try_share_scene_payload(
+            extension_schemas,
+            extension_schema_retained_bytes,
+            CanonicalSceneSharedPayload::ExtensionSchemas,
+        )?;
+        let metadata = try_share_scene_payload(
+            SceneMetadata::empty(),
+            0,
+            CanonicalSceneSharedPayload::Metadata,
+        )?;
+        let provenance_arena =
+            SharedStorage::try_new(provenance_arena).map_err(|error| match error {
+                SharedStorageError::AllocationFailed => {
+                    CanonicalSceneBuildError::ProvenanceArenaAllocationFailed
+                }
+                SharedStorageError::AccountingOverflow => {
+                    CanonicalSceneBuildError::ProvenanceArenaAccountingOverflow
+                }
+            })?;
         Ok(Self {
             data: CanonicalSceneData {
                 generation: SceneGenerationId::allocate()?,
                 root: None,
                 scene_space,
-                provenance: provenance.into(),
+                provenance,
                 nodes: Vec::new(),
                 mesh_instances: Vec::new(),
                 logical_meshes: Vec::new(),
@@ -230,7 +263,7 @@ impl CanonicalSceneBuilder {
                 cameras: Vec::new(),
                 lights: Vec::new(),
                 extension_schemas,
-                metadata: SceneMetadata::empty(),
+                metadata,
                 provenance_arena,
                 scene_bounds: SceneBounds::absent(absent_scene_bounds),
             },
@@ -246,7 +279,7 @@ impl CanonicalSceneBuilder {
         node: Node,
     ) -> Result<NodeIndex, CanonicalSceneBuildError> {
         let index = NodeIndex::try_from(self.data.nodes.len())?;
-        try_push_shared(&mut self.data.nodes, node, CanonicalSceneCollection::Nodes)?;
+        try_push_owned(&mut self.data.nodes, node, CanonicalSceneCollection::Nodes)?;
         Ok(index)
     }
 
@@ -268,7 +301,7 @@ impl CanonicalSceneBuilder {
         mesh: LogicalMesh,
     ) -> Result<LogicalMeshIndex, CanonicalSceneBuildError> {
         let index = LogicalMeshIndex::try_from(self.data.logical_meshes.len())?;
-        try_push_shared(
+        try_push_owned(
             &mut self.data.logical_meshes,
             mesh,
             CanonicalSceneCollection::LogicalMeshes,
@@ -376,8 +409,21 @@ impl CanonicalSceneBuilder {
         Ok(index)
     }
 
-    pub(crate) fn set_metadata(&mut self, metadata: SceneMetadata) {
-        self.data.metadata = metadata;
+    pub(crate) fn set_metadata(
+        &mut self,
+        metadata: SceneMetadata,
+    ) -> Result<(), CanonicalSceneBuildError> {
+        let retained_bytes = metadata.retained_allocation_bytes().map_err(|_| {
+            CanonicalSceneBuildError::SharedPayloadAccountingOverflow {
+                payload: CanonicalSceneSharedPayload::Metadata,
+            }
+        })?;
+        self.data.metadata = try_share_scene_payload(
+            metadata,
+            retained_bytes,
+            CanonicalSceneSharedPayload::Metadata,
+        )?;
+        Ok(())
     }
 
     pub(crate) fn set_scene_bounds(&mut self, bounds: SceneBounds) {
@@ -398,20 +444,38 @@ fn try_push_shared<T>(
     value: T,
     collection: CanonicalSceneCollection,
 ) -> Result<(), CanonicalSceneBuildError> {
+    try_push_prepared(values, collection, || {
+        SharedStorage::try_new(value).map_err(|error| match error {
+            SharedStorageError::AllocationFailed => {
+                CanonicalSceneBuildError::AllocationFailed { collection }
+            }
+            SharedStorageError::AccountingOverflow => {
+                CanonicalSceneBuildError::CollectionSizeOverflow { collection }
+            }
+        })
+    })
+}
+
+fn try_push_owned<T>(
+    values: &mut Vec<T>,
+    value: T,
+    collection: CanonicalSceneCollection,
+) -> Result<(), CanonicalSceneBuildError> {
+    try_push_prepared(values, collection, || Ok(value))
+}
+
+fn try_push_prepared<T>(
+    values: &mut Vec<T>,
+    collection: CanonicalSceneCollection,
+    prepare: impl FnOnce() -> Result<T, CanonicalSceneBuildError>,
+) -> Result<(), CanonicalSceneBuildError> {
     let desired = values
         .len()
         .checked_add(1)
         .ok_or(CanonicalSceneBuildError::CollectionSizeOverflow { collection })?;
-    let plan = CapacityPlan::for_type::<SharedStorage<T>>(values.len(), values.capacity(), desired)
+    let plan = CapacityPlan::for_type::<T>(values.len(), values.capacity(), desired)
         .map_err(|_| CanonicalSceneBuildError::CollectionSizeOverflow { collection })?;
-    let value = SharedStorage::try_new(value).map_err(|error| match error {
-        SharedStorageError::AllocationFailed => {
-            CanonicalSceneBuildError::AllocationFailed { collection }
-        }
-        SharedStorageError::AccountingOverflow => {
-            CanonicalSceneBuildError::CollectionSizeOverflow { collection }
-        }
-    })?;
+    let value = prepare()?;
     if desired > values.capacity() {
         values
             .try_reserve_exact(plan.allocator_additional())
@@ -421,6 +485,21 @@ fn try_push_shared<T>(
     }
     values.push(value);
     Ok(())
+}
+
+fn try_share_scene_payload<T>(
+    value: T,
+    nested_allocation_bytes: usize,
+    payload: CanonicalSceneSharedPayload,
+) -> Result<SharedStorage<T>, CanonicalSceneBuildError> {
+    SharedStorage::try_new_prepared(value, nested_allocation_bytes).map_err(|error| match error {
+        SharedStorageError::AllocationFailed => {
+            CanonicalSceneBuildError::SharedPayloadAllocationFailed { payload }
+        }
+        SharedStorageError::AccountingOverflow => {
+            CanonicalSceneBuildError::SharedPayloadAccountingOverflow { payload }
+        }
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -438,6 +517,13 @@ pub(crate) enum CanonicalSceneCollection {
     Lights,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CanonicalSceneSharedPayload {
+    Provenance,
+    ExtensionSchemas,
+    Metadata,
+}
+
 #[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CanonicalSceneBuildError {
     #[error(transparent)]
@@ -451,6 +537,18 @@ pub(crate) enum CanonicalSceneBuildError {
     #[error("canonical scene allocation failed for {collection:?}")]
     AllocationFailed {
         collection: CanonicalSceneCollection,
+    },
+    #[error("canonical provenance arena shared allocation failed")]
+    ProvenanceArenaAllocationFailed,
+    #[error("canonical provenance arena shared allocation accounting overflowed")]
+    ProvenanceArenaAccountingOverflow,
+    #[error("canonical scene shared allocation failed for {payload:?}")]
+    SharedPayloadAllocationFailed {
+        payload: CanonicalSceneSharedPayload,
+    },
+    #[error("canonical scene shared allocation accounting overflowed for {payload:?}")]
+    SharedPayloadAccountingOverflow {
+        payload: CanonicalSceneSharedPayload,
     },
 }
 
@@ -496,12 +594,19 @@ pub(crate) struct NodeView<'a> {
 }
 
 impl<'a> NodeView<'a> {
-    pub(crate) const fn name(self) -> Option<&'a EntityName> {
+    pub(crate) fn name(self) -> Option<&'a EntityName> {
         self.node.name()
     }
 
     pub(crate) const fn authored_transform(self) -> AuthoredTransform {
         self.node.authored_transform()
+    }
+
+    pub(crate) fn fork_with_authored_transform(
+        self,
+        authored_transform: AuthoredTransform,
+    ) -> Node {
+        self.node.with_authored_transform(authored_transform)
     }
 
     pub(crate) fn local_matrix(self) -> Mat4 {
@@ -515,21 +620,19 @@ impl<'a> NodeView<'a> {
             .map(move |child| child.handle(generation))
     }
 
-    pub(crate) const fn camera(self) -> Option<CameraId> {
-        match self.node.camera_index() {
-            Some(camera) => Some(camera.handle(self.generation)),
-            None => None,
-        }
+    pub(crate) fn camera(self) -> Option<CameraId> {
+        self.node
+            .camera_index()
+            .map(|camera| camera.handle(self.generation))
     }
 
-    pub(crate) const fn light(self) -> Option<LightId> {
-        match self.node.light_index() {
-            Some(light) => Some(light.handle(self.generation)),
-            None => None,
-        }
+    pub(crate) fn light(self) -> Option<LightId> {
+        self.node
+            .light_index()
+            .map(|light| light.handle(self.generation))
     }
 
-    pub(crate) const fn provenance(self) -> &'a ProvenanceAttachments {
+    pub(crate) fn provenance(self) -> &'a ProvenanceAttachments {
         self.node.provenance()
     }
 
@@ -588,7 +691,7 @@ impl<'a> LogicalMeshView<'a> {
         self.id
     }
 
-    pub(crate) const fn name(self) -> Option<&'a EntityName> {
+    pub(crate) fn name(self) -> Option<&'a EntityName> {
         self.mesh.name()
     }
 
@@ -635,7 +738,7 @@ impl<'a> LogicalMeshView<'a> {
         self.mesh.bounds()
     }
 
-    pub(crate) const fn provenance(self) -> &'a ProvenanceAttachments {
+    pub(crate) fn provenance(self) -> &'a ProvenanceAttachments {
         self.mesh.provenance()
     }
 }
@@ -651,34 +754,33 @@ impl<'a> PrimitiveView<'a> {
         self.id
     }
 
-    pub(crate) const fn topology(self) -> &'a Topology {
+    pub(crate) fn topology(self) -> &'a Topology {
         self.primitive.topology()
     }
 
-    pub(crate) const fn index_stream(self) -> &'a IndexStream {
+    pub(crate) fn index_stream(self) -> &'a IndexStream {
         self.primitive.index_stream()
     }
 
-    pub(crate) const fn cardinality(self) -> PrimitiveCardinality {
+    pub(crate) fn cardinality(self) -> PrimitiveCardinality {
         self.primitive.cardinality()
     }
 
-    pub(crate) const fn domain_count(self, domain: AttributeDomain) -> Option<u32> {
+    pub(crate) fn domain_count(self, domain: AttributeDomain) -> Option<u32> {
         self.primitive.domain_count(domain)
     }
 
-    pub(crate) const fn material(self) -> Option<MaterialId> {
-        match self.primitive.material_index() {
-            Some(material) => Some(material.handle(self.id.generation())),
-            None => None,
-        }
+    pub(crate) fn material(self) -> Option<MaterialId> {
+        self.primitive
+            .material_index()
+            .map(|material| material.handle(self.id.generation()))
     }
 
     pub(crate) fn attributes(self) -> &'a [Attribute] {
         self.primitive.attributes()
     }
 
-    pub(crate) const fn influences(self) -> Option<&'a InfluenceRows> {
+    pub(crate) fn influences(self) -> Option<&'a InfluenceRows> {
         self.primitive.influences()
     }
 
@@ -690,7 +792,7 @@ impl<'a> PrimitiveView<'a> {
         self.primitive.bounds()
     }
 
-    pub(crate) const fn provenance(self) -> &'a ProvenanceAttachments {
+    pub(crate) fn provenance(self) -> &'a ProvenanceAttachments {
         self.primitive.provenance()
     }
 
@@ -794,6 +896,34 @@ impl CanonicalValidatedScene {
         self.validation_stats
     }
 
+    pub(crate) const fn data(&self) -> &CanonicalSceneData {
+        &self.data
+    }
+
+    pub(crate) fn try_edit_node_transform(
+        &self,
+        node: NodeId,
+        authored_transform: AuthoredTransform,
+        limits: SceneValidationLimits,
+    ) -> Result<CanonicalNodeTransformEditStart<'_>, CanonicalEditError> {
+        CanonicalNodeTransformEdit::try_begin(self, node, authored_transform, limits)
+    }
+
+    pub(crate) fn try_edit_node_transform_with<C: SceneValidationControl>(
+        &self,
+        node: NodeId,
+        authored_transform: AuthoredTransform,
+        limits: SceneValidationLimits,
+        control: &mut C,
+    ) -> Result<CanonicalNodeTransformEditStart<'_, C::Reservation>, CanonicalEditFailure<C::Error>>
+    {
+        CanonicalNodeTransformEdit::try_begin_with(self, node, authored_transform, limits, control)
+    }
+
+    pub(crate) const fn scene_bounds(&self) -> &SceneBounds {
+        &self.data.scene_bounds
+    }
+
     pub(crate) const fn root(&self) -> Option<NodeId> {
         match self.data.root {
             Some(root) => Some(root.handle(self.data.generation)),
@@ -806,17 +936,14 @@ impl CanonicalValidatedScene {
         StableEnumerate::new(self.data.nodes.iter()).map(move |(index, node)| {
             (
                 NodeId::new(generation, index),
-                NodeView {
-                    node: node.as_ref(),
-                    generation,
-                },
+                NodeView { node, generation },
             )
         })
     }
 
     pub(crate) fn node(&self, id: NodeId) -> Result<NodeView<'_>, SceneLookupError> {
         lookup_scene_wide(self.data.generation, id, &self.data.nodes).map(|node| NodeView {
-            node: node.as_ref(),
+            node,
             generation: self.data.generation,
         })
     }
@@ -854,13 +981,7 @@ impl CanonicalValidatedScene {
         let generation = self.data.generation;
         StableEnumerate::new(self.data.logical_meshes.iter()).map(move |(index, mesh)| {
             let id = LogicalMeshId::new(generation, index);
-            (
-                id,
-                LogicalMeshView {
-                    mesh: mesh.as_ref(),
-                    id,
-                },
-            )
+            (id, LogicalMeshView { mesh, id })
         })
     }
 
@@ -868,12 +989,8 @@ impl CanonicalValidatedScene {
         &self,
         id: LogicalMeshId,
     ) -> Result<LogicalMeshView<'_>, SceneLookupError> {
-        lookup_scene_wide(self.data.generation, id, &self.data.logical_meshes).map(|mesh| {
-            LogicalMeshView {
-                mesh: mesh.as_ref(),
-                id,
-            }
-        })
+        lookup_scene_wide(self.data.generation, id, &self.data.logical_meshes)
+            .map(|mesh| LogicalMeshView { mesh, id })
     }
 
     pub(crate) fn materials(
@@ -1019,6 +1136,7 @@ mod tests {
     use crate::math::{Color, Mat4, Vec3};
     use crate::provenance::{Provenance, test_provenance_fixture};
     use crate::scene_space::SceneSpace;
+    use crate::shared_storage::fail_next_allocation_for_test;
     use crate::validation_control::SceneValidationLimits;
 
     fn root_node(provenance: crate::provenance::Provenance) -> Node {
@@ -1217,6 +1335,56 @@ mod tests {
             SceneValidationLimits::default(),
         )
         .expect("fully populated canonical scene should validate")
+    }
+
+    #[test]
+    fn builder_reports_the_failed_shared_scene_payload() {
+        let (provenance_arena, provenance) = test_provenance_fixture();
+        fail_next_allocation_for_test();
+
+        let error = CanonicalSceneBuilder::try_new(
+            SceneSpace::unknown(),
+            ExtensionSchemaSnapshot::empty(),
+            provenance_arena,
+            provenance,
+            DerivedAbsenceReason::NotProvided,
+        )
+        .err()
+        .expect("the injected shared allocation failure must be reported");
+
+        assert_eq!(
+            error,
+            CanonicalSceneBuildError::SharedPayloadAllocationFailed {
+                payload: CanonicalSceneSharedPayload::Provenance,
+            }
+        );
+    }
+
+    #[test]
+    fn failed_metadata_replacement_preserves_existing_shared_payload() {
+        let (provenance_arena, provenance) = test_provenance_fixture();
+        let mut builder = CanonicalSceneBuilder::try_new(
+            SceneSpace::unknown(),
+            ExtensionSchemaSnapshot::empty(),
+            provenance_arena,
+            provenance,
+            DerivedAbsenceReason::NotProvided,
+        )
+        .expect("scene builder fixture should allocate");
+        let original = builder.data.metadata.clone();
+        fail_next_allocation_for_test();
+
+        let error = builder
+            .set_metadata(SceneMetadata::empty())
+            .expect_err("the injected metadata allocation failure must be reported");
+
+        assert_eq!(
+            error,
+            CanonicalSceneBuildError::SharedPayloadAllocationFailed {
+                payload: CanonicalSceneSharedPayload::Metadata,
+            }
+        );
+        assert!(builder.data.metadata.ptr_eq(&original));
     }
 
     #[test]
