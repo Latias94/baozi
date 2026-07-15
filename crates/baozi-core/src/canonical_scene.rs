@@ -229,6 +229,12 @@ pub(crate) enum CanonicalSceneSharedPayload {
     Metadata,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CanonicalPreparedAllocation {
+    Collection,
+    ValueStorage,
+}
+
 #[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CanonicalSceneBuildError {
     #[error(transparent)]
@@ -255,10 +261,11 @@ pub(crate) enum CanonicalSceneBuildError {
         cause: CapacityPlanError,
     },
     #[error(
-        "canonical scene prepared allocation for {collection:?} retained {actual} bytes beyond admitted {admitted} bytes"
+        "canonical scene prepared {allocation:?} allocation for {collection:?} retained {actual} bytes beyond admitted {admitted} bytes"
     )]
     PreparedAllocationUnderestimated {
         collection: CanonicalSceneCollection,
+        allocation: CanonicalPreparedAllocation,
         admitted: u64,
         actual: u64,
     },
@@ -1215,14 +1222,15 @@ mod tests {
             .collection_capacity_plan(CanonicalSceneCollection::Nodes)
             .expect("node insertion should have a capacity plan");
         let admitted = plan
-            .envelope_delta_bytes()
-            .expect("node insertion envelope should fit");
+            .collection_envelope_delta_bytes()
+            .expect("node insertion collection envelope should fit");
 
         let prepared = builder
             .prepare_push_node(root_node(provenance), plan)
             .expect("node insertion should prepare off to the side");
-        assert!(prepared.replaces_allocation());
-        assert!(prepared.retained_allocation_bytes() <= admitted);
+        assert!(prepared.replaces_collection_allocation());
+        assert!(prepared.collection_retained_allocation_bytes() <= admitted);
+        assert_eq!(prepared.value_storage_retained_allocation_bytes(), 0);
         drop(prepared);
         assert!(builder.data.nodes.is_empty());
 
@@ -1259,12 +1267,13 @@ mod tests {
         let plan = builder
             .collection_capacity_plan(CanonicalSceneCollection::Nodes)
             .expect("spare node capacity should have a plan");
-        assert!(!plan.replaces_allocation());
+        assert!(!plan.replaces_collection_allocation());
         let prepared = builder
             .prepare_push_node(root_node(provenance), plan)
             .expect("spare capacity should prepare without replacement storage");
-        assert!(!prepared.replaces_allocation());
-        assert_eq!(prepared.retained_allocation_bytes(), 0);
+        assert!(!prepared.replaces_collection_allocation());
+        assert_eq!(prepared.collection_retained_allocation_bytes(), 0);
+        assert_eq!(prepared.value_storage_retained_allocation_bytes(), 0);
         drop(prepared);
         assert!(builder.data.nodes.is_empty());
         assert_eq!(builder.data.nodes.capacity(), original_capacity);
@@ -1343,16 +1352,19 @@ mod tests {
         let plan = builder
             .collection_capacity_plan(CanonicalSceneCollection::Materials)
             .expect("material insertion should have a capacity plan");
-        let admitted = plan
-            .envelope_delta_bytes()
-            .expect("material insertion envelope should fit");
+        let collection_admitted = plan
+            .collection_envelope_delta_bytes()
+            .expect("material collection envelope should fit");
+        let value_admitted = plan.value_storage_envelope_bytes();
 
         let prepared = builder
             .prepare_push_material(unlit_material(provenance), plan)
             .expect("shared material insertion should prepare");
-        assert!(prepared.replaces_allocation());
-        assert!(prepared.retained_allocation_bytes() > 0);
-        assert!(prepared.retained_allocation_bytes() <= admitted);
+        assert!(prepared.replaces_collection_allocation());
+        assert!(prepared.collection_retained_allocation_bytes() > 0);
+        assert!(prepared.collection_retained_allocation_bytes() <= collection_admitted);
+        assert!(prepared.value_storage_retained_allocation_bytes() > 0);
+        assert!(prepared.value_storage_retained_allocation_bytes() <= value_admitted);
         drop(prepared);
         assert!(builder.data.materials.is_empty());
         assert_eq!(builder.data.materials.capacity(), 0);
@@ -1370,6 +1382,114 @@ mod tests {
     }
 
     #[test]
+    fn prepared_shared_insert_keeps_value_storage_separate_from_spare_collection_capacity() {
+        let (provenance_arena, provenance) = test_provenance_fixture();
+        let mut builder = CanonicalSceneBuilder::try_new(
+            SceneSpace::unknown(),
+            ExtensionSchemaSnapshot::empty(),
+            provenance_arena,
+            provenance,
+            DerivedAbsenceReason::NotProvided,
+        )
+        .expect("scene builder fixture should allocate");
+        builder
+            .try_push_material(unlit_material(provenance))
+            .expect("fixture should establish reusable material capacity");
+        builder.data.materials.clear();
+
+        let plan = builder
+            .collection_capacity_plan(CanonicalSceneCollection::Materials)
+            .expect("spare material capacity should have a plan");
+        assert!(!plan.replaces_collection_allocation());
+        assert_eq!(
+            plan.collection_envelope_delta_bytes()
+                .expect("spare collection envelope should fit"),
+            0
+        );
+        assert!(plan.value_storage_envelope_bytes() > 0);
+
+        let prepared = builder
+            .prepare_push_material(unlit_material(provenance), plan)
+            .expect("shared material should prepare in spare collection capacity");
+        assert!(!prepared.replaces_collection_allocation());
+        assert_eq!(prepared.collection_retained_allocation_bytes(), 0);
+        assert!(prepared.value_storage_retained_allocation_bytes() > 0);
+        assert!(
+            prepared.value_storage_retained_allocation_bytes()
+                <= plan.value_storage_envelope_bytes()
+        );
+        prepared.commit();
+
+        assert_eq!(builder.data.materials.len(), 1);
+    }
+
+    #[test]
+    fn failed_shared_value_preparation_preserves_spare_collection_capacity() {
+        let (provenance_arena, provenance) = test_provenance_fixture();
+        let mut builder = CanonicalSceneBuilder::try_new(
+            SceneSpace::unknown(),
+            ExtensionSchemaSnapshot::empty(),
+            provenance_arena,
+            provenance,
+            DerivedAbsenceReason::NotProvided,
+        )
+        .expect("scene builder fixture should allocate");
+        builder
+            .try_push_material(unlit_material(provenance))
+            .expect("fixture should establish reusable material capacity");
+        builder.data.materials.clear();
+        let original_capacity = builder.data.materials.capacity();
+
+        let mut underestimated = builder
+            .collection_capacity_plan(CanonicalSceneCollection::Materials)
+            .expect("spare material capacity should have a plan");
+        underestimated.prepared_value_storage_bytes = 0;
+        let error = match builder.prepare_push_material(unlit_material(provenance), underestimated)
+        {
+            Ok(_) => panic!("underestimated shared value storage must not prepare"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            error,
+            CanonicalSceneBuildError::PreparedAllocationUnderestimated {
+                collection: CanonicalSceneCollection::Materials,
+                allocation: CanonicalPreparedAllocation::ValueStorage,
+                ..
+            }
+        ));
+        assert!(builder.data.materials.is_empty());
+        assert_eq!(builder.data.materials.capacity(), original_capacity);
+
+        let plan = builder
+            .collection_capacity_plan(CanonicalSceneCollection::Materials)
+            .expect("retry should have a fresh capacity plan");
+        fail_next_allocation_for_test();
+        let error = match builder.prepare_push_material(unlit_material(provenance), plan) {
+            Ok(_) => panic!("the injected shared allocation failure must abort preparation"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            error,
+            CanonicalSceneBuildError::AllocationFailed {
+                collection: CanonicalSceneCollection::Materials,
+            }
+        );
+        assert!(builder.data.materials.is_empty());
+        assert_eq!(builder.data.materials.capacity(), original_capacity);
+
+        let plan = builder
+            .collection_capacity_plan(CanonicalSceneCollection::Materials)
+            .expect("retry should have a fresh capacity plan");
+        let material = builder
+            .prepare_push_material(unlit_material(provenance), plan)
+            .expect("builder should remain usable after failed preparation")
+            .commit();
+        assert_eq!(material.as_u32(), 0);
+        assert_eq!(builder.data.materials.len(), 1);
+        assert_eq!(builder.data.materials.capacity(), original_capacity);
+    }
+
+    #[test]
     fn underestimated_shared_storage_admission_preserves_the_live_collection() {
         let (provenance_arena, provenance) = test_provenance_fixture();
         let mut builder = CanonicalSceneBuilder::try_new(
@@ -1383,10 +1503,8 @@ mod tests {
         let mut plan = builder
             .collection_capacity_plan(CanonicalSceneCollection::Materials)
             .expect("material insertion should have a capacity plan");
-        plan.prepared_value_bytes = 0;
-        let admitted = plan
-            .envelope_delta_bytes()
-            .expect("under-admitted replacement envelope should fit");
+        plan.prepared_value_storage_bytes = 0;
+        let admitted = plan.value_storage_envelope_bytes();
 
         let error = match builder.prepare_push_material(unlit_material(provenance), plan) {
             Ok(_) => panic!("under-admitted shared storage must not prepare"),
@@ -1397,6 +1515,7 @@ mod tests {
             error,
             CanonicalSceneBuildError::PreparedAllocationUnderestimated {
                 collection: CanonicalSceneCollection::Materials,
+                allocation: CanonicalPreparedAllocation::ValueStorage,
                 admitted: actual_admitted,
                 actual,
             } if actual_admitted == admitted && actual > admitted

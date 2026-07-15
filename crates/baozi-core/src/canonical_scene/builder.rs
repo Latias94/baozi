@@ -6,26 +6,25 @@ pub(crate) struct CanonicalSceneCapacityPlan {
     original_len: usize,
     original_capacity: usize,
     replacement: Option<CapacityPlan>,
-    pub(super) prepared_value_bytes: u64,
+    pub(super) prepared_value_storage_bytes: u64,
 }
 
 impl CanonicalSceneCapacityPlan {
-    pub(crate) fn envelope_delta_bytes(self) -> Result<u64, CanonicalSceneBuildError> {
-        let replacement_bytes = self.replacement.map_or(Ok(0), |plan| {
+    pub(crate) fn collection_envelope_delta_bytes(self) -> Result<u64, CanonicalSceneBuildError> {
+        self.replacement.map_or(Ok(0), |plan| {
             plan.envelope_delta_bytes()
                 .map_err(|cause| CanonicalSceneBuildError::CapacityPlan {
                     collection: self.collection,
                     cause,
                 })
-        })?;
-        replacement_bytes
-            .checked_add(self.prepared_value_bytes)
-            .ok_or(CanonicalSceneBuildError::CollectionSizeOverflow {
-                collection: self.collection,
-            })
+        })
     }
 
-    pub(crate) const fn replaces_allocation(self) -> bool {
+    pub(crate) const fn value_storage_envelope_bytes(self) -> u64 {
+        self.prepared_value_storage_bytes
+    }
+
+    pub(crate) const fn replaces_collection_allocation(self) -> bool {
         self.replacement.is_some()
     }
 }
@@ -33,9 +32,11 @@ impl CanonicalSceneCapacityPlan {
 pub(crate) trait CanonicalPreparedSceneInsert {
     type Id;
 
-    fn retained_allocation_bytes(&self) -> u64;
+    fn collection_retained_allocation_bytes(&self) -> u64;
 
-    fn replaces_allocation(&self) -> bool;
+    fn value_storage_retained_allocation_bytes(&self) -> u64;
+
+    fn replaces_collection_allocation(&self) -> bool;
 
     fn commit(self) -> Self::Id;
 }
@@ -45,17 +46,22 @@ struct PreparedCanonicalSceneInsert<'owner, T, Id> {
     replacement: Option<Vec<T>>,
     value: T,
     id: Id,
-    retained_allocation_bytes: u64,
+    collection_retained_allocation_bytes: u64,
+    value_storage_retained_allocation_bytes: u64,
 }
 
 impl<T, Id> CanonicalPreparedSceneInsert for PreparedCanonicalSceneInsert<'_, T, Id> {
     type Id = Id;
 
-    fn retained_allocation_bytes(&self) -> u64 {
-        self.retained_allocation_bytes
+    fn collection_retained_allocation_bytes(&self) -> u64 {
+        self.collection_retained_allocation_bytes
     }
 
-    fn replaces_allocation(&self) -> bool {
+    fn value_storage_retained_allocation_bytes(&self) -> u64 {
+        self.value_storage_retained_allocation_bytes
+    }
+
+    fn replaces_collection_allocation(&self) -> bool {
         self.replacement.is_some()
     }
 
@@ -65,7 +71,8 @@ impl<T, Id> CanonicalPreparedSceneInsert for PreparedCanonicalSceneInsert<'_, T,
             replacement,
             value,
             id,
-            retained_allocation_bytes: _,
+            collection_retained_allocation_bytes: _,
+            value_storage_retained_allocation_bytes: _,
         } = self;
         if let Some(mut replacement) = replacement {
             assert!(
@@ -537,7 +544,7 @@ fn shared_value_layout_bytes<T>(
 fn canonical_capacity_plan<T>(
     values: &Vec<T>,
     collection: CanonicalSceneCollection,
-    prepared_value_bytes: u64,
+    prepared_value_storage_bytes: u64,
 ) -> Result<CanonicalSceneCapacityPlan, CanonicalSceneBuildError> {
     let required_capacity = values
         .len()
@@ -556,7 +563,7 @@ fn canonical_capacity_plan<T>(
         original_len: values.len(),
         original_capacity: values.capacity(),
         replacement,
-        prepared_value_bytes,
+        prepared_value_storage_bytes,
     })
 }
 
@@ -661,18 +668,25 @@ fn prepare_insert<'owner, Source, Stored, Id>(
     collection: CanonicalSceneCollection,
     prepare_value: impl FnOnce(Source) -> Result<(Stored, u64), CanonicalSceneBuildError>,
 ) -> Result<PreparedCanonicalSceneInsert<'owner, Stored, Id>, CanonicalSceneBuildError> {
-    let admitted = plan.envelope_delta_bytes()?;
-    let (replacement, replacement_bytes) =
+    let collection_admitted = plan.collection_envelope_delta_bytes()?;
+    let value_storage_admitted = plan.value_storage_envelope_bytes();
+    let (replacement, collection_retained_allocation_bytes) =
         allocate_collection_replacement(values, plan, collection)?;
-    let (value, value_bytes) = prepare_value(value)?;
-    let retained_allocation_bytes = replacement_bytes
-        .checked_add(value_bytes)
-        .ok_or(CanonicalSceneBuildError::CollectionSizeOverflow { collection })?;
-    if retained_allocation_bytes > admitted {
+    if collection_retained_allocation_bytes > collection_admitted {
         return Err(CanonicalSceneBuildError::PreparedAllocationUnderestimated {
             collection,
-            admitted,
-            actual: retained_allocation_bytes,
+            allocation: CanonicalPreparedAllocation::Collection,
+            admitted: collection_admitted,
+            actual: collection_retained_allocation_bytes,
+        });
+    }
+    let (value, value_storage_retained_allocation_bytes) = prepare_value(value)?;
+    if value_storage_retained_allocation_bytes > value_storage_admitted {
+        return Err(CanonicalSceneBuildError::PreparedAllocationUnderestimated {
+            collection,
+            allocation: CanonicalPreparedAllocation::ValueStorage,
+            admitted: value_storage_admitted,
+            actual: value_storage_retained_allocation_bytes,
         });
     }
     Ok(PreparedCanonicalSceneInsert {
@@ -680,7 +694,8 @@ fn prepare_insert<'owner, Source, Stored, Id>(
         replacement,
         value,
         id,
-        retained_allocation_bytes,
+        collection_retained_allocation_bytes,
+        value_storage_retained_allocation_bytes,
     })
 }
 
