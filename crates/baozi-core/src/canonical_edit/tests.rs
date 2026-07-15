@@ -10,7 +10,8 @@ use crate::attribute::{
     Attribute, AttributeBuffer, AttributeDomain, AttributeFormat, AttributePayload,
     AttributeSemantic, ComponentType, Normalization,
 };
-use crate::canonical_scene::{CanonicalSceneBuilder, CanonicalValidatedScene, SceneBounds};
+use crate::canonical_scene::builder::CanonicalSceneBuilder;
+use crate::canonical_scene::{CanonicalValidatedScene, SceneBounds};
 use crate::canonical_validation::{
     CanonicalValidationError, CanonicalValidationLimit, validate_canonical_scene,
 };

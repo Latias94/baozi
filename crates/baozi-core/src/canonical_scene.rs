@@ -34,7 +34,7 @@ use crate::shared_storage::{SharedStorage, SharedStorageError};
 use crate::validation_control::{
     SceneValidationControl, SceneValidationLimits, SceneValidationStats,
 };
-use baozi_operation::CapacityPlan;
+use baozi_operation::{CapacityPlan, CapacityPlanError};
 use std::convert::Infallible;
 use thiserror::Error;
 
@@ -206,302 +206,7 @@ pub(crate) struct CanonicalSceneDraft {
     pub(crate) data: CanonicalSceneData,
 }
 
-pub(crate) struct CanonicalSceneBuilder {
-    data: CanonicalSceneData,
-}
-
-impl CanonicalSceneBuilder {
-    pub(crate) fn try_new(
-        scene_space: SceneSpace,
-        extension_schemas: ExtensionSchemaSnapshot,
-        provenance_arena: ProvenanceArena,
-        provenance: impl Into<ProvenanceAttachments>,
-        absent_scene_bounds: DerivedAbsenceReason,
-    ) -> Result<Self, CanonicalSceneBuildError> {
-        let provenance = provenance.into();
-        let provenance_retained_bytes = provenance.retained_allocation_bytes();
-        let provenance = try_share_scene_payload(
-            provenance,
-            provenance_retained_bytes,
-            CanonicalSceneSharedPayload::Provenance,
-        )?;
-        let extension_schema_retained_bytes = extension_schemas.retained_allocation_bytes();
-        let extension_schemas = try_share_scene_payload(
-            extension_schemas,
-            extension_schema_retained_bytes,
-            CanonicalSceneSharedPayload::ExtensionSchemas,
-        )?;
-        let metadata = try_share_scene_payload(
-            SceneMetadata::empty(),
-            0,
-            CanonicalSceneSharedPayload::Metadata,
-        )?;
-        let provenance_arena =
-            SharedStorage::try_new(provenance_arena).map_err(|error| match error {
-                SharedStorageError::AllocationFailed => {
-                    CanonicalSceneBuildError::ProvenanceArenaAllocationFailed
-                }
-                SharedStorageError::AccountingOverflow => {
-                    CanonicalSceneBuildError::ProvenanceArenaAccountingOverflow
-                }
-            })?;
-        Ok(Self {
-            data: CanonicalSceneData {
-                generation: SceneGenerationId::allocate()?,
-                root: None,
-                scene_space,
-                provenance,
-                nodes: Vec::new(),
-                mesh_instances: Vec::new(),
-                logical_meshes: Vec::new(),
-                materials: Vec::new(),
-                images: Vec::new(),
-                samplers: Vec::new(),
-                textures: Vec::new(),
-                skins: Vec::new(),
-                animation_clips: Vec::new(),
-                cameras: Vec::new(),
-                lights: Vec::new(),
-                extension_schemas,
-                metadata,
-                provenance_arena,
-                scene_bounds: SceneBounds::absent(absent_scene_bounds),
-            },
-        })
-    }
-
-    pub(crate) const fn generation(&self) -> SceneGenerationId {
-        self.data.generation
-    }
-
-    pub(crate) fn try_push_node(
-        &mut self,
-        node: Node,
-    ) -> Result<NodeIndex, CanonicalSceneBuildError> {
-        let index = NodeIndex::try_from(self.data.nodes.len())?;
-        try_push_owned(&mut self.data.nodes, node, CanonicalSceneCollection::Nodes)?;
-        Ok(index)
-    }
-
-    pub(crate) fn try_push_mesh_instance(
-        &mut self,
-        instance: MeshInstance,
-    ) -> Result<MeshInstanceIndex, CanonicalSceneBuildError> {
-        let index = MeshInstanceIndex::try_from(self.data.mesh_instances.len())?;
-        try_push_shared(
-            &mut self.data.mesh_instances,
-            instance,
-            CanonicalSceneCollection::MeshInstances,
-        )?;
-        Ok(index)
-    }
-
-    pub(crate) fn try_push_logical_mesh(
-        &mut self,
-        mesh: LogicalMesh,
-    ) -> Result<LogicalMeshIndex, CanonicalSceneBuildError> {
-        let index = LogicalMeshIndex::try_from(self.data.logical_meshes.len())?;
-        try_push_owned(
-            &mut self.data.logical_meshes,
-            mesh,
-            CanonicalSceneCollection::LogicalMeshes,
-        )?;
-        Ok(index)
-    }
-
-    pub(crate) fn try_push_material(
-        &mut self,
-        material: Material,
-    ) -> Result<MaterialIndex, CanonicalSceneBuildError> {
-        let index = MaterialIndex::try_from(self.data.materials.len())?;
-        try_push_shared(
-            &mut self.data.materials,
-            material,
-            CanonicalSceneCollection::Materials,
-        )?;
-        Ok(index)
-    }
-
-    pub(crate) fn try_push_image(
-        &mut self,
-        image: Image,
-    ) -> Result<ImageIndex, CanonicalSceneBuildError> {
-        let index = ImageIndex::try_from(self.data.images.len())?;
-        try_push_shared(
-            &mut self.data.images,
-            image,
-            CanonicalSceneCollection::Images,
-        )?;
-        Ok(index)
-    }
-
-    pub(crate) fn try_push_sampler(
-        &mut self,
-        sampler: Sampler,
-    ) -> Result<SamplerIndex, CanonicalSceneBuildError> {
-        let index = SamplerIndex::try_from(self.data.samplers.len())?;
-        try_push_shared(
-            &mut self.data.samplers,
-            sampler,
-            CanonicalSceneCollection::Samplers,
-        )?;
-        Ok(index)
-    }
-
-    pub(crate) fn try_push_texture(
-        &mut self,
-        texture: Texture,
-    ) -> Result<TextureIndex, CanonicalSceneBuildError> {
-        let index = TextureIndex::try_from(self.data.textures.len())?;
-        try_push_shared(
-            &mut self.data.textures,
-            texture,
-            CanonicalSceneCollection::Textures,
-        )?;
-        Ok(index)
-    }
-
-    pub(crate) fn try_push_skin(
-        &mut self,
-        skin: crate::deform::Skin,
-    ) -> Result<SkinIndex, CanonicalSceneBuildError> {
-        let index = SkinIndex::try_from(self.data.skins.len())?;
-        try_push_shared(&mut self.data.skins, skin, CanonicalSceneCollection::Skins)?;
-        Ok(index)
-    }
-
-    pub(crate) fn try_push_animation_clip(
-        &mut self,
-        clip: AnimationClip,
-    ) -> Result<AnimationClipIndex, CanonicalSceneBuildError> {
-        let index = AnimationClipIndex::try_from(self.data.animation_clips.len())?;
-        try_push_shared(
-            &mut self.data.animation_clips,
-            clip,
-            CanonicalSceneCollection::AnimationClips,
-        )?;
-        Ok(index)
-    }
-
-    pub(crate) fn try_push_camera(
-        &mut self,
-        camera: Camera,
-    ) -> Result<CameraIndex, CanonicalSceneBuildError> {
-        let index = CameraIndex::try_from(self.data.cameras.len())?;
-        try_push_shared(
-            &mut self.data.cameras,
-            camera,
-            CanonicalSceneCollection::Cameras,
-        )?;
-        Ok(index)
-    }
-
-    pub(crate) fn try_push_light(
-        &mut self,
-        light: Light,
-    ) -> Result<LightIndex, CanonicalSceneBuildError> {
-        let index = LightIndex::try_from(self.data.lights.len())?;
-        try_push_shared(
-            &mut self.data.lights,
-            light,
-            CanonicalSceneCollection::Lights,
-        )?;
-        Ok(index)
-    }
-
-    pub(crate) fn set_metadata(
-        &mut self,
-        metadata: SceneMetadata,
-    ) -> Result<(), CanonicalSceneBuildError> {
-        let retained_bytes = metadata.retained_allocation_bytes().map_err(|_| {
-            CanonicalSceneBuildError::SharedPayloadAccountingOverflow {
-                payload: CanonicalSceneSharedPayload::Metadata,
-            }
-        })?;
-        self.data.metadata = try_share_scene_payload(
-            metadata,
-            retained_bytes,
-            CanonicalSceneSharedPayload::Metadata,
-        )?;
-        Ok(())
-    }
-
-    pub(crate) fn set_scene_bounds(&mut self, bounds: SceneBounds) {
-        self.data.scene_bounds = bounds;
-    }
-
-    pub(crate) fn set_root(&mut self, root: NodeIndex) {
-        self.data.root = Some(root);
-    }
-
-    pub(crate) fn finish_draft(self) -> CanonicalSceneDraft {
-        CanonicalSceneDraft { data: self.data }
-    }
-}
-
-fn try_push_shared<T>(
-    values: &mut Vec<SharedStorage<T>>,
-    value: T,
-    collection: CanonicalSceneCollection,
-) -> Result<(), CanonicalSceneBuildError> {
-    try_push_prepared(values, collection, || {
-        SharedStorage::try_new(value).map_err(|error| match error {
-            SharedStorageError::AllocationFailed => {
-                CanonicalSceneBuildError::AllocationFailed { collection }
-            }
-            SharedStorageError::AccountingOverflow => {
-                CanonicalSceneBuildError::CollectionSizeOverflow { collection }
-            }
-        })
-    })
-}
-
-fn try_push_owned<T>(
-    values: &mut Vec<T>,
-    value: T,
-    collection: CanonicalSceneCollection,
-) -> Result<(), CanonicalSceneBuildError> {
-    try_push_prepared(values, collection, || Ok(value))
-}
-
-fn try_push_prepared<T>(
-    values: &mut Vec<T>,
-    collection: CanonicalSceneCollection,
-    prepare: impl FnOnce() -> Result<T, CanonicalSceneBuildError>,
-) -> Result<(), CanonicalSceneBuildError> {
-    let desired = values
-        .len()
-        .checked_add(1)
-        .ok_or(CanonicalSceneBuildError::CollectionSizeOverflow { collection })?;
-    let plan = CapacityPlan::for_type::<T>(values.len(), values.capacity(), desired)
-        .map_err(|_| CanonicalSceneBuildError::CollectionSizeOverflow { collection })?;
-    let value = prepare()?;
-    if desired > values.capacity() {
-        values
-            .try_reserve_exact(plan.allocator_additional())
-            .map_err(|_| CanonicalSceneBuildError::AllocationFailed { collection })?;
-        plan.finish(values.len(), values.capacity())
-            .map_err(|_| CanonicalSceneBuildError::AllocationFailed { collection })?;
-    }
-    values.push(value);
-    Ok(())
-}
-
-fn try_share_scene_payload<T>(
-    value: T,
-    nested_allocation_bytes: usize,
-    payload: CanonicalSceneSharedPayload,
-) -> Result<SharedStorage<T>, CanonicalSceneBuildError> {
-    SharedStorage::try_new_prepared(value, nested_allocation_bytes).map_err(|error| match error {
-        SharedStorageError::AllocationFailed => {
-            CanonicalSceneBuildError::SharedPayloadAllocationFailed { payload }
-        }
-        SharedStorageError::AccountingOverflow => {
-            CanonicalSceneBuildError::SharedPayloadAccountingOverflow { payload }
-        }
-    })
-}
-
+pub(crate) mod builder;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CanonicalSceneCollection {
     Nodes,
@@ -537,6 +242,25 @@ pub(crate) enum CanonicalSceneBuildError {
     #[error("canonical scene allocation failed for {collection:?}")]
     AllocationFailed {
         collection: CanonicalSceneCollection,
+    },
+    #[error("canonical scene capacity plan for {actual:?} cannot prepare {expected:?}")]
+    CapacityPlanCollectionMismatch {
+        expected: CanonicalSceneCollection,
+        actual: CanonicalSceneCollection,
+    },
+    #[error("canonical scene capacity plan failed for {collection:?}")]
+    CapacityPlan {
+        collection: CanonicalSceneCollection,
+        #[source]
+        cause: CapacityPlanError,
+    },
+    #[error(
+        "canonical scene prepared allocation for {collection:?} retained {actual} bytes beyond admitted {admitted} bytes"
+    )]
+    PreparedAllocationUnderestimated {
+        collection: CanonicalSceneCollection,
+        admitted: u64,
+        actual: u64,
     },
     #[error("canonical provenance arena shared allocation failed")]
     ProvenanceArenaAllocationFailed,
@@ -1118,6 +842,7 @@ impl CanonicalValidatedScene {
 
 #[cfg(test)]
 mod tests {
+    use super::builder::{CanonicalPreparedSceneInsert, CanonicalSceneBuilder};
     use super::*;
     use crate::animation::{AnimationLimits, AnimationTimeDomain};
     use crate::appearance::{AlphaMode, MaterialFactors, ShadingModel};
@@ -1150,6 +875,20 @@ mod tests {
             [],
         )
         .expect("root node fixture should be valid")
+    }
+
+    fn unlit_material(provenance: Provenance) -> Material {
+        Material::try_new(
+            None,
+            ShadingModel::Unlit,
+            AlphaMode::Opaque,
+            false,
+            MaterialFactors::empty(),
+            [],
+            provenance,
+            [],
+        )
+        .expect("material fixture should be valid")
     }
 
     fn positions(values: Vec<Vec3>, provenance: Provenance) -> Attribute {
@@ -1459,6 +1198,243 @@ mod tests {
         assert_eq!(image_index.as_u32(), 0);
         assert_eq!(sampler_index.as_u32(), 0);
         assert_eq!(texture_index.as_u32(), 0);
+    }
+
+    #[test]
+    fn prepared_node_insert_keeps_the_builder_unchanged_until_commit() {
+        let (provenance_arena, provenance) = test_provenance_fixture();
+        let mut builder = CanonicalSceneBuilder::try_new(
+            SceneSpace::unknown(),
+            ExtensionSchemaSnapshot::empty(),
+            provenance_arena,
+            provenance,
+            DerivedAbsenceReason::NotProvided,
+        )
+        .expect("scene builder fixture should allocate");
+        let plan = builder
+            .collection_capacity_plan(CanonicalSceneCollection::Nodes)
+            .expect("node insertion should have a capacity plan");
+        let admitted = plan
+            .envelope_delta_bytes()
+            .expect("node insertion envelope should fit");
+
+        let prepared = builder
+            .prepare_push_node(root_node(provenance), plan)
+            .expect("node insertion should prepare off to the side");
+        assert!(prepared.replaces_allocation());
+        assert!(prepared.retained_allocation_bytes() <= admitted);
+        drop(prepared);
+        assert!(builder.data.nodes.is_empty());
+
+        let plan = builder
+            .collection_capacity_plan(CanonicalSceneCollection::Nodes)
+            .expect("retry should have a fresh capacity plan");
+        let prepared = builder
+            .prepare_push_node(root_node(provenance), plan)
+            .expect("retry should prepare");
+        let node = prepared.commit();
+
+        assert_eq!(node.as_u32(), 0);
+        assert_eq!(builder.data.nodes.len(), 1);
+    }
+
+    #[test]
+    fn prepared_node_insert_uses_spare_capacity_only_at_commit() {
+        let (provenance_arena, provenance) = test_provenance_fixture();
+        let mut builder = CanonicalSceneBuilder::try_new(
+            SceneSpace::unknown(),
+            ExtensionSchemaSnapshot::empty(),
+            provenance_arena,
+            provenance,
+            DerivedAbsenceReason::NotProvided,
+        )
+        .expect("scene builder fixture should allocate");
+        builder
+            .try_push_node(root_node(provenance))
+            .expect("fixture should establish reusable node capacity");
+        builder.data.nodes.clear();
+        let original_capacity = builder.data.nodes.capacity();
+        assert!(original_capacity > 0);
+
+        let plan = builder
+            .collection_capacity_plan(CanonicalSceneCollection::Nodes)
+            .expect("spare node capacity should have a plan");
+        assert!(!plan.replaces_allocation());
+        let prepared = builder
+            .prepare_push_node(root_node(provenance), plan)
+            .expect("spare capacity should prepare without replacement storage");
+        assert!(!prepared.replaces_allocation());
+        assert_eq!(prepared.retained_allocation_bytes(), 0);
+        drop(prepared);
+        assert!(builder.data.nodes.is_empty());
+        assert_eq!(builder.data.nodes.capacity(), original_capacity);
+
+        let plan = builder
+            .collection_capacity_plan(CanonicalSceneCollection::Nodes)
+            .expect("retry should have a fresh capacity plan");
+        let node = builder
+            .prepare_push_node(root_node(provenance), plan)
+            .expect("retry should prepare")
+            .commit();
+
+        assert_eq!(node.as_u32(), 0);
+        assert_eq!(builder.data.nodes.len(), 1);
+        assert_eq!(builder.data.nodes.capacity(), original_capacity);
+    }
+
+    #[test]
+    fn prepared_insert_rejects_wrong_and_stale_capacity_plans_without_mutation() {
+        let (provenance_arena, provenance) = test_provenance_fixture();
+        let mut builder = CanonicalSceneBuilder::try_new(
+            SceneSpace::unknown(),
+            ExtensionSchemaSnapshot::empty(),
+            provenance_arena,
+            provenance,
+            DerivedAbsenceReason::NotProvided,
+        )
+        .expect("scene builder fixture should allocate");
+        let wrong = builder
+            .collection_capacity_plan(CanonicalSceneCollection::Materials)
+            .expect("material insertion should have a capacity plan");
+        let wrong_error = match builder.prepare_push_node(root_node(provenance), wrong) {
+            Ok(_) => panic!("a material capacity plan must not prepare a node"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            wrong_error,
+            CanonicalSceneBuildError::CapacityPlanCollectionMismatch {
+                expected: CanonicalSceneCollection::Nodes,
+                actual: CanonicalSceneCollection::Materials,
+            }
+        );
+        assert!(builder.data.nodes.is_empty());
+
+        let stale = builder
+            .collection_capacity_plan(CanonicalSceneCollection::Nodes)
+            .expect("node insertion should have a capacity plan");
+        builder
+            .try_push_node(root_node(provenance))
+            .expect("intervening insertion should succeed");
+        let stale_error = match builder.prepare_push_node(root_node(provenance), stale) {
+            Ok(_) => panic!("a stale capacity plan must not prepare a node"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            stale_error,
+            CanonicalSceneBuildError::CapacityPlan {
+                collection: CanonicalSceneCollection::Nodes,
+                cause: baozi_operation::CapacityPlanError::StalePlan { .. },
+            }
+        ));
+        assert_eq!(builder.data.nodes.len(), 1);
+    }
+
+    #[test]
+    fn prepared_shared_insert_accounts_storage_and_publishes_only_at_commit() {
+        let (provenance_arena, provenance) = test_provenance_fixture();
+        let mut builder = CanonicalSceneBuilder::try_new(
+            SceneSpace::unknown(),
+            ExtensionSchemaSnapshot::empty(),
+            provenance_arena,
+            provenance,
+            DerivedAbsenceReason::NotProvided,
+        )
+        .expect("scene builder fixture should allocate");
+        let plan = builder
+            .collection_capacity_plan(CanonicalSceneCollection::Materials)
+            .expect("material insertion should have a capacity plan");
+        let admitted = plan
+            .envelope_delta_bytes()
+            .expect("material insertion envelope should fit");
+
+        let prepared = builder
+            .prepare_push_material(unlit_material(provenance), plan)
+            .expect("shared material insertion should prepare");
+        assert!(prepared.replaces_allocation());
+        assert!(prepared.retained_allocation_bytes() > 0);
+        assert!(prepared.retained_allocation_bytes() <= admitted);
+        drop(prepared);
+        assert!(builder.data.materials.is_empty());
+        assert_eq!(builder.data.materials.capacity(), 0);
+
+        let plan = builder
+            .collection_capacity_plan(CanonicalSceneCollection::Materials)
+            .expect("retry should have a fresh capacity plan");
+        let material = builder
+            .prepare_push_material(unlit_material(provenance), plan)
+            .expect("retry should prepare")
+            .commit();
+
+        assert_eq!(material.as_u32(), 0);
+        assert_eq!(builder.data.materials.len(), 1);
+    }
+
+    #[test]
+    fn underestimated_shared_storage_admission_preserves_the_live_collection() {
+        let (provenance_arena, provenance) = test_provenance_fixture();
+        let mut builder = CanonicalSceneBuilder::try_new(
+            SceneSpace::unknown(),
+            ExtensionSchemaSnapshot::empty(),
+            provenance_arena,
+            provenance,
+            DerivedAbsenceReason::NotProvided,
+        )
+        .expect("scene builder fixture should allocate");
+        let mut plan = builder
+            .collection_capacity_plan(CanonicalSceneCollection::Materials)
+            .expect("material insertion should have a capacity plan");
+        plan.prepared_value_bytes = 0;
+        let admitted = plan
+            .envelope_delta_bytes()
+            .expect("under-admitted replacement envelope should fit");
+
+        let error = match builder.prepare_push_material(unlit_material(provenance), plan) {
+            Ok(_) => panic!("under-admitted shared storage must not prepare"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(
+            error,
+            CanonicalSceneBuildError::PreparedAllocationUnderestimated {
+                collection: CanonicalSceneCollection::Materials,
+                admitted: actual_admitted,
+                actual,
+            } if actual_admitted == admitted && actual > admitted
+        ));
+        assert!(builder.data.materials.is_empty());
+        assert_eq!(builder.data.materials.capacity(), 0);
+    }
+
+    #[test]
+    fn failed_shared_value_preparation_does_not_grow_the_live_collection() {
+        let (provenance_arena, provenance) = test_provenance_fixture();
+        let mut builder = CanonicalSceneBuilder::try_new(
+            SceneSpace::unknown(),
+            ExtensionSchemaSnapshot::empty(),
+            provenance_arena,
+            provenance,
+            DerivedAbsenceReason::NotProvided,
+        )
+        .expect("scene builder fixture should allocate");
+        let plan = builder
+            .collection_capacity_plan(CanonicalSceneCollection::Materials)
+            .expect("material insertion should have a capacity plan");
+        let material = unlit_material(provenance);
+        fail_next_allocation_for_test();
+
+        let error = match builder.prepare_push_material(material, plan) {
+            Ok(_) => panic!("the injected shared allocation failure must abort preparation"),
+            Err(error) => error,
+        };
+
+        assert_eq!(
+            error,
+            CanonicalSceneBuildError::AllocationFailed {
+                collection: CanonicalSceneCollection::Materials,
+            }
+        );
+        assert!(builder.data.materials.is_empty());
+        assert_eq!(builder.data.materials.capacity(), 0);
     }
 
     #[test]

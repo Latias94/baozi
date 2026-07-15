@@ -411,7 +411,7 @@ pub(crate) fn try_publish_coupled<S, R, E>(
     .map(|(scene, ())| scene)
 }
 
-fn try_publish_coupled_with<S, C, R, E, F>(
+pub(crate) fn try_publish_coupled_with<S, C, R, E, F>(
     scene: S,
     companion: C,
     reservation: R,

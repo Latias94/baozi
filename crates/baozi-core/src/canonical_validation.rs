@@ -29,7 +29,7 @@ use crate::shared_storage::SharedStorage;
 use crate::validation_control::{
     NoopSceneValidationControl, SCENE_VALIDATION_POLL_INTERVAL, SceneCanonicalCounts,
     SceneFootprint, SceneReservationKind, SceneValidationControl, SceneValidationLimits,
-    SceneValidationStats, SceneValidationWork, try_publish_coupled,
+    SceneValidationStats, SceneValidationWork, try_publish_coupled, try_publish_coupled_with,
 };
 use baozi_operation::CapacityPlan;
 use std::error::Error;
@@ -372,6 +372,25 @@ impl<R> CanonicalValidationSuccess<R> {
             canonical_output,
         } = self;
         try_publish_coupled(scene, canonical_output, publish_reservation)
+    }
+
+    pub(crate) fn try_publish_with_companion<C, E, F>(
+        self,
+        companion: C,
+        publish_reservation: impl FnOnce(&mut R, &mut C) -> Result<(), E>,
+        finalize_failure: impl FnOnce(E, C) -> F,
+    ) -> Result<(CanonicalValidatedScene, C), F> {
+        let Self {
+            scene,
+            canonical_output,
+        } = self;
+        try_publish_coupled_with(
+            scene,
+            companion,
+            canonical_output,
+            publish_reservation,
+            finalize_failure,
+        )
     }
 }
 
@@ -2514,7 +2533,8 @@ mod tests {
         AttributeSemantic, ComponentType, CustomAttributeSemantic, Normalization,
         RegisteredPackedEncoding,
     };
-    use crate::canonical_scene::{CanonicalSceneBuilder, SceneBounds};
+    use crate::canonical_scene::SceneBounds;
+    use crate::canonical_scene::builder::CanonicalSceneBuilder;
     use crate::deform::{
         Influence, InfluenceRows, MorphDelta, MorphTargetDefinition, PrimitiveMorphTarget, Skin,
         SkinMatrixSpaces,
@@ -3628,6 +3648,61 @@ mod tests {
             Err(error) => error,
         };
         assert_eq!(error, "publication rejected");
+        assert_eq!(control.live_bytes(), 0);
+    }
+
+    #[test]
+    fn publication_success_returns_the_canonical_scene_with_its_companion() {
+        let mut control = TestControl::new();
+        let success = validate_canonical_scene_with(
+            draft_with_children(&[&[]]),
+            SceneValidationLimits::default(),
+            &mut control,
+        )
+        .expect("valid input should reach the publication boundary");
+        assert!(control.live_bytes() > 0);
+
+        let (scene, companion) = success
+            .try_publish_with_companion(
+                vec!["staged"],
+                |_reservation, companion| {
+                    companion.push("published");
+                    Ok::<(), ()>(())
+                },
+                |_error, _companion| unreachable!("publication should succeed"),
+            )
+            .expect("publication should return scene and companion together");
+
+        assert_eq!(scene.validation_stats().canonical_counts().nodes, 1);
+        assert_eq!(companion, ["staged", "published"]);
+        assert_eq!(control.live_bytes(), 0);
+    }
+
+    #[test]
+    fn publication_failure_finalizes_the_canonical_companion_before_rollback() {
+        let mut control = TestControl::new();
+        let success = validate_canonical_scene_with(
+            draft_with_children(&[&[]]),
+            SceneValidationLimits::default(),
+            &mut control,
+        )
+        .expect("valid input should reach the publication boundary");
+        assert!(control.live_bytes() > 0);
+
+        let failure = match success.try_publish_with_companion(
+            vec!["staged"],
+            |_reservation, companion| {
+                companion.push("attempted");
+                Err("publication rejected")
+            },
+            |error, companion| (error, companion),
+        ) {
+            Ok(_) => panic!("publication failure must not expose the canonical scene"),
+            Err(failure) => failure,
+        };
+
+        assert_eq!(failure.0, "publication rejected");
+        assert_eq!(failure.1, ["staged", "attempted"]);
         assert_eq!(control.live_bytes(), 0);
     }
 
