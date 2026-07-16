@@ -6,7 +6,8 @@ use crate::canonical_edit::{
     CanonicalNodeTransformEditStart,
 };
 use crate::deform::{
-    InfluenceRows, MorphTargetDefinition, PrimitiveMorphTarget, Skin, SkinMatrixSpaces,
+    CanonicalSkinDescriptor, InfluenceRows, MorphTargetDefinition, PrimitiveMorphTarget, Skin,
+    SkinMatrixSpaces,
 };
 use crate::derived::{Derived, DerivedAbsenceReason};
 use crate::entity::{AuthoredTransform, Camera, EntityName, Light};
@@ -901,7 +902,7 @@ mod tests {
         Attribute, AttributeBuffer, AttributeDomain, AttributeFormat, AttributePayload,
         AttributeSemantic, ComponentType, Normalization,
     };
-    use crate::deform::{Skin, SkinMatrixSpaces};
+    use crate::deform::SkinMatrixSpaces;
     use crate::derived::DerivedAbsenceReason;
     use crate::entity::{AuthoredTransform, Camera, CameraProjection, Light, LightKind};
     use crate::extension::ExtensionSchemaSnapshot;
@@ -1121,19 +1122,20 @@ mod tests {
                 .unwrap(),
             )
             .unwrap();
-        let skin = builder
+        let skin_id = builder
             .try_push_skin(
-                Skin::try_new(
+                CanonicalSkinDescriptor::try_new(
                     None,
-                    [root],
+                    [root_id],
                     [Mat4::IDENTITY],
-                    Some(root),
+                    Some(root_id),
                     SkinMatrixSpaces::canonical(),
                     provenance,
                 )
                 .unwrap(),
             )
             .unwrap();
+        let skin = SkinIndex::from_handle(builder.generation(), skin_id).unwrap();
         builder
             .try_push_mesh_instance(
                 MeshInstance::try_new(

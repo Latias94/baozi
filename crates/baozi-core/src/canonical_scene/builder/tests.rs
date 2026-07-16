@@ -7,6 +7,7 @@ use crate::provenance::{Provenance, test_provenance_fixture};
 use crate::scene_space::SceneSpace;
 
 mod material;
+mod skin;
 
 fn scene_builder() -> (CanonicalSceneBuilder, Provenance) {
     let (arena, provenance) = test_provenance_fixture();

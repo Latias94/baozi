@@ -19,7 +19,7 @@ use crate::canonical_scene::{CanonicalValidatedScene, Node, SceneBounds};
 use crate::canonical_validation::{
     CanonicalValidationError, CanonicalValidationLimit, validate_canonical_scene,
 };
-use crate::deform::{MorphTargetDefinition, Skin, SkinMatrixSpaces};
+use crate::deform::{CanonicalSkinDescriptor, MorphTargetDefinition, SkinMatrixSpaces};
 use crate::derived::{Derived, DerivedAbsenceReason, DerivedProducer};
 use crate::derived_input::{
     logical_mesh_bounds_input_stamp, primitive_bounds_input_stamp, scene_bounds_input_stamp,
@@ -33,7 +33,7 @@ use crate::geometry::{
     PrimitiveBounds, Topology,
 };
 use crate::identity::{
-    MaterialIndex, NodeId, NodeIndex, SceneGenerationId, SceneLookupError, TextureId,
+    MaterialIndex, NodeId, NodeIndex, SceneGenerationId, SceneLookupError, SkinIndex, TextureId,
 };
 use crate::image::{CanonicalTextureDescriptor, Image, Sampler};
 use crate::math::{Aabb, Color, Mat4, Quat, Vec3};

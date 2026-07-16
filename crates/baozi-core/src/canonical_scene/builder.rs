@@ -472,27 +472,49 @@ impl CanonicalSceneBuilder {
 
     pub(crate) fn try_push_skin(
         &mut self,
-        skin: crate::deform::Skin,
-    ) -> Result<SkinIndex, CanonicalSceneBuildError> {
+        descriptor: CanonicalSkinDescriptor,
+    ) -> Result<SkinId, CanonicalSceneBuildError> {
         let plan = self.collection_capacity_plan(CanonicalSceneCollection::Skins)?;
-        self.prepare_push_skin(skin, plan)
+        self.prepare_push_skin(descriptor, plan)
             .map(CanonicalPreparedSceneInsert::commit)
     }
 
     pub(crate) fn prepare_push_skin(
         &mut self,
+        descriptor: CanonicalSkinDescriptor,
+        plan: CanonicalSceneCapacityPlan,
+    ) -> Result<impl CanonicalPreparedSceneInsert<Id = SkinId> + '_, CanonicalSceneBuildError> {
+        let skin = descriptor.resolve(self.data.generation, self.data.nodes.len())?;
+        self.prepare_resolved_skin(skin, plan)
+    }
+
+    fn prepare_resolved_skin(
+        &mut self,
         skin: Skin,
         plan: CanonicalSceneCapacityPlan,
-    ) -> Result<impl CanonicalPreparedSceneInsert<Id = SkinIndex> + '_, CanonicalSceneBuildError>
-    {
+    ) -> Result<
+        PreparedCanonicalSceneInsert<'_, SharedStorage<Skin>, SkinId>,
+        CanonicalSceneBuildError,
+    > {
         let index = SkinIndex::try_from(self.data.skins.len())?;
+        let id = index.handle(self.data.generation);
         prepare_shared_insert(
             &mut self.data.skins,
             skin,
-            index,
+            id,
             plan,
             CanonicalSceneCollection::Skins,
         )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn try_push_skin_unchecked_for_test(
+        &mut self,
+        skin: Skin,
+    ) -> Result<SkinId, CanonicalSceneBuildError> {
+        let plan = self.collection_capacity_plan(CanonicalSceneCollection::Skins)?;
+        self.prepare_resolved_skin(skin, plan)
+            .map(CanonicalPreparedSceneInsert::commit)
     }
 
     pub(crate) fn try_push_animation_clip(

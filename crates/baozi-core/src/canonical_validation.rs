@@ -2538,8 +2538,8 @@ mod tests {
     use crate::canonical_scene::SceneBounds;
     use crate::canonical_scene::builder::CanonicalSceneBuilder;
     use crate::deform::{
-        Influence, InfluenceRows, MorphDelta, MorphTargetDefinition, PrimitiveMorphTarget, Skin,
-        SkinMatrixSpaces,
+        CanonicalSkinDescriptor, Influence, InfluenceRows, MorphDelta, MorphTargetDefinition,
+        PrimitiveMorphTarget, Skin, SkinMatrixSpaces,
     };
     use crate::derived::{Derived, DerivedAbsenceReason, DerivedProducer, InputStamp};
     use crate::derived_input::{
@@ -3053,6 +3053,7 @@ mod tests {
             .try_push_node_unchecked_for_test(node(provenance, []))
             .unwrap();
         builder.set_root_unchecked_for_test(root);
+        let root_id = root.handle(builder.generation());
         let influence_count_u32 =
             u32::try_from(influence_count).expect("test influence count should fit");
         let influences = InfluenceRows::try_new(
@@ -3093,11 +3094,11 @@ mod tests {
                 .unwrap(),
             )
             .unwrap();
-        let skin = builder
+        let skin_id = builder
             .try_push_skin(
-                Skin::try_new(
+                CanonicalSkinDescriptor::try_new(
                     None,
-                    [root],
+                    [root_id],
                     [Mat4::IDENTITY],
                     None,
                     SkinMatrixSpaces::canonical(),
@@ -3106,6 +3107,7 @@ mod tests {
                 .unwrap(),
             )
             .unwrap();
+        let skin = SkinIndex::from_handle(builder.generation(), skin_id).unwrap();
         for _ in 0..instance_count {
             builder
                 .try_push_mesh_instance(
@@ -4646,8 +4648,8 @@ mod tests {
             )
             .unwrap();
         builder
-            .try_push_skin(
-                Skin::try_new(
+            .try_push_skin_unchecked_for_test(
+                Skin::try_new_unchecked_references_for_test(
                     None,
                     [NodeIndex::from_u32(18)],
                     [Mat4::IDENTITY],
@@ -5184,14 +5186,15 @@ mod tests {
             .try_push_node_unchecked_for_test(node(provenance, []))
             .unwrap();
         builder.set_root_unchecked_for_test(root);
+        let root_id = root.handle(builder.generation());
         let mesh = builder
             .try_push_logical_mesh(mesh_with_influences_and_two_morphs(provenance))
             .unwrap();
-        let skin = builder
+        let skin_id = builder
             .try_push_skin(
-                Skin::try_new(
+                CanonicalSkinDescriptor::try_new(
                     None,
-                    [root],
+                    [root_id],
                     [Mat4::IDENTITY],
                     None,
                     SkinMatrixSpaces::canonical(),
@@ -5200,6 +5203,7 @@ mod tests {
                 .unwrap(),
             )
             .unwrap();
+        let skin = SkinIndex::from_handle(builder.generation(), skin_id).unwrap();
         let instance = builder
             .try_push_mesh_instance(
                 MeshInstance::try_new(
@@ -5444,7 +5448,7 @@ mod tests {
         let mut changed_skin = draft_with_shared_skinned_instances(1, 1);
         let provenance = changed_skin.data.skins[0].as_ref().provenance();
         changed_skin.data.skins[0] = SharedStorage::try_new(
-            Skin::try_new(
+            Skin::try_new_unchecked_references_for_test(
                 None,
                 [NodeIndex::from_u32(0)],
                 [Mat4::IDENTITY],

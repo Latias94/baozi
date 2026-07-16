@@ -1,6 +1,9 @@
 use crate::attribute::{AttributeBuffer, AttributePayload, AttributePayloadError};
 use crate::entity::EntityName;
-use crate::identity::{MorphTargetLocalIndex, NodeIndex};
+use crate::identity::{
+    MorphTargetLocalIndex, NodeId, NodeIndex, SceneEntityKind, SceneGenerationId, SceneLookupError,
+    validate_storage_index,
+};
 use crate::math::Mat4;
 use crate::provenance::Provenance;
 use baozi_operation::CapacityPlan;
@@ -496,27 +499,23 @@ impl std::fmt::Debug for Skin {
 }
 
 impl Skin {
-    pub(crate) fn try_new<Joints, InverseBinds>(
+    fn try_from_prepared_parts(
         name: Option<EntityName>,
-        joints: Joints,
-        inverse_bind_matrices: InverseBinds,
+        joints: Vec<NodeIndex>,
+        inverse_bind_matrices: Vec<Mat4>,
         skeleton_root_hint: Option<NodeIndex>,
         matrix_spaces: SkinMatrixSpaces,
         provenance: Provenance,
-    ) -> Result<Self, SkinError>
-    where
-        Joints: IntoIterator<Item = NodeIndex>,
-        InverseBinds: IntoIterator<Item = Mat4>,
-    {
-        let joints = try_collect_deform(
-            joints,
+    ) -> Result<Self, SkinError> {
+        preflight_deform_collection::<NodeIndex>(
             DeformBuildResource::SkinJoints,
+            joints.len(),
             MAX_SKIN_JOINTS,
             MAX_DEFORM_COLLECTION_BYTES,
         )?;
-        let inverse_bind_matrices = try_collect_deform(
-            inverse_bind_matrices,
+        preflight_deform_collection::<Mat4>(
             DeformBuildResource::SkinInverseBindMatrices,
+            inverse_bind_matrices.len(),
             MAX_SKIN_JOINTS,
             MAX_DEFORM_COLLECTION_BYTES,
         )?;
@@ -571,6 +570,41 @@ impl Skin {
         })
     }
 
+    #[cfg(test)]
+    pub(crate) fn try_new_unchecked_references_for_test<Joints, InverseBinds>(
+        name: Option<EntityName>,
+        joints: Joints,
+        inverse_bind_matrices: InverseBinds,
+        skeleton_root_hint: Option<NodeIndex>,
+        matrix_spaces: SkinMatrixSpaces,
+        provenance: Provenance,
+    ) -> Result<Self, SkinError>
+    where
+        Joints: IntoIterator<Item = NodeIndex>,
+        InverseBinds: IntoIterator<Item = Mat4>,
+    {
+        let joints = try_collect_deform(
+            joints,
+            DeformBuildResource::SkinJoints,
+            MAX_SKIN_JOINTS,
+            MAX_DEFORM_COLLECTION_BYTES,
+        )?;
+        let inverse_bind_matrices = try_collect_deform(
+            inverse_bind_matrices,
+            DeformBuildResource::SkinInverseBindMatrices,
+            MAX_SKIN_JOINTS,
+            MAX_DEFORM_COLLECTION_BYTES,
+        )?;
+        Self::try_from_prepared_parts(
+            name,
+            joints,
+            inverse_bind_matrices,
+            skeleton_root_hint,
+            matrix_spaces,
+            provenance,
+        )
+    }
+
     pub const fn name(&self) -> Option<&EntityName> {
         self.name.as_ref()
     }
@@ -597,6 +631,119 @@ impl Skin {
 
     pub const fn retained_allocation_bytes(&self) -> usize {
         self.retained_allocation_bytes
+    }
+}
+
+/// Qualified, move-only input for one canonical skin.
+///
+/// Joint generations are summarized while compact indexes are collected.
+/// [`Self::resolve`] verifies every generation before any storage range.
+#[derive(Debug, PartialEq)]
+pub(crate) struct CanonicalSkinDescriptor {
+    candidate: Skin,
+    first_joint_generation: Option<SceneGenerationId>,
+    first_different_joint_generation: Option<SceneGenerationId>,
+    skeleton_root_generation: Option<SceneGenerationId>,
+}
+
+impl CanonicalSkinDescriptor {
+    pub(crate) fn try_new<Joints, InverseBinds>(
+        name: Option<EntityName>,
+        joints: Joints,
+        inverse_bind_matrices: InverseBinds,
+        skeleton_root_hint: Option<NodeId>,
+        matrix_spaces: SkinMatrixSpaces,
+        provenance: Provenance,
+    ) -> Result<Self, SkinError>
+    where
+        Joints: IntoIterator<Item = NodeId>,
+        InverseBinds: IntoIterator<Item = Mat4>,
+    {
+        let mut first_joint_generation = None;
+        let mut first_different_joint_generation = None;
+        let joints = try_collect_deform(
+            joints.into_iter().map(|joint| {
+                let generation = joint.generation();
+                match first_joint_generation {
+                    None => first_joint_generation = Some(generation),
+                    Some(first)
+                        if generation != first && first_different_joint_generation.is_none() =>
+                    {
+                        first_different_joint_generation = Some(generation);
+                    }
+                    Some(_) => {}
+                }
+                NodeIndex::from_u32(joint.index())
+            }),
+            DeformBuildResource::SkinJoints,
+            MAX_SKIN_JOINTS,
+            MAX_DEFORM_COLLECTION_BYTES,
+        )?;
+        let inverse_bind_matrices = try_collect_deform(
+            inverse_bind_matrices,
+            DeformBuildResource::SkinInverseBindMatrices,
+            MAX_SKIN_JOINTS,
+            MAX_DEFORM_COLLECTION_BYTES,
+        )?;
+        let skeleton_root_generation = skeleton_root_hint.map(NodeId::generation);
+        let skeleton_root_hint = skeleton_root_hint.map(|root| NodeIndex::from_u32(root.index()));
+        let candidate = Skin::try_from_prepared_parts(
+            name,
+            joints,
+            inverse_bind_matrices,
+            skeleton_root_hint,
+            matrix_spaces,
+            provenance,
+        )?;
+        Ok(Self {
+            candidate,
+            first_joint_generation,
+            first_different_joint_generation,
+            skeleton_root_generation,
+        })
+    }
+
+    pub(crate) fn resolve(
+        self,
+        expected_generation: SceneGenerationId,
+        node_count: usize,
+    ) -> Result<Skin, SceneLookupError> {
+        let Self {
+            candidate,
+            first_joint_generation,
+            first_different_joint_generation,
+            skeleton_root_generation,
+        } = self;
+
+        let first_joint_mismatch = match first_joint_generation {
+            Some(first) if first != expected_generation => Some(first),
+            Some(_) => first_different_joint_generation,
+            None => None,
+        };
+        if let Some(actual) = first_joint_mismatch {
+            return Err(SceneLookupError::GenerationMismatch {
+                kind: SceneEntityKind::Node,
+                expected: expected_generation,
+                actual,
+            });
+        }
+        if let Some(actual) = skeleton_root_generation
+            && actual != expected_generation
+        {
+            return Err(SceneLookupError::GenerationMismatch {
+                kind: SceneEntityKind::Node,
+                expected: expected_generation,
+                actual,
+            });
+        }
+
+        for &joint in &candidate.joints {
+            validate_storage_index(joint, node_count)?;
+        }
+        if let Some(root) = candidate.skeleton_root_hint {
+            validate_storage_index(root, node_count)?;
+        }
+        Ok(candidate)
     }
 }
 
@@ -1102,6 +1249,14 @@ mod tests {
         NodeIndex::from_u32(index)
     }
 
+    fn generation() -> SceneGenerationId {
+        SceneGenerationId::allocate().expect("generation space should remain available")
+    }
+
+    fn node_id(generation: SceneGenerationId, index: u32) -> NodeId {
+        NodeId::new(generation, index)
+    }
+
     fn f32x3_format() -> AttributeFormat {
         AttributeFormat::new(ComponentType::F32, 3, Normalization::None, None).unwrap()
     }
@@ -1250,8 +1405,9 @@ mod tests {
     #[test]
     fn skin_requires_exactly_one_finite_inverse_bind_per_joint() {
         let (_arena, provenance) = test_provenance_fixture();
-        let joint = node_index(0);
-        let mismatch = Skin::try_new(
+        let generation = generation();
+        let joint = node_id(generation, 0);
+        let mismatch = CanonicalSkinDescriptor::try_new(
             Some(EntityName::try_new("armature").expect("test name should be valid")),
             vec![joint],
             Vec::new(),
@@ -1270,7 +1426,7 @@ mod tests {
         let mut non_finite = Mat4::IDENTITY;
         non_finite.cols[0][0] = f32::NAN;
         assert_eq!(
-            Skin::try_new(
+            CanonicalSkinDescriptor::try_new(
                 None,
                 vec![joint],
                 vec![non_finite],
@@ -1281,7 +1437,7 @@ mod tests {
             Err(SkinError::NonFiniteInverseBindMatrix { joint: 0 })
         );
 
-        let skin = Skin::try_new(
+        let skin = CanonicalSkinDescriptor::try_new(
             Some(EntityName::try_new("armature").expect("test name should be valid")),
             vec![joint],
             vec![Mat4::IDENTITY],
@@ -1289,10 +1445,12 @@ mod tests {
             SkinMatrixSpaces::canonical(),
             provenance,
         )
+        .unwrap()
+        .resolve(generation, 1)
         .unwrap();
         assert_eq!(skin.name().map(EntityName::as_str), Some("armature"));
-        assert_eq!(skin.joints(), &[joint]);
-        assert_eq!(skin.skeleton_root_hint(), Some(joint));
+        assert_eq!(skin.joints(), &[node_index(0)]);
+        assert_eq!(skin.skeleton_root_hint(), Some(node_index(0)));
         assert_eq!(skin.provenance(), provenance);
     }
 
@@ -1300,13 +1458,23 @@ mod tests {
     fn public_debug_output_hides_storage_indices() {
         let (_arena, provenance) = test_provenance_fixture();
         let private_index = 4_294_967_291;
-        let skin = Skin::try_new(
+        let generation = generation();
+        let joint = node_id(generation, private_index);
+        let skin = CanonicalSkinDescriptor::try_new(
             None,
-            vec![node_index(private_index)],
+            vec![joint],
             vec![Mat4::IDENTITY],
-            Some(node_index(private_index)),
+            Some(joint),
             SkinMatrixSpaces::canonical(),
             provenance,
+        )
+        .unwrap()
+        .resolve(
+            generation,
+            usize::try_from(private_index)
+                .unwrap()
+                .checked_add(1)
+                .unwrap(),
         )
         .unwrap();
         let target =
@@ -1517,13 +1685,16 @@ mod tests {
             .expect("one bounded influence row should be admitted");
         assert!(rows.retained_allocation_bytes() < source_row_bytes);
 
+        let generation = generation();
         let mut joints = Vec::with_capacity(1_024);
-        joints.push(node_index(0));
+        joints.push(node_id(generation, 0));
         let mut inverse_binds = Vec::with_capacity(1_024);
         inverse_binds.push(Mat4::IDENTITY);
-        let source_skin_bytes = joints.capacity() * std::mem::size_of::<NodeIndex>()
-            + inverse_binds.capacity() * std::mem::size_of::<Mat4>();
-        let skin = Skin::try_new(
+        let hostile_joint_capacity = joints.capacity();
+        let hostile_inverse_bind_capacity = inverse_binds.capacity();
+        let source_skin_bytes = hostile_joint_capacity * std::mem::size_of::<NodeId>()
+            + hostile_inverse_bind_capacity * std::mem::size_of::<Mat4>();
+        let descriptor = CanonicalSkinDescriptor::try_new(
             Some(EntityName::try_new("armature").expect("test name should be valid")),
             joints,
             inverse_binds,
@@ -1532,6 +1703,13 @@ mod tests {
             test_provenance_fixture().1,
         )
         .expect("one bounded skin joint should be admitted");
+        assert!(descriptor.candidate.joints.capacity() < hostile_joint_capacity);
+        assert!(
+            descriptor.candidate.inverse_bind_matrices.capacity() < hostile_inverse_bind_capacity
+        );
+        let skin = descriptor.resolve(generation, 1).unwrap();
+        assert!(skin.joints.capacity() < hostile_joint_capacity);
+        assert!(skin.inverse_bind_matrices.capacity() < hostile_inverse_bind_capacity);
         assert!(skin.retained_allocation_bytes() < source_skin_bytes);
 
         let mut dense_values = Vec::with_capacity(1_024);
@@ -1570,9 +1748,9 @@ mod tests {
 
         let (_arena, provenance) = test_provenance_fixture();
         assert!(matches!(
-            Skin::try_new(
+            CanonicalSkinDescriptor::try_new(
                 None,
-                SizeHintOnly::<NodeIndex>::new(MAX_SKIN_JOINTS + 1),
+                SizeHintOnly::<NodeId>::new(MAX_SKIN_JOINTS + 1),
                 std::iter::empty(),
                 None,
                 SkinMatrixSpaces::canonical(),
