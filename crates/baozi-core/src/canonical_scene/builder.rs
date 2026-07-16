@@ -94,12 +94,11 @@ impl<T, Id> CanonicalPreparedSceneInsert for PreparedCanonicalSceneInsert<'_, T,
     }
 }
 
-pub(crate) mod node_batch;
 #[cfg(test)]
 mod tests;
 
 #[cfg(test)]
-fn assert_generation_mismatch_for_test(
+pub(in crate::canonical_scene) fn assert_generation_mismatch_for_test(
     error: CanonicalSceneBuildError,
     expected_kind: crate::identity::SceneEntityKind,
 ) {

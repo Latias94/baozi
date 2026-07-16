@@ -9,9 +9,7 @@ use crate::deform::{
     InfluenceRows, MorphTargetDefinition, PrimitiveMorphTarget, Skin, SkinMatrixSpaces,
 };
 use crate::derived::{Derived, DerivedAbsenceReason};
-use crate::entity::{
-    AuthoredTransform, Camera, EntityName, Light, Node, NodeError, NodePreparedParts,
-};
+use crate::entity::{AuthoredTransform, Camera, EntityName, Light};
 use crate::extension::{
     ControlledRetainedFootprintError, ExtensionEntry, ExtensionEntryClassification,
     ExtensionEntryValidationError, ExtensionSchemaSnapshot,
@@ -41,6 +39,10 @@ use crate::validation_control::{
 use baozi_operation::{CapacityPlan, CapacityPlanError};
 use std::convert::Infallible;
 use thiserror::Error;
+
+mod node;
+pub(crate) use node::batch::CanonicalNodeDescriptor;
+pub use node::{Node, NodeError};
 
 pub(crate) const MAX_SCENE_METADATA_ENTRIES: usize = 4_096;
 
@@ -887,7 +889,6 @@ impl CanonicalValidatedScene {
 
 #[cfg(test)]
 mod tests {
-    use super::builder::node_batch::CanonicalNodeDescriptor;
     use super::builder::{CanonicalPreparedSceneInsert, CanonicalSceneBuilder};
     use super::*;
     use crate::animation::{AnimationLimits, AnimationTimeDomain};
@@ -902,7 +903,7 @@ mod tests {
     };
     use crate::deform::{Skin, SkinMatrixSpaces};
     use crate::derived::DerivedAbsenceReason;
-    use crate::entity::{AuthoredTransform, Camera, CameraProjection, Light, LightKind, Node};
+    use crate::entity::{AuthoredTransform, Camera, CameraProjection, Light, LightKind};
     use crate::extension::ExtensionSchemaSnapshot;
     use crate::geometry::{
         IndexStream, LogicalMeshBounds, MeshPrimitive, MorphBoundsPolicy, PrimitiveBounds, Topology,

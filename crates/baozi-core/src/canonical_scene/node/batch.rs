@@ -1,5 +1,16 @@
-use super::*;
-use crate::identity::SceneStorageIndex;
+use super::{Node, NodeError, NodePreparedParts};
+use crate::canonical_scene::builder::CanonicalSceneBuilder;
+use crate::canonical_scene::{
+    CanonicalPreparedAllocation, CanonicalSceneBuildError, CanonicalSceneCollection,
+};
+use crate::entity::{AuthoredTransform, EntityName};
+use crate::extension::ExtensionEntry;
+use crate::identity::{
+    CameraId, CameraIndex, LightId, LightIndex, NodeId, NodeIndex, SceneGenerationId,
+    SceneLookupError, SceneStorageIndex,
+};
+use crate::provenance::ProvenanceAttachments;
+use baozi_operation::{CapacityPlan, CapacityPlanError};
 use std::convert::Infallible;
 use std::fmt;
 use std::marker::PhantomData;
@@ -322,7 +333,7 @@ impl<'batch, C> CanonicalNodeBatch<'batch, C> {
     pub(crate) fn initialize_node(
         &mut self,
         slot: CanonicalNodeSlot<'batch>,
-        descriptor: CanonicalNodeDescriptor<'batch>,
+        descriptor: crate::canonical_scene::CanonicalNodeDescriptor<'batch>,
     ) -> Result<(), CanonicalSceneBuildError> {
         self.validate_slot(slot)?;
         let expected = self.staging.nodes.len();

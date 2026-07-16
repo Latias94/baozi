@@ -1,5 +1,14 @@
+use super::super::NodePayload;
 use super::*;
-use crate::provenance::{Provenance, test_provenance_fixture};
+use crate::canonical_validation::validate_canonical_scene;
+use crate::derived::DerivedAbsenceReason;
+use crate::extension::{ExtensionEntry, ExtensionSchemaSnapshot, ExtensionValue};
+use crate::provenance::{
+    Provenance, ProvenanceAttachments, test_provenance_fixture, test_provenance_pair_fixture,
+};
+use crate::scene_space::SceneSpace;
+use crate::shared_storage::SharedStorage;
+use crate::validation_control::SceneValidationLimits;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
@@ -80,6 +89,36 @@ fn standalone_node(provenance: Provenance) -> Node {
         [],
     )
     .expect("standalone node fixture should allocate")
+}
+
+fn node_nested_allocation_oracle(
+    name: Option<&EntityName>,
+    children: &CanonicalPreparedNodeChildren<'_>,
+    provenance: &ProvenanceAttachments,
+    extensions: &Vec<ExtensionEntry>,
+) -> u64 {
+    let name_bytes = name.map_or(0, EntityName::capacity);
+    let child_bytes = children
+        .indices
+        .capacity()
+        .checked_mul(std::mem::size_of::<NodeIndex>())
+        .unwrap();
+    let extension_storage_bytes = extensions
+        .capacity()
+        .checked_mul(std::mem::size_of::<ExtensionEntry>())
+        .unwrap();
+    let extension_value_bytes = extensions.iter().fold(0_usize, |total, entry| {
+        total
+            .checked_add(entry.value().retained_allocation_bytes())
+            .unwrap()
+    });
+    let bytes = name_bytes
+        .checked_add(child_bytes)
+        .and_then(|total| total.checked_add(provenance.retained_allocation_bytes()))
+        .and_then(|total| total.checked_add(extension_storage_bytes))
+        .and_then(|total| total.checked_add(extension_value_bytes))
+        .unwrap();
+    u64::try_from(bytes).unwrap()
 }
 
 struct LyingNodeSlots<'batch, const N: usize> {
@@ -302,6 +341,189 @@ fn prepared_node_batch_separates_footprints_and_adopts_the_staging_vec() {
 }
 
 #[test]
+fn complex_node_batch_footprint_matches_retained_and_validation_accounting() {
+    let (provenance_arena, [first, second]) = test_provenance_pair_fixture();
+    let mut builder = CanonicalSceneBuilder::try_new(
+        SceneSpace::unknown(),
+        ExtensionSchemaSnapshot::empty(),
+        provenance_arena,
+        first,
+        DerivedAbsenceReason::NotProvided,
+    )
+    .expect("complex node footprint fixture should allocate");
+    let extension = ExtensionEntry::descriptive_metadata(
+        crate::namespaced::NamespacedName::new("test:node-footprint").unwrap(),
+        ExtensionValue::try_string("retained extension payload").unwrap(),
+        first,
+    );
+    let attachments = ProvenanceAttachments::try_from_iter([first, second]).unwrap();
+    let plan = builder.node_batch_plan(2).unwrap();
+    let mut expected_nested_payload_bytes = None;
+    let mut expected_root_children_storage = None;
+    let prepared = builder
+        .prepare_node_batch(plan, |batch| {
+            let root = batch.slot(0)?;
+            let child = batch.slot(1)?;
+            let root_children_plan = batch.node_children_plan(1)?;
+            let root_children = batch.prepare_node_children(root_children_plan, [child])?;
+            expected_root_children_storage = Some((
+                root_children.indices.as_ptr(),
+                root_children.indices.capacity(),
+            ));
+            let child_children_plan = batch.node_children_plan(0)?;
+            let child_children = batch.prepare_node_children(child_children_plan, [])?;
+            let root_name = EntityName::try_new("complex-root").unwrap();
+            let child_name = EntityName::try_new("child").unwrap();
+            let root_extensions = vec![extension];
+            let child_extensions = Vec::new();
+            let child_attachments = ProvenanceAttachments::from(second);
+            expected_nested_payload_bytes = Some(
+                node_nested_allocation_oracle(
+                    Some(&root_name),
+                    &root_children,
+                    &attachments,
+                    &root_extensions,
+                )
+                .checked_add(node_nested_allocation_oracle(
+                    Some(&child_name),
+                    &child_children,
+                    &child_attachments,
+                    &child_extensions,
+                ))
+                .unwrap(),
+            );
+            let root_descriptor = CanonicalNodeDescriptor::new(
+                Some(root_name),
+                AuthoredTransform::identity_trs(),
+                root_children,
+                None,
+                None,
+                attachments,
+                root_extensions,
+            );
+            let child_descriptor = CanonicalNodeDescriptor::new(
+                Some(child_name),
+                AuthoredTransform::identity_trs(),
+                child_children,
+                None,
+                None,
+                child_attachments,
+                child_extensions,
+            );
+            batch.initialize_node(root, root_descriptor)?;
+            batch.initialize_node(child, child_descriptor)?;
+            batch.set_root(root)
+        })
+        .expect("complex node batch should prepare");
+    let evidence = prepared.allocation_evidence();
+    prepared.commit();
+
+    let (expected_root_children_ptr, expected_root_children_capacity) =
+        expected_root_children_storage.unwrap();
+    let stored_root_children = &builder.data.nodes[0].payload.as_ref().children;
+    assert_eq!(stored_root_children.as_ptr(), expected_root_children_ptr);
+    assert_eq!(
+        stored_root_children.capacity(),
+        expected_root_children_capacity
+    );
+    assert_eq!(
+        builder.data.nodes[0].local_matrix(),
+        crate::math::Mat4::IDENTITY
+    );
+
+    let expected_collection_bytes = u64::try_from(
+        builder
+            .data
+            .nodes
+            .capacity()
+            .checked_mul(std::mem::size_of::<Node>())
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        evidence.collection_retained_allocation_bytes(),
+        expected_collection_bytes,
+        "batch collection evidence must equal retained Vec<Node> capacity"
+    );
+    let expected_value_storage_bytes =
+        u64::try_from(SharedStorage::<NodePayload>::checked_layout_footprint().unwrap())
+            .unwrap()
+            .checked_mul(u64::try_from(builder.data.nodes.len()).unwrap())
+            .unwrap();
+    assert_eq!(
+        evidence.value_storage_retained_allocation_bytes(),
+        expected_value_storage_bytes,
+        "batch value-storage evidence must contain only each SharedStorage outer allocation"
+    );
+    let expected_nested_payload_bytes = expected_nested_payload_bytes.unwrap();
+    assert_eq!(
+        evidence.nested_payload_retained_allocation_bytes(),
+        expected_nested_payload_bytes,
+        "batch nested evidence must equal independently measured NodePayload allocations"
+    );
+
+    let provenance_bytes = builder
+        .data
+        .provenance_arena
+        .as_ref()
+        .retained_footprint()
+        .unwrap()
+        .total_bytes();
+    let provenance_allocation_bytes = builder
+        .data
+        .provenance_arena
+        .checked_allocation_footprint()
+        .unwrap();
+    let scene_payload_bytes = builder
+        .data
+        .provenance
+        .checked_allocation_footprint()
+        .unwrap()
+        .checked_add(
+            builder
+                .data
+                .extension_schemas
+                .checked_allocation_footprint()
+                .unwrap(),
+        )
+        .and_then(|bytes| {
+            bytes.checked_add(
+                builder
+                    .data
+                    .metadata
+                    .checked_allocation_footprint()
+                    .unwrap(),
+            )
+        })
+        .unwrap();
+    let scene_bounds_bytes = builder
+        .data
+        .scene_bounds
+        .retained_producer_allocation_bytes()
+        .unwrap();
+    let expected_validation_bytes = expected_collection_bytes
+        .checked_add(expected_value_storage_bytes)
+        .and_then(|bytes| bytes.checked_add(expected_nested_payload_bytes))
+        .and_then(|bytes| bytes.checked_add(u64::try_from(provenance_bytes).unwrap()))
+        .and_then(|bytes| bytes.checked_add(u64::try_from(provenance_allocation_bytes).unwrap()))
+        .and_then(|bytes| bytes.checked_add(u64::try_from(scene_payload_bytes).unwrap()))
+        .and_then(|bytes| bytes.checked_add(u64::try_from(scene_bounds_bytes).unwrap()))
+        .unwrap();
+    let scene = validate_canonical_scene(
+        builder.finish_draft(),
+        SceneValidationLimits::default().with_max_canonical_bytes(expected_validation_bytes),
+    )
+    .expect("validator accounting must accept the exact complex node footprint");
+    assert_eq!(
+        scene
+            .validation_stats()
+            .footprint()
+            .accounted_payload_bytes(),
+        expected_validation_bytes
+    );
+}
+
+#[test]
 fn node_slots_and_root_enforce_batch_ownership_and_bounds() {
     let (mut builder, provenance) = scene_builder();
     let plan = builder.node_batch_plan(1).unwrap();
@@ -471,6 +693,34 @@ fn failed_or_dropped_preparation_leaves_the_builder_retryable() {
     assert_eq!(builder.data.root, None);
 
     prepare_two_node_tree(&mut builder, provenance).commit();
+    assert_eq!(builder.data.nodes.len(), 2);
+}
+
+#[test]
+fn second_node_shared_storage_failure_discards_batch_and_allows_retry() {
+    let (mut builder, provenance) = scene_builder();
+    let plan = builder.node_batch_plan(2).unwrap();
+    let error = builder
+        .prepare_node_batch(plan, |batch| {
+            let root = batch.slot(0)?;
+            let child = batch.slot(1)?;
+            batch.initialize_node(root, node_descriptor(batch, provenance, "root", [child]))?;
+            crate::shared_storage::fail_next_allocation_for_test();
+            batch.initialize_node(child, node_descriptor(batch, provenance, "child", []))?;
+            batch.set_root(root)
+        })
+        .unwrap_err();
+
+    assert_eq!(
+        error,
+        CanonicalSceneBuildError::Node(NodeError::PayloadAllocationFailed)
+    );
+    assert!(builder.data.nodes.is_empty());
+    assert_eq!(builder.data.nodes.capacity(), 0);
+    assert_eq!(builder.data.root, None);
+
+    let committed = prepare_two_node_tree(&mut builder, provenance).commit();
+    assert_eq!(committed.root().index(), 0);
     assert_eq!(builder.data.nodes.len(), 2);
 }
 

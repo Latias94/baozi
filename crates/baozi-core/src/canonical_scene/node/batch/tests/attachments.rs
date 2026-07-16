@@ -1,4 +1,5 @@
 use super::*;
+use crate::canonical_scene::builder::assert_generation_mismatch_for_test;
 use crate::canonical_validation::validate_canonical_scene;
 use crate::entity::{Camera, CameraProjection, Light, LightKind};
 use crate::identity::{CameraId, LightId, SceneEntityKind};

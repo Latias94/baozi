@@ -15,7 +15,7 @@ use crate::attribute::{
     AttributeSemantic, ComponentType, Normalization,
 };
 use crate::canonical_scene::builder::CanonicalSceneBuilder;
-use crate::canonical_scene::{CanonicalValidatedScene, SceneBounds};
+use crate::canonical_scene::{CanonicalValidatedScene, Node, SceneBounds};
 use crate::canonical_validation::{
     CanonicalValidationError, CanonicalValidationLimit, validate_canonical_scene,
 };
@@ -25,7 +25,7 @@ use crate::derived_input::{
     logical_mesh_bounds_input_stamp, primitive_bounds_input_stamp, scene_bounds_input_stamp,
 };
 use crate::entity::{
-    AuthoredTransform, AuthoredTransformKind, Camera, CameraProjection, Light, LightKind, Node,
+    AuthoredTransform, AuthoredTransformKind, Camera, CameraProjection, Light, LightKind,
 };
 use crate::extension::ExtensionSchemaSnapshot;
 use crate::geometry::{

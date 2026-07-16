@@ -285,11 +285,6 @@ pub enum AuthoredTransformError {
     ScaleNotFinite,
 }
 
-mod node;
-
-pub(crate) use node::NodePreparedParts;
-pub use node::{Node, NodeError};
-
 /// The supported camera projection category.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CameraProjectionKind {
@@ -623,7 +618,7 @@ fn owner_retained_bytes_controlled<E>(
         .ok_or(ControlledRetainedFootprintError::AccountingOverflow)
 }
 
-fn unwrap_uncontrolled_retained_footprint(
+pub(crate) fn unwrap_uncontrolled_retained_footprint(
     result: Result<usize, ControlledRetainedFootprintError<Infallible>>,
 ) -> Result<usize, EntityRetainedFootprintError> {
     match result {

@@ -2534,6 +2534,7 @@ mod tests {
         AttributeSemantic, ComponentType, CustomAttributeSemantic, Normalization,
         RegisteredPackedEncoding,
     };
+    use crate::canonical_scene::Node;
     use crate::canonical_scene::SceneBounds;
     use crate::canonical_scene::builder::CanonicalSceneBuilder;
     use crate::deform::{
@@ -2546,7 +2547,7 @@ mod tests {
         primitive_bounds_input_stamp, primitive_bounds_input_stamp_controlled,
         scene_bounds_input_stamp,
     };
-    use crate::entity::{AuthoredTransform, Node};
+    use crate::entity::AuthoredTransform;
     use crate::extension::{
         ExtensionBehaviorKind, ExtensionCardinality, ExtensionEntry, ExtensionEntryClassification,
         ExtensionInvalidationRule, ExtensionReferenceRule, ExtensionRemapRule, ExtensionSchema,

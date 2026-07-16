@@ -1,12 +1,12 @@
 use crate::canonical_scene::{
-    CanonicalSceneCollection, CanonicalSceneData, CanonicalValidatedScene, SceneBounds,
+    CanonicalSceneCollection, CanonicalSceneData, CanonicalValidatedScene, Node, SceneBounds,
 };
 use crate::canonical_validation::{
     CanonicalValidationError, CanonicalValidationFailure, CanonicalValidationLimit,
     validate_canonical_scene_data_with_initial_work,
 };
 use crate::derived::DerivedAbsenceReason;
-use crate::entity::{AuthoredTransform, Node};
+use crate::entity::AuthoredTransform;
 use crate::geometry::{
     ControlledLogicalMeshGenerationRebindError, LogicalMeshGenerationRebindError,
 };

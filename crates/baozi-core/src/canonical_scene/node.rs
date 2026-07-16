@@ -1,6 +1,4 @@
-#[cfg(test)]
-use super::try_collect_bounded;
-use super::{
+use crate::entity::{
     AuthoredTransform, EntityAllocation, EntityCollectionError, EntityName,
     EntityRetainedFootprintError, MAX_ENTITY_EXTENSION_ENTRIES, MAX_NODE_CHILDREN,
     unwrap_uncontrolled_retained_footprint,
@@ -38,27 +36,27 @@ pub struct Node {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct NodePreparedFootprint {
+struct NodePreparedFootprint {
     value_storage_bytes: u64,
     nested_payload_bytes: u64,
 }
 
-pub(crate) struct NodePreparedParts {
-    pub(crate) name: Option<EntityName>,
-    pub(crate) authored_transform: AuthoredTransform,
-    pub(crate) children: Vec<NodeIndex>,
-    pub(crate) camera: Option<CameraIndex>,
-    pub(crate) light: Option<LightIndex>,
-    pub(crate) provenance: ProvenanceAttachments,
-    pub(crate) extensions: Vec<ExtensionEntry>,
+struct NodePreparedParts {
+    name: Option<EntityName>,
+    authored_transform: AuthoredTransform,
+    children: Vec<NodeIndex>,
+    camera: Option<CameraIndex>,
+    light: Option<LightIndex>,
+    provenance: ProvenanceAttachments,
+    extensions: Vec<ExtensionEntry>,
 }
 
 impl NodePreparedFootprint {
-    pub(crate) const fn value_storage_bytes(self) -> u64 {
+    const fn value_storage_bytes(self) -> u64 {
         self.value_storage_bytes
     }
 
-    pub(crate) const fn nested_payload_bytes(self) -> u64 {
+    const fn nested_payload_bytes(self) -> u64 {
         self.nested_payload_bytes
     }
 }
@@ -86,7 +84,7 @@ impl Node {
         Self::try_from_payload(authored_transform, payload)
     }
 
-    pub(crate) fn try_from_prepared_parts(
+    fn try_from_prepared_parts(
         parts: NodePreparedParts,
     ) -> Result<(Self, NodePreparedFootprint), NodeError> {
         let NodePreparedParts {
@@ -114,7 +112,7 @@ impl Node {
         ))
     }
 
-    pub(crate) fn value_storage_layout_bytes() -> Result<u64, NodeError> {
+    fn value_storage_layout_bytes() -> Result<u64, NodeError> {
         SharedStorage::<NodePayload>::checked_layout_footprint()
             .map_err(|SharedStorageFootprintError::LayoutOverflow| {
                 NodeError::PayloadAccountingOverflow
@@ -314,6 +312,40 @@ fn node_payload_nested_allocation_bytes_controlled<E>(
         .ok_or(ControlledRetainedFootprintError::AccountingOverflow)
 }
 
+#[cfg(test)]
+fn try_collect_bounded<T>(
+    values: impl IntoIterator<Item = T>,
+    maximum: usize,
+    resource: EntityAllocation,
+) -> Result<Vec<T>, EntityCollectionError> {
+    let mut values = values.into_iter();
+    let (lower, upper) = values.size_hint();
+    if lower > maximum {
+        return Err(EntityCollectionError::LimitExceeded { resource, maximum });
+    }
+
+    let preflight = upper.filter(|count| *count <= maximum).unwrap_or(lower);
+    let mut collected = Vec::new();
+    if preflight > 0 {
+        collected
+            .try_reserve(preflight)
+            .map_err(|_| EntityCollectionError::AllocationFailed { resource })?;
+    }
+
+    for value in values.by_ref() {
+        if collected.len() == maximum {
+            return Err(EntityCollectionError::LimitExceeded { resource, maximum });
+        }
+        if collected.len() == collected.capacity() {
+            collected
+                .try_reserve(1)
+                .map_err(|_| EntityCollectionError::AllocationFailed { resource })?;
+        }
+        collected.push(value);
+    }
+    Ok(collected)
+}
+
 impl From<EntityCollectionError> for NodeError {
     fn from(error: EntityCollectionError) -> Self {
         match error {
@@ -328,5 +360,4 @@ impl From<EntityCollectionError> for NodeError {
     }
 }
 
-#[cfg(test)]
-mod tests;
+pub(super) mod batch;

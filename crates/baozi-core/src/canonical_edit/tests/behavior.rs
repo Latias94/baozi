@@ -1,5 +1,5 @@
 use super::*;
-use crate::canonical_scene::builder::node_batch::CanonicalNodeDescriptor;
+use crate::canonical_scene::CanonicalNodeDescriptor;
 
 fn base_color_binding(
     texture: TextureId,
