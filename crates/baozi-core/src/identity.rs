@@ -459,7 +459,7 @@ pub(crate) trait OwnerQualifiedHandle: Copy {
     ) -> Result<Self::StorageIndex, SceneLookupError>;
 }
 
-fn lookup_storage_index<T, I: SceneStorageIndex>(
+pub(crate) fn lookup_storage_index<T, I: SceneStorageIndex>(
     index: I,
     entities: &[T],
 ) -> Result<&T, SceneLookupError> {

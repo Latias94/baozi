@@ -79,8 +79,6 @@ fn fully_populated_scene() -> CanonicalValidatedScene {
         .expect("fully populated root batch should prepare")
         .commit();
     let root_id = committed_nodes.root();
-    let root = NodeIndex::from_handle(builder.generation(), root_id)
-        .expect("committed root should belong to the fixture generation");
 
     let image = builder
         .try_push_image(
@@ -159,21 +157,15 @@ fn fully_populated_scene() -> CanonicalValidatedScene {
             .expect("skin fixture"),
         )
         .expect("skin storage");
-    let skin = SkinIndex::from_handle(builder.generation(), skin_id)
-        .expect("fixture skin should belong to the builder generation");
     builder
-        .try_push_mesh_instance(
-            MeshInstance::try_new(
-                root,
-                logical_mesh,
-                Some(skin),
-                1,
-                None,
-                Vec::new(),
-                provenance,
-            )
-            .expect("mesh instance fixture"),
-        )
+        .try_push_mesh_instance(CanonicalMeshInstanceDescriptor::new(
+            root_id,
+            logical_mesh,
+            Some(skin_id),
+            None,
+            Vec::new(),
+            provenance,
+        ))
         .expect("mesh instance storage");
     builder
         .try_push_animation_clip(

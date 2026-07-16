@@ -29,11 +29,11 @@ use crate::entity::{
 };
 use crate::extension::ExtensionSchemaSnapshot;
 use crate::geometry::{
-    IndexStream, LogicalMesh, LogicalMeshBounds, MeshInstance, MeshPrimitive, MorphBoundsPolicy,
-    PrimitiveBounds, Topology,
+    CanonicalMeshInstanceDescriptor, IndexStream, LogicalMesh, LogicalMeshBounds, MeshPrimitive,
+    MorphBoundsPolicy, PrimitiveBounds, Topology,
 };
 use crate::identity::{
-    MaterialIndex, NodeId, NodeIndex, SceneGenerationId, SceneLookupError, SkinIndex, TextureId,
+    MaterialIndex, NodeId, NodeIndex, SceneGenerationId, SceneLookupError, TextureId,
 };
 use crate::image::{CanonicalTextureDescriptor, Image, Sampler};
 use crate::math::{Aabb, Color, Mat4, Quat, Vec3};

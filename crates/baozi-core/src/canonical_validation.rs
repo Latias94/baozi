@@ -2556,8 +2556,8 @@ mod tests {
         PackedAttributeEncodingSchema, PackedByteOrder,
     };
     use crate::geometry::{
-        IndexStream, LogicalMesh, LogicalMeshBounds, MeshInstance, MeshPrimitive,
-        MorphBoundsPolicy, PrimitiveBounds, Topology,
+        CanonicalMeshInstanceDescriptor, IndexStream, LogicalMesh, LogicalMeshBounds, MeshInstance,
+        MeshPrimitive, MorphBoundsPolicy, PrimitiveBounds, Topology,
     };
     use crate::identity::{
         CameraIndex, ImageIndex, LightIndex, LogicalMeshIndex, MaterialIndex, MeshInstanceIndex,
@@ -3107,13 +3107,16 @@ mod tests {
                 .unwrap(),
             )
             .unwrap();
-        let skin = SkinIndex::from_handle(builder.generation(), skin_id).unwrap();
         for _ in 0..instance_count {
             builder
-                .try_push_mesh_instance(
-                    MeshInstance::try_new(root, mesh, Some(skin), 0, None, Vec::new(), provenance)
-                        .unwrap(),
-                )
+                .try_push_mesh_instance(CanonicalMeshInstanceDescriptor::new(
+                    root_id,
+                    mesh,
+                    Some(skin_id),
+                    None,
+                    Vec::new(),
+                    provenance,
+                ))
                 .unwrap();
         }
         builder.finish_draft()
@@ -4634,12 +4637,11 @@ mod tests {
             ))
             .unwrap();
         builder
-            .try_push_mesh_instance(
-                MeshInstance::try_new(
+            .try_push_mesh_instance_unchecked_for_test(
+                MeshInstance::try_new_unchecked_references_for_test(
                     NodeIndex::from_u32(15),
                     LogicalMeshIndex::from_u32(16),
                     Some(SkinIndex::from_u32(17)),
-                    0,
                     None,
                     Vec::new(),
                     provenance,
@@ -5016,12 +5018,17 @@ mod tests {
         let root = builder
             .try_push_node_unchecked_for_test(node(provenance, []))
             .unwrap();
+        let root_id = root.handle(builder.generation());
         let logical_mesh = builder.try_push_logical_mesh(logical_mesh).unwrap();
         builder
-            .try_push_mesh_instance(
-                MeshInstance::try_new(root, logical_mesh, None, 0, None, Vec::new(), provenance)
-                    .unwrap(),
-            )
+            .try_push_mesh_instance(CanonicalMeshInstanceDescriptor::new(
+                root_id,
+                logical_mesh,
+                None,
+                None,
+                Vec::new(),
+                provenance,
+            ))
             .unwrap();
         builder.set_root_unchecked_for_test(root);
         let mut draft = builder.finish_draft();
@@ -5094,12 +5101,11 @@ mod tests {
             )
             .unwrap();
         builder
-            .try_push_mesh_instance(
-                MeshInstance::try_new(
+            .try_push_mesh_instance_unchecked_for_test(
+                MeshInstance::try_new_unchecked_references_for_test(
                     root,
                     LogicalMeshIndex::from_u32(logical_mesh_reference),
                     None,
-                    0,
                     None,
                     Vec::new(),
                     provenance,
@@ -5128,13 +5134,19 @@ mod tests {
             .try_push_node_unchecked_for_test(node(provenance, []))
             .unwrap();
         builder.set_root_unchecked_for_test(root);
+        let root_id = root.handle(builder.generation());
         let mesh = builder
             .try_push_logical_mesh(mesh_with_influences_and_two_morphs(provenance))
             .unwrap();
         builder
-            .try_push_mesh_instance(
-                MeshInstance::try_new(root, mesh, None, 2, None, Vec::new(), provenance).unwrap(),
-            )
+            .try_push_mesh_instance(CanonicalMeshInstanceDescriptor::new(
+                root_id,
+                mesh,
+                None,
+                None,
+                Vec::new(),
+                provenance,
+            ))
             .unwrap();
 
         validate_canonical_scene(builder.finish_draft(), SceneValidationLimits::default())
@@ -5203,14 +5215,14 @@ mod tests {
                 .unwrap(),
             )
             .unwrap();
+        let mesh = LogicalMeshIndex::from_handle(builder.generation(), mesh).unwrap();
         let skin = SkinIndex::from_handle(builder.generation(), skin_id).unwrap();
         let instance = builder
-            .try_push_mesh_instance(
-                MeshInstance::try_new(
+            .try_push_mesh_instance_unchecked_for_test(
+                MeshInstance::try_new_unchecked_references_for_test(
                     root,
                     mesh,
                     Some(skin),
-                    1,
                     Some(vec![0.5]),
                     Vec::new(),
                     provenance,
@@ -5218,6 +5230,7 @@ mod tests {
                 .unwrap(),
             )
             .unwrap();
+        let instance = MeshInstanceIndex::from_handle(builder.generation(), instance).unwrap();
         builder
             .try_push_animation_clip(
                 AnimationClip::try_new(

@@ -17,7 +17,8 @@ use crate::extension::{
     extension_entries_retained_allocation_bytes_controlled, validate_unique_extension_entry_keys,
 };
 use crate::geometry::{
-    GeometryBoundsError, IndexStream, LogicalMesh, LogicalMeshBounds, MeshInstance, MeshPrimitive,
+    CanonicalMeshInstanceDescriptor, CanonicalMeshInstanceResolveError, GeometryBoundsError,
+    IndexStream, LogicalMesh, LogicalMeshBounds, MeshInstance, MeshInstanceError, MeshPrimitive,
     PrimitiveBounds, PrimitiveCardinality, Topology, validate_aabb,
 };
 use crate::identity::{
@@ -252,6 +253,8 @@ pub(crate) enum CanonicalSceneBuildError {
     Reference(#[from] SceneLookupError),
     #[error(transparent)]
     Node(#[from] NodeError),
+    #[error(transparent)]
+    MeshInstance(#[from] MeshInstanceError),
     #[error("canonical scene collection size overflowed for {collection:?}")]
     CollectionSizeOverflow {
         collection: CanonicalSceneCollection,
@@ -1069,8 +1072,6 @@ mod tests {
             .commit();
         let root_id = committed_nodes.root();
         assert_eq!(committed_nodes.node_id(1).unwrap().index(), 1);
-        let root = NodeIndex::from_handle(builder.generation(), root_id).unwrap();
-
         let image = builder
             .try_push_image(
                 Image::try_encoded([1, 2, 3], None, None, None, None, provenance).unwrap(),
@@ -1135,20 +1136,15 @@ mod tests {
                 .unwrap(),
             )
             .unwrap();
-        let skin = SkinIndex::from_handle(builder.generation(), skin_id).unwrap();
         builder
-            .try_push_mesh_instance(
-                MeshInstance::try_new(
-                    root,
-                    logical_mesh,
-                    Some(skin),
-                    1,
-                    None,
-                    Vec::new(),
-                    provenance,
-                )
-                .unwrap(),
-            )
+            .try_push_mesh_instance(CanonicalMeshInstanceDescriptor::new(
+                root_id,
+                logical_mesh,
+                Some(skin_id),
+                None,
+                Vec::new(),
+                provenance,
+            ))
             .unwrap();
         builder
             .try_push_animation_clip(

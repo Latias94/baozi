@@ -8,7 +8,10 @@ use crate::deform::{
 };
 use crate::derived::{Derived, DerivedAbsenceReason, DerivedRebindError};
 use crate::entity::EntityName;
-use crate::identity::{LogicalMeshIndex, MaterialIndex, NodeIndex, SkinIndex};
+use crate::identity::{
+    LogicalMeshId, LogicalMeshIndex, MaterialIndex, NodeId, NodeIndex, SceneGenerationId,
+    SceneLookupError, SkinId, SkinIndex, lookup_storage_index, validate_storage_index,
+};
 use crate::math::Aabb;
 use crate::provenance::ProvenanceAttachments;
 use crate::shared_storage::{SharedStorage, SharedStorageError};
@@ -1555,24 +1558,58 @@ pub struct MeshInstance {
 }
 
 impl MeshInstance {
-    pub(crate) fn try_new(
+    fn try_from_resolved_references(
         owner: NodeIndex,
         logical_mesh: LogicalMeshIndex,
         skin: Option<SkinIndex>,
-        logical_morph_target_count: u32,
+        logical_morph_target_count: usize,
         morph_weight_override: Option<Vec<f32>>,
         attributes: Vec<Attribute>,
         provenance: impl Into<ProvenanceAttachments>,
     ) -> Result<Self, MeshInstanceError> {
         validate_instance_attributes(&attributes)?;
         if let Some(weights) = &morph_weight_override {
-            let target_count = usize::try_from(logical_morph_target_count).map_err(|_| {
-                MeshInstanceError::MorphTargetCountUnsupported {
-                    count: logical_morph_target_count,
-                }
-            })?;
-            validate_morph_weight_override(target_count, weights)?;
+            validate_morph_weight_override(logical_morph_target_count, weights)?;
         }
+        Self::try_from_validated_parts(
+            owner,
+            logical_mesh,
+            skin,
+            morph_weight_override,
+            attributes,
+            provenance,
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn try_new_unchecked_references_for_test(
+        owner: NodeIndex,
+        logical_mesh: LogicalMeshIndex,
+        skin: Option<SkinIndex>,
+        morph_weight_override: Option<Vec<f32>>,
+        attributes: Vec<Attribute>,
+        provenance: impl Into<ProvenanceAttachments>,
+    ) -> Result<Self, MeshInstanceError> {
+        let logical_morph_target_count = morph_weight_override.as_ref().map_or(0, Vec::len);
+        Self::try_from_resolved_references(
+            owner,
+            logical_mesh,
+            skin,
+            logical_morph_target_count,
+            morph_weight_override,
+            attributes,
+            provenance,
+        )
+    }
+
+    fn try_from_validated_parts(
+        owner: NodeIndex,
+        logical_mesh: LogicalMeshIndex,
+        skin: Option<SkinIndex>,
+        morph_weight_override: Option<Vec<f32>>,
+        attributes: Vec<Attribute>,
+        provenance: impl Into<ProvenanceAttachments>,
+    ) -> Result<Self, MeshInstanceError> {
         let morph_weight_override = morph_weight_override
             .map(|weights| {
                 try_compact_geometry_vec(weights, GeometryAllocation::MeshInstanceMorphWeights)
@@ -1682,14 +1719,94 @@ pub enum MeshInstanceError {
     #[error(transparent)]
     Attributes(#[from] MeshInstanceAttributeError),
 
-    #[error("logical morph-target count {count} cannot be represented on this platform")]
-    MorphTargetCountUnsupported { count: u32 },
-
     #[error(transparent)]
     MorphWeightOverride(#[from] MorphWeightOverrideError),
 
     #[error(transparent)]
     Storage(#[from] GeometryStorageError),
+}
+
+/// Qualified, move-only input for one canonical mesh instance.
+///
+/// Reference generations and ranges are resolved before instance payload
+/// validation. The morph override width is derived from the resolved logical
+/// mesh rather than supplied by the caller.
+#[derive(Debug)]
+pub(crate) struct CanonicalMeshInstanceDescriptor {
+    owner: NodeId,
+    logical_mesh: LogicalMeshId,
+    skin: Option<SkinId>,
+    morph_weight_override: Option<Vec<f32>>,
+    attributes: Vec<Attribute>,
+    provenance: ProvenanceAttachments,
+}
+
+impl CanonicalMeshInstanceDescriptor {
+    pub(crate) fn new(
+        owner: NodeId,
+        logical_mesh: LogicalMeshId,
+        skin: Option<SkinId>,
+        morph_weight_override: Option<Vec<f32>>,
+        attributes: Vec<Attribute>,
+        provenance: impl Into<ProvenanceAttachments>,
+    ) -> Self {
+        Self {
+            owner,
+            logical_mesh,
+            skin,
+            morph_weight_override,
+            attributes,
+            provenance: provenance.into(),
+        }
+    }
+
+    pub(crate) fn resolve(
+        self,
+        expected_generation: SceneGenerationId,
+        node_count: usize,
+        logical_meshes: &[LogicalMesh],
+        skin_count: usize,
+    ) -> Result<MeshInstance, CanonicalMeshInstanceResolveError> {
+        let Self {
+            owner,
+            logical_mesh,
+            skin,
+            morph_weight_override,
+            attributes,
+            provenance,
+        } = self;
+
+        let owner_index = NodeIndex::from_handle(expected_generation, owner)?;
+        let logical_mesh_index = LogicalMeshIndex::from_handle(expected_generation, logical_mesh)?;
+        let skin_index = skin
+            .map(|skin| SkinIndex::from_handle(expected_generation, skin))
+            .transpose()?;
+
+        validate_storage_index(owner_index, node_count)?;
+        let resolved_mesh = lookup_storage_index(logical_mesh_index, logical_meshes)?;
+        if let Some(skin_index) = skin_index {
+            validate_storage_index(skin_index, skin_count)?;
+        }
+
+        MeshInstance::try_from_resolved_references(
+            owner_index,
+            logical_mesh_index,
+            skin_index,
+            resolved_mesh.morph_target_definitions().len(),
+            morph_weight_override,
+            attributes,
+            provenance,
+        )
+        .map_err(CanonicalMeshInstanceResolveError::from)
+    }
+}
+
+#[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CanonicalMeshInstanceResolveError {
+    #[error(transparent)]
+    Reference(#[from] SceneLookupError),
+    #[error(transparent)]
+    MeshInstance(#[from] MeshInstanceError),
 }
 
 #[cfg(test)]
@@ -2333,11 +2450,10 @@ mod tests {
     #[test]
     fn mesh_instance_stores_only_private_typed_indexes_and_instance_data() {
         let provenance = provenance();
-        let instance = MeshInstance::try_new(
+        let instance = MeshInstance::try_new_unchecked_references_for_test(
             NodeIndex::from_u32(7),
             LogicalMeshIndex::from_u32(2),
             Some(SkinIndex::from_u32(3)),
-            2,
             Some(vec![0.25, -0.5]),
             vec![instance_color(1, provenance)],
             provenance,
@@ -2365,11 +2481,10 @@ mod tests {
     #[test]
     fn mesh_instance_rejects_wrong_domain_cardinality_keys_and_overrides() {
         let provenance = provenance();
-        let wrong_domain = MeshInstance::try_new(
+        let wrong_domain = MeshInstance::try_new_unchecked_references_for_test(
             NodeIndex::from_u32(0),
             LogicalMeshIndex::from_u32(0),
             None,
-            0,
             None,
             vec![positions(1, provenance)],
             provenance,
@@ -2384,11 +2499,10 @@ mod tests {
             ))
         ));
 
-        let wrong_cardinality = MeshInstance::try_new(
+        let wrong_cardinality = MeshInstance::try_new_unchecked_references_for_test(
             NodeIndex::from_u32(0),
             LogicalMeshIndex::from_u32(0),
             None,
-            0,
             None,
             vec![instance_color(2, provenance)],
             provenance,
@@ -2403,11 +2517,10 @@ mod tests {
             ))
         ));
 
-        let duplicate = MeshInstance::try_new(
+        let duplicate = MeshInstance::try_new_unchecked_references_for_test(
             NodeIndex::from_u32(0),
             LogicalMeshIndex::from_u32(0),
             None,
-            0,
             None,
             vec![instance_color(1, provenance), instance_color(1, provenance)],
             provenance,
@@ -2419,30 +2532,10 @@ mod tests {
             ))
         ));
 
-        let wrong_override = MeshInstance::try_new(
+        let non_finite = MeshInstance::try_new_unchecked_references_for_test(
             NodeIndex::from_u32(0),
             LogicalMeshIndex::from_u32(0),
             None,
-            2,
-            Some(vec![0.0]),
-            Vec::new(),
-            provenance,
-        );
-        assert!(matches!(
-            wrong_override,
-            Err(MeshInstanceError::MorphWeightOverride(
-                MorphWeightOverrideError::CountMismatch {
-                    expected: 2,
-                    actual: 1,
-                }
-            ))
-        ));
-
-        let non_finite = MeshInstance::try_new(
-            NodeIndex::from_u32(0),
-            LogicalMeshIndex::from_u32(0),
-            None,
-            1,
             Some(vec![f32::INFINITY]),
             Vec::new(),
             provenance,
@@ -2591,20 +2684,23 @@ mod tests {
 
         let mut override_weights = Vec::with_capacity(1_024);
         override_weights.push(0.0);
+        let hostile_override_capacity = override_weights.capacity();
         let mut instance_attributes = Vec::with_capacity(1_024);
         instance_attributes.push(instance_color(1, provenance));
-        let instance = MeshInstance::try_new(
+        let hostile_attribute_capacity = instance_attributes.capacity();
+        let instance = MeshInstance::try_new_unchecked_references_for_test(
             NodeIndex::from_u32(0),
             LogicalMeshIndex::from_u32(0),
             None,
-            1,
             Some(override_weights),
             instance_attributes,
             provenance,
         )
         .unwrap();
-        assert!(instance.morph_weight_override.as_ref().unwrap().capacity() < 1_024);
-        assert!(instance.attributes.capacity() < 1_024);
+        assert!(
+            instance.morph_weight_override.as_ref().unwrap().capacity() < hostile_override_capacity
+        );
+        assert!(instance.attributes.capacity() < hostile_attribute_capacity);
         assert!(instance.retained_footprint().unwrap().bytes() > 0);
     }
 
@@ -2662,21 +2758,19 @@ mod tests {
             multi_mesh.provenance().retained_allocation_bytes()
         );
 
-        let single_instance = MeshInstance::try_new(
+        let single_instance = MeshInstance::try_new_unchecked_references_for_test(
             NodeIndex::from_u32(0),
             LogicalMeshIndex::from_u32(0),
             None,
-            0,
             None,
             Vec::new(),
             first,
         )
         .unwrap();
-        let multi_instance = MeshInstance::try_new(
+        let multi_instance = MeshInstance::try_new_unchecked_references_for_test(
             NodeIndex::from_u32(0),
             LogicalMeshIndex::from_u32(0),
             None,
-            0,
             None,
             Vec::new(),
             ProvenanceAttachments::try_from_iter([first, second]).unwrap(),

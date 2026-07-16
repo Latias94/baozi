@@ -266,35 +266,70 @@ impl CanonicalSceneBuilder {
 
     pub(crate) fn try_push_mesh_instance(
         &mut self,
-        instance: MeshInstance,
-    ) -> Result<MeshInstanceIndex, CanonicalSceneBuildError> {
+        descriptor: CanonicalMeshInstanceDescriptor,
+    ) -> Result<MeshInstanceId, CanonicalSceneBuildError> {
         let plan = self.collection_capacity_plan(CanonicalSceneCollection::MeshInstances)?;
-        self.prepare_push_mesh_instance(instance, plan)
+        self.prepare_push_mesh_instance(descriptor, plan)
             .map(CanonicalPreparedSceneInsert::commit)
     }
 
     pub(crate) fn prepare_push_mesh_instance(
         &mut self,
+        descriptor: CanonicalMeshInstanceDescriptor,
+        plan: CanonicalSceneCapacityPlan,
+    ) -> Result<impl CanonicalPreparedSceneInsert<Id = MeshInstanceId> + '_, CanonicalSceneBuildError>
+    {
+        let instance = descriptor
+            .resolve(
+                self.data.generation,
+                self.data.nodes.len(),
+                &self.data.logical_meshes,
+                self.data.skins.len(),
+            )
+            .map_err(|error| match error {
+                CanonicalMeshInstanceResolveError::Reference(cause) => {
+                    CanonicalSceneBuildError::Reference(cause)
+                }
+                CanonicalMeshInstanceResolveError::MeshInstance(cause) => {
+                    CanonicalSceneBuildError::MeshInstance(cause)
+                }
+            })?;
+        self.prepare_resolved_mesh_instance(instance, plan)
+    }
+
+    fn prepare_resolved_mesh_instance(
+        &mut self,
         instance: MeshInstance,
         plan: CanonicalSceneCapacityPlan,
     ) -> Result<
-        impl CanonicalPreparedSceneInsert<Id = MeshInstanceIndex> + '_,
+        PreparedCanonicalSceneInsert<'_, SharedStorage<MeshInstance>, MeshInstanceId>,
         CanonicalSceneBuildError,
     > {
         let index = MeshInstanceIndex::try_from(self.data.mesh_instances.len())?;
+        let id = index.handle(self.data.generation);
         prepare_shared_insert(
             &mut self.data.mesh_instances,
             instance,
-            index,
+            id,
             plan,
             CanonicalSceneCollection::MeshInstances,
         )
     }
 
+    #[cfg(test)]
+    pub(crate) fn try_push_mesh_instance_unchecked_for_test(
+        &mut self,
+        instance: MeshInstance,
+    ) -> Result<MeshInstanceId, CanonicalSceneBuildError> {
+        let plan = self.collection_capacity_plan(CanonicalSceneCollection::MeshInstances)?;
+        self.prepare_resolved_mesh_instance(instance, plan)
+            .map(CanonicalPreparedSceneInsert::commit)
+    }
+
     pub(crate) fn try_push_logical_mesh(
         &mut self,
         mesh: LogicalMesh,
-    ) -> Result<LogicalMeshIndex, CanonicalSceneBuildError> {
+    ) -> Result<LogicalMeshId, CanonicalSceneBuildError> {
         let plan = self.collection_capacity_plan(CanonicalSceneCollection::LogicalMeshes)?;
         self.prepare_push_logical_mesh(mesh, plan)
             .map(CanonicalPreparedSceneInsert::commit)
@@ -304,15 +339,14 @@ impl CanonicalSceneBuilder {
         &mut self,
         mesh: LogicalMesh,
         plan: CanonicalSceneCapacityPlan,
-    ) -> Result<
-        impl CanonicalPreparedSceneInsert<Id = LogicalMeshIndex> + '_,
-        CanonicalSceneBuildError,
-    > {
+    ) -> Result<impl CanonicalPreparedSceneInsert<Id = LogicalMeshId> + '_, CanonicalSceneBuildError>
+    {
         let index = LogicalMeshIndex::try_from(self.data.logical_meshes.len())?;
+        let id = index.handle(self.data.generation);
         prepare_owned_insert(
             &mut self.data.logical_meshes,
             mesh,
-            index,
+            id,
             plan,
             CanonicalSceneCollection::LogicalMeshes,
         )

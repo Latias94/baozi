@@ -1,12 +1,14 @@
 use super::*;
 use crate::derived::DerivedAbsenceReason;
+use crate::entity::AuthoredTransform;
 use crate::extension::ExtensionSchemaSnapshot;
-use crate::identity::SceneEntityKind;
+use crate::identity::{NodeId, SceneEntityKind};
 use crate::image::{CanonicalTextureDescriptor, Image, Sampler};
 use crate::provenance::{Provenance, test_provenance_fixture};
 use crate::scene_space::SceneSpace;
 
 mod material;
+mod mesh_instance;
 mod skin;
 
 fn scene_builder() -> (CanonicalSceneBuilder, Provenance) {
@@ -20,6 +22,50 @@ fn scene_builder() -> (CanonicalSceneBuilder, Provenance) {
     )
     .expect("scene generation should remain available");
     (builder, provenance)
+}
+
+fn produce_nodes(
+    builder: &mut CanonicalSceneBuilder,
+    provenance: Provenance,
+    node_count: usize,
+) -> Vec<NodeId> {
+    let plan = builder
+        .node_batch_plan(node_count)
+        .expect("node fixtures should have a batch plan");
+    let prepared = builder
+        .prepare_node_batch(plan, |batch| {
+            let root = batch.slot(0)?;
+            batch.set_root(root)?;
+
+            for ordinal in 0..node_count {
+                let slot = batch.slot(ordinal)?;
+                let children_plan = batch.node_children_plan(0)?;
+                let children = batch.prepare_node_children(children_plan, [])?;
+                batch.initialize_node(
+                    slot,
+                    CanonicalNodeDescriptor::new(
+                        None,
+                        AuthoredTransform::identity_trs(),
+                        children,
+                        None,
+                        None,
+                        provenance.into(),
+                        Vec::new(),
+                    ),
+                )?;
+            }
+            Ok(())
+        })
+        .expect("node fixtures should prepare through the canonical producer");
+    let committed = prepared.commit();
+
+    (0..node_count)
+        .map(|ordinal| {
+            committed
+                .node_id(ordinal)
+                .expect("every committed fixture ordinal should have a qualified id")
+        })
+        .collect()
 }
 
 fn encoded_image(byte: u8, provenance: Provenance) -> Image {

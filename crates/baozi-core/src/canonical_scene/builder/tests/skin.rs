@@ -1,54 +1,9 @@
 use super::*;
 use crate::canonical_validation::validate_canonical_scene;
 use crate::deform::{CanonicalSkinDescriptor, SkinMatrixSpaces};
-use crate::entity::AuthoredTransform;
 use crate::identity::{NodeId, SceneEntityKind, SceneLookupError};
 use crate::math::Mat4;
 use crate::validation_control::SceneValidationLimits;
-
-fn produce_nodes(
-    builder: &mut CanonicalSceneBuilder,
-    provenance: Provenance,
-    node_count: usize,
-) -> Vec<NodeId> {
-    let plan = builder
-        .node_batch_plan(node_count)
-        .expect("node fixtures should have a batch plan");
-    let prepared = builder
-        .prepare_node_batch(plan, |batch| {
-            let root = batch.slot(0)?;
-            batch.set_root(root)?;
-
-            for ordinal in 0..node_count {
-                let slot = batch.slot(ordinal)?;
-                let children_plan = batch.node_children_plan(0)?;
-                let children = batch.prepare_node_children(children_plan, [])?;
-                batch.initialize_node(
-                    slot,
-                    CanonicalNodeDescriptor::new(
-                        None,
-                        AuthoredTransform::identity_trs(),
-                        children,
-                        None,
-                        None,
-                        provenance.into(),
-                        Vec::new(),
-                    ),
-                )?;
-            }
-            Ok(())
-        })
-        .expect("node fixtures should prepare through the canonical producer");
-    let committed = prepared.commit();
-
-    (0..node_count)
-        .map(|ordinal| {
-            committed
-                .node_id(ordinal)
-                .expect("every committed fixture ordinal should have a qualified id")
-        })
-        .collect()
-}
 
 fn bind_with_scale(scale: f32) -> Mat4 {
     let mut matrix = Mat4::IDENTITY;
