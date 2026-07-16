@@ -2524,9 +2524,10 @@ mod tests {
         AnimationValues,
     };
     use crate::appearance::{
-        AlphaMode, ColorInterpretation, Material, MaterialFactors, ShadingModel, TextureBinding,
-        TextureBlendOperation, TextureChannelMapping, TextureChannelSwizzle,
-        TextureCoordinateSource, TextureRole, TextureStrength, TextureTransform,
+        AlphaMode, CanonicalMaterialDescriptor, ColorInterpretation, Material, MaterialFactors,
+        ShadingModel, TextureBinding, TextureBlendOperation, TextureChannelMapping,
+        TextureChannelSwizzle, TextureCoordinateSource, TextureRole, TextureStrength,
+        TextureTransform,
     };
     use crate::attribute::{
         Attribute, AttributeBuffer, AttributeDomain, AttributeFormat, AttributePayload,
@@ -3128,7 +3129,7 @@ mod tests {
         builder.set_root(root);
         builder
             .try_push_material(
-                Material::try_new(
+                CanonicalMaterialDescriptor::try_new(
                     None,
                     ShadingModel::try_namespaced(Some(schema_id)).unwrap(),
                     AlphaMode::Opaque,
@@ -3206,8 +3207,8 @@ mod tests {
         .unwrap()
     }
 
-    fn material_with_texture(texture: TextureIndex, provenance: Provenance) -> Material {
-        let binding = TextureBinding::try_new(
+    fn material_with_unchecked_texture(texture: TextureIndex, provenance: Provenance) -> Material {
+        let binding = TextureBinding::try_new_unchecked_reference_for_test(
             texture,
             TextureRole::BaseColor,
             TextureCoordinateSource::uv_set(0).unwrap(),
@@ -3221,7 +3222,7 @@ mod tests {
             [],
         )
         .unwrap();
-        Material::try_new(
+        Material::try_new_unchecked_references_for_test(
             None,
             ShadingModel::Unlit,
             AlphaMode::Opaque,
@@ -4756,7 +4757,7 @@ mod tests {
             )
             .unwrap();
         builder
-            .try_push_material(material_with_texture(
+            .try_push_material_unchecked_for_test(material_with_unchecked_texture(
                 TextureIndex::from_u32(22),
                 provenance,
             ))

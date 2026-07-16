@@ -11,7 +11,10 @@ use crate::extension::{
     ExtensionSchemaId, ExtensionSchemaOwner,
     extension_entries_retained_allocation_bytes_controlled, validate_unique_extension_entry_keys,
 };
-use crate::identity::{SceneEntityKind, SceneGenerationId, TextureId, TextureIndex};
+use crate::identity::{
+    SceneEntityKind, SceneGenerationId, SceneLookupError, TextureId, TextureIndex,
+    validate_storage_index,
+};
 use crate::math::{Color, Vec2, Vec3};
 use crate::provenance::Provenance;
 use baozi_operation::CapacityPlan;
@@ -1179,7 +1182,7 @@ pub struct TextureBinding {
 
 impl TextureBinding {
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn try_new(
+    fn try_from_resolved_reference(
         texture: TextureIndex,
         role: TextureRole,
         coordinate_source: TextureCoordinateSource,
@@ -1219,6 +1222,36 @@ impl TextureBinding {
             provenance,
             extensions,
         })
+    }
+
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn try_new_unchecked_reference_for_test(
+        texture: TextureIndex,
+        role: TextureRole,
+        coordinate_source: TextureCoordinateSource,
+        channel_mapping: TextureChannelMapping,
+        color_interpretation: ColorInterpretation,
+        transform: TextureTransform,
+        strength: TextureStrength,
+        blend: TextureBlendOperation,
+        source_key: Option<TextureSourceKey>,
+        provenance: Provenance,
+        extensions: impl IntoIterator<Item = ExtensionEntry>,
+    ) -> Result<Self, AppearanceBuildError> {
+        Self::try_from_resolved_reference(
+            texture,
+            role,
+            coordinate_source,
+            channel_mapping,
+            color_interpretation,
+            transform,
+            strength,
+            blend,
+            source_key,
+            provenance,
+            extensions,
+        )
     }
 
     pub(crate) const fn texture_index(&self) -> TextureIndex {
@@ -1327,6 +1360,53 @@ impl TextureBinding {
     }
 }
 
+/// Qualified, move-only input for one canonical material texture binding.
+///
+/// The candidate binding is not publishable on its own. Its private index is
+/// cached only so the owning material can retain the allocation after the
+/// complete set of qualified references has been validated.
+#[derive(Debug, PartialEq)]
+pub(crate) struct CanonicalTextureBindingDescriptor {
+    texture: TextureId,
+    candidate: TextureBinding,
+}
+
+impl CanonicalTextureBindingDescriptor {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn try_new(
+        texture: TextureId,
+        role: TextureRole,
+        coordinate_source: TextureCoordinateSource,
+        channel_mapping: TextureChannelMapping,
+        color_interpretation: ColorInterpretation,
+        transform: TextureTransform,
+        strength: TextureStrength,
+        blend: TextureBlendOperation,
+        source_key: Option<TextureSourceKey>,
+        provenance: Provenance,
+        extensions: impl IntoIterator<Item = ExtensionEntry>,
+    ) -> Result<Self, AppearanceBuildError> {
+        let candidate = TextureBinding::try_from_resolved_reference(
+            TextureIndex::from_u32(texture.index()),
+            role,
+            coordinate_source,
+            channel_mapping,
+            color_interpretation,
+            transform,
+            strength,
+            blend,
+            source_key,
+            provenance,
+            extensions,
+        )?;
+        Ok(Self { texture, candidate })
+    }
+
+    fn into_parts(self) -> (TextureBinding, TextureId) {
+        (self.candidate, self.texture)
+    }
+}
+
 /// A read-only texture binding with a generation-qualified texture handle.
 #[derive(Debug, Clone, Copy)]
 pub struct TextureBindingView<'a> {
@@ -1397,24 +1477,80 @@ pub struct Material {
     extensions: Vec<ExtensionEntry>,
 }
 
-impl Material {
+/// Qualified, move-only input for one canonical material.
+///
+/// The candidate and its reference sidecar are built in the same source-order
+/// pass. Only [`Self::resolve`] can release the candidate for publication.
+#[derive(Debug, PartialEq)]
+pub(crate) struct CanonicalMaterialDescriptor {
+    candidate: Material,
+    texture_references: Vec<TextureId>,
+}
+
+impl CanonicalMaterialDescriptor {
     #[allow(clippy::too_many_arguments)]
-    pub fn try_new(
+    pub(crate) fn try_new(
         name: Option<EntityName>,
         shading_model: ShadingModel,
         alpha_mode: AlphaMode,
         double_sided: bool,
         factors: MaterialFactors,
-        texture_bindings: impl IntoIterator<Item = TextureBinding>,
+        texture_bindings: impl IntoIterator<Item = CanonicalTextureBindingDescriptor>,
         provenance: Provenance,
         extensions: impl IntoIterator<Item = ExtensionEntry>,
     ) -> Result<Self, AppearanceBuildError> {
         validate_required_factor_group(&shading_model, factors)?;
-        let texture_bindings = try_collect_bounded(
+        let (texture_bindings, texture_references) =
+            try_collect_canonical_texture_bindings(texture_bindings)?;
+        let candidate = Material::try_from_prepared_parts(
+            name,
+            shading_model,
+            alpha_mode,
+            double_sided,
+            factors,
             texture_bindings,
+            provenance,
+            extensions,
+        )?;
+        Ok(Self {
+            candidate,
+            texture_references,
+        })
+    }
+
+    pub(crate) fn resolve(
+        self,
+        generation: SceneGenerationId,
+        texture_count: usize,
+    ) -> Result<Material, SceneLookupError> {
+        for texture in &self.texture_references {
+            TextureIndex::from_handle(generation, *texture)?;
+        }
+        for binding in self.candidate.texture_bindings() {
+            validate_storage_index(binding.texture_index(), texture_count)?;
+        }
+        Ok(self.candidate)
+    }
+}
+
+impl Material {
+    #[allow(clippy::too_many_arguments)]
+    fn try_from_prepared_parts(
+        name: Option<EntityName>,
+        shading_model: ShadingModel,
+        alpha_mode: AlphaMode,
+        double_sided: bool,
+        factors: MaterialFactors,
+        texture_bindings: Vec<TextureBinding>,
+        provenance: Provenance,
+        extensions: impl IntoIterator<Item = ExtensionEntry>,
+    ) -> Result<Self, AppearanceBuildError> {
+        validate_required_factor_group(&shading_model, factors)?;
+        validate_collection_size::<TextureBinding>(
+            AppearanceBuildResource::TextureBindings,
+            texture_bindings.len(),
             MAX_TEXTURE_BINDINGS_PER_MATERIAL,
             MAX_APPEARANCE_COLLECTION_STORAGE_BYTES,
-            AppearanceBuildResource::TextureBindings,
         )?;
         validate_unique_binding_authorities(&texture_bindings)?;
         let extensions = try_collect_extension_entries(
@@ -1439,6 +1575,36 @@ impl Material {
             provenance,
             extensions,
         })
+    }
+
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn try_new_unchecked_references_for_test(
+        name: Option<EntityName>,
+        shading_model: ShadingModel,
+        alpha_mode: AlphaMode,
+        double_sided: bool,
+        factors: MaterialFactors,
+        texture_bindings: impl IntoIterator<Item = TextureBinding>,
+        provenance: Provenance,
+        extensions: impl IntoIterator<Item = ExtensionEntry>,
+    ) -> Result<Self, AppearanceBuildError> {
+        let texture_bindings = try_collect_bounded(
+            texture_bindings,
+            MAX_TEXTURE_BINDINGS_PER_MATERIAL,
+            MAX_APPEARANCE_COLLECTION_STORAGE_BYTES,
+            AppearanceBuildResource::TextureBindings,
+        )?;
+        Self::try_from_prepared_parts(
+            name,
+            shading_model,
+            alpha_mode,
+            double_sided,
+            factors,
+            texture_bindings,
+            provenance,
+            extensions,
+        )
     }
 
     pub const fn name(&self) -> Option<&EntityName> {
@@ -1905,6 +2071,77 @@ fn try_collect_bounded<T>(
     Ok(collected)
 }
 
+fn try_collect_canonical_texture_bindings(
+    values: impl IntoIterator<Item = CanonicalTextureBindingDescriptor>,
+) -> Result<(Vec<TextureBinding>, Vec<TextureId>), AppearanceBuildError> {
+    let mut iterator = values.into_iter();
+    let (minimum, _) = iterator.size_hint();
+    validate_collection_size::<(TextureBinding, TextureId)>(
+        AppearanceBuildResource::TextureBindings,
+        minimum,
+        MAX_TEXTURE_BINDINGS_PER_MATERIAL,
+        MAX_APPEARANCE_COLLECTION_STORAGE_BYTES,
+    )?;
+
+    let mut bindings = Vec::new();
+    let mut references = Vec::new();
+    if minimum != 0 {
+        try_reserve_bounded(
+            &mut bindings,
+            minimum,
+            MAX_TEXTURE_BINDINGS_PER_MATERIAL,
+            MAX_APPEARANCE_COLLECTION_STORAGE_BYTES,
+            AppearanceBuildResource::TextureBindings,
+        )?;
+        try_reserve_bounded(
+            &mut references,
+            minimum,
+            MAX_TEXTURE_BINDINGS_PER_MATERIAL,
+            MAX_APPEARANCE_COLLECTION_STORAGE_BYTES,
+            AppearanceBuildResource::TextureBindings,
+        )?;
+    }
+
+    for descriptor in &mut iterator {
+        let desired =
+            bindings
+                .len()
+                .checked_add(1)
+                .ok_or(AppearanceBuildError::CollectionSizeOverflow {
+                    resource: AppearanceBuildResource::TextureBindings,
+                    count: usize::MAX,
+                })?;
+        validate_collection_size::<(TextureBinding, TextureId)>(
+            AppearanceBuildResource::TextureBindings,
+            desired,
+            MAX_TEXTURE_BINDINGS_PER_MATERIAL,
+            MAX_APPEARANCE_COLLECTION_STORAGE_BYTES,
+        )?;
+        if bindings.len() == bindings.capacity() {
+            try_reserve_bounded(
+                &mut bindings,
+                desired,
+                MAX_TEXTURE_BINDINGS_PER_MATERIAL,
+                MAX_APPEARANCE_COLLECTION_STORAGE_BYTES,
+                AppearanceBuildResource::TextureBindings,
+            )?;
+        }
+        if references.len() == references.capacity() {
+            try_reserve_bounded(
+                &mut references,
+                desired,
+                MAX_TEXTURE_BINDINGS_PER_MATERIAL,
+                MAX_APPEARANCE_COLLECTION_STORAGE_BYTES,
+                AppearanceBuildResource::TextureBindings,
+            )?;
+        }
+        let (binding, texture) = descriptor.into_parts();
+        bindings.push(binding);
+        references.push(texture);
+    }
+    Ok((bindings, references))
+}
+
 fn try_reserve_bounded<T>(
     values: &mut Vec<T>,
     desired: usize,
@@ -2000,7 +2237,7 @@ mod tests {
         source_key: Option<&str>,
         provenance: Provenance,
     ) -> TextureBinding {
-        TextureBinding::try_new(
+        TextureBinding::try_new_unchecked_reference_for_test(
             texture,
             role,
             TextureCoordinateSource::uv_set(0).expect("UV set zero should be valid"),
@@ -2022,7 +2259,7 @@ mod tests {
         bindings: impl IntoIterator<Item = TextureBinding>,
         provenance: Provenance,
     ) -> Result<Material, AppearanceBuildError> {
-        Material::try_new(
+        Material::try_new_unchecked_references_for_test(
             None,
             ShadingModel::Unlit,
             AlphaMode::Opaque,
@@ -2137,7 +2374,7 @@ mod tests {
         .expect("legacy factors should be valid");
         let factors = MaterialFactors::try_new(Vec3::ZERO, Some(pbr), None, Some(legacy))
             .expect("factor set should be valid");
-        let material = Material::try_new(
+        let material = Material::try_new_unchecked_references_for_test(
             None,
             ShadingModel::PbrMetallicRoughness,
             AlphaMode::Blend,
@@ -2201,7 +2438,7 @@ mod tests {
     #[test]
     fn known_data_roles_reject_color_interpretation() {
         let (_arena, provenance) = test_provenance_fixture();
-        let result = TextureBinding::try_new(
+        let result = TextureBinding::try_new_unchecked_reference_for_test(
             texture_index(0),
             TextureRole::Normal,
             TextureCoordinateSource::uv_set(0).expect("UV set should be valid"),
@@ -2372,7 +2609,7 @@ mod tests {
             ExtensionValue::try_string("second").expect("value should be valid"),
             provenance,
         );
-        let duplicate_result = TextureBinding::try_new(
+        let duplicate_result = TextureBinding::try_new_unchecked_reference_for_test(
             texture_index(0),
             TextureRole::BaseColor,
             TextureCoordinateSource::uv_set(0).expect("UV set should be valid"),
@@ -2400,7 +2637,7 @@ mod tests {
             .checked_div(MAX_EXTENSION_STRING_BYTES)
             .expect("test divisor is non-zero")
             + 1;
-        let aggregate_result = TextureBinding::try_new(
+        let aggregate_result = TextureBinding::try_new_unchecked_reference_for_test(
             texture_index(0),
             TextureRole::BaseColor,
             TextureCoordinateSource::uv_set(0).expect("UV set should be valid"),
@@ -2447,7 +2684,7 @@ mod tests {
         );
 
         assert_eq!(
-            Material::try_new(
+            Material::try_new_unchecked_references_for_test(
                 None,
                 ShadingModel::Unlit,
                 AlphaMode::Opaque,
@@ -2483,6 +2720,66 @@ mod tests {
 
         assert!(matches!(
             unlit_material(bindings, provenance),
+            Err(AppearanceBuildError::LimitExceeded {
+                resource: AppearanceBuildResource::TextureBindings,
+                dimension: AppearanceLimitDimension::Count,
+                requested,
+                maximum: MAX_TEXTURE_BINDINGS_PER_MATERIAL,
+            }) if requested == MAX_TEXTURE_BINDINGS_PER_MATERIAL + 1
+        ));
+    }
+
+    #[test]
+    fn qualified_texture_binding_count_accepts_maximum_and_rejects_next() {
+        let (_arena, provenance) = test_provenance_fixture();
+        let generation = SceneGenerationId::allocate().expect("generation should allocate");
+        let bindings = |count| {
+            (0..count).map(|index| {
+                let index = u32::try_from(index).expect("fixture index should fit");
+                CanonicalTextureBindingDescriptor::try_new(
+                    TextureId::new(generation, index),
+                    TextureRole::BaseColor,
+                    TextureCoordinateSource::uv_set(0).expect("UV set should be valid"),
+                    TextureChannelMapping::swizzle(TextureChannelSwizzle::RGB),
+                    ColorInterpretation::SrgbColor,
+                    TextureTransform::IDENTITY,
+                    TextureStrength::ONE,
+                    TextureBlendOperation::Replace,
+                    Some(
+                        TextureSourceKey::try_new(format!("layer-{index}"))
+                            .expect("source key should be valid"),
+                    ),
+                    provenance,
+                    [],
+                )
+                .expect("qualified binding should be valid")
+            })
+        };
+
+        assert!(
+            CanonicalMaterialDescriptor::try_new(
+                None,
+                ShadingModel::Unlit,
+                AlphaMode::Opaque,
+                false,
+                MaterialFactors::empty(),
+                bindings(MAX_TEXTURE_BINDINGS_PER_MATERIAL),
+                provenance,
+                [],
+            )
+            .is_ok()
+        );
+        assert!(matches!(
+            CanonicalMaterialDescriptor::try_new(
+                None,
+                ShadingModel::Unlit,
+                AlphaMode::Opaque,
+                false,
+                MaterialFactors::empty(),
+                bindings(MAX_TEXTURE_BINDINGS_PER_MATERIAL + 1),
+                provenance,
+                [],
+            ),
             Err(AppearanceBuildError::LimitExceeded {
                 resource: AppearanceBuildResource::TextureBindings,
                 dimension: AppearanceLimitDimension::Count,
@@ -2539,7 +2836,7 @@ mod tests {
         let (_arena, provenance) = test_provenance_fixture();
         let role_schema = schema("vendor:role");
         let blend_schema = schema("vendor:blend");
-        let binding = TextureBinding::try_new(
+        let binding = TextureBinding::try_new_unchecked_reference_for_test(
             texture_index(0),
             TextureRole::try_namespaced(Some(role_schema.clone()))
                 .expect("role schema should be accepted"),

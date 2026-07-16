@@ -5,7 +5,11 @@ use super::{
     CanonicalSubjectRemap,
 };
 use crate::animation::{AnimationClip, AnimationLimits, AnimationTimeDomain};
-use crate::appearance::{AlphaMode, Material, MaterialFactors, ShadingModel};
+use crate::appearance::{
+    AlphaMode, CanonicalMaterialDescriptor, CanonicalTextureBindingDescriptor, ColorInterpretation,
+    MaterialFactors, ShadingModel, TextureBlendOperation, TextureChannelMapping,
+    TextureChannelSwizzle, TextureCoordinateSource, TextureRole, TextureStrength, TextureTransform,
+};
 use crate::attribute::{
     Attribute, AttributeBuffer, AttributeDomain, AttributeFormat, AttributePayload,
     AttributeSemantic, ComponentType, Normalization,
@@ -28,10 +32,12 @@ use crate::geometry::{
     IndexStream, LogicalMesh, LogicalMeshBounds, MeshInstance, MeshPrimitive, MorphBoundsPolicy,
     PrimitiveBounds, Topology,
 };
-use crate::identity::{NodeId, NodeIndex, SceneGenerationId, SceneLookupError};
+use crate::identity::{
+    MaterialIndex, NodeId, NodeIndex, SceneGenerationId, SceneLookupError, TextureId,
+};
 use crate::image::{CanonicalTextureDescriptor, Image, Sampler};
 use crate::math::{Aabb, Color, Mat4, Quat, Vec3};
-use crate::provenance::test_provenance_fixture;
+use crate::provenance::{Provenance, test_provenance_fixture};
 use crate::remap::{RemapChange, RemapSpace};
 use crate::scene_space::SceneSpace;
 use crate::validation_control::{

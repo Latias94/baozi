@@ -6,6 +6,8 @@ use crate::image::{CanonicalTextureDescriptor, Image, Sampler};
 use crate::provenance::{Provenance, test_provenance_fixture};
 use crate::scene_space::SceneSpace;
 
+mod material;
+
 fn scene_builder() -> (CanonicalSceneBuilder, Provenance) {
     let (arena, provenance) = test_provenance_fixture();
     let builder = CanonicalSceneBuilder::try_new(

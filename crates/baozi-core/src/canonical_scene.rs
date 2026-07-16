@@ -1,5 +1,5 @@
 use crate::animation::{AnimationClip, AnimationTimeDomain};
-use crate::appearance::{Material, MaterialView};
+use crate::appearance::{CanonicalMaterialDescriptor, Material, MaterialView};
 use crate::attribute::{Attribute, AttributeDomain, F32Vec3View};
 use crate::canonical_edit::{
     CanonicalEditError, CanonicalEditFailure, CanonicalNodeTransformEdit,
@@ -890,7 +890,11 @@ mod tests {
     use super::builder::{CanonicalPreparedSceneInsert, CanonicalSceneBuilder};
     use super::*;
     use crate::animation::{AnimationLimits, AnimationTimeDomain};
-    use crate::appearance::{AlphaMode, MaterialFactors, ShadingModel};
+    use crate::appearance::{
+        AlphaMode, CanonicalTextureBindingDescriptor, ColorInterpretation, MaterialFactors,
+        ShadingModel, TextureBlendOperation, TextureChannelMapping, TextureChannelSwizzle,
+        TextureCoordinateSource, TextureRole, TextureStrength, TextureTransform,
+    };
     use crate::attribute::{
         Attribute, AttributeBuffer, AttributeDomain, AttributeFormat, AttributePayload,
         AttributeSemantic, ComponentType, Normalization,
@@ -922,8 +926,8 @@ mod tests {
         .expect("root node fixture should be valid")
     }
 
-    fn unlit_material(provenance: Provenance) -> Material {
-        Material::try_new(
+    fn unlit_material(provenance: Provenance) -> CanonicalMaterialDescriptor {
+        CanonicalMaterialDescriptor::try_new(
             None,
             ShadingModel::Unlit,
             AlphaMode::Opaque,
@@ -934,6 +938,26 @@ mod tests {
             [],
         )
         .expect("material fixture should be valid")
+    }
+
+    fn base_color_binding(
+        texture: TextureId,
+        provenance: Provenance,
+    ) -> CanonicalTextureBindingDescriptor {
+        CanonicalTextureBindingDescriptor::try_new(
+            texture,
+            TextureRole::BaseColor,
+            TextureCoordinateSource::uv_set(0).expect("UV set zero should be valid"),
+            TextureChannelMapping::swizzle(TextureChannelSwizzle::RGBA),
+            ColorInterpretation::SrgbColor,
+            TextureTransform::IDENTITY,
+            TextureStrength::ONE,
+            TextureBlendOperation::Replace,
+            None,
+            provenance,
+            [],
+        )
+        .expect("base-color binding fixture should be valid")
     }
 
     fn positions(values: Vec<Vec3>, provenance: Provenance) -> Attribute {
@@ -1032,24 +1056,25 @@ mod tests {
         let sampler = builder
             .try_push_sampler(Sampler::canonical_default(provenance))
             .unwrap();
-        builder
+        let texture = builder
             .try_push_texture(CanonicalTextureDescriptor::new(image, sampler, provenance))
             .unwrap();
-        let material = builder
+        let material_id = builder
             .try_push_material(
-                Material::try_new(
+                CanonicalMaterialDescriptor::try_new(
                     None,
                     ShadingModel::Unlit,
                     AlphaMode::Opaque,
                     false,
                     MaterialFactors::empty(),
-                    [],
+                    [base_color_binding(texture, provenance)],
                     provenance,
                     [],
                 )
                 .unwrap(),
             )
             .unwrap();
+        let material = MaterialIndex::from_handle(builder.generation(), material_id).unwrap();
         let logical_mesh = builder
             .try_push_logical_mesh(
                 LogicalMesh::try_new(
@@ -1369,7 +1394,8 @@ mod tests {
             .expect("retry should prepare")
             .commit();
 
-        assert_eq!(material.as_u32(), 0);
+        assert_eq!(material.generation(), builder.generation());
+        assert_eq!(material.index(), 0);
         assert_eq!(builder.data.materials.len(), 1);
     }
 
@@ -1476,7 +1502,8 @@ mod tests {
             .prepare_push_material(unlit_material(provenance), plan)
             .expect("builder should remain usable after failed preparation")
             .commit();
-        assert_eq!(material.as_u32(), 0);
+        assert_eq!(material.generation(), builder.generation());
+        assert_eq!(material.index(), 0);
         assert_eq!(builder.data.materials.len(), 1);
         assert_eq!(builder.data.materials.capacity(), original_capacity);
     }
@@ -1574,7 +1601,7 @@ mod tests {
         let (mesh_id, _) = scene.logical_meshes().next().unwrap();
         assert_eq!(scene.logical_mesh(mesh_id).unwrap().id(), mesh_id);
 
-        let (material_id, _) = scene.materials().next().unwrap();
+        let (material_id, material) = scene.materials().next().unwrap();
         assert!(!scene.material(material_id).unwrap().double_sided());
 
         let (image_id, _) = scene.images().next().unwrap();
@@ -1590,6 +1617,14 @@ mod tests {
         assert_eq!(scene.texture(texture_id).unwrap(), texture);
         assert_eq!(texture.image(), image_id);
         assert_eq!(texture.sampler(), sampler_id);
+        assert_eq!(
+            material
+                .texture_bindings()
+                .next()
+                .expect("fixture material should retain one binding")
+                .texture(),
+            texture_id
+        );
 
         let (skin_id, skin) = scene.skins().next().unwrap();
         assert_eq!(scene.skin(skin_id).unwrap().joints().next(), Some(root));

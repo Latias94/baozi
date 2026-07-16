@@ -305,27 +305,50 @@ impl CanonicalSceneBuilder {
 
     pub(crate) fn try_push_material(
         &mut self,
-        material: Material,
-    ) -> Result<MaterialIndex, CanonicalSceneBuildError> {
+        descriptor: CanonicalMaterialDescriptor,
+    ) -> Result<MaterialId, CanonicalSceneBuildError> {
         let plan = self.collection_capacity_plan(CanonicalSceneCollection::Materials)?;
-        self.prepare_push_material(material, plan)
+        self.prepare_push_material(descriptor, plan)
             .map(CanonicalPreparedSceneInsert::commit)
     }
 
     pub(crate) fn prepare_push_material(
         &mut self,
+        descriptor: CanonicalMaterialDescriptor,
+        plan: CanonicalSceneCapacityPlan,
+    ) -> Result<impl CanonicalPreparedSceneInsert<Id = MaterialId> + '_, CanonicalSceneBuildError>
+    {
+        let material = descriptor.resolve(self.data.generation, self.data.textures.len())?;
+        self.prepare_resolved_material(material, plan)
+    }
+
+    fn prepare_resolved_material(
+        &mut self,
         material: Material,
         plan: CanonicalSceneCapacityPlan,
-    ) -> Result<impl CanonicalPreparedSceneInsert<Id = MaterialIndex> + '_, CanonicalSceneBuildError>
-    {
+    ) -> Result<
+        PreparedCanonicalSceneInsert<'_, SharedStorage<Material>, MaterialId>,
+        CanonicalSceneBuildError,
+    > {
         let index = MaterialIndex::try_from(self.data.materials.len())?;
+        let id = index.handle(self.data.generation);
         prepare_shared_insert(
             &mut self.data.materials,
             material,
-            index,
+            id,
             plan,
             CanonicalSceneCollection::Materials,
         )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn try_push_material_unchecked_for_test(
+        &mut self,
+        material: Material,
+    ) -> Result<MaterialId, CanonicalSceneBuildError> {
+        let plan = self.collection_capacity_plan(CanonicalSceneCollection::Materials)?;
+        self.prepare_resolved_material(material, plan)
+            .map(CanonicalPreparedSceneInsert::commit)
     }
 
     pub(crate) fn try_push_image(

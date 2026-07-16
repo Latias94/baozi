@@ -1,5 +1,25 @@
 use super::*;
 
+fn base_color_binding(
+    texture: TextureId,
+    provenance: Provenance,
+) -> CanonicalTextureBindingDescriptor {
+    CanonicalTextureBindingDescriptor::try_new(
+        texture,
+        TextureRole::BaseColor,
+        TextureCoordinateSource::uv_set(0).expect("UV set zero should be valid"),
+        TextureChannelMapping::swizzle(TextureChannelSwizzle::RGBA),
+        ColorInterpretation::SrgbColor,
+        TextureTransform::IDENTITY,
+        TextureStrength::ONE,
+        TextureBlendOperation::Replace,
+        None,
+        provenance,
+        [],
+    )
+    .expect("base-color binding fixture")
+}
+
 fn fully_populated_scene() -> CanonicalValidatedScene {
     let (arena, provenance) = test_provenance_fixture();
     let mut builder = CanonicalSceneBuilder::try_new(
@@ -60,24 +80,26 @@ fn fully_populated_scene() -> CanonicalValidatedScene {
     let sampler = builder
         .try_push_sampler(Sampler::canonical_default(provenance))
         .expect("sampler storage");
-    builder
+    let texture = builder
         .try_push_texture(CanonicalTextureDescriptor::new(image, sampler, provenance))
         .expect("texture storage");
-    let material = builder
+    let material_id = builder
         .try_push_material(
-            Material::try_new(
+            CanonicalMaterialDescriptor::try_new(
                 None,
                 ShadingModel::Unlit,
                 AlphaMode::Opaque,
                 false,
                 MaterialFactors::empty(),
-                [],
+                [base_color_binding(texture, provenance)],
                 provenance,
                 [],
             )
             .expect("material fixture"),
         )
         .expect("material storage");
+    let material = MaterialIndex::from_handle(builder.generation(), material_id)
+        .expect("fixture material should belong to the builder generation");
     let primitive = MeshPrimitive::try_new(
         3,
         Topology::Points,
@@ -751,6 +773,16 @@ fn complete_remap_set_covers_every_entity_and_domain_even_when_empty() {
 fn populated_scene_uses_compact_unchanged_markers_for_every_subject() {
     let input = fully_populated_scene();
     let input_generation = input.generation();
+    let input_texture = input
+        .materials()
+        .next()
+        .expect("fully populated fixture material")
+        .1
+        .texture_bindings()
+        .next()
+        .expect("fully populated fixture binding")
+        .texture();
+    assert_eq!(input_texture.generation(), input_generation);
     let root = input.root().expect("fully populated fixture root");
     let CanonicalNodeTransformEditStart::Changed(edit) = CanonicalNodeTransformEdit::try_begin(
         &input,
@@ -765,7 +797,19 @@ fn populated_scene_uses_compact_unchanged_markers_for_every_subject() {
         .commit()
         .expect("fully populated transform edit should commit")
         .into_unreserved_publication();
-    let output_generation = publication.scene().generation();
+    let output = publication.scene();
+    let output_generation = output.generation();
+    let output_texture = output
+        .materials()
+        .next()
+        .expect("published fixture material")
+        .1
+        .texture_bindings()
+        .next()
+        .expect("published fixture binding")
+        .texture();
+    assert_eq!(output_texture.generation(), output_generation);
+    assert_eq!(output_texture.index(), input_texture.index());
     let remaps = publication.remaps();
     assert_all_subjects_unchanged(remaps, input_generation, output_generation);
 }
