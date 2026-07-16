@@ -9,7 +9,7 @@ fn node_stores_only_canonical_child_and_attachment_indexes() {
     let child = NodeIndex::try_from(3).expect("fixture index should fit");
     let camera = CameraIndex::try_from(1).expect("fixture index should fit");
     let light = LightIndex::try_from(2).expect("fixture index should fit");
-    let node = Node::try_new(
+    let node = Node::try_new_unchecked_references_for_test(
         EntityName::try_new("root").ok(),
         AuthoredTransform::identity_trs(),
         [child],
@@ -32,7 +32,7 @@ fn node_stores_only_canonical_child_and_attachment_indexes() {
 fn node_preserves_every_provenance_attachment() {
     let (_arena, [first, second]) = crate::provenance::test_provenance_pair_fixture();
     let attachments = ProvenanceAttachments::try_from_iter([first, second]).unwrap();
-    let node = Node::try_new(
+    let node = Node::try_new_unchecked_references_for_test(
         None,
         AuthoredTransform::identity_trs(),
         [],
@@ -60,7 +60,7 @@ fn node_transform_fork_shares_every_non_transform_attachment() {
         crate::extension::ExtensionValue::from_bool(true),
         provenance,
     );
-    let node = Node::try_new(
+    let node = Node::try_new_unchecked_references_for_test(
         EntityName::try_new("shared-node").ok(),
         AuthoredTransform::identity_trs(),
         [child],
@@ -100,7 +100,7 @@ fn node_payload_allocation_failure_is_typed() {
     crate::shared_storage::fail_next_allocation_for_test();
 
     assert_eq!(
-        Node::try_new(
+        Node::try_new_unchecked_references_for_test(
             None,
             AuthoredTransform::identity_trs(),
             [],

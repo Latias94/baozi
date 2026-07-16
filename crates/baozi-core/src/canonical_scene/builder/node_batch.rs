@@ -104,14 +104,39 @@ pub(crate) struct CanonicalNodeDescriptor<'batch> {
     name: Option<EntityName>,
     authored_transform: AuthoredTransform,
     children: CanonicalPreparedNodeChildren<'batch>,
-    camera: Option<CameraIndex>,
-    light: Option<LightIndex>,
+    camera: Option<CameraId>,
+    light: Option<LightId>,
     provenance: ProvenanceAttachments,
     extensions: Vec<ExtensionEntry>,
 }
 
 impl<'batch> CanonicalNodeDescriptor<'batch> {
-    fn into_prepared_parts(self) -> NodePreparedParts {
+    pub(crate) fn new(
+        name: Option<EntityName>,
+        authored_transform: AuthoredTransform,
+        children: CanonicalPreparedNodeChildren<'batch>,
+        camera: Option<CameraId>,
+        light: Option<LightId>,
+        provenance: ProvenanceAttachments,
+        extensions: Vec<ExtensionEntry>,
+    ) -> Self {
+        Self {
+            name,
+            authored_transform,
+            children,
+            camera,
+            light,
+            provenance,
+            extensions,
+        }
+    }
+
+    fn into_resolved_prepared_parts(
+        self,
+        generation: SceneGenerationId,
+        camera_count: usize,
+        light_count: usize,
+    ) -> Result<NodePreparedParts, SceneLookupError> {
         let Self {
             name,
             authored_transform,
@@ -121,7 +146,19 @@ impl<'batch> CanonicalNodeDescriptor<'batch> {
             provenance,
             extensions,
         } = self;
-        NodePreparedParts {
+        let camera = camera
+            .map(|camera| CameraIndex::from_handle(generation, camera))
+            .transpose()?;
+        let light = light
+            .map(|light| LightIndex::from_handle(generation, light))
+            .transpose()?;
+        let camera = camera
+            .map(|camera| crate::identity::validate_storage_index(camera, camera_count))
+            .transpose()?;
+        let light = light
+            .map(|light| crate::identity::validate_storage_index(light, light_count))
+            .transpose()?;
+        Ok(NodePreparedParts {
             name,
             authored_transform,
             children: children.indices,
@@ -129,7 +166,7 @@ impl<'batch> CanonicalNodeDescriptor<'batch> {
             light,
             provenance,
             extensions,
-        }
+        })
     }
 }
 
@@ -162,7 +199,10 @@ impl Drop for NodeBatchStorageDropProbe {
 pub(crate) struct CanonicalNodeBatch<'batch, C = ()> {
     brand: &'batch CanonicalNodeBatchBrand,
     staging: &'batch mut NodeBatchStaging<C>,
+    generation: SceneGenerationId,
     node_count: usize,
+    camera_count: usize,
+    light_count: usize,
     value_storage_bytes_per_node: u64,
     value_storage_envelope_bytes: u64,
     invariant: PhantomData<fn(&'batch CanonicalNodeBatchBrand) -> &'batch CanonicalNodeBatchBrand>,
@@ -296,6 +336,11 @@ impl<'batch, C> CanonicalNodeBatch<'batch, C> {
         if !std::ptr::eq(descriptor.children.brand, self.brand) {
             return Err(CanonicalSceneBuildError::ForeignNodeBatchSlot);
         }
+        let parts = descriptor.into_resolved_prepared_parts(
+            self.generation,
+            self.camera_count,
+            self.light_count,
+        )?;
         let next_node_count = self.staging.nodes.len().checked_add(1).ok_or(
             CanonicalSceneBuildError::CollectionSizeOverflow {
                 collection: CanonicalSceneCollection::Nodes,
@@ -327,7 +372,7 @@ impl<'batch, C> CanonicalNodeBatch<'batch, C> {
             });
         }
 
-        let (node, footprint) = Node::try_from_prepared_parts(descriptor.into_prepared_parts())?;
+        let (node, footprint) = Node::try_from_prepared_parts(parts)?;
         let value_storage_retained_allocation_bytes = self
             .staging
             .value_storage_retained_allocation_bytes
@@ -614,6 +659,9 @@ impl CanonicalSceneBuilder {
             return Err(CanonicalSceneBuildError::ForeignNodeBatchPlan);
         }
         let node_count = plan.node_count();
+        let generation = self.data.generation;
+        let camera_count = self.data.cameras.len();
+        let light_count = self.data.lights.len();
         plan.collection
             .verify_preflight(self.data.nodes.len(), self.data.nodes.capacity())
             .map_err(|cause| CanonicalSceneBuildError::CapacityPlan {
@@ -661,7 +709,10 @@ impl CanonicalSceneBuilder {
             let mut batch = CanonicalNodeBatch {
                 brand: &brand,
                 staging: &mut staging,
+                generation,
                 node_count,
+                camera_count,
+                light_count,
                 value_storage_bytes_per_node: plan.value_storage_bytes_per_node,
                 value_storage_envelope_bytes: plan.value_storage_envelope_bytes,
                 invariant: PhantomData,

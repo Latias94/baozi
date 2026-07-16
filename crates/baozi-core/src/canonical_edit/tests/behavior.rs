@@ -1,4 +1,5 @@
 use super::*;
+use crate::canonical_scene::builder::node_batch::CanonicalNodeDescriptor;
 
 fn base_color_binding(
     texture: TextureId,
@@ -55,21 +56,30 @@ fn fully_populated_scene() -> CanonicalValidatedScene {
             .expect("light fixture"),
         )
         .expect("light storage");
-    let root = builder
-        .try_push_node(
-            Node::try_new(
+    let node_plan = builder
+        .node_batch_plan(1)
+        .expect("fully populated root batch plan");
+    let committed_nodes = builder
+        .prepare_node_batch(node_plan, |batch| {
+            let root = batch.slot(0)?;
+            let children_plan = batch.node_children_plan(0)?;
+            let children = batch.prepare_node_children(children_plan, [])?;
+            let descriptor = CanonicalNodeDescriptor::new(
                 None,
                 AuthoredTransform::identity_trs(),
-                [],
+                children,
                 Some(camera),
                 Some(light),
-                provenance,
-                [],
-            )
-            .expect("fully populated root"),
-        )
-        .expect("fully populated root storage");
-    builder.set_root(root);
+                provenance.into(),
+                Vec::new(),
+            );
+            batch.initialize_node(root, descriptor)?;
+            batch.set_root(root)
+        })
+        .expect("fully populated root batch should prepare")
+        .commit();
+    let root = NodeIndex::from_handle(builder.generation(), committed_nodes.root())
+        .expect("committed root should belong to the fixture generation");
 
     let image = builder
         .try_push_image(
@@ -784,6 +794,11 @@ fn populated_scene_uses_compact_unchanged_markers_for_every_subject() {
         .texture();
     assert_eq!(input_texture.generation(), input_generation);
     let root = input.root().expect("fully populated fixture root");
+    let input_root = input.node(root).expect("fully populated input root view");
+    let input_camera = input_root.camera().expect("fully populated input camera");
+    let input_light = input_root.light().expect("fully populated input light");
+    assert_eq!(input_camera.generation(), input_generation);
+    assert_eq!(input_light.generation(), input_generation);
     let CanonicalNodeTransformEditStart::Changed(edit) = CanonicalNodeTransformEdit::try_begin(
         &input,
         root,
@@ -810,6 +825,15 @@ fn populated_scene_uses_compact_unchanged_markers_for_every_subject() {
         .texture();
     assert_eq!(output_texture.generation(), output_generation);
     assert_eq!(output_texture.index(), input_texture.index());
+    let output_root = output
+        .node(output.root().expect("published fully populated root"))
+        .expect("published fully populated root view");
+    let output_camera = output_root.camera().expect("published camera attachment");
+    let output_light = output_root.light().expect("published light attachment");
+    assert_eq!(output_camera.generation(), output_generation);
+    assert_eq!(output_camera.index(), input_camera.index());
+    assert_eq!(output_light.generation(), output_generation);
+    assert_eq!(output_light.index(), input_light.index());
     let remaps = publication.remaps();
     assert_all_subjects_unchanged(remaps, input_generation, output_generation);
 }

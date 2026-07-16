@@ -97,6 +97,20 @@ impl<T, Id> CanonicalPreparedSceneInsert for PreparedCanonicalSceneInsert<'_, T,
 pub(crate) mod node_batch;
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+fn assert_generation_mismatch_for_test(
+    error: CanonicalSceneBuildError,
+    expected_kind: crate::identity::SceneEntityKind,
+) {
+    let CanonicalSceneBuildError::Reference(SceneLookupError::GenerationMismatch { kind, .. }) =
+        error
+    else {
+        panic!("expected a generation mismatch, observed {error:?}");
+    };
+    assert_eq!(kind, expected_kind);
+}
+
 pub(crate) struct CanonicalSceneBuilder {
     pub(super) data: CanonicalSceneData,
 }
@@ -224,16 +238,18 @@ impl CanonicalSceneBuilder {
         }
     }
 
-    pub(crate) fn try_push_node(
+    #[cfg(test)]
+    pub(crate) fn try_push_node_unchecked_for_test(
         &mut self,
         node: Node,
     ) -> Result<NodeIndex, CanonicalSceneBuildError> {
         let plan = self.collection_capacity_plan(CanonicalSceneCollection::Nodes)?;
-        self.prepare_push_node(node, plan)
+        self.prepare_push_node_unchecked_for_test(node, plan)
             .map(CanonicalPreparedSceneInsert::commit)
     }
 
-    pub(crate) fn prepare_push_node(
+    #[cfg(test)]
+    pub(crate) fn prepare_push_node_unchecked_for_test(
         &mut self,
         node: Node,
         plan: CanonicalSceneCapacityPlan,
@@ -510,7 +526,7 @@ impl CanonicalSceneBuilder {
     pub(crate) fn try_push_camera(
         &mut self,
         camera: Camera,
-    ) -> Result<CameraIndex, CanonicalSceneBuildError> {
+    ) -> Result<CameraId, CanonicalSceneBuildError> {
         let plan = self.collection_capacity_plan(CanonicalSceneCollection::Cameras)?;
         self.prepare_push_camera(camera, plan)
             .map(CanonicalPreparedSceneInsert::commit)
@@ -520,13 +536,14 @@ impl CanonicalSceneBuilder {
         &mut self,
         camera: Camera,
         plan: CanonicalSceneCapacityPlan,
-    ) -> Result<impl CanonicalPreparedSceneInsert<Id = CameraIndex> + '_, CanonicalSceneBuildError>
+    ) -> Result<impl CanonicalPreparedSceneInsert<Id = CameraId> + '_, CanonicalSceneBuildError>
     {
         let index = CameraIndex::try_from(self.data.cameras.len())?;
+        let id = index.handle(self.data.generation);
         prepare_shared_insert(
             &mut self.data.cameras,
             camera,
-            index,
+            id,
             plan,
             CanonicalSceneCollection::Cameras,
         )
@@ -535,7 +552,7 @@ impl CanonicalSceneBuilder {
     pub(crate) fn try_push_light(
         &mut self,
         light: Light,
-    ) -> Result<LightIndex, CanonicalSceneBuildError> {
+    ) -> Result<LightId, CanonicalSceneBuildError> {
         let plan = self.collection_capacity_plan(CanonicalSceneCollection::Lights)?;
         self.prepare_push_light(light, plan)
             .map(CanonicalPreparedSceneInsert::commit)
@@ -545,13 +562,14 @@ impl CanonicalSceneBuilder {
         &mut self,
         light: Light,
         plan: CanonicalSceneCapacityPlan,
-    ) -> Result<impl CanonicalPreparedSceneInsert<Id = LightIndex> + '_, CanonicalSceneBuildError>
+    ) -> Result<impl CanonicalPreparedSceneInsert<Id = LightId> + '_, CanonicalSceneBuildError>
     {
         let index = LightIndex::try_from(self.data.lights.len())?;
+        let id = index.handle(self.data.generation);
         prepare_shared_insert(
             &mut self.data.lights,
             light,
-            index,
+            id,
             plan,
             CanonicalSceneCollection::Lights,
         )
@@ -578,7 +596,8 @@ impl CanonicalSceneBuilder {
         self.data.scene_bounds = bounds;
     }
 
-    pub(crate) fn set_root(&mut self, root: NodeIndex) {
+    #[cfg(test)]
+    pub(crate) fn set_root_unchecked_for_test(&mut self, root: NodeIndex) {
         self.data.root = Some(root);
     }
 

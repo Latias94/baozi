@@ -2796,7 +2796,7 @@ mod tests {
     }
 
     fn node(provenance: Provenance, children: impl IntoIterator<Item = NodeIndex>) -> Node {
-        Node::try_new(
+        Node::try_new_unchecked_references_for_test(
             None,
             AuthoredTransform::identity_trs(),
             children,
@@ -2820,13 +2820,13 @@ mod tests {
         .expect("scene generation should remain available");
         for child_indexes in children {
             builder
-                .try_push_node(node(
+                .try_push_node_unchecked_for_test(node(
                     provenance,
                     child_indexes.iter().copied().map(NodeIndex::from_u32),
                 ))
                 .expect("node allocation should succeed");
         }
-        builder.set_root(NodeIndex::from_u32(0));
+        builder.set_root_unchecked_for_test(NodeIndex::from_u32(0));
         builder.finish_draft()
     }
 
@@ -2850,10 +2850,10 @@ mod tests {
                 Vec::new()
             };
             builder
-                .try_push_node(node(provenance, children))
+                .try_push_node_unchecked_for_test(node(provenance, children))
                 .expect("node allocation should succeed");
         }
-        builder.set_root(NodeIndex::from_u32(0));
+        builder.set_root_unchecked_for_test(NodeIndex::from_u32(0));
         builder.finish_draft()
     }
 
@@ -3026,8 +3026,10 @@ mod tests {
             DerivedAbsenceReason::NotProvided,
         )
         .unwrap();
-        let root = builder.try_push_node(node(provenance, [])).unwrap();
-        builder.set_root(root);
+        let root = builder
+            .try_push_node_unchecked_for_test(node(provenance, []))
+            .unwrap();
+        builder.set_root_unchecked_for_test(root);
         builder.finish_draft()
     }
 
@@ -3046,8 +3048,10 @@ mod tests {
             DerivedAbsenceReason::NotProvided,
         )
         .unwrap();
-        let root = builder.try_push_node(node(provenance, [])).unwrap();
-        builder.set_root(root);
+        let root = builder
+            .try_push_node_unchecked_for_test(node(provenance, []))
+            .unwrap();
+        builder.set_root_unchecked_for_test(root);
         let influence_count_u32 =
             u32::try_from(influence_count).expect("test influence count should fit");
         let influences = InfluenceRows::try_new(
@@ -3125,8 +3129,10 @@ mod tests {
             DerivedAbsenceReason::NotProvided,
         )
         .unwrap();
-        let root = builder.try_push_node(node(provenance, [])).unwrap();
-        builder.set_root(root);
+        let root = builder
+            .try_push_node_unchecked_for_test(node(provenance, []))
+            .unwrap();
+        builder.set_root_unchecked_for_test(root);
         builder
             .try_push_material(
                 CanonicalMaterialDescriptor::try_new(
@@ -3308,9 +3314,9 @@ mod tests {
         )
         .expect("scene generation should remain available");
         let root = builder
-            .try_push_node(node(provenance, []))
+            .try_push_node_unchecked_for_test(node(provenance, []))
             .expect("root node allocation should succeed");
-        builder.set_root(root);
+        builder.set_root_unchecked_for_test(root);
         builder
             .try_push_image(
                 Image::try_encoded([1, 2, 3], None, None, None, None, provenance)
@@ -3847,8 +3853,10 @@ mod tests {
             DerivedAbsenceReason::NotProvided,
         )
         .unwrap();
-        let root = builder.try_push_node(node(foreign, [])).unwrap();
-        builder.set_root(root);
+        let root = builder
+            .try_push_node_unchecked_for_test(node(foreign, []))
+            .unwrap();
+        builder.set_root_unchecked_for_test(root);
 
         let error =
             validate_canonical_scene(builder.finish_draft(), SceneValidationLimits::default())
@@ -3877,8 +3885,10 @@ mod tests {
             DerivedAbsenceReason::NotProvided,
         )
         .unwrap();
-        let root = builder.try_push_node(node(provenance, [])).unwrap();
-        builder.set_root(root);
+        let root = builder
+            .try_push_node_unchecked_for_test(node(provenance, []))
+            .unwrap();
+        builder.set_root_unchecked_for_test(root);
         let error =
             validate_canonical_scene(builder.finish_draft(), SceneValidationLimits::default())
                 .err()
@@ -3906,8 +3916,10 @@ mod tests {
                 DerivedAbsenceReason::NotProvided,
             )
             .unwrap();
-            let root = builder.try_push_node(node(first, [])).unwrap();
-            builder.set_root(root);
+            let root = builder
+                .try_push_node_unchecked_for_test(node(first, []))
+                .unwrap();
+            builder.set_root_unchecked_for_test(root);
             let scene =
                 validate_canonical_scene(builder.finish_draft(), SceneValidationLimits::default())
                     .unwrap();
@@ -3941,8 +3953,10 @@ mod tests {
             DerivedAbsenceReason::NotProvided,
         )
         .unwrap();
-        let root = builder.try_push_node(node(provenance, [])).unwrap();
-        builder.set_root(root);
+        let root = builder
+            .try_push_node_unchecked_for_test(node(provenance, []))
+            .unwrap();
+        builder.set_root_unchecked_for_test(root);
         builder
             .try_push_camera(
                 crate::entity::Camera::try_new(
@@ -4378,8 +4392,10 @@ mod tests {
             DerivedAbsenceReason::NotProvided,
         )
         .unwrap();
-        let root = builder.try_push_node(node(provenance, [])).unwrap();
-        builder.set_root(root);
+        let root = builder
+            .try_push_node_unchecked_for_test(node(provenance, []))
+            .unwrap();
+        builder.set_root_unchecked_for_test(root);
         builder
             .try_push_logical_mesh(
                 LogicalMesh::try_new(
@@ -4460,8 +4476,10 @@ mod tests {
                 DerivedAbsenceReason::NotProvided,
             )
             .unwrap();
-            let root = builder.try_push_node(node(provenance, [])).unwrap();
-            builder.set_root(root);
+            let root = builder
+                .try_push_node_unchecked_for_test(node(provenance, []))
+                .unwrap();
+            builder.set_root_unchecked_for_test(root);
             builder
                 .try_push_logical_mesh(
                     LogicalMesh::try_new(
@@ -4521,8 +4539,10 @@ mod tests {
                 DerivedAbsenceReason::NotProvided,
             )
             .unwrap();
-            let root = builder.try_push_node(node(provenance, [])).unwrap();
-            builder.set_root(root);
+            let root = builder
+                .try_push_node_unchecked_for_test(node(provenance, []))
+                .unwrap();
+            builder.set_root_unchecked_for_test(root);
             builder.set_metadata(metadata).unwrap();
             builder.finish_draft()
         };
@@ -4589,8 +4609,8 @@ mod tests {
         )
         .unwrap();
         let root = builder
-            .try_push_node(
-                Node::try_new(
+            .try_push_node_unchecked_for_test(
+                Node::try_new_unchecked_references_for_test(
                     None,
                     AuthoredTransform::identity_trs(),
                     [],
@@ -4602,7 +4622,7 @@ mod tests {
                 .unwrap(),
             )
             .unwrap();
-        builder.set_root(root);
+        builder.set_root_unchecked_for_test(root);
         builder
             .try_push_texture_unchecked_for_test(Texture::from_unchecked_references_for_test(
                 ImageIndex::from_u32(13),
@@ -4738,8 +4758,10 @@ mod tests {
             DerivedAbsenceReason::NotProvided,
         )
         .unwrap();
-        let root = builder.try_push_node(node(provenance, [])).unwrap();
-        builder.set_root(root);
+        let root = builder
+            .try_push_node_unchecked_for_test(node(provenance, []))
+            .unwrap();
+        builder.set_root_unchecked_for_test(root);
         builder
             .try_push_logical_mesh(
                 LogicalMesh::try_new(
@@ -4801,8 +4823,8 @@ mod tests {
         )
         .unwrap();
         let root = builder
-            .try_push_node(
-                Node::try_new(
+            .try_push_node_unchecked_for_test(
+                Node::try_new_unchecked_references_for_test(
                     None,
                     AuthoredTransform::try_matrix(Mat4::IDENTITY).unwrap(),
                     [],
@@ -4814,7 +4836,7 @@ mod tests {
                 .unwrap(),
             )
             .unwrap();
-        builder.set_root(root);
+        builder.set_root_unchecked_for_test(root);
         builder
             .try_push_animation_clip(
                 AnimationClip::try_new(
@@ -4988,7 +5010,9 @@ mod tests {
         )
         .unwrap();
 
-        let root = builder.try_push_node(node(provenance, [])).unwrap();
+        let root = builder
+            .try_push_node_unchecked_for_test(node(provenance, []))
+            .unwrap();
         let logical_mesh = builder.try_push_logical_mesh(logical_mesh).unwrap();
         builder
             .try_push_mesh_instance(
@@ -4996,7 +5020,7 @@ mod tests {
                     .unwrap(),
             )
             .unwrap();
-        builder.set_root(root);
+        builder.set_root_unchecked_for_test(root);
         let mut draft = builder.finish_draft();
         let scene_stamp = scene_bounds_input_stamp(&draft.data).unwrap().stamp();
         let scene_generation = if matches!(fault, Some(DerivedBoundsFault::SceneGeneration)) {
@@ -5030,8 +5054,8 @@ mod tests {
         )
         .unwrap();
         let root = builder
-            .try_push_node(
-                Node::try_new(
+            .try_push_node_unchecked_for_test(
+                Node::try_new_unchecked_references_for_test(
                     None,
                     AuthoredTransform::try_trs(
                         Vec3::new(translation_x, 0.0, 0.0),
@@ -5080,7 +5104,7 @@ mod tests {
                 .unwrap(),
             )
             .unwrap();
-        builder.set_root(root);
+        builder.set_root_unchecked_for_test(root);
         scene_bounds_input_stamp(&builder.finish_draft().data)
             .unwrap()
             .stamp()
@@ -5097,8 +5121,10 @@ mod tests {
             DerivedAbsenceReason::NotProvided,
         )
         .unwrap();
-        let root = builder.try_push_node(node(provenance, [])).unwrap();
-        builder.set_root(root);
+        let root = builder
+            .try_push_node_unchecked_for_test(node(provenance, []))
+            .unwrap();
+        builder.set_root_unchecked_for_test(root);
         let mesh = builder
             .try_push_logical_mesh(mesh_with_influences_and_two_morphs(provenance))
             .unwrap();
@@ -5153,8 +5179,10 @@ mod tests {
             DerivedAbsenceReason::NotProvided,
         )
         .unwrap();
-        let root = builder.try_push_node(node(provenance, [])).unwrap();
-        builder.set_root(root);
+        let root = builder
+            .try_push_node_unchecked_for_test(node(provenance, []))
+            .unwrap();
+        builder.set_root_unchecked_for_test(root);
         let mesh = builder
             .try_push_logical_mesh(mesh_with_influences_and_two_morphs(provenance))
             .unwrap();

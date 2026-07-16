@@ -887,6 +887,7 @@ impl CanonicalValidatedScene {
 
 #[cfg(test)]
 mod tests {
+    use super::builder::node_batch::CanonicalNodeDescriptor;
     use super::builder::{CanonicalPreparedSceneInsert, CanonicalSceneBuilder};
     use super::*;
     use crate::animation::{AnimationLimits, AnimationTimeDomain};
@@ -914,7 +915,7 @@ mod tests {
     use crate::validation_control::SceneValidationLimits;
 
     fn root_node(provenance: crate::provenance::Provenance) -> Node {
-        Node::try_new(
+        Node::try_new_unchecked_references_for_test(
             None,
             AuthoredTransform::identity_trs(),
             [],
@@ -1030,23 +1031,43 @@ mod tests {
                 .unwrap(),
             )
             .unwrap();
-        let root = builder
-            .try_push_node(
-                Node::try_new(
+        let node_plan = builder.node_batch_plan(2).unwrap();
+        let committed_nodes = builder
+            .prepare_node_batch(node_plan, |batch| {
+                let root = batch.slot(0)?;
+                let child = batch.slot(1)?;
+                let root_children_plan = batch.node_children_plan(1)?;
+                let root_children = batch.prepare_node_children(root_children_plan, [child])?;
+                let root_descriptor = CanonicalNodeDescriptor::new(
                     None,
                     AuthoredTransform::identity_trs(),
-                    [NodeIndex::from_u32(1)],
+                    root_children,
                     Some(camera),
                     Some(light),
-                    provenance,
-                    [],
-                )
-                .unwrap(),
-            )
-            .unwrap();
-        let child = builder.try_push_node(root_node(provenance)).unwrap();
-        assert_eq!(child.as_u32(), 1);
-        builder.set_root(root);
+                    provenance.into(),
+                    Vec::new(),
+                );
+                batch.initialize_node(root, root_descriptor)?;
+
+                let child_children_plan = batch.node_children_plan(0)?;
+                let child_children = batch.prepare_node_children(child_children_plan, [])?;
+                let child_descriptor = CanonicalNodeDescriptor::new(
+                    None,
+                    AuthoredTransform::identity_trs(),
+                    child_children,
+                    None,
+                    None,
+                    provenance.into(),
+                    Vec::new(),
+                );
+                batch.initialize_node(child, child_descriptor)?;
+                batch.set_root(root)
+            })
+            .unwrap()
+            .commit();
+        let root_id = committed_nodes.root();
+        assert_eq!(committed_nodes.node_id(1).unwrap().index(), 1);
+        let root = NodeIndex::from_handle(builder.generation(), root_id).unwrap();
 
         let image = builder
             .try_push_image(
@@ -1208,9 +1229,9 @@ mod tests {
         )
         .expect("scene generation should remain available");
         let root = builder
-            .try_push_node(root_node(provenance))
+            .try_push_node_unchecked_for_test(root_node(provenance))
             .expect("root allocation should succeed");
-        builder.set_root(root);
+        builder.set_root_unchecked_for_test(root);
         let generation = builder.generation();
 
         let scene = crate::canonical_validation::validate_canonical_scene(
@@ -1243,7 +1264,7 @@ mod tests {
             .expect("node insertion collection envelope should fit");
 
         let prepared = builder
-            .prepare_push_node(root_node(provenance), plan)
+            .prepare_push_node_unchecked_for_test(root_node(provenance), plan)
             .expect("node insertion should prepare off to the side");
         assert!(prepared.replaces_collection_allocation());
         assert!(prepared.collection_retained_allocation_bytes() <= admitted);
@@ -1255,7 +1276,7 @@ mod tests {
             .collection_capacity_plan(CanonicalSceneCollection::Nodes)
             .expect("retry should have a fresh capacity plan");
         let prepared = builder
-            .prepare_push_node(root_node(provenance), plan)
+            .prepare_push_node_unchecked_for_test(root_node(provenance), plan)
             .expect("retry should prepare");
         let node = prepared.commit();
 
@@ -1275,7 +1296,7 @@ mod tests {
         )
         .expect("scene builder fixture should allocate");
         builder
-            .try_push_node(root_node(provenance))
+            .try_push_node_unchecked_for_test(root_node(provenance))
             .expect("fixture should establish reusable node capacity");
         builder.data.nodes.clear();
         let original_capacity = builder.data.nodes.capacity();
@@ -1286,7 +1307,7 @@ mod tests {
             .expect("spare node capacity should have a plan");
         assert!(!plan.replaces_collection_allocation());
         let prepared = builder
-            .prepare_push_node(root_node(provenance), plan)
+            .prepare_push_node_unchecked_for_test(root_node(provenance), plan)
             .expect("spare capacity should prepare without replacement storage");
         assert!(!prepared.replaces_collection_allocation());
         assert_eq!(prepared.collection_retained_allocation_bytes(), 0);
@@ -1299,7 +1320,7 @@ mod tests {
             .collection_capacity_plan(CanonicalSceneCollection::Nodes)
             .expect("retry should have a fresh capacity plan");
         let node = builder
-            .prepare_push_node(root_node(provenance), plan)
+            .prepare_push_node_unchecked_for_test(root_node(provenance), plan)
             .expect("retry should prepare")
             .commit();
 
@@ -1322,10 +1343,11 @@ mod tests {
         let wrong = builder
             .collection_capacity_plan(CanonicalSceneCollection::Materials)
             .expect("material insertion should have a capacity plan");
-        let wrong_error = match builder.prepare_push_node(root_node(provenance), wrong) {
-            Ok(_) => panic!("a material capacity plan must not prepare a node"),
-            Err(error) => error,
-        };
+        let wrong_error =
+            match builder.prepare_push_node_unchecked_for_test(root_node(provenance), wrong) {
+                Ok(_) => panic!("a material capacity plan must not prepare a node"),
+                Err(error) => error,
+            };
         assert_eq!(
             wrong_error,
             CanonicalSceneBuildError::CapacityPlanCollectionMismatch {
@@ -1339,12 +1361,13 @@ mod tests {
             .collection_capacity_plan(CanonicalSceneCollection::Nodes)
             .expect("node insertion should have a capacity plan");
         builder
-            .try_push_node(root_node(provenance))
+            .try_push_node_unchecked_for_test(root_node(provenance))
             .expect("intervening insertion should succeed");
-        let stale_error = match builder.prepare_push_node(root_node(provenance), stale) {
-            Ok(_) => panic!("a stale capacity plan must not prepare a node"),
-            Err(error) => error,
-        };
+        let stale_error =
+            match builder.prepare_push_node_unchecked_for_test(root_node(provenance), stale) {
+                Ok(_) => panic!("a stale capacity plan must not prepare a node"),
+                Err(error) => error,
+            };
         assert!(matches!(
             stale_error,
             CanonicalSceneBuildError::CapacityPlan {

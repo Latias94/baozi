@@ -4,6 +4,8 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
+mod attachments;
+
 struct ReservationDropProbe(Arc<AtomicU8>);
 
 impl Drop for ReservationDropProbe {
@@ -56,19 +58,19 @@ fn node_descriptor<'batch, C, const N: usize>(
     let children = batch
         .prepare_node_children(plan, children)
         .expect("node children should prepare");
-    CanonicalNodeDescriptor {
-        name: Some(EntityName::try_new(name).expect("fixture name should be valid")),
-        authored_transform: AuthoredTransform::identity_trs(),
+    CanonicalNodeDescriptor::new(
+        Some(EntityName::try_new(name).expect("fixture name should be valid")),
+        AuthoredTransform::identity_trs(),
         children,
-        camera: None,
-        light: None,
-        provenance: provenance.into(),
-        extensions: Vec::new(),
-    }
+        None,
+        None,
+        provenance.into(),
+        Vec::new(),
+    )
 }
 
 fn standalone_node(provenance: Provenance) -> Node {
-    Node::try_new(
+    Node::try_new_unchecked_references_for_test(
         None,
         AuthoredTransform::identity_trs(),
         [],
@@ -483,7 +485,9 @@ fn foreign_plan_and_non_pristine_builder_are_rejected_without_allocation() {
     );
     assert!(first.data.nodes.is_empty());
 
-    first.try_push_node(standalone_node(provenance)).unwrap();
+    first
+        .try_push_node_unchecked_for_test(standalone_node(provenance))
+        .unwrap();
     assert!(matches!(
         first.node_batch_plan(1),
         Err(CanonicalSceneBuildError::NodeBatchNotPristine { .. })
@@ -516,7 +520,9 @@ fn node_batch_plan_boundaries_and_stale_pristine_state_are_typed() {
     assert_eq!(builder.data.nodes.capacity(), 0);
 
     let stale = builder.node_batch_plan(1).unwrap();
-    builder.try_push_node(standalone_node(provenance)).unwrap();
+    builder
+        .try_push_node_unchecked_for_test(standalone_node(provenance))
+        .unwrap();
     assert!(matches!(
         builder.prepare_node_batch(stale, |_| Ok(())),
         Err(CanonicalSceneBuildError::NodeBatchNotPristine { .. })

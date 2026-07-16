@@ -402,12 +402,20 @@ fn scene_with_valid_bounds_and_transform(
     )
     .expect("canonical edit fixture builder");
     let root = builder
-        .try_push_node(
-            Node::try_new(None, root_transform, [], None, None, provenance, [])
-                .expect("canonical edit fixture root"),
+        .try_push_node_unchecked_for_test(
+            Node::try_new_unchecked_references_for_test(
+                None,
+                root_transform,
+                [],
+                None,
+                None,
+                provenance,
+                [],
+            )
+            .expect("canonical edit fixture root"),
         )
         .expect("canonical edit fixture node storage");
-    builder.set_root(root);
+    builder.set_root_unchecked_for_test(root);
     let mut draft = builder.finish_draft();
     let stamp = scene_bounds_input_stamp(&draft.data)
         .expect("scene bounds fixture stamp")
@@ -438,8 +446,8 @@ fn scene_with_three_nodes() -> CanonicalValidatedScene {
     )
     .expect("multi-node edit fixture builder");
     let root = builder
-        .try_push_node(
-            Node::try_new(
+        .try_push_node_unchecked_for_test(
+            Node::try_new_unchecked_references_for_test(
                 None,
                 AuthoredTransform::identity_trs(),
                 [NodeIndex::from_u32(1), NodeIndex::from_u32(2)],
@@ -452,8 +460,8 @@ fn scene_with_three_nodes() -> CanonicalValidatedScene {
         )
         .expect("multi-node root storage");
     builder
-        .try_push_node(
-            Node::try_new(
+        .try_push_node_unchecked_for_test(
+            Node::try_new_unchecked_references_for_test(
                 None,
                 AuthoredTransform::identity_trs(),
                 [],
@@ -466,8 +474,8 @@ fn scene_with_three_nodes() -> CanonicalValidatedScene {
         )
         .expect("multi-node child storage");
     builder
-        .try_push_node(
-            Node::try_new(
+        .try_push_node_unchecked_for_test(
+            Node::try_new_unchecked_references_for_test(
                 None,
                 AuthoredTransform::try_matrix(Mat4::IDENTITY).expect("multi-node sibling matrix"),
                 [],
@@ -479,7 +487,7 @@ fn scene_with_three_nodes() -> CanonicalValidatedScene {
             .expect("multi-node sibling"),
         )
         .expect("multi-node sibling storage");
-    builder.set_root(root);
+    builder.set_root_unchecked_for_test(root);
 
     validate_canonical_scene(builder.finish_draft(), SceneValidationLimits::default())
         .expect("multi-node edit fixture should validate")
@@ -505,8 +513,8 @@ fn scene_with_many_nodes(node_count: usize) -> CanonicalValidatedScene {
         })
         .collect::<Vec<_>>();
     let root = builder
-        .try_push_node(
-            Node::try_new(
+        .try_push_node_unchecked_for_test(
+            Node::try_new_unchecked_references_for_test(
                 None,
                 AuthoredTransform::identity_trs(),
                 children,
@@ -520,8 +528,8 @@ fn scene_with_many_nodes(node_count: usize) -> CanonicalValidatedScene {
         .expect("large-node root storage");
     for _ in 1..node_count {
         builder
-            .try_push_node(
-                Node::try_new(
+            .try_push_node_unchecked_for_test(
+                Node::try_new_unchecked_references_for_test(
                     None,
                     AuthoredTransform::identity_trs(),
                     [],
@@ -534,7 +542,7 @@ fn scene_with_many_nodes(node_count: usize) -> CanonicalValidatedScene {
             )
             .expect("large-node child storage");
     }
-    builder.set_root(root);
+    builder.set_root_unchecked_for_test(root);
 
     validate_canonical_scene(builder.finish_draft(), SceneValidationLimits::default())
         .expect("large-node edit fixture should validate")
@@ -678,8 +686,8 @@ fn scene_with_valid_local_and_scene_bounds() -> CanonicalValidatedScene {
     .expect("canonical edit local-bounds fixture builder");
     let generation = builder.generation();
     let root = builder
-        .try_push_node(
-            Node::try_new(
+        .try_push_node_unchecked_for_test(
+            Node::try_new_unchecked_references_for_test(
                 None,
                 AuthoredTransform::identity_trs(),
                 [],
@@ -691,7 +699,7 @@ fn scene_with_valid_local_and_scene_bounds() -> CanonicalValidatedScene {
             .expect("canonical edit local-bounds fixture root"),
         )
         .expect("canonical edit local-bounds fixture node storage");
-    builder.set_root(root);
+    builder.set_root_unchecked_for_test(root);
     builder
         .try_push_logical_mesh(logical_mesh_with_valid_bounds(generation, provenance))
         .expect("canonical edit local-bounds fixture mesh storage");
@@ -725,8 +733,8 @@ fn scene_with_three_primitives_and_absent_scene_bounds() -> CanonicalValidatedSc
     )
     .expect("canonical edit primitive-capacity fixture builder");
     let root = builder
-        .try_push_node(
-            Node::try_new(
+        .try_push_node_unchecked_for_test(
+            Node::try_new_unchecked_references_for_test(
                 None,
                 AuthoredTransform::identity_trs(),
                 [],
@@ -738,7 +746,7 @@ fn scene_with_three_primitives_and_absent_scene_bounds() -> CanonicalValidatedSc
             .expect("canonical edit primitive-capacity fixture root"),
         )
         .expect("canonical edit primitive-capacity root storage");
-    builder.set_root(root);
+    builder.set_root_unchecked_for_test(root);
 
     let primitive = || {
         MeshPrimitive::try_new(
@@ -794,8 +802,8 @@ fn scene_with_many_vertices(vertex_count: usize) -> CanonicalValidatedScene {
     )
     .expect("canonical edit large-remap fixture builder");
     let root = builder
-        .try_push_node(
-            Node::try_new(
+        .try_push_node_unchecked_for_test(
+            Node::try_new_unchecked_references_for_test(
                 None,
                 AuthoredTransform::identity_trs(),
                 [],
@@ -807,7 +815,7 @@ fn scene_with_many_vertices(vertex_count: usize) -> CanonicalValidatedScene {
             .expect("canonical edit large-remap root"),
         )
         .expect("canonical edit large-remap root storage");
-    builder.set_root(root);
+    builder.set_root_unchecked_for_test(root);
 
     let attribute = Attribute::new(
         AttributeSemantic::Position,

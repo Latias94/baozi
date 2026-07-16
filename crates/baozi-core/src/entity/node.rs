@@ -1,7 +1,9 @@
+#[cfg(test)]
+use super::try_collect_bounded;
 use super::{
     AuthoredTransform, EntityAllocation, EntityCollectionError, EntityName,
     EntityRetainedFootprintError, MAX_ENTITY_EXTENSION_ENTRIES, MAX_NODE_CHILDREN,
-    try_collect_bounded, unwrap_uncontrolled_retained_footprint,
+    unwrap_uncontrolled_retained_footprint,
 };
 use crate::extension::{
     ControlledRetainedFootprintError, ExtensionEntry, ExtensionEntryValidationError,
@@ -62,8 +64,8 @@ impl NodePreparedFootprint {
 }
 
 impl Node {
-    /// Creates a node and validates all leaf-level invariants.
-    pub fn try_new(
+    #[cfg(test)]
+    pub(crate) fn try_new_unchecked_references_for_test(
         name: Option<EntityName>,
         authored_transform: AuthoredTransform,
         children: impl IntoIterator<Item = NodeIndex>,
@@ -156,11 +158,11 @@ impl Node {
         self.payload.as_ref().children.get(index).copied()
     }
 
-    pub fn camera_index(&self) -> Option<CameraIndex> {
+    pub(crate) fn camera_index(&self) -> Option<CameraIndex> {
         self.payload.as_ref().camera
     }
 
-    pub fn light_index(&self) -> Option<LightIndex> {
+    pub(crate) fn light_index(&self) -> Option<LightIndex> {
         self.payload.as_ref().light
     }
 

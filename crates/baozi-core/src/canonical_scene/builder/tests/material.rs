@@ -161,7 +161,7 @@ fn material_descriptor_rejects_foreign_texture_generation_without_mutation() {
             ))
             .unwrap_err();
 
-        assert_generation_mismatch(error, SceneEntityKind::Texture);
+        assert_generation_mismatch_for_test(error, SceneEntityKind::Texture);
         assert_eq!(builder.data.materials.len(), original_len);
         assert_eq!(builder.data.materials.capacity(), original_capacity);
     }
@@ -260,7 +260,7 @@ fn material_descriptor_checks_all_texture_generations_before_any_range() {
         ))
         .unwrap_err();
 
-    assert_generation_mismatch(error, SceneEntityKind::Texture);
+    assert_generation_mismatch_for_test(error, SceneEntityKind::Texture);
     assert_eq!(builder.data.materials.len(), original_len);
     assert_eq!(builder.data.materials.capacity(), original_capacity);
 }

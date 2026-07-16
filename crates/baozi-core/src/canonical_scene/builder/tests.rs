@@ -26,15 +26,6 @@ fn encoded_image(byte: u8, provenance: Provenance) -> Image {
         .expect("encoded image fixture should be valid")
 }
 
-fn assert_generation_mismatch(error: CanonicalSceneBuildError, expected_kind: SceneEntityKind) {
-    let CanonicalSceneBuildError::Reference(SceneLookupError::GenerationMismatch { kind, .. }) =
-        error
-    else {
-        panic!("expected a generation mismatch, observed {error:?}");
-    };
-    assert_eq!(kind, expected_kind);
-}
-
 #[test]
 fn texture_construction_lowers_nonzero_qualified_references_exactly() {
     let (mut builder, provenance) = scene_builder();
@@ -105,7 +96,7 @@ fn texture_descriptor_rejects_foreign_generation_before_range_without_mutation()
                 second_provenance,
             ))
             .unwrap_err();
-        assert_generation_mismatch(error, SceneEntityKind::Image);
+        assert_generation_mismatch_for_test(error, SceneEntityKind::Image);
         assert!(second.data.textures.is_empty());
     }
 
@@ -120,7 +111,7 @@ fn texture_descriptor_rejects_foreign_generation_before_range_without_mutation()
                 second_provenance,
             ))
             .unwrap_err();
-        assert_generation_mismatch(error, SceneEntityKind::Sampler);
+        assert_generation_mismatch_for_test(error, SceneEntityKind::Sampler);
         assert!(second.data.textures.is_empty());
     }
 }
@@ -232,6 +223,6 @@ fn texture_descriptor_checks_all_generations_before_any_range() {
         ))
         .unwrap_err();
 
-    assert_generation_mismatch(error, SceneEntityKind::Sampler);
+    assert_generation_mismatch_for_test(error, SceneEntityKind::Sampler);
     assert_eq!(builder.data.textures.len(), texture_count);
 }
