@@ -6,7 +6,10 @@
 //! color interpretation deliberately live outside this module.
 
 use crate::extension::{ExtensionMediaType, ExtensionMediaTypeError};
-use crate::identity::{ImageId, ImageIndex, SamplerId, SamplerIndex, SceneGenerationId};
+use crate::identity::{
+    ImageId, ImageIndex, SamplerId, SamplerIndex, SceneGenerationId, SceneLookupError,
+    validate_storage_index,
+};
 use crate::provenance::{ContentDigest, Provenance};
 use baozi_operation::CapacityPlan;
 use std::fmt;
@@ -705,9 +708,43 @@ pub struct Texture {
     provenance: Provenance,
 }
 
+/// Generation-qualified input used to assemble one canonical texture.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct CanonicalTextureDescriptor {
+    image: ImageId,
+    sampler: SamplerId,
+    provenance: Provenance,
+}
+
+impl CanonicalTextureDescriptor {
+    pub(crate) const fn new(image: ImageId, sampler: SamplerId, provenance: Provenance) -> Self {
+        Self {
+            image,
+            sampler,
+            provenance,
+        }
+    }
+
+    pub(crate) fn resolve(
+        self,
+        generation: SceneGenerationId,
+        image_count: usize,
+        sampler_count: usize,
+    ) -> Result<Texture, SceneLookupError> {
+        let image = ImageIndex::from_handle(generation, self.image)?;
+        let sampler = SamplerIndex::from_handle(generation, self.sampler)?;
+        let image = validate_storage_index(image, image_count)?;
+        let sampler = validate_storage_index(sampler, sampler_count)?;
+        Ok(Texture::from_resolved_references(
+            image,
+            sampler,
+            self.provenance,
+        ))
+    }
+}
+
 impl Texture {
-    /// Creates a pairing from private scene-local typed indexes.
-    pub(crate) const fn new(
+    const fn from_resolved_references(
         image: ImageIndex,
         sampler: SamplerIndex,
         provenance: Provenance,
@@ -717,6 +754,15 @@ impl Texture {
             sampler,
             provenance,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn from_unchecked_references_for_test(
+        image: ImageIndex,
+        sampler: SamplerIndex,
+        provenance: Provenance,
+    ) -> Self {
+        Self::from_resolved_references(image, sampler, provenance)
     }
 
     pub(crate) const fn image_index(self) -> ImageIndex {
@@ -732,7 +778,7 @@ impl Texture {
         self.provenance
     }
 
-    /// Creates generation-qualified public handles only at the read boundary.
+    /// Qualifies the stored private indexes with the owning generation.
     pub(crate) const fn view(self, generation: SceneGenerationId) -> TextureView {
         TextureView {
             image: self.image.handle(generation),
@@ -875,12 +921,12 @@ mod tests {
             ),
             provenance,
         );
-        let first_texture = Texture::new(
+        let first_texture = Texture::from_unchecked_references_for_test(
             ImageIndex::from_u32(0),
             SamplerIndex::from_u32(0),
             provenance,
         );
-        let second_texture = Texture::new(
+        let second_texture = Texture::from_unchecked_references_for_test(
             ImageIndex::from_u32(0),
             SamplerIndex::from_u32(1),
             provenance,
@@ -991,7 +1037,7 @@ mod tests {
     #[test]
     fn texture_storage_uses_independent_typed_indexes() {
         let (_arena, provenance) = test_provenance_fixture();
-        let texture = Texture::new(
+        let texture = Texture::from_unchecked_references_for_test(
             ImageIndex::try_from(12usize).unwrap(),
             SamplerIndex::try_from(7usize).unwrap(),
             provenance,

@@ -95,6 +95,8 @@ impl<T, Id> CanonicalPreparedSceneInsert for PreparedCanonicalSceneInsert<'_, T,
 }
 
 pub(crate) mod node_batch;
+#[cfg(test)]
+mod tests;
 pub(crate) struct CanonicalSceneBuilder {
     pub(super) data: CanonicalSceneData,
 }
@@ -329,7 +331,7 @@ impl CanonicalSceneBuilder {
     pub(crate) fn try_push_image(
         &mut self,
         image: Image,
-    ) -> Result<ImageIndex, CanonicalSceneBuildError> {
+    ) -> Result<ImageId, CanonicalSceneBuildError> {
         let plan = self.collection_capacity_plan(CanonicalSceneCollection::Images)?;
         self.prepare_push_image(image, plan)
             .map(CanonicalPreparedSceneInsert::commit)
@@ -339,13 +341,14 @@ impl CanonicalSceneBuilder {
         &mut self,
         image: Image,
         plan: CanonicalSceneCapacityPlan,
-    ) -> Result<impl CanonicalPreparedSceneInsert<Id = ImageIndex> + '_, CanonicalSceneBuildError>
+    ) -> Result<impl CanonicalPreparedSceneInsert<Id = ImageId> + '_, CanonicalSceneBuildError>
     {
         let index = ImageIndex::try_from(self.data.images.len())?;
+        let id = index.handle(self.data.generation);
         prepare_shared_insert(
             &mut self.data.images,
             image,
-            index,
+            id,
             plan,
             CanonicalSceneCollection::Images,
         )
@@ -354,7 +357,7 @@ impl CanonicalSceneBuilder {
     pub(crate) fn try_push_sampler(
         &mut self,
         sampler: Sampler,
-    ) -> Result<SamplerIndex, CanonicalSceneBuildError> {
+    ) -> Result<SamplerId, CanonicalSceneBuildError> {
         let plan = self.collection_capacity_plan(CanonicalSceneCollection::Samplers)?;
         self.prepare_push_sampler(sampler, plan)
             .map(CanonicalPreparedSceneInsert::commit)
@@ -364,13 +367,14 @@ impl CanonicalSceneBuilder {
         &mut self,
         sampler: Sampler,
         plan: CanonicalSceneCapacityPlan,
-    ) -> Result<impl CanonicalPreparedSceneInsert<Id = SamplerIndex> + '_, CanonicalSceneBuildError>
+    ) -> Result<impl CanonicalPreparedSceneInsert<Id = SamplerId> + '_, CanonicalSceneBuildError>
     {
         let index = SamplerIndex::try_from(self.data.samplers.len())?;
+        let id = index.handle(self.data.generation);
         prepare_shared_insert(
             &mut self.data.samplers,
             sampler,
-            index,
+            id,
             plan,
             CanonicalSceneCollection::Samplers,
         )
@@ -378,27 +382,54 @@ impl CanonicalSceneBuilder {
 
     pub(crate) fn try_push_texture(
         &mut self,
-        texture: Texture,
-    ) -> Result<TextureIndex, CanonicalSceneBuildError> {
+        descriptor: CanonicalTextureDescriptor,
+    ) -> Result<TextureId, CanonicalSceneBuildError> {
         let plan = self.collection_capacity_plan(CanonicalSceneCollection::Textures)?;
-        self.prepare_push_texture(texture, plan)
+        self.prepare_push_texture(descriptor, plan)
             .map(CanonicalPreparedSceneInsert::commit)
     }
 
     pub(crate) fn prepare_push_texture(
         &mut self,
+        descriptor: CanonicalTextureDescriptor,
+        plan: CanonicalSceneCapacityPlan,
+    ) -> Result<impl CanonicalPreparedSceneInsert<Id = TextureId> + '_, CanonicalSceneBuildError>
+    {
+        let texture = descriptor.resolve(
+            self.data.generation,
+            self.data.images.len(),
+            self.data.samplers.len(),
+        )?;
+        self.prepare_resolved_texture(texture, plan)
+    }
+
+    fn prepare_resolved_texture(
+        &mut self,
         texture: Texture,
         plan: CanonicalSceneCapacityPlan,
-    ) -> Result<impl CanonicalPreparedSceneInsert<Id = TextureIndex> + '_, CanonicalSceneBuildError>
-    {
+    ) -> Result<
+        PreparedCanonicalSceneInsert<'_, SharedStorage<Texture>, TextureId>,
+        CanonicalSceneBuildError,
+    > {
         let index = TextureIndex::try_from(self.data.textures.len())?;
+        let id = index.handle(self.data.generation);
         prepare_shared_insert(
             &mut self.data.textures,
             texture,
-            index,
+            id,
             plan,
             CanonicalSceneCollection::Textures,
         )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn try_push_texture_unchecked_for_test(
+        &mut self,
+        texture: Texture,
+    ) -> Result<TextureId, CanonicalSceneBuildError> {
+        let plan = self.collection_capacity_plan(CanonicalSceneCollection::Textures)?;
+        self.prepare_resolved_texture(texture, plan)
+            .map(CanonicalPreparedSceneInsert::commit)
     }
 
     pub(crate) fn try_push_skin(

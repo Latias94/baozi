@@ -28,7 +28,9 @@ use crate::identity::{
     SceneGenerationError, SceneGenerationId, SceneLookupError, SceneStorageIndexError, SkinId,
     SkinIndex, TextureId, TextureIndex, lookup_owned, lookup_scene_wide,
 };
-use crate::image::{Image, ImageView, Sampler, SamplerView, Texture, TextureView};
+use crate::image::{
+    CanonicalTextureDescriptor, Image, ImageView, Sampler, SamplerView, Texture, TextureView,
+};
 use crate::math::{Aabb, Mat4, Vec3};
 use crate::provenance::{Provenance, ProvenanceArena, ProvenanceAttachments};
 use crate::scene_space::SceneSpace;
@@ -243,6 +245,8 @@ pub(crate) enum CanonicalSceneBuildError {
     Generation(#[from] SceneGenerationError),
     #[error(transparent)]
     Index(#[from] SceneStorageIndexError),
+    #[error(transparent)]
+    Reference(#[from] SceneLookupError),
     #[error(transparent)]
     Node(#[from] NodeError),
     #[error("canonical scene collection size overflowed for {collection:?}")]
@@ -898,7 +902,7 @@ mod tests {
     use crate::geometry::{
         IndexStream, LogicalMeshBounds, MeshPrimitive, MorphBoundsPolicy, PrimitiveBounds, Topology,
     };
-    use crate::image::{Image, Sampler, Texture};
+    use crate::image::{CanonicalTextureDescriptor, Image, Sampler};
     use crate::math::{Color, Mat4, Vec3};
     use crate::provenance::{Provenance, test_provenance_fixture};
     use crate::scene_space::SceneSpace;
@@ -1029,7 +1033,7 @@ mod tests {
             .try_push_sampler(Sampler::canonical_default(provenance))
             .unwrap();
         builder
-            .try_push_texture(Texture::new(image, sampler, provenance))
+            .try_push_texture(CanonicalTextureDescriptor::new(image, sampler, provenance))
             .unwrap();
         let material = builder
             .try_push_material(
@@ -1193,52 +1197,6 @@ mod tests {
         assert_eq!(scene.generation(), generation);
         assert!(scene.node(root.handle(generation)).is_ok());
         assert_eq!(scene.validation_stats().canonical_counts().nodes, 1);
-    }
-
-    #[test]
-    fn builder_assigns_private_indexes_for_scene_wide_collections() {
-        let (provenance_arena, provenance) = test_provenance_fixture();
-        let mut builder = CanonicalSceneBuilder::try_new(
-            SceneSpace::unknown(),
-            ExtensionSchemaSnapshot::empty(),
-            provenance_arena,
-            provenance,
-            DerivedAbsenceReason::NotProvided,
-        )
-        .expect("scene generation should remain available");
-
-        let camera = Camera::try_new(
-            None,
-            CameraProjection::perspective(1.0, None, 0.1, None).unwrap(),
-            provenance,
-            [],
-        )
-        .unwrap();
-        let light = Light::try_new(
-            None,
-            LightKind::Directional,
-            Color::linear_rgba(1.0, 1.0, 1.0, 1.0),
-            1.0,
-            provenance,
-            [],
-        )
-        .unwrap();
-        let image = Image::try_encoded([1, 2, 3], None, None, None, None, provenance).unwrap();
-        let sampler = Sampler::canonical_default(provenance);
-
-        let camera_index = builder.try_push_camera(camera).unwrap();
-        let light_index = builder.try_push_light(light).unwrap();
-        let image_index = builder.try_push_image(image).unwrap();
-        let sampler_index = builder.try_push_sampler(sampler).unwrap();
-        let texture_index = builder
-            .try_push_texture(Texture::new(image_index, sampler_index, provenance))
-            .unwrap();
-
-        assert_eq!(camera_index.as_u32(), 0);
-        assert_eq!(light_index.as_u32(), 0);
-        assert_eq!(image_index.as_u32(), 0);
-        assert_eq!(sampler_index.as_u32(), 0);
-        assert_eq!(texture_index.as_u32(), 0);
     }
 
     #[test]

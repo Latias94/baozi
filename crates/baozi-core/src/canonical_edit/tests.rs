@@ -29,7 +29,7 @@ use crate::geometry::{
     PrimitiveBounds, Topology,
 };
 use crate::identity::{NodeId, NodeIndex, SceneGenerationId, SceneLookupError};
-use crate::image::{Image, Sampler, Texture};
+use crate::image::{CanonicalTextureDescriptor, Image, Sampler};
 use crate::math::{Aabb, Color, Mat4, Quat, Vec3};
 use crate::provenance::test_provenance_fixture;
 use crate::remap::{RemapChange, RemapSpace};

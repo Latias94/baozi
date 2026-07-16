@@ -4603,7 +4603,7 @@ mod tests {
             .unwrap();
         builder.set_root(root);
         builder
-            .try_push_texture(Texture::new(
+            .try_push_texture_unchecked_for_test(Texture::from_unchecked_references_for_test(
                 ImageIndex::from_u32(13),
                 SamplerIndex::from_u32(14),
                 provenance,

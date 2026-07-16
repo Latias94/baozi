@@ -61,7 +61,7 @@ fn fully_populated_scene() -> CanonicalValidatedScene {
         .try_push_sampler(Sampler::canonical_default(provenance))
         .expect("sampler storage");
     builder
-        .try_push_texture(Texture::new(image, sampler, provenance))
+        .try_push_texture(CanonicalTextureDescriptor::new(image, sampler, provenance))
         .expect("texture storage");
     let material = builder
         .try_push_material(

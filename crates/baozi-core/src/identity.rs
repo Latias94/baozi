@@ -465,15 +465,40 @@ fn lookup_storage_index<T, I: SceneStorageIndex>(
 ) -> Result<&T, SceneLookupError> {
     let entity = index
         .get(entities)
-        .map_err(|_| SceneLookupError::OutOfRange {
-            kind: I::KIND,
-            length: entities.len(),
-        })?;
+        .map_err(|_| out_of_range::<I>(entities.len()))?;
 
-    entity.ok_or(SceneLookupError::OutOfRange {
+    entity.ok_or_else(|| out_of_range::<I>(entities.len()))
+}
+
+pub(crate) fn validate_storage_index<I: SceneStorageIndex>(
+    index: I,
+    length: usize,
+) -> Result<I, SceneLookupError> {
+    let position = index
+        .try_to_usize()
+        .map_err(|_| out_of_range::<I>(length))?;
+    if position >= length {
+        return Err(out_of_range::<I>(length));
+    }
+    Ok(index)
+}
+
+const fn out_of_range<I: SceneStorageIndex>(length: usize) -> SceneLookupError {
+    SceneLookupError::OutOfRange {
         kind: I::KIND,
-        length: entities.len(),
-    })
+        length,
+    }
+}
+
+/// Resolves a scene-wide handle to its compact storage index after validating
+/// generation and collection range, in that order.
+pub(crate) fn resolve_scene_wide_index<H: SceneWideHandle>(
+    expected_generation: SceneGenerationId,
+    handle: H,
+    collection_length: usize,
+) -> Result<H::StorageIndex, SceneLookupError> {
+    let index = handle.storage_index(expected_generation)?;
+    validate_storage_index(index, collection_length)
 }
 
 /// Looks up a scene-wide handle after validating its generation.
