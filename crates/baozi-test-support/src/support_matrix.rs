@@ -1,5 +1,6 @@
 use baozi_import::{
-    CapabilityStatus, DependencyRequirement, FormatCapability, FormatDescriptor, FormatMaturity,
+    CapabilityStatus, DeclarationEvidenceAuthority, DependencyRequirement, FormatCapability,
+    FormatDescriptor,
 };
 
 const SUPPORT_MATRIX: &str = include_str!("../../../docs/formats/support-matrix.md");
@@ -24,19 +25,19 @@ pub enum SupportMatrixColumn {
 impl SupportMatrixColumn {
     fn index(self) -> usize {
         match self {
-            Self::Geometry => 3,
-            Self::Hierarchy => 4,
-            Self::Materials => 5,
-            Self::Textures => 6,
-            Self::CamerasLights => 7,
-            Self::Animation => 8,
-            Self::Skinning => 9,
-            Self::MorphTargets => 10,
-            Self::Metadata => 11,
-            Self::CompressionContainers => 12,
-            Self::CoordinatesUnits => 13,
-            Self::ResourceLimits => 14,
-            Self::Diagnostics => 16,
+            Self::Geometry => 4,
+            Self::Hierarchy => 5,
+            Self::Materials => 6,
+            Self::Textures => 7,
+            Self::CamerasLights => 8,
+            Self::Animation => 9,
+            Self::Skinning => 10,
+            Self::MorphTargets => 11,
+            Self::Metadata => 12,
+            Self::CompressionContainers => 13,
+            Self::CoordinatesUnits => 14,
+            Self::ResourceLimits => 15,
+            Self::Diagnostics => 17,
         }
     }
 }
@@ -82,13 +83,17 @@ pub fn assert_support_matrix_row(crate_name: &str, descriptor: &FormatDescriptor
 
     assert_eq!(
         columns.len(),
-        18,
+        19,
         "support matrix column count drifted for {crate_name}"
     );
     assert_eq!(columns[1], expected_crate);
-    assert_eq!(columns[2], maturity_label(descriptor.maturity()));
     assert_eq!(
-        columns[15],
+        columns[2],
+        declaration_evidence_label(descriptor.declaration_evidence_authority())
+    );
+    assert_eq!(columns[3], "None", "unexpected Baozi maturity claim");
+    assert_eq!(
+        columns[16],
         sidecar_label(descriptor),
         "support matrix Sidecars/archives column drifted for {crate_name}"
     );
@@ -132,12 +137,9 @@ fn capability_status(
     })
 }
 
-fn maturity_label(maturity: FormatMaturity) -> &'static str {
-    match maturity {
-        FormatMaturity::Experimental => "Experimental",
-        FormatMaturity::Beta => "Beta",
-        FormatMaturity::Stable => "Stable",
-        FormatMaturity::Deprecated => "Deprecated",
+fn declaration_evidence_label(authority: DeclarationEvidenceAuthority) -> &'static str {
+    match authority {
+        DeclarationEvidenceAuthority::Unverified => "Unverified",
         _ => "Unknown",
     }
 }
@@ -167,5 +169,22 @@ fn sidecar_label(descriptor: &FormatDescriptor) -> &'static str {
         "Partial"
     } else {
         "Supported"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_published_row_is_unverified_without_baozi_maturity() {
+        for crate_name in ["baozi-format-stl", "baozi-format-obj", "baozi-format-ply"] {
+            let columns = parse_markdown_row(support_matrix_row(crate_name));
+            assert_eq!(
+                columns[2], "Unverified",
+                "unexpected authority for {crate_name}"
+            );
+            assert_eq!(columns[3], "None", "unexpected maturity for {crate_name}");
+        }
     }
 }

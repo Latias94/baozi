@@ -1,10 +1,10 @@
 use baozi_core::{FormatId, SceneDraft};
 use baozi_import::{
     CapabilityStatus, CompiledFormatOptions, DetectionOutcome, DetectionResult, DetectionScope,
-    FormatCapability, FormatDescriptor, FormatEncoding, FormatImporter, FormatMaturity,
-    FormatOptionCodec, FormatOptionEnvelope, FormatOptionEnvelopeError, FormatOptionKey,
-    FormatOptionLayers, FormatOptionSchema, FormatOptionSchemaId, FormatOptionSchemaKey,
-    FormatSelection, FormatUnavailability, ImportConfigOverlay, ImportLossKind, ImportRequest,
+    FormatCapability, FormatDescriptor, FormatEncoding, FormatImporter, FormatOptionCodec,
+    FormatOptionEnvelope, FormatOptionEnvelopeError, FormatOptionKey, FormatOptionLayers,
+    FormatOptionSchema, FormatOptionSchemaId, FormatOptionSchemaKey, FormatSelection,
+    FormatUnavailability, ImportConfigOverlay, ImportLossKind, ImportRequest,
     ImportRequestBuildError, ImportRequestLayer, LossPolicy, OptionBudget, OptionCompileError,
     OptionCompileLimits, OptionCompileScope, OptionRuntimeTypeKey, OptionScopeLimits, ParseResult,
     ParseScope, ReadHint, RegistryBuildError, RegistryBuildLimits, RegistryBuildScope,
@@ -224,7 +224,6 @@ fn descriptor(format: FormatId) -> FormatDescriptor {
         .extensions(["test"])
         .media_types(["model/test"])
         .encoding(FormatEncoding::Binary)
-        .maturity(FormatMaturity::Experimental)
         .capabilities([(FormatCapability::Geometry, CapabilityStatus::Unknown)])
         .build()
         .unwrap()

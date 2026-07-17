@@ -5,6 +5,8 @@
 - Format: glTF 2.0 / GLB
 - Crate: `baozi-format-gltf`
 - Admission: blocked; internal development candidate only
+- Declaration evidence: Unverified
+- Baozi maturity: None (no current `BaoziVerified` evidence record)
 - Public facade feature: none
 - Parser backend: `gltf-rs` 1.4.x as an internal bootstrap dependency
 - Candidate extensions: `.gltf`, `.glb`
@@ -26,13 +28,13 @@ without changing facade users. The ownership and replacement boundary is defined
 [`ADR 0027`](../adr/0027-gltf-backend-ownership-and-replacement-policy.md).
 
 The crate remains `publish = false`. A public facade feature may be reintroduced only after the ADR
-0027 baseline admission gates pass; broader non-safety maturity evidence then determines whether the
-admitted format is Experimental, Beta, or Stable.
+0027 baseline admission gates pass. A separate managed evidence inventory must verify an exact
+admitted subject before Baozi can assign it any maturity.
 
 The `gltf_import` development fuzz target currently compiles but is not accepted as parser evidence.
 Malformed input can trigger a `gltf-rs` validation panic in cargo-fuzz builds where panic aborts
 before Baozi's `catch_unwind` fallback can return an error. This known baseline failure is why the
-format is disabled at the facade rather than labeled Experimental. The blocker and replacement
+format is disabled at the facade rather than assigned a maturity. The blocker and replacement
 criteria are tracked in [glTF Backend Notes](../research/gltf-rs-backend-notes.md).
 
 ## Implemented Development Slice

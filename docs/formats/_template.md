@@ -6,7 +6,8 @@ Copy this file to `docs/formats/<format>.md` when adding or promoting a format.
 
 - Format:
 - Crate:
-- Maturity:
+- Declaration evidence: Unverified
+- Baozi maturity: None
 - Default feature:
 - Parser backend:
 - Supported extensions:

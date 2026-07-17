@@ -1,9 +1,8 @@
 use baozi::{
     AssetIo, AssetLength, AssetOpenError, AssetPath, AuthorityDomain, CapabilityStatus, Error,
-    FormatCapability, FormatDescriptor, FormatEncoding, FormatId, FormatMaturity, ImportCause,
-    ImportDimension, ImportOperationControl, Importer, MeshBinding, PostProcessLimits,
-    PostProcessPipeline, PostProcessRunError, PostProcessStep, PrimitiveTopology, ReadConfidence,
-    RequestError, Vec3,
+    FormatCapability, FormatDescriptor, FormatEncoding, FormatId, ImportCause, ImportDimension,
+    ImportOperationControl, Importer, MeshBinding, PostProcessLimits, PostProcessPipeline,
+    PostProcessRunError, PostProcessStep, PrimitiveTopology, ReadConfidence, RequestError, Vec3,
 };
 use baozi_import::{
     DetectionOutcome, DetectionResult, DetectionScope, FormatImporter, ImportStorageClass,
@@ -26,7 +25,6 @@ fn descriptor(id: &str, extension: &str) -> FormatDescriptor {
     )
     .extensions([extension])
     .encoding(FormatEncoding::Binary)
-    .maturity(FormatMaturity::Experimental)
     .capabilities([(FormatCapability::Geometry, CapabilityStatus::Unknown)])
     .build()
     .expect("valid test descriptor")

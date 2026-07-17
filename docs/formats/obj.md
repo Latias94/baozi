@@ -4,7 +4,8 @@
 
 - Format: Wavefront OBJ with MTL sidecars
 - Crate: `baozi-format-obj`
-- Maturity: Experimental
+- Declaration evidence: Unverified
+- Baozi maturity: None (no current `BaoziVerified` evidence record)
 - Default feature: `format-obj`
 - Parser backend: Baozi-owned hand-written parser
 - Supported extensions: `.obj`

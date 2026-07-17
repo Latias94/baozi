@@ -14,10 +14,10 @@ pub use options::{ObjImportOptions, ObjTextDecodingMode, obj_import_option_key};
 use baozi_core::{FormatId, SceneDraft};
 use baozi_import::{
     CapabilityStatus, DetectionOutcome, DetectionResult, DetectionScope, FormatCapability,
-    FormatDescriptor, FormatEncoding, FormatImporter, FormatMaturity, OptionRuntimeTypeKey,
-    ParseResult, ParseScope, Probe, ReadHint, RegistryBuilder, RegistryRegistrationError,
-    TextBomPolicy, TextControlPolicy, TextDecodingMode, TextHardCaps, TextLexicalMode, TextNewline,
-    TextProfile, TextSourceEncoding,
+    FormatDescriptor, FormatEncoding, FormatImporter, OptionRuntimeTypeKey, ParseResult,
+    ParseScope, Probe, ReadHint, RegistryBuilder, RegistryRegistrationError, TextBomPolicy,
+    TextControlPolicy, TextDecodingMode, TextHardCaps, TextLexicalMode, TextNewline, TextProfile,
+    TextSourceEncoding,
 };
 use std::sync::Arc;
 
@@ -35,7 +35,6 @@ pub fn format_descriptor() -> FormatDescriptor {
     .media_types(["model/obj", "text/plain"])
     .encoding(FormatEncoding::Text)
     .text_profile(obj_text_profile())
-    .maturity(FormatMaturity::Experimental)
     .capabilities([
         (FormatCapability::Geometry, CapabilityStatus::Supported),
         (FormatCapability::Hierarchy, CapabilityStatus::Partial),
@@ -70,9 +69,7 @@ pub fn format_descriptor() -> FormatDescriptor {
         material_library_role(),
         baozi_import::DependencyRequirement::Optional,
     )])
-    .notes(
-        "experimental OBJ/MTL importer for static face meshes and external texture URI references",
-    )
+    .notes("OBJ/MTL importer for static face meshes and external texture URI references")
     .docs_path("docs/formats/obj.md")
     .build()
     .expect("static OBJ descriptor must be valid")

@@ -9,9 +9,9 @@ pub use error::{PlyFailure, PlyFailureCode};
 use baozi_core::{FormatId, SceneDraft};
 use baozi_import::{
     CapabilityStatus, DetectionOutcome, DetectionResult, DetectionScope, FormatCapability,
-    FormatDescriptor, FormatEncoding, FormatImporter, FormatMaturity, ParseResult, ParseScope,
-    Probe, ReadHint, RegistryBuilder, RegistryRegistrationError, TextBomPolicy, TextControlPolicy,
-    TextDecodingMode, TextHardCaps, TextLexicalMode, TextNewline, TextProfile, TextSourceEncoding,
+    FormatDescriptor, FormatEncoding, FormatImporter, ParseResult, ParseScope, Probe, ReadHint,
+    RegistryBuilder, RegistryRegistrationError, TextBomPolicy, TextControlPolicy, TextDecodingMode,
+    TextHardCaps, TextLexicalMode, TextNewline, TextProfile, TextSourceEncoding,
 };
 
 pub struct PlyImporter;
@@ -25,7 +25,6 @@ pub fn format_descriptor() -> FormatDescriptor {
     .media_types(["model/ply"])
     .encoding(FormatEncoding::TextOrBinary)
     .text_profile(text_profile())
-    .maturity(FormatMaturity::Experimental)
     .capabilities([
         (FormatCapability::Geometry, CapabilityStatus::Supported),
         (FormatCapability::Hierarchy, CapabilityStatus::Partial),
@@ -56,7 +55,7 @@ pub fn format_descriptor() -> FormatDescriptor {
             CapabilityStatus::Supported,
         ),
     ])
-    .notes("experimental PLY importer for ASCII and binary vertex/face geometry")
+    .notes("PLY importer for ASCII and binary vertex/face geometry")
     .docs_path("docs/formats/ply.md")
     .build()
     .expect("built-in PLY descriptor is valid")
@@ -113,10 +112,16 @@ impl FormatImporter for PlyImporter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use baozi_test_support::assert_support_matrix_row;
 
     #[test]
     fn uses_qualified_stable_identity() {
         assert_eq!(format_descriptor().id().as_str(), "org.baozi.ply");
+    }
+
+    #[test]
+    fn support_matrix_matches_format_descriptor() {
+        assert_support_matrix_row("baozi-format-ply", &format_descriptor());
     }
 
     #[test]

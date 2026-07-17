@@ -19,12 +19,12 @@ pub use baozi_core::{
     VertexAttribute, VertexAttributeData, VertexAttributeSemantic,
 };
 pub use baozi_import::{
-    CapabilityStatus, CauseOwner, ConformancePolicy, DependencyPolicyError, DependencyRequirement,
-    DependencyResolver, DependencyRoleId, DetectionEvidence, DetectionFailure, DetectionFault,
-    DetectionFaultCode, DetectionInconclusive, DetectionOptions, DetectionOptionsError,
-    DetectionOutcome, DiagnosticCause, DiagnosticCode, DiagnosticSeverity, DiagnosticSummary,
-    FormatCapability, FormatDescriptor, FormatEncoding, FormatFailureDetail,
-    FormatFailureDetailValue, FormatFailureEnvelope, FormatImporter, FormatMaturity,
+    CapabilityStatus, CauseOwner, ConformancePolicy, DeclarationEvidenceAuthority,
+    DependencyPolicyError, DependencyRequirement, DependencyResolver, DependencyRoleId,
+    DetectionEvidence, DetectionFailure, DetectionFault, DetectionFaultCode, DetectionInconclusive,
+    DetectionOptions, DetectionOptionsError, DetectionOutcome, DiagnosticCause, DiagnosticCode,
+    DiagnosticSeverity, DiagnosticSummary, FormatCapability, FormatDescriptor, FormatEncoding,
+    FormatFailureDetail, FormatFailureDetailValue, FormatFailureEnvelope, FormatImporter,
     FormatOptionEnvelope, FormatOptionEnvelopeError, FormatSelection, FormatUnavailability,
     ImportCause, ImportConfig, ImportConfigOverlay, ImportDiagnostic, ImportDimension,
     ImportFailure, ImportLedgerPhase, ImportLedgerSnapshot, ImportLossKind, ImportOperationControl,

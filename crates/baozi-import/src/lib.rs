@@ -37,10 +37,10 @@ pub use dependency::{
     OptionalDependencyOutcome, SameAuthorityResolver,
 };
 pub use descriptor::{
-    CapabilityStatus, DescriptorError, FormatCapability, FormatDescriptor, FormatDescriptorBuilder,
-    FormatEncoding, FormatMaturity, TextBomPolicy, TextControlPolicy, TextDecodingMode,
-    TextHardCapDimension, TextHardCaps, TextLexicalMode, TextNewline, TextProfile,
-    TextProfileBuilder, TextProfileError, TextProfileField, TextSourceEncoding,
+    CapabilityStatus, DeclarationEvidenceAuthority, DescriptorError, FormatCapability,
+    FormatDescriptor, FormatDescriptorBuilder, FormatEncoding, TextBomPolicy, TextControlPolicy,
+    TextDecodingMode, TextHardCapDimension, TextHardCaps, TextLexicalMode, TextNewline,
+    TextProfile, TextProfileBuilder, TextProfileError, TextProfileField, TextSourceEncoding,
 };
 pub use detection::{DetectionAbort, DetectionResult, DetectionScope, DetectionWorkPermit};
 pub use diagnostic::{

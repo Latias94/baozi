@@ -97,6 +97,7 @@ dependencies = [
  "baozi-import",
  "baozi-io",
  "baozi-operation",
+ "baozi-test-support",
 ]
 
 [[package]]
@@ -107,6 +108,7 @@ dependencies = [
  "baozi-import",
  "baozi-io",
  "baozi-operation",
+ "baozi-test-support",
 ]
 
 [[package]]

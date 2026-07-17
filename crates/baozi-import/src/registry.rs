@@ -760,7 +760,7 @@ impl std::error::Error for RegistryBuildError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::descriptor::{CapabilityStatus, FormatCapability, FormatEncoding, FormatMaturity};
+    use crate::descriptor::{CapabilityStatus, FormatCapability, FormatEncoding};
     use crate::error::ScopeAbortCause;
     use crate::format::{DetectionFaultCode, ReadConfidence};
     use crate::ledger::{ImportCoordinator, ImportOperationControl, import_ledger_limits};
@@ -978,7 +978,6 @@ mod tests {
         FormatDescriptor::builder(FormatId::new(format).unwrap(), "Test format")
             .extensions([extension])
             .encoding(FormatEncoding::Binary)
-            .maturity(FormatMaturity::Experimental)
             .capabilities([(FormatCapability::Geometry, CapabilityStatus::Unknown)])
             .build()
             .unwrap()
@@ -1035,7 +1034,6 @@ mod tests {
             )
             .extensions(["panic"])
             .encoding(FormatEncoding::Binary)
-            .maturity(FormatMaturity::Experimental)
             .capabilities([(FormatCapability::Geometry, CapabilityStatus::Unknown)])
             .build()
             .unwrap()

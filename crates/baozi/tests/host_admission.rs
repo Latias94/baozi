@@ -1,6 +1,6 @@
 use baozi::{
-    CapabilityStatus, FormatCapability, FormatDescriptor, FormatEncoding, FormatId, FormatMaturity,
-    Importer, ReadConfidence,
+    CapabilityStatus, FormatCapability, FormatDescriptor, FormatEncoding, FormatId, Importer,
+    ReadConfidence,
 };
 use baozi_import::{
     DetectionOutcome, DetectionResult, DetectionScope, FormatImporter, ParseResult, ParseScope,
@@ -145,7 +145,6 @@ impl FormatImporter for AdmissionProbeImporter {
         )
         .extensions(["host-gate"])
         .encoding(FormatEncoding::Binary)
-        .maturity(FormatMaturity::Experimental)
         .capabilities([(FormatCapability::Geometry, CapabilityStatus::Unknown)])
         .build()
         .expect("valid host-admission descriptor")

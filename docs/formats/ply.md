@@ -4,7 +4,8 @@
 
 - Format: PLY
 - Crate: `baozi-format-ply`
-- Maturity: Experimental
+- Declaration evidence: Unverified
+- Baozi maturity: None (no current `BaoziVerified` evidence record)
 - Default feature: not enabled by `default-formats`
 - Parser backend: Baozi-owned parser
 - Supported extensions: `.ply`
@@ -15,7 +16,7 @@
 ## Current Status
 
 `baozi-format-ply` imports common vertex and face geometry into Baozi's owned IR. It is marked
-`publish = false` while fixture coverage, fuzzing, and format maturity evidence are still growing.
+`publish = false` while fixture coverage, fuzzing, and managed format evidence are still growing.
 
 ## Supported MVP
 
@@ -75,4 +76,4 @@ profile, and failed-record accounting are exercised by the format integration su
 - Materials, textures, cameras, lights, skinning, morph targets, and animation.
 - Non-scalar custom properties and non-geometry elements are skipped with diagnostics.
 - Coordinate system and unit metadata are not standardized by the format and remain `Unknown`.
-- The parser is still Experimental until fuzz coverage and broader fixture evidence land.
+- The parser has no Baozi maturity until managed fuzz and broader fixture evidence are available.

@@ -4,7 +4,8 @@
 
 - Format: STL
 - Crate: `baozi-format-stl`
-- Maturity: Experimental
+- Declaration evidence: Unverified
+- Baozi maturity: None (no current `BaoziVerified` evidence record)
 - Default feature: `format-stl`
 - Parser backend: Baozi-owned hand-written parser
 - Supported extensions: `.stl`

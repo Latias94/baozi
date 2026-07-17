@@ -1,7 +1,7 @@
 use baozi::{
     CancellationToken, CapabilityStatus, ConformancePolicy, DiagnosticCode, DiagnosticSeverity,
-    Error, FormatCapability, FormatDescriptor, FormatEncoding, FormatId, FormatMaturity,
-    ImportCause, ImportConfigOverlay, ImportOperationControl, ImportPhase, ImportProgressPhase,
+    Error, FormatCapability, FormatDescriptor, FormatEncoding, FormatId, ImportCause,
+    ImportConfigOverlay, ImportOperationControl, ImportPhase, ImportProgressPhase,
     ImportProgressUnit, ImportRequest, ImportRequestLayer, Importer, OptionCompileLimits,
     PostProcessControl, PostProcessProgressPhase, PostProcessProgressUnit, ProgressDecision,
     ProgressDeliveryLimits, ProgressEvent, ReadConfidence,
@@ -49,7 +49,6 @@ impl FormatImporter for TestImporter {
         )
         .extensions(["facade-test"])
         .encoding(FormatEncoding::Binary)
-        .maturity(FormatMaturity::Experimental)
         .capabilities([(FormatCapability::Geometry, CapabilityStatus::Unknown)])
         .build()
         .expect("valid test descriptor")

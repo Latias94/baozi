@@ -10,8 +10,8 @@ use baozi_core::{FormatId, SceneDraft};
 use baozi_import::{
     CapabilityStatus, DependencyRequirement, DependencyRoleId, DetectionOutcome, DetectionResult,
     DetectionScope, FormatCapability, FormatDescriptor, FormatEncoding, FormatImporter,
-    FormatMaturity, ParseResult, ParseScope, Probe, ReadHint, TextBomPolicy, TextControlPolicy,
-    TextDecodingMode, TextHardCaps, TextLexicalMode, TextNewline, TextProfile, TextSourceEncoding,
+    ParseResult, ParseScope, Probe, ReadHint, TextBomPolicy, TextControlPolicy, TextDecodingMode,
+    TextHardCaps, TextLexicalMode, TextNewline, TextProfile, TextSourceEncoding,
 };
 
 /// Stable identity used only by the internal development harness.
@@ -33,7 +33,6 @@ pub fn format_descriptor_for_development() -> FormatDescriptor {
     .media_types(["model/gltf+json", "model/gltf-binary"])
     .encoding(FormatEncoding::TextOrBinary)
     .text_profile(text_profile())
-    .maturity(FormatMaturity::Experimental)
     .capabilities([
         (FormatCapability::Geometry, CapabilityStatus::Partial),
         (FormatCapability::Hierarchy, CapabilityStatus::Supported),

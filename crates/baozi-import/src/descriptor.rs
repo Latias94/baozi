@@ -15,14 +15,25 @@ const MAX_DEPENDENCY_ROLE_COUNT: usize = 32;
 const MAX_NOTES_BYTES: usize = 1_024;
 const MAX_DOCS_PATH_BYTES: usize = 256;
 
-/// Maturity claimed by one registered format implementation.
+/// Evidence authority carried by one registered format declaration.
+///
+/// Descriptor declarations cannot issue Baozi-managed maturity:
+///
+/// ```compile_fail
+/// use baozi_core::FormatId;
+/// use baozi_import::{FormatDescriptor, FormatMaturity};
+///
+/// let _descriptor = FormatDescriptor::builder(
+///     FormatId::new("org.example.external").expect("valid format ID"),
+///     "External format",
+/// )
+/// .maturity(FormatMaturity::Stable);
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[non_exhaustive]
-pub enum FormatMaturity {
-    Experimental,
-    Beta,
-    Stable,
-    Deprecated,
+pub enum DeclarationEvidenceAuthority {
+    /// No issuer-scoped evidence accompanies this declaration.
+    Unverified,
 }
 
 /// Degree to which one format capability is implemented.
@@ -572,7 +583,6 @@ pub struct FormatDescriptor {
     media_types: Box<[Box<str>]>,
     encoding: FormatEncoding,
     text_profile: Option<TextProfile>,
-    maturity: FormatMaturity,
     capabilities: BTreeMap<FormatCapability, CapabilityStatus>,
     dependency_roles: BTreeMap<DependencyRoleId, DependencyRequirement>,
     notes: Box<str>,
@@ -609,8 +619,13 @@ impl FormatDescriptor {
         self.text_profile.as_ref()
     }
 
-    pub const fn maturity(&self) -> FormatMaturity {
-        self.maturity
+    /// Returns the declaration evidence available from the registry boundary.
+    ///
+    /// Baozi maturity is joined from a separate managed evidence inventory and is never carried by
+    /// a descriptor. Issuer-scoped self-attestation is not yet exposed by the registration API, so
+    /// every current descriptor is deliberately unverified.
+    pub const fn declaration_evidence_authority(&self) -> DeclarationEvidenceAuthority {
+        DeclarationEvidenceAuthority::Unverified
     }
 
     pub fn capabilities(
@@ -658,7 +673,6 @@ pub struct FormatDescriptorBuilder {
     media_types: Vec<String>,
     encoding: Option<FormatEncoding>,
     text_profile: Option<TextProfile>,
-    maturity: FormatMaturity,
     capabilities: Vec<(FormatCapability, CapabilityStatus)>,
     dependency_roles: Vec<(DependencyRoleId, DependencyRequirement)>,
     notes: String,
@@ -674,7 +688,6 @@ impl FormatDescriptorBuilder {
             media_types: Vec::new(),
             encoding: None,
             text_profile: None,
-            maturity: FormatMaturity::Experimental,
             capabilities: Vec::new(),
             dependency_roles: Vec::new(),
             notes: String::new(),
@@ -699,11 +712,6 @@ impl FormatDescriptorBuilder {
 
     pub fn text_profile(mut self, profile: TextProfile) -> Self {
         self.text_profile = Some(profile);
-        self
-    }
-
-    pub const fn maturity(mut self, maturity: FormatMaturity) -> Self {
-        self.maturity = maturity;
         self
     }
 
@@ -769,7 +777,6 @@ impl FormatDescriptorBuilder {
             media_types,
             encoding,
             text_profile: self.text_profile,
-            maturity: self.maturity,
             capabilities,
             dependency_roles,
             notes: self.notes.into_boxed_str(),
