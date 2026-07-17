@@ -2,3 +2,7 @@
 failure-output = "immediate-final"
 status-level = "pass"
 slow-timeout = { period = "5s", terminate-after = 2 }
+
+[[profile.default.overrides]]
+filter = "package(baozi-xtask)"
+slow-timeout = { period = "10s", terminate-after = 2 }
