@@ -134,6 +134,9 @@ dependencies = [
 [[package]]
 name = "baozi-operation"
 version = "0.1.0"
+dependencies = [
+ "triomphe",
+]
 
 [[package]]
 name = "baozi-postprocess"

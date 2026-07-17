@@ -7,6 +7,7 @@ mod control;
 mod coordinator;
 mod ledger;
 mod owner;
+mod retained;
 
 pub use capacity::{CAPACITY_POLICY_REVISION, CapacityPlan, CapacityPlanError};
 pub use control::{
@@ -23,3 +24,11 @@ pub use ledger::{
     PublicationReservationBatchErrorKind,
 };
 pub use owner::OperationOwner;
+pub use retained::{
+    MAX_RETAINED_INLINE_BYTES, PhysicalStorageAccount, PhysicalStorageAccountCreateError,
+    PhysicalStorageAccountFactory, PhysicalStorageAccountFactoryCreateError,
+    PhysicalStorageAccountFactoryLimits, PhysicalStorageAccountFactorySnapshot,
+    PhysicalStorageAccountLimits, PhysicalStorageAccountSnapshot, PhysicalStorageLimitError,
+    RetainedAllocation, RetainedAllocationError, RetainedAllocationPlan,
+    RetainedAllocationPlanError, RetainedBuildFailureCode,
+};

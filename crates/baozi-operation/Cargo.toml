@@ -9,3 +9,6 @@ homepage.workspace = true
 documentation.workspace = true
 authors.workspace = true
 description.workspace = true
+
+[dependencies]
+triomphe.workspace = true
