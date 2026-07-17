@@ -46,7 +46,7 @@ The decision remains per format. Passing this checklist does not make a tool a p
 - [ ] Transitive dependencies are reviewed for native FFI, build scripts, proc macros, yanked
   versions, and unusual licenses.
 - [ ] `cargo tree -e features` confirms feature isolation.
-- [ ] `cargo deny check` policy is updated when the dependency graph changes.
+- [ ] `cargo deny --locked check` policy is updated when the dependency graph changes.
 - [ ] Maintainer and release cadence risk is acceptable for the feature tier.
 
 ## WASM and Runtime Assumptions

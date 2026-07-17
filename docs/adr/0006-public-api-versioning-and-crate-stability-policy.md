@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-07-08
-updated: 2026-07-11
+updated: 2026-07-17
 authors:
   - Codex
 decision_type: architecture
@@ -9,6 +9,9 @@ supersedes:
   - docs/adr/0024-public-api-hardening-and-stability-tiers.md
 evidence:
   - docs/plans/2026-07-10-001-refactor-baozi-canonical-architecture-plan.md
+  - docs/contributing/release-policy.md
+  - docs/research/crates-io-baozi-0.0.1-registry-evidence.md
+  - docs/research/crates-io-baozi-0.0.1-registry-evidence.toml
   - crates/baozi/src/lib.rs
   - crates/baozi-import/src/lib.rs
   - crates/baozi-operation/Cargo.toml
@@ -146,7 +149,7 @@ The facade and every published transitive dependency must be packageable togethe
 crates are deleted or kept unpublished; they are not published to make a feature graph appear
 complete.
 
-The first public product is the `baozi` facade. Its release unit is one lockstep version containing
+The first canonical product is the `baozi` facade. Its release unit is one lockstep version containing
 every production package reachable from the facade through required or optional Cargo dependencies:
 `baozi-operation`, `baozi-core`, `baozi-io`, `baozi-import`, `baozi-postprocess`, every admitted
 first-party `baozi-format-*` package wired by a facade feature, and the facade itself. A facade feature
@@ -159,6 +162,66 @@ need a registry-resolvable dependency. It is not a primary end-user product or a
 cross-crate mechanism APIs remain Internal/backend tier unless an explicit compatibility review
 promotes a narrower surface. Publication therefore makes it packageable and versioned; it does not
 silently promise direct-consumer stability for every public item.
+
+### Existing Registry State and Canonical Release Train
+
+The crates.io registry already contains `baozi 0.0.1`, published on 2026-07-09 with placeholder
+metadata and no supporting release train. That immutable artifact is not the canonical v1 contract,
+does not establish compatibility for the current workspace, and must never be overwritten, rebuilt,
+or reused. Before the first canonical train, release automation must record its noncanonical status
+and yank it; yanking is a discovery control, not deletion or rollback. The canonical train starts at
+the repository's current lockstep version (currently `0.1.0`) and publishes only the closed package
+set proven by the package simulation.
+
+U9 must create `docs/release/registry-state.toml` as the sole expected-state authority for a release.
+The reviewed manifest binds its schema version, registry identity, release version/tag, full source
+commit SHA, and complete release-unit package set. Each package entry records expected presence,
+registry-stable owner kind/ID set, credential route, maximum token TTL, and the complete approved
+Trusted Publisher configuration set when OIDC is allowed. Display names are documentary only. The
+release workflow must prove the tag and checkout SHA match the manifest, exhaust all paginated owner
+and publisher results, and reject missing, duplicate, unknown, extra, or stale entries. Until this
+manifest and its validator exist, publication is disabled; live state can never define its own
+expected value.
+
+Registry authentication is scoped to the registry state rather than a blanket "first release"
+assumption:
+
+- before publishing the first package, one complete preflight queries every release-unit name and
+  current owner set; every name must be absent as expected or owned exactly as approved, and any
+  unexpected occupation, owner drift, timeout, or partial response stops the train before an
+  immutable upload;
+- immediately before each upload, automation repeats the exact-name and owner check for that
+  package; the initial preflight reduces avoidable partial trains but does not reserve a crates.io
+  name, so a late occupation still stops the train and enters the documented partial-train recovery
+  path;
+- the first publication of each supporting crate name that is not already present requires an
+  explicitly approved crates.io API token with endpoint scope `publish-new`, an exact crate-name
+  scope, and an expiry; supporting crates cannot rely on an OIDC relationship that does not yet
+  exist;
+- the existing `baozi` package may use crates.io Trusted Publishing/OIDC for a later canonical
+  version only after the complete live publisher configuration set exactly matches the manifest and
+  a token exchange verifies the selected repository owner, repository, workflow, and environment;
+  crate owner identity and repository owner identity remain distinct fields, and inability to
+  enumerate the complete configured set blocks all publication unless an independently protected,
+  equally current complete snapshot can be exhaustively compared; an exact-crate token fallback is
+  allowed only after set equality succeeds, a typed service-availability failure occurs before token
+  issuance, and the protected release environment records an approval; any claim, binding,
+  configuration, or authentication rejection stops the train;
+- yanking uses a separate expiring exact-crate `yank` token; wildcard crate scopes, unrelated
+  endpoint scopes, and no-expiry credentials are forbidden; API tokens have a manifest-declared
+  maximum TTL no greater than 24 hours, and an `always()` cleanup attempts and verifies immediate
+  revocation; cancellation, runner loss, or registry outage cannot be called a successful revoke,
+  so an unverified cleanup blocks later publication, emits an alert, and requires confirmed manual
+  revocation or expiry before another credential is used;
+- tokens never enter the repository, workflow logs, or package metadata, and a failed token/OIDC
+  authentication stops the train before the facade or any later package is published; and
+- an OIDC setup is not evidence of artifact reproducibility or provenance by itself.
+
+The mandatory pre-release evidence is package topology, lockstep versions, extracted-package
+consumer tests, metadata/license checks, and immutable registry-artifact verification. U9 evaluates
+cryptographic provenance/attestation, SBOM, signatures, and reproducible-build claims as separate
+release-evidence axes. A tool or format that cannot provide stable, reviewable evidence is not made a
+hard gate merely because it is available in a particular CI image.
 
 Publication follows dependency order and the facade is always last:
 
@@ -184,6 +247,13 @@ Before the first publish command, CI packages every member, tests the extracted 
 registry-style dependencies, verifies license/readme/repository metadata and documentation, and
 proves that the version and dependency requirements form one closed release train. After each
 supporting package publish, automation verifies its immutable registry artifact before continuing.
+Packaging and upload both use the lockfile; the real command is
+`cargo publish --locked --registry crates-io -p <crate>`. Automation records the local `.crate`
+SHA-256, then uses bounded retries to download the exact published `.crate`. The downloaded archive
+SHA-256, registry checksum, and local archive SHA-256 must all match before the next package starts;
+metadata equality without the consumer-visible archive is insufficient.
+The historical API response fingerprint for `baozi 0.0.1` is documentary only: live checks compare
+its immutable version/archive tuple and query mutable yank/owner state independently.
 
 Registry publication is not transactional, so recovery is explicit:
 
@@ -201,7 +271,7 @@ Registry publication is not transactional, so recovery is explicit:
 
 ### Release Versioning
 
-Before the first public release:
+Before the first canonical release train (the existing placeholder version is excluded):
 
 - breaking changes are allowed and should favor the correct canonical design
 - the old prototype is deleted instead of deprecated
@@ -334,6 +404,13 @@ Negative:
 | Feature names promise unavailable behavior | Medium | Medium | Promotion requires executable feature and packaged-consumer evidence; delete empty features |
 | Registry publish fails after supporting crates are immutable | High | Medium | publish in dependency order with facade last; stop the train, never reuse bytes/version, and advance the complete lockstep train when same-version recovery is impossible |
 | Supporting package visibility is mistaken for product stability | High | Medium | identify `baozi-operation` and similar crates as packageable support with Internal/backend-tier APIs until explicit promotion |
+| The existing placeholder package is mistaken for the canonical contract | Critical | High | record and yank `baozi 0.0.1` before the canonical train, never reuse its version, and require the lockstep package simulation to start from the new train |
+| A release-unit name changes after the initial preflight | Critical | Low | preflight every name and exact owner set before the first upload, recheck the current package immediately before upload, stop on drift, and use partial-train recovery because crates.io offers no name reservation |
+| Expected owners or credential routes are inferred from mutable live state | Critical | Medium | require a reviewed tag/commit-bound registry-state manifest with exhaustive stable owner IDs and fail closed on missing or incomplete pagination |
+| First-publication authentication is unavailable or overprivileged | High | Medium | use exact-crate scoped credentials with a maximum 24-hour TTL, verify best-effort immediate revocation, block after unverified cleanup, and allow OIDC only when the complete publisher configuration set matches the manifest |
+| A live mutable API response is compared with a historical byte digest | High | High | normalize the captured immutable tuple, check live yank/owners separately, and never use the raw response fingerprint as a live equality gate |
+| Registry metadata matches while the downloadable archive is absent or wrong | Critical | Low | bounded-retry the exact archive download and require local archive, registry checksum, and downloaded bytes to have one SHA-256 |
+| Provenance/SBOM/signing tooling drifts or is unavailable | Medium | Medium | keep these as separate U9 evidence decisions with pinned tool/input records; do not make an unstable tool an implicit publication blocker |
 
 ## Acceptance Criteria
 
@@ -348,6 +425,11 @@ Negative:
 | Release readiness | packaged consumer imports, inspects, and optionally processes a scene using only canonical v1 names |
 | Closed release topology | package simulation proves every required and optional facade dependency is registry-publishable at one lockstep version, with licenses, metadata, docs, and extracted-package tests |
 | Failure recovery | release automation publishes the facade last and a dry-run fault injection proves a partial supporting train cannot publish the facade or cause version drift/reuse |
+| Registry state | a tag/commit-bound machine manifest is the sole expected-state authority for the complete release unit; normalized exact-version evidence records the immutable `baozi 0.0.1` version/archive tuple without treating mutable live JSON bytes as stable; a separate live check proves it is yanked immediately before the `0.1.0` train, and no workflow targets the old version |
+| Name preflight and upload-time recheck | before the first upload, workflow tests query every release-unit name and exact owner set, so failures visible then produce zero publications; every upload repeats its exact-name/owner check, and an injected late race stops before that upload, with any earlier immutable packages handled by partial-train recovery |
+| Authentication boundary | workflow tests prove a never-published supporting crate can reach only an exact-crate `publish-new` job with at most a 24-hour TTL, update/yank jobs use distinct endpoint scopes, unverified cleanup blocks later publication, and an existing package may select OIDC only after exhaustive publisher-set equality plus a successful exact-bound exchange; wildcard/no-expiry/excess-scope credentials fail |
+| Locked artifact identity | package and real publish commands use `--locked`; dry-run is never authentication evidence; each upload records the local `.crate` SHA-256 and requires exact owner/version plus equality of local archive, registry checksum, and bounded-retry downloaded archive before continuing |
+| Evidence-axis separation | attestation, SBOM, signatures, and reproducibility are each represented by an explicit U9 gate or documented deferral and cannot be inferred from successful publication |
 
 ## Implementation Evidence
 
@@ -362,3 +444,44 @@ implementation state but do not alter this decision's authority:
 
 Transient pass/fail counts, current symbol gaps, and work-unit completion belong in those evidence
 records. They must not change this ADR's accepted decision status.
+
+## Amendment History
+
+### 2026-07-17: Account for the existing placeholder registry artifact
+
+- Affected: `Crate Publication`, `Existing Registry State and Canonical Release Train`,
+  `Release Versioning`, `Risks and Mitigations`, and
+  `Acceptance Criteria`.
+- Previous: the policy described the next release as the first public product and assumed every
+  package name was absent from crates.io.
+- New: `baozi 0.0.1` is recorded as an immutable, noncanonical placeholder; the canonical train
+  begins at `0.1.0`; a tag/commit-bound manifest supplies the expected registry state; every
+  release-unit name/owner is preflighted before the train and rechecked before its upload; API tokens
+  use expiring exact-crate endpoint scopes with bounded TTL and verified cleanup; an existing facade
+  name may use Trusted Publishing only after exhaustive configuration-set equality; real publication
+  is locked and verified by local, registry, and downloaded archive equality.
+- Impact: no published bytes or version is reused, discoverable name conflicts move before the train,
+  late races stop at the affected upload and use explicit partial-train recovery, unknown publisher
+  authority cannot be bypassed by changing credentials, and authentication/artifact/provenance
+  evidence axes remain distinct.
+- Review: 2026-07-17 crates.io registry-state and release-governance review.
+- Rationale: registry publication is irreversible and non-transactional. Discoverable
+  name/owner/authentication failures must move before the first upload, each name must be rechecked
+  at its upload boundary, and every published byte identity must be checked before advancing the
+  dependency train.
+
+## External Evidence
+
+- [Captured crates.io `baozi 0.0.1` registry evidence](../research/crates-io-baozi-0.0.1-registry-evidence.md)
+  records the [exact-version API](https://crates.io/api/v1/crates/baozi/0.0.1), 2026-07-17 retrieval
+  date, `1388` UTF-8 response bytes,
+  response SHA-256 `afd7d3d57fb9503fc745ac247d7d260f3cb0a06f665ce2fb51e563590e46bff2`,
+  and immutable `.crate` SHA-256
+  `e74b14d1e2410f8a062bb423f7bbc8bc9fdaa9cf4ac64b10efccc562d62bbd28`. The API body contains
+  mutable fields and is only a time-point snapshot; yank status remains a release-time live check.
+  The same evidence record captures official Cargo initial-publication guidance and fixed crates.io
+  Trusted Publishing documentation supporting the conditional token/OIDC routing above. Its
+  [normalized TOML manifest](../research/crates-io-baozi-0.0.1-registry-evidence.toml) separates the
+  immutable tuple from mutable observations. The crates.io source at fixed commit
+  `e9c29a333bcb7c14e82adb59309e0220a771648a` defines `publish-new`, `publish-update`, and `yank`
+  endpoint scopes, crate-name patterns, and token expiry; Baozi narrows crate patterns to exact names.

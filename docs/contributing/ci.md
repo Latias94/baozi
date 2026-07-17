@@ -44,22 +44,22 @@ Run the core Rust gates before opening a PR:
 
 ```powershell
 cargo fmt --all -- --check
-cargo check --workspace --all-targets
-cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo nextest run --workspace
-cargo nextest run --workspace --all-features
-cargo test --doc --workspace --all-features
+cargo check --locked --workspace --all-targets
+cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+cargo nextest run --locked --workspace
+cargo nextest run --locked --workspace --all-features
+cargo test --locked --doc --workspace --all-features
 $env:RUSTDOCFLAGS = '-D warnings'
-cargo doc --workspace --all-features --no-deps
-cargo deny check
-cargo deny --manifest-path fuzz/Cargo.toml check
-cargo check -p baozi --target x86_64-pc-windows-msvc --no-default-features --features all-formats,native-fs-candidate
-cargo nextest run --target x86_64-pc-windows-msvc -p baozi-io --features fs-candidate
-cargo check -p baozi --target wasm32-unknown-unknown --no-default-features --features all-formats
-cargo check -p baozi --target wasm32-wasip1 --no-default-features --features all-formats
-cargo run -p baozi-xtask -- adr-check
-cargo run -p baozi-xtask -- crate-graph-check
-cargo run -p baozi-xtask -- native-fs-check
+cargo doc --locked --workspace --all-features --no-deps
+cargo deny --locked check
+cargo deny --locked --manifest-path fuzz/Cargo.toml check
+cargo check --locked -p baozi --target x86_64-pc-windows-msvc --no-default-features --features all-formats,native-fs-candidate
+cargo nextest run --locked --target x86_64-pc-windows-msvc -p baozi-io --features fs-candidate
+cargo check --locked -p baozi --target wasm32-unknown-unknown --no-default-features --features all-formats
+cargo check --locked -p baozi --target wasm32-wasip1 --no-default-features --features all-formats
+cargo run --locked -p baozi-xtask -- adr-check
+cargo run --locked -p baozi-xtask -- crate-graph-check
+cargo run --locked -p baozi-xtask -- native-fs-check
 ```
 
 There is currently no release-registered `native-fs` or low-level `fs` feature. The explicitly
@@ -74,8 +74,12 @@ GitHub Actions binds each runtime candidate to one fixed runner and exact target
 `rustc -vV` host with its matrix target, then passes that target explicitly to every Cargo and
 nextest command. Candidate fixture setup is fail-closed; the suite contains no `SKIP` path.
 
-Browser WASM and WASI builds exercise byte and custom-IO imports without enabling the candidate.
-CI also requires the candidate feature to fail with the same explicit Baozi diagnostic on
+Browser WASM and WASI jobs are compile-only today. They prove that the byte/custom-IO feature graph
+builds without enabling the native-filesystem candidate, but they do not execute an import, snapshot,
+or digest golden and therefore cannot satisfy ADR 0034 Portable Byte promotion or release evidence.
+U9 must select and pin executable browser-WASM and WASI runners, then run representative byte and
+custom-IO facade imports plus canonical digest goldens before either target is promoted. CI also
+requires the candidate feature to fail with the same explicit Baozi diagnostic on
 `wasm32-unknown-unknown`, `wasm32-wasip1`, Build Monitored `x86_64-apple-darwin`, and audit-only
 `x86_64-unknown-freebsd`, plus ABI-distinct `x86_64-unknown-linux-gnux32`, after first proving each
 target is installed. The `native-fs-check` command separately compares normal/build dependency
