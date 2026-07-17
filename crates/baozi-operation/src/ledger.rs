@@ -2643,19 +2643,19 @@ where
         drop(self.discard_canonical.take());
         drop(self.discard_evidence.take());
 
-        let snapshot = {
+        {
             let mut state = lock(&self.ledger.state);
-            self.canonical.release_bound_reservations(&mut state);
-            self.evidence.release_bound_reservations(&mut state);
+            self.canonical.release_bound_attributions(&mut state);
+            self.evidence.release_bound_attributions(&mut state);
             apply_typed_commitments(&mut state.dimensions, &self.canonical);
             apply_typed_commitments(&mut state.dimensions, &self.evidence);
+            self.canonical
+                .destroy_storage_then_release_bound_cover(&mut state);
+            self.evidence
+                .destroy_storage_then_release_bound_cover(&mut state);
             state.publication = PublicationState::Published;
             take_typed_final_snapshot(&mut state)
-        };
-
-        self.canonical.destroy_storage_then_release_cover();
-        self.evidence.destroy_storage_then_release_cover();
-        snapshot
+        }
     }
 }
 
@@ -2706,6 +2706,14 @@ where
 
     pub(crate) fn attribution_len(&self) -> usize {
         self.attributions.len()
+    }
+
+    pub(crate) fn attributed_bytes(&self) -> Option<u64> {
+        self.attributions
+            .iter()
+            .try_fold(0_u64, |total, attribution| {
+                total.checked_add(attribution.bytes())
+            })
     }
 
     fn absorb_proven(&mut self, other: &mut Self) {
@@ -2800,19 +2808,19 @@ where
             .checked_add(self.account_capacity_bytes())
     }
 
-    fn release_bound_reservations(&mut self, state: &mut LedgerState<P, D>) {
+    fn release_bound_attributions(&mut self, state: &mut LedgerState<P, D>) {
         for token in &mut self.attributions {
             token.core.release_bound_locked(state);
         }
-        if let Some(capacity_cover) = &mut self.capacity_cover {
-            capacity_cover.core.release_bound_locked(state);
-        }
     }
 
-    fn destroy_storage_then_release_cover(&mut self) {
+    fn destroy_storage_then_release_bound_cover(&mut self, state: &mut LedgerState<P, D>) {
         drop(std::mem::take(&mut self.attributions));
         drop(std::mem::take(&mut self.commitments));
-        drop(self.capacity_cover.take());
+        if let Some(mut capacity_cover) = self.capacity_cover.take() {
+            capacity_cover.core.release_bound_locked(state);
+            drop(capacity_cover);
+        }
     }
 }
 
@@ -4815,8 +4823,8 @@ mod tests {
         }
         assert_eq!(freeze.matches("lock(").count(), 1);
         let release = freeze
-            .find("release_bound_reservations")
-            .expect("freeze releases bound reservations");
+            .find("release_bound_attributions")
+            .expect("freeze releases bound attributions");
         let discard_canonical = freeze
             .find("drop(self.discard_canonical.take())")
             .expect("freeze drops discarded canonical batch");
@@ -4826,6 +4834,9 @@ mod tests {
         let commitments = freeze
             .find("apply_typed_commitments")
             .expect("freeze applies bound commitments");
+        let destroy_storage = freeze
+            .find("destroy_storage_then_release_bound_cover")
+            .expect("freeze destroys batch storage before releasing its cover");
         let published = freeze
             .find("PublicationState::Published")
             .expect("freeze publishes atomically");
@@ -4835,15 +4846,14 @@ mod tests {
         assert!(discard_canonical < release);
         assert!(discard_evidence < release);
         assert!(release < commitments);
-        assert!(commitments < published);
+        assert!(commitments < destroy_storage);
+        assert!(destroy_storage < published);
         assert!(published < final_snapshot);
-        let deallocation_tail = freeze
-            .split("        };\n")
-            .nth(1)
-            .expect("freeze has one mutation block tail");
-        assert!(!deallocation_tail.contains("lock("));
-        assert!(!deallocation_tail.contains("release_bound_reservations"));
-        assert!(!deallocation_tail.contains("apply_typed_commitments"));
+        let after_snapshot = &freeze[final_snapshot + "take_typed_final_snapshot".len()..];
+        assert!(!after_snapshot.contains("lock("));
+        assert!(!after_snapshot.contains("release_bound_attributions"));
+        assert!(!after_snapshot.contains("destroy_storage_then_release_bound_cover"));
+        assert!(!after_snapshot.contains("apply_typed_commitments"));
 
         let bound_release = production
             .split("fn release_bound_locked")
@@ -4860,13 +4870,31 @@ mod tests {
             .next()
             .expect("bound commitment helper body exists");
         let batch_release = production
-            .split("fn release_bound_reservations")
+            .split("fn release_bound_attributions")
             .nth(1)
             .expect("bound batch release helper exists")
-            .split("fn destroy_storage_then_release_cover")
+            .split("fn destroy_storage_then_release_bound_cover")
             .next()
             .expect("bound batch release helper body exists");
-        assert!(batch_release.contains("capacity_cover.core.release_bound_locked"));
+        assert!(!batch_release.contains("capacity_cover.core.release_bound_locked"));
+        let storage_release = production
+            .split("fn destroy_storage_then_release_bound_cover")
+            .nth(1)
+            .expect("storage-before-cover helper exists")
+            .split("/// Live reservations submitted")
+            .next()
+            .expect("storage-before-cover helper body exists");
+        let attribution_storage = storage_release
+            .find("take(&mut self.attributions)")
+            .expect("attribution vector storage is destroyed");
+        let commitment_storage = storage_release
+            .find("take(&mut self.commitments)")
+            .expect("commitment vector storage is destroyed");
+        let capacity_release = storage_release
+            .find("capacity_cover.core.release_bound_locked")
+            .expect("capacity cover is released under the ledger lock");
+        assert!(attribution_storage < capacity_release);
+        assert!(commitment_storage < capacity_release);
         let snapshot = production
             .split("fn take_typed_final_snapshot")
             .nth(1)

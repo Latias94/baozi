@@ -7,6 +7,10 @@ mod control;
 mod coordinator;
 mod ledger;
 mod owner;
+#[allow(
+    dead_code,
+    reason = "the private retained-publication foundation precedes the atomic U4 consumer switch"
+)]
 mod retained;
 
 pub use capacity::{CAPACITY_POLICY_REVISION, CapacityPlan, CapacityPlanError};
@@ -25,10 +29,8 @@ pub use ledger::{
 };
 pub use owner::OperationOwner;
 pub use retained::{
-    MAX_RETAINED_INLINE_BYTES, PhysicalStorageAccount, PhysicalStorageAccountCreateError,
-    PhysicalStorageAccountFactory, PhysicalStorageAccountFactoryCreateError,
-    PhysicalStorageAccountFactoryLimits, PhysicalStorageAccountFactorySnapshot,
-    PhysicalStorageAccountLimits, PhysicalStorageAccountSnapshot, PhysicalStorageLimitError,
-    RetainedAllocation, RetainedAllocationError, RetainedAllocationPlan,
-    RetainedAllocationPlanError, RetainedBuildFailureCode,
+    PhysicalStorageAccount, PhysicalStorageAccountCreateError, PhysicalStorageAccountFactory,
+    PhysicalStorageAccountFactoryCreateError, PhysicalStorageAccountFactoryLimits,
+    PhysicalStorageAccountFactorySnapshot, PhysicalStorageAccountLimits,
+    PhysicalStorageAccountSnapshot, PhysicalStorageLimitError,
 };
