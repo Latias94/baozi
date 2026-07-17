@@ -2,32 +2,51 @@
 
 //! Canonical Baozi scene, math, material, diagnostic, and domain error types.
 
+#[allow(dead_code, reason = "U4-private-canonical-rail: remove at U4 cutover")]
 mod animation;
+#[allow(dead_code, reason = "U4-private-canonical-rail: remove at U4 cutover")]
 mod appearance;
+#[allow(dead_code, reason = "U4-private-canonical-rail: remove at U4 cutover")]
 mod attribute;
+#[allow(dead_code, reason = "U4-private-canonical-rail: remove at U4 cutover")]
 mod canonical_edit;
+#[allow(dead_code, reason = "U4-private-canonical-rail: remove at U4 cutover")]
 mod canonical_scene;
+#[allow(dead_code, reason = "U4-private-canonical-rail: remove at U4 cutover")]
 mod canonical_validation;
+#[allow(dead_code, reason = "U4-private-canonical-rail: remove at U4 cutover")]
 mod deform;
+#[allow(dead_code, reason = "U4-private-canonical-rail: remove at U4 cutover")]
 mod derived;
+#[allow(dead_code, reason = "U4-private-canonical-rail: remove at U4 cutover")]
 mod derived_input;
 pub mod diagnostic;
+#[allow(dead_code, reason = "U4-private-canonical-rail: remove at U4 cutover")]
 mod entity;
 pub mod error;
+#[allow(dead_code, reason = "U4-private-canonical-rail: remove at U4 cutover")]
 mod extension;
 mod format_id;
+#[allow(dead_code, reason = "U4-private-canonical-rail: remove at U4 cutover")]
 mod geometry;
+#[allow(dead_code, reason = "U4-private-canonical-rail: remove at U4 cutover")]
 mod identity;
+#[allow(dead_code, reason = "U4-private-canonical-rail: remove at U4 cutover")]
 mod image;
 pub mod material;
 pub mod math;
+#[allow(dead_code, reason = "U4-private-canonical-rail: remove at U4 cutover")]
 mod namespaced;
 mod ordered_map;
+#[allow(dead_code, reason = "U4-private-canonical-rail: remove at U4 cutover")]
 mod provenance;
+#[allow(dead_code, reason = "U4-private-canonical-rail: remove at U4 cutover")]
 mod remap;
 pub mod scene;
+#[allow(dead_code, reason = "U4-private-canonical-rail: remove at U4 cutover")]
 mod scene_space;
 mod scene_storage;
+#[allow(dead_code, reason = "U4-private-canonical-rail: remove at U4 cutover")]
 mod shared_storage;
 mod validation;
 mod validation_control;
