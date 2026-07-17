@@ -183,8 +183,10 @@ where
         if let Some(cause) = self.terminal.clone() {
             return Err(cause);
         }
-        let cancellation = Arc::clone(&self.control.cancellation);
-        let cancelled = catch_unwind(move || cancellation.is_cancelled());
+        let cancellation = self.control.cancellation.as_ref().map(Arc::clone);
+        let cancelled = catch_unwind(move || {
+            cancellation.is_some_and(|cancellation| cancellation.is_cancelled())
+        });
         let cancelled = match cancelled {
             Ok(cancelled) => cancelled,
             Err(payload) => {
@@ -504,6 +506,49 @@ where
         reservation: &LiveReservation<O, LP, D>,
     ) -> Result<(), LedgerCause<D>> {
         self.ledger.validate_live_reservation(reservation)
+    }
+
+    #[allow(
+        dead_code,
+        reason = "crate-private until the U4 canonical consumers switch atomically"
+    )]
+    pub(crate) fn retained_ledger(&self) -> &Ledger<O, LP, D> {
+        &self.ledger
+    }
+
+    #[allow(
+        dead_code,
+        reason = "crate-private until the U4 canonical consumers switch atomically"
+    )]
+    pub(crate) fn try_prepare_typed_control(
+        &mut self,
+        final_progress: FinalProgress<PP, U>,
+    ) -> Result<(), ControlCause> {
+        self.report_final_progress(
+            final_progress.phase,
+            final_progress.unit,
+            final_progress.total,
+        )?;
+        self.poll()
+    }
+
+    #[allow(
+        dead_code,
+        reason = "crate-private until the U4 canonical consumers switch atomically"
+    )]
+    pub(crate) fn into_ledger_for_typed_publication(self) -> Ledger<O, LP, D> {
+        let Self {
+            mut control,
+            ledger,
+            progress,
+            progress_evidence_bytes,
+            ..
+        } = self;
+        drop(progress);
+        ledger.release_progress_evidence(progress_evidence_bytes);
+        control.discard_cancellation();
+        drop(control);
+        ledger
     }
 
     /// Finalizes the generic ledger after operation-owned live storage reaches zero.

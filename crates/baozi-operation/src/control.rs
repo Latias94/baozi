@@ -40,15 +40,6 @@ impl CancellationSignal for CancellationToken {
     }
 }
 
-#[derive(Debug)]
-struct NeverCancelled;
-
-impl CancellationSignal for NeverCancelled {
-    fn is_cancelled(&self) -> bool {
-        false
-    }
-}
-
 /// Identifies the mechanism that requested cancellation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CancellationOrigin {
@@ -309,7 +300,7 @@ impl Default for ProgressDeliveryLimits {
 
 /// Live operation capabilities, separate from frozen semantic configuration.
 pub struct OperationControl<P, U> {
-    pub(crate) cancellation: Arc<dyn CancellationSignal>,
+    pub(crate) cancellation: Option<Arc<dyn CancellationSignal>>,
     pub(crate) observer: Option<Box<dyn ProgressObserver<P, U>>>,
     pub(crate) deadline: Option<Instant>,
     pub(crate) progress_limits: ProgressDeliveryLimits,
@@ -318,8 +309,9 @@ pub struct OperationControl<P, U> {
 impl<P, U> OperationControl<P, U> {
     /// Replaces the no-op cancellation signal.
     pub fn with_cancellation(mut self, cancellation: impl CancellationSignal) -> Self {
-        let previous = std::mem::replace(&mut self.cancellation, Arc::new(cancellation));
-        discard_extension(previous);
+        if let Some(previous) = self.cancellation.replace(Arc::new(cancellation)) {
+            discard_extension(previous);
+        }
         self
     }
 
@@ -347,15 +339,16 @@ impl<P, U> OperationControl<P, U> {
     }
 
     pub(crate) fn discard_cancellation(&mut self) {
-        let cancellation = std::mem::replace(&mut self.cancellation, Arc::new(NeverCancelled));
-        discard_extension(cancellation);
+        if let Some(cancellation) = self.cancellation.take() {
+            discard_extension(cancellation);
+        }
     }
 }
 
 impl<P, U> Default for OperationControl<P, U> {
     fn default() -> Self {
         Self {
-            cancellation: Arc::new(NeverCancelled),
+            cancellation: None,
             observer: None,
             deadline: None,
             progress_limits: ProgressDeliveryLimits::default(),
@@ -365,8 +358,9 @@ impl<P, U> Default for OperationControl<P, U> {
 
 impl<P, U> Drop for OperationControl<P, U> {
     fn drop(&mut self) {
-        let cancellation = std::mem::replace(&mut self.cancellation, Arc::new(NeverCancelled));
-        discard_extension(cancellation);
+        if let Some(cancellation) = self.cancellation.take() {
+            discard_extension(cancellation);
+        }
         if let Some(observer) = self.observer.take() {
             discard_extension(observer);
         }

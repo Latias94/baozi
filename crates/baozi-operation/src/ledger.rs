@@ -104,6 +104,8 @@ pub enum CounterClass {
     PendingPublication,
     /// Canonical output published durably from the operation.
     Committed,
+    /// Non-canonical outcome evidence published durably from the operation.
+    PublishedOutcomeEvidence,
 }
 
 /// Value policy for one owner-defined accounting dimension.
@@ -115,6 +117,7 @@ pub struct DimensionPolicy {
     attempted_limit: u64,
     consumed_limit: u64,
     committed_limit: u64,
+    published_outcome_evidence_limit: u64,
     live_byte_limit: Option<u64>,
 }
 
@@ -125,6 +128,7 @@ impl DimensionPolicy {
             attempted_limit,
             consumed_limit,
             committed_limit,
+            published_outcome_evidence_limit: 0,
             live_byte_limit: None,
         }
     }
@@ -140,8 +144,15 @@ impl DimensionPolicy {
             attempted_limit,
             consumed_limit,
             committed_limit,
+            published_outcome_evidence_limit: 0,
             live_byte_limit: Some(live_byte_limit),
         }
+    }
+
+    /// Adds an independent limit for retained published outcome evidence.
+    pub const fn with_published_outcome_evidence_limit(mut self, limit: u64) -> Self {
+        self.published_outcome_evidence_limit = limit;
+        self
     }
 
     /// Returns the immutable attempted-work limit.
@@ -157,6 +168,11 @@ impl DimensionPolicy {
     /// Returns the immutable committed-output limit.
     pub const fn committed_limit(self) -> u64 {
         self.committed_limit
+    }
+
+    /// Returns the immutable published-outcome-evidence limit.
+    pub const fn published_outcome_evidence_limit(self) -> u64 {
+        self.published_outcome_evidence_limit
     }
 
     /// Returns the live-byte limit, or `None` when the dimension is not reservable.
@@ -178,6 +194,9 @@ impl DimensionPolicy {
                 .min(upper_bound.consumed_limit)
                 .min(attempted_limit),
             committed_limit: self.committed_limit.min(upper_bound.committed_limit),
+            published_outcome_evidence_limit: self
+                .published_outcome_evidence_limit
+                .min(upper_bound.published_outcome_evidence_limit),
             live_byte_limit,
         })
     }
@@ -416,6 +435,8 @@ pub enum LedgerCause<D> {
     PendingPublicationsRemain,
     /// Internal evidence storage could not be admitted or allocated safely.
     Evidence { cause: LedgerEvidenceError },
+    /// Final snapshot staging no longer matches the frozen dimension and phase indexes.
+    FinalSnapshotShapeMismatch,
 }
 
 impl<D: fmt::Debug> fmt::Display for LedgerCause<D> {
@@ -499,6 +520,9 @@ impl<D: fmt::Debug> fmt::Display for LedgerCause<D> {
                 formatter.write_str("publication transactions remain pending")
             }
             Self::Evidence { cause } => write!(formatter, "ledger evidence failed: {cause}"),
+            Self::FinalSnapshotShapeMismatch => {
+                formatter.write_str("final snapshot staging does not match ledger indexes")
+            }
         }
     }
 }
@@ -580,6 +604,109 @@ impl<D: Copy> Commitment<D> {
     }
 }
 
+mod destination_sealed {
+    #[allow(
+        dead_code,
+        reason = "crate-private until the U4 canonical consumers switch atomically"
+    )]
+    pub trait Sealed {}
+}
+
+/// Destination marker for committed canonical output.
+#[allow(
+    dead_code,
+    reason = "crate-private until the U4 canonical consumers switch atomically"
+)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CanonicalOutput;
+
+/// Destination marker for published non-canonical outcome evidence.
+#[allow(
+    dead_code,
+    reason = "crate-private until the U4 canonical consumers switch atomically"
+)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PublishedOutcomeEvidence;
+
+impl destination_sealed::Sealed for CanonicalOutput {}
+impl destination_sealed::Sealed for PublishedOutcomeEvidence {}
+
+#[allow(
+    dead_code,
+    reason = "crate-private until the U4 canonical consumers switch atomically"
+)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DestinationKind {
+    CanonicalOutput,
+    PublishedOutcomeEvidence,
+}
+
+/// Sealed vocabulary for one retained publication destination.
+#[allow(
+    dead_code,
+    reason = "crate-private until the U4 canonical consumers switch atomically"
+)]
+pub trait PublicationDestination: destination_sealed::Sealed + Send + Sync + 'static {}
+
+#[allow(
+    dead_code,
+    reason = "crate-private until the U4 canonical consumers switch atomically"
+)]
+pub(crate) trait DestinationState: PublicationDestination {
+    const KIND: DestinationKind;
+}
+
+impl PublicationDestination for CanonicalOutput {}
+
+impl DestinationState for CanonicalOutput {
+    const KIND: DestinationKind = DestinationKind::CanonicalOutput;
+}
+
+impl PublicationDestination for PublishedOutcomeEvidence {}
+
+impl DestinationState for PublishedOutcomeEvidence {
+    const KIND: DestinationKind = DestinationKind::PublishedOutcomeEvidence;
+}
+
+/// One typed logical commitment independent of physical allocation attribution.
+#[allow(
+    dead_code,
+    reason = "crate-private until the U4 canonical consumers switch atomically"
+)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OutputCommitment<D, Destination> {
+    dimension: D,
+    amount: u64,
+    dimension_position: usize,
+    destination: PhantomData<fn() -> Destination>,
+}
+
+#[allow(
+    dead_code,
+    reason = "crate-private until the U4 canonical consumers switch atomically"
+)]
+impl<D: Copy, Destination: PublicationDestination> OutputCommitment<D, Destination> {
+    /// Creates one logical commitment for the destination in the type parameter.
+    pub const fn new(dimension: D, amount: u64) -> Self {
+        Self {
+            dimension,
+            amount,
+            dimension_position: usize::MAX,
+            destination: PhantomData,
+        }
+    }
+
+    /// Returns the owner-defined dimension.
+    pub const fn dimension(self) -> D {
+        self.dimension
+    }
+
+    /// Returns the logical amount.
+    pub const fn amount(self) -> u64 {
+        self.amount
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct DimensionState {
     attempted: u64,
@@ -588,6 +715,8 @@ struct DimensionState {
     peak_live_bytes: u64,
     pending_publication: u64,
     committed: u64,
+    committed_canonical_output: u64,
+    published_outcome_evidence: u64,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -599,13 +728,15 @@ struct PhaseState {
 #[derive(Debug)]
 struct PhaseEntry<P> {
     phase: P,
-    state: PhaseState,
+    // Sorted lookup entries may move; their append-only state slots never do.
+    state_position: usize,
 }
 
 #[derive(Debug)]
 struct LedgerState<P, D> {
     dimensions: Vec<DimensionEntry<D>>,
     phases: Vec<PhaseEntry<P>>,
+    phase_states: Vec<PhaseState>,
     dimension_snapshot_staging: Vec<(D, DimensionSnapshot)>,
     phase_snapshot_staging: Vec<(P, PhaseSnapshot)>,
     current_live_bytes: u64,
@@ -629,6 +760,23 @@ pub(crate) struct Ledger<O, P, D> {
     state: Arc<Mutex<LedgerState<P, D>>>,
     operation_live_byte_limit: u64,
     operation_owner: PhantomData<fn() -> O>,
+}
+
+/// Test-only scalar observation of one ledger's live reservation state.
+#[cfg(test)]
+pub(crate) struct LedgerTestProbe<P, D> {
+    state: Arc<Mutex<LedgerState<P, D>>>,
+}
+
+#[cfg(test)]
+impl<P, D> LedgerTestProbe<P, D> {
+    pub(crate) fn active_reservations(&self) -> u64 {
+        lock(&self.state).active_reservations
+    }
+
+    pub(crate) fn current_live_bytes(&self) -> u64 {
+        lock(&self.state).current_live_bytes
+    }
 }
 
 impl<O, P, D> fmt::Debug for Ledger<O, P, D> {
@@ -657,6 +805,7 @@ where
             state: Arc::new(Mutex::new(LedgerState {
                 dimensions,
                 phases: Vec::new(),
+                phase_states: Vec::new(),
                 dimension_snapshot_staging,
                 phase_snapshot_staging: Vec::new(),
                 current_live_bytes: 0,
@@ -669,6 +818,13 @@ where
             })),
             operation_live_byte_limit,
             operation_owner: PhantomData,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_probe(&self) -> LedgerTestProbe<P, D> {
+        LedgerTestProbe {
+            state: Arc::clone(&self.state),
         }
     }
 
@@ -874,10 +1030,23 @@ where
         dimension: D,
         bytes: u64,
     ) -> Result<LiveReservation<O, P, D>, LedgerCause<D>> {
+        self.reserve_core(phase, dimension, bytes)
+            .map(|core| LiveReservation { core })
+    }
+
+    fn reserve_core(
+        &self,
+        phase: P,
+        dimension: D,
+        bytes: u64,
+    ) -> Result<ReservationCore<O, P, D>, LedgerCause<D>> {
         let mut state = lock(&self.state);
         Self::ensure_open(&state)?;
-        let dimension_entry = dimension_entry(&state.dimensions, dimension)
-            .ok_or(LedgerCause::UnknownDimension { dimension })?;
+        let dimension_position = state
+            .dimensions
+            .binary_search_by_key(&dimension, |entry| entry.dimension)
+            .map_err(|_| LedgerCause::UnknownDimension { dimension })?;
+        let dimension_entry = &state.dimensions[dimension_position];
         let dimension_limit = dimension_entry
             .policy
             .live_byte_limit
@@ -914,8 +1083,7 @@ where
                 limit: self.operation_live_byte_limit,
             });
         }
-        let current_phase =
-            phase_entry(&state.phases, phase).map_or(0, |entry| entry.state.current_live_bytes);
+        let current_phase = phase_state(&state, phase).map_or(0, |state| state.current_live_bytes);
         let phase_live =
             current_phase
                 .checked_add(bytes)
@@ -939,20 +1107,132 @@ where
             .state;
         dimension_state.current_live_bytes = dimension_live;
         dimension_state.peak_live_bytes = dimension_state.peak_live_bytes.max(dimension_live);
-        let phase_state = &mut state.phases[phase_position].state;
+        let phase_state = &mut state.phase_states[phase_position];
         phase_state.current_live_bytes = phase_live;
         phase_state.peak_live_bytes = phase_state.peak_live_bytes.max(phase_live);
         state.current_live_bytes = operation_live;
         state.peak_live_bytes = state.peak_live_bytes.max(operation_live);
         state.active_reservations = active_reservations;
 
-        Ok(LiveReservation {
-            owner: Arc::clone(&self.state),
+        Ok(ReservationCore::new(
+            Arc::clone(&self.state),
             phase,
+            phase_position,
             dimension,
+            dimension_position,
             bytes,
-            active: true,
-            operation_owner: PhantomData,
+        ))
+    }
+
+    #[allow(
+        dead_code,
+        reason = "crate-private until the U4 canonical consumers switch atomically"
+    )]
+    pub(crate) fn reserve_operation_attribution<Destination>(
+        &self,
+        phase: P,
+        dimension: D,
+        bytes: u64,
+    ) -> Result<OperationAttributionReservation<O, P, D, Destination>, LedgerCause<D>>
+    where
+        Destination: PublicationDestination,
+    {
+        self.reserve_core(phase, dimension, bytes)
+            .map(|core| OperationAttributionReservation {
+                core,
+                destination: PhantomData,
+            })
+    }
+
+    #[allow(
+        dead_code,
+        reason = "crate-private until the U4 canonical consumers switch atomically"
+    )]
+    pub(crate) fn try_attribution_batch<Destination>(
+        &self,
+        phase: P,
+        capacity_dimension: D,
+        attribution_limit: usize,
+        commitment_limit: usize,
+    ) -> Result<AttributionReservationBatch<O, P, D, Destination>, AttributionBatchCreateError<D>>
+    where
+        Destination: PublicationDestination,
+    {
+        let attribution_plan = CapacityPlan::for_type::<
+            OperationAttributionReservation<O, P, D, Destination>,
+        >(0, 0, attribution_limit)
+        .map_err(|_| AttributionBatchCreateError::CapacityOverflow)?;
+        let commitment_plan =
+            CapacityPlan::for_type::<OutputCommitment<D, Destination>>(0, 0, commitment_limit)
+                .map_err(|_| AttributionBatchCreateError::CapacityOverflow)?;
+        let planned_bytes = attribution_plan
+            .envelope_delta_bytes()
+            .ok()
+            .and_then(|bytes| {
+                commitment_plan
+                    .envelope_delta_bytes()
+                    .ok()
+                    .and_then(|commitment_bytes| bytes.checked_add(commitment_bytes))
+            })
+            .ok_or(AttributionBatchCreateError::CapacityOverflow)?;
+        let mut capacity_cover = if planned_bytes == 0 {
+            None
+        } else {
+            Some(StorageCoveringReservation {
+                core: self
+                    .reserve_core(phase, capacity_dimension, planned_bytes)
+                    .map_err(AttributionBatchCreateError::Ledger)?,
+            })
+        };
+
+        let mut attributions = Vec::new();
+        attributions
+            .try_reserve_exact(attribution_plan.allocator_additional())
+            .map_err(|_| AttributionBatchCreateError::AllocationFailed)?;
+        let mut commitments = Vec::new();
+        commitments
+            .try_reserve_exact(commitment_plan.allocator_additional())
+            .map_err(|_| AttributionBatchCreateError::AllocationFailed)?;
+        attribution_plan
+            .finish(attributions.len(), attributions.capacity())
+            .map_err(|_| AttributionBatchCreateError::CapacityOverflow)?;
+        commitment_plan
+            .finish(commitments.len(), commitments.capacity())
+            .map_err(|_| AttributionBatchCreateError::CapacityOverflow)?;
+
+        let actual_bytes = attributions
+            .capacity()
+            .checked_mul(size_of::<
+                OperationAttributionReservation<O, P, D, Destination>,
+            >())
+            .and_then(|bytes| {
+                commitments
+                    .capacity()
+                    .checked_mul(size_of::<OutputCommitment<D, Destination>>())
+                    .and_then(|commitment_bytes| bytes.checked_add(commitment_bytes))
+            })
+            .and_then(|bytes| u64::try_from(bytes).ok())
+            .ok_or(AttributionBatchCreateError::CapacityOverflow)?;
+        if actual_bytes > planned_bytes {
+            return Err(AttributionBatchCreateError::CapacityOverflow);
+        }
+        match (&mut capacity_cover, actual_bytes) {
+            (Some(_), 0) => {
+                drop(capacity_cover.take());
+            }
+            (Some(cover), bytes) => self
+                .resize_core(&mut cover.core, bytes)
+                .map_err(AttributionBatchCreateError::Ledger)?,
+            (None, 0) => {}
+            (None, _) => return Err(AttributionBatchCreateError::CapacityOverflow),
+        }
+
+        Ok(AttributionReservationBatch {
+            attributions,
+            commitments,
+            capacity_cover,
+            attribution_limit,
+            commitment_limit,
         })
     }
 
@@ -965,23 +1245,24 @@ where
         self.check_reservation(reservation)?;
         let mut state = lock(&self.state);
         Self::ensure_open(&state)?;
-        if reservation.phase == phase {
+        if reservation.core.phase == phase {
             return Ok(());
         }
-        let target_live = phase_entry(&state.phases, phase)
-            .map_or(0, |entry| entry.state.current_live_bytes)
-            .checked_add(reservation.bytes)
+        let target_live = phase_state(&state, phase)
+            .map_or(0, |state| state.current_live_bytes)
+            .checked_add(reservation.core.bytes)
             .ok_or(LedgerCause::ArithmeticOverflow {
                 class: CounterClass::Live,
-                dimension: reservation.dimension,
+                dimension: reservation.core.dimension,
             })?;
         let phase_position =
             ensure_phase(&mut state, phase).map_err(|cause| LedgerCause::Evidence { cause })?;
-        release_phase(&mut state, reservation.phase, reservation.bytes);
-        let target = &mut state.phases[phase_position].state;
+        release_phase(&mut state, reservation.core.phase, reservation.core.bytes);
+        let target = &mut state.phase_states[phase_position];
         target.current_live_bytes = target_live;
         target.peak_live_bytes = target.peak_live_bytes.max(target_live);
-        reservation.phase = phase;
+        reservation.core.phase = phase;
+        reservation.core.phase_position = phase_position;
         Ok(())
     }
 
@@ -995,6 +1276,14 @@ where
         bytes: u64,
     ) -> Result<(), LedgerCause<D>> {
         self.check_reservation(reservation)?;
+        self.resize_core(&mut reservation.core, bytes)
+    }
+
+    fn resize_core(
+        &self,
+        reservation: &mut ReservationCore<O, P, D>,
+        bytes: u64,
+    ) -> Result<(), LedgerCause<D>> {
         let mut state = lock(&self.state);
         Self::ensure_open(&state)?;
         if bytes == reservation.bytes {
@@ -1043,9 +1332,8 @@ where
             });
         }
 
-        let phase_live = project(
-            phase_entry(&state.phases, phase).map_or(0, |entry| entry.state.current_live_bytes),
-        )?;
+        let phase_live =
+            project(phase_state(&state, phase).map_or(0, |state| state.current_live_bytes))?;
 
         let phase_position =
             ensure_phase(&mut state, phase).map_err(|cause| LedgerCause::Evidence { cause })?;
@@ -1054,7 +1342,7 @@ where
             .state;
         dimension_state.current_live_bytes = dimension_live;
         dimension_state.peak_live_bytes = dimension_state.peak_live_bytes.max(dimension_live);
-        let phase_state = &mut state.phases[phase_position].state;
+        let phase_state = &mut state.phase_states[phase_position];
         phase_state.current_live_bytes = phase_live;
         phase_state.peak_live_bytes = phase_state.peak_live_bytes.max(phase_live);
         state.current_live_bytes = operation_live;
@@ -1101,7 +1389,7 @@ where
 
         let source_bytes = reservations.iter().try_fold(0_u64, |total, reservation| {
             total
-                .checked_add(reservation.bytes)
+                .checked_add(reservation.core.bytes)
                 .ok_or(LedgerCause::ArithmeticOverflow {
                     class: CounterClass::Live,
                     dimension,
@@ -1109,10 +1397,10 @@ where
         })?;
         let target_dimension_source = reservations
             .iter()
-            .filter(|reservation| reservation.dimension == dimension)
+            .filter(|reservation| reservation.core.dimension == dimension)
             .try_fold(0_u64, |total, reservation| {
                 total
-                    .checked_add(reservation.bytes)
+                    .checked_add(reservation.core.bytes)
                     .ok_or(LedgerCause::ArithmeticOverflow {
                         class: CounterClass::Live,
                         dimension,
@@ -1120,10 +1408,10 @@ where
             })?;
         let target_phase_source = reservations
             .iter()
-            .filter(|reservation| reservation.phase == phase)
+            .filter(|reservation| reservation.core.phase == phase)
             .try_fold(0_u64, |total, reservation| {
                 total
-                    .checked_add(reservation.bytes)
+                    .checked_add(reservation.core.bytes)
                     .ok_or(LedgerCause::ArithmeticOverflow {
                         class: CounterClass::Live,
                         dimension,
@@ -1172,18 +1460,22 @@ where
             });
         }
         let phase_live = project(
-            phase_entry(&state.phases, phase).map_or(0, |entry| entry.state.current_live_bytes),
+            phase_state(&state, phase).map_or(0, |state| state.current_live_bytes),
             target_phase_source,
         )?;
+        let dimension_position = state
+            .dimensions
+            .binary_search_by_key(&dimension, |entry| entry.dimension)
+            .map_err(|_| LedgerCause::UnknownDimension { dimension })?;
         let phase_position =
             ensure_phase(&mut state, phase).map_err(|cause| LedgerCause::Evidence { cause })?;
 
         for reservation in reservations.iter() {
             release_bytes_locked(
                 &mut state,
-                reservation.phase,
-                reservation.dimension,
-                reservation.bytes,
+                reservation.core.phase,
+                reservation.core.dimension,
+                reservation.core.bytes,
             );
         }
         let dimension_state = &mut dimension_entry_mut(&mut state.dimensions, dimension)
@@ -1191,7 +1483,7 @@ where
             .state;
         dimension_state.current_live_bytes = dimension_live;
         dimension_state.peak_live_bytes = dimension_state.peak_live_bytes.max(dimension_live);
-        let phase_state = &mut state.phases[phase_position].state;
+        let phase_state = &mut state.phase_states[phase_position];
         phase_state.current_live_bytes = phase_live;
         phase_state.peak_live_bytes = phase_state.peak_live_bytes.max(phase_live);
         state.current_live_bytes = operation_live;
@@ -1204,12 +1496,14 @@ where
             let target_bytes = if index == last {
                 remaining
             } else {
-                reservation.bytes.min(remaining)
+                reservation.core.bytes.min(remaining)
             };
             remaining -= target_bytes;
-            reservation.phase = phase;
-            reservation.dimension = dimension;
-            reservation.bytes = target_bytes;
+            reservation.core.phase = phase;
+            reservation.core.phase_position = phase_position;
+            reservation.core.dimension = dimension;
+            reservation.core.dimension_position = dimension_position;
+            reservation.core.bytes = target_bytes;
         }
         debug_assert_eq!(remaining, 0);
         Ok(())
@@ -1224,10 +1518,10 @@ where
         self.check_reservation(reservation)?;
         let mut state = lock(&self.state);
         Self::ensure_open(&state)?;
-        if bytes > reservation.bytes {
+        if bytes > reservation.core.bytes {
             return Err(LedgerCause::SplitExceedsReservation {
                 requested: bytes,
-                available: reservation.bytes,
+                available: reservation.core.bytes,
             });
         }
         state.active_reservations =
@@ -1236,18 +1530,20 @@ where
                 .checked_add(1)
                 .ok_or(LedgerCause::ArithmeticOverflow {
                     class: CounterClass::Live,
-                    dimension: reservation.dimension,
+                    dimension: reservation.core.dimension,
                 })?;
         drop(state);
 
-        reservation.bytes -= bytes;
+        reservation.core.bytes -= bytes;
         Ok(LiveReservation {
-            owner: Arc::clone(&reservation.owner),
-            phase: reservation.phase,
-            dimension: reservation.dimension,
-            bytes,
-            active: true,
-            operation_owner: PhantomData,
+            core: ReservationCore::new(
+                Arc::clone(&reservation.core.owner),
+                reservation.core.phase,
+                reservation.core.phase_position,
+                reservation.core.dimension,
+                reservation.core.dimension_position,
+                bytes,
+            ),
         })
     }
 
@@ -1365,10 +1661,354 @@ where
             .ok_or(LedgerCause::UnknownDimension { dimension })
     }
 
+    #[allow(
+        dead_code,
+        reason = "crate-private until the U4 canonical consumers switch atomically"
+    )]
+    pub(crate) fn dimension_count(&self) -> usize {
+        lock(&self.state).dimensions.len()
+    }
+
+    #[allow(
+        dead_code,
+        reason = "crate-private until the U4 canonical consumers switch atomically"
+    )]
+    pub(crate) fn dimension_at(&self, index: usize) -> Option<D> {
+        lock(&self.state)
+            .dimensions
+            .get(index)
+            .map(|entry| entry.dimension)
+    }
+
+    #[allow(
+        dead_code,
+        reason = "crate-private until the U4 canonical consumers switch atomically"
+    )]
+    pub(crate) fn validate_typed_batch_pair<Destination>(
+        &self,
+        first: &AttributionReservationBatch<O, P, D, Destination>,
+        second: &AttributionReservationBatch<O, P, D, Destination>,
+    ) -> Result<(), LedgerCause<D>>
+    where
+        Destination: DestinationState,
+    {
+        if !first.validate_owner(&self.state) || !second.validate_owner(&self.state) {
+            return Err(LedgerCause::OwnerMismatch);
+        }
+        validate_typed_commitment_pair(&lock(&self.state).dimensions, first, second)
+    }
+
+    #[allow(
+        dead_code,
+        clippy::result_large_err,
+        reason = "the staged seam preserves every reservation on rejection without allocating"
+    )]
+    pub(crate) fn try_fallback_baseline(
+        &self,
+        canonical_assembly: AttributionReservationBatch<O, P, D, CanonicalOutput>,
+        evidence_assembly: AttributionReservationBatch<O, P, D, PublishedOutcomeEvidence>,
+        fallback: AttributionReservationBatch<O, P, D, PublishedOutcomeEvidence>,
+        evidence: AttributionReservationBatch<O, P, D, PublishedOutcomeEvidence>,
+    ) -> Result<FallbackBatchBaseline<O, P, D>, FallbackBaselineRejection<O, P, D>> {
+        let mut baseline = FallbackBatchBaseline {
+            canonical_assembly,
+            evidence_assembly,
+            fallback,
+            evidence,
+        };
+        if let Err(cause) = self.validate_fallback_baseline(&baseline) {
+            return Err(FallbackBaselineRejection { baseline, cause });
+        }
+        if let Err(cause) = self.bind_fallback_baseline(&mut baseline) {
+            return Err(FallbackBaselineRejection { baseline, cause });
+        }
+        Ok(baseline)
+    }
+
+    #[allow(
+        dead_code,
+        reason = "crate-private until the U4 canonical consumers switch atomically"
+    )]
+    fn bind_fallback_baseline(
+        &self,
+        baseline: &mut FallbackBatchBaseline<O, P, D>,
+    ) -> Result<(), LedgerCause<D>> {
+        let state = lock(&self.state);
+        bind_typed_publication_batch(&state, &mut baseline.canonical_assembly)?;
+        bind_typed_publication_batch(&state, &mut baseline.evidence_assembly)?;
+        bind_typed_publication_batch(&state, &mut baseline.fallback)?;
+        bind_typed_publication_batch(&state, &mut baseline.evidence)
+    }
+
+    #[allow(
+        dead_code,
+        reason = "crate-private until the U4 canonical consumers switch atomically"
+    )]
+    fn validate_fallback_baseline(
+        &self,
+        baseline: &FallbackBatchBaseline<O, P, D>,
+    ) -> Result<(), LedgerCause<D>> {
+        if !baseline.canonical_assembly.validate_owner(&self.state)
+            || !baseline.evidence_assembly.validate_owner(&self.state)
+            || !baseline.fallback.validate_owner(&self.state)
+            || !baseline.evidence.validate_owner(&self.state)
+        {
+            return Err(LedgerCause::OwnerMismatch);
+        }
+        if !baseline
+            .evidence_assembly
+            .can_absorb_sources([Some(&baseline.evidence), Some(&baseline.fallback)])
+        {
+            return Err(LedgerCause::ActiveReservationsRemain { count: u64::MAX });
+        }
+        let expected_active = baseline
+            .canonical_assembly
+            .active_count()
+            .and_then(|count| {
+                baseline
+                    .evidence_assembly
+                    .active_count()?
+                    .checked_add(count)
+            })
+            .and_then(|count| baseline.fallback.active_count()?.checked_add(count))
+            .and_then(|count| baseline.evidence.active_count()?.checked_add(count))
+            .ok_or(LedgerCause::ActiveReservationsRemain { count: u64::MAX })?;
+        let expected_live = baseline
+            .canonical_assembly
+            .live_bytes()
+            .and_then(|bytes| baseline.evidence_assembly.live_bytes()?.checked_add(bytes))
+            .and_then(|bytes| baseline.fallback.live_bytes()?.checked_add(bytes))
+            .and_then(|bytes| baseline.evidence.live_bytes()?.checked_add(bytes))
+            .ok_or(LedgerCause::LiveReservationsRemain { bytes: u64::MAX })?;
+        let state = lock(&self.state);
+        Self::ensure_open(&state)?;
+        validate_final_snapshot_shape(&state)?;
+        if state.active_reservations != expected_active {
+            return Err(LedgerCause::ActiveReservationsRemain {
+                count: state.active_reservations,
+            });
+        }
+        if state.current_live_bytes != expected_live {
+            return Err(LedgerCause::PublicationLiveMismatch {
+                transaction_bytes: expected_live,
+                ledger_bytes: state.current_live_bytes,
+            });
+        }
+        validate_typed_commitments(&state.dimensions, &baseline.canonical_assembly)?;
+        validate_typed_commitment_batches(
+            &state.dimensions,
+            [
+                Some(&baseline.evidence_assembly),
+                Some(&baseline.evidence),
+                Some(&baseline.fallback),
+            ],
+        )
+    }
+
+    #[allow(
+        dead_code,
+        clippy::result_large_err,
+        reason = "the staged seam preserves the fallback baseline on rejection without allocating"
+    )]
+    pub(crate) fn try_prepare_primary(
+        self,
+        mut baseline: FallbackBatchBaseline<O, P, D>,
+        mut canonical_source: Option<AttributionReservationBatch<O, P, D, CanonicalOutput>>,
+        mut evidence_source: Option<AttributionReservationBatch<O, P, D, PublishedOutcomeEvidence>>,
+    ) -> Result<TypedFreezeProof<O, P, D>, TypedPrimaryRejection<O, P, D>> {
+        if let Err(cause) = self.validate_primary_publication(
+            &baseline,
+            canonical_source.as_ref(),
+            evidence_source.as_ref(),
+        ) {
+            return Err(TypedPrimaryRejection {
+                ledger: self,
+                baseline,
+                canonical_discard: canonical_source,
+                evidence_discard: evidence_source,
+                cause,
+            });
+        }
+        let bind_result = {
+            let state = lock(&self.state);
+            bind_typed_publication_batch(&state, &mut baseline.canonical_assembly)
+                .and_then(|()| {
+                    bind_typed_publication_batch(&state, &mut baseline.evidence_assembly)
+                })
+                .and_then(|()| bind_typed_publication_batch(&state, &mut baseline.evidence))
+                .and_then(|()| {
+                    canonical_source
+                        .as_mut()
+                        .map_or(Ok(()), |batch| bind_typed_publication_batch(&state, batch))
+                })
+                .and_then(|()| {
+                    evidence_source
+                        .as_mut()
+                        .map_or(Ok(()), |batch| bind_typed_publication_batch(&state, batch))
+                })
+        };
+        if let Err(cause) = bind_result {
+            return Err(TypedPrimaryRejection {
+                ledger: self,
+                baseline,
+                canonical_discard: canonical_source,
+                evidence_discard: evidence_source,
+                cause,
+            });
+        }
+        let FallbackBatchBaseline {
+            mut canonical_assembly,
+            mut evidence_assembly,
+            fallback,
+            mut evidence,
+        } = baseline;
+        if let Some(mut source) = canonical_source {
+            canonical_assembly.absorb_proven(&mut source);
+        }
+        evidence_assembly.absorb_proven(&mut evidence);
+        if let Some(mut source) = evidence_source {
+            evidence_assembly.absorb_proven(&mut source);
+        }
+        Ok(TypedFreezeProof {
+            canonical: canonical_assembly,
+            evidence: evidence_assembly,
+            discard_canonical: None,
+            discard_evidence: Some(fallback),
+            ledger: self,
+        })
+    }
+
+    #[allow(
+        dead_code,
+        reason = "crate-private until the U4 canonical consumers switch atomically"
+    )]
+    fn validate_primary_publication(
+        &self,
+        baseline: &FallbackBatchBaseline<O, P, D>,
+        canonical_source: Option<&AttributionReservationBatch<O, P, D, CanonicalOutput>>,
+        evidence_source: Option<&AttributionReservationBatch<O, P, D, PublishedOutcomeEvidence>>,
+    ) -> Result<(), LedgerCause<D>> {
+        if !baseline.canonical_assembly.validate_owner(&self.state)
+            || !baseline.evidence_assembly.validate_owner(&self.state)
+            || !baseline.fallback.validate_owner(&self.state)
+            || !baseline.evidence.validate_owner(&self.state)
+            || canonical_source.is_some_and(|batch| !batch.validate_owner(&self.state))
+            || evidence_source.is_some_and(|batch| !batch.validate_owner(&self.state))
+        {
+            return Err(LedgerCause::OwnerMismatch);
+        }
+        if !baseline
+            .canonical_assembly
+            .can_absorb_sources([canonical_source])
+            || !baseline
+                .evidence_assembly
+                .can_absorb_sources([Some(&baseline.evidence), evidence_source])
+        {
+            return Err(LedgerCause::ActiveReservationsRemain { count: u64::MAX });
+        }
+
+        let canonical_attribution_count = baseline
+            .canonical_assembly
+            .combined_attribution_count([canonical_source])
+            .ok_or(LedgerCause::ActiveReservationsRemain { count: u64::MAX })?;
+        let evidence_attribution_count = baseline
+            .evidence_assembly
+            .combined_attribution_count([Some(&baseline.evidence), evidence_source])
+            .ok_or(LedgerCause::ActiveReservationsRemain { count: u64::MAX })?;
+        let projected_active = canonical_attribution_count
+            .checked_add(evidence_attribution_count)
+            .and_then(|count| {
+                count.checked_add(u64::from(
+                    baseline.canonical_assembly.capacity_cover.is_some(),
+                ))
+            })
+            .and_then(|count| {
+                count.checked_add(u64::from(
+                    baseline.evidence_assembly.capacity_cover.is_some(),
+                ))
+            })
+            .ok_or(LedgerCause::ActiveReservationsRemain { count: u64::MAX })?;
+        let canonical_attribution_bytes = baseline
+            .canonical_assembly
+            .combined_attribution_bytes([canonical_source])
+            .ok_or(LedgerCause::LiveReservationsRemain { bytes: u64::MAX })?;
+        let evidence_attribution_bytes = baseline
+            .evidence_assembly
+            .combined_attribution_bytes([Some(&baseline.evidence), evidence_source])
+            .ok_or(LedgerCause::LiveReservationsRemain { bytes: u64::MAX })?;
+        let projected_live = canonical_attribution_bytes
+            .checked_add(evidence_attribution_bytes)
+            .and_then(|bytes| {
+                bytes.checked_add(baseline.canonical_assembly.account_capacity_bytes())
+            })
+            .and_then(|bytes| {
+                bytes.checked_add(baseline.evidence_assembly.account_capacity_bytes())
+            })
+            .ok_or(LedgerCause::LiveReservationsRemain { bytes: u64::MAX })?;
+        let released_active =
+            u64::from(canonical_source.is_some_and(|batch| batch.capacity_cover.is_some()))
+                .checked_add(u64::from(baseline.evidence.capacity_cover.is_some()))
+                .and_then(|count| {
+                    count.checked_add(u64::from(
+                        evidence_source.is_some_and(|batch| batch.capacity_cover.is_some()),
+                    ))
+                })
+                .and_then(|count| count.checked_add(baseline.fallback.active_count()?))
+                .ok_or(LedgerCause::ActiveReservationsRemain { count: u64::MAX })?;
+        let released_live = canonical_source
+            .map_or(0, AttributionReservationBatch::account_capacity_bytes)
+            .checked_add(baseline.evidence.account_capacity_bytes())
+            .and_then(|bytes| {
+                bytes.checked_add(
+                    evidence_source.map_or(0, AttributionReservationBatch::account_capacity_bytes),
+                )
+            })
+            .and_then(|bytes| bytes.checked_add(baseline.fallback.live_bytes()?))
+            .ok_or(LedgerCause::LiveReservationsRemain { bytes: u64::MAX })?;
+
+        let state = lock(&self.state);
+        Self::ensure_open(&state)?;
+        validate_final_snapshot_shape(&state)?;
+        let active_after_transition = state
+            .active_reservations
+            .checked_sub(released_active)
+            .ok_or(LedgerCause::ActiveReservationsRemain {
+                count: state.active_reservations,
+            })?;
+        if active_after_transition != projected_active {
+            return Err(LedgerCause::ActiveReservationsRemain {
+                count: state.active_reservations,
+            });
+        }
+        let live_after_transition = state.current_live_bytes.checked_sub(released_live).ok_or(
+            LedgerCause::LiveReservationsRemain {
+                bytes: state.current_live_bytes,
+            },
+        )?;
+        if live_after_transition != projected_live {
+            return Err(LedgerCause::PublicationLiveMismatch {
+                transaction_bytes: projected_live,
+                ledger_bytes: live_after_transition,
+            });
+        }
+        validate_typed_commitment_batches(
+            &state.dimensions,
+            [Some(&baseline.canonical_assembly), canonical_source],
+        )?;
+        validate_typed_commitment_batches(
+            &state.dimensions,
+            [
+                Some(&baseline.evidence_assembly),
+                Some(&baseline.evidence),
+                evidence_source,
+            ],
+        )
+    }
+
     /// Copies one phase's scalar evidence without allocating a full snapshot.
     pub fn phase_evidence(&self, phase: P) -> Option<PhaseSnapshot> {
         let state = lock(&self.state);
-        phase_entry(&state.phases, phase).map(|entry| phase_snapshot(entry.state))
+        phase_state(&state, phase).map(|state| phase_snapshot(*state))
     }
 
     /// Finalizes evidence only after every live reservation and pending transaction is gone.
@@ -1415,10 +2055,10 @@ where
         &self,
         reservation: &LiveReservation<O, P, D>,
     ) -> Result<(), LedgerCause<D>> {
-        if !Arc::ptr_eq(&self.state, &reservation.owner) {
+        if !reservation.core.is_owned_by(&self.state) {
             return Err(LedgerCause::OwnerMismatch);
         }
-        if !reservation.active {
+        if !reservation.core.active {
             return Err(LedgerCause::InactiveReservation);
         }
         Ok(())
@@ -1513,10 +2153,10 @@ where
     ) -> Result<u64, LedgerCause<D>> {
         reservations.iter().try_fold(0u64, |total, reservation| {
             total
-                .checked_add(reservation.bytes)
+                .checked_add(reservation.core.bytes)
                 .ok_or(LedgerCause::ArithmeticOverflow {
                     class: CounterClass::Live,
-                    dimension: reservation.dimension,
+                    dimension: reservation.core.dimension,
                 })
         })
     }
@@ -1610,12 +2250,128 @@ where
     P: Copy + Ord,
     D: Copy + Ord,
 {
+    core: ReservationCore<O, P, D>,
+}
+
+struct ReservationCore<O, P, D>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+{
     owner: Arc<Mutex<LedgerState<P, D>>>,
     phase: P,
+    phase_position: usize,
     dimension: D,
+    dimension_position: usize,
     bytes: u64,
     active: bool,
     operation_owner: PhantomData<fn() -> O>,
+}
+
+impl<O, P, D> ReservationCore<O, P, D>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+{
+    fn new(
+        owner: Arc<Mutex<LedgerState<P, D>>>,
+        phase: P,
+        phase_position: usize,
+        dimension: D,
+        dimension_position: usize,
+        bytes: u64,
+    ) -> Self {
+        Self {
+            owner,
+            phase,
+            phase_position,
+            dimension,
+            dimension_position,
+            bytes,
+            active: true,
+            operation_owner: PhantomData,
+        }
+    }
+
+    fn is_owned_by(&self, owner: &Arc<Mutex<LedgerState<P, D>>>) -> bool {
+        Arc::ptr_eq(&self.owner, owner)
+    }
+
+    fn bind_publication_positions(
+        &mut self,
+        state: &LedgerState<P, D>,
+    ) -> Result<(), LedgerCause<D>> {
+        if !self.active {
+            return Err(LedgerCause::InactiveReservation);
+        }
+        let dimension_position = state
+            .dimensions
+            .binary_search_by_key(&self.dimension, |entry| entry.dimension)
+            .map_err(|_| LedgerCause::UnknownDimension {
+                dimension: self.dimension,
+            })?;
+        let phase_position = state
+            .phases
+            .binary_search_by_key(&self.phase, |entry| entry.phase)
+            .map_err(|_| LedgerCause::FinalSnapshotShapeMismatch)
+            .map(|position| state.phases[position].state_position)?;
+        if state.phase_states.get(phase_position).is_none() {
+            return Err(LedgerCause::FinalSnapshotShapeMismatch);
+        }
+        self.dimension_position = dimension_position;
+        self.phase_position = phase_position;
+        Ok(())
+    }
+
+    fn release(&mut self) {
+        if !self.active {
+            return;
+        }
+        let mut state = lock(&self.owner);
+        release_positioned_locked(
+            &mut state,
+            self.phase_position,
+            self.dimension_position,
+            self.bytes,
+        );
+        self.active = false;
+    }
+
+    fn release_locked(&mut self, state: &mut LedgerState<P, D>) {
+        if !self.active {
+            return;
+        }
+        release_positioned_locked(
+            state,
+            self.phase_position,
+            self.dimension_position,
+            self.bytes,
+        );
+        self.active = false;
+    }
+
+    fn release_bound_locked(&mut self, state: &mut LedgerState<P, D>) {
+        state.active_reservations -= 1;
+        state.current_live_bytes -= self.bytes;
+        state.dimensions[self.dimension_position]
+            .state
+            .current_live_bytes -= self.bytes;
+        state.phase_states[self.phase_position].current_live_bytes -= self.bytes;
+        self.active = false;
+    }
+}
+
+impl<O, P, D> Drop for ReservationCore<O, P, D>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+{
+    fn drop(&mut self) {
+        self.release();
+    }
 }
 
 impl<O, P, D> fmt::Debug for LiveReservation<O, P, D>
@@ -1627,22 +2383,11 @@ where
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("LiveReservation")
-            .field("phase", &self.phase)
-            .field("dimension", &self.dimension)
-            .field("bytes", &self.bytes)
-            .field("active", &self.active)
+            .field("phase", &self.core.phase)
+            .field("dimension", &self.core.dimension)
+            .field("bytes", &self.core.bytes)
+            .field("active", &self.core.active)
             .finish_non_exhaustive()
-    }
-}
-
-impl<O, P, D> Drop for LiveReservation<O, P, D>
-where
-    O: OperationOwner,
-    P: Copy + Ord,
-    D: Copy + Ord,
-{
-    fn drop(&mut self) {
-        self.release();
     }
 }
 
@@ -1654,15 +2399,420 @@ where
 {
     /// Returns the live bytes owned by this token.
     pub const fn bytes(&self) -> u64 {
-        self.bytes
+        self.core.bytes
+    }
+}
+
+#[allow(
+    dead_code,
+    reason = "crate-private until the U4 canonical consumers switch atomically"
+)]
+pub(crate) struct StorageCoveringReservation<O, P, D>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+{
+    core: ReservationCore<O, P, D>,
+}
+
+#[allow(
+    dead_code,
+    reason = "crate-private until the U4 canonical consumers switch atomically"
+)]
+pub(crate) struct OperationAttributionReservation<O, P, D, Destination>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+    Destination: PublicationDestination,
+{
+    core: ReservationCore<O, P, D>,
+    destination: PhantomData<fn() -> Destination>,
+}
+
+#[allow(
+    dead_code,
+    reason = "crate-private until the U4 canonical consumers switch atomically"
+)]
+impl<O, P, D, Destination> OperationAttributionReservation<O, P, D, Destination>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+    Destination: PublicationDestination,
+{
+    pub(crate) const fn bytes(&self) -> u64 {
+        self.core.bytes
+    }
+}
+
+#[allow(
+    dead_code,
+    reason = "crate-private until the U4 canonical consumers switch atomically"
+)]
+pub(crate) struct AttributionReservationBatch<O, P, D, Destination>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+    Destination: PublicationDestination,
+{
+    attributions: Vec<OperationAttributionReservation<O, P, D, Destination>>,
+    commitments: Vec<OutputCommitment<D, Destination>>,
+    capacity_cover: Option<StorageCoveringReservation<O, P, D>>,
+    attribution_limit: usize,
+    commitment_limit: usize,
+}
+
+#[allow(
+    dead_code,
+    reason = "crate-private until the U4 canonical consumers switch atomically"
+)]
+#[derive(Debug)]
+pub(crate) enum AttributionBatchCreateError<D> {
+    CapacityOverflow,
+    Ledger(LedgerCause<D>),
+    AllocationFailed,
+}
+
+#[allow(
+    dead_code,
+    reason = "crate-private until the U4 canonical consumers switch atomically"
+)]
+pub(crate) struct FallbackBatchBaseline<O, P, D>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+{
+    canonical_assembly: AttributionReservationBatch<O, P, D, CanonicalOutput>,
+    evidence_assembly: AttributionReservationBatch<O, P, D, PublishedOutcomeEvidence>,
+    fallback: AttributionReservationBatch<O, P, D, PublishedOutcomeEvidence>,
+    evidence: AttributionReservationBatch<O, P, D, PublishedOutcomeEvidence>,
+}
+
+#[allow(
+    dead_code,
+    reason = "crate-private until the U4 canonical consumers switch atomically"
+)]
+pub(crate) struct FallbackBaselineRejection<O, P, D>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+{
+    baseline: FallbackBatchBaseline<O, P, D>,
+    cause: LedgerCause<D>,
+}
+
+#[allow(
+    dead_code,
+    reason = "crate-private until the U4 canonical consumers switch atomically"
+)]
+impl<O, P, D> FallbackBaselineRejection<O, P, D>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+{
+    pub(crate) fn into_parts(self) -> (FallbackBatchBaseline<O, P, D>, LedgerCause<D>) {
+        (self.baseline, self.cause)
+    }
+}
+
+#[allow(
+    dead_code,
+    clippy::type_complexity,
+    reason = "the exact fallback batch product remains statically destination-qualified"
+)]
+impl<O, P, D> FallbackBatchBaseline<O, P, D>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+{
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        AttributionReservationBatch<O, P, D, CanonicalOutput>,
+        AttributionReservationBatch<O, P, D, PublishedOutcomeEvidence>,
+        AttributionReservationBatch<O, P, D, PublishedOutcomeEvidence>,
+        AttributionReservationBatch<O, P, D, PublishedOutcomeEvidence>,
+    ) {
+        (
+            self.canonical_assembly,
+            self.evidence_assembly,
+            self.fallback,
+            self.evidence,
+        )
     }
 
-    fn release(&mut self) {
-        if !self.active {
-            return;
+    pub(crate) fn into_fallback_proof(
+        self,
+        ledger: Ledger<O, P, D>,
+        discard_canonical: Option<AttributionReservationBatch<O, P, D, CanonicalOutput>>,
+        discard_evidence: Option<AttributionReservationBatch<O, P, D, PublishedOutcomeEvidence>>,
+    ) -> TypedFreezeProof<O, P, D> {
+        let Self {
+            canonical_assembly,
+            mut evidence_assembly,
+            mut fallback,
+            mut evidence,
+        } = self;
+        evidence_assembly.absorb_proven(&mut evidence);
+        evidence_assembly.absorb_proven(&mut fallback);
+        TypedFreezeProof {
+            canonical: canonical_assembly,
+            evidence: evidence_assembly,
+            discard_canonical,
+            discard_evidence,
+            ledger,
         }
-        release(&self.owner, self.phase, self.dimension, self.bytes);
-        self.active = false;
+    }
+}
+
+#[allow(
+    dead_code,
+    reason = "crate-private until the U4 canonical consumers switch atomically"
+)]
+pub(crate) struct TypedPrimaryRejection<O, P, D>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+{
+    ledger: Ledger<O, P, D>,
+    baseline: FallbackBatchBaseline<O, P, D>,
+    canonical_discard: Option<AttributionReservationBatch<O, P, D, CanonicalOutput>>,
+    evidence_discard: Option<AttributionReservationBatch<O, P, D, PublishedOutcomeEvidence>>,
+    cause: LedgerCause<D>,
+}
+
+#[allow(
+    dead_code,
+    reason = "crate-private until the U4 canonical consumers switch atomically"
+)]
+impl<O, P, D> TypedPrimaryRejection<O, P, D>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+{
+    pub(crate) fn cause(&self) -> &LedgerCause<D> {
+        &self.cause
+    }
+
+    pub(crate) fn into_fallback_proof(self) -> TypedFreezeProof<O, P, D> {
+        self.baseline.into_fallback_proof(
+            self.ledger,
+            self.canonical_discard,
+            self.evidence_discard,
+        )
+    }
+}
+
+#[allow(
+    dead_code,
+    reason = "crate-private until the U4 canonical consumers switch atomically"
+)]
+pub(crate) struct TypedFreezeProof<O, P, D>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+{
+    canonical: AttributionReservationBatch<O, P, D, CanonicalOutput>,
+    evidence: AttributionReservationBatch<O, P, D, PublishedOutcomeEvidence>,
+    discard_canonical: Option<AttributionReservationBatch<O, P, D, CanonicalOutput>>,
+    discard_evidence: Option<AttributionReservationBatch<O, P, D, PublishedOutcomeEvidence>>,
+    ledger: Ledger<O, P, D>,
+}
+
+#[allow(
+    dead_code,
+    reason = "crate-private until the U4 canonical consumers switch atomically"
+)]
+impl<O, P, D> TypedFreezeProof<O, P, D>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+{
+    pub(crate) fn freeze(mut self) -> LedgerSnapshot<P, D> {
+        drop(self.discard_canonical.take());
+        drop(self.discard_evidence.take());
+
+        let snapshot = {
+            let mut state = lock(&self.ledger.state);
+            self.canonical.release_bound_reservations(&mut state);
+            self.evidence.release_bound_reservations(&mut state);
+            apply_typed_commitments(&mut state.dimensions, &self.canonical);
+            apply_typed_commitments(&mut state.dimensions, &self.evidence);
+            state.publication = PublicationState::Published;
+            take_typed_final_snapshot(&mut state)
+        };
+
+        self.canonical.destroy_storage_then_release_cover();
+        self.evidence.destroy_storage_then_release_cover();
+        snapshot
+    }
+}
+
+#[allow(
+    dead_code,
+    reason = "crate-private until the U4 canonical consumers switch atomically"
+)]
+impl<O, P, D, Destination> AttributionReservationBatch<O, P, D, Destination>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+    Destination: PublicationDestination,
+{
+    pub(crate) fn has_attribution_slot(&self) -> bool {
+        self.attributions.len() < self.attribution_limit
+            && self.attributions.len() < self.attributions.capacity()
+    }
+
+    pub(crate) fn try_push_attribution(
+        &mut self,
+        token: OperationAttributionReservation<O, P, D, Destination>,
+    ) -> Result<(), OperationAttributionReservation<O, P, D, Destination>> {
+        if !self.has_attribution_slot()
+            || self
+                .capacity_cover
+                .as_ref()
+                .is_some_and(|cover| !token.core.is_owned_by(&cover.core.owner))
+        {
+            return Err(token);
+        }
+        self.attributions.push(token);
+        Ok(())
+    }
+
+    pub(crate) fn try_push_commitment(
+        &mut self,
+        commitment: OutputCommitment<D, Destination>,
+    ) -> Result<(), OutputCommitment<D, Destination>> {
+        if self.commitments.len() >= self.commitment_limit
+            || self.commitments.len() >= self.commitments.capacity()
+        {
+            return Err(commitment);
+        }
+        self.commitments.push(commitment);
+        Ok(())
+    }
+
+    pub(crate) fn attribution_len(&self) -> usize {
+        self.attributions.len()
+    }
+
+    fn absorb_proven(&mut self, other: &mut Self) {
+        self.attributions.append(&mut other.attributions);
+        self.commitments.append(&mut other.commitments);
+        drop(std::mem::take(&mut other.attributions));
+        drop(std::mem::take(&mut other.commitments));
+        drop(other.capacity_cover.take());
+    }
+
+    fn can_absorb_sources<const N: usize>(&self, sources: [Option<&Self>; N]) -> bool {
+        let Some(attribution_len) = sources
+            .into_iter()
+            .flatten()
+            .try_fold(self.attributions.len(), |length, source| {
+                length.checked_add(source.attributions.len())
+            })
+        else {
+            return false;
+        };
+        let Some(commitment_len) = sources
+            .into_iter()
+            .flatten()
+            .try_fold(self.commitments.len(), |length, source| {
+                length.checked_add(source.commitments.len())
+            })
+        else {
+            return false;
+        };
+        if attribution_len > self.attribution_limit
+            || attribution_len > self.attributions.capacity()
+            || commitment_len > self.commitment_limit
+            || commitment_len > self.commitments.capacity()
+        {
+            return false;
+        }
+        true
+    }
+
+    fn combined_attribution_count<const N: usize>(
+        &self,
+        sources: [Option<&Self>; N],
+    ) -> Option<u64> {
+        sources.into_iter().flatten().try_fold(
+            u64::try_from(self.attributions.len()).ok()?,
+            |count, source| count.checked_add(u64::try_from(source.attributions.len()).ok()?),
+        )
+    }
+
+    fn combined_attribution_bytes<const N: usize>(
+        &self,
+        sources: [Option<&Self>; N],
+    ) -> Option<u64> {
+        sources
+            .into_iter()
+            .flatten()
+            .try_fold(self.attribution_bytes()?, |bytes, source| {
+                bytes.checked_add(source.attribution_bytes()?)
+            })
+    }
+
+    pub(crate) fn account_capacity_bytes(&self) -> u64 {
+        self.capacity_cover
+            .as_ref()
+            .map_or(0, |cover| cover.core.bytes)
+    }
+
+    fn validate_owner(&self, owner: &Arc<Mutex<LedgerState<P, D>>>) -> bool {
+        self.attributions
+            .iter()
+            .all(|token| token.core.active && token.core.is_owned_by(owner))
+            && self
+                .capacity_cover
+                .as_ref()
+                .is_none_or(|cover| cover.core.active && cover.core.is_owned_by(owner))
+    }
+
+    fn attribution_bytes(&self) -> Option<u64> {
+        self.attributions
+            .iter()
+            .try_fold(0_u64, |total, token| total.checked_add(token.core.bytes))
+    }
+
+    fn active_count(&self) -> Option<u64> {
+        u64::try_from(self.attributions.len())
+            .ok()?
+            .checked_add(u64::from(self.capacity_cover.is_some()))
+    }
+
+    fn live_bytes(&self) -> Option<u64> {
+        self.attribution_bytes()?
+            .checked_add(self.account_capacity_bytes())
+    }
+
+    fn release_bound_reservations(&mut self, state: &mut LedgerState<P, D>) {
+        for token in &mut self.attributions {
+            token.core.release_bound_locked(state);
+        }
+        if let Some(capacity_cover) = &mut self.capacity_cover {
+            capacity_cover.core.release_bound_locked(state);
+        }
+    }
+
+    fn destroy_storage_then_release_cover(&mut self) {
+        drop(std::mem::take(&mut self.attributions));
+        drop(std::mem::take(&mut self.commitments));
+        drop(self.capacity_cover.take());
     }
 }
 
@@ -1873,25 +3023,13 @@ where
 
     fn release_locked(&mut self, state: &mut LedgerState<P, D>) {
         for reservation in &mut self.reservations {
-            release_locked(
-                state,
-                reservation.phase,
-                reservation.dimension,
-                reservation.bytes,
-            );
-            reservation.active = false;
+            reservation.core.release_locked(state);
         }
 
         // Free the accounted vector allocation before releasing the token that covers it.
         drop(std::mem::take(&mut self.reservations));
         if let Some(capacity_reservation) = &mut self.capacity_reservation {
-            release_locked(
-                state,
-                capacity_reservation.phase,
-                capacity_reservation.dimension,
-                capacity_reservation.bytes,
-            );
-            capacity_reservation.active = false;
+            capacity_reservation.core.release_locked(state);
         }
     }
 }
@@ -2008,6 +3146,8 @@ pub struct DimensionSnapshot {
     peak_live_bytes: u64,
     pending_publication: u64,
     committed: u64,
+    committed_canonical_output: u64,
+    published_outcome_evidence: u64,
 }
 
 impl DimensionSnapshot {
@@ -2039,6 +3179,16 @@ impl DimensionSnapshot {
     /// Returns durable published output amounts in this dimension's own unit.
     pub const fn committed(&self) -> u64 {
         self.committed
+    }
+
+    /// Returns output committed through the destination-typed canonical path.
+    pub const fn committed_canonical_output(&self) -> u64 {
+        self.committed_canonical_output
+    }
+
+    /// Returns evidence published through the destination-typed failure/report path.
+    pub const fn published_outcome_evidence(&self) -> u64 {
+        self.published_outcome_evidence
     }
 }
 
@@ -2142,22 +3292,20 @@ fn lock<P, D>(state: &Arc<Mutex<LedgerState<P, D>>>) -> MutexGuard<'_, LedgerSta
     }
 }
 
-fn release<P, D>(owner: &Arc<Mutex<LedgerState<P, D>>>, phase: P, dimension: D, bytes: u64)
-where
-    P: Copy + Ord,
-    D: Copy + Ord,
-{
-    let mut state = lock(owner);
-    release_locked(&mut state, phase, dimension, bytes);
-}
-
-fn release_locked<P, D>(state: &mut LedgerState<P, D>, phase: P, dimension: D, bytes: u64)
-where
-    P: Copy + Ord,
-    D: Copy + Ord,
-{
+fn release_positioned_locked<P, D>(
+    state: &mut LedgerState<P, D>,
+    phase_position: usize,
+    dimension_position: usize,
+    bytes: u64,
+) {
     state.active_reservations = state.active_reservations.saturating_sub(1);
-    release_bytes_locked(state, phase, dimension, bytes);
+    state.current_live_bytes = state.current_live_bytes.saturating_sub(bytes);
+    if let Some(entry) = state.dimensions.get_mut(dimension_position) {
+        entry.state.current_live_bytes = entry.state.current_live_bytes.saturating_sub(bytes);
+    }
+    if let Some(phase_state) = state.phase_states.get_mut(phase_position) {
+        phase_state.current_live_bytes = phase_state.current_live_bytes.saturating_sub(bytes);
+    }
 }
 
 fn release_bytes_locked<P, D>(state: &mut LedgerState<P, D>, phase: P, dimension: D, bytes: u64)
@@ -2173,8 +3321,8 @@ where
 }
 
 fn release_phase<P: Copy + Ord, D>(state: &mut LedgerState<P, D>, phase: P, bytes: u64) {
-    if let Some(entry) = phase_entry_mut(&mut state.phases, phase) {
-        entry.state.current_live_bytes = entry.state.current_live_bytes.saturating_sub(bytes);
+    if let Some(phase_state) = phase_state_mut(state, phase) {
+        phase_state.current_live_bytes = phase_state.current_live_bytes.saturating_sub(bytes);
     }
 }
 
@@ -2249,6 +3397,14 @@ fn validate_dimension_state<D: Copy>(
             limit: policy.committed_limit,
         });
     }
+    if state.published_outcome_evidence > policy.published_outcome_evidence_limit {
+        return Err(LedgerCause::LimitExceeded {
+            class: CounterClass::PublishedOutcomeEvidence,
+            dimension,
+            value: state.published_outcome_evidence,
+            limit: policy.published_outcome_evidence_limit,
+        });
+    }
     Ok(())
 }
 
@@ -2259,14 +3415,17 @@ fn phase_entry<P: Copy + Ord>(phases: &[PhaseEntry<P>], phase: P) -> Option<&Pha
         .map(|position| &phases[position])
 }
 
-fn phase_entry_mut<P: Copy + Ord>(
-    phases: &mut [PhaseEntry<P>],
+fn phase_state<P: Copy + Ord, D>(state: &LedgerState<P, D>, phase: P) -> Option<&PhaseState> {
+    let position = phase_entry(&state.phases, phase)?.state_position;
+    state.phase_states.get(position)
+}
+
+fn phase_state_mut<P: Copy + Ord, D>(
+    state: &mut LedgerState<P, D>,
     phase: P,
-) -> Option<&mut PhaseEntry<P>> {
-    phases
-        .binary_search_by_key(&phase, |entry| entry.phase)
-        .ok()
-        .map(|position| &mut phases[position])
+) -> Option<&mut PhaseState> {
+    let position = phase_entry(&state.phases, phase)?.state_position;
+    state.phase_states.get_mut(position)
 }
 
 fn ensure_phase<P: Copy + Ord, D>(
@@ -2277,13 +3436,22 @@ fn ensure_phase<P: Copy + Ord, D>(
         .phases
         .binary_search_by_key(&phase, |entry| entry.phase)
     {
-        Ok(position) => return Ok(position),
+        Ok(position) => return Ok(state.phases[position].state_position),
         Err(position) => position,
     };
     let desired_phase_capacity = state.phases.len().saturating_add(1);
     try_grow_evidence_vec(
         &mut state.phases,
         desired_phase_capacity,
+        &mut state.current_evidence_bytes,
+        &mut state.peak_evidence_bytes,
+        state.evidence_byte_limit,
+        LedgerEvidencePurpose::Phases,
+    )?;
+    let desired_state_capacity = state.phase_states.len().saturating_add(1);
+    try_grow_evidence_vec(
+        &mut state.phase_states,
+        desired_state_capacity,
         &mut state.current_evidence_bytes,
         &mut state.peak_evidence_bytes,
         state.evidence_byte_limit,
@@ -2298,17 +3466,19 @@ fn ensure_phase<P: Copy + Ord, D>(
         state.evidence_byte_limit,
         LedgerEvidencePurpose::Phases,
     )?;
+    let state_position = state.phase_states.len();
+    state.phase_states.push(PhaseState::default());
     state.phases.insert(
         position,
         PhaseEntry {
             phase,
-            state: PhaseState::default(),
+            state_position,
         },
     );
     state
         .phase_snapshot_staging
         .insert(position, (phase, PhaseSnapshot::default()));
-    Ok(position)
+    Ok(state_position)
 }
 
 fn try_grow_evidence_vec<T>(
@@ -2559,6 +3729,176 @@ fn validate_commitments<D: Copy + Ord>(
     Ok(())
 }
 
+#[allow(
+    dead_code,
+    reason = "crate-private until the U4 canonical consumers switch atomically"
+)]
+fn validate_typed_commitments<O, P, D, Destination>(
+    dimensions: &[DimensionEntry<D>],
+    batch: &AttributionReservationBatch<O, P, D, Destination>,
+) -> Result<(), LedgerCause<D>>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+    Destination: DestinationState,
+{
+    validate_typed_commitment_batches(dimensions, [Some(batch)])
+}
+
+#[allow(
+    dead_code,
+    reason = "crate-private until the U4 canonical consumers switch atomically"
+)]
+fn validate_typed_commitment_pair<O, P, D, Destination>(
+    dimensions: &[DimensionEntry<D>],
+    first: &AttributionReservationBatch<O, P, D, Destination>,
+    second: &AttributionReservationBatch<O, P, D, Destination>,
+) -> Result<(), LedgerCause<D>>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+    Destination: DestinationState,
+{
+    validate_typed_commitment_batches(dimensions, [Some(first), Some(second)])
+}
+
+#[allow(
+    dead_code,
+    reason = "crate-private until the U4 canonical consumers switch atomically"
+)]
+fn validate_typed_commitment_batches<O, P, D, Destination, const N: usize>(
+    dimensions: &[DimensionEntry<D>],
+    batches: [Option<&AttributionReservationBatch<O, P, D, Destination>>; N],
+) -> Result<(), LedgerCause<D>>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+    Destination: DestinationState,
+{
+    let all = || {
+        batches
+            .into_iter()
+            .flatten()
+            .flat_map(|batch| batch.commitments.iter())
+    };
+    for (index, commitment) in all().enumerate() {
+        if all()
+            .take(index)
+            .any(|prior| prior.dimension == commitment.dimension)
+        {
+            continue;
+        }
+        let amount = all()
+            .filter(|candidate| candidate.dimension == commitment.dimension)
+            .try_fold(0_u64, |total, candidate| {
+                total.checked_add(candidate.amount)
+            })
+            .ok_or(LedgerCause::ArithmeticOverflow {
+                class: match Destination::KIND {
+                    DestinationKind::CanonicalOutput => CounterClass::Committed,
+                    DestinationKind::PublishedOutcomeEvidence => {
+                        CounterClass::PublishedOutcomeEvidence
+                    }
+                },
+                dimension: commitment.dimension,
+            })?;
+        let entry = dimension_entry(dimensions, commitment.dimension).ok_or(
+            LedgerCause::UnknownDimension {
+                dimension: commitment.dimension,
+            },
+        )?;
+        let (current, limit, class) = match Destination::KIND {
+            DestinationKind::CanonicalOutput => (
+                entry.state.committed,
+                entry.policy.committed_limit,
+                CounterClass::Committed,
+            ),
+            DestinationKind::PublishedOutcomeEvidence => (
+                entry.state.published_outcome_evidence,
+                entry.policy.published_outcome_evidence_limit,
+                CounterClass::PublishedOutcomeEvidence,
+            ),
+        };
+        let value = current
+            .checked_add(amount)
+            .ok_or(LedgerCause::ArithmeticOverflow {
+                class,
+                dimension: commitment.dimension,
+            })?;
+        if value > limit {
+            return Err(LedgerCause::LimitExceeded {
+                class,
+                dimension: commitment.dimension,
+                value,
+                limit,
+            });
+        }
+    }
+    Ok(())
+}
+
+#[allow(
+    dead_code,
+    reason = "crate-private until the U4 canonical consumers switch atomically"
+)]
+fn bind_typed_publication_batch<O, P, D, Destination>(
+    state: &LedgerState<P, D>,
+    batch: &mut AttributionReservationBatch<O, P, D, Destination>,
+) -> Result<(), LedgerCause<D>>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+    Destination: PublicationDestination,
+{
+    for commitment in &mut batch.commitments {
+        let position = state
+            .dimensions
+            .binary_search_by_key(&commitment.dimension, |entry| entry.dimension)
+            .map_err(|_| LedgerCause::UnknownDimension {
+                dimension: commitment.dimension,
+            })?;
+        commitment.dimension_position = position;
+    }
+    for attribution in &mut batch.attributions {
+        attribution.core.bind_publication_positions(state)?;
+    }
+    if let Some(capacity_cover) = &mut batch.capacity_cover {
+        capacity_cover.core.bind_publication_positions(state)?;
+    }
+    Ok(())
+}
+
+#[allow(
+    dead_code,
+    reason = "crate-private until the U4 canonical consumers switch atomically"
+)]
+fn apply_typed_commitments<O, P, D, Destination>(
+    dimensions: &mut [DimensionEntry<D>],
+    batch: &AttributionReservationBatch<O, P, D, Destination>,
+) where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+    Destination: DestinationState,
+{
+    for commitment in &batch.commitments {
+        let entry = &mut dimensions[commitment.dimension_position];
+        match Destination::KIND {
+            DestinationKind::CanonicalOutput => {
+                entry.state.committed += commitment.amount;
+                entry.state.committed_canonical_output += commitment.amount;
+            }
+            DestinationKind::PublishedOutcomeEvidence => {
+                entry.state.published_outcome_evidence += commitment.amount;
+            }
+        }
+    }
+}
+
 fn try_snapshot<P, D>(
     state: &mut LedgerState<P, D>,
 ) -> Result<LedgerSnapshot<P, D>, LedgerEvidenceError>
@@ -2602,7 +3942,10 @@ where
         return Err(cause);
     }
     for entry in &state.phases {
-        phases.push((entry.phase, phase_snapshot(entry.state)));
+        phases.push((
+            entry.phase,
+            phase_snapshot(state.phase_states[entry.state_position]),
+        ));
     }
     let phase_bytes = capacity_bytes(&phases).map_err(|cause| LedgerEvidenceError::Capacity {
         purpose: LedgerEvidencePurpose::Snapshot,
@@ -2623,16 +3966,31 @@ where
     Ok(snapshot)
 }
 
+#[allow(
+    dead_code,
+    reason = "crate-private until the U4 canonical consumers switch atomically"
+)]
+fn validate_final_snapshot_shape<P, D>(state: &LedgerState<P, D>) -> Result<(), LedgerCause<D>> {
+    if state.dimensions.len() != state.dimension_snapshot_staging.len()
+        || state.phases.len() != state.phase_snapshot_staging.len()
+        || state.phases.len() != state.phase_states.len()
+        || state.phases.iter().enumerate().any(|(index, entry)| {
+            entry.state_position >= state.phase_states.len()
+                || state.phases[..index]
+                    .iter()
+                    .any(|prior| prior.state_position == entry.state_position)
+        })
+    {
+        return Err(LedgerCause::FinalSnapshotShapeMismatch);
+    }
+    Ok(())
+}
+
 fn take_final_snapshot<P, D>(state: &mut LedgerState<P, D>, clean: bool) -> LedgerSnapshot<P, D>
 where
     P: Copy + Ord,
     D: Copy + Ord,
 {
-    debug_assert_eq!(
-        state.dimensions.len(),
-        state.dimension_snapshot_staging.len()
-    );
-    debug_assert_eq!(state.phases.len(), state.phase_snapshot_staging.len());
     for (entry, staging) in state
         .dimensions
         .iter()
@@ -2647,7 +4005,7 @@ where
         .zip(state.phase_snapshot_staging.iter_mut())
     {
         staging.0 = entry.phase;
-        staging.1 = phase_snapshot(entry.state);
+        staging.1 = phase_snapshot(state.phase_states[entry.state_position]);
     }
     let outgoing_bytes = capacity_bytes(&state.dimension_snapshot_staging)
         .unwrap_or(0)
@@ -2669,6 +4027,40 @@ where
     }
 }
 
+#[allow(
+    dead_code,
+    reason = "crate-private until the U4 canonical consumers switch atomically"
+)]
+fn take_typed_final_snapshot<P: Copy, D: Copy>(
+    state: &mut LedgerState<P, D>,
+) -> LedgerSnapshot<P, D> {
+    for (entry, staging) in state
+        .dimensions
+        .iter()
+        .zip(state.dimension_snapshot_staging.iter_mut())
+    {
+        staging.0 = entry.dimension;
+        staging.1 = dimension_snapshot(entry.state);
+    }
+    for (entry, staging) in state
+        .phases
+        .iter()
+        .zip(state.phase_snapshot_staging.iter_mut())
+    {
+        staging.0 = entry.phase;
+        staging.1 = phase_snapshot(state.phase_states[entry.state_position]);
+    }
+    LedgerSnapshot {
+        dimensions: std::mem::take(&mut state.dimension_snapshot_staging),
+        phases: std::mem::take(&mut state.phase_snapshot_staging),
+        current_live_bytes: state.current_live_bytes,
+        peak_live_bytes: state.peak_live_bytes,
+        active_reservations: state.active_reservations,
+        current_evidence_bytes: 0,
+        peak_evidence_bytes: state.peak_evidence_bytes,
+    }
+}
+
 const fn dimension_snapshot(state: DimensionState) -> DimensionSnapshot {
     DimensionSnapshot {
         attempted: state.attempted,
@@ -2677,6 +4069,8 @@ const fn dimension_snapshot(state: DimensionState) -> DimensionSnapshot {
         peak_live_bytes: state.peak_live_bytes,
         pending_publication: state.pending_publication,
         committed: state.committed,
+        committed_canonical_output: state.committed_canonical_output,
+        published_outcome_evidence: state.published_outcome_evidence,
     }
 }
 
@@ -3032,5 +4426,479 @@ mod tests {
         assert!(FAIL_NEXT_EVIDENCE_ALLOCATION.load(Ordering::SeqCst));
         FAIL_NEXT_EVIDENCE_ALLOCATION.store(false, Ordering::SeqCst);
         drop(reservation);
+    }
+
+    fn typed_limits() -> LedgerLimits<Dimension> {
+        LedgerLimits::new(
+            u64::MAX,
+            [(
+                Dimension::Bytes,
+                DimensionPolicy::reservable_bytes(u64::MAX, u64::MAX, u64::MAX, u64::MAX)
+                    .with_published_outcome_evidence_limit(u64::MAX),
+            )],
+        )
+        .expect("typed test policy")
+    }
+
+    fn probe_values(probe: &LedgerTestProbe<Phase, Dimension>) -> (u64, u64) {
+        (probe.active_reservations(), probe.current_live_bytes())
+    }
+
+    #[test]
+    fn typed_foreign_attribution_push_returns_the_token_without_mutating_either_ledger() {
+        let target = Ledger::<Owner, Phase, Dimension>::new(typed_limits());
+        let foreign = Ledger::<Owner, Phase, Dimension>::new(typed_limits());
+        let target_probe = target.test_probe();
+        let foreign_probe = foreign.test_probe();
+        let mut target_batch = target
+            .try_attribution_batch::<CanonicalOutput>(Phase::Build, Dimension::Bytes, 1, 0)
+            .expect("target batch");
+        let foreign_token = foreign
+            .reserve_operation_attribution::<CanonicalOutput>(Phase::Build, Dimension::Bytes, 5)
+            .expect("foreign attribution");
+        let target_before = probe_values(&target_probe);
+        let foreign_before = probe_values(&foreign_probe);
+        assert_eq!(target_before.0, 1);
+        assert_eq!(foreign_before.0, 1);
+        assert!(target_before.1 > 0);
+        assert!(foreign_before.1 >= 5);
+
+        let recovered = match target_batch.try_push_attribution(foreign_token) {
+            Ok(()) => panic!("foreign attribution must not enter the target batch"),
+            Err(token) => token,
+        };
+
+        assert_eq!(target_batch.attribution_len(), 0);
+        assert_eq!(probe_values(&target_probe), target_before);
+        assert_eq!(probe_values(&foreign_probe), foreign_before);
+        drop(recovered);
+        drop(target_batch);
+        assert_eq!(probe_values(&target_probe), (0, 0));
+        assert_eq!(probe_values(&foreign_probe), (0, 0));
+    }
+
+    #[test]
+    fn typed_foreign_fallback_batch_rejects_the_baseline_without_mutation() {
+        let target = Ledger::<Owner, Phase, Dimension>::new(typed_limits());
+        let foreign = Ledger::<Owner, Phase, Dimension>::new(typed_limits());
+        let target_probe = target.test_probe();
+        let foreign_probe = foreign.test_probe();
+        let canonical = target
+            .try_attribution_batch::<CanonicalOutput>(Phase::Build, Dimension::Bytes, 1, 0)
+            .expect("target canonical assembly");
+        let evidence_assembly = target
+            .try_attribution_batch::<PublishedOutcomeEvidence>(Phase::Build, Dimension::Bytes, 0, 0)
+            .expect("target evidence assembly");
+        let fallback = foreign
+            .try_attribution_batch::<PublishedOutcomeEvidence>(Phase::Build, Dimension::Bytes, 1, 0)
+            .expect("foreign fallback batch");
+        let evidence = target
+            .try_attribution_batch::<PublishedOutcomeEvidence>(Phase::Build, Dimension::Bytes, 0, 0)
+            .expect("target evidence batch");
+        let target_before = probe_values(&target_probe);
+        let foreign_before = probe_values(&foreign_probe);
+        assert_eq!(target_before.0, 1);
+        assert_eq!(foreign_before.0, 1);
+
+        let rejection =
+            match target.try_fallback_baseline(canonical, evidence_assembly, fallback, evidence) {
+                Ok(_) => panic!("foreign fallback batch must reject the baseline"),
+                Err(rejection) => rejection,
+            };
+
+        assert_eq!(probe_values(&target_probe), target_before);
+        assert_eq!(probe_values(&foreign_probe), foreign_before);
+        let (baseline, cause) = rejection.into_parts();
+        assert!(matches!(cause, LedgerCause::OwnerMismatch));
+        let (canonical, evidence_assembly, fallback, evidence) = baseline.into_parts();
+        drop(canonical);
+        drop(evidence_assembly);
+        drop(fallback);
+        drop(evidence);
+        assert_eq!(probe_values(&target_probe), (0, 0));
+        assert_eq!(probe_values(&foreign_probe), (0, 0));
+    }
+
+    #[test]
+    fn typed_foreign_primary_source_rejects_without_mutation_then_discards_safely() {
+        let target = Ledger::<Owner, Phase, Dimension>::new(typed_limits());
+        let foreign = Ledger::<Owner, Phase, Dimension>::new(typed_limits());
+        let target_probe = target.test_probe();
+        let foreign_probe = foreign.test_probe();
+        let canonical = target
+            .try_attribution_batch::<CanonicalOutput>(Phase::Build, Dimension::Bytes, 1, 0)
+            .expect("target canonical assembly");
+        let evidence_assembly = target
+            .try_attribution_batch::<PublishedOutcomeEvidence>(Phase::Build, Dimension::Bytes, 0, 0)
+            .expect("target evidence assembly");
+        let fallback = target
+            .try_attribution_batch::<PublishedOutcomeEvidence>(Phase::Build, Dimension::Bytes, 0, 0)
+            .expect("target fallback batch");
+        let evidence = target
+            .try_attribution_batch::<PublishedOutcomeEvidence>(Phase::Build, Dimension::Bytes, 0, 0)
+            .expect("target evidence batch");
+        let baseline = target
+            .try_fallback_baseline(canonical, evidence_assembly, fallback, evidence)
+            .unwrap_or_else(|_| panic!("target baseline must be admitted"));
+        let mut foreign_source = foreign
+            .try_attribution_batch::<CanonicalOutput>(Phase::Build, Dimension::Bytes, 1, 0)
+            .expect("foreign source batch");
+        let foreign_token = foreign
+            .reserve_operation_attribution::<CanonicalOutput>(Phase::Build, Dimension::Bytes, 5)
+            .expect("foreign source attribution");
+        assert!(foreign_source.try_push_attribution(foreign_token).is_ok());
+        let target_before = probe_values(&target_probe);
+        let foreign_before = probe_values(&foreign_probe);
+        assert_eq!(target_before.0, 1);
+        assert_eq!(foreign_before.0, 2);
+
+        let rejection = match target.try_prepare_primary(baseline, Some(foreign_source), None) {
+            Ok(_) => panic!("foreign primary source must be rejected"),
+            Err(rejection) => rejection,
+        };
+
+        assert!(matches!(rejection.cause(), LedgerCause::OwnerMismatch));
+        assert_eq!(probe_values(&target_probe), target_before);
+        assert_eq!(probe_values(&foreign_probe), foreign_before);
+        let snapshot = rejection.into_fallback_proof().freeze();
+        assert_eq!(snapshot.active_reservations(), 0);
+        assert_eq!(snapshot.current_live_bytes(), 0);
+        assert_eq!(probe_values(&target_probe), (0, 0));
+        assert_eq!(probe_values(&foreign_probe), (0, 0));
+    }
+
+    static PANIC_ON_BOUND_ORD: AtomicBool = AtomicBool::new(false);
+    static BOUND_ORD_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct StatefulOrd(u8);
+
+    impl PartialOrd for StatefulOrd {
+        fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+            Some(self.cmp(other))
+        }
+    }
+
+    impl Ord for StatefulOrd {
+        fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+            assert!(
+                !PANIC_ON_BOUND_ORD.load(Ordering::SeqCst),
+                "typed freeze called owner-defined Ord after positions were bound"
+            );
+            self.0.cmp(&other.0)
+        }
+    }
+
+    fn stateful_ord_limits() -> LedgerLimits<StatefulOrd> {
+        LedgerLimits::new(
+            u64::MAX,
+            [(
+                StatefulOrd(7),
+                DimensionPolicy::reservable_bytes(u64::MAX, u64::MAX, u64::MAX, u64::MAX)
+                    .with_published_outcome_evidence_limit(u64::MAX),
+            )],
+        )
+        .expect("stateful Ord test policy")
+    }
+
+    fn freeze_while_ord_panics(
+        proof: TypedFreezeProof<Owner, StatefulOrd, StatefulOrd>,
+    ) -> LedgerSnapshot<StatefulOrd, StatefulOrd> {
+        PANIC_ON_BOUND_ORD.store(true, Ordering::SeqCst);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| proof.freeze()));
+        PANIC_ON_BOUND_ORD.store(false, Ordering::SeqCst);
+        result.expect("bound typed freeze must not call owner-defined Ord")
+    }
+
+    #[test]
+    fn fallback_baseline_counts_zero_byte_attribution_capabilities() {
+        let ledger = Ledger::<Owner, Phase, Dimension>::new(typed_limits());
+        let extra = ledger
+            .reserve_operation_attribution::<PublishedOutcomeEvidence>(
+                Phase::Build,
+                Dimension::Bytes,
+                0,
+            )
+            .expect("zero-byte attribution");
+        let canonical = ledger
+            .try_attribution_batch::<CanonicalOutput>(Phase::Build, Dimension::Bytes, 0, 0)
+            .expect("empty canonical assembly");
+        let evidence = ledger
+            .try_attribution_batch::<PublishedOutcomeEvidence>(Phase::Build, Dimension::Bytes, 0, 0)
+            .expect("empty evidence assembly");
+        let fallback = ledger
+            .try_attribution_batch::<PublishedOutcomeEvidence>(Phase::Build, Dimension::Bytes, 0, 0)
+            .expect("empty fallback batch");
+        let snapshot = ledger
+            .try_attribution_batch::<PublishedOutcomeEvidence>(Phase::Build, Dimension::Bytes, 0, 0)
+            .expect("empty snapshot batch");
+
+        let rejection = match ledger.try_fallback_baseline(canonical, evidence, fallback, snapshot)
+        {
+            Ok(_) => panic!("unowned zero-byte capability must reject the baseline"),
+            Err(rejection) => rejection,
+        };
+        assert!(matches!(
+            rejection.into_parts().1,
+            LedgerCause::ActiveReservationsRemain { count: 1 }
+        ));
+        drop(extra);
+    }
+
+    #[test]
+    fn included_zero_byte_attribution_freezes_to_zero_active_capabilities() {
+        let ledger = Ledger::<Owner, Phase, Dimension>::new(typed_limits());
+        let canonical = ledger
+            .try_attribution_batch::<CanonicalOutput>(Phase::Build, Dimension::Bytes, 0, 0)
+            .expect("empty canonical assembly");
+        let evidence_assembly = ledger
+            .try_attribution_batch::<PublishedOutcomeEvidence>(Phase::Build, Dimension::Bytes, 1, 0)
+            .expect("evidence assembly");
+        let mut fallback = ledger
+            .try_attribution_batch::<PublishedOutcomeEvidence>(Phase::Build, Dimension::Bytes, 1, 0)
+            .expect("fallback batch");
+        let zero = ledger
+            .reserve_operation_attribution::<PublishedOutcomeEvidence>(
+                Phase::Build,
+                Dimension::Bytes,
+                0,
+            )
+            .expect("zero-byte attribution");
+        assert!(fallback.try_push_attribution(zero).is_ok());
+        let evidence = ledger
+            .try_attribution_batch::<PublishedOutcomeEvidence>(Phase::Build, Dimension::Bytes, 0, 0)
+            .expect("snapshot batch");
+        let baseline =
+            match ledger.try_fallback_baseline(canonical, evidence_assembly, fallback, evidence) {
+                Ok(baseline) => baseline,
+                Err(_) => panic!("exact zero-byte baseline must be admitted"),
+            };
+        let snapshot = baseline.into_fallback_proof(ledger, None, None).freeze();
+        assert_eq!(snapshot.current_live_bytes(), 0);
+        assert_eq!(snapshot.active_reservations(), 0);
+    }
+
+    #[test]
+    fn fallback_freeze_uses_stable_positions_for_attribution_and_capacity_cover() {
+        let _guard = BOUND_ORD_TEST_LOCK.lock().expect("bound Ord test lock");
+        let terminal_phase = StatefulOrd(2);
+        let dimension = StatefulOrd(7);
+        let ledger = Ledger::<Owner, StatefulOrd, StatefulOrd>::new(stateful_ord_limits());
+        let canonical = ledger
+            .try_attribution_batch::<CanonicalOutput>(terminal_phase, dimension, 0, 0)
+            .expect("empty canonical assembly");
+        let evidence_assembly = ledger
+            .try_attribution_batch::<PublishedOutcomeEvidence>(terminal_phase, dimension, 1, 0)
+            .expect("covered evidence assembly");
+        let mut fallback = ledger
+            .try_attribution_batch::<PublishedOutcomeEvidence>(terminal_phase, dimension, 1, 0)
+            .expect("covered fallback batch");
+        let attribution = ledger
+            .reserve_operation_attribution::<PublishedOutcomeEvidence>(terminal_phase, dimension, 3)
+            .expect("fallback attribution");
+        assert!(fallback.try_push_attribution(attribution).is_ok());
+        let evidence = ledger
+            .try_attribution_batch::<PublishedOutcomeEvidence>(terminal_phase, dimension, 0, 0)
+            .expect("empty evidence batch");
+        let baseline = ledger
+            .try_fallback_baseline(canonical, evidence_assembly, fallback, evidence)
+            .unwrap_or_else(|_| panic!("exact fallback baseline must bind"));
+
+        let earlier = ledger
+            .reserve(StatefulOrd(1), dimension, 1)
+            .expect("later phase insertion");
+        drop(earlier);
+        let proof = baseline.into_fallback_proof(ledger, None, None);
+        let snapshot = freeze_while_ord_panics(proof);
+
+        assert_eq!(snapshot.current_live_bytes(), 0);
+        assert_eq!(snapshot.active_reservations(), 0);
+    }
+
+    #[test]
+    fn primary_freeze_uses_bound_source_attribution_cover_and_commitment_positions() {
+        let _guard = BOUND_ORD_TEST_LOCK.lock().expect("bound Ord test lock");
+        let terminal_phase = StatefulOrd(2);
+        let dimension = StatefulOrd(7);
+        let ledger = Ledger::<Owner, StatefulOrd, StatefulOrd>::new(stateful_ord_limits());
+        let canonical_assembly = ledger
+            .try_attribution_batch::<CanonicalOutput>(terminal_phase, dimension, 1, 1)
+            .expect("covered canonical assembly");
+        let evidence_assembly = ledger
+            .try_attribution_batch::<PublishedOutcomeEvidence>(terminal_phase, dimension, 0, 0)
+            .expect("empty evidence assembly");
+        let fallback = ledger
+            .try_attribution_batch::<PublishedOutcomeEvidence>(terminal_phase, dimension, 0, 0)
+            .expect("empty fallback batch");
+        let evidence = ledger
+            .try_attribution_batch::<PublishedOutcomeEvidence>(terminal_phase, dimension, 0, 0)
+            .expect("empty evidence batch");
+        let baseline = ledger
+            .try_fallback_baseline(canonical_assembly, evidence_assembly, fallback, evidence)
+            .unwrap_or_else(|_| panic!("exact primary baseline must bind"));
+
+        let earlier = ledger
+            .reserve(StatefulOrd(1), dimension, 1)
+            .expect("later phase insertion");
+        drop(earlier);
+        let mut source = ledger
+            .try_attribution_batch::<CanonicalOutput>(terminal_phase, dimension, 1, 1)
+            .expect("covered canonical source");
+        let attribution = ledger
+            .reserve_operation_attribution::<CanonicalOutput>(terminal_phase, dimension, 5)
+            .expect("canonical attribution");
+        assert!(source.try_push_attribution(attribution).is_ok());
+        assert!(
+            source
+                .try_push_commitment(OutputCommitment::new(dimension, 3))
+                .is_ok()
+        );
+        let proof = ledger
+            .try_prepare_primary(baseline, Some(source), None)
+            .unwrap_or_else(|_| panic!("exact primary publication must bind"));
+        let snapshot = freeze_while_ord_panics(proof);
+
+        assert_eq!(snapshot.current_live_bytes(), 0);
+        assert_eq!(snapshot.active_reservations(), 0);
+        assert_eq!(
+            snapshot
+                .dimensions()
+                .next()
+                .expect("one dimension")
+                .1
+                .committed_canonical_output(),
+            3
+        );
+    }
+
+    #[test]
+    fn typed_freeze_proof_owns_exact_batches_and_has_no_post_mutation_fault_gate() {
+        let source = include_str!("ledger.rs");
+        let test_attribute = ["#[cfg(", "test)]"].concat();
+        let (production, _) = source
+            .rsplit_once(&test_attribute)
+            .expect("ledger source contains one final test module boundary");
+        let proof = production
+            .split("pub(crate) struct TypedFreezeProof")
+            .nth(1)
+            .expect("typed proof exists")
+            .split("impl<O, P, D> TypedFreezeProof")
+            .next()
+            .expect("typed proof fields exist");
+        assert!(proof.contains("canonical: AttributionReservationBatch"));
+        assert!(proof.contains("evidence: AttributionReservationBatch"));
+        assert!(proof.contains("ledger: Ledger"));
+        assert!(!proof.contains("PhantomData"));
+
+        let freeze = production
+            .split("pub(crate) fn freeze(mut self)")
+            .nth(1)
+            .expect("typed freeze exists")
+            .split("\n}\n\n#[allow(")
+            .next()
+            .expect("typed freeze body exists");
+        for forbidden in [
+            "Result",
+            "?",
+            "assert",
+            "checked_",
+            "binary_search",
+            "saturating_",
+            "unwrap",
+            "expect",
+            "unreachable",
+        ] {
+            assert!(
+                !freeze.contains(forbidden),
+                "freeze contains post-mutation fault gate `{forbidden}`"
+            );
+        }
+        assert_eq!(freeze.matches("lock(").count(), 1);
+        let release = freeze
+            .find("release_bound_reservations")
+            .expect("freeze releases bound reservations");
+        let discard_canonical = freeze
+            .find("drop(self.discard_canonical.take())")
+            .expect("freeze drops discarded canonical batch");
+        let discard_evidence = freeze
+            .find("drop(self.discard_evidence.take())")
+            .expect("freeze drops discarded evidence batch");
+        let commitments = freeze
+            .find("apply_typed_commitments")
+            .expect("freeze applies bound commitments");
+        let published = freeze
+            .find("PublicationState::Published")
+            .expect("freeze publishes atomically");
+        let final_snapshot = freeze
+            .find("take_typed_final_snapshot")
+            .expect("freeze moves preallocated final evidence");
+        assert!(discard_canonical < release);
+        assert!(discard_evidence < release);
+        assert!(release < commitments);
+        assert!(commitments < published);
+        assert!(published < final_snapshot);
+        let deallocation_tail = freeze
+            .split("        };\n")
+            .nth(1)
+            .expect("freeze has one mutation block tail");
+        assert!(!deallocation_tail.contains("lock("));
+        assert!(!deallocation_tail.contains("release_bound_reservations"));
+        assert!(!deallocation_tail.contains("apply_typed_commitments"));
+
+        let bound_release = production
+            .split("fn release_bound_locked")
+            .nth(1)
+            .expect("bound release helper exists")
+            .split("impl<O, P, D> Drop for ReservationCore")
+            .next()
+            .expect("bound release helper body exists");
+        let apply = production
+            .split("fn apply_typed_commitments")
+            .nth(1)
+            .expect("bound commitment helper exists")
+            .split("fn try_snapshot")
+            .next()
+            .expect("bound commitment helper body exists");
+        let batch_release = production
+            .split("fn release_bound_reservations")
+            .nth(1)
+            .expect("bound batch release helper exists")
+            .split("fn destroy_storage_then_release_cover")
+            .next()
+            .expect("bound batch release helper body exists");
+        assert!(batch_release.contains("capacity_cover.core.release_bound_locked"));
+        let snapshot = production
+            .split("fn take_typed_final_snapshot")
+            .nth(1)
+            .expect("typed snapshot helper exists")
+            .split("const fn dimension_snapshot")
+            .next()
+            .expect("typed snapshot helper body exists");
+        for (name, helper) in [
+            ("bound release", bound_release),
+            ("bound batch release", batch_release),
+            ("commitment apply", apply),
+            ("typed snapshot", snapshot),
+        ] {
+            for forbidden in [
+                "Result",
+                "?",
+                "assert",
+                "checked_",
+                "binary_search",
+                "saturating_",
+                "unwrap",
+                "expect",
+                "unreachable",
+                "lock(",
+            ] {
+                assert!(
+                    !helper.contains(forbidden),
+                    "{name} contains post-binding fault gate `{forbidden}`"
+                );
+            }
+        }
+        assert!(!freeze.contains("canonical:"));
+        assert!(!freeze.contains("evidence:"));
     }
 }
