@@ -171,6 +171,10 @@ impl<T, L> FinalOwnerAllocation<T, L> {
             .map_err(|_| FinalOwnerAllocationError::AccountingOverflow)
     }
 
+    #[allow(
+        dead_code,
+        reason = "the coupled retained writer will be the production authority for shared handles"
+    )]
     fn share(&self) -> Self {
         let shared = match self.shared.as_ref() {
             Some(shared) => Arc::clone(shared),
@@ -610,11 +614,15 @@ impl PhysicalStorageAccount {
         self.inner.ptr_eq_for_account(&other.inner)
     }
 
-    /// Shares the opaque account handle after the owning domain admits handle and branch work.
+    /// Shares the opaque account handle inside the retained owner implementation.
     ///
-    /// This Internal/backend-tier method does not perform operation attribution itself. Canonical
-    /// callers may invoke it only behind their operation-owned allocation guard.
-    pub fn share_after_admission(&self) -> Self {
+    /// Domain callers must eventually reach this only through the coupled operation-attribution
+    /// writer; the raw physical handle share is deliberately module-private.
+    #[allow(
+        dead_code,
+        reason = "the coupled retained writer will gate this physical handle share"
+    )]
+    fn share_after_admission(&self) -> Self {
         Self {
             inner: self.inner.share(),
         }
@@ -623,12 +631,15 @@ impl PhysicalStorageAccount {
     /// Admits one retained allocation before running its constructing closure or entering the shared
     /// allocator.
     ///
-    /// This is an Internal/backend-tier physical-ownership seam. It grants no canonical Scene or
-    /// publication authority. Baozi domain guards must additionally admit operation attribution and
-    /// verify the builder's nested envelope before calling it. Canonical callers also restrict `T`
-    /// to audited ownership headers with non-panicking destructors; safe Rust cannot infer that
-    /// property for an arbitrary public generic type.
-    pub fn try_retain_with<T>(
+    /// This module-private leaf grants no canonical Scene or publication authority. Its future
+    /// operation-owned writer must additionally admit operation attribution before reaching it.
+    /// Canonical callers also restrict `T` to audited ownership headers with non-panicking
+    /// destructors; safe Rust cannot infer that property for an arbitrary generic type.
+    #[allow(
+        dead_code,
+        reason = "the coupled retained writer will supply operation attribution before this leaf"
+    )]
+    fn try_retain_with<T>(
         &self,
         plan: RetainedAllocationPlan,
         build: impl FnOnce() -> Result<T, RetainedBuildFailureCode>,
@@ -636,25 +647,7 @@ impl PhysicalStorageAccount {
     where
         T: Send + Sync + 'static,
     {
-        let inline_bytes = size_of::<RetainedPayload<T>>();
-        if inline_bytes > MAX_RETAINED_INLINE_BYTES {
-            return Err(RetainedAllocationError::InlinePayloadTooLarge {
-                bytes: inline_bytes,
-                limit: MAX_RETAINED_INLINE_BYTES,
-            });
-        }
-
-        type RetainedLease = AdmissionLease<PhysicalStorageAccount>;
-        let outer_bytes =
-            FinalOwnerAllocation::<RetainedPayload<T>, RetainedLease>::checked_layout_bytes()
-                .map_err(map_retained_final_owner_error)?;
-        let bytes = outer_bytes
-            .checked_add(plan.nested_bytes)
-            .ok_or(RetainedAllocationError::AccountingOverflow)?;
-        let allocations = 1_u64
-            .checked_add(plan.nested_allocations)
-            .ok_or(RetainedAllocationError::AccountingOverflow)?;
-        let charge = AdmissionCharge::new(bytes, allocations);
+        let charge = self.checked_retained_charge::<T>(plan)?;
         let owner = self.share_after_admission();
         try_admit(
             &owner.inner.value().counters,
@@ -685,6 +678,35 @@ impl PhysicalStorageAccount {
         let inner = FinalOwnerAllocation::try_new(payload, lease)
             .map_err(map_retained_final_owner_error)?;
         Ok(RetainedAllocation { inner })
+    }
+
+    #[allow(
+        dead_code,
+        reason = "the coupled retained writer will preflight this charge before both admissions"
+    )]
+    fn checked_retained_charge<T>(
+        &self,
+        plan: RetainedAllocationPlan,
+    ) -> Result<AdmissionCharge, RetainedAllocationError> {
+        let inline_bytes = size_of::<RetainedPayload<T>>();
+        if inline_bytes > MAX_RETAINED_INLINE_BYTES {
+            return Err(RetainedAllocationError::InlinePayloadTooLarge {
+                bytes: inline_bytes,
+                limit: MAX_RETAINED_INLINE_BYTES,
+            });
+        }
+
+        type RetainedLease = AdmissionLease<PhysicalStorageAccount>;
+        let outer_bytes =
+            FinalOwnerAllocation::<RetainedPayload<T>, RetainedLease>::checked_layout_bytes()
+                .map_err(map_retained_final_owner_error)?;
+        let bytes = outer_bytes
+            .checked_add(plan.nested_bytes)
+            .ok_or(RetainedAllocationError::AccountingOverflow)?;
+        let allocations = 1_u64
+            .checked_add(plan.nested_allocations)
+            .ok_or(RetainedAllocationError::AccountingOverflow)?;
+        Ok(AdmissionCharge::new(bytes, allocations))
     }
 }
 
@@ -916,6 +938,10 @@ impl fmt::Display for RetainedAllocationError {
 
 impl std::error::Error for RetainedAllocationError {}
 
+#[allow(
+    dead_code,
+    reason = "physical retained admission is private until the coupled writer lands"
+)]
 fn map_retained_admission_error(error: AdmissionError) -> RetainedAllocationError {
     match error {
         AdmissionError::AccountingOverflow => RetainedAllocationError::AccountingOverflow,
@@ -928,6 +954,10 @@ fn map_retained_admission_error(error: AdmissionError) -> RetainedAllocationErro
     }
 }
 
+#[allow(
+    dead_code,
+    reason = "physical retained admission is private until the coupled writer lands"
+)]
 fn map_retained_final_owner_error(error: FinalOwnerAllocationError) -> RetainedAllocationError {
     match error {
         FinalOwnerAllocationError::AccountingOverflow => {
@@ -1144,15 +1174,16 @@ mod tests {
 
     #[test]
     fn builder_local_storage_drops_before_its_physical_lease() {
+        static OBSERVED_LIVE_BYTES: AtomicU64 = AtomicU64::new(0);
+
         struct BuilderLocalStorage {
             account: PhysicalStorageAccount,
-            observed_live_bytes: StdArc<AtomicU64>,
             _bytes: Vec<u8>,
         }
 
         impl Drop for BuilderLocalStorage {
             fn drop(&mut self) {
-                self.observed_live_bytes.store(
+                OBSERVED_LIVE_BYTES.store(
                     self.account.snapshot().live_retained_bytes(),
                     Ordering::SeqCst,
                 );
@@ -1161,13 +1192,12 @@ mod tests {
 
         let factory = account_factory(1);
         let account = account(&factory, 4_096, 8);
-        let observed = StdArc::new(AtomicU64::new(0));
+        OBSERVED_LIVE_BYTES.store(0, Ordering::SeqCst);
         let plan = RetainedAllocationPlan::new(64, 1).unwrap();
         let error = account
             .try_retain_with::<u64>(plan, || {
                 let _storage = BuilderLocalStorage {
                     account: account.share_after_admission(),
-                    observed_live_bytes: StdArc::clone(&observed),
                     _bytes: vec![0; 64],
                 };
                 Err(BUILD_FAILED)
@@ -1175,7 +1205,7 @@ mod tests {
             .unwrap_err();
 
         assert_eq!(error, RetainedAllocationError::Build(BUILD_FAILED));
-        assert!(observed.load(Ordering::SeqCst) > 64);
+        assert!(OBSERVED_LIVE_BYTES.load(Ordering::SeqCst) > 64);
         assert_eq!(account.snapshot().live_retained_bytes(), 0);
         assert_eq!(account.snapshot().live_retained_allocations(), 0);
     }
@@ -1222,14 +1252,15 @@ mod tests {
 
     #[test]
     fn injected_shared_allocation_failure_drops_payload_before_refunding_charge() {
+        static OBSERVED_LIVE_BYTES: AtomicU64 = AtomicU64::new(0);
+
         struct DropProbe {
             account: PhysicalStorageAccount,
-            observed_live_bytes: StdArc<AtomicU64>,
         }
 
         impl Drop for DropProbe {
             fn drop(&mut self) {
-                self.observed_live_bytes.store(
+                OBSERVED_LIVE_BYTES.store(
                     self.account.snapshot().live_retained_bytes(),
                     Ordering::SeqCst,
                 );
@@ -1238,12 +1269,11 @@ mod tests {
 
         let factory = account_factory(1);
         let account = account(&factory, 4_096, 8);
-        let observed = StdArc::new(AtomicU64::new(0));
+        OBSERVED_LIVE_BYTES.store(0, Ordering::SeqCst);
         fail_next_final_owner_allocation();
         let result = account.try_retain_with(empty_plan(), || {
             Ok::<_, RetainedBuildFailureCode>(DropProbe {
                 account: account.share_after_admission(),
-                observed_live_bytes: StdArc::clone(&observed),
             })
         });
 
@@ -1251,7 +1281,7 @@ mod tests {
             result,
             Err(RetainedAllocationError::AllocationFailed)
         ));
-        assert!(observed.load(Ordering::SeqCst) > 0);
+        assert!(OBSERVED_LIVE_BYTES.load(Ordering::SeqCst) > 0);
         assert_eq!(account.snapshot().live_retained_bytes(), 0);
     }
 
@@ -1261,7 +1291,7 @@ mod tests {
         let account = account(&factory, 4_096, 8);
         let first = account
             .try_retain_with(empty_plan(), || {
-                Ok::<_, RetainedBuildFailureCode>(String::from("payload"))
+                Ok::<_, RetainedBuildFailureCode>(*b"payload!")
             })
             .unwrap();
         let charged = first.charged_bytes();
@@ -1277,20 +1307,22 @@ mod tests {
 
     #[test]
     fn concurrent_shared_drops_select_exactly_one_final_owner() {
-        struct DropCount(StdArc<AtomicU64>);
+        static DROP_COUNT: AtomicU64 = AtomicU64::new(0);
+
+        struct DropCount;
 
         impl Drop for DropCount {
             fn drop(&mut self) {
-                self.0.fetch_add(1, Ordering::SeqCst);
+                DROP_COUNT.fetch_add(1, Ordering::SeqCst);
             }
         }
 
         let factory = account_factory(1);
         let account = account(&factory, 4_096, 8);
-        let drops = StdArc::new(AtomicU64::new(0));
+        DROP_COUNT.store(0, Ordering::SeqCst);
         let first = account
             .try_retain_with(empty_plan(), || {
-                Ok::<_, RetainedBuildFailureCode>(DropCount(StdArc::clone(&drops)))
+                Ok::<_, RetainedBuildFailureCode>(DropCount)
             })
             .unwrap();
         let second = first.share_after_test_admission();
@@ -1309,22 +1341,22 @@ mod tests {
         for thread in threads {
             thread.join().unwrap();
         }
-        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        assert_eq!(DROP_COUNT.load(Ordering::SeqCst), 1);
         assert_eq!(account.snapshot().live_retained_bytes(), 0);
         assert_eq!(account.snapshot().live_retained_allocations(), 0);
     }
 
     #[test]
     fn payload_drop_barrier_keeps_headroom_unavailable_until_cleanup_finishes() {
-        struct BlockingDrop {
-            entered: StdArc<Barrier>,
-            release: StdArc<Barrier>,
-        }
+        static ENTERED: Barrier = Barrier::new(2);
+        static RELEASE: Barrier = Barrier::new(2);
+
+        struct BlockingDrop;
 
         impl Drop for BlockingDrop {
             fn drop(&mut self) {
-                self.entered.wait();
-                self.release.wait();
+                ENTERED.wait();
+                RELEASE.wait();
             }
         }
 
@@ -1334,19 +1366,14 @@ mod tests {
                 .unwrap();
         let factory = account_factory(1);
         let account = account(&factory, outer, 1);
-        let entered = StdArc::new(Barrier::new(2));
-        let release_drop = StdArc::new(Barrier::new(2));
         let retained = account
             .try_retain_with(empty_plan(), || {
-                Ok::<_, RetainedBuildFailureCode>(BlockingDrop {
-                    entered: StdArc::clone(&entered),
-                    release: StdArc::clone(&release_drop),
-                })
+                Ok::<_, RetainedBuildFailureCode>(BlockingDrop)
             })
             .unwrap();
         let drop_thread = thread::spawn(move || drop(retained));
 
-        entered.wait();
+        ENTERED.wait();
         assert!(matches!(
             account.try_retain_with::<BlockingDrop>(empty_plan(), || {
                 panic!("builder must not run before physical admission")
@@ -1354,26 +1381,27 @@ mod tests {
             Err(RetainedAllocationError::ByteLimitExceeded { .. })
                 | Err(RetainedAllocationError::AllocationLimitExceeded { .. })
         ));
-        release_drop.wait();
+        RELEASE.wait();
         drop_thread.join().unwrap();
         assert_eq!(account.snapshot().live_retained_bytes(), 0);
         assert_eq!(account.snapshot().live_retained_allocations(), 0);
         let replacement = account
-            .try_retain_with(empty_plan(), || Ok::<_, RetainedBuildFailureCode>(3_u64))
+            .try_retain_with(empty_plan(), || Ok::<_, RetainedBuildFailureCode>(()))
             .expect("headroom becomes available after payload cleanup and lease release");
         drop(replacement);
     }
 
     #[test]
     fn payload_drop_observes_charge_and_factory_outlives_public_account_handle() {
+        static OBSERVED_LIVE_BYTES: AtomicU64 = AtomicU64::new(0);
+
         struct DropProbe {
             account: PhysicalStorageAccount,
-            observed_live_bytes: StdArc<AtomicU64>,
         }
 
         impl Drop for DropProbe {
             fn drop(&mut self) {
-                self.observed_live_bytes.store(
+                OBSERVED_LIVE_BYTES.store(
                     self.account.snapshot().live_retained_bytes(),
                     Ordering::SeqCst,
                 );
@@ -1382,12 +1410,11 @@ mod tests {
 
         let factory = account_factory(1);
         let account = account(&factory, 4_096, 8);
-        let observed = StdArc::new(AtomicU64::new(0));
+        OBSERVED_LIVE_BYTES.store(0, Ordering::SeqCst);
         let retained = account
             .try_retain_with(empty_plan(), || {
                 Ok::<_, RetainedBuildFailureCode>(DropProbe {
                     account: account.share_after_admission(),
-                    observed_live_bytes: StdArc::clone(&observed),
                 })
             })
             .unwrap();
@@ -1396,7 +1423,7 @@ mod tests {
         drop(account);
         assert_eq!(factory.snapshot().live_accounts(), 1);
         drop(retained);
-        assert_eq!(observed.load(Ordering::SeqCst), charged);
+        assert_eq!(OBSERVED_LIVE_BYTES.load(Ordering::SeqCst), charged);
         assert_eq!(factory.snapshot().live_accounts(), 0);
     }
 
@@ -1485,6 +1512,46 @@ mod tests {
                 "forbidden final-owner bypass `{forbidden}` was introduced"
             );
         }
+    }
+
+    #[test]
+    fn physical_leaf_mutators_are_not_crate_or_public_api() {
+        let source = include_str!("retained.rs");
+        let test_attribute = ["#[cfg(", "test)]"].concat();
+        let (production, _) = source
+            .rsplit_once(&test_attribute)
+            .expect("retained source contains one final test module boundary");
+
+        for method in ["try_retain_with", "share_after_admission"] {
+            let needle = format!("fn {method}");
+            let signatures: Vec<_> = production
+                .lines()
+                .filter(|line| line.contains(&needle))
+                .collect();
+            assert_eq!(
+                signatures.len(),
+                1,
+                "raw physical mutator `{method}` must have one implementation"
+            );
+            assert!(
+                signatures[0].trim_start().starts_with(&needle),
+                "raw physical mutator `{method}` escaped the retained module: {}",
+                signatures[0]
+            );
+        }
+    }
+
+    #[test]
+    fn retained_handles_do_not_gain_unattributed_clone() {
+        trait AmbiguousIfClone<Marker> {
+            fn assert_not_clone() {}
+        }
+
+        impl<T: ?Sized> AmbiguousIfClone<()> for T {}
+        impl<T: Clone> AmbiguousIfClone<u8> for T {}
+
+        let _ = <PhysicalStorageAccount as AmbiguousIfClone<_>>::assert_not_clone;
+        let _ = <RetainedAllocation<u64> as AmbiguousIfClone<_>>::assert_not_clone;
     }
 
     #[test]
