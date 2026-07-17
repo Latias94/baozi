@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-07-10
-updated: 2026-07-13
+updated: 2026-07-17
 authors:
   - Codex
 decision_type: architecture
@@ -12,6 +12,10 @@ depends_on:
   - docs/adr/0030-logical-mesh-primitive-and-attribute-domain.md
   - docs/adr/0031-animation-skin-morph-and-deformer-contract.md
   - docs/adr/0032-postprocess-remap-and-derived-data-contract.md
+related:
+  - docs/adr/0010-asset-io-virtual-filesystem-uri-archive-and-path-security.md
+  - docs/adr/0020-import-lifecycle-and-report-contract.md
+  - docs/adr/0041-resource-dependency-graph-and-successful-input-manifest.md
 ---
 
 # ADR 0036: Source Identity, Provenance, and Metadata
@@ -48,7 +52,11 @@ flowchart LR
 
 A resource identity is the import session's normalized logical identity, not an OS path or open-file
 handle. For the primary asset it is the caller-provided logical name or a generated opaque report
-identity. For dependencies it is the resolver's normalized identity relative to that primary asset.
+identity. For a dependency it is the resolver's sanitized canonical namespace target after resolving
+the hostile reference relative to the session-issued origin of the resource that declared it. The
+primary is the origin only for references authored in the primary; an MTL-authored texture is based
+on the MTL resource rather than the OBJ root. The private authority domain remains separate and never
+enters this public identity.
 Absolute host roots, credentials, query secrets, and backend implementation handles are excluded
 from public output.
 
@@ -59,6 +67,42 @@ For ADR 0029 direct bytes, each session receives a fresh domain even when caller
 public source label. The domain is authorization machinery: it is not derived from display text, is
 not serialized into Scene provenance, and does not prove byte equality. Public resolver identity is
 sanitized separately under this ADR, while byte equality requires content-digest evidence.
+
+The canonical v1 `ResourceIdentity` value is the exact byte sequence of its already validated UTF-8
+string. Resolver normalization, origin-relative resolution, and redaction happen before construction;
+canonical encoding performs no additional Unicode normalization, case folding, percent decoding,
+separator conversion, or display formatting. Invalid UTF-8 never becomes a `ResourceIdentity`, and
+NFC and NFD spellings remain distinct unless the owning resolver has already produced one identical
+sanitized canonical value for both.
+
+`ResourceIdentity` text and replay stability are separate typed facts. Every manifest-facing identity
+therefore carries one sealed `ResourceIdentityStability` value:
+
+```text
+Stable(owner, schema_id, schema_version)
+SessionOpaque(reason)
+```
+
+`Stable` means the admitted owner guarantees that the exact validated UTF-8 value is derived by the
+named, versioned identity schema and can be reproduced in a fresh session given the same logical
+resource subject. It does not prove equal bytes or grant authority. A caller-provided primary name is
+`Stable` only through an explicit admitted caller-identity schema; an ordinary display label is not
+silently promoted. A generated report identity, a resolver without an admitted stable-identity
+schema, or a fallback created from session state is `SessionOpaque`.
+
+The stability value is Baozi-owned inert typed evidence. Its owner and schema IDs are bounded stable
+registry values owned here; its reason is a closed typed variant. It contains no authority domain,
+callback, path root, credential, or native handle. `ResourceIdentity` string equality remains byte
+equality of the validated value. Stability is compared separately so two equal display identities
+cannot accidentally share different replay claims. This ADR does not define manifest bytes or a
+digest for that evidence.
+
+ADR 0036 owns stability-schema registry membership and meaning. Each `Stable` entry names one exact
+derivation from a logical subject to validated identity UTF-8 and includes independent fresh-session
+semantic vectors. An unregistered owner/schema/version or a derivation/configuration change is
+`SessionOpaque`; syntactically valid IDs cannot self-register. ADR 0041, as a downstream consumer,
+admits only entries whose IDs fit its `canonical-id-v1` grammar and exclusively owns their manifest
+encoding and digest vectors. Nothing in this ADR consumes that downstream adapter.
 
 A source object locator is format-defined, deterministic, and typed: for example a glTF document
 index plus object kind, an OBJ statement/segment identity, or a PLY element row. Names may be
@@ -72,11 +116,12 @@ edits can move or replace an index-based locator, and byte equality is proven on
 content digest. Source identity is not globally unique and never substitutes for a dense ID in
 in-memory references.
 
-The public shape is a typed resource identity plus a typed format/object locator, optional sanitized
-display name, and optional content digest reference. It contains no host path or parser-backend
-object. Unknown locator kinds require a registered bounded namespaced schema; an untyped free-form
-string is evidence text, not identity. Equality excludes display text and keeps content digest
-separate so identity continuity and byte equality remain different questions.
+The public shape is a typed resource identity plus its sealed stability evidence, a typed format/
+object locator, optional sanitized display name, and optional content digest reference. It contains
+no host path or parser-backend object. Unknown locator kinds require a registered bounded namespaced
+schema; an untyped free-form string is evidence text, not identity. Equality excludes display text
+and keeps content digest and replay stability separate so identity continuity, byte equality, and
+cross-session naming guarantees remain different questions.
 
 The locator's stable format owner uses the bounded `baozi-core::FormatId` value object. Core owns only
 that lowercase ASCII/reverse-DNS value grammar so a validated Scene can retain provenance without
@@ -181,6 +226,8 @@ This makes each lifetime and trust boundary explicit while retaining source trac
 - Postprocess operations have a provenance cost and cannot simply invent or discard identity.
 - A resolver that cannot provide a stable logical identity gets an opaque session identity rather
   than a misleading path-derived key.
+- Session-opaque identities remain valid report/provenance identities but prevent ADR 0041 from
+  claiming a replayable resource-input manifest.
 
 ## Risks and Mitigations
 
@@ -189,6 +236,9 @@ This makes each lifetime and trust boundary explicit while retaining source trac
 | Source identity exposes sensitive paths or URIs | High | Sanitize at the import-session boundary and test drive/UNC/credential/query cases. |
 | Provenance grows superlinearly through repeated merges | High | Use lossless deduplicated lineage nodes and checked limits; require explicit loss authority before digest/preview collapse. |
 | Callers assume source identity implies equal content | Medium | Keep content digest separate and document resolver stability conditions. |
+| Nested dependency identity is accidentally primary-relative | High | require the session-issued declaring-resource origin and nested OBJ/MTL/texture plus negative-proof target fixtures |
+| Canonical encoding silently normalizes an admitted identity | High | encode the exact validated UTF-8 value and pin NFC/NFD, separator, case, and percent-spelling vectors |
+| A generated or unstable identity is presented as replayable | Critical | retain typed `SessionOpaque` stability evidence and require ADR 0041 to emit `ObservedOnly(unstable-resource-identity)` |
 | Metadata duplicates typed behavior | Medium | Central validation rejects reserved/duplicate canonical keys and promotion tests remove duplicates. |
 
 ## Success Metrics
@@ -198,6 +248,9 @@ This makes each lifetime and trust boundary explicit while retaining source trac
 | Lineage completeness | Every canonical owner has source or generated-operation provenance after import and edits | coverage walk and per-owner negative tests |
 | Validation complexity | Provenance and source-reference validation is `O(nodes + edges + attachments)` with deterministic order | deep/wide/merge scale counters |
 | Identity separation | Dense reorder, branch edit, and re-import independently exercise generation ID, source identity, digest, and provenance | identity/remap fixture matrix |
+| Nested-origin identity | every dependency and unavailable proof target uses the declaring resource's origin while private authority remains absent | nested sidecar/texture and dual-namespace fixtures |
+| Canonical identity bytes | canonical v1 encodes the exact validated UTF-8 value without a second normalization pass | independent transcript and Unicode mutation vectors |
+| Replay-stability honesty | 100% of generated or unregistered resolver identities are `SessionOpaque`; only admitted schemas emit `Stable` | direct-bytes, caller-label, custom-resolver, and fresh-session fixtures |
 
 ## Acceptance Criteria
 
@@ -211,5 +264,44 @@ This makes each lifetime and trust boundary explicit while retaining source trac
 - Public reports never expose absolute host paths, credentials, backend handles, or unsanitized URI
   components.
 - Re-import fixtures distinguish stable identity from content digest changes.
+- Primary -> sidecar -> texture fixtures derive the texture's public target from the sidecar origin;
+  primary-relative derivation fails, and available/unavailable/negative-proof records use the same
+  sanitized target identity.
+- Canonical v1 known vectors distinguish NFC/NFD, case, separator, and percent spellings unless the
+  resolver produced the same validated canonical value; invalid UTF-8 is rejected before identity
+  construction.
+- Direct bytes without an admitted logical-name schema, generated report identities, and resolver
+  identities without an admitted stable schema carry `SessionOpaque`; equal text does not upgrade
+  them. Stable caller/resolver fixtures bind exact owner/schema/version and reproduce the same
+  identity bytes in a fresh session.
 - Metadata cannot forge references, stage/proof state, diagnostics, or canonical typed behavior.
 - Per-step provenance and the composed input-to-final remap agree after multi-step edits.
+
+## Amendment History
+
+### 2026-07-17: Separate identity text from replay stability
+
+- Affected: `Source Identity`, `Consequences`, `Risks and Mitigations`, `Success Metrics`, and
+  `Acceptance Criteria`.
+- Previous: generated and resolver-supplied resource identities had exact bytes but no typed fact
+  distinguishing cross-session stable values from session-opaque report labels.
+- New: every manifest-facing resource identity carries sealed `Stable(owner, schema, version)` or
+  `SessionOpaque(reason)` evidence; text equality remains separate.
+- Impact: opaque identities remain usable for provenance and diagnostics but cannot create a false
+  replayable input-manifest claim.
+- Review: 2026-07-17 canonical input-manifest and replay-classification review.
+- Rationale: byte-exact encoding cannot make a session-generated name reproducible.
+
+### 2026-07-16: Make dependency identity origin-qualified and byte-exact
+
+- Affected: `Source Identity`, `Risks and Mitigations`, `Success Metrics`, and `Acceptance Criteria`.
+- Previous: dependency resource identity was described as relative to the primary asset, conflicting
+  with nested resource authorship.
+- New: dependency identity uses the session-issued origin of the resource that declared the hostile
+  reference; the private authority domain remains separate, and canonical v1 encodes the exact
+  validated UTF-8 identity value without a second normalization pass.
+- Impact: nested sidecar resources and ADR 0041 negative-proof targets now have one canonical public
+  identity without exposing capability/cache identity.
+- Review: 2026-07-16 negative-input replay and origin-resolution architecture review.
+- Rationale: source identity must follow the same declaring-resource base as authorized acquisition
+  or provenance and reproducibility would name different resources.

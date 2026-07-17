@@ -151,7 +151,7 @@ Each of these should get a design note or ADR before implementation if it change
 | Format honesty | support matrix never claims unimplemented support | docs review and tests |
 | IR stability | STL, OBJ, PLY, and glTF map without replacing core scene types | milestone reviews |
 | Post-process clarity | raw and processed snapshots are separately reviewable | golden tests |
-| License hygiene | default dependency tree remains compatible with MIT/Apache-2.0 consumers | `cargo deny check` |
+| License hygiene | default dependency tree remains compatible with MIT/Apache-2.0 consumers | `cargo deny --locked check` |
 
 ## Risks and Mitigations
 

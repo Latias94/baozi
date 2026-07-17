@@ -12,10 +12,11 @@ The admitted Cargo configuration is:
 triomphe = { version = "=0.1.16", default-features = false }
 ```
 
-The initial consumer is `baozi-core` provenance storage. Baozi remains
-responsible for budget admission, fallible payload construction, fresh branch
-segment identity, segment-qualified attachment validation, and transactional
-publication.
+The initial consumer is `baozi-core` provenance storage. ADR 0042's canonical cutover moves the
+private shared-allocation backend into `baozi-operation`, where it becomes the sole concrete
+retained-allocation/final-owner implementation. Baozi remains responsible for budget admission,
+fallible payload construction, fresh branch segment identity, segment-qualified attachment
+validation, physical-account release ordering, and transactional publication.
 
 ## Package Identity
 
@@ -44,13 +45,20 @@ reproducible correspondence rather than signed provenance.
 The Baozi wrapper may use only these ownership operations:
 
 - `Arc::try_new` to publish already prepared storage;
+- `Arc::into_unique` only when consuming every private clone in the ADR 0042 final-owner path;
+- `UniqueArc::into_inner` only for the exactly-one winner, to deallocate the shared block before the
+  returned payload and bound lease are destroyed in that order;
 - `Arc::get_mut` only in `#[cfg(test)]` code that deliberately corrupts private fixtures;
 - `Arc::clone` for allocation-free reference-count increments;
 - ordinary borrow, dereference, and drop operations.
 
 The wrapper must not expose `triomphe` types or a production mutable/COW API. It must not call
 `Arc::new`, `make_mut`, `make_unique`, infallible conversion or deserialization paths, or any API
-that clones a payload behind an infallible interface.
+that clones a payload behind an infallible interface. Once a physical lease is bound inside the
+shared allocation, ordinary `Arc` drop is forbidden: every published clone is consumed by
+`Arc::into_unique`, and the sole winner is consumed immediately by `UniqueArc::into_inner`. Ordinary
+drop remains admitted for the current pre-cutover `SharedStorage` wrapper and for values that never
+contain a bound physical lease; the U4 cutover deletes that legacy path.
 
 ## Failure Semantics
 
@@ -73,11 +81,25 @@ Identity-preserving provenance remaps retain a bounded source-segment snapshot i
 remain qualified to one target branch. Cloning that remap increments only shared reference counts;
 it neither allocates nor weakens source/target validation.
 
+For an ADR 0042 bound allocation, the private wrapper must establish these stronger conditions:
+
+1. the bound lease and payload are passed directly to `Arc::try_new` after both admissions succeed;
+2. a successful raw `Arc` is wrapped immediately by an infallible expression before any callback,
+   validation, fault injection, or other panic-capable action;
+3. every wrapper destruction calls `Arc::into_unique` rather than ordinary drop;
+4. the exactly-one winner calls `UniqueArc::into_inner`, then destroys the Baozi-owned inert payload
+   and its nested backing blocks, then destroys the bound lease; and
+5. the wrapper exposes no raw/weak handle, `try_unwrap`, `try_unique`, detach, rebrand, or manual
+   release path.
+
 `Arc::clone` does not allocate. Its reference-count overflow guard aborts after
 `isize::MAX` references; Baozi accepts that unreachable process-liveness edge
-and does not treat it as a recoverable allocation failure. Final drop uses
-release/acquire synchronization and deallocates through the global allocator
-without allocating. Shared payloads must not define panic-prone destructors.
+and does not treat it as a recoverable allocation failure. `Arc::into_unique` performs one `AcqRel`
+decrement and guarantees exactly one winner when every clone uses it. `UniqueArc::into_inner`
+reconstructs and consumes the allocation before returning the inner value. The wrapper then drops
+the payload before its bound lease, so charged headroom is not released before the shared control
+block or exclusive nested backing blocks are deallocated. Shared payloads must be sealed Baozi-owned
+inert types with bounded inline size and non-panic-prone destructors.
 
 ## Feature And Closure Review
 
@@ -95,9 +117,11 @@ therefore compile both targets with the actual locked dependency graph.
 
 The crate is an unsafe trusted-computing-base dependency. A source scan found
 11 Rust files and approximately 3,315 lines, including 84 `unsafe` blocks, 24
-unsafe function declarations, and 22 unsafe implementations. The core risks
-are raw allocation and layout synthesis, DST metadata construction, reference
-counting, raw-pointer ownership conversion, and `Send`/`Sync` invariants.
+unsafe function declarations, and 22 unsafe implementations. The core risks are raw allocation and
+layout synthesis, DST metadata construction, reference counting, raw-pointer ownership conversion,
+final-owner election, deallocation-before-return behavior, and `Send`/`Sync` invariants. The expanded
+allowlist specifically reviews `Arc::into_unique` at `src/arc.rs:163-218` and
+`UniqueArc::into_inner` at `src/unique_arc.rs:103-114` in the admitted source.
 
 Upstream runs stable, MSRV, nightly, Miri, AddressSanitizer, and
 ThreadSanitizer checks. The repository is active and not archived, but crates.io
@@ -116,19 +140,38 @@ already accepts MIT and Apache-2.0, and both license texts ship in the crate.
 Admission becomes effective only after the locked integration passes:
 
 ```text
-cargo +1.95.0 check -p baozi-core --all-targets
-cargo +1.95.0 clippy -p baozi-core --all-targets --all-features -- -D warnings
-cargo +1.95.0 nextest run -p baozi-core
-cargo +1.95.0 check -p baozi --target wasm32-unknown-unknown --no-default-features --features all-formats
-cargo +1.95.0 check -p baozi --target wasm32-wasip1 --no-default-features --features all-formats
-cargo deny check
-cargo deny --manifest-path fuzz/Cargo.toml check
+cargo +1.95.0 check --locked -p baozi-core --all-targets
+cargo +1.95.0 check --locked -p baozi-operation --all-targets
+cargo +1.95.0 clippy --locked -p baozi-core --all-targets --all-features -- -D warnings
+cargo +1.95.0 clippy --locked -p baozi-operation --all-targets --all-features -- -D warnings
+cargo +1.95.0 nextest run --locked -p baozi-core
+cargo +1.95.0 nextest run --locked -p baozi-operation
+cargo +1.95.0 check --locked -p baozi --target wasm32-unknown-unknown --no-default-features --features all-formats
+cargo +1.95.0 check --locked -p baozi --target wasm32-wasip1 --no-default-features --features all-formats
+cargo deny --locked check
+cargo deny --locked --manifest-path fuzz/Cargo.toml check
 ```
 
-The lockfile must show exactly `triomphe 0.1.16` with the admitted checksum and
-no transitive dependency. Tests must also inject wrapper allocation failure and
-prove that provenance fork failure leaves the input arena and attachments
-unchanged.
+The lockfile must show exactly `triomphe 0.1.16` with the admitted checksum and no transitive
+dependency. Tests must also inject wrapper allocation failure, prove that provenance fork failure
+leaves the input arena and attachments unchanged, race final-owner extraction, and use an
+allocator-level barrier to prove the physical account remains charged through outer-control and
+nested-backing deallocation. Source/API-shape checks reject an ordinary post-bind Arc drop or any
+raw/weak/try-unwrapping escape.
+
+## 2026-07-17 Final-Owner Surface Re-review
+
+The package identity, source tree, checksum, features, transitive closure, MSRV, licenses, advisory
+queries, target claims, and upstream safety posture remain unchanged from the initial review. The
+allowlist expansion is limited to the two safe consuming methods above. Both rely on existing
+unsafe reference-count/raw-allocation internals, so their exact source and deallocation order are
+treated as security-sensitive implementation evidence rather than inferred from the safe signature.
+
+The rejected alternative is a Baozi-owned custom allocator/refcount implementation. It could provide
+the same post-deallocation hook but would add first-party unsafe layout, atomic, and deallocation
+logic. A paired account-slot design remains a safe fallback if final extraction disappears, but it
+duplicates the handle count and needs a generational ABA protocol. The pinned extraction path is
+admitted because it is smaller, keeps one refcount, and preserves the strict ADR 0042 release rule.
 
 ## Re-review Triggers
 

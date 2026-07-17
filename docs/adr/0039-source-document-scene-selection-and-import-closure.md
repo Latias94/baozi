@@ -1,17 +1,19 @@
 ---
 status: accepted
 date: 2026-07-12
+updated: 2026-07-17
 authors:
   - Codex
 decision_type: architecture
 depends_on:
   - docs/adr/0003-core-scene-ir-and-material-model.md
   - docs/adr/0016-import-options-presets-and-configuration-precedence.md
-  - docs/adr/0020-import-lifecycle-and-report-contract.md
   - docs/adr/0031-animation-skin-morph-and-deformer-contract.md
   - docs/adr/0036-source-identity-provenance-and-metadata.md
 related:
   - docs/adr/0011-format-support-tiers-and-compatibility-charter.md
+  - docs/adr/0020-import-lifecycle-and-report-contract.md
+  - docs/adr/0022-per-import-resource-ledger-and-budget-accounting.md
   - docs/adr/0027-gltf-backend-ownership-and-replacement-policy.md
 ---
 
@@ -119,15 +121,15 @@ collapsed record carries a typed source-scope loss subject and explicit fidelity
 authority, or when the collapsed record plus its loss fact cannot be retained atomically, the import
 fails before record submission.
 
-ADR 0020 owns the concrete `SourceScopeRecord` type, its ledger-charged bounded builder, the sealed
-`ParseScope` recording capability, and terminal report transport. This ADR owns the record's scene-
-selection outcome, retained/omitted object-kind semantics, and completeness rules. ADR 0036 owns the
-identity, digest, provenance, and loss representations used by those fields. A parser may finalize at
-most one record; once recorded, the same evidence survives in either the success report or a later
-terminal failure and cannot be replaced by the parser. `SourceScopeRecord` is report evidence, not
-another canonical Scene collection. The canonical Scene carries the selection operation through its
-scene-level provenance attachment; the import report retains the bounded selection detail and any
-loss records.
+This ADR owns the semantic `SourceScopeRecord` schema, its scene-selection outcome, retained/omitted
+object-kind semantics, and completeness rules. ADR 0036 owns the identity, digest, provenance, and
+loss representations used by those fields. A downstream lifecycle may provide a ledger-charged
+builder and sealed submission/transport capability, but it cannot redefine or partially publish the
+record. A parser may finalize at most one record; once recorded, the same evidence survives in either
+the success report or a later terminal failure and cannot be replaced by the parser.
+`SourceScopeRecord` is report evidence, not another canonical Scene collection. The canonical Scene
+carries the selection operation through its scene-level provenance attachment; the import report
+retains the bounded selection detail and any loss records.
 
 `AllDeclaredScenes` is deliberately not a v1 option. A union would need to represent scene variants
 and duplicate source-root membership without violating the one-tree ownership rule. A caller that
@@ -188,8 +190,8 @@ excluded or lossy semantic observable. Chosen.
   provenance, including empty and single-root source scenes.
 - Whole-document structural validation rejects malformed unselected indices/graphs without
   materializing unselected resource payloads.
-- The sealed import outcome retains exactly the recorded source-scope evidence on both success and
-  later failure; duplicate recording and uncharged detail fail before publication.
+- Any lifecycle consumer retains exactly the recorded source-scope evidence on both success and later
+  failure; duplicate recording and uncharged detail fail before publication.
 - Exact-budget detail is retained losslessly; excess detail fails under preserve-or-fail, while an
   explicitly authorized collapse retains exact typed counts/digest plus one typed
   `ProvenanceEvidenceLoss` record. Failure to retain that loss record publishes no source-scope record.
@@ -205,3 +207,21 @@ excluded or lossy semantic observable. Chosen.
 - [glTF 2.0 scenes and node hierarchy](https://github.com/KhronosGroup/glTF/blob/5ec16c42e5ed044f26ce2a5b741ed5c57cf622f3/specification/2.0/Specification.adoc)
 - [ADR 0027 glTF backend ownership](0027-gltf-backend-ownership-and-replacement-policy.md)
 - [ADR 0036 source identity and provenance](0036-source-identity-provenance-and-metadata.md)
+
+## Amendment History
+
+### 2026-07-17: Own source-scope semantics without owning lifecycle transport
+
+- Affected: front matter dependencies/related links, `Decision`, `Consequences`, and
+  `Acceptance Criteria`.
+- Previous: source-scene selection and closure depended normatively on the import lifecycle, while
+  no decision uniquely owned the bounded `SourceScopeRecord` semantic schema and completeness rules.
+- New: ADR 0039 exclusively owns the record's selection outcome, retained/omitted object-kind
+  semantics, collapse authority, and completeness; ADR 0020 owns sealed lifecycle submission and
+  success/failure transport, ADR 0022 supplies accounting mechanisms, and ADR 0036 owns identity,
+  digest, provenance, and loss representations.
+- Impact: format adapters and lifecycle code cannot redefine or partially publish source-scope
+  evidence, while this decision gains no session, ledger, or report-construction authority.
+- Review: 2026-07-17 source-selection and authority-graph review.
+- Rationale: semantic evidence must have one owner independent of the mechanism that meters and
+  transports it.

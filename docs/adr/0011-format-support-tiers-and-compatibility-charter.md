@@ -1,13 +1,14 @@
 ---
 status: accepted
 date: 2026-07-09
-updated: 2026-07-13
+updated: 2026-07-16
 authors:
   - Codex
 decision_type: architecture
 depends_on:
   - docs/adr/0004-parser-backend-and-format-coverage-policy.md
   - docs/adr/0005-testing-fuzzing-and-differential-oracle-strategy.md
+  - docs/adr/0021-extension-registry-and-format-descriptor-governance.md
   - docs/adr/0026-validation-snapshot-and-fuzz-gates.md
   - docs/adr/0034-supported-targets-and-portability.md
 related:
@@ -15,6 +16,8 @@ related:
   - docs/adr/0007-workspace-crate-graph-feature-flags-msrv-and-ci-gates.md
   - docs/adr/0010-asset-io-virtual-filesystem-uri-archive-and-path-security.md
 evidence:
+  - crates/baozi-import/tests/maturity_authority.rs
+  - crates/baozi-test-support/src/support_matrix.rs
   - docs/formats/_template.md
   - docs/formats/support-matrix.md
   - docs/plans/2026-07-10-001-refactor-baozi-canonical-architecture-plan.md
@@ -49,57 +52,77 @@ object with plausible counts.
 
 ## Decision
 
-Every first-party format inventory entry has an evidence-authority state, a complete capability
-matrix, a durable support page, structured machine-readable evidence, and code-side
-`FormatDescriptor`. Every active Baozi maturity claim has exactly one level and requires
-`BaoziVerified`; an `Unverified` candidate has no Baozi maturity level. Those views must agree before
-promotion or release.
+Every first-party format inventory entry joins ADR 0021's declaration-authority state with this ADR's
+managed verification state, a complete capability matrix, a durable support page, structured
+machine-readable evidence, and code-side `FormatDescriptor`. Every active Baozi maturity claim has
+exactly one level and requires a current `BaoziVerified` record. A subject without that record has no
+Baozi maturity level. Those views must agree before promotion or release.
 
 ADR 0004 owns parser/backend admission. ADR 0005 and ADR 0026 own test and snapshot mechanisms. ADR
 0007 owns feature membership. ADR 0034 owns targets. This ADR composes their evidence into a format
 maturity decision without redefining those underlying contracts.
 
-### Evidence Authority
+### Managed Verification and Joined Support View
 
-Maturity level answers how mature a declared profile is; evidence authority answers who made and
-verified that claim. They are independent fields with exactly these authority states:
+Maturity answers how mature one exact declared profile is. Declaration authority and Baozi-managed
+verification are separate axes with separate owners:
 
-| Authority | Meaning | Baozi support implication |
+| Axis | States | Sole owner |
 | --- | --- | --- |
-| `Unverified` | no currently valid Baozi-managed verification record exists, whether absent, stale, failing, expired, or withdrawn | discovery metadata only; no Baozi maturity claim |
-| `SelfAttested` | a named registrant asserts a level/profile and supplies its own evidence reference | display only with issuer and authority; never presented as Baozi Beta/Stable |
-| `BaoziVerified` | Baozi's managed inventory binds the exact implementation/profile identity to reviewed evidence and passing gates | eligible for first-party maturity and release decisions |
+| Registry declaration authority | `Unverified` or issuer-scoped `SelfAttested` | ADR 0021 owns schema, issuer identity, evidence-reference validation, constructors, and registry lifetime |
+| Managed maturity verification | no current record or `BaoziVerified` | ADR 0011 owns exact subject matching, managed issuer/inventory, gate validity, withdrawal, maturity, and release eligibility |
+
+This ADR does not redefine or construct `Unverified` or `SelfAttested`. Its joined support view shows
+`BaoziVerified` only when the current managed snapshot contains an exact passing record. Otherwise it
+falls back to ADR 0021's declaration state, which is discovery/display metadata and never a Baozi
+maturity claim. A self-attested level remains visibly bound to its named issuer and evidence reference.
 
 An evidence profile has two canonical, machine-comparable identities. Its subject identity includes
-the format ID and declared specification/subset, importer and backend artifact or source identity,
-enabled feature composition, complete compiled option profile including defaults, recovery and loss
-modes, and target/toolchain set. Its verification-record identity includes the evidence manifest and
-corpus digests plus gate, harness, and oracle versions.
+ADR 0021's `ImplementationDeclarationIdentity`, the evidence profile's recovery/loss/conformance
+predicate and target tier, and the managed inventory's exact tested implementation/build subject.
+That tested subject binds the reviewed source or artifact, resolved dependency and generated/native
+inputs, behavior-changing feature/cfg/build profile, target, and toolchain evidence used by the
+gates. A descriptor, package version, plugin filename, display label, or commit name alone cannot
+substitute for that managed evidence.
+
+The tested implementation/build subject is maturity evidence owned by this charter. It is not a
+runtime producer attestation, closed-input qualification, cache key, cooker identity, or claim that
+trusted extension code used no ambient input. Its separate verification-record identity includes the
+evidence manifest and corpus digests plus gate, harness, and oracle versions.
+
+`BaoziVerified` exists only in an immutable, versioned managed evidence snapshot. A support query
+joins that snapshot to ADR 0021's registry declaration identity and the effective request profile;
+the registry descriptor/snapshot never stores, accepts, or issues the verified state. Replacing the
+managed evidence snapshot can withdraw, expire, or revise a claim without mutating a live registry
+snapshot. Runtime import success never depends on maturity state, and a historical evidence snapshot
+cannot be presented as the current Baozi support view.
 
 Support and maturity claims are keyed by `(format ID, evidence-profile subject identity)`, never by
 format ID alone. Any subject change that can alter accepted input, canonical output, diagnostics,
 dependency behavior, resource/safety behavior, or loss semantics creates a new unverified subject.
 Adding evidence revises the verification record for the same subject; changing gate semantics
 invalidates the old record until that exact subject passes the new gate. A runtime request outside
-every verified subject remains `Unverified` or issuer-scoped `SelfAttested` and cannot inherit the
-default profile's claim.
+every verified subject falls back to its ADR 0021 declaration state and cannot inherit the default
+profile's claim.
 
 Loss of exact identity, an evidence withdrawal/expiry, or a failing required gate atomically removes
-the `BaoziVerified` token and transitions that subject to `Unverified`; the old record remains
-historical evidence only. The public Baozi maturity claim is removed in the same change. If baseline
+the subject from the next current `BaoziVerified` evidence snapshot and makes the joined support view
+fall back to its ADR 0021 declaration state; the old record remains historical evidence only. The
+public Baozi maturity claim is removed in the same change. If baseline
 safety still holds, the implementation may remain discoverable without a Baozi maturity level while
 verification is rebuilt; a baseline-safety failure follows the disable/unregister rule below.
 
 An external implementation is not permanently barred from `BaoziVerified`, but only Baozi's managed
-inventory can bind one exact subject and verification record to that authority. A runtime descriptor
-or plugin cannot issue `BaoziVerified` to itself.
+inventory can bind one exact subject and verification record to that authority. A runtime descriptor,
+registry snapshot, or plugin cannot issue, retain, or revoke `BaoziVerified`.
 
 ### Evidence Flow
 
 ```mermaid
 flowchart TD
     Descriptor[FormatDescriptor] --> Checker[Maturity checker]
-    Authority[Evidence authority and issuer] --> Checker
+    Declaration[ADR 0021 declaration authority and issuer] --> Checker
+    Managed[Managed Baozi verification snapshot] --> Checker
     Support[Format support page] --> Checker
     Structured[Structured evidence manifest] --> Checker
     Fixtures[Provenanced valid and malformed fixtures] --> Tests[Executable gates]
@@ -227,8 +250,9 @@ Promotion rules:
 Demotion rules:
 
 - a newly discovered violation updates the evidence and user-facing claim in the same change
-- a stale, expired, withdrawn, or failing required verification record transitions the exact subject
-  to `Unverified` and removes its Baozi maturity claim atomically; a previous level is history only
+- a stale, expired, withdrawn, or failing required verification record removes the exact subject's
+  `BaoziVerified` state and Baozi maturity claim atomically, then the joined view falls back to its
+  registry declaration state; a previous level is history only
 - a baseline-safety failure disables and unregisters the affected path or moves it behind an admitted
   process boundary; maturity demotion alone is insufficient
 - a non-safety semantic or evidence regression may demote immediately without a compatibility shim
@@ -328,6 +352,8 @@ Negative:
 | Support docs drift from code | High | High | checker joins descriptor, evidence, matrix, feature, and tests by stable format ID |
 | Third-party self-attestation appears to be a Baozi guarantee | High | Medium | store maturity level and evidence authority separately; reserve `BaoziVerified` construction for the managed inventory checker |
 | Evidence is reused across behavior-changing profiles | Critical | Medium | key claims by canonical subject identity including compiled defaults, recovery/loss modes, backend/features, and targets |
+| Managed evidence tests a different implementation than the declared subject | Critical | Medium | bind ADR 0021's declaration identity to exact source/artifact/build/dependency/target/toolchain evidence in the managed inventory and reject missing or stale components |
+| A long-lived registry snapshot retains a withdrawn maturity claim | Critical | Medium | keep `BaoziVerified` only in the replaceable managed evidence snapshot and join it to immutable registry declarations at query/release time |
 | Snapshot proves only shape/counts | High | Medium | require complete canonical-value digest and mutation tests beyond bounded preview |
 | Oracle reproduces importer/backend assumptions | High | Medium | require independent normalized source expectations and classify tolerated differences |
 | Assimp is treated as ground truth | Medium | Medium | sandbox it externally, keep it optional/non-authoritative, and record oracle limitations |
@@ -342,8 +368,8 @@ Negative:
 | Single maturity authority | ADR checker finds maturity definitions only here and references from backend/feature ADRs point here |
 | Admission before maturity | checker fixtures reject assigning any maturity, including Experimental, to a first-party path that fails baseline admission safety |
 | Complete declaration | every first-party format declares every required capability dimension; each verified Baozi claim has exactly one maturity, while an unverified candidate has none |
-| Evidence authority | external registrations default to `Unverified`, self-attested fixtures retain issuer identity, and only an exact passing managed-inventory entry can construct `BaoziVerified` |
-| Profile identity | changing any default, recovery/loss mode, backend/feature composition, target, or semantic option prevents reuse of the prior verified token; adding corpus evidence revises only the verification record |
+| Evidence authority | ADR 0021 exclusively validates declaration `Unverified`/issuer-scoped `SelfAttested`; only an exact passing current ADR 0011 managed-inventory entry can construct the joined `BaoziVerified` support view |
+| Profile identity | changing any declaration identity, tested source/artifact/dependency/config/generated/native/toolchain evidence, default, recovery/loss mode, target, or semantic option prevents reuse of the prior verified token; adding corpus evidence revises only the verification record |
 | Evidence reachability | every structured evidence pointer resolves to a test, fixture, golden, fuzz target, provenance record, or reviewed exception |
 | Semantic golden | mutation beyond the bounded preview changes the versioned full-value digest; count-only snapshots fail negative tests |
 | Independent confidence | Beta/Stable gates reject importer-generated snapshots as the sole oracle; Stable has differential/conformance evidence or reviewed equivalent |
@@ -359,3 +385,20 @@ These links locate evolving evidence; they do not themselves assert a maturity l
 - [Canonical architecture refactor plan](../plans/2026-07-10-001-refactor-baozi-canonical-architecture-plan.md)
 - [Testing and differential strategy](0005-testing-fuzzing-and-differential-oracle-strategy.md)
 - [Validation, snapshot, and fuzz gates](0026-validation-snapshot-and-fuzz-gates.md)
+
+## Amendment History
+
+### 2026-07-16: Separate registry declaration from managed execution evidence
+
+- Affected: `Evidence Authority`, `Risks and Mitigations`, and `Acceptance Criteria`.
+- Previous: this ADR repeated descriptor-owned fields while leaving the exact tested implementation
+  and build evidence insufficiently distinguished from registry declaration.
+- New: maturity subjects compose ADR 0021's declaration identity with exact tested implementation,
+  dependency, configuration, generated/native input, target, and toolchain evidence owned by the
+  managed maturity inventory.
+- Impact: execution/build drift invalidates maturity evidence without inventing a runtime producer,
+  closed-input, cache, or build-identity authority, and evidence withdrawal never mutates a registry
+  snapshot.
+- Review: 2026-07-16 producer-identity and evidence-authority architecture review.
+- Rationale: registry declarations and verified execution evidence answer different questions, but
+  one maturity subject must bind both before Baozi makes a support claim.

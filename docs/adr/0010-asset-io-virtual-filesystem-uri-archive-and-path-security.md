@@ -1,21 +1,23 @@
 ---
 status: accepted
 date: 2026-07-09
-updated: 2026-07-13
+updated: 2026-07-17
 authors:
   - Codex
 decision_type: architecture
+depends_on:
+  - docs/adr/0022-per-import-resource-ledger-and-budget-accounting.md
 related:
   - docs/adr/0002-runtime-concurrency-observability.md
   - docs/adr/0004-parser-backend-and-format-coverage-policy.md
   - docs/adr/0007-workspace-crate-graph-feature-flags-msrv-and-ci-gates.md
   - docs/adr/0014-parser-security-unsafe-ffi-and-panic-boundary-policy.md
   - docs/adr/0020-import-lifecycle-and-report-contract.md
-  - docs/adr/0022-per-import-resource-ledger-and-budget-accounting.md
   - docs/adr/0029-format-detection-stable-input-and-failure-contract.md
   - docs/adr/0034-supported-targets-and-portability.md
   - docs/adr/0036-source-identity-provenance-and-metadata.md
   - docs/adr/0037-archive-and-container-security.md
+  - docs/adr/0041-resource-dependency-graph-and-successful-input-manifest.md
 evidence:
   - docs/research/native-filesystem-bound-handle-admission.md
 tracers:
@@ -71,6 +73,11 @@ The canonical rules are:
   import layer slices or allocates from that value
 - the first snapshot or identity-terminal failure is cached only under an authority-qualified
   dependency key `(authority domain, normalized resource identity)`
+- a cached failure atomically freezes its Baozi-owned negative observation as `proof` or `none`; no
+  later lookup may attach, replace, or upgrade proof for that cache entry
+- every admitted negative-proof scheme declares hard canonical-byte, temporary-memory,
+  construction-work, and verification-work caps; ADR 0022 accounting is precharged before proof
+  construction or verification, and excess is session-terminal
 - every logical reference is normalized, role-checked, and authorized before a cache lookup; a cache
   hit never bypasses the current reference's policy or loss decision
 - `exists` and metadata probes are advisory only and never authorize a later open
@@ -124,13 +131,14 @@ sequenceDiagram
 
 ## Identity and Authority
 
-Baozi distinguishes four concepts:
+Baozi distinguishes these concepts:
 
 | Concept | Purpose | Security meaning |
 | --- | --- | --- |
 | Raw reference | Text from a source file or caller | Hostile data; no authority |
 | `AssetPath` | Bounded, normalized logical identity | One component of cache and diagnostic identity; never authority |
 | `AssetScope` | Open root capability or memory namespace | Authority ceiling |
+| Resolver semantic identity | Stable identity of the resolver implementation, namespace semantics, and admitted negative-proof scheme | Reproducibility subject input; never authority by itself |
 | Authority-qualified dependency key | Opaque authority-domain identity plus normalized resource identity | Session-local physical cache key only; not public provenance |
 | Opened resource | Handle plus immutable session snapshot | Object authorized for parsing |
 
@@ -138,6 +146,63 @@ An `AssetUri` can label a source, but URI syntax does not grant access. `file:`,
 namespace, device, or remote URI strings are rejected at the format-facing boundary. A host custom
 resolver may support additional schemes only by returning a bounded identity and an authorized
 opener or immutable bytes. It must not return a path for Baozi to reopen with ambient authority.
+
+An admitted resolver may additionally return one inert negative observation together with a terminal
+authorized failure. ADR 0010 owns resolver semantic identity, proof-scheme admission, verification
+against the exact authorized namespace/reference, and atomic binding of `proof | none` to the first
+cache result. ADR 0041 consumes that inert result when it builds the public resource graph and
+replay-classified manifest; it does not change the authorized cache result or issue a producer/build
+identity. ADR 0020 owns its bounded staging and terminal transport.
+
+### Resolver, Normalizer, Proof, and Cause Semantic Schemas
+
+ADR 0010 owns the registry membership, typed subject fields, equality, and semantic meaning of every
+IO-facing identity that ADR 0041 may consume. ADR 0041 alone owns manifest framing, the
+`semantic-identity-v1` adapter, subject-record field order, and subject digest bytes. This ADR does
+not consume that downstream encoding and therefore does not depend normatively on ADR 0041.
+
+A registry entry is admitted only when one Accepted authority fixes its complete typed subject,
+bounded stable identifiers, version, semantic equality, resource caps, and independent semantic
+vectors. A display name, Rust type name/discriminant, callback address, registration ordinal, or
+caller-chosen digest is never an admitted semantic identity.
+
+V1 has these exact owned schema identities:
+
+| Subject | ADR 0041 consumer-adapter identity | Required ADR 0010 semantic content |
+| --- | --- | --- |
+| Resolver | `baozi.asset-io` / `resolver-semantic` / `1` | resolver contract ID/version, namespace-semantics ID, normalizer identity, canonical semantic-parameter schema/digest, and sorted admitted proof-scheme identities |
+| Reference normalizer | `baozi.asset-io` / `reference-normalizer` / `1` | normalizer contract ID/version, namespace-semantics ID, canonicalization profile ID, and canonical semantic-parameter schema/digest |
+| Negative-proof scheme | `baozi.asset-io` / `negative-proof-scheme` / `1` | scheme ID/version, validity-rule ID, proof-subject kind, proof-payload schema/digest algorithm, and exact byte/memory/construction/verification caps |
+
+The adapter identities in the middle column describe how the downstream manifest consumer maps these
+subjects; they grant no authority back to this ADR. A semantic-parameter schema is itself an ADR 0010
+registry entry with exact typed fields, equality, and semantic vectors; it cannot mean arbitrary
+opaque bytes. Changing any listed semantic field changes the typed subject and therefore changes any
+ADR 0041 adapter digest. A custom resolver or normalizer without an admitted entry may still run
+within its capability boundary, but it cannot emit an admitted negative proof. ADR 0036 and ADR 0041
+consumers classify its public identity as session-opaque without changing the IO decision here.
+
+ADR 0010 also owns the IO/policy membership and normative meaning of unavailable cause IDs. Cause
+class and code are registered as one bounded stable pair. Backend-native error numbers/text are
+mapped synchronously to a registered Baozi pair or to one registered bounded generic pair; they never
+become stable IDs directly. ADR 0041 owns the stricter `canonical-id-v1` admission and transcript
+field for any pair entering a manifest, while ADR 0020 only transports the sealed pair.
+
+The initial v1 IO/policy pairs are exact:
+
+| Class | Code | Meaning |
+| --- | --- | --- |
+| `baozi.reference` | `normalization-rejected` | hostile reference failed the admitted normalizer |
+| `baozi.policy` | `denied` | external-reference policy denied the normalized target |
+| `baozi.io` | `missing` | authorized target is absent under the observed namespace |
+| `baozi.io` | `open-failed` | authorized object-bound open failed for a non-missing reason |
+| `baozi.io` | `read-failed` | same-object bounded read failed |
+| `baozi.io` | `remote-failed` | admitted host resolver reported a remote acquisition failure |
+| `baozi.io` | `backend-failed` | bounded generic mapping for another admitted backend failure |
+
+Adding or changing a pair's meaning requires an Accepted amendment and new vectors. ADR 0041 owns
+the separate manifest-facing acquisition-budget pairs and may derive them only from ADR 0022
+accounting facts interpreted by the import session.
 
 ## Dependency Policy
 
@@ -173,7 +238,39 @@ format crates cannot bypass part of the policy.
 The cache's first failure is terminal only for that authority-qualified dependency identity: it
 prevents a second physical open in that authority domain but does not itself end the import. ADR 0020
 owns disposition. An optional failure accepted by format and loss policy is a non-abort unavailable
-outcome; a required or policy-rejected failure becomes a session-terminal `ScopeAbort`.
+outcome; a required failure or an optional omission rejected by the sealed role/loss contract becomes
+a session-terminal `ScopeAbort`.
+
+A policy denial is semantically frozen only when ADR 0016's compiled policy binds every deciding
+input in sealed typed evidence. ADR 0041, as the downstream replay consumer, alone decides whether
+that evidence matches its registered `frozen-policy-denial` adapter. A decision made by a mutable
+allowlist, host callback, or process state is session-dependent when the sealed role/loss contract
+permits optional continuation; ADR 0041 renders it `ObservedOnly`, and it cannot carry negative proof.
+Cancellation and deadline observations remain `ScopeAbort` and never become an unavailable-success
+outcome.
+
+The first authorized resolution returns one indivisible cache value:
+
+```text
+PhysicalResolution =
+    Snapshot(immutable bytes)
+  | Failure(stable class/code, sanitized identity evidence, NegativeObservation::Proof | None)
+```
+
+`Proof` is admitted only when the resolver's sealed semantic identity and proof scheme validate a
+namespace-snapshot or per-reference assertion for the exact normalized target and exact failure
+class/code. The observation contains no callback, credential, native handle, host path, or executable
+verifier. A mutable filesystem error, timestamp, HTTP status, backend message, or stable error code
+alone is `None`. Cache reuse returns the frozen observation unchanged; a later host claim cannot
+upgrade `None`, swap proof namespaces, or relabel the failure. A fresh session must resolve and verify
+its own observation.
+
+Proof admission is not an unmetered trusted callback. The scheme's fixed hard caps and the session's
+remaining ADR 0022 limits are checked before the resolver or verifier may construct canonical proof
+state. Each bounded construction/verification step spends work, all temporary and retained bytes use
+fallible admitted storage, and any cap, arithmetic, allocation, panic, or contract failure aborts the
+session before publishing or caching a failure. Optionality cannot convert proof-verification failure
+into an unproven successful omission.
 
 ## Native Filesystem Admission
 
@@ -334,6 +431,10 @@ Decision: chosen, subject to the executable acceptance gates in the admission re
 | Object binding | authorization and reads use the same opened object | injected replacement/race tests |
 | Session stability | primary and repeated dependencies reuse their first snapshot/failure | mutable-backend integration tests |
 | Cache authority isolation | equal logical paths in different scopes/resolver namespaces never share bytes or failures, and a denied alias never hits an allowed cache entry | dual-scope, resolver-namespace, and allowed-then-denied tests |
+| Negative observation atomicity | every cached failure freezes exactly one verified proof or none; cache hits and later host claims cannot upgrade it | proof/no-proof, post-cache-upgrade, stale/wrong-target/cross-namespace tests |
+| Negative proof admission | proof construction and verification allocate or execute only after exact byte/memory/work admission and never leave a cached partial result | exact/excess, arithmetic, allocation, panic, and verifier-contract fixtures |
+| Semantic subject registry | every replay-capable resolver, normalizer, proof scheme, and unavailable cause resolves to one registered typed subject and independent semantic vectors; ADR 0041 separately proves adapter bytes | registry mutation, unknown-schema, semantic-vector, and downstream-adapter fixtures |
+| Mutable policy honesty | mutable allowlist/callback/process-state denial is always session-dependent and never replayable | frozen-versus-mutable policy and cancellation/deadline fixtures |
 | Deny ordering | denied references cause zero backend opens | recording-backend tests |
 | Platform path safety | escape, symlink, junction, reparse, namespace, and device cases fail | per-target adversarial suites |
 | Special-file availability | directory, FIFO, socket, and device inputs fail by deadline without a blocking pathname preflight | same-handle type and deadline tests |
@@ -351,8 +452,37 @@ Decision: chosen, subject to the executable acceptance gates in the admission re
 | A hostile FIFO blocks before type validation | Critical | Medium | capability-relative `O_NONBLOCK` open, same-handle regular-file validation, and deadline tests |
 | Legitimate Windows names are rejected | Medium | Medium | conservative documented policy; custom memory backend for exceptional assets |
 | Host resolver returns mutable or overpowered resources | High | Medium | resolver is explicitly trusted; session snapshots first result and bounds diagnostics |
+| Resolver retrofits proof after observing a useful failure | Critical | Medium | atomically cache failure plus proof/none, prohibit mutation/upgrades, and require a fresh session for a new observation |
+| Proof is valid for another namespace, target, or cause | Critical | Medium | verify sealed resolver/scheme identity and exact namespace/reference/class/code before cache publication |
+| Proof verification allocates or loops outside the session budget | Critical | Medium | scheme hard caps, ADR 0022 precharge, fallible temporary storage, bounded steps, and fail-before-cache publication |
+| Two implementations derive different resolver or cause identities | Critical | Medium | one admitted typed-subject registry and semantic vectors here, plus independent ADR 0041 adapter vectors |
+| Mutable host policy is mislabeled deterministic | Critical | Medium | require the registered frozen-policy basis; classify mutable policy/callback/process-state omission as session-dependent |
 | Writable roots change during import | High | Medium | handle-relative open, immutable snapshots, and host guidance to use read-only roots |
 | Capability abstraction is mistaken for process sandboxing | Critical | Medium | threat model states trusted-code boundary and process-isolation requirement |
+
+## Acceptance Criteria
+
+- A first authorized failure atomically stores stable class/code, sanitized target evidence, and
+  exactly one admitted negative proof or `None` under its authority-qualified cache key.
+- Cache hits reproduce the stored proof state byte-for-byte; a later resolver callback cannot attach
+  proof to `None`, replace a proof, or change target/class/code without a fresh session.
+- Stale, forged, wrong-target, wrong-class, cross-namespace, unadmitted-scheme, and executable proof
+  values fail before cache publication and cannot be recovered by optionality.
+- Exact/excess proof canonical-byte, temporary-memory, construction-work, and verification-work tests
+  prove no verifier callback, allocation, partial proof, or cache entry occurs before admission and
+  every mid-verification failure is session-terminal.
+- Two fresh sessions over the same immutable namespace proof produce the same ADR 0041 replay-proof
+  evidence; a namespace/proof change changes that evidence or fails closed.
+- Resolver, normalizer, proof-scheme, and cause-ID registry vectors pin every typed semantic field and
+  stable ID/version. Unknown schema, arbitrary semantic digest, changed parameter semantics, or
+  changed scheme cap cannot retain the same subject; ADR 0041 adapter vectors separately prove it
+  cannot retain the same manifest identity or replay claim.
+- Frozen-policy denial emits complete sealed typed deciding evidence; only ADR 0041 may adapt it into
+  a deterministic replay basis. Mutable allowlist, callback, and process-state denials are
+  session-dependent, and the downstream manifest is `ObservedOnly`; cancellation and deadline always
+  latch `ScopeAbort`.
+- Public resolver/IO evidence exposes no authority domain, capability, credential, native handle,
+  host path, callback, or backend object.
 
 ## Implementation and Verification
 
@@ -364,6 +494,18 @@ Decision: chosen, subject to the executable acceptance gates in the admission re
 - On Windows, construct root and descendant directory handles without `FILE_SHARE_DELETE` and test
   that textual root replacement cannot redirect the retained capability.
 - Make dependency resolution return an authorized resource operation, not a reopenable path.
+- Give admitted resolvers a sealed semantic identity and optional negative-observation result; bind
+  the verified `proof | none` to the first failure in the same cache publication transaction.
+- Give every admitted proof scheme fixed byte/memory/work caps and execute construction and
+  verification through ADR 0022 precharged fallible storage/work permits before cache publication.
+- Implement one sealed resolver/normalizer/proof/cause registry whose entries expose exact typed
+  subjects and independent semantic vectors; ADR 0041 alone adapts admitted entries to its
+  owner/schema/version records, while unknown/custom entries remain operationally usable only without
+  a replay claim.
+- Emit frozen policy-denial evidence only from a compiled policy that binds every deciding input;
+  expose no replay classification here. Map mutable policy, callback, and process-state omission to
+  session-dependent typed evidence and keep cancellation/deadline terminal; ADR 0041 alone adapts
+  those outcomes into replay status.
 - Derive the physical dependency cache key from the selected authority domain and normalized resource
   identity only after authorization; authorize every logical reference before lookup, while keeping
   requiredness and loss disposition outside the physical key.
@@ -403,6 +545,37 @@ Negative:
 - Native filesystem support has a security-sensitive dependency and target-specific tests.
 - Some path names and exotic filesystems are intentionally rejected.
 - Host-provided in-process resolvers remain part of the trusted computing base.
+
+## Amendment History
+
+### 2026-07-17: Freeze IO semantic schema ownership and mutable-policy replay
+
+- Affected: `Identity and Authority`, `Dependency Policy`, `Success Metrics`,
+  `Risks and Mitigations`, `Acceptance Criteria`, and `Implementation and Verification`.
+- Previous: resolver, normalizer, proof-scheme, and cause identities were described as stable without
+  one versioned canonical registry, and mutable policy denial had no exhaustive replay class.
+- New: ADR 0010 owns exact admitted semantic-schema membership and cause meaning; ADR 0041 owns their
+  framing. Mutable policy/callback/process-state omission is session-dependent, while cancellation and
+  deadline remain terminal.
+- Impact: independent implementations cannot invent equivalent-looking semantic digests or promote
+  ambient policy results to replayable evidence.
+- Review: 2026-07-17 canonical input-manifest and replay-classification review.
+- Rationale: stable labels are not stable semantics without one owner, version, encoder, and vector.
+
+### 2026-07-16: Own atomic resolver negative observations
+
+- Affected: `Decision`, `Identity and Authority`, `Dependency Policy`, `Success Metrics`,
+  `Risks and Mitigations`, `Acceptance Criteria`, and `Implementation and Verification`.
+- Previous: the physical cache froze snapshots/failures but did not define who could attach a
+  cross-session negative observation or whether it could be upgraded later.
+- New: ADR 0010 owns resolver semantic identity, proof-scheme validation and hard resource caps, and
+  atomic caching of the first failure with `proof | none`; ADR 0041 alone canonicalizes its public
+  replay evidence.
+- Impact: same-session cache stability can no longer be mistaken for replay evidence, and post-cache
+  proof upgrades are forbidden.
+- Review: 2026-07-16 negative-input replay and resource-graph architecture review.
+- Rationale: proof creation belongs at the authorized physical resolution boundary, while public
+  reproducibility semantics remain with the input-closure authority.
 
 ## Sources
 

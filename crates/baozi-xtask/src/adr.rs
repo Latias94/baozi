@@ -9,7 +9,7 @@ use std::process::{Command, Stdio};
 
 const ADR_DIRECTORY: &str = "docs/adr";
 const INDEX_FILE: &str = "docs/adr/README.md";
-const DEFERRED_TRACER_ADRS: [u16; 2] = [37, 38];
+const DEFERRED_TRACER_ADRS: [u16; 3] = [37, 38, 43];
 
 /// The result of checking every ADR governance invariant.
 #[derive(Debug, Default)]
@@ -1521,7 +1521,7 @@ fn check_authority_graph(
             violations.push(violation(
                 "ADR010",
                 &adr.path,
-                "ADR 0037 and ADR 0038 must retain promotion_requires: implementation_tracer",
+                "ADRs 0037, 0038, and 0043 must retain promotion_requires: implementation_tracer",
             ));
         }
         let tracer_required = DEFERRED_TRACER_ADRS.contains(&adr.id)
@@ -3633,6 +3633,31 @@ mod tests {
     }
 
     #[test]
+    fn rejects_0043_accepted_without_required_tracer() {
+        let promoted = proposed_adr_with_identity(43, "Producer Qualification")
+            .replace("status: proposed", "status: accepted");
+
+        assert_has_violation(
+            &check_0043(&promoted, "Accepted"),
+            "ADR010",
+            "Accepted promotion requires at least one repository-local implementation tracer",
+        );
+    }
+
+    #[test]
+    fn rejects_0043_accepted_after_removing_promotion_requirement() {
+        let promoted_without_gate = proposed_adr_with_identity(43, "Producer Qualification")
+            .replace("status: proposed", "status: accepted")
+            .replace("promotion_requires:\n  - implementation_tracer\n", "");
+
+        assert_has_violation(
+            &check_0043(&promoted_without_gate, "Accepted"),
+            "ADR010",
+            "ADRs 0037, 0038, and 0043 must retain promotion_requires: implementation_tracer",
+        );
+    }
+
+    #[test]
     fn rejects_duplicate_index_entry() {
         let repository = TestRepository::new();
         repository.write_fixture();
@@ -4028,6 +4053,34 @@ mod tests {
             "# ADR 0003: Deferred Boundary",
             &format!("# ADR {id:04}: {title}"),
         )
+    }
+
+    fn check_0043(content: &str, status: &str) -> CheckReport {
+        let repository = TestRepository::new();
+        repository.write_fixture();
+        repository.write("docs/adr/0043-producer-qualification.md", content);
+        repository.write_index(&[
+            index_row(1, "0001-old-decision.md", "Old Decision", "Superseded"),
+            index_row(
+                2,
+                "0002-canonical-decision.md",
+                "Canonical Decision",
+                "Accepted",
+            ),
+            index_row(
+                3,
+                "0003-deferred-boundary.md",
+                "Deferred Boundary",
+                "Proposed",
+            ),
+            index_row(
+                43,
+                "0043-producer-qualification.md",
+                "Producer Qualification",
+                status,
+            ),
+        ]);
+        check_repository(&repository.root)
     }
 
     fn accepted_deferred_adr_with_identity(id: u16, title: &str, tracer: &str) -> String {
