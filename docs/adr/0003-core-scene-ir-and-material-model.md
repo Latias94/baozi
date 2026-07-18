@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-07-08
-updated: 2026-07-12
+updated: 2026-07-19
 authors:
   - Codex
 decision_type: architecture
@@ -17,6 +17,7 @@ related:
   - docs/adr/0036-source-identity-provenance-and-metadata.md
   - docs/adr/0039-source-document-scene-selection-and-import-closure.md
   - docs/adr/0040-camera-and-light-canonical-semantics.md
+  - docs/adr/0042-shared-canonical-storage-accounts-and-generation-lineage.md
 ---
 
 # ADR 0003: Canonical Scene IR Ownership and State Model
@@ -41,12 +42,22 @@ converted before crossing the format crate boundary. The canonical lifecycle has
 capabilities:
 
 - `SceneBuilder` owns an unvalidated draft and is the construction API for importers and trusted
-  producers.
+  producers. Finishing it produces only a construction-branded directory descriptor, not a public
+  generation.
 - `ValidatedScene` owns a scene generation plus an unforgeable validation proof. The core central
   validator is the only proof constructor. Import, postprocess, and downstream code may invoke that
   validator, but cannot construct a proof or `ValidatedScene` directly or bypass full validation.
 - `SceneEdit` isolates mutations from an existing `ValidatedScene`. Commit validates and returns a
-  new generation; failure or cancellation publishes no partial state.
+  new generation; failure or cancellation publishes no partial state or generation.
+
+Opening `SceneEdit` is a derived-operation start against the input Scene's inherited
+`PhysicalStorageAccount`. It performs ADR 0042's shared poison/counter admission before edit work,
+clone/share/refcount access, or replacement allocation. Poison-first returns typed
+`AccountPoisoned` and leaves the input untouched. If edit start or a retained admission linearizes
+first and another account clone later latches poison, its charge remains coupled, all later
+retain/share attempts fail, and final validation/preparation returns
+`FinalizationContainmentError` before any exact prepared wrapper, generation, proof, remap, or
+handoff exists. No core edit API can reset, ignore, or replace the inherited account latch.
 
 `Scene` collections are not publicly mutable. Read-only accessors and typed iterators provide the
 common inspect workflow. `ImportReport::scene()` exposes a read view, so callers that only import and
@@ -56,11 +67,27 @@ inspect never handle proof internals. A caller opts into `SceneEdit` only when c
 stateDiagram-v2
     [*] --> Building: SceneBuilder
     Building --> Draft: finish
-    Draft --> Validated: central validator
-    Draft --> [*]: reject
+    Draft --> CheckedDraft: central validation
+    Draft --> [*]: validation failure; no generation
+    CheckedDraft --> Reserved: reserve one output generation
+    CheckedDraft --> PreparedRichFailure: reservation rejection/exhaustion; consume no nonce
+    Reserved --> PreparedSuccess: freeze and classify exact success
+    Reserved --> PreparedRichFailure: later downgrade; burn gap
+    Reserved --> PreparedMinimalFallback: rich-failure preparation cannot complete or caught unwind cleans up; burn gap
+    Reserved --> ContainmentFatal: release proof unavailable; burn gap and poison coupled ownership
+    PreparedSuccess --> Validated: infallible reserved-token handoff
+    PreparedSuccess --> [*]: drop; burn private gap
+    PreparedRichFailure --> [*]: pure failure handoff; no generation
+    PreparedMinimalFallback --> [*]: pure fallback handoff; no generation
+    ContainmentFatal --> [*]: typed fatal containment error; no generation or fallback claim
     Validated --> Editing: begin edit
-    Editing --> ValidatedNext: commit and validate
-    Editing --> Validated: cancel or fail
+    Editing --> CheckedNext: validate candidate
+    CheckedNext --> ReservedNext: reserve exactly one final generation
+    CheckedNext --> Validated: validation or reservation failure; no candidate generation
+    ReservedNext --> PreparedSuccessNext: freeze and classify exact success
+    ReservedNext --> Validated: later downgrade; burn gap and retain input
+    PreparedSuccessNext --> ValidatedNext: infallible reserved-token handoff
+    PreparedSuccessNext --> Validated: drop; burn private gap and retain input
     ValidatedNext --> Editing: begin another edit
 ```
 
@@ -74,6 +101,12 @@ The aggregate owns these collections:
 | Primitive | topology, indices, vertex/corner/face attributes, material, derived primitive bounds | material ID |
 | Mesh instance | owner node, logical mesh, optional skin, morph overrides, instance attributes | node, mesh, and skin IDs |
 | Material | typed common fields, texture bindings, bounded extensions | texture IDs |
+
+Canonical presence is semantic rather than inferred from storage allocation. Core record/header fields
+carry an explicit presence discriminator plus semantic element count wherever `Absent` and
+`PresentEmpty` differ. A zero count therefore does not erase source meaning, while ADR 0042 may forbid
+a physical zero-length payload block and represent present-empty content entirely in its owning
+record/header.
 
 The node hierarchy is one rooted tree. A node canonically stores its ordered child IDs; parent lookup
 is a derived index/view rather than a reciprocal stored field. The root has no derived parent, every
@@ -95,12 +128,50 @@ format contract has explicitly lowered it to TRS with provenance and authorized 
 ADR 0008 defines matrix/TRS numeric semantics, and ADR 0031 defines the base-pose and channel-overlay
 rules. This distinction is part of the canonical aggregate rather than a glTF-only adapter detail.
 
-Every published scene owns an opaque `SceneGenerationId` that is collision-free within the runtime
-generation domain. Builder finish and every successful edit commit expose a fresh token; ADR 0032
-also assigns never-reused tokens to private step states without granting them a proof. Two edits
-branched from the same input therefore receive distinct tokens rather than both being identified
-only as `G + 1`; equal scene content does not imply equal generation identity. Generation tokens are
-runtime capabilities, not persistence keys or source identities.
+Every published scene owns an opaque `SceneGenerationId` that is collision-free and never reused
+within the runtime generation domain. Core's private `SceneGenerationId::allocate()` is fallible and
+returns a linear `ReservedSceneGeneration` rather than a public ID, so nonce acquisition cannot occur
+in the final ownership handoff. The operation finalizer classifies the terminal result completely
+during preparation; it never returns one opaque success-capable prepared value whose outcome is
+decided only during handoff. The reservation typestate obeys this lifecycle:
+
+1. after complete central validation, publication preparation attempts checked generation
+   reservation as its final fallible identity acquisition before attribution freeze; exhaustion or
+   collision rejection leaves the generation domain unchanged;
+2. successful reservation consumes a never-reused nonce but does not construct, expose, or publish a
+   `SceneGenerationId`;
+3. preparation finishes the final control downgrade and returns exactly one typed terminal variant:
+   `PreparedSuccess`, `PreparedRichFailure`, or `PreparedMinimalFallback`; only the exact
+   `PreparedSuccess` structurally owns the reservation together with the validated canonical
+   aggregate and private frozen attribution, while both failure wrappers structurally contain no
+   reservation; and
+4. `PreparedSuccess` handoff consumes the reservation by ownership conversion into the public
+   `SceneGenerationId`, constructs the only new `ValidatedScene` proof, and performs no allocation,
+   lock, checked counter transition, retry, or other fallible state change.
+
+Reservation rejection or exhaustion consumes no nonce and is classified as an ordinary rich failure
+with preserved evidence and zero canonical output. It does not by itself require the minimal
+fallback. If appending, validating, or preparing that downgraded rich failure then fails, or an
+invalid root or equivalent non-unwind integrity fault prevents rich preparation, the finalizer selects
+`PreparedMinimalFallback`. A caught single builder unwind selects that fallback only after complete
+storage/dependency cleanup and zero operation-live attribution are verified. If the process survives
+but release cannot be proved, the finalizer instead keeps payload, lease, and operation attribution
+coupled, atomically latches the shared physical account and marks the operation/extension path
+poisoned, then returns `FinalizationContainmentError`; it does not publish a
+fallback or claim zero leak. Double panic, `panic = "abort"`, process exit, and OOM require process
+isolation. Once reservation has succeeded, any later
+publication-preparation failure, cancellation, caught unwind, or prepared-success drop burns that invisible
+nonce gap. The nonce is never returned to the domain and never reused, so no failed path publishes a
+generation or proof. The two exact failure wrappers contain no reservation by the time they leave
+preparation.
+
+`SceneBuilder::finish` exposes no token. ADR 0032 gives immutable edit step states only report-scoped
+typed ordinals/paths, never generation reservations or public `SceneGenerationId` values. Each
+`Changed` edit reserves and publishes exactly one generation for its final `ValidatedScene`; only the
+composed input-to-final remap is generation-qualified. Two edits branched from the same input
+therefore receive distinct final tokens rather than both being identified only as `G + 1`; equal
+scene content does not imply equal generation identity. Generation tokens are runtime capabilities,
+not persistence keys, step-state identities, or source identities.
 
 Scene-wide dense IDs are typed pairs of `(SceneGenerationId, dense_index)`. Primitive and morph
 target handles are owner-qualified triples of
@@ -147,6 +218,8 @@ postprocess one atomic mutation boundary. Chosen.
 - `SceneBuilder::finish` produces only an owned `SceneDraft`; every publication path passes that
   draft or an edit candidate through the central validator, even when a producer performed local
   checks.
+- Successful preparation may consume an unpublished generation nonce; aborting after reservation
+  burns a never-reused gap rather than weakening the handoff or publishing partial identity.
 - Editors must retain or consume explicit remaps when they keep IDs across generations.
 
 ## Risks and Mitigations
@@ -157,12 +230,20 @@ postprocess one atomic mutation boundary. Chosen.
 | Edit transactions duplicate large data | High | Share unchanged storage and allocate only affected replacements; peak-live accounting remains mandatory. |
 | Internal code bypasses proof construction | High | Keep proof constructors private, expose only the central validating function as the legal minting path, and add compile-fail/public-API tests. |
 | Validator and IR drift | High | Every new field lands with invariant tests and validator coverage in the same change. |
+| Generation allocation fails after publication evidence is frozen | Critical | Reserve `ReservedSceneGeneration` as the final fallible pre-freeze identity acquisition; rejection/exhaustion becomes a rich failure with no nonce, later freeze/preparation failure may burn a successful reservation, and handoff only consumes exact `PreparedSuccess`. |
+| Failed preparation reuses or exposes a reserved nonce | Critical | The linear private reservation burns on drop, has no public conversion except prepared handoff, and never returns a nonce to the allocator. |
+| A success-capable prepared wrapper defers terminal classification to handoff | Critical | Preparation completes control downgrade and returns exact success, rich-failure, or minimal-fallback wrappers; only exact success can contain `ReservedSceneGeneration`. |
+| A caught unwind is reported as a clean fallback without deallocation proof | Critical | Permit fallback only after verified cleanup; otherwise keep storage/lease/attribution coupled, latch the shared physical account, return typed fatal containment, and rely on process isolation for abort/double-panic/exit/OOM. |
+| A derived edit starts or commits through a poisoned account clone | Critical | begin-edit and final publication eligibility linearize against ADR 0042's one shared latch; poison-first has zero work/refcount/allocation effects, start/retain-admission-first retains charge and fails finalization before handoff, and no reset/reuse API exists |
 
 ## Success Metrics
 
 | Metric | Target | Measurement |
 | --- | --- | --- |
 | Generation isolation | Stale, foreign-owner, and sibling-branch handles are rejected before lookup | exact/stale/branch API tests |
+| Generation publication | exhaustion becomes an ordinary rich failure before attribution freeze and consumes no nonce; successful handoff publishes exactly one reserved never-reused token; failed/prepared-drop paths publish none | exhaustion, cancellation, caught-unwind, and prepared-drop probes |
+| Terminal classification | only exact `PreparedSuccess` can own one generation reservation; exact rich-failure/minimal-fallback wrappers structurally cannot; fatal containment is not a prepared publication | API-shape, downgrade, single-unwind, uncertain-cleanup, and compile-fail probes |
+| Poisoned lineage | every clone of one Scene account rejects new derived edits after poison; a pre-admitted edit cannot publish once poison linearizes before final eligibility | two-order barriers, input digest/proof/refcount/allocator probes, account snapshots, and no-bypass API scans |
 | Validation complexity | Complete validation visits each graph edge, entity, reference, and payload cell at most a constant number of times | deterministic validator work counters |
 | Publication integrity | Only the central validator can mint proof; import finalization and edit commit may publish only its successful result | compile-fail and rollback tests |
 
@@ -170,13 +251,93 @@ postprocess one atomic mutation boundary. Chosen.
 
 - External code cannot mutate a validated collection or construct `ValidatedScene` directly; it can
   obtain one only by passing a draft through the central validator.
+- `SceneBuilder::finish` and a checked draft expose no generation; preparation reserves a private
+  never-reused nonce before attribution freeze, and only infallible handoff converts it into the
+  `SceneGenerationId` carried by the new `ValidatedScene`.
+- Exact/exhausted generation-domain tests prove reservation failure consumes no nonce and precedes
+  attribution freeze, preserves ordinary rich-failure evidence, and records zero canonical output.
+  Only a subsequent failure to append, validate, or prepare that rich failure, a root integrity fault,
+  or a caught single builder unwind with verified cleanup selects the minimal fallback. Uncertain
+  release instead returns typed fatal containment with coupled poisoned ownership and no fallback or
+  zero-leak claim; abort/double-panic/exit/OOM fixtures are process-isolated. Separate later-preparation-failure,
+  cancellation, caught-unwind, and prepared-drop tests prove any path after successful reservation may burn
+  an invisible gap, while no failed path publishes/reuses an ID or constructs a proof.
+- Preparation returns exact `PreparedSuccess`, `PreparedRichFailure`, or
+  `PreparedMinimalFallback` terminal wrappers. Only exact success can bind one
+  `ReservedSceneGeneration`; both failure wrappers structurally contain none, and each exact handoff
+  is a pure consuming split rather than terminal classification.
 - Every importer success and postprocess success contains a valid proof from the central validator.
 - Root, reachability, unique derived parentage, duplicate child edges, and every dense reference are
   centrally validated.
 - Failed or cancelled edits preserve the input scene digest and generation.
+- Poisoned-account edit tests force both linearization orders. Poison-first `SceneEdit` start returns
+  typed `AccountPoisoned` with zero work/counter/share/refcount/allocator delta. Start/retain-first
+  keeps its charge, rejects later sharing/allocation, and final preparation returns
+  `FinalizationContainmentError` with no exact wrapper, generation, proof, remap, or handoff. Sibling
+  account/Scene clones expose the same poison/count/evidence, and compile-fail/source gates find no
+  reset, ignore, reuse, or account-replacement escape.
 - Stale dense IDs require an explicit remap before use with a new generation.
 - Primitive and morph-target handles from another logical mesh fail even when the local index exists.
-- Sibling edits from one input publish different generation IDs and distinct remap endpoints.
+- Every `Changed` edit publishes exactly one final generation. Ordered per-step remaps use only the
+  owning report's typed step-state ordinals/paths, while the composed input-to-final remap is the sole
+  generation-qualified edit relation; sibling edits publish distinct final endpoints.
 - A node view distinguishes authored matrix from authored TRS, while its derived local matrix follows
   ADR 0008 without changing the preserved source representation.
+- `Absent` and `PresentEmpty` survive validation and semantic digesting as distinct values without a
+  physical zero-length payload allocation.
 - Public API tests prove the import-inspect path does not require builder, proof, or ledger internals.
+
+## Amendment History
+
+### 2026-07-19: Close derived-edit poison and unwind containment
+
+- Affected headings: canonical lifecycle, lifecycle diagram, generation identity, `Risks and Mitigations`,
+  `Success Metrics`, and `Acceptance Criteria`.
+- Previous rule: an “unrecoverable builder panic” selected minimal fallback without distinguishing
+  verified cleanup from an uncertain dependency/storage release, and `SceneEdit` did not define how
+  derived-operation start or final commit behaves when another account clone latches poison.
+- New rule: only a caught single unwind followed by proved cleanup, correct lease ordering, and zero
+  operation-live attribution may prepare minimal fallback and claim no leak. A surviving process with
+  uncertain release keeps payload/lease/attribution coupled, latches the shared physical account and
+  marks the operation/extension path poisoned, and returns
+  typed `FinalizationContainmentError` without a fallback or refund. Abort, double panic, process exit,
+  and OOM require process isolation. `SceneEdit` start and final publication eligibility linearize
+  against ADR 0042's shared account latch: poison-first rejects before edit/refcount/allocation work;
+  start/retain-admission-first keeps charge but cannot prepare or hand off after poison. All clones share the
+  latch/count/evidence and no reset/account-replacement escape exists. None of these paths publishes or
+  reuses a generation nonce.
+- Compatibility impact: the pre-release edit-start/finalization error domains gain typed
+  `AccountPoisoned` and fatal containment results;
+  no stable Scene or wire compatibility is promised.
+- Required review: caught-unwind cleanup/drop probes, uncertain-extraction poisoning and no-refund
+  tests, two-order derived-start/retain/finalization barriers, clone/reuse/no-bypass and zero-side-
+  effect probes, process-isolated abort/double-panic/exit/OOM fixtures, generation never-reuse, and ADR checks.
+- Rationale: a minimal report is truthful only when Baozi can prove what was deallocated; otherwise
+  conservative retained accounting is safer than an optimistic zero-leak result. A Scene cannot
+  authorize new derived work through an account whose physical lifetime is no longer trustworthy.
+
+### 2026-07-18: Classify terminal state before handoff and reserve one published generation
+
+- Affected headings: `Decision`, lifecycle diagram, canonical presence semantics, generation identity,
+  `Consequences`, `Risks and Mitigations`, `Success Metrics`, and `Acceptance Criteria`.
+- Previous rule: builder/edit publication was described as assigning or minting a fresh
+  `SceneGenerationId` during validation or commit without representing that nonce allocation can fail
+  or explaining prepared-drop behavior.
+- New rule: core privately reserves one never-reused nonce as the final fallible pre-freeze identity
+  acquisition for a provisional success. Preparation completes terminal classification as exact
+  success, rich failure, or minimal fallback before handoff. Reservation rejection/exhaustion
+  consumes no nonce and becomes an ordinary rich failure; only failure to prepare that downgraded
+  evidence or an unrecoverable builder/root integrity fault selects minimal fallback. Only exact
+  `PreparedSuccess` owns `ReservedSceneGeneration`; failure wrappers structurally contain none.
+  Handoff is a pure consuming split that constructs `ValidatedScene` only for exact success. Edit step
+  states use report-scoped typed ordinals/paths and every changed edit publishes exactly one final
+  generation; only its composed input-to-final remap is generation-qualified. Canonical headers also
+  distinguish `Absent` from `PresentEmpty` without zero-length physical blocks.
+- Compatibility impact: pre-release builder, validator, and edit typestates change; no public caller
+  can observe or construct the reservation, and no previously stable generation representation or
+  wire exists.
+- Required review: generation exhaustion/concurrency/never-reuse review, cancellation/unwind/prepared-
+  drop probes, proof-construction compile-fail gates, import/edit handoff integration, empty-semantics
+  digest tests, and ADR checking.
+- Rationale: a fallible allocator cannot remain after the pure ownership boundary; reservation makes
+  failure explicit without weakening collision freedom, never-reuse, or proof atomicity.
