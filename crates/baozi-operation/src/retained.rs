@@ -3,9 +3,9 @@
 use crate::control::discard_untrusted_panic_payload;
 use crate::coordinator::{FinalProgress, OperationCoordinator};
 use crate::ledger::{
-    AttributionBatchCreateError, AttributionReservationBatch, CanonicalOutput,
-    FallbackBatchBaseline, Ledger, LedgerCause, LedgerLimits, LedgerSnapshot, OutputCommitment,
-    PublicationDestination, PublishedOutcomeEvidence,
+    AttributionBatchCreateError, AttributionBatchPlan, AttributionReservationBatch,
+    CanonicalOutput, FallbackBatchBaseline, Ledger, LedgerCause, LedgerLimits, LedgerSnapshot,
+    OutputCommitment, PublicationDestination, PublishedOutcomeEvidence,
 };
 use crate::{
     CapacityPlan, ControlCause, OperationControl, OperationOwner, ProgressPhase, ProgressUnit,
@@ -26,7 +26,7 @@ use triomphe::{Arc, UniqueArc};
 ///
 /// Input-proportional storage belongs in separately planned backing allocations and contributes to
 /// [`RetainedAllocationPlan`]. This ceiling bounds the final-owner extraction stack move.
-pub const MAX_RETAINED_INLINE_BYTES: usize = 4 * 1024;
+pub(crate) const MAX_RETAINED_INLINE_BYTES: usize = 4 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct AdmissionCharge {
@@ -719,6 +719,36 @@ struct AccountState {
 ///
 /// Account identity is observable only through same-account predicates. It is not a semantic Scene
 /// value and is intentionally absent from equality, ordering, serialization, and digest APIs.
+/// Generic retained construction authority remains crate-private until a concrete canonical store
+/// owns that seam:
+///
+/// ```compile_fail,E0432
+/// use baozi_operation::RetainedOperation;
+/// ```
+///
+/// ```compile_fail,E0432
+/// use baozi_operation::RetainedAllocationPlan;
+/// ```
+///
+/// ```compile_fail,E0432
+/// use baozi_operation::BlockEmplacer;
+/// ```
+///
+/// ```compile_fail,E0432
+/// use baozi_operation::RetainedPart;
+/// ```
+///
+/// ```compile_fail,E0432
+/// use baozi_operation::RetainedClosureValidationError;
+/// ```
+///
+/// ```compile_fail,E0432
+/// use baozi_operation::PublishedRetainedAggregate;
+/// ```
+///
+/// ```compile_fail,E0432
+/// use baozi_operation::RetainedSuccessClosureProof;
+/// ```
 pub struct PhysicalStorageAccount {
     inner: FinalOwnerAllocation<AccountState, AdmissionLease<Arc<FactoryState>>>,
 }
@@ -801,6 +831,18 @@ impl PhysicalStorageAccount {
         T: Send + Sync + 'static,
     {
         let charge = self.checked_retained_charge::<T>(plan)?;
+        self.try_retain_with_admitted_charge(owner, charge, build)
+    }
+
+    fn try_retain_with_admitted_charge<T>(
+        &self,
+        owner: PhysicalStorageAccount,
+        charge: AdmissionCharge,
+        build: impl FnOnce() -> Result<T, RetainedBuildFailureCode>,
+    ) -> Result<RetainedAllocation<T>, RetainedAllocationError>
+    where
+        T: Send + Sync + 'static,
+    {
         try_admit(
             &owner.inner.value().counters,
             owner.limits().counter_limits(),
@@ -924,7 +966,7 @@ impl<T, L> FinalOwnerAllocation<T, L> {
 /// guard must derive it from qualified capacity plans rather than treating caller estimates as
 /// observed allocator evidence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct RetainedAllocationPlan {
+pub(crate) struct RetainedAllocationPlan {
     nested_bytes: u64,
     nested_allocations: u64,
 }
@@ -950,7 +992,7 @@ impl RetainedAllocationPlan {
 /// Invalid nested retained-allocation evidence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
-pub enum RetainedAllocationPlanError {
+pub(crate) enum RetainedAllocationPlanError {
     MismatchedNestedFootprint { bytes: u64, allocations: u64 },
 }
 
@@ -976,18 +1018,9 @@ impl std::error::Error for RetainedAllocationPlanError {}
 /// value itself; it cannot prevent side effects, so trusted domain adapters must uphold the rest of
 /// the contract. A panic supplies no such proof and always retains physical and operation charges
 /// fail-closed. Domain layers reconstruct their typed error after this operation seam returns.
-///
-/// ```compile_fail
-/// use baozi_operation::RetainedBuildFailureCode;
-/// use std::sync::Mutex;
-///
-/// let storage: &'static Mutex<Option<Vec<u8>>> =
-///     Box::leak(Box::new(Mutex::new(Some(vec![0; 64]))));
-/// let code: RetainedBuildFailureCode = storage;
-/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(transparent)]
-pub struct RetainedBuildFailureCode(u32);
+pub(crate) struct RetainedBuildFailureCode(u32);
 
 impl RetainedBuildFailureCode {
     pub const fn new(code: u32) -> Self {
@@ -1011,7 +1044,23 @@ struct RetainedSetId(u64);
 
 static NEXT_RETAINED_SET_ID: AtomicU64 = AtomicU64::new(1);
 
+#[cfg(test)]
+std::thread_local! {
+    static RETAINED_SET_ID_REQUESTS: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
+}
+
+#[cfg(test)]
+fn test_retained_set_id_requests() -> usize {
+    RETAINED_SET_ID_REQUESTS.with(std::cell::Cell::get)
+}
+
 fn try_next_retained_set_id() -> Option<RetainedSetId> {
+    #[cfg(test)]
+    RETAINED_SET_ID_REQUESTS.with(|requests| {
+        requests.set(requests.get().saturating_add(1));
+    });
     NEXT_RETAINED_SET_ID
         .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
             current.checked_add(1)
@@ -1066,6 +1115,16 @@ impl<T> RetainedAllocation<T> {
 
     fn value_mut_during_construction(&mut self) -> Option<&mut T> {
         Some(&mut self.inner.value_mut()?.value)
+    }
+
+    /// Shares an already admitted retained allocation after the owning operation has charged all
+    /// clone and retained-handle work. The new handle deliberately starts without publication
+    /// membership so only the destination table can brand it.
+    fn share_after_admitted_work(&self) -> Self {
+        Self {
+            inner: self.inner.share(),
+            membership: None,
+        }
     }
 
     #[cfg(test)]
@@ -1140,7 +1199,7 @@ fn drop_retained_allocation_before_attribution<T>(
 /// Failure before a retained allocation becomes observable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
-pub enum RetainedAllocationError {
+pub(crate) enum RetainedAllocationError {
     InlinePayloadTooLarge { bytes: usize, limit: usize },
     AccountingOverflow,
     ByteLimitExceeded { requested: u64, limit: u64 },
@@ -1247,7 +1306,7 @@ fn map_retained_final_owner_error(
     reason = "crate-private until the U4 canonical consumers switch atomically"
 )]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct RetainedBatchLimits {
+pub(crate) struct RetainedBatchLimits {
     attribution_slots: usize,
     commitment_slots: usize,
 }
@@ -1279,7 +1338,7 @@ impl RetainedBatchLimits {
     reason = "crate-private until the U4 canonical consumers switch atomically"
 )]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct RetainedWriterPlan<P, D> {
+pub(crate) struct RetainedWriterPlan<P, D> {
     phase: P,
     capacity_dimension: D,
     attribution_dimension: D,
@@ -1312,7 +1371,7 @@ impl<P: Copy, D: Copy> RetainedWriterPlan<P, D> {
     reason = "crate-private until the U4 canonical consumers switch atomically"
 )]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct RetainedHandleSharePlan<D> {
+pub(crate) struct RetainedHandleSharePlan<D> {
     clone_dimension: D,
     retained_handle_dimension: D,
 }
@@ -1343,7 +1402,7 @@ impl<D: Copy> RetainedHandleSharePlan<D> {
     reason = "crate-private until the U4 canonical consumers switch atomically"
 )]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct RetainedOperationStartPlan<P, D> {
+pub(crate) struct RetainedOperationStartPlan<P, D> {
     terminal_writer: RetainedWriterPlan<P, D>,
     terminal_account_share_work: RetainedHandleSharePlan<D>,
     fallback_plan: RetainedAllocationPlan,
@@ -1397,7 +1456,7 @@ impl<P: Copy, D: Copy> RetainedOperationStartPlan<P, D> {
 )]
 #[derive(Debug)]
 #[non_exhaustive]
-pub enum RetainedWriterError<D> {
+pub(crate) enum RetainedWriterError<D> {
     /// A fixed batch capacity could not be represented.
     BatchCapacity,
     /// Allocation of fixed batch storage failed.
@@ -1467,7 +1526,7 @@ impl<D: fmt::Debug + 'static> std::error::Error for RetainedWriterError<D> {
 )]
 #[derive(Debug)]
 #[non_exhaustive]
-pub enum RetainedOperationStartError<D> {
+pub(crate) enum RetainedOperationStartError<D> {
     /// Terminal writer limits cannot contain the mandatory fallback and evidence owners.
     InvalidTerminalLimits,
     /// A retained writer action failed during operation startup.
@@ -1526,10 +1585,22 @@ where
     P: Copy + Ord,
     D: Copy + Ord + fmt::Debug + Send + Sync + 'static,
 {
+    try_admit_retained_share_work(ledger, work)?;
+    Ok(account.share_after_admission())
+}
+
+fn try_admit_retained_share_work<O, P, D>(
+    ledger: &Ledger<O, P, D>,
+    work: RetainedHandleSharePlan<D>,
+) -> Result<(), RetainedWriterError<D>>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord + fmt::Debug + Send + Sync + 'static,
+{
     ledger
         .charge_observed_batch(&work.charges())
-        .map_err(RetainedWriterError::Ledger)?;
-    Ok(account.share_after_admission())
+        .map_err(RetainedWriterError::Ledger)
 }
 
 #[allow(
@@ -1600,7 +1671,7 @@ impl<D: Copy + Ord> PublicationEvidenceCells<D> {
     reason = "crate-private until the U4 canonical consumers switch atomically"
 )]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PublishedDimensionSnapshot<D> {
+pub(crate) struct PublishedDimensionSnapshot<D> {
     dimension: D,
     attempted: u64,
     consumed: u64,
@@ -1715,7 +1786,7 @@ where
     dead_code,
     reason = "crate-private until the U4 canonical consumers switch atomically"
 )]
-pub struct RetainedPart<T, Destination, O, P, D>
+struct RetainedPart<T, Destination, O, P, D>
 where
     O: OperationOwner,
     P: Copy + Ord,
@@ -1995,17 +2066,25 @@ where
 /// `total_blocks` is the exact preallocated slot capacity, not a required final length. The table
 /// root consumes one attribution slot in addition to every allocated member.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct RetainedBlockTablePlan<P, D> {
+pub(crate) struct RetainedBlockTablePlan<P, D> {
     writer: RetainedWriterPlan<P, D>,
     total_blocks: usize,
+    max_new_blocks: usize,
 }
 
 impl<P: Copy, D: Copy> RetainedBlockTablePlan<P, D> {
-    /// Creates a fixed table plan. Invalid relationships are rejected before opening the assembly.
-    pub const fn new(writer: RetainedWriterPlan<P, D>, total_blocks: usize) -> Self {
+    /// Creates a fixed table plan. `total_blocks` bounds every member while `max_new_blocks` bounds
+    /// only allocations attributed to this operation; inherited members consume table capacity but
+    /// retain their original physical charge and receive no new allocation attribution.
+    pub const fn new(
+        writer: RetainedWriterPlan<P, D>,
+        total_blocks: usize,
+        max_new_blocks: usize,
+    ) -> Self {
         Self {
             writer,
             total_blocks,
+            max_new_blocks,
         }
     }
 }
@@ -2016,7 +2095,7 @@ impl<P: Copy, D: Copy> RetainedBlockTablePlan<P, D> {
 /// atomically downgrade it to rich failure or minimal fallback. The outcome-evidence root must be
 /// outcome-neutral so the same evidence graph remains valid for success and failure.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct RetainedPublicationPlan<P, D> {
+pub(crate) struct RetainedPublicationPlan<P, D> {
     canonical: Option<RetainedBlockTablePlan<P, D>>,
     outcome_evidence: RetainedBlockTablePlan<P, D>,
 }
@@ -2089,32 +2168,8 @@ struct RetainedSlotIdentity {
 ///
 /// A slot is valid only for the retained set that issued it. Sharing the same physical block into a
 /// later generation issues a fresh slot; the old slot is rejected by the new aggregate.
-///
-/// ```compile_fail
-/// use baozi_operation::CanonicalRetainedSlot;
-/// use std::marker::PhantomData;
-///
-/// struct Block;
-/// struct Tag;
-/// let _slot: CanonicalRetainedSlot<Block, Tag> = CanonicalRetainedSlot {
-///     identity: todo!(),
-///     marker: PhantomData,
-/// };
-/// ```
-///
-/// ```compile_fail
-/// use baozi_operation::CanonicalRetainedSlot;
-///
-/// struct OldTag;
-/// struct NewTag;
-/// fn retag(slot: CanonicalRetainedSlot<u64, OldTag>)
-///     -> CanonicalRetainedSlot<u64, NewTag>
-/// {
-///     slot
-/// }
-/// ```
 #[must_use = "a retained slot is required to reference and validate its block"]
-pub struct CanonicalRetainedSlot<Block, Tag> {
+pub(crate) struct CanonicalRetainedSlot<Block, Tag> {
     identity: RetainedSlotIdentity,
     marker: PhantomData<fn() -> (Block, Tag)>,
 }
@@ -2146,7 +2201,7 @@ impl<Block, Tag> fmt::Debug for CanonicalRetainedSlot<Block, Tag> {
 /// Like a canonical slot, this identity is set-local and cannot be retagged or persisted as a
 /// cross-generation identity.
 #[must_use = "a retained slot is required to reference and validate its block"]
-pub struct OutcomeEvidenceRetainedSlot<Block, Tag> {
+pub(crate) struct OutcomeEvidenceRetainedSlot<Block, Tag> {
     identity: RetainedSlotIdentity,
     marker: PhantomData<fn() -> (Block, Tag)>,
 }
@@ -2178,25 +2233,13 @@ impl<Block, Tag> fmt::Debug for OutcomeEvidenceRetainedSlot<Block, Tag> {
 /// Blocks are constructed exactly once and remain immutable after placement. The table interface
 /// deliberately has no replacement, retirement, or generic mutable-access operation.
 #[must_use = "the emplacer must place one complete block or be returned as a builder failure"]
-pub struct BlockEmplacer<'a, Block> {
+pub(crate) struct BlockEmplacer<'a, Block> {
     marker: PhantomData<&'a mut Block>,
 }
 
 /// Unforgeable result of placing one complete block with a value witness.
-///
-/// ```compile_fail
-/// use baozi_operation::BlockPlacement;
-/// use std::marker::PhantomData;
-///
-/// struct Tag;
-/// let _placement: BlockPlacement<'static, u64, Tag> = BlockPlacement {
-///     block: 1,
-///     block_marker: PhantomData,
-///     tag_marker: PhantomData,
-/// };
-/// ```
 #[must_use = "placement must be returned to the retained table builder"]
-pub struct BlockPlacement<'a, Block, Tag> {
+pub(crate) struct BlockPlacement<'a, Block, Tag> {
     block: Block,
     block_marker: PhantomData<&'a mut Block>,
     tag_marker: PhantomData<fn() -> Tag>,
@@ -2227,12 +2270,21 @@ impl<Block, Tag> BlockPlacement<'_, Block, Tag> {
 struct RetainedBlockMember<Block> {
     allocation: RetainedAllocation<Block>,
     tag: TypeId,
+    origin: RetainedBlockOrigin,
     reachable: AtomicBool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RetainedBlockOrigin {
+    New,
+    Inherited,
 }
 
 struct RetainedBlockTable<Block> {
     members: Vec<RetainedBlockMember<Block>>,
-    slot_limit: usize,
+    total_blocks: usize,
+    max_new_blocks: usize,
+    new_blocks: usize,
     qualified_capacity: usize,
 }
 
@@ -2244,6 +2296,21 @@ impl<Block> RetainedBlockTable<Block> {
         self.members
             .get(identity.index)
             .and_then(|member| (member.tag == identity.tag).then(|| member.allocation.as_ref()))
+    }
+
+    fn member_allocation(
+        &self,
+        identity: RetainedSlotIdentity,
+        set_id: RetainedSetId,
+    ) -> Option<&RetainedAllocation<Block>> {
+        #[cfg(test)]
+        record_test_member_lookup();
+        if identity.set_id != set_id {
+            return None;
+        }
+        self.members
+            .get(identity.index)
+            .and_then(|member| (member.tag == identity.tag).then_some(&member.allocation))
     }
 
     fn reset_reachable(&self) {
@@ -2263,7 +2330,7 @@ impl<Block> RetainedBlockTable<Block> {
 ///
 /// Validation must visit every unique slot in both tables. Repeated DAG edges are valid and count
 /// once. Any lookup returning `None` invalidates the whole session even if the callback ignores it.
-pub struct RetainedClosureSession<'a, CanonicalBlock, EvidenceBlock> {
+pub(crate) struct RetainedClosureSession<'a, CanonicalBlock, EvidenceBlock> {
     canonical: &'a RetainedBlockTable<CanonicalBlock>,
     evidence: &'a RetainedBlockTable<EvidenceBlock>,
     set_id: RetainedSetId,
@@ -2339,7 +2406,7 @@ impl<'a, CanonicalBlock, EvidenceBlock> RetainedClosureSession<'a, CanonicalBloc
 ///
 /// Validation must visit every unique evidence slot. Repeated DAG edges count once, and a failed
 /// lookup invalidates the complete session.
-pub struct RetainedEvidenceClosureSession<'a, EvidenceBlock> {
+pub(crate) struct RetainedEvidenceClosureSession<'a, EvidenceBlock> {
     evidence: &'a RetainedBlockTable<EvidenceBlock>,
     set_id: RetainedSetId,
     seen: usize,
@@ -2379,23 +2446,9 @@ impl<'a, EvidenceBlock> RetainedEvidenceClosureSession<'a, EvidenceBlock> {
     }
 }
 
-/// Unforgeable exact-closure witness consumed by success preparation.
-///
-/// ```compile_fail
-/// use baozi_operation::RetainedSuccessClosureProof;
-/// use std::marker::PhantomData;
-///
-/// let _proof: RetainedSuccessClosureProof<u64, u64> = RetainedSuccessClosureProof {
-///     set_id: todo!(),
-///     canonical_count: 0,
-///     evidence_count: 0,
-///     canonical_root: todo!(),
-///     evidence_root: todo!(),
-///     marker: PhantomData,
-/// };
-/// ```
+/// Module-private exact-closure witness consumed by success preparation.
 #[must_use = "the closure proof must be consumed by terminal preparation"]
-pub struct RetainedSuccessClosureProof<CanonicalBlock, EvidenceBlock> {
+struct RetainedSuccessClosureProof<CanonicalBlock, EvidenceBlock> {
     set_id: RetainedSetId,
     canonical_count: usize,
     evidence_count: usize,
@@ -2404,9 +2457,9 @@ pub struct RetainedSuccessClosureProof<CanonicalBlock, EvidenceBlock> {
     marker: PhantomData<fn() -> (CanonicalBlock, EvidenceBlock)>,
 }
 
-/// Unforgeable exact-closure witness consumed by evidence-only preparation.
+/// Module-private exact-closure witness consumed by evidence-only preparation.
 #[must_use = "the closure proof must be consumed by terminal preparation"]
-pub struct RetainedEvidenceClosureProof<EvidenceBlock> {
+struct RetainedEvidenceClosureProof<EvidenceBlock> {
     set_id: RetainedSetId,
     evidence_count: usize,
     evidence_root: RetainedSlotIdentity,
@@ -2416,7 +2469,7 @@ pub struct RetainedEvidenceClosureProof<EvidenceBlock> {
 /// Failure to validate the complete reachable block closure.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
-pub enum RetainedClosureValidationError {
+enum RetainedClosureValidationError {
     /// A prior contained failure poisoned the assembly.
     Poisoned,
     /// Success validation was requested from an evidence-only assembly.
@@ -2461,20 +2514,7 @@ impl<Block> PublishedRetainedAggregate<Block> {
 }
 
 /// Immutable canonical block table after the atomic publication handoff.
-///
-/// ```compile_fail
-/// use baozi_operation::{CanonicalRetainedSlot, PublishedCanonicalAggregate};
-///
-/// #[derive(Clone, Copy)]
-/// struct Tag;
-/// fn mutate(
-///     aggregate: &mut PublishedCanonicalAggregate<u64>,
-///     slot: CanonicalRetainedSlot<u64, Tag>,
-/// ) {
-///     let _ = aggregate.get_mut(slot);
-/// }
-/// ```
-pub struct PublishedCanonicalAggregate<Block> {
+pub(crate) struct PublishedCanonicalAggregate<Block> {
     inner: PublishedRetainedAggregate<Block>,
 }
 
@@ -2499,7 +2539,7 @@ impl<Block> PublishedCanonicalAggregate<Block> {
 }
 
 /// Immutable outcome-evidence block table after the atomic publication handoff.
-pub struct PublishedOutcomeEvidenceAggregate<Block> {
+pub(crate) struct PublishedOutcomeEvidenceAggregate<Block> {
     inner: PublishedRetainedAggregate<Block>,
 }
 
@@ -2529,7 +2569,7 @@ impl<Block> PublishedOutcomeEvidenceAggregate<Block> {
 /// proved that storage and accounting were rolled back. An unverified payload drop deliberately
 /// retains the operation and its charges fail-closed inside this error.
 #[must_use = "the error owns the operation until recovery is proven or the error is dropped"]
-pub struct RetainedPublicationOpenError<Operation, D> {
+pub(crate) struct RetainedPublicationOpenError<Operation, D> {
     operation: Operation,
     cause: RetainedWriterError<D>,
     recoverable: bool,
@@ -2585,7 +2625,7 @@ fn retained_open_failure_is_recoverable<D>(cause: &RetainedWriterError<D>) -> bo
 /// Recoverable construction failure for an operation-owned retained block table.
 #[derive(Debug)]
 #[non_exhaustive]
-pub enum RetainedPublicationError<D> {
+pub(crate) enum RetainedPublicationError<D> {
     /// The underlying retained writer rejected an accounted action.
     Writer(RetainedWriterError<D>),
     /// The canonical table has reached its fixed slot limit.
@@ -2594,6 +2634,8 @@ pub enum RetainedPublicationError<D> {
     OutcomeEvidenceSlotLimit,
     /// A canonical action was requested from an evidence-only assembly.
     WrongOutcomeMode,
+    /// An inherited source slot is stale, foreign to its aggregate, or carries the wrong tag.
+    InvalidSourceSlot,
     /// A prior failure made safe rollback or publication unverifiable.
     Poisoned,
 }
@@ -2608,6 +2650,9 @@ impl<D: fmt::Debug> fmt::Display for RetainedPublicationError<D> {
             }
             Self::WrongOutcomeMode => {
                 formatter.write_str("canonical action requires a success-capable plan")
+            }
+            Self::InvalidSourceSlot => {
+                formatter.write_str("retained inherited source slot is invalid")
             }
             Self::Poisoned => formatter.write_str("retained publication assembly is poisoned"),
         }
@@ -2638,7 +2683,7 @@ fn retained_publication_error_is_poisoning<D>(error: &RetainedPublicationError<D
 
 /// Stable operation owner for two preplanned, physically accounted block tables.
 #[must_use = "the assembly owns the operation, retained storage, and live attribution"]
-pub struct RetainedPublicationAssembly<O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
+pub(crate) struct RetainedPublicationAssembly<O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
 where
     O: OperationOwner,
     P: Copy + Ord,
@@ -2663,15 +2708,198 @@ where
     poisoned: bool,
 }
 
+/// Exact success closure whose owning assembly can no longer be mutated.
+#[must_use = "validated retained success must be prepared or deliberately dropped"]
+pub(crate) struct ValidatedRetainedSuccess<O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+    D: Copy + Ord + fmt::Debug + Send + Sync + 'static,
+    F: Send + Sync + 'static,
+    CanonicalBlock: Send + Sync + 'static,
+    EvidenceBlock: Send + Sync + 'static,
+{
+    assembly: RetainedPublicationAssembly<O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>,
+    proof: RetainedSuccessClosureProof<CanonicalBlock, EvidenceBlock>,
+}
+
+/// Evidence-building state after a semantic rejection or before an explicit rich failure.
+///
+/// This wrapper intentionally exposes no canonical retain, share, or commitment method.
+#[must_use = "failure evidence must be validated, downgraded, or deliberately dropped"]
+pub(crate) struct RetainedFailureAssembly<O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+    D: Copy + Ord + fmt::Debug + Send + Sync + 'static,
+    F: Send + Sync + 'static,
+    CanonicalBlock: Send + Sync + 'static,
+    EvidenceBlock: Send + Sync + 'static,
+{
+    assembly: RetainedPublicationAssembly<O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>,
+    fallback_cause: PreparationFailureCode,
+}
+
+/// Exact rich-failure closure whose owning assembly can no longer be mutated.
+#[must_use = "validated retained failure must be prepared or deliberately dropped"]
+pub(crate) struct ValidatedRetainedFailure<O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+    D: Copy + Ord + fmt::Debug + Send + Sync + 'static,
+    F: Send + Sync + 'static,
+    CanonicalBlock: Send + Sync + 'static,
+    EvidenceBlock: Send + Sync + 'static,
+{
+    assembly: RetainedPublicationAssembly<O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>,
+    proof: RetainedEvidenceClosureProof<EvidenceBlock>,
+}
+
+/// Terminal-only owner produced by an invalid root, poisoned graph, or contained validator panic.
+#[must_use = "fallback-only retained state must be prepared or deliberately dropped"]
+pub(crate) struct RetainedFallbackOnly<O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+    D: Copy + Ord + fmt::Debug + Send + Sync + 'static,
+    F: Send + Sync + 'static,
+    CanonicalBlock: Send + Sync + 'static,
+    EvidenceBlock: Send + Sync + 'static,
+{
+    assembly: RetainedPublicationAssembly<O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>,
+    cause: PreparationFailureCode,
+}
+
+/// Linear result of validating a success candidate.
+#[must_use = "every validation outcome retains the complete publication owner"]
+pub(crate) enum RetainedSuccessValidation<O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+    D: Copy + Ord + fmt::Debug + Send + Sync + 'static,
+    F: Send + Sync + 'static,
+    CanonicalBlock: Send + Sync + 'static,
+    EvidenceBlock: Send + Sync + 'static,
+{
+    Valid(ValidatedRetainedSuccess<O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>),
+    Rejected(RetainedFailureAssembly<O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>),
+    FallbackOnly(RetainedFallbackOnly<O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>),
+}
+
+/// Linear result of validating a rich-failure candidate.
+#[must_use = "every validation outcome retains the complete publication owner"]
+pub(crate) enum RetainedFailureValidation<O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+    D: Copy + Ord + fmt::Debug + Send + Sync + 'static,
+    F: Send + Sync + 'static,
+    CanonicalBlock: Send + Sync + 'static,
+    EvidenceBlock: Send + Sync + 'static,
+{
+    Valid(ValidatedRetainedFailure<O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>),
+    Rejected(RetainedFailureAssembly<O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>),
+    FallbackOnly(RetainedFallbackOnly<O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>),
+}
+
+struct QualifiedRetainedBlockTableStoragePlan<P, D, Block> {
+    phase: P,
+    attribution_dimension: D,
+    total_blocks: usize,
+    max_new_blocks: usize,
+    member_capacity: CapacityPlan,
+    charge: AdmissionCharge,
+    block: PhantomData<fn() -> Block>,
+}
+
+struct QualifiedRetainedBlockTablePlan<O, P, D, Destination, Block>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+    Destination: PublicationDestination,
+{
+    source: RetainedBlockTablePlan<P, D>,
+    batch: AttributionBatchPlan<O, P, D, Destination>,
+    storage: QualifiedRetainedBlockTableStoragePlan<P, D, Block>,
+}
+
+fn try_qualify_retained_block_table_plan<O, P, D, Destination, Block>(
+    account: &PhysicalStorageAccount,
+    source: RetainedBlockTablePlan<P, D>,
+    terminal_limits: RetainedBatchLimits,
+) -> Result<QualifiedRetainedBlockTablePlan<O, P, D, Destination, Block>, RetainedWriterError<D>>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+    Destination: PublicationDestination,
+{
+    let required_attributions = source
+        .max_new_blocks
+        .checked_add(1)
+        .ok_or(RetainedWriterError::InvalidPublicationPlan)?;
+    if source.total_blocks == 0
+        || source.max_new_blocks > source.total_blocks
+        || u64::try_from(source.total_blocks).is_err()
+        || required_attributions > source.writer.limits.attribution_slots
+        || required_attributions > terminal_limits.attribution_slots
+        || source.writer.limits.commitment_slots > terminal_limits.commitment_slots
+    {
+        return Err(RetainedWriterError::InvalidPublicationPlan);
+    }
+    let batch = AttributionBatchPlan::try_new(
+        source.writer.phase,
+        source.writer.capacity_dimension,
+        source.writer.limits.attribution_slots,
+        source.writer.limits.commitment_slots,
+    )
+    .map_err(map_batch_error)?;
+    let member_capacity =
+        CapacityPlan::for_type::<RetainedBlockMember<Block>>(0, 0, source.total_blocks)
+            .map_err(|_| RetainedWriterError::BatchCapacity)?;
+    let nested_bytes = member_capacity
+        .envelope_delta_bytes()
+        .map_err(|_| RetainedWriterError::BatchCapacity)?;
+    let allocation = RetainedAllocationPlan::new(nested_bytes, u64::from(nested_bytes != 0))
+        .map_err(|_| RetainedWriterError::BatchCapacity)?;
+    let charge = account
+        .checked_retained_charge::<RetainedBlockTable<Block>>(allocation)
+        .map_err(RetainedWriterError::Physical)?;
+    Ok(QualifiedRetainedBlockTablePlan {
+        source,
+        batch,
+        storage: QualifiedRetainedBlockTableStoragePlan {
+            phase: source.writer.phase,
+            attribution_dimension: source.writer.attribution_dimension,
+            total_blocks: source.total_blocks,
+            max_new_blocks: source.max_new_blocks,
+            member_capacity,
+            charge,
+            block: PhantomData,
+        },
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 fn try_create_retained_block_table<O, P, D, Destination, Block>(
     ledger: &Ledger<O, P, D>,
     account: &PhysicalStorageAccount,
     handle_share_work: RetainedHandleSharePlan<D>,
-    phase: P,
-    attribution_dimension: D,
     batch: &mut AttributionReservationBatch<O, P, D, Destination>,
-    slot_limit: usize,
+    plan: QualifiedRetainedBlockTableStoragePlan<P, D, Block>,
     set_id: RetainedSetId,
     membership_destination: RetainedMembershipDestination,
 ) -> Result<RetainedAllocation<RetainedBlockTable<Block>>, RetainedWriterError<D>>
@@ -2682,54 +2910,54 @@ where
     Destination: PublicationDestination,
     Block: Send + Sync + 'static,
 {
-    if u64::try_from(slot_limit).is_err() {
-        return Err(RetainedWriterError::MembershipExhausted);
-    }
+    let QualifiedRetainedBlockTableStoragePlan {
+        phase,
+        attribution_dimension,
+        total_blocks,
+        max_new_blocks,
+        member_capacity,
+        charge,
+        block: _,
+    } = plan;
     if !batch.has_attribution_slot() {
         return Err(RetainedWriterError::AttributionBatchFull);
     }
-    let capacity = CapacityPlan::for_type::<RetainedBlockMember<Block>>(0, 0, slot_limit)
-        .map_err(|_| RetainedWriterError::BatchCapacity)?;
-    let nested_bytes = capacity
-        .envelope_delta_bytes()
-        .map_err(|_| RetainedWriterError::BatchCapacity)?;
-    let table_plan = RetainedAllocationPlan::new(nested_bytes, u64::from(nested_bytes != 0))
-        .map_err(|_| RetainedWriterError::BatchCapacity)?;
-    let charge = account
-        .checked_retained_charge::<RetainedBlockTable<Block>>(table_plan)
-        .map_err(RetainedWriterError::Physical)?;
     let attribution = ledger
         .reserve_operation_attribution::<Destination>(phase, attribution_dimension, charge.bytes)
         .map_err(RetainedWriterError::Ledger)?;
     let allocation_owner = try_share_account_after_work(ledger, account, handle_share_work)?;
-    let mut table =
-        match account.try_retain_with_admitted_handle(allocation_owner, table_plan, || {
-            let mut members = Vec::new();
-            if members
-                .try_reserve_exact(capacity.allocator_additional())
-                .is_err()
-            {
-                return Err(RetainedBuildFailureCode::new(1));
+    let mut table = match account.try_retain_with_admitted_charge(allocation_owner, charge, || {
+        let mut members = Vec::new();
+        if members
+            .try_reserve_exact(member_capacity.allocator_additional())
+            .is_err()
+        {
+            return Err(RetainedBuildFailureCode::new(1));
+        }
+        if member_capacity
+            .finish(members.len(), members.capacity())
+            .is_err()
+        {
+            return Err(RetainedBuildFailureCode::new(2));
+        }
+        Ok(RetainedBlockTable {
+            qualified_capacity: members.capacity(),
+            members,
+            total_blocks,
+            max_new_blocks,
+            new_blocks: 0,
+        })
+    }) {
+        Ok(table) => table,
+        Err(cause) => {
+            if cause.charge_retained() {
+                std::mem::forget(attribution);
+            } else {
+                drop(attribution);
             }
-            if capacity.finish(members.len(), members.capacity()).is_err() {
-                return Err(RetainedBuildFailureCode::new(2));
-            }
-            Ok(RetainedBlockTable {
-                qualified_capacity: members.capacity(),
-                members,
-                slot_limit,
-            })
-        }) {
-            Ok(table) => table,
-            Err(cause) => {
-                if cause.charge_retained() {
-                    std::mem::forget(attribution);
-                } else {
-                    drop(attribution);
-                }
-                return Err(RetainedWriterError::Physical(cause));
-            }
-        };
+            return Err(RetainedWriterError::Physical(cause));
+        }
+    };
     let membership = RetainedMembership {
         set_id,
         destination: membership_destination,
@@ -2783,7 +3011,7 @@ where
         let table = table
             .value_mut_during_construction()
             .ok_or(RetainedPublicationError::Poisoned)?;
-        if table.members.len() >= table.slot_limit {
+        if table.members.len() >= table.total_blocks || table.new_blocks >= table.max_new_blocks {
             return Err(slot_limit_error);
         }
         if table.members.len() >= table.members.capacity() {
@@ -2865,6 +3093,90 @@ where
     table.members.push(RetainedBlockMember {
         allocation,
         tag: TypeId::of::<Tag>(),
+        origin: RetainedBlockOrigin::New,
+        reachable: AtomicBool::new(false),
+    });
+    table.new_blocks = match table.new_blocks.checked_add(1) {
+        Some(new_blocks) => new_blocks,
+        None => unreachable_final_owner_state(),
+    };
+    Ok(RetainedSlotIdentity {
+        set_id,
+        index,
+        tag: TypeId::of::<Tag>(),
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn try_share_retained_block<O, P, D, Block, Tag>(
+    ledger: &Ledger<O, P, D>,
+    account: &PhysicalStorageAccount,
+    handle_share_work: RetainedHandleSharePlan<D>,
+    table: &mut RetainedAllocation<RetainedBlockTable<Block>>,
+    set_id: RetainedSetId,
+    destination: RetainedMembershipDestination,
+    slot_limit_error: RetainedPublicationError<D>,
+    source: &PublishedRetainedAggregate<Block>,
+    source_identity: RetainedSlotIdentity,
+) -> Result<RetainedSlotIdentity, RetainedPublicationError<D>>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord + fmt::Debug + Send + Sync + 'static,
+    Block: Send + Sync + 'static,
+    Tag: Copy + Send + Sync + 'static,
+{
+    // Complete every target and source preflight before charging work or changing a reference
+    // count. Re-borrowing the uniquely owned table after admission cannot introduce a new failure.
+    let table = table
+        .value_mut_during_construction()
+        .ok_or(RetainedPublicationError::Poisoned)?;
+    if table.members.len() >= table.total_blocks || table.members.len() >= table.members.capacity()
+    {
+        return Err(slot_limit_error);
+    }
+    let index = table.members.len();
+    let ordinal = u64::try_from(index)
+        .ok()
+        .and_then(|index| index.checked_add(1))
+        .ok_or(RetainedPublicationError::Writer(
+            RetainedWriterError::MembershipExhausted,
+        ))?;
+    if source_identity.tag != TypeId::of::<Tag>() {
+        return Err(RetainedPublicationError::InvalidSourceSlot);
+    }
+    if !source.table.belongs_to(account) {
+        return Err(RetainedPublicationError::Writer(
+            RetainedWriterError::ForeignAccount,
+        ));
+    }
+    let source_allocation = source
+        .table
+        .as_ref()
+        .member_allocation(source_identity, source.set_id)
+        .ok_or(RetainedPublicationError::InvalidSourceSlot)?;
+    if !source_allocation.belongs_to(account) {
+        return Err(RetainedPublicationError::Writer(
+            RetainedWriterError::ForeignAccount,
+        ));
+    }
+
+    try_admit_retained_share_work(ledger, handle_share_work)
+        .map_err(RetainedPublicationError::Writer)?;
+    let mut allocation = source_allocation.share_after_admitted_work();
+    let membership = RetainedMembership {
+        set_id,
+        destination,
+        ordinal,
+    };
+    if allocation.assign_membership(membership).is_err() {
+        drop(allocation);
+        return Err(RetainedPublicationError::Poisoned);
+    }
+    table.members.push(RetainedBlockMember {
+        allocation,
+        tag: TypeId::of::<Tag>(),
+        origin: RetainedBlockOrigin::Inherited,
         reachable: AtomicBool::new(false),
     });
     Ok(RetainedSlotIdentity {
@@ -2900,14 +3212,13 @@ where
     let mut attributed_bytes = table.charged_bytes();
     let table = table.as_ref();
     if table.members.capacity() != table.qualified_capacity
-        || table.members.len() > table.slot_limit
+        || table.members.len() > table.total_blocks
+        || table.new_blocks > table.max_new_blocks
         || table.members.len() > table.members.capacity()
     {
         return false;
     }
-    let Some(attributed) = table.members.len().checked_add(1) else {
-        return false;
-    };
+    let mut new_blocks = 0_usize;
     for (index, member) in table.members.iter().enumerate() {
         let Some(ordinal) = u64::try_from(index)
             .ok()
@@ -2925,13 +3236,24 @@ where
         {
             return false;
         }
-        let Some(next_bytes) = attributed_bytes.checked_add(member.allocation.charged_bytes())
-        else {
-            return false;
-        };
-        attributed_bytes = next_bytes;
+        if member.origin == RetainedBlockOrigin::New {
+            let Some(next_new_blocks) = new_blocks.checked_add(1) else {
+                return false;
+            };
+            let Some(next_bytes) = attributed_bytes.checked_add(member.allocation.charged_bytes())
+            else {
+                return false;
+            };
+            new_blocks = next_new_blocks;
+            attributed_bytes = next_bytes;
+        }
     }
-    attributed == batch.attribution_len() && batch.attributed_bytes() == Some(attributed_bytes)
+    let Some(attributed) = new_blocks.checked_add(1) else {
+        return false;
+    };
+    new_blocks == table.new_blocks
+        && attributed == batch.attribution_len()
+        && batch.attributed_bytes() == Some(attributed_bytes)
 }
 
 /// Linear owner for one coordinator, one physical account, and its pre-admitted fallback.
@@ -2940,7 +3262,7 @@ where
     reason = "crate-private until the U4 canonical consumers switch atomically"
 )]
 #[must_use = "the operation owns its coordinator and pre-admitted terminal fallback"]
-pub struct RetainedOperation<O, P, PP, U, D, F>
+pub(crate) struct RetainedOperation<O, P, PP, U, D, F>
 where
     O: OperationOwner,
     P: Copy + Ord,
@@ -3182,6 +3504,29 @@ where
     pub fn account(&self) -> &PhysicalStorageAccount {
         self.baseline.account()
     }
+
+    /// Freezes the pre-admitted terminal baseline without opening a block-table assembly.
+    ///
+    /// This path performs no allocation, table construction, root validation, control callback, or
+    /// other fallible action. It is therefore available after every recoverable assembly-open
+    /// failure. Fail-closed open errors deliberately do not return the operation and cannot reach
+    /// this method.
+    #[must_use = "the prepared fallback must be handed off or deliberately dropped"]
+    pub fn prepare_minimal_fallback<CanonicalBlock, EvidenceBlock>(
+        self,
+        cause: PreparationFailureCode,
+    ) -> PreparedRetainedPublication<CanonicalBlock, EvidenceBlock, F, D> {
+        let RetainedOperation {
+            coordinator,
+            baseline,
+            ..
+        } = self;
+        let ledger = coordinator.into_ledger_for_typed_publication();
+        let (fallback, evidence, batches) = baseline.into_parts();
+        let proof = batches.into_fallback_proof(ledger, None, None);
+        finish_retained_publication_fallback(proof, fallback, evidence, cause, None)
+    }
+
     pub fn try_publication_assembly<CanonicalBlock, EvidenceBlock>(
         self,
         plan: RetainedPublicationPlan<P, D>,
@@ -3193,40 +3538,17 @@ where
         CanonicalBlock: Send + Sync + 'static,
         EvidenceBlock: Send + Sync + 'static,
     {
-        let canonical_plan = plan.canonical;
-        let evidence_plan = plan.outcome_evidence;
-        let handle_share_work = self.terminal_account_share_work;
         let terminal_limits = self.terminal_writer.limits;
-        let plan_valid = |table: RetainedBlockTablePlan<P, D>| {
-            table.total_blocks > 0
-                && table.total_blocks.checked_add(1).is_some_and(|required| {
-                    required <= table.writer.limits.attribution_slots
-                        && required <= terminal_limits.attribution_slots
-                })
-                && table.writer.limits.commitment_slots <= terminal_limits.commitment_slots
-        };
-        if !plan_valid(evidence_plan)
-            || canonical_plan.is_some_and(|canonical| !plan_valid(canonical))
-        {
-            return Err(RetainedPublicationOpenError {
-                operation: self,
-                cause: RetainedWriterError::InvalidPublicationPlan,
-                recoverable: true,
-            });
-        }
-        let Some(set_id) = try_next_retained_set_id() else {
-            return Err(RetainedPublicationOpenError {
-                operation: self,
-                cause: RetainedWriterError::MembershipExhausted,
-                recoverable: true,
-            });
-        };
-        let account = match try_share_account_after_work(
-            self.coordinator.retained_ledger(),
-            self.account(),
-            self.terminal_account_share_work,
+        let evidence_qualified = match try_qualify_retained_block_table_plan::<
+            O,
+            P,
+            D,
+            PublishedOutcomeEvidence,
+            EvidenceBlock,
+        >(
+            self.account(), plan.outcome_evidence, terminal_limits
         ) {
-            Ok(account) => account,
+            Ok(qualified) => qualified,
             Err(cause) => {
                 return Err(RetainedPublicationOpenError {
                     operation: self,
@@ -3235,38 +3557,114 @@ where
                 });
             }
         };
-
-        let (canonical_batch, canonical_table) = if let Some(canonical_plan) = canonical_plan {
-            let mut batch = match self.coordinator.retained_ledger().try_attribution_batch(
-                canonical_plan.writer.phase,
-                canonical_plan.writer.capacity_dimension,
-                canonical_plan.writer.limits.attribution_slots,
-                canonical_plan.writer.limits.commitment_slots,
-            ) {
-                Ok(batch) => batch,
-                Err(error) => {
-                    drop(account);
+        let canonical_qualified = match plan.canonical {
+            Some(canonical) => match try_qualify_retained_block_table_plan::<
+                O,
+                P,
+                D,
+                CanonicalOutput,
+                CanonicalBlock,
+            >(self.account(), canonical, terminal_limits)
+            {
+                Ok(qualified) => Some(qualified),
+                Err(cause) => {
                     return Err(RetainedPublicationOpenError {
                         operation: self,
-                        cause: map_batch_error(error),
+                        cause,
                         recoverable: true,
                     });
                 }
+            },
+            None => None,
+        };
+        let Some(set_id) = try_next_retained_set_id() else {
+            return Err(RetainedPublicationOpenError {
+                operation: self,
+                cause: RetainedWriterError::MembershipExhausted,
+                recoverable: true,
+            });
+        };
+        let handle_share_work = self.terminal_account_share_work;
+        let (canonical_plan, mut canonical_batch, canonical_storage) =
+            if let Some(qualified) = canonical_qualified {
+                let QualifiedRetainedBlockTablePlan {
+                    source,
+                    batch: batch_plan,
+                    storage,
+                } = qualified;
+                let batch = match self
+                    .coordinator
+                    .retained_ledger()
+                    .try_attribution_batch_from_plan(batch_plan)
+                {
+                    Ok(batch) => batch,
+                    Err(error) => {
+                        return Err(RetainedPublicationOpenError {
+                            operation: self,
+                            cause: map_batch_error(error),
+                            recoverable: true,
+                        });
+                    }
+                };
+                (Some(source), Some(batch), Some(storage))
+            } else {
+                (None, None, None)
+            };
+        let QualifiedRetainedBlockTablePlan {
+            source: evidence_plan,
+            batch: evidence_batch_plan,
+            storage: evidence_storage,
+        } = evidence_qualified;
+        let mut evidence_batch = match self
+            .coordinator
+            .retained_ledger()
+            .try_attribution_batch_from_plan(evidence_batch_plan)
+        {
+            Ok(batch) => batch,
+            Err(error) => {
+                drop(canonical_batch);
+                return Err(RetainedPublicationOpenError {
+                    operation: self,
+                    cause: map_batch_error(error),
+                    recoverable: true,
+                });
+            }
+        };
+        let account = match try_share_account_after_work(
+            self.coordinator.retained_ledger(),
+            self.account(),
+            handle_share_work,
+        ) {
+            Ok(account) => account,
+            Err(cause) => {
+                drop(evidence_batch);
+                drop(canonical_batch);
+                return Err(RetainedPublicationOpenError {
+                    operation: self,
+                    cause,
+                    recoverable: true,
+                });
+            }
+        };
+
+        let canonical_table = if let Some(storage) = canonical_storage {
+            let batch = match canonical_batch.as_mut() {
+                Some(batch) => batch,
+                None => unreachable_final_owner_state(),
             };
             let table = match try_create_retained_block_table(
                 self.coordinator.retained_ledger(),
                 &account,
                 handle_share_work,
-                canonical_plan.writer.phase,
-                canonical_plan.writer.attribution_dimension,
-                &mut batch,
-                canonical_plan.total_blocks,
+                batch,
+                storage,
                 set_id,
                 RetainedMembershipDestination::Canonical,
             ) {
-                Ok(table) => table,
+                Ok(batch) => batch,
                 Err(cause) => {
-                    drop(batch);
+                    drop(evidence_batch);
+                    drop(canonical_batch);
                     drop(account);
                     return Err(RetainedPublicationOpenError {
                         operation: self,
@@ -3275,37 +3673,16 @@ where
                     });
                 }
             };
-            (Some(batch), Some(table))
+            Some(table)
         } else {
-            (None, None)
-        };
-
-        let mut evidence_batch = match self.coordinator.retained_ledger().try_attribution_batch(
-            evidence_plan.writer.phase,
-            evidence_plan.writer.capacity_dimension,
-            evidence_plan.writer.limits.attribution_slots,
-            evidence_plan.writer.limits.commitment_slots,
-        ) {
-            Ok(batch) => batch,
-            Err(error) => {
-                drop(canonical_table);
-                drop(canonical_batch);
-                drop(account);
-                return Err(RetainedPublicationOpenError {
-                    operation: self,
-                    cause: map_batch_error(error),
-                    recoverable: true,
-                });
-            }
+            None
         };
         let evidence_table = match try_create_retained_block_table(
             self.coordinator.retained_ledger(),
             &account,
             handle_share_work,
-            evidence_plan.writer.phase,
-            evidence_plan.writer.attribution_dimension,
             &mut evidence_batch,
-            evidence_plan.total_blocks,
+            evidence_storage,
             set_id,
             RetainedMembershipDestination::OutcomeEvidence,
         ) {
@@ -3510,6 +3887,78 @@ where
         })
     }
 
+    /// Borrows the complete candidate graph for validation and consumes the writable assembly.
+    ///
+    /// A semantic rejection returns an evidence-only builder so callers may append bounded failure
+    /// details and validate a rich failure. Invalid identity, poisoned state, and panic can only
+    /// proceed to the pre-admitted minimal fallback. A valid result owns the private closure proof
+    /// and exposes no mutation method, eliminating proof/mutation TOCTOU.
+    pub fn validate_success<CanonicalTag, EvidenceTag>(
+        mut self,
+        canonical_root: CanonicalRetainedSlot<CanonicalBlock, CanonicalTag>,
+        evidence_root: OutcomeEvidenceRetainedSlot<EvidenceBlock, EvidenceTag>,
+        validate: impl for<'a> FnOnce(
+            &mut RetainedClosureSession<'a, CanonicalBlock, EvidenceBlock>,
+            CanonicalRetainedSlot<CanonicalBlock, CanonicalTag>,
+            OutcomeEvidenceRetainedSlot<EvidenceBlock, EvidenceTag>,
+        ) -> bool,
+    ) -> RetainedSuccessValidation<O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
+    where
+        CanonicalTag: Copy + Send + Sync + 'static,
+        EvidenceTag: Copy + Send + Sync + 'static,
+    {
+        match self.try_validate_success(canonical_root, evidence_root, validate) {
+            Ok(proof) => RetainedSuccessValidation::Valid(ValidatedRetainedSuccess {
+                assembly: self,
+                proof,
+            }),
+            Err(RetainedClosureValidationError::Rejected) => {
+                RetainedSuccessValidation::Rejected(RetainedFailureAssembly {
+                    assembly: self,
+                    fallback_cause: PreparationFailureCode::from_closure_validation(
+                        RetainedClosureValidationError::Rejected,
+                    ),
+                })
+            }
+            Err(cause) => RetainedSuccessValidation::FallbackOnly(RetainedFallbackOnly {
+                assembly: self,
+                cause: PreparationFailureCode::from_closure_validation(cause),
+            }),
+        }
+    }
+
+    /// Borrows an evidence graph for validation and consumes the writable assembly.
+    pub fn validate_rich_failure<EvidenceTag>(
+        mut self,
+        evidence_root: OutcomeEvidenceRetainedSlot<EvidenceBlock, EvidenceTag>,
+        validate: impl for<'a> FnOnce(
+            &mut RetainedEvidenceClosureSession<'a, EvidenceBlock>,
+            OutcomeEvidenceRetainedSlot<EvidenceBlock, EvidenceTag>,
+        ) -> bool,
+    ) -> RetainedFailureValidation<O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
+    where
+        EvidenceTag: Copy + Send + Sync + 'static,
+    {
+        match self.try_validate_rich_failure(evidence_root, validate) {
+            Ok(proof) => RetainedFailureValidation::Valid(ValidatedRetainedFailure {
+                assembly: self,
+                proof,
+            }),
+            Err(RetainedClosureValidationError::Rejected) => {
+                RetainedFailureValidation::Rejected(RetainedFailureAssembly {
+                    assembly: self,
+                    fallback_cause: PreparationFailureCode::from_closure_validation(
+                        RetainedClosureValidationError::Rejected,
+                    ),
+                })
+            }
+            Err(cause) => RetainedFailureValidation::FallbackOnly(RetainedFallbackOnly {
+                assembly: self,
+                cause: PreparationFailureCode::from_closure_validation(cause),
+            }),
+        }
+    }
+
     pub fn canonical_len(&self) -> usize {
         self.canonical_table
             .as_ref()
@@ -3579,6 +4028,58 @@ where
         }
     }
 
+    /// Inherits one immutable canonical block from a published same-account aggregate.
+    ///
+    /// The inherited payload keeps its original physical charge and receives no new operation
+    /// attribution. Clone and retained-handle work are charged before the reference count changes,
+    /// and the returned slot is freshly branded for this assembly.
+    pub fn try_share_canonical<Tag>(
+        &mut self,
+        source: &PublishedCanonicalAggregate<CanonicalBlock>,
+        source_slot: CanonicalRetainedSlot<CanonicalBlock, Tag>,
+    ) -> Result<CanonicalRetainedSlot<CanonicalBlock, Tag>, RetainedPublicationError<D>>
+    where
+        Tag: Copy + Send + Sync + 'static,
+    {
+        if self.poisoned {
+            return Err(RetainedPublicationError::Poisoned);
+        }
+        if self.mode != RetainedOutcomeMode::SuccessCapable {
+            return Err(RetainedPublicationError::WrongOutcomeMode);
+        }
+        let result = try_share_retained_block::<O, P, D, CanonicalBlock, Tag>(
+            self.operation
+                .as_ref()
+                .ok_or(RetainedPublicationError::Poisoned)?
+                .coordinator
+                .retained_ledger(),
+            self.account
+                .as_ref()
+                .ok_or(RetainedPublicationError::Poisoned)?,
+            self.handle_share_work,
+            self.canonical_table
+                .as_mut()
+                .ok_or(RetainedPublicationError::Poisoned)?,
+            self.set_id,
+            RetainedMembershipDestination::Canonical,
+            RetainedPublicationError::CanonicalSlotLimit,
+            &source.inner,
+            source_slot.identity,
+        );
+        match result {
+            Ok(identity) => Ok(CanonicalRetainedSlot {
+                identity,
+                marker: PhantomData,
+            }),
+            Err(error) => {
+                if retained_publication_error_is_poisoning(&error) {
+                    self.poisoned = true;
+                }
+                Err(error)
+            }
+        }
+    }
+
     pub fn try_retain_outcome_evidence<Tag>(
         &mut self,
         plan: RetainedAllocationPlan,
@@ -3618,6 +4119,51 @@ where
             RetainedPublicationError::OutcomeEvidenceSlotLimit,
             plan,
             build,
+        );
+        match result {
+            Ok(identity) => Ok(OutcomeEvidenceRetainedSlot {
+                identity,
+                marker: PhantomData,
+            }),
+            Err(error) => {
+                if retained_publication_error_is_poisoning(&error) {
+                    self.poisoned = true;
+                }
+                Err(error)
+            }
+        }
+    }
+
+    /// Inherits one immutable outcome-evidence block from a published same-account aggregate.
+    pub fn try_share_outcome_evidence<Tag>(
+        &mut self,
+        source: &PublishedOutcomeEvidenceAggregate<EvidenceBlock>,
+        source_slot: OutcomeEvidenceRetainedSlot<EvidenceBlock, Tag>,
+    ) -> Result<OutcomeEvidenceRetainedSlot<EvidenceBlock, Tag>, RetainedPublicationError<D>>
+    where
+        Tag: Copy + Send + Sync + 'static,
+    {
+        if self.poisoned {
+            return Err(RetainedPublicationError::Poisoned);
+        }
+        let result = try_share_retained_block::<O, P, D, EvidenceBlock, Tag>(
+            self.operation
+                .as_ref()
+                .ok_or(RetainedPublicationError::Poisoned)?
+                .coordinator
+                .retained_ledger(),
+            self.account
+                .as_ref()
+                .ok_or(RetainedPublicationError::Poisoned)?,
+            self.handle_share_work,
+            self.evidence_table
+                .as_mut()
+                .ok_or(RetainedPublicationError::Poisoned)?,
+            self.set_id,
+            RetainedMembershipDestination::OutcomeEvidence,
+            RetainedPublicationError::OutcomeEvidenceSlotLimit,
+            &source.inner,
+            source_slot.identity,
         );
         match result {
             Ok(identity) => Ok(OutcomeEvidenceRetainedSlot {
@@ -3675,78 +4221,6 @@ where
     > {
         self.try_prepare_terminal(RetainedTerminalRequest::MinimalFallback {
             requested_cause: PreparationFailureCode::requested(),
-        })
-    }
-
-    /// Validates the exact closure and attempts success publication in one consuming transaction.
-    ///
-    /// Final control rejection atomically downgrades to rich failure. Primary ledger rejection
-    /// drops both block tables before attribution and publishes minimal fallback without retrying a
-    /// second primary mode.
-    pub fn try_prepare_success<CanonicalTag, EvidenceTag>(
-        mut self,
-        canonical_root: CanonicalRetainedSlot<CanonicalBlock, CanonicalTag>,
-        evidence_root: OutcomeEvidenceRetainedSlot<EvidenceBlock, EvidenceTag>,
-        final_progress: FinalProgress<PP, U>,
-        validate: impl for<'a> FnOnce(
-            &mut RetainedClosureSession<'a, CanonicalBlock, EvidenceBlock>,
-            CanonicalRetainedSlot<CanonicalBlock, CanonicalTag>,
-            OutcomeEvidenceRetainedSlot<EvidenceBlock, EvidenceTag>,
-        ) -> bool,
-    ) -> Result<
-        PreparedRetainedPublication<CanonicalBlock, EvidenceBlock, F, D>,
-        RetainedPublicationPrepareError,
-    >
-    where
-        CanonicalTag: Copy + Send + Sync + 'static,
-        EvidenceTag: Copy + Send + Sync + 'static,
-    {
-        let proof = match self.try_validate_success(canonical_root, evidence_root, validate) {
-            Ok(proof) => proof,
-            Err(cause) => {
-                return self.try_prepare_terminal(RetainedTerminalRequest::MinimalFallback {
-                    requested_cause: PreparationFailureCode::from_closure_validation(cause),
-                });
-            }
-        };
-        self.try_prepare_terminal(RetainedTerminalRequest::Success {
-            proof,
-            final_progress,
-        })
-    }
-
-    /// Validates the exact evidence closure and attempts failure publication atomically.
-    ///
-    /// A final control cause overrides `cause`. Primary ledger rejection drops the evidence table
-    /// before attribution and publishes minimal fallback without another primary attempt.
-    pub fn try_prepare_rich_failure<EvidenceTag>(
-        mut self,
-        evidence_root: OutcomeEvidenceRetainedSlot<EvidenceBlock, EvidenceTag>,
-        cause: PreparationFailureCode,
-        final_progress: FinalProgress<PP, U>,
-        validate: impl for<'a> FnOnce(
-            &mut RetainedEvidenceClosureSession<'a, EvidenceBlock>,
-            OutcomeEvidenceRetainedSlot<EvidenceBlock, EvidenceTag>,
-        ) -> bool,
-    ) -> Result<
-        PreparedRetainedPublication<CanonicalBlock, EvidenceBlock, F, D>,
-        RetainedPublicationPrepareError,
-    >
-    where
-        EvidenceTag: Copy + Send + Sync + 'static,
-    {
-        let proof = match self.try_validate_rich_failure(evidence_root, validate) {
-            Ok(proof) => proof,
-            Err(cause) => {
-                return self.try_prepare_terminal(RetainedTerminalRequest::MinimalFallback {
-                    requested_cause: PreparationFailureCode::from_closure_validation(cause),
-                });
-            }
-        };
-        self.try_prepare_terminal(RetainedTerminalRequest::RichFailure {
-            proof,
-            requested_cause: cause,
-            final_progress,
         })
     }
 
@@ -3927,7 +4401,11 @@ where
             let proof =
                 baseline_batches.into_fallback_proof(ledger, canonical_batch, Some(evidence_batch));
             return Ok(finish_retained_publication_fallback(
-                proof, fallback, evidence, cause, account,
+                proof,
+                fallback,
+                evidence,
+                cause,
+                Some(account),
             ));
         }
 
@@ -3985,7 +4463,7 @@ where
                     fallback,
                     evidence,
                     PreparationFailureCode::ledger(),
-                    account,
+                    Some(account),
                 ));
             }
             Ok(Ok(())) => {}
@@ -4139,6 +4617,189 @@ where
     }
 }
 
+impl<O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
+    ValidatedRetainedSuccess<O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+    D: Copy + Ord + fmt::Debug + Send + Sync + 'static,
+    F: Send + Sync + 'static,
+    CanonicalBlock: Send + Sync + 'static,
+    EvidenceBlock: Send + Sync + 'static,
+{
+    /// Performs final control and ledger preparation without reopening graph mutation.
+    pub fn try_prepare(
+        self,
+        final_progress: FinalProgress<PP, U>,
+    ) -> Result<
+        PreparedRetainedPublication<CanonicalBlock, EvidenceBlock, F, D>,
+        RetainedPublicationPrepareError,
+    > {
+        self.assembly
+            .try_prepare_terminal(RetainedTerminalRequest::Success {
+                proof: self.proof,
+                final_progress,
+            })
+    }
+
+    pub fn prepare_minimal_fallback(
+        self,
+    ) -> Result<
+        PreparedRetainedPublication<CanonicalBlock, EvidenceBlock, F, D>,
+        RetainedPublicationPrepareError,
+    > {
+        self.assembly
+            .try_prepare_terminal(RetainedTerminalRequest::MinimalFallback {
+                requested_cause: PreparationFailureCode::requested(),
+            })
+    }
+}
+
+impl<O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
+    RetainedFailureAssembly<O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+    D: Copy + Ord + fmt::Debug + Send + Sync + 'static,
+    F: Send + Sync + 'static,
+    CanonicalBlock: Send + Sync + 'static,
+    EvidenceBlock: Send + Sync + 'static,
+{
+    pub fn outcome_evidence_len(&self) -> usize {
+        self.assembly.outcome_evidence_len()
+    }
+
+    pub fn try_retain_outcome_evidence<Tag>(
+        &mut self,
+        plan: RetainedAllocationPlan,
+        build: impl for<'a> FnOnce(
+            BlockEmplacer<'a, EvidenceBlock>,
+        ) -> Result<
+            BlockPlacement<'a, EvidenceBlock, Tag>,
+            RetainedBuildFailureCode,
+        >,
+    ) -> Result<OutcomeEvidenceRetainedSlot<EvidenceBlock, Tag>, RetainedPublicationError<D>>
+    where
+        Tag: Copy + Send + Sync + 'static,
+    {
+        self.assembly.try_retain_outcome_evidence(plan, build)
+    }
+
+    pub fn try_share_outcome_evidence<Tag>(
+        &mut self,
+        source: &PublishedOutcomeEvidenceAggregate<EvidenceBlock>,
+        source_slot: OutcomeEvidenceRetainedSlot<EvidenceBlock, Tag>,
+    ) -> Result<OutcomeEvidenceRetainedSlot<EvidenceBlock, Tag>, RetainedPublicationError<D>>
+    where
+        Tag: Copy + Send + Sync + 'static,
+    {
+        self.assembly
+            .try_share_outcome_evidence(source, source_slot)
+    }
+
+    pub fn try_commit_outcome_evidence(
+        &mut self,
+        dimension: D,
+        amount: u64,
+    ) -> Result<(), RetainedPublicationError<D>> {
+        self.assembly.try_commit_outcome_evidence(dimension, amount)
+    }
+
+    pub fn validate_rich_failure<EvidenceTag>(
+        self,
+        evidence_root: OutcomeEvidenceRetainedSlot<EvidenceBlock, EvidenceTag>,
+        validate: impl for<'a> FnOnce(
+            &mut RetainedEvidenceClosureSession<'a, EvidenceBlock>,
+            OutcomeEvidenceRetainedSlot<EvidenceBlock, EvidenceTag>,
+        ) -> bool,
+    ) -> RetainedFailureValidation<O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
+    where
+        EvidenceTag: Copy + Send + Sync + 'static,
+    {
+        self.assembly.validate_rich_failure(evidence_root, validate)
+    }
+
+    pub fn prepare_minimal_fallback(
+        self,
+    ) -> Result<
+        PreparedRetainedPublication<CanonicalBlock, EvidenceBlock, F, D>,
+        RetainedPublicationPrepareError,
+    > {
+        self.assembly
+            .try_prepare_terminal(RetainedTerminalRequest::MinimalFallback {
+                requested_cause: self.fallback_cause,
+            })
+    }
+}
+
+impl<O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
+    ValidatedRetainedFailure<O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+    D: Copy + Ord + fmt::Debug + Send + Sync + 'static,
+    F: Send + Sync + 'static,
+    CanonicalBlock: Send + Sync + 'static,
+    EvidenceBlock: Send + Sync + 'static,
+{
+    pub fn try_prepare(
+        self,
+        cause: PreparationFailureCode,
+        final_progress: FinalProgress<PP, U>,
+    ) -> Result<
+        PreparedRetainedPublication<CanonicalBlock, EvidenceBlock, F, D>,
+        RetainedPublicationPrepareError,
+    > {
+        self.assembly
+            .try_prepare_terminal(RetainedTerminalRequest::RichFailure {
+                proof: self.proof,
+                requested_cause: cause,
+                final_progress,
+            })
+    }
+
+    pub fn prepare_minimal_fallback(
+        self,
+    ) -> Result<
+        PreparedRetainedPublication<CanonicalBlock, EvidenceBlock, F, D>,
+        RetainedPublicationPrepareError,
+    > {
+        self.assembly.prepare_minimal_fallback()
+    }
+}
+
+impl<O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
+    RetainedFallbackOnly<O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+    D: Copy + Ord + fmt::Debug + Send + Sync + 'static,
+    F: Send + Sync + 'static,
+    CanonicalBlock: Send + Sync + 'static,
+    EvidenceBlock: Send + Sync + 'static,
+{
+    /// Discards candidate tables and prepares only the pre-admitted terminal baseline.
+    pub fn prepare_minimal_fallback(
+        self,
+    ) -> Result<
+        PreparedRetainedPublication<CanonicalBlock, EvidenceBlock, F, D>,
+        RetainedPublicationPrepareError,
+    > {
+        self.assembly
+            .try_prepare_terminal(RetainedTerminalRequest::MinimalFallback {
+                requested_cause: self.cause,
+            })
+    }
+}
+
 impl<O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock> Drop
     for RetainedPublicationAssembly<O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
 where
@@ -4230,7 +4891,7 @@ where
 )]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
-pub enum PreparationFailureClass {
+pub(crate) enum PreparationFailureClass {
     Requested,
     Control,
     ProductGraph,
@@ -4238,7 +4899,7 @@ pub enum PreparationFailureClass {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PreparationFailureCode {
+pub(crate) struct PreparationFailureCode {
     class: PreparationFailureClass,
     code: u32,
 }
@@ -4333,7 +4994,7 @@ enum RetainedPublicationPayload<CanonicalBlock, EvidenceBlock, F> {
 /// minimal fallback freezes the pre-admitted fallback/evidence baseline. Handoff is a pure
 /// allocation-free ownership move.
 #[must_use = "prepared publication owns terminal output and frozen evidence until handoff"]
-pub struct PreparedRetainedPublication<CanonicalBlock, EvidenceBlock, F, D> {
+pub(crate) struct PreparedRetainedPublication<CanonicalBlock, EvidenceBlock, F, D> {
     payload: RetainedPublicationPayload<CanonicalBlock, EvidenceBlock, F>,
     evidence: PublishedPart<PublicationEvidenceCells<D>>,
 }
@@ -4365,13 +5026,13 @@ where
 /// Success and rich failure carry retained block tables; minimal fallback carries only the
 /// pre-admitted fallback and frozen ledger evidence.
 #[must_use = "the published owner must be split or deliberately dropped"]
-pub struct PublishedRetainedPublication<CanonicalBlock, EvidenceBlock, F, D> {
+pub(crate) struct PublishedRetainedPublication<CanonicalBlock, EvidenceBlock, F, D> {
     payload: RetainedPublicationPayload<CanonicalBlock, EvidenceBlock, F>,
     evidence: PublishedPart<PublicationEvidenceCells<D>>,
 }
 
 /// Canonical owning half ready to move into a domain-owned validated Scene wrapper.
-pub struct PublishedCanonicalOutput<CanonicalBlock> {
+pub(crate) struct PublishedCanonicalOutput<CanonicalBlock> {
     aggregate: PublishedCanonicalAggregate<CanonicalBlock>,
     root: RetainedSlotIdentity,
     account: PhysicalStorageAccount,
@@ -4395,13 +5056,13 @@ impl<CanonicalBlock> PublishedCanonicalOutput<CanonicalBlock> {
 }
 
 /// Outcome-evidence owning half ready to move into a domain report.
-pub struct PublishedOutcomeEvidenceOutput<EvidenceBlock> {
+pub(crate) struct PublishedOutcomeEvidenceOutput<EvidenceBlock> {
     aggregate: PublishedOutcomeEvidenceAggregate<EvidenceBlock>,
     root: RetainedSlotIdentity,
 }
 
 /// Evidence-only terminal owner with its frozen outer failure cause and account lineage.
-pub struct PublishedRichFailureOutput<EvidenceBlock> {
+pub(crate) struct PublishedRichFailureOutput<EvidenceBlock> {
     outcome_evidence: PublishedOutcomeEvidenceOutput<EvidenceBlock>,
     account: PhysicalStorageAccount,
     cause: PreparationFailureCode,
@@ -4435,7 +5096,7 @@ impl<EvidenceBlock> PublishedOutcomeEvidenceOutput<EvidenceBlock> {
 }
 
 /// Frozen destination-aware ledger evidence moved into a domain report.
-pub struct PublishedLedgerEvidence<D> {
+pub(crate) struct PublishedLedgerEvidence<D> {
     evidence: PublishedPart<PublicationEvidenceCells<D>>,
 }
 
@@ -4446,7 +5107,7 @@ impl<D: Copy + Ord> PublishedLedgerEvidence<D> {
 }
 
 /// Pre-admitted fallback owner after a failed terminal publication.
-pub struct PublishedFallbackOutput<F> {
+pub(crate) struct PublishedFallbackOutput<F> {
     part: PublishedPart<F>,
     cause: PreparationFailureCode,
 }
@@ -4467,7 +5128,7 @@ impl<F> PublishedFallbackOutput<F> {
 
 /// Consuming split that removes import-only generics from the canonical owner path.
 #[must_use = "the split contains all terminal owners and frozen ledger evidence"]
-pub enum PublishedRetainedPublicationParts<CanonicalBlock, EvidenceBlock, F, D> {
+pub(crate) enum PublishedRetainedPublicationParts<CanonicalBlock, EvidenceBlock, F, D> {
     Success {
         canonical: PublishedCanonicalOutput<CanonicalBlock>,
         outcome_evidence: PublishedOutcomeEvidenceOutput<EvidenceBlock>,
@@ -4551,7 +5212,7 @@ where
 /// Failure to establish a safe terminal publication; all uncertain accounting is retained.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
-pub enum RetainedPublicationPrepareError {
+pub(crate) enum RetainedPublicationPrepareError {
     /// Required terminal ownership was already consumed or poisoned.
     Poisoned,
     /// Storage, membership, account, proof, and attribution no longer form one exact graph.
@@ -4631,7 +5292,7 @@ fn finish_retained_publication_fallback<O, P, D, F, CanonicalBlock, EvidenceBloc
     fallback: RetainedPart<F, PublishedOutcomeEvidence, O, P, D>,
     evidence: RetainedPart<PublicationEvidenceCells<D>, PublishedOutcomeEvidence, O, P, D>,
     cause: PreparationFailureCode,
-    discarded_account: PhysicalStorageAccount,
+    discarded_account: Option<PhysicalStorageAccount>,
 ) -> PreparedRetainedPublication<CanonicalBlock, EvidenceBlock, F, D>
 where
     O: OperationOwner,
@@ -4639,7 +5300,7 @@ where
     D: Copy + Ord + fmt::Debug + Send + Sync + 'static,
     F: Send + Sync + 'static,
 {
-    freeze_terminal_evidence(proof, Some(discarded_account), &evidence);
+    freeze_terminal_evidence(proof, discarded_account, &evidence);
     PreparedRetainedPublication {
         payload: RetainedPublicationPayload::MinimalFallback {
             part: fallback.into_published_part(),
@@ -4654,6 +5315,19 @@ thread_local! {
     static FAIL_NEXT_FINAL_OWNER_ALLOCATION: std::cell::Cell<bool> = const {
         std::cell::Cell::new(false)
     };
+    static TEST_MEMBER_LOOKUPS: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
+}
+
+#[cfg(test)]
+fn record_test_member_lookup() {
+    TEST_MEMBER_LOOKUPS.with(|lookups| lookups.set(lookups.get().saturating_add(1)));
+}
+
+#[cfg(test)]
+fn take_test_member_lookups() -> usize {
+    TEST_MEMBER_LOOKUPS.with(|lookups| lookups.replace(0))
 }
 
 #[cfg(test)]
@@ -4915,8 +5589,16 @@ mod tests {
         evidence_blocks: usize,
     ) -> RetainedPublicationPlan<TestPhase, TestDimension> {
         RetainedPublicationPlan::success(
-            RetainedBlockTablePlan::new(writer_plan(canonical_blocks + 1, 2), canonical_blocks),
-            RetainedBlockTablePlan::new(writer_plan(evidence_blocks + 1, 2), evidence_blocks),
+            RetainedBlockTablePlan::new(
+                writer_plan(canonical_blocks + 1, 2),
+                canonical_blocks,
+                canonical_blocks,
+            ),
+            RetainedBlockTablePlan::new(
+                writer_plan(evidence_blocks + 1, 2),
+                evidence_blocks,
+                evidence_blocks,
+            ),
         )
     }
 
@@ -5032,6 +5714,52 @@ mod tests {
         (canonical, evidence)
     }
 
+    type PublishedScalarSource = (
+        PublishedCanonicalOutput<u64>,
+        CanonicalRetainedSlot<u64, CanonicalRootTag>,
+        PublishedOutcomeEvidenceOutput<u64>,
+        OutcomeEvidenceRetainedSlot<u64, EvidenceRootTag>,
+    );
+
+    fn publish_scalar_source(account: &PhysicalStorageAccount) -> PublishedScalarSource {
+        let operation = test_operation_on_account_with_control(
+            account,
+            64,
+            RetainedBatchLimits::new(2, 2),
+            OperationControl::default(),
+        );
+        let mut assembly: TestPublication<u64, u64> = operation
+            .try_publication_assembly(publication_plan(1, 1))
+            .unwrap_or_else(|_| panic!("source publication must open"));
+        let (canonical_slot, evidence_slot) = retain_scalar_success(&mut assembly);
+        let validated = match assembly.validate_success(
+            canonical_slot,
+            evidence_slot,
+            |session, canonical, evidence| {
+                session.canonical(canonical) == Some(&11)
+                    && session.outcome_evidence(evidence) == Some(&7)
+            },
+        ) {
+            RetainedSuccessValidation::Valid(validated) => validated,
+            _ => panic!("source publication must validate"),
+        };
+        let published = validated
+            .try_prepare(final_progress())
+            .unwrap_or_else(|_| panic!("source publication must prepare"))
+            .handoff();
+        match published.into_parts() {
+            PublishedRetainedPublicationParts::Success {
+                canonical,
+                outcome_evidence,
+                ledger_evidence,
+            } => {
+                drop(ledger_evidence);
+                (canonical, canonical_slot, outcome_evidence, evidence_slot)
+            }
+            _ => panic!("source publication must succeed"),
+        }
+    }
+
     #[test]
     fn block_table_success_freezes_dual_batches_and_splits_owners() {
         let factory = account_factory(1);
@@ -5070,34 +5798,37 @@ mod tests {
             .try_commit_outcome_evidence(TestDimension::Bytes, 6)
             .unwrap_or_else(|_| panic!("evidence commitment must fit"));
 
-        let prepared = assembly
-            .try_prepare_success(
-                canonical_root,
-                evidence_root,
-                final_progress(),
-                |session, canonical_root, evidence_root| {
-                    let Some(TestCanonicalBlock::Root { leaf }) = session.canonical(canonical_root)
-                    else {
-                        return false;
-                    };
-                    if !matches!(session.canonical(*leaf), Some(TestCanonicalBlock::Leaf(11))) {
-                        return false;
-                    }
-                    // A DAG may reach the same slot more than once; only unique members are counted.
-                    if !matches!(session.canonical(*leaf), Some(TestCanonicalBlock::Leaf(11))) {
-                        return false;
-                    }
-                    let Some(TestEvidenceBlock::Root { detail }) =
-                        session.outcome_evidence(evidence_root)
-                    else {
-                        return false;
-                    };
-                    matches!(
-                        session.outcome_evidence(*detail),
-                        Some(TestEvidenceBlock::Detail(7))
-                    )
-                },
-            )
+        let validated = match assembly.validate_success(
+            canonical_root,
+            evidence_root,
+            |session, canonical_root, evidence_root| {
+                let Some(TestCanonicalBlock::Root { leaf }) = session.canonical(canonical_root)
+                else {
+                    return false;
+                };
+                if !matches!(session.canonical(*leaf), Some(TestCanonicalBlock::Leaf(11))) {
+                    return false;
+                }
+                // A DAG may reach the same slot more than once; only unique members are counted.
+                if !matches!(session.canonical(*leaf), Some(TestCanonicalBlock::Leaf(11))) {
+                    return false;
+                }
+                let Some(TestEvidenceBlock::Root { detail }) =
+                    session.outcome_evidence(evidence_root)
+                else {
+                    return false;
+                };
+                matches!(
+                    session.outcome_evidence(*detail),
+                    Some(TestEvidenceBlock::Detail(7))
+                )
+            },
+        ) {
+            RetainedSuccessValidation::Valid(validated) => validated,
+            _ => panic!("dual publication graph must validate"),
+        };
+        let prepared = validated
+            .try_prepare(final_progress())
             .unwrap_or_else(|_| panic!("dual publication must prepare"));
         assert!(!prepared.uses_fallback());
         match prepared.handoff().into_parts() {
@@ -5118,6 +5849,581 @@ mod tests {
                 assert_eq!(snapshot.published_outcome_evidence(), 7);
             }
             _ => panic!("success must not publish a failure owner"),
+        }
+        assert_eq!(factory.snapshot().live_accounts(), 0);
+    }
+
+    #[test]
+    fn inherited_blocks_use_fresh_slots_without_new_attribution_or_physical_charge() {
+        let factory = account_factory(1);
+        let account = account(&factory, u64::MAX, 128);
+        let (source_canonical, source_canonical_slot, source_evidence, source_evidence_slot) =
+            publish_scalar_source(&account);
+        let canonical_shares_before = source_canonical.aggregate().inner.table.as_ref().members[0]
+            .allocation
+            .share_call_count();
+        let evidence_shares_before = source_evidence.aggregate().inner.table.as_ref().members[0]
+            .allocation
+            .share_call_count();
+
+        let operation = test_operation_on_account_with_control(
+            &account,
+            64,
+            RetainedBatchLimits::new(2, 2),
+            OperationControl::default(),
+        );
+        let plan = RetainedPublicationPlan::success(
+            RetainedBlockTablePlan::new(writer_plan(2, 2), 3, 1),
+            RetainedBlockTablePlan::new(writer_plan(1, 2), 3, 0),
+        );
+        let mut assembly: TestPublication<u64, u64> = operation
+            .try_publication_assembly(plan)
+            .unwrap_or_else(|_| panic!("inherited publication must open"));
+        let physical_before_shares = account.snapshot();
+
+        let canonical_root = assembly
+            .try_share_canonical(source_canonical.aggregate(), source_canonical_slot)
+            .unwrap_or_else(|_| panic!("first canonical share must succeed"));
+        let canonical_second = assembly
+            .try_share_canonical(source_canonical.aggregate(), source_canonical_slot)
+            .unwrap_or_else(|_| panic!("second canonical share must succeed"));
+        let evidence_root = assembly
+            .try_share_outcome_evidence(source_evidence.aggregate(), source_evidence_slot)
+            .unwrap_or_else(|_| panic!("first evidence share must succeed"));
+        let evidence_second = assembly
+            .try_share_outcome_evidence(source_evidence.aggregate(), source_evidence_slot)
+            .unwrap_or_else(|_| panic!("second evidence share must succeed"));
+        let evidence_third = assembly
+            .try_share_outcome_evidence(source_evidence.aggregate(), source_evidence_slot)
+            .unwrap_or_else(|_| panic!("third evidence share must succeed"));
+
+        assert_eq!(account.snapshot(), physical_before_shares);
+        assert_eq!(assembly.canonical_len(), 2);
+        assert_eq!(assembly.outcome_evidence_len(), 3);
+        assert_eq!(
+            assembly
+                .canonical_batch
+                .as_ref()
+                .expect("canonical attribution batch")
+                .attribution_len(),
+            1
+        );
+        assert_eq!(
+            assembly
+                .evidence_batch
+                .as_ref()
+                .expect("evidence attribution batch")
+                .attribution_len(),
+            1
+        );
+        assert_eq!(
+            source_canonical.aggregate().inner.table.as_ref().members[0]
+                .allocation
+                .share_call_count(),
+            canonical_shares_before + 2
+        );
+        assert_eq!(
+            source_evidence.aggregate().inner.table.as_ref().members[0]
+                .allocation
+                .share_call_count(),
+            evidence_shares_before + 3
+        );
+        assert!(source_canonical.aggregate().get(canonical_root).is_none());
+        assert!(source_evidence.aggregate().get(evidence_root).is_none());
+
+        let canonical_new = assembly
+            .try_retain_canonical(empty_plan(), |emplacer| {
+                Ok(emplacer.place(13, CanonicalRootTag))
+            })
+            .unwrap_or_else(|_| panic!("one new canonical block must fit"));
+        assert_eq!(assembly.canonical_len(), 3);
+        assert_eq!(
+            assembly
+                .canonical_batch
+                .as_ref()
+                .expect("canonical attribution batch")
+                .attribution_len(),
+            2
+        );
+        assert!(
+            account.snapshot().live_retained_bytes() > physical_before_shares.live_retained_bytes()
+        );
+
+        let validated = match assembly.validate_success(
+            canonical_root,
+            evidence_root,
+            |session, canonical_root, evidence_root| {
+                session.canonical(canonical_root) == Some(&11)
+                    && session.canonical(canonical_second) == Some(&11)
+                    && session.canonical(canonical_new) == Some(&13)
+                    && session.outcome_evidence(evidence_root) == Some(&7)
+                    && session.outcome_evidence(evidence_second) == Some(&7)
+                    && session.outcome_evidence(evidence_third) == Some(&7)
+            },
+        ) {
+            RetainedSuccessValidation::Valid(validated) => validated,
+            _ => panic!("inherited publication must validate"),
+        };
+        let published = validated
+            .try_prepare(final_progress())
+            .unwrap_or_else(|_| panic!("inherited publication must prepare"))
+            .handoff();
+        match published.into_parts() {
+            PublishedRetainedPublicationParts::Success {
+                canonical,
+                outcome_evidence,
+                ..
+            } => {
+                assert_eq!(canonical.aggregate().get(canonical_root), Some(&11));
+                assert!(canonical.aggregate().get(source_canonical_slot).is_none());
+                assert_eq!(outcome_evidence.aggregate().get(evidence_root), Some(&7));
+                assert!(
+                    outcome_evidence
+                        .aggregate()
+                        .get(source_evidence_slot)
+                        .is_none()
+                );
+            }
+            _ => panic!("inherited publication must succeed"),
+        }
+        drop(source_canonical);
+        drop(source_evidence);
+        drop(account);
+        assert_eq!(factory.snapshot().live_accounts(), 0);
+    }
+
+    #[test]
+    fn foreign_aggregate_is_rejected_before_member_access_or_reference_clone() {
+        let factory = account_factory(2);
+        let source_account = account(&factory, u64::MAX, 128);
+        let target_account = account(&factory, u64::MAX, 128);
+        let (source_canonical, source_slot, source_evidence, _) =
+            publish_scalar_source(&source_account);
+        let table_shares_before = source_canonical.aggregate().inner.table.share_call_count();
+        let block_shares_before = source_canonical.aggregate().inner.table.as_ref().members[0]
+            .allocation
+            .share_call_count();
+        let _ = take_test_member_lookups();
+
+        let operation = test_operation_on_account_with_control(
+            &target_account,
+            64,
+            RetainedBatchLimits::new(2, 2),
+            OperationControl::default(),
+        );
+        let mut assembly: TestPublication<u64, u64> = operation
+            .try_publication_assembly(publication_plan(1, 1))
+            .unwrap_or_else(|_| panic!("foreign-account target must open"));
+        let result = assembly.try_share_canonical(source_canonical.aggregate(), source_slot);
+
+        assert!(matches!(
+            result,
+            Err(RetainedPublicationError::Writer(
+                RetainedWriterError::ForeignAccount
+            ))
+        ));
+        assert_eq!(take_test_member_lookups(), 0);
+        assert_eq!(assembly.canonical_len(), 0);
+        assert_eq!(
+            source_canonical.aggregate().inner.table.share_call_count(),
+            table_shares_before
+        );
+        assert_eq!(
+            source_canonical.aggregate().inner.table.as_ref().members[0]
+                .allocation
+                .share_call_count(),
+            block_shares_before
+        );
+        drop(
+            assembly
+                .prepare_minimal_fallback()
+                .unwrap_or_else(|_| panic!("foreign rejection must preserve fallback"))
+                .handoff(),
+        );
+        drop(source_canonical);
+        drop(source_evidence);
+        drop(source_account);
+        drop(target_account);
+        assert_eq!(factory.snapshot().live_accounts(), 0);
+    }
+
+    #[test]
+    fn share_work_rejection_does_not_clone_or_mutate_the_target_table() {
+        let factory = account_factory(1);
+        let account = account(&factory, u64::MAX, 128);
+        let (source_canonical, source_slot, source_evidence, _) = publish_scalar_source(&account);
+        let block_shares_before = source_canonical.aggregate().inner.table.as_ref().members[0]
+            .allocation
+            .share_call_count();
+        let physical_before_operation = account.snapshot();
+        let policy = DimensionPolicy::reservable_bytes(15, 15, u64::MAX, u64::MAX)
+            .with_published_outcome_evidence_limit(u64::MAX);
+        let limits = LedgerLimits::new(u64::MAX, [(TestDimension::Bytes, policy)]).unwrap();
+        let start = RetainedOperationStartPlan::new(
+            writer_plan(2, 2),
+            share_work(),
+            empty_plan(),
+            OutputCommitment::new(TestDimension::Bytes, 1),
+            OutputCommitment::new(TestDimension::Bytes, 1),
+        );
+        let operation =
+            TestOperation::try_start(OperationControl::default(), limits, &account, start, || {
+                Ok(7_u32)
+            })
+            .unwrap_or_else(|_| panic!("exact share-work operation must start"));
+        let mut assembly: TestPublication<u64, u64> = operation
+            .try_publication_assembly(publication_plan(1, 1))
+            .unwrap_or_else(|_| panic!("exact share-work tables must open"));
+        let physical_before_share = account.snapshot();
+
+        let result = assembly.try_share_canonical(source_canonical.aggregate(), source_slot);
+
+        assert!(matches!(
+            result,
+            Err(RetainedPublicationError::Writer(
+                RetainedWriterError::Ledger(LedgerCause::LimitExceeded { .. })
+            ))
+        ));
+        assert_eq!(assembly.canonical_len(), 0);
+        assert_eq!(account.snapshot(), physical_before_share);
+        assert!(
+            physical_before_share.live_retained_bytes()
+                > physical_before_operation.live_retained_bytes()
+        );
+        assert_eq!(
+            source_canonical.aggregate().inner.table.as_ref().members[0]
+                .allocation
+                .share_call_count(),
+            block_shares_before
+        );
+        drop(
+            assembly
+                .prepare_minimal_fallback()
+                .unwrap_or_else(|_| panic!("share-work rejection must preserve fallback"))
+                .handoff(),
+        );
+        drop(source_canonical);
+        drop(source_evidence);
+        drop(account);
+        assert_eq!(factory.snapshot().live_accounts(), 0);
+    }
+
+    #[test]
+    fn invalid_publication_capacity_is_rejected_before_every_open_side_effect() {
+        let factory = account_factory(1);
+        let invalid_plans = [
+            (
+                "attribution capacity overflow",
+                RetainedPublicationPlan::rich_failure(RetainedBlockTablePlan::new(
+                    writer_plan(usize::MAX, 1),
+                    1,
+                    0,
+                )),
+                true,
+            ),
+            (
+                "commitment capacity overflow",
+                RetainedPublicationPlan::rich_failure(RetainedBlockTablePlan::new(
+                    writer_plan(1, usize::MAX),
+                    1,
+                    0,
+                )),
+                false,
+            ),
+            (
+                "member capacity overflow",
+                RetainedPublicationPlan::rich_failure(RetainedBlockTablePlan::new(
+                    writer_plan(1, 1),
+                    usize::MAX,
+                    0,
+                )),
+                true,
+            ),
+            (
+                "new block limit exceeds total blocks",
+                RetainedPublicationPlan::rich_failure(RetainedBlockTablePlan::new(
+                    writer_plan(2, 1),
+                    1,
+                    2,
+                )),
+                false,
+            ),
+        ];
+
+        for (index, (case, invalid_plan, expects_batch_capacity)) in
+            invalid_plans.into_iter().enumerate()
+        {
+            let operation = test_operation(&factory, 64);
+            let dimension_before = operation
+                .coordinator
+                .dimension_evidence(TestDimension::Bytes)
+                .unwrap_or_else(|_| panic!("{case}: dimension evidence before open"));
+            let physical_before = operation.account().snapshot();
+            let account_shares_before = operation.account().share_call_count();
+            let set_ids_before = test_retained_set_id_requests();
+            let batch_allocations_before =
+                crate::ledger::test_attribution_batch_allocation_entries();
+
+            let error = match operation.try_publication_assembly::<u64, u64>(invalid_plan) {
+                Ok(_) => panic!("{case}: invalid plan unexpectedly opened"),
+                Err(error) => error,
+            };
+            assert!(
+                if expects_batch_capacity {
+                    matches!(error.cause(), RetainedWriterError::BatchCapacity)
+                } else {
+                    matches!(error.cause(), RetainedWriterError::InvalidPublicationPlan)
+                },
+                "{case}: unexpected preflight cause: {}",
+                error.cause()
+            );
+            let operation = error
+                .try_into_operation()
+                .unwrap_or_else(|_| panic!("{case}: pure preflight must return the operation"));
+
+            assert_eq!(test_retained_set_id_requests(), set_ids_before, "{case}");
+            assert_eq!(
+                crate::ledger::test_attribution_batch_allocation_entries(),
+                batch_allocations_before,
+                "{case}"
+            );
+            assert_eq!(
+                operation.account().share_call_count(),
+                account_shares_before,
+                "{case}"
+            );
+            assert_eq!(operation.account().snapshot(), physical_before, "{case}");
+            assert_eq!(
+                operation
+                    .coordinator
+                    .dimension_evidence(TestDimension::Bytes)
+                    .unwrap_or_else(|_| panic!("{case}: dimension evidence after rejection")),
+                dimension_before,
+                "{case}"
+            );
+
+            if index == 2 {
+                let assembly: TestPublication<u64, u64> = operation
+                    .try_publication_assembly(RetainedPublicationPlan::rich_failure(
+                        RetainedBlockTablePlan::new(writer_plan(1, 1), 1, 0),
+                    ))
+                    .unwrap_or_else(|_| panic!("{case}: valid retry must open"));
+                drop(
+                    assembly
+                        .prepare_minimal_fallback()
+                        .unwrap_or_else(|_| panic!("{case}: retry fallback must prepare"))
+                        .handoff(),
+                );
+            } else {
+                drop(
+                    operation
+                        .prepare_minimal_fallback::<u64, u64>(PreparationFailureCode::domain(70))
+                        .handoff(),
+                );
+            }
+            assert_eq!(factory.snapshot().live_accounts(), 0, "{case}");
+        }
+    }
+
+    #[test]
+    fn recoverable_open_failures_prepare_the_baseline_without_tables_or_roots() {
+        let factory = account_factory(1);
+        let operation = test_operation(&factory, 64);
+        let invalid_plan = RetainedPublicationPlan::success(
+            RetainedBlockTablePlan::new(writer_plan(2, 2), 1, 2),
+            RetainedBlockTablePlan::new(writer_plan(2, 2), 1, 1),
+        );
+        let error = match operation.try_publication_assembly::<u64, u64>(invalid_plan) {
+            Ok(_) => panic!("invalid total/new relation must be rejected"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            error.cause(),
+            RetainedWriterError::InvalidPublicationPlan
+        ));
+        let operation = error
+            .try_into_operation()
+            .unwrap_or_else(|_| panic!("invalid plan must return the untouched operation"));
+        let published = operation
+            .prepare_minimal_fallback::<u64, u64>(PreparationFailureCode::domain(71))
+            .handoff();
+        match published.into_parts() {
+            PublishedRetainedPublicationParts::MinimalFallback {
+                fallback,
+                ledger_evidence,
+            } => {
+                assert_eq!(fallback.cause(), PreparationFailureCode::domain(71));
+                assert_eq!(*fallback.value(), 7);
+                assert_eq!(
+                    ledger_evidence
+                        .dimension(TestDimension::Bytes)
+                        .expect("direct fallback ledger evidence")
+                        .committed_canonical_output(),
+                    0
+                );
+            }
+            _ => panic!("invalid plan must publish minimal fallback"),
+        }
+
+        let operation = test_operation(&factory, 64);
+        fail_next_final_owner_allocation();
+        let error = match operation.try_publication_assembly::<u64, u64>(publication_plan(1, 1)) {
+            Ok(_) => panic!("injected table allocation failure must reject open"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            error.cause(),
+            RetainedWriterError::Physical(RetainedAllocationError::AllocationFailed {
+                charge_retained: false
+            })
+        ));
+        let operation = error
+            .try_into_operation()
+            .unwrap_or_else(|_| panic!("verified allocation failure must return the operation"));
+        let published = operation
+            .prepare_minimal_fallback::<u64, u64>(PreparationFailureCode::domain(72))
+            .handoff();
+        assert!(matches!(
+            published.into_parts(),
+            PublishedRetainedPublicationParts::MinimalFallback { fallback, .. }
+                if fallback.cause() == PreparationFailureCode::domain(72)
+        ));
+        assert_eq!(factory.snapshot().live_accounts(), 0);
+    }
+
+    #[test]
+    fn semantic_rejection_can_append_evidence_and_prepare_a_rich_failure() {
+        let factory = account_factory(1);
+        let operation =
+            test_operation_with_writer_limits(&factory, 64, RetainedBatchLimits::new(3, 2));
+        let mut assembly: TestPublication<u64, u64> = operation
+            .try_publication_assembly(publication_plan(1, 2))
+            .unwrap_or_else(|_| panic!("semantic rejection publication must open"));
+        let (canonical_root, evidence_root) = retain_scalar_success(&mut assembly);
+
+        let mut failure = match assembly.validate_success(
+            canonical_root,
+            evidence_root,
+            |session, canonical, evidence| {
+                let _ = session.canonical(canonical);
+                let _ = session.outcome_evidence(evidence);
+                false
+            },
+        ) {
+            RetainedSuccessValidation::Rejected(failure) => failure,
+            _ => panic!("semantic rejection must preserve evidence-building ownership"),
+        };
+        let detail = failure
+            .try_retain_outcome_evidence(empty_plan(), |emplacer| {
+                Ok(emplacer.place(9, EvidenceDetailTag))
+            })
+            .unwrap_or_else(|_| panic!("bounded failure detail must retain"));
+        failure
+            .try_commit_outcome_evidence(TestDimension::Bytes, 3)
+            .unwrap_or_else(|_| panic!("failure evidence commitment must fit"));
+        let validated = match failure.validate_rich_failure(evidence_root, |session, root| {
+            session.outcome_evidence(root) == Some(&7)
+                && session.outcome_evidence(detail) == Some(&9)
+        }) {
+            RetainedFailureValidation::Valid(validated) => validated,
+            _ => panic!("augmented failure evidence must validate"),
+        };
+        let published = validated
+            .try_prepare(PreparationFailureCode::domain(91), final_progress())
+            .unwrap_or_else(|_| panic!("rich failure must prepare"))
+            .handoff();
+        match published.into_parts() {
+            PublishedRetainedPublicationParts::RichFailure {
+                outcome_evidence,
+                ledger_evidence,
+            } => {
+                assert_eq!(outcome_evidence.cause(), PreparationFailureCode::domain(91));
+                assert_eq!(outcome_evidence.outcome_evidence().root(), &7);
+                assert_eq!(
+                    outcome_evidence.outcome_evidence().aggregate().get(detail),
+                    Some(&9)
+                );
+                assert_eq!(
+                    ledger_evidence
+                        .dimension(TestDimension::Bytes)
+                        .expect("rich failure ledger evidence")
+                        .committed_canonical_output(),
+                    0
+                );
+            }
+            _ => panic!("semantic rejection must publish rich failure only"),
+        }
+        assert_eq!(factory.snapshot().live_accounts(), 0);
+    }
+
+    #[test]
+    fn validation_panic_transitions_to_fallback_only() {
+        let factory = account_factory(1);
+        let operation = test_operation(&factory, 64);
+        let mut assembly: TestPublication<u64, u64> = operation
+            .try_publication_assembly(publication_plan(1, 1))
+            .unwrap_or_else(|_| panic!("validation-panic publication must open"));
+        let (canonical_root, evidence_root) = retain_scalar_success(&mut assembly);
+
+        let fallback_only = match assembly.validate_success(
+            canonical_root,
+            evidence_root,
+            |_session, _canonical, _evidence| panic!("validator panic"),
+        ) {
+            RetainedSuccessValidation::FallbackOnly(fallback) => fallback,
+            _ => panic!("validator panic must expose only fallback"),
+        };
+        let published = fallback_only
+            .prepare_minimal_fallback()
+            .unwrap_or_else(|_| panic!("validation panic fallback must prepare"))
+            .handoff();
+        match published.into_parts() {
+            PublishedRetainedPublicationParts::MinimalFallback { fallback, .. } => {
+                assert_eq!(
+                    fallback.cause().class(),
+                    PreparationFailureClass::ProductGraph
+                );
+                assert_eq!(fallback.cause().code(), 5);
+            }
+            _ => panic!("validation panic must publish minimal fallback"),
+        }
+        assert_eq!(factory.snapshot().live_accounts(), 0);
+    }
+
+    #[test]
+    fn repeated_semantic_rejection_preserves_the_product_graph_fallback_cause() {
+        let factory = account_factory(1);
+        let operation = test_operation(&factory, 64);
+        let mut assembly: TestPublication<u64, u64> = operation
+            .try_publication_assembly(publication_plan(1, 1))
+            .unwrap_or_else(|_| panic!("repeated-rejection publication must open"));
+        let (canonical, evidence) = retain_scalar_success(&mut assembly);
+
+        let failure = match assembly.validate_success(
+            canonical,
+            evidence,
+            |_session, _canonical, _evidence| false,
+        ) {
+            RetainedSuccessValidation::Rejected(failure) => failure,
+            _ => panic!("first semantic rejection must expose failure building"),
+        };
+        let failure = match failure.validate_rich_failure(evidence, |_session, _evidence| false) {
+            RetainedFailureValidation::Rejected(failure) => failure,
+            _ => panic!("second semantic rejection must preserve failure building"),
+        };
+        let published = failure
+            .prepare_minimal_fallback()
+            .unwrap_or_else(|_| panic!("repeated rejection fallback must prepare"))
+            .handoff();
+        match published.into_parts() {
+            PublishedRetainedPublicationParts::MinimalFallback { fallback, .. } => {
+                assert_eq!(
+                    fallback.cause().class(),
+                    PreparationFailureClass::ProductGraph
+                );
+                assert_eq!(fallback.cause().code(), 4);
+            }
+            _ => panic!("repeated semantic rejection must publish only fallback"),
         }
         assert_eq!(factory.snapshot().live_accounts(), 0);
     }
@@ -5146,16 +6452,14 @@ mod tests {
             })
             .unwrap_or_else(|_| panic!("evidence must retain"));
 
-        let prepared = assembly
-            .try_prepare_success(
-                root,
-                evidence,
-                final_progress(),
-                |session, root, evidence| {
-                    session.canonical(root).is_some()
-                        && session.outcome_evidence(evidence).is_some()
-                },
-            )
+        let rejected = match assembly.validate_success(root, evidence, |session, root, evidence| {
+            session.canonical(root).is_some() && session.outcome_evidence(evidence).is_some()
+        }) {
+            RetainedSuccessValidation::Rejected(rejected) => rejected,
+            _ => panic!("orphan graph must be rejected"),
+        };
+        let prepared = rejected
+            .prepare_minimal_fallback()
             .unwrap_or_else(|_| panic!("orphan rejection must prepare minimal fallback"));
         match prepared.handoff().into_parts() {
             PublishedRetainedPublicationParts::MinimalFallback { fallback, .. } => {
@@ -5194,17 +6498,16 @@ mod tests {
                 identity: orphan.identity,
                 marker: PhantomData,
             };
-        let prepared = assembly
-            .try_prepare_success(
-                root,
-                evidence,
-                final_progress(),
-                |session, root, evidence| {
-                    session.canonical(root).is_some()
-                        && session.canonical(retagged).is_some()
-                        && session.outcome_evidence(evidence).is_some()
-                },
-            )
+        let rejected = match assembly.validate_success(root, evidence, |session, root, evidence| {
+            session.canonical(root).is_some()
+                && session.canonical(retagged).is_some()
+                && session.outcome_evidence(evidence).is_some()
+        }) {
+            RetainedSuccessValidation::Rejected(rejected) => rejected,
+            _ => panic!("retagged graph must be rejected"),
+        };
+        let prepared = rejected
+            .prepare_minimal_fallback()
             .unwrap_or_else(|_| panic!("retag rejection must prepare minimal fallback"));
         match prepared.handoff().into_parts() {
             PublishedRetainedPublicationParts::MinimalFallback { fallback, .. } => {
@@ -5305,13 +6608,14 @@ mod tests {
         OBSERVED_OPERATION_LIVE.store(0, Ordering::SeqCst);
         OBSERVED_PHYSICAL_BYTES.store(0, Ordering::SeqCst);
         OBSERVED_PHYSICAL_ALLOCATIONS.store(0, Ordering::SeqCst);
-        let prepared = assembly
-            .try_prepare_rich_failure(
-                evidence,
-                PreparationFailureCode::domain(9),
-                final_progress(),
-                |session, root| session.outcome_evidence(root) == Some(&5),
-            )
+        let validated = match assembly.validate_rich_failure(evidence, |session, root| {
+            session.outcome_evidence(root) == Some(&5)
+        }) {
+            RetainedFailureValidation::Valid(validated) => validated,
+            _ => panic!("partial canonical failure graph must validate"),
+        };
+        let prepared = validated
+            .try_prepare(PreparationFailureCode::domain(9), final_progress())
             .unwrap_or_else(|_| panic!("partial canonical must downgrade to rich failure"));
 
         assert!(OBSERVED_ACTIVE.load(Ordering::SeqCst) > 0);
@@ -5337,6 +6641,7 @@ mod tests {
         let plan = RetainedPublicationPlan::rich_failure(RetainedBlockTablePlan::new(
             writer_plan(2, 2),
             1,
+            1,
         ));
         let mut assembly: TestPublication<u64, u64> = operation
             .try_publication_assembly(plan)
@@ -5356,13 +6661,14 @@ mod tests {
                 Ok(emplacer.place(7, EvidenceRootTag))
             })
             .unwrap_or_else(|_| panic!("failure evidence must retain"));
-        match assembly
-            .try_prepare_rich_failure(
-                evidence,
-                PreparationFailureCode::domain(3),
-                final_progress(),
-                |session, root| session.outcome_evidence(root) == Some(&7),
-            )
+        let validated = match assembly.validate_rich_failure(evidence, |session, root| {
+            session.outcome_evidence(root) == Some(&7)
+        }) {
+            RetainedFailureValidation::Valid(validated) => validated,
+            _ => panic!("failure-only graph must validate"),
+        };
+        match validated
+            .try_prepare(PreparationFailureCode::domain(3), final_progress())
             .unwrap_or_else(|_| panic!("failure-only publication must prepare"))
             .handoff()
             .into_parts()
@@ -5394,16 +6700,16 @@ mod tests {
             .unwrap_or_else(|_| panic!("publication assembly must open"));
         let (canonical, evidence) = retain_scalar_success(&mut assembly);
 
-        match assembly
-            .try_prepare_success(
-                canonical,
-                evidence,
-                final_progress(),
-                |session, canonical, evidence| {
-                    session.canonical(canonical) == Some(&11)
-                        && session.outcome_evidence(evidence) == Some(&7)
-                },
-            )
+        let validated =
+            match assembly.validate_success(canonical, evidence, |session, canonical, evidence| {
+                session.canonical(canonical) == Some(&11)
+                    && session.outcome_evidence(evidence) == Some(&7)
+            }) {
+                RetainedSuccessValidation::Valid(validated) => validated,
+                _ => panic!("control rejection candidate must validate"),
+            };
+        match validated
+            .try_prepare(final_progress())
             .unwrap_or_else(|_| panic!("control rejection must produce a rich failure"))
             .handoff()
             .into_parts()
@@ -5429,6 +6735,7 @@ mod tests {
         let plan = RetainedPublicationPlan::rich_failure(RetainedBlockTablePlan::new(
             writer_plan(2, 2),
             1,
+            1,
         ));
         let mut assembly: TestPublication<u64, u64> = operation
             .try_publication_assembly(plan)
@@ -5441,13 +6748,14 @@ mod tests {
         assembly
             .try_commit_outcome_evidence(TestDimension::Bytes, 4)
             .unwrap_or_else(|_| panic!("commitment must fit the preallocated batch"));
-        match assembly
-            .try_prepare_rich_failure(
-                evidence,
-                PreparationFailureCode::domain(5),
-                final_progress(),
-                |session, root| session.outcome_evidence(root) == Some(&7),
-            )
+        let validated = match assembly.validate_rich_failure(evidence, |session, root| {
+            session.outcome_evidence(root) == Some(&7)
+        }) {
+            RetainedFailureValidation::Valid(validated) => validated,
+            _ => panic!("evidence rejection candidate must validate"),
+        };
+        match validated
+            .try_prepare(PreparationFailureCode::domain(5), final_progress())
             .unwrap_or_else(|_| panic!("ledger rejection must retain minimal fallback"))
             .handoff()
             .into_parts()
@@ -5487,16 +6795,16 @@ mod tests {
             .try_commit_outcome_evidence(TestDimension::Bytes, 4)
             .unwrap_or_else(|_| panic!("commitment must fit the preallocated batch"));
 
-        let prepared = assembly
-            .try_prepare_success(
-                canonical,
-                evidence,
-                final_progress(),
-                |session, canonical, evidence| {
-                    session.canonical(canonical).is_some()
-                        && session.outcome_evidence(evidence).is_some()
-                },
-            )
+        let validated =
+            match assembly.validate_success(canonical, evidence, |session, canonical, evidence| {
+                session.canonical(canonical).is_some()
+                    && session.outcome_evidence(evidence).is_some()
+            }) {
+                RetainedSuccessValidation::Valid(validated) => validated,
+                _ => panic!("success rejection candidate must validate"),
+            };
+        let prepared = validated
+            .try_prepare(final_progress())
             .unwrap_or_else(|_| panic!("success rejection must prepare minimal fallback"));
         assert_eq!(CANONICAL_DROPS.load(Ordering::SeqCst), 1);
         assert_eq!(EVIDENCE_DROPS.load(Ordering::SeqCst), 1);
@@ -5577,8 +6885,8 @@ mod tests {
             RetainedBatchLimits::new(2, 2),
         );
         let publication_plan = RetainedPublicationPlan::success(
-            RetainedBlockTablePlan::new(table_writer, 1),
-            RetainedBlockTablePlan::new(table_writer, 1),
+            RetainedBlockTablePlan::new(table_writer, 1, 1),
+            RetainedBlockTablePlan::new(table_writer, 1, 1),
         );
         let mut assembly: PanicPublication = operation
             .try_publication_assembly(publication_plan)
@@ -5607,16 +6915,16 @@ mod tests {
             (ledger.active_reservations(), ledger.current_live_bytes())
         };
 
-        PANIC_ON_PRIMARY_DIMENSION_ORD.store(true, Ordering::SeqCst);
-        let result = assembly.try_prepare_success(
-            canonical,
-            evidence,
-            final_progress(),
-            |session, canonical, evidence| {
+        let validated =
+            match assembly.validate_success(canonical, evidence, |session, canonical, evidence| {
                 session.canonical(canonical).is_some()
                     && session.outcome_evidence(evidence) == Some(&9)
-            },
-        );
+            }) {
+                RetainedSuccessValidation::Valid(validated) => validated,
+                _ => panic!("panic-order candidate must validate"),
+            };
+        PANIC_ON_PRIMARY_DIMENSION_ORD.store(true, Ordering::SeqCst);
+        let result = validated.try_prepare(final_progress());
         PANIC_ON_PRIMARY_DIMENSION_ORD.store(false, Ordering::SeqCst);
 
         assert!(matches!(
@@ -5672,15 +6980,15 @@ mod tests {
         let before_active = probe.active_reservations();
         let before_live = probe.current_live_bytes();
 
-        let result = assembly.try_prepare_success(
-            canonical,
-            evidence,
-            final_progress(),
-            |session, canonical, evidence| {
+        let validated =
+            match assembly.validate_success(canonical, evidence, |session, canonical, evidence| {
                 session.canonical(canonical).is_some()
                     && session.outcome_evidence(evidence).is_some()
-            },
-        );
+            }) {
+                RetainedSuccessValidation::Valid(validated) => validated,
+                _ => panic!("panicking-drop candidate must validate"),
+            };
+        let result = validated.try_prepare(final_progress());
         assert!(matches!(
             result,
             Err(RetainedPublicationPrepareError::StorageDropUnverified)
@@ -5712,13 +7020,14 @@ mod tests {
                 Ok(emplacer.place(7, EvidenceRootTag))
             })
             .unwrap_or_else(|_| panic!("evidence must retain"));
+        let validated = match assembly.validate_rich_failure(evidence, |session, root| {
+            session.outcome_evidence(root) == Some(&7)
+        }) {
+            RetainedFailureValidation::Valid(validated) => validated,
+            _ => panic!("table-drop failure candidate must validate"),
+        };
         assert!(matches!(
-            assembly.try_prepare_rich_failure(
-                evidence,
-                PreparationFailureCode::domain(2),
-                final_progress(),
-                |session, root| session.outcome_evidence(root) == Some(&7),
-            ),
+            validated.try_prepare(PreparationFailureCode::domain(2), final_progress()),
             Err(RetainedPublicationPrepareError::StorageDropUnverified)
         ));
         assert_eq!(DROP_COUNT.load(Ordering::SeqCst), 1);
@@ -5823,16 +7132,16 @@ mod tests {
                 Ok(emplacer.place(7, EvidenceRootTag))
             })
             .unwrap_or_else(|_| panic!("prepared drop evidence must retain"));
-        let prepared = assembly
-            .try_prepare_success(
-                canonical,
-                evidence,
-                final_progress(),
-                |session, canonical, evidence| {
-                    session.canonical(canonical).is_some()
-                        && session.outcome_evidence(evidence) == Some(&7)
-                },
-            )
+        let validated =
+            match assembly.validate_success(canonical, evidence, |session, canonical, evidence| {
+                session.canonical(canonical).is_some()
+                    && session.outcome_evidence(evidence) == Some(&7)
+            }) {
+                RetainedSuccessValidation::Valid(validated) => validated,
+                _ => panic!("prepared-drop graph must validate"),
+            };
+        let prepared = validated
+            .try_prepare(final_progress())
             .unwrap_or_else(|_| panic!("prepared drop publication must prepare"));
         assert!(catch_unwind(AssertUnwindSafe(|| drop(prepared))).is_ok());
         assert_eq!(PREPARED_DROPS.load(Ordering::SeqCst), 1);
@@ -5854,16 +7163,16 @@ mod tests {
                 Ok(emplacer.place(7, EvidenceRootTag))
             })
             .unwrap_or_else(|_| panic!("published drop evidence must retain"));
-        let published = assembly
-            .try_prepare_success(
-                canonical,
-                evidence,
-                final_progress(),
-                |session, canonical, evidence| {
-                    session.canonical(canonical).is_some()
-                        && session.outcome_evidence(evidence) == Some(&7)
-                },
-            )
+        let validated =
+            match assembly.validate_success(canonical, evidence, |session, canonical, evidence| {
+                session.canonical(canonical).is_some()
+                    && session.outcome_evidence(evidence) == Some(&7)
+            }) {
+                RetainedSuccessValidation::Valid(validated) => validated,
+                _ => panic!("published-drop graph must validate"),
+            };
+        let published = validated
+            .try_prepare(final_progress())
             .unwrap_or_else(|_| panic!("published drop publication must prepare"))
             .handoff();
         assert!(catch_unwind(AssertUnwindSafe(|| drop(published))).is_ok());
@@ -5911,16 +7220,16 @@ mod tests {
                 Ok(emplacer.place(7, EvidenceRootTag))
             })
             .unwrap_or_else(|_| panic!("prepared observation evidence must retain"));
-        let prepared = assembly
-            .try_prepare_success(
-                canonical,
-                evidence,
-                final_progress(),
-                |session, canonical, evidence| {
-                    session.canonical(canonical).is_some()
-                        && session.outcome_evidence(evidence) == Some(&7)
-                },
-            )
+        let validated =
+            match assembly.validate_success(canonical, evidence, |session, canonical, evidence| {
+                session.canonical(canonical).is_some()
+                    && session.outcome_evidence(evidence) == Some(&7)
+            }) {
+                RetainedSuccessValidation::Valid(validated) => validated,
+                _ => panic!("prepared observation graph must validate"),
+            };
+        let prepared = validated
+            .try_prepare(final_progress())
             .unwrap_or_else(|_| panic!("prepared observation publication must prepare"));
         drop(prepared);
         assert_eq!(DROP_COUNT.load(Ordering::SeqCst), 1);
@@ -5955,16 +7264,16 @@ mod tests {
                 Ok(emplacer.place(7, EvidenceRootTag))
             })
             .unwrap_or_else(|_| panic!("handoff observation evidence must retain"));
-        let prepared = assembly
-            .try_prepare_success(
-                canonical,
-                evidence,
-                final_progress(),
-                |session, canonical, evidence| {
-                    session.canonical(canonical).is_some()
-                        && session.outcome_evidence(evidence) == Some(&7)
-                },
-            )
+        let validated =
+            match assembly.validate_success(canonical, evidence, |session, canonical, evidence| {
+                session.canonical(canonical).is_some()
+                    && session.outcome_evidence(evidence) == Some(&7)
+            }) {
+                RetainedSuccessValidation::Valid(validated) => validated,
+                _ => panic!("handoff observation graph must validate"),
+            };
+        let prepared = validated
+            .try_prepare(final_progress())
             .unwrap_or_else(|_| panic!("handoff observation publication must prepare"));
         let (canonical_identity, canonical_shares, evidence_identity, evidence_shares) =
             match &prepared.payload {
@@ -6096,18 +7405,16 @@ mod tests {
             .test_probe();
         let before_active = probe.active_reservations();
         let before_live = probe.current_live_bytes();
-        let result = catch_unwind(AssertUnwindSafe(|| {
-            assembly.try_prepare_success(
-                canonical,
-                evidence,
-                final_progress(),
-                |session, canonical, evidence| {
-                    session.canonical(canonical) == Some(&41)
-                        && session.outcome_evidence(evidence) == Some(&7)
-                },
-            )
-        }))
-        .expect("fallback destructor panic must be contained");
+        let validated =
+            match assembly.validate_success(canonical, evidence, |session, canonical, evidence| {
+                session.canonical(canonical) == Some(&41)
+                    && session.outcome_evidence(evidence) == Some(&7)
+            }) {
+                RetainedSuccessValidation::Valid(validated) => validated,
+                _ => panic!("fallback-panic candidate must validate"),
+            };
+        let result = catch_unwind(AssertUnwindSafe(|| validated.try_prepare(final_progress())))
+            .expect("fallback destructor panic must be contained");
         assert!(matches!(
             result,
             Err(RetainedPublicationPrepareError::StorageDropUnverified)
@@ -6141,6 +7448,7 @@ mod tests {
         let plan = RetainedPublicationPlan::rich_failure(RetainedBlockTablePlan::new(
             writer_plan(2, 2),
             1,
+            1,
         ));
         let mut assembly: TestPublication<u64, PanickingEvidence> = operation
             .try_publication_assembly(plan)
@@ -6154,13 +7462,14 @@ mod tests {
         assembly
             .try_commit_outcome_evidence(TestDimension::Bytes, 4)
             .unwrap_or_else(|_| panic!("commitment must fit the preallocated batch"));
+        let validated = match assembly.validate_rich_failure(evidence, |session, root| {
+            session.outcome_evidence(root).is_some()
+        }) {
+            RetainedFailureValidation::Valid(validated) => validated,
+            _ => panic!("rejected-primary candidate must validate"),
+        };
         let result = catch_unwind(AssertUnwindSafe(|| {
-            assembly.try_prepare_rich_failure(
-                evidence,
-                PreparationFailureCode::domain(5),
-                final_progress(),
-                |session, root| session.outcome_evidence(root).is_some(),
-            )
+            validated.try_prepare(PreparationFailureCode::domain(5), final_progress())
         }))
         .expect("primary rejection payload panic must be contained");
         assert!(matches!(
@@ -6276,16 +7585,16 @@ mod tests {
                 Ok(emplacer.place(7, EvidenceRootTag))
             })
             .unwrap_or_else(|_| panic!("evidence root must retain"));
-        let published = assembly
-            .try_prepare_success(
-                canonical,
-                evidence,
-                final_progress(),
-                |session, canonical, evidence| {
-                    session.canonical(canonical) == Some(&11)
-                        && session.outcome_evidence(evidence) == Some(&7)
-                },
-            )
+        let validated =
+            match assembly.validate_success(canonical, evidence, |session, canonical, evidence| {
+                session.canonical(canonical) == Some(&11)
+                    && session.outcome_evidence(evidence) == Some(&7)
+            }) {
+                RetainedSuccessValidation::Valid(validated) => validated,
+                _ => panic!("retried assembly graph must validate"),
+            };
+        let published = validated
+            .try_prepare(final_progress())
             .unwrap_or_else(|_| panic!("retried assembly must prepare"))
             .handoff();
         drop(published);
@@ -6310,13 +7619,16 @@ mod tests {
             })
             .unwrap_or_else(|_| panic!("evidence root must retain"));
 
-        let prepared = assembly
-            .try_prepare_success(
-                canonical,
-                evidence,
-                final_progress(),
-                |_session, _canonical, _evidence| std::panic::panic_any(vec![0_u8; 8]),
-            )
+        let fallback_only = match assembly.validate_success(
+            canonical,
+            evidence,
+            |_session, _canonical, _evidence| std::panic::panic_any(vec![0_u8; 8]),
+        ) {
+            RetainedSuccessValidation::FallbackOnly(fallback) => fallback,
+            _ => panic!("validation panic must expose fallback-only state"),
+        };
+        let prepared = fallback_only
+            .prepare_minimal_fallback()
             .unwrap_or_else(|_| panic!("validation panic must prepare minimal fallback"));
         match prepared.handoff().into_parts() {
             PublishedRetainedPublicationParts::MinimalFallback { fallback, .. } => {
@@ -7097,7 +8409,7 @@ mod tests {
     }
 
     #[test]
-    fn physical_leaf_mutators_are_not_crate_or_public_api() {
+    fn generic_retained_authority_remains_crate_private() {
         let source = include_str!("retained.rs");
         let root_exports = include_str!("lib.rs");
         let test_attribute = ["#[cfg(", "test)]"].concat();
@@ -7105,20 +8417,74 @@ mod tests {
             .rsplit_once(&test_attribute)
             .expect("retained source contains one final test module boundary");
 
+        assert!(
+            !root_exports.contains("pub use retained::*"),
+            "the private retained module must never gain a glob re-export"
+        );
+        let export_prefix = "pub use retained::{";
+        assert_eq!(root_exports.matches(export_prefix).count(), 1);
+        let export_tail = root_exports
+            .split_once(export_prefix)
+            .expect("the crate root has one curated retained export block")
+            .1;
+        let export_body = export_tail
+            .split_once("};")
+            .expect("the curated retained export block is terminated")
+            .0;
+        let mut actual_exports: Vec<_> = export_body
+            .split(',')
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .collect();
+        let mut expected_exports = vec![
+            "PhysicalStorageAccount",
+            "PhysicalStorageAccountCreateError",
+            "PhysicalStorageAccountFactory",
+            "PhysicalStorageAccountFactoryCreateError",
+            "PhysicalStorageAccountFactoryLimits",
+            "PhysicalStorageAccountFactorySnapshot",
+            "PhysicalStorageAccountLimits",
+            "PhysicalStorageAccountSnapshot",
+            "PhysicalStorageLimitError",
+        ];
+        actual_exports.sort_unstable();
+        expected_exports.sort_unstable();
+        assert_eq!(actual_exports, expected_exports);
+
+        let mut public_declarations: Vec<_> = production
+            .lines()
+            .filter(|line| {
+                line.starts_with("pub struct ")
+                    || line.starts_with("pub enum ")
+                    || line.starts_with("pub const ")
+                    || line.starts_with("pub type ")
+                    || line.starts_with("pub trait ")
+            })
+            .filter_map(|line| line.split_whitespace().nth(2))
+            .map(|name| name.trim_end_matches(['{', ':']))
+            .collect();
+        public_declarations.sort_unstable();
+        assert_eq!(public_declarations, expected_exports);
+
         assert!(production.contains("pub(crate) struct RetainedAllocation<T>"));
+        assert!(production.contains("\nstruct RetainedPart<"));
+        assert!(production.contains("\nenum RetainedClosureValidationError"));
         for forbidden in [
-            "CanonicalRetainedSlot",
-            "OutcomeEvidenceRetainedSlot",
             "RetainedAllocation",
-            "RetainedClosureSession",
-            "RetainedEvidenceClosureSession",
-            "RetainedOperation",
             "RetainedPart",
-            "RetainedPublication",
+            "RetainedOperation",
+            "RetainedAllocationPlan",
+            "BlockEmplacer",
+            "RetainedClosureValidationError",
+            "RetainedSuccessClosureProof",
+            "RetainedEvidenceClosureProof",
+            "PublishedRetainedAggregate",
+            "FinalOwnerAllocation",
+            "AdmissionLease",
         ] {
             assert!(
-                !root_exports.contains(forbidden),
-                "retained write authority `{forbidden}` escaped the crate root"
+                !actual_exports.contains(&forbidden),
+                "raw retained authority `{forbidden}` escaped the crate root"
             );
         }
 
@@ -7161,6 +8527,10 @@ mod tests {
             "unadmitted physical retain wrapper gate must be line-ending independent"
         );
         for forbidden in [
+            "fn try_prepare_success(",
+            "fn try_prepare_rich_failure(",
+            "pub struct RetainedSuccessClosureProof",
+            "pub struct RetainedEvidenceClosureProof",
             "pub fn attach(",
             "pub fn detach(",
             "pub fn get_mut(",

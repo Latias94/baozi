@@ -13,6 +13,18 @@ static FAIL_NEXT_EVIDENCE_ALLOCATION: AtomicBool = AtomicBool::new(false);
 #[cfg(test)]
 static EVIDENCE_ALLOCATION_TEST_LOCK: Mutex<()> = Mutex::new(());
 
+#[cfg(test)]
+std::thread_local! {
+    static ATTRIBUTION_BATCH_ALLOCATION_ENTRIES: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
+}
+
+#[cfg(test)]
+pub(crate) fn test_attribution_batch_allocation_entries() -> usize {
+    ATTRIBUTION_BATCH_ALLOCATION_ENTRIES.with(std::cell::Cell::get)
+}
+
 /// Default hard limit for ledger-owned evidence indexes and staging storage.
 pub const DEFAULT_LEDGER_EVIDENCE_BYTE_LIMIT: u64 = 1024 * 1024;
 
@@ -1158,23 +1170,40 @@ where
     where
         Destination: PublicationDestination,
     {
-        let attribution_plan = CapacityPlan::for_type::<
-            OperationAttributionReservation<O, P, D, Destination>,
-        >(0, 0, attribution_limit)
-        .map_err(|_| AttributionBatchCreateError::CapacityOverflow)?;
-        let commitment_plan =
-            CapacityPlan::for_type::<OutputCommitment<D, Destination>>(0, 0, commitment_limit)
-                .map_err(|_| AttributionBatchCreateError::CapacityOverflow)?;
-        let planned_bytes = attribution_plan
-            .envelope_delta_bytes()
-            .ok()
-            .and_then(|bytes| {
-                commitment_plan
-                    .envelope_delta_bytes()
-                    .ok()
-                    .and_then(|commitment_bytes| bytes.checked_add(commitment_bytes))
-            })
-            .ok_or(AttributionBatchCreateError::CapacityOverflow)?;
+        let plan = AttributionBatchPlan::try_new(
+            phase,
+            capacity_dimension,
+            attribution_limit,
+            commitment_limit,
+        )?;
+        self.try_attribution_batch_from_plan(plan)
+    }
+
+    #[allow(
+        dead_code,
+        reason = "crate-private until the U4 canonical consumers switch atomically"
+    )]
+    pub(crate) fn try_attribution_batch_from_plan<Destination>(
+        &self,
+        plan: AttributionBatchPlan<O, P, D, Destination>,
+    ) -> Result<AttributionReservationBatch<O, P, D, Destination>, AttributionBatchCreateError<D>>
+    where
+        Destination: PublicationDestination,
+    {
+        #[cfg(test)]
+        ATTRIBUTION_BATCH_ALLOCATION_ENTRIES.with(|entries| {
+            entries.set(entries.get().saturating_add(1));
+        });
+        let AttributionBatchPlan {
+            phase,
+            capacity_dimension,
+            attribution_capacity,
+            commitment_capacity,
+            planned_bytes,
+            attribution_limit,
+            commitment_limit,
+            destination: _,
+        } = plan;
         let mut capacity_cover = if planned_bytes == 0 {
             None
         } else {
@@ -1187,31 +1216,20 @@ where
 
         let mut attributions = Vec::new();
         attributions
-            .try_reserve_exact(attribution_plan.allocator_additional())
+            .try_reserve_exact(attribution_capacity.allocator_additional())
             .map_err(|_| AttributionBatchCreateError::AllocationFailed)?;
         let mut commitments = Vec::new();
         commitments
-            .try_reserve_exact(commitment_plan.allocator_additional())
+            .try_reserve_exact(commitment_capacity.allocator_additional())
             .map_err(|_| AttributionBatchCreateError::AllocationFailed)?;
-        attribution_plan
+        let attribution_bytes = attribution_capacity
             .finish(attributions.len(), attributions.capacity())
             .map_err(|_| AttributionBatchCreateError::CapacityOverflow)?;
-        commitment_plan
+        let commitment_bytes = commitment_capacity
             .finish(commitments.len(), commitments.capacity())
             .map_err(|_| AttributionBatchCreateError::CapacityOverflow)?;
-
-        let actual_bytes = attributions
-            .capacity()
-            .checked_mul(size_of::<
-                OperationAttributionReservation<O, P, D, Destination>,
-            >())
-            .and_then(|bytes| {
-                commitments
-                    .capacity()
-                    .checked_mul(size_of::<OutputCommitment<D, Destination>>())
-                    .and_then(|commitment_bytes| bytes.checked_add(commitment_bytes))
-            })
-            .and_then(|bytes| u64::try_from(bytes).ok())
+        let actual_bytes = attribution_bytes
+            .checked_add(commitment_bytes)
             .ok_or(AttributionBatchCreateError::CapacityOverflow)?;
         if actual_bytes > planned_bytes {
             return Err(AttributionBatchCreateError::CapacityOverflow);
@@ -2438,6 +2456,79 @@ where
 {
     pub(crate) const fn bytes(&self) -> u64 {
         self.core.bytes
+    }
+}
+
+/// Allocation-free qualification for one destination-specific attribution batch.
+///
+/// Construction performs every capacity and byte calculation. Consuming allocation may still fail
+/// because the allocator or live ledger admission rejects the qualified request, but it does not
+/// repeat plan arithmetic after the caller crosses its side-effect boundary.
+#[allow(
+    dead_code,
+    reason = "crate-private until the U4 canonical consumers switch atomically"
+)]
+pub(crate) struct AttributionBatchPlan<O, P, D, Destination>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+    Destination: PublicationDestination,
+{
+    phase: P,
+    capacity_dimension: D,
+    attribution_capacity: CapacityPlan,
+    commitment_capacity: CapacityPlan,
+    planned_bytes: u64,
+    attribution_limit: usize,
+    commitment_limit: usize,
+    destination: PhantomData<fn() -> (O, Destination)>,
+}
+
+#[allow(
+    dead_code,
+    reason = "crate-private until the U4 canonical consumers switch atomically"
+)]
+impl<O, P, D, Destination> AttributionBatchPlan<O, P, D, Destination>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+    Destination: PublicationDestination,
+{
+    pub(crate) fn try_new(
+        phase: P,
+        capacity_dimension: D,
+        attribution_limit: usize,
+        commitment_limit: usize,
+    ) -> Result<Self, AttributionBatchCreateError<D>> {
+        let attribution_capacity = CapacityPlan::for_type::<
+            OperationAttributionReservation<O, P, D, Destination>,
+        >(0, 0, attribution_limit)
+        .map_err(|_| AttributionBatchCreateError::CapacityOverflow)?;
+        let commitment_capacity =
+            CapacityPlan::for_type::<OutputCommitment<D, Destination>>(0, 0, commitment_limit)
+                .map_err(|_| AttributionBatchCreateError::CapacityOverflow)?;
+        let planned_bytes = attribution_capacity
+            .envelope_delta_bytes()
+            .ok()
+            .and_then(|bytes| {
+                commitment_capacity
+                    .envelope_delta_bytes()
+                    .ok()
+                    .and_then(|commitment_bytes| bytes.checked_add(commitment_bytes))
+            })
+            .ok_or(AttributionBatchCreateError::CapacityOverflow)?;
+        Ok(Self {
+            phase,
+            capacity_dimension,
+            attribution_capacity,
+            commitment_capacity,
+            planned_bytes,
+            attribution_limit,
+            commitment_limit,
+            destination: PhantomData,
+        })
     }
 }
 
