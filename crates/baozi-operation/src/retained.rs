@@ -5,7 +5,7 @@ use crate::coordinator::{FinalProgress, OperationCoordinator};
 use crate::ledger::{
     AttributionBatchCreateError, AttributionBatchPlan, AttributionReservationBatch,
     CanonicalOutput, FallbackBatchBaseline, Ledger, LedgerCause, LedgerLimits, LedgerSnapshot,
-    OutputCommitment, PublicationDestination, PublishedOutcomeEvidence,
+    OutcomeEvidenceDestination, OutputCommitment, PublicationDestination,
 };
 use crate::{
     CapacityPlan, ControlCause, OperationControl, OperationOwner, ProgressPhase, ProgressUnit,
@@ -216,6 +216,16 @@ impl<T, L> FinalOwnerInner<T, L> {
 impl<T, L> Drop for FinalOwnerInner<T, L> {
     fn drop(&mut self) {
         let value = self.value.take();
+
+        #[cfg(test)]
+        if take_injected_final_owner_drop_panic() {
+            (self.observe_unverified_drop)(self.lease.get());
+            if let Some(value) = value {
+                std::mem::forget(value);
+            }
+            panic!("injected final-owner storage release failure");
+        }
+
         // Running untrusted destructors during an existing unwind could abort the process before
         // containment runs. Retain both storage and admission in that fail-closed state.
         if std::thread::panicking() {
@@ -783,6 +793,11 @@ impl PhysicalStorageAccount {
         (count != u64::MAX).then_some(count)
     }
 
+    #[cfg(test)]
+    pub(crate) fn test_unverified_drop_count(&self) -> Option<u64> {
+        self.unverified_drop_count()
+    }
+
     fn record_unverified_drop(&self) {
         let _ = self.inner.value().unverified_drop_count.fetch_update(
             Ordering::AcqRel,
@@ -1026,6 +1041,10 @@ impl RetainedBuildFailureCode {
     pub const fn new(code: u32) -> Self {
         Self(code)
     }
+
+    pub(super) const fn code(self) -> u32 {
+        self.0
+    }
 }
 
 impl fmt::Display for RetainedBuildFailureCode {
@@ -1102,6 +1121,11 @@ impl<T> RetainedAllocation<T> {
     }
 
     fn assign_membership(&mut self, membership: RetainedMembership) -> Result<(), ()> {
+        #[cfg(test)]
+        if take_injected_membership_assignment_failure() {
+            return Err(());
+        }
+
         if self.membership.is_some() {
             return Err(());
         }
@@ -1406,8 +1430,8 @@ pub(crate) struct RetainedOperationStartPlan<P, D> {
     terminal_writer: RetainedWriterPlan<P, D>,
     terminal_account_share_work: RetainedHandleSharePlan<D>,
     fallback_plan: RetainedAllocationPlan,
-    fallback_commitment: OutputCommitment<D, PublishedOutcomeEvidence>,
-    snapshot_commitment: OutputCommitment<D, PublishedOutcomeEvidence>,
+    fallback_commitment: OutputCommitment<D, OutcomeEvidenceDestination>,
+    snapshot_commitment: OutputCommitment<D, OutcomeEvidenceDestination>,
 }
 
 #[allow(
@@ -1419,8 +1443,8 @@ impl<P: Copy, D: Copy> RetainedOperationStartPlan<P, D> {
         terminal_writer: RetainedWriterPlan<P, D>,
         terminal_account_share_work: RetainedHandleSharePlan<D>,
         fallback_plan: RetainedAllocationPlan,
-        fallback_commitment: OutputCommitment<D, PublishedOutcomeEvidence>,
-        snapshot_commitment: OutputCommitment<D, PublishedOutcomeEvidence>,
+        fallback_commitment: OutputCommitment<D, OutcomeEvidenceDestination>,
+        snapshot_commitment: OutputCommitment<D, OutcomeEvidenceDestination>,
     ) -> Self {
         Self {
             terminal_writer,
@@ -1958,8 +1982,9 @@ where
     P: Copy + Ord,
     D: Copy + Ord,
 {
-    fallback: Option<RetainedPart<F, PublishedOutcomeEvidence, O, P, D>>,
-    evidence: Option<RetainedPart<PublicationEvidenceCells<D>, PublishedOutcomeEvidence, O, P, D>>,
+    fallback: Option<RetainedPart<F, OutcomeEvidenceDestination, O, P, D>>,
+    evidence:
+        Option<RetainedPart<PublicationEvidenceCells<D>, OutcomeEvidenceDestination, O, P, D>>,
     batches: Option<FallbackBatchBaseline<O, P, D>>,
 }
 
@@ -1984,8 +2009,8 @@ where
     fn into_parts(
         mut self,
     ) -> (
-        RetainedPart<F, PublishedOutcomeEvidence, O, P, D>,
-        RetainedPart<PublicationEvidenceCells<D>, PublishedOutcomeEvidence, O, P, D>,
+        RetainedPart<F, OutcomeEvidenceDestination, O, P, D>,
+        RetainedPart<PublicationEvidenceCells<D>, OutcomeEvidenceDestination, O, P, D>,
         FallbackBatchBaseline<O, P, D>,
     ) {
         let fallback = match self.fallback.take() {
@@ -2158,10 +2183,16 @@ enum RetainedTerminalMode {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-struct RetainedSlotIdentity {
+pub(super) struct RetainedSlotIdentity {
     set_id: RetainedSetId,
     index: usize,
     tag: TypeId,
+}
+
+impl RetainedSlotIdentity {
+    pub(super) fn matches_tag<Tag: 'static>(self) -> bool {
+        self.tag == TypeId::of::<Tag>()
+    }
 }
 
 /// Non-owning projection to one canonical block in a branded retained publication.
@@ -2196,6 +2227,19 @@ impl<Block, Tag> fmt::Debug for CanonicalRetainedSlot<Block, Tag> {
     }
 }
 
+impl<Block, Tag> CanonicalRetainedSlot<Block, Tag> {
+    pub(super) const fn from_identity(identity: RetainedSlotIdentity) -> Self {
+        Self {
+            identity,
+            marker: PhantomData,
+        }
+    }
+
+    pub(super) const fn identity(self) -> RetainedSlotIdentity {
+        self.identity
+    }
+}
+
 /// Non-owning projection to one outcome-evidence block in a branded retained publication.
 ///
 /// Like a canonical slot, this identity is set-local and cannot be retagged or persisted as a
@@ -2225,6 +2269,19 @@ impl<Block, Tag> Eq for OutcomeEvidenceRetainedSlot<Block, Tag> {}
 impl<Block, Tag> fmt::Debug for OutcomeEvidenceRetainedSlot<Block, Tag> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("OutcomeEvidenceRetainedSlot(..)")
+    }
+}
+
+impl<Block, Tag> OutcomeEvidenceRetainedSlot<Block, Tag> {
+    pub(super) const fn from_identity(identity: RetainedSlotIdentity) -> Self {
+        Self {
+            identity,
+            marker: PhantomData,
+        }
+    }
+
+    pub(super) const fn identity(self) -> RetainedSlotIdentity {
+        self.identity
     }
 }
 
@@ -2697,7 +2754,7 @@ where
     canonical_table: Option<RetainedAllocation<RetainedBlockTable<CanonicalBlock>>>,
     evidence_table: Option<RetainedAllocation<RetainedBlockTable<EvidenceBlock>>>,
     canonical_batch: Option<AttributionReservationBatch<O, P, D, CanonicalOutput>>,
-    evidence_batch: Option<AttributionReservationBatch<O, P, D, PublishedOutcomeEvidence>>,
+    evidence_batch: Option<AttributionReservationBatch<O, P, D, OutcomeEvidenceDestination>>,
     account: Option<PhysicalStorageAccount>,
     operation: Option<RetainedOperation<O, P, PP, U, D, F>>,
     set_id: RetainedSetId,
@@ -3543,7 +3600,7 @@ where
             O,
             P,
             D,
-            PublishedOutcomeEvidence,
+            OutcomeEvidenceDestination,
             EvidenceBlock,
         >(
             self.account(), plan.outcome_evidence, terminal_limits
@@ -3969,6 +4026,16 @@ where
         self.evidence_table
             .as_ref()
             .map_or(0, |table| table.as_ref().members.len())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_ledger_probe(&self) -> crate::ledger::LedgerTestProbe<P, D> {
+        self.operation
+            .as_ref()
+            .expect("test assembly retains its operation")
+            .coordinator
+            .retained_ledger()
+            .test_probe()
     }
 
     pub fn try_retain_canonical<Tag>(
@@ -4629,6 +4696,21 @@ where
     CanonicalBlock: Send + Sync + 'static,
     EvidenceBlock: Send + Sync + 'static,
 {
+    /// Consumes a valid success proof after a later domain admission rejects the canonical result.
+    ///
+    /// Canonical ownership remains sealed and inaccessible until the existing rich-failure
+    /// terminal transition drops it before attribution. Evidence remains writable and may be
+    /// revalidated without forcing the minimal fallback.
+    pub fn downgrade_to_rich_failure(
+        self,
+        fallback_cause: PreparationFailureCode,
+    ) -> RetainedFailureAssembly<O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock> {
+        RetainedFailureAssembly {
+            assembly: self.assembly,
+            fallback_cause,
+        }
+    }
+
     /// Performs final control and ledger preparation without reopening graph mutation.
     pub fn try_prepare(
         self,
@@ -4835,7 +4917,7 @@ where
     D: Copy + Ord,
 {
     canonical: Option<AttributionReservationBatch<O, P, D, CanonicalOutput>>,
-    evidence: Option<AttributionReservationBatch<O, P, D, PublishedOutcomeEvidence>>,
+    evidence: Option<AttributionReservationBatch<O, P, D, OutcomeEvidenceDestination>>,
 }
 
 fn prepare_terminal_control<O, P, PP, U, D>(
@@ -4999,36 +5081,85 @@ pub(crate) struct PreparedRetainedPublication<CanonicalBlock, EvidenceBlock, F, 
     evidence: PublishedPart<PublicationEvidenceCells<D>>,
 }
 
+/// Exact terminal classification consumed before any domain prepared wrapper is constructed.
+pub(crate) enum PreparedRetainedPublicationOutcome<CanonicalBlock, EvidenceBlock, F, D> {
+    Success(PreparedRetainedSuccess<CanonicalBlock, EvidenceBlock, D>),
+    RichFailure(PreparedRetainedRichFailure<EvidenceBlock, D>),
+    MinimalFallback(PreparedRetainedFallback<F, D>),
+}
+
+/// Exact prepared success. Its retained roots remain opaque until handoff.
+pub(crate) struct PreparedRetainedSuccess<CanonicalBlock, EvidenceBlock, D> {
+    canonical: PublishedCanonicalAggregate<CanonicalBlock>,
+    outcome_evidence: PublishedOutcomeEvidenceAggregate<EvidenceBlock>,
+    canonical_root: RetainedSlotIdentity,
+    outcome_evidence_root: RetainedSlotIdentity,
+    account: PhysicalStorageAccount,
+    evidence: PublishedPart<PublicationEvidenceCells<D>>,
+}
+
+/// Exact prepared rich failure. Its retained evidence remains opaque until handoff.
+pub(crate) struct PreparedRetainedRichFailure<EvidenceBlock, D> {
+    outcome_evidence: PublishedOutcomeEvidenceAggregate<EvidenceBlock>,
+    outcome_evidence_root: RetainedSlotIdentity,
+    account: PhysicalStorageAccount,
+    cause: PreparationFailureCode,
+    evidence: PublishedPart<PublicationEvidenceCells<D>>,
+}
+
+/// Exact prepared minimal fallback. Its payload remains opaque until handoff.
+pub(crate) struct PreparedRetainedFallback<F, D> {
+    part: PublishedPart<F>,
+    cause: PreparationFailureCode,
+    evidence: PublishedPart<PublicationEvidenceCells<D>>,
+}
+
 impl<CanonicalBlock, EvidenceBlock, F, D>
     PreparedRetainedPublication<CanonicalBlock, EvidenceBlock, F, D>
 where
     D: Copy + Ord,
 {
-    /// Returns whether preparation selected the minimal pre-admitted fallback.
-    #[must_use]
-    pub fn uses_fallback(&self) -> bool {
-        matches!(
-            self.payload,
-            RetainedPublicationPayload::MinimalFallback { .. }
-        )
-    }
-
-    /// Moves the prepared ownership graph into its published wrapper without further fallibility.
-    #[must_use = "the published owner must be consumed or deliberately dropped"]
-    pub fn handoff(self) -> PublishedRetainedPublication<CanonicalBlock, EvidenceBlock, F, D> {
+    /// Consumes the unclassified private owner into one exact prepared terminal state.
+    pub fn into_outcome(
+        self,
+    ) -> PreparedRetainedPublicationOutcome<CanonicalBlock, EvidenceBlock, F, D> {
         let Self { payload, evidence } = self;
-        PublishedRetainedPublication { payload, evidence }
+        match payload {
+            RetainedPublicationPayload::Success {
+                canonical,
+                outcome_evidence,
+                canonical_root,
+                outcome_evidence_root,
+                account,
+            } => PreparedRetainedPublicationOutcome::Success(PreparedRetainedSuccess {
+                canonical,
+                outcome_evidence,
+                canonical_root,
+                outcome_evidence_root,
+                account,
+                evidence,
+            }),
+            RetainedPublicationPayload::RichFailure {
+                outcome_evidence,
+                outcome_evidence_root,
+                account,
+                cause,
+            } => PreparedRetainedPublicationOutcome::RichFailure(PreparedRetainedRichFailure {
+                outcome_evidence,
+                outcome_evidence_root,
+                account,
+                cause,
+                evidence,
+            }),
+            RetainedPublicationPayload::MinimalFallback { part, cause } => {
+                PreparedRetainedPublicationOutcome::MinimalFallback(PreparedRetainedFallback {
+                    part,
+                    cause,
+                    evidence,
+                })
+            }
+        }
     }
-}
-
-/// Published terminal owner after the allocation-free ownership handoff.
-///
-/// Success and rich failure carry retained block tables; minimal fallback carries only the
-/// pre-admitted fallback and frozen ledger evidence.
-#[must_use = "the published owner must be split or deliberately dropped"]
-pub(crate) struct PublishedRetainedPublication<CanonicalBlock, EvidenceBlock, F, D> {
-    payload: RetainedPublicationPayload<CanonicalBlock, EvidenceBlock, F>,
-    evidence: PublishedPart<PublicationEvidenceCells<D>>,
 }
 
 /// Canonical owning half ready to move into a domain-owned validated Scene wrapper.
@@ -5126,85 +5257,96 @@ impl<F> PublishedFallbackOutput<F> {
     }
 }
 
-/// Consuming split that removes import-only generics from the canonical owner path.
-#[must_use = "the split contains all terminal owners and frozen ledger evidence"]
-pub(crate) enum PublishedRetainedPublicationParts<CanonicalBlock, EvidenceBlock, F, D> {
-    Success {
-        canonical: PublishedCanonicalOutput<CanonicalBlock>,
-        outcome_evidence: PublishedOutcomeEvidenceOutput<EvidenceBlock>,
-        ledger_evidence: PublishedLedgerEvidence<D>,
-    },
-    RichFailure {
-        outcome_evidence: PublishedRichFailureOutput<EvidenceBlock>,
-        ledger_evidence: PublishedLedgerEvidence<D>,
-    },
-    MinimalFallback {
-        fallback: PublishedFallbackOutput<F>,
-        ledger_evidence: PublishedLedgerEvidence<D>,
-    },
+/// Exact published success owners produced directly by pure handoff.
+pub(crate) struct PublishedRetainedSuccessParts<CanonicalBlock, EvidenceBlock, D> {
+    pub(crate) canonical: PublishedCanonicalOutput<CanonicalBlock>,
+    pub(crate) outcome_evidence: PublishedOutcomeEvidenceOutput<EvidenceBlock>,
+    pub(crate) ledger_evidence: PublishedLedgerEvidence<D>,
 }
-impl<CanonicalBlock, EvidenceBlock, F, D>
-    PublishedRetainedPublication<CanonicalBlock, EvidenceBlock, F, D>
+
+/// Exact published rich-failure owners produced directly by pure handoff.
+pub(crate) struct PublishedRetainedRichFailureParts<EvidenceBlock, D> {
+    pub(crate) outcome_evidence: PublishedRichFailureOutput<EvidenceBlock>,
+    pub(crate) ledger_evidence: PublishedLedgerEvidence<D>,
+}
+
+/// Exact published minimal-fallback owners produced directly by pure handoff.
+pub(crate) struct PublishedRetainedFallbackParts<F, D> {
+    pub(crate) fallback: PublishedFallbackOutput<F>,
+    pub(crate) ledger_evidence: PublishedLedgerEvidence<D>,
+}
+
+impl<CanonicalBlock, EvidenceBlock, D> PreparedRetainedSuccess<CanonicalBlock, EvidenceBlock, D>
 where
     D: Copy + Ord,
 {
-    /// Returns whether the published result selected minimal fallback.
-    #[must_use]
-    pub fn uses_fallback(&self) -> bool {
-        matches!(
-            self.payload,
-            RetainedPublicationPayload::MinimalFallback { .. }
-        )
-    }
-
-    /// Consumes the published wrapper and returns outcome-specific owners.
-    #[must_use = "the split contains all terminal owners and frozen ledger evidence"]
-    pub fn into_parts(
-        self,
-    ) -> PublishedRetainedPublicationParts<CanonicalBlock, EvidenceBlock, F, D> {
-        let Self { payload, evidence } = self;
+    /// Performs a pure ownership handoff directly into exact success owners.
+    pub fn handoff(self) -> PublishedRetainedSuccessParts<CanonicalBlock, EvidenceBlock, D> {
+        let Self {
+            canonical,
+            outcome_evidence,
+            canonical_root,
+            outcome_evidence_root,
+            account,
+            evidence,
+        } = self;
         let ledger_evidence = PublishedLedgerEvidence { evidence };
-        match payload {
-            RetainedPublicationPayload::Success {
-                canonical,
-                outcome_evidence,
-                canonical_root,
-                outcome_evidence_root,
+        PublishedRetainedSuccessParts {
+            canonical: PublishedCanonicalOutput {
+                aggregate: canonical,
+                root: canonical_root,
                 account,
-            } => PublishedRetainedPublicationParts::Success {
-                canonical: PublishedCanonicalOutput {
-                    aggregate: canonical,
-                    root: canonical_root,
-                    account,
-                },
+            },
+            outcome_evidence: PublishedOutcomeEvidenceOutput {
+                aggregate: outcome_evidence,
+                root: outcome_evidence_root,
+            },
+            ledger_evidence,
+        }
+    }
+}
+
+impl<EvidenceBlock, D> PreparedRetainedRichFailure<EvidenceBlock, D>
+where
+    D: Copy + Ord,
+{
+    /// Performs a pure ownership handoff directly into exact rich-failure owners.
+    pub fn handoff(self) -> PublishedRetainedRichFailureParts<EvidenceBlock, D> {
+        let Self {
+            outcome_evidence,
+            outcome_evidence_root,
+            account,
+            cause,
+            evidence,
+        } = self;
+        PublishedRetainedRichFailureParts {
+            outcome_evidence: PublishedRichFailureOutput {
                 outcome_evidence: PublishedOutcomeEvidenceOutput {
                     aggregate: outcome_evidence,
                     root: outcome_evidence_root,
                 },
-                ledger_evidence,
-            },
-            RetainedPublicationPayload::RichFailure {
-                outcome_evidence,
-                outcome_evidence_root,
                 account,
                 cause,
-            } => PublishedRetainedPublicationParts::RichFailure {
-                outcome_evidence: PublishedRichFailureOutput {
-                    outcome_evidence: PublishedOutcomeEvidenceOutput {
-                        aggregate: outcome_evidence,
-                        root: outcome_evidence_root,
-                    },
-                    account,
-                    cause,
-                },
-                ledger_evidence,
             },
-            RetainedPublicationPayload::MinimalFallback { part, cause } => {
-                PublishedRetainedPublicationParts::MinimalFallback {
-                    fallback: PublishedFallbackOutput { part, cause },
-                    ledger_evidence,
-                }
-            }
+            ledger_evidence: PublishedLedgerEvidence { evidence },
+        }
+    }
+}
+
+impl<F, D> PreparedRetainedFallback<F, D>
+where
+    D: Copy + Ord,
+{
+    /// Performs a pure ownership handoff directly into exact fallback owners.
+    pub fn handoff(self) -> PublishedRetainedFallbackParts<F, D> {
+        let Self {
+            part,
+            cause,
+            evidence,
+        } = self;
+        PublishedRetainedFallbackParts {
+            fallback: PublishedFallbackOutput { part, cause },
+            ledger_evidence: PublishedLedgerEvidence { evidence },
         }
     }
 }
@@ -5275,7 +5417,7 @@ fn drop_retained_table_before_attribution<Block>(
 fn freeze_terminal_evidence<O, P, D>(
     proof: crate::ledger::TypedFreezeProof<O, P, D>,
     discarded_account: Option<PhysicalStorageAccount>,
-    evidence: &RetainedPart<PublicationEvidenceCells<D>, PublishedOutcomeEvidence, O, P, D>,
+    evidence: &RetainedPart<PublicationEvidenceCells<D>, OutcomeEvidenceDestination, O, P, D>,
 ) where
     O: OperationOwner,
     P: Copy + Ord,
@@ -5289,8 +5431,8 @@ fn freeze_terminal_evidence<O, P, D>(
 
 fn finish_retained_publication_fallback<O, P, D, F, CanonicalBlock, EvidenceBlock>(
     proof: crate::ledger::TypedFreezeProof<O, P, D>,
-    fallback: RetainedPart<F, PublishedOutcomeEvidence, O, P, D>,
-    evidence: RetainedPart<PublicationEvidenceCells<D>, PublishedOutcomeEvidence, O, P, D>,
+    fallback: RetainedPart<F, OutcomeEvidenceDestination, O, P, D>,
+    evidence: RetainedPart<PublicationEvidenceCells<D>, OutcomeEvidenceDestination, O, P, D>,
     cause: PreparationFailureCode,
     discarded_account: Option<PhysicalStorageAccount>,
 ) -> PreparedRetainedPublication<CanonicalBlock, EvidenceBlock, F, D>
@@ -5315,6 +5457,12 @@ thread_local! {
     static FAIL_NEXT_FINAL_OWNER_ALLOCATION: std::cell::Cell<bool> = const {
         std::cell::Cell::new(false)
     };
+    static FAIL_NEXT_MEMBERSHIP_ASSIGNMENT: std::cell::Cell<bool> = const {
+        std::cell::Cell::new(false)
+    };
+    static PANIC_FINAL_OWNER_DROP_AFTER: std::cell::Cell<Option<usize>> = const {
+        std::cell::Cell::new(None)
+    };
     static TEST_MEMBER_LOOKUPS: std::cell::Cell<usize> = const {
         std::cell::Cell::new(0)
     };
@@ -5333,6 +5481,36 @@ fn take_test_member_lookups() -> usize {
 #[cfg(test)]
 fn fail_next_final_owner_allocation() {
     FAIL_NEXT_FINAL_OWNER_ALLOCATION.with(|flag| flag.set(true));
+}
+
+#[cfg(test)]
+pub(crate) fn test_fail_next_membership_assignment() {
+    FAIL_NEXT_MEMBERSHIP_ASSIGNMENT.with(|flag| flag.set(true));
+}
+
+#[cfg(test)]
+fn take_injected_membership_assignment_failure() -> bool {
+    FAIL_NEXT_MEMBERSHIP_ASSIGNMENT.with(|flag| flag.replace(false))
+}
+
+#[cfg(test)]
+pub(crate) fn test_panic_final_owner_drop_after(skipped_drops: usize) {
+    PANIC_FINAL_OWNER_DROP_AFTER.with(|remaining| remaining.set(Some(skipped_drops)));
+}
+
+#[cfg(test)]
+fn take_injected_final_owner_drop_panic() -> bool {
+    PANIC_FINAL_OWNER_DROP_AFTER.with(|remaining| match remaining.get() {
+        None => false,
+        Some(0) => {
+            remaining.set(None);
+            true
+        }
+        Some(count) => {
+            remaining.set(Some(count - 1));
+            false
+        }
+    })
 }
 
 #[cfg(test)]
@@ -5568,6 +5746,54 @@ mod tests {
         EvidenceBlock,
     >;
 
+    enum PublishedRetainedPublicationParts<CanonicalBlock, EvidenceBlock, F, D> {
+        Success {
+            canonical: PublishedCanonicalOutput<CanonicalBlock>,
+            outcome_evidence: PublishedOutcomeEvidenceOutput<EvidenceBlock>,
+            ledger_evidence: PublishedLedgerEvidence<D>,
+        },
+        RichFailure {
+            outcome_evidence: PublishedRichFailureOutput<EvidenceBlock>,
+            ledger_evidence: PublishedLedgerEvidence<D>,
+        },
+        MinimalFallback {
+            fallback: PublishedFallbackOutput<F>,
+            ledger_evidence: PublishedLedgerEvidence<D>,
+        },
+    }
+
+    fn handoff_for_test<CanonicalBlock, EvidenceBlock, F, D>(
+        prepared: PreparedRetainedPublication<CanonicalBlock, EvidenceBlock, F, D>,
+    ) -> PublishedRetainedPublicationParts<CanonicalBlock, EvidenceBlock, F, D>
+    where
+        D: Copy + Ord,
+    {
+        match prepared.into_outcome() {
+            PreparedRetainedPublicationOutcome::Success(prepared) => {
+                let published = prepared.handoff();
+                PublishedRetainedPublicationParts::Success {
+                    canonical: published.canonical,
+                    outcome_evidence: published.outcome_evidence,
+                    ledger_evidence: published.ledger_evidence,
+                }
+            }
+            PreparedRetainedPublicationOutcome::RichFailure(prepared) => {
+                let published = prepared.handoff();
+                PublishedRetainedPublicationParts::RichFailure {
+                    outcome_evidence: published.outcome_evidence,
+                    ledger_evidence: published.ledger_evidence,
+                }
+            }
+            PreparedRetainedPublicationOutcome::MinimalFallback(prepared) => {
+                let published = prepared.handoff();
+                PublishedRetainedPublicationParts::MinimalFallback {
+                    fallback: published.fallback,
+                    ledger_evidence: published.ledger_evidence,
+                }
+            }
+        }
+    }
+
     fn share_work() -> RetainedHandleSharePlan<TestDimension> {
         RetainedHandleSharePlan::new(TestDimension::Bytes, TestDimension::Bytes)
     }
@@ -5743,11 +5969,12 @@ mod tests {
             RetainedSuccessValidation::Valid(validated) => validated,
             _ => panic!("source publication must validate"),
         };
-        let published = validated
-            .try_prepare(final_progress())
-            .unwrap_or_else(|_| panic!("source publication must prepare"))
-            .handoff();
-        match published.into_parts() {
+        let published = handoff_for_test(
+            validated
+                .try_prepare(final_progress())
+                .unwrap_or_else(|_| panic!("source publication must prepare")),
+        );
+        match published {
             PublishedRetainedPublicationParts::Success {
                 canonical,
                 outcome_evidence,
@@ -5830,8 +6057,7 @@ mod tests {
         let prepared = validated
             .try_prepare(final_progress())
             .unwrap_or_else(|_| panic!("dual publication must prepare"));
-        assert!(!prepared.uses_fallback());
-        match prepared.handoff().into_parts() {
+        match handoff_for_test(prepared) {
             PublishedRetainedPublicationParts::Success {
                 canonical,
                 outcome_evidence,
@@ -5964,11 +6190,12 @@ mod tests {
             RetainedSuccessValidation::Valid(validated) => validated,
             _ => panic!("inherited publication must validate"),
         };
-        let published = validated
-            .try_prepare(final_progress())
-            .unwrap_or_else(|_| panic!("inherited publication must prepare"))
-            .handoff();
-        match published.into_parts() {
+        let published = handoff_for_test(
+            validated
+                .try_prepare(final_progress())
+                .unwrap_or_else(|_| panic!("inherited publication must prepare")),
+        );
+        match &published {
             PublishedRetainedPublicationParts::Success {
                 canonical,
                 outcome_evidence,
@@ -5986,6 +6213,7 @@ mod tests {
             }
             _ => panic!("inherited publication must succeed"),
         }
+        drop(published);
         drop(source_canonical);
         drop(source_evidence);
         drop(account);
@@ -6034,12 +6262,11 @@ mod tests {
                 .share_call_count(),
             block_shares_before
         );
-        drop(
+        drop(handoff_for_test(
             assembly
                 .prepare_minimal_fallback()
-                .unwrap_or_else(|_| panic!("foreign rejection must preserve fallback"))
-                .handoff(),
-        );
+                .unwrap_or_else(|_| panic!("foreign rejection must preserve fallback")),
+        ));
         drop(source_canonical);
         drop(source_evidence);
         drop(source_account);
@@ -6096,12 +6323,11 @@ mod tests {
                 .share_call_count(),
             block_shares_before
         );
-        drop(
+        drop(handoff_for_test(
             assembly
                 .prepare_minimal_fallback()
-                .unwrap_or_else(|_| panic!("share-work rejection must preserve fallback"))
-                .handoff(),
-        );
+                .unwrap_or_else(|_| panic!("share-work rejection must preserve fallback")),
+        ));
         drop(source_canonical);
         drop(source_evidence);
         drop(account);
@@ -6208,18 +6434,16 @@ mod tests {
                         RetainedBlockTablePlan::new(writer_plan(1, 1), 1, 0),
                     ))
                     .unwrap_or_else(|_| panic!("{case}: valid retry must open"));
-                drop(
+                drop(handoff_for_test(
                     assembly
                         .prepare_minimal_fallback()
-                        .unwrap_or_else(|_| panic!("{case}: retry fallback must prepare"))
-                        .handoff(),
-                );
+                        .unwrap_or_else(|_| panic!("{case}: retry fallback must prepare")),
+                ));
             } else {
-                drop(
+                drop(handoff_for_test(
                     operation
-                        .prepare_minimal_fallback::<u64, u64>(PreparationFailureCode::domain(70))
-                        .handoff(),
-                );
+                        .prepare_minimal_fallback::<u64, u64>(PreparationFailureCode::domain(70)),
+                ));
             }
             assert_eq!(factory.snapshot().live_accounts(), 0, "{case}");
         }
@@ -6244,10 +6468,10 @@ mod tests {
         let operation = error
             .try_into_operation()
             .unwrap_or_else(|_| panic!("invalid plan must return the untouched operation"));
-        let published = operation
-            .prepare_minimal_fallback::<u64, u64>(PreparationFailureCode::domain(71))
-            .handoff();
-        match published.into_parts() {
+        let published = handoff_for_test(
+            operation.prepare_minimal_fallback::<u64, u64>(PreparationFailureCode::domain(71)),
+        );
+        match published {
             PublishedRetainedPublicationParts::MinimalFallback {
                 fallback,
                 ledger_evidence,
@@ -6280,14 +6504,15 @@ mod tests {
         let operation = error
             .try_into_operation()
             .unwrap_or_else(|_| panic!("verified allocation failure must return the operation"));
-        let published = operation
-            .prepare_minimal_fallback::<u64, u64>(PreparationFailureCode::domain(72))
-            .handoff();
+        let published = handoff_for_test(
+            operation.prepare_minimal_fallback::<u64, u64>(PreparationFailureCode::domain(72)),
+        );
         assert!(matches!(
-            published.into_parts(),
+            &published,
             PublishedRetainedPublicationParts::MinimalFallback { fallback, .. }
                 if fallback.cause() == PreparationFailureCode::domain(72)
         ));
+        drop(published);
         assert_eq!(factory.snapshot().live_accounts(), 0);
     }
 
@@ -6328,11 +6553,12 @@ mod tests {
             RetainedFailureValidation::Valid(validated) => validated,
             _ => panic!("augmented failure evidence must validate"),
         };
-        let published = validated
-            .try_prepare(PreparationFailureCode::domain(91), final_progress())
-            .unwrap_or_else(|_| panic!("rich failure must prepare"))
-            .handoff();
-        match published.into_parts() {
+        let published = handoff_for_test(
+            validated
+                .try_prepare(PreparationFailureCode::domain(91), final_progress())
+                .unwrap_or_else(|_| panic!("rich failure must prepare")),
+        );
+        match published {
             PublishedRetainedPublicationParts::RichFailure {
                 outcome_evidence,
                 ledger_evidence,
@@ -6373,11 +6599,12 @@ mod tests {
             RetainedSuccessValidation::FallbackOnly(fallback) => fallback,
             _ => panic!("validator panic must expose only fallback"),
         };
-        let published = fallback_only
-            .prepare_minimal_fallback()
-            .unwrap_or_else(|_| panic!("validation panic fallback must prepare"))
-            .handoff();
-        match published.into_parts() {
+        let published = handoff_for_test(
+            fallback_only
+                .prepare_minimal_fallback()
+                .unwrap_or_else(|_| panic!("validation panic fallback must prepare")),
+        );
+        match &published {
             PublishedRetainedPublicationParts::MinimalFallback { fallback, .. } => {
                 assert_eq!(
                     fallback.cause().class(),
@@ -6387,6 +6614,7 @@ mod tests {
             }
             _ => panic!("validation panic must publish minimal fallback"),
         }
+        drop(published);
         assert_eq!(factory.snapshot().live_accounts(), 0);
     }
 
@@ -6411,11 +6639,12 @@ mod tests {
             RetainedFailureValidation::Rejected(failure) => failure,
             _ => panic!("second semantic rejection must preserve failure building"),
         };
-        let published = failure
-            .prepare_minimal_fallback()
-            .unwrap_or_else(|_| panic!("repeated rejection fallback must prepare"))
-            .handoff();
-        match published.into_parts() {
+        let published = handoff_for_test(
+            failure
+                .prepare_minimal_fallback()
+                .unwrap_or_else(|_| panic!("repeated rejection fallback must prepare")),
+        );
+        match &published {
             PublishedRetainedPublicationParts::MinimalFallback { fallback, .. } => {
                 assert_eq!(
                     fallback.cause().class(),
@@ -6425,6 +6654,7 @@ mod tests {
             }
             _ => panic!("repeated semantic rejection must publish only fallback"),
         }
+        drop(published);
         assert_eq!(factory.snapshot().live_accounts(), 0);
     }
 
@@ -6461,7 +6691,7 @@ mod tests {
         let prepared = rejected
             .prepare_minimal_fallback()
             .unwrap_or_else(|_| panic!("orphan rejection must prepare minimal fallback"));
-        match prepared.handoff().into_parts() {
+        match handoff_for_test(prepared) {
             PublishedRetainedPublicationParts::MinimalFallback { fallback, .. } => {
                 assert_eq!(
                     fallback.cause().class(),
@@ -6509,7 +6739,7 @@ mod tests {
         let prepared = rejected
             .prepare_minimal_fallback()
             .unwrap_or_else(|_| panic!("retag rejection must prepare minimal fallback"));
-        match prepared.handoff().into_parts() {
+        match handoff_for_test(prepared) {
             PublishedRetainedPublicationParts::MinimalFallback { fallback, .. } => {
                 assert_eq!(
                     fallback.cause().class(),
@@ -6554,7 +6784,7 @@ mod tests {
         let prepared = assembly
             .prepare_minimal_fallback()
             .unwrap_or_else(|_| panic!("minimal fallback must remain available"));
-        match prepared.handoff().into_parts() {
+        match handoff_for_test(prepared) {
             PublishedRetainedPublicationParts::MinimalFallback { fallback, .. } => {
                 assert_eq!(*fallback.value(), 7);
             }
@@ -6622,7 +6852,7 @@ mod tests {
         assert!(OBSERVED_OPERATION_LIVE.load(Ordering::SeqCst) > 0);
         assert!(OBSERVED_PHYSICAL_BYTES.load(Ordering::SeqCst) > 0);
         assert!(OBSERVED_PHYSICAL_ALLOCATIONS.load(Ordering::SeqCst) > 0);
-        match prepared.handoff().into_parts() {
+        match handoff_for_test(prepared) {
             PublishedRetainedPublicationParts::RichFailure {
                 outcome_evidence, ..
             } => {
@@ -6667,12 +6897,11 @@ mod tests {
             RetainedFailureValidation::Valid(validated) => validated,
             _ => panic!("failure-only graph must validate"),
         };
-        match validated
-            .try_prepare(PreparationFailureCode::domain(3), final_progress())
-            .unwrap_or_else(|_| panic!("failure-only publication must prepare"))
-            .handoff()
-            .into_parts()
-        {
+        match handoff_for_test(
+            validated
+                .try_prepare(PreparationFailureCode::domain(3), final_progress())
+                .unwrap_or_else(|_| panic!("failure-only publication must prepare")),
+        ) {
             PublishedRetainedPublicationParts::RichFailure {
                 outcome_evidence, ..
             } => assert_eq!(*outcome_evidence.outcome_evidence().root(), 7),
@@ -6708,12 +6937,11 @@ mod tests {
                 RetainedSuccessValidation::Valid(validated) => validated,
                 _ => panic!("control rejection candidate must validate"),
             };
-        match validated
-            .try_prepare(final_progress())
-            .unwrap_or_else(|_| panic!("control rejection must produce a rich failure"))
-            .handoff()
-            .into_parts()
-        {
+        match handoff_for_test(
+            validated
+                .try_prepare(final_progress())
+                .unwrap_or_else(|_| panic!("control rejection must produce a rich failure")),
+        ) {
             PublishedRetainedPublicationParts::RichFailure {
                 outcome_evidence, ..
             } => {
@@ -6754,12 +6982,11 @@ mod tests {
             RetainedFailureValidation::Valid(validated) => validated,
             _ => panic!("evidence rejection candidate must validate"),
         };
-        match validated
-            .try_prepare(PreparationFailureCode::domain(5), final_progress())
-            .unwrap_or_else(|_| panic!("ledger rejection must retain minimal fallback"))
-            .handoff()
-            .into_parts()
-        {
+        match handoff_for_test(
+            validated
+                .try_prepare(PreparationFailureCode::domain(5), final_progress())
+                .unwrap_or_else(|_| panic!("ledger rejection must retain minimal fallback")),
+        ) {
             PublishedRetainedPublicationParts::MinimalFallback { fallback, .. } => {
                 assert_eq!(*fallback.value(), 7);
                 assert_eq!(fallback.cause().class(), PreparationFailureClass::Ledger);
@@ -6808,7 +7035,7 @@ mod tests {
             .unwrap_or_else(|_| panic!("success rejection must prepare minimal fallback"));
         assert_eq!(CANONICAL_DROPS.load(Ordering::SeqCst), 1);
         assert_eq!(EVIDENCE_DROPS.load(Ordering::SeqCst), 1);
-        match prepared.handoff().into_parts() {
+        match handoff_for_test(prepared) {
             PublishedRetainedPublicationParts::MinimalFallback { fallback, .. } => {
                 assert_eq!(fallback.cause().class(), PreparationFailureClass::Ledger);
             }
@@ -7171,10 +7398,11 @@ mod tests {
                 RetainedSuccessValidation::Valid(validated) => validated,
                 _ => panic!("published-drop graph must validate"),
             };
-        let published = validated
-            .try_prepare(final_progress())
-            .unwrap_or_else(|_| panic!("published drop publication must prepare"))
-            .handoff();
+        let published = handoff_for_test(
+            validated
+                .try_prepare(final_progress())
+                .unwrap_or_else(|_| panic!("published drop publication must prepare")),
+        );
         assert!(catch_unwind(AssertUnwindSafe(|| drop(published))).is_ok());
         assert_eq!(PUBLISHED_DROPS.load(Ordering::SeqCst), 1);
         assert_eq!(factory.snapshot().live_accounts(), 1);
@@ -7275,20 +7503,16 @@ mod tests {
         let prepared = validated
             .try_prepare(final_progress())
             .unwrap_or_else(|_| panic!("handoff observation publication must prepare"));
-        let (canonical_identity, canonical_shares, evidence_identity, evidence_shares) =
-            match &prepared.payload {
-                RetainedPublicationPayload::Success {
-                    canonical,
-                    outcome_evidence,
-                    ..
-                } => (
-                    canonical.inner.table.allocation_identity(),
-                    canonical.inner.table.share_call_count(),
-                    outcome_evidence.inner.table.allocation_identity(),
-                    outcome_evidence.inner.table.share_call_count(),
-                ),
-                _ => panic!("handoff observation must prepare success"),
-            };
+        let prepared = match prepared.into_outcome() {
+            PreparedRetainedPublicationOutcome::Success(prepared) => prepared,
+            _ => panic!("handoff observation must prepare success"),
+        };
+        let (canonical_identity, canonical_shares, evidence_identity, evidence_shares) = (
+            prepared.canonical.inner.table.allocation_identity(),
+            prepared.canonical.inner.table.share_call_count(),
+            prepared.outcome_evidence.inner.table.allocation_identity(),
+            prepared.outcome_evidence.inner.table.share_call_count(),
+        );
         let ledger_allocation = prepared.evidence.allocation();
         let ledger_identity = ledger_allocation.allocation_identity();
         let ledger_shares = ledger_allocation.share_call_count();
@@ -7297,29 +7521,38 @@ mod tests {
         assert_eq!(DROP_COUNT.load(Ordering::SeqCst), 0);
         assert_eq!(OBSERVED_BYTES.load(Ordering::SeqCst), 0);
         assert_eq!(OBSERVED_ALLOCATIONS.load(Ordering::SeqCst), 0);
-        match &published.payload {
-            RetainedPublicationPayload::Success {
-                canonical,
-                outcome_evidence,
-                ..
-            } => {
-                assert_eq!(
-                    canonical.inner.table.allocation_identity(),
-                    canonical_identity
-                );
-                assert_eq!(canonical.inner.table.share_call_count(), canonical_shares);
-                assert_eq!(
-                    outcome_evidence.inner.table.allocation_identity(),
-                    evidence_identity
-                );
-                assert_eq!(
-                    outcome_evidence.inner.table.share_call_count(),
-                    evidence_shares
-                );
-            }
-            _ => panic!("handoff must preserve success"),
-        }
-        let ledger_allocation = published.evidence.allocation();
+        assert_eq!(
+            published
+                .canonical
+                .aggregate
+                .inner
+                .table
+                .allocation_identity(),
+            canonical_identity
+        );
+        assert_eq!(
+            published.canonical.aggregate.inner.table.share_call_count(),
+            canonical_shares
+        );
+        assert_eq!(
+            published
+                .outcome_evidence
+                .aggregate
+                .inner
+                .table
+                .allocation_identity(),
+            evidence_identity
+        );
+        assert_eq!(
+            published
+                .outcome_evidence
+                .aggregate
+                .inner
+                .table
+                .share_call_count(),
+            evidence_shares
+        );
+        let ledger_allocation = published.ledger_evidence.evidence.allocation();
         assert_eq!(ledger_allocation.allocation_identity(), ledger_identity);
         assert_eq!(ledger_allocation.share_call_count(), ledger_shares);
 
@@ -7517,12 +7750,11 @@ mod tests {
         let assembly: TestPublication<u64, u64> = operation
             .try_publication_assembly(publication_plan(1, 1))
             .unwrap_or_else(|_| panic!("retry must open a valid assembly"));
-        drop(
+        drop(handoff_for_test(
             assembly
                 .prepare_minimal_fallback()
-                .unwrap_or_else(|_| panic!("retry fallback must prepare"))
-                .handoff(),
-        );
+                .unwrap_or_else(|_| panic!("retry fallback must prepare")),
+        ));
         assert_eq!(factory.snapshot().live_accounts(), 0);
     }
 
@@ -7593,10 +7825,11 @@ mod tests {
                 RetainedSuccessValidation::Valid(validated) => validated,
                 _ => panic!("retried assembly graph must validate"),
             };
-        let published = validated
-            .try_prepare(final_progress())
-            .unwrap_or_else(|_| panic!("retried assembly must prepare"))
-            .handoff();
+        let published = handoff_for_test(
+            validated
+                .try_prepare(final_progress())
+                .unwrap_or_else(|_| panic!("retried assembly must prepare")),
+        );
         drop(published);
         assert_eq!(factory.snapshot().live_accounts(), 0);
     }
@@ -7630,7 +7863,7 @@ mod tests {
         let prepared = fallback_only
             .prepare_minimal_fallback()
             .unwrap_or_else(|_| panic!("validation panic must prepare minimal fallback"));
-        match prepared.handoff().into_parts() {
+        match handoff_for_test(prepared) {
             PublishedRetainedPublicationParts::MinimalFallback { fallback, .. } => {
                 assert_eq!(
                     fallback.cause().class(),
@@ -8695,12 +8928,11 @@ mod tests {
         ));
         assert!(!builder_called.load(Ordering::SeqCst));
         assert_eq!(account.share_call_count(), shares_before);
-        drop(
+        drop(handoff_for_test(
             assembly
                 .prepare_minimal_fallback()
-                .unwrap_or_else(|_| panic!("handle rejection must preserve minimal fallback"))
-                .handoff(),
-        );
+                .unwrap_or_else(|_| panic!("handle rejection must preserve minimal fallback")),
+        ));
         drop(account);
         assert_eq!(factory.snapshot().live_accounts(), 0);
     }

@@ -632,16 +632,16 @@ mod destination_sealed {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CanonicalOutput;
 
-/// Destination marker for published non-canonical outcome evidence.
+/// Destination marker for frozen non-canonical outcome evidence.
 #[allow(
     dead_code,
     reason = "crate-private until the U4 canonical consumers switch atomically"
 )]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PublishedOutcomeEvidence;
+pub struct OutcomeEvidenceDestination;
 
 impl destination_sealed::Sealed for CanonicalOutput {}
-impl destination_sealed::Sealed for PublishedOutcomeEvidence {}
+impl destination_sealed::Sealed for OutcomeEvidenceDestination {}
 
 #[allow(
     dead_code,
@@ -650,7 +650,7 @@ impl destination_sealed::Sealed for PublishedOutcomeEvidence {}
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DestinationKind {
     CanonicalOutput,
-    PublishedOutcomeEvidence,
+    OutcomeEvidence,
 }
 
 /// Sealed vocabulary for one retained publication destination.
@@ -674,10 +674,10 @@ impl DestinationState for CanonicalOutput {
     const KIND: DestinationKind = DestinationKind::CanonicalOutput;
 }
 
-impl PublicationDestination for PublishedOutcomeEvidence {}
+impl PublicationDestination for OutcomeEvidenceDestination {}
 
-impl DestinationState for PublishedOutcomeEvidence {
-    const KIND: DestinationKind = DestinationKind::PublishedOutcomeEvidence;
+impl DestinationState for OutcomeEvidenceDestination {
+    const KIND: DestinationKind = DestinationKind::OutcomeEvidence;
 }
 
 /// One typed logical commitment independent of physical allocation attribution.
@@ -1724,9 +1724,9 @@ where
     pub(crate) fn try_fallback_baseline(
         &self,
         canonical_assembly: AttributionReservationBatch<O, P, D, CanonicalOutput>,
-        evidence_assembly: AttributionReservationBatch<O, P, D, PublishedOutcomeEvidence>,
-        fallback: AttributionReservationBatch<O, P, D, PublishedOutcomeEvidence>,
-        evidence: AttributionReservationBatch<O, P, D, PublishedOutcomeEvidence>,
+        evidence_assembly: AttributionReservationBatch<O, P, D, OutcomeEvidenceDestination>,
+        fallback: AttributionReservationBatch<O, P, D, OutcomeEvidenceDestination>,
+        evidence: AttributionReservationBatch<O, P, D, OutcomeEvidenceDestination>,
     ) -> Result<FallbackBatchBaseline<O, P, D>, FallbackBaselineRejection<O, P, D>> {
         let mut baseline = FallbackBatchBaseline {
             canonical_assembly,
@@ -1832,7 +1832,7 @@ where
         baseline: &mut FallbackBatchBaseline<O, P, D>,
         canonical_source: Option<&mut AttributionReservationBatch<O, P, D, CanonicalOutput>>,
         evidence_source: Option<
-            &mut AttributionReservationBatch<O, P, D, PublishedOutcomeEvidence>,
+            &mut AttributionReservationBatch<O, P, D, OutcomeEvidenceDestination>,
         >,
     ) -> Result<(), LedgerCause<D>> {
         self.validate_primary_publication(
@@ -1866,7 +1866,7 @@ where
         self,
         baseline: FallbackBatchBaseline<O, P, D>,
         canonical_source: Option<AttributionReservationBatch<O, P, D, CanonicalOutput>>,
-        evidence_source: Option<AttributionReservationBatch<O, P, D, PublishedOutcomeEvidence>>,
+        evidence_source: Option<AttributionReservationBatch<O, P, D, OutcomeEvidenceDestination>>,
     ) -> TypedFreezeProof<O, P, D> {
         let FallbackBatchBaseline {
             mut canonical_assembly,
@@ -1898,7 +1898,7 @@ where
         &self,
         baseline: &FallbackBatchBaseline<O, P, D>,
         canonical_source: Option<&AttributionReservationBatch<O, P, D, CanonicalOutput>>,
-        evidence_source: Option<&AttributionReservationBatch<O, P, D, PublishedOutcomeEvidence>>,
+        evidence_source: Option<&AttributionReservationBatch<O, P, D, OutcomeEvidenceDestination>>,
     ) -> Result<(), LedgerCause<D>> {
         if !baseline.canonical_assembly.validate_owner(&self.state)
             || !baseline.evidence_assembly.validate_owner(&self.state)
@@ -2572,9 +2572,9 @@ where
     D: Copy + Ord,
 {
     canonical_assembly: AttributionReservationBatch<O, P, D, CanonicalOutput>,
-    evidence_assembly: AttributionReservationBatch<O, P, D, PublishedOutcomeEvidence>,
-    fallback: AttributionReservationBatch<O, P, D, PublishedOutcomeEvidence>,
-    evidence: AttributionReservationBatch<O, P, D, PublishedOutcomeEvidence>,
+    evidence_assembly: AttributionReservationBatch<O, P, D, OutcomeEvidenceDestination>,
+    fallback: AttributionReservationBatch<O, P, D, OutcomeEvidenceDestination>,
+    evidence: AttributionReservationBatch<O, P, D, OutcomeEvidenceDestination>,
 }
 
 #[allow(
@@ -2621,9 +2621,9 @@ where
         self,
     ) -> (
         AttributionReservationBatch<O, P, D, CanonicalOutput>,
-        AttributionReservationBatch<O, P, D, PublishedOutcomeEvidence>,
-        AttributionReservationBatch<O, P, D, PublishedOutcomeEvidence>,
-        AttributionReservationBatch<O, P, D, PublishedOutcomeEvidence>,
+        AttributionReservationBatch<O, P, D, OutcomeEvidenceDestination>,
+        AttributionReservationBatch<O, P, D, OutcomeEvidenceDestination>,
+        AttributionReservationBatch<O, P, D, OutcomeEvidenceDestination>,
     ) {
         (
             self.canonical_assembly,
@@ -2637,7 +2637,7 @@ where
         self,
         ledger: Ledger<O, P, D>,
         discard_canonical: Option<AttributionReservationBatch<O, P, D, CanonicalOutput>>,
-        discard_evidence: Option<AttributionReservationBatch<O, P, D, PublishedOutcomeEvidence>>,
+        discard_evidence: Option<AttributionReservationBatch<O, P, D, OutcomeEvidenceDestination>>,
     ) -> TypedFreezeProof<O, P, D> {
         let Self {
             canonical_assembly,
@@ -2668,9 +2668,9 @@ where
     D: Copy + Ord,
 {
     canonical: AttributionReservationBatch<O, P, D, CanonicalOutput>,
-    evidence: AttributionReservationBatch<O, P, D, PublishedOutcomeEvidence>,
+    evidence: AttributionReservationBatch<O, P, D, OutcomeEvidenceDestination>,
     discard_canonical: Option<AttributionReservationBatch<O, P, D, CanonicalOutput>>,
-    discard_evidence: Option<AttributionReservationBatch<O, P, D, PublishedOutcomeEvidence>>,
+    discard_evidence: Option<AttributionReservationBatch<O, P, D, OutcomeEvidenceDestination>>,
     ledger: Ledger<O, P, D>,
 }
 
@@ -3852,9 +3852,7 @@ where
             .ok_or(LedgerCause::ArithmeticOverflow {
                 class: match Destination::KIND {
                     DestinationKind::CanonicalOutput => CounterClass::Committed,
-                    DestinationKind::PublishedOutcomeEvidence => {
-                        CounterClass::PublishedOutcomeEvidence
-                    }
+                    DestinationKind::OutcomeEvidence => CounterClass::PublishedOutcomeEvidence,
                 },
                 dimension: commitment.dimension,
             })?;
@@ -3869,7 +3867,7 @@ where
                 entry.policy.committed_limit,
                 CounterClass::Committed,
             ),
-            DestinationKind::PublishedOutcomeEvidence => (
+            DestinationKind::OutcomeEvidence => (
                 entry.state.published_outcome_evidence,
                 entry.policy.published_outcome_evidence_limit,
                 CounterClass::PublishedOutcomeEvidence,
@@ -3945,7 +3943,7 @@ fn apply_typed_commitments<O, P, D, Destination>(
                 entry.state.committed += commitment.amount;
                 entry.state.committed_canonical_output += commitment.amount;
             }
-            DestinationKind::PublishedOutcomeEvidence => {
+            DestinationKind::OutcomeEvidence => {
                 entry.state.published_outcome_evidence += commitment.amount;
             }
         }
@@ -4540,13 +4538,28 @@ mod tests {
             .try_attribution_batch::<CanonicalOutput>(Phase::Build, Dimension::Bytes, 1, 0)
             .expect("target canonical assembly");
         let evidence_assembly = target
-            .try_attribution_batch::<PublishedOutcomeEvidence>(Phase::Build, Dimension::Bytes, 0, 0)
+            .try_attribution_batch::<OutcomeEvidenceDestination>(
+                Phase::Build,
+                Dimension::Bytes,
+                0,
+                0,
+            )
             .expect("target evidence assembly");
         let fallback = foreign
-            .try_attribution_batch::<PublishedOutcomeEvidence>(Phase::Build, Dimension::Bytes, 1, 0)
+            .try_attribution_batch::<OutcomeEvidenceDestination>(
+                Phase::Build,
+                Dimension::Bytes,
+                1,
+                0,
+            )
             .expect("foreign fallback batch");
         let evidence = target
-            .try_attribution_batch::<PublishedOutcomeEvidence>(Phase::Build, Dimension::Bytes, 0, 0)
+            .try_attribution_batch::<OutcomeEvidenceDestination>(
+                Phase::Build,
+                Dimension::Bytes,
+                0,
+                0,
+            )
             .expect("target evidence batch");
         let target_before = probe_values(&target_probe);
         let foreign_before = probe_values(&foreign_probe);
@@ -4582,13 +4595,28 @@ mod tests {
             .try_attribution_batch::<CanonicalOutput>(Phase::Build, Dimension::Bytes, 1, 0)
             .expect("target canonical assembly");
         let evidence_assembly = target
-            .try_attribution_batch::<PublishedOutcomeEvidence>(Phase::Build, Dimension::Bytes, 0, 0)
+            .try_attribution_batch::<OutcomeEvidenceDestination>(
+                Phase::Build,
+                Dimension::Bytes,
+                0,
+                0,
+            )
             .expect("target evidence assembly");
         let fallback = target
-            .try_attribution_batch::<PublishedOutcomeEvidence>(Phase::Build, Dimension::Bytes, 0, 0)
+            .try_attribution_batch::<OutcomeEvidenceDestination>(
+                Phase::Build,
+                Dimension::Bytes,
+                0,
+                0,
+            )
             .expect("target fallback batch");
         let evidence = target
-            .try_attribution_batch::<PublishedOutcomeEvidence>(Phase::Build, Dimension::Bytes, 0, 0)
+            .try_attribution_batch::<OutcomeEvidenceDestination>(
+                Phase::Build,
+                Dimension::Bytes,
+                0,
+                0,
+            )
             .expect("target evidence batch");
         let baseline = target
             .try_fallback_baseline(canonical, evidence_assembly, fallback, evidence)
@@ -4670,7 +4698,7 @@ mod tests {
     fn fallback_baseline_counts_zero_byte_attribution_capabilities() {
         let ledger = Ledger::<Owner, Phase, Dimension>::new(typed_limits());
         let extra = ledger
-            .reserve_operation_attribution::<PublishedOutcomeEvidence>(
+            .reserve_operation_attribution::<OutcomeEvidenceDestination>(
                 Phase::Build,
                 Dimension::Bytes,
                 0,
@@ -4680,13 +4708,28 @@ mod tests {
             .try_attribution_batch::<CanonicalOutput>(Phase::Build, Dimension::Bytes, 0, 0)
             .expect("empty canonical assembly");
         let evidence = ledger
-            .try_attribution_batch::<PublishedOutcomeEvidence>(Phase::Build, Dimension::Bytes, 0, 0)
+            .try_attribution_batch::<OutcomeEvidenceDestination>(
+                Phase::Build,
+                Dimension::Bytes,
+                0,
+                0,
+            )
             .expect("empty evidence assembly");
         let fallback = ledger
-            .try_attribution_batch::<PublishedOutcomeEvidence>(Phase::Build, Dimension::Bytes, 0, 0)
+            .try_attribution_batch::<OutcomeEvidenceDestination>(
+                Phase::Build,
+                Dimension::Bytes,
+                0,
+                0,
+            )
             .expect("empty fallback batch");
         let snapshot = ledger
-            .try_attribution_batch::<PublishedOutcomeEvidence>(Phase::Build, Dimension::Bytes, 0, 0)
+            .try_attribution_batch::<OutcomeEvidenceDestination>(
+                Phase::Build,
+                Dimension::Bytes,
+                0,
+                0,
+            )
             .expect("empty snapshot batch");
 
         let rejection = match ledger.try_fallback_baseline(canonical, evidence, fallback, snapshot)
@@ -4708,13 +4751,23 @@ mod tests {
             .try_attribution_batch::<CanonicalOutput>(Phase::Build, Dimension::Bytes, 0, 0)
             .expect("empty canonical assembly");
         let evidence_assembly = ledger
-            .try_attribution_batch::<PublishedOutcomeEvidence>(Phase::Build, Dimension::Bytes, 1, 0)
+            .try_attribution_batch::<OutcomeEvidenceDestination>(
+                Phase::Build,
+                Dimension::Bytes,
+                1,
+                0,
+            )
             .expect("evidence assembly");
         let mut fallback = ledger
-            .try_attribution_batch::<PublishedOutcomeEvidence>(Phase::Build, Dimension::Bytes, 1, 0)
+            .try_attribution_batch::<OutcomeEvidenceDestination>(
+                Phase::Build,
+                Dimension::Bytes,
+                1,
+                0,
+            )
             .expect("fallback batch");
         let zero = ledger
-            .reserve_operation_attribution::<PublishedOutcomeEvidence>(
+            .reserve_operation_attribution::<OutcomeEvidenceDestination>(
                 Phase::Build,
                 Dimension::Bytes,
                 0,
@@ -4722,7 +4775,12 @@ mod tests {
             .expect("zero-byte attribution");
         assert!(fallback.try_push_attribution(zero).is_ok());
         let evidence = ledger
-            .try_attribution_batch::<PublishedOutcomeEvidence>(Phase::Build, Dimension::Bytes, 0, 0)
+            .try_attribution_batch::<OutcomeEvidenceDestination>(
+                Phase::Build,
+                Dimension::Bytes,
+                0,
+                0,
+            )
             .expect("snapshot batch");
         let baseline =
             match ledger.try_fallback_baseline(canonical, evidence_assembly, fallback, evidence) {
@@ -4744,17 +4802,21 @@ mod tests {
             .try_attribution_batch::<CanonicalOutput>(terminal_phase, dimension, 0, 0)
             .expect("empty canonical assembly");
         let evidence_assembly = ledger
-            .try_attribution_batch::<PublishedOutcomeEvidence>(terminal_phase, dimension, 1, 0)
+            .try_attribution_batch::<OutcomeEvidenceDestination>(terminal_phase, dimension, 1, 0)
             .expect("covered evidence assembly");
         let mut fallback = ledger
-            .try_attribution_batch::<PublishedOutcomeEvidence>(terminal_phase, dimension, 1, 0)
+            .try_attribution_batch::<OutcomeEvidenceDestination>(terminal_phase, dimension, 1, 0)
             .expect("covered fallback batch");
         let attribution = ledger
-            .reserve_operation_attribution::<PublishedOutcomeEvidence>(terminal_phase, dimension, 3)
+            .reserve_operation_attribution::<OutcomeEvidenceDestination>(
+                terminal_phase,
+                dimension,
+                3,
+            )
             .expect("fallback attribution");
         assert!(fallback.try_push_attribution(attribution).is_ok());
         let evidence = ledger
-            .try_attribution_batch::<PublishedOutcomeEvidence>(terminal_phase, dimension, 0, 0)
+            .try_attribution_batch::<OutcomeEvidenceDestination>(terminal_phase, dimension, 0, 0)
             .expect("empty evidence batch");
         let baseline = ledger
             .try_fallback_baseline(canonical, evidence_assembly, fallback, evidence)
@@ -4781,13 +4843,13 @@ mod tests {
             .try_attribution_batch::<CanonicalOutput>(terminal_phase, dimension, 1, 1)
             .expect("covered canonical assembly");
         let evidence_assembly = ledger
-            .try_attribution_batch::<PublishedOutcomeEvidence>(terminal_phase, dimension, 0, 0)
+            .try_attribution_batch::<OutcomeEvidenceDestination>(terminal_phase, dimension, 0, 0)
             .expect("empty evidence assembly");
         let fallback = ledger
-            .try_attribution_batch::<PublishedOutcomeEvidence>(terminal_phase, dimension, 0, 0)
+            .try_attribution_batch::<OutcomeEvidenceDestination>(terminal_phase, dimension, 0, 0)
             .expect("empty fallback batch");
         let evidence = ledger
-            .try_attribution_batch::<PublishedOutcomeEvidence>(terminal_phase, dimension, 0, 0)
+            .try_attribution_batch::<OutcomeEvidenceDestination>(terminal_phase, dimension, 0, 0)
             .expect("empty evidence batch");
         let baseline = ledger
             .try_fallback_baseline(canonical_assembly, evidence_assembly, fallback, evidence)
