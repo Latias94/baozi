@@ -1807,55 +1807,49 @@ where
 
     #[allow(
         dead_code,
-        clippy::result_large_err,
-        reason = "the staged seam preserves the fallback baseline on rejection without allocating"
+        reason = "crate-private until the U4 canonical consumers switch atomically"
     )]
-    pub(crate) fn try_prepare_primary(
+    pub(crate) fn try_bind_primary(
+        &self,
+        baseline: &mut FallbackBatchBaseline<O, P, D>,
+        canonical_source: Option<&mut AttributionReservationBatch<O, P, D, CanonicalOutput>>,
+        evidence_source: Option<
+            &mut AttributionReservationBatch<O, P, D, PublishedOutcomeEvidence>,
+        >,
+    ) -> Result<(), LedgerCause<D>> {
+        self.validate_primary_publication(
+            baseline,
+            canonical_source.as_deref(),
+            evidence_source.as_deref(),
+        )?;
+        let state = lock(&self.state);
+        bind_typed_publication_batch(&state, &mut baseline.canonical_assembly)?;
+        bind_typed_publication_batch(&state, &mut baseline.evidence_assembly)?;
+        bind_typed_publication_batch(&state, &mut baseline.evidence)?;
+        if let Some(batch) = canonical_source {
+            bind_typed_publication_batch(&state, batch)?;
+        }
+        if let Some(batch) = evidence_source {
+            bind_typed_publication_batch(&state, batch)?;
+        }
+        Ok(())
+    }
+
+    /// Consumes a primary batch graph only after [`Self::try_bind_primary`] has completed.
+    ///
+    /// This step deliberately performs no owner-defined `P::Ord` or `D::Ord` calls. Callers can
+    /// therefore contain an ordering panic while they still own the storage coupled to these
+    /// batches, then invoke this consuming transition only after binding succeeds.
+    #[allow(
+        dead_code,
+        reason = "crate-private until the U4 canonical consumers switch atomically"
+    )]
+    pub(crate) fn finish_bound_primary(
         self,
-        mut baseline: FallbackBatchBaseline<O, P, D>,
-        mut canonical_source: Option<AttributionReservationBatch<O, P, D, CanonicalOutput>>,
-        mut evidence_source: Option<AttributionReservationBatch<O, P, D, PublishedOutcomeEvidence>>,
-    ) -> Result<TypedFreezeProof<O, P, D>, TypedPrimaryRejection<O, P, D>> {
-        if let Err(cause) = self.validate_primary_publication(
-            &baseline,
-            canonical_source.as_ref(),
-            evidence_source.as_ref(),
-        ) {
-            return Err(TypedPrimaryRejection {
-                ledger: self,
-                baseline,
-                canonical_discard: canonical_source,
-                evidence_discard: evidence_source,
-                cause,
-            });
-        }
-        let bind_result = {
-            let state = lock(&self.state);
-            bind_typed_publication_batch(&state, &mut baseline.canonical_assembly)
-                .and_then(|()| {
-                    bind_typed_publication_batch(&state, &mut baseline.evidence_assembly)
-                })
-                .and_then(|()| bind_typed_publication_batch(&state, &mut baseline.evidence))
-                .and_then(|()| {
-                    canonical_source
-                        .as_mut()
-                        .map_or(Ok(()), |batch| bind_typed_publication_batch(&state, batch))
-                })
-                .and_then(|()| {
-                    evidence_source
-                        .as_mut()
-                        .map_or(Ok(()), |batch| bind_typed_publication_batch(&state, batch))
-                })
-        };
-        if let Err(cause) = bind_result {
-            return Err(TypedPrimaryRejection {
-                ledger: self,
-                baseline,
-                canonical_discard: canonical_source,
-                evidence_discard: evidence_source,
-                cause,
-            });
-        }
+        baseline: FallbackBatchBaseline<O, P, D>,
+        canonical_source: Option<AttributionReservationBatch<O, P, D, CanonicalOutput>>,
+        evidence_source: Option<AttributionReservationBatch<O, P, D, PublishedOutcomeEvidence>>,
+    ) -> TypedFreezeProof<O, P, D> {
         let FallbackBatchBaseline {
             mut canonical_assembly,
             mut evidence_assembly,
@@ -1869,13 +1863,13 @@ where
         if let Some(mut source) = evidence_source {
             evidence_assembly.absorb_proven(&mut source);
         }
-        Ok(TypedFreezeProof {
+        TypedFreezeProof {
             canonical: canonical_assembly,
             evidence: evidence_assembly,
             discard_canonical: None,
             discard_evidence: Some(fallback),
             ledger: self,
-        })
+        }
     }
 
     #[allow(
@@ -2569,46 +2563,6 @@ where
             discard_evidence,
             ledger,
         }
-    }
-}
-
-#[allow(
-    dead_code,
-    reason = "crate-private until the U4 canonical consumers switch atomically"
-)]
-pub(crate) struct TypedPrimaryRejection<O, P, D>
-where
-    O: OperationOwner,
-    P: Copy + Ord,
-    D: Copy + Ord,
-{
-    ledger: Ledger<O, P, D>,
-    baseline: FallbackBatchBaseline<O, P, D>,
-    canonical_discard: Option<AttributionReservationBatch<O, P, D, CanonicalOutput>>,
-    evidence_discard: Option<AttributionReservationBatch<O, P, D, PublishedOutcomeEvidence>>,
-    cause: LedgerCause<D>,
-}
-
-#[allow(
-    dead_code,
-    reason = "crate-private until the U4 canonical consumers switch atomically"
-)]
-impl<O, P, D> TypedPrimaryRejection<O, P, D>
-where
-    O: OperationOwner,
-    P: Copy + Ord,
-    D: Copy + Ord,
-{
-    pub(crate) fn cause(&self) -> &LedgerCause<D> {
-        &self.cause
-    }
-
-    pub(crate) fn into_fallback_proof(self) -> TypedFreezeProof<O, P, D> {
-        self.baseline.into_fallback_proof(
-            self.ledger,
-            self.canonical_discard,
-            self.evidence_discard,
-        )
     }
 }
 
@@ -4560,15 +4514,18 @@ mod tests {
         assert_eq!(target_before.0, 1);
         assert_eq!(foreign_before.0, 2);
 
-        let rejection = match target.try_prepare_primary(baseline, Some(foreign_source), None) {
-            Ok(_) => panic!("foreign primary source must be rejected"),
-            Err(rejection) => rejection,
-        };
+        let mut baseline = baseline;
+        let mut foreign_source = Some(foreign_source);
+        let rejection = target
+            .try_bind_primary(&mut baseline, foreign_source.as_mut(), None)
+            .expect_err("foreign primary source must be rejected");
 
-        assert!(matches!(rejection.cause(), LedgerCause::OwnerMismatch));
+        assert!(matches!(rejection, LedgerCause::OwnerMismatch));
         assert_eq!(probe_values(&target_probe), target_before);
         assert_eq!(probe_values(&foreign_probe), foreign_before);
-        let snapshot = rejection.into_fallback_proof().freeze();
+        let snapshot = baseline
+            .into_fallback_proof(target, foreign_source, None)
+            .freeze();
         assert_eq!(snapshot.active_reservations(), 0);
         assert_eq!(snapshot.current_live_bytes(), 0);
         assert_eq!(probe_values(&target_probe), (0, 0));
@@ -4761,9 +4718,12 @@ mod tests {
                 .try_push_commitment(OutputCommitment::new(dimension, 3))
                 .is_ok()
         );
-        let proof = ledger
-            .try_prepare_primary(baseline, Some(source), None)
+        let mut baseline = baseline;
+        let mut source = Some(source);
+        ledger
+            .try_bind_primary(&mut baseline, source.as_mut(), None)
             .unwrap_or_else(|_| panic!("exact primary publication must bind"));
+        let proof = ledger.finish_bound_primary(baseline, source, None);
         let snapshot = freeze_while_ord_panics(proof);
 
         assert_eq!(snapshot.current_live_bytes(), 0);

@@ -816,18 +816,15 @@ impl PhysicalStorageAccount {
                 return Err(RetainedAllocationError::Build(error));
             }
             Err(payload) => {
-                let charge_retained = !payload.is::<String>() && !payload.is::<&'static str>();
                 discard_untrusted_panic_payload(payload);
-                #[cfg(test)]
-                if !charge_retained {
-                    observe_known_builder_panic_after_discard(&lease.owner);
-                }
-                if charge_retained {
-                    std::mem::forget(lease);
-                } else {
-                    drop(lease);
-                }
-                return Err(RetainedAllocationError::BuilderPanicked { charge_retained });
+                // A builder can move nested storage into a side owner before panicking. The panic
+                // payload type cannot prove that storage was released, even for `&str` or
+                // `String`, so both physical admission and the caller's operation attribution
+                // remain fail-closed.
+                std::mem::forget(lease);
+                return Err(RetainedAllocationError::BuilderPanicked {
+                    charge_retained: true,
+                });
             }
         };
         let payload = RetainedPayload { value, charge };
@@ -972,11 +969,13 @@ impl std::error::Error for RetainedAllocationPlanError {}
 
 /// An allocation-free code returned when a retained payload builder fails.
 ///
-/// Builder-owned storage is destroyed while physical admission remains live. This concrete value
-/// type prevents safe Rust from moving an owning `Vec`, `String`, `Arc`, static reference, or
-/// interior-mutable storage container past the point where that admission is released. Domain
-/// layers translate their typed failure into a local numeric code inside the builder closure and
-/// reconstruct the domain error after this operation seam returns.
+/// Returning this code is an explicit recoverable-failure contract: the builder certifies that it
+/// did not transfer nested storage to a side owner and that all builder-local storage was destroyed
+/// while physical admission remained live. This concrete value type prevents moving an owning
+/// `Vec`, `String`, `Arc`, static reference, or interior-mutable storage container through the error
+/// value itself; it cannot prevent side effects, so trusted domain adapters must uphold the rest of
+/// the contract. A panic supplies no such proof and always retains physical and operation charges
+/// fail-closed. Domain layers reconstruct their typed error after this operation seam returns.
 ///
 /// ```compile_fail
 /// use baozi_operation::RetainedBuildFailureCode;
@@ -1187,7 +1186,7 @@ impl fmt::Display for RetainedAllocationError {
             Self::BuilderPanicked { charge_retained } => {
                 if *charge_retained {
                     formatter.write_str(
-                        "retained payload constructor panicked with an opaque leaked payload; physical charge remains retained",
+                        "retained payload constructor panicked and storage release was not proven; physical charge remains retained",
                     )
                 } else {
                     formatter.write_str("retained payload constructor panicked")
@@ -3932,92 +3931,85 @@ where
             ));
         }
 
-        let primary_batches = PrimaryPublicationBatches {
+        let mut baseline_batches = baseline_batches;
+        let mut primary_batches = PrimaryPublicationBatches {
             canonical: canonical_batch,
             evidence: Some(evidence_batch),
         };
-        let rejection =
-            match try_prepare_terminal_primary(ledger, baseline_batches, primary_batches) {
-                Ok(proof) => {
-                    let fallback_account =
-                        match fallback.try_discard_allocation_before_batch_release() {
-                            Ok(account) => account,
-                            Err(()) => {
-                                std::mem::forget(proof);
-                                std::mem::forget(fallback);
-                                std::mem::forget(evidence);
-                                std::mem::forget(canonical_table);
-                                std::mem::forget(evidence_table);
-                                std::mem::forget(account);
-                                return Err(RetainedPublicationPrepareError::StorageDropUnverified);
-                            }
-                        };
-                    freeze_terminal_evidence(proof, Some(fallback_account), &evidence);
-                    let payload = match terminal {
-                        RetainedTerminalMode::Success {
-                            canonical_root,
-                            evidence_root,
-                        } => {
-                            let canonical_table = match canonical_table {
-                                Some(table) => table,
-                                None => unreachable_final_owner_state(),
-                            };
-                            let evidence_table = match evidence_table {
-                                Some(table) => table,
-                                None => unreachable_final_owner_state(),
-                            };
-                            RetainedPublicationPayload::Success {
-                                canonical: PublishedCanonicalAggregate {
-                                    inner: PublishedRetainedAggregate {
-                                        table: canonical_table,
-                                        set_id: self.set_id,
-                                    },
-                                },
-                                outcome_evidence: PublishedOutcomeEvidenceAggregate {
-                                    inner: PublishedRetainedAggregate {
-                                        table: evidence_table,
-                                        set_id: self.set_id,
-                                    },
-                                },
-                                canonical_root,
-                                outcome_evidence_root: evidence_root,
-                                account,
-                            }
-                        }
-                        RetainedTerminalMode::RichFailure {
-                            evidence_root,
-                            cause,
-                        } => {
-                            let evidence_table = match evidence_table {
-                                Some(table) => table,
-                                None => unreachable_final_owner_state(),
-                            };
-                            RetainedPublicationPayload::RichFailure {
-                                outcome_evidence: PublishedOutcomeEvidenceAggregate {
-                                    inner: PublishedRetainedAggregate {
-                                        table: evidence_table,
-                                        set_id: self.set_id,
-                                    },
-                                },
-                                outcome_evidence_root: evidence_root,
-                                account,
-                                cause,
-                            }
-                        }
-                        RetainedTerminalMode::MinimalFallback { .. } => {
-                            unreachable_final_owner_state()
-                        }
-                    };
-                    return Ok(PreparedRetainedPublication {
-                        payload,
-                        evidence: evidence.into_published_part(),
-                    });
+        let bind_result = catch_unwind(AssertUnwindSafe(|| {
+            try_bind_terminal_primary(&ledger, &mut baseline_batches, &mut primary_batches)
+        }));
+        match bind_result {
+            Err(payload) => {
+                let expect_canonical = matches!(terminal, RetainedTerminalMode::Success { .. });
+                let _storage_dropped = drop_primary_tables_before_attribution(
+                    expect_canonical,
+                    canonical_table,
+                    evidence_table,
+                    &account,
+                );
+                discard_untrusted_panic_payload(payload);
+                // Binding may have updated only a prefix of cached positions. Even when both
+                // tables dropped cleanly, no remaining batch can safely release or publish.
+                std::mem::forget(baseline_batches);
+                std::mem::forget(primary_batches);
+                std::mem::forget(ledger);
+                std::mem::forget(account);
+                std::mem::forget(fallback);
+                std::mem::forget(evidence);
+                return Err(RetainedPublicationPrepareError::PrimaryPanicked);
+            }
+            Ok(Err(_cause)) => {
+                let expect_canonical = matches!(terminal, RetainedTerminalMode::Success { .. });
+                if !drop_primary_tables_before_attribution(
+                    expect_canonical,
+                    canonical_table,
+                    evidence_table,
+                    &account,
+                ) {
+                    std::mem::forget(baseline_batches);
+                    std::mem::forget(primary_batches);
+                    std::mem::forget(ledger);
+                    std::mem::forget(account);
+                    std::mem::forget(fallback);
+                    std::mem::forget(evidence);
+                    return Err(RetainedPublicationPrepareError::StorageDropUnverified);
                 }
-                Err(rejection) => rejection,
-            };
+                let proof = baseline_batches.into_fallback_proof(
+                    ledger,
+                    primary_batches.canonical,
+                    primary_batches.evidence,
+                );
+                return Ok(finish_retained_publication_fallback(
+                    proof,
+                    fallback,
+                    evidence,
+                    PreparationFailureCode::ledger(),
+                    account,
+                ));
+            }
+            Ok(Ok(())) => {}
+        }
 
-        let storage_dropped = match terminal {
-            RetainedTerminalMode::Success { .. } => {
+        let proof = finish_bound_terminal_primary(ledger, baseline_batches, primary_batches);
+        let fallback_account = match fallback.try_discard_allocation_before_batch_release() {
+            Ok(account) => account,
+            Err(()) => {
+                std::mem::forget(proof);
+                std::mem::forget(fallback);
+                std::mem::forget(evidence);
+                std::mem::forget(canonical_table);
+                std::mem::forget(evidence_table);
+                std::mem::forget(account);
+                return Err(RetainedPublicationPrepareError::StorageDropUnverified);
+            }
+        };
+        freeze_terminal_evidence(proof, Some(fallback_account), &evidence);
+        let payload = match terminal {
+            RetainedTerminalMode::Success {
+                canonical_root,
+                evidence_root,
+            } => {
                 let canonical_table = match canonical_table {
                     Some(table) => table,
                     None => unreachable_final_owner_state(),
@@ -4026,32 +4018,50 @@ where
                     Some(table) => table,
                     None => unreachable_final_owner_state(),
                 };
-                drop_block_tables_before_attribution(canonical_table, evidence_table, &account)
+                RetainedPublicationPayload::Success {
+                    canonical: PublishedCanonicalAggregate {
+                        inner: PublishedRetainedAggregate {
+                            table: canonical_table,
+                            set_id: self.set_id,
+                        },
+                    },
+                    outcome_evidence: PublishedOutcomeEvidenceAggregate {
+                        inner: PublishedRetainedAggregate {
+                            table: evidence_table,
+                            set_id: self.set_id,
+                        },
+                    },
+                    canonical_root,
+                    outcome_evidence_root: evidence_root,
+                    account,
+                }
             }
-            RetainedTerminalMode::RichFailure { .. } => {
+            RetainedTerminalMode::RichFailure {
+                evidence_root,
+                cause,
+            } => {
                 let evidence_table = match evidence_table {
                     Some(table) => table,
                     None => unreachable_final_owner_state(),
                 };
-                drop_retained_table_before_attribution(evidence_table, &account)
+                RetainedPublicationPayload::RichFailure {
+                    outcome_evidence: PublishedOutcomeEvidenceAggregate {
+                        inner: PublishedRetainedAggregate {
+                            table: evidence_table,
+                            set_id: self.set_id,
+                        },
+                    },
+                    outcome_evidence_root: evidence_root,
+                    account,
+                    cause,
+                }
             }
             RetainedTerminalMode::MinimalFallback { .. } => unreachable_final_owner_state(),
         };
-        if !storage_dropped {
-            std::mem::forget(rejection);
-            std::mem::forget(account);
-            std::mem::forget(fallback);
-            std::mem::forget(evidence);
-            return Err(RetainedPublicationPrepareError::StorageDropUnverified);
-        }
-        let _ = rejection.cause();
-        Ok(finish_retained_publication_fallback(
-            rejection.into_fallback_proof(),
-            fallback,
-            evidence,
-            PreparationFailureCode::ledger(),
-            account,
-        ))
+        Ok(PreparedRetainedPublication {
+            payload,
+            evidence: evidence.into_published_part(),
+        })
     }
 
     fn has_exact_storage_graph(&self) -> bool {
@@ -4184,21 +4194,34 @@ where
         .map(|cause| PreparationFailureCode::from_control(&cause))
 }
 
-#[allow(
-    clippy::result_large_err,
-    reason = "primary rejection preserves the complete allocation-free fallback ownership graph"
-)]
-fn try_prepare_terminal_primary<O, P, D>(
-    ledger: Ledger<O, P, D>,
-    baseline: FallbackBatchBaseline<O, P, D>,
-    batches: PrimaryPublicationBatches<O, P, D>,
-) -> Result<crate::ledger::TypedFreezeProof<O, P, D>, crate::ledger::TypedPrimaryRejection<O, P, D>>
+fn try_bind_terminal_primary<O, P, D>(
+    ledger: &Ledger<O, P, D>,
+    baseline: &mut FallbackBatchBaseline<O, P, D>,
+    batches: &mut PrimaryPublicationBatches<O, P, D>,
+) -> Result<(), LedgerCause<D>>
 where
     O: OperationOwner,
     P: Copy + Ord,
     D: Copy + Ord + fmt::Debug,
 {
-    ledger.try_prepare_primary(baseline, batches.canonical, batches.evidence)
+    ledger.try_bind_primary(
+        baseline,
+        batches.canonical.as_mut(),
+        batches.evidence.as_mut(),
+    )
+}
+
+fn finish_bound_terminal_primary<O, P, D>(
+    ledger: Ledger<O, P, D>,
+    baseline: FallbackBatchBaseline<O, P, D>,
+    batches: PrimaryPublicationBatches<O, P, D>,
+) -> crate::ledger::TypedFreezeProof<O, P, D>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord + fmt::Debug,
+{
+    ledger.finish_bound_primary(baseline, batches.canonical, batches.evidence)
 }
 
 #[allow(
@@ -4535,6 +4558,8 @@ pub enum RetainedPublicationPrepareError {
     InvalidStorageGraph,
     /// Payload destruction could not prove that physical storage was released.
     StorageDropUnverified,
+    /// Owner-defined ledger ordering panicked; all uncertain attribution remains retained.
+    PrimaryPanicked,
 }
 
 impl fmt::Display for RetainedPublicationPrepareError {
@@ -4546,6 +4571,9 @@ impl fmt::Display for RetainedPublicationPrepareError {
             }
             Self::StorageDropUnverified => formatter
                 .write_str("retained storage release could not be verified before attribution"),
+            Self::PrimaryPanicked => formatter.write_str(
+                "retained primary ledger preparation panicked; attribution remains retained fail-closed",
+            ),
         }
     }
 }
@@ -4556,16 +4584,24 @@ impl std::error::Error for RetainedPublicationPrepareError {
     }
 }
 
-fn drop_block_tables_before_attribution<CanonicalBlock, EvidenceBlock>(
-    canonical: RetainedAllocation<RetainedBlockTable<CanonicalBlock>>,
-    evidence: RetainedAllocation<RetainedBlockTable<EvidenceBlock>>,
+fn drop_primary_tables_before_attribution<CanonicalBlock, EvidenceBlock>(
+    expect_canonical: bool,
+    canonical: Option<RetainedAllocation<RetainedBlockTable<CanonicalBlock>>>,
+    evidence: Option<RetainedAllocation<RetainedBlockTable<EvidenceBlock>>>,
     account: &PhysicalStorageAccount,
 ) -> bool {
-    if !drop_retained_table_before_attribution(canonical, account) {
-        std::mem::forget(evidence);
+    let exact_shape = canonical.is_some() == expect_canonical && evidence.is_some();
+    if let Some(canonical) = canonical
+        && !drop_retained_table_before_attribution(canonical, account)
+    {
+        if let Some(evidence) = evidence {
+            std::mem::forget(evidence);
+        }
         return false;
     }
-    drop_retained_table_before_attribution(evidence, account)
+    let evidence_dropped =
+        evidence.is_some_and(|evidence| drop_retained_table_before_attribution(evidence, account));
+    exact_shape && evidence_dropped
 }
 
 fn drop_retained_table_before_attribution<Block>(
@@ -4618,23 +4654,6 @@ thread_local! {
     static FAIL_NEXT_FINAL_OWNER_ALLOCATION: std::cell::Cell<bool> = const {
         std::cell::Cell::new(false)
     };
-    static KNOWN_BUILDER_PANIC_AFTER_DISCARD: std::cell::Cell<
-        Option<fn(&PhysicalStorageAccount)>,
-    > = const { std::cell::Cell::new(None) };
-}
-
-#[cfg(test)]
-fn set_known_builder_panic_after_discard_observer(observer: fn(&PhysicalStorageAccount)) {
-    KNOWN_BUILDER_PANIC_AFTER_DISCARD.with(|slot| slot.set(Some(observer)));
-}
-
-#[cfg(test)]
-fn observe_known_builder_panic_after_discard(account: &PhysicalStorageAccount) {
-    KNOWN_BUILDER_PANIC_AFTER_DISCARD.with(|slot| {
-        if let Some(observer) = slot.take() {
-            observer(account);
-        }
-    });
 }
 
 #[cfg(test)]
@@ -4781,6 +4800,57 @@ mod tests {
     #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
     enum TestDimension {
         Bytes,
+    }
+
+    static PANIC_ON_PRIMARY_DIMENSION_ORD: AtomicBool = AtomicBool::new(false);
+    static PRIMARY_DIMENSION_ORD_TEST_LOCK: StdMutex<()> = StdMutex::new(());
+
+    struct PrimaryDimensionOrdReset;
+
+    impl Drop for PrimaryDimensionOrdReset {
+        fn drop(&mut self) {
+            PANIC_ON_PRIMARY_DIMENSION_ORD.store(false, Ordering::SeqCst);
+        }
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct PrimaryPanicDimension(u8);
+
+    impl PartialOrd for PrimaryPanicDimension {
+        fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+            Some(self.cmp(other))
+        }
+    }
+
+    impl Ord for PrimaryPanicDimension {
+        fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+            assert!(
+                !PANIC_ON_PRIMARY_DIMENSION_ORD.load(Ordering::SeqCst),
+                "primary bind invoked owner-defined dimension ordering"
+            );
+            self.0.cmp(&other.0)
+        }
+    }
+
+    struct PrimaryBindDropObservation {
+        ledger: StdArc<StdMutex<Option<LedgerTestProbe<TestPhase, PrimaryPanicDimension>>>>,
+        drop_count: &'static AtomicU64,
+        observed_active: &'static AtomicU64,
+        observed_live: &'static AtomicU64,
+    }
+
+    impl Drop for PrimaryBindDropObservation {
+        fn drop(&mut self) {
+            let ledger = lock_recovering_poison(&self.ledger);
+            let ledger = ledger
+                .as_ref()
+                .expect("primary bind probe must remain installed through storage drop");
+            self.drop_count.fetch_add(1, Ordering::SeqCst);
+            self.observed_active
+                .store(ledger.active_reservations(), Ordering::SeqCst);
+            self.observed_live
+                .store(ledger.current_live_bytes(), Ordering::SeqCst);
+        }
     }
 
     #[derive(Clone, Copy)]
@@ -5437,6 +5507,134 @@ mod tests {
             _ => panic!("success ledger rejection must publish minimal fallback"),
         }
         assert_eq!(factory.snapshot().live_accounts(), 0);
+    }
+
+    #[test]
+    fn primary_ordering_panic_drops_storage_while_attribution_remains_live() {
+        static BLOCK_DROPS: AtomicU64 = AtomicU64::new(0);
+        static OBSERVED_ACTIVE: AtomicU64 = AtomicU64::new(0);
+        static OBSERVED_LIVE: AtomicU64 = AtomicU64::new(0);
+
+        let _ord_lock = PRIMARY_DIMENSION_ORD_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _reset = PrimaryDimensionOrdReset;
+        PANIC_ON_PRIMARY_DIMENSION_ORD.store(false, Ordering::SeqCst);
+        BLOCK_DROPS.store(0, Ordering::SeqCst);
+        OBSERVED_ACTIVE.store(0, Ordering::SeqCst);
+        OBSERVED_LIVE.store(0, Ordering::SeqCst);
+
+        type PanicOperation = RetainedOperation<
+            TestOwner,
+            TestPhase,
+            TestProgress,
+            TestUnit,
+            PrimaryPanicDimension,
+            u32,
+        >;
+        type PanicPublication = RetainedPublicationAssembly<
+            TestOwner,
+            TestPhase,
+            TestProgress,
+            TestUnit,
+            PrimaryPanicDimension,
+            u32,
+            PrimaryBindDropObservation,
+            u64,
+        >;
+
+        let factory = account_factory(1);
+        let account = account(&factory, u64::MAX, 128);
+        let dimension = PrimaryPanicDimension(7);
+        let policy = DimensionPolicy::reservable_bytes(u64::MAX, u64::MAX, u64::MAX, u64::MAX)
+            .with_published_outcome_evidence_limit(64);
+        let limits = LedgerLimits::new(u64::MAX, [(dimension, policy)])
+            .unwrap_or_else(|_| panic!("panic-order policy must be valid"));
+        let writer = RetainedWriterPlan::new(
+            TestPhase::Build,
+            dimension,
+            dimension,
+            RetainedBatchLimits::new(2, 2),
+        );
+        let start = RetainedOperationStartPlan::new(
+            writer,
+            RetainedHandleSharePlan::new(dimension, dimension),
+            empty_plan(),
+            OutputCommitment::new(dimension, 1),
+            OutputCommitment::new(dimension, 1),
+        );
+        let operation =
+            PanicOperation::try_start(OperationControl::default(), limits, &account, start, || {
+                Ok(7_u32)
+            })
+            .unwrap_or_else(|_| panic!("panic-order operation must start"));
+        let ledger = operation.coordinator.retained_ledger().test_probe();
+        let deferred_ledger = StdArc::new(StdMutex::new(Some(ledger)));
+        let table_writer = RetainedWriterPlan::new(
+            TestPhase::Build,
+            dimension,
+            dimension,
+            RetainedBatchLimits::new(2, 2),
+        );
+        let publication_plan = RetainedPublicationPlan::success(
+            RetainedBlockTablePlan::new(table_writer, 1),
+            RetainedBlockTablePlan::new(table_writer, 1),
+        );
+        let mut assembly: PanicPublication = operation
+            .try_publication_assembly(publication_plan)
+            .unwrap_or_else(|_| panic!("panic-order publication must open"));
+        let canonical = assembly
+            .try_retain_canonical(empty_plan(), |emplacer| {
+                Ok(emplacer.place(
+                    PrimaryBindDropObservation {
+                        ledger: StdArc::clone(&deferred_ledger),
+                        drop_count: &BLOCK_DROPS,
+                        observed_active: &OBSERVED_ACTIVE,
+                        observed_live: &OBSERVED_LIVE,
+                    },
+                    CanonicalRootTag,
+                ))
+            })
+            .unwrap_or_else(|_| panic!("panic-order canonical block must retain"));
+        let evidence = assembly
+            .try_retain_outcome_evidence(empty_plan(), |emplacer| {
+                Ok(emplacer.place(9_u64, EvidenceRootTag))
+            })
+            .unwrap_or_else(|_| panic!("panic-order evidence block must retain"));
+        let (expected_active, expected_live) = {
+            let ledger = lock_recovering_poison(&deferred_ledger);
+            let ledger = ledger.as_ref().expect("panic-order ledger probe");
+            (ledger.active_reservations(), ledger.current_live_bytes())
+        };
+
+        PANIC_ON_PRIMARY_DIMENSION_ORD.store(true, Ordering::SeqCst);
+        let result = assembly.try_prepare_success(
+            canonical,
+            evidence,
+            final_progress(),
+            |session, canonical, evidence| {
+                session.canonical(canonical).is_some()
+                    && session.outcome_evidence(evidence) == Some(&9)
+            },
+        );
+        PANIC_ON_PRIMARY_DIMENSION_ORD.store(false, Ordering::SeqCst);
+
+        assert!(matches!(
+            result,
+            Err(RetainedPublicationPrepareError::PrimaryPanicked)
+        ));
+        assert_eq!(BLOCK_DROPS.load(Ordering::SeqCst), 1);
+        assert_eq!(OBSERVED_ACTIVE.load(Ordering::SeqCst), expected_active);
+        assert_eq!(OBSERVED_LIVE.load(Ordering::SeqCst), expected_live);
+        {
+            let ledger = lock_recovering_poison(&deferred_ledger);
+            let ledger = ledger.as_ref().expect("retained panic-order ledger probe");
+            assert_eq!(ledger.active_reservations(), expected_active);
+            assert_eq!(ledger.current_live_bytes(), expected_live);
+        }
+        assert!(account.snapshot().live_retained_bytes() > 0);
+        drop(account);
+        assert_eq!(factory.snapshot().live_accounts(), 1);
     }
 
     #[test]
@@ -6332,74 +6530,110 @@ mod tests {
     }
 
     #[test]
-    fn known_panic_payload_is_destroyed_before_charge_release() {
-        static OBSERVED_BYTES: AtomicU64 = AtomicU64::new(0);
-        static OBSERVED_ALLOCATIONS: AtomicU64 = AtomicU64::new(0);
-
-        fn observe_after_discard(account: &PhysicalStorageAccount) {
-            let snapshot = account.snapshot();
-            OBSERVED_BYTES.store(snapshot.live_retained_bytes(), Ordering::SeqCst);
-            OBSERVED_ALLOCATIONS.store(snapshot.live_retained_allocations(), Ordering::SeqCst);
-        }
-
+    fn every_builder_panic_payload_keeps_its_physical_charge_fail_closed() {
         let factory = account_factory(1);
-        let account = account(&factory, 1_024, 8);
+        let account = account(&factory, 4_096, 16);
+        let before = account.snapshot();
 
-        OBSERVED_BYTES.store(0, Ordering::SeqCst);
-        OBSERVED_ALLOCATIONS.store(0, Ordering::SeqCst);
-        set_known_builder_panic_after_discard_observer(observe_after_discard);
-        let error = account
+        let borrowed = account
             .try_retain_with::<u64>(empty_plan(), || panic!("test panic"))
             .unwrap_err();
         assert_eq!(
-            error,
+            borrowed,
             RetainedAllocationError::BuilderPanicked {
-                charge_retained: false,
+                charge_retained: true,
             }
         );
-        assert!(OBSERVED_BYTES.load(Ordering::SeqCst) > 0);
-        assert!(OBSERVED_ALLOCATIONS.load(Ordering::SeqCst) > 0);
-        assert_eq!(account.snapshot().live_retained_bytes(), 0);
-        assert_eq!(account.snapshot().live_retained_allocations(), 0);
+        let after_borrowed = account.snapshot();
+        assert!(after_borrowed.live_retained_bytes() > before.live_retained_bytes());
+        assert!(after_borrowed.live_retained_allocations() > before.live_retained_allocations());
 
-        OBSERVED_BYTES.store(0, Ordering::SeqCst);
-        OBSERVED_ALLOCATIONS.store(0, Ordering::SeqCst);
-        set_known_builder_panic_after_discard_observer(observe_after_discard);
-        let error = account
+        let owned = account
             .try_retain_with::<u64>(empty_plan(), || {
                 std::panic::panic_any(String::from("owned test panic"))
             })
             .unwrap_err();
         assert_eq!(
-            error,
-            RetainedAllocationError::BuilderPanicked {
-                charge_retained: false,
-            }
-        );
-        assert!(OBSERVED_BYTES.load(Ordering::SeqCst) > 0);
-        assert!(OBSERVED_ALLOCATIONS.load(Ordering::SeqCst) > 0);
-        assert_eq!(account.snapshot().live_retained_bytes(), 0);
-        assert_eq!(account.snapshot().live_retained_allocations(), 0);
-    }
-
-    #[test]
-    fn opaque_leaked_panic_payload_keeps_its_charge_fail_closed() {
-        let factory = account_factory(1);
-        let account = account(&factory, 4_096, 8);
-        let plan = RetainedAllocationPlan::new(64, 1).unwrap();
-        let error = account
-            .try_retain_with::<u64>(plan, || std::panic::panic_any(vec![0_u8; 64]))
-            .unwrap_err();
-
-        assert_eq!(
-            error,
+            owned,
             RetainedAllocationError::BuilderPanicked {
                 charge_retained: true,
             }
         );
-        let retained_bytes = account.snapshot().live_retained_bytes();
-        assert!(retained_bytes > 64);
-        assert_eq!(account.snapshot().live_retained_bytes(), retained_bytes);
+        let after_owned = account.snapshot();
+        assert!(after_owned.live_retained_bytes() > after_borrowed.live_retained_bytes());
+        assert!(
+            after_owned.live_retained_allocations() > after_borrowed.live_retained_allocations()
+        );
+
+        let plan = RetainedAllocationPlan::new(64, 1).unwrap();
+        let opaque = account
+            .try_retain_with::<u64>(plan, || std::panic::panic_any(vec![0_u8; 64]))
+            .unwrap_err();
+        assert_eq!(
+            opaque,
+            RetainedAllocationError::BuilderPanicked {
+                charge_retained: true,
+            }
+        );
+        let after_opaque = account.snapshot();
+        assert!(after_opaque.live_retained_bytes() > after_owned.live_retained_bytes() + 64);
+        assert!(after_opaque.live_retained_allocations() > after_owned.live_retained_allocations());
+        drop(account);
+        assert_eq!(factory.snapshot().live_accounts(), 1);
+    }
+
+    #[test]
+    fn side_owner_escape_keeps_physical_and_operation_attribution_fail_closed() {
+        let factory = account_factory(1);
+        let operation = test_operation(&factory, 64);
+        let mut assembly: TestPublication<u64, u64> = operation
+            .try_publication_assembly(publication_plan(1, 1))
+            .unwrap_or_else(|_| panic!("side-owner publication must open"));
+        let ledger = assembly
+            .operation
+            .as_ref()
+            .expect("side-owner assembly retains operation")
+            .coordinator
+            .retained_ledger()
+            .test_probe();
+        let account = assembly
+            .account
+            .as_ref()
+            .expect("side-owner assembly retains account")
+            .share_after_admission();
+        let side_owner = StdArc::new(StdMutex::new(None));
+        let escaped = StdArc::clone(&side_owner);
+        let active_before = ledger.active_reservations();
+        let live_before = ledger.current_live_bytes();
+        let physical_before = account.snapshot();
+        let plan = RetainedAllocationPlan::new(64, 1).unwrap();
+
+        let result = assembly.try_retain_canonical::<CanonicalRootTag>(plan, move |_emplacer| {
+            *lock_recovering_poison(&escaped) = Some(vec![0_u8; 64]);
+            panic!("builder escaped side-owned storage")
+        });
+
+        assert!(matches!(
+            result,
+            Err(RetainedPublicationError::Writer(
+                RetainedWriterError::Physical(RetainedAllocationError::BuilderPanicked {
+                    charge_retained: true,
+                })
+            ))
+        ));
+        assert!(lock_recovering_poison(&side_owner).is_some());
+        assert_eq!(ledger.active_reservations(), active_before + 1);
+        assert!(ledger.current_live_bytes() > live_before);
+        let physical_after = account.snapshot();
+        assert!(physical_after.live_retained_bytes() > physical_before.live_retained_bytes() + 64);
+        assert!(
+            physical_after.live_retained_allocations()
+                > physical_before.live_retained_allocations()
+        );
+        let retained_live = ledger.current_live_bytes();
+        drop(lock_recovering_poison(&side_owner).take());
+        assert_eq!(ledger.current_live_bytes(), retained_live);
+        drop(assembly);
         drop(account);
         assert_eq!(factory.snapshot().live_accounts(), 1);
     }
@@ -7117,6 +7351,10 @@ mod tests {
             1
         );
         assert_eq!(production.matches(".try_prepare_typed_control(").count(), 1);
-        assert_eq!(production.matches("ledger.try_prepare_primary(").count(), 1);
+        assert_eq!(production.matches("ledger.try_bind_primary(").count(), 1);
+        assert_eq!(
+            production.matches("ledger.finish_bound_primary(").count(),
+            1
+        );
     }
 }
