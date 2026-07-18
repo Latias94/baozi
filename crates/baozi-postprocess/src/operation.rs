@@ -16,6 +16,11 @@ pub enum PostProcessLedgerPhase {
     Validate,
 }
 
+impl PostProcessLedgerPhase {
+    /// Complete canonical accounting-phase vocabulary for one post-process operation.
+    pub const ALL: [Self; 2] = [Self::Transform, Self::Validate];
+}
+
 /// Transient observer phases, intentionally distinct from ledger phases.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum PostProcessProgressPhase {
@@ -127,5 +132,41 @@ impl PostProcessLimits {
 impl Default for PostProcessLimits {
     fn default() -> Self {
         Self::new(100_000_000, 1024 * 1024 * 1024)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::any::TypeId;
+
+    #[test]
+    fn postprocess_ledger_phase_catalog_is_complete_unique_and_canonical() {
+        let expected = [
+            PostProcessLedgerPhase::Transform,
+            PostProcessLedgerPhase::Validate,
+        ];
+
+        assert_eq!(PostProcessLedgerPhase::ALL, expected);
+        for (index, phase) in PostProcessLedgerPhase::ALL.iter().enumerate() {
+            assert!(
+                !PostProcessLedgerPhase::ALL[..index].contains(phase),
+                "post-process ledger phase catalog contains a duplicate: {phase:?}"
+            );
+        }
+        assert!(
+            PostProcessLedgerPhase::ALL
+                .windows(2)
+                .all(|pair| pair[0] < pair[1]),
+            "post-process ledger phase catalog must follow canonical Ord order"
+        );
+    }
+
+    #[test]
+    fn postprocess_ledger_and_progress_phase_vocabularies_are_distinct_types() {
+        assert_ne!(
+            TypeId::of::<PostProcessLedgerPhase>(),
+            TypeId::of::<PostProcessProgressPhase>()
+        );
     }
 }

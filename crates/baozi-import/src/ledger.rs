@@ -23,6 +23,20 @@ pub enum ImportLedgerPhase {
     OutcomeFinalization,
 }
 
+impl ImportLedgerPhase {
+    /// Complete canonical accounting-phase vocabulary for one import operation.
+    pub const ALL: [Self; 8] = [
+        Self::PrimarySnapshot,
+        Self::Detection,
+        Self::DependencyAcquisition,
+        Self::BackendDecode,
+        Self::FormatNormalization,
+        Self::SceneConstruction,
+        Self::Validation,
+        Self::OutcomeFinalization,
+    ];
+}
+
 /// Transient observer vocabulary. It cannot advance lifecycle evidence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ImportProgressPhase {
@@ -313,6 +327,43 @@ pub(crate) type ImportPendingPublication =
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::any::TypeId;
+
+    #[test]
+    fn import_ledger_phase_catalog_is_complete_unique_and_canonical() {
+        let expected = [
+            ImportLedgerPhase::PrimarySnapshot,
+            ImportLedgerPhase::Detection,
+            ImportLedgerPhase::DependencyAcquisition,
+            ImportLedgerPhase::BackendDecode,
+            ImportLedgerPhase::FormatNormalization,
+            ImportLedgerPhase::SceneConstruction,
+            ImportLedgerPhase::Validation,
+            ImportLedgerPhase::OutcomeFinalization,
+        ];
+
+        assert_eq!(ImportLedgerPhase::ALL, expected);
+        for (index, phase) in ImportLedgerPhase::ALL.iter().enumerate() {
+            assert!(
+                !ImportLedgerPhase::ALL[..index].contains(phase),
+                "import ledger phase catalog contains a duplicate: {phase:?}"
+            );
+        }
+        assert!(
+            ImportLedgerPhase::ALL
+                .windows(2)
+                .all(|pair| pair[0] < pair[1]),
+            "import ledger phase catalog must follow canonical Ord order"
+        );
+    }
+
+    #[test]
+    fn import_ledger_and_progress_phase_vocabularies_are_distinct_types() {
+        assert_ne!(
+            TypeId::of::<ImportLedgerPhase>(),
+            TypeId::of::<ImportProgressPhase>()
+        );
+    }
 
     #[test]
     fn diagnostic_policy_never_relaxes_attempted_limits() {
