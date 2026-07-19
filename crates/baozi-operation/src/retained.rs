@@ -9,6 +9,7 @@ mod account;
 mod evidence;
 mod final_owner;
 mod ownership;
+mod startup;
 
 use crate::control::discard_untrusted_panic_payload;
 use crate::coordinator::{FinalProgress, OperationCoordinator};

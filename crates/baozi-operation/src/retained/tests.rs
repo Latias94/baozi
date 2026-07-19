@@ -24,6 +24,7 @@ fn retained_production_source() -> String {
         include_str!("evidence.rs"),
         include_str!("final_owner.rs"),
         include_str!("ownership.rs"),
+        include_str!("startup.rs"),
     ]
     .join("\n")
 }
@@ -34,6 +35,7 @@ fn retained_non_final_owner_production_source() -> String {
         include_str!("account.rs"),
         include_str!("evidence.rs"),
         include_str!("ownership.rs"),
+        include_str!("startup.rs"),
     ]
     .join("\n")
 }
