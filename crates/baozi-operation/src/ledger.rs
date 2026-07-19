@@ -8,21 +8,56 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 #[cfg(test)]
-static FAIL_NEXT_EVIDENCE_ALLOCATION: AtomicBool = AtomicBool::new(false);
-
-#[cfg(test)]
 static EVIDENCE_ALLOCATION_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 #[cfg(test)]
+pub(crate) fn test_evidence_allocation_guard() -> MutexGuard<'static, ()> {
+    EVIDENCE_ALLOCATION_TEST_LOCK
+        .lock()
+        .expect("ledger evidence allocation test lock")
+}
+
+#[cfg(test)]
+pub(crate) fn test_fail_next_evidence_allocation() {
+    test_set_evidence_allocation_failure(true);
+}
+
+#[cfg(test)]
 std::thread_local! {
+    static FAIL_NEXT_EVIDENCE_ALLOCATION: std::cell::Cell<bool> = const {
+        std::cell::Cell::new(false)
+    };
     static ATTRIBUTION_BATCH_ALLOCATION_ENTRIES: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
+    static PHASE_CATALOG_CONSTRUCTION_ENTRIES: std::cell::Cell<usize> = const {
         std::cell::Cell::new(0)
     };
 }
 
 #[cfg(test)]
+fn test_set_evidence_allocation_failure(armed: bool) {
+    FAIL_NEXT_EVIDENCE_ALLOCATION.with(|failpoint| failpoint.set(armed));
+}
+
+#[cfg(test)]
+fn test_evidence_allocation_failure_is_armed() -> bool {
+    FAIL_NEXT_EVIDENCE_ALLOCATION.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+fn test_take_evidence_allocation_failure() -> bool {
+    FAIL_NEXT_EVIDENCE_ALLOCATION.with(|failpoint| failpoint.replace(false))
+}
+
+#[cfg(test)]
 pub(crate) fn test_attribution_batch_allocation_entries() -> usize {
     ATTRIBUTION_BATCH_ALLOCATION_ENTRIES.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+pub(crate) fn test_phase_catalog_construction_entries() -> usize {
+    PHASE_CATALOG_CONSTRUCTION_ENTRIES.with(std::cell::Cell::get)
 }
 
 /// Default hard limit for ledger-owned evidence indexes and staging storage.
@@ -365,6 +400,10 @@ where
         self.dimensions.len()
     }
 
+    pub(crate) fn dimensions(&self) -> impl ExactSizeIterator<Item = D> + '_ {
+        self.dimensions.iter().map(|entry| entry.dimension)
+    }
+
     /// Returns the frozen operation-wide live-byte limit.
     pub const fn operation_live_byte_limit(&self) -> u64 {
         self.operation_live_byte_limit
@@ -405,6 +444,8 @@ where
 pub enum LedgerCause<D> {
     /// The requested dimension is absent from the frozen policy.
     UnknownDimension { dimension: D },
+    /// The requested phase is absent from a frozen phase catalog.
+    UnknownPhase,
     /// A policy update attempted to change a dimension between counter and reservable shapes.
     DimensionPolicyShapeMismatch { dimension: D },
     /// The dimension is a counter and cannot reserve byte capacity.
@@ -461,6 +502,7 @@ impl<D: fmt::Debug> fmt::Display for LedgerCause<D> {
             Self::UnknownDimension { dimension } => {
                 write!(formatter, "unknown ledger dimension {dimension:?}")
             }
+            Self::UnknownPhase => formatter.write_str("unknown ledger phase"),
             Self::DimensionPolicyShapeMismatch { dimension } => write!(
                 formatter,
                 "ledger dimension {dimension:?} cannot change between counter and reservable policy shapes"
@@ -762,6 +804,7 @@ struct LedgerState<P, D> {
     current_evidence_bytes: u64,
     peak_evidence_bytes: u64,
     publication: PublicationState,
+    phase_catalog: PhaseCatalogState,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -769,6 +812,12 @@ enum PublicationState {
     Open,
     Pending,
     Published,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PhaseCatalogState {
+    Dynamic,
+    Frozen,
 }
 
 /// Shared accounting state branded by one operation domain.
@@ -831,10 +880,30 @@ where
                 current_evidence_bytes,
                 peak_evidence_bytes,
                 publication: PublicationState::Open,
+                phase_catalog: PhaseCatalogState::Dynamic,
             })),
             operation_live_byte_limit,
             operation_owner: PhantomData,
         }
+    }
+
+    pub(crate) fn try_new_with_phase_catalog(
+        limits: LedgerLimits<D>,
+        phases: &[P],
+    ) -> Result<Self, LedgerCause<D>> {
+        #[cfg(test)]
+        PHASE_CATALOG_CONSTRUCTION_ENTRIES.with(|entries| {
+            entries.set(entries.get().saturating_add(1));
+        });
+        let ledger = Self::new(limits);
+        {
+            let mut state = lock(&ledger.state);
+            for phase in phases {
+                ensure_phase(&mut state, *phase)?;
+            }
+            state.phase_catalog = PhaseCatalogState::Frozen;
+        }
+        Ok(ledger)
     }
 
     #[cfg(test)]
@@ -1116,8 +1185,7 @@ where
                     dimension,
                 })?;
 
-        let phase_position =
-            ensure_phase(&mut state, phase).map_err(|cause| LedgerCause::Evidence { cause })?;
+        let phase_position = ensure_phase(&mut state, phase)?;
         let dimension_state = &mut dimension_entry_mut(&mut state.dimensions, dimension)
             .expect("validated dimensions remain present")
             .state;
@@ -1277,8 +1345,7 @@ where
                 class: CounterClass::Live,
                 dimension: reservation.core.dimension,
             })?;
-        let phase_position =
-            ensure_phase(&mut state, phase).map_err(|cause| LedgerCause::Evidence { cause })?;
+        let phase_position = ensure_phase(&mut state, phase)?;
         release_phase(&mut state, reservation.core.phase, reservation.core.bytes);
         let target = &mut state.phase_states[phase_position];
         target.current_live_bytes = target_live;
@@ -1357,8 +1424,7 @@ where
         let phase_live =
             project(phase_state(&state, phase).map_or(0, |state| state.current_live_bytes))?;
 
-        let phase_position =
-            ensure_phase(&mut state, phase).map_err(|cause| LedgerCause::Evidence { cause })?;
+        let phase_position = ensure_phase(&mut state, phase)?;
         let dimension_state = &mut dimension_entry_mut(&mut state.dimensions, dimension)
             .expect("validated dimensions remain present")
             .state;
@@ -1489,8 +1555,7 @@ where
             .dimensions
             .binary_search_by_key(&dimension, |entry| entry.dimension)
             .map_err(|_| LedgerCause::UnknownDimension { dimension })?;
-        let phase_position =
-            ensure_phase(&mut state, phase).map_err(|cause| LedgerCause::Evidence { cause })?;
+        let phase_position = ensure_phase(&mut state, phase)?;
 
         for reservation in reservations.iter() {
             release_bytes_locked(
@@ -1700,6 +1765,14 @@ where
             .dimensions
             .get(index)
             .map(|entry| entry.dimension)
+    }
+
+    pub(crate) fn contains_dimension(&self, dimension: D) -> bool {
+        dimension_entry(&lock(&self.state).dimensions, dimension).is_some()
+    }
+
+    pub(crate) fn contains_phase(&self, phase: P) -> bool {
+        phase_entry(&lock(&self.state).phases, phase).is_some()
     }
 
     #[allow(
@@ -4000,7 +4073,7 @@ fn phase_state_mut<P: Copy + Ord, D>(
 fn ensure_phase<P: Copy + Ord, D>(
     state: &mut LedgerState<P, D>,
     phase: P,
-) -> Result<usize, LedgerEvidenceError> {
+) -> Result<usize, LedgerCause<D>> {
     let position = match state
         .phases
         .binary_search_by_key(&phase, |entry| entry.phase)
@@ -4008,6 +4081,9 @@ fn ensure_phase<P: Copy + Ord, D>(
         Ok(position) => return Ok(state.phases[position].state_position),
         Err(position) => position,
     };
+    if state.phase_catalog == PhaseCatalogState::Frozen {
+        return Err(LedgerCause::UnknownPhase);
+    }
     let desired_phase_capacity = state.phases.len().saturating_add(1);
     try_grow_evidence_vec(
         &mut state.phases,
@@ -4016,7 +4092,8 @@ fn ensure_phase<P: Copy + Ord, D>(
         &mut state.peak_evidence_bytes,
         state.evidence_byte_limit,
         LedgerEvidencePurpose::Phases,
-    )?;
+    )
+    .map_err(|cause| LedgerCause::Evidence { cause })?;
     let desired_state_capacity = state.phase_states.len().saturating_add(1);
     try_grow_evidence_vec(
         &mut state.phase_states,
@@ -4025,7 +4102,8 @@ fn ensure_phase<P: Copy + Ord, D>(
         &mut state.peak_evidence_bytes,
         state.evidence_byte_limit,
         LedgerEvidencePurpose::Phases,
-    )?;
+    )
+    .map_err(|cause| LedgerCause::Evidence { cause })?;
     let desired_staging_capacity = state.phase_snapshot_staging.len().saturating_add(1);
     try_grow_evidence_vec(
         &mut state.phase_snapshot_staging,
@@ -4034,7 +4112,8 @@ fn ensure_phase<P: Copy + Ord, D>(
         &mut state.peak_evidence_bytes,
         state.evidence_byte_limit,
         LedgerEvidencePurpose::Phases,
-    )?;
+    )
+    .map_err(|cause| LedgerCause::Evidence { cause })?;
     let state_position = state.phase_states.len();
     state.phase_states.push(PhaseState::default());
     state.phases.insert(
@@ -4125,7 +4204,7 @@ fn try_grow_evidence_vec_impl<T>(
     *peak_evidence_bytes = (*peak_evidence_bytes).max(admitted);
     let original_capacity = values.capacity();
     #[cfg(test)]
-    if FAIL_NEXT_EVIDENCE_ALLOCATION.swap(false, Ordering::SeqCst) {
+    if test_take_evidence_allocation_failure() {
         *current_evidence_bytes = current_evidence_bytes.saturating_sub(envelope_delta);
         return Err(LedgerEvidenceError::AllocationFailed {
             purpose,
@@ -4690,6 +4769,8 @@ mod tests {
     #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
     enum Phase {
         Build,
+        Finalize,
+        Unknown,
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -4737,6 +4818,83 @@ mod tests {
             ],
         )
         .expect("test policy")
+    }
+
+    #[test]
+    fn frozen_phase_catalog_prebuilds_complete_final_evidence_shape() {
+        let ledger = Ledger::<Owner, Phase, Dimension>::try_new_with_phase_catalog(
+            limits(),
+            &[Phase::Build, Phase::Finalize],
+        )
+        .expect("frozen phase catalog");
+
+        let state = lock(&ledger.state);
+        assert_eq!(state.phase_catalog, PhaseCatalogState::Frozen);
+        assert_eq!(state.phases.len(), 2);
+        assert_eq!(state.phase_states.len(), 2);
+        assert_eq!(state.phase_snapshot_staging.len(), 2);
+        assert_eq!(state.phases[0].phase, Phase::Build);
+        assert_eq!(state.phases[1].phase, Phase::Finalize);
+        assert_eq!(state.phase_snapshot_staging[0].0, Phase::Build);
+        assert_eq!(state.phase_snapshot_staging[1].0, Phase::Finalize);
+        drop(state);
+
+        assert_eq!(
+            ledger.phase_evidence(Phase::Build),
+            Some(PhaseSnapshot::default())
+        );
+        assert_eq!(
+            ledger.phase_evidence(Phase::Finalize),
+            Some(PhaseSnapshot::default())
+        );
+    }
+
+    #[test]
+    fn frozen_phase_catalog_rejects_unknown_phase_without_allocation_or_counter_mutation() {
+        let ledger = Ledger::<Owner, Phase, Dimension>::try_new_with_phase_catalog(
+            limits(),
+            &[Phase::Build, Phase::Finalize],
+        )
+        .expect("frozen phase catalog");
+        let before = {
+            let state = lock(&ledger.state);
+            (
+                state.phases.len(),
+                state.phases.capacity(),
+                state.phase_states.len(),
+                state.phase_states.capacity(),
+                state.phase_snapshot_staging.len(),
+                state.phase_snapshot_staging.capacity(),
+                state.current_evidence_bytes,
+                state.peak_evidence_bytes,
+                state.current_live_bytes,
+                state.peak_live_bytes,
+                state.active_reservations,
+                dimension_snapshot(state.dimensions[0].state),
+            )
+        };
+
+        let rejected = ledger.reserve(Phase::Unknown, Dimension::Bytes, 1);
+
+        assert!(matches!(rejected, Err(LedgerCause::UnknownPhase)));
+        let after = {
+            let state = lock(&ledger.state);
+            (
+                state.phases.len(),
+                state.phases.capacity(),
+                state.phase_states.len(),
+                state.phase_states.capacity(),
+                state.phase_snapshot_staging.len(),
+                state.phase_snapshot_staging.capacity(),
+                state.current_evidence_bytes,
+                state.peak_evidence_bytes,
+                state.current_live_bytes,
+                state.peak_live_bytes,
+                state.active_reservations,
+                dimension_snapshot(state.dimensions[0].state),
+            )
+        };
+        assert_eq!(after, before);
     }
 
     fn startup_limits(
@@ -5310,7 +5468,7 @@ mod tests {
         let mut values = Vec::<u64>::new();
         let mut current = 0;
         let mut peak = 0;
-        FAIL_NEXT_EVIDENCE_ALLOCATION.store(true, Ordering::SeqCst);
+        test_set_evidence_allocation_failure(true);
         let error = try_grow_evidence_vec(
             &mut values,
             1,
@@ -5344,7 +5502,7 @@ mod tests {
             limits,
         );
 
-        FAIL_NEXT_EVIDENCE_ALLOCATION.store(true, Ordering::SeqCst);
+        test_set_evidence_allocation_failure(true);
         let error = coordinator
             .report_progress(Progress::Work, Unit::Work, 1, None)
             .expect_err("injected progress allocation failure");
@@ -5391,29 +5549,29 @@ mod tests {
             .reserve(Phase::Build, Dimension::Bytes, 1)
             .expect("live reservation");
         drop(reservation);
-        FAIL_NEXT_EVIDENCE_ALLOCATION.store(true, Ordering::SeqCst);
+        test_set_evidence_allocation_failure(true);
         let evidence = ledger
             .dimension_evidence(Dimension::Bytes)
             .expect("scalar evidence is allocation-free");
         assert_eq!(evidence.current_live_bytes(), 0);
-        assert!(FAIL_NEXT_EVIDENCE_ALLOCATION.load(Ordering::SeqCst));
+        assert!(test_evidence_allocation_failure_is_armed());
         let snapshot = ledger.finish().expect("clean finalization");
         assert_eq!(snapshot.current_evidence_bytes(), 0);
-        assert!(FAIL_NEXT_EVIDENCE_ALLOCATION.load(Ordering::SeqCst));
-        FAIL_NEXT_EVIDENCE_ALLOCATION.store(false, Ordering::SeqCst);
+        assert!(test_evidence_allocation_failure_is_armed());
+        test_set_evidence_allocation_failure(false);
 
         let ledger = Ledger::<Owner, Phase, Dimension>::new(limits());
         let reservation = ledger
             .reserve(Phase::Build, Dimension::Bytes, 1)
             .expect("retained reservation");
-        FAIL_NEXT_EVIDENCE_ALLOCATION.store(true, Ordering::SeqCst);
+        test_set_evidence_allocation_failure(true);
         let error = ledger
             .finish()
             .expect_err("live state is an invariant failure");
         assert_eq!(error.snapshot().current_live_bytes(), 1);
         assert!(error.snapshot().current_evidence_bytes() > 0);
-        assert!(FAIL_NEXT_EVIDENCE_ALLOCATION.load(Ordering::SeqCst));
-        FAIL_NEXT_EVIDENCE_ALLOCATION.store(false, Ordering::SeqCst);
+        assert!(test_evidence_allocation_failure_is_armed());
+        test_set_evidence_allocation_failure(false);
         drop(reservation);
     }
 

@@ -30,11 +30,13 @@ pub use concrete_store::{
     RetainedStorePublicationPlan, RetainedStoreSharePlan, RetainedStoreStartError,
     RetainedStoreStartPlan, RetainedStoreWriterPlan, ScalarSequence, SequencePlan, SequenceView,
     SequenceWriter, ShareableStoreKind, StoreBuildError, StoreBuildFailureClass, StoreDestination,
-    StoreDimensionSnapshot, StoreEvidenceValidationSession, StoreFailureAssembly,
-    StoreFailureValidation, StoreFallbackEnvelope, StoreFallbackOnly, StoreLedgerEvidence,
-    StorePlanError, StorePreparationFailure, StorePreparationFailureClass, StorePrepareError,
-    StoreRuntimeError, StoreSuccessValidation, StoreValidationSession, StoredScalar, Utf8Block,
-    Utf8Plan, Utf8Writer, ValidatedStoreFailure, ValidatedStoreSuccess,
+    StoreDimensionKey, StoreDimensionSnapshot, StoreEvidenceValidationSession,
+    StoreFailureAssembly, StoreFailureValidation, StoreFallbackEnvelope, StoreFallbackOnly,
+    StoreKeyDomain, StoreKeyDomainCreateError, StoreLedgerEvidence, StoreLedgerPlan,
+    StoreLedgerPlanError, StorePhaseKey, StorePlanError, StorePreparationFailure,
+    StorePreparationFailureClass, StorePrepareError, StoreRuntimeError, StoreSuccessValidation,
+    StoreValidationSession, StoredScalar, Utf8Block, Utf8Plan, Utf8Writer, ValidatedStoreFailure,
+    ValidatedStoreSuccess,
 };
 pub use control::{
     CancellationOrigin, CancellationSignal, CancellationToken, ControlCause, OperationControl,

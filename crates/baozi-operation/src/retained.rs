@@ -831,6 +831,8 @@ impl PendingAccountActionAdmission<'_> {
         action(self.account)
     }
 
+    fn release(self) {}
+
     fn complete(self) {
         let Self { account: _ } = self;
     }
@@ -6957,9 +6959,48 @@ where
     D: Copy + Ord + fmt::Debug + Send + Sync + 'static,
     F: Send + Sync + 'static,
 {
+    pub fn contains_dimension(&self, dimension: D) -> bool {
+        self.coordinator
+            .retained_ledger()
+            .contains_dimension(dimension)
+    }
+
+    pub fn contains_phase(&self, phase: P) -> bool {
+        self.coordinator.retained_ledger().contains_phase(phase)
+    }
+
     pub fn try_start(
         control: OperationControl<PP, U>,
         ledger_limits: LedgerLimits<D>,
+        account: &PhysicalStorageAccount,
+        plan: RetainedOperationStartPlan<P, D>,
+        build_fallback: impl FnOnce() -> Result<F, RetainedBuildFailureCode>,
+    ) -> Result<Self, RetainedOperationStartError<D>> {
+        Self::try_start_inner(control, ledger_limits, None, account, plan, build_fallback)
+    }
+
+    pub fn try_start_with_phase_catalog(
+        control: OperationControl<PP, U>,
+        ledger_limits: LedgerLimits<D>,
+        phase_catalog: &[P],
+        account: &PhysicalStorageAccount,
+        plan: RetainedOperationStartPlan<P, D>,
+        build_fallback: impl FnOnce() -> Result<F, RetainedBuildFailureCode>,
+    ) -> Result<Self, RetainedOperationStartError<D>> {
+        Self::try_start_inner(
+            control,
+            ledger_limits,
+            Some(phase_catalog),
+            account,
+            plan,
+            build_fallback,
+        )
+    }
+
+    fn try_start_inner(
+        control: OperationControl<PP, U>,
+        ledger_limits: LedgerLimits<D>,
+        phase_catalog: Option<&[P]>,
         account: &PhysicalStorageAccount,
         plan: RetainedOperationStartPlan<P, D>,
         build_fallback: impl FnOnce() -> Result<F, RetainedBuildFailureCode>,
@@ -7082,7 +7123,24 @@ where
             .try_admit_account_action()
             .map_err(map_account_action_admission_error)
             .map_err(RetainedOperationStartError::Writer)?;
-        let coordinator = OperationCoordinator::new(control, ledger_limits);
+        let coordinator = match phase_catalog {
+            Some(phases) => {
+                match OperationCoordinator::try_new_with_phase_catalog(
+                    control,
+                    ledger_limits,
+                    phases,
+                ) {
+                    Ok(coordinator) => coordinator,
+                    Err(cause) => {
+                        account_admission.release();
+                        return Err(RetainedOperationStartError::Writer(
+                            RetainedWriterError::Ledger(cause),
+                        ));
+                    }
+                }
+            }
+            None => OperationCoordinator::new(control, ledger_limits),
+        };
         let ledger = coordinator.retained_ledger();
         let startup_owners = try_admit_start_share_work(ledger, account, account_shares)
             .map_err(RetainedOperationStartError::Writer)?;
@@ -7698,6 +7756,15 @@ where
         self.evidence_table
             .as_ref()
             .map_or(0, |table| table.as_ref().members.len())
+    }
+
+    pub fn contains_dimension(&self, dimension: D) -> bool {
+        self.operation.as_ref().is_some_and(|operation| {
+            operation
+                .coordinator
+                .retained_ledger()
+                .contains_dimension(dimension)
+        })
     }
 
     #[cfg(test)]
@@ -8479,6 +8546,10 @@ where
 {
     pub fn outcome_evidence_len(&self) -> usize {
         self.assembly.outcome_evidence_len()
+    }
+
+    pub fn contains_dimension(&self, dimension: D) -> bool {
+        self.assembly.contains_dimension(dimension)
     }
 
     pub fn try_retain_outcome_evidence<Tag>(

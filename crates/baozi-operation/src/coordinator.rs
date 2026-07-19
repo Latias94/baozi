@@ -178,6 +178,24 @@ where
         }
     }
 
+    pub(crate) fn try_new_with_phase_catalog(
+        control: OperationControl<PP, U>,
+        ledger_limits: LedgerLimits<D>,
+        phases: &[LP],
+    ) -> Result<Self, LedgerCause<D>> {
+        Ok(Self {
+            control,
+            ledger: Ledger::try_new_with_phase_catalog(ledger_limits, phases)?,
+            terminal: None,
+            progress: Vec::new(),
+            progress_evidence_bytes: 0,
+            last_phase_order: None,
+            delivered_events: 0,
+            delivered_bytes: 0,
+            next_sequence: 0,
+        })
+    }
+
     /// Polls cancellation and deadline state.
     pub fn poll(&mut self) -> Result<(), ControlCause> {
         if let Some(cause) = self.terminal.clone() {
