@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-07-09
-updated: 2026-07-19
+updated: 2026-07-20
 authors:
   - Codex
 decision_type: architecture
@@ -84,10 +84,21 @@ runtime option-type mismatch, or other codec/request defect is a bounded `Reques
 the frozen snapshot. Neither path has an import ledger, lifecycle phase, diagnostics stream, finalizer,
 or asset open.
 
-`ImportSession::try_start` then obtains either a host-supplied admitted physical account or creates a
-private account through ADR 0042's explicit host-owned account factory, creates the real operation
-ledger, performs both admissions for one minimal terminal envelope, and fallibly allocates/binds that
-envelope. Its fixed `FallbackHeader<P>` carries `schema_revision`, Baozi-owned inert
+`ImportSession::try_start` then obtains either a host-supplied physical-account capability or creates
+a private account through ADR 0042's explicit host-owned account factory, creates the real operation
+ledger, and preflights the complete minimal-terminal aggregate. A private two-phase startup guard
+first admits the complete operation-attribution aggregate under the ledger's one lock, releases that
+lock, and then admits the complete physical aggregate under the account's one lock. The locks are
+never nested, and the two internal snapshots do not share a linearization point. If the second
+admission returns an ordinary typed rejection that proves no physical mutation, the guard
+structurally rolls back the first aggregate before returning `SessionStartError`. If that transition
+panics, observes poison after mutation, or cannot prove charge/owner disposition, it instead preserves
+the provisional attribution coupled with every possible physical owner, poisons the account/path,
+and follows ADR 0042's fail-closed startup-containment result without refund or an accepted session.
+Only the ready pair may enter the first retained allocator and fallibly
+allocate/bind the envelope. The session remains externally unaccepted until both planes succeed, so
+session acceptance is atomic even though the two accounting planes remain independently linearized.
+Its fixed `FallbackHeader<P>` carries `schema_revision`, Baozi-owned inert
 `terminal_cause`, optional `last_completed_phase`, `dimension_count`, `phase_count`, and the
 operation-wide `current_live_bytes`, `peak_live_bytes`, `active_reservations`,
 `current_evidence_bytes`, and `peak_evidence_bytes`. The global fields are stored facts; neither the
@@ -98,9 +109,17 @@ high-water mark. Successful preparation verifies `current_live_bytes == 0`,
 The dynamic evidence uses sealed `FallbackDimensionCell<D> { key, snapshot }` and
 `FallbackPhaseCell<P> { key, snapshot }` values. Each key is a fixed-size copied Baozi operation-
 domain value with no `Drop`, external object, trait object/vtable, function pointer, or executable
-plugin state. A plugin or extension key must be normalized synchronously into that domain-owned key
-before its first ledger entry; failure to normalize rejects the entry. Query after plugin unload uses
-only the copied key and Baozi-owned mapping and cannot call or retain the plugin.
+plugin state. `StoreKeyDomain` is a process-local minting authority, not stable semantic identity.
+The Baozi-owned result/evidence owner structurally retains that domain's lifetime anchor and complete
+immutable normalized key mapping until the last supported query ends. A plugin receives only keys
+minted by the host for its admitted declarations. It may create an unrelated process-local domain,
+but cannot copy or access the host authority, mint an accepted host-domain key, inject a raw key, or
+own the retained mapping; every foreign-domain key is rejected. Normalization completes synchronously
+before the first ledger entry, and failure rejects the entry. Query after plugin unload uses only the
+copied key and owner-held mapping and cannot call or retain the plugin. The process-local brand, its
+raw value, and its allocation order enter no semantic
+digest, snapshot transcript, wire format, persistent cache key, or build identity; stable meaning
+comes only from the Baozi-owned normalized catalog.
 
 Bootstrap checked-converts both counts, builds
 `Layout::array::<FallbackDimensionCell<D>>(dimension_count)` and
@@ -110,9 +129,11 @@ the complete key, snapshot, alignment, and per-cell padding. The resulting compl
 aggregate shape/overflow preflight, not a promise of one allocator backing or a stable ABI. The fixed
 header owner and one or more keyed-evidence backings may be separate allocations; every actual
 allocation has its own managed-qualified `CapacityPlan` and layout/capacity charge. Before the first
-allocator call, bootstrap checked-sums every requested envelope and block count and atomically admits
-the whole set to the operation ledger and physical account. A future single-backing implementation
-must preserve the same observable admission, evidence, query, and failure contract.
+allocator call, bootstrap checked-sums every requested envelope and block count, admits the complete
+attribution aggregate in one ledger transition, and then admits the complete physical aggregate in
+one account transition through the private guard described above. A future single-backing
+implementation must preserve the same observable admission, rollback, evidence, query, and failure
+contract without merging the two locks or accounting snapshots.
 
 Session startup delegates construction and containment of its fallback/evidence storage to ADR 0042.
 The import lifecycle accepts a session only after that storage has reached the exact startup-baseline
@@ -721,7 +742,9 @@ Negative:
 | Risk | Severity | Mitigation |
 | --- | --- | --- |
 | A convenience helper bypasses the session | Critical | Keep constructors private and test every public facade path with instrumented IO/invalid drafts. |
-| Session bootstrap fails before the terminal envelope exists | Critical | checked complete sealed-cell/header semantic layout plus per-backing `CapacityPlan` and atomic aggregate admission, fixed-size allocation-free `SessionStartError`, no asset IO, and exactly-one returned-terminal guarantee begins only after `try_start` succeeds |
+| Session bootstrap fails before the terminal envelope exists | Critical | checked complete sealed-cell/header semantic layout plus per-backing `CapacityPlan`, ledger-first/physical-second aggregate admission, structural rollback only for typed no-mutation second-plane rejection, fail-closed coupled containment for panic/post-mutation poison/uncertain disposition, fixed-size allocation-free `SessionStartError`, no asset IO, and exactly-one returned-terminal guarantee begins only after `try_start` succeeds |
+| Two accounting locks are mistaken for one cross-plane transaction lock | Critical | each plane admits its complete aggregate under its own non-nested lock; a private guard makes only external session acceptance atomic and tests prove no shared internal linearization point is claimed |
+| Process-local evidence keys outlive their mapping or enter stable identity | Critical | the Baozi-owned result/evidence owner retains the `StoreKeyDomain` anchor and immutable normalized catalog through query lifetime; plugins receive only host-minted keys, and transcript/digest/wire tests exclude the runtime brand |
 | A cloned explicit account bypasses containment poison | Critical | operation start uses ADR 0042's shared monotonic account latch; every clone rejects with typed `AccountPoisoned`, and import/facade APIs expose no reset, ignore, state replacement, or reuse path |
 | Account poison races a previously admitted import | Critical | start/retain charge remains coupled, all later admissions reject, and final publication eligibility observes poison under the account linearization state and returns fatal containment before an exact prepared wrapper exists |
 | ParseScope grows back into a raw service locator | High | Capability allowlist, private fields, and compile-fail boundary tests. |
@@ -759,9 +782,9 @@ Negative:
 | Contract | Testable acceptance |
 | --- | --- |
 | Session-before-IO | Invalid requests create no session and perform zero IO; a primary-open failure observes one created session and one finalizer. |
-| Session bootstrap | Invalid/zero/exact account-factory and physical limits plus shared account-poison start admission, key normalization, count conversion, complete `FallbackDimensionCell<D>`/`FallbackPhaseCell<P>` `Layout::array`, ordered semantic `Layout::extend`/`pad_to_align`, per-actual-allocation `CapacityPlan`, aggregate requested-envelope/block checked sum, atomic account/ledger admission, and allocator fault injection either return one allocation-free `SessionStartError` with zero session/IO or return a session already owning its complete fallback envelope. A poison-first explicit account returns typed `AccountPoisoned` before ledger/work/IO/refcount/allocator effects. No dimension-only, unchecked `size_of`, or aggregate-layout-as-single-backing formula is accepted. |
+| Session bootstrap | Invalid/zero/exact account-factory and physical limits plus shared account-poison start admission, key normalization, count conversion, complete `FallbackDimensionCell<D>`/`FallbackPhaseCell<P>` `Layout::array`, ordered semantic `Layout::extend`/`pad_to_align`, per-actual-allocation `CapacityPlan`, and aggregate requested-envelope/block checked sum either return one allocation-free `SessionStartError` with zero accepted session/IO or produce a private ready pair. Tests prove one complete ledger aggregate admission, then one complete physical aggregate admission, no nested locks or shared cross-plane linearization point, deterministic first-plane rollback only on typed no-mutation second-plane rejection, coupled fail-closed containment on panic/post-mutation poison/uncertain disposition, and zero retained allocator entry until both succeed. A poison-first typed account rejection leaves no accepted ledger/work/IO/refcount/allocator state. No dimension-only, unchecked `size_of`, or aggregate-layout-as-single-backing formula is accepted. |
 | Startup retained outcome | Operation integration fixtures prove every retained-start failure returns one `SessionStartError` with no accepted session or terminal, while successful startup supplies the exact baseline required for later downgrade. Retained builder containment after startup returns `FinalizationContainmentError`; physical cleanup conformance remains ADR 0042's test authority. |
-| Fallback evidence ownership | Compile-fail, shape, and plugin-unload tests prove each cell contains one inert Baozi-owned copied key plus its snapshot; keys have no `Drop`, external/plugin object, trait object/vtable, or function pointer and are normalized before the first ledger entry. `FallbackHeader<P>` retains schema revision, terminal cause, last completed phase, counts, operation-wide current/peak live bytes, active reservations, and current/peak evidence-storage bytes; no global field is reconstructed from cells. Prepared minimal fallback has zero current live, active reservations, and current evidence storage, preserves both peaks, and remains queryable without plugin code. |
+| Fallback evidence ownership | Compile-fail, shape, and plugin-unload tests prove each cell contains one inert Baozi-owned copied key plus its snapshot; keys have no `Drop`, external/plugin object, trait object/vtable, or function pointer and are normalized before the first ledger entry. The Baozi-owned result/evidence owner keeps the process-local `StoreKeyDomain` anchor and immutable normalized mapping through query lifetime; plugins receive only host-minted keys. Brand variation leaves semantic transcripts, digests, wire values, cache/build identities, and user-visible meaning unchanged. `FallbackHeader<P>` retains schema revision, terminal cause, last completed phase, counts, operation-wide current/peak live bytes, active reservations, and current/peak evidence-storage bytes; no global field is reconstructed from cells. Prepared minimal fallback has zero current live, active reservations, and current evidence storage, preserves both peaks, and remains queryable without plugin code. |
 | Pre-session panic | Submitted-layer codec panic is one bounded `RequestError`; default-codec panic prevents snapshot creation as `RegistryBuildError`; both have zero sessions, finalizers, import ledgers, diagnostic streams, and asset opens. |
 | Single finalization | After session creation, success, every failure phase, cancellation, and caught unwind call the outcome finalizer exactly once; it returns one report/failure when cleanup is proved or one fatal containment error when release remains uncertain. Abort/double-panic/exit/OOM are asserted only by the isolating parent process. |
 | Success report atomicity | Injected failures at every success-preparation allocation, validation, generation reservation, freeze/accounting, product-graph, account-brand/poison eligibility, cancellation, and transition point publish no partial field or generation; rejection/exhaustion consumes no nonce and downgrades to rich failure, later failure may burn a successful reservation, poison-first eligibility returns fatal containment with no exact wrapper, and exact `PreparedSuccess` freezes private canonical/evidence attribution, reaches zero operation live, then permits only pure consuming handoff. |
@@ -794,6 +817,34 @@ Negative:
 | Crate ownership | Dependency and public-API checks find no backend type or executable backend object in public outcomes/stable schemas, no `baozi-operation` upward dependency, no postprocess-to-import edge, and no reversed core dependency. |
 
 ## Amendment History
+
+### 2026-07-20: Separate accounting-plane admission and retain evidence-key authority
+
+- Affected headings: `Lifecycle`, `Risks and Mitigations`, and `Acceptance Criteria`.
+- Previous rule: bootstrap said the ledger and physical account were admitted atomically without
+  defining lock order or rollback, which could be read as one nested cross-plane lock or common
+  linearization point. It also required copied inert keys but did not structurally keep their
+  process-local mapping alive with every queryable result.
+- New rule: bootstrap preflights the complete aggregate, admits it first in the operation-attribution
+  ledger under that ledger's one lock, releases the lock, and admits the complete physical aggregate
+  second under the account's one lock. A private two-phase guard rolls back the first graph only when
+  the second admission returns a typed no-mutation rejection. Panic, poison observed after mutation,
+  or uncertain physical disposition instead preserves coupled attribution/physical ownership and
+  fails closed without refund. No path exposes an accepted session until both succeed; the first retained
+  allocator is unreachable before the ready pair exists. This gives atomic external session
+  acceptance without nested locks or a shared internal linearization point. The Baozi-owned
+  result/evidence owner retains the `StoreKeyDomain` lifetime anchor and immutable normalized catalog
+  until query lifetime ends. Plugins receive only host-minted keys, and runtime brand values are
+  excluded from stable semantics, digests, transcripts, wire, cache, and build identity.
+- Compatibility impact: pre-release startup typestates, lock/rollback instrumentation, result owner,
+  and evidence-query internals change; no stable report wire or compatibility adapter is preserved.
+- Required review: ledger-first/physical-second barriers, typed no-mutation rejection rollback,
+  post-mutation/panic/uncertain coupled containment, no nested locks or pre-ready allocator entry,
+  external acceptance visibility, mapping-owner drop order,
+  post-plugin-unload query, cross-domain key rejection, and brand-exclusion transcript/digest tests.
+- Rationale: attribution and physical lifetime answer different questions and cannot truthfully share
+  one snapshot. Atomic API acceptance comes from private ownership and rollback, while queryable inert
+  keys remain meaningful only when Baozi owns their mapping for the same lifetime.
 
 ### 2026-07-19: Supersede retained-builder fallback with exact startup ownership
 

@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-07-09
-updated: 2026-07-19
+updated: 2026-07-20
 authors:
   - Codex
 decision_type: architecture
@@ -137,18 +137,30 @@ private generation gap.
 
 Starting a failure-capable operation is itself fallible and precedes the exactly-one returned-terminal
 contract. The owner-specific `try_start` must create the real ledger, obtain the separately owned
-physical-account capability, perform both admissions for one minimal terminal envelope, and allocate/
-bind that envelope before it returns an accepted operation. A bootstrap rejection or allocation
-failure returns a fixed-size allocation-free owner start error with no operation snapshot or terminal
-outcome; every partial owner is destroyed before return.
+physical-account capability, preflight one complete minimal-terminal aggregate, and pass a private
+two-phase startup guard through two non-nested transitions. The ledger first admits the complete
+operation-attribution aggregate under its own lock. After that lock is released, the physical account
+admits the complete physical aggregate under its own lock. An ordinary typed rejection that proves no
+physical mutation deterministically rolls back the provisional ledger graph before return. A panic,
+poison observed after physical mutation, or uncertain charge/owner disposition instead preserves the
+provisional attribution coupled with every possible physical owner and fails closed without refund.
+The guard exposes an
+accepted operation only after both transitions succeed, and the first retained allocator is
+unreachable before that ready state. A bootstrap rejection or allocation failure returns a fixed-
+size allocation-free owner start error with no accepted operation snapshot or terminal outcome.
+Verified-cleanup paths destroy every partial owner before return; uncertain paths preserve the exact
+coupled attribution/physical owners in containment and never claim cleanup, rollback, or refund.
 
-Physical startup admission can precede creation of its matching operation attribution. This ADR owns
-only the ledger consequence: before attribution is minted there is no attribution owner to retain or
-release; after minting, verified physical cleanup releases the matching attribution, while uncertain
-physical ownership preserves every matching attribution owner that already exists. No path fabricates
-an attribution owner to complete a nominal shape. Independent startup assembly-capacity attribution
-drops with its failed startup container; a successfully accepted operation keeps the fallback/evidence
-attribution required by later terminal downgrade.
+The two planes have independent snapshots and no shared linearization point. The ledger transition
+is atomic for its complete attribution aggregate, and the account transition is atomic for its
+complete physical aggregate; only external operation acceptance is atomic across both. The private
+provisional ledger graph advances no public `Attempted` or `Consumed` fact and is not queryable as an
+accepted operation. Once both planes are ready, each retained allocation outcome is structurally
+paired with its matching operation attribution and physical charge. Verified cleanup releases both
+in storage-before-owner order, while uncertain physical ownership preserves the matching attribution
+already paired with it. No path fabricates an attribution owner to complete a nominal shape. A
+successfully accepted operation keeps the fallback/evidence attribution required by later terminal
+downgrade.
 
 The retained-storage owner supplies this ledger with a typed cleanup result. The ledger neither
 classifies physical side state nor chooses extraction, destructor, deallocation, lease, or membership
@@ -171,8 +183,15 @@ evidence-storage `current_evidence_bytes`/`peak_evidence_bytes`. The global valu
 stored evidence and cannot be reconstructed by summing or maximizing dimension/phase entries. Each
 dynamic entry is a sealed cell containing one inert copied owner-domain key plus its
 `DimensionSnapshot` or `PhaseSnapshot`. Domain owners normalize extension/plugin keys to Baozi-owned
-fixed-size values before the first ledger entry; a retained cell cannot own `Drop`, external/plugin
-objects, vtables, function pointers, or callbacks, and lookup remains valid after producer unload.
+fixed-size values before the first ledger entry. `StoreKeyDomain` is a process-local minting brand,
+not stable evidence identity. The Baozi-owned result/evidence owner retains the domain lifetime anchor
+and complete immutable normalized key mapping through the last supported query. Plugins receive only
+host-minted keys for admitted declarations. They may create foreign process-local domains, but cannot
+copy or access the host authority, mint an accepted host-domain key, inject a raw key, or own the
+retained mapping; every foreign-domain key is rejected. A retained cell cannot own `Drop`, external/
+plugin objects, vtables, function pointers, or callbacks, and lookup remains valid after producer
+unload. The brand and raw runtime key never enter a semantic
+digest, snapshot transcript, wire representation, persistent cache key, or build identity.
 Safely prepared fallback records zero current live bytes, active reservations, and current ledger-
 evidence bytes while preserving the actual operation-wide and evidence-storage peaks.
 
@@ -180,15 +199,16 @@ The complete header-plus-cell `Layout` is a checked semantic shape/overflow pref
 one allocator request. ADR 0042 may give the fixed header owner and keyed evidence backing separate
 actual allocations; every actual allocation has its own managed-qualified `CapacityPlan` and full
 layout/capacity charge. Before allocator entry, bootstrap checked-sums all requested envelopes and
-block counts and atomically admits the entire set in both accounting planes. Consolidating those
-backings later cannot change the observable evidence, admission, query, or failure contract.
+block counts, admits the complete ledger aggregate first, and admits the complete physical aggregate
+second through the private guard. Consolidating those backings later cannot change the observable
+evidence, admission, rollback, query, or failure contract and cannot merge the two locks.
 
 If the process survives but cleanup or release cannot be proved, payload, lease, and operation
 attribution remain conservatively coupled and charged, the affected operation/account/extension path
 is poisoned, and the owner returns typed `FinalizationContainmentError` without a prepared fallback,
 refund, or zero-leak claim. Double panic, `panic = "abort"`, process exit, and OOM require process
 isolation. No partial publishable outcome escapes. Storage that enters no prepared outcome is
-destroyed before attribution and physical admissions roll back only in the verified-cleanup case.
+destroyed before its attribution and physical owners release only in the verified-cleanup case.
 
 Physical containment cannot be overruled by a logical ledger transition. This ADR records only the
 resulting operation attribution and fixed evidence supplied by the retained-storage owner; it does not
@@ -296,9 +316,10 @@ value contains no pending/live attribution capability; handoff only consumes and
 ownership into `CommittedCanonicalOutput`/`PublishedOutcomeEvidence`. Dropping it destroys
 unpublished aggregates and discards private frozen attribution rather than rolling back a nonexistent
 pending attribution or claiming publication. An operation failure leaves committed canonical output
-at zero but may publish typed failure evidence; a preparation failure destroys every
-unpublished rich aggregate before its admissions roll back and then uses the pre-admitted assembly-
-independent terminal envelope. ADR 0042's concrete store must satisfy this provider contract before
+at zero but may publish typed failure evidence; a preparation failure with verified cleanup destroys
+every unpublished rich aggregate before releasing its covering owners and then uses the pre-admitted
+assembly-independent terminal envelope. Uncertain cleanup retains the coupled owners and cannot
+select fallback. ADR 0042's concrete store must satisfy this provider contract before
 U4 conformance; replacing it must preserve the same one-way dependency and must not expose its raw
 generic foundation.
 
@@ -514,11 +535,13 @@ Negative:
 | Structural retained plan mutates state before an overflow or capacity failure | Critical | Validate count/width/overflow/table/max-new/attribution structure before set-id, work, account, or allocator side effects. |
 | Observed allocator capacity differs from admission | Critical | Charge a managed-qualified revision/allocator/toolchain/target envelope before entry, accept desired-through-envelope in `finish`, retain conservative charge while live, and destroy over-envelope storage before releasing owners. This is a post-allocation defense, not proof that transient RSS never exceeded the envelope. |
 | A physical-account limit is presented as an exact process-memory limit | Critical | Define it as Baozi-requested qualified layout/capacity only; exclude allocator-private overhead/overgrant, deny strict claims for unqualified allocators, and require an OS/subprocess limit for a hard process-memory boundary. |
-| Operation accounting ignores shared account poison | Critical | operation start/retain/share/final-publication eligibility composes with ADR 0042's one linearization state; poison-first has zero ledger/work/allocation effects, start/retain/share-admission-first evidence/charge remains and finalization fails closed before handoff |
+| Operation accounting ignores shared account poison | Critical | operation start/retain/share/final-publication eligibility composes with ADR 0042's physical-account linearization state; a typed poison rejection before physical mutation rolls back the unobservable provisional ledger graph, while poison observed after mutation or start/retain/share-admission-first evidence/charge remains coupled and fails closed before handoff |
+| Two independent accounting locks are presented as one snapshot | Critical | the ledger-first and physical-second transitions each admit one complete aggregate under one lock, never nest locks, expose no shared internal linearization point, and use a private guard to make only external operation acceptance atomic |
 | Failure evidence has no legal attribution terminal state | Critical | private prepared outcome attribution, public `PublishedOutcomeEvidence` only after handoff, a pre-admitted terminal envelope, and exact infallible failure handoffs |
 | A prepared handoff discovers another failure or panic source | Critical | preparation completes terminal classification, freezes private attribution, and reaches zero operation-live attribution; exact prepared wrappers have no pending token and their handoffs are pure consuming reclassifications. |
 | A retained-builder panic is treated as clean fallback | Critical | startup panic returns a start error; later candidate/report panic returns fatal containment; fallback requires verified candidate cleanup and intact pre-admitted fallback/evidence attribution |
-| Startup accounting invents, loses, or prematurely releases attribution | Critical | before mint there is no side-attribution owner; after mint verified physical cleanup releases the matching owner and uncertain cleanup retains every matching owner that already exists; no owner is fabricated |
+| Startup accounting invents, loses, or prematurely releases attribution | Critical | a provisional complete ledger graph precedes physical admission but cannot reach an allocator or accepted operation; only typed no-mutation second-plane rejection rolls it back, uncertain transition state preserves coupled attribution/physical owners, and the ready pair structurally couples every later allocation with matching attribution and charge without fabricating an owner |
+| Process-local evidence keys lose their catalog or become persistent identity | Critical | the Baozi-owned result/evidence owner retains the `StoreKeyDomain` anchor and immutable normalized catalog through query lifetime; plugin code receives only host-minted keys and runtime brands are excluded from transcripts, digests, wire, cache, and build identity |
 | Domain identity exhaustion remains after ledger freeze | Critical | Require atomic reservation as the final fallible pre-freeze identity acquisition; rejection/exhaustion becomes ordinary rich failure with no nonce, later freeze failure may burn a successful value, and only exact-success handoff may consume it. |
 | Prepared drop releases attribution before unpublished storage | Critical | exact prepared state owns aggregates before private prepared attribution in drop order, contains no rollback-capable token, and discards rather than publishes that attribution. |
 | Standalone validation bypasses operation attribution | Critical | core owns a real `SceneConstructionOperation` for both explicit-account and private-account paths; no no-op adapter exists. |
@@ -536,7 +559,7 @@ Negative:
 | Canonical/evidence independence | failure reports always retain zero committed canonical output while independently reporting exact published outcome evidence | ledger snapshot assertions at every failure phase |
 | Structural preflight | invalid count/width/overflow/table/max-new/attribution plans cause zero set-id, work, account, and allocator side effects | exact/excess boundary and fault-injection counters |
 | Capacity coverage | hostile input cannot make Baozi request beyond the admitted qualified envelope; actual may be smaller, over-envelope publishes nothing, and logical output uses semantic length without an exact-RSS claim | desired/actual/envelope allocator probes, qualification identity, and subprocess-limit tests |
-| Retained attribution coupling | before mint there is zero side attribution; after mint verified cleanup releases the matching token and uncertain cleanup retains every already-minted matching token; no fabricated owner exists | pre-mint failure, post-mint verified/uncertain cleanup, owner-count, and drop-order probes |
+| Retained attribution coupling | before readiness, typed no-mutation second-plane rejection rolls back the complete provisional attribution graph while uncertain second-plane completion preserves it coupled with every possible physical owner; after readiness every side has matching attribution and physical ownership, and no path fabricates an owner | typed-rejection rollback, uncertain second-plane containment, post-ready verified/uncertain cleanup, owner-count, and drop-order probes |
 | Poison/accounting composition | one shared poison latch is visible across account clones without rewriting monotonic operation evidence; poison-first does no work, start/retain/share-admission-first keeps exact work/charge and cannot publish | two-order operation-start/retain/share/finalization barriers plus ledger/account snapshot assertions |
 | Prepared handoff | preparation has selected an exact publishable terminal wrapper, frozen private attribution, any success identity already reserved, and zero live attribution; handoff reaches zero allocator, validator, control, callback, panic, classification, or accounting entry; fatal containment is not a prepared handoff | identity-exhaustion, API-shape, prepared-drop, verified-unwind, uncertain-cleanup, and injected-failure counters |
 | Standalone parity | explicit-account and private-account core validation use the same non-noop ledger and publication state machine | core integration and snapshot-equivalence tests |
@@ -551,9 +574,9 @@ Negative:
 | Peak overlap | Tests retaining snapshot + backend + normalized + Scene storage observe their sum, not their maximum. |
 | Checked admission | Count, scalar width, record fields, count-times-size and aggregate overflow, table capacity, maximum new blocks, and root-plus-actual-new attribution failure precede set-id, work, account, allocator, and backend side effects. |
 | Capacity envelope | Retained `CapacityPlan` identity is managed-qualified by exact revision/allocator/toolchain/target; full envelope admission precedes every Baozi allocation request, `finish` accepts `desired..=envelope`, retains conservative charge while live, and over-envelope storage drops before owners with a typed non-conformance failure. Tests prove the strong request-envelope guarantee, distinguish it from transient/exact RSS, reject strict conformance for custom/unqualified allocators, and use OS/subprocess limits where hard process memory is required. |
-| Operation bootstrap | Invalid/zero/exact limits plus sealed-cell/header semantic layout, per-actual-backing `CapacityPlan`, checked aggregate requested-envelope/block sum, ledger/physical-account atomic admission, and terminal-envelope allocator faults either return an allocation-free start error with no accepted operation or return an operation already owning its fallback envelope. The semantic aggregate layout is never treated as proof of one allocator backing. |
+| Operation bootstrap | Invalid/zero/exact limits plus sealed-cell/header semantic layout, per-actual-backing `CapacityPlan`, and checked aggregate requested-envelope/block sums either return an allocation-free start error with no accepted operation or return an operation already owning its fallback envelope. Instrumentation proves one complete ledger aggregate admission followed by one complete physical aggregate admission, non-nested locks, no common cross-plane linearization point, exact first-plane rollback only for typed no-mutation rejection, coupled fail-closed containment for panic/post-mutation poison/uncertain disposition, and no retained allocator entry before both succeed. The semantic aggregate layout is never treated as proof of one allocator backing. |
 | Account poison composition | Across cloned explicit accounts, poison-first operation start/retain/share returns typed `AccountPoisoned` before attempted/consumed/live counters, work permits, set/slot, refcount/range, or allocator effects. If start/admission linearizes first, existing operation evidence and charge remain, later admissions reject, and final publication eligibility returns `FinalizationContainmentError` with no exact prepared wrapper or handoff. Physical snapshots expose one latch/count/evidence; ledger snapshots are not rewritten to fabricate that physical state. |
-| Minimal fallback evidence | Header assertions preserve schema/cause/last-phase/counts plus operation-wide current/peak live, active-reservation, and current/peak evidence-storage values without deriving globals from cells; prepared fallback has all current values zero. Cell shape, key-normalization, producer-unload, and query tests prove every dynamic entry owns only one inert Baozi-domain key plus its snapshot and no external/plugin object, vtable, function pointer, callback, or `Drop`. |
+| Minimal fallback evidence | Header assertions preserve schema/cause/last-phase/counts plus operation-wide current/peak live, active-reservation, and current/peak evidence-storage values without deriving globals from cells; prepared fallback has all current values zero. Cell shape, key-normalization, producer-unload, and query tests prove every dynamic entry owns only one inert Baozi-domain key plus its snapshot and no external/plugin object, vtable, function pointer, callback, or `Drop`. The Baozi-owned result/evidence owner retains the process-local domain anchor and immutable catalog for the complete query lifetime, plugins receive only host-minted keys, and changing a runtime brand cannot change any semantic transcript, digest, wire, cache/build identity, or user-visible meaning. |
 | Shared metered storage | Compile-time API checks and format-source scans find one `baozi-import` reserve/grow/shrink/transfer/rollback implementation; all first-party parser collections use it, allocation drops before its token, and injected transition failures preserve both owners exactly. |
 | Retained-store authority | Rustdoc/source/compile-fail gates find no public generic retained constructor, arbitrary owning payload, caller-supplied backing allocation, visitor/attach path, or caller-declared footprint; domain code uses only ADR 0042's concrete store and non-owning qualified projections. |
 | Linear work accounting | Permit admission charges attempted work, completion charges consumed work, and unfinished work retains attempted-only evidence; owner-specific integration fixtures prove their polling and terminal transport separately. |
@@ -562,7 +585,7 @@ Negative:
 | Opaque-backend admission | A known abort, unbounded recursion, or pre-admission allocation path has no first-party in-process registration. Allowance admission and maturity evidence never prove real runtime memory use; a hostile/opaque path claiming a hard bound runs under an admitted OS-enforced subprocess limit. |
 | Publication token separation | This ledger tracks attribution rather than physical lifetime; preparation freezes success into private canonical plus outcome attribution, freezes failure into private outcome attribution with zero canonical attribution, and gives unpublished preparation debris neither destination. No pending/live token survives in prepared state; public committed/published names appear only after handoff. |
 | Outcome-evidence terminal state | Exact success, rich-failure, minimal-fallback, and postprocess fixtures freeze private outcome attribution and expose non-canonical retained storage as `PublishedOutcomeEvidence` only through handoff; canonical output remains independently zero/nonzero and final operation live is zero. Fatal containment publishes no fallback and retains conservative coupled charge instead. |
-| Retained attribution coupling | Pre-mint failure owns zero side attribution. Post-mint verified physical cleanup releases exactly the matching attribution; uncertain physical cleanup preserves every already-minted matching attribution. No test may satisfy the invariant by fabricating an owner. Independent startup assembly-capacity attribution drops with its failed container, while an accepted operation retains the attribution needed by later fallback. |
+| Retained attribution coupling | Failure before physical mutation, including typed no-mutation rejection, rolls back the complete provisional ledger graph and reaches no allocator. Uncertain second-plane completion preserves that graph coupled with every possible physical owner. After the ready pair exists, verified physical cleanup releases exactly the matching attribution and uncertain physical cleanup preserves the matching paired attribution. No test may satisfy the invariant by fabricating an owner. An accepted operation retains the attribution needed by later fallback. |
 | Prepared publication | Every fallible allocation/validation/accounting/control/callback and final downgrade step precedes preparation completion; preparation returns exact `PreparedSuccess`, `PreparedRichFailure`, or `PreparedMinimalFallback`, freezes private attribution with zero operation live, and structurally permits a reservation only in exact success. Prepared drop destroys unpublished aggregates and discards private attribution without pending rollback or a publication claim. Exact handoff is a pure infallible consuming reclassification. Reservation rejection/exhaustion produces ordinary rich failure; fallback requires verified candidate cleanup and intact pre-admitted fallback/evidence attribution. Retained candidate/report builder panic and uncertain cleanup return typed `FinalizationContainmentError`, keep exact ownership/charge coupled and poisoned, and are not prepared publications. |
 | Domain identity reservation | Owner-specific tests prove any fallible generation/publication identity reservation is the final pre-freeze identity acquisition; rejection/exhaustion consumes no nonce, leaves attribution unfrozen, and prepares ordinary rich failure with zero canonical output. Handoff only consumes a successful reservation from exact success, while later freeze/product-graph preparation failure, cancellation, caught unwind, or exact-success drop may burn its never-reused gap without publishing an identity or reopening prepared ledger state. |
 | Dependency accounting | Repeated authorized references to one authority-qualified identity charge one physical read and N logical references/work units; equal logical names in different authority domains remain separate. |
@@ -576,6 +599,34 @@ Negative:
 | Clone and branch admission | Exact/excess transient clone loops and sibling/deep-branch fixtures charge non-refundable work before reference-count changes and cannot bypass retained-handle, container, branch, or generation limits. |
 
 ## Amendment History
+
+### 2026-07-20: Make cross-plane startup composition explicit
+
+- Affected headings: `Decision`, `Retained Output Integration`, `Risks and Mitigations`, and
+  `Acceptance Criteria`.
+- Previous rule: physical startup admission could precede operation attribution, and “atomic
+  admission in both accounting planes” did not define lock order, rollback, or whether the two
+  snapshots shared one linearization point. Process-local fallback keys also lacked a structurally
+  retained catalog lifetime.
+- New rule: after complete structural preflight, the ledger admits one complete provisional
+  attribution aggregate under its own lock, releases that lock, and the physical account admits one
+  complete aggregate under its own lock. A private two-phase guard makes only external operation
+  acceptance atomic, rolls back the first graph only for typed no-mutation rejection, preserves
+  coupled owners for panic/post-mutation poison/uncertain disposition, and prevents every retained
+  allocator entry until both succeed. The locks are never nested and the snapshots remain
+  independent. After readiness, every allocation outcome is structurally paired with its matching
+  attribution and charge. The Baozi-owned result/evidence owner retains its process-local
+  `StoreKeyDomain` anchor and normalized immutable catalog for the query lifetime; plugins receive
+  only host-minted keys, and runtime brand values are not stable semantic or persistence inputs.
+- Compatibility impact: pre-release startup admission order, provisional typestate, rollback probes,
+  and result/evidence ownership change; no stable wire or compatibility rail is preserved.
+- Required review: complete-aggregate admission at each lock, lock non-nesting, typed no-mutation
+  second-plane rollback, post-mutation/panic/uncertain containment, zero pre-ready allocator entry,
+  poison rejection, paired post-ready cleanup, catalog drop order,
+  post-plugin-unload query, and runtime-brand exclusion vectors.
+- Rationale: operation attribution and physical retention are separate evidence planes. A private
+  ownership guard can make operation acceptance atomic without inventing a cross-plane snapshot or
+  allowing physical storage to exist before its attribution coverage.
 
 ### 2026-07-19: Supersede builder-unwind fallback with exact startup accounting
 
