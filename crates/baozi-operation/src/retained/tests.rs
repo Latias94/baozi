@@ -22,6 +22,16 @@ fn retained_production_source() -> String {
         retained_root_production_source(),
         include_str!("account.rs"),
         include_str!("final_owner.rs"),
+        include_str!("ownership.rs"),
+    ]
+    .join("\n")
+}
+
+fn retained_non_final_owner_production_source() -> String {
+    [
+        retained_root_production_source(),
+        include_str!("account.rs"),
+        include_str!("ownership.rs"),
     ]
     .join("\n")
 }
@@ -4212,7 +4222,7 @@ fn concurrent_exact_limit_admission_is_linearizable() {
 
 #[test]
 fn final_owner_source_uses_only_the_qualified_extraction_path() {
-    let root_production = retained_root_production_source();
+    let non_final_owner_production = retained_non_final_owner_production_source();
     let final_owner = include_str!("final_owner.rs");
     let production = retained_production_source();
 
@@ -4222,7 +4232,7 @@ fn final_owner_source_uses_only_the_qualified_extraction_path() {
         "UniqueArc::into_inner",
     ] {
         assert!(
-            !root_production.contains(extraction),
+            !non_final_owner_production.contains(extraction),
             "final-owner extraction `{extraction}` escaped final_owner.rs"
         );
         assert!(
@@ -4328,7 +4338,8 @@ fn generic_retained_authority_remains_crate_private() {
         )
     );
     assert!(!production.contains("pub(crate) type RetainedAllocation"));
-    assert!(production.contains("\nstruct RetainedPart<"));
+    assert!(production.contains("\npub(super) struct RetainedPart<"));
+    assert!(!production.contains("\npub(crate) struct RetainedPart<"));
     assert!(production.contains("\nenum RetainedClosureValidationError"));
     for forbidden in [
         "RetainedAllocation",
@@ -4551,12 +4562,7 @@ fn publication_evidence_precharges_the_capacity_envelope() {
         })
         .unwrap_or_else(|_| panic!("evidence operation must start"));
     assert_eq!(account.share_call_count(), 4);
-    let evidence = operation
-        .baseline
-        .evidence
-        .as_ref()
-        .expect("evidence baseline remains present");
-    let allocation = evidence.allocation();
+    let allocation = operation.baseline.test_evidence_allocation();
     let outer_bytes = FinalOwnerAllocation::<
         RetainedFinalOwnerInner<RetainedPayload<PublicationEvidenceCells<u8>>, LeafRetainedPolicy>,
     >::checked_layout_bytes()
