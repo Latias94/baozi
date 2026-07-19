@@ -5,6 +5,8 @@
     reason = "bounded poison snapshots stay inline so containment never needs a failure-path allocation"
 )]
 
+mod final_owner;
+
 use crate::control::discard_untrusted_panic_payload;
 use crate::coordinator::{FinalProgress, OperationCoordinator};
 use crate::ledger::{
@@ -17,7 +19,10 @@ use crate::ledger::{
 use crate::{
     CapacityPlan, ControlCause, OperationControl, OperationOwner, ProgressPhase, ProgressUnit,
 };
-use std::alloc::Layout;
+use final_owner::{
+    FinalOwnerAllocation, FinalOwnerAllocationError, FinalOwnerInnerDrop,
+    unreachable_final_owner_state,
+};
 use std::any::TypeId;
 use std::borrow::Borrow;
 use std::fmt;
@@ -25,7 +30,9 @@ use std::marker::PhantomData;
 use std::mem::size_of;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+#[cfg(test)]
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard};
 use triomphe::{Arc, UniqueArc};
 
@@ -308,16 +315,6 @@ struct LeafRetainedPolicy;
 
 struct TableRetainedPolicy;
 
-trait FinalOwnerInnerDrop {
-    fn release_for_drop(&mut self);
-
-    #[cfg(test)]
-    fn record_share(&self);
-
-    #[cfg(test)]
-    fn share_call_count(&self) -> usize;
-}
-
 struct RetainedFinalOwnerInner<T, P> {
     value: Option<T>,
     lease: RetainedLeaseGuard,
@@ -426,91 +423,22 @@ where
     }
 }
 
-struct FinalOwnerAllocation<I: FinalOwnerInnerDrop> {
-    shared: Option<Arc<I>>,
-}
-
-impl<I: FinalOwnerInnerDrop> FinalOwnerAllocation<I> {
-    fn checked_layout_bytes() -> Result<u64, FinalOwnerAllocationError> {
-        let (layout, _) = Layout::new::<AtomicUsize>()
-            .extend(Layout::new::<I>())
-            .map_err(|_| FinalOwnerAllocationError::AccountingOverflow)?;
-        u64::try_from(layout.pad_to_align().size())
-            .map_err(|_| FinalOwnerAllocationError::AccountingOverflow)
-    }
-
-    fn share(&self) -> Self {
-        let shared = match self.shared.as_ref() {
-            Some(shared) => {
-                #[cfg(test)]
-                shared.record_share();
-                Arc::clone(shared)
-            }
-            None => unreachable_final_owner_state(),
-        };
-        Self {
-            shared: Some(shared),
-        }
-    }
-
-    fn ptr_eq(&self, other: &Self) -> bool {
-        match (self.shared.as_ref(), other.shared.as_ref()) {
-            (Some(left), Some(right)) => Arc::ptr_eq(left, right),
-            _ => false,
-        }
-    }
-
-    #[cfg(test)]
-    fn share_call_count(&self) -> usize {
-        self.shared
-            .as_ref()
-            .map_or(0, |shared| shared.share_call_count())
-    }
-
-    #[cfg(test)]
-    fn allocation_identity(&self) -> *const I {
-        self.shared.as_ref().map_or(std::ptr::null(), Arc::as_ptr)
-    }
-
-    fn release_for_drop(&mut self) {
-        let Some(shared) = self.shared.take() else {
-            return;
-        };
-        let Some(unique) = Arc::into_unique(shared) else {
-            return;
-        };
-        let mut inner = UniqueArc::into_inner(unique);
-        inner.release_for_drop();
-        drop(inner);
-    }
-}
-
 impl<T, P> FinalOwnerAllocation<RetainedFinalOwnerInner<T, P>>
 where
     P: RetainedValuePolicy<T>,
 {
     fn value(&self) -> &T {
-        match self.shared.as_ref() {
-            Some(shared) => shared.value(),
-            None => unreachable_final_owner_state(),
-        }
+        self.inner().value()
     }
 
     fn lease(&self) -> &RetainedLease {
-        match self.shared.as_ref() {
-            Some(shared) => shared.lease(),
-            None => unreachable_final_owner_state(),
-        }
+        self.inner().lease()
     }
 
-    fn release(mut self) -> FinalOwnerReleaseOutcome {
-        let Some(shared) = self.shared.take() else {
+    fn release(self) -> FinalOwnerReleaseOutcome {
+        let Some(mut inner) = self.into_unique_inner() else {
             return FinalOwnerReleaseOutcome::Clean;
         };
-        let Some(unique) = Arc::into_unique(shared) else {
-            return FinalOwnerReleaseOutcome::Clean;
-        };
-        let mut inner = UniqueArc::into_inner(unique);
         let outcome = inner.release_retained(RetainedReleaseMode::OrdinarySharedDrop);
         drop(inner);
         outcome
@@ -530,20 +458,14 @@ where
             }
         }
     }
+
     fn try_release_unique_before_attribution_deferred(
-        mut self,
+        self,
     ) -> Result<FinalOwnerReleaseOutcome, Self> {
-        let Some(shared) = self.shared.take() else {
-            return Ok(FinalOwnerReleaseOutcome::Clean);
+        let mut inner = match self.try_into_unique_inner()? {
+            Some(inner) => inner,
+            None => return Ok(FinalOwnerReleaseOutcome::Clean),
         };
-        let unique = match Arc::try_unique(shared) {
-            Ok(unique) => unique,
-            Err(shared) => {
-                self.shared = Some(shared);
-                return Err(self);
-            }
-        };
-        let mut inner = UniqueArc::into_inner(unique);
         let outcome = inner.release_retained(RetainedReleaseMode::BeforeAttribution);
         drop(inner);
         Ok(outcome)
@@ -556,8 +478,7 @@ impl<Block>
     >
 {
     fn table_mut_during_construction(&mut self) -> Option<&mut RetainedBlockTable<Block>> {
-        let shared = self.shared.as_mut()?;
-        let payload = Arc::get_mut(shared)?.value.as_mut()?;
+        let payload = self.inner_mut_if_unique()?.value.as_mut()?;
         Some(&mut payload.value)
     }
 }
@@ -591,26 +512,8 @@ where
     ) -> FinalOwnerAllocation<RetainedFinalOwnerInner<T, P>> {
         self.unique.lease.arm(lease);
         self.unique.value = Some(value);
-        FinalOwnerAllocation {
-            shared: Some(self.unique.shareable()),
-        }
+        FinalOwnerAllocation::from_shared(self.unique.shareable())
     }
-}
-
-impl<I: FinalOwnerInnerDrop> Drop for FinalOwnerAllocation<I> {
-    fn drop(&mut self) {
-        self.release_for_drop();
-    }
-}
-
-fn unreachable_final_owner_state() -> ! {
-    panic!("final-owner allocation was observed during destruction")
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum FinalOwnerAllocationError {
-    AccountingOverflow,
-    AllocationFailed,
 }
 
 /// Invalid explicit limits for a physical storage account or account factory.
@@ -1196,10 +1099,7 @@ impl FinalOwnerInnerDrop for AccountControlInner {
 
 impl FinalOwnerAllocation<AccountControlInner> {
     fn value(&self) -> &AccountState {
-        match self.shared.as_ref() {
-            Some(shared) => shared.value(),
-            None => unreachable_final_owner_state(),
-        }
+        self.inner().value()
     }
 }
 
@@ -1226,9 +1126,7 @@ impl UnarmedAccountControlFinalOwner {
     ) -> FinalOwnerAllocation<AccountControlInner> {
         self.unique.lease.arm(lease);
         self.unique.value = Some(value);
-        FinalOwnerAllocation {
-            shared: Some(self.unique.shareable()),
-        }
+        FinalOwnerAllocation::from_shared(self.unique.shareable())
     }
 }
 
@@ -11415,6 +11313,24 @@ mod tests {
 
     const BUILD_FAILED: RetainedBuildFailureCode = RetainedBuildFailureCode::new(1);
 
+    fn retained_root_production_source() -> &'static str {
+        let source = include_str!("retained.rs");
+        let test_attribute = ["#[cfg(", "test)]"].concat();
+        let (production, test_module) = source
+            .rsplit_once(&test_attribute)
+            .expect("retained source contains one final test module boundary");
+        assert!(test_module.trim_start().starts_with("mod tests"));
+        production
+    }
+
+    fn retained_production_source() -> String {
+        [
+            retained_root_production_source(),
+            include_str!("retained/final_owner.rs"),
+        ]
+        .join("\n")
+    }
+
     struct PanickingDropProbe(&'static AtomicU64);
 
     impl Drop for PanickingDropProbe {
@@ -15661,17 +15577,38 @@ mod tests {
 
     #[test]
     fn final_owner_source_uses_only_the_qualified_extraction_path() {
-        let source = include_str!("retained.rs");
-        let test_attribute = ["#[cfg(", "test)]"].concat();
-        let (production, test_module) = source
-            .rsplit_once(&test_attribute)
-            .expect("retained source contains one final test module boundary");
-        assert!(test_module.trim_start().starts_with("mod tests"));
-        assert!(production.contains("Arc::into_unique(shared)"));
+        let root_production = retained_root_production_source();
+        let final_owner = include_str!("retained/final_owner.rs");
+        let production = retained_production_source();
+
+        for extraction in [
+            "Arc::into_unique",
+            "Arc::try_unique",
+            "UniqueArc::into_inner",
+        ] {
+            assert!(
+                !root_production.contains(extraction),
+                "final-owner extraction `{extraction}` escaped final_owner.rs"
+            );
+            assert!(
+                final_owner.contains(extraction),
+                "final_owner.rs lost required extraction `{extraction}`"
+            );
+        }
         assert_eq!(
-            production.matches("Arc::try_unique(shared)").count(),
+            final_owner.matches("Arc::into_unique(shared)").count(),
+            2,
+            "ordinary release and final shared-owner drop are the only non-strict transitions"
+        );
+        assert_eq!(
+            final_owner.matches("Arc::try_unique(shared)").count(),
             1,
             "strict pre-attribution cleanup has one qualified uniqueness transition"
+        );
+        assert_eq!(
+            final_owner.matches("UniqueArc::into_inner(unique)").count(),
+            3,
+            "every qualified uniqueness transition extracts through the generic engine"
         );
         for forbidden in [
             "Arc::try_unwrap",
@@ -15693,12 +15630,9 @@ mod tests {
 
     #[test]
     fn generic_retained_authority_remains_crate_private() {
-        let source = include_str!("retained.rs");
+        let production = retained_production_source();
         let root_exports = include_str!("lib.rs");
         let test_attribute = ["#[cfg(", "test)]"].concat();
-        let (production, _) = source
-            .rsplit_once(&test_attribute)
-            .expect("retained source contains one final test module boundary");
 
         assert!(
             !root_exports.contains("pub use retained::*"),
@@ -15811,7 +15745,7 @@ mod tests {
                 .count()
         };
         assert_eq!(
-            count_test_only_wrappers(production),
+            count_test_only_wrappers(&production),
             1,
             "unadmitted physical retain wrapper must remain test-only"
         );
@@ -16489,11 +16423,7 @@ mod tests {
 
     #[test]
     fn single_value_bootstrap_and_primary_prepare_exclude_duplicate_tail_work() {
-        let source = include_str!("retained.rs");
-        let test_attribute = ["#[cfg(", "test)]"].concat();
-        let (production, _) = source
-            .rsplit_once(&test_attribute)
-            .expect("retained source contains one final test module boundary");
+        let production = retained_production_source();
         assert!(!production.contains("set: fn("));
         assert!(!production.contains("AggregateSetterPanicked"));
         assert!(!production.contains("fn try_create_single_retained_part"));
