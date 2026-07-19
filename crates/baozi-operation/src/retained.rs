@@ -5837,7 +5837,7 @@ where
         let mut ownership_failure = false;
         let mut charge_failure = false;
         let mut deferred_ownership = false;
-        let mut primary_fault_recorded = false;
+        let mut cleanup_fault_recorded = false;
         let evidence_exact = self.evidence.pending_admission().is_some_and(|admission| {
             admission.account.is_same_account(self.account)
                 && admission.charge == self.pair_plan.second
@@ -5860,23 +5860,28 @@ where
             PendingRetainedRollback::Clean => {}
             PendingRetainedRollback::FaultRecorded(poisoned) => {
                 ownership_failure = true;
-                primary_fault_recorded = true;
+                cleanup_fault_recorded = true;
                 self.anchor_fault(poisoned);
             }
             PendingRetainedRollback::ChargeReleaseUnverified(poisoned) => {
                 charge_failure = true;
-                primary_fault_recorded = true;
+                cleanup_fault_recorded = true;
                 self.anchor_fault(poisoned);
                 self.evidence.contain_pending_charge(self.pair_plan.second);
             }
             PendingRetainedRollback::ChargeRetainedAfterPoison(poisoned) => {
                 ownership_failure = true;
-                primary_fault_recorded = true;
                 self.anchor_fault(poisoned);
                 self.evidence.contain_pending_charge(self.pair_plan.second);
             }
         }
-        let defer_fallback_ownership = primary_fault_recorded || deferred_ownership;
+        #[cfg(test)]
+        if take_injected_start_fallback_account_anchor_loss()
+            && let StartupRetainedSideState::Built(part) = &mut self.fallback
+        {
+            drop(part.account.take());
+        }
+        let defer_fallback_ownership = cleanup_fault_recorded || deferred_ownership;
         match self
             .fallback
             .try_discard_built_before_batch_release(defer_fallback_ownership)
@@ -5884,7 +5889,7 @@ where
             Ok(()) => {}
             Err(RetainedPartCleanupError::ChargeReleaseUnverified(poisoned)) => {
                 charge_failure = true;
-                primary_fault_recorded |=
+                cleanup_fault_recorded |=
                     poisoned.reason == AccountPoisonReason::CounterInvariantViolated;
                 self.anchor_fault(poisoned.poisoned);
             }
@@ -5905,11 +5910,11 @@ where
                 | RetainedPartCleanupError::StillSharedOwnershipFault(poisoned),
             ) => {
                 ownership_failure = true;
-                primary_fault_recorded = true;
+                cleanup_fault_recorded = true;
                 self.anchor_fault(poisoned.poisoned);
             }
         }
-        if deferred_ownership && !primary_fault_recorded {
+        if deferred_ownership && !cleanup_fault_recorded {
             let poisoned = self
                 .account
                 .record_poison(AccountPoisonReason::OwnershipGraphUnverified);
@@ -11259,6 +11264,9 @@ thread_local! {
     static PANIC_NEXT_START_EVIDENCE_BUILD: std::cell::Cell<bool> = const {
         std::cell::Cell::new(false)
     };
+    static LOSE_NEXT_START_FALLBACK_ACCOUNT_ANCHOR: std::cell::Cell<bool> = const {
+        std::cell::Cell::new(false)
+    };
     static START_EVIDENCE_BUILD_CALLS: std::cell::Cell<usize> = const {
         std::cell::Cell::new(0)
     };
@@ -11354,6 +11362,16 @@ fn take_injected_start_evidence_build_panic() -> bool {
 #[cfg(test)]
 fn take_injected_start_evidence_build_failure() -> Option<RetainedBuildFailureCode> {
     FAIL_NEXT_START_EVIDENCE_BUILD.with(std::cell::Cell::take)
+}
+
+#[cfg(test)]
+fn lose_next_start_fallback_account_anchor() {
+    LOSE_NEXT_START_FALLBACK_ACCOUNT_ANCHOR.with(|flag| flag.set(true));
+}
+
+#[cfg(test)]
+fn take_injected_start_fallback_account_anchor_loss() -> bool {
+    LOSE_NEXT_START_FALLBACK_ACCOUNT_ANCHOR.with(|flag| flag.replace(false))
 }
 
 #[cfg(test)]
@@ -11818,6 +11836,7 @@ mod tests {
     fn reset_startup_test_observations() {
         let _ = take_injected_start_evidence_build_failure();
         let _ = take_injected_start_evidence_build_panic();
+        let _ = take_injected_start_fallback_account_anchor_loss();
         let _ = take_start_evidence_build_calls();
         let _ = take_startup_failure_ledger_snapshot();
     }
@@ -16155,6 +16174,43 @@ mod tests {
 
         drop(account);
         assert_eq!(factory.snapshot().live_accounts(), 0);
+    }
+
+    #[test]
+    fn existing_poison_does_not_suppress_a_later_startup_ownership_fault() {
+        reset_startup_test_observations();
+        fail_next_start_evidence_build(BUILD_FAILED);
+        lose_next_start_fallback_account_anchor();
+        let factory = account_factory(1);
+        let account = account(&factory, u64::MAX, 128);
+        let (limits, plan) = startup_limits_and_plan();
+
+        let result =
+            TestOperation::try_start(OperationControl::default(), limits, &account, plan, || {
+                let _ =
+                    account.record_poison(AccountPoisonReason::RetainedStorageReleaseUnverified);
+                Ok::<u32, RetainedBuildFailureCode>(7)
+            });
+
+        assert!(matches!(
+            result,
+            Err(RetainedOperationStartError::Writer(
+                RetainedWriterError::OwnershipUnverified
+            ))
+        ));
+        let snapshot = account.snapshot();
+        assert_eq!(snapshot.poison_event_count(), 2);
+        assert!(snapshot.poison_event_count_exact());
+        assert!(snapshot.poison_event_domain_valid());
+        assert_eq!(
+            snapshot
+                .first_poison_evidence()
+                .map(AccountPoisonEvidence::reason),
+            Some(AccountPoisonReason::RetainedStorageReleaseUnverified)
+        );
+
+        drop(account);
+        assert_eq!(factory.snapshot().live_accounts(), 1);
     }
 
     #[test]
