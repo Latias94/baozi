@@ -116,8 +116,10 @@ freeze; the generic ledger does not interpret that identity. Atomic reservation 
 exhaustion consumes no nonce, destroys the canonical candidate, and is an ordinary rich failure with
 preserved evidence and zero canonical output. It does not select minimal fallback merely because the
 identity was unavailable. Once reservation succeeds, any later freeze/product-graph preparation
-failure, cancellation, or caught unwind burns its never-reused identity while preparation attempts the rich-
-failure terminal variant.
+failure, cancellation, or caught unwind burns its never-reused identity. A non-builder unwind may
+attempt the rich-failure terminal variant after all required candidate/publication cleanup is
+verified and the pre-admitted fallback/evidence attribution remains intact; a retained candidate/report builder panic instead
+enters side-local containment and prepares no terminal wrapper.
 
 Preparation returns a closed, already classified transport containing exactly one linear
 `PreparedSuccess`, `PreparedRichFailure`, or `PreparedMinimalFallback`. It is not one opaque
@@ -140,13 +142,27 @@ bind that envelope before it returns an accepted operation. A bootstrap rejectio
 failure returns a fixed-size allocation-free owner start error with no operation snapshot or terminal
 outcome; every partial owner is destroyed before return.
 
+Physical startup admission can precede creation of its matching operation attribution. This ADR owns
+only the ledger consequence: before attribution is minted there is no attribution owner to retain or
+release; after minting, verified physical cleanup releases the matching attribution, while uncertain
+physical ownership preserves every matching attribution owner that already exists. No path fabricates
+an attribution owner to complete a nominal shape. Independent startup assembly-capacity attribution
+drops with its failed startup container; a successfully accepted operation keeps the fallback/evidence
+attribution required by later terminal downgrade.
+
+The retained-storage owner supplies this ledger with a typed cleanup result. The ledger neither
+classifies physical side state nor chooses extraction, destructor, deallocation, lease, or membership
+cleanup policy. A failed startup returns its owner-specific start error and no operation terminal.
+
 Each successfully started failure-capable operation therefore already owns one minimal terminal
 envelope before risky work. If appending, validating, or preparing a rich failure after downgrade
 fails, or an invalid root or equivalent non-unwind integrity fault makes rich assembly unsafe, the
 operation destroys every partial rich aggregate and uses that assembly-independent, already allocated
-account-bound envelope to record the preparation cause without another fallible step. A caught single
-aggregate-builder unwind may follow the same fallback path only after every partial aggregate,
-dependency, backing allocation, lease transition, and operation-live attribution is verified clean.
+account-bound envelope to record the preparation cause without another fallible step. After
+successful startup, a non-builder unwind may follow the same path only when candidate/publication
+cleanup is verified, the pre-admitted fallback/evidence attribution remains intact, dependency cleanup completes,
+and operation-live attribution is zero. A retained candidate/report builder panic instead enters
+containment and never selects minimal fallback.
 
 That minimal envelope preserves the complete owner-neutral ledger snapshot. Its fixed header records
 schema revision, terminal cause, the optional owner-normalized last-completed phase key, dimension and
@@ -173,6 +189,10 @@ is poisoned, and the owner returns typed `FinalizationContainmentError` without 
 refund, or zero-leak claim. Double panic, `panic = "abort"`, process exit, and OOM require process
 isolation. No partial publishable outcome escapes. Storage that enters no prepared outcome is
 destroyed before attribution and physical admissions roll back only in the verified-cleanup case.
+
+Physical containment cannot be overruled by a logical ledger transition. This ADR records only the
+resulting operation attribution and fixed evidence supplied by the retained-storage owner; it does not
+define physical fault selection, release evidence, severity precedence, or containment shape.
 
 ### Live and Peak-Live Accounting
 
@@ -427,8 +447,8 @@ stateDiagram-v2
     Validate --> PrepareRichFailure: identity rejection/exhaustion; no nonce
     IdentityReserved --> PrepareSuccess: freeze private attribution
     IdentityReserved --> PrepareRichFailure: later downgrade; burn identity gap
-    Build --> PrepareMinimalFallback: invalid root or caught single unwind; cleanup verified
-    Build --> FatalContainment: cleanup/release proof unavailable; keep coupled charge
+    Build --> PrepareMinimalFallback: invalid root or non-builder unwind; candidate clean; baseline exact
+    Build --> FatalContainment: retained builder panic or side containment; keep coupled charge
     PrepareSuccess --> PreparedSuccess: exact variant; live attribution = 0
     PrepareRichFailure --> PreparedRichFailure: rich append/validation/prepare succeeds
     PrepareRichFailure --> PreparedMinimalFallback: rich preparation itself fails
@@ -497,7 +517,8 @@ Negative:
 | Operation accounting ignores shared account poison | Critical | operation start/retain/share/final-publication eligibility composes with ADR 0042's one linearization state; poison-first has zero ledger/work/allocation effects, start/retain/share-admission-first evidence/charge remains and finalization fails closed before handoff |
 | Failure evidence has no legal attribution terminal state | Critical | private prepared outcome attribution, public `PublishedOutcomeEvidence` only after handoff, a pre-admitted terminal envelope, and exact infallible failure handoffs |
 | A prepared handoff discovers another failure or panic source | Critical | preparation completes terminal classification, freezes private attribution, and reaches zero operation-live attribution; exact prepared wrappers have no pending token and their handoffs are pure consuming reclassifications. |
-| A caught unwind is treated as clean although storage release is uncertain | Critical | permit fallback only after verified cleanup; otherwise keep payload/lease/attribution coupled and charged, latch the shared physical account, return typed fatal containment, and require process isolation for abort/double-panic/exit/OOM |
+| A retained-builder panic is treated as clean fallback | Critical | startup panic returns a start error; later candidate/report panic returns fatal containment; fallback requires verified candidate cleanup and intact pre-admitted fallback/evidence attribution |
+| Startup accounting invents, loses, or prematurely releases attribution | Critical | before mint there is no side-attribution owner; after mint verified physical cleanup releases the matching owner and uncertain cleanup retains every matching owner that already exists; no owner is fabricated |
 | Domain identity exhaustion remains after ledger freeze | Critical | Require atomic reservation as the final fallible pre-freeze identity acquisition; rejection/exhaustion becomes ordinary rich failure with no nonce, later freeze failure may burn a successful value, and only exact-success handoff may consume it. |
 | Prepared drop releases attribution before unpublished storage | Critical | exact prepared state owns aggregates before private prepared attribution in drop order, contains no rollback-capable token, and discards rather than publishes that attribution. |
 | Standalone validation bypasses operation attribution | Critical | core owns a real `SceneConstructionOperation` for both explicit-account and private-account paths; no no-op adapter exists. |
@@ -515,6 +536,7 @@ Negative:
 | Canonical/evidence independence | failure reports always retain zero committed canonical output while independently reporting exact published outcome evidence | ledger snapshot assertions at every failure phase |
 | Structural preflight | invalid count/width/overflow/table/max-new/attribution plans cause zero set-id, work, account, and allocator side effects | exact/excess boundary and fault-injection counters |
 | Capacity coverage | hostile input cannot make Baozi request beyond the admitted qualified envelope; actual may be smaller, over-envelope publishes nothing, and logical output uses semantic length without an exact-RSS claim | desired/actual/envelope allocator probes, qualification identity, and subprocess-limit tests |
+| Retained attribution coupling | before mint there is zero side attribution; after mint verified cleanup releases the matching token and uncertain cleanup retains every already-minted matching token; no fabricated owner exists | pre-mint failure, post-mint verified/uncertain cleanup, owner-count, and drop-order probes |
 | Poison/accounting composition | one shared poison latch is visible across account clones without rewriting monotonic operation evidence; poison-first does no work, start/retain/share-admission-first keeps exact work/charge and cannot publish | two-order operation-start/retain/share/finalization barriers plus ledger/account snapshot assertions |
 | Prepared handoff | preparation has selected an exact publishable terminal wrapper, frozen private attribution, any success identity already reserved, and zero live attribution; handoff reaches zero allocator, validator, control, callback, panic, classification, or accounting entry; fatal containment is not a prepared handoff | identity-exhaustion, API-shape, prepared-drop, verified-unwind, uncertain-cleanup, and injected-failure counters |
 | Standalone parity | explicit-account and private-account core validation use the same non-noop ledger and publication state machine | core integration and snapshot-equivalence tests |
@@ -540,7 +562,8 @@ Negative:
 | Opaque-backend admission | A known abort, unbounded recursion, or pre-admission allocation path has no first-party in-process registration. Allowance admission and maturity evidence never prove real runtime memory use; a hostile/opaque path claiming a hard bound runs under an admitted OS-enforced subprocess limit. |
 | Publication token separation | This ledger tracks attribution rather than physical lifetime; preparation freezes success into private canonical plus outcome attribution, freezes failure into private outcome attribution with zero canonical attribution, and gives unpublished preparation debris neither destination. No pending/live token survives in prepared state; public committed/published names appear only after handoff. |
 | Outcome-evidence terminal state | Exact success, rich-failure, minimal-fallback, and postprocess fixtures freeze private outcome attribution and expose non-canonical retained storage as `PublishedOutcomeEvidence` only through handoff; canonical output remains independently zero/nonzero and final operation live is zero. Fatal containment publishes no fallback and retains conservative coupled charge instead. |
-| Prepared publication | Every fallible allocation/validation/accounting/control/callback and final downgrade step precedes preparation completion; preparation returns exact `PreparedSuccess`, `PreparedRichFailure`, or `PreparedMinimalFallback`, freezes private attribution with zero operation live, and structurally permits a reservation only in exact success. Prepared drop destroys unpublished aggregates and discards private attribution without pending rollback or a publication claim. Exact handoff is a pure infallible consuming reclassification. Reservation rejection/exhaustion produces ordinary rich failure; only failure to append/validate/prepare that downgraded evidence, an invalid root/equivalent integrity fault, or a caught single builder unwind with verified cleanup selects the assembly-independent fallback. Uncertain cleanup returns typed `FinalizationContainmentError`, keeps ownership/charge coupled and poisoned, and is not a prepared publication. |
+| Retained attribution coupling | Pre-mint failure owns zero side attribution. Post-mint verified physical cleanup releases exactly the matching attribution; uncertain physical cleanup preserves every already-minted matching attribution. No test may satisfy the invariant by fabricating an owner. Independent startup assembly-capacity attribution drops with its failed container, while an accepted operation retains the attribution needed by later fallback. |
+| Prepared publication | Every fallible allocation/validation/accounting/control/callback and final downgrade step precedes preparation completion; preparation returns exact `PreparedSuccess`, `PreparedRichFailure`, or `PreparedMinimalFallback`, freezes private attribution with zero operation live, and structurally permits a reservation only in exact success. Prepared drop destroys unpublished aggregates and discards private attribution without pending rollback or a publication claim. Exact handoff is a pure infallible consuming reclassification. Reservation rejection/exhaustion produces ordinary rich failure; fallback requires verified candidate cleanup and intact pre-admitted fallback/evidence attribution. Retained candidate/report builder panic and uncertain cleanup return typed `FinalizationContainmentError`, keep exact ownership/charge coupled and poisoned, and are not prepared publications. |
 | Domain identity reservation | Owner-specific tests prove any fallible generation/publication identity reservation is the final pre-freeze identity acquisition; rejection/exhaustion consumes no nonce, leaves attribution unfrozen, and prepares ordinary rich failure with zero canonical output. Handoff only consumes a successful reservation from exact success, while later freeze/product-graph preparation failure, cancellation, caught unwind, or exact-success drop may burn its never-reused gap without publishing an identity or reopening prepared ledger state. |
 | Dependency accounting | Repeated authorized references to one authority-qualified identity charge one physical read and N logical references/work units; equal logical names in different authority domains remain separate. |
 | Failure evidence | Cancellation and parse failures retain bounded stats, attempted counters, and peak-live by phase. |
@@ -553,6 +576,26 @@ Negative:
 | Clone and branch admission | Exact/excess transient clone loops and sibling/deep-branch fixtures charge non-refundable work before reference-count changes and cannot bypass retained-handle, container, branch, or generation limits. |
 
 ## Amendment History
+
+### 2026-07-19: Supersede builder-unwind fallback with exact startup accounting
+
+- Affected headings: `Decision`, `Retained Output Integration`, `Risks and Mitigations`, and
+  `Acceptance Criteria`.
+- Previous rule: the earlier 2026-07-19 amendment allowed a caught retained-builder unwind to become
+  minimal fallback after a general cleanup proof and did not state how operation attribution behaves
+  when physical admission precedes attribution creation.
+- New rule: before attribution mint there is no side-attribution owner. After mint, verified physical
+  cleanup releases the matching owner and uncertain physical ownership preserves every matching owner
+  that already exists; no path fabricates an owner. Independent startup assembly-capacity attribution
+  drops with its failed container, while an accepted operation retains the fallback/evidence
+  attribution required by later downgrade. Physical disposition, fault/release precedence,
+  membership cleanup, and lease policy remain outside this ledger authority.
+- Compatibility impact: pre-release startup accounting, failure evidence, and containment typestates
+  change; no stable wire or compatibility rail is preserved.
+- Required review: pre-mint and post-mint owner counts, verified/uncertain physical cleanup coupling,
+  startup-container drop, successful fallback attribution, prepared boundary, and ADR checks.
+- Rationale: operation attribution is truthful only when its terminal owner matches the physical side
+  that remains; a generic cleanup-success flag cannot prove that relationship.
 
 ### 2026-07-19: Complete fallback evidence and account-poison composition
 

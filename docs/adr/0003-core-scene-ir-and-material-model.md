@@ -50,6 +50,11 @@ capabilities:
 - `SceneEdit` isolates mutations from an existing `ValidatedScene`. Commit validates and returns a
   new generation; failure or cancellation publishes no partial state or generation.
 
+This is the accepted U4 target, not a claim that the workspace has completed the cutover. The
+operation-owned retained-storage foundation exists, but core has not yet integrated the final
+`CanonicalBlockRef`/`SceneConstructionOperation` path and the legacy Scene lifecycle remains until the
+atomic workspace switch and deletion gates complete.
+
 Opening `SceneEdit` is a derived-operation start against the input Scene's inherited
 `PhysicalStorageAccount`. It performs ADR 0042's shared poison/counter admission before edit work,
 clone/share/refcount access, or replacement allocation. Poison-first returns typed
@@ -66,6 +71,7 @@ inspect never handle proof internals. A caller opts into `SceneEdit` only when c
 ```mermaid
 stateDiagram-v2
     [*] --> Building: SceneBuilder
+    Building --> ContainmentFatal: retained builder panic; no reservation
     Building --> Draft: finish
     Draft --> CheckedDraft: central validation
     Draft --> [*]: validation failure; no generation
@@ -73,7 +79,7 @@ stateDiagram-v2
     CheckedDraft --> PreparedRichFailure: reservation rejection/exhaustion; consume no nonce
     Reserved --> PreparedSuccess: freeze and classify exact success
     Reserved --> PreparedRichFailure: later downgrade; burn gap
-    Reserved --> PreparedMinimalFallback: rich-failure preparation cannot complete or caught unwind cleans up; burn gap
+    Reserved --> PreparedMinimalFallback: rich-failure preparation fails or non-unwind root fault; burn gap
     Reserved --> ContainmentFatal: release proof unavailable; burn gap and poison coupled ownership
     PreparedSuccess --> Validated: infallible reserved-token handoff
     PreparedSuccess --> [*]: drop; burn private gap
@@ -152,14 +158,15 @@ decided only during handoff. The reservation typestate obeys this lifecycle:
 Reservation rejection or exhaustion consumes no nonce and is classified as an ordinary rich failure
 with preserved evidence and zero canonical output. It does not by itself require the minimal
 fallback. If appending, validating, or preparing that downgraded rich failure then fails, or an
-invalid root or equivalent non-unwind integrity fault prevents rich preparation, the finalizer selects
-`PreparedMinimalFallback`. A caught single builder unwind selects that fallback only after complete
-storage/dependency cleanup and zero operation-live attribution are verified. If the process survives
-but release cannot be proved, the finalizer instead keeps payload, lease, and operation attribution
-coupled, atomically latches the shared physical account and marks the operation/extension path
-poisoned, then returns `FinalizationContainmentError`; it does not publish a
-fallback or claim zero leak. Double panic, `panic = "abort"`, process exit, and OOM require process
-isolation. Once reservation has succeeded, any later
+invalid root or equivalent non-unwind integrity fault prevents rich preparation after candidate
+cleanup is verified and the retained operation layer confirms its startup fallback baseline remains
+intact, the finalizer selects
+`PreparedMinimalFallback`. A retained canonical or
+evidence builder panic never selects that fallback. The retained store returns
+`FinalizationContainmentError`, and core constructs no fallback, generation, proof, or remap from that
+path. ADR 0042 exclusively owns physical-side disposition, charge/attribution coupling, cleanup
+precedence, and retained allocation membership below core's non-owning block views.
+Double panic, `panic = "abort"`, process exit, and OOM require process isolation. Once reservation has succeeded, any later
 publication-preparation failure, cancellation, caught unwind, or prepared-success drop burns that invisible
 nonce gap. The nonce is never returned to the domain and never reused, so no failed path publishes a
 generation or proof. The two exact failure wrappers contain no reservation by the time they leave
@@ -233,7 +240,7 @@ postprocess one atomic mutation boundary. Chosen.
 | Generation allocation fails after publication evidence is frozen | Critical | Reserve `ReservedSceneGeneration` as the final fallible pre-freeze identity acquisition; rejection/exhaustion becomes a rich failure with no nonce, later freeze/preparation failure may burn a successful reservation, and handoff only consumes exact `PreparedSuccess`. |
 | Failed preparation reuses or exposes a reserved nonce | Critical | The linear private reservation burns on drop, has no public conversion except prepared handoff, and never returns a nonce to the allocator. |
 | A success-capable prepared wrapper defers terminal classification to handoff | Critical | Preparation completes control downgrade and returns exact success, rich-failure, or minimal-fallback wrappers; only exact success can contain `ReservedSceneGeneration`. |
-| A caught unwind is reported as a clean fallback without deallocation proof | Critical | Permit fallback only after verified cleanup; otherwise keep storage/lease/attribution coupled, latch the shared physical account, return typed fatal containment, and rely on process isolation for abort/double-panic/exit/OOM. |
+| A retained-builder panic is reported as a clean fallback | Critical | ADR 0042 returns typed fatal containment; core constructs no fallback, generation, or proof from that path. |
 | A derived edit starts or commits through a poisoned account clone | Critical | begin-edit and final publication eligibility linearize against ADR 0042's one shared latch; poison-first has zero work/refcount/allocation effects, start/retain-admission-first retains charge and fails finalization before handoff, and no reset/reuse API exists |
 
 ## Success Metrics
@@ -242,7 +249,7 @@ postprocess one atomic mutation boundary. Chosen.
 | --- | --- | --- |
 | Generation isolation | Stale, foreign-owner, and sibling-branch handles are rejected before lookup | exact/stale/branch API tests |
 | Generation publication | exhaustion becomes an ordinary rich failure before attribution freeze and consumes no nonce; successful handoff publishes exactly one reserved never-reused token; failed/prepared-drop paths publish none | exhaustion, cancellation, caught-unwind, and prepared-drop probes |
-| Terminal classification | only exact `PreparedSuccess` can own one generation reservation; exact rich-failure/minimal-fallback wrappers structurally cannot; fatal containment is not a prepared publication | API-shape, downgrade, single-unwind, uncertain-cleanup, and compile-fail probes |
+| Terminal classification | only exact `PreparedSuccess` can own one generation reservation; exact rich-failure/minimal-fallback wrappers structurally cannot; retained-builder containment is not a prepared publication | API-shape, downgrade, startup-side, uncertain-cleanup, and compile-fail probes |
 | Poisoned lineage | every clone of one Scene account rejects new derived edits after poison; a pre-admitted edit cannot publish once poison linearizes before final eligibility | two-order barriers, input digest/proof/refcount/allocator probes, account snapshots, and no-bypass API scans |
 | Validation complexity | Complete validation visits each graph edge, entity, reference, and payload cell at most a constant number of times | deterministic validator work counters |
 | Publication integrity | Only the central validator can mint proof; import finalization and edit commit may publish only its successful result | compile-fail and rollback tests |
@@ -256,10 +263,11 @@ postprocess one atomic mutation boundary. Chosen.
   `SceneGenerationId` carried by the new `ValidatedScene`.
 - Exact/exhausted generation-domain tests prove reservation failure consumes no nonce and precedes
   attribution freeze, preserves ordinary rich-failure evidence, and records zero canonical output.
-  Only a subsequent failure to append, validate, or prepare that rich failure, a root integrity fault,
-  or a caught single builder unwind with verified cleanup selects the minimal fallback. Uncertain
-  release instead returns typed fatal containment with coupled poisoned ownership and no fallback or
-  zero-leak claim; abort/double-panic/exit/OOM fixtures are process-isolated. Separate later-preparation-failure,
+  Only a subsequent failure to append, validate, or prepare that rich failure or a non-unwind root
+  integrity fault with verified candidate cleanup and a confirmed intact retained startup baseline
+  selects the minimal fallback. A
+  retained-builder panic instead requires ADR 0042 typed fatal containment with no fallback or zero-
+  leak claim; abort/double-panic/exit/OOM fixtures are process-isolated. Separate later-preparation-failure,
   cancellation, caught-unwind, and prepared-drop tests prove any path after successful reservation may burn
   an invisible gap, while no failed path publishes/reuses an ID or constructs a proof.
 - Preparation returns exact `PreparedSuccess`, `PreparedRichFailure`, or
@@ -288,6 +296,25 @@ postprocess one atomic mutation boundary. Chosen.
 - Public API tests prove the import-inspect path does not require builder, proof, or ledger internals.
 
 ## Amendment History
+
+### 2026-07-19: Supersede clean retained-builder fallback at the canonical boundary
+
+- Affected headings: canonical lifecycle diagram, generation identity, `Risks and Mitigations`,
+  `Success Metrics`, and `Acceptance Criteria`.
+- Previous rule: the earlier 2026-07-19 amendment still allowed a caught retained-builder unwind to
+  produce minimal fallback after a general verified-cleanup test.
+- New rule: a retained canonical/evidence builder panic always resolves below core as ADR 0042 typed
+  fatal containment and returns `FinalizationContainmentError`; it cannot construct
+  fallback, generation, proof, or remap. Only rich-failure preparation failure or a non-unwind root
+  integrity fault with verified candidate cleanup and an intact startup baseline may select minimal
+  fallback. ADR 0042 exclusively owns the underlying physical admission, containment, cleanup-
+  evidence, attribution-coupling, and retained-membership protocol.
+- Compatibility impact: pre-release canonical finalization and fault tests change; Scene identity and
+  wire compatibility remain explicitly unstabilized.
+- Required review: lifecycle exhaustivity, typed containment integration, no generation/proof/remap on
+  containment, root-fault fallback, generation-gap, physical-owner integration, and ADR checks.
+- Rationale: core can mint a validation proof only from a fully owned canonical aggregate. A builder
+  panic is evidence of an incomplete ownership graph, not an ordinary report-quality downgrade.
 
 ### 2026-07-19: Close derived-edit poison and unwind containment
 

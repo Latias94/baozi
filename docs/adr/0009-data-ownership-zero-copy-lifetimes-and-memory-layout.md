@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-07-09
-updated: 2026-07-13
+updated: 2026-07-19
 authors:
   - Codex
 decision_type: architecture
@@ -9,10 +9,10 @@ depends_on:
   - docs/adr/0003-core-scene-ir-and-material-model.md
   - docs/adr/0022-per-import-resource-ledger-and-budget-accounting.md
   - docs/adr/0030-logical-mesh-primitive-and-attribute-domain.md
-  - docs/adr/0032-postprocess-remap-and-derived-data-contract.md
 related:
   - docs/adr/0006-public-api-versioning-and-crate-stability-policy.md
   - docs/adr/0008-math-coordinate-units-and-numeric-policy.md
+  - docs/adr/0032-postprocess-remap-and-derived-data-contract.md
   - docs/adr/0037-archive-and-container-security.md
 ---
 
@@ -238,7 +238,9 @@ SceneBuilder -> SceneDraft -> central validator -> ValidatedScene
 `SceneEdit` is the only canonical mutation transaction. It shares unchanged owned storage, builds
 affected replacements privately, and publishes a new generation only after central validation.
 Postprocess and user-authored changes use this same boundary; neither mutates a `ValidatedScene` in
-place. Exact remap, rollback, and derived-data rules are authoritative in ADR 0032.
+place. This ADR supplies the lower-level ownership and representation boundary consumed by ADR 0032;
+exact remap, rollback, and derived-data rules remain authoritative there. The reference is not a
+reverse normative dependency from storage policy to postprocess policy.
 
 Possible future APIs:
 
@@ -368,3 +370,19 @@ Negative:
    Recommendation: only if clone cost is explicit and large buffers share storage where appropriate.
 3. Should a borrowed inspection API exist later?
    Recommendation: defer until stable importers reveal real demand.
+
+## Amendment History
+
+### 2026-07-19: Correct the storage-to-edit dependency direction
+
+- Affected headings: frontmatter dependency metadata and the `SceneEdit` authority paragraph.
+- Previous rule: this lower-level storage-representation ADR normatively depended on ADR 0032's
+  higher-level postprocess transaction contract, creating a cycle once retained physical ownership
+  became a dependency of postprocess.
+- New rule: ADR 0009 owns the lower-level ownership, borrowing, sharing, and representation boundary.
+  ADR 0032 depends on that boundary for edit semantics; this ADR keeps ADR 0032 only as related
+  navigation to its remap and rollback authority.
+- Compatibility impact: none; this corrects architectural authority metadata before release.
+- Required review: ADR dependency-cycle gate and ownership-boundary review.
+- Rationale: representation policy must be reusable below import and postprocess transactions rather
+  than depend on either consumer.

@@ -114,6 +114,12 @@ allocator call, bootstrap checked-sums every requested envelope and block count 
 the whole set to the operation ledger and physical account. A future single-backing implementation
 must preserve the same observable admission, evidence, query, and failure contract.
 
+Session startup delegates construction and containment of its fallback/evidence storage to ADR 0042.
+The import lifecycle accepts a session only after that storage has reached the exact startup-baseline
+state required by later terminal downgrade. Every failed startup maps to `SessionStartError` with no
+accepted session, report, failure, or fallback publication. This ADR owns that lifecycle mapping; it
+does not redefine the physical side, attribution, cleanup-evidence, or membership algorithm.
+
 Any count conversion, multiplication, addition, array, extend, aggregate-envelope sum, block-count,
 or actual-allocation layout overflow rejects bootstrap before a session or risky work exists; no
 dimension-only formula or aggregate-layout-as-single-allocation shortcut is permitted. Failure before
@@ -122,6 +128,11 @@ has no heap allocation, account lease, ledger snapshot, lifecycle phase, diagnos
 open; it distinguishes invalid/bootstrap limits, account-control admission/allocation, operation-
 ledger start, terminal-envelope admission, and terminal-envelope allocation. It is neither
 `RequestError` nor `ImportFailure`, and formatting it requires no allocation.
+
+A retained startup builder panic maps to `SessionStartError` and creates no session or import
+terminal. A retained candidate/report builder panic after successful startup maps to
+`FinalizationContainmentError` and cannot publish minimal fallback. ADR 0042 owns the physical
+containment facts preserved by either mapping.
 
 For an explicit account, `try_start` first performs ADR 0042's operation-start admission under the
 shared physical-account poison/counter linearization state. Poison-first returns allocation-free
@@ -179,7 +190,8 @@ stateDiagram-v2
     SessionCreated --> PrimaryBound
     PrimaryBound --> SelectionCompleted
     SelectionCompleted --> ResourceGraphActive
-    ResourceGraphActive --> DraftBuilt
+    ResourceGraphActive --> RetainedBuildActive
+    RetainedBuildActive --> DraftBuilt
     DraftBuilt --> DraftValidated
     DraftValidated --> InputManifestFinalized
     DraftValidated --> PrepareRichFailure: manifest/finalization failure
@@ -195,9 +207,11 @@ stateDiagram-v2
     InputManifestFinalized --> PrepareRichFailure: reservation rejection/exhaustion; consume no nonce
     PrepareRichFailure --> PreparedRichFailure: append/validate/prepare succeeds; live = 0
     PrepareRichFailure --> PreparedMinimalFallback: rich preparation itself fails
-    DraftBuilt --> PreparedMinimalFallback: invalid root or caught unwind with verified cleanup
+    RetainedBuildActive --> PreparedMinimalFallback: non-builder unwind; candidate cleanup verified; baseline intact
+    DraftBuilt --> PreparedMinimalFallback: invalid root; candidate cleanup verified; baseline intact
     PrepareRichFailure --> FinalizationContainmentError: cleanup/release proof unavailable
-    DraftBuilt --> FinalizationContainmentError: builder cleanup/release proof unavailable
+    RetainedBuildActive --> FinalizationContainmentError: retained builder panic or side containment
+    PrepareRichFailure --> FinalizationContainmentError: retained evidence builder panic or side containment
     PreparedRichFailure --> ImportFailure: pure consuming split
     PreparedMinimalFallback --> ImportFailure: pure consuming split
     ImportReport --> [*]
@@ -524,7 +538,9 @@ not freeze or construct an earlier `ValidatedScene`. Reservation rejection or ex
 generation domain unchanged, destroys unpublished success storage, appends the reservation cause,
 and selects ordinary rich-failure preparation with zero canonical output.
 After successful reservation, any later freeze/product-graph preparation failure, cancellation, or
-caught unwind burns the private gap and selects rich-failure preparation. Failure preparation validates the
+caught unwind burns the private gap. A non-builder unwind may select rich-failure preparation after
+candidate/publication cleanup is verified and `StartupBaselineOwner` remains exact; a retained
+candidate/report builder panic selects containment instead. Failure preparation validates the
 cause, last phase, bounded partial evidence, ledger snapshot, account brand, physical leases, zero
 canonical attribution, and private outcome-evidence attribution.
 
@@ -546,8 +562,8 @@ reclassifies canonical/evidence attribution as `CommittedCanonicalOutput` and
 `PublishedOutcomeEvidence`; failure reclassifies evidence only. Handoff performs no generation
 allocation, checked counter mutation, terminal classification, fallible lock, or extension call and
 cannot return an error or panic under the published contract. Dropping prepared success burns an
-invisible never-reused nonce gap. Ordinary drop, and a caught single unwind only after its cleanup
-completes, destroys unpublished aggregates and discards private frozen attribution. It does not
+invisible never-reused nonce gap. Ordinary drop, and a caught non-builder unwind only after its
+cleanup completes, destroys unpublished aggregates and discards private frozen attribution. It does not
 publish that attribution or roll back pending state because none remains after preparation.
 
 Final publication eligibility is still part of preparation. It checks the shared account poison
@@ -562,19 +578,25 @@ already allocated, bound to the session's physical account, and admitted for one
 cause plus complete dynamic ledger-dimension/phase evidence. If appending, validating, or preparing
 rich failure evidence after downgrade itself fails, or an invalid root or equivalent non-unwind
 integrity fault makes rich assembly unsafe, the finalizer destroys all partial rich evidence, fills
-that envelope without allocation, and prepares it through prevalidated slots. A caught single
-retained-builder unwind may use the same envelope only after dependency/final-owner cleanup, backing-
-storage deallocation, lease ordering, and zero operation-live attribution are all verified. Generation
-reservation rejection/exhaustion alone does not enter this path. There is no recursive attempt to
-allocate another `ImportFailure`.
+that envelope without allocation, and prepares it through prevalidated slots. After successful
+startup, a non-builder unwind may use the same envelope only after candidate/publication cleanup is
+verified, the exact `StartupBaselineOwner` remains intact, dependency/final-owner cleanup completes,
+and operation-live attribution is zero. A retained candidate/report builder panic never enters this path.
+Generation reservation rejection/exhaustion alone does not enter this path. There is no recursive
+attempt to allocate another `ImportFailure`.
 
 `PreparedCanonicalAttribution` and `PreparedOutcomeEvidenceAttribution` are independent private
 pre-handoff states. A success handoff reclassifies both into public `CommittedCanonicalOutput` and
 `PublishedOutcomeEvidence`. An ordinary rich-failure handoff reclassifies only outcome evidence; this
 includes generation reservation rejection/exhaustion. An invalid root, failure to append/validate/
-prepare rich failure, or caught single builder unwind with verified cleanup uses the minimal fallback
-and also publishes evidence only. All three exact forms reach zero operation-live attribution during
+prepare rich failure, or equivalent non-unwind integrity fault with verified candidate cleanup and an
+intact `StartupBaselineOwner` uses
+the minimal fallback and also publishes evidence only. All three exact forms reach zero operation-live attribution during
 preparation, before their pure handoffs, while physical leases remain bound to returned storage.
+
+ADR 0042 owns all startup and later retained-storage cleanup facts, evidence precedence, and
+membership-specific release rules. The import finalizer consumes only the resulting typed lifecycle
+outcome and cannot reinterpret physical containment as a clean report-quality downgrade.
 
 If the process survives but any dependency extraction, destructor completion, backing-storage
 deallocation, lease release, or attribution release cannot be verified, the finalizer must not claim
@@ -711,7 +733,8 @@ Negative:
 | Partial graph state is published as a successful manifest | Critical | Only the private finalizer can construct `SuccessfulInputManifest`; failure transport has a distinct bounded partial-evidence type. |
 | Failure-outcome preparation recursively needs another allocation | Critical | Pre-admit one checked-layout minimal account-bound terminal envelope before risky work; destroy partial rich evidence and perform one infallible prepared handoff only after cleanup is proved. |
 | Prepared outcome handoff still reaches a failure or panic boundary | Critical | Preparation completes final downgrade, returns an exact typed terminal wrapper, freezes private attribution, and performs all allocation, validation, accounting, control, callback, and account work; type-specific handoff cannot fail or panic. |
-| A caught unwind is reported as fallback although storage release is uncertain | Critical | Permit fallback only after verified cleanup and zero live attribution; otherwise keep payload/lease/attribution coupled and charged, latch the shared physical account, return typed fatal containment, and use process isolation for abort/double-panic/exit/OOM. |
+| A retained-builder panic is reported as fallback | Critical | Startup panic returns `SessionStartError` with side containment; later candidate/report panic returns fatal containment; fallback requires verified candidate cleanup and intact `StartupBaselineOwner`. |
+| Import lifecycle reinterprets retained containment as a report downgrade | Critical | Consume ADR 0042's typed startup/finalization result without reproducing or weakening its physical cleanup protocol. |
 | Generation allocation remains after attribution freeze | Critical | Reserve `ReservedSceneGeneration` as the final fallible pre-freeze identity acquisition; rejection/exhaustion consumes no nonce and becomes ordinary rich failure, any later preparation failure/cancellation/caught-unwind/prepared-success drop may burn the gap, and only exact `PreparedSuccess` can own/consume a reservation. |
 | Failure evidence is counted as canonical output or loses its physical owner | Critical | `PublishedOutcomeEvidence` is independent of zero committed canonical output and every retained slot keeps its account-bound lease. |
 | Import code duplicates or bypasses retained storage authority | Critical | `baozi-operation` keeps the generic rail private and exposes one concrete store; core owns only sealed schema plus non-owning projections, and import owns only sealed outcome composition. |
@@ -724,7 +747,8 @@ Negative:
 | --- | --- | --- |
 | Single visible result | after successful bootstrap, exactly one `ImportReport`, `ImportFailure`, or `FinalizationContainmentError`, with no partial field visibility; the containment error is not a prepared fallback | fault injection at every lifecycle, cleanup, and preparation boundary |
 | Destination independence | preparation freezes private canonical/outcome attribution separately; exact handoff alone exposes committed canonical output and `PublishedOutcomeEvidence` | three-path publication snapshot matrix |
-| Failure fallback | failure to append/validate/prepare downgraded rich evidence, invalid root/equivalent integrity fault, or caught single builder unwind with verified cleanup returns the assembly-independent envelope; generation rejection/exhaustion remains rich failure and uncertain cleanup returns fatal containment | allocator/deallocation counters, poison state, and terminal-cause assertions |
+| Failure fallback | failure to append/validate/prepare downgraded rich evidence or invalid root/equivalent non-unwind integrity fault returns the assembly-independent envelope only after verified candidate cleanup with intact `StartupBaselineOwner`; generation rejection/exhaustion remains rich failure, while retained candidate/report builder panic or uncertain cleanup returns fatal containment | candidate-cleanup, allocator/deallocation counters, poison state, and terminal-cause assertions |
+| Startup lifecycle mapping | every failed retained startup yields `SessionStartError` and no session/terminal; successful startup yields the baseline required for later downgrade; later retained-builder containment yields `FinalizationContainmentError` | operation integration, session acceptance, and no-terminal probes |
 | Poison fail-closed | poison-first explicit-account start has zero ledger/work/IO/refcount/allocator effects; start/retain-first then poison preserves charge but cannot prepare or hand off any import terminal | deterministic two-order barriers, clone/account snapshots, finalization probes, and explicit-account reuse rejection |
 | Infallible handoff | only exact prepared success owns a reserved generation; every exact wrapper has zero live attribution and zero allocator, checked generation/account transition, classification, panic source, or extension callback in handoff | exhaustion, API-shape, prepared-drop, and injected-failure/panic probes |
 | Owner uniqueness | zero import-owned physical charge/lease/canonical allocation implementations and zero public generic retained authority | crate graph, rustdoc, compile-fail, and production source scans |
@@ -736,13 +760,14 @@ Negative:
 | --- | --- |
 | Session-before-IO | Invalid requests create no session and perform zero IO; a primary-open failure observes one created session and one finalizer. |
 | Session bootstrap | Invalid/zero/exact account-factory and physical limits plus shared account-poison start admission, key normalization, count conversion, complete `FallbackDimensionCell<D>`/`FallbackPhaseCell<P>` `Layout::array`, ordered semantic `Layout::extend`/`pad_to_align`, per-actual-allocation `CapacityPlan`, aggregate requested-envelope/block checked sum, atomic account/ledger admission, and allocator fault injection either return one allocation-free `SessionStartError` with zero session/IO or return a session already owning its complete fallback envelope. A poison-first explicit account returns typed `AccountPoisoned` before ledger/work/IO/refcount/allocator effects. No dimension-only, unchecked `size_of`, or aggregate-layout-as-single-backing formula is accepted. |
+| Startup retained outcome | Operation integration fixtures prove every retained-start failure returns one `SessionStartError` with no accepted session or terminal, while successful startup supplies the exact baseline required for later downgrade. Retained builder containment after startup returns `FinalizationContainmentError`; physical cleanup conformance remains ADR 0042's test authority. |
 | Fallback evidence ownership | Compile-fail, shape, and plugin-unload tests prove each cell contains one inert Baozi-owned copied key plus its snapshot; keys have no `Drop`, external/plugin object, trait object/vtable, or function pointer and are normalized before the first ledger entry. `FallbackHeader<P>` retains schema revision, terminal cause, last completed phase, counts, operation-wide current/peak live bytes, active reservations, and current/peak evidence-storage bytes; no global field is reconstructed from cells. Prepared minimal fallback has zero current live, active reservations, and current evidence storage, preserves both peaks, and remains queryable without plugin code. |
 | Pre-session panic | Submitted-layer codec panic is one bounded `RequestError`; default-codec panic prevents snapshot creation as `RegistryBuildError`; both have zero sessions, finalizers, import ledgers, diagnostic streams, and asset opens. |
 | Single finalization | After session creation, success, every failure phase, cancellation, and caught unwind call the outcome finalizer exactly once; it returns one report/failure when cleanup is proved or one fatal containment error when release remains uncertain. Abort/double-panic/exit/OOM are asserted only by the isolating parent process. |
 | Success report atomicity | Injected failures at every success-preparation allocation, validation, generation reservation, freeze/accounting, product-graph, account-brand/poison eligibility, cancellation, and transition point publish no partial field or generation; rejection/exhaustion consumes no nonce and downgrades to rich failure, later failure may burn a successful reservation, poison-first eligibility returns fatal containment with no exact wrapper, and exact `PreparedSuccess` freezes private canonical/evidence attribution, reaches zero operation live, then permits only pure consuming handoff. |
 | Account poison race | Barrier tests force poison-first and start/retain-first orderings across multiple explicit-account clones. Poison-first returns `SessionStartError::AccountPoisoned` with zero work/counter/IO/refcount/allocator deltas. Start/retain-first keeps the admitted charge, rejects every later retain/share, records the same account poison/count/evidence in all snapshots, and returns `FinalizationContainmentError` during final preparation with no report/failure prepared handoff. Source/API tests find no reset/unpoison/reuse/ignore route. |
 | Failure outcome atomicity | Ordinary failures, including generation rejection/exhaustion, prepare zero canonical attribution, exact bounded private outcome-evidence attribution, and zero operation live before one pure handoff reclassifies it as `PublishedOutcomeEvidence`; their wrappers structurally contain no reservation. |
-| Failure-publication-failure atomicity | Injected failure to append/validate/prepare rich-failure evidence, invalid root/equivalent integrity fault, and a caught single retained-builder unwind with verified deallocation destroy partial rich storage and publish only the assembly-independent pre-admitted minimal terminal envelope, with zero committed canonical output, typed published outcome evidence, zero operation live, no public generation, and no recursive allocation. A generation-reservation fault instead proves ordinary rich failure. Uncertain extraction/deallocation keeps payload/lease/attribution coupled, poisons the path, and returns `FinalizationContainmentError` without fallback/refund/zero-leak claim. |
+| Failure-publication-failure atomicity | Injected failure to append/validate/prepare rich-failure evidence or invalid root/equivalent non-unwind integrity fault publishes only the assembly-independent pre-admitted minimal terminal envelope after verified candidate cleanup with intact `StartupBaselineOwner`, zero committed canonical output, zero operation live, no public generation, and no recursive allocation. A generation-reservation fault remains ordinary rich failure. Retained candidate/report builder panic, ownership mismatch, or uncertain release keeps the exact affected owners/charges/attributions coupled, poisons the path, and returns `FinalizationContainmentError` without fallback/refund/zero-leak claim. |
 | Prepared handoff API | API-shape and instrumentation prove safely completed preparation returns exact `PreparedSuccess`, `PreparedRichFailure`, or `PreparedMinimalFallback`, not one success-capable opaque wrapper. No exact wrapper owns pending/live attribution; only exact success may own one private generation reservation. Their type-specific consuming splits cannot allocate a generation, classify terminal state, validate, poll control, invoke a callback, mutate a counter/account, return `Result`, or panic. Dropping exact success burns its gap; dropping any wrapper destroys unpublished aggregates, discards private attribution without calling it published, and performs no pending rollback. `FinalizationContainmentError` is a distinct pre-prepared fatal result. |
 | Capability boundary | Compile-fail/API-shape tests prove detectors and parsers cannot reach raw IO, other options, reports, phases, arbitrary detection/parse failure constructors, dependency-requiredness relabeling, or a parser-supplied proof return path. |
 | DetectionResult shape | A heterogeneous `dyn FormatImporter` receives `Probe`, `ReadHint`, and `DetectionScope` and returns exactly `DetectionResult<DetectionOutcome>`; its opaque abort cannot be constructed, sent, or used to suppress the session latch. |
@@ -769,6 +794,26 @@ Negative:
 | Crate ownership | Dependency and public-API checks find no backend type or executable backend object in public outcomes/stable schemas, no `baozi-operation` upward dependency, no postprocess-to-import edge, and no reversed core dependency. |
 
 ## Amendment History
+
+### 2026-07-19: Supersede retained-builder fallback with exact startup ownership
+
+- Affected headings: `Lifecycle`, lifecycle diagram, `Prepared Outcome Publication`, `Risks and Mitigations`,
+  `Success Metrics`, and `Acceptance Criteria`.
+- Previous rule: the earlier 2026-07-19 amendment allowed a caught retained-builder unwind to publish
+  minimal fallback after generic verified cleanup and did not distinguish startup from later retained
+  construction in the import lifecycle.
+- New rule: retained startup builder panic returns `SessionStartError` with no accepted session or
+  terminal; successful startup supplies the exact baseline required for later downgrade; and later
+  retained candidate/report builder panic returns `FinalizationContainmentError` without fallback.
+  ADR 0042 exclusively owns the physical admission, side disposition, cleanup evidence, attribution
+  coupling, membership, and release protocol below these import outcomes.
+- Compatibility impact: pre-release session-start/finalization errors, state machine, and fault
+  evidence change without a compatibility adapter or stable report wire.
+- Required review: session acceptance, startup-versus-later builder failure mapping, no-terminal
+  startup failure, fallback exclusion, lifecycle diagram, ADR 0042 integration, and ADR checks.
+- Rationale: an import may promise exactly one terminal only after startup owns a provable cleanup
+  graph; a builder panic cannot be rewritten as an ordinary report when its closure may have escaped
+  storage.
 
 ### 2026-07-19: Complete fallback evidence and account-poison containment
 

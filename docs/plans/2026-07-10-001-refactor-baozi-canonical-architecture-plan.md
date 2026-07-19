@@ -617,3 +617,19 @@ allocator/account tracing, independently frozen equivalent candidates, and integ
 
 - If U6 admission exposes a remaining glTF sanitizer abort, unbounded path, required-semantic loss, or strict-decoding failure, whether the disabled slice is hardened by Baozi preflight, a narrow private fork, backend replacement, or an admitted process boundary remains an execution-time choice; baseline-unsafe first-party registration is not an option.
 - Exact CI matrix partitioning may change to control runtime, but every declared target/evidence tier remains mandatory before maturity or release promotion.
+
+### 2026-07-19: Correct U4 retained-builder containment
+
+This append-only execution correction supersedes only the derived builder-unwind wording in KTD34,
+the U4 storage scenarios, and their verification prose. It does not change ADR authority; ADR 0042
+governs the retained physical-ownership protocol.
+
+- A retained fallback/evidence builder panic during operation startup returns the owner-specific start
+  error, accepts no operation, and produces no terminal publication.
+- A retained canonical, evidence, or report builder panic after startup returns
+  `FinalizationContainmentError`; it produces no fallback, prepared wrapper, generation, proof, remap,
+  or handoff.
+- Only a non-builder unwind may continue to fallback after candidate cleanup is verified, operation
+  live attribution is zero, and the exact startup baseline remains intact.
+- Abort, double panic, process exit, OOM, or any unverified cleanup remains outside an in-process clean
+  fallback claim and requires the containment specified by ADR 0042 or an admitted process boundary.

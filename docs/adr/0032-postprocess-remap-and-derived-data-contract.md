@@ -7,16 +7,16 @@ authors:
 decision_type: architecture
 depends_on:
   - docs/adr/0003-core-scene-ir-and-material-model.md
+  - docs/adr/0009-data-ownership-zero-copy-lifetimes-and-memory-layout.md
   - docs/adr/0022-per-import-resource-ledger-and-budget-accounting.md
   - docs/adr/0030-logical-mesh-primitive-and-attribute-domain.md
   - docs/adr/0031-animation-skin-morph-and-deformer-contract.md
+  - docs/adr/0042-shared-canonical-storage-accounts-and-generation-lineage.md
 supersedes:
   - docs/adr/0025-scene-ir-invariants-and-validation-boundaries.md
 related:
   - docs/adr/0013-post-process-pipeline-semantics-presets-and-mutation-model.md
-  - docs/adr/0009-data-ownership-zero-copy-lifetimes-and-memory-layout.md
   - docs/adr/0036-source-identity-provenance-and-metadata.md
-  - docs/adr/0042-shared-canonical-storage-accounts-and-generation-lineage.md
 ---
 
 # ADR 0032: Postprocess Remap, Edit Transaction, and Derived Data Contract
@@ -46,6 +46,11 @@ transitions but owns no import/postprocess policy, dimensions, phase semantics, 
 Scene meaning. This ADR supplies the scene-specific read/write, remap, invalidation, loss, and edit
 ledger semantics to that shared mechanism rather than defining a second mechanism.
 
+This is the accepted postprocess target, not a current conformance claim. `SceneEdit` has not yet been
+cut over to the operation-owned retained store and canonical block projections; its retained
+transaction, report, and remap obligations become enforceable only through the atomic U4 workspace
+switch and deletion of the legacy path.
+
 ## Decision
 
 `SceneEdit` is the only canonical mutation capability. It starts from a
@@ -69,6 +74,15 @@ another account clone later poisons the account, admitted charge remains coupled
 retain/share attempt rejects, and final publication eligibility returns
 `FinalizationContainmentError` with no exact prepared report, output generation, remap, or handoff.
 Neither plan execution nor `SceneEdit` exposes reset, ignore, reuse, or account replacement.
+
+The edit operation's pre-admitted fallback/evidence startup pair follows ADR 0042 before any exact
+postprocess terminal can exist. A startup builder panic returns a start error with no accepted edit
+invocation or terminal; successful startup instead preserves the exact baseline required by later
+fallback preparation. A later retained candidate/report builder panic returns fatal containment and
+never becomes a clean postprocess failure or minimal fallback. The unchanged input generation remains
+valid and no report/remap is published. ADR 0042 exclusively owns physical pair admission, side and
+pre-attribution containment, attribution coupling, cleanup evidence/precedence, and retained
+allocation membership; this ADR owns only the edit-visible input/output and report consequences.
 
 ADR 0013 decides whether a compiled postprocess plan requires a canonical write before opening a
 `SceneEdit`. `NotRequested` and successfully executed `Unchanged` outcomes do not publish an edit and
@@ -290,6 +304,8 @@ tools. Chosen.
 - Reservation rejection or exhaustion consumes no nonce. Any later freeze/ledger/product-graph
   preparation failure, cancellation, caught unwind, or prepared drop after the one successful reservation
   may burn one private generation nonce gap, but never publishes or reuses it.
+- A retained-builder panic is a pre-prepared containment result, not a caught-unwind fallback; it
+  preserves the input Scene while retaining the exact affected physical/accounting owners.
 - Some operations need extra remap storage, which is budgeted as required output evidence rather
   than optional debug data.
 
@@ -305,6 +321,7 @@ tools. Chosen.
 | Generation exhaustion occurs after attribution freeze | Critical | Reserve exactly one final-Scene nonce as the final fallible pre-freeze identity acquisition; intermediate step states use report-scoped typed paths and never consume nonces. |
 | Prepared drop exposes a private remap endpoint or reuses its nonce | Critical | Keep the one reservation and staged remaps private and linear; drop burns the one gap, while only pure final handoff converts the final identity and publishes the report. |
 | Postprocess starts or publishes through a poisoned account clone | Critical | derived start and final eligibility use ADR 0042's shared linearization state; poison-first has zero work/evidence/refcount/allocation effects, start/retain/share-admission-first retains charge but returns fatal containment before handoff, and no reset/reuse bypass exists |
+| A retained edit/evidence builder panic is downgraded to an ordinary failure | Critical | startup panic returns a start error with side containment; later candidate/report panic returns fatal containment; fallback requires verified candidate cleanup and intact `StartupBaselineOwner` |
 | A report step ID is mistaken for persistent Scene identity | Critical | Brand every typed step-state path to its owning report and expose no conversion, cross-report comparison, Scene lookup, persistence, or proof API. |
 
 ## Success Metrics
@@ -314,6 +331,7 @@ tools. Chosen.
 | Atomicity | Every injected failure leaves input generation, digest, and proof unchanged and publishes zero remaps | failure/cancellation/resource matrix |
 | Reserved generation atomicity | exactly one final reservation is attempted; exhaustion consumes no nonce and fails before freeze; any later freeze/ledger/product-graph preparation failure, cancellation/caught-unwind/prepared drop may burn that one gap; no failed path publishes a generation/proof/remap | reservation and publication typestate probes |
 | Poisoned edit containment | all account/Scene clones reject new changed operations after poison; a pre-admitted invocation cannot publish when poison wins final eligibility | two-order start/retain/share/finalization barriers, work/evidence/refcount/allocator deltas, account snapshots, and no-bypass scans |
+| Retained failure isolation | failed startup accepts no edit invocation; a later retained builder panic publishes no fallback, generation, proof, report, or remap; the input remains unchanged | postprocess integration against ADR 0042 terminal outcomes and input-preservation probes |
 | Remap completeness | Per-step remaps cover every affected entity/domain with exact same-report step-state endpoints, and the composed remap has exact input/final generation endpoints | split/merge/delete/generate composition tests |
 | Operation-local complexity | Private candidate validation and remap composition are `O(affected entities + affected edges + affected cells + remap cells)` | deterministic per-step scale counters |
 | Publication validation complexity | Final central validation is `O(total graph edges + total entities + total references + total payload cells)` under ADR 0003 | deterministic full-validator work counters |
@@ -329,6 +347,11 @@ tools. Chosen.
   with no exact wrapper, generation, proof, derived binding, report, remap, or handoff. Every clone's
   account snapshot exposes the same poison/count/evidence; source/API gates find no reset, ignore,
   reuse, or account-replacement path.
+- Retained failure integration tests prove startup failure returns no accepted invocation or
+  postprocess terminal, while successful startup preserves the baseline required by later terminal
+  downgrade. A later candidate/report builder panic publishes no failure/fallback/report/remap. ADR
+  0042's physical and attribution tests own the exact containment mechanics. The input generation,
+  proof, and digest remain unchanged throughout.
 - Exact/exhausted generation-domain tests prove exactly one final reservation is attempted, atomic
   reservation failure consumes no nonce, and the failure precedes attribution freeze. Separate later-
   preparation-failure, cancellation, caught-unwind, and prepared-drop tests prove any path after that one
@@ -364,6 +387,37 @@ tools. Chosen.
   generation reservation, preparation freeze, and handoff.
 
 ## Amendment History
+
+### 2026-07-19: Correct the storage-to-edit dependency direction
+
+- Affected headings: frontmatter dependency metadata and implementation status.
+- Previous rule: ADR 0009 depended on this higher-level postprocess contract while this ADR treated
+  storage policy only as related navigation, creating a cycle through ADR 0042.
+- New rule: postprocess normatively consumes ADR 0009's lower-level storage representation and ADR
+  0042's retained physical-ownership protocol. Neither lower-level authority depends on postprocess
+  semantics.
+- Compatibility impact: none; this corrects architectural authority metadata before release.
+- Required review: ADR dependency-cycle gate and postprocess/storage ownership review.
+- Rationale: `SceneEdit` is a consumer of storage and retained-publication primitives, not their
+  dependency root.
+
+### 2026-07-19: Supersede retained-builder rollback with startup containment
+
+- Affected headings: `Decision`, `Consequences`, `Risks and Mitigations`, `Success Metrics`, and
+  `Acceptance Criteria`.
+- Previous rule: the earlier 2026-07-19 amendment delegated caught-unwind cleanup but still permitted
+  a retained-builder unwind to be read as a verified rollback/fallback path.
+- New rule: failed retained edit startup accepts no invocation or terminal, while successful startup
+  supplies the baseline needed by later downgrade. A later retained-builder panic publishes no
+  postprocess fallback, report, generation, proof, or remap, and the original input Scene remains
+  valid. ADR 0042 exclusively owns the physical admission, containment, cleanup evidence,
+  attribution coupling, membership, and release protocol below these postprocess consequences.
+- Compatibility impact: pre-release postprocess failure and containment typestates change; no edit or
+  remap compatibility adapter is retained.
+- Required review: startup-versus-later builder mapping, input preservation, zero published remaps,
+  prepared boundary, ADR 0042 integration, and ADR checks.
+- Rationale: transactional edit atomicity protects the input Scene, but it cannot turn an uncertain
+  retained ownership graph into a clean published failure.
 
 ### 2026-07-19: Close poisoned-edit and in-process containment
 

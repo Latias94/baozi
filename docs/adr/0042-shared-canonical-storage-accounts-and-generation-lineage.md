@@ -10,12 +10,12 @@ depends_on:
   - docs/adr/0009-data-ownership-zero-copy-lifetimes-and-memory-layout.md
   - docs/adr/0014-parser-security-unsafe-ffi-and-panic-boundary-policy.md
   - docs/adr/0022-per-import-resource-ledger-and-budget-accounting.md
-  - docs/adr/0032-postprocess-remap-and-derived-data-contract.md
 related:
   - docs/adr/0025-scene-ir-invariants-and-validation-boundaries.md
   - docs/adr/0013-post-process-pipeline-semantics-presets-and-mutation-model.md
   - docs/adr/0020-import-lifecycle-and-report-contract.md
   - docs/adr/0026-validation-snapshot-and-fuzz-gates.md
+  - docs/adr/0032-postprocess-remap-and-derived-data-contract.md
   - docs/adr/0036-source-identity-provenance-and-metadata.md
 ---
 
@@ -30,6 +30,16 @@ validated Scene generations and their published evidence.
 Acceptance selects the architecture required by the canonical Scene cutover. It does not claim that
 the current reservation-transfer implementation, `SharedStorage`, edit pipeline, import reports, or
 postprocess reports already conform.
+
+Implementation progress as of 2026-07-19 is intentionally narrower than acceptance:
+
+| Slice | Current status |
+| --- | --- |
+| `baozi-operation` retained account/store/terminal rail | Implemented and locally verified as infrastructure; not sufficient by itself for ADR or U4 conformance |
+| Complete keyed fallback phase/global-header evidence and repository conformance gate | Not yet admitted as complete U4 evidence |
+| Core `CanonicalBlockRef` and `SceneConstructionOperation` integration | Not implemented |
+| Workspace-wide single canonical Scene lifecycle and legacy deletion | Not cut over |
+| U4c metrics and U4 exit evidence | Not admitted |
 
 The adjacent authorities remain separate:
 
@@ -168,7 +178,8 @@ Behind those transitions, the operation-owned implementation:
 2. keeps storage covered from that entry and binds each physical charge before its block can escape;
 3. destroys storage before its covering reservation, pending admission, or bound lease is released;
 4. rolls back unpublished construction state on allocation, construction, validation, or a caught
-   single unwind only when cleanup and deallocation completion are verified; and
+   non-builder unwind only when cleanup and deallocation completion are verified; a retained-builder
+   panic instead follows the startup containment contract below; and
 5. freezes prepared attribution without transferring or releasing the physical lease bound to the
    retained aggregate.
 
@@ -195,13 +206,138 @@ A successful retained aggregate owns both its payload/capacity and one account-b
 is no observable state in which allocated retained storage has neither the construction guard nor a
 bound lease.
 
-On every failure path, any constructed payload and capacity are destroyed before the pending or
-bound physical charge is released. On final success, only the aggregate's final shared owner destroys
+On every failure path that reaches `Released` or a safely prepared failure, any constructed payload
+and capacity are destroyed before the pending or bound physical charge is released. A contained path
+instead retains the exact owners defined below. On final success, only the aggregate's final shared owner destroys
 the payload, deallocates every accounted backing block, and then releases the lease exactly once.
 Account counters use one checked linearizable transition; concurrent admissions cannot pass a stale
 check and oversubscribe the configured limit.
 
 The retained-allocation module owns the actual deallocation boundary.
+
+#### Startup Pair Ownership and Side Disposition
+
+Starting a failure-capable operation admits the assembly-independent fallback side and its keyed-
+evidence side as one exact physical pair before either retained builder is called. Pair admission
+preholds every account owner needed by physical lease binding, rollback, or containment. Side
+attribution and independent assembly containers are created only after that admission succeeds, so an
+early failure may enter containment before either exists. Cleanup always consumes an existing account
+owner; it never obtains a new account clone or reconstructs authority from the shared account
+reference.
+
+The backticked owner, disposition, and containment names in this section are normative protocol roles,
+not stable Rust type names or public API promises. An implementation may use private typestates with
+different names only when it preserves the same structural ownership proof.
+
+This ADR uses two normative role names that are neither interchangeable nor owners of one another.
+An `AssemblyBatch` is an independent fallible canonical or outcome-evidence assembly container plus
+its capacity cover; every `AssemblyBatch` is destroyed by ordinary `Drop` on startup failure,
+including after poison evidence is recorded. A `SideAttributionOwner` is the exact typed attribution
+batch/reservation already minted for one physical fallback or keyed-evidence side. It drops with that
+side's `Released` disposition and remains coupled only with the same side's
+`Contained`/`BuiltContained` disposition. Containment never retains an `AssemblyBatch` merely because
+it retains a `SideAttributionOwner`.
+
+`PreAttributionPairContainment` is the distinct early state for a physical pair whose release became
+unverifiable before side attribution was minted. It retains the aggregate pending/lease owner, exact
+physical charge, and preheld account anchors while structurally containing no
+`SideAttributionOwner`. Later containment preserves every matching side attribution that actually
+exists; no path fabricates a missing owner to satisfy a nominal shape.
+
+This early containment is legal only before either side has entered a retained payload allocator. If
+side attribution has not been minted, the implementation must prove zero retained allocator entries
+for both sides; it may retain the pre-admitted charge and account anchors, but it cannot claim a built
+payload. Construction may begin only after the matching attribution owner can accompany every
+possible retained allocation outcome.
+
+Successful startup does not assign a failure disposition. It consumes the exact pair into one
+`StartupBaselineOwner`, which keeps the prebuilt fallback and keyed evidence available for later
+terminal downgrade. `Released`, `Contained`, and `BuiltContained` classify startup failure cleanup
+only; releasing the baseline fallback would make later minimal-fallback publication impossible.
+
+Every startup failure resolves each physical side to one structural disposition before control
+leaves the startup owner:
+
+| Disposition | Structural meaning | Accounting consequence |
+| --- | --- | --- |
+| `Released` | Any closure-inaccessible unarmed header and any built payload selected for cleanup were verifiably destroyed; the exact pending or bound charge was released only afterward | Every already-minted matching `SideAttributionOwner` drops normally and no physical or attribution owner remains |
+| `Contained` | No built retained payload is available as an anchor, but the builder boundary or charge/ownership state is not provably clean | A preheld pending/lease owner and exact charge remain; every matching `SideAttributionOwner` that already exists remains coupled, while `PreAttributionPairContainment` contains none |
+| `BuiltContained` | A built allocation still exists, or extraction/destruction/deallocation of that allocation was not verified | The allocation owner and its bound lease or pending charge remain with every matching `SideAttributionOwner` that already exists |
+
+These dispositions are cleanup facts, not public prepared outcomes and not mutable intent flags. No
+missing owner, absent expected state, or `None` branch may be interpreted as clean. A retained-builder
+panic always leaves the panicked side at least `Contained`, even when its closure-inaccessible unarmed
+header was verifiably destroyed, because the closure may have escaped nested storage. If the sibling
+was already built, it becomes `Released` only after verified destruction or `BuiltContained`
+otherwise. Verified unarmed-header destruction emits no `R`; containment covers possible escaped
+nested storage, not uncertainty about that header. Consequently, a retained-builder panic never
+downgrades to `PreparedMinimalFallback`.
+A non-panicking builder `Err` is an ordinary rejection: after every required side reaches `Released`,
+startup returns its original build cause rather than fabricating fallback. Every startup failure
+returns without an accepted operation, exact prepared terminal, or fallback publication. Only
+successful startup moves both sides into `StartupBaselineOwner`.
+
+Startup cleanup selects fault (`F`) and records unverified-release (`R`) events from local facts.
+Builder panic or ownership-graph detection first nominates one deterministic primary-`F` candidate;
+it does not record a poison event yet. Cleanup then completes every remaining side/aggregate charge
+transition that can reveal counter underflow. If any such observation produces counter `F`, cleanup
+records exactly that counter `F` and discards the Builder/Ownership candidate without an event. Only
+after all counter-producing cleanup observations finish, and only when none recorded counter `F`, does
+cleanup record the nominated candidate exactly once. An attempted extraction, destructor,
+deallocation, or release transition whose completion cannot be verified records its independent `R`
+when observed.
+
+`ChargeRetainedAfterPoison` reports that an admitted action observed an already-existing or
+concurrently published poison after admission. It is containment evidence, not a new counter `F`
+created by the current cleanup. Therefore, when cleanup produces no actual counter `F`, the nominated
+Builder/Ownership candidate is still recorded exactly once; the existing poison evidence remains a
+distinct fact.
+
+The cleanup result keeps three non-interchangeable classes:
+
+| Class | Required evidence and containment |
+| --- | --- |
+| Storage release unverified | Payload extraction/destruction/deallocation was attempted but not proved complete; record `R` and select `BuiltContained` |
+| Ownership unverified | The expected unique or exact owner graph is false before a destructor is attempted; nominate ownership `F`, select `Contained` or `BuiltContained`, and fabricate no `R`; record that candidate only after counter-producing cleanup completes without counter `F` |
+| Charge release unverified | Payload destruction is proved, but pending-charge or bound-lease release is not; retain the charge owner. Counter underflow owns and records the sole primary `F`; a panicking release transition records independent `R` |
+
+Each startup attempt has one primary-`F` slot and the two-phase selection above is its only writer.
+Aggregate error
+selection is order-independent and uses `storage release unverified > ownership unverified > charge`
+`release unverified > original cause`. Primary-`F` selection never suppresses an independent `R`
+event/count update or broadens containment to a clean sibling; it never permits a second `F`.
+
+An exact-pair mismatch is an ownership fault: cleanup nominates ownership `F`, attempts no aggregate
+rollback under a mismatched shape, and contains both charges with every matching
+`SideAttributionOwner` already minted for either side. A mismatch before side attribution exists uses
+`PreAttributionPairContainment` and contains no such owner.
+`MissingFaultAnchor` likewise nominates a new outer ownership fault rather than assuming another layer
+already recorded one. After all possible counter-producing cleanup completes, counter `F` alone is
+recorded when present; otherwise the nominated ownership `F` is recorded once. A clean rollback that
+merely observes an already selected outer fault still releases
+its exact charge and drops its `SideAttributionOwner` normally.
+
+#### Post-start Pre-attribution Table Cleanup
+
+Publication block-table cleanup before operation attribution distinguishes allocation membership. A
+`New` allocation must be uniquely
+owned, proven by the qualified `Arc::try_unique` transition. If uniqueness fails, the transition
+returns the original owner; the publication assembly couples that owner with its matching attribution,
+permanent account/charge anchor, and the corresponding assembly batch when that batch still owns the
+attribution container. It nominates ownership `F` for the same two-phase selection and does not
+attempt a destructor or emit `R`. Unlike startup-failure cleanup, post-start table cleanup may retain
+that assembly batch when physical cleanup is not verified. An `Inherited` allocation follows ordinary shared-owner drop semantics, where non-uniqueness is
+expected and is not an ownership fault. A retained lease releases at most once: clean release disarms
+it before ordinary drop, counter underflow keeps the armed lease in a containment guard, and a
+panicking release permanently retains its lease/account witness. No drop path retries either failed
+release.
+
+All startup failure dispositions are resolved before an operation is accepted. Later publication
+cleanup is a separate protocol: it cleans candidate/report construction while the exact
+`StartupBaselineOwner` remains alive. An exact prepared wrapper contains only its selected built
+aggregates and private frozen attribution at operation-live zero; it has no pending charge or
+rollback-capable attribution token. Prepared drop therefore follows the ordinary aggregate-before-
+private-attribution order below and never re-enters startup cleanup.
 
 #### Capacity Envelope Contract
 
@@ -244,8 +380,8 @@ exclusive nested blocks, and finally releases `L`. The raw shared handle, weak/r
 ordinary post-bind shared-handle drop, either lease, and generic type parameter never cross the
 module boundary.
 
-This backend currently requires the admitted `triomphe` version's `Arc::into_unique` and
-`UniqueArc::into_inner` behavior. Those operations and their deallocation order are part of the
+This backend currently requires the admitted `triomphe` version's `Arc::try_unique`,
+`Arc::into_unique`, and `UniqueArc::into_inner` behavior. Those operations and their deallocation order are part of the
 reviewed trusted computing base under ADR 0014 and the pinned dependency admission record. A backend,
 version, feature, target, or wrapper-surface change requires requalification before use; it cannot
 silently weaken the post-deallocation release rule. Retained payloads are sealed Baozi-owned inert
@@ -284,8 +420,9 @@ its physical-byte/block counters. Every account handle, bound lease, and account
 one state. The latch and counter admissions use the same linearization lock/transition; there is no
 split check-then-charge window and no per-clone poison cache.
 
-When release, extraction, or deallocation cannot be verified, one infallible fixed-evidence
-transition keeps the existing charge coupled to its storage, changes `poisoned` only from `false` to
+When a retained-builder boundary, ownership graph, release, extraction, or deallocation cannot be
+verified, one infallible fixed-evidence transition keeps the existing charge coupled to its preheld
+account/charge anchor or built storage, changes `poisoned` only from `false` to
 `true`, increments the checked `poison_event_count`, and retains the first inert Baozi-owned
 `AccountPoisonEvidence`. That evidence contains only fixed codes/ordinals and owns no allocation,
 external object, callback, function pointer, vtable, or fallible destructor. Further uncertain
@@ -376,13 +513,15 @@ handoff.
 
 Unwind containment has three distinct outcomes and cannot be summarized as panic-to-fallback:
 
-1. A single unwind caught at a trusted boundary may select the minimal fallback only after every
-   partial payload is destroyed, dependency/final-owner cleanup completes, physical leases remain
-   correctly bound or are released after deallocation, and operation live is proven zero. This case
-   publishes the pre-admitted fallback and claims no leak.
+1. A non-builder unwind caught after successful startup may continue to rich-failure or minimal-
+   fallback preparation only after every candidate/publication cleanup side is verified released,
+   dependency/final-owner cleanup completes, operation live is proven zero, and the exact
+   `StartupBaselineOwner` remains intact. A retained candidate/report builder panic instead records
+   its local fault and contains that construction side; it never publishes fallback. A startup-
+   baseline builder panic already returned a start error and created no operation.
 2. If the process survives but dependency extraction, destructor completion, backing-storage
-   deallocation, or lease/attribution release cannot be verified, Baozi deliberately keeps the
-   payload, physical lease, and operation attribution together, atomically records fixed evidence and
+   deallocation, owner-graph exactness, or lease/charge release cannot be verified, Baozi selects the
+   applicable `Contained`/`BuiltContained` disposition, atomically records fixed `F`/`R` evidence and
    latches the shared physical account poisoned under its counter lock, marks the affected operation/
    extension path poisoned, and returns a fixed typed `FinalizationContainmentError`. It publishes no
    prepared fallback, performs no optimistic refund, and makes no zero-leak claim. This error is not a
@@ -409,9 +548,11 @@ allocations from exactly one account. Derived generations inherit the input Scen
 - every `RecordBlock`, generation directory, reference table, ownership header, generation-local
   lookup/index structure, changed leaf, remap, and report is rebuilt and admitted against the same
   account, even when a current record instance contains only scalar fields;
-- operations that fail before canonical publication release new unpublished candidate storage and do
-  not alter input Scene account state; an exact prepared failure wrapper remains charged to the same
-  account, and only its handoff publishes `PublishedOutcomeEvidence`;
+- ordinary operations that fail before canonical publication and reach `Released` release new
+  unpublished candidate storage and do not alter input Scene account state; fatal containment instead
+  retains only the exact affected `SideAttributionOwner` plus its account/charge anchor or built
+  storage. An exact prepared failure wrapper remains charged to the same account, and only its handoff
+  publishes `PublishedOutcomeEvidence`;
 - sibling generations may outlive one another without transferring or recharging shared payloads;
   and
 - dropping a parent does not release storage still owned by a child.
@@ -811,7 +952,9 @@ Negative:
 | Account control adds a second deallocation protocol | Critical | account state and retained payloads use the same private generic final-owner backend with different sealed lease types; source scans permit one physical `Drop` implementation |
 | Operation attribution becomes a second physical owner | Critical | publication commits only attribution evidence; no conversion or lease-release path exists |
 | Failure outcome has no legal retained terminal state | Critical | private prepared outcome attribution, a pre-admitted terminal envelope, and exact rich-failure/minimal-fallback handoffs that alone produce `PublishedOutcomeEvidence` |
-| A caught unwind is reported as clean although storage release is uncertain | Critical | distinguish verified single-unwind cleanup from fail-closed leaked/poisoned containment; return `FinalizationContainmentError` without fallback or refund when release cannot be proved, and require process isolation for abort/double-panic/exit/OOM |
+| A retained-builder panic is downgraded to clean fallback | Critical | startup panic returns a start error with `Contained`/`BuiltContained`; later candidate/report builder panic returns fatal containment; only verified candidate cleanup with an intact `StartupBaselineOwner` may reach fallback |
+| Startup cleanup loses or invents ownership | Critical | atomically admit an exact pair, prehold every account/charge anchor, preserve every already-minted matching attribution owner, require zero retained allocator entries before attribution mint, classify `Released`/`Contained`/`BuiltContained`, and forbid rollback-time account cloning |
+| Storage, ownership, and charge failures collapse into one result | Critical | preserve local `F`/`R` events, counter-fault precedence, order-independent storage-over-ownership-over-charge severity, and side-local containment |
 | Prepared handoff can still fail or panic | Critical | preparation completes terminal classification, performs every fallible action, freezes private attribution, and proves live attribution is zero; exact handoff performs only a consuming reclassification |
 | Prepared drop claims publication or rolls back frozen attribution | Critical | exact prepared types contain no pending/live token; drop destroys unpublished aggregates and discards private attribution without naming it committed/published |
 | Generation exhaustion remains after attribution freeze | Critical | reserve `ReservedSceneGeneration` as the final fallible pre-freeze identity acquisition; later preparation failure may burn it, while prepared handoff only consumes the reserved nonce |
@@ -831,7 +974,9 @@ Negative:
 | Metric | Target | Measurement |
 | --- | --- | --- |
 | Physical uniqueness | each retained payload's Baozi-requested qualified capacity envelope, fixed shared control block, and account-control allocation is charged exactly once to its respective account or factory without claiming exact RSS | desired/actual/envelope, shared-versus-copied, factory/account-control, and parent/sibling probes |
-| Failure atomicity | verified-cleanup failures leave no allocation uncovered and publish at most exact outcome evidence; uncertain release keeps payload/lease/attribution coupled and returns typed fatal containment without fallback or refund | reserve/allocation/bind/validation/preparation/single-unwind/uncertain-cleanup fault injection |
+| Failure atomicity | verified-cleanup failures leave no allocation uncovered and publish at most exact outcome evidence; retained-builder panic or uncertain release yields exact side-local `Contained`/`BuiltContained` ownership and typed fatal containment without fallback or refund | reserve/allocation/bind/validation/preparation/startup-side/unwind fault injection |
+| Startup disposition | every failed startup resolves each side exactly once as `Released`, `Contained`, or `BuiltContained` and returns no terminal; successful startup instead owns one exact `StartupBaselineOwner`; startup assembly batches always drop normally | exact-pair/mismatch, pre-attribution zero-entry, missing-anchor, builder panic, sibling cleanup, success-baseline, and owner-count probes |
+| Cleanup evidence | Builder/Ownership first nominate without recording; after every counter-producing cleanup observation, exactly counter `F` or the candidate is recorded once; independent `R` events remain; public severity is order-independent | selection-order permutations and injected counter/extraction/destructor/release tests |
 | Poison fail-closed | all account clones expose one monotonic poison state/count/evidence; poison-first retain/share/start has zero side effects, and retain/share/start-admission-first storage stays charged but cannot pass later preparation/publication eligibility | deterministic two-order barrier tests, allocator/refcount/counter probes, clone snapshots, explicit-account reuse rejection, and no-bypass API scans |
 | Final-owner safety | concurrent clone/drop releases the lease once and only after every accounted payload/control block is deallocated | allocator-level barrier, exact-limit contention, and destructor-order tests |
 | Lineage | import, parent/child/sibling edit, postprocess, failure, and drop preserve one account plus exact input-source authority; independent same-account Scenes cannot share | account-brand/source-capability API and integration matrix |
@@ -908,14 +1053,31 @@ Negative:
   overgrant, fragmentation, and page retention are excluded from physical-account bytes; custom/
   unqualified allocators cannot claim strict conformance, and a hard process-memory claim requires an
   OS/subprocess limit.
+- Startup tests prove pair admission is exact and atomic, every account/charge anchor is preheld, and
+  rollback performs no account clone. Before side attribution mint, both sides have zero retained
+  allocator entries and containment owns no fabricated attribution. Each side resolves exactly once to `Released`, `Contained`, or
+  `BuiltContained`. A retained-builder panic always contains the panicked side and never prepares
+  fallback; a clean sibling releases independently; every start failure returns no accepted operation
+  or terminal. Successful startup instead moves the exact pair into `StartupBaselineOwner`. Canonical
+  and evidence `AssemblyBatch` values always use ordinary drop and never become containment anchors.
+- Exact-pair mismatch and `MissingFaultAnchor` nominate ownership `F` and retain their required
+  containment. Only after all counter-producing cleanup completes does the primary slot record either
+  counter `F`, when present, or the nominated candidate exactly once. Independent `R` events remain observable, and cleanup permutations
+  select storage over ownership over charge over the original cause without changing side-local
+  containment.
+- Pre-attribution `New` cleanup uses `Arc::try_unique`; failure returns and retains the original owner
+  coupled to its typed attribution and account/charge anchor, nominates ownership `F` for two-phase
+  primary selection, and performs no
+  destructor or `R`. `Inherited` cleanup permits ordinary sharing. Clean lease release occurs exactly
+  once; underflow retains an armed no-retry guard, while release panic permanently retains its
+  account/charge witness without another release attempt.
 - Allocation, construction, bind, validation, and publication-preparation failures with verified
   cleanup leave no uncovered allocation, committed canonical output from the failed candidate,
-  leaked charge, partial rich outcome, or modified input Scene account state. A caught single unwind
-  may publish the pre-admitted `PublishedOutcomeEvidence` fallback only after storage deallocation,
-  dependency cleanup, lease ordering, and zero operation-live attribution are proved. If the process
-  survives but any release proof is unavailable, tests require payload, lease, and operation
-  attribution to remain coupled, the shared physical account latch/count/evidence to update under the
-  counter lock, the operation/extension path to become poisoned, and a typed
+  leaked charge, partial rich outcome, or modified input Scene account state. After successful
+  startup, a non-builder unwind may publish the pre-admitted `PublishedOutcomeEvidence` fallback only
+  after candidate/publication cleanup is verified, dependency cleanup completes, operation-live
+  attribution is zero, and `StartupBaselineOwner` remains exact. Otherwise
+  tests require the exact side-local containment, shared poison evidence, and a typed
   `FinalizationContainmentError` with no fallback/refund/zero-leak claim. Double panic,
   `panic = "abort"`, process exit, and OOM have only process-isolation containment.
 - A safely completed preparation completes final downgrade and returns exact `PreparedSuccess`,
@@ -931,10 +1093,11 @@ Negative:
 - Success-report, ordinary rich-failure, and minimal-fallback tests prove atomic visibility and
   independent `CommittedCanonicalOutput`/`PublishedOutcomeEvidence` values. Generation reservation
   rejection/exhaustion consumes no nonce and publishes ordinary rich failure with preserved evidence;
-  only a subsequent failure to append/validate/prepare that downgraded evidence, an invalid root,
-  equivalent integrity fault, or a caught single builder unwind whose complete cleanup is verified
-  reaches the assembly-independent minimal fallback. Uncertain cleanup instead reaches typed fatal
-  containment and is not counted as a prepared outcome.
+  only a subsequent failure to append/validate/prepare that downgraded evidence, an invalid root, or
+  equivalent non-unwind integrity fault with verified candidate cleanup and an intact
+  `StartupBaselineOwner` reaches the assembly-independent minimal fallback. Retained candidate/report
+  builder panic and uncertain cleanup instead reach typed
+  fatal containment and are not counted as prepared outcomes.
 - Minimal-fallback shape tests use checked conversion plus
   `Layout::array::<FallbackDimensionCell<D>>(dimension_count)`,
   `Layout::array::<FallbackPhaseCell<P>>(phase_count)`, ordered semantic `Layout::extend`, and
@@ -1018,6 +1181,40 @@ Negative:
   migrated in the canonical Scene cutover before the legacy reservation-transfer path is deleted.
 
 ## Amendment History
+
+### 2026-07-19: Supersede clean builder-unwind fallback with structural startup disposition
+
+- Affected headings: `Allocation and Drop Transaction`, `Prepared Publication and Terminal Outcomes`,
+  `Risks and Mitigations`, `Success Metrics`, and `Acceptance Criteria`.
+- Previous rule: the earlier 2026-07-19 amendment permitted a caught retained-builder unwind to reach
+  minimal fallback after a general verified-cleanup test. It did not define exact paired startup
+  ownership, factual per-side cleanup states, missing-owner handling, event/severity precedence,
+  assembly-batch lifetime, strict `New` uniqueness, or no-retry lease containment.
+- New rule: startup atomically admits the fallback/evidence pair and preholds every account/charge
+  anchor. Side attribution and assembly containers are created later and may be absent on early
+  containment; that path requires zero retained allocator entries and never fabricates an owner.
+  Failed startup resolves each side structurally as `Released`, `Contained`, or `BuiltContained` and
+  returns no terminal; successful startup instead creates exact `StartupBaselineOwner`. Retained-
+  builder panic always contains its affected construction side and never prepares fallback. Exact-pair mismatch and
+  `MissingFaultAnchor` nominate ownership `F`; after counter-producing cleanup completes, exactly
+  counter `F` or that candidate is recorded, never both;
+  independent `R` remains observable; and cleanup severity is storage over ownership over charge over
+  the original cause. Independent canonical/evidence assembly batches always drop normally on startup
+  failure. Post-start table cleanup is separate: `New` pre-attribution cleanup requires
+  `Arc::try_unique` and may retain its corresponding attribution/assembly batch when physical cleanup
+  is not verified, while `Inherited` permits ordinary sharing. An unverified lease release is
+  contained without retry. All of these transitions precede exact prepared wrappers, which contain no
+  rollback-capable token.
+- Compatibility impact: pre-release startup/finalization typestates, poison evidence, cleanup errors,
+  and fault-injection expectations change; no compatibility adapter or stable in-memory wire is kept.
+- Required review: exact-pair and mismatch permutations, pre-attribution zero-entry/no-fabrication,
+  missing-anchor, preheld-account/no-clone,
+  builder-panic/sibling-cleanup, counter-versus-builder `F`, independent `R`, severity-order,
+  assembly-batch drop, `New` escaped-clone versus `Inherited` sharing, lease single-release/no-retry,
+  prepared-boundary, source/API-shape, and ADR checks.
+- Rationale: a cleanup claim must follow the owners that actually remain. Treating a builder panic or
+  missing owner as clean can uncover escaped storage, while structural side disposition preserves the
+  exact charge and attribution without poisoning unrelated clean containers.
 
 ### 2026-07-19: Close fallback evidence, account poison, index terminology, and U4c evidence
 
