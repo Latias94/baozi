@@ -361,6 +361,10 @@ where
         dimension_entry(&self.dimensions, dimension).map(|entry| entry.policy)
     }
 
+    pub(crate) fn dimension_count(&self) -> usize {
+        self.dimensions.len()
+    }
+
     /// Returns the frozen operation-wide live-byte limit.
     pub const fn operation_live_byte_limit(&self) -> u64 {
         self.operation_live_byte_limit
@@ -1734,13 +1738,22 @@ where
             fallback,
             evidence,
         };
-        if let Err(cause) = self.validate_fallback_baseline(&baseline) {
-            return Err(FallbackBaselineRejection { baseline, cause });
-        }
-        if let Err(cause) = self.bind_fallback_baseline(&mut baseline) {
+        if let Err(cause) = self.try_bind_fallback_baseline(&mut baseline) {
             return Err(FallbackBaselineRejection { baseline, cause });
         }
         Ok(baseline)
+    }
+
+    #[allow(
+        dead_code,
+        reason = "crate-private until retained startup consumes the borrowed binding seam"
+    )]
+    pub(crate) fn try_bind_fallback_baseline(
+        &self,
+        baseline: &mut FallbackBatchBaseline<O, P, D>,
+    ) -> Result<(), LedgerCause<D>> {
+        self.validate_fallback_baseline(baseline)?;
+        self.bind_fallback_baseline(baseline)
     }
 
     #[allow(
@@ -1752,10 +1765,15 @@ where
         baseline: &mut FallbackBatchBaseline<O, P, D>,
     ) -> Result<(), LedgerCause<D>> {
         let state = lock(&self.state);
-        bind_typed_publication_batch(&state, &mut baseline.canonical_assembly)?;
-        bind_typed_publication_batch(&state, &mut baseline.evidence_assembly)?;
-        bind_typed_publication_batch(&state, &mut baseline.fallback)?;
-        bind_typed_publication_batch(&state, &mut baseline.evidence)
+        preflight_typed_publication_batch(&state, &baseline.canonical_assembly)?;
+        preflight_typed_publication_batch(&state, &baseline.evidence_assembly)?;
+        preflight_typed_publication_batch(&state, &baseline.fallback)?;
+        preflight_typed_publication_batch(&state, &baseline.evidence)?;
+        bind_preflighted_typed_publication_batch(&state, &mut baseline.canonical_assembly);
+        bind_preflighted_typed_publication_batch(&state, &mut baseline.evidence_assembly);
+        bind_preflighted_typed_publication_batch(&state, &mut baseline.fallback);
+        bind_preflighted_typed_publication_batch(&state, &mut baseline.evidence);
+        Ok(())
     }
 
     #[allow(
@@ -1830,8 +1848,8 @@ where
     pub(crate) fn try_bind_primary(
         &self,
         baseline: &mut FallbackBatchBaseline<O, P, D>,
-        canonical_source: Option<&mut AttributionReservationBatch<O, P, D, CanonicalOutput>>,
-        evidence_source: Option<
+        mut canonical_source: Option<&mut AttributionReservationBatch<O, P, D, CanonicalOutput>>,
+        mut evidence_source: Option<
             &mut AttributionReservationBatch<O, P, D, OutcomeEvidenceDestination>,
         >,
     ) -> Result<(), LedgerCause<D>> {
@@ -1841,23 +1859,43 @@ where
             evidence_source.as_deref(),
         )?;
         let state = lock(&self.state);
-        bind_typed_publication_batch(&state, &mut baseline.canonical_assembly)?;
-        bind_typed_publication_batch(&state, &mut baseline.evidence_assembly)?;
-        bind_typed_publication_batch(&state, &mut baseline.evidence)?;
-        if let Some(batch) = canonical_source {
-            bind_typed_publication_batch(&state, batch)?;
+        preflight_typed_publication_batch(&state, &baseline.canonical_assembly)?;
+        preflight_typed_publication_batch(&state, &baseline.evidence_assembly)?;
+        preflight_typed_publication_batch(&state, &baseline.evidence)?;
+        if let Some(batch) = canonical_source.as_deref() {
+            preflight_typed_publication_batch(&state, batch)?;
         }
-        if let Some(batch) = evidence_source {
-            bind_typed_publication_batch(&state, batch)?;
+        if let Some(batch) = evidence_source.as_deref() {
+            preflight_typed_publication_batch(&state, batch)?;
+        }
+        bind_preflighted_typed_publication_batch(&state, &mut baseline.canonical_assembly);
+        bind_preflighted_typed_publication_batch(&state, &mut baseline.evidence_assembly);
+        bind_preflighted_typed_publication_batch(&state, &mut baseline.evidence);
+        if let Some(batch) = canonical_source.as_deref_mut() {
+            bind_preflighted_typed_publication_batch(&state, batch);
+        }
+        if let Some(batch) = evidence_source.as_deref_mut() {
+            bind_preflighted_typed_publication_batch(&state, batch);
+        }
+        drop(state);
+
+        if let Some(source) = canonical_source {
+            baseline.canonical_assembly.absorb_proven(source);
+        }
+        baseline
+            .evidence_assembly
+            .absorb_proven(&mut baseline.evidence);
+        if let Some(source) = evidence_source {
+            baseline.evidence_assembly.absorb_proven(source);
         }
         Ok(())
     }
 
     /// Consumes a primary batch graph only after [`Self::try_bind_primary`] has completed.
     ///
-    /// This step deliberately performs no owner-defined `P::Ord` or `D::Ord` calls. Callers can
-    /// therefore contain an ordering panic while they still own the storage coupled to these
-    /// batches, then invoke this consuming transition only after binding succeeds.
+    /// Binding and source absorption already completed while the caller retained the coupled
+    /// physical owner. This step performs only field moves and can therefore consume the graph
+    /// without opening a storage-before-attribution unwind window.
     #[allow(
         dead_code,
         reason = "crate-private until the U4 canonical consumers switch atomically"
@@ -1869,18 +1907,13 @@ where
         evidence_source: Option<AttributionReservationBatch<O, P, D, OutcomeEvidenceDestination>>,
     ) -> TypedFreezeProof<O, P, D> {
         let FallbackBatchBaseline {
-            mut canonical_assembly,
-            mut evidence_assembly,
+            canonical_assembly,
+            evidence_assembly,
             fallback,
-            mut evidence,
+            evidence: _,
         } = baseline;
-        if let Some(mut source) = canonical_source {
-            canonical_assembly.absorb_proven(&mut source);
-        }
-        evidence_assembly.absorb_proven(&mut evidence);
-        if let Some(mut source) = evidence_source {
-            evidence_assembly.absorb_proven(&mut source);
-        }
+        drop(canonical_source);
+        drop(evidence_source);
         TypedFreezeProof {
             canonical: canonical_assembly,
             evidence: evidence_assembly,
@@ -2311,10 +2344,10 @@ where
         Arc::ptr_eq(&self.owner, owner)
     }
 
-    fn bind_publication_positions(
-        &mut self,
+    fn publication_positions(
+        &self,
         state: &LedgerState<P, D>,
-    ) -> Result<(), LedgerCause<D>> {
+    ) -> Result<(usize, usize), LedgerCause<D>> {
         if !self.active {
             return Err(LedgerCause::InactiveReservation);
         }
@@ -2332,9 +2365,15 @@ where
         if state.phase_states.get(phase_position).is_none() {
             return Err(LedgerCause::FinalSnapshotShapeMismatch);
         }
+        Ok((dimension_position, phase_position))
+    }
+
+    fn bind_publication_positions(&mut self, state: &LedgerState<P, D>) {
+        let (dimension_position, phase_position) = self
+            .publication_positions(state)
+            .unwrap_or_else(|_| panic!("preflighted publication position became invalid"));
         self.dimension_position = dimension_position;
         self.phase_position = phase_position;
-        Ok(())
     }
 
     fn release(&mut self) {
@@ -2532,6 +2571,450 @@ where
     }
 }
 
+const STARTUP_ACCOUNT_SHARE_STEP_COUNT: usize = 4;
+
+/// One retained allocation attribution that startup must be able to reserve.
+///
+/// The phase remains part of the qualified value even though the current frozen policy has no
+/// phase-specific limit. That keeps startup qualification ready for a future phase-qualified
+/// `LedgerLimits<P, D>` without weakening today's dimension and operation-wide checks.
+#[allow(
+    dead_code,
+    reason = "crate-private until retained startup consumes the pure qualification proof"
+)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct StartupRetainedAttribution<P, D> {
+    phase: P,
+    dimension: D,
+    bytes: u64,
+}
+
+#[allow(
+    dead_code,
+    reason = "crate-private until retained startup consumes the pure qualification proof"
+)]
+impl<P, D> StartupRetainedAttribution<P, D> {
+    pub(crate) const fn new(phase: P, dimension: D, bytes: u64) -> Self {
+        Self {
+            phase,
+            dimension,
+            bytes,
+        }
+    }
+
+    pub(crate) fn into_parts(self) -> (P, D, u64) {
+        (self.phase, self.dimension, self.bytes)
+    }
+}
+
+/// One linear attempted-and-consumed work step paired with one startup account share.
+#[allow(
+    dead_code,
+    reason = "crate-private until retained startup consumes the pure qualification proof"
+)]
+pub(crate) struct StartupAccountShareStep<D> {
+    charges: [(D, u64); 2],
+}
+
+#[allow(
+    dead_code,
+    reason = "crate-private until retained startup consumes the pure qualification proof"
+)]
+impl<D> StartupAccountShareStep<D> {
+    pub(crate) fn into_charges(self) -> [(D, u64); 2] {
+        self.charges
+    }
+}
+
+/// The exact linear work steps consumed by retained startup's four account shares.
+///
+/// The fixed step count is defined only by this envelope. Qualification and execution both consume
+/// these stored steps, so adding or removing an account share cannot silently drift from the pure
+/// ledger proof.
+#[allow(
+    dead_code,
+    reason = "crate-private until retained startup consumes the pure qualification proof"
+)]
+pub(crate) struct StartupAccountShareEnvelope<D> {
+    steps: [StartupAccountShareStep<D>; STARTUP_ACCOUNT_SHARE_STEP_COUNT],
+}
+
+#[allow(
+    dead_code,
+    reason = "crate-private until retained startup consumes the pure qualification proof"
+)]
+impl<D: Copy> StartupAccountShareEnvelope<D> {
+    pub(crate) const fn four_identical(charges: [(D, u64); 2]) -> Self {
+        Self {
+            steps: [
+                StartupAccountShareStep { charges },
+                StartupAccountShareStep { charges },
+                StartupAccountShareStep { charges },
+                StartupAccountShareStep { charges },
+            ],
+        }
+    }
+
+    pub(crate) fn into_steps(
+        self,
+    ) -> [StartupAccountShareStep<D>; STARTUP_ACCOUNT_SHARE_STEP_COUNT] {
+        self.steps
+    }
+}
+
+/// The four destination-qualified attribution batches required by retained startup.
+#[allow(
+    dead_code,
+    reason = "crate-private until retained startup consumes the pure qualification proof"
+)]
+pub(crate) struct StartupAttributionBatchPlans<O, P, D>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+{
+    canonical_assembly: AttributionBatchPlan<O, P, D, CanonicalOutput>,
+    evidence_assembly: AttributionBatchPlan<O, P, D, OutcomeEvidenceDestination>,
+    fallback: AttributionBatchPlan<O, P, D, OutcomeEvidenceDestination>,
+    evidence: AttributionBatchPlan<O, P, D, OutcomeEvidenceDestination>,
+}
+
+#[allow(
+    dead_code,
+    reason = "crate-private until retained startup consumes the pure qualification proof"
+)]
+impl<O, P, D> StartupAttributionBatchPlans<O, P, D>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+{
+    pub(crate) const fn new(
+        canonical_assembly: AttributionBatchPlan<O, P, D, CanonicalOutput>,
+        evidence_assembly: AttributionBatchPlan<O, P, D, OutcomeEvidenceDestination>,
+        fallback: AttributionBatchPlan<O, P, D, OutcomeEvidenceDestination>,
+        evidence: AttributionBatchPlan<O, P, D, OutcomeEvidenceDestination>,
+    ) -> Self {
+        Self {
+            canonical_assembly,
+            evidence_assembly,
+            fallback,
+            evidence,
+        }
+    }
+
+    #[allow(
+        clippy::type_complexity,
+        reason = "the tuple preserves four static destinations"
+    )]
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        AttributionBatchPlan<O, P, D, CanonicalOutput>,
+        AttributionBatchPlan<O, P, D, OutcomeEvidenceDestination>,
+        AttributionBatchPlan<O, P, D, OutcomeEvidenceDestination>,
+        AttributionBatchPlan<O, P, D, OutcomeEvidenceDestination>,
+    ) {
+        (
+            self.canonical_assembly,
+            self.evidence_assembly,
+            self.fallback,
+            self.evidence,
+        )
+    }
+}
+
+/// Consuming output of one successful startup-ledger qualification.
+///
+/// This remains crate-private: outside callers cannot inspect or synthesize startup admission
+/// evidence, while the retained owner can consume the exact typed inputs without reconstructing
+/// them after crossing the side-effect boundary.
+#[allow(
+    dead_code,
+    reason = "crate-private until retained startup consumes the pure qualification proof"
+)]
+pub(crate) struct StartupLedgerPlanParts<O, P, D>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+{
+    pub(crate) batches: StartupAttributionBatchPlans<O, P, D>,
+    pub(crate) retained_attributions: [StartupRetainedAttribution<P, D>; 2],
+    pub(crate) account_shares: StartupAccountShareEnvelope<D>,
+    pub(crate) commitments: [OutputCommitment<D, OutcomeEvidenceDestination>; 2],
+}
+
+/// Sealed proof that every deterministic ledger action needed by retained startup fits policy.
+///
+/// The only constructor is `LedgerLimits::try_qualify_startup`. Qualification is read-only and
+/// allocation-free, so ordinary policy rejection happens before a ledger, coordinator, physical
+/// account admission, or allocator can observe startup.
+#[allow(
+    dead_code,
+    reason = "crate-private until retained startup consumes the pure qualification proof"
+)]
+#[must_use = "startup qualification must be consumed before crossing the side-effect boundary"]
+pub(crate) struct StartupLedgerPlan<O, P, D>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+{
+    limits: LedgerLimits<D>,
+    parts: StartupLedgerPlanParts<O, P, D>,
+}
+
+#[allow(
+    dead_code,
+    reason = "crate-private until retained startup consumes the pure qualification proof"
+)]
+impl<O, P, D> StartupLedgerPlan<O, P, D>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+{
+    pub(crate) fn into_parts(self) -> (LedgerLimits<D>, StartupLedgerPlanParts<O, P, D>) {
+        (self.limits, self.parts)
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct StartupLiveEnvelope<D> {
+    dimension: D,
+    bytes: u64,
+}
+
+impl<D> StartupLiveEnvelope<D> {
+    const fn new(dimension: D, bytes: u64) -> Self {
+        Self { dimension, bytes }
+    }
+}
+
+impl<D> LedgerLimits<D>
+where
+    D: Copy + Ord + fmt::Debug,
+{
+    /// Purely qualifies the complete deterministic ledger envelope for retained startup.
+    #[allow(
+        dead_code,
+        reason = "crate-private until retained startup consumes the pure qualification proof"
+    )]
+    pub(crate) fn try_qualify_startup<O, P>(
+        self,
+        batches: StartupAttributionBatchPlans<O, P, D>,
+        retained_attributions: [StartupRetainedAttribution<P, D>; 2],
+        account_shares: StartupAccountShareEnvelope<D>,
+        commitments: [OutputCommitment<D, OutcomeEvidenceDestination>; 2],
+    ) -> Result<StartupLedgerPlan<O, P, D>, LedgerCause<D>>
+    where
+        O: OperationOwner,
+        P: Copy + Ord,
+    {
+        let live = [
+            StartupLiveEnvelope::new(
+                batches.fallback.capacity_dimension,
+                batches.fallback.planned_bytes,
+            ),
+            StartupLiveEnvelope::new(
+                retained_attributions[0].dimension,
+                retained_attributions[0].bytes,
+            ),
+            StartupLiveEnvelope::new(
+                batches.evidence.capacity_dimension,
+                batches.evidence.planned_bytes,
+            ),
+            StartupLiveEnvelope::new(
+                retained_attributions[1].dimension,
+                retained_attributions[1].bytes,
+            ),
+            StartupLiveEnvelope::new(
+                batches.canonical_assembly.capacity_dimension,
+                batches.canonical_assembly.planned_bytes,
+            ),
+            StartupLiveEnvelope::new(
+                batches.evidence_assembly.capacity_dimension,
+                batches.evidence_assembly.planned_bytes,
+            ),
+        ];
+
+        self.validate_startup_live_envelope(&live)?;
+        self.validate_startup_account_shares(&account_shares)?;
+        self.validate_startup_outcome_commitments(commitments)?;
+
+        Ok(StartupLedgerPlan {
+            limits: self,
+            parts: StartupLedgerPlanParts {
+                batches,
+                retained_attributions,
+                account_shares,
+                commitments,
+            },
+        })
+    }
+
+    fn validate_startup_live_envelope<const N: usize>(
+        &self,
+        live: &[StartupLiveEnvelope<D>; N],
+    ) -> Result<(), LedgerCause<D>> {
+        let mut operation_live = 0_u64;
+        for (index, envelope) in live.iter().copied().enumerate() {
+            let entry = dimension_entry(&self.dimensions, envelope.dimension).ok_or(
+                LedgerCause::UnknownDimension {
+                    dimension: envelope.dimension,
+                },
+            )?;
+            let dimension_limit =
+                entry
+                    .policy
+                    .live_byte_limit
+                    .ok_or(LedgerCause::DimensionNotReservable {
+                        dimension: envelope.dimension,
+                    })?;
+            let dimension_live = live[..=index]
+                .iter()
+                .filter(|candidate| candidate.dimension == envelope.dimension)
+                .try_fold(0_u64, |bytes, candidate| {
+                    bytes
+                        .checked_add(candidate.bytes)
+                        .ok_or(LedgerCause::ArithmeticOverflow {
+                            class: CounterClass::Live,
+                            dimension: envelope.dimension,
+                        })
+                })?;
+            if dimension_live > dimension_limit {
+                return Err(LedgerCause::LimitExceeded {
+                    class: CounterClass::Live,
+                    dimension: envelope.dimension,
+                    value: dimension_live,
+                    limit: dimension_limit,
+                });
+            }
+            operation_live = operation_live.checked_add(envelope.bytes).ok_or(
+                LedgerCause::ArithmeticOverflow {
+                    class: CounterClass::Live,
+                    dimension: envelope.dimension,
+                },
+            )?;
+            if operation_live > self.operation_live_byte_limit {
+                return Err(LedgerCause::LimitExceeded {
+                    class: CounterClass::Live,
+                    dimension: envelope.dimension,
+                    value: operation_live,
+                    limit: self.operation_live_byte_limit,
+                });
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_startup_account_shares(
+        &self,
+        account_shares: &StartupAccountShareEnvelope<D>,
+    ) -> Result<(), LedgerCause<D>> {
+        let all = || {
+            account_shares
+                .steps
+                .iter()
+                .flat_map(|step| step.charges.iter())
+                .copied()
+        };
+        for (index, (dimension, _)) in all().enumerate() {
+            let entry = dimension_entry(&self.dimensions, dimension)
+                .ok_or(LedgerCause::UnknownDimension { dimension })?;
+            if all().take(index).any(|(previous, _)| previous == dimension) {
+                continue;
+            }
+
+            let attempted = all()
+                .filter(|(candidate, _)| *candidate == dimension)
+                .try_fold(0_u64, |total, (_, amount)| {
+                    total
+                        .checked_add(amount)
+                        .ok_or(LedgerCause::ArithmeticOverflow {
+                            class: CounterClass::Attempted,
+                            dimension,
+                        })
+                })?;
+            if attempted > entry.policy.attempted_limit {
+                return Err(LedgerCause::LimitExceeded {
+                    class: CounterClass::Attempted,
+                    dimension,
+                    value: attempted,
+                    limit: entry.policy.attempted_limit,
+                });
+            }
+
+            let consumed = all()
+                .filter(|(candidate, _)| *candidate == dimension)
+                .try_fold(0_u64, |total, (_, amount)| {
+                    total
+                        .checked_add(amount)
+                        .ok_or(LedgerCause::ArithmeticOverflow {
+                            class: CounterClass::Consumed,
+                            dimension,
+                        })
+                })?;
+            if consumed > attempted {
+                return Err(LedgerCause::ConsumedExceedsAttempted {
+                    dimension,
+                    consumed,
+                    attempted,
+                });
+            }
+            if consumed > entry.policy.consumed_limit {
+                return Err(LedgerCause::LimitExceeded {
+                    class: CounterClass::Consumed,
+                    dimension,
+                    value: consumed,
+                    limit: entry.policy.consumed_limit,
+                });
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_startup_outcome_commitments(
+        &self,
+        commitments: [OutputCommitment<D, OutcomeEvidenceDestination>; 2],
+    ) -> Result<(), LedgerCause<D>> {
+        for (index, commitment) in commitments.iter().copied().enumerate() {
+            let entry = dimension_entry(&self.dimensions, commitment.dimension).ok_or(
+                LedgerCause::UnknownDimension {
+                    dimension: commitment.dimension,
+                },
+            )?;
+            if commitments[..index]
+                .iter()
+                .any(|previous| previous.dimension == commitment.dimension)
+            {
+                continue;
+            }
+            let amount = commitments
+                .iter()
+                .filter(|candidate| candidate.dimension == commitment.dimension)
+                .try_fold(0_u64, |total, candidate| {
+                    total
+                        .checked_add(candidate.amount)
+                        .ok_or(LedgerCause::ArithmeticOverflow {
+                            class: CounterClass::PublishedOutcomeEvidence,
+                            dimension: commitment.dimension,
+                        })
+                })?;
+            if amount > entry.policy.published_outcome_evidence_limit {
+                return Err(LedgerCause::LimitExceeded {
+                    class: CounterClass::PublishedOutcomeEvidence,
+                    dimension: commitment.dimension,
+                    value: amount,
+                    limit: entry.policy.published_outcome_evidence_limit,
+                });
+            }
+        }
+        Ok(())
+    }
+}
+
 #[allow(
     dead_code,
     reason = "crate-private until the U4 canonical consumers switch atomically"
@@ -2617,6 +3100,20 @@ where
     P: Copy + Ord,
     D: Copy + Ord,
 {
+    pub(crate) const fn new_unbound(
+        canonical_assembly: AttributionReservationBatch<O, P, D, CanonicalOutput>,
+        evidence_assembly: AttributionReservationBatch<O, P, D, OutcomeEvidenceDestination>,
+        fallback: AttributionReservationBatch<O, P, D, OutcomeEvidenceDestination>,
+        evidence: AttributionReservationBatch<O, P, D, OutcomeEvidenceDestination>,
+    ) -> Self {
+        Self {
+            canonical_assembly,
+            evidence_assembly,
+            fallback,
+            evidence,
+        }
+    }
+
     pub(crate) fn into_parts(
         self,
     ) -> (
@@ -2633,7 +3130,19 @@ where
         )
     }
 
-    pub(crate) fn into_fallback_proof(
+    pub(crate) fn try_prepare_fallback_sources(&mut self) -> Result<(), ()> {
+        if !self
+            .evidence_assembly
+            .can_absorb_sources([Some(&self.evidence), Some(&self.fallback)])
+        {
+            return Err(());
+        }
+        self.evidence_assembly.absorb_proven(&mut self.evidence);
+        self.evidence_assembly.absorb_proven(&mut self.fallback);
+        Ok(())
+    }
+
+    pub(crate) fn finish_prepared_fallback_proof(
         self,
         ledger: Ledger<O, P, D>,
         discard_canonical: Option<AttributionReservationBatch<O, P, D, CanonicalOutput>>,
@@ -2641,12 +3150,10 @@ where
     ) -> TypedFreezeProof<O, P, D> {
         let Self {
             canonical_assembly,
-            mut evidence_assembly,
-            mut fallback,
-            mut evidence,
+            evidence_assembly,
+            fallback: _,
+            evidence: _,
         } = self;
-        evidence_assembly.absorb_proven(&mut evidence);
-        evidence_assembly.absorb_proven(&mut fallback);
         TypedFreezeProof {
             canonical: canonical_assembly,
             evidence: evidence_assembly,
@@ -2654,6 +3161,17 @@ where
             discard_evidence,
             ledger,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn into_fallback_proof(
+        mut self,
+        ledger: Ledger<O, P, D>,
+        discard_canonical: Option<AttributionReservationBatch<O, P, D, CanonicalOutput>>,
+        discard_evidence: Option<AttributionReservationBatch<O, P, D, OutcomeEvidenceDestination>>,
+    ) -> TypedFreezeProof<O, P, D> {
+        assert!(self.try_prepare_fallback_sources().is_ok());
+        self.finish_prepared_fallback_proof(ledger, discard_canonical, discard_evidence)
     }
 }
 
@@ -2724,12 +3242,10 @@ where
         &mut self,
         token: OperationAttributionReservation<O, P, D, Destination>,
     ) -> Result<(), OperationAttributionReservation<O, P, D, Destination>> {
-        if !self.has_attribution_slot()
-            || self
-                .capacity_cover
-                .as_ref()
-                .is_some_and(|cover| !token.core.is_owned_by(&cover.core.owner))
-        {
+        let Some(cover) = self.capacity_cover.as_ref() else {
+            return Err(token);
+        };
+        if !self.has_attribution_slot() || !token.core.is_owned_by(&cover.core.owner) {
             return Err(token);
         }
         self.attributions.push(token);
@@ -3895,9 +4411,9 @@ where
     dead_code,
     reason = "crate-private until the U4 canonical consumers switch atomically"
 )]
-fn bind_typed_publication_batch<O, P, D, Destination>(
+fn preflight_typed_publication_batch<O, P, D, Destination>(
     state: &LedgerState<P, D>,
-    batch: &mut AttributionReservationBatch<O, P, D, Destination>,
+    batch: &AttributionReservationBatch<O, P, D, Destination>,
 ) -> Result<(), LedgerCause<D>>
 where
     O: OperationOwner,
@@ -3905,22 +4421,48 @@ where
     D: Copy + Ord,
     Destination: PublicationDestination,
 {
-    for commitment in &mut batch.commitments {
-        let position = state
+    for commitment in &batch.commitments {
+        state
             .dimensions
             .binary_search_by_key(&commitment.dimension, |entry| entry.dimension)
             .map_err(|_| LedgerCause::UnknownDimension {
                 dimension: commitment.dimension,
             })?;
-        commitment.dimension_position = position;
     }
-    for attribution in &mut batch.attributions {
-        attribution.core.bind_publication_positions(state)?;
+    for attribution in &batch.attributions {
+        attribution.core.publication_positions(state)?;
     }
-    if let Some(capacity_cover) = &mut batch.capacity_cover {
-        capacity_cover.core.bind_publication_positions(state)?;
+    if let Some(capacity_cover) = &batch.capacity_cover {
+        capacity_cover.core.publication_positions(state)?;
     }
     Ok(())
+}
+
+#[allow(
+    dead_code,
+    reason = "crate-private until the U4 canonical consumers switch atomically"
+)]
+fn bind_preflighted_typed_publication_batch<O, P, D, Destination>(
+    state: &LedgerState<P, D>,
+    batch: &mut AttributionReservationBatch<O, P, D, Destination>,
+) where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+    Destination: PublicationDestination,
+{
+    for commitment in &mut batch.commitments {
+        commitment.dimension_position = state
+            .dimensions
+            .binary_search_by_key(&commitment.dimension, |entry| entry.dimension)
+            .unwrap_or_else(|_| panic!("preflighted commitment dimension became invalid"));
+    }
+    for attribution in &mut batch.attributions {
+        attribution.core.bind_publication_positions(state);
+    }
+    if let Some(capacity_cover) = &mut batch.capacity_cover {
+        capacity_cover.core.bind_publication_positions(state);
+    }
 }
 
 #[allow(
@@ -4154,6 +4696,7 @@ mod tests {
     enum Dimension {
         Bytes,
         Records,
+        Unknown,
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -4194,6 +4737,401 @@ mod tests {
             ],
         )
         .expect("test policy")
+    }
+
+    fn startup_limits(
+        operation_live: u64,
+        dimension_live: u64,
+        attempted: u64,
+        consumed: u64,
+        published_evidence: u64,
+    ) -> LedgerLimits<Dimension> {
+        LedgerLimits::new(
+            operation_live,
+            [
+                (
+                    Dimension::Bytes,
+                    DimensionPolicy::reservable_bytes(
+                        attempted,
+                        consumed,
+                        u64::MAX,
+                        dimension_live,
+                    )
+                    .with_published_outcome_evidence_limit(published_evidence),
+                ),
+                (
+                    Dimension::Records,
+                    DimensionPolicy::counter(attempted, consumed, u64::MAX)
+                        .with_published_outcome_evidence_limit(published_evidence),
+                ),
+            ],
+        )
+        .expect("startup test policy")
+    }
+
+    fn startup_batch_plans(
+        capacity_dimension: Dimension,
+    ) -> StartupAttributionBatchPlans<Owner, Phase, Dimension> {
+        StartupAttributionBatchPlans::new(
+            AttributionBatchPlan::try_new(Phase::Build, capacity_dimension, 2, 1)
+                .expect("canonical assembly plan"),
+            AttributionBatchPlan::try_new(Phase::Build, capacity_dimension, 2, 2)
+                .expect("evidence assembly plan"),
+            AttributionBatchPlan::try_new(Phase::Build, capacity_dimension, 1, 1)
+                .expect("fallback plan"),
+            AttributionBatchPlan::try_new(Phase::Build, capacity_dimension, 1, 1)
+                .expect("evidence plan"),
+        )
+    }
+
+    fn startup_batch_bytes(batches: &StartupAttributionBatchPlans<Owner, Phase, Dimension>) -> u64 {
+        [
+            batches.canonical_assembly.planned_bytes,
+            batches.evidence_assembly.planned_bytes,
+            batches.fallback.planned_bytes,
+            batches.evidence.planned_bytes,
+        ]
+        .into_iter()
+        .try_fold(0_u64, u64::checked_add)
+        .expect("test batch envelope")
+    }
+
+    fn startup_attributions(
+        first_dimension: Dimension,
+        second_dimension: Dimension,
+    ) -> [StartupRetainedAttribution<Phase, Dimension>; 2] {
+        [
+            StartupRetainedAttribution::new(Phase::Build, first_dimension, 3),
+            StartupRetainedAttribution::new(Phase::Build, second_dimension, 5),
+        ]
+    }
+
+    fn startup_share_charges() -> [(Dimension, u64); 2] {
+        [(Dimension::Records, 1), (Dimension::Records, 2)]
+    }
+
+    fn startup_account_shares() -> StartupAccountShareEnvelope<Dimension> {
+        StartupAccountShareEnvelope::four_identical(startup_share_charges())
+    }
+
+    fn startup_commitments(
+        first_dimension: Dimension,
+        second_dimension: Dimension,
+    ) -> [OutputCommitment<Dimension, OutcomeEvidenceDestination>; 2] {
+        [
+            OutputCommitment::new(first_dimension, 4),
+            OutputCommitment::new(second_dimension, 6),
+        ]
+    }
+
+    #[test]
+    fn frozen_dimension_count_matches_the_canonical_dimension_vocabulary() {
+        let limits = limits();
+
+        assert_eq!(limits.dimension_count(), 2);
+        assert!(limits.dimension(Dimension::Bytes).is_some());
+        assert!(limits.dimension(Dimension::Records).is_some());
+    }
+
+    #[test]
+    fn startup_qualification_preserves_the_exact_typed_envelope() {
+        let batches = startup_batch_plans(Dimension::Bytes);
+        let batch_bytes = startup_batch_bytes(&batches);
+        let retained_attributions = startup_attributions(Dimension::Bytes, Dimension::Bytes);
+        let total_live = batch_bytes.checked_add(8).expect("test live envelope");
+        let limits = startup_limits(total_live, total_live, 12, 12, 10);
+
+        let qualified = limits
+            .try_qualify_startup(
+                batches,
+                retained_attributions,
+                startup_account_shares(),
+                startup_commitments(Dimension::Records, Dimension::Records),
+            )
+            .expect("the exact startup envelope must qualify");
+        let (limits, parts) = qualified.into_parts();
+
+        assert_eq!(startup_batch_bytes(&parts.batches), batch_bytes);
+        assert_eq!(parts.retained_attributions, retained_attributions);
+        let (phase, dimension, bytes) = parts.retained_attributions[0].into_parts();
+        assert_eq!(
+            (phase, dimension, bytes),
+            (Phase::Build, Dimension::Bytes, 3)
+        );
+        let (_canonical, _evidence_assembly, _fallback, _evidence) = parts.batches.into_parts();
+        for share in parts.account_shares.into_steps() {
+            assert_eq!(share.into_charges(), startup_share_charges());
+        }
+        assert_eq!(parts.commitments[0].dimension(), Dimension::Records);
+        assert_eq!(parts.commitments[0].amount(), 4);
+        assert_eq!(parts.commitments[1].dimension(), Dimension::Records);
+        assert_eq!(parts.commitments[1].amount(), 6);
+        assert_eq!(limits.dimension_count(), 2);
+    }
+
+    #[test]
+    fn startup_live_and_observed_work_are_independent_on_the_same_dimension() {
+        let batches = startup_batch_plans(Dimension::Bytes);
+        let total_live = startup_batch_bytes(&batches)
+            .checked_add(8)
+            .expect("test live envelope");
+        let limits = startup_limits(total_live, total_live, 12, 12, 10);
+        let account_shares = StartupAccountShareEnvelope::four_identical([
+            (Dimension::Bytes, 1),
+            (Dimension::Bytes, 2),
+        ]);
+
+        assert!(
+            limits
+                .try_qualify_startup(
+                    batches,
+                    startup_attributions(Dimension::Bytes, Dimension::Bytes),
+                    account_shares,
+                    startup_commitments(Dimension::Bytes, Dimension::Bytes),
+                )
+                .is_ok(),
+            "live reservations and observed work use independent ledger counter classes"
+        );
+    }
+
+    #[test]
+    fn startup_qualification_rejects_unknown_dimensions_without_allocation() {
+        let allocations_before = test_attribution_batch_allocation_entries();
+
+        assert!(matches!(
+            startup_limits(u64::MAX, u64::MAX, u64::MAX, u64::MAX, u64::MAX).try_qualify_startup(
+                startup_batch_plans(Dimension::Unknown),
+                startup_attributions(Dimension::Bytes, Dimension::Bytes),
+                startup_account_shares(),
+                startup_commitments(Dimension::Records, Dimension::Records),
+            ),
+            Err(LedgerCause::UnknownDimension {
+                dimension: Dimension::Unknown,
+            })
+        ));
+        assert!(matches!(
+            startup_limits(u64::MAX, u64::MAX, u64::MAX, u64::MAX, u64::MAX).try_qualify_startup(
+                startup_batch_plans(Dimension::Bytes),
+                startup_attributions(Dimension::Unknown, Dimension::Bytes),
+                startup_account_shares(),
+                startup_commitments(Dimension::Records, Dimension::Records),
+            ),
+            Err(LedgerCause::UnknownDimension {
+                dimension: Dimension::Unknown,
+            })
+        ));
+        assert!(matches!(
+            startup_limits(u64::MAX, u64::MAX, u64::MAX, u64::MAX, u64::MAX).try_qualify_startup(
+                startup_batch_plans(Dimension::Bytes),
+                startup_attributions(Dimension::Bytes, Dimension::Bytes),
+                StartupAccountShareEnvelope::four_identical([
+                    (Dimension::Unknown, 1),
+                    (Dimension::Records, 2),
+                ]),
+                startup_commitments(Dimension::Records, Dimension::Records),
+            ),
+            Err(LedgerCause::UnknownDimension {
+                dimension: Dimension::Unknown,
+            })
+        ));
+        assert!(matches!(
+            startup_limits(u64::MAX, u64::MAX, u64::MAX, u64::MAX, u64::MAX).try_qualify_startup(
+                startup_batch_plans(Dimension::Bytes),
+                startup_attributions(Dimension::Bytes, Dimension::Bytes),
+                startup_account_shares(),
+                startup_commitments(Dimension::Unknown, Dimension::Records),
+            ),
+            Err(LedgerCause::UnknownDimension {
+                dimension: Dimension::Unknown,
+            })
+        ));
+
+        assert_eq!(
+            test_attribution_batch_allocation_entries(),
+            allocations_before,
+            "qualification rejection must not allocate a batch"
+        );
+    }
+
+    #[test]
+    fn startup_qualification_checks_live_dimension_and_operation_limits() {
+        let batches = startup_batch_plans(Dimension::Bytes);
+        let total_live = startup_batch_bytes(&batches)
+            .checked_add(8)
+            .expect("test live envelope");
+        let dimension_limited = startup_limits(
+            u64::MAX,
+            total_live.checked_sub(1).expect("nonzero envelope"),
+            12,
+            12,
+            10,
+        );
+        assert!(matches!(
+            dimension_limited.try_qualify_startup(
+                batches,
+                startup_attributions(Dimension::Bytes, Dimension::Bytes),
+                startup_account_shares(),
+                startup_commitments(Dimension::Records, Dimension::Records),
+            ),
+            Err(LedgerCause::LimitExceeded {
+                class: CounterClass::Live,
+                dimension: Dimension::Bytes,
+                value,
+                limit,
+            }) if value == total_live && limit == total_live - 1
+        ));
+
+        let batches = startup_batch_plans(Dimension::Bytes);
+        let operation_limited = startup_limits(
+            total_live.checked_sub(1).expect("nonzero envelope"),
+            total_live,
+            12,
+            12,
+            10,
+        );
+        assert!(matches!(
+            operation_limited.try_qualify_startup(
+                batches,
+                startup_attributions(Dimension::Bytes, Dimension::Bytes),
+                startup_account_shares(),
+                startup_commitments(Dimension::Records, Dimension::Records),
+            ),
+            Err(LedgerCause::LimitExceeded {
+                class: CounterClass::Live,
+                dimension: Dimension::Bytes,
+                value,
+                limit,
+            }) if value == total_live && limit == total_live - 1
+        ));
+
+        let non_reservable = startup_limits(u64::MAX, u64::MAX, 12, 12, 10);
+        assert!(matches!(
+            non_reservable.try_qualify_startup(
+                startup_batch_plans(Dimension::Records),
+                startup_attributions(Dimension::Bytes, Dimension::Bytes),
+                startup_account_shares(),
+                startup_commitments(Dimension::Records, Dimension::Records),
+            ),
+            Err(LedgerCause::DimensionNotReservable {
+                dimension: Dimension::Records,
+            })
+        ));
+
+        let live_overflow = startup_limits(u64::MAX, u64::MAX, 12, 12, 10);
+        assert!(matches!(
+            live_overflow.try_qualify_startup(
+                startup_batch_plans(Dimension::Bytes),
+                [
+                    StartupRetainedAttribution::new(Phase::Build, Dimension::Bytes, u64::MAX,),
+                    StartupRetainedAttribution::new(Phase::Build, Dimension::Bytes, 0),
+                ],
+                startup_account_shares(),
+                startup_commitments(Dimension::Records, Dimension::Records),
+            ),
+            Err(LedgerCause::ArithmeticOverflow {
+                class: CounterClass::Live,
+                dimension: Dimension::Bytes,
+            })
+        ));
+    }
+
+    #[test]
+    fn startup_qualification_aggregates_four_account_shares() {
+        let batches = startup_batch_plans(Dimension::Bytes);
+        let total_live = startup_batch_bytes(&batches)
+            .checked_add(8)
+            .expect("test live envelope");
+        let attempted_limited = startup_limits(total_live, total_live, 11, 11, 10);
+        assert!(matches!(
+            attempted_limited.try_qualify_startup(
+                batches,
+                startup_attributions(Dimension::Bytes, Dimension::Bytes),
+                startup_account_shares(),
+                startup_commitments(Dimension::Records, Dimension::Records),
+            ),
+            Err(LedgerCause::LimitExceeded {
+                class: CounterClass::Attempted,
+                dimension: Dimension::Records,
+                value: 12,
+                limit: 11,
+            })
+        ));
+
+        let batches = startup_batch_plans(Dimension::Bytes);
+        let consumed_limited = startup_limits(total_live, total_live, 12, 11, 10);
+        assert!(matches!(
+            consumed_limited.try_qualify_startup(
+                batches,
+                startup_attributions(Dimension::Bytes, Dimension::Bytes),
+                startup_account_shares(),
+                startup_commitments(Dimension::Records, Dimension::Records),
+            ),
+            Err(LedgerCause::LimitExceeded {
+                class: CounterClass::Consumed,
+                dimension: Dimension::Records,
+                value: 12,
+                limit: 11,
+            })
+        ));
+
+        let batches = startup_batch_plans(Dimension::Bytes);
+        let share_overflow = startup_limits(total_live, total_live, u64::MAX, u64::MAX, 10);
+        assert!(matches!(
+            share_overflow.try_qualify_startup(
+                batches,
+                startup_attributions(Dimension::Bytes, Dimension::Bytes),
+                StartupAccountShareEnvelope::four_identical([
+                    (Dimension::Records, u64::MAX),
+                    (Dimension::Records, 0),
+                ]),
+                startup_commitments(Dimension::Records, Dimension::Records),
+            ),
+            Err(LedgerCause::ArithmeticOverflow {
+                class: CounterClass::Attempted,
+                dimension: Dimension::Records,
+            })
+        ));
+    }
+
+    #[test]
+    fn startup_qualification_checked_sums_outcome_evidence_commitments() {
+        let batches = startup_batch_plans(Dimension::Bytes);
+        let total_live = startup_batch_bytes(&batches)
+            .checked_add(8)
+            .expect("test live envelope");
+        let evidence_limited = startup_limits(total_live, total_live, 12, 12, 9);
+        assert!(matches!(
+            evidence_limited.try_qualify_startup(
+                batches,
+                startup_attributions(Dimension::Bytes, Dimension::Bytes),
+                startup_account_shares(),
+                startup_commitments(Dimension::Records, Dimension::Records),
+            ),
+            Err(LedgerCause::LimitExceeded {
+                class: CounterClass::PublishedOutcomeEvidence,
+                dimension: Dimension::Records,
+                value: 10,
+                limit: 9,
+            })
+        ));
+
+        let batches = startup_batch_plans(Dimension::Bytes);
+        let overflow_limits = startup_limits(total_live, total_live, 12, 12, u64::MAX);
+        assert!(matches!(
+            overflow_limits.try_qualify_startup(
+                batches,
+                startup_attributions(Dimension::Bytes, Dimension::Bytes),
+                startup_account_shares(),
+                [
+                    OutputCommitment::new(Dimension::Records, u64::MAX),
+                    OutputCommitment::new(Dimension::Records, 1),
+                ],
+            ),
+            Err(LedgerCause::ArithmeticOverflow {
+                class: CounterClass::PublishedOutcomeEvidence,
+                dimension: Dimension::Records,
+            })
+        ));
     }
 
     #[test]
@@ -4890,6 +5828,80 @@ mod tests {
                 .committed_canonical_output(),
             3
         );
+    }
+
+    #[test]
+    fn typed_binding_preflights_every_batch_before_the_infallible_mutation_tail() {
+        let source = include_str!("ledger.rs");
+        let test_attribute = ["#[cfg(", "test)]"].concat();
+        let (production, _) = source
+            .rsplit_once(&test_attribute)
+            .expect("ledger source contains one final test module boundary");
+        let primary = production
+            .split("pub(crate) fn try_bind_primary(")
+            .nth(1)
+            .expect("typed primary binding exists")
+            .split("pub(crate) fn finish_bound_primary(")
+            .next()
+            .expect("typed primary binding boundary exists");
+        assert_eq!(
+            primary
+                .matches("preflight_typed_publication_batch(")
+                .count(),
+            5
+        );
+        assert_eq!(
+            primary
+                .matches("bind_preflighted_typed_publication_batch(")
+                .count(),
+            5
+        );
+        assert!(
+            primary
+                .rfind("preflight_typed_publication_batch(")
+                .expect("last primary preflight")
+                < primary
+                    .find("bind_preflighted_typed_publication_batch(")
+                    .expect("first primary mutation")
+        );
+
+        let fallback = production
+            .split("fn bind_fallback_baseline(")
+            .nth(1)
+            .expect("fallback binding exists")
+            .split("fn validate_fallback_baseline(")
+            .next()
+            .expect("fallback binding boundary exists");
+        assert_eq!(
+            fallback
+                .matches("preflight_typed_publication_batch(")
+                .count(),
+            4
+        );
+        assert_eq!(
+            fallback
+                .matches("bind_preflighted_typed_publication_batch(")
+                .count(),
+            4
+        );
+        assert!(
+            fallback
+                .rfind("preflight_typed_publication_batch(")
+                .expect("last fallback preflight")
+                < fallback
+                    .find("bind_preflighted_typed_publication_batch(")
+                    .expect("first fallback mutation")
+        );
+
+        let mutation = production
+            .split("fn bind_preflighted_typed_publication_batch")
+            .nth(1)
+            .expect("infallible binding helper exists")
+            .split("fn apply_typed_commitments")
+            .next()
+            .expect("infallible binding helper boundary exists");
+        assert!(!mutation.contains("Result<"));
+        assert!(!mutation.contains('?'));
     }
 
     #[test]

@@ -51,6 +51,7 @@ pub use ledger::{
 };
 pub use owner::OperationOwner;
 pub use retained::{
+    AccountPoisonEvidence, AccountPoisonReason, AccountPoisoned, FinalizationContainmentError,
     PhysicalStorageAccount, PhysicalStorageAccountCreateError, PhysicalStorageAccountFactory,
     PhysicalStorageAccountFactoryCreateError, PhysicalStorageAccountFactoryLimits,
     PhysicalStorageAccountFactorySnapshot, PhysicalStorageAccountLimits,

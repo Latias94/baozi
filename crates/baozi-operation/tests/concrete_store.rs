@@ -1,14 +1,14 @@
 use baozi_operation::{
-    BytesPlan, CancellationToken, CanonicalSequenceRef, DimensionPolicy, FinalProgress,
-    LedgerLimits, OperationControl, OperationOwner, PhysicalStorageAccount,
+    AccountPoisonReason, BytesPlan, CancellationToken, CanonicalSequenceRef, DimensionPolicy,
+    FinalProgress, LedgerLimits, OperationControl, OperationOwner, PhysicalStorageAccount,
     PhysicalStorageAccountFactory, PhysicalStorageAccountFactoryLimits,
     PhysicalStorageAccountLimits, PhysicalStorageAccountSnapshot, PreparedStoreFailureOutcome,
     PreparedStoreSuccessOutcome, ProgressPhase, ProgressUnit, PublishedStoreFailureParts,
     PublishedStoreSuccessParts, RecordPlan, RetainedStoreBatchLimits, RetainedStoreBlockTablePlan,
     RetainedStoreOperation, RetainedStorePublicationPlan, RetainedStoreSharePlan,
     RetainedStoreStartPlan, RetainedStoreWriterPlan, SequencePlan, StoreBuildFailureClass,
-    StoreFailureValidation, StoreFallbackEnvelope, StorePreparationFailureClass, StoreRuntimeError,
-    StoreSuccessValidation, Utf8Plan,
+    StoreFailureValidation, StoreFallbackEnvelope, StorePreparationFailureClass, StorePrepareError,
+    StoreRuntimeError, StoreSuccessValidation, Utf8Plan,
 };
 
 struct TestOwner;
@@ -1043,12 +1043,13 @@ fn physical_snapshots_follow_capacity_envelopes_for_sequence_bytes_and_utf8() {
 }
 
 #[test]
-fn builder_panic_is_one_way_and_only_minimal_fallback_remains() {
+fn builder_panic_is_fatal_and_cannot_publish_fallback() {
     let factory = factory(1);
     let account = account(&factory);
     let mut assembly = operation(&account)
         .try_publication_assembly(publication_plan(1, 1))
         .unwrap();
+    let before = account.snapshot();
     let error = assembly
         .try_retain_canonical_sequence(
             SequencePlan::<u32>::new(1).unwrap(),
@@ -1058,12 +1059,17 @@ fn builder_panic_is_one_way_and_only_minimal_fallback_remains() {
             },
         )
         .unwrap_err();
-    assert!(matches!(
-        error,
-        StoreRuntimeError::BuilderPanicked {
-            charge_retained: false
-        }
-    ));
+    assert!(matches!(error, StoreRuntimeError::BuilderPanicked));
+    let after = account.snapshot();
+    assert!(after.poisoned());
+    assert_eq!(
+        after
+            .first_poison_evidence()
+            .map(|evidence| evidence.reason()),
+        Some(AccountPoisonReason::RetainedBuilderPanicked)
+    );
+    assert!(after.live_retained_bytes() > before.live_retained_bytes());
+    assert!(after.live_retained_allocations() > before.live_retained_allocations());
     assert!(matches!(
         assembly.try_retain_outcome_evidence_records(
             RecordPlan::new(1, 1).unwrap(),
@@ -1072,11 +1078,14 @@ fn builder_panic_is_one_way_and_only_minimal_fallback_remains() {
         ),
         Err(StoreRuntimeError::FallbackOnly)
     ));
+    assert!(matches!(
+        assembly.prepare_minimal_fallback(),
+        Err(StorePrepareError::FinalizationContainment(cause))
+            if cause.reason() == AccountPoisonReason::RetainedBuilderPanicked
+    ));
 
-    let parts = assembly.prepare_minimal_fallback().unwrap().handoff();
-    assert_eq!(parts.fallback.value().code(), 91);
-    drop(parts);
-    assert_eq!(account.snapshot().live_retained_bytes(), 0);
+    drop(account);
+    assert_eq!(factory.snapshot().live_accounts(), 1);
 }
 
 #[test]

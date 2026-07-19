@@ -1,11 +1,18 @@
 //! Fallible physical storage accounting for retained operation allocations.
 
+#![allow(
+    clippy::result_large_err,
+    reason = "bounded poison snapshots stay inline so containment never needs a failure-path allocation"
+)]
+
 use crate::control::discard_untrusted_panic_payload;
 use crate::coordinator::{FinalProgress, OperationCoordinator};
 use crate::ledger::{
     AttributionBatchCreateError, AttributionBatchPlan, AttributionReservationBatch,
     CanonicalOutput, FallbackBatchBaseline, Ledger, LedgerCause, LedgerLimits, LedgerSnapshot,
-    OutcomeEvidenceDestination, OutputCommitment, PublicationDestination,
+    OperationAttributionReservation, OutcomeEvidenceDestination, OutputCommitment,
+    PublicationDestination, StartupAccountShareEnvelope, StartupAccountShareStep,
+    StartupAttributionBatchPlans, StartupRetainedAttribution,
 };
 use crate::{
     CapacityPlan, ControlCause, OperationControl, OperationOwner, ProgressPhase, ProgressUnit,
@@ -76,6 +83,14 @@ fn try_admit(
     charge: AdmissionCharge,
 ) -> Result<(), AdmissionError> {
     let mut counters = lock_recovering_poison(counters);
+    try_admit_locked(&mut counters, limits, charge)
+}
+
+fn try_admit_locked(
+    counters: &mut CounterState,
+    limits: CounterLimits,
+    charge: AdmissionCharge,
+) -> Result<(), AdmissionError> {
     let live_bytes = counters
         .live_bytes
         .checked_add(charge.bytes)
@@ -117,14 +132,19 @@ fn try_admit(
 
 fn release(counters: &Mutex<CounterState>, charge: AdmissionCharge) {
     let mut counters = lock_recovering_poison(counters);
+    let _released = release_locked(&mut counters, charge);
+}
+
+fn release_locked(counters: &mut CounterState, charge: AdmissionCharge) -> bool {
     let Some(live_bytes) = counters.live_bytes.checked_sub(charge.bytes) else {
-        return;
+        return false;
     };
     let Some(live_allocations) = counters.live_allocations.checked_sub(charge.allocations) else {
-        return;
+        return false;
     };
     counters.live_bytes = live_bytes;
     counters.live_allocations = live_allocations;
+    true
 }
 
 trait AdmissionOwner {
@@ -134,37 +154,111 @@ trait AdmissionOwner {
 struct AdmissionLease<O: AdmissionOwner> {
     owner: O,
     charge: AdmissionCharge,
+    armed: bool,
 }
 
 impl<O: AdmissionOwner> AdmissionLease<O> {
     const fn new(owner: O, charge: AdmissionCharge) -> Self {
-        Self { owner, charge }
+        Self {
+            owner,
+            charge,
+            armed: true,
+        }
     }
 }
 
 impl<O: AdmissionOwner> Drop for AdmissionLease<O> {
     fn drop(&mut self) {
-        self.owner.release_admission(self.charge);
+        if self.armed {
+            self.owner.release_admission(self.charge);
+        }
     }
 }
 
-struct FailClosedLease<L> {
-    lease: Option<L>,
+impl AdmissionLease<PhysicalStorageAccount> {
+    fn release_retained_admission(&mut self) -> Result<(), AccountPoisonEventWitness> {
+        let release = self.owner.release_retained_charge(self.charge);
+        if release.is_ok() {
+            self.armed = false;
+        }
+        release
+    }
 }
 
-impl<L> FailClosedLease<L> {
-    const fn new(lease: L) -> Self {
-        Self { lease: Some(lease) }
+struct RetainedLeaseGuard {
+    lease: Option<RetainedLease>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RetainedLeaseReleaseOutcome {
+    Clean,
+    ChargeReleaseUnverified(AccountPoisonEventWitness),
+}
+
+impl RetainedLeaseGuard {
+    const fn unarmed() -> Self {
+        Self { lease: None }
     }
 
-    fn get(&self) -> &L {
+    fn arm(&mut self, lease: RetainedLease) {
+        self.lease = Some(lease);
+    }
+
+    fn get(&self) -> &RetainedLease {
         match self.lease.as_ref() {
             Some(lease) => lease,
             None => unreachable_final_owner_state(),
         }
     }
 
-    fn release_after_verified_storage_drop(&mut self) {
+    fn release_after_verified_storage_drop(&mut self) -> RetainedLeaseReleaseOutcome {
+        let Some(mut lease) = self.lease.take() else {
+            return RetainedLeaseReleaseOutcome::Clean;
+        };
+        match catch_unwind(AssertUnwindSafe(|| lease.release_retained_admission())) {
+            Ok(Ok(())) => {
+                drop(lease);
+                RetainedLeaseReleaseOutcome::Clean
+            }
+            Ok(Err(poisoned)) => {
+                self.lease = Some(lease);
+                RetainedLeaseReleaseOutcome::ChargeReleaseUnverified(poisoned)
+            }
+            Err(payload) => {
+                let poisoned = record_account_poison_event(
+                    &lease.owner,
+                    AccountPoisonReason::RetainedStorageReleaseUnverified,
+                );
+                std::mem::forget(lease);
+                discard_untrusted_panic_payload(payload);
+                RetainedLeaseReleaseOutcome::ChargeReleaseUnverified(poisoned)
+            }
+        }
+    }
+}
+
+impl Drop for RetainedLeaseGuard {
+    fn drop(&mut self) {
+        if let Some(lease) = self.lease.take() {
+            std::mem::forget(lease);
+        }
+    }
+}
+
+struct FactoryControlLeaseGuard {
+    lease: Option<FactoryControlLease>,
+}
+
+impl FactoryControlLeaseGuard {
+    const fn unarmed() -> Self {
+        Self { lease: None }
+    }
+
+    fn arm(&mut self, lease: FactoryControlLease) {
+        self.lease = Some(lease);
+    }
+
+    fn release_trusted_after_verified_value_drop(&mut self) {
         let Some(lease) = self.lease.take() else {
             return;
         };
@@ -174,28 +268,73 @@ impl<L> FailClosedLease<L> {
     }
 }
 
-impl<L> Drop for FailClosedLease<L> {
+impl Drop for FactoryControlLeaseGuard {
     fn drop(&mut self) {
-        if let Some(lease) = self.lease.take() {
-            std::mem::forget(lease);
-        }
+        self.release_trusted_after_verified_value_drop();
     }
 }
 
-struct FinalOwnerInner<T, L> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FinalOwnerReleaseOutcome {
+    Clean,
+    StorageReleaseUnverified(AccountPoisonEventWitness),
+    ChargeReleaseUnverified(AccountPoisonEventWitness),
+    OwnershipUnverified(AccountPoisonEventWitness),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RetainedValueReleaseOutcome {
+    Clean,
+    NestedStorageReleaseUnverified(AccountPoisonEventWitness),
+    NestedChargeReleaseUnverified(AccountPoisonEventWitness),
+    NestedOwnershipUnverified(AccountPoisonEventWitness),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RetainedReleaseMode {
+    OrdinarySharedDrop,
+    BeforeAttribution,
+}
+
+type RetainedLease = AdmissionLease<PhysicalStorageAccount>;
+
+trait RetainedValuePolicy<T> {
+    fn observe_pre_forget(value: &T, lease: &RetainedLease) -> AccountPoisonEventWitness;
+
+    fn release(value: T, mode: RetainedReleaseMode) -> RetainedValueReleaseOutcome;
+}
+
+struct LeafRetainedPolicy;
+
+struct TableRetainedPolicy;
+
+trait FinalOwnerInnerDrop {
+    fn release_for_drop(&mut self);
+
+    #[cfg(test)]
+    fn record_share(&self);
+
+    #[cfg(test)]
+    fn share_call_count(&self) -> usize;
+}
+
+struct RetainedFinalOwnerInner<T, P> {
     value: Option<T>,
-    lease: FailClosedLease<L>,
-    observe_unverified_drop: fn(&L),
+    lease: RetainedLeaseGuard,
+    policy: PhantomData<fn() -> P>,
     #[cfg(test)]
     share_calls: AtomicUsize,
 }
 
-impl<T, L> FinalOwnerInner<T, L> {
-    const fn new(value: T, lease: L, observe_unverified_drop: fn(&L)) -> Self {
+impl<T, P> RetainedFinalOwnerInner<T, P>
+where
+    P: RetainedValuePolicy<T>,
+{
+    const fn unarmed() -> Self {
         Self {
-            value: Some(value),
-            lease: FailClosedLease::new(lease),
-            observe_unverified_drop,
+            value: None,
+            lease: RetainedLeaseGuard::unarmed(),
+            policy: PhantomData,
             #[cfg(test)]
             share_calls: AtomicUsize::new(0),
         }
@@ -208,97 +347,103 @@ impl<T, L> FinalOwnerInner<T, L> {
         }
     }
 
-    fn lease(&self) -> &L {
+    fn lease(&self) -> &RetainedLease {
         self.lease.get()
     }
-}
 
-impl<T, L> Drop for FinalOwnerInner<T, L> {
-    fn drop(&mut self) {
+    fn release_retained(&mut self, mode: RetainedReleaseMode) -> FinalOwnerReleaseOutcome {
         let value = self.value.take();
 
         #[cfg(test)]
         if take_injected_final_owner_drop_panic() {
-            (self.observe_unverified_drop)(self.lease.get());
             if let Some(value) = value {
+                let poisoned = P::observe_pre_forget(&value, self.lease.get());
                 std::mem::forget(value);
+                return FinalOwnerReleaseOutcome::StorageReleaseUnverified(poisoned);
             }
-            panic!("injected final-owner storage release failure");
+            return FinalOwnerReleaseOutcome::Clean;
         }
 
-        // Running untrusted destructors during an existing unwind could abort the process before
-        // containment runs. Retain both storage and admission in that fail-closed state.
         if std::thread::panicking() {
-            (self.observe_unverified_drop)(self.lease.get());
             if let Some(value) = value {
+                let poisoned = P::observe_pre_forget(&value, self.lease.get());
                 std::mem::forget(value);
+                return FinalOwnerReleaseOutcome::StorageReleaseUnverified(poisoned);
             }
-            return;
+            return FinalOwnerReleaseOutcome::Clean;
         }
 
         let Some(value) = value else {
-            return;
+            return FinalOwnerReleaseOutcome::Clean;
         };
 
-        match catch_unwind(AssertUnwindSafe(|| drop(value))) {
-            Ok(()) => self.lease.release_after_verified_storage_drop(),
+        match catch_unwind(AssertUnwindSafe(|| P::release(value, mode))) {
+            Ok(RetainedValueReleaseOutcome::Clean) => {
+                match self.lease.release_after_verified_storage_drop() {
+                    RetainedLeaseReleaseOutcome::Clean => FinalOwnerReleaseOutcome::Clean,
+                    RetainedLeaseReleaseOutcome::ChargeReleaseUnverified(poisoned) => {
+                        FinalOwnerReleaseOutcome::ChargeReleaseUnverified(poisoned)
+                    }
+                }
+            }
+            Ok(RetainedValueReleaseOutcome::NestedStorageReleaseUnverified(poisoned)) => {
+                let _ = self.lease.release_after_verified_storage_drop();
+                FinalOwnerReleaseOutcome::StorageReleaseUnverified(poisoned)
+            }
+            Ok(RetainedValueReleaseOutcome::NestedChargeReleaseUnverified(poisoned)) => {
+                let _ = self.lease.release_after_verified_storage_drop();
+                FinalOwnerReleaseOutcome::ChargeReleaseUnverified(poisoned)
+            }
+            Ok(RetainedValueReleaseOutcome::NestedOwnershipUnverified(poisoned)) => {
+                let _ = self.lease.release_after_verified_storage_drop();
+                FinalOwnerReleaseOutcome::OwnershipUnverified(poisoned)
+            }
             Err(payload) => {
-                (self.observe_unverified_drop)(self.lease.get());
-                // A panicking destructor cannot prove that nested storage was released. Preserve
-                // the guard's default-retain lease so physical accounting remains fail-closed.
+                let poisoned = observe_retained_payload_drop_failure(self.lease.get());
                 discard_untrusted_panic_payload(payload);
+                FinalOwnerReleaseOutcome::StorageReleaseUnverified(poisoned)
             }
         }
     }
 }
 
-/// The only final-owner extraction backend for retained storage and account control.
-struct FinalOwnerAllocation<T, L> {
-    shared: Option<Arc<FinalOwnerInner<T, L>>>,
+impl<T, P> FinalOwnerInnerDrop for RetainedFinalOwnerInner<T, P>
+where
+    P: RetainedValuePolicy<T>,
+{
+    fn release_for_drop(&mut self) {
+        let _ = self.release_retained(RetainedReleaseMode::OrdinarySharedDrop);
+    }
+
+    #[cfg(test)]
+    fn record_share(&self) {
+        self.share_calls.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[cfg(test)]
+    fn share_call_count(&self) -> usize {
+        self.share_calls.load(Ordering::Relaxed)
+    }
 }
 
-impl<T, L> FinalOwnerAllocation<T, L> {
-    fn try_new(value: T, lease: L) -> Result<Self, FinalOwnerAllocationError> {
-        Self::try_new_observed(value, lease, |_| {})
-    }
+struct FinalOwnerAllocation<I: FinalOwnerInnerDrop> {
+    shared: Option<Arc<I>>,
+}
 
-    fn try_new_observed(
-        value: T,
-        lease: L,
-        observe_unverified_drop: fn(&L),
-    ) -> Result<Self, FinalOwnerAllocationError> {
-        let inner = FinalOwnerInner::new(value, lease, observe_unverified_drop);
-
-        #[cfg(test)]
-        if take_injected_final_owner_allocation_failure() {
-            drop(inner);
-            return Err(FinalOwnerAllocationError::AllocationFailed);
-        }
-
-        let shared =
-            Arc::try_new(inner).map_err(|_| FinalOwnerAllocationError::AllocationFailed)?;
-        Ok(Self {
-            shared: Some(shared),
-        })
-    }
-
+impl<I: FinalOwnerInnerDrop> FinalOwnerAllocation<I> {
     fn checked_layout_bytes() -> Result<u64, FinalOwnerAllocationError> {
         let (layout, _) = Layout::new::<AtomicUsize>()
-            .extend(Layout::new::<FinalOwnerInner<T, L>>())
+            .extend(Layout::new::<I>())
             .map_err(|_| FinalOwnerAllocationError::AccountingOverflow)?;
         u64::try_from(layout.pad_to_align().size())
             .map_err(|_| FinalOwnerAllocationError::AccountingOverflow)
     }
 
-    #[allow(
-        dead_code,
-        reason = "the coupled retained writer will be the production authority for shared handles"
-    )]
     fn share(&self) -> Self {
         let shared = match self.shared.as_ref() {
             Some(shared) => {
                 #[cfg(test)]
-                shared.share_calls.fetch_add(1, Ordering::Relaxed);
+                shared.record_share();
                 Arc::clone(shared)
             }
             None => unreachable_final_owner_state(),
@@ -308,26 +453,6 @@ impl<T, L> FinalOwnerAllocation<T, L> {
         }
     }
 
-    fn value(&self) -> &T {
-        match self.shared.as_ref() {
-            Some(shared) => shared.value(),
-            None => unreachable_final_owner_state(),
-        }
-    }
-
-    fn value_mut(&mut self) -> Option<&mut T> {
-        let shared = self.shared.as_mut()?;
-        Arc::get_mut(shared)?.value.as_mut()
-    }
-
-    fn lease(&self) -> &L {
-        match self.shared.as_ref() {
-            Some(shared) => shared.lease(),
-            None => unreachable_final_owner_state(),
-        }
-    }
-
-    #[cfg(test)]
     fn ptr_eq(&self, other: &Self) -> bool {
         match (self.shared.as_ref(), other.shared.as_ref()) {
             (Some(left), Some(right)) => Arc::ptr_eq(left, right),
@@ -339,27 +464,142 @@ impl<T, L> FinalOwnerAllocation<T, L> {
     fn share_call_count(&self) -> usize {
         self.shared
             .as_ref()
-            .map_or(0, |shared| shared.share_calls.load(Ordering::Relaxed))
+            .map_or(0, |shared| shared.share_call_count())
     }
 
     #[cfg(test)]
-    fn allocation_identity(&self) -> *const FinalOwnerInner<T, L> {
+    fn allocation_identity(&self) -> *const I {
         self.shared.as_ref().map_or(std::ptr::null(), Arc::as_ptr)
     }
-}
 
-impl<T, L> Drop for FinalOwnerAllocation<T, L> {
-    fn drop(&mut self) {
+    fn release_for_drop(&mut self) {
         let Some(shared) = self.shared.take() else {
             return;
         };
         let Some(unique) = Arc::into_unique(shared) else {
             return;
         };
+        let mut inner = UniqueArc::into_inner(unique);
+        inner.release_for_drop();
+        drop(inner);
+    }
+}
 
-        // The qualified triomphe implementation deallocates the outer shared block before this
-        // value is returned. FinalOwnerInner is the sole contained payload-then-lease boundary.
-        drop(UniqueArc::into_inner(unique));
+impl<T, P> FinalOwnerAllocation<RetainedFinalOwnerInner<T, P>>
+where
+    P: RetainedValuePolicy<T>,
+{
+    fn value(&self) -> &T {
+        match self.shared.as_ref() {
+            Some(shared) => shared.value(),
+            None => unreachable_final_owner_state(),
+        }
+    }
+
+    fn lease(&self) -> &RetainedLease {
+        match self.shared.as_ref() {
+            Some(shared) => shared.lease(),
+            None => unreachable_final_owner_state(),
+        }
+    }
+
+    fn release(mut self) -> FinalOwnerReleaseOutcome {
+        let Some(shared) = self.shared.take() else {
+            return FinalOwnerReleaseOutcome::Clean;
+        };
+        let Some(unique) = Arc::into_unique(shared) else {
+            return FinalOwnerReleaseOutcome::Clean;
+        };
+        let mut inner = UniqueArc::into_inner(unique);
+        let outcome = inner.release_retained(RetainedReleaseMode::OrdinarySharedDrop);
+        drop(inner);
+        outcome
+    }
+
+    fn try_release_unique_before_attribution(
+        self,
+    ) -> Result<FinalOwnerReleaseOutcome, (Self, AccountPoisonEventWitness)> {
+        match self.try_release_unique_before_attribution_deferred() {
+            Ok(outcome) => Ok(outcome),
+            Err(owner) => {
+                let poisoned = record_account_poison_event(
+                    &owner.lease().owner,
+                    AccountPoisonReason::OwnershipGraphUnverified,
+                );
+                Err((owner, poisoned))
+            }
+        }
+    }
+    fn try_release_unique_before_attribution_deferred(
+        mut self,
+    ) -> Result<FinalOwnerReleaseOutcome, Self> {
+        let Some(shared) = self.shared.take() else {
+            return Ok(FinalOwnerReleaseOutcome::Clean);
+        };
+        let unique = match Arc::try_unique(shared) {
+            Ok(unique) => unique,
+            Err(shared) => {
+                self.shared = Some(shared);
+                return Err(self);
+            }
+        };
+        let mut inner = UniqueArc::into_inner(unique);
+        let outcome = inner.release_retained(RetainedReleaseMode::BeforeAttribution);
+        drop(inner);
+        Ok(outcome)
+    }
+}
+
+impl<Block>
+    FinalOwnerAllocation<
+        RetainedFinalOwnerInner<RetainedPayload<RetainedBlockTable<Block>>, TableRetainedPolicy>,
+    >
+{
+    fn table_mut_during_construction(&mut self) -> Option<&mut RetainedBlockTable<Block>> {
+        let shared = self.shared.as_mut()?;
+        let payload = Arc::get_mut(shared)?.value.as_mut()?;
+        Some(&mut payload.value)
+    }
+}
+
+struct UnarmedRetainedFinalOwner<T, P>
+where
+    P: RetainedValuePolicy<T>,
+{
+    unique: UniqueArc<RetainedFinalOwnerInner<T, P>>,
+}
+
+impl<T, P> UnarmedRetainedFinalOwner<T, P>
+where
+    P: RetainedValuePolicy<T>,
+{
+    fn try_allocate() -> Result<Self, FinalOwnerAllocationError> {
+        #[cfg(test)]
+        if take_injected_final_owner_allocation_failure() {
+            return Err(FinalOwnerAllocationError::AllocationFailed);
+        }
+
+        let unique = UniqueArc::try_new(RetainedFinalOwnerInner::unarmed())
+            .map_err(|_| FinalOwnerAllocationError::AllocationFailed)?;
+        Ok(Self { unique })
+    }
+
+    fn arm(
+        mut self,
+        value: T,
+        lease: RetainedLease,
+    ) -> FinalOwnerAllocation<RetainedFinalOwnerInner<T, P>> {
+        self.unique.lease.arm(lease);
+        self.unique.value = Some(value);
+        FinalOwnerAllocation {
+            shared: Some(self.unique.shareable()),
+        }
+    }
+}
+
+impl<I: FinalOwnerInnerDrop> Drop for FinalOwnerAllocation<I> {
+    fn drop(&mut self) {
+        self.release_for_drop();
     }
 }
 
@@ -517,6 +757,50 @@ impl PhysicalStorageAccountFactorySnapshot {
 ///
 /// Byte values are admitted charged envelopes covering declared shared and nested backing blocks,
 /// not allocator RSS, size classes, fragmentation, or page-retention measurements.
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum AccountPoisonReason {
+    /// A retained payload, backing allocation, or final owner could not prove release.
+    RetainedStorageReleaseUnverified = 1,
+    /// A retained builder unwound after admission and could have escaped storage.
+    RetainedBuilderPanicked = 2,
+    /// A coupled storage/attribution ownership graph had to be abandoned intact.
+    OwnershipGraphUnverified = 3,
+    /// Primary publication binding unwound after it could have mutated a prefix.
+    PrimaryPublicationBindingPanicked = 4,
+    /// A verified storage release found inconsistent physical accounting counters.
+    CounterInvariantViolated = 5,
+}
+
+/// Fixed, inert evidence retained for the first physical-account poison event.
+///
+/// This value owns no allocation or executable backend object and has no fallible destructor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct AccountPoisonEvidence {
+    reason: AccountPoisonReason,
+    event_ordinal: u128,
+}
+
+impl AccountPoisonEvidence {
+    const fn new(reason: AccountPoisonReason, event_ordinal: u128) -> Self {
+        Self {
+            reason,
+            event_ordinal,
+        }
+    }
+
+    /// Returns the fixed containment reason retained for the first event.
+    pub const fn reason(self) -> AccountPoisonReason {
+        self.reason
+    }
+
+    /// Returns the one-based ordinal of the retained event.
+    pub const fn event_ordinal(self) -> u128 {
+        self.event_ordinal
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PhysicalStorageAccountSnapshot {
     live_retained_bytes: u64,
@@ -525,6 +809,11 @@ pub struct PhysicalStorageAccountSnapshot {
     peak_retained_allocations: u64,
     total_admitted_retained_bytes: u64,
     total_admitted_retained_allocations: u64,
+    poisoned: bool,
+    poison_event_count: u128,
+    poison_event_count_exact: bool,
+    poison_event_domain_valid: bool,
+    first_poison_evidence: Option<AccountPoisonEvidence>,
 }
 
 impl PhysicalStorageAccountSnapshot {
@@ -550,6 +839,136 @@ impl PhysicalStorageAccountSnapshot {
 
     pub const fn total_admitted_retained_allocations(self) -> u64 {
         self.total_admitted_retained_allocations
+    }
+
+    /// Returns whether this account is permanently quarantined.
+    pub const fn poisoned(self) -> bool {
+        self.poisoned
+    }
+
+    /// Returns the representable number of recorded unverified containment events.
+    ///
+    /// The value is exact while [`Self::poison_event_count_exact`] is `true`. A false exactness
+    /// flag is an internal-invariant failure, not a saturating success state.
+    pub const fn poison_event_count(self) -> u128 {
+        self.poison_event_count
+    }
+
+    /// Returns whether the event count remains exactly representable.
+    pub const fn poison_event_count_exact(self) -> bool {
+        self.poison_event_count_exact
+    }
+
+    /// Returns whether every recorded event fits the account's pre-admitted containment domain.
+    ///
+    /// This flag is monotonic: after an unexpected event exceeds the admitted owner/operation
+    /// domain, the account remains invalid even though later events continue to be counted.
+    pub const fn poison_event_domain_valid(self) -> bool {
+        self.poison_event_domain_valid
+    }
+
+    /// Returns the fixed evidence retained for the first poison event.
+    pub const fn first_poison_evidence(self) -> Option<AccountPoisonEvidence> {
+        self.first_poison_evidence
+    }
+}
+
+/// Typed rejection returned when a physical account has been quarantined.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AccountPoisoned {
+    snapshot: PhysicalStorageAccountSnapshot,
+}
+
+impl AccountPoisoned {
+    const fn new(snapshot: PhysicalStorageAccountSnapshot) -> Self {
+        Self { snapshot }
+    }
+
+    /// Returns the atomic account snapshot observed by the rejected transition.
+    pub const fn snapshot(self) -> PhysicalStorageAccountSnapshot {
+        self.snapshot
+    }
+}
+
+fn quarantined_account_reason(account: AccountPoisoned) -> AccountPoisonReason {
+    account.snapshot().first_poison_evidence().map_or(
+        AccountPoisonReason::OwnershipGraphUnverified,
+        AccountPoisonEvidence::reason,
+    )
+}
+
+impl fmt::Display for AccountPoisoned {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "physical storage account is poisoned after {} containment event(s)",
+            self.snapshot.poison_event_count
+        )
+    }
+}
+
+impl std::error::Error for AccountPoisoned {}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AccountPoisonEventWitness {
+    poisoned: AccountPoisoned,
+    reason: AccountPoisonReason,
+}
+
+impl AccountPoisonEventWitness {
+    const fn new(poisoned: AccountPoisoned, reason: AccountPoisonReason) -> Self {
+        Self { poisoned, reason }
+    }
+}
+
+fn record_account_poison_event(
+    account: &PhysicalStorageAccount,
+    reason: AccountPoisonReason,
+) -> AccountPoisonEventWitness {
+    AccountPoisonEventWitness::new(account.record_poison(reason), reason)
+}
+
+/// Fatal finalization containment after the account became quarantined.
+///
+/// This error certifies that no exact prepared publication, minimal fallback, or handoff owner was
+/// produced. All uncertain retained ownership remains contained fail-closed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FinalizationContainmentError {
+    account: AccountPoisoned,
+    reason: AccountPoisonReason,
+}
+
+impl FinalizationContainmentError {
+    const fn new(account: AccountPoisoned, reason: AccountPoisonReason) -> Self {
+        Self { account, reason }
+    }
+
+    fn from_quarantine(account: AccountPoisoned) -> Self {
+        let reason = quarantined_account_reason(account);
+        Self::new(account, reason)
+    }
+
+    /// Returns the fixed account quarantine evidence observed at final eligibility.
+    pub const fn account_poisoned(self) -> AccountPoisoned {
+        self.account
+    }
+
+    /// Returns the event class that forced this finalization to fail closed.
+    pub const fn reason(self) -> AccountPoisonReason {
+        self.reason
+    }
+}
+
+impl fmt::Display for FinalizationContainmentError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .write_str("retained publication finalization was contained after account quarantine")
+    }
+}
+
+impl std::error::Error for FinalizationContainmentError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.account)
     }
 }
 
@@ -656,22 +1075,20 @@ impl PhysicalStorageAccountFactory {
         &self,
         limits: PhysicalStorageAccountLimits,
     ) -> Result<PhysicalStorageAccount, PhysicalStorageAccountCreateError> {
-        type FactoryControlLease = AdmissionLease<Arc<FactoryState>>;
-        let bytes =
-            FinalOwnerAllocation::<AccountState, FactoryControlLease>::checked_layout_bytes()
-                .map_err(map_account_control_final_owner_error)?;
+        let bytes = FinalOwnerAllocation::<AccountControlInner>::checked_layout_bytes()
+            .map_err(map_account_control_final_owner_error)?;
         let charge = AdmissionCharge::new(bytes, 1);
         let owner = Arc::clone(&self.state);
         try_admit(&owner.counters, owner.limits.counter_limits(), charge)
             .map_err(map_factory_admission_error)?;
         let lease = AdmissionLease::new(owner, charge);
+        let unarmed = UnarmedAccountControlFinalOwner::try_allocate()
+            .map_err(map_account_control_final_owner_error)?;
         let state = AccountState {
             limits,
-            counters: Mutex::new(CounterState::default()),
-            unverified_drop_count: AtomicU64::new(0),
+            linear: Mutex::new(AccountLinearState::default()),
         };
-        let inner = FinalOwnerAllocation::try_new(state, lease)
-            .map_err(map_account_control_final_owner_error)?;
+        let inner = unarmed.arm(state, lease);
         Ok(PhysicalStorageAccount { inner })
     }
 }
@@ -721,8 +1138,670 @@ fn map_account_control_final_owner_error(
 
 struct AccountState {
     limits: PhysicalStorageAccountLimits,
-    counters: Mutex<CounterState>,
-    unverified_drop_count: AtomicU64,
+    linear: Mutex<AccountLinearState>,
+}
+
+type FactoryControlLease = AdmissionLease<Arc<FactoryState>>;
+
+struct AccountControlInner {
+    value: Option<AccountState>,
+    lease: FactoryControlLeaseGuard,
+    #[cfg(test)]
+    share_calls: AtomicUsize,
+}
+
+impl AccountControlInner {
+    const fn unarmed() -> Self {
+        Self {
+            value: None,
+            lease: FactoryControlLeaseGuard::unarmed(),
+            #[cfg(test)]
+            share_calls: AtomicUsize::new(0),
+        }
+    }
+
+    fn value(&self) -> &AccountState {
+        match self.value.as_ref() {
+            Some(value) => value,
+            None => unreachable_final_owner_state(),
+        }
+    }
+
+    fn release_trusted(&mut self) {
+        let Some(value) = self.value.take() else {
+            return;
+        };
+        {
+            let _value = value;
+        }
+        self.lease.release_trusted_after_verified_value_drop();
+    }
+}
+
+impl FinalOwnerInnerDrop for AccountControlInner {
+    fn release_for_drop(&mut self) {
+        self.release_trusted();
+    }
+
+    #[cfg(test)]
+    fn record_share(&self) {
+        self.share_calls.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[cfg(test)]
+    fn share_call_count(&self) -> usize {
+        self.share_calls.load(Ordering::Relaxed)
+    }
+}
+
+impl FinalOwnerAllocation<AccountControlInner> {
+    fn value(&self) -> &AccountState {
+        match self.shared.as_ref() {
+            Some(shared) => shared.value(),
+            None => unreachable_final_owner_state(),
+        }
+    }
+}
+
+struct UnarmedAccountControlFinalOwner {
+    unique: UniqueArc<AccountControlInner>,
+}
+
+impl UnarmedAccountControlFinalOwner {
+    fn try_allocate() -> Result<Self, FinalOwnerAllocationError> {
+        #[cfg(test)]
+        if take_injected_final_owner_allocation_failure() {
+            return Err(FinalOwnerAllocationError::AllocationFailed);
+        }
+
+        let unique = UniqueArc::try_new(AccountControlInner::unarmed())
+            .map_err(|_| FinalOwnerAllocationError::AllocationFailed)?;
+        Ok(Self { unique })
+    }
+
+    fn arm(
+        mut self,
+        value: AccountState,
+        lease: FactoryControlLease,
+    ) -> FinalOwnerAllocation<AccountControlInner> {
+        self.unique.lease.arm(lease);
+        self.unique.value = Some(value);
+        FinalOwnerAllocation {
+            shared: Some(self.unique.shareable()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum AccountPoisonState {
+    #[default]
+    Healthy,
+    Poisoned {
+        event_count: u128,
+        count_exact: bool,
+        event_domain_valid: bool,
+        first_evidence: AccountPoisonEvidence,
+    },
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct AccountLinearState {
+    counters: CounterState,
+    admitted_retained_owners: u64,
+    admitted_account_actions: u64,
+    poison: AccountPoisonState,
+}
+
+impl AccountLinearState {
+    fn snapshot(self) -> PhysicalStorageAccountSnapshot {
+        let (
+            poisoned,
+            poison_event_count,
+            poison_event_count_exact,
+            poison_event_domain_valid,
+            first_poison_evidence,
+        ) = match self.poison {
+            AccountPoisonState::Healthy => (false, 0, true, true, None),
+            AccountPoisonState::Poisoned {
+                event_count,
+                count_exact,
+                event_domain_valid,
+                first_evidence,
+            } => (
+                true,
+                event_count,
+                count_exact,
+                event_domain_valid,
+                Some(first_evidence),
+            ),
+        };
+        PhysicalStorageAccountSnapshot {
+            live_retained_bytes: self.counters.live_bytes,
+            live_retained_allocations: self.counters.live_allocations,
+            peak_retained_bytes: self.counters.peak_bytes,
+            peak_retained_allocations: self.counters.peak_allocations,
+            total_admitted_retained_bytes: self.counters.total_admitted_bytes,
+            total_admitted_retained_allocations: self.counters.total_admitted_allocations,
+            poisoned,
+            poison_event_count,
+            poison_event_count_exact,
+            poison_event_domain_valid,
+            first_poison_evidence,
+        }
+    }
+
+    fn poisoned_error(&self) -> Option<AccountPoisoned> {
+        matches!(self.poison, AccountPoisonState::Poisoned { .. })
+            .then(|| AccountPoisoned::new((*self).snapshot()))
+    }
+
+    fn record_poison(&mut self, reason: AccountPoisonReason) -> AccountPoisoned {
+        let event_limit =
+            u128::from(self.admitted_retained_owners) + u128::from(self.admitted_account_actions);
+        self.poison = match self.poison {
+            AccountPoisonState::Healthy => AccountPoisonState::Poisoned {
+                event_count: 1,
+                count_exact: true,
+                event_domain_valid: event_limit >= 1,
+                first_evidence: AccountPoisonEvidence::new(reason, 1),
+            },
+            AccountPoisonState::Poisoned {
+                event_count,
+                count_exact,
+                event_domain_valid,
+                first_evidence,
+            } => match event_count.checked_add(1) {
+                Some(next) => AccountPoisonState::Poisoned {
+                    event_count: next,
+                    count_exact,
+                    event_domain_valid: event_domain_valid && next <= event_limit,
+                    first_evidence,
+                },
+                None => AccountPoisonState::Poisoned {
+                    event_count,
+                    count_exact: false,
+                    event_domain_valid: false,
+                    first_evidence,
+                },
+            },
+        };
+        AccountPoisoned::new(self.snapshot())
+    }
+}
+
+/// A single-use account-branded admission for work that does not add a physical charge.
+///
+/// The account lock admits the attempt and is released before generic ledger, ordering, allocator,
+/// or reference-count code runs. Poison racing after admission therefore has explicit
+/// admission-first semantics without exposing a reusable eligibility permit.
+struct PendingAccountActionAdmission<'account> {
+    account: &'account PhysicalStorageAccount,
+}
+
+/// Single-use proof that final publication eligibility linearized before account poison.
+///
+/// The proof is minted only while holding the account's linear-state lock. A later poison event is
+/// therefore ordered after this capability and cannot invalidate the already admitted pure
+/// preparation tail.
+#[must_use = "publication eligibility must be consumed by the exact freeze handoff"]
+struct PublicationEligibility {
+    private: (),
+}
+
+/// Holds the account linearization lock while a caller performs non-mutating table/source
+/// preflight.  The action admission is minted only after that preflight succeeds, so invalid
+/// structure cannot consume account admission-domain evidence and a concurrent poison cannot slip
+/// between the health check and the action transition.
+struct AccountPreflightGuard<'account> {
+    account: &'account PhysicalStorageAccount,
+    state: MutexGuard<'account, AccountLinearState>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AccountActionAdmissionError {
+    AccountPoisoned(AccountPoisoned),
+    AccountingOverflow,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PublicationOpenAdmissionError {
+    Account(AccountActionAdmissionError),
+    MembershipExhausted,
+}
+
+impl PendingAccountActionAdmission<'_> {
+    fn account(&self) -> &PhysicalStorageAccount {
+        self.account
+    }
+
+    fn run<T>(self, action: impl FnOnce(&PhysicalStorageAccount) -> T) -> T {
+        action(self.account)
+    }
+
+    fn complete(self) {
+        let Self { account: _ } = self;
+    }
+}
+
+impl<'account> AccountPreflightGuard<'account> {
+    fn admit_action(
+        self,
+    ) -> Result<PendingAccountActionAdmission<'account>, AccountActionAdmissionError> {
+        let mut this = self;
+        let admitted = this
+            .state
+            .admitted_account_actions
+            .checked_add(1)
+            .ok_or(AccountActionAdmissionError::AccountingOverflow)?;
+        this.state.admitted_account_actions = admitted;
+        drop(this.state);
+        Ok(PendingAccountActionAdmission {
+            account: this.account,
+        })
+    }
+}
+
+struct PendingRetainedAdmission<'account> {
+    account: &'account PhysicalStorageAccount,
+    charge: AdmissionCharge,
+    state: PendingRetainedAdmissionState,
+    /// The one account handle reserved for commit, rollback, or containment.
+    ///
+    /// This owner is created at admission time, after its share work has been admitted.  No
+    /// failure path is allowed to acquire another account clone.
+    lease_owner: Option<PhysicalStorageAccount>,
+}
+
+enum PendingRetainedAdmissionState {
+    Pending,
+    RolledBack,
+    Transferred,
+    Contained(RetainedLeaseGuard),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PendingRetainedRollback {
+    Clean,
+    FaultRecorded(AccountPoisoned),
+    ChargeReleaseUnverified(AccountPoisoned),
+    /// The admission linearized before an external poison event; its charge is not refundable.
+    ChargeRetainedAfterPoison(AccountPoisoned),
+}
+
+impl PendingRetainedRollback {
+    const fn charge_released(self) -> bool {
+        matches!(self, Self::Clean | Self::FaultRecorded(_))
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RetainedAdmissionPairPlan {
+    first: AdmissionCharge,
+    second: AdmissionCharge,
+    aggregate: AdmissionCharge,
+}
+
+impl RetainedAdmissionPairPlan {
+    fn try_new(
+        first: AdmissionCharge,
+        second: AdmissionCharge,
+    ) -> Result<Self, RetainedAllocationError> {
+        let bytes = first
+            .bytes
+            .checked_add(second.bytes)
+            .ok_or(RetainedAllocationError::AccountingOverflow)?;
+        let allocations = first
+            .allocations
+            .checked_add(second.allocations)
+            .ok_or(RetainedAllocationError::AccountingOverflow)?;
+        Ok(Self {
+            first,
+            second,
+            aggregate: AdmissionCharge::new(bytes, allocations),
+        })
+    }
+}
+
+struct PendingStartRetainedAdmissions<'account> {
+    account: &'account PhysicalStorageAccount,
+    plan: RetainedAdmissionPairPlan,
+    state: PendingStartRetainedAdmissionState,
+    containment_owner: Option<PhysicalStorageAccount>,
+}
+
+enum PendingStartRetainedAdmissionState {
+    Pending,
+    Transferred,
+    RolledBack,
+    Contained(RetainedLeaseGuard),
+}
+
+struct StartupAdmissionGuard<'account> {
+    account: &'account PhysicalStorageAccount,
+    admissions: Option<PendingStartRetainedAdmissions<'account>>,
+    evidence_account: Option<PhysicalStorageAccount>,
+    fallback_lease_owner: Option<PhysicalStorageAccount>,
+    evidence_lease_owner: Option<PhysicalStorageAccount>,
+}
+
+/// One pre-admitted clone/retained-handle pair for an ordinary retained writer.
+///
+/// The capability is consumed exactly once by the physical admission that performs the matching
+/// account/allocation clone.  Keeping it typed prevents rollback paths from manufacturing a new
+/// account handle after the work boundary.
+struct AdmittedRetainedShareWork {
+    private: (),
+}
+
+struct StartupAccountOwners {
+    fallback_account: PhysicalStorageAccount,
+    evidence_account: PhysicalStorageAccount,
+    fallback_lease_owner: PhysicalStorageAccount,
+    evidence_lease_owner: PhysicalStorageAccount,
+}
+
+struct StartupRemainingOwners {
+    evidence_account: PhysicalStorageAccount,
+    fallback_lease_owner: PhysicalStorageAccount,
+    evidence_lease_owner: PhysicalStorageAccount,
+}
+
+impl AdmittedRetainedShareWork {
+    fn consume_account(self, account: &PhysicalStorageAccount) -> PhysicalStorageAccount {
+        let Self { private: () } = self;
+        PhysicalStorageAccount {
+            inner: account.inner.share(),
+        }
+    }
+
+    fn consume_allocation<T>(self, allocation: &RetainedAllocation<T>) -> RetainedAllocation<T> {
+        let Self { private: () } = self;
+        allocation.share_after_admitted_work()
+    }
+}
+
+impl<'account> StartupAdmissionGuard<'account> {
+    fn new(
+        account: &'account PhysicalStorageAccount,
+        admissions: PendingStartRetainedAdmissions<'account>,
+        owners: StartupRemainingOwners,
+    ) -> Self {
+        let StartupRemainingOwners {
+            evidence_account,
+            fallback_lease_owner,
+            evidence_lease_owner,
+        } = owners;
+        Self {
+            account,
+            admissions: Some(admissions),
+            evidence_account: Some(evidence_account),
+            fallback_lease_owner: Some(fallback_lease_owner),
+            evidence_lease_owner: Some(evidence_lease_owner),
+        }
+    }
+
+    fn rollback(mut self, outer_reason: Option<AccountPoisonReason>) -> PendingRetainedRollback {
+        match self.admissions.take() {
+            Some(admissions) => admissions.rollback_with_fault(outer_reason),
+            None => unreachable_final_owner_state(),
+        }
+    }
+}
+
+impl Drop for StartupAdmissionGuard<'_> {
+    fn drop(&mut self) {
+        let Some(admissions) = self.admissions.take() else {
+            return;
+        };
+        let _ = admissions.rollback_with_fault(Some(AccountPoisonReason::OwnershipGraphUnverified));
+    }
+}
+
+impl<'account> PendingStartRetainedAdmissions<'account> {
+    fn into_parts(
+        mut self,
+        second_account: PhysicalStorageAccount,
+        first_lease_owner: PhysicalStorageAccount,
+        second_lease_owner: PhysicalStorageAccount,
+    ) -> (
+        PhysicalStorageAccount,
+        PendingRetainedAdmission<'account>,
+        PhysicalStorageAccount,
+        PendingRetainedAdmission<'account>,
+    ) {
+        let first_account = match self.containment_owner.take() {
+            Some(owner) => owner,
+            None => unreachable_final_owner_state(),
+        };
+        self.state = PendingStartRetainedAdmissionState::Transferred;
+        (
+            first_account,
+            PendingRetainedAdmission {
+                account: self.account,
+                charge: self.plan.first,
+                state: PendingRetainedAdmissionState::Pending,
+                lease_owner: Some(first_lease_owner),
+            },
+            second_account,
+            PendingRetainedAdmission {
+                account: self.account,
+                charge: self.plan.second,
+                state: PendingRetainedAdmissionState::Pending,
+                lease_owner: Some(second_lease_owner),
+            },
+        )
+    }
+
+    fn rollback(self) -> bool {
+        self.rollback_with_fault(None).charge_released()
+    }
+
+    fn transfer_to_containment(mut self) -> RetainedLeaseGuard {
+        let owner = self.containment_owner.take();
+        self.state = PendingStartRetainedAdmissionState::Transferred;
+        RetainedLeaseGuard {
+            lease: owner.map(|owner| AdmissionLease::new(owner, self.plan.aggregate)),
+        }
+    }
+
+    fn rollback_with_fault(
+        mut self,
+        outer_reason: Option<AccountPoisonReason>,
+    ) -> PendingRetainedRollback {
+        let rollback = self
+            .account
+            .rollback_pending_retained_charge(self.plan.aggregate, outer_reason);
+        match rollback {
+            PendingRetainedRollback::ChargeReleaseUnverified(_)
+            | PendingRetainedRollback::ChargeRetainedAfterPoison(_) => {
+                self.state = PendingStartRetainedAdmissionState::Contained(RetainedLeaseGuard {
+                    lease: self
+                        .containment_owner
+                        .take()
+                        .map(|owner| AdmissionLease::new(owner, self.plan.aggregate)),
+                });
+            }
+            PendingRetainedRollback::Clean | PendingRetainedRollback::FaultRecorded(_) => {
+                self.state = PendingStartRetainedAdmissionState::RolledBack;
+                drop(self.containment_owner.take());
+            }
+        }
+        rollback
+    }
+}
+
+impl Drop for PendingStartRetainedAdmissions<'_> {
+    fn drop(&mut self) {
+        if matches!(&self.state, PendingStartRetainedAdmissionState::Pending) {
+            let rollback = self
+                .account
+                .rollback_pending_retained_charge(self.plan.aggregate, None);
+            if matches!(
+                rollback,
+                PendingRetainedRollback::ChargeReleaseUnverified(_)
+                    | PendingRetainedRollback::ChargeRetainedAfterPoison(_)
+            ) {
+                self.state = PendingStartRetainedAdmissionState::Contained(RetainedLeaseGuard {
+                    lease: self
+                        .containment_owner
+                        .take()
+                        .map(|owner| AdmissionLease::new(owner, self.plan.aggregate)),
+                });
+            } else {
+                self.state = PendingStartRetainedAdmissionState::RolledBack;
+                drop(self.containment_owner.take());
+            }
+        }
+    }
+}
+
+impl PendingRetainedAdmission<'_> {
+    const fn is_pending(&self) -> bool {
+        matches!(&self.state, PendingRetainedAdmissionState::Pending)
+    }
+
+    fn take_lease_owner(&mut self) -> PhysicalStorageAccount {
+        if !self.is_pending() {
+            unreachable_final_owner_state();
+        }
+        match self.lease_owner.take() {
+            Some(owner) => owner,
+            None => unreachable_final_owner_state(),
+        }
+    }
+
+    fn commit_lease(&mut self) -> AdmissionLease<PhysicalStorageAccount> {
+        let owner = self.take_lease_owner();
+        self.state = PendingRetainedAdmissionState::Transferred;
+        AdmissionLease::new(owner, self.charge)
+    }
+
+    fn rollback(self) -> bool {
+        self.rollback_with_fault(None).charge_released()
+    }
+
+    fn rollback_with_fault(
+        mut self,
+        outer_reason: Option<AccountPoisonReason>,
+    ) -> PendingRetainedRollback {
+        self.rollback_in_place(outer_reason)
+    }
+
+    fn rollback_in_place(
+        &mut self,
+        outer_reason: Option<AccountPoisonReason>,
+    ) -> PendingRetainedRollback {
+        if !self.is_pending() {
+            unreachable_final_owner_state();
+        }
+        let owner = self.take_lease_owner();
+        let rollback = self
+            .account
+            .rollback_pending_retained_charge(self.charge, outer_reason);
+        match rollback {
+            PendingRetainedRollback::ChargeReleaseUnverified(_)
+            | PendingRetainedRollback::ChargeRetainedAfterPoison(_) => {
+                self.state = PendingRetainedAdmissionState::Contained(RetainedLeaseGuard {
+                    lease: Some(AdmissionLease::new(owner, self.charge)),
+                });
+            }
+            PendingRetainedRollback::Clean | PendingRetainedRollback::FaultRecorded(_) => {
+                self.state = PendingRetainedAdmissionState::RolledBack;
+                drop(owner);
+            }
+        }
+        rollback
+    }
+
+    /// Releases a startup charge without manufacturing a new account handle. On an unverified
+    /// release the admission remains pending so the enclosing side owner can move its pre-held
+    /// account witness and typed batch into one containment object.
+    fn rollback_startup_in_place(
+        &mut self,
+        outer_reason: Option<AccountPoisonReason>,
+    ) -> PendingRetainedRollback {
+        if !self.is_pending() {
+            unreachable_final_owner_state();
+        }
+        let rollback = self
+            .account
+            .rollback_pending_retained_charge(self.charge, outer_reason);
+        if matches!(
+            rollback,
+            PendingRetainedRollback::Clean | PendingRetainedRollback::FaultRecorded(_)
+        ) {
+            self.state = PendingRetainedAdmissionState::RolledBack;
+        }
+        rollback
+    }
+
+    fn mark_released_by_aggregate_rollback(&mut self) {
+        if self.is_pending() {
+            self.state = PendingRetainedAdmissionState::RolledBack;
+        }
+    }
+
+    fn transfer_to_aggregate_containment(&mut self) -> PhysicalStorageAccount {
+        if self.is_pending() {
+            let owner = self.take_lease_owner();
+            self.state = PendingRetainedAdmissionState::Transferred;
+            return owner;
+        }
+        unreachable_final_owner_state();
+    }
+
+    fn contain_with_lease_owner(&mut self) -> RetainedLeaseGuard {
+        if !self.is_pending() {
+            unreachable_final_owner_state();
+        }
+        let owner = self.take_lease_owner();
+        self.state = PendingRetainedAdmissionState::Transferred;
+        RetainedLeaseGuard {
+            lease: Some(AdmissionLease::new(owner, self.charge)),
+        }
+    }
+
+    fn take_contained_lease(&mut self) -> Option<RetainedLeaseGuard> {
+        let state = std::mem::replace(&mut self.state, PendingRetainedAdmissionState::Transferred);
+        match state {
+            PendingRetainedAdmissionState::Contained(lease) => Some(lease),
+            state => {
+                self.state = state;
+                None
+            }
+        }
+    }
+}
+
+impl Drop for PendingRetainedAdmission<'_> {
+    fn drop(&mut self) {
+        if self.is_pending() {
+            let owner = match self.lease_owner.take() {
+                Some(owner) => owner,
+                None => {
+                    let _ = self
+                        .account
+                        .record_poison(AccountPoisonReason::OwnershipGraphUnverified);
+                    return;
+                }
+            };
+            let rollback = self
+                .account
+                .rollback_pending_retained_charge(self.charge, None);
+            if matches!(
+                rollback,
+                PendingRetainedRollback::ChargeReleaseUnverified(_)
+                    | PendingRetainedRollback::ChargeRetainedAfterPoison(_)
+            ) {
+                self.state = PendingRetainedAdmissionState::Contained(RetainedLeaseGuard {
+                    lease: Some(AdmissionLease::new(owner, self.charge)),
+                });
+            } else {
+                self.state = PendingRetainedAdmissionState::RolledBack;
+                drop(owner);
+            }
+        }
+    }
 }
 
 /// One opaque physical owner for retained allocations across operation and Scene generations.
@@ -760,7 +1839,7 @@ struct AccountState {
 /// use baozi_operation::RetainedSuccessClosureProof;
 /// ```
 pub struct PhysicalStorageAccount {
-    inner: FinalOwnerAllocation<AccountState, AdmissionLease<Arc<FactoryState>>>,
+    inner: FinalOwnerAllocation<AccountControlInner>,
 }
 
 impl PhysicalStorageAccount {
@@ -769,55 +1848,243 @@ impl PhysicalStorageAccount {
     }
 
     pub fn snapshot(&self) -> PhysicalStorageAccountSnapshot {
-        let counters = *lock_recovering_poison(&self.inner.value().counters);
-        PhysicalStorageAccountSnapshot {
-            live_retained_bytes: counters.live_bytes,
-            live_retained_allocations: counters.live_allocations,
-            peak_retained_bytes: counters.peak_bytes,
-            peak_retained_allocations: counters.peak_allocations,
-            total_admitted_retained_bytes: counters.total_admitted_bytes,
-            total_admitted_retained_allocations: counters.total_admitted_allocations,
-        }
+        (*lock_recovering_poison(&self.inner.value().linear)).snapshot()
     }
 
     pub fn is_same_account(&self, other: &Self) -> bool {
-        self.inner.ptr_eq_for_account(&other.inner)
+        self.inner.ptr_eq(&other.inner)
     }
 
-    fn unverified_drop_count(&self) -> Option<u64> {
-        let count = self
-            .inner
-            .value()
-            .unverified_drop_count
-            .load(Ordering::Acquire);
-        (count != u64::MAX).then_some(count)
+    fn unverified_drop_count(&self) -> Option<u128> {
+        Some(self.snapshot().poison_event_count())
     }
 
     #[cfg(test)]
-    pub(crate) fn test_unverified_drop_count(&self) -> Option<u64> {
+    pub(crate) fn test_unverified_drop_count(&self) -> Option<u128> {
         self.unverified_drop_count()
     }
 
-    fn record_unverified_drop(&self) {
-        let _ = self.inner.value().unverified_drop_count.fetch_update(
-            Ordering::AcqRel,
-            Ordering::Acquire,
-            |count| count.checked_add(1),
-        );
+    #[cfg(test)]
+    pub(super) fn test_record_poison(&self, reason: AccountPoisonReason) -> AccountPoisoned {
+        self.record_poison(reason)
     }
 
-    /// Shares the opaque account handle inside the retained owner implementation.
-    ///
-    /// Domain callers must eventually reach this only through the coupled operation-attribution
-    /// writer; the raw physical handle share is deliberately module-private.
-    #[allow(
-        dead_code,
-        reason = "the coupled retained writer will gate this physical handle share"
-    )]
-    fn share_after_admission(&self) -> Self {
-        Self {
-            inner: self.inner.share(),
+    fn record_poison(&self, reason: AccountPoisonReason) -> AccountPoisoned {
+        lock_recovering_poison(&self.inner.value().linear).record_poison(reason)
+    }
+
+    fn try_admit_account_action(
+        &self,
+    ) -> Result<PendingAccountActionAdmission<'_>, AccountActionAdmissionError> {
+        self.try_begin_account_preflight()
+            .map_err(AccountActionAdmissionError::AccountPoisoned)?
+            .admit_action()
+    }
+
+    fn try_begin_account_preflight(&self) -> Result<AccountPreflightGuard<'_>, AccountPoisoned> {
+        let state = lock_recovering_poison(&self.inner.value().linear);
+        if let Some(error) = state.poisoned_error() {
+            return Err(error);
         }
+        Ok(AccountPreflightGuard {
+            account: self,
+            state,
+        })
+    }
+
+    fn try_admit_publication_open(
+        &self,
+    ) -> Result<(PendingAccountActionAdmission<'_>, RetainedSetId), PublicationOpenAdmissionError>
+    {
+        let mut state = lock_recovering_poison(&self.inner.value().linear);
+        if let Some(error) = state.poisoned_error() {
+            return Err(PublicationOpenAdmissionError::Account(
+                AccountActionAdmissionError::AccountPoisoned(error),
+            ));
+        }
+        let admitted_account_actions = state.admitted_account_actions.checked_add(1).ok_or(
+            PublicationOpenAdmissionError::Account(AccountActionAdmissionError::AccountingOverflow),
+        )?;
+        let set_id =
+            try_next_retained_set_id().ok_or(PublicationOpenAdmissionError::MembershipExhausted)?;
+        state.admitted_account_actions = admitted_account_actions;
+        Ok((PendingAccountActionAdmission { account: self }, set_id))
+    }
+
+    fn try_publication_eligibility(&self) -> Result<PublicationEligibility, AccountPoisoned> {
+        let state = lock_recovering_poison(&self.inner.value().linear);
+        if let Some(error) = state.poisoned_error() {
+            return Err(error);
+        }
+        let eligibility = PublicationEligibility { private: () };
+        drop(state);
+        #[cfg(test)]
+        pause_after_publication_eligibility();
+        Ok(eligibility)
+    }
+
+    fn try_admit_retained(
+        &self,
+        charge: AdmissionCharge,
+        admitted_share_work: AdmittedRetainedShareWork,
+    ) -> Result<PendingRetainedAdmission<'_>, RetainedAllocationError> {
+        let mut state = lock_recovering_poison(&self.inner.value().linear);
+        if let Some(error) = state.poisoned_error() {
+            return Err(RetainedAllocationError::AccountPoisoned(error));
+        }
+        let admitted_retained_owners = state
+            .admitted_retained_owners
+            .checked_add(1)
+            .ok_or(RetainedAllocationError::AccountingOverflow)?;
+        let limits = self.limits().counter_limits();
+        try_admit_locked(&mut state.counters, limits, charge)
+            .map_err(map_retained_admission_error)?;
+        state.admitted_retained_owners = admitted_retained_owners;
+        drop(state);
+        let lease_owner = admitted_share_work.consume_account(self);
+        Ok(PendingRetainedAdmission {
+            account: self,
+            charge,
+            state: PendingRetainedAdmissionState::Pending,
+            lease_owner: Some(lease_owner),
+        })
+    }
+
+    /// Completes a retained admission whose account poison/action gate already linearized.
+    ///
+    /// The second account lock only commits the physical counter; it deliberately does not
+    /// re-check the poison latch.  The single-use action capability is the proof that this retain
+    /// began before any later poison transition.
+    fn try_admit_retained_after_action(
+        &self,
+        action: PendingAccountActionAdmission<'_>,
+        charge: AdmissionCharge,
+        admitted_share_work: AdmittedRetainedShareWork,
+    ) -> Result<PendingRetainedAdmission<'_>, RetainedAllocationError> {
+        if !action.account().is_same_account(self) {
+            let poisoned = self.record_poison(AccountPoisonReason::OwnershipGraphUnverified);
+            return Err(RetainedAllocationError::AccountPoisoned(poisoned));
+        }
+        let mut state = lock_recovering_poison(&self.inner.value().linear);
+        let admitted_retained_owners = state
+            .admitted_retained_owners
+            .checked_add(1)
+            .ok_or(RetainedAllocationError::AccountingOverflow)?;
+        let limits = self.limits().counter_limits();
+        try_admit_locked(&mut state.counters, limits, charge)
+            .map_err(map_retained_admission_error)?;
+        state.admitted_retained_owners = admitted_retained_owners;
+        drop(state);
+        let lease_owner = admitted_share_work.consume_account(self);
+        action.complete();
+        Ok(PendingRetainedAdmission {
+            account: self,
+            charge,
+            state: PendingRetainedAdmissionState::Pending,
+            lease_owner: Some(lease_owner),
+        })
+    }
+
+    fn try_admit_start_retained_pair_after_action(
+        &self,
+        action: PendingAccountActionAdmission<'_>,
+        plan: RetainedAdmissionPairPlan,
+        owners: StartupAccountOwners,
+    ) -> Result<(PendingStartRetainedAdmissions<'_>, StartupRemainingOwners), RetainedAllocationError>
+    {
+        if !action.account().is_same_account(self) {
+            let poisoned = self.record_poison(AccountPoisonReason::OwnershipGraphUnverified);
+            return Err(RetainedAllocationError::AccountPoisoned(poisoned));
+        }
+        let mut state = lock_recovering_poison(&self.inner.value().linear);
+        let admitted_retained_owners = state
+            .admitted_retained_owners
+            .checked_add(2)
+            .ok_or(RetainedAllocationError::AccountingOverflow)?;
+        let limits = self.limits().counter_limits();
+        try_admit_locked(&mut state.counters, limits, plan.aggregate)
+            .map_err(map_retained_admission_error)?;
+        state.admitted_retained_owners = admitted_retained_owners;
+        drop(state);
+        let StartupAccountOwners {
+            fallback_account,
+            evidence_account,
+            fallback_lease_owner,
+            evidence_lease_owner,
+        } = owners;
+        action.complete();
+        Ok((
+            PendingStartRetainedAdmissions {
+                account: self,
+                plan,
+                state: PendingStartRetainedAdmissionState::Pending,
+                containment_owner: Some(fallback_account),
+            },
+            StartupRemainingOwners {
+                evidence_account,
+                fallback_lease_owner,
+                evidence_lease_owner,
+            },
+        ))
+    }
+
+    fn release_retained_charge(
+        &self,
+        charge: AdmissionCharge,
+    ) -> Result<(), AccountPoisonEventWitness> {
+        let mut state = lock_recovering_poison(&self.inner.value().linear);
+        if !release_locked(&mut state.counters, charge) {
+            let reason = AccountPoisonReason::CounterInvariantViolated;
+            return Err(AccountPoisonEventWitness::new(
+                state.record_poison(reason),
+                reason,
+            ));
+        }
+        Ok(())
+    }
+
+    fn rollback_pending_retained_charge(
+        &self,
+        charge: AdmissionCharge,
+        outer_reason: Option<AccountPoisonReason>,
+    ) -> PendingRetainedRollback {
+        let mut state = lock_recovering_poison(&self.inner.value().linear);
+        if state.poisoned_error().is_some() {
+            let poisoned = match outer_reason {
+                Some(reason) => state.record_poison(reason),
+                None => match state.poisoned_error() {
+                    Some(poisoned) => poisoned,
+                    None => unreachable_final_owner_state(),
+                },
+            };
+            return PendingRetainedRollback::ChargeRetainedAfterPoison(poisoned);
+        }
+        if !release_locked(&mut state.counters, charge) {
+            return PendingRetainedRollback::ChargeReleaseUnverified(
+                state.record_poison(AccountPoisonReason::CounterInvariantViolated),
+            );
+        }
+        match outer_reason {
+            Some(reason) => PendingRetainedRollback::FaultRecorded(state.record_poison(reason)),
+            None => PendingRetainedRollback::Clean,
+        }
+    }
+
+    #[cfg(test)]
+    fn share_after_test_admission(&self) -> Result<Self, RetainedAllocationError> {
+        let admission = self
+            .try_admit_account_action()
+            .map_err(|cause| match cause {
+                AccountActionAdmissionError::AccountPoisoned(cause) => {
+                    RetainedAllocationError::AccountPoisoned(cause)
+                }
+                AccountActionAdmissionError::AccountingOverflow => {
+                    RetainedAllocationError::AccountingOverflow
+                }
+            })?;
+        Ok(admission.run(|account| Self {
+            inner: account.inner.share(),
+        }))
     }
 
     #[cfg(test)]
@@ -838,67 +2105,82 @@ impl PhysicalStorageAccount {
     )]
     fn try_retain_with_admitted_handle<T>(
         &self,
-        owner: PhysicalStorageAccount,
+        admission: &mut PendingRetainedAdmission<'_>,
         plan: RetainedAllocationPlan,
         build: impl FnOnce() -> Result<T, RetainedBuildFailureCode>,
     ) -> Result<RetainedAllocation<T>, RetainedAllocationError>
     where
         T: Send + Sync + 'static,
     {
-        let charge = self.checked_retained_charge::<T>(plan)?;
-        self.try_retain_with_admitted_charge(owner, charge, build)
+        let charge = match self.checked_retained_charge::<T>(plan) {
+            Ok(charge) => charge,
+            Err(cause) => {
+                return Err(map_pending_rollback_or(
+                    admission.rollback_in_place(None),
+                    cause,
+                ));
+            }
+        };
+        if charge != admission.charge || !self.is_same_account(admission.account) {
+            return Err(map_faulted_pending_rollback(admission.rollback_in_place(
+                Some(AccountPoisonReason::OwnershipGraphUnverified),
+            )));
+        }
+        self.try_retain_with_admitted_charge::<T, LeafRetainedPolicy>(admission, build)
     }
 
-    fn try_retain_with_admitted_charge<T>(
+    fn try_retain_with_admitted_charge<T, P>(
         &self,
-        owner: PhysicalStorageAccount,
-        charge: AdmissionCharge,
+        admission: &mut PendingRetainedAdmission<'_>,
         build: impl FnOnce() -> Result<T, RetainedBuildFailureCode>,
-    ) -> Result<RetainedAllocation<T>, RetainedAllocationError>
+    ) -> Result<PolicyRetainedAllocation<T, P>, RetainedAllocationError>
     where
         T: Send + Sync + 'static,
+        P: RetainedValuePolicy<RetainedPayload<T>>,
     {
-        try_admit(
-            &owner.inner.value().counters,
-            owner.limits().counter_limits(),
-            charge,
-        )
-        .map_err(map_retained_admission_error)?;
-        let lease = AdmissionLease::new(owner, charge);
-
+        if !self.is_same_account(admission.account) {
+            return Err(map_faulted_pending_rollback(admission.rollback_in_place(
+                Some(AccountPoisonReason::OwnershipGraphUnverified),
+            )));
+        }
+        let unarmed = match UnarmedRetainedFinalOwner::<RetainedPayload<T>, P>::try_allocate() {
+            Ok(unarmed) => unarmed,
+            Err(error) => {
+                return Err(map_pending_rollback_or(
+                    admission.rollback_in_place(None),
+                    map_retained_final_owner_error(error),
+                ));
+            }
+        };
         let value = match catch_unwind(AssertUnwindSafe(build)) {
             Ok(Ok(value)) => value,
             Ok(Err(error)) => {
-                drop(lease);
-                return Err(RetainedAllocationError::Build(error));
+                drop(unarmed);
+                return Err(map_pending_rollback_or(
+                    admission.rollback_in_place(None),
+                    RetainedAllocationError::Build(error),
+                ));
             }
             Err(payload) => {
-                discard_untrusted_panic_payload(payload);
                 // A builder can move nested storage into a side owner before panicking. The panic
                 // payload type cannot prove that storage was released, even for `&str` or
                 // `String`, so both physical admission and the caller's operation attribution
                 // remain fail-closed.
-                std::mem::forget(lease);
-                return Err(RetainedAllocationError::BuilderPanicked {
-                    charge_retained: true,
-                });
+                let _ = admission
+                    .account
+                    .record_poison(AccountPoisonReason::RetainedBuilderPanicked);
+                let contained = admission.contain_with_lease_owner();
+                drop(unarmed);
+                drop(contained);
+                discard_untrusted_panic_payload(payload);
+                return Err(RetainedAllocationError::BuilderPanicked);
             }
         };
+        let charge = admission.charge;
+        let lease = admission.commit_lease();
         let payload = RetainedPayload { value, charge };
-        let unverified_before = self.unverified_drop_count();
-        let inner = match FinalOwnerAllocation::try_new_observed(
-            payload,
-            lease,
-            observe_retained_payload_drop_failure,
-        ) {
-            Ok(inner) => inner,
-            Err(error) => {
-                let charge_retained = unverified_before.is_none()
-                    || self.unverified_drop_count() != unverified_before;
-                return Err(map_retained_final_owner_error(error, charge_retained));
-            }
-        };
-        Ok(RetainedAllocation {
+        let inner = unarmed.arm(payload, lease);
+        Ok(PolicyRetainedAllocation {
             inner,
             membership: None,
         })
@@ -913,7 +2195,10 @@ impl PhysicalStorageAccount {
     where
         T: Send + Sync + 'static,
     {
-        self.try_retain_with_admitted_handle(self.share_after_admission(), plan, build)
+        let charge = self.checked_retained_charge::<T>(plan)?;
+        let mut admission =
+            self.try_admit_retained(charge, AdmittedRetainedShareWork { private: () })?;
+        self.try_retain_with_admitted_handle(&mut admission, plan, build)
     }
 
     #[allow(
@@ -924,6 +2209,25 @@ impl PhysicalStorageAccount {
         &self,
         plan: RetainedAllocationPlan,
     ) -> Result<AdmissionCharge, RetainedAllocationError> {
+        self.checked_retained_charge_with_policy::<T, LeafRetainedPolicy>(plan)
+    }
+
+    fn checked_retained_table_charge<Block>(
+        &self,
+        plan: RetainedAllocationPlan,
+    ) -> Result<AdmissionCharge, RetainedAllocationError> {
+        self.checked_retained_charge_with_policy::<RetainedBlockTable<Block>, TableRetainedPolicy>(
+            plan,
+        )
+    }
+
+    fn checked_retained_charge_with_policy<T, P>(
+        &self,
+        plan: RetainedAllocationPlan,
+    ) -> Result<AdmissionCharge, RetainedAllocationError>
+    where
+        P: RetainedValuePolicy<RetainedPayload<T>>,
+    {
         let inline_bytes = size_of::<RetainedPayload<T>>();
         if inline_bytes > MAX_RETAINED_INLINE_BYTES {
             return Err(RetainedAllocationError::InlinePayloadTooLarge {
@@ -932,10 +2236,10 @@ impl PhysicalStorageAccount {
             });
         }
 
-        type RetainedLease = AdmissionLease<PhysicalStorageAccount>;
-        let outer_bytes =
-            FinalOwnerAllocation::<RetainedPayload<T>, RetainedLease>::checked_layout_bytes()
-                .map_err(|error| map_retained_final_owner_error(error, false))?;
+        let outer_bytes = FinalOwnerAllocation::<
+            RetainedFinalOwnerInner<RetainedPayload<T>, P>,
+        >::checked_layout_bytes()
+        .map_err(map_retained_final_owner_error)?;
         let bytes = outer_bytes
             .checked_add(plan.nested_bytes)
             .ok_or(RetainedAllocationError::AccountingOverflow)?;
@@ -946,13 +2250,67 @@ impl PhysicalStorageAccount {
     }
 }
 
-fn observe_retained_payload_drop_failure(lease: &AdmissionLease<PhysicalStorageAccount>) {
-    lease.owner.record_unverified_drop();
+fn observe_retained_payload_drop_failure(
+    lease: &AdmissionLease<PhysicalStorageAccount>,
+) -> AccountPoisonEventWitness {
+    record_account_poison_event(
+        &lease.owner,
+        AccountPoisonReason::RetainedStorageReleaseUnverified,
+    )
+}
+
+impl<T> RetainedValuePolicy<RetainedPayload<T>> for LeafRetainedPolicy {
+    fn observe_pre_forget(
+        _payload: &RetainedPayload<T>,
+        lease: &RetainedLease,
+    ) -> AccountPoisonEventWitness {
+        observe_retained_payload_drop_failure(lease)
+    }
+
+    fn release(
+        payload: RetainedPayload<T>,
+        _mode: RetainedReleaseMode,
+    ) -> RetainedValueReleaseOutcome {
+        drop(payload);
+        RetainedValueReleaseOutcome::Clean
+    }
+}
+
+fn observe_retained_table_pre_forget<Block>(
+    payload: &RetainedPayload<RetainedBlockTable<Block>>,
+    lease: &RetainedLease,
+) -> AccountPoisonEventWitness {
+    let poisoned = observe_retained_payload_drop_failure(lease);
+    for member in &payload.value.members {
+        let _ = member
+            .allocation
+            .account()
+            .record_poison(AccountPoisonReason::RetainedStorageReleaseUnverified);
+    }
+    poisoned
+}
+
+impl<Block> RetainedValuePolicy<RetainedPayload<RetainedBlockTable<Block>>>
+    for TableRetainedPolicy
+{
+    fn observe_pre_forget(
+        payload: &RetainedPayload<RetainedBlockTable<Block>>,
+        lease: &RetainedLease,
+    ) -> AccountPoisonEventWitness {
+        observe_retained_table_pre_forget(payload, lease)
+    }
+
+    fn release(
+        payload: RetainedPayload<RetainedBlockTable<Block>>,
+        mode: RetainedReleaseMode,
+    ) -> RetainedValueReleaseOutcome {
+        release_retained_table_payload(payload, mode)
+    }
 }
 
 impl AdmissionOwner for PhysicalStorageAccount {
     fn release_admission(&self, charge: AdmissionCharge) {
-        release(&self.inner.value().counters, charge);
+        let _ = self.release_retained_charge(charge);
     }
 }
 
@@ -966,12 +2324,15 @@ impl fmt::Debug for PhysicalStorageAccount {
     }
 }
 
-impl<T, L> FinalOwnerAllocation<T, L> {
-    fn ptr_eq_for_account(&self, other: &Self) -> bool {
-        match (self.shared.as_ref(), other.shared.as_ref()) {
-            (Some(left), Some(right)) => Arc::ptr_eq(left, right),
-            _ => false,
-        }
+fn record_poison_on_forgotten_edges<const N: usize>(
+    accounts: [Option<&PhysicalStorageAccount>; N],
+    reason: AccountPoisonReason,
+) {
+    for account in accounts {
+        let Some(account) = account else {
+            continue;
+        };
+        let _ = account.record_poison(reason);
     }
 }
 
@@ -1102,12 +2463,51 @@ struct RetainedMembership {
 }
 
 /// One module-private immutable payload whose physical charge follows its final shared owner.
-pub(crate) struct RetainedAllocation<T> {
-    inner: FinalOwnerAllocation<RetainedPayload<T>, AdmissionLease<PhysicalStorageAccount>>,
+struct PolicyRetainedAllocation<T, P>
+where
+    P: RetainedValuePolicy<RetainedPayload<T>>,
+{
+    inner: FinalOwnerAllocation<RetainedFinalOwnerInner<RetainedPayload<T>, P>>,
     membership: Option<RetainedMembership>,
 }
 
-impl<T> RetainedAllocation<T> {
+type RetainedAllocation<T> = PolicyRetainedAllocation<T, LeafRetainedPolicy>;
+
+type RetainedTableAllocation<Block> =
+    PolicyRetainedAllocation<RetainedBlockTable<Block>, TableRetainedPolicy>;
+
+impl<T, P> PolicyRetainedAllocation<T, P>
+where
+    P: RetainedValuePolicy<RetainedPayload<T>>,
+{
+    fn release_storage(self) -> FinalOwnerReleaseOutcome {
+        let Self {
+            inner,
+            membership: _,
+        } = self;
+        inner.release()
+    }
+
+    fn try_release_unique_before_attribution(
+        self,
+    ) -> Result<FinalOwnerReleaseOutcome, (Self, AccountPoisonEventWitness)> {
+        let Self { inner, membership } = self;
+        match inner.try_release_unique_before_attribution() {
+            Ok(outcome) => Ok(outcome),
+            Err((inner, poisoned)) => Err((Self { inner, membership }, poisoned)),
+        }
+    }
+
+    fn try_release_unique_before_attribution_deferred(
+        self,
+    ) -> Result<FinalOwnerReleaseOutcome, Self> {
+        let Self { inner, membership } = self;
+        match inner.try_release_unique_before_attribution_deferred() {
+            Ok(outcome) => Ok(outcome),
+            Err(inner) => Err(Self { inner, membership }),
+        }
+    }
+
     fn charged_bytes(&self) -> u64 {
         self.inner.value().charge.bytes
     }
@@ -1118,6 +2518,10 @@ impl<T> RetainedAllocation<T> {
 
     fn belongs_to(&self, account: &PhysicalStorageAccount) -> bool {
         self.inner.lease().owner.is_same_account(account)
+    }
+
+    fn account(&self) -> &PhysicalStorageAccount {
+        &self.inner.lease().owner
     }
 
     fn assign_membership(&mut self, membership: RetainedMembership) -> Result<(), ()> {
@@ -1135,10 +2539,6 @@ impl<T> RetainedAllocation<T> {
 
     fn membership(&self) -> Option<RetainedMembership> {
         self.membership
-    }
-
-    fn value_mut_during_construction(&mut self) -> Option<&mut T> {
-        Some(&mut self.inner.value_mut()?.value)
     }
 
     /// Shares an already admitted retained allocation after the owning operation has charged all
@@ -1170,26 +2570,39 @@ impl<T> RetainedAllocation<T> {
     }
 
     #[cfg(test)]
-    fn allocation_identity(
-        &self,
-    ) -> *const FinalOwnerInner<RetainedPayload<T>, AdmissionLease<PhysicalStorageAccount>> {
+    fn allocation_identity(&self) -> *const RetainedFinalOwnerInner<RetainedPayload<T>, P> {
         self.inner.allocation_identity()
     }
 }
 
-impl<T> AsRef<T> for RetainedAllocation<T> {
+impl<Block> PolicyRetainedAllocation<RetainedBlockTable<Block>, TableRetainedPolicy> {
+    fn table_mut_during_construction(&mut self) -> Option<&mut RetainedBlockTable<Block>> {
+        self.inner.table_mut_during_construction()
+    }
+}
+
+impl<T, P> AsRef<T> for PolicyRetainedAllocation<T, P>
+where
+    P: RetainedValuePolicy<RetainedPayload<T>>,
+{
     fn as_ref(&self) -> &T {
         &self.inner.value().value
     }
 }
 
-impl<T> Borrow<T> for RetainedAllocation<T> {
+impl<T, P> Borrow<T> for PolicyRetainedAllocation<T, P>
+where
+    P: RetainedValuePolicy<RetainedPayload<T>>,
+{
     fn borrow(&self) -> &T {
         self.as_ref()
     }
 }
 
-impl<T> fmt::Debug for RetainedAllocation<T> {
+impl<T, P> fmt::Debug for PolicyRetainedAllocation<T, P>
+where
+    P: RetainedValuePolicy<RetainedPayload<T>>,
+{
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("RetainedAllocation")
@@ -1199,23 +2612,183 @@ impl<T> fmt::Debug for RetainedAllocation<T> {
     }
 }
 
-fn drop_retained_allocation_before_attribution<T>(
-    allocation: RetainedAllocation<T>,
-    account: &PhysicalStorageAccount,
-) -> bool {
-    if !allocation.belongs_to(account) {
-        std::mem::forget(allocation);
-        return false;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RetainedStorageDropOutcome {
+    Clean,
+    StorageReleaseUnverified(AccountPoisonEventWitness),
+    ChargeReleaseUnverified(AccountPoisonEventWitness),
+    StillSharedOwnershipFault(AccountPoisonEventWitness),
+    ForeignOwnershipFault(AccountPoisonEventWitness),
+    MissingFaultAnchor,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum RetainedStorageDropSeverity {
+    Clean,
+    Charge,
+    Ownership,
+    Storage,
+}
+
+impl RetainedStorageDropOutcome {
+    const fn severity(self) -> RetainedStorageDropSeverity {
+        match self {
+            Self::Clean => RetainedStorageDropSeverity::Clean,
+            Self::ChargeReleaseUnverified(_) => RetainedStorageDropSeverity::Charge,
+            Self::StillSharedOwnershipFault(_)
+            | Self::ForeignOwnershipFault(_)
+            | Self::MissingFaultAnchor => RetainedStorageDropSeverity::Ownership,
+            Self::StorageReleaseUnverified(_) => RetainedStorageDropSeverity::Storage,
+        }
     }
-    let Some(before) = account.unverified_drop_count() else {
+
+    const fn witness(self) -> Option<AccountPoisonEventWitness> {
+        match self {
+            Self::StorageReleaseUnverified(witness)
+            | Self::ChargeReleaseUnverified(witness)
+            | Self::StillSharedOwnershipFault(witness)
+            | Self::ForeignOwnershipFault(witness) => Some(witness),
+            Self::Clean | Self::MissingFaultAnchor => None,
+        }
+    }
+
+    fn join(self, other: Self) -> Self {
+        match self.severity().cmp(&other.severity()) {
+            std::cmp::Ordering::Less => other,
+            std::cmp::Ordering::Greater => self,
+            std::cmp::Ordering::Equal if self.witness().is_none() && other.witness().is_some() => {
+                other
+            }
+            std::cmp::Ordering::Equal => self,
+        }
+    }
+}
+
+fn join_pre_attribution_cleanup_cause<D>(
+    outcome: RetainedStorageDropOutcome,
+    original: RetainedWriterError<D>,
+) -> RetainedWriterError<D> {
+    match outcome.severity() {
+        RetainedStorageDropSeverity::Clean => original,
+        RetainedStorageDropSeverity::Storage => RetainedWriterError::StorageDropUnverified,
+        RetainedStorageDropSeverity::Ownership => {
+            if matches!(original, RetainedWriterError::StorageDropUnverified) {
+                RetainedWriterError::StorageDropUnverified
+            } else {
+                RetainedWriterError::OwnershipUnverified
+            }
+        }
+        RetainedStorageDropSeverity::Charge => match original {
+            RetainedWriterError::StorageDropUnverified => {
+                RetainedWriterError::StorageDropUnverified
+            }
+            RetainedWriterError::OwnershipUnverified => RetainedWriterError::OwnershipUnverified,
+            _ => RetainedWriterError::ChargeReleaseUnverified,
+        },
+    }
+}
+
+fn finish_pre_attribution_cleanup<O, P, D, Destination>(
+    attribution: OperationAttributionReservation<O, P, D, Destination>,
+    outcome: RetainedStorageDropOutcome,
+    original: RetainedWriterError<D>,
+) -> RetainedWriterError<D>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+    Destination: PublicationDestination,
+{
+    if outcome == RetainedStorageDropOutcome::Clean {
+        drop(attribution);
+    } else {
+        std::mem::forget(attribution);
+    }
+    join_pre_attribution_cleanup_cause(outcome, original)
+}
+
+fn finish_pre_attribution_batch_cleanup<O, P, D, Destination>(
+    batch: Option<AttributionReservationBatch<O, P, D, Destination>>,
+    outcome: RetainedStorageDropOutcome,
+    original: RetainedWriterError<D>,
+) -> RetainedWriterError<D>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+    Destination: PublicationDestination,
+{
+    if outcome == RetainedStorageDropOutcome::Clean {
+        drop(batch);
+    } else if let Some(batch) = batch {
+        std::mem::forget(batch);
+    }
+    join_pre_attribution_cleanup_cause(outcome, original)
+}
+
+fn map_inherited_cleanup_error<D>(
+    account: &PhysicalStorageAccount,
+    outcome: FinalOwnerReleaseOutcome,
+    original: RetainedWriterError<D>,
+) -> RetainedWriterError<D> {
+    match outcome {
+        FinalOwnerReleaseOutcome::Clean => {
+            let _ = account.record_poison(AccountPoisonReason::OwnershipGraphUnverified);
+            original
+        }
+        FinalOwnerReleaseOutcome::StorageReleaseUnverified(_) => {
+            RetainedWriterError::StorageDropUnverified
+        }
+        FinalOwnerReleaseOutcome::ChargeReleaseUnverified(_) => match original {
+            RetainedWriterError::StorageDropUnverified => {
+                RetainedWriterError::StorageDropUnverified
+            }
+            RetainedWriterError::OwnershipUnverified => RetainedWriterError::OwnershipUnverified,
+            _ => RetainedWriterError::ChargeReleaseUnverified,
+        },
+        FinalOwnerReleaseOutcome::OwnershipUnverified(_) => {
+            if matches!(original, RetainedWriterError::StorageDropUnverified) {
+                RetainedWriterError::StorageDropUnverified
+            } else {
+                RetainedWriterError::OwnershipUnverified
+            }
+        }
+    }
+}
+
+fn drop_retained_allocation_before_attribution<T, P>(
+    allocation: PolicyRetainedAllocation<T, P>,
+    account: &PhysicalStorageAccount,
+) -> RetainedStorageDropOutcome
+where
+    P: RetainedValuePolicy<RetainedPayload<T>>,
+{
+    if !allocation.belongs_to(account) {
+        let allocation_account = allocation.account();
+        let poisoned =
+            record_account_poison_event(account, AccountPoisonReason::OwnershipGraphUnverified);
+        let _ =
+            allocation_account.record_poison(AccountPoisonReason::RetainedStorageReleaseUnverified);
         std::mem::forget(allocation);
-        return false;
+        return RetainedStorageDropOutcome::ForeignOwnershipFault(poisoned);
+    }
+    let release = match allocation.try_release_unique_before_attribution() {
+        Ok(release) => release,
+        Err((allocation, poisoned)) => {
+            std::mem::forget(allocation);
+            return RetainedStorageDropOutcome::StillSharedOwnershipFault(poisoned);
+        }
     };
-    match catch_unwind(AssertUnwindSafe(|| drop(allocation))) {
-        Ok(()) => account.unverified_drop_count() == Some(before),
-        Err(payload) => {
-            discard_untrusted_panic_payload(payload);
-            false
+    match release {
+        FinalOwnerReleaseOutcome::Clean => RetainedStorageDropOutcome::Clean,
+        FinalOwnerReleaseOutcome::StorageReleaseUnverified(poisoned) => {
+            RetainedStorageDropOutcome::StorageReleaseUnverified(poisoned)
+        }
+        FinalOwnerReleaseOutcome::ChargeReleaseUnverified(poisoned) => {
+            RetainedStorageDropOutcome::ChargeReleaseUnverified(poisoned)
+        }
+        FinalOwnerReleaseOutcome::OwnershipUnverified(poisoned) => {
+            RetainedStorageDropOutcome::StillSharedOwnershipFault(poisoned)
         }
     }
 }
@@ -1224,24 +2797,38 @@ fn drop_retained_allocation_before_attribution<T>(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub(crate) enum RetainedAllocationError {
-    InlinePayloadTooLarge { bytes: usize, limit: usize },
+    InlinePayloadTooLarge {
+        bytes: usize,
+        limit: usize,
+    },
+    AccountPoisoned(AccountPoisoned),
+    /// The account was poisoned after this retain admission; its physical charge remains coupled.
+    AccountPoisonedWithRetainedCharge(AccountPoisoned),
     AccountingOverflow,
-    ByteLimitExceeded { requested: u64, limit: u64 },
-    AllocationLimitExceeded { requested: u64, limit: u64 },
+    ByteLimitExceeded {
+        requested: u64,
+        limit: u64,
+    },
+    AllocationLimitExceeded {
+        requested: u64,
+        limit: u64,
+    },
     Build(RetainedBuildFailureCode),
-    BuilderPanicked { charge_retained: bool },
-    AllocationFailed { charge_retained: bool },
+    BuilderPanicked,
+    AllocationFailed,
+    ChargeReleaseUnverified,
 }
 
 impl RetainedAllocationError {
     /// Whether failure containment retained the physical charge because storage release was not
     /// proven.
     pub const fn charge_retained(&self) -> bool {
-        match self {
-            Self::BuilderPanicked { charge_retained }
-            | Self::AllocationFailed { charge_retained } => *charge_retained,
-            _ => false,
-        }
+        matches!(
+            self,
+            Self::BuilderPanicked
+                | Self::ChargeReleaseUnverified
+                | Self::AccountPoisonedWithRetainedCharge(_)
+        )
     }
 }
 
@@ -1252,6 +2839,13 @@ impl fmt::Display for RetainedAllocationError {
                 formatter,
                 "retained inline payload uses {bytes} bytes, exceeding limit {limit}"
             ),
+            Self::AccountPoisoned(cause) => cause.fmt(formatter),
+            Self::AccountPoisonedWithRetainedCharge(cause) => {
+                write!(
+                    formatter,
+                    "{cause}; retained physical charge remains fail-closed"
+                )
+            }
             Self::AccountingOverflow => {
                 formatter.write_str("retained allocation accounting overflowed")
             }
@@ -1266,29 +2860,26 @@ impl fmt::Display for RetainedAllocationError {
             Self::Build(failure) => {
                 write!(formatter, "retained payload construction failed: {failure}")
             }
-            Self::BuilderPanicked { charge_retained } => {
-                if *charge_retained {
-                    formatter.write_str(
-                        "retained payload constructor panicked and storage release was not proven; physical charge remains retained",
-                    )
-                } else {
-                    formatter.write_str("retained payload constructor panicked")
-                }
-            }
-            Self::AllocationFailed { charge_retained } => {
-                if *charge_retained {
-                    formatter.write_str(
-                        "retained shared allocation failed and payload release was not proven; physical charge remains retained",
-                    )
-                } else {
-                    formatter.write_str("retained shared allocation failed")
-                }
-            }
+            Self::BuilderPanicked => formatter.write_str(
+                "retained payload constructor panicked; physical charge remains retained",
+            ),
+            Self::AllocationFailed => formatter.write_str("retained shared allocation failed"),
+            Self::ChargeReleaseUnverified => formatter
+                .write_str("retained physical charge release failed and remains fail-closed"),
         }
     }
 }
 
-impl std::error::Error for RetainedAllocationError {}
+impl std::error::Error for RetainedAllocationError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::AccountPoisoned(cause) | Self::AccountPoisonedWithRetainedCharge(cause) => {
+                Some(cause)
+            }
+            _ => None,
+        }
+    }
+}
 
 #[allow(
     dead_code,
@@ -1310,17 +2901,12 @@ fn map_retained_admission_error(error: AdmissionError) -> RetainedAllocationErro
     dead_code,
     reason = "physical retained admission is private until the coupled writer lands"
 )]
-fn map_retained_final_owner_error(
-    error: FinalOwnerAllocationError,
-    charge_retained: bool,
-) -> RetainedAllocationError {
+fn map_retained_final_owner_error(error: FinalOwnerAllocationError) -> RetainedAllocationError {
     match error {
         FinalOwnerAllocationError::AccountingOverflow => {
             RetainedAllocationError::AccountingOverflow
         }
-        FinalOwnerAllocationError::AllocationFailed => {
-            RetainedAllocationError::AllocationFailed { charge_retained }
-        }
+        FinalOwnerAllocationError::AllocationFailed => RetainedAllocationError::AllocationFailed,
     }
 }
 
@@ -1489,6 +3075,8 @@ pub(crate) enum RetainedWriterError<D> {
     Ledger(LedgerCause<D>),
     /// The physical retained-storage account rejected the action.
     Physical(RetainedAllocationError),
+    /// The shared physical account has been permanently quarantined.
+    AccountPoisoned(AccountPoisoned),
     /// A preallocated attribution batch has no remaining slot.
     AttributionBatchFull,
     /// A preallocated commitment batch has no remaining slot.
@@ -1501,6 +3089,10 @@ pub(crate) enum RetainedWriterError<D> {
     InvalidPublicationPlan,
     /// Payload destruction could not prove that storage was released before attribution.
     StorageDropUnverified,
+    /// The retained ownership graph could not be proven before attribution.
+    OwnershipUnverified,
+    /// A retained physical charge could not be proven released.
+    ChargeReleaseUnverified,
 }
 
 impl<D: fmt::Debug> fmt::Display for RetainedWriterError<D> {
@@ -1517,6 +3109,7 @@ impl<D: fmt::Debug> fmt::Display for RetainedWriterError<D> {
                     "retained physical storage action failed: {cause}"
                 )
             }
+            Self::AccountPoisoned(cause) => cause.fmt(formatter),
             Self::AttributionBatchFull => formatter.write_str("retained attribution batch is full"),
             Self::CommitmentBatchFull => formatter.write_str("retained commitment batch is full"),
             Self::ForeignAccount => {
@@ -1530,6 +3123,12 @@ impl<D: fmt::Debug> fmt::Display for RetainedWriterError<D> {
             }
             Self::StorageDropUnverified => formatter
                 .write_str("retained storage release could not be verified before attribution"),
+            Self::OwnershipUnverified => {
+                formatter.write_str("retained ownership could not be verified before attribution")
+            }
+            Self::ChargeReleaseUnverified => {
+                formatter.write_str("retained physical charge release could not be verified")
+            }
         }
     }
 }
@@ -1539,6 +3138,7 @@ impl<D: fmt::Debug + 'static> std::error::Error for RetainedWriterError<D> {
         match self {
             Self::Ledger(cause) => Some(cause),
             Self::Physical(cause) => Some(cause),
+            Self::AccountPoisoned(cause) => Some(cause),
             _ => None,
         }
     }
@@ -1595,6 +3195,119 @@ fn map_batch_error<D>(error: AttributionBatchCreateError<D>) -> RetainedWriterEr
     }
 }
 
+fn map_pending_rollback_or(
+    rollback: PendingRetainedRollback,
+    original: RetainedAllocationError,
+) -> RetainedAllocationError {
+    match rollback {
+        PendingRetainedRollback::Clean => original,
+        PendingRetainedRollback::FaultRecorded(poisoned) => {
+            RetainedAllocationError::AccountPoisoned(poisoned)
+        }
+        PendingRetainedRollback::ChargeReleaseUnverified(_) => {
+            RetainedAllocationError::ChargeReleaseUnverified
+        }
+        PendingRetainedRollback::ChargeRetainedAfterPoison(poisoned) => {
+            RetainedAllocationError::AccountPoisonedWithRetainedCharge(poisoned)
+        }
+    }
+}
+
+fn map_faulted_pending_rollback(rollback: PendingRetainedRollback) -> RetainedAllocationError {
+    match rollback {
+        PendingRetainedRollback::FaultRecorded(poisoned) => {
+            RetainedAllocationError::AccountPoisoned(poisoned)
+        }
+        PendingRetainedRollback::ChargeReleaseUnverified(_) => {
+            RetainedAllocationError::ChargeReleaseUnverified
+        }
+        PendingRetainedRollback::ChargeRetainedAfterPoison(poisoned) => {
+            RetainedAllocationError::AccountPoisonedWithRetainedCharge(poisoned)
+        }
+        PendingRetainedRollback::Clean => unreachable_final_owner_state(),
+    }
+}
+
+fn map_faulted_pending_writer_rollback<D>(
+    rollback: PendingRetainedRollback,
+) -> RetainedWriterError<D> {
+    match rollback {
+        PendingRetainedRollback::FaultRecorded(poisoned) => {
+            RetainedWriterError::AccountPoisoned(poisoned)
+        }
+        PendingRetainedRollback::ChargeReleaseUnverified(_) => {
+            RetainedWriterError::Physical(RetainedAllocationError::ChargeReleaseUnverified)
+        }
+        PendingRetainedRollback::ChargeRetainedAfterPoison(poisoned) => {
+            RetainedWriterError::Physical(
+                RetainedAllocationError::AccountPoisonedWithRetainedCharge(poisoned),
+            )
+        }
+        PendingRetainedRollback::Clean => unreachable_final_owner_state(),
+    }
+}
+
+fn map_qualified_startup_batch_error<D>(
+    error: AttributionBatchCreateError<D>,
+    rollback: impl FnOnce(Option<AccountPoisonReason>) -> PendingRetainedRollback,
+) -> RetainedWriterError<D> {
+    match error {
+        AttributionBatchCreateError::CapacityOverflow => match rollback(None) {
+            PendingRetainedRollback::Clean => RetainedWriterError::BatchCapacity,
+            PendingRetainedRollback::ChargeReleaseUnverified(_) => {
+                RetainedWriterError::Physical(RetainedAllocationError::ChargeReleaseUnverified)
+            }
+            PendingRetainedRollback::ChargeRetainedAfterPoison(poisoned) => {
+                RetainedWriterError::Physical(
+                    RetainedAllocationError::AccountPoisonedWithRetainedCharge(poisoned),
+                )
+            }
+            PendingRetainedRollback::FaultRecorded(_) => unreachable_final_owner_state(),
+        },
+        AttributionBatchCreateError::AllocationFailed => match rollback(None) {
+            PendingRetainedRollback::Clean => RetainedWriterError::BatchAllocationFailed,
+            PendingRetainedRollback::ChargeReleaseUnverified(_) => {
+                RetainedWriterError::Physical(RetainedAllocationError::ChargeReleaseUnverified)
+            }
+            PendingRetainedRollback::ChargeRetainedAfterPoison(poisoned) => {
+                RetainedWriterError::Physical(
+                    RetainedAllocationError::AccountPoisonedWithRetainedCharge(poisoned),
+                )
+            }
+            PendingRetainedRollback::FaultRecorded(_) => unreachable_final_owner_state(),
+        },
+        AttributionBatchCreateError::Ledger(_) => {
+            match rollback(Some(AccountPoisonReason::OwnershipGraphUnverified)) {
+                PendingRetainedRollback::FaultRecorded(poisoned) => {
+                    RetainedWriterError::AccountPoisoned(poisoned)
+                }
+                PendingRetainedRollback::ChargeReleaseUnverified(_) => {
+                    RetainedWriterError::Physical(RetainedAllocationError::ChargeReleaseUnverified)
+                }
+                PendingRetainedRollback::ChargeRetainedAfterPoison(poisoned) => {
+                    RetainedWriterError::Physical(
+                        RetainedAllocationError::AccountPoisonedWithRetainedCharge(poisoned),
+                    )
+                }
+                PendingRetainedRollback::Clean => unreachable_final_owner_state(),
+            }
+        }
+    }
+}
+
+fn map_account_action_admission_error<D>(
+    error: AccountActionAdmissionError,
+) -> RetainedWriterError<D> {
+    match error {
+        AccountActionAdmissionError::AccountPoisoned(cause) => {
+            RetainedWriterError::AccountPoisoned(cause)
+        }
+        AccountActionAdmissionError::AccountingOverflow => {
+            RetainedWriterError::Physical(RetainedAllocationError::AccountingOverflow)
+        }
+    }
+}
+
 #[allow(
     dead_code,
     reason = "crate-private until the U4 canonical consumers switch atomically"
@@ -1609,14 +3322,55 @@ where
     P: Copy + Ord,
     D: Copy + Ord + fmt::Debug + Send + Sync + 'static,
 {
-    try_admit_retained_share_work(ledger, work)?;
-    Ok(account.share_after_admission())
+    let admission = account
+        .try_admit_account_action()
+        .map_err(map_account_action_admission_error)?;
+    share_account_after_admitted_work(admission, ledger, work)
+}
+
+fn try_open_publication_account<O, P, D>(
+    ledger: &Ledger<O, P, D>,
+    account: &PhysicalStorageAccount,
+    work: RetainedHandleSharePlan<D>,
+) -> Result<(PhysicalStorageAccount, RetainedSetId), RetainedWriterError<D>>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord + fmt::Debug + Send + Sync + 'static,
+{
+    let (admission, set_id) =
+        account
+            .try_admit_publication_open()
+            .map_err(|cause| match cause {
+                PublicationOpenAdmissionError::Account(cause) => {
+                    map_account_action_admission_error(cause)
+                }
+                PublicationOpenAdmissionError::MembershipExhausted => {
+                    RetainedWriterError::MembershipExhausted
+                }
+            })?;
+    let account = share_account_after_admitted_work(admission, ledger, work)?;
+    Ok((account, set_id))
+}
+
+fn share_account_after_admitted_work<O, P, D>(
+    admission: PendingAccountActionAdmission<'_>,
+    ledger: &Ledger<O, P, D>,
+    work: RetainedHandleSharePlan<D>,
+) -> Result<PhysicalStorageAccount, RetainedWriterError<D>>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord + fmt::Debug + Send + Sync + 'static,
+{
+    let admitted = try_admit_retained_share_work(ledger, work)?;
+    Ok(admission.run(|account| admitted.consume_account(account)))
 }
 
 fn try_admit_retained_share_work<O, P, D>(
     ledger: &Ledger<O, P, D>,
     work: RetainedHandleSharePlan<D>,
-) -> Result<(), RetainedWriterError<D>>
+) -> Result<AdmittedRetainedShareWork, RetainedWriterError<D>>
 where
     O: OperationOwner,
     P: Copy + Ord,
@@ -1624,7 +3378,87 @@ where
 {
     ledger
         .charge_observed_batch(&work.charges())
+        .map(|()| AdmittedRetainedShareWork { private: () })
         .map_err(RetainedWriterError::Ledger)
+}
+
+fn try_admit_retained_share_work_before_physical<O, P, D>(
+    ledger: &Ledger<O, P, D>,
+    account: &PhysicalStorageAccount,
+    work: RetainedHandleSharePlan<D>,
+) -> Result<AdmittedRetainedShareWork, RetainedWriterError<D>>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord + fmt::Debug + Send + Sync + 'static,
+{
+    match catch_unwind(AssertUnwindSafe(|| {
+        try_admit_retained_share_work(ledger, work)
+    })) {
+        Ok(result) => result,
+        Err(payload) => {
+            let poisoned = account.record_poison(AccountPoisonReason::OwnershipGraphUnverified);
+            discard_untrusted_panic_payload(payload);
+            Err(RetainedWriterError::AccountPoisoned(poisoned))
+        }
+    }
+}
+
+fn try_admit_start_share_work<O, P, D>(
+    ledger: &Ledger<O, P, D>,
+    account: &PhysicalStorageAccount,
+    account_shares: StartupAccountShareEnvelope<D>,
+) -> Result<StartupAccountOwners, RetainedWriterError<D>>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord + fmt::Debug + Send + Sync + 'static,
+{
+    let [
+        fallback_account_step,
+        evidence_account_step,
+        fallback_lease_step,
+        evidence_lease_step,
+    ] = account_shares.into_steps();
+    let fallback_account =
+        try_share_startup_account_after_work(ledger, account, fallback_account_step)?;
+    let evidence_account =
+        try_share_startup_account_after_work(ledger, account, evidence_account_step)?;
+    let fallback_lease_owner =
+        try_share_startup_account_after_work(ledger, account, fallback_lease_step)?;
+    let evidence_lease_owner =
+        try_share_startup_account_after_work(ledger, account, evidence_lease_step)?;
+    Ok(StartupAccountOwners {
+        fallback_account,
+        evidence_account,
+        fallback_lease_owner,
+        evidence_lease_owner,
+    })
+}
+
+fn try_share_startup_account_after_work<O, P, D>(
+    ledger: &Ledger<O, P, D>,
+    account: &PhysicalStorageAccount,
+    step: StartupAccountShareStep<D>,
+) -> Result<PhysicalStorageAccount, RetainedWriterError<D>>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord + fmt::Debug + Send + Sync + 'static,
+{
+    match catch_unwind(AssertUnwindSafe(|| {
+        ledger.charge_observed_batch(&step.into_charges())
+    })) {
+        Ok(Ok(())) => Ok(PhysicalStorageAccount {
+            inner: account.inner.share(),
+        }),
+        Ok(Err(cause)) => Err(RetainedWriterError::Ledger(cause)),
+        Err(payload) => {
+            let poisoned = account.record_poison(AccountPoisonReason::OwnershipGraphUnverified);
+            discard_untrusted_panic_payload(payload);
+            Err(RetainedWriterError::AccountPoisoned(poisoned))
+        }
+    }
 }
 
 #[allow(
@@ -1734,77 +3568,6 @@ impl<D: Copy> PublishedDimensionSnapshot<D> {
     }
 }
 
-#[allow(
-    clippy::too_many_arguments,
-    reason = "single-value bootstrap keeps storage, attribution, and commitment construction atomic"
-)]
-fn try_create_single_retained_part<O, P, D, Destination, T>(
-    ledger: &Ledger<O, P, D>,
-    account: PhysicalStorageAccount,
-    handle_share_work: RetainedHandleSharePlan<D>,
-    writer: RetainedWriterPlan<P, D>,
-    allocation_plan: RetainedAllocationPlan,
-    commitment: OutputCommitment<D, Destination>,
-    build: impl FnOnce() -> Result<T, RetainedBuildFailureCode>,
-) -> Result<RetainedPart<T, Destination, O, P, D>, RetainedWriterError<D>>
-where
-    O: OperationOwner,
-    P: Copy + Ord,
-    D: Copy + Ord + fmt::Debug + Send + Sync + 'static,
-    Destination: PublicationDestination,
-    T: Send + Sync + 'static,
-{
-    let mut batch = ledger
-        .try_attribution_batch(
-            writer.phase,
-            writer.capacity_dimension,
-            writer.limits.attribution_slots,
-            writer.limits.commitment_slots,
-        )
-        .map_err(map_batch_error)?;
-    if !batch.has_attribution_slot() {
-        return Err(RetainedWriterError::AttributionBatchFull);
-    }
-    batch
-        .try_push_commitment(commitment)
-        .map_err(|_| RetainedWriterError::CommitmentBatchFull)?;
-
-    let charge = account
-        .checked_retained_charge::<T>(allocation_plan)
-        .map_err(RetainedWriterError::Physical)?;
-    let attribution = ledger
-        .reserve_operation_attribution::<Destination>(
-            writer.phase,
-            writer.attribution_dimension,
-            charge.bytes,
-        )
-        .map_err(RetainedWriterError::Ledger)?;
-    let allocation_owner = try_share_account_after_work(ledger, &account, handle_share_work)?;
-    let allocation =
-        match account.try_retain_with_admitted_handle(allocation_owner, allocation_plan, build) {
-            Ok(allocation) => allocation,
-            Err(cause) => {
-                if cause.charge_retained() {
-                    std::mem::forget(attribution);
-                } else {
-                    drop(attribution);
-                }
-                return Err(RetainedWriterError::Physical(cause));
-            }
-        };
-    if let Err(attribution) = batch.try_push_attribution(attribution) {
-        std::mem::forget(allocation);
-        std::mem::forget(attribution);
-        return Err(RetainedWriterError::AttributionBatchFull);
-    }
-
-    Ok(RetainedPart {
-        allocation: Some(allocation),
-        batch: Some(batch),
-        account: Some(account),
-    })
-}
-
 /// A destination-qualified retained allocation whose attribution cannot be detached.
 #[allow(
     dead_code,
@@ -1820,6 +3583,241 @@ where
     allocation: Option<RetainedAllocation<T>>,
     batch: Option<AttributionReservationBatch<O, P, D, Destination>>,
     account: Option<PhysicalStorageAccount>,
+}
+
+/// A retained part whose physical owner, attribution batch, and account witness are exact.
+///
+/// Keeping the original owner intact until detachment makes the exact-to-detached transition
+/// infallible while preserving its storage-before-attribution destructor on every earlier exit.
+struct ExactRetainedPart<T, Destination, O, P, D>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+    Destination: PublicationDestination,
+{
+    inner: RetainedPart<T, Destination, O, P, D>,
+}
+
+impl<T, Destination, O, P, D> ExactRetainedPart<T, Destination, O, P, D>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+    Destination: PublicationDestination,
+{
+    fn into_inner(self) -> RetainedPart<T, Destination, O, P, D> {
+        self.inner
+    }
+
+    fn into_detached(
+        mut self,
+    ) -> (
+        AttributionReservationBatch<O, P, D, Destination>,
+        DetachedRetainedPart<T>,
+    ) {
+        let batch = match self.inner.batch.take() {
+            Some(batch) => batch,
+            None => unreachable_final_owner_state(),
+        };
+        let allocation = match self.inner.allocation.take() {
+            Some(allocation) => allocation,
+            None => unreachable_final_owner_state(),
+        };
+        let account = match self.inner.account.take() {
+            Some(account) => account,
+            None => unreachable_final_owner_state(),
+        };
+        (
+            batch,
+            DetachedRetainedPart {
+                allocation: Some(allocation),
+                account: Some(account),
+            },
+        )
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RetainedPartCleanupError {
+    NewFaultAlreadyRecorded(AccountPoisonEventWitness),
+    StorageReleaseUnverified(AccountPoisonEventWitness),
+    ChargeReleaseUnverified(AccountPoisonEventWitness),
+    StillSharedOwnershipFault(AccountPoisonEventWitness),
+    DeferredOwnershipFault,
+    MissingFaultAnchor,
+}
+
+fn try_discard_retained_owner<T>(
+    allocation: &mut Option<RetainedAllocation<T>>,
+    account: &mut Option<PhysicalStorageAccount>,
+    defer_ownership_fault: bool,
+) -> Result<PhysicalStorageAccount, RetainedPartCleanupError> {
+    let Some(expected_account) = account.as_ref() else {
+        let Some(allocation) = allocation.take() else {
+            return Err(RetainedPartCleanupError::MissingFaultAnchor);
+        };
+        let actual_account = allocation.account();
+        if defer_ownership_fault {
+            std::mem::forget(allocation);
+            return Err(RetainedPartCleanupError::DeferredOwnershipFault);
+        }
+        let poisoned = record_account_poison_event(
+            actual_account,
+            AccountPoisonReason::OwnershipGraphUnverified,
+        );
+        std::mem::forget(allocation);
+        return Err(RetainedPartCleanupError::NewFaultAlreadyRecorded(poisoned));
+    };
+    let Some(allocation_owner) = allocation.take() else {
+        if defer_ownership_fault {
+            drop(account.take());
+            return Err(RetainedPartCleanupError::DeferredOwnershipFault);
+        }
+        let poisoned = record_account_poison_event(
+            expected_account,
+            AccountPoisonReason::OwnershipGraphUnverified,
+        );
+        drop(account.take());
+        return Err(RetainedPartCleanupError::NewFaultAlreadyRecorded(poisoned));
+    };
+    if !allocation_owner.belongs_to(expected_account) {
+        if defer_ownership_fault {
+            let _ = allocation_owner
+                .account()
+                .record_poison(AccountPoisonReason::RetainedStorageReleaseUnverified);
+            std::mem::forget(allocation_owner);
+            drop(account.take());
+            return Err(RetainedPartCleanupError::DeferredOwnershipFault);
+        }
+        let poisoned = record_account_poison_event(
+            expected_account,
+            AccountPoisonReason::OwnershipGraphUnverified,
+        );
+        let _ = allocation_owner
+            .account()
+            .record_poison(AccountPoisonReason::RetainedStorageReleaseUnverified);
+        std::mem::forget(allocation_owner);
+        drop(account.take());
+        return Err(RetainedPartCleanupError::NewFaultAlreadyRecorded(poisoned));
+    }
+    let outcome = if defer_ownership_fault {
+        match allocation_owner.try_release_unique_before_attribution_deferred() {
+            Ok(outcome) => outcome,
+            Err(still_shared) => {
+                *allocation = Some(still_shared);
+                return Err(RetainedPartCleanupError::DeferredOwnershipFault);
+            }
+        }
+    } else {
+        match allocation_owner.try_release_unique_before_attribution() {
+            Ok(outcome) => outcome,
+            Err((still_shared, poisoned)) => {
+                *allocation = Some(still_shared);
+                return Err(RetainedPartCleanupError::StillSharedOwnershipFault(
+                    poisoned,
+                ));
+            }
+        }
+    };
+    match outcome {
+        FinalOwnerReleaseOutcome::Clean => match account.take() {
+            Some(account) => Ok(account),
+            None => Err(RetainedPartCleanupError::MissingFaultAnchor),
+        },
+        FinalOwnerReleaseOutcome::StorageReleaseUnverified(poisoned) => {
+            drop(account.take());
+            Err(RetainedPartCleanupError::StorageReleaseUnverified(poisoned))
+        }
+        FinalOwnerReleaseOutcome::ChargeReleaseUnverified(poisoned) => {
+            drop(account.take());
+            Err(RetainedPartCleanupError::ChargeReleaseUnverified(poisoned))
+        }
+        FinalOwnerReleaseOutcome::OwnershipUnverified(poisoned) => {
+            drop(account.take());
+            Err(RetainedPartCleanupError::StillSharedOwnershipFault(
+                poisoned,
+            ))
+        }
+    }
+}
+
+struct DetachedRetainedPart<T> {
+    allocation: Option<RetainedAllocation<T>>,
+    account: Option<PhysicalStorageAccount>,
+}
+
+impl<T> DetachedRetainedPart<T> {
+    fn allocation(&self) -> &RetainedAllocation<T> {
+        match self.allocation.as_ref() {
+            Some(allocation) => allocation,
+            None => unreachable_final_owner_state(),
+        }
+    }
+
+    fn account(&self) -> &PhysicalStorageAccount {
+        match self.account.as_ref() {
+            Some(account) => account,
+            None => unreachable_final_owner_state(),
+        }
+    }
+
+    fn has_exact_owner(&self) -> bool {
+        matches!(
+            (self.allocation.as_ref(), self.account.as_ref()),
+            (Some(allocation), Some(account)) if allocation.belongs_to(account)
+        )
+    }
+
+    fn is_empty(&self) -> bool {
+        self.allocation.is_none() && self.account.is_none()
+    }
+
+    fn try_discard_allocation(
+        &mut self,
+    ) -> Result<PhysicalStorageAccount, RetainedPartCleanupError> {
+        try_discard_retained_owner(&mut self.allocation, &mut self.account, false)
+    }
+
+    fn record_forgotten_physical_edge(&self) {
+        if let Some(allocation) = self.allocation.as_ref() {
+            let _ = allocation
+                .account()
+                .record_poison(AccountPoisonReason::RetainedStorageReleaseUnverified);
+        }
+    }
+
+    fn fail_closed_after_recorded_poison(&mut self) {
+        if let Some(allocation) = self.allocation.take() {
+            std::mem::forget(allocation);
+        }
+        drop(self.account.take());
+    }
+
+    fn new_fault_and_fail_closed(&mut self, reason: AccountPoisonReason) {
+        if let Some(account) = self.account.as_ref().or_else(|| {
+            self.allocation
+                .as_ref()
+                .map(|allocation| allocation.account())
+        }) {
+            let _ = account.record_poison(reason);
+        }
+        self.record_forgotten_physical_edge();
+        self.fail_closed_after_recorded_poison();
+    }
+}
+
+impl<T> Drop for DetachedRetainedPart<T> {
+    fn drop(&mut self) {
+        if self.allocation.is_none() && self.account.is_none() {
+            return;
+        }
+        if std::thread::panicking() || !self.has_exact_owner() {
+            self.new_fault_and_fail_closed(AccountPoisonReason::OwnershipGraphUnverified);
+            return;
+        }
+        let _ = self.try_discard_allocation();
+    }
 }
 
 #[allow(
@@ -1847,38 +3845,31 @@ where
         }
     }
 
-    fn take_batch_for_prepare(&mut self) -> AttributionReservationBatch<O, P, D, Destination> {
-        match self.batch.take() {
-            Some(batch) => batch,
-            None => unreachable_final_owner_state(),
+    fn try_into_exact(self) -> Result<ExactRetainedPart<T, Destination, O, P, D>, Self> {
+        if !self.has_exact_product_graph() {
+            return Err(self);
         }
-    }
-
-    fn into_published_part(mut self) -> PublishedPart<T> {
-        PublishedPart {
-            allocation: self.allocation.take(),
-            account: self.account.take(),
-        }
+        Ok(ExactRetainedPart { inner: self })
     }
 
     fn try_discard_allocation_before_batch_release(
         &mut self,
-    ) -> Result<PhysicalStorageAccount, ()> {
-        let account = match self.account.as_ref() {
-            Some(account) => account,
-            None => return Err(()),
-        };
-        let allocation = match self.allocation.take() {
-            Some(allocation) => allocation,
-            None => return Err(()),
-        };
-        if !drop_retained_allocation_before_attribution(allocation, account) {
-            return Err(());
-        }
-        self.account.take().ok_or(())
+    ) -> Result<PhysicalStorageAccount, RetainedPartCleanupError> {
+        self.try_discard_allocation_before_batch_release_with_policy(false)
     }
 
-    fn fail_closed(&mut self) {
+    fn try_discard_allocation_before_batch_release_with_policy(
+        &mut self,
+        defer_ownership_fault: bool,
+    ) -> Result<PhysicalStorageAccount, RetainedPartCleanupError> {
+        try_discard_retained_owner(
+            &mut self.allocation,
+            &mut self.account,
+            defer_ownership_fault,
+        )
+    }
+
+    fn fail_closed_after_recorded_poison(&mut self) {
         if let Some(allocation) = self.allocation.take() {
             std::mem::forget(allocation);
         }
@@ -1886,8 +3877,33 @@ where
             std::mem::forget(batch);
         }
         if let Some(account) = self.account.take() {
-            std::mem::forget(account);
+            drop(account);
         }
+    }
+
+    fn record_forgotten_physical_edges(&self) {
+        if let Some(allocation) = self.allocation.as_ref() {
+            let _ = allocation
+                .account()
+                .record_poison(AccountPoisonReason::RetainedStorageReleaseUnverified);
+        }
+    }
+
+    fn poison_and_fail_closed(&mut self) {
+        self.record_forgotten_physical_edges();
+        self.fail_closed_after_recorded_poison();
+    }
+
+    fn new_fault_and_fail_closed(&mut self, reason: AccountPoisonReason) {
+        let account = self.account.as_ref().or_else(|| {
+            self.allocation
+                .as_ref()
+                .map(|allocation| allocation.account())
+        });
+        if let Some(account) = account {
+            let _ = account.record_poison(reason);
+        }
+        self.poison_and_fail_closed();
     }
 
     fn has_exact_product_graph(&self) -> bool {
@@ -1912,26 +3928,26 @@ where
     Destination: PublicationDestination,
 {
     fn drop(&mut self) {
+        if self.allocation.is_none() && self.batch.is_none() && self.account.is_none() {
+            return;
+        }
         if std::thread::panicking() {
-            self.fail_closed();
+            self.new_fault_and_fail_closed(AccountPoisonReason::OwnershipGraphUnverified);
             return;
         }
-        if let Some(allocation) = self.allocation.take() {
-            let Some(account) = self.account.as_ref() else {
-                std::mem::forget(allocation);
-                self.fail_closed();
-                return;
-            };
-            if !drop_retained_allocation_before_attribution(allocation, account) {
-                self.fail_closed();
-                return;
+        if !self.has_exact_product_graph() {
+            self.new_fault_and_fail_closed(AccountPoisonReason::OwnershipGraphUnverified);
+            return;
+        }
+        match self.try_discard_allocation_before_batch_release() {
+            Ok(account) => {
+                drop(self.batch.take());
+                drop(account);
             }
-        } else if self.batch.is_some() || self.account.is_some() {
-            self.fail_closed();
-            return;
+            Err(_) => {
+                self.fail_closed_after_recorded_poison();
+            }
         }
-        drop(self.batch.take());
-        drop(self.account.take());
     }
 }
 
@@ -1949,6 +3965,14 @@ struct PublishedPart<T> {
     reason = "crate-private until the U4 canonical consumers switch atomically"
 )]
 impl<T> PublishedPart<T> {
+    /// Moves an owner whose exact shape was established by a typed terminal state before freeze.
+    fn from_exact_owner(mut owner: DetachedRetainedPart<T>) -> Self {
+        Self {
+            allocation: owner.allocation.take(),
+            account: owner.account.take(),
+        }
+    }
+
     fn allocation(&self) -> &RetainedAllocation<T> {
         match self.allocation.as_ref() {
             Some(allocation) => allocation,
@@ -1982,9 +4006,8 @@ where
     P: Copy + Ord,
     D: Copy + Ord,
 {
-    fallback: Option<RetainedPart<F, OutcomeEvidenceDestination, O, P, D>>,
-    evidence:
-        Option<RetainedPart<PublicationEvidenceCells<D>, OutcomeEvidenceDestination, O, P, D>>,
+    fallback: Option<DetachedRetainedPart<F>>,
+    evidence: Option<DetachedRetainedPart<PublicationEvidenceCells<D>>>,
     batches: Option<FallbackBatchBaseline<O, P, D>>,
 }
 
@@ -2009,8 +4032,8 @@ where
     fn into_parts(
         mut self,
     ) -> (
-        RetainedPart<F, OutcomeEvidenceDestination, O, P, D>,
-        RetainedPart<PublicationEvidenceCells<D>, OutcomeEvidenceDestination, O, P, D>,
+        DetachedRetainedPart<F>,
+        DetachedRetainedPart<PublicationEvidenceCells<D>>,
         FallbackBatchBaseline<O, P, D>,
     ) {
         let fallback = match self.fallback.take() {
@@ -2028,16 +4051,127 @@ where
         (fallback, evidence, batches)
     }
 
-    fn fail_closed(&mut self) {
-        if let Some(fallback) = self.fallback.take() {
-            std::mem::forget(fallback);
+    fn first_account(&self) -> Option<&PhysicalStorageAccount> {
+        self.evidence
+            .as_ref()
+            .and_then(|part| part.account.as_ref())
+            .or_else(|| {
+                self.fallback
+                    .as_ref()
+                    .and_then(|part| part.account.as_ref())
+            })
+            .or_else(|| {
+                self.evidence
+                    .as_ref()
+                    .and_then(|part| part.allocation.as_ref())
+                    .map(RetainedAllocation::account)
+            })
+            .or_else(|| {
+                self.fallback
+                    .as_ref()
+                    .and_then(|part| part.allocation.as_ref())
+                    .map(RetainedAllocation::account)
+            })
+    }
+
+    fn has_exact_product_graph(&self) -> bool {
+        let (Some(fallback), Some(evidence), Some(_batches)) = (
+            self.fallback.as_ref(),
+            self.evidence.as_ref(),
+            self.batches.as_ref(),
+        ) else {
+            return false;
+        };
+        fallback.has_exact_owner()
+            && evidence.has_exact_owner()
+            && fallback.account().is_same_account(evidence.account())
+    }
+
+    fn fail_closed_after_recorded_poison(&mut self) {
+        if let Some(mut fallback) = self.fallback.take() {
+            fallback.fail_closed_after_recorded_poison();
+            drop(fallback);
         }
-        if let Some(evidence) = self.evidence.take() {
-            std::mem::forget(evidence);
+        if let Some(mut evidence) = self.evidence.take() {
+            evidence.fail_closed_after_recorded_poison();
+            drop(evidence);
         }
         if let Some(batches) = self.batches.take() {
             std::mem::forget(batches);
         }
+    }
+
+    fn record_forgotten_physical_edges(&self) {
+        if let Some(fallback) = self.fallback.as_ref() {
+            fallback.record_forgotten_physical_edge();
+        }
+        if let Some(evidence) = self.evidence.as_ref() {
+            evidence.record_forgotten_physical_edge();
+        }
+    }
+
+    fn contain_after_recorded_poison(&mut self) {
+        self.record_forgotten_physical_edges();
+        self.fail_closed_after_recorded_poison();
+    }
+
+    fn new_fault_and_fail_closed(&mut self, reason: AccountPoisonReason) {
+        if let Some(account) = self.first_account() {
+            let _ = account.record_poison(reason);
+        }
+        self.contain_after_recorded_poison();
+    }
+
+    fn try_discard_all(&mut self) -> Result<(), ()> {
+        if !self.has_exact_product_graph() {
+            self.new_fault_and_fail_closed(AccountPoisonReason::OwnershipGraphUnverified);
+            return Err(());
+        }
+
+        let fallback_result = match self.fallback.as_mut() {
+            Some(fallback) => fallback.try_discard_allocation(),
+            None => Err(RetainedPartCleanupError::MissingFaultAnchor),
+        };
+        let fallback_account = match fallback_result {
+            Ok(account) => account,
+            Err(cause) => {
+                if cause == RetainedPartCleanupError::MissingFaultAnchor
+                    && let Some(account) = self.first_account()
+                {
+                    let _ = account.record_poison(AccountPoisonReason::OwnershipGraphUnverified);
+                }
+                self.contain_after_recorded_poison();
+                return Err(());
+            }
+        };
+
+        let evidence_result = match self.evidence.as_mut() {
+            Some(evidence) => evidence.try_discard_allocation(),
+            None => Err(RetainedPartCleanupError::MissingFaultAnchor),
+        };
+        let evidence_account = match evidence_result {
+            Ok(account) => account,
+            Err(cause) => {
+                if cause == RetainedPartCleanupError::MissingFaultAnchor {
+                    let _ = fallback_account
+                        .record_poison(AccountPoisonReason::OwnershipGraphUnverified);
+                }
+                drop(fallback_account);
+                self.contain_after_recorded_poison();
+                return Err(());
+            }
+        };
+
+        drop(self.batches.take());
+        drop(fallback_account);
+        drop(evidence_account);
+        drop(self.fallback.take());
+        drop(self.evidence.take());
+        Ok(())
+    }
+
+    fn discard_rejected(mut self) -> Result<(), ()> {
+        self.try_discard_all()
     }
 }
 
@@ -2052,37 +4186,1936 @@ where
             return;
         }
         if std::thread::panicking() {
-            self.fail_closed();
+            self.new_fault_and_fail_closed(AccountPoisonReason::OwnershipGraphUnverified);
             return;
         }
-        let fallback_account = match self
-            .fallback
-            .as_mut()
-            .and_then(|part| part.try_discard_allocation_before_batch_release().ok())
-        {
-            Some(account) => account,
-            None => {
-                self.fail_closed();
-                return;
+        let _ = self.try_discard_all();
+    }
+}
+
+struct StartupFallbackOwner<O, P, D, F>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+{
+    fallback: Option<RetainedPart<F, OutcomeEvidenceDestination, O, P, D>>,
+    evidence:
+        Option<RetainedPart<PublicationEvidenceCells<D>, OutcomeEvidenceDestination, O, P, D>>,
+    canonical_assembly: Option<AttributionReservationBatch<O, P, D, CanonicalOutput>>,
+    evidence_assembly: Option<AttributionReservationBatch<O, P, D, OutcomeEvidenceDestination>>,
+}
+
+impl<O, P, D, F> StartupFallbackOwner<O, P, D, F>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+{
+    fn from_complete(
+        fallback: RetainedPart<F, OutcomeEvidenceDestination, O, P, D>,
+        evidence: RetainedPart<PublicationEvidenceCells<D>, OutcomeEvidenceDestination, O, P, D>,
+        canonical_assembly: AttributionReservationBatch<O, P, D, CanonicalOutput>,
+        evidence_assembly: AttributionReservationBatch<O, P, D, OutcomeEvidenceDestination>,
+    ) -> Self {
+        Self {
+            fallback: Some(fallback),
+            evidence: Some(evidence),
+            canonical_assembly: Some(canonical_assembly),
+            evidence_assembly: Some(evidence_assembly),
+        }
+    }
+
+    fn first_account(&self) -> Option<&PhysicalStorageAccount> {
+        self.fallback
+            .as_ref()
+            .and_then(|part| part.account.as_ref())
+            .or_else(|| {
+                self.evidence
+                    .as_ref()
+                    .and_then(|part| part.account.as_ref())
+            })
+            .or_else(|| {
+                self.fallback
+                    .as_ref()
+                    .and_then(|part| part.allocation.as_ref())
+                    .map(RetainedAllocation::account)
+            })
+            .or_else(|| {
+                self.evidence
+                    .as_ref()
+                    .and_then(|part| part.allocation.as_ref())
+                    .map(RetainedAllocation::account)
+            })
+    }
+
+    fn record_forgotten_physical_edges(&self) {
+        if let Some(fallback) = self.fallback.as_ref() {
+            fallback.record_forgotten_physical_edges();
+        }
+        if let Some(evidence) = self.evidence.as_ref() {
+            evidence.record_forgotten_physical_edges();
+        }
+    }
+
+    fn fail_closed_after_recorded_poison(&mut self) {
+        if let Some(mut fallback) = self.fallback.take() {
+            fallback.fail_closed_after_recorded_poison();
+            drop(fallback);
+        }
+        if let Some(mut evidence) = self.evidence.take() {
+            evidence.fail_closed_after_recorded_poison();
+            drop(evidence);
+        }
+        if let Some(batch) = self.canonical_assembly.take() {
+            std::mem::forget(batch);
+        }
+        if let Some(batch) = self.evidence_assembly.take() {
+            std::mem::forget(batch);
+        }
+    }
+
+    fn contain_after_recorded_poison(&mut self) {
+        self.record_forgotten_physical_edges();
+        self.fail_closed_after_recorded_poison();
+    }
+
+    fn new_fault_and_fail_closed(&mut self, reason: AccountPoisonReason) {
+        if let Some(account) = self.first_account() {
+            let _ = account.record_poison(reason);
+        }
+        self.contain_after_recorded_poison();
+    }
+
+    fn try_discard_all(&mut self) -> Result<(), ()> {
+        let fallback_result = match self.fallback.as_mut() {
+            Some(fallback) => fallback.try_discard_allocation_before_batch_release(),
+            None => Err(RetainedPartCleanupError::MissingFaultAnchor),
+        };
+        let fallback_account = match fallback_result {
+            Ok(account) => account,
+            Err(cause) => {
+                if cause == RetainedPartCleanupError::MissingFaultAnchor
+                    && let Some(account) = self.first_account()
+                {
+                    let _ = account.record_poison(AccountPoisonReason::OwnershipGraphUnverified);
+                }
+                self.contain_after_recorded_poison();
+                return Err(());
             }
         };
-        let evidence_account = match self
-            .evidence
-            .as_mut()
-            .and_then(|part| part.try_discard_allocation_before_batch_release().ok())
-        {
-            Some(account) => account,
-            None => {
-                std::mem::forget(fallback_account);
-                self.fail_closed();
-                return;
-            }
+
+        let evidence_account = match self.evidence.as_mut() {
+            Some(evidence) => match evidence.try_discard_allocation_before_batch_release() {
+                Ok(account) => Some(account),
+                Err(cause) => {
+                    if cause == RetainedPartCleanupError::MissingFaultAnchor {
+                        let _ = fallback_account
+                            .record_poison(AccountPoisonReason::OwnershipGraphUnverified);
+                    }
+                    drop(fallback_account);
+                    self.contain_after_recorded_poison();
+                    return Err(());
+                }
+            },
+            None => None,
         };
-        drop(self.batches.take());
+
+        if let Some(fallback) = self.fallback.as_mut() {
+            drop(fallback.batch.take());
+        }
+        if let Some(evidence) = self.evidence.as_mut() {
+            drop(evidence.batch.take());
+        }
+        drop(self.canonical_assembly.take());
+        drop(self.evidence_assembly.take());
         drop(fallback_account);
         drop(evidence_account);
         drop(self.fallback.take());
         drop(self.evidence.take());
+        Ok(())
+    }
+
+    fn discard_rejected(mut self) -> Result<(), ()> {
+        self.try_discard_all()
+    }
+
+    fn try_into_baseline(
+        mut self,
+    ) -> Result<FallbackPublicationBaseline<O, P, D, F>, RetainedWriterError<D>> {
+        let exact = matches!(
+            (self.fallback.as_ref(), self.evidence.as_ref()),
+            (Some(fallback), Some(evidence))
+                if fallback.has_exact_product_graph()
+                    && evidence.has_exact_product_graph()
+                    && fallback.account().is_same_account(evidence.account())
+        ) && self.canonical_assembly.is_some()
+            && self.evidence_assembly.is_some();
+        if !exact {
+            self.new_fault_and_fail_closed(AccountPoisonReason::OwnershipGraphUnverified);
+            return Err(RetainedWriterError::StorageDropUnverified);
+        }
+
+        let fallback = match self.fallback.take() {
+            Some(fallback) => fallback,
+            None => unreachable_final_owner_state(),
+        };
+        let fallback = match fallback.try_into_exact() {
+            Ok(fallback) => fallback,
+            Err(fallback) => {
+                self.fallback = Some(fallback);
+                self.new_fault_and_fail_closed(AccountPoisonReason::OwnershipGraphUnverified);
+                return Err(RetainedWriterError::StorageDropUnverified);
+            }
+        };
+        let evidence = match self.evidence.take() {
+            Some(evidence) => evidence,
+            None => unreachable_final_owner_state(),
+        };
+        let evidence = match evidence.try_into_exact() {
+            Ok(evidence) => evidence,
+            Err(evidence) => {
+                self.evidence = Some(evidence);
+                self.fallback = Some(fallback.into_inner());
+                self.new_fault_and_fail_closed(AccountPoisonReason::OwnershipGraphUnverified);
+                return Err(RetainedWriterError::StorageDropUnverified);
+            }
+        };
+        let canonical_assembly = match self.canonical_assembly.take() {
+            Some(batch) => batch,
+            None => {
+                self.fallback = Some(fallback.into_inner());
+                self.evidence = Some(evidence.into_inner());
+                self.new_fault_and_fail_closed(AccountPoisonReason::OwnershipGraphUnverified);
+                return Err(RetainedWriterError::StorageDropUnverified);
+            }
+        };
+        let evidence_assembly = match self.evidence_assembly.take() {
+            Some(batch) => batch,
+            None => {
+                self.canonical_assembly = Some(canonical_assembly);
+                self.fallback = Some(fallback.into_inner());
+                self.evidence = Some(evidence.into_inner());
+                self.new_fault_and_fail_closed(AccountPoisonReason::OwnershipGraphUnverified);
+                return Err(RetainedWriterError::StorageDropUnverified);
+            }
+        };
+        let (fallback_batch, fallback) = fallback.into_detached();
+        let (evidence_batch, evidence) = evidence.into_detached();
+        let batches = FallbackBatchBaseline::new_unbound(
+            canonical_assembly,
+            evidence_assembly,
+            fallback_batch,
+            evidence_batch,
+        );
+        Ok(FallbackPublicationBaseline {
+            fallback: Some(fallback),
+            evidence: Some(evidence),
+            batches: Some(batches),
+        })
+    }
+}
+
+impl<O, P, D, F> Drop for StartupFallbackOwner<O, P, D, F>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+{
+    fn drop(&mut self) {
+        if self.fallback.is_none()
+            && self.evidence.is_none()
+            && self.canonical_assembly.is_none()
+            && self.evidence_assembly.is_none()
+        {
+            return;
+        }
+        if std::thread::panicking() {
+            self.new_fault_and_fail_closed(AccountPoisonReason::OwnershipGraphUnverified);
+            return;
+        }
+        let _ = self.try_discard_all();
+    }
+}
+
+struct StartupRetainedPartPlan<O, P, D, Destination>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+    Destination: PublicationDestination,
+{
+    attribution: StartupRetainedAttribution<P, D>,
+    batch: AttributionBatchPlan<O, P, D, Destination>,
+    allocation: RetainedAllocationPlan,
+    commitment: OutputCommitment<D, Destination>,
+}
+
+impl<O, P, D, Destination> StartupRetainedPartPlan<O, P, D, Destination>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+    Destination: PublicationDestination,
+{
+    const fn new(
+        attribution: StartupRetainedAttribution<P, D>,
+        batch: AttributionBatchPlan<O, P, D, Destination>,
+        allocation: RetainedAllocationPlan,
+        commitment: OutputCommitment<D, Destination>,
+    ) -> Self {
+        Self {
+            attribution,
+            batch,
+            allocation,
+            commitment,
+        }
+    }
+}
+
+struct StartupRetainedSideFailure<D> {
+    cause: RetainedWriterError<D>,
+    fault: Option<AccountPoisonReason>,
+    retain_attribution: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StartupRetainedSide {
+    Fallback,
+    Evidence,
+}
+
+struct StartupPendingResolution {
+    rollback: PendingRetainedRollback,
+}
+
+impl<D> StartupRetainedSideFailure<D> {
+    const fn clean(cause: RetainedWriterError<D>) -> Self {
+        Self {
+            cause,
+            fault: None,
+            retain_attribution: false,
+        }
+    }
+
+    const fn ownership(cause: RetainedWriterError<D>) -> Self {
+        Self {
+            cause,
+            fault: Some(AccountPoisonReason::OwnershipGraphUnverified),
+            retain_attribution: false,
+        }
+    }
+
+    const fn uncertain(cause: RetainedWriterError<D>) -> Self {
+        Self {
+            cause,
+            fault: Some(AccountPoisonReason::OwnershipGraphUnverified),
+            retain_attribution: true,
+        }
+    }
+}
+
+struct StartupRetainedSideConstruction<'account, O, P, D, T>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+{
+    unarmed: Option<UnarmedRetainedFinalOwner<RetainedPayload<T>, LeafRetainedPolicy>>,
+    attribution: Option<OperationAttributionReservation<O, P, D, OutcomeEvidenceDestination>>,
+    batch: Option<AttributionReservationBatch<O, P, D, OutcomeEvidenceDestination>>,
+    admission: Option<PendingRetainedAdmission<'account>>,
+    account: Option<PhysicalStorageAccount>,
+}
+
+struct ReadyStartupRetainedSide<'account, O, P, D, T>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+{
+    unarmed: UnarmedRetainedFinalOwner<RetainedPayload<T>, LeafRetainedPolicy>,
+    admission: PendingRetainedAdmission<'account>,
+    batch: AttributionReservationBatch<O, P, D, OutcomeEvidenceDestination>,
+    account: PhysicalStorageAccount,
+}
+
+struct ContainedStartupRetainedSide<O, P, D>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+{
+    lease: RetainedLeaseGuard,
+    batch: Option<AttributionReservationBatch<O, P, D, OutcomeEvidenceDestination>>,
+    attribution: Option<OperationAttributionReservation<O, P, D, OutcomeEvidenceDestination>>,
+    account: Option<PhysicalStorageAccount>,
+}
+
+/// A fail-closed startup pair keeps both attribution batches beside the aggregate physical lease.
+///
+/// The pair is intentionally opaque: callers cannot drop one charge witness while retaining the
+/// corresponding typed batch in a separate orchestration variable.
+struct ContainedStartupRetainedPair<O, P, D>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+{
+    lease: RetainedLeaseGuard,
+    fallback_batch: Option<AttributionReservationBatch<O, P, D, OutcomeEvidenceDestination>>,
+    evidence_batch: Option<AttributionReservationBatch<O, P, D, OutcomeEvidenceDestination>>,
+    fallback_attribution:
+        Option<OperationAttributionReservation<O, P, D, OutcomeEvidenceDestination>>,
+    evidence_attribution:
+        Option<OperationAttributionReservation<O, P, D, OutcomeEvidenceDestination>>,
+    fallback_account: Option<PhysicalStorageAccount>,
+    evidence_account: Option<PhysicalStorageAccount>,
+    fallback_lease_owner: Option<PhysicalStorageAccount>,
+    evidence_lease_owner: Option<PhysicalStorageAccount>,
+}
+
+struct StartupSideContainmentComponents<O, P, D>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+{
+    batch: Option<AttributionReservationBatch<O, P, D, OutcomeEvidenceDestination>>,
+    attribution: Option<OperationAttributionReservation<O, P, D, OutcomeEvidenceDestination>>,
+    account: Option<PhysicalStorageAccount>,
+    lease_owner: Option<PhysicalStorageAccount>,
+}
+
+impl<O, P, D> Drop for ContainedStartupRetainedPair<O, P, D>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+{
+    fn drop(&mut self) {
+        if let Some(batch) = self.fallback_batch.take() {
+            std::mem::forget(batch);
+        }
+        if let Some(batch) = self.evidence_batch.take() {
+            std::mem::forget(batch);
+        }
+        if let Some(attribution) = self.fallback_attribution.take() {
+            std::mem::forget(attribution);
+        }
+        if let Some(attribution) = self.evidence_attribution.take() {
+            std::mem::forget(attribution);
+        }
+        drop(self.fallback_account.take());
+        drop(self.evidence_account.take());
+        drop(self.fallback_lease_owner.take());
+        drop(self.evidence_lease_owner.take());
+        let _ = &self.lease;
+    }
+}
+
+impl<O, P, D> Drop for ContainedStartupRetainedSide<O, P, D>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+{
+    fn drop(&mut self) {
+        if let Some(batch) = self.batch.take() {
+            std::mem::forget(batch);
+        }
+        if let Some(attribution) = self.attribution.take() {
+            std::mem::forget(attribution);
+        }
+        drop(self.account.take());
+        let _ = &self.lease;
+    }
+}
+
+impl<'account, O, P, D, T> ReadyStartupRetainedSide<'account, O, P, D, T>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+{
+    fn commit(self, value: T) -> RetainedPart<T, OutcomeEvidenceDestination, O, P, D> {
+        let Self {
+            unarmed,
+            mut admission,
+            batch,
+            account,
+        } = self;
+        let charge = admission.charge;
+        let lease = admission.commit_lease();
+        let allocation = PolicyRetainedAllocation {
+            inner: unarmed.arm(RetainedPayload { value, charge }, lease),
+            membership: None,
+        };
+        RetainedPart {
+            allocation: Some(allocation),
+            batch: Some(batch),
+            account: Some(account),
+        }
+    }
+
+    fn contain_after_builder_panic(self) {
+        let Self {
+            unarmed,
+            mut admission,
+            batch,
+            account,
+        } = self;
+        drop(unarmed);
+        let lease = admission.contain_with_lease_owner();
+        drop(ContainedStartupRetainedSide {
+            lease,
+            batch: Some(batch),
+            attribution: None,
+            account: Some(account),
+        });
+    }
+
+    fn rollback(self, outer_reason: Option<AccountPoisonReason>) -> PendingRetainedRollback {
+        let Self {
+            unarmed,
+            mut admission,
+            batch,
+            account,
+        } = self;
+        drop(unarmed);
+        if !account.is_same_account(admission.account) {
+            let poisoned = account.record_poison(AccountPoisonReason::OwnershipGraphUnverified);
+            let lease = admission.contain_with_lease_owner();
+            drop(ContainedStartupRetainedSide {
+                lease,
+                batch: Some(batch),
+                attribution: None,
+                account: Some(account),
+            });
+            return PendingRetainedRollback::FaultRecorded(poisoned);
+        }
+        let rollback = admission.rollback_in_place(outer_reason);
+        if matches!(
+            rollback,
+            PendingRetainedRollback::ChargeReleaseUnverified(_)
+                | PendingRetainedRollback::ChargeRetainedAfterPoison(_)
+        ) {
+            let lease = match admission.take_contained_lease() {
+                Some(lease) => lease,
+                None => unreachable_final_owner_state(),
+            };
+            drop(ContainedStartupRetainedSide {
+                lease,
+                batch: Some(batch),
+                attribution: None,
+                account: Some(account),
+            });
+        } else {
+            drop(batch);
+            drop(account);
+        }
+        drop(admission);
+        rollback
+    }
+}
+
+enum StartupRetainedSideState<'account, O, P, D, T>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+{
+    Empty,
+    Pending {
+        account: PhysicalStorageAccount,
+        admission: PendingRetainedAdmission<'account>,
+    },
+    Constructing(StartupRetainedSideConstruction<'account, O, P, D, T>),
+    Ready(ReadyStartupRetainedSide<'account, O, P, D, T>),
+    Built(RetainedPart<T, OutcomeEvidenceDestination, O, P, D>),
+    Contained(ContainedStartupRetainedSide<O, P, D>),
+}
+
+impl<'account, O, P, D, T> StartupRetainedSideState<'account, O, P, D, T>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord + fmt::Debug + Send + Sync + 'static,
+    T: Send + Sync + 'static,
+{
+    fn begin_construction(&mut self) {
+        let pending = std::mem::replace(self, Self::Empty);
+        let (account, admission) = match pending {
+            Self::Pending { account, admission } => (account, admission),
+            state => {
+                *self = state;
+                unreachable_final_owner_state();
+            }
+        };
+        *self = Self::Constructing(StartupRetainedSideConstruction {
+            unarmed: None,
+            attribution: None,
+            batch: None,
+            admission: Some(admission),
+            account: Some(account),
+        });
+    }
+
+    fn construction_mut(&mut self) -> &mut StartupRetainedSideConstruction<'account, O, P, D, T> {
+        match self {
+            Self::Constructing(construction) => construction,
+            _ => unreachable_final_owner_state(),
+        }
+    }
+
+    fn try_prepare(
+        &mut self,
+        ledger: &Ledger<O, P, D>,
+        plan: StartupRetainedPartPlan<O, P, D, OutcomeEvidenceDestination>,
+    ) -> Result<(), StartupRetainedSideFailure<D>> {
+        self.begin_construction();
+        let construction = self.construction_mut();
+        let admission = match construction.admission.as_ref() {
+            Some(admission) => admission,
+            None => unreachable_final_owner_state(),
+        };
+        let account = match construction.account.as_ref() {
+            Some(account) => account,
+            None => unreachable_final_owner_state(),
+        };
+        let expected_charge = account
+            .checked_retained_charge::<T>(plan.allocation)
+            .map_err(|cause| {
+                StartupRetainedSideFailure::clean(RetainedWriterError::Physical(cause))
+            })?;
+        let (phase, attribution_dimension, qualified_bytes) = plan.attribution.into_parts();
+        if expected_charge != admission.charge
+            || qualified_bytes != admission.charge.bytes
+            || !account.is_same_account(admission.account)
+        {
+            return Err(StartupRetainedSideFailure::ownership(
+                RetainedWriterError::InvalidPublicationPlan,
+            ));
+        }
+
+        let batch = match catch_unwind(AssertUnwindSafe(|| {
+            ledger.try_attribution_batch_from_plan(plan.batch)
+        })) {
+            Err(payload) => {
+                discard_untrusted_panic_payload(payload);
+                return Err(StartupRetainedSideFailure::uncertain(
+                    RetainedWriterError::OwnershipUnverified,
+                ));
+            }
+            Ok(Err(AttributionBatchCreateError::CapacityOverflow)) => {
+                return Err(StartupRetainedSideFailure::clean(
+                    RetainedWriterError::BatchCapacity,
+                ));
+            }
+            Ok(Err(AttributionBatchCreateError::AllocationFailed)) => {
+                return Err(StartupRetainedSideFailure::clean(
+                    RetainedWriterError::BatchAllocationFailed,
+                ));
+            }
+            Ok(Err(AttributionBatchCreateError::Ledger(_))) => {
+                return Err(StartupRetainedSideFailure::uncertain(
+                    RetainedWriterError::OwnershipUnverified,
+                ));
+            }
+            Ok(Ok(batch)) => batch,
+        };
+        construction.batch = Some(batch);
+        let batch = match construction.batch.as_mut() {
+            Some(batch) => batch,
+            None => unreachable_final_owner_state(),
+        };
+        if !batch.has_attribution_slot() || batch.try_push_commitment(plan.commitment).is_err() {
+            return Err(StartupRetainedSideFailure::uncertain(
+                RetainedWriterError::OwnershipUnverified,
+            ));
+        }
+
+        let attribution = match catch_unwind(AssertUnwindSafe(|| {
+            ledger.reserve_operation_attribution::<OutcomeEvidenceDestination>(
+                phase,
+                attribution_dimension,
+                qualified_bytes,
+            )
+        })) {
+            Err(payload) => {
+                discard_untrusted_panic_payload(payload);
+                return Err(StartupRetainedSideFailure::uncertain(
+                    RetainedWriterError::OwnershipUnverified,
+                ));
+            }
+            Ok(Err(_)) => {
+                return Err(StartupRetainedSideFailure::uncertain(
+                    RetainedWriterError::OwnershipUnverified,
+                ));
+            }
+            Ok(Ok(attribution)) => attribution,
+        };
+        construction.attribution = Some(attribution);
+        let attribution = match construction.attribution.take() {
+            Some(attribution) => attribution,
+            None => unreachable_final_owner_state(),
+        };
+        if let Err(attribution) = batch.try_push_attribution(attribution) {
+            construction.attribution = Some(attribution);
+            return Err(StartupRetainedSideFailure::uncertain(
+                RetainedWriterError::OwnershipUnverified,
+            ));
+        }
+
+        let unarmed =
+            UnarmedRetainedFinalOwner::<RetainedPayload<T>, LeafRetainedPolicy>::try_allocate()
+                .map_err(|cause| {
+                    StartupRetainedSideFailure::clean(RetainedWriterError::Physical(
+                        map_retained_final_owner_error(cause),
+                    ))
+                })?;
+        construction.unarmed = Some(unarmed);
+        let construction = match std::mem::replace(self, Self::Empty) {
+            Self::Constructing(construction) => construction,
+            state => {
+                *self = state;
+                unreachable_final_owner_state();
+            }
+        };
+        let StartupRetainedSideConstruction {
+            account,
+            admission,
+            batch,
+            attribution,
+            unarmed,
+        } = construction;
+        if attribution.is_some() {
+            unreachable_final_owner_state();
+        }
+        *self = Self::Ready(ReadyStartupRetainedSide {
+            unarmed: match unarmed {
+                Some(unarmed) => unarmed,
+                None => unreachable_final_owner_state(),
+            },
+            admission: match admission {
+                Some(admission) => admission,
+                None => unreachable_final_owner_state(),
+            },
+            batch: match batch {
+                Some(batch) => batch,
+                None => unreachable_final_owner_state(),
+            },
+            account: match account {
+                Some(account) => account,
+                None => unreachable_final_owner_state(),
+            },
+        });
+        Ok(())
+    }
+
+    fn drop_unarmed_before_charge_resolution(&mut self) {
+        match self {
+            Self::Constructing(construction) => {
+                drop(construction.unarmed.take());
+            }
+            Self::Ready(_) => {
+                let ready = match std::mem::replace(self, Self::Empty) {
+                    Self::Ready(ready) => ready,
+                    state => {
+                        *self = state;
+                        return;
+                    }
+                };
+                let ReadyStartupRetainedSide {
+                    account,
+                    admission,
+                    batch,
+                    unarmed,
+                } = ready;
+                drop(unarmed);
+                *self = Self::Constructing(StartupRetainedSideConstruction {
+                    account: Some(account),
+                    admission: Some(admission),
+                    batch: Some(batch),
+                    attribution: None,
+                    unarmed: None,
+                });
+            }
+            Self::Empty | Self::Pending { .. } | Self::Built(_) | Self::Contained(_) => {}
+        }
+    }
+
+    fn contain_ready(&mut self) {
+        let ready = match std::mem::replace(self, Self::Empty) {
+            Self::Ready(ready) => ready,
+            state => {
+                *self = state;
+                unreachable_final_owner_state();
+            }
+        };
+        let ReadyStartupRetainedSide {
+            account,
+            mut admission,
+            batch,
+            unarmed,
+        } = ready;
+        drop(unarmed);
+        let lease = admission.contain_with_lease_owner();
+        *self = Self::Contained(ContainedStartupRetainedSide {
+            lease,
+            batch: Some(batch),
+            attribution: None,
+            account: Some(account),
+        });
+    }
+
+    fn pending_admission_mut(&mut self) -> Option<&mut PendingRetainedAdmission<'account>> {
+        match self {
+            Self::Pending { admission, .. } => Some(admission),
+            Self::Constructing(construction) => construction.admission.as_mut(),
+            Self::Ready(ready) => Some(&mut ready.admission),
+            Self::Empty | Self::Built(_) | Self::Contained(_) => None,
+        }
+    }
+
+    fn take_ready(&mut self) -> Option<ReadyStartupRetainedSide<'account, O, P, D, T>> {
+        match std::mem::replace(self, Self::Empty) {
+            Self::Ready(ready) => Some(ready),
+            state => {
+                *self = state;
+                None
+            }
+        }
+    }
+
+    fn pending_admission(&self) -> Option<&PendingRetainedAdmission<'account>> {
+        match self {
+            Self::Pending { admission, .. } => Some(admission),
+            Self::Constructing(construction) => construction.admission.as_ref(),
+            Self::Ready(ready) => Some(&ready.admission),
+            Self::Empty | Self::Built(_) | Self::Contained(_) => None,
+        }
+        .filter(|admission| admission.is_pending())
+    }
+
+    fn rollback_pending_side(
+        &mut self,
+        outer_reason: Option<AccountPoisonReason>,
+    ) -> PendingRetainedRollback {
+        let charge = match self.pending_admission() {
+            Some(admission) => admission.charge,
+            None => {
+                let account = match self {
+                    Self::Pending { account, .. } => Some(&*account),
+                    Self::Constructing(construction) => construction.account.as_ref(),
+                    Self::Ready(ready) => Some(&ready.account),
+                    Self::Empty | Self::Built(_) | Self::Contained(_) => None,
+                };
+                return match account {
+                    Some(account) => PendingRetainedRollback::FaultRecorded(
+                        account.record_poison(AccountPoisonReason::OwnershipGraphUnverified),
+                    ),
+                    None => PendingRetainedRollback::Clean,
+                };
+            }
+        };
+        let rollback = match self {
+            Self::Pending { admission, .. } => admission.rollback_startup_in_place(outer_reason),
+            Self::Constructing(construction) => match construction.admission.as_mut() {
+                Some(admission) => admission.rollback_startup_in_place(outer_reason),
+                None => PendingRetainedRollback::Clean,
+            },
+            Self::Ready(ready) => ready.admission.rollback_startup_in_place(outer_reason),
+            Self::Empty | Self::Built(_) | Self::Contained(_) => PendingRetainedRollback::Clean,
+        };
+        if !matches!(
+            rollback,
+            PendingRetainedRollback::ChargeReleaseUnverified(_)
+        ) {
+            return rollback;
+        }
+        let _ = charge;
+        rollback
+    }
+
+    fn contain_pending_charge(&mut self, charge: AdmissionCharge) {
+        let mut components = self.take_containment_components();
+        let owner = components
+            .account
+            .take()
+            .or_else(|| components.lease_owner.take());
+        let Some(owner) = owner else {
+            if let Some(batch) = components.batch.take() {
+                std::mem::forget(batch);
+            }
+            if let Some(attribution) = components.attribution.take() {
+                std::mem::forget(attribution);
+            }
+            return;
+        };
+        *self = Self::Contained(ContainedStartupRetainedSide {
+            lease: RetainedLeaseGuard {
+                lease: Some(AdmissionLease::new(owner, charge)),
+            },
+            batch: components.batch,
+            attribution: components.attribution,
+            account: components.account.or(components.lease_owner),
+        });
+    }
+
+    fn take_built(&mut self) -> Option<RetainedPart<T, OutcomeEvidenceDestination, O, P, D>> {
+        match std::mem::replace(self, Self::Empty) {
+            Self::Built(part) => Some(part),
+            state => {
+                *self = state;
+                None
+            }
+        }
+    }
+
+    const fn is_empty(&self) -> bool {
+        matches!(self, Self::Empty)
+    }
+
+    fn contain_built_after_recorded_fault(&mut self) {
+        if let Some(mut part) = self.take_built() {
+            part.record_forgotten_physical_edges();
+            part.fail_closed_after_recorded_poison();
+        }
+    }
+
+    fn try_discard_built_before_batch_release(
+        &mut self,
+        defer_ownership_fault: bool,
+    ) -> Result<(), RetainedPartCleanupError> {
+        let mut part = match self.take_built() {
+            Some(part) => part,
+            None => return Err(RetainedPartCleanupError::MissingFaultAnchor),
+        };
+        match part.try_discard_allocation_before_batch_release_with_policy(defer_ownership_fault) {
+            Ok(account) => {
+                drop(part.batch.take());
+                drop(account);
+                drop(part);
+                Ok(())
+            }
+            Err(cause) => {
+                part.fail_closed_after_recorded_poison();
+                drop(part);
+                Err(cause)
+            }
+        }
+    }
+
+    fn contain_attribution_after_anchored_fault(&mut self) {
+        let mut components = self.take_containment_components();
+        *self = Self::Contained(ContainedStartupRetainedSide {
+            lease: RetainedLeaseGuard::unarmed(),
+            batch: components.batch.take(),
+            attribution: components.attribution.take(),
+            account: components
+                .account
+                .take()
+                .or_else(|| components.lease_owner.take()),
+        });
+    }
+
+    fn take_containment_components(&mut self) -> StartupSideContainmentComponents<O, P, D> {
+        let state = std::mem::replace(self, Self::Empty);
+        match state {
+            Self::Pending {
+                account,
+                mut admission,
+            } => {
+                let lease_owner = admission.transfer_to_aggregate_containment();
+                StartupSideContainmentComponents {
+                    batch: None,
+                    attribution: None,
+                    account: Some(account),
+                    lease_owner: Some(lease_owner),
+                }
+            }
+            Self::Constructing(mut construction) => {
+                drop(construction.unarmed.take());
+                let lease_owner = construction
+                    .admission
+                    .as_mut()
+                    .map(|admission| admission.transfer_to_aggregate_containment());
+                StartupSideContainmentComponents {
+                    batch: construction.batch.take(),
+                    attribution: construction.attribution.take(),
+                    account: construction.account.take(),
+                    lease_owner,
+                }
+            }
+            Self::Ready(ready) => {
+                let ReadyStartupRetainedSide {
+                    unarmed,
+                    mut admission,
+                    batch,
+                    account,
+                } = ready;
+                drop(unarmed);
+                let lease_owner = admission.transfer_to_aggregate_containment();
+                StartupSideContainmentComponents {
+                    batch: Some(batch),
+                    attribution: None,
+                    account: Some(account),
+                    lease_owner: Some(lease_owner),
+                }
+            }
+            Self::Built(mut part) => {
+                part.record_forgotten_physical_edges();
+                part.fail_closed_after_recorded_poison();
+                StartupSideContainmentComponents {
+                    batch: None,
+                    attribution: None,
+                    account: None,
+                    lease_owner: None,
+                }
+            }
+            Self::Contained(contained) => {
+                drop(contained);
+                StartupSideContainmentComponents {
+                    batch: None,
+                    attribution: None,
+                    account: None,
+                    lease_owner: None,
+                }
+            }
+            Self::Empty => StartupSideContainmentComponents {
+                batch: None,
+                attribution: None,
+                account: None,
+                lease_owner: None,
+            },
+        }
+    }
+}
+
+struct StartupReadyPair<'account, O, P, D, F>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord + fmt::Debug + Send + Sync + 'static,
+    F: Send + Sync + 'static,
+{
+    account: &'account PhysicalStorageAccount,
+    pair_plan: RetainedAdmissionPairPlan,
+    fallback: ReadyStartupRetainedSide<'account, O, P, D, F>,
+    evidence: ReadyStartupRetainedSide<'account, O, P, D, PublicationEvidenceCells<D>>,
+    canonical_assembly: AttributionReservationBatch<O, P, D, CanonicalOutput>,
+    evidence_assembly: AttributionReservationBatch<O, P, D, OutcomeEvidenceDestination>,
+}
+
+struct StartupFallbackBuilt<'account, O, P, D, F>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord + fmt::Debug + Send + Sync + 'static,
+    F: Send + Sync + 'static,
+{
+    fallback: RetainedPart<F, OutcomeEvidenceDestination, O, P, D>,
+    evidence: ReadyStartupRetainedSide<'account, O, P, D, PublicationEvidenceCells<D>>,
+    canonical_assembly: AttributionReservationBatch<O, P, D, CanonicalOutput>,
+    evidence_assembly: AttributionReservationBatch<O, P, D, OutcomeEvidenceDestination>,
+    account: &'account PhysicalStorageAccount,
+    pair_plan: RetainedAdmissionPairPlan,
+}
+
+#[derive(Clone, Copy)]
+enum StartupCleanupDisposition {
+    Armed,
+    FaultAnchored(AccountPoisoned),
+    Drained,
+}
+
+impl<'account, O, P, D, F> StartupReadyPair<'account, O, P, D, F>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord + fmt::Debug + Send + Sync + 'static,
+    F: Send + Sync + 'static,
+{
+    fn into_cleanup_guard(self) -> StartupRetainedPartGuard<'account, O, P, D, F> {
+        StartupRetainedPartGuard {
+            account: self.account,
+            pair_plan: self.pair_plan,
+            pending_pair: None,
+            evidence_account: None,
+            fallback_lease_owner: None,
+            evidence_lease_owner: None,
+            fallback: StartupRetainedSideState::Ready(self.fallback),
+            evidence: StartupRetainedSideState::Ready(self.evidence),
+            contained_pending: None,
+            canonical_assembly: Some(self.canonical_assembly),
+            evidence_assembly: Some(self.evidence_assembly),
+            cleanup_disposition: StartupCleanupDisposition::Armed,
+        }
+    }
+
+    fn try_build(
+        self,
+        build_fallback: impl FnOnce() -> Result<F, RetainedBuildFailureCode>,
+        build_evidence: impl FnOnce() -> Result<PublicationEvidenceCells<D>, RetainedBuildFailureCode>,
+    ) -> Result<StartupFallbackOwner<O, P, D, F>, RetainedWriterError<D>> {
+        let fallback = match catch_unwind(AssertUnwindSafe(build_fallback)) {
+            Ok(Ok(value)) => value,
+            Ok(Err(cause)) => {
+                let cleanup = self.into_cleanup_guard();
+                return Err(cleanup.finish_rejection(
+                    StartupRetainedSide::Fallback,
+                    StartupRetainedSideFailure::clean(RetainedWriterError::Physical(
+                        RetainedAllocationError::Build(cause),
+                    )),
+                ));
+            }
+            Err(payload) => {
+                return Err(self
+                    .into_cleanup_guard()
+                    .finish_fallback_builder_panic(payload));
+            }
+        };
+        let Self {
+            account,
+            pair_plan,
+            fallback: ready_fallback,
+            evidence,
+            canonical_assembly,
+            evidence_assembly,
+        } = self;
+        StartupFallbackBuilt {
+            fallback: ready_fallback.commit(fallback),
+            evidence,
+            canonical_assembly,
+            evidence_assembly,
+            account,
+            pair_plan,
+        }
+        .try_build_evidence(build_evidence)
+    }
+}
+
+impl<'account, O, P, D, F> StartupFallbackBuilt<'account, O, P, D, F>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord + fmt::Debug + Send + Sync + 'static,
+    F: Send + Sync + 'static,
+{
+    fn into_cleanup_guard(self) -> StartupRetainedPartGuard<'account, O, P, D, F> {
+        StartupRetainedPartGuard {
+            account: self.account,
+            pair_plan: self.pair_plan,
+            pending_pair: None,
+            evidence_account: None,
+            fallback_lease_owner: None,
+            evidence_lease_owner: None,
+            fallback: StartupRetainedSideState::Built(self.fallback),
+            evidence: StartupRetainedSideState::Ready(self.evidence),
+            contained_pending: None,
+            canonical_assembly: Some(self.canonical_assembly),
+            evidence_assembly: Some(self.evidence_assembly),
+            cleanup_disposition: StartupCleanupDisposition::Armed,
+        }
+    }
+
+    fn try_build_evidence(
+        self,
+        build_evidence: impl FnOnce() -> Result<PublicationEvidenceCells<D>, RetainedBuildFailureCode>,
+    ) -> Result<StartupFallbackOwner<O, P, D, F>, RetainedWriterError<D>> {
+        let evidence = match catch_unwind(AssertUnwindSafe(build_evidence)) {
+            Ok(Ok(value)) => value,
+            Ok(Err(cause)) => {
+                return Err(self
+                    .into_cleanup_guard()
+                    .finish_evidence_build_rejection(cause));
+            }
+            Err(payload) => {
+                return Err(self
+                    .into_cleanup_guard()
+                    .finish_evidence_builder_panic(payload));
+            }
+        };
+        let Self {
+            fallback,
+            evidence: ready_evidence,
+            canonical_assembly,
+            evidence_assembly,
+            account: _,
+            pair_plan: _,
+        } = self;
+        Ok(StartupFallbackOwner::from_complete(
+            fallback,
+            ready_evidence.commit(evidence),
+            canonical_assembly,
+            evidence_assembly,
+        ))
+    }
+}
+
+struct StartupRetainedPartGuard<'account, O, P, D, F>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord + fmt::Debug + Send + Sync + 'static,
+    F: Send + Sync + 'static,
+{
+    account: &'account PhysicalStorageAccount,
+    pair_plan: RetainedAdmissionPairPlan,
+    pending_pair: Option<PendingStartRetainedAdmissions<'account>>,
+    evidence_account: Option<PhysicalStorageAccount>,
+    fallback_lease_owner: Option<PhysicalStorageAccount>,
+    evidence_lease_owner: Option<PhysicalStorageAccount>,
+    fallback: StartupRetainedSideState<'account, O, P, D, F>,
+    evidence: StartupRetainedSideState<'account, O, P, D, PublicationEvidenceCells<D>>,
+    contained_pending: Option<ContainedStartupRetainedPair<O, P, D>>,
+    canonical_assembly: Option<AttributionReservationBatch<O, P, D, CanonicalOutput>>,
+    evidence_assembly: Option<AttributionReservationBatch<O, P, D, OutcomeEvidenceDestination>>,
+    cleanup_disposition: StartupCleanupDisposition,
+}
+
+impl<'account, O, P, D, F> StartupRetainedPartGuard<'account, O, P, D, F>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord + fmt::Debug + Send + Sync + 'static,
+    F: Send + Sync + 'static,
+{
+    fn anchor_fault(&mut self, poisoned: AccountPoisoned) {
+        self.cleanup_disposition = StartupCleanupDisposition::FaultAnchored(poisoned);
+    }
+
+    fn mark_drained(&mut self) {
+        self.cleanup_disposition = StartupCleanupDisposition::Drained;
+    }
+
+    fn contain_pending_after_anchored_fault(&mut self) {
+        if let Some(admissions) = self.pending_pair.take() {
+            self.contained_pending = Some(ContainedStartupRetainedPair {
+                lease: admissions.transfer_to_containment(),
+                fallback_batch: None,
+                evidence_batch: None,
+                fallback_attribution: None,
+                evidence_attribution: None,
+                fallback_account: None,
+                evidence_account: self.evidence_account.take(),
+                fallback_lease_owner: self.fallback_lease_owner.take(),
+                evidence_lease_owner: self.evidence_lease_owner.take(),
+            });
+            return;
+        }
+
+        let fallback_charge = self
+            .fallback
+            .pending_admission()
+            .map(|admission| admission.charge);
+        let evidence_charge = self
+            .evidence
+            .pending_admission()
+            .map(|admission| admission.charge);
+        match (fallback_charge, evidence_charge) {
+            (Some(_), Some(_)) => self.install_split_pending_containment(None),
+            (Some(charge), None) => self.fallback.contain_pending_charge(charge),
+            (None, Some(charge)) => self.evidence.contain_pending_charge(charge),
+            (None, None) => {}
+        }
+    }
+
+    fn new(
+        mut admission_guard: StartupAdmissionGuard<'account>,
+        canonical_assembly: AttributionReservationBatch<O, P, D, CanonicalOutput>,
+        evidence_assembly: AttributionReservationBatch<O, P, D, OutcomeEvidenceDestination>,
+    ) -> Self {
+        let evidence_account = match admission_guard.evidence_account.take() {
+            Some(account) => account,
+            None => unreachable_final_owner_state(),
+        };
+        let fallback_lease_owner = match admission_guard.fallback_lease_owner.take() {
+            Some(account) => account,
+            None => unreachable_final_owner_state(),
+        };
+        let evidence_lease_owner = match admission_guard.evidence_lease_owner.take() {
+            Some(account) => account,
+            None => unreachable_final_owner_state(),
+        };
+        let pending_pair = match admission_guard.admissions.take() {
+            Some(admissions) => admissions,
+            None => unreachable_final_owner_state(),
+        };
+        let pair_plan = pending_pair.plan;
+        Self {
+            account: admission_guard.account,
+            pair_plan,
+            pending_pair: Some(pending_pair),
+            evidence_account: Some(evidence_account),
+            fallback_lease_owner: Some(fallback_lease_owner),
+            evidence_lease_owner: Some(evidence_lease_owner),
+            fallback: StartupRetainedSideState::Empty,
+            evidence: StartupRetainedSideState::Empty,
+            contained_pending: None,
+            canonical_assembly: Some(canonical_assembly),
+            evidence_assembly: Some(evidence_assembly),
+            cleanup_disposition: StartupCleanupDisposition::Armed,
+        }
+    }
+
+    fn split_pending_pair(&mut self) {
+        let admissions = match self.pending_pair.take() {
+            Some(admissions) => admissions,
+            None => return,
+        };
+        let evidence_account = match self.evidence_account.take() {
+            Some(account) => account,
+            None => unreachable_final_owner_state(),
+        };
+        let fallback_lease_owner = match self.fallback_lease_owner.take() {
+            Some(account) => account,
+            None => unreachable_final_owner_state(),
+        };
+        let evidence_lease_owner = match self.evidence_lease_owner.take() {
+            Some(account) => account,
+            None => unreachable_final_owner_state(),
+        };
+        let (fallback_account, fallback, evidence_account, evidence) =
+            admissions.into_parts(evidence_account, fallback_lease_owner, evidence_lease_owner);
+        self.fallback = StartupRetainedSideState::Pending {
+            account: fallback_account,
+            admission: fallback,
+        };
+        self.evidence = StartupRetainedSideState::Pending {
+            account: evidence_account,
+            admission: evidence,
+        };
+    }
+
+    fn mark_split_pending_released(&mut self) {
+        if let Some(admission) = self.fallback.pending_admission_mut() {
+            admission.mark_released_by_aggregate_rollback();
+        }
+        if let Some(admission) = self.evidence.pending_admission_mut() {
+            admission.mark_released_by_aggregate_rollback();
+        }
+    }
+
+    fn install_split_pending_containment(&mut self, owner: Option<PhysicalStorageAccount>) {
+        let mut fallback = self.fallback.take_containment_components();
+        let mut evidence = self.evidence.take_containment_components();
+        let owner = owner
+            .or_else(|| fallback.account.take())
+            .or_else(|| evidence.account.take())
+            .or_else(|| fallback.lease_owner.take())
+            .or_else(|| evidence.lease_owner.take());
+        self.contained_pending = Some(ContainedStartupRetainedPair {
+            lease: RetainedLeaseGuard {
+                lease: owner.map(|owner| AdmissionLease::new(owner, self.pair_plan.aggregate)),
+            },
+            fallback_batch: fallback.batch,
+            evidence_batch: evidence.batch,
+            fallback_attribution: fallback.attribution,
+            evidence_attribution: evidence.attribution,
+            fallback_account: fallback.account,
+            evidence_account: evidence.account,
+            fallback_lease_owner: fallback.lease_owner,
+            evidence_lease_owner: evidence.lease_owner,
+        });
+    }
+
+    fn rollback_remaining(
+        &mut self,
+        outer_reason: Option<AccountPoisonReason>,
+    ) -> StartupPendingResolution {
+        if let Some(admissions) = self.pending_pair.take() {
+            let rollback = admissions.rollback_with_fault(outer_reason);
+            if let PendingRetainedRollback::FaultRecorded(poisoned)
+            | PendingRetainedRollback::ChargeReleaseUnverified(poisoned)
+            | PendingRetainedRollback::ChargeRetainedAfterPoison(poisoned) = rollback
+            {
+                self.anchor_fault(poisoned);
+            }
+            return StartupPendingResolution { rollback };
+        }
+
+        let fallback_pending = self.fallback.pending_admission().map(|admission| {
+            (
+                admission.account.is_same_account(self.account),
+                admission.charge,
+            )
+        });
+        let evidence_pending = self.evidence.pending_admission().map(|admission| {
+            (
+                admission.account.is_same_account(self.account),
+                admission.charge,
+            )
+        });
+        match (fallback_pending, evidence_pending) {
+            (
+                Some((fallback_same_account, fallback_charge)),
+                Some((evidence_same_account, evidence_charge)),
+            ) => {
+                let exact_pair = fallback_same_account
+                    && evidence_same_account
+                    && fallback_charge == self.pair_plan.first
+                    && evidence_charge == self.pair_plan.second;
+                if !exact_pair {
+                    let poisoned = self
+                        .account
+                        .record_poison(AccountPoisonReason::OwnershipGraphUnverified);
+                    self.anchor_fault(poisoned);
+                    self.install_split_pending_containment(None);
+                    return StartupPendingResolution {
+                        rollback: PendingRetainedRollback::FaultRecorded(poisoned),
+                    };
+                }
+                let rollback = self
+                    .account
+                    .rollback_pending_retained_charge(self.pair_plan.aggregate, outer_reason);
+                if let PendingRetainedRollback::FaultRecorded(poisoned)
+                | PendingRetainedRollback::ChargeReleaseUnverified(poisoned)
+                | PendingRetainedRollback::ChargeRetainedAfterPoison(poisoned) = rollback
+                {
+                    self.anchor_fault(poisoned);
+                }
+                match rollback {
+                    PendingRetainedRollback::ChargeReleaseUnverified(_)
+                    | PendingRetainedRollback::ChargeRetainedAfterPoison(_) => {
+                        self.install_split_pending_containment(None);
+                    }
+                    PendingRetainedRollback::Clean | PendingRetainedRollback::FaultRecorded(_) => {
+                        self.mark_split_pending_released();
+                    }
+                }
+                StartupPendingResolution { rollback }
+            }
+            (Some((fallback_same_account, fallback_charge)), None) => {
+                let exact = fallback_same_account && fallback_charge == self.pair_plan.first;
+                if !exact {
+                    let poisoned = self
+                        .account
+                        .record_poison(AccountPoisonReason::OwnershipGraphUnverified);
+                    self.anchor_fault(poisoned);
+                    self.fallback.contain_pending_charge(fallback_charge);
+                    return StartupPendingResolution {
+                        rollback: PendingRetainedRollback::FaultRecorded(poisoned),
+                    };
+                }
+                let rollback = self.fallback.rollback_pending_side(outer_reason);
+                if let PendingRetainedRollback::FaultRecorded(poisoned)
+                | PendingRetainedRollback::ChargeReleaseUnverified(poisoned)
+                | PendingRetainedRollback::ChargeRetainedAfterPoison(poisoned) = rollback
+                {
+                    self.anchor_fault(poisoned);
+                }
+                if matches!(
+                    rollback,
+                    PendingRetainedRollback::ChargeReleaseUnverified(_)
+                        | PendingRetainedRollback::ChargeRetainedAfterPoison(_)
+                ) {
+                    self.fallback.contain_pending_charge(self.pair_plan.first);
+                }
+                StartupPendingResolution { rollback }
+            }
+            (None, Some((evidence_same_account, evidence_charge))) => {
+                let exact = evidence_same_account && evidence_charge == self.pair_plan.second;
+                if !exact {
+                    let poisoned = self
+                        .account
+                        .record_poison(AccountPoisonReason::OwnershipGraphUnverified);
+                    self.anchor_fault(poisoned);
+                    self.evidence.contain_pending_charge(evidence_charge);
+                    return StartupPendingResolution {
+                        rollback: PendingRetainedRollback::FaultRecorded(poisoned),
+                    };
+                }
+                let rollback = self.evidence.rollback_pending_side(outer_reason);
+                if let PendingRetainedRollback::FaultRecorded(poisoned)
+                | PendingRetainedRollback::ChargeReleaseUnverified(poisoned)
+                | PendingRetainedRollback::ChargeRetainedAfterPoison(poisoned) = rollback
+                {
+                    self.anchor_fault(poisoned);
+                }
+                if matches!(
+                    rollback,
+                    PendingRetainedRollback::ChargeReleaseUnverified(_)
+                        | PendingRetainedRollback::ChargeRetainedAfterPoison(_)
+                ) {
+                    self.evidence.contain_pending_charge(self.pair_plan.second);
+                }
+                StartupPendingResolution { rollback }
+            }
+            (None, None) => {
+                let rollback = match outer_reason {
+                    Some(reason) => {
+                        let poisoned = self.account.record_poison(reason);
+                        self.anchor_fault(poisoned);
+                        PendingRetainedRollback::FaultRecorded(poisoned)
+                    }
+                    None => PendingRetainedRollback::Clean,
+                };
+                StartupPendingResolution { rollback }
+            }
+        }
+    }
+
+    fn retain_side_attribution(&mut self, side: StartupRetainedSide) {
+        match side {
+            StartupRetainedSide::Fallback => {
+                self.fallback.contain_attribution_after_anchored_fault()
+            }
+            StartupRetainedSide::Evidence => {
+                self.evidence.contain_attribution_after_anchored_fault()
+            }
+        }
+    }
+
+    fn is_structurally_empty(&self) -> bool {
+        self.pending_pair.is_none()
+            && self.evidence_account.is_none()
+            && self.fallback_lease_owner.is_none()
+            && self.evidence_lease_owner.is_none()
+            && self.fallback.is_empty()
+            && self.evidence.is_empty()
+            && self.contained_pending.is_none()
+            && self.canonical_assembly.is_none()
+            && self.evidence_assembly.is_none()
+    }
+
+    fn drain_handled_state(&mut self) {
+        drop(std::mem::replace(
+            &mut self.fallback,
+            StartupRetainedSideState::Empty,
+        ));
+        drop(std::mem::replace(
+            &mut self.evidence,
+            StartupRetainedSideState::Empty,
+        ));
+        drop(self.pending_pair.take());
+        drop(self.contained_pending.take());
+        drop(self.evidence_account.take());
+        drop(self.fallback_lease_owner.take());
+        drop(self.evidence_lease_owner.take());
+        drop(self.canonical_assembly.take());
+        drop(self.evidence_assembly.take());
+    }
+
+    fn try_into_ready_pair(
+        mut self,
+    ) -> Result<StartupReadyPair<'account, O, P, D, F>, RetainedWriterError<D>> {
+        let fallback = match self.fallback.take_ready() {
+            Some(ready) => ready,
+            None => return Err(self.finish_invalid_complete_state()),
+        };
+        let evidence = match self.evidence.take_ready() {
+            Some(ready) => ready,
+            None => {
+                self.fallback = StartupRetainedSideState::Ready(fallback);
+                return Err(self.finish_invalid_complete_state());
+            }
+        };
+        let canonical_assembly = match self.canonical_assembly.take() {
+            Some(batch) => batch,
+            None => {
+                self.fallback = StartupRetainedSideState::Ready(fallback);
+                self.evidence = StartupRetainedSideState::Ready(evidence);
+                return Err(self.finish_invalid_complete_state());
+            }
+        };
+        let evidence_assembly = match self.evidence_assembly.take() {
+            Some(batch) => batch,
+            None => {
+                self.fallback = StartupRetainedSideState::Ready(fallback);
+                self.evidence = StartupRetainedSideState::Ready(evidence);
+                self.canonical_assembly = Some(canonical_assembly);
+                return Err(self.finish_invalid_complete_state());
+            }
+        };
+        if self.pending_pair.is_some()
+            || self.evidence_account.is_some()
+            || self.fallback_lease_owner.is_some()
+            || self.evidence_lease_owner.is_some()
+            || self.contained_pending.is_some()
+        {
+            self.fallback = StartupRetainedSideState::Ready(fallback);
+            self.evidence = StartupRetainedSideState::Ready(evidence);
+            self.canonical_assembly = Some(canonical_assembly);
+            self.evidence_assembly = Some(evidence_assembly);
+            return Err(self.finish_invalid_complete_state());
+        }
+        Ok(StartupReadyPair {
+            account: self.account,
+            pair_plan: self.pair_plan,
+            fallback,
+            evidence,
+            canonical_assembly,
+            evidence_assembly,
+        })
+    }
+
+    fn finish_invalid_complete_state(mut self) -> RetainedWriterError<D> {
+        self.fallback.drop_unarmed_before_charge_resolution();
+        self.evidence.drop_unarmed_before_charge_resolution();
+        let resolution =
+            self.rollback_remaining(Some(AccountPoisonReason::OwnershipGraphUnverified));
+        match resolution.rollback {
+            PendingRetainedRollback::FaultRecorded(poisoned)
+            | PendingRetainedRollback::ChargeReleaseUnverified(poisoned)
+            | PendingRetainedRollback::ChargeRetainedAfterPoison(poisoned) => {
+                self.anchor_fault(poisoned);
+            }
+            PendingRetainedRollback::Clean => {
+                let poisoned = self
+                    .account
+                    .record_poison(AccountPoisonReason::OwnershipGraphUnverified);
+                self.anchor_fault(poisoned);
+            }
+        }
+        self.fallback.contain_built_after_recorded_fault();
+        self.evidence.contain_built_after_recorded_fault();
+        self.drain_handled_state();
+        self.mark_drained();
+        RetainedWriterError::OwnershipUnverified
+    }
+
+    fn finish_rejection(
+        mut self,
+        failed_side: StartupRetainedSide,
+        failure: StartupRetainedSideFailure<D>,
+    ) -> RetainedWriterError<D> {
+        self.fallback.drop_unarmed_before_charge_resolution();
+        self.evidence.drop_unarmed_before_charge_resolution();
+        let resolution = self.rollback_remaining(failure.fault);
+        match resolution.rollback {
+            PendingRetainedRollback::FaultRecorded(poisoned)
+            | PendingRetainedRollback::ChargeReleaseUnverified(poisoned)
+            | PendingRetainedRollback::ChargeRetainedAfterPoison(poisoned) => {
+                self.anchor_fault(poisoned);
+            }
+            PendingRetainedRollback::Clean => {}
+        }
+        if failure.retain_attribution
+            && matches!(
+                resolution.rollback,
+                PendingRetainedRollback::FaultRecorded(_)
+                    | PendingRetainedRollback::ChargeReleaseUnverified(_)
+                    | PendingRetainedRollback::ChargeRetainedAfterPoison(_)
+            )
+        {
+            self.retain_side_attribution(failed_side);
+        }
+        let storage_failure = matches!(failure.cause, RetainedWriterError::StorageDropUnverified);
+        let ownership_failure = failure.fault.is_some()
+            || matches!(
+                resolution.rollback,
+                PendingRetainedRollback::FaultRecorded(_)
+                    | PendingRetainedRollback::ChargeRetainedAfterPoison(_)
+            );
+        let charge_failure = matches!(
+            resolution.rollback,
+            PendingRetainedRollback::ChargeReleaseUnverified(_)
+                | PendingRetainedRollback::ChargeRetainedAfterPoison(_)
+        );
+        let error = if storage_failure {
+            RetainedWriterError::StorageDropUnverified
+        } else if ownership_failure {
+            RetainedWriterError::OwnershipUnverified
+        } else if charge_failure {
+            RetainedWriterError::ChargeReleaseUnverified
+        } else {
+            failure.cause
+        };
+        self.drain_handled_state();
+        self.mark_drained();
+        error
+    }
+
+    fn finish_evidence_build_rejection(
+        mut self,
+        cause: RetainedBuildFailureCode,
+    ) -> RetainedWriterError<D> {
+        self.evidence.drop_unarmed_before_charge_resolution();
+        let mut storage_failure = false;
+        let mut ownership_failure = false;
+        let mut charge_failure = false;
+        let mut deferred_ownership = false;
+        let mut primary_fault_recorded = false;
+        let evidence_exact = self.evidence.pending_admission().is_some_and(|admission| {
+            admission.account.is_same_account(self.account)
+                && admission.charge == self.pair_plan.second
+        });
+        let rollback = if evidence_exact {
+            self.evidence.rollback_pending_side(None)
+        } else {
+            let charge = self
+                .evidence
+                .pending_admission()
+                .map(|admission| admission.charge);
+            if let Some(charge) = charge {
+                self.evidence.contain_pending_charge(charge);
+            }
+            ownership_failure = true;
+            deferred_ownership = true;
+            PendingRetainedRollback::Clean
+        };
+        match rollback {
+            PendingRetainedRollback::Clean => {}
+            PendingRetainedRollback::FaultRecorded(poisoned) => {
+                ownership_failure = true;
+                primary_fault_recorded = true;
+                self.anchor_fault(poisoned);
+            }
+            PendingRetainedRollback::ChargeReleaseUnverified(poisoned) => {
+                charge_failure = true;
+                primary_fault_recorded = true;
+                self.anchor_fault(poisoned);
+                self.evidence.contain_pending_charge(self.pair_plan.second);
+            }
+            PendingRetainedRollback::ChargeRetainedAfterPoison(poisoned) => {
+                ownership_failure = true;
+                primary_fault_recorded = true;
+                self.anchor_fault(poisoned);
+                self.evidence.contain_pending_charge(self.pair_plan.second);
+            }
+        }
+        let defer_fallback_ownership = primary_fault_recorded || deferred_ownership;
+        match self
+            .fallback
+            .try_discard_built_before_batch_release(defer_fallback_ownership)
+        {
+            Ok(()) => {}
+            Err(RetainedPartCleanupError::ChargeReleaseUnverified(poisoned)) => {
+                charge_failure = true;
+                primary_fault_recorded |=
+                    poisoned.reason == AccountPoisonReason::CounterInvariantViolated;
+                self.anchor_fault(poisoned.poisoned);
+            }
+            Err(RetainedPartCleanupError::MissingFaultAnchor) => {
+                ownership_failure = true;
+                deferred_ownership = true;
+            }
+            Err(RetainedPartCleanupError::DeferredOwnershipFault) => {
+                ownership_failure = true;
+                deferred_ownership = true;
+            }
+            Err(RetainedPartCleanupError::StorageReleaseUnverified(poisoned)) => {
+                storage_failure = true;
+                self.anchor_fault(poisoned.poisoned);
+            }
+            Err(
+                RetainedPartCleanupError::NewFaultAlreadyRecorded(poisoned)
+                | RetainedPartCleanupError::StillSharedOwnershipFault(poisoned),
+            ) => {
+                ownership_failure = true;
+                primary_fault_recorded = true;
+                self.anchor_fault(poisoned.poisoned);
+            }
+        }
+        if deferred_ownership && !primary_fault_recorded {
+            let poisoned = self
+                .account
+                .record_poison(AccountPoisonReason::OwnershipGraphUnverified);
+            self.anchor_fault(poisoned);
+        }
+        let error = if storage_failure {
+            RetainedWriterError::StorageDropUnverified
+        } else if ownership_failure {
+            RetainedWriterError::OwnershipUnverified
+        } else if charge_failure {
+            RetainedWriterError::ChargeReleaseUnverified
+        } else {
+            RetainedWriterError::Physical(RetainedAllocationError::Build(cause))
+        };
+        self.drain_handled_state();
+        self.mark_drained();
+        error
+    }
+
+    fn finish_fallback_builder_panic(
+        mut self,
+        payload: Box<dyn std::any::Any + Send>,
+    ) -> RetainedWriterError<D> {
+        self.evidence.drop_unarmed_before_charge_resolution();
+        let evidence_exact = self.evidence.pending_admission().is_some_and(|admission| {
+            admission.account.is_same_account(self.account)
+                && admission.charge == self.pair_plan.second
+        });
+        let sibling_rollback = if evidence_exact {
+            self.evidence.rollback_pending_side(None)
+        } else {
+            let charge = self
+                .evidence
+                .pending_admission()
+                .map(|admission| admission.charge);
+            let poisoned = self
+                .account
+                .record_poison(AccountPoisonReason::OwnershipGraphUnverified);
+            self.anchor_fault(poisoned);
+            if let Some(charge) = charge {
+                self.evidence.contain_pending_charge(charge);
+            }
+            PendingRetainedRollback::FaultRecorded(poisoned)
+        };
+        match sibling_rollback {
+            PendingRetainedRollback::Clean => {
+                let poisoned = self
+                    .account
+                    .record_poison(AccountPoisonReason::RetainedBuilderPanicked);
+                self.anchor_fault(poisoned);
+            }
+            PendingRetainedRollback::FaultRecorded(poisoned)
+            | PendingRetainedRollback::ChargeReleaseUnverified(poisoned) => {
+                self.anchor_fault(poisoned);
+                if matches!(
+                    sibling_rollback,
+                    PendingRetainedRollback::ChargeReleaseUnverified(_)
+                ) {
+                    self.evidence.contain_pending_charge(self.pair_plan.second);
+                }
+            }
+            PendingRetainedRollback::ChargeRetainedAfterPoison(poisoned) => {
+                self.anchor_fault(poisoned);
+                self.evidence.contain_pending_charge(self.pair_plan.second);
+                let builder_fault = self
+                    .account
+                    .record_poison(AccountPoisonReason::RetainedBuilderPanicked);
+                self.anchor_fault(builder_fault);
+            }
+        }
+        self.fallback.contain_ready();
+        discard_untrusted_panic_payload(payload);
+        let error = match sibling_rollback {
+            PendingRetainedRollback::ChargeReleaseUnverified(_) => {
+                RetainedWriterError::ChargeReleaseUnverified
+            }
+            PendingRetainedRollback::ChargeRetainedAfterPoison(_) => {
+                RetainedWriterError::Physical(RetainedAllocationError::BuilderPanicked)
+            }
+            PendingRetainedRollback::FaultRecorded(_) => RetainedWriterError::OwnershipUnverified,
+            PendingRetainedRollback::Clean => {
+                RetainedWriterError::Physical(RetainedAllocationError::BuilderPanicked)
+            }
+        };
+        self.drain_handled_state();
+        self.mark_drained();
+        error
+    }
+
+    fn finish_evidence_builder_panic(
+        mut self,
+        payload: Box<dyn std::any::Any + Send>,
+    ) -> RetainedWriterError<D> {
+        self.evidence.contain_ready();
+        let mut storage_failure = false;
+        let mut ownership_failure = false;
+        let mut charge_failure = false;
+        let mut deferred_ownership = false;
+        let mut primary_fault_recorded = false;
+
+        match self.fallback.try_discard_built_before_batch_release(false) {
+            Ok(()) => {}
+            Err(RetainedPartCleanupError::ChargeReleaseUnverified(poisoned)) => {
+                charge_failure = true;
+                primary_fault_recorded |=
+                    poisoned.reason == AccountPoisonReason::CounterInvariantViolated;
+                self.anchor_fault(poisoned.poisoned);
+            }
+            Err(RetainedPartCleanupError::MissingFaultAnchor)
+            | Err(RetainedPartCleanupError::DeferredOwnershipFault) => {
+                ownership_failure = true;
+                deferred_ownership = true;
+            }
+            Err(RetainedPartCleanupError::StorageReleaseUnverified(poisoned)) => {
+                storage_failure = true;
+                self.anchor_fault(poisoned.poisoned);
+            }
+            Err(
+                RetainedPartCleanupError::NewFaultAlreadyRecorded(poisoned)
+                | RetainedPartCleanupError::StillSharedOwnershipFault(poisoned),
+            ) => {
+                ownership_failure = true;
+                primary_fault_recorded = true;
+                self.anchor_fault(poisoned.poisoned);
+            }
+        }
+        if !primary_fault_recorded {
+            let reason = if deferred_ownership {
+                AccountPoisonReason::OwnershipGraphUnverified
+            } else {
+                AccountPoisonReason::RetainedBuilderPanicked
+            };
+            let poisoned = self.account.record_poison(reason);
+            self.anchor_fault(poisoned);
+        }
+        discard_untrusted_panic_payload(payload);
+        let error = if storage_failure {
+            RetainedWriterError::StorageDropUnverified
+        } else if ownership_failure {
+            RetainedWriterError::OwnershipUnverified
+        } else if charge_failure {
+            RetainedWriterError::ChargeReleaseUnverified
+        } else {
+            RetainedWriterError::Physical(RetainedAllocationError::BuilderPanicked)
+        };
+        self.drain_handled_state();
+        self.mark_drained();
+        error
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "startup retains both physical parts under one continuous owner"
+    )]
+    fn try_build(
+        mut self,
+        ledger: &Ledger<O, P, D>,
+        fallback_plan: StartupRetainedPartPlan<O, P, D, OutcomeEvidenceDestination>,
+        build_fallback: impl FnOnce() -> Result<F, RetainedBuildFailureCode>,
+        evidence_plan: StartupRetainedPartPlan<O, P, D, OutcomeEvidenceDestination>,
+        build_evidence: impl FnOnce() -> Result<PublicationEvidenceCells<D>, RetainedBuildFailureCode>,
+    ) -> Result<StartupFallbackOwner<O, P, D, F>, RetainedWriterError<D>> {
+        self.split_pending_pair();
+        if let Err(failure) = self.fallback.try_prepare(ledger, fallback_plan) {
+            return Err(self.finish_rejection(StartupRetainedSide::Fallback, failure));
+        }
+        if let Err(failure) = self.evidence.try_prepare(ledger, evidence_plan) {
+            return Err(self.finish_rejection(StartupRetainedSide::Evidence, failure));
+        }
+        self.try_into_ready_pair()?
+            .try_build(build_fallback, build_evidence)
+    }
+}
+
+impl<O, P, D, F> Drop for StartupRetainedPartGuard<'_, O, P, D, F>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord + fmt::Debug + Send + Sync + 'static,
+    F: Send + Sync + 'static,
+{
+    fn drop(&mut self) {
+        if self.is_structurally_empty() {
+            return;
+        }
+        if matches!(self.cleanup_disposition, StartupCleanupDisposition::Drained) {
+            self.drain_handled_state();
+            return;
+        }
+        if let StartupCleanupDisposition::FaultAnchored(witness) = self.cleanup_disposition {
+            let _ = witness;
+            self.fallback.drop_unarmed_before_charge_resolution();
+            self.evidence.drop_unarmed_before_charge_resolution();
+            self.contain_pending_after_anchored_fault();
+            self.fallback.contain_built_after_recorded_fault();
+            self.evidence.contain_built_after_recorded_fault();
+            self.drain_handled_state();
+            return;
+        }
+        self.fallback.drop_unarmed_before_charge_resolution();
+        self.evidence.drop_unarmed_before_charge_resolution();
+        let _resolution =
+            self.rollback_remaining(Some(AccountPoisonReason::OwnershipGraphUnverified));
+        self.fallback.contain_built_after_recorded_fault();
+        self.evidence.contain_built_after_recorded_fault();
+        self.drain_handled_state();
     }
 }
 
@@ -2150,6 +6183,13 @@ impl<P: Copy, D: Copy> RetainedPublicationPlan<P, D> {
 enum RetainedOutcomeMode {
     SuccessCapable,
     FailureOnly,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AssemblyContainmentProvenance {
+    Healthy,
+    NewFaultPending,
+    RetainedFailureAlreadyRecorded(AccountPoisonReason),
 }
 
 enum RetainedTerminalRequest<CanonicalBlock, EvidenceBlock, PP, U> {
@@ -2383,6 +6423,75 @@ impl<Block> RetainedBlockTable<Block> {
     }
 }
 
+fn record_forgotten_table_edges<Block>(table: &RetainedTableAllocation<Block>) {
+    let _ = table
+        .account()
+        .record_poison(AccountPoisonReason::RetainedStorageReleaseUnverified);
+    for member in &table.as_ref().members {
+        let _ = member
+            .allocation
+            .account()
+            .record_poison(AccountPoisonReason::RetainedStorageReleaseUnverified);
+    }
+}
+
+fn release_retained_table_payload<Block>(
+    payload: RetainedPayload<RetainedBlockTable<Block>>,
+    mode: RetainedReleaseMode,
+) -> RetainedValueReleaseOutcome {
+    let RetainedPayload {
+        value: mut table,
+        charge: _,
+    } = payload;
+    let members = std::mem::take(&mut table.members);
+    let mut nested_failure = None;
+    let mut nested_charge_unverified = None;
+    let mut nested_ownership_unverified = None;
+    for RetainedBlockMember {
+        allocation,
+        tag: _,
+        origin,
+        reachable: _,
+    } in members
+    {
+        let outcome = if mode == RetainedReleaseMode::BeforeAttribution
+            && origin == RetainedBlockOrigin::New
+        {
+            match allocation.try_release_unique_before_attribution() {
+                Ok(outcome) => outcome,
+                Err((allocation, poisoned)) => {
+                    std::mem::forget(allocation);
+                    FinalOwnerReleaseOutcome::OwnershipUnverified(poisoned)
+                }
+            }
+        } else {
+            allocation.release_storage()
+        };
+        match outcome {
+            FinalOwnerReleaseOutcome::Clean => {}
+            FinalOwnerReleaseOutcome::StorageReleaseUnverified(poisoned) => {
+                nested_failure.get_or_insert(poisoned);
+            }
+            FinalOwnerReleaseOutcome::ChargeReleaseUnverified(poisoned) => {
+                nested_charge_unverified.get_or_insert(poisoned);
+            }
+            FinalOwnerReleaseOutcome::OwnershipUnverified(poisoned) => {
+                nested_ownership_unverified.get_or_insert(poisoned);
+            }
+        }
+    }
+    drop(table);
+    if let Some(poisoned) = nested_failure {
+        RetainedValueReleaseOutcome::NestedStorageReleaseUnverified(poisoned)
+    } else if let Some(poisoned) = nested_ownership_unverified {
+        RetainedValueReleaseOutcome::NestedOwnershipUnverified(poisoned)
+    } else if let Some(poisoned) = nested_charge_unverified {
+        RetainedValueReleaseOutcome::NestedChargeReleaseUnverified(poisoned)
+    } else {
+        RetainedValueReleaseOutcome::Clean
+    }
+}
+
 /// Read-only reachability session for a success-capable canonical/evidence graph.
 ///
 /// Validation must visit every unique slot in both tables. Repeated DAG edges are valid and count
@@ -2556,7 +6665,7 @@ impl fmt::Display for RetainedClosureValidationError {
 impl std::error::Error for RetainedClosureValidationError {}
 
 struct PublishedRetainedAggregate<Block> {
-    table: RetainedAllocation<RetainedBlockTable<Block>>,
+    table: RetainedTableAllocation<Block>,
     set_id: RetainedSetId,
 }
 
@@ -2676,7 +6785,13 @@ impl<Operation, D> RetainedPublicationOpenError<Operation, D> {
 
 fn retained_open_failure_is_recoverable<D>(cause: &RetainedWriterError<D>) -> bool {
     !matches!(cause, RetainedWriterError::Physical(error) if error.charge_retained())
-        && !matches!(cause, RetainedWriterError::StorageDropUnverified)
+        && !matches!(
+            cause,
+            RetainedWriterError::StorageDropUnverified
+                | RetainedWriterError::OwnershipUnverified
+                | RetainedWriterError::ChargeReleaseUnverified
+        )
+        && !matches!(cause, RetainedWriterError::AccountPoisoned(_))
 }
 
 /// Recoverable construction failure for an operation-owned retained block table.
@@ -2725,17 +6840,43 @@ impl<D: fmt::Debug + 'static> std::error::Error for RetainedPublicationError<D> 
     }
 }
 
-fn retained_publication_error_is_poisoning<D>(error: &RetainedPublicationError<D>) -> bool {
-    matches!(error, RetainedPublicationError::Poisoned)
-        || matches!(
-            error,
-            RetainedPublicationError::Writer(RetainedWriterError::StorageDropUnverified)
-        )
-        || matches!(
-            error,
-            RetainedPublicationError::Writer(RetainedWriterError::Physical(cause))
-                if cause.charge_retained()
-        )
+fn retained_publication_error_containment<D>(
+    error: &RetainedPublicationError<D>,
+) -> Option<AssemblyContainmentProvenance> {
+    let reason = match error {
+        RetainedPublicationError::Poisoned => {
+            return Some(AssemblyContainmentProvenance::NewFaultPending);
+        }
+        RetainedPublicationError::Writer(RetainedWriterError::StorageDropUnverified) => {
+            AccountPoisonReason::RetainedStorageReleaseUnverified
+        }
+        RetainedPublicationError::Writer(RetainedWriterError::OwnershipUnverified) => {
+            AccountPoisonReason::OwnershipGraphUnverified
+        }
+        RetainedPublicationError::Writer(RetainedWriterError::ChargeReleaseUnverified) => {
+            AccountPoisonReason::CounterInvariantViolated
+        }
+        RetainedPublicationError::Writer(RetainedWriterError::AccountPoisoned(cause)) => {
+            quarantined_account_reason(*cause)
+        }
+        RetainedPublicationError::Writer(RetainedWriterError::Physical(
+            RetainedAllocationError::BuilderPanicked,
+        )) => AccountPoisonReason::RetainedBuilderPanicked,
+        RetainedPublicationError::Writer(RetainedWriterError::Physical(
+            RetainedAllocationError::ChargeReleaseUnverified,
+        )) => AccountPoisonReason::CounterInvariantViolated,
+        RetainedPublicationError::Writer(RetainedWriterError::Physical(
+            RetainedAllocationError::AccountPoisonedWithRetainedCharge(cause),
+        )) => quarantined_account_reason(*cause),
+        _ => return None,
+    };
+    Some(AssemblyContainmentProvenance::RetainedFailureAlreadyRecorded(reason))
+}
+
+pub(super) fn retained_publication_error_requires_containment<D>(
+    error: &RetainedPublicationError<D>,
+) -> bool {
+    retained_publication_error_containment(error).is_some()
 }
 
 /// Stable operation owner for two preplanned, physically accounted block tables.
@@ -2751,8 +6892,8 @@ where
     CanonicalBlock: Send + Sync + 'static,
     EvidenceBlock: Send + Sync + 'static,
 {
-    canonical_table: Option<RetainedAllocation<RetainedBlockTable<CanonicalBlock>>>,
-    evidence_table: Option<RetainedAllocation<RetainedBlockTable<EvidenceBlock>>>,
+    canonical_table: Option<RetainedTableAllocation<CanonicalBlock>>,
+    evidence_table: Option<RetainedTableAllocation<EvidenceBlock>>,
     canonical_batch: Option<AttributionReservationBatch<O, P, D, CanonicalOutput>>,
     evidence_batch: Option<AttributionReservationBatch<O, P, D, OutcomeEvidenceDestination>>,
     account: Option<PhysicalStorageAccount>,
@@ -2762,7 +6903,912 @@ where
     evidence_plan: RetainedBlockTablePlan<P, D>,
     handle_share_work: RetainedHandleSharePlan<D>,
     mode: RetainedOutcomeMode,
-    poisoned: bool,
+    containment: AssemblyContainmentProvenance,
+}
+
+struct TerminalPhysicalOwnershipManifest<D, F, CanonicalBlock, EvidenceBlock> {
+    fallback: Option<DetachedRetainedPart<F>>,
+    evidence: Option<DetachedRetainedPart<PublicationEvidenceCells<D>>>,
+    canonical_table: Option<RetainedTableAllocation<CanonicalBlock>>,
+    evidence_table: Option<RetainedTableAllocation<EvidenceBlock>>,
+    account: Option<PhysicalStorageAccount>,
+}
+
+type TerminalPhysicalParts<D, F, CanonicalBlock, EvidenceBlock> = (
+    DetachedRetainedPart<F>,
+    DetachedRetainedPart<PublicationEvidenceCells<D>>,
+    Option<RetainedTableAllocation<CanonicalBlock>>,
+    Option<RetainedTableAllocation<EvidenceBlock>>,
+    Option<PhysicalStorageAccount>,
+);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TerminalTableCleanup {
+    canonical: RetainedStorageDropOutcome,
+    evidence: RetainedStorageDropOutcome,
+}
+
+impl TerminalTableCleanup {
+    fn outcome(self) -> RetainedStorageDropOutcome {
+        self.canonical.join(self.evidence)
+    }
+
+    fn failure_reason(self) -> Option<AccountPoisonReason> {
+        match self.outcome() {
+            RetainedStorageDropOutcome::Clean => None,
+            RetainedStorageDropOutcome::StorageReleaseUnverified(witness)
+            | RetainedStorageDropOutcome::ChargeReleaseUnverified(witness)
+            | RetainedStorageDropOutcome::StillSharedOwnershipFault(witness)
+            | RetainedStorageDropOutcome::ForeignOwnershipFault(witness) => Some(witness.reason),
+            RetainedStorageDropOutcome::MissingFaultAnchor => {
+                Some(AccountPoisonReason::OwnershipGraphUnverified)
+            }
+        }
+    }
+}
+
+impl<D, F, CanonicalBlock, EvidenceBlock>
+    TerminalPhysicalOwnershipManifest<D, F, CanonicalBlock, EvidenceBlock>
+{
+    fn new(
+        fallback: DetachedRetainedPart<F>,
+        evidence: DetachedRetainedPart<PublicationEvidenceCells<D>>,
+        canonical_table: Option<RetainedTableAllocation<CanonicalBlock>>,
+        evidence_table: Option<RetainedTableAllocation<EvidenceBlock>>,
+        account: Option<PhysicalStorageAccount>,
+    ) -> Self {
+        Self {
+            fallback: Some(fallback),
+            evidence: Some(evidence),
+            canonical_table,
+            evidence_table,
+            account,
+        }
+    }
+
+    fn account(&self) -> &PhysicalStorageAccount {
+        match self.account.as_ref() {
+            Some(account) => account,
+            None => unreachable_final_owner_state(),
+        }
+    }
+
+    fn evidence(&self) -> &DetachedRetainedPart<PublicationEvidenceCells<D>> {
+        match self.evidence.as_ref() {
+            Some(evidence) => evidence,
+            None => unreachable_final_owner_state(),
+        }
+    }
+
+    fn take_account(&mut self) -> Option<PhysicalStorageAccount> {
+        self.account.take()
+    }
+
+    fn try_drop_primary_tables(&mut self, expect_canonical: bool) -> TerminalTableCleanup {
+        let mut canonical = if self.canonical_table.is_some() == expect_canonical {
+            RetainedStorageDropOutcome::Clean
+        } else {
+            RetainedStorageDropOutcome::ForeignOwnershipFault(
+                self.record_new_fault(AccountPoisonReason::OwnershipGraphUnverified),
+            )
+        };
+        let mut evidence = if self.evidence_table.is_some() {
+            RetainedStorageDropOutcome::Clean
+        } else {
+            RetainedStorageDropOutcome::ForeignOwnershipFault(
+                self.record_new_fault(AccountPoisonReason::OwnershipGraphUnverified),
+            )
+        };
+        if let Some(table) = self.canonical_table.take() {
+            canonical = canonical.join(drop_retained_table_with_account_anchor(
+                table,
+                self.account(),
+            ));
+        }
+        if let Some(table) = self.evidence_table.take() {
+            evidence = evidence.join(drop_retained_table_with_account_anchor(
+                table,
+                self.account(),
+            ));
+        }
+        TerminalTableCleanup {
+            canonical,
+            evidence,
+        }
+    }
+
+    fn try_discard_fallback_allocation(
+        &mut self,
+    ) -> Result<PhysicalStorageAccount, RetainedPartCleanupError> {
+        match self.fallback.as_mut() {
+            Some(fallback) => fallback.try_discard_allocation(),
+            None => Err(RetainedPartCleanupError::MissingFaultAnchor),
+        }
+    }
+
+    fn first_account(&self) -> Option<&PhysicalStorageAccount> {
+        self.account
+            .as_ref()
+            .or_else(|| {
+                self.fallback
+                    .as_ref()
+                    .and_then(|part| part.account.as_ref())
+            })
+            .or_else(|| {
+                self.evidence
+                    .as_ref()
+                    .and_then(|part| part.account.as_ref())
+            })
+            .or_else(|| self.canonical_table.as_ref().map(|table| table.account()))
+            .or_else(|| {
+                self.canonical_table.as_ref().and_then(|table| {
+                    table
+                        .as_ref()
+                        .members
+                        .first()
+                        .map(|member| member.allocation.account())
+                })
+            })
+            .or_else(|| self.evidence_table.as_ref().map(|table| table.account()))
+            .or_else(|| {
+                self.evidence_table.as_ref().and_then(|table| {
+                    table
+                        .as_ref()
+                        .members
+                        .first()
+                        .map(|member| member.allocation.account())
+                })
+            })
+            .or_else(|| {
+                self.fallback
+                    .as_ref()
+                    .and_then(|part| part.allocation.as_ref())
+                    .map(RetainedAllocation::account)
+            })
+            .or_else(|| {
+                self.evidence
+                    .as_ref()
+                    .and_then(|part| part.allocation.as_ref())
+                    .map(RetainedAllocation::account)
+            })
+    }
+
+    fn has_exact_fallback_shape(&self) -> bool {
+        let (Some(fallback), Some(evidence)) = (self.fallback.as_ref(), self.evidence.as_ref())
+        else {
+            return false;
+        };
+        self.canonical_table.is_none()
+            && self.evidence_table.is_none()
+            && fallback.has_exact_owner()
+            && evidence.has_exact_owner()
+            && fallback.account().is_same_account(evidence.account())
+            && self
+                .account
+                .as_ref()
+                .is_none_or(|account| account.is_same_account(evidence.account()))
+    }
+
+    fn record_forgotten_physical_edges(
+        &self,
+        reason: AccountPoisonReason,
+    ) -> FinalizationContainmentError {
+        let account = match self.first_account() {
+            Some(account) => account,
+            None => unreachable_final_owner_state(),
+        };
+        if let Some(canonical) = self.canonical_table.as_ref() {
+            record_forgotten_table_edges(canonical);
+        }
+        if let Some(evidence) = self.evidence_table.as_ref() {
+            record_forgotten_table_edges(evidence);
+        }
+        if let Some(fallback) = self.fallback.as_ref() {
+            fallback.record_forgotten_physical_edge();
+        }
+        if let Some(evidence) = self.evidence.as_ref() {
+            evidence.record_forgotten_physical_edge();
+        }
+        FinalizationContainmentError::new(AccountPoisoned::new(account.snapshot()), reason)
+    }
+
+    fn record_new_fault(&self, reason: AccountPoisonReason) -> AccountPoisonEventWitness {
+        let account = match self.account.as_ref().or_else(|| self.first_account()) {
+            Some(account) => account,
+            None => unreachable_final_owner_state(),
+        };
+        record_account_poison_event(account, reason)
+    }
+
+    fn fail_closed_after_recorded_poison(&mut self) {
+        if let Some(canonical) = self.canonical_table.take() {
+            std::mem::forget(canonical);
+        }
+        if let Some(evidence) = self.evidence_table.take() {
+            std::mem::forget(evidence);
+        }
+        if let Some(account) = self.account.take() {
+            drop(account);
+        }
+        if let Some(mut fallback) = self.fallback.take() {
+            fallback.fail_closed_after_recorded_poison();
+            drop(fallback);
+        }
+        if let Some(mut evidence) = self.evidence.take() {
+            evidence.fail_closed_after_recorded_poison();
+            drop(evidence);
+        }
+    }
+
+    fn contain_new_fault(mut self, reason: AccountPoisonReason) -> FinalizationContainmentError {
+        self.record_new_fault(reason);
+        let cause = self.record_forgotten_physical_edges(reason);
+        self.fail_closed_after_recorded_poison();
+        cause
+    }
+
+    fn contain_after_recorded(
+        mut self,
+        reason: AccountPoisonReason,
+    ) -> FinalizationContainmentError {
+        let cause = self.record_forgotten_physical_edges(reason);
+        self.fail_closed_after_recorded_poison();
+        cause
+    }
+
+    fn contain_after_quarantine(self, cause: AccountPoisoned) -> FinalizationContainmentError {
+        let reason = cause.snapshot().first_poison_evidence().map_or(
+            AccountPoisonReason::OwnershipGraphUnverified,
+            AccountPoisonEvidence::reason,
+        );
+        self.contain_after_recorded(reason)
+    }
+
+    fn into_parts(mut self) -> TerminalPhysicalParts<D, F, CanonicalBlock, EvidenceBlock> {
+        let fallback = match self.fallback.take() {
+            Some(fallback) => fallback,
+            None => unreachable_final_owner_state(),
+        };
+        let evidence = match self.evidence.take() {
+            Some(evidence) => evidence,
+            None => unreachable_final_owner_state(),
+        };
+        (
+            fallback,
+            evidence,
+            self.canonical_table.take(),
+            self.evidence_table.take(),
+            self.account.take(),
+        )
+    }
+
+    fn qualifies_exact_fallback(&self) -> bool {
+        self.has_exact_fallback_shape() && self.account.is_none()
+    }
+
+    fn finish_exact_fallback(mut self) -> ExactFallbackPhysicalOwnership<D, F> {
+        let fallback = match self.fallback.take() {
+            Some(fallback) => fallback,
+            None => unreachable_final_owner_state(),
+        };
+        let evidence = match self.evidence.take() {
+            Some(evidence) => evidence,
+            None => unreachable_final_owner_state(),
+        };
+        ExactFallbackPhysicalOwnership { fallback, evidence }
+    }
+
+    fn qualifies_exact_terminal(&self, terminal: RetainedTerminalMode) -> bool {
+        let Some(account) = self.account.as_ref() else {
+            return false;
+        };
+        let common_exact = self
+            .fallback
+            .as_ref()
+            .is_some_and(DetachedRetainedPart::is_empty)
+            && self.evidence.as_ref().is_some_and(|evidence| {
+                evidence.has_exact_owner() && evidence.account().is_same_account(account)
+            });
+        let terminal_exact = match terminal {
+            RetainedTerminalMode::Success { .. } => {
+                self.canonical_table
+                    .as_ref()
+                    .is_some_and(|table| table.belongs_to(account))
+                    && self
+                        .evidence_table
+                        .as_ref()
+                        .is_some_and(|table| table.belongs_to(account))
+            }
+            RetainedTerminalMode::RichFailure { .. } => {
+                self.canonical_table.is_none()
+                    && self
+                        .evidence_table
+                        .as_ref()
+                        .is_some_and(|table| table.belongs_to(account))
+            }
+            RetainedTerminalMode::MinimalFallback { .. } => false,
+        };
+        common_exact && terminal_exact
+    }
+
+    fn finish_exact_terminal(
+        mut self,
+        terminal: RetainedTerminalMode,
+    ) -> ExactTerminalPhysicalOwnership<D, F, CanonicalBlock, EvidenceBlock> {
+        let fallback = match self.fallback.take() {
+            Some(fallback) => fallback,
+            None => unreachable_final_owner_state(),
+        };
+        debug_assert!(fallback.is_empty());
+        drop(fallback);
+        let evidence = match self.evidence.take() {
+            Some(evidence) => evidence,
+            None => unreachable_final_owner_state(),
+        };
+        let account = match self.account.take() {
+            Some(account) => account,
+            None => unreachable_final_owner_state(),
+        };
+        match terminal {
+            RetainedTerminalMode::Success {
+                canonical_root,
+                evidence_root,
+            } => {
+                let canonical_table = match self.canonical_table.take() {
+                    Some(table) => table,
+                    None => unreachable_final_owner_state(),
+                };
+                let evidence_table = match self.evidence_table.take() {
+                    Some(table) => table,
+                    None => unreachable_final_owner_state(),
+                };
+                ExactTerminalPhysicalOwnership::Success {
+                    evidence,
+                    canonical_table,
+                    evidence_table,
+                    account,
+                    canonical_root,
+                    evidence_root,
+                    fallback_type: PhantomData,
+                }
+            }
+            RetainedTerminalMode::RichFailure {
+                evidence_root,
+                cause,
+            } => {
+                let evidence_table = match self.evidence_table.take() {
+                    Some(table) => table,
+                    None => unreachable_final_owner_state(),
+                };
+                ExactTerminalPhysicalOwnership::RichFailure {
+                    evidence,
+                    evidence_table,
+                    account,
+                    evidence_root,
+                    cause,
+                    fallback_type: PhantomData,
+                }
+            }
+            RetainedTerminalMode::MinimalFallback { .. } => unreachable_final_owner_state(),
+        }
+    }
+}
+
+impl<D, F, CanonicalBlock, EvidenceBlock> Drop
+    for TerminalPhysicalOwnershipManifest<D, F, CanonicalBlock, EvidenceBlock>
+{
+    fn drop(&mut self) {
+        if self.first_account().is_none() {
+            return;
+        }
+        self.record_new_fault(AccountPoisonReason::OwnershipGraphUnverified);
+        let _ = self.record_forgotten_physical_edges(AccountPoisonReason::OwnershipGraphUnverified);
+        self.fail_closed_after_recorded_poison();
+    }
+}
+
+/// Exact fallback-only physical graph established before terminal eligibility and freeze.
+struct ExactFallbackPhysicalOwnership<D, F> {
+    fallback: DetachedRetainedPart<F>,
+    evidence: DetachedRetainedPart<PublicationEvidenceCells<D>>,
+}
+
+impl<D, F> ExactFallbackPhysicalOwnership<D, F> {
+    fn account(&self) -> &PhysicalStorageAccount {
+        self.evidence.account()
+    }
+
+    fn evidence(&self) -> &DetachedRetainedPart<PublicationEvidenceCells<D>> {
+        &self.evidence
+    }
+
+    fn into_terminal<CanonicalBlock, EvidenceBlock>(
+        self,
+    ) -> TerminalPhysicalOwnershipManifest<D, F, CanonicalBlock, EvidenceBlock> {
+        TerminalPhysicalOwnershipManifest::new(self.fallback, self.evidence, None, None, None)
+    }
+
+    fn into_publication<CanonicalBlock, EvidenceBlock>(
+        self,
+        cause: PreparationFailureCode,
+    ) -> PreparedRetainedPublication<CanonicalBlock, EvidenceBlock, F, D> {
+        PreparedRetainedPublication {
+            payload: RetainedPublicationPayload::MinimalFallback {
+                part: PublishedPart::from_exact_owner(self.fallback),
+                cause,
+            },
+            evidence: PublishedPart::from_exact_owner(self.evidence),
+        }
+    }
+}
+
+/// Exact success or rich-failure graph proven before terminal eligibility and freeze.
+enum ExactTerminalPhysicalOwnership<D, F, CanonicalBlock, EvidenceBlock> {
+    Success {
+        evidence: DetachedRetainedPart<PublicationEvidenceCells<D>>,
+        canonical_table: RetainedTableAllocation<CanonicalBlock>,
+        evidence_table: RetainedTableAllocation<EvidenceBlock>,
+        account: PhysicalStorageAccount,
+        canonical_root: RetainedSlotIdentity,
+        evidence_root: RetainedSlotIdentity,
+        fallback_type: PhantomData<fn() -> F>,
+    },
+    RichFailure {
+        evidence: DetachedRetainedPart<PublicationEvidenceCells<D>>,
+        evidence_table: RetainedTableAllocation<EvidenceBlock>,
+        account: PhysicalStorageAccount,
+        evidence_root: RetainedSlotIdentity,
+        cause: PreparationFailureCode,
+        fallback_type: PhantomData<fn() -> F>,
+    },
+}
+
+impl<D, F, CanonicalBlock, EvidenceBlock>
+    ExactTerminalPhysicalOwnership<D, F, CanonicalBlock, EvidenceBlock>
+{
+    fn account(&self) -> &PhysicalStorageAccount {
+        match self {
+            Self::Success { account, .. } | Self::RichFailure { account, .. } => account,
+        }
+    }
+
+    fn evidence(&self) -> &DetachedRetainedPart<PublicationEvidenceCells<D>> {
+        match self {
+            Self::Success { evidence, .. } | Self::RichFailure { evidence, .. } => evidence,
+        }
+    }
+
+    fn into_terminal(
+        self,
+    ) -> TerminalPhysicalOwnershipManifest<D, F, CanonicalBlock, EvidenceBlock> {
+        match self {
+            Self::Success {
+                evidence,
+                canonical_table,
+                evidence_table,
+                account,
+                ..
+            } => TerminalPhysicalOwnershipManifest::new(
+                DetachedRetainedPart {
+                    allocation: None,
+                    account: None,
+                },
+                evidence,
+                Some(canonical_table),
+                Some(evidence_table),
+                Some(account),
+            ),
+            Self::RichFailure {
+                evidence,
+                evidence_table,
+                account,
+                ..
+            } => TerminalPhysicalOwnershipManifest::new(
+                DetachedRetainedPart {
+                    allocation: None,
+                    account: None,
+                },
+                evidence,
+                None,
+                Some(evidence_table),
+                Some(account),
+            ),
+        }
+    }
+
+    fn into_publication(
+        self,
+        set_id: RetainedSetId,
+    ) -> (
+        RetainedPublicationPayload<CanonicalBlock, EvidenceBlock, F>,
+        PublishedPart<PublicationEvidenceCells<D>>,
+    ) {
+        match self {
+            Self::Success {
+                evidence,
+                canonical_table,
+                evidence_table,
+                account,
+                canonical_root,
+                evidence_root,
+                fallback_type: _,
+            } => (
+                RetainedPublicationPayload::Success {
+                    canonical: PublishedCanonicalAggregate {
+                        inner: PublishedRetainedAggregate {
+                            table: canonical_table,
+                            set_id,
+                        },
+                    },
+                    outcome_evidence: PublishedOutcomeEvidenceAggregate {
+                        inner: PublishedRetainedAggregate {
+                            table: evidence_table,
+                            set_id,
+                        },
+                    },
+                    canonical_root,
+                    outcome_evidence_root: evidence_root,
+                    account,
+                },
+                PublishedPart::from_exact_owner(evidence),
+            ),
+            Self::RichFailure {
+                evidence,
+                evidence_table,
+                account,
+                evidence_root,
+                cause,
+                fallback_type: _,
+            } => (
+                RetainedPublicationPayload::RichFailure {
+                    outcome_evidence: PublishedOutcomeEvidenceAggregate {
+                        inner: PublishedRetainedAggregate {
+                            table: evidence_table,
+                            set_id,
+                        },
+                    },
+                    outcome_evidence_root: evidence_root,
+                    account,
+                    cause,
+                },
+                PublishedPart::from_exact_owner(evidence),
+            ),
+        }
+    }
+}
+
+/// Linear owner spanning the primary final-eligibility decision.
+///
+/// Attribution cannot be released while fallible physical cleanup or account eligibility remains.
+/// A successful eligibility check consumes this guard into the pure freeze handoff. Every other
+/// exit contains physical storage first and deliberately retains the coupled attribution proof.
+struct TerminalFreezeGuard<O, P, D, F, CanonicalBlock, EvidenceBlock>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+{
+    proof: Option<crate::ledger::TypedFreezeProof<O, P, D>>,
+    physical: Option<ExactTerminalPhysicalOwnership<D, F, CanonicalBlock, EvidenceBlock>>,
+    discarded_account: Option<PhysicalStorageAccount>,
+}
+
+impl<O, P, D, F, CanonicalBlock, EvidenceBlock>
+    TerminalFreezeGuard<O, P, D, F, CanonicalBlock, EvidenceBlock>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+{
+    fn new(
+        proof: crate::ledger::TypedFreezeProof<O, P, D>,
+        physical: ExactTerminalPhysicalOwnership<D, F, CanonicalBlock, EvidenceBlock>,
+        discarded_account: PhysicalStorageAccount,
+    ) -> Self {
+        Self {
+            proof: Some(proof),
+            physical: Some(physical),
+            discarded_account: Some(discarded_account),
+        }
+    }
+
+    fn contain_after_quarantine(
+        mut self,
+        quarantine: AccountPoisoned,
+    ) -> FinalizationContainmentError {
+        let physical = match self.physical.take() {
+            Some(physical) => physical,
+            None => unreachable_final_owner_state(),
+        };
+        let cause = physical
+            .into_terminal()
+            .contain_after_quarantine(quarantine);
+        if let Some(proof) = self.proof.take() {
+            std::mem::forget(proof);
+        }
+        drop(self.discarded_account.take());
+        cause
+    }
+
+    fn try_into_eligible(
+        mut self,
+    ) -> Result<
+        EligibleTerminalFreezeGuard<O, P, D, F, CanonicalBlock, EvidenceBlock>,
+        FinalizationContainmentError,
+    > {
+        let eligibility = match self.physical.as_ref() {
+            Some(physical) => match physical.account().try_publication_eligibility() {
+                Ok(eligibility) => eligibility,
+                Err(quarantine) => return Err(self.contain_after_quarantine(quarantine)),
+            },
+            None => unreachable_final_owner_state(),
+        };
+        let proof = match self.proof.take() {
+            Some(proof) => proof,
+            None => unreachable_final_owner_state(),
+        };
+        let physical = match self.physical.take() {
+            Some(physical) => physical,
+            None => unreachable_final_owner_state(),
+        };
+        Ok(EligibleTerminalFreezeGuard {
+            eligibility: Some(eligibility),
+            proof: Some(proof),
+            physical: Some(physical),
+            discarded_account: self.discarded_account.take(),
+        })
+    }
+}
+
+impl<O, P, D, F, CanonicalBlock, EvidenceBlock> Drop
+    for TerminalFreezeGuard<O, P, D, F, CanonicalBlock, EvidenceBlock>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+{
+    fn drop(&mut self) {
+        if let Some(physical) = self.physical.take() {
+            let _ = physical
+                .into_terminal()
+                .contain_new_fault(AccountPoisonReason::OwnershipGraphUnverified);
+        }
+        if let Some(proof) = self.proof.take() {
+            std::mem::forget(proof);
+        }
+        drop(self.discarded_account.take());
+    }
+}
+
+/// Exact primary ownership after final account eligibility has linearized successfully.
+///
+/// Only this state may freeze terminal evidence and construct a prepared publication.
+#[must_use = "eligible terminal ownership must complete preparation or contain its graph"]
+struct EligibleTerminalFreezeGuard<O, P, D, F, CanonicalBlock, EvidenceBlock>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+{
+    eligibility: Option<PublicationEligibility>,
+    proof: Option<crate::ledger::TypedFreezeProof<O, P, D>>,
+    physical: Option<ExactTerminalPhysicalOwnership<D, F, CanonicalBlock, EvidenceBlock>>,
+    discarded_account: Option<PhysicalStorageAccount>,
+}
+
+impl<O, P, D, F, CanonicalBlock, EvidenceBlock>
+    EligibleTerminalFreezeGuard<O, P, D, F, CanonicalBlock, EvidenceBlock>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+{
+    fn into_prepared(
+        mut self,
+        set_id: RetainedSetId,
+    ) -> PreparedRetainedPublication<CanonicalBlock, EvidenceBlock, F, D> {
+        let eligibility = match self.eligibility.take() {
+            Some(eligibility) => eligibility,
+            None => unreachable_final_owner_state(),
+        };
+        let proof = match self.proof.take() {
+            Some(proof) => proof,
+            None => unreachable_final_owner_state(),
+        };
+        let physical = match self.physical.take() {
+            Some(physical) => physical,
+            None => unreachable_final_owner_state(),
+        };
+        freeze_terminal_evidence(
+            eligibility,
+            proof,
+            self.discarded_account.take(),
+            physical.evidence(),
+        );
+        let (payload, evidence) = physical.into_publication(set_id);
+        PreparedRetainedPublication { payload, evidence }
+    }
+}
+
+impl<O, P, D, F, CanonicalBlock, EvidenceBlock> Drop
+    for EligibleTerminalFreezeGuard<O, P, D, F, CanonicalBlock, EvidenceBlock>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+{
+    fn drop(&mut self) {
+        if let Some(physical) = self.physical.take() {
+            let _ = physical
+                .into_terminal()
+                .contain_new_fault(AccountPoisonReason::OwnershipGraphUnverified);
+        }
+        if let Some(proof) = self.proof.take() {
+            std::mem::forget(proof);
+        }
+        drop(self.discarded_account.take());
+        let _ = self.eligibility.take();
+    }
+}
+
+/// Linear owner for an exact fallback graph until account eligibility succeeds.
+struct FallbackFreezeGuard<O, P, D, F>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+{
+    proof: Option<crate::ledger::TypedFreezeProof<O, P, D>>,
+    physical: Option<ExactFallbackPhysicalOwnership<D, F>>,
+    discarded_account: Option<PhysicalStorageAccount>,
+}
+
+impl<O, P, D, F> FallbackFreezeGuard<O, P, D, F>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+{
+    fn new(
+        proof: crate::ledger::TypedFreezeProof<O, P, D>,
+        physical: ExactFallbackPhysicalOwnership<D, F>,
+        discarded_account: Option<PhysicalStorageAccount>,
+    ) -> Self {
+        Self {
+            proof: Some(proof),
+            physical: Some(physical),
+            discarded_account,
+        }
+    }
+
+    fn contain_after_quarantine(
+        mut self,
+        quarantine: AccountPoisoned,
+    ) -> FinalizationContainmentError {
+        let physical = match self.physical.take() {
+            Some(physical) => physical,
+            None => unreachable_final_owner_state(),
+        };
+        let cause = physical
+            .into_terminal::<(), ()>()
+            .contain_after_quarantine(quarantine);
+        if let Some(proof) = self.proof.take() {
+            std::mem::forget(proof);
+        }
+        drop(self.discarded_account.take());
+        cause
+    }
+
+    fn try_into_eligible(
+        mut self,
+    ) -> Result<EligibleFallbackFreezeGuard<O, P, D, F>, FinalizationContainmentError> {
+        let eligibility = match self.physical.as_ref() {
+            Some(physical) => match physical.account().try_publication_eligibility() {
+                Ok(eligibility) => eligibility,
+                Err(quarantine) => return Err(self.contain_after_quarantine(quarantine)),
+            },
+            None => unreachable_final_owner_state(),
+        };
+        let proof = match self.proof.take() {
+            Some(proof) => proof,
+            None => unreachable_final_owner_state(),
+        };
+        let physical = match self.physical.take() {
+            Some(physical) => physical,
+            None => unreachable_final_owner_state(),
+        };
+        Ok(EligibleFallbackFreezeGuard {
+            eligibility: Some(eligibility),
+            proof: Some(proof),
+            physical: Some(physical),
+            discarded_account: self.discarded_account.take(),
+        })
+    }
+}
+
+impl<O, P, D, F> Drop for FallbackFreezeGuard<O, P, D, F>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+{
+    fn drop(&mut self) {
+        if let Some(physical) = self.physical.take() {
+            let _ = physical
+                .into_terminal::<(), ()>()
+                .contain_new_fault(AccountPoisonReason::OwnershipGraphUnverified);
+        }
+        if let Some(proof) = self.proof.take() {
+            std::mem::forget(proof);
+        }
+        drop(self.discarded_account.take());
+    }
+}
+
+/// Exact fallback ownership after final account eligibility has linearized successfully.
+#[must_use = "eligible fallback ownership must complete preparation or contain its graph"]
+struct EligibleFallbackFreezeGuard<O, P, D, F>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+{
+    eligibility: Option<PublicationEligibility>,
+    proof: Option<crate::ledger::TypedFreezeProof<O, P, D>>,
+    physical: Option<ExactFallbackPhysicalOwnership<D, F>>,
+    discarded_account: Option<PhysicalStorageAccount>,
+}
+
+impl<O, P, D, F> EligibleFallbackFreezeGuard<O, P, D, F>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+{
+    fn into_prepared<CanonicalBlock, EvidenceBlock>(
+        mut self,
+        cause: PreparationFailureCode,
+    ) -> PreparedRetainedPublication<CanonicalBlock, EvidenceBlock, F, D> {
+        let eligibility = match self.eligibility.take() {
+            Some(eligibility) => eligibility,
+            None => unreachable_final_owner_state(),
+        };
+        let proof = match self.proof.take() {
+            Some(proof) => proof,
+            None => unreachable_final_owner_state(),
+        };
+        let physical = match self.physical.take() {
+            Some(physical) => physical,
+            None => unreachable_final_owner_state(),
+        };
+        freeze_terminal_evidence(
+            eligibility,
+            proof,
+            self.discarded_account.take(),
+            physical.evidence(),
+        );
+        physical.into_publication(cause)
+    }
+}
+
+impl<O, P, D, F> Drop for EligibleFallbackFreezeGuard<O, P, D, F>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+{
+    fn drop(&mut self) {
+        if let Some(physical) = self.physical.take() {
+            let _ = physical
+                .into_terminal::<(), ()>()
+                .contain_new_fault(AccountPoisonReason::OwnershipGraphUnverified);
+        }
+        if let Some(proof) = self.proof.take() {
+            std::mem::forget(proof);
+        }
+        drop(self.discarded_account.take());
+        let _ = self.eligibility.take();
+    }
 }
 
 /// Exact success closure whose owning assembly can no longer be mutated.
@@ -2913,6 +7959,7 @@ where
         || u64::try_from(source.total_blocks).is_err()
         || required_attributions > source.writer.limits.attribution_slots
         || required_attributions > terminal_limits.attribution_slots
+        || source.writer.limits.attribution_slots > terminal_limits.attribution_slots
         || source.writer.limits.commitment_slots > terminal_limits.commitment_slots
     {
         return Err(RetainedWriterError::InvalidPublicationPlan);
@@ -2933,7 +7980,7 @@ where
     let allocation = RetainedAllocationPlan::new(nested_bytes, u64::from(nested_bytes != 0))
         .map_err(|_| RetainedWriterError::BatchCapacity)?;
     let charge = account
-        .checked_retained_charge::<RetainedBlockTable<Block>>(allocation)
+        .checked_retained_table_charge::<Block>(allocation)
         .map_err(RetainedWriterError::Physical)?;
     Ok(QualifiedRetainedBlockTablePlan {
         source,
@@ -2959,7 +8006,7 @@ fn try_create_retained_block_table<O, P, D, Destination, Block>(
     plan: QualifiedRetainedBlockTableStoragePlan<P, D, Block>,
     set_id: RetainedSetId,
     membership_destination: RetainedMembershipDestination,
-) -> Result<RetainedAllocation<RetainedBlockTable<Block>>, RetainedWriterError<D>>
+) -> Result<RetainedTableAllocation<Block>, RetainedWriterError<D>>
 where
     O: OperationOwner,
     P: Copy + Ord,
@@ -2976,35 +8023,73 @@ where
         charge,
         block: _,
     } = plan;
+    let preflight = account
+        .try_begin_account_preflight()
+        .map_err(RetainedWriterError::AccountPoisoned)?;
     if !batch.has_attribution_slot() {
         return Err(RetainedWriterError::AttributionBatchFull);
     }
-    let attribution = ledger
-        .reserve_operation_attribution::<Destination>(phase, attribution_dimension, charge.bytes)
-        .map_err(RetainedWriterError::Ledger)?;
-    let allocation_owner = try_share_account_after_work(ledger, account, handle_share_work)?;
-    let mut table = match account.try_retain_with_admitted_charge(allocation_owner, charge, || {
-        let mut members = Vec::new();
-        if members
-            .try_reserve_exact(member_capacity.allocator_additional())
-            .is_err()
-        {
-            return Err(RetainedBuildFailureCode::new(1));
+    let account_admission = preflight
+        .admit_action()
+        .map_err(map_account_action_admission_error)?;
+    let admitted_share_work =
+        try_admit_retained_share_work_before_physical(ledger, account, handle_share_work)?;
+    let attribution_result = catch_unwind(AssertUnwindSafe(|| {
+        ledger.reserve_operation_attribution::<Destination>(
+            phase,
+            attribution_dimension,
+            charge.bytes,
+        )
+    }));
+    let attribution = match attribution_result {
+        Err(payload) => {
+            let poisoned = account.record_poison(AccountPoisonReason::OwnershipGraphUnverified);
+            discard_untrusted_panic_payload(payload);
+            return Err(RetainedWriterError::AccountPoisoned(poisoned));
         }
-        if member_capacity
-            .finish(members.len(), members.capacity())
-            .is_err()
-        {
-            return Err(RetainedBuildFailureCode::new(2));
+        Ok(Ok(attribution)) => attribution,
+        Ok(Err(cause)) => return Err(RetainedWriterError::Ledger(cause)),
+    };
+    let mut physical_admission = match account.try_admit_retained_after_action(
+        account_admission,
+        charge,
+        admitted_share_work,
+    ) {
+        Ok(admission) => Some(admission),
+        Err(cause) => {
+            drop(attribution);
+            return Err(RetainedWriterError::Physical(cause));
         }
-        Ok(RetainedBlockTable {
-            qualified_capacity: members.capacity(),
-            members,
-            total_blocks,
-            max_new_blocks,
-            new_blocks: 0,
-        })
-    }) {
+    };
+    let mut table = match account
+        .try_retain_with_admitted_charge::<RetainedBlockTable<Block>, TableRetainedPolicy>(
+            match physical_admission.as_mut() {
+                Some(admission) => admission,
+                None => unreachable_final_owner_state(),
+            },
+            || {
+                let mut members = Vec::new();
+                if members
+                    .try_reserve_exact(member_capacity.allocator_additional())
+                    .is_err()
+                {
+                    return Err(RetainedBuildFailureCode::new(1));
+                }
+                if member_capacity
+                    .finish(members.len(), members.capacity())
+                    .is_err()
+                {
+                    return Err(RetainedBuildFailureCode::new(2));
+                }
+                Ok(RetainedBlockTable {
+                    qualified_capacity: members.capacity(),
+                    members,
+                    total_blocks,
+                    max_new_blocks,
+                    new_blocks: 0,
+                })
+            },
+        ) {
         Ok(table) => table,
         Err(cause) => {
             if cause.charge_retained() {
@@ -3021,20 +8106,32 @@ where
         ordinal: 0,
     };
     if table.assign_membership(membership).is_err() {
-        if drop_retained_allocation_before_attribution(table, account) {
-            drop(attribution);
-            return Err(RetainedWriterError::MembershipExhausted);
+        let outcome = drop_retained_allocation_before_attribution(table, account);
+        if matches!(
+            outcome,
+            RetainedStorageDropOutcome::Clean | RetainedStorageDropOutcome::MissingFaultAnchor
+        ) {
+            let _ = account.record_poison(AccountPoisonReason::OwnershipGraphUnverified);
         }
-        std::mem::forget(attribution);
-        return Err(RetainedWriterError::StorageDropUnverified);
+        return Err(finish_pre_attribution_cleanup(
+            attribution,
+            outcome,
+            RetainedWriterError::OwnershipUnverified,
+        ));
     }
     if let Err(attribution) = batch.try_push_attribution(attribution) {
-        if drop_retained_allocation_before_attribution(table, account) {
-            drop(attribution);
-            return Err(RetainedWriterError::AttributionBatchFull);
+        let outcome = drop_retained_allocation_before_attribution(table, account);
+        if matches!(
+            outcome,
+            RetainedStorageDropOutcome::Clean | RetainedStorageDropOutcome::MissingFaultAnchor
+        ) {
+            let _ = account.record_poison(AccountPoisonReason::OwnershipGraphUnverified);
         }
-        std::mem::forget(attribution);
-        return Err(RetainedWriterError::StorageDropUnverified);
+        return Err(finish_pre_attribution_cleanup(
+            attribution,
+            outcome,
+            RetainedWriterError::OwnershipUnverified,
+        ));
     }
     Ok(table)
 }
@@ -3047,7 +8144,7 @@ fn try_retain_block<O, P, D, Destination, Block, Tag>(
     phase: P,
     attribution_dimension: D,
     batch: &mut AttributionReservationBatch<O, P, D, Destination>,
-    table: &mut RetainedAllocation<RetainedBlockTable<Block>>,
+    table: &mut RetainedTableAllocation<Block>,
     set_id: RetainedSetId,
     destination: RetainedMembershipDestination,
     slot_limit_error: RetainedPublicationError<D>,
@@ -3064,10 +8161,17 @@ where
     Block: Send + Sync + 'static,
     Tag: Copy + Send + Sync + 'static,
 {
-    let index = {
-        let table = table
-            .value_mut_during_construction()
-            .ok_or(RetainedPublicationError::Poisoned)?;
+    let preflight = account
+        .try_begin_account_preflight()
+        .map_err(RetainedWriterError::AccountPoisoned)
+        .map_err(RetainedPublicationError::Writer)?;
+    if !table.belongs_to(account) {
+        return Err(RetainedPublicationError::Writer(
+            RetainedWriterError::ForeignAccount,
+        ));
+    }
+    let (index, next_new_blocks) = {
+        let table = table.as_ref();
         if table.members.len() >= table.total_blocks || table.new_blocks >= table.max_new_blocks {
             return Err(slot_limit_error);
         }
@@ -3076,7 +8180,14 @@ where
                 RetainedWriterError::BatchCapacity,
             ));
         }
-        table.members.len()
+        let next_new_blocks =
+            table
+                .new_blocks
+                .checked_add(1)
+                .ok_or(RetainedPublicationError::Writer(
+                    RetainedWriterError::MembershipExhausted,
+                ))?;
+        (table.members.len(), next_new_blocks)
     };
     let ordinal = u64::try_from(index)
         .ok()
@@ -3092,60 +8203,115 @@ where
     let charge = account
         .checked_retained_charge::<Block>(plan)
         .map_err(|cause| RetainedPublicationError::Writer(RetainedWriterError::Physical(cause)))?;
-    let attribution = ledger
-        .reserve_operation_attribution::<Destination>(phase, attribution_dimension, charge.bytes)
-        .map_err(|cause| RetainedPublicationError::Writer(RetainedWriterError::Ledger(cause)))?;
-    let allocation_owner = try_share_account_after_work(ledger, account, handle_share_work)
+    let account_admission = preflight
+        .admit_action()
+        .map_err(map_account_action_admission_error)
         .map_err(RetainedPublicationError::Writer)?;
-    let mut allocation =
-        match account.try_retain_with_admitted_handle(allocation_owner, plan, || {
+    let Some(table) = table.table_mut_during_construction() else {
+        let poisoned = account.record_poison(AccountPoisonReason::OwnershipGraphUnverified);
+        return Err(RetainedPublicationError::Writer(
+            RetainedWriterError::AccountPoisoned(poisoned),
+        ));
+    };
+    let admitted_share_work =
+        try_admit_retained_share_work_before_physical(ledger, account, handle_share_work)
+            .map_err(RetainedPublicationError::Writer)?;
+    let attribution_result = catch_unwind(AssertUnwindSafe(|| {
+        ledger.reserve_operation_attribution::<Destination>(
+            phase,
+            attribution_dimension,
+            charge.bytes,
+        )
+    }));
+    let attribution = match attribution_result {
+        Err(payload) => {
+            let poisoned = account.record_poison(AccountPoisonReason::OwnershipGraphUnverified);
+            discard_untrusted_panic_payload(payload);
+            return Err(RetainedPublicationError::Writer(
+                RetainedWriterError::AccountPoisoned(poisoned),
+            ));
+        }
+        Ok(Ok(attribution)) => attribution,
+        Ok(Err(cause)) => {
+            return Err(RetainedPublicationError::Writer(
+                RetainedWriterError::Ledger(cause),
+            ));
+        }
+    };
+    let mut physical_admission = match account.try_admit_retained_after_action(
+        account_admission,
+        charge,
+        admitted_share_work,
+    ) {
+        Ok(admission) => Some(admission),
+        Err(cause) => {
+            drop(attribution);
+            return Err(RetainedPublicationError::Writer(
+                RetainedWriterError::Physical(cause),
+            ));
+        }
+    };
+    let mut allocation = match account.try_retain_with_admitted_handle(
+        match physical_admission.as_mut() {
+            Some(admission) => admission,
+            None => unreachable_final_owner_state(),
+        },
+        plan,
+        || {
             build(BlockEmplacer {
                 marker: PhantomData,
             })
             .map(BlockPlacement::into_block)
-        }) {
-            Ok(allocation) => allocation,
-            Err(cause) => {
-                if cause.charge_retained() {
-                    std::mem::forget(attribution);
-                } else {
-                    drop(attribution);
-                }
-                return Err(RetainedPublicationError::Writer(
-                    RetainedWriterError::Physical(cause),
-                ));
+        },
+    ) {
+        Ok(allocation) => allocation,
+        Err(cause) => {
+            if cause.charge_retained() {
+                std::mem::forget(attribution);
+            } else {
+                drop(attribution);
             }
-        };
+            return Err(RetainedPublicationError::Writer(
+                RetainedWriterError::Physical(cause),
+            ));
+        }
+    };
     let membership = RetainedMembership {
         set_id,
         destination,
         ordinal,
     };
     if allocation.assign_membership(membership).is_err() {
-        if drop_retained_allocation_before_attribution(allocation, account) {
-            drop(attribution);
-            return Err(RetainedPublicationError::Poisoned);
+        let outcome = drop_retained_allocation_before_attribution(allocation, account);
+        if matches!(
+            outcome,
+            RetainedStorageDropOutcome::Clean | RetainedStorageDropOutcome::MissingFaultAnchor
+        ) {
+            let _ = account.record_poison(AccountPoisonReason::OwnershipGraphUnverified);
         }
-        std::mem::forget(attribution);
         return Err(RetainedPublicationError::Writer(
-            RetainedWriterError::StorageDropUnverified,
+            finish_pre_attribution_cleanup(
+                attribution,
+                outcome,
+                RetainedWriterError::OwnershipUnverified,
+            ),
         ));
     }
     if let Err(attribution) = batch.try_push_attribution(attribution) {
-        if drop_retained_allocation_before_attribution(allocation, account) {
-            drop(attribution);
-            return Err(RetainedPublicationError::Writer(
-                RetainedWriterError::AttributionBatchFull,
-            ));
+        let outcome = drop_retained_allocation_before_attribution(allocation, account);
+        if matches!(
+            outcome,
+            RetainedStorageDropOutcome::Clean | RetainedStorageDropOutcome::MissingFaultAnchor
+        ) {
+            let _ = account.record_poison(AccountPoisonReason::OwnershipGraphUnverified);
         }
-        std::mem::forget(attribution);
         return Err(RetainedPublicationError::Writer(
-            RetainedWriterError::StorageDropUnverified,
+            finish_pre_attribution_cleanup(
+                attribution,
+                outcome,
+                RetainedWriterError::OwnershipUnverified,
+            ),
         ));
-    }
-    let Some(table) = table.value_mut_during_construction() else {
-        std::mem::forget(allocation);
-        return Err(RetainedPublicationError::Poisoned);
     };
     table.members.push(RetainedBlockMember {
         allocation,
@@ -3153,10 +8319,7 @@ where
         origin: RetainedBlockOrigin::New,
         reachable: AtomicBool::new(false),
     });
-    table.new_blocks = match table.new_blocks.checked_add(1) {
-        Some(new_blocks) => new_blocks,
-        None => unreachable_final_owner_state(),
-    };
+    table.new_blocks = next_new_blocks;
     Ok(RetainedSlotIdentity {
         set_id,
         index,
@@ -3169,7 +8332,7 @@ fn try_share_retained_block<O, P, D, Block, Tag>(
     ledger: &Ledger<O, P, D>,
     account: &PhysicalStorageAccount,
     handle_share_work: RetainedHandleSharePlan<D>,
-    table: &mut RetainedAllocation<RetainedBlockTable<Block>>,
+    table: &mut RetainedTableAllocation<Block>,
     set_id: RetainedSetId,
     destination: RetainedMembershipDestination,
     slot_limit_error: RetainedPublicationError<D>,
@@ -3183,23 +8346,29 @@ where
     Block: Send + Sync + 'static,
     Tag: Copy + Send + Sync + 'static,
 {
-    // Complete every target and source preflight before charging work or changing a reference
-    // count. Re-borrowing the uniquely owned table after admission cannot introduce a new failure.
-    let table = table
-        .value_mut_during_construction()
-        .ok_or(RetainedPublicationError::Poisoned)?;
-    if table.members.len() >= table.total_blocks || table.members.len() >= table.members.capacity()
+    let preflight = account
+        .try_begin_account_preflight()
+        .map_err(RetainedWriterError::AccountPoisoned)
+        .map_err(RetainedPublicationError::Writer)?;
+    if !table.belongs_to(account) {
+        return Err(RetainedPublicationError::Writer(
+            RetainedWriterError::ForeignAccount,
+        ));
+    }
+    let table_value = table.as_ref();
+    if table_value.members.len() >= table_value.total_blocks
+        || table_value.members.len() >= table_value.members.capacity()
     {
         return Err(slot_limit_error);
     }
-    let index = table.members.len();
+    let index = table_value.members.len();
     let ordinal = u64::try_from(index)
         .ok()
         .and_then(|index| index.checked_add(1))
         .ok_or(RetainedPublicationError::Writer(
             RetainedWriterError::MembershipExhausted,
         ))?;
-    if source_identity.tag != TypeId::of::<Tag>() {
+    if source_identity.tag != TypeId::of::<Tag>() || source_identity.set_id != source.set_id {
         return Err(RetainedPublicationError::InvalidSourceSlot);
     }
     if !source.table.belongs_to(account) {
@@ -3213,22 +8382,80 @@ where
         .member_allocation(source_identity, source.set_id)
         .ok_or(RetainedPublicationError::InvalidSourceSlot)?;
     if !source_allocation.belongs_to(account) {
+        drop(preflight);
+        let cause = account.record_poison(AccountPoisonReason::OwnershipGraphUnverified);
         return Err(RetainedPublicationError::Writer(
-            RetainedWriterError::ForeignAccount,
+            RetainedWriterError::AccountPoisoned(cause),
         ));
     }
-
-    try_admit_retained_share_work(ledger, handle_share_work)
+    let share_admission = preflight
+        .admit_action()
+        .map_err(map_account_action_admission_error)
         .map_err(RetainedPublicationError::Writer)?;
-    let mut allocation = source_allocation.share_after_admitted_work();
+    let Some(table) = table.table_mut_during_construction() else {
+        let poisoned = account.record_poison(AccountPoisonReason::OwnershipGraphUnverified);
+        return Err(RetainedPublicationError::Writer(
+            RetainedWriterError::AccountPoisoned(poisoned),
+        ));
+    };
+    match catch_unwind(AssertUnwindSafe(|| {
+        try_share_retained_block_after_admission::<O, P, D, Block, Tag>(
+            ledger,
+            share_admission,
+            handle_share_work,
+            table,
+            set_id,
+            destination,
+            index,
+            ordinal,
+            source_allocation,
+        )
+    })) {
+        Ok(result) => result,
+        Err(payload) => {
+            let cause = account.record_poison(AccountPoisonReason::OwnershipGraphUnverified);
+            discard_untrusted_panic_payload(payload);
+            Err(RetainedPublicationError::Writer(
+                RetainedWriterError::AccountPoisoned(cause),
+            ))
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn try_share_retained_block_after_admission<O, P, D, Block, Tag>(
+    ledger: &Ledger<O, P, D>,
+    share_admission: PendingAccountActionAdmission<'_>,
+    handle_share_work: RetainedHandleSharePlan<D>,
+    table: &mut RetainedBlockTable<Block>,
+    set_id: RetainedSetId,
+    destination: RetainedMembershipDestination,
+    index: usize,
+    ordinal: u64,
+    source_allocation: &RetainedAllocation<Block>,
+) -> Result<RetainedSlotIdentity, RetainedPublicationError<D>>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord + fmt::Debug + Send + Sync + 'static,
+    Block: Send + Sync + 'static,
+    Tag: Copy + Send + Sync + 'static,
+{
+    let account = share_admission.account;
+    let admitted_share_work = try_admit_retained_share_work(ledger, handle_share_work)
+        .map_err(RetainedPublicationError::Writer)?;
+    let mut allocation =
+        share_admission.run(|_| admitted_share_work.consume_allocation(source_allocation));
     let membership = RetainedMembership {
         set_id,
         destination,
         ordinal,
     };
     if allocation.assign_membership(membership).is_err() {
-        drop(allocation);
-        return Err(RetainedPublicationError::Poisoned);
+        let outcome = allocation.release_storage();
+        return Err(RetainedPublicationError::Writer(
+            map_inherited_cleanup_error(account, outcome, RetainedWriterError::OwnershipUnverified),
+        ));
     }
     table.members.push(RetainedBlockMember {
         allocation,
@@ -3244,7 +8471,7 @@ where
 }
 
 fn retained_block_table_is_exact<O, P, D, Destination, Block>(
-    table: &RetainedAllocation<RetainedBlockTable<Block>>,
+    table: &RetainedTableAllocation<Block>,
     batch: &AttributionReservationBatch<O, P, D, Destination>,
     account: &PhysicalStorageAccount,
     set_id: RetainedSetId,
@@ -3376,30 +8603,44 @@ where
                 .max(2),
         );
         let canonical_assembly = plan.terminal_writer.limits;
-
-        let coordinator = OperationCoordinator::new(control, ledger_limits);
-        let ledger = coordinator.retained_ledger();
         let terminal_slot_plan = RetainedWriterPlan::new(
             plan.terminal_writer.phase,
             plan.terminal_writer.capacity_dimension,
             plan.terminal_writer.attribution_dimension,
             RetainedBatchLimits::new(1, 1),
         );
-        let fallback_account =
-            try_share_account_after_work(ledger, account, plan.terminal_account_share_work)?;
-        let evidence_account =
-            try_share_account_after_work(ledger, account, plan.terminal_account_share_work)?;
-        let mut fallback = try_create_single_retained_part(
-            ledger,
-            fallback_account,
-            plan.terminal_account_share_work,
-            terminal_slot_plan,
-            plan.fallback_plan,
-            plan.fallback_commitment,
-            build_fallback,
-        )?;
-
-        let dimension_count = ledger.dimension_count();
+        let fallback_batch_plan =
+            AttributionBatchPlan::<O, P, D, OutcomeEvidenceDestination>::try_new(
+                terminal_slot_plan.phase,
+                terminal_slot_plan.capacity_dimension,
+                terminal_slot_plan.limits.attribution_slots,
+                terminal_slot_plan.limits.commitment_slots,
+            )
+            .map_err(map_batch_error)?;
+        let evidence_batch_plan =
+            AttributionBatchPlan::<O, P, D, OutcomeEvidenceDestination>::try_new(
+                terminal_slot_plan.phase,
+                terminal_slot_plan.capacity_dimension,
+                terminal_slot_plan.limits.attribution_slots,
+                terminal_slot_plan.limits.commitment_slots,
+            )
+            .map_err(map_batch_error)?;
+        let canonical_assembly_plan = AttributionBatchPlan::<O, P, D, CanonicalOutput>::try_new(
+            plan.terminal_writer.phase,
+            plan.terminal_writer.capacity_dimension,
+            canonical_assembly.attribution_slots,
+            canonical_assembly.commitment_slots,
+        )
+        .map_err(map_batch_error)?;
+        let evidence_assembly_plan =
+            AttributionBatchPlan::<O, P, D, OutcomeEvidenceDestination>::try_new(
+                plan.terminal_writer.phase,
+                plan.terminal_writer.capacity_dimension,
+                evidence_assembly.attribution_slots,
+                evidence_assembly.commitment_slots,
+            )
+            .map_err(map_batch_error)?;
+        let dimension_count = ledger_limits.dimension_count();
         let evidence_capacity =
             CapacityPlan::for_type::<PublicationDimensionCell<D>>(0, 0, dimension_count).map_err(
                 |_| RetainedOperationStartError::Writer(RetainedWriterError::BatchCapacity),
@@ -3409,14 +8650,121 @@ where
             .map_err(|_| RetainedOperationStartError::Writer(RetainedWriterError::BatchCapacity))?;
         let evidence_plan = RetainedAllocationPlan::new(nested_bytes, u64::from(nested_bytes != 0))
             .map_err(|_| RetainedOperationStartError::Writer(RetainedWriterError::BatchCapacity))?;
-        let mut evidence = try_create_single_retained_part(
+        let fallback_charge = account
+            .checked_retained_charge::<F>(plan.fallback_plan)
+            .map_err(RetainedWriterError::Physical)?;
+        let evidence_charge = account
+            .checked_retained_charge::<PublicationEvidenceCells<D>>(evidence_plan)
+            .map_err(RetainedWriterError::Physical)?;
+        let pair_plan = RetainedAdmissionPairPlan::try_new(fallback_charge, evidence_charge)
+            .map_err(RetainedWriterError::Physical)?;
+        let startup_plan = ledger_limits
+            .try_qualify_startup(
+                StartupAttributionBatchPlans::new(
+                    canonical_assembly_plan,
+                    evidence_assembly_plan,
+                    fallback_batch_plan,
+                    evidence_batch_plan,
+                ),
+                [
+                    StartupRetainedAttribution::new(
+                        terminal_slot_plan.phase,
+                        terminal_slot_plan.attribution_dimension,
+                        fallback_charge.bytes,
+                    ),
+                    StartupRetainedAttribution::new(
+                        terminal_slot_plan.phase,
+                        terminal_slot_plan.attribution_dimension,
+                        evidence_charge.bytes,
+                    ),
+                ],
+                StartupAccountShareEnvelope::four_identical(
+                    plan.terminal_account_share_work.charges(),
+                ),
+                [plan.fallback_commitment, plan.snapshot_commitment],
+            )
+            .map_err(|cause| {
+                RetainedOperationStartError::Writer(RetainedWriterError::Ledger(cause))
+            })?;
+        let (ledger_limits, startup_parts) = startup_plan.into_parts();
+        let (
+            canonical_assembly_plan,
+            evidence_assembly_plan,
+            fallback_batch_plan,
+            evidence_batch_plan,
+        ) = startup_parts.batches.into_parts();
+        let [fallback_attribution, evidence_attribution] = startup_parts.retained_attributions;
+        let account_shares = startup_parts.account_shares;
+        let [fallback_commitment, snapshot_commitment] = startup_parts.commitments;
+
+        let account_admission = account
+            .try_admit_account_action()
+            .map_err(map_account_action_admission_error)
+            .map_err(RetainedOperationStartError::Writer)?;
+        let coordinator = OperationCoordinator::new(control, ledger_limits);
+        let ledger = coordinator.retained_ledger();
+        let startup_owners = try_admit_start_share_work(ledger, account, account_shares)
+            .map_err(RetainedOperationStartError::Writer)?;
+        let (start_admissions, startup_owners) = account
+            .try_admit_start_retained_pair_after_action(
+                account_admission,
+                pair_plan,
+                startup_owners,
+            )
+            .map_err(RetainedWriterError::Physical)?;
+        let start_guard = StartupAdmissionGuard::new(account, start_admissions, startup_owners);
+
+        let canonical_assembly =
+            match ledger.try_attribution_batch_from_plan(canonical_assembly_plan) {
+                Ok(batch) => batch,
+                Err(cause) => {
+                    return Err(RetainedOperationStartError::Writer(
+                        map_qualified_startup_batch_error(cause, |outer_reason| {
+                            start_guard.rollback(outer_reason)
+                        }),
+                    ));
+                }
+            };
+        let evidence_assembly = match ledger.try_attribution_batch_from_plan(evidence_assembly_plan)
+        {
+            Ok(batch) => batch,
+            Err(cause) => {
+                return Err(RetainedOperationStartError::Writer(
+                    map_qualified_startup_batch_error(cause, |outer_reason| {
+                        start_guard.rollback(outer_reason)
+                    }),
+                ));
+            }
+        };
+
+        let startup_guard =
+            StartupRetainedPartGuard::new(start_guard, canonical_assembly, evidence_assembly);
+        let startup_owner_result = startup_guard.try_build(
             ledger,
-            evidence_account,
-            plan.terminal_account_share_work,
-            terminal_slot_plan,
-            evidence_plan,
-            plan.snapshot_commitment,
+            StartupRetainedPartPlan::new(
+                fallback_attribution,
+                fallback_batch_plan,
+                plan.fallback_plan,
+                fallback_commitment,
+            ),
+            build_fallback,
+            StartupRetainedPartPlan::new(
+                evidence_attribution,
+                evidence_batch_plan,
+                evidence_plan,
+                snapshot_commitment,
+            ),
             || {
+                #[cfg(test)]
+                {
+                    record_start_evidence_build_call();
+                    if take_injected_start_evidence_build_panic() {
+                        panic!("inject startup evidence builder panic");
+                    }
+                    if let Some(cause) = take_injected_start_evidence_build_failure() {
+                        return Err(cause);
+                    }
+                }
                 let mut dimensions = Vec::new();
                 if dimensions
                     .try_reserve_exact(evidence_capacity.allocator_additional())
@@ -3448,111 +8796,54 @@ where
                     frozen: AtomicBool::new(false),
                 })
             },
-        )?;
-        ledger
-            .validate_typed_batch_pair(
-                fallback
-                    .batch
-                    .as_ref()
-                    .ok_or(RetainedOperationStartError::InvalidTerminalLimits)?,
-                evidence
-                    .batch
-                    .as_ref()
-                    .ok_or(RetainedOperationStartError::InvalidTerminalLimits)?,
-            )
-            .map_err(|cause| {
-                RetainedOperationStartError::Writer(RetainedWriterError::Ledger(cause))
-            })?;
-
-        let canonical_assembly = ledger
-            .try_attribution_batch(
-                plan.terminal_writer.phase,
-                plan.terminal_writer.capacity_dimension,
-                canonical_assembly.attribution_slots,
-                canonical_assembly.commitment_slots,
-            )
-            .map_err(map_batch_error)?;
-        let evidence_assembly = ledger
-            .try_attribution_batch(
-                plan.terminal_writer.phase,
-                plan.terminal_writer.capacity_dimension,
-                evidence_assembly.attribution_slots,
-                evidence_assembly.commitment_slots,
-            )
-            .map_err(map_batch_error)?;
-
-        if !fallback.has_exact_product_graph()
-            || !evidence.has_exact_product_graph()
-            || !fallback.account().is_same_account(evidence.account())
-        {
-            return Err(RetainedOperationStartError::Writer(
-                RetainedWriterError::ForeignAccount,
-            ));
+        );
+        #[cfg(test)]
+        if startup_owner_result.is_err() {
+            let probe = ledger.test_probe();
+            STARTUP_FAILURE_LEDGER_SNAPSHOT.with(|snapshot| {
+                snapshot.set(Some((
+                    probe.active_reservations(),
+                    probe.current_live_bytes(),
+                )));
+            });
         }
-        let fallback_batch = fallback.take_batch_for_prepare();
-        let evidence_batch = evidence.take_batch_for_prepare();
-        let batches = match ledger.try_fallback_baseline(
-            canonical_assembly,
-            evidence_assembly,
-            fallback_batch,
-            evidence_batch,
-        ) {
-            Ok(baseline) => baseline,
-            Err(rejection) => {
-                let (baseline, cause) = rejection.into_parts();
-                let (canonical_assembly, evidence_assembly, fallback_batch, evidence_batch) =
-                    baseline.into_parts();
-                let fallback_account = match fallback.try_discard_allocation_before_batch_release()
-                {
-                    Ok(account) => account,
-                    Err(()) => {
-                        std::mem::forget(fallback);
-                        std::mem::forget(evidence);
-                        std::mem::forget(fallback_batch);
-                        std::mem::forget(evidence_batch);
-                        std::mem::forget(canonical_assembly);
-                        std::mem::forget(evidence_assembly);
-                        return Err(RetainedOperationStartError::Writer(
-                            RetainedWriterError::StorageDropUnverified,
-                        ));
-                    }
-                };
-                let evidence_account = match evidence.try_discard_allocation_before_batch_release()
-                {
-                    Ok(account) => account,
-                    Err(()) => {
-                        std::mem::forget(fallback_account);
-                        std::mem::forget(evidence);
-                        std::mem::forget(fallback_batch);
-                        std::mem::forget(evidence_batch);
-                        std::mem::forget(canonical_assembly);
-                        std::mem::forget(evidence_assembly);
-                        return Err(RetainedOperationStartError::Writer(
-                            RetainedWriterError::StorageDropUnverified,
-                        ));
-                    }
-                };
-                drop(fallback);
-                drop(evidence);
-                drop(fallback_batch);
-                drop(evidence_batch);
-                drop(fallback_account);
-                drop(evidence_account);
-                drop(canonical_assembly);
-                drop(evidence_assembly);
+        let startup_owner = startup_owner_result.map_err(RetainedOperationStartError::Writer)?;
+        let mut baseline = startup_owner
+            .try_into_baseline()
+            .map_err(RetainedOperationStartError::Writer)?;
+        let bind_result = catch_unwind(AssertUnwindSafe(|| {
+            let batches = match baseline.batches.as_mut() {
+                Some(batches) => batches,
+                None => unreachable_final_owner_state(),
+            };
+            ledger.try_bind_fallback_baseline(batches)
+        }));
+        match bind_result {
+            Err(payload) => {
+                discard_untrusted_panic_payload(payload);
+                baseline.new_fault_and_fail_closed(AccountPoisonReason::OwnershipGraphUnverified);
                 return Err(RetainedOperationStartError::Writer(
-                    RetainedWriterError::Ledger(cause),
+                    RetainedWriterError::StorageDropUnverified,
                 ));
             }
-        };
+            Ok(Err(_cause)) => {
+                let poisoned = baseline
+                    .account()
+                    .record_poison(AccountPoisonReason::OwnershipGraphUnverified);
+                return Err(RetainedOperationStartError::Writer(
+                    if baseline.discard_rejected().is_ok() {
+                        RetainedWriterError::AccountPoisoned(poisoned)
+                    } else {
+                        RetainedWriterError::StorageDropUnverified
+                    },
+                ));
+            }
+            Ok(Ok(())) => {}
+        }
 
         Ok(Self {
             coordinator,
-            baseline: FallbackPublicationBaseline {
-                fallback: Some(fallback),
-                evidence: Some(evidence),
-                batches: Some(batches),
-            },
+            baseline,
             terminal_writer: plan.terminal_writer,
             terminal_account_share_work: plan.terminal_account_share_work,
         })
@@ -3572,7 +8863,10 @@ where
     pub fn prepare_minimal_fallback<CanonicalBlock, EvidenceBlock>(
         self,
         cause: PreparationFailureCode,
-    ) -> PreparedRetainedPublication<CanonicalBlock, EvidenceBlock, F, D> {
+    ) -> Result<
+        PreparedRetainedPublication<CanonicalBlock, EvidenceBlock, F, D>,
+        RetainedPublicationPrepareError,
+    > {
         let RetainedOperation {
             coordinator,
             baseline,
@@ -3580,8 +8874,19 @@ where
         } = self;
         let ledger = coordinator.into_ledger_for_typed_publication();
         let (fallback, evidence, batches) = baseline.into_parts();
-        let proof = batches.into_fallback_proof(ledger, None, None);
-        finish_retained_publication_fallback(proof, fallback, evidence, cause, None)
+        let physical = TerminalPhysicalOwnershipManifest::new(fallback, evidence, None, None, None);
+        TerminalFallbackGuard::new(
+            TerminalFallbackAttribution {
+                ledger,
+                baseline: batches,
+                discard: PrimaryPublicationBatches {
+                    canonical: None,
+                    evidence: None,
+                },
+            },
+            physical,
+        )
+        .try_prepare(cause)
     }
 
     pub fn try_publication_assembly<CanonicalBlock, EvidenceBlock>(
@@ -3634,14 +8939,37 @@ where
             },
             None => None,
         };
-        let Some(set_id) = try_next_retained_set_id() else {
-            return Err(RetainedPublicationOpenError {
-                operation: self,
-                cause: RetainedWriterError::MembershipExhausted,
-                recoverable: true,
-            });
-        };
         let handle_share_work = self.terminal_account_share_work;
+        let open_result = catch_unwind(AssertUnwindSafe(|| {
+            try_open_publication_account(
+                self.coordinator.retained_ledger(),
+                self.account(),
+                handle_share_work,
+            )
+        }));
+        let (account, set_id) = match open_result {
+            Err(payload) => {
+                let cause = RetainedWriterError::AccountPoisoned(
+                    self.account()
+                        .record_poison(AccountPoisonReason::OwnershipGraphUnverified),
+                );
+                discard_untrusted_panic_payload(payload);
+                return Err(RetainedPublicationOpenError {
+                    operation: self,
+                    cause,
+                    recoverable: false,
+                });
+            }
+            Ok(Err(cause)) => {
+                let recoverable = retained_open_failure_is_recoverable(&cause);
+                return Err(RetainedPublicationOpenError {
+                    operation: self,
+                    cause,
+                    recoverable,
+                });
+            }
+            Ok(Ok(open)) => open,
+        };
         let (canonical_plan, mut canonical_batch, canonical_storage) =
             if let Some(qualified) = canonical_qualified {
                 let QualifiedRetainedBlockTablePlan {
@@ -3656,6 +8984,7 @@ where
                 {
                     Ok(batch) => batch,
                     Err(error) => {
+                        drop(account);
                         return Err(RetainedPublicationOpenError {
                             operation: self,
                             cause: map_batch_error(error),
@@ -3680,6 +9009,7 @@ where
             Ok(batch) => batch,
             Err(error) => {
                 drop(canonical_batch);
+                drop(account);
                 return Err(RetainedPublicationOpenError {
                     operation: self,
                     cause: map_batch_error(error),
@@ -3687,23 +9017,6 @@ where
                 });
             }
         };
-        let account = match try_share_account_after_work(
-            self.coordinator.retained_ledger(),
-            self.account(),
-            handle_share_work,
-        ) {
-            Ok(account) => account,
-            Err(cause) => {
-                drop(evidence_batch);
-                drop(canonical_batch);
-                return Err(RetainedPublicationOpenError {
-                    operation: self,
-                    cause,
-                    recoverable: true,
-                });
-            }
-        };
-
         let canonical_table = if let Some(storage) = canonical_storage {
             let batch = match canonical_batch.as_mut() {
                 Some(batch) => batch,
@@ -3745,8 +9058,12 @@ where
         ) {
             Ok(table) => table,
             Err(cause) => {
-                drop(canonical_table);
-                drop(canonical_batch);
+                let canonical_cleanup = match canonical_table {
+                    Some(table) => drop_retained_table_with_account_anchor(table, &account),
+                    None => RetainedStorageDropOutcome::Clean,
+                };
+                let cause =
+                    finish_pre_attribution_batch_cleanup(canonical_batch, canonical_cleanup, cause);
                 drop(evidence_batch);
                 drop(account);
                 return Err(RetainedPublicationOpenError {
@@ -3772,7 +9089,7 @@ where
             } else {
                 RetainedOutcomeMode::FailureOnly
             },
-            poisoned: false,
+            containment: AssemblyContainmentProvenance::Healthy,
         })
     }
 }
@@ -3812,7 +9129,7 @@ where
         CanonicalTag: Copy + Send + Sync + 'static,
         EvidenceTag: Copy + Send + Sync + 'static,
     {
-        if self.poisoned {
+        if self.containment != AssemblyContainmentProvenance::Healthy {
             return Err(RetainedClosureValidationError::Poisoned);
         }
         if self.mode != RetainedOutcomeMode::SuccessCapable {
@@ -3821,7 +9138,7 @@ where
         let (Some(canonical), Some(evidence)) =
             (self.canonical_table.as_ref(), self.evidence_table.as_ref())
         else {
-            self.poisoned = true;
+            self.containment = AssemblyContainmentProvenance::NewFaultPending;
             return Err(RetainedClosureValidationError::Poisoned);
         };
         let canonical = canonical.as_ref();
@@ -3896,11 +9213,11 @@ where
     where
         EvidenceTag: Copy + Send + Sync + 'static,
     {
-        if self.poisoned {
+        if self.containment != AssemblyContainmentProvenance::Healthy {
             return Err(RetainedClosureValidationError::Poisoned);
         }
         let Some(evidence) = self.evidence_table.as_ref() else {
-            self.poisoned = true;
+            self.containment = AssemblyContainmentProvenance::NewFaultPending;
             return Err(RetainedClosureValidationError::Poisoned);
         };
         let evidence = evidence.as_ref();
@@ -4051,7 +9368,7 @@ where
     where
         Tag: Copy + Send + Sync + 'static,
     {
-        if self.poisoned {
+        if self.containment != AssemblyContainmentProvenance::Healthy {
             return Err(RetainedPublicationError::Poisoned);
         }
         let canonical_plan = self
@@ -4087,8 +9404,8 @@ where
                 marker: PhantomData,
             }),
             Err(error) => {
-                if retained_publication_error_is_poisoning(&error) {
-                    self.poisoned = true;
+                if let Some(containment) = retained_publication_error_containment(&error) {
+                    self.containment = containment;
                 }
                 Err(error)
             }
@@ -4108,7 +9425,7 @@ where
     where
         Tag: Copy + Send + Sync + 'static,
     {
-        if self.poisoned {
+        if self.containment != AssemblyContainmentProvenance::Healthy {
             return Err(RetainedPublicationError::Poisoned);
         }
         if self.mode != RetainedOutcomeMode::SuccessCapable {
@@ -4139,8 +9456,8 @@ where
                 marker: PhantomData,
             }),
             Err(error) => {
-                if retained_publication_error_is_poisoning(&error) {
-                    self.poisoned = true;
+                if let Some(containment) = retained_publication_error_containment(&error) {
+                    self.containment = containment;
                 }
                 Err(error)
             }
@@ -4160,7 +9477,7 @@ where
     where
         Tag: Copy + Send + Sync + 'static,
     {
-        if self.poisoned {
+        if self.containment != AssemblyContainmentProvenance::Healthy {
             return Err(RetainedPublicationError::Poisoned);
         }
         let result = try_retain_block(
@@ -4193,8 +9510,8 @@ where
                 marker: PhantomData,
             }),
             Err(error) => {
-                if retained_publication_error_is_poisoning(&error) {
-                    self.poisoned = true;
+                if let Some(containment) = retained_publication_error_containment(&error) {
+                    self.containment = containment;
                 }
                 Err(error)
             }
@@ -4210,7 +9527,7 @@ where
     where
         Tag: Copy + Send + Sync + 'static,
     {
-        if self.poisoned {
+        if self.containment != AssemblyContainmentProvenance::Healthy {
             return Err(RetainedPublicationError::Poisoned);
         }
         let result = try_share_retained_block::<O, P, D, EvidenceBlock, Tag>(
@@ -4238,8 +9555,8 @@ where
                 marker: PhantomData,
             }),
             Err(error) => {
-                if retained_publication_error_is_poisoning(&error) {
-                    self.poisoned = true;
+                if let Some(containment) = retained_publication_error_containment(&error) {
+                    self.containment = containment;
                 }
                 Err(error)
             }
@@ -4251,7 +9568,7 @@ where
         dimension: D,
         amount: u64,
     ) -> Result<(), RetainedPublicationError<D>> {
-        if self.poisoned {
+        if self.containment != AssemblyContainmentProvenance::Healthy {
             return Err(RetainedPublicationError::Poisoned);
         }
         if self.mode != RetainedOutcomeMode::SuccessCapable {
@@ -4269,7 +9586,7 @@ where
         dimension: D,
         amount: u64,
     ) -> Result<(), RetainedPublicationError<D>> {
-        if self.poisoned {
+        if self.containment != AssemblyContainmentProvenance::Healthy {
             return Err(RetainedPublicationError::Poisoned);
         }
         self.evidence_batch
@@ -4298,9 +9615,19 @@ where
         PreparedRetainedPublication<CanonicalBlock, EvidenceBlock, F, D>,
         RetainedPublicationPrepareError,
     > {
-        if self.poisoned {
-            self.fail_closed();
-            return Err(RetainedPublicationPrepareError::Poisoned);
+        if self.containment != AssemblyContainmentProvenance::Healthy {
+            let cause = match self.containment {
+                AssemblyContainmentProvenance::NewFaultPending => {
+                    self.poison_and_fail_closed(AccountPoisonReason::OwnershipGraphUnverified)
+                }
+                AssemblyContainmentProvenance::RetainedFailureAlreadyRecorded(reason) => {
+                    self.contain_after_recorded_poison(reason)
+                }
+                AssemblyContainmentProvenance::Healthy => unreachable_final_owner_state(),
+            };
+            return Err(RetainedPublicationPrepareError::FinalizationContainment(
+                cause,
+            ));
         }
         let exact_storage = self.has_exact_storage_graph()
             && match (self.account.as_ref(), self.operation.as_ref()) {
@@ -4310,8 +9637,10 @@ where
                 _ => false,
             };
         if !exact_storage {
-            self.fail_closed();
-            return Err(RetainedPublicationPrepareError::InvalidStorageGraph);
+            let cause = self.poison_and_fail_closed(AccountPoisonReason::OwnershipGraphUnverified);
+            return Err(RetainedPublicationPrepareError::FinalizationContainment(
+                cause,
+            ));
         }
 
         let terminal = match request {
@@ -4338,16 +9667,22 @@ where
                                 .is_some()
                     });
                 if !proof_valid {
-                    self.fail_closed();
-                    return Err(RetainedPublicationPrepareError::InvalidStorageGraph);
+                    let cause =
+                        self.poison_and_fail_closed(AccountPoisonReason::OwnershipGraphUnverified);
+                    return Err(RetainedPublicationPrepareError::FinalizationContainment(
+                        cause,
+                    ));
                 }
                 let control_cause = match self.operation.as_mut() {
                     Some(operation) => {
                         prepare_terminal_control(&mut operation.coordinator, final_progress)
                     }
                     None => {
-                        self.fail_closed();
-                        return Err(RetainedPublicationPrepareError::Poisoned);
+                        let cause = self
+                            .poison_and_fail_closed(AccountPoisonReason::OwnershipGraphUnverified);
+                        return Err(RetainedPublicationPrepareError::FinalizationContainment(
+                            cause,
+                        ));
                     }
                 };
                 control_cause.map_or(
@@ -4376,16 +9711,22 @@ where
                                 .is_some()
                     });
                 if !proof_valid {
-                    self.fail_closed();
-                    return Err(RetainedPublicationPrepareError::InvalidStorageGraph);
+                    let cause =
+                        self.poison_and_fail_closed(AccountPoisonReason::OwnershipGraphUnverified);
+                    return Err(RetainedPublicationPrepareError::FinalizationContainment(
+                        cause,
+                    ));
                 }
                 let control_cause = match self.operation.as_mut() {
                     Some(operation) => {
                         prepare_terminal_control(&mut operation.coordinator, final_progress)
                     }
                     None => {
-                        self.fail_closed();
-                        return Err(RetainedPublicationPrepareError::Poisoned);
+                        let cause = self
+                            .poison_and_fail_closed(AccountPoisonReason::OwnershipGraphUnverified);
+                        return Err(RetainedPublicationPrepareError::FinalizationContainment(
+                            cause,
+                        ));
                     }
                 };
                 RetainedTerminalMode::RichFailure {
@@ -4403,8 +9744,11 @@ where
                             PreparationFailureCode::from_control(&cause)
                         }),
                     None => {
-                        self.fail_closed();
-                        return Err(RetainedPublicationPrepareError::Poisoned);
+                        let cause = self
+                            .poison_and_fail_closed(AccountPoisonReason::OwnershipGraphUnverified);
+                        return Err(RetainedPublicationPrepareError::FinalizationContainment(
+                            cause,
+                        ));
                     }
                 };
                 RetainedTerminalMode::MinimalFallback { cause }
@@ -4414,32 +9758,72 @@ where
         match terminal {
             RetainedTerminalMode::Success { .. } => {}
             RetainedTerminalMode::RichFailure { .. } => {
-                if let Some(canonical) = self.canonical_table.take()
-                    && !drop_retained_table_before_attribution(
+                if let Some(canonical) = self.canonical_table.take() {
+                    let outcome = drop_retained_table_before_attribution(
                         canonical,
                         match self.account.as_ref() {
                             Some(account) => account,
                             None => unreachable_final_owner_state(),
                         },
-                    )
-                {
-                    self.fail_closed();
-                    return Err(RetainedPublicationPrepareError::StorageDropUnverified);
+                    );
+                    if outcome != RetainedStorageDropOutcome::Clean {
+                        let reason = match outcome {
+                            RetainedStorageDropOutcome::Clean => unreachable_final_owner_state(),
+                            RetainedStorageDropOutcome::StorageReleaseUnverified(witness)
+                            | RetainedStorageDropOutcome::ChargeReleaseUnverified(witness)
+                            | RetainedStorageDropOutcome::StillSharedOwnershipFault(witness)
+                            | RetainedStorageDropOutcome::ForeignOwnershipFault(witness) => {
+                                witness.reason
+                            }
+                            RetainedStorageDropOutcome::MissingFaultAnchor => {
+                                AccountPoisonReason::OwnershipGraphUnverified
+                            }
+                        };
+                        let cause = if matches!(
+                            outcome,
+                            RetainedStorageDropOutcome::StorageReleaseUnverified(_)
+                                | RetainedStorageDropOutcome::ChargeReleaseUnverified(_)
+                                | RetainedStorageDropOutcome::StillSharedOwnershipFault(_)
+                                | RetainedStorageDropOutcome::ForeignOwnershipFault(_)
+                        ) {
+                            self.contain_after_recorded_poison(reason)
+                        } else {
+                            self.poison_and_fail_closed(reason)
+                        };
+                        return Err(RetainedPublicationPrepareError::FinalizationContainment(
+                            cause,
+                        ));
+                    }
                 }
                 drop(self.canonical_batch.take());
                 self.mode = RetainedOutcomeMode::FailureOnly;
             }
             RetainedTerminalMode::MinimalFallback { .. } => {
-                if !self.drop_tables_before_attribution() {
-                    self.fail_closed();
-                    return Err(RetainedPublicationPrepareError::StorageDropUnverified);
+                let outcome = self.drop_tables_before_attribution();
+                if outcome != RetainedStorageDropOutcome::Clean {
+                    let cause = match outcome {
+                        RetainedStorageDropOutcome::Clean => unreachable_final_owner_state(),
+                        RetainedStorageDropOutcome::StorageReleaseUnverified(witness)
+                        | RetainedStorageDropOutcome::ChargeReleaseUnverified(witness)
+                        | RetainedStorageDropOutcome::StillSharedOwnershipFault(witness)
+                        | RetainedStorageDropOutcome::ForeignOwnershipFault(witness) => {
+                            self.contain_after_recorded_poison(witness.reason)
+                        }
+                        RetainedStorageDropOutcome::MissingFaultAnchor => self
+                            .poison_and_fail_closed(AccountPoisonReason::OwnershipGraphUnverified),
+                    };
+                    return Err(RetainedPublicationPrepareError::FinalizationContainment(
+                        cause,
+                    ));
                 }
             }
         }
 
         if self.operation.is_none() || self.evidence_batch.is_none() || self.account.is_none() {
-            self.fail_closed();
-            return Err(RetainedPublicationPrepareError::Poisoned);
+            let cause = self.poison_and_fail_closed(AccountPoisonReason::OwnershipGraphUnverified);
+            return Err(RetainedPublicationPrepareError::FinalizationContainment(
+                cause,
+            ));
         }
         let operation = match self.operation.take() {
             Some(operation) => operation,
@@ -4462,155 +9846,51 @@ where
             ..
         } = operation;
         let ledger = coordinator.into_ledger_for_typed_publication();
-        let (mut fallback, evidence, baseline_batches) = baseline.into_parts();
+        let (fallback, evidence, baseline_batches) = baseline.into_parts();
+        let physical = TerminalPhysicalOwnershipManifest::new(
+            fallback,
+            evidence,
+            canonical_table,
+            evidence_table,
+            Some(account),
+        );
 
         if let RetainedTerminalMode::MinimalFallback { cause } = terminal {
-            let proof =
-                baseline_batches.into_fallback_proof(ledger, canonical_batch, Some(evidence_batch));
-            return Ok(finish_retained_publication_fallback(
-                proof,
-                fallback,
-                evidence,
-                cause,
-                Some(account),
-            ));
+            let attribution = TerminalFallbackAttribution {
+                ledger,
+                baseline: baseline_batches,
+                discard: PrimaryPublicationBatches {
+                    canonical: canonical_batch,
+                    evidence: Some(evidence_batch),
+                },
+            };
+            return TerminalFallbackGuard::new(attribution, physical).try_prepare(cause);
         }
 
-        let mut baseline_batches = baseline_batches;
-        let mut primary_batches = PrimaryPublicationBatches {
-            canonical: canonical_batch,
-            evidence: Some(evidence_batch),
-        };
-        let bind_result = catch_unwind(AssertUnwindSafe(|| {
-            try_bind_terminal_primary(&ledger, &mut baseline_batches, &mut primary_batches)
-        }));
-        match bind_result {
-            Err(payload) => {
-                let expect_canonical = matches!(terminal, RetainedTerminalMode::Success { .. });
-                let _storage_dropped = drop_primary_tables_before_attribution(
-                    expect_canonical,
-                    canonical_table,
-                    evidence_table,
-                    &account,
-                );
-                discard_untrusted_panic_payload(payload);
-                // Binding may have updated only a prefix of cached positions. Even when both
-                // tables dropped cleanly, no remaining batch can safely release or publish.
-                std::mem::forget(baseline_batches);
-                std::mem::forget(primary_batches);
-                std::mem::forget(ledger);
-                std::mem::forget(account);
-                std::mem::forget(fallback);
-                std::mem::forget(evidence);
-                return Err(RetainedPublicationPrepareError::PrimaryPanicked);
-            }
-            Ok(Err(_cause)) => {
-                let expect_canonical = matches!(terminal, RetainedTerminalMode::Success { .. });
-                if !drop_primary_tables_before_attribution(
-                    expect_canonical,
-                    canonical_table,
-                    evidence_table,
-                    &account,
-                ) {
-                    std::mem::forget(baseline_batches);
-                    std::mem::forget(primary_batches);
-                    std::mem::forget(ledger);
-                    std::mem::forget(account);
-                    std::mem::forget(fallback);
-                    std::mem::forget(evidence);
-                    return Err(RetainedPublicationPrepareError::StorageDropUnverified);
-                }
-                let proof = baseline_batches.into_fallback_proof(
-                    ledger,
-                    primary_batches.canonical,
-                    primary_batches.evidence,
-                );
-                return Ok(finish_retained_publication_fallback(
-                    proof,
-                    fallback,
-                    evidence,
-                    PreparationFailureCode::ledger(),
-                    Some(account),
-                ));
-            }
-            Ok(Ok(())) => {}
-        }
-
-        let proof = finish_bound_terminal_primary(ledger, baseline_batches, primary_batches);
-        let fallback_account = match fallback.try_discard_allocation_before_batch_release() {
-            Ok(account) => account,
-            Err(()) => {
-                std::mem::forget(proof);
-                std::mem::forget(fallback);
-                std::mem::forget(evidence);
-                std::mem::forget(canonical_table);
-                std::mem::forget(evidence_table);
-                std::mem::forget(account);
-                return Err(RetainedPublicationPrepareError::StorageDropUnverified);
+        let transition = TerminalPrimaryGuard::new(
+            ledger,
+            baseline_batches,
+            PrimaryPublicationBatches {
+                canonical: canonical_batch,
+                evidence: Some(evidence_batch),
+            },
+            physical,
+        )
+        .try_advance(terminal)?;
+        let freeze_guard = match transition {
+            TerminalPrimaryTransition::Primary(freeze_guard) => freeze_guard,
+            TerminalPrimaryTransition::Fallback(fallback_guard) => {
+                return fallback_guard.try_prepare(PreparationFailureCode::ledger());
             }
         };
-        freeze_terminal_evidence(proof, Some(fallback_account), &evidence);
-        let payload = match terminal {
-            RetainedTerminalMode::Success {
-                canonical_root,
-                evidence_root,
-            } => {
-                let canonical_table = match canonical_table {
-                    Some(table) => table,
-                    None => unreachable_final_owner_state(),
-                };
-                let evidence_table = match evidence_table {
-                    Some(table) => table,
-                    None => unreachable_final_owner_state(),
-                };
-                RetainedPublicationPayload::Success {
-                    canonical: PublishedCanonicalAggregate {
-                        inner: PublishedRetainedAggregate {
-                            table: canonical_table,
-                            set_id: self.set_id,
-                        },
-                    },
-                    outcome_evidence: PublishedOutcomeEvidenceAggregate {
-                        inner: PublishedRetainedAggregate {
-                            table: evidence_table,
-                            set_id: self.set_id,
-                        },
-                    },
-                    canonical_root,
-                    outcome_evidence_root: evidence_root,
-                    account,
-                }
-            }
-            RetainedTerminalMode::RichFailure {
-                evidence_root,
-                cause,
-            } => {
-                let evidence_table = match evidence_table {
-                    Some(table) => table,
-                    None => unreachable_final_owner_state(),
-                };
-                RetainedPublicationPayload::RichFailure {
-                    outcome_evidence: PublishedOutcomeEvidenceAggregate {
-                        inner: PublishedRetainedAggregate {
-                            table: evidence_table,
-                            set_id: self.set_id,
-                        },
-                    },
-                    outcome_evidence_root: evidence_root,
-                    account,
-                    cause,
-                }
-            }
-            RetainedTerminalMode::MinimalFallback { .. } => unreachable_final_owner_state(),
-        };
-        Ok(PreparedRetainedPublication {
-            payload,
-            evidence: evidence.into_published_part(),
-        })
+        let eligible = freeze_guard
+            .try_into_eligible()
+            .map_err(RetainedPublicationPrepareError::FinalizationContainment)?;
+        Ok(eligible.into_prepared(self.set_id))
     }
 
     fn has_exact_storage_graph(&self) -> bool {
-        if self.poisoned {
+        if self.containment != AssemblyContainmentProvenance::Healthy {
             return false;
         }
         let (Some(evidence), Some(evidence_batch), Some(account)) = (
@@ -4647,7 +9927,66 @@ where
         evidence_exact && canonical_exact
     }
 
-    fn fail_closed(&mut self) {
+    fn first_containment_account(&self) -> Option<&PhysicalStorageAccount> {
+        self.account
+            .as_ref()
+            .or_else(|| {
+                self.operation
+                    .as_ref()
+                    .and_then(|operation| operation.baseline.first_account())
+            })
+            .or_else(|| self.canonical_table.as_ref().map(|table| table.account()))
+            .or_else(|| {
+                self.canonical_table.as_ref().and_then(|table| {
+                    table
+                        .as_ref()
+                        .members
+                        .first()
+                        .map(|member| member.allocation.account())
+                })
+            })
+            .or_else(|| self.evidence_table.as_ref().map(|table| table.account()))
+            .or_else(|| {
+                self.evidence_table.as_ref().and_then(|table| {
+                    table
+                        .as_ref()
+                        .members
+                        .first()
+                        .map(|member| member.allocation.account())
+                })
+            })
+    }
+
+    fn record_containment(&self, reason: AccountPoisonReason) -> FinalizationContainmentError {
+        let account = match self.first_containment_account() {
+            Some(account) => account,
+            None => unreachable_final_owner_state(),
+        };
+        if let Some(canonical) = self.canonical_table.as_ref() {
+            record_forgotten_table_edges(canonical);
+        }
+        if let Some(evidence) = self.evidence_table.as_ref() {
+            record_forgotten_table_edges(evidence);
+        }
+        if let Some(operation) = self.operation.as_ref() {
+            operation.baseline.record_forgotten_physical_edges();
+        }
+        FinalizationContainmentError::new(AccountPoisoned::new(account.snapshot()), reason)
+    }
+
+    fn record_new_fault(&self, reason: AccountPoisonReason) {
+        let account = match self
+            .account
+            .as_ref()
+            .or_else(|| self.first_containment_account())
+        {
+            Some(account) => account,
+            None => unreachable_final_owner_state(),
+        };
+        let _ = account.record_poison(reason);
+    }
+
+    fn fail_closed_after_recorded_poison(&mut self) {
         if let Some(canonical) = self.canonical_table.take() {
             std::mem::forget(canonical);
         }
@@ -4661,26 +10000,58 @@ where
             std::mem::forget(batch);
         }
         if let Some(account) = self.account.take() {
-            std::mem::forget(account);
+            drop(account);
         }
-        if let Some(operation) = self.operation.take() {
+        if let Some(mut operation) = self.operation.take() {
+            operation.baseline.fail_closed_after_recorded_poison();
             std::mem::forget(operation);
         }
     }
 
-    fn drop_tables_before_attribution(&mut self) -> bool {
+    fn poison_and_fail_closed(
+        &mut self,
+        reason: AccountPoisonReason,
+    ) -> FinalizationContainmentError {
+        self.record_new_fault(reason);
+        let cause = self.record_containment(reason);
+        self.fail_closed_after_recorded_poison();
+        cause
+    }
+
+    fn contain_after_recorded_poison(
+        &mut self,
+        reason: AccountPoisonReason,
+    ) -> FinalizationContainmentError {
+        let cause = self.record_containment(reason);
+        self.fail_closed_after_recorded_poison();
+        cause
+    }
+
+    fn drop_tables_before_attribution(&mut self) -> RetainedStorageDropOutcome {
         let Some(account) = self.account.as_ref() else {
-            return false;
+            return RetainedStorageDropOutcome::MissingFaultAnchor;
         };
-        if let Some(canonical) = self.canonical_table.take()
-            && !drop_retained_table_before_attribution(canonical, account)
-        {
-            return false;
+        let canonical = match self.canonical_table.take() {
+            Some(canonical) => drop_retained_table_with_account_anchor(canonical, account),
+            None => RetainedStorageDropOutcome::Clean,
+        };
+        let evidence = match self.evidence_table.take() {
+            Some(evidence) => drop_retained_table_with_account_anchor(evidence, account),
+            None => RetainedStorageDropOutcome::ForeignOwnershipFault(record_account_poison_event(
+                account,
+                AccountPoisonReason::OwnershipGraphUnverified,
+            )),
+        };
+        let outcome = canonical.join(evidence);
+        if outcome != RetainedStorageDropOutcome::Clean {
+            if canonical == RetainedStorageDropOutcome::Clean {
+                drop(self.canonical_batch.take());
+            }
+            if evidence == RetainedStorageDropOutcome::Clean {
+                drop(self.evidence_batch.take());
+            }
         }
-        let Some(evidence) = self.evidence_table.take() else {
-            return false;
-        };
-        drop_retained_table_before_attribution(evidence, account)
+        outcome
     }
 }
 
@@ -4895,13 +10266,47 @@ where
     EvidenceBlock: Send + Sync + 'static,
 {
     fn drop(&mut self) {
-        if std::thread::panicking() || !self.has_exact_storage_graph() {
-            self.fail_closed();
+        if self.canonical_table.is_none()
+            && self.evidence_table.is_none()
+            && self.canonical_batch.is_none()
+            && self.evidence_batch.is_none()
+            && self.account.is_none()
+            && self.operation.is_none()
+        {
             return;
         }
-        if !self.drop_tables_before_attribution() {
-            self.fail_closed();
+        if std::thread::panicking() {
+            let _ = self.poison_and_fail_closed(AccountPoisonReason::OwnershipGraphUnverified);
             return;
+        }
+        match self.containment {
+            AssemblyContainmentProvenance::Healthy => {}
+            AssemblyContainmentProvenance::NewFaultPending => {
+                let _ = self.poison_and_fail_closed(AccountPoisonReason::OwnershipGraphUnverified);
+                return;
+            }
+            AssemblyContainmentProvenance::RetainedFailureAlreadyRecorded(reason) => {
+                let _ = self.contain_after_recorded_poison(reason);
+                return;
+            }
+        }
+        if !self.has_exact_storage_graph() {
+            let _ = self.poison_and_fail_closed(AccountPoisonReason::OwnershipGraphUnverified);
+            return;
+        }
+        match self.drop_tables_before_attribution() {
+            RetainedStorageDropOutcome::Clean => {}
+            RetainedStorageDropOutcome::StorageReleaseUnverified(witness)
+            | RetainedStorageDropOutcome::ChargeReleaseUnverified(witness)
+            | RetainedStorageDropOutcome::StillSharedOwnershipFault(witness)
+            | RetainedStorageDropOutcome::ForeignOwnershipFault(witness) => {
+                let _ = self.contain_after_recorded_poison(witness.reason);
+                return;
+            }
+            RetainedStorageDropOutcome::MissingFaultAnchor => {
+                let _ = self.poison_and_fail_closed(AccountPoisonReason::OwnershipGraphUnverified);
+                return;
+            }
         }
         drop(self.canonical_batch.take());
         drop(self.evidence_batch.take());
@@ -4920,6 +10325,450 @@ where
     evidence: Option<AttributionReservationBatch<O, P, D, OutcomeEvidenceDestination>>,
 }
 
+struct TerminalPrimaryAttribution<O, P, D>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+{
+    ledger: Ledger<O, P, D>,
+    baseline: FallbackBatchBaseline<O, P, D>,
+    batches: PrimaryPublicationBatches<O, P, D>,
+}
+
+impl<O, P, D> TerminalPrimaryAttribution<O, P, D>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord + fmt::Debug,
+{
+    fn try_bind(&mut self) -> Result<(), LedgerCause<D>> {
+        self.ledger.try_bind_primary(
+            &mut self.baseline,
+            self.batches.canonical.as_mut(),
+            self.batches.evidence.as_mut(),
+        )
+    }
+
+    fn finish(self) -> crate::ledger::TypedFreezeProof<O, P, D> {
+        self.ledger.finish_bound_primary(
+            self.baseline,
+            self.batches.canonical,
+            self.batches.evidence,
+        )
+    }
+
+    fn release_sources_after_verified_cleanup(&mut self, cleanup: TerminalTableCleanup) {
+        if cleanup.canonical == RetainedStorageDropOutcome::Clean {
+            drop(self.batches.canonical.take());
+        }
+        if cleanup.evidence == RetainedStorageDropOutcome::Clean {
+            drop(self.batches.evidence.take());
+        }
+    }
+
+    fn into_fallback(self) -> TerminalFallbackAttribution<O, P, D> {
+        TerminalFallbackAttribution {
+            ledger: self.ledger,
+            baseline: self.baseline,
+            discard: self.batches,
+        }
+    }
+}
+
+struct TerminalFallbackAttribution<O, P, D>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+{
+    ledger: Ledger<O, P, D>,
+    baseline: FallbackBatchBaseline<O, P, D>,
+    discard: PrimaryPublicationBatches<O, P, D>,
+}
+
+impl<O, P, D> TerminalFallbackAttribution<O, P, D>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord + fmt::Debug,
+{
+    fn try_prepare_sources(&mut self) -> Result<(), ()> {
+        self.baseline.try_prepare_fallback_sources()
+    }
+
+    fn finish(self) -> crate::ledger::TypedFreezeProof<O, P, D> {
+        self.baseline.finish_prepared_fallback_proof(
+            self.ledger,
+            self.discard.canonical,
+            self.discard.evidence,
+        )
+    }
+}
+
+enum TerminalPrimaryTransition<O, P, D, F, CanonicalBlock, EvidenceBlock>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+{
+    Primary(TerminalFreezeGuard<O, P, D, F, CanonicalBlock, EvidenceBlock>),
+    Fallback(TerminalFallbackGuard<O, P, D, F, CanonicalBlock, EvidenceBlock>),
+}
+
+struct TerminalPrimaryGuard<O, P, D, F, CanonicalBlock, EvidenceBlock>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+{
+    attribution: Option<TerminalPrimaryAttribution<O, P, D>>,
+    physical: Option<TerminalPhysicalOwnershipManifest<D, F, CanonicalBlock, EvidenceBlock>>,
+    discarded_account: Option<PhysicalStorageAccount>,
+}
+
+impl<O, P, D, F, CanonicalBlock, EvidenceBlock>
+    TerminalPrimaryGuard<O, P, D, F, CanonicalBlock, EvidenceBlock>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord + fmt::Debug,
+{
+    fn new(
+        ledger: Ledger<O, P, D>,
+        baseline: FallbackBatchBaseline<O, P, D>,
+        batches: PrimaryPublicationBatches<O, P, D>,
+        physical: TerminalPhysicalOwnershipManifest<D, F, CanonicalBlock, EvidenceBlock>,
+    ) -> Self {
+        Self {
+            attribution: Some(TerminalPrimaryAttribution {
+                ledger,
+                baseline,
+                batches,
+            }),
+            physical: Some(physical),
+            discarded_account: None,
+        }
+    }
+
+    fn attribution_mut(&mut self) -> &mut TerminalPrimaryAttribution<O, P, D> {
+        match self.attribution.as_mut() {
+            Some(attribution) => attribution,
+            None => unreachable_final_owner_state(),
+        }
+    }
+
+    fn physical(&self) -> &TerminalPhysicalOwnershipManifest<D, F, CanonicalBlock, EvidenceBlock> {
+        match self.physical.as_ref() {
+            Some(physical) => physical,
+            None => unreachable_final_owner_state(),
+        }
+    }
+
+    fn physical_mut(
+        &mut self,
+    ) -> &mut TerminalPhysicalOwnershipManifest<D, F, CanonicalBlock, EvidenceBlock> {
+        match self.physical.as_mut() {
+            Some(physical) => physical,
+            None => unreachable_final_owner_state(),
+        }
+    }
+
+    fn retain_attribution_after_physical_containment(&mut self) {
+        if let Some(attribution) = self.attribution.take() {
+            std::mem::forget(attribution);
+        }
+    }
+
+    fn contain_new_fault(mut self, reason: AccountPoisonReason) -> FinalizationContainmentError {
+        let physical = match self.physical.take() {
+            Some(physical) => physical,
+            None => unreachable_final_owner_state(),
+        };
+        let cause = physical.contain_new_fault(reason);
+        self.retain_attribution_after_physical_containment();
+        drop(self.discarded_account.take());
+        cause
+    }
+
+    fn contain_after_recorded(
+        mut self,
+        reason: AccountPoisonReason,
+    ) -> FinalizationContainmentError {
+        let physical = match self.physical.take() {
+            Some(physical) => physical,
+            None => unreachable_final_owner_state(),
+        };
+        let cause = physical.contain_after_recorded(reason);
+        self.retain_attribution_after_physical_containment();
+        drop(self.discarded_account.take());
+        cause
+    }
+
+    fn into_fallback(mut self) -> TerminalFallbackGuard<O, P, D, F, CanonicalBlock, EvidenceBlock> {
+        let attribution = match self.attribution.take() {
+            Some(attribution) => attribution.into_fallback(),
+            None => unreachable_final_owner_state(),
+        };
+        let physical = match self.physical.take() {
+            Some(physical) => physical,
+            None => unreachable_final_owner_state(),
+        };
+        TerminalFallbackGuard::new(attribution, physical)
+    }
+
+    fn try_advance(
+        mut self,
+        terminal: RetainedTerminalMode,
+    ) -> Result<
+        TerminalPrimaryTransition<O, P, D, F, CanonicalBlock, EvidenceBlock>,
+        RetainedPublicationPrepareError,
+    > {
+        let bind_result = catch_unwind(AssertUnwindSafe(|| self.attribution_mut().try_bind()));
+        match bind_result {
+            Err(payload) => {
+                discard_untrusted_panic_payload(payload);
+                let expect_canonical = matches!(terminal, RetainedTerminalMode::Success { .. });
+                self.physical_mut()
+                    .record_new_fault(AccountPoisonReason::PrimaryPublicationBindingPanicked);
+                let cleanup = self
+                    .physical_mut()
+                    .try_drop_primary_tables(expect_canonical);
+                let reason = cleanup
+                    .failure_reason()
+                    .unwrap_or(AccountPoisonReason::PrimaryPublicationBindingPanicked);
+                let containment = self.contain_after_recorded(reason);
+                return Err(RetainedPublicationPrepareError::FinalizationContainment(
+                    containment,
+                ));
+            }
+            Ok(Err(_cause)) => {
+                let expect_canonical = matches!(terminal, RetainedTerminalMode::Success { .. });
+                let cleanup = self
+                    .physical_mut()
+                    .try_drop_primary_tables(expect_canonical);
+                if let Some(reason) = cleanup.failure_reason() {
+                    self.attribution_mut()
+                        .release_sources_after_verified_cleanup(cleanup);
+                    let containment = self.contain_after_recorded(reason);
+                    return Err(RetainedPublicationPrepareError::FinalizationContainment(
+                        containment,
+                    ));
+                }
+                return Ok(TerminalPrimaryTransition::Fallback(self.into_fallback()));
+            }
+            Ok(Ok(())) => {}
+        }
+
+        let fallback_account = match self.physical_mut().try_discard_fallback_allocation() {
+            Ok(account) => account,
+            Err(cause) => {
+                let containment =
+                    match cause {
+                        RetainedPartCleanupError::MissingFaultAnchor => {
+                            self.contain_new_fault(AccountPoisonReason::OwnershipGraphUnverified)
+                        }
+                        RetainedPartCleanupError::NewFaultAlreadyRecorded(_) => self
+                            .contain_after_recorded(AccountPoisonReason::OwnershipGraphUnverified),
+                        RetainedPartCleanupError::StorageReleaseUnverified(_) => self
+                            .contain_after_recorded(
+                                AccountPoisonReason::RetainedStorageReleaseUnverified,
+                            ),
+                        RetainedPartCleanupError::ChargeReleaseUnverified(witness) => {
+                            self.contain_after_recorded(witness.reason)
+                        }
+                        RetainedPartCleanupError::StillSharedOwnershipFault(_) => self
+                            .contain_after_recorded(AccountPoisonReason::OwnershipGraphUnverified),
+                        RetainedPartCleanupError::DeferredOwnershipFault => {
+                            self.contain_new_fault(AccountPoisonReason::OwnershipGraphUnverified)
+                        }
+                    };
+                return Err(RetainedPublicationPrepareError::FinalizationContainment(
+                    containment,
+                ));
+            }
+        };
+        self.discarded_account = Some(fallback_account);
+        if !self.physical().qualifies_exact_terminal(terminal) {
+            let containment = self.contain_new_fault(AccountPoisonReason::OwnershipGraphUnverified);
+            return Err(RetainedPublicationPrepareError::FinalizationContainment(
+                containment,
+            ));
+        }
+        let physical = match self.physical.take() {
+            Some(physical) => physical.finish_exact_terminal(terminal),
+            None => unreachable_final_owner_state(),
+        };
+        let proof = match self.attribution.take() {
+            Some(attribution) => attribution.finish(),
+            None => unreachable_final_owner_state(),
+        };
+        let discarded_account = match self.discarded_account.take() {
+            Some(account) => account,
+            None => unreachable_final_owner_state(),
+        };
+        Ok(TerminalPrimaryTransition::Primary(
+            TerminalFreezeGuard::new(proof, physical, discarded_account),
+        ))
+    }
+}
+
+impl<O, P, D, F, CanonicalBlock, EvidenceBlock> Drop
+    for TerminalPrimaryGuard<O, P, D, F, CanonicalBlock, EvidenceBlock>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+{
+    fn drop(&mut self) {
+        if let Some(physical) = self.physical.take() {
+            let _ = physical.contain_new_fault(AccountPoisonReason::OwnershipGraphUnverified);
+        }
+        if let Some(attribution) = self.attribution.take() {
+            std::mem::forget(attribution);
+        }
+        drop(self.discarded_account.take());
+    }
+}
+
+struct TerminalFallbackGuard<O, P, D, F, CanonicalBlock, EvidenceBlock>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+{
+    attribution: Option<TerminalFallbackAttribution<O, P, D>>,
+    physical: Option<TerminalPhysicalOwnershipManifest<D, F, CanonicalBlock, EvidenceBlock>>,
+    discarded_account: Option<PhysicalStorageAccount>,
+}
+
+impl<O, P, D, F, CanonicalBlock, EvidenceBlock>
+    TerminalFallbackGuard<O, P, D, F, CanonicalBlock, EvidenceBlock>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord + fmt::Debug,
+{
+    fn new(
+        attribution: TerminalFallbackAttribution<O, P, D>,
+        physical: TerminalPhysicalOwnershipManifest<D, F, CanonicalBlock, EvidenceBlock>,
+    ) -> Self {
+        Self {
+            attribution: Some(attribution),
+            physical: Some(physical),
+            discarded_account: None,
+        }
+    }
+
+    fn attribution_mut(&mut self) -> &mut TerminalFallbackAttribution<O, P, D> {
+        match self.attribution.as_mut() {
+            Some(attribution) => attribution,
+            None => unreachable_final_owner_state(),
+        }
+    }
+
+    fn physical(&self) -> &TerminalPhysicalOwnershipManifest<D, F, CanonicalBlock, EvidenceBlock> {
+        match self.physical.as_ref() {
+            Some(physical) => physical,
+            None => unreachable_final_owner_state(),
+        }
+    }
+
+    fn physical_mut(
+        &mut self,
+    ) -> &mut TerminalPhysicalOwnershipManifest<D, F, CanonicalBlock, EvidenceBlock> {
+        match self.physical.as_mut() {
+            Some(physical) => physical,
+            None => unreachable_final_owner_state(),
+        }
+    }
+
+    fn retain_attribution_after_physical_containment(&mut self) {
+        if let Some(attribution) = self.attribution.take() {
+            std::mem::forget(attribution);
+        }
+    }
+
+    fn contain_new_fault(mut self, reason: AccountPoisonReason) -> FinalizationContainmentError {
+        let physical = match self.physical.take() {
+            Some(physical) => physical,
+            None => unreachable_final_owner_state(),
+        };
+        let cause = physical.contain_new_fault(reason);
+        self.retain_attribution_after_physical_containment();
+        drop(self.discarded_account.take());
+        cause
+    }
+
+    fn try_prepare(
+        mut self,
+        cause: PreparationFailureCode,
+    ) -> Result<
+        PreparedRetainedPublication<CanonicalBlock, EvidenceBlock, F, D>,
+        RetainedPublicationPrepareError,
+    > {
+        match catch_unwind(AssertUnwindSafe(|| {
+            self.attribution_mut().try_prepare_sources()
+        })) {
+            Ok(Ok(())) => {}
+            Ok(Err(())) => {
+                let containment =
+                    self.contain_new_fault(AccountPoisonReason::OwnershipGraphUnverified);
+                return Err(RetainedPublicationPrepareError::FinalizationContainment(
+                    containment,
+                ));
+            }
+            Err(payload) => {
+                let containment =
+                    self.contain_new_fault(AccountPoisonReason::OwnershipGraphUnverified);
+                discard_untrusted_panic_payload(payload);
+                return Err(RetainedPublicationPrepareError::FinalizationContainment(
+                    containment,
+                ));
+            }
+        }
+
+        self.discarded_account = self.physical_mut().take_account();
+        if !self.physical().qualifies_exact_fallback() {
+            let containment = self.contain_new_fault(AccountPoisonReason::OwnershipGraphUnverified);
+            return Err(RetainedPublicationPrepareError::FinalizationContainment(
+                containment,
+            ));
+        }
+        let physical = match self.physical.take() {
+            Some(physical) => physical.finish_exact_fallback(),
+            None => unreachable_final_owner_state(),
+        };
+        let proof = match self.attribution.take() {
+            Some(attribution) => attribution.finish(),
+            None => unreachable_final_owner_state(),
+        };
+        let freeze_guard = FallbackFreezeGuard::new(proof, physical, self.discarded_account.take());
+        let eligible = freeze_guard
+            .try_into_eligible()
+            .map_err(RetainedPublicationPrepareError::FinalizationContainment)?;
+        Ok(eligible.into_prepared(cause))
+    }
+}
+
+impl<O, P, D, F, CanonicalBlock, EvidenceBlock> Drop
+    for TerminalFallbackGuard<O, P, D, F, CanonicalBlock, EvidenceBlock>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+{
+    fn drop(&mut self) {
+        if let Some(physical) = self.physical.take() {
+            let _ = physical.contain_new_fault(AccountPoisonReason::OwnershipGraphUnverified);
+        }
+        if let Some(attribution) = self.attribution.take() {
+            std::mem::forget(attribution);
+        }
+        drop(self.discarded_account.take());
+    }
+}
+
 fn prepare_terminal_control<O, P, PP, U, D>(
     coordinator: &mut OperationCoordinator<O, P, PP, U, D>,
     final_progress: FinalProgress<PP, U>,
@@ -4935,36 +10784,6 @@ where
         .try_prepare_typed_control(final_progress)
         .err()
         .map(|cause| PreparationFailureCode::from_control(&cause))
-}
-
-fn try_bind_terminal_primary<O, P, D>(
-    ledger: &Ledger<O, P, D>,
-    baseline: &mut FallbackBatchBaseline<O, P, D>,
-    batches: &mut PrimaryPublicationBatches<O, P, D>,
-) -> Result<(), LedgerCause<D>>
-where
-    O: OperationOwner,
-    P: Copy + Ord,
-    D: Copy + Ord + fmt::Debug,
-{
-    ledger.try_bind_primary(
-        baseline,
-        batches.canonical.as_mut(),
-        batches.evidence.as_mut(),
-    )
-}
-
-fn finish_bound_terminal_primary<O, P, D>(
-    ledger: Ledger<O, P, D>,
-    baseline: FallbackBatchBaseline<O, P, D>,
-    batches: PrimaryPublicationBatches<O, P, D>,
-) -> crate::ledger::TypedFreezeProof<O, P, D>
-where
-    O: OperationOwner,
-    P: Copy + Ord,
-    D: Copy + Ord + fmt::Debug,
-{
-    ledger.finish_bound_primary(baseline, batches.canonical, batches.evidence)
 }
 
 #[allow(
@@ -5355,69 +11174,58 @@ where
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub(crate) enum RetainedPublicationPrepareError {
-    /// Required terminal ownership was already consumed or poisoned.
-    Poisoned,
-    /// Storage, membership, account, proof, and attribution no longer form one exact graph.
-    InvalidStorageGraph,
-    /// Payload destruction could not prove that physical storage was released.
-    StorageDropUnverified,
-    /// Owner-defined ledger ordering panicked; all uncertain attribution remains retained.
-    PrimaryPanicked,
+    /// Final eligibility failed closed without producing any prepared or fallback owner.
+    FinalizationContainment(FinalizationContainmentError),
 }
 
 impl fmt::Display for RetainedPublicationPrepareError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Poisoned => formatter.write_str("retained publication preparation is poisoned"),
-            Self::InvalidStorageGraph => {
-                formatter.write_str("retained publication storage graph is invalid")
-            }
-            Self::StorageDropUnverified => formatter
-                .write_str("retained storage release could not be verified before attribution"),
-            Self::PrimaryPanicked => formatter.write_str(
-                "retained primary ledger preparation panicked; attribution remains retained fail-closed",
-            ),
+            Self::FinalizationContainment(cause) => cause.fmt(formatter),
         }
     }
 }
 
 impl std::error::Error for RetainedPublicationPrepareError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        None
+        match self {
+            Self::FinalizationContainment(cause) => Some(cause),
+        }
     }
 }
 
-fn drop_primary_tables_before_attribution<CanonicalBlock, EvidenceBlock>(
-    expect_canonical: bool,
-    canonical: Option<RetainedAllocation<RetainedBlockTable<CanonicalBlock>>>,
-    evidence: Option<RetainedAllocation<RetainedBlockTable<EvidenceBlock>>>,
+fn drop_retained_table_with_account_anchor<Block>(
+    table: RetainedTableAllocation<Block>,
     account: &PhysicalStorageAccount,
-) -> bool {
-    let exact_shape = canonical.is_some() == expect_canonical && evidence.is_some();
-    if let Some(canonical) = canonical
-        && !drop_retained_table_before_attribution(canonical, account)
-    {
-        if let Some(evidence) = evidence {
-            std::mem::forget(evidence);
-        }
-        return false;
-    }
-    let evidence_dropped =
-        evidence.is_some_and(|evidence| drop_retained_table_before_attribution(evidence, account));
-    exact_shape && evidence_dropped
+) -> RetainedStorageDropOutcome {
+    let ownership = if table.belongs_to(account) {
+        RetainedStorageDropOutcome::Clean
+    } else {
+        RetainedStorageDropOutcome::ForeignOwnershipFault(record_account_poison_event(
+            account,
+            AccountPoisonReason::OwnershipGraphUnverified,
+        ))
+    };
+    ownership.join(drop_retained_table_before_attribution(table, account))
 }
 
 fn drop_retained_table_before_attribution<Block>(
-    table: RetainedAllocation<RetainedBlockTable<Block>>,
+    table: RetainedTableAllocation<Block>,
     account: &PhysicalStorageAccount,
-) -> bool {
+) -> RetainedStorageDropOutcome {
+    if !table.belongs_to(account) {
+        record_forgotten_table_edges(&table);
+        std::mem::forget(table);
+        return RetainedStorageDropOutcome::MissingFaultAnchor;
+    }
     drop_retained_allocation_before_attribution(table, account)
 }
 
 fn freeze_terminal_evidence<O, P, D>(
+    _eligibility: PublicationEligibility,
     proof: crate::ledger::TypedFreezeProof<O, P, D>,
     discarded_account: Option<PhysicalStorageAccount>,
-    evidence: &RetainedPart<PublicationEvidenceCells<D>, OutcomeEvidenceDestination, O, P, D>,
+    evidence: &DetachedRetainedPart<PublicationEvidenceCells<D>>,
 ) where
     O: OperationOwner,
     P: Copy + Ord,
@@ -5429,33 +11237,13 @@ fn freeze_terminal_evidence<O, P, D>(
     drop(snapshot);
 }
 
-fn finish_retained_publication_fallback<O, P, D, F, CanonicalBlock, EvidenceBlock>(
-    proof: crate::ledger::TypedFreezeProof<O, P, D>,
-    fallback: RetainedPart<F, OutcomeEvidenceDestination, O, P, D>,
-    evidence: RetainedPart<PublicationEvidenceCells<D>, OutcomeEvidenceDestination, O, P, D>,
-    cause: PreparationFailureCode,
-    discarded_account: Option<PhysicalStorageAccount>,
-) -> PreparedRetainedPublication<CanonicalBlock, EvidenceBlock, F, D>
-where
-    O: OperationOwner,
-    P: Copy + Ord,
-    D: Copy + Ord + fmt::Debug + Send + Sync + 'static,
-    F: Send + Sync + 'static,
-{
-    freeze_terminal_evidence(proof, discarded_account, &evidence);
-    PreparedRetainedPublication {
-        payload: RetainedPublicationPayload::MinimalFallback {
-            part: fallback.into_published_part(),
-            cause,
-        },
-        evidence: evidence.into_published_part(),
-    }
-}
-
 #[cfg(test)]
 thread_local! {
-    static FAIL_NEXT_FINAL_OWNER_ALLOCATION: std::cell::Cell<bool> = const {
-        std::cell::Cell::new(false)
+    static PUBLICATION_ELIGIBILITY_PAUSE: std::cell::RefCell<
+        Option<(std::sync::Arc<std::sync::Barrier>, std::sync::Arc<std::sync::Barrier>)>
+    > = const { std::cell::RefCell::new(None) };
+    static FAIL_FINAL_OWNER_ALLOCATION_AFTER: std::cell::Cell<Option<usize>> = const {
+        std::cell::Cell::new(None)
     };
     static FAIL_NEXT_MEMBERSHIP_ASSIGNMENT: std::cell::Cell<bool> = const {
         std::cell::Cell::new(false)
@@ -5466,6 +11254,36 @@ thread_local! {
     static TEST_MEMBER_LOOKUPS: std::cell::Cell<usize> = const {
         std::cell::Cell::new(0)
     };
+    static FAIL_NEXT_START_EVIDENCE_BUILD: std::cell::Cell<Option<RetainedBuildFailureCode>> =
+        const { std::cell::Cell::new(None) };
+    static PANIC_NEXT_START_EVIDENCE_BUILD: std::cell::Cell<bool> = const {
+        std::cell::Cell::new(false)
+    };
+    static START_EVIDENCE_BUILD_CALLS: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
+    static STARTUP_FAILURE_LEDGER_SNAPSHOT: std::cell::Cell<Option<(u64, u64)>> = const {
+        std::cell::Cell::new(None)
+    };
+}
+
+#[cfg(test)]
+fn install_publication_eligibility_pause(
+    entered: std::sync::Arc<std::sync::Barrier>,
+    resume: std::sync::Arc<std::sync::Barrier>,
+) {
+    PUBLICATION_ELIGIBILITY_PAUSE.with(|pause| {
+        *pause.borrow_mut() = Some((entered, resume));
+    });
+}
+
+#[cfg(test)]
+fn pause_after_publication_eligibility() {
+    let pause = PUBLICATION_ELIGIBILITY_PAUSE.with(|slot| slot.borrow_mut().take());
+    if let Some((entered, resume)) = pause {
+        entered.wait();
+        resume.wait();
+    }
 }
 
 #[cfg(test)]
@@ -5480,7 +11298,12 @@ fn take_test_member_lookups() -> usize {
 
 #[cfg(test)]
 fn fail_next_final_owner_allocation() {
-    FAIL_NEXT_FINAL_OWNER_ALLOCATION.with(|flag| flag.set(true));
+    fail_final_owner_allocation_after(0);
+}
+
+#[cfg(test)]
+fn fail_final_owner_allocation_after(skipped_allocations: usize) {
+    FAIL_FINAL_OWNER_ALLOCATION_AFTER.with(|remaining| remaining.set(Some(skipped_allocations)));
 }
 
 #[cfg(test)]
@@ -5514,8 +11337,53 @@ fn take_injected_final_owner_drop_panic() -> bool {
 }
 
 #[cfg(test)]
+fn fail_next_start_evidence_build(cause: RetainedBuildFailureCode) {
+    FAIL_NEXT_START_EVIDENCE_BUILD.with(|failure| failure.set(Some(cause)));
+}
+
+#[cfg(test)]
+fn panic_next_start_evidence_build() {
+    PANIC_NEXT_START_EVIDENCE_BUILD.with(|panic| panic.set(true));
+}
+
+#[cfg(test)]
+fn take_injected_start_evidence_build_panic() -> bool {
+    PANIC_NEXT_START_EVIDENCE_BUILD.with(|panic| panic.replace(false))
+}
+
+#[cfg(test)]
+fn take_injected_start_evidence_build_failure() -> Option<RetainedBuildFailureCode> {
+    FAIL_NEXT_START_EVIDENCE_BUILD.with(std::cell::Cell::take)
+}
+
+#[cfg(test)]
+fn record_start_evidence_build_call() {
+    START_EVIDENCE_BUILD_CALLS.with(|calls| calls.set(calls.get().saturating_add(1)));
+}
+
+#[cfg(test)]
+fn take_start_evidence_build_calls() -> usize {
+    START_EVIDENCE_BUILD_CALLS.with(std::cell::Cell::take)
+}
+
+#[cfg(test)]
+fn take_startup_failure_ledger_snapshot() -> Option<(u64, u64)> {
+    STARTUP_FAILURE_LEDGER_SNAPSHOT.with(std::cell::Cell::take)
+}
+
+#[cfg(test)]
 fn take_injected_final_owner_allocation_failure() -> bool {
-    FAIL_NEXT_FINAL_OWNER_ALLOCATION.with(|flag| flag.replace(false))
+    FAIL_FINAL_OWNER_ALLOCATION_AFTER.with(|remaining| match remaining.get() {
+        None => false,
+        Some(0) => {
+            remaining.set(None);
+            true
+        }
+        Some(count) => {
+            remaining.set(Some(count - 1));
+            false
+        }
+    })
 }
 
 #[cfg(test)]
@@ -5917,6 +11785,43 @@ mod tests {
             .unwrap()
     }
 
+    fn admitted_startup_share_work(account: &PhysicalStorageAccount) -> StartupAccountOwners {
+        let share = || PhysicalStorageAccount {
+            inner: account.inner.share(),
+        };
+        StartupAccountOwners {
+            fallback_account: share(),
+            evidence_account: share(),
+            fallback_lease_owner: share(),
+            evidence_lease_owner: share(),
+        }
+    }
+
+    fn startup_limits_and_plan() -> (
+        LedgerLimits<TestDimension>,
+        RetainedOperationStartPlan<TestPhase, TestDimension>,
+    ) {
+        let policy = DimensionPolicy::reservable_bytes(u64::MAX, u64::MAX, u64::MAX, u64::MAX)
+            .with_published_outcome_evidence_limit(64);
+        let limits = LedgerLimits::new(u64::MAX, [(TestDimension::Bytes, policy)])
+            .unwrap_or_else(|_| panic!("startup test limits must qualify"));
+        let plan = RetainedOperationStartPlan::new(
+            writer_plan(2, 2),
+            share_work(),
+            empty_plan(),
+            OutputCommitment::new(TestDimension::Bytes, 1),
+            OutputCommitment::new(TestDimension::Bytes, 1),
+        );
+        (limits, plan)
+    }
+
+    fn reset_startup_test_observations() {
+        let _ = take_injected_start_evidence_build_failure();
+        let _ = take_injected_start_evidence_build_panic();
+        let _ = take_start_evidence_build_calls();
+        let _ = take_startup_failure_ledger_snapshot();
+    }
+
     fn empty_plan() -> RetainedAllocationPlan {
         RetainedAllocationPlan::new(0, 0).unwrap()
     }
@@ -6095,7 +12000,7 @@ mod tests {
         let operation = test_operation_on_account_with_control(
             &account,
             64,
-            RetainedBatchLimits::new(2, 2),
+            RetainedBatchLimits::new(3, 2),
             OperationControl::default(),
         );
         let plan = RetainedPublicationPlan::success(
@@ -6345,7 +12250,7 @@ mod tests {
                     1,
                     0,
                 )),
-                true,
+                false,
             ),
             (
                 "commitment capacity overflow",
@@ -6442,7 +12347,8 @@ mod tests {
             } else {
                 drop(handoff_for_test(
                     operation
-                        .prepare_minimal_fallback::<u64, u64>(PreparationFailureCode::domain(70)),
+                        .prepare_minimal_fallback::<u64, u64>(PreparationFailureCode::domain(70))
+                        .unwrap_or_else(|_| panic!("direct fallback must prepare")),
                 ));
             }
             assert_eq!(factory.snapshot().live_accounts(), 0, "{case}");
@@ -6469,7 +12375,9 @@ mod tests {
             .try_into_operation()
             .unwrap_or_else(|_| panic!("invalid plan must return the untouched operation"));
         let published = handoff_for_test(
-            operation.prepare_minimal_fallback::<u64, u64>(PreparationFailureCode::domain(71)),
+            operation
+                .prepare_minimal_fallback::<u64, u64>(PreparationFailureCode::domain(71))
+                .unwrap_or_else(|_| panic!("direct fallback must prepare")),
         );
         match published {
             PublishedRetainedPublicationParts::MinimalFallback {
@@ -6497,15 +12405,15 @@ mod tests {
         };
         assert!(matches!(
             error.cause(),
-            RetainedWriterError::Physical(RetainedAllocationError::AllocationFailed {
-                charge_retained: false
-            })
+            RetainedWriterError::Physical(RetainedAllocationError::AllocationFailed)
         ));
         let operation = error
             .try_into_operation()
             .unwrap_or_else(|_| panic!("verified allocation failure must return the operation"));
         let published = handoff_for_test(
-            operation.prepare_minimal_fallback::<u64, u64>(PreparationFailureCode::domain(72)),
+            operation
+                .prepare_minimal_fallback::<u64, u64>(PreparationFailureCode::domain(72))
+                .unwrap_or_else(|_| panic!("direct fallback must prepare")),
         );
         assert!(matches!(
             &published,
@@ -6514,6 +12422,54 @@ mod tests {
         ));
         drop(published);
         assert_eq!(factory.snapshot().live_accounts(), 0);
+    }
+
+    #[test]
+    fn second_table_allocation_failure_releases_canonical_and_returns_operation() {
+        let factory = account_factory(1);
+        let operation = test_operation(&factory, 64);
+        fail_final_owner_allocation_after(1);
+
+        let error = match operation.try_publication_assembly::<u64, u64>(publication_plan(1, 1)) {
+            Ok(_) => panic!("evidence table allocation failure must reject open"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            error.cause(),
+            RetainedWriterError::Physical(RetainedAllocationError::AllocationFailed)
+        ));
+        let operation = error
+            .try_into_operation()
+            .unwrap_or_else(|_| panic!("clean canonical rollback must return the operation"));
+        let published = handoff_for_test(
+            operation
+                .prepare_minimal_fallback::<u64, u64>(PreparationFailureCode::domain(73))
+                .unwrap_or_else(|_| panic!("recovered operation must prepare fallback")),
+        );
+        drop(published);
+        assert_eq!(factory.snapshot().live_accounts(), 0);
+    }
+
+    #[test]
+    fn second_table_allocation_failure_reports_canonical_storage_cleanup_failure() {
+        let factory = account_factory(1);
+        let operation = test_operation(&factory, 64);
+        fail_final_owner_allocation_after(1);
+        test_panic_final_owner_drop_after(0);
+
+        let error = match operation.try_publication_assembly::<u64, u64>(publication_plan(1, 1)) {
+            Ok(_) => panic!("combined evidence allocation and canonical drop failure must reject"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            error.cause(),
+            RetainedWriterError::StorageDropUnverified
+        ));
+        assert!(matches!(
+            error.try_into_operation(),
+            Err(RetainedWriterError::StorageDropUnverified)
+        ));
+        assert_eq!(factory.snapshot().live_accounts(), 1);
     }
 
     #[test]
@@ -6818,7 +12774,8 @@ mod tests {
                 .account
                 .as_ref()
                 .expect("assembly retains account")
-                .share_after_admission(),
+                .share_after_test_admission()
+                .unwrap_or_else(|_| panic!("test account share must be admitted")),
             observed_active: &OBSERVED_ACTIVE,
             observed_operation_live: &OBSERVED_OPERATION_LIVE,
             observed_physical_bytes: &OBSERVED_PHYSICAL_BYTES,
@@ -7156,7 +13113,8 @@ mod tests {
 
         assert!(matches!(
             result,
-            Err(RetainedPublicationPrepareError::PrimaryPanicked)
+            Err(RetainedPublicationPrepareError::FinalizationContainment(cause))
+                if cause.reason() == AccountPoisonReason::PrimaryPublicationBindingPanicked
         ));
         assert_eq!(BLOCK_DROPS.load(Ordering::SeqCst), 1);
         assert_eq!(OBSERVED_ACTIVE.load(Ordering::SeqCst), expected_active);
@@ -7168,6 +13126,178 @@ mod tests {
             assert_eq!(ledger.current_live_bytes(), expected_live);
         }
         assert!(account.snapshot().live_retained_bytes() > 0);
+        drop(account);
+        assert_eq!(factory.snapshot().live_accounts(), 1);
+    }
+
+    #[test]
+    fn cleanup_lattice_is_order_independent_and_preserves_error_precedence() {
+        let factory = account_factory(1);
+        let account = account(&factory, u64::MAX, 16);
+        let storage =
+            RetainedStorageDropOutcome::StorageReleaseUnverified(record_account_poison_event(
+                &account,
+                AccountPoisonReason::RetainedStorageReleaseUnverified,
+            ));
+        let ownership = RetainedStorageDropOutcome::ForeignOwnershipFault(
+            record_account_poison_event(&account, AccountPoisonReason::OwnershipGraphUnverified),
+        );
+        let charge = RetainedStorageDropOutcome::ChargeReleaseUnverified(
+            record_account_poison_event(&account, AccountPoisonReason::CounterInvariantViolated),
+        );
+
+        for (left, right, expected) in [
+            (storage, ownership, RetainedStorageDropSeverity::Storage),
+            (storage, charge, RetainedStorageDropSeverity::Storage),
+            (ownership, charge, RetainedStorageDropSeverity::Ownership),
+            (
+                charge,
+                RetainedStorageDropOutcome::Clean,
+                RetainedStorageDropSeverity::Charge,
+            ),
+        ] {
+            assert_eq!(left.join(right).severity(), expected);
+            assert_eq!(right.join(left).severity(), expected);
+        }
+        assert_eq!(
+            RetainedStorageDropOutcome::MissingFaultAnchor
+                .join(ownership)
+                .witness()
+                .map(|witness| witness.reason),
+            Some(AccountPoisonReason::OwnershipGraphUnverified)
+        );
+        assert_eq!(
+            ownership
+                .join(RetainedStorageDropOutcome::MissingFaultAnchor)
+                .witness()
+                .map(|witness| witness.reason),
+            Some(AccountPoisonReason::OwnershipGraphUnverified)
+        );
+
+        let cause: RetainedWriterError<TestDimension> = join_pre_attribution_cleanup_cause(
+            RetainedStorageDropOutcome::Clean,
+            RetainedWriterError::InvalidPublicationPlan,
+        );
+        assert!(matches!(cause, RetainedWriterError::InvalidPublicationPlan));
+        let cause = join_pre_attribution_cleanup_cause(
+            charge,
+            RetainedWriterError::<TestDimension>::OwnershipUnverified,
+        );
+        assert!(matches!(cause, RetainedWriterError::OwnershipUnverified));
+        let cause = join_pre_attribution_cleanup_cause(
+            ownership,
+            RetainedWriterError::<TestDimension>::StorageDropUnverified,
+        );
+        assert!(matches!(cause, RetainedWriterError::StorageDropUnverified));
+        let cause = join_pre_attribution_cleanup_cause(
+            storage,
+            RetainedWriterError::<TestDimension>::OwnershipUnverified,
+        );
+        assert!(matches!(cause, RetainedWriterError::StorageDropUnverified));
+
+        drop(account);
+        assert_eq!(factory.snapshot().live_accounts(), 0);
+    }
+
+    #[test]
+    fn primary_binding_panic_reports_later_storage_release_failure() {
+        let _ord_lock = PRIMARY_DIMENSION_ORD_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _reset = PrimaryDimensionOrdReset;
+        PANIC_ON_PRIMARY_DIMENSION_ORD.store(false, Ordering::SeqCst);
+
+        type PanicOperation = RetainedOperation<
+            TestOwner,
+            TestPhase,
+            TestProgress,
+            TestUnit,
+            PrimaryPanicDimension,
+            u32,
+        >;
+        type PanicPublication = RetainedPublicationAssembly<
+            TestOwner,
+            TestPhase,
+            TestProgress,
+            TestUnit,
+            PrimaryPanicDimension,
+            u32,
+            u64,
+            u64,
+        >;
+
+        let factory = account_factory(1);
+        let account = account(&factory, u64::MAX, 128);
+        let dimension = PrimaryPanicDimension(7);
+        let policy = DimensionPolicy::reservable_bytes(u64::MAX, u64::MAX, u64::MAX, u64::MAX)
+            .with_published_outcome_evidence_limit(64);
+        let limits = LedgerLimits::new(u64::MAX, [(dimension, policy)])
+            .unwrap_or_else(|_| panic!("combined-fault policy must be valid"));
+        let writer = RetainedWriterPlan::new(
+            TestPhase::Build,
+            dimension,
+            dimension,
+            RetainedBatchLimits::new(2, 2),
+        );
+        let start = RetainedOperationStartPlan::new(
+            writer,
+            RetainedHandleSharePlan::new(dimension, dimension),
+            empty_plan(),
+            OutputCommitment::new(dimension, 1),
+            OutputCommitment::new(dimension, 1),
+        );
+        let operation =
+            PanicOperation::try_start(OperationControl::default(), limits, &account, start, || {
+                Ok(7_u32)
+            })
+            .unwrap_or_else(|_| panic!("combined-fault operation must start"));
+        let publication_plan = RetainedPublicationPlan::success(
+            RetainedBlockTablePlan::new(writer, 1, 1),
+            RetainedBlockTablePlan::new(writer, 1, 1),
+        );
+        let mut assembly: PanicPublication = operation
+            .try_publication_assembly(publication_plan)
+            .unwrap_or_else(|_| panic!("combined-fault publication must open"));
+        let canonical = assembly
+            .try_retain_canonical(empty_plan(), |emplacer| {
+                Ok(emplacer.place(11_u64, CanonicalRootTag))
+            })
+            .unwrap_or_else(|_| panic!("combined-fault canonical block must retain"));
+        let evidence = assembly
+            .try_retain_outcome_evidence(empty_plan(), |emplacer| {
+                Ok(emplacer.place(9_u64, EvidenceRootTag))
+            })
+            .unwrap_or_else(|_| panic!("combined-fault evidence block must retain"));
+        let validated =
+            match assembly.validate_success(canonical, evidence, |session, canonical, evidence| {
+                session.canonical(canonical) == Some(&11)
+                    && session.outcome_evidence(evidence) == Some(&9)
+            }) {
+                RetainedSuccessValidation::Valid(validated) => validated,
+                _ => panic!("combined-fault candidate must validate"),
+            };
+
+        test_panic_final_owner_drop_after(0);
+        PANIC_ON_PRIMARY_DIMENSION_ORD.store(true, Ordering::SeqCst);
+        let result = validated.try_prepare(final_progress());
+        PANIC_ON_PRIMARY_DIMENSION_ORD.store(false, Ordering::SeqCst);
+
+        assert!(matches!(
+            result,
+            Err(RetainedPublicationPrepareError::FinalizationContainment(cause))
+                if cause.reason() == AccountPoisonReason::RetainedStorageReleaseUnverified
+        ));
+        let snapshot = account.snapshot();
+        assert!(snapshot.poison_event_count() >= 2);
+        assert!(snapshot.poison_event_count_exact());
+        assert!(snapshot.poison_event_domain_valid());
+        assert_eq!(
+            snapshot
+                .first_poison_evidence()
+                .map(AccountPoisonEvidence::reason),
+            Some(AccountPoisonReason::PrimaryPublicationBindingPanicked)
+        );
+        assert!(snapshot.live_retained_bytes() > 0);
         drop(account);
         assert_eq!(factory.snapshot().live_accounts(), 1);
     }
@@ -7218,12 +13348,73 @@ mod tests {
         let result = validated.try_prepare(final_progress());
         assert!(matches!(
             result,
-            Err(RetainedPublicationPrepareError::StorageDropUnverified)
+            Err(RetainedPublicationPrepareError::FinalizationContainment(cause))
+                if cause.reason() == AccountPoisonReason::RetainedStorageReleaseUnverified
         ));
         assert_eq!(CANONICAL_DROPS.load(Ordering::SeqCst), 1);
         assert_eq!(EVIDENCE_DROPS.load(Ordering::SeqCst), 1);
-        assert_eq!(probe.active_reservations(), before_active);
-        assert_eq!(probe.current_live_bytes(), before_live);
+        assert_eq!(before_active - probe.active_reservations(), 3);
+        assert!(probe.active_reservations() > 0);
+        assert!(probe.current_live_bytes() > 0);
+        assert!(probe.current_live_bytes() < before_live);
+        assert_eq!(factory.snapshot().live_accounts(), 1);
+    }
+
+    #[test]
+    fn first_table_drop_panic_still_releases_the_clean_evidence_table() {
+        static CANONICAL_DROPS: AtomicU64 = AtomicU64::new(0);
+        static EVIDENCE_DROPS: AtomicU64 = AtomicU64::new(0);
+
+        CANONICAL_DROPS.store(0, Ordering::SeqCst);
+        EVIDENCE_DROPS.store(0, Ordering::SeqCst);
+        let factory = account_factory(1);
+        let operation = test_operation(&factory, 4);
+        let mut assembly: TestPublication<PanickingDropProbe, DropCounter> = operation
+            .try_publication_assembly(publication_plan(1, 1))
+            .unwrap_or_else(|_| panic!("success rejection assembly must open"));
+        let canonical = assembly
+            .try_retain_canonical(empty_plan(), |emplacer| {
+                Ok(emplacer.place(PanickingDropProbe(&CANONICAL_DROPS), CanonicalRootTag))
+            })
+            .unwrap_or_else(|_| panic!("panicking canonical must retain"));
+        let evidence = assembly
+            .try_retain_outcome_evidence(empty_plan(), |emplacer| {
+                Ok(emplacer.place(DropCounter(&EVIDENCE_DROPS), EvidenceRootTag))
+            })
+            .unwrap_or_else(|_| panic!("evidence drop counter must retain"));
+        assembly
+            .try_commit_outcome_evidence(TestDimension::Bytes, 4)
+            .unwrap_or_else(|_| panic!("commitment must fit the preallocated batch"));
+        let probe = assembly
+            .operation
+            .as_ref()
+            .expect("assembly retains operation")
+            .coordinator
+            .retained_ledger()
+            .test_probe();
+        let before_active = probe.active_reservations();
+        let before_live = probe.current_live_bytes();
+
+        let validated =
+            match assembly.validate_success(canonical, evidence, |session, canonical, evidence| {
+                session.canonical(canonical).is_some()
+                    && session.outcome_evidence(evidence).is_some()
+            }) {
+                RetainedSuccessValidation::Valid(validated) => validated,
+                _ => panic!("panicking-drop candidate must validate"),
+            };
+        let result = validated.try_prepare(final_progress());
+        assert!(matches!(
+            result,
+            Err(RetainedPublicationPrepareError::FinalizationContainment(cause))
+                if cause.reason() == AccountPoisonReason::RetainedStorageReleaseUnverified
+        ));
+        assert_eq!(CANONICAL_DROPS.load(Ordering::SeqCst), 1);
+        assert_eq!(EVIDENCE_DROPS.load(Ordering::SeqCst), 1);
+        assert_eq!(before_active - probe.active_reservations(), 3);
+        assert!(probe.active_reservations() > 0);
+        assert!(probe.current_live_bytes() > 0);
+        assert!(probe.current_live_bytes() < before_live);
         assert_eq!(factory.snapshot().live_accounts(), 1);
     }
 
@@ -7255,7 +13446,8 @@ mod tests {
         };
         assert!(matches!(
             validated.try_prepare(PreparationFailureCode::domain(2), final_progress()),
-            Err(RetainedPublicationPrepareError::StorageDropUnverified)
+            Err(RetainedPublicationPrepareError::FinalizationContainment(cause))
+                if cause.reason() == AccountPoisonReason::RetainedStorageReleaseUnverified
         ));
         assert_eq!(DROP_COUNT.load(Ordering::SeqCst), 1);
         assert_eq!(factory.snapshot().live_accounts(), 1);
@@ -7277,7 +13469,9 @@ mod tests {
         let deferred_ledger = StdArc::new(StdMutex::new(None));
         let fallback = DeferredLiveDropObservation {
             ledger: StdArc::clone(&deferred_ledger),
-            account: account.share_after_admission(),
+            account: account
+                .share_after_test_admission()
+                .unwrap_or_else(|_| panic!("test account share must be admitted")),
             observed_active: &OBSERVED_ACTIVE,
             observed_operation_live: &OBSERVED_OPERATION_LIVE,
             observed_physical_bytes: &OBSERVED_PHYSICAL_BYTES,
@@ -7426,7 +13620,10 @@ mod tests {
         OBSERVED_ALLOCATIONS.store(0, Ordering::SeqCst);
         let factory = account_factory(1);
         let operation = test_operation(&factory, 64);
-        let observed_account = operation.account().share_after_admission();
+        let observed_account = operation
+            .account()
+            .share_after_test_admission()
+            .unwrap_or_else(|_| panic!("test account share must be admitted"));
         let mut assembly: TestPublication<PhysicalDropObservation, u64> = operation
             .try_publication_assembly(publication_plan(1, 1))
             .unwrap_or_else(|_| panic!("prepared observation assembly must open"));
@@ -7470,7 +13667,10 @@ mod tests {
         OBSERVED_ALLOCATIONS.store(0, Ordering::SeqCst);
         let factory = account_factory(1);
         let operation = test_operation(&factory, 64);
-        let observed_account = operation.account().share_after_admission();
+        let observed_account = operation
+            .account()
+            .share_after_test_admission()
+            .unwrap_or_else(|_| panic!("test account share must be admitted"));
         let mut assembly: TestPublication<PhysicalDropObservation, u64> = operation
             .try_publication_assembly(publication_plan(1, 1))
             .unwrap_or_else(|_| panic!("handoff observation assembly must open"));
@@ -7650,7 +13850,8 @@ mod tests {
             .expect("fallback destructor panic must be contained");
         assert!(matches!(
             result,
-            Err(RetainedPublicationPrepareError::StorageDropUnverified)
+            Err(RetainedPublicationPrepareError::FinalizationContainment(cause))
+                if cause.reason() == AccountPoisonReason::RetainedStorageReleaseUnverified
         ));
         assert_eq!(DROP_COUNT.load(Ordering::SeqCst), 1);
         assert!(before_active > 0);
@@ -7707,7 +13908,8 @@ mod tests {
         .expect("primary rejection payload panic must be contained");
         assert!(matches!(
             result,
-            Err(RetainedPublicationPrepareError::StorageDropUnverified)
+            Err(RetainedPublicationPrepareError::FinalizationContainment(cause))
+                if cause.reason() == AccountPoisonReason::RetainedStorageReleaseUnverified
         ));
         assert_eq!(DROP_COUNT.load(Ordering::SeqCst), 1);
         assert_eq!(factory.snapshot().live_accounts(), 1);
@@ -7739,9 +13941,7 @@ mod tests {
             };
         assert!(matches!(
             allocation.cause(),
-            RetainedWriterError::Physical(RetainedAllocationError::AllocationFailed {
-                charge_retained: false,
-            })
+            RetainedWriterError::Physical(RetainedAllocationError::AllocationFailed)
         ));
         let operation = match allocation.try_into_operation() {
             Ok(operation) => operation,
@@ -7786,9 +13986,7 @@ mod tests {
                 Ok(emplacer.place(11, CanonicalRootTag))
             }),
             Err(RetainedPublicationError::Writer(
-                RetainedWriterError::Physical(RetainedAllocationError::AllocationFailed {
-                    charge_retained: false,
-                })
+                RetainedWriterError::Physical(RetainedAllocationError::AllocationFailed)
             ))
         ));
         let after_physical = assembly
@@ -7914,9 +14112,8 @@ mod tests {
 
     #[test]
     fn factory_enforces_exact_live_account_and_control_byte_limits() {
-        type Lease = AdmissionLease<Arc<FactoryState>>;
         let control_bytes =
-            FinalOwnerAllocation::<AccountState, Lease>::checked_layout_bytes().unwrap();
+            FinalOwnerAllocation::<AccountControlInner>::checked_layout_bytes().unwrap();
         let limits = PhysicalStorageAccountFactoryLimits::new(control_bytes, 1).unwrap();
         let factory = PhysicalStorageAccountFactory::try_new(limits).unwrap();
         let account_limits = PhysicalStorageAccountLimits::new(1_024, 8).unwrap();
@@ -7953,10 +14150,24 @@ mod tests {
     }
 
     #[test]
+    fn last_account_control_owner_releases_factory_admission_during_unwind() {
+        let factory = account_factory(1);
+        let account_limits = PhysicalStorageAccountLimits::new(1_024, 8).unwrap();
+
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            let _account = factory.try_create_account(account_limits).unwrap();
+            panic!("drop the final account control owner during unwind");
+        }));
+
+        assert!(result.is_err());
+        assert_eq!(factory.snapshot().live_accounts(), 0);
+        assert_eq!(factory.snapshot().live_account_control_bytes(), 0);
+    }
+
+    #[test]
     fn concurrent_factory_admission_cannot_oversubscribe_one_account_slot() {
-        type Lease = AdmissionLease<Arc<FactoryState>>;
         let control_bytes =
-            FinalOwnerAllocation::<AccountState, Lease>::checked_layout_bytes().unwrap();
+            FinalOwnerAllocation::<AccountControlInner>::checked_layout_bytes().unwrap();
         let limits = PhysicalStorageAccountFactoryLimits::new(control_bytes, 1).unwrap();
         let factory = PhysicalStorageAccountFactory::try_new(limits).unwrap();
         let account_limits = PhysicalStorageAccountLimits::new(1_024, 8).unwrap();
@@ -7997,9 +14208,10 @@ mod tests {
 
     #[test]
     fn retained_admission_accepts_exact_limits_and_rejects_excess() {
-        type Lease = AdmissionLease<PhysicalStorageAccount>;
-        let outer =
-            FinalOwnerAllocation::<RetainedPayload<u64>, Lease>::checked_layout_bytes().unwrap();
+        let outer = FinalOwnerAllocation::<
+            RetainedFinalOwnerInner<RetainedPayload<u64>, LeafRetainedPolicy>,
+        >::checked_layout_bytes()
+        .unwrap();
         let factory = account_factory(1);
         let account = account(&factory, outer + 11, 2);
         let plan = RetainedAllocationPlan::new(11, 1).unwrap();
@@ -8061,7 +14273,9 @@ mod tests {
         let error = account
             .try_retain_with::<u64>(plan, || {
                 let _storage = BuilderLocalStorage {
-                    account: account.share_after_admission(),
+                    account: account
+                        .share_after_test_admission()
+                        .unwrap_or_else(|_| panic!("test account share must be admitted")),
                     _bytes: vec![0; 64],
                 };
                 Err(BUILD_FAILED)
@@ -8076,55 +14290,908 @@ mod tests {
 
     #[test]
     fn every_builder_panic_payload_keeps_its_physical_charge_fail_closed() {
-        let factory = account_factory(1);
-        let account = account(&factory, 4_096, 16);
-        let before = account.snapshot();
+        let factory = account_factory(3);
+        let borrowed_account = account(&factory, 4_096, 16);
+        let before = borrowed_account.snapshot();
 
-        let borrowed = account
+        let borrowed = borrowed_account
             .try_retain_with::<u64>(empty_plan(), || panic!("test panic"))
             .unwrap_err();
-        assert_eq!(
-            borrowed,
-            RetainedAllocationError::BuilderPanicked {
-                charge_retained: true,
-            }
-        );
-        let after_borrowed = account.snapshot();
+        assert_eq!(borrowed, RetainedAllocationError::BuilderPanicked);
+        let after_borrowed = borrowed_account.snapshot();
         assert!(after_borrowed.live_retained_bytes() > before.live_retained_bytes());
         assert!(after_borrowed.live_retained_allocations() > before.live_retained_allocations());
+        assert!(after_borrowed.poisoned());
+        assert_eq!(after_borrowed.poison_event_count(), 1);
+        assert!(after_borrowed.poison_event_count_exact());
+        assert!(after_borrowed.poison_event_domain_valid());
+        assert_eq!(
+            after_borrowed
+                .first_poison_evidence()
+                .map(AccountPoisonEvidence::reason),
+            Some(AccountPoisonReason::RetainedBuilderPanicked)
+        );
 
-        let owned = account
+        let later_builder_ran = AtomicBool::new(false);
+        let later = borrowed_account
+            .try_retain_with::<u64>(empty_plan(), || {
+                later_builder_ran.store(true, Ordering::SeqCst);
+                Ok(7)
+            })
+            .unwrap_err();
+        assert!(matches!(later, RetainedAllocationError::AccountPoisoned(_)));
+        assert!(!later_builder_ran.load(Ordering::SeqCst));
+        assert_eq!(borrowed_account.snapshot(), after_borrowed);
+
+        let owned_account = account(&factory, 4_096, 16);
+        let owned_before = owned_account.snapshot();
+        let owned = owned_account
             .try_retain_with::<u64>(empty_plan(), || {
                 std::panic::panic_any(String::from("owned test panic"))
             })
             .unwrap_err();
-        assert_eq!(
-            owned,
-            RetainedAllocationError::BuilderPanicked {
-                charge_retained: true,
-            }
-        );
-        let after_owned = account.snapshot();
-        assert!(after_owned.live_retained_bytes() > after_borrowed.live_retained_bytes());
-        assert!(
-            after_owned.live_retained_allocations() > after_borrowed.live_retained_allocations()
-        );
+        assert_eq!(owned, RetainedAllocationError::BuilderPanicked);
+        let after_owned = owned_account.snapshot();
+        assert!(after_owned.live_retained_bytes() > owned_before.live_retained_bytes());
+        assert!(after_owned.live_retained_allocations() > owned_before.live_retained_allocations());
 
+        let opaque_account = account(&factory, 4_096, 16);
+        let opaque_before = opaque_account.snapshot();
         let plan = RetainedAllocationPlan::new(64, 1).unwrap();
-        let opaque = account
+        let opaque = opaque_account
             .try_retain_with::<u64>(plan, || std::panic::panic_any(vec![0_u8; 64]))
             .unwrap_err();
-        assert_eq!(
-            opaque,
-            RetainedAllocationError::BuilderPanicked {
-                charge_retained: true,
-            }
+        assert_eq!(opaque, RetainedAllocationError::BuilderPanicked);
+        let after_opaque = opaque_account.snapshot();
+        assert!(after_opaque.live_retained_bytes() > opaque_before.live_retained_bytes() + 64);
+        assert!(
+            after_opaque.live_retained_allocations() > opaque_before.live_retained_allocations()
         );
-        let after_opaque = account.snapshot();
-        assert!(after_opaque.live_retained_bytes() > after_owned.live_retained_bytes() + 64);
-        assert!(after_opaque.live_retained_allocations() > after_owned.live_retained_allocations());
-        drop(account);
-        assert_eq!(factory.snapshot().live_accounts(), 1);
+        drop(borrowed_account);
+        drop(owned_account);
+        drop(opaque_account);
+        assert_eq!(factory.snapshot().live_accounts(), 3);
+    }
+
+    #[test]
+    fn shared_handles_observe_one_latched_first_event_and_exact_event_count() {
+        static DROP_COUNT: AtomicU64 = AtomicU64::new(0);
+
+        DROP_COUNT.store(0, Ordering::SeqCst);
+        let factory = account_factory(1);
+        let account = account(&factory, 4_096, 8);
+        let observer = account
+            .share_after_test_admission()
+            .unwrap_or_else(|_| panic!("observer share must be admitted before poison"));
+        let first = account
+            .try_retain_with(empty_plan(), || {
+                Ok::<_, RetainedBuildFailureCode>(PanickingDropProbe(&DROP_COUNT))
+            })
+            .unwrap_or_else(|_| panic!("first poison probe must retain"));
+        let second = account
+            .try_retain_with(empty_plan(), || {
+                Ok::<_, RetainedBuildFailureCode>(PanickingDropProbe(&DROP_COUNT))
+            })
+            .unwrap_or_else(|_| panic!("second poison probe must retain"));
+
+        drop(first);
+        let after_first = account.snapshot();
+        assert_eq!(after_first, observer.snapshot());
+        assert_eq!(after_first.poison_event_count(), 1);
+        assert_eq!(
+            after_first
+                .first_poison_evidence()
+                .map(AccountPoisonEvidence::reason),
+            Some(AccountPoisonReason::RetainedStorageReleaseUnverified)
+        );
+
+        drop(second);
+        let after_second = account.snapshot();
+        assert_eq!(after_second, observer.snapshot());
+        assert_eq!(after_second.poison_event_count(), 2);
+        assert!(after_second.poison_event_count_exact());
+        assert!(after_second.poison_event_domain_valid());
+        assert_eq!(
+            after_second.first_poison_evidence(),
+            after_first.first_poison_evidence()
+        );
+        assert_eq!(DROP_COUNT.load(Ordering::SeqCst), 2);
+
+        let before_rejected_share = account.snapshot();
+        let rejected_share = account.share_after_test_admission().unwrap_err();
+        assert!(matches!(
+            rejected_share,
+            RetainedAllocationError::AccountPoisoned(_)
+        ));
+        assert_eq!(account.snapshot(), before_rejected_share);
+    }
+
+    #[test]
+    fn poison_first_start_rejects_without_builder_or_account_side_effects() {
+        static DROP_COUNT: AtomicU64 = AtomicU64::new(0);
+
+        DROP_COUNT.store(0, Ordering::SeqCst);
+        let factory = account_factory(1);
+        let account = account(&factory, 4_096, 16);
+        let poisoner = account
+            .try_retain_with(empty_plan(), || {
+                Ok::<_, RetainedBuildFailureCode>(PanickingDropProbe(&DROP_COUNT))
+            })
+            .unwrap_or_else(|_| panic!("poison probe must retain"));
+        let started = StdArc::new(Barrier::new(2));
+        let poisoned = StdArc::new(Barrier::new(2));
+        let thread_started = StdArc::clone(&started);
+        let thread_poisoned = StdArc::clone(&poisoned);
+        let poison_thread = thread::spawn(move || {
+            thread_started.wait();
+            drop(poisoner);
+            thread_poisoned.wait();
+        });
+        started.wait();
+        poisoned.wait();
+        poison_thread
+            .join()
+            .unwrap_or_else(|_| panic!("poison thread must be contained"));
+
+        let before = account.snapshot();
+        let builder_ran = AtomicBool::new(false);
+        let policy = DimensionPolicy::reservable_bytes(u64::MAX, u64::MAX, u64::MAX, u64::MAX)
+            .with_published_outcome_evidence_limit(64);
+        let limits = LedgerLimits::new(u64::MAX, [(TestDimension::Bytes, policy)]).unwrap();
+        let plan = RetainedOperationStartPlan::new(
+            writer_plan(2, 2),
+            share_work(),
+            empty_plan(),
+            OutputCommitment::new(TestDimension::Bytes, 1),
+            OutputCommitment::new(TestDimension::Bytes, 1),
+        );
+        let result =
+            TestOperation::try_start(OperationControl::default(), limits, &account, plan, || {
+                builder_ran.store(true, Ordering::SeqCst);
+                Ok(7)
+            });
+
+        assert!(matches!(
+            result,
+            Err(RetainedOperationStartError::Writer(
+                RetainedWriterError::AccountPoisoned(_)
+            ))
+        ));
+        assert!(!builder_ran.load(Ordering::SeqCst));
+        assert_eq!(account.snapshot(), before);
+    }
+
+    #[test]
+    fn admission_first_start_panic_after_external_poison_records_distinct_builder_fault() {
+        static DROP_COUNT: AtomicU64 = AtomicU64::new(0);
+
+        DROP_COUNT.store(0, Ordering::SeqCst);
+        let factory = account_factory(1);
+        let account = account(&factory, 8_192, 32);
+        let poisoner = account
+            .try_retain_with(empty_plan(), || {
+                Ok::<_, RetainedBuildFailureCode>(PanickingDropProbe(&DROP_COUNT))
+            })
+            .unwrap_or_else(|_| panic!("startup panic poison probe must retain"));
+        let worker_account = account
+            .share_after_test_admission()
+            .unwrap_or_else(|_| panic!("startup worker account share must precede poison"));
+        let shares_before_start = account.share_call_count();
+        let policy = DimensionPolicy::reservable_bytes(u64::MAX, u64::MAX, u64::MAX, u64::MAX)
+            .with_published_outcome_evidence_limit(64);
+        let limits = LedgerLimits::new(u64::MAX, [(TestDimension::Bytes, policy)]).unwrap();
+        let plan = RetainedOperationStartPlan::new(
+            writer_plan(2, 2),
+            share_work(),
+            empty_plan(),
+            OutputCommitment::new(TestDimension::Bytes, 1),
+            OutputCommitment::new(TestDimension::Bytes, 1),
+        );
+        let builder_entered = StdArc::new(Barrier::new(2));
+        let builder_continue = StdArc::new(Barrier::new(2));
+        let worker_entered = StdArc::clone(&builder_entered);
+        let worker_continue = StdArc::clone(&builder_continue);
+        let worker = thread::spawn(move || {
+            TestOperation::try_start(
+                OperationControl::default(),
+                limits,
+                &worker_account,
+                plan,
+                || {
+                    worker_entered.wait();
+                    worker_continue.wait();
+                    std::panic::panic_any(vec![0_u8; 8]);
+                },
+            )
+        });
+
+        builder_entered.wait();
+        drop(poisoner);
+        let after_external_poison = account.snapshot();
+        assert!(after_external_poison.poisoned());
+        let first_evidence = after_external_poison.first_poison_evidence();
+        builder_continue.wait();
+        let result = worker
+            .join()
+            .unwrap_or_else(|_| panic!("startup builder panic must be contained"));
+        let after_builder_panic = account.snapshot();
+
+        assert!(matches!(
+            result,
+            Err(RetainedOperationStartError::Writer(
+                RetainedWriterError::Physical(RetainedAllocationError::BuilderPanicked)
+            ))
+        ));
+        assert_eq!(
+            after_builder_panic.poison_event_count(),
+            after_external_poison.poison_event_count() + 1
+        );
+        assert_eq!(after_builder_panic.first_poison_evidence(), first_evidence);
+        assert_eq!(
+            after_builder_panic.live_retained_bytes(),
+            after_external_poison.live_retained_bytes()
+        );
+        assert_eq!(
+            after_builder_panic.live_retained_allocations(),
+            after_external_poison.live_retained_allocations()
+        );
+        assert_eq!(account.share_call_count(), shares_before_start + 4);
+    }
+
+    #[test]
+    fn admission_first_physical_retain_completes_then_later_retain_is_rejected() {
+        static DROP_COUNT: AtomicU64 = AtomicU64::new(0);
+
+        DROP_COUNT.store(0, Ordering::SeqCst);
+        let factory = account_factory(1);
+        let account = account(&factory, 4_096, 16);
+        let poisoner = account
+            .try_retain_with(empty_plan(), || {
+                Ok::<_, RetainedBuildFailureCode>(PanickingDropProbe(&DROP_COUNT))
+            })
+            .unwrap_or_else(|_| panic!("physical-race poison probe must retain"));
+        let worker_account = account
+            .share_after_test_admission()
+            .unwrap_or_else(|_| panic!("worker account share must precede poison"));
+        let builder_entered = StdArc::new(Barrier::new(2));
+        let builder_continue = StdArc::new(Barrier::new(2));
+        let worker_entered = StdArc::clone(&builder_entered);
+        let worker_continue = StdArc::clone(&builder_continue);
+        let worker = thread::spawn(move || {
+            worker_account
+                .try_retain_with(empty_plan(), || {
+                    worker_entered.wait();
+                    worker_continue.wait();
+                    Ok::<_, RetainedBuildFailureCode>(99_u64)
+                })
+                .unwrap_or_else(|_| panic!("admission-first retain must complete"))
+        });
+
+        builder_entered.wait();
+        drop(poisoner);
+        let after_poison = account.snapshot();
+        assert!(after_poison.poisoned());
+        builder_continue.wait();
+        let retained = worker
+            .join()
+            .unwrap_or_else(|_| panic!("retaining worker must finish"));
+        assert_eq!(retained.as_ref(), &99);
+        assert_eq!(account.snapshot(), after_poison);
+
+        let later_builder_ran = AtomicBool::new(false);
+        let later = account
+            .try_retain_with(empty_plan(), || {
+                later_builder_ran.store(true, Ordering::SeqCst);
+                Ok::<_, RetainedBuildFailureCode>(100_u64)
+            })
+            .unwrap_err();
+        assert!(matches!(later, RetainedAllocationError::AccountPoisoned(_)));
+        assert!(!later_builder_ran.load(Ordering::SeqCst));
+        assert_eq!(account.snapshot(), after_poison);
+        drop(retained);
+    }
+
+    #[test]
+    fn admission_first_builder_error_after_poison_retains_charge_without_rollback_clone() {
+        static DROP_COUNT: AtomicU64 = AtomicU64::new(0);
+
+        DROP_COUNT.store(0, Ordering::SeqCst);
+        let factory = account_factory(1);
+        let account = account(&factory, 4_096, 16);
+        let poisoner = account
+            .try_retain_with(empty_plan(), || {
+                Ok::<_, RetainedBuildFailureCode>(PanickingDropProbe(&DROP_COUNT))
+            })
+            .unwrap_or_else(|_| panic!("builder-error poison probe must retain"));
+        let worker_account = account
+            .share_after_test_admission()
+            .unwrap_or_else(|_| panic!("worker account share must precede poison"));
+        let shares_before_retain = account.share_call_count();
+        let builder_entered = StdArc::new(Barrier::new(2));
+        let builder_continue = StdArc::new(Barrier::new(2));
+        let worker_entered = StdArc::clone(&builder_entered);
+        let worker_continue = StdArc::clone(&builder_continue);
+        let worker = thread::spawn(move || {
+            worker_account
+                .try_retain_with::<u64>(empty_plan(), || {
+                    worker_entered.wait();
+                    worker_continue.wait();
+                    Err(BUILD_FAILED)
+                })
+                .expect_err("admission-first builder error must not publish storage")
+        });
+
+        builder_entered.wait();
+        drop(poisoner);
+        let after_poison = account.snapshot();
+        assert!(after_poison.poisoned());
+        builder_continue.wait();
+        let error = worker
+            .join()
+            .unwrap_or_else(|_| panic!("builder-error worker must finish"));
+
+        assert!(matches!(
+            error,
+            RetainedAllocationError::AccountPoisonedWithRetainedCharge(_)
+        ));
+        assert_eq!(account.snapshot(), after_poison);
+        assert_eq!(account.share_call_count(), shares_before_retain + 1);
+        assert!(matches!(
+            account.try_retain_with(empty_plan(), || Ok::<_, RetainedBuildFailureCode>(1_u64)),
+            Err(RetainedAllocationError::AccountPoisoned(_))
+        ));
+    }
+
+    #[test]
+    fn admission_first_direct_fallback_ends_in_finalization_containment() {
+        static DROP_COUNT: AtomicU64 = AtomicU64::new(0);
+
+        DROP_COUNT.store(0, Ordering::SeqCst);
+        let factory = account_factory(1);
+        let account = account(&factory, u64::MAX, 128);
+        let operation = test_operation_on_account_with_control(
+            &account,
+            64,
+            RetainedBatchLimits::new(2, 2),
+            OperationControl::default(),
+        );
+        let poisoner = account
+            .try_retain_with(empty_plan(), || {
+                Ok::<_, RetainedBuildFailureCode>(PanickingDropProbe(&DROP_COUNT))
+            })
+            .unwrap_or_else(|_| panic!("post-start poison probe must retain"));
+        let started = StdArc::new(Barrier::new(2));
+        let poisoned = StdArc::new(Barrier::new(2));
+        let thread_started = StdArc::clone(&started);
+        let thread_poisoned = StdArc::clone(&poisoned);
+        let poison_thread = thread::spawn(move || {
+            thread_started.wait();
+            drop(poisoner);
+            thread_poisoned.wait();
+        });
+        started.wait();
+        poisoned.wait();
+        poison_thread
+            .join()
+            .unwrap_or_else(|_| panic!("poison thread must be contained"));
+        let before_prepare = account.snapshot();
+        let first_evidence = before_prepare.first_poison_evidence();
+        let ledger = operation.coordinator.retained_ledger().test_probe();
+        let active_before = ledger.active_reservations();
+        let live_before = ledger.current_live_bytes();
+
+        let result =
+            operation.prepare_minimal_fallback::<u64, u64>(PreparationFailureCode::domain(91));
+        let after_prepare = account.snapshot();
+        assert!(matches!(
+            result,
+            Err(RetainedPublicationPrepareError::FinalizationContainment(cause))
+                if cause.reason() == AccountPoisonReason::RetainedStorageReleaseUnverified
+                    && cause.account_poisoned().snapshot() == after_prepare
+        ));
+        assert_eq!(
+            after_prepare.poison_event_count(),
+            before_prepare.poison_event_count() + 2
+        );
+        assert!(after_prepare.poison_event_count_exact());
+        assert!(after_prepare.poison_event_domain_valid());
+        assert_eq!(after_prepare.first_poison_evidence(), first_evidence);
+        assert_eq!(ledger.active_reservations(), active_before - 2);
+        assert!(ledger.current_live_bytes() > 0);
+        assert!(ledger.current_live_bytes() < live_before);
+    }
+
+    #[test]
+    fn poisoned_inherited_share_has_no_lookup_work_clone_or_target_side_effect() {
+        static DROP_COUNT: AtomicU64 = AtomicU64::new(0);
+
+        DROP_COUNT.store(0, Ordering::SeqCst);
+        let factory = account_factory(1);
+        let account = account(&factory, u64::MAX, 128);
+        let (source, source_slot, source_evidence, _source_evidence_slot) =
+            publish_scalar_source(&account);
+        let operation = test_operation_on_account_with_control(
+            &account,
+            64,
+            RetainedBatchLimits::new(2, 2),
+            OperationControl::default(),
+        );
+        let mut assembly: TestPublication<u64, u64> = operation
+            .try_publication_assembly(publication_plan(1, 1))
+            .unwrap_or_else(|_| panic!("target publication must open"));
+        let source_allocation = source
+            .aggregate
+            .inner
+            .table
+            .as_ref()
+            .member_allocation(source_slot.identity, source.aggregate.inner.set_id)
+            .unwrap_or_else(|| panic!("source slot must resolve before poison"));
+        let source_share_calls = source_allocation.share_call_count();
+        let target_len = assembly.canonical_len();
+        let ledger = assembly.test_ledger_probe();
+        let active = ledger.active_reservations();
+        let live = ledger.current_live_bytes();
+        let poisoner = account
+            .try_retain_with(empty_plan(), || {
+                Ok::<_, RetainedBuildFailureCode>(PanickingDropProbe(&DROP_COUNT))
+            })
+            .unwrap_or_else(|_| panic!("share poison probe must retain"));
+        drop(poisoner);
+        let poisoned = account.snapshot();
+        let _ = take_test_member_lookups();
+
+        let result = assembly.try_share_canonical(source.aggregate(), source_slot);
+        assert!(matches!(
+            result,
+            Err(RetainedPublicationError::Writer(
+                RetainedWriterError::AccountPoisoned(_)
+            ))
+        ));
+        assert_eq!(assembly.canonical_len(), target_len);
+        assert_eq!(ledger.active_reservations(), active);
+        assert_eq!(ledger.current_live_bytes(), live);
+        assert_eq!(source_allocation.share_call_count(), source_share_calls);
+        assert_eq!(take_test_member_lookups(), 0);
+        assert_eq!(account.snapshot(), poisoned);
+        drop(source_evidence);
+    }
+
+    #[test]
+    fn admission_first_inherited_share_completes_then_later_share_is_rejected() {
+        static DROP_COUNT: AtomicU64 = AtomicU64::new(0);
+
+        DROP_COUNT.store(0, Ordering::SeqCst);
+        let factory = account_factory(1);
+        let account = account(&factory, u64::MAX, 128);
+        let (source, source_slot, source_evidence, _source_evidence_slot) =
+            publish_scalar_source(&account);
+        let operation = test_operation_on_account_with_control(
+            &account,
+            64,
+            RetainedBatchLimits::new(3, 2),
+            OperationControl::default(),
+        );
+        let mut assembly: TestPublication<u64, u64> = operation
+            .try_publication_assembly(publication_plan(2, 1))
+            .unwrap_or_else(|_| panic!("admission-first share target must open"));
+        let poisoner = account
+            .try_retain_with(empty_plan(), || {
+                Ok::<_, RetainedBuildFailureCode>(PanickingDropProbe(&DROP_COUNT))
+            })
+            .unwrap_or_else(|_| panic!("share-race poison probe must retain"));
+        let target_account = assembly
+            .account
+            .as_ref()
+            .unwrap_or_else(|| panic!("target retains account"));
+        let share_admission = target_account
+            .try_admit_account_action()
+            .unwrap_or_else(|_| panic!("share action must be admitted before poison"));
+        drop(poisoner);
+        let poisoned = account.snapshot();
+        let source_allocation = source
+            .aggregate
+            .inner
+            .table
+            .as_ref()
+            .member_allocation(source_slot.identity, source.aggregate.inner.set_id)
+            .unwrap_or_else(|| panic!("source slot must resolve"));
+        let source_share_calls = source_allocation.share_call_count();
+        let ledger = assembly
+            .operation
+            .as_ref()
+            .unwrap_or_else(|| panic!("target retains operation"))
+            .coordinator
+            .retained_ledger();
+        let identity = try_share_retained_block_after_admission::<
+            TestOwner,
+            TestPhase,
+            TestDimension,
+            u64,
+            CanonicalRootTag,
+        >(
+            ledger,
+            share_admission,
+            assembly.handle_share_work,
+            assembly
+                .canonical_table
+                .as_mut()
+                .and_then(PolicyRetainedAllocation::table_mut_during_construction)
+                .unwrap_or_else(|| panic!("target retains canonical table")),
+            assembly.set_id,
+            RetainedMembershipDestination::Canonical,
+            0,
+            1,
+            source_allocation,
+        )
+        .unwrap_or_else(|_| panic!("admission-first share must complete"));
+        assert_eq!(identity.index, 0);
+        assert_eq!(assembly.canonical_len(), 1);
+        assert_eq!(source_allocation.share_call_count(), source_share_calls + 1);
+        assert_eq!(account.snapshot(), poisoned);
+
+        let before_later = assembly.canonical_len();
+        let later = assembly.try_share_canonical(source.aggregate(), source_slot);
+        assert!(matches!(
+            later,
+            Err(RetainedPublicationError::Writer(
+                RetainedWriterError::AccountPoisoned(_)
+            ))
+        ));
+        assert_eq!(assembly.canonical_len(), before_later);
+        drop(source_evidence);
+    }
+
+    #[test]
+    fn prepared_handoff_is_a_pure_move_after_later_account_poison() {
+        static DROP_COUNT: AtomicU64 = AtomicU64::new(0);
+
+        DROP_COUNT.store(0, Ordering::SeqCst);
+        let factory = account_factory(1);
+        let account = account(&factory, u64::MAX, 128);
+        let poisoner = account
+            .try_retain_with(empty_plan(), || {
+                Ok::<_, RetainedBuildFailureCode>(PanickingDropProbe(&DROP_COUNT))
+            })
+            .unwrap_or_else(|_| panic!("handoff poison probe must retain"));
+        let operation = test_operation_on_account_with_control(
+            &account,
+            64,
+            RetainedBatchLimits::new(2, 2),
+            OperationControl::default(),
+        );
+        let prepared = operation
+            .prepare_minimal_fallback::<u64, u64>(PreparationFailureCode::domain(92))
+            .unwrap_or_else(|_| panic!("healthy account must prepare fallback"));
+        drop(poisoner);
+        let before_handoff = account.snapshot();
+
+        let published = handoff_for_test(prepared);
+        assert_eq!(account.snapshot(), before_handoff);
+        assert!(matches!(
+            published,
+            PublishedRetainedPublicationParts::MinimalFallback { .. }
+        ));
+    }
+
+    #[test]
+    fn eligibility_first_capability_completes_preparation_after_later_account_poison() {
+        static DROP_COUNT: AtomicU64 = AtomicU64::new(0);
+
+        DROP_COUNT.store(0, Ordering::SeqCst);
+        let factory = account_factory(1);
+        let account = account(&factory, u64::MAX, 128);
+        let poisoner = account
+            .try_retain_with(empty_plan(), || {
+                Ok::<_, RetainedBuildFailureCode>(PanickingDropProbe(&DROP_COUNT))
+            })
+            .unwrap_or_else(|_| panic!("eligibility race poison probe must retain"));
+        let operation = test_operation_on_account_with_control(
+            &account,
+            64,
+            RetainedBatchLimits::new(2, 2),
+            OperationControl::default(),
+        );
+        let eligibility_entered = StdArc::new(Barrier::new(2));
+        let eligibility_resume = StdArc::new(Barrier::new(2));
+        let worker_entered = StdArc::clone(&eligibility_entered);
+        let worker_resume = StdArc::clone(&eligibility_resume);
+        let worker = thread::spawn(move || {
+            install_publication_eligibility_pause(worker_entered, worker_resume);
+            operation.prepare_minimal_fallback::<u64, u64>(PreparationFailureCode::domain(93))
+        });
+
+        eligibility_entered.wait();
+        drop(poisoner);
+        let poisoned = account.snapshot();
+        assert!(poisoned.poisoned());
+        eligibility_resume.wait();
+
+        let prepared = worker
+            .join()
+            .unwrap_or_else(|_| panic!("eligibility-first worker must remain contained"))
+            .unwrap_or_else(|_| panic!("eligibility-first preparation must complete"));
+        assert_eq!(account.snapshot(), poisoned);
+        let published = handoff_for_test(prepared);
+        assert!(matches!(
+            published,
+            PublishedRetainedPublicationParts::MinimalFallback { .. }
+        ));
+    }
+
+    #[test]
+    fn primary_eligibility_first_capability_completes_after_later_account_poison() {
+        static DROP_COUNT: AtomicU64 = AtomicU64::new(0);
+
+        DROP_COUNT.store(0, Ordering::SeqCst);
+        let factory = account_factory(1);
+        let account = account(&factory, u64::MAX, 128);
+        let poisoner = account
+            .try_retain_with(empty_plan(), || {
+                Ok::<_, RetainedBuildFailureCode>(PanickingDropProbe(&DROP_COUNT))
+            })
+            .unwrap_or_else(|_| panic!("primary eligibility race poison probe must retain"));
+        let operation = test_operation_on_account_with_control(
+            &account,
+            64,
+            RetainedBatchLimits::new(2, 2),
+            OperationControl::default(),
+        );
+        let mut assembly: TestPublication<u64, u64> = operation
+            .try_publication_assembly(publication_plan(1, 1))
+            .unwrap_or_else(|_| panic!("primary eligibility publication must open"));
+        let (canonical, evidence) = retain_scalar_success(&mut assembly);
+        let validated =
+            match assembly.validate_success(canonical, evidence, |session, canonical, evidence| {
+                session.canonical(canonical) == Some(&11)
+                    && session.outcome_evidence(evidence) == Some(&7)
+            }) {
+                RetainedSuccessValidation::Valid(validated) => validated,
+                _ => panic!("primary eligibility candidate must validate"),
+            };
+        let eligibility_entered = StdArc::new(Barrier::new(2));
+        let eligibility_resume = StdArc::new(Barrier::new(2));
+        let worker_entered = StdArc::clone(&eligibility_entered);
+        let worker_resume = StdArc::clone(&eligibility_resume);
+        let worker = thread::spawn(move || {
+            install_publication_eligibility_pause(worker_entered, worker_resume);
+            validated.try_prepare(final_progress())
+        });
+
+        eligibility_entered.wait();
+        drop(poisoner);
+        let poisoned = account.snapshot();
+        assert!(poisoned.poisoned());
+        eligibility_resume.wait();
+
+        let prepared = worker
+            .join()
+            .unwrap_or_else(|_| panic!("primary eligibility worker must remain contained"))
+            .unwrap_or_else(|_| panic!("primary eligibility preparation must complete"));
+        assert_eq!(account.snapshot(), poisoned);
+        let published = handoff_for_test(prepared);
+        assert!(matches!(
+            published,
+            PublishedRetainedPublicationParts::Success { .. }
+        ));
+    }
+
+    #[test]
+    fn release_underflow_latches_counter_invariant_without_saturating_event_count() {
+        let factory = account_factory(1);
+        let account = account(&factory, 4_096, 8);
+
+        let _ = account.release_retained_charge(AdmissionCharge::new(1, 1));
+        let first = account.snapshot();
+        assert!(first.poisoned());
+        assert_eq!(first.poison_event_count(), 1);
+        assert!(first.poison_event_count_exact());
+        assert!(!first.poison_event_domain_valid());
+        assert_eq!(
+            first
+                .first_poison_evidence()
+                .map(AccountPoisonEvidence::reason),
+            Some(AccountPoisonReason::CounterInvariantViolated)
+        );
+
+        let _ = account.release_retained_charge(AdmissionCharge::new(1, 1));
+        let second = account.snapshot();
+        assert_eq!(second.poison_event_count(), 2);
+        assert!(second.poison_event_count_exact());
+        assert!(!second.poison_event_domain_valid());
+        assert_eq!(
+            second.first_poison_evidence(),
+            first.first_poison_evidence()
+        );
+    }
+
+    #[test]
+    fn pending_single_rollback_underflow_records_one_in_domain_counter_fault() {
+        let factory = account_factory(1);
+        let account = account(&factory, 4_096, 8);
+        let charge = AdmissionCharge::new(1, 1);
+        let admission = account
+            .try_admit_retained(charge, AdmittedRetainedShareWork { private: () })
+            .unwrap_or_else(|_| panic!("single pending charge must admit"));
+        {
+            let mut state = lock_recovering_poison(&account.inner.value().linear);
+            state.counters.live_bytes = 0;
+            state.counters.live_allocations = 0;
+        }
+
+        let rollback =
+            admission.rollback_with_fault(Some(AccountPoisonReason::OwnershipGraphUnverified));
+        assert!(matches!(
+            rollback,
+            PendingRetainedRollback::ChargeReleaseUnverified(_)
+        ));
+        let snapshot = account.snapshot();
+        assert_eq!(snapshot.poison_event_count(), 1);
+        assert!(snapshot.poison_event_count_exact());
+        assert!(snapshot.poison_event_domain_valid());
+        assert_eq!(
+            snapshot
+                .first_poison_evidence()
+                .map(AccountPoisonEvidence::reason),
+            Some(AccountPoisonReason::CounterInvariantViolated)
+        );
+    }
+
+    #[test]
+    fn pending_pair_rollback_underflow_records_one_in_domain_counter_fault() {
+        let factory = account_factory(1);
+        let account = account(&factory, 4_096, 8);
+        let pair = RetainedAdmissionPairPlan::try_new(
+            AdmissionCharge::new(1, 1),
+            AdmissionCharge::new(1, 1),
+        )
+        .unwrap_or_else(|_| panic!("pair charge must qualify"));
+        let (admissions, _owners) = account
+            .try_admit_start_retained_pair_after_action(
+                account.try_admit_account_action().expect("account action"),
+                pair,
+                admitted_startup_share_work(&account),
+            )
+            .unwrap_or_else(|_| panic!("pending pair must admit"));
+        {
+            let mut state = lock_recovering_poison(&account.inner.value().linear);
+            state.counters.live_bytes = 0;
+            state.counters.live_allocations = 0;
+        }
+
+        let rollback =
+            admissions.rollback_with_fault(Some(AccountPoisonReason::OwnershipGraphUnverified));
+        assert!(matches!(
+            rollback,
+            PendingRetainedRollback::ChargeReleaseUnverified(_)
+        ));
+        let snapshot = account.snapshot();
+        assert_eq!(snapshot.poison_event_count(), 1);
+        assert!(snapshot.poison_event_count_exact());
+        assert!(snapshot.poison_event_domain_valid());
+        assert_eq!(
+            snapshot
+                .first_poison_evidence()
+                .map(AccountPoisonEvidence::reason),
+            Some(AccountPoisonReason::CounterInvariantViolated)
+        );
+    }
+
+    #[test]
+    fn startup_admission_guard_underflow_records_one_counter_fault() {
+        let factory = account_factory(1);
+        let account = account(&factory, 4_096, 8);
+        let pair = RetainedAdmissionPairPlan::try_new(
+            AdmissionCharge::new(1, 1),
+            AdmissionCharge::new(1, 1),
+        )
+        .unwrap_or_else(|_| panic!("guard pair charge must qualify"));
+        let (admissions, owners) = account
+            .try_admit_start_retained_pair_after_action(
+                account.try_admit_account_action().expect("account action"),
+                pair,
+                admitted_startup_share_work(&account),
+            )
+            .unwrap_or_else(|_| panic!("guard pair must admit"));
+        let guard = StartupAdmissionGuard::new(&account, admissions, owners);
+        {
+            let mut state = lock_recovering_poison(&account.inner.value().linear);
+            state.counters.live_bytes = 0;
+            state.counters.live_allocations = 0;
+        }
+
+        drop(guard);
+        let snapshot = account.snapshot();
+        assert_eq!(snapshot.poison_event_count(), 1);
+        assert!(snapshot.poison_event_count_exact());
+        assert!(snapshot.poison_event_domain_valid());
+        assert_eq!(
+            snapshot
+                .first_poison_evidence()
+                .map(AccountPoisonEvidence::reason),
+            Some(AccountPoisonReason::CounterInvariantViolated)
+        );
+    }
+
+    #[test]
+    fn startup_admission_guard_unwind_records_exactly_one_outer_fault() {
+        let factory = account_factory(1);
+        let account = account(&factory, 4_096, 8);
+        let pair = RetainedAdmissionPairPlan::try_new(
+            AdmissionCharge::new(1, 1),
+            AdmissionCharge::new(1, 1),
+        )
+        .unwrap_or_else(|_| panic!("unwind pair charge must qualify"));
+        let (admissions, owners) = account
+            .try_admit_start_retained_pair_after_action(
+                account.try_admit_account_action().expect("account action"),
+                pair,
+                admitted_startup_share_work(&account),
+            )
+            .unwrap_or_else(|_| panic!("unwind pair must admit"));
+
+        let unwind = catch_unwind(AssertUnwindSafe(|| {
+            let _guard = StartupAdmissionGuard::new(&account, admissions, owners);
+            panic!("inject startup host unwind");
+        }));
+        assert!(unwind.is_err());
+        let snapshot = account.snapshot();
+        assert_eq!(snapshot.live_retained_bytes(), 0);
+        assert_eq!(snapshot.live_retained_allocations(), 0);
+        assert_eq!(snapshot.poison_event_count(), 1);
+        assert!(snapshot.poison_event_count_exact());
+        assert!(snapshot.poison_event_domain_valid());
+        assert_eq!(
+            snapshot
+                .first_poison_evidence()
+                .map(AccountPoisonEvidence::reason),
+            Some(AccountPoisonReason::OwnershipGraphUnverified)
+        );
+    }
+
+    #[test]
+    fn qualified_startup_capacity_failure_rolls_back_without_poisoning() {
+        let factory = account_factory(1);
+        let account = account(&factory, 4_096, 8);
+        let pair = RetainedAdmissionPairPlan::try_new(
+            AdmissionCharge::new(1, 1),
+            AdmissionCharge::new(1, 1),
+        )
+        .unwrap_or_else(|_| panic!("capacity pair charge must qualify"));
+        let (admissions, owners) = account
+            .try_admit_start_retained_pair_after_action(
+                account.try_admit_account_action().expect("account action"),
+                pair,
+                admitted_startup_share_work(&account),
+            )
+            .unwrap_or_else(|_| panic!("capacity pair must admit"));
+        let guard = StartupAdmissionGuard::new(&account, admissions, owners);
+
+        let error = map_qualified_startup_batch_error::<TestDimension>(
+            AttributionBatchCreateError::CapacityOverflow,
+            |outer_reason| guard.rollback(outer_reason),
+        );
+        assert!(matches!(error, RetainedWriterError::BatchCapacity));
+        let snapshot = account.snapshot();
+        assert_eq!(snapshot.live_retained_bytes(), 0);
+        assert_eq!(snapshot.live_retained_allocations(), 0);
+        assert!(!snapshot.poisoned());
+        assert_eq!(snapshot.poison_event_count(), 0);
+    }
+
+    #[test]
+    fn action_admission_counter_exhaustion_is_a_clean_non_poisoning_rejection() {
+        let factory = account_factory(1);
+        let account = account(&factory, 4_096, 8);
+        lock_recovering_poison(&account.inner.value().linear).admitted_account_actions = u64::MAX;
+        let before = account.snapshot();
+
+        let result = account.try_admit_account_action();
+        assert!(matches!(
+            result,
+            Err(AccountActionAdmissionError::AccountingOverflow)
+        ));
+        assert_eq!(account.snapshot(), before);
+        assert!(!account.snapshot().poisoned());
     }
 
     #[test]
@@ -8145,7 +15212,8 @@ mod tests {
             .account
             .as_ref()
             .expect("side-owner assembly retains account")
-            .share_after_admission();
+            .share_after_test_admission()
+            .unwrap_or_else(|_| panic!("test account share must be admitted"));
         let side_owner = StdArc::new(StdMutex::new(None));
         let escaped = StdArc::clone(&side_owner);
         let active_before = ledger.active_reservations();
@@ -8161,9 +15229,7 @@ mod tests {
         assert!(matches!(
             result,
             Err(RetainedPublicationError::Writer(
-                RetainedWriterError::Physical(RetainedAllocationError::BuilderPanicked {
-                    charge_retained: true,
-                })
+                RetainedWriterError::Physical(RetainedAllocationError::BuilderPanicked)
             ))
         ));
         assert!(lock_recovering_poison(&side_owner).is_some());
@@ -8184,7 +15250,7 @@ mod tests {
     }
 
     #[test]
-    fn injected_shared_allocation_failure_drops_payload_before_refunding_charge() {
+    fn injected_shared_allocation_failure_does_not_run_the_builder() {
         static OBSERVED_LIVE_BYTES: AtomicU64 = AtomicU64::new(0);
 
         struct DropProbe {
@@ -8206,22 +15272,22 @@ mod tests {
         fail_next_final_owner_allocation();
         let result = account.try_retain_with(empty_plan(), || {
             Ok::<_, RetainedBuildFailureCode>(DropProbe {
-                account: account.share_after_admission(),
+                account: account
+                    .share_after_test_admission()
+                    .unwrap_or_else(|_| panic!("test account share must be admitted")),
             })
         });
 
         assert!(matches!(
             result,
-            Err(RetainedAllocationError::AllocationFailed {
-                charge_retained: false,
-            })
+            Err(RetainedAllocationError::AllocationFailed)
         ));
-        assert!(OBSERVED_LIVE_BYTES.load(Ordering::SeqCst) > 0);
+        assert_eq!(OBSERVED_LIVE_BYTES.load(Ordering::SeqCst), 0);
         assert_eq!(account.snapshot().live_retained_bytes(), 0);
     }
 
     #[test]
-    fn allocation_failure_contains_payload_drop_panic_and_retains_the_lease() {
+    fn allocation_failure_precedes_payload_construction_and_releases_the_lease() {
         static DROP_COUNT: AtomicU64 = AtomicU64::new(0);
 
         struct PanickingDrop;
@@ -8245,62 +15311,17 @@ mod tests {
 
         assert!(matches!(
             result,
-            Ok(Err(RetainedAllocationError::AllocationFailed {
-                charge_retained: true,
-            }))
+            Ok(Err(RetainedAllocationError::AllocationFailed))
         ));
-        assert_eq!(DROP_COUNT.load(Ordering::SeqCst), 1);
-        assert!(account.snapshot().live_retained_bytes() > 0);
-        assert_eq!(account.snapshot().live_retained_allocations(), 1);
+        assert_eq!(DROP_COUNT.load(Ordering::SeqCst), 0);
+        assert_eq!(account.snapshot().live_retained_bytes(), 0);
+        assert_eq!(account.snapshot().live_retained_allocations(), 0);
         drop(account);
-        assert_eq!(factory.snapshot().live_accounts(), 1);
+        assert_eq!(factory.snapshot().live_accounts(), 0);
     }
 
     #[test]
-    fn allocation_failure_with_unverified_drop_keeps_single_part_attribution() {
-        static DROP_COUNT: AtomicU64 = AtomicU64::new(0);
-
-        let factory = account_factory(1);
-        let account = account(&factory, 4_096, 8);
-        let policy = DimensionPolicy::reservable_bytes(u64::MAX, u64::MAX, u64::MAX, u64::MAX)
-            .with_published_outcome_evidence_limit(u64::MAX);
-        let ledger = Ledger::<TestOwner, TestPhase, TestDimension>::new(
-            LedgerLimits::new(u64::MAX, [(TestDimension::Bytes, policy)]).unwrap(),
-        );
-        let probe = ledger.test_probe();
-        let before_active = probe.active_reservations();
-        let before_live = probe.current_live_bytes();
-
-        DROP_COUNT.store(0, Ordering::SeqCst);
-        fail_next_final_owner_allocation();
-        let error = match try_create_single_retained_part::<_, _, _, CanonicalOutput, _>(
-            &ledger,
-            account.share_after_admission(),
-            share_work(),
-            writer_plan(1, 1),
-            empty_plan(),
-            OutputCommitment::new(TestDimension::Bytes, 1),
-            || Ok(PanickingDropProbe(&DROP_COUNT)),
-        ) {
-            Ok(_) => panic!("injected single-part allocation must fail"),
-            Err(error) => error,
-        };
-
-        assert!(matches!(
-            error,
-            RetainedWriterError::Physical(RetainedAllocationError::AllocationFailed {
-                charge_retained: true,
-            })
-        ));
-        assert_eq!(DROP_COUNT.load(Ordering::SeqCst), 1);
-        assert_eq!(probe.active_reservations(), before_active + 1);
-        assert!(probe.current_live_bytes() > before_live);
-        drop(account);
-        assert_eq!(factory.snapshot().live_accounts(), 1);
-    }
-
-    #[test]
-    fn allocation_failure_with_unverified_drop_keeps_block_table_attribution() {
+    fn allocation_failure_rolls_back_block_attribution_before_build() {
         static DROP_COUNT: AtomicU64 = AtomicU64::new(0);
 
         let factory = account_factory(1);
@@ -8330,16 +15351,14 @@ mod tests {
         assert!(matches!(
             error,
             RetainedPublicationError::Writer(RetainedWriterError::Physical(
-                RetainedAllocationError::AllocationFailed {
-                    charge_retained: true,
-                }
+                RetainedAllocationError::AllocationFailed
             ))
         ));
-        assert_eq!(DROP_COUNT.load(Ordering::SeqCst), 1);
-        assert_eq!(probe.active_reservations(), before_active + 1);
-        assert!(probe.current_live_bytes() > before_live);
+        assert_eq!(DROP_COUNT.load(Ordering::SeqCst), 0);
+        assert_eq!(probe.active_reservations(), before_active);
+        assert_eq!(probe.current_live_bytes(), before_live);
         drop(assembly);
-        assert_eq!(factory.snapshot().live_accounts(), 1);
+        assert_eq!(factory.snapshot().live_accounts(), 0);
     }
 
     #[test]
@@ -8459,10 +15478,10 @@ mod tests {
             }
         }
 
-        type Lease = AdmissionLease<PhysicalStorageAccount>;
-        let outer =
-            FinalOwnerAllocation::<RetainedPayload<BlockingDrop>, Lease>::checked_layout_bytes()
-                .unwrap();
+        let outer = FinalOwnerAllocation::<
+            RetainedFinalOwnerInner<RetainedPayload<BlockingDrop>, LeafRetainedPolicy>,
+        >::checked_layout_bytes()
+        .unwrap();
         let factory = account_factory(1);
         let account = account(&factory, outer, 1);
         let retained = account
@@ -8513,7 +15532,9 @@ mod tests {
         let retained = account
             .try_retain_with(empty_plan(), || {
                 Ok::<_, RetainedBuildFailureCode>(DropProbe {
-                    account: account.share_after_admission(),
+                    account: account
+                        .share_after_test_admission()
+                        .unwrap_or_else(|_| panic!("test account share must be admitted")),
                 })
             })
             .unwrap();
@@ -8537,7 +15558,10 @@ mod tests {
 
         assert!(retained.belongs_to(&first_account));
         assert!(!retained.belongs_to(&second_account));
-        assert!(first_account.is_same_account(&first_account.share_after_admission()));
+        let shared_first = first_account
+            .share_after_test_admission()
+            .unwrap_or_else(|_| panic!("test account share must be admitted"));
+        assert!(first_account.is_same_account(&shared_first));
         assert!(!first_account.is_same_account(&second_account));
     }
 
@@ -8551,9 +15575,9 @@ mod tests {
             .unwrap_or_else(|_| panic!("foreign-account probe allocation must retain"));
         let first_before = first_account.snapshot();
 
-        assert!(!drop_retained_allocation_before_attribution(
-            retained,
-            &second_account
+        assert!(matches!(
+            drop_retained_allocation_before_attribution(retained, &second_account),
+            RetainedStorageDropOutcome::ForeignOwnershipFault(_)
         ));
         assert_eq!(
             first_account.snapshot().live_retained_bytes(),
@@ -8571,9 +15595,10 @@ mod tests {
 
     #[test]
     fn concurrent_exact_limit_admission_is_linearizable() {
-        type Lease = AdmissionLease<PhysicalStorageAccount>;
-        let outer =
-            FinalOwnerAllocation::<RetainedPayload<u64>, Lease>::checked_layout_bytes().unwrap();
+        let outer = FinalOwnerAllocation::<
+            RetainedFinalOwnerInner<RetainedPayload<u64>, LeafRetainedPolicy>,
+        >::checked_layout_bytes()
+        .unwrap();
         let factory = account_factory(1);
         let account = account(&factory, outer, 1);
         let start = StdArc::new(Barrier::new(3));
@@ -8582,7 +15607,9 @@ mod tests {
         let successes = StdArc::new(AtomicU64::new(0));
         let mut threads = Vec::new();
         for value in [1_u64, 2_u64] {
-            let account = account.share_after_admission();
+            let account = account
+                .share_after_test_admission()
+                .unwrap_or_else(|_| panic!("test account share must be admitted"));
             let start = StdArc::clone(&start);
             let attempts_complete = StdArc::clone(&attempts_complete);
             let release_owner = StdArc::clone(&release_owner);
@@ -8622,8 +15649,12 @@ mod tests {
             .expect("retained source contains one final test module boundary");
         assert!(test_module.trim_start().starts_with("mod tests"));
         assert!(production.contains("Arc::into_unique(shared)"));
+        assert_eq!(
+            production.matches("Arc::try_unique(shared)").count(),
+            1,
+            "strict pre-attribution cleanup has one qualified uniqueness transition"
+        );
         for forbidden in [
-            "Arc::try_unique",
             "Arc::try_unwrap",
             "Arc::into_raw",
             "Arc::from_raw",
@@ -8670,6 +15701,10 @@ mod tests {
             .filter(|name| !name.is_empty())
             .collect();
         let mut expected_exports = vec![
+            "AccountPoisonEvidence",
+            "AccountPoisonReason",
+            "AccountPoisoned",
+            "FinalizationContainmentError",
             "PhysicalStorageAccount",
             "PhysicalStorageAccountCreateError",
             "PhysicalStorageAccountFactory",
@@ -8699,7 +15734,10 @@ mod tests {
         public_declarations.sort_unstable();
         assert_eq!(public_declarations, expected_exports);
 
-        assert!(production.contains("pub(crate) struct RetainedAllocation<T>"));
+        assert!(production.contains(
+            "type RetainedAllocation<T> = PolicyRetainedAllocation<T, LeafRetainedPolicy>;"
+        ));
+        assert!(!production.contains("pub(crate) type RetainedAllocation"));
         assert!(production.contains("\nstruct RetainedPart<"));
         assert!(production.contains("\nenum RetainedClosureValidationError"));
         for forbidden in [
@@ -8721,7 +15759,8 @@ mod tests {
             );
         }
 
-        for method in ["try_retain_with_admitted_handle", "share_after_admission"] {
+        {
+            let method = "try_retain_with_admitted_handle";
             let needle = format!("fn {method}");
             let signatures: Vec<_> = production
                 .lines()
@@ -8738,6 +15777,10 @@ mod tests {
                 signatures[0]
             );
         }
+        assert!(
+            !production.contains("fn share_after_admission"),
+            "raw account sharing must not exist in production"
+        );
         let count_test_only_wrappers = |candidate: &str| {
             candidate
                 .lines()
@@ -8771,11 +15814,98 @@ mod tests {
             "pub fn replace(",
             "pub fn retag(",
             "pub fn retire(",
+            "fn reset_poison(",
+            "fn clear_poison(",
+            "fn unpoison(",
+            "fn rebrand_account(",
+            "fn bypass_account_poison(",
             "RetainedAllocationVisitor",
         ] {
             assert!(
                 !production.contains(forbidden),
                 "raw retained authority `{forbidden}` escaped the deep module"
+            );
+        }
+
+        let normalized = production.replace("\r\n", "\n");
+        assert!(normalized.contains(
+            "fn try_publication_eligibility(&self) -> Result<PublicationEligibility, AccountPoisoned>"
+        ));
+        assert_eq!(
+            normalized.matches(".try_publication_eligibility()").count(),
+            2
+        );
+        let eligible_method = |state_marker: &str| {
+            normalized
+                .split_once(state_marker)
+                .unwrap_or_else(|| panic!("missing eligible state `{state_marker}`"))
+                .1
+                .split_once("fn into_prepared")
+                .unwrap_or_else(|| panic!("missing consuming handoff for `{state_marker}`"))
+                .1
+                .split_once("\n    }\n}\n\nimpl")
+                .unwrap_or_else(|| panic!("unterminated consuming handoff for `{state_marker}`"))
+                .0
+                .to_owned()
+        };
+        for eligible_tail in [
+            eligible_method("struct EligibleTerminalFreezeGuard"),
+            eligible_method("struct EligibleFallbackFreezeGuard"),
+        ] {
+            assert!(eligible_tail.contains("freeze_terminal_evidence("));
+            assert!(eligible_tail.contains("physical.into_publication("));
+            for forbidden in [
+                "record_poison",
+                "contain_",
+                "catch_unwind",
+                "try_retain",
+                "try_discard",
+                "drop_retained",
+                "release_retained",
+                "try_allocate",
+                "assign_membership",
+                "table_mut",
+            ] {
+                assert!(
+                    !eligible_tail.contains(forbidden),
+                    "post-eligibility tail regained fallible authority `{forbidden}`"
+                );
+            }
+        }
+        let freeze_end = format!("\n}}\n\n{test_attribute}");
+        let freeze_tail = normalized
+            .split_once("fn freeze_terminal_evidence")
+            .expect("terminal evidence freeze seam exists")
+            .1
+            .split_once(&freeze_end)
+            .expect("terminal evidence freeze seam is bounded")
+            .0;
+        assert!(freeze_tail.contains("_eligibility: PublicationEligibility"));
+        for required in [
+            "let snapshot = proof.freeze();",
+            "drop(discarded_account);",
+            "evidence.allocation().as_ref().freeze_from(&snapshot);",
+            "drop(snapshot);",
+        ] {
+            assert!(
+                freeze_tail.contains(required),
+                "eligible freeze tail lost required pure step `{required}`"
+            );
+        }
+        for forbidden in [
+            "record_poison",
+            "catch_unwind",
+            "try_retain",
+            "try_discard",
+            "drop_retained",
+            "release_retained",
+            "try_allocate",
+            "assign_membership",
+            "table_mut",
+        ] {
+            assert!(
+                !freeze_tail.contains(forbidden),
+                "eligible freeze seam regained fallible authority `{forbidden}`"
             );
         }
     }
@@ -8805,7 +15935,6 @@ mod tests {
     fn publication_evidence_precharges_the_capacity_envelope() {
         type EvidenceOperation =
             RetainedOperation<TestOwner, TestPhase, TestProgress, TestUnit, u8, u32>;
-        type EvidenceLease = AdmissionLease<PhysicalStorageAccount>;
 
         let factory = account_factory(1);
         let account = account(&factory, u64::MAX, 128);
@@ -8842,8 +15971,10 @@ mod tests {
             .expect("evidence baseline remains present");
         let allocation = evidence.allocation();
         let outer_bytes = FinalOwnerAllocation::<
-            RetainedPayload<PublicationEvidenceCells<u8>>,
-            EvidenceLease,
+            RetainedFinalOwnerInner<
+                RetainedPayload<PublicationEvidenceCells<u8>>,
+                LeafRetainedPolicy,
+            >,
         >::checked_layout_bytes()
         .unwrap();
 
@@ -8856,10 +15987,10 @@ mod tests {
     }
 
     #[test]
-    fn second_start_share_rejection_preserves_the_borrowed_host_account() {
+    fn startup_share_qualification_rejection_preserves_the_borrowed_host_account() {
         let factory = account_factory(1);
         let account = account(&factory, 4_096, 16);
-        let policy = DimensionPolicy::reservable_bytes(3, 3, u64::MAX, u64::MAX)
+        let policy = DimensionPolicy::reservable_bytes(7, 7, u64::MAX, u64::MAX)
             .with_published_outcome_evidence_limit(u64::MAX);
         let limits = LedgerLimits::new(u64::MAX, [(TestDimension::Bytes, policy)]).unwrap();
         let plan = RetainedOperationStartPlan::new(
@@ -8883,7 +16014,7 @@ mod tests {
             ))
         ));
         assert!(!builder_called.load(Ordering::SeqCst));
-        assert_eq!(account.share_call_count(), 1);
+        assert_eq!(account.share_call_count(), 0);
         let retained = account
             .try_retain_with(empty_plan(), || Ok::<_, RetainedBuildFailureCode>(9_u32))
             .expect("borrowed host account remains usable after start rejection");
@@ -8938,6 +16069,369 @@ mod tests {
     }
 
     #[test]
+    fn startup_fallback_builder_error_returns_original_cause_and_restores_baseline() {
+        reset_startup_test_observations();
+        let factory = account_factory(1);
+        let account = account(&factory, u64::MAX, 128);
+        let before = account.snapshot();
+        let builder_called = AtomicBool::new(false);
+        let (limits, plan) = startup_limits_and_plan();
+
+        let result = TestOperation::try_start(
+            OperationControl::default(),
+            limits,
+            &account,
+            plan,
+            || -> Result<u32, RetainedBuildFailureCode> {
+                builder_called.store(true, Ordering::SeqCst);
+                Err(BUILD_FAILED)
+            },
+        );
+
+        assert!(matches!(
+            result,
+            Err(RetainedOperationStartError::Writer(
+                RetainedWriterError::Physical(RetainedAllocationError::Build(cause))
+            )) if cause == BUILD_FAILED
+        ));
+        assert!(builder_called.load(Ordering::SeqCst));
+        assert_eq!(take_start_evidence_build_calls(), 0);
+        assert_eq!(take_startup_failure_ledger_snapshot(), Some((0, 0)));
+        let after = account.snapshot();
+        assert_eq!(after.live_retained_bytes(), before.live_retained_bytes());
+        assert_eq!(
+            after.live_retained_allocations(),
+            before.live_retained_allocations()
+        );
+        assert_eq!(after.poison_event_count(), before.poison_event_count());
+        assert_eq!(account.share_call_count(), 4);
+
+        drop(account);
+        assert_eq!(factory.snapshot().live_accounts(), 0);
+    }
+
+    #[test]
+    fn startup_evidence_builder_error_drops_fallback_once_and_restores_baseline() {
+        static FALLBACK_DROPS: AtomicU64 = AtomicU64::new(0);
+
+        reset_startup_test_observations();
+        FALLBACK_DROPS.store(0, Ordering::SeqCst);
+        fail_next_start_evidence_build(BUILD_FAILED);
+        let factory = account_factory(1);
+        let account = account(&factory, u64::MAX, 128);
+        let before = account.snapshot();
+        let (limits, plan) = startup_limits_and_plan();
+        type DropOperation = RetainedOperation<
+            TestOwner,
+            TestPhase,
+            TestProgress,
+            TestUnit,
+            TestDimension,
+            DropCounter,
+        >;
+
+        let result =
+            DropOperation::try_start(OperationControl::default(), limits, &account, plan, || {
+                Ok::<DropCounter, RetainedBuildFailureCode>(DropCounter(&FALLBACK_DROPS))
+            });
+
+        assert!(matches!(
+            result,
+            Err(RetainedOperationStartError::Writer(
+                RetainedWriterError::Physical(RetainedAllocationError::Build(cause))
+            )) if cause == BUILD_FAILED
+        ));
+        assert_eq!(take_start_evidence_build_calls(), 1);
+        assert_eq!(FALLBACK_DROPS.load(Ordering::SeqCst), 1);
+        assert_eq!(take_startup_failure_ledger_snapshot(), Some((0, 0)));
+        let after = account.snapshot();
+        assert_eq!(after.live_retained_bytes(), before.live_retained_bytes());
+        assert_eq!(
+            after.live_retained_allocations(),
+            before.live_retained_allocations()
+        );
+        assert_eq!(after.poison_event_count(), before.poison_event_count());
+        assert_eq!(account.share_call_count(), 4);
+
+        drop(account);
+        assert_eq!(factory.snapshot().live_accounts(), 0);
+    }
+
+    #[test]
+    fn startup_evidence_builder_panic_releases_the_clean_fallback_sibling() {
+        static FALLBACK_DROPS: AtomicU64 = AtomicU64::new(0);
+
+        reset_startup_test_observations();
+        FALLBACK_DROPS.store(0, Ordering::SeqCst);
+        panic_next_start_evidence_build();
+        let factory = account_factory(1);
+        let account = account(&factory, u64::MAX, 128);
+        let before = account.snapshot();
+        let evidence_capacity =
+            CapacityPlan::for_type::<PublicationDimensionCell<TestDimension>>(0, 0, 1)
+                .unwrap_or_else(|_| panic!("evidence panic capacity must qualify"));
+        let nested_bytes = evidence_capacity
+            .envelope_delta_bytes()
+            .unwrap_or_else(|_| panic!("evidence panic envelope must fit"));
+        let evidence_plan = RetainedAllocationPlan::new(nested_bytes, u64::from(nested_bytes != 0))
+            .unwrap_or_else(|_| panic!("evidence panic plan must qualify"));
+        let evidence_charge = account
+            .checked_retained_charge::<PublicationEvidenceCells<TestDimension>>(evidence_plan)
+            .unwrap_or_else(|_| panic!("evidence panic charge must qualify"));
+        let (limits, plan) = startup_limits_and_plan();
+        type DropOperation = RetainedOperation<
+            TestOwner,
+            TestPhase,
+            TestProgress,
+            TestUnit,
+            TestDimension,
+            DropCounter,
+        >;
+
+        let result =
+            DropOperation::try_start(OperationControl::default(), limits, &account, plan, || {
+                Ok::<DropCounter, RetainedBuildFailureCode>(DropCounter(&FALLBACK_DROPS))
+            });
+
+        assert!(matches!(
+            result,
+            Err(RetainedOperationStartError::Writer(
+                RetainedWriterError::Physical(RetainedAllocationError::BuilderPanicked)
+            ))
+        ));
+        assert_eq!(take_start_evidence_build_calls(), 1);
+        assert_eq!(FALLBACK_DROPS.load(Ordering::SeqCst), 1);
+        let snapshot = account.snapshot();
+        assert_eq!(
+            snapshot.live_retained_bytes() - before.live_retained_bytes(),
+            evidence_charge.bytes
+        );
+        assert_eq!(
+            snapshot.live_retained_allocations() - before.live_retained_allocations(),
+            evidence_charge.allocations
+        );
+        assert_eq!(snapshot.poison_event_count(), 1);
+        assert_eq!(
+            snapshot
+                .first_poison_evidence()
+                .map(AccountPoisonEvidence::reason),
+            Some(AccountPoisonReason::RetainedBuilderPanicked)
+        );
+        let (active, live) = take_startup_failure_ledger_snapshot()
+            .unwrap_or_else(|| panic!("evidence panic must capture startup ledger state"));
+        assert_eq!(active, 2);
+        assert!(live > evidence_charge.bytes);
+
+        drop(account);
+        assert_eq!(factory.snapshot().live_accounts(), 1);
+    }
+
+    #[test]
+    fn startup_evidence_builder_panic_keeps_storage_release_as_r_and_records_builder_f() {
+        static FALLBACK_DROPS: AtomicU64 = AtomicU64::new(0);
+
+        reset_startup_test_observations();
+        FALLBACK_DROPS.store(0, Ordering::SeqCst);
+        panic_next_start_evidence_build();
+        let factory = account_factory(1);
+        let account = account(&factory, u64::MAX, 128);
+        let (limits, plan) = startup_limits_and_plan();
+        type PanicDropOperation = RetainedOperation<
+            TestOwner,
+            TestPhase,
+            TestProgress,
+            TestUnit,
+            TestDimension,
+            PanickingDropProbe,
+        >;
+
+        let result = PanicDropOperation::try_start(
+            OperationControl::default(),
+            limits,
+            &account,
+            plan,
+            || {
+                Ok::<PanickingDropProbe, RetainedBuildFailureCode>(PanickingDropProbe(
+                    &FALLBACK_DROPS,
+                ))
+            },
+        );
+
+        assert!(matches!(
+            result,
+            Err(RetainedOperationStartError::Writer(
+                RetainedWriterError::StorageDropUnverified
+            ))
+        ));
+        assert_eq!(take_start_evidence_build_calls(), 1);
+        assert_eq!(FALLBACK_DROPS.load(Ordering::SeqCst), 1);
+        let snapshot = account.snapshot();
+        assert_eq!(snapshot.poison_event_count(), 2);
+        assert!(snapshot.poison_event_count_exact());
+        assert!(snapshot.poison_event_domain_valid());
+        assert_eq!(
+            snapshot
+                .first_poison_evidence()
+                .map(AccountPoisonEvidence::reason),
+            Some(AccountPoisonReason::RetainedStorageReleaseUnverified)
+        );
+        let (active, live) = take_startup_failure_ledger_snapshot()
+            .unwrap_or_else(|| panic!("combined evidence panic must capture startup ledger state"));
+        assert_eq!(active, 4);
+        assert!(live > 0);
+
+        drop(account);
+        assert_eq!(factory.snapshot().live_accounts(), 1);
+    }
+
+    #[test]
+    fn startup_evidence_builder_panic_prefers_sibling_counter_f_without_builder_f() {
+        static FALLBACK_DROPS: AtomicU64 = AtomicU64::new(0);
+
+        reset_startup_test_observations();
+        FALLBACK_DROPS.store(0, Ordering::SeqCst);
+        panic_next_start_evidence_build();
+        let factory = account_factory(1);
+        let account = account(&factory, u64::MAX, 128);
+        let (limits, plan) = startup_limits_and_plan();
+        type DropOperation = RetainedOperation<
+            TestOwner,
+            TestPhase,
+            TestProgress,
+            TestUnit,
+            TestDimension,
+            DropCounter,
+        >;
+
+        let result =
+            DropOperation::try_start(OperationControl::default(), limits, &account, plan, || {
+                let mut state = lock_recovering_poison(&account.inner.value().linear);
+                state.counters.live_bytes = 0;
+                state.counters.live_allocations = 0;
+                drop(state);
+                Ok::<DropCounter, RetainedBuildFailureCode>(DropCounter(&FALLBACK_DROPS))
+            });
+
+        assert!(matches!(
+            result,
+            Err(RetainedOperationStartError::Writer(
+                RetainedWriterError::ChargeReleaseUnverified
+            ))
+        ));
+        assert_eq!(take_start_evidence_build_calls(), 1);
+        assert_eq!(FALLBACK_DROPS.load(Ordering::SeqCst), 1);
+        let snapshot = account.snapshot();
+        assert_eq!(snapshot.poison_event_count(), 1);
+        assert_eq!(
+            snapshot
+                .first_poison_evidence()
+                .map(AccountPoisonEvidence::reason),
+            Some(AccountPoisonReason::CounterInvariantViolated)
+        );
+
+        drop(account);
+        assert_eq!(factory.snapshot().live_accounts(), 1);
+    }
+
+    #[test]
+    fn startup_fallback_panic_contains_fallback_and_cleans_evidence() {
+        reset_startup_test_observations();
+        let factory = account_factory(1);
+        let account = account(&factory, u64::MAX, 128);
+        let fallback_charge = account
+            .checked_retained_charge::<u32>(empty_plan())
+            .unwrap_or_else(|_| panic!("fallback charge must qualify"));
+        let (limits, plan) = startup_limits_and_plan();
+
+        let result = TestOperation::try_start(
+            OperationControl::default(),
+            limits,
+            &account,
+            plan,
+            || -> Result<u32, RetainedBuildFailureCode> { panic!("inject fallback startup panic") },
+        );
+
+        assert!(matches!(
+            result,
+            Err(RetainedOperationStartError::Writer(
+                RetainedWriterError::Physical(RetainedAllocationError::BuilderPanicked)
+            ))
+        ));
+        assert_eq!(take_start_evidence_build_calls(), 0);
+        let snapshot = account.snapshot();
+        assert!(snapshot.poisoned());
+        assert_eq!(snapshot.poison_event_count(), 1);
+        assert_eq!(
+            snapshot
+                .first_poison_evidence()
+                .map(AccountPoisonEvidence::reason),
+            Some(AccountPoisonReason::RetainedBuilderPanicked)
+        );
+        assert_eq!(snapshot.live_retained_bytes(), fallback_charge.bytes);
+        assert_eq!(
+            snapshot.live_retained_allocations(),
+            fallback_charge.allocations
+        );
+        let (active, live) = take_startup_failure_ledger_snapshot()
+            .unwrap_or_else(|| panic!("fallback panic must capture startup ledger state"));
+        assert_eq!(active, 2);
+        assert!(live > fallback_charge.bytes);
+        assert_eq!(account.share_call_count(), 4);
+
+        drop(account);
+        assert_eq!(factory.snapshot().live_accounts(), 1);
+    }
+
+    #[test]
+    fn startup_fallback_panic_with_sibling_underflow_records_only_counter_fault() {
+        reset_startup_test_observations();
+        let factory = account_factory(1);
+        let account = account(&factory, u64::MAX, 128);
+        let (limits, plan) = startup_limits_and_plan();
+
+        let result = TestOperation::try_start(
+            OperationControl::default(),
+            limits,
+            &account,
+            plan,
+            || -> Result<u32, RetainedBuildFailureCode> {
+                let mut state = lock_recovering_poison(&account.inner.value().linear);
+                state.counters.live_bytes = 0;
+                state.counters.live_allocations = 0;
+                drop(state);
+                panic!("inject fallback panic after counter corruption")
+            },
+        );
+
+        assert!(matches!(
+            result,
+            Err(RetainedOperationStartError::Writer(
+                RetainedWriterError::ChargeReleaseUnverified
+            ))
+        ));
+        assert_eq!(take_start_evidence_build_calls(), 0);
+        let snapshot = account.snapshot();
+        assert!(snapshot.poisoned());
+        assert_eq!(snapshot.poison_event_count(), 1);
+        assert_eq!(
+            snapshot
+                .first_poison_evidence()
+                .map(AccountPoisonEvidence::reason),
+            Some(AccountPoisonReason::CounterInvariantViolated)
+        );
+        assert_eq!(snapshot.live_retained_bytes(), 0);
+        assert_eq!(snapshot.live_retained_allocations(), 0);
+        let (active, live) = take_startup_failure_ledger_snapshot()
+            .unwrap_or_else(|| panic!("underflow panic must capture startup ledger state"));
+        assert_eq!(active, 4);
+        assert!(live > 0);
+        assert_eq!(account.share_call_count(), 4);
+
+        drop(account);
+        assert_eq!(factory.snapshot().live_accounts(), 1);
+    }
+
+    #[test]
     fn single_value_bootstrap_and_primary_prepare_exclude_duplicate_tail_work() {
         let source = include_str!("retained.rs");
         let test_attribute = ["#[cfg(", "test)]"].concat();
@@ -8946,12 +16440,7 @@ mod tests {
             .expect("retained source contains one final test module boundary");
         assert!(!production.contains("set: fn("));
         assert!(!production.contains("AggregateSetterPanicked"));
-        assert_eq!(
-            production
-                .matches("fn try_create_single_retained_part")
-                .count(),
-            1
-        );
+        assert!(!production.contains("fn try_create_single_retained_part"));
         assert_eq!(production.matches(".try_prepare_typed_control(").count(), 1);
         assert_eq!(production.matches("ledger.try_bind_primary(").count(), 1);
         assert_eq!(

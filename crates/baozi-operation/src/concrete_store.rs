@@ -3,6 +3,11 @@
 //! This module is the only public construction seam for retained publication payloads. The raw
 //! generic owner in `retained` remains a private foundation: callers can request semantic element
 //! counts, but cannot provide an owning payload or declare its allocator footprint.
+
+#![allow(
+    clippy::result_large_err,
+    reason = "bounded poison snapshots stay inline so containment never needs a failure-path allocation"
+)]
 //!
 //! Raw ownership and arbitrary payloads are intentionally unreachable. Each forbidden symbol has
 //! an independent compile-time gate so one missing export cannot mask another:
@@ -75,28 +80,26 @@
 
 use std::fmt;
 use std::marker::PhantomData;
-use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use crate::capacity::{CapacityPlan, CapacityPlanError};
-use crate::control::{
-    OperationControl, ProgressPhase, ProgressUnit, discard_untrusted_panic_payload,
-};
+use crate::control::{OperationControl, ProgressPhase, ProgressUnit};
 use crate::coordinator::FinalProgress;
 use crate::ledger::{LedgerCause, LedgerLimits};
 use crate::owner::OperationOwner;
 use crate::retained::{
-    CanonicalRetainedSlot, OutcomeEvidenceRetainedSlot, PhysicalStorageAccount,
-    PreparationFailureClass, PreparationFailureCode, PreparedRetainedFallback,
-    PreparedRetainedPublication, PreparedRetainedPublicationOutcome, PreparedRetainedRichFailure,
-    PreparedRetainedSuccess, PublishedCanonicalOutput, PublishedFallbackOutput,
-    PublishedLedgerEvidence, PublishedOutcomeEvidenceOutput, PublishedRichFailureOutput,
-    RetainedAllocationError, RetainedAllocationPlan, RetainedBatchLimits, RetainedBlockTablePlan,
-    RetainedBuildFailureCode, RetainedClosureSession, RetainedEvidenceClosureSession,
-    RetainedFailureAssembly, RetainedFailureValidation, RetainedFallbackOnly,
-    RetainedHandleSharePlan, RetainedOperation, RetainedOperationStartError,
-    RetainedOperationStartPlan, RetainedPublicationAssembly, RetainedPublicationError,
-    RetainedPublicationPlan, RetainedPublicationPrepareError, RetainedSuccessValidation,
-    RetainedWriterError, RetainedWriterPlan, ValidatedRetainedFailure, ValidatedRetainedSuccess,
+    AccountPoisoned, CanonicalRetainedSlot, FinalizationContainmentError,
+    OutcomeEvidenceRetainedSlot, PhysicalStorageAccount, PreparationFailureClass,
+    PreparationFailureCode, PreparedRetainedFallback, PreparedRetainedPublication,
+    PreparedRetainedPublicationOutcome, PreparedRetainedRichFailure, PreparedRetainedSuccess,
+    PublishedCanonicalOutput, PublishedFallbackOutput, PublishedLedgerEvidence,
+    PublishedOutcomeEvidenceOutput, PublishedRichFailureOutput, RetainedAllocationError,
+    RetainedAllocationPlan, RetainedBatchLimits, RetainedBlockTablePlan, RetainedBuildFailureCode,
+    RetainedClosureSession, RetainedEvidenceClosureSession, RetainedFailureAssembly,
+    RetainedFailureValidation, RetainedFallbackOnly, RetainedHandleSharePlan, RetainedOperation,
+    RetainedOperationStartError, RetainedOperationStartPlan, RetainedPublicationAssembly,
+    RetainedPublicationError, RetainedPublicationPlan, RetainedPublicationPrepareError,
+    RetainedSuccessValidation, RetainedWriterError, RetainedWriterPlan, ValidatedRetainedFailure,
+    ValidatedRetainedSuccess, retained_publication_error_requires_containment,
 };
 
 const MAX_RECORD_FIELDS: usize = 32;
@@ -106,7 +109,6 @@ const BUILD_CODE_CAPACITY_UNQUALIFIED: u32 = 2;
 const BUILD_CODE_CAPACITY_EXCEEDED: u32 = 3;
 const BUILD_CODE_INCOMPLETE: u32 = 4;
 const BUILD_CODE_ROW_WIDTH: u32 = 5;
-const BUILD_CODE_BUILDER_PANICKED: u32 = 6;
 
 #[allow(
     private_interfaces,
@@ -172,7 +174,6 @@ pub enum StoreBuildFailureClass {
     CapacityExceeded,
     IncompleteWrite,
     InvalidRecordWidth,
-    BuilderPanicked,
 }
 
 /// Allocation-free failure returned from a scoped store writer.
@@ -239,13 +240,6 @@ impl StoreBuildError {
         }
     }
 
-    const fn builder_panicked() -> Self {
-        Self {
-            class: StoreBuildFailureClass::BuilderPanicked,
-            code: 0,
-        }
-    }
-
     const fn into_raw(self) -> RetainedBuildFailureCode {
         let code = match self.class {
             StoreBuildFailureClass::Domain => BUILD_CODE_DOMAIN + self.code,
@@ -254,7 +248,6 @@ impl StoreBuildError {
             StoreBuildFailureClass::CapacityExceeded => BUILD_CODE_CAPACITY_EXCEEDED,
             StoreBuildFailureClass::IncompleteWrite => BUILD_CODE_INCOMPLETE,
             StoreBuildFailureClass::InvalidRecordWidth => BUILD_CODE_ROW_WIDTH,
-            StoreBuildFailureClass::BuilderPanicked => BUILD_CODE_BUILDER_PANICKED,
         };
         RetainedBuildFailureCode::new(code)
     }
@@ -266,7 +259,6 @@ impl StoreBuildError {
             BUILD_CODE_CAPACITY_EXCEEDED => Self::capacity_exceeded(),
             BUILD_CODE_INCOMPLETE => Self::incomplete_write(),
             BUILD_CODE_ROW_WIDTH => Self::invalid_record_width(),
-            BUILD_CODE_BUILDER_PANICKED => Self::builder_panicked(),
             code if code >= BUILD_CODE_DOMAIN => Self {
                 class: StoreBuildFailureClass::Domain,
                 code: code - BUILD_CODE_DOMAIN,
@@ -303,9 +295,6 @@ impl fmt::Display for StoreBuildError {
             }
             StoreBuildFailureClass::InvalidRecordWidth => {
                 formatter.write_str("retained record row does not match its planned width")
-            }
-            StoreBuildFailureClass::BuilderPanicked => {
-                formatter.write_str("retained store builder panicked")
             }
         }
     }
@@ -530,19 +519,10 @@ fn finish_scoped_writer<Writer>(
     build: impl FnOnce(&mut Writer) -> Result<(), StoreBuildError>,
     finish: impl FnOnce(Writer) -> Result<StoredBlock, StoreBuildError>,
 ) -> Result<StoredBlock, StoreBuildError> {
-    match catch_unwind(AssertUnwindSafe(|| build(&mut writer))) {
-        Ok(result) => {
-            result?;
-            finish(writer)
-        }
-        Err(payload) => {
-            // Every concrete writer owns only sealed primitive storage whose destructor cannot
-            // execute caller code. Destroy it before touching the untrusted panic payload.
-            drop(writer);
-            discard_untrusted_panic_payload(payload);
-            Err(StoreBuildError::builder_panicked())
-        }
-    }
+    // Natural unwind drops the sealed primitive writer before the raw retained owner catches the
+    // panic while it still owns the physical admission, lease owner, and attribution.
+    build(&mut writer)?;
+    finish(writer)
 }
 
 enum SequenceStorage {
@@ -1899,6 +1879,11 @@ pub enum StoreRuntimeError<D> {
     BatchCapacity,
     BatchAllocationFailed,
     Ledger(LedgerCause<D>),
+    /// The physical account is permanently quarantined; the snapshot retains its first evidence.
+    AccountPoisoned(AccountPoisoned),
+    /// The account was quarantined after this action's physical admission. The retained charge
+    /// remains coupled fail-closed and must not be reported as an ordinary poison-first rejection.
+    AccountPoisonedWithRetainedCharge(AccountPoisoned),
     AccountingOverflow,
     PhysicalByteLimit {
         requested: u64,
@@ -1909,12 +1894,8 @@ pub enum StoreRuntimeError<D> {
         limit: u64,
     },
     Build(StoreBuildError),
-    BuilderPanicked {
-        charge_retained: bool,
-    },
-    AllocationFailed {
-        charge_retained: bool,
-    },
+    BuilderPanicked,
+    AllocationFailed,
     SlotLimit {
         destination: StoreDestination,
     },
@@ -1931,6 +1912,12 @@ pub enum StoreRuntimeError<D> {
     /// runtime must be quarantined because the uncertain charge is deliberately retained
     /// fail-closed.
     StorageDropUnverified,
+    /// The retained ownership graph could not be proven before attribution. The affected account
+    /// is quarantined and any structurally coupled storage remains fail-closed.
+    OwnershipUnverified,
+    /// A retained physical charge could not be proven released. This does not assert that payload
+    /// or nested storage destruction failed.
+    ChargeReleaseUnverified,
     FallbackOnly,
     Poisoned,
 }
@@ -1946,6 +1933,11 @@ impl<D: fmt::Debug> fmt::Display for StoreRuntimeError<D> {
             Self::Ledger(cause) => {
                 write!(formatter, "retained store ledger rejected action: {cause}")
             }
+            Self::AccountPoisoned(cause) => cause.fmt(formatter),
+            Self::AccountPoisonedWithRetainedCharge(cause) => write!(
+                formatter,
+                "{cause}; retained physical charge remains fail-closed"
+            ),
             Self::AccountingOverflow => formatter.write_str("retained store accounting overflowed"),
             Self::PhysicalByteLimit { requested, limit } => write!(
                 formatter,
@@ -1956,14 +1948,12 @@ impl<D: fmt::Debug> fmt::Display for StoreRuntimeError<D> {
                 "retained store requested {requested} allocations above limit {limit}"
             ),
             Self::Build(cause) => cause.fmt(formatter),
-            Self::BuilderPanicked { charge_retained } => write!(
-                formatter,
-                "retained store builder panicked; fail-closed charge retained: {charge_retained}"
+            Self::BuilderPanicked => formatter.write_str(
+                "retained store builder panicked; its physical charge remains fail-closed",
             ),
-            Self::AllocationFailed { charge_retained } => write!(
-                formatter,
-                "retained store allocation failed; fail-closed charge retained: {charge_retained}"
-            ),
+            Self::AllocationFailed => {
+                formatter.write_str("retained store allocation failed before payload construction")
+            }
             Self::SlotLimit { destination } => {
                 write!(formatter, "retained {destination:?} block table is full")
             }
@@ -1981,6 +1971,12 @@ impl<D: fmt::Debug> fmt::Display for StoreRuntimeError<D> {
             Self::StorageDropUnverified => {
                 formatter.write_str("retained storage release could not be verified")
             }
+            Self::OwnershipUnverified => {
+                formatter.write_str("retained ownership could not be verified")
+            }
+            Self::ChargeReleaseUnverified => {
+                formatter.write_str("retained physical charge release could not be verified")
+            }
             Self::FallbackOnly => {
                 formatter.write_str("retained store is restricted to minimal fallback")
             }
@@ -1995,6 +1991,9 @@ impl<D: fmt::Debug + 'static> std::error::Error for StoreRuntimeError<D> {
             Self::Plan(cause) => Some(cause),
             Self::Ledger(cause) => Some(cause),
             Self::Build(cause) => Some(cause),
+            Self::AccountPoisoned(cause) | Self::AccountPoisonedWithRetainedCharge(cause) => {
+                Some(cause)
+            }
             _ => None,
         }
     }
@@ -2004,6 +2003,12 @@ fn map_allocation_error<D>(error: &RetainedAllocationError) -> StoreRuntimeError
     match error {
         RetainedAllocationError::InlinePayloadTooLarge { .. } => {
             StoreRuntimeError::InvalidPublicationPlan
+        }
+        RetainedAllocationError::AccountPoisoned(cause) => {
+            StoreRuntimeError::AccountPoisoned(*cause)
+        }
+        RetainedAllocationError::AccountPoisonedWithRetainedCharge(cause) => {
+            StoreRuntimeError::AccountPoisonedWithRetainedCharge(*cause)
         }
         RetainedAllocationError::AccountingOverflow => StoreRuntimeError::AccountingOverflow,
         RetainedAllocationError::ByteLimitExceeded { requested, limit } => {
@@ -2019,24 +2024,12 @@ fn map_allocation_error<D>(error: &RetainedAllocationError) -> StoreRuntimeError
             }
         }
         RetainedAllocationError::Build(code) => {
-            let cause = StoreBuildError::from_raw(code.code());
-            if cause.class() == StoreBuildFailureClass::BuilderPanicked {
-                StoreRuntimeError::BuilderPanicked {
-                    charge_retained: false,
-                }
-            } else {
-                StoreRuntimeError::Build(cause)
-            }
+            StoreRuntimeError::Build(StoreBuildError::from_raw(code.code()))
         }
-        RetainedAllocationError::BuilderPanicked { charge_retained } => {
-            StoreRuntimeError::BuilderPanicked {
-                charge_retained: *charge_retained,
-            }
-        }
-        RetainedAllocationError::AllocationFailed { charge_retained } => {
-            StoreRuntimeError::AllocationFailed {
-                charge_retained: *charge_retained,
-            }
+        RetainedAllocationError::BuilderPanicked => StoreRuntimeError::BuilderPanicked,
+        RetainedAllocationError::AllocationFailed => StoreRuntimeError::AllocationFailed,
+        RetainedAllocationError::ChargeReleaseUnverified => {
+            StoreRuntimeError::ChargeReleaseUnverified
         }
     }
 }
@@ -2046,6 +2039,7 @@ fn map_writer_error<D: Copy>(error: &RetainedWriterError<D>) -> StoreRuntimeErro
         RetainedWriterError::BatchCapacity => StoreRuntimeError::BatchCapacity,
         RetainedWriterError::BatchAllocationFailed => StoreRuntimeError::BatchAllocationFailed,
         RetainedWriterError::Ledger(cause) => StoreRuntimeError::Ledger(cause.clone()),
+        RetainedWriterError::AccountPoisoned(cause) => StoreRuntimeError::AccountPoisoned(*cause),
         RetainedWriterError::Physical(cause) => map_allocation_error(cause),
         RetainedWriterError::AttributionBatchFull
         | RetainedWriterError::CommitmentBatchFull
@@ -2053,6 +2047,8 @@ fn map_writer_error<D: Copy>(error: &RetainedWriterError<D>) -> StoreRuntimeErro
         RetainedWriterError::ForeignAccount => StoreRuntimeError::ForeignAccount,
         RetainedWriterError::MembershipExhausted => StoreRuntimeError::MembershipExhausted,
         RetainedWriterError::StorageDropUnverified => StoreRuntimeError::StorageDropUnverified,
+        RetainedWriterError::OwnershipUnverified => StoreRuntimeError::OwnershipUnverified,
+        RetainedWriterError::ChargeReleaseUnverified => StoreRuntimeError::ChargeReleaseUnverified,
     }
 }
 
@@ -2071,19 +2067,8 @@ fn map_publication_error<D: Copy>(error: &RetainedPublicationError<D>) -> StoreR
     }
 }
 
-fn publication_error_is_builder_panic<D>(error: &RetainedPublicationError<D>) -> bool {
-    matches!(
-        error,
-        RetainedPublicationError::Writer(RetainedWriterError::Physical(
-            RetainedAllocationError::BuilderPanicked { .. }
-        ))
-    ) || matches!(
-        error,
-        RetainedPublicationError::Writer(RetainedWriterError::Physical(
-            RetainedAllocationError::Build(code)
-        )) if StoreBuildError::from_raw(code.code()).class()
-            == StoreBuildFailureClass::BuilderPanicked
-    )
+fn publication_error_requires_containment<D>(error: &RetainedPublicationError<D>) -> bool {
+    retained_publication_error_requires_containment(error)
 }
 
 /// Failure while starting a concrete retained store operation.
@@ -2279,11 +2264,14 @@ where
     }
 
     /// Publishes the pre-admitted minimal fallback without opening block tables.
-    pub fn prepare_minimal_fallback(self, cause: u32) -> PreparedStoreFallback<D> {
-        classify_prepared_fallback(
-            self.raw
-                .prepare_minimal_fallback(PreparationFailureCode::domain(cause)),
-        )
+    pub fn prepare_minimal_fallback(
+        self,
+        cause: u32,
+    ) -> Result<PreparedStoreFallback<D>, StorePrepareError> {
+        self.raw
+            .prepare_minimal_fallback(PreparationFailureCode::domain(cause))
+            .map(classify_prepared_fallback)
+            .map_err(StorePrepareError::from_raw)
     }
 }
 
@@ -2420,15 +2408,7 @@ where
         match result {
             Ok(value) => Ok(value),
             Err(error) => {
-                if publication_error_is_builder_panic(&error)
-                    || matches!(
-                        error,
-                        RetainedPublicationError::Poisoned
-                            | RetainedPublicationError::Writer(
-                                RetainedWriterError::StorageDropUnverified
-                            )
-                    )
-                {
+                if publication_error_requires_containment(&error) {
                     self.fallback_only = true;
                 }
                 Err(map_publication_error(&error))
@@ -2950,15 +2930,7 @@ where
         match result {
             Ok(value) => Ok(value),
             Err(error) => {
-                if publication_error_is_builder_panic(&error)
-                    || matches!(
-                        error,
-                        RetainedPublicationError::Poisoned
-                            | RetainedPublicationError::Writer(
-                                RetainedWriterError::StorageDropUnverified
-                            )
-                    )
-                {
+                if publication_error_requires_containment(&error) {
                     self.fallback_only = true;
                 }
                 Err(map_publication_error(&error))
@@ -3278,25 +3250,16 @@ where
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum StorePrepareError {
-    Poisoned,
-    InvalidStorageGraph,
-    /// Terminal preparation consumed the operation but could not prove that discarded storage,
-    /// attribution, and admission leases were released.
-    ///
-    /// This failure is non-retryable and returns no success, rich-failure, or fallback owner. The
-    /// uncertain charge is deliberately retained fail-closed, so the affected physical account
-    /// and operation runtime must be quarantined rather than reused.
-    StorageDropUnverified,
-    PrimaryPanicked,
+    /// Final eligibility failed closed; no prepared publication or fallback owner was produced.
+    FinalizationContainment(FinalizationContainmentError),
 }
 
 impl StorePrepareError {
     const fn from_raw(error: RetainedPublicationPrepareError) -> Self {
         match error {
-            RetainedPublicationPrepareError::Poisoned => Self::Poisoned,
-            RetainedPublicationPrepareError::InvalidStorageGraph => Self::InvalidStorageGraph,
-            RetainedPublicationPrepareError::StorageDropUnverified => Self::StorageDropUnverified,
-            RetainedPublicationPrepareError::PrimaryPanicked => Self::PrimaryPanicked,
+            RetainedPublicationPrepareError::FinalizationContainment(cause) => {
+                Self::FinalizationContainment(cause)
+            }
         }
     }
 }
@@ -3304,21 +3267,18 @@ impl StorePrepareError {
 impl fmt::Display for StorePrepareError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Poisoned => formatter.write_str("retained store preparation is poisoned"),
-            Self::InvalidStorageGraph => {
-                formatter.write_str("retained store ownership graph is invalid")
-            }
-            Self::StorageDropUnverified => {
-                formatter.write_str("retained store release could not be verified")
-            }
-            Self::PrimaryPanicked => {
-                formatter.write_str("retained store primary ledger preparation panicked")
-            }
+            Self::FinalizationContainment(cause) => cause.fmt(formatter),
         }
     }
 }
 
-impl std::error::Error for StorePrepareError {}
+impl std::error::Error for StorePrepareError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::FinalizationContainment(cause) => Some(cause),
+        }
+    }
+}
 
 /// Exact preparation outcome for a success candidate.
 #[must_use = "every exact terminal branch owns the frozen publication"]
@@ -4217,11 +4177,162 @@ mod tests {
         ));
         assert!(matches!(
             assembly.prepare_minimal_fallback(),
-            Err(StorePrepareError::Poisoned)
+            Err(StorePrepareError::FinalizationContainment(cause))
+                if cause.reason()
+                    == crate::AccountPoisonReason::RetainedStorageReleaseUnverified
         ));
 
         drop(account);
         assert_eq!(factory.snapshot().live_accounts(), 1);
+    }
+
+    #[test]
+    fn containment_mapping_preserves_retained_charge_and_restricts_the_facade_immediately() {
+        let factory = test_factory();
+        let account = test_account(&factory);
+        let mut assembly = test_operation(&account, u64::MAX)
+            .try_publication_assembly(test_publication_plan(1, 1))
+            .expect("containment mapping assembly");
+        let poisoned =
+            account.test_record_poison(crate::AccountPoisonReason::OwnershipGraphUnverified);
+        let error = RetainedPublicationError::Writer(RetainedWriterError::Physical(
+            RetainedAllocationError::AccountPoisonedWithRetainedCharge(poisoned),
+        ));
+
+        let mapped: Result<(), StoreRuntimeError<TestDimension>> = assembly.map_action(Err(error));
+        assert!(matches!(
+            mapped,
+            Err(StoreRuntimeError::AccountPoisonedWithRetainedCharge(cause))
+                if cause == poisoned
+        ));
+        assert!(assembly.fallback_only);
+        assert!(matches!(
+            assembly.ensure_writable(),
+            Err(StoreRuntimeError::FallbackOnly)
+        ));
+        assert!(publication_error_requires_containment(
+            &RetainedPublicationError::<TestDimension>::Writer(
+                RetainedWriterError::AccountPoisoned(poisoned)
+            )
+        ));
+    }
+
+    #[test]
+    fn builder_panic_retains_physical_and_operation_charges_fail_closed() {
+        let factory = test_factory();
+        let account = test_account(&factory);
+        let mut assembly = test_operation(&account, u64::MAX)
+            .try_publication_assembly(test_publication_plan(1, 1))
+            .expect("builder-panic assembly");
+        let ledger = assembly.raw.test_ledger_probe();
+        let before_active = ledger.active_reservations();
+        let before_live = ledger.current_live_bytes();
+        let before_physical = account.snapshot();
+
+        let error = assembly
+            .try_retain_canonical_sequence(
+                SequencePlan::<u8>::new(1).expect("sequence plan"),
+                TestTag,
+                |_writer| -> Result<(), StoreBuildError> {
+                    panic!("contained concrete builder panic")
+                },
+            )
+            .expect_err("builder panic must reach the raw fatal containment seam");
+
+        assert!(matches!(error, StoreRuntimeError::BuilderPanicked));
+        assert!(ledger.active_reservations() > before_active);
+        assert!(ledger.current_live_bytes() > before_live);
+        let after_physical = account.snapshot();
+        assert!(after_physical.live_retained_bytes() > before_physical.live_retained_bytes());
+        assert!(
+            after_physical.live_retained_allocations()
+                > before_physical.live_retained_allocations()
+        );
+        assert_eq!(
+            after_physical
+                .first_poison_evidence()
+                .map(crate::AccountPoisonEvidence::reason),
+            Some(crate::AccountPoisonReason::RetainedBuilderPanicked)
+        );
+        assert!(matches!(
+            assembly.prepare_minimal_fallback(),
+            Err(StorePrepareError::FinalizationContainment(cause))
+                if cause.reason() == crate::AccountPoisonReason::RetainedBuilderPanicked
+        ));
+
+        drop(account);
+        assert_eq!(factory.snapshot().live_accounts(), 1);
+    }
+
+    #[test]
+    fn concrete_builder_callbacks_use_only_the_raw_fatal_panic_boundary() {
+        let source = include_str!("concrete_store.rs");
+        let start = source
+            .find("fn finish_scoped_writer<Writer>(")
+            .expect("scoped-writer helper");
+        let end = source[start..]
+            .find("\nenum SequenceStorage")
+            .map(|offset| start + offset)
+            .expect("scoped-writer helper boundary");
+        let helper = &source[start..end];
+
+        assert!(helper.contains("build(&mut writer)?;"));
+        for forbidden in ["catch_unwind", "builder_panicked", "BuilderPanicked"] {
+            assert!(
+                !helper.contains(forbidden),
+                "concrete builder helper must not recover fatal panic token `{forbidden}`"
+            );
+        }
+    }
+
+    #[test]
+    fn clean_membership_rejection_releases_storage_and_attribution_once() {
+        let factory = test_factory();
+        let account = test_account(&factory);
+        let mut assembly = test_operation(&account, u64::MAX)
+            .try_publication_assembly(test_publication_plan(1, 1))
+            .expect("clean membership rollback assembly");
+        let ledger = assembly.raw.test_ledger_probe();
+        let before_active = ledger.active_reservations();
+        let before_live = ledger.current_live_bytes();
+        let before_physical = account.snapshot();
+        let before_faults = account
+            .test_unverified_drop_count()
+            .expect("account fault counter");
+
+        test_fail_next_membership_assignment();
+        let error = assembly
+            .try_retain_canonical_sequence(
+                SequencePlan::<u8>::new(1).expect("sequence plan"),
+                TestTag,
+                |writer| writer.push(7),
+            )
+            .expect_err("membership invariant must reject the new block");
+
+        assert!(matches!(error, StoreRuntimeError::OwnershipUnverified));
+        assert_eq!(ledger.active_reservations(), before_active);
+        assert_eq!(ledger.current_live_bytes(), before_live);
+        let after_physical = account.snapshot();
+        assert_eq!(
+            after_physical.live_retained_bytes(),
+            before_physical.live_retained_bytes()
+        );
+        assert_eq!(
+            after_physical.live_retained_allocations(),
+            before_physical.live_retained_allocations()
+        );
+        assert_eq!(
+            account.test_unverified_drop_count(),
+            Some(before_faults + 1)
+        );
+        assert!(matches!(
+            assembly.try_retain_outcome_evidence_sequence(
+                SequencePlan::<u8>::new(1).expect("sequence plan"),
+                TestTag,
+                |writer| writer.push(8),
+            ),
+            Err(StoreRuntimeError::FallbackOnly)
+        ));
     }
 
     #[test]
@@ -4284,16 +4395,44 @@ mod tests {
         let result = validated.try_prepare(test_final_progress());
         assert!(matches!(
             result,
-            Err(StorePrepareError::StorageDropUnverified)
+            Err(StorePrepareError::FinalizationContainment(cause))
+                if cause.reason() == crate::AccountPoisonReason::RetainedStorageReleaseUnverified
         ));
         assert!(
             account
                 .test_unverified_drop_count()
                 .is_some_and(|count| count > before_unverified)
         );
-        assert_eq!(ledger.active_reservations(), before_active);
-        assert_eq!(ledger.current_live_bytes(), before_live);
-        assert_eq!(account.snapshot(), before_physical);
+        assert_eq!(before_active - ledger.active_reservations(), 3);
+        assert!(ledger.active_reservations() > 0);
+        assert!(ledger.current_live_bytes() > 0);
+        assert!(ledger.current_live_bytes() < before_live);
+        let after_physical = account.snapshot();
+        assert!(after_physical.live_retained_bytes() > 0);
+        assert!(after_physical.live_retained_bytes() < before_physical.live_retained_bytes());
+        assert!(after_physical.live_retained_allocations() > 0);
+        assert!(
+            after_physical.live_retained_allocations()
+                < before_physical.live_retained_allocations()
+        );
+        assert_eq!(
+            after_physical.total_admitted_retained_bytes(),
+            before_physical.total_admitted_retained_bytes()
+        );
+        assert_eq!(
+            after_physical.total_admitted_retained_allocations(),
+            before_physical.total_admitted_retained_allocations()
+        );
+        assert!(after_physical.poisoned());
+        assert!(after_physical.poison_event_count() > 0);
+        assert!(after_physical.poison_event_count_exact());
+        assert!(after_physical.poison_event_domain_valid());
+        assert_eq!(
+            after_physical
+                .first_poison_evidence()
+                .map(|evidence| evidence.reason()),
+            Some(crate::AccountPoisonReason::RetainedStorageReleaseUnverified)
+        );
 
         drop(account);
         assert_eq!(factory.snapshot().live_accounts(), 1);
