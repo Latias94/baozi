@@ -21,6 +21,7 @@ fn retained_production_source() -> String {
     [
         retained_root_production_source(),
         include_str!("account.rs"),
+        include_str!("block_table.rs"),
         include_str!("evidence.rs"),
         include_str!("final_owner.rs"),
         include_str!("ownership.rs"),
@@ -33,6 +34,7 @@ fn retained_non_final_owner_production_source() -> String {
     [
         retained_root_production_source(),
         include_str!("account.rs"),
+        include_str!("block_table.rs"),
         include_str!("evidence.rs"),
         include_str!("ownership.rs"),
         include_str!("startup.rs"),
