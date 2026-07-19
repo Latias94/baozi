@@ -38,17 +38,17 @@ fn test_reset_startup_graph_probes(fail_at: Option<usize>) {
 }
 
 #[cfg(test)]
-fn test_startup_graph_allocation_entries() -> usize {
+pub(crate) fn test_startup_graph_allocation_entries() -> usize {
     STARTUP_GRAPH_ALLOCATION_ENTRIES.with(std::cell::Cell::get)
 }
 
 #[cfg(test)]
-fn test_startup_graph_storage_releases() -> usize {
+pub(crate) fn test_startup_graph_storage_releases() -> usize {
     STARTUP_GRAPH_STORAGE_RELEASES.with(std::cell::Cell::get)
 }
 
 #[cfg(test)]
-fn test_startup_graph_ledger_release_locks() -> usize {
+pub(crate) fn test_startup_graph_ledger_release_locks() -> usize {
     STARTUP_GRAPH_LEDGER_RELEASE_LOCKS.with(std::cell::Cell::get)
 }
 
@@ -261,6 +261,13 @@ where
     P: Copy + Ord,
     D: Copy + Ord,
 {
+    pub(crate) const fn retained_bytes(&self) -> [u64; 2] {
+        [
+            self.parts.retained_attributions[0].bytes,
+            self.parts.retained_attributions[1].bytes,
+        ]
+    }
+
     pub(crate) fn into_parts(self) -> (LedgerLimits<D>, StartupLedgerPlanParts<O, P, D>) {
         (self.limits, self.parts)
     }

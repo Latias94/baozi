@@ -689,11 +689,17 @@ fn startup_uses_two_sequential_account_locks() {
 }
 
 #[test]
-fn startup_rail_has_no_ledger_allocation_or_legacy_admission_authority() {
+fn startup_cross_plane_rail_has_one_qualified_ledger_path_and_no_legacy_authority() {
     let source = include_str!("../startup.rs");
+    assert!(source.contains("plan: StartupCrossPlanePlan<O, P, D>"));
+    assert_eq!(
+        source
+            .matches(".try_admit_startup_attribution_graph(parts)")
+            .count(),
+        1
+    );
+    assert!(source.contains("struct StartupGraphPreholdAuthority<"));
     for forbidden in [
-        "Ledger",
-        "StartupAttributionGraph",
         "allocator",
         "try_reserve",
         "AdmissionLease",

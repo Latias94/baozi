@@ -12,7 +12,13 @@ mod startup;
 )]
 pub(crate) use startup::{
     StartupAccountShareEnvelope, StartupAccountShareStep, StartupAttributionBatchPlans,
-    StartupLedgerPlan, StartupLedgerPlanParts, StartupRetainedAttribution,
+    StartupAttributionGraph, StartupLedgerPlan, StartupLedgerPlanParts, StartupRetainedAttribution,
+};
+
+#[cfg(test)]
+pub(crate) use startup::{
+    test_startup_graph_allocation_entries, test_startup_graph_ledger_release_locks,
+    test_startup_graph_storage_releases,
 };
 
 #[cfg(test)]
