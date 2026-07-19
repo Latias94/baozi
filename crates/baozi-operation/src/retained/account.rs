@@ -1,5 +1,117 @@
-use super::{CounterLimits, CounterState};
 use std::fmt;
+use std::sync::{Mutex, MutexGuard};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct AdmissionCharge {
+    pub(super) bytes: u64,
+    pub(super) allocations: u64,
+}
+
+impl AdmissionCharge {
+    pub(super) const fn new(bytes: u64, allocations: u64) -> Self {
+        Self { bytes, allocations }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct CounterLimits {
+    pub(super) bytes: u64,
+    pub(super) allocations: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(super) struct CounterState {
+    pub(super) live_bytes: u64,
+    pub(super) live_allocations: u64,
+    pub(super) peak_bytes: u64,
+    pub(super) peak_allocations: u64,
+    pub(super) total_admitted_bytes: u64,
+    pub(super) total_admitted_allocations: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum AdmissionError {
+    AccountingOverflow,
+    ByteLimitExceeded { requested: u64, limit: u64 },
+    AllocationLimitExceeded { requested: u64, limit: u64 },
+}
+
+pub(super) fn lock_recovering_poison<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    match mutex.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
+pub(super) fn try_admit(
+    counters: &Mutex<CounterState>,
+    limits: CounterLimits,
+    charge: AdmissionCharge,
+) -> Result<(), AdmissionError> {
+    let mut counters = lock_recovering_poison(counters);
+    try_admit_locked(&mut counters, limits, charge)
+}
+
+pub(super) fn try_admit_locked(
+    counters: &mut CounterState,
+    limits: CounterLimits,
+    charge: AdmissionCharge,
+) -> Result<(), AdmissionError> {
+    let live_bytes = counters
+        .live_bytes
+        .checked_add(charge.bytes)
+        .ok_or(AdmissionError::AccountingOverflow)?;
+    let live_allocations = counters
+        .live_allocations
+        .checked_add(charge.allocations)
+        .ok_or(AdmissionError::AccountingOverflow)?;
+    if live_bytes > limits.bytes {
+        return Err(AdmissionError::ByteLimitExceeded {
+            requested: live_bytes,
+            limit: limits.bytes,
+        });
+    }
+    if live_allocations > limits.allocations {
+        return Err(AdmissionError::AllocationLimitExceeded {
+            requested: live_allocations,
+            limit: limits.allocations,
+        });
+    }
+
+    let total_admitted_bytes = counters
+        .total_admitted_bytes
+        .checked_add(charge.bytes)
+        .ok_or(AdmissionError::AccountingOverflow)?;
+    let total_admitted_allocations = counters
+        .total_admitted_allocations
+        .checked_add(charge.allocations)
+        .ok_or(AdmissionError::AccountingOverflow)?;
+
+    counters.live_bytes = live_bytes;
+    counters.live_allocations = live_allocations;
+    counters.peak_bytes = counters.peak_bytes.max(live_bytes);
+    counters.peak_allocations = counters.peak_allocations.max(live_allocations);
+    counters.total_admitted_bytes = total_admitted_bytes;
+    counters.total_admitted_allocations = total_admitted_allocations;
+    Ok(())
+}
+
+pub(super) fn release(counters: &Mutex<CounterState>, charge: AdmissionCharge) {
+    let mut counters = lock_recovering_poison(counters);
+    let _released = release_locked(&mut counters, charge);
+}
+
+pub(super) fn release_locked(counters: &mut CounterState, charge: AdmissionCharge) -> bool {
+    let Some(live_bytes) = counters.live_bytes.checked_sub(charge.bytes) else {
+        return false;
+    };
+    let Some(live_allocations) = counters.live_allocations.checked_sub(charge.allocations) else {
+        return false;
+    };
+    counters.live_bytes = live_bytes;
+    counters.live_allocations = live_allocations;
+    true
+}
 
 /// Invalid explicit limits for a physical storage account or account factory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
