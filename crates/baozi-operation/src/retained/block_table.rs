@@ -1,5 +1,12 @@
 use super::account::{AccountPoisonReason, AdmissionCharge};
-use super::final_owner::unreachable_final_owner_state;
+use super::allocation::{
+    AccountPoisonEventWitness, FinalOwnerReleaseOutcome, PolicyRetainedAllocation,
+    RetainedAllocation, RetainedAllocationError, RetainedAllocationPlan, RetainedBuildFailureCode,
+    RetainedFinalOwnerInner, RetainedLease, RetainedMembership, RetainedMembershipDestination,
+    RetainedPayload, RetainedReleaseMode, RetainedSetId, RetainedValuePolicy,
+    RetainedValueReleaseOutcome, observe_retained_payload_drop_failure,
+};
+use super::final_owner::{FinalOwnerAllocation, unreachable_final_owner_state};
 use super::ownership::{
     RetainedStorageDropOutcome, drop_retained_allocation_before_attribution,
     finish_pre_attribution_cleanup, map_inherited_cleanup_error,
@@ -7,11 +14,8 @@ use super::ownership::{
 #[cfg(test)]
 use super::record_test_member_lookup;
 use super::{
-    FinalOwnerReleaseOutcome, PendingAccountActionAdmission, PhysicalStorageAccount,
-    RetainedAllocation, RetainedAllocationPlan, RetainedBatchLimits, RetainedBuildFailureCode,
-    RetainedHandleSharePlan, RetainedMembership, RetainedMembershipDestination, RetainedPayload,
-    RetainedPublicationError, RetainedReleaseMode, RetainedSetId, RetainedTableAllocation,
-    RetainedValueReleaseOutcome, RetainedWriterError, RetainedWriterPlan, TableRetainedPolicy,
+    PendingAccountActionAdmission, PhysicalStorageAccount, RetainedBatchLimits,
+    RetainedHandleSharePlan, RetainedPublicationError, RetainedWriterError, RetainedWriterPlan,
     map_account_action_admission_error, map_batch_error, try_admit_retained_share_work,
     try_admit_retained_share_work_before_physical,
 };
@@ -26,6 +30,75 @@ use std::marker::PhantomData;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
+
+pub(super) struct TableRetainedPolicy;
+
+pub(super) type RetainedTableAllocation<Block> =
+    PolicyRetainedAllocation<RetainedBlockTable<Block>, TableRetainedPolicy>;
+
+impl<Block>
+    FinalOwnerAllocation<
+        RetainedFinalOwnerInner<RetainedPayload<RetainedBlockTable<Block>>, TableRetainedPolicy>,
+    >
+{
+    pub(super) fn table_mut_during_construction(
+        &mut self,
+    ) -> Option<&mut RetainedBlockTable<Block>> {
+        let payload = self.inner_mut_if_unique()?.value.as_mut()?;
+        Some(&mut payload.value)
+    }
+}
+
+fn observe_retained_table_pre_forget<Block>(
+    payload: &RetainedPayload<RetainedBlockTable<Block>>,
+    lease: &RetainedLease,
+) -> AccountPoisonEventWitness {
+    let poisoned = observe_retained_payload_drop_failure(lease);
+    for member in &payload.value.members {
+        let _ = member
+            .allocation
+            .account()
+            .record_poison(AccountPoisonReason::RetainedStorageReleaseUnverified);
+    }
+    poisoned
+}
+
+impl<Block> RetainedValuePolicy<RetainedPayload<RetainedBlockTable<Block>>>
+    for TableRetainedPolicy
+{
+    fn observe_pre_forget(
+        payload: &RetainedPayload<RetainedBlockTable<Block>>,
+        lease: &RetainedLease,
+    ) -> AccountPoisonEventWitness {
+        observe_retained_table_pre_forget(payload, lease)
+    }
+
+    fn release(
+        payload: RetainedPayload<RetainedBlockTable<Block>>,
+        mode: RetainedReleaseMode,
+    ) -> RetainedValueReleaseOutcome {
+        release_retained_table_payload(payload, mode)
+    }
+}
+
+impl<Block> PolicyRetainedAllocation<RetainedBlockTable<Block>, TableRetainedPolicy> {
+    pub(super) fn table_mut_during_construction(
+        &mut self,
+    ) -> Option<&mut RetainedBlockTable<Block>> {
+        self.inner.table_mut_during_construction()
+    }
+}
+
+impl PhysicalStorageAccount {
+    fn checked_retained_table_charge<Block>(
+        &self,
+        plan: RetainedAllocationPlan,
+    ) -> Result<AdmissionCharge, RetainedAllocationError> {
+        self.checked_retained_charge_with_policy::<RetainedBlockTable<Block>, TableRetainedPolicy>(
+            plan,
+        )
+    }
+}
 
 /// One destination's fixed block capacity and ledger placement.
 ///

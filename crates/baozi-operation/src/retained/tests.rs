@@ -21,6 +21,7 @@ fn retained_production_source() -> String {
     [
         retained_root_production_source(),
         include_str!("account.rs"),
+        include_str!("allocation.rs"),
         include_str!("block_table.rs"),
         include_str!("evidence.rs"),
         include_str!("final_owner.rs"),
@@ -30,10 +31,27 @@ fn retained_production_source() -> String {
     .join("\n")
 }
 
+#[test]
+fn allocation_module_remains_table_agnostic() {
+    let source = include_str!("allocation.rs");
+    for forbidden in [
+        "RetainedBlockTable",
+        "block_table",
+        "TableRetainedPolicy",
+        "RetainedTableAllocation",
+    ] {
+        assert!(
+            !source.contains(forbidden),
+            "allocation module must not depend on {forbidden}"
+        );
+    }
+}
+
 fn retained_non_final_owner_production_source() -> String {
     [
         retained_root_production_source(),
         include_str!("account.rs"),
+        include_str!("allocation.rs"),
         include_str!("block_table.rs"),
         include_str!("evidence.rs"),
         include_str!("ownership.rs"),
@@ -692,7 +710,11 @@ fn generic_retained_authority_remains_crate_private() {
             "raw physical mutator `{method}` must have one implementation"
         );
         assert!(
-            signatures[0].trim_start().starts_with(&needle),
+            matches!(
+                signatures[0].trim_start(),
+                signature if signature.starts_with(&needle)
+                    || signature.starts_with(&format!("pub(super) {needle}"))
+            ),
             "raw physical mutator `{method}` escaped the retained module: {}",
             signatures[0]
         );
@@ -707,7 +729,7 @@ fn generic_retained_authority_remains_crate_private() {
             .zip(candidate.lines().skip(1))
             .filter(|(attribute, signature)| {
                 attribute.trim_start() == test_attribute.as_str()
-                    && *signature == "    fn try_retain_with<T>("
+                    && *signature == "    pub(super) fn try_retain_with<T>("
             })
             .count()
     };
