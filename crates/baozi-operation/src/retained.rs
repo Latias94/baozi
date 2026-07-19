@@ -31,7 +31,10 @@ use account::{
     AdmissionCharge, AdmissionError, CounterState, lock_recovering_poison,
     quarantined_account_reason, release, release_locked, try_admit, try_admit_locked,
 };
-pub(crate) use evidence::PublishedDimensionSnapshot;
+pub(crate) use evidence::{
+    PreparationFailureClass, PreparationFailureCode, PublishedDimensionSnapshot,
+    TerminalEvidenceKey, TerminalEvidenceKeySeal,
+};
 use evidence::{PublicationDimensionCell, PublicationEvidenceCells};
 use final_owner::{
     FinalOwnerAllocation, FinalOwnerAllocationError, FinalOwnerInnerDrop,
@@ -9102,40 +9105,7 @@ where
     dead_code,
     reason = "crate-private until the U4 canonical consumers switch atomically"
 )]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u8)]
-pub(crate) enum PreparationFailureClass {
-    Requested,
-    Control,
-    ProductGraph,
-    Ledger,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct PreparationFailureCode {
-    class: PreparationFailureClass,
-    code: u32,
-}
-
-#[allow(
-    dead_code,
-    reason = "crate-private until the U4 canonical consumers switch atomically"
-)]
 impl PreparationFailureCode {
-    pub const fn domain(code: u32) -> Self {
-        Self {
-            class: PreparationFailureClass::Requested,
-            code,
-        }
-    }
-
-    const fn requested() -> Self {
-        Self {
-            class: PreparationFailureClass::Requested,
-            code: 0,
-        }
-    }
-
     fn from_control(cause: &ControlCause) -> Self {
         let code = match cause {
             ControlCause::Cancelled { .. } => 1,
@@ -9145,10 +9115,7 @@ impl PreparationFailureCode {
             ControlCause::InvalidProgress { .. } => 5,
             ControlCause::ProgressStorage { .. } => 6,
         };
-        Self {
-            class: PreparationFailureClass::Control,
-            code,
-        }
+        Self::control(code)
     }
 
     const fn from_closure_validation(cause: RetainedClosureValidationError) -> Self {
@@ -9159,25 +9126,7 @@ impl PreparationFailureCode {
             RetainedClosureValidationError::Rejected => 4,
             RetainedClosureValidationError::Panicked => 5,
         };
-        Self {
-            class: PreparationFailureClass::ProductGraph,
-            code,
-        }
-    }
-
-    const fn ledger() -> Self {
-        Self {
-            class: PreparationFailureClass::Ledger,
-            code: 1,
-        }
-    }
-
-    pub const fn class(self) -> PreparationFailureClass {
-        self.class
-    }
-
-    pub const fn code(self) -> u32 {
-        self.code
+        Self::product_graph(code)
     }
 }
 

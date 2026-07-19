@@ -1731,6 +1731,10 @@ impl std::error::Error for StoreKeyDomainCreateError {}
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct StorePhaseKey(NonZeroU128);
 
+impl crate::retained::TerminalEvidenceKeySeal for StorePhaseKey {}
+
+impl crate::retained::TerminalEvidenceKey for StorePhaseKey {}
+
 impl StorePhaseKey {
     /// Returns the host-normalized local identifier without exposing the process-local brand.
     pub const fn local_id(self) -> NonZeroU32 {
@@ -1758,6 +1762,10 @@ impl fmt::Debug for StorePhaseKey {
 #[repr(transparent)]
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct StoreDimensionKey(NonZeroU128);
+
+impl crate::retained::TerminalEvidenceKeySeal for StoreDimensionKey {}
+
+impl crate::retained::TerminalEvidenceKey for StoreDimensionKey {}
 
 impl StoreDimensionKey {
     /// Returns the host-normalized local identifier without exposing the process-local brand.

@@ -3780,6 +3780,17 @@ where
 }
 
 /// Immutable evidence for one accounting dimension.
+pub(crate) struct DimensionSnapshotScalars {
+    pub(crate) attempted: u64,
+    pub(crate) consumed: u64,
+    pub(crate) current_live_bytes: u64,
+    pub(crate) peak_live_bytes: u64,
+    pub(crate) pending_publication: u64,
+    pub(crate) committed: u64,
+    pub(crate) committed_canonical_output: u64,
+    pub(crate) published_outcome_evidence: u64,
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct DimensionSnapshot {
     attempted: u64,
@@ -3793,6 +3804,19 @@ pub struct DimensionSnapshot {
 }
 
 impl DimensionSnapshot {
+    pub(crate) const fn from_terminal_evidence(values: DimensionSnapshotScalars) -> Self {
+        Self {
+            attempted: values.attempted,
+            consumed: values.consumed,
+            current_live_bytes: values.current_live_bytes,
+            peak_live_bytes: values.peak_live_bytes,
+            pending_publication: values.pending_publication,
+            committed: values.committed,
+            committed_canonical_output: values.committed_canonical_output,
+            published_outcome_evidence: values.published_outcome_evidence,
+        }
+    }
+
     /// Returns cumulative attempted work.
     pub const fn attempted(&self) -> u64 {
         self.attempted
@@ -3842,6 +3866,16 @@ pub struct PhaseSnapshot {
 }
 
 impl PhaseSnapshot {
+    pub(crate) const fn from_terminal_evidence(
+        current_live_bytes: u64,
+        peak_live_bytes: u64,
+    ) -> Self {
+        Self {
+            current_live_bytes,
+            peak_live_bytes,
+        }
+    }
+
     /// Returns currently retained live bytes in this phase.
     pub const fn current_live_bytes(&self) -> u64 {
         self.current_live_bytes
