@@ -2,8 +2,8 @@ use super::account::AccountPoisonReason;
 use super::final_owner::unreachable_final_owner_state;
 use super::{
     AccountPoisonEventWitness, FinalOwnerReleaseOutcome, PhysicalStorageAccount,
-    PolicyRetainedAllocation, PublicationEvidenceCells, RetainedAllocation, RetainedPayload,
-    RetainedValuePolicy, RetainedWriterError, record_account_poison_event,
+    PolicyRetainedAllocation, RetainedAllocation, RetainedPayload, RetainedValuePolicy,
+    RetainedWriterError, TerminalLedgerEvidence, record_account_poison_event,
 };
 use crate::OperationOwner;
 use crate::control::discard_untrusted_panic_payload;
@@ -688,7 +688,7 @@ where
     D: Copy + Ord,
 {
     fallback: Option<DetachedRetainedPart<F>>,
-    evidence: Option<DetachedRetainedPart<PublicationEvidenceCells<D>>>,
+    evidence: Option<DetachedRetainedPart<TerminalLedgerEvidence<P, D>>>,
     batches: Option<FallbackBatchBaseline<O, P, D>>,
 }
 
@@ -714,7 +714,7 @@ where
         mut self,
     ) -> (
         DetachedRetainedPart<F>,
-        DetachedRetainedPart<PublicationEvidenceCells<D>>,
+        DetachedRetainedPart<TerminalLedgerEvidence<P, D>>,
         FallbackBatchBaseline<O, P, D>,
     ) {
         let fallback = match self.fallback.take() {
@@ -794,7 +794,7 @@ where
     #[cfg(test)]
     pub(super) fn test_evidence_allocation(
         &self,
-    ) -> &RetainedAllocation<PublicationEvidenceCells<D>> {
+    ) -> &RetainedAllocation<TerminalLedgerEvidence<P, D>> {
         match self.evidence.as_ref() {
             Some(evidence) => evidence.allocation(),
             None => unreachable_final_owner_state(),
@@ -925,8 +925,12 @@ where
     D: Copy + Ord,
 {
     fallback: Option<RetainedPart<F, OutcomeEvidenceDestination, O, P, D>>,
+    #[allow(
+        clippy::type_complexity,
+        reason = "the concrete linear owner type documents the exact evidence destination and ledger brand"
+    )]
     evidence:
-        Option<RetainedPart<PublicationEvidenceCells<D>, OutcomeEvidenceDestination, O, P, D>>,
+        Option<RetainedPart<TerminalLedgerEvidence<P, D>, OutcomeEvidenceDestination, O, P, D>>,
     canonical_assembly: Option<AttributionReservationBatch<O, P, D, CanonicalOutput>>,
     evidence_assembly: Option<AttributionReservationBatch<O, P, D, OutcomeEvidenceDestination>>,
 }
@@ -939,7 +943,7 @@ where
 {
     pub(super) fn from_complete(
         fallback: RetainedPart<F, OutcomeEvidenceDestination, O, P, D>,
-        evidence: RetainedPart<PublicationEvidenceCells<D>, OutcomeEvidenceDestination, O, P, D>,
+        evidence: RetainedPart<TerminalLedgerEvidence<P, D>, OutcomeEvidenceDestination, O, P, D>,
         canonical_assembly: AttributionReservationBatch<O, P, D, CanonicalOutput>,
         evidence_assembly: AttributionReservationBatch<O, P, D, OutcomeEvidenceDestination>,
     ) -> Self {

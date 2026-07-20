@@ -1049,10 +1049,11 @@ pub(crate) struct CachedDependencySnapshot {
 mod tests {
     use super::*;
     use crate::ledger::{
-        ImportCoordinator, ImportDimension, ImportLedgerPhase, ImportOperationControl,
-        import_ledger_limits,
+        ImportDimension, ImportLedgerPhase, ImportOperationControl, import_ledger_limits,
+        try_import_coordinator,
     };
     use crate::limits::ResourceLimits;
+    use baozi_operation::LedgerCause;
 
     fn indexed_identity(
         authority: &AuthorityDomain,
@@ -1109,7 +1110,8 @@ mod tests {
     }
 
     #[test]
-    fn dependency_cache_capacity_distinguishes_entry_and_index_ledger_evidence() {
+    fn dependency_cache_capacity_distinguishes_entry_and_index_ledger_evidence()
+    -> Result<(), LedgerCause<ImportDimension>> {
         let mut cache = DependencyCache::new();
         let plan = cache.capacity_plan().unwrap();
         let entry_envelope = plan
@@ -1122,10 +1124,10 @@ mod tests {
         assert!(index_envelope > 0);
 
         let limits = ResourceLimits::default();
-        let mut coordinator = ImportCoordinator::new(
+        let mut coordinator = try_import_coordinator(
             ImportOperationControl::default(),
             import_ledger_limits(&limits).unwrap(),
-        );
+        )?;
         let mut entry_reservation = coordinator
             .checkpoint()
             .reserve(
@@ -1199,6 +1201,7 @@ mod tests {
                 .current_live_bytes(),
             0
         );
+        Ok(())
     }
 
     #[test]
@@ -1303,12 +1306,13 @@ mod tests {
     }
 
     #[test]
-    fn dependency_cache_reuses_vacant_records_without_moving_live_indices() {
+    fn dependency_cache_reuses_vacant_records_without_moving_live_indices()
+    -> Result<(), LedgerCause<ImportDimension>> {
         let limits = ResourceLimits::default();
-        let mut coordinator = ImportCoordinator::new(
+        let mut coordinator = try_import_coordinator(
             ImportOperationControl::default(),
             import_ledger_limits(&limits).unwrap(),
-        );
+        )?;
         let authority = AuthorityDomain::new();
         let identities = (0..3)
             .map(|record_index| indexed_identity(&authority, "record", record_index))
@@ -1357,5 +1361,6 @@ mod tests {
         );
         assert_eq!(cache.get(&replacement).map(|(index, _)| index), Some(1));
         assert_eq!(cache.get(&identities[2]).map(|(index, _)| index), Some(2));
+        Ok(())
     }
 }

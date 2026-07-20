@@ -37,6 +37,13 @@ type PublicationBatchError = baozi_operation::PublicationReservationBatchError<
 type PostProcessPendingPublication =
     PendingPublication<PostProcessOwner, PostProcessLedgerPhase, PostProcessDimension>;
 
+fn try_postprocess_coordinator(
+    control: PostProcessControl,
+    ledger_limits: LedgerLimits<PostProcessDimension>,
+) -> std::result::Result<Coordinator, LedgerCause<PostProcessDimension>> {
+    Coordinator::try_new(control, ledger_limits, &PostProcessLedgerPhase::ALL)
+}
+
 /// A currently implemented post-process transformation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PostProcessStep {
@@ -169,10 +176,11 @@ impl PostProcessPipeline {
         >,
     ) -> Result<PostProcessSuccess> {
         let ledger_limits = ledger_limits.map_err(PostProcessRunError::initialization)?;
+        let mut coordinator = try_postprocess_coordinator(control, ledger_limits)
+            .map_err(PostProcessRunError::coordinator_initialization)?;
         #[cfg(feature = "tracing")]
         let _span = tracing::info_span!("baozi.postprocess").entered();
 
-        let mut coordinator = Coordinator::new(control, ledger_limits);
         let outcome = self.execute(input, &mut coordinator);
 
         match outcome {
@@ -460,7 +468,7 @@ impl<'a> ExecutionState<'a> {
         checkpoint.poll().map_err(control_error)?;
         checkpoint
             .reserve(
-                PostProcessLedgerPhase::Transform,
+                PostProcessLedgerPhase::TransactionStaging,
                 PostProcessDimension::StagingBytes,
                 bytes,
             )
@@ -471,13 +479,13 @@ impl<'a> ExecutionState<'a> {
     fn begin_validation(&mut self) -> StepResult<()> {
         self.retained_output.ensure_slots(
             self.coordinator,
-            PostProcessLedgerPhase::Transform,
+            PostProcessLedgerPhase::TransactionStaging,
             2,
             "publication",
             "publication reservation evidence",
         )?;
         self.retained_output
-            .transfer_all(self.coordinator, PostProcessLedgerPhase::Validate)?;
+            .transfer_all(self.coordinator, PostProcessLedgerPhase::ValidationCommit)?;
         self.coordinator
             .report_progress(
                 PostProcessProgressPhase::Validate,
@@ -491,7 +499,7 @@ impl<'a> ExecutionState<'a> {
     fn ensure_output_slot(&mut self, step: PostProcessStep) -> StepResult<()> {
         self.retained_output.ensure_slots(
             self.coordinator,
-            PostProcessLedgerPhase::Transform,
+            PostProcessLedgerPhase::TransactionStaging,
             1,
             step.name(),
             "staging reservation evidence",
@@ -832,15 +840,15 @@ fn resize_or_reserve(
 fn reservation_class(kind: SceneReservationKind) -> (PostProcessLedgerPhase, PostProcessDimension) {
     match kind {
         SceneReservationKind::EditCandidate => (
-            PostProcessLedgerPhase::Transform,
+            PostProcessLedgerPhase::TransactionStaging,
             PostProcessDimension::StagingBytes,
         ),
         SceneReservationKind::ValidationScratch => (
-            PostProcessLedgerPhase::Validate,
+            PostProcessLedgerPhase::ValidationCommit,
             PostProcessDimension::StagingBytes,
         ),
         SceneReservationKind::CanonicalOutput => (
-            PostProcessLedgerPhase::Validate,
+            PostProcessLedgerPhase::ValidationCommit,
             PostProcessDimension::CanonicalBytes,
         ),
     }
@@ -1392,6 +1400,7 @@ fn dot_vec3(a: Vec3, b: Vec3) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::PostProcessInitializationError;
     use baozi_core::{SceneBuilder, validate_scene};
     use baozi_operation::{LedgerEvidenceError, LedgerEvidencePurpose, LedgerLimitsError};
     use std::error::Error;
@@ -1400,6 +1409,16 @@ mod tests {
         Arc,
         atomic::{AtomicUsize, Ordering},
     };
+
+    fn test_coordinator(
+        limits: PostProcessLimits,
+    ) -> std::result::Result<Coordinator, PostProcessInitializationError> {
+        let ledger_limits = limits
+            .try_ledger_limits()
+            .map_err(PostProcessInitializationError::ledger_limits)?;
+        try_postprocess_coordinator(PostProcessControl::default(), ledger_limits)
+            .map_err(PostProcessInitializationError::coordinator)
+    }
 
     #[test]
     #[allow(
@@ -1438,9 +1457,14 @@ mod tests {
 
         assert!(matches!(
             &error,
-            PostProcessRunError::Initialization { source } if source == &injected
+            PostProcessRunError::Initialization {
+                source: PostProcessInitializationError::LedgerLimits { source }
+            } if source == &injected
         ));
-        let limits_source = Error::source(&error)
+        let initialization_source = Error::source(&error)
+            .and_then(|source| source.downcast_ref::<PostProcessInitializationError>())
+            .expect("run error must retain the typed initialization source");
+        let limits_source = Error::source(initialization_source)
             .and_then(|source| source.downcast_ref::<LedgerLimitsError<PostProcessDimension>>())
             .expect("run error must retain the typed limits source");
         assert_eq!(limits_source, &injected);
@@ -1463,18 +1487,14 @@ mod tests {
     }
 
     #[test]
-    fn finalization_invariant_preserves_primary_error_and_exact_snapshot() {
+    fn finalization_invariant_preserves_primary_error_and_exact_snapshot()
+    -> std::result::Result<(), PostProcessInitializationError> {
         let limits = PostProcessLimits::new(8, 64);
-        let mut coordinator = Coordinator::new(
-            PostProcessControl::default(),
-            limits
-                .try_ledger_limits()
-                .expect("test ledger limits should freeze"),
-        );
+        let mut coordinator = test_coordinator(limits)?;
         let reservation = coordinator
             .checkpoint()
             .reserve(
-                PostProcessLedgerPhase::Transform,
+                PostProcessLedgerPhase::TransactionStaging,
                 PostProcessDimension::StagingBytes,
                 32,
             )
@@ -1527,17 +1547,14 @@ mod tests {
         ));
         assert_eq!(snapshot.current_live_bytes(), 32);
         drop(reservation);
+        Ok(())
     }
 
     #[test]
-    fn rejected_scene_reservation_resize_preserves_the_live_token() {
+    fn rejected_scene_reservation_resize_preserves_the_live_token()
+    -> std::result::Result<(), PostProcessInitializationError> {
         let limits = PostProcessLimits::new(8, 8);
-        let mut coordinator = Coordinator::new(
-            PostProcessControl::default(),
-            limits
-                .try_ledger_limits()
-                .expect("test ledger limits should freeze"),
-        );
+        let mut coordinator = test_coordinator(limits)?;
         let mut state = ExecutionState::new(&mut coordinator);
         let mut reservation = state
             .reserve(SceneReservationKind::EditCandidate, 8)
@@ -1571,17 +1588,14 @@ mod tests {
             .expect("dropping the preserved token should finalize cleanly");
         assert_eq!(ledger.current_live_bytes(), 0);
         assert_eq!(ledger.peak_live_bytes(), 8);
+        Ok(())
     }
 
     #[test]
-    fn zero_byte_scene_reservation_retains_owner_capability() {
+    fn zero_byte_scene_reservation_retains_owner_capability()
+    -> std::result::Result<(), PostProcessInitializationError> {
         let limits = PostProcessLimits::new(8, 1024 * 1024);
-        let mut owner_coordinator = Coordinator::new(
-            PostProcessControl::default(),
-            limits
-                .try_ledger_limits()
-                .expect("owner ledger limits should freeze"),
-        );
+        let mut owner_coordinator = test_coordinator(limits)?;
         let mut owner_state = ExecutionState::new(&mut owner_coordinator);
         let mut reservation = owner_state
             .reserve(SceneReservationKind::EditCandidate, 0)
@@ -1609,12 +1623,7 @@ mod tests {
             .expect("wrong-kind rejection must preserve the owner capability");
         drop(owner_state);
 
-        let mut foreign_coordinator = Coordinator::new(
-            PostProcessControl::default(),
-            limits
-                .try_ledger_limits()
-                .expect("foreign ledger limits should freeze"),
-        );
+        let mut foreign_coordinator = test_coordinator(limits)?;
         let mut foreign_state = ExecutionState::new(&mut foreign_coordinator);
         let validation_error = foreign_state
             .validate_reservation(&reservation, SceneReservationKind::EditCandidate)
@@ -1645,7 +1654,7 @@ mod tests {
             .retained_output
             .ensure_slots(
                 owner_state.coordinator,
-                PostProcessLedgerPhase::Validate,
+                PostProcessLedgerPhase::ValidationCommit,
                 3,
                 "test",
                 "zero-byte owner capability evidence",
@@ -1656,7 +1665,7 @@ mod tests {
                 .coordinator
                 .checkpoint()
                 .reserve(
-                    PostProcessLedgerPhase::Validate,
+                    PostProcessLedgerPhase::ValidationCommit,
                     PostProcessDimension::CanonicalBytes,
                     0,
                 )
@@ -1706,17 +1715,14 @@ mod tests {
                 .current_live_bytes(),
             0
         );
+        Ok(())
     }
 
     #[test]
-    fn zero_byte_scene_reservation_completes_publication() {
+    fn zero_byte_scene_reservation_completes_publication()
+    -> std::result::Result<(), PostProcessInitializationError> {
         let limits = PostProcessLimits::new(8, 1024 * 1024);
-        let mut coordinator = Coordinator::new(
-            PostProcessControl::default(),
-            limits
-                .try_ledger_limits()
-                .expect("test ledger limits should freeze"),
-        );
+        let mut coordinator = test_coordinator(limits)?;
         let mut state = ExecutionState::new(&mut coordinator);
         state
             .begin_transform()
@@ -1728,7 +1734,7 @@ mod tests {
             .retained_output
             .ensure_slots(
                 state.coordinator,
-                PostProcessLedgerPhase::Transform,
+                PostProcessLedgerPhase::TransactionStaging,
                 3,
                 "test",
                 "zero-byte publication capabilities",
@@ -1739,7 +1745,7 @@ mod tests {
                 .coordinator
                 .checkpoint()
                 .reserve(
-                    PostProcessLedgerPhase::Transform,
+                    PostProcessLedgerPhase::TransactionStaging,
                     PostProcessDimension::StagingBytes,
                     0,
                 )
@@ -1798,25 +1804,22 @@ mod tests {
                 .committed(),
             0
         );
+        Ok(())
     }
 
     #[test]
-    fn rejected_reservation_list_growth_keeps_previous_capacity_coverage() {
+    fn rejected_reservation_list_growth_keeps_previous_capacity_coverage()
+    -> std::result::Result<(), PostProcessInitializationError> {
         let initial_bytes = CapacityPlan::for_type::<BufferReservation>(0, 0, 4)
             .and_then(CapacityPlan::envelope_delta_bytes)
             .expect("test evidence capacity should be representable");
         let limits = PostProcessLimits::new(8, initial_bytes);
-        let mut coordinator = Coordinator::new(
-            PostProcessControl::default(),
-            limits
-                .try_ledger_limits()
-                .expect("test ledger limits should freeze"),
-        );
+        let mut coordinator = test_coordinator(limits)?;
         let mut reservations = ReservationList::new();
         reservations
             .ensure_slots(
                 &mut coordinator,
-                PostProcessLedgerPhase::Transform,
+                PostProcessLedgerPhase::TransactionStaging,
                 1,
                 "test",
                 "reservation evidence",
@@ -1832,7 +1835,7 @@ mod tests {
         let error = reservations
             .ensure_slots(
                 &mut coordinator,
-                PostProcessLedgerPhase::Transform,
+                PostProcessLedgerPhase::TransactionStaging,
                 original_capacity + 1,
                 "test",
                 "reservation evidence",
@@ -1856,17 +1859,14 @@ mod tests {
             .finish()
             .expect("dropping capacity evidence should finalize cleanly");
         assert_eq!(ledger.current_live_bytes(), 0);
+        Ok(())
     }
 
     #[test]
-    fn rejected_scene_transition_remains_in_the_callers_reservation() {
+    fn rejected_scene_transition_remains_in_the_callers_reservation()
+    -> std::result::Result<(), PostProcessInitializationError> {
         let limits = PostProcessLimits::new(8, 1024 * 1024);
-        let mut coordinator = Coordinator::new(
-            PostProcessControl::default(),
-            limits
-                .try_ledger_limits()
-                .expect("test ledger limits should freeze"),
-        );
+        let mut coordinator = test_coordinator(limits)?;
         let mut state = ExecutionState::new(&mut coordinator);
         let mut reservation = state
             .reserve(SceneReservationKind::EditCandidate, 8)
@@ -1900,27 +1900,19 @@ mod tests {
             .expect("dropping rollback evidence should finalize cleanly");
         assert_eq!(ledger.current_live_bytes(), 0);
         assert_eq!(ledger.peak_live_bytes(), 8);
+        Ok(())
     }
 
     #[test]
-    fn failed_composite_scene_transition_restores_every_owner_and_can_retry() {
+    fn failed_composite_scene_transition_restores_every_owner_and_can_retry()
+    -> std::result::Result<(), PostProcessInitializationError> {
         let limits = PostProcessLimits::new(8, 1024 * 1024);
-        let mut coordinator = Coordinator::new(
-            PostProcessControl::default(),
-            limits
-                .try_ledger_limits()
-                .expect("test ledger limits should freeze"),
-        );
-        let mut foreign_coordinator = Coordinator::new(
-            PostProcessControl::default(),
-            limits
-                .try_ledger_limits()
-                .expect("foreign ledger limits should freeze"),
-        );
+        let mut coordinator = test_coordinator(limits)?;
+        let mut foreign_coordinator = test_coordinator(limits)?;
         let foreign = foreign_coordinator
             .checkpoint()
             .reserve(
-                PostProcessLedgerPhase::Validate,
+                PostProcessLedgerPhase::ValidationCommit,
                 PostProcessDimension::StagingBytes,
                 1,
             )
@@ -1933,7 +1925,7 @@ mod tests {
             .retained_output
             .ensure_slots(
                 state.coordinator,
-                PostProcessLedgerPhase::Validate,
+                PostProcessLedgerPhase::ValidationCommit,
                 3,
                 "test",
                 "composite transition evidence",
@@ -2004,5 +1996,6 @@ mod tests {
             .finish()
             .expect("dropping the foreign reservation should finalize cleanly");
         assert_eq!(foreign_ledger.current_live_bytes(), 0);
+        Ok(())
     }
 }

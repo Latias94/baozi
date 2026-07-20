@@ -184,7 +184,7 @@ fn cancellation_after_validation_does_not_publish_the_candidate() {
     assert!(
         failure
             .ledger()
-            .phase(PostProcessLedgerPhase::Validate)
+            .phase(PostProcessLedgerPhase::ValidationCommit)
             .is_some_and(|phase| phase.peak_live_bytes() > 0)
     );
 }
@@ -326,6 +326,42 @@ fn progress_is_monotonic_across_distinct_owner_phases() {
             assert!(right_completed >= left_completed);
         }
     }
+}
+
+#[test]
+fn success_snapshot_retains_the_complete_accounting_phase_catalog() {
+    let scene = scene_with_meshes([triangle_mesh()]);
+
+    let success = PostProcessPipeline::new([PostProcessStep::GenerateNormals])
+        .unwrap()
+        .run(&scene)
+        .unwrap();
+    let ledger = success.ledger();
+
+    assert_eq!(
+        ledger.phases().map(|(phase, _)| phase).collect::<Vec<_>>(),
+        PostProcessLedgerPhase::ALL
+    );
+    let plan_preflight = ledger
+        .phase(PostProcessLedgerPhase::PlanPreflight)
+        .expect("the frozen plan-preflight phase must remain queryable");
+    assert_eq!(plan_preflight.current_live_bytes(), 0);
+    assert_eq!(plan_preflight.peak_live_bytes(), 0);
+    assert!(
+        ledger
+            .phase(PostProcessLedgerPhase::TransactionStaging)
+            .is_some_and(|phase| phase.peak_live_bytes() > 0)
+    );
+    assert!(
+        ledger
+            .phase(PostProcessLedgerPhase::ValidationCommit)
+            .is_some_and(|phase| phase.peak_live_bytes() > 0)
+    );
+    assert!(
+        ledger
+            .phase(PostProcessLedgerPhase::OutcomeFinalization)
+            .is_some()
+    );
 }
 
 #[test]

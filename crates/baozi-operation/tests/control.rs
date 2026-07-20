@@ -195,10 +195,12 @@ impl ProgressObserver<Phase, Unit> for DropOnlyObserver {
 type Coordinator = OperationCoordinator<TestOwner, LedgerPhase, Phase, Unit, Dimension>;
 
 fn coordinator(control: OperationControl<Phase, Unit>) -> Coordinator {
-    Coordinator::new(
+    Coordinator::try_new(
         control,
         LedgerLimits::new(0, []).expect("empty control-only policy"),
+        &[],
     )
+    .expect("empty ledger phase catalog is complete for control-only operations")
 }
 
 fn run_parallel_progress_workers(
@@ -263,7 +265,8 @@ fn semantic_progress_capacity_obeys_the_evidence_limit_and_latches() {
         .expect("empty control-only policy")
         .try_with_evidence_byte_limit(0)
         .expect("empty policy retains no evidence");
-    let mut coordinator = Coordinator::new(OperationControl::default(), limits);
+    let mut coordinator = Coordinator::try_new(OperationControl::default(), limits, &[])
+        .expect("empty ledger phase catalog is complete for control-only operations");
 
     let error = coordinator
         .report_progress(Phase::Acquire, Unit::Bytes, 1, None)
@@ -292,7 +295,8 @@ fn semantic_progress_capacity_obeys_the_evidence_limit_and_latches() {
 fn semantic_progress_capacity_contributes_to_evidence_peak_then_releases() {
     let limits = LedgerLimits::new(0, []).expect("empty control-only policy");
     let frozen_evidence_bytes = limits.frozen_evidence_bytes();
-    let mut coordinator = Coordinator::new(OperationControl::default(), limits);
+    let mut coordinator = Coordinator::try_new(OperationControl::default(), limits, &[])
+        .expect("empty ledger phase catalog is complete for control-only operations");
 
     coordinator
         .report_progress(Phase::Acquire, Unit::Bytes, 1, None)

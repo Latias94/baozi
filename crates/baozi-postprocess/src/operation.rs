@@ -12,13 +12,20 @@ impl OperationOwner for PostProcessOwner {}
 /// Post-process live-capacity ownership phases.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum PostProcessLedgerPhase {
-    Transform,
-    Validate,
+    PlanPreflight,
+    TransactionStaging,
+    ValidationCommit,
+    OutcomeFinalization,
 }
 
 impl PostProcessLedgerPhase {
     /// Complete canonical accounting-phase vocabulary for one post-process operation.
-    pub const ALL: [Self; 2] = [Self::Transform, Self::Validate];
+    pub const ALL: [Self; 4] = [
+        Self::PlanPreflight,
+        Self::TransactionStaging,
+        Self::ValidationCommit,
+        Self::OutcomeFinalization,
+    ];
 }
 
 /// Transient observer phases, intentionally distinct from ledger phases.
@@ -143,8 +150,10 @@ mod tests {
     #[test]
     fn postprocess_ledger_phase_catalog_is_complete_unique_and_canonical() {
         let expected = [
-            PostProcessLedgerPhase::Transform,
-            PostProcessLedgerPhase::Validate,
+            PostProcessLedgerPhase::PlanPreflight,
+            PostProcessLedgerPhase::TransactionStaging,
+            PostProcessLedgerPhase::ValidationCommit,
+            PostProcessLedgerPhase::OutcomeFinalization,
         ];
 
         assert_eq!(PostProcessLedgerPhase::ALL, expected);

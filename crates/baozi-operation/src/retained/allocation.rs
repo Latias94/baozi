@@ -841,6 +841,8 @@ pub(crate) enum RetainedAllocationError {
     },
     Build(RetainedBuildFailureCode),
     BuilderPanicked,
+    /// A trusted retained payload constructor violated its prequalified shape contract.
+    ConstructionInvariantUnverified,
     AllocationFailed,
     ChargeReleaseUnverified,
 }
@@ -852,6 +854,7 @@ impl RetainedAllocationError {
         matches!(
             self,
             Self::BuilderPanicked
+                | Self::ConstructionInvariantUnverified
                 | Self::ChargeReleaseUnverified
                 | Self::AccountPoisonedWithRetainedCharge(_)
         )
@@ -888,6 +891,9 @@ impl fmt::Display for RetainedAllocationError {
             }
             Self::BuilderPanicked => formatter.write_str(
                 "retained payload constructor panicked; physical charge remains retained",
+            ),
+            Self::ConstructionInvariantUnverified => formatter.write_str(
+                "retained payload construction violated a qualified invariant; physical charge remains retained",
             ),
             Self::AllocationFailed => formatter.write_str("retained shared allocation failed"),
             Self::ChargeReleaseUnverified => formatter

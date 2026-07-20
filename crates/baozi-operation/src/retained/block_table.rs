@@ -98,6 +98,22 @@ impl PhysicalStorageAccount {
             plan,
         )
     }
+
+    #[cfg(test)]
+    pub(super) fn test_checked_retained_table_charge<Block>(
+        &self,
+        total_blocks: usize,
+    ) -> Result<AdmissionCharge, RetainedAllocationError> {
+        let member_capacity =
+            CapacityPlan::for_type::<RetainedBlockMember<Block>>(0, 0, total_blocks)
+                .map_err(|_| RetainedAllocationError::AccountingOverflow)?;
+        let nested_bytes = member_capacity
+            .envelope_delta_bytes()
+            .map_err(|_| RetainedAllocationError::AccountingOverflow)?;
+        let allocation = RetainedAllocationPlan::new(nested_bytes, u64::from(nested_bytes != 0))
+            .map_err(|_| RetainedAllocationError::AccountingOverflow)?;
+        self.checked_retained_table_charge::<Block>(allocation)
+    }
 }
 
 /// One destination's fixed block capacity and ledger placement.

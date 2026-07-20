@@ -35,6 +35,14 @@ enum TestPhase {
     Finalize,
 }
 
+const COMPLETE_TEST_PHASES: &[TestPhase] = &[
+    TestPhase::Read,
+    TestPhase::Decode,
+    TestPhase::Validate,
+    TestPhase::Publish,
+    TestPhase::Finalize,
+];
+
 impl TerminalEvidenceKeySeal for TestPhase {}
 
 impl TerminalEvidenceKey for TestPhase {}
@@ -48,7 +56,7 @@ impl TerminalEvidenceKeySeal for ShapeKey {}
 impl TerminalEvidenceKey for ShapeKey {}
 
 fn terminal_snapshot() -> LedgerSnapshot<TestPhase, TestDimension> {
-    let ledger = Ledger::<EvidenceOwner, TestPhase, TestDimension>::try_new_with_phase_catalog(
+    let ledger = Ledger::<EvidenceOwner, TestPhase, TestDimension>::try_new(
         test_limits(),
         &[TestPhase::Read, TestPhase::Decode],
     )
@@ -74,7 +82,8 @@ fn terminal_snapshot() -> LedgerSnapshot<TestPhase, TestDimension> {
 }
 
 fn test_ledger() -> Ledger<EvidenceOwner, TestPhase, TestDimension> {
-    Ledger::new(test_limits())
+    Ledger::try_new(test_limits(), COMPLETE_TEST_PHASES)
+        .expect("complete evidence test phase catalog")
 }
 
 fn test_limits() -> LedgerLimits<TestDimension> {
@@ -168,7 +177,7 @@ fn terminal_evidence_freezes_exact_header_cells_and_queries() {
 
 #[test]
 fn terminal_evidence_does_not_infer_completion_from_the_last_accounting_phase() {
-    let ledger = Ledger::<EvidenceOwner, TestPhase, TestDimension>::try_new_with_phase_catalog(
+    let ledger = Ledger::<EvidenceOwner, TestPhase, TestDimension>::try_new(
         test_limits(),
         &[TestPhase::Read, TestPhase::Decode],
     )
@@ -204,8 +213,8 @@ fn terminal_evidence_does_not_infer_completion_from_the_last_accounting_phase() 
 }
 
 #[test]
-fn terminal_evidence_preserves_completion_when_catalog_position_opposes_key_order() {
-    let ledger = Ledger::<EvidenceOwner, TestPhase, TestDimension>::try_new_with_phase_catalog(
+fn terminal_evidence_rejects_a_lifecycle_order_outside_its_canonical_key_catalog() {
+    let ledger = Ledger::<EvidenceOwner, TestPhase, TestDimension>::try_new(
         test_limits(),
         &[TestPhase::Decode, TestPhase::Read],
     )
@@ -222,29 +231,16 @@ fn terminal_evidence_preserves_completion_when_catalog_position_opposes_key_orde
             .phases()
             .map(|(phase, _)| phase)
             .collect::<Vec<_>>(),
-        vec![TestPhase::Read, TestPhase::Decode]
+        vec![TestPhase::Decode, TestPhase::Read]
     );
 
     let evidence = terminal_evidence();
-    evidence
-        .try_freeze_from(TerminalEvidenceCause::Success, &snapshot)
-        .expect("terminal evidence freezes");
-
     assert_eq!(
-        evidence
-            .header()
-            .expect("frozen header")
-            .last_completed_phase(),
-        Some(TestPhase::Read)
+        evidence.try_freeze_from(TerminalEvidenceCause::Success, &snapshot),
+        Err(TerminalEvidenceFreezeError::PhaseKeyMismatch { index: 0 }),
+        "retained terminal evidence accepts only its separately admitted canonical key catalog"
     );
-    assert_eq!(
-        evidence
-            .header
-            .last_completed_phase_ordinal_plus_one
-            .load(Ordering::Relaxed),
-        1,
-        "the stored header ordinal follows the validated key catalog, not state_position"
-    );
+    assert_evidence_cells_pristine(&evidence);
 }
 
 #[test]
@@ -415,7 +411,7 @@ fn nonterminal_phase_dimension_and_global_states_reject_before_any_cell_write() 
         .expect("interim phase snapshot fits");
     let phase_evidence = build_evidence(
         &[TestDimension::Bytes, TestDimension::Items],
-        &[TestPhase::Read],
+        COMPLETE_TEST_PHASES,
     );
     assert_eq!(
         phase_evidence.try_freeze_from(TerminalEvidenceCause::Success, &phase_snapshot),
@@ -440,7 +436,10 @@ fn nonterminal_phase_dimension_and_global_states_reject_before_any_cell_write() 
     let pending_snapshot = pending_ledger
         .try_snapshot()
         .expect("interim pending snapshot fits");
-    let pending_evidence = build_evidence(&[TestDimension::Bytes, TestDimension::Items], &[]);
+    let pending_evidence = build_evidence(
+        &[TestDimension::Bytes, TestDimension::Items],
+        COMPLETE_TEST_PHASES,
+    );
     assert_eq!(
         pending_evidence.try_freeze_from(TerminalEvidenceCause::Success, &pending_snapshot),
         Err(TerminalEvidenceFreezeError::NonTerminalDimensionState {
@@ -462,7 +461,7 @@ fn nonterminal_phase_dimension_and_global_states_reject_before_any_cell_write() 
         .expect("interim global snapshot fits");
     let global_evidence = build_evidence(
         &[TestDimension::Bytes, TestDimension::Items],
-        &[TestPhase::Read],
+        COMPLETE_TEST_PHASES,
     );
     assert_eq!(
         global_evidence.try_freeze_from(TerminalEvidenceCause::Success, &global_snapshot),

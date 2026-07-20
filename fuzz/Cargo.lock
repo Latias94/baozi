@@ -88,6 +88,10 @@ dependencies = [
 [[package]]
 name = "baozi-operation"
 version = "0.1.0"
+dependencies = [
+ "scopeguard",
+ "triomphe",
+]
 
 [[package]]
 name = "baozi-postprocess"
@@ -302,6 +306,12 @@ name = "r-efi"
 version = "6.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
+
+[[package]]
+name = "scopeguard"
+version = "1.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 
 [[package]]
 name = "serde"

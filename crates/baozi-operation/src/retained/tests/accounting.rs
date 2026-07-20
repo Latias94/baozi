@@ -619,9 +619,16 @@ fn admission_first_direct_fallback_ends_in_finalization_containment() {
     assert!(after_prepare.poison_event_count_exact());
     assert!(after_prepare.poison_event_domain_valid());
     assert_eq!(after_prepare.first_poison_evidence(), first_evidence);
-    assert_eq!(ledger.active_reservations(), active_before - 2);
-    assert!(ledger.current_live_bytes() > 0);
-    assert!(ledger.current_live_bytes() < live_before);
+    assert_eq!(ledger.active_reservations(), active_before);
+    assert_eq!(ledger.current_live_bytes(), live_before);
+    assert_eq!(
+        after_prepare.live_retained_bytes(),
+        before_prepare.live_retained_bytes()
+    );
+    assert_eq!(
+        after_prepare.live_retained_allocations(),
+        before_prepare.live_retained_allocations()
+    );
 }
 
 #[test]
@@ -871,6 +878,9 @@ fn primary_eligibility_first_capability_completes_after_later_account_poison() {
             RetainedSuccessValidation::Valid(validated) => validated,
             _ => panic!("primary eligibility candidate must validate"),
         };
+    let fallback_charge = account
+        .checked_retained_charge::<u32>(empty_plan())
+        .unwrap_or_else(|_| panic!("fallback charge must remain derivable from its admitted plan"));
     let eligibility_entered = StdArc::new(Barrier::new(2));
     let eligibility_resume = StdArc::new(Barrier::new(2));
     let worker_entered = StdArc::clone(&eligibility_entered);
@@ -890,7 +900,31 @@ fn primary_eligibility_first_capability_completes_after_later_account_poison() {
         .join()
         .unwrap_or_else(|_| panic!("primary eligibility worker must remain contained"))
         .unwrap_or_else(|_| panic!("primary eligibility preparation must complete"));
-    assert_eq!(account.snapshot(), poisoned);
+    let after_prepare = account.snapshot();
+    assert_eq!(
+        after_prepare
+            .live_retained_bytes()
+            .checked_add(fallback_charge.bytes),
+        Some(poisoned.live_retained_bytes())
+    );
+    assert_eq!(
+        after_prepare
+            .live_retained_allocations()
+            .checked_add(fallback_charge.allocations),
+        Some(poisoned.live_retained_allocations())
+    );
+    assert_eq!(
+        after_prepare.total_admitted_retained_bytes(),
+        poisoned.total_admitted_retained_bytes()
+    );
+    assert_eq!(
+        after_prepare.total_admitted_retained_allocations(),
+        poisoned.total_admitted_retained_allocations()
+    );
+    assert_eq!(
+        after_prepare.first_poison_evidence(),
+        poisoned.first_poison_evidence()
+    );
     let published = handoff_for_test(prepared);
     assert!(matches!(
         published,

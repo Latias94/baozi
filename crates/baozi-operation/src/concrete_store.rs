@@ -81,7 +81,7 @@
 use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::marker::PhantomData;
-use std::num::{NonZeroU32, NonZeroU64, NonZeroU128};
+use std::num::{NonZeroU32, NonZeroU64};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::capacity::{CapacityPlan, CapacityPlanError};
@@ -101,8 +101,9 @@ use crate::retained::{
     RetainedFailureValidation, RetainedFallbackOnly, RetainedHandleSharePlan, RetainedOperation,
     RetainedOperationStartError, RetainedOperationStartPlan, RetainedPublicationAssembly,
     RetainedPublicationError, RetainedPublicationPlan, RetainedPublicationPrepareError,
-    RetainedSuccessValidation, RetainedWriterError, RetainedWriterPlan, ValidatedRetainedFailure,
-    ValidatedRetainedSuccess, retained_publication_error_requires_containment,
+    RetainedSuccessValidation, RetainedWriterError, RetainedWriterPlan, TerminalEvidenceCause,
+    ValidatedRetainedFailure, ValidatedRetainedSuccess,
+    retained_publication_error_requires_containment,
 };
 
 const MAX_RECORD_FIELDS: usize = 32;
@@ -1652,11 +1653,152 @@ pub struct StoreFallbackEnvelope {
 
 static NEXT_STORE_KEY_DOMAIN_ID: AtomicU64 = AtomicU64::new(1);
 
+/// Stable identity of one Baozi-managed concrete-store semantic catalog.
+///
+/// The fixed namespace and nonzero revision are registry data, never process-local allocation
+/// order. A registry must assign namespaces canonically and increment the revision whenever a local
+/// identifier changes meaning.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct StoreSemanticCatalogId {
+    namespace: [u8; 16],
+    revision: NonZeroU32,
+}
+
+impl StoreSemanticCatalogId {
+    /// Declares one registry-normalized catalog identity.
+    ///
+    /// This inert value grants no host admission, registry authority, or BaoziVerified status.
+    /// Those claims require an independent host-owned registry and evidence decision.
+    pub const fn new(namespace: [u8; 16], revision: NonZeroU32) -> Self {
+        Self {
+            namespace,
+            revision,
+        }
+    }
+
+    /// Returns the fixed registry namespace.
+    pub const fn namespace(self) -> [u8; 16] {
+        self.namespace
+    }
+
+    /// Returns the semantic-catalog revision.
+    pub const fn revision(self) -> NonZeroU32 {
+        self.revision
+    }
+
+    /// Returns the canonical namespace-plus-revision encoding.
+    pub const fn to_canonical_bytes(self) -> [u8; 20] {
+        let revision = self.revision.get().to_be_bytes();
+        let mut encoded = [0_u8; 20];
+        let mut index = 0;
+        while index < self.namespace.len() {
+            encoded[index] = self.namespace[index];
+            index += 1;
+        }
+        encoded[16] = revision[0];
+        encoded[17] = revision[1];
+        encoded[18] = revision[2];
+        encoded[19] = revision[3];
+        encoded
+    }
+}
+
+/// Stable, host-normalized semantic identity for one accounting phase.
+///
+/// This inert value contains no process-local brand, pointer, callback, plugin state, or allocation
+/// order and is therefore suitable for evidence transcripts and persistent identities.
+#[repr(transparent)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct StorePhaseSemanticId(StoreSemanticIdentity);
+
+impl StorePhaseSemanticId {
+    /// Declares one stable phase semantic identity.
+    ///
+    /// Construction alone grants no runtime admission, registry authority, or verification claim.
+    pub const fn new(catalog: StoreSemanticCatalogId, local: NonZeroU64) -> Self {
+        Self(StoreSemanticIdentity { catalog, local })
+    }
+
+    /// Returns the owning semantic-catalog identity.
+    pub const fn catalog(self) -> StoreSemanticCatalogId {
+        self.0.catalog
+    }
+
+    /// Returns the catalog-local stable identifier.
+    pub const fn local(self) -> NonZeroU64 {
+        self.0.local
+    }
+
+    /// Returns the canonical kind-plus-catalog-plus-local encoding.
+    pub const fn to_canonical_bytes(self) -> [u8; 29] {
+        self.0.to_canonical_bytes(1)
+    }
+}
+
+/// Stable, host-normalized semantic identity for one accounting dimension.
+#[repr(transparent)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct StoreDimensionSemanticId(StoreSemanticIdentity);
+
+impl StoreDimensionSemanticId {
+    /// Declares one stable dimension semantic identity.
+    ///
+    /// Construction alone grants no runtime admission, registry authority, or verification claim.
+    pub const fn new(catalog: StoreSemanticCatalogId, local: NonZeroU64) -> Self {
+        Self(StoreSemanticIdentity { catalog, local })
+    }
+
+    /// Returns the owning semantic-catalog identity.
+    pub const fn catalog(self) -> StoreSemanticCatalogId {
+        self.0.catalog
+    }
+
+    /// Returns the catalog-local stable identifier.
+    pub const fn local(self) -> NonZeroU64 {
+        self.0.local
+    }
+
+    /// Returns the canonical kind-plus-catalog-plus-local encoding.
+    pub const fn to_canonical_bytes(self) -> [u8; 29] {
+        self.0.to_canonical_bytes(2)
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+struct StoreSemanticIdentity {
+    catalog: StoreSemanticCatalogId,
+    local: NonZeroU64,
+}
+
+impl StoreSemanticIdentity {
+    const fn to_canonical_bytes(self, kind: u8) -> [u8; 29] {
+        let catalog = self.catalog.to_canonical_bytes();
+        let local = self.local.get().to_be_bytes();
+        let mut encoded = [0_u8; 29];
+        encoded[0] = kind;
+        let mut index = 0;
+        while index < catalog.len() {
+            encoded[index + 1] = catalog[index];
+            index += 1;
+        }
+        index = 0;
+        while index < local.len() {
+            encoded[index + 21] = local[index];
+            index += 1;
+        }
+        encoded
+    }
+}
+
 /// Process-local authority for one normalized concrete-store key vocabulary.
 ///
-/// A domain is a runtime brand, not stable wire data, digest input, or user-visible semantics.
-/// The host owner must retain the local-to-stable semantic mapping for the lifetime of every key.
-/// Plugins receive normalized keys minted by the host; they never receive this authority.
+/// A domain is only a runtime brand, host-admission authority, and linear lifetime anchor; it is not
+/// stable wire data, digest input, user-visible semantics, or a semantic-to-ordinal mapping. The
+/// complete mapping lives in the metered key-bearing ledger evidence cells. Consuming the domain
+/// into [`StoreLedgerPlan`] moves the anchor through the operation into terminal evidence without
+/// another mapping allocation or reference count. Plugins receive only host-admitted keys and never
+/// this authority.
 ///
 /// The authority is intentionally neither `Clone` nor `Copy`:
 ///
@@ -1668,36 +1810,65 @@ static NEXT_STORE_KEY_DOMAIN_ID: AtomicU64 = AtomicU64::new(1);
 /// ```
 pub struct StoreKeyDomain {
     id: NonZeroU64,
+    catalog: StoreSemanticCatalogId,
 }
 
 impl StoreKeyDomain {
     /// Issues one unique process-local key authority.
-    pub fn try_new() -> Result<Self, StoreKeyDomainCreateError> {
+    pub fn try_new(catalog: StoreSemanticCatalogId) -> Result<Self, StoreKeyDomainCreateError> {
         let id = NEXT_STORE_KEY_DOMAIN_ID
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |next| {
                 (next != 0).then(|| next.wrapping_add(1))
             })
             .map_err(|_| StoreKeyDomainCreateError::Exhausted)?;
         let id = NonZeroU64::new(id).ok_or(StoreKeyDomainCreateError::Exhausted)?;
-        Ok(Self { id })
+        Ok(Self { id, catalog })
     }
 
-    /// Mints one phase key from a host-normalized local identifier.
-    pub const fn phase_key(&self, local_id: NonZeroU32) -> StorePhaseKey {
-        StorePhaseKey(branded_store_key(self.id, local_id))
+    /// Returns this authority's frozen semantic-catalog identity.
+    pub const fn catalog(&self) -> StoreSemanticCatalogId {
+        self.catalog
     }
 
-    /// Mints one dimension key from a host-normalized local identifier.
-    pub const fn dimension_key(&self, local_id: NonZeroU32) -> StoreDimensionKey {
-        StoreDimensionKey(branded_store_key(self.id, local_id))
+    /// Uses host authority to admit one phase identity into this runtime domain.
+    ///
+    /// A matching catalog is necessary but does not by itself imply registry ownership or
+    /// BaoziVerified evidence status; this call is the host's explicit runtime-admission decision.
+    pub fn try_admit_phase(&self, semantic: StorePhaseSemanticId) -> Option<StorePhaseKey> {
+        if semantic.catalog() == self.catalog {
+            Some(StorePhaseKey {
+                brand: self.id,
+                semantic,
+            })
+        } else {
+            None
+        }
     }
 
-    const fn owns_phase(&self, key: StorePhaseKey) -> bool {
-        store_key_domain_id(key.0) == self.id.get()
+    /// Uses host authority to admit one dimension identity into this runtime domain.
+    ///
+    /// A matching catalog is necessary but does not by itself imply registry ownership or
+    /// BaoziVerified evidence status; this call is the host's explicit runtime-admission decision.
+    pub fn try_admit_dimension(
+        &self,
+        semantic: StoreDimensionSemanticId,
+    ) -> Option<StoreDimensionKey> {
+        if semantic.catalog() == self.catalog {
+            Some(StoreDimensionKey {
+                brand: self.id,
+                semantic,
+            })
+        } else {
+            None
+        }
     }
 
-    const fn owns_dimension(&self, key: StoreDimensionKey) -> bool {
-        store_key_domain_id(key.0) == self.id.get()
+    fn owns_phase(&self, key: StorePhaseKey) -> bool {
+        key.brand == self.id && key.semantic.catalog() == self.catalog
+    }
+
+    fn owns_dimension(&self, key: StoreDimensionKey) -> bool {
+        key.brand == self.id && key.semantic.catalog() == self.catalog
     }
 }
 
@@ -1727,25 +1898,28 @@ impl fmt::Display for StoreKeyDomainCreateError {
 impl std::error::Error for StoreKeyDomainCreateError {}
 
 /// Fixed, inert accounting-phase identity used by the concrete retained store.
-#[repr(transparent)]
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub struct StorePhaseKey(NonZeroU128);
+pub struct StorePhaseKey {
+    brand: NonZeroU64,
+    semantic: StorePhaseSemanticId,
+}
 
 impl crate::retained::TerminalEvidenceKeySeal for StorePhaseKey {}
 
 impl crate::retained::TerminalEvidenceKey for StorePhaseKey {}
 
 impl StorePhaseKey {
-    /// Returns the host-normalized local identifier without exposing the process-local brand.
-    pub const fn local_id(self) -> NonZeroU32 {
-        store_key_local_id(self.0)
+    /// Returns stable semantic meaning without exposing the process-local brand.
+    pub const fn semantic_id(self) -> StorePhaseSemanticId {
+        self.semantic
     }
 }
 
 impl Hash for StorePhaseKey {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        // Equality separates domains; the process-local brand must never become digest material.
-        self.local_id().hash(state);
+        // Semantic-only hashing permits cross-domain collection bucketing. Rust `Hash` output is
+        // explicitly not a stable digest or wire encoding.
+        self.semantic_id().hash(state);
     }
 }
 
@@ -1753,31 +1927,34 @@ impl fmt::Debug for StorePhaseKey {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_tuple("StorePhaseKey")
-            .field(&self.local_id())
+            .field(&self.semantic_id())
             .finish()
     }
 }
 
 /// Fixed, inert accounting-dimension identity used by the concrete retained store.
-#[repr(transparent)]
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub struct StoreDimensionKey(NonZeroU128);
+pub struct StoreDimensionKey {
+    brand: NonZeroU64,
+    semantic: StoreDimensionSemanticId,
+}
 
 impl crate::retained::TerminalEvidenceKeySeal for StoreDimensionKey {}
 
 impl crate::retained::TerminalEvidenceKey for StoreDimensionKey {}
 
 impl StoreDimensionKey {
-    /// Returns the host-normalized local identifier without exposing the process-local brand.
-    pub const fn local_id(self) -> NonZeroU32 {
-        store_key_local_id(self.0)
+    /// Returns stable semantic meaning without exposing the process-local brand.
+    pub const fn semantic_id(self) -> StoreDimensionSemanticId {
+        self.semantic
     }
 }
 
 impl Hash for StoreDimensionKey {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        // Equality separates domains; the process-local brand must never become digest material.
-        self.local_id().hash(state);
+        // Semantic-only hashing permits cross-domain collection bucketing. Rust `Hash` output is
+        // explicitly not a stable digest or wire encoding.
+        self.semantic_id().hash(state);
     }
 }
 
@@ -1785,32 +1962,9 @@ impl fmt::Debug for StoreDimensionKey {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_tuple("StoreDimensionKey")
-            .field(&self.local_id())
+            .field(&self.semantic_id())
             .finish()
     }
-}
-
-const fn branded_store_key(domain_id: NonZeroU64, local_id: NonZeroU32) -> NonZeroU128 {
-    let encoded = ((domain_id.get() as u128) << 32) | local_id.get() as u128;
-    match NonZeroU128::new(encoded) {
-        Some(key) => key,
-        None => unreachable_store_key_state(),
-    }
-}
-
-const fn store_key_domain_id(key: NonZeroU128) -> u64 {
-    (key.get() >> 32) as u64
-}
-
-const fn store_key_local_id(key: NonZeroU128) -> NonZeroU32 {
-    match NonZeroU32::new(key.get() as u32) {
-        Some(local_id) => local_id,
-        None => unreachable_store_key_state(),
-    }
-}
-
-const fn unreachable_store_key_state() -> ! {
-    panic!("concrete retained store key violated its private representation invariant")
 }
 
 /// Failure while freezing the complete concrete-store ledger vocabulary.
@@ -1865,9 +2019,8 @@ impl fmt::Display for StoreLedgerPlanError {
 impl std::error::Error for StoreLedgerPlanError {}
 
 /// Frozen dimension policy and complete phase vocabulary for one retained store operation.
-#[derive(PartialEq, Eq)]
 pub struct StoreLedgerPlan {
-    domain_id: NonZeroU64,
+    domain: StoreKeyDomain,
     limits: LedgerLimits<StoreDimensionKey>,
     phases: Vec<StorePhaseKey>,
 }
@@ -1884,8 +2037,13 @@ impl fmt::Debug for StoreLedgerPlan {
 
 impl StoreLedgerPlan {
     /// Freezes a non-empty phase vocabulary in canonical key order.
+    ///
+    /// This is an attempt-once authority transfer. The domain is consumed even when construction
+    /// fails, so every previously admitted runtime key from that domain is burned for plan
+    /// construction. A retry must create a fresh domain and re-admit the complete vocabulary; the
+    /// error intentionally does not return a large authority-bearing input.
     pub fn try_new(
-        domain: &StoreKeyDomain,
+        domain: StoreKeyDomain,
         limits: LedgerLimits<StoreDimensionKey>,
         phases: &[StorePhaseKey],
     ) -> Result<Self, StoreLedgerPlanError> {
@@ -1919,7 +2077,7 @@ impl StoreLedgerPlan {
             .map_err(|_| StoreLedgerPlanError::PhaseCatalogAllocationFailed)?;
         frozen.extend_from_slice(phases);
         Ok(Self {
-            domain_id: domain.id,
+            domain,
             limits,
             phases: frozen,
         })
@@ -1944,21 +2102,21 @@ impl StoreLedgerPlan {
     }
 
     fn owns_phase(&self, phase: StorePhaseKey) -> bool {
-        store_key_domain_id(phase.0) == self.domain_id.get()
+        self.domain.owns_phase(phase)
     }
 
     fn owns_dimension(&self, dimension: StoreDimensionKey) -> bool {
-        store_key_domain_id(dimension.0) == self.domain_id.get()
+        self.domain.owns_dimension(dimension)
     }
 
     fn into_parts(
         self,
     ) -> (
-        NonZeroU64,
+        StoreKeyDomain,
         LedgerLimits<StoreDimensionKey>,
         Vec<StorePhaseKey>,
     ) {
-        (self.domain_id, self.limits, self.phases)
+        (self.domain, self.limits, self.phases)
     }
 }
 
@@ -2212,8 +2370,6 @@ pub enum StoreRuntimeError {
     PhaseCompletionPublicationPending,
     /// Durable publication permanently sealed semantic phase completion.
     PhaseCompletionPublicationCompleted,
-    /// The operation was not started with a frozen semantic phase catalog.
-    PhaseCompletionCatalogNotFrozen,
     /// The frozen semantic phase catalog violated its internal position invariant.
     PhaseCompletionCatalogShapeMismatch,
     /// The physical account is permanently quarantined; the snapshot retains its first evidence.
@@ -2232,6 +2388,8 @@ pub enum StoreRuntimeError {
     },
     Build(StoreBuildError),
     BuilderPanicked,
+    /// Trusted retained-store construction violated a prequalified internal invariant.
+    ConstructionInvariantUnverified,
     AllocationFailed,
     SlotLimit {
         destination: StoreDestination,
@@ -2289,9 +2447,6 @@ impl fmt::Display for StoreRuntimeError {
                 .write_str("retained store phase completion is sealed by pending publication"),
             Self::PhaseCompletionPublicationCompleted => formatter
                 .write_str("retained store phase completion is sealed by durable publication"),
-            Self::PhaseCompletionCatalogNotFrozen => {
-                formatter.write_str("retained store phase completion requires a frozen catalog")
-            }
             Self::PhaseCompletionCatalogShapeMismatch => {
                 formatter.write_str("retained store phase completion catalog shape is inconsistent")
             }
@@ -2312,6 +2467,9 @@ impl fmt::Display for StoreRuntimeError {
             Self::Build(cause) => cause.fmt(formatter),
             Self::BuilderPanicked => formatter.write_str(
                 "retained store builder panicked; its physical charge remains fail-closed",
+            ),
+            Self::ConstructionInvariantUnverified => formatter.write_str(
+                "retained store construction violated a qualified invariant; its physical charge remains fail-closed",
             ),
             Self::AllocationFailed => {
                 formatter.write_str("retained store allocation failed before payload construction")
@@ -2389,6 +2547,9 @@ fn map_allocation_error(error: &RetainedAllocationError) -> StoreRuntimeError {
             StoreRuntimeError::Build(StoreBuildError::from_raw(code.code()))
         }
         RetainedAllocationError::BuilderPanicked => StoreRuntimeError::BuilderPanicked,
+        RetainedAllocationError::ConstructionInvariantUnverified => {
+            StoreRuntimeError::ConstructionInvariantUnverified
+        }
         RetainedAllocationError::AllocationFailed => StoreRuntimeError::AllocationFailed,
         RetainedAllocationError::ChargeReleaseUnverified => {
             StoreRuntimeError::ChargeReleaseUnverified
@@ -2432,9 +2593,6 @@ fn map_phase_completion_error(error: PhaseCompletionError<StorePhaseKey>) -> Sto
             last_completed_phase,
             phase,
         },
-        PhaseCompletionError::CatalogNotFrozen => {
-            StoreRuntimeError::PhaseCompletionCatalogNotFrozen
-        }
         PhaseCompletionError::CatalogShapeMismatch => {
             StoreRuntimeError::PhaseCompletionCatalogShapeMismatch
         }
@@ -2463,11 +2621,11 @@ fn publication_error_requires_containment(
 }
 
 fn validate_store_dimension(
-    domain_id: NonZeroU64,
+    domain: &StoreKeyDomain,
     dimension: StoreDimensionKey,
     known: bool,
 ) -> Result<(), StoreRuntimeError> {
-    if store_key_domain_id(dimension.0) != domain_id.get() {
+    if !domain.owns_dimension(dimension) {
         return Err(StoreRuntimeError::ForeignDimensionDomain { dimension });
     }
     if !known {
@@ -2558,16 +2716,25 @@ type RawStoreFallbackOnly<O, PP, U> = RetainedFallbackOnly<
     StoredBlock,
     StoredBlock,
 >;
-type RawPreparedStore =
-    PreparedRetainedPublication<StoredBlock, StoredBlock, StoreFallbackEnvelope, StoreDimensionKey>;
-type RawPreparedStoreSuccess = PreparedRetainedSuccess<StoredBlock, StoredBlock, StoreDimensionKey>;
-type RawPreparedStoreFailure = PreparedRetainedRichFailure<StoredBlock, StoreDimensionKey>;
-type RawPreparedStoreFallback = PreparedRetainedFallback<StoreFallbackEnvelope, StoreDimensionKey>;
+type RawPreparedStore = PreparedRetainedPublication<
+    StoredBlock,
+    StoredBlock,
+    StoreFallbackEnvelope,
+    StorePhaseKey,
+    StoreDimensionKey,
+>;
+type RawPreparedStoreSuccess =
+    PreparedRetainedSuccess<StoredBlock, StoredBlock, StorePhaseKey, StoreDimensionKey>;
+type RawPreparedStoreFailure =
+    PreparedRetainedRichFailure<StoredBlock, StorePhaseKey, StoreDimensionKey>;
+type RawPreparedStoreFallback =
+    PreparedRetainedFallback<StoreFallbackEnvelope, StorePhaseKey, StoreDimensionKey>;
 
 fn classify_prepared_success<CanonicalKind, CanonicalTag, EvidenceKind, EvidenceTag>(
     raw: RawPreparedStore,
     canonical_root: CanonicalStoreRef<CanonicalKind, CanonicalTag>,
     evidence_root: OutcomeEvidenceStoreRef<EvidenceKind, EvidenceTag>,
+    domain: StoreKeyDomain,
 ) -> PreparedStoreSuccessOutcome<CanonicalKind, CanonicalTag, EvidenceKind, EvidenceTag> {
     match raw.into_outcome() {
         PreparedRetainedPublicationOutcome::Success(raw) => {
@@ -2575,13 +2742,18 @@ fn classify_prepared_success<CanonicalKind, CanonicalTag, EvidenceKind, Evidence
                 raw,
                 canonical_root,
                 evidence_root,
+                domain,
             })
         }
         PreparedRetainedPublicationOutcome::RichFailure(raw) => {
-            PreparedStoreSuccessOutcome::RichFailure(PreparedStoreFailure { raw, evidence_root })
+            PreparedStoreSuccessOutcome::RichFailure(PreparedStoreFailure {
+                raw,
+                evidence_root,
+                domain,
+            })
         }
         PreparedRetainedPublicationOutcome::MinimalFallback(raw) => {
-            PreparedStoreSuccessOutcome::MinimalFallback(PreparedStoreFallback { raw })
+            PreparedStoreSuccessOutcome::MinimalFallback(PreparedStoreFallback { raw, domain })
         }
     }
 }
@@ -2589,21 +2761,31 @@ fn classify_prepared_success<CanonicalKind, CanonicalTag, EvidenceKind, Evidence
 fn classify_prepared_failure<EvidenceKind, EvidenceTag>(
     raw: RawPreparedStore,
     evidence_root: OutcomeEvidenceStoreRef<EvidenceKind, EvidenceTag>,
+    domain: StoreKeyDomain,
 ) -> PreparedStoreFailureOutcome<EvidenceKind, EvidenceTag> {
     match raw.into_outcome() {
         PreparedRetainedPublicationOutcome::RichFailure(raw) => {
-            PreparedStoreFailureOutcome::RichFailure(PreparedStoreFailure { raw, evidence_root })
+            PreparedStoreFailureOutcome::RichFailure(PreparedStoreFailure {
+                raw,
+                evidence_root,
+                domain,
+            })
         }
         PreparedRetainedPublicationOutcome::MinimalFallback(raw) => {
-            PreparedStoreFailureOutcome::MinimalFallback(PreparedStoreFallback { raw })
+            PreparedStoreFailureOutcome::MinimalFallback(PreparedStoreFallback { raw, domain })
         }
         PreparedRetainedPublicationOutcome::Success(_) => unreachable_store_state(),
     }
 }
 
-fn classify_prepared_fallback(raw: RawPreparedStore) -> PreparedStoreFallback {
+fn classify_prepared_fallback(
+    raw: RawPreparedStore,
+    domain: StoreKeyDomain,
+) -> PreparedStoreFallback {
     match raw.into_outcome() {
-        PreparedRetainedPublicationOutcome::MinimalFallback(raw) => PreparedStoreFallback { raw },
+        PreparedRetainedPublicationOutcome::MinimalFallback(raw) => {
+            PreparedStoreFallback { raw, domain }
+        }
         PreparedRetainedPublicationOutcome::Success(_)
         | PreparedRetainedPublicationOutcome::RichFailure(_) => unreachable_store_state(),
     }
@@ -2618,7 +2800,7 @@ where
     U: ProgressUnit,
 {
     raw: RawStoreOperation<O, PP, U>,
-    domain_id: NonZeroU64,
+    domain: StoreKeyDomain,
 }
 
 impl<O, PP, U> RetainedStoreOperation<O, PP, U>
@@ -2629,7 +2811,7 @@ where
 {
     /// Records one semantically completed phase after concrete domain and catalog validation.
     pub fn try_complete_phase(&self, phase: StorePhaseKey) -> Result<(), StoreRuntimeError> {
-        if store_key_domain_id(phase.0) != self.domain_id.get() {
+        if !self.domain.owns_phase(phase) {
             return Err(StoreRuntimeError::ForeignPhaseDomain { phase });
         }
         if !self.raw.contains_phase(phase) {
@@ -2649,7 +2831,7 @@ where
             .flatten()
         {
             let writer = table.writer;
-            if store_key_domain_id(writer.phase.0) != self.domain_id.get() {
+            if !self.domain.owns_phase(writer.phase) {
                 return Err(StoreRuntimeError::ForeignPhaseDomain {
                     phase: writer.phase,
                 });
@@ -2658,7 +2840,7 @@ where
                 return Err(StoreRuntimeError::Ledger(LedgerCause::UnknownPhase));
             }
             for dimension in [writer.capacity_dimension, writer.attribution_dimension] {
-                if store_key_domain_id(dimension.0) != self.domain_id.get() {
+                if !self.domain.owns_dimension(dimension) {
                     return Err(StoreRuntimeError::ForeignDimensionDomain { dimension });
                 }
                 if !self.raw.contains_dimension(dimension) {
@@ -2721,7 +2903,7 @@ where
             plan.snapshot_dimension,
             plan.snapshot_amount,
         );
-        let (domain_id, ledger_limits, phases) = ledger_plan.into_parts();
+        let (domain, ledger_limits, phases) = ledger_plan.into_parts();
         RetainedOperation::try_start_with_phase_catalog(
             control,
             ledger_limits,
@@ -2730,10 +2912,13 @@ where
             raw_plan,
             || Ok(plan.fallback),
         )
-        .map(|raw| Self { raw, domain_id })
+        .map(|raw| Self { raw, domain })
         .map_err(|cause| match cause {
             RetainedOperationStartError::InvalidTerminalLimits => {
                 RetainedStoreStartError::InvalidTerminalLimits
+            }
+            RetainedOperationStartError::TerminalEvidenceCatalogInvariant => {
+                RetainedStoreStartError::Runtime(StoreRuntimeError::ConstructionInvariantUnverified)
             }
             RetainedOperationStartError::Writer(cause) => {
                 RetainedStoreStartError::Runtime(map_writer_error(&cause))
@@ -2762,18 +2947,18 @@ where
                 cause,
             });
         }
-        let domain_id = self.domain_id;
+        let domain = self.domain;
         match self.raw.try_publication_assembly(plan.into_raw()) {
             Ok(raw) => Ok(RetainedStorePublicationAssembly {
                 raw,
                 fallback_only: false,
-                domain_id,
+                domain,
             }),
             Err(error) => {
                 let cause = map_writer_error(error.cause());
                 match error.try_into_operation() {
                     Ok(raw) => Err(RetainedStoreOpenError {
-                        operation: Some(Self { raw, domain_id }),
+                        operation: Some(Self { raw, domain }),
                         cause,
                     }),
                     Err(_) => Err(RetainedStoreOpenError {
@@ -2790,9 +2975,10 @@ where
         self,
         cause: u32,
     ) -> Result<PreparedStoreFallback, StorePrepareError> {
+        let domain = self.domain;
         self.raw
             .prepare_minimal_fallback(PreparationFailureCode::domain(cause))
-            .map(classify_prepared_fallback)
+            .map(|raw| classify_prepared_fallback(raw, domain))
             .map_err(StorePrepareError::from_raw)
     }
 }
@@ -2881,7 +3067,7 @@ where
 {
     raw: RawStoreAssembly<O, PP, U>,
     fallback_only: bool,
-    domain_id: NonZeroU64,
+    domain: StoreKeyDomain,
 }
 
 impl<O, PP, U> RetainedStorePublicationAssembly<O, PP, U>
@@ -2910,7 +3096,7 @@ where
 
     fn validate_dimension(&self, dimension: StoreDimensionKey) -> Result<(), StoreRuntimeError> {
         validate_store_dimension(
-            self.domain_id,
+            &self.domain,
             dimension,
             self.raw.contains_dimension(dimension),
         )
@@ -3205,10 +3391,11 @@ where
         CanonicalTag: Copy + Send + Sync + 'static,
         EvidenceTag: Copy + Send + Sync + 'static,
     {
-        let domain_id = self.domain_id;
+        let domain = self.domain;
         if self.fallback_only {
             return StoreSuccessValidation::FallbackOnly(StoreFallbackOnly {
                 state: StoreFallbackState::Assembly(self.raw),
+                domain,
             });
         }
         match self
@@ -3222,7 +3409,7 @@ where
                     raw,
                     canonical_root,
                     evidence_root,
-                    domain_id,
+                    domain,
                 })
             }
             RetainedSuccessValidation::Rejected(raw) => {
@@ -3230,12 +3417,13 @@ where
                     raw,
                     fallback_only: false,
                     evidence_root,
-                    domain_id,
+                    domain,
                 })
             }
             RetainedSuccessValidation::FallbackOnly(raw) => {
                 StoreSuccessValidation::FallbackOnly(StoreFallbackOnly {
                     state: StoreFallbackState::Validated(raw),
+                    domain,
                 })
             }
         }
@@ -3253,10 +3441,11 @@ where
     where
         EvidenceTag: Copy + Send + Sync + 'static,
     {
-        let domain_id = self.domain_id;
+        let domain = self.domain;
         if self.fallback_only {
             return StoreFailureValidation::FallbackOnly(StoreFallbackOnly {
                 state: StoreFallbackState::Assembly(self.raw),
+                domain,
             });
         }
         map_failure_validation(
@@ -3265,15 +3454,16 @@ where
                 validate(&mut session, evidence_root)
             }),
             evidence_root,
-            domain_id,
+            domain,
         )
     }
 
     /// Discards candidate tables and prepares only the pre-admitted fallback.
     pub fn prepare_minimal_fallback(self) -> Result<PreparedStoreFallback, StorePrepareError> {
+        let domain = self.domain;
         self.raw
             .prepare_minimal_fallback()
-            .map(classify_prepared_fallback)
+            .map(|raw| classify_prepared_fallback(raw, domain))
             .map_err(StorePrepareError::from_raw)
     }
 }
@@ -3302,7 +3492,7 @@ where
     raw: RawValidatedStoreSuccess<O, PP, U>,
     canonical_root: CanonicalStoreRef<CanonicalKind, CanonicalTag>,
     evidence_root: OutcomeEvidenceStoreRef<EvidenceKind, EvidenceTag>,
-    domain_id: NonZeroU64,
+    domain: StoreKeyDomain,
 }
 
 impl<O, PP, U, CanonicalKind, CanonicalTag, EvidenceKind, EvidenceTag>
@@ -3327,7 +3517,7 @@ where
                 .downgrade_to_rich_failure(PreparationFailureCode::domain(fallback_cause)),
             fallback_only: false,
             evidence_root: self.evidence_root,
-            domain_id: self.domain_id,
+            domain: self.domain,
         }
     }
 
@@ -3339,17 +3529,21 @@ where
         PreparedStoreSuccessOutcome<CanonicalKind, CanonicalTag, EvidenceKind, EvidenceTag>,
         StorePrepareError,
     > {
+        let domain = self.domain;
         self.raw
             .try_prepare(final_progress)
-            .map(|raw| classify_prepared_success(raw, self.canonical_root, self.evidence_root))
+            .map(|raw| {
+                classify_prepared_success(raw, self.canonical_root, self.evidence_root, domain)
+            })
             .map_err(StorePrepareError::from_raw)
     }
 
     /// Discards the validated candidate and prepares only minimal fallback.
     pub fn prepare_minimal_fallback(self) -> Result<PreparedStoreFallback, StorePrepareError> {
+        let domain = self.domain;
         self.raw
             .prepare_minimal_fallback()
-            .map(classify_prepared_fallback)
+            .map(|raw| classify_prepared_fallback(raw, domain))
             .map_err(StorePrepareError::from_raw)
     }
 }
@@ -3368,7 +3562,7 @@ where
     raw: RawStoreFailureAssembly<O, PP, U>,
     fallback_only: bool,
     evidence_root: OutcomeEvidenceStoreRef<EvidenceKind, EvidenceTag>,
-    domain_id: NonZeroU64,
+    domain: StoreKeyDomain,
 }
 
 impl<O, PP, U, PreservedEvidenceKind, PreservedEvidenceTag>
@@ -3400,7 +3594,7 @@ where
 
     fn validate_dimension(&self, dimension: StoreDimensionKey) -> Result<(), StoreRuntimeError> {
         validate_store_dimension(
-            self.domain_id,
+            &self.domain,
             dimension,
             self.raw.contains_dimension(dimension),
         )
@@ -3567,10 +3761,11 @@ where
     where
         EvidenceTag: Copy + Send + Sync + 'static,
     {
-        let domain_id = self.domain_id;
+        let domain = self.domain;
         if self.fallback_only {
             return StoreFailureValidation::FallbackOnly(StoreFallbackOnly {
                 state: StoreFallbackState::FailureAssembly(self.raw),
+                domain,
             });
         }
         map_failure_validation(
@@ -3579,15 +3774,16 @@ where
                 validate(&mut session, evidence_root)
             }),
             evidence_root,
-            domain_id,
+            domain,
         )
     }
 
     /// Discards failure details and prepares only minimal fallback.
     pub fn prepare_minimal_fallback(self) -> Result<PreparedStoreFallback, StorePrepareError> {
+        let domain = self.domain;
         self.raw
             .prepare_minimal_fallback()
-            .map(classify_prepared_fallback)
+            .map(|raw| classify_prepared_fallback(raw, domain))
             .map_err(StorePrepareError::from_raw)
     }
 }
@@ -3617,7 +3813,7 @@ fn map_failure_validation<O, PP, U, EvidenceKind, EvidenceTag>(
         StoredBlock,
     >,
     evidence_root: OutcomeEvidenceStoreRef<EvidenceKind, EvidenceTag>,
-    domain_id: NonZeroU64,
+    domain: StoreKeyDomain,
 ) -> StoreFailureValidation<O, PP, U, EvidenceKind, EvidenceTag>
 where
     O: OperationOwner,
@@ -3626,19 +3822,24 @@ where
 {
     match validation {
         RetainedFailureValidation::Valid(raw) => {
-            StoreFailureValidation::Valid(ValidatedStoreFailure { raw, evidence_root })
+            StoreFailureValidation::Valid(ValidatedStoreFailure {
+                raw,
+                evidence_root,
+                domain,
+            })
         }
         RetainedFailureValidation::Rejected(raw) => {
             StoreFailureValidation::Rejected(StoreFailureAssembly {
                 raw,
                 fallback_only: false,
                 evidence_root,
-                domain_id,
+                domain,
             })
         }
         RetainedFailureValidation::FallbackOnly(raw) => {
             StoreFailureValidation::FallbackOnly(StoreFallbackOnly {
                 state: StoreFallbackState::Validated(raw),
+                domain,
             })
         }
     }
@@ -3654,6 +3855,7 @@ where
 {
     raw: RawValidatedStoreFailure<O, PP, U>,
     evidence_root: OutcomeEvidenceStoreRef<EvidenceKind, EvidenceTag>,
+    domain: StoreKeyDomain,
 }
 
 impl<O, PP, U, EvidenceKind, EvidenceTag> ValidatedStoreFailure<O, PP, U, EvidenceKind, EvidenceTag>
@@ -3668,17 +3870,19 @@ where
         cause: u32,
         final_progress: FinalProgress<PP, U>,
     ) -> Result<PreparedStoreFailureOutcome<EvidenceKind, EvidenceTag>, StorePrepareError> {
+        let domain = self.domain;
         self.raw
             .try_prepare(PreparationFailureCode::domain(cause), final_progress)
-            .map(|raw| classify_prepared_failure(raw, self.evidence_root))
+            .map(|raw| classify_prepared_failure(raw, self.evidence_root, domain))
             .map_err(StorePrepareError::from_raw)
     }
 
     /// Discards rich failure and prepares only minimal fallback.
     pub fn prepare_minimal_fallback(self) -> Result<PreparedStoreFallback, StorePrepareError> {
+        let domain = self.domain;
         self.raw
             .prepare_minimal_fallback()
-            .map(classify_prepared_fallback)
+            .map(|raw| classify_prepared_fallback(raw, domain))
             .map_err(StorePrepareError::from_raw)
     }
 }
@@ -3703,6 +3907,7 @@ where
     U: ProgressUnit,
 {
     state: StoreFallbackState<O, PP, U>,
+    domain: StoreKeyDomain,
 }
 
 impl<O, PP, U> StoreFallbackOnly<O, PP, U>
@@ -3713,12 +3918,13 @@ where
 {
     /// Discards every candidate table and prepares the assembly-independent fallback.
     pub fn prepare_minimal_fallback(self) -> Result<PreparedStoreFallback, StorePrepareError> {
+        let domain = self.domain;
         let raw = match self.state {
             StoreFallbackState::Assembly(raw) => raw.prepare_minimal_fallback(),
             StoreFallbackState::FailureAssembly(raw) => raw.prepare_minimal_fallback(),
             StoreFallbackState::Validated(raw) => raw.prepare_minimal_fallback(),
         };
-        raw.map(classify_prepared_fallback)
+        raw.map(|raw| classify_prepared_fallback(raw, domain))
             .map_err(StorePrepareError::from_raw)
     }
 }
@@ -3778,6 +3984,7 @@ pub struct PreparedStoreSuccess<CanonicalKind, CanonicalTag, EvidenceKind, Evide
     raw: RawPreparedStoreSuccess,
     canonical_root: CanonicalStoreRef<CanonicalKind, CanonicalTag>,
     evidence_root: OutcomeEvidenceStoreRef<EvidenceKind, EvidenceTag>,
+    domain: StoreKeyDomain,
 }
 
 impl<CanonicalKind, CanonicalTag, EvidenceKind, EvidenceTag>
@@ -3797,9 +4004,7 @@ impl<CanonicalKind, CanonicalTag, EvidenceKind, EvidenceTag>
                 raw: raw.outcome_evidence,
                 root: self.evidence_root,
             },
-            ledger_evidence: StoreLedgerEvidence {
-                raw: raw.ledger_evidence,
-            },
+            ledger_evidence: StoreLedgerEvidence::from_raw(raw.ledger_evidence, self.domain),
         }
     }
 }
@@ -3809,6 +4014,7 @@ impl<CanonicalKind, CanonicalTag, EvidenceKind, EvidenceTag>
 pub struct PreparedStoreFailure<EvidenceKind, EvidenceTag> {
     raw: RawPreparedStoreFailure,
     evidence_root: OutcomeEvidenceStoreRef<EvidenceKind, EvidenceTag>,
+    domain: StoreKeyDomain,
 }
 
 impl<EvidenceKind, EvidenceTag> PreparedStoreFailure<EvidenceKind, EvidenceTag> {
@@ -3820,9 +4026,7 @@ impl<EvidenceKind, EvidenceTag> PreparedStoreFailure<EvidenceKind, EvidenceTag> 
                 raw: raw.outcome_evidence,
                 root: self.evidence_root,
             },
-            ledger_evidence: StoreLedgerEvidence {
-                raw: raw.ledger_evidence,
-            },
+            ledger_evidence: StoreLedgerEvidence::from_raw(raw.ledger_evidence, self.domain),
         }
     }
 }
@@ -3831,6 +4035,7 @@ impl<EvidenceKind, EvidenceTag> PreparedStoreFailure<EvidenceKind, EvidenceTag> 
 #[must_use = "prepared fallback must be handed off or deliberately dropped"]
 pub struct PreparedStoreFallback {
     raw: RawPreparedStoreFallback,
+    domain: StoreKeyDomain,
 }
 
 impl PreparedStoreFallback {
@@ -3839,9 +4044,7 @@ impl PreparedStoreFallback {
         let raw = self.raw.handoff();
         PublishedStoreFallbackParts {
             fallback: PublishedStoreFallbackOutput { raw: raw.fallback },
-            ledger_evidence: StoreLedgerEvidence {
-                raw: raw.ledger_evidence,
-            },
+            ledger_evidence: StoreLedgerEvidence::from_raw(raw.ledger_evidence, self.domain),
         }
     }
 }
@@ -4100,11 +4303,6 @@ impl<Kind, Tag> PublishedRichFailureStore<Kind, Tag> {
         self.raw.account()
     }
 
-    /// Returns the frozen terminal cause.
-    pub fn cause(&self) -> StorePreparationFailure {
-        StorePreparationFailure::from_raw(self.raw.cause())
-    }
-
     /// Borrows the evidence table through a typed wrapper.
     pub fn outcome_evidence(&self) -> PublishedOutcomeEvidenceStoreRef<'_, Kind, Tag> {
         PublishedOutcomeEvidenceStoreRef {
@@ -4210,40 +4408,212 @@ where
 }
 
 /// Frozen destination-aware ledger evidence.
+///
+/// This terminal owner retains the runtime domain anchor and the metered key-bearing mapping, so
+/// semantic and ordinal queries remain valid after the producer or plugin-facing owner is gone.
 pub struct StoreLedgerEvidence {
-    raw: PublishedLedgerEvidence<StoreDimensionKey>,
+    raw: PublishedLedgerEvidence<StorePhaseKey, StoreDimensionKey>,
+    domain: StoreKeyDomain,
 }
 
 impl StoreLedgerEvidence {
-    /// Returns one frozen dimension snapshot.
-    pub fn dimension(&self, dimension: StoreDimensionKey) -> Option<StoreDimensionSnapshot> {
-        self.raw
-            .dimension(dimension)
-            .map(|raw| StoreDimensionSnapshot {
-                dimension: raw.dimension(),
-                attempted: raw.attempted(),
-                consumed: raw.consumed(),
-                peak_live_bytes: raw.peak_live_bytes(),
-                committed_canonical_output: raw.committed_canonical_output(),
-                published_outcome_evidence: raw.published_outcome_evidence(),
-            })
+    const fn from_raw(
+        raw: PublishedLedgerEvidence<StorePhaseKey, StoreDimensionKey>,
+        domain: StoreKeyDomain,
+    ) -> Self {
+        Self { raw, domain }
     }
+
+    /// Returns the complete frozen terminal header.
+    pub fn header(&self) -> StoreLedgerEvidenceHeader {
+        let raw = self
+            .raw
+            .header()
+            .unwrap_or_else(|| published_root_invariant("terminal evidence header"));
+        StoreLedgerEvidenceHeader {
+            schema_revision: raw.schema_revision(),
+            terminal_cause: match raw.terminal_cause() {
+                TerminalEvidenceCause::Success => StoreTerminalCause::Success,
+                TerminalEvidenceCause::Failure(cause) => {
+                    StoreTerminalCause::Failure(StorePreparationFailure::from_raw(cause))
+                }
+            },
+            last_completed_phase: raw.last_completed_phase().map(StorePhaseKey::semantic_id),
+            dimension_count: raw.dimension_count(),
+            phase_count: raw.phase_count(),
+            current_live_bytes: raw.current_live_bytes(),
+            peak_live_bytes: raw.peak_live_bytes(),
+            active_reservations: raw.active_reservations(),
+            current_evidence_bytes: raw.current_evidence_bytes(),
+            peak_evidence_bytes: raw.peak_evidence_bytes(),
+        }
+    }
+
+    /// Returns one frozen dimension snapshot after exact key-domain validation.
+    pub fn dimension(
+        &self,
+        dimension: StoreDimensionKey,
+    ) -> Result<StoreDimensionSnapshot, StoreRuntimeError> {
+        if !self.domain.owns_dimension(dimension) {
+            return Err(StoreRuntimeError::ForeignDimensionDomain { dimension });
+        }
+        let raw = self
+            .raw
+            .dimension(dimension)
+            .ok_or(StoreRuntimeError::Ledger(LedgerCause::UnknownDimension {
+                dimension,
+            }))?;
+        Ok(StoreDimensionSnapshot {
+            dimension: dimension.semantic_id(),
+            attempted: raw.attempted(),
+            consumed: raw.consumed(),
+            current_live_bytes: raw.current_live_bytes(),
+            peak_live_bytes: raw.peak_live_bytes(),
+            pending_publication: raw.pending_publication(),
+            committed: raw.committed(),
+            committed_canonical_output: raw.committed_canonical_output(),
+            published_outcome_evidence: raw.published_outcome_evidence(),
+        })
+    }
+
+    /// Returns one frozen dimension snapshot by stable semantic identity.
+    pub fn dimension_by_semantic(
+        &self,
+        dimension: StoreDimensionSemanticId,
+    ) -> Option<StoreDimensionSnapshot> {
+        let dimension = self.domain.try_admit_dimension(dimension)?;
+        self.dimension(dimension).ok()
+    }
+
+    /// Enumerates one frozen dimension and its stable semantic identity by canonical ordinal.
+    pub fn dimension_at(&self, index: usize) -> Option<StoreDimensionSnapshot> {
+        let dimension = self.raw.dimension_key_at(index)?;
+        self.dimension(dimension).ok()
+    }
+
+    /// Returns one frozen phase snapshot after exact key-domain validation.
+    pub fn phase(&self, phase: StorePhaseKey) -> Result<StorePhaseSnapshot, StoreRuntimeError> {
+        if !self.domain.owns_phase(phase) {
+            return Err(StoreRuntimeError::ForeignPhaseDomain { phase });
+        }
+        let raw = self
+            .raw
+            .phase(phase)
+            .ok_or(StoreRuntimeError::Ledger(LedgerCause::UnknownPhase))?;
+        Ok(StorePhaseSnapshot {
+            phase: phase.semantic_id(),
+            current_live_bytes: raw.current_live_bytes(),
+            peak_live_bytes: raw.peak_live_bytes(),
+        })
+    }
+
+    /// Returns one frozen phase snapshot by stable semantic identity.
+    pub fn phase_by_semantic(&self, phase: StorePhaseSemanticId) -> Option<StorePhaseSnapshot> {
+        let phase = self.domain.try_admit_phase(phase)?;
+        self.phase(phase).ok()
+    }
+
+    /// Enumerates one frozen phase and its stable semantic identity by canonical ordinal.
+    pub fn phase_at(&self, index: usize) -> Option<StorePhaseSnapshot> {
+        let phase = self.raw.phase_key_at(index)?;
+        self.phase(phase).ok()
+    }
+}
+
+/// Complete copied header from one terminal retained-store operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StoreLedgerEvidenceHeader {
+    schema_revision: u32,
+    terminal_cause: StoreTerminalCause,
+    last_completed_phase: Option<StorePhaseSemanticId>,
+    dimension_count: usize,
+    phase_count: usize,
+    current_live_bytes: u64,
+    peak_live_bytes: u64,
+    active_reservations: u64,
+    current_evidence_bytes: u64,
+    peak_evidence_bytes: u64,
+}
+
+impl StoreLedgerEvidenceHeader {
+    /// Returns the terminal evidence schema revision.
+    pub const fn schema_revision(self) -> u32 {
+        self.schema_revision
+    }
+
+    /// Returns the unique terminal cause recorded for this publication.
+    pub const fn terminal_cause(self) -> StoreTerminalCause {
+        self.terminal_cause
+    }
+
+    /// Returns the last semantically completed phase, when one completed.
+    pub const fn last_completed_phase(self) -> Option<StorePhaseSemanticId> {
+        self.last_completed_phase
+    }
+
+    /// Returns the number of frozen dimension entries.
+    pub const fn dimension_count(self) -> usize {
+        self.dimension_count
+    }
+
+    /// Returns the number of frozen phase entries.
+    pub const fn phase_count(self) -> usize {
+        self.phase_count
+    }
+
+    /// Returns operation-live bytes remaining at terminal freeze.
+    pub const fn current_live_bytes(self) -> u64 {
+        self.current_live_bytes
+    }
+
+    /// Returns the operation-live byte high-water mark.
+    pub const fn peak_live_bytes(self) -> u64 {
+        self.peak_live_bytes
+    }
+
+    /// Returns active reservations remaining at terminal freeze.
+    pub const fn active_reservations(self) -> u64 {
+        self.active_reservations
+    }
+
+    /// Returns ledger evidence bytes remaining at terminal freeze.
+    pub const fn current_evidence_bytes(self) -> u64 {
+        self.current_evidence_bytes
+    }
+
+    /// Returns the ledger evidence byte high-water mark.
+    pub const fn peak_evidence_bytes(self) -> u64 {
+        self.peak_evidence_bytes
+    }
+}
+
+/// Unique terminal classification stored in the ledger evidence header.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum StoreTerminalCause {
+    /// The validated canonical and outcome-evidence graph published successfully.
+    Success,
+    /// Preparation terminated with the contained failure.
+    Failure(StorePreparationFailure),
 }
 
 /// Copied destination-aware dimension snapshot from a published operation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StoreDimensionSnapshot {
-    dimension: StoreDimensionKey,
+    dimension: StoreDimensionSemanticId,
     attempted: u64,
     consumed: u64,
+    current_live_bytes: u64,
     peak_live_bytes: u64,
+    pending_publication: u64,
+    committed: u64,
     committed_canonical_output: u64,
     published_outcome_evidence: u64,
 }
 
 impl StoreDimensionSnapshot {
-    /// Returns the owner-defined dimension.
-    pub const fn dimension(self) -> StoreDimensionKey {
+    /// Returns the stable owner-defined dimension semantic identity.
+    pub const fn dimension(self) -> StoreDimensionSemanticId {
         self.dimension
     }
 
@@ -4257,9 +4627,24 @@ impl StoreDimensionSnapshot {
         self.consumed
     }
 
+    /// Returns operation-live bytes remaining at terminal freeze.
+    pub const fn current_live_bytes(self) -> u64 {
+        self.current_live_bytes
+    }
+
     /// Returns peak operation-live bytes.
     pub const fn peak_live_bytes(self) -> u64 {
         self.peak_live_bytes
+    }
+
+    /// Returns publication units still pending at terminal freeze.
+    pub const fn pending_publication(self) -> u64 {
+        self.pending_publication
+    }
+
+    /// Returns total committed output in this dimension.
+    pub const fn committed(self) -> u64 {
+        self.committed
     }
 
     /// Returns committed canonical output.
@@ -4270,6 +4655,31 @@ impl StoreDimensionSnapshot {
     /// Returns published outcome evidence.
     pub const fn published_outcome_evidence(self) -> u64 {
         self.published_outcome_evidence
+    }
+}
+
+/// Copied accounting snapshot for one frozen store phase.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StorePhaseSnapshot {
+    phase: StorePhaseSemanticId,
+    current_live_bytes: u64,
+    peak_live_bytes: u64,
+}
+
+impl StorePhaseSnapshot {
+    /// Returns the stable owner-defined phase semantic identity.
+    pub const fn phase(self) -> StorePhaseSemanticId {
+        self.phase
+    }
+
+    /// Returns operation-live bytes remaining in this phase at terminal freeze.
+    pub const fn current_live_bytes(self) -> u64 {
+        self.current_live_bytes
+    }
+
+    /// Returns the phase's operation-live byte high-water mark.
+    pub const fn peak_live_bytes(self) -> u64 {
+        self.peak_live_bytes
     }
 }
 
@@ -4287,11 +4697,6 @@ impl PublishedStoreFallbackOutput {
     /// Returns the physical account that owns the fallback.
     pub fn account(&self) -> &PhysicalStorageAccount {
         self.raw.account()
-    }
-
-    /// Returns the frozen terminal cause.
-    pub fn cause(&self) -> StorePreparationFailure {
-        StorePreparationFailure::from_raw(self.raw.cause())
     }
 }
 
@@ -4348,7 +4753,6 @@ fn unreachable_store_state() -> ! {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::OnceLock;
 
     use crate::retained::{
         test_fail_next_membership_assignment, test_panic_final_owner_drop_after,
@@ -4362,13 +4766,44 @@ mod tests {
 
     impl OperationOwner for TestOwner {}
 
-    fn test_domain() -> &'static StoreKeyDomain {
-        static DOMAIN: OnceLock<StoreKeyDomain> = OnceLock::new();
-        DOMAIN.get_or_init(|| StoreKeyDomain::try_new().expect("test store key domain"))
+    const fn test_catalog() -> StoreSemanticCatalogId {
+        StoreSemanticCatalogId::new(
+            *b"baozi-unit-store",
+            NonZeroU32::new(1).expect("test catalog revision is nonzero"),
+        )
     }
 
-    fn test_phase() -> StorePhaseKey {
-        test_domain().phase_key(NonZeroU32::new(1).expect("test phase local id"))
+    const fn test_phase_semantic(local: u64) -> StorePhaseSemanticId {
+        StorePhaseSemanticId::new(
+            test_catalog(),
+            NonZeroU64::new(local).expect("test phase local id is nonzero"),
+        )
+    }
+
+    const fn test_dimension_semantic(local: u64) -> StoreDimensionSemanticId {
+        StoreDimensionSemanticId::new(
+            test_catalog(),
+            NonZeroU64::new(local).expect("test dimension local id is nonzero"),
+        )
+    }
+
+    #[derive(Clone, Copy)]
+    struct TestKeys {
+        phase: StorePhaseKey,
+        dimension: StoreDimensionKey,
+    }
+
+    fn test_vocabulary() -> (StoreKeyDomain, TestKeys) {
+        let domain = StoreKeyDomain::try_new(test_catalog()).expect("test store key domain");
+        let keys = TestKeys {
+            phase: domain
+                .try_admit_phase(test_phase_semantic(1))
+                .expect("test phase key"),
+            dimension: domain
+                .try_admit_dimension(test_dimension_semantic(1))
+                .expect("test dimension key"),
+        };
+        (domain, keys)
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -4397,10 +4832,6 @@ mod tests {
         }
     }
 
-    fn test_dimension() -> StoreDimensionKey {
-        test_domain().dimension_key(NonZeroU32::new(1).expect("test dimension local id"))
-    }
-
     #[derive(Clone, Copy)]
     struct TestTag;
 
@@ -4424,48 +4855,60 @@ mod tests {
             .expect("test account")
     }
 
-    fn test_writer_plan(attributions: usize, commitments: usize) -> RetainedStoreWriterPlan {
+    fn test_writer_plan(
+        keys: TestKeys,
+        attributions: usize,
+        commitments: usize,
+    ) -> RetainedStoreWriterPlan {
         RetainedStoreWriterPlan::new(
-            test_phase(),
-            test_dimension(),
-            test_dimension(),
+            keys.phase,
+            keys.dimension,
+            keys.dimension,
             RetainedStoreBatchLimits::new(attributions, commitments).expect("test writer limits"),
         )
     }
 
-    fn test_operation(account: &PhysicalStorageAccount, evidence_limit: u64) -> TestOperation {
+    fn test_operation(
+        account: &PhysicalStorageAccount,
+        evidence_limit: u64,
+    ) -> (TestOperation, TestKeys) {
+        let (domain, keys) = test_vocabulary();
         let policy = DimensionPolicy::reservable_bytes(u64::MAX, u64::MAX, u64::MAX, u64::MAX)
             .with_published_outcome_evidence_limit(evidence_limit);
         let ledger_limits =
-            LedgerLimits::new(u64::MAX, [(test_dimension(), policy)]).expect("test ledger limits");
-        let ledger_plan = StoreLedgerPlan::try_new(test_domain(), ledger_limits, &[test_phase()])
+            LedgerLimits::new(u64::MAX, [(keys.dimension, policy)]).expect("test ledger limits");
+        let ledger_plan = StoreLedgerPlan::try_new(domain, ledger_limits, &[keys.phase])
             .expect("test store ledger plan");
         let start = RetainedStoreStartPlan::new(
-            test_writer_plan(32, 8),
-            RetainedStoreSharePlan::new(test_dimension(), test_dimension()),
+            test_writer_plan(keys, 32, 8),
+            RetainedStoreSharePlan::new(keys.dimension, keys.dimension),
             StoreFallbackEnvelope::new(91),
-            test_dimension(),
+            keys.dimension,
             1,
-            test_dimension(),
+            keys.dimension,
             1,
         );
-        TestOperation::try_start(OperationControl::default(), ledger_plan, account, start)
-            .expect("test operation")
+        (
+            TestOperation::try_start(OperationControl::default(), ledger_plan, account, start)
+                .expect("test operation"),
+            keys,
+        )
     }
 
     fn test_publication_plan(
+        keys: TestKeys,
         canonical_blocks: usize,
         evidence_blocks: usize,
     ) -> RetainedStorePublicationPlan {
         RetainedStorePublicationPlan::success(
             RetainedStoreBlockTablePlan::new(
-                test_writer_plan(canonical_blocks + 1, 2),
+                test_writer_plan(keys, canonical_blocks + 1, 2),
                 canonical_blocks,
                 canonical_blocks,
             )
             .expect("test canonical table plan"),
             RetainedStoreBlockTablePlan::new(
-                test_writer_plan(evidence_blocks + 1, 2),
+                test_writer_plan(keys, evidence_blocks + 1, 2),
                 evidence_blocks,
                 evidence_blocks,
             )
@@ -4504,25 +4947,53 @@ mod tests {
         &tail[..end + "\n    }\n".len()]
     }
 
+    fn implementation_block<'a>(source: &'a str, marker: &str) -> &'a str {
+        let start = source
+            .find(marker)
+            .unwrap_or_else(|| panic!("missing implementation marker `{marker}`"));
+        let tail = &source[start..];
+        let end = tail
+            .find("\n}\n")
+            .unwrap_or_else(|| panic!("unterminated implementation `{marker}`"));
+        &tail[..end + "\n}\n".len()]
+    }
+
+    fn type_declaration<'a>(source: &'a str, marker: &str) -> &'a str {
+        let start = source
+            .find(marker)
+            .unwrap_or_else(|| panic!("missing type declaration `{marker}`"));
+        let tail = &source[start..];
+        let braced_end = tail.find("\n}").map(|end| end + "\n}".len());
+        let tuple_end = tail.find(";\n").map(|end| end + 1);
+        let end = match (braced_end, tuple_end) {
+            (Some(braced), Some(tuple)) => braced.min(tuple),
+            (Some(braced), None) => braced,
+            (None, Some(tuple)) => tuple,
+            (None, None) => panic!("unterminated type declaration `{marker}`"),
+        };
+        &tail[..end]
+    }
+
     #[test]
     fn poisoned_account_rejects_before_frozen_phase_catalog_construction() {
         let factory = test_factory();
         let account = test_account(&factory);
         let _ = account.test_record_poison(AccountPoisonReason::OwnershipGraphUnverified);
         let before_account = account.snapshot();
+        let (domain, keys) = test_vocabulary();
         let policy = DimensionPolicy::reservable_bytes(u64::MAX, u64::MAX, u64::MAX, u64::MAX)
             .with_published_outcome_evidence_limit(u64::MAX);
         let limits =
-            LedgerLimits::new(u64::MAX, [(test_dimension(), policy)]).expect("test ledger limits");
-        let ledger_plan = StoreLedgerPlan::try_new(test_domain(), limits, &[test_phase()])
+            LedgerLimits::new(u64::MAX, [(keys.dimension, policy)]).expect("test ledger limits");
+        let ledger_plan = StoreLedgerPlan::try_new(domain, limits, &[keys.phase])
             .expect("test store ledger plan");
         let start = RetainedStoreStartPlan::new(
-            test_writer_plan(8, 4),
-            RetainedStoreSharePlan::new(test_dimension(), test_dimension()),
+            test_writer_plan(keys, 8, 4),
+            RetainedStoreSharePlan::new(keys.dimension, keys.dimension),
             StoreFallbackEnvelope::new(91),
-            test_dimension(),
+            keys.dimension,
             1,
-            test_dimension(),
+            keys.dimension,
             1,
         );
         let before_catalog_entries = crate::ledger::test_phase_catalog_construction_entries();
@@ -4547,27 +5018,30 @@ mod tests {
     fn phase_completion_validates_domain_and_catalog_before_monotonic_progress() {
         let factory = test_factory();
         let account = test_account(&factory);
-        let finalize_phase =
-            test_domain().phase_key(NonZeroU32::new(2).expect("finalize phase local id"));
-        let unknown_phase =
-            test_domain().phase_key(NonZeroU32::new(3).expect("unknown phase local id"));
-        let foreign_domain = StoreKeyDomain::try_new().expect("foreign key domain");
-        let foreign_phase =
-            foreign_domain.phase_key(NonZeroU32::new(1).expect("foreign phase local id"));
+        let (domain, keys) = test_vocabulary();
+        let finalize_phase = domain
+            .try_admit_phase(test_phase_semantic(2))
+            .expect("finalize phase key");
+        let unknown_phase = domain
+            .try_admit_phase(test_phase_semantic(3))
+            .expect("unknown phase key");
+        let foreign_domain = StoreKeyDomain::try_new(test_catalog()).expect("foreign key domain");
+        let foreign_phase = foreign_domain
+            .try_admit_phase(test_phase_semantic(1))
+            .expect("foreign phase key");
         let policy = DimensionPolicy::reservable_bytes(u64::MAX, u64::MAX, u64::MAX, u64::MAX)
             .with_published_outcome_evidence_limit(u64::MAX);
         let limits =
-            LedgerLimits::new(u64::MAX, [(test_dimension(), policy)]).expect("test ledger limits");
-        let ledger_plan =
-            StoreLedgerPlan::try_new(test_domain(), limits, &[test_phase(), finalize_phase])
-                .expect("two-phase store ledger plan");
+            LedgerLimits::new(u64::MAX, [(keys.dimension, policy)]).expect("test ledger limits");
+        let ledger_plan = StoreLedgerPlan::try_new(domain, limits, &[keys.phase, finalize_phase])
+            .expect("two-phase store ledger plan");
         let start = RetainedStoreStartPlan::new(
-            test_writer_plan(32, 8),
-            RetainedStoreSharePlan::new(test_dimension(), test_dimension()),
+            test_writer_plan(keys, 32, 8),
+            RetainedStoreSharePlan::new(keys.dimension, keys.dimension),
             StoreFallbackEnvelope::new(91),
-            test_dimension(),
+            keys.dimension,
             1,
-            test_dimension(),
+            keys.dimension,
             1,
         );
         let operation =
@@ -4585,7 +5059,7 @@ mod tests {
             Err(StoreRuntimeError::Ledger(LedgerCause::UnknownPhase))
         );
         operation
-            .try_complete_phase(test_phase())
+            .try_complete_phase(keys.phase)
             .expect("build completes");
         operation
             .try_complete_phase(finalize_phase)
@@ -4594,10 +5068,10 @@ mod tests {
             .try_complete_phase(finalize_phase)
             .expect("repeating finalize is idempotent");
         assert_eq!(
-            operation.try_complete_phase(test_phase()),
+            operation.try_complete_phase(keys.phase),
             Err(StoreRuntimeError::PhaseCompletionRegression {
                 last_completed_phase: finalize_phase,
-                phase: test_phase(),
+                phase: keys.phase,
             })
         );
         operation
@@ -4616,10 +5090,6 @@ mod tests {
             StoreRuntimeError::PhaseCompletionPublicationCompleted
         );
         assert_eq!(
-            map_phase_completion_error(PhaseCompletionError::<StorePhaseKey>::CatalogNotFrozen),
-            StoreRuntimeError::PhaseCompletionCatalogNotFrozen
-        );
-        assert_eq!(
             map_phase_completion_error(PhaseCompletionError::<StorePhaseKey>::CatalogShapeMismatch),
             StoreRuntimeError::PhaseCompletionCatalogShapeMismatch
         );
@@ -4630,19 +5100,20 @@ mod tests {
         let _guard = crate::ledger::test_evidence_allocation_guard();
         let factory = test_factory();
         let account = test_account(&factory);
+        let (domain, keys) = test_vocabulary();
         let policy = DimensionPolicy::reservable_bytes(u64::MAX, u64::MAX, u64::MAX, u64::MAX)
             .with_published_outcome_evidence_limit(u64::MAX);
         let limits =
-            LedgerLimits::new(u64::MAX, [(test_dimension(), policy)]).expect("test ledger limits");
-        let ledger_plan = StoreLedgerPlan::try_new(test_domain(), limits, &[test_phase()])
+            LedgerLimits::new(u64::MAX, [(keys.dimension, policy)]).expect("test ledger limits");
+        let ledger_plan = StoreLedgerPlan::try_new(domain, limits, &[keys.phase])
             .expect("test store ledger plan");
         let start = RetainedStoreStartPlan::new(
-            test_writer_plan(8, 4),
-            RetainedStoreSharePlan::new(test_dimension(), test_dimension()),
+            test_writer_plan(keys, 8, 4),
+            RetainedStoreSharePlan::new(keys.dimension, keys.dimension),
             StoreFallbackEnvelope::new(91),
-            test_dimension(),
+            keys.dimension,
             1,
-            test_dimension(),
+            keys.dimension,
             1,
         );
         let before_account = account.snapshot();
@@ -4699,8 +5170,9 @@ mod tests {
 
         let factory = test_factory();
         let account = test_account(&factory);
-        let mut assembly = test_operation(&account, u64::MAX)
-            .try_publication_assembly(test_publication_plan(3, 1))
+        let (operation, keys) = test_operation(&account, u64::MAX);
+        let mut assembly = operation
+            .try_publication_assembly(test_publication_plan(keys, 3, 1))
             .expect("record accounting assembly");
         let mut snapshots = Vec::with_capacity(4);
         snapshots.push(account.snapshot());
@@ -4748,8 +5220,9 @@ mod tests {
     fn membership_rollback_storage_failure_poisoned_the_store_and_quarantines_accounting() {
         let factory = test_factory();
         let account = test_account(&factory);
-        let mut assembly = test_operation(&account, u64::MAX)
-            .try_publication_assembly(test_publication_plan(1, 1))
+        let (operation, keys) = test_operation(&account, u64::MAX);
+        let mut assembly = operation
+            .try_publication_assembly(test_publication_plan(keys, 1, 1))
             .expect("membership rollback assembly");
         let ledger = assembly.raw.test_ledger_probe();
         let before_active = ledger.active_reservations();
@@ -4804,8 +5277,9 @@ mod tests {
     fn containment_mapping_preserves_retained_charge_and_restricts_the_facade_immediately() {
         let factory = test_factory();
         let account = test_account(&factory);
-        let mut assembly = test_operation(&account, u64::MAX)
-            .try_publication_assembly(test_publication_plan(1, 1))
+        let (operation, keys) = test_operation(&account, u64::MAX);
+        let mut assembly = operation
+            .try_publication_assembly(test_publication_plan(keys, 1, 1))
             .expect("containment mapping assembly");
         let poisoned =
             account.test_record_poison(crate::AccountPoisonReason::OwnershipGraphUnverified);
@@ -4835,8 +5309,9 @@ mod tests {
     fn builder_panic_retains_physical_and_operation_charges_fail_closed() {
         let factory = test_factory();
         let account = test_account(&factory);
-        let mut assembly = test_operation(&account, u64::MAX)
-            .try_publication_assembly(test_publication_plan(1, 1))
+        let (operation, keys) = test_operation(&account, u64::MAX);
+        let mut assembly = operation
+            .try_publication_assembly(test_publication_plan(keys, 1, 1))
             .expect("builder-panic assembly");
         let ledger = assembly.raw.test_ledger_probe();
         let before_active = ledger.active_reservations();
@@ -4903,8 +5378,9 @@ mod tests {
     fn clean_membership_rejection_releases_storage_and_attribution_once() {
         let factory = test_factory();
         let account = test_account(&factory);
-        let mut assembly = test_operation(&account, u64::MAX)
-            .try_publication_assembly(test_publication_plan(1, 1))
+        let (operation, keys) = test_operation(&account, u64::MAX);
+        let mut assembly = operation
+            .try_publication_assembly(test_publication_plan(keys, 1, 1))
             .expect("clean membership rollback assembly");
         let ledger = assembly.raw.test_ledger_probe();
         let before_active = ledger.active_reservations();
@@ -4950,11 +5426,12 @@ mod tests {
     }
 
     #[test]
-    fn primary_rejection_dependency_unwind_maps_to_non_retryable_storage_failure() {
+    fn primary_rejection_dependency_unwind_stops_before_attribution_ack() {
         let factory = test_factory();
         let account = test_account(&factory);
-        let mut assembly = test_operation(&account, 4)
-            .try_publication_assembly(test_publication_plan(2, 1))
+        let (operation, keys) = test_operation(&account, 4);
+        let mut assembly = operation
+            .try_publication_assembly(test_publication_plan(keys, 2, 1))
             .expect("primary rejection assembly");
         let leaf = assembly
             .try_retain_canonical_sequence(
@@ -4978,7 +5455,7 @@ mod tests {
             )
             .expect("evidence root");
         assembly
-            .try_commit_outcome_evidence(test_dimension(), 4)
+            .try_commit_outcome_evidence(keys.dimension, 4)
             .expect("primary commitment");
         let ledger = assembly.raw.test_ledger_probe();
         let before_active = ledger.active_reservations();
@@ -5017,10 +5494,8 @@ mod tests {
                 .test_unverified_drop_count()
                 .is_some_and(|count| count > before_unverified)
         );
-        assert_eq!(before_active - ledger.active_reservations(), 3);
-        assert!(ledger.active_reservations() > 0);
-        assert!(ledger.current_live_bytes() > 0);
-        assert!(ledger.current_live_bytes() < before_live);
+        assert_eq!(ledger.active_reservations(), before_active);
+        assert_eq!(ledger.current_live_bytes(), before_live);
         let after_physical = account.snapshot();
         assert!(after_physical.live_retained_bytes() > 0);
         assert!(after_physical.live_retained_bytes() < before_physical.live_retained_bytes());
@@ -5077,6 +5552,15 @@ mod tests {
     fn store_key_authority_is_unique_and_raw_brand_access_stays_private() {
         let root = include_str!("lib.rs");
         let source = include_str!("concrete_store.rs");
+        let catalog_start = source
+            .find("pub struct StoreSemanticCatalogId")
+            .expect("public store semantic catalog identity");
+        let phase_semantic_start = source
+            .find("pub struct StorePhaseSemanticId")
+            .expect("public store phase semantic identity");
+        let dimension_semantic_start = source
+            .find("pub struct StoreDimensionSemanticId")
+            .expect("public store dimension semantic identity");
         let domain_start = source
             .find("pub struct StoreKeyDomain")
             .expect("public store key authority");
@@ -5096,6 +5580,9 @@ mod tests {
                 .expect("complete store key authority declaration")
             + "\n}".len();
         let authority_declaration = &source[authority_declaration_start..authority_declaration_end];
+        let catalog_surface = &source[catalog_start..phase_semantic_start];
+        let phase_semantic_surface = &source[phase_semantic_start..dimension_semantic_start];
+        let dimension_semantic_surface = &source[dimension_semantic_start..domain_start];
         let domain_surface = &source[domain_start..phase_start];
         let phase_surface = &source[phase_start..dimension_start];
         let dimension_surface = &source[dimension_start..plan_start];
@@ -5104,6 +5591,15 @@ mod tests {
         assert!(!authority_declaration.contains("#[derive("));
         assert!(!domain_surface.contains("impl Clone for StoreKeyDomain"));
         assert!(!domain_surface.contains("impl Copy for StoreKeyDomain"));
+        assert!(domain_surface.contains("pub fn try_admit_phase("));
+        assert!(domain_surface.contains("pub fn try_admit_dimension("));
+        assert!(!domain_surface.contains("pub fn phase_key("));
+        assert!(!domain_surface.contains("pub fn dimension_key("));
+        let plan_declaration = &source[plan_start.saturating_sub(128)..plan_start];
+        assert!(!plan_declaration.contains("#[derive(PartialEq, Eq)]"));
+        let plan_surface = &source[plan_start..];
+        assert!(plan_surface.contains("This is an attempt-once authority transfer"));
+        assert!(plan_surface.contains("A retry must create a fresh domain"));
         for forbidden in [
             "pub const fn id(",
             "pub fn id(",
@@ -5120,12 +5616,189 @@ mod tests {
             assert!(!surface.contains("pub fn new("));
             assert!(!surface.contains("pub const fn get("));
             assert!(!surface.contains("pub fn get("));
-            assert!(surface.contains("pub const fn local_id("));
+            for forbidden in [
+                "pub const fn local_id(",
+                "pub fn local_id(",
+                "pub const fn brand(",
+                "pub fn brand(",
+                "pub const fn raw(",
+                "pub fn raw(",
+            ] {
+                assert!(
+                    !surface.contains(forbidden),
+                    "store key leaked process-local identity through `{forbidden}`"
+                );
+            }
+            assert!(surface.contains("pub const fn semantic_id("));
             assert_eq!(surface.matches("pub const fn ").count(), 1);
             assert_eq!(surface.matches("pub fn ").count(), 0);
         }
+        for surface in [
+            catalog_surface,
+            phase_semantic_surface,
+            dimension_semantic_surface,
+        ] {
+            assert!(
+                surface.contains("pub const fn to_canonical_bytes("),
+                "every exported semantic identity must expose a canonical byte encoding"
+            );
+        }
         assert!(phase_surface.contains("impl Hash for StorePhaseKey"));
         assert!(dimension_surface.contains("impl Hash for StoreDimensionKey"));
+    }
+
+    #[test]
+    fn semantic_authority_and_terminal_key_cells_cannot_retain_executable_state() {
+        let store = include_str!("concrete_store.rs");
+        let evidence = include_str!("retained/evidence.rs");
+        let declarations = [
+            (
+                "StoreSemanticCatalogId",
+                type_declaration(store, "pub struct StoreSemanticCatalogId"),
+                store,
+            ),
+            (
+                "StorePhaseSemanticId",
+                type_declaration(store, "pub struct StorePhaseSemanticId"),
+                store,
+            ),
+            (
+                "StoreDimensionSemanticId",
+                type_declaration(store, "pub struct StoreDimensionSemanticId"),
+                store,
+            ),
+            (
+                "StoreKeyDomain",
+                type_declaration(store, "pub struct StoreKeyDomain"),
+                store,
+            ),
+            (
+                "StorePhaseKey",
+                type_declaration(store, "pub struct StorePhaseKey"),
+                store,
+            ),
+            (
+                "StoreDimensionKey",
+                type_declaration(store, "pub struct StoreDimensionKey"),
+                store,
+            ),
+            (
+                "FallbackDimensionCell",
+                type_declaration(evidence, "pub(super) struct FallbackDimensionCell"),
+                evidence,
+            ),
+            (
+                "FallbackPhaseCell",
+                type_declaration(evidence, "pub(super) struct FallbackPhaseCell"),
+                evidence,
+            ),
+        ];
+
+        for (name, declaration, source) in declarations {
+            for forbidden in [
+                "Arc<", "Rc<", "dyn ", "fn(", "fn ", "*const", "*mut", "callback",
+            ] {
+                assert!(
+                    !declaration.contains(forbidden),
+                    "terminal semantic authority `{name}` retained executable state through `{forbidden}`"
+                );
+            }
+            assert!(
+                !source.contains(&format!("Drop for {name}")),
+                "terminal semantic authority `{name}` acquired executable drop behavior"
+            );
+        }
+    }
+
+    #[test]
+    fn prepared_store_surfaces_expose_only_consuming_classification_or_handoff() {
+        let store = include_str!("concrete_store.rs");
+        let retained = include_str!("retained.rs");
+        let concrete_impls = [
+            implementation_block(
+                store,
+                "impl<CanonicalKind, CanonicalTag, EvidenceKind, EvidenceTag>\n    PreparedStoreSuccess",
+            ),
+            implementation_block(
+                store,
+                "impl<EvidenceKind, EvidenceTag> PreparedStoreFailure",
+            ),
+            implementation_block(store, "impl PreparedStoreFallback"),
+        ];
+        let prepared_struct_marker = ["pub struct ", "PreparedStore"].concat();
+        assert_eq!(store.matches(&prepared_struct_marker).count(), 3);
+        for surface in concrete_impls {
+            assert_eq!(surface.matches("pub fn ").count(), 1);
+            assert!(surface.contains("pub fn handoff("));
+            assert!(!surface.contains("&self"));
+            assert!(!surface.contains("&mut self"));
+            for forbidden in [
+                "pub fn canonical",
+                "pub fn outcome_evidence",
+                "pub fn evidence",
+                "pub fn root",
+                "pub fn aggregate",
+                "pub fn value",
+                "pub fn ledger_evidence",
+            ] {
+                assert!(
+                    !surface.contains(forbidden),
+                    "prepared concrete owner leaked content through `{forbidden}`"
+                );
+            }
+        }
+
+        let retained_publication = implementation_block(
+            retained,
+            "impl<CanonicalBlock, EvidenceBlock, F, P, D>\n    PreparedRetainedPublication",
+        );
+        assert_eq!(retained_publication.matches("pub fn ").count(), 1);
+        assert!(retained_publication.contains("pub fn into_outcome("));
+        assert!(!retained_publication.contains("&self"));
+        assert!(!retained_publication.contains("&mut self"));
+        for forbidden in [
+            "canonical_root(",
+            "outcome_evidence_root(",
+            "evidence(",
+            "root(",
+            "aggregate(",
+            "value(",
+        ] {
+            assert!(
+                !retained_publication.contains(forbidden),
+                "prepared retained classifier leaked content through `{forbidden}`"
+            );
+        }
+        let retained_impls = [
+            implementation_block(
+                retained,
+                "impl<CanonicalBlock, EvidenceBlock, P, D>\n    PreparedRetainedSuccess",
+            ),
+            implementation_block(
+                retained,
+                "impl<EvidenceBlock, P, D> PreparedRetainedRichFailure",
+            ),
+            implementation_block(retained, "impl<F, P, D> PreparedRetainedFallback"),
+        ];
+        for surface in retained_impls {
+            assert_eq!(surface.matches("pub fn ").count(), 1);
+            assert!(surface.contains("pub fn handoff("));
+            assert!(!surface.contains("&self"));
+            assert!(!surface.contains("&mut self"));
+            for forbidden in [
+                "canonical_root(",
+                "outcome_evidence_root(",
+                "evidence(",
+                "root(",
+                "aggregate(",
+                "value(",
+            ] {
+                assert!(
+                    !surface.contains(forbidden),
+                    "prepared retained owner leaked content through `{forbidden}`"
+                );
+            }
+        }
     }
 
     #[test]

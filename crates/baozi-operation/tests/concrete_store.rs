@@ -1,6 +1,6 @@
 use std::hash::{Hash, Hasher};
-use std::num::NonZeroU32;
-use std::sync::OnceLock;
+use std::num::{NonZeroU32, NonZeroU64};
+use std::sync::{Arc, OnceLock};
 
 use baozi_operation::{
     AccountPoisonReason, BytesPlan, CancellationToken, CanonicalSequenceRef, DimensionPolicy,
@@ -11,10 +11,11 @@ use baozi_operation::{
     PublishedStoreSuccessParts, RecordPlan, RetainedStoreBatchLimits, RetainedStoreBlockTablePlan,
     RetainedStoreOperation, RetainedStorePublicationPlan, RetainedStoreSharePlan,
     RetainedStoreStartError, RetainedStoreStartPlan, RetainedStoreWriterPlan, SequencePlan,
-    StoreBuildFailureClass, StoreDimensionKey, StoreFailureValidation, StoreFallbackEnvelope,
-    StoreKeyDomain, StoreLedgerPlan, StoreLedgerPlanError, StorePhaseKey,
-    StorePreparationFailureClass, StorePrepareError, StoreRuntimeError, StoreSuccessValidation,
-    Utf8Plan,
+    StoreBuildFailureClass, StoreDimensionKey, StoreDimensionSemanticId, StoreFailureValidation,
+    StoreFallbackEnvelope, StoreKeyDomain, StoreLedgerEvidence, StoreLedgerPlan,
+    StoreLedgerPlanError, StorePhaseKey, StorePhaseSemanticId, StorePreparationFailure,
+    StorePreparationFailureClass, StorePrepareError, StoreRuntimeError, StoreSemanticCatalogId,
+    StoreSuccessValidation, StoreTerminalCause, Utf8Plan,
 };
 
 struct TestOwner;
@@ -40,26 +41,166 @@ fn hash_transcript(value: &impl Hash) -> Vec<u8> {
     transcript.0
 }
 
-fn test_domain() -> &'static StoreKeyDomain {
-    static DOMAIN: OnceLock<StoreKeyDomain> = OnceLock::new();
-    DOMAIN.get_or_init(|| StoreKeyDomain::try_new().expect("test store key domain"))
+const fn phase_semantic_for(catalog: StoreSemanticCatalogId, value: u64) -> StorePhaseSemanticId {
+    StorePhaseSemanticId::new(
+        catalog,
+        NonZeroU64::new(value).expect("test phase semantic id is nonzero"),
+    )
 }
 
-fn foreign_domain() -> &'static StoreKeyDomain {
-    static DOMAIN: OnceLock<StoreKeyDomain> = OnceLock::new();
-    DOMAIN.get_or_init(|| StoreKeyDomain::try_new().expect("foreign test store key domain"))
+const fn phase_semantic(value: u64) -> StorePhaseSemanticId {
+    phase_semantic_for(test_catalog(), value)
 }
 
-fn test_phase() -> StorePhaseKey {
-    test_domain().phase_key(NonZeroU32::new(1).expect("test phase local id"))
+const fn dimension_semantic_for(
+    catalog: StoreSemanticCatalogId,
+    value: u64,
+) -> StoreDimensionSemanticId {
+    StoreDimensionSemanticId::new(
+        catalog,
+        NonZeroU64::new(value).expect("test dimension semantic id is nonzero"),
+    )
 }
 
-fn other_phase() -> StorePhaseKey {
-    test_domain().phase_key(NonZeroU32::new(2).expect("other phase local id"))
+const fn dimension_semantic(value: u64) -> StoreDimensionSemanticId {
+    dimension_semantic_for(test_catalog(), value)
+}
+
+const fn test_catalog() -> StoreSemanticCatalogId {
+    StoreSemanticCatalogId::new(
+        *b"baozi-test-store",
+        NonZeroU32::new(1).expect("test catalog revision is nonzero"),
+    )
+}
+
+#[derive(Clone, Copy)]
+struct TestKeys {
+    phase: StorePhaseKey,
+    other_phase: StorePhaseKey,
+    dimension: StoreDimensionKey,
+    other_dimension: StoreDimensionKey,
+}
+
+struct TestVocabulary {
+    domain: StoreKeyDomain,
+    keys: TestKeys,
+}
+
+fn test_vocabulary() -> TestVocabulary {
+    test_vocabulary_for(test_catalog())
+}
+
+fn test_vocabulary_for(catalog: StoreSemanticCatalogId) -> TestVocabulary {
+    let domain = StoreKeyDomain::try_new(catalog).expect("test store key domain");
+    let keys = TestKeys {
+        phase: domain
+            .try_admit_phase(phase_semantic_for(catalog, 1))
+            .expect("test phase key"),
+        other_phase: domain
+            .try_admit_phase(phase_semantic_for(catalog, 2))
+            .expect("other test phase key"),
+        dimension: domain
+            .try_admit_dimension(dimension_semantic_for(catalog, 1))
+            .expect("test dimension key"),
+        other_dimension: domain
+            .try_admit_dimension(dimension_semantic_for(catalog, 2))
+            .expect("other test dimension key"),
+    };
+    TestVocabulary { domain, keys }
+}
+
+struct FakeProducer {
+    catalog: StoreSemanticCatalogId,
+}
+
+fn fake_producer() -> Arc<FakeProducer> {
+    Arc::new(FakeProducer {
+        catalog: test_catalog(),
+    })
 }
 
 fn foreign_phase() -> StorePhaseKey {
-    foreign_domain().phase_key(NonZeroU32::new(1).expect("foreign phase local id"))
+    static KEY: OnceLock<StorePhaseKey> = OnceLock::new();
+    *KEY.get_or_init(|| {
+        StoreKeyDomain::try_new(test_catalog())
+            .expect("foreign phase key domain")
+            .try_admit_phase(phase_semantic(1))
+            .expect("foreign phase key")
+    })
+}
+
+fn store_failure_cause(evidence: &StoreLedgerEvidence) -> StorePreparationFailure {
+    match evidence.header().terminal_cause() {
+        StoreTerminalCause::Failure(cause) => cause,
+        StoreTerminalCause::Success => panic!("published failure must not report success"),
+        _ => panic!("published failure reported an unsupported terminal cause"),
+    }
+}
+
+fn assert_semantic_and_ordinal_evidence_queries(evidence: &StoreLedgerEvidence, keys: TestKeys) {
+    let dimension = evidence
+        .dimension_by_semantic(keys.dimension.semantic_id())
+        .expect("admitted dimension remains queryable by semantic identity");
+    assert_eq!(dimension.dimension(), keys.dimension.semantic_id());
+    assert_eq!(evidence.dimension_at(0), Some(dimension));
+    assert_eq!(evidence.dimension_at(1), None);
+    assert_eq!(
+        evidence.dimension_by_semantic(keys.other_dimension.semantic_id()),
+        None,
+        "an admitted key omitted from the frozen plan is not evidence authority"
+    );
+
+    let phase = evidence
+        .phase_by_semantic(keys.phase.semantic_id())
+        .expect("admitted phase remains queryable by semantic identity");
+    assert_eq!(phase.phase(), keys.phase.semantic_id());
+    assert_eq!(evidence.phase_at(0), Some(phase));
+    assert_eq!(evidence.phase_at(1), None);
+    assert_eq!(
+        evidence.phase_by_semantic(keys.other_phase.semantic_id()),
+        None,
+        "an admitted key omitted from the frozen plan is not evidence authority"
+    );
+
+    let foreign_catalog = StoreSemanticCatalogId::new(
+        *b"foreign-catalog!",
+        NonZeroU32::new(1).expect("foreign catalog revision is nonzero"),
+    );
+    assert_eq!(
+        evidence.dimension_by_semantic(StoreDimensionSemanticId::new(
+            foreign_catalog,
+            NonZeroU64::new(1).expect("foreign dimension id is nonzero"),
+        )),
+        None
+    );
+    assert_eq!(
+        evidence.phase_by_semantic(StorePhaseSemanticId::new(
+            foreign_catalog,
+            NonZeroU64::new(1).expect("foreign phase id is nonzero"),
+        )),
+        None
+    );
+
+    let revision_variant = StoreSemanticCatalogId::new(
+        test_catalog().namespace(),
+        NonZeroU32::new(test_catalog().revision().get() + 1).expect("revision variant is nonzero"),
+    );
+    assert_eq!(
+        evidence.dimension_by_semantic(StoreDimensionSemanticId::new(
+            revision_variant,
+            NonZeroU64::new(1).expect("revision-variant dimension id is nonzero"),
+        )),
+        None,
+        "same-namespace identities from another revision are not dimension evidence authority"
+    );
+    assert_eq!(
+        evidence.phase_by_semantic(StorePhaseSemanticId::new(
+            revision_variant,
+            NonZeroU64::new(1).expect("revision-variant phase id is nonzero"),
+        )),
+        None,
+        "same-namespace identities from another revision are not phase evidence authority"
+    );
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -88,16 +229,14 @@ impl ProgressUnit for TestUnit {
     }
 }
 
-fn test_dimension() -> StoreDimensionKey {
-    test_domain().dimension_key(NonZeroU32::new(1).expect("test dimension local id"))
-}
-
-fn other_dimension() -> StoreDimensionKey {
-    test_domain().dimension_key(NonZeroU32::new(2).expect("other dimension local id"))
-}
-
 fn foreign_dimension() -> StoreDimensionKey {
-    foreign_domain().dimension_key(NonZeroU32::new(1).expect("foreign dimension local id"))
+    static KEY: OnceLock<StoreDimensionKey> = OnceLock::new();
+    *KEY.get_or_init(|| {
+        StoreKeyDomain::try_new(test_catalog())
+            .expect("foreign dimension key domain")
+            .try_admit_dimension(dimension_semantic(1))
+            .expect("foreign dimension key")
+    })
 }
 
 #[derive(Clone, Copy)]
@@ -153,30 +292,30 @@ fn account(factory: &PhysicalStorageAccountFactory) -> PhysicalStorageAccount {
         .unwrap()
 }
 
-fn writer_plan(attributions: usize, commitments: usize) -> RetainedStoreWriterPlan {
+fn writer_plan(keys: TestKeys, attributions: usize, commitments: usize) -> RetainedStoreWriterPlan {
     RetainedStoreWriterPlan::new(
-        test_phase(),
-        test_dimension(),
-        test_dimension(),
+        keys.phase,
+        keys.dimension,
+        keys.dimension,
         RetainedStoreBatchLimits::new(attributions, commitments).unwrap(),
     )
 }
 
-fn operation(account: &PhysicalStorageAccount) -> TestOperation {
+fn operation(account: &PhysicalStorageAccount) -> (TestOperation, TestKeys) {
     operation_with_control(account, OperationControl::default())
 }
 
 fn operation_with_control(
     account: &PhysicalStorageAccount,
     control: OperationControl<TestProgress, TestUnit>,
-) -> TestOperation {
+) -> (TestOperation, TestKeys) {
     operation_with_control_and_evidence_limit(account, control, u64::MAX)
 }
 
 fn operation_with_evidence_limit(
     account: &PhysicalStorageAccount,
     evidence_limit: u64,
-) -> TestOperation {
+) -> (TestOperation, TestKeys) {
     operation_with_control_and_evidence_limit(account, OperationControl::default(), evidence_limit)
 }
 
@@ -184,36 +323,50 @@ fn operation_with_control_and_evidence_limit(
     account: &PhysicalStorageAccount,
     control: OperationControl<TestProgress, TestUnit>,
     evidence_limit: u64,
-) -> TestOperation {
+) -> (TestOperation, TestKeys) {
+    operation_with_catalog_and_evidence_limit(account, control, test_catalog(), evidence_limit)
+}
+
+fn operation_with_catalog_and_evidence_limit(
+    account: &PhysicalStorageAccount,
+    control: OperationControl<TestProgress, TestUnit>,
+    catalog: StoreSemanticCatalogId,
+    evidence_limit: u64,
+) -> (TestOperation, TestKeys) {
+    let TestVocabulary { domain, keys } = test_vocabulary_for(catalog);
     let policy = DimensionPolicy::reservable_bytes(u64::MAX, u64::MAX, u64::MAX, u64::MAX)
         .with_published_outcome_evidence_limit(evidence_limit);
-    let limits = LedgerLimits::new(u64::MAX, [(test_dimension(), policy)]).unwrap();
-    let ledger_plan = StoreLedgerPlan::try_new(test_domain(), limits, &[test_phase()]).unwrap();
+    let limits = LedgerLimits::new(u64::MAX, [(keys.dimension, policy)]).unwrap();
+    let ledger_plan = StoreLedgerPlan::try_new(domain, limits, &[keys.phase]).unwrap();
     let start = RetainedStoreStartPlan::new(
-        writer_plan(32, 8),
-        RetainedStoreSharePlan::new(test_dimension(), test_dimension()),
+        writer_plan(keys, 32, 8),
+        RetainedStoreSharePlan::new(keys.dimension, keys.dimension),
         StoreFallbackEnvelope::new(91),
-        test_dimension(),
+        keys.dimension,
         1,
-        test_dimension(),
+        keys.dimension,
         1,
     );
-    TestOperation::try_start(control, ledger_plan, account, start).unwrap()
+    (
+        TestOperation::try_start(control, ledger_plan, account, start).unwrap(),
+        keys,
+    )
 }
 
 fn publication_plan(
+    keys: TestKeys,
     canonical_blocks: usize,
     evidence_blocks: usize,
 ) -> RetainedStorePublicationPlan {
     RetainedStorePublicationPlan::success(
         RetainedStoreBlockTablePlan::new(
-            writer_plan(canonical_blocks + 1, 2),
+            writer_plan(keys, canonical_blocks + 1, 2),
             canonical_blocks,
             canonical_blocks,
         )
         .unwrap(),
         RetainedStoreBlockTablePlan::new(
-            writer_plan(evidence_blocks + 1, 2),
+            writer_plan(keys, evidence_blocks + 1, 2),
             evidence_blocks,
             evidence_blocks,
         )
@@ -221,10 +374,10 @@ fn publication_plan(
     )
 }
 
-fn rich_failure_plan(evidence_blocks: usize) -> RetainedStorePublicationPlan {
+fn rich_failure_plan(keys: TestKeys, evidence_blocks: usize) -> RetainedStorePublicationPlan {
     RetainedStorePublicationPlan::rich_failure(
         RetainedStoreBlockTablePlan::new(
-            writer_plan(evidence_blocks + 1, 2),
+            writer_plan(keys, evidence_blocks + 1, 2),
             evidence_blocks,
             evidence_blocks,
         )
@@ -238,11 +391,15 @@ fn publication_plan_with_writer(writer: RetainedStoreWriterPlan) -> RetainedStor
     )
 }
 
-fn reject_publication_plan_without_side_effects(
+fn reject_publication_plan_without_side_effects<F>(
     account: &PhysicalStorageAccount,
-    plan: RetainedStorePublicationPlan,
-) -> StoreRuntimeError {
-    let operation = operation(account);
+    build_plan: F,
+) -> StoreRuntimeError
+where
+    F: FnOnce(TestKeys) -> RetainedStorePublicationPlan,
+{
+    let (operation, keys) = operation(account);
+    let plan = build_plan(keys);
     let before = account.snapshot();
     let error = match operation.try_publication_assembly(plan) {
         Ok(assembly) => {
@@ -283,118 +440,237 @@ fn physical_delta(
 }
 
 #[test]
-fn concrete_store_keys_are_fixed_inert_non_zero_values() {
+fn store_semantic_identity_bytes_are_exact_brand_neutral_big_endian_goldens() {
+    let namespace = [
+        0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee,
+        0xff,
+    ];
+    let catalog = StoreSemanticCatalogId::new(
+        namespace,
+        NonZeroU32::new(0x0102_0304).expect("golden revision is nonzero"),
+    );
+    let local = NonZeroU64::new(0x0102_0304_0506_0708).expect("golden local id is nonzero");
+    let phase = StorePhaseSemanticId::new(catalog, local);
+    let dimension = StoreDimensionSemanticId::new(catalog, local);
+
     assert_eq!(
-        std::mem::size_of::<StorePhaseKey>(),
-        std::mem::size_of::<u128>()
+        catalog.to_canonical_bytes(),
+        [
+            0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd,
+            0xee, 0xff, 0x01, 0x02, 0x03, 0x04,
+        ]
     );
     assert_eq!(
-        std::mem::size_of::<StoreDimensionKey>(),
-        std::mem::size_of::<u128>()
+        phase.to_canonical_bytes(),
+        [
+            0x01, 0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc,
+            0xdd, 0xee, 0xff, 0x01, 0x02, 0x03, 0x04, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+            0x08,
+        ]
     );
     assert_eq!(
-        std::mem::size_of::<Option<StorePhaseKey>>(),
-        std::mem::size_of::<u128>()
+        dimension.to_canonical_bytes(),
+        [
+            0x02, 0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc,
+            0xdd, 0xee, 0xff, 0x01, 0x02, 0x03, 0x04, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+            0x08,
+        ]
     );
+
+    let first_domain = StoreKeyDomain::try_new(catalog).expect("first runtime authority");
+    let second_domain = StoreKeyDomain::try_new(catalog).expect("second runtime authority");
+    let first_key = first_domain
+        .try_admit_phase(phase)
+        .expect("first host admission");
+    let second_key = second_domain
+        .try_admit_phase(phase)
+        .expect("second host admission");
+    assert_ne!(first_key, second_key);
     assert_eq!(
-        std::mem::size_of::<Option<StoreDimensionKey>>(),
-        std::mem::size_of::<u128>()
+        first_key.semantic_id().to_canonical_bytes(),
+        second_key.semantic_id().to_canonical_bytes(),
+        "the private runtime brand is never part of canonical identity bytes"
     );
-    assert!(!std::mem::needs_drop::<StorePhaseKey>());
-    assert!(!std::mem::needs_drop::<StoreDimensionKey>());
-    assert!(!std::mem::needs_drop::<StoreKeyDomain>());
-    assert_eq!(test_phase().local_id().get(), 1);
-    assert_eq!(test_dimension().local_id().get(), 1);
-    assert_ne!(test_phase(), foreign_phase());
-    assert_ne!(test_dimension(), foreign_dimension());
-    assert_eq!(
-        format!("{:?}", test_domain()),
-        format!("{:?}", foreign_domain())
+
+    let mut changed_namespace = namespace;
+    changed_namespace[0] = 0x01;
+    let namespace_variant = StoreSemanticCatalogId::new(
+        changed_namespace,
+        NonZeroU32::new(0x0102_0304).expect("variant revision is nonzero"),
     );
-    assert_eq!(
-        format!("{:?}", test_phase()),
-        format!("{:?}", foreign_phase())
+    let revision_variant = StoreSemanticCatalogId::new(
+        namespace,
+        NonZeroU32::new(0x0102_0305).expect("variant revision is nonzero"),
     );
-    assert_eq!(
-        format!("{:?}", test_dimension()),
-        format!("{:?}", foreign_dimension())
+    let local_variant = StorePhaseSemanticId::new(
+        catalog,
+        NonZeroU64::new(0x0102_0304_0506_0709).expect("variant local id is nonzero"),
+    );
+    assert_ne!(
+        catalog.to_canonical_bytes(),
+        namespace_variant.to_canonical_bytes()
+    );
+    assert_ne!(
+        catalog.to_canonical_bytes(),
+        revision_variant.to_canonical_bytes()
+    );
+    assert_ne!(
+        phase.to_canonical_bytes(),
+        local_variant.to_canonical_bytes()
+    );
+
+    let foreign_catalog = StoreSemanticCatalogId::new(
+        *b"foreign-catalog!",
+        NonZeroU32::new(1).expect("foreign revision is nonzero"),
+    );
+    assert!(
+        first_domain
+            .try_admit_phase(StorePhaseSemanticId::new(
+                foreign_catalog,
+                NonZeroU64::new(1).expect("foreign phase id is nonzero"),
+            ))
+            .is_none(),
+        "declaring a semantic ID does not grant host admission"
+    );
+    assert!(
+        first_domain
+            .try_admit_phase(StorePhaseSemanticId::new(
+                revision_variant,
+                NonZeroU64::new(1).expect("revision-variant phase id is nonzero"),
+            ))
+            .is_none(),
+        "matching a namespace without its revision does not grant phase admission"
+    );
+    assert!(
+        first_domain
+            .try_admit_dimension(StoreDimensionSemanticId::new(
+                revision_variant,
+                NonZeroU64::new(1).expect("revision-variant dimension id is nonzero"),
+            ))
+            .is_none(),
+        "matching a namespace without its revision does not grant dimension admission"
     );
 }
 
 #[test]
-fn concrete_store_key_hashing_exposes_only_the_public_local_identifier() {
+fn concrete_store_keys_are_fixed_inert_non_zero_values() {
+    let TestVocabulary { domain, keys } = test_vocabulary();
+    let foreign_domain = StoreKeyDomain::try_new(test_catalog()).unwrap();
+    let foreign_phase = foreign_domain.try_admit_phase(phase_semantic(1)).unwrap();
+    let foreign_dimension = foreign_domain
+        .try_admit_dimension(dimension_semantic(1))
+        .unwrap();
+
     assert_eq!(
-        hash_transcript(&test_phase()),
+        std::mem::size_of::<StorePhaseKey>(),
+        std::mem::size_of::<StoreDimensionKey>()
+    );
+    assert_eq!(
+        std::mem::size_of::<Option<StorePhaseKey>>(),
+        std::mem::size_of::<StorePhaseKey>()
+    );
+    assert_eq!(
+        std::mem::size_of::<Option<StoreDimensionKey>>(),
+        std::mem::size_of::<StoreDimensionKey>()
+    );
+    assert!(!std::mem::needs_drop::<StorePhaseKey>());
+    assert!(!std::mem::needs_drop::<StoreDimensionKey>());
+    assert!(!std::mem::needs_drop::<StoreKeyDomain>());
+    assert_eq!(keys.phase.semantic_id(), phase_semantic(1));
+    assert_eq!(keys.dimension.semantic_id(), dimension_semantic(1));
+    assert_ne!(keys.phase, foreign_phase);
+    assert_ne!(keys.dimension, foreign_dimension);
+    assert_eq!(format!("{domain:?}"), format!("{foreign_domain:?}"));
+    assert_eq!(format!("{:?}", keys.phase), format!("{foreign_phase:?}"));
+    assert_eq!(
+        format!("{:?}", keys.dimension),
+        format!("{foreign_dimension:?}")
+    );
+}
+
+#[test]
+fn concrete_store_key_hashing_exposes_only_the_structured_semantic_identity() {
+    let TestVocabulary { keys, .. } = test_vocabulary();
+    assert_eq!(
+        hash_transcript(&keys.phase),
         hash_transcript(&foreign_phase())
     );
     assert_eq!(
-        hash_transcript(&test_phase()),
-        hash_transcript(&test_phase().local_id())
+        hash_transcript(&keys.phase),
+        hash_transcript(&keys.phase.semantic_id())
     );
     assert_ne!(
-        hash_transcript(&test_phase()),
-        hash_transcript(&other_phase())
+        hash_transcript(&keys.phase),
+        hash_transcript(&keys.other_phase)
     );
     assert_eq!(
-        hash_transcript(&test_dimension()),
+        hash_transcript(&keys.dimension),
         hash_transcript(&foreign_dimension())
     );
     assert_eq!(
-        hash_transcript(&test_dimension()),
-        hash_transcript(&test_dimension().local_id())
+        hash_transcript(&keys.dimension),
+        hash_transcript(&keys.dimension.semantic_id())
     );
     assert_ne!(
-        hash_transcript(&test_dimension()),
-        hash_transcript(&other_dimension())
+        hash_transcript(&keys.dimension),
+        hash_transcript(&keys.other_dimension)
     );
 }
 
 #[test]
 fn store_ledger_plan_rejects_incomplete_or_non_canonical_phase_catalogs() {
-    let limits = || {
+    let limits = |keys: TestKeys| {
         LedgerLimits::new(
             16,
             [(
-                test_dimension(),
+                keys.dimension,
                 DimensionPolicy::reservable_bytes(16, 16, 16, 16),
             )],
         )
         .unwrap()
     };
 
+    let TestVocabulary { domain, keys } = test_vocabulary();
     assert!(matches!(
-        StoreLedgerPlan::try_new(test_domain(), limits(), &[]),
+        StoreLedgerPlan::try_new(domain, limits(keys), &[]),
         Err(StoreLedgerPlanError::EmptyPhaseCatalog)
     ));
+    let TestVocabulary { domain, keys } = test_vocabulary();
     assert!(matches!(
-        StoreLedgerPlan::try_new(test_domain(), limits(), &[test_phase(), test_phase()]),
-        Err(StoreLedgerPlanError::DuplicatePhase { phase }) if phase == test_phase()
+        StoreLedgerPlan::try_new(domain, limits(keys), &[keys.phase, keys.phase]),
+        Err(StoreLedgerPlanError::DuplicatePhase { phase }) if phase == keys.phase
     ));
+    let TestVocabulary { domain, keys } = test_vocabulary();
     assert!(matches!(
-        StoreLedgerPlan::try_new(test_domain(), limits(), &[other_phase(), test_phase()]),
+        StoreLedgerPlan::try_new(domain, limits(keys), &[keys.other_phase, keys.phase]),
         Err(StoreLedgerPlanError::PhaseOutOfOrder { previous, phase })
-            if previous == other_phase() && phase == test_phase()
+            if previous == keys.other_phase && phase == keys.phase
     ));
+    let TestVocabulary { domain, keys } = test_vocabulary();
+    let foreign_phase = foreign_phase();
     assert!(matches!(
-        StoreLedgerPlan::try_new(test_domain(), limits(), &[foreign_phase()]),
-        Err(StoreLedgerPlanError::ForeignPhaseDomain { phase }) if phase == foreign_phase()
+        StoreLedgerPlan::try_new(domain, limits(keys), &[foreign_phase]),
+        Err(StoreLedgerPlanError::ForeignPhaseDomain { phase }) if phase == foreign_phase
     ));
+    let TestVocabulary { domain, keys } = test_vocabulary();
+    let foreign_dimension = foreign_dimension();
     let foreign_limits = LedgerLimits::new(
         16,
         [(
-            foreign_dimension(),
+            foreign_dimension,
             DimensionPolicy::reservable_bytes(16, 16, 16, 16),
         )],
     )
     .unwrap();
     assert!(matches!(
-        StoreLedgerPlan::try_new(test_domain(), foreign_limits, &[test_phase()]),
+        StoreLedgerPlan::try_new(domain, foreign_limits, &[keys.phase]),
         Err(StoreLedgerPlanError::ForeignDimensionDomain { dimension })
-            if dimension == foreign_dimension()
+            if dimension == foreign_dimension
     ));
 
+    let TestVocabulary { domain, keys } = test_vocabulary();
     let plan =
-        StoreLedgerPlan::try_new(test_domain(), limits(), &[test_phase(), other_phase()]).unwrap();
+        StoreLedgerPlan::try_new(domain, limits(keys), &[keys.phase, keys.other_phase]).unwrap();
     assert_eq!(plan.dimension_count(), 1);
     assert_eq!(plan.phase_count(), 2);
 }
@@ -404,22 +680,23 @@ fn retained_store_start_rejects_phase_outside_frozen_catalog_without_retained_si
     let factory = factory(1);
     let account = account(&factory);
     let before = account.snapshot();
+    let TestVocabulary { domain, keys } = test_vocabulary();
     let policy = DimensionPolicy::reservable_bytes(u64::MAX, u64::MAX, u64::MAX, u64::MAX)
         .with_published_outcome_evidence_limit(u64::MAX);
-    let limits = LedgerLimits::new(u64::MAX, [(test_dimension(), policy)]).unwrap();
-    let ledger_plan = StoreLedgerPlan::try_new(test_domain(), limits, &[test_phase()]).unwrap();
+    let limits = LedgerLimits::new(u64::MAX, [(keys.dimension, policy)]).unwrap();
+    let ledger_plan = StoreLedgerPlan::try_new(domain, limits, &[keys.phase]).unwrap();
     let start = RetainedStoreStartPlan::new(
         RetainedStoreWriterPlan::new(
-            other_phase(),
-            test_dimension(),
-            test_dimension(),
+            keys.other_phase,
+            keys.dimension,
+            keys.dimension,
             RetainedStoreBatchLimits::new(8, 4).unwrap(),
         ),
-        RetainedStoreSharePlan::new(test_dimension(), test_dimension()),
+        RetainedStoreSharePlan::new(keys.dimension, keys.dimension),
         StoreFallbackEnvelope::new(91),
-        test_dimension(),
+        keys.dimension,
         1,
-        test_dimension(),
+        keys.dimension,
         1,
     );
 
@@ -447,65 +724,18 @@ fn retained_store_start_rejects_phase_outside_frozen_catalog_without_retained_si
 fn retained_store_start_preflights_every_dimension_key_without_side_effects() {
     let factory = factory(1);
     let account = account(&factory);
-    for dimensions in [
-        [
-            other_dimension(),
-            test_dimension(),
-            test_dimension(),
-            test_dimension(),
-            test_dimension(),
-            test_dimension(),
-        ],
-        [
-            test_dimension(),
-            other_dimension(),
-            test_dimension(),
-            test_dimension(),
-            test_dimension(),
-            test_dimension(),
-        ],
-        [
-            test_dimension(),
-            test_dimension(),
-            other_dimension(),
-            test_dimension(),
-            test_dimension(),
-            test_dimension(),
-        ],
-        [
-            test_dimension(),
-            test_dimension(),
-            test_dimension(),
-            other_dimension(),
-            test_dimension(),
-            test_dimension(),
-        ],
-        [
-            test_dimension(),
-            test_dimension(),
-            test_dimension(),
-            test_dimension(),
-            other_dimension(),
-            test_dimension(),
-        ],
-        [
-            test_dimension(),
-            test_dimension(),
-            test_dimension(),
-            test_dimension(),
-            test_dimension(),
-            other_dimension(),
-        ],
-    ] {
+    for invalid_position in 0..6 {
+        let TestVocabulary { domain, keys } = test_vocabulary();
+        let mut dimensions = [keys.dimension; 6];
+        dimensions[invalid_position] = keys.other_dimension;
         let before = account.snapshot();
         let policy = DimensionPolicy::reservable_bytes(u64::MAX, u64::MAX, u64::MAX, u64::MAX)
             .with_published_outcome_evidence_limit(u64::MAX);
-        let ledger_limits = LedgerLimits::new(u64::MAX, [(test_dimension(), policy)]).unwrap();
-        let ledger_plan =
-            StoreLedgerPlan::try_new(test_domain(), ledger_limits, &[test_phase()]).unwrap();
+        let ledger_limits = LedgerLimits::new(u64::MAX, [(keys.dimension, policy)]).unwrap();
+        let ledger_plan = StoreLedgerPlan::try_new(domain, ledger_limits, &[keys.phase]).unwrap();
         let start = RetainedStoreStartPlan::new(
             RetainedStoreWriterPlan::new(
-                test_phase(),
+                keys.phase,
                 dimensions[0],
                 dimensions[1],
                 RetainedStoreBatchLimits::new(8, 4).unwrap(),
@@ -525,7 +755,7 @@ fn retained_store_start_preflights_every_dimension_key_without_side_effects() {
             rejected,
             Err(RetainedStoreStartError::Runtime(StoreRuntimeError::Ledger(
                 LedgerCause::UnknownDimension { dimension }
-            ))) if dimension == other_dimension()
+            ))) if dimension == keys.other_dimension
         ));
         assert_eq!(account.snapshot(), before);
     }
@@ -535,41 +765,44 @@ fn retained_store_start_preflights_every_dimension_key_without_side_effects() {
 fn retained_store_start_rejects_foreign_phase_and_dimension_domains_without_side_effects() {
     let factory = factory(1);
     let account = account(&factory);
-    let cases = [
-        (
-            foreign_phase(),
-            test_dimension(),
-            StoreRuntimeError::ForeignPhaseDomain {
-                phase: foreign_phase(),
-            },
-        ),
-        (
-            test_phase(),
-            foreign_dimension(),
-            StoreRuntimeError::ForeignDimensionDomain {
-                dimension: foreign_dimension(),
-            },
-        ),
-    ];
-
-    for (phase, dimension, expected) in cases {
+    for reject_foreign_phase in [true, false] {
+        let TestVocabulary { domain, keys } = test_vocabulary();
+        let foreign_phase = foreign_phase();
+        let foreign_dimension = foreign_dimension();
+        let (phase, dimension, expected) = if reject_foreign_phase {
+            (
+                foreign_phase,
+                keys.dimension,
+                StoreRuntimeError::ForeignPhaseDomain {
+                    phase: foreign_phase,
+                },
+            )
+        } else {
+            (
+                keys.phase,
+                foreign_dimension,
+                StoreRuntimeError::ForeignDimensionDomain {
+                    dimension: foreign_dimension,
+                },
+            )
+        };
         let before = account.snapshot();
         let policy = DimensionPolicy::reservable_bytes(u64::MAX, u64::MAX, u64::MAX, u64::MAX)
             .with_published_outcome_evidence_limit(u64::MAX);
-        let limits = LedgerLimits::new(u64::MAX, [(test_dimension(), policy)]).unwrap();
-        let ledger_plan = StoreLedgerPlan::try_new(test_domain(), limits, &[test_phase()]).unwrap();
+        let limits = LedgerLimits::new(u64::MAX, [(keys.dimension, policy)]).unwrap();
+        let ledger_plan = StoreLedgerPlan::try_new(domain, limits, &[keys.phase]).unwrap();
         let start = RetainedStoreStartPlan::new(
             RetainedStoreWriterPlan::new(
                 phase,
                 dimension,
-                test_dimension(),
+                keys.dimension,
                 RetainedStoreBatchLimits::new(8, 4).unwrap(),
             ),
-            RetainedStoreSharePlan::new(test_dimension(), test_dimension()),
+            RetainedStoreSharePlan::new(keys.dimension, keys.dimension),
             StoreFallbackEnvelope::new(91),
-            test_dimension(),
+            keys.dimension,
             1,
-            test_dimension(),
+            keys.dimension,
             1,
         );
 
@@ -590,32 +823,41 @@ fn publication_key_preflight_rejects_unknown_phase_and_dimensions_without_side_e
     let account = account(&factory);
     let limits = RetainedStoreBatchLimits::new(2, 2).unwrap();
 
-    let phase_cause = reject_publication_plan_without_side_effects(
-        &account,
+    let phase_cause = reject_publication_plan_without_side_effects(&account, |keys| {
         publication_plan_with_writer(RetainedStoreWriterPlan::new(
-            other_phase(),
-            test_dimension(),
-            test_dimension(),
+            keys.other_phase,
+            keys.dimension,
+            keys.dimension,
             limits,
-        )),
-    );
+        ))
+    });
     assert!(matches!(
         phase_cause,
         StoreRuntimeError::Ledger(LedgerCause::UnknownPhase)
     ));
 
-    for writer in [
-        RetainedStoreWriterPlan::new(test_phase(), other_dimension(), test_dimension(), limits),
-        RetainedStoreWriterPlan::new(test_phase(), test_dimension(), other_dimension(), limits),
-    ] {
-        let dimension_cause = reject_publication_plan_without_side_effects(
-            &account,
-            publication_plan_with_writer(writer),
-        );
+    for unknown_attribution_dimension in [true, false] {
+        let dimension_cause = reject_publication_plan_without_side_effects(&account, |keys| {
+            let writer = if unknown_attribution_dimension {
+                RetainedStoreWriterPlan::new(
+                    keys.phase,
+                    keys.other_dimension,
+                    keys.dimension,
+                    limits,
+                )
+            } else {
+                RetainedStoreWriterPlan::new(
+                    keys.phase,
+                    keys.dimension,
+                    keys.other_dimension,
+                    limits,
+                )
+            };
+            publication_plan_with_writer(writer)
+        });
         assert!(matches!(
             dimension_cause,
-            StoreRuntimeError::Ledger(LedgerCause::UnknownDimension { dimension })
-                if dimension == other_dimension()
+            StoreRuntimeError::Ledger(LedgerCause::UnknownDimension { .. })
         ));
     }
 }
@@ -626,33 +868,33 @@ fn publication_key_preflight_rejects_foreign_domains_without_side_effects() {
     let account = account(&factory);
     let limits = RetainedStoreBatchLimits::new(2, 2).unwrap();
 
-    let phase_cause = reject_publication_plan_without_side_effects(
-        &account,
+    let foreign_phase = foreign_phase();
+    let phase_cause = reject_publication_plan_without_side_effects(&account, |keys| {
         publication_plan_with_writer(RetainedStoreWriterPlan::new(
-            foreign_phase(),
-            test_dimension(),
-            test_dimension(),
+            foreign_phase,
+            keys.dimension,
+            keys.dimension,
             limits,
-        )),
-    );
+        ))
+    });
     assert!(matches!(
         phase_cause,
-        StoreRuntimeError::ForeignPhaseDomain { phase } if phase == foreign_phase()
+        StoreRuntimeError::ForeignPhaseDomain { phase } if phase == foreign_phase
     ));
 
-    let dimension_cause = reject_publication_plan_without_side_effects(
-        &account,
+    let foreign_dimension = foreign_dimension();
+    let dimension_cause = reject_publication_plan_without_side_effects(&account, |keys| {
         publication_plan_with_writer(RetainedStoreWriterPlan::new(
-            test_phase(),
-            foreign_dimension(),
-            test_dimension(),
+            keys.phase,
+            foreign_dimension,
+            keys.dimension,
             limits,
-        )),
-    );
+        ))
+    });
     assert!(matches!(
         dimension_cause,
         StoreRuntimeError::ForeignDimensionDomain { dimension }
-            if dimension == foreign_dimension()
+            if dimension == foreign_dimension
     ));
 }
 
@@ -660,8 +902,17 @@ fn publication_key_preflight_rejects_foreign_domains_without_side_effects() {
 fn sequence_bytes_utf8_and_records_round_trip_through_typed_roots() {
     let factory = factory(1);
     let account = account(&factory);
-    let mut assembly = operation(&account)
-        .try_publication_assembly(publication_plan(4, 1))
+    let producer = fake_producer();
+    let producer_unloaded = Arc::downgrade(&producer);
+    let (operation, keys) = operation_with_catalog_and_evidence_limit(
+        &account,
+        OperationControl::default(),
+        producer.catalog,
+        u64::MAX,
+    );
+    operation.try_complete_phase(keys.phase).unwrap();
+    let mut assembly = operation
+        .try_publication_assembly(publication_plan(keys, 4, 1))
         .unwrap();
 
     let sequence = assembly
@@ -706,9 +957,9 @@ fn sequence_bytes_utf8_and_records_round_trip_through_typed_roots() {
             if dimension == foreign_dimension()
     ));
     assert!(matches!(
-        assembly.try_commit_canonical(other_dimension(), 13),
+        assembly.try_commit_canonical(keys.other_dimension, 13),
         Err(StoreRuntimeError::Ledger(LedgerCause::UnknownDimension { dimension }))
-            if dimension == other_dimension()
+            if dimension == keys.other_dimension
     ));
     assert!(matches!(
         assembly.try_commit_outcome_evidence(foreign_dimension(), 13),
@@ -716,15 +967,15 @@ fn sequence_bytes_utf8_and_records_round_trip_through_typed_roots() {
             if dimension == foreign_dimension()
     ));
     assert!(matches!(
-        assembly.try_commit_outcome_evidence(other_dimension(), 13),
+        assembly.try_commit_outcome_evidence(keys.other_dimension, 13),
         Err(StoreRuntimeError::Ledger(LedgerCause::UnknownDimension { dimension }))
-            if dimension == other_dimension()
+            if dimension == keys.other_dimension
     ));
     assert_eq!(account.snapshot(), before_rejected_commits);
 
-    assembly.try_commit_canonical(test_dimension(), 5).unwrap();
+    assembly.try_commit_canonical(keys.dimension, 5).unwrap();
     assembly
-        .try_commit_outcome_evidence(test_dimension(), 6)
+        .try_commit_outcome_evidence(keys.dimension, 6)
         .unwrap();
     let validated = match assembly.validate_success(
         canonical_root,
@@ -767,6 +1018,11 @@ fn sequence_bytes_utf8_and_records_round_trip_through_typed_roots() {
         PreparedStoreSuccessOutcome::Success(prepared) => prepared,
         _ => panic!("validated success must prepare as success"),
     };
+    drop(producer);
+    assert!(
+        producer_unloaded.upgrade().is_none(),
+        "prepared success must not retain executable producer state"
+    );
     let physical_before_handoff = account.snapshot();
     let PublishedStoreSuccessParts {
         canonical,
@@ -781,13 +1037,50 @@ fn sequence_bytes_utf8_and_records_round_trip_through_typed_roots() {
         .expect("typed sequence reference");
     assert_eq!(canonical.sequence(sequence).unwrap().as_slice(), &[1, 2, 3]);
     assert_eq!(outcome_evidence.root().scalar::<u8>(0, 0), Some(7));
+    drop(canonical);
+    drop(outcome_evidence);
+
+    let header = ledger_evidence.header();
+    assert_eq!(header.schema_revision(), 1);
+    assert_eq!(header.terminal_cause(), StoreTerminalCause::Success);
+    assert_eq!(
+        header.last_completed_phase(),
+        Some(keys.phase.semantic_id())
+    );
+    assert_eq!(header.dimension_count(), 1);
+    assert_eq!(header.phase_count(), 1);
+    assert_eq!(header.current_live_bytes(), 0);
+    assert_eq!(header.active_reservations(), 0);
+    assert_eq!(header.current_evidence_bytes(), 0);
+    assert_semantic_and_ordinal_evidence_queries(&ledger_evidence, keys);
     let snapshot = ledger_evidence
-        .dimension(test_dimension())
+        .dimension(keys.dimension)
         .expect("published dimension evidence");
     assert_eq!(snapshot.committed_canonical_output(), 5);
     assert_eq!(snapshot.published_outcome_evidence(), 7);
-    drop(canonical);
-    drop(outcome_evidence);
+    let phase = ledger_evidence
+        .phase(keys.phase)
+        .expect("published phase evidence");
+    assert_eq!(phase.phase(), keys.phase.semantic_id());
+    assert_eq!(phase.current_live_bytes(), 0);
+    assert!(matches!(
+        ledger_evidence.dimension(foreign_dimension()),
+        Err(StoreRuntimeError::ForeignDimensionDomain { dimension })
+            if dimension == foreign_dimension()
+    ));
+    assert!(matches!(
+        ledger_evidence.dimension(keys.other_dimension),
+        Err(StoreRuntimeError::Ledger(LedgerCause::UnknownDimension { dimension }))
+            if dimension == keys.other_dimension
+    ));
+    assert!(matches!(
+        ledger_evidence.phase(foreign_phase()),
+        Err(StoreRuntimeError::ForeignPhaseDomain { phase }) if phase == foreign_phase()
+    ));
+    assert!(matches!(
+        ledger_evidence.phase(keys.other_phase),
+        Err(StoreRuntimeError::Ledger(LedgerCause::UnknownPhase))
+    ));
     drop(ledger_evidence);
     assert_eq!(account.snapshot().live_retained_bytes(), 0);
     assert_eq!(account.snapshot().live_retained_allocations(), 0);
@@ -799,8 +1092,9 @@ fn sequence_bytes_and_utf8_roots_round_trip_through_every_terminal_owner() {
     let account = account(&factory);
 
     {
-        let mut assembly = operation(&account)
-            .try_publication_assembly(publication_plan(1, 1))
+        let (operation, keys) = operation(&account);
+        let mut assembly = operation
+            .try_publication_assembly(publication_plan(keys, 1, 1))
             .unwrap();
         let canonical = assembly
             .try_retain_canonical_sequence(
@@ -834,8 +1128,9 @@ fn sequence_bytes_and_utf8_roots_round_trip_through_every_terminal_owner() {
     }
 
     {
-        let mut assembly = operation(&account)
-            .try_publication_assembly(publication_plan(1, 1))
+        let (operation, keys) = operation(&account);
+        let mut assembly = operation
+            .try_publication_assembly(publication_plan(keys, 1, 1))
             .unwrap();
         let canonical = assembly
             .try_retain_canonical_bytes(BytesPlan::new(2).unwrap(), BytesTag, |writer| {
@@ -866,8 +1161,9 @@ fn sequence_bytes_and_utf8_roots_round_trip_through_every_terminal_owner() {
     }
 
     {
-        let mut assembly = operation(&account)
-            .try_publication_assembly(publication_plan(1, 1))
+        let (operation, keys) = operation(&account);
+        let mut assembly = operation
+            .try_publication_assembly(publication_plan(keys, 1, 1))
             .unwrap();
         let canonical = assembly
             .try_retain_canonical_utf8(Utf8Plan::new(5).unwrap(), TextTag, |writer| {
@@ -898,8 +1194,9 @@ fn sequence_bytes_and_utf8_roots_round_trip_through_every_terminal_owner() {
     }
 
     {
-        let mut assembly = operation(&account)
-            .try_publication_assembly(rich_failure_plan(1))
+        let (operation, keys) = operation(&account);
+        let mut assembly = operation
+            .try_publication_assembly(rich_failure_plan(keys, 1))
             .unwrap();
         let evidence = assembly
             .try_retain_outcome_evidence_sequence(
@@ -933,8 +1230,9 @@ fn sequence_bytes_and_utf8_roots_round_trip_through_every_terminal_owner() {
     }
 
     {
-        let mut assembly = operation(&account)
-            .try_publication_assembly(rich_failure_plan(1))
+        let (operation, keys) = operation(&account);
+        let mut assembly = operation
+            .try_publication_assembly(rich_failure_plan(keys, 1))
             .unwrap();
         let evidence = assembly
             .try_retain_outcome_evidence_bytes(
@@ -964,8 +1262,9 @@ fn sequence_bytes_and_utf8_roots_round_trip_through_every_terminal_owner() {
     }
 
     {
-        let mut assembly = operation(&account)
-            .try_publication_assembly(rich_failure_plan(1))
+        let (operation, keys) = operation(&account);
+        let mut assembly = operation
+            .try_publication_assembly(rich_failure_plan(keys, 1))
             .unwrap();
         let evidence = assembly
             .try_retain_outcome_evidence_utf8(
@@ -1002,8 +1301,9 @@ fn sequence_bytes_and_utf8_roots_round_trip_through_every_terminal_owner() {
 fn record_reference_projection_requires_exact_block_kind_and_tag() {
     let factory = factory(1);
     let account = account(&factory);
-    let mut assembly = operation(&account)
-        .try_publication_assembly(publication_plan(5, 5))
+    let (operation, keys) = operation(&account);
+    let mut assembly = operation
+        .try_publication_assembly(publication_plan(keys, 5, 5))
         .unwrap();
 
     let sequence = assembly
@@ -1277,8 +1577,9 @@ fn record_reference_projection_requires_exact_block_kind_and_tag() {
 fn every_supported_scalar_kind_round_trips_without_cross_kind_projection() {
     let factory = factory(1);
     let account = account(&factory);
-    let mut assembly = operation(&account)
-        .try_publication_assembly(publication_plan(11, 1))
+    let (operation, keys) = operation(&account);
+    let mut assembly = operation
+        .try_publication_assembly(publication_plan(keys, 11, 1))
         .unwrap();
 
     macro_rules! retain_scalar {
@@ -1417,8 +1718,9 @@ fn exact_plans_reject_empty_excess_and_wrong_record_kinds() {
 
     let factory = factory(1);
     let account = account(&factory);
-    let mut assembly = operation(&account)
-        .try_publication_assembly(publication_plan(2, 1))
+    let (operation, keys) = operation(&account);
+    let mut assembly = operation
+        .try_publication_assembly(publication_plan(keys, 2, 1))
         .unwrap();
     let error = assembly
         .try_retain_canonical_sequence(SequencePlan::<u8>::new(1).unwrap(), SequenceTag, |writer| {
@@ -1470,8 +1772,9 @@ fn exact_plans_reject_empty_excess_and_wrong_record_kinds() {
 fn physical_snapshots_follow_capacity_envelopes_for_sequence_bytes_and_utf8() {
     let factory = factory(1);
     let account = account(&factory);
-    let mut assembly = operation(&account)
-        .try_publication_assembly(publication_plan(3, 1))
+    let (operation, keys) = operation(&account);
+    let mut assembly = operation
+        .try_publication_assembly(publication_plan(keys, 3, 1))
         .unwrap();
 
     let before_sequence = account.snapshot();
@@ -1515,8 +1818,9 @@ fn physical_snapshots_follow_capacity_envelopes_for_sequence_bytes_and_utf8() {
 fn builder_panic_is_fatal_and_cannot_publish_fallback() {
     let factory = factory(1);
     let account = account(&factory);
-    let mut assembly = operation(&account)
-        .try_publication_assembly(publication_plan(1, 1))
+    let (operation, keys) = operation(&account);
+    let mut assembly = operation
+        .try_publication_assembly(publication_plan(keys, 1, 1))
         .unwrap();
     let before = account.snapshot();
     let error = assembly
@@ -1547,7 +1851,7 @@ fn builder_panic_is_fatal_and_cannot_publish_fallback() {
         ),
         Err(StoreRuntimeError::FallbackOnly)
     ));
-    for dimension in [foreign_dimension(), other_dimension()] {
+    for dimension in [foreign_dimension(), keys.other_dimension] {
         assert!(matches!(
             assembly.try_commit_canonical(dimension, 1),
             Err(StoreRuntimeError::FallbackOnly)
@@ -1571,8 +1875,9 @@ fn builder_panic_is_fatal_and_cannot_publish_fallback() {
 fn failure_assembly_commit_preserves_fallback_first_error_precedence() {
     let factory = factory(1);
     let account = account(&factory);
-    let mut assembly = operation(&account)
-        .try_publication_assembly(publication_plan(1, 2))
+    let (operation, keys) = operation(&account);
+    let mut assembly = operation
+        .try_publication_assembly(publication_plan(keys, 1, 2))
         .unwrap();
     let canonical = assembly
         .try_retain_canonical_sequence(SequencePlan::<u8>::new(1).unwrap(), SequenceTag, |writer| {
@@ -1601,7 +1906,7 @@ fn failure_assembly_commit_preserves_fallback_first_error_precedence() {
         .unwrap_err();
     assert!(matches!(error, StoreRuntimeError::BuilderPanicked));
 
-    for dimension in [foreign_dimension(), other_dimension()] {
+    for dimension in [foreign_dimension(), keys.other_dimension] {
         assert!(matches!(
             failure.try_commit(dimension, 1),
             Err(StoreRuntimeError::FallbackOnly)
@@ -1621,8 +1926,16 @@ fn failure_assembly_commit_preserves_fallback_first_error_precedence() {
 fn semantic_rejection_can_publish_rich_failure() {
     let factory = factory(1);
     let account = account(&factory);
-    let mut assembly = operation(&account)
-        .try_publication_assembly(publication_plan(1, 1))
+    let producer = fake_producer();
+    let producer_unloaded = Arc::downgrade(&producer);
+    let (operation, keys) = operation_with_catalog_and_evidence_limit(
+        &account,
+        OperationControl::default(),
+        producer.catalog,
+        u64::MAX,
+    );
+    let mut assembly = operation
+        .try_publication_assembly(publication_plan(keys, 1, 1))
         .unwrap();
     let canonical = assembly
         .try_retain_canonical_sequence(SequencePlan::<u8>::new(1).unwrap(), SequenceTag, |writer| {
@@ -1656,11 +1969,15 @@ fn semantic_rejection_can_publish_rich_failure() {
             panic!("validated evidence must prepare rich failure")
         }
     };
+    drop(producer);
+    assert!(
+        producer_unloaded.upgrade().is_none(),
+        "prepared rich failure must not retain executable producer state"
+    );
     let PublishedStoreFailureParts {
         outcome_evidence,
         ledger_evidence,
     } = prepared.handoff();
-    assert_eq!(outcome_evidence.cause().code(), 42);
     assert_eq!(
         outcome_evidence
             .outcome_evidence()
@@ -1669,7 +1986,82 @@ fn semantic_rejection_can_publish_rich_failure() {
         Some(7)
     );
     drop(outcome_evidence);
+
+    assert_eq!(store_failure_cause(&ledger_evidence).code(), 42);
+    assert_semantic_and_ordinal_evidence_queries(&ledger_evidence, keys);
     drop(ledger_evidence);
+    assert_eq!(account.snapshot().live_retained_bytes(), 0);
+}
+
+#[test]
+fn minimal_fallback_keeps_two_by_two_terminal_evidence_after_producer_unload() {
+    let factory = factory(1);
+    let account = account(&factory);
+    let producer = fake_producer();
+    let producer_unloaded = Arc::downgrade(&producer);
+    let TestVocabulary { domain, keys } = test_vocabulary_for(producer.catalog);
+    let policy = DimensionPolicy::reservable_bytes(u64::MAX, u64::MAX, u64::MAX, u64::MAX)
+        .with_published_outcome_evidence_limit(u64::MAX);
+    let limits = LedgerLimits::new(
+        u64::MAX,
+        [(keys.dimension, policy), (keys.other_dimension, policy)],
+    )
+    .unwrap();
+    let ledger_plan =
+        StoreLedgerPlan::try_new(domain, limits, &[keys.phase, keys.other_phase]).unwrap();
+    let start = RetainedStoreStartPlan::new(
+        writer_plan(keys, 32, 8),
+        RetainedStoreSharePlan::new(keys.dimension, keys.dimension),
+        StoreFallbackEnvelope::new(91),
+        keys.dimension,
+        1,
+        keys.dimension,
+        1,
+    );
+    let operation =
+        TestOperation::try_start(OperationControl::default(), ledger_plan, &account, start)
+            .unwrap();
+    operation.try_complete_phase(keys.phase).unwrap();
+    operation.try_complete_phase(keys.other_phase).unwrap();
+    let prepared = operation.prepare_minimal_fallback(75).unwrap();
+
+    drop(producer);
+    assert!(
+        producer_unloaded.upgrade().is_none(),
+        "prepared fallback must not retain executable producer state"
+    );
+    let published = prepared.handoff();
+    let fallback = published.fallback;
+    let evidence = published.ledger_evidence;
+    assert!(account.is_same_account(fallback.account()));
+    assert_eq!(fallback.value().code(), 91);
+    drop(fallback);
+
+    let first_dimension = evidence
+        .dimension_by_semantic(keys.dimension.semantic_id())
+        .expect("first semantic dimension");
+    let second_dimension = evidence
+        .dimension_by_semantic(keys.other_dimension.semantic_id())
+        .expect("second semantic dimension");
+    assert_eq!(evidence.dimension_at(0), Some(first_dimension));
+    assert_eq!(evidence.dimension_at(1), Some(second_dimension));
+    assert_ne!(first_dimension.dimension(), second_dimension.dimension());
+
+    let first_phase = evidence
+        .phase_by_semantic(keys.phase.semantic_id())
+        .expect("first semantic phase");
+    let second_phase = evidence
+        .phase_by_semantic(keys.other_phase.semantic_id())
+        .expect("second semantic phase");
+    assert_eq!(evidence.phase_at(0), Some(first_phase));
+    assert_eq!(evidence.phase_at(1), Some(second_phase));
+    assert_ne!(first_phase.phase(), second_phase.phase());
+    assert_eq!(evidence.dimension_at(2), None);
+    assert_eq!(evidence.phase_at(2), None);
+    assert_eq!(evidence.header().dimension_count(), 2);
+    assert_eq!(evidence.header().phase_count(), 2);
+
+    drop(evidence);
     assert_eq!(account.snapshot().live_retained_bytes(), 0);
 }
 
@@ -1677,8 +2069,9 @@ fn semantic_rejection_can_publish_rich_failure() {
 fn success_primary_rejection_returns_the_exact_minimal_fallback_owner() {
     let factory = factory(1);
     let account = account(&factory);
-    let mut assembly = operation_with_evidence_limit(&account, 4)
-        .try_publication_assembly(publication_plan(1, 1))
+    let (operation, keys) = operation_with_evidence_limit(&account, 4);
+    let mut assembly = operation
+        .try_publication_assembly(publication_plan(keys, 1, 1))
         .unwrap();
     let canonical = assembly
         .try_retain_canonical_sequence(SequencePlan::<u8>::new(1).unwrap(), SequenceTag, |writer| {
@@ -1692,9 +2085,9 @@ fn success_primary_rejection_returns_the_exact_minimal_fallback_owner() {
             |writer| writer.push(7),
         )
         .unwrap();
-    assembly.try_commit_canonical(test_dimension(), 9).unwrap();
+    assembly.try_commit_canonical(keys.dimension, 9).unwrap();
     assembly
-        .try_commit_outcome_evidence(test_dimension(), 4)
+        .try_commit_outcome_evidence(keys.dimension, 4)
         .unwrap();
     let validated = match assembly.validate_success(canonical, evidence, |session, c, e| {
         session.canonical_sequence(c).is_some() && session.outcome_evidence_sequence(e).is_some()
@@ -1725,15 +2118,16 @@ fn success_primary_rejection_returns_the_exact_minimal_fallback_owner() {
     let published = prepared.handoff();
     assert!(account.is_same_account(published.fallback.account()));
     assert_eq!(published.fallback.value().code(), 91);
+    assert_semantic_and_ordinal_evidence_queries(&published.ledger_evidence, keys);
     assert_eq!(
-        published.fallback.cause().class(),
+        store_failure_cause(&published.ledger_evidence).class(),
         StorePreparationFailureClass::Ledger
     );
-    assert_eq!(published.fallback.cause().code(), 1);
+    assert_eq!(store_failure_cause(&published.ledger_evidence).code(), 1);
     assert_eq!(
         published
             .ledger_evidence
-            .dimension(test_dimension())
+            .dimension(keys.dimension)
             .expect("success rejection ledger evidence")
             .committed_canonical_output(),
         0
@@ -1749,8 +2143,9 @@ fn success_primary_rejection_returns_the_exact_minimal_fallback_owner() {
 fn rich_failure_primary_rejection_returns_the_exact_minimal_fallback_owner() {
     let factory = factory(1);
     let account = account(&factory);
-    let mut assembly = operation_with_evidence_limit(&account, 4)
-        .try_publication_assembly(rich_failure_plan(1))
+    let (operation, keys) = operation_with_evidence_limit(&account, 4);
+    let mut assembly = operation
+        .try_publication_assembly(rich_failure_plan(keys, 1))
         .unwrap();
     let evidence = assembly
         .try_retain_outcome_evidence_bytes(BytesPlan::new(2).unwrap(), EvidenceBytesTag, |writer| {
@@ -1758,7 +2153,7 @@ fn rich_failure_primary_rejection_returns_the_exact_minimal_fallback_owner() {
         })
         .unwrap();
     assembly
-        .try_commit_outcome_evidence(test_dimension(), 4)
+        .try_commit_outcome_evidence(keys.dimension, 4)
         .unwrap();
     let validated = match assembly.validate_rich_failure(evidence, |session, evidence| {
         session.bytes(evidence) == Some(&[7, 8][..])
@@ -1787,14 +2182,14 @@ fn rich_failure_primary_rejection_returns_the_exact_minimal_fallback_owner() {
     assert!(account.is_same_account(published.fallback.account()));
     assert_eq!(published.fallback.value().code(), 91);
     assert_eq!(
-        published.fallback.cause().class(),
+        store_failure_cause(&published.ledger_evidence).class(),
         StorePreparationFailureClass::Ledger
     );
-    assert_eq!(published.fallback.cause().code(), 1);
+    assert_eq!(store_failure_cause(&published.ledger_evidence).code(), 1);
     assert_eq!(
         published
             .ledger_evidence
-            .dimension(test_dimension())
+            .dimension(keys.dimension)
             .expect("failure rejection ledger evidence")
             .committed_canonical_output(),
         0
@@ -1812,8 +2207,9 @@ fn final_cancellation_downgrades_validated_success_before_pure_handoff() {
     let account = account(&factory);
     let cancellation = CancellationToken::new();
     let control = OperationControl::default().with_cancellation(cancellation.clone());
-    let mut assembly = operation_with_control(&account, control)
-        .try_publication_assembly(publication_plan(1, 1))
+    let (operation, keys) = operation_with_control(&account, control);
+    let mut assembly = operation
+        .try_publication_assembly(publication_plan(keys, 1, 1))
         .unwrap();
     let canonical = assembly
         .try_retain_canonical_sequence(SequencePlan::<u8>::new(1).unwrap(), SequenceTag, |writer| {
@@ -1827,9 +2223,9 @@ fn final_cancellation_downgrades_validated_success_before_pure_handoff() {
             |writer| writer.write_row(|row| row.write_scalar(7_u8)),
         )
         .unwrap();
-    assembly.try_commit_canonical(test_dimension(), 9).unwrap();
+    assembly.try_commit_canonical(keys.dimension, 9).unwrap();
     assembly
-        .try_commit_outcome_evidence(test_dimension(), 6)
+        .try_commit_outcome_evidence(keys.dimension, 6)
         .unwrap();
     let validated = match assembly.validate_success(canonical, evidence, |session, c, e| {
         session.canonical_sequence(c).is_some() && session.outcome_evidence_records(e).is_some()
@@ -1850,10 +2246,10 @@ fn final_cancellation_downgrades_validated_success_before_pure_handoff() {
     } = prepared.handoff();
     assert_eq!(account.snapshot(), physical_before_handoff);
     assert_eq!(
-        outcome_evidence.cause().class(),
+        store_failure_cause(&ledger_evidence).class(),
         StorePreparationFailureClass::Control
     );
-    assert_eq!(outcome_evidence.cause().code(), 1);
+    assert_eq!(store_failure_cause(&ledger_evidence).code(), 1);
     assert_eq!(
         outcome_evidence
             .outcome_evidence()
@@ -1862,7 +2258,7 @@ fn final_cancellation_downgrades_validated_success_before_pure_handoff() {
         Some(7)
     );
     let dimension = ledger_evidence
-        .dimension(test_dimension())
+        .dimension(keys.dimension)
         .expect("final cancellation evidence");
     assert_eq!(dimension.committed_canonical_output(), 0);
     drop(outcome_evidence);
@@ -1875,8 +2271,9 @@ fn final_cancellation_downgrades_validated_success_before_pure_handoff() {
 fn validated_success_downgrade_preserves_evidence_and_publishes_exact_rich_failure() {
     let factory = factory(1);
     let account = account(&factory);
-    let mut assembly = operation(&account)
-        .try_publication_assembly(publication_plan(1, 3))
+    let (operation, keys) = operation(&account);
+    let mut assembly = operation
+        .try_publication_assembly(publication_plan(keys, 1, 3))
         .unwrap();
     let canonical = assembly
         .try_retain_canonical_sequence(SequencePlan::<u8>::new(1).unwrap(), SequenceTag, |writer| {
@@ -1890,9 +2287,9 @@ fn validated_success_downgrade_preserves_evidence_and_publishes_exact_rich_failu
             |writer| writer.write_row(|row| row.write_scalar(7_u8)),
         )
         .unwrap();
-    assembly.try_commit_canonical(test_dimension(), 9).unwrap();
+    assembly.try_commit_canonical(keys.dimension, 9).unwrap();
     assembly
-        .try_commit_outcome_evidence(test_dimension(), 6)
+        .try_commit_outcome_evidence(keys.dimension, 6)
         .unwrap();
     let validated = match assembly.validate_success(canonical, evidence, |session, c, e| {
         session.canonical_sequence(c).is_some()
@@ -1931,12 +2328,12 @@ fn validated_success_downgrade_preserves_evidence_and_publishes_exact_rich_failu
             if dimension == foreign_dimension()
     ));
     assert!(matches!(
-        failure.try_commit(other_dimension(), 11),
+        failure.try_commit(keys.other_dimension, 11),
         Err(StoreRuntimeError::Ledger(LedgerCause::UnknownDimension { dimension }))
-            if dimension == other_dimension()
+            if dimension == keys.other_dimension
     ));
     assert_eq!(account.snapshot(), before_rejected_commits);
-    failure.try_commit(test_dimension(), 4).unwrap();
+    failure.try_commit(keys.dimension, 4).unwrap();
     let validated = match failure.validate_rich_failure(failure_root, |session, failure_root| {
         let Some(root) = session.records(failure_root) else {
             return false;
@@ -1966,7 +2363,7 @@ fn validated_success_downgrade_preserves_evidence_and_publishes_exact_rich_failu
         outcome_evidence,
         ledger_evidence,
     } = prepared.handoff();
-    assert_eq!(outcome_evidence.cause().code(), 74);
+    assert_eq!(store_failure_cause(&ledger_evidence).code(), 74);
     let evidence_view = outcome_evidence.outcome_evidence();
     let root = evidence_view.root();
     let preserved = root
@@ -1983,7 +2380,7 @@ fn validated_success_downgrade_preserves_evidence_and_publishes_exact_rich_failu
     );
     assert_eq!(evidence_view.utf8(detail), Some("rejected"));
     let dimension = ledger_evidence
-        .dimension(test_dimension())
+        .dimension(keys.dimension)
         .expect("downgrade ledger evidence");
     assert_eq!(dimension.committed_canonical_output(), 0);
     drop(outcome_evidence);
@@ -1996,8 +2393,9 @@ fn validated_success_downgrade_preserves_evidence_and_publishes_exact_rich_failu
 fn downgrade_revalidation_panic_exposes_only_minimal_fallback() {
     let factory = factory(1);
     let account = account(&factory);
-    let mut assembly = operation(&account)
-        .try_publication_assembly(publication_plan(1, 1))
+    let (operation, keys) = operation(&account);
+    let mut assembly = operation
+        .try_publication_assembly(publication_plan(keys, 1, 1))
         .unwrap();
     let canonical = assembly
         .try_retain_canonical_sequence(SequencePlan::<u8>::new(1).unwrap(), SequenceTag, |writer| {
@@ -2011,7 +2409,7 @@ fn downgrade_revalidation_panic_exposes_only_minimal_fallback() {
             |writer| writer.write_row(|row| row.write_scalar(7_u8)),
         )
         .unwrap();
-    assembly.try_commit_canonical(test_dimension(), 9).unwrap();
+    assembly.try_commit_canonical(keys.dimension, 9).unwrap();
     let validated = match assembly.validate_success(canonical, evidence, |session, c, e| {
         session.canonical_sequence(c).is_some() && session.outcome_evidence_records(e).is_some()
     }) {
@@ -2028,13 +2426,13 @@ fn downgrade_revalidation_panic_exposes_only_minimal_fallback() {
     };
     let published = fallback_only.prepare_minimal_fallback().unwrap().handoff();
     assert_eq!(
-        published.fallback.cause().class(),
+        store_failure_cause(&published.ledger_evidence).class(),
         StorePreparationFailureClass::ProductGraph
     );
-    assert_eq!(published.fallback.cause().code(), 5);
+    assert_eq!(store_failure_cause(&published.ledger_evidence).code(), 5);
     let dimension = published
         .ledger_evidence
-        .dimension(test_dimension())
+        .dimension(keys.dimension)
         .expect("fallback downgrade ledger evidence");
     assert_eq!(dimension.committed_canonical_output(), 0);
     drop(published);
@@ -2043,8 +2441,9 @@ fn downgrade_revalidation_panic_exposes_only_minimal_fallback() {
 }
 
 fn publish_sequence_source(account: &PhysicalStorageAccount) -> PublishedSource {
-    let mut assembly = operation(account)
-        .try_publication_assembly(publication_plan(3, 3))
+    let (operation, keys) = operation(account);
+    let mut assembly = operation
+        .try_publication_assembly(publication_plan(keys, 3, 3))
         .unwrap();
     let sequence = assembly
         .try_retain_canonical_sequence(
@@ -2150,11 +2549,12 @@ fn same_account_share_is_zero_physical_growth_and_foreign_or_stale_refs_fail() {
     let foreign_account = account(&factory);
     let source = publish_sequence_source(&source_account);
 
+    let (share_operation, keys) = operation(&source_account);
     let share_plan = RetainedStorePublicationPlan::success(
-        RetainedStoreBlockTablePlan::new(writer_plan(2, 2), 3, 1).unwrap(),
-        RetainedStoreBlockTablePlan::new(writer_plan(2, 2), 3, 1).unwrap(),
+        RetainedStoreBlockTablePlan::new(writer_plan(keys, 2, 2), 3, 1).unwrap(),
+        RetainedStoreBlockTablePlan::new(writer_plan(keys, 2, 2), 3, 1).unwrap(),
     );
-    let mut assembly = operation(&source_account)
+    let mut assembly = share_operation
         .try_publication_assembly(share_plan)
         .unwrap();
     let physical_before_share = source_account.snapshot();
@@ -2265,8 +2665,9 @@ fn same_account_share_is_zero_physical_growth_and_foreign_or_stale_refs_fail() {
     );
     assert_eq!(shared_evidence.utf8(evidence_text), Some("ok"));
 
-    let mut stale_root = operation(&source_account)
-        .try_publication_assembly(publication_plan(1, 1))
+    let (stale_operation, keys) = operation(&source_account);
+    let mut stale_root = stale_operation
+        .try_publication_assembly(publication_plan(keys, 1, 1))
         .unwrap();
     let _local_canonical = stale_root
         .try_retain_canonical_sequence(
@@ -2292,10 +2693,11 @@ fn same_account_share_is_zero_physical_growth_and_foreign_or_stale_refs_fail() {
     };
     drop(fallback_only.prepare_minimal_fallback().unwrap().handoff());
 
-    let mut foreign = operation(&foreign_account)
+    let (operation, foreign_keys) = operation(&foreign_account);
+    let mut foreign = operation
         .try_publication_assembly(RetainedStorePublicationPlan::success(
-            RetainedStoreBlockTablePlan::new(writer_plan(1, 2), 1, 0).unwrap(),
-            RetainedStoreBlockTablePlan::new(writer_plan(1, 2), 1, 0).unwrap(),
+            RetainedStoreBlockTablePlan::new(writer_plan(foreign_keys, 1, 2), 1, 0).unwrap(),
+            RetainedStoreBlockTablePlan::new(writer_plan(foreign_keys, 1, 2), 1, 0).unwrap(),
         ))
         .unwrap();
     assert!(matches!(
@@ -2317,14 +2719,15 @@ fn same_account_owner_ref_mismatch_rejects_before_mutation_or_work_charge() {
     let source_a = publish_sequence_source(&account);
     let source_b = publish_sequence_source(&account);
 
-    let target_plan = || {
+    let target_plan = |keys| {
         RetainedStorePublicationPlan::success(
-            RetainedStoreBlockTablePlan::new(writer_plan(1, 2), 1, 0).unwrap(),
-            RetainedStoreBlockTablePlan::new(writer_plan(1, 2), 1, 0).unwrap(),
+            RetainedStoreBlockTablePlan::new(writer_plan(keys, 1, 2), 1, 0).unwrap(),
+            RetainedStoreBlockTablePlan::new(writer_plan(keys, 1, 2), 1, 0).unwrap(),
         )
     };
-    let mut challenged = operation(&account)
-        .try_publication_assembly(target_plan())
+    let (challenged_operation, challenged_keys) = operation(&account);
+    let mut challenged = challenged_operation
+        .try_publication_assembly(target_plan(challenged_keys))
         .unwrap();
     let physical_before_invalid_shares = account.snapshot();
     assert!(matches!(
@@ -2374,12 +2777,13 @@ fn same_account_owner_ref_mismatch_rejects_before_mutation_or_work_charge() {
     drop(canonical);
     drop(outcome_evidence);
     let challenged_work = ledger_evidence
-        .dimension(test_dimension())
+        .dimension(challenged_keys.dimension)
         .expect("challenged work snapshot");
     drop(ledger_evidence);
 
-    let mut control = operation(&account)
-        .try_publication_assembly(target_plan())
+    let (control_operation, control_keys) = operation(&account);
+    let mut control = control_operation
+        .try_publication_assembly(target_plan(control_keys))
         .unwrap();
     let control_canonical = control
         .try_share_canonical(&source_a.canonical, source_a.canonical_sequence)
@@ -2410,7 +2814,7 @@ fn same_account_owner_ref_mismatch_rejects_before_mutation_or_work_charge() {
     drop(canonical);
     drop(outcome_evidence);
     let control_work = ledger_evidence
-        .dimension(test_dimension())
+        .dimension(control_keys.dimension)
         .expect("control work snapshot");
     assert_eq!(challenged_work.attempted(), control_work.attempted());
     assert_eq!(challenged_work.consumed(), control_work.consumed());

@@ -12,7 +12,7 @@ use crate::ledger::{
     ImportCoordinator, ImportDimension, ImportLedgerPhase, ImportOperationControl,
     ImportPendingPublication, ImportProgressPhase, ImportProgressUnit, ImportPublicationBatch,
     ImportPublicationBatchError, ImportReservation, import_ledger_limits,
-    tighten_selected_format_limits,
+    tighten_selected_format_limits, try_import_coordinator,
 };
 use crate::limits::ResourceLimits;
 use crate::loss::ImportLossEvidence;
@@ -113,10 +113,12 @@ fn import_asset_with_resolver_and_ledger_limits(
     ledger_limits: Result<LedgerLimits<ImportDimension>, LedgerLimitsError<ImportDimension>>,
 ) -> ImportResult<ImportReport> {
     let ledger_limits = ledger_limits.map_err(ImportRunError::initialization)?;
+    let coordinator = try_import_coordinator(control, ledger_limits)
+        .map_err(ImportRunError::coordinator_initialization)?;
     #[cfg(feature = "tracing")]
     let _span = tracing::info_span!("baozi.import").entered();
 
-    let mut session = ImportSession::new(request, io, source, resolver, control, ledger_limits);
+    let mut session = ImportSession::new(request, io, source, resolver, coordinator);
     let execution = session.execute(SessionCreatedProof::new());
     match execution {
         Ok(validation) => session
@@ -143,18 +145,14 @@ pub fn import_bytes(
 ) -> ImportResult<ImportReport> {
     let ledger_limits =
         import_ledger_limits(request.limits()).map_err(ImportRunError::initialization)?;
+    let coordinator = try_import_coordinator(control, ledger_limits)
+        .map_err(ImportRunError::coordinator_initialization)?;
     #[cfg(feature = "tracing")]
     let _span = tracing::info_span!("baozi.import").entered();
 
     let primary_io = DirectBytesAuthority::new();
-    let mut session = ImportSession::new(
-        request,
-        &primary_io,
-        source,
-        &DenyDependencies,
-        control,
-        ledger_limits,
-    );
+    let mut session =
+        ImportSession::new(request, &primary_io, source, &DenyDependencies, coordinator);
     let execution = session.execute_bytes(bytes, SessionCreatedProof::new());
     match execution {
         Ok(validation) => session
@@ -219,15 +217,14 @@ impl<'a> ImportSession<'a> {
         primary_io: &'a dyn AssetIo,
         source: AssetPath,
         resolver: &'a dyn DependencyResolver,
-        control: ImportOperationControl,
-        ledger_limits: LedgerLimits<ImportDimension>,
+        coordinator: ImportCoordinator,
     ) -> Self {
         Self {
             request,
             primary_io,
             source,
             resolver,
-            coordinator: Some(RefCell::new(ImportCoordinator::new(control, ledger_limits))),
+            coordinator: Some(RefCell::new(coordinator)),
             diagnostics: Some(RefCell::new(DiagnosticSink::new(
                 request.limits().max_diagnostics,
                 request.limits().max_diagnostic_bytes,
@@ -1730,6 +1727,7 @@ fn publication_scope_cause(cause: PublicationCause<ImportDimension>) -> ScopeAbo
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::outcome::ImportInitializationError;
     use crate::{
         CapabilityStatus, FormatCapability, FormatDescriptor, FormatEncoding, FormatImporter,
         ImportRequest, OptionCompileLimits, ParseResult, ParseScope, RegistryBuildLimits,
@@ -1893,10 +1891,15 @@ mod tests {
 
         assert!(matches!(
             &error,
-            ImportRunError::Initialization { source } if source == &injected
+            ImportRunError::Initialization {
+                source: ImportInitializationError::LedgerLimits { source }
+            } if source == &injected
         ));
         assert!(error.operation_failure().is_none());
-        let limits_source = Error::source(&error)
+        let initialization_source = Error::source(&error)
+            .and_then(|source| source.downcast_ref::<ImportInitializationError>())
+            .expect("run error must retain the typed initialization source");
+        let limits_source = Error::source(initialization_source)
             .and_then(|source| source.downcast_ref::<LedgerLimitsError<ImportDimension>>())
             .expect("run error must retain the typed limits source");
         assert_eq!(limits_source, &injected);
@@ -1921,15 +1924,16 @@ mod tests {
     }
 
     #[test]
-    fn validation_resize_failure_preserves_the_existing_live_token() {
+    fn validation_resize_failure_preserves_the_existing_live_token()
+    -> Result<(), LedgerCause<ImportDimension>> {
         let limits = ResourceLimits {
             max_live_bytes: 4,
             ..ResourceLimits::default()
         };
-        let coordinator = RefCell::new(ImportCoordinator::new(
+        let coordinator = RefCell::new(try_import_coordinator(
             ImportOperationControl::default(),
             import_ledger_limits(&limits).expect("valid import ledger limits"),
-        ));
+        )?);
         let draft_reservations = RefCell::new(AccountedReservationVec::new());
         let reservation = {
             let mut adapter = ImportValidationAdapter {
@@ -1962,19 +1966,21 @@ mod tests {
             .finish()
             .expect("dropping the preserved token permits clean finalization");
         assert_eq!(ledger.current_live_bytes(), 0);
+        Ok(())
     }
 
     #[test]
-    fn failed_canonical_batch_transition_keeps_draft_storage_reservations_owned() {
+    fn failed_canonical_batch_transition_keeps_draft_storage_reservations_owned()
+    -> Result<(), LedgerCause<ImportDimension>> {
         let limits = ResourceLimits {
             max_live_bytes: 4096,
             max_canonical_payload_bytes: 8,
             ..ResourceLimits::default()
         };
-        let coordinator = RefCell::new(ImportCoordinator::new(
+        let coordinator = RefCell::new(try_import_coordinator(
             ImportOperationControl::default(),
             import_ledger_limits(&limits).expect("valid import ledger limits"),
-        ));
+        )?);
         let mut draft_values = AccountedReservationVec::new();
         draft_values
             .try_reserve(1, "test-draft-reservations", |capacity_bytes| {
@@ -2075,23 +2081,28 @@ mod tests {
             .finish()
             .expect("preserved source ownership should finalize cleanly");
         assert_eq!(ledger.current_live_bytes(), 0);
+        Ok(())
     }
 
     #[test]
-    fn direct_primary_binding_rejects_payload_before_copying_when_live_budget_is_too_small() {
+    fn direct_primary_binding_rejects_payload_before_copying_when_live_budget_is_too_small()
+    -> Result<(), LedgerCause<ImportDimension>> {
         let request = initialization_test_request();
         let io = DirectBytesAuthority::new();
         let limits = ResourceLimits {
             max_live_bytes: 63,
             ..ResourceLimits::default()
         };
+        let coordinator = try_import_coordinator(
+            ImportOperationControl::default(),
+            import_ledger_limits(&limits).expect("valid ledger limits"),
+        )?;
         let mut session = ImportSession::new(
             &request,
             &io,
             AssetPath::new("asset.direct-reservation").expect("valid test path"),
             &DenyDependencies,
-            ImportOperationControl::default(),
-            import_ledger_limits(&limits).expect("valid ledger limits"),
+            coordinator,
         );
 
         assert!(
@@ -2102,5 +2113,6 @@ mod tests {
         );
         assert!(session.primary_snapshot.is_none());
         assert_eq!(session.last_completed.phase(), ImportPhase::SessionCreated);
+        Ok(())
     }
 }

@@ -299,6 +299,13 @@ pub(crate) type ImportCoordinator = OperationCoordinator<
     ImportDimension,
 >;
 
+pub(crate) fn try_import_coordinator(
+    control: ImportOperationControl,
+    ledger_limits: LedgerLimits<ImportDimension>,
+) -> Result<ImportCoordinator, LedgerCause<ImportDimension>> {
+    ImportCoordinator::try_new(control, ledger_limits, &ImportLedgerPhase::ALL)
+}
+
 pub(crate) fn tighten_selected_format_limits(
     coordinator: &mut ImportCoordinator,
     limits: &ResourceLimits,

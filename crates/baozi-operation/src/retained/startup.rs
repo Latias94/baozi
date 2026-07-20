@@ -561,7 +561,7 @@ impl<'account> PendingOperationStartAdmission<'account> {
             physical: manifest,
         } = plan;
         let (limits, parts) = qualified_ledger.into_parts();
-        let ledger = Ledger::try_new_with_phase_catalog(limits, phases)
+        let ledger = Ledger::try_new(limits, phases)
             .map_err(StartupCrossPlaneAdmissionFailure::LedgerInitialization)?;
         let graph = ledger
             .try_admit_startup_attribution_graph(parts)

@@ -727,16 +727,18 @@ mod tests {
     use super::*;
     use crate::ledger::{
         ImportCoordinator, ImportDimension, ImportLedgerPhase, ImportOperationControl,
-        import_ledger_limits,
+        import_ledger_limits, try_import_coordinator,
     };
     use crate::limits::ResourceLimits;
+    use baozi_operation::LedgerCause;
     use std::cell::RefCell;
 
-    fn coordinator() -> RefCell<ImportCoordinator> {
-        RefCell::new(ImportCoordinator::new(
+    fn coordinator() -> Result<RefCell<ImportCoordinator>, LedgerCause<ImportDimension>> {
+        try_import_coordinator(
             ImportOperationControl::default(),
             import_ledger_limits(&ResourceLimits::default()).expect("valid import limits"),
-        ))
+        )
+        .map(RefCell::new)
     }
 
     fn reserve(
@@ -800,8 +802,9 @@ mod tests {
     }
 
     #[test]
-    fn owner_drops_elements_before_releasing_capacity() {
-        let coordinator = coordinator();
+    fn owner_drops_elements_before_releasing_capacity() -> Result<(), LedgerCause<ImportDimension>>
+    {
+        let coordinator = coordinator()?;
         let mut values = AccountedVec::new();
         values
             .try_reserve(1, "drop-order", |bytes| reserve(&coordinator, bytes))
@@ -821,11 +824,13 @@ mod tests {
                 .current_live_bytes(),
             0
         );
+        Ok(())
     }
 
     #[test]
-    fn metered_vector_drops_elements_before_releasing_its_complete_token() {
-        let coordinator = coordinator();
+    fn metered_vector_drops_elements_before_releasing_its_complete_token()
+    -> Result<(), LedgerCause<ImportDimension>> {
+        let coordinator = coordinator()?;
         let terminal = RefCell::new(None);
         let meter = StorageMeter {
             coordinator: &coordinator,
@@ -864,11 +869,13 @@ mod tests {
                 .current_live_bytes(),
             0
         );
+        Ok(())
     }
 
     #[test]
-    fn scene_collection_final_merge_failure_drops_payload_before_element_reservation() {
-        let coordinator = std::rc::Rc::new(coordinator());
+    fn scene_collection_final_merge_failure_drops_payload_before_element_reservation()
+    -> Result<(), LedgerCause<ImportDimension>> {
+        let coordinator = std::rc::Rc::new(coordinator()?);
         let terminal = RefCell::new(None);
         let meter = StorageMeter {
             coordinator: coordinator.as_ref(),
@@ -941,15 +948,17 @@ mod tests {
                 .current_live_bytes(),
             0
         );
+        Ok(())
     }
 
     #[test]
-    fn rejected_prepared_value_drops_value_before_releasing_its_reservations() {
+    fn rejected_prepared_value_drops_value_before_releasing_its_reservations()
+    -> Result<(), LedgerCause<ImportDimension>> {
         fn reject<T>(_prepared: PreparedSceneValue<T>) -> Result<(), ()> {
             Err(())
         }
 
-        let coordinator = coordinator();
+        let coordinator = coordinator()?;
         let mut reservations = SceneValueReservations::new();
         reservations
             .payload
@@ -979,11 +988,13 @@ mod tests {
                 .current_live_bytes(),
             0
         );
+        Ok(())
     }
 
     #[test]
-    fn failed_candidates_preserve_the_live_owner_and_release_candidate_capacity() {
-        let coordinator = coordinator();
+    fn failed_candidates_preserve_the_live_owner_and_release_candidate_capacity()
+    -> Result<(), LedgerCause<ImportDimension>> {
+        let coordinator = coordinator()?;
         let mut values = AccountedVec::new();
         values
             .try_reserve(1, "candidate", |bytes| reserve(&coordinator, bytes))
@@ -1036,11 +1047,13 @@ mod tests {
                 .current_live_bytes(),
             original_live
         );
+        Ok(())
     }
 
     #[test]
-    fn undercovered_capacity_reservation_is_rejected_before_allocation() {
-        let coordinator = coordinator();
+    fn undercovered_capacity_reservation_is_rejected_before_allocation()
+    -> Result<(), LedgerCause<ImportDimension>> {
+        let coordinator = coordinator()?;
         let mut values = AccountedVec::<u64>::new();
 
         let result = values.try_reserve(1, "undercovered-capacity", |bytes| {
@@ -1064,11 +1077,12 @@ mod tests {
                 .current_live_bytes(),
             0
         );
+        Ok(())
     }
 
     #[test]
-    fn failed_reservation_preserves_the_live_owner() {
-        let coordinator = coordinator();
+    fn failed_reservation_preserves_the_live_owner() -> Result<(), LedgerCause<ImportDimension>> {
+        let coordinator = coordinator()?;
         let mut values = AccountedVec::new();
         values
             .try_reserve(1, "reserve-failure", |bytes| reserve(&coordinator, bytes))
@@ -1103,11 +1117,13 @@ mod tests {
                 .current_live_bytes(),
             original_live
         );
+        Ok(())
     }
 
     #[test]
-    fn successful_replacement_accounts_overlap_then_retires_the_old_owner() {
-        let coordinator = coordinator();
+    fn successful_replacement_accounts_overlap_then_retires_the_old_owner()
+    -> Result<(), LedgerCause<ImportDimension>> {
+        let coordinator = coordinator()?;
         let mut values = AccountedVec::new();
         values
             .try_reserve(1, "replacement", |bytes| reserve(&coordinator, bytes))
@@ -1141,11 +1157,13 @@ mod tests {
                 .current_live_bytes(),
             values.capacity_bytes()
         );
+        Ok(())
     }
 
     #[test]
-    fn abandoned_replacement_preserves_the_live_owner() {
-        let coordinator = coordinator();
+    fn abandoned_replacement_preserves_the_live_owner() -> Result<(), LedgerCause<ImportDimension>>
+    {
+        let coordinator = coordinator()?;
         let mut values = AccountedVec::new();
         values
             .try_reserve(1, "abandoned-replacement", |bytes| {
@@ -1190,11 +1208,13 @@ mod tests {
                 .current_live_bytes(),
             original_live
         );
+        Ok(())
     }
 
     #[test]
-    fn publication_conversion_preserves_the_coupled_owner() {
-        let coordinator = coordinator();
+    fn publication_conversion_preserves_the_coupled_owner()
+    -> Result<(), LedgerCause<ImportDimension>> {
+        let coordinator = coordinator()?;
         let mut reservations = AccountedReservationVec::new();
         reservations
             .try_reserve(1, "publication-conversion", |bytes| {
@@ -1227,10 +1247,12 @@ mod tests {
                 .current_live_bytes(),
             0
         );
+        Ok(())
     }
 
     #[test]
-    fn terminal_type_owns_values_before_capacity_is_released() {
+    fn terminal_type_owns_values_before_capacity_is_released()
+    -> Result<(), LedgerCause<ImportDimension>> {
         struct TerminalValue<'a> {
             alive: &'a std::cell::Cell<bool>,
         }
@@ -1241,7 +1263,7 @@ mod tests {
             }
         }
 
-        let coordinator = coordinator();
+        let coordinator = coordinator()?;
         let alive = std::cell::Cell::new(true);
         let mut values = AccountedVec::new();
         values
@@ -1265,5 +1287,6 @@ mod tests {
 
         drop(terminal);
         assert!(!alive.get());
+        Ok(())
     }
 }

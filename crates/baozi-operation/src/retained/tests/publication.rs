@@ -1,9 +1,305 @@
 use super::*;
 
+#[derive(Debug, Clone, Copy)]
+enum FailureGuardCase {
+    RichEvidence,
+    RichBoth,
+    MinimalNone,
+    MinimalEvidence,
+    MinimalBoth,
+}
+
+impl FailureGuardCase {
+    const fn rail(self) -> FailureTerminalRail {
+        match self {
+            Self::RichEvidence | Self::RichBoth => FailureTerminalRail::Rich,
+            Self::MinimalNone | Self::MinimalEvidence | Self::MinimalBoth => {
+                FailureTerminalRail::Minimal
+            }
+        }
+    }
+
+    const fn has_discard(self) -> bool {
+        !matches!(self, Self::MinimalNone)
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum FailureFault {
+    Guard(FailureGuardDropStage),
+    EvidenceWrite,
+}
+
+fn arm_failure_fault(case: FailureGuardCase, fault: FailureFault) {
+    match fault {
+        FailureFault::Guard(stage) => drop_next_failure_guard(case.rail(), stage),
+        FailureFault::EvidenceWrite => panic_next_terminal_evidence_write(),
+    }
+}
+
+fn run_failure_guard_case(case: FailureGuardCase, fault: FailureFault) {
+    let factory = account_factory(1);
+    let account = account(&factory, u64::MAX, 128);
+    let evidence_limit = match case {
+        FailureGuardCase::MinimalEvidence | FailureGuardCase::MinimalBoth => 4,
+        FailureGuardCase::RichEvidence
+        | FailureGuardCase::RichBoth
+        | FailureGuardCase::MinimalNone => 64,
+    };
+    let operation = test_operation_on_account_with_control(
+        &account,
+        evidence_limit,
+        RetainedBatchLimits::new(2, 2),
+        OperationControl::default(),
+    );
+    let ledger = operation.coordinator.retained_ledger().test_probe();
+
+    macro_rules! run_prepare {
+        ($prepare:expr) => {{
+            let physical = account.snapshot();
+            let physical_before = (
+                physical.live_retained_bytes(),
+                physical.live_retained_allocations(),
+            );
+            let ledger_before = (ledger.active_reservations(), ledger.current_live_bytes());
+            arm_failure_fault(case, fault);
+            let unwind = catch_unwind(AssertUnwindSafe(|| {
+                let _ = $prepare;
+            }));
+            (physical_before, ledger_before, unwind)
+        }};
+    }
+
+    let (physical_before, ledger_before, unwind) = match case {
+        FailureGuardCase::RichEvidence => {
+            let plan = RetainedPublicationPlan::rich_failure(RetainedBlockTablePlan::new(
+                writer_plan(2, 2),
+                1,
+                1,
+            ));
+            let mut assembly: TestPublication<u64, u64> = operation
+                .try_publication_assembly(plan)
+                .unwrap_or_else(|_| panic!("rich-evidence fixture must open"));
+            let evidence = assembly
+                .try_retain_outcome_evidence(empty_plan(), |emplacer| {
+                    Ok(emplacer.place(7, EvidenceRootTag))
+                })
+                .unwrap_or_else(|_| panic!("rich-evidence root must retain"));
+            let validated = match assembly.validate_rich_failure(evidence, |session, root| {
+                session.outcome_evidence(root) == Some(&7)
+            }) {
+                RetainedFailureValidation::Valid(validated) => validated,
+                _ => panic!("rich-evidence fixture must validate"),
+            };
+            run_prepare!(
+                validated.try_prepare(PreparationFailureCode::domain(201), final_progress())
+            )
+        }
+        FailureGuardCase::RichBoth => {
+            let mut assembly: TestPublication<u64, u64> = operation
+                .try_publication_assembly(publication_plan(1, 1))
+                .unwrap_or_else(|_| panic!("rich-both fixture must open"));
+            let (canonical, evidence) = retain_scalar_success(&mut assembly);
+            let failure = match assembly.validate_success(
+                canonical,
+                evidence,
+                |_session, _canonical, _evidence| false,
+            ) {
+                RetainedSuccessValidation::Rejected(failure) => failure,
+                _ => panic!("rich-both fixture must enter failure validation"),
+            };
+            let validated = match failure.validate_rich_failure(evidence, |session, root| {
+                session.outcome_evidence(root) == Some(&7)
+            }) {
+                RetainedFailureValidation::Valid(validated) => validated,
+                _ => panic!("rich-both fixture must validate"),
+            };
+            run_prepare!(
+                validated.try_prepare(PreparationFailureCode::domain(202), final_progress())
+            )
+        }
+        FailureGuardCase::MinimalNone => run_prepare!(
+            operation.prepare_minimal_fallback::<u64, u64>(PreparationFailureCode::domain(203))
+        ),
+        FailureGuardCase::MinimalEvidence => {
+            let plan = RetainedPublicationPlan::rich_failure(RetainedBlockTablePlan::new(
+                writer_plan(2, 2),
+                1,
+                1,
+            ));
+            let mut assembly: TestPublication<u64, u64> = operation
+                .try_publication_assembly(plan)
+                .unwrap_or_else(|_| panic!("minimal-evidence fixture must open"));
+            let evidence = assembly
+                .try_retain_outcome_evidence(empty_plan(), |emplacer| {
+                    Ok(emplacer.place(7, EvidenceRootTag))
+                })
+                .unwrap_or_else(|_| panic!("minimal-evidence root must retain"));
+            assembly
+                .try_commit_outcome_evidence(TestDimension::Bytes, 4)
+                .unwrap_or_else(|_| panic!("minimal-evidence commitment must fit"));
+            let validated = match assembly.validate_rich_failure(evidence, |session, root| {
+                session.outcome_evidence(root) == Some(&7)
+            }) {
+                RetainedFailureValidation::Valid(validated) => validated,
+                _ => panic!("minimal-evidence fixture must validate"),
+            };
+            run_prepare!(
+                validated.try_prepare(PreparationFailureCode::domain(204), final_progress())
+            )
+        }
+        FailureGuardCase::MinimalBoth => {
+            let mut assembly: TestPublication<u64, u64> = operation
+                .try_publication_assembly(publication_plan(1, 1))
+                .unwrap_or_else(|_| panic!("minimal-both fixture must open"));
+            let (canonical, evidence) = retain_scalar_success(&mut assembly);
+            assembly
+                .try_commit_outcome_evidence(TestDimension::Bytes, 4)
+                .unwrap_or_else(|_| panic!("minimal-both commitment must fit"));
+            let validated = match assembly.validate_success(
+                canonical,
+                evidence,
+                |session, canonical, evidence| {
+                    session.canonical(canonical) == Some(&11)
+                        && session.outcome_evidence(evidence) == Some(&7)
+                },
+            ) {
+                RetainedSuccessValidation::Valid(validated) => validated,
+                _ => panic!("minimal-both fixture must validate"),
+            };
+            run_prepare!(validated.try_prepare(final_progress()))
+        }
+    };
+
+    assert!(unwind.is_err(), "{case:?} {fault:?} must unwind");
+    let physical_after = account.snapshot();
+    let physical_after_counts = (
+        physical_after.live_retained_bytes(),
+        physical_after.live_retained_allocations(),
+    );
+    let ledger_after = (ledger.active_reservations(), ledger.current_live_bytes());
+    assert_eq!(
+        physical_after
+            .first_poison_evidence()
+            .map(AccountPoisonEvidence::reason),
+        Some(AccountPoisonReason::OwnershipGraphUnverified),
+        "{case:?} {fault:?} must contain the exact physical continuation"
+    );
+
+    match fault {
+        FailureFault::Guard(FailureGuardDropStage::Qualified | FailureGuardDropStage::Eligible) => {
+            assert!(ledger.is_terminal_qualified());
+            assert_eq!(physical_after_counts, physical_before);
+            assert_eq!(ledger_after, ledger_before);
+        }
+        FailureFault::Guard(FailureGuardDropStage::CanonicalAcknowledged) => {
+            assert!(ledger.is_terminal_qualified());
+            assert!(physical_after_counts.0 < physical_before.0);
+            assert!(physical_after_counts.1 < physical_before.1);
+            assert!(ledger_after.0 < ledger_before.0);
+            assert!(ledger_after.1 < ledger_before.1);
+            assert!(ledger_after.0 > 0);
+            assert!(ledger_after.1 > 0);
+        }
+        FailureFault::Guard(FailureGuardDropStage::DiscardCleaned) => {
+            assert!(ledger.is_terminal_qualified());
+            assert!(physical_after_counts.0 < physical_before.0);
+            assert!(physical_after_counts.1 < physical_before.1);
+            assert!(ledger_after.0 <= ledger_before.0);
+            assert!(ledger_after.1 <= ledger_before.1);
+            assert!(ledger_after.0 > 0);
+            assert!(ledger_after.1 > 0);
+        }
+        FailureFault::Guard(FailureGuardDropStage::FreezeReady) => {
+            assert!(ledger.is_terminal_qualified());
+            assert!(physical_after_counts.0 <= physical_before.0);
+            assert!(physical_after_counts.1 <= physical_before.1);
+            assert!(ledger_after.0 <= ledger_before.0);
+            assert!(ledger_after.1 <= ledger_before.1);
+            if case.has_discard() {
+                assert!(physical_after_counts.0 < physical_before.0);
+                assert!(physical_after_counts.1 < physical_before.1);
+                assert!(ledger_after.0 < ledger_before.0);
+                assert!(ledger_after.1 < ledger_before.1);
+            }
+        }
+        FailureFault::Guard(FailureGuardDropStage::LedgerPublished)
+        | FailureFault::EvidenceWrite => {
+            assert!(!ledger.is_terminal_qualified());
+            assert_eq!(ledger_after, (0, 0));
+            assert!(physical_after_counts.0 > 0);
+            assert!(physical_after_counts.1 > 0);
+        }
+    }
+    drop(account);
+    assert_eq!(factory.snapshot().live_accounts(), 1);
+}
+
+#[test]
+fn rich_and_minimal_owning_guards_contain_direct_drop_at_every_stable_state() {
+    for case in [
+        FailureGuardCase::RichEvidence,
+        FailureGuardCase::RichBoth,
+        FailureGuardCase::MinimalNone,
+        FailureGuardCase::MinimalEvidence,
+        FailureGuardCase::MinimalBoth,
+    ] {
+        for stage in [
+            FailureGuardDropStage::Qualified,
+            FailureGuardDropStage::Eligible,
+            FailureGuardDropStage::FreezeReady,
+        ] {
+            run_failure_guard_case(case, FailureFault::Guard(stage));
+        }
+    }
+}
+
+#[test]
+fn both_discard_continuation_owns_the_graph_after_canonical_acknowledgement() {
+    for case in [FailureGuardCase::RichBoth, FailureGuardCase::MinimalBoth] {
+        run_failure_guard_case(
+            case,
+            FailureFault::Guard(FailureGuardDropStage::CanonicalAcknowledged),
+        );
+    }
+}
+
+#[test]
+fn evidence_discard_continuation_owns_the_graph_after_physical_cleanup() {
+    for case in [
+        FailureGuardCase::RichEvidence,
+        FailureGuardCase::RichBoth,
+        FailureGuardCase::MinimalEvidence,
+        FailureGuardCase::MinimalBoth,
+    ] {
+        run_failure_guard_case(
+            case,
+            FailureFault::Guard(FailureGuardDropStage::DiscardCleaned),
+        );
+    }
+}
+
+#[test]
+fn failure_rails_contain_both_sides_of_the_ledger_published_evidence_write_window() {
+    for case in [
+        FailureGuardCase::RichEvidence,
+        FailureGuardCase::MinimalNone,
+    ] {
+        run_failure_guard_case(
+            case,
+            FailureFault::Guard(FailureGuardDropStage::LedgerPublished),
+        );
+        run_failure_guard_case(case, FailureFault::EvidenceWrite);
+    }
+}
+
 #[test]
 fn block_table_success_freezes_dual_batches_and_splits_owners() {
     let factory = account_factory(1);
     let operation = test_operation_with_writer_limits(&factory, 64, RetainedBatchLimits::new(3, 2));
+    operation
+        .try_complete_phase(TestPhase::Build)
+        .unwrap_or_else(|_| panic!("semantic phase completion must fit the frozen catalog"));
     let mut assembly: TestPublication<TestCanonicalBlock, TestEvidenceBlock> = operation
         .try_publication_assembly(publication_plan(2, 2))
         .unwrap_or_else(|_| panic!("publication assembly must open"));
@@ -73,6 +369,13 @@ fn block_table_success_freezes_dual_batches_and_splits_owners() {
             outcome_evidence,
             ledger_evidence,
         } => {
+            let header = ledger_evidence
+                .header()
+                .expect("success terminal ledger header");
+            assert_eq!(header.terminal_cause(), TerminalEvidenceCause::Success);
+            assert_eq!(header.last_completed_phase(), Some(TestPhase::Build));
+            assert_eq!(header.dimension_count(), 1);
+            assert_eq!(header.phase_count(), 1);
             assert!(matches!(canonical.root(), TestCanonicalBlock::Root { .. }));
             assert!(matches!(
                 outcome_evidence.root(),
@@ -87,6 +390,314 @@ fn block_table_success_freezes_dual_batches_and_splits_owners() {
         _ => panic!("success must not publish a failure owner"),
     }
     assert_eq!(factory.snapshot().live_accounts(), 0);
+}
+
+#[test]
+fn terminal_evidence_qualification_error_contains_the_complete_success_graph() {
+    let factory = account_factory(1);
+    let account = account(&factory, u64::MAX, 128);
+    let operation = test_operation_on_account_with_control(
+        &account,
+        64,
+        RetainedBatchLimits::new(2, 2),
+        OperationControl::default(),
+    );
+    let ledger = operation.coordinator.retained_ledger().test_probe();
+    let mut assembly: TestPublication<u64, u64> = operation
+        .try_publication_assembly(publication_plan(1, 1))
+        .unwrap_or_else(|_| panic!("freeze-error publication must open"));
+    let (canonical_root, evidence_root) = retain_scalar_success(&mut assembly);
+    let validated = match assembly.validate_success(
+        canonical_root,
+        evidence_root,
+        |session, canonical, evidence| {
+            session.canonical(canonical) == Some(&11)
+                && session.outcome_evidence(evidence) == Some(&7)
+        },
+    ) {
+        RetainedSuccessValidation::Valid(validated) => validated,
+        _ => panic!("freeze-error graph must validate"),
+    };
+    let physical_before = account.snapshot();
+    let ledger_before = (ledger.active_reservations(), ledger.current_live_bytes());
+
+    fail_next_terminal_evidence_qualification();
+    let cause = match validated.try_prepare(final_progress()) {
+        Err(RetainedPublicationPrepareError::FinalizationContainment(cause)) => cause,
+        Ok(_) => panic!("an unfrozen terminal evidence graph must never publish"),
+    };
+    assert_eq!(
+        cause.reason(),
+        AccountPoisonReason::TerminalEvidenceFreezeUnverified
+    );
+    let contained = account.snapshot();
+    assert_eq!(
+        contained.live_retained_bytes(),
+        physical_before.live_retained_bytes()
+    );
+    assert_eq!(
+        contained.live_retained_allocations(),
+        physical_before.live_retained_allocations()
+    );
+    assert_eq!(
+        contained
+            .first_poison_evidence()
+            .map(AccountPoisonEvidence::reason),
+        Some(AccountPoisonReason::TerminalEvidenceFreezeUnverified)
+    );
+    assert!(ledger.is_terminal_qualified());
+    assert_eq!(ledger.active_reservations(), ledger_before.0);
+    assert_eq!(ledger.current_live_bytes(), ledger_before.1);
+    drop(account);
+    assert_eq!(factory.snapshot().live_accounts(), 1);
+}
+
+#[test]
+fn success_guard_direct_drop_contains_physical_before_retaining_ledger_proof() {
+    for stage in [
+        SuccessGuardDropStage::Qualified,
+        SuccessGuardDropStage::Eligible,
+        SuccessGuardDropStage::Verified,
+        SuccessGuardDropStage::FreezeReady,
+    ] {
+        let factory = account_factory(1);
+        let account = account(&factory, u64::MAX, 128);
+        let operation = test_operation_on_account_with_control(
+            &account,
+            64,
+            RetainedBatchLimits::new(2, 2),
+            OperationControl::default(),
+        );
+        let ledger = operation.coordinator.retained_ledger().test_probe();
+        let mut assembly: TestPublication<u64, u64> = operation
+            .try_publication_assembly(publication_plan(1, 1))
+            .unwrap_or_else(|_| panic!("direct-drop publication must open"));
+        let (canonical_root, evidence_root) = retain_scalar_success(&mut assembly);
+        let validated = match assembly.validate_success(
+            canonical_root,
+            evidence_root,
+            |session, canonical, evidence| {
+                session.canonical(canonical) == Some(&11)
+                    && session.outcome_evidence(evidence) == Some(&7)
+            },
+        ) {
+            RetainedSuccessValidation::Valid(validated) => validated,
+            _ => panic!("direct-drop graph must validate"),
+        };
+        let physical_before = account.snapshot();
+        let ledger_before = (ledger.active_reservations(), ledger.current_live_bytes());
+
+        drop_next_success_guard(stage);
+        let unwind = catch_unwind(AssertUnwindSafe(|| {
+            let _ = validated.try_prepare(final_progress());
+        }));
+        assert!(
+            unwind.is_err(),
+            "{stage:?} guard must be dropped by the probe"
+        );
+
+        let physical_after = account.snapshot();
+        let ledger_after = (ledger.active_reservations(), ledger.current_live_bytes());
+        assert!(ledger.is_terminal_qualified());
+        assert_eq!(
+            physical_after
+                .first_poison_evidence()
+                .map(AccountPoisonEvidence::reason),
+            Some(AccountPoisonReason::OwnershipGraphUnverified),
+            "{stage:?} must poison the physical graph before retaining proof"
+        );
+        match stage {
+            SuccessGuardDropStage::Qualified | SuccessGuardDropStage::Eligible => {
+                assert_eq!(
+                    physical_after.live_retained_bytes(),
+                    physical_before.live_retained_bytes()
+                );
+                assert_eq!(
+                    physical_after.live_retained_allocations(),
+                    physical_before.live_retained_allocations()
+                );
+                assert_eq!(ledger_after, ledger_before);
+            }
+            SuccessGuardDropStage::Verified => {
+                assert!(
+                    physical_after.live_retained_bytes() < physical_before.live_retained_bytes()
+                );
+                assert!(
+                    physical_after.live_retained_allocations()
+                        < physical_before.live_retained_allocations()
+                );
+                assert_eq!(ledger_after, ledger_before);
+            }
+            SuccessGuardDropStage::FreezeReady => {
+                assert!(
+                    physical_after.live_retained_bytes() < physical_before.live_retained_bytes()
+                );
+                assert!(
+                    physical_after.live_retained_allocations()
+                        < physical_before.live_retained_allocations()
+                );
+                assert!(ledger_after.0 < ledger_before.0);
+                assert!(ledger_after.1 < ledger_before.1);
+            }
+            SuccessGuardDropStage::VerifiedInProgress | SuccessGuardDropStage::LedgerPublished => {
+                unreachable!("mid-transition stages are covered by unwind probes")
+            }
+        }
+        drop(account);
+        assert_eq!(factory.snapshot().live_accounts(), 1);
+    }
+}
+
+#[test]
+fn success_acknowledgement_panic_does_not_retry_or_release_unacknowledged_ledger_state() {
+    let factory = account_factory(1);
+    let account = account(&factory, u64::MAX, 128);
+    let operation = test_operation_on_account_with_control(
+        &account,
+        64,
+        RetainedBatchLimits::new(2, 2),
+        OperationControl::default(),
+    );
+    let ledger = operation.coordinator.retained_ledger().test_probe();
+    let mut assembly: TestPublication<u64, u64> = operation
+        .try_publication_assembly(publication_plan(1, 1))
+        .unwrap_or_else(|_| panic!("acknowledgement-panic publication must open"));
+    let (canonical_root, evidence_root) = retain_scalar_success(&mut assembly);
+    let validated = match assembly.validate_success(
+        canonical_root,
+        evidence_root,
+        |session, canonical, evidence| {
+            session.canonical(canonical) == Some(&11)
+                && session.outcome_evidence(evidence) == Some(&7)
+        },
+    ) {
+        RetainedSuccessValidation::Valid(validated) => validated,
+        _ => panic!("acknowledgement-panic graph must validate"),
+    };
+    let physical_before = account.snapshot();
+    let ledger_before = (ledger.active_reservations(), ledger.current_live_bytes());
+
+    drop_next_success_guard(SuccessGuardDropStage::VerifiedInProgress);
+    let unwind = catch_unwind(AssertUnwindSafe(|| {
+        let _ = validated.try_prepare(final_progress());
+    }));
+    assert!(unwind.is_err());
+
+    let physical_after = account.snapshot();
+    assert!(ledger.is_terminal_qualified());
+    assert_eq!(
+        (ledger.active_reservations(), ledger.current_live_bytes()),
+        ledger_before,
+        "an in-progress acknowledgement panic must retain, not retry, the exact proof"
+    );
+    assert!(physical_after.live_retained_bytes() < physical_before.live_retained_bytes());
+    assert!(
+        physical_after.live_retained_allocations() < physical_before.live_retained_allocations()
+    );
+    assert_eq!(
+        physical_after
+            .first_poison_evidence()
+            .map(AccountPoisonEvidence::reason),
+        Some(AccountPoisonReason::OwnershipGraphUnverified)
+    );
+    drop(account);
+    assert_eq!(factory.snapshot().live_accounts(), 1);
+}
+
+#[test]
+fn success_ledger_freeze_panic_before_evidence_freeze_uses_scopeguard_containment() {
+    let factory = account_factory(1);
+    let account = account(&factory, u64::MAX, 128);
+    let operation = test_operation_on_account_with_control(
+        &account,
+        64,
+        RetainedBatchLimits::new(2, 2),
+        OperationControl::default(),
+    );
+    let ledger = operation.coordinator.retained_ledger().test_probe();
+    let mut assembly: TestPublication<u64, u64> = operation
+        .try_publication_assembly(publication_plan(1, 1))
+        .unwrap_or_else(|_| panic!("ledger-published publication must open"));
+    let (canonical_root, evidence_root) = retain_scalar_success(&mut assembly);
+    let validated = match assembly.validate_success(
+        canonical_root,
+        evidence_root,
+        |session, canonical, evidence| {
+            session.canonical(canonical) == Some(&11)
+                && session.outcome_evidence(evidence) == Some(&7)
+        },
+    ) {
+        RetainedSuccessValidation::Valid(validated) => validated,
+        _ => panic!("ledger-published graph must validate"),
+    };
+
+    drop_next_success_guard(SuccessGuardDropStage::LedgerPublished);
+    let unwind = catch_unwind(AssertUnwindSafe(|| {
+        let _ = validated.try_prepare(final_progress());
+    }));
+    assert!(unwind.is_err());
+
+    let physical_after = account.snapshot();
+    assert!(!ledger.is_terminal_qualified());
+    assert_eq!(ledger.active_reservations(), 0);
+    assert_eq!(ledger.current_live_bytes(), 0);
+    assert_eq!(
+        physical_after
+            .first_poison_evidence()
+            .map(AccountPoisonEvidence::reason),
+        Some(AccountPoisonReason::OwnershipGraphUnverified),
+        "scopeguard must contain the physical graph when evidence freeze never starts"
+    );
+    assert!(physical_after.live_retained_bytes() > 0);
+    assert!(physical_after.live_retained_allocations() > 0);
+    drop(account);
+    assert_eq!(factory.snapshot().live_accounts(), 1);
+}
+
+#[test]
+fn terminal_evidence_qualification_panic_contains_the_complete_fallback_graph() {
+    let factory = account_factory(1);
+    let account = account(&factory, u64::MAX, 128);
+    let operation = test_operation_on_account_with_control(
+        &account,
+        64,
+        RetainedBatchLimits::new(2, 2),
+        OperationControl::default(),
+    );
+    let ledger = operation.coordinator.retained_ledger().test_probe();
+    let physical_before = account.snapshot();
+    let ledger_before = (ledger.active_reservations(), ledger.current_live_bytes());
+
+    panic_next_terminal_evidence_qualification();
+    let cause =
+        match operation.prepare_minimal_fallback::<u64, u64>(PreparationFailureCode::domain(93)) {
+            Err(RetainedPublicationPrepareError::FinalizationContainment(cause)) => cause,
+            Ok(_) => panic!("a panicked terminal evidence freeze must never publish fallback"),
+        };
+    assert_eq!(
+        cause.reason(),
+        AccountPoisonReason::TerminalEvidenceFreezeUnverified
+    );
+    let contained = account.snapshot();
+    assert_eq!(
+        contained.live_retained_bytes(),
+        physical_before.live_retained_bytes()
+    );
+    assert_eq!(
+        contained.live_retained_allocations(),
+        physical_before.live_retained_allocations()
+    );
+    assert_eq!(
+        contained
+            .first_poison_evidence()
+            .map(AccountPoisonEvidence::reason),
+        Some(AccountPoisonReason::TerminalEvidenceFreezeUnverified)
+    );
+    assert!(ledger.is_terminal_qualified());
+    assert_eq!(ledger.active_reservations(), ledger_before.0);
+    assert_eq!(ledger.current_live_bytes(), ledger_before.1);
+    drop(account);
+    assert_eq!(factory.snapshot().live_accounts(), 1);
 }
 
 #[test]
@@ -488,7 +1099,10 @@ fn recoverable_open_failures_prepare_the_baseline_without_tables_or_roots() {
             fallback,
             ledger_evidence,
         } => {
-            assert_eq!(fallback.cause(), PreparationFailureCode::domain(71));
+            assert_eq!(
+                published_failure_cause(&ledger_evidence),
+                PreparationFailureCode::domain(71)
+            );
             assert_eq!(*fallback.value(), 7);
             assert_eq!(
                 ledger_evidence
@@ -521,8 +1135,8 @@ fn recoverable_open_failures_prepare_the_baseline_without_tables_or_roots() {
     );
     assert!(matches!(
         &published,
-        PublishedRetainedPublicationParts::MinimalFallback { fallback, .. }
-            if fallback.cause() == PreparationFailureCode::domain(72)
+        PublishedRetainedPublicationParts::MinimalFallback { ledger_evidence, .. }
+            if published_failure_cause(ledger_evidence) == PreparationFailureCode::domain(72)
     ));
     drop(published);
     assert_eq!(factory.snapshot().live_accounts(), 0);
@@ -621,7 +1235,10 @@ fn semantic_rejection_can_append_evidence_and_prepare_a_rich_failure() {
             outcome_evidence,
             ledger_evidence,
         } => {
-            assert_eq!(outcome_evidence.cause(), PreparationFailureCode::domain(91));
+            assert_eq!(
+                published_failure_cause(&ledger_evidence),
+                PreparationFailureCode::domain(91)
+            );
             assert_eq!(outcome_evidence.outcome_evidence().root(), &7);
             assert_eq!(
                 outcome_evidence.outcome_evidence().aggregate().get(detail),
@@ -663,12 +1280,12 @@ fn validation_panic_transitions_to_fallback_only() {
             .unwrap_or_else(|_| panic!("validation panic fallback must prepare")),
     );
     match &published {
-        PublishedRetainedPublicationParts::MinimalFallback { fallback, .. } => {
-            assert_eq!(
-                fallback.cause().class(),
-                PreparationFailureClass::ProductGraph
-            );
-            assert_eq!(fallback.cause().code(), 5);
+        PublishedRetainedPublicationParts::MinimalFallback {
+            ledger_evidence, ..
+        } => {
+            let cause = published_failure_cause(ledger_evidence);
+            assert_eq!(cause.class(), PreparationFailureClass::ProductGraph);
+            assert_eq!(cause.code(), 5);
         }
         _ => panic!("validation panic must publish minimal fallback"),
     }
@@ -702,12 +1319,12 @@ fn repeated_semantic_rejection_preserves_the_product_graph_fallback_cause() {
             .unwrap_or_else(|_| panic!("repeated rejection fallback must prepare")),
     );
     match &published {
-        PublishedRetainedPublicationParts::MinimalFallback { fallback, .. } => {
-            assert_eq!(
-                fallback.cause().class(),
-                PreparationFailureClass::ProductGraph
-            );
-            assert_eq!(fallback.cause().code(), 4);
+        PublishedRetainedPublicationParts::MinimalFallback {
+            ledger_evidence, ..
+        } => {
+            let cause = published_failure_cause(ledger_evidence);
+            assert_eq!(cause.class(), PreparationFailureClass::ProductGraph);
+            assert_eq!(cause.code(), 4);
         }
         _ => panic!("repeated semantic rejection must publish only fallback"),
     }
@@ -748,12 +1365,12 @@ fn consuming_closure_validation_rejects_orphans_and_retagged_slots() {
         .prepare_minimal_fallback()
         .unwrap_or_else(|_| panic!("orphan rejection must prepare minimal fallback"));
     match handoff_for_test(prepared) {
-        PublishedRetainedPublicationParts::MinimalFallback { fallback, .. } => {
-            assert_eq!(
-                fallback.cause().class(),
-                PreparationFailureClass::ProductGraph
-            );
-            assert_eq!(fallback.cause().code(), 4);
+        PublishedRetainedPublicationParts::MinimalFallback {
+            ledger_evidence, ..
+        } => {
+            let cause = published_failure_cause(&ledger_evidence);
+            assert_eq!(cause.class(), PreparationFailureClass::ProductGraph);
+            assert_eq!(cause.code(), 4);
         }
         _ => panic!("orphan rejection must publish minimal fallback"),
     }
@@ -795,12 +1412,12 @@ fn consuming_closure_validation_rejects_orphans_and_retagged_slots() {
         .prepare_minimal_fallback()
         .unwrap_or_else(|_| panic!("retag rejection must prepare minimal fallback"));
     match handoff_for_test(prepared) {
-        PublishedRetainedPublicationParts::MinimalFallback { fallback, .. } => {
-            assert_eq!(
-                fallback.cause().class(),
-                PreparationFailureClass::ProductGraph
-            );
-            assert_eq!(fallback.cause().code(), 4);
+        PublishedRetainedPublicationParts::MinimalFallback {
+            ledger_evidence, ..
+        } => {
+            let cause = published_failure_cause(&ledger_evidence);
+            assert_eq!(cause.class(), PreparationFailureClass::ProductGraph);
+            assert_eq!(cause.code(), 4);
         }
         _ => panic!("retag rejection must publish minimal fallback"),
     }
@@ -908,10 +1525,14 @@ fn partial_canonical_downgrades_to_rich_failure_after_storage_drops_first() {
     assert!(OBSERVED_PHYSICAL_ALLOCATIONS.load(Ordering::SeqCst) > 0);
     match handoff_for_test(prepared) {
         PublishedRetainedPublicationParts::RichFailure {
-            outcome_evidence, ..
+            outcome_evidence,
+            ledger_evidence,
         } => {
             assert_eq!(*outcome_evidence.outcome_evidence().root(), 5);
-            assert_eq!(outcome_evidence.cause(), PreparationFailureCode::domain(9));
+            assert_eq!(
+                published_failure_cause(&ledger_evidence),
+                PreparationFailureCode::domain(9)
+            );
         }
         _ => panic!("partial canonical must not publish canonical output"),
     }
@@ -994,12 +1615,11 @@ fn success_control_rejection_atomically_downgrades_to_rich_failure() {
             .unwrap_or_else(|_| panic!("control rejection must produce a rich failure")),
     ) {
         PublishedRetainedPublicationParts::RichFailure {
-            outcome_evidence, ..
+            outcome_evidence,
+            ledger_evidence,
         } => {
-            assert_eq!(
-                outcome_evidence.cause().class(),
-                PreparationFailureClass::Control
-            );
+            let cause = published_failure_cause(&ledger_evidence);
+            assert_eq!(cause.class(), PreparationFailureClass::Control);
             assert_eq!(*outcome_evidence.outcome_evidence().root(), 7);
         }
         _ => panic!("control rejection must not publish canonical output"),
@@ -1035,9 +1655,15 @@ fn evidence_primary_rejection_uses_minimal_fallback_without_retry() {
             .try_prepare(PreparationFailureCode::domain(5), final_progress())
             .unwrap_or_else(|_| panic!("ledger rejection must retain minimal fallback")),
     ) {
-        PublishedRetainedPublicationParts::MinimalFallback { fallback, .. } => {
+        PublishedRetainedPublicationParts::MinimalFallback {
+            fallback,
+            ledger_evidence,
+        } => {
             assert_eq!(*fallback.value(), 7);
-            assert_eq!(fallback.cause().class(), PreparationFailureClass::Ledger);
+            assert_eq!(
+                published_failure_cause(&ledger_evidence).class(),
+                PreparationFailureClass::Ledger
+            );
         }
         _ => panic!("primary ledger rejection must not retry rich failure"),
     }
@@ -1083,8 +1709,13 @@ fn success_primary_rejection_drops_both_tables_before_minimal_fallback() {
     assert_eq!(CANONICAL_DROPS.load(Ordering::SeqCst), 1);
     assert_eq!(EVIDENCE_DROPS.load(Ordering::SeqCst), 1);
     match handoff_for_test(prepared) {
-        PublishedRetainedPublicationParts::MinimalFallback { fallback, .. } => {
-            assert_eq!(fallback.cause().class(), PreparationFailureClass::Ledger);
+        PublishedRetainedPublicationParts::MinimalFallback {
+            ledger_evidence, ..
+        } => {
+            assert_eq!(
+                published_failure_cause(&ledger_evidence).class(),
+                PreparationFailureClass::Ledger
+            );
         }
         _ => panic!("success ledger rejection must publish minimal fallback"),
     }
@@ -1092,7 +1723,7 @@ fn success_primary_rejection_drops_both_tables_before_minimal_fallback() {
 }
 
 #[test]
-fn primary_ordering_panic_drops_storage_while_attribution_remains_live() {
+fn primary_ordering_panic_retains_storage_and_attribution_without_cleanup() {
     static BLOCK_DROPS: AtomicU64 = AtomicU64::new(0);
     static OBSERVED_ACTIVE: AtomicU64 = AtomicU64::new(0);
     static OBSERVED_LIVE: AtomicU64 = AtomicU64::new(0);
@@ -1190,6 +1821,7 @@ fn primary_ordering_panic_drops_storage_while_attribution_remains_live() {
             RetainedSuccessValidation::Valid(validated) => validated,
             _ => panic!("panic-order candidate must validate"),
         };
+    let before_physical = account.snapshot();
     PANIC_ON_PRIMARY_DIMENSION_ORD.store(true, Ordering::SeqCst);
     let result = validated.try_prepare(final_progress());
     PANIC_ON_PRIMARY_DIMENSION_ORD.store(false, Ordering::SeqCst);
@@ -1199,16 +1831,38 @@ fn primary_ordering_panic_drops_storage_while_attribution_remains_live() {
         Err(RetainedPublicationPrepareError::FinalizationContainment(cause))
             if cause.reason() == AccountPoisonReason::PrimaryPublicationBindingPanicked
     ));
-    assert_eq!(BLOCK_DROPS.load(Ordering::SeqCst), 1);
-    assert_eq!(OBSERVED_ACTIVE.load(Ordering::SeqCst), expected_active);
-    assert_eq!(OBSERVED_LIVE.load(Ordering::SeqCst), expected_live);
+    assert_eq!(BLOCK_DROPS.load(Ordering::SeqCst), 0);
+    assert_eq!(OBSERVED_ACTIVE.load(Ordering::SeqCst), 0);
+    assert_eq!(OBSERVED_LIVE.load(Ordering::SeqCst), 0);
     {
         let ledger = lock_recovering_poison(&deferred_ledger);
         let ledger = ledger.as_ref().expect("retained panic-order ledger probe");
         assert_eq!(ledger.active_reservations(), expected_active);
         assert_eq!(ledger.current_live_bytes(), expected_live);
     }
-    assert!(account.snapshot().live_retained_bytes() > 0);
+    let after_physical = account.snapshot();
+    assert_eq!(
+        after_physical.live_retained_bytes(),
+        before_physical.live_retained_bytes()
+    );
+    assert_eq!(
+        after_physical.live_retained_allocations(),
+        before_physical.live_retained_allocations()
+    );
+    assert_eq!(
+        after_physical.total_admitted_retained_bytes(),
+        before_physical.total_admitted_retained_bytes()
+    );
+    assert_eq!(
+        after_physical.total_admitted_retained_allocations(),
+        before_physical.total_admitted_retained_allocations()
+    );
+    assert_eq!(
+        after_physical
+            .first_poison_evidence()
+            .map(AccountPoisonEvidence::reason),
+        Some(AccountPoisonReason::PrimaryPublicationBindingPanicked)
+    );
     drop(account);
     assert_eq!(factory.snapshot().live_accounts(), 1);
 }
@@ -1285,7 +1939,7 @@ fn cleanup_lattice_is_order_independent_and_preserves_error_precedence() {
 }
 
 #[test]
-fn primary_binding_panic_reports_later_storage_release_failure() {
+fn primary_binding_panic_stops_before_later_storage_cleanup() {
     let _ord_lock = PRIMARY_DIMENSION_ORD_TEST_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -1337,6 +1991,13 @@ fn primary_binding_panic_reports_later_storage_release_failure() {
     let mut assembly: PanicPublication = operation
         .try_publication_assembly(publication_plan)
         .unwrap_or_else(|_| panic!("combined-fault publication must open"));
+    let ledger = assembly
+        .operation
+        .as_ref()
+        .expect("combined-fault operation")
+        .coordinator
+        .retained_ledger()
+        .test_probe();
     let canonical = assembly
         .try_retain_canonical(empty_plan(), |emplacer| {
             Ok(emplacer.place(11_u64, CanonicalRootTag))
@@ -1355,6 +2016,9 @@ fn primary_binding_panic_reports_later_storage_release_failure() {
             RetainedSuccessValidation::Valid(validated) => validated,
             _ => panic!("combined-fault candidate must validate"),
         };
+    let before_active = ledger.active_reservations();
+    let before_live = ledger.current_live_bytes();
+    let before_physical = account.snapshot();
 
     test_panic_final_owner_drop_after(0);
     PANIC_ON_PRIMARY_DIMENSION_ORD.store(true, Ordering::SeqCst);
@@ -1364,10 +2028,10 @@ fn primary_binding_panic_reports_later_storage_release_failure() {
     assert!(matches!(
         result,
         Err(RetainedPublicationPrepareError::FinalizationContainment(cause))
-            if cause.reason() == AccountPoisonReason::RetainedStorageReleaseUnverified
+            if cause.reason() == AccountPoisonReason::PrimaryPublicationBindingPanicked
     ));
     let snapshot = account.snapshot();
-    assert!(snapshot.poison_event_count() >= 2);
+    assert!(snapshot.poison_event_count() > 0);
     assert!(snapshot.poison_event_count_exact());
     assert!(snapshot.poison_event_domain_valid());
     assert_eq!(
@@ -1376,7 +2040,20 @@ fn primary_binding_panic_reports_later_storage_release_failure() {
             .map(AccountPoisonEvidence::reason),
         Some(AccountPoisonReason::PrimaryPublicationBindingPanicked)
     );
-    assert!(snapshot.live_retained_bytes() > 0);
+    assert_eq!(ledger.active_reservations(), before_active);
+    assert_eq!(ledger.current_live_bytes(), before_live);
+    assert_eq!(
+        snapshot.live_retained_bytes(),
+        before_physical.live_retained_bytes()
+    );
+    assert_eq!(
+        snapshot.live_retained_allocations(),
+        before_physical.live_retained_allocations()
+    );
+    assert!(
+        take_injected_final_owner_drop_panic(),
+        "primary binding uncertainty must stop before any later storage cleanup"
+    );
     drop(account);
     assert_eq!(factory.snapshot().live_accounts(), 1);
 }
@@ -1439,14 +2116,20 @@ fn second_table_drop_panic_keeps_success_rejection_accounting_fail_closed() {
 }
 
 #[test]
-fn first_table_drop_panic_still_releases_the_clean_evidence_table() {
+fn first_table_drop_panic_stops_before_evidence_cleanup_or_attribution_ack() {
     static CANONICAL_DROPS: AtomicU64 = AtomicU64::new(0);
     static EVIDENCE_DROPS: AtomicU64 = AtomicU64::new(0);
 
     CANONICAL_DROPS.store(0, Ordering::SeqCst);
     EVIDENCE_DROPS.store(0, Ordering::SeqCst);
     let factory = account_factory(1);
-    let operation = test_operation(&factory, 4);
+    let account = account(&factory, u64::MAX, 128);
+    let operation = test_operation_on_account_with_control(
+        &account,
+        4,
+        RetainedBatchLimits::new(2, 2),
+        OperationControl::default(),
+    );
     let mut assembly: TestPublication<PanickingDropProbe, DropCounter> = operation
         .try_publication_assembly(publication_plan(1, 1))
         .unwrap_or_else(|_| panic!("success rejection assembly must open"));
@@ -1472,6 +2155,10 @@ fn first_table_drop_panic_still_releases_the_clean_evidence_table() {
         .test_probe();
     let before_active = probe.active_reservations();
     let before_live = probe.current_live_bytes();
+    let before_physical = account.snapshot();
+    let canonical_table_charge = account
+        .test_checked_retained_table_charge::<PanickingDropProbe>(1)
+        .unwrap_or_else(|_| panic!("canonical table charge must remain derivable"));
 
     let validated =
         match assembly.validate_success(canonical, evidence, |session, canonical, evidence| {
@@ -1487,24 +2174,50 @@ fn first_table_drop_panic_still_releases_the_clean_evidence_table() {
             if cause.reason() == AccountPoisonReason::RetainedStorageReleaseUnverified
     ));
     assert_eq!(CANONICAL_DROPS.load(Ordering::SeqCst), 1);
-    assert_eq!(EVIDENCE_DROPS.load(Ordering::SeqCst), 1);
-    assert_eq!(before_active - probe.active_reservations(), 3);
-    assert!(probe.active_reservations() > 0);
-    assert!(probe.current_live_bytes() > 0);
-    assert!(probe.current_live_bytes() < before_live);
+    assert_eq!(EVIDENCE_DROPS.load(Ordering::SeqCst), 0);
+    assert_eq!(probe.active_reservations(), before_active);
+    assert_eq!(probe.current_live_bytes(), before_live);
+    let after_physical = account.snapshot();
+    // The table shell is verified released, while the panicking member final owner and the
+    // untouched evidence table remain physically accounted and every attribution remains live.
+    assert_eq!(
+        after_physical
+            .live_retained_bytes()
+            .checked_add(canonical_table_charge.bytes),
+        Some(before_physical.live_retained_bytes())
+    );
+    assert_eq!(
+        after_physical
+            .live_retained_allocations()
+            .checked_add(canonical_table_charge.allocations),
+        Some(before_physical.live_retained_allocations())
+    );
+    assert_eq!(
+        after_physical
+            .first_poison_evidence()
+            .map(AccountPoisonEvidence::reason),
+        Some(AccountPoisonReason::RetainedStorageReleaseUnverified)
+    );
     assert_eq!(factory.snapshot().live_accounts(), 1);
 }
 
 #[test]
 fn table_payload_drop_panic_fails_closed_before_attribution_release() {
     static DROP_COUNT: AtomicU64 = AtomicU64::new(0);
+    static EVIDENCE_DROPS: AtomicU64 = AtomicU64::new(0);
 
     let factory = account_factory(1);
     let operation = test_operation(&factory, 64);
-    let mut assembly: TestPublication<PanickingDropProbe, u64> = operation
+    let account = operation
+        .account()
+        .share_after_test_admission()
+        .unwrap_or_else(|_| panic!("rich-both account share must be admitted"));
+    let ledger = operation.coordinator.retained_ledger().test_probe();
+    let mut assembly: TestPublication<PanickingDropProbe, DropCounter> = operation
         .try_publication_assembly(publication_plan(1, 1))
         .unwrap_or_else(|_| panic!("publication assembly must open"));
     DROP_COUNT.store(0, Ordering::SeqCst);
+    EVIDENCE_DROPS.store(0, Ordering::SeqCst);
     let _canonical = assembly
         .try_retain_canonical(empty_plan(), |emplacer| {
             Ok(emplacer.place(PanickingDropProbe(&DROP_COUNT), CanonicalRootTag))
@@ -1512,11 +2225,12 @@ fn table_payload_drop_panic_fails_closed_before_attribution_release() {
         .unwrap_or_else(|_| panic!("panicking block must retain"));
     let evidence = assembly
         .try_retain_outcome_evidence(empty_plan(), |emplacer| {
-            Ok(emplacer.place(7, EvidenceRootTag))
+            Ok(emplacer.place(DropCounter(&EVIDENCE_DROPS), EvidenceRootTag))
         })
         .unwrap_or_else(|_| panic!("evidence must retain"));
+    let before_ledger = (ledger.active_reservations(), ledger.current_live_bytes());
     let validated = match assembly.validate_rich_failure(evidence, |session, root| {
-        session.outcome_evidence(root) == Some(&7)
+        session.outcome_evidence(root).is_some()
     }) {
         RetainedFailureValidation::Valid(validated) => validated,
         _ => panic!("table-drop failure candidate must validate"),
@@ -1527,6 +2241,20 @@ fn table_payload_drop_panic_fails_closed_before_attribution_release() {
             if cause.reason() == AccountPoisonReason::RetainedStorageReleaseUnverified
     ));
     assert_eq!(DROP_COUNT.load(Ordering::SeqCst), 1);
+    assert_eq!(EVIDENCE_DROPS.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        (ledger.active_reservations(), ledger.current_live_bytes()),
+        before_ledger,
+        "failed canonical cleanup must not ACK either discard batch"
+    );
+    assert_eq!(
+        account
+            .snapshot()
+            .first_poison_evidence()
+            .map(AccountPoisonEvidence::reason),
+        Some(AccountPoisonReason::RetainedStorageReleaseUnverified)
+    );
+    drop(account);
     assert_eq!(factory.snapshot().live_accounts(), 1);
 }
 
@@ -1833,6 +2561,119 @@ fn prepared_and_published_drop_keep_physical_charge_and_handoff_is_a_pure_move()
 }
 
 #[test]
+fn rich_failure_fallback_drop_panic_preserves_every_unacknowledged_attribution() {
+    static DROP_COUNT: AtomicU64 = AtomicU64::new(0);
+
+    struct PanickingRichFallback;
+
+    impl Drop for PanickingRichFallback {
+        fn drop(&mut self) {
+            DROP_COUNT.fetch_add(1, Ordering::SeqCst);
+            std::panic::panic_any(vec![0_u8; 8]);
+        }
+    }
+
+    for includes_canonical_discard in [false, true] {
+        DROP_COUNT.store(0, Ordering::SeqCst);
+        let factory = account_factory(1);
+        let operation = test_operation_with_fallback(&factory, PanickingRichFallback);
+        let account = operation
+            .account()
+            .share_after_test_admission()
+            .unwrap_or_else(|_| panic!("rich fallback account share must be admitted"));
+        let ledger = operation.coordinator.retained_ledger().test_probe();
+        let validated = if includes_canonical_discard {
+            let mut assembly = operation
+                .try_publication_assembly(publication_plan(1, 1))
+                .unwrap_or_else(|_| panic!("rich-both fallback fixture must open"));
+            let canonical = assembly
+                .try_retain_canonical(empty_plan(), |emplacer| {
+                    Ok(emplacer.place(11_u64, CanonicalRootTag))
+                })
+                .unwrap_or_else(|_| panic!("rich-both canonical root must retain"));
+            let evidence = assembly
+                .try_retain_outcome_evidence(empty_plan(), |emplacer| {
+                    Ok(emplacer.place(7_u64, EvidenceRootTag))
+                })
+                .unwrap_or_else(|_| panic!("rich-both evidence root must retain"));
+            let failure = match assembly.validate_success(
+                canonical,
+                evidence,
+                |_session, _canonical, _evidence| false,
+            ) {
+                RetainedSuccessValidation::Rejected(failure) => failure,
+                _ => panic!("rich-both fixture must enter failure validation"),
+            };
+            match failure.validate_rich_failure(evidence, |session, root| {
+                session.outcome_evidence(root) == Some(&7)
+            }) {
+                RetainedFailureValidation::Valid(validated) => validated,
+                _ => panic!("rich-both fallback fixture must validate"),
+            }
+        } else {
+            let plan = RetainedPublicationPlan::rich_failure(RetainedBlockTablePlan::new(
+                writer_plan(2, 2),
+                1,
+                1,
+            ));
+            let mut assembly = operation
+                .try_publication_assembly(plan)
+                .unwrap_or_else(|_| panic!("rich-evidence fallback fixture must open"));
+            let evidence = assembly
+                .try_retain_outcome_evidence(empty_plan(), |emplacer| {
+                    Ok(emplacer.place(7_u64, EvidenceRootTag))
+                })
+                .unwrap_or_else(|_| panic!("rich-evidence root must retain"));
+            match assembly.validate_rich_failure(evidence, |session, root| {
+                session.outcome_evidence(root) == Some(&7)
+            }) {
+                RetainedFailureValidation::Valid(validated) => validated,
+                _ => panic!("rich-evidence fallback fixture must validate"),
+            }
+        };
+        let before_ledger = (ledger.active_reservations(), ledger.current_live_bytes());
+        let before_physical = account.snapshot();
+
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            validated.try_prepare(PreparationFailureCode::domain(205), final_progress())
+        }))
+        .expect("rich fallback destructor panic must be contained");
+
+        assert!(matches!(
+            result,
+            Err(RetainedPublicationPrepareError::FinalizationContainment(cause))
+                if cause.reason() == AccountPoisonReason::RetainedStorageReleaseUnverified
+        ));
+        assert_eq!(DROP_COUNT.load(Ordering::SeqCst), 1);
+        let after_ledger = (ledger.active_reservations(), ledger.current_live_bytes());
+        if includes_canonical_discard {
+            assert!(after_ledger.0 < before_ledger.0);
+            assert!(after_ledger.1 < before_ledger.1);
+        } else {
+            assert_eq!(after_ledger, before_ledger);
+        }
+        assert!(after_ledger.0 > 0);
+        assert!(after_ledger.1 > 0);
+        let after_physical = account.snapshot();
+        assert!(after_physical.live_retained_bytes() <= before_physical.live_retained_bytes());
+        assert!(
+            after_physical.live_retained_allocations()
+                <= before_physical.live_retained_allocations()
+        );
+        assert!(after_physical.live_retained_bytes() > 0);
+        assert!(after_physical.live_retained_allocations() > 0);
+        assert_eq!(
+            after_physical
+                .first_poison_evidence()
+                .map(AccountPoisonEvidence::reason),
+            Some(AccountPoisonReason::RetainedStorageReleaseUnverified)
+        );
+        drop(account);
+        assert_eq!(factory.snapshot().live_accounts(), 1);
+    }
+}
+
+#[test]
 fn success_preparation_contains_fallback_drop_panic() {
     static DROP_COUNT: AtomicU64 = AtomicU64::new(0);
 
@@ -1948,6 +2789,11 @@ fn rejected_primary_payload_drop_panic_fails_closed_before_token_release() {
 
     let factory = account_factory(1);
     let operation = test_operation(&factory, 4);
+    let account = operation
+        .account()
+        .share_after_test_admission()
+        .unwrap_or_else(|_| panic!("minimal-evidence account share must be admitted"));
+    let ledger = operation.coordinator.retained_ledger().test_probe();
     let plan =
         RetainedPublicationPlan::rich_failure(RetainedBlockTablePlan::new(writer_plan(2, 2), 1, 1));
     let mut assembly: TestPublication<u64, PanickingEvidence> = operation
@@ -1968,6 +2814,7 @@ fn rejected_primary_payload_drop_panic_fails_closed_before_token_release() {
         RetainedFailureValidation::Valid(validated) => validated,
         _ => panic!("rejected-primary candidate must validate"),
     };
+    let before_ledger = (ledger.active_reservations(), ledger.current_live_bytes());
     let result = catch_unwind(AssertUnwindSafe(|| {
         validated.try_prepare(PreparationFailureCode::domain(5), final_progress())
     }))
@@ -1978,6 +2825,19 @@ fn rejected_primary_payload_drop_panic_fails_closed_before_token_release() {
             if cause.reason() == AccountPoisonReason::RetainedStorageReleaseUnverified
     ));
     assert_eq!(DROP_COUNT.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        (ledger.active_reservations(), ledger.current_live_bytes()),
+        before_ledger,
+        "failed evidence cleanup must not ACK its discard batch"
+    );
+    assert_eq!(
+        account
+            .snapshot()
+            .first_poison_evidence()
+            .map(AccountPoisonEvidence::reason),
+        Some(AccountPoisonReason::RetainedStorageReleaseUnverified)
+    );
+    drop(account);
     assert_eq!(factory.snapshot().live_accounts(), 1);
 }
 
@@ -2126,12 +2986,12 @@ fn closure_validation_panic_publishes_minimal_fallback() {
         .prepare_minimal_fallback()
         .unwrap_or_else(|_| panic!("validation panic must prepare minimal fallback"));
     match handoff_for_test(prepared) {
-        PublishedRetainedPublicationParts::MinimalFallback { fallback, .. } => {
-            assert_eq!(
-                fallback.cause().class(),
-                PreparationFailureClass::ProductGraph
-            );
-            assert_eq!(fallback.cause().code(), 5);
+        PublishedRetainedPublicationParts::MinimalFallback {
+            ledger_evidence, ..
+        } => {
+            let cause = published_failure_cause(&ledger_evidence);
+            assert_eq!(cause.class(), PreparationFailureClass::ProductGraph);
+            assert_eq!(cause.code(), 5);
         }
         _ => panic!("validation panic must publish minimal fallback"),
     }

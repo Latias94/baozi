@@ -1,3 +1,7 @@
+use super::evidence::{
+    fail_next_terminal_evidence_qualification, panic_next_terminal_evidence_qualification,
+    panic_next_terminal_evidence_write,
+};
 use super::*;
 use crate::DimensionPolicy;
 use crate::ledger::LedgerTestProbe;
@@ -6,6 +10,10 @@ use std::sync::{Arc as StdArc, Barrier, Mutex as StdMutex};
 use std::thread;
 
 const BUILD_FAILED: RetainedBuildFailureCode = RetainedBuildFailureCode::new(1);
+
+impl TerminalEvidenceKeySeal for u8 {}
+
+impl TerminalEvidenceKey for u8 {}
 
 fn retained_root_production_source() -> &'static str {
     let source = include_str!("../retained.rs");
@@ -58,6 +66,26 @@ fn retained_non_final_owner_production_source() -> String {
         include_str!("startup.rs"),
     ]
     .join("\n")
+}
+
+#[test]
+fn retained_publication_has_one_terminal_ledger_evidence_rail() {
+    let production = retained_production_source();
+
+    assert!(
+        production.contains("TerminalLedgerEvidence"),
+        "the retained ownership graph must publish the complete terminal ledger evidence"
+    );
+    for removed in [
+        "PublicationEvidenceCells",
+        "PublicationDimensionCell",
+        "PublishedDimensionSnapshot",
+    ] {
+        assert!(
+            !production.contains(removed),
+            "legacy terminal evidence rail `{removed}` still has production reachability"
+        );
+    }
 }
 
 struct PanickingDropProbe(&'static AtomicU64);
@@ -154,6 +182,10 @@ enum TestPhase {
     Build,
 }
 
+impl TerminalEvidenceKeySeal for TestPhase {}
+
+impl TerminalEvidenceKey for TestPhase {}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum TestProgress {
     Build,
@@ -185,6 +217,10 @@ enum TestDimension {
     Bytes,
 }
 
+impl TerminalEvidenceKeySeal for TestDimension {}
+
+impl TerminalEvidenceKey for TestDimension {}
+
 static PANIC_ON_PRIMARY_DIMENSION_ORD: AtomicBool = AtomicBool::new(false);
 static PRIMARY_DIMENSION_ORD_TEST_LOCK: StdMutex<()> = StdMutex::new(());
 
@@ -198,6 +234,10 @@ impl Drop for PrimaryDimensionOrdReset {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct PrimaryPanicDimension(u8);
+
+impl TerminalEvidenceKeySeal for PrimaryPanicDimension {}
+
+impl TerminalEvidenceKey for PrimaryPanicDimension {}
 
 impl PartialOrd for PrimaryPanicDimension {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
@@ -277,27 +317,28 @@ type TestPublication<CanonicalBlock, EvidenceBlock> = RetainedPublicationAssembl
     EvidenceBlock,
 >;
 
-enum PublishedRetainedPublicationParts<CanonicalBlock, EvidenceBlock, F, D> {
+enum PublishedRetainedPublicationParts<CanonicalBlock, EvidenceBlock, F, P, D> {
     Success {
         canonical: PublishedCanonicalOutput<CanonicalBlock>,
         outcome_evidence: PublishedOutcomeEvidenceOutput<EvidenceBlock>,
-        ledger_evidence: PublishedLedgerEvidence<D>,
+        ledger_evidence: PublishedLedgerEvidence<P, D>,
     },
     RichFailure {
         outcome_evidence: PublishedRichFailureOutput<EvidenceBlock>,
-        ledger_evidence: PublishedLedgerEvidence<D>,
+        ledger_evidence: PublishedLedgerEvidence<P, D>,
     },
     MinimalFallback {
         fallback: PublishedFallbackOutput<F>,
-        ledger_evidence: PublishedLedgerEvidence<D>,
+        ledger_evidence: PublishedLedgerEvidence<P, D>,
     },
 }
 
-fn handoff_for_test<CanonicalBlock, EvidenceBlock, F, D>(
-    prepared: PreparedRetainedPublication<CanonicalBlock, EvidenceBlock, F, D>,
-) -> PublishedRetainedPublicationParts<CanonicalBlock, EvidenceBlock, F, D>
+fn handoff_for_test<CanonicalBlock, EvidenceBlock, F, P, D>(
+    prepared: PreparedRetainedPublication<CanonicalBlock, EvidenceBlock, F, P, D>,
+) -> PublishedRetainedPublicationParts<CanonicalBlock, EvidenceBlock, F, P, D>
 where
-    D: Copy + Ord,
+    P: TerminalEvidenceKey,
+    D: TerminalEvidenceKey,
 {
     match prepared.into_outcome() {
         PreparedRetainedPublicationOutcome::Success(prepared) => {
@@ -322,6 +363,20 @@ where
                 ledger_evidence: published.ledger_evidence,
             }
         }
+    }
+}
+
+fn published_failure_cause<P, D>(evidence: &PublishedLedgerEvidence<P, D>) -> PreparationFailureCode
+where
+    P: TerminalEvidenceKey,
+    D: TerminalEvidenceKey,
+{
+    match evidence
+        .terminal_cause()
+        .unwrap_or_else(|| panic!("published ledger evidence must have a terminal cause"))
+    {
+        TerminalEvidenceCause::Failure(cause) => cause,
+        TerminalEvidenceCause::Success => panic!("published failure must not report success"),
     }
 }
 
@@ -478,6 +533,7 @@ fn startup_limits_and_plan() -> (
 fn reset_startup_test_observations() {
     let _ = take_injected_start_evidence_build_failure();
     let _ = take_injected_start_evidence_build_panic();
+    let _ = take_injected_start_evidence_structural_failure();
     let _ = take_injected_start_fallback_account_anchor_loss();
     let _ = take_start_evidence_build_calls();
     let _ = take_startup_failure_ledger_snapshot();
@@ -775,80 +831,264 @@ fn generic_retained_authority_remains_crate_private() {
     ));
     assert_eq!(
         normalized.matches(".try_publication_eligibility()").count(),
-        2
+        3
     );
-    let eligible_method = |state_marker: &str| {
-        normalized
-            .split_once(state_marker)
-            .unwrap_or_else(|| panic!("missing eligible state `{state_marker}`"))
-            .1
-            .split_once("fn into_prepared")
-            .unwrap_or_else(|| panic!("missing consuming handoff for `{state_marker}`"))
-            .1
-            .split_once("\n    }\n}\n\nimpl")
-            .unwrap_or_else(|| panic!("unterminated consuming handoff for `{state_marker}`"))
-            .0
-            .to_owned()
-    };
-    for eligible_tail in [
-        eligible_method("struct EligibleTerminalFreezeGuard"),
-        eligible_method("struct EligibleFallbackFreezeGuard"),
+    for forbidden in [
+        "struct TerminalFreezeGuard",
+        "struct EligibleTerminalFreezeGuard",
+        "struct FallbackFreezeGuard",
+        "struct EligibleFallbackFreezeGuard",
+        "struct QualifiedTerminalEvidenceFreeze",
+        "fn try_freeze_terminal_evidence",
+        "struct ExactTerminalPhysicalOwnership",
+        "struct ExactFallbackPhysicalOwnership",
+        "struct TerminalTableCleanup",
     ] {
-        assert!(eligible_tail.contains("freeze_terminal_evidence("));
-        assert!(eligible_tail.contains("physical.into_publication("));
-        for forbidden in [
-            "record_poison",
-            "contain_",
-            "catch_unwind",
-            "try_retain",
-            "try_discard",
-            "drop_retained",
-            "release_retained",
-            "try_allocate",
-            "assign_membership",
-            "table_mut",
+        assert!(
+            !normalized.contains(forbidden),
+            "obsolete terminal rail `{forbidden}` regained production authority"
+        );
+    }
+    for (qualified, eligible) in [
+        (
+            "struct QualifiedSuccessGraph",
+            "struct EligibleSuccessGraph",
+        ),
+        ("struct QualifiedRichGraph", "struct EligibleRichGraph"),
+        (
+            "struct QualifiedMinimalGraph",
+            "struct EligibleMinimalGraph",
+        ),
+    ] {
+        assert!(
+            normalized.contains(qualified),
+            "missing owning state `{qualified}`"
+        );
+        assert!(
+            normalized.contains(eligible),
+            "missing owning state `{eligible}`"
+        );
+    }
+    for continuation in [
+        "struct RichDiscardContinuationState",
+        "struct MinimalDiscardContinuationState",
+        "contain_rich_discard_continuation_on_drop",
+        "contain_minimal_discard_continuation_on_drop",
+    ] {
+        assert!(
+            normalized.contains(continuation),
+            "discard continuation lost owning guard `{continuation}`"
+        );
+    }
+    assert_eq!(
+        normalized.matches("fn finish_discard(").count(),
+        2,
+        "rich and minimal discard rails must each have one guarded continuation"
+    );
+    for guard in [
+        "scopeguard::guard(\n            state,\n            contain_rich_discard_continuation_on_drop",
+        "scopeguard::guard(\n            state,\n            contain_minimal_discard_continuation_on_drop",
+    ] {
+        assert!(
+            normalized.contains(guard),
+            "discard continuation lost its owning scopeguard `{guard}`"
+        );
+    }
+    let minimal_discard = normalized
+        .split_once("enum QualifiedMinimalDiscard")
+        .expect("qualified minimal discard exists")
+        .1
+        .split_once("struct QualifiedMinimalState")
+        .expect("qualified minimal discard is bounded")
+        .0;
+    for required in ["    None {", "    Evidence {", "    Both {"] {
+        assert!(
+            minimal_discard.contains(required),
+            "minimal discard lost supported state `{required}`"
+        );
+    }
+    assert!(
+        !minimal_discard.contains("    Canonical {"),
+        "minimal fallback must reject a canonical-only discard before entering the terminal rail"
+    );
+    assert!(!normalized.contains("QualifiedMinimalDiscard::Canonical"));
+    for continuation_proof in [
+        "enum RichDiscardContinuationProof",
+        "enum MinimalDiscardContinuationProof",
+    ] {
+        let variants = normalized
+            .split_once(continuation_proof)
+            .unwrap_or_else(|| panic!("missing continuation proof `{continuation_proof}`"))
+            .1
+            .split_once("\n}\n\nimpl")
+            .unwrap_or_else(|| panic!("unbounded continuation proof `{continuation_proof}`"))
+            .0;
+        assert!(variants.contains("    Both("));
+        assert!(variants.contains("    Evidence("));
+        assert!(!variants.contains("    Canonical("));
+        assert!(!variants.contains("    None("));
+    }
+    for qualification in [
+        "proof.try_into_qualified_evidence_discard()",
+        "proof.try_into_qualified_discards()",
+    ] {
+        assert!(
+            normalized.contains(qualification),
+            "terminal rail lost owning ledger qualification `{qualification}`"
+        );
+    }
+
+    let success_freeze = normalized
+        .split_once(
+            "impl<O, P, D, F, CanonicalBlock, EvidenceBlock>\n    FreezeReadySuccessGraph<O, P, D, F, CanonicalBlock, EvidenceBlock>",
+        )
+        .expect("freeze-ready success owner exists")
+        .1
+        .split_once("fn contain_freeze_ready_success_state")
+        .expect("freeze-ready success owner is bounded")
+        .0;
+    for required in [
+        "let Some(state) = self.state.take()",
+        "scopeguard::guard(",
+        "let snapshot = state.proof.freeze_in_place();",
+        ".freeze_in_place(TerminalEvidenceCause::Success, &snapshot);",
+        "scopeguard::ScopeGuard::into_inner(state)",
+        "evidence.into_frozen_owner()",
+    ] {
+        assert!(
+            success_freeze.contains(required),
+            "success freeze tail lost guarded pure step `{required}`"
+        );
+    }
+    let success_mutation = success_freeze
+        .split_once("scopeguard::guard(")
+        .expect("success mutation guard exists")
+        .1;
+    let proof_freeze = success_mutation
+        .find("state.proof.freeze_in_place()")
+        .expect("typed proof freezes in place");
+    let evidence_freeze = success_mutation
+        .find(".freeze_in_place(TerminalEvidenceCause::Success, &snapshot)")
+        .expect("terminal evidence freezes in place");
+    let disarm = success_mutation
+        .find("scopeguard::ScopeGuard::into_inner(state)")
+        .expect("scopeguard disarms after both freezes");
+    assert!(proof_freeze < evidence_freeze);
+    assert!(evidence_freeze < disarm);
+    let success_handoff = &success_mutation[disarm..];
+    for forbidden in [
+        "Result<",
+        "?",
+        "unwrap",
+        "expect(",
+        "catch_unwind",
+        "try_publication_eligibility",
+        "try_discard",
+        "try_allocate",
+        "record_poison",
+    ] {
+        assert!(
+            !success_handoff.contains(forbidden),
+            "success handoff regained post-freeze fault gate `{forbidden}`"
+        );
+    }
+    let concrete_evidence = normalized
+        .split_once("struct FreezeReadyDetachedTerminalEvidence")
+        .expect("concrete terminal evidence owner exists")
+        .1
+        .split_once("struct FreezeReadySuccessGraph")
+        .expect("concrete terminal evidence owner is bounded")
+        .0;
+    assert!(
+        concrete_evidence.contains("owner: DetachedRetainedPart<TerminalLedgerEvidence<P, D>>")
+    );
+    assert!(concrete_evidence.contains("qualification: TerminalEvidenceFreezeQualification"));
+
+    let qualified_evidence = normalized
+        .split_once("struct QualifiedDetachedTerminalEvidence")
+        .expect("owning terminal-evidence qualification exists")
+        .1
+        .split_once("#[cfg(test)]")
+        .expect("owning terminal-evidence qualification is bounded")
+        .0;
+    assert!(
+        qualified_evidence
+            .contains("owner: Option<DetachedRetainedPart<TerminalLedgerEvidence<P, D>>>")
+    );
+    assert!(
+        qualified_evidence.contains("qualification: Option<TerminalEvidenceFreezeQualification>")
+    );
+    assert!(qualified_evidence.contains("catch_unwind"));
+    assert!(qualified_evidence.contains("owner.allocation().as_ref().try_qualify("));
+    assert!(qualified_evidence.contains("owner.record_forgotten_physical_edge();"));
+    assert!(!qualified_evidence.contains("&'evidence TerminalLedgerEvidence"));
+
+    let freeze_ready_section = |owner_marker: &str, drop_marker: &str| {
+        normalized
+            .split_once(owner_marker)
+            .unwrap_or_else(|| panic!("missing freeze-ready owner `{owner_marker}`"))
+            .1
+            .split_once(drop_marker)
+            .unwrap_or_else(|| panic!("unbounded freeze-ready owner `{owner_marker}`"))
+            .0
+    };
+    for (owner_marker, drop_marker, cause_marker) in [
+        (
+            "impl<O, P, D, F, CanonicalBlock, EvidenceBlock>\n    FreezeReadySuccessGraph<O, P, D, F, CanonicalBlock, EvidenceBlock>\nwhere",
+            "Drop\n    for FreezeReadySuccessGraph",
+            "TerminalEvidenceCause::Success",
+        ),
+        (
+            "impl<O, P, D, F, EvidenceBlock> FreezeReadyRichGraph<O, P, D, F, EvidenceBlock>\nwhere",
+            "Drop for FreezeReadyRichGraph",
+            "TerminalEvidenceCause::Failure",
+        ),
+        (
+            "impl<O, P, D, F> FreezeReadyMinimalGraph<O, P, D, F>\nwhere",
+            "Drop for FreezeReadyMinimalGraph",
+            "TerminalEvidenceCause::Failure",
+        ),
+    ] {
+        let freeze = freeze_ready_section(owner_marker, drop_marker);
+        for required in [
+            "scopeguard::guard(",
+            "proof.freeze_in_place()",
+            ".freeze_in_place(",
+            cause_marker,
+            "scopeguard::ScopeGuard::into_inner(state)",
         ] {
             assert!(
-                !eligible_tail.contains(forbidden),
-                "post-eligibility tail regained fallible authority `{forbidden}`"
+                freeze.contains(required),
+                "freeze-ready rail `{owner_marker}` lost guarded step `{required}`"
             );
         }
-    }
-    let freeze_end = format!("\n}}\n\n{test_attribute}");
-    let freeze_tail = normalized
-        .split_once("fn freeze_terminal_evidence")
-        .expect("terminal evidence freeze seam exists")
-        .1
-        .split_once(&freeze_end)
-        .expect("terminal evidence freeze seam is bounded")
-        .0;
-    assert!(freeze_tail.contains("_eligibility: PublicationEligibility"));
-    for required in [
-        "let snapshot = proof.freeze();",
-        "drop(discarded_account);",
-        "evidence.allocation().as_ref().freeze_from(&snapshot);",
-        "drop(snapshot);",
-    ] {
-        assert!(
-            freeze_tail.contains(required),
-            "eligible freeze tail lost required pure step `{required}`"
-        );
-    }
-    for forbidden in [
-        "record_poison",
-        "catch_unwind",
-        "try_retain",
-        "try_discard",
-        "drop_retained",
-        "release_retained",
-        "try_allocate",
-        "assign_membership",
-        "table_mut",
-    ] {
-        assert!(
-            !freeze_tail.contains(forbidden),
-            "eligible freeze seam regained fallible authority `{forbidden}`"
-        );
+        let proof_freeze = freeze
+            .find("proof.freeze_in_place()")
+            .expect("ledger proof freezes first");
+        let evidence_freeze = freeze[proof_freeze..]
+            .find(".freeze_in_place(")
+            .map(|position| position + proof_freeze)
+            .expect("terminal evidence freezes second");
+        let disarm = freeze
+            .find("scopeguard::ScopeGuard::into_inner(state)")
+            .expect("paired freeze guard disarms last");
+        assert!(proof_freeze < evidence_freeze);
+        assert!(evidence_freeze < disarm);
+        let handoff = &freeze[disarm..];
+        for forbidden in [
+            "Result<",
+            "?",
+            "catch_unwind",
+            "try_publication_eligibility",
+            "try_qualify",
+            "try_discard",
+            "record_poison",
+        ] {
+            assert!(
+                !handoff.contains(forbidden),
+                "freeze-ready handoff `{owner_marker}` regained fault gate `{forbidden}`"
+            );
+        }
     }
 }
 
@@ -888,8 +1128,8 @@ fn publication_evidence_precharges_the_capacity_envelope() {
         )
     });
     let limits = LedgerLimits::new(u64::MAX, dimensions).unwrap();
-    let capacity = CapacityPlan::for_type::<PublicationDimensionCell<u8>>(0, 0, 17).unwrap();
-    let envelope_bytes = capacity.envelope_delta_bytes().unwrap();
+    let backing = TerminalEvidenceBackingPlan::<TestPhase, u8>::try_new(17, 1).unwrap();
+    let footprint = backing.footprint();
     let plan = RetainedOperationStartPlan::new(
         RetainedWriterPlan::new(TestPhase::Build, 0, 0, RetainedBatchLimits::new(2, 2)),
         RetainedHandleSharePlan::new(0, 0),
@@ -905,13 +1145,19 @@ fn publication_evidence_precharges_the_capacity_envelope() {
     assert_eq!(account.share_call_count(), 4);
     let allocation = operation.baseline.test_evidence_allocation();
     let outer_bytes = FinalOwnerAllocation::<
-        RetainedFinalOwnerInner<RetainedPayload<PublicationEvidenceCells<u8>>, LeafRetainedPolicy>,
+        RetainedFinalOwnerInner<
+            RetainedPayload<TerminalLedgerEvidence<TestPhase, u8>>,
+            LeafRetainedPolicy,
+        >,
     >::checked_layout_bytes()
     .unwrap();
 
-    assert_eq!(capacity.envelope_capacity(), 32);
-    assert_eq!(allocation.charged_bytes(), outer_bytes + envelope_bytes);
-    assert_eq!(allocation.charged_allocations(), 2);
+    assert_eq!(backing.dimension_capacity().envelope_capacity(), 32);
+    assert_eq!(allocation.charged_bytes(), outer_bytes + footprint.bytes());
+    assert_eq!(
+        allocation.charged_allocations(),
+        1 + footprint.allocations()
+    );
     drop(operation);
     drop(account);
     assert_eq!(factory.snapshot().live_accounts(), 0);
@@ -1119,6 +1365,66 @@ fn existing_poison_does_not_suppress_a_later_startup_ownership_fault() {
 }
 
 #[test]
+fn startup_evidence_structural_failure_is_contained_as_an_internal_invariant() {
+    static FALLBACK_DROPS: AtomicU64 = AtomicU64::new(0);
+
+    reset_startup_test_observations();
+    FALLBACK_DROPS.store(0, Ordering::SeqCst);
+    fail_next_start_evidence_structural();
+    let factory = account_factory(1);
+    let account = account(&factory, u64::MAX, 128);
+    let before = account.snapshot();
+    let evidence_backing = TerminalEvidenceBackingPlan::<TestPhase, TestDimension>::try_new(1, 1)
+        .unwrap_or_else(|_| panic!("evidence structural backing must qualify"));
+    let footprint = evidence_backing.footprint();
+    let evidence_plan = RetainedAllocationPlan::new(footprint.bytes(), footprint.allocations())
+        .unwrap_or_else(|_| panic!("evidence structural plan must qualify"));
+    let evidence_charge = account
+        .checked_retained_charge::<TerminalLedgerEvidence<TestPhase, TestDimension>>(evidence_plan)
+        .unwrap_or_else(|_| panic!("evidence structural charge must qualify"));
+    let (limits, plan) = startup_limits_and_plan();
+    type DropOperation =
+        RetainedOperation<TestOwner, TestPhase, TestProgress, TestUnit, TestDimension, DropCounter>;
+
+    let result =
+        DropOperation::try_start(OperationControl::default(), limits, &account, plan, || {
+            Ok::<DropCounter, RetainedBuildFailureCode>(DropCounter(&FALLBACK_DROPS))
+        });
+
+    assert!(matches!(
+        result,
+        Err(RetainedOperationStartError::Writer(
+            RetainedWriterError::Physical(RetainedAllocationError::ConstructionInvariantUnverified)
+        ))
+    ));
+    assert_eq!(take_start_evidence_build_calls(), 1);
+    assert_eq!(FALLBACK_DROPS.load(Ordering::SeqCst), 1);
+    let snapshot = account.snapshot();
+    assert_eq!(
+        snapshot.live_retained_bytes() - before.live_retained_bytes(),
+        evidence_charge.bytes
+    );
+    assert_eq!(
+        snapshot.live_retained_allocations() - before.live_retained_allocations(),
+        evidence_charge.allocations
+    );
+    assert_eq!(snapshot.poison_event_count(), 1);
+    assert_eq!(
+        snapshot
+            .first_poison_evidence()
+            .map(AccountPoisonEvidence::reason),
+        Some(AccountPoisonReason::TerminalEvidenceConstructionUnverified)
+    );
+    let (active, live) = take_startup_failure_ledger_snapshot()
+        .unwrap_or_else(|| panic!("structural evidence failure must capture ledger state"));
+    assert_eq!(active, 2);
+    assert!(live > evidence_charge.bytes);
+
+    drop(account);
+    assert_eq!(factory.snapshot().live_accounts(), 1);
+}
+
+#[test]
 fn startup_evidence_builder_panic_releases_the_clean_fallback_sibling() {
     static FALLBACK_DROPS: AtomicU64 = AtomicU64::new(0);
 
@@ -1128,16 +1434,13 @@ fn startup_evidence_builder_panic_releases_the_clean_fallback_sibling() {
     let factory = account_factory(1);
     let account = account(&factory, u64::MAX, 128);
     let before = account.snapshot();
-    let evidence_capacity =
-        CapacityPlan::for_type::<PublicationDimensionCell<TestDimension>>(0, 0, 1)
-            .unwrap_or_else(|_| panic!("evidence panic capacity must qualify"));
-    let nested_bytes = evidence_capacity
-        .envelope_delta_bytes()
-        .unwrap_or_else(|_| panic!("evidence panic envelope must fit"));
-    let evidence_plan = RetainedAllocationPlan::new(nested_bytes, u64::from(nested_bytes != 0))
+    let evidence_backing = TerminalEvidenceBackingPlan::<TestPhase, TestDimension>::try_new(1, 1)
+        .unwrap_or_else(|_| panic!("evidence panic backing must qualify"));
+    let footprint = evidence_backing.footprint();
+    let evidence_plan = RetainedAllocationPlan::new(footprint.bytes(), footprint.allocations())
         .unwrap_or_else(|_| panic!("evidence panic plan must qualify"));
     let evidence_charge = account
-        .checked_retained_charge::<PublicationEvidenceCells<TestDimension>>(evidence_plan)
+        .checked_retained_charge::<TerminalLedgerEvidence<TestPhase, TestDimension>>(evidence_plan)
         .unwrap_or_else(|_| panic!("evidence panic charge must qualify"));
     let (limits, plan) = startup_limits_and_plan();
     type DropOperation =

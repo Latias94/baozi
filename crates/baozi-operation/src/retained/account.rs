@@ -282,6 +282,10 @@ pub enum AccountPoisonReason {
     PrimaryPublicationBindingPanicked = 4,
     /// A verified storage release found inconsistent physical accounting counters.
     CounterInvariantViolated = 5,
+    /// Terminal ledger evidence could not prove a complete frozen snapshot before publication.
+    TerminalEvidenceFreezeUnverified = 6,
+    /// Terminal ledger evidence construction violated its prequalified catalog or capacity.
+    TerminalEvidenceConstructionUnverified = 7,
 }
 
 /// Fixed, inert evidence retained for the first physical-account poison event.

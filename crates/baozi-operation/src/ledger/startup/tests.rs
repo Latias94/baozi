@@ -286,8 +286,7 @@ fn default_qualified_graph() -> (
 }
 
 fn frozen_graph_ledger(limits: LedgerLimits<Dimension>) -> Ledger<Owner, Phase, Dimension> {
-    Ledger::try_new_with_phase_catalog(limits, &[Phase::Build, Phase::Finalize])
-        .expect("frozen startup graph ledger")
+    Ledger::try_new(limits, &[Phase::Build, Phase::Finalize]).expect("frozen startup graph ledger")
 }
 
 fn vec_capacity_bytes<T>(values: &Vec<T>) -> u64 {
@@ -856,18 +855,19 @@ fn startup_graph_commit_tail_is_infallible_and_has_no_dynamic_phase_path() {
 }
 
 #[test]
-fn startup_graph_rejects_dynamic_unknown_phase_and_invalid_dimensions_without_a_prefix() {
+fn startup_graph_rejects_unknown_phase_and_invalid_dimensions_without_a_prefix() {
     test_reset_startup_graph_probes(None);
     let (limits, parts, _) = default_qualified_graph();
-    let dynamic = Ledger::<Owner, Phase, Dimension>::new(limits);
-    let before = ledger_graph_observation(&dynamic);
+    let ledger = Ledger::<Owner, Phase, Dimension>::try_new(limits, &[])
+        .expect("empty frozen catalog is valid for an unknown-phase fixture");
+    let before = ledger_graph_observation(&ledger);
     assert!(matches!(
-        dynamic.try_admit_startup_attribution_graph(parts),
+        ledger.try_admit_startup_attribution_graph(parts),
         Err(AttributionBatchCreateError::Ledger(
             LedgerCause::UnknownPhase
         ))
     ));
-    assert_eq!(ledger_graph_observation(&dynamic), before);
+    assert_eq!(ledger_graph_observation(&ledger), before);
     assert_eq!(test_startup_graph_allocation_entries(), 0);
 
     test_reset_startup_graph_probes(None);

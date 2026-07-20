@@ -1,8 +1,8 @@
 use super::{
     AttributionBatchCreateError, AttributionBatchPlan, CanonicalOutput, CounterClass, Ledger,
     LedgerCause, LedgerLimits, LedgerState, OperationAttributionReservation,
-    OutcomeEvidenceDestination, OutputCommitment, PhaseCatalogState, PublicationDestination,
-    ReservationCore, dimension_entry, lock, phase_entry,
+    OutcomeEvidenceDestination, OutputCommitment, PublicationDestination, ReservationCore,
+    dimension_entry, lock, phase_entry,
 };
 use crate::{CapacityPlan, OperationOwner};
 use std::fmt;
@@ -814,10 +814,6 @@ where
         account_shares: &StartupAccountShareEnvelope<D>,
         commitments: [OutputCommitment<D, OutcomeEvidenceDestination>; 2],
     ) -> Result<StartupLedgerAdmission<P, D>, LedgerCause<D>> {
-        if state.phase_catalog != PhaseCatalogState::Frozen {
-            return Err(LedgerCause::UnknownPhase);
-        }
-
         let mut reservations = reservation_specs.map(|spec| StartupReservationProjection {
             spec,
             phase_position: usize::MAX,

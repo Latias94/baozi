@@ -20,6 +20,9 @@ pub(crate) trait TerminalEvidenceKey:
 thread_local! {
     static FAIL_NEXT_DIMENSION_BACKING_ALLOCATION: Cell<bool> = const { Cell::new(false) };
     static FAIL_NEXT_PHASE_BACKING_ALLOCATION: Cell<bool> = const { Cell::new(false) };
+    static FAIL_NEXT_TERMINAL_EVIDENCE_QUALIFICATION: Cell<bool> = const { Cell::new(false) };
+    static PANIC_NEXT_TERMINAL_EVIDENCE_QUALIFICATION: Cell<bool> = const { Cell::new(false) };
+    static PANIC_NEXT_TERMINAL_EVIDENCE_WRITE: Cell<bool> = const { Cell::new(false) };
 }
 
 #[cfg(test)]
@@ -40,6 +43,36 @@ fn take_dimension_backing_allocation_failure() -> bool {
 #[cfg(test)]
 fn take_phase_backing_allocation_failure() -> bool {
     FAIL_NEXT_PHASE_BACKING_ALLOCATION.with(|fail| fail.replace(false))
+}
+
+#[cfg(test)]
+pub(super) fn fail_next_terminal_evidence_qualification() {
+    FAIL_NEXT_TERMINAL_EVIDENCE_QUALIFICATION.with(|fail| fail.set(true));
+}
+
+#[cfg(test)]
+pub(super) fn panic_next_terminal_evidence_qualification() {
+    PANIC_NEXT_TERMINAL_EVIDENCE_QUALIFICATION.with(|panic| panic.set(true));
+}
+
+#[cfg(test)]
+pub(super) fn panic_next_terminal_evidence_write() {
+    PANIC_NEXT_TERMINAL_EVIDENCE_WRITE.with(|panic| panic.set(true));
+}
+
+#[cfg(test)]
+fn take_terminal_evidence_qualification_failure() -> bool {
+    FAIL_NEXT_TERMINAL_EVIDENCE_QUALIFICATION.with(|fail| fail.replace(false))
+}
+
+#[cfg(test)]
+fn take_terminal_evidence_qualification_panic() -> bool {
+    PANIC_NEXT_TERMINAL_EVIDENCE_QUALIFICATION.with(|panic| panic.replace(false))
+}
+
+#[cfg(test)]
+fn take_terminal_evidence_write_panic() -> bool {
+    PANIC_NEXT_TERMINAL_EVIDENCE_WRITE.with(|panic| panic.replace(false))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -127,13 +160,13 @@ impl PreparationFailureCode {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum TerminalEvidenceCause {
+pub(crate) enum TerminalEvidenceCause {
     Success,
     Failure(PreparationFailureCode),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct FallbackHeaderSnapshot<P: TerminalEvidenceKey> {
+pub(crate) struct FallbackHeaderSnapshot<P: TerminalEvidenceKey> {
     schema_revision: u32,
     terminal_cause: TerminalEvidenceCause,
     last_completed_phase: Option<P>,
@@ -147,43 +180,43 @@ pub(super) struct FallbackHeaderSnapshot<P: TerminalEvidenceKey> {
 }
 
 impl<P: TerminalEvidenceKey> FallbackHeaderSnapshot<P> {
-    pub(super) const fn schema_revision(self) -> u32 {
+    pub(crate) const fn schema_revision(self) -> u32 {
         self.schema_revision
     }
 
-    pub(super) const fn terminal_cause(self) -> TerminalEvidenceCause {
+    pub(crate) const fn terminal_cause(self) -> TerminalEvidenceCause {
         self.terminal_cause
     }
 
-    pub(super) const fn last_completed_phase(self) -> Option<P> {
+    pub(crate) const fn last_completed_phase(self) -> Option<P> {
         self.last_completed_phase
     }
 
-    pub(super) const fn dimension_count(self) -> usize {
+    pub(crate) const fn dimension_count(self) -> usize {
         self.dimension_count
     }
 
-    pub(super) const fn phase_count(self) -> usize {
+    pub(crate) const fn phase_count(self) -> usize {
         self.phase_count
     }
 
-    pub(super) const fn current_live_bytes(self) -> u64 {
+    pub(crate) const fn current_live_bytes(self) -> u64 {
         self.current_live_bytes
     }
 
-    pub(super) const fn peak_live_bytes(self) -> u64 {
+    pub(crate) const fn peak_live_bytes(self) -> u64 {
         self.peak_live_bytes
     }
 
-    pub(super) const fn active_reservations(self) -> u64 {
+    pub(crate) const fn active_reservations(self) -> u64 {
         self.active_reservations
     }
 
-    pub(super) const fn current_evidence_bytes(self) -> u64 {
+    pub(crate) const fn current_evidence_bytes(self) -> u64 {
         self.current_evidence_bytes
     }
 
-    pub(super) const fn peak_evidence_bytes(self) -> u64 {
+    pub(crate) const fn peak_evidence_bytes(self) -> u64 {
         self.peak_evidence_bytes
     }
 }
@@ -192,7 +225,7 @@ const TERMINAL_CAUSE_UNSET: u8 = 0;
 const TERMINAL_CAUSE_SUCCESS: u8 = 1;
 const TERMINAL_CAUSE_FAILURE: u8 = 2;
 
-pub(super) struct FallbackHeader<P: TerminalEvidenceKey> {
+pub(super) struct FallbackHeader<P> {
     schema_revision: u32,
     dimension_count: usize,
     phase_count: usize,
@@ -294,7 +327,7 @@ impl<P: TerminalEvidenceKey> FallbackHeader<P> {
     }
 }
 
-pub(super) struct FallbackDimensionCell<D: TerminalEvidenceKey> {
+pub(super) struct FallbackDimensionCell<D> {
     key: D,
     attempted: AtomicU64,
     consumed: AtomicU64,
@@ -357,7 +390,7 @@ impl<D: TerminalEvidenceKey> FallbackDimensionCell<D> {
     }
 }
 
-pub(super) struct FallbackPhaseCell<P: TerminalEvidenceKey> {
+pub(super) struct FallbackPhaseCell<P> {
     key: P,
     current_live_bytes: AtomicU64,
     peak_live_bytes: AtomicU64,
@@ -393,6 +426,8 @@ impl<P: TerminalEvidenceKey> FallbackPhaseCell<P> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum TerminalEvidenceFreezeError {
+    #[cfg(test)]
+    InjectedFailure,
     AlreadyFrozen,
     ShapeMismatch {
         expected_dimensions: usize,
@@ -427,6 +462,10 @@ pub(super) enum TerminalEvidenceFreezeError {
 impl fmt::Display for TerminalEvidenceFreezeError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            #[cfg(test)]
+            Self::InjectedFailure => {
+                formatter.write_str("injected terminal ledger evidence freeze failure")
+            }
             Self::AlreadyFrozen => {
                 formatter.write_str("terminal ledger evidence is already frozen")
             }
@@ -504,12 +543,46 @@ impl fmt::Display for TerminalEvidenceCatalogError {
 
 impl std::error::Error for TerminalEvidenceCatalogError {}
 
-pub(super) struct TerminalLedgerEvidence<P: TerminalEvidenceKey, D: TerminalEvidenceKey> {
+pub(super) struct TerminalLedgerEvidence<P, D> {
     header: FallbackHeader<P>,
     dimensions: Vec<FallbackDimensionCell<D>>,
     phases: Vec<FallbackPhaseCell<P>>,
     freeze_started: AtomicBool,
     final_frozen: AtomicBool,
+}
+
+pub(super) struct TerminalEvidenceFreezeQualification {
+    last_completed_phase_ordinal_plus_one: usize,
+}
+
+impl<P, D> TerminalLedgerEvidence<P, D>
+where
+    P: TerminalEvidenceKey,
+    D: TerminalEvidenceKey,
+{
+    pub(super) fn freeze_from(
+        &self,
+        qualification: &TerminalEvidenceFreezeQualification,
+        terminal_cause: TerminalEvidenceCause,
+        snapshot: &LedgerSnapshot<P, D>,
+    ) {
+        #[cfg(test)]
+        if take_terminal_evidence_write_panic() {
+            panic!("injected terminal ledger evidence write panic");
+        }
+        for (cell, (_, value)) in self.dimensions.iter().zip(snapshot.dimensions()) {
+            cell.write(value);
+        }
+        for (cell, (_, value)) in self.phases.iter().zip(snapshot.phases()) {
+            cell.write(value);
+        }
+        self.header.write(
+            terminal_cause,
+            qualification.last_completed_phase_ordinal_plus_one,
+            snapshot,
+        );
+        self.final_frozen.store(true, Ordering::Release);
+    }
 }
 
 impl<P, D> TerminalLedgerEvidence<P, D>
@@ -532,43 +605,83 @@ where
         }
     }
 
-    pub(super) fn try_freeze_from(
+    pub(super) fn try_qualify(
         &self,
-        terminal_cause: TerminalEvidenceCause,
-        snapshot: &LedgerSnapshot<P, D>,
-    ) -> Result<(), TerminalEvidenceFreezeError> {
+        expected_dimensions: usize,
+        mut dimension_key_at: impl FnMut(usize) -> Option<D>,
+        expected_phases: usize,
+        mut phase_key_at: impl FnMut(usize) -> Option<P>,
+        last_completed_phase: Option<P>,
+    ) -> Result<TerminalEvidenceFreezeQualification, TerminalEvidenceFreezeError> {
+        let last_completed_phase_ordinal_plus_one = self.validate_qualification(
+            expected_dimensions,
+            &mut dimension_key_at,
+            expected_phases,
+            &mut phase_key_at,
+            last_completed_phase,
+        )?;
+        self.finish_qualification(last_completed_phase_ordinal_plus_one)
+    }
+
+    fn validate_qualification(
+        &self,
+        expected_dimensions: usize,
+        dimension_key_at: &mut impl FnMut(usize) -> Option<D>,
+        expected_phases: usize,
+        phase_key_at: &mut impl FnMut(usize) -> Option<P>,
+        last_completed_phase: Option<P>,
+    ) -> Result<usize, TerminalEvidenceFreezeError> {
         if self.freeze_started.load(Ordering::Acquire) || self.final_frozen.load(Ordering::Acquire)
         {
             return Err(TerminalEvidenceFreezeError::AlreadyFrozen);
         }
 
-        let actual_dimensions = snapshot.dimensions().len();
-        let actual_phases = snapshot.phases().len();
-        if self.dimensions.len() != actual_dimensions || self.phases.len() != actual_phases {
+        #[cfg(test)]
+        if take_terminal_evidence_qualification_failure() {
+            return Err(TerminalEvidenceFreezeError::InjectedFailure);
+        }
+
+        #[cfg(test)]
+        if take_terminal_evidence_qualification_panic() {
+            panic!("injected terminal ledger evidence qualification panic");
+        }
+
+        if self.dimensions.len() != expected_dimensions || self.phases.len() != expected_phases {
             return Err(TerminalEvidenceFreezeError::ShapeMismatch {
                 expected_dimensions: self.dimensions.len(),
-                actual_dimensions,
+                actual_dimensions: expected_dimensions,
                 expected_phases: self.phases.len(),
-                actual_phases,
+                actual_phases: expected_phases,
             });
         }
 
-        for (index, (cell, (key, _))) in self
-            .dimensions
-            .iter()
-            .zip(snapshot.dimensions())
-            .enumerate()
-        {
-            if cell.key != key {
+        for (index, cell) in self.dimensions.iter().enumerate() {
+            if dimension_key_at(index) != Some(cell.key) {
                 return Err(TerminalEvidenceFreezeError::DimensionKeyMismatch { index });
             }
         }
-        for (index, (cell, (key, _))) in self.phases.iter().zip(snapshot.phases()).enumerate() {
-            if cell.key != key {
+        if dimension_key_at(expected_dimensions).is_some() {
+            return Err(TerminalEvidenceFreezeError::ShapeMismatch {
+                expected_dimensions: self.dimensions.len(),
+                actual_dimensions: expected_dimensions.saturating_add(1),
+                expected_phases: self.phases.len(),
+                actual_phases: expected_phases,
+            });
+        }
+        for (index, cell) in self.phases.iter().enumerate() {
+            if phase_key_at(index) != Some(cell.key) {
                 return Err(TerminalEvidenceFreezeError::PhaseKeyMismatch { index });
             }
         }
-        let last_completed_phase_ordinal_plus_one = match snapshot.last_completed_phase() {
+        if phase_key_at(expected_phases).is_some() {
+            return Err(TerminalEvidenceFreezeError::ShapeMismatch {
+                expected_dimensions: self.dimensions.len(),
+                actual_dimensions: expected_dimensions,
+                expected_phases: self.phases.len(),
+                actual_phases: expected_phases.saturating_add(1),
+            });
+        }
+        let ordinal = match last_completed_phase {
             Some(phase) => self
                 .phases
                 .binary_search_by_key(&phase, FallbackPhaseCell::key)
@@ -577,6 +690,38 @@ where
                 .ok_or(TerminalEvidenceFreezeError::LastCompletedPhaseOrdinalOverflow)?,
             None => 0,
         };
+        Ok(ordinal)
+    }
+
+    fn finish_qualification(
+        &self,
+        last_completed_phase_ordinal_plus_one: usize,
+    ) -> Result<TerminalEvidenceFreezeQualification, TerminalEvidenceFreezeError> {
+        if self
+            .freeze_started
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return Err(TerminalEvidenceFreezeError::AlreadyFrozen);
+        }
+        Ok(TerminalEvidenceFreezeQualification {
+            last_completed_phase_ordinal_plus_one,
+        })
+    }
+
+    #[cfg(test)]
+    pub(super) fn try_freeze_from(
+        &self,
+        terminal_cause: TerminalEvidenceCause,
+        snapshot: &LedgerSnapshot<P, D>,
+    ) -> Result<(), TerminalEvidenceFreezeError> {
+        let last_completed_phase_ordinal_plus_one = self.validate_qualification(
+            snapshot.dimensions().len(),
+            &mut |index| snapshot.dimensions().nth(index).map(|(key, _)| key),
+            snapshot.phases().len(),
+            &mut |index| snapshot.phases().nth(index).map(|(key, _)| key),
+            snapshot.last_completed_phase(),
+        )?;
         for (index, (_, value)) in snapshot.phases().enumerate() {
             if value.current_live_bytes() != 0 {
                 return Err(TerminalEvidenceFreezeError::NonTerminalPhaseState {
@@ -604,27 +749,8 @@ where
                 current_evidence_bytes: snapshot.current_evidence_bytes(),
             });
         }
-
-        if self
-            .freeze_started
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_err()
-        {
-            return Err(TerminalEvidenceFreezeError::AlreadyFrozen);
-        }
-
-        for (cell, (_, value)) in self.dimensions.iter().zip(snapshot.dimensions()) {
-            cell.write(value);
-        }
-        for (cell, (_, value)) in self.phases.iter().zip(snapshot.phases()) {
-            cell.write(value);
-        }
-        self.header.write(
-            terminal_cause,
-            last_completed_phase_ordinal_plus_one,
-            snapshot,
-        );
-        self.final_frozen.store(true, Ordering::Release);
+        let qualification = self.finish_qualification(last_completed_phase_ordinal_plus_one)?;
+        self.freeze_from(&qualification, terminal_cause, snapshot);
         Ok(())
     }
 
@@ -659,6 +785,18 @@ where
             .binary_search_by_key(&key, FallbackPhaseCell::key)
             .ok()?;
         Some(self.phases[position].snapshot())
+    }
+
+    pub(super) fn dimension_key_at(&self, index: usize) -> Option<D> {
+        self.is_frozen()
+            .then(|| self.dimensions.get(index).map(FallbackDimensionCell::key))
+            .flatten()
+    }
+
+    pub(super) fn phase_key_at(&self, index: usize) -> Option<P> {
+        self.is_frozen()
+            .then(|| self.phases.get(index).map(FallbackPhaseCell::key))
+            .flatten()
     }
 }
 
@@ -787,22 +925,20 @@ where
         dimension_keys: &[D],
         phase_keys: &[P],
     ) -> Result<TerminalLedgerEvidence<P, D>, TerminalEvidenceBuildError> {
+        self.try_build_indexed(
+            |index| dimension_keys.get(index).copied(),
+            |index| phase_keys.get(index).copied(),
+        )
+    }
+
+    pub(super) fn try_build_indexed(
+        self,
+        mut dimension_key_at: impl FnMut(usize) -> Option<D>,
+        mut phase_key_at: impl FnMut(usize) -> Option<P>,
+    ) -> Result<TerminalLedgerEvidence<P, D>, TerminalEvidenceBuildError> {
         // U4 startup will expose this allocation tail only through its ready two-plane guard.
         // Keeping it here binds both real Vec backings to the qualified plans without importing
         // ledger/account lifecycle authority into this leaf model.
-        if dimension_keys.len() != self.dimension_capacity.desired_capacity()
-            || phase_keys.len() != self.phase_capacity.desired_capacity()
-        {
-            return Err(TerminalEvidenceBuildError::ShapeMismatch {
-                planned_dimensions: self.dimension_capacity.desired_capacity(),
-                actual_dimensions: dimension_keys.len(),
-                planned_phases: self.phase_capacity.desired_capacity(),
-                actual_phases: phase_keys.len(),
-            });
-        }
-        validate_key_catalogs(dimension_keys, phase_keys)
-            .map_err(TerminalEvidenceBuildError::Catalog)?;
-
         let mut dimensions = Vec::new();
         self.dimension_capacity
             .verify_preflight(dimensions.len(), dimensions.capacity())
@@ -833,13 +969,56 @@ where
             .finish(phases.len(), phases.capacity())
             .map_err(TerminalEvidenceBuildError::PhaseCapacity)?;
 
-        dimensions.extend(
-            dimension_keys
-                .iter()
-                .copied()
-                .map(FallbackDimensionCell::new),
-        );
-        phases.extend(phase_keys.iter().copied().map(FallbackPhaseCell::new));
+        for index in 0..self.dimension_capacity.desired_capacity() {
+            let key = dimension_key_at(index).ok_or(TerminalEvidenceBuildError::ShapeMismatch {
+                planned_dimensions: self.dimension_capacity.desired_capacity(),
+                actual_dimensions: index,
+                planned_phases: self.phase_capacity.desired_capacity(),
+                actual_phases: self.phase_capacity.desired_capacity(),
+            })?;
+            if dimensions
+                .last()
+                .is_some_and(|previous: &FallbackDimensionCell<D>| previous.key() >= key)
+            {
+                return Err(TerminalEvidenceBuildError::Catalog(
+                    TerminalEvidenceCatalogError::DimensionKeysNotStrictlyOrdered { index },
+                ));
+            }
+            dimensions.push(FallbackDimensionCell::new(key));
+        }
+        if dimension_key_at(self.dimension_capacity.desired_capacity()).is_some() {
+            return Err(TerminalEvidenceBuildError::ShapeMismatch {
+                planned_dimensions: self.dimension_capacity.desired_capacity(),
+                actual_dimensions: self.dimension_capacity.desired_capacity().saturating_add(1),
+                planned_phases: self.phase_capacity.desired_capacity(),
+                actual_phases: self.phase_capacity.desired_capacity(),
+            });
+        }
+        for index in 0..self.phase_capacity.desired_capacity() {
+            let key = phase_key_at(index).ok_or(TerminalEvidenceBuildError::ShapeMismatch {
+                planned_dimensions: self.dimension_capacity.desired_capacity(),
+                actual_dimensions: self.dimension_capacity.desired_capacity(),
+                planned_phases: self.phase_capacity.desired_capacity(),
+                actual_phases: index,
+            })?;
+            if phases
+                .last()
+                .is_some_and(|previous: &FallbackPhaseCell<P>| previous.key() >= key)
+            {
+                return Err(TerminalEvidenceBuildError::Catalog(
+                    TerminalEvidenceCatalogError::PhaseKeysNotStrictlyOrdered { index },
+                ));
+            }
+            phases.push(FallbackPhaseCell::new(key));
+        }
+        if phase_key_at(self.phase_capacity.desired_capacity()).is_some() {
+            return Err(TerminalEvidenceBuildError::ShapeMismatch {
+                planned_dimensions: self.dimension_capacity.desired_capacity(),
+                actual_dimensions: self.dimension_capacity.desired_capacity(),
+                planned_phases: self.phase_capacity.desired_capacity(),
+                actual_phases: self.phase_capacity.desired_capacity().saturating_add(1),
+            });
+        }
         Ok(TerminalLedgerEvidence::from_validated_cells(
             dimensions, phases,
         ))
@@ -888,31 +1067,6 @@ fn try_new_backing_footprint(
         }
     }
     Ok(TerminalEvidenceBackingFootprint { bytes, allocations })
-}
-
-fn validate_key_catalogs<P, D>(
-    dimension_keys: &[D],
-    phase_keys: &[P],
-) -> Result<(), TerminalEvidenceCatalogError>
-where
-    P: TerminalEvidenceKey,
-    D: TerminalEvidenceKey,
-{
-    if let Some(index) = dimension_keys
-        .windows(2)
-        .position(|pair| pair[0] >= pair[1])
-        .map(|position| position + 1)
-    {
-        return Err(TerminalEvidenceCatalogError::DimensionKeysNotStrictlyOrdered { index });
-    }
-    if let Some(index) = phase_keys
-        .windows(2)
-        .position(|pair| pair[0] >= pair[1])
-        .map(|position| position + 1)
-    {
-        return Err(TerminalEvidenceCatalogError::PhaseKeysNotStrictlyOrdered { index });
-    }
-    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1029,133 +1183,6 @@ impl std::error::Error for TerminalEvidenceBuildError {
             | Self::DimensionAllocationFailed
             | Self::PhaseAllocationFailed => None,
         }
-    }
-}
-
-#[allow(
-    dead_code,
-    reason = "crate-private until the U4 canonical consumers switch atomically"
-)]
-pub(super) struct PublicationDimensionCell<D> {
-    dimension: D,
-    attempted: AtomicU64,
-    consumed: AtomicU64,
-    peak_live_bytes: AtomicU64,
-    committed_canonical_output: AtomicU64,
-    published_outcome_evidence: AtomicU64,
-}
-
-impl<D> PublicationDimensionCell<D> {
-    pub(super) const fn new(dimension: D) -> Self {
-        Self {
-            dimension,
-            attempted: AtomicU64::new(0),
-            consumed: AtomicU64::new(0),
-            peak_live_bytes: AtomicU64::new(0),
-            committed_canonical_output: AtomicU64::new(0),
-            published_outcome_evidence: AtomicU64::new(0),
-        }
-    }
-}
-
-#[allow(
-    dead_code,
-    reason = "crate-private until the U4 canonical consumers switch atomically"
-)]
-pub(super) struct PublicationEvidenceCells<D> {
-    dimensions: Vec<PublicationDimensionCell<D>>,
-    frozen: AtomicBool,
-}
-
-#[allow(
-    dead_code,
-    reason = "crate-private until the U4 canonical consumers switch atomically"
-)]
-impl<D: Copy + Ord> PublicationEvidenceCells<D> {
-    pub(super) const fn new(dimensions: Vec<PublicationDimensionCell<D>>) -> Self {
-        Self {
-            dimensions,
-            frozen: AtomicBool::new(false),
-        }
-    }
-
-    pub(super) fn freeze_from(&self, snapshot: &LedgerSnapshot<impl Copy + Ord, D>) {
-        for (cell, (_, evidence)) in self.dimensions.iter().zip(snapshot.dimensions()) {
-            cell.attempted
-                .store(evidence.attempted(), Ordering::Release);
-            cell.consumed.store(evidence.consumed(), Ordering::Release);
-            cell.peak_live_bytes
-                .store(evidence.peak_live_bytes(), Ordering::Release);
-            cell.committed_canonical_output
-                .store(evidence.committed_canonical_output(), Ordering::Release);
-            cell.published_outcome_evidence
-                .store(evidence.published_outcome_evidence(), Ordering::Release);
-        }
-        self.frozen.store(true, Ordering::Release);
-    }
-
-    pub(super) fn dimension(&self, dimension: D) -> Option<PublishedDimensionSnapshot<D>> {
-        if !self.frozen.load(Ordering::Acquire) {
-            return None;
-        }
-        let position = self
-            .dimensions
-            .binary_search_by_key(&dimension, |cell| cell.dimension)
-            .ok()?;
-        let cell = &self.dimensions[position];
-        Some(PublishedDimensionSnapshot {
-            dimension,
-            attempted: cell.attempted.load(Ordering::Acquire),
-            consumed: cell.consumed.load(Ordering::Acquire),
-            peak_live_bytes: cell.peak_live_bytes.load(Ordering::Acquire),
-            committed_canonical_output: cell.committed_canonical_output.load(Ordering::Acquire),
-            published_outcome_evidence: cell.published_outcome_evidence.load(Ordering::Acquire),
-        })
-    }
-}
-
-/// One copied destination-aware dimension snapshot from a published operation.
-#[allow(
-    dead_code,
-    reason = "crate-private until the U4 canonical consumers switch atomically"
-)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct PublishedDimensionSnapshot<D> {
-    dimension: D,
-    attempted: u64,
-    consumed: u64,
-    peak_live_bytes: u64,
-    committed_canonical_output: u64,
-    published_outcome_evidence: u64,
-}
-
-#[allow(
-    dead_code,
-    reason = "crate-private until the U4 canonical consumers switch atomically"
-)]
-impl<D: Copy> PublishedDimensionSnapshot<D> {
-    pub const fn dimension(self) -> D {
-        self.dimension
-    }
-
-    pub const fn attempted(self) -> u64 {
-        self.attempted
-    }
-
-    pub const fn consumed(self) -> u64 {
-        self.consumed
-    }
-
-    pub const fn peak_live_bytes(self) -> u64 {
-        self.peak_live_bytes
-    }
-
-    pub const fn committed_canonical_output(self) -> u64 {
-        self.committed_canonical_output
-    }
-
-    pub const fn published_outcome_evidence(self) -> u64 {
-        self.published_outcome_evidence
     }
 }
 

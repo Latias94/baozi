@@ -310,6 +310,51 @@ impl Error for PostProcessFailure {
     }
 }
 
+/// A typed failure before a post-process coordinator exists.
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum PostProcessInitializationError {
+    /// The owner-defined ledger limits could not be frozen.
+    #[error("post-process ledger limits could not be frozen: {source}")]
+    LedgerLimits {
+        #[source]
+        source: LedgerLimitsError<PostProcessDimension>,
+    },
+
+    /// The coordinator could not retain the complete accounting-phase catalog.
+    #[error("post-process coordinator could not be initialized: {source}")]
+    Coordinator {
+        #[source]
+        source: LedgerCause<PostProcessDimension>,
+    },
+}
+
+impl PostProcessInitializationError {
+    pub(crate) const fn ledger_limits(source: LedgerLimitsError<PostProcessDimension>) -> Self {
+        Self::LedgerLimits { source }
+    }
+
+    pub(crate) const fn coordinator(source: LedgerCause<PostProcessDimension>) -> Self {
+        Self::Coordinator { source }
+    }
+
+    /// Returns the limits error when policy freezing failed.
+    pub const fn ledger_limits_error(&self) -> Option<&LedgerLimitsError<PostProcessDimension>> {
+        match self {
+            Self::LedgerLimits { source } => Some(source),
+            Self::Coordinator { .. } => None,
+        }
+    }
+
+    /// Returns the coordinator cause when phase-catalog initialization failed.
+    pub const fn coordinator_cause(&self) -> Option<&LedgerCause<PostProcessDimension>> {
+        match self {
+            Self::LedgerLimits { .. } => None,
+            Self::Coordinator { source } => Some(source),
+        }
+    }
+}
+
 /// A failure before or during one post-process invocation.
 ///
 /// Initialization failures occur before an operation coordinator exists and
@@ -318,11 +363,11 @@ impl Error for PostProcessFailure {
 #[derive(Debug, Error, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum PostProcessRunError {
-    /// The operation ledger policy could not be frozen.
+    /// The post-process operation could not be initialized.
     #[error("post-process operation initialization failed: {source}")]
     Initialization {
         #[source]
-        source: LedgerLimitsError<PostProcessDimension>,
+        source: PostProcessInitializationError,
     },
 
     /// The initialized operation failed and retained its terminal evidence.
@@ -335,7 +380,17 @@ pub enum PostProcessRunError {
 
 impl PostProcessRunError {
     pub(crate) const fn initialization(source: LedgerLimitsError<PostProcessDimension>) -> Self {
-        Self::Initialization { source }
+        Self::Initialization {
+            source: PostProcessInitializationError::ledger_limits(source),
+        }
+    }
+
+    pub(crate) const fn coordinator_initialization(
+        source: LedgerCause<PostProcessDimension>,
+    ) -> Self {
+        Self::Initialization {
+            source: PostProcessInitializationError::coordinator(source),
+        }
     }
 
     pub(crate) const fn operation(failure: PostProcessFailure) -> Self {
@@ -346,7 +401,7 @@ impl PostProcessRunError {
     /// initialization error on mismatch.
     pub fn into_operation_failure(
         self,
-    ) -> std::result::Result<PostProcessFailure, LedgerLimitsError<PostProcessDimension>> {
+    ) -> std::result::Result<PostProcessFailure, PostProcessInitializationError> {
         match self {
             Self::Operation { failure } => Ok(failure),
             Self::Initialization { source } => Err(source),
@@ -391,3 +446,28 @@ impl PostProcessSuccess {
 pub type Result<T> = std::result::Result<T, PostProcessRunError>;
 
 pub(crate) type StepResult<T> = std::result::Result<T, PostProcessError>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn coordinator_initialization_retains_its_typed_source_on_mismatch() {
+        let cause: LedgerCause<PostProcessDimension> = LedgerCause::DuplicatePhase;
+        let run_error = PostProcessRunError::coordinator_initialization(cause.clone());
+
+        let initialization_source = Error::source(&run_error)
+            .and_then(|source| source.downcast_ref::<PostProcessInitializationError>())
+            .expect("run error must retain the typed initialization source");
+        assert_eq!(initialization_source.coordinator_cause(), Some(&cause));
+        let coordinator_source = Error::source(initialization_source)
+            .and_then(|source| source.downcast_ref::<LedgerCause<PostProcessDimension>>())
+            .expect("initialization error must retain the typed coordinator cause");
+        assert_eq!(coordinator_source, &cause);
+
+        let initialization = run_error
+            .into_operation_failure()
+            .expect_err("coordinator initialization cannot be an operation failure");
+        assert_eq!(initialization.coordinator_cause(), Some(&cause));
+    }
+}

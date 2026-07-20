@@ -5732,7 +5732,7 @@ impl ScopedSceneBuilder<'_, '_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ledger::{ImportOperationControl, import_ledger_limits};
+    use crate::ledger::{ImportOperationControl, import_ledger_limits, try_import_coordinator};
     use crate::{
         CapabilityStatus, DetectionOutcome, DetectionResult, DetectionScope, FormatCapability,
         FormatDescriptor, FormatEncoding, FormatImporter, ImportRequest, OptionCompileLimits,
@@ -5742,6 +5742,16 @@ mod tests {
     use baozi_io::AssetPath;
     use baozi_io::{AssetLength, AuthorityDomain};
     use std::io::Cursor;
+
+    fn test_coordinator(
+        limits: &ResourceLimits,
+    ) -> Result<RefCell<ImportCoordinator>, LedgerCause<ImportDimension>> {
+        try_import_coordinator(
+            ImportOperationControl::default(),
+            import_ledger_limits(limits).expect("valid import ledger limits"),
+        )
+        .map(RefCell::new)
+    }
 
     #[derive(Clone, Copy)]
     enum QualificationContainer {
@@ -6365,12 +6375,10 @@ mod tests {
     }
 
     #[test]
-    fn opened_asset_snapshot_is_unique_metered_vec_storage() {
+    fn opened_asset_snapshot_is_unique_metered_vec_storage()
+    -> Result<(), LedgerCause<ImportDimension>> {
         let limits = ResourceLimits::default();
-        let coordinator = RefCell::new(ImportCoordinator::new(
-            ImportOperationControl::default(),
-            import_ledger_limits(&limits).expect("valid import ledger limits"),
-        ));
+        let coordinator = test_coordinator(&limits)?;
         let payload = b"metered snapshot".to_vec();
         let opened = OpenedAsset::new(
             AuthorityDomain::new(),
@@ -6410,6 +6418,7 @@ mod tests {
                 .current_live_bytes(),
             0
         );
+        Ok(())
     }
 
     struct OwnedIterationDropProbe<'a> {
@@ -6457,12 +6466,10 @@ mod tests {
     }
 
     #[test]
-    fn owned_iteration_error_drops_current_and_remaining_elements_before_capacity() {
+    fn owned_iteration_error_drops_current_and_remaining_elements_before_capacity()
+    -> Result<(), LedgerCause<ImportDimension>> {
         let limits = ResourceLimits::default();
-        let coordinator = RefCell::new(ImportCoordinator::new(
-            ImportOperationControl::default(),
-            import_ledger_limits(&limits).expect("valid import ledger limits"),
-        ));
+        let coordinator = test_coordinator(&limits)?;
         let terminal = RefCell::new(None);
         let meter = StorageMeter {
             coordinator: &coordinator,
@@ -6493,15 +6500,14 @@ mod tests {
 
         assert_eq!(result, Err("injected visitor failure"));
         assert_owned_iteration_drop_observations(&observations, &coordinator);
+        Ok(())
     }
 
     #[test]
-    fn owned_iteration_panic_drops_current_and_remaining_elements_before_capacity() {
+    fn owned_iteration_panic_drops_current_and_remaining_elements_before_capacity()
+    -> Result<(), LedgerCause<ImportDimension>> {
         let limits = ResourceLimits::default();
-        let coordinator = RefCell::new(ImportCoordinator::new(
-            ImportOperationControl::default(),
-            import_ledger_limits(&limits).expect("valid import ledger limits"),
-        ));
+        let coordinator = test_coordinator(&limits)?;
         let terminal = RefCell::new(None);
         let meter = StorageMeter {
             coordinator: &coordinator,
@@ -6534,15 +6540,14 @@ mod tests {
 
         assert!(result.is_err(), "the visitor panic must be observed");
         assert_owned_iteration_drop_observations(&observations, &coordinator);
+        Ok(())
     }
 
     #[test]
-    fn reservation_merge_failure_preserves_both_payload_owners() {
+    fn reservation_merge_failure_preserves_both_payload_owners()
+    -> Result<(), LedgerCause<ImportDimension>> {
         let limits = ResourceLimits::default();
-        let coordinator = RefCell::new(ImportCoordinator::new(
-            ImportOperationControl::default(),
-            import_ledger_limits(&limits).expect("valid import ledger limits"),
-        ));
+        let coordinator = test_coordinator(&limits)?;
         let mut target = SceneValueReservations::new();
         let mut source = SceneValueReservations::new();
         fill_reservation_inventory(&coordinator, &mut target);
@@ -6590,10 +6595,12 @@ mod tests {
             .finish()
             .expect("preserved merge owners must finalize cleanly");
         assert_eq!(ledger.current_live_bytes(), 0);
+        Ok(())
     }
 
     #[test]
-    fn scene_parts_finalizer_drops_value_before_current_and_remaining_reservations_on_panic() {
+    fn scene_parts_finalizer_drops_value_before_current_and_remaining_reservations_on_panic()
+    -> Result<(), LedgerCause<ImportDimension>> {
         struct FinalizationDropProbe<'a> {
             coordinator: &'a RefCell<ImportCoordinator>,
             observed_current_reservation: &'a std::cell::Cell<bool>,
@@ -6652,10 +6659,7 @@ mod tests {
         }
 
         let limits = ResourceLimits::default();
-        let coordinator = RefCell::new(ImportCoordinator::new(
-            ImportOperationControl::default(),
-            import_ledger_limits(&limits).expect("valid import ledger limits"),
-        ));
+        let coordinator = test_coordinator(&limits)?;
         let terminal = RefCell::new(None);
         let meter = StorageMeter {
             coordinator: &coordinator,
@@ -6726,15 +6730,14 @@ mod tests {
                 .current_live_bytes(),
             0
         );
+        Ok(())
     }
 
     #[test]
-    fn reserved_vector_copy_rejects_an_unbounded_chunk_without_mutation() {
+    fn reserved_vector_copy_rejects_an_unbounded_chunk_without_mutation()
+    -> Result<(), LedgerCause<ImportDimension>> {
         let limits = ResourceLimits::default();
-        let coordinator = RefCell::new(ImportCoordinator::new(
-            ImportOperationControl::default(),
-            import_ledger_limits(&limits).expect("valid import ledger limits"),
-        ));
+        let coordinator = test_coordinator(&limits)?;
         let terminal = RefCell::new(None);
         let meter = StorageMeter {
             coordinator: &coordinator,
@@ -6760,15 +6763,14 @@ mod tests {
                 code: "metered-vector-copy-chunk-too-large",
             })
         ));
+        Ok(())
     }
 
     #[test]
-    fn reserved_string_copy_rejects_an_unbounded_chunk_without_mutation() {
+    fn reserved_string_copy_rejects_an_unbounded_chunk_without_mutation()
+    -> Result<(), LedgerCause<ImportDimension>> {
         let limits = ResourceLimits::default();
-        let coordinator = RefCell::new(ImportCoordinator::new(
-            ImportOperationControl::default(),
-            import_ledger_limits(&limits).expect("valid import ledger limits"),
-        ));
+        let coordinator = test_coordinator(&limits)?;
         let terminal = RefCell::new(None);
         let meter = StorageMeter {
             coordinator: &coordinator,
@@ -6794,10 +6796,12 @@ mod tests {
                 code: "metered-string-copy-chunk-too-large",
             })
         ));
+        Ok(())
     }
 
     #[test]
-    fn dedup_partition_defers_duplicate_drops_to_the_caller() {
+    fn dedup_partition_defers_duplicate_drops_to_the_caller()
+    -> Result<(), LedgerCause<ImportDimension>> {
         struct DedupDropProbe<'a> {
             key: u8,
             drops: &'a std::cell::Cell<usize>,
@@ -6810,10 +6814,7 @@ mod tests {
         }
 
         let limits = ResourceLimits::default();
-        let coordinator = RefCell::new(ImportCoordinator::new(
-            ImportOperationControl::default(),
-            import_ledger_limits(&limits).expect("valid import ledger limits"),
-        ));
+        let coordinator = test_coordinator(&limits)?;
         let terminal = RefCell::new(None);
         let meter = StorageMeter {
             coordinator: &coordinator,
@@ -6844,5 +6845,6 @@ mod tests {
         assert_eq!(drops.get(), 2);
         drop(values);
         assert_eq!(drops.get(), 4);
+        Ok(())
     }
 }

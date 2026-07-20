@@ -66,6 +66,15 @@ type Coordinator = OperationCoordinator<TestOwner, Phase, ObserverPhase, Unit, D
 type Reservation = LiveReservation<TestOwner, Phase, Dimension>;
 type PublicationBatch = PublicationReservationBatch<TestOwner, Phase, Dimension>;
 
+const COMPLETE_PHASES: &[Phase] = &[Phase::Snapshot, Phase::Decode, Phase::Output];
+
+fn coordinator_with(
+    control: OperationControl<ObserverPhase, Unit>,
+    limits: LedgerLimits<Dimension>,
+) -> Coordinator {
+    Coordinator::try_new(control, limits, COMPLETE_PHASES).expect("complete test phase catalog")
+}
+
 fn publication_capacity_bytes() -> u64 {
     CapacityPlan::for_type::<Reservation>(0, 0, 1)
         .and_then(CapacityPlan::envelope_delta_bytes)
@@ -81,7 +90,7 @@ fn publication_limits(payload_live_bytes: u64) -> LedgerLimits<Dimension> {
 }
 
 fn publication_coordinator(payload_live_bytes: u64) -> Coordinator {
-    Coordinator::new(
+    coordinator_with(
         OperationControl::default(),
         publication_limits(payload_live_bytes),
     )
@@ -171,7 +180,7 @@ fn limits(operation_live_bytes: u64) -> LedgerLimits<Dimension> {
 }
 
 fn coordinator(operation_live_bytes: u64) -> Coordinator {
-    Coordinator::new(OperationControl::default(), limits(operation_live_bytes))
+    coordinator_with(OperationControl::default(), limits(operation_live_bytes))
 }
 
 fn run_with_timeout<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> T {
@@ -287,7 +296,7 @@ fn checked_counter_overflow_keeps_the_last_valid_evidence() {
         )],
     )
     .expect("maximum counters are valid");
-    let mut coordinator = Coordinator::new(OperationControl::default(), limits);
+    let mut coordinator = coordinator_with(OperationControl::default(), limits);
     let mut checkpoint = coordinator.checkpoint();
 
     checkpoint
@@ -639,6 +648,7 @@ fn failed_reservation_transition_preserves_source_without_target_pollution() {
         .checkpoint()
         .reserve(Phase::Snapshot, Dimension::AssetBytes, 8)
         .expect("dimension-limit source");
+    let dimension_before = dimension_limited.ledger_snapshot();
     assert_eq!(
         dimension_limited
             .transition_reservation(&mut source, Phase::Output, Dimension::OutputBytes, 17)
@@ -652,16 +662,7 @@ fn failed_reservation_transition_preserves_source_without_target_pollution() {
     );
     let dimension_failure = dimension_limited.ledger_snapshot();
     assert_eq!(source.bytes(), 8);
-    assert_eq!(dimension_failure.current_live_bytes(), 8);
-    assert_eq!(dimension_failure.peak_live_bytes(), 8);
-    assert_eq!(
-        dimension_failure
-            .dimension(Dimension::OutputBytes)
-            .expect("output evidence")
-            .peak_live_bytes(),
-        0
-    );
-    assert!(dimension_failure.phase(Phase::Output).is_none());
+    assert_eq!(dimension_failure, dimension_before);
     dimension_limited
         .transition_reservation(&mut source, Phase::Output, Dimension::OutputBytes, 16)
         .expect("preserved source can be retried");
@@ -674,6 +675,7 @@ fn failed_reservation_transition_preserves_source_without_target_pollution() {
         .checkpoint()
         .reserve(Phase::Snapshot, Dimension::AssetBytes, 8)
         .expect("operation-limit source");
+    let operation_before = operation_limited.ledger_snapshot();
     assert_eq!(
         operation_limited
             .transition_reservation(&mut source, Phase::Output, Dimension::OutputBytes, 11)
@@ -687,18 +689,42 @@ fn failed_reservation_transition_preserves_source_without_target_pollution() {
     );
     let operation_failure = operation_limited.ledger_snapshot();
     assert_eq!(source.bytes(), 8);
-    assert_eq!(operation_failure.current_live_bytes(), 8);
-    assert_eq!(operation_failure.peak_live_bytes(), 8);
-    assert_eq!(
-        operation_failure
-            .dimension(Dimension::OutputBytes)
-            .expect("output evidence")
-            .peak_live_bytes(),
-        0
-    );
-    assert!(operation_failure.phase(Phase::Output).is_none());
+    assert_eq!(operation_failure, operation_before);
     drop(source);
     assert_eq!(operation_limited.ledger_snapshot().current_live_bytes(), 0);
+}
+
+#[test]
+fn repeated_failed_transitions_leave_predeclared_phase_evidence_unchanged() {
+    let mut coordinator = coordinator(32);
+    let mut source = coordinator
+        .checkpoint()
+        .reserve(Phase::Snapshot, Dimension::AssetBytes, 8)
+        .expect("source reservation");
+    let before = coordinator.ledger_snapshot();
+
+    for phase in [Phase::Decode, Phase::Output, Phase::Decode, Phase::Output] {
+        assert_eq!(
+            coordinator
+                .transition_reservation(&mut source, phase, Dimension::OutputBytes, 17)
+                .expect_err("target dimension limit must reject every transition"),
+            LedgerCause::LimitExceeded {
+                class: CounterClass::Live,
+                dimension: Dimension::OutputBytes,
+                value: 17,
+                limit: 16,
+            }
+        );
+        assert_eq!(source.bytes(), 8);
+        assert_eq!(
+            coordinator.ledger_snapshot(),
+            before,
+            "failed transition to {phase:?} changed the ledger or its evidence"
+        );
+    }
+
+    drop(source);
+    assert_eq!(coordinator.ledger_snapshot().current_live_bytes(), 0);
 }
 
 #[test]
@@ -713,6 +739,7 @@ fn failed_batch_transition_preserves_every_source_token_atomically() {
         .reserve(Phase::Snapshot, Dimension::AssetBytes, 4)
         .expect("second source reservation");
     let mut sources = [first, second];
+    let before = coordinator.ledger_snapshot();
 
     assert_eq!(
         coordinator
@@ -728,22 +755,7 @@ fn failed_batch_transition_preserves_every_source_token_atomically() {
     assert_eq!(sources[0].bytes(), 4);
     assert_eq!(sources[1].bytes(), 4);
     let rejected = coordinator.ledger_snapshot();
-    assert_eq!(rejected.current_live_bytes(), 8);
-    assert_eq!(
-        rejected
-            .dimension(Dimension::AssetBytes)
-            .expect("asset evidence")
-            .current_live_bytes(),
-        8
-    );
-    assert_eq!(
-        rejected
-            .dimension(Dimension::OutputBytes)
-            .expect("output evidence")
-            .peak_live_bytes(),
-        0
-    );
-    assert!(rejected.phase(Phase::Output).is_none());
+    assert_eq!(rejected, before);
 
     coordinator
         .transition_reservations(&mut sources, Phase::Output, Dimension::OutputBytes, 8)
@@ -834,41 +846,21 @@ fn mixed_batch_transition_conserves_operation_dimension_and_phase_totals() {
 }
 
 #[test]
-fn failed_batch_target_phase_evidence_admission_preserves_all_source_state() {
-    let mut probe = coordinator(20);
-    let probe_reservation = probe
-        .checkpoint()
-        .reserve(Phase::Snapshot, Dimension::AssetBytes, 1)
-        .expect("one phase should be measurable");
+fn complete_phase_catalog_must_fit_evidence_before_operation_start() {
+    let probe = Coordinator::try_new(OperationControl::default(), limits(20), &[Phase::Snapshot])
+        .expect("one phase should fit without starting an operation");
     let one_phase_evidence_limit = probe.ledger_snapshot().current_evidence_bytes();
-    drop(probe_reservation);
     probe
         .finish()
         .expect("the evidence probe should finalize cleanly");
 
     let tight = limits(20)
         .try_with_evidence_byte_limit(one_phase_evidence_limit)
-        .expect("one source phase should fit exactly");
-    let mut coordinator = Coordinator::new(OperationControl::default(), tight);
-    let first = coordinator
-        .checkpoint()
-        .reserve(Phase::Snapshot, Dimension::AssetBytes, 2)
-        .expect("first source reservation");
-    let second = coordinator
-        .checkpoint()
-        .reserve(Phase::Snapshot, Dimension::AssetBytes, 2)
-        .expect("second source reservation");
-    let mut sources = [first, second];
-    let before_dimension = coordinator
-        .dimension_evidence(Dimension::AssetBytes)
-        .expect("source dimension evidence");
-    let before_phase = coordinator
-        .phase_evidence(Phase::Snapshot)
-        .expect("source phase evidence");
-
-    let failure = coordinator
-        .transition_reservations(&mut sources, Phase::Output, Dimension::OutputBytes, 4)
-        .expect_err("the second phase must exceed the exact evidence bound");
+        .expect("one phase should fit exactly");
+    let failure = match Coordinator::try_new(OperationControl::default(), tight, COMPLETE_PHASES) {
+        Ok(_) => panic!("the complete phase catalog must be admitted before operation start"),
+        Err(failure) => failure,
+    };
 
     assert!(matches!(
         failure,
@@ -879,24 +871,6 @@ fn failed_batch_target_phase_evidence_admission_preserves_all_source_state() {
             }
         }
     ));
-    assert_eq!(sources[0].bytes(), 2);
-    assert_eq!(sources[1].bytes(), 2);
-    assert_eq!(
-        coordinator
-            .dimension_evidence(Dimension::AssetBytes)
-            .expect("preserved source dimension evidence"),
-        before_dimension
-    );
-    assert_eq!(
-        coordinator.phase_evidence(Phase::Snapshot),
-        Some(before_phase)
-    );
-    assert!(coordinator.phase_evidence(Phase::Output).is_none());
-
-    drop(sources);
-    coordinator
-        .finish()
-        .expect("preserved source reservations should finalize cleanly");
 }
 
 #[test]
@@ -937,6 +911,7 @@ fn batch_transition_rejects_owner_mismatch_and_pending_mutation_atomically() {
     let pending = owner
         .prepare_publication(&mut batch, &[])
         .expect("zero live bytes are fully covered");
+    let before_pending_rejection = owner.ledger_snapshot();
     assert_eq!(
         owner
             .transition_reservations(&mut zero_sources, Phase::Output, Dimension::OutputBytes, 3,)
@@ -945,8 +920,7 @@ fn batch_transition_rejects_owner_mismatch_and_pending_mutation_atomically() {
     );
     assert_eq!(zero_sources[0].bytes(), 0);
     assert_eq!(zero_sources[1].bytes(), 0);
-    assert_eq!(owner.ledger_snapshot().current_live_bytes(), 0);
-    assert!(owner.phase_evidence(Phase::Output).is_none());
+    assert_eq!(owner.ledger_snapshot(), before_pending_rejection);
     drop(zero_sources);
     pending.rollback();
 }
@@ -979,6 +953,7 @@ fn reservation_transition_rejects_owner_mismatch_and_pending_mutation() {
     let pending = owner
         .prepare_publication(&mut batch, &[])
         .expect("zero live bytes are fully covered");
+    let before_pending_rejection = owner.ledger_snapshot();
     assert_eq!(
         owner
             .checkpoint()
@@ -987,16 +962,7 @@ fn reservation_transition_rejects_owner_mismatch_and_pending_mutation() {
         LedgerCause::PublicationAlreadyPending
     );
     let pending_snapshot = owner.ledger_snapshot();
-    assert_eq!(pending_snapshot.current_live_bytes(), 0);
-    assert_eq!(pending_snapshot.peak_live_bytes(), 3);
-    assert_eq!(
-        pending_snapshot
-            .dimension(Dimension::OutputBytes)
-            .expect("output evidence")
-            .peak_live_bytes(),
-        0
-    );
-    assert!(pending_snapshot.phase(Phase::Output).is_none());
+    assert_eq!(pending_snapshot, before_pending_rejection);
     assert_eq!(zero.bytes(), 0);
     drop(zero);
     pending.rollback();
@@ -1385,7 +1351,7 @@ fn commitment_failures_preserve_live_batch_for_retry() {
         ],
     )
     .expect("overflow fixture policy");
-    let mut overflow = Coordinator::new(OperationControl::default(), overflow_limits);
+    let mut overflow = coordinator_with(OperationControl::default(), overflow_limits);
     let reservation = overflow
         .checkpoint()
         .reserve(Phase::Output, Dimension::OutputBytes, 1)
@@ -1491,7 +1457,7 @@ fn publication_evidence_failure_preserves_live_batch_for_retry() {
     let tight_limits = publication_limits(20)
         .try_with_evidence_byte_limit(prepublication_evidence_limit)
         .expect("dimension and one phase evidence fit exactly");
-    let mut coordinator = Coordinator::new(OperationControl::default(), tight_limits);
+    let mut coordinator = coordinator_with(OperationControl::default(), tight_limits);
     let reservation = coordinator
         .checkpoint()
         .reserve(Phase::Output, Dimension::OutputBytes, 1)
@@ -1571,7 +1537,7 @@ fn wrong_coordinator_rejects_pending_before_progress_and_preserves_it_for_owner(
     let observed = Arc::new(Mutex::new(0usize));
     let observed_by_other = Arc::clone(&observed);
     let mut owner = publication_coordinator(20);
-    let mut other = Coordinator::new(
+    let mut other = coordinator_with(
         OperationControl::default().with_progress_observer(move |_| {
             *observed_by_other.lock().expect("observer lock") += 1;
             baozi_operation::ProgressDecision::Continue
@@ -1629,7 +1595,7 @@ fn progress_observers_can_release_same_ledger_reservations_without_blocking() {
         drop(reservation);
         ProgressDecision::Continue
     };
-    let mut coordinator = Coordinator::new(
+    let mut coordinator = coordinator_with(
         OperationControl::default().with_progress_observer(observer),
         limits(20),
     );
@@ -1658,7 +1624,7 @@ fn progress_observers_can_release_same_ledger_reservations_without_blocking() {
         drop(reservation);
         ProgressDecision::Continue
     };
-    let mut coordinator = Coordinator::new(
+    let mut coordinator = coordinator_with(
         OperationControl::default().with_progress_observer(final_observer),
         limits(20),
     );
@@ -1694,7 +1660,7 @@ fn cancellation_callback_can_release_same_ledger_reservation_without_blocking() 
     let control = OperationControl::default().with_cancellation(ReleasingCancellation {
         reservation: Arc::clone(&reservation_slot),
     });
-    let mut coordinator = Coordinator::new(control, limits(20));
+    let mut coordinator = coordinator_with(control, limits(20));
     let reservation = coordinator
         .checkpoint()
         .reserve(Phase::Snapshot, Dimension::AssetBytes, 4)
@@ -1762,7 +1728,7 @@ fn final_observer_decision_bypasses_exhausted_transient_delivery_limits() {
         let control = OperationControl::default()
             .with_progress_observer(observer)
             .with_progress_limits(delivery_limits);
-        let mut coordinator = Coordinator::new(control, publication_limits(20));
+        let mut coordinator = coordinator_with(control, publication_limits(20));
 
         if let Some(prior_phase) = prior_phase {
             let (completed, total) = match prior_phase {
@@ -1847,7 +1813,7 @@ fn final_observer_receives_publication_event_after_identical_transient_delivery(
             ProgressDecision::Continue
         }
     };
-    let mut coordinator = Coordinator::new(
+    let mut coordinator = coordinator_with(
         OperationControl::default().with_progress_observer(observer),
         publication_limits(20),
     );
@@ -1907,7 +1873,7 @@ fn assert_final_control_failure(
     observer: impl ProgressObserver<ObserverPhase, Unit>,
     expected: ControlCause,
 ) {
-    let mut coordinator = Coordinator::new(
+    let mut coordinator = coordinator_with(
         OperationControl::default().with_progress_observer(observer),
         publication_limits(20),
     );
@@ -1969,7 +1935,7 @@ fn final_callback_can_run_nested_work_and_last_poll_observes_its_cancellation() 
     let control = OperationControl::default()
         .with_cancellation(cancellation)
         .with_progress_observer(observer);
-    let mut coordinator = Coordinator::new(control, publication_limits(20));
+    let mut coordinator = coordinator_with(control, publication_limits(20));
     let reservation = coordinator
         .checkpoint()
         .reserve(Phase::Output, Dimension::OutputBytes, 4)
@@ -2015,7 +1981,7 @@ fn identical_transient_or_invalid_final_progress_cannot_bypass_the_publication_g
         *deliveries_from_observer.lock().expect("delivery lock") += 1;
         ProgressDecision::Continue
     };
-    let mut duplicate = Coordinator::new(
+    let mut duplicate = coordinator_with(
         OperationControl::default().with_progress_observer(observer),
         limits(20),
     );
@@ -2181,7 +2147,7 @@ fn checkpoint_exposes_control_and_accounting_without_state_authority() {
 }
 
 #[test]
-fn frozen_and_phase_evidence_obey_the_independent_hard_limit() {
+fn frozen_dimension_and_complete_phase_evidence_obey_the_independent_hard_limit() {
     assert!(matches!(
         LedgerLimits::with_evidence_byte_limit(
             20,
@@ -2199,29 +2165,26 @@ fn frozen_and_phase_evidence_obey_the_independent_hard_limit() {
         })
     ));
 
-    let frozen = limits(20);
-    let frozen_bytes = frozen.frozen_evidence_bytes();
-    let tight = frozen
+    let probe = coordinator(20);
+    let frozen_bytes = probe.ledger_snapshot().current_evidence_bytes();
+    probe
+        .finish()
+        .expect("the complete phase evidence probe finalizes cleanly");
+    let tight = limits(20)
         .try_with_evidence_byte_limit(frozen_bytes)
-        .expect("the frozen allocation exactly fits its own bound");
-    let mut coordinator = Coordinator::new(OperationControl::default(), tight);
-    assert!(matches!(
-        coordinator
-            .checkpoint()
-            .reserve(Phase::Snapshot, Dimension::AssetBytes, 1),
-        Err(LedgerCause::Evidence {
-            cause: LedgerEvidenceError::LimitExceeded {
-                purpose: LedgerEvidencePurpose::Phases,
-                ..
-            },
-        })
-    ));
+        .expect("the complete frozen allocation exactly fits its own bound");
+    let mut coordinator = coordinator_with(OperationControl::default(), tight);
+    let reservation = coordinator
+        .checkpoint()
+        .reserve(Phase::Snapshot, Dimension::AssetBytes, 1)
+        .expect("runtime reservation reuses the predeclared phase evidence");
+    drop(reservation);
     let snapshot = coordinator
         .finish()
-        .expect("failed metadata admission leaves no live reservation");
+        .expect("predeclared metadata leaves no live reservation");
     assert_eq!(snapshot.current_live_bytes(), 0);
     assert_eq!(snapshot.current_evidence_bytes(), 0);
-    assert_eq!(snapshot.peak_evidence_bytes(), frozen_bytes);
+    assert!(snapshot.peak_evidence_bytes() >= frozen_bytes);
 }
 
 #[test]
@@ -2285,7 +2248,7 @@ fn evidence_peak_covers_snapshot_and_publication_storage_then_finishes_at_zero()
 }
 
 #[test]
-fn snapshot_iteration_is_stably_sorted_after_out_of_order_policy_and_phase_use() {
+fn snapshot_iteration_preserves_sorted_dimensions_and_declared_phase_lifecycle() {
     let limits = LedgerLimits::new(
         20,
         [
@@ -2301,7 +2264,7 @@ fn snapshot_iteration_is_stably_sorted_after_out_of_order_policy_and_phase_use()
         ],
     )
     .expect("out-of-order policy is valid");
-    let mut coordinator = Coordinator::new(OperationControl::default(), limits);
+    let mut coordinator = coordinator_with(OperationControl::default(), limits);
     let output = coordinator
         .checkpoint()
         .reserve(Phase::Output, Dimension::OutputBytes, 1)
@@ -2329,7 +2292,7 @@ fn snapshot_iteration_is_stably_sorted_after_out_of_order_policy_and_phase_use()
             .phases()
             .map(|(phase, _)| phase)
             .collect::<Vec<_>>(),
-        vec![Phase::Snapshot, Phase::Output]
+        vec![Phase::Snapshot, Phase::Decode, Phase::Output]
     );
 }
 

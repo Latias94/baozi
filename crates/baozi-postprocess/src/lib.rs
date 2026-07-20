@@ -8,8 +8,9 @@ pub mod pipeline;
 pub mod preset;
 
 pub use error::{
-    PostProcessError, PostProcessFailure, PostProcessFinalizationError, PostProcessPlanError,
-    PostProcessRunError, PostProcessStepIssue, PostProcessSuccess, Result,
+    PostProcessError, PostProcessFailure, PostProcessFinalizationError,
+    PostProcessInitializationError, PostProcessPlanError, PostProcessRunError,
+    PostProcessStepIssue, PostProcessSuccess, Result,
 };
 pub use operation::{
     PostProcessControl, PostProcessDimension, PostProcessLedgerPhase, PostProcessLedgerSnapshot,

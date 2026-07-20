@@ -127,13 +127,14 @@ enum ProgressDelivery {
 ///
 /// let mut coordinator = OperationCoordinator::<
 ///     Owner, LedgerPhase, ObserverPhase, Unit, Dimension,
-/// >::new(
+/// >::try_new(
 ///     OperationControl::default(),
 ///     LedgerLimits::new(
 ///         8,
 ///         [(Dimension::Bytes, DimensionPolicy::reservable_bytes(8, 8, 8, 8))],
 ///     ).unwrap(),
-/// );
+///     &[LedgerPhase::Build],
+/// ).unwrap();
 /// coordinator.report_progress(LedgerPhase::Build, Unit::Work, 1, None).unwrap();
 /// ```
 pub struct OperationCoordinator<O, LP, PP, U, D>
@@ -163,29 +164,15 @@ where
     U: ProgressUnit,
     D: Copy + Ord + fmt::Debug,
 {
-    /// Creates one coordinator with frozen initial central ledger policy.
-    pub fn new(control: OperationControl<PP, U>, ledger_limits: LedgerLimits<D>) -> Self {
-        Self {
-            control,
-            ledger: Ledger::new(ledger_limits),
-            terminal: None,
-            progress: Vec::new(),
-            progress_evidence_bytes: 0,
-            last_phase_order: None,
-            delivered_events: 0,
-            delivered_bytes: 0,
-            next_sequence: 0,
-        }
-    }
-
-    pub(crate) fn try_new_with_phase_catalog(
+    /// Creates one coordinator with frozen initial policy and a complete phase vocabulary.
+    pub fn try_new(
         control: OperationControl<PP, U>,
         ledger_limits: LedgerLimits<D>,
         phases: &[LP],
     ) -> Result<Self, LedgerCause<D>> {
         Ok(Self {
             control,
-            ledger: Ledger::try_new_with_phase_catalog(ledger_limits, phases)?,
+            ledger: Ledger::try_new(ledger_limits, phases)?,
             terminal: None,
             progress: Vec::new(),
             progress_evidence_bytes: 0,
@@ -669,7 +656,10 @@ where
     }
 
     /// Atomically charges completed work across multiple dimensions.
-    pub fn charge_consumed_batch(&mut self, charges: &[(D, u64)]) -> Result<(), LedgerCause<D>> {
+    pub fn charge_consumed_batch<const N: usize>(
+        &mut self,
+        charges: &[(D, u64); N],
+    ) -> Result<(), LedgerCause<D>> {
         self.coordinator.ledger.charge_consumed_batch(charges)
     }
 

@@ -763,13 +763,16 @@ mod tests {
     use crate::descriptor::{CapabilityStatus, FormatCapability, FormatEncoding};
     use crate::error::ScopeAbortCause;
     use crate::format::{DetectionFaultCode, ReadConfidence};
-    use crate::ledger::{ImportCoordinator, ImportOperationControl, import_ledger_limits};
+    use crate::ledger::{
+        ImportDimension, ImportOperationControl, import_ledger_limits, try_import_coordinator,
+    };
     use crate::limits::ResourceLimits;
     use crate::options::{
         FormatOptionEnvelope, FormatOptionKey, FormatOptionSchemaId, FormatOptionSchemaKey,
         OptionCompileLimits,
     };
     use baozi_io::AssetPath;
+    use baozi_operation::LedgerCause;
     use std::cell::RefCell;
     use std::num::NonZeroU32;
     use std::sync::Barrier;
@@ -1054,43 +1057,49 @@ mod tests {
         }
     }
 
-    fn detect_entry(entry: &RegistryEntry, probe: &Probe<'_>, hint: &ReadHint) -> DetectionOutcome {
-        let coordinator = RefCell::new(ImportCoordinator::new(
+    fn detect_entry(
+        entry: &RegistryEntry,
+        probe: &Probe<'_>,
+        hint: &ReadHint,
+    ) -> Result<DetectionOutcome, LedgerCause<ImportDimension>> {
+        let coordinator = RefCell::new(try_import_coordinator(
             ImportOperationControl::default(),
             import_ledger_limits(&ResourceLimits::default()).unwrap(),
-        ));
+        )?);
         let terminal = RefCell::new(None);
         let scope = DetectionScope::new(&coordinator, &terminal);
         let outcome = entry
             .detect(probe, hint, &scope)
             .expect("uncontrolled registry detector must not abort");
         assert!(scope.into_terminal_abort().is_none());
-        outcome
+        Ok(outcome)
     }
 
     fn detect_entry_abort_code(
         entry: &RegistryEntry,
         probe: &Probe<'_>,
         hint: &ReadHint,
-    ) -> &'static str {
-        let coordinator = RefCell::new(ImportCoordinator::new(
+    ) -> Result<&'static str, LedgerCause<ImportDimension>> {
+        let coordinator = RefCell::new(try_import_coordinator(
             ImportOperationControl::default(),
             import_ledger_limits(&ResourceLimits::default()).unwrap(),
-        ));
+        )?);
         let terminal = RefCell::new(None);
         let scope = DetectionScope::new(&coordinator, &terminal);
         assert!(entry.detect(probe, hint, &scope).is_err());
         let abort = scope
             .into_terminal_abort()
             .expect("detector abort must latch a terminal cause");
-        match abort.cause() {
+        let code = match abort.cause() {
             ScopeAbortCause::DescriptorContract { code } => code,
             cause => panic!("expected descriptor contract abort, got {cause:?}"),
-        }
+        };
+        Ok(code)
     }
 
     #[test]
-    fn detector_panic_poison_is_shared_by_all_snapshots_of_one_registration() {
+    fn detector_panic_poison_is_shared_by_all_snapshots_of_one_registration()
+    -> Result<(), LedgerCause<ImportDimension>> {
         let calls = Arc::new(AtomicUsize::new(0));
         let mut builder = RegistryBuilder::new();
         builder
@@ -1105,14 +1114,14 @@ mod tests {
         let hint = ReadHint::from_source(AssetPath::new("model.panic").unwrap());
 
         let DetectionOutcome::Fault(first_fault) =
-            detect_entry(&first.entry(&id).unwrap(), &probe, &hint)
+            detect_entry(&first.entry(&id).unwrap(), &probe, &hint)?
         else {
             panic!("panicking detector must produce fault evidence");
         };
         assert_eq!(first_fault.code(), DetectionFaultCode::ExtensionPanicked);
         assert_eq!(first_fault.detail(), "detector panic");
         let DetectionOutcome::Fault(second_fault) =
-            detect_entry(&second.entry(&id).unwrap(), &probe, &hint)
+            detect_entry(&second.entry(&id).unwrap(), &probe, &hint)?
         else {
             panic!("poisoned detector must produce fault evidence");
         };
@@ -1122,10 +1131,12 @@ mod tests {
             builder.freeze(RegistryBuildLimits::default()),
             Err(RegistryBuildError::ExtensionPoisoned { format }) if format == id
         ));
+        Ok(())
     }
 
     #[test]
-    fn one_snapshot_is_semantically_reentrant_for_detection_and_option_compilation() {
+    fn one_snapshot_is_semantically_reentrant_for_detection_and_option_compilation()
+    -> Result<(), LedgerCause<ImportDimension>> {
         let format = FormatId::new("org.example.reentrant").unwrap();
         let schema = reentrant_schema(&format);
         let codec: Arc<dyn FormatOptionCodec> = Arc::new(ReentrantCodec {
@@ -1176,25 +1187,27 @@ mod tests {
             let hint = ReadHint::from_source(AssetPath::new("model.right").unwrap());
             detect_entry(&right_snapshot.entry(&right_format).unwrap(), &probe, &hint)
         });
-        let concurrent_detection = (left.join().unwrap(), right.join().unwrap());
+        let concurrent_detection = (left.join().unwrap()?, right.join().unwrap()?);
         let probe = Probe::new(&[], 0);
         let serial_detection = (
             detect_entry(
                 &snapshot.entry(&format).unwrap(),
                 &probe,
                 &ReadHint::from_source(AssetPath::new("model.left").unwrap()),
-            ),
+            )?,
             detect_entry(
                 &snapshot.entry(&format).unwrap(),
                 &probe,
                 &ReadHint::from_source(AssetPath::new("model.right").unwrap()),
-            ),
+            )?,
         );
         assert_eq!(concurrent_detection, serial_detection);
+        Ok(())
     }
 
     #[test]
-    fn poison_linearization_rejects_in_flight_success_and_later_reinvocation() {
+    fn poison_linearization_rejects_in_flight_success_and_later_reinvocation()
+    -> Result<(), LedgerCause<ImportDimension>> {
         let entered = Arc::new(Barrier::new(3));
         let release_success = Arc::new(Barrier::new(2));
         let calls = Arc::new(AtomicUsize::new(0));
@@ -1238,11 +1251,11 @@ mod tests {
         release_success.wait();
         assert!(poisoned, "panicking invocation did not poison registration");
 
-        let DetectionOutcome::Fault(panic_fault) = panicking.join().unwrap() else {
+        let DetectionOutcome::Fault(panic_fault) = panicking.join().unwrap()? else {
             panic!("panicking invocation must return fault evidence");
         };
         assert_eq!(panic_fault.code(), DetectionFaultCode::ExtensionPanicked);
-        let DetectionOutcome::Fault(success_fault) = succeeding.join().unwrap() else {
+        let DetectionOutcome::Fault(success_fault) = succeeding.join().unwrap()? else {
             panic!("in-flight success must be discarded after poison");
         };
         assert_eq!(success_fault.code(), DetectionFaultCode::ExtensionPoisoned);
@@ -1251,15 +1264,18 @@ mod tests {
             &snapshot.entry(&format).unwrap(),
             &Probe::new(&[], 0),
             &ReadHint::from_source(AssetPath::new("model.ok").unwrap()),
-        ) else {
+        )?
+        else {
             panic!("later invocation must be rejected before extension entry");
         };
         assert_eq!(later_fault.code(), DetectionFaultCode::ExtensionPoisoned);
         assert_eq!(calls.load(Ordering::Acquire), 2);
+        Ok(())
     }
 
     #[test]
-    fn poison_linearization_preserves_in_flight_scope_abort() {
+    fn poison_linearization_preserves_in_flight_scope_abort()
+    -> Result<(), LedgerCause<ImportDimension>> {
         let entered = Arc::new(Barrier::new(3));
         let release_abort = Arc::new(Barrier::new(2));
         let calls = Arc::new(AtomicUsize::new(0));
@@ -1303,16 +1319,18 @@ mod tests {
         release_abort.wait();
         assert!(poisoned, "panicking invocation did not poison registration");
 
-        let DetectionOutcome::Fault(panic_fault) = panicking.join().unwrap() else {
+        let DetectionOutcome::Fault(panic_fault) = panicking.join().unwrap()? else {
             panic!("panicking invocation must return fault evidence");
         };
         assert_eq!(panic_fault.code(), DetectionFaultCode::ExtensionPanicked);
-        assert_eq!(aborting.join().unwrap(), "detector-work-quantum-exceeded");
+        assert_eq!(aborting.join().unwrap()?, "detector-work-quantum-exceeded");
         assert_eq!(calls.load(Ordering::Acquire), 2);
+        Ok(())
     }
 
     #[test]
-    fn default_codec_panic_poisons_existing_and_future_snapshots() {
+    fn default_codec_panic_poisons_existing_and_future_snapshots()
+    -> Result<(), LedgerCause<ImportDimension>> {
         let format = FormatId::new("org.example.late-default-panic").unwrap();
         let default_calls = Arc::new(AtomicUsize::new(0));
         let detector_calls = Arc::new(AtomicUsize::new(0));
@@ -1342,7 +1360,8 @@ mod tests {
                 &snapshot.entry(&format).unwrap(),
                 &Probe::new(&[], 0),
                 &ReadHint::from_source(AssetPath::new("model.late").unwrap()),
-            ) else {
+            )?
+            else {
                 panic!("existing snapshot must observe permanent poison");
             };
             assert_eq!(fault.code(), DetectionFaultCode::ExtensionPoisoned);
@@ -1353,6 +1372,7 @@ mod tests {
         ));
         assert_eq!(default_calls.load(Ordering::Acquire), 3);
         assert_eq!(detector_calls.load(Ordering::Acquire), 0);
+        Ok(())
     }
 
     #[test]

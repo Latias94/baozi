@@ -76,8 +76,8 @@ pub use options::{
     RegistryBuildLimits, RegistryBuildScope,
 };
 pub use outcome::{
-    DetectionEvidence, ImportFailure, ImportPhase, ImportPhaseEvidence, ImportReport, ImportResult,
-    ImportRunError,
+    DetectionEvidence, ImportFailure, ImportInitializationError, ImportPhase, ImportPhaseEvidence,
+    ImportReport, ImportResult, ImportRunError,
 };
 pub use registry::{
     FormatUnavailability, RegistryBuildError, RegistryBuilder, RegistryRegistrationError,
