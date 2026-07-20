@@ -212,8 +212,25 @@ destination preflight. A private two-phase guard then executes this fixed order:
    every table root and actual `New` block covered by the plan;
 2. release the ledger lock, then under the physical account's one lock atomically admit the complete
    physical aggregate and prehold its required account/charge anchors; and
-3. promote both owners into one private ready pair before any retained allocator, builder, set ID,
-   reference-count change, or externally accepted operation can be reached.
+3. promote both owners into one private ready pair before any retained payload/evidence allocator
+   entry, builder, set ID, retained-payload reference-count change, or externally accepted operation
+   can be reached.
+
+A **ledger control/bookkeeping allocation** is operation-temporary backing used only to materialize
+the provisional ledger graph, including its attribution and commitment containers. It is admitted
+under the complete ledger-side capacity aggregate before growth, remains structurally owned by that
+graph, and cannot contain, become, or be reclassified as retained canonical/output-evidence payload.
+A **retained payload/evidence allocator entry** is an allocation request whose backing may enter a
+canonical, fallback, terminal-evidence, or other retained aggregate and therefore requires both
+accounting planes. Only the latter is prohibited before readiness. Ledger control/bookkeeping
+allocation may occur after complete ledger-side capacity admission and before the physical
+transition. The physical manifest and physical aggregate contain no ledger bookkeeping capacity or
+backing and confer no physical owner on it. If any bookkeeping backing allocation fails, the
+provisional graph destroys every successfully allocated partial backing first, releases the complete
+ledger aggregate under one ledger lock, and returns the fixed start error without entering the
+physical transition; physical entry/charge, retained payload/evidence allocator entries, and accepted
+operations all remain zero. On typed physical rejection that proves no mutation, the complete
+provisional graph follows the same storage-first, one-lock ledger rollback contract.
 
 The locks are never nested. The ledger snapshot and physical-account snapshot remain independently
 linearized and there is no cross-plane snapshot or common internal linearization point. If the second
@@ -222,7 +239,7 @@ poison-first or capacity rejection, the guard structurally rolls back the first 
 before returning. A panic, poison observed after physical mutation, or unverified charge/owner
 disposition is not a rejection eligible for rollback: `CrossPlaneAdmissionContainment` retains the
 provisional attribution coupled with every possible physical owner/anchor, latches poison, and fails
-closed without refund, allocator entry, or an accepted operation. The provisional graph is never
+closed without refund, retained payload/evidence allocator entry, or an accepted operation. The provisional graph is never
 queryable as an accepted operation and advances no public `Attempted` or `Consumed` fact. Thus
 operation/session acceptance is atomic to callers without conflating the two planes. A failure of the
 first transition never touches the physical account.
@@ -232,20 +249,32 @@ sequenceDiagram
     participant Owner as Operation owner
     participant Ledger as Attribution ledger
     participant Account as Physical account
-    participant Allocator as Retained allocator
+    participant Bookkeeping as Ledger bookkeeping allocator
+    participant Retained as Retained payload/evidence allocator
     Owner->>Ledger: Admit complete attribution aggregate (one lock)
-    Ledger-->>Owner: Provisional ledger guard
-    Owner->>Account: Admit complete physical aggregate (one lock)
-    alt Typed rejection proves no physical mutation
-        Account-->>Owner: Rejection, no physical owner
-        Owner->>Ledger: Structurally roll back provisional graph
-    else Physical transition completion is uncertain
-        Account-->>Owner: Possible physical owner or anchor
-        Owner->>Owner: Preserve coupled owners and poison; fail closed
-    else Both planes admitted
-        Account-->>Owner: Physical aggregate owner
-        Owner->>Owner: Promote private ready pair
-        Owner->>Allocator: First retained allocation
+    Ledger-->>Owner: Provisional graph capacity authority
+    Owner->>Bookkeeping: Materialize covered graph backings
+    alt Any bookkeeping backing allocation fails
+        Bookkeeping-->>Owner: Partial graph-owned backing set
+        Owner->>Bookkeeping: Destroy every partial backing
+        Owner->>Ledger: Roll back complete aggregate (one lock)
+        Note over Owner,Account: Fixed start error; physical entry/charge = 0;<br/>retained payload/evidence allocator entries = 0; accepted operation = 0
+    else Complete bookkeeping graph exists
+        Bookkeeping-->>Owner: Complete graph-owned bookkeeping storage
+        Owner->>Account: Admit complete physical aggregate (one lock)
+        alt Typed rejection proves no physical mutation
+            Account-->>Owner: Rejection, no physical owner
+            Owner->>Bookkeeping: Destroy every graph backing
+            Owner->>Ledger: Roll back complete graph (one lock)
+        else Physical transition completion is uncertain
+            Account-->>Owner: Possible physical owner or anchor
+            Owner->>Owner: Preserve graph and possible physical owners; poison
+        else Both planes admitted
+            Account-->>Owner: Physical aggregate owner
+            Owner->>Owner: Promote private ready pair
+            Owner->>Owner: Pure consuming split
+            Owner->>Retained: First retained allocation
+        end
     end
 ```
 
@@ -280,7 +309,11 @@ Starting a failure-capable operation preflights the assembly-independent fallbac
 evidence side as one exact pair before either retained builder is called. The private guard first
 admits their complete ledger aggregate and then their complete physical aggregate as specified above.
 Only the resulting ready pair creates the paired side-attribution owners and independent assembly
-containers and may enter a builder. An earlier typed no-mutation rejection deterministically rolls
+containers and may enter a builder. Its single consuming split only reclassifies the already owned
+ledger backings, reservation cores, and physical owners; it performs no allocation, lock acquisition,
+counter mutation, refcount operation, callback, or other fallible work. Provisional bookkeeping
+backings are not an `AssemblyBatch` or `SideAttributionOwner` and cannot be extracted or used before
+this split. An earlier typed no-mutation rejection deterministically rolls
 back the provisional ledger graph, accepts no operation, and enters neither physical containment nor
 retained allocation cleanup. An uncertain second-plane transition instead enters
 `CrossPlaneAdmissionContainment` with the provisional attribution and every possible physical owner;
@@ -301,7 +334,7 @@ side's `Released` disposition and remains coupled only with the same side's
 it retains a `SideAttributionOwner`.
 
 There is no physical-first `PreAttributionPairContainment` state with zero attribution coverage.
-Before the ready pair exists, no allocator entry may exist. A typed no-mutation second-plane
+Before the ready pair exists, no retained payload/evidence allocator entry may exist. A typed no-mutation second-plane
 rejection rolls back the provisional ledger graph and leaves no physical owner. An uncertain second-
 plane transition retains that graph in `CrossPlaneAdmissionContainment` with every possible physical
 owner/anchor rather than refunding it. After readiness, every possible retained allocation outcome
@@ -1004,7 +1037,7 @@ Negative:
 | Risk | Severity | Mitigation |
 | --- | --- | --- |
 | Concurrent admission oversubscribes the account | Critical | one checked linearizable account transition, contention tests at exact/excess limits, and no split check-then-charge API |
-| The two accounting planes are mistaken for one nested-lock transaction | Critical | ledger-first and physical-second each admit a complete aggregate under one non-nested lock; a private guard rolls back the ledger graph only for typed no-mutation rejection, contains coupled owners for uncertain completion, and makes only external operation/session acceptance atomic |
+| The two accounting planes are mistaken for one nested-lock transaction | Critical | ledger-first and physical-second each admit a complete aggregate under one non-nested lock; before physical entry, each typed bookkeeping allocation failure destroys partial backings and rolls back the complete ledger aggregate; after physical transition entry, only typed no-mutation second-plane rejection is rollback-eligible while uncertain completion contains coupled owners; only external operation/session acceptance is atomic |
 | One account clone misses or clears containment poison | Critical | one monotonic latch in shared account state, fixed first evidence plus event count in snapshots, and no reset/unpoison/reuse/ignore API |
 | Retain/share or operation start races an unverified release | Critical | poison and admissions use the same account-state lock; poison-first rejects before work/counter/refcount/allocator effects, while retain/share/start-admission-first retains its charge and final preparation must observe poison and return fatal containment before any prepared handoff exists |
 | Physical charge releases before a payload or control block is deallocated | Critical | the private operation-owned final-owner foundation consumes every clone through the qualified exactly-one-winner extraction path; allocator barriers gate exact-limit admission until every charged block is gone |
@@ -1020,7 +1053,7 @@ Negative:
 | Operation attribution becomes a second physical owner | Critical | publication commits only attribution evidence; no conversion or lease-release path exists |
 | Failure outcome has no legal retained terminal state | Critical | private prepared outcome attribution, a pre-admitted terminal envelope, and exact rich-failure/minimal-fallback handoffs that alone produce `PublishedOutcomeEvidence` |
 | A retained-builder panic is downgraded to clean fallback | Critical | startup panic returns a start error with `Contained`/`BuiltContained`; later candidate/report builder panic returns fatal containment; only verified candidate cleanup with an intact `StartupBaselineOwner` may reach fallback |
-| Startup cleanup loses or invents ownership | Critical | pure preflight precedes a complete ledger aggregate and then a complete physical aggregate; typed no-mutation rejection rolls back the first before any allocator, uncertain second-plane completion preserves coupled attribution/physical owners, and the ready pair structurally couples every later allocation with matching owners, classifies `Released`/`Contained`/`BuiltContained`, and forbids rollback-time account cloning |
+| Startup cleanup loses or invents ownership | Critical | pure preflight precedes a complete ledger aggregate and then a complete physical aggregate; graph-owned ledger control/bookkeeping allocation may follow only the complete first-plane capacity admission; failure at every bookkeeping backing allocation destroys every partial backing before one-lock full-ledger rollback and returns the fixed start error with zero physical entry/charge, retained payload/evidence allocator entry, or accepted operation; typed no-mutation physical rejection applies the same storage-first rollback to the complete graph, uncertain second-plane completion preserves the graph coupled with every possible physical owner, and the ready pair structurally couples every later retained allocation with matching owners, classifies `Released`/`Contained`/`BuiltContained`, and forbids rollback-time account cloning |
 | Storage, ownership, and charge failures collapse into one result | Critical | preserve local `F`/`R` events, counter-fault precedence, order-independent storage-over-ownership-over-charge severity, and side-local containment |
 | Prepared handoff can still fail or panic | Critical | preparation completes terminal classification, performs every fallible action, freezes private attribution, and proves live attribution is zero; exact handoff performs only a consuming reclassification |
 | Prepared drop claims publication or rolls back frozen attribution | Critical | exact prepared types contain no pending/live token; drop destroys unpublished aggregates and discards private attribution without naming it committed/published |
@@ -1043,7 +1076,8 @@ Negative:
 | --- | --- | --- |
 | Physical uniqueness | each retained payload's Baozi-requested qualified capacity envelope, fixed shared control block, and account-control allocation is charged exactly once to its respective account or factory without claiming exact RSS | desired/actual/envelope, shared-versus-copied, factory/account-control, and parent/sibling probes |
 | Failure atomicity | verified-cleanup failures leave no allocation uncovered and publish at most exact outcome evidence; retained-builder panic or uncertain release yields exact side-local `Contained`/`BuiltContained` ownership and typed fatal containment without fallback or refund | reserve/allocation/bind/validation/preparation/startup-side/unwind fault injection |
-| Startup disposition | typed pre-ready no-mutation rejection rolls back provisional ledger state and reaches no physical owner or allocator; uncertain second-plane completion enters coupled containment with no allocator; every post-ready failed startup resolves each side exactly once as `Released`, `Contained`, or `BuiltContained` and returns no terminal; successful startup instead owns one exact `StartupBaselineOwner`; startup assembly batches always drop normally | aggregate-order/rollback/uncertain-containment, exact-pair/mismatch, pre-ready zero-entry, missing-anchor, builder panic, sibling cleanup, success-baseline, and owner-count probes |
+| Startup disposition | each bookkeeping backing-allocation fault destroys every partial backing before one-lock full-ledger rollback and returns the fixed start error with zero physical entry/charge, retained payload/evidence allocator entry, or accepted operation; typed pre-ready no-mutation rejection applies the same cleanup to the complete graph and reaches no physical owner or charge; uncertain second-plane completion enters coupled containment with no retained payload/evidence allocator entry; every post-ready failed startup resolves each side exactly once as `Released`, `Contained`, or `BuiltContained` and returns no terminal; successful startup instead owns one exact `StartupBaselineOwner`; startup assembly batches always drop normally | per-backing allocation-fault matrix, aggregate-order/rollback/uncertain-containment, exact-pair/mismatch, separated bookkeeping/retained allocator and physical-charge probes, missing-anchor, builder panic, sibling cleanup, success-baseline, and owner-count probes |
+| Startup allocator taxonomy | pre-ready ledger control/bookkeeping allocations are capacity-covered, graph-owned, excluded from the physical manifest, and deterministically released storage-first on every partial allocation failure and typed no-mutation physical rejection; retained payload/evidence allocator entries remain zero through readiness, and the consuming split is allocation-, lock-, refcount-, and counter-free | fault injection at every backing allocation, independent allocation-class counters, storage-release-at-ledger-lock ordering, physical-entry/manifest/charge and accepted-operation assertions, and consuming-split transition probes |
 | Cleanup evidence | Builder/Ownership first nominate without recording; after every counter-producing cleanup observation, exactly counter `F` or the candidate is recorded once; independent `R` events remain; public severity is order-independent | selection-order permutations and injected counter/extraction/destructor/release tests |
 | Poison fail-closed | all account clones expose one monotonic poison state/count/evidence; poison-first retain/share/start has zero side effects, and retain/share/start-admission-first storage stays charged but cannot pass later preparation/publication eligibility | deterministic two-order barrier tests, allocator/refcount/counter probes, clone snapshots, explicit-account reuse rejection, and no-bypass API scans |
 | Final-owner safety | concurrent clone/drop releases the lease once and only after every accounted payload/control block is deallocated | allocator-level barrier, exact-limit contention, and destructor-order tests |
@@ -1061,7 +1095,7 @@ Negative:
 | Shareable-kind closure | only sealed scalar-sequence, bytes, and UTF-8 leaves, including geometry index scalar payload, inherit physical backing; every record/directory/reference/header/generation-local lookup-index structure is rebuilt | positive leaf inheritance plus negative `RecordBlock`/structural-kind compile-fail and runtime probes |
 | Capacity threat boundary | strict conformance names exact managed allocator/toolchain/target identity; over-envelope postcheck prevents publication but makes no transient-RSS claim | qualification drift, custom allocator rejection, overgrant drop, and subprocess-limit fixtures |
 | U4c falsification | the frozen spec proves `0/0` hot-leaf copy/allocation, `0/0` hot-view allocation/decode, fixed `<= 8` lookup events at `N/2N/4N`, zero tracer-proven schema-only allocations, producer-event bounds, and `2 * concrete <= 3 * candidate` for both normalized LOC and tokens | pinned xtask, allocator/account tracer, exact event taxonomy, independently frozen fixtures/digests, pinned rustfmt and `rustc_lexer` |
-| Fallback representation | sealed key-bearing dimension/phase cells plus a complete global-evidence header; checked semantic aggregate layout, independent actual-allocation `CapacityPlan`s, and ledger-first/physical-second complete aggregate admission before allocator entry | key normalization/catalog lifetime/post-plugin-unload query, brand-exclusion vectors, full-cell/header layout and global-field tests, actual-backing plan plus aggregate-envelope/block overflow probes, no nested locks, no shared linearization point, no hardcoded ABI, and no single-backing assumption; small account-bound owner after bootstrap and by-value `SessionStartError` before it |
+| Fallback representation | sealed key-bearing dimension/phase cells plus a complete global-evidence header; checked semantic aggregate layout, independent actual-allocation `CapacityPlan`s, and ledger-first/physical-second complete aggregate admission before retained payload/evidence allocator entry | key normalization/catalog lifetime/post-plugin-unload query, brand-exclusion vectors, full-cell/header layout and global-field tests, actual-backing plan plus aggregate-envelope/block overflow probes, no nested locks, no shared linearization point, no hardcoded ABI, and no single-backing assumption; small account-bound owner after bootstrap and by-value `SessionStartError` before it |
 
 ## Acceptance Criteria
 
@@ -1114,7 +1148,13 @@ Negative:
   the complete physical aggregate under the account lock. Tests prove the locks are never nested, no
   common internal linearization point is reported, typed no-mutation second-plane rejection restores
   the provisional ledger graph exactly, panic/post-mutation poison/uncertain disposition retains
-  coupled owners without refund, and no allocator entry is reachable until both planes form the ready pair.
+  coupled owners without refund, and no retained payload/evidence allocator entry is reachable until
+  both planes form the ready pair. Ledger control/bookkeeping allocation is separately probed and may
+  occur only after its complete first-plane capacity admission; it remains graph-owned, appears in no
+  physical manifest or charge, and fault injection at every backing allocation proves that every
+  partial backing is destroyed before one-lock full-ledger rollback and a fixed start error returns
+  with zero physical entry/charge, retained payload/evidence allocator entry, or accepted operation.
+  Typed no-mutation physical rejection applies the same cleanup ordering to the complete graph.
 - Every backing allocation uses a managed-qualified exact revision/allocator/toolchain/target
   `CapacityPlan`; the complete Baozi-requested envelope/layout is charged before allocator entry,
   `finish` accepts any observed capacity in `desired..=envelope`, and the envelope charge remains
@@ -1127,7 +1167,7 @@ Negative:
   OS/subprocess limit.
 - Startup tests prove each plane admits its exact complete pair aggregate, external startup acceptance
   is atomic, every account/charge anchor is preheld after readiness, and rollback performs no account
-  clone. Before readiness both sides have zero retained allocator entries. Typed no-mutation rejection
+  clone. Before readiness both sides have zero retained payload/evidence allocator entries. Typed no-mutation rejection
   leaves no physical owner and rolls back the provisional ledger graph; uncertain second-plane
   completion retains the graph with every possible physical owner in cross-plane containment. After readiness,
   each side has matching attribution and physical owners and resolves exactly once to `Released`, `Contained`, or
@@ -1273,11 +1313,14 @@ Negative:
   nested locks or one cross-plane snapshot. The process-local fallback key mapping also had no
   structural lifetime owner.
 - New rule: complete pure preflight is followed by one complete ledger aggregate admission under the
-  ledger lock and then one complete physical aggregate admission under the account lock. The locks
-  are never nested and have no common internal linearization point. A private two-phase guard rolls
-  back the provisional ledger graph only for typed no-mutation rejection, preserves coupled owners on
-  panic/post-mutation poison/uncertain completion, exposes no accepted operation before both succeed,
-  and makes the first retained allocator reachable only from the ready pair.
+  ledger lock. Before physical entry, each typed bookkeeping backing-allocation failure destroys all
+  partial backings and rolls back the complete ledger aggregate under one lock. After complete
+  bookkeeping materialization, the physical aggregate is admitted under the account lock. From
+  physical transition entry onward, only typed no-mutation second-plane rejection is rollback-
+  eligible; panic/post-mutation poison/uncertain completion preserves coupled owners. The locks are
+  never nested and have no common internal linearization point. The private guard exposes no accepted
+  operation before both planes succeed and makes the first retained payload/evidence allocator entry
+  reachable only from the ready pair.
   Consequently physical-first pre-attribution containment is forbidden; every post-ready allocation
   outcome already has matching attribution and physical owners. `StoreKeyDomain` remains a public
   process-local authority type, so a plugin may create a foreign domain, but it cannot copy/access the
@@ -1287,9 +1330,11 @@ Negative:
 - Compatibility impact: pre-release admission order, startup/containment typestates, result owner,
   key-query internals, and fault instrumentation change; no compatibility adapter or stable in-memory
   wire is retained.
-- Required review: complete per-plane aggregate admission, lock-order/non-nesting probes, typed no-
-  mutation rejection rollback, post-mutation/panic/uncertain coupled containment, zero pre-ready
-  allocator entry, post-ready owner
+- Required review: complete per-plane aggregate admission, lock-order/non-nesting probes, pre-
+  physical per-backing typed allocation-failure rollback, post-entry typed no-mutation rejection
+  rollback, post-mutation/panic/uncertain coupled containment, zero pre-ready
+  retained payload/evidence allocator entry, separately probed graph-owned ledger control/bookkeeping
+  allocation and storage-before-single-lock rollback, post-ready owner
   coupling and cleanup, foreign-domain rejection, mapping-owner drop order, post-plugin-unload query,
   and brand-exclusion vectors.
 - Rationale: operation attribution and unique physical lifetime cannot share an honest snapshot.
@@ -1307,7 +1352,7 @@ Negative:
   assembly-batch lifetime, strict `New` uniqueness, or no-retry lease containment.
 - New rule: startup atomically admits the fallback/evidence pair and preholds every account/charge
   anchor. Side attribution and assembly containers are created later and may be absent on early
-  containment; that path requires zero retained allocator entries and never fabricates an owner.
+  containment; that path requires zero retained payload/evidence allocator entries and never fabricates an owner.
   Failed startup resolves each side structurally as `Released`, `Contained`, or `BuiltContained` and
   returns no terminal; successful startup instead creates exact `StartupBaselineOwner`. Retained-
   builder panic always contains its affected construction side and never prepares fallback. Exact-pair mismatch and
@@ -1350,7 +1395,8 @@ Negative:
   storage facts that cells cannot derive. Keys are inert Baozi-owned copies normalized before ledger
   entry, preserving query after plugin unload. Every actual header/evidence backing has an independent
   managed-qualified `CapacityPlan`, while aggregate envelopes/blocks are checked-summed and atomically
-  admitted before allocator entry; the semantic aggregate layout is not a single-backing promise. Any
+  admitted before retained payload/evidence allocator entry; the semantic aggregate layout is not a
+  single-backing promise. Any
   conversion/arithmetic/layout/plan/aggregate-admission overflow rejects bootstrap. A caught single unwind
   reaches fallback only after verified cleanup and zero live attribution; uncertain in-process release
   conservatively keeps payload/lease/attribution coupled, atomically latches fixed evidence/count in
