@@ -535,7 +535,6 @@ where
     pub(super) fn try_freeze_from(
         &self,
         terminal_cause: TerminalEvidenceCause,
-        last_completed_phase: Option<P>,
         snapshot: &LedgerSnapshot<P, D>,
     ) -> Result<(), TerminalEvidenceFreezeError> {
         if self.freeze_started.load(Ordering::Acquire) || self.final_frozen.load(Ordering::Acquire)
@@ -569,7 +568,7 @@ where
                 return Err(TerminalEvidenceFreezeError::PhaseKeyMismatch { index });
             }
         }
-        let last_completed_phase_ordinal_plus_one = match last_completed_phase {
+        let last_completed_phase_ordinal_plus_one = match snapshot.last_completed_phase() {
             Some(phase) => self
                 .phases
                 .binary_search_by_key(&phase, FallbackPhaseCell::key)

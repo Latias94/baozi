@@ -48,7 +48,11 @@ impl TerminalEvidenceKeySeal for ShapeKey {}
 impl TerminalEvidenceKey for ShapeKey {}
 
 fn terminal_snapshot() -> LedgerSnapshot<TestPhase, TestDimension> {
-    let ledger = test_ledger();
+    let ledger = Ledger::<EvidenceOwner, TestPhase, TestDimension>::try_new_with_phase_catalog(
+        test_limits(),
+        &[TestPhase::Read, TestPhase::Decode],
+    )
+    .expect("terminal phase catalog is frozen");
     ledger
         .charge_attempted(TestDimension::Bytes, 17)
         .expect("attempted evidence fits");
@@ -63,20 +67,26 @@ fn terminal_snapshot() -> LedgerSnapshot<TestPhase, TestDimension> {
         .expect("decode reservation fits");
     drop(decode);
     drop(read);
+    ledger
+        .try_complete_phase(TestPhase::Decode)
+        .expect("decode phase completes explicitly");
     ledger.finish().expect("released reservations finalize")
 }
 
 fn test_ledger() -> Ledger<EvidenceOwner, TestPhase, TestDimension> {
+    Ledger::new(test_limits())
+}
+
+fn test_limits() -> LedgerLimits<TestDimension> {
     let policy = DimensionPolicy::reservable_bytes(u64::MAX, u64::MAX, u64::MAX, u64::MAX);
-    let limits = LedgerLimits::new(
+    LedgerLimits::new(
         u64::MAX,
         [
             (TestDimension::Bytes, policy),
             (TestDimension::Items, policy),
         ],
     )
-    .expect("test policies are ordered and bounded");
-    Ledger::new(limits)
+    .expect("test policies are ordered and bounded")
 }
 
 fn build_evidence(
@@ -110,11 +120,7 @@ fn terminal_evidence_freezes_exact_header_cells_and_queries() {
 
     let cause = PreparationFailureCode::domain(47);
     evidence
-        .try_freeze_from(
-            TerminalEvidenceCause::Failure(cause),
-            Some(TestPhase::Decode),
-            &snapshot,
-        )
+        .try_freeze_from(TerminalEvidenceCause::Failure(cause), &snapshot)
         .expect("exact terminal evidence freezes");
 
     let header = evidence.header().expect("frozen header is published");
@@ -155,8 +161,89 @@ fn terminal_evidence_freezes_exact_header_cells_and_queries() {
     assert!(evidence.dimension(TestDimension::Work).is_none());
     assert!(evidence.phase(TestPhase::Validate).is_none());
     assert_eq!(
-        evidence.try_freeze_from(TerminalEvidenceCause::Success, None, &snapshot),
+        evidence.try_freeze_from(TerminalEvidenceCause::Success, &snapshot),
         Err(TerminalEvidenceFreezeError::AlreadyFrozen)
+    );
+}
+
+#[test]
+fn terminal_evidence_does_not_infer_completion_from_the_last_accounting_phase() {
+    let ledger = Ledger::<EvidenceOwner, TestPhase, TestDimension>::try_new_with_phase_catalog(
+        test_limits(),
+        &[TestPhase::Read, TestPhase::Decode],
+    )
+    .expect("terminal phase catalog is frozen");
+    let decode_writer = ledger
+        .reserve(TestPhase::Decode, TestDimension::Bytes, 5)
+        .expect("decode writer reservation fits");
+    drop(decode_writer);
+    ledger
+        .try_complete_phase(TestPhase::Read)
+        .expect("read completes explicitly");
+    let snapshot = ledger.finish().expect("writer reservation is released");
+    assert_eq!(
+        snapshot
+            .phase(TestPhase::Decode)
+            .expect("decode accounting evidence")
+            .peak_live_bytes(),
+        5
+    );
+
+    let evidence = terminal_evidence();
+    evidence
+        .try_freeze_from(TerminalEvidenceCause::Success, &snapshot)
+        .expect("terminal evidence freezes");
+
+    assert_eq!(
+        evidence
+            .header()
+            .expect("frozen header")
+            .last_completed_phase(),
+        Some(TestPhase::Read)
+    );
+}
+
+#[test]
+fn terminal_evidence_preserves_completion_when_catalog_position_opposes_key_order() {
+    let ledger = Ledger::<EvidenceOwner, TestPhase, TestDimension>::try_new_with_phase_catalog(
+        test_limits(),
+        &[TestPhase::Decode, TestPhase::Read],
+    )
+    .expect("reverse-order terminal phase catalog is frozen");
+    ledger
+        .try_complete_phase(TestPhase::Decode)
+        .expect("first catalog position completes");
+    ledger
+        .try_complete_phase(TestPhase::Read)
+        .expect("second catalog position completes despite its earlier key order");
+    let snapshot = ledger.finish().expect("terminal ledger finishes");
+    assert_eq!(
+        snapshot
+            .phases()
+            .map(|(phase, _)| phase)
+            .collect::<Vec<_>>(),
+        vec![TestPhase::Read, TestPhase::Decode]
+    );
+
+    let evidence = terminal_evidence();
+    evidence
+        .try_freeze_from(TerminalEvidenceCause::Success, &snapshot)
+        .expect("terminal evidence freezes");
+
+    assert_eq!(
+        evidence
+            .header()
+            .expect("frozen header")
+            .last_completed_phase(),
+        Some(TestPhase::Read)
+    );
+    assert_eq!(
+        evidence
+            .header
+            .last_completed_phase_ordinal_plus_one
+            .load(Ordering::Relaxed),
+        1,
+        "the stored header ordinal follows the validated key catalog, not state_position"
     );
 }
 
@@ -187,7 +274,7 @@ fn terminal_evidence_rejects_shape_and_keys_before_any_cell_write() {
     let snapshot = terminal_snapshot();
     let shape = build_evidence(&[TestDimension::Bytes], &[]);
     assert_eq!(
-        shape.try_freeze_from(TerminalEvidenceCause::Success, None, &snapshot),
+        shape.try_freeze_from(TerminalEvidenceCause::Success, &snapshot),
         Err(TerminalEvidenceFreezeError::ShapeMismatch {
             expected_dimensions: 1,
             actual_dimensions: 2,
@@ -203,7 +290,7 @@ fn terminal_evidence_rejects_shape_and_keys_before_any_cell_write() {
         &[TestPhase::Read, TestPhase::Decode],
     );
     assert_eq!(
-        wrong_dimension.try_freeze_from(TerminalEvidenceCause::Success, None, &snapshot),
+        wrong_dimension.try_freeze_from(TerminalEvidenceCause::Success, &snapshot),
         Err(TerminalEvidenceFreezeError::DimensionKeyMismatch { index: 1 })
     );
     assert_evidence_cells_pristine(&wrong_dimension);
@@ -213,21 +300,10 @@ fn terminal_evidence_rejects_shape_and_keys_before_any_cell_write() {
         &[TestPhase::Read, TestPhase::Validate],
     );
     assert_eq!(
-        wrong_phase.try_freeze_from(TerminalEvidenceCause::Success, None, &snapshot),
+        wrong_phase.try_freeze_from(TerminalEvidenceCause::Success, &snapshot),
         Err(TerminalEvidenceFreezeError::PhaseKeyMismatch { index: 1 })
     );
     assert_evidence_cells_pristine(&wrong_phase);
-
-    let unknown_last_phase = terminal_evidence();
-    assert_eq!(
-        unknown_last_phase.try_freeze_from(
-            TerminalEvidenceCause::Success,
-            Some(TestPhase::Validate),
-            &snapshot,
-        ),
-        Err(TerminalEvidenceFreezeError::LastCompletedPhaseUnknown)
-    );
-    assert_evidence_cells_pristine(&unknown_last_phase);
 }
 
 #[test]
@@ -342,7 +418,7 @@ fn nonterminal_phase_dimension_and_global_states_reject_before_any_cell_write() 
         &[TestPhase::Read],
     );
     assert_eq!(
-        phase_evidence.try_freeze_from(TerminalEvidenceCause::Success, None, &phase_snapshot),
+        phase_evidence.try_freeze_from(TerminalEvidenceCause::Success, &phase_snapshot),
         Err(TerminalEvidenceFreezeError::NonTerminalPhaseState {
             index: 0,
             current_live_bytes: 9,
@@ -366,7 +442,7 @@ fn nonterminal_phase_dimension_and_global_states_reject_before_any_cell_write() 
         .expect("interim pending snapshot fits");
     let pending_evidence = build_evidence(&[TestDimension::Bytes, TestDimension::Items], &[]);
     assert_eq!(
-        pending_evidence.try_freeze_from(TerminalEvidenceCause::Success, None, &pending_snapshot),
+        pending_evidence.try_freeze_from(TerminalEvidenceCause::Success, &pending_snapshot),
         Err(TerminalEvidenceFreezeError::NonTerminalDimensionState {
             index: 0,
             current_live_bytes: 0,
@@ -389,7 +465,7 @@ fn nonterminal_phase_dimension_and_global_states_reject_before_any_cell_write() 
         &[TestPhase::Read],
     );
     assert_eq!(
-        global_evidence.try_freeze_from(TerminalEvidenceCause::Success, None, &global_snapshot),
+        global_evidence.try_freeze_from(TerminalEvidenceCause::Success, &global_snapshot),
         Err(TerminalEvidenceFreezeError::NonTerminalGlobalState {
             current_live_bytes: global_snapshot.current_live_bytes(),
             active_reservations: global_snapshot.active_reservations(),
@@ -437,17 +513,12 @@ fn shared_freeze_reference_linearizes_one_complete_snapshot() {
     let (first, second) = thread::scope(|scope| {
         let first = scope.spawn(|| {
             barrier.wait();
-            evidence.try_freeze_from(
-                TerminalEvidenceCause::Success,
-                Some(TestPhase::Decode),
-                &snapshot,
-            )
+            evidence.try_freeze_from(TerminalEvidenceCause::Success, &snapshot)
         });
         let second = scope.spawn(|| {
             barrier.wait();
             evidence.try_freeze_from(
                 TerminalEvidenceCause::Failure(PreparationFailureCode::domain(99)),
-                Some(TestPhase::Decode),
                 &snapshot,
             )
         });

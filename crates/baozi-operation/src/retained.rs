@@ -19,8 +19,8 @@ use crate::ledger::{
     AttributionBatchCreateError, AttributionBatchPlan, AttributionReservationBatch,
     CanonicalOutput, FallbackBatchBaseline, Ledger, LedgerCause, LedgerLimits,
     OperationAttributionReservation, OutcomeEvidenceDestination, OutputCommitment,
-    PublicationDestination, StartupAccountShareEnvelope, StartupAccountShareStep,
-    StartupAttributionBatchPlans, StartupRetainedAttribution,
+    PhaseCompletionError, PublicationDestination, StartupAccountShareEnvelope,
+    StartupAccountShareStep, StartupAttributionBatchPlans, StartupRetainedAttribution,
 };
 use crate::{
     CapacityPlan, ControlCause, OperationControl, OperationOwner, ProgressPhase, ProgressUnit,
@@ -4818,6 +4818,11 @@ where
 
     pub fn contains_phase(&self, phase: P) -> bool {
         self.coordinator.retained_ledger().contains_phase(phase)
+    }
+
+    /// Records semantic completion against the operation's frozen phase catalog.
+    pub(crate) fn try_complete_phase(&self, phase: P) -> Result<(), PhaseCompletionError<P>> {
+        self.coordinator.retained_ledger().try_complete_phase(phase)
     }
 
     pub fn try_start(

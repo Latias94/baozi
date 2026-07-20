@@ -87,7 +87,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use crate::capacity::{CapacityPlan, CapacityPlanError};
 use crate::control::{OperationControl, ProgressPhase, ProgressUnit};
 use crate::coordinator::FinalProgress;
-use crate::ledger::{LedgerCause, LedgerLimits};
+use crate::ledger::{LedgerCause, LedgerLimits, PhaseCompletionError};
 use crate::owner::OperationOwner;
 use crate::retained::{
     AccountPoisoned, CanonicalRetainedSlot, FinalizationContainmentError,
@@ -2203,6 +2203,19 @@ pub enum StoreRuntimeError {
     ForeignDimensionDomain {
         dimension: StoreDimensionKey,
     },
+    /// Semantic phase completion attempted to move backward in the frozen catalog.
+    PhaseCompletionRegression {
+        last_completed_phase: StorePhaseKey,
+        phase: StorePhaseKey,
+    },
+    /// A reversible publication transaction currently seals semantic phase completion.
+    PhaseCompletionPublicationPending,
+    /// Durable publication permanently sealed semantic phase completion.
+    PhaseCompletionPublicationCompleted,
+    /// The operation was not started with a frozen semantic phase catalog.
+    PhaseCompletionCatalogNotFrozen,
+    /// The frozen semantic phase catalog violated its internal position invariant.
+    PhaseCompletionCatalogShapeMismatch,
     /// The physical account is permanently quarantined; the snapshot retains its first evidence.
     AccountPoisoned(AccountPoisoned),
     /// The account was quarantined after this action's physical admission. The retained charge
@@ -2265,6 +2278,23 @@ impl fmt::Display for StoreRuntimeError {
                 formatter,
                 "retained store dimension {dimension:?} belongs to another key domain"
             ),
+            Self::PhaseCompletionRegression {
+                last_completed_phase,
+                phase,
+            } => write!(
+                formatter,
+                "retained store phase {phase:?} precedes completed phase {last_completed_phase:?}"
+            ),
+            Self::PhaseCompletionPublicationPending => formatter
+                .write_str("retained store phase completion is sealed by pending publication"),
+            Self::PhaseCompletionPublicationCompleted => formatter
+                .write_str("retained store phase completion is sealed by durable publication"),
+            Self::PhaseCompletionCatalogNotFrozen => {
+                formatter.write_str("retained store phase completion requires a frozen catalog")
+            }
+            Self::PhaseCompletionCatalogShapeMismatch => {
+                formatter.write_str("retained store phase completion catalog shape is inconsistent")
+            }
             Self::AccountPoisoned(cause) => cause.fmt(formatter),
             Self::AccountPoisonedWithRetainedCharge(cause) => write!(
                 formatter,
@@ -2381,6 +2411,33 @@ fn map_writer_error(error: &RetainedWriterError<StoreDimensionKey>) -> StoreRunt
         RetainedWriterError::StorageDropUnverified => StoreRuntimeError::StorageDropUnverified,
         RetainedWriterError::OwnershipUnverified => StoreRuntimeError::OwnershipUnverified,
         RetainedWriterError::ChargeReleaseUnverified => StoreRuntimeError::ChargeReleaseUnverified,
+    }
+}
+
+fn map_phase_completion_error(error: PhaseCompletionError<StorePhaseKey>) -> StoreRuntimeError {
+    match error {
+        PhaseCompletionError::PublicationPending => {
+            StoreRuntimeError::PhaseCompletionPublicationPending
+        }
+        PhaseCompletionError::PublicationCompleted => {
+            StoreRuntimeError::PhaseCompletionPublicationCompleted
+        }
+        PhaseCompletionError::UnknownPhase { .. } => {
+            StoreRuntimeError::Ledger(LedgerCause::UnknownPhase)
+        }
+        PhaseCompletionError::Regression {
+            last_completed_phase,
+            phase,
+        } => StoreRuntimeError::PhaseCompletionRegression {
+            last_completed_phase,
+            phase,
+        },
+        PhaseCompletionError::CatalogNotFrozen => {
+            StoreRuntimeError::PhaseCompletionCatalogNotFrozen
+        }
+        PhaseCompletionError::CatalogShapeMismatch => {
+            StoreRuntimeError::PhaseCompletionCatalogShapeMismatch
+        }
     }
 }
 
@@ -2570,6 +2627,19 @@ where
     PP: ProgressPhase,
     U: ProgressUnit,
 {
+    /// Records one semantically completed phase after concrete domain and catalog validation.
+    pub fn try_complete_phase(&self, phase: StorePhaseKey) -> Result<(), StoreRuntimeError> {
+        if store_key_domain_id(phase.0) != self.domain_id.get() {
+            return Err(StoreRuntimeError::ForeignPhaseDomain { phase });
+        }
+        if !self.raw.contains_phase(phase) {
+            return Err(StoreRuntimeError::Ledger(LedgerCause::UnknownPhase));
+        }
+        self.raw
+            .try_complete_phase(phase)
+            .map_err(map_phase_completion_error)
+    }
+
     fn validate_publication_plan_keys(
         &self,
         plan: &RetainedStorePublicationPlan,
@@ -4471,6 +4541,88 @@ mod tests {
             before_catalog_entries
         );
         assert_eq!(account.snapshot(), before_account);
+    }
+
+    #[test]
+    fn phase_completion_validates_domain_and_catalog_before_monotonic_progress() {
+        let factory = test_factory();
+        let account = test_account(&factory);
+        let finalize_phase =
+            test_domain().phase_key(NonZeroU32::new(2).expect("finalize phase local id"));
+        let unknown_phase =
+            test_domain().phase_key(NonZeroU32::new(3).expect("unknown phase local id"));
+        let foreign_domain = StoreKeyDomain::try_new().expect("foreign key domain");
+        let foreign_phase =
+            foreign_domain.phase_key(NonZeroU32::new(1).expect("foreign phase local id"));
+        let policy = DimensionPolicy::reservable_bytes(u64::MAX, u64::MAX, u64::MAX, u64::MAX)
+            .with_published_outcome_evidence_limit(u64::MAX);
+        let limits =
+            LedgerLimits::new(u64::MAX, [(test_dimension(), policy)]).expect("test ledger limits");
+        let ledger_plan =
+            StoreLedgerPlan::try_new(test_domain(), limits, &[test_phase(), finalize_phase])
+                .expect("two-phase store ledger plan");
+        let start = RetainedStoreStartPlan::new(
+            test_writer_plan(32, 8),
+            RetainedStoreSharePlan::new(test_dimension(), test_dimension()),
+            StoreFallbackEnvelope::new(91),
+            test_dimension(),
+            1,
+            test_dimension(),
+            1,
+        );
+        let operation =
+            TestOperation::try_start(OperationControl::default(), ledger_plan, &account, start)
+                .expect("test operation");
+
+        assert_eq!(
+            operation.try_complete_phase(foreign_phase),
+            Err(StoreRuntimeError::ForeignPhaseDomain {
+                phase: foreign_phase,
+            })
+        );
+        assert_eq!(
+            operation.try_complete_phase(unknown_phase),
+            Err(StoreRuntimeError::Ledger(LedgerCause::UnknownPhase))
+        );
+        operation
+            .try_complete_phase(test_phase())
+            .expect("build completes");
+        operation
+            .try_complete_phase(finalize_phase)
+            .expect("finalize completes");
+        operation
+            .try_complete_phase(finalize_phase)
+            .expect("repeating finalize is idempotent");
+        assert_eq!(
+            operation.try_complete_phase(test_phase()),
+            Err(StoreRuntimeError::PhaseCompletionRegression {
+                last_completed_phase: finalize_phase,
+                phase: test_phase(),
+            })
+        );
+        operation
+            .try_complete_phase(finalize_phase)
+            .expect("regression rejection preserves the completed phase");
+    }
+
+    #[test]
+    fn phase_completion_mapping_preserves_lifecycle_and_catalog_failures() {
+        assert_eq!(
+            map_phase_completion_error(PhaseCompletionError::<StorePhaseKey>::PublicationPending),
+            StoreRuntimeError::PhaseCompletionPublicationPending
+        );
+        assert_eq!(
+            map_phase_completion_error(PhaseCompletionError::<StorePhaseKey>::PublicationCompleted),
+            StoreRuntimeError::PhaseCompletionPublicationCompleted
+        );
+        assert_eq!(
+            map_phase_completion_error(PhaseCompletionError::<StorePhaseKey>::CatalogNotFrozen),
+            StoreRuntimeError::PhaseCompletionCatalogNotFrozen
+        );
+        assert_eq!(
+            map_phase_completion_error(PhaseCompletionError::<StorePhaseKey>::CatalogShapeMismatch),
+            StoreRuntimeError::PhaseCompletionCatalogShapeMismatch
+        );
     }
 
     #[test]

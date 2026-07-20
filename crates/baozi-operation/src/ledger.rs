@@ -100,6 +100,8 @@ pub enum LedgerEvidencePurpose {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum LedgerEvidenceError {
+    /// The phase catalog no longer maps its append-only state positions exactly once.
+    PhaseCatalogShapeMismatch,
     /// Checked capacity planning rejected the requested storage.
     Capacity {
         purpose: LedgerEvidencePurpose,
@@ -121,6 +123,9 @@ pub enum LedgerEvidenceError {
 impl fmt::Display for LedgerEvidenceError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::PhaseCatalogShapeMismatch => {
+                formatter.write_str("ledger phase catalog shape is inconsistent")
+            }
             Self::Capacity { purpose, cause } => {
                 write!(
                     formatter,
@@ -150,7 +155,9 @@ impl std::error::Error for LedgerEvidenceError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Capacity { cause, .. } => Some(cause),
-            Self::LimitExceeded { .. } | Self::AllocationFailed { .. } => None,
+            Self::PhaseCatalogShapeMismatch
+            | Self::LimitExceeded { .. }
+            | Self::AllocationFailed { .. } => None,
         }
     }
 }
@@ -513,6 +520,23 @@ pub enum LedgerCause<D> {
     FinalSnapshotShapeMismatch,
 }
 
+/// Failure while recording semantic completion against a frozen phase catalog.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PhaseCompletionError<P> {
+    /// A reversible publication transaction currently seals semantic completion.
+    PublicationPending,
+    /// The ledger already published its durable output and is permanently sealed.
+    PublicationCompleted,
+    /// Dynamic accounting phases cannot establish a stable semantic completion order.
+    CatalogNotFrozen,
+    /// The requested phase is absent from the frozen catalog.
+    UnknownPhase { phase: P },
+    /// The requested phase precedes the last completed catalog position.
+    Regression { last_completed_phase: P, phase: P },
+    /// The frozen lookup catalog no longer maps its append-only state positions exactly once.
+    CatalogShapeMismatch,
+}
+
 impl<D: fmt::Debug> fmt::Display for LedgerCause<D> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -807,6 +831,12 @@ struct PhaseEntry<P> {
     state_position: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CompletedPhase<P> {
+    phase: P,
+    state_position: usize,
+}
+
 #[derive(Debug)]
 struct LedgerState<P, D> {
     dimensions: Vec<DimensionEntry<D>>,
@@ -822,6 +852,7 @@ struct LedgerState<P, D> {
     peak_evidence_bytes: u64,
     publication: PublicationState,
     phase_catalog: PhaseCatalogState,
+    last_completed_phase: Option<CompletedPhase<P>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -898,6 +929,7 @@ where
                 peak_evidence_bytes,
                 publication: PublicationState::Open,
                 phase_catalog: PhaseCatalogState::Dynamic,
+                last_completed_phase: None,
             })),
             operation_live_byte_limit,
             operation_owner: PhantomData,
@@ -1792,6 +1824,51 @@ where
         phase_entry(&lock(&self.state).phases, phase).is_some()
     }
 
+    /// Records one semantically completed phase in frozen catalog insertion order.
+    ///
+    /// Repeating the current phase is idempotent. Every rejection occurs before the stored
+    /// completion position changes.
+    pub(crate) fn try_complete_phase(&self, phase: P) -> Result<(), PhaseCompletionError<P>> {
+        let mut state = lock(&self.state);
+        match state.publication {
+            PublicationState::Open => {}
+            PublicationState::Pending => return Err(PhaseCompletionError::PublicationPending),
+            PublicationState::Published => {
+                return Err(PhaseCompletionError::PublicationCompleted);
+            }
+        }
+        if state.phase_catalog != PhaseCatalogState::Frozen {
+            return Err(PhaseCompletionError::CatalogNotFrozen);
+        }
+        if !phase_catalog_shape_is_valid(&state) {
+            return Err(PhaseCompletionError::CatalogShapeMismatch);
+        }
+        let phase_position = phase_entry(&state.phases, phase)
+            .map(|entry| entry.state_position)
+            .ok_or(PhaseCompletionError::UnknownPhase { phase })?;
+        let Some(last_completed) = state.last_completed_phase else {
+            state.last_completed_phase = Some(CompletedPhase {
+                phase,
+                state_position: phase_position,
+            });
+            return Ok(());
+        };
+        if phase_position == last_completed.state_position {
+            return Ok(());
+        }
+        if phase_position < last_completed.state_position {
+            return Err(PhaseCompletionError::Regression {
+                last_completed_phase: last_completed.phase,
+                phase,
+            });
+        }
+        state.last_completed_phase = Some(CompletedPhase {
+            phase,
+            state_position: phase_position,
+        });
+        Ok(())
+    }
+
     #[allow(
         dead_code,
         reason = "crate-private until the U4 canonical consumers switch atomically"
@@ -2153,6 +2230,7 @@ where
     )]
     pub fn finish(self) -> Result<LedgerSnapshot<P, D>, LedgerFinishError<P, D>> {
         let mut state = lock(&self.state);
+        let shape_cause = validate_final_snapshot_shape(&state).err();
         let live_cause =
             (state.current_live_bytes != 0).then_some(LedgerCause::LiveReservationsRemain {
                 bytes: state.current_live_bytes,
@@ -2163,8 +2241,17 @@ where
             .then_some(LedgerCause::ActiveReservationsRemain {
                 count: state.active_reservations,
             });
-        let clean = live_cause.is_none() && pending_cause.is_none() && reservation_cause.is_none();
+        let clean = shape_cause.is_none()
+            && live_cause.is_none()
+            && pending_cause.is_none()
+            && reservation_cause.is_none();
         let evidence = take_final_snapshot(&mut state, clean);
+        if let Some(cause) = shape_cause {
+            return Err(LedgerFinishError {
+                cause,
+                snapshot: evidence,
+            });
+        }
         if let Some(cause) = live_cause {
             return Err(LedgerFinishError {
                 cause,
@@ -3470,6 +3557,7 @@ impl PhaseSnapshot {
 pub struct LedgerSnapshot<P, D> {
     dimensions: Vec<(D, DimensionSnapshot)>,
     phases: Vec<(P, PhaseSnapshot)>,
+    last_completed_phase: Option<P>,
     current_live_bytes: u64,
     peak_live_bytes: u64,
     active_reservations: u64,
@@ -3478,6 +3566,11 @@ pub struct LedgerSnapshot<P, D> {
 }
 
 impl<P: Copy + Ord, D: Copy + Ord> LedgerSnapshot<P, D> {
+    /// Returns the latest phase explicitly completed by the operation owner.
+    pub const fn last_completed_phase(&self) -> Option<P> {
+        self.last_completed_phase
+    }
+
     /// Returns evidence for one owner-defined dimension.
     pub fn dimension(&self, dimension: D) -> Option<&DimensionSnapshot> {
         self.dimensions
@@ -4185,6 +4278,9 @@ where
     P: Copy + Ord,
     D: Copy + Ord,
 {
+    if !phase_catalog_shape_is_valid(state) {
+        return Err(LedgerEvidenceError::PhaseCatalogShapeMismatch);
+    }
     let mut dimensions = Vec::new();
     if let Err(cause) = try_grow_evidence_vec(
         &mut dimensions,
@@ -4232,9 +4328,11 @@ where
     })?;
     let outgoing_bytes = dimension_bytes.saturating_add(phase_bytes);
     let current_evidence_bytes = state.current_evidence_bytes.saturating_sub(outgoing_bytes);
+    let last_completed_phase = state.last_completed_phase.map(|completed| completed.phase);
     let snapshot = LedgerSnapshot {
         dimensions,
         phases,
+        last_completed_phase,
         current_live_bytes: state.current_live_bytes,
         peak_live_bytes: state.peak_live_bytes,
         active_reservations: state.active_reservations,
@@ -4249,20 +4347,42 @@ where
     dead_code,
     reason = "crate-private until the U4 canonical consumers switch atomically"
 )]
-fn validate_final_snapshot_shape<P, D>(state: &LedgerState<P, D>) -> Result<(), LedgerCause<D>> {
+fn validate_final_snapshot_shape<P: Copy + PartialEq, D>(
+    state: &LedgerState<P, D>,
+) -> Result<(), LedgerCause<D>> {
     if state.dimensions.len() != state.dimension_snapshot_staging.len()
-        || state.phases.len() != state.phase_snapshot_staging.len()
-        || state.phases.len() != state.phase_states.len()
-        || state.phases.iter().enumerate().any(|(index, entry)| {
-            entry.state_position >= state.phase_states.len()
-                || state.phases[..index]
-                    .iter()
-                    .any(|prior| prior.state_position == entry.state_position)
-        })
+        || !phase_catalog_shape_is_valid(state)
     {
         return Err(LedgerCause::FinalSnapshotShapeMismatch);
     }
     Ok(())
+}
+
+fn phase_catalog_shape_is_valid<P: Copy + PartialEq, D>(state: &LedgerState<P, D>) -> bool {
+    let phase_count = state.phases.len();
+    if phase_count != state.phase_states.len()
+        || phase_count != state.phase_snapshot_staging.len()
+        || state
+            .phases
+            .iter()
+            .zip(&state.phase_snapshot_staging)
+            .any(|(entry, staging)| entry.phase != staging.0)
+        || (0..phase_count).any(|state_position| {
+            state
+                .phases
+                .iter()
+                .filter(|entry| entry.state_position == state_position)
+                .count()
+                != 1
+        })
+    {
+        return false;
+    }
+    state.last_completed_phase.is_none_or(|completed| {
+        state.phases.iter().any(|entry| {
+            entry.state_position == completed.state_position && entry.phase == completed.phase
+        })
+    })
 }
 
 fn take_final_snapshot<P, D>(state: &mut LedgerState<P, D>, clean: bool) -> LedgerSnapshot<P, D>
@@ -4284,7 +4404,12 @@ where
         .zip(state.phase_snapshot_staging.iter_mut())
     {
         staging.0 = entry.phase;
-        staging.1 = phase_snapshot(state.phase_states[entry.state_position]);
+        staging.1 = state
+            .phase_states
+            .get(entry.state_position)
+            .copied()
+            .map(phase_snapshot)
+            .unwrap_or_default();
     }
     let outgoing_bytes = capacity_bytes(&state.dimension_snapshot_staging)
         .unwrap_or(0)
@@ -4295,9 +4420,11 @@ where
     } else {
         state.current_evidence_bytes
     };
+    let last_completed_phase = state.last_completed_phase.map(|completed| completed.phase);
     LedgerSnapshot {
         dimensions: std::mem::take(&mut state.dimension_snapshot_staging),
         phases: std::mem::take(&mut state.phase_snapshot_staging),
+        last_completed_phase,
         current_live_bytes: state.current_live_bytes,
         peak_live_bytes: state.peak_live_bytes,
         active_reservations: state.active_reservations,
@@ -4329,9 +4456,11 @@ fn take_typed_final_snapshot<P: Copy, D: Copy>(
         staging.0 = entry.phase;
         staging.1 = phase_snapshot(state.phase_states[entry.state_position]);
     }
+    let last_completed_phase = state.last_completed_phase.map(|completed| completed.phase);
     LedgerSnapshot {
         dimensions: std::mem::take(&mut state.dimension_snapshot_staging),
         phases: std::mem::take(&mut state.phase_snapshot_staging),
+        last_completed_phase,
         current_live_bytes: state.current_live_bytes,
         peak_live_bytes: state.peak_live_bytes,
         active_reservations: state.active_reservations,
@@ -4513,6 +4642,259 @@ mod tests {
             )
         };
         assert_eq!(after, before);
+    }
+
+    #[test]
+    fn frozen_phase_completion_is_monotonic_by_catalog_position_and_preserves_rejections() {
+        let ledger = Ledger::<Owner, Phase, Dimension>::try_new_with_phase_catalog(
+            limits(),
+            &[Phase::Finalize, Phase::Build],
+        )
+        .expect("frozen phase catalog");
+
+        assert_eq!(
+            ledger
+                .try_snapshot()
+                .expect("initial snapshot fits")
+                .last_completed_phase(),
+            None
+        );
+
+        ledger
+            .try_complete_phase(Phase::Finalize)
+            .expect("first catalog phase completes");
+        ledger
+            .try_complete_phase(Phase::Finalize)
+            .expect("repeating the completed phase is idempotent");
+        assert_eq!(
+            ledger
+                .try_snapshot()
+                .expect("idempotent snapshot fits")
+                .last_completed_phase(),
+            Some(Phase::Finalize)
+        );
+
+        ledger
+            .try_complete_phase(Phase::Build)
+            .expect("later catalog position completes even when its key sorts earlier");
+        assert_eq!(
+            ledger.try_complete_phase(Phase::Finalize),
+            Err(PhaseCompletionError::Regression {
+                last_completed_phase: Phase::Build,
+                phase: Phase::Finalize,
+            })
+        );
+        assert_eq!(
+            ledger.try_complete_phase(Phase::Unknown),
+            Err(PhaseCompletionError::UnknownPhase {
+                phase: Phase::Unknown,
+            })
+        );
+        assert_eq!(
+            ledger
+                .try_snapshot()
+                .expect("rejection-preserving snapshot fits")
+                .last_completed_phase(),
+            Some(Phase::Build)
+        );
+    }
+
+    #[test]
+    fn dynamic_phase_catalog_rejects_completion_without_recording_it() {
+        let ledger = Ledger::<Owner, Phase, Dimension>::new(limits());
+        let reservation = ledger
+            .reserve(Phase::Build, Dimension::Bytes, 1)
+            .expect("dynamic phase is admitted for accounting");
+
+        assert_eq!(
+            ledger.try_complete_phase(Phase::Build),
+            Err(PhaseCompletionError::CatalogNotFrozen)
+        );
+        assert_eq!(
+            ledger
+                .try_snapshot()
+                .expect("dynamic snapshot fits")
+                .last_completed_phase(),
+            None
+        );
+
+        drop(reservation);
+    }
+
+    #[test]
+    fn phase_completion_obeys_pending_rollback_and_published_boundaries() {
+        let ledger = Ledger::<Owner, Phase, Dimension>::try_new_with_phase_catalog(
+            limits(),
+            &[Phase::Build, Phase::Finalize],
+        )
+        .expect("frozen phase catalog");
+        let mut first_batch = PublicationReservationBatch::default();
+        let pending = ledger
+            .prepare_publication(&mut first_batch, &[])
+            .expect("empty publication covers zero live bytes");
+
+        assert_eq!(
+            ledger.try_complete_phase(Phase::Build),
+            Err(PhaseCompletionError::PublicationPending)
+        );
+        assert_eq!(
+            ledger
+                .try_snapshot()
+                .expect("pending snapshot fits")
+                .last_completed_phase(),
+            None
+        );
+
+        pending.rollback();
+        ledger
+            .try_complete_phase(Phase::Build)
+            .expect("rollback reopens semantic completion");
+
+        let mut replacement_batch = PublicationReservationBatch::default();
+        let mut published = ledger
+            .prepare_publication(&mut replacement_batch, &[])
+            .expect("replacement publication");
+        ledger
+            .publish(&mut published)
+            .expect("publication becomes durable");
+        assert_eq!(
+            ledger.try_complete_phase(Phase::Finalize),
+            Err(PhaseCompletionError::PublicationCompleted)
+        );
+        assert_eq!(
+            ledger
+                .try_snapshot()
+                .expect("published snapshot fits")
+                .last_completed_phase(),
+            Some(Phase::Build)
+        );
+    }
+
+    fn phase_shape_probe(
+        ledger: &Ledger<Owner, Phase, Dimension>,
+    ) -> (Vec<usize>, Option<(Phase, usize)>, u64, u64) {
+        let state = lock(&ledger.state);
+        (
+            state
+                .phases
+                .iter()
+                .map(|entry| entry.state_position)
+                .collect(),
+            state
+                .last_completed_phase
+                .map(|completed| (completed.phase, completed.state_position)),
+            state.current_evidence_bytes,
+            state.peak_evidence_bytes,
+        )
+    }
+
+    #[test]
+    fn phase_catalog_shape_faults_reject_completion_and_snapshot_without_mutation() {
+        let duplicate = Ledger::<Owner, Phase, Dimension>::try_new_with_phase_catalog(
+            limits(),
+            &[Phase::Build, Phase::Finalize],
+        )
+        .expect("duplicate fault ledger");
+        {
+            let mut state = lock(&duplicate.state);
+            state.phases[1].state_position = state.phases[0].state_position;
+        }
+        let duplicate_before = phase_shape_probe(&duplicate);
+        assert_eq!(
+            duplicate.try_complete_phase(Phase::Build),
+            Err(PhaseCompletionError::CatalogShapeMismatch)
+        );
+        assert_eq!(
+            duplicate.try_snapshot(),
+            Err(LedgerEvidenceError::PhaseCatalogShapeMismatch)
+        );
+        assert_eq!(phase_shape_probe(&duplicate), duplicate_before);
+
+        let out_of_range = Ledger::<Owner, Phase, Dimension>::try_new_with_phase_catalog(
+            limits(),
+            &[Phase::Build, Phase::Finalize],
+        )
+        .expect("out-of-range fault ledger");
+        out_of_range
+            .try_complete_phase(Phase::Build)
+            .expect("build completes before fault injection");
+        {
+            let mut state = lock(&out_of_range.state);
+            state.phases[1].state_position = state.phase_states.len();
+        }
+        let out_of_range_before = phase_shape_probe(&out_of_range);
+        assert_eq!(
+            out_of_range.try_complete_phase(Phase::Build),
+            Err(PhaseCompletionError::CatalogShapeMismatch),
+            "idempotent completion still validates the whole catalog"
+        );
+        assert_eq!(
+            out_of_range.try_complete_phase(Phase::Finalize),
+            Err(PhaseCompletionError::CatalogShapeMismatch),
+            "forward completion still validates the whole catalog"
+        );
+        assert_eq!(
+            out_of_range.try_snapshot(),
+            Err(LedgerEvidenceError::PhaseCatalogShapeMismatch)
+        );
+        assert_eq!(phase_shape_probe(&out_of_range), out_of_range_before);
+
+        let missing_last = Ledger::<Owner, Phase, Dimension>::try_new_with_phase_catalog(
+            limits(),
+            &[Phase::Build, Phase::Finalize],
+        )
+        .expect("missing-last fault ledger");
+        missing_last
+            .try_complete_phase(Phase::Finalize)
+            .expect("finalize completes before fault injection");
+        {
+            let mut state = lock(&missing_last.state);
+            state
+                .last_completed_phase
+                .as_mut()
+                .expect("completed phase")
+                .state_position = state.phase_states.len();
+        }
+        let missing_last_before = phase_shape_probe(&missing_last);
+        assert_eq!(
+            missing_last.try_complete_phase(Phase::Build),
+            Err(PhaseCompletionError::CatalogShapeMismatch)
+        );
+        assert_eq!(
+            missing_last.try_snapshot(),
+            Err(LedgerEvidenceError::PhaseCatalogShapeMismatch)
+        );
+        assert_eq!(phase_shape_probe(&missing_last), missing_last_before);
+    }
+
+    #[test]
+    fn final_shape_failure_preserves_the_stored_completed_phase_key() {
+        let ledger = Ledger::<Owner, Phase, Dimension>::try_new_with_phase_catalog(
+            limits(),
+            &[Phase::Build, Phase::Finalize],
+        )
+        .expect("frozen phase catalog");
+        ledger
+            .try_complete_phase(Phase::Finalize)
+            .expect("finalize completes before fault injection");
+        {
+            let mut state = lock(&ledger.state);
+            state
+                .last_completed_phase
+                .as_mut()
+                .expect("completed phase")
+                .state_position = state.phase_states.len();
+        }
+
+        let error = ledger
+            .finish()
+            .expect_err("invalid completed pair rejects finalization");
+
+        assert_eq!(error.cause(), &LedgerCause::FinalSnapshotShapeMismatch);
+        assert_eq!(
+            error.snapshot().last_completed_phase(),
+            Some(Phase::Finalize)
+        );
     }
 
     #[test]
@@ -4807,6 +5189,42 @@ mod tests {
         drop(reservation);
     }
 
+    #[test]
+    fn completed_phase_survives_clean_and_non_clean_final_snapshots() {
+        let clean = Ledger::<Owner, Phase, Dimension>::try_new_with_phase_catalog(
+            limits(),
+            &[Phase::Build, Phase::Finalize],
+        )
+        .expect("clean frozen catalog");
+        clean
+            .try_complete_phase(Phase::Build)
+            .expect("build completes");
+        assert_eq!(
+            clean
+                .finish()
+                .expect("clean ledger finishes")
+                .last_completed_phase(),
+            Some(Phase::Build)
+        );
+
+        let non_clean = Ledger::<Owner, Phase, Dimension>::try_new_with_phase_catalog(
+            limits(),
+            &[Phase::Build, Phase::Finalize],
+        )
+        .expect("non-clean frozen catalog");
+        non_clean
+            .try_complete_phase(Phase::Build)
+            .expect("build completes");
+        let reservation = non_clean
+            .reserve(Phase::Finalize, Dimension::Bytes, 1)
+            .expect("live finalize reservation");
+        let error = non_clean
+            .finish()
+            .expect_err("live reservation makes finalization non-clean");
+        assert_eq!(error.snapshot().last_completed_phase(), Some(Phase::Build));
+        drop(reservation);
+    }
+
     fn typed_limits() -> LedgerLimits<Dimension> {
         LedgerLimits::new(
             u64::MAX,
@@ -5074,7 +5492,14 @@ mod tests {
 
     #[test]
     fn included_zero_byte_attribution_freezes_to_zero_active_capabilities() {
-        let ledger = Ledger::<Owner, Phase, Dimension>::new(typed_limits());
+        let ledger = Ledger::<Owner, Phase, Dimension>::try_new_with_phase_catalog(
+            typed_limits(),
+            &[Phase::Build],
+        )
+        .expect("typed frozen catalog");
+        ledger
+            .try_complete_phase(Phase::Build)
+            .expect("build completes before typed freeze");
         let canonical = ledger
             .try_attribution_batch::<CanonicalOutput>(Phase::Build, Dimension::Bytes, 0, 0)
             .expect("empty canonical assembly");
@@ -5118,6 +5543,72 @@ mod tests {
         let snapshot = baseline.into_fallback_proof(ledger, None, None).freeze();
         assert_eq!(snapshot.current_live_bytes(), 0);
         assert_eq!(snapshot.active_reservations(), 0);
+        assert_eq!(snapshot.last_completed_phase(), Some(Phase::Build));
+    }
+
+    #[test]
+    fn typed_final_preflight_rejects_an_invalid_completed_phase_pair_without_mutation() {
+        let ledger = Ledger::<Owner, Phase, Dimension>::try_new_with_phase_catalog(
+            typed_limits(),
+            &[Phase::Build],
+        )
+        .expect("typed frozen catalog");
+        ledger
+            .try_complete_phase(Phase::Build)
+            .expect("build completes before fault injection");
+        let canonical = ledger
+            .try_attribution_batch::<CanonicalOutput>(Phase::Build, Dimension::Bytes, 0, 0)
+            .expect("empty canonical assembly");
+        let evidence_assembly = ledger
+            .try_attribution_batch::<OutcomeEvidenceDestination>(
+                Phase::Build,
+                Dimension::Bytes,
+                1,
+                0,
+            )
+            .expect("evidence assembly");
+        let fallback = ledger
+            .try_attribution_batch::<OutcomeEvidenceDestination>(
+                Phase::Build,
+                Dimension::Bytes,
+                1,
+                0,
+            )
+            .expect("fallback batch");
+        let evidence = ledger
+            .try_attribution_batch::<OutcomeEvidenceDestination>(
+                Phase::Build,
+                Dimension::Bytes,
+                0,
+                0,
+            )
+            .expect("evidence batch");
+        let probe = ledger.test_probe();
+        let before = probe_values(&probe);
+        {
+            let mut state = lock(&ledger.state);
+            state
+                .last_completed_phase
+                .as_mut()
+                .expect("completed phase")
+                .state_position = state.phase_states.len();
+        }
+
+        let rejection =
+            match ledger.try_fallback_baseline(canonical, evidence_assembly, fallback, evidence) {
+                Ok(_) => panic!("invalid completed pair cannot produce a typed freeze proof"),
+                Err(rejection) => rejection,
+            };
+
+        assert_eq!(probe_values(&probe), before);
+        let (baseline, cause) = rejection.into_parts();
+        assert_eq!(cause, LedgerCause::FinalSnapshotShapeMismatch);
+        let (canonical, evidence_assembly, fallback, evidence) = baseline.into_parts();
+        drop(canonical);
+        drop(evidence_assembly);
+        drop(fallback);
+        drop(evidence);
+        assert_eq!(probe_values(&probe), (0, 0));
     }
 
     #[test]
