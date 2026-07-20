@@ -129,8 +129,8 @@ Before any crate publish:
 - `cargo fmt --all -- --check`
 - `cargo check --locked --workspace --all-targets`
 - `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`
-- `cargo nextest run --locked --workspace`
-- `cargo nextest run --locked --workspace --all-features`
+- `cargo nextest run --locked --workspace --exclude baozi-xtask`
+- `cargo nextest run --locked --workspace --all-features --exclude baozi-xtask`
 - `cargo test --locked --doc --workspace --all-features`
 - `cargo doc --locked --workspace --all-features --no-deps` with `RUSTDOCFLAGS=-D warnings`
 - `cargo deny --locked check`

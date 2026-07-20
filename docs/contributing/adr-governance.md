@@ -223,16 +223,18 @@ and may reference the same stable contract IDs.
 Until that inventory exists, plans and progress records may locate incomplete work but cannot claim
 repository-wide conformance, format maturity, or release readiness.
 
-## Automated Enforcement
+## Optional Structural Audit
 
-The canonical local structural command is:
+The repository retains an on-demand structural audit command for ADR-heavy changes:
 
 ```console
 cargo run --locked -p baozi-xtask -- adr-check
 ```
 
-Because ID permanence is historical, this gate fails outside a Git worktree or in a shallow clone.
-Repository CI checks out the complete current-`HEAD` ancestry before running it.
+This command is not part of the default Rust or release gate. It scans repository history and the
+documentation tree, so authors should run it only when ADR index, lifecycle, or dependency metadata
+changes warrant the additional work. It requires a complete Git worktree and fails in a shallow
+clone.
 
 The checker contract requires it to verify:
 
@@ -264,4 +266,5 @@ outside this policy; implementation lag does not weaken this contract.
 - An Accepted amendment has `updated` plus amendment history, or a replacement ADR uses reciprocal
   supersession.
 - Promotion gates and conformance claims have executable evidence rather than file-presence claims.
-- `adr-check` passes in a clean-checkout-equivalent repository state.
+- ADR index, lifecycle, dependency, and link changes receive direct review; run the optional
+  `adr-check` audit when the change is broad enough to benefit from a whole-tree consistency scan.

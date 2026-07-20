@@ -537,8 +537,8 @@ Backend-only glTF safety research may run in parallel, but it is not a U4 depend
 | `cargo fmt --all -- --check` | Every code unit | No formatting drift. |
 | `cargo check --locked --workspace --all-targets` | U1-U9 | Every crate, test, example, and bench compiles without lockfile drift. |
 | `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings` | U1-U9 | No warnings under the complete feature surface. |
-| `cargo nextest run --locked --workspace` | Every behavior unit | Curated default behavior passes. |
-| `cargo nextest run --locked --workspace --all-features` | U3-U9 | Optional facade paths and internal non-admitted format crates execute; glTF facade reachability and facade tests return only after U6 baseline admission. |
+| `cargo nextest run --locked --workspace --exclude baozi-xtask` | Every production behavior unit | Curated default behavior passes without repeating repository-wide xtask scans. |
+| `cargo nextest run --locked --workspace --all-features --exclude baozi-xtask` | U3-U9 | Optional facade paths and internal non-admitted format crates execute without repeating repository-wide xtask scans; glTF facade reachability and facade tests return only after U6 baseline admission. |
 | Focused package and test-target nextest gates derived from each unit's files and scenarios | U1, U3-U8 | Unit scenarios pass before broader workspace gates. |
 | `cargo test --locked --doc --workspace --all-features` | U2-U9 | Public examples and docs compile. |
 | `cargo doc --locked --workspace --all-features --no-deps` with rustdoc warnings denied | U2-U9 | Public API documentation is complete and warning-free. |

@@ -46,8 +46,8 @@ Run the core Rust gates before opening a PR:
 cargo fmt --all -- --check
 cargo check --locked --workspace --all-targets
 cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
-cargo nextest run --locked --workspace
-cargo nextest run --locked --workspace --all-features
+cargo nextest run --locked --workspace --exclude baozi-xtask
+cargo nextest run --locked --workspace --all-features --exclude baozi-xtask
 cargo test --locked --doc --workspace --all-features
 $env:RUSTDOCFLAGS = '-D warnings'
 cargo doc --locked --workspace --all-features --no-deps
@@ -57,7 +57,6 @@ cargo check --locked -p baozi --target x86_64-pc-windows-msvc --no-default-featu
 cargo nextest run --locked --target x86_64-pc-windows-msvc -p baozi-io --features fs-candidate
 cargo check --locked -p baozi --target wasm32-unknown-unknown --no-default-features --features all-formats
 cargo check --locked -p baozi --target wasm32-wasip1 --no-default-features --features all-formats
-cargo run --locked -p baozi-xtask -- adr-check
 cargo run --locked -p baozi-xtask -- crate-graph-check
 cargo run --locked -p baozi-xtask -- native-fs-check
 ```
@@ -95,8 +94,9 @@ features in byte-only WebAssembly graphs. The separate `crate-graph-check` trave
 normal/build dependency edge, including optional, renamed, and target-conditional declarations. It
 enforces the complete ADR 0007 production direction table, rejects unclassified production crates,
 support/tool dependencies, reverse paths, and production cycles, while allowing dev-only test edges.
-The `adr-check` command validates the real ADR index, lifecycle, link, and supersession graph rather
-than relying only on xtask's fixture tests.
+The default nextest runs exclude `baozi-xtask`. Its repository-scanning fixture suites duplicate
+whole-tree work and can dominate otherwise parallel workspace tests. CI invokes the required
+repository checks directly; ADR review remains an authoring concern rather than a default Rust gate.
 
 A green dependency or candidate runner gate is not filesystem-conformance evidence. The three exact
 runtime candidates still require the complete platform-local race, link/reparse,

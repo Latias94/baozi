@@ -4,7 +4,8 @@ This directory is the canonical index for Baozi architecture decisions. Only an 
 normative. `Proposed` ADRs are non-authoritative candidates; `Superseded` and `Rejected` ADRs are
 historical context.
 
-Run the structural governance gate from the repository root:
+For ADR-heavy changes, an optional whole-tree structural audit is available from the repository
+root:
 
 ```console
 cargo run --locked -p baozi-xtask -- adr-check
