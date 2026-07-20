@@ -34,6 +34,7 @@ fn retained_production_source() -> String {
         include_str!("evidence.rs"),
         include_str!("final_owner.rs"),
         include_str!("ownership.rs"),
+        include_str!("physical.rs"),
         include_str!("startup.rs"),
     ]
     .join("\n")
@@ -63,6 +64,7 @@ fn retained_non_final_owner_production_source() -> String {
         include_str!("block_table.rs"),
         include_str!("evidence.rs"),
         include_str!("ownership.rs"),
+        include_str!("physical.rs"),
         include_str!("startup.rs"),
     ]
     .join("\n")
@@ -827,7 +829,7 @@ fn generic_retained_authority_remains_crate_private() {
 
     let normalized = production.replace("\r\n", "\n");
     assert!(normalized.contains(
-        "fn try_publication_eligibility(&self) -> Result<PublicationEligibility, AccountPoisoned>"
+        "pub(super) fn try_publication_eligibility(\n        &self,\n    ) -> Result<PublicationEligibility, AccountPoisoned>"
     ));
     assert_eq!(
         normalized.matches(".try_publication_eligibility()").count(),
