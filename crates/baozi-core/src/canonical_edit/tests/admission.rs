@@ -223,7 +223,22 @@ fn commit_admission_covers_three_primitive_rebind_growth_before_allocation() {
         Some(u64::try_from(std::mem::size_of::<MeshPrimitive>()).unwrap()),
         "rebuilding a len=capacity=3 primitive Vec requires one additional slot"
     );
-    assert_eq!(exact_control.transition_required_bytes, Some(admitted));
+    let publication = &committed.publication;
+    let required_bytes = publication
+        .scene()
+        .validation_stats()
+        .footprint()
+        .accounted_payload_bytes()
+        .checked_add(publication.remaps().retained_allocation_bytes())
+        .expect("the validated publication footprint must fit u64");
+    assert!(
+        required_bytes <= admitted,
+        "the qualified publication must fit its pre-allocation envelope"
+    );
+    assert_eq!(
+        exact_control.transition_required_bytes,
+        Some(required_bytes)
+    );
     let drops_before_commit = exact_control.reservation_drop_count();
     drop(committed);
     assert_eq!(

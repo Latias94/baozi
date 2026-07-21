@@ -17,7 +17,7 @@ use crate::identity::{
 };
 use crate::math::{Color, Vec2, Vec3};
 use crate::provenance::Provenance;
-use baozi_operation::CapacityPlan;
+use baozi_operation::GrowableCapacityPlan;
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::fmt;
@@ -2154,7 +2154,7 @@ fn try_reserve_bounded<T>(
         return Ok(());
     }
 
-    let plan = CapacityPlan::for_type::<T>(values.len(), values.capacity(), desired)
+    let plan = GrowableCapacityPlan::for_type::<T>(values.len(), values.capacity(), desired)
         .map_err(|_| AppearanceBuildError::AllocationFailed { resource })?;
     validate_collection_size::<T>(
         resource,

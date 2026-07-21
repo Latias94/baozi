@@ -1,4 +1,4 @@
-use baozi_operation::{CapacityPlan, CapacityPlanError};
+use baozi_operation::{CapacityPlan, CapacityPlanError, ReplacementCapacityPlan};
 use std::borrow::Borrow;
 use std::fmt;
 use std::marker::PhantomData;
@@ -60,7 +60,7 @@ pub(crate) struct OrderedMapReplacementPlan<K, V> {
     original_len: usize,
     original_capacity: usize,
     additional: usize,
-    replacement: Option<CapacityPlan>,
+    replacement: Option<ReplacementCapacityPlan>,
     marker: PhantomData<fn() -> (K, V)>,
 }
 
@@ -99,13 +99,6 @@ impl<K, V> PartialEq for OrderedMapCapacityPlan<K, V> {
 impl<K, V> Eq for OrderedMapCapacityPlan<K, V> {}
 
 impl<K, V> OrderedMapCapacityPlan<K, V> {
-    /// Returns the byte increase that must be admitted before allocator entry.
-    pub fn envelope_delta_bytes(&self) -> Result<u64, OrderedMapError> {
-        self.inner
-            .envelope_delta_bytes()
-            .map_err(OrderedMapError::CapacityPlan)
-    }
-
     /// Returns the complete replacement allocation that must be admitted before preparation.
     pub fn replacement_envelope_bytes(&self) -> Result<u64, OrderedMapError> {
         CapacityPlan::for_type::<(K, V)>(0, 0, self.inner.envelope_capacity())
@@ -117,7 +110,7 @@ impl<K, V> OrderedMapCapacityPlan<K, V> {
 impl<K, V> OrderedMapReplacementPlan<K, V> {
     pub(crate) fn envelope_bytes(&self) -> Result<u64, OrderedMapError> {
         self.replacement.map_or(Ok(0), |plan| {
-            plan.envelope_delta_bytes()
+            plan.candidate_envelope_bytes()
                 .map_err(OrderedMapError::CapacityPlan)
         })
     }
@@ -190,8 +183,12 @@ impl<K, V> OrderedMap<K, V> {
             None
         } else {
             Some(
-                CapacityPlan::for_type::<(K, V)>(0, 0, required_capacity)
-                    .map_err(OrderedMapError::CapacityPlan)?,
+                ReplacementCapacityPlan::for_type::<(K, V)>(
+                    self.len(),
+                    self.capacity(),
+                    required_capacity,
+                )
+                .map_err(OrderedMapError::CapacityPlan)?,
             )
         };
         Ok(OrderedMapReplacementPlan {
@@ -240,13 +237,17 @@ impl<K, V> OrderedMap<K, V> {
         let (replacement, replacement_bytes) = match plan.replacement {
             Some(replacement_plan) => {
                 replacement_plan
+                    .verify_source(self.len(), self.capacity())
+                    .map_err(OrderedMapError::CapacityPlan)?;
+                let candidate_plan = replacement_plan.candidate();
+                candidate_plan
                     .verify_preflight(0, 0)
                     .map_err(OrderedMapError::CapacityPlan)?;
                 let mut replacement = Vec::new();
                 replacement
-                    .try_reserve_exact(replacement_plan.allocator_additional())
+                    .try_reserve_exact(candidate_plan.allocator_additional())
                     .map_err(|_| OrderedMapError::AllocationFailed)?;
-                let replacement_bytes = replacement_plan
+                let replacement_bytes = candidate_plan
                     .finish(replacement.len(), replacement.capacity())
                     .map_err(OrderedMapError::CapacityPlan)?;
                 (Some(replacement), replacement_bytes)
@@ -269,19 +270,19 @@ impl<K, V> OrderedMap<K, V> {
     }
 
     /// Applies a previously admitted plan and returns actual retained growth.
+    ///
+    /// Capacity growth is prepared in a replacement allocation and committed only after both
+    /// capacity checks pass. A rejected allocator result therefore cannot leave this map with a
+    /// new, unaccounted capacity. Callers that account live storage must admit
+    /// [`OrderedMapCapacityPlan::replacement_envelope_bytes`] before calling this method.
     pub fn apply_capacity_plan(
         &mut self,
         plan: OrderedMapCapacityPlan<K, V>,
     ) -> Result<u64, OrderedMapError> {
-        plan.inner
-            .verify_preflight(self.len(), self.capacity())
-            .map_err(OrderedMapError::CapacityPlan)?;
-        self.entries
-            .try_reserve_exact(plan.inner.allocator_additional())
-            .map_err(|_| OrderedMapError::AllocationFailed)?;
-        plan.inner
-            .finish(self.len(), self.capacity())
-            .map_err(OrderedMapError::CapacityPlan)
+        let prepared = self.prepare_capacity_replacement(plan)?;
+        let growth_bytes = prepared.growth_bytes();
+        prepared.commit();
+        Ok(growth_bytes)
     }
 
     /// Allocates and qualifies a complete replacement without changing the live map.
@@ -314,12 +315,16 @@ impl<K, V> OrderedMap<K, V> {
         replacement
             .try_reserve_exact(replacement_plan.allocator_additional())
             .map_err(|_| OrderedMapError::AllocationFailed)?;
+        let qualified_capacity = capacity_for_qualification(
+            replacement.capacity(),
+            replacement_plan.envelope_capacity(),
+        );
         let allocation_bytes = replacement_plan
-            .finish(replacement.len(), replacement.capacity())
+            .finish(replacement.len(), qualified_capacity)
             .map_err(OrderedMapError::CapacityPlan)?;
         let growth_bytes = plan
             .inner
-            .finish(self.len(), replacement.capacity())
+            .finish(self.len(), qualified_capacity)
             .map_err(OrderedMapError::CapacityPlan)?;
 
         Ok(PreparedOrderedMapCapacity {
@@ -558,6 +563,32 @@ fn capacity_bytes<K, V>(capacity: usize) -> Result<u64, OrderedMapError> {
 }
 
 #[cfg(test)]
+thread_local! {
+    static FAIL_NEXT_CAPACITY_QUALIFICATION: std::cell::Cell<bool> = const {
+        std::cell::Cell::new(false)
+    };
+}
+
+#[cfg(test)]
+fn fail_next_capacity_qualification_for_test() {
+    FAIL_NEXT_CAPACITY_QUALIFICATION.with(|flag| flag.set(true));
+}
+
+#[cfg(test)]
+fn capacity_for_qualification(actual: usize, envelope: usize) -> usize {
+    if FAIL_NEXT_CAPACITY_QUALIFICATION.with(|flag| flag.replace(false)) {
+        envelope.saturating_add(1)
+    } else {
+        actual
+    }
+}
+
+#[cfg(not(test))]
+fn capacity_for_qualification(actual: usize, _envelope: usize) -> usize {
+    actual
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -565,7 +596,7 @@ mod tests {
     fn reserved_insert_is_sorted_and_allocation_free() {
         let mut map = OrderedMap::new();
         let plan = map.capacity_plan(2).unwrap();
-        let admitted = plan.envelope_delta_bytes().unwrap();
+        let admitted = plan.replacement_envelope_bytes().unwrap();
         let actual = map.apply_capacity_plan(plan).unwrap();
         assert!(
             actual <= admitted,
@@ -629,6 +660,60 @@ mod tests {
             ))
         ));
         assert_eq!(map.capacity(), capacity);
+    }
+
+    #[test]
+    fn capacity_envelope_failure_preserves_non_clone_map_and_accounting() {
+        #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+        struct NonCloneKey(u32);
+
+        #[derive(Debug, PartialEq, Eq)]
+        struct NonCloneValue(u32);
+
+        let mut map = OrderedMap::new();
+        map.try_insert(NonCloneKey(7), NonCloneValue(11))
+            .expect("initial entry should allocate");
+        let original_entries = map
+            .iter()
+            .map(|(key, value)| (key.0, value.0))
+            .collect::<Vec<_>>();
+        let original_capacity = map.capacity();
+        let original_accounted_bytes = map.capacity_bytes().expect("test capacity should fit");
+        let mut accounted_bytes = original_accounted_bytes;
+        let plan = map.capacity_plan(1).expect("growth plan should fit");
+
+        fail_next_capacity_qualification_for_test();
+        let result = map.apply_capacity_plan(plan);
+        if let Ok(growth_bytes) = &result {
+            accounted_bytes = accounted_bytes
+                .checked_add(*growth_bytes)
+                .expect("test accounting should fit");
+        }
+        let error = result.expect_err("injected capacity-envelope violation must fail");
+
+        assert!(matches!(
+            error,
+            OrderedMapError::CapacityPlan(CapacityPlanError::CapacityEnvelopeViolated { .. })
+        ));
+        assert_eq!(
+            map.iter()
+                .map(|(key, value)| (key.0, value.0))
+                .collect::<Vec<_>>(),
+            original_entries
+        );
+        assert_eq!(map.capacity(), original_capacity);
+        assert_eq!(map.capacity_bytes().unwrap(), original_accounted_bytes);
+        assert_eq!(accounted_bytes, original_accounted_bytes);
+
+        let retry = map.capacity_plan(1).expect("retry plan should fit");
+        accounted_bytes = accounted_bytes
+            .checked_add(
+                map.apply_capacity_plan(retry)
+                    .expect("consumed test fault must not poison retry"),
+            )
+            .expect("test accounting should fit");
+        assert_eq!(accounted_bytes, map.capacity_bytes().unwrap());
+        assert_eq!(map.get(&NonCloneKey(7)), Some(&NonCloneValue(11)));
     }
 
     #[test]

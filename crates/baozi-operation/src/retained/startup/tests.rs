@@ -716,11 +716,12 @@ fn startup_cross_plane_rail_has_one_qualified_ledger_path_and_no_legacy_authorit
 }
 
 #[test]
-fn startup_results_have_no_production_extraction_seam() {
+fn only_ready_cross_plane_result_has_a_production_split() {
     let source = include_str!("../startup.rs");
-    assert!(!source.contains("impl ReadyStartupPhysicalAdmission {"));
+    assert!(!source.contains("impl ReadyStartupPhysicalAdmission<'_> {"));
     assert!(!source.contains("impl UncertainStartupPhysicalAdmission {"));
-    for forbidden in ["fn accept(", "fn split(", "fn into_parts("] {
+    assert_eq!(source.matches("pub(super) fn split(").count(), 1);
+    for forbidden in ["fn accept(", "fn into_parts("] {
         assert!(
             !source.contains(forbidden),
             "startup result regained extraction seam `{forbidden}`"

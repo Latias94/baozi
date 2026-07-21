@@ -500,16 +500,11 @@ fn mixed_batch_transition_conserves_operation_dimension_and_phase_totals() {
 
 #[test]
 fn complete_phase_catalog_must_fit_evidence_before_operation_start() {
-    let probe = Coordinator::try_new(OperationControl::default(), limits(20), &[Phase::Snapshot])
-        .expect("one phase should fit without starting an operation");
-    let one_phase_evidence_limit = probe.ledger_snapshot().current_evidence_bytes();
-    probe
-        .finish()
-        .expect("the evidence probe should finalize cleanly");
-
-    let tight = limits(20)
-        .try_with_evidence_byte_limit(one_phase_evidence_limit)
-        .expect("one phase should fit exactly");
+    let tight = limits(20);
+    let dimension_evidence_limit = tight.frozen_evidence_bytes();
+    let tight = tight
+        .try_with_evidence_byte_limit(dimension_evidence_limit)
+        .expect("the frozen dimension evidence fits its exact existing allocation");
     let failure = match Coordinator::try_new(OperationControl::default(), tight, COMPLETE_PHASES) {
         Ok(_) => panic!("the complete phase catalog must be admitted before operation start"),
         Err(failure) => failure,

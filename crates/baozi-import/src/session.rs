@@ -824,7 +824,7 @@ impl<'a> ImportSession<'a> {
                 })?;
         let required_bytes = draft
             .storage_footprint()
-            .map_err(|cause| self.scope_cause(ScopeAbortCause::SceneAccounting(cause)))?
+            .map_err(|cause| self.scope_cause(ScopeAbortCause::from_scene_validation(cause)))?
             .accounted_payload_bytes();
         if reserved_bytes < required_bytes {
             return Err(self.scope_cause(ScopeAbortCause::DescriptorContract {
@@ -866,7 +866,7 @@ impl<'a> ImportSession<'a> {
                 return Err(self.scope_cause(cause));
             }
             Err(SceneValidationFailure::Scene(cause)) => {
-                return Err(ImportCause::Validation(cause));
+                return Err(ImportCause::from_scene_validation(cause));
             }
         };
         self.poll_boundary()?;

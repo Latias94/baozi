@@ -109,7 +109,7 @@ use crate::retained::{
 const MAX_RECORD_FIELDS: usize = 32;
 const BUILD_CODE_DOMAIN: u32 = 0x0100_0000;
 const BUILD_CODE_ALLOCATION_FAILED: u32 = 1;
-const BUILD_CODE_CAPACITY_UNQUALIFIED: u32 = 2;
+const BUILD_CODE_CAPACITY_ENVELOPE_VIOLATED: u32 = 2;
 const BUILD_CODE_CAPACITY_EXCEEDED: u32 = 3;
 const BUILD_CODE_INCOMPLETE: u32 = 4;
 const BUILD_CODE_ROW_WIDTH: u32 = 5;
@@ -174,7 +174,7 @@ pub trait StoredScalar: sealed::StoredScalar {}
 pub enum StoreBuildFailureClass {
     Domain,
     AllocationFailed,
-    CapacityUnqualified,
+    CapacityEnvelopeViolated,
     CapacityExceeded,
     IncompleteWrite,
     InvalidRecordWidth,
@@ -216,9 +216,9 @@ impl StoreBuildError {
         }
     }
 
-    const fn capacity_unqualified() -> Self {
+    const fn capacity_envelope_violated() -> Self {
         Self {
-            class: StoreBuildFailureClass::CapacityUnqualified,
+            class: StoreBuildFailureClass::CapacityEnvelopeViolated,
             code: 0,
         }
     }
@@ -248,7 +248,9 @@ impl StoreBuildError {
         let code = match self.class {
             StoreBuildFailureClass::Domain => BUILD_CODE_DOMAIN + self.code,
             StoreBuildFailureClass::AllocationFailed => BUILD_CODE_ALLOCATION_FAILED,
-            StoreBuildFailureClass::CapacityUnqualified => BUILD_CODE_CAPACITY_UNQUALIFIED,
+            StoreBuildFailureClass::CapacityEnvelopeViolated => {
+                BUILD_CODE_CAPACITY_ENVELOPE_VIOLATED
+            }
             StoreBuildFailureClass::CapacityExceeded => BUILD_CODE_CAPACITY_EXCEEDED,
             StoreBuildFailureClass::IncompleteWrite => BUILD_CODE_INCOMPLETE,
             StoreBuildFailureClass::InvalidRecordWidth => BUILD_CODE_ROW_WIDTH,
@@ -259,7 +261,7 @@ impl StoreBuildError {
     const fn from_raw(code: u32) -> Self {
         match code {
             BUILD_CODE_ALLOCATION_FAILED => Self::allocation_failed(),
-            BUILD_CODE_CAPACITY_UNQUALIFIED => Self::capacity_unqualified(),
+            BUILD_CODE_CAPACITY_ENVELOPE_VIOLATED => Self::capacity_envelope_violated(),
             BUILD_CODE_CAPACITY_EXCEEDED => Self::capacity_exceeded(),
             BUILD_CODE_INCOMPLETE => Self::incomplete_write(),
             BUILD_CODE_ROW_WIDTH => Self::invalid_record_width(),
@@ -288,7 +290,7 @@ impl fmt::Display for StoreBuildError {
             StoreBuildFailureClass::AllocationFailed => {
                 formatter.write_str("retained store allocation failed")
             }
-            StoreBuildFailureClass::CapacityUnqualified => {
+            StoreBuildFailureClass::CapacityEnvelopeViolated => {
                 formatter.write_str("allocator capacity is outside the qualified envelope")
             }
             StoreBuildFailureClass::CapacityExceeded => {
@@ -511,10 +513,11 @@ fn try_allocate_vec<T>(capacity: CapacityPlan) -> Result<(Vec<T>, usize), StoreB
     values
         .try_reserve_exact(capacity.allocator_additional())
         .map_err(|_| StoreBuildError::allocation_failed())?;
-    capacity
-        .finish(values.len(), values.capacity())
-        .map_err(|_| StoreBuildError::capacity_unqualified())?;
+    let len = values.len();
     let qualified_capacity = values.capacity();
+    let (values, _) = capacity
+        .finish_owned(values, len, qualified_capacity)
+        .map_err(|_| StoreBuildError::capacity_envelope_violated())?;
     Ok((values, qualified_capacity))
 }
 
@@ -636,7 +639,7 @@ impl<T: StoredScalar> SequenceWriter<T> {
             return Err(StoreBuildError::incomplete_write());
         }
         if self.storage.capacity() != self.qualified_capacity {
-            return Err(StoreBuildError::capacity_unqualified());
+            return Err(StoreBuildError::capacity_envelope_violated());
         }
         Ok(StoredBlock::Sequence(self.storage))
     }
@@ -747,7 +750,7 @@ macro_rules! impl_stored_scalar {
                         values.push(value);
                         Ok(())
                     }
-                    _ => Err(StoreBuildError::capacity_unqualified()),
+                    _ => Err(StoreBuildError::capacity_envelope_violated()),
                 }
             }
 
@@ -855,7 +858,7 @@ impl BytesWriter {
             return Err(StoreBuildError::incomplete_write());
         }
         if self.values.capacity() != self.qualified_capacity {
-            return Err(StoreBuildError::capacity_unqualified());
+            return Err(StoreBuildError::capacity_envelope_violated());
         }
         Ok(StoredBlock::Bytes(self.values))
     }
@@ -874,10 +877,12 @@ impl Utf8Writer {
         value
             .try_reserve_exact(plan.capacity.allocator_additional())
             .map_err(|_| StoreBuildError::allocation_failed())?;
-        plan.capacity
-            .finish(value.len(), value.capacity())
-            .map_err(|_| StoreBuildError::capacity_unqualified())?;
+        let len = value.len();
         let qualified_capacity = value.capacity();
+        let (value, _) = plan
+            .capacity
+            .finish_owned(value, len, qualified_capacity)
+            .map_err(|_| StoreBuildError::capacity_envelope_violated())?;
         Ok(Self {
             value,
             expected_bytes: plan.bytes,
@@ -913,7 +918,7 @@ impl Utf8Writer {
             return Err(StoreBuildError::incomplete_write());
         }
         if self.value.capacity() != self.qualified_capacity {
-            return Err(StoreBuildError::capacity_unqualified());
+            return Err(StoreBuildError::capacity_envelope_violated());
         }
         Ok(StoredBlock::Utf8(self.value))
     }
@@ -1192,7 +1197,7 @@ impl RecordWriterCore {
             return Err(StoreBuildError::incomplete_write());
         }
         if self.storage.cells.capacity() != self.storage.qualified_capacity {
-            return Err(StoreBuildError::capacity_unqualified());
+            return Err(StoreBuildError::capacity_envelope_violated());
         }
         Ok(StoredBlock::Records(self.storage))
     }

@@ -38,7 +38,7 @@ use crate::shared_storage::{SharedStorage, SharedStorageError};
 use crate::validation_control::{
     SceneValidationControl, SceneValidationLimits, SceneValidationStats,
 };
-use baozi_operation::{CapacityPlan, CapacityPlanError};
+use baozi_operation::{CapacityPlanError, GrowableCapacityPlan, ReplacementCapacityPlan};
 use std::convert::Infallible;
 use thiserror::Error;
 
@@ -145,8 +145,12 @@ fn try_reserve_metadata(
     if desired <= entries.capacity() {
         return Ok(());
     }
-    let plan = CapacityPlan::for_type::<ExtensionEntry>(entries.len(), entries.capacity(), desired)
-        .map_err(|_| SceneMetadataError::AllocationFailed)?;
+    let plan = GrowableCapacityPlan::for_type::<ExtensionEntry>(
+        entries.len(),
+        entries.capacity(),
+        desired,
+    )
+    .map_err(|_| SceneMetadataError::AllocationFailed)?;
     entries
         .try_reserve_exact(plan.allocator_additional())
         .map_err(|_| SceneMetadataError::AllocationFailed)?;

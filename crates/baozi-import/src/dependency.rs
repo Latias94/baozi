@@ -3,7 +3,7 @@ use crate::error::{CauseOwner, ScopeAbortCause};
 use crate::ledger::ImportReservation;
 use crate::metered_storage::AccountedVec;
 use baozi_io::{AssetIo, AssetPath, AuthorityDomain};
-use baozi_operation::{CapacityPlan, CapacityPlanError};
+use baozi_operation::{CapacityPlan, CapacityPlanError, ReplacementCapacityPlan};
 use std::collections::hash_map::RandomState;
 use std::error::Error;
 use std::fmt;
@@ -477,24 +477,29 @@ impl DependencyCache {
     pub(crate) fn capacity_plan(
         &self,
     ) -> Result<DependencyCacheCapacityPlan, DependencyCacheCapacityError> {
-        let entry_replacement =
-            if self.free_entry.is_none() && self.entries.len() == self.entries.capacity() {
-                let required_capacity = self.entries.len().checked_add(1).ok_or(
-                    DependencyCacheCapacityError::Capacity {
-                        storage: DependencyCacheStorage::Entries,
-                        cause: CapacityPlanError::CapacityOverflow,
-                    },
-                )?;
-                Some(
-                    CapacityPlan::for_type::<DependencyCacheRecordSlot>(0, 0, required_capacity)
-                        .map_err(|cause| DependencyCacheCapacityError::Capacity {
-                            storage: DependencyCacheStorage::Entries,
-                            cause,
-                        })?,
+        let entry_replacement = if self.free_entry.is_none()
+            && self.entries.len() == self.entries.capacity()
+        {
+            let required_capacity = self.entries.len().checked_add(1).ok_or(
+                DependencyCacheCapacityError::Capacity {
+                    storage: DependencyCacheStorage::Entries,
+                    cause: CapacityPlanError::CapacityOverflow,
+                },
+            )?;
+            Some(
+                ReplacementCapacityPlan::for_type::<DependencyCacheRecordSlot>(
+                    self.entries.len(),
+                    self.entries.capacity(),
+                    required_capacity,
                 )
-            } else {
-                None
-            };
+                .map_err(|cause| DependencyCacheCapacityError::Capacity {
+                    storage: DependencyCacheStorage::Entries,
+                    cause,
+                })?,
+            )
+        } else {
+            None
+        };
         let index_slots = self.index_slots_for_next_entry()?;
         let index_replacement = index_slots
             .map(|slots| {
@@ -557,19 +562,26 @@ impl DependencyCache {
 
         let (mut replacement_entries, entry_retained_bytes) =
             if let Some(entry_plan) = plan.entry_replacement {
-                let mut entries = Vec::new();
                 entry_plan
+                    .verify_source(self.entries.len(), self.entries.capacity())
+                    .map_err(|cause| DependencyCacheCapacityError::Capacity {
+                        storage: DependencyCacheStorage::Entries,
+                        cause,
+                    })?;
+                let candidate_plan = entry_plan.candidate();
+                let mut entries = Vec::new();
+                candidate_plan
                     .verify_preflight(entries.len(), entries.capacity())
                     .map_err(|cause| DependencyCacheCapacityError::Capacity {
                         storage: DependencyCacheStorage::Entries,
                         cause,
                     })?;
                 entries
-                    .try_reserve_exact(entry_plan.allocator_additional())
+                    .try_reserve_exact(candidate_plan.allocator_additional())
                     .map_err(|_| DependencyCacheCapacityError::Allocation {
                         storage: DependencyCacheStorage::Entries,
                     })?;
-                let actual = entry_plan
+                let actual = candidate_plan
                     .finish(entries.len(), entries.capacity())
                     .map_err(|cause| DependencyCacheCapacityError::Capacity {
                         storage: DependencyCacheStorage::Entries,
@@ -980,7 +992,7 @@ pub(crate) struct DependencyCacheCapacityPlan {
     index_len: usize,
     index_capacity: usize,
     index_tombstones: usize,
-    entry_replacement: Option<CapacityPlan>,
+    entry_replacement: Option<ReplacementCapacityPlan>,
     index_replacement: Option<DependencyIndexReplacementPlan>,
 }
 
@@ -993,16 +1005,18 @@ impl DependencyCacheCapacityPlan {
         self,
         storage: DependencyCacheStorage,
     ) -> Result<u64, DependencyCacheCapacityError> {
-        let plan = match storage {
-            DependencyCacheStorage::Entries => self.entry_replacement,
-            DependencyCacheStorage::Index => self
-                .index_replacement
-                .map(|replacement| replacement.allocation),
-        };
-        plan.map_or(Ok(0), |plan| {
-            plan.envelope_delta_bytes()
-                .map_err(|cause| DependencyCacheCapacityError::Capacity { storage, cause })
-        })
+        match storage {
+            DependencyCacheStorage::Entries => self.entry_replacement.map_or(Ok(0), |plan| {
+                plan.candidate_envelope_bytes()
+                    .map_err(|cause| DependencyCacheCapacityError::Capacity { storage, cause })
+            }),
+            DependencyCacheStorage::Index => self.index_replacement.map_or(Ok(0), |replacement| {
+                replacement
+                    .allocation
+                    .envelope_delta_bytes()
+                    .map_err(|cause| DependencyCacheCapacityError::Capacity { storage, cause })
+            }),
+        }
     }
 
     fn verify(self, cache: &DependencyCache) -> Result<(), DependencyCacheCapacityError> {

@@ -2,7 +2,7 @@ use crate::FormatId;
 use crate::extension::ExtensionSchemaId;
 use crate::namespaced::NamespacedName;
 use crate::shared_storage::{SharedStorage, SharedStorageError, SharedStorageFootprintError};
-use baozi_operation::CapacityPlan;
+use baozi_operation::{CapacityPlan, GrowableCapacityPlan};
 use std::borrow::Borrow;
 use std::hash::{Hash, Hasher};
 use std::num::NonZeroU64;
@@ -1229,9 +1229,12 @@ fn try_reserve_provenance_attachments(
     if desired <= attachments.capacity() {
         return Ok(());
     }
-    let plan =
-        CapacityPlan::for_type::<Provenance>(attachments.len(), attachments.capacity(), desired)
-            .map_err(|_| ProvenanceAttachmentsError::AllocationFailed)?;
+    let plan = GrowableCapacityPlan::for_type::<Provenance>(
+        attachments.len(),
+        attachments.capacity(),
+        desired,
+    )
+    .map_err(|_| ProvenanceAttachmentsError::AllocationFailed)?;
     attachments
         .try_reserve_exact(plan.allocator_additional())
         .map_err(|_| ProvenanceAttachmentsError::AllocationFailed)?;
@@ -1714,8 +1717,12 @@ impl ProvenanceArenaBuilder {
         if desired <= parents.capacity() {
             return Ok(());
         }
-        let plan = CapacityPlan::for_type::<Provenance>(parents.len(), parents.capacity(), desired)
-            .map_err(|_| ProvenanceBuildError::AccountingOverflow)?;
+        let plan = GrowableCapacityPlan::for_type::<Provenance>(
+            parents.len(),
+            parents.capacity(),
+            desired,
+        )
+        .map_err(|_| ProvenanceBuildError::AccountingOverflow)?;
         let node_bytes = checked_operation_node_retained_bytes(identity, plan.envelope_capacity())
             .map_err(ProvenanceBuildError::from_footprint)?;
         self.prepare_retained_capacity(node_bytes)?;

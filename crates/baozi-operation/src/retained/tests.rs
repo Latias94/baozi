@@ -510,18 +510,6 @@ fn account(
         .unwrap()
 }
 
-fn admitted_startup_share_work(account: &PhysicalStorageAccount) -> StartupAccountOwners {
-    let share = || PhysicalStorageAccount {
-        inner: account.inner.share(),
-    };
-    StartupAccountOwners {
-        fallback_account: share(),
-        evidence_account: share(),
-        fallback_lease_owner: share(),
-        evidence_lease_owner: share(),
-    }
-}
-
 fn startup_limits_and_plan() -> (
     LedgerLimits<TestDimension>,
     RetainedOperationStartPlan<TestPhase, TestDimension>,
@@ -541,12 +529,17 @@ fn startup_limits_and_plan() -> (
 }
 
 fn reset_startup_test_observations() {
+    reset_startup_footprint_mismatches();
+    reset_startup_payload_allocation_attempts();
     let _ = take_injected_start_evidence_build_failure();
     let _ = take_injected_start_evidence_build_panic();
     let _ = take_injected_start_evidence_structural_failure();
+    let _ = take_injected_terminal_evidence_catalog_failure();
     let _ = take_injected_start_fallback_account_anchor_loss();
     let _ = take_start_evidence_build_calls();
     let _ = take_startup_failure_ledger_snapshot();
+    reset_retained_final_owner_allocator_entries();
+    let _ = take_startup_ready_final_owner_allocator_entries();
 }
 
 fn empty_plan() -> RetainedAllocationPlan {

@@ -23,6 +23,13 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::{AtomicU64, Ordering};
 use triomphe::UniqueArc;
 
+#[cfg(test)]
+std::thread_local! {
+    static RETAINED_FINAL_OWNER_ALLOCATOR_ENTRIES: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
+}
+
 /// Maximum inline payload header moved out of the final shared allocation.
 ///
 /// Input-proportional storage belongs in separately planned backing allocations and contributes to
@@ -333,6 +340,11 @@ where
             return Err(FinalOwnerAllocationError::AllocationFailed);
         }
 
+        #[cfg(test)]
+        RETAINED_FINAL_OWNER_ALLOCATOR_ENTRIES.with(|entries| {
+            entries.set(entries.get().saturating_add(1));
+        });
+
         let unique = UniqueArc::try_new(RetainedFinalOwnerInner::unarmed())
             .map_err(|_| FinalOwnerAllocationError::AllocationFailed)?;
         Ok(Self { unique })
@@ -347,6 +359,16 @@ where
         self.unique.value = Some(value);
         FinalOwnerAllocation::from_shared(self.unique.shareable())
     }
+}
+
+#[cfg(test)]
+pub(crate) fn test_retained_final_owner_allocator_entries() -> usize {
+    RETAINED_FINAL_OWNER_ALLOCATOR_ENTRIES.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+pub(crate) fn reset_retained_final_owner_allocator_entries() {
+    RETAINED_FINAL_OWNER_ALLOCATOR_ENTRIES.with(|entries| entries.set(0));
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

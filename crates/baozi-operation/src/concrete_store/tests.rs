@@ -259,6 +259,87 @@ fn poisoned_account_rejects_before_frozen_phase_catalog_construction() {
 }
 
 #[test]
+fn public_store_start_enters_retained_allocators_after_ready_only() {
+    crate::retained::reset_startup_payload_allocation_attempts();
+    crate::retained::reset_retained_final_owner_allocator_entries();
+    let _ = crate::retained::take_startup_ready_final_owner_allocator_entries();
+    let factory = test_factory();
+    let account = test_account(&factory);
+
+    let (operation, _) = test_operation(&account, u64::MAX);
+
+    assert_eq!(
+        crate::retained::take_startup_ready_final_owner_allocator_entries(),
+        Some(0),
+        "the public startup seam must reach Ready before retained payload allocation"
+    );
+    assert_eq!(
+        crate::retained::test_retained_final_owner_allocator_entries(),
+        2,
+        "one final-owner allocation must occur for fallback and evidence"
+    );
+    assert_eq!(
+        crate::retained::test_startup_payload_allocation_attempts(),
+        (1, 1)
+    );
+
+    drop(operation);
+    drop(account);
+    assert_eq!(factory.snapshot().live_accounts(), 0);
+}
+
+#[test]
+fn public_store_start_rejection_never_enters_retained_allocator() {
+    crate::retained::reset_startup_payload_allocation_attempts();
+    crate::retained::reset_retained_final_owner_allocator_entries();
+    let _ = crate::retained::take_startup_ready_final_owner_allocator_entries();
+    let factory = test_factory();
+    let account = factory
+        .try_create_account(
+            PhysicalStorageAccountLimits::new(1, 1).expect("minimal retained account limits"),
+        )
+        .expect("minimal retained account");
+    let before = account.snapshot();
+    let (domain, keys) = test_vocabulary();
+    let policy = DimensionPolicy::reservable_bytes(u64::MAX, u64::MAX, u64::MAX, u64::MAX)
+        .with_published_outcome_evidence_limit(u64::MAX);
+    let limits =
+        LedgerLimits::new(u64::MAX, [(keys.dimension, policy)]).expect("test ledger limits");
+    let ledger_plan =
+        StoreLedgerPlan::try_new(domain, limits, &[keys.phase]).expect("test store ledger plan");
+    let start = RetainedStoreStartPlan::new(
+        test_writer_plan(keys, 8, 4),
+        RetainedStoreSharePlan::new(keys.dimension, keys.dimension),
+        StoreFallbackEnvelope::new(91),
+        keys.dimension,
+        1,
+        keys.dimension,
+        1,
+    );
+
+    let rejected =
+        TestOperation::try_start(OperationControl::default(), ledger_plan, &account, start);
+
+    assert!(rejected.is_err());
+    assert_eq!(
+        crate::retained::test_retained_final_owner_allocator_entries(),
+        0
+    );
+    assert_eq!(
+        crate::retained::test_startup_payload_allocation_attempts(),
+        (0, 0)
+    );
+    assert_eq!(
+        crate::retained::take_startup_ready_final_owner_allocator_entries(),
+        None
+    );
+    assert_eq!(account.snapshot(), before);
+
+    drop(account);
+    assert_eq!(factory.snapshot().live_accounts(), 0);
+}
+
+#[test]
 fn phase_completion_validates_domain_and_catalog_before_monotonic_progress() {
     let factory = test_factory();
     let account = test_account(&factory);
@@ -402,13 +483,17 @@ fn scalar_vocabulary_is_closed_and_record_cells_are_allocation_free() {
 
 #[test]
 fn record_capacity_plan_allocator_and_physical_accounting_are_exact() {
-    for (fields, desired, envelope, actual) in [(3, 3, 4, 4), (4, 4, 4, 4), (5, 5, 8, 8)] {
+    for (fields, desired, envelope) in [(3, 3, 4), (4, 4, 4), (5, 5, 8)] {
         let plan = RecordPlan::new(1, fields).expect("record plan");
         assert_eq!(plan.cells, desired);
         assert_eq!(plan.capacity.desired_capacity(), desired);
         assert_eq!(plan.capacity.envelope_capacity(), envelope);
         let writer = CanonicalRecordWriter::new(plan).expect("record writer");
-        assert_eq!(writer.core.storage.cells.capacity(), actual);
+        let actual = writer.core.storage.cells.capacity();
+        assert!(
+            (desired..=envelope).contains(&actual),
+            "allocator capacity {actual} must stay within {desired}..={envelope}"
+        );
         assert_eq!(writer.core.storage.qualified_capacity, actual);
     }
 

@@ -1000,12 +1000,7 @@ fn pending_pair_rollback_underflow_records_one_in_domain_counter_fault() {
     let pair =
         RetainedAdmissionPairPlan::try_new(AdmissionCharge::new(1, 1), AdmissionCharge::new(1, 1))
             .unwrap_or_else(|_| panic!("pair charge must qualify"));
-    let (admissions, _owners) = account
-        .try_admit_start_retained_pair_after_action(
-            account.try_admit_account_action().expect("account action"),
-            pair,
-            admitted_startup_share_work(&account),
-        )
+    let admissions = PendingStartRetainedAdmissions::try_admit_for_test(&account, pair)
         .unwrap_or_else(|_| panic!("pending pair must admit"));
     {
         let mut state = lock_recovering_poison(&account.inner.value().linear);
@@ -1032,92 +1027,18 @@ fn pending_pair_rollback_underflow_records_one_in_domain_counter_fault() {
 }
 
 #[test]
-fn startup_admission_guard_underflow_records_one_counter_fault() {
-    let factory = account_factory(1);
-    let account = account(&factory, 4_096, 8);
-    let pair =
-        RetainedAdmissionPairPlan::try_new(AdmissionCharge::new(1, 1), AdmissionCharge::new(1, 1))
-            .unwrap_or_else(|_| panic!("guard pair charge must qualify"));
-    let (admissions, owners) = account
-        .try_admit_start_retained_pair_after_action(
-            account.try_admit_account_action().expect("account action"),
-            pair,
-            admitted_startup_share_work(&account),
-        )
-        .unwrap_or_else(|_| panic!("guard pair must admit"));
-    let guard = StartupAdmissionGuard::new(&account, admissions, owners);
-    {
-        let mut state = lock_recovering_poison(&account.inner.value().linear);
-        state.counters.live_bytes = 0;
-        state.counters.live_allocations = 0;
-    }
-
-    drop(guard);
-    let snapshot = account.snapshot();
-    assert_eq!(snapshot.poison_event_count(), 1);
-    assert!(snapshot.poison_event_count_exact());
-    assert!(snapshot.poison_event_domain_valid());
-    assert_eq!(
-        snapshot
-            .first_poison_evidence()
-            .map(AccountPoisonEvidence::reason),
-        Some(AccountPoisonReason::CounterInvariantViolated)
-    );
-}
-
-#[test]
-fn startup_admission_guard_unwind_records_exactly_one_outer_fault() {
-    let factory = account_factory(1);
-    let account = account(&factory, 4_096, 8);
-    let pair =
-        RetainedAdmissionPairPlan::try_new(AdmissionCharge::new(1, 1), AdmissionCharge::new(1, 1))
-            .unwrap_or_else(|_| panic!("unwind pair charge must qualify"));
-    let (admissions, owners) = account
-        .try_admit_start_retained_pair_after_action(
-            account.try_admit_account_action().expect("account action"),
-            pair,
-            admitted_startup_share_work(&account),
-        )
-        .unwrap_or_else(|_| panic!("unwind pair must admit"));
-
-    let unwind = catch_unwind(AssertUnwindSafe(|| {
-        let _guard = StartupAdmissionGuard::new(&account, admissions, owners);
-        panic!("inject startup host unwind");
-    }));
-    assert!(unwind.is_err());
-    let snapshot = account.snapshot();
-    assert_eq!(snapshot.live_retained_bytes(), 0);
-    assert_eq!(snapshot.live_retained_allocations(), 0);
-    assert_eq!(snapshot.poison_event_count(), 1);
-    assert!(snapshot.poison_event_count_exact());
-    assert!(snapshot.poison_event_domain_valid());
-    assert_eq!(
-        snapshot
-            .first_poison_evidence()
-            .map(AccountPoisonEvidence::reason),
-        Some(AccountPoisonReason::OwnershipGraphUnverified)
-    );
-}
-
-#[test]
 fn qualified_startup_capacity_failure_rolls_back_without_poisoning() {
     let factory = account_factory(1);
     let account = account(&factory, 4_096, 8);
     let pair =
         RetainedAdmissionPairPlan::try_new(AdmissionCharge::new(1, 1), AdmissionCharge::new(1, 1))
             .unwrap_or_else(|_| panic!("capacity pair charge must qualify"));
-    let (admissions, owners) = account
-        .try_admit_start_retained_pair_after_action(
-            account.try_admit_account_action().expect("account action"),
-            pair,
-            admitted_startup_share_work(&account),
-        )
+    let admissions = PendingStartRetainedAdmissions::try_admit_for_test(&account, pair)
         .unwrap_or_else(|_| panic!("capacity pair must admit"));
-    let guard = StartupAdmissionGuard::new(&account, admissions, owners);
 
     let error = map_qualified_startup_batch_error::<TestDimension>(
         AttributionBatchCreateError::CapacityOverflow,
-        |outer_reason| guard.rollback(outer_reason),
+        |outer_reason| admissions.rollback_with_fault(outer_reason),
     );
     assert!(matches!(error, RetainedWriterError::BatchCapacity));
     let snapshot = account.snapshot();

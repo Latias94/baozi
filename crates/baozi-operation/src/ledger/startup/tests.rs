@@ -49,10 +49,29 @@ fn startup_qualification_has_one_production_module() {
         .expect("startup graph boundary exists");
     assert!(graph.contains("cores: StartupLedgerCores"));
     assert!(!graph.contains("AttributionReservationBatch"));
-    for forbidden in ["pub fn ", "pub(", "fn accept", "fn into_parts"] {
+    assert_eq!(
+        graph
+            .matches("pub(crate) fn into_runtime_baseline(")
+            .count(),
+        1
+    );
+    assert!(graph.contains("_authority: ReadyStartupGraphSplitAuthority"));
+    let graph_without_ready_split = graph.replacen(
+        "pub(crate) fn into_runtime_baseline(",
+        "fn into_runtime_baseline(",
+        1,
+    );
+    for forbidden in [
+        "pub fn ",
+        "pub(crate) fn ",
+        "pub(super)",
+        "pub(in ",
+        "fn accept",
+        "fn into_parts",
+    ] {
         assert!(
-            !graph.contains(forbidden),
-            "provisional graph exposes forbidden seam `{forbidden}`"
+            !graph_without_ready_split.contains(forbidden),
+            "startup graph exposes forbidden seam `{forbidden}`"
         );
     }
 }
@@ -356,12 +375,21 @@ fn startup_qualification_preserves_the_exact_typed_envelope() {
 
     assert_eq!(startup_batch_bytes(&parts.batches), batch_bytes);
     assert_eq!(parts.retained_attributions, retained_attributions);
-    let (phase, dimension, bytes) = parts.retained_attributions[0].into_parts();
+    let StartupRetainedAttribution {
+        phase,
+        dimension,
+        bytes,
+    } = parts.retained_attributions[0];
     assert_eq!(
         (phase, dimension, bytes),
         (Phase::Build, Dimension::Bytes, 3)
     );
-    let (_canonical, _evidence_assembly, _fallback, _evidence) = parts.batches.into_parts();
+    let StartupAttributionBatchPlans {
+        canonical_assembly: _canonical,
+        evidence_assembly: _evidence_assembly,
+        fallback: _fallback,
+        evidence: _evidence,
+    } = parts.batches;
     for share in parts.account_shares.into_steps() {
         assert_eq!(share.into_charges(), startup_share_charges());
     }
@@ -652,38 +680,42 @@ fn startup_graph_owns_exact_envelopes_and_drops_storage_before_one_ledger_rollba
     assert_eq!(test_startup_graph_allocation_entries(), 8);
     assert_eq!(ledger.test_probe().active_reservations(), 6);
     assert_eq!(ledger.test_probe().current_live_bytes(), total_live);
+    let ownership = graph
+        .ownership
+        .as_ref()
+        .expect("startup graph ownership before drop");
     assert_eq!(
         [
-            graph.cores.canonical_assembly_cover.bytes,
-            graph.cores.evidence_assembly_cover.bytes,
-            graph.cores.fallback_cover.bytes,
-            graph.cores.evidence_cover.bytes,
+            ownership.cores.canonical_assembly_cover.bytes,
+            ownership.cores.evidence_assembly_cover.bytes,
+            ownership.cores.fallback_cover.bytes,
+            ownership.cores.evidence_cover.bytes,
         ],
         covers
     );
     assert_eq!(
         [
-            graph.cores.fallback_attribution.bytes,
-            graph.cores.evidence_attribution.bytes,
+            ownership.cores.fallback_attribution.bytes,
+            ownership.cores.evidence_attribution.bytes,
         ],
         [3, 5]
     );
     for (actual, cover) in [
-        batch_backing_bytes(&graph.canonical_assembly),
-        batch_backing_bytes(&graph.evidence_assembly),
-        batch_backing_bytes(&graph.fallback),
-        batch_backing_bytes(&graph.evidence),
+        batch_backing_bytes(&ownership.canonical_assembly),
+        batch_backing_bytes(&ownership.evidence_assembly),
+        batch_backing_bytes(&ownership.fallback),
+        batch_backing_bytes(&ownership.evidence),
     ]
     .into_iter()
     .zip(covers)
     {
         assert!(actual <= cover);
     }
-    assert_eq!(graph.canonical_assembly.commitments.len(), 0);
-    assert_eq!(graph.evidence_assembly.commitments.len(), 0);
-    assert_eq!(graph.fallback.commitments.len(), 1);
-    assert_eq!(graph.evidence.commitments.len(), 1);
-    assert_eq!(graph._account_shares.steps.len(), 4);
+    assert_eq!(ownership.canonical_assembly.commitments.len(), 0);
+    assert_eq!(ownership.evidence_assembly.commitments.len(), 0);
+    assert_eq!(ownership.fallback.commitments.len(), 1);
+    assert_eq!(ownership.evidence.commitments.len(), 1);
+    assert_eq!(ownership._account_shares.steps.len(), 4);
 
     drop(graph);
 

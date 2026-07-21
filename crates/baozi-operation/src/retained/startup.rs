@@ -1,12 +1,15 @@
 use super::account::{AdmissionCharge, AdmissionError, try_admit_locked};
+use super::physical::{RetainedAdmissionPairPlan, StartupAccountOwners, StartupAdmissionGuard};
 use super::{
     AccountLinearState, AccountPoisonEventWitness, AccountPoisonReason, AccountPoisoned,
-    PhysicalStorageAccount, record_account_poison_event,
+    PhysicalStorageAccount, TerminalEvidenceKey, record_account_poison_event,
+    terminal_evidence_catalog_is_qualified,
 };
 use crate::OperationOwner;
 use crate::control::discard_untrusted_panic_payload;
 use crate::ledger::{
-    AttributionBatchCreateError, Ledger, LedgerCause, StartupAttributionGraph, StartupLedgerPlan,
+    AttributionBatchCreateError, FallbackBatchBaseline, Ledger, LedgerCause,
+    StartupAttributionGraph, StartupLedgerPlan,
 };
 use std::fmt;
 use std::ops::{Deref, DerefMut};
@@ -26,6 +29,37 @@ pub(super) struct PendingOperationStartAdmission<'account> {
 pub(super) enum OperationStartAdmissionError {
     AccountPoisoned(AccountPoisoned),
     AccountingOverflow,
+}
+
+/// Unforgeable capability consumed by the ledger graph's Ready-only runtime conversion.
+pub(crate) struct ReadyStartupGraphSplitAuthority {
+    private: (),
+}
+
+/// Unforgeable capability consumed by the physical Ready-only runtime conversion.
+pub(super) struct ReadyStartupPhysicalSplitAuthority {
+    private: (),
+}
+
+/// A fully started ledger that can initialize an operation coordinator without re-admission.
+pub(crate) struct StartedLedger<O, P, D>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+{
+    ledger: Ledger<O, P, D>,
+}
+
+impl<O, P, D> StartedLedger<O, P, D>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+{
+    pub(crate) fn into_inner(self) -> Ledger<O, P, D> {
+        self.ledger
+    }
 }
 
 /// The exact pair of retained charges committed by one operation start.
@@ -113,8 +147,8 @@ impl StartupPhysicalManifest {
 
 /// Four account owners whose share work must already be charged by the startup ledger graph.
 ///
-/// There is intentionally no production constructor in this disconnected rail. The cross-plane
-/// guard will eventually be the only authority allowed to assemble this value.
+/// Only the cross-plane transition can assemble this value, after ledger admission owns the
+/// complete startup attribution graph.
 pub(super) struct PreheldStartupAccountOwners {
     fallback_account: PhysicalStorageAccount,
     evidence_account: PhysicalStorageAccount,
@@ -145,12 +179,13 @@ pub(super) enum StartupPhysicalAdmissionFailure {
     Uncertain(UncertainStartupPhysicalAdmission),
 }
 
-/// A complete physical pair that has not yet been coupled to its attribution graph.
+/// The committed physical half of a complete cross-plane startup graph.
 ///
-/// Until the cross-plane transition exists, dropping this value is an ownership fault. The four
-/// pre-held owners stay intentionally unreachable so the committed physical charge cannot be
-/// released without the missing graph proof.
-pub(super) struct ReadyStartupPhysicalAdmission {
+/// Dropping this value before the Ready split is an ownership fault. The four pre-held owners stay
+/// intentionally unreachable so the committed physical charge cannot be released without moving
+/// the ledger graph into its runtime baseline at the same boundary.
+pub(super) struct ReadyStartupPhysicalAdmission<'account> {
+    account: &'account PhysicalStorageAccount,
     manifest: StartupPhysicalManifest,
     owners: Option<PreheldStartupAccountOwners>,
 }
@@ -164,9 +199,9 @@ pub(super) struct UncertainStartupPhysicalAdmission {
 
 /// The complete startup ownership graph after both accounting planes have committed.
 ///
-/// This value has no extraction surface. It exists only to carry the whole graph to the later
-/// retained-construction cutover without making either plane independently observable.
-struct StartupCrossPlaneOwnership<O, P, D>
+/// Only the Ready consuming split can move its ledger, attribution baseline, and physical guard
+/// into retained construction; neither accounting plane is independently extractable beforehand.
+struct StartupCrossPlaneOwnership<'account, O, P, D>
 where
     O: OperationOwner,
     P: Copy + Ord,
@@ -174,7 +209,7 @@ where
 {
     ledger: Ledger<O, P, D>,
     graph: StartupAttributionGraph<O, P, D>,
-    physical: ReadyStartupPhysicalAdmission,
+    physical: ReadyStartupPhysicalAdmission<'account>,
 }
 
 /// Unique authority to pre-hold the four physical owners for one admitted ledger graph.
@@ -198,11 +233,12 @@ where
     P: Copy + Ord,
     D: Copy + Ord,
 {
-    fn try_commit_physical(
+    fn try_commit_physical<'account>(
         self,
-        account: &PhysicalStorageAccount,
-        admission: PendingOperationStartAdmission<'_>,
-    ) -> Result<ReadyStartupCrossPlane<O, P, D>, StartupCrossPlaneAdmissionFailure<O, P, D>> {
+        account: &'account PhysicalStorageAccount,
+        admission: PendingOperationStartAdmission<'account>,
+    ) -> Result<ReadyStartupCrossPlane<'account, O, P, D>, StartupCrossPlaneAdmissionFailure<O, P, D>>
+    {
         let owners = PreheldStartupAccountOwners {
             fallback_account: PhysicalStorageAccount {
                 inner: account.inner.share(),
@@ -243,7 +279,7 @@ where
     }
 }
 
-impl<O, P, D> StartupCrossPlaneOwnership<O, P, D>
+impl<O, P, D> StartupCrossPlaneOwnership<'_, O, P, D>
 where
     O: OperationOwner,
     P: Copy + Ord,
@@ -261,59 +297,56 @@ where
     }
 }
 
-/// A startup pair that may cross the infallible promotion boundary exactly once.
-#[must_use = "the ready startup pair must be promoted or contained"]
-pub(super) struct ReadyStartupCrossPlane<O, P, D>
+/// A startup pair that may cross the infallible runtime split exactly once.
+#[must_use = "the ready startup pair must be split into runtime owners or contained"]
+pub(super) struct ReadyStartupCrossPlane<'account, O, P, D>
 where
     O: OperationOwner,
     P: Copy + Ord,
     D: Copy + Ord,
 {
-    ownership: Option<StartupCrossPlaneOwnership<O, P, D>>,
+    ownership: Option<StartupCrossPlaneOwnership<'account, O, P, D>>,
 }
 
-impl<O, P, D> ReadyStartupCrossPlane<O, P, D>
+impl<'account, O, P, D> ReadyStartupCrossPlane<'account, O, P, D>
 where
     O: OperationOwner,
     P: Copy + Ord,
     D: Copy + Ord,
 {
-    /// Moves the complete pair across a state-only boundary.
+    /// Moves the complete Ready graph into the sole retained runtime representation.
     ///
     /// This transition performs no lock acquisition, allocation, refcount operation, or fallible
-    /// work. The returned product remains opaque until the retained-construction cutover exists.
-    pub(super) fn promote(mut self) -> PromotedStartupCrossPlane<O, P, D> {
-        PromotedStartupCrossPlane {
-            ownership: self.ownership.take(),
-        }
+    /// work. Both accounting planes were admitted from the same qualified plan before this method
+    /// can be called.
+    #[allow(
+        clippy::type_complexity,
+        reason = "the split preserves each static runtime owner"
+    )]
+    pub(super) fn split(
+        mut self,
+    ) -> (
+        StartedLedger<O, P, D>,
+        FallbackBatchBaseline<O, P, D>,
+        StartupAdmissionGuard<'account>,
+    ) {
+        let ownership = self
+            .ownership
+            .take()
+            .expect("ready cross-plane startup owns its runtime graph");
+        let StartupCrossPlaneOwnership {
+            ledger,
+            graph,
+            physical,
+        } = ownership;
+        let baseline = graph.into_runtime_baseline(ReadyStartupGraphSplitAuthority { private: () });
+        let physical =
+            physical.into_runtime_guard(ReadyStartupPhysicalSplitAuthority { private: () });
+        (StartedLedger { ledger }, baseline, physical)
     }
 }
 
-impl<O, P, D> Drop for ReadyStartupCrossPlane<O, P, D>
-where
-    O: OperationOwner,
-    P: Copy + Ord,
-    D: Copy + Ord,
-{
-    fn drop(&mut self) {
-        if let Some(ownership) = self.ownership.take() {
-            ownership.contain();
-        }
-    }
-}
-
-/// Opaque output of the cross-plane startup promotion tracer.
-#[must_use = "the promoted startup graph must reach retained construction"]
-pub(super) struct PromotedStartupCrossPlane<O, P, D>
-where
-    O: OperationOwner,
-    P: Copy + Ord,
-    D: Copy + Ord,
-{
-    ownership: Option<StartupCrossPlaneOwnership<O, P, D>>,
-}
-
-impl<O, P, D> Drop for PromotedStartupCrossPlane<O, P, D>
+impl<O, P, D> Drop for ReadyStartupCrossPlane<'_, O, P, D>
 where
     O: OperationOwner,
     P: Copy + Ord,
@@ -347,6 +380,19 @@ where
     ownership: Option<UncertainStartupCrossPlaneOwnership<O, P, D>>,
 }
 
+impl<O, P, D> CrossPlaneAdmissionContainment<O, P, D>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+{
+    pub(super) fn poisoned(&self) -> Option<AccountPoisoned> {
+        self.ownership
+            .as_ref()
+            .map(|ownership| ownership.physical.poison.poisoned)
+    }
+}
+
 impl<O, P, D> Drop for CrossPlaneAdmissionContainment<O, P, D>
 where
     O: OperationOwner,
@@ -374,6 +420,7 @@ where
 {
     OperationStart(OperationStartAdmissionError),
     LedgerInitialization(LedgerCause<D>),
+    TerminalEvidenceCatalogInvariant,
     LedgerAdmission(AttributionBatchCreateError<D>),
     PhysicalNoMutation(StartupPhysicalNoMutation),
     Uncertain(CrossPlaneAdmissionContainment<O, P, D>),
@@ -385,9 +432,10 @@ struct StartupPhysicalTransitionGuard<'account> {
     owners: PreheldStartupAccountOwners,
 }
 
-impl StartupPhysicalTransitionGuard<'_> {
-    fn ready(self) -> ReadyStartupPhysicalAdmission {
+impl<'account> StartupPhysicalTransitionGuard<'account> {
+    fn ready(self) -> ReadyStartupPhysicalAdmission<'account> {
         ReadyStartupPhysicalAdmission {
+            account: self.admission.account,
             manifest: self.manifest,
             owners: Some(self.owners),
         }
@@ -402,7 +450,40 @@ impl StartupPhysicalTransitionGuard<'_> {
     }
 }
 
-impl Drop for ReadyStartupPhysicalAdmission {
+impl<'account> ReadyStartupPhysicalAdmission<'account> {
+    fn into_runtime_guard(
+        mut self,
+        authority: ReadyStartupPhysicalSplitAuthority,
+    ) -> StartupAdmissionGuard<'account> {
+        let owners = self
+            .owners
+            .take()
+            .expect("ready physical startup owns all four preheld account handles");
+        let PreheldStartupAccountOwners {
+            fallback_account,
+            evidence_account,
+            fallback_lease_owner,
+            evidence_lease_owner,
+        } = owners;
+        StartupAdmissionGuard::from_precommitted(
+            self.account,
+            RetainedAdmissionPairPlan {
+                first: self.manifest.fallback,
+                second: self.manifest.evidence,
+                aggregate: self.manifest.aggregate,
+            },
+            StartupAccountOwners {
+                fallback_account,
+                evidence_account,
+                fallback_lease_owner,
+                evidence_lease_owner,
+            },
+            authority,
+        )
+    }
+}
+
+impl Drop for ReadyStartupPhysicalAdmission<'_> {
     fn drop(&mut self) {
         let Some(owners) = self.owners.as_ref() else {
             return;
@@ -434,11 +515,11 @@ impl PhysicalStorageAccount {
         &self,
         phases: &[P],
         plan: StartupCrossPlanePlan<O, P, D>,
-    ) -> Result<ReadyStartupCrossPlane<O, P, D>, StartupCrossPlaneAdmissionFailure<O, P, D>>
+    ) -> Result<ReadyStartupCrossPlane<'_, O, P, D>, StartupCrossPlaneAdmissionFailure<O, P, D>>
     where
         O: OperationOwner,
-        P: Copy + Ord,
-        D: Copy + Ord + fmt::Debug,
+        P: TerminalEvidenceKey,
+        D: TerminalEvidenceKey + fmt::Debug,
     {
         let admission = self
             .try_admit_operation_start()
@@ -462,12 +543,12 @@ impl PhysicalStorageAccount {
         })
     }
 
-    pub(super) fn try_admit_startup_physical(
-        &self,
-        admission: PendingOperationStartAdmission<'_>,
+    pub(super) fn try_admit_startup_physical<'account>(
+        &'account self,
+        admission: PendingOperationStartAdmission<'account>,
         manifest: StartupPhysicalManifest,
         owners: PreheldStartupAccountOwners,
-    ) -> Result<ReadyStartupPhysicalAdmission, StartupPhysicalAdmissionFailure> {
+    ) -> Result<ReadyStartupPhysicalAdmission<'account>, StartupPhysicalAdmissionFailure> {
         let guard = StartupPhysicalTransitionGuard {
             admission,
             manifest,
@@ -549,11 +630,11 @@ impl<'account> PendingOperationStartAdmission<'account> {
         self,
         phases: &[P],
         plan: StartupCrossPlanePlan<O, P, D>,
-    ) -> Result<ReadyStartupCrossPlane<O, P, D>, StartupCrossPlaneAdmissionFailure<O, P, D>>
+    ) -> Result<ReadyStartupCrossPlane<'account, O, P, D>, StartupCrossPlaneAdmissionFailure<O, P, D>>
     where
         O: OperationOwner,
-        P: Copy + Ord,
-        D: Copy + Ord + fmt::Debug,
+        P: TerminalEvidenceKey,
+        D: TerminalEvidenceKey + fmt::Debug,
     {
         let account = self.account;
         let StartupCrossPlanePlan {
@@ -561,8 +642,12 @@ impl<'account> PendingOperationStartAdmission<'account> {
             physical: manifest,
         } = plan;
         let (limits, parts) = qualified_ledger.into_parts();
+        let expected_dimensions = limits.dimension_count();
         let ledger = Ledger::try_new(limits, phases)
             .map_err(StartupCrossPlaneAdmissionFailure::LedgerInitialization)?;
+        if !terminal_evidence_catalog_is_qualified(&ledger, expected_dimensions, phases.len()) {
+            return Err(StartupCrossPlaneAdmissionFailure::TerminalEvidenceCatalogInvariant);
+        }
         let graph = ledger
             .try_admit_startup_attribution_graph(parts)
             .map_err(StartupCrossPlaneAdmissionFailure::LedgerAdmission)?;

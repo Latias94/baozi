@@ -183,6 +183,25 @@ where
         })
     }
 
+    /// Rehydrates the coordinator around a ledger whose complete startup graph already crossed
+    /// the retained Ready boundary. No ledger or physical admission work is repeated here.
+    pub(crate) fn from_started_ledger(
+        control: OperationControl<PP, U>,
+        started: crate::retained::StartedLedger<O, LP, D>,
+    ) -> Self {
+        Self {
+            control,
+            ledger: started.into_inner(),
+            terminal: None,
+            progress: Vec::new(),
+            progress_evidence_bytes: 0,
+            last_phase_order: None,
+            delivered_events: 0,
+            delivered_bytes: 0,
+            next_sequence: 0,
+        }
+    }
+
     /// Polls cancellation and deadline state.
     pub fn poll(&mut self) -> Result<(), ControlCause> {
         if let Some(cause) = self.terminal.clone() {
@@ -513,18 +532,10 @@ where
         self.ledger.validate_live_reservation(reservation)
     }
 
-    #[allow(
-        dead_code,
-        reason = "crate-private until the U4 canonical consumers switch atomically"
-    )]
     pub(crate) fn retained_ledger(&self) -> &Ledger<O, LP, D> {
         &self.ledger
     }
 
-    #[allow(
-        dead_code,
-        reason = "crate-private until the U4 canonical consumers switch atomically"
-    )]
     pub(crate) fn try_prepare_typed_control(
         &mut self,
         final_progress: FinalProgress<PP, U>,
@@ -537,10 +548,6 @@ where
         self.poll()
     }
 
-    #[allow(
-        dead_code,
-        reason = "crate-private until the U4 canonical consumers switch atomically"
-    )]
     pub(crate) fn into_ledger_for_typed_publication(self) -> Ledger<O, LP, D> {
         let Self {
             mut control,

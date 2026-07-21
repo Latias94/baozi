@@ -8,7 +8,7 @@ use crate::{
     SceneValidationControl, SceneValidationError, SceneValidationFailure, SceneValidationLimits,
     SceneValidationStats, SceneValidationSuccess,
 };
-use baozi_operation::CapacityPlan;
+use baozi_operation::ReplacementCapacityPlan;
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -77,14 +77,14 @@ pub struct SceneCapacityPlan {
     original_len: usize,
     original_capacity: usize,
     additional: usize,
-    replacement: Option<CapacityPlan>,
+    replacement: Option<ReplacementCapacityPlan>,
 }
 
 impl SceneCapacityPlan {
     /// Returns the complete candidate-allocation envelope admitted before allocator entry.
     pub fn envelope_delta_bytes(&self) -> Result<u64, SceneBuildError> {
         self.replacement.map_or(Ok(0), |plan| {
-            plan.envelope_delta_bytes()
+            plan.candidate_envelope_bytes()
                 .map_err(|cause| SceneBuildError::CapacityPlan {
                     resource: self.resource,
                     cause,
@@ -1411,8 +1411,12 @@ fn capacity_plan<T>(
         None
     } else {
         Some(
-            CapacityPlan::for_type::<T>(0, 0, required_capacity)
-                .map_err(|cause| SceneBuildError::CapacityPlan { resource, cause })?,
+            ReplacementCapacityPlan::for_type::<T>(
+                collection.len(),
+                collection.capacity(),
+                required_capacity,
+            )
+            .map_err(|cause| SceneBuildError::CapacityPlan { resource, cause })?,
         )
     };
     Ok(SceneCapacityPlan {
@@ -1464,13 +1468,17 @@ fn allocate_replacement<T>(
     };
 
     replacement_plan
+        .verify_source(collection.len(), collection.capacity())
+        .map_err(|cause| SceneBuildError::CapacityPlan { resource, cause })?;
+    let candidate_plan = replacement_plan.candidate();
+    candidate_plan
         .verify_preflight(0, 0)
         .map_err(|cause| SceneBuildError::CapacityPlan { resource, cause })?;
     let mut replacement = Vec::new();
     replacement
-        .try_reserve_exact(replacement_plan.allocator_additional())
+        .try_reserve_exact(candidate_plan.allocator_additional())
         .map_err(|_| SceneBuildError::AllocationFailed { resource })?;
-    let replacement_bytes = replacement_plan
+    let replacement_bytes = candidate_plan
         .finish(replacement.len(), replacement.capacity())
         .map_err(|cause| SceneBuildError::CapacityPlan { resource, cause })?;
     Ok((Some(replacement), replacement_bytes))
@@ -1887,6 +1895,33 @@ mod tests {
             vec![MeshBinding::new(mesh)]
         );
         assert_eq!(scene.meshes()[mesh.index()].material, Some(material));
+    }
+
+    #[test]
+    fn repeated_node_replacements_have_geometric_total_move_work() {
+        const NODE_COUNT: usize = 4_096;
+
+        let mut builder = SceneBuilder::try_new().unwrap();
+        let mut parent = builder.root();
+        let mut previous_capacity = builder.data.nodes.capacity();
+        let mut replacement_count = 0_usize;
+        let mut total_moved_nodes = 0_usize;
+
+        for _ in 1..NODE_COUNT {
+            let source_len = builder.data.nodes.len();
+            parent = builder.add_child_node(parent, Node::default()).unwrap();
+            let current_capacity = builder.data.nodes.capacity();
+            if current_capacity != previous_capacity {
+                replacement_count += 1;
+                total_moved_nodes = total_moved_nodes
+                    .checked_add(source_len)
+                    .expect("small geometric move count");
+                previous_capacity = current_capacity;
+            }
+        }
+
+        assert!(replacement_count <= NODE_COUNT.ilog2() as usize + 1);
+        assert!(total_moved_nodes < NODE_COUNT * 2);
     }
 
     #[test]

@@ -1,11 +1,14 @@
 use super::{
-    AttributionBatchCreateError, AttributionBatchPlan, CanonicalOutput, CounterClass, Ledger,
-    LedgerCause, LedgerLimits, LedgerState, OperationAttributionReservation,
-    OutcomeEvidenceDestination, OutputCommitment, PublicationDestination, ReservationCore,
-    dimension_entry, lock, phase_entry,
+    AttributionBatchCreateError, AttributionBatchPlan, AttributionReservationBatch,
+    CanonicalOutput, CounterClass, FallbackBatchBaseline, Ledger, LedgerCause, LedgerLimits,
+    LedgerState, OperationAttributionReservation, OutcomeEvidenceDestination, OutputCommitment,
+    PublicationDestination, ReservationCore, StorageCoveringReservation, dimension_entry, lock,
+    phase_entry,
 };
+use crate::retained::ReadyStartupGraphSplitAuthority;
 use crate::{CapacityPlan, OperationOwner};
 use std::fmt;
+use std::marker::PhantomData;
 use std::mem;
 use std::sync::{Arc, Mutex};
 
@@ -64,10 +67,6 @@ const STARTUP_ACCOUNT_SHARE_STEP_COUNT: usize = 4;
 /// The phase remains part of the qualified value even though the current frozen policy has no
 /// phase-specific limit. That keeps startup qualification ready for a future phase-qualified
 /// `LedgerLimits<P, D>` without weakening today's dimension and operation-wide checks.
-#[allow(
-    dead_code,
-    reason = "crate-private until retained startup consumes the pure qualification proof"
-)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct StartupRetainedAttribution<P, D> {
     phase: P,
@@ -75,10 +74,6 @@ pub(crate) struct StartupRetainedAttribution<P, D> {
     bytes: u64,
 }
 
-#[allow(
-    dead_code,
-    reason = "crate-private until retained startup consumes the pure qualification proof"
-)]
 impl<P, D> StartupRetainedAttribution<P, D> {
     pub(crate) const fn new(phase: P, dimension: D, bytes: u64) -> Self {
         Self {
@@ -87,25 +82,13 @@ impl<P, D> StartupRetainedAttribution<P, D> {
             bytes,
         }
     }
-
-    pub(crate) fn into_parts(self) -> (P, D, u64) {
-        (self.phase, self.dimension, self.bytes)
-    }
 }
 
 /// One linear attempted-and-consumed work step paired with one startup account share.
-#[allow(
-    dead_code,
-    reason = "crate-private until retained startup consumes the pure qualification proof"
-)]
 pub(crate) struct StartupAccountShareStep<D> {
     charges: [(D, u64); 2],
 }
 
-#[allow(
-    dead_code,
-    reason = "crate-private until retained startup consumes the pure qualification proof"
-)]
 impl<D> StartupAccountShareStep<D> {
     pub(crate) fn into_charges(self) -> [(D, u64); 2] {
         self.charges
@@ -117,18 +100,10 @@ impl<D> StartupAccountShareStep<D> {
 /// The fixed step count is defined only by this envelope. Qualification and execution both consume
 /// these stored steps, so adding or removing an account share cannot silently drift from the pure
 /// ledger proof.
-#[allow(
-    dead_code,
-    reason = "crate-private until retained startup consumes the pure qualification proof"
-)]
 pub(crate) struct StartupAccountShareEnvelope<D> {
     steps: [StartupAccountShareStep<D>; STARTUP_ACCOUNT_SHARE_STEP_COUNT],
 }
 
-#[allow(
-    dead_code,
-    reason = "crate-private until retained startup consumes the pure qualification proof"
-)]
 impl<D: Copy> StartupAccountShareEnvelope<D> {
     pub(crate) const fn four_identical(charges: [(D, u64); 2]) -> Self {
         Self {
@@ -149,10 +124,6 @@ impl<D: Copy> StartupAccountShareEnvelope<D> {
 }
 
 /// The four destination-qualified attribution batches required by retained startup.
-#[allow(
-    dead_code,
-    reason = "crate-private until retained startup consumes the pure qualification proof"
-)]
 pub(crate) struct StartupAttributionBatchPlans<O, P, D>
 where
     O: OperationOwner,
@@ -165,10 +136,6 @@ where
     evidence: AttributionBatchPlan<O, P, D, OutcomeEvidenceDestination>,
 }
 
-#[allow(
-    dead_code,
-    reason = "crate-private until retained startup consumes the pure qualification proof"
-)]
 impl<O, P, D> StartupAttributionBatchPlans<O, P, D>
 where
     O: OperationOwner,
@@ -188,26 +155,6 @@ where
             evidence,
         }
     }
-
-    #[allow(
-        clippy::type_complexity,
-        reason = "the tuple preserves four static destinations"
-    )]
-    pub(crate) fn into_parts(
-        self,
-    ) -> (
-        AttributionBatchPlan<O, P, D, CanonicalOutput>,
-        AttributionBatchPlan<O, P, D, OutcomeEvidenceDestination>,
-        AttributionBatchPlan<O, P, D, OutcomeEvidenceDestination>,
-        AttributionBatchPlan<O, P, D, OutcomeEvidenceDestination>,
-    ) {
-        (
-            self.canonical_assembly,
-            self.evidence_assembly,
-            self.fallback,
-            self.evidence,
-        )
-    }
 }
 
 /// Consuming output of one successful startup-ledger qualification.
@@ -215,10 +162,6 @@ where
 /// This remains crate-private: outside callers cannot inspect or synthesize startup admission
 /// evidence, while the retained owner can consume the exact typed inputs without reconstructing
 /// them after crossing the side-effect boundary.
-#[allow(
-    dead_code,
-    reason = "crate-private until retained startup consumes the pure qualification proof"
-)]
 pub(crate) struct StartupLedgerPlanParts<O, P, D>
 where
     O: OperationOwner,
@@ -236,10 +179,6 @@ where
 /// The only constructor is `LedgerLimits::try_qualify_startup`. Qualification is read-only and
 /// allocation-free, so ordinary policy rejection happens before a ledger, coordinator, physical
 /// account admission, or allocator can observe startup.
-#[allow(
-    dead_code,
-    reason = "crate-private until retained startup consumes the pure qualification proof"
-)]
 #[must_use = "startup qualification must be consumed before crossing the side-effect boundary"]
 pub(crate) struct StartupLedgerPlan<O, P, D>
 where
@@ -251,10 +190,6 @@ where
     parts: StartupLedgerPlanParts<O, P, D>,
 }
 
-#[allow(
-    dead_code,
-    reason = "crate-private until retained startup consumes the pure qualification proof"
-)]
 impl<O, P, D> StartupLedgerPlan<O, P, D>
 where
     O: OperationOwner,
@@ -290,10 +225,6 @@ where
     D: Copy + Ord + fmt::Debug,
 {
     /// Purely qualifies the complete deterministic ledger envelope for retained startup.
-    #[allow(
-        dead_code,
-        reason = "crate-private until retained startup consumes the pure qualification proof"
-    )]
     pub(crate) fn try_qualify_startup<O, P>(
         self,
         batches: StartupAttributionBatchPlans<O, P, D>,
@@ -559,14 +490,11 @@ struct StartupWorkProjection<D> {
 struct StartupLedgerAdmission<P, D> {
     reservations: [StartupReservationProjection<P, D>; STARTUP_RESERVATION_COUNT as usize],
     work: [StartupWorkProjection<D>; STARTUP_WORK_CHARGE_COUNT],
+    commitments: [OutputCommitment<D, OutcomeEvidenceDestination>; 2],
     operation_live_after: u64,
     active_reservations_after: u64,
 }
 
-#[allow(
-    dead_code,
-    reason = "owned only by the provisional graph until the retained runtime cutover"
-)]
 struct StartupLedgerCores<O, P, D>
 where
     O: OperationOwner,
@@ -581,10 +509,16 @@ where
     evidence_attribution: ReservationCore<O, P, D>,
 }
 
-#[allow(
-    dead_code,
-    reason = "called only by the provisional graph destructor before runtime cutover"
-)]
+struct StartupLedgerCommit<O, P, D>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+{
+    cores: StartupLedgerCores<O, P, D>,
+    commitments: [OutputCommitment<D, OutcomeEvidenceDestination>; 2],
+}
+
 impl<O, P, D> StartupLedgerCores<O, P, D>
 where
     O: OperationOwner,
@@ -640,15 +574,57 @@ where
     commitment_limit: usize,
 }
 
-/// Provisional owner of the complete ledger-first startup attribution graph.
+fn into_runtime_batch<O, P, D, Destination>(
+    backing: StartupAttributionBatchBackings<O, P, D, Destination>,
+    capacity_core: ReservationCore<O, P, D>,
+    owner: Arc<Mutex<LedgerState<P, D>>>,
+) -> AttributionReservationBatch<O, P, D, Destination>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+    Destination: PublicationDestination,
+{
+    let StartupAttributionBatchBackings {
+        attributions,
+        commitments,
+        attribution_limit,
+        commitment_limit,
+    } = backing;
+    AttributionReservationBatch {
+        attributions,
+        commitments,
+        capacity_cover: Some(StorageCoveringReservation {
+            core: capacity_core,
+        }),
+        attribution_limit,
+        commitment_limit,
+        owner,
+    }
+}
+
+fn drop_startup_graph_ownership<O, P, D>(mut ownership: StartupAttributionGraphOwnership<O, P, D>)
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+{
+    drop_startup_batch_backings(&mut ownership.canonical_assembly);
+    drop_startup_batch_backings(&mut ownership.evidence_assembly);
+    drop_startup_batch_backings(&mut ownership.fallback);
+    drop_startup_batch_backings(&mut ownership.evidence);
+
+    let mut state = lock(&ownership.runtime_owners[0]);
+    test_note_startup_graph_ledger_release_lock();
+    ownership.cores.release_locked(&mut state);
+}
+
+/// Ready-owned ledger half of the complete cross-plane startup attribution graph.
 ///
-/// This rail remains crate-private and is deliberately disconnected from retained physical
-/// admission. Its destructor owns the only rollback path: all eight vector backings are destroyed
-/// before one ledger lock releases the four capacity covers and two retained attributions.
-#[allow(
-    dead_code,
-    reason = "the retained runtime cutover consumes this provisional graph in the next U4a batch"
-)]
+/// The cross-plane transition consumes this value into the production retained baseline only after
+/// physical admission commits. Before that split, its destructor owns the rollback path: all eight
+/// vector backings are destroyed before one ledger lock releases the four capacity covers and two
+/// retained attributions.
 #[must_use = "dropping the startup graph releases all live startup reservations atomically"]
 pub(crate) struct StartupAttributionGraph<O, P, D>
 where
@@ -656,7 +632,16 @@ where
     P: Copy + Ord,
     D: Copy + Ord,
 {
-    owner: Arc<Mutex<LedgerState<P, D>>>,
+    ownership: Option<StartupAttributionGraphOwnership<O, P, D>>,
+}
+
+struct StartupAttributionGraphOwnership<O, P, D>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+{
+    runtime_owners: [Arc<Mutex<LedgerState<P, D>>>; 4],
     canonical_assembly: StartupAttributionBatchBackings<O, P, D, CanonicalOutput>,
     evidence_assembly: StartupAttributionBatchBackings<O, P, D, OutcomeEvidenceDestination>,
     fallback: StartupAttributionBatchBackings<O, P, D, OutcomeEvidenceDestination>,
@@ -665,10 +650,6 @@ where
     _account_shares: StartupAccountShareEnvelope<D>,
 }
 
-#[allow(
-    dead_code,
-    reason = "the retained runtime cutover consumes this provisional graph in the next U4a batch"
-)]
 impl<O, P, D> StartupAttributionGraph<O, P, D>
 where
     O: OperationOwner,
@@ -682,11 +663,76 @@ where
         fallback: StartupBatchAllocationPlans,
         evidence: StartupBatchAllocationPlans,
     ) -> Result<(), AttributionBatchCreateError<D>> {
-        try_allocate_startup_batch(&mut self.canonical_assembly, canonical_assembly)?;
-        try_allocate_startup_batch(&mut self.evidence_assembly, evidence_assembly)?;
-        try_allocate_startup_batch(&mut self.fallback, fallback)?;
-        try_allocate_startup_batch(&mut self.evidence, evidence)?;
+        let Some(ownership) = self.ownership.as_mut() else {
+            return Err(AttributionBatchCreateError::CapacityOverflow);
+        };
+        try_allocate_startup_batch(&mut ownership.canonical_assembly, canonical_assembly)?;
+        try_allocate_startup_batch(&mut ownership.evidence_assembly, evidence_assembly)?;
+        try_allocate_startup_batch(&mut ownership.fallback, fallback)?;
+        try_allocate_startup_batch(&mut ownership.evidence, evidence)?;
         Ok(())
+    }
+
+    /// Converts the complete admitted graph into the existing runtime batches.
+    ///
+    /// The unforgeable authority is constructed only by the Ready cross-plane owner. All backing
+    /// capacity and ledger cores already exist, so this transition only moves ownership and fills
+    /// two preallocated attribution slots.
+    pub(crate) fn into_runtime_baseline(
+        mut self,
+        _authority: ReadyStartupGraphSplitAuthority,
+    ) -> FallbackBatchBaseline<O, P, D> {
+        let ownership = self
+            .ownership
+            .take()
+            .expect("ready startup graph owns its runtime parts");
+        let StartupAttributionGraphOwnership {
+            runtime_owners:
+                [
+                    canonical_owner,
+                    evidence_assembly_owner,
+                    fallback_owner,
+                    evidence_owner,
+                ],
+            canonical_assembly,
+            evidence_assembly,
+            mut fallback,
+            mut evidence,
+            cores,
+            _account_shares: _,
+        } = ownership;
+        let StartupLedgerCores {
+            canonical_assembly_cover,
+            evidence_assembly_cover,
+            fallback_cover,
+            evidence_cover,
+            fallback_attribution,
+            evidence_attribution,
+        } = cores;
+
+        fallback.attributions.push(OperationAttributionReservation {
+            core: fallback_attribution,
+            destination: PhantomData,
+        });
+        evidence.attributions.push(OperationAttributionReservation {
+            core: evidence_attribution,
+            destination: PhantomData,
+        });
+
+        FallbackBatchBaseline::new_unbound(
+            into_runtime_batch(
+                canonical_assembly,
+                canonical_assembly_cover,
+                canonical_owner,
+            ),
+            into_runtime_batch(
+                evidence_assembly,
+                evidence_assembly_cover,
+                evidence_assembly_owner,
+            ),
+            into_runtime_batch(fallback, fallback_cover, fallback_owner),
+            into_runtime_batch(evidence, evidence_cover, evidence_owner),
+        )
     }
 }
 
@@ -697,21 +743,12 @@ where
     D: Copy + Ord,
 {
     fn drop(&mut self) {
-        drop_startup_batch_backings(&mut self.canonical_assembly);
-        drop_startup_batch_backings(&mut self.evidence_assembly);
-        drop_startup_batch_backings(&mut self.fallback);
-        drop_startup_batch_backings(&mut self.evidence);
-
-        let mut state = lock(&self.owner);
-        test_note_startup_graph_ledger_release_lock();
-        self.cores.release_locked(&mut state);
+        if let Some(ownership) = self.ownership.take() {
+            drop_startup_graph_ownership(ownership);
+        }
     }
 }
 
-#[allow(
-    dead_code,
-    reason = "the retained runtime cutover consumes this provisional graph in the next U4a batch"
-)]
 impl<O, P, D> Ledger<O, P, D>
 where
     O: OperationOwner,
@@ -752,10 +789,9 @@ where
             StartupReservationSpec::for_retained(retained_attributions[0]),
             StartupReservationSpec::for_retained(retained_attributions[1]),
         ];
-        let cores = StartupLedgerCores::from_array(
-            self.try_admit_startup_ledger(reservation_specs, &account_shares, commitments)
-                .map_err(AttributionBatchCreateError::Ledger)?,
-        );
+        let StartupLedgerCommit { cores, commitments } = self
+            .try_admit_startup_ledger(reservation_specs, &account_shares, commitments)
+            .map_err(AttributionBatchCreateError::Ledger)?;
 
         let (canonical_assembly, canonical_allocation) = empty_startup_batch(canonical_assembly);
         let (evidence_assembly, evidence_assembly_allocation) =
@@ -763,13 +799,20 @@ where
         let (fallback, fallback_allocation) = empty_startup_batch(fallback);
         let (evidence, evidence_allocation) = empty_startup_batch(evidence);
         let mut graph = StartupAttributionGraph {
-            owner: Arc::clone(&self.state),
-            canonical_assembly,
-            evidence_assembly,
-            fallback,
-            evidence,
-            cores,
-            _account_shares: account_shares,
+            ownership: Some(StartupAttributionGraphOwnership {
+                runtime_owners: [
+                    Arc::clone(&self.state),
+                    Arc::clone(&self.state),
+                    Arc::clone(&self.state),
+                    Arc::clone(&self.state),
+                ],
+                canonical_assembly,
+                evidence_assembly,
+                fallback,
+                evidence,
+                cores,
+                _account_shares: account_shares,
+            }),
         };
         graph.try_allocate_backings(
             canonical_allocation,
@@ -778,8 +821,11 @@ where
             evidence_allocation,
         )?;
 
-        graph.fallback.commitments.push(commitments[0]);
-        graph.evidence.commitments.push(commitments[1]);
+        let Some(ownership) = graph.ownership.as_mut() else {
+            return Err(AttributionBatchCreateError::CapacityOverflow);
+        };
+        ownership.fallback.commitments.push(commitments[0]);
+        ownership.evidence.commitments.push(commitments[1]);
         Ok(graph)
     }
 
@@ -788,23 +834,30 @@ where
         reservation_specs: [StartupReservationSpec<P, D>; STARTUP_RESERVATION_COUNT as usize],
         account_shares: &StartupAccountShareEnvelope<D>,
         commitments: [OutputCommitment<D, OutcomeEvidenceDestination>; 2],
-    ) -> Result<[ReservationCore<O, P, D>; STARTUP_RESERVATION_COUNT as usize], LedgerCause<D>>
-    {
+    ) -> Result<StartupLedgerCommit<O, P, D>, LedgerCause<D>> {
         let mut state = lock(&self.state);
         Self::ensure_open(&state)?;
         let admission =
             self.preflight_startup_ledger(&state, reservation_specs, account_shares, commitments)?;
         commit_startup_ledger(&mut state, &admission);
-        Ok(admission.reservations.map(|projection| {
-            ReservationCore::new(
-                Arc::clone(&self.state),
-                projection.spec.phase,
-                projection.phase_position,
-                projection.spec.dimension,
-                projection.dimension_position,
-                projection.spec.bytes,
-            )
-        }))
+        let StartupLedgerAdmission {
+            reservations,
+            commitments,
+            ..
+        } = admission;
+        Ok(StartupLedgerCommit {
+            cores: StartupLedgerCores::from_array(reservations.map(|projection| {
+                ReservationCore::new(
+                    Arc::clone(&self.state),
+                    projection.spec.phase,
+                    projection.phase_position,
+                    projection.spec.dimension,
+                    projection.dimension_position,
+                    projection.spec.bytes,
+                )
+            })),
+            commitments,
+        })
     }
 
     fn preflight_startup_ledger(
@@ -812,7 +865,7 @@ where
         state: &LedgerState<P, D>,
         reservation_specs: [StartupReservationSpec<P, D>; STARTUP_RESERVATION_COUNT as usize],
         account_shares: &StartupAccountShareEnvelope<D>,
-        commitments: [OutputCommitment<D, OutcomeEvidenceDestination>; 2],
+        mut commitments: [OutputCommitment<D, OutcomeEvidenceDestination>; 2],
     ) -> Result<StartupLedgerAdmission<P, D>, LedgerCause<D>> {
         let mut reservations = reservation_specs.map(|spec| StartupReservationProjection {
             spec,
@@ -1019,19 +1072,21 @@ where
             }
         }
 
-        for (index, commitment) in commitments.iter().copied().enumerate() {
-            if commitments[..index]
-                .iter()
-                .any(|prior| prior.dimension == commitment.dimension)
-            {
-                continue;
-            }
+        for index in 0..commitments.len() {
+            let commitment = commitments[index];
             let dimension_position = state
                 .dimensions
                 .binary_search_by_key(&commitment.dimension, |entry| entry.dimension)
                 .map_err(|_| LedgerCause::UnknownDimension {
                     dimension: commitment.dimension,
                 })?;
+            commitments[index].dimension_position = dimension_position;
+            if commitments[..index]
+                .iter()
+                .any(|prior| prior.dimension == commitment.dimension)
+            {
+                continue;
+            }
             let added = commitments
                 .iter()
                 .filter(|candidate| candidate.dimension == commitment.dimension)
@@ -1065,6 +1120,7 @@ where
         Ok(StartupLedgerAdmission {
             reservations,
             work,
+            commitments,
             operation_live_after,
             active_reservations_after,
         })
@@ -1187,10 +1243,6 @@ fn enter_startup_graph_allocator() -> bool {
     }
 }
 
-#[allow(
-    dead_code,
-    reason = "called only by the provisional graph destructor before runtime cutover"
-)]
 fn drop_startup_batch_backings<O, P, D, Destination>(
     batch: &mut StartupAttributionBatchBackings<O, P, D, Destination>,
 ) where
@@ -1205,10 +1257,6 @@ fn drop_startup_batch_backings<O, P, D, Destination>(
     test_note_startup_graph_storage_release();
 }
 
-#[allow(
-    dead_code,
-    reason = "called only by the provisional graph destructor before runtime cutover"
-)]
 fn test_note_startup_graph_storage_release() {
     #[cfg(test)]
     STARTUP_GRAPH_STORAGE_RELEASES.with(|releases| {
@@ -1216,10 +1264,6 @@ fn test_note_startup_graph_storage_release() {
     });
 }
 
-#[allow(
-    dead_code,
-    reason = "called only by the provisional graph destructor before runtime cutover"
-)]
 fn test_note_startup_graph_ledger_release_lock() {
     #[cfg(test)]
     {

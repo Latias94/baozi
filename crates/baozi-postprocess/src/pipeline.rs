@@ -14,7 +14,7 @@ use baozi_core::{
 use baozi_operation::{
     CapacityPlan, CapacityPlanError, Commitment, ControlCause, FinalProgress, LedgerCause,
     LedgerLimits, LedgerLimitsError, LiveReservation, OperationCoordinator, PendingPublication,
-    PublicationCause, PublicationReservationBatch,
+    PublicationCause, PublicationReservationBatch, ReplacementCapacityPlan,
 };
 use std::mem::size_of;
 
@@ -306,10 +306,14 @@ impl ReservationList {
         }
 
         let desired = required.max(4);
-        let plan = CapacityPlan::for_type::<BufferReservation>(0, 0, desired)
-            .map_err(|_| PostProcessError::CapacityExceeded { context, resource })?;
-        let admitted = plan
-            .envelope_delta_bytes()
+        let replacement_plan = ReplacementCapacityPlan::for_type::<BufferReservation>(
+            self.values.len(),
+            self.values.capacity(),
+            desired,
+        )
+        .map_err(|_| PostProcessError::CapacityExceeded { context, resource })?;
+        let admitted = replacement_plan
+            .candidate_envelope_bytes()
             .map_err(|_| PostProcessError::CapacityExceeded { context, resource })?;
         let mut candidate = Self::new();
         resize_or_reserve(
@@ -319,15 +323,23 @@ impl ReservationList {
             PostProcessDimension::StagingBytes,
             admitted,
         )?;
-        plan.verify_preflight(candidate.values.len(), candidate.values.capacity())
+        replacement_plan
+            .verify_source(self.values.len(), self.values.capacity())
+            .map_err(|_| PostProcessError::ValidationControlInvariant {
+                message: "reservation-list source plan became stale before allocator entry",
+            })?;
+        let candidate_plan = replacement_plan.candidate();
+        candidate_plan
+            .verify_preflight(candidate.values.len(), candidate.values.capacity())
             .map_err(|_| PostProcessError::ValidationControlInvariant {
                 message: "reservation-list candidate plan became stale before allocator entry",
             })?;
         candidate
             .values
-            .try_reserve_exact(plan.allocator_additional())
+            .try_reserve_exact(candidate_plan.allocator_additional())
             .map_err(|_| PostProcessError::CapacityExceeded { context, resource })?;
-        plan.finish(candidate.values.len(), candidate.values.capacity())
+        candidate_plan
+            .finish(candidate.values.len(), candidate.values.capacity())
             .map_err(|_| PostProcessError::ValidationControlInvariant {
                 message: "reservation-list candidate violated the qualified capacity envelope",
             })?;

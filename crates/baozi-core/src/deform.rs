@@ -6,7 +6,7 @@ use crate::identity::{
 };
 use crate::math::Mat4;
 use crate::provenance::Provenance;
-use baozi_operation::CapacityPlan;
+use baozi_operation::GrowableCapacityPlan;
 use std::collections::HashSet;
 use thiserror::Error;
 
@@ -1186,7 +1186,7 @@ fn try_reserve_deform_collection<T>(
         return Ok(());
     }
 
-    let plan = CapacityPlan::for_type::<T>(values.len(), values.capacity(), desired)
+    let plan = GrowableCapacityPlan::for_type::<T>(values.len(), values.capacity(), desired)
         .map_err(|_| DeformCollectionError::Allocation { resource })?;
     preflight_deform_collection::<T>(
         resource,

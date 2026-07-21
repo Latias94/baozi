@@ -5,18 +5,19 @@ pub(crate) struct CanonicalSceneCapacityPlan {
     collection: CanonicalSceneCollection,
     original_len: usize,
     original_capacity: usize,
-    replacement: Option<CapacityPlan>,
+    replacement: Option<ReplacementCapacityPlan>,
     pub(super) prepared_value_storage_bytes: u64,
 }
 
 impl CanonicalSceneCapacityPlan {
     pub(crate) fn collection_envelope_delta_bytes(self) -> Result<u64, CanonicalSceneBuildError> {
         self.replacement.map_or(Ok(0), |plan| {
-            plan.envelope_delta_bytes()
-                .map_err(|cause| CanonicalSceneBuildError::CapacityPlan {
+            plan.candidate_envelope_bytes().map_err(|cause| {
+                CanonicalSceneBuildError::CapacityPlan {
                     collection: self.collection,
                     cause,
-                })
+                }
+            })
         })
     }
 
@@ -683,8 +684,12 @@ fn canonical_capacity_plan<T>(
         None
     } else {
         Some(
-            CapacityPlan::for_type::<T>(0, 0, required_capacity)
-                .map_err(|cause| CanonicalSceneBuildError::CapacityPlan { collection, cause })?,
+            ReplacementCapacityPlan::for_type::<T>(
+                values.len(),
+                values.capacity(),
+                required_capacity,
+            )
+            .map_err(|cause| CanonicalSceneBuildError::CapacityPlan { collection, cause })?,
         )
     };
     Ok(CanonicalSceneCapacityPlan {
@@ -736,13 +741,17 @@ fn allocate_collection_replacement<T>(
     };
 
     replacement_plan
+        .verify_source(values.len(), values.capacity())
+        .map_err(|cause| CanonicalSceneBuildError::CapacityPlan { collection, cause })?;
+    let candidate_plan = replacement_plan.candidate();
+    candidate_plan
         .verify_preflight(0, 0)
         .map_err(|cause| CanonicalSceneBuildError::CapacityPlan { collection, cause })?;
     let mut replacement = Vec::new();
     replacement
-        .try_reserve_exact(replacement_plan.allocator_additional())
+        .try_reserve_exact(candidate_plan.allocator_additional())
         .map_err(|_| CanonicalSceneBuildError::AllocationFailed { collection })?;
-    let replacement_bytes = replacement_plan
+    let replacement_bytes = candidate_plan
         .finish(replacement.len(), replacement.capacity())
         .map_err(|cause| CanonicalSceneBuildError::CapacityPlan { collection, cause })?;
     if replacement.capacity() < required_capacity {

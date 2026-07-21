@@ -1,4 +1,8 @@
 use super::*;
+use crate::ledger::{
+    test_startup_graph_allocation_entries, test_startup_graph_ledger_release_locks,
+    test_startup_graph_storage_releases,
+};
 
 #[test]
 fn publication_evidence_precharges_the_capacity_envelope() {
@@ -28,7 +32,7 @@ fn publication_evidence_precharges_the_capacity_envelope() {
         EvidenceOperation::try_start(OperationControl::default(), limits, &account, plan, || {
             Ok(7_u32)
         })
-        .unwrap_or_else(|_| panic!("evidence operation must start"));
+        .unwrap_or_else(|error| panic!("evidence operation must start: {error:?}"));
     assert_eq!(account.share_call_count(), 4);
     let allocation = operation.baseline.test_evidence_allocation();
     let outer_bytes = FinalOwnerAllocation::<
@@ -88,6 +92,114 @@ fn startup_share_qualification_rejection_preserves_the_borrowed_host_account() {
 }
 
 #[test]
+fn startup_fallback_footprint_mismatch_rejects_before_allocator_entry() {
+    reset_startup_test_observations();
+    mismatch_next_startup_fallback_footprint();
+    let factory = account_factory(1);
+    let account = account(&factory, u64::MAX, 128);
+    let before = account.snapshot();
+    let builder_called = AtomicBool::new(false);
+    let (limits, plan) = startup_limits_and_plan();
+
+    let result =
+        TestOperation::try_start(OperationControl::default(), limits, &account, plan, || {
+            builder_called.store(true, Ordering::SeqCst);
+            Ok(7_u32)
+        });
+
+    let error = match result {
+        Err(error) => error,
+        Ok(operation) => {
+            drop(operation);
+            panic!("fallback footprint mismatch unexpectedly started")
+        }
+    };
+    assert!(
+        matches!(
+            &error,
+            RetainedOperationStartError::Writer(RetainedWriterError::OwnershipUnverified)
+        ),
+        "unexpected fallback mismatch result: {error:?}"
+    );
+    assert!(!builder_called.load(Ordering::SeqCst));
+    assert_eq!(take_start_evidence_build_calls(), 0);
+    assert_eq!(take_startup_ready_final_owner_allocator_entries(), Some(0));
+    assert_eq!(test_retained_final_owner_allocator_entries(), 0);
+    assert_eq!(test_startup_payload_allocation_attempts(), (0, 0));
+    assert_eq!(take_startup_failure_ledger_snapshot(), Some((0, 0)));
+    let after = account.snapshot();
+    assert_eq!(after.live_retained_bytes(), before.live_retained_bytes());
+    assert_eq!(
+        after.live_retained_allocations(),
+        before.live_retained_allocations()
+    );
+    assert!(after.poisoned());
+    assert_eq!(
+        after
+            .first_poison_evidence()
+            .map(AccountPoisonEvidence::reason),
+        Some(AccountPoisonReason::OwnershipGraphUnverified)
+    );
+
+    drop(account);
+    assert_eq!(factory.snapshot().live_accounts(), 0);
+}
+
+#[test]
+fn startup_evidence_footprint_mismatch_rejects_before_allocator_entry() {
+    reset_startup_test_observations();
+    mismatch_next_startup_evidence_footprint();
+    let factory = account_factory(1);
+    let account = account(&factory, u64::MAX, 128);
+    let before = account.snapshot();
+    let builder_called = AtomicBool::new(false);
+    let (limits, plan) = startup_limits_and_plan();
+
+    let result =
+        TestOperation::try_start(OperationControl::default(), limits, &account, plan, || {
+            builder_called.store(true, Ordering::SeqCst);
+            Ok(7_u32)
+        });
+
+    let error = match result {
+        Err(error) => error,
+        Ok(operation) => {
+            drop(operation);
+            panic!("evidence footprint mismatch unexpectedly started")
+        }
+    };
+    assert!(
+        matches!(
+            &error,
+            RetainedOperationStartError::Writer(RetainedWriterError::OwnershipUnverified)
+        ),
+        "unexpected evidence mismatch result: {error:?}"
+    );
+    assert!(!builder_called.load(Ordering::SeqCst));
+    assert_eq!(take_start_evidence_build_calls(), 0);
+    assert_eq!(take_startup_ready_final_owner_allocator_entries(), Some(0));
+    assert_eq!(test_retained_final_owner_allocator_entries(), 0);
+    assert_eq!(test_startup_payload_allocation_attempts(), (0, 0));
+    assert_eq!(take_startup_failure_ledger_snapshot(), Some((0, 0)));
+    let after = account.snapshot();
+    assert_eq!(after.live_retained_bytes(), before.live_retained_bytes());
+    assert_eq!(
+        after.live_retained_allocations(),
+        before.live_retained_allocations()
+    );
+    assert!(after.poisoned());
+    assert_eq!(
+        after
+            .first_poison_evidence()
+            .map(AccountPoisonEvidence::reason),
+        Some(AccountPoisonReason::OwnershipGraphUnverified)
+    );
+
+    drop(account);
+    assert_eq!(factory.snapshot().live_accounts(), 0);
+}
+
+#[test]
 fn block_handle_clone_is_charged_before_builder_or_account_share() {
     let factory = account_factory(1);
     let account = account(&factory, 4_096, 16);
@@ -105,7 +217,7 @@ fn block_handle_clone_is_charged_before_builder_or_account_share() {
         TestOperation::try_start(OperationControl::default(), limits, &account, plan, || {
             Ok(7_u32)
         })
-        .unwrap_or_else(|_| panic!("exact pre-block handle budget must start"));
+        .unwrap_or_else(|error| panic!("exact pre-block handle budget must start: {error:?}"));
     let mut assembly: TestPublication<u64, u64> = operation
         .try_publication_assembly(publication_plan(1, 1))
         .unwrap_or_else(|_| panic!("exact pre-block handle budget must open tables"));
@@ -249,6 +361,49 @@ fn existing_poison_does_not_suppress_a_later_startup_ownership_fault() {
 
     drop(account);
     assert_eq!(factory.snapshot().live_accounts(), 1);
+}
+
+#[test]
+fn terminal_evidence_catalog_rejection_precedes_attribution_and_physical_commit() {
+    reset_startup_test_observations();
+    fail_next_terminal_evidence_catalog_qualification();
+    let factory = account_factory(1);
+    let account = account(&factory, u64::MAX, 128);
+    let before = account.snapshot();
+    let (limits, plan) = startup_limits_and_plan();
+    let builder_called = AtomicBool::new(false);
+    let graph_allocations = test_startup_graph_allocation_entries();
+    let graph_storage_releases = test_startup_graph_storage_releases();
+    let graph_ledger_release_locks = test_startup_graph_ledger_release_locks();
+
+    let result =
+        TestOperation::try_start(OperationControl::default(), limits, &account, plan, || {
+            builder_called.store(true, Ordering::SeqCst);
+            Ok(7_u32)
+        });
+
+    assert!(matches!(
+        result,
+        Err(RetainedOperationStartError::TerminalEvidenceCatalogInvariant)
+    ));
+    assert!(!builder_called.load(Ordering::SeqCst));
+    assert_eq!(take_start_evidence_build_calls(), 0);
+    assert_eq!(test_startup_payload_allocation_attempts(), (0, 0));
+    assert_eq!(test_startup_graph_allocation_entries(), graph_allocations);
+    assert_eq!(
+        test_startup_graph_storage_releases(),
+        graph_storage_releases
+    );
+    assert_eq!(
+        test_startup_graph_ledger_release_locks(),
+        graph_ledger_release_locks
+    );
+    assert_eq!(account.share_call_count(), 0);
+    assert_eq!(account.snapshot(), before);
+    assert_eq!(take_startup_ready_final_owner_allocator_entries(), None);
+
+    drop(account);
+    assert_eq!(factory.snapshot().live_accounts(), 0);
 }
 
 #[test]

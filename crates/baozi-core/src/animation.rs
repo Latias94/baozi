@@ -5,7 +5,7 @@ use crate::extension::{
 use crate::identity::{MeshInstanceIndex, NodeIndex};
 use crate::math::{Quat, Vec3, Vec4};
 use crate::provenance::Provenance;
-use baozi_operation::{CapacityPlan, CapacityPlanError};
+use baozi_operation::{CapacityPlanError, GrowableCapacityPlan};
 use std::collections::{HashMap, TryReserveError};
 use std::fmt;
 use std::iter::FusedIterator;
@@ -1657,9 +1657,12 @@ fn try_reserve_clip_channels(
         return Ok(());
     }
 
-    let plan =
-        CapacityPlan::for_type::<AnimationChannel>(channels.len(), channels.capacity(), desired)
-            .map_err(|source| AnimationBuildError::CapacityPlan { resource, source })?;
+    let plan = GrowableCapacityPlan::for_type::<AnimationChannel>(
+        channels.len(),
+        channels.capacity(),
+        desired,
+    )
+    .map_err(|source| AnimationBuildError::CapacityPlan { resource, source })?;
     collection_limit.preflight_capacity::<AnimationChannel>(resource, plan.envelope_capacity())?;
     validate_clip_retained_budget(plan.envelope_capacity(), nested_retained_bytes, limits)?;
 
@@ -2156,7 +2159,7 @@ fn try_reserve_collection<T>(
         return Ok(());
     }
 
-    let plan = CapacityPlan::for_type::<T>(values.len(), values.capacity(), desired)
+    let plan = GrowableCapacityPlan::for_type::<T>(values.len(), values.capacity(), desired)
         .map_err(|source| AnimationBuildError::CapacityPlan { resource, source })?;
     limit.preflight_capacity::<T>(resource, plan.envelope_capacity())?;
     values
@@ -2235,7 +2238,7 @@ fn try_reserve_fixed_sample_part<T>(
         return Ok(());
     }
 
-    let plan = CapacityPlan::for_type::<T>(values.len(), values.capacity(), desired)
+    let plan = GrowableCapacityPlan::for_type::<T>(values.len(), values.capacity(), desired)
         .map_err(|source| AnimationBuildError::CapacityPlan { resource, source })?;
     collection_limit.preflight_capacity::<T>(resource, plan.envelope_capacity())?;
     let projected = base.try_with_fixed_part::<T>(plan.envelope_capacity(), cells_per_value)?;
@@ -2356,7 +2359,7 @@ fn try_reserve_morph_outer(
         return Ok(());
     }
 
-    let plan = CapacityPlan::for_type::<Vec<f32>>(values.len(), values.capacity(), desired)
+    let plan = GrowableCapacityPlan::for_type::<Vec<f32>>(values.len(), values.capacity(), desired)
         .map_err(|source| AnimationBuildError::CapacityPlan { resource, source })?;
     collection_limit.preflight_capacity::<Vec<f32>>(resource, plan.envelope_capacity())?;
     validate_morph_retained_budget(
@@ -3286,22 +3289,30 @@ mod tests {
     #[test]
     fn clip_retained_budget_stops_before_polling_the_tail() {
         let (_arena, provenance) = test_provenance_fixture();
+        let channel_header_bytes = std::mem::size_of::<AnimationChannel>();
+        let keys_per_channel = channel_header_bytes
+            .checked_div(std::mem::size_of::<Vec3>())
+            .and_then(|whole_values| whole_values.checked_add(1))
+            .expect("test channel payload size should fit");
+        let keys_per_channel_u32 =
+            u32::try_from(keys_per_channel).expect("test key count should fit u32");
         let channels = (0..3)
             .map(|index| {
                 channel(
                     AnimationTarget::NodeTranslation(node(index)),
                     AnimationInterpolation::Linear,
-                    [0.0],
+                    (0..keys_per_channel_u32).map(f64::from),
                     AnimationExtrapolation::Constant,
                     AnimationExtrapolation::Constant,
-                    translation_values(1),
+                    translation_values(keys_per_channel),
                     provenance,
                 )
                 .expect("test channel should be valid")
             })
             .collect::<Vec<_>>();
         let one_channel_bytes = channels[0].retained_allocation_bytes();
-        let planned_header_bytes = 4 * std::mem::size_of::<AnimationChannel>();
+        assert!(one_channel_bytes > channel_header_bytes);
+        let planned_header_bytes = 4 * channel_header_bytes;
         let maximum = planned_header_bytes + one_channel_bytes;
         let limits = AnimationLimits::canonical()
             .try_with_max_clip_retained_bytes(maximum)

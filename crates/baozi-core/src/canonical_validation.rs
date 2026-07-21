@@ -31,7 +31,7 @@ use crate::validation_control::{
     SceneFootprint, SceneReservationKind, SceneValidationControl, SceneValidationLimits,
     SceneValidationStats, SceneValidationWork, try_publish_coupled, try_publish_coupled_with,
 };
-use baozi_operation::CapacityPlan;
+use baozi_operation::{CapacityPlan, GrowableCapacityPlan};
 use std::error::Error;
 use std::mem::size_of;
 use thiserror::Error;
@@ -303,12 +303,13 @@ impl IssueCollector {
                 .len()
                 .checked_add(1)
                 .ok_or(CanonicalValidationError::AccountingOverflow)?;
-            let plan = CapacityPlan::for_type::<CanonicalValidationIssue>(
+            let growth = GrowableCapacityPlan::for_type::<CanonicalValidationIssue>(
                 self.issues.len(),
                 self.issues.capacity(),
                 desired,
             )
             .map_err(|_| CanonicalValidationError::AccountingOverflow)?;
+            let plan = growth;
             let envelope_bytes = issue_capacity_bytes(plan.envelope_capacity())?;
             if envelope_bytes > self.maximum_bytes {
                 return Ok(());
@@ -3790,38 +3791,45 @@ mod tests {
             .expect("out-of-range children must fail validation");
         let full_issues = baseline.issues().to_vec();
         let full_issue_count = u64::try_from(full_issues.len()).unwrap();
-        let full_issue_bytes = baseline.retained_issue_bytes();
+        let actual_retained_issue_bytes = baseline.retained_issue_bytes();
+        let full_admission_envelope_bytes = issue_capacity_bytes(
+            CapacityPlan::for_type::<CanonicalValidationIssue>(0, 0, full_issues.len())
+                .expect("the small diagnostic capacity plan must fit")
+                .envelope_capacity(),
+        )
+        .expect("the small diagnostic admission envelope must fit");
 
         assert_eq!(full_issue_count, 5);
         assert_eq!(baseline.omitted_issue_count(), 0);
-        assert!(full_issue_bytes > 0);
+        assert!(actual_retained_issue_bytes > 0);
+        assert!(actual_retained_issue_bytes <= full_admission_envelope_bytes);
 
         let exact = validate_canonical_scene(
             build_draft(),
             SceneValidationLimits::default()
                 .with_max_diagnostic_issues(full_issue_count)
-                .with_max_diagnostic_bytes(full_issue_bytes),
+                .with_max_diagnostic_bytes(full_admission_envelope_bytes),
         )
         .err()
         .expect("the exact diagnostic boundaries must retain every issue");
         assert_eq!(exact.issues(), full_issues);
         assert_eq!(exact.omitted_issue_count(), 0);
-        assert!(exact.retained_issue_bytes() <= full_issue_bytes);
+        assert!(exact.retained_issue_bytes() <= full_admission_envelope_bytes);
 
         let prefix_len = full_issues.len() - 1;
         let issue_limited = validate_canonical_scene(
             build_draft(),
             SceneValidationLimits::default()
                 .with_max_diagnostic_issues(full_issue_count - 1)
-                .with_max_diagnostic_bytes(full_issue_bytes),
+                .with_max_diagnostic_bytes(full_admission_envelope_bytes),
         )
         .err()
         .expect("the issue-count boundary must still report validation failure");
         assert_eq!(issue_limited.issues(), &full_issues[..prefix_len]);
         assert_eq!(issue_limited.omitted_issue_count(), 1);
-        assert!(issue_limited.retained_issue_bytes() <= full_issue_bytes);
+        assert!(issue_limited.retained_issue_bytes() <= full_admission_envelope_bytes);
 
-        let byte_limit = full_issue_bytes - 1;
+        let byte_limit = full_admission_envelope_bytes - 1;
         let byte_limited = validate_canonical_scene(
             build_draft(),
             SceneValidationLimits::default()

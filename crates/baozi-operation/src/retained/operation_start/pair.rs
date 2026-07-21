@@ -1,9 +1,8 @@
 use super::config::RetainedWriterError;
 use crate::control::discard_untrusted_panic_payload;
 use crate::ledger::{
-    AttributionBatchCreateError, AttributionBatchPlan, AttributionReservationBatch,
-    CanonicalOutput, Ledger, OperationAttributionReservation, OutcomeEvidenceDestination,
-    OutputCommitment, PublicationDestination, StartupRetainedAttribution,
+    AttributionReservationBatch, CanonicalOutput, FallbackBatchBaseline,
+    OperationAttributionReservation, OutcomeEvidenceDestination,
 };
 use crate::owner::OperationOwner;
 use crate::retained::account::{AccountPoisonReason, AccountPoisoned, AdmissionCharge};
@@ -26,41 +25,6 @@ use crate::retained::take_injected_start_fallback_account_anchor_loss;
 use std::fmt;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
-pub(in crate::retained) struct StartupRetainedPartPlan<O, P, D, Destination>
-where
-    O: OperationOwner,
-    P: Copy + Ord,
-    D: Copy + Ord,
-    Destination: PublicationDestination,
-{
-    attribution: StartupRetainedAttribution<P, D>,
-    batch: AttributionBatchPlan<O, P, D, Destination>,
-    allocation: RetainedAllocationPlan,
-    commitment: OutputCommitment<D, Destination>,
-}
-
-impl<O, P, D, Destination> StartupRetainedPartPlan<O, P, D, Destination>
-where
-    O: OperationOwner,
-    P: Copy + Ord,
-    D: Copy + Ord,
-    Destination: PublicationDestination,
-{
-    pub(in crate::retained) const fn new(
-        attribution: StartupRetainedAttribution<P, D>,
-        batch: AttributionBatchPlan<O, P, D, Destination>,
-        allocation: RetainedAllocationPlan,
-        commitment: OutputCommitment<D, Destination>,
-    ) -> Self {
-        Self {
-            attribution,
-            batch,
-            allocation,
-            commitment,
-        }
-    }
-}
-
 struct StartupRetainedSideFailure<D> {
     cause: RetainedWriterError<D>,
     fault: Option<AccountPoisonReason>,
@@ -71,6 +35,85 @@ struct StartupRetainedSideFailure<D> {
 enum StartupRetainedSide {
     Fallback,
     Evidence,
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static STARTUP_FALLBACK_ALLOCATION_ATTEMPTS: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
+    static STARTUP_EVIDENCE_ALLOCATION_ATTEMPTS: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
+    static MISMATCH_NEXT_STARTUP_FALLBACK_FOOTPRINT: std::cell::Cell<bool> = const {
+        std::cell::Cell::new(false)
+    };
+    static MISMATCH_NEXT_STARTUP_EVIDENCE_FOOTPRINT: std::cell::Cell<bool> = const {
+        std::cell::Cell::new(false)
+    };
+}
+
+fn note_startup_payload_allocation_attempt(side: StartupRetainedSide) {
+    #[cfg(test)]
+    match side {
+        StartupRetainedSide::Fallback => STARTUP_FALLBACK_ALLOCATION_ATTEMPTS.with(|entries| {
+            entries.set(entries.get().saturating_add(1));
+        }),
+        StartupRetainedSide::Evidence => STARTUP_EVIDENCE_ALLOCATION_ATTEMPTS.with(|entries| {
+            entries.set(entries.get().saturating_add(1));
+        }),
+    }
+    #[cfg(not(test))]
+    let _ = side;
+}
+
+#[cfg(test)]
+pub(crate) fn test_startup_payload_allocation_attempts() -> (usize, usize) {
+    (
+        STARTUP_FALLBACK_ALLOCATION_ATTEMPTS.with(std::cell::Cell::get),
+        STARTUP_EVIDENCE_ALLOCATION_ATTEMPTS.with(std::cell::Cell::get),
+    )
+}
+
+#[cfg(test)]
+pub(crate) fn reset_startup_payload_allocation_attempts() {
+    STARTUP_FALLBACK_ALLOCATION_ATTEMPTS.with(|entries| entries.set(0));
+    STARTUP_EVIDENCE_ALLOCATION_ATTEMPTS.with(|entries| entries.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn mismatch_next_startup_fallback_footprint() {
+    MISMATCH_NEXT_STARTUP_FALLBACK_FOOTPRINT.with(|mismatch| mismatch.set(true));
+}
+
+#[cfg(test)]
+pub(crate) fn mismatch_next_startup_evidence_footprint() {
+    MISMATCH_NEXT_STARTUP_EVIDENCE_FOOTPRINT.with(|mismatch| mismatch.set(true));
+}
+
+#[cfg(test)]
+pub(crate) fn reset_startup_footprint_mismatches() {
+    MISMATCH_NEXT_STARTUP_FALLBACK_FOOTPRINT.with(|mismatch| mismatch.set(false));
+    MISMATCH_NEXT_STARTUP_EVIDENCE_FOOTPRINT.with(|mismatch| mismatch.set(false));
+}
+
+fn take_startup_footprint_mismatch(side: StartupRetainedSide) -> bool {
+    #[cfg(test)]
+    {
+        match side {
+            StartupRetainedSide::Fallback => {
+                MISMATCH_NEXT_STARTUP_FALLBACK_FOOTPRINT.with(|mismatch| mismatch.replace(false))
+            }
+            StartupRetainedSide::Evidence => {
+                MISMATCH_NEXT_STARTUP_EVIDENCE_FOOTPRINT.with(|mismatch| mismatch.replace(false))
+            }
+        }
+    }
+    #[cfg(not(test))]
+    {
+        let _ = side;
+        false
+    }
 }
 
 struct StartupPendingResolution {
@@ -313,6 +356,7 @@ where
     Pending {
         account: PhysicalStorageAccount,
         admission: PendingRetainedAdmission<'account>,
+        batch: AttributionReservationBatch<O, P, D, OutcomeEvidenceDestination>,
     },
     Constructing(StartupRetainedSideConstruction<'account, O, P, D, T>),
     Ready(ReadyStartupRetainedSide<'account, O, P, D, T>),
@@ -329,8 +373,12 @@ where
 {
     fn begin_construction(&mut self) {
         let pending = std::mem::replace(self, Self::Empty);
-        let (account, admission) = match pending {
-            Self::Pending { account, admission } => (account, admission),
+        let (account, admission, batch) = match pending {
+            Self::Pending {
+                account,
+                admission,
+                batch,
+            } => (account, admission, batch),
             state => {
                 *self = state;
                 unreachable_final_owner_state();
@@ -339,7 +387,7 @@ where
         *self = Self::Constructing(StartupRetainedSideConstruction {
             unarmed: None,
             attribution: None,
-            batch: None,
+            batch: Some(batch),
             admission: Some(admission),
             account: Some(account),
         });
@@ -352,107 +400,46 @@ where
         }
     }
 
-    fn try_prepare(
-        &mut self,
-        ledger: &Ledger<O, P, D>,
-        plan: StartupRetainedPartPlan<O, P, D, OutcomeEvidenceDestination>,
+    fn try_preflight(
+        &self,
+        side: StartupRetainedSide,
+        allocation_plan: RetainedAllocationPlan,
     ) -> Result<(), StartupRetainedSideFailure<D>> {
-        self.begin_construction();
-        let construction = self.construction_mut();
-        let admission = match construction.admission.as_ref() {
-            Some(admission) => admission,
-            None => unreachable_final_owner_state(),
-        };
-        let account = match construction.account.as_ref() {
-            Some(account) => account,
-            None => unreachable_final_owner_state(),
+        let Self::Pending {
+            account,
+            admission,
+            batch,
+        } = self
+        else {
+            return Err(StartupRetainedSideFailure::ownership(
+                RetainedWriterError::InvalidPublicationPlan,
+            ));
         };
         let expected_charge = account
-            .checked_retained_charge::<T>(plan.allocation)
+            .checked_retained_charge::<T>(allocation_plan)
             .map_err(|cause| {
                 StartupRetainedSideFailure::clean(RetainedWriterError::Physical(cause))
             })?;
-        let (phase, attribution_dimension, qualified_bytes) = plan.attribution.into_parts();
-        if expected_charge != admission.charge
-            || qualified_bytes != admission.charge.bytes
+        if take_startup_footprint_mismatch(side)
+            || expected_charge != admission.charge
+            || batch.attribution_len() != 1
+            || batch.attributed_bytes() != Some(admission.charge.bytes)
             || !account.is_same_account(admission.account)
         {
             return Err(StartupRetainedSideFailure::ownership(
                 RetainedWriterError::InvalidPublicationPlan,
             ));
         }
+        Ok(())
+    }
 
-        let batch = match catch_unwind(AssertUnwindSafe(|| {
-            ledger.try_attribution_batch_from_plan(plan.batch)
-        })) {
-            Err(payload) => {
-                discard_untrusted_panic_payload(payload);
-                return Err(StartupRetainedSideFailure::uncertain(
-                    RetainedWriterError::OwnershipUnverified,
-                ));
-            }
-            Ok(Err(AttributionBatchCreateError::CapacityOverflow)) => {
-                return Err(StartupRetainedSideFailure::clean(
-                    RetainedWriterError::BatchCapacity,
-                ));
-            }
-            Ok(Err(AttributionBatchCreateError::AllocationFailed)) => {
-                return Err(StartupRetainedSideFailure::clean(
-                    RetainedWriterError::BatchAllocationFailed,
-                ));
-            }
-            Ok(Err(AttributionBatchCreateError::Ledger(_))) => {
-                return Err(StartupRetainedSideFailure::uncertain(
-                    RetainedWriterError::OwnershipUnverified,
-                ));
-            }
-            Ok(Ok(batch)) => batch,
-        };
-        construction.batch = Some(batch);
-        let batch = match construction.batch.as_mut() {
-            Some(batch) => batch,
-            None => unreachable_final_owner_state(),
-        };
-        if !batch.has_attribution_slot()
-            || ledger.try_push_commitment(batch, plan.commitment).is_err()
-        {
-            return Err(StartupRetainedSideFailure::uncertain(
-                RetainedWriterError::OwnershipUnverified,
-            ));
-        }
-
-        let attribution = match catch_unwind(AssertUnwindSafe(|| {
-            ledger.reserve_operation_attribution::<OutcomeEvidenceDestination>(
-                phase,
-                attribution_dimension,
-                qualified_bytes,
-            )
-        })) {
-            Err(payload) => {
-                discard_untrusted_panic_payload(payload);
-                return Err(StartupRetainedSideFailure::uncertain(
-                    RetainedWriterError::OwnershipUnverified,
-                ));
-            }
-            Ok(Err(_)) => {
-                return Err(StartupRetainedSideFailure::uncertain(
-                    RetainedWriterError::OwnershipUnverified,
-                ));
-            }
-            Ok(Ok(attribution)) => attribution,
-        };
-        construction.attribution = Some(attribution);
-        let attribution = match construction.attribution.take() {
-            Some(attribution) => attribution,
-            None => unreachable_final_owner_state(),
-        };
-        if let Err(attribution) = batch.try_push_attribution(attribution) {
-            construction.attribution = Some(attribution);
-            return Err(StartupRetainedSideFailure::uncertain(
-                RetainedWriterError::OwnershipUnverified,
-            ));
-        }
-
+    fn try_prepare(
+        &mut self,
+        side: StartupRetainedSide,
+    ) -> Result<(), StartupRetainedSideFailure<D>> {
+        self.begin_construction();
+        let construction = self.construction_mut();
+        note_startup_payload_allocation_attempt(side);
         let unarmed =
             UnarmedRetainedFinalOwner::<RetainedPayload<T>, LeafRetainedPolicy>::try_allocate()
                 .map_err(|cause| {
@@ -699,10 +686,11 @@ where
             Self::Pending {
                 account,
                 mut admission,
+                batch,
             } => {
                 let lease_owner = admission.transfer_to_aggregate_containment();
                 StartupSideContainmentComponents {
-                    batch: None,
+                    batch: Some(batch),
                     attribution: None,
                     account: Some(account),
                     lease_owner: Some(lease_owner),
@@ -774,6 +762,8 @@ where
 {
     account: &'account PhysicalStorageAccount,
     pair_plan: RetainedAdmissionPairPlan,
+    fallback_allocation_plan: RetainedAllocationPlan,
+    evidence_allocation_plan: RetainedAllocationPlan,
     fallback: ReadyStartupRetainedSide<'account, O, P, D, F>,
     evidence: ReadyStartupRetainedSide<'account, O, P, D, TerminalLedgerEvidence<P, D>>,
     canonical_assembly: AttributionReservationBatch<O, P, D, CanonicalOutput>,
@@ -793,6 +783,8 @@ where
     evidence_assembly: AttributionReservationBatch<O, P, D, OutcomeEvidenceDestination>,
     account: &'account PhysicalStorageAccount,
     pair_plan: RetainedAdmissionPairPlan,
+    fallback_allocation_plan: RetainedAllocationPlan,
+    evidence_allocation_plan: RetainedAllocationPlan,
 }
 
 #[derive(Clone, Copy)]
@@ -836,6 +828,8 @@ where
         StartupRetainedPartGuard {
             account: self.account,
             pair_plan: self.pair_plan,
+            fallback_allocation_plan: self.fallback_allocation_plan,
+            evidence_allocation_plan: self.evidence_allocation_plan,
             pending_pair: None,
             evidence_account: None,
             fallback_lease_owner: None,
@@ -877,6 +871,8 @@ where
         let Self {
             account,
             pair_plan,
+            fallback_allocation_plan,
+            evidence_allocation_plan,
             fallback: ready_fallback,
             evidence,
             canonical_assembly,
@@ -889,6 +885,8 @@ where
             evidence_assembly,
             account,
             pair_plan,
+            fallback_allocation_plan,
+            evidence_allocation_plan,
         }
         .try_build_evidence(build_evidence)
     }
@@ -905,6 +903,8 @@ where
         StartupRetainedPartGuard {
             account: self.account,
             pair_plan: self.pair_plan,
+            fallback_allocation_plan: self.fallback_allocation_plan,
+            evidence_allocation_plan: self.evidence_allocation_plan,
             pending_pair: None,
             evidence_account: None,
             fallback_lease_owner: None,
@@ -950,6 +950,8 @@ where
             evidence_assembly,
             account: _,
             pair_plan: _,
+            fallback_allocation_plan: _,
+            evidence_allocation_plan: _,
         } = self;
         Ok(StartupFallbackOwner::from_complete(
             fallback,
@@ -969,6 +971,8 @@ where
 {
     account: &'account PhysicalStorageAccount,
     pair_plan: RetainedAdmissionPairPlan,
+    fallback_allocation_plan: RetainedAllocationPlan,
+    evidence_allocation_plan: RetainedAllocationPlan,
     pending_pair: Option<PendingStartRetainedAdmissions<'account>>,
     evidence_account: Option<PhysicalStorageAccount>,
     fallback_lease_owner: Option<PhysicalStorageAccount>,
@@ -1030,9 +1034,12 @@ where
 
     pub(in crate::retained) fn new(
         mut admission_guard: StartupAdmissionGuard<'account>,
-        canonical_assembly: AttributionReservationBatch<O, P, D, CanonicalOutput>,
-        evidence_assembly: AttributionReservationBatch<O, P, D, OutcomeEvidenceDestination>,
+        baseline: FallbackBatchBaseline<O, P, D>,
+        fallback_allocation_plan: RetainedAllocationPlan,
+        evidence_allocation_plan: RetainedAllocationPlan,
     ) -> Self {
+        let (canonical_assembly, evidence_assembly, fallback_batch, evidence_batch) =
+            baseline.into_parts();
         let evidence_account = match admission_guard.evidence_account.take() {
             Some(account) => account,
             None => unreachable_final_owner_state(),
@@ -1050,9 +1057,11 @@ where
             None => unreachable_final_owner_state(),
         };
         let pair_plan = pending_pair.plan;
-        Self {
+        let mut this = Self {
             account: admission_guard.account,
             pair_plan,
+            fallback_allocation_plan,
+            evidence_allocation_plan,
             pending_pair: Some(pending_pair),
             evidence_account: Some(evidence_account),
             fallback_lease_owner: Some(fallback_lease_owner),
@@ -1063,10 +1072,16 @@ where
             canonical_assembly: Some(canonical_assembly),
             evidence_assembly: Some(evidence_assembly),
             cleanup_disposition: StartupCleanupDisposition::Armed,
-        }
+        };
+        this.split_pending_pair(fallback_batch, evidence_batch);
+        this
     }
 
-    fn split_pending_pair(&mut self) {
+    fn split_pending_pair(
+        &mut self,
+        fallback_batch: AttributionReservationBatch<O, P, D, OutcomeEvidenceDestination>,
+        evidence_batch: AttributionReservationBatch<O, P, D, OutcomeEvidenceDestination>,
+    ) {
         let admissions = match self.pending_pair.take() {
             Some(admissions) => admissions,
             None => return,
@@ -1088,10 +1103,12 @@ where
         self.fallback = StartupRetainedSideState::Pending {
             account: fallback_account,
             admission: fallback,
+            batch: fallback_batch,
         };
         self.evidence = StartupRetainedSideState::Pending {
             account: evidence_account,
             admission: evidence,
+            batch: evidence_batch,
         };
     }
 
@@ -1350,6 +1367,8 @@ where
         Ok(StartupReadyPair {
             account: self.account,
             pair_plan: self.pair_plan,
+            fallback_allocation_plan: self.fallback_allocation_plan,
+            evidence_allocation_plan: self.evidence_allocation_plan,
             fallback,
             evidence,
             canonical_assembly,
@@ -1689,26 +1708,30 @@ where
         error
     }
 
-    #[allow(
-        clippy::too_many_arguments,
-        reason = "startup retains both physical parts under one continuous owner"
-    )]
     pub(in crate::retained) fn try_build(
         mut self,
-        ledger: &Ledger<O, P, D>,
-        fallback_plan: StartupRetainedPartPlan<O, P, D, OutcomeEvidenceDestination>,
         build_fallback: impl FnOnce() -> Result<F, RetainedBuildFailureCode>,
-        evidence_plan: StartupRetainedPartPlan<O, P, D, OutcomeEvidenceDestination>,
         build_evidence: impl FnOnce() -> Result<
             TerminalLedgerEvidence<P, D>,
             StartupTerminalEvidenceBuildError,
         >,
     ) -> Result<StartupFallbackOwner<O, P, D, F>, RetainedWriterError<D>> {
-        self.split_pending_pair();
-        if let Err(failure) = self.fallback.try_prepare(ledger, fallback_plan) {
+        if let Err(failure) = self
+            .fallback
+            .try_preflight(StartupRetainedSide::Fallback, self.fallback_allocation_plan)
+        {
             return Err(self.finish_rejection(StartupRetainedSide::Fallback, failure));
         }
-        if let Err(failure) = self.evidence.try_prepare(ledger, evidence_plan) {
+        if let Err(failure) = self
+            .evidence
+            .try_preflight(StartupRetainedSide::Evidence, self.evidence_allocation_plan)
+        {
+            return Err(self.finish_rejection(StartupRetainedSide::Evidence, failure));
+        }
+        if let Err(failure) = self.fallback.try_prepare(StartupRetainedSide::Fallback) {
+            return Err(self.finish_rejection(StartupRetainedSide::Fallback, failure));
+        }
+        if let Err(failure) = self.evidence.try_prepare(StartupRetainedSide::Evidence) {
             return Err(self.finish_rejection(StartupRetainedSide::Evidence, failure));
         }
         self.try_into_ready_pair()?

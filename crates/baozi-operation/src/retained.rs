@@ -53,6 +53,10 @@ pub(crate) use allocation::{
     MAX_RETAINED_INLINE_BYTES, RetainedAllocationError, RetainedAllocationPlan,
     RetainedAllocationPlanError, RetainedBuildFailureCode,
 };
+#[cfg(test)]
+pub(crate) use allocation::{
+    reset_retained_final_owner_allocator_entries, test_retained_final_owner_allocator_entries,
+};
 pub(super) use block_table::RetainedSlotIdentity;
 #[cfg(test)]
 use block_table::try_share_retained_block_after_admission;
@@ -87,13 +91,15 @@ use ownership::{RetainedStorageDropSeverity, join_pre_attribution_cleanup_cause}
 #[cfg(test)]
 use physical::AccountControlInner;
 #[cfg(test)]
+use physical::RetainedAdmissionPairPlan;
+#[cfg(test)]
 use physical::{
     AccountActionAdmissionError, AdmittedRetainedShareWork, PendingRetainedRollback,
-    StartupAccountOwners,
+    PendingStartRetainedAdmissions,
 };
 use physical::{
     AccountLinearState, PendingAccountActionAdmission, PendingRetainedAdmission,
-    PublicationEligibility, RetainedAdmissionPairPlan, StartupAdmissionGuard,
+    PublicationEligibility,
 };
 pub use physical::{
     PhysicalStorageAccount, PhysicalStorageAccountCreateError, PhysicalStorageAccountFactory,
@@ -110,16 +116,22 @@ use std::sync::atomic::Ordering;
 use std::sync::{Mutex, MutexGuard};
 use triomphe::{Arc, UniqueArc};
 
+#[cfg(test)]
+use operation_start::map_qualified_startup_batch_error;
 pub(crate) use operation_start::{
     RetainedBatchLimits, RetainedHandleSharePlan, RetainedOperationStartError,
     RetainedOperationStartPlan, RetainedWriterError, RetainedWriterPlan,
 };
 use operation_start::{
-    StartupRetainedPartGuard, StartupRetainedPartPlan, StartupTerminalEvidenceBuildError,
+    StartupRetainedPartGuard, StartupTerminalEvidenceBuildError,
     map_account_action_admission_error, map_batch_error, map_faulted_pending_rollback,
-    map_pending_rollback_or, map_qualified_startup_batch_error, try_admit_retained_share_work,
-    try_admit_retained_share_work_before_physical, try_admit_start_share_work,
-    try_open_publication_account,
+    map_pending_rollback_or, try_admit_retained_share_work,
+    try_admit_retained_share_work_before_physical, try_open_publication_account,
+};
+pub(crate) use startup::{ReadyStartupGraphSplitAuthority, StartedLedger};
+use startup::{
+    StartupCrossPlaneAdmissionFailure, StartupCrossPlanePlan, StartupPhysicalManifest,
+    StartupPhysicalNoMutation,
 };
 
 /// Independent canonical and outcome-evidence plans for one retained publication.
@@ -3350,8 +3362,6 @@ where
         let evidence_charge = account
             .checked_retained_charge::<TerminalLedgerEvidence<P, D>>(evidence_plan)
             .map_err(RetainedWriterError::Physical)?;
-        let pair_plan = RetainedAdmissionPairPlan::try_new(fallback_charge, evidence_charge)
-            .map_err(RetainedWriterError::Physical)?;
         let startup_plan = ledger_limits
             .try_qualify_startup(
                 StartupAttributionBatchPlans::new(
@@ -3380,109 +3390,49 @@ where
             .map_err(|cause| {
                 RetainedOperationStartError::Writer(RetainedWriterError::Ledger(cause))
             })?;
-        let (ledger_limits, startup_parts) = startup_plan.into_parts();
-        let (
-            canonical_assembly_plan,
-            evidence_assembly_plan,
-            fallback_batch_plan,
-            evidence_batch_plan,
-        ) = startup_parts.batches.into_parts();
-        let [fallback_attribution, evidence_attribution] = startup_parts.retained_attributions;
-        let account_shares = startup_parts.account_shares;
-        let [fallback_commitment, snapshot_commitment] = startup_parts.commitments;
-
-        let account_admission = account
-            .try_admit_account_action()
-            .map_err(map_account_action_admission_error)
-            .map_err(RetainedOperationStartError::Writer)?;
-        let coordinator = match OperationCoordinator::try_new(control, ledger_limits, phase_catalog)
-        {
-            Ok(coordinator) => coordinator,
-            Err(cause) => {
-                account_admission.release();
-                return Err(RetainedOperationStartError::Writer(
-                    RetainedWriterError::Ledger(cause),
-                ));
-            }
-        };
+        let physical_manifest = StartupPhysicalManifest::try_new(fallback_charge, evidence_charge)
+            .map_err(|_| {
+                RetainedOperationStartError::Writer(RetainedWriterError::Physical(
+                    RetainedAllocationError::AccountingOverflow,
+                ))
+            })?;
+        let cross_plane =
+            StartupCrossPlanePlan::try_new(startup_plan, physical_manifest).map_err(|_| {
+                RetainedOperationStartError::Writer(RetainedWriterError::OwnershipUnverified)
+            })?;
+        let ready = account
+            .try_prepare_startup_cross_plane(phase_catalog, cross_plane)
+            .map_err(map_startup_cross_plane_error)?;
+        #[cfg(test)]
+        STARTUP_READY_FINAL_OWNER_ALLOCATOR_ENTRIES.with(|entries| {
+            entries.set(Some(test_retained_final_owner_allocator_entries()));
+        });
+        let (started_ledger, baseline, start_guard) = ready.split();
+        let coordinator = OperationCoordinator::from_started_ledger(control, started_ledger);
         let ledger = coordinator.retained_ledger();
-        if !terminal_evidence_catalog_is_qualified(ledger, dimension_count, phase_catalog.len()) {
-            account_admission.release();
-            return Err(RetainedOperationStartError::TerminalEvidenceCatalogInvariant);
-        }
-        let startup_owners = try_admit_start_share_work(ledger, account, account_shares)
-            .map_err(RetainedOperationStartError::Writer)?;
-        let (start_admissions, startup_owners) = account
-            .try_admit_start_retained_pair_after_action(
-                account_admission,
-                pair_plan,
-                startup_owners,
-            )
-            .map_err(RetainedWriterError::Physical)?;
-        let start_guard = StartupAdmissionGuard::new(account, start_admissions, startup_owners);
-
-        let canonical_assembly =
-            match ledger.try_attribution_batch_from_plan(canonical_assembly_plan) {
-                Ok(batch) => batch,
-                Err(cause) => {
-                    return Err(RetainedOperationStartError::Writer(
-                        map_qualified_startup_batch_error(cause, |outer_reason| {
-                            start_guard.rollback(outer_reason)
-                        }),
-                    ));
-                }
-            };
-        let evidence_assembly = match ledger.try_attribution_batch_from_plan(evidence_assembly_plan)
-        {
-            Ok(batch) => batch,
-            Err(cause) => {
-                return Err(RetainedOperationStartError::Writer(
-                    map_qualified_startup_batch_error(cause, |outer_reason| {
-                        start_guard.rollback(outer_reason)
-                    }),
-                ));
-            }
-        };
-
         let startup_guard =
-            StartupRetainedPartGuard::new(start_guard, canonical_assembly, evidence_assembly);
-        let startup_owner_result = startup_guard.try_build(
-            ledger,
-            StartupRetainedPartPlan::new(
-                fallback_attribution,
-                fallback_batch_plan,
-                plan.fallback_plan,
-                fallback_commitment,
-            ),
-            build_fallback,
-            StartupRetainedPartPlan::new(
-                evidence_attribution,
-                evidence_batch_plan,
-                evidence_plan,
-                snapshot_commitment,
-            ),
-            || {
-                #[cfg(test)]
-                {
-                    record_start_evidence_build_call();
-                    if take_injected_start_evidence_build_panic() {
-                        panic!("inject startup evidence builder panic");
-                    }
-                    if let Some(cause) = take_injected_start_evidence_build_failure() {
-                        return Err(StartupTerminalEvidenceBuildError::Rejected(cause));
-                    }
-                    if take_injected_start_evidence_structural_failure() {
-                        return Err(StartupTerminalEvidenceBuildError::StructuralInvariant);
-                    }
+            StartupRetainedPartGuard::new(start_guard, baseline, plan.fallback_plan, evidence_plan);
+        let startup_owner_result = startup_guard.try_build(build_fallback, || {
+            #[cfg(test)]
+            {
+                record_start_evidence_build_call();
+                if take_injected_start_evidence_build_panic() {
+                    panic!("inject startup evidence builder panic");
                 }
-                terminal_evidence_backing
-                    .try_build_indexed(
-                        |index| ledger.dimension_at(index),
-                        |index| ledger.phase_at(index),
-                    )
-                    .map_err(StartupTerminalEvidenceBuildError::from)
-            },
-        );
+                if let Some(cause) = take_injected_start_evidence_build_failure() {
+                    return Err(StartupTerminalEvidenceBuildError::Rejected(cause));
+                }
+                if take_injected_start_evidence_structural_failure() {
+                    return Err(StartupTerminalEvidenceBuildError::StructuralInvariant);
+                }
+            }
+            terminal_evidence_backing
+                .try_build_indexed(
+                    |index| ledger.dimension_at(index),
+                    |index| ledger.phase_at(index),
+                )
+                .map_err(StartupTerminalEvidenceBuildError::from)
+        });
         #[cfg(test)]
         if startup_owner_result.is_err() {
             let probe = ledger.test_probe();
@@ -3752,6 +3702,62 @@ where
             containment: AssemblyContainmentProvenance::Healthy,
         })
     }
+}
+
+fn map_startup_cross_plane_error<O, P, D>(
+    error: StartupCrossPlaneAdmissionFailure<O, P, D>,
+) -> RetainedOperationStartError<D>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: TerminalEvidenceKey + fmt::Debug,
+{
+    let writer = match error {
+        StartupCrossPlaneAdmissionFailure::OperationStart(cause) => match cause {
+            startup::OperationStartAdmissionError::AccountPoisoned(poisoned) => {
+                RetainedWriterError::AccountPoisoned(poisoned)
+            }
+            startup::OperationStartAdmissionError::AccountingOverflow => {
+                RetainedWriterError::Physical(RetainedAllocationError::AccountingOverflow)
+            }
+        },
+        StartupCrossPlaneAdmissionFailure::LedgerInitialization(cause) => {
+            RetainedWriterError::Ledger(cause)
+        }
+        StartupCrossPlaneAdmissionFailure::TerminalEvidenceCatalogInvariant => {
+            return RetainedOperationStartError::TerminalEvidenceCatalogInvariant;
+        }
+        StartupCrossPlaneAdmissionFailure::LedgerAdmission(cause) => map_batch_error(cause),
+        StartupCrossPlaneAdmissionFailure::PhysicalNoMutation(cause) => match cause {
+            StartupPhysicalNoMutation::ForeignStartAdmission
+            | StartupPhysicalNoMutation::ForeignOwner(_) => RetainedWriterError::ForeignAccount,
+            StartupPhysicalNoMutation::RetainedOwnerOverflow
+            | StartupPhysicalNoMutation::AccountingOverflow => {
+                RetainedWriterError::Physical(RetainedAllocationError::AccountingOverflow)
+            }
+            StartupPhysicalNoMutation::ByteLimitExceeded { requested, limit } => {
+                RetainedWriterError::Physical(RetainedAllocationError::ByteLimitExceeded {
+                    requested,
+                    limit,
+                })
+            }
+            StartupPhysicalNoMutation::AllocationLimitExceeded { requested, limit } => {
+                RetainedWriterError::Physical(RetainedAllocationError::AllocationLimitExceeded {
+                    requested,
+                    limit,
+                })
+            }
+        },
+        StartupCrossPlaneAdmissionFailure::Uncertain(containment) => {
+            let error = containment.poisoned().map_or(
+                RetainedWriterError::OwnershipUnverified,
+                RetainedWriterError::AccountPoisoned,
+            );
+            drop(containment);
+            error
+        }
+    };
+    RetainedOperationStartError::Writer(writer)
 }
 
 #[allow(clippy::result_large_err)]
@@ -5761,32 +5767,12 @@ where
     P: TerminalEvidenceKey,
     D: TerminalEvidenceKey + fmt::Debug,
 {
-    if ledger.dimension_count() != expected_dimensions || ledger.phase_count() != expected_phases {
+    #[cfg(test)]
+    if take_injected_terminal_evidence_catalog_failure() {
         return false;
     }
 
-    let mut previous_dimension = None;
-    for index in 0..expected_dimensions {
-        let Some(dimension) = ledger.dimension_at(index) else {
-            return false;
-        };
-        if previous_dimension.is_some_and(|previous| previous >= dimension) {
-            return false;
-        }
-        previous_dimension = Some(dimension);
-    }
-
-    let mut previous_phase = None;
-    for index in 0..expected_phases {
-        let Some(phase) = ledger.phase_at(index) else {
-            return false;
-        };
-        if previous_phase.is_some_and(|previous| previous >= phase) {
-            return false;
-        }
-        previous_phase = Some(phase);
-    }
-    true
+    ledger.catalog_shape_is_strictly_ordered(expected_dimensions, expected_phases)
 }
 
 struct QualifiedDetachedTerminalEvidence<P, D> {
@@ -5981,6 +5967,9 @@ thread_local! {
     static FAIL_NEXT_START_EVIDENCE_STRUCTURAL: std::cell::Cell<bool> = const {
         std::cell::Cell::new(false)
     };
+    static FAIL_NEXT_TERMINAL_EVIDENCE_CATALOG: std::cell::Cell<bool> = const {
+        std::cell::Cell::new(false)
+    };
     static LOSE_NEXT_START_FALLBACK_ACCOUNT_ANCHOR: std::cell::Cell<bool> = const {
         std::cell::Cell::new(false)
     };
@@ -5988,6 +5977,9 @@ thread_local! {
         std::cell::Cell::new(0)
     };
     static STARTUP_FAILURE_LEDGER_SNAPSHOT: std::cell::Cell<Option<(u64, u64)>> = const {
+        std::cell::Cell::new(None)
+    };
+    static STARTUP_READY_FINAL_OWNER_ALLOCATOR_ENTRIES: std::cell::Cell<Option<usize>> = const {
         std::cell::Cell::new(None)
     };
     static DROP_NEXT_SUCCESS_GUARD: std::cell::Cell<Option<SuccessGuardDropStage>> = const {
@@ -6153,6 +6145,11 @@ fn fail_next_start_evidence_structural() {
 }
 
 #[cfg(test)]
+fn fail_next_terminal_evidence_catalog_qualification() {
+    FAIL_NEXT_TERMINAL_EVIDENCE_CATALOG.with(|failure| failure.set(true));
+}
+
+#[cfg(test)]
 fn take_injected_start_evidence_build_panic() -> bool {
     PANIC_NEXT_START_EVIDENCE_BUILD.with(|panic| panic.replace(false))
 }
@@ -6160,6 +6157,11 @@ fn take_injected_start_evidence_build_panic() -> bool {
 #[cfg(test)]
 fn take_injected_start_evidence_structural_failure() -> bool {
     FAIL_NEXT_START_EVIDENCE_STRUCTURAL.with(|failure| failure.replace(false))
+}
+
+#[cfg(test)]
+fn take_injected_terminal_evidence_catalog_failure() -> bool {
+    FAIL_NEXT_TERMINAL_EVIDENCE_CATALOG.with(|failure| failure.replace(false))
 }
 
 #[cfg(test)]
@@ -6190,6 +6192,36 @@ fn take_start_evidence_build_calls() -> usize {
 #[cfg(test)]
 fn take_startup_failure_ledger_snapshot() -> Option<(u64, u64)> {
     STARTUP_FAILURE_LEDGER_SNAPSHOT.with(std::cell::Cell::take)
+}
+
+#[cfg(test)]
+pub(crate) fn take_startup_ready_final_owner_allocator_entries() -> Option<usize> {
+    STARTUP_READY_FINAL_OWNER_ALLOCATOR_ENTRIES.with(std::cell::Cell::take)
+}
+
+#[cfg(test)]
+pub(crate) fn reset_startup_payload_allocation_attempts() {
+    operation_start::reset_startup_payload_allocation_attempts();
+}
+
+#[cfg(test)]
+pub(crate) fn test_startup_payload_allocation_attempts() -> (usize, usize) {
+    operation_start::test_startup_payload_allocation_attempts()
+}
+
+#[cfg(test)]
+fn mismatch_next_startup_fallback_footprint() {
+    operation_start::mismatch_next_startup_fallback_footprint();
+}
+
+#[cfg(test)]
+fn mismatch_next_startup_evidence_footprint() {
+    operation_start::mismatch_next_startup_evidence_footprint();
+}
+
+#[cfg(test)]
+fn reset_startup_footprint_mismatches() {
+    operation_start::reset_startup_footprint_mismatches();
 }
 
 #[cfg(test)]

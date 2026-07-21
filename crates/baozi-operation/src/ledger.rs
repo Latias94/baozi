@@ -1,4 +1,4 @@
-use crate::{CapacityPlan, CapacityPlanError, OperationOwner};
+use crate::{CapacityPlan, CapacityPlanError, OperationOwner, ReplacementCapacityPlan};
 use std::fmt;
 use std::marker::PhantomData;
 use std::mem::size_of;
@@ -44,6 +44,9 @@ std::thread_local! {
     static FAIL_NEXT_EVIDENCE_ALLOCATION: std::cell::Cell<bool> = const {
         std::cell::Cell::new(false)
     };
+    static FAIL_NEXT_EVIDENCE_OVER_ENVELOPE: std::cell::Cell<bool> = const {
+        std::cell::Cell::new(false)
+    };
     static ATTRIBUTION_BATCH_ALLOCATION_ENTRIES: std::cell::Cell<usize> = const {
         std::cell::Cell::new(0)
     };
@@ -65,6 +68,16 @@ fn test_evidence_allocation_failure_is_armed() -> bool {
 #[cfg(test)]
 fn test_take_evidence_allocation_failure() -> bool {
     FAIL_NEXT_EVIDENCE_ALLOCATION.with(|failpoint| failpoint.replace(false))
+}
+
+#[cfg(test)]
+fn test_fail_next_evidence_over_envelope() {
+    FAIL_NEXT_EVIDENCE_OVER_ENVELOPE.with(|failpoint| failpoint.set(true));
+}
+
+#[cfg(test)]
+fn test_take_evidence_over_envelope_failure() -> bool {
+    FAIL_NEXT_EVIDENCE_OVER_ENVELOPE.with(|failpoint| failpoint.replace(false))
 }
 
 #[cfg(test)]
@@ -102,6 +115,12 @@ pub enum LedgerEvidencePurpose {
 pub enum LedgerEvidenceError {
     /// The phase catalog no longer maps its append-only state positions exactly once.
     PhaseCatalogShapeMismatch,
+    /// A tracked storage owner no longer matches the exact capacity bytes it must release.
+    TrackedStorageCoverageMismatch {
+        purpose: LedgerEvidencePurpose,
+        retained_bytes: u64,
+        capacity_bytes: u64,
+    },
     /// Checked capacity planning rejected the requested storage.
     Capacity {
         purpose: LedgerEvidencePurpose,
@@ -126,6 +145,14 @@ impl fmt::Display for LedgerEvidenceError {
             Self::PhaseCatalogShapeMismatch => {
                 formatter.write_str("ledger phase catalog shape is inconsistent")
             }
+            Self::TrackedStorageCoverageMismatch {
+                purpose,
+                retained_bytes,
+                capacity_bytes,
+            } => write!(
+                formatter,
+                "{purpose:?} ledger evidence owns {capacity_bytes} capacity bytes but its retained owner records {retained_bytes} bytes"
+            ),
             Self::Capacity { purpose, cause } => {
                 write!(
                     formatter,
@@ -156,6 +183,7 @@ impl std::error::Error for LedgerEvidenceError {
         match self {
             Self::Capacity { cause, .. } => Some(cause),
             Self::PhaseCatalogShapeMismatch
+            | Self::TrackedStorageCoverageMismatch { .. }
             | Self::LimitExceeded { .. }
             | Self::AllocationFailed { .. } => None,
         }
@@ -1860,12 +1888,26 @@ where
             .map(|entry| entry.dimension)
     }
 
-    pub(crate) fn phase_count(&self) -> usize {
-        lock(&self.state).phases.len()
-    }
-
     pub(crate) fn phase_at(&self, index: usize) -> Option<P> {
         lock(&self.state).phases.get(index).map(|entry| entry.phase)
+    }
+
+    pub(crate) fn catalog_shape_is_strictly_ordered(
+        &self,
+        expected_dimensions: usize,
+        expected_phases: usize,
+    ) -> bool {
+        let state = lock(&self.state);
+        state.dimensions.len() == expected_dimensions
+            && state.phases.len() == expected_phases
+            && state
+                .dimensions
+                .windows(2)
+                .all(|pair| pair[0].dimension < pair[1].dimension)
+            && state
+                .phases
+                .windows(2)
+                .all(|pair| pair[0].phase < pair[1].phase)
     }
 
     pub(crate) fn contains_dimension(&self, dimension: D) -> bool {
@@ -1960,10 +2002,6 @@ where
         Ok(baseline)
     }
 
-    #[allow(
-        dead_code,
-        reason = "crate-private until retained startup consumes the borrowed binding seam"
-    )]
     pub(crate) fn try_bind_fallback_baseline(
         &self,
         baseline: &mut FallbackBatchBaseline<O, P, D>,
@@ -5151,7 +5189,15 @@ fn try_grow_tracked_evidence_vec<T>(
     evidence_byte_limit: u64,
     purpose: LedgerEvidencePurpose,
 ) -> Result<(), LedgerEvidenceError> {
-    debug_assert_eq!(capacity_bytes(values).ok(), Some(*retained_bytes));
+    let owned_capacity_bytes =
+        capacity_bytes(values).map_err(|cause| LedgerEvidenceError::Capacity { purpose, cause })?;
+    if owned_capacity_bytes != *retained_bytes {
+        return Err(LedgerEvidenceError::TrackedStorageCoverageMismatch {
+            purpose,
+            retained_bytes: *retained_bytes,
+            capacity_bytes: owned_capacity_bytes,
+        });
+    }
     try_grow_evidence_vec_impl(
         values,
         desired_capacity,
@@ -5173,19 +5219,59 @@ fn try_grow_evidence_vec_impl<T>(
     evidence_byte_limit: u64,
     purpose: LedgerEvidencePurpose,
 ) -> Result<(), LedgerEvidenceError> {
-    let plan = CapacityPlan::for_type::<T>(values.len(), values.capacity(), desired_capacity)
+    let original_len = values.len();
+    let original_capacity = values.capacity();
+    let original_current = *current_evidence_bytes;
+    let source_plan =
+        CapacityPlan::for_type::<T>(original_len, original_capacity, desired_capacity)
+            .map_err(|cause| LedgerEvidenceError::Capacity { purpose, cause })?;
+    source_plan
+        .verify_preflight(original_len, original_capacity)
         .map_err(|cause| LedgerEvidenceError::Capacity { purpose, cause })?;
-    plan.verify_preflight(values.len(), values.capacity())
+
+    // Existing spare capacity already satisfies the request. Keep the original owner untouched;
+    // in particular, do not enter the allocator or change any accounting state.
+    if source_plan.desired_capacity() <= original_capacity {
+        source_plan
+            .finish(original_len, original_capacity)
+            .map_err(|cause| LedgerEvidenceError::Capacity { purpose, cause })?;
+        return Ok(());
+    }
+
+    // A replacement backing is live alongside the old backing until the owner swap completes.
+    // Admit the complete candidate envelope, not merely the eventual capacity delta, so a failed
+    // allocation cannot create an uncharged transient peak.
+    let original_bytes =
+        capacity_bytes(values).map_err(|cause| LedgerEvidenceError::Capacity { purpose, cause })?;
+    let current_without_original =
+        original_current
+            .checked_sub(original_bytes)
+            .ok_or(LedgerEvidenceError::Capacity {
+                purpose,
+                cause: CapacityPlanError::CapacityOverflow,
+            })?;
+    let replacement_plan = ReplacementCapacityPlan::for_type::<T>(
+        original_len,
+        original_capacity,
+        source_plan.desired_capacity(),
+    )
+    .map_err(|cause| LedgerEvidenceError::Capacity { purpose, cause })?;
+    replacement_plan
+        .verify_source(original_len, original_capacity)
         .map_err(|cause| LedgerEvidenceError::Capacity { purpose, cause })?;
-    let envelope_delta = plan
-        .envelope_delta_bytes()
+    let candidate_plan = replacement_plan.candidate();
+    candidate_plan
+        .verify_preflight(0, 0)
         .map_err(|cause| LedgerEvidenceError::Capacity { purpose, cause })?;
-    let admitted = current_evidence_bytes.checked_add(envelope_delta).ok_or(
-        LedgerEvidenceError::Capacity {
+    let replacement_envelope_bytes = replacement_plan
+        .candidate_envelope_bytes()
+        .map_err(|cause| LedgerEvidenceError::Capacity { purpose, cause })?;
+    let admitted = original_current
+        .checked_add(replacement_envelope_bytes)
+        .ok_or(LedgerEvidenceError::Capacity {
             purpose,
             cause: CapacityPlanError::CapacityOverflow,
-        },
-    )?;
+        })?;
     if admitted > evidence_byte_limit {
         return Err(LedgerEvidenceError::LimitExceeded {
             purpose,
@@ -5193,74 +5279,73 @@ fn try_grow_evidence_vec_impl<T>(
             limit: evidence_byte_limit,
         });
     }
-    *current_evidence_bytes = admitted;
-    *peak_evidence_bytes = (*peak_evidence_bytes).max(admitted);
-    let original_capacity = values.capacity();
-    #[cfg(test)]
-    if test_take_evidence_allocation_failure() {
-        *current_evidence_bytes = current_evidence_bytes.saturating_sub(envelope_delta);
-        return Err(LedgerEvidenceError::AllocationFailed {
-            purpose,
-            requested_bytes: envelope_delta,
-        });
-    }
-    if values
-        .try_reserve_exact(plan.allocator_additional())
-        .is_err()
-    {
-        *current_evidence_bytes = current_evidence_bytes.saturating_sub(envelope_delta);
-        return Err(LedgerEvidenceError::AllocationFailed {
-            purpose,
-            requested_bytes: envelope_delta,
-        });
-    }
-    let actual_delta = capacity_delta_bytes::<T>(original_capacity, values.capacity())
-        .map_err(|cause| LedgerEvidenceError::Capacity { purpose, cause })?;
-    let updated_retained_bytes = retained_bytes
-        .as_deref()
-        .map(|retained| {
-            retained
-                .checked_add(actual_delta)
-                .ok_or(LedgerEvidenceError::Capacity {
-                    purpose,
-                    cause: CapacityPlanError::CapacityOverflow,
-                })
-        })
-        .transpose()?;
-    *current_evidence_bytes = current_evidence_bytes
-        .saturating_sub(envelope_delta)
-        .checked_add(actual_delta)
+    let final_current_upper_bound = current_without_original
+        .checked_add(replacement_envelope_bytes)
         .ok_or(LedgerEvidenceError::Capacity {
             purpose,
             cause: CapacityPlanError::CapacityOverflow,
         })?;
-    if let (Some(retained_bytes), Some(updated_retained_bytes)) =
-        (retained_bytes, updated_retained_bytes)
-    {
-        *retained_bytes = updated_retained_bytes;
+
+    *current_evidence_bytes = admitted;
+    *peak_evidence_bytes = (*peak_evidence_bytes).max(admitted);
+
+    let mut replacement = Vec::new();
+    #[cfg(test)]
+    if test_take_evidence_allocation_failure() {
+        drop(replacement);
+        *current_evidence_bytes = original_current;
+        return Err(LedgerEvidenceError::AllocationFailed {
+            purpose,
+            requested_bytes: replacement_envelope_bytes,
+        });
     }
-    *peak_evidence_bytes = (*peak_evidence_bytes).max(*current_evidence_bytes);
-    plan.finish(values.len(), values.capacity())
-        .map(|_| ())
-        .map_err(|cause| LedgerEvidenceError::Capacity { purpose, cause })
+    if replacement
+        .try_reserve_exact(candidate_plan.allocator_additional())
+        .is_err()
+    {
+        drop(replacement);
+        *current_evidence_bytes = original_current;
+        return Err(LedgerEvidenceError::AllocationFailed {
+            purpose,
+            requested_bytes: replacement_envelope_bytes,
+        });
+    }
+
+    #[cfg(test)]
+    let observed_capacity = if test_take_evidence_over_envelope_failure() {
+        candidate_plan.envelope_capacity().saturating_add(1)
+    } else {
+        replacement.capacity()
+    };
+    #[cfg(not(test))]
+    let observed_capacity = replacement.capacity();
+    let actual_bytes = match candidate_plan.finish(0, observed_capacity) {
+        Ok(bytes) => bytes,
+        Err(cause) => {
+            drop(replacement);
+            *current_evidence_bytes = original_current;
+            return Err(LedgerEvidenceError::Capacity { purpose, cause });
+        }
+    };
+    debug_assert!(actual_bytes <= replacement_envelope_bytes);
+    let unused_envelope_bytes = replacement_envelope_bytes - actual_bytes;
+    let final_current = final_current_upper_bound - unused_envelope_bytes;
+
+    // `replacement` has been fully admitted and qualified. Moving elements and swapping owners
+    // are allocation-free; dropping the old backing happens before any accounting is reduced.
+    replacement.append(values);
+    std::mem::swap(values, &mut replacement);
+    drop(replacement);
+    *current_evidence_bytes = final_current;
+    if let Some(retained_bytes) = retained_bytes {
+        *retained_bytes = actual_bytes;
+    }
+    Ok(())
 }
 
 fn capacity_bytes<T>(values: &Vec<T>) -> Result<u64, CapacityPlanError> {
     let bytes = values
         .capacity()
-        .checked_mul(size_of::<T>())
-        .ok_or(CapacityPlanError::CapacityOverflow)?;
-    u64::try_from(bytes).map_err(|_| CapacityPlanError::CapacityOverflow)
-}
-
-fn capacity_delta_bytes<T>(
-    original_capacity: usize,
-    actual_capacity: usize,
-) -> Result<u64, CapacityPlanError> {
-    let capacity_delta = actual_capacity
-        .checked_sub(original_capacity)
-        .ok_or(CapacityPlanError::CapacityOverflow)?;
-    let bytes = capacity_delta
         .checked_mul(size_of::<T>())
         .ok_or(CapacityPlanError::CapacityOverflow)?;
     u64::try_from(bytes).map_err(|_| CapacityPlanError::CapacityOverflow)
@@ -5585,6 +5670,69 @@ fn apply_typed_commitments<O, P, D, Destination>(
     }
 }
 
+struct SnapshotEvidenceAssembly<'a, P, D> {
+    state: &'a mut LedgerState<P, D>,
+    dimensions: Vec<(D, DimensionSnapshot)>,
+    phases: Vec<(P, PhaseSnapshot)>,
+    evidence_before: u64,
+    armed: bool,
+}
+
+impl<'a, P, D> SnapshotEvidenceAssembly<'a, P, D> {
+    fn new(state: &'a mut LedgerState<P, D>) -> Self {
+        Self {
+            evidence_before: state.current_evidence_bytes,
+            state,
+            dimensions: Vec::new(),
+            phases: Vec::new(),
+            armed: true,
+        }
+    }
+}
+
+impl<P: Copy, D> SnapshotEvidenceAssembly<'_, P, D> {
+    fn finish(mut self) -> LedgerSnapshot<P, D> {
+        let outgoing_bytes = self
+            .state
+            .current_evidence_bytes
+            .saturating_sub(self.evidence_before);
+        let snapshot = LedgerSnapshot {
+            dimensions: std::mem::take(&mut self.dimensions),
+            phases: std::mem::take(&mut self.phases),
+            last_completed_phase: self
+                .state
+                .last_completed_phase
+                .map(|completed| completed.phase),
+            current_live_bytes: self.state.current_live_bytes,
+            peak_live_bytes: self.state.peak_live_bytes,
+            active_reservations: self.state.active_reservations,
+            current_evidence_bytes: self
+                .state
+                .current_evidence_bytes
+                .saturating_sub(outgoing_bytes),
+            peak_evidence_bytes: self.state.peak_evidence_bytes,
+        };
+        self.armed = false;
+        release_evidence(self.state, outgoing_bytes);
+        snapshot
+    }
+}
+
+impl<P, D> Drop for SnapshotEvidenceAssembly<'_, P, D> {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        drop(std::mem::take(&mut self.phases));
+        drop(std::mem::take(&mut self.dimensions));
+        let outgoing_bytes = self
+            .state
+            .current_evidence_bytes
+            .saturating_sub(self.evidence_before);
+        release_evidence(self.state, outgoing_bytes);
+    }
+}
+
 fn try_snapshot<P, D>(
     state: &mut LedgerState<P, D>,
 ) -> Result<LedgerSnapshot<P, D>, LedgerEvidenceError>
@@ -5595,66 +5743,39 @@ where
     if !phase_catalog_shape_is_valid(state) {
         return Err(LedgerEvidenceError::PhaseCatalogShapeMismatch);
     }
-    let mut dimensions = Vec::new();
-    if let Err(cause) = try_grow_evidence_vec(
-        &mut dimensions,
-        state.dimensions.len(),
-        &mut state.current_evidence_bytes,
-        &mut state.peak_evidence_bytes,
-        state.evidence_byte_limit,
+    let mut assembly = SnapshotEvidenceAssembly::new(state);
+    let dimension_count = assembly.state.dimensions.len();
+    let evidence_byte_limit = assembly.state.evidence_byte_limit;
+    try_grow_evidence_vec(
+        &mut assembly.dimensions,
+        dimension_count,
+        &mut assembly.state.current_evidence_bytes,
+        &mut assembly.state.peak_evidence_bytes,
+        evidence_byte_limit,
         LedgerEvidencePurpose::Snapshot,
-    ) {
-        let retained = capacity_bytes(&dimensions).unwrap_or(0);
-        release_evidence(state, retained);
-        return Err(cause);
+    )?;
+    for entry in &assembly.state.dimensions {
+        assembly
+            .dimensions
+            .push((entry.dimension, dimension_snapshot(entry.state)));
     }
-    for entry in &state.dimensions {
-        dimensions.push((entry.dimension, dimension_snapshot(entry.state)));
-    }
-    let dimension_bytes =
-        capacity_bytes(&dimensions).map_err(|cause| LedgerEvidenceError::Capacity {
-            purpose: LedgerEvidencePurpose::Snapshot,
-            cause,
-        })?;
 
-    let mut phases = Vec::new();
-    if let Err(cause) = try_grow_evidence_vec(
-        &mut phases,
-        state.phases.len(),
-        &mut state.current_evidence_bytes,
-        &mut state.peak_evidence_bytes,
-        state.evidence_byte_limit,
+    let phase_count = assembly.state.phases.len();
+    try_grow_evidence_vec(
+        &mut assembly.phases,
+        phase_count,
+        &mut assembly.state.current_evidence_bytes,
+        &mut assembly.state.peak_evidence_bytes,
+        evidence_byte_limit,
         LedgerEvidencePurpose::Snapshot,
-    ) {
-        let phase_bytes = capacity_bytes(&phases).unwrap_or(0);
-        release_evidence(state, dimension_bytes.saturating_add(phase_bytes));
-        return Err(cause);
-    }
-    for entry in &state.phases {
-        phases.push((
+    )?;
+    for entry in &assembly.state.phases {
+        assembly.phases.push((
             entry.phase,
-            phase_snapshot(state.phase_states[entry.state_position]),
+            phase_snapshot(assembly.state.phase_states[entry.state_position]),
         ));
     }
-    let phase_bytes = capacity_bytes(&phases).map_err(|cause| LedgerEvidenceError::Capacity {
-        purpose: LedgerEvidencePurpose::Snapshot,
-        cause,
-    })?;
-    let outgoing_bytes = dimension_bytes.saturating_add(phase_bytes);
-    let current_evidence_bytes = state.current_evidence_bytes.saturating_sub(outgoing_bytes);
-    let last_completed_phase = state.last_completed_phase.map(|completed| completed.phase);
-    let snapshot = LedgerSnapshot {
-        dimensions,
-        phases,
-        last_completed_phase,
-        current_live_bytes: state.current_live_bytes,
-        peak_live_bytes: state.peak_live_bytes,
-        active_reservations: state.active_reservations,
-        current_evidence_bytes,
-        peak_evidence_bytes: state.peak_evidence_bytes,
-    };
-    release_evidence(state, outgoing_bytes);
-    Ok(snapshot)
+    Ok(assembly.finish())
 }
 
 #[allow(
@@ -5868,15 +5989,22 @@ mod tests {
     #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
     enum Progress {
         Work,
+        Other,
     }
 
     impl ProgressPhase for Progress {
         fn order(self) -> u32 {
-            0
+            match self {
+                Self::Work => 0,
+                Self::Other => 1,
+            }
         }
 
         fn stable_id(self) -> &'static str {
-            "work"
+            match self {
+                Self::Work => "work",
+                Self::Other => "other",
+            }
         }
     }
 
@@ -6412,6 +6540,94 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_failure_cleanup_is_structurally_storage_before_accounting() {
+        let production = ledger_production_source();
+        let cleanup = production
+            .split_once("impl<P, D> Drop for SnapshotEvidenceAssembly")
+            .expect("snapshot evidence cleanup owner exists")
+            .1
+            .split_once("fn try_snapshot")
+            .expect("snapshot cleanup precedes snapshot construction")
+            .0;
+        let phase_storage = cleanup
+            .find("drop(std::mem::take(&mut self.phases))")
+            .expect("phase snapshot storage is destroyed explicitly");
+        let dimension_storage = cleanup
+            .find("drop(std::mem::take(&mut self.dimensions))")
+            .expect("dimension snapshot storage is destroyed explicitly");
+        let accounting_release = cleanup
+            .find("release_evidence(self.state, outgoing_bytes)")
+            .expect("snapshot evidence accounting is released explicitly");
+        assert!(phase_storage < accounting_release);
+        assert!(dimension_storage < accounting_release);
+
+        let snapshot = production
+            .split_once("fn try_snapshot<P, D>")
+            .expect("snapshot constructor exists")
+            .1
+            .split_once("fn validate_final_snapshot_shape")
+            .expect("snapshot constructor has a bounded body")
+            .0;
+        assert!(snapshot.contains("SnapshotEvidenceAssembly::new(state)"));
+        assert!(!snapshot.contains("capacity_bytes("));
+    }
+
+    #[test]
+    fn phase_snapshot_admission_failure_restores_exact_evidence_accounting() {
+        let ledger = test_ledger(limits());
+        let (evidence_before, peak_before, original_limit) = {
+            let mut state = lock(&ledger.state);
+            let dimension_plan = CapacityPlan::for_type::<(Dimension, DimensionSnapshot)>(
+                0,
+                0,
+                state.dimensions.len(),
+            )
+            .expect("dimension snapshot capacity plan");
+            let dimension_envelope = dimension_plan
+                .envelope_delta_bytes()
+                .expect("dimension snapshot envelope");
+            let evidence_before = state.current_evidence_bytes;
+            let peak_before = state.peak_evidence_bytes;
+            let original_limit = state.evidence_byte_limit;
+            state.evidence_byte_limit = evidence_before
+                .checked_add(dimension_envelope)
+                .expect("dimension snapshot fits the test limit");
+            (evidence_before, peak_before, original_limit)
+        };
+
+        let error = ledger
+            .try_snapshot()
+            .expect_err("phase snapshot storage must exceed the tightened limit");
+        assert!(matches!(
+            error,
+            LedgerEvidenceError::LimitExceeded {
+                purpose: LedgerEvidencePurpose::Snapshot,
+                ..
+            }
+        ));
+
+        {
+            let mut state = lock(&ledger.state);
+            assert_eq!(
+                state.current_evidence_bytes, evidence_before,
+                "failed snapshot storage must release its complete local accounting"
+            );
+            assert!(
+                state.peak_evidence_bytes >= peak_before,
+                "failed transient storage remains visible in peak evidence"
+            );
+            state.evidence_byte_limit = original_limit;
+        }
+        assert_eq!(
+            ledger
+                .try_snapshot()
+                .expect("a later snapshot remains usable")
+                .current_evidence_bytes(),
+            evidence_before
+        );
+    }
+
+    #[test]
     fn injected_allocator_failure_releases_current_evidence_but_preserves_peak() {
         let _guard = EVIDENCE_ALLOCATION_TEST_LOCK
             .lock()
@@ -6439,6 +6655,164 @@ mod tests {
         assert_eq!(values.capacity(), 0);
         assert_eq!(current, 0);
         assert_eq!(peak, 8);
+    }
+
+    #[test]
+    fn injected_over_envelope_failure_preserves_non_empty_local_vec_and_accounting() {
+        let _guard = EVIDENCE_ALLOCATION_TEST_LOCK
+            .lock()
+            .expect("allocation test lock");
+        let mut values = Vec::with_capacity(2);
+        values.extend([11_u64, 22]);
+        let original_values = values.clone();
+        let original_len = values.len();
+        let original_capacity = values.capacity();
+        let original_bytes = capacity_bytes(&values).expect("test capacity bytes");
+        let mut current = original_bytes;
+        let mut peak = original_bytes;
+
+        test_fail_next_evidence_over_envelope();
+        let error = try_grow_evidence_vec(
+            &mut values,
+            original_capacity.saturating_add(1),
+            &mut current,
+            &mut peak,
+            u64::MAX,
+            LedgerEvidencePurpose::Snapshot,
+        )
+        .expect_err("injected post-allocation envelope violation");
+
+        assert!(matches!(
+            error,
+            LedgerEvidenceError::Capacity {
+                purpose: LedgerEvidencePurpose::Snapshot,
+                cause: CapacityPlanError::CapacityEnvelopeViolated { .. },
+            }
+        ));
+        assert_eq!(values, original_values);
+        assert_eq!(values.len(), original_len);
+        assert_eq!(values.capacity(), original_capacity);
+        assert_eq!(current, original_bytes);
+        assert!(peak > original_bytes);
+    }
+
+    #[test]
+    fn replacement_growth_accounts_the_complete_transient_candidate() {
+        let mut values = Vec::with_capacity(2);
+        values.extend([11_u64, 22]);
+        let original_values = values.clone();
+        let original_bytes = capacity_bytes(&values).expect("test capacity bytes");
+        let desired_capacity = values.capacity().saturating_add(1);
+        let replacement_plan = CapacityPlan::for_type::<u64>(0, 0, desired_capacity)
+            .expect("replacement capacity plan");
+        let replacement_envelope_bytes = replacement_plan
+            .envelope_delta_bytes()
+            .expect("replacement envelope bytes");
+        let mut current = original_bytes;
+        let mut peak = original_bytes;
+
+        try_grow_evidence_vec(
+            &mut values,
+            desired_capacity,
+            &mut current,
+            &mut peak,
+            u64::MAX,
+            LedgerEvidencePurpose::Snapshot,
+        )
+        .expect("replacement growth");
+
+        assert_eq!(values, original_values);
+        assert!(values.capacity() >= desired_capacity);
+        assert_eq!(
+            current,
+            capacity_bytes(&values).expect("replacement capacity bytes")
+        );
+        assert_eq!(
+            peak,
+            original_bytes + replacement_envelope_bytes,
+            "the old backing and complete candidate envelope overlap at allocation time"
+        );
+    }
+
+    #[test]
+    fn tracked_coverage_mismatch_rejects_before_allocator_or_accounting_mutation() {
+        let _guard = EVIDENCE_ALLOCATION_TEST_LOCK
+            .lock()
+            .expect("allocation test lock");
+        let mut values = Vec::with_capacity(2);
+        values.extend([11_u64, 22]);
+        let original_values = values.clone();
+        let original_capacity = values.capacity();
+        let owned_capacity_bytes = capacity_bytes(&values).expect("test capacity bytes");
+        let mut retained_bytes = 0;
+        let mut current = owned_capacity_bytes;
+        let mut peak = owned_capacity_bytes;
+
+        test_set_evidence_allocation_failure(true);
+        let error = try_grow_tracked_evidence_vec(
+            &mut values,
+            original_capacity.saturating_add(1),
+            &mut retained_bytes,
+            &mut current,
+            &mut peak,
+            u64::MAX,
+            LedgerEvidencePurpose::Progress,
+        )
+        .expect_err("mismatched retained owner must reject");
+
+        assert_eq!(
+            error,
+            LedgerEvidenceError::TrackedStorageCoverageMismatch {
+                purpose: LedgerEvidencePurpose::Progress,
+                retained_bytes: 0,
+                capacity_bytes: owned_capacity_bytes,
+            }
+        );
+        assert_eq!(values, original_values);
+        assert_eq!(values.capacity(), original_capacity);
+        assert_eq!(retained_bytes, 0);
+        assert_eq!(current, owned_capacity_bytes);
+        assert_eq!(peak, owned_capacity_bytes);
+        assert!(
+            test_evidence_allocation_failure_is_armed(),
+            "coverage rejection must precede the allocator failpoint"
+        );
+        test_set_evidence_allocation_failure(false);
+    }
+
+    #[test]
+    fn zero_sized_tracked_storage_needs_no_candidate_or_evidence_bytes() {
+        let _guard = EVIDENCE_ALLOCATION_TEST_LOCK
+            .lock()
+            .expect("allocation test lock");
+        let mut values = vec![(), ()];
+        let original_capacity = values.capacity();
+        let mut retained_bytes = 0;
+        let mut current = 0;
+        let mut peak = 0;
+
+        test_set_evidence_allocation_failure(true);
+        try_grow_tracked_evidence_vec(
+            &mut values,
+            usize::MAX,
+            &mut retained_bytes,
+            &mut current,
+            &mut peak,
+            0,
+            LedgerEvidencePurpose::Progress,
+        )
+        .expect("zero-sized storage already has logical capacity");
+
+        assert_eq!(values, [(), ()]);
+        assert_eq!(values.capacity(), original_capacity);
+        assert_eq!(retained_bytes, 0);
+        assert_eq!(current, 0);
+        assert_eq!(peak, 0);
+        assert!(
+            test_evidence_allocation_failure_is_armed(),
+            "zero-sized growth must not create a replacement backing"
+        );
+        test_set_evidence_allocation_failure(false);
     }
 
     #[test]
@@ -6494,6 +6868,67 @@ mod tests {
             .expect("failed growth finalizes cleanly");
         assert_eq!(final_snapshot.current_evidence_bytes(), 0);
         assert!(final_snapshot.peak_evidence_bytes() > frozen_evidence_bytes);
+    }
+
+    #[test]
+    fn injected_progress_over_envelope_failure_preserves_storage_and_releases_on_finish() {
+        let _guard = EVIDENCE_ALLOCATION_TEST_LOCK
+            .lock()
+            .expect("allocation test lock");
+        let limits = limits();
+        let mut coordinator =
+            OperationCoordinator::<Owner, Phase, Progress, Unit, Dimension>::try_new(
+                OperationControl::default(),
+                limits,
+                COMPLETE_PHASES,
+            )
+            .expect("complete test phase catalog");
+        coordinator
+            .report_progress(Progress::Work, Unit::Work, 1, None)
+            .expect("initial progress state");
+        let frozen_evidence_bytes = coordinator
+            .try_ledger_snapshot()
+            .expect("progress evidence baseline")
+            .current_evidence_bytes();
+
+        test_fail_next_evidence_over_envelope();
+        let error = coordinator
+            .report_progress(Progress::Other, Unit::Work, 1, None)
+            .expect_err("injected post-allocation envelope violation");
+        assert!(matches!(
+            &error,
+            ControlCause::ProgressStorage {
+                cause: ProgressStorageError::Evidence {
+                    cause: LedgerEvidenceError::Capacity {
+                        purpose: LedgerEvidencePurpose::Progress,
+                        cause: CapacityPlanError::CapacityEnvelopeViolated { .. },
+                    }
+                }
+            }
+        ));
+        assert_eq!(coordinator.poll(), Err(error));
+        assert_eq!(
+            coordinator.reported_progress(Progress::Work, Unit::Work),
+            Some((1, None)),
+            "failed replacement must leave the previous progress entry intact"
+        );
+        let interim = coordinator
+            .try_ledger_snapshot()
+            .expect("terminal coordinator retains capturable evidence");
+        assert_eq!(
+            interim.current_evidence_bytes(),
+            frozen_evidence_bytes,
+            "failed growth must restore current evidence exactly"
+        );
+        assert!(
+            interim.peak_evidence_bytes() > frozen_evidence_bytes,
+            "the transient candidate envelope remains visible in the high-water mark"
+        );
+
+        let final_snapshot = coordinator
+            .finish()
+            .expect("terminal progress storage must release on finish");
+        assert_eq!(final_snapshot.current_evidence_bytes(), 0);
     }
 
     #[test]
@@ -8229,7 +8664,7 @@ mod tests {
             .split("fn apply_typed_commitments")
             .nth(1)
             .expect("bound commitment helper exists")
-            .split("fn try_snapshot")
+            .split("struct SnapshotEvidenceAssembly")
             .next()
             .expect("bound commitment helper body exists");
         let batch_release = production

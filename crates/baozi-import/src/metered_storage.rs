@@ -4,7 +4,7 @@ use crate::ledger::{
 };
 use crate::scope::ImportStorageClass;
 use baozi_core::{MetadataValue, OrderedMap};
-use baozi_operation::{CapacityPlan, CapacityPlanError};
+use baozi_operation::{CapacityPlanError, ReplacementCapacityPlan};
 use std::cell::RefCell;
 use std::fmt;
 use std::ops::{Deref, DerefMut};
@@ -427,10 +427,14 @@ impl<T> AccountedVec<T> {
             return Ok(None);
         }
 
-        let plan = CapacityPlan::for_type::<T>(0, 0, required_capacity)
-            .map_err(|cause| capacity_plan_cause(resource, cause))?;
-        let admitted = plan
-            .envelope_delta_bytes()
+        let replacement_plan = ReplacementCapacityPlan::for_type::<T>(
+            self.values.len(),
+            self.values.capacity(),
+            required_capacity,
+        )
+        .map_err(|cause| capacity_plan_cause(resource, cause))?;
+        let admitted = replacement_plan
+            .candidate_envelope_bytes()
             .map_err(|cause| capacity_plan_cause(resource, cause))?;
         let capacity = if admitted == 0 {
             None
@@ -448,27 +452,33 @@ impl<T> AccountedVec<T> {
             capacity,
         };
 
-        plan.verify_preflight(replacement.values.len(), replacement.values.capacity())
+        replacement_plan
+            .verify_source(self.values.len(), self.values.capacity())
+            .map_err(|cause| capacity_plan_cause(resource, cause))?;
+        let candidate_plan = replacement_plan.candidate();
+        candidate_plan
+            .verify_preflight(replacement.values.len(), replacement.values.capacity())
             .map_err(|cause| capacity_plan_cause(resource, cause))?;
         if fail_next_allocation() {
             return Err(ScopeAbortCause::Allocation { resource });
         }
         replacement
             .values
-            .try_reserve_exact(plan.allocator_additional())
+            .try_reserve_exact(candidate_plan.allocator_additional())
             .map_err(|_| ScopeAbortCause::Allocation { resource })?;
         if fail_next_qualification() {
             return Err(capacity_plan_cause(
                 resource,
-                CapacityPlanError::CapacityPlatformUnqualified {
+                CapacityPlanError::CapacityEnvelopeViolated {
                     policy_revision: baozi_operation::CAPACITY_POLICY_REVISION,
-                    desired_capacity: plan.desired_capacity(),
-                    envelope_capacity: plan.envelope_capacity(),
+                    desired_capacity: candidate_plan.desired_capacity(),
+                    envelope_capacity: candidate_plan.envelope_capacity(),
                     actual_capacity: replacement.values.capacity(),
                 },
             ));
         }
-        plan.finish(replacement.values.len(), replacement.values.capacity())
+        candidate_plan
+            .finish(replacement.values.len(), replacement.values.capacity())
             .map_err(|cause| capacity_plan_cause(resource, cause))?;
 
         Ok(Some(AccountedVecCandidate {
@@ -678,12 +688,13 @@ pub(crate) fn capacity_plan_cause(
                 limit: u64::MAX,
             }
         }
-        CapacityPlanError::InvalidState { .. }
-        | CapacityPlanError::StalePlan { .. }
-        | CapacityPlanError::CapacityPlatformUnqualified { .. } => {
+        CapacityPlanError::InvalidState { .. } | CapacityPlanError::StalePlan { .. } => {
             ScopeAbortCause::DescriptorContract {
                 code: "capacity-plan-contract-failed",
             }
+        }
+        cause @ CapacityPlanError::CapacityEnvelopeViolated { .. } => {
+            ScopeAbortCause::CapacityEnvelope { resource, cause }
         }
         _ => ScopeAbortCause::DescriptorContract {
             code: "capacity-plan-error-unknown",
@@ -1032,8 +1043,9 @@ mod tests {
         FAIL_NEXT_QUALIFICATION.with(|fault| fault.set(true));
         assert!(matches!(
             values.try_reserve(1, "candidate", |bytes| reserve(&coordinator, bytes)),
-            Err(ScopeAbortCause::DescriptorContract {
-                code: "capacity-plan-contract-failed"
+            Err(ScopeAbortCause::CapacityEnvelope {
+                resource: "candidate",
+                cause: CapacityPlanError::CapacityEnvelopeViolated { .. },
             })
         ));
         assert_eq!(&*values, &[7]);

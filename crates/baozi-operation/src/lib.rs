@@ -14,7 +14,10 @@ mod owner;
 )]
 mod retained;
 
-pub use capacity::{CAPACITY_POLICY_REVISION, CapacityPlan, CapacityPlanError};
+pub use capacity::{
+    CAPACITY_POLICY_REVISION, CapacityPlan, CapacityPlanError, GrowableCapacityPlan,
+    ReplacementCapacityPlan,
+};
 pub use concrete_store::{
     ByteBlock, BytesPlan, BytesWriter, CanonicalBytesRef, CanonicalRecordRef,
     CanonicalRecordRowWriter, CanonicalRecordView, CanonicalRecordWriter, CanonicalSequenceRef,

@@ -1,5 +1,35 @@
 use super::*;
 
+fn publication_limits_with_four_commitment_dimensions(
+    payload_live_bytes: u64,
+) -> LedgerLimits<Dimension> {
+    LedgerLimits::new(
+        payload_live_bytes
+            .checked_add(publication_capacity_bytes())
+            .expect("publication test live limit must be representable"),
+        [
+            (
+                Dimension::AssetBytes,
+                DimensionPolicy::reservable_bytes(
+                    64,
+                    64,
+                    16,
+                    publication_capacity_bytes()
+                        .checked_add(20)
+                        .expect("test asset live limit must be representable"),
+                ),
+            ),
+            (
+                Dimension::OutputBytes,
+                DimensionPolicy::reservable_bytes(64, 64, 16, 16),
+            ),
+            (Dimension::Records, DimensionPolicy::counter(32, 32, 8)),
+            (Dimension::Unknown, DimensionPolicy::counter(32, 32, 8)),
+        ],
+    )
+    .expect("valid four-dimension publication policy")
+}
+
 #[test]
 fn publication_must_take_every_live_byte_or_commit_nothing() {
     let mut coordinator = publication_coordinator(20);
@@ -444,36 +474,34 @@ fn commitment_failures_preserve_live_batch_for_retry() {
 
 #[test]
 fn publication_evidence_failure_preserves_live_batch_for_retry() {
-    let mut probe = publication_coordinator(20);
-    let probe_reservation = probe
-        .checkpoint()
-        .reserve(Phase::Output, Dimension::OutputBytes, 1)
-        .expect("publication evidence probe reservation");
-    let probe_batch = publication_batch(&mut probe, [probe_reservation]);
-    let prepublication_evidence_limit = probe.ledger_snapshot().current_evidence_bytes();
-    drop(probe_batch);
-    probe
-        .finish()
-        .expect("the evidence probe should finalize cleanly");
-
-    let tight_limits = publication_limits(20)
-        .try_with_evidence_byte_limit(prepublication_evidence_limit)
-        .expect("dimension and one phase evidence fit exactly");
-    let mut coordinator = coordinator_with(OperationControl::default(), tight_limits);
+    let mut coordinator = coordinator_with_tight_evidence_limit(|| {
+        publication_limits_with_four_commitment_dimensions(20)
+    });
     let reservation = coordinator
         .checkpoint()
         .reserve(Phase::Output, Dimension::OutputBytes, 1)
         .expect("the prepublication envelope should fit");
     let mut batch = publication_batch(&mut coordinator, [reservation]);
 
+    let failure = coordinator
+        .prepare_publication(
+            &mut batch,
+            &[
+                Commitment::new(Dimension::AssetBytes, 1),
+                Commitment::new(Dimension::OutputBytes, 1),
+                Commitment::new(Dimension::Records, 1),
+                Commitment::new(Dimension::Unknown, 1),
+            ],
+        )
+        .expect_err("the four-entry aggregate must exceed the tight evidence bound");
     assert!(matches!(
-        coordinator.prepare_publication(&mut batch, &[Commitment::new(Dimension::OutputBytes, 1)],),
-        Err(LedgerCause::Evidence {
+        failure,
+        LedgerCause::Evidence {
             cause: LedgerEvidenceError::LimitExceeded {
                 purpose: LedgerEvidencePurpose::Publication,
                 ..
             }
-        })
+        }
     ));
     assert!(!batch.is_empty());
     let output = coordinator

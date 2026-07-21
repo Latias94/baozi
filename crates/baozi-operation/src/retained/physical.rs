@@ -1,3 +1,4 @@
+use super::startup::ReadyStartupPhysicalSplitAuthority;
 use super::*;
 
 struct FactoryControlLeaseGuard {
@@ -484,6 +485,7 @@ pub(super) struct RetainedAdmissionPairPlan {
 }
 
 impl RetainedAdmissionPairPlan {
+    #[cfg(test)]
     pub(super) fn try_new(
         first: AdmissionCharge,
         second: AdmissionCharge,
@@ -542,12 +544,6 @@ pub(super) struct StartupAccountOwners {
     pub(super) evidence_lease_owner: PhysicalStorageAccount,
 }
 
-pub(super) struct StartupRemainingOwners {
-    evidence_account: PhysicalStorageAccount,
-    fallback_lease_owner: PhysicalStorageAccount,
-    evidence_lease_owner: PhysicalStorageAccount,
-}
-
 impl AdmittedRetainedShareWork {
     pub(super) fn consume_account(
         self,
@@ -569,25 +565,36 @@ impl AdmittedRetainedShareWork {
 }
 
 impl<'account> StartupAdmissionGuard<'account> {
-    pub(super) fn new(
+    pub(super) fn from_precommitted(
         account: &'account PhysicalStorageAccount,
-        admissions: PendingStartRetainedAdmissions<'account>,
-        owners: StartupRemainingOwners,
+        plan: RetainedAdmissionPairPlan,
+        owners: StartupAccountOwners,
+        _authority: ReadyStartupPhysicalSplitAuthority,
     ) -> Self {
-        let StartupRemainingOwners {
+        let StartupAccountOwners {
+            fallback_account,
             evidence_account,
             fallback_lease_owner,
             evidence_lease_owner,
         } = owners;
         Self {
             account,
-            admissions: Some(admissions),
+            admissions: Some(PendingStartRetainedAdmissions {
+                account,
+                plan,
+                state: PendingStartRetainedAdmissionState::Pending,
+                containment_owner: Some(fallback_account),
+            }),
             evidence_account: Some(evidence_account),
             fallback_lease_owner: Some(fallback_lease_owner),
             evidence_lease_owner: Some(evidence_lease_owner),
         }
     }
 
+    #[allow(
+        dead_code,
+        reason = "the Ready guard keeps an explicit recoverable exit for pre-handoff failures"
+    )]
     pub(super) fn rollback(
         mut self,
         outer_reason: Option<AccountPoisonReason>,
@@ -604,11 +611,52 @@ impl Drop for StartupAdmissionGuard<'_> {
         let Some(admissions) = self.admissions.take() else {
             return;
         };
-        let _ = admissions.rollback_with_fault(Some(AccountPoisonReason::OwnershipGraphUnverified));
+        let _ = self
+            .account
+            .record_poison(AccountPoisonReason::OwnershipGraphUnverified);
+        std::mem::forget(admissions);
+        if let Some(account) = self.evidence_account.take() {
+            std::mem::forget(account);
+        }
+        if let Some(owner) = self.fallback_lease_owner.take() {
+            std::mem::forget(owner);
+        }
+        if let Some(owner) = self.evidence_lease_owner.take() {
+            std::mem::forget(owner);
+        }
     }
 }
 
 impl<'account> PendingStartRetainedAdmissions<'account> {
+    #[cfg(test)]
+    pub(super) fn try_admit_for_test(
+        account: &'account PhysicalStorageAccount,
+        plan: RetainedAdmissionPairPlan,
+    ) -> Result<Self, RetainedAllocationError> {
+        let containment_owner = PhysicalStorageAccount {
+            inner: account.inner.share(),
+        };
+        let mut state = lock_recovering_poison(&account.inner.value().linear);
+        if let Some(error) = state.poisoned_error() {
+            return Err(RetainedAllocationError::AccountPoisoned(error));
+        }
+        let admitted_retained_owners = state
+            .admitted_retained_owners
+            .checked_add(2)
+            .ok_or(RetainedAllocationError::AccountingOverflow)?;
+        let limits = account.limits().counter_limits();
+        try_admit_locked(&mut state.counters, limits, plan.aggregate)
+            .map_err(map_retained_admission_error)?;
+        state.admitted_retained_owners = admitted_retained_owners;
+        drop(state);
+        Ok(Self {
+            account,
+            plan,
+            state: PendingStartRetainedAdmissionState::Pending,
+            containment_owner: Some(containment_owner),
+        })
+    }
+
     pub(super) fn into_parts(
         mut self,
         second_account: PhysicalStorageAccount,
@@ -1038,49 +1086,6 @@ impl PhysicalStorageAccount {
             state: PendingRetainedAdmissionState::Pending,
             lease_owner: Some(lease_owner),
         })
-    }
-
-    pub(super) fn try_admit_start_retained_pair_after_action(
-        &self,
-        action: PendingAccountActionAdmission<'_>,
-        plan: RetainedAdmissionPairPlan,
-        owners: StartupAccountOwners,
-    ) -> Result<(PendingStartRetainedAdmissions<'_>, StartupRemainingOwners), RetainedAllocationError>
-    {
-        if !action.account().is_same_account(self) {
-            let poisoned = self.record_poison(AccountPoisonReason::OwnershipGraphUnverified);
-            return Err(RetainedAllocationError::AccountPoisoned(poisoned));
-        }
-        let mut state = lock_recovering_poison(&self.inner.value().linear);
-        let admitted_retained_owners = state
-            .admitted_retained_owners
-            .checked_add(2)
-            .ok_or(RetainedAllocationError::AccountingOverflow)?;
-        let limits = self.limits().counter_limits();
-        try_admit_locked(&mut state.counters, limits, plan.aggregate)
-            .map_err(map_retained_admission_error)?;
-        state.admitted_retained_owners = admitted_retained_owners;
-        drop(state);
-        let StartupAccountOwners {
-            fallback_account,
-            evidence_account,
-            fallback_lease_owner,
-            evidence_lease_owner,
-        } = owners;
-        action.complete();
-        Ok((
-            PendingStartRetainedAdmissions {
-                account: self,
-                plan,
-                state: PendingStartRetainedAdmissionState::Pending,
-                containment_owner: Some(fallback_account),
-            },
-            StartupRemainingOwners {
-                evidence_account,
-                fallback_lease_owner,
-                evidence_lease_owner,
-            },
-        ))
     }
 
     pub(super) fn release_retained_charge(

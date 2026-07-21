@@ -183,6 +183,32 @@ fn coordinator(operation_live_bytes: u64) -> Coordinator {
     coordinator_with(OperationControl::default(), limits(operation_live_bytes))
 }
 
+fn coordinator_with_tight_evidence_limit(
+    mut build_limits: impl FnMut() -> LedgerLimits<Dimension>,
+) -> Coordinator {
+    let mut evidence_limit = 0;
+    for _ in 0..16 {
+        let limits = build_limits();
+        evidence_limit = evidence_limit.max(limits.frozen_evidence_bytes());
+        let limits = limits
+            .try_with_evidence_byte_limit(evidence_limit)
+            .expect("the frozen dimension evidence must fit its observed bound");
+        match Coordinator::try_new(OperationControl::default(), limits, COMPLETE_PHASES) {
+            Ok(coordinator) => return coordinator,
+            Err(LedgerCause::Evidence {
+                cause:
+                    LedgerEvidenceError::LimitExceeded {
+                        purpose: LedgerEvidencePurpose::Phases,
+                        value,
+                        ..
+                    },
+            }) => evidence_limit = value,
+            Err(cause) => panic!("unexpected tight evidence qualification failure: {cause}"),
+        }
+    }
+    panic!("the tiny test catalog did not converge to its admitted evidence envelope")
+}
+
 fn run_with_timeout<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> T {
     let (sender, receiver) = std::sync::mpsc::sync_channel(1);
     let worker = std::thread::spawn(move || {

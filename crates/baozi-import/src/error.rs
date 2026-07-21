@@ -2,7 +2,7 @@ use crate::dependency::DependencyPolicyError;
 use crate::descriptor::FormatDescriptor;
 use crate::diagnostic::{DiagnosticCause, DiagnosticCode, valid_detail_key};
 use crate::ledger::ImportDimension;
-use baozi_core::{FormatId, SceneBuildError, SceneValidationError};
+use baozi_core::{FormatId, SceneBuildError, SceneBuildResource, SceneValidationError};
 use baozi_io::{AssetOpenError, AssetReadError, PathError};
 use baozi_operation::{CapacityPlan, CapacityPlanError, ControlCause, LedgerCause};
 use std::error::Error;
@@ -106,6 +106,15 @@ pub enum ScopeAbortCause {
     Allocation {
         resource: &'static str,
     },
+    /// The allocator returned capacity outside the operation's admitted envelope.
+    ///
+    /// This is an operation/runtime qualification failure, not a format descriptor contract
+    /// failure. The structured operation error is retained so infrastructure diagnostics do not
+    /// get attributed to a parser or importer.
+    CapacityEnvelope {
+        resource: &'static str,
+        cause: CapacityPlanError,
+    },
     OptionTypeMismatch,
     DescriptorContract {
         code: &'static str,
@@ -117,11 +126,34 @@ pub enum ScopeAbortCause {
 }
 
 impl ScopeAbortCause {
+    pub(crate) fn from_scene_build(cause: SceneBuildError) -> Self {
+        match cause {
+            SceneBuildError::CapacityPlan {
+                resource,
+                cause: cause @ CapacityPlanError::CapacityEnvelopeViolated { .. },
+            } => Self::CapacityEnvelope {
+                resource: scene_build_resource_label(resource),
+                cause,
+            },
+            cause => Self::SceneBuild(cause),
+        }
+    }
+
+    pub(crate) fn from_scene_validation(cause: SceneValidationError) -> Self {
+        match cause {
+            SceneValidationError::CapacityPlan {
+                resource,
+                cause: cause @ CapacityPlanError::CapacityEnvelopeViolated { .. },
+            } => Self::CapacityEnvelope { resource, cause },
+            cause => Self::SceneAccounting(cause),
+        }
+    }
+
     pub fn owner(&self) -> CauseOwner {
         match self {
             Self::Path(_) | Self::AssetOpen(_) | Self::AssetRead(_) => CauseOwner::Io,
             Self::DependencyPolicy(_) => CauseOwner::DependencyPolicy,
-            Self::Control(_) => CauseOwner::Operation,
+            Self::Control(_) | Self::CapacityEnvelope { .. } => CauseOwner::Operation,
             Self::SceneBuild(_) | Self::SceneAccounting(_) => CauseOwner::Core,
             Self::TrustedExtension { .. } => CauseOwner::TrustedExtension,
             Self::Ledger(_)
@@ -134,6 +166,22 @@ impl ScopeAbortCause {
             | Self::OptionTypeMismatch
             | Self::DescriptorContract { .. } => CauseOwner::Import,
         }
+    }
+}
+
+fn scene_build_resource_label(resource: SceneBuildResource) -> &'static str {
+    match resource {
+        SceneBuildResource::Nodes => "scene-builder-nodes",
+        SceneBuildResource::NodeChildren => "scene-builder-node-children",
+        SceneBuildResource::NodeMeshBindings => "scene-builder-node-mesh-bindings",
+        SceneBuildResource::Meshes => "scene-builder-meshes",
+        SceneBuildResource::Materials => "scene-builder-materials",
+        SceneBuildResource::Textures => "scene-builder-textures",
+        SceneBuildResource::Animations => "scene-builder-animations",
+        SceneBuildResource::Cameras => "scene-builder-cameras",
+        SceneBuildResource::Lights => "scene-builder-lights",
+        SceneBuildResource::Skins => "scene-builder-skins",
+        SceneBuildResource::SceneMetadata => "scene-builder-metadata",
     }
 }
 
@@ -166,6 +214,12 @@ impl fmt::Display for ScopeAbortCause {
             Self::Allocation { resource } => {
                 write!(formatter, "allocation failed for {resource}")
             }
+            Self::CapacityEnvelope { resource, cause } => {
+                write!(
+                    formatter,
+                    "capacity envelope failed for {resource}: {cause}"
+                )
+            }
             Self::OptionTypeMismatch => formatter.write_str("selected format option type mismatch"),
             Self::DescriptorContract { code } => {
                 write!(
@@ -196,6 +250,7 @@ impl Error for ScopeAbortCause {
             Self::FormatFailureDetail(error) => Some(error),
             Self::SceneBuild(error) => Some(error),
             Self::SceneAccounting(error) => Some(error),
+            Self::CapacityEnvelope { cause, .. } => Some(cause),
             Self::OptionTypeMismatch
             | Self::FormatRecoveryRejectedByConformance { .. }
             | Self::FormatRecoveryRejectedByLossPolicy { .. }
@@ -799,6 +854,13 @@ pub enum ImportCause {
 }
 
 impl ImportCause {
+    pub(crate) fn from_scene_validation(cause: SceneValidationError) -> Self {
+        match ScopeAbortCause::from_scene_validation(cause) {
+            ScopeAbortCause::SceneAccounting(cause) => Self::Validation(cause),
+            cause => Self::Scope(ScopeAbort::new(cause)),
+        }
+    }
+
     pub fn owner(&self) -> CauseOwner {
         match self {
             Self::Scope(abort) => abort.owner(),
@@ -843,6 +905,71 @@ impl Error for ImportCause {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scene_build_capacity_envelope_is_operation_owned() {
+        let cause = ScopeAbortCause::from_scene_build(SceneBuildError::CapacityPlan {
+            resource: SceneBuildResource::Meshes,
+            cause: CapacityPlanError::CapacityEnvelopeViolated {
+                policy_revision: baozi_operation::CAPACITY_POLICY_REVISION,
+                desired_capacity: 4,
+                envelope_capacity: 4,
+                actual_capacity: 8,
+            },
+        });
+
+        assert_eq!(cause.owner(), CauseOwner::Operation);
+        assert!(matches!(
+            cause,
+            ScopeAbortCause::CapacityEnvelope {
+                resource: "scene-builder-meshes",
+                cause: CapacityPlanError::CapacityEnvelopeViolated { .. },
+            }
+        ));
+    }
+
+    #[test]
+    fn scene_validation_capacity_envelope_is_operation_owned() {
+        let cause = ScopeAbortCause::from_scene_validation(SceneValidationError::CapacityPlan {
+            resource: "validation-scratch",
+            cause: CapacityPlanError::CapacityEnvelopeViolated {
+                policy_revision: baozi_operation::CAPACITY_POLICY_REVISION,
+                desired_capacity: 2,
+                envelope_capacity: 2,
+                actual_capacity: 3,
+            },
+        });
+
+        assert_eq!(cause.owner(), CauseOwner::Operation);
+        assert!(matches!(
+            cause,
+            ScopeAbortCause::CapacityEnvelope {
+                resource: "validation-scratch",
+                cause: CapacityPlanError::CapacityEnvelopeViolated { .. },
+            }
+        ));
+    }
+
+    #[test]
+    fn final_validation_capacity_envelope_does_not_claim_core_ownership() {
+        let cause = ImportCause::from_scene_validation(SceneValidationError::CapacityPlan {
+            resource: "validation-scratch",
+            cause: CapacityPlanError::CapacityEnvelopeViolated {
+                policy_revision: baozi_operation::CAPACITY_POLICY_REVISION,
+                desired_capacity: 2,
+                envelope_capacity: 2,
+                actual_capacity: 3,
+            },
+        });
+
+        assert_eq!(cause.owner(), CauseOwner::Operation);
+        assert!(matches!(
+            cause,
+            ImportCause::Scope(ScopeAbort {
+                cause: ScopeAbortCause::CapacityEnvelope { .. },
+            })
+        ));
+    }
 
     fn new_sink() -> BoundedFormatFailureDetailSink {
         let plan = BoundedFormatFailureDetailSink::capacity_plan()

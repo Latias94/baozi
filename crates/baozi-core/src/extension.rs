@@ -11,7 +11,7 @@ use crate::identity::SceneEntityKind;
 use crate::math::{Color, Mat4, Vec2, Vec3, Vec4};
 use crate::namespaced::{NamespacedName, NamespacedNameError};
 use crate::provenance::{MAX_SOURCE_LOCATOR_LEN, Provenance};
-use baozi_operation::CapacityPlan;
+use baozi_operation::{CapacityPlan, GrowableCapacityPlan};
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::fmt;
@@ -812,7 +812,7 @@ fn try_reserve_vec<T>(
         .len()
         .checked_add(additional)
         .ok_or(ExtensionValueError::AllocationFailed { resource })?;
-    let plan = CapacityPlan::for_type::<T>(values.len(), values.capacity(), desired)
+    let plan = GrowableCapacityPlan::for_type::<T>(values.len(), values.capacity(), desired)
         .map_err(|_| ExtensionValueError::AllocationFailed { resource })?;
     if desired > values.capacity() {
         values
@@ -833,7 +833,7 @@ fn try_reserve_string(
         .len()
         .checked_add(additional)
         .ok_or(ExtensionValueError::AllocationFailed { resource })?;
-    let plan = CapacityPlan::for_type::<u8>(value.len(), value.capacity(), desired)
+    let plan = GrowableCapacityPlan::for_type::<u8>(value.len(), value.capacity(), desired)
         .map_err(|_| ExtensionValueError::AllocationFailed { resource })?;
     if desired > value.capacity() {
         value
@@ -2129,10 +2129,13 @@ fn try_insert_schema(
         .len()
         .checked_add(1)
         .ok_or(ExtensionSchemaSnapshotError::AllocationFailed)?;
-    let plan =
-        CapacityPlan::for_type::<ExtensionSchema>(schemas.len(), schemas.capacity(), desired)
-            .map_err(|_| ExtensionSchemaSnapshotError::AllocationFailed)?;
-    plan.verify_preflight(schemas.len(), schemas.capacity())
+    let plan = GrowableCapacityPlan::for_type::<ExtensionSchema>(
+        schemas.len(),
+        schemas.capacity(),
+        desired,
+    )
+    .map_err(|_| ExtensionSchemaSnapshotError::AllocationFailed)?;
+    plan.verify_source(schemas.len(), schemas.capacity())
         .map_err(|_| ExtensionSchemaSnapshotError::AllocationFailed)?;
 
     if desired <= schemas.capacity() {
@@ -2193,9 +2196,12 @@ fn try_reserve_schema_vec(
         .len()
         .checked_add(additional)
         .ok_or(ExtensionSchemaSnapshotError::AllocationFailed)?;
-    let plan =
-        CapacityPlan::for_type::<ExtensionSchema>(schemas.len(), schemas.capacity(), desired)
-            .map_err(|_| ExtensionSchemaSnapshotError::AllocationFailed)?;
+    let plan = GrowableCapacityPlan::for_type::<ExtensionSchema>(
+        schemas.len(),
+        schemas.capacity(),
+        desired,
+    )
+    .map_err(|_| ExtensionSchemaSnapshotError::AllocationFailed)?;
     if desired > schemas.capacity() {
         schemas
             .try_reserve_exact(plan.allocator_additional())

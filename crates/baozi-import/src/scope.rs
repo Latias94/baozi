@@ -823,12 +823,12 @@ impl<'session> ParseScope<'session> {
             CapacityPlanError::CapacityOverflow | CapacityPlanError::AllocationTooLarge { .. } => {
                 self.resource_limit_exceeded(resource, u64::MAX)
             }
-            CapacityPlanError::InvalidState { .. }
-            | CapacityPlanError::StalePlan { .. }
-            | CapacityPlanError::CapacityPlatformUnqualified { .. } => {
-                self.abort(ScopeAbortCause::DescriptorContract {
+            CapacityPlanError::InvalidState { .. } | CapacityPlanError::StalePlan { .. } => self
+                .abort(ScopeAbortCause::DescriptorContract {
                     code: "capacity-plan-contract-failed",
-                })
+                }),
+            cause @ CapacityPlanError::CapacityEnvelopeViolated { .. } => {
+                self.abort(ScopeAbortCause::CapacityEnvelope { resource, cause })
             }
             _ => self.abort(ScopeAbortCause::DescriptorContract {
                 code: "capacity-plan-error-unknown",
@@ -1711,16 +1711,16 @@ impl<'session> ParseScope<'session> {
         self.preflight_active()?;
         self.poll()?;
         let capacity_plan = SceneBuilder::initial_capacity_plan()
-            .map_err(|cause| self.abort(ScopeAbortCause::SceneBuild(cause)))?;
+            .map_err(|cause| self.abort(ScopeAbortCause::from_scene_build(cause)))?;
         let capacity_bytes = capacity_plan
             .envelope_delta_bytes()
-            .map_err(|cause| self.abort(ScopeAbortCause::SceneBuild(cause)))?;
+            .map_err(|cause| self.abort(ScopeAbortCause::from_scene_build(cause)))?;
         let inline_bytes = u64::try_from(size_of::<SceneBuilder>())
             .map_err(|_| self.allocation_failure("scene-builder-inline-accounting"))?;
         let inline = self.reserve_live(ImportStorageClass::SceneConstruction, inline_bytes)?;
         let nodes = self.reserve_live(ImportStorageClass::SceneConstruction, capacity_bytes)?;
         let builder = SceneBuilder::try_new_with_capacity_plan(capacity_plan)
-            .map_err(|cause| self.abort(ScopeAbortCause::SceneBuild(cause)))?;
+            .map_err(|cause| self.abort(ScopeAbortCause::from_scene_build(cause)))?;
         let mut node_slots = AccountedVec::new();
         node_slots
             .try_reserve(1, "scene-node-reservation-slots", |bytes| {
@@ -3034,24 +3034,7 @@ impl StorageMeter<'_> {
     }
 
     fn capacity_error(&self, resource: &'static str, cause: CapacityPlanError) -> ParseFailure {
-        match cause {
-            CapacityPlanError::CapacityOverflow | CapacityPlanError::AllocationTooLarge { .. } => {
-                self.abort(ScopeAbortCause::ResourceLimit {
-                    resource,
-                    limit: u64::MAX,
-                })
-            }
-            CapacityPlanError::InvalidState { .. }
-            | CapacityPlanError::StalePlan { .. }
-            | CapacityPlanError::CapacityPlatformUnqualified { .. } => {
-                self.abort(ScopeAbortCause::DescriptorContract {
-                    code: "capacity-plan-contract-failed",
-                })
-            }
-            _ => self.abort(ScopeAbortCause::DescriptorContract {
-                code: "capacity-plan-error-unknown",
-            }),
-        }
+        self.abort(crate::metered_storage::capacity_plan_cause(resource, cause))
     }
 
     fn allocation_failure(&self, resource: &'static str) -> ParseFailure {
@@ -3061,7 +3044,7 @@ impl StorageMeter<'_> {
     fn qualification_failure(&self, resource: &'static str) -> ParseFailure {
         self.capacity_error(
             resource,
-            CapacityPlanError::CapacityPlatformUnqualified {
+            CapacityPlanError::CapacityEnvelopeViolated {
                 policy_revision: baozi_operation::CAPACITY_POLICY_REVISION,
                 desired_capacity: 1,
                 envelope_capacity: 1,
@@ -3694,6 +3677,7 @@ fn metered_map_error(
         OrderedMapError::CapacityNotReserved => meter.abort(ScopeAbortCause::DescriptorContract {
             code: "metered-ordered-map-capacity-not-reserved",
         }),
+        OrderedMapError::CapacityPlan(cause) => meter.abort(capacity_plan_cause(resource, cause)),
         _ => meter.abort(ScopeAbortCause::DescriptorContract {
             code: "metered-ordered-map-capacity-error-unknown",
         }),
@@ -4243,7 +4227,7 @@ fn validate_prepared_scene_value_with_meter<T: SceneBuildValue>(
         .as_ref()
         .expect("a new prepared scene value owns its value")
         .scene_value_footprint()
-        .map_err(|cause| meter.abort(ScopeAbortCause::SceneAccounting(cause)))?;
+        .map_err(|cause| meter.abort(ScopeAbortCause::from_scene_validation(cause)))?;
     validate_scene_value_reservations_with_meter(meter, &prepared.reservations, footprint)?;
     Ok(prepared)
 }
@@ -4674,6 +4658,14 @@ fn capacity_plan_cause(resource: &'static str, cause: CapacityPlanError) -> Scop
                 resource,
                 limit: u64::MAX,
             }
+        }
+        CapacityPlanError::InvalidState { .. } | CapacityPlanError::StalePlan { .. } => {
+            ScopeAbortCause::DescriptorContract {
+                code: "capacity-plan-contract-failed",
+            }
+        }
+        cause @ CapacityPlanError::CapacityEnvelopeViolated { .. } => {
+            ScopeAbortCause::CapacityEnvelope { resource, cause }
         }
         _ => ScopeAbortCause::DescriptorContract {
             code: "capacity-plan-contract-failed",
@@ -5110,6 +5102,9 @@ fn metadata_error(scope: &ParseScope<'_>, cause: OrderedMapError) -> ParseFailur
         OrderedMapError::CapacityNotReserved => scope.abort(ScopeAbortCause::DescriptorContract {
             code: "scene-metadata-capacity-not-reserved",
         }),
+        OrderedMapError::CapacityPlan(cause) => {
+            scope.abort(capacity_plan_cause("scene-metadata-capacity", cause))
+        }
         _ => scope.abort(ScopeAbortCause::DescriptorContract {
             code: "scene-metadata-capacity-error-unknown",
         }),
@@ -5274,15 +5269,15 @@ impl ScopedSceneBuilder<'_, '_> {
         let plan = storage
             .builder
             .node_mesh_binding_capacity_plan(id, 1)
-            .map_err(|cause| scope.abort(ScopeAbortCause::SceneBuild(cause)))?;
+            .map_err(|cause| scope.abort(ScopeAbortCause::from_scene_build(cause)))?;
         let admitted = plan
             .envelope_delta_bytes()
-            .map_err(|cause| scope.abort(ScopeAbortCause::SceneBuild(cause)))?;
+            .map_err(|cause| scope.abort(ScopeAbortCause::from_scene_build(cause)))?;
         let token = reserve_scene_candidate(scope, admitted)?;
         let candidate = storage
             .builder
             .prepare_add_node_mesh_binding(id, binding, plan)
-            .map_err(|cause| scope.abort(ScopeAbortCause::SceneBuild(cause)))?;
+            .map_err(|cause| scope.abort(ScopeAbortCause::from_scene_build(cause)))?;
         let mut accounted = AccountedSceneCandidate { candidate, token };
         let actual = accounted.candidate.replacement_bytes();
         qualify_scene_candidate(scope, &mut accounted.token, admitted, actual)?;
@@ -5357,7 +5352,7 @@ impl ScopedSceneBuilder<'_, '_> {
             .as_ref()
             .expect("a prepared metadata entry is inserted exactly once")
             .scene_value_footprint()
-            .map_err(|cause| scope.abort(ScopeAbortCause::SceneAccounting(cause)))?;
+            .map_err(|cause| scope.abort(ScopeAbortCause::from_scene_validation(cause)))?;
         validate_scene_value_reservations(scope, &prepared.reservations, footprint)?;
         let storage = &mut self.storage;
         let (is_new, position, metadata_len) = {
@@ -5491,7 +5486,7 @@ impl ScopedSceneBuilder<'_, '_> {
             .as_ref()
             .expect("a prepared scene value is inserted exactly once")
             .scene_value_footprint()
-            .map_err(|cause| scope.abort(ScopeAbortCause::SceneAccounting(cause)))?;
+            .map_err(|cause| scope.abort(ScopeAbortCause::from_scene_validation(cause)))?;
         validate_scene_value_reservations(scope, &prepared.reservations, footprint)?;
         let storage = &mut self.storage;
         if !storage
@@ -5517,14 +5512,14 @@ impl ScopedSceneBuilder<'_, '_> {
         let plan = storage
             .builder
             .collection_capacity_plan(collection, 1)
-            .map_err(|cause| scope.abort(ScopeAbortCause::SceneBuild(cause)))?;
+            .map_err(|cause| scope.abort(ScopeAbortCause::from_scene_build(cause)))?;
         let admitted = plan
             .envelope_delta_bytes()
-            .map_err(|cause| scope.abort(ScopeAbortCause::SceneBuild(cause)))?;
+            .map_err(|cause| scope.abort(ScopeAbortCause::from_scene_build(cause)))?;
         let token = reserve_scene_candidate(scope, admitted)?;
         let value = prepared.take_value();
         let candidate = prepare(&mut storage.builder, value, plan)
-            .map_err(|cause| scope.abort(ScopeAbortCause::SceneBuild(cause)))?;
+            .map_err(|cause| scope.abort(ScopeAbortCause::from_scene_build(cause)))?;
         let mut accounted = AccountedPreparedSceneCandidate {
             candidate,
             reservations: prepared.take_reservations(),
@@ -5586,7 +5581,7 @@ impl ScopedSceneBuilder<'_, '_> {
         }
         let footprint = node
             .scene_value_footprint()
-            .map_err(|cause| scope.abort(ScopeAbortCause::SceneAccounting(cause)))?;
+            .map_err(|cause| scope.abort(ScopeAbortCause::from_scene_validation(cause)))?;
         validate_scene_value_reservations(scope, &prepared.reservations, footprint)?;
         let storage = &mut self.storage;
         if !storage.inventory.collections.nodes.is_stable()
@@ -5614,13 +5609,13 @@ impl ScopedSceneBuilder<'_, '_> {
         let plan = storage
             .builder
             .node_insert_capacity_plan(parent)
-            .map_err(|cause| scope.abort(ScopeAbortCause::SceneBuild(cause)))?;
+            .map_err(|cause| scope.abort(ScopeAbortCause::from_scene_build(cause)))?;
         let nodes_admitted = plan
             .node_envelope_bytes()
-            .map_err(|cause| scope.abort(ScopeAbortCause::SceneBuild(cause)))?;
+            .map_err(|cause| scope.abort(ScopeAbortCause::from_scene_build(cause)))?;
         let children_admitted = plan
             .parent_children_envelope_bytes()
-            .map_err(|cause| scope.abort(ScopeAbortCause::SceneBuild(cause)))?;
+            .map_err(|cause| scope.abort(ScopeAbortCause::from_scene_build(cause)))?;
         storage
             .inventory
             .nodes
@@ -5634,7 +5629,7 @@ impl ScopedSceneBuilder<'_, '_> {
         let candidate = storage
             .builder
             .prepare_add_child_node(parent, node, plan)
-            .map_err(|cause| scope.abort(ScopeAbortCause::SceneBuild(cause)))?;
+            .map_err(|cause| scope.abort(ScopeAbortCause::from_scene_build(cause)))?;
         let mut accounted = AccountedPreparedNodeCandidate {
             candidate,
             reservations: prepared.take_reservations(),
@@ -5721,7 +5716,10 @@ impl ScopedSceneBuilder<'_, '_> {
             .storage
             .builder
             .storage_footprint()
-            .map_err(|cause| self.scope.abort(ScopeAbortCause::SceneAccounting(cause)))?
+            .map_err(|cause| {
+                self.scope
+                    .abort(ScopeAbortCause::from_scene_validation(cause))
+            })?
             .accounted_payload_bytes();
         self.scope
             .seal_draft_inventory(&mut self.storage.inventory, footprint)?;
@@ -5734,9 +5732,10 @@ mod tests {
     use super::*;
     use crate::ledger::{ImportOperationControl, import_ledger_limits, try_import_coordinator};
     use crate::{
-        CapabilityStatus, DetectionOutcome, DetectionResult, DetectionScope, FormatCapability,
-        FormatDescriptor, FormatEncoding, FormatImporter, ImportRequest, OptionCompileLimits,
-        ReadConfidence, ReadHint, RegistryBuildLimits, RegistryBuilder,
+        CapabilityStatus, CauseOwner, DetectionOutcome, DetectionResult, DetectionScope,
+        FormatCapability, FormatDescriptor, FormatEncoding, FormatImporter, ImportCause,
+        ImportRequest, OptionCompileLimits, ReadConfidence, ReadHint, RegistryBuildLimits,
+        RegistryBuilder,
     };
     use baozi_core::{FormatId, SceneDraft, Vec2, Vec3};
     use baozi_io::AssetPath;
@@ -6254,16 +6253,27 @@ mod tests {
             let request = snapshot
                 .compile_request(&ImportRequest::new(), OptionCompileLimits::default())
                 .expect("the test request must compile");
-            let result = crate::session::import_bytes(
+            let failure = crate::session::import_bytes(
                 &request,
                 AssetPath::new("asset.metered-qualification").expect("valid test path"),
                 b"fixture",
                 ImportOperationControl::default(),
-            );
-            assert!(
-                result.is_err(),
-                "the injected allocator qualification failure must terminate the import"
-            );
+            )
+            .expect_err("the injected capacity-envelope failure must terminate the import");
+            let operation_failure = failure
+                .operation_failure()
+                .expect("the injected failure must occur after operation initialization");
+            let ImportCause::Scope(abort) = operation_failure.cause() else {
+                panic!("capacity-envelope failure must remain a scope abort");
+            };
+            assert_eq!(abort.owner(), CauseOwner::Operation);
+            assert!(matches!(
+                abort.cause(),
+                ScopeAbortCause::CapacityEnvelope {
+                    cause: CapacityPlanError::CapacityEnvelopeViolated { .. },
+                    ..
+                }
+            ));
         }
     }
 

@@ -7,7 +7,7 @@ use crate::ledger::{
 };
 use crate::retained::{
     PhysicalStorageAccountFactory, PhysicalStorageAccountFactoryLimits,
-    PhysicalStorageAccountLimits,
+    PhysicalStorageAccountLimits, TerminalEvidenceKeySeal,
 };
 use crate::{DimensionPolicy, LedgerLimits};
 
@@ -21,11 +21,19 @@ enum Phase {
     Build,
 }
 
+impl TerminalEvidenceKeySeal for Phase {}
+
+impl TerminalEvidenceKey for Phase {}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Dimension {
     Bytes,
     Records,
 }
+
+impl TerminalEvidenceKeySeal for Dimension {}
+
+impl TerminalEvidenceKey for Dimension {}
 
 fn factory() -> PhysicalStorageAccountFactory {
     PhysicalStorageAccountFactory::try_new(
@@ -147,6 +155,9 @@ fn expect_uncertain(
         }
         Err(StartupCrossPlaneAdmissionFailure::LedgerInitialization(_)) => {
             panic!("injected physical panic reached ledger initialization")
+        }
+        Err(StartupCrossPlaneAdmissionFailure::TerminalEvidenceCatalogInvariant) => {
+            panic!("injected physical panic reached terminal evidence catalog qualification")
         }
         Err(StartupCrossPlaneAdmissionFailure::LedgerAdmission(_)) => {
             panic!("injected physical panic reached ledger admission")
@@ -383,7 +394,7 @@ fn ready_drop_poison_contains_both_accounting_planes() {
 }
 
 #[test]
-fn promotion_is_state_only_and_promoted_drop_remains_fail_closed() {
+fn ready_split_is_state_only_and_runtime_drop_remains_fail_closed() {
     let factory = factory();
     let account = account(&factory, 5, 2);
     let ready = account
@@ -403,7 +414,7 @@ fn promotion_is_state_only_and_promoted_drop_remains_fail_closed() {
             .ledger,
     );
 
-    let promoted = ready.promote();
+    let (started, baseline, guard) = ready.split();
 
     assert_eq!(
         startup_lock_probe_snapshot(),
@@ -414,17 +425,10 @@ fn promotion_is_state_only_and_promoted_drop_remains_fail_closed() {
     assert_eq!(test_startup_graph_ledger_release_locks(), release_locks);
     assert_eq!(account.share_call_count(), shares);
     assert_eq!(account.snapshot(), account_before);
-    assert_eq!(
-        ledger_observation(
-            &promoted
-                .ownership
-                .as_ref()
-                .unwrap_or_else(|| panic!("promoted product owns its ledger"))
-                .ledger,
-        ),
-        ledger_before
-    );
-    drop(promoted);
+    assert_eq!(ledger_observation(&started.ledger), ledger_before);
+    drop(baseline);
+    drop(guard);
+    drop(started);
     assert_eq!(test_startup_graph_storage_releases(), releases);
     assert_eq!(test_startup_graph_ledger_release_locks(), release_locks);
     assert_eq!(account.snapshot().live_retained_bytes(), 5);
@@ -452,9 +456,7 @@ fn cross_plane_authority_and_products_remain_private_and_indivisible() {
         "visitor",
         "attach",
         "fn accept(",
-        "fn split(",
         "fn into_parts",
-        "fn into_inner",
         "charge_observed_batch",
     ] {
         assert!(
@@ -467,7 +469,6 @@ fn cross_plane_authority_and_products_remain_private_and_indivisible() {
         "StartupAttributionGraph",
         "StartupCrossPlanePlan",
         "ReadyStartupCrossPlane",
-        "PromotedStartupCrossPlane",
         "CrossPlaneAdmissionContainment",
     ] {
         assert!(
@@ -476,13 +477,16 @@ fn cross_plane_authority_and_products_remain_private_and_indivisible() {
         );
     }
 
-    let promotion = source
-        .split("pub(super) fn promote")
+    assert!(!source.contains("PromotedStartupCrossPlane"));
+    assert_eq!(source.matches("pub(super) fn split(").count(), 1);
+    assert_eq!(source.matches("StartedLedger { ledger }").count(), 1);
+    let ready_split = source
+        .split("pub(super) fn split(")
         .nth(1)
-        .unwrap_or_else(|| panic!("promotion method exists"))
+        .unwrap_or_else(|| panic!("Ready-only split exists"))
         .split("impl<O, P, D> Drop for ReadyStartupCrossPlane")
         .next()
-        .unwrap_or_else(|| panic!("promotion method boundary exists"));
+        .unwrap_or_else(|| panic!("Ready-only split boundary exists"));
     for forbidden in [
         "lock",
         "share",
@@ -497,8 +501,8 @@ fn cross_plane_authority_and_products_remain_private_and_indivisible() {
         "?",
     ] {
         assert!(
-            !promotion.contains(forbidden),
-            "promotion regained fallible or effectful operation `{forbidden}`"
+            !ready_split.contains(forbidden),
+            "Ready-only split regained fallible or effectful operation `{forbidden}`"
         );
     }
 
