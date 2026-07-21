@@ -223,7 +223,7 @@ Proposed disposition: choose only after the promotion gates pass.
 - [ ] Malformed and bomb fixture provenance is documented.
 - [ ] Parser-local and facade fuzz targets execute under sanitizer.
 - [ ] 3MF or USDZ profile tests distinguish container safety from format conformance.
-- [ ] ADR governance checker permits promotion only with the tracer.
+- [ ] Promotion review confirms the tracer and its executable evidence directly satisfy this ADR.
 
 ## Sources
 

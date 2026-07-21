@@ -284,7 +284,7 @@ Decision: chosen.
 | Evidence | every failure retains bounded stage/detection/diagnostic/resource context | facade snapshots |
 | Trust honesty | in-process APIs and docs make no sandbox claim | API/doc review |
 | Aggregate availability | service deployment guidance requires host admission or workers | security review |
-| Proposal honesty | archive/export proposals are not presented as implemented defenses | ADR checker and docs review |
+| Proposal honesty | archive/export proposals are not presented as implemented defenses | ADR review and docs review |
 
 ## Review Checklist
 

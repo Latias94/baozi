@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-07-08
-updated: 2026-07-19
+updated: 2026-07-20
 authors:
   - Codex
 decision_type: architecture
@@ -148,9 +148,9 @@ decided only during handoff. The reservation typestate obeys this lifecycle:
    `SceneGenerationId`;
 3. preparation finishes the final control downgrade and returns exactly one typed terminal variant:
    `PreparedSuccess`, `PreparedRichFailure`, or `PreparedMinimalFallback`; only the exact
-   `PreparedSuccess` structurally owns the reservation together with the validated canonical
-   aggregate and private frozen attribution, while both failure wrappers structurally contain no
-   reservation; and
+   `PreparedSuccess` structurally owns the reservation together with the validated, destination-
+   qualified but still domain-unexposed canonical owner, while both failure wrappers structurally
+   contain no reservation or canonical owner; and
 4. `PreparedSuccess` handoff consumes the reservation by ownership conversion into the public
    `SceneGenerationId`, constructs the only new `ValidatedScene` proof, and performs no allocation,
    lock, checked counter transition, retry, or other fallible state change.
@@ -297,6 +297,22 @@ postprocess one atomic mutation boundary. Chosen.
 
 ## Amendment History
 
+### 2026-07-20: Consume operation publication ownership without redefining attribution
+
+- Affected heading: `Decision` generation-reservation lifecycle.
+- Previous rule: core described exact success as owning `private frozen attribution`, duplicating
+  ADR 0022's superseded prepared-attribution vocabulary.
+- New rule: ADR 0022 alone commits attribution destinations during preparation. Exact core success
+  owns the reserved generation plus an already destination-qualified but domain-unexposed canonical
+  owner. Handoff converts the reservation into `SceneGenerationId`, exposes/moves the canonical
+  owner, and constructs `ValidatedScene`; core does not define or execute an attribution transition.
+- Compatibility impact: private pre-release publication vocabulary changes; generation identity,
+  Scene semantics, and stable-wire policy do not.
+- Required review: core-to-operation typestate mapping, generation rejection/gap/drop probes, and
+  source gates that reject a core-defined prepared-attribution owner.
+- Rationale: generation identity is core authority, while ledger destination commitment is operation
+  authority. Keeping those responsibilities separate preserves the infallible handoff boundary.
+
 ### 2026-07-19: Supersede clean retained-builder fallback at the canonical boundary
 
 - Affected headings: canonical lifecycle diagram, generation identity, `Risks and Mitigations`,
@@ -312,7 +328,7 @@ postprocess one atomic mutation boundary. Chosen.
 - Compatibility impact: pre-release canonical finalization and fault tests change; Scene identity and
   wire compatibility remain explicitly unstabilized.
 - Required review: lifecycle exhaustivity, typed containment integration, no generation/proof/remap on
-  containment, root-fault fallback, generation-gap, physical-owner integration, and ADR checks.
+  containment, root-fault fallback, generation-gap, physical-owner integration, and ADR review.
 - Rationale: core can mint a validation proof only from a fully owned canonical aggregate. A builder
   panic is evidence of an incomplete ownership graph, not an ordinary report-quality downgrade.
 
@@ -338,7 +354,7 @@ postprocess one atomic mutation boundary. Chosen.
   no stable Scene or wire compatibility is promised.
 - Required review: caught-unwind cleanup/drop probes, uncertain-extraction poisoning and no-refund
   tests, two-order derived-start/retain/finalization barriers, clone/reuse/no-bypass and zero-side-
-  effect probes, process-isolated abort/double-panic/exit/OOM fixtures, generation never-reuse, and ADR checks.
+  effect probes, process-isolated abort/double-panic/exit/OOM fixtures, generation never-reuse, and ADR review.
 - Rationale: a minimal report is truthful only when Baozi can prove what was deallocated; otherwise
   conservative retained accounting is safer than an optimistic zero-leak result. A Scene cannot
   authorize new derived work through an account whose physical lifetime is no longer trustworthy.
@@ -365,6 +381,6 @@ postprocess one atomic mutation boundary. Chosen.
   wire exists.
 - Required review: generation exhaustion/concurrency/never-reuse review, cancellation/unwind/prepared-
   drop probes, proof-construction compile-fail gates, import/edit handoff integration, empty-semantics
-  digest tests, and ADR checking.
+  digest tests, and direct ADR review.
 - Rationale: a fallible allocator cannot remain after the pure ownership boundary; reservation makes
   failure explicit without weakening collision freedom, never-reuse, or proof atomicity.

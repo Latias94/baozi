@@ -416,7 +416,7 @@ Negative:
 
 | Contract | Measurable evidence |
 | --- | --- |
-| One authority | ADR checker finds exactly one accepted public compatibility authority and resolves ADR 0024's `superseded_by` link |
+| One authority | Direct review confirms exactly one accepted public compatibility authority and resolves ADR 0024's `superseded_by` link |
 | No parallel compatibility model | repository search and API baseline contain no version-suffixed replacement, old/new adapter, or duplicate Scene model |
 | Facade boundary | public API review exposes the common workflow and bounded evidence without registry, probe, context, proof-construction, or ledger internals |
 | Invariant boundary | compile-fail tests prove callers cannot forge validation or directly publish an invalid structural edit |

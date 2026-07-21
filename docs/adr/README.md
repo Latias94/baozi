@@ -4,20 +4,13 @@ This directory is the canonical index for Baozi architecture decisions. Only an 
 normative. `Proposed` ADRs are non-authoritative candidates; `Superseded` and `Rejected` ADRs are
 historical context.
 
-For ADR-heavy changes, an optional whole-tree structural audit is available from the repository
-root:
-
-```console
-cargo run --locked -p baozi-xtask -- adr-check
-```
-
 ## Metadata contract
 
 ADR frontmatter is a strict schema defined by the
 [ADR governance policy](../contributing/adr-governance.md). Required fields are `status`, `date`,
 `authors`, and `decision_type`. Optional fields are `updated`, `depends_on`, `related`, `supersedes`,
 `superseded_by`, `evidence`, `tracers`, and `promotion_requires`. Lists use a two-space block list or
-`[]`; unknown fields and duplicate keys fail the checker. The policy also governs reviewable
+`[]`; unknown fields and duplicate keys are review failures. The policy also governs reviewable
 amendment history for authority-affecting updates; frontmatter alone is not an approval record.
 
 `depends_on` is normative. `related` is navigation only. Supersession uses reciprocal `supersedes`
@@ -28,6 +21,29 @@ A Proposed ADR may carry an explicitly isolated controlled-trial implementation 
 That evidence creates no default, publication, compatibility, or production authority. Promotion may
 atomically change the implementation, evidence, tracked tracer, and ADR status in one reviewed change;
 only the resulting Accepted state makes the tracer authoritative.
+
+## Review checklist
+
+Before accepting an ADR change, reviewers manually verify the following structural and lifecycle
+invariants:
+
+- the numbered file, heading, title, status, and index row agree, and each active ADR has exactly one
+  canonical index entry;
+- frontmatter uses only the fields defined by the governance policy, with valid scalar/list syntax,
+  unique keys, and no duplicate normalized paths;
+- active and retired IDs are disjoint and exhaustive through the current maximum, retired IDs are
+  permanent and well-formed, and a new ID is greater than that maximum;
+- every `depends_on` target is Accepted and the dependency graph is acyclic; `related` is reviewed as
+  navigation only;
+- `supersedes` and `superseded_by` are reciprocal and legal for the involved lifecycle states;
+- local links, fragments, fenced examples, and referenced paths resolve with exact casing and remain
+  repository-contained; and
+- evidence, tracers, promotion gates, and conformance claims are directly relevant and backed by
+  review records or the applicable executable gates.
+
+These checks support the index; they do not replace semantic review. Reviewers still decide whether
+an ADR has a single owner, whether prose conflicts with another Accepted ADR, whether an amendment
+should be a supersession, and whether implementation evidence actually demonstrates conformance.
 
 ## Decision ownership
 

@@ -128,7 +128,8 @@ Bootstrap checked-converts both counts, builds
 the complete key, snapshot, alignment, and per-cell padding. The resulting complete layout is an
 aggregate shape/overflow preflight, not a promise of one allocator backing or a stable ABI. The fixed
 header owner and one or more keyed-evidence backings may be separate allocations; every actual
-allocation has its own managed-qualified `CapacityPlan` and layout/capacity charge. Before the first
+allocation has its own policy-governed `CapacityPlan` and layout/capacity charge. A separate source
+evidence anchor pairs the concrete-store and capacity-policy revisions. Before the first
 allocator call, bootstrap checked-sums every requested envelope and block count, admits the complete
 attribution aggregate in one ledger transition, and then admits the complete physical aggregate in
 one account transition through the private guard described above. A future single-backing
@@ -184,8 +185,8 @@ canonical inheritance between independent Scenes.
    without minting a generation or exposing a `ValidatedScene`;
 8. reserve one private never-reused generation nonce as the final fallible pre-freeze identity
    acquisition,
-   finish final control classification as exact `PreparedSuccess`, freeze private canonical/outcome
-   attribution, and purely hand it off by consuming the reservation into the
+   finish final control classification as exact `PreparedSuccess`, apply canonical/outcome
+   destination commitments with zero operation-live attribution, and purely hand it off by consuming the reservation into the
    `SceneGenerationId` carried by the report's unforgeable `ValidatedScene` proof; or
 9. from any point after successful session bootstrap, prepare and infallibly hand off one
    exact `PreparedRichFailure` or `PreparedMinimalFallback`, each structurally containing no
@@ -217,7 +218,7 @@ stateDiagram-v2
     DraftValidated --> InputManifestFinalized
     DraftValidated --> PrepareRichFailure: manifest/finalization failure
     InputManifestFinalized --> GenerationReserved: final fallible pre-freeze identity acquisition
-    GenerationReserved --> PreparedSuccess: freeze private attribution; live = 0
+    GenerationReserved --> PreparedSuccess: commit destinations; live = 0
     GenerationReserved --> PrepareRichFailure: later downgrade; burn reserved gap
     PreparedSuccess --> ImportReport: consume reservation; pure split
     SessionCreated --> PrepareRichFailure
@@ -572,20 +573,20 @@ exactly one `PreparedSuccess`, `PreparedRichFailure`, or `PreparedMinimalFallbac
 wraps that exact variant without erasing its typestate. There is no opaque success-capable prepared
 outcome whose branch is decided during handoff.
 
-Preparation returns an exact wrapper only after destination-qualified attribution is frozen into
-private `PreparedCanonicalAttribution`/`PreparedOutcomeEvidenceAttribution` values and current
-operation-live attribution is zero. Only `PreparedSuccess` structurally owns the unpublished
-canonical aggregate and private generation reservation. `PreparedRichFailure` and
-`PreparedMinimalFallback` structurally contain neither. All exact wrappers own no pending/live
-attribution token. Each exact handoff is a pure consuming split and owner/type reclassification:
-success converts the reserved nonce into `SceneGenerationId`, constructs `ValidatedScene`, and
-reclassifies canonical/evidence attribution as `CommittedCanonicalOutput` and
-`PublishedOutcomeEvidence`; failure reclassifies evidence only. Handoff performs no generation
-allocation, checked counter mutation, terminal classification, fallible lock, or extension call and
-cannot return an error or panic under the published contract. Dropping prepared success burns an
-invisible never-reused nonce gap. Ordinary drop, and a caught non-builder unwind only after its
-cleanup completes, destroys unpublished aggregates and discards private frozen attribution. It does not
-publish that attribution or roll back pending state because none remains after preparation.
+Preparation returns an exact wrapper only after it applies destination-qualified canonical and
+outcome-evidence commitments and current operation-live attribution is zero. No pending or prepared-
+attribution token survives. Only `PreparedSuccess` structurally owns the still-domain-unexposed
+canonical owner and private generation reservation. `PreparedRichFailure` and
+`PreparedMinimalFallback` structurally contain neither, while all exact wrappers may own the already
+qualified but domain-unexposed evidence owner. Each exact handoff is a pure consuming split: success
+converts the reserved nonce into `SceneGenerationId`, constructs `ValidatedScene`, and exposes the
+canonical/evidence owners as `CommittedCanonicalOutput` and `PublishedOutcomeEvidence`; failure
+exposes evidence only. Handoff performs no generation allocation, attribution reclassification,
+checked counter mutation, terminal classification, fallible lock, or extension call and cannot
+return an error or panic under the published contract. Dropping prepared success burns an invisible
+never-reused nonce gap. Ordinary drop, and a caught non-builder unwind only after its cleanup
+completes, destroys domain-unexposed publication owners in storage-before-account order. It does not
+reopen the ledger, roll back destination commitments, or expose a public terminal.
 
 Final publication eligibility is still part of preparation. It checks the shared account poison
 latch under ADR 0042's linearization state before any exact wrapper is returned. Poison-first,
@@ -606,10 +607,10 @@ and operation-live attribution is zero. A retained candidate/report builder pani
 Generation reservation rejection/exhaustion alone does not enter this path. There is no recursive
 attempt to allocate another `ImportFailure`.
 
-`PreparedCanonicalAttribution` and `PreparedOutcomeEvidenceAttribution` are independent private
-pre-handoff states. A success handoff reclassifies both into public `CommittedCanonicalOutput` and
-`PublishedOutcomeEvidence`. An ordinary rich-failure handoff reclassifies only outcome evidence; this
-includes generation reservation rejection/exhaustion. An invalid root, failure to append/validate/
+Canonical and outcome-evidence destination commitments are independent preparation results. A
+success wrapper privately owns both already qualified owners until handoff exposes
+`CommittedCanonicalOutput` and `PublishedOutcomeEvidence`. An ordinary rich-failure wrapper owns and
+exposes only outcome evidence; this includes generation reservation rejection/exhaustion. An invalid root, failure to append/validate/
 prepare rich failure, or equivalent non-unwind integrity fault with verified candidate cleanup and an
 intact `StartupBaselineOwner` uses
 the minimal fallback and also publishes evidence only. All three exact forms reach zero operation-live attribution during
@@ -649,11 +650,11 @@ The report does not contain a setter, `map_scene`, `map_scene_with`, arbitrary s
 parser-supplied stats object. Structural edits consume the validation proof through the core edit
 contract and yield a new proof outside this import lifecycle.
 
-Successful preparation releases all scratch/opaque reservations, freezes private canonical and
-outcome-evidence attribution separately, owns one reserved generation, and reaches zero session-owned
-live attribution. The subsequent pure handoff consumes that reservation into the validated Scene,
-reclassifies the private attribution into committed/published report values, and transfers bounded
-report evidence without generation allocation or counter mutation. The ledger's peak still includes
+Successful preparation releases all scratch/opaque reservations, applies independent canonical and
+outcome-evidence destination commitments, owns one reserved generation, and reaches zero session-
+owned live attribution. The subsequent pure handoff consumes that reservation into the validated
+Scene and exposes/moves the already qualified report owners without generation allocation,
+attribution transition, or counter mutation. The ledger's peak still includes
 output while it overlapped with snapshot, backend, normalized, validation, or report storage.
 
 ### Failure Outcome
@@ -677,10 +678,10 @@ the cause identifies that preparation failure and only the pre-admitted minimal 
 this is still a successfully published `ImportFailure`, not canonical output and not a second
 publication failure.
 
-Failure preparation freezes only private `PreparedOutcomeEvidenceAttribution`, proves zero operation-
-live attribution, and reserves or publishes no Scene generation. Its exact handoff is the same pure
-consuming reclassification as success, without a canonical aggregate, and only then names the value
-`PublishedOutcomeEvidence`.
+Failure preparation applies only the outcome-evidence destination commitment, proves zero operation-
+live attribution, and reserves or publishes no Scene generation. Its exact wrapper privately owns the
+already qualified but domain-unexposed evidence. Handoff only exposes that owner as
+`PublishedOutcomeEvidence`; it performs no canonical or attribution transition.
 
 ### Post-Process Boundary
 
@@ -755,7 +756,7 @@ Negative:
 | Optional evidence exhaustion is mislabeled as an unavailable dependency | Critical | Pre-admit the complete terminal edge/finalization envelope; failure to preserve it always latches `ScopeAbort`. |
 | Partial graph state is published as a successful manifest | Critical | Only the private finalizer can construct `SuccessfulInputManifest`; failure transport has a distinct bounded partial-evidence type. |
 | Failure-outcome preparation recursively needs another allocation | Critical | Pre-admit one checked-layout minimal account-bound terminal envelope before risky work; destroy partial rich evidence and perform one infallible prepared handoff only after cleanup is proved. |
-| Prepared outcome handoff still reaches a failure or panic boundary | Critical | Preparation completes final downgrade, returns an exact typed terminal wrapper, freezes private attribution, and performs all allocation, validation, accounting, control, callback, and account work; type-specific handoff cannot fail or panic. |
+| Prepared outcome handoff still reaches a failure or panic boundary | Critical | Preparation completes final downgrade and destination commitments, returns an exact typed terminal wrapper with zero live attribution, and performs all allocation, validation, accounting, control, callback, and account work; type-specific handoff only exposes owners and cannot fail or panic. |
 | A retained-builder panic is reported as fallback | Critical | Startup panic returns `SessionStartError` with side containment; later candidate/report panic returns fatal containment; fallback requires verified candidate cleanup and intact `StartupBaselineOwner`. |
 | Import lifecycle reinterprets retained containment as a report downgrade | Critical | Consume ADR 0042's typed startup/finalization result without reproducing or weakening its physical cleanup protocol. |
 | Generation allocation remains after attribution freeze | Critical | Reserve `ReservedSceneGeneration` as the final fallible pre-freeze identity acquisition; rejection/exhaustion consumes no nonce and becomes ordinary rich failure, any later preparation failure/cancellation/caught-unwind/prepared-success drop may burn the gap, and only exact `PreparedSuccess` can own/consume a reservation. |
@@ -769,7 +770,7 @@ Negative:
 | Metric | Target | Measurement |
 | --- | --- | --- |
 | Single visible result | after successful bootstrap, exactly one `ImportReport`, `ImportFailure`, or `FinalizationContainmentError`, with no partial field visibility; the containment error is not a prepared fallback | fault injection at every lifecycle, cleanup, and preparation boundary |
-| Destination independence | preparation freezes private canonical/outcome attribution separately; exact handoff alone exposes committed canonical output and `PublishedOutcomeEvidence` | three-path publication snapshot matrix |
+| Destination independence | preparation applies canonical/outcome commitments independently and exact wrappers privately own the still-domain-unexposed values; exact handoff alone exposes committed canonical output and `PublishedOutcomeEvidence` | three-path publication snapshot matrix |
 | Failure fallback | failure to append/validate/prepare downgraded rich evidence or invalid root/equivalent non-unwind integrity fault returns the assembly-independent envelope only after verified candidate cleanup with intact `StartupBaselineOwner`; generation rejection/exhaustion remains rich failure, while retained candidate/report builder panic or uncertain cleanup returns fatal containment | candidate-cleanup, allocator/deallocation counters, poison state, and terminal-cause assertions |
 | Startup lifecycle mapping | every failed retained startup yields `SessionStartError` and no session/terminal; successful startup yields the baseline required for later downgrade; later retained-builder containment yields `FinalizationContainmentError` | operation integration, session acceptance, and no-terminal probes |
 | Poison fail-closed | poison-first explicit-account start has zero ledger/work/IO/refcount/allocator effects; start/retain-first then poison preserves charge but cannot prepare or hand off any import terminal | deterministic two-order barriers, clone/account snapshots, finalization probes, and explicit-account reuse rejection |
@@ -787,11 +788,11 @@ Negative:
 | Fallback evidence ownership | Compile-fail, shape, and plugin-unload tests prove each cell contains one inert Baozi-owned copied key plus its snapshot; keys have no `Drop`, external/plugin object, trait object/vtable, or function pointer and are normalized before the first ledger entry. The Baozi-owned result/evidence owner keeps the process-local `StoreKeyDomain` anchor and immutable normalized mapping through query lifetime; plugins receive only host-minted keys. Brand variation leaves semantic transcripts, digests, wire values, cache/build identities, and user-visible meaning unchanged. `FallbackHeader<P>` retains schema revision, terminal cause, last completed phase, counts, operation-wide current/peak live bytes, active reservations, and current/peak evidence-storage bytes; no global field is reconstructed from cells. Prepared minimal fallback has zero current live, active reservations, and current evidence storage, preserves both peaks, and remains queryable without plugin code. |
 | Pre-session panic | Submitted-layer codec panic is one bounded `RequestError`; default-codec panic prevents snapshot creation as `RegistryBuildError`; both have zero sessions, finalizers, import ledgers, diagnostic streams, and asset opens. |
 | Single finalization | After session creation, success, every failure phase, cancellation, and caught unwind call the outcome finalizer exactly once; it returns one report/failure when cleanup is proved or one fatal containment error when release remains uncertain. Abort/double-panic/exit/OOM are asserted only by the isolating parent process. |
-| Success report atomicity | Injected failures at every success-preparation allocation, validation, generation reservation, freeze/accounting, product-graph, account-brand/poison eligibility, cancellation, and transition point publish no partial field or generation; rejection/exhaustion consumes no nonce and downgrades to rich failure, later failure may burn a successful reservation, poison-first eligibility returns fatal containment with no exact wrapper, and exact `PreparedSuccess` freezes private canonical/evidence attribution, reaches zero operation live, then permits only pure consuming handoff. |
+| Success report atomicity | Injected failures at every success-preparation allocation, validation, generation reservation, destination-commit/accounting, product-graph, account-brand/poison eligibility, cancellation, and transition point publish no partial field or generation; rejection/exhaustion consumes no nonce and downgrades to rich failure, later failure may burn a successful reservation, poison-first eligibility returns fatal containment with no exact wrapper, and exact `PreparedSuccess` applies canonical/evidence commitments, reaches zero operation live, privately owns domain-unexposed values, then permits only pure consuming handoff. |
 | Account poison race | Barrier tests force poison-first and start/retain-first orderings across multiple explicit-account clones. Poison-first returns `SessionStartError::AccountPoisoned` with zero work/counter/IO/refcount/allocator deltas. Start/retain-first keeps the admitted charge, rejects every later retain/share, records the same account poison/count/evidence in all snapshots, and returns `FinalizationContainmentError` during final preparation with no report/failure prepared handoff. Source/API tests find no reset/unpoison/reuse/ignore route. |
-| Failure outcome atomicity | Ordinary failures, including generation rejection/exhaustion, prepare zero canonical attribution, exact bounded private outcome-evidence attribution, and zero operation live before one pure handoff reclassifies it as `PublishedOutcomeEvidence`; their wrappers structurally contain no reservation. |
+| Failure outcome atomicity | Ordinary failures, including generation rejection/exhaustion, prepare zero canonical commitment, one exact bounded outcome-evidence commitment, and zero operation live before one pure handoff exposes the domain-unexposed owner as `PublishedOutcomeEvidence`; their wrappers structurally contain no reservation. |
 | Failure-publication-failure atomicity | Injected failure to append/validate/prepare rich-failure evidence or invalid root/equivalent non-unwind integrity fault publishes only the assembly-independent pre-admitted minimal terminal envelope after verified candidate cleanup with intact `StartupBaselineOwner`, zero committed canonical output, zero operation live, no public generation, and no recursive allocation. A generation-reservation fault remains ordinary rich failure. Retained candidate/report builder panic, ownership mismatch, or uncertain release keeps the exact affected owners/charges/attributions coupled, poisons the path, and returns `FinalizationContainmentError` without fallback/refund/zero-leak claim. |
-| Prepared handoff API | API-shape and instrumentation prove safely completed preparation returns exact `PreparedSuccess`, `PreparedRichFailure`, or `PreparedMinimalFallback`, not one success-capable opaque wrapper. No exact wrapper owns pending/live attribution; only exact success may own one private generation reservation. Their type-specific consuming splits cannot allocate a generation, classify terminal state, validate, poll control, invoke a callback, mutate a counter/account, return `Result`, or panic. Dropping exact success burns its gap; dropping any wrapper destroys unpublished aggregates, discards private attribution without calling it published, and performs no pending rollback. `FinalizationContainmentError` is a distinct pre-prepared fatal result. |
+| Prepared handoff API | API-shape and instrumentation prove safely completed preparation returns exact `PreparedSuccess`, `PreparedRichFailure`, or `PreparedMinimalFallback`, not one success-capable opaque wrapper. No exact wrapper owns pending/live or prepared-attribution tokens; only exact success may own one private generation reservation. Their type-specific consuming splits cannot allocate a generation, classify terminal state, validate, poll control, invoke a callback, reclassify attribution, mutate a counter/account, return `Result`, or panic. Dropping exact success burns its gap; dropping any wrapper destroys domain-unexposed publication owners in storage-before-account order without reopening the ledger or exposing a terminal. `FinalizationContainmentError` is a distinct pre-prepared fatal result. |
 | Capability boundary | Compile-fail/API-shape tests prove detectors and parsers cannot reach raw IO, other options, reports, phases, arbitrary detection/parse failure constructors, dependency-requiredness relabeling, or a parser-supplied proof return path. |
 | DetectionResult shape | A heterogeneous `dyn FormatImporter` receives `Probe`, `ReadHint`, and `DetectionScope` and returns exactly `DetectionResult<DetectionOutcome>`; its opaque abort cannot be constructed, sent, or used to suppress the session latch. |
 | Detector work permit | Detection permits are single-outstanding and bounded to 4 KiB; begin polls then charges attempted work, complete charges consumed then polls, and zero/repeated/poll-during/drop/forgotten-permit violations latch the first terminal cause. |
@@ -817,6 +818,29 @@ Negative:
 | Crate ownership | Dependency and public-API checks find no backend type or executable backend object in public outcomes/stable schemas, no `baozi-operation` upward dependency, no postprocess-to-import edge, and no reversed core dependency. |
 
 ## Amendment History
+
+### 2026-07-20: Consume the ledger's prepared-owner publication seam
+
+- Affected headings: state diagram, `Prepared Outcome Publication`, `Success Outcome`, `Failure
+  Outcome`, `Risks and Mitigations`, `Success Metrics`, and `Acceptance Criteria`.
+- Previous rule: the lifecycle repeated ADR 0022's superseded private
+  `PreparedCanonicalAttribution`/`PreparedOutcomeEvidenceAttribution` model and described handoff as
+  reclassifying attribution.
+- New rule: ADR 0022 alone owns attribution commitment. Import preparation consumes that operation
+  seam after applying canonical/outcome destination commitments and reaching zero operation live.
+  Exact import wrappers privately own already destination-qualified but domain-unexposed publication
+  owners. Handoff only consumes the wrapper, exposes/moves those owners, and constructs
+  `SceneGenerationId`/`ValidatedScene` for exact success; it performs no attribution transition.
+  Prepared drop destroys the unexposed owners in storage-before-account order without reopening the
+  ledger or exposing a report/failure.
+- Compatibility impact: pre-release internal typestate vocabulary changes; the report/failure shape
+  and stable-wire policy do not.
+- Required review: import-to-operation type mapping, preparation snapshots, exact terminal ownership,
+  generation-gap drop, pure handoff probes, and source gates that reject duplicate attribution
+  typestates in `baozi-import`.
+- Rationale: import owns lifecycle and domain outcomes, while operation owns ledger commitment. A
+  second import-defined attribution state would duplicate authority and make infallible handoff
+  misleading.
 
 ### 2026-07-20: Separate accounting-plane admission and retain evidence-key authority
 
@@ -861,7 +885,7 @@ Negative:
 - Compatibility impact: pre-release session-start/finalization errors, state machine, and fault
   evidence change without a compatibility adapter or stable report wire.
 - Required review: session acceptance, startup-versus-later builder failure mapping, no-terminal
-  startup failure, fallback exclusion, lifecycle diagram, ADR 0042 integration, and ADR checks.
+  startup failure, fallback exclusion, lifecycle diagram, ADR 0042 integration, and ADR review.
 - Rationale: an import may promise exactly one terminal only after startup owns a provable cleanup
   graph; a builder panic cannot be rewritten as an ordinary report when its closure may have escaped
   storage.
@@ -880,7 +904,8 @@ Negative:
 - New rule: bootstrap checked-converts counts, creates sealed key-bearing dimension and phase cells
   with `Layout::array`, extends them after the complete global-evidence header in order, and calls
   `pad_to_align`. The resulting layout is semantic aggregate preflight only; every actual header or
-  keyed-evidence backing has an independent managed-qualified `CapacityPlan`, and bootstrap checked-
+  keyed-evidence backing has an independent policy-governed `CapacityPlan`, while a separate source
+  evidence anchor pairs the concrete-store and policy revisions, and bootstrap checked-
   sums and atomically admits every requested envelope/block before allocator entry. Keys are inert
   Baozi-owned copied domain values normalized before the first ledger entry, so evidence remains
   queryable after plugin unload. The header stores, rather than derives, operation-wide current/peak
@@ -903,7 +928,7 @@ Negative:
   normalization and post-unload query tests, global-field snapshots, state-machine/result exhaustivity,
   verified-unwind cleanup, clone/reuse and two-order start/retain/finalization poison barriers,
   zero-side-effect/no-bypass checks, uncertain-release poison/no-refund probes, process-isolated failures,
-  hostile opaque-memory wording/gates, and ADR checking.
+  hostile opaque-memory wording/gates, and direct ADR review.
 - Rationale: exactly-one result does not justify fabricating a clean failure report when ownership
   release is unknown, and a complete evidence envelope must retain keys, phase data, and non-derivable
   operation-wide facts without pretending one aggregate formula is one allocator request. A shared
@@ -918,7 +943,8 @@ Negative:
   `AccountedAllocation<T>` and `CanonicalAllocationGuard`, prepared outcomes could retain pending
   attribution until handoff, and the draft/generation boundary was not tied to a checked pre-freeze
   identity-acquisition stage.
-- New rule: import and core can reach only the operation-owned concrete scalar/bytes/record store;
+- Historical rule introduced here and superseded in its publication-boundary details by the
+  2026-07-20 prepared-owner amendment: import and core can reach only the operation-owned concrete scalar/bytes/record store;
   core's `CanonicalBlockRef<Schema>` is a non-owning projection over a sealed unstable schema;
   `SceneDraft` is a brand plus directory-slot descriptor. Preparation completes final control
   downgrade and returns exact success, rich-failure, or minimal-fallback wrappers after freezing
@@ -926,10 +952,12 @@ Negative:
   never-reused generation reservation; both failure wrappers structurally contain none. Reservation
   rejection/exhaustion consumes no nonce and becomes ordinary rich failure with preserved evidence;
   only failure to append/validate/prepare that rich failure or an unrecoverable builder/root integrity
-  fault selects minimal fallback. Type-specific handoff is a pure consuming split that reclassifies
-  attribution into `CommittedCanonicalOutput`/`PublishedOutcomeEvidence` and constructs
+  fault selects minimal fallback. This intermediate model let type-specific handoff reclassify
+  attribution into `CommittedCanonicalOutput`/`PublishedOutcomeEvidence` and construct
   `SceneGenerationId`/`ValidatedScene` only for exact success. A long-lived bounded facade runtime
-  owns one factory and private per-import accounts.
+  owns one factory and private per-import accounts. The current rule applies destination commitments
+  during preparation; handoff only exposes/moves the already qualified owners and constructs the
+  success-domain values.
 - Compatibility impact: the pre-release generic/owning wrapper plan, handoff-time accounting,
   post-freeze generation allocation, prepared-token rollback behavior, global/per-request facade
   factory paths, and legacy Scene/`SharedStorage` path are removed rather than adapted. No public wire
@@ -938,7 +966,7 @@ Negative:
   fail gates, structural-preflight and builder/root fault injection, generation exhaustion/never-
   reuse/prepared-drop probes, rich-failure-after-reservation-fault and fallback-after-rich-preparation-
   fault probes, facade profile/factory lifetime tests, success/rich-failure/fallback
-  snapshots, full workspace migration, and ADR checking.
+  snapshots, full workspace migration, and direct ADR review.
 - Rationale: an import outcome is atomically publishable only when physical ownership is provable and
   every accounting failure has ended before the final ownership move and generation identity exist.
 
@@ -997,7 +1025,7 @@ Negative:
 - Impact: closes parser bypass and partial-publication ambiguity with a pre-release capability/report
   shape change; no stable public compatibility promise exists.
 - Review: 2026-07-16 lifecycle/graph integration review, independent Codex architecture and security
-  reviews, and the repository ADR checker.
+  reviews, and the repository architecture review.
 - Rationale: this extends ADR 0020's existing session capability and outcome-transport concern; it
   does not move graph semantics into the lifecycle ADR or replace the selected single-finalizer
   architecture.

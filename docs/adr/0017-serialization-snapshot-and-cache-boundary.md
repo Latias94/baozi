@@ -165,7 +165,7 @@ Decision: chosen.
 | Metric | Target | Measurement |
 | --- | --- | --- |
 | Representation separation | snapshots are produced by test-support adapters, never `Debug` or derived serde | dependency/source audit |
-| Evidence delegation | snapshot schema, digest, coverage, and bounds have one authority in ADR 0026 | ADR checker and review |
+| Evidence delegation | snapshot schema, digest, coverage, and bounds have one authority in ADR 0026 | Direct ADR review |
 | Cache non-authority | no production API, crate, feature, or docs claim a persistent cache under this ADR | API, feature, and documentation audit |
 | Feature isolation | builds without serde omit serde dependencies, and no persistent-cache feature or dependency exists | feature-tree checks |
 | Boundary honesty | docs and APIs do not describe snapshot/cache/serde as export | ADR/doc checker |

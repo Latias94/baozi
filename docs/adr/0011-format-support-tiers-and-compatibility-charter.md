@@ -365,7 +365,7 @@ Negative:
 
 | Contract | Measurable evidence |
 | --- | --- |
-| Single maturity authority | ADR checker finds maturity definitions only here and references from backend/feature ADRs point here |
+| Single maturity authority | Direct review confirms maturity definitions live only here and references from backend/feature ADRs point here |
 | Admission before maturity | checker fixtures reject assigning any maturity, including Experimental, to a first-party path that fails baseline admission safety |
 | Complete declaration | every first-party format declares every required capability dimension; each verified Baozi claim has exactly one maturity, while an unverified candidate has none |
 | Evidence authority | ADR 0021 exclusively validates declaration `Unverified`/issuer-scoped `SelfAttested`; only an exact passing current ADR 0011 managed-inventory entry can construct the joined `BaoziVerified` support view |

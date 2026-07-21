@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-07-10
-updated: 2026-07-19
+updated: 2026-07-20
 authors:
   - Codex
 decision_type: architecture
@@ -35,10 +35,10 @@ ADR 0022 remains the normative authority for `Attempted`, `Consumed`, live attri
 peak, `CommittedCanonicalOutput`, and `PublishedOutcomeEvidence` accounting invariants. Import and
 postprocess own their domain ledger semantics, policy, dimensions, phase vocabulary, and evidence.
 This ADR owns the postprocess edit meanings for replacement, scratch, and remap reservations; it
-cannot refund monotonic work or reinterpret either committed destination. During preparation these
-destinations remain private `PreparedCanonicalAttribution` and
-`PreparedOutcomeEvidenceAttribution`; only pure handoff reclassifies them as committed/published
-report-facing values.
+cannot refund monotonic work or reinterpret either committed destination. ADR 0022 applies those
+destination commitments during preparation. Exact postprocess wrappers privately own the already
+qualified but domain-unexposed canonical and outcome-evidence owners; pure handoff only exposes/moves
+them into report-facing values and performs no attribution transition.
 
 The runtime-neutral leaf crate `baozi-operation` owns the reusable reservation/ledger state-machine
 mechanism together with operation-control and effect-descriptor mechanics. It performs checked state
@@ -271,9 +271,9 @@ Postprocess success reports its `Unchanged` or `Changed` outcome, ordered steps,
 resource statistics, entity remaps, domain remaps, and derived-data outcomes. `Unchanged` has no
 committed output or remaps and names the preserved input generation. Resource semantics are owned by
 ADR 0022: attempted and consumed work remain monotonic on success or failure; peak-live records the
-transaction high-water; final preparation freezes private canonical and report/remap attribution with
-operation-live attribution at zero; and pure handoff reclassifies those prepared values as committed/
-published evidence. Failure evidence includes the last completed step plus attempted, consumed,
+transaction high-water; final preparation applies canonical and report/remap destination commitments
+with operation-live attribution at zero; and pure handoff only exposes/moves the already qualified
+owners as committed/published evidence. Failure evidence includes the last completed step plus attempted, consumed,
 peak-live, zero newly committed canonical output, and bounded published outcome evidence without
 presenting private candidate remaps as committed. A failure may identify the already published input
 generation that remains valid, but it exposes no candidate output generation or generation-qualified
@@ -388,6 +388,22 @@ tools. Chosen.
 
 ## Amendment History
 
+### 2026-07-20: Reuse operation destination commitment and owner exposure
+
+- Affected headings: `Context`, `Decision`, and postprocess outcome semantics.
+- Previous rule: this ADR repeated private prepared-attribution types and described handoff as their
+  accounting reclassification.
+- New rule: ADR 0022 alone applies canonical and outcome-evidence destination commitments during
+  preparation. Exact postprocess wrappers privately own the already qualified but domain-unexposed
+  Scene/report/remap owners. Handoff only exposes/moves those owners while publishing the one final
+  generation and report; it performs no attribution transition.
+- Compatibility impact: private pre-release transaction vocabulary changes; remap, generation, and
+  derived-data semantics do not.
+- Required review: postprocess-to-operation typestate mapping, prepared-drop preservation of the
+  input Scene, pure-handoff counters, and source gates rejecting duplicate attribution typestates.
+- Rationale: SceneEdit owns semantic replacement and remap truth, while operation owns accounting
+  commitment. Reusing that seam prevents a second ledger state machine inside postprocess.
+
 ### 2026-07-19: Correct the storage-to-edit dependency direction
 
 - Affected headings: frontmatter dependency metadata and implementation status.
@@ -415,7 +431,7 @@ tools. Chosen.
 - Compatibility impact: pre-release postprocess failure and containment typestates change; no edit or
   remap compatibility adapter is retained.
 - Required review: startup-versus-later builder mapping, input preservation, zero published remaps,
-  prepared boundary, ADR 0042 integration, and ADR checks.
+  prepared boundary, ADR 0042 integration, and ADR review.
 - Rationale: transactional edit atomicity protects the input Scene, but it cannot turn an uncertain
   retained ownership graph into a clean published failure.
 
@@ -437,7 +453,7 @@ tools. Chosen.
   contracts gain typed `AccountPoisoned`/fatal-containment behavior.
 - Required review: caught-unwind rollback/gap probes, fatal-containment integration, two-order
   changed-operation start/retain/finalization barriers, clone/reuse/zero-side-effect/no-bypass probes,
-  process-isolated abort fixtures, and ADR checking.
+  process-isolated abort fixtures, and direct ADR review.
 - Rationale: this ADR owns edit/remap semantics, not a stronger in-process containment guarantee than
   the shared operation/import authorities can provide. A poisoned physical lineage cannot safely
   authorize another edit or publish newly derived state.
@@ -464,6 +480,6 @@ tools. Chosen.
 - Required review: one-token generation exhaustion/never-reuse and sibling concurrency tests,
   report-branded multi-step remap composition, step-state lookup/persistence/cross-report rejection,
   cancellation/caught-unwind/prepared-drop probes, derived-data rebinding,
-  postprocess publication accounting, compile-fail authority gates, and ADR checking.
+  postprocess publication accounting, compile-fail authority gates, and direct ADR review.
 - Rationale: remap identity is truthful only when every endpoint is published with the same atomic
   proof boundary, and a fallible generation allocator cannot remain inside a pure handoff.

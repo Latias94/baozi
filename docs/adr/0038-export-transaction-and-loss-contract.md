@@ -249,7 +249,7 @@ Proposed disposition: choose after promotion gates pass.
 - [ ] Native atomic replacement tests run on Linux, Windows, and macOS.
 - [ ] Multi-resource behavior proves either new-tree atomicity or explicit non-atomic evidence.
 - [ ] Public docs do not call snapshots, caches, or serde output an export format.
-- [ ] ADR governance checker permits promotion only with the tracer.
+- [ ] Promotion review confirms the tracer and its executable evidence directly satisfy this ADR.
 
 ## Sources
 

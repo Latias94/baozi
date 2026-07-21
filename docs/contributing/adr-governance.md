@@ -1,7 +1,8 @@
 # ADR Governance
 
 This document is Baozi's living contribution policy for Architecture Decision Records (ADRs). It
-governs how decisions are proposed, accepted, amended, superseded, indexed, evidenced, and checked.
+governs how decisions are proposed, accepted, amended, superseded, indexed, evidenced, and
+reviewed.
 It does not define product architecture: each Accepted ADR remains the sole semantic authority for
 the concern it owns. This policy is maintained like any other repository contribution policy. It
 does not need, and cannot derive authority from, an ADR that attempts to authorize its own
@@ -66,11 +67,11 @@ reused and later ADRs are never renumbered to close a gap. A genuine decision th
 history remains as Rejected or Superseded; an erroneous pre-release record that never represented an
 architectural decision may be removed during baseline cleanup, leaving its ID intentionally unused.
 Every such ID is recorded in the [retired-ID registry](../adr/README.md#retired-adr-ids). That registry
-is identifier governance, not an ADR or semantic owner. The checker contract requires active ADR IDs
-and retired IDs to be disjoint; every ID from 0001 through the maximum active-or-retired ID belongs
-to exactly one set; retired entries are unique, four-digit, numerically sorted, use the canonical
-`Permanently unassigned` disposition, and carry a nonempty reason; and a newly assigned ID is greater
-than that maximum.
+is identifier governance, not an ADR or semantic owner. During review, maintainers must verify that
+active and retired ADR IDs are disjoint, every ID from 0001 through the maximum active-or-retired ID
+belongs to exactly one set, retired entries are unique four-digit values in numeric order with the
+canonical `Permanently unassigned` disposition and a nonempty reason, and a newly assigned ID is
+greater than that maximum.
 
 ## Amendments And Supersession
 
@@ -124,8 +125,8 @@ change.
 ## Frontmatter
 
 Every numbered ADR uses the strict frontmatter subset below. Scalars use `field: value`. Lists use a
-two-space block list or the literal `[]`. Unknown fields, duplicate keys, invalid null aliases, and
-duplicate normalized paths fail closed.
+two-space block list or the literal `[]`. Reviewers must reject unknown fields, duplicate keys,
+invalid null aliases, and duplicate normalized paths.
 
 | Field | Cardinality | Meaning |
 | --- | --- | --- |
@@ -154,8 +155,9 @@ test, or CI path.
 Directories, globs, plans, placeholders, prose status notes, generated transient output, and
 unrelated files are not tracers. Every tracer, regardless of ADR status, must resolve with exact
 casing to a regular file that is tracked or staged, is not Git-ignored, and crosses no symbolic-link,
-junction, reparse, `.git`, or `repo-ref` component. Structural validity is a prerequisite, not proof
-that the tracer demonstrates the claimed behavior; review and executable gates establish directness.
+junction, reparse, `.git`, or `repo-ref` component. Reviewers must verify these structural conditions
+and then judge whether the tracer directly demonstrates the claimed behavior; structural validity is
+not proof of semantic directness.
 
 Repository-local evidence must exist in a clean checkout and obey the same path-containment rules.
 An evidence file may be new and unstaged while a complete change is being prepared; a promotion
@@ -190,10 +192,9 @@ the implementation, test, and CI tracer classes plus the executable command or w
 passing evidence. An unknown gate, absent required tracer class, or missing passing result blocks
 promotion. Tracer presence alone never proves a gate passed.
 
-ADR 0037 and ADR 0038 retain `implementation_tracer` while they remain deferred proposals. The
-current checker also contains a legacy unconditional guard for those IDs. That hard-coded branch is
-an implementation-conformance debt: the policy is the generic gate model, and removing the branch
-requires a later checker change rather than another governance ADR.
+ADR 0037 and ADR 0038 retain `implementation_tracer` while they remain deferred proposals. Any
+temporary compatibility exception in a proposal must be recorded as implementation-conformance debt
+and removed through a later reviewed policy or implementation change; it does not create authority.
 
 ## Ownership Registry
 
@@ -223,37 +224,29 @@ and may reference the same stable contract IDs.
 Until that inventory exists, plans and progress records may locate incomplete work but cannot claim
 repository-wide conformance, format maturity, or release readiness.
 
-## Optional Structural Audit
+## Human Review Responsibilities
 
-The repository retains an on-demand structural audit command for ADR-heavy changes:
+ADR structure and lifecycle are reviewed as part of the change that edits them. Repository-wide
+structural validation is not a separate policy gate, and local tooling is only an optional aid. The
+review record is responsible for confirming all of the following:
 
-```console
-cargo run --locked -p baozi-xtask -- adr-check
-```
+- each numbered ADR has one canonical filename, matching heading, title, status, and index row;
+- frontmatter uses only the fields and scalar/list forms defined above, with no duplicate keys or
+  normalized paths;
+- active and retired IDs obey the permanent, disjoint, exhaustive, and monotonic assignment rules;
+- every `depends_on` target is an Accepted ADR and the dependency graph is acyclic, while `related`
+  remains non-normative navigation;
+- every supersession is legal and reciprocal, and an amendment has the required `updated` date and
+  amendment history;
+- local links, fragments, fenced examples, and referenced paths resolve with exact casing and stay
+  within the repository; and
+- evidence, tracers, promotion gates, and conformance claims are directly relevant and supported by
+  the recorded review or executable gate evidence.
 
-This command is not part of the default Rust or release gate. It scans repository history and the
-documentation tree, so authors should run it only when ADR index, lifecycle, or dependency metadata
-changes warrant the additional work. It requires a complete Git worktree and fails in a shallow
-clone.
-
-The checker contract requires it to verify:
-
-- unique canonical ADR filenames; a unique, normalized, sorted retired registry; disjoint and
-  exhaustive active/retired ID sets through the current maximum; permanence and monotonic new IDs
-  backed by the complete current-`HEAD` ancestry, including merged side-branch history but excluding
-  unrelated refs; and one exact index row per active ADR;
-- filename, heading, title, status, and authority-column agreement;
-- the frontmatter schema, normalized duplicate paths, Accepted dependency closure, and acyclic
-  `depends_on` relationships;
-- reciprocal legal supersession;
-- local link/fence/fragment structure and exact-case contained paths; and
-- implemented promotion/tracer prerequisites.
-
-The checker cannot infer whether prose competes with another ADR, whether a tracer directly proves a
-behavior, whether an amendment should have been a supersession, or whether architecture is complete.
-Those are review responsibilities. Documentation must not claim that structural validation proves
-semantic coherence. Current implementation conformance and scheduled checker work are tracked
-outside this policy; implementation lag does not weaken this contract.
+Reviewers must also assess semantic ownership, competing prose, whether an amendment should instead be
+a superseding decision, and whether the claimed architecture is complete. These judgments cannot be
+replaced by file-presence or syntax checks. Current implementation conformance and publication
+readiness remain separate axes; implementation lag does not weaken the authority of an Accepted ADR.
 
 ## Change Checklist
 
@@ -266,5 +259,4 @@ outside this policy; implementation lag does not weaken this contract.
 - An Accepted amendment has `updated` plus amendment history, or a replacement ADR uses reciprocal
   supersession.
 - Promotion gates and conformance claims have executable evidence rather than file-presence claims.
-- ADR index, lifecycle, dependency, and link changes receive direct review; run the optional
-  `adr-check` audit when the change is broad enough to benefit from a whole-tree consistency scan.
+- ADR index, lifecycle, dependency, and link changes receive direct review against the checklist above.
