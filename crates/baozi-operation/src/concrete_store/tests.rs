@@ -1035,7 +1035,7 @@ fn semantic_authority_and_terminal_key_cells_cannot_retain_executable_state() {
 #[test]
 fn prepared_store_surfaces_expose_only_consuming_classification_or_handoff() {
     let store = include_str!("../concrete_store.rs");
-    let retained = include_str!("../retained.rs");
+    let retained = include_str!("../retained/terminal_output.rs");
     let concrete_impls = [
         implementation_block(
             store,
