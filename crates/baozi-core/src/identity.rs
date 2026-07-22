@@ -25,7 +25,7 @@ impl SceneGenerationId {
     }
 
     #[cfg(test)]
-    fn reserve_from(
+    pub(crate) fn reserve_from(
         last_generation: &AtomicU64,
     ) -> Result<ReservedSceneGeneration, SceneGenerationError> {
         reserve_scene_generation(last_generation)
@@ -581,10 +581,11 @@ mod tests {
     #[test]
     fn dropped_reservation_burns_one_invisible_gap() {
         let last_generation = AtomicU64::new(0);
-        let discarded = SceneGenerationId::reserve_from(&last_generation)
-            .expect("generation space should remain available");
-
-        drop(discarded);
+        {
+            let _discarded = SceneGenerationId::reserve_from(&last_generation)
+                .expect("generation space should remain available");
+            assert_eq!(last_generation.load(Ordering::Relaxed), 1);
+        }
 
         let published = SceneGenerationId::reserve_from(&last_generation)
             .expect("generation space should remain available")

@@ -43,6 +43,7 @@ use std::convert::Infallible;
 use thiserror::Error;
 
 mod node;
+pub(crate) mod store;
 pub(crate) use node::batch::CanonicalNodeDescriptor;
 pub use node::{Node, NodeError};
 
