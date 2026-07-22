@@ -40,6 +40,7 @@ fn retained_production_source() -> String {
         include_str!("ownership.rs"),
         include_str!("physical.rs"),
         include_str!("startup.rs"),
+        include_str!("terminal_failure.rs"),
         include_str!("terminal_output.rs"),
     ]
     .join("\n")
@@ -75,6 +76,7 @@ fn retained_non_final_owner_production_source() -> String {
         include_str!("ownership.rs"),
         include_str!("physical.rs"),
         include_str!("startup.rs"),
+        include_str!("terminal_failure.rs"),
         include_str!("terminal_output.rs"),
     ]
     .join("\n")
