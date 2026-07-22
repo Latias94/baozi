@@ -1,5 +1,8 @@
 use super::*;
 
+use std::num::{NonZeroU32, NonZeroU64};
+
+use crate::ledger::LedgerLimits;
 use crate::retained::{test_fail_next_membership_assignment, test_panic_final_owner_drop_after};
 use crate::{
     AccountPoisonReason, DimensionPolicy, PhysicalStorageAccountFactory,
@@ -220,8 +223,9 @@ fn type_declaration<'a>(source: &'a str, marker: &str) -> &'a str {
 
 fn concrete_store_source() -> String {
     let root = include_str!("../concrete_store.rs");
+    let vocabulary = include_str!("vocabulary.rs");
     let terminal = include_str!("terminal_output.rs");
-    format!("{root}\n{terminal}")
+    format!("{root}\n{vocabulary}\n{terminal}")
 }
 
 #[test]
@@ -881,7 +885,7 @@ fn public_store_surface_does_not_export_raw_or_generic_owning_authority() {
 #[test]
 fn store_key_authority_is_unique_and_raw_brand_access_stays_private() {
     let root = include_str!("../lib.rs");
-    let source = include_str!("../concrete_store.rs");
+    let source = include_str!("vocabulary.rs");
     let catalog_start = source
         .find("pub struct StoreSemanticCatalogId")
         .expect("public store semantic catalog identity");
@@ -979,38 +983,38 @@ fn store_key_authority_is_unique_and_raw_brand_access_stays_private() {
 
 #[test]
 fn semantic_authority_and_terminal_key_cells_cannot_retain_executable_state() {
-    let store = include_str!("../concrete_store.rs");
+    let vocabulary = include_str!("vocabulary.rs");
     let store_source = concrete_store_source();
     let evidence = include_str!("../retained/evidence.rs");
     let declarations = [
         (
             "StoreSemanticCatalogId",
-            type_declaration(store, "pub struct StoreSemanticCatalogId"),
+            type_declaration(vocabulary, "pub struct StoreSemanticCatalogId"),
             store_source.as_str(),
         ),
         (
             "StorePhaseSemanticId",
-            type_declaration(store, "pub struct StorePhaseSemanticId"),
+            type_declaration(vocabulary, "pub struct StorePhaseSemanticId"),
             store_source.as_str(),
         ),
         (
             "StoreDimensionSemanticId",
-            type_declaration(store, "pub struct StoreDimensionSemanticId"),
+            type_declaration(vocabulary, "pub struct StoreDimensionSemanticId"),
             store_source.as_str(),
         ),
         (
             "StoreKeyDomain",
-            type_declaration(store, "pub struct StoreKeyDomain"),
+            type_declaration(vocabulary, "pub struct StoreKeyDomain"),
             store_source.as_str(),
         ),
         (
             "StorePhaseKey",
-            type_declaration(store, "pub struct StorePhaseKey"),
+            type_declaration(vocabulary, "pub struct StorePhaseKey"),
             store_source.as_str(),
         ),
         (
             "StoreDimensionKey",
-            type_declaration(store, "pub struct StoreDimensionKey"),
+            type_declaration(vocabulary, "pub struct StoreDimensionKey"),
             store_source.as_str(),
         ),
         (

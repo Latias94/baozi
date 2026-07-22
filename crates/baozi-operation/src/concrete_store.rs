@@ -79,26 +79,22 @@
 //! adapters that require those boundaries must run in an isolated process.
 
 use std::fmt;
-use std::hash::{Hash, Hasher};
 use std::marker::PhantomData;
-use std::num::{NonZeroU32, NonZeroU64};
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::capacity::{CapacityPlan, CapacityPlanError};
 use crate::control::{OperationControl, ProgressPhase, ProgressUnit};
 use crate::coordinator::FinalProgress;
-use crate::ledger::{LedgerCause, LedgerLimits, PhaseCompletionError};
+use crate::ledger::{LedgerCause, PhaseCompletionError};
 use crate::owner::OperationOwner;
 use crate::retained::{
     AccountPoisoned, CanonicalRetainedSlot, FinalizationContainmentError,
     OutcomeEvidenceRetainedSlot, PhysicalStorageAccount, PreparationFailureCode,
-    RetainedAllocationError, RetainedAllocationPlan, RetainedBatchLimits, RetainedBlockTablePlan,
-    RetainedBuildFailureCode, RetainedClosureSession, RetainedEvidenceClosureSession,
-    RetainedFailureAssembly, RetainedFailureValidation, RetainedFallbackOnly,
-    RetainedHandleSharePlan, RetainedOperation, RetainedOperationStartError,
-    RetainedOperationStartPlan, RetainedPublicationAssembly, RetainedPublicationError,
-    RetainedPublicationPlan, RetainedPublicationPrepareError, RetainedSuccessValidation,
-    RetainedWriterError, RetainedWriterPlan, ValidatedRetainedFailure, ValidatedRetainedSuccess,
+    RetainedAllocationError, RetainedAllocationPlan, RetainedBuildFailureCode,
+    RetainedClosureSession, RetainedEvidenceClosureSession, RetainedFailureAssembly,
+    RetainedFailureValidation, RetainedFallbackOnly, RetainedOperation,
+    RetainedOperationStartError, RetainedOperationStartPlan, RetainedPublicationAssembly,
+    RetainedPublicationError, RetainedPublicationPrepareError, RetainedSuccessValidation,
+    RetainedWriterError, ValidatedRetainedFailure, ValidatedRetainedSuccess,
     retained_publication_error_requires_containment,
 };
 use terminal_output::{
@@ -106,6 +102,15 @@ use terminal_output::{
 };
 
 mod terminal_output;
+mod vocabulary;
+
+pub use vocabulary::{
+    RetainedStoreBatchLimits, RetainedStoreBlockTablePlan, RetainedStorePublicationPlan,
+    RetainedStoreSharePlan, RetainedStoreStartPlan, RetainedStoreWriterPlan, StoreDimensionKey,
+    StoreDimensionSemanticId, StoreFallbackEnvelope, StoreKeyDomain, StoreKeyDomainCreateError,
+    StoreLedgerPlan, StoreLedgerPlanError, StorePhaseKey, StorePhaseSemanticId,
+    StoreSemanticCatalogId,
+};
 
 pub use terminal_output::{
     PreparedStoreFailure, PreparedStoreFailureOutcome, PreparedStoreFallback, PreparedStoreSuccess,
@@ -1660,701 +1665,6 @@ impl<'storage> StoreEvidenceValidationSession<'_, 'storage> {
     }
 }
 
-/// Allocation-free terminal fallback payload.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct StoreFallbackEnvelope {
-    code: u32,
-}
-
-static NEXT_STORE_KEY_DOMAIN_ID: AtomicU64 = AtomicU64::new(1);
-
-/// Stable identity of one Baozi-managed concrete-store semantic catalog.
-///
-/// The fixed namespace and nonzero revision are registry data, never process-local allocation
-/// order. A registry must assign namespaces canonically and increment the revision whenever a local
-/// identifier changes meaning.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct StoreSemanticCatalogId {
-    namespace: [u8; 16],
-    revision: NonZeroU32,
-}
-
-impl StoreSemanticCatalogId {
-    /// Declares one registry-normalized catalog identity.
-    ///
-    /// This inert value grants no host admission, registry authority, or BaoziVerified status.
-    /// Those claims require an independent host-owned registry and evidence decision.
-    pub const fn new(namespace: [u8; 16], revision: NonZeroU32) -> Self {
-        Self {
-            namespace,
-            revision,
-        }
-    }
-
-    /// Returns the fixed registry namespace.
-    pub const fn namespace(self) -> [u8; 16] {
-        self.namespace
-    }
-
-    /// Returns the semantic-catalog revision.
-    pub const fn revision(self) -> NonZeroU32 {
-        self.revision
-    }
-
-    /// Returns the canonical namespace-plus-revision encoding.
-    pub const fn to_canonical_bytes(self) -> [u8; 20] {
-        let revision = self.revision.get().to_be_bytes();
-        let mut encoded = [0_u8; 20];
-        let mut index = 0;
-        while index < self.namespace.len() {
-            encoded[index] = self.namespace[index];
-            index += 1;
-        }
-        encoded[16] = revision[0];
-        encoded[17] = revision[1];
-        encoded[18] = revision[2];
-        encoded[19] = revision[3];
-        encoded
-    }
-}
-
-/// Stable, host-normalized semantic identity for one accounting phase.
-///
-/// This inert value contains no process-local brand, pointer, callback, plugin state, or allocation
-/// order and is therefore suitable for evidence transcripts and persistent identities.
-#[repr(transparent)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct StorePhaseSemanticId(StoreSemanticIdentity);
-
-impl StorePhaseSemanticId {
-    /// Declares one stable phase semantic identity.
-    ///
-    /// Construction alone grants no runtime admission, registry authority, or verification claim.
-    pub const fn new(catalog: StoreSemanticCatalogId, local: NonZeroU64) -> Self {
-        Self(StoreSemanticIdentity { catalog, local })
-    }
-
-    /// Returns the owning semantic-catalog identity.
-    pub const fn catalog(self) -> StoreSemanticCatalogId {
-        self.0.catalog
-    }
-
-    /// Returns the catalog-local stable identifier.
-    pub const fn local(self) -> NonZeroU64 {
-        self.0.local
-    }
-
-    /// Returns the canonical kind-plus-catalog-plus-local encoding.
-    pub const fn to_canonical_bytes(self) -> [u8; 29] {
-        self.0.to_canonical_bytes(1)
-    }
-}
-
-/// Stable, host-normalized semantic identity for one accounting dimension.
-#[repr(transparent)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct StoreDimensionSemanticId(StoreSemanticIdentity);
-
-impl StoreDimensionSemanticId {
-    /// Declares one stable dimension semantic identity.
-    ///
-    /// Construction alone grants no runtime admission, registry authority, or verification claim.
-    pub const fn new(catalog: StoreSemanticCatalogId, local: NonZeroU64) -> Self {
-        Self(StoreSemanticIdentity { catalog, local })
-    }
-
-    /// Returns the owning semantic-catalog identity.
-    pub const fn catalog(self) -> StoreSemanticCatalogId {
-        self.0.catalog
-    }
-
-    /// Returns the catalog-local stable identifier.
-    pub const fn local(self) -> NonZeroU64 {
-        self.0.local
-    }
-
-    /// Returns the canonical kind-plus-catalog-plus-local encoding.
-    pub const fn to_canonical_bytes(self) -> [u8; 29] {
-        self.0.to_canonical_bytes(2)
-    }
-}
-
-#[repr(C)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-struct StoreSemanticIdentity {
-    catalog: StoreSemanticCatalogId,
-    local: NonZeroU64,
-}
-
-impl StoreSemanticIdentity {
-    const fn to_canonical_bytes(self, kind: u8) -> [u8; 29] {
-        let catalog = self.catalog.to_canonical_bytes();
-        let local = self.local.get().to_be_bytes();
-        let mut encoded = [0_u8; 29];
-        encoded[0] = kind;
-        let mut index = 0;
-        while index < catalog.len() {
-            encoded[index + 1] = catalog[index];
-            index += 1;
-        }
-        index = 0;
-        while index < local.len() {
-            encoded[index + 21] = local[index];
-            index += 1;
-        }
-        encoded
-    }
-}
-
-/// Process-local authority for one normalized concrete-store key vocabulary.
-///
-/// A domain is only a runtime brand, host-admission authority, and linear lifetime anchor; it is not
-/// stable wire data, digest input, user-visible semantics, or a semantic-to-ordinal mapping. The
-/// complete mapping lives in the metered key-bearing ledger evidence cells. Consuming the domain
-/// into [`StoreLedgerPlan`] moves the anchor through the operation into terminal evidence without
-/// another mapping allocation or reference count. Plugins receive only host-admitted keys and never
-/// this authority.
-///
-/// The authority is intentionally neither `Clone` nor `Copy`:
-///
-/// ```compile_fail,E0277
-/// use baozi_operation::StoreKeyDomain;
-///
-/// fn require_copy<T: Copy>() {}
-/// require_copy::<StoreKeyDomain>();
-/// ```
-pub struct StoreKeyDomain {
-    id: NonZeroU64,
-    catalog: StoreSemanticCatalogId,
-}
-
-impl StoreKeyDomain {
-    /// Issues one unique process-local key authority.
-    pub fn try_new(catalog: StoreSemanticCatalogId) -> Result<Self, StoreKeyDomainCreateError> {
-        let id = NEXT_STORE_KEY_DOMAIN_ID
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |next| {
-                (next != 0).then(|| next.wrapping_add(1))
-            })
-            .map_err(|_| StoreKeyDomainCreateError::Exhausted)?;
-        let id = NonZeroU64::new(id).ok_or(StoreKeyDomainCreateError::Exhausted)?;
-        Ok(Self { id, catalog })
-    }
-
-    /// Returns this authority's frozen semantic-catalog identity.
-    pub const fn catalog(&self) -> StoreSemanticCatalogId {
-        self.catalog
-    }
-
-    /// Uses host authority to admit one phase identity into this runtime domain.
-    ///
-    /// A matching catalog is necessary but does not by itself imply registry ownership or
-    /// BaoziVerified evidence status; this call is the host's explicit runtime-admission decision.
-    pub fn try_admit_phase(&self, semantic: StorePhaseSemanticId) -> Option<StorePhaseKey> {
-        if semantic.catalog() == self.catalog {
-            Some(StorePhaseKey {
-                brand: self.id,
-                semantic,
-            })
-        } else {
-            None
-        }
-    }
-
-    /// Uses host authority to admit one dimension identity into this runtime domain.
-    ///
-    /// A matching catalog is necessary but does not by itself imply registry ownership or
-    /// BaoziVerified evidence status; this call is the host's explicit runtime-admission decision.
-    pub fn try_admit_dimension(
-        &self,
-        semantic: StoreDimensionSemanticId,
-    ) -> Option<StoreDimensionKey> {
-        if semantic.catalog() == self.catalog {
-            Some(StoreDimensionKey {
-                brand: self.id,
-                semantic,
-            })
-        } else {
-            None
-        }
-    }
-
-    fn owns_phase(&self, key: StorePhaseKey) -> bool {
-        key.brand == self.id && key.semantic.catalog() == self.catalog
-    }
-
-    fn owns_dimension(&self, key: StoreDimensionKey) -> bool {
-        key.brand == self.id && key.semantic.catalog() == self.catalog
-    }
-}
-
-impl fmt::Debug for StoreKeyDomain {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("StoreKeyDomain")
-            .finish_non_exhaustive()
-    }
-}
-
-/// Failure while issuing a process-local concrete-store key authority.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum StoreKeyDomainCreateError {
-    Exhausted,
-}
-
-impl fmt::Display for StoreKeyDomainCreateError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Exhausted => formatter.write_str("concrete-store key domain space is exhausted"),
-        }
-    }
-}
-
-impl std::error::Error for StoreKeyDomainCreateError {}
-
-/// Fixed, inert accounting-phase identity used by the concrete retained store.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub struct StorePhaseKey {
-    brand: NonZeroU64,
-    semantic: StorePhaseSemanticId,
-}
-
-impl crate::retained::TerminalEvidenceKeySeal for StorePhaseKey {}
-
-impl crate::retained::TerminalEvidenceKey for StorePhaseKey {}
-
-impl StorePhaseKey {
-    /// Returns stable semantic meaning without exposing the process-local brand.
-    pub const fn semantic_id(self) -> StorePhaseSemanticId {
-        self.semantic
-    }
-}
-
-impl Hash for StorePhaseKey {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        // Semantic-only hashing permits cross-domain collection bucketing. Rust `Hash` output is
-        // explicitly not a stable digest or wire encoding.
-        self.semantic_id().hash(state);
-    }
-}
-
-impl fmt::Debug for StorePhaseKey {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_tuple("StorePhaseKey")
-            .field(&self.semantic_id())
-            .finish()
-    }
-}
-
-/// Fixed, inert accounting-dimension identity used by the concrete retained store.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub struct StoreDimensionKey {
-    brand: NonZeroU64,
-    semantic: StoreDimensionSemanticId,
-}
-
-impl crate::retained::TerminalEvidenceKeySeal for StoreDimensionKey {}
-
-impl crate::retained::TerminalEvidenceKey for StoreDimensionKey {}
-
-impl StoreDimensionKey {
-    /// Returns stable semantic meaning without exposing the process-local brand.
-    pub const fn semantic_id(self) -> StoreDimensionSemanticId {
-        self.semantic
-    }
-}
-
-impl Hash for StoreDimensionKey {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        // Semantic-only hashing permits cross-domain collection bucketing. Rust `Hash` output is
-        // explicitly not a stable digest or wire encoding.
-        self.semantic_id().hash(state);
-    }
-}
-
-impl fmt::Debug for StoreDimensionKey {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_tuple("StoreDimensionKey")
-            .field(&self.semantic_id())
-            .finish()
-    }
-}
-
-/// Failure while freezing the complete concrete-store ledger vocabulary.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum StoreLedgerPlanError {
-    EmptyPhaseCatalog,
-    ForeignPhaseDomain {
-        phase: StorePhaseKey,
-    },
-    ForeignDimensionDomain {
-        dimension: StoreDimensionKey,
-    },
-    DuplicatePhase {
-        phase: StorePhaseKey,
-    },
-    PhaseOutOfOrder {
-        previous: StorePhaseKey,
-        phase: StorePhaseKey,
-    },
-    PhaseCatalogAllocationFailed,
-}
-
-impl fmt::Display for StoreLedgerPlanError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::EmptyPhaseCatalog => {
-                formatter.write_str("retained store phase catalog must not be empty")
-            }
-            Self::ForeignPhaseDomain { phase } => write!(
-                formatter,
-                "retained store phase {phase:?} belongs to another key domain"
-            ),
-            Self::ForeignDimensionDomain { dimension } => write!(
-                formatter,
-                "retained store dimension {dimension:?} belongs to another key domain"
-            ),
-            Self::DuplicatePhase { phase } => {
-                write!(formatter, "retained store phase catalog repeats {phase:?}")
-            }
-            Self::PhaseOutOfOrder { previous, phase } => write!(
-                formatter,
-                "retained store phase {phase:?} follows later phase {previous:?}"
-            ),
-            Self::PhaseCatalogAllocationFailed => {
-                formatter.write_str("retained store phase catalog allocation failed")
-            }
-        }
-    }
-}
-
-impl std::error::Error for StoreLedgerPlanError {}
-
-/// Frozen dimension policy and complete phase vocabulary for one retained store operation.
-pub struct StoreLedgerPlan {
-    domain: StoreKeyDomain,
-    limits: LedgerLimits<StoreDimensionKey>,
-    phases: Vec<StorePhaseKey>,
-}
-
-impl fmt::Debug for StoreLedgerPlan {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("StoreLedgerPlan")
-            .field("dimension_count", &self.dimension_count())
-            .field("phases", &self.phases)
-            .finish()
-    }
-}
-
-impl StoreLedgerPlan {
-    /// Freezes a non-empty phase vocabulary in canonical key order.
-    ///
-    /// This is an attempt-once authority transfer. The domain is consumed even when construction
-    /// fails, so every previously admitted runtime key from that domain is burned for plan
-    /// construction. A retry must create a fresh domain and re-admit the complete vocabulary; the
-    /// error intentionally does not return a large authority-bearing input.
-    pub fn try_new(
-        domain: StoreKeyDomain,
-        limits: LedgerLimits<StoreDimensionKey>,
-        phases: &[StorePhaseKey],
-    ) -> Result<Self, StoreLedgerPlanError> {
-        if phases.is_empty() {
-            return Err(StoreLedgerPlanError::EmptyPhaseCatalog);
-        }
-        for dimension in limits.dimensions() {
-            if !domain.owns_dimension(dimension) {
-                return Err(StoreLedgerPlanError::ForeignDimensionDomain { dimension });
-            }
-        }
-        for phase in phases {
-            if !domain.owns_phase(*phase) {
-                return Err(StoreLedgerPlanError::ForeignPhaseDomain { phase: *phase });
-            }
-        }
-        for pair in phases.windows(2) {
-            if pair[0] == pair[1] {
-                return Err(StoreLedgerPlanError::DuplicatePhase { phase: pair[1] });
-            }
-            if pair[0] > pair[1] {
-                return Err(StoreLedgerPlanError::PhaseOutOfOrder {
-                    previous: pair[0],
-                    phase: pair[1],
-                });
-            }
-        }
-        let mut frozen = Vec::new();
-        frozen
-            .try_reserve_exact(phases.len())
-            .map_err(|_| StoreLedgerPlanError::PhaseCatalogAllocationFailed)?;
-        frozen.extend_from_slice(phases);
-        Ok(Self {
-            domain,
-            limits,
-            phases: frozen,
-        })
-    }
-
-    /// Returns the number of frozen ledger dimensions.
-    pub fn dimension_count(&self) -> usize {
-        self.limits.dimension_count()
-    }
-
-    /// Returns the number of frozen ledger phases.
-    pub fn phase_count(&self) -> usize {
-        self.phases.len()
-    }
-
-    fn contains_phase(&self, phase: StorePhaseKey) -> bool {
-        self.owns_phase(phase) && self.phases.binary_search(&phase).is_ok()
-    }
-
-    fn contains_dimension(&self, dimension: StoreDimensionKey) -> bool {
-        self.owns_dimension(dimension) && self.limits.dimension(dimension).is_some()
-    }
-
-    fn owns_phase(&self, phase: StorePhaseKey) -> bool {
-        self.domain.owns_phase(phase)
-    }
-
-    fn owns_dimension(&self, dimension: StoreDimensionKey) -> bool {
-        self.domain.owns_dimension(dimension)
-    }
-
-    fn into_parts(
-        self,
-    ) -> (
-        StoreKeyDomain,
-        LedgerLimits<StoreDimensionKey>,
-        Vec<StorePhaseKey>,
-    ) {
-        (self.domain, self.limits, self.phases)
-    }
-}
-
-impl StoreFallbackEnvelope {
-    /// Creates an application-defined fallback code.
-    pub const fn new(code: u32) -> Self {
-        Self { code }
-    }
-
-    /// Returns the application-defined fallback code.
-    pub const fn code(self) -> u32 {
-        self.code
-    }
-}
-
-/// Fixed capacities for one concrete retained writer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct RetainedStoreBatchLimits {
-    attribution_slots: usize,
-    commitment_slots: usize,
-}
-
-impl RetainedStoreBatchLimits {
-    /// Creates non-zero fixed capacities.
-    pub fn new(attribution_slots: usize, commitment_slots: usize) -> Result<Self, StorePlanError> {
-        if attribution_slots == 0 || commitment_slots == 0 {
-            return Err(StorePlanError::InvalidBlockTable);
-        }
-        Ok(Self {
-            attribution_slots,
-            commitment_slots,
-        })
-    }
-
-    /// Returns the attribution-slot capacity.
-    pub const fn attribution_slots(self) -> usize {
-        self.attribution_slots
-    }
-
-    /// Returns the commitment-slot capacity.
-    pub const fn commitment_slots(self) -> usize {
-        self.commitment_slots
-    }
-
-    const fn into_raw(self) -> RetainedBatchLimits {
-        RetainedBatchLimits::new(self.attribution_slots, self.commitment_slots)
-    }
-}
-
-/// Ledger placement and fixed capacities for one concrete retained writer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct RetainedStoreWriterPlan {
-    phase: StorePhaseKey,
-    capacity_dimension: StoreDimensionKey,
-    attribution_dimension: StoreDimensionKey,
-    limits: RetainedStoreBatchLimits,
-}
-
-impl RetainedStoreWriterPlan {
-    /// Creates a writer plan without entering the ledger or allocator.
-    pub const fn new(
-        phase: StorePhaseKey,
-        capacity_dimension: StoreDimensionKey,
-        attribution_dimension: StoreDimensionKey,
-        limits: RetainedStoreBatchLimits,
-    ) -> Self {
-        Self {
-            phase,
-            capacity_dimension,
-            attribution_dimension,
-            limits,
-        }
-    }
-
-    const fn into_raw(self) -> RetainedWriterPlan<StorePhaseKey, StoreDimensionKey> {
-        RetainedWriterPlan::new(
-            self.phase,
-            self.capacity_dimension,
-            self.attribution_dimension,
-            self.limits.into_raw(),
-        )
-    }
-}
-
-/// Work dimensions charged before a same-account retained handle is shared.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct RetainedStoreSharePlan {
-    clone_dimension: StoreDimensionKey,
-    retained_handle_dimension: StoreDimensionKey,
-}
-
-impl RetainedStoreSharePlan {
-    /// Creates the work plan used by every inherited block share.
-    pub const fn new(
-        clone_dimension: StoreDimensionKey,
-        retained_handle_dimension: StoreDimensionKey,
-    ) -> Self {
-        Self {
-            clone_dimension,
-            retained_handle_dimension,
-        }
-    }
-
-    const fn into_raw(self) -> RetainedHandleSharePlan<StoreDimensionKey> {
-        RetainedHandleSharePlan::new(self.clone_dimension, self.retained_handle_dimension)
-    }
-}
-
-/// Start-time policy for the operation-owned concrete retained store.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct RetainedStoreStartPlan {
-    terminal_writer: RetainedStoreWriterPlan,
-    share: RetainedStoreSharePlan,
-    fallback: StoreFallbackEnvelope,
-    fallback_dimension: StoreDimensionKey,
-    fallback_amount: u64,
-    snapshot_dimension: StoreDimensionKey,
-    snapshot_amount: u64,
-}
-
-impl RetainedStoreStartPlan {
-    /// Creates start policy for the pre-admitted fallback and frozen ledger evidence.
-    #[allow(clippy::too_many_arguments)]
-    pub const fn new(
-        terminal_writer: RetainedStoreWriterPlan,
-        share: RetainedStoreSharePlan,
-        fallback: StoreFallbackEnvelope,
-        fallback_dimension: StoreDimensionKey,
-        fallback_amount: u64,
-        snapshot_dimension: StoreDimensionKey,
-        snapshot_amount: u64,
-    ) -> Self {
-        Self {
-            terminal_writer,
-            share,
-            fallback,
-            fallback_dimension,
-            fallback_amount,
-            snapshot_dimension,
-            snapshot_amount,
-        }
-    }
-}
-
-/// Fixed table capacity and maximum new allocations for one publication destination.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct RetainedStoreBlockTablePlan {
-    writer: RetainedStoreWriterPlan,
-    total_blocks: usize,
-    max_new_blocks: usize,
-}
-
-impl RetainedStoreBlockTablePlan {
-    /// Creates a non-empty table plan and rejects impossible new-block bounds.
-    pub fn new(
-        writer: RetainedStoreWriterPlan,
-        total_blocks: usize,
-        max_new_blocks: usize,
-    ) -> Result<Self, StorePlanError> {
-        let required_attributions = max_new_blocks
-            .checked_add(1)
-            .ok_or(StorePlanError::InvalidBlockTable)?;
-        if total_blocks == 0
-            || max_new_blocks > total_blocks
-            || u64::try_from(total_blocks).is_err()
-            || required_attributions > writer.limits.attribution_slots
-        {
-            return Err(StorePlanError::InvalidBlockTable);
-        }
-        Ok(Self {
-            writer,
-            total_blocks,
-            max_new_blocks,
-        })
-    }
-
-    const fn into_raw(self) -> RetainedBlockTablePlan<StorePhaseKey, StoreDimensionKey> {
-        RetainedBlockTablePlan::new(
-            self.writer.into_raw(),
-            self.total_blocks,
-            self.max_new_blocks,
-        )
-    }
-}
-
-/// Independent canonical and outcome-evidence table plans.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct RetainedStorePublicationPlan {
-    canonical: Option<RetainedStoreBlockTablePlan>,
-    outcome_evidence: RetainedStoreBlockTablePlan,
-}
-
-impl RetainedStorePublicationPlan {
-    /// Creates a success-capable dual-table publication plan.
-    pub const fn success(
-        canonical: RetainedStoreBlockTablePlan,
-        outcome_evidence: RetainedStoreBlockTablePlan,
-    ) -> Self {
-        Self {
-            canonical: Some(canonical),
-            outcome_evidence,
-        }
-    }
-
-    /// Creates an evidence-only publication plan.
-    pub const fn rich_failure(outcome_evidence: RetainedStoreBlockTablePlan) -> Self {
-        Self {
-            canonical: None,
-            outcome_evidence,
-        }
-    }
-
-    const fn into_raw(self) -> RetainedPublicationPlan<StorePhaseKey, StoreDimensionKey> {
-        match self.canonical {
-            Some(canonical) => RetainedPublicationPlan::success(
-                canonical.into_raw(),
-                self.outcome_evidence.into_raw(),
-            ),
-            None => RetainedPublicationPlan::rich_failure(self.outcome_evidence.into_raw()),
-        }
-    }
-}
-
 /// Destination that rejected a concrete retained store action.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StoreDestination {
@@ -2767,20 +2077,15 @@ where
         &self,
         plan: &RetainedStorePublicationPlan,
     ) -> Result<(), StoreRuntimeError> {
-        for table in [plan.canonical, Some(plan.outcome_evidence)]
-            .into_iter()
-            .flatten()
-        {
-            let writer = table.writer;
-            if !self.domain.owns_phase(writer.phase) {
-                return Err(StoreRuntimeError::ForeignPhaseDomain {
-                    phase: writer.phase,
-                });
+        for table in plan.tables_for_validation().into_iter().flatten() {
+            let (phase, dimensions) = table.keys_for_publication_validation();
+            if !self.domain.owns_phase(phase) {
+                return Err(StoreRuntimeError::ForeignPhaseDomain { phase });
             }
-            if !self.raw.contains_phase(writer.phase) {
+            if !self.raw.contains_phase(phase) {
                 return Err(StoreRuntimeError::Ledger(LedgerCause::UnknownPhase));
             }
-            for dimension in [writer.capacity_dimension, writer.attribution_dimension] {
+            for dimension in dimensions {
                 if !self.domain.owns_dimension(dimension) {
                     return Err(StoreRuntimeError::ForeignDimensionDomain { dimension });
                 }
@@ -2801,26 +2106,20 @@ where
         account: &PhysicalStorageAccount,
         plan: RetainedStoreStartPlan,
     ) -> Result<Self, RetainedStoreStartError> {
-        if !ledger_plan.owns_phase(plan.terminal_writer.phase) {
+        let (terminal_phase, dimensions) = plan.keys_for_start_validation();
+        if !ledger_plan.owns_phase(terminal_phase) {
             return Err(RetainedStoreStartError::Runtime(
                 StoreRuntimeError::ForeignPhaseDomain {
-                    phase: plan.terminal_writer.phase,
+                    phase: terminal_phase,
                 },
             ));
         }
-        if !ledger_plan.contains_phase(plan.terminal_writer.phase) {
+        if !ledger_plan.contains_phase(terminal_phase) {
             return Err(RetainedStoreStartError::Runtime(StoreRuntimeError::Ledger(
                 LedgerCause::UnknownPhase,
             )));
         }
-        for dimension in [
-            plan.terminal_writer.capacity_dimension,
-            plan.terminal_writer.attribution_dimension,
-            plan.share.clone_dimension,
-            plan.share.retained_handle_dimension,
-            plan.fallback_dimension,
-            plan.snapshot_dimension,
-        ] {
+        for dimension in dimensions {
             if !ledger_plan.owns_dimension(dimension) {
                 return Err(RetainedStoreStartError::Runtime(
                     StoreRuntimeError::ForeignDimensionDomain { dimension },
@@ -2835,14 +2134,23 @@ where
         let allocation_plan = RetainedAllocationPlan::new(0, 0).map_err(|_| {
             RetainedStoreStartError::Runtime(StoreRuntimeError::InvalidPublicationPlan)
         })?;
+        let (
+            terminal_writer,
+            share,
+            fallback,
+            fallback_dimension,
+            fallback_amount,
+            snapshot_dimension,
+            snapshot_amount,
+        ) = plan.into_raw_start_parts();
         let raw_plan = RetainedOperationStartPlan::for_publication(
-            plan.terminal_writer.into_raw(),
-            plan.share.into_raw(),
+            terminal_writer,
+            share,
             allocation_plan,
-            plan.fallback_dimension,
-            plan.fallback_amount,
-            plan.snapshot_dimension,
-            plan.snapshot_amount,
+            fallback_dimension,
+            fallback_amount,
+            snapshot_dimension,
+            snapshot_amount,
         );
         let (domain, ledger_limits, phases) = ledger_plan.into_parts();
         RetainedOperation::try_start_with_phase_catalog(
@@ -2851,7 +2159,7 @@ where
             &phases,
             account,
             raw_plan,
-            || Ok(plan.fallback),
+            || Ok(fallback),
         )
         .map(|raw| Self { raw, domain })
         .map_err(|cause| match cause {
