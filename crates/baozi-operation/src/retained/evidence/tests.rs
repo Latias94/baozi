@@ -746,7 +746,11 @@ fn terminal_evidence_errors_preserve_typed_sources() {
 #[test]
 fn terminal_evidence_key_marker_is_sealed_to_the_two_production_store_keys() {
     let evidence_source = include_str!("../evidence.rs");
-    let store_source = include_str!("../../concrete_store.rs");
+    let store_source = format!(
+        "{}\n{}",
+        include_str!("../../concrete_store.rs"),
+        include_str!("../../concrete_store/terminal_output.rs")
+    );
     assert!(evidence_source.contains("pub(crate) trait TerminalEvidenceKey:"));
     assert!(evidence_source.contains("P: TerminalEvidenceKey"));
     assert!(evidence_source.contains("D: TerminalEvidenceKey"));

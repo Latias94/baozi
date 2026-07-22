@@ -586,7 +586,11 @@ fn canonical_store_keeps_share_surface_leaf_only_and_core_private() {
     assert_record_schema::<ReferenceTableSchema>();
     assert_shareable_leaf_schema::<AuthoredMatrixSchema>();
 
-    let operation_source = include_str!("../../../../baozi-operation/src/concrete_store.rs");
+    let operation_source = format!(
+        "{}\n{}",
+        include_str!("../../../../baozi-operation/src/concrete_store.rs"),
+        include_str!("../../../../baozi-operation/src/concrete_store/terminal_output.rs")
+    );
     let core_source = include_str!("construction.rs");
     let schema_source = include_str!("schema.rs");
 

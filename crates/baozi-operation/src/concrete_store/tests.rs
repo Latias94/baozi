@@ -218,6 +218,12 @@ fn type_declaration<'a>(source: &'a str, marker: &str) -> &'a str {
     &tail[..end]
 }
 
+fn concrete_store_source() -> String {
+    let root = include_str!("../concrete_store.rs");
+    let terminal = include_str!("terminal_output.rs");
+    format!("{root}\n{terminal}")
+}
+
 #[test]
 fn poisoned_account_rejects_before_frozen_phase_catalog_construction() {
     let factory = test_factory();
@@ -853,6 +859,7 @@ fn primary_rejection_dependency_unwind_stops_before_attribution_ack() {
 fn public_store_surface_does_not_export_raw_or_generic_owning_authority() {
     let root = include_str!("../lib.rs");
     let source = include_str!("../concrete_store.rs");
+    let terminal = include_str!("terminal_output.rs");
     for forbidden in [
         "RetainedAllocation",
         "RetainedAllocationPlan",
@@ -868,6 +875,7 @@ fn public_store_surface_does_not_export_raw_or_generic_owning_authority() {
     assert!(!source.contains("pub trait StoredScalar:\n"));
     assert!(!root.contains("CanonicalBlockRef"));
     assert!(!root.contains("OutcomeEvidenceBlockRef"));
+    assert!(!terminal.contains("pub(super) raw:"));
 }
 
 #[test]
@@ -972,37 +980,38 @@ fn store_key_authority_is_unique_and_raw_brand_access_stays_private() {
 #[test]
 fn semantic_authority_and_terminal_key_cells_cannot_retain_executable_state() {
     let store = include_str!("../concrete_store.rs");
+    let store_source = concrete_store_source();
     let evidence = include_str!("../retained/evidence.rs");
     let declarations = [
         (
             "StoreSemanticCatalogId",
             type_declaration(store, "pub struct StoreSemanticCatalogId"),
-            store,
+            store_source.as_str(),
         ),
         (
             "StorePhaseSemanticId",
             type_declaration(store, "pub struct StorePhaseSemanticId"),
-            store,
+            store_source.as_str(),
         ),
         (
             "StoreDimensionSemanticId",
             type_declaration(store, "pub struct StoreDimensionSemanticId"),
-            store,
+            store_source.as_str(),
         ),
         (
             "StoreKeyDomain",
             type_declaration(store, "pub struct StoreKeyDomain"),
-            store,
+            store_source.as_str(),
         ),
         (
             "StorePhaseKey",
             type_declaration(store, "pub struct StorePhaseKey"),
-            store,
+            store_source.as_str(),
         ),
         (
             "StoreDimensionKey",
             type_declaration(store, "pub struct StoreDimensionKey"),
-            store,
+            store_source.as_str(),
         ),
         (
             "FallbackDimensionCell",
@@ -1034,7 +1043,7 @@ fn semantic_authority_and_terminal_key_cells_cannot_retain_executable_state() {
 
 #[test]
 fn prepared_store_surfaces_expose_only_consuming_classification_or_handoff() {
-    let store = include_str!("../concrete_store.rs");
+    let store = include_str!("terminal_output.rs");
     let retained = include_str!("../retained/terminal_output.rs");
     let concrete_impls = [
         implementation_block(
