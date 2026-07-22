@@ -549,14 +549,24 @@ growable/replacement geometric targets, preserve source-plus-candidate charge, a
 count plus moved elements/bytes. Full default/all-feature workspace tests, strict Clippy, doctests,
 rustdoc, both WASM targets, packaging, formatting, and diff checks passed before commit `25a55fa`.
 
-U4b is no longer blocked by retained startup or U3 format evidence. Commit `b1f7608` replaced the
-extension-owned `FormatFailureSource` rail with one Baozi-owned packed `FormatFailureEvidence`, migrated
-OBJ, PLY, STL, glTF, and facade consumers, kept every fuzz target compatible, and made the public
-source chain terminate at that host value. Dynamic code/detail bytes are copied before the producer
-and backend error are destroyed; code, detail, destructor, direct-scope, derived-meter,
-pre-reserved-storage, decoded-text, formatting, and Scene-parts reentry paths fail closed under one
-callback fence. Independent review found no remaining P0/P1/P2. The first U4b tracer may proceed
-without a backend-source compatibility shim.
+U4b is complete in commit `54f4bff`. The private two-node retained canonical Scene tracer uses typed,
+non-owning `CanonicalBlockRef<Schema>` handles. Only authored-matrix leaves may share physical
+backing; records, directories, and references are rebuilt with fresh target-local slots. Semantic and
+graph closure is validated before acquiring exactly one `ReservedSceneGeneration`. Destination
+commitments are pre-registered while assembly is open, but are applied only after validation and a
+successful reservation. Pure handoff then splits the published Scene owner from the outcome-report
+owner. Positive lineage cases and negative foreign-Scene, source-slot, and non-shareable-kind cases
+pass alongside semantic-fault, reservation-exhaustion, cancellation, unwind, post-reservation-fault,
+and owner-lifetime gates.
+
+Verification passed with all 434 core tests and all 11 focused tests, strict Clippy, six doctests,
+rustdoc, `wasm32-unknown-unknown`, `wasm32-wasip1`, formatting and diff checks. Independent two-axis
+review found no P0-P2 findings.
+
+Before freezing the U4c metrics contract, finish the source-layout-only extraction of the oversized
+operation ledger, retained-publication, and concrete-store sources that will enter exact source
+allowlists. This extraction must not change runtime behavior, public API, drop order, or metric
+semantics. U4c complex-schema falsification and metrics freeze follow that extraction.
 
 #### U4c Metric Contract
 
