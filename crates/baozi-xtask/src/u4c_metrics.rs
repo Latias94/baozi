@@ -10,6 +10,8 @@ use std::process::Command;
 const PROBE_PREFIX: &str = "BAOZI_U4C_METRICS_V1=";
 const PROBE_ARGUMENTS: &[&str] = &[
     "test",
+    "-j",
+    "1",
     "--locked",
     "-p",
     "baozi-core",
