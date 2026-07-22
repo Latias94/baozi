@@ -5,16 +5,28 @@ use crate::{
 };
 use std::sync::atomic::AtomicUsize;
 
-fn ledger_production_source() -> String {
+fn production_source(source: &'static str) -> &'static str {
     let test_attribute = ["#[cfg(", "test)]"].concat();
-    [include_str!("../ledger.rs"), include_str!("startup.rs")]
-        .into_iter()
-        .map(|source| {
-            source
-                .rsplit_once(&test_attribute)
-                .map_or(source, |(production, _)| production)
-        })
-        .collect()
+    source
+        .rsplit_once(&test_attribute)
+        .map_or(source, |(production, _)| production)
+}
+
+fn ledger_root_source() -> &'static str {
+    production_source(include_str!("../ledger.rs"))
+}
+
+fn ledger_snapshot_source() -> &'static str {
+    production_source(include_str!("snapshot.rs"))
+}
+
+fn ledger_production_source() -> String {
+    [
+        ledger_root_source(),
+        ledger_snapshot_source(),
+        production_source(include_str!("startup.rs")),
+    ]
+    .join("\n")
 }
 
 #[derive(Debug)]
@@ -90,11 +102,12 @@ fn test_ledger(limits: LedgerLimits<Dimension>) -> Ledger<Owner, Phase, Dimensio
 
 #[test]
 fn runtime_ledger_has_no_dynamic_phase_growth_rail() {
+    let root = ledger_root_source();
     let production = ledger_production_source();
     assert!(!production.contains("PhaseCatalogState"));
     assert!(!production.contains("fn ensure_phase"));
     assert!(!production.contains("try_new_with_phase_catalog"));
-    let lookup = production
+    let lookup = root
         .split_once("fn phase_position")
         .expect("frozen phase lookup exists")
         .1
@@ -590,8 +603,8 @@ fn dimension_policy_tightening_is_monotonic_and_preserves_existing_evidence() {
 
 #[test]
 fn snapshot_failure_cleanup_is_structurally_storage_before_accounting() {
-    let production = ledger_production_source();
-    let cleanup = production
+    let source = ledger_snapshot_source();
+    let cleanup = source
         .split_once("impl<P, D> Drop for SnapshotEvidenceAssembly")
         .expect("snapshot evidence cleanup owner exists")
         .1
@@ -610,7 +623,7 @@ fn snapshot_failure_cleanup_is_structurally_storage_before_accounting() {
     assert!(phase_storage < accounting_release);
     assert!(dimension_storage < accounting_release);
 
-    let snapshot = production
+    let snapshot = source
         .split_once("fn try_snapshot<P, D>")
         .expect("snapshot constructor exists")
         .1
@@ -1993,8 +2006,9 @@ fn terminal_freeze_keeps_commitments_on_bound_positions_after_ord_reverses() {
 
 #[test]
 fn typed_terminal_binding_uses_prestored_numeric_positions_without_a_mutation_tail() {
+    let root = ledger_root_source();
     let production = ledger_production_source();
-    let primary = production
+    let primary = root
         .split("pub(crate) fn try_bind_primary(")
         .nth(1)
         .expect("typed primary binding exists")
@@ -2011,7 +2025,7 @@ fn typed_terminal_binding_uses_prestored_numeric_positions_without_a_mutation_ta
     assert!(primary.contains("validate_primary_publication_locked("));
     assert!(!primary.contains("bind_preflighted"));
 
-    let fallback = production
+    let fallback = root
         .split("pub(crate) fn try_bind_fallback_baseline(")
         .nth(1)
         .expect("fallback binding exists")
@@ -2028,7 +2042,7 @@ fn typed_terminal_binding_uses_prestored_numeric_positions_without_a_mutation_ta
     assert!(fallback.contains("validate_fallback_baseline_locked("));
     assert!(!fallback.contains("bind_preflighted"));
 
-    let preflight = production
+    let preflight = root
         .split("fn preflight_typed_publication_batch")
         .nth(1)
         .expect("numeric preflight exists")
@@ -2048,7 +2062,7 @@ fn typed_terminal_binding_uses_prestored_numeric_positions_without_a_mutation_ta
         );
     }
 
-    let push = production
+    let push = root
         .split("pub(crate) fn try_push_commitment")
         .nth(1)
         .expect("ledger commitment insertion exists")
@@ -2083,7 +2097,7 @@ fn typed_terminal_binding_uses_prestored_numeric_positions_without_a_mutation_ta
         );
     }
 
-    let batch = production
+    let batch = root
         .split("pub(crate) struct AttributionReservationBatch")
         .nth(1)
         .expect("typed publication batch exists")
@@ -2106,7 +2120,7 @@ fn typed_terminal_binding_uses_prestored_numeric_positions_without_a_mutation_ta
 
 #[test]
 fn consumed_batch_binds_every_dimension_before_its_numeric_mutation_tail() {
-    let production = ledger_production_source();
+    let production = ledger_root_source();
     let batch = production
         .split("pub fn charge_consumed_batch<const N: usize>(")
         .nth(1)
@@ -2149,7 +2163,7 @@ fn consumed_batch_binds_every_dimension_before_its_numeric_mutation_tail() {
 
 #[test]
 fn reservation_transition_finishes_all_fallible_lookup_before_releasing_source_bytes() {
-    let production = ledger_production_source();
+    let production = ledger_root_source();
     let transition = production
         .split("pub fn transition_reservations(")
         .nth(1)
@@ -2203,7 +2217,7 @@ fn reservation_transition_finishes_all_fallible_lookup_before_releasing_source_b
 
 #[test]
 fn reservation_admission_and_resize_use_one_preflight_then_numeric_slots() {
-    let production = ledger_production_source();
+    let production = ledger_root_source();
     let reserve = production
         .split("fn reserve_core(")
         .nth(1)
@@ -2282,7 +2296,7 @@ fn reservation_admission_and_resize_use_one_preflight_then_numeric_slots() {
 
 #[test]
 fn reservation_transfer_finishes_all_fallible_lookup_before_mutating_phase_bytes() {
-    let production = ledger_production_source();
+    let production = ledger_root_source();
     let transfer = production
         .split("pub fn transfer(")
         .nth(1)
@@ -2323,7 +2337,7 @@ fn reservation_transfer_finishes_all_fallible_lookup_before_mutating_phase_bytes
 
 #[test]
 fn legacy_publication_binds_commitment_positions_before_counter_mutation() {
-    let production = ledger_production_source();
+    let production = ledger_root_source();
     let aggregate = production
         .split("struct AggregatedCommitment")
         .nth(1)
@@ -2383,7 +2397,7 @@ fn legacy_publication_binds_commitment_positions_before_counter_mutation() {
         .split("impl<O, P, D> Drop for PendingPublication")
         .nth(1)
         .expect("pending publication rollback exists")
-        .split("/// Immutable evidence")
+        .split("fn lock")
         .next()
         .expect("pending publication rollback boundary exists");
     assert!(rollback.contains("get_mut(commitment.dimension_position)"));
@@ -2393,8 +2407,10 @@ fn legacy_publication_binds_commitment_positions_before_counter_mutation() {
 
 #[test]
 fn typed_freeze_proof_owns_exact_batches_and_has_no_post_mutation_fault_gate() {
+    let root = ledger_root_source();
+    let snapshot_source = ledger_snapshot_source();
     let production = ledger_production_source();
-    let proof = production
+    let proof = root
         .split("pub(crate) struct TypedFreezeProof")
         .nth(1)
         .expect("typed proof exists")
@@ -2421,7 +2437,7 @@ fn typed_freeze_proof_owns_exact_batches_and_has_no_post_mutation_fault_gate() {
         1,
         "only the freeze-ready typed wrapper may expose consuming publication"
     );
-    let generic_qualified = production
+    let generic_qualified = root
         .split("impl<O, P, D> QualifiedTypedFreezeProof")
         .nth(1)
         .expect("generic qualified proof implementation exists")
@@ -2432,7 +2448,7 @@ fn typed_freeze_proof_owns_exact_batches_and_has_no_post_mutation_fault_gate() {
     assert!(generic_qualified.contains("    fn freeze(mut self)"));
     assert!(!generic_qualified.contains("pub(crate) fn freeze"));
 
-    let qualification = production
+    let qualification = root
         .split("fn validate_terminal(")
         .nth(1)
         .expect("typed terminal qualification exists")
@@ -2484,7 +2500,7 @@ fn typed_freeze_proof_owns_exact_batches_and_has_no_post_mutation_fault_gate() {
             "self-consuming qualification calls owner-defined key behavior through `{forbidden}`"
         );
     }
-    let bound_positions = production
+    let bound_positions = root
         .split("fn bound_positions_are_in_bounds")
         .nth(1)
         .expect("bound-position qualification exists")
@@ -2503,7 +2519,7 @@ fn typed_freeze_proof_owns_exact_batches_and_has_no_post_mutation_fault_gate() {
             "terminal qualification lost bound-position gate `{required}`"
         );
     }
-    let discard_positions = production
+    let discard_positions = root
         .split("fn discard_positions_are_in_bounds")
         .nth(1)
         .expect("discard-position qualification exists")
@@ -2526,7 +2542,7 @@ fn typed_freeze_proof_owns_exact_batches_and_has_no_post_mutation_fault_gate() {
         "discard qualification must not apply a payload commitment that is being destroyed"
     );
 
-    let freeze = production
+    let freeze = root
         .split("fn freeze_in_place(&mut self)")
         .nth(1)
         .expect("in-place typed freeze exists")
@@ -2587,21 +2603,21 @@ fn typed_freeze_proof_owns_exact_batches_and_has_no_post_mutation_fault_gate() {
     assert!(!after_snapshot.contains("destroy_storage_then_release_bound_cover"));
     assert!(!after_snapshot.contains("apply_typed_commitments"));
 
-    let bound_release = production
+    let bound_release = root
         .split("fn release_bound_locked")
         .nth(1)
         .expect("bound release helper exists")
         .split("impl<O, P, D> Drop for ReservationCore")
         .next()
         .expect("bound release helper body exists");
-    let apply = production
+    let apply = root
         .split("fn apply_typed_commitments")
         .nth(1)
         .expect("bound commitment helper exists")
-        .split("struct SnapshotEvidenceAssembly")
-        .next()
-        .expect("bound commitment helper body exists");
-    let batch_release = production
+        .split_once("\n    }\n}\n")
+        .expect("bound commitment helper has a closed function body")
+        .0;
+    let batch_release = root
         .split("fn release_bound_attributions")
         .nth(1)
         .expect("bound batch release helper exists")
@@ -2609,7 +2625,7 @@ fn typed_freeze_proof_owns_exact_batches_and_has_no_post_mutation_fault_gate() {
         .next()
         .expect("bound batch release helper body exists");
     assert!(!batch_release.contains("capacity_cover.core.release_bound_locked"));
-    let storage_release = production
+    let storage_release = root
         .split("fn destroy_storage_then_release_bound_cover")
         .nth(1)
         .expect("storage-before-cover helper exists")
@@ -2627,7 +2643,7 @@ fn typed_freeze_proof_owns_exact_batches_and_has_no_post_mutation_fault_gate() {
         .expect("capacity cover is released under the ledger lock");
     assert!(attribution_storage < capacity_release);
     assert!(commitment_storage < capacity_release);
-    let snapshot = production
+    let snapshot = snapshot_source
         .split("fn take_typed_final_snapshot")
         .nth(1)
         .expect("typed snapshot helper exists")
