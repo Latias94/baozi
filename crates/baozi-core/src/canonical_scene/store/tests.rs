@@ -617,3 +617,87 @@ fn canonical_store_keeps_share_surface_leaf_only_and_core_private() {
         assert!(!projection.contains(forbidden));
     }
 }
+
+#[test]
+fn canonical_store_complex_fixture_closes_typed_cross_table_graph() {
+    let factory = test_factory(1);
+    let account = test_account(&factory);
+    let nonce = AtomicU64::new(0);
+    let prepared = SceneConstructionOperation::with_account(&account, test_limits())
+        .expect("complex fixture construction operation")
+        .prepare_complex_fixture_for_test(None, || SceneGenerationId::reserve_from(&nonce))
+        .expect("complex fixture preparation");
+    let before_handoff = account.snapshot();
+    let parts = match prepared.handoff() {
+        super::construction::ComplexFixtureTerminal::Success(parts) => parts,
+        super::construction::ComplexFixtureTerminal::RichFailure(failure) => {
+            panic!(
+                "the complete complex fixture must validate; it was rejected with {:#?} evidence blocks",
+                failure.outcome_evidence_block_count()
+            )
+        }
+        super::construction::ComplexFixtureTerminal::MinimalFallback(_) => {
+            panic!("the complete complex fixture must not fall back")
+        }
+    };
+    assert_eq!(nonce.load(Ordering::Relaxed), 1);
+    assert_eq!(account.snapshot(), before_handoff);
+    assert_eq!(parts.fixture.canonical_block_count(), 26);
+    assert!(parts.fixture.root_is_retained());
+    assert_eq!(parts.report.outcome_evidence_block_count(), 1);
+    let dimension = parts
+        .report
+        .ledger_evidence()
+        .dimension_at(0)
+        .expect("the complex fixture has one ledger dimension");
+    assert_eq!(dimension.committed_canonical_output(), 26);
+    // The frozen ledger records the retained candidate evidence plus its terminal snapshot.
+    assert_eq!(dimension.published_outcome_evidence(), 2);
+
+    drop(parts);
+    assert_eq!(account.snapshot().live_retained_bytes(), 0);
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
+    drop(account);
+    assert_eq!(factory.snapshot().live_accounts(), 0);
+}
+
+#[test]
+fn canonical_store_complex_fixture_rejects_cross_table_and_orphan_candidates() {
+    let factory = test_factory(1);
+    let account = test_account(&factory);
+    let nonce = AtomicU64::new(0);
+
+    for fault in [
+        super::construction::ComplexFixtureFault::CrossTableIndex,
+        super::construction::ComplexFixtureFault::OrphanCanonicalBlock,
+    ] {
+        let prepared = SceneConstructionOperation::with_account(&account, test_limits())
+            .expect("complex fixture fault operation")
+            .prepare_complex_fixture_for_test(Some(fault), || {
+                SceneGenerationId::reserve_from(&nonce)
+            })
+            .expect("rejected complex fixture should retain rich evidence");
+        assert!(matches!(
+            prepared,
+            super::construction::PreparedComplexFixture::RichFailure(_)
+        ));
+        assert_eq!(nonce.load(Ordering::Relaxed), 0);
+        match prepared.handoff() {
+            super::construction::ComplexFixtureTerminal::RichFailure(failure) => {
+                assert_eq!(failure.outcome_evidence_block_count(), Some(2));
+                drop(failure);
+            }
+            super::construction::ComplexFixtureTerminal::Success(_) => {
+                panic!("a rejected complex fixture must not publish canonical data")
+            }
+            super::construction::ComplexFixtureTerminal::MinimalFallback(_) => {
+                panic!("semantic rejection must preserve rich evidence")
+            }
+        }
+        assert_eq!(account.snapshot().live_retained_bytes(), 0);
+        assert_eq!(account.snapshot().live_retained_allocations(), 0);
+    }
+
+    drop(account);
+    assert_eq!(factory.snapshot().live_accounts(), 0);
+}

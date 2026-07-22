@@ -35,6 +35,12 @@ use super::schema::{
 };
 use super::validation::{validate_evidence_graph, validate_scene_graph};
 
+#[cfg(test)]
+mod complex;
+
+#[cfg(test)]
+pub(super) use complex::{ComplexFixtureFault, ComplexFixtureTerminal, PreparedComplexFixture};
+
 const STORE_CATALOG: StoreSemanticCatalogId =
     StoreSemanticCatalogId::new(*b"baozi-core-scene", NonZeroU32::MIN);
 const STORE_PHASE: StorePhaseSemanticId = StorePhaseSemanticId::new(STORE_CATALOG, NonZeroU64::MIN);
@@ -43,6 +49,10 @@ const STORE_DIMENSION: StoreDimensionSemanticId =
 const FALLBACK_CODE: u32 = 0x5343_0001;
 const SEMANTIC_REJECTION_CODE: u32 = 0x5343_0002;
 const GENERATION_EXHAUSTED_CODE: u32 = 0x5343_0003;
+// A publication table itself consumes one attribution slot in addition to its new members.
+const MAX_ADMITTED_CANONICAL_NEW_BLOCKS: usize = 27;
+const TERMINAL_ATTRIBUTION_SLOTS: usize = MAX_ADMITTED_CANONICAL_NEW_BLOCKS + 1;
+const TERMINAL_COMMITMENT_SLOTS: usize = 8;
 
 static NEXT_CONSTRUCTION_BRAND: AtomicU64 = AtomicU64::new(1);
 
@@ -597,6 +607,15 @@ impl SceneConstructionOperation<'static> {
             SceneGenerationId::reserve,
         )
     }
+
+    #[cfg(test)]
+    pub(super) fn prepare_complex_fixture_for_test(
+        self,
+        fault: Option<ComplexFixtureFault>,
+        reserve_generation: impl FnOnce() -> Result<ReservedSceneGeneration, SceneGenerationError>,
+    ) -> Result<PreparedComplexFixture, SceneConstructionError> {
+        complex::prepare(self, fault, reserve_generation)
+    }
 }
 
 impl<'scene> SceneConstructionOperation<'scene> {
@@ -734,7 +753,8 @@ impl<'scene> SceneConstructionOperation<'scene> {
             [(keys.dimension, dimension_policy)],
         )?;
         let ledger_plan = StoreLedgerPlan::try_new(domain, ledger_limits, &[keys.phase])?;
-        let terminal_limits = RetainedStoreBatchLimits::new(16, 8)?;
+        let terminal_limits =
+            RetainedStoreBatchLimits::new(TERMINAL_ATTRIBUTION_SLOTS, TERMINAL_COMMITMENT_SLOTS)?;
         let terminal_writer = RetainedStoreWriterPlan::new(
             keys.phase,
             keys.dimension,
