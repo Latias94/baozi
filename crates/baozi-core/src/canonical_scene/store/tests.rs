@@ -2,8 +2,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use baozi_operation::{
     CancellationToken, PhysicalStorageAccount, PhysicalStorageAccountFactory,
-    PhysicalStorageAccountFactoryLimits, PhysicalStorageAccountLimits, RecordBlock, ScalarSequence,
-    StoreTerminalCause,
+    PhysicalStorageAccountFactoryLimits, PhysicalStorageAccountLimits,
+    PhysicalStorageAccountSnapshot, RecordBlock, ScalarSequence, StoreTerminalCause,
 };
 
 use crate::identity::SceneGenerationId;
@@ -16,7 +16,8 @@ use super::construction::{
     TracerSceneSuccessParts, TwoNodeAuthoredMatrices, ValidatedTracerScene,
 };
 use super::schema::{
-    AuthoredMatrixSchema, CanonicalSchema, DirectorySchema, NodeTableSchema, ReferenceTableSchema,
+    AuthoredMatrixSchema, COMPLEX_SCHEMA_REVISION, CanonicalSchema, DirectorySchema,
+    NodeTableSchema, ReferenceTableSchema,
 };
 use super::validation::authored_matrix_is_valid;
 
@@ -659,6 +660,150 @@ fn canonical_store_complex_fixture_closes_typed_cross_table_graph() {
     assert_eq!(account.snapshot().live_retained_allocations(), 0);
     drop(account);
     assert_eq!(factory.snapshot().live_accounts(), 0);
+}
+
+fn u4c_physical_snapshot_json(snapshot: PhysicalStorageAccountSnapshot) -> String {
+    format!(
+        concat!(
+            r#"{{"live_retained_bytes":{},"live_retained_allocations":{},"peak_retained_bytes":{},"#,
+            r#""peak_retained_allocations":{},"total_admitted_retained_bytes":{},"#,
+            r#""total_admitted_retained_allocations":{},"poisoned":{}}}"#,
+        ),
+        snapshot.live_retained_bytes(),
+        snapshot.live_retained_allocations(),
+        snapshot.peak_retained_bytes(),
+        snapshot.peak_retained_allocations(),
+        snapshot.total_admitted_retained_bytes(),
+        snapshot.total_admitted_retained_allocations(),
+        snapshot.poisoned(),
+    )
+}
+
+#[test]
+#[ignore = "run via baozi-xtask u4c-metrics"]
+fn canonical_store_u4c_metrics_v1_probe() {
+    let factory = test_factory(1);
+    let account = test_account(&factory);
+    let nonce = AtomicU64::new(0);
+    let before_prepare = account.snapshot();
+
+    let prepared = SceneConstructionOperation::with_account(&account, test_limits())
+        .expect("complex fixture construction operation")
+        .prepare_complex_fixture_for_test(None, || SceneGenerationId::reserve_from(&nonce))
+        .expect("complex fixture preparation");
+    assert!(matches!(
+        &prepared,
+        super::construction::PreparedComplexFixture::Success(_)
+    ));
+    let prepared_snapshot = account.snapshot();
+
+    let parts = match prepared.handoff() {
+        super::construction::ComplexFixtureTerminal::Success(parts) => parts,
+        super::construction::ComplexFixtureTerminal::RichFailure(failure) => {
+            panic!(
+                "the complete complex fixture must validate; it was rejected with {:#?} evidence blocks",
+                failure.outcome_evidence_block_count()
+            )
+        }
+        super::construction::ComplexFixtureTerminal::MinimalFallback(_) => {
+            panic!("the complete complex fixture must not fall back")
+        }
+    };
+    let after_handoff = account.snapshot();
+
+    let canonical_block_count = u64::try_from(parts.fixture.canonical_block_count())
+        .expect("canonical block count fits u64");
+    let outcome_evidence_block_count = u64::try_from(parts.report.outcome_evidence_block_count())
+        .expect("outcome evidence block count fits u64");
+    let root_retained = parts.fixture.root_is_retained();
+    let ledger = parts.report.ledger_evidence();
+    let header = ledger.header();
+    let dimension = ledger
+        .dimension_at(0)
+        .expect("the complex fixture has one ledger dimension");
+    let terminal_success = matches!(header.terminal_cause(), StoreTerminalCause::Success);
+    let dimension_count =
+        u64::try_from(header.dimension_count()).expect("ledger dimension count fits u64");
+    let phase_count = u64::try_from(header.phase_count()).expect("ledger phase count fits u64");
+
+    assert_eq!(nonce.load(Ordering::Relaxed), 1);
+    assert_eq!(prepared_snapshot, after_handoff);
+    assert_eq!(canonical_block_count, 26);
+    assert!(root_retained);
+    assert_eq!(outcome_evidence_block_count, 1);
+    assert!(terminal_success);
+    assert_eq!(
+        dimension.committed_canonical_output(),
+        canonical_block_count
+    );
+    assert_eq!(dimension.published_outcome_evidence(), 2);
+
+    drop(parts);
+    let after_release = account.snapshot();
+    assert_eq!(after_release.live_retained_bytes(), 0);
+    assert_eq!(after_release.live_retained_allocations(), 0);
+
+    drop(account);
+    let factory_after_release = factory.snapshot();
+    assert_eq!(factory_after_release.live_accounts(), 0);
+    assert_eq!(factory_after_release.total_admitted_accounts(), 1);
+
+    let ledger_json = format!(
+        concat!(
+            r#"{{"terminal_success":{},"dimension_count":{},"phase_count":{},"#,
+            r#""current_live_bytes":{},"peak_live_bytes":{},"active_reservations":{},"#,
+            r#""current_evidence_bytes":{},"peak_evidence_bytes":{},"attempted":{},"#,
+            r#""consumed":{},"pending_publication":{},"committed":{},"#,
+            r#""committed_canonical_output":{},"published_outcome_evidence":{}}}"#,
+        ),
+        terminal_success,
+        dimension_count,
+        phase_count,
+        header.current_live_bytes(),
+        header.peak_live_bytes(),
+        header.active_reservations(),
+        header.current_evidence_bytes(),
+        header.peak_evidence_bytes(),
+        dimension.attempted(),
+        dimension.consumed(),
+        dimension.pending_publication(),
+        dimension.committed(),
+        dimension.committed_canonical_output(),
+        dimension.published_outcome_evidence(),
+    );
+    let physical_account_json = format!(
+        concat!(
+            r#"{{"before_prepare":{},"prepared":{},"after_handoff":{},"#,
+            r#""after_release":{}}}"#,
+        ),
+        u4c_physical_snapshot_json(before_prepare),
+        u4c_physical_snapshot_json(prepared_snapshot),
+        u4c_physical_snapshot_json(after_handoff),
+        u4c_physical_snapshot_json(after_release),
+    );
+    let factory_after_release_json = format!(
+        r#"{{"live_accounts":{},"total_admitted_accounts":{}}}"#,
+        factory_after_release.live_accounts(),
+        factory_after_release.total_admitted_accounts(),
+    );
+
+    println!(
+        concat!(
+            "\n",
+            r#"BAOZI_U4C_METRICS_V1={{"schema_version":1,"fixture_schema_revision":{},"#,
+            r#""canonical_block_count":{},"outcome_evidence_block_count":{},"root_retained":{},"#,
+            r#""generation_reservations":{},"ledger":{},"physical_account":{},"#,
+            r#""factory_after_release":{}}}"#,
+        ),
+        COMPLEX_SCHEMA_REVISION,
+        canonical_block_count,
+        outcome_evidence_block_count,
+        root_retained,
+        nonce.load(Ordering::Relaxed),
+        ledger_json,
+        physical_account_json,
+        factory_after_release_json,
+    );
 }
 
 #[test]

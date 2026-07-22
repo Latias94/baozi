@@ -1,9 +1,10 @@
 use std::process::Command;
 
-const SUPPORTED_COMMANDS: [&str; 3] = [
+const SUPPORTED_COMMANDS: [&str; 4] = [
     "crate-graph-check",
     "native-fs-check",
     "runtime-admission-check",
+    "u4c-metrics",
 ];
 
 #[test]
@@ -37,4 +38,21 @@ fn removed_adr_check_is_rejected_as_an_unknown_command() {
         "{output:#?}"
     );
     assert!(!stderr.contains("adr-check"), "{output:#?}");
+}
+
+#[test]
+fn u4c_metrics_rejects_unexpected_arguments_with_usage() {
+    let output = Command::new(env!("CARGO_BIN_EXE_baozi-xtask"))
+        .args(["u4c-metrics", "unexpected"])
+        .output()
+        .expect("run baozi-xtask with unexpected u4c-metrics argument");
+
+    assert_eq!(output.status.code(), Some(2), "{output:#?}");
+    assert!(output.stdout.is_empty(), "{output:#?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("usage: cargo run -p baozi-xtask"),
+        "{output:#?}"
+    );
+    assert!(stderr.contains("u4c-metrics"), "{output:#?}");
 }

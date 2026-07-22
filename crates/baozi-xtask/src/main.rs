@@ -4,7 +4,7 @@ use std::process::ExitCode;
 
 const USAGE: &str = concat!(
     "usage: cargo run -p baozi-xtask -- ",
-    "<crate-graph-check|native-fs-check|runtime-admission-check>"
+    "<crate-graph-check|native-fs-check|runtime-admission-check|u4c-metrics>"
 );
 
 fn main() -> ExitCode {
@@ -17,9 +17,35 @@ fn main() -> ExitCode {
         (Some("crate-graph-check"), None) => run_crate_graph_check(),
         (Some("native-fs-check"), None) => run_native_fs_check(),
         (Some("runtime-admission-check"), None) => run_runtime_admission_check(),
+        (Some("u4c-metrics"), None) => run_u4c_metrics(),
         _ => {
             eprintln!("{USAGE}");
             ExitCode::from(2)
+        }
+    }
+}
+
+fn run_u4c_metrics() -> ExitCode {
+    let current_directory = match env::current_dir() {
+        Ok(path) => path,
+        Err(error) => {
+            eprintln!("failed to read the current directory: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let Some(repository_root) = find_repository_root(&current_directory) else {
+        eprintln!("failed to find a Baozi repository root from {current_directory:?}");
+        return ExitCode::FAILURE;
+    };
+
+    match baozi_xtask::u4c_metrics::collect_repository(&repository_root) {
+        Ok(metrics) => {
+            println!("{metrics}");
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("{error}");
+            ExitCode::FAILURE
         }
     }
 }
