@@ -24,8 +24,14 @@ The decision remains per format. Passing this checklist does not make a tool a p
 ## Architecture Boundary
 
 - [ ] Tool types do not appear in public Baozi APIs, re-exports, diagnostics, or scene IR.
-- [ ] Tool errors are converted to stable format-owned causes admitted through the selected
-  `ParseScope`, or to bounded Baozi diagnostics/loss facts.
+- [ ] Tool errors are converted through crate-private synchronous evidence producers admitted through
+  the selected `ParseScope`, or to bounded Baozi diagnostics/loss facts.
+- [ ] `ParseScope` copies dynamic codes, detail keys, string values, and scalars into Baozi-owned
+  `FormatFailureEvidence`; the producer and every backend error are destroyed before return.
+- [ ] Public outcomes expose no backend source chain, concrete downcast target, callback, vtable,
+  native handle, or plugin-owned destructor.
+- [ ] Producer code/detail/destructor callbacks cannot reenter `ParseScope` or derived metered
+  capabilities; contract tests cover direct and pre-reserved storage paths.
 - [ ] Session-terminal capability-produced `ScopeAbort` values are propagated unchanged and are never
   caught or reclassified as format failures.
 - [ ] Permitted optional-dependency unavailability is handled only through the resolver's explicit

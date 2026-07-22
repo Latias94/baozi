@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-07-09
-updated: 2026-07-17
+updated: 2026-07-22
 authors:
   - Codex
 decision_type: architecture
@@ -382,14 +382,29 @@ Negative:
 | Snapshot and unload | Builder removal cannot affect an existing snapshot/session; after those objects drop, an imported scene still validates and remaps typed descriptors without plugin code. |
 | Capability limits | Registry API-shape tests expose no mutation, health-latch, poison-reset, another codec's options, or domain failure/outcome constructor through a registered callable slot. |
 | Invocation pass-through | Instrumented integration proves the registry wrapper passes the owner-supplied invocation context unchanged, adds no coordinator, and cannot inspect or reinterpret the returned domain value. |
-| Scope abort transport | Every session-terminal capability family composes with `?`, retains its lower cause owner, and forces final failure even when a test importer catches the opaque value. |
-| Format evidence transport | Two distinct native format errors enter through selected-scope synchronous packing; each envelope retains only its selected declarative descriptor, stable code, bounded packed details, and optional Baozi-owned inert source, with no concrete-source downcast or foreign object. |
-| Backend isolation | Public facade/report/core fields, terminal errors, and stable schemas contain no concrete or executable third-party backend/plugin object; native errors are consumed only while the adapter call and library lifetime are active. |
+| Registry-unload isolation | Outcomes composed under ADR 0020 remain printable, source-traversable, and droppable after builder, snapshot, and importer teardown without invoking a registered callable. Exact domain transport, packing, source-chain, and producer-teardown semantics remain exclusively owned by ADR 0020. |
+| Backend isolation | Public facade/report/core fields, terminal errors, and stable schemas contain no registry entry, health/poison state, registered callable, or executable backend/plugin object; registry teardown cannot change an existing outcome. |
 | Trust boundary | An unwindable default-codec panic is `RegistryBuildError`, submitted-layer codec panic is `RequestError`, and detector/parser panic becomes its session-owned typed failure; docs require process isolation for hostile extensions. |
 | Reentrancy | Barrier tests share one snapshot across distinct inputs/options; concurrent results equal their serial baselines, selected options are immutable, and first-party importers contain no session-state fields or hidden serialization mutex. |
 | Panic poisoning | Default-codec, request-codec, detector, and parser panic fixtures are invoked once, poison their registration atomically across the builder and all snapshots, and every later entry path returns `ExtensionPoisoned` without calling the object again. |
 
 ## Amendment History
+
+### 2026-07-22: Require registry-unload isolation without owning domain transport
+
+- Affected: `Domain Failure Non-Ownership`, `Backend Isolation`, and `Acceptance Criteria`.
+- Previous: the format-evidence row allowed an optional Baozi-owned inert source, leaving the public
+  source-chain shape ambiguous and duplicating ADR 0020's authority over domain transport.
+- New: this ADR requires only the registry-owned observable result: outcomes produced under ADR 0020
+  outlive registry/importer teardown without retaining or invoking a registered callable, health
+  state, or executable backend object. ADR 0020 alone defines packing, source chains, and producer
+  teardown.
+- Impact: registry callable identity and object safety are unchanged; public outcomes can no longer
+  anchor registered extension code, while their exact error representation remains downstream.
+- Review: implementation commit `b1f7608` and independent API/lifecycle review with no remaining
+  P0/P1/P2.
+- Rationale: registry unload and poison guarantees need an isolation postcondition, not a second
+  normative owner for lifecycle transport.
 
 ### 2026-07-17: Move exact invocation and domain transport to import lifecycle
 

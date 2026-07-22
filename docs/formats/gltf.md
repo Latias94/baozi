@@ -75,16 +75,19 @@ These contracts are exercised by `crates/baozi-format-gltf/tests/text_preflight.
 `crates/baozi-format-gltf/tests/limits.rs`. They are development safety evidence only and do not
 promote glTF into the public facade inventory.
 
-## Bounded Format Failure Source
+## Bounded Format Failure Evidence
 
-`GltfFailure` is retained as the concrete `FormatFailureEnvelope` source and remains available through
-typed outer-source downcast. Its human reason uses a sanitized 70-byte inline buffer rather than a
-heap-backed `String`; the complete failure is smaller than 128 bytes and needs no drop glue. Invalid
-UTF-8 may retain a private glTF source wrapper and `std::str::Utf8Error` behind that outer source. The
-envelope's stable code/details and `Debug`/`Display` remain independent of the private source chain.
+`GltfFailure` is a crate-private synchronous evidence producer. Its human reason uses a sanitized
+70-byte inline buffer rather than a heap-backed `String`. The selected `ParseScope` copies the stable
+code, detail keys, string values, and scalar details into Baozi-owned `FormatFailureEvidence`, then
+destroys the producer before returning the sealed envelope. A transient `std::str::Utf8Error` is used
+only to compute the container-relative offset and bounded reason; neither it nor a glTF wrapper is
+retained.
 
-The inline storage, truncation/sanitization, size, and standard source-chain behavior are covered by
-the unit tests in `crates/baozi-format-gltf/src/error.rs`.
+The public standard-error chain is exactly `FormatFailureEnvelope -> FormatFailureEvidence -> None`.
+There is no backend downcast target, backend vtable, or plugin-owned destructor after packing. Inline
+storage, sanitization, bounded packing, teardown, and source-chain termination are covered by the unit
+and import-contract tests.
 
 ## Admission Blockers And Missing Semantics
 

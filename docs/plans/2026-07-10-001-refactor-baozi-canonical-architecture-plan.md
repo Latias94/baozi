@@ -532,13 +532,13 @@ flowchart TB
 | Substage | Deliverable | Allowed temporary private seam | Gate | Commit and deletion owner |
 | --- | --- | --- | --- | --- |
 | U4a | Private generic final-owner foundation plus concrete sealed scalar-sequence/bytes/UTF-8/record store, policy-governed runtime `CapacityPlan` plus a separate concrete-store/policy evidence anchor, dual tables, exact terminal variants, account-bound fallback, and structural fault probes | Crate-private raw rail and store tracer; legacy public Scene remains unchanged | Operation tests; rustdoc/source/compile-fail authority and shareable-kind closure; fixed logical-minimum desired, growable/replacement logical-requirement preservation, allocator/candidate geometric desired, per-plan desired/actual/envelope request semantics, source-plus-candidate envelope admission, and logarithmic replacement/linear moved-element gates, plus U4c-linked allocator/toolchain/target qualification evidence and request-versus-RSS boundary; prepare-time destination commitments, exact domain-unexposed owners, no prepared-attribution token, pure handoff, and drop order; complete sealed keyed dimension/phase cells, non-derivable global header evidence, Baozi-owned `StoreKeyDomain`/mapping lifetime, foreign-key rejection, post-plugin-unload query and brand-exclusion vectors; semantic aggregate versus per-actual-backing plans; ledger-first and physical-second complete aggregate admissions under non-nested locks, exact typed no-mutation rollback, uncertain-completion coupled containment, no common internal linearization point, no pre-ready retained payload/evidence allocator entry, and positive ledger control/bookkeeping allocation gates requiring complete first-plane capacity admission, independent allocation-class probes, graph ownership, every partial/full backing release before one-lock ledger rollback, zero physical entry/charge, and a fixed start error at every backing-allocation fault; phase/global evidence; shared-state monotonic poison latch/count/fixed evidence, clone snapshot/reuse/no-bypass, retain/share/start/publication two-order barriers, poison-first zero side effects, retain/share/start-admission-first charge plus fatal/no-handoff, publication-eligibility-first pure handoff; WASM/MSRV | `baozi-operation` reviewable commit; U4f deletes tracer/scaffolding |
-| U4b | Core two-node root/child tracer with authored transform, rebuilt record/directory/reference slots, one `ReservedSceneGeneration`, `CanonicalInheritanceSource`, fresh inherited leaf slots, empty semantics, validation, and pure handoff | Private core-to-store construction adapter; legacy public Scene remains authoritative | **U4a gate passed. Before the first U4b tracer, close the residual U3 inert format-evidence gate described below.** Then: exhaustion consumes no nonce and prepares ordinary rich failure; rich-preparation fault reaches fallback; only exact success holds one reservation; any later preparation failure/cancellation/caught-unwind/prepared-success drop burns only one invisible gap; source-slot/non-shareable-kind/same-account-independent-Scene rejection; parent/sibling positive cases; explicit expected semantic transcript | `baozi-core` reviewable commit; U4f deletes bridge/test-only constructors |
+| U4b | Core two-node root/child tracer with authored transform, rebuilt record/directory/reference slots, one `ReservedSceneGeneration`, `CanonicalInheritanceSource`, fresh inherited leaf slots, empty semantics, validation, and pure handoff | Private core-to-store construction adapter; legacy public Scene remains authoritative | **U4a and residual U3 inert-format-evidence gates passed (`25a55fa`, `b1f7608`).** Then: exhaustion consumes no nonce and prepares ordinary rich failure; rich-preparation fault reaches fallback; only exact success holds one reservation; any later preparation failure/cancellation/caught-unwind/prepared-success drop burns only one invisible gap; source-slot/non-shareable-kind/same-account-independent-Scene rejection; parent/sibling positive cases; explicit expected semantic transcript | `baozi-core` reviewable commit; U4f deletes bridge/test-only constructors |
 | U4c | Complex-schema falsification using skin, morph, animation, material/texture/image, metadata, and provenance fixtures, compared with a sealed schema-generated typed-arena design | Test-only/private candidate schema representations; no producer or public facade reachability | Freeze `docs/conformance/u4c-metrics.toml`, fixture/expected-digest values, exact source allowlists, event taxonomy, and pinned xtask/rustfmt/`rustc_lexer` versions before measurement; independently review equal fixtures/functionality/views/proof and reject dead/padding code. Require `0/0` unchanged-hot-leaf copy/allocation, `0/0` hot-view allocation/decode, fixed `<= 8` lookup events with identical maximum at `N/2N/4N`, zero schema-only allocations under the single-thread allocator/account tracer, producer events `<= semantic_cells + references + 3 * blocks`, and `2 * concrete <= 3 * candidate` for both normalized LOC and tokens. Any drift or violation stops U4 and amends ADR 0042; per-field semantic transcript mutations distinguish every family | Core/storage joint reviewable commit or ADR correction; U4f deletes rejected candidate |
 | U4d | Private producer/consumer tracer: OBJ corner/smoothing plus backend-free glTF multi-primitive/skin/morph/animation shape, snapshot, validator, and edit/postprocess readers | Private adapters into the replacement while legacy public Scene/facade remains the only public path | Both tracers use only store-owned construction and pass semantic vectors without parser-reachable glTF. Preparation fixes Attempted/Consumed/live values, applies canonical/evidence destination commitments, and retains only domain-unexposed owners; the final snapshot exposes five public classes, while handoff only exposes/moves those owners with no attribution or counter mutation | Format/core/test-support reviewable commit; U4e owns adapter replacement, U4f deletion |
 | U4e | Atomic workspace-wide public switch of every format, import/postprocess/snapshot/fuzz/facade consumer and the bounded facade runtime/account profile | Temporary private call-site shims only inside the atomic switch; no committed public dual rail | Full workspace compile/tests, facade packaged workflow, exact terminal/generation/report-step-state/account/lineage/capacity gates, no public legacy constructor | Cross-workspace reviewable cutover commit; U4f owns all remaining deletion |
 | U4f | Delete legacy `Scene`, `SharedStorage`, recharge/transfer paths, private bridges, rejected candidates, and all migration scaffolding; run full U4 gates | None | Legacy/source/API searches empty, independent digest oracle plus supplemental layout permutations pass, workspace/fuzz/docs/package gates green | Core/operation integration cleanup commit owns final deletion |
 
-**Current U4 status (2026-07-21):** U4a is complete and independently reviewed. Production
+**Current U4 status (2026-07-22):** U4a is complete and independently reviewed. Production
 `RetainedOperation::try_start_inner` uses the operation-owned cross-plane startup seam; catalog and
 capacity preflight precede ledger-graph materialization and physical commitment, and only the Ready
 state can split into the runtime owner graph. The split performs no allocation, lock, refcount, or
@@ -549,12 +549,14 @@ growable/replacement geometric targets, preserve source-plus-candidate charge, a
 count plus moved elements/bytes. Full default/all-feature workspace tests, strict Clippy, doctests,
 rustdoc, both WASM targets, packaging, formatting, and diff checks passed before commit `25a55fa`.
 
-U4b is no longer blocked by retained startup. One residual U3 contract must be closed before the first
-U4b core tracer: current `FormatFailureEnvelope` still retains `Box<dyn FormatFailureSource>`, exposes
-a concrete-source downcast, and returns that extension-owned object from `Error::source`. ADR 0020
-requires synchronous packing into Baozi-owned inert evidence with no retained backend/plugin object or
-native source chain. Remove that obsolete public ownership path and its callers/tests first; do not
-weaken ADR 0020 or carry the object into the canonical consumer migration.
+U4b is no longer blocked by retained startup or U3 format evidence. Commit `b1f7608` replaced the
+extension-owned `FormatFailureSource` rail with one Baozi-owned packed `FormatFailureEvidence`, migrated
+OBJ, PLY, STL, glTF, and facade consumers, kept every fuzz target compatible, and made the public
+source chain terminate at that host value. Dynamic code/detail bytes are copied before the producer
+and backend error are destroyed; code, detail, destructor, direct-scope, derived-meter,
+pre-reserved-storage, decoded-text, formatting, and Scene-parts reentry paths fail closed under one
+callback fence. Independent review found no remaining P0/P1/P2. The first U4b tracer may proceed
+without a backend-source compatibility shim.
 
 #### U4c Metric Contract
 
@@ -805,7 +807,7 @@ Backend-only glTF safety research may run in parallel, but it is not a U4 depend
 | `cargo test --locked --doc --workspace --all-features` | U2-U9 | Public examples and docs compile. |
 | `cargo doc --locked --workspace --all-features --no-deps` with rustdoc warnings denied | U2-U9 | Public API documentation is complete and warning-free. |
 | `cargo check --locked -p baozi --target wasm32-unknown-unknown --no-default-features --features all-formats` plus the U9 pinned browser runner | U3-U9 | Compilation remains green; Portable Byte promotion additionally requires representative byte/custom-IO facade imports and canonical digest goldens to execute in browser-WASM. |
-| `cargo check --locked -p baozi --target wasm32-wasip1 --all-features` or the target-tier equivalent plus the U9 pinned WASI runner | U3-U9 | Compilation remains green; target promotion additionally requires the same representative runtime imports and digest goldens under WASI. |
+| `cargo check --locked -p baozi --target wasm32-wasip1 --no-default-features --features all-formats` plus the U9 pinned WASI runner | U3-U9 | The byte/custom-IO feature graph compiles without the desktop-only `native-fs-candidate`; target promotion additionally requires the same representative runtime imports and digest goldens under WASI. |
 | Exact native-fs resolved-closure checker and platform-local Linux/Windows/macOS adversarial suites | U3-U9 | The admitted dependency identity and object-bound path contract pass before registration; an affected target fails closed and keeps `native-fs` disabled or unregistered otherwise. |
 | `cargo deny --locked check` and `cargo deny --locked --manifest-path fuzz/Cargo.toml check` | U3-U9 | Both lockfiles satisfy license, source, ban, and advisory policy without dependency drift from the first security-sensitive dependency cutover. |
 | `cargo +nightly-2026-05-27 fuzz check` for every target | U1, U3-U9 | All fuzz harnesses remain compatible with each breaking cutover. |
@@ -983,7 +985,9 @@ plugins receive only host-minted accepted keys, foreign-domain keys reject, and 
 excluded from semantic transcripts, digests, wire, cache, and build identity. Existing branded-key
 groundwork alone did not satisfy the mapping-lifetime, complete fallback evidence, two-plane
 admission, or containment gates. Those U4a gates are now closed by the production startup seam and
-its reviewed fault evidence; the residual inert-format-evidence debt above is the next prerequisite.
+its reviewed fault evidence. At that review point inert format evidence remained the next
+prerequisite; commit `b1f7608` subsequently closed it, so the current-status section now admits the
+first U4b tracer.
 
 #### 2026-07-19: Freeze publication, containment, memory, and metric evidence
 
@@ -1005,9 +1009,9 @@ has zero side effects; retain/share/start-admission-first charge remains coupled
 is fatal with no handoff; publication-eligibility-first is the sole pure-handoff control; and no
 reset/reuse/bypass exists. That review kept U4a in progress and blocked U4b until those barriers and
 snapshots passed. Commit `25a55fa` subsequently closed the retained U4a gates; the residual U3 inert-
-format-evidence prerequisite in the current-status section is now the next blocker. This record also separates verified
-single-unwind fallback from conservative fatal containment and process-loss isolation, limits hard
-prebudget claims to Baozi-owned/requested and
+format-evidence prerequisite then remained the next blocker, and commit `b1f7608` subsequently closed
+it. This record also separates verified single-unwind fallback from conservative fatal containment
+and process-loss isolation, limits hard prebudget claims to Baozi-owned/requested and
 first-party metered storage unless an OS-limited subprocess contains opaque decode, distinguishes
 shareable geometry index scalar payload from rebuilt generation-local lookup/index structures, and
 makes U4c reproducible through a repository-owned spec, pinned xtask/tools, exact event vocabulary,

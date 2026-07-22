@@ -49,14 +49,16 @@
 - ASCII scalar literals and header element counts have a format-owned maximum of 4096 bytes. A
   4096-byte literal reaches the typed numeric parser; a 4097-byte literal is rejected before that
   parser is entered. Numeric syntax is locale-independent and uses a dot decimal separator.
-- The retained outer `PlyFailure.byte_offset` and packed `byte_offset` detail are source-global raw
-  offsets computed from the line base plus the offending chunk-relative byte. When invalid UTF-8 can
-  provide a standard source, `FormatFailureEnvelope` retains `PlyFailure`, its private PLY source
-  wrapper, and `std::str::Utf8Error` as successive source-chain hops. `Utf8Error::valid_up_to()` remains
+- The format-private `PlyFailure.byte_offset` and packed `byte_offset` detail are source-global raw
+  offsets computed from the line base plus the offending chunk-relative byte.
+- `Utf8Error::valid_up_to()` is read only while constructing that format-private evidence. It remains
   relative to the validation chunk and must not be interpreted as the source-global offset.
+- `ParseScope` copies the stable code plus bounded `reason`, `context`, and `byte_offset` details into
+  Baozi-owned `FormatFailureEvidence`, then destroys `PlyFailure` and any transient parser error. The
+  public error chain terminates at that host-owned evidence and exposes no PLY/backend downcast.
 
-The profile, decoded-surface, numeric-boundary, global-offset, and source-chain contracts are covered
-by `crates/baozi-format-ply/tests/text_profile.rs`.
+The profile, decoded-surface, numeric-boundary, global-offset, packed-evidence, and teardown contracts
+are covered by `crates/baozi-format-ply/tests/text_profile.rs` and the import session contract tests.
 
 ## Cancellation and Collection Checkpoints
 

@@ -22,8 +22,13 @@ Use this checklist before adding or promoting a `baozi-format-*` crate.
   raw `AssetIo` or unrestricted path authority.
 - Charge input-derived work and reserve live storage through `ParseScope` before allocation, or
   document and test a conservative allowance for an opaque trusted backend.
-- Convert backend errors into stable format-owned causes admitted through `ParseScope`, or bounded
-  diagnostics/loss facts.
+- Convert backend errors into crate-private synchronous evidence producers admitted through the
+  selected `ParseScope`, or bounded diagnostics/loss facts. `ParseScope` must copy every code, detail
+  key, string value, and scalar into Baozi-owned evidence and destroy the producer before returning.
+- Never retain or publicly expose a backend error, source chain, concrete downcast target, callback,
+  vtable, native handle, or plugin-owned destructor in an import outcome.
+- Evidence-producer code, detail, and destructor callbacks must not reenter `ParseScope` or a derived
+  metered-storage capability. Reentry is a terminal descriptor-contract failure.
 - Propagate session-terminal capability-produced `ScopeAbort` unchanged; never catch it to continue
   or reclassify it as a format failure.
 - Continue after optional dependency unavailability only through the resolver's explicit non-abort

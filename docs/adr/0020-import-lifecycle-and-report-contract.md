@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-07-09
-updated: 2026-07-20
+updated: 2026-07-22
 authors:
   - Codex
 decision_type: architecture
@@ -512,11 +512,11 @@ session-internal branches with distinct cause ownership:
    outcome is deliberately outside this branch.
 2. `FormatFailureEnvelope` seals the selected descriptor identity, a validated stable code, and
    bounded packed structured details into a Baozi-owned inert `FormatFailureEvidence` value. The
-   selected `ParseScope` reserves the packed-detail storage, validates the code, and invokes a
-   borrowed format detail producer synchronously through a bounded sink. It never retains that
-   producer, its concrete format error, a backend/library error, or another object with foreign
-   methods or destruction behavior. No generic `From<dyn Error>` or arbitrary category constructor
-   exists.
+   selected `ParseScope` reserves the packed-detail storage, takes a format evidence producer by
+   value, validates and copies its code, and invokes it synchronously through a bounded sink. It
+   never retains that producer, its concrete format error, a backend/library error, or another object
+   with foreign methods or destruction behavior. No generic `From<dyn Error>` or arbitrary category
+   constructor exists.
 
 A failure returned by the session's final central-validator call is not parser transport and does not
 enter `ParseFailure`; it remains a core-owned validation cause finalized directly by `ImportSession`.
@@ -530,11 +530,13 @@ cannot turn the operation into success; the finalizer observes the first termina
 contrast, an importer continues after `DependencyOutcome::Unavailable` through an explicit
 success branch, never by catching or suppressing `ParseFailure`.
 
-A borrowed detail producer writes only stable enums, bounded scalars, IDs, ranges, and admitted
-strings through the scope-owned sink rather than returning an input-sized preformatted `String`.
-Packing is fallible and bounded by the import diagnostic/detail budget. When the constructor returns,
-no reference to the producer or its native source remains; the adapter drops native errors before
-returning `ParseFailure`.
+The producer writes only stable enums, bounded scalars, IDs, ranges, and admitted strings through the
+scope-owned sink rather than returning an input-sized preformatted `String`. Codes, detail keys, and
+string values may be computed dynamically; the host copies their bytes into one admitted packed
+arena. Packing is fallible and bounded by the import diagnostic/detail budget. Code, detail, and
+producer-destructor callbacks run behind the same non-reentrant panic boundary. Before the constructor
+returns, the host destroys the producer and every native error it owns; no borrowed data or foreign
+object remains.
 
 `FormatFailureEvidence` contains only Baozi-owned declarative data and may implement `Error` so
 `Error::source(&FormatFailureEnvelope)` returns that one inert host-defined cause. The envelope offers
@@ -813,11 +815,29 @@ Negative:
 | Resource-graph capability | Root/dependency origins are opaque, non-comparable, and session-bound; forged, stale, foreign, unavailable, or caller-path origins latch failure before graph/cache/storage access, while nested references use only the origin returned with their snapshot. |
 | Resource-graph outcome transport | Success atomically retains one complete manifest and replay status; proof/none is frozen with the first cache failure and cannot be post-attached or upgraded; every injected later failure retains only bounded partial graph evidence and cannot construct a successful-manifest claim. Post-parse finalization errors are direct import causes rather than synthetic parser failures. |
 | Phase separation | Tests independently advance ledger/progress phases and prove `last_completed` changes only after the mapped atomic lifecycle boundary succeeds. |
-| Format evidence transport | Heterogeneous format errors enter only through the selected-scope synchronous packing constructor; each envelope retains only descriptor/code/bounded details plus an optional Baozi-owned inert standard source, exposes no concrete-source downcast, and contains no backend/plugin object after construction. |
+| Format evidence transport | Heterogeneous format errors enter only through the selected-scope synchronous packing constructor; each envelope retains its selected descriptor and exactly one Baozi-owned `FormatFailureEvidence` containing the stable code and bounded packed details. `Error::source` returns that evidence, whose own source is `None`; no concrete-source downcast or backend/plugin object survives construction. |
 | No legacy transition | Production/public symbol search finds no `map_scene*`, assignable import stage, or parser-owned report constructor. |
 | Crate ownership | Dependency and public-API checks find no backend type or executable backend object in public outcomes/stable schemas, no `baozi-operation` upward dependency, no postprocess-to-import edge, and no reversed core dependency. |
 
 ## Amendment History
+
+### 2026-07-22: Seal format failures as host-owned inert evidence
+
+- Affected: `Parse Failure Transport`, `Crate Error and Capability Ownership`, and `Acceptance
+  Criteria`.
+- Previous: the decision required synchronous stable packing, but its acceptance row still allowed
+  an optional inert source and the implementation retained an extension-owned
+  `FormatFailureSource` object behind the public envelope.
+- New: the selected scope takes a synchronous producer by value, copies dynamic code/detail bytes
+  into exactly one Baozi-owned `FormatFailureEvidence`, contains callback reentry and panic, destroys
+  the producer, and exposes a fixed source chain:
+  `FormatFailureEnvelope -> FormatFailureEvidence -> None`.
+- Impact: pre-release format/facade error APIs break; built-in native error wrappers and concrete
+  downcasts are deleted, while stable code/detail inspection remains available.
+- Review: implementation commit `b1f7608`, focused import/format/facade/fuzz/WASM gates, and two
+  independent Codex reviews with no remaining P0/P1/P2.
+- Rationale: a terminal outcome cannot be inert or safe after plugin unload while any extension
+  vtable, borrowed text, native error, or plugin-owned destructor remains reachable.
 
 ### 2026-07-20: Consume the ledger's prepared-owner publication seam
 
