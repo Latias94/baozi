@@ -86,7 +86,7 @@ fn extension_is_maybe_without_magic() -> TestResult<()> {
     assert!(failure.selected_format().is_some());
     let envelope = expected_ply_failure(&failure, PlyFailureCode::InvalidHeader);
     assert_eq!(ply_unsigned_detail(envelope, "byte_offset"), Some(0));
-    assert_eq!(envelope.details().len(), 1);
+    assert_eq!(envelope.details().len(), 2);
     Ok(())
 }
 

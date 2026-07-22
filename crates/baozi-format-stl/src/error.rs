@@ -1,8 +1,4 @@
-use baozi_import::{FormatFailureDetailSink, FormatFailureSource};
-use std::error::Error;
-use std::fmt;
-use std::num::ParseFloatError;
-use std::str::Utf8Error;
+use baozi_import::{FormatFailureDetailSink, FormatFailureEvidenceProducer};
 
 /// Stable classification of an STL-owned content failure.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -36,32 +32,7 @@ impl StlFailureCode {
 }
 
 #[derive(Debug)]
-enum StlFailureSource {
-    Utf8(Utf8Error),
-    Float(ParseFloatError),
-}
-
-impl fmt::Display for StlFailureSource {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Utf8(error) => error.fmt(formatter),
-            Self::Float(error) => error.fmt(formatter),
-        }
-    }
-}
-
-impl Error for StlFailureSource {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Utf8(error) => Some(error),
-            Self::Float(error) => Some(error),
-        }
-    }
-}
-
-/// Retained STL-owned source and bounded evidence producer sealed by the selected import scope.
-#[derive(Debug)]
-pub struct StlFailure {
+pub(crate) struct StlFailure {
     code: StlFailureCode,
     line: Option<u32>,
     column: Option<u32>,
@@ -70,42 +41,9 @@ pub struct StlFailure {
     reason: Option<&'static str>,
     expected: Option<u64>,
     actual: Option<u64>,
-    source: Option<StlFailureSource>,
 }
 
 impl StlFailure {
-    pub const fn code(&self) -> StlFailureCode {
-        self.code
-    }
-
-    pub const fn line(&self) -> Option<u32> {
-        self.line
-    }
-
-    pub const fn column(&self) -> Option<u32> {
-        self.column
-    }
-
-    pub const fn byte_offset(&self) -> Option<u64> {
-        self.byte_offset
-    }
-
-    pub const fn subject(&self) -> Option<&'static str> {
-        self.subject
-    }
-
-    pub const fn reason(&self) -> Option<&'static str> {
-        self.reason
-    }
-
-    pub const fn expected(&self) -> Option<u64> {
-        self.expected
-    }
-
-    pub const fn actual(&self) -> Option<u64> {
-        self.actual
-    }
-
     pub(crate) const fn content(
         code: StlFailureCode,
         subject: &'static str,
@@ -120,7 +58,6 @@ impl StlFailure {
             reason: Some(reason),
             expected: None,
             actual: None,
-            source: None,
         }
     }
 
@@ -148,15 +85,13 @@ impl StlFailure {
         self
     }
 
-    pub(crate) fn invalid_utf8_at(source: Utf8Error, byte_offset: u64) -> Self {
-        let mut failure = Self::content(
+    pub(crate) const fn invalid_utf8_at(byte_offset: u64) -> Self {
+        Self::content(
             StlFailureCode::InvalidUtf8,
             "ascii-document",
             "invalid-utf8",
         )
-        .at_byte(byte_offset);
-        failure.source = Some(StlFailureSource::Utf8(source));
-        failure
+        .at_byte(byte_offset)
     }
 
     pub(crate) const fn non_ascii(offset: u64, reason: &'static str) -> Self {
@@ -167,39 +102,19 @@ impl StlFailure {
         Self::content(StlFailureCode::InvalidControl, "ascii-document", reason).at_byte(offset)
     }
 
-    pub(crate) fn invalid_float(line: u32, column: u32, source: ParseFloatError) -> Self {
-        let mut failure = Self::located(
+    pub(crate) const fn invalid_float(line: u32, column: u32) -> Self {
+        Self::located(
             StlFailureCode::InvalidNumber,
             "float",
             "invalid-float",
             line,
             column,
-        );
-        failure.source = Some(StlFailureSource::Float(source));
-        failure
+        )
     }
 }
 
-impl fmt::Display for StlFailure {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(formatter, "STL content failed with {}", self.code.as_str())?;
-        if let (Some(line), Some(column)) = (self.line, self.column) {
-            write!(formatter, " at line {line}, column {column}")?;
-        } else if let Some(offset) = self.byte_offset {
-            write!(formatter, " at byte offset {offset}")?;
-        }
-        Ok(())
-    }
-}
-
-impl Error for StlFailure {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        self.source.as_ref().map(|source| source as &dyn Error)
-    }
-}
-
-impl FormatFailureSource for StlFailure {
-    fn code(&self) -> &'static str {
+impl FormatFailureEvidenceProducer for StlFailure {
+    fn code(&self) -> &str {
         self.code.as_str()
     }
 
@@ -250,20 +165,12 @@ mod tests {
     }
 
     #[test]
-    fn invalid_utf8_failure_retains_typed_source_and_stable_details() {
-        let bytes = vec![0xff];
-        let source = std::str::from_utf8(&bytes).expect_err("fixture must be invalid UTF-8");
-        let failure = StlFailure::invalid_utf8_at(source, 37);
+    fn invalid_utf8_failure_reports_stable_details() {
+        let failure = StlFailure::invalid_utf8_at(37);
 
-        assert_eq!(failure.code(), StlFailureCode::InvalidUtf8);
-        assert_eq!(failure.byte_offset(), Some(37));
-        assert_eq!(failure.subject(), Some("ascii-document"));
-        assert_eq!(failure.reason(), Some("invalid-utf8"));
-        assert!(
-            Error::source(&failure)
-                .and_then(Error::source)
-                .and_then(|source| source.downcast_ref::<Utf8Error>())
-                .is_some()
-        );
+        assert_eq!(failure.code, StlFailureCode::InvalidUtf8);
+        assert_eq!(failure.byte_offset, Some(37));
+        assert_eq!(failure.subject, Some("ascii-document"));
+        assert_eq!(failure.reason, Some("invalid-utf8"));
     }
 }

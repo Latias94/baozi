@@ -198,6 +198,10 @@ pub fn expected_ply_failure(
     assert_eq!(envelope.format(), &expected_format);
     assert_eq!(envelope.code(), expected_code.as_str());
     assert_ply_detail_schema(envelope);
+    assert!(
+        ply_string_detail(envelope, "reason").is_some_and(|reason| !reason.is_empty()),
+        "PLY format envelope must contain a non-empty string reason"
+    );
     envelope
 }
 
@@ -234,11 +238,12 @@ fn assert_ply_detail_schema(envelope: &FormatFailureEnvelope) {
             detail.key()
         );
         match detail.key() {
-            "context" => assert!(
+            "reason" | "context" => assert!(
                 matches!(detail.value(), FormatFailureDetailValue::String(_)),
-                "PLY context detail must be a string"
+                "PLY text detail {} must be a string",
+                detail.key()
             ),
-            "byte_offset" | "expected" | "actual" => assert!(
+            "byte_offset" => assert!(
                 matches!(detail.value(), FormatFailureDetailValue::Unsigned(_)),
                 "PLY numeric detail {} must be unsigned",
                 detail.key()

@@ -1,10 +1,10 @@
 use baozi_core::{FormatId, SceneDraft};
 use baozi_import::{
     CapabilityStatus, DetectionOutcome, DetectionResult, DetectionScope, FormatCapability,
-    FormatDescriptor, FormatEncoding, FormatFailureDetailSink, FormatFailureSource, FormatImporter,
-    ImportConfigOverlay, ImportDimension, ImportFailure, ImportLossKind, ImportLossSubject,
-    ImportOperationControl, ImportReport, ImportRequest, ImportRequestLayer, ImportResult,
-    LossPolicy, OptionCompileLimits, ParseResult, ParseScope, PreparedImportRequest,
+    FormatDescriptor, FormatEncoding, FormatFailureDetailSink, FormatFailureEvidenceProducer,
+    FormatImporter, ImportConfigOverlay, ImportDimension, ImportFailure, ImportLossKind,
+    ImportLossSubject, ImportOperationControl, ImportReport, ImportRequest, ImportRequestLayer,
+    ImportResult, LossPolicy, OptionCompileLimits, ParseResult, ParseScope, PreparedImportRequest,
     ReadConfidence, ReadHint, RegistryBuildLimits, RegistryBuilder, ResourceLimits,
     ResourceLimitsOverlay, ScopeAbortCause, SourceScopeDetailState, SourceScopeDisposition,
     SourceScopeEntityKind, import_bytes,
@@ -162,7 +162,7 @@ impl fmt::Display for TestFormatFailure {
 
 impl std::error::Error for TestFormatFailure {}
 
-impl FormatFailureSource for TestFormatFailure {
+impl FormatFailureEvidenceProducer for TestFormatFailure {
     fn code(&self) -> &'static str {
         "test.failure_after_source_scope"
     }

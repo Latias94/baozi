@@ -1,9 +1,8 @@
-use baozi_import::{FormatFailureDetailSink, FormatFailureSource};
-use std::error::Error;
+use baozi_import::{FormatFailureDetailSink, FormatFailureEvidenceProducer};
 use std::fmt;
 use std::str::Utf8Error;
 
-// This is the largest inline payload that keeps the retained failure below 128 bytes on 64-bit targets.
+// This is the largest inline payload that keeps the synchronous producer below 128 bytes on 64-bit targets.
 const MAX_REASON_BYTES: usize = 70;
 const FAILURE_CODE_MASK: u8 = 0x0f;
 const FAILURE_HAS_INDEX: u8 = 0x10;
@@ -71,45 +70,19 @@ impl GltfFailureCode {
     }
 }
 
+/// Synchronous glTF-owned producer sealed into host-owned bounded evidence by the import scope.
 #[derive(Debug)]
-enum GltfFailureSource {
-    Utf8(Utf8Error),
-}
-
-impl fmt::Display for GltfFailureSource {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Utf8(error) => error.fmt(formatter),
-        }
-    }
-}
-
-impl Error for GltfFailureSource {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Utf8(error) => Some(error),
-        }
-    }
-}
-
-/// Retained glTF-owned source and bounded evidence producer sealed by the selected import scope.
-#[derive(Debug)]
-pub struct GltfFailure {
+pub(crate) struct GltfFailure {
     metadata: u8,
     subject: Option<&'static str>,
     index: u64,
     byte_offset: u64,
     reason: BoundedReason,
-    source: Option<GltfFailureSource>,
 }
 
 impl GltfFailure {
     pub const fn code(&self) -> GltfFailureCode {
         GltfFailureCode::from_bits(self.metadata & FAILURE_CODE_MASK)
-    }
-
-    pub const fn subject(&self) -> Option<&'static str> {
-        self.subject
     }
 
     pub const fn index(&self) -> Option<u64> {
@@ -128,10 +101,6 @@ impl GltfFailure {
         }
     }
 
-    pub fn reason(&self) -> &str {
-        self.reason.as_str()
-    }
-
     pub(crate) fn invalid_document(reason: impl fmt::Display) -> Self {
         Self::new(GltfFailureCode::InvalidDocument, None, None, reason)
     }
@@ -144,7 +113,6 @@ impl GltfFailure {
             format_args!("glTF JSON contains invalid UTF-8: {source}"),
         );
         failure.set_byte_offset(byte_offset);
-        failure.source = Some(GltfFailureSource::Utf8(source));
         failure
     }
 
@@ -224,7 +192,6 @@ impl GltfFailure {
             index,
             byte_offset: 0,
             reason: BoundedReason::new(reason),
-            source: None,
         }
     }
 
@@ -240,14 +207,8 @@ impl fmt::Display for GltfFailure {
     }
 }
 
-impl Error for GltfFailure {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        self.source.as_ref().map(|source| source as &dyn Error)
-    }
-}
-
-impl FormatFailureSource for GltfFailure {
-    fn code(&self) -> &'static str {
+impl FormatFailureEvidenceProducer for GltfFailure {
+    fn code(&self) -> &str {
         self.code().as_str()
     }
 
@@ -349,9 +310,9 @@ mod tests {
     #[test]
     fn reason_is_bounded_and_sanitized() {
         let failure = GltfFailure::invalid_document(format!("line\n{}secret", "x".repeat(600)));
-        assert!(failure.reason().len() <= MAX_REASON_BYTES);
-        assert!(!failure.reason().contains('\n'));
-        assert!(failure.reason().contains('\u{fffd}'));
+        assert!(failure.reason.as_str().len() <= MAX_REASON_BYTES);
+        assert!(!failure.reason.as_str().contains('\n'));
+        assert!(failure.reason.as_str().contains('\u{fffd}'));
         assert_eq!(failure.code(), GltfFailureCode::InvalidDocument);
     }
 
@@ -375,16 +336,15 @@ mod tests {
     }
 
     #[test]
-    fn invalid_utf8_failure_retains_the_standard_error_in_its_source_chain() {
+    fn invalid_utf8_failure_retains_only_bounded_stable_evidence() {
         let bytes = [u8::MAX];
         let source = std::str::from_utf8(&bytes).expect_err("fixture must be invalid UTF-8");
-        let failure = GltfFailure::invalid_utf8(source, 0);
+        let failure = GltfFailure::invalid_utf8(source, 4_096);
 
-        assert!(
-            Error::source(&failure)
-                .and_then(Error::source)
-                .and_then(|source| source.downcast_ref::<Utf8Error>())
-                .is_some()
-        );
+        assert_eq!(failure.code(), GltfFailureCode::InvalidUtf8);
+        assert_eq!(failure.subject, Some("json-document"));
+        assert_eq!(failure.byte_offset(), Some(4_096));
+        assert!(failure.reason.as_str().contains("invalid UTF-8"));
+        assert!(failure.reason.as_str().len() <= MAX_REASON_BYTES);
     }
 }

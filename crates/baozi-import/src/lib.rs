@@ -50,8 +50,9 @@ pub use diagnostic::{
 };
 pub use error::{
     CauseOwner, DetectionFailure, FormatFailureDetail, FormatFailureDetailCause,
-    FormatFailureDetailSink, FormatFailureDetailValue, FormatFailureEnvelope, FormatFailureSource,
-    ImportCause, ScopeAbort, ScopeAbortCause, TrustedExtensionBoundary,
+    FormatFailureDetailSink, FormatFailureDetailValue, FormatFailureEnvelope,
+    FormatFailureEvidence, FormatFailureEvidenceProducer, ImportCause, ScopeAbort, ScopeAbortCause,
+    TrustedExtensionBoundary,
 };
 pub use format::{
     BoundedFaultDetail, DetectionFault, DetectionFaultCode, DetectionInconclusive,

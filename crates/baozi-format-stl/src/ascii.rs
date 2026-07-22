@@ -73,7 +73,7 @@ fn validate_text_profile_scoped<'scope>(
                     .checked_add(source.valid_up_to())
                     .and_then(|offset| u64::try_from(offset).ok())
                     .ok_or_else(|| scope.allocation_failure("stl-utf8-byte-offset"))?;
-                return Err(scope.format_failure(StlFailure::invalid_utf8_at(source, byte_offset)));
+                return Err(scope.format_failure(StlFailure::invalid_utf8_at(byte_offset)));
             }
         };
         decoded.try_push_str(chunk)?;
@@ -129,12 +129,13 @@ fn non_ascii_failure(bytes: &[u8], offset: usize) -> StlFailure {
     let end = offset
         .checked_add(MAX_UTF8_SEQUENCE_BYTES)
         .map_or(bytes.len(), |end| end.min(bytes.len()));
-    if let Some(source) = bytes
+    if bytes
         .get(offset..end)
         .and_then(|window| std::str::from_utf8(window).err())
         .filter(|source| source.valid_up_to() == 0)
+        .is_some()
     {
-        return StlFailure::invalid_utf8_at(source, offset as u64);
+        return StlFailure::invalid_utf8_at(offset as u64);
     }
     StlFailure::non_ascii(offset as u64, "non-ascii-byte")
 }
@@ -727,9 +728,10 @@ fn required_token<'line>(
 }
 
 fn parse_f32(scope: &ParseScope<'_>, token: Token<'_>, line_number: u32) -> ParseResult<f32> {
-    let value = token.text.parse::<f32>().map_err(|error| {
-        scope.format_failure(StlFailure::invalid_float(line_number, token.column, error))
-    })?;
+    let value = token
+        .text
+        .parse::<f32>()
+        .map_err(|_| scope.format_failure(StlFailure::invalid_float(line_number, token.column)))?;
     if !value.is_finite() {
         return Err(scope.format_failure(StlFailure::located(
             StlFailureCode::NonFiniteNumber,

@@ -12,6 +12,7 @@ const MAX_DIAGNOSTIC_DETAILS: usize = 32;
 const MAX_DIAGNOSTIC_DETAIL_BYTES: u64 = 4 * 1024;
 const MAX_DIAGNOSTIC_DETAIL_STRING_BYTES: usize = 512;
 const MAX_DIAGNOSTIC_OBJECT_PATH_BYTES: usize = 512;
+pub(crate) const MAX_DIAGNOSTIC_CODE_BYTES: usize = 96;
 
 /// A session-bound source capability used for authoritative byte locations.
 pub struct DiagnosticSource<'source> {
@@ -58,7 +59,7 @@ pub struct DiagnosticCode(&'static str);
 
 impl DiagnosticCode {
     pub fn new(value: &'static str) -> Result<Self, DiagnosticCause> {
-        if !is_valid_code(value) {
+        if !valid_diagnostic_code(value) {
             return Err(DiagnosticCause::InvalidCode);
         }
         Ok(Self(value))
@@ -69,9 +70,9 @@ impl DiagnosticCode {
     }
 }
 
-fn is_valid_code(value: &str) -> bool {
+pub(crate) fn valid_diagnostic_code(value: &str) -> bool {
     !value.is_empty()
-        && value.len() <= 96
+        && value.len() <= MAX_DIAGNOSTIC_CODE_BYTES
         && value.split('.').all(|segment| {
             !segment.is_empty()
                 && segment

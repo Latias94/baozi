@@ -5,7 +5,7 @@ use crate::ledger::{
 use crate::scope::ImportStorageClass;
 use baozi_core::{MetadataValue, OrderedMap};
 use baozi_operation::{CapacityPlanError, ReplacementCapacityPlan};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::fmt;
 use std::ops::{Deref, DerefMut};
 
@@ -140,6 +140,7 @@ pub struct SceneValueParts<'scope, T> {
 #[derive(Clone, Copy)]
 pub(crate) struct StorageMeter<'scope> {
     pub(crate) coordinator: &'scope RefCell<ImportCoordinator>,
+    pub(crate) callback_active: &'scope Cell<bool>,
     pub(crate) terminal: &'scope RefCell<Option<ScopeAbortCause>>,
 }
 
@@ -842,9 +843,11 @@ mod tests {
     fn metered_vector_drops_elements_before_releasing_its_complete_token()
     -> Result<(), LedgerCause<ImportDimension>> {
         let coordinator = coordinator()?;
+        let callback_active = Cell::new(false);
         let terminal = RefCell::new(None);
         let meter = StorageMeter {
             coordinator: &coordinator,
+            callback_active: &callback_active,
             terminal: &terminal,
         };
         let mut values = MeteredVec {
@@ -887,9 +890,11 @@ mod tests {
     fn scene_collection_final_merge_failure_drops_payload_before_element_reservation()
     -> Result<(), LedgerCause<ImportDimension>> {
         let coordinator = std::rc::Rc::new(coordinator()?);
+        let callback_active = Cell::new(false);
         let terminal = RefCell::new(None);
         let meter = StorageMeter {
             coordinator: coordinator.as_ref(),
+            callback_active: &callback_active,
             terminal: &terminal,
         };
         let mut values = MeteredVec {

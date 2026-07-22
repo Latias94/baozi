@@ -4,7 +4,8 @@ mod detect;
 mod error;
 mod parser;
 
-pub use error::{GltfFailure, GltfFailureCode};
+pub(crate) use error::GltfFailure;
+pub use error::GltfFailureCode;
 
 use baozi_core::{FormatId, SceneDraft};
 use baozi_import::{

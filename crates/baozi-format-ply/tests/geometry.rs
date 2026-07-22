@@ -135,7 +135,7 @@ fn malformed_header_is_parse_error() -> TestResult<()> {
     assert!(error.diagnostics().is_empty());
     let envelope = expected_ply_failure(&error, PlyFailureCode::InvalidHeader);
     assert_eq!(ply_unsigned_detail(envelope, "byte_offset"), Some(0));
-    assert_eq!(envelope.details().len(), 1);
+    assert_eq!(envelope.details().len(), 2);
     Ok(())
 }
 

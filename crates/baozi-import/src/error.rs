@@ -1,6 +1,8 @@
 use crate::dependency::DependencyPolicyError;
 use crate::descriptor::FormatDescriptor;
-use crate::diagnostic::{DiagnosticCause, DiagnosticCode, valid_detail_key};
+use crate::diagnostic::{
+    DiagnosticCause, DiagnosticCode, MAX_DIAGNOSTIC_CODE_BYTES, valid_detail_key,
+};
 use crate::ledger::ImportDimension;
 use baozi_core::{FormatId, SceneBuildError, SceneBuildResource, SceneValidationError};
 use baozi_io::{AssetOpenError, AssetReadError, PathError};
@@ -295,32 +297,57 @@ impl Error for ScopeAbort {
 }
 
 pub trait FormatFailureDetailSink {
-    fn string(&mut self, key: &'static str, value: &str);
-    fn unsigned(&mut self, key: &'static str, value: u64);
-    fn signed(&mut self, key: &'static str, value: i64);
+    fn string(&mut self, key: &str, value: &str);
+    fn unsigned(&mut self, key: &str, value: u64);
+    fn signed(&mut self, key: &str, value: i64);
 }
 
 const MAX_FORMAT_FAILURE_DETAILS: usize = 32;
 const MAX_FORMAT_FAILURE_DETAIL_BYTES: usize = 4 * 1024;
 const MAX_FORMAT_FAILURE_STRING_BYTES: usize = 512;
-pub(crate) const MAX_FORMAT_FAILURE_SOURCE_BYTES: u64 = 4 * 1024;
+const MAX_FORMAT_FAILURE_TEXT_BYTES: usize =
+    MAX_DIAGNOSTIC_CODE_BYTES + MAX_FORMAT_FAILURE_DETAIL_BYTES;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PackedTextRange {
+    offset: u16,
+    len: u16,
+}
+
+impl PackedTextRange {
+    const EMPTY: Self = Self { offset: 0, len: 0 };
+
+    fn checked(offset: usize, len: usize) -> Result<Self, FormatFailureDetailCause> {
+        Ok(Self {
+            offset: u16::try_from(offset).map_err(|_| FormatFailureDetailCause::BytesExceeded)?,
+            len: u16::try_from(len).map_err(|_| FormatFailureDetailCause::BytesExceeded)?,
+        })
+    }
+
+    fn resolve(self, text: &[u8]) -> &str {
+        let start = usize::from(self.offset);
+        let end = start.saturating_add(usize::from(self.len));
+        let bytes = text.get(start..end).unwrap_or_default();
+        std::str::from_utf8(bytes).unwrap_or_default()
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum InlineFormatFailureDetailValue {
-    String { offset: u16, len: u16 },
+    String(PackedTextRange),
     Unsigned(u64),
     Signed(i64),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct InlineFormatFailureDetail {
-    key: &'static str,
+    key: PackedTextRange,
     value: InlineFormatFailureDetailValue,
 }
 
 impl InlineFormatFailureDetail {
     const EMPTY: Self = Self {
-        key: "",
+        key: PackedTextRange::EMPTY,
         value: InlineFormatFailureDetailValue::Unsigned(0),
     };
 }
@@ -366,21 +393,18 @@ pub type FormatFailureDetailValue<'a> = FormatFailureDetailValueRef<'a>;
 #[derive(Clone, Copy)]
 pub struct FormatFailureDetail<'a> {
     entry: &'a InlineFormatFailureDetail,
-    string_bytes: &'a [u8],
+    text: &'a [u8],
 }
 
 impl<'a> FormatFailureDetail<'a> {
-    pub const fn key(self) -> &'static str {
-        self.entry.key
+    pub fn key(self) -> &'a str {
+        self.entry.key.resolve(self.text)
     }
 
     pub fn value(self) -> FormatFailureDetailValueRef<'a> {
         match self.entry.value {
-            InlineFormatFailureDetailValue::String { offset, len } => {
-                let start = usize::from(offset);
-                let end = start.saturating_add(usize::from(len));
-                let bytes = self.string_bytes.get(start..end).unwrap_or_default();
-                let value = std::str::from_utf8(bytes).unwrap_or_default();
+            InlineFormatFailureDetailValue::String(range) => {
+                let value = range.resolve(self.text);
                 FormatFailureDetailValueRef::String(FormatFailureDetailString { value })
             }
             InlineFormatFailureDetailValue::Unsigned(value) => {
@@ -409,17 +433,14 @@ pub struct FormatFailureDetails<'a> {
 }
 
 impl<'a> FormatFailureDetails<'a> {
-    fn new(entries: &'a [InlineFormatFailureDetail], string_bytes: &'a [u8]) -> Self {
+    fn new(entries: &'a [InlineFormatFailureDetail], text: &'a [u8]) -> Self {
         let empty = FormatFailureDetail {
             entry: &InlineFormatFailureDetail::EMPTY,
-            string_bytes: &[],
+            text: &[],
         };
         let mut details = [empty; MAX_FORMAT_FAILURE_DETAILS];
         for (detail, entry) in details.iter_mut().zip(entries) {
-            *detail = FormatFailureDetail {
-                entry,
-                string_bytes,
-            };
+            *detail = FormatFailureDetail { entry, text };
         }
         Self {
             details,
@@ -507,12 +528,12 @@ impl From<CapacityPlanError> for FormatFailureDetailCause {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct FormatFailureDetailCapacityPlan {
+pub(crate) struct FormatFailureEvidenceCapacityPlan {
     entries: CapacityPlan,
-    string_bytes: CapacityPlan,
+    text: CapacityPlan,
 }
 
-impl FormatFailureDetailCapacityPlan {
+impl FormatFailureEvidenceCapacityPlan {
     fn new() -> Result<Self, CapacityPlanError> {
         Ok(Self {
             entries: CapacityPlan::for_type::<InlineFormatFailureDetail>(
@@ -520,37 +541,38 @@ impl FormatFailureDetailCapacityPlan {
                 0,
                 MAX_FORMAT_FAILURE_DETAILS,
             )?,
-            string_bytes: CapacityPlan::for_type::<u8>(0, 0, MAX_FORMAT_FAILURE_DETAIL_BYTES)?,
+            text: CapacityPlan::for_type::<u8>(0, 0, MAX_FORMAT_FAILURE_TEXT_BYTES)?,
         })
     }
 
     pub(crate) fn envelope_bytes(self) -> Result<u64, CapacityPlanError> {
         self.entries
             .envelope_delta_bytes()?
-            .checked_add(self.string_bytes.envelope_delta_bytes()?)
+            .checked_add(self.text.envelope_delta_bytes()?)
             .ok_or(CapacityPlanError::CapacityOverflow)
     }
 
-    fn finish(self, details: &PackedFormatFailureDetails) -> Result<u64, CapacityPlanError> {
+    fn finish(self, evidence: &FormatFailureEvidence) -> Result<u64, CapacityPlanError> {
         self.entries
-            .finish(details.entries.len(), details.entries.capacity())?
+            .finish(evidence.entries.len(), evidence.entries.capacity())?
             .checked_add(
-                self.string_bytes
-                    .finish(details.string_bytes.len(), details.string_bytes.capacity())?,
+                self.text
+                    .finish(evidence.text.len(), evidence.text.capacity())?,
             )
             .ok_or(CapacityPlanError::CapacityOverflow)
     }
 }
 
 #[derive(PartialEq, Eq)]
-pub(crate) struct PackedFormatFailureDetails {
+pub struct FormatFailureEvidence {
+    code: PackedTextRange,
     entries: Vec<InlineFormatFailureDetail>,
-    string_bytes: Vec<u8>,
+    text: Vec<u8>,
 }
 
-impl PackedFormatFailureDetails {
+impl FormatFailureEvidence {
     fn try_allocate(
-        plan: FormatFailureDetailCapacityPlan,
+        plan: FormatFailureEvidenceCapacityPlan,
     ) -> Result<(Self, u64), FormatFailureDetailCause> {
         let mut entries = Vec::new();
         plan.entries
@@ -559,50 +581,74 @@ impl PackedFormatFailureDetails {
             .try_reserve_exact(plan.entries.allocator_additional())
             .map_err(|_| FormatFailureDetailCause::AllocationFailed)?;
 
-        let mut string_bytes = Vec::new();
-        plan.string_bytes
-            .verify_preflight(string_bytes.len(), string_bytes.capacity())?;
-        string_bytes
-            .try_reserve_exact(plan.string_bytes.allocator_additional())
+        let mut text = Vec::new();
+        plan.text.verify_preflight(text.len(), text.capacity())?;
+        text.try_reserve_exact(plan.text.allocator_additional())
             .map_err(|_| FormatFailureDetailCause::AllocationFailed)?;
 
-        let details = Self {
+        let evidence = Self {
+            code: PackedTextRange::EMPTY,
             entries,
-            string_bytes,
+            text,
         };
-        let actual = plan.finish(&details)?;
-        Ok((details, actual))
+        let actual = plan.finish(&evidence)?;
+        Ok((evidence, actual))
+    }
+
+    pub fn code(&self) -> &str {
+        self.code.resolve(&self.text)
+    }
+
+    pub fn details(&self) -> FormatFailureDetails<'_> {
+        FormatFailureDetails::new(&self.entries, &self.text)
+    }
+
+    fn store_code(&mut self, code: &str) -> Result<(), FormatFailureDetailCause> {
+        self.text
+            .try_reserve(code.len())
+            .map_err(|_| FormatFailureDetailCause::AllocationFailed)?;
+        self.code = PackedTextRange::checked(self.text.len(), code.len())?;
+        self.text.extend_from_slice(code.as_bytes());
+        Ok(())
+    }
+
+    fn store_text(&mut self, value: &str) -> Result<PackedTextRange, FormatFailureDetailCause> {
+        self.text
+            .try_reserve(value.len())
+            .map_err(|_| FormatFailureDetailCause::AllocationFailed)?;
+        let range = PackedTextRange::checked(self.text.len(), value.len())?;
+        self.text.extend_from_slice(value.as_bytes());
+        Ok(range)
     }
 
     fn push_scalar(
         &mut self,
-        key: &'static str,
+        key: &str,
         value: InlineFormatFailureDetailValue,
     ) -> Result<(), FormatFailureDetailCause> {
         self.entries
             .try_reserve(1)
             .map_err(|_| FormatFailureDetailCause::AllocationFailed)?;
+        let key = self.store_text(key)?;
         self.entries.push(InlineFormatFailureDetail { key, value });
         Ok(())
     }
 
     fn push_string(
         &mut self,
-        key: &'static str,
+        key: &str,
         value: &str,
         sanitized_len: usize,
     ) -> Result<(), FormatFailureDetailCause> {
         self.entries
             .try_reserve(1)
             .map_err(|_| FormatFailureDetailCause::AllocationFailed)?;
-        self.string_bytes
-            .try_reserve(sanitized_len)
+        self.text
+            .try_reserve(key.len().saturating_add(sanitized_len))
             .map_err(|_| FormatFailureDetailCause::AllocationFailed)?;
 
-        let offset = u16::try_from(self.string_bytes.len())
-            .map_err(|_| FormatFailureDetailCause::BytesExceeded)?;
-        let len =
-            u16::try_from(sanitized_len).map_err(|_| FormatFailureDetailCause::StringExceeded)?;
+        let key = self.store_text(key)?;
+        let value_start = self.text.len();
         let mut encoded = [0; 4];
         for character in value.chars() {
             let character = if character.is_control() {
@@ -611,44 +657,57 @@ impl PackedFormatFailureDetails {
                 character
             };
             let encoded = character.encode_utf8(&mut encoded);
-            self.string_bytes.extend_from_slice(encoded.as_bytes());
+            self.text.extend_from_slice(encoded.as_bytes());
         }
+        let value = PackedTextRange::checked(value_start, sanitized_len)?;
         self.entries.push(InlineFormatFailureDetail {
             key,
-            value: InlineFormatFailureDetailValue::String { offset, len },
+            value: InlineFormatFailureDetailValue::String(value),
         });
         Ok(())
     }
+}
 
-    fn view(&self) -> FormatFailureDetails<'_> {
-        FormatFailureDetails::new(&self.entries, &self.string_bytes)
+impl fmt::Debug for FormatFailureEvidence {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("FormatFailureEvidence")
+            .field("code", &self.code())
+            .field("details", &self.details())
+            .finish()
     }
 }
 
-impl fmt::Debug for PackedFormatFailureDetails {
+impl fmt::Display for FormatFailureEvidence {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.view().fmt(formatter)
+        write!(formatter, "format failure evidence {}", self.code())
+    }
+}
+
+impl Error for FormatFailureEvidence {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        None
     }
 }
 
 pub(crate) struct BoundedFormatFailureDetailSink {
-    details: PackedFormatFailureDetails,
+    evidence: FormatFailureEvidence,
     bytes: usize,
     cause: Option<FormatFailureDetailCause>,
 }
 
 impl BoundedFormatFailureDetailSink {
-    pub(crate) fn capacity_plan() -> Result<FormatFailureDetailCapacityPlan, CapacityPlanError> {
-        FormatFailureDetailCapacityPlan::new()
+    pub(crate) fn capacity_plan() -> Result<FormatFailureEvidenceCapacityPlan, CapacityPlanError> {
+        FormatFailureEvidenceCapacityPlan::new()
     }
 
     pub(crate) fn try_allocate(
-        plan: FormatFailureDetailCapacityPlan,
+        plan: FormatFailureEvidenceCapacityPlan,
     ) -> Result<(Self, u64), FormatFailureDetailCause> {
-        let (details, actual_capacity_bytes) = PackedFormatFailureDetails::try_allocate(plan)?;
+        let (evidence, actual_capacity_bytes) = FormatFailureEvidence::try_allocate(plan)?;
         Ok((
             Self {
-                details,
+                evidence,
                 bytes: 0,
                 cause: None,
             },
@@ -656,14 +715,18 @@ impl BoundedFormatFailureDetailSink {
         ))
     }
 
-    pub(crate) fn finish(self) -> Result<PackedFormatFailureDetails, FormatFailureDetailCause> {
+    pub(crate) fn store_code(&mut self, code: &str) -> Result<(), FormatFailureDetailCause> {
+        self.evidence.store_code(code)
+    }
+
+    pub(crate) fn finish(self) -> Result<FormatFailureEvidence, FormatFailureDetailCause> {
         match self.cause {
             Some(cause) => Err(cause),
-            None => Ok(self.details),
+            None => Ok(self.evidence),
         }
     }
 
-    fn admit(&mut self, key: &'static str, bytes: usize) -> Option<usize> {
+    fn admit(&mut self, key: &str, bytes: usize) -> Option<usize> {
         if self.cause.is_some() {
             return None;
         }
@@ -671,7 +734,7 @@ impl BoundedFormatFailureDetailSink {
             self.cause = Some(FormatFailureDetailCause::InvalidKey);
             return None;
         }
-        if self.details.entries.len() >= MAX_FORMAT_FAILURE_DETAILS {
+        if self.evidence.entries.len() >= MAX_FORMAT_FAILURE_DETAILS {
             self.cause = Some(FormatFailureDetailCause::CountExceeded);
             return None;
         }
@@ -690,11 +753,11 @@ impl BoundedFormatFailureDetailSink {
         Some(next_bytes)
     }
 
-    fn push_scalar(&mut self, key: &'static str, value: InlineFormatFailureDetailValue) {
+    fn push_scalar(&mut self, key: &str, value: InlineFormatFailureDetailValue) {
         let Some(next_bytes) = self.admit(key, 8) else {
             return;
         };
-        if let Err(cause) = self.details.push_scalar(key, value) {
+        if let Err(cause) = self.evidence.push_scalar(key, value) {
             self.cause = Some(cause);
             return;
         }
@@ -703,7 +766,7 @@ impl BoundedFormatFailureDetailSink {
 }
 
 impl FormatFailureDetailSink for BoundedFormatFailureDetailSink {
-    fn string(&mut self, key: &'static str, value: &str) {
+    fn string(&mut self, key: &str, value: &str) {
         if self.cause.is_some() {
             return;
         }
@@ -717,18 +780,18 @@ impl FormatFailureDetailSink for BoundedFormatFailureDetailSink {
         let Some(next_bytes) = self.admit(key, sanitized_len) else {
             return;
         };
-        if let Err(cause) = self.details.push_string(key, value, sanitized_len) {
+        if let Err(cause) = self.evidence.push_string(key, value, sanitized_len) {
             self.cause = Some(cause);
             return;
         }
         self.bytes = next_bytes;
     }
 
-    fn unsigned(&mut self, key: &'static str, value: u64) {
+    fn unsigned(&mut self, key: &str, value: u64) {
         self.push_scalar(key, InlineFormatFailureDetailValue::Unsigned(value));
     }
 
-    fn signed(&mut self, key: &'static str, value: i64) {
+    fn signed(&mut self, key: &str, value: i64) {
         self.push_scalar(key, InlineFormatFailureDetailValue::Signed(value));
     }
 }
@@ -754,60 +817,39 @@ fn sanitized_detail_string_len(value: &str) -> Result<usize, FormatFailureDetail
     Ok(len)
 }
 
-/// A format-owned source for stable failure evidence.
+/// A synchronous producer for bounded format failure evidence.
 ///
-/// The import boundary validates `code` and bounded `visit_details` output before retaining the
-/// source as the direct standard error source of [`FormatFailureEnvelope`]. Backend-native types
-/// remain private behind the format-owned source chain.
-pub trait FormatFailureSource: Error + Send + Sync + 'static {
-    fn code(&self) -> &'static str;
+/// The import boundary validates and copies all returned text before this value is destroyed.
+/// Producer and backend-native objects never become part of the public error chain.
+pub trait FormatFailureEvidenceProducer {
+    fn code(&self) -> &str;
     fn visit_details(&self, _sink: &mut dyn FormatFailureDetailSink) {}
 }
 
 pub struct FormatFailureEnvelope {
     format: Arc<FormatDescriptor>,
-    code: &'static str,
-    details: PackedFormatFailureDetails,
-    source: Box<dyn FormatFailureSource>,
+    evidence: FormatFailureEvidence,
 }
 
 impl FormatFailureEnvelope {
-    pub(crate) fn seal<S>(
-        format: Arc<FormatDescriptor>,
-        code: &'static str,
-        details: PackedFormatFailureDetails,
-        source: S,
-    ) -> Self
-    where
-        S: FormatFailureSource,
-    {
-        Self {
-            format,
-            code,
-            details,
-            source: Box::new(source),
-        }
+    pub(crate) fn seal(format: Arc<FormatDescriptor>, evidence: FormatFailureEvidence) -> Self {
+        Self { format, evidence }
     }
 
     pub fn format(&self) -> &FormatId {
         self.format.id()
     }
 
-    pub const fn code(&self) -> &'static str {
-        self.code
+    pub fn code(&self) -> &str {
+        self.evidence.code()
     }
 
     pub fn details(&self) -> FormatFailureDetails<'_> {
-        self.details.view()
+        self.evidence.details()
     }
 
-    /// Returns the retained format-owned source when its concrete type is `T`.
-    pub fn downcast_ref<T>(&self) -> Option<&T>
-    where
-        T: FormatFailureSource,
-    {
-        let source: &(dyn Error + Send + Sync + 'static) = self.source.as_ref();
-        source.downcast_ref::<T>()
+    pub const fn evidence(&self) -> &FormatFailureEvidence {
+        &self.evidence
     }
 }
 
@@ -816,8 +858,7 @@ impl fmt::Debug for FormatFailureEnvelope {
         formatter
             .debug_struct("FormatFailureEnvelope")
             .field("format", &self.format())
-            .field("code", &self.code)
-            .field("details", &self.details)
+            .field("evidence", &self.evidence)
             .finish_non_exhaustive()
     }
 }
@@ -828,14 +869,14 @@ impl fmt::Display for FormatFailureEnvelope {
             formatter,
             "format {} failed with {}",
             self.format.id(),
-            self.code
+            self.code()
         )
     }
 }
 
 impl Error for FormatFailureEnvelope {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
-        Some(self.source.as_ref())
+        Some(&self.evidence)
     }
 }
 
@@ -1003,36 +1044,19 @@ mod tests {
         .expect("static packed-failure text profile must be valid")
     }
 
-    #[derive(Debug)]
-    struct PackedFailureSource;
-
-    impl fmt::Display for PackedFailureSource {
-        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-            formatter.write_str("packed failure source")
-        }
-    }
-
-    impl Error for PackedFailureSource {}
-
-    impl FormatFailureSource for PackedFailureSource {
-        fn code(&self) -> &'static str {
-            "test.inline_failure"
-        }
-    }
-
     #[test]
     fn detail_sink_accepts_exactly_the_maximum_entry_count() {
         let mut sink = new_sink();
-        let entry_capacity = sink.details.entries.capacity();
-        let string_capacity = sink.details.string_bytes.capacity();
+        let entry_capacity = sink.evidence.entries.capacity();
+        let text_capacity = sink.evidence.text.capacity();
         for value in 0..MAX_FORMAT_FAILURE_DETAILS {
             sink.unsigned("value", value as u64);
         }
-        assert_eq!(sink.details.entries.capacity(), entry_capacity);
-        assert_eq!(sink.details.string_bytes.capacity(), string_capacity);
+        assert_eq!(sink.evidence.entries.capacity(), entry_capacity);
+        assert_eq!(sink.evidence.text.capacity(), text_capacity);
 
-        let details = sink.finish().expect("the maximum count must be accepted");
-        let view = details.view();
+        let evidence = sink.finish().expect("the maximum count must be accepted");
+        let view = evidence.details();
         assert_eq!(view.len(), MAX_FORMAT_FAILURE_DETAILS);
         assert!(matches!(
             view.get(MAX_FORMAT_FAILURE_DETAILS - 1).map(FormatFailureDetail::value),
@@ -1057,11 +1081,14 @@ mod tests {
 
         let mut sink = new_sink();
         sink.string("message", &value);
-        let details = sink
+        let evidence = sink
             .finish()
             .expect("the exact string limit must be accepted");
-        let FormatFailureDetailValue::String(stored) =
-            details.view().get(0).expect("stored string detail").value()
+        let FormatFailureDetailValue::String(stored) = evidence
+            .details()
+            .get(0)
+            .expect("stored string detail")
+            .value()
         else {
             panic!("expected a string detail")
         };
@@ -1081,11 +1108,14 @@ mod tests {
 
         let mut sink = new_sink();
         sink.string("message", &value);
-        let details = sink
+        let evidence = sink
             .finish()
             .expect("expanded controls that exactly fit must be accepted");
-        let FormatFailureDetailValue::String(stored) =
-            details.view().get(0).expect("stored string detail").value()
+        let FormatFailureDetailValue::String(stored) = evidence
+            .details()
+            .get(0)
+            .expect("stored string detail")
+            .value()
         else {
             panic!("expected a string detail")
         };
@@ -1145,8 +1175,8 @@ mod tests {
     #[test]
     fn failure_transport_stays_below_the_large_error_threshold() {
         if std::mem::size_of::<usize>() == 8 {
-            assert_eq!(std::mem::size_of::<PackedFormatFailureDetails>(), 48);
-            assert_eq!(std::mem::size_of::<FormatFailureEnvelope>(), 88);
+            assert_eq!(std::mem::size_of::<FormatFailureEvidence>(), 56);
+            assert_eq!(std::mem::size_of::<FormatFailureEnvelope>(), 64);
         }
         assert_eq!(
             std::mem::size_of::<ScopeAbort>(),
@@ -1161,12 +1191,14 @@ mod tests {
     #[test]
     fn sealed_envelope_moves_packed_stable_evidence_without_reallocation() {
         let mut sink = new_sink();
+        sink.store_code("test.inline_failure")
+            .expect("valid code must fit preallocated evidence");
         sink.signed("offset", -7);
-        let details = sink.finish().expect("valid details must finish");
-        let entry_pointer = details.entries.as_ptr();
-        let entry_capacity = details.entries.capacity();
-        let string_pointer = details.string_bytes.as_ptr();
-        let string_capacity = details.string_bytes.capacity();
+        let evidence = sink.finish().expect("valid details must finish");
+        let entry_pointer = evidence.entries.as_ptr();
+        let entry_capacity = evidence.entries.capacity();
+        let text_pointer = evidence.text.as_ptr();
+        let text_capacity = evidence.text.capacity();
         let descriptor = Arc::new(
             FormatDescriptor::builder(
                 FormatId::new("dev.baozi.test.packed-failure").expect("valid format id"),
@@ -1184,23 +1216,18 @@ mod tests {
         );
         let injected_descriptor = Arc::clone(&descriptor);
         let descriptor_strong_count = Arc::strong_count(&descriptor);
-        let envelope = FormatFailureEnvelope::seal(
-            injected_descriptor,
-            "test.inline_failure",
-            details,
-            PackedFailureSource,
-        );
+        let envelope = FormatFailureEnvelope::seal(injected_descriptor, evidence);
 
         assert!(!std::mem::needs_drop::<FormatFailureDetailString<'static>>());
-        assert!(std::mem::needs_drop::<PackedFormatFailureDetails>());
+        assert!(std::mem::needs_drop::<FormatFailureEvidence>());
         assert!(std::mem::needs_drop::<FormatFailureEnvelope>());
         assert!(Arc::ptr_eq(&envelope.format, &descriptor));
         assert_eq!(Arc::strong_count(&descriptor), descriptor_strong_count);
         assert_eq!(envelope.format(), descriptor.id());
-        assert_eq!(envelope.details.entries.as_ptr(), entry_pointer);
-        assert_eq!(envelope.details.entries.capacity(), entry_capacity);
-        assert_eq!(envelope.details.string_bytes.as_ptr(), string_pointer);
-        assert_eq!(envelope.details.string_bytes.capacity(), string_capacity);
+        assert_eq!(envelope.evidence.entries.as_ptr(), entry_pointer);
+        assert_eq!(envelope.evidence.entries.capacity(), entry_capacity);
+        assert_eq!(envelope.evidence.text.as_ptr(), text_pointer);
+        assert_eq!(envelope.evidence.text.capacity(), text_capacity);
         assert_eq!(envelope.code(), "test.inline_failure");
         assert_eq!(envelope.details().len(), 1);
         let detail_view = envelope.details();
@@ -1211,12 +1238,9 @@ mod tests {
             detail.value(),
             FormatFailureDetailValue::Signed(-7)
         ));
-        assert!(
-            Error::source(&envelope)
-                .and_then(|source| source.downcast_ref::<PackedFailureSource>())
-                .is_some()
-        );
-        assert!(envelope.downcast_ref::<PackedFailureSource>().is_some());
+        let source = Error::source(&envelope).expect("host evidence must be the direct source");
+        assert!(source.downcast_ref::<FormatFailureEvidence>().is_some());
+        assert!(source.source().is_none());
         let repeated_detail = envelope.details().get(0).expect("repeated detail read");
         assert_eq!(repeated_detail.key(), detail.key());
         assert_eq!(repeated_detail.value(), detail.value());

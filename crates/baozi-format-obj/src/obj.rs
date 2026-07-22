@@ -434,13 +434,12 @@ fn resolve_index(
     column: u32,
 ) -> ParseResult<usize> {
     enforce_numeric_literal(scope, text)?;
-    let value = text.parse::<i64>().map_err(|error| {
+    let value = text.parse::<i64>().map_err(|_| {
         scope.format_failure(ObjFailure::invalid_index(
             kind,
             "invalid-integer",
             line_number,
             column,
-            Some(error),
         ))
     })?;
     if value == 0 {
@@ -449,7 +448,6 @@ fn resolve_index(
             "zero",
             line_number,
             column,
-            None,
         )));
     }
 
@@ -464,7 +462,6 @@ fn resolve_index(
             "out-of-range",
             line_number,
             column,
-            None,
         )));
     }
     Ok(resolved as usize)
@@ -496,12 +493,11 @@ fn parse_f32(
     line_number: u32,
 ) -> ParseResult<f32> {
     enforce_numeric_literal(scope, token.text)?;
-    let value = token.text.parse::<f32>().map_err(|error| {
+    let value = token.text.parse::<f32>().map_err(|_| {
         scope.format_failure(ObjFailure::invalid_float(
             subject,
             line_number,
             token.column,
-            error,
         ))
     })?;
     if !value.is_finite() {

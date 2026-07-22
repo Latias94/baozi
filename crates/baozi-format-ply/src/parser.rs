@@ -14,8 +14,6 @@ use std::fmt;
 
 const SCAN_QUANTUM: usize = 4 * 1024;
 const MAX_NUMERIC_LITERAL_BYTES: usize = SCAN_QUANTUM;
-const UTF8_LOOKAHEAD_BYTES: usize = 3;
-const PROFILE_SCAN_CHUNK_BYTES: usize = SCAN_QUANTUM - UTF8_LOOKAHEAD_BYTES;
 
 pub(crate) fn read_ply(scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
     let bytes = scope.primary_bytes();
@@ -2182,7 +2180,7 @@ fn ascii_profile_line<'scope>(
     while chunk_start < raw_line.len() {
         ctx.poll()?;
         let chunk_end = chunk_start
-            .checked_add(PROFILE_SCAN_CHUNK_BYTES)
+            .checked_add(SCAN_QUANTUM)
             .map_or(raw_line.len(), |end| end.min(raw_line.len()));
         let chunk = raw_line.get(chunk_start..chunk_end).ok_or_else(|| {
             ctx.format_failure(PlyFailure::new(
@@ -2190,17 +2188,6 @@ fn ascii_profile_line<'scope>(
                 "PLY text profile scan range is invalid",
             ))
         })?;
-        let validation_end = chunk_end
-            .checked_add(UTF8_LOOKAHEAD_BYTES)
-            .map_or(raw_line.len(), |end| end.min(raw_line.len()));
-        let validation_chunk = raw_line.get(chunk_start..validation_end).ok_or_else(|| {
-            ctx.format_failure(PlyFailure::new(
-                PlyFailureCode::InternalInvariant,
-                "PLY UTF-8 validation range is invalid",
-            ))
-        })?;
-        let utf8 = std::str::from_utf8(validation_chunk);
-
         ctx.poll()?;
         for (relative, byte) in chunk.iter().copied().enumerate() {
             let line_relative = chunk_start
@@ -2226,30 +2213,21 @@ fn ascii_profile_line<'scope>(
             let offending_offset = line_offset
                 .checked_add(line_relative)
                 .ok_or_else(|| ctx.resource_limit_exceeded("ply-text-byte-offset", u64::MAX))?;
-            let mut failure = PlyFailure::new(
+            let failure = PlyFailure::new(
                 surface.failure_code(),
                 "PLY input violates its ASCII text profile",
             )
             .with_context(context)
             .at_byte(usize_amount(ctx, offending_offset, "ply-text-byte-offset")?);
-            if !byte.is_ascii()
-                && let Err(source) = utf8.as_ref()
-                && source.valid_up_to() == relative
-            {
-                failure = failure.with_utf8_source(*source);
-            }
             return Err(ctx.format_failure(failure));
         }
 
         ctx.poll()?;
-        let chunk_text = std::str::from_utf8(chunk).map_err(|source| {
-            ctx.format_failure(
-                PlyFailure::new(
-                    PlyFailureCode::InternalInvariant,
-                    "ASCII-profiled PLY chunk is not UTF-8",
-                )
-                .with_utf8_source(source),
-            )
+        let chunk_text = std::str::from_utf8(chunk).map_err(|_| {
+            ctx.format_failure(PlyFailure::new(
+                PlyFailureCode::InternalInvariant,
+                "ASCII-profiled PLY chunk is not UTF-8",
+            ))
         })?;
         let chunk_text = if strips_trailing_cr && chunk_end == raw_line.len() {
             chunk_text.strip_suffix('\r').ok_or_else(|| {

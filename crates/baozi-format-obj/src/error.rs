@@ -1,7 +1,5 @@
-use baozi_import::{FormatFailureDetailSink, FormatFailureSource};
-use std::error::Error;
+use baozi_import::{FormatFailureDetailSink, FormatFailureEvidenceProducer};
 use std::fmt;
-use std::num::{ParseFloatError, ParseIntError};
 use std::str::Utf8Error;
 
 /// Stable classification of an OBJ-owned content failure.
@@ -33,70 +31,18 @@ impl ObjFailureCode {
     }
 }
 
+/// Synchronous OBJ-owned producer sealed into host-owned bounded evidence by the import scope.
 #[derive(Debug)]
-enum ObjFailureSource {
-    Utf8(Utf8Error),
-    Float(ParseFloatError),
-    Integer(ParseIntError),
-}
-
-impl fmt::Display for ObjFailureSource {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Utf8(error) => error.fmt(formatter),
-            Self::Float(error) => error.fmt(formatter),
-            Self::Integer(error) => error.fmt(formatter),
-        }
-    }
-}
-
-impl Error for ObjFailureSource {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Utf8(error) => Some(error),
-            Self::Float(error) => Some(error),
-            Self::Integer(error) => Some(error),
-        }
-    }
-}
-
-/// Retained OBJ-owned source and bounded evidence producer sealed by the selected import scope.
-#[derive(Debug)]
-pub struct ObjFailure {
+pub(crate) struct ObjFailure {
     code: ObjFailureCode,
     line: Option<u32>,
     column: Option<u32>,
     byte_offset: Option<u64>,
     subject: Option<&'static str>,
     reason: Option<&'static str>,
-    source: Option<ObjFailureSource>,
 }
 
 impl ObjFailure {
-    pub const fn code(&self) -> ObjFailureCode {
-        self.code
-    }
-
-    pub const fn line(&self) -> Option<u32> {
-        self.line
-    }
-
-    pub const fn column(&self) -> Option<u32> {
-        self.column
-    }
-
-    pub const fn byte_offset(&self) -> Option<u64> {
-        self.byte_offset
-    }
-
-    pub const fn subject(&self) -> Option<&'static str> {
-        self.subject
-    }
-
-    pub const fn reason(&self) -> Option<&'static str> {
-        self.reason
-    }
-
     pub(crate) fn invalid_utf8_at(error: Utf8Error, base_offset: u64) -> Option<Self> {
         let valid_up_to = u64::try_from(error.valid_up_to()).ok()?;
         let byte_offset = base_offset.checked_add(valid_up_to)?;
@@ -107,7 +53,6 @@ impl ObjFailure {
             byte_offset: Some(byte_offset),
             subject: Some("document"),
             reason: Some("invalid-utf8"),
-            source: Some(ObjFailureSource::Utf8(error)),
         })
     }
 
@@ -119,7 +64,6 @@ impl ObjFailure {
             byte_offset: Some(byte_offset),
             subject: Some("document"),
             reason: Some(reason),
-            source: None,
         }
     }
 
@@ -142,21 +86,14 @@ impl ObjFailure {
         Self::located(ObjFailureCode::InvalidFace, "face", reason, line, column)
     }
 
-    pub(crate) fn invalid_float(
-        subject: &'static str,
-        line: u32,
-        column: u32,
-        source: ParseFloatError,
-    ) -> Self {
-        let mut failure = Self::located(
+    pub(crate) const fn invalid_float(subject: &'static str, line: u32, column: u32) -> Self {
+        Self::located(
             ObjFailureCode::InvalidNumber,
             subject,
             "invalid-float",
             line,
             column,
-        );
-        failure.source = Some(ObjFailureSource::Float(source));
-        failure
+        )
     }
 
     pub(crate) const fn non_finite(subject: &'static str, line: u32, column: u32) -> Self {
@@ -169,17 +106,13 @@ impl ObjFailure {
         )
     }
 
-    pub(crate) fn invalid_index(
+    pub(crate) const fn invalid_index(
         subject: &'static str,
         reason: &'static str,
         line: u32,
         column: u32,
-        source: Option<ParseIntError>,
     ) -> Self {
-        let mut failure =
-            Self::located(ObjFailureCode::InvalidIndex, subject, reason, line, column);
-        failure.source = source.map(ObjFailureSource::Integer);
-        failure
+        Self::located(ObjFailureCode::InvalidIndex, subject, reason, line, column)
     }
 
     pub(crate) const fn empty_geometry() -> Self {
@@ -190,7 +123,6 @@ impl ObjFailure {
             byte_offset: None,
             subject: Some("faces"),
             reason: Some("none-declared"),
-            source: None,
         }
     }
 
@@ -202,7 +134,6 @@ impl ObjFailure {
             byte_offset: None,
             subject: Some("normalized-model"),
             reason: Some(reason),
-            source: None,
         }
     }
 
@@ -220,7 +151,6 @@ impl ObjFailure {
             byte_offset: None,
             subject: Some(subject),
             reason: Some(reason),
-            source: None,
         }
     }
 }
@@ -237,14 +167,8 @@ impl fmt::Display for ObjFailure {
     }
 }
 
-impl Error for ObjFailure {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        self.source.as_ref().map(|source| source as &dyn Error)
-    }
-}
-
-impl FormatFailureSource for ObjFailure {
-    fn code(&self) -> &'static str {
+impl FormatFailureEvidenceProducer for ObjFailure {
+    fn code(&self) -> &str {
         self.code.as_str()
     }
 
@@ -288,15 +212,16 @@ mod tests {
     }
 
     #[test]
-    fn utf8_failure_preserves_its_standard_source_before_sealing() {
+    fn utf8_failure_retains_stable_offset_evidence() {
         let mut bytes = [0_u8];
         bytes[0] = u8::MAX;
         let error = std::str::from_utf8(&bytes).expect_err("fixture is invalid UTF-8");
         let failure = ObjFailure::invalid_utf8_at(error, 4_096)
             .expect("fixture offset remains representable");
 
-        assert!(matches!(failure.source, Some(ObjFailureSource::Utf8(_))));
-        assert_eq!(failure.byte_offset(), Some(4_096));
+        assert_eq!(failure.byte_offset, Some(4_096));
+        assert_eq!(failure.subject, Some("document"));
+        assert_eq!(failure.reason, Some("invalid-utf8"));
     }
 
     #[test]
@@ -308,12 +233,13 @@ mod tests {
     }
 
     #[test]
-    fn number_failure_preserves_its_standard_source_before_sealing() {
-        let error = "nope"
-            .parse::<f32>()
-            .expect_err("fixture is not a floating-point number");
-        let failure = ObjFailure::invalid_float("position", 1, 3, error);
+    fn number_failure_retains_stable_location_evidence() {
+        let failure = ObjFailure::invalid_float("position", 1, 3);
 
-        assert!(matches!(failure.source, Some(ObjFailureSource::Float(_))));
+        assert_eq!(failure.code, ObjFailureCode::InvalidNumber);
+        assert_eq!(failure.line, Some(1));
+        assert_eq!(failure.column, Some(3));
+        assert_eq!(failure.subject, Some("position"));
+        assert_eq!(failure.reason, Some("invalid-float"));
     }
 }

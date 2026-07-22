@@ -1,43 +1,60 @@
 use baozi::{
     CancellationToken, CapabilityStatus, ConformancePolicy, DiagnosticCode, DiagnosticSeverity,
-    Error, FormatCapability, FormatDescriptor, FormatEncoding, FormatId, ImportCause,
-    ImportConfigOverlay, ImportOperationControl, ImportPhase, ImportProgressPhase,
+    Error, FormatCapability, FormatDescriptor, FormatEncoding, FormatFailureEvidence, FormatId,
+    ImportCause, ImportConfigOverlay, ImportOperationControl, ImportPhase, ImportProgressPhase,
     ImportProgressUnit, ImportRequest, ImportRequestLayer, Importer, OptionCompileLimits,
     PostProcessControl, PostProcessProgressPhase, PostProcessProgressUnit, ProgressDecision,
     ProgressDeliveryLimits, ProgressEvent, ReadConfidence,
 };
 use baozi_import::{
     DetectionOutcome, DetectionResult, DetectionScope, FormatFailureDetailSink,
-    FormatFailureDetailValue, FormatFailureSource, FormatImporter, ParseResult, ParseScope, Probe,
-    ReadHint,
+    FormatFailureDetailValue, FormatFailureEvidenceProducer, FormatImporter, ParseResult,
+    ParseScope, Probe, ReadHint,
 };
 use std::error::Error as StdError;
-use std::fmt;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 const FORMAT_ID: &str = "org.example.facade-test";
 
 struct TestImporter {
     fail: bool,
+    failure_drops: Arc<AtomicUsize>,
 }
 
 #[derive(Debug)]
-struct TestFormatFailure;
+struct TestFormatFailure {
+    code: String,
+    detail_key: String,
+    detail_value: String,
+    drops: Arc<AtomicUsize>,
+}
 
-impl fmt::Display for TestFormatFailure {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("intentional test format failure")
+impl TestFormatFailure {
+    fn new(drops: Arc<AtomicUsize>) -> Self {
+        Self {
+            code: String::from("test.intentional_failure"),
+            detail_key: String::from("fixture_name"),
+            detail_value: String::from("facade-runtime-value"),
+            drops,
+        }
     }
 }
 
-impl StdError for TestFormatFailure {}
+impl Drop for TestFormatFailure {
+    fn drop(&mut self) {
+        self.drops.fetch_add(1, Ordering::AcqRel);
+    }
+}
 
-impl FormatFailureSource for TestFormatFailure {
-    fn code(&self) -> &'static str {
-        "test.intentional_failure"
+impl FormatFailureEvidenceProducer for TestFormatFailure {
+    fn code(&self) -> &str {
+        &self.code
     }
 
     fn visit_details(&self, sink: &mut dyn FormatFailureDetailSink) {
         sink.unsigned("fixture", 1);
+        sink.string(&self.detail_key, &self.detail_value);
     }
 }
 
@@ -65,7 +82,9 @@ impl FormatImporter for TestImporter {
 
     fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<baozi_core::SceneDraft> {
         if self.fail {
-            return Err(scope.format_failure(TestFormatFailure));
+            return Err(
+                scope.format_failure(TestFormatFailure::new(Arc::clone(&self.failure_drops)))
+            );
         }
         scope.emit_diagnostic(
             DiagnosticSeverity::Warning,
@@ -77,11 +96,22 @@ impl FormatImporter for TestImporter {
 }
 
 fn test_importer(fail: bool) -> Importer {
+    test_importer_with_failure_probe(fail).0
+}
+
+fn test_importer_with_failure_probe(fail: bool) -> (Importer, Arc<AtomicUsize>) {
+    let failure_drops = Arc::new(AtomicUsize::new(0));
     let mut builder = Importer::builder();
     builder
-        .register(TestImporter { fail })
+        .register(TestImporter {
+            fail,
+            failure_drops: Arc::clone(&failure_drops),
+        })
         .expect("test importer must register");
-    builder.build().expect("test registry must freeze")
+    (
+        builder.build().expect("test registry must freeze"),
+        failure_drops,
+    )
 }
 
 #[test]
@@ -145,10 +175,12 @@ fn facade_preserves_success_evidence_from_the_session() {
 
 #[test]
 fn facade_preserves_format_envelope_and_detection_evidence() {
-    let importer = test_importer(true);
+    let (importer, failure_drops) = test_importer_with_failure_probe(true);
     let error = importer
         .read_bytes("model.facade-test", b"opaque")
         .expect_err("format fixture must fail");
+    assert_eq!(failure_drops.load(Ordering::Acquire), 1);
+    drop(importer);
 
     let Error::Import(failure) = error else {
         panic!("expected a post-session import failure");
@@ -167,6 +199,18 @@ fn facade_preserves_format_envelope_and_detection_evidence() {
         fixture.value(),
         FormatFailureDetailValue::Unsigned(1)
     ));
+    let runtime_detail = envelope
+        .details()
+        .iter()
+        .find(|detail| detail.key() == "fixture_name")
+        .expect("host evidence must copy the runtime detail key");
+    let FormatFailureDetailValue::String(runtime_value) = runtime_detail.value() else {
+        panic!("expected the copied runtime detail value")
+    };
+    assert_eq!(runtime_value.as_str(), "facade-runtime-value");
+    let evidence = StdError::source(envelope).expect("envelope must expose host-owned evidence");
+    assert!(evidence.downcast_ref::<FormatFailureEvidence>().is_some());
+    assert!(evidence.source().is_none());
     assert_eq!(failure.detection_evidence().len(), 1);
     assert_eq!(
         failure.selected_format().map(FormatId::as_str),

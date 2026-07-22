@@ -24,7 +24,7 @@ fn missing_end_header_is_parse_error() -> TestResult<()> {
 
     assert!(diagnostics.is_empty());
     let envelope = expected_ply_failure(&error, PlyFailureCode::InvalidHeader);
-    assert!(envelope.details().is_empty());
+    assert_eq!(envelope.details().len(), 1);
     Ok(())
 }
 
@@ -39,7 +39,7 @@ fn face_index_out_of_range_is_parse_error() -> TestResult<()> {
 
     assert!(diagnostics.is_empty());
     let envelope = expected_ply_failure(&error, PlyFailureCode::InvalidTopology);
-    assert!(envelope.details().is_empty());
+    assert_eq!(envelope.details().len(), 1);
     Ok(())
 }
 
@@ -90,7 +90,7 @@ end_header
         Some("format-version")
     );
     assert_eq!(ply_unsigned_detail(envelope, "byte_offset"), Some(4));
-    assert_eq!(envelope.details().len(), 2);
+    assert_eq!(envelope.details().len(), 3);
     Ok(())
 }
 
@@ -117,7 +117,7 @@ end_header
     assert!(diagnostics.is_empty());
     let envelope = expected_ply_failure(&error, PlyFailureCode::InvalidSchema);
     assert!(ply_unsigned_detail(envelope, "byte_offset").is_some());
-    assert_eq!(envelope.details().len(), 1);
+    assert_eq!(envelope.details().len(), 2);
     Ok(())
 }
 
@@ -147,7 +147,7 @@ end_header
     assert!(diagnostics.is_empty());
     let envelope = expected_ply_failure(&error, PlyFailureCode::InvalidSchema);
     assert!(ply_unsigned_detail(envelope, "byte_offset").is_some());
-    assert_eq!(envelope.details().len(), 1);
+    assert_eq!(envelope.details().len(), 2);
     Ok(())
 }
 
@@ -174,7 +174,7 @@ end_header
 
     assert!(diagnostics.is_empty());
     let envelope = expected_ply_failure(&error, PlyFailureCode::InvalidSchema);
-    assert!(envelope.details().is_empty());
+    assert_eq!(envelope.details().len(), 1);
     Ok(())
 }
 
@@ -512,7 +512,7 @@ end_header
         ply_string_detail(envelope, "context"),
         Some("zero-width-binary-element")
     );
-    assert_eq!(envelope.details().len(), 1);
+    assert_eq!(envelope.details().len(), 2);
     Ok(())
 }
 
@@ -539,7 +539,7 @@ end_header
     assert!(diagnostics.is_empty());
     let envelope = expected_ply_failure(&error, PlyFailureCode::TruncatedPayload);
     assert!(ply_unsigned_detail(envelope, "byte_offset").is_some());
-    assert_eq!(envelope.details().len(), 1);
+    assert_eq!(envelope.details().len(), 2);
     Ok(())
 }
 
@@ -734,7 +734,7 @@ fn zero_width_record_fuzz_corpus_terminates_with_expected_outcomes() -> TestResu
         ply_string_detail(envelope, "context"),
         Some("zero-width-binary-element")
     );
-    assert_eq!(envelope.details().len(), 1);
+    assert_eq!(envelope.details().len(), 2);
     Ok(())
 }
 

@@ -4,11 +4,12 @@ use baozi_import::{
     DependencyRequirement, DependencyResolver, DependencyRoleId, DetectionFailure,
     DetectionInconclusive, DetectionOutcome, DetectionResult, DetectionScope, FormatCapability,
     FormatDescriptor, FormatEncoding, FormatFailureDetailSink, FormatFailureDetailValue,
-    FormatFailureSource, FormatImporter, FormatSelection, ImportCause, ImportConfigOverlay,
-    ImportDimension, ImportFailure, ImportLossKind, ImportOperationControl, ImportPhase,
-    ImportProgressPhase, ImportProgressUnit, ImportReport, ImportRequest, ImportRequestLayer,
-    ImportResult, ImportStorageClass, ImportWorkClass, LossPolicy, OptionCompileLimits,
-    ParseResult, ParseScope, PreparedImportRequest, ReadConfidence, ReadHint, RegistryBuildLimits,
+    FormatFailureEvidence, FormatFailureEvidenceProducer, FormatImporter, FormatSelection,
+    ImportCause, ImportConfigOverlay, ImportDimension, ImportFailure, ImportLossKind,
+    ImportOperationControl, ImportPhase, ImportProgressPhase, ImportProgressUnit, ImportReport,
+    ImportRequest, ImportRequestLayer, ImportResult, ImportStorageClass, ImportWorkClass,
+    LossPolicy, MeteredDecodedText, MeteredString, MeteredVec, OptionCompileLimits, ParseResult,
+    ParseScope, PreparedImportRequest, ReadConfidence, ReadHint, RegistryBuildLimits,
     RegistryBuilder, ResourceLimits, ResourceLimitsOverlay, ScopeAbortCause, TextBomPolicy,
     TextControlPolicy, TextDecodingMode, TextHardCaps, TextLexicalMode, TextNewline, TextProfile,
     TextSourceEncoding, TrustedExtensionBoundary, import_asset as run_import_asset,
@@ -19,6 +20,7 @@ use baozi_io::{
     AssetReadError, AssetReadErrorKind, AssetReader, AuthorityDomain, OpenedAsset,
 };
 use baozi_operation::{CancellationToken, LedgerCause, ProgressDecision};
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt;
@@ -221,7 +223,9 @@ impl FormatImporter for RecordingImporter {
                 DependencyBehavior::OptionalThenFail => {
                     let dependency = scope.optional_dependency(role, "missing.bin")?;
                     assert!(dependency.unavailable_evidence().is_some());
-                    return Err(scope.format_failure(TestFormatCause::new()));
+                    return Err(scope.format_failure(TestFormatCause::new(Arc::new(
+                        FormatFailureProducerObservation::default(),
+                    ))));
                 }
             }
         }
@@ -229,8 +233,27 @@ impl FormatImporter for RecordingImporter {
     }
 }
 
-struct FormatFailingImporter;
+struct FormatFailingImporter {
+    observation: Arc<FormatFailureProducerObservation>,
+}
 struct OversizedFormatFailingImporter;
+
+#[derive(Debug, Clone, Copy)]
+enum ReentrantFormatFailurePhase {
+    Code,
+    Details,
+    DecodedStorage,
+    FormattedStorage,
+    MeteredStorage,
+    ReservedStorage,
+    ScenePartsConversion,
+    NestedFormatFailure,
+    Drop,
+}
+
+struct ReentrantFormatFailureImporter {
+    phase: ReentrantFormatFailurePhase,
+}
 
 struct PanickingImporter {
     calls: Arc<AtomicUsize>,
@@ -430,7 +453,7 @@ impl FormatImporter for FormatFailingImporter {
     }
 
     fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
-        Err(scope.format_failure(TestFormatCause::new()))
+        Err(scope.format_failure(TestFormatCause::new(Arc::clone(&self.observation))))
     }
 }
 
@@ -476,7 +499,7 @@ impl fmt::Display for OversizedFormatCause {
 
 impl Error for OversizedFormatCause {}
 
-impl FormatFailureSource for OversizedFormatCause {
+impl FormatFailureEvidenceProducer for OversizedFormatCause {
     fn code(&self) -> &'static str {
         "test.oversized_format_failure"
     }
@@ -484,57 +507,84 @@ impl FormatFailureSource for OversizedFormatCause {
 
 #[derive(Debug)]
 struct TestFormatCause {
-    source: TestBackendCause,
+    code: String,
+    key: String,
+    value: String,
+    _source: TestBackendCause,
+    observation: Arc<FormatFailureProducerObservation>,
 }
 
 impl TestFormatCause {
-    const fn new() -> Self {
+    fn new(observation: Arc<FormatFailureProducerObservation>) -> Self {
+        let code = String::from("test.format_failure");
+        let key = String::from("backend_message");
+        let value = String::from("private test backend failure");
+        observation
+            .code_pointer
+            .store(code.as_ptr() as usize, Ordering::Release);
+        observation
+            .key_pointer
+            .store(key.as_ptr() as usize, Ordering::Release);
+        observation
+            .value_pointer
+            .store(value.as_ptr() as usize, Ordering::Release);
         Self {
-            source: TestBackendCause,
+            code,
+            key,
+            value,
+            _source: TestBackendCause {
+                observation: Arc::clone(&observation),
+            },
+            observation,
         }
     }
 }
 
-impl fmt::Display for TestFormatCause {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("test format failure")
+impl Drop for TestFormatCause {
+    fn drop(&mut self) {
+        self.observation.drops.fetch_add(1, Ordering::AcqRel);
     }
 }
 
-impl Error for TestFormatCause {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        Some(&self.source)
-    }
-}
-
-impl FormatFailureSource for TestFormatCause {
-    fn code(&self) -> &'static str {
-        "test.format_failure"
+impl FormatFailureEvidenceProducer for TestFormatCause {
+    fn code(&self) -> &str {
+        &self.code
     }
 
     fn visit_details(&self, sink: &mut dyn FormatFailureDetailSink) {
         sink.unsigned("record", 7);
+        sink.string(&self.key, &self.value);
     }
 }
 
 #[derive(Debug)]
-struct TestBackendCause;
+struct TestBackendCause {
+    observation: Arc<FormatFailureProducerObservation>,
+}
 
-impl fmt::Display for TestBackendCause {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("private test backend failure")
+impl Drop for TestBackendCause {
+    fn drop(&mut self) {
+        self.observation.drops.fetch_add(1, Ordering::AcqRel);
     }
 }
 
-impl Error for TestBackendCause {}
+#[derive(Debug, Default)]
+struct FormatFailureProducerObservation {
+    drops: AtomicUsize,
+    code_pointer: AtomicUsize,
+    key_pointer: AtomicUsize,
+    value_pointer: AtomicUsize,
+}
 
 #[derive(Debug, Clone, Copy)]
 enum FailureEvidenceMode {
     Normal,
     CodePanics,
     InvalidCode,
+    OverlongCode,
     DetailsPanic,
     DetailsRejected,
+    DropPanics,
 }
 
 #[derive(Debug)]
@@ -551,14 +601,19 @@ impl fmt::Display for LifecycleFormatCause {
 
 impl Error for LifecycleFormatCause {}
 
-impl FormatFailureSource for LifecycleFormatCause {
+impl FormatFailureEvidenceProducer for LifecycleFormatCause {
     fn code(&self) -> &'static str {
         match self.mode {
             FailureEvidenceMode::CodePanics => panic!("format failure code panic"),
             FailureEvidenceMode::InvalidCode => "",
+            FailureEvidenceMode::OverlongCode => concat!(
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            ),
             FailureEvidenceMode::Normal
             | FailureEvidenceMode::DetailsPanic
-            | FailureEvidenceMode::DetailsRejected => "test.lifecycle_failure",
+            | FailureEvidenceMode::DetailsRejected
+            | FailureEvidenceMode::DropPanics => "test.lifecycle_failure",
         }
     }
 
@@ -567,9 +622,177 @@ impl FormatFailureSource for LifecycleFormatCause {
         match self.mode {
             FailureEvidenceMode::DetailsPanic => panic!("format failure detail panic"),
             FailureEvidenceMode::DetailsRejected => sink.unsigned("INVALID", 1),
-            FailureEvidenceMode::Normal => sink.unsigned("record", 7),
-            FailureEvidenceMode::CodePanics | FailureEvidenceMode::InvalidCode => {}
+            FailureEvidenceMode::Normal | FailureEvidenceMode::DropPanics => {
+                sink.unsigned("record", 7);
+            }
+            FailureEvidenceMode::CodePanics
+            | FailureEvidenceMode::InvalidCode
+            | FailureEvidenceMode::OverlongCode => {}
         }
+    }
+}
+
+impl Drop for LifecycleFormatCause {
+    fn drop(&mut self) {
+        if matches!(self.mode, FailureEvidenceMode::DropPanics) {
+            panic!("format failure producer drop panic");
+        }
+    }
+}
+
+struct NestedFormatFailureProducer;
+
+impl FormatFailureEvidenceProducer for NestedFormatFailureProducer {
+    fn code(&self) -> &str {
+        "test.nested_format_failure"
+    }
+}
+
+struct ReentrantFormatFailureProducer<'scope, 'session> {
+    scope: &'scope ParseScope<'session>,
+    phase: ReentrantFormatFailurePhase,
+    storage: RefCell<Option<MeteredVec<'scope, u8>>>,
+    decoded: Option<RefCell<MeteredDecodedText<'scope>>>,
+    formatted: Option<RefCell<MeteredString<'scope>>>,
+}
+
+struct FailingFormatValue;
+
+impl fmt::Display for FailingFormatValue {
+    fn fmt(&self, _formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        Err(fmt::Error)
+    }
+}
+
+impl FormatFailureEvidenceProducer for ReentrantFormatFailureProducer<'_, '_> {
+    fn code(&self) -> &str {
+        if matches!(self.phase, ReentrantFormatFailurePhase::Code) {
+            drop(self.scope.begin_work(ImportWorkClass::WorkUnits, 1));
+        }
+        "test.reentrant_format_failure"
+    }
+
+    fn visit_details(&self, sink: &mut dyn FormatFailureDetailSink) {
+        match self.phase {
+            ReentrantFormatFailurePhase::Details => drop(self.scope.scene_builder()),
+            ReentrantFormatFailurePhase::DecodedStorage => {
+                drop(
+                    self.decoded
+                        .as_ref()
+                        .expect("decoded-storage phase owns decoded text")
+                        .borrow_mut()
+                        .try_push_str_reserved("x"),
+                );
+            }
+            ReentrantFormatFailurePhase::FormattedStorage => {
+                drop(
+                    self.formatted
+                        .as_ref()
+                        .expect("formatted-storage phase owns a string")
+                        .borrow_mut()
+                        .try_write_fmt(format_args!("{}", FailingFormatValue)),
+                );
+            }
+            ReentrantFormatFailurePhase::MeteredStorage => {
+                drop(
+                    self.storage
+                        .borrow_mut()
+                        .as_mut()
+                        .expect("metered-storage phase owns storage")
+                        .try_push(1),
+                );
+            }
+            ReentrantFormatFailurePhase::ReservedStorage => {
+                drop(
+                    self.storage
+                        .borrow_mut()
+                        .as_mut()
+                        .expect("reserved-storage phase owns storage")
+                        .try_push_reserved(1),
+                );
+            }
+            ReentrantFormatFailurePhase::ScenePartsConversion => {
+                let storage = self
+                    .storage
+                    .borrow_mut()
+                    .take()
+                    .expect("scene-parts phase owns storage");
+                drop(storage.try_into_scene_parts());
+            }
+            ReentrantFormatFailurePhase::NestedFormatFailure => {
+                drop(self.scope.format_failure(NestedFormatFailureProducer));
+            }
+            ReentrantFormatFailurePhase::Code | ReentrantFormatFailurePhase::Drop => {}
+        }
+        sink.unsigned("ignored", 1);
+    }
+}
+
+impl Drop for ReentrantFormatFailureProducer<'_, '_> {
+    fn drop(&mut self) {
+        if matches!(self.phase, ReentrantFormatFailurePhase::Drop) {
+            drop(self.scope.begin_work(ImportWorkClass::WorkUnits, 1));
+        }
+    }
+}
+
+impl FormatImporter for ReentrantFormatFailureImporter {
+    fn descriptor(&self) -> FormatDescriptor {
+        FormatDescriptor::builder(
+            FormatId::new("dev.baozi.test.reentrant-format-failure").unwrap(),
+            "Reentrant Format Failure",
+        )
+        .extensions(["reentrant-failure"])
+        .encoding(FormatEncoding::Binary)
+        .capabilities([(FormatCapability::Geometry, CapabilityStatus::Supported)])
+        .build()
+        .unwrap()
+    }
+
+    fn detect(
+        &self,
+        _probe: &baozi_import::Probe<'_>,
+        _hint: &ReadHint,
+        _scope: &DetectionScope<'_>,
+    ) -> DetectionResult<DetectionOutcome> {
+        Ok(DetectionOutcome::Match(ReadConfidence::Certain))
+    }
+
+    fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
+        let class = if matches!(
+            self.phase,
+            ReentrantFormatFailurePhase::ScenePartsConversion
+        ) {
+            ImportStorageClass::SceneConstruction
+        } else {
+            ImportStorageClass::FormatNormalization
+        };
+        let mut storage = scope.metered_vec(class, "reentrant-format-failure-storage");
+        if matches!(self.phase, ReentrantFormatFailurePhase::ReservedStorage) {
+            storage.try_reserve(1)?;
+        }
+        let decoded = if matches!(self.phase, ReentrantFormatFailurePhase::DecodedStorage) {
+            Some(RefCell::new(scope.metered_decoded_text(
+                1,
+                "reentrant-format-failure-decoded-text",
+            )?))
+        } else {
+            None
+        };
+        let formatted =
+            matches!(self.phase, ReentrantFormatFailurePhase::FormattedStorage).then(|| {
+                RefCell::new(scope.metered_string(
+                    ImportStorageClass::FormatNormalization,
+                    "reentrant-format-failure-formatted-storage",
+                ))
+            });
+        Err(scope.format_failure(ReentrantFormatFailureProducer {
+            scope,
+            phase: self.phase,
+            storage: RefCell::new(Some(storage)),
+            decoded,
+            formatted,
+        }))
     }
 }
 
@@ -1826,11 +2049,16 @@ fn optional_dependency_loss_requires_explicit_caller_authority() {
 #[test]
 fn format_failure_retains_stable_packed_evidence_and_owner() {
     let source = AssetPath::new("asset.failure").unwrap();
-    let request = request_for(FormatFailingImporter);
+    let observation = Arc::new(FormatFailureProducerObservation::default());
+    let request = request_for(FormatFailingImporter {
+        observation: Arc::clone(&observation),
+    });
     let io = SequencedIo::new(source.clone(), [Arc::from(&b"primary"[..])]);
 
     let failure = import_asset(&request, &io, source, ImportOperationControl::default())
         .expect_err("format failure must be retained");
+    drop(request);
+    drop(io);
 
     let ImportCause::Format(envelope) = failure.cause() else {
         panic!("expected format envelope")
@@ -1840,45 +2068,56 @@ fn format_failure_retains_stable_packed_evidence_and_owner() {
         envelope.details().get(0).unwrap().value(),
         FormatFailureDetailValue::Unsigned(7)
     ));
-    let format_source =
-        Error::source(envelope).expect("format cause must survive envelope sealing");
-    let typed_source = format_source
-        .downcast_ref::<TestFormatCause>()
-        .expect("standard source chain must retain the concrete format cause");
-    typed_source
-        .source()
-        .and_then(|source| source.downcast_ref::<TestBackendCause>())
-        .expect("the retained format cause must preserve its backend source chain");
-    assert!(envelope.downcast_ref::<TestFormatCause>().is_some());
-    assert!(envelope.downcast_ref::<LifecycleFormatCause>().is_none());
+    let detail = envelope.details().get(1).expect("copied string evidence");
+    assert_eq!(detail.key(), "backend_message");
+    let FormatFailureDetailValue::String(value) = detail.value() else {
+        panic!("expected copied string evidence")
+    };
+    assert_eq!(value.as_str(), "private test backend failure");
+    assert_eq!(observation.drops.load(Ordering::Acquire), 2);
+    assert_ne!(
+        envelope.code().as_ptr() as usize,
+        observation.code_pointer.load(Ordering::Acquire)
+    );
+    assert_ne!(
+        detail.key().as_ptr() as usize,
+        observation.key_pointer.load(Ordering::Acquire)
+    );
+    assert_ne!(
+        value.as_str().as_ptr() as usize,
+        observation.value_pointer.load(Ordering::Acquire)
+    );
+    let evidence = Error::source(envelope).expect("host evidence must be the direct source");
+    assert!(evidence.downcast_ref::<FormatFailureEvidence>().is_some());
+    assert!(evidence.source().is_none());
+    assert!(std::ptr::eq(
+        evidence.downcast_ref::<FormatFailureEvidence>().unwrap(),
+        envelope.evidence()
+    ));
     assert!(!format!("{envelope:?}").contains("TestBackendCause"));
     assert!(
         !envelope
             .to_string()
             .contains("private test backend failure")
     );
+    assert_eq!(envelope.code(), "test.format_failure");
+    assert_eq!(envelope.details().get(1).unwrap().key(), detail.key());
     assert_eq!(failure.ledger().current_live_bytes(), 0);
 }
 
 #[test]
-fn oversized_format_failure_source_is_rejected_before_retention() {
+fn large_format_failure_producer_is_destroyed_after_bounded_evidence_capture() {
     let source = AssetPath::new("asset.oversized-failure").unwrap();
     let request = request_for(OversizedFormatFailingImporter);
     let io = SequencedIo::new(source.clone(), [Arc::from(&b"primary"[..])]);
 
     let failure = import_asset(&request, &io, source, ImportOperationControl::default())
-        .expect_err("oversized format source must be rejected");
+        .expect_err("the importer deliberately returns a format failure");
 
     assert!(matches!(
         failure.cause(),
-        ImportCause::Scope(abort)
-            if matches!(
-                abort.cause(),
-                ScopeAbortCause::ResourceLimit {
-                    resource: "format-failure-source-storage",
-                    limit: 4096,
-                }
-            )
+        ImportCause::Format(envelope)
+            if envelope.code() == "test.oversized_format_failure"
     ));
     assert_eq!(failure.ledger().current_live_bytes(), 0);
 }
@@ -1889,8 +2128,10 @@ fn format_failure_storage_survives_all_terminal_evidence_paths() {
         FailureEvidenceMode::Normal,
         FailureEvidenceMode::CodePanics,
         FailureEvidenceMode::InvalidCode,
+        FailureEvidenceMode::OverlongCode,
         FailureEvidenceMode::DetailsPanic,
         FailureEvidenceMode::DetailsRejected,
+        FailureEvidenceMode::DropPanics,
     ] {
         let visits = Arc::new(AtomicUsize::new(0));
         let request = request_for(LifecycleFailureImporter::returning(
@@ -1910,7 +2151,9 @@ fn format_failure_storage_survives_all_terminal_evidence_paths() {
                 assert!(matches!(failure.cause(), ImportCause::Format(_)));
                 assert_eq!(visits.load(Ordering::Acquire), 1);
             }
-            FailureEvidenceMode::CodePanics | FailureEvidenceMode::InvalidCode => {
+            FailureEvidenceMode::CodePanics
+            | FailureEvidenceMode::InvalidCode
+            | FailureEvidenceMode::OverlongCode => {
                 assert!(matches!(failure.cause(), ImportCause::Scope(_)));
                 assert_eq!(visits.load(Ordering::Acquire), 0);
             }
@@ -1930,9 +2173,57 @@ fn format_failure_storage_survives_all_terminal_evidence_paths() {
                     ));
                 }
             }
+            FailureEvidenceMode::DropPanics => {
+                let ImportCause::Scope(abort) = failure.cause() else {
+                    panic!("expected a contained producer drop panic")
+                };
+                assert!(matches!(
+                    abort.cause(),
+                    ScopeAbortCause::TrustedExtension {
+                        boundary: TrustedExtensionBoundary::FormatFailureDetail,
+                        code: "format-failure-producer-drop-panicked",
+                    }
+                ));
+                assert_eq!(visits.load(Ordering::Acquire), 1);
+            }
         }
         assert_eq!(failure.ledger().current_live_bytes(), 0);
         assert!(failure.finalization_cause().is_none());
+    }
+}
+
+#[test]
+fn format_failure_evidence_callbacks_cannot_reenter_parse_capabilities() {
+    for phase in [
+        ReentrantFormatFailurePhase::Code,
+        ReentrantFormatFailurePhase::Details,
+        ReentrantFormatFailurePhase::DecodedStorage,
+        ReentrantFormatFailurePhase::FormattedStorage,
+        ReentrantFormatFailurePhase::MeteredStorage,
+        ReentrantFormatFailurePhase::ReservedStorage,
+        ReentrantFormatFailurePhase::ScenePartsConversion,
+        ReentrantFormatFailurePhase::NestedFormatFailure,
+        ReentrantFormatFailurePhase::Drop,
+    ] {
+        let request = request_for(ReentrantFormatFailureImporter { phase });
+        let failure = import_bytes(
+            &request,
+            AssetPath::new("asset.reentrant-format-failure").unwrap(),
+            b"primary",
+            ImportOperationControl::default(),
+        )
+        .expect_err("reentrant format evidence must fail closed");
+
+        let ImportCause::Scope(abort) = failure.cause() else {
+            panic!("expected a scope contract failure for {phase:?}")
+        };
+        assert!(matches!(
+            abort.cause(),
+            ScopeAbortCause::DescriptorContract {
+                code: "parse-capability-reentered",
+            }
+        ));
+        assert_eq!(failure.ledger().current_live_bytes(), 0);
     }
 }
 

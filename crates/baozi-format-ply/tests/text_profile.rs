@@ -1,12 +1,12 @@
 mod common;
 
-use baozi_format_ply::{PlyFailure, PlyFailureCode};
-use baozi_import::{ImportDimension, ResourceLimits};
+use baozi_format_ply::PlyFailureCode;
+use baozi_import::{FormatFailureEvidence, ImportDimension, ResourceLimits};
 use common::{
     TestResult, assert_scope_resource_limit, binary_triangle, expected_error, expected_ply_failure,
     expected_report, import_bytes_forced_result, ply_string_detail, ply_unsigned_detail,
 };
-use std::{error::Error, str::Utf8Error};
+use std::error::Error;
 
 const SCAN_CHUNK_BYTES: usize = 4 * 1024;
 const MAX_NUMERIC_LITERAL_BYTES: usize = SCAN_CHUNK_BYTES;
@@ -91,7 +91,7 @@ fn non_ascii_ascii_body_grammar_is_rejected_at_first_raw_byte() -> TestResult<()
 }
 
 #[test]
-fn trailing_invalid_utf8_preserves_global_offset_source_and_failed_record_accounting()
+fn trailing_invalid_utf8_preserves_inert_evidence_offset_and_failed_record_accounting()
 -> TestResult<()> {
     const HEADER: &[u8] = b"ply\nformat ascii 1.0\nelement vertex 1\nproperty float x\nproperty float y\nproperty float z\nend_header\n";
 
@@ -115,15 +115,14 @@ fn trailing_invalid_utf8_preserves_global_offset_source_and_failed_record_accoun
         ply_unsigned_detail(envelope, "byte_offset"),
         Some(invalid_offset as u64)
     );
-    let ply_failure = envelope
-        .downcast_ref::<PlyFailure>()
-        .expect("sealed PLY envelope must retain its typed source");
-    let utf8_source = Error::source(ply_failure)
-        .and_then(Error::source)
-        .and_then(|source| source.downcast_ref::<Utf8Error>())
-        .expect("invalid PLY text must retain std::str::Utf8Error in its source chain");
-    assert!(utf8_source.valid_up_to() < SCAN_CHUNK_BYTES);
-    assert_eq!(utf8_source.error_len(), Some(1));
+    assert_eq!(
+        ply_string_detail(envelope, "reason"),
+        Some("PLY input violates its ASCII text profile")
+    );
+    let evidence = Error::source(envelope)
+        .and_then(|source| source.downcast_ref::<FormatFailureEvidence>())
+        .expect("PLY envelope must expose only Baozi-owned format evidence");
+    assert!(Error::source(evidence).is_none());
     assert_eq!(
         failure.source_identity().as_str(),
         "trailing-invalid-utf8.ply"

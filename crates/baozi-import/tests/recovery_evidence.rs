@@ -2,14 +2,14 @@ use baozi_core::{FormatId, MeshBinding, MeshId, SceneDraft};
 use baozi_import::{
     CapabilityStatus, CauseOwner, ConformancePolicy, DetectionOutcome, DetectionResult,
     DetectionScope, DiagnosticByteRange, DiagnosticCode, FormatCapability, FormatDescriptor,
-    FormatEncoding, FormatFailureDetailSink, FormatFailureSource, FormatImporter, ImportCause,
-    ImportConfigOverlay, ImportDimension, ImportFailure, ImportLossDisposition, ImportLossKind,
-    ImportLossSubject, ImportOperationControl, ImportProgressPhase, ImportProgressUnit,
-    ImportReport, ImportRequest, ImportRequestLayer, ImportResult, LossPolicy, OptionCompileLimits,
-    ParseResult, ParseScope, PreparedImportRequest, ReadConfidence, ReadHint, RegistryBuildLimits,
-    RegistryBuilder, ResourceLimits, ResourceLimitsOverlay, ScopeAbortCause, TextBomPolicy,
-    TextControlPolicy, TextDecodingMode, TextHardCaps, TextLexicalMode, TextNewline, TextProfile,
-    TextSourceEncoding, import_bytes,
+    FormatEncoding, FormatFailureDetailSink, FormatFailureEvidenceProducer, FormatImporter,
+    ImportCause, ImportConfigOverlay, ImportDimension, ImportFailure, ImportLossDisposition,
+    ImportLossKind, ImportLossSubject, ImportOperationControl, ImportProgressPhase,
+    ImportProgressUnit, ImportReport, ImportRequest, ImportRequestLayer, ImportResult, LossPolicy,
+    OptionCompileLimits, ParseResult, ParseScope, PreparedImportRequest, ReadConfidence, ReadHint,
+    RegistryBuildLimits, RegistryBuilder, ResourceLimits, ResourceLimitsOverlay, ScopeAbortCause,
+    TextBomPolicy, TextControlPolicy, TextDecodingMode, TextHardCaps, TextLexicalMode, TextNewline,
+    TextProfile, TextSourceEncoding, import_bytes,
 };
 use baozi_io::AssetPath;
 use baozi_operation::{CancellationToken, ProgressDecision};
@@ -120,7 +120,7 @@ impl fmt::Display for TestFormatFailure {
 
 impl std::error::Error for TestFormatFailure {}
 
-impl FormatFailureSource for TestFormatFailure {
+impl FormatFailureEvidenceProducer for TestFormatFailure {
     fn code(&self) -> &'static str {
         "test.failure_after_recovery"
     }

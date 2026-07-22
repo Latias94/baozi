@@ -6,7 +6,7 @@ mod detect;
 mod error;
 mod parser;
 
-pub use error::{StlFailure, StlFailureCode};
+pub use error::StlFailureCode;
 
 use baozi_core::{FormatId, SceneDraft};
 use baozi_import::{

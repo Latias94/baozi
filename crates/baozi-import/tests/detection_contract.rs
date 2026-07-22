@@ -7,7 +7,7 @@ use baozi_core::{FormatId, SceneDraft, SceneSpace};
 use baozi_import::{
     CapabilityStatus, DetectionEvidence, DetectionFailure, DetectionInconclusive, DetectionOptions,
     DetectionOutcome, DetectionResult, DetectionScope, FormatCapability, FormatDescriptor,
-    FormatEncoding, FormatFailureSource, FormatImporter, FormatSelection, ImportCause,
+    FormatEncoding, FormatFailureEvidenceProducer, FormatImporter, FormatSelection, ImportCause,
     ImportConfigOverlay, ImportFailure, ImportOperationControl, ImportPhase, ImportProgressPhase,
     ImportProgressUnit, ImportRequest, ImportRequestLayer, ImportRunError, OptionCompileLimits,
     ParseResult, ParseScope, PreparedImportRequest, ReadConfidence, ReadHint, RegistryBuildLimits,
@@ -147,7 +147,7 @@ impl fmt::Display for TestFormatCause {
 
 impl Error for TestFormatCause {}
 
-impl FormatFailureSource for TestFormatCause {
+impl FormatFailureEvidenceProducer for TestFormatCause {
     fn code(&self) -> &'static str {
         "test.detection.parser_failure"
     }

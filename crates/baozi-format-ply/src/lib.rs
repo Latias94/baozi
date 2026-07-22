@@ -4,7 +4,8 @@ mod detect;
 mod error;
 mod parser;
 
-pub use error::{PlyFailure, PlyFailureCode};
+pub(crate) use error::PlyFailure;
+pub use error::PlyFailureCode;
 
 use baozi_core::{FormatId, SceneDraft};
 use baozi_import::{

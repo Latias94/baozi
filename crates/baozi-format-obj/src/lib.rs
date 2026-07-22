@@ -8,7 +8,8 @@ mod obj;
 mod options;
 mod parser;
 
-pub use error::{ObjFailure, ObjFailureCode};
+pub(crate) use error::ObjFailure;
+pub use error::ObjFailureCode;
 pub use options::{ObjImportOptions, ObjTextDecodingMode, obj_import_option_key};
 
 use baozi_core::{FormatId, SceneDraft};
