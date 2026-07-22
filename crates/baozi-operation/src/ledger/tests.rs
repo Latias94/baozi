@@ -24,9 +24,14 @@ fn ledger_reservation_source() -> &'static str {
     production_source(include_str!("reservation.rs"))
 }
 
+fn ledger_commitment_source() -> &'static str {
+    production_source(include_str!("commitment.rs"))
+}
+
 fn ledger_production_source() -> String {
     [
         ledger_root_source(),
+        ledger_commitment_source(),
         ledger_reservation_source(),
         ledger_snapshot_source(),
         production_source(include_str!("startup.rs")),
@@ -2012,6 +2017,7 @@ fn terminal_freeze_keeps_commitments_on_bound_positions_after_ord_reverses() {
 #[test]
 fn typed_terminal_binding_uses_prestored_numeric_positions_without_a_mutation_tail() {
     let root = ledger_root_source();
+    let commitment = ledger_commitment_source();
     let reservation = ledger_reservation_source();
     let production = ledger_production_source();
     let primary = root
@@ -2048,7 +2054,7 @@ fn typed_terminal_binding_uses_prestored_numeric_positions_without_a_mutation_ta
     assert!(fallback.contains("validate_fallback_baseline_locked("));
     assert!(!fallback.contains("bind_preflighted"));
 
-    let preflight = root
+    let preflight = commitment
         .split("fn preflight_typed_publication_batch")
         .nth(1)
         .expect("numeric preflight exists")
@@ -2348,7 +2354,7 @@ fn reservation_transfer_finishes_all_fallible_lookup_before_mutating_phase_bytes
 #[test]
 fn legacy_publication_binds_commitment_positions_before_counter_mutation() {
     let production = ledger_root_source();
-    let aggregate = production
+    let aggregate = ledger_commitment_source()
         .split("struct AggregatedCommitment")
         .nth(1)
         .expect("commitment unwind guard exists")
@@ -2418,6 +2424,7 @@ fn legacy_publication_binds_commitment_positions_before_counter_mutation() {
 #[test]
 fn typed_freeze_proof_owns_exact_batches_and_has_no_post_mutation_fault_gate() {
     let root = ledger_root_source();
+    let commitment = ledger_commitment_source();
     let reservation_source = ledger_reservation_source();
     let snapshot_source = ledger_snapshot_source();
     let production = ledger_production_source();
@@ -2625,7 +2632,7 @@ fn typed_freeze_proof_owns_exact_batches_and_has_no_post_mutation_fault_gate() {
         .split("impl<O, P, D> Drop for ReservationCore")
         .next()
         .expect("bound release helper body exists");
-    let apply = root
+    let apply = commitment
         .split("fn apply_typed_commitments")
         .nth(1)
         .expect("bound commitment helper exists")
