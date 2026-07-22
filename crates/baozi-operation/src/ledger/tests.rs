@@ -20,9 +20,14 @@ fn ledger_snapshot_source() -> &'static str {
     production_source(include_str!("snapshot.rs"))
 }
 
+fn ledger_reservation_source() -> &'static str {
+    production_source(include_str!("reservation.rs"))
+}
+
 fn ledger_production_source() -> String {
     [
         ledger_root_source(),
+        ledger_reservation_source(),
         ledger_snapshot_source(),
         production_source(include_str!("startup.rs")),
     ]
@@ -2007,6 +2012,7 @@ fn terminal_freeze_keeps_commitments_on_bound_positions_after_ord_reverses() {
 #[test]
 fn typed_terminal_binding_uses_prestored_numeric_positions_without_a_mutation_tail() {
     let root = ledger_root_source();
+    let reservation = ledger_reservation_source();
     let production = ledger_production_source();
     let primary = root
         .split("pub(crate) fn try_bind_primary(")
@@ -2097,7 +2103,7 @@ fn typed_terminal_binding_uses_prestored_numeric_positions_without_a_mutation_ta
         );
     }
 
-    let batch = root
+    let batch = reservation
         .split("pub(crate) struct AttributionReservationBatch")
         .nth(1)
         .expect("typed publication batch exists")
@@ -2105,6 +2111,10 @@ fn typed_terminal_binding_uses_prestored_numeric_positions_without_a_mutation_ta
         .next()
         .expect("typed publication batch boundary exists");
     assert!(batch.contains("owner: Arc<Mutex<LedgerState<P, D>>>"));
+    assert!(
+        !reservation.contains("TypedFreezeProof"),
+        "reservation batches must not depend on the terminal proof"
+    );
     for removed in [
         "fn bind_preflighted_typed_publication_batch",
         "fn bind_preflighted_typed_discard_batch",
@@ -2408,6 +2418,7 @@ fn legacy_publication_binds_commitment_positions_before_counter_mutation() {
 #[test]
 fn typed_freeze_proof_owns_exact_batches_and_has_no_post_mutation_fault_gate() {
     let root = ledger_root_source();
+    let reservation_source = ledger_reservation_source();
     let snapshot_source = ledger_snapshot_source();
     let production = ledger_production_source();
     let proof = root
@@ -2421,6 +2432,10 @@ fn typed_freeze_proof_owns_exact_batches_and_has_no_post_mutation_fault_gate() {
     assert!(proof.contains("evidence: AttributionReservationBatch"));
     assert!(proof.contains("ledger: Ledger"));
     assert!(!proof.contains("PhantomData"));
+    assert!(
+        !reservation_source.contains("TypedFreezeProof"),
+        "reservation implementation must not own or construct terminal proofs"
+    );
     assert!(!production.contains("struct TypedFreezeQualification"));
     assert!(production.contains("struct QualifiedTypedFreezeProof"));
     assert!(!production.contains("pub(crate) struct QualifiedTypedFreezeProof"));
@@ -2500,7 +2515,7 @@ fn typed_freeze_proof_owns_exact_batches_and_has_no_post_mutation_fault_gate() {
             "self-consuming qualification calls owner-defined key behavior through `{forbidden}`"
         );
     }
-    let bound_positions = root
+    let bound_positions = reservation_source
         .split("fn bound_positions_are_in_bounds")
         .nth(1)
         .expect("bound-position qualification exists")
@@ -2519,7 +2534,7 @@ fn typed_freeze_proof_owns_exact_batches_and_has_no_post_mutation_fault_gate() {
             "terminal qualification lost bound-position gate `{required}`"
         );
     }
-    let discard_positions = root
+    let discard_positions = reservation_source
         .split("fn discard_positions_are_in_bounds")
         .nth(1)
         .expect("discard-position qualification exists")
@@ -2603,7 +2618,7 @@ fn typed_freeze_proof_owns_exact_batches_and_has_no_post_mutation_fault_gate() {
     assert!(!after_snapshot.contains("destroy_storage_then_release_bound_cover"));
     assert!(!after_snapshot.contains("apply_typed_commitments"));
 
-    let bound_release = root
+    let bound_release = reservation_source
         .split("fn release_bound_locked")
         .nth(1)
         .expect("bound release helper exists")
@@ -2617,7 +2632,7 @@ fn typed_freeze_proof_owns_exact_batches_and_has_no_post_mutation_fault_gate() {
         .split_once("\n    }\n}\n")
         .expect("bound commitment helper has a closed function body")
         .0;
-    let batch_release = root
+    let batch_release = reservation_source
         .split("fn release_bound_attributions")
         .nth(1)
         .expect("bound batch release helper exists")
@@ -2625,13 +2640,10 @@ fn typed_freeze_proof_owns_exact_batches_and_has_no_post_mutation_fault_gate() {
         .next()
         .expect("bound batch release helper body exists");
     assert!(!batch_release.contains("capacity_cover.core.release_bound_locked"));
-    let storage_release = root
+    let storage_release = reservation_source
         .split("fn destroy_storage_then_release_bound_cover")
         .nth(1)
-        .expect("storage-before-cover helper exists")
-        .split("/// Live reservations submitted")
-        .next()
-        .expect("storage-before-cover helper body exists");
+        .expect("storage-before-cover helper exists");
     let attribution_storage = storage_release
         .find("take(&mut self.attributions)")
         .expect("attribution vector storage is destroyed");

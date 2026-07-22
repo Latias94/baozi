@@ -28,12 +28,17 @@ enum Dimension {
 #[test]
 fn startup_qualification_has_one_production_module() {
     let ledger_root = include_str!("../../ledger.rs");
+    let reservation = include_str!("../reservation.rs");
     let startup = include_str!("../startup.rs");
     let crate_root = include_str!("../../lib.rs");
 
+    assert!(ledger_root.contains("mod reservation;"));
+    assert!(ledger_root.contains("pub(crate) use reservation::{"));
     assert!(ledger_root.contains("mod startup;"));
     assert!(ledger_root.contains("pub(crate) use startup::{"));
     assert!(!ledger_root.contains("pub(crate) struct StartupLedgerPlan<"));
+    assert!(reservation.contains("pub(crate) struct AttributionReservationBatch<"));
+    assert!(!reservation.contains("TypedFreezeProof"));
     assert!(startup.contains("pub(crate) struct StartupLedgerPlan<"));
     assert!(startup.contains("pub(crate) fn try_qualify_startup<"));
     assert!(startup.contains("pub(crate) struct StartupAttributionGraph<"));
