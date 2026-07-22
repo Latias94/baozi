@@ -13,19 +13,47 @@ pub struct SceneGenerationId(u64);
 static LAST_SCENE_GENERATION: AtomicU64 = AtomicU64::new(0);
 
 impl SceneGenerationId {
+    /// Reserves a generation identity that can be consumed only once.
+    pub(crate) fn reserve() -> Result<ReservedSceneGeneration, SceneGenerationError> {
+        reserve_scene_generation(&LAST_SCENE_GENERATION)
+    }
+
     /// Allocates a generation identity that has not previously been returned by
     /// this process.
     pub(crate) fn allocate() -> Result<Self, SceneGenerationError> {
-        let previous = LAST_SCENE_GENERATION
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |observed| {
-                observed.checked_add(1)
-            })
-            .map_err(|_| SceneGenerationError::Exhausted)?;
-        previous
-            .checked_add(1)
-            .map(Self)
-            .ok_or(SceneGenerationError::Exhausted)
+        Ok(Self::reserve()?.into_id())
     }
+
+    #[cfg(test)]
+    fn reserve_from(
+        last_generation: &AtomicU64,
+    ) -> Result<ReservedSceneGeneration, SceneGenerationError> {
+        reserve_scene_generation(last_generation)
+    }
+}
+
+/// A linear reservation for one never-reused scene generation identity.
+///
+/// Dropping a reservation burns its identity. Only consuming it can expose the
+/// identity to crate internals.
+pub(crate) struct ReservedSceneGeneration(u64);
+
+impl ReservedSceneGeneration {
+    /// Consumes the reservation without mutating the generation sequence.
+    pub(crate) const fn into_id(self) -> SceneGenerationId {
+        SceneGenerationId(self.0)
+    }
+}
+
+fn reserve_scene_generation(
+    last_generation: &AtomicU64,
+) -> Result<ReservedSceneGeneration, SceneGenerationError> {
+    last_generation
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |observed| {
+            observed.checked_add(1)
+        })
+        .map(|previous| ReservedSceneGeneration(previous + 1))
+        .map_err(|_| SceneGenerationError::Exhausted)
 }
 
 impl fmt::Debug for SceneGenerationId {
@@ -536,6 +564,44 @@ mod tests {
         let second = generation();
 
         assert_ne!(first, second);
+    }
+
+    #[test]
+    fn reserved_generation_is_consumed_into_id() {
+        let last_generation = AtomicU64::new(40);
+
+        let reservation = SceneGenerationId::reserve_from(&last_generation)
+            .expect("generation space should remain available");
+
+        assert_eq!(last_generation.load(Ordering::Relaxed), 41);
+        assert_eq!(reservation.into_id(), SceneGenerationId(41));
+        assert_eq!(last_generation.load(Ordering::Relaxed), 41);
+    }
+
+    #[test]
+    fn dropped_reservation_burns_one_invisible_gap() {
+        let last_generation = AtomicU64::new(0);
+        let discarded = SceneGenerationId::reserve_from(&last_generation)
+            .expect("generation space should remain available");
+
+        drop(discarded);
+
+        let published = SceneGenerationId::reserve_from(&last_generation)
+            .expect("generation space should remain available")
+            .into_id();
+
+        assert_eq!(published, SceneGenerationId(2));
+        assert_eq!(last_generation.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn generation_exhaustion_preserves_nonce() {
+        let last_generation = AtomicU64::new(u64::MAX);
+
+        let result = SceneGenerationId::reserve_from(&last_generation);
+
+        assert!(matches!(result, Err(SceneGenerationError::Exhausted)));
+        assert_eq!(last_generation.load(Ordering::Relaxed), u64::MAX);
     }
 
     #[test]
