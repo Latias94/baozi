@@ -223,9 +223,10 @@ fn type_declaration<'a>(source: &'a str, marker: &str) -> &'a str {
 
 fn concrete_store_source() -> String {
     let root = include_str!("../concrete_store.rs");
+    let validation = include_str!("validation.rs");
     let vocabulary = include_str!("vocabulary.rs");
     let terminal = include_str!("terminal_output.rs");
-    format!("{root}\n{vocabulary}\n{terminal}")
+    format!("{root}\n{validation}\n{vocabulary}\n{terminal}")
 }
 
 #[test]
