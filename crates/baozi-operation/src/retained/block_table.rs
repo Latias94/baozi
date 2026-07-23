@@ -23,6 +23,11 @@ use crate::control::discard_untrusted_panic_payload;
 use crate::ledger::{
     AttributionBatchPlan, AttributionReservationBatch, Ledger, PublicationDestination,
 };
+#[cfg(feature = "_u4c-collector")]
+use crate::u4c_collector::{
+    BlockKind, LookupStage, record_block_begin, record_block_seal, record_lookup_rejected,
+    record_lookup_stage, record_payload_backing_allocation, record_slot_publication,
+};
 use crate::{CapacityPlan, OperationOwner};
 use std::any::TypeId;
 use std::fmt;
@@ -543,9 +548,75 @@ pub(super) struct PublishedRetainedAggregate<Block> {
     pub(super) set_id: RetainedSetId,
 }
 
+/// One table-validated retained member awaiting concrete-store view projection.
+pub(crate) struct RetainedLookupMember<'a, Block> {
+    block: &'a Block,
+    schema_tag_matches: bool,
+}
+
+impl<'a, Block> RetainedLookupMember<'a, Block> {
+    pub(crate) const fn block(&self) -> &'a Block {
+        self.block
+    }
+
+    pub(crate) const fn schema_tag_matches(&self) -> bool {
+        self.schema_tag_matches
+    }
+}
+
 impl<Block> PublishedRetainedAggregate<Block> {
+    /// Resolves a retained terminal root before a concrete-store projection exists.
+    ///
+    /// Concrete-store published views must use `lookup_member` so the U4c checked lookup
+    /// taxonomy remains observable.
     pub(super) fn member(&self, identity: RetainedSlotIdentity) -> Option<&Block> {
         self.table.as_ref().member(identity, self.set_id)
+    }
+
+    fn lookup_member<Tag>(
+        &self,
+        identity: RetainedSlotIdentity,
+        expected_destination: RetainedMembershipDestination,
+    ) -> Option<RetainedLookupMember<'_, Block>>
+    where
+        Tag: Copy + Send + Sync + 'static,
+    {
+        #[cfg(feature = "_u4c-collector")]
+        record_lookup_stage(LookupStage::CheckTableBrand);
+        if self.table.membership()
+            != Some(RetainedMembership {
+                set_id: self.set_id,
+                destination: expected_destination,
+                ordinal: 0,
+            })
+        {
+            #[cfg(feature = "_u4c-collector")]
+            record_lookup_rejected();
+            return None;
+        }
+
+        #[cfg(feature = "_u4c-collector")]
+        record_lookup_stage(LookupStage::CheckSlotSet);
+        if identity.set_id != self.set_id {
+            #[cfg(feature = "_u4c-collector")]
+            record_lookup_rejected();
+            return None;
+        }
+
+        #[cfg(feature = "_u4c-collector")]
+        record_lookup_stage(LookupStage::CheckRange);
+        let Some(member) = self.table.as_ref().members.get(identity.index) else {
+            #[cfg(feature = "_u4c-collector")]
+            record_lookup_rejected();
+            return None;
+        };
+
+        #[cfg(feature = "_u4c-collector")]
+        record_lookup_stage(LookupStage::LoadMember);
+        Some(RetainedLookupMember {
+            block: member.allocation.as_ref(),
+            schema_tag_matches: identity.tag == TypeId::of::<Tag>() && member.tag == identity.tag,
+        })
     }
 
     fn len(&self) -> usize {
@@ -559,6 +630,7 @@ pub(crate) struct PublishedCanonicalAggregate<Block> {
 }
 
 impl<Block> PublishedCanonicalAggregate<Block> {
+    #[cfg(test)]
     pub fn get<Tag>(&self, slot: CanonicalRetainedSlot<Block, Tag>) -> Option<&Block>
     where
         Tag: Copy + Send + Sync + 'static,
@@ -567,6 +639,17 @@ impl<Block> PublishedCanonicalAggregate<Block> {
             return None;
         }
         self.inner.member(slot.identity)
+    }
+
+    pub(crate) fn lookup_member<Tag>(
+        &self,
+        slot: CanonicalRetainedSlot<Block, Tag>,
+    ) -> Option<RetainedLookupMember<'_, Block>>
+    where
+        Tag: Copy + Send + Sync + 'static,
+    {
+        self.inner
+            .lookup_member::<Tag>(slot.identity, RetainedMembershipDestination::Canonical)
     }
 
     pub fn len(&self) -> usize {
@@ -584,6 +667,7 @@ pub(crate) struct PublishedOutcomeEvidenceAggregate<Block> {
 }
 
 impl<Block> PublishedOutcomeEvidenceAggregate<Block> {
+    #[cfg(test)]
     pub fn get<Tag>(&self, slot: OutcomeEvidenceRetainedSlot<Block, Tag>) -> Option<&Block>
     where
         Tag: Copy + Send + Sync + 'static,
@@ -592,6 +676,19 @@ impl<Block> PublishedOutcomeEvidenceAggregate<Block> {
             return None;
         }
         self.inner.member(slot.identity)
+    }
+
+    pub(crate) fn lookup_member<Tag>(
+        &self,
+        slot: OutcomeEvidenceRetainedSlot<Block, Tag>,
+    ) -> Option<RetainedLookupMember<'_, Block>>
+    where
+        Tag: Copy + Send + Sync + 'static,
+    {
+        self.inner.lookup_member::<Tag>(
+            slot.identity,
+            RetainedMembershipDestination::OutcomeEvidence,
+        )
     }
 
     pub fn len(&self) -> usize {
@@ -942,13 +1039,24 @@ where
         },
         plan,
         || {
-            build(BlockEmplacer {
+            #[cfg(feature = "_u4c-collector")]
+            record_block_begin(BlockKind::New);
+            let block = build(BlockEmplacer {
                 marker: PhantomData,
             })
-            .map(BlockPlacement::into_block)
+            .map(BlockPlacement::into_block);
+            #[cfg(feature = "_u4c-collector")]
+            if block.is_ok() {
+                record_block_seal(BlockKind::New);
+            }
+            block
         },
     ) {
-        Ok(allocation) => allocation,
+        Ok(allocation) => {
+            #[cfg(feature = "_u4c-collector")]
+            record_payload_backing_allocation();
+            allocation
+        }
         Err(cause) => {
             if cause.charge_retained() {
                 std::mem::forget(attribution);
@@ -1003,6 +1111,8 @@ where
         origin: RetainedBlockOrigin::New,
         reachable: AtomicBool::new(false),
     });
+    #[cfg(feature = "_u4c-collector")]
+    record_slot_publication(BlockKind::New);
     table.new_blocks = next_new_blocks;
     Ok(RetainedSlotIdentity {
         set_id,
@@ -1139,12 +1249,19 @@ where
             map_inherited_cleanup_error(account, outcome, RetainedWriterError::OwnershipUnverified),
         ));
     }
+    #[cfg(feature = "_u4c-collector")]
+    {
+        record_block_begin(BlockKind::Inherited);
+        record_block_seal(BlockKind::Inherited);
+    }
     table.members.push(RetainedBlockMember {
         allocation,
         tag: TypeId::of::<Tag>(),
         origin: RetainedBlockOrigin::Inherited,
         reachable: AtomicBool::new(false),
     });
+    #[cfg(feature = "_u4c-collector")]
+    record_slot_publication(BlockKind::Inherited);
     Ok(RetainedSlotIdentity {
         set_id,
         index,

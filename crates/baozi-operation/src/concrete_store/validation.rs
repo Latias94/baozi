@@ -15,14 +15,21 @@ use crate::retained::{
 };
 
 pub(super) fn sequence_view<T: StoredScalar>(block: &StoredBlock) -> Option<SequenceView<'_, T>> {
+    if !sequence_kind_matches::<T>(block) {
+        return None;
+    }
     let StoredBlock::Sequence(storage) = block else {
         return None;
     };
-    if storage.kind() != <T as sealed::StoredScalar>::KIND {
-        return None;
-    }
     let values = <T as sealed::StoredScalar>::as_slice(storage)?;
     Some(SequenceView { values })
+}
+
+pub(super) fn sequence_kind_matches<T: StoredScalar>(block: &StoredBlock) -> bool {
+    let StoredBlock::Sequence(storage) = block else {
+        return false;
+    };
+    storage.kind() == <T as sealed::StoredScalar>::KIND
 }
 
 pub(super) fn bytes_view(block: &StoredBlock) -> Option<&[u8]> {

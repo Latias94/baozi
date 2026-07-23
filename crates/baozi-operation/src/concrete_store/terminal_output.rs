@@ -1,6 +1,6 @@
 use super::validation::{
     StoreRuntimeError, bytes_view, canonical_record_view, outcome_evidence_record_view,
-    sequence_view, utf8_view,
+    sequence_kind_matches, sequence_view, utf8_view,
 };
 use super::{
     ByteBlock, CanonicalBytesRef, CanonicalRecordRef, CanonicalRecordView, CanonicalSequenceRef,
@@ -16,8 +16,10 @@ use crate::retained::{
     PreparedRetainedFallback, PreparedRetainedPublication, PreparedRetainedPublicationOutcome,
     PreparedRetainedRichFailure, PreparedRetainedSuccess, PublishedCanonicalOutput,
     PublishedFallbackOutput, PublishedLedgerEvidence, PublishedOutcomeEvidenceOutput,
-    PublishedRichFailureOutput, TerminalEvidenceCause,
+    PublishedRichFailureOutput, RetainedLookupMember, TerminalEvidenceCause,
 };
+#[cfg(feature = "_u4c-collector")]
+use crate::u4c_collector::{LookupStage, record_lookup_rejected, record_lookup_stage};
 
 pub(super) type RawPreparedStore = PreparedRetainedPublication<
     StoredBlock,
@@ -32,6 +34,136 @@ type RawPreparedStoreFailure =
     PreparedRetainedRichFailure<StoredBlock, StorePhaseKey, StoreDimensionKey>;
 type RawPreparedStoreFallback =
     PreparedRetainedFallback<StoreFallbackEnvelope, StorePhaseKey, StoreDimensionKey>;
+
+fn reject_lookup<T>() -> Option<T> {
+    #[cfg(feature = "_u4c-collector")]
+    record_lookup_rejected();
+    None
+}
+
+fn project_sequence_view<'a, T>(
+    member: RetainedLookupMember<'a, StoredBlock>,
+) -> Option<SequenceView<'a, T>>
+where
+    T: StoredScalar,
+{
+    #[cfg(feature = "_u4c-collector")]
+    record_lookup_stage(LookupStage::CheckVariant);
+    if !matches!(member.block(), StoredBlock::Sequence(_)) {
+        return reject_lookup();
+    }
+
+    #[cfg(feature = "_u4c-collector")]
+    record_lookup_stage(LookupStage::CheckSchemaTag);
+    if !member.schema_tag_matches() || !sequence_kind_matches::<T>(member.block()) {
+        return reject_lookup();
+    }
+
+    #[cfg(feature = "_u4c-collector")]
+    record_lookup_stage(LookupStage::ProjectView);
+    let Some(view) = sequence_view::<T>(member.block()) else {
+        return reject_lookup();
+    };
+    #[cfg(feature = "_u4c-collector")]
+    record_lookup_stage(LookupStage::ReturnView);
+    Some(view)
+}
+
+fn project_bytes_view(member: RetainedLookupMember<'_, StoredBlock>) -> Option<&[u8]> {
+    #[cfg(feature = "_u4c-collector")]
+    record_lookup_stage(LookupStage::CheckVariant);
+    if !matches!(member.block(), StoredBlock::Bytes(_)) {
+        return reject_lookup();
+    }
+
+    #[cfg(feature = "_u4c-collector")]
+    record_lookup_stage(LookupStage::CheckSchemaTag);
+    if !member.schema_tag_matches() {
+        return reject_lookup();
+    }
+
+    #[cfg(feature = "_u4c-collector")]
+    record_lookup_stage(LookupStage::ProjectView);
+    let Some(view) = bytes_view(member.block()) else {
+        return reject_lookup();
+    };
+    #[cfg(feature = "_u4c-collector")]
+    record_lookup_stage(LookupStage::ReturnView);
+    Some(view)
+}
+
+fn project_utf8_view(member: RetainedLookupMember<'_, StoredBlock>) -> Option<&str> {
+    #[cfg(feature = "_u4c-collector")]
+    record_lookup_stage(LookupStage::CheckVariant);
+    if !matches!(member.block(), StoredBlock::Utf8(_)) {
+        return reject_lookup();
+    }
+
+    #[cfg(feature = "_u4c-collector")]
+    record_lookup_stage(LookupStage::CheckSchemaTag);
+    if !member.schema_tag_matches() {
+        return reject_lookup();
+    }
+
+    #[cfg(feature = "_u4c-collector")]
+    record_lookup_stage(LookupStage::ProjectView);
+    let Some(view) = utf8_view(member.block()) else {
+        return reject_lookup();
+    };
+    #[cfg(feature = "_u4c-collector")]
+    record_lookup_stage(LookupStage::ReturnView);
+    Some(view)
+}
+
+fn project_canonical_record_view(
+    member: RetainedLookupMember<'_, StoredBlock>,
+) -> Option<CanonicalRecordView<'_>> {
+    #[cfg(feature = "_u4c-collector")]
+    record_lookup_stage(LookupStage::CheckVariant);
+    if !matches!(member.block(), StoredBlock::Records(_)) {
+        return reject_lookup();
+    }
+
+    #[cfg(feature = "_u4c-collector")]
+    record_lookup_stage(LookupStage::CheckSchemaTag);
+    if !member.schema_tag_matches() {
+        return reject_lookup();
+    }
+
+    #[cfg(feature = "_u4c-collector")]
+    record_lookup_stage(LookupStage::ProjectView);
+    let Some(view) = canonical_record_view(member.block()) else {
+        return reject_lookup();
+    };
+    #[cfg(feature = "_u4c-collector")]
+    record_lookup_stage(LookupStage::ReturnView);
+    Some(view)
+}
+
+fn project_outcome_evidence_record_view(
+    member: RetainedLookupMember<'_, StoredBlock>,
+) -> Option<OutcomeEvidenceRecordView<'_>> {
+    #[cfg(feature = "_u4c-collector")]
+    record_lookup_stage(LookupStage::CheckVariant);
+    if !matches!(member.block(), StoredBlock::Records(_)) {
+        return reject_lookup();
+    }
+
+    #[cfg(feature = "_u4c-collector")]
+    record_lookup_stage(LookupStage::CheckSchemaTag);
+    if !member.schema_tag_matches() {
+        return reject_lookup();
+    }
+
+    #[cfg(feature = "_u4c-collector")]
+    record_lookup_stage(LookupStage::ProjectView);
+    let Some(view) = outcome_evidence_record_view(member.block()) else {
+        return reject_lookup();
+    };
+    #[cfg(feature = "_u4c-collector")]
+    record_lookup_stage(LookupStage::ReturnView);
+    Some(view)
+}
 
 pub(super) fn classify_prepared_success<CanonicalKind, CanonicalTag, EvidenceKind, EvidenceTag>(
     raw: RawPreparedStore,
@@ -241,7 +373,7 @@ impl<Kind, Tag> PublishedCanonicalStore<Kind, Tag> {
     where
         SlotTag: Copy + Send + Sync + 'static,
     {
-        sequence_view(self.raw.aggregate().get(slot.raw)?)
+        project_sequence_view(self.raw.aggregate().lookup_member(slot.raw)?)
     }
 
     /// Resolves one binary block.
@@ -249,7 +381,7 @@ impl<Kind, Tag> PublishedCanonicalStore<Kind, Tag> {
     where
         SlotTag: Copy + Send + Sync + 'static,
     {
-        bytes_view(self.raw.aggregate().get(slot.raw)?)
+        project_bytes_view(self.raw.aggregate().lookup_member(slot.raw)?)
     }
 
     /// Resolves one UTF-8 block.
@@ -257,7 +389,7 @@ impl<Kind, Tag> PublishedCanonicalStore<Kind, Tag> {
     where
         SlotTag: Copy + Send + Sync + 'static,
     {
-        utf8_view(self.raw.aggregate().get(slot.raw)?)
+        project_utf8_view(self.raw.aggregate().lookup_member(slot.raw)?)
     }
 
     /// Resolves one canonical record block.
@@ -268,7 +400,7 @@ impl<Kind, Tag> PublishedCanonicalStore<Kind, Tag> {
     where
         SlotTag: Copy + Send + Sync + 'static,
     {
-        canonical_record_view(self.raw.aggregate().get(slot.raw)?)
+        project_canonical_record_view(self.raw.aggregate().lookup_member(slot.raw)?)
     }
 }
 
@@ -350,7 +482,7 @@ impl<Kind, Tag> PublishedOutcomeEvidenceStore<Kind, Tag> {
     where
         SlotTag: Copy + Send + Sync + 'static,
     {
-        sequence_view(self.raw.aggregate().get(slot.raw)?)
+        project_sequence_view(self.raw.aggregate().lookup_member(slot.raw)?)
     }
 
     /// Resolves one binary block.
@@ -358,7 +490,7 @@ impl<Kind, Tag> PublishedOutcomeEvidenceStore<Kind, Tag> {
     where
         SlotTag: Copy + Send + Sync + 'static,
     {
-        bytes_view(self.raw.aggregate().get(slot.raw)?)
+        project_bytes_view(self.raw.aggregate().lookup_member(slot.raw)?)
     }
 
     /// Resolves one UTF-8 block.
@@ -366,7 +498,7 @@ impl<Kind, Tag> PublishedOutcomeEvidenceStore<Kind, Tag> {
     where
         SlotTag: Copy + Send + Sync + 'static,
     {
-        utf8_view(self.raw.aggregate().get(slot.raw)?)
+        project_utf8_view(self.raw.aggregate().lookup_member(slot.raw)?)
     }
 
     /// Resolves one outcome-evidence record block.
@@ -377,7 +509,7 @@ impl<Kind, Tag> PublishedOutcomeEvidenceStore<Kind, Tag> {
     where
         SlotTag: Copy + Send + Sync + 'static,
     {
-        outcome_evidence_record_view(self.raw.aggregate().get(slot.raw)?)
+        project_outcome_evidence_record_view(self.raw.aggregate().lookup_member(slot.raw)?)
     }
 }
 
@@ -466,7 +598,7 @@ impl<Kind, Tag> PublishedOutcomeEvidenceStoreRef<'_, Kind, Tag> {
     where
         SlotTag: Copy + Send + Sync + 'static,
     {
-        sequence_view(self.raw.aggregate().get(slot.raw)?)
+        project_sequence_view(self.raw.aggregate().lookup_member(slot.raw)?)
     }
 
     /// Resolves one binary block.
@@ -474,7 +606,7 @@ impl<Kind, Tag> PublishedOutcomeEvidenceStoreRef<'_, Kind, Tag> {
     where
         SlotTag: Copy + Send + Sync + 'static,
     {
-        bytes_view(self.raw.aggregate().get(slot.raw)?)
+        project_bytes_view(self.raw.aggregate().lookup_member(slot.raw)?)
     }
 
     /// Resolves one UTF-8 block.
@@ -482,7 +614,7 @@ impl<Kind, Tag> PublishedOutcomeEvidenceStoreRef<'_, Kind, Tag> {
     where
         SlotTag: Copy + Send + Sync + 'static,
     {
-        utf8_view(self.raw.aggregate().get(slot.raw)?)
+        project_utf8_view(self.raw.aggregate().lookup_member(slot.raw)?)
     }
 
     /// Resolves one outcome-evidence record block.
@@ -493,7 +625,7 @@ impl<Kind, Tag> PublishedOutcomeEvidenceStoreRef<'_, Kind, Tag> {
     where
         SlotTag: Copy + Send + Sync + 'static,
     {
-        outcome_evidence_record_view(self.raw.aggregate().get(slot.raw)?)
+        project_outcome_evidence_record_view(self.raw.aggregate().lookup_member(slot.raw)?)
     }
 
     /// Returns the typed root reference.

@@ -67,7 +67,7 @@ use block_table::try_share_retained_block_after_admission;
 pub(crate) use block_table::{
     BlockEmplacer, BlockPlacement, CanonicalRetainedSlot, OutcomeEvidenceRetainedSlot,
     PublishedCanonicalAggregate, PublishedOutcomeEvidenceAggregate, RetainedBlockTablePlan,
-    RetainedClosureSession, RetainedEvidenceClosureSession,
+    RetainedClosureSession, RetainedEvidenceClosureSession, RetainedLookupMember,
 };
 use block_table::{
     PublishedRetainedAggregate, QualifiedRetainedBlockTablePlan, RetainedTableAllocation,

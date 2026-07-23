@@ -10,6 +10,14 @@ documentation.workspace = true
 authors.workspace = true
 description.workspace = true
 
+[features]
+_u4c-collector = []
+
+[[test]]
+name = "u4c_collector"
+path = "tests/u4c_collector.rs"
+required-features = ["_u4c-collector"]
+
 [dependencies]
 triomphe.workspace = true
 scopeguard.workspace = true
