@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-07-16
-updated: 2026-07-21
+updated: 2026-07-23
 authors:
   - Codex
 decision_type: architecture
@@ -947,12 +947,14 @@ algorithm above; they do not hardcode platform byte counts.
 
 ### Option K: Replace the concrete store with a complex schema-generated typed arena
 
-A generated arena could encode complex records more directly, but would add a larger ownership and
-authoring surface before real canonical producers falsify the smaller store. It is not an automatic
-fallback. U4's complex-schema tracer must stop the cutover and amend this ADR if the selected store
-requires extra hidden owned allocations, unacceptable copies, non-zero-copy hot views, or materially
-inflated authoring code; a sealed schema-generated arena is the explicit redesign direction for that
-review. U4c records both candidates on the same fixtures and applies all of these exact thresholds:
+A generated arena could encode complex records more directly, but would add a second ownership and
+authoring model before real canonical producers falsify the selected store. It is a redesign direction,
+not a speculative comparison implementation or an automatic fallback. U4's complex-schema tracers must
+stop the cutover and amend this ADR if real OBJ, glTF, edit, snapshot, or facade producers demonstrate
+hidden owned allocations, unacceptable copies, non-zero-copy hot views, unbounded lookup work, or an
+authoring interface that cannot be simplified without weakening the retained-store invariants.
+
+U4c measures the selected concrete store against these exact behavioral thresholds:
 
 | Counter | Required concrete-store result |
 | --- | --- |
@@ -960,19 +962,26 @@ review. U4c records both candidates on the same fixtures and applies all of thes
 | Typed hot view | `0` allocations, `0` per-element decodes, and `O(1)` checked lookup/variant dispatch |
 | Schema plumbing | `0` extra owned allocations created solely for schema plumbing |
 | Producer operation count | `<= semantic_cells + references + 3 * blocks` |
-| Handwritten adapter size | Both normalized non-test adapter LOC and lexical-token counts satisfy integer `2 * concrete <= 3 * candidate` |
 
 Any threshold violation stops U4 and requires an ADR amendment before implementation continues; it
-cannot be waived as an implementation detail.
+cannot be waived as an implementation detail. A violation may justify the typed-arena redesign, but U4c
+does not require Baozi to construct a second production-shaped store merely to compare implementation
+size.
 
 ### U4c Reproducible Falsification Gate
 
-The U4c comparison is executable repository evidence, not a prose or reviewer estimate. The checked-
-in `docs/conformance/u4c-metrics.toml` specification freezes its schema revision, exact candidate and
-concrete source allowlists, fixture and expected semantic-digest values, event taxonomy, tool
-versions, and thresholds. The pinned command is
-`cargo run --locked -p baozi-xtask -- u4c-metrics --spec docs/conformance/u4c-metrics.toml`; any
-unlisted file, fixture-digest drift, tool drift, or counter-taxonomy drift invalidates the result.
+The U4c falsification gate is executable repository evidence, not a prose or reviewer estimate. The
+checked-in `docs/conformance/u4c-metrics.toml` specification freezes its schema revision, selected-
+implementation source closure, fixture and expected semantic-transcript/digest values, per-field
+mutations, event taxonomy, toolchain/build/allocator identity, and thresholds. Its closure manifest
+must cover the exact resolved dependency graph, local source and manifest inputs, registry package
+identities and checksums, build scripts, procedural macros, generated outputs, target and profile
+configuration, and the measurement harness itself; discovered inputs and the frozen manifest must
+match exactly. The pinned command is
+`cargo run -j 1 --locked -p baozi-xtask -- u4c-metrics --spec docs/conformance/u4c-metrics.toml`; any
+unlisted or missing input, fixture-digest drift, tool/build drift, or counter-taxonomy drift invalidates
+the result. Qualification is derived from the complete observation and coverage mapping; neither the
+specification nor a diagnostic probe may declare itself qualifying with an authored boolean.
 
 The metric vocabulary is exact:
 
@@ -983,7 +992,7 @@ The metric vocabulary is exact:
 - one `reference` is one target-table-qualified slot edge occurrence in the frozen semantic output,
   including root/directory, record, and reference-table edges. Aliases count by occurrence; transient
   validation or lookup repetitions do not count; and
-- one `block` is one concrete retained block membership reachable from the candidate's target root,
+- one `block` is one concrete retained block membership reachable from the selected table's target root,
   whether `New` or `Inherited`. The table aggregate itself is not a block.
 
 The producer tracer has exactly five counted event kinds: `write_semantic_cell`, `write_reference`,
@@ -1006,14 +1015,13 @@ admitted outcome envelope is schema-only; the selected concrete store must produ
 cumulative allocations. Concurrent noise, RSS sampling, and heap-profile inference are not accepted
 substitutes.
 
-Adapter size is measured after the exact pinned `rustfmt` version formats both source allowlists.
-Logical LOC excludes tests, generated files, blank lines, and comment-only lines. Lexical tokens use
-the exact pinned `rustc_lexer` package version and exclude whitespace and comments. Both gates use
-integer arithmetic with no rounding: `2 * concrete <= 3 * candidate`. Before measurement, an
-independent reviewer freezes the spec and expected digests and confirms that both candidates expose
-the same fixtures, semantics, typed views, validation proof, and required producer functionality.
-Dead code, padding code, deliberately duplicated helpers, and functionality omitted from either
-candidate invalidate the comparison.
+Before measurement, an independent reviewer freezes the scenarios, hand-authored semantic transcripts,
+expected digests, per-field mutations, closure manifest, and coverage mapping. The reviewer confirms
+that the sealed collector observes real retained-store construction, lookup, sharing, physical-account
+snapshots, and allocator behavior without accepting caller-supplied counts or implementation callbacks.
+Dead code, padding code, fixture-only bypasses, incomplete closure discovery, or omitted production
+behavior invalidate the evidence. Source size may guide maintainability work, but LOC, token count, and
+an unexercised alternate layout are not architecture or release gates.
 
 ## Consequences
 
@@ -1090,7 +1098,7 @@ Negative:
 | Foreign-account allocation enters one Scene | Critical | account-branded storage and fail-before-access/publication validation |
 | Account handle drops while storage remains | Critical | each bound lease retains account state until final payload release |
 | Facade creates an unbounded/global/per-request factory | Critical | one long-lived facade runtime owns a finite documented factory and creates bounded private accounts per import; low-level/advanced APIs remain explicit |
-| The concrete store passes qualitative review but hides copy/view/authoring regressions | Critical | run the checked-in U4c spec through the pinned xtask on frozen equivalent candidates and stop/amend on any exact copy, allocation, fixed-event lookup, producer-count, or integer adapter-size threshold violation |
+| The concrete store passes qualitative review but hides copy/view/authoring regressions | Critical | run the checked-in U4c spec through the pinned xtask over the sealed collector, independently frozen semantic evidence, and exact selected-implementation closure; stop/amend on any copy, allocation, fixed-event lookup, producer-count, closure, or no-bypass threshold violation |
 
 ## Success Metrics
 
@@ -1117,7 +1125,7 @@ Negative:
 | Facade boundedness | common facade imports use one runtime-held bounded factory and one private account per import without exposing physical types | default/custom profile, repeated-import, lifetime, and API-shape tests |
 | Shareable-kind closure | only sealed scalar-sequence, bytes, and UTF-8 leaves, including geometry index scalar payload, inherit physical backing; every record/directory/reference/header/generation-local lookup-index structure is rebuilt | positive leaf inheritance plus negative `RecordBlock`/structural-kind compile-fail and runtime probes |
 | Capacity threat boundary | runtime plans are governed by the capacity-policy revision and enforce request/observed envelopes; a separate source anchor pairs that policy with the concrete-store revision for repository-managed rustc/libstd/target/profile/allocator evidence, while unknown/custom paths remain `Unverified`; over-envelope postcheck prevents publication but makes no transient-RSS claim | source-anchor drift, explicit allocator probe, custom/unknown classification, overgrant drop, and subprocess-limit fixtures |
-| U4c falsification | the frozen spec proves `0/0` hot-leaf copy/allocation, `0/0` hot-view allocation/decode, fixed `<= 8` lookup events at `N/2N/4N`, zero tracer-proven schema-only allocations, producer-event bounds, and `2 * concrete <= 3 * candidate` for both normalized LOC and tokens | pinned xtask, allocator/account tracer, exact event taxonomy, independently frozen fixtures/digests, pinned rustfmt and `rustc_lexer` |
+| U4c falsification | the frozen spec proves `0/0` hot-leaf copy/allocation, `0/0` hot-view allocation/decode, fixed `<= 8` lookup events at `N/2N/4N`, zero tracer-proven schema-only allocations, producer-event bounds, exact source/build/environment closure, and a sealed no-bypass collector | pinned xtask, allocator/account tracer, exact event taxonomy, independently frozen transcripts/digests/mutations, closure manifest, and toolchain/build/allocator identity |
 | Fallback representation | sealed key-bearing dimension/phase cells plus a complete global-evidence header; checked semantic aggregate layout, independent actual-allocation `CapacityPlan`s, and ledger-first/physical-second complete aggregate admission before retained payload/evidence allocator entry | key normalization/catalog lifetime/post-plugin-unload query, brand-exclusion vectors, full-cell/header layout and global-field tests, actual-backing plan plus aggregate-envelope/block overflow probes, no nested locks, no shared linearization point, no hardcoded ABI, and no single-backing assumption; small account-bound owner after bootstrap and by-value `SessionStartError` before it |
 
 ## Acceptance Criteria
@@ -1322,20 +1330,46 @@ Negative:
   first canonical families and per-field mutations; layout permutations are supplemental. Large-
   corpus and cross-platform expansion remains U8 evidence rather than a substitute for these vectors.
 - U4c runs the checked-in `docs/conformance/u4c-metrics.toml` through the pinned `baozi-xtask`
-  subcommand. The independently frozen spec fixes fixtures/digests, candidate and concrete source
-  allowlists, event taxonomy, rustfmt and `rustc_lexer` versions, and candidate parity before
-  measurement. The concrete store must produce zero copied bytes/new backing allocations for an
-  unchanged hot leaf; zero allocation/per-element decode for a hot view; at most eight fixed-taxonomy
-  lookup events with the same maximum at `N`, `2N`, and `4N`; zero schema-only allocation under the
-  single-thread allocator/account tracer; producer events no greater than
-  `semantic_cells + references + 3 * blocks`; and, for both normalized non-test LOC and lexical
-  tokens, `2 * concrete <= 3 * candidate`. Tests use this ADR's exact cell/reference/block/event
-  definitions and reject fixture/tool/digest drift, dead or padding code, and unequal functionality.
-  Any violation stops U4 and requires an ADR amendment.
+  subcommand. The independently frozen spec fixes semantic transcripts/digests/mutations, scenarios,
+  selected-implementation source/build/environment closure, event taxonomy, collector identity, and
+  coverage mapping before measurement. The concrete store must produce zero copied bytes/new backing
+  allocations for an unchanged hot leaf; zero allocation/per-element decode for a hot view; at most
+  eight fixed-taxonomy lookup events with the same maximum at `N`, `2N`, and `4N`; zero schema-only
+  allocation under the single-thread allocator/account tracer; and producer events no greater than
+  `semantic_cells + references + 3 * blocks`. Tests use this ADR's exact cell/reference/block/event
+  definitions and reject closure/tool/build/fixture/digest drift, caller-supplied counts, measurement
+  callbacks, fixture-only bypasses, dead or padding code, and incomplete production coverage. U4
+  qualification is derived only after all required U4d producer and consumer scenarios are mapped to
+  passing evidence. Any violation stops U4 and requires an ADR amendment. The separate
+  `u4c-lifecycle-diagnostic.toml` probe remains diagnostic-only and cannot satisfy this criterion.
 - Import, postprocess, snapshot/golden adapters, fuzz targets, facade workflows, and every format are
   migrated in the canonical Scene cutover before the legacy reservation-transfer path is deleted.
 
 ## Amendment History
+
+### 2026-07-23: Make U4c behavior-oriented and single-implementation
+
+- Affected headings: `Option K`, `U4c Reproducible Falsification Gate`, the concrete-store risk,
+  `U4c falsification`, and the U4c acceptance criterion.
+- Previous rule: U4c required Baozi to implement and freeze equivalent concrete-store and generated-
+  arena candidates, then used normalized LOC and lexical-token ratios as release gates.
+- New rule: U4c freezes the selected implementation's complete source/build/environment closure and
+  independently authored semantic evidence, then measures copy, allocation, decode, lookup,
+  producer-event, physical-account, and no-bypass behavior through a sealed collector. Qualification is
+  derived from complete U4d scenario coverage. A generated typed arena remains an explicit redesign
+  direction only if real producers falsify the selected store.
+- Compatibility impact: the production `u4c-metrics.toml` schema and comparator no longer carry
+  alternate-candidate allowlists, candidate-parity fields, `rustfmt`/`rustc_lexer` measurement pins, or
+  LOC/token thresholds. Existing diagnostic evidence remains non-qualifying.
+- Supersession: this amendment replaces only the fair-candidate, source-size, and pinned source-metric
+  U4c clauses recorded by the 2026-07-19 amendment. Its fallback, poison, index, and other retained-
+  ownership rules remain in force.
+- Required review: exact closure discovery, toolchain/build/allocator identity, independent semantic
+  transcripts/digests/mutations, sealed event collection, `N`/`2N`/`4N` lookup evidence, sharing/copy
+  evidence, physical-account snapshots, and real producer/consumer coverage mapping.
+- Rationale: behavior and resource invariants determine whether the retained-store interface is sound.
+  A speculative second implementation and code-size ratio add a parallel architecture without proving
+  correctness, depth, or maintainability; actual producer friction is the appropriate redesign signal.
 
 ### 2026-07-21: Separate logical capacity from geometric retained growth
 
