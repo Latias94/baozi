@@ -1,4 +1,4 @@
-//! U4c lifecycle-diagnostic probe collection and contract validation.
+//! U4c lifecycle diagnostics and measurement-scope admission.
 
 mod spec;
 
@@ -188,6 +188,33 @@ pub fn collect_repository(
     repository_root: &Path,
     specification_path: &Path,
 ) -> Result<Value, String> {
+    let evidence_scope = spec::read_evidence_scope(repository_root, specification_path)?;
+    collect_evidence_scope(&evidence_scope, repository_root, specification_path)
+}
+
+fn collect_evidence_scope(
+    evidence_scope: &str,
+    repository_root: &Path,
+    specification_path: &Path,
+) -> Result<Value, String> {
+    match evidence_scope {
+        "lifecycle-diagnostic" => {
+            collect_lifecycle_diagnostic(repository_root, specification_path)
+        }
+        "u4c-production" => Err(
+            "U4c production specifications are not accepted until the sealed collector and exact closure discovery are implemented; production evidence cannot qualify U4 exit"
+                .to_owned(),
+        ),
+        evidence_scope => Err(format!(
+            "unsupported U4c evidence_scope {evidence_scope:?}; expected \"lifecycle-diagnostic\" or \"u4c-production\""
+        )),
+    }
+}
+
+fn collect_lifecycle_diagnostic(
+    repository_root: &Path,
+    specification_path: &Path,
+) -> Result<Value, String> {
     let specification = spec::LifecycleDiagnosticSpec::load(repository_root, specification_path)?;
     specification.verify_toolchain(repository_root)?;
     let report = collect_v1_probe(repository_root)?;
@@ -281,6 +308,16 @@ mod tests {
         let stdout = format!("test probe logs\n{PROBE_PREFIX}{metrics}\n");
 
         assert_eq!(parse_probe_stdout(&stdout), Ok(metrics));
+    }
+
+    #[test]
+    fn production_scope_fails_before_any_probe_or_contract_claim() {
+        let missing = Path::new("path-that-must-not-be-read");
+        let error = collect_evidence_scope("u4c-production", missing, missing)
+            .expect_err("production scope must fail closed");
+
+        assert!(error.contains("not accepted"), "{error}");
+        assert!(error.contains("cannot qualify U4 exit"), "{error}");
     }
 
     #[test]

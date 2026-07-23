@@ -23,6 +23,7 @@ const UNOBSERVED_FACTS: &[&str] = &[
     "lookup-events",
     "producer-events",
     "complete-measurement-closure",
+    "handle-relative-input-closure",
     "target-identity",
     "profile-identity",
     "libstd-identity",
@@ -99,6 +100,45 @@ struct CoverageSpec {
 struct SourceAnchor {
     path: String,
     sha256: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct EvidenceScopeEnvelope {
+    evidence_scope: String,
+}
+
+/// Reads only the routing discriminator for a non-qualifying diagnostic command.
+///
+/// Production evidence must use handle-relative input discovery and must not reuse this
+/// canonicalize-then-open path reader.
+pub(super) fn read_evidence_scope(
+    repository_root: &Path,
+    specification_path: &Path,
+) -> Result<String, String> {
+    let repository_root = canonical_directory(repository_root, "repository root")?;
+    let specification_path = if specification_path.is_absolute() {
+        specification_path.to_path_buf()
+    } else {
+        repository_root.join(specification_path)
+    };
+    let specification_path =
+        canonical_file_within(&repository_root, &specification_path, "U4c specification")?;
+    let contents = fs::read_to_string(&specification_path).map_err(|error| {
+        format!(
+            "failed to read U4c specification {}: {error}",
+            specification_path.display()
+        )
+    })?;
+    parse_evidence_scope(&contents)
+}
+
+fn parse_evidence_scope(contents: &str) -> Result<String, String> {
+    let envelope = toml::from_str::<EvidenceScopeEnvelope>(contents)
+        .map_err(|error| format!("failed to read U4c evidence_scope: {error}"))?;
+    if envelope.evidence_scope.is_empty() {
+        return Err("U4c evidence_scope must not be empty".to_owned());
+    }
+    Ok(envelope.evidence_scope)
 }
 
 impl LifecycleDiagnosticSpec {
@@ -397,7 +437,62 @@ fn validated_relative_path<'a>(path: &'a str, label: &str) -> Result<&'a Path, S
             path.display()
         ));
     }
+    for component in path.components() {
+        let Component::Normal(component) = component else {
+            return Err(format!(
+                "{label} path {} must not contain a prefix, root, or dot component",
+                path.display()
+            ));
+        };
+        let component = component
+            .to_str()
+            .ok_or_else(|| format!("{label} path {} must be valid UTF-8", path.display()))?;
+        validate_portable_path_component(component, label, path)?;
+    }
     Ok(path)
+}
+
+fn validate_portable_path_component(
+    component: &str,
+    label: &str,
+    path: &Path,
+) -> Result<(), String> {
+    let has_forbidden_character = component.bytes().any(|byte| {
+        byte.is_ascii_control() || matches!(byte, b'<' | b'>' | b':' | b'"' | b'|' | b'?' | b'*')
+    });
+    if component.is_empty()
+        || component != component.trim()
+        || component.ends_with('.')
+        || has_forbidden_character
+        || is_windows_reserved_name(component)
+    {
+        return Err(format!(
+            "{label} path {} contains a non-portable repository path component {component:?}",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
+fn is_windows_reserved_name(component: &str) -> bool {
+    let stem = component
+        .split('.')
+        .next()
+        .unwrap_or(component)
+        .trim_end_matches([' ', '.']);
+    let stem = stem.to_ascii_uppercase();
+    matches!(
+        stem.as_str(),
+        "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
+    ) || stem
+        .strip_prefix("COM")
+        .or_else(|| stem.strip_prefix("LPT"))
+        .is_some_and(|suffix| {
+            matches!(
+                suffix,
+                "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "¹" | "²" | "³"
+            )
+        })
 }
 
 fn validate_exact_list(label: &str, actual: &[String], expected: &[&str]) -> Result<(), String> {
@@ -462,11 +557,13 @@ mod tests {
     #[test]
     fn checked_in_specification_has_only_lifecycle_diagnostic_scope() {
         let repository_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let specification = LifecycleDiagnosticSpec::load(
-            &repository_root,
-            Path::new("docs/conformance/u4c-lifecycle-diagnostic.toml"),
-        )
-        .expect("checked-in U4c lifecycle diagnostic specification and source anchors");
+        let specification_path = Path::new("docs/conformance/u4c-lifecycle-diagnostic.toml");
+        assert_eq!(
+            read_evidence_scope(&repository_root, specification_path),
+            Ok(LIFECYCLE_DIAGNOSTIC_SCOPE.to_owned())
+        );
+        let specification = LifecycleDiagnosticSpec::load(&repository_root, specification_path)
+            .expect("checked-in U4c lifecycle diagnostic specification and source anchors");
 
         assert_eq!(specification.evidence_scope(), LIFECYCLE_DIAGNOSTIC_SCOPE);
         assert_eq!(specification.fixture_id(), COMPLEX_FIXTURE_ID);
@@ -483,10 +580,25 @@ mod tests {
     }
 
     #[test]
+    fn recognizes_production_scope_only_for_fail_closed_routing() {
+        assert_eq!(
+            parse_evidence_scope("evidence_scope = \"u4c-production\"\nfuture_field = true\n"),
+            Ok("u4c-production".to_owned())
+        );
+        assert!(parse_evidence_scope("evidence_scope = \"\"\n").is_err());
+    }
+
+    #[test]
     fn rejects_non_normal_anchor_paths_and_hashes() {
         assert!(validated_relative_path("../Cargo.toml", "anchor").is_err());
         assert!(validated_relative_path("crates\\baozi-core", "anchor").is_err());
         assert!(validated_relative_path("crates//baozi-core", "anchor").is_err());
+        assert!(validated_relative_path("inputs/store.rs:payload", "anchor").is_err());
+        assert!(validated_relative_path("inputs/CON.txt", "anchor").is_err());
+        assert!(validated_relative_path("inputs/CON .txt", "anchor").is_err());
+        assert!(validated_relative_path("inputs/COM¹.txt", "anchor").is_err());
+        assert!(validated_relative_path("inputs/trailing. ", "anchor").is_err());
+        assert!(validated_relative_path("inputs/control\u{1f}.rs", "anchor").is_err());
         assert!(validated_relative_path("crates/baozi-core", "anchor").is_ok());
         assert!(!is_lowercase_sha256("A"));
         assert!(is_lowercase_sha256(&"a".repeat(64)));

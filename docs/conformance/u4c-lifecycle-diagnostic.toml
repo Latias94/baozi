@@ -32,6 +32,7 @@ unobserved = [
     "lookup-events",
     "producer-events",
     "complete-measurement-closure",
+    "handle-relative-input-closure",
     "target-identity",
     "profile-identity",
     "libstd-identity",
@@ -76,11 +77,11 @@ sha256 = "8931bf6138fcf72db936894634620e124aa501d925f0c09cc938886c25df5ec0"
 
 [[source_anchors]]
 path = "crates/baozi-xtask/src/u4c_metrics.rs"
-sha256 = "9b18a1f6c9209d9d38a95b36b71c4f0bab070eee82594716e417809b243bd1c7"
+sha256 = "f52dd9388acb8108323794b44d4e458597a61e1627a8755f507bcd5b602b7609"
 
 [[source_anchors]]
 path = "crates/baozi-xtask/src/u4c_metrics/spec.rs"
-sha256 = "fffeb9d3c51f71a0c03b5613c2e0b20065a36a90d4b8a5cf80619f534fa6a615"
+sha256 = "675059f206e433006f6248aa5dd15a3a889f6822322777dd682d2b987a55d469"
 
 [expected_metrics]
 schema_version = 1
