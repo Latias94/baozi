@@ -120,7 +120,7 @@ fn generic_retained_authority_remains_crate_private() {
     assert!(!production.contains("pub(crate) type RetainedAllocation"));
     assert!(production.contains("\npub(super) struct RetainedPart<"));
     assert!(!production.contains("\npub(crate) struct RetainedPart<"));
-    assert!(production.contains("\nenum RetainedClosureValidationError"));
+    assert!(production.contains("\npub(super) enum RetainedClosureValidationError"));
     for forbidden in [
         "RetainedAllocation",
         "RetainedPart",
