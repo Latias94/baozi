@@ -1,13 +1,17 @@
-//! U4c metrics V1 probe collection and contract validation.
+//! U4c lifecycle-diagnostic probe collection and contract validation.
+
+mod spec;
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::env;
 use std::ffi::OsString;
 use std::path::Path;
 use std::process::Command;
 
-const PROBE_PREFIX: &str = "BAOZI_U4C_METRICS_V1=";
+pub(super) const PROBE_PREFIX: &str = "BAOZI_U4C_METRICS_V1=";
+pub(super) const PROBE_TARGET: &str =
+    "canonical_scene::store::tests::canonical_store_u4c_metrics_v1_probe";
 const PROBE_ARGUMENTS: &[&str] = &[
     "test",
     "-j",
@@ -16,7 +20,7 @@ const PROBE_ARGUMENTS: &[&str] = &[
     "-p",
     "baozi-core",
     "--lib",
-    "canonical_scene::store::tests::canonical_store_u4c_metrics_v1_probe",
+    PROBE_TARGET,
     "--",
     "--ignored",
     "--exact",
@@ -26,7 +30,7 @@ const PROBE_ARGUMENTS: &[&str] = &[
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct MetricsV1 {
+pub(super) struct MetricsV1 {
     schema_version: u64,
     fixture_schema_revision: u64,
     canonical_block_count: u64,
@@ -129,32 +133,9 @@ impl MetricsV1 {
                 self.schema_version
             ));
         }
-
-        if self.fixture_schema_revision != 1 {
-            return Err(format!(
-                "U4c metrics V1 fixture_schema_revision must be 1, found {}",
-                self.fixture_schema_revision
-            ));
-        }
-
-        if self.canonical_block_count != 26 {
-            return Err(format!(
-                "U4c metrics V1 canonical_block_count must be 26, found {}",
-                self.canonical_block_count
-            ));
-        }
-
-        if self.outcome_evidence_block_count != 1 {
-            return Err(format!(
-                "U4c metrics V1 outcome_evidence_block_count must be 1, found {}",
-                self.outcome_evidence_block_count
-            ));
-        }
-
         if !self.root_retained {
             return Err("U4c metrics V1 root_retained must be true".to_owned());
         }
-
         if self.generation_reservations != 1 {
             return Err(format!(
                 "U4c metrics V1 generation_reservations must be 1, found {}",
@@ -166,16 +147,14 @@ impl MetricsV1 {
         if !ledger.terminal_success {
             return Err("U4c metrics V1 ledger.terminal_success must be true".to_owned());
         }
-
-        for (field, actual, expected) in [
-            ("dimension_count", ledger.dimension_count, 1),
-            ("current_live_bytes", ledger.current_live_bytes, 0),
-            ("active_reservations", ledger.active_reservations, 0),
-            ("pending_publication", ledger.pending_publication, 0),
+        for (field, actual) in [
+            ("current_live_bytes", ledger.current_live_bytes),
+            ("active_reservations", ledger.active_reservations),
+            ("pending_publication", ledger.pending_publication),
         ] {
-            if actual != expected {
+            if actual != 0 {
                 return Err(format!(
-                    "U4c metrics V1 ledger.{field} must be {expected}, found {actual}"
+                    "U4c metrics V1 ledger.{field} must be 0 after terminal handoff, found {actual}"
                 ));
             }
         }
@@ -202,8 +181,29 @@ impl MetricsV1 {
     }
 }
 
-/// Runs the fixed U4c metrics probe from a repository root and validates its report.
-pub fn collect_repository(repository_root: &Path) -> Result<Value, String> {
+/// Runs the V1 lifecycle probe against a checked-in diagnostic specification.
+///
+/// This is intentionally not U4 exit evidence. The specification must state that scope explicitly.
+pub fn collect_repository(
+    repository_root: &Path,
+    specification_path: &Path,
+) -> Result<Value, String> {
+    let specification = spec::LifecycleDiagnosticSpec::load(repository_root, specification_path)?;
+    specification.verify_toolchain(repository_root)?;
+    let report = collect_v1_probe(repository_root)?;
+    specification.verify_source_anchors(repository_root)?;
+    specification.verify_report(&report)?;
+
+    Ok(json!({
+        "evidence_scope": specification.evidence_scope(),
+        "qualifies_u4_exit": false,
+        "specification_sha256": specification.specification_sha256(),
+        "fixture": specification.fixture_id(),
+        "metrics": report,
+    }))
+}
+
+fn collect_v1_probe(repository_root: &Path) -> Result<MetricsV1, String> {
     let cargo = env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
     let output = Command::new(cargo)
         .args(PROBE_ARGUMENTS)
@@ -221,11 +221,17 @@ pub fn collect_repository(repository_root: &Path) -> Result<Value, String> {
 
     let stdout = std::str::from_utf8(&output.stdout)
         .map_err(|error| format!("U4c metrics probe emitted non-UTF-8 stdout: {error}"))?;
-    parse_probe_stdout(stdout)
+    parse_probe_stdout_metrics(stdout)
 }
 
 /// Parses and validates the one V1 metrics report emitted by the core probe.
 pub fn parse_probe_stdout(stdout: &str) -> Result<Value, String> {
+    let report = parse_probe_stdout_metrics(stdout)?;
+    serde_json::to_value(report)
+        .map_err(|error| format!("U4c metrics probe could not serialize V1 metrics: {error}"))
+}
+
+fn parse_probe_stdout_metrics(stdout: &str) -> Result<MetricsV1, String> {
     let mut payload = None;
     let mut prefix_matches = 0usize;
 
@@ -251,8 +257,7 @@ pub fn parse_probe_stdout(stdout: &str) -> Result<Value, String> {
     let report = serde_json::from_str::<MetricsV1>(payload)
         .map_err(|error| format!("U4c metrics probe emitted invalid V1 JSON: {error}"))?;
     report.validate()?;
-    serde_json::to_value(report)
-        .map_err(|error| format!("U4c metrics probe could not serialize V1 metrics: {error}"))
+    Ok(report)
 }
 
 fn stderr_diagnostic(stderr: &[u8]) -> String {
@@ -349,6 +354,14 @@ mod tests {
         let mut metrics = valid_metrics();
         metrics["ledger"]["pending_publication"] = json!(1);
 
+        assert!(parse_probe_stdout(&probe_stdout(&metrics)).is_err());
+
+        let mut metrics = valid_metrics();
+        metrics["root_retained"] = json!(false);
+        assert!(parse_probe_stdout(&probe_stdout(&metrics)).is_err());
+
+        let mut metrics = valid_metrics();
+        metrics["generation_reservations"] = json!(0);
         assert!(parse_probe_stdout(&probe_stdout(&metrics)).is_err());
     }
 

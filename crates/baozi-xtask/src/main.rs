@@ -4,20 +4,23 @@ use std::process::ExitCode;
 
 const USAGE: &str = concat!(
     "usage: cargo run -p baozi-xtask -- ",
-    "<crate-graph-check|native-fs-check|runtime-admission-check|u4c-metrics>"
+    "<crate-graph-check|native-fs-check|runtime-admission-check>\n",
+    "       cargo run -p baozi-xtask -- u4c-metrics --spec <path>"
 );
 
 fn main() -> ExitCode {
-    let mut arguments = env::args().skip(1);
-    match (arguments.next().as_deref(), arguments.next()) {
-        (Some("help" | "-h" | "--help"), None) => {
+    let arguments = env::args().skip(1).collect::<Vec<_>>();
+    match arguments.as_slice() {
+        [help] if matches!(help.as_str(), "help" | "-h" | "--help") => {
             println!("{USAGE}");
             ExitCode::SUCCESS
         }
-        (Some("crate-graph-check"), None) => run_crate_graph_check(),
-        (Some("native-fs-check"), None) => run_native_fs_check(),
-        (Some("runtime-admission-check"), None) => run_runtime_admission_check(),
-        (Some("u4c-metrics"), None) => run_u4c_metrics(),
+        [command] if command == "crate-graph-check" => run_crate_graph_check(),
+        [command] if command == "native-fs-check" => run_native_fs_check(),
+        [command] if command == "runtime-admission-check" => run_runtime_admission_check(),
+        [command, flag, specification] if command == "u4c-metrics" && flag == "--spec" => {
+            run_u4c_metrics(Path::new(specification))
+        }
         _ => {
             eprintln!("{USAGE}");
             ExitCode::from(2)
@@ -25,7 +28,7 @@ fn main() -> ExitCode {
     }
 }
 
-fn run_u4c_metrics() -> ExitCode {
+fn run_u4c_metrics(specification_argument: &Path) -> ExitCode {
     let current_directory = match env::current_dir() {
         Ok(path) => path,
         Err(error) => {
@@ -37,8 +40,7 @@ fn run_u4c_metrics() -> ExitCode {
         eprintln!("failed to find a Baozi repository root from {current_directory:?}");
         return ExitCode::FAILURE;
     };
-
-    match baozi_xtask::u4c_metrics::collect_repository(&repository_root) {
+    match baozi_xtask::u4c_metrics::collect_repository(&repository_root, specification_argument) {
         Ok(metrics) => {
             println!("{metrics}");
             ExitCode::SUCCESS

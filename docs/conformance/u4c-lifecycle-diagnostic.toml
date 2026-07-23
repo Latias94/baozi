@@ -1,0 +1,147 @@
+# This schema freezes only the existing V1 lifecycle diagnostic. It is not U4 exit evidence.
+# Each source-anchor SHA-256 uses UTF-8 text after CRLF is normalized to LF.
+schema_version = 1
+evidence_scope = "lifecycle-diagnostic"
+
+[probe]
+id = "canonical-store-u4c-metrics-v1"
+test_target = "canonical_scene::store::tests::canonical_store_u4c_metrics_v1_probe"
+report_prefix = "BAOZI_U4C_METRICS_V1="
+
+[toolchain]
+rustc_release = "1.97.1"
+host = "x86_64-pc-windows-msvc"
+
+[fixture]
+id = "canonical-store-complex-v1"
+source = "crates/baozi-core/src/canonical_scene/store/tests.rs"
+schema_revision = 1
+
+[accounting]
+baseline = "fresh-factory-and-account"
+release_boundary = "terminal-parts-drop"
+
+[coverage]
+qualifies_u4_exit = false
+observed = ["ledger", "physical-account", "handoff", "release"]
+unobserved = [
+    "semantic-digest",
+    "semantic-mutation-vectors",
+    "copy-events",
+    "decode-events",
+    "lookup-events",
+    "producer-events",
+    "complete-measurement-closure",
+    "target-identity",
+    "profile-identity",
+    "libstd-identity",
+    "allocator-identity",
+]
+
+[[source_anchors]]
+path = "Cargo.lock"
+sha256 = "435ab9e7d41c54d64fbc23fc24b19b266cccb6e3aa03f31c57a175d443666a4e"
+
+[[source_anchors]]
+path = "crates/baozi-core/Cargo.toml"
+sha256 = "31a65c478400f1ab094b390130dd04fd768ed54ce91c7b739d9847148a62a968"
+
+[[source_anchors]]
+path = "crates/baozi-core/src/canonical_scene/store/construction.rs"
+sha256 = "2d8a4c75511a623821540ef13283d24a2f9c5a31a001653b291f88bf9243ae40"
+
+[[source_anchors]]
+path = "crates/baozi-core/src/canonical_scene/store/tests.rs"
+sha256 = "5782feb75527ba9e8bb7bac5c3404fab4c0ae277d159677e21f56e968d41c063"
+
+[[source_anchors]]
+path = "crates/baozi-operation/Cargo.toml"
+sha256 = "78784ca48d7f99e60493703b7279d5e20219077fff16febf7fb1952cb5aa3a6f"
+
+[[source_anchors]]
+path = "crates/baozi-operation/src/concrete_store.rs"
+sha256 = "5f2021883c4b26f2523ed811e53a3c82358d97a21ae378af247a9118c2a6e323"
+
+[[source_anchors]]
+path = "crates/baozi-operation/src/retained.rs"
+sha256 = "48ca744e49c4e12acd3c00fbd55be7b5a54013e3a03b056d510dcbbaee4a312e"
+
+[[source_anchors]]
+path = "crates/baozi-xtask/Cargo.toml"
+sha256 = "7bb70dd9f2e744b649439833ae0b4e0e3f123ae626bde0bc1185b6f0c6527aa3"
+
+[[source_anchors]]
+path = "crates/baozi-xtask/src/main.rs"
+sha256 = "8931bf6138fcf72db936894634620e124aa501d925f0c09cc938886c25df5ec0"
+
+[[source_anchors]]
+path = "crates/baozi-xtask/src/u4c_metrics.rs"
+sha256 = "9b18a1f6c9209d9d38a95b36b71c4f0bab070eee82594716e417809b243bd1c7"
+
+[[source_anchors]]
+path = "crates/baozi-xtask/src/u4c_metrics/spec.rs"
+sha256 = "fffeb9d3c51f71a0c03b5613c2e0b20065a36a90d4b8a5cf80619f534fa6a615"
+
+[expected_metrics]
+schema_version = 1
+fixture_schema_revision = 1
+canonical_block_count = 26
+outcome_evidence_block_count = 1
+root_retained = true
+generation_reservations = 1
+
+[expected_metrics.ledger]
+terminal_success = true
+dimension_count = 1
+phase_count = 1
+current_live_bytes = 0
+peak_live_bytes = 24048
+active_reservations = 0
+current_evidence_bytes = 0
+peak_evidence_bytes = 416
+attempted = 68
+consumed = 68
+pending_publication = 0
+committed = 26
+committed_canonical_output = 26
+published_outcome_evidence = 2
+
+[expected_metrics.physical_account.before_prepare]
+live_retained_bytes = 0
+live_retained_allocations = 0
+peak_retained_bytes = 0
+peak_retained_allocations = 0
+total_admitted_retained_bytes = 0
+total_admitted_retained_allocations = 0
+poisoned = false
+
+[expected_metrics.physical_account.prepared]
+live_retained_bytes = 10896
+live_retained_allocations = 61
+peak_retained_bytes = 10968
+peak_retained_allocations = 62
+total_admitted_retained_bytes = 10968
+total_admitted_retained_allocations = 62
+poisoned = false
+
+[expected_metrics.physical_account.after_handoff]
+live_retained_bytes = 10896
+live_retained_allocations = 61
+peak_retained_bytes = 10968
+peak_retained_allocations = 62
+total_admitted_retained_bytes = 10968
+total_admitted_retained_allocations = 62
+poisoned = false
+
+[expected_metrics.physical_account.after_release]
+live_retained_bytes = 0
+live_retained_allocations = 0
+peak_retained_bytes = 10968
+peak_retained_allocations = 62
+total_admitted_retained_bytes = 10968
+total_admitted_retained_allocations = 62
+poisoned = false
+
+[expected_metrics.factory_after_release]
+live_accounts = 0
+total_admitted_accounts = 1

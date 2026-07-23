@@ -555,15 +555,18 @@ runtime behavior, public API, drop order, or probe semantics.
 #### U4c Metric Contract
 
 U4c exit requires a checked-in, production-oriented measurement specification using ADR 0042's
-physical-account and canonical vocabulary. The existing zero-argument `u4c-metrics` command is only
-a serial V1 retained-lifecycle diagnostic: it verifies the tracer's ledger/account/handoff/release
-snapshots with one nested `cargo test -j 1` and one test thread. It does not qualify a canonical
-cutover on its own; the frozen U4c collector and its U4d/U4e production-equivalent scenarios do.
-The specification freezes fixture digests, semantic mutation vectors, expected allocation/copy/decode/
-lookup observations, and the entire measurement closure: observer sources, schema and generator
-inputs, `build.rs`, procedural macros, generated-output hashes, and local path dependencies. An
-undeclared input or generated output fails closed. This guards the evidence implementation itself,
-not an arbitrary LOC or token ceiling.
+physical-account and canonical vocabulary. The checked-in
+`cargo run -j 1 --locked -p baozi-xtask -- u4c-metrics --spec docs/conformance/u4c-lifecycle-diagnostic.toml`
+command currently accepts only a versioned `lifecycle-diagnostic` specification. It checks the
+declared Rust/host identity, source-anchor digests, one serial V1 retained-lifecycle probe, and its
+exact ledger/account/handoff/release report; its machine-readable result sets
+`qualifies_u4_exit: false`. It is deliberately insufficient for a canonical cutover. U4 exit needs
+the separate `docs/conformance/u4c-metrics.toml` production specification, frozen collector, and
+U4d/U4e production-equivalent scenarios. That production specification must include fixture semantic
+digests, mutation vectors, allocation/copy/decode/lookup observations, and the complete measurement
+closure: observer sources, schema and generator inputs, `build.rs`, procedural macros,
+generated-output hashes, and local path dependencies. An undeclared input or generated output fails
+closed. This guards the evidence implementation itself, not an arbitrary LOC or token ceiling.
 
 One `semantic_cell` is one non-reference scalar unit in the frozen semantic transcript: each scalar-
 sequence element and each bytes/UTF-8 byte counts once, as does each stored non-reference record
@@ -828,7 +831,7 @@ Backend-only glTF safety research may run in parallel, but it is not a U4 depend
 | `cargo +nightly-2026-05-27 fuzz check` for every target | U1, U3-U9 | All fuzz harnesses remain compatible with each breaking cutover. |
 | Linux sanitizer smoke for every public parser plus registry/Scene/postprocess | U1, U3-U9 | Each target executes bounded runs without crash, abort, timeout, or invalid success. |
 | Deterministic operation, allocation, and peak-live scale gates | U1, U3-U8 | ADR 0041 online dependency admission remains within its explicit `O(E * (N + E))` portable worst-case work bound; final DAG/class construction, validation, remap, Scene digest, and transcript hashing remain linear in their declared inputs; canonical ordering stays within `O(E log E + N log N)`; tessellation stays inside its declared capped envelope; monotonic single-element replacement growth has logarithmic successful-candidate count and linear total moved elements/bytes under the capacity-policy thresholds; simultaneous Baozi-owned/requested storage never exceeds the configured phase budget. Opaque allowance is not execution proof, and hard hostile decode uses an OS-limited subprocess. |
-| `cargo run -j 1 --locked -p baozi-xtask -- u4c-metrics` | U4b-U4c | The V1 retained-lifecycle diagnostic runs serially, emits exactly one typed report, and proves only ledger/account/handoff/release lifecycle facts. It is deliberately insufficient for U4 exit. |
+| `cargo run -j 1 --locked -p baozi-xtask -- u4c-metrics --spec docs/conformance/u4c-lifecycle-diagnostic.toml` | U4b-U4c | The versioned V1 retained-lifecycle diagnostic checks the declared toolchain, source anchors, and one serial typed report. It proves only ledger/account/handoff/release lifecycle facts and emits `qualifies_u4_exit: false`. |
 | Frozen U4c measurement comparator after its checked-in specification and parser exist | U4c-U4f | Repository-owned fixture/digest/mutation-vector/observer definitions, complete measurement closure, allocator/account procedure, and sealed collector reproduce production-path allocation/copy/decode/lookup/physical-charge observations at `N/2N/4N`; behavioral, resource, or closure drift blocks U4. |
 | Scheduled Criterion and heap-profile scale runs | U3-U8 | 1x/10x/100x and selected 1000x fixtures expose time or memory-slope regressions without making wall-clock timing the PR correctness oracle. |
 | Direct ADR architecture review | Every ADR change | Reviewers apply the governance checklist to lifecycle, dependency, supersession, links, tracers, and semantic authority without a repository-history scan in xtask or routine CI. |
@@ -915,7 +918,7 @@ Backend-only glTF safety research may run in parallel, but it is not a U4 depend
   dual rail are deleted.
 - The common facade exposes one long-lived runtime created from a finite documented profile, retains one bounded factory, and creates private per-import accounts without exposing proof, physical-account, ledger, reservation, or lease types. Advanced explicit accounts are deliberate aggregate retention domains and never imply lineage; there is no global or per-request factory.
 - Checked-in independently authored semantic transcript expected values and per-field mutation vectors cover node/transform, geometry, material/texture/image, skin/morph/animation, metadata, and provenance before layout permutations are accepted. Block/slot/capacity/padding/sharing permutations are supplemental only; U8 extends the same oracle through provenance-qualified corpus and cross-platform digest evidence.
-- U4c exit requires repository-owned `docs/conformance/u4c-metrics.toml` and a pinned comparator command; the present zero-argument V1 lifecycle probe is not a substitute. Before measurement an independent reviewer freezes semantically equivalent fixtures, expected digests, semantic mutation vectors, the allocation/copy/decode/lookup taxonomy, allocator/account procedure, and the full measurement closure: observer sources, schema/generator inputs, build scripts, procedural macros, generated-output hashes, and local path dependencies. Any undeclared closure input or generated output invalidates the result. Each mapped production scenario proves its declared canonical/evidence blocks and physical charge, no full-payload copy or per-element decode for an unchanged typed view, its fixture-specific bounded lookup budget at `N`, `2N`, and `4N`, and that no producer bypasses the sealed collector. LOC, tokenizer output, and comparisons with alternate layouts are not release gates. Otherwise execution stops and ADR 0042 is amended.
+- U4c exit requires a separate repository-owned `docs/conformance/u4c-metrics.toml` and a pinned production comparator command; the current `u4c-lifecycle-diagnostic.toml` V1 report is not a substitute. Before production measurement an independent reviewer freezes semantically equivalent fixtures, expected digests, semantic mutation vectors, the allocation/copy/decode/lookup taxonomy, allocator/account procedure, and the full measurement closure: observer sources, schema/generator inputs, build scripts, procedural macros, generated-output hashes, and local path dependencies. Any undeclared closure input or generated output invalidates the result. Each mapped production scenario proves its declared canonical/evidence blocks and physical charge, no full-payload copy or per-element decode for an unchanged typed view, its fixture-specific bounded lookup budget at `N`, `2N`, and `4N`, and that no producer bypasses the sealed collector. LOC, tokenizer output, and comparisons with alternate layouts are not release gates. Otherwise execution stops and ADR 0042 is amended.
 - Every successful import publishes one complete origin-correct input manifest with explicit replay status; producer attestation, closed-input qualification, and build identity remain unavailable until a separate Accepted decision and consumer exist.
 - STL, OBJ/MTL, PLY, and glTF pass parser-local, facade/session, golden, malformed, limit, and fuzz gates on their declared support tiers; glTF also proves source-scene selection/closure and authored matrix/TRS behavior.
 - ADR 0006 is the public compatibility authority, ADR 0024 is superseded, the new canonical-architecture ADRs are indexed and internally consistent, and transient verification status lives outside durable decisions.
