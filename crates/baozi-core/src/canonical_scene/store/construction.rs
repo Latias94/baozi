@@ -39,6 +39,9 @@ use super::validation::{validate_evidence_graph, validate_scene_graph};
 mod complex;
 
 #[cfg(test)]
+mod u4d;
+
+#[cfg(test)]
 pub(super) use complex::{ComplexFixtureFault, ComplexFixtureTerminal, PreparedComplexFixture};
 
 const STORE_CATALOG: StoreSemanticCatalogId =
