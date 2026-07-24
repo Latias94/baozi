@@ -16,6 +16,7 @@ const FAULT_COUNTER_OVERFLOW: u8 = 1 << 0;
 const FAULT_LOOKUP_ORDER: u8 = 1 << 1;
 const FAULT_LOOKUP_TERMINATION: u8 = 1 << 2;
 const FAULT_BLOCK_LIFECYCLE: u8 = 1 << 3;
+const FAULT_MEMBER_PROBE: u8 = 1 << 4;
 
 static COLLECTOR_GATE: AtomicBool = AtomicBool::new(false);
 static ACTIVE_SESSION_ID: AtomicU64 = AtomicU64::new(NO_SESSION);
@@ -62,10 +63,16 @@ pub struct MeasurementReport {
     element_decodes: u64,
     /// Successful and rejected lookups that reached an explicit completion.
     completed_lookups: u64,
+    /// Lookups that completed through an explicit rejection.
+    rejected_lookups: u64,
     /// Events emitted from the fixed lookup taxonomy.
     lookup_events: u64,
     /// Largest taxonomy-event count observed for one completed lookup.
     max_lookup_events: u64,
+    /// Actual retained-member index probes performed by checked lookups.
+    member_probes: u64,
+    /// Largest retained-member probe count observed for one completed lookup.
+    max_member_probes_per_lookup: u64,
 }
 
 impl MeasurementReport {
@@ -133,12 +140,24 @@ impl MeasurementReport {
         self.completed_lookups
     }
 
+    pub const fn rejected_lookups(self) -> u64 {
+        self.rejected_lookups
+    }
+
     pub const fn lookup_events(self) -> u64 {
         self.lookup_events
     }
 
     pub const fn max_lookup_events(self) -> u64 {
         self.max_lookup_events
+    }
+
+    pub const fn member_probes(self) -> u64 {
+        self.member_probes
+    }
+
+    pub const fn max_member_probes_per_lookup(self) -> u64 {
+        self.max_member_probes_per_lookup
     }
 }
 
@@ -166,6 +185,8 @@ pub enum MeasurementError {
     LookupTerminationWithoutActiveLookup,
     /// A lookup sequence was not explicitly completed.
     IncompleteLookup,
+    /// A lookup reached the retained member range without exactly one indexed probe.
+    MemberProbeViolation,
     /// A block was sealed or published outside its required lifecycle order.
     BlockLifecycleViolation,
     /// A begun block was not both sealed and published.
@@ -193,6 +214,9 @@ impl fmt::Display for MeasurementError {
                 "a rejected lookup was recorded without an active lookup"
             }
             Self::IncompleteLookup => "a lookup was left incomplete",
+            Self::MemberProbeViolation => {
+                "a checked lookup did not perform exactly one retained member probe"
+            }
             Self::BlockLifecycleViolation => "a block lifecycle event was emitted out of order",
             Self::IncompleteBlockLifecycle => "a block lifecycle was left incomplete",
             Self::NoObservedStoreWork => "the measurement session observed no retained-store work",
@@ -351,6 +375,11 @@ pub(crate) fn record_lookup_stage(stage: LookupStage) {
     record_event(Event::LookupStage(stage));
 }
 
+/// Records one actual indexed access to the retained member directory.
+pub(crate) fn record_lookup_member_probe() {
+    record_event(Event::LookupMemberProbe);
+}
+
 /// Completes a rejected lookup without inventing later taxonomy events.
 pub(crate) fn record_lookup_rejected() {
     record_event(Event::LookupRejected);
@@ -371,6 +400,7 @@ enum Event {
     BlockSeal(BlockKind),
     SlotPublication(BlockKind),
     LookupStage(LookupStage),
+    LookupMemberProbe,
     LookupRejected,
 }
 
@@ -398,9 +428,13 @@ struct CollectorState {
     inherited_sealed_blocks: u64,
     element_decodes: u64,
     completed_lookups: u64,
+    rejected_lookups: u64,
     lookup_events: u64,
     max_lookup_events: u64,
     current_lookup_events: u64,
+    member_probes: u64,
+    max_member_probes_per_lookup: u64,
+    current_member_probes: u64,
     next_lookup_stage: u8,
     lookup_active: bool,
 }
@@ -434,9 +468,13 @@ impl CollectorState {
             inherited_sealed_blocks: 0,
             element_decodes: 0,
             completed_lookups: 0,
+            rejected_lookups: 0,
             lookup_events: 0,
             max_lookup_events: 0,
             current_lookup_events: 0,
+            member_probes: 0,
+            max_member_probes_per_lookup: 0,
+            current_member_probes: 0,
             next_lookup_stage: 0,
             lookup_active: false,
         }
@@ -467,6 +505,7 @@ impl CollectorState {
             Event::BlockSeal(kind) => self.record_block_seal(kind),
             Event::SlotPublication(kind) => self.record_slot_publication(kind),
             Event::LookupStage(stage) => self.record_lookup_stage(stage),
+            Event::LookupMemberProbe => self.record_lookup_member_probe(),
             Event::LookupRejected => self.record_lookup_rejected(),
         }
     }
@@ -555,10 +594,20 @@ impl CollectorState {
         }
 
         if stage == LookupStage::ReturnView {
-            self.complete_lookup();
+            self.complete_lookup(false);
         } else {
             self.next_lookup_stage += 1;
         }
+    }
+
+    fn record_lookup_member_probe(&mut self) {
+        if !self.lookup_active || self.next_lookup_stage != LookupStage::LoadMember.ordinal() {
+            self.mark_fault(FAULT_MEMBER_PROBE);
+            return;
+        }
+
+        self.increment_counter(Counter::MemberProbes, 1);
+        self.increment_counter(Counter::CurrentMemberProbes, 1);
     }
 
     fn record_lookup_rejected(&mut self) {
@@ -567,13 +616,26 @@ impl CollectorState {
             return;
         }
 
-        self.complete_lookup();
+        self.complete_lookup(true);
     }
 
-    fn complete_lookup(&mut self) {
+    fn complete_lookup(&mut self, rejected: bool) {
+        let reached_member_directory = self.next_lookup_stage > LookupStage::CheckRange.ordinal();
+        let expected_member_probes = u64::from(reached_member_directory);
+        if self.current_member_probes != expected_member_probes {
+            self.mark_fault(FAULT_MEMBER_PROBE);
+        }
+
         self.max_lookup_events = self.max_lookup_events.max(self.current_lookup_events);
+        self.max_member_probes_per_lookup = self
+            .max_member_probes_per_lookup
+            .max(self.current_member_probes);
         self.increment_counter(Counter::CompletedLookups, 1);
+        if rejected {
+            self.increment_counter(Counter::RejectedLookups, 1);
+        }
         self.current_lookup_events = 0;
+        self.current_member_probes = 0;
         self.next_lookup_stage = 0;
         self.lookup_active = false;
     }
@@ -600,8 +662,11 @@ impl CollectorState {
             Counter::InheritedSealedBlocks => &mut self.inherited_sealed_blocks,
             Counter::ElementDecodes => &mut self.element_decodes,
             Counter::CompletedLookups => &mut self.completed_lookups,
+            Counter::RejectedLookups => &mut self.rejected_lookups,
             Counter::LookupEvents => &mut self.lookup_events,
             Counter::CurrentLookupEvents => &mut self.current_lookup_events,
+            Counter::MemberProbes => &mut self.member_probes,
+            Counter::CurrentMemberProbes => &mut self.current_member_probes,
         };
 
         if !checked_add(target, amount) {
@@ -625,6 +690,9 @@ impl CollectorState {
         }
         if self.lookup_active {
             return Err(MeasurementError::IncompleteLookup);
+        }
+        if self.faults & FAULT_MEMBER_PROBE != 0 {
+            return Err(MeasurementError::MemberProbeViolation);
         }
         if self.faults & FAULT_BLOCK_LIFECYCLE != 0 {
             return Err(MeasurementError::BlockLifecycleViolation);
@@ -662,8 +730,11 @@ impl CollectorState {
             inherited_slot_publications: self.inherited_slot_publications,
             element_decodes: self.element_decodes,
             completed_lookups: self.completed_lookups,
+            rejected_lookups: self.rejected_lookups,
             lookup_events: self.lookup_events,
             max_lookup_events: self.max_lookup_events,
+            member_probes: self.member_probes,
+            max_member_probes_per_lookup: self.max_member_probes_per_lookup,
         })
     }
 }
@@ -690,8 +761,11 @@ enum Counter {
     InheritedSealedBlocks,
     ElementDecodes,
     CompletedLookups,
+    RejectedLookups,
     LookupEvents,
     CurrentLookupEvents,
+    MemberProbes,
+    CurrentMemberProbes,
 }
 
 struct CollectorGateGuard;
@@ -831,6 +905,7 @@ mod tests {
         overflow_invalidates_the_report();
         cross_thread_hooks_invalidate_the_report();
         lookup_order_completion_and_rejection_are_validated();
+        member_probe_contract_is_fail_closed();
         incomplete_block_lifecycles_are_rejected();
         inactive_hooks_are_no_ops();
     }
@@ -873,8 +948,11 @@ mod tests {
         assert_eq!(report.inherited_slot_publications(), 1);
         assert_eq!(report.element_decodes(), 1);
         assert_eq!(report.completed_lookups(), 2);
+        assert_eq!(report.rejected_lookups(), 1);
         assert_eq!(report.lookup_events(), 10);
         assert_eq!(report.max_lookup_events(), 8);
+        assert_eq!(report.member_probes(), 1);
+        assert_eq!(report.max_member_probes_per_lookup(), 1);
     }
 
     fn nested_and_concurrent_sessions_fail_closed() {
@@ -968,6 +1046,44 @@ mod tests {
         ));
     }
 
+    fn member_probe_contract_is_fail_closed() {
+        let session =
+            MeasurementSession::begin().expect("the misplaced-probe session should start");
+        record_lookup_stage(LookupStage::CheckTableBrand);
+        record_lookup_member_probe();
+        record_lookup_rejected();
+        assert!(matches!(
+            session.finish(),
+            Err(MeasurementError::MemberProbeViolation)
+        ));
+
+        let session = MeasurementSession::begin().expect("the missing-probe session should start");
+        record_lookup_stage(LookupStage::CheckTableBrand);
+        record_lookup_stage(LookupStage::CheckSlotSet);
+        record_lookup_stage(LookupStage::CheckRange);
+        record_lookup_stage(LookupStage::LoadMember);
+        record_lookup_stage(LookupStage::CheckVariant);
+        record_lookup_stage(LookupStage::CheckSchemaTag);
+        record_lookup_stage(LookupStage::ProjectView);
+        record_lookup_stage(LookupStage::ReturnView);
+        assert!(matches!(
+            session.finish(),
+            Err(MeasurementError::MemberProbeViolation)
+        ));
+
+        let session = MeasurementSession::begin().expect("the repeated-probe session should start");
+        record_lookup_stage(LookupStage::CheckTableBrand);
+        record_lookup_stage(LookupStage::CheckSlotSet);
+        record_lookup_stage(LookupStage::CheckRange);
+        record_lookup_member_probe();
+        record_lookup_member_probe();
+        record_lookup_rejected();
+        assert!(matches!(
+            session.finish(),
+            Err(MeasurementError::MemberProbeViolation)
+        ));
+    }
+
     fn incomplete_block_lifecycles_are_rejected() {
         let session =
             MeasurementSession::begin().expect("the incomplete-block session should start");
@@ -1008,6 +1124,7 @@ mod tests {
         record_block_seal(BlockKind::New);
         record_slot_publication(BlockKind::New);
         record_lookup_stage(LookupStage::ReturnView);
+        record_lookup_member_probe();
         record_lookup_rejected();
 
         assert!(matches!(
@@ -1022,6 +1139,7 @@ mod tests {
         record_lookup_stage(LookupStage::CheckTableBrand);
         record_lookup_stage(LookupStage::CheckSlotSet);
         record_lookup_stage(LookupStage::CheckRange);
+        record_lookup_member_probe();
         record_lookup_stage(LookupStage::LoadMember);
         record_lookup_stage(LookupStage::CheckVariant);
         record_lookup_stage(LookupStage::CheckSchemaTag);

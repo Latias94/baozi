@@ -1,8 +1,9 @@
+#[cfg(test)]
+use super::unreachable_final_owner_state;
 use super::{
     DimensionSnapshot, FallbackHeaderSnapshot, PhaseSnapshot, PhysicalStorageAccount,
     PublishedCanonicalAggregate, PublishedOutcomeEvidenceAggregate, PublishedPart,
     RetainedSlotIdentity, TerminalEvidenceCause, TerminalEvidenceKey, TerminalLedgerEvidence,
-    unreachable_final_owner_state,
 };
 
 pub(super) enum RetainedPublicationPayload<CanonicalBlock, EvidenceBlock, F> {
@@ -123,6 +124,7 @@ impl<CanonicalBlock> PublishedCanonicalOutput<CanonicalBlock> {
         &self.aggregate
     }
 
+    #[cfg(test)]
     pub fn root(&self) -> &CanonicalBlock {
         match self.aggregate.inner.member(self.root) {
             Some(root) => root,
@@ -162,6 +164,7 @@ impl<EvidenceBlock> PublishedOutcomeEvidenceOutput<EvidenceBlock> {
         &self.aggregate
     }
 
+    #[cfg(test)]
     pub fn root(&self) -> &EvidenceBlock {
         match self.aggregate.inner.member(self.root) {
             Some(root) => root,

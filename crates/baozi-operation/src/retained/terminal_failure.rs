@@ -743,12 +743,10 @@ where
         } = output;
         PreparedRetainedPublication {
             payload: RetainedPublicationPayload::RichFailure {
-                outcome_evidence: PublishedOutcomeEvidenceAggregate {
-                    inner: PublishedRetainedAggregate {
-                        table: evidence_table,
-                        set_id,
-                    },
-                },
+                outcome_evidence: PublishedOutcomeEvidenceAggregate::from_table(
+                    evidence_table,
+                    set_id,
+                ),
                 outcome_evidence_root: evidence_root,
                 account,
             },

@@ -416,6 +416,7 @@ fn real_publication_and_view_paths_emit_the_fixed_taxonomy() {
     let canonical_utf8 = canonical_root
         .utf8_ref::<CanonicalUtf8Tag>(0, 2)
         .expect("canonical UTF-8 reference");
+    assert_eq!(canonical_root.scalar::<u8>(0, 3), Some(5));
     assert_eq!(
         canonical
             .sequence(canonical_sequence)
@@ -435,6 +436,7 @@ fn real_publication_and_view_paths_emit_the_fixed_taxonomy() {
     let outcome_evidence_utf8 = outcome_evidence_root
         .utf8_ref::<OutcomeEvidenceUtf8Tag>(0, 2)
         .expect("outcome-evidence UTF-8 reference");
+    assert_eq!(outcome_evidence_root.scalar::<u8>(0, 3), Some(9));
     assert_eq!(
         outcome_evidence
             .sequence(outcome_evidence_sequence)
@@ -464,8 +466,11 @@ fn real_publication_and_view_paths_emit_the_fixed_taxonomy() {
     assert_eq!(report.inherited_slot_publications(), 0);
     assert_eq!(report.element_decodes(), 0);
     assert_eq!(report.completed_lookups(), 8);
+    assert_eq!(report.rejected_lookups(), 0);
     assert_eq!(report.lookup_events(), 64);
     assert_eq!(report.max_lookup_events(), 8);
+    assert_eq!(report.member_probes(), 8);
+    assert_eq!(report.max_member_probes_per_lookup(), 1);
 }
 
 #[test]
@@ -532,8 +537,11 @@ fn inherited_shares_emit_lifecycles_without_copying_or_hot_leaf_lookup() {
     assert_eq!(report.inherited_slot_publications(), 2);
     assert_eq!(report.element_decodes(), 0);
     assert_eq!(report.completed_lookups(), 0);
+    assert_eq!(report.rejected_lookups(), 0);
     assert_eq!(report.lookup_events(), 0);
     assert_eq!(report.max_lookup_events(), 0);
+    assert_eq!(report.member_probes(), 0);
+    assert_eq!(report.max_member_probes_per_lookup(), 0);
 
     assert_eq!(canonical.root().get(0), Some(41));
     assert_eq!(outcome_evidence.root().get(0), Some(73));
@@ -541,6 +549,7 @@ fn inherited_shares_emit_lifecycles_without_copying_or_hot_leaf_lookup() {
 
 #[test]
 fn source_gates_keep_public_views_on_the_checked_lookup_seam() {
+    let concrete_store = include_str!("../src/concrete_store.rs");
     let terminal_output = include_str!("../src/concrete_store/terminal_output.rs");
     let retained = include_str!("../src/retained/block_table.rs");
     let validation = include_str!("../src/concrete_store/validation.rs");
@@ -590,8 +599,9 @@ fn source_gates_keep_public_views_on_the_checked_lookup_seam() {
         "construction validation is not a published typed-view measurement path"
     );
     assert!(
-        !terminal_output.contains("record_element_decode("),
-        "the selected typed-view implementation stays zero-copy"
+        !concrete_store.contains("record_element_decode(")
+            && !terminal_output.contains("record_element_decode("),
+        "all selected public typed-view implementations stay zero-copy"
     );
 
     for stage in [
@@ -605,6 +615,21 @@ fn source_gates_keep_public_views_on_the_checked_lookup_seam() {
             "retained lookup must retain the {stage} taxonomy stage"
         );
     }
+    assert!(
+        retained.matches("pub(super) struct PublishedRetainedTable<").count() == 1
+            && retained.matches("table: PublishedRetainedTable<Block>").count() == 1
+            && retained.matches("pub(super) struct PublishedRetainedAggregate<").count() == 1
+            && !retained.contains(
+                "pub(super) struct PublishedRetainedAggregate<Block> {\n    table: RetainedTableAllocation"
+            )
+            && retained.matches("fn probe_published_member(").count() == 1
+            && retained.matches("record_lookup_member_probe();").count() == 1
+            && retained.matches("self.members.get(index)").count() == 1
+            && retained.matches("self.table.as_ref().probe_published_member(index)").count() == 1
+            && retained.matches("self.table.probe_member(identity.index)").count() == 1
+            && !retained.contains("self.table.as_ref().members"),
+        "published lookup must be unable to reach raw members outside the unique probe-coupled index capability"
+    );
     for stage in [
         "LookupStage::CheckVariant",
         "LookupStage::CheckSchemaTag",

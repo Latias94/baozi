@@ -25,8 +25,9 @@ use crate::ledger::{
 };
 #[cfg(feature = "_u4c-collector")]
 use crate::u4c_collector::{
-    BlockKind, LookupStage, record_block_begin, record_block_seal, record_lookup_rejected,
-    record_lookup_stage, record_payload_backing_allocation, record_slot_publication,
+    BlockKind, LookupStage, record_block_begin, record_block_seal, record_lookup_member_probe,
+    record_lookup_rejected, record_lookup_stage, record_payload_backing_allocation,
+    record_slot_publication,
 };
 use crate::{CapacityPlan, OperationOwner};
 use std::any::TypeId;
@@ -313,6 +314,16 @@ pub(super) struct RetainedBlockTable<Block> {
 }
 
 impl<Block> RetainedBlockTable<Block> {
+    fn probe_published_member(&self, index: usize) -> Option<&RetainedBlockMember<Block>> {
+        #[cfg(feature = "_u4c-collector")]
+        record_lookup_member_probe();
+        self.members.get(index)
+    }
+
+    fn member_count(&self) -> usize {
+        self.members.len()
+    }
+
     pub(super) fn member(
         &self,
         identity: RetainedSlotIdentity,
@@ -353,6 +364,68 @@ impl<Block> RetainedBlockTable<Block> {
             .all(|member| member.reachable.load(Ordering::Acquire))
     }
 }
+
+mod published_table_capability {
+    use super::{
+        PhysicalStorageAccount, RetainedAllocation, RetainedBlockMember, RetainedMembership,
+        RetainedSlotIdentity, RetainedTableAllocation,
+    };
+
+    pub(super) struct PublishedRetainedTable<Block> {
+        table: RetainedTableAllocation<Block>,
+    }
+
+    impl<Block> PublishedRetainedTable<Block> {
+        pub(super) fn new(table: RetainedTableAllocation<Block>) -> Self {
+            Self { table }
+        }
+
+        pub(super) fn membership(&self) -> Option<RetainedMembership> {
+            self.table.membership()
+        }
+
+        pub(super) fn belongs_to(&self, account: &PhysicalStorageAccount) -> bool {
+            self.table.belongs_to(account)
+        }
+
+        #[cfg(test)]
+        pub(super) fn member(
+            &self,
+            identity: RetainedSlotIdentity,
+            set_id: super::RetainedSetId,
+        ) -> Option<&Block> {
+            self.table.as_ref().member(identity, set_id)
+        }
+
+        pub(super) fn member_allocation(
+            &self,
+            identity: RetainedSlotIdentity,
+            set_id: super::RetainedSetId,
+        ) -> Option<&RetainedAllocation<Block>> {
+            self.table.as_ref().member_allocation(identity, set_id)
+        }
+
+        pub(super) fn probe_member(&self, index: usize) -> Option<&RetainedBlockMember<Block>> {
+            self.table.as_ref().probe_published_member(index)
+        }
+
+        pub(super) fn len(&self) -> usize {
+            self.table.as_ref().member_count()
+        }
+
+        #[cfg(test)]
+        pub(super) fn share_call_count(&self) -> usize {
+            self.table.share_call_count()
+        }
+
+        #[cfg(test)]
+        pub(super) fn allocation_identity(&self) -> *const () {
+            self.table.allocation_identity().cast()
+        }
+    }
+}
+
+use published_table_capability::PublishedRetainedTable;
 
 pub(super) fn record_forgotten_table_edges<Block>(table: &RetainedTableAllocation<Block>) {
     let _ = table
@@ -544,8 +617,8 @@ impl<'a, EvidenceBlock> RetainedEvidenceClosureSession<'a, EvidenceBlock> {
 }
 
 pub(super) struct PublishedRetainedAggregate<Block> {
-    pub(super) table: RetainedTableAllocation<Block>,
-    pub(super) set_id: RetainedSetId,
+    table: PublishedRetainedTable<Block>,
+    set_id: RetainedSetId,
 }
 
 /// One table-validated retained member awaiting concrete-store view projection.
@@ -565,12 +638,35 @@ impl<'a, Block> RetainedLookupMember<'a, Block> {
 }
 
 impl<Block> PublishedRetainedAggregate<Block> {
-    /// Resolves a retained terminal root before a concrete-store projection exists.
-    ///
-    /// Concrete-store published views must use `lookup_member` so the U4c checked lookup
-    /// taxonomy remains observable.
+    fn new(table: RetainedTableAllocation<Block>, set_id: RetainedSetId) -> Self {
+        Self {
+            table: PublishedRetainedTable::new(table),
+            set_id,
+        }
+    }
+
+    #[cfg(test)]
     pub(super) fn member(&self, identity: RetainedSlotIdentity) -> Option<&Block> {
-        self.table.as_ref().member(identity, self.set_id)
+        self.table.member(identity, self.set_id)
+    }
+
+    fn source_allocation(
+        &self,
+        identity: RetainedSlotIdentity,
+    ) -> Option<&RetainedAllocation<Block>> {
+        self.table.member_allocation(identity, self.set_id)
+    }
+
+    #[cfg(test)]
+    pub(super) fn test_source_allocation(
+        &self,
+        identity: RetainedSlotIdentity,
+    ) -> Option<&RetainedAllocation<Block>> {
+        self.source_allocation(identity)
+    }
+
+    fn belongs_to(&self, account: &PhysicalStorageAccount) -> bool {
+        self.table.belongs_to(account)
     }
 
     fn lookup_member<Tag>(
@@ -605,7 +701,7 @@ impl<Block> PublishedRetainedAggregate<Block> {
 
         #[cfg(feature = "_u4c-collector")]
         record_lookup_stage(LookupStage::CheckRange);
-        let Some(member) = self.table.as_ref().members.get(identity.index) else {
+        let Some(member) = self.table.probe_member(identity.index) else {
             #[cfg(feature = "_u4c-collector")]
             record_lookup_rejected();
             return None;
@@ -620,7 +716,26 @@ impl<Block> PublishedRetainedAggregate<Block> {
     }
 
     fn len(&self) -> usize {
-        self.table.as_ref().members.len()
+        self.table.len()
+    }
+
+    #[cfg(test)]
+    pub(super) fn test_member_share_call_count(
+        &self,
+        identity: RetainedSlotIdentity,
+    ) -> Option<usize> {
+        self.source_allocation(identity)
+            .map(RetainedAllocation::share_call_count)
+    }
+
+    #[cfg(test)]
+    pub(super) fn test_table_share_call_count(&self) -> usize {
+        self.table.share_call_count()
+    }
+
+    #[cfg(test)]
+    pub(super) fn test_table_allocation_identity(&self) -> *const () {
+        self.table.allocation_identity()
     }
 }
 
@@ -630,6 +745,12 @@ pub(crate) struct PublishedCanonicalAggregate<Block> {
 }
 
 impl<Block> PublishedCanonicalAggregate<Block> {
+    pub(super) fn from_table(table: RetainedTableAllocation<Block>, set_id: RetainedSetId) -> Self {
+        Self {
+            inner: PublishedRetainedAggregate::new(table, set_id),
+        }
+    }
+
     #[cfg(test)]
     pub fn get<Tag>(&self, slot: CanonicalRetainedSlot<Block, Tag>) -> Option<&Block>
     where
@@ -667,6 +788,12 @@ pub(crate) struct PublishedOutcomeEvidenceAggregate<Block> {
 }
 
 impl<Block> PublishedOutcomeEvidenceAggregate<Block> {
+    pub(super) fn from_table(table: RetainedTableAllocation<Block>, set_id: RetainedSetId) -> Self {
+        Self {
+            inner: PublishedRetainedAggregate::new(table, set_id),
+        }
+    }
+
     #[cfg(test)]
     pub fn get<Tag>(&self, slot: OutcomeEvidenceRetainedSlot<Block, Tag>) -> Option<&Block>
     where
@@ -1164,15 +1291,13 @@ where
     if source_identity.tag != TypeId::of::<Tag>() || source_identity.set_id != source.set_id {
         return Err(RetainedPublicationError::InvalidSourceSlot);
     }
-    if !source.table.belongs_to(account) {
+    if !source.belongs_to(account) {
         return Err(RetainedPublicationError::Writer(
             RetainedWriterError::ForeignAccount,
         ));
     }
     let source_allocation = source
-        .table
-        .as_ref()
-        .member_allocation(source_identity, source.set_id)
+        .source_allocation(source_identity)
         .ok_or(RetainedPublicationError::InvalidSourceSlot)?;
     if !source_allocation.belongs_to(account) {
         drop(preflight);

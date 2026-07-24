@@ -70,8 +70,8 @@ pub(crate) use block_table::{
     RetainedClosureSession, RetainedEvidenceClosureSession, RetainedLookupMember,
 };
 use block_table::{
-    PublishedRetainedAggregate, QualifiedRetainedBlockTablePlan, RetainedTableAllocation,
-    record_forgotten_table_edges, retained_block_table_is_exact, try_create_retained_block_table,
+    QualifiedRetainedBlockTablePlan, RetainedTableAllocation, record_forgotten_table_edges,
+    retained_block_table_is_exact, try_create_retained_block_table,
     try_qualify_retained_block_table_plan, try_retain_block, try_share_retained_block,
 };
 pub(crate) use evidence::{
@@ -1164,18 +1164,11 @@ where
         let evidence = evidence.into_frozen_owner();
         PreparedRetainedPublication {
             payload: RetainedPublicationPayload::Success {
-                canonical: PublishedCanonicalAggregate {
-                    inner: PublishedRetainedAggregate {
-                        table: canonical_table,
-                        set_id,
-                    },
-                },
-                outcome_evidence: PublishedOutcomeEvidenceAggregate {
-                    inner: PublishedRetainedAggregate {
-                        table: evidence_table,
-                        set_id,
-                    },
-                },
+                canonical: PublishedCanonicalAggregate::from_table(canonical_table, set_id),
+                outcome_evidence: PublishedOutcomeEvidenceAggregate::from_table(
+                    evidence_table,
+                    set_id,
+                ),
                 canonical_root,
                 outcome_evidence_root: evidence_root,
                 account,

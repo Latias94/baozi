@@ -706,12 +706,16 @@ fn inherited_blocks_use_fresh_slots_without_new_attribution_or_physical_charge()
     let account = account(&factory, u64::MAX, 128);
     let (source_canonical, source_canonical_slot, source_evidence, source_evidence_slot) =
         publish_scalar_source(&account);
-    let canonical_shares_before = source_canonical.aggregate().inner.table.as_ref().members[0]
-        .allocation
-        .share_call_count();
-    let evidence_shares_before = source_evidence.aggregate().inner.table.as_ref().members[0]
-        .allocation
-        .share_call_count();
+    let canonical_shares_before = source_canonical
+        .aggregate()
+        .inner
+        .test_member_share_call_count(source_canonical_slot.identity)
+        .expect("canonical source slot must resolve");
+    let evidence_shares_before = source_evidence
+        .aggregate()
+        .inner
+        .test_member_share_call_count(source_evidence_slot.identity)
+        .expect("evidence source slot must resolve");
 
     let operation = test_operation_on_account_with_control(
         &account,
@@ -764,15 +768,19 @@ fn inherited_blocks_use_fresh_slots_without_new_attribution_or_physical_charge()
         1
     );
     assert_eq!(
-        source_canonical.aggregate().inner.table.as_ref().members[0]
-            .allocation
-            .share_call_count(),
+        source_canonical
+            .aggregate()
+            .inner
+            .test_member_share_call_count(source_canonical_slot.identity)
+            .expect("canonical source slot must remain observable"),
         canonical_shares_before + 2
     );
     assert_eq!(
-        source_evidence.aggregate().inner.table.as_ref().members[0]
-            .allocation
-            .share_call_count(),
+        source_evidence
+            .aggregate()
+            .inner
+            .test_member_share_call_count(source_evidence_slot.identity)
+            .expect("evidence source slot must remain observable"),
         evidence_shares_before + 3
     );
     assert!(source_canonical.aggregate().get(canonical_root).is_none());
@@ -848,10 +856,15 @@ fn foreign_aggregate_is_rejected_before_member_access_or_reference_clone() {
     let target_account = account(&factory, u64::MAX, 128);
     let (source_canonical, source_slot, source_evidence, _) =
         publish_scalar_source(&source_account);
-    let table_shares_before = source_canonical.aggregate().inner.table.share_call_count();
-    let block_shares_before = source_canonical.aggregate().inner.table.as_ref().members[0]
-        .allocation
-        .share_call_count();
+    let table_shares_before = source_canonical
+        .aggregate()
+        .inner
+        .test_table_share_call_count();
+    let block_shares_before = source_canonical
+        .aggregate()
+        .inner
+        .test_member_share_call_count(source_slot.identity)
+        .expect("source slot must resolve");
     let _ = take_test_member_lookups();
 
     let operation = test_operation_on_account_with_control(
@@ -874,13 +887,18 @@ fn foreign_aggregate_is_rejected_before_member_access_or_reference_clone() {
     assert_eq!(take_test_member_lookups(), 0);
     assert_eq!(assembly.canonical_len(), 0);
     assert_eq!(
-        source_canonical.aggregate().inner.table.share_call_count(),
+        source_canonical
+            .aggregate()
+            .inner
+            .test_table_share_call_count(),
         table_shares_before
     );
     assert_eq!(
-        source_canonical.aggregate().inner.table.as_ref().members[0]
-            .allocation
-            .share_call_count(),
+        source_canonical
+            .aggregate()
+            .inner
+            .test_member_share_call_count(source_slot.identity)
+            .expect("source slot must remain observable"),
         block_shares_before
     );
     drop(handoff_for_test(
@@ -900,9 +918,11 @@ fn share_work_rejection_does_not_clone_or_mutate_the_target_table() {
     let factory = account_factory(1);
     let account = account(&factory, u64::MAX, 128);
     let (source_canonical, source_slot, source_evidence, _) = publish_scalar_source(&account);
-    let block_shares_before = source_canonical.aggregate().inner.table.as_ref().members[0]
-        .allocation
-        .share_call_count();
+    let block_shares_before = source_canonical
+        .aggregate()
+        .inner
+        .test_member_share_call_count(source_slot.identity)
+        .expect("source slot must resolve");
     let physical_before_operation = account.snapshot();
     let policy = DimensionPolicy::reservable_bytes(15, 15, u64::MAX, u64::MAX)
         .with_published_outcome_evidence_limit(u64::MAX);
@@ -939,9 +959,11 @@ fn share_work_rejection_does_not_clone_or_mutate_the_target_table() {
             > physical_before_operation.live_retained_bytes()
     );
     assert_eq!(
-        source_canonical.aggregate().inner.table.as_ref().members[0]
-            .allocation
-            .share_call_count(),
+        source_canonical
+            .aggregate()
+            .inner
+            .test_member_share_call_count(source_slot.identity)
+            .expect("source slot must remain observable"),
         block_shares_before
     );
     drop(handoff_for_test(
@@ -2505,10 +2527,16 @@ fn prepared_and_published_drop_keep_physical_charge_and_handoff_is_a_pure_move()
         _ => panic!("handoff observation must prepare success"),
     };
     let (canonical_identity, canonical_shares, evidence_identity, evidence_shares) = (
-        prepared.canonical.inner.table.allocation_identity(),
-        prepared.canonical.inner.table.share_call_count(),
-        prepared.outcome_evidence.inner.table.allocation_identity(),
-        prepared.outcome_evidence.inner.table.share_call_count(),
+        prepared.canonical.inner.test_table_allocation_identity(),
+        prepared.canonical.inner.test_table_share_call_count(),
+        prepared
+            .outcome_evidence
+            .inner
+            .test_table_allocation_identity(),
+        prepared
+            .outcome_evidence
+            .inner
+            .test_table_share_call_count(),
     );
     let ledger_allocation = prepared.evidence.allocation();
     let ledger_identity = ledger_allocation.allocation_identity();
@@ -2523,12 +2551,15 @@ fn prepared_and_published_drop_keep_physical_charge_and_handoff_is_a_pure_move()
             .canonical
             .aggregate
             .inner
-            .table
-            .allocation_identity(),
+            .test_table_allocation_identity(),
         canonical_identity
     );
     assert_eq!(
-        published.canonical.aggregate.inner.table.share_call_count(),
+        published
+            .canonical
+            .aggregate
+            .inner
+            .test_table_share_call_count(),
         canonical_shares
     );
     assert_eq!(
@@ -2536,8 +2567,7 @@ fn prepared_and_published_drop_keep_physical_charge_and_handoff_is_a_pure_move()
             .outcome_evidence
             .aggregate
             .inner
-            .table
-            .allocation_identity(),
+            .test_table_allocation_identity(),
         evidence_identity
     );
     assert_eq!(
@@ -2545,8 +2575,7 @@ fn prepared_and_published_drop_keep_physical_charge_and_handoff_is_a_pure_move()
             .outcome_evidence
             .aggregate
             .inner
-            .table
-            .share_call_count(),
+            .test_table_share_call_count(),
         evidence_shares
     );
     let ledger_allocation = published.ledger_evidence.evidence.allocation();

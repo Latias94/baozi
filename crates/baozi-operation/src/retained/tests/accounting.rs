@@ -652,9 +652,7 @@ fn poisoned_inherited_share_has_no_lookup_work_clone_or_target_side_effect() {
     let source_allocation = source
         .aggregate
         .inner
-        .table
-        .as_ref()
-        .member_allocation(source_slot.identity, source.aggregate.inner.set_id)
+        .test_source_allocation(source_slot.identity)
         .unwrap_or_else(|| panic!("source slot must resolve before poison"));
     let source_share_calls = source_allocation.share_call_count();
     let target_len = assembly.canonical_len();
@@ -718,14 +716,16 @@ fn admission_first_inherited_share_completes_then_later_share_is_rejected() {
         .unwrap_or_else(|_| panic!("share action must be admitted before poison"));
     drop(poisoner);
     let poisoned = account.snapshot();
+    let source_share_calls = source
+        .aggregate
+        .inner
+        .test_member_share_call_count(source_slot.identity)
+        .unwrap_or_else(|| panic!("source slot must resolve"));
     let source_allocation = source
         .aggregate
         .inner
-        .table
-        .as_ref()
-        .member_allocation(source_slot.identity, source.aggregate.inner.set_id)
+        .test_source_allocation(source_slot.identity)
         .unwrap_or_else(|| panic!("source slot must resolve"));
-    let source_share_calls = source_allocation.share_call_count();
     let ledger = assembly
         .operation
         .as_ref()
