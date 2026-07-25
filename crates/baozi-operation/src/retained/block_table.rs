@@ -11,8 +11,6 @@ use super::ownership::{
     RetainedStorageDropOutcome, drop_retained_allocation_before_attribution,
     finish_pre_attribution_cleanup, map_inherited_cleanup_error,
 };
-#[cfg(test)]
-use super::record_test_member_lookup;
 use super::{
     PendingAccountActionAdmission, PhysicalStorageAccount, RetainedBatchLimits,
     RetainedHandleSharePlan, RetainedPublicationError, RetainedWriterError, RetainedWriterPlan,
@@ -314,12 +312,6 @@ pub(super) struct RetainedBlockTable<Block> {
 }
 
 impl<Block> RetainedBlockTable<Block> {
-    fn probe_published_member(&self, index: usize) -> Option<&RetainedBlockMember<Block>> {
-        #[cfg(feature = "_u4c-collector")]
-        record_lookup_member_probe();
-        self.members.get(index)
-    }
-
     fn member_count(&self) -> usize {
         self.members.len()
     }
@@ -337,21 +329,6 @@ impl<Block> RetainedBlockTable<Block> {
             .and_then(|member| (member.tag == identity.tag).then(|| member.allocation.as_ref()))
     }
 
-    pub(super) fn member_allocation(
-        &self,
-        identity: RetainedSlotIdentity,
-        set_id: RetainedSetId,
-    ) -> Option<&RetainedAllocation<Block>> {
-        #[cfg(test)]
-        record_test_member_lookup();
-        if identity.set_id != set_id {
-            return None;
-        }
-        self.members
-            .get(identity.index)
-            .and_then(|member| (member.tag == identity.tag).then_some(&member.allocation))
-    }
-
     pub(super) fn reset_reachable(&self) {
         for member in &self.members {
             member.reachable.store(false, Ordering::Release);
@@ -367,65 +344,354 @@ impl<Block> RetainedBlockTable<Block> {
 
 mod published_table_capability {
     use super::{
-        PhysicalStorageAccount, RetainedAllocation, RetainedBlockMember, RetainedMembership,
-        RetainedSlotIdentity, RetainedTableAllocation,
+        AccountPoisonReason, AssertUnwindSafe, Ledger, OperationOwner, PhysicalStorageAccount,
+        RetainedAllocation, RetainedBlockMember, RetainedHandleSharePlan, RetainedLookupMember,
+        RetainedMembership, RetainedMembershipDestination, RetainedPublicationError, RetainedSetId,
+        RetainedSlotIdentity, RetainedTableAllocation, RetainedWriterError, TypeId, catch_unwind,
+        discard_untrusted_panic_payload, map_account_action_admission_error,
     };
+    use std::fmt;
 
-    pub(super) struct PublishedRetainedTable<Block> {
+    struct PublishedRetainedTable<Block> {
         table: RetainedTableAllocation<Block>,
     }
 
-    impl<Block> PublishedRetainedTable<Block> {
-        pub(super) fn new(table: RetainedTableAllocation<Block>) -> Self {
-            Self { table }
+    struct PublishedLookupCapability<'a, Block> {
+        table_membership: Option<RetainedMembership>,
+        members: &'a [RetainedBlockMember<Block>],
+    }
+
+    struct PublishedSourceSharingCapability<'a, Block> {
+        table: &'a RetainedTableAllocation<Block>,
+    }
+
+    struct ProbedPublishedMember<'a, Block> {
+        block: &'a Block,
+        schema_tag: TypeId,
+    }
+
+    impl<'a, Block> PublishedLookupCapability<'a, Block> {
+        const fn table_membership(&self) -> Option<RetainedMembership> {
+            self.table_membership
         }
 
-        pub(super) fn membership(&self) -> Option<RetainedMembership> {
-            self.table.membership()
+        fn probe_member(&self, index: usize) -> Option<ProbedPublishedMember<'a, Block>> {
+            #[cfg(feature = "_u4c-collector")]
+            super::record_lookup_member_probe();
+            let member = self.members.get(index)?;
+            Some(ProbedPublishedMember {
+                block: member.allocation.as_ref(),
+                schema_tag: member.tag,
+            })
         }
+    }
 
-        pub(super) fn belongs_to(&self, account: &PhysicalStorageAccount) -> bool {
+    impl<'a, Block> PublishedSourceSharingCapability<'a, Block> {
+        fn belongs_to(&self, account: &PhysicalStorageAccount) -> bool {
             self.table.belongs_to(account)
         }
 
-        #[cfg(test)]
-        pub(super) fn member(
+        fn source_allocation(
             &self,
             identity: RetainedSlotIdentity,
-            set_id: super::RetainedSetId,
-        ) -> Option<&Block> {
+            set_id: RetainedSetId,
+        ) -> Option<&'a RetainedAllocation<Block>> {
+            #[cfg(test)]
+            super::super::record_test_member_lookup();
+            if identity.set_id != set_id {
+                return None;
+            }
+            self.table
+                .as_ref()
+                .members
+                .get(identity.index)
+                .and_then(|member| (member.tag == identity.tag).then_some(&member.allocation))
+        }
+    }
+
+    impl<Block> PublishedRetainedTable<Block> {
+        fn new(table: RetainedTableAllocation<Block>) -> Self {
+            Self { table }
+        }
+
+        fn lookup_capability(&self) -> PublishedLookupCapability<'_, Block> {
+            let table_membership = self.table.membership();
+            let members = self.table.as_ref().members.as_slice();
+            PublishedLookupCapability {
+                table_membership,
+                members,
+            }
+        }
+
+        fn lookup_member<Tag>(
+            &self,
+            set_id: RetainedSetId,
+            identity: RetainedSlotIdentity,
+            expected_destination: RetainedMembershipDestination,
+        ) -> Option<RetainedLookupMember<'_, Block>>
+        where
+            Tag: Copy + Send + Sync + 'static,
+        {
+            typed_lookup::lookup_member::<Block, Tag>(
+                self.lookup_capability(),
+                set_id,
+                identity,
+                expected_destination,
+            )
+        }
+
+        #[cfg(test)]
+        fn member(&self, identity: RetainedSlotIdentity, set_id: RetainedSetId) -> Option<&Block> {
             self.table.as_ref().member(identity, set_id)
         }
 
-        pub(super) fn member_allocation(
-            &self,
-            identity: RetainedSlotIdentity,
-            set_id: super::RetainedSetId,
-        ) -> Option<&RetainedAllocation<Block>> {
-            self.table.as_ref().member_allocation(identity, set_id)
+        fn source_sharing_capability(&self) -> PublishedSourceSharingCapability<'_, Block> {
+            PublishedSourceSharingCapability { table: &self.table }
         }
 
-        pub(super) fn probe_member(&self, index: usize) -> Option<&RetainedBlockMember<Block>> {
-            self.table.as_ref().probe_published_member(index)
-        }
-
-        pub(super) fn len(&self) -> usize {
+        fn len(&self) -> usize {
             self.table.as_ref().member_count()
         }
 
         #[cfg(test)]
-        pub(super) fn share_call_count(&self) -> usize {
+        fn share_call_count(&self) -> usize {
             self.table.share_call_count()
         }
 
         #[cfg(test)]
-        pub(super) fn allocation_identity(&self) -> *const () {
+        fn allocation_identity(&self) -> *const () {
             self.table.allocation_identity().cast()
+        }
+    }
+
+    mod typed_lookup {
+        use super::{
+            PublishedLookupCapability, RetainedLookupMember, RetainedMembership,
+            RetainedMembershipDestination, RetainedSetId, RetainedSlotIdentity, TypeId,
+        };
+
+        pub(super) fn lookup_member<'a, Block, Tag>(
+            table: PublishedLookupCapability<'a, Block>,
+            set_id: RetainedSetId,
+            identity: RetainedSlotIdentity,
+            expected_destination: RetainedMembershipDestination,
+        ) -> Option<RetainedLookupMember<'a, Block>>
+        where
+            Tag: Copy + Send + Sync + 'static,
+        {
+            #[cfg(feature = "_u4c-collector")]
+            super::super::record_lookup_stage(super::super::LookupStage::CheckTableBrand);
+            if table.table_membership()
+                != Some(RetainedMembership {
+                    set_id,
+                    destination: expected_destination,
+                    ordinal: 0,
+                })
+            {
+                #[cfg(feature = "_u4c-collector")]
+                super::super::record_lookup_rejected();
+                return None;
+            }
+
+            #[cfg(feature = "_u4c-collector")]
+            super::super::record_lookup_stage(super::super::LookupStage::CheckSlotSet);
+            if identity.set_id != set_id {
+                #[cfg(feature = "_u4c-collector")]
+                super::super::record_lookup_rejected();
+                return None;
+            }
+
+            #[cfg(feature = "_u4c-collector")]
+            super::super::record_lookup_stage(super::super::LookupStage::CheckRange);
+            let Some(member) = table.probe_member(identity.index) else {
+                #[cfg(feature = "_u4c-collector")]
+                super::super::record_lookup_rejected();
+                return None;
+            };
+
+            #[cfg(feature = "_u4c-collector")]
+            super::super::record_lookup_stage(super::super::LookupStage::LoadMember);
+            Some(RetainedLookupMember {
+                block: member.block,
+                schema_tag_matches: identity.tag == TypeId::of::<Tag>()
+                    && member.schema_tag == identity.tag,
+            })
+        }
+    }
+
+    pub(in crate::retained) struct PublishedRetainedAggregate<Block> {
+        table: PublishedRetainedTable<Block>,
+        set_id: RetainedSetId,
+    }
+
+    impl<Block> PublishedRetainedAggregate<Block> {
+        pub(in crate::retained) fn new(
+            table: RetainedTableAllocation<Block>,
+            set_id: RetainedSetId,
+        ) -> Self {
+            Self {
+                table: PublishedRetainedTable::new(table),
+                set_id,
+            }
+        }
+
+        #[cfg(test)]
+        pub(in crate::retained) fn member(&self, identity: RetainedSlotIdentity) -> Option<&Block> {
+            self.table.member(identity, self.set_id)
+        }
+
+        fn source_allocation(
+            &self,
+            identity: RetainedSlotIdentity,
+        ) -> Option<&RetainedAllocation<Block>> {
+            self.table
+                .source_sharing_capability()
+                .source_allocation(identity, self.set_id)
+        }
+
+        fn belongs_to(&self, account: &PhysicalStorageAccount) -> bool {
+            self.table.source_sharing_capability().belongs_to(account)
+        }
+
+        pub(in crate::retained) fn lookup_member<Tag>(
+            &self,
+            identity: RetainedSlotIdentity,
+            expected_destination: RetainedMembershipDestination,
+        ) -> Option<RetainedLookupMember<'_, Block>>
+        where
+            Tag: Copy + Send + Sync + 'static,
+        {
+            self.table
+                .lookup_member::<Tag>(self.set_id, identity, expected_destination)
+        }
+
+        pub(in crate::retained) fn len(&self) -> usize {
+            self.table.len()
+        }
+
+        #[cfg(test)]
+        pub(in crate::retained) fn test_source_allocation(
+            &self,
+            identity: RetainedSlotIdentity,
+        ) -> Option<&RetainedAllocation<Block>> {
+            self.source_allocation(identity)
+        }
+
+        #[cfg(test)]
+        pub(in crate::retained) fn test_member_share_call_count(
+            &self,
+            identity: RetainedSlotIdentity,
+        ) -> Option<usize> {
+            self.source_allocation(identity)
+                .map(RetainedAllocation::share_call_count)
+        }
+
+        #[cfg(test)]
+        pub(in crate::retained) fn test_table_share_call_count(&self) -> usize {
+            self.table.share_call_count()
+        }
+
+        #[cfg(test)]
+        pub(in crate::retained) fn test_table_allocation_identity(&self) -> *const () {
+            self.table.allocation_identity()
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn share_retained_block<O, P, D, Block, Tag>(
+        ledger: &Ledger<O, P, D>,
+        account: &PhysicalStorageAccount,
+        handle_share_work: RetainedHandleSharePlan<D>,
+        table: &mut RetainedTableAllocation<Block>,
+        set_id: RetainedSetId,
+        destination: RetainedMembershipDestination,
+        slot_limit_error: RetainedPublicationError<D>,
+        source: &PublishedRetainedAggregate<Block>,
+        source_identity: RetainedSlotIdentity,
+    ) -> Result<RetainedSlotIdentity, RetainedPublicationError<D>>
+    where
+        O: OperationOwner,
+        P: Copy + Ord,
+        D: Copy + Ord + fmt::Debug + Send + Sync + 'static,
+        Block: Send + Sync + 'static,
+        Tag: Copy + Send + Sync + 'static,
+    {
+        let preflight = account
+            .try_begin_account_preflight()
+            .map_err(RetainedWriterError::AccountPoisoned)
+            .map_err(RetainedPublicationError::Writer)?;
+        if !table.belongs_to(account) {
+            return Err(RetainedPublicationError::Writer(
+                RetainedWriterError::ForeignAccount,
+            ));
+        }
+        let table_value = table.as_ref();
+        if table_value.members.len() >= table_value.total_blocks
+            || table_value.members.len() >= table_value.members.capacity()
+        {
+            return Err(slot_limit_error);
+        }
+        let index = table_value.members.len();
+        let ordinal = u64::try_from(index)
+            .ok()
+            .and_then(|index| index.checked_add(1))
+            .ok_or(RetainedPublicationError::Writer(
+                RetainedWriterError::MembershipExhausted,
+            ))?;
+        if source_identity.tag != TypeId::of::<Tag>() || source_identity.set_id != source.set_id {
+            return Err(RetainedPublicationError::InvalidSourceSlot);
+        }
+        if !source.belongs_to(account) {
+            return Err(RetainedPublicationError::Writer(
+                RetainedWriterError::ForeignAccount,
+            ));
+        }
+        let source_allocation = source
+            .source_allocation(source_identity)
+            .ok_or(RetainedPublicationError::InvalidSourceSlot)?;
+        if !source_allocation.belongs_to(account) {
+            drop(preflight);
+            let cause = account.record_poison(AccountPoisonReason::OwnershipGraphUnverified);
+            return Err(RetainedPublicationError::Writer(
+                RetainedWriterError::AccountPoisoned(cause),
+            ));
+        }
+        let share_admission = preflight
+            .admit_action()
+            .map_err(map_account_action_admission_error)
+            .map_err(RetainedPublicationError::Writer)?;
+        let Some(table) = table.table_mut_during_construction() else {
+            let poisoned = account.record_poison(AccountPoisonReason::OwnershipGraphUnverified);
+            return Err(RetainedPublicationError::Writer(
+                RetainedWriterError::AccountPoisoned(poisoned),
+            ));
+        };
+        match catch_unwind(AssertUnwindSafe(|| {
+            super::try_share_retained_block_after_admission::<O, P, D, Block, Tag>(
+                ledger,
+                share_admission,
+                handle_share_work,
+                table,
+                set_id,
+                destination,
+                index,
+                ordinal,
+                source_allocation,
+            )
+        })) {
+            Ok(result) => result,
+            Err(payload) => {
+                let cause = account.record_poison(AccountPoisonReason::OwnershipGraphUnverified);
+                discard_untrusted_panic_payload(payload);
+                Err(RetainedPublicationError::Writer(
+                    RetainedWriterError::AccountPoisoned(cause),
+                ))
+            }
         }
     }
 }
 
-use published_table_capability::PublishedRetainedTable;
+use published_table_capability::PublishedRetainedAggregate;
 
 pub(super) fn record_forgotten_table_edges<Block>(table: &RetainedTableAllocation<Block>) {
     let _ = table
@@ -616,11 +882,6 @@ impl<'a, EvidenceBlock> RetainedEvidenceClosureSession<'a, EvidenceBlock> {
     }
 }
 
-pub(super) struct PublishedRetainedAggregate<Block> {
-    table: PublishedRetainedTable<Block>,
-    set_id: RetainedSetId,
-}
-
 /// One table-validated retained member awaiting concrete-store view projection.
 pub(crate) struct RetainedLookupMember<'a, Block> {
     block: &'a Block,
@@ -634,108 +895,6 @@ impl<'a, Block> RetainedLookupMember<'a, Block> {
 
     pub(crate) const fn schema_tag_matches(&self) -> bool {
         self.schema_tag_matches
-    }
-}
-
-impl<Block> PublishedRetainedAggregate<Block> {
-    fn new(table: RetainedTableAllocation<Block>, set_id: RetainedSetId) -> Self {
-        Self {
-            table: PublishedRetainedTable::new(table),
-            set_id,
-        }
-    }
-
-    #[cfg(test)]
-    pub(super) fn member(&self, identity: RetainedSlotIdentity) -> Option<&Block> {
-        self.table.member(identity, self.set_id)
-    }
-
-    fn source_allocation(
-        &self,
-        identity: RetainedSlotIdentity,
-    ) -> Option<&RetainedAllocation<Block>> {
-        self.table.member_allocation(identity, self.set_id)
-    }
-
-    #[cfg(test)]
-    pub(super) fn test_source_allocation(
-        &self,
-        identity: RetainedSlotIdentity,
-    ) -> Option<&RetainedAllocation<Block>> {
-        self.source_allocation(identity)
-    }
-
-    fn belongs_to(&self, account: &PhysicalStorageAccount) -> bool {
-        self.table.belongs_to(account)
-    }
-
-    fn lookup_member<Tag>(
-        &self,
-        identity: RetainedSlotIdentity,
-        expected_destination: RetainedMembershipDestination,
-    ) -> Option<RetainedLookupMember<'_, Block>>
-    where
-        Tag: Copy + Send + Sync + 'static,
-    {
-        #[cfg(feature = "_u4c-collector")]
-        record_lookup_stage(LookupStage::CheckTableBrand);
-        if self.table.membership()
-            != Some(RetainedMembership {
-                set_id: self.set_id,
-                destination: expected_destination,
-                ordinal: 0,
-            })
-        {
-            #[cfg(feature = "_u4c-collector")]
-            record_lookup_rejected();
-            return None;
-        }
-
-        #[cfg(feature = "_u4c-collector")]
-        record_lookup_stage(LookupStage::CheckSlotSet);
-        if identity.set_id != self.set_id {
-            #[cfg(feature = "_u4c-collector")]
-            record_lookup_rejected();
-            return None;
-        }
-
-        #[cfg(feature = "_u4c-collector")]
-        record_lookup_stage(LookupStage::CheckRange);
-        let Some(member) = self.table.probe_member(identity.index) else {
-            #[cfg(feature = "_u4c-collector")]
-            record_lookup_rejected();
-            return None;
-        };
-
-        #[cfg(feature = "_u4c-collector")]
-        record_lookup_stage(LookupStage::LoadMember);
-        Some(RetainedLookupMember {
-            block: member.allocation.as_ref(),
-            schema_tag_matches: identity.tag == TypeId::of::<Tag>() && member.tag == identity.tag,
-        })
-    }
-
-    fn len(&self) -> usize {
-        self.table.len()
-    }
-
-    #[cfg(test)]
-    pub(super) fn test_member_share_call_count(
-        &self,
-        identity: RetainedSlotIdentity,
-    ) -> Option<usize> {
-        self.source_allocation(identity)
-            .map(RetainedAllocation::share_call_count)
-    }
-
-    #[cfg(test)]
-    pub(super) fn test_table_share_call_count(&self) -> usize {
-        self.table.share_call_count()
-    }
-
-    #[cfg(test)]
-    pub(super) fn test_table_allocation_identity(&self) -> *const () {
-        self.table.allocation_identity()
     }
 }
 
@@ -1266,78 +1425,17 @@ where
     Block: Send + Sync + 'static,
     Tag: Copy + Send + Sync + 'static,
 {
-    let preflight = account
-        .try_begin_account_preflight()
-        .map_err(RetainedWriterError::AccountPoisoned)
-        .map_err(RetainedPublicationError::Writer)?;
-    if !table.belongs_to(account) {
-        return Err(RetainedPublicationError::Writer(
-            RetainedWriterError::ForeignAccount,
-        ));
-    }
-    let table_value = table.as_ref();
-    if table_value.members.len() >= table_value.total_blocks
-        || table_value.members.len() >= table_value.members.capacity()
-    {
-        return Err(slot_limit_error);
-    }
-    let index = table_value.members.len();
-    let ordinal = u64::try_from(index)
-        .ok()
-        .and_then(|index| index.checked_add(1))
-        .ok_or(RetainedPublicationError::Writer(
-            RetainedWriterError::MembershipExhausted,
-        ))?;
-    if source_identity.tag != TypeId::of::<Tag>() || source_identity.set_id != source.set_id {
-        return Err(RetainedPublicationError::InvalidSourceSlot);
-    }
-    if !source.belongs_to(account) {
-        return Err(RetainedPublicationError::Writer(
-            RetainedWriterError::ForeignAccount,
-        ));
-    }
-    let source_allocation = source
-        .source_allocation(source_identity)
-        .ok_or(RetainedPublicationError::InvalidSourceSlot)?;
-    if !source_allocation.belongs_to(account) {
-        drop(preflight);
-        let cause = account.record_poison(AccountPoisonReason::OwnershipGraphUnverified);
-        return Err(RetainedPublicationError::Writer(
-            RetainedWriterError::AccountPoisoned(cause),
-        ));
-    }
-    let share_admission = preflight
-        .admit_action()
-        .map_err(map_account_action_admission_error)
-        .map_err(RetainedPublicationError::Writer)?;
-    let Some(table) = table.table_mut_during_construction() else {
-        let poisoned = account.record_poison(AccountPoisonReason::OwnershipGraphUnverified);
-        return Err(RetainedPublicationError::Writer(
-            RetainedWriterError::AccountPoisoned(poisoned),
-        ));
-    };
-    match catch_unwind(AssertUnwindSafe(|| {
-        try_share_retained_block_after_admission::<O, P, D, Block, Tag>(
-            ledger,
-            share_admission,
-            handle_share_work,
-            table,
-            set_id,
-            destination,
-            index,
-            ordinal,
-            source_allocation,
-        )
-    })) {
-        Ok(result) => result,
-        Err(payload) => {
-            let cause = account.record_poison(AccountPoisonReason::OwnershipGraphUnverified);
-            discard_untrusted_panic_payload(payload);
-            Err(RetainedPublicationError::Writer(
-                RetainedWriterError::AccountPoisoned(cause),
-            ))
-        }
-    }
+    published_table_capability::share_retained_block::<O, P, D, Block, Tag>(
+        ledger,
+        account,
+        handle_share_work,
+        table,
+        set_id,
+        destination,
+        slot_limit_error,
+        source,
+        source_identity,
+    )
 }
 #[allow(clippy::too_many_arguments)]
 pub(super) fn try_share_retained_block_after_admission<O, P, D, Block, Tag>(

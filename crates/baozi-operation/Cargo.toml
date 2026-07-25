@@ -21,3 +21,6 @@ required-features = ["_u4c-collector"]
 [dependencies]
 triomphe.workspace = true
 scopeguard.workspace = true
+
+[dev-dependencies]
+syn = { version = "2", default-features = false, features = ["full", "parsing", "visit"] }

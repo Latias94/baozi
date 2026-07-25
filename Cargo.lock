@@ -136,6 +136,7 @@ name = "baozi-operation"
 version = "0.1.0"
 dependencies = [
  "scopeguard",
+ "syn",
  "triomphe",
 ]
 

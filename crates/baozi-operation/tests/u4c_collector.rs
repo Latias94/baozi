@@ -14,11 +14,406 @@ use baozi_operation::{
     StoreDimensionSemanticId, StoreFallbackEnvelope, StoreKeyDomain, StoreLedgerPlan,
     StorePhaseKey, StorePhaseSemanticId, StoreSemanticCatalogId, StoreSuccessValidation, Utf8Plan,
 };
+use syn::visit::Visit;
 
 #[path = "../src/u4c_collector.rs"]
 mod isolated_collector;
 
 static COLLECTOR_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+fn module_items<'a>(items: &'a [syn::Item], name: &str) -> &'a [syn::Item] {
+    let modules = items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Mod(module) if module.ident == name => Some(module),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        modules.len(),
+        1,
+        "expected exactly one checked module {name}, found {}",
+        modules.len()
+    );
+    let module = modules[0];
+    assert_not_conditionally_compiled(&module.attrs, &format!("module {name}"));
+    module
+        .content
+        .as_ref()
+        .map(|(_, items)| items.as_slice())
+        .unwrap_or_else(|| panic!("{name} must remain an inline module"))
+}
+
+fn struct_item<'a>(items: &'a [syn::Item], name: &str) -> &'a syn::ItemStruct {
+    let structs = items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Struct(item) if item.ident == name => Some(item),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        structs.len(),
+        1,
+        "expected exactly one checked struct {name}, found {}",
+        structs.len()
+    );
+    let item = structs[0];
+    assert_not_conditionally_compiled(&item.attrs, &format!("struct {name}"));
+    item
+}
+
+fn type_last_ident(ty: &syn::Type) -> Option<String> {
+    match ty {
+        syn::Type::Path(path) => path
+            .path
+            .segments
+            .last()
+            .map(|segment| segment.ident.to_string()),
+        _ => None,
+    }
+}
+
+fn is_path(ty: &syn::Type, expected: &str) -> bool {
+    type_last_ident(ty).as_deref() == Some(expected)
+}
+
+fn is_reference_to_path(ty: &syn::Type, expected: &str) -> bool {
+    match ty {
+        syn::Type::Reference(reference) => is_path(&reference.elem, expected),
+        _ => false,
+    }
+}
+
+fn is_reference_to_slice_of_path(ty: &syn::Type, expected: &str) -> bool {
+    match ty {
+        syn::Type::Reference(reference) => match reference.elem.as_ref() {
+            syn::Type::Slice(slice) => is_path(&slice.elem, expected),
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+fn impl_method<'a>(
+    items: &'a [syn::Item],
+    type_name: &str,
+    method_name: &str,
+) -> &'a syn::ImplItemFn {
+    let mut methods = Vec::new();
+    for item in items {
+        let syn::Item::Impl(implementation) = item else {
+            continue;
+        };
+        if type_last_ident(&implementation.self_ty).as_deref() != Some(type_name) {
+            continue;
+        }
+        for item in &implementation.items {
+            if let syn::ImplItem::Fn(method) = item
+                && method.sig.ident == method_name
+            {
+                methods.push((implementation, method));
+            }
+        }
+    }
+    assert_eq!(
+        methods.len(),
+        1,
+        "expected exactly one checked method {type_name}::{method_name}, found {}",
+        methods.len()
+    );
+    let (implementation, method) = methods[0];
+    assert_not_conditionally_compiled(
+        &implementation.attrs,
+        &format!("impl parent of {type_name}::{method_name}"),
+    );
+    assert_not_conditionally_compiled(&method.attrs, &format!("method {type_name}::{method_name}"));
+    method
+}
+
+fn free_function<'a>(items: &'a [syn::Item], name: &str) -> &'a syn::ItemFn {
+    let functions = items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Fn(function) if function.sig.ident == name => Some(function),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        functions.len(),
+        1,
+        "expected exactly one checked free function {name}, found {}",
+        functions.len()
+    );
+    let function = functions[0];
+    assert_not_conditionally_compiled(&function.attrs, &format!("function {name}"));
+    function
+}
+
+fn assert_not_conditionally_compiled(attributes: &[syn::Attribute], subject: &str) {
+    let conditional_attributes = attributes
+        .iter()
+        .filter(|attribute| {
+            attribute.path().is_ident("cfg") || attribute.path().is_ident("cfg_attr")
+        })
+        .map(|attribute| path_name(attribute.path()))
+        .collect::<Vec<_>>();
+    assert!(
+        conditional_attributes.is_empty(),
+        "{subject} must not use conditional compilation: {conditional_attributes:?}"
+    );
+}
+
+fn named_fields(item: &syn::ItemStruct) -> Vec<&syn::Field> {
+    match &item.fields {
+        syn::Fields::Named(fields) => fields.named.iter().collect(),
+        _ => panic!("{} must keep named fields", item.ident),
+    }
+}
+
+fn field_names(fields: &[&syn::Field]) -> Vec<String> {
+    fields
+        .iter()
+        .map(|field| {
+            field
+                .ident
+                .as_ref()
+                .map(ToString::to_string)
+                .unwrap_or_else(|| panic!("named field must have an identifier"))
+        })
+        .collect()
+}
+
+fn assert_private_visibility(visibility: &syn::Visibility, subject: &str) {
+    assert!(
+        matches!(visibility, syn::Visibility::Inherited),
+        "{subject} must remain private to the capability module"
+    );
+}
+
+fn assert_retained_visibility(visibility: &syn::Visibility, subject: &str) {
+    let syn::Visibility::Restricted(restricted) = visibility else {
+        panic!("{subject} must be visible only to retained");
+    };
+    assert_eq!(
+        path_name(&restricted.path),
+        "crate::retained",
+        "{subject} must not widen beyond retained"
+    );
+}
+
+#[derive(Default)]
+struct LookupBodyShape {
+    function_calls: Vec<String>,
+    indirect_function_calls: usize,
+    method_calls: Vec<String>,
+    field_accesses: Vec<String>,
+    macro_calls: Vec<String>,
+    loops: usize,
+    index_expressions: usize,
+}
+
+#[derive(Default)]
+struct CapabilityBoundaryFinder {
+    trait_implementations: usize,
+    item_macros: usize,
+    forbidden_attributes: Vec<String>,
+}
+
+impl<'ast> Visit<'ast> for CapabilityBoundaryFinder {
+    fn visit_item_impl(&mut self, implementation: &'ast syn::ItemImpl) {
+        if implementation.trait_.is_some() {
+            self.trait_implementations += 1;
+        }
+        syn::visit::visit_item_impl(self, implementation);
+    }
+
+    fn visit_item_macro(&mut self, item: &'ast syn::ItemMacro) {
+        self.item_macros += 1;
+        syn::visit::visit_item_macro(self, item);
+    }
+
+    fn visit_attribute(&mut self, attribute: &'ast syn::Attribute) {
+        if !attribute.path().is_ident("allow") && !attribute.path().is_ident("cfg") {
+            self.forbidden_attributes.push(path_name(attribute.path()));
+        }
+        syn::visit::visit_attribute(self, attribute);
+    }
+}
+
+impl<'ast> Visit<'ast> for LookupBodyShape {
+    fn visit_expr_call(&mut self, expression: &'ast syn::ExprCall) {
+        if let syn::Expr::Path(path) = expression.func.as_ref() {
+            self.function_calls.push(path_name(&path.path));
+        } else {
+            self.indirect_function_calls += 1;
+        }
+        syn::visit::visit_expr_call(self, expression);
+    }
+
+    fn visit_expr_method_call(&mut self, expression: &'ast syn::ExprMethodCall) {
+        self.method_calls.push(expression.method.to_string());
+        syn::visit::visit_expr_method_call(self, expression);
+    }
+
+    fn visit_expr_field(&mut self, expression: &'ast syn::ExprField) {
+        if let syn::Member::Named(member) = &expression.member {
+            self.field_accesses.push(member.to_string());
+        }
+        syn::visit::visit_expr_field(self, expression);
+    }
+
+    fn visit_expr_for_loop(&mut self, expression: &'ast syn::ExprForLoop) {
+        self.loops += 1;
+        syn::visit::visit_expr_for_loop(self, expression);
+    }
+
+    fn visit_expr_while(&mut self, expression: &'ast syn::ExprWhile) {
+        self.loops += 1;
+        syn::visit::visit_expr_while(self, expression);
+    }
+
+    fn visit_expr_loop(&mut self, expression: &'ast syn::ExprLoop) {
+        self.loops += 1;
+        syn::visit::visit_expr_loop(self, expression);
+    }
+
+    fn visit_expr_index(&mut self, expression: &'ast syn::ExprIndex) {
+        self.index_expressions += 1;
+        syn::visit::visit_expr_index(self, expression);
+    }
+
+    fn visit_macro(&mut self, invocation: &'ast syn::Macro) {
+        self.macro_calls.push(path_name(&invocation.path));
+        syn::visit::visit_macro(self, invocation);
+    }
+}
+
+fn path_name(path: &syn::Path) -> String {
+    path.segments
+        .iter()
+        .map(|segment| segment.ident.to_string())
+        .collect::<Vec<_>>()
+        .join("::")
+}
+
+fn sorted(values: impl IntoIterator<Item = String>) -> Vec<String> {
+    let mut values = values.into_iter().collect::<Vec<_>>();
+    values.sort_unstable();
+    values
+}
+
+fn assert_no_lookup_scan(observed: &LookupBodyShape) {
+    assert_eq!(
+        observed.loops, 0,
+        "the checked published lookup call graph must not contain a loop"
+    );
+    assert_eq!(
+        observed.index_expressions, 0,
+        "the checked published lookup call graph must not use an index expression"
+    );
+    assert_eq!(
+        observed.indirect_function_calls, 0,
+        "the checked published lookup call graph must not use an indirect function call"
+    );
+    assert!(
+        observed.macro_calls.is_empty(),
+        "the checked published lookup call graph must not invoke or define a macro: {:?}",
+        observed.macro_calls
+    );
+    for forbidden in [
+        "all",
+        "all_reachable",
+        "any",
+        "collect",
+        "filter",
+        "filter_map",
+        "find",
+        "flat_map",
+        "fold",
+        "for_each",
+        "into_iter",
+        "iter",
+        "iter_mut",
+        "map",
+        "position",
+        "reduce",
+    ] {
+        assert!(
+            !observed
+                .method_calls
+                .iter()
+                .any(|method| method == forbidden),
+            "the checked published lookup call graph must not invoke {forbidden}"
+        );
+    }
+}
+
+fn assert_lookup_body_shape(
+    block: &syn::Block,
+    expected_functions: &[&str],
+    expected_methods: &[&str],
+    expected_fields: &[&str],
+) {
+    let mut observed = LookupBodyShape::default();
+    observed.visit_block(block);
+    assert_no_lookup_scan(&observed);
+    assert_eq!(
+        sorted(observed.function_calls),
+        sorted(expected_functions.iter().map(|value| (*value).to_owned())),
+        "the lookup body must call only the frozen function whitelist"
+    );
+    assert_eq!(
+        sorted(observed.method_calls),
+        sorted(expected_methods.iter().map(|value| (*value).to_owned())),
+        "the lookup body must call only the frozen method whitelist"
+    );
+    assert_eq!(
+        sorted(observed.field_accesses),
+        sorted(expected_fields.iter().map(|value| (*value).to_owned())),
+        "the lookup body must access only the frozen fields"
+    );
+}
+
+fn assert_lookup_call_shape(
+    block: &syn::Block,
+    expected_functions: &[&str],
+    expected_methods: &[&str],
+) {
+    let mut observed = LookupBodyShape::default();
+    observed.visit_block(block);
+    assert_no_lookup_scan(&observed);
+    assert_eq!(
+        sorted(observed.function_calls),
+        sorted(expected_functions.iter().map(|value| (*value).to_owned())),
+        "the lookup body must call only the frozen function whitelist"
+    );
+    assert_eq!(
+        sorted(observed.method_calls),
+        sorted(expected_methods.iter().map(|value| (*value).to_owned())),
+        "the lookup body must call only the frozen method whitelist"
+    );
+}
+
+fn assert_capability_module_has_no_implicit_execution(items: &[syn::Item]) {
+    let mut finder = CapabilityBoundaryFinder::default();
+    for item in items {
+        finder.visit_item(item);
+    }
+    assert_eq!(
+        finder.trait_implementations, 0,
+        "the private capability module must not gain a trait-provided implicit execution path"
+    );
+    assert_eq!(
+        finder.item_macros, 0,
+        "the private capability module must not gain an item macro execution path"
+    );
+    assert!(
+        finder.forbidden_attributes.is_empty(),
+        "the private capability module must not gain an attribute macro execution path: {:?}",
+        finder.forbidden_attributes
+    );
+}
 
 fn collector_test_lock() -> MutexGuard<'static, ()> {
     COLLECTOR_TEST_LOCK
@@ -615,21 +1010,6 @@ fn source_gates_keep_public_views_on_the_checked_lookup_seam() {
             "retained lookup must retain the {stage} taxonomy stage"
         );
     }
-    assert!(
-        retained.matches("pub(super) struct PublishedRetainedTable<").count() == 1
-            && retained.matches("table: PublishedRetainedTable<Block>").count() == 1
-            && retained.matches("pub(super) struct PublishedRetainedAggregate<").count() == 1
-            && !retained.contains(
-                "pub(super) struct PublishedRetainedAggregate<Block> {\n    table: RetainedTableAllocation"
-            )
-            && retained.matches("fn probe_published_member(").count() == 1
-            && retained.matches("record_lookup_member_probe();").count() == 1
-            && retained.matches("self.members.get(index)").count() == 1
-            && retained.matches("self.table.as_ref().probe_published_member(index)").count() == 1
-            && retained.matches("self.table.probe_member(identity.index)").count() == 1
-            && !retained.contains("self.table.as_ref().members"),
-        "published lookup must be unable to reach raw members outside the unique probe-coupled index capability"
-    );
     for stage in [
         "LookupStage::CheckVariant",
         "LookupStage::CheckSchemaTag",
@@ -644,6 +1024,330 @@ fn source_gates_keep_public_views_on_the_checked_lookup_seam() {
     assert!(
         retained.contains("record_lookup_rejected") && terminal_output.contains("reject_lookup"),
         "both retained and terminal rejection paths must explicitly complete the taxonomy"
+    );
+}
+
+#[test]
+fn ast_gate_seals_the_published_lookup_call_graph() {
+    let source = include_str!("../src/retained/block_table.rs");
+    let file = syn::parse_file(source).expect("block_table.rs must remain valid Rust source");
+    let capability_items = module_items(&file.items, "published_table_capability");
+    assert_capability_module_has_no_implicit_execution(capability_items);
+
+    let published_table = struct_item(capability_items, "PublishedRetainedTable");
+    assert_private_visibility(&published_table.vis, "the raw published table owner");
+    let published_table_fields = named_fields(published_table);
+    assert_eq!(
+        field_names(&published_table_fields),
+        ["table"],
+        "the raw table allocation must stay behind the private capability boundary"
+    );
+    assert_private_visibility(
+        &published_table_fields[0].vis,
+        "the raw published table allocation",
+    );
+    assert!(is_path(
+        &published_table_fields[0].ty,
+        "RetainedTableAllocation"
+    ));
+
+    let lookup_capability = struct_item(capability_items, "PublishedLookupCapability");
+    assert_private_visibility(&lookup_capability.vis, "the indexed lookup capability");
+    let lookup_fields = named_fields(lookup_capability);
+    assert_eq!(
+        field_names(&lookup_fields),
+        ["table_membership", "members"],
+        "lookup capability must carry only its table snapshot and member slice"
+    );
+    assert!(is_path(&lookup_fields[0].ty, "Option"));
+    assert!(
+        is_reference_to_slice_of_path(&lookup_fields[1].ty, "RetainedBlockMember"),
+        "lookup capability must borrow an opaque member slice rather than raw table ownership"
+    );
+
+    let source_sharing_capability =
+        struct_item(capability_items, "PublishedSourceSharingCapability");
+    assert_private_visibility(
+        &source_sharing_capability.vis,
+        "the source-sharing capability",
+    );
+    let source_sharing_fields = named_fields(source_sharing_capability);
+    assert_eq!(
+        field_names(&source_sharing_fields),
+        ["table"],
+        "source sharing must be the only capability holding the raw table allocation"
+    );
+    assert!(
+        is_reference_to_path(&source_sharing_fields[0].ty, "RetainedTableAllocation"),
+        "source sharing must retain its separate raw-table borrow"
+    );
+
+    let probed_member = struct_item(capability_items, "ProbedPublishedMember");
+    assert_private_visibility(&probed_member.vis, "the indexed lookup result");
+    let probed_fields = named_fields(probed_member);
+    assert_eq!(
+        field_names(&probed_fields),
+        ["block", "schema_tag"],
+        "the indexed lookup result must not expose a member, allocation, or directory"
+    );
+    assert!(matches!(&probed_fields[0].ty, syn::Type::Reference(_)));
+    assert!(is_path(&probed_fields[1].ty, "TypeId"));
+
+    let aggregate = struct_item(capability_items, "PublishedRetainedAggregate");
+    assert_retained_visibility(&aggregate.vis, "the published aggregate");
+    let aggregate_fields = named_fields(aggregate);
+    assert_eq!(
+        field_names(&aggregate_fields),
+        ["table", "set_id"],
+        "the published aggregate must not expose a member directory or source capability"
+    );
+    for field in aggregate_fields {
+        assert_private_visibility(&field.vis, "a published aggregate field");
+    }
+
+    let lookup_capability_factory = impl_method(
+        capability_items,
+        "PublishedRetainedTable",
+        "lookup_capability",
+    );
+    assert_private_visibility(
+        &lookup_capability_factory.vis,
+        "the lookup capability factory",
+    );
+    assert_lookup_body_shape(
+        &lookup_capability_factory.block,
+        &[],
+        &["as_ref", "as_slice", "membership"],
+        &["members", "table", "table"],
+    );
+
+    let probe_member = impl_method(
+        capability_items,
+        "PublishedLookupCapability",
+        "probe_member",
+    );
+    assert_private_visibility(&probe_member.vis, "the member probe");
+    assert_lookup_body_shape(
+        &probe_member.block,
+        &["Some", "super::record_lookup_member_probe"],
+        &["as_ref", "get"],
+        &["allocation", "members", "tag"],
+    );
+
+    let table_membership = impl_method(
+        capability_items,
+        "PublishedLookupCapability",
+        "table_membership",
+    );
+    assert_private_visibility(&table_membership.vis, "the lookup table-membership check");
+    assert_lookup_body_shape(&table_membership.block, &[], &[], &["table_membership"]);
+
+    let table_lookup = impl_method(capability_items, "PublishedRetainedTable", "lookup_member");
+    assert_private_visibility(&table_lookup.vis, "the table-local typed lookup");
+    assert_lookup_body_shape(
+        &table_lookup.block,
+        &["typed_lookup::lookup_member"],
+        &["lookup_capability"],
+        &[],
+    );
+
+    let source_capability_factory = impl_method(
+        capability_items,
+        "PublishedRetainedTable",
+        "source_sharing_capability",
+    );
+    assert_private_visibility(
+        &source_capability_factory.vis,
+        "the source-sharing capability factory",
+    );
+    assert_lookup_body_shape(&source_capability_factory.block, &[], &[], &["table"]);
+
+    let source_capability_belongs_to = impl_method(
+        capability_items,
+        "PublishedSourceSharingCapability",
+        "belongs_to",
+    );
+    assert_private_visibility(
+        &source_capability_belongs_to.vis,
+        "the source-sharing account check",
+    );
+    assert_lookup_body_shape(
+        &source_capability_belongs_to.block,
+        &[],
+        &["belongs_to"],
+        &["table"],
+    );
+
+    let source_capability_allocation = impl_method(
+        capability_items,
+        "PublishedSourceSharingCapability",
+        "source_allocation",
+    );
+    assert_private_visibility(
+        &source_capability_allocation.vis,
+        "the source-sharing indexed allocation lookup",
+    );
+    assert_lookup_body_shape(
+        &source_capability_allocation.block,
+        &["super::super::record_test_member_lookup"],
+        &["and_then", "as_ref", "get", "then_some"],
+        &[
+            "allocation",
+            "index",
+            "members",
+            "set_id",
+            "table",
+            "tag",
+            "tag",
+        ],
+    );
+
+    let aggregate_source_lookup = impl_method(
+        capability_items,
+        "PublishedRetainedAggregate",
+        "source_allocation",
+    );
+    assert_private_visibility(
+        &aggregate_source_lookup.vis,
+        "the aggregate source-allocation gateway",
+    );
+    assert_lookup_body_shape(
+        &aggregate_source_lookup.block,
+        &[],
+        &["source_allocation", "source_sharing_capability"],
+        &["set_id", "table"],
+    );
+
+    let aggregate_belongs_to =
+        impl_method(capability_items, "PublishedRetainedAggregate", "belongs_to");
+    assert_private_visibility(&aggregate_belongs_to.vis, "the aggregate account check");
+    assert_lookup_body_shape(
+        &aggregate_belongs_to.block,
+        &[],
+        &["belongs_to", "source_sharing_capability"],
+        &["table"],
+    );
+
+    let aggregate_lookup = impl_method(
+        capability_items,
+        "PublishedRetainedAggregate",
+        "lookup_member",
+    );
+    assert_retained_visibility(&aggregate_lookup.vis, "the published aggregate lookup API");
+    assert_lookup_body_shape(
+        &aggregate_lookup.block,
+        &[],
+        &["lookup_member"],
+        &["set_id", "table"],
+    );
+
+    let table_len = impl_method(capability_items, "PublishedRetainedTable", "len");
+    assert_private_visibility(&table_len.vis, "the table member-count gateway");
+    assert_lookup_body_shape(
+        &table_len.block,
+        &[],
+        &["as_ref", "member_count"],
+        &["table"],
+    );
+
+    let aggregate_len = impl_method(capability_items, "PublishedRetainedAggregate", "len");
+    assert_retained_visibility(&aggregate_len.vis, "the published aggregate length API");
+    assert_lookup_body_shape(&aggregate_len.block, &[], &["len"], &["table"]);
+
+    let typed_lookup_items = module_items(capability_items, "typed_lookup");
+    let typed_lookup = free_function(typed_lookup_items, "lookup_member");
+    let first_parameter = typed_lookup
+        .sig
+        .inputs
+        .first()
+        .unwrap_or_else(|| panic!("typed lookup must accept a lookup capability"));
+    let syn::FnArg::Typed(first_parameter) = first_parameter else {
+        panic!("typed lookup must receive a named lookup capability");
+    };
+    assert!(
+        is_path(&first_parameter.ty, "PublishedLookupCapability"),
+        "typed lookup must not receive the raw table or source-sharing capability"
+    );
+    assert_lookup_body_shape(
+        &typed_lookup.block,
+        &[
+            "Some",
+            "Some",
+            "TypeId::of",
+            "super::super::record_lookup_rejected",
+            "super::super::record_lookup_rejected",
+            "super::super::record_lookup_rejected",
+            "super::super::record_lookup_stage",
+            "super::super::record_lookup_stage",
+            "super::super::record_lookup_stage",
+            "super::super::record_lookup_stage",
+        ],
+        &["probe_member", "table_membership"],
+        &["block", "index", "schema_tag", "set_id", "tag", "tag"],
+    );
+
+    let source_share = free_function(capability_items, "share_retained_block");
+    assert_lookup_call_shape(
+        &source_share.block,
+        &[
+            "AssertUnwindSafe",
+            "Err",
+            "Err",
+            "Err",
+            "Err",
+            "Err",
+            "Err",
+            "Err",
+            "RetainedPublicationError::Writer",
+            "RetainedPublicationError::Writer",
+            "RetainedPublicationError::Writer",
+            "RetainedPublicationError::Writer",
+            "RetainedPublicationError::Writer",
+            "RetainedPublicationError::Writer",
+            "RetainedWriterError::AccountPoisoned",
+            "RetainedWriterError::AccountPoisoned",
+            "RetainedWriterError::AccountPoisoned",
+            "TypeId::of",
+            "catch_unwind",
+            "discard_untrusted_panic_payload",
+            "drop",
+            "super::try_share_retained_block_after_admission",
+            "u64::try_from",
+        ],
+        &[
+            "admit_action",
+            "and_then",
+            "as_ref",
+            "belongs_to",
+            "belongs_to",
+            "belongs_to",
+            "capacity",
+            "checked_add",
+            "len",
+            "len",
+            "len",
+            "map_err",
+            "map_err",
+            "map_err",
+            "map_err",
+            "ok",
+            "ok_or",
+            "ok_or",
+            "record_poison",
+            "record_poison",
+            "record_poison",
+            "source_allocation",
+            "table_mut_during_construction",
+            "try_begin_account_preflight",
+        ],
+    );
+
+    let outer_source_share = free_function(&file.items, "try_share_retained_block");
+    assert_lookup_body_shape(
+        &outer_source_share.block,
+        &["published_table_capability::share_retained_block"],
+        &[],
+        &[],
     );
 }
 
