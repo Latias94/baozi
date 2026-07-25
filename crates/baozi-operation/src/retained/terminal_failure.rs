@@ -1147,7 +1147,6 @@ where
         let eligibility = match state
             .output
             .evidence
-            .owner
             .account()
             .try_publication_eligibility()
         {

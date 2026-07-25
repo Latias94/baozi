@@ -54,6 +54,52 @@ fn final_owner_source_uses_only_the_qualified_extraction_path() {
 }
 
 #[test]
+fn terminal_publication_protocol_stays_out_of_retained_root() {
+    let retained_root = retained_root_production_source();
+    let terminal = include_str!("../terminal.rs");
+
+    for (definition, root_forbidden) in [
+        (
+            "pub(super) struct TerminalPhysicalOwnershipManifest",
+            "struct TerminalPhysicalOwnershipManifest",
+        ),
+        (
+            "pub(super) struct TerminalSuccessFreezeGuard",
+            "struct TerminalSuccessFreezeGuard",
+        ),
+        (
+            "pub(super) struct PrimaryPublicationBatches",
+            "struct PrimaryPublicationBatches",
+        ),
+        (
+            "pub(super) struct TerminalPrimaryGuard",
+            "struct TerminalPrimaryGuard",
+        ),
+        (
+            "pub(super) struct TerminalFallbackGuard",
+            "struct TerminalFallbackGuard",
+        ),
+        (
+            "pub(crate) enum RetainedPublicationPrepareError",
+            "enum RetainedPublicationPrepareError",
+        ),
+        (
+            "pub(super) struct QualifiedDetachedTerminalEvidence",
+            "struct QualifiedDetachedTerminalEvidence",
+        ),
+    ] {
+        assert!(
+            terminal.contains(definition),
+            "terminal protocol declaration `{definition}` must remain in terminal.rs"
+        );
+        assert!(
+            !retained_root.contains(root_forbidden),
+            "terminal protocol declaration `{root_forbidden}` leaked back into retained.rs"
+        );
+    }
+}
+
+#[test]
 fn generic_retained_authority_remains_crate_private() {
     let production = retained_production_source();
     let root_exports = include_str!("../../lib.rs");

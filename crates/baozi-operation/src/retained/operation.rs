@@ -330,14 +330,11 @@ where
         let (fallback, evidence, batches) = baseline.into_parts();
         let physical = TerminalPhysicalOwnershipManifest::new(fallback, evidence, None, None, None);
         TerminalFallbackGuard::new(
-            TerminalFallbackAttribution {
+            TerminalFallbackAttribution::new(
                 ledger,
-                baseline: batches,
-                discard: PrimaryPublicationBatches {
-                    canonical: None,
-                    evidence: None,
-                },
-            },
+                batches,
+                PrimaryPublicationBatches::new(None, None),
+            ),
             physical,
         )
         .try_prepare(cause)
