@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-07-16
-updated: 2026-07-23
+updated: 2026-07-25
 authors:
   - Codex
 decision_type: architecture
@@ -959,7 +959,7 @@ U4c measures the selected concrete store against these exact behavioral threshol
 | Counter | Required concrete-store result |
 | --- | --- |
 | Unchanged shareable hot leaf | `0` copied payload bytes and `0` new payload backing allocations |
-| Typed hot view | `0` allocations, `0` per-element decodes, and `O(1)` checked lookup/variant dispatch |
+| Typed hot view | `0` allocations, `0` per-element decodes, and `O(1)` checked lookup/variant dispatch with at most one actual member-directory probe |
 | Schema plumbing | `0` extra owned allocations created solely for schema plumbing |
 | Producer operation count | `<= semantic_cells + references + 3 * blocks` |
 
@@ -1001,11 +1001,29 @@ one reference event per `reference`, and the three lifecycle events per `block`;
 checked arithmetic, and test harness work are not relabeled as producer events. Therefore the gate is
 the declared inequality `producer_events <= semantic_cells + references + 3 * blocks`.
 
-Checked lookup uses the fixed event taxonomy `check_table_brand`, `check_slot_set`, `check_range`,
-`load_member`, `check_variant`, `check_schema_tag`, `project_view`, and `return_view`. The same lookup
-fixture runs against tables with `N`, `2N`, and `4N` reachable members. Every successful or rejected
-lookup emits at most eight events, and the maximum event count must be identical at all three sizes;
-this is the measured `O(1)` claim.
+Checked lookup uses the fixed logical-stage taxonomy `check_table_brand`, `check_slot_set`,
+`check_range`, `load_member`, `check_variant`, `check_schema_tag`, `project_view`, and
+`return_view`. That taxonomy classifies control flow only; it is not evidence that the member
+directory was not scanned. A separate non-taxonomy `member_probe` counter is emitted only by the
+private indexed directory access after `check_range`. It is zero for any rejection before that
+boundary and exactly one for every lookup that reaches the directory, including an out-of-range or
+tag-mismatch rejection. The same lookup fixture runs against tables with `N`, `2N`, and `4N`
+reachable members. At all three sizes, successful and rejected lookups must retain a maximum of
+eight logical-stage events and an identical `member_probe` count no greater than one; together these
+are the measured `O(1)` claim.
+
+The published aggregate exposes only its checked typed lookup and length to retained callers. Its
+raw table owner, member directory, lookup capability, probe result, and source-sharing capability
+remain private to one capability module. The source-sharing transition is implemented in that module
+and crossed only by one thin outer sharing wrapper; the published typed-view call graph cannot obtain
+a raw root, raw member, raw directory, source allocation, closure validator, iterator, or full-table
+scan. The no-bypass source/API gate parses that actual module, freezes the complete direct
+function/method call sets for lookup and sharing, requires exactly one AST declaration for every
+selected capability module, raw-capability struct, impl method, and free function, and rejects
+`cfg`/`cfg_attr` on each selected declaration and its enclosing impl. It also rejects loops,
+indexing, indirect calls, macros, iterator/scan methods, and executable trait/item/attribute-macro
+paths, and requires the capability module to contain zero trait implementations. Test-only
+inspection helpers do not widen the production capability surface.
 
 Schema-only allocation is measured in a dedicated single-threaded subprocess. After the harness,
 allocator tracer, factory, and account reach a frozen baseline, the xtask records both physical-
@@ -1098,6 +1116,7 @@ Negative:
 | Foreign-account allocation enters one Scene | Critical | account-branded storage and fail-before-access/publication validation |
 | Account handle drops while storage remains | Critical | each bound lease retains account state until final payload release |
 | Facade creates an unbounded/global/per-request factory | Critical | one long-lived facade runtime owns a finite documented factory and creates bounded private accounts per import; low-level/advanced APIs remain explicit |
+| Fixed logical lookup events conceal a linear member-directory scan | Critical | an independent probe counter records only the private indexed directory access; `N/2N/4N` fixtures require constant logical and probe counts, while private capabilities plus AST/source gates forbid raw-directory, helper, macro, indirect-call, iterator, or implicit-execution bypasses |
 | The concrete store passes qualitative review but hides copy/view/authoring regressions | Critical | run the checked-in U4c spec through the pinned xtask over the sealed collector, independently frozen semantic evidence, and exact selected-implementation closure; stop/amend on any copy, allocation, fixed-event lookup, producer-count, closure, or no-bypass threshold violation |
 
 ## Success Metrics
@@ -1125,7 +1144,7 @@ Negative:
 | Facade boundedness | common facade imports use one runtime-held bounded factory and one private account per import without exposing physical types | default/custom profile, repeated-import, lifetime, and API-shape tests |
 | Shareable-kind closure | only sealed scalar-sequence, bytes, and UTF-8 leaves, including geometry index scalar payload, inherit physical backing; every record/directory/reference/header/generation-local lookup-index structure is rebuilt | positive leaf inheritance plus negative `RecordBlock`/structural-kind compile-fail and runtime probes |
 | Capacity threat boundary | runtime plans are governed by the capacity-policy revision and enforce request/observed envelopes; a separate source anchor pairs that policy with the concrete-store revision for repository-managed rustc/libstd/target/profile/allocator evidence, while unknown/custom paths remain `Unverified`; over-envelope postcheck prevents publication but makes no transient-RSS claim | source-anchor drift, explicit allocator probe, custom/unknown classification, overgrant drop, and subprocess-limit fixtures |
-| U4c falsification | the frozen spec proves `0/0` hot-leaf copy/allocation, `0/0` hot-view allocation/decode, fixed `<= 8` lookup events at `N/2N/4N`, zero tracer-proven schema-only allocations, producer-event bounds, exact source/build/environment closure, and a sealed no-bypass collector | pinned xtask, allocator/account tracer, exact event taxonomy, independently frozen transcripts/digests/mutations, closure manifest, and toolchain/build/allocator identity |
+| U4c falsification | the frozen spec proves `0/0` hot-leaf copy/allocation, `0/0` hot-view allocation/decode, fixed `<= 8` logical lookup events plus constant `<= 1` actual member-directory probe at `N/2N/4N`, zero tracer-proven schema-only allocations, producer-event bounds, exact source/build/environment closure, and a sealed no-bypass collector | pinned xtask, allocator/account tracer, exact logical/probe taxonomy, private-capability and AST/source gates, independently frozen transcripts/digests/mutations, closure manifest, and toolchain/build/allocator identity |
 | Fallback representation | sealed key-bearing dimension/phase cells plus a complete global-evidence header; checked semantic aggregate layout, independent actual-allocation `CapacityPlan`s, and ledger-first/physical-second complete aggregate admission before retained payload/evidence allocator entry | key normalization/catalog lifetime/post-plugin-unload query, brand-exclusion vectors, full-cell/header layout and global-field tests, actual-backing plan plus aggregate-envelope/block overflow probes, no nested locks, no shared linearization point, no hardcoded ABI, and no single-backing assumption; small account-bound owner after bootstrap and by-value `SessionStartError` before it |
 
 ## Acceptance Criteria
@@ -1334,8 +1353,9 @@ Negative:
   selected-implementation source/build/environment closure, event taxonomy, collector identity, and
   coverage mapping before measurement. The concrete store must produce zero copied bytes/new backing
   allocations for an unchanged hot leaf; zero allocation/per-element decode for a hot view; at most
-  eight fixed-taxonomy lookup events with the same maximum at `N`, `2N`, and `4N`; zero schema-only
-  allocation under the single-thread allocator/account tracer; and producer events no greater than
+  eight fixed logical lookup events and an identical at-most-one actual member-directory probe at
+  `N`, `2N`, and `4N`; zero schema-only allocation under the single-thread allocator/account tracer;
+  and producer events no greater than
   `semantic_cells + references + 3 * blocks`. Tests use this ADR's exact cell/reference/block/event
   definitions and reject closure/tool/build/fixture/digest drift, caller-supplied counts, measurement
   callbacks, fixture-only bypasses, dead or padding code, and incomplete production coverage. U4
@@ -1346,6 +1366,31 @@ Negative:
   migrated in the canonical Scene cutover before the legacy reservation-transfer path is deleted.
 
 ## Amendment History
+
+### 2026-07-25: Bind U4c lookup evidence to the actual member-directory probe
+
+- Affected headings: `Option K`, `U4c Reproducible Falsification Gate`, `Risks and Mitigations`,
+  `Success Metrics`, and the U4c acceptance criterion.
+- Previous rule: U4c treated the fixed eight-stage lookup taxonomy and equal `N`/`2N`/`4N` event
+  maxima as sufficient evidence of constant lookup cost. A linear member-directory scan could occur
+  before the counted indexed access without changing that logical taxonomy.
+- New rule: `member_probe` is an independent non-taxonomy counter attached only to the actual private
+  indexed directory access. It is zero before the range boundary and exactly one after it; both the
+  logical `<= 8` maximum and the actual probe count must remain constant at `N`, `2N`, and `4N`.
+  Raw table/directory, lookup, probe, and source-sharing authority are private to one capability
+  module. Its published aggregate has no raw fields visible to callers, sharing crosses only one thin
+  wrapper, and AST/source gates freeze the qualifying call graph while rejecting scans, macros,
+  indirect calls, executable trait implementations, macro-generated execution paths, and alternate
+  conditionally compiled declarations.
+- Compatibility impact: this strengthens private pre-release lookup/source-sharing internals and U4c
+  test evidence only; no semantic, wire, or public retained-store contract is widened.
+- Required review: independently verify the `N`/`2N`/`4N` probe counts, the zero-before-range and
+  one-after-range boundary, the exact private capability fields and visibility, the single sharing
+  crossing, exactly one unconditional declaration for every selected capability node, and source
+  gates for explicit and implicit execution paths.
+- Rationale: a fixed logical trace proves neither the absence nor the cost of uncounted directory
+  work. The probe must bind the performance claim to the single indexed access, while capability
+  boundaries make that access the only production path able to see the directory.
 
 ### 2026-07-23: Make U4c behavior-oriented and single-implementation
 
