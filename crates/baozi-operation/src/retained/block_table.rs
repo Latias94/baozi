@@ -204,6 +204,30 @@ impl<Block, Tag> CanonicalRetainedSlot<Block, Tag> {
     pub(crate) const fn identity(self) -> RetainedSlotIdentity {
         self.identity
     }
+
+    #[cfg(feature = "_u4c-collector")]
+    pub(crate) const fn u4c_probe_with_identity_index(self, index: usize) -> Self {
+        Self {
+            identity: RetainedSlotIdentity {
+                set_id: self.identity.set_id,
+                index,
+                tag: self.identity.tag,
+            },
+            marker: PhantomData,
+        }
+    }
+
+    #[cfg(feature = "_u4c-collector")]
+    pub(crate) fn u4c_probe_with_identity_tag<IdentityTag: 'static>(self) -> Self {
+        Self {
+            identity: RetainedSlotIdentity {
+                set_id: self.identity.set_id,
+                index: self.identity.index,
+                tag: TypeId::of::<IdentityTag>(),
+            },
+            marker: PhantomData,
+        }
+    }
 }
 
 /// Non-owning projection to one outcome-evidence block in a branded retained publication.

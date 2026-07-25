@@ -243,6 +243,12 @@ jobs:
       - name: Test capability-bound native filesystem candidate without skipped fixtures
         run: cargo nextest run --locked --target "${{ matrix.target }}" -p baozi-io --features fs-candidate
 
+      - name: Check capability-bound repository filesystem candidate
+        run: cargo check --locked --target "${{ matrix.target }}" -p baozi-io --no-default-features --features repository-fs-candidate
+
+      - name: Test repository filesystem candidate operational and fail-closed contracts
+        run: cargo nextest run --locked --target "${{ matrix.target }}" -p baozi-io --no-default-features --features repository-fs-candidate
+
   fuzz:
     name: ${{ matrix.target }} sanitizer fuzz smoke
     runs-on: ubuntu-latest

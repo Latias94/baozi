@@ -40,6 +40,10 @@ impl NativeDirectoryCapability {
     pub fn authority_domain(&self) -> &AuthorityDomain {
         &self.domain
     }
+
+    pub(crate) fn directory(&self) -> &Dir {
+        &self.directory
+    }
 }
 
 impl fmt::Debug for NativeDirectoryCapability {
@@ -184,6 +188,62 @@ mod tests {
         }
     }
 
+    #[cfg(windows)]
+    fn replace_retained_root(root_path: &Path, moved_path: &Path) {
+        let error = fs::rename(root_path, moved_path)
+            .expect_err("Windows capability root must deny rename while retained");
+        assert!(
+            error.kind() == std::io::ErrorKind::PermissionDenied
+                || error.raw_os_error() == Some(32),
+            "Windows may only reject root replacement with permission denied or ERROR_SHARING_VIOLATION (32): {error}"
+        );
+        assert_eq!(
+            fs::read(root_path.join("identity.bin"))
+                .expect("read unchanged fixture through host path"),
+            b"authorized"
+        );
+    }
+
+    #[cfg(not(windows))]
+    fn replace_retained_root(root_path: &Path, moved_path: &Path) {
+        fs::rename(root_path, moved_path)
+            .expect("candidate runner must replace the retained root fixture");
+        fs::create_dir(root_path).expect("create replacement root");
+        fs::write(root_path.join("identity.bin"), b"replacement")
+            .expect("write replacement fixture");
+        assert_eq!(
+            fs::read(root_path.join("identity.bin"))
+                .expect("read replacement fixture through host path"),
+            b"replacement"
+        );
+    }
+
+    fn replace_opened_file_fixture(source: &Path, moved: &Path) {
+        match fs::rename(source, moved) {
+            Ok(()) => {
+                fs::write(source, b"replacement").expect("write replacement fixture");
+                assert_eq!(
+                    fs::read(source).expect("read replacement fixture through host path"),
+                    b"replacement"
+                );
+            }
+            #[cfg(windows)]
+            Err(error) => {
+                assert!(
+                    error.kind() == std::io::ErrorKind::PermissionDenied
+                        || error.raw_os_error() == Some(32),
+                    "Windows may only reject file replacement with permission denied or ERROR_SHARING_VIOLATION (32): {error}"
+                );
+                assert_eq!(
+                    fs::read(source).expect("read unchanged fixture through host path"),
+                    b"authorized"
+                );
+            }
+            #[cfg(not(windows))]
+            Err(error) => panic!("candidate runner must replace the opened file fixture: {error}"),
+        }
+    }
+
     #[test]
     fn opens_and_inspects_the_same_regular_file_handle() {
         let root = TempRoot::new("inside-scope");
@@ -277,35 +337,7 @@ mod tests {
             NativeDirectoryCapability::open_ambient(&root_path).expect("open capability");
         let io = FileSystemAssetIo::from_capability(capability);
 
-        #[cfg(windows)]
-        {
-            let error = fs::rename(&root_path, &moved_path)
-                .expect_err("Windows capability root must deny rename while retained");
-            assert!(
-                error.kind() == std::io::ErrorKind::PermissionDenied
-                    || error.raw_os_error() == Some(32),
-                "Windows may only reject root replacement with permission denied or ERROR_SHARING_VIOLATION (32): {error}"
-            );
-            assert_eq!(
-                fs::read(root_path.join("identity.bin"))
-                    .expect("read unchanged fixture through host path"),
-                b"authorized"
-            );
-        }
-
-        #[cfg(not(windows))]
-        {
-            fs::rename(&root_path, &moved_path)
-                .expect("candidate runner must replace the retained root fixture");
-            fs::create_dir(&root_path).expect("create replacement root");
-            fs::write(root_path.join("identity.bin"), b"replacement")
-                .expect("write replacement fixture");
-            assert_eq!(
-                fs::read(root_path.join("identity.bin"))
-                    .expect("read replacement fixture through host path"),
-                b"replacement"
-            );
-        }
+        replace_retained_root(&root_path, &moved_path);
 
         let opened = io
             .open(&AssetPath::new("identity.bin").expect("valid path"))
@@ -326,29 +358,7 @@ mod tests {
             .open(&AssetPath::new("identity.bin").expect("valid path"))
             .expect("open original handle");
 
-        match fs::rename(&source, &moved) {
-            Ok(()) => {
-                fs::write(&source, b"replacement").expect("write replacement fixture");
-                assert_eq!(
-                    fs::read(&source).expect("read replacement fixture through host path"),
-                    b"replacement"
-                );
-            }
-            #[cfg(windows)]
-            Err(error) => {
-                assert!(
-                    error.kind() == std::io::ErrorKind::PermissionDenied
-                        || error.raw_os_error() == Some(32),
-                    "Windows may only reject file replacement with permission denied or ERROR_SHARING_VIOLATION (32): {error}"
-                );
-                assert_eq!(
-                    fs::read(&source).expect("read unchanged fixture through host path"),
-                    b"authorized"
-                );
-            }
-            #[cfg(not(windows))]
-            Err(error) => panic!("candidate runner must replace the opened file fixture: {error}"),
-        }
+        replace_opened_file_fixture(&source, &moved);
 
         assert_eq!(read_all(opened), b"authorized");
     }

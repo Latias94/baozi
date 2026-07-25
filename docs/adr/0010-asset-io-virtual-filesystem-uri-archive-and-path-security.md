@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-07-09
-updated: 2026-07-17
+updated: 2026-07-26
 authors:
   - Codex
 decision_type: architecture
@@ -20,6 +20,7 @@ related:
   - docs/adr/0041-resource-dependency-graph-and-successful-input-manifest.md
 evidence:
   - docs/research/native-filesystem-bound-handle-admission.md
+  - docs/research/u4c-repository-input-capability.md
 tracers:
   - crates/baozi-io/src/lib.rs
   - crates/baozi-io/src/fs.rs
@@ -274,12 +275,11 @@ into an unproven successful omission.
 
 ## Native Filesystem Admission
 
-The admitted implementation direction is `cap-std` 4.0.2 behind `baozi-io/fs-candidate`, with an
-exact direct `rustix` 1.1.4 dependency used only for the portable `OFlags::NONBLOCK` value on
-Unix-like targets.
-The adapter passes that value through `cap_std::fs::OpenOptionsExt`; it does not use a numeric flag,
-a documentation-hidden dependency API, or an additional filesystem extension crate. The detailed
-blocking review is recorded in
+The admitted runtime-asset implementation direction is `cap-std` 4.0.2 behind
+`baozi-io/fs-candidate`, with an exact direct `rustix` 1.1.4 dependency used only for the portable
+`OFlags::NONBLOCK` value on Unix-like targets. The runtime adapter passes that value through
+`cap_std::fs::OpenOptionsExt`; it does not use a numeric flag, a documentation-hidden dependency
+API, or an additional filesystem extension crate. The detailed blocking review is recorded in
 [`native-filesystem-bound-handle-admission.md`](../research/native-filesystem-bound-handle-admission.md).
 It satisfies Baozi's license and MSRV gates and keeps platform `unsafe` outside Baozi-owned crates.
 The adapter's conformance gate must machine-lock the reviewed `cap-std`, `cap-primitives`, and
@@ -329,6 +329,75 @@ verifiable contract and platform tests before admission.
 A hard link whose directory entry is inside an authorized root is inside that filesystem capability.
 Hosts requiring content ownership stronger than directory-entry authority must provide an immutable
 bundle or stronger process sandbox. Mounts and writable scope roots are also host trust decisions.
+
+### Repository Evidence Input Closure
+
+Repository conformance evidence has a different contract from hostile runtime asset IO. It must
+discover a complete, deterministic source closure, reject every symlink or reparse component and
+every hard-link alias, and compare the same explicit roots before and after a probe. The runtime
+`AssetIo` adapter intentionally permits an in-root symlink and therefore cannot implement this
+contract without changing its accepted semantics.
+
+`baozi-io` remains the sole owner of native filesystem dependencies and owns a separate internal
+candidate mechanism behind `repository-fs-candidate`. `baozi-xtask` may reach that feature only
+through its optional, empty-by-default `repository-input-candidate` feature; it owns only
+repository-policy inputs, source-root selection, SHA-256 framing, toolchain identity, comparison,
+and evidence output. No format, import, core, postprocess, facade, or ordinary xtask build reaches
+the repository candidate.
+
+The repository candidate uses exact `cap-std` 4.0.2 plus exact `cap-fs-ext` 4.0.2 with its explicit
+`std` feature. It uses only the extension crate's public no-follow, directory, metadata, and
+nonblocking interfaces. Direct `cap-primitives`, documentation-hidden hooks, and Baozi-owned
+platform `unsafe` are forbidden. `cap-fs-ext` controls only the final path component, so Baozi walks
+one validated normal component at a time, retains each opened directory capability, and applies
+no-follow to every step. The runtime `fs-candidate` dependency closure remains independently frozen
+and must not acquire `cap-fs-ext` transitively.
+
+```mermaid
+flowchart LR
+    Spec[xtask closure roots and limits] --> Path[Strict repository paths]
+    Path --> Walk[baozi-io component-wise no-follow walk]
+    Walk --> Handle[Same-handle type, identity, and bounded read]
+    Handle --> Capture[Sorted bounded capture]
+    Capture --> Hash[xtask raw and declared-text LF digests]
+    Hash --> Probe[U4c probe]
+    Probe --> Recapture[Complete recapture of the same roots]
+    Recapture --> Compare[Path set, identity, and raw-byte comparison]
+```
+
+The mechanism enforces all of these rules:
+
+- the admitted portable repository profile accepts only non-empty ASCII, forward-slash, relative
+  normal-component paths; it preserves accepted spelling and rejects Unicode, dot components,
+  case aliases, reserved names, non-portable spelling, and over-limit bytes before IO. A broader
+  Unicode profile requires a separately admitted normalization and cross-filesystem collision proof
+- roots are explicit, unique, non-overlapping paths captured under one retained ambient root
+  capability; host paths and native handles never enter stable evidence
+- traversal is iterative and deterministic; directory names are bounded before sorting, and file,
+  directory, root, depth, path-byte, single-file-byte, total-byte, and work ceilings fail closed
+- authorization and object classification use the opened handle; directories are opened one
+  component at a time without following the final component, regular files are read from that same
+  handle, and special objects never reach a blocking unbounded read
+- the opaque physical identity is used only for capture-local alias and replacement checks; it is
+  not serialized, hashed, or treated as a durable source identity. A platform that cannot supply
+  the admitted comparison semantics fails closed
+- the 64-bit Windows file index is not qualified as a complete ReFS replacement identity, and the
+  admitted safe API cannot establish the filesystem contract from that handle. Windows repository
+  capture therefore fails before traversal until a separately reviewed safe full-width
+  `FILE_ID_INFO` plus filesystem-qualification adapter exists; target compilation does not waive it
+- every retained byte vector uses checked sizing and fallible reservation before reading; a length
+  hint is not trusted as EOF, and one byte beyond the admitted limit is a typed rejection
+- recapture enumerates the complete original root set again. Comparing only previously observed
+  files is insufficient because it cannot detect additions or deletions
+- all files receive a raw digest in xtask. LF normalization is computed only for inputs whose
+  evidence schema declares and validates UTF-8 text; normalized digests never replace raw drift
+  detection
+
+Two equal captures prove equality at those observation boundaries. They do not prove that a mutable
+tree never changed and changed back between observations, nor that Cargo consumed the captured
+handle bytes. A production evidence schema must either state a trusted static-worktree premise or
+run the probe from an isolated tree materialized from the captured bytes. It may not claim continuous
+immutability from endpoint recapture alone.
 
 ## Portable Boundary
 
@@ -423,6 +492,54 @@ Cons:
 
 Decision: chosen, subject to the executable acceptance gates in the admission record.
 
+### Option D: Give `baozi-xtask` direct native filesystem dependencies
+
+Pros:
+
+- keeps repository-only code near its evidence policy
+- avoids a cross-workspace tool dependency
+
+Cons:
+
+- creates a second owner for capability and platform opening semantics
+- bypasses the native dependency, target, checksum, and unsafe-boundary gate
+- permits repository evidence and runtime IO to drift onto incompatible backend versions
+
+Decision: rejected. Native mechanisms remain private to `baozi-io`; xtask owns evidence policy.
+
+### Option E: Reuse runtime `AssetIo` for repository closure discovery
+
+Pros:
+
+- reuses an existing public abstraction
+- adds no native dependency
+
+Cons:
+
+- `AssetIo` opens one logical resource and has no deterministic tree enumeration contract
+- the runtime adapter permits safe in-root links, while repository evidence rejects all links and
+  aliases
+- `AssetPath` normalizes spellings that repository evidence must reject as distinct input attempts
+
+Decision: rejected. The repository candidate is a separate internal mechanism under the same IO
+owner.
+
+### Option F: Implement repository walking with Baozi-owned syscalls
+
+Pros:
+
+- can expose full native identifiers and platform-specific flags directly
+- avoids an extension crate
+
+Cons:
+
+- introduces Baozi-owned unsafe and a second platform resolver
+- substantially increases Windows reparse, sharing, Unix fallback, and MSRV review burden
+- duplicates public no-follow and metadata capabilities already provided by the admitted cap family
+
+Decision: rejected while the exact public `cap-std`/`cap-fs-ext` pair satisfies the candidate
+contract. Reconsider only after a measured blocker and a separate unsafe/dependency admission.
+
 ## Success Metrics
 
 | Metric | Target | Measurement |
@@ -440,6 +557,9 @@ Decision: chosen, subject to the executable acceptance gates in the admission re
 | Special-file availability | directory, FIFO, socket, and device inputs fail by deadline without a blocking pathname preflight | same-handle type and deadline tests |
 | Root capability integrity | only Baozi-constructed, directory-validated roots enter the adapter; Windows roots exclude `FILE_SHARE_DELETE` | API-shape, root-type, and replacement tests |
 | Dependency identity | the resolved `cap-std`, `cap-primitives`, and direct `rustix` security-sensitive closure matches the admitted versions, checksums, features, and sources | target-filtered lockfile admission checker |
+| Repository mechanism ownership | no crate other than `baozi-io` directly depends on native filesystem backends; xtask reaches only the internal repository candidate | manifest and crate-graph negative fixtures |
+| Repository closure completeness | additions, deletions, same-content replacements, raw-byte changes, hard-link aliases, overlapping roots, and every symlink/reparse component fail the before/after closure gate | Linux/macOS platform-local no-skip capture and recapture matrix; Windows typed pre-traversal fail-closed test |
+| Repository resource bounds | exact limit succeeds and one-over root/file/directory/depth/path/single-file/total-byte/work cases fail before excess retention or read | boundary, allocation-failure, and hostile-size fixtures |
 | Portable bytes | memory imports compile without native filesystem dependencies | WASM feature checks |
 | Failure honesty | unavailable primitives return a typed failure, never a weaker fallback | negative capability tests |
 
@@ -459,6 +579,9 @@ Decision: chosen, subject to the executable acceptance gates in the admission re
 | Mutable host policy is mislabeled deterministic | Critical | Medium | require the registered frozen-policy basis; classify mutable policy/callback/process-state omission as session-dependent |
 | Writable roots change during import | High | Medium | handle-relative open, immutable snapshots, and host guidance to use read-only roots |
 | Capability abstraction is mistaken for process sandboxing | Critical | Medium | threat model states trusted-code boundary and process-isolation requirement |
+| Repository snapshot code becomes a second IO stack | High | Medium | keep native walking in `baozi-io`, keep hashes and U4c policy in xtask, and reject direct backend dependencies elsewhere |
+| Endpoint recapture is mistaken for continuous immutability | Critical | Medium | freeze the static-worktree premise in the evidence schema or run from a captured isolated tree; never infer the stronger claim |
+| Platform file identity is truncated or unavailable | High | Low | use identity only as a fail-closed ephemeral comparison, pair it with raw-byte closure equality, and reject an unqualified identity backend |
 
 ## Acceptance Criteria
 
@@ -483,6 +606,15 @@ Decision: chosen, subject to the executable acceptance gates in the admission re
   latch `ScopeAbort`.
 - Public resolver/IO evidence exposes no authority domain, capability, credential, native handle,
   host path, callback, or backend object.
+- Repository capture rejects every non-normal path component, link/reparse component, hard-link
+  alias, overlapping root, special object, and one-over resource limit without a weaker fallback.
+- Windows repository capture returns a typed identity-capability failure before traversal until the
+  full-width same-handle identity and filesystem contract are separately admitted; it never falls
+  back to a 64-bit file index or pathname reopen.
+- Capturing and recapturing the same explicit roots compares the complete sorted path set, opaque
+  capture-local identities, and raw bytes; an added or deleted file cannot escape the comparison.
+- Production evidence identifies whether it assumes a static worktree or executes from an isolated
+  captured tree. Endpoint equality alone never qualifies a continuous-immutability claim.
 
 ## Implementation and Verification
 
@@ -530,6 +662,14 @@ Decision: chosen, subject to the executable acceptance gates in the admission re
 - Check the complete resolved native-filesystem dependency closure for every target in that baseline
   against the admitted versions, features, sources, and checksums; any
   path-resolution-, open-flag-, special-file-, or target-relevant change reopens admission.
+- Add `baozi-io/repository-fs-candidate` as a separately audited internal feature using exact
+  `cap-fs-ext` 4.0.2 with `default-features = false, features = ["std"]`; preserve the existing
+  runtime `fs-candidate` closure unchanged.
+- Implement strict repository paths, component-wise public no-follow traversal, bounded iterative
+  enumeration, same-handle regular-file reads, opaque alias identity, and full-root recapture in
+  `baozi-io`. Keep root selection, digests, closure comparison policy, and U4c output in xtask.
+- Extend native dependency gates with a distinct repository profile, exact checksums/features/source
+  closure, unsupported-target failures, and platform-local no-skip alias/reparse/resource tests.
 - Fail CI if a format crate uses direct `std::fs` outside an approved adapter.
 
 ## Consequences
@@ -547,6 +687,20 @@ Negative:
 - Host-provided in-process resolvers remain part of the trusted computing base.
 
 ## Amendment History
+
+### 2026-07-26: Separate bounded repository evidence capture from runtime asset IO
+
+- Affected: `Native Filesystem Admission`, `Repository Evidence Input Closure`, alternatives,
+  success metrics, risks, acceptance criteria, and implementation verification.
+- Previous: native filesystem dependencies were correctly private to `baozi-io`, but the ADR owned
+  only runtime `AssetIo`; it had no contract for complete repository evidence capture.
+- New: `baozi-io` also owns a separately featured, public-API-only no-follow capture mechanism using
+  exact `cap-fs-ext` 4.0.2, while xtask owns source selection, hashing, comparison policy, and
+  evidence. Unix candidates provide complete capture; Windows compiles and fails before traversal
+  until safe full-width identity is admitted. Runtime `fs-candidate` behavior and closure remain
+  independent.
+- Impact: U4c can bind a bounded complete repository input closure without duplicating native IO or
+  misusing runtime symlink semantics, and endpoint recapture cannot overclaim continuous immutability.
 
 ### 2026-07-17: Freeze IO semantic schema ownership and mutable-policy replay
 

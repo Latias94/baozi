@@ -1,0 +1,47 @@
+mod report;
+mod scenarios;
+
+use report::{ProductionReport, REPORT_PREFIX, render, sha256_hex};
+use scenarios::{
+    collect_inherited_hot_leaf_scenario, collect_scale_scenarios, collect_validation_faults,
+};
+
+#[test]
+#[ignore = "run via baozi-xtask u4c-metrics with the production specification"]
+fn canonical_store_u4c_production_v1_probe() {
+    let report = ProductionReport::new(
+        collect_scale_scenarios(),
+        collect_inherited_hot_leaf_scenario(),
+        collect_validation_faults(),
+    );
+    println!("{REPORT_PREFIX}{}", render(&report));
+}
+
+#[test]
+fn allocation_counter_canary_counts_box_and_vec() {
+    let box_info = allocation_counter::measure(|| {
+        let value = std::hint::black_box(Box::new(7_u64));
+        let _ = std::hint::black_box(value);
+    });
+    let vec_info = allocation_counter::measure(|| {
+        let value = std::hint::black_box(vec![7_u8; 64]);
+        let _ = std::hint::black_box(value);
+    });
+    assert!(box_info.count_total > 0);
+    assert!(box_info.bytes_total > 0);
+    assert_eq!(box_info.count_current, 0);
+    assert_eq!(box_info.bytes_current, 0);
+    assert!(vec_info.count_total > 0);
+    assert!(vec_info.bytes_total > 0);
+    assert_eq!(vec_info.count_current, 0);
+    assert_eq!(vec_info.bytes_current, 0);
+}
+
+#[test]
+fn production_report_static_vectors_are_stable() {
+    assert_eq!(
+        sha256_hex(b"abc"),
+        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+    );
+    assert!(REPORT_PREFIX.is_ascii());
+}

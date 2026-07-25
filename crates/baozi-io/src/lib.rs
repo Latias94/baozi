@@ -35,6 +35,33 @@ mod error;
 mod fs;
 mod memory;
 mod path;
+#[cfg(all(
+    feature = "repository-fs-candidate",
+    any(
+        all(
+            target_arch = "x86_64",
+            target_vendor = "unknown",
+            target_os = "linux",
+            target_env = "gnu",
+            target_abi = ""
+        ),
+        all(
+            target_arch = "x86_64",
+            target_vendor = "pc",
+            target_os = "windows",
+            target_env = "msvc",
+            target_abi = ""
+        ),
+        all(
+            target_arch = "aarch64",
+            target_vendor = "apple",
+            target_os = "macos",
+            target_env = "",
+            target_abi = ""
+        )
+    )
+))]
+mod repository;
 mod resource;
 
 #[cfg(all(
@@ -123,6 +150,38 @@ pub use error::{
 pub use fs::{FileSystemAssetIo, NativeDirectoryCapability};
 pub use memory::MemoryAssetIo;
 pub use path::AssetPath;
+#[cfg(all(
+    feature = "repository-fs-candidate",
+    any(
+        all(
+            target_arch = "x86_64",
+            target_vendor = "unknown",
+            target_os = "linux",
+            target_env = "gnu",
+            target_abi = ""
+        ),
+        all(
+            target_arch = "x86_64",
+            target_vendor = "pc",
+            target_os = "windows",
+            target_env = "msvc",
+            target_abi = ""
+        ),
+        all(
+            target_arch = "aarch64",
+            target_vendor = "apple",
+            target_os = "macos",
+            target_env = "",
+            target_abi = ""
+        )
+    )
+))]
+pub use repository::{
+    RepositoryCapture, RepositoryCaptureError, RepositoryCaptureErrorKind, RepositoryCaptureStage,
+    RepositoryFile, RepositoryLimit, RepositoryLimitSpec, RepositoryLimits, RepositoryLimitsError,
+    RepositoryObjectKind, RepositoryPath, RepositoryPathError, RepositoryPathErrorCode,
+    RepositoryRoot, RepositoryRootSpec, RepositoryUsage, RepositoryVerifyError,
+};
 pub use resource::{AssetIo, AssetLength, AssetReader, AuthorityDomain, OpenedAsset};
 
 #[cfg(test)]

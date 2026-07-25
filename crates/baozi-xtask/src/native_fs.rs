@@ -1,7 +1,9 @@
 //! Target-filtered dependency admission for the native filesystem adapter.
 
 use proc_macro2::{TokenStream, TokenTree};
+use quote::ToTokens;
 use serde_json::{Map, Value};
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::ffi::OsString;
 use std::fs;
@@ -11,13 +13,19 @@ use syn::ext::IdentExt;
 use syn::parse::Parser;
 use syn::punctuated::Punctuated;
 use syn::visit::Visit;
-use syn::{Attribute, Item, ItemMod, Meta, Token, UseTree};
+use syn::{Attribute, Item, ItemMod, Meta, Token, UseTree, Visibility};
 
 const BASELINE_PATH: &str = "docs/research/native-filesystem-resolved-closure.json";
+const REPOSITORY_BASELINE_PATH: &str =
+    "docs/research/native-filesystem-repository-resolved-closure.json";
 const CANDIDATE_TEST_SOURCE_PATH: &str = "crates/baozi-io/src/fs.rs";
+const REPOSITORY_CANDIDATE_TEST_SOURCE_PATH: &str = "crates/baozi-io/src/repository.rs";
+const REPOSITORY_CANDIDATE_SURFACE_PATH: &str = "crates/baozi-io/src/lib.rs";
+const RUNTIME_CANDIDATE_SURFACE_PATH: &str = "crates/baozi-io/src/lib.rs";
 const FACADE_MANIFEST_PATH: &str = "crates/baozi/Cargo.toml";
 const FACADE_PACKAGE: &str = "baozi";
 const FACADE_FORMAT_FEATURE: &str = "all-formats";
+const XTASK_PACKAGE: &str = "baozi-xtask";
 const IMPORT_PACKAGE: &str = "baozi-import";
 const FORMAT_PACKAGE_PREFIX: &str = "baozi-format-";
 const CRATES_IO_SOURCE: &str = "registry+https://github.com/rust-lang/crates.io-index";
@@ -27,6 +35,12 @@ const CAP_STD_TARGET: &str = concat!(
     "all(target_arch = \"x86_64\", target_vendor = \"pc\", target_os = \"windows\", target_env = \"msvc\", target_abi = \"\"), ",
     "all(target_arch = \"aarch64\", target_vendor = \"apple\", target_os = \"macos\", target_env = \"\", target_abi = \"\"), ",
     "all(target_arch = \"x86_64\", target_vendor = \"unknown\", target_os = \"freebsd\", target_env = \"\", target_abi = \"\")))"
+);
+const XTASK_REPOSITORY_TARGET: &str = concat!(
+    "cfg(any(",
+    "all(target_arch = \"x86_64\", target_vendor = \"unknown\", target_os = \"linux\", target_env = \"gnu\", target_abi = \"\"), ",
+    "all(target_arch = \"x86_64\", target_vendor = \"pc\", target_os = \"windows\", target_env = \"msvc\", target_abi = \"\"), ",
+    "all(target_arch = \"aarch64\", target_vendor = \"apple\", target_os = \"macos\", target_env = \"\", target_abi = \"\")))"
 );
 const RUSTIX_TARGET: &str = concat!(
     "cfg(any(",
@@ -41,7 +55,36 @@ const RUNTIME_CANDIDATE_TARGETS: &[&str] = &[
     "x86_64-pc-windows-msvc",
     "aarch64-apple-darwin",
 ];
+const REPOSITORY_CANDIDATE_TARGETS: &[&str] = &[
+    "x86_64-unknown-linux-gnu",
+    "x86_64-pc-windows-msvc",
+    "aarch64-apple-darwin",
+];
+const REPOSITORY_OPERATIONAL_CANDIDATE_TARGETS: &[&str] =
+    &["x86_64-unknown-linux-gnu", "aarch64-apple-darwin"];
+const REPOSITORY_FAIL_CLOSED_TARGETS: &[&str] = &["x86_64-pc-windows-msvc"];
+const XTASK_REPOSITORY_RESOLUTION_TARGET: &str = "x86_64-unknown-linux-gnu";
 const RELEASE_REGISTERED_TARGETS: &[&str] = &[];
+const REPOSITORY_PUBLIC_EXPORTS: &[&str] = &[
+    "RepositoryCapture",
+    "RepositoryCaptureError",
+    "RepositoryCaptureErrorKind",
+    "RepositoryCaptureStage",
+    "RepositoryFile",
+    "RepositoryLimit",
+    "RepositoryLimitSpec",
+    "RepositoryLimits",
+    "RepositoryLimitsError",
+    "RepositoryObjectKind",
+    "RepositoryPath",
+    "RepositoryPathError",
+    "RepositoryPathErrorCode",
+    "RepositoryRoot",
+    "RepositoryRootSpec",
+    "RepositoryUsage",
+    "RepositoryVerifyError",
+];
+const RUNTIME_PUBLIC_EXPORTS: &[&str] = &["FileSystemAssetIo", "NativeDirectoryCapability"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CandidateTestPlatform {
@@ -96,6 +139,83 @@ const REQUIRED_CANDIDATE_TESTS: &[RequiredCandidateTest] = &[
         platform: Some(CandidateTestPlatform::Unix),
     },
 ];
+const CANDIDATE_TEST_MODULE_DIGEST: &str =
+    "5cb630243231991cac647453a2227d82a24b5e46d6eabc3892466585a02e4cf7";
+
+const REQUIRED_REPOSITORY_CANDIDATE_TESTS: &[RequiredCandidateTest] = &[
+    RequiredCandidateTest {
+        name: "repository_path_preserves_spelling_and_rejects_non_portable_forms",
+        platform: None,
+    },
+    RequiredCandidateTest {
+        name: "repository_limits_accept_exact_boundaries_and_reject_invalid_specs",
+        platform: None,
+    },
+    RequiredCandidateTest {
+        name: "reenumeration_scratch_is_bounded_by_original_entry_count",
+        platform: None,
+    },
+    RequiredCandidateTest {
+        name: "repository_resource_limits_accept_exact_and_reject_one_over",
+        platform: Some(CandidateTestPlatform::Unix),
+    },
+    RequiredCandidateTest {
+        name: "deterministic_capture_records_files_and_empty_directories",
+        platform: Some(CandidateTestPlatform::Unix),
+    },
+    RequiredCandidateTest {
+        name: "rejects_duplicate_overlapping_and_case_alias_roots",
+        platform: None,
+    },
+    RequiredCandidateTest {
+        name: "rejects_hard_link_aliases",
+        platform: Some(CandidateTestPlatform::Unix),
+    },
+    RequiredCandidateTest {
+        name: "verify_detects_added_and_removed_paths",
+        platform: Some(CandidateTestPlatform::Unix),
+    },
+    RequiredCandidateTest {
+        name: "verify_detects_content_and_same_content_replacement",
+        platform: Some(CandidateTestPlatform::Unix),
+    },
+    RequiredCandidateTest {
+        name: "verify_detects_kind_changes",
+        platform: Some(CandidateTestPlatform::Unix),
+    },
+    RequiredCandidateTest {
+        name: "retained_repository_capability_ignores_textual_root_replacement",
+        platform: Some(CandidateTestPlatform::Unix),
+    },
+    RequiredCandidateTest {
+        name: "rejects_symlinks_in_roots_and_descendants",
+        platform: Some(CandidateTestPlatform::Unix),
+    },
+    RequiredCandidateTest {
+        name: "unix_special_files_fail_closed_without_blocking",
+        platform: Some(CandidateTestPlatform::Unix),
+    },
+    RequiredCandidateTest {
+        name: "windows_rejects_case_alias_root_spelling",
+        platform: Some(CandidateTestPlatform::Windows),
+    },
+    RequiredCandidateTest {
+        name: "windows_repository_capture_fails_closed_before_traversal",
+        platform: Some(CandidateTestPlatform::Windows),
+    },
+];
+const REPOSITORY_CANDIDATE_TEST_MODULE_DIGEST: &str =
+    "09c89f3d377bba0012ebe727e4b145e7702cb5cc83373de4fff36f2a48310da0";
+const CANDIDATE_TEST_ALLOWED_MACROS: &[&str] = &[
+    "assert",
+    "assert_eq",
+    "assert_ne",
+    "eprintln",
+    "format",
+    "matches",
+    "panic",
+    "vec",
+];
 
 fn identifier_name(identifier: &syn::Ident) -> String {
     identifier.unraw().to_string()
@@ -113,6 +233,27 @@ fn path_is_identifier(path: &syn::Path, expected: &str) -> bool {
             .is_some_and(|segment| identifier_is(&segment.ident, expected))
 }
 
+fn path_ends_in_identifier(path: &syn::Path, expected: &str) -> bool {
+    path.segments
+        .last()
+        .is_some_and(|segment| identifier_is(&segment.ident, expected))
+}
+
+fn is_admitted_candidate_implementation_macro(path: &syn::Path) -> bool {
+    path.leading_colon.is_some()
+        && path.segments.len() == 2
+        && path
+            .segments
+            .first()
+            .is_some_and(|segment| identifier_is(&segment.ident, "core"))
+        && path.segments.last().is_some_and(|segment| {
+            matches!(
+                identifier_name(&segment.ident).as_str(),
+                "debug_assert" | "matches" | "write"
+            )
+        })
+}
+
 fn token_identifier(token: &str) -> &str {
     token.strip_prefix("r#").unwrap_or(token)
 }
@@ -122,6 +263,12 @@ struct DependencyAuditProfile {
     name: &'static str,
     target: &'static str,
     direct_rustix: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DependencyAuditKind {
+    Runtime,
+    Repository,
 }
 
 const DEPENDENCY_AUDIT_PROFILES: &[DependencyAuditProfile] = &[
@@ -157,6 +304,11 @@ struct CriticalPackage {
 
 const CRITICAL_PACKAGES: &[CriticalPackage] = &[
     CriticalPackage {
+        name: "cap-fs-ext",
+        version: "4.0.2",
+        checksum: "d78e5a3368ae89b7cb68186411452b4b9fac8b41be9c19bf3f47c2d2c8e36e6b",
+    },
+    CriticalPackage {
         name: "cap-std",
         version: "4.0.2",
         checksum: "7281235d6e96d3544ca18bba9049be92f4190f8d923e3caef1b5f66cfa752608",
@@ -182,9 +334,36 @@ pub struct NativeFsReport {
     pub violations: Vec<String>,
 }
 
+/// Resolved metadata profiles required by the repository capability admission fixture.
+#[doc(hidden)]
+pub struct RepositoryMetadataProfiles<'a> {
+    /// Complete all-feature metadata used to inspect every local/path declaration.
+    pub local_declarations: &'a Value,
+    /// Repository-feature profiles for every dependency-audit target.
+    pub repository: &'a BTreeMap<String, Value>,
+    /// Facade runtime-candidate profiles for every exact candidate target.
+    pub facade: &'a BTreeMap<String, Value>,
+    /// The xtask empty-feature profile, which must not reach repository IO.
+    pub xtask_empty: &'a Value,
+    /// The xtask all-feature profile used to bind the sole workspace dependency edge.
+    pub xtask_all: &'a Value,
+}
+
 /// Checks the checked-in manifest and target-filtered resolved closure.
 pub fn check_repository(repository_root: &Path) -> NativeFsReport {
     let baseline = match read_json(&repository_root.join(BASELINE_PATH), "native-fs baseline") {
+        Ok(value) => value,
+        Err(violation) => {
+            return NativeFsReport {
+                profiles_checked: 0,
+                violations: vec![violation],
+            };
+        }
+    };
+    let repository_baseline = match read_json(
+        &repository_root.join(REPOSITORY_BASELINE_PATH),
+        "native-fs repository baseline",
+    ) {
         Ok(value) => value,
         Err(violation) => {
             return NativeFsReport {
@@ -208,6 +387,16 @@ pub fn check_repository(repository_root: &Path) -> NativeFsReport {
             };
         }
     };
+    let local_declaration_metadata =
+        match load_metadata_all_features(repository_root, "Cargo.toml", None, false) {
+            Ok(value) => value,
+            Err(violation) => {
+                return NativeFsReport {
+                    profiles_checked: 0,
+                    violations: vec![violation],
+                };
+            }
+        };
     let source_metadata = match load_metadata(
         repository_root,
         FACADE_MANIFEST_PATH,
@@ -234,6 +423,10 @@ pub fn check_repository(repository_root: &Path) -> NativeFsReport {
     };
 
     let mut target_metadata = BTreeMap::new();
+    let mut repository_target_metadata = BTreeMap::new();
+    let mut facade_candidate_target_metadata = BTreeMap::new();
+    let mut xtask_empty_metadata = None;
+    let mut xtask_all_metadata = None;
     let mut violations = Vec::new();
     check_format_import_production_sources(repository_root, &source_metadata, &mut violations);
     for profile in DEPENDENCY_AUDIT_PROFILES {
@@ -246,6 +439,53 @@ pub fn check_repository(repository_root: &Path) -> NativeFsReport {
         ) {
             Ok(value) => {
                 target_metadata.insert(profile.target.to_owned(), value);
+            }
+            Err(violation) => violations.push(violation),
+        }
+    }
+    for target in REPOSITORY_CANDIDATE_TARGETS {
+        match load_metadata(
+            repository_root,
+            FACADE_MANIFEST_PATH,
+            Some(target),
+            Some("native-fs-candidate"),
+            false,
+        ) {
+            Ok(value) => {
+                facade_candidate_target_metadata.insert((*target).to_owned(), value);
+            }
+            Err(violation) => violations.push(violation),
+        }
+    }
+    match load_metadata(
+        repository_root,
+        "crates/baozi-xtask/Cargo.toml",
+        Some(XTASK_REPOSITORY_RESOLUTION_TARGET),
+        None,
+        false,
+    ) {
+        Ok(value) => xtask_empty_metadata = Some(value),
+        Err(violation) => violations.push(violation),
+    }
+    match load_metadata_all_features(
+        repository_root,
+        "crates/baozi-xtask/Cargo.toml",
+        Some(XTASK_REPOSITORY_RESOLUTION_TARGET),
+        false,
+    ) {
+        Ok(value) => xtask_all_metadata = Some(value),
+        Err(violation) => violations.push(violation),
+    }
+    for profile in DEPENDENCY_AUDIT_PROFILES {
+        match load_metadata(
+            repository_root,
+            "crates/baozi-io/Cargo.toml",
+            Some(profile.target),
+            Some("repository-fs-candidate"),
+            false,
+        ) {
+            Ok(value) => {
+                repository_target_metadata.insert(profile.target.to_owned(), value);
             }
             Err(violation) => violations.push(violation),
         }
@@ -268,19 +508,65 @@ pub fn check_repository(repository_root: &Path) -> NativeFsReport {
     if !violations.is_empty() {
         violations.sort_unstable();
         return NativeFsReport {
-            profiles_checked: target_metadata.len(),
+            profiles_checked: target_metadata.len()
+                + repository_target_metadata.len()
+                + facade_candidate_target_metadata.len()
+                + usize::from(xtask_empty_metadata.is_some())
+                + usize::from(xtask_all_metadata.is_some()),
             violations,
         };
     }
 
-    let mut report =
-        check_metadata_fixture(&manifest_metadata, &lockfile, &baseline, &target_metadata);
+    let xtask_empty_metadata =
+        xtask_empty_metadata.expect("successful metadata load must populate the empty profile");
+    let xtask_all_metadata =
+        xtask_all_metadata.expect("successful metadata load must populate the all-feature profile");
+    let mut report = check_metadata_fixture_with_repository(
+        &manifest_metadata,
+        &lockfile,
+        &baseline,
+        &repository_baseline,
+        &target_metadata,
+        RepositoryMetadataProfiles {
+            local_declarations: &local_declaration_metadata,
+            repository: &repository_target_metadata,
+            facade: &facade_candidate_target_metadata,
+            xtask_empty: &xtask_empty_metadata,
+            xtask_all: &xtask_all_metadata,
+        },
+    );
     match fs::read_to_string(repository_root.join(CANDIDATE_TEST_SOURCE_PATH)) {
         Ok(source) => report
             .violations
             .extend(candidate_test_source_violations(&source)),
         Err(error) => report.violations.push(format!(
             "native-fs candidate tests: failed to read {CANDIDATE_TEST_SOURCE_PATH}: {error}"
+        )),
+    }
+    report
+        .violations
+        .extend(candidate_test_crate_ancestor_violations(
+            repository_root,
+            "native-fs candidate tests",
+        ));
+    check_candidate_implementation_cfg_sources(repository_root, &mut report.violations);
+    report
+        .violations
+        .extend(repository_candidate_test_tree_violations(repository_root));
+    match fs::read_to_string(repository_root.join(RUNTIME_CANDIDATE_SURFACE_PATH)) {
+        Ok(source) => report
+            .violations
+            .extend(runtime_candidate_surface_violations(&source)),
+        Err(error) => report.violations.push(format!(
+            "native-fs runtime candidate surface: failed to read {RUNTIME_CANDIDATE_SURFACE_PATH}: {error}"
+        )),
+    }
+    match fs::read_to_string(repository_root.join(REPOSITORY_CANDIDATE_SURFACE_PATH)) {
+        Ok(source) => report
+            .violations
+            .extend(repository_candidate_surface_violations(&source)),
+        Err(error) => report.violations.push(format!(
+            "native-fs repository candidate surface: failed to read {REPOSITORY_CANDIDATE_SURFACE_PATH}: {error}"
         )),
     }
     report.violations.sort_unstable();
@@ -291,21 +577,789 @@ pub fn check_repository(repository_root: &Path) -> NativeFsReport {
 /// Rejects source patterns that can turn unavailable fixtures into passing candidate tests.
 #[doc(hidden)]
 pub fn candidate_test_source_violations(source: &str) -> Vec<String> {
+    candidate_test_source_violations_for_contract(
+        source,
+        REQUIRED_CANDIDATE_TESTS,
+        CANDIDATE_TEST_MODULE_DIGEST,
+        "native-fs candidate tests",
+    )
+}
+
+/// Rejects no-skip and early-success patterns in repository candidate tests.
+#[doc(hidden)]
+pub fn repository_candidate_test_source_violations(source: &str) -> Vec<String> {
+    candidate_test_source_violations_for_contract(
+        source,
+        REQUIRED_REPOSITORY_CANDIDATE_TESTS,
+        REPOSITORY_CANDIDATE_TEST_MODULE_DIGEST,
+        "native-fs repository candidate tests",
+    )
+}
+
+/// Loads the repository candidate's out-of-line test module and checks its contract.
+#[doc(hidden)]
+pub fn repository_candidate_test_tree_violations(repository_root: &Path) -> Vec<String> {
+    const LABEL: &str = "native-fs repository candidate tests";
+    let entry_path = repository_root.join(REPOSITORY_CANDIDATE_TEST_SOURCE_PATH);
+    let entry_source = match fs::read_to_string(&entry_path) {
+        Ok(source) => source,
+        Err(error) => {
+            return vec![format!(
+                "{LABEL}: failed to read {REPOSITORY_CANDIDATE_TEST_SOURCE_PATH}: {error}"
+            )];
+        }
+    };
+    let entry = match syn::parse_file(&entry_source) {
+        Ok(file) => file,
+        Err(error) => {
+            return vec![format!(
+                "{LABEL}: failed to parse {REPOSITORY_CANDIDATE_TEST_SOURCE_PATH}: {error}"
+            )];
+        }
+    };
+    let mut ancestor_violations = Vec::new();
+    check_candidate_test_ancestor_macro_bindings(&entry, LABEL, &mut ancestor_violations);
+    ancestor_violations.extend(candidate_test_crate_ancestor_violations(
+        repository_root,
+        LABEL,
+    ));
+    let matching: Vec<_> = entry
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            Item::Mod(module) if identifier_is(&module.ident, "tests") => Some(module),
+            _ => None,
+        })
+        .collect();
+    let test_module = match matching.as_slice() {
+        [module] => *module,
+        _ => {
+            return vec![format!(
+                "{LABEL}: {REPOSITORY_CANDIDATE_TEST_SOURCE_PATH} must declare exactly one tests module, found {}",
+                matching.len()
+            )];
+        }
+    };
+    if test_module.content.is_some()
+        || !matches!(test_module.vis, Visibility::Inherited)
+        || test_module.attrs.len() != 1
+        || !exact_cfg_test_attribute(&test_module.attrs[0])
+        || module_source_override(&test_module.attrs).is_some()
+    {
+        return vec![format!(
+            "{LABEL}: {REPOSITORY_CANDIDATE_TEST_SOURCE_PATH} tests module must be exactly #[cfg(test)] mod tests;"
+        )];
+    }
+    let module_directory = module_directory_for_file(&entry_path);
+    let Some(test_path) = resolve_module_file(&module_directory, test_module) else {
+        return vec![format!(
+            "{LABEL}: cannot resolve tests module from {REPOSITORY_CANDIDATE_TEST_SOURCE_PATH}"
+        )];
+    };
+    let test_source = match fs::read_to_string(&test_path) {
+        Ok(source) => source,
+        Err(error) => {
+            return vec![format!(
+                "{LABEL}: failed to read {}: {error}",
+                display_source_path(repository_root, &test_path)
+            )];
+        }
+    };
+    let synthetic = format!("#[cfg(test)]\nmod tests {{\n{test_source}\n}}\n");
+    let mut violations = repository_candidate_test_source_violations(&synthetic);
+    violations.extend(ancestor_violations);
+    violations.sort_unstable();
+    violations.dedup();
+    violations
+}
+
+fn candidate_test_crate_ancestor_violations(repository_root: &Path, label: &str) -> Vec<String> {
+    let path = repository_root.join(REPOSITORY_CANDIDATE_SURFACE_PATH);
+    let source = match fs::read_to_string(&path) {
+        Ok(source) => source,
+        Err(error) => {
+            return vec![format!(
+                "{label}: failed to read {REPOSITORY_CANDIDATE_SURFACE_PATH}: {error}"
+            )];
+        }
+    };
+    let file = match syn::parse_file(&source) {
+        Ok(file) => file,
+        Err(error) => {
+            return vec![format!(
+                "{label}: failed to parse {REPOSITORY_CANDIDATE_SURFACE_PATH}: {error}"
+            )];
+        }
+    };
+    let mut violations = Vec::new();
+    check_candidate_test_ancestor_macro_bindings(&file, label, &mut violations);
+    let mut visited = BTreeSet::new();
+    scan_candidate_macro_hazards(
+        repository_root,
+        &path,
+        &file,
+        label,
+        &mut visited,
+        &mut violations,
+    );
+    violations.sort_unstable();
+    violations.dedup();
+    violations
+}
+
+fn scan_candidate_macro_hazards(
+    repository_root: &Path,
+    source_path: &Path,
+    file: &syn::File,
+    label: &str,
+    visited: &mut BTreeSet<PathBuf>,
+    violations: &mut Vec<String>,
+) {
+    let canonical = match fs::canonicalize(source_path) {
+        Ok(path) => path,
+        Err(error) => {
+            violations.push(format!(
+                "{label}: cannot inspect {} while checking macro bindings: {error}",
+                display_source_path(repository_root, source_path)
+            ));
+            return;
+        }
+    };
+    if !visited.insert(canonical) {
+        return;
+    }
+    if file.attrs.iter().any(|attribute| {
+        path_is_identifier(attribute.path(), "macro_use")
+            || path_is_identifier(attribute.path(), "macro_export")
+    }) {
+        violations.push(format!(
+            "{label}: {} has a crate/module macro import or export that can alter candidate-test bindings",
+            display_source_path(repository_root, source_path)
+        ));
+    }
+    scan_candidate_macro_items(
+        repository_root,
+        source_path,
+        &file.items,
+        label,
+        visited,
+        violations,
+    );
+}
+
+fn scan_candidate_macro_items(
+    repository_root: &Path,
+    source_path: &Path,
+    items: &[Item],
+    label: &str,
+    visited: &mut BTreeSet<PathBuf>,
+    violations: &mut Vec<String>,
+) {
+    let module_directory = module_directory_for_file(source_path);
+    for item in items {
+        if item_attributes(item).iter().any(|attribute| {
+            path_is_identifier(attribute.path(), "macro_use")
+                || path_is_identifier(attribute.path(), "macro_export")
+        }) {
+            violations.push(format!(
+                "{label}: {} contains an item macro import/export that can alter candidate-test bindings",
+                display_source_path(repository_root, source_path)
+            ));
+        }
+        match item {
+            Item::Macro(item_macro) if item_macro.ident.is_none() => {
+                let invocation = item_macro
+                    .mac
+                    .path
+                    .segments
+                    .last()
+                    .map(|segment| identifier_name(&segment.ident))
+                    .unwrap_or_else(|| "<empty-path>".to_owned());
+                if invocation != "compile_error" {
+                    violations.push(format!(
+                        "{label}: {} invokes item macro {invocation}! that can introduce candidate-test bindings",
+                        display_source_path(repository_root, source_path)
+                    ));
+                }
+            }
+            Item::ExternCrate(item_extern_crate)
+                if item_extern_crate
+                    .attrs
+                    .iter()
+                    .any(|attribute| path_is_identifier(attribute.path(), "macro_use")) =>
+            {
+                violations.push(format!(
+                    "{label}: {} imports macros with extern crate",
+                    display_source_path(repository_root, source_path)
+                ));
+            }
+            Item::Mod(module) => {
+                if let Some(attribute) = module_source_override(&module.attrs) {
+                    violations.push(format!(
+                        "{label}: module {} in {} uses forbidden {attribute} source redirection while checking macro bindings",
+                        module.ident,
+                        display_source_path(repository_root, source_path)
+                    ));
+                    continue;
+                }
+                if let Some((_, nested_items)) = &module.content {
+                    scan_candidate_macro_items(
+                        repository_root,
+                        source_path,
+                        nested_items,
+                        label,
+                        visited,
+                        violations,
+                    );
+                    continue;
+                }
+                let Some(module_file) = resolve_module_file(&module_directory, module) else {
+                    violations.push(format!(
+                        "{label}: cannot resolve module {} from {} while checking macro bindings",
+                        module.ident,
+                        display_source_path(repository_root, source_path)
+                    ));
+                    continue;
+                };
+                let module_source = match fs::read_to_string(&module_file) {
+                    Ok(source) => source,
+                    Err(error) => {
+                        violations.push(format!(
+                            "{label}: failed to read {} while checking macro bindings: {error}",
+                            display_source_path(repository_root, &module_file)
+                        ));
+                        continue;
+                    }
+                };
+                let module_file_ast = match syn::parse_file(&module_source) {
+                    Ok(file) => file,
+                    Err(error) => {
+                        violations.push(format!(
+                            "{label}: failed to parse {} while checking macro bindings: {error}",
+                            display_source_path(repository_root, &module_file)
+                        ));
+                        continue;
+                    }
+                };
+                scan_candidate_macro_hazards(
+                    repository_root,
+                    &module_file,
+                    &module_file_ast,
+                    label,
+                    visited,
+                    violations,
+                );
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Verifies that the repository module and its public re-export compile on the exact candidate set.
+#[doc(hidden)]
+pub fn repository_candidate_surface_violations(source: &str) -> Vec<String> {
+    const LABEL: &str = "native-fs repository candidate surface";
+    let file = match syn::parse_file(source) {
+        Ok(file) => file,
+        Err(error) => return vec![format!("{LABEL}: failed to parse source: {error}")],
+    };
+    let mut violations = Vec::new();
+    for attribute in &file.attrs {
+        if ["cfg", "cfg_attr", "path"]
+            .iter()
+            .any(|name| path_is_identifier(attribute.path(), name))
+        {
+            violations.push(format!(
+                "{LABEL}: crate-level {} attribute is forbidden",
+                identifier_name(
+                    &attribute
+                        .path()
+                        .segments
+                        .last()
+                        .expect("an attribute path is non-empty")
+                        .ident
+                )
+            ));
+        }
+    }
+    let modules = file
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            Item::Mod(module) if identifier_is(&module.ident, "repository") => Some(module),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let reexports = file
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            Item::Use(item)
+                if matches!(item.vis, Visibility::Public(_))
+                    && use_tree_root_identifier(&item.tree)
+                        .is_some_and(|identifier| identifier_is(identifier, "repository")) =>
+            {
+                Some(item)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    let module = match modules.as_slice() {
+        [module] => Some(*module),
+        _ => {
+            violations.push(format!(
+                "{LABEL}: expected exactly one repository module, found {}",
+                modules.len()
+            ));
+            None
+        }
+    };
+    if let Some(module) = module {
+        if !matches!(module.vis, Visibility::Inherited)
+            || module.content.is_some()
+            || module.attrs.len() != 1
+        {
+            violations.push(format!(
+                "{LABEL}: repository module must be a private out-of-line module with exactly one cfg attribute and no path override"
+            ));
+        }
+        check_repository_surface_cfg("module", &module.attrs, &mut violations);
+    }
+
+    let reexport = match reexports.as_slice() {
+        [reexport] => Some(*reexport),
+        _ => {
+            violations.push(format!(
+                "{LABEL}: expected exactly one repository public re-export, found {}",
+                reexports.len()
+            ));
+            None
+        }
+    };
+    if let Some(reexport) = reexport {
+        if reexport.attrs.len() != 1 {
+            violations.push(format!(
+                "{LABEL}: repository public re-export must have exactly one cfg attribute"
+            ));
+        }
+        check_repository_surface_cfg("public re-export", &reexport.attrs, &mut violations);
+        match repository_reexport_names(&reexport.tree) {
+            Ok(actual) => {
+                let expected = string_set(REPOSITORY_PUBLIC_EXPORTS);
+                if actual != expected {
+                    violations.push(format!(
+                        "{LABEL}: repository public re-export set must be {expected:?}, found {actual:?}"
+                    ));
+                }
+            }
+            Err(reason) => violations.push(format!(
+                "{LABEL}: repository public re-export is invalid: {reason}"
+            )),
+        }
+    }
+    check_repository_target_partition(&mut violations);
+    violations.sort_unstable();
+    violations.dedup();
+    violations
+}
+
+/// Verifies that the runtime filesystem module and its public re-export compile on the exact candidate set.
+#[doc(hidden)]
+pub fn runtime_candidate_surface_violations(source: &str) -> Vec<String> {
+    const LABEL: &str = "native-fs runtime candidate surface";
+    let file = match syn::parse_file(source) {
+        Ok(file) => file,
+        Err(error) => return vec![format!("{LABEL}: failed to parse source: {error}")],
+    };
+    let mut violations = Vec::new();
+    for attribute in &file.attrs {
+        if ["cfg", "cfg_attr", "path"]
+            .iter()
+            .any(|name| path_is_identifier(attribute.path(), name))
+        {
+            violations.push(format!(
+                "{LABEL}: crate-level {} attribute is forbidden",
+                identifier_name(
+                    &attribute
+                        .path()
+                        .segments
+                        .last()
+                        .expect("an attribute path is non-empty")
+                        .ident
+                )
+            ));
+        }
+    }
+    let modules = file
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            Item::Mod(module) if identifier_is(&module.ident, "fs") => Some(module),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let reexports = file
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            Item::Use(item)
+                if matches!(item.vis, Visibility::Public(_))
+                    && use_tree_root_identifier(&item.tree)
+                        .is_some_and(|identifier| identifier_is(identifier, "fs")) =>
+            {
+                Some(item)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    match modules.as_slice() {
+        [module] => {
+            if !matches!(module.vis, Visibility::Inherited)
+                || module.content.is_some()
+                || module.attrs.len() != 1
+            {
+                violations.push(format!(
+                    "{LABEL}: filesystem module must be a private out-of-line module with exactly one cfg attribute and no path override"
+                ));
+            }
+            match runtime_candidate_cfg_targets(&module.attrs) {
+                Ok(targets) => {
+                    let expected = string_set(RUNTIME_CANDIDATE_TARGETS);
+                    if targets != expected {
+                        violations.push(format!(
+                            "{LABEL}: filesystem module cfg target set must be {expected:?}, found {targets:?}"
+                        ));
+                    }
+                }
+                Err(reason) => violations.push(format!(
+                    "{LABEL}: filesystem module cfg is invalid: {reason}"
+                )),
+            }
+        }
+        _ => violations.push(format!(
+            "{LABEL}: expected exactly one filesystem module, found {}",
+            modules.len()
+        )),
+    }
+
+    match reexports.as_slice() {
+        [reexport] => {
+            if reexport.attrs.len() != 1 {
+                violations.push(format!(
+                    "{LABEL}: filesystem public re-export must have exactly one cfg attribute"
+                ));
+            }
+            match runtime_candidate_cfg_targets(&reexport.attrs) {
+                Ok(targets) => {
+                    let expected = string_set(RUNTIME_CANDIDATE_TARGETS);
+                    if targets != expected {
+                        violations.push(format!(
+                            "{LABEL}: filesystem public re-export cfg target set must be {expected:?}, found {targets:?}"
+                        ));
+                    }
+                }
+                Err(reason) => violations.push(format!(
+                    "{LABEL}: filesystem public re-export cfg is invalid: {reason}"
+                )),
+            }
+            match runtime_reexport_names(&reexport.tree) {
+                Ok(actual) => {
+                    let expected = string_set(RUNTIME_PUBLIC_EXPORTS);
+                    if actual != expected {
+                        violations.push(format!(
+                            "{LABEL}: filesystem public re-export set must be {expected:?}, found {actual:?}"
+                        ));
+                    }
+                }
+                Err(reason) => violations.push(format!(
+                    "{LABEL}: filesystem public re-export is invalid: {reason}"
+                )),
+            }
+        }
+        _ => violations.push(format!(
+            "{LABEL}: expected exactly one filesystem public re-export, found {}",
+            reexports.len()
+        )),
+    }
+    violations.sort_unstable();
+    violations.dedup();
+    violations
+}
+
+fn runtime_reexport_names(tree: &UseTree) -> Result<BTreeSet<String>, String> {
+    let UseTree::Path(root) = tree else {
+        return Err("root must be fs::{...}".to_owned());
+    };
+    if !identifier_is(&root.ident, "fs") {
+        return Err("root must be fs::{...}".to_owned());
+    }
+    let UseTree::Group(group) = root.tree.as_ref() else {
+        return Err("filesystem re-export must use one explicit group".to_owned());
+    };
+    let mut names = BTreeSet::new();
+    for item in &group.items {
+        let UseTree::Name(name) = item else {
+            return Err("aliases, globs, and nested paths are forbidden".to_owned());
+        };
+        let name = identifier_name(&name.ident);
+        if !names.insert(name.clone()) {
+            return Err(format!("duplicate re-export {name}"));
+        }
+    }
+    Ok(names)
+}
+
+fn check_repository_surface_cfg(
+    kind: &str,
+    attributes: &[Attribute],
+    violations: &mut Vec<String>,
+) {
+    const LABEL: &str = "native-fs repository candidate surface";
+    match repository_candidate_cfg_targets(attributes) {
+        Ok(targets) => {
+            let expected = string_set(REPOSITORY_CANDIDATE_TARGETS);
+            if targets != expected {
+                violations.push(format!(
+                        "{LABEL}: repository {kind} cfg target set must be {expected:?}, found {targets:?}"
+                    ));
+            }
+        }
+        Err(reason) => violations.push(format!(
+            "{LABEL}: repository {kind} cfg is invalid: {reason}"
+        )),
+    }
+}
+
+fn repository_reexport_names(tree: &UseTree) -> Result<BTreeSet<String>, String> {
+    let UseTree::Path(root) = tree else {
+        return Err("root must be repository::{...}".to_owned());
+    };
+    if !identifier_is(&root.ident, "repository") {
+        return Err("root must be repository::{...}".to_owned());
+    }
+    let UseTree::Group(group) = root.tree.as_ref() else {
+        return Err("repository re-export must use one explicit group".to_owned());
+    };
+    let mut names = BTreeSet::new();
+    for item in &group.items {
+        let UseTree::Name(name) = item else {
+            return Err("aliases, globs, and nested paths are forbidden".to_owned());
+        };
+        let name = identifier_name(&name.ident);
+        if !names.insert(name.clone()) {
+            return Err(format!("duplicate re-export {name}"));
+        }
+    }
+    Ok(names)
+}
+
+fn use_tree_root_identifier(tree: &UseTree) -> Option<&syn::Ident> {
+    match tree {
+        UseTree::Path(path) => Some(&path.ident),
+        UseTree::Name(name) => Some(&name.ident),
+        UseTree::Rename(rename) => Some(&rename.ident),
+        UseTree::Group(_) | UseTree::Glob(_) => None,
+    }
+}
+
+fn repository_candidate_cfg_targets(attributes: &[Attribute]) -> Result<BTreeSet<String>, String> {
+    candidate_surface_cfg_targets(attributes, "repository-fs-candidate", "repository")
+}
+
+fn runtime_candidate_cfg_targets(attributes: &[Attribute]) -> Result<BTreeSet<String>, String> {
+    candidate_surface_cfg_targets(attributes, "fs-candidate", "runtime")
+}
+
+fn candidate_surface_cfg_targets(
+    attributes: &[Attribute],
+    expected_feature: &str,
+    kind: &str,
+) -> Result<BTreeSet<String>, String> {
+    if attributes
+        .iter()
+        .any(|attribute| path_is_identifier(attribute.path(), "cfg_attr"))
+    {
+        return Err("cfg_attr is forbidden".to_owned());
+    }
+    let cfg_attributes = attributes
+        .iter()
+        .filter(|attribute| path_is_identifier(attribute.path(), "cfg"))
+        .collect::<Vec<_>>();
+    let attribute = match cfg_attributes.as_slice() {
+        [attribute] => *attribute,
+        _ => {
+            return Err(format!(
+                "expected exactly one cfg attribute, found {}",
+                cfg_attributes.len()
+            ));
+        }
+    };
+    let Meta::List(cfg) = &attribute.meta else {
+        return Err("cfg attribute must be a list".to_owned());
+    };
+    let cfg_arguments = parse_meta_arguments(cfg).ok_or_else(|| "cannot parse cfg".to_owned())?;
+    if cfg_arguments.len() != 1 {
+        return Err("cfg must contain one all(...) expression".to_owned());
+    }
+    let Some(Meta::List(outer)) = cfg_arguments.first() else {
+        return Err("cfg must contain one all(...) expression".to_owned());
+    };
+    if !path_is_identifier(&outer.path, "all") {
+        return Err("cfg must contain one all(...) expression".to_owned());
+    }
+    let outer_arguments = parse_meta_arguments(outer)
+        .ok_or_else(|| "cannot parse outer all(...) expression".to_owned())?;
+    if outer_arguments.len() != 2 {
+        return Err(
+            "outer all(...) must contain exactly feature and target-set clauses".to_owned(),
+        );
+    }
+
+    let mut feature_seen = false;
+    let mut targets = None;
+    for argument in &outer_arguments {
+        if meta_name_value_string(argument, "feature").as_deref() == Some(expected_feature) {
+            if feature_seen {
+                return Err(format!("{kind} feature clause is duplicated"));
+            }
+            feature_seen = true;
+            continue;
+        }
+        let Meta::List(any) = argument else {
+            return Err("unexpected repository cfg clause".to_owned());
+        };
+        if !path_is_identifier(&any.path, "any") || targets.is_some() {
+            return Err("target clause must be one any(...) expression".to_owned());
+        }
+        let target_arguments = parse_meta_arguments(any)
+            .ok_or_else(|| "cannot parse target any(...) expression".to_owned())?;
+        let mut parsed_targets = BTreeSet::new();
+        for target in &target_arguments {
+            let triple = repository_cfg_target_triple(target)?;
+            if !parsed_targets.insert(triple.clone()) {
+                return Err(format!("target clause contains duplicate {triple:?}"));
+            }
+        }
+        targets = Some(parsed_targets);
+    }
+    if !feature_seen {
+        return Err(format!("{kind} feature clause is missing or inexact"));
+    }
+    targets.ok_or_else(|| "target any(...) clause is missing".to_owned())
+}
+
+fn repository_cfg_target_triple(meta: &Meta) -> Result<String, String> {
+    let Meta::List(all) = meta else {
+        return Err("each target must be an all(...) expression".to_owned());
+    };
+    if !path_is_identifier(&all.path, "all") {
+        return Err("each target must be an all(...) expression".to_owned());
+    }
+    let arguments =
+        parse_meta_arguments(all).ok_or_else(|| "cannot parse target all(...)".to_owned())?;
+    let mut fields = BTreeMap::new();
+    for field in [
+        "target_arch",
+        "target_vendor",
+        "target_os",
+        "target_env",
+        "target_abi",
+    ] {
+        let matching = arguments
+            .iter()
+            .filter_map(|argument| meta_name_value_string(argument, field))
+            .collect::<Vec<_>>();
+        match matching.as_slice() {
+            [value] => {
+                fields.insert(field, value.clone());
+            }
+            _ => {
+                return Err(format!(
+                    "target all(...) must contain exactly one {field} clause"
+                ));
+            }
+        }
+    }
+    if arguments.len() != fields.len() {
+        return Err("target all(...) contains an unsupported clause".to_owned());
+    }
+    let triple = match (
+        fields["target_arch"].as_str(),
+        fields["target_vendor"].as_str(),
+        fields["target_os"].as_str(),
+        fields["target_env"].as_str(),
+        fields["target_abi"].as_str(),
+    ) {
+        ("x86_64", "unknown", "linux", "gnu", "") => "x86_64-unknown-linux-gnu",
+        ("x86_64", "pc", "windows", "msvc", "") => "x86_64-pc-windows-msvc",
+        ("aarch64", "apple", "macos", "", "") => "aarch64-apple-darwin",
+        values => return Err(format!("unsupported exact target tuple {values:?}")),
+    };
+    Ok(triple.to_owned())
+}
+
+fn meta_name_value_string(meta: &Meta, expected_path: &str) -> Option<String> {
+    let Meta::NameValue(name_value) = meta else {
+        return None;
+    };
+    if !path_is_identifier(&name_value.path, expected_path) {
+        return None;
+    }
+    let syn::Expr::Lit(expression) = &name_value.value else {
+        return None;
+    };
+    let syn::Lit::Str(value) = &expression.lit else {
+        return None;
+    };
+    Some(value.value())
+}
+
+fn string_set(values: &[&str]) -> BTreeSet<String> {
+    values.iter().map(|value| (*value).to_owned()).collect()
+}
+
+fn check_repository_target_partition(violations: &mut Vec<String>) {
+    let candidates = string_set(REPOSITORY_CANDIDATE_TARGETS);
+    let operational = string_set(REPOSITORY_OPERATIONAL_CANDIDATE_TARGETS);
+    let fail_closed = string_set(REPOSITORY_FAIL_CLOSED_TARGETS);
+    let overlap = operational
+        .intersection(&fail_closed)
+        .cloned()
+        .collect::<Vec<_>>();
+    if !overlap.is_empty() {
+        violations.push(format!(
+            "native-fs repository targets: operational and fail-closed sets overlap at {overlap:?}"
+        ));
+    }
+    let qualified = operational.union(&fail_closed).cloned().collect();
+    if candidates != qualified {
+        violations.push(format!(
+            "native-fs repository targets: operational and fail-closed union must be {candidates:?}, found {qualified:?}"
+        ));
+    }
+}
+
+fn candidate_test_source_violations_for_contract(
+    source: &str,
+    required_tests: &[RequiredCandidateTest],
+    expected_module_digest: &str,
+    label: &str,
+) -> Vec<String> {
     let mut violations = Vec::new();
     for (marker, description) in [
         ("SKIP", "a textual skip marker"),
         ("BAOZI_TEST_", "an environment-dependent external fixture"),
     ] {
         if source.contains(marker) {
-            violations.push(format!(
-                "native-fs candidate tests: {description} is forbidden ({marker:?})"
-            ));
+            violations.push(format!("{label}: {description} is forbidden ({marker:?})"));
         }
     }
     for (line_index, line) in source.lines().enumerate() {
         if line.contains("fs::rename(") && line.contains(".is_ok()") {
             violations.push(format!(
-                "native-fs candidate tests: line {} must not turn an fs::rename error into a passing test with .is_ok()",
+                "{label}: line {} must not turn an fs::rename error into a passing test with .is_ok()",
                 line_index + 1
             ));
         }
@@ -314,42 +1368,50 @@ pub fn candidate_test_source_violations(source: &str) -> Vec<String> {
         Ok(file) => file,
         Err(error) => {
             violations.push(format!(
-                "native-fs candidate tests: failed to parse candidate source: {error}"
+                "{label}: failed to parse candidate source: {error}"
             ));
             violations.sort_unstable();
             violations.dedup();
             return violations;
         }
     };
+    check_candidate_test_ancestor_macro_bindings(&file, label, &mut violations);
+    match candidate_test_module_digest(&file) {
+        Ok(actual) if actual == expected_module_digest => {}
+        Ok(actual) => violations.push(format!(
+            "{label}: normalized test-module digest must be {expected_module_digest}, found {actual}"
+        )),
+        Err(reason) => violations.push(format!("{label}: {reason}")),
+    }
     let mut collector = CandidateTestCollector::default();
     collector.visit_file(&file);
     for test in &collector.tests {
-        check_candidate_test(test, &mut violations);
+        check_candidate_test(test, label, &mut violations);
     }
-    for required in REQUIRED_CANDIDATE_TESTS {
+    for required in required_tests {
         let matches = collector
             .tests
             .iter()
             .filter(|test| identifier_is(&test.item.sig.ident, required.name))
             .collect::<Vec<_>>();
         match matches.as_slice() {
-            [] => violations.push(format!(
-                "native-fs candidate tests: missing required test {}",
-                required.name
-            )),
-            [test] => match candidate_test_platform(&test.item.attrs) {
-                Ok(actual) if actual == required.platform => {}
-                Ok(actual) => violations.push(format!(
-                    "native-fs candidate tests: required test {} has platform {actual:?}, expected {:?}",
-                    required.name, required.platform
-                )),
-                Err(()) => violations.push(format!(
-                    "native-fs candidate tests: required test {} has an unsupported conditional attribute",
-                    required.name
-                )),
-            },
+            [] => violations.push(format!("{label}: missing required test {}", required.name)),
+            [test] => {
+                match candidate_test_platform(&test.item.attrs) {
+                    Ok(actual) if actual == required.platform => {}
+                    Ok(actual) => violations.push(format!(
+                        "{label}: required test {} has platform {actual:?}, expected {:?}",
+                        required.name, required.platform
+                    )),
+                    Err(()) => violations.push(format!(
+                        "{label}: required test {} has an unsupported conditional attribute",
+                        required.name
+                    )),
+                }
+                check_required_candidate_test_body(test, label, &mut violations);
+            }
             _ => violations.push(format!(
-                "native-fs candidate tests: required test {} is defined more than once",
+                "{label}: required test {} is defined more than once",
                 required.name
             )),
         }
@@ -357,6 +1419,259 @@ pub fn candidate_test_source_violations(source: &str) -> Vec<String> {
     violations.sort_unstable();
     violations.dedup();
     violations
+}
+
+fn candidate_test_module_digest(file: &syn::File) -> Result<String, String> {
+    let modules = file
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            Item::Mod(module) if identifier_is(&module.ident, "tests") => Some(module),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let module = match modules.as_slice() {
+        [module] => *module,
+        _ => {
+            return Err(format!(
+                "expected exactly one top-level tests module for digesting, found {}",
+                modules.len()
+            ));
+        }
+    };
+    if module.content.is_none()
+        || !matches!(module.vis, Visibility::Inherited)
+        || module.attrs.len() != 1
+        || !exact_cfg_test_attribute(&module.attrs[0])
+    {
+        return Err(
+            "top-level tests module must be exactly an inline private #[cfg(test)] mod tests"
+                .to_owned(),
+        );
+    }
+    let mut normalized = TokenStream::new();
+    module.to_tokens(&mut normalized);
+    let digest = Sha256::digest(normalized.to_string().as_bytes());
+    Ok(format!("{digest:x}"))
+}
+
+fn check_candidate_test_ancestor_macro_bindings(
+    file: &syn::File,
+    label: &str,
+    violations: &mut Vec<String>,
+) {
+    for attribute in &file.attrs {
+        if path_is_identifier(attribute.path(), "macro_use") {
+            violations.push(format!(
+                "{label}: ancestor #[macro_use] can shadow candidate-test macros"
+            ));
+        }
+    }
+
+    for item in &file.items {
+        if matches!(
+            item,
+            Item::Mod(module) if identifier_is(&module.ident, "tests")
+        ) {
+            let Item::Mod(module) = item else {
+                unreachable!("the match above requires a module");
+            };
+            check_candidate_test_module_export_hazards(module, label, violations);
+            continue;
+        }
+        if let Item::Mod(module) = item {
+            check_candidate_test_module_export_hazards(module, label, violations);
+        }
+        if item_attributes(item)
+            .iter()
+            .any(|attribute| path_is_identifier(attribute.path(), "macro_use"))
+        {
+            violations.push(format!(
+                "{label}: ancestor #[macro_use] can shadow candidate-test macros"
+            ));
+        }
+        match item {
+            Item::Macro(item_macro) => {
+                if let Some(identifier) = &item_macro.ident {
+                    let name = identifier_name(identifier);
+                    if is_candidate_test_ancestor_guard_macro(&name) {
+                        violations.push(format!(
+                            "{label}: ancestor scope shadows candidate-test macro {name}! with a macro declaration"
+                        ));
+                    }
+                } else {
+                    let invocation = item_macro
+                        .mac
+                        .path
+                        .segments
+                        .last()
+                        .map(|segment| identifier_name(&segment.ident))
+                        .unwrap_or_else(|| "<empty-path>".to_owned());
+                    if invocation != "compile_error" {
+                        violations.push(format!(
+                            "{label}: ancestor macro invocation {invocation}! can introduce shadowing candidate-test macros"
+                        ));
+                    }
+                }
+            }
+            Item::Use(item_use) => {
+                let mut bindings = BTreeSet::new();
+                let mut contains_glob = false;
+                collect_use_tree_candidate_macro_bindings(
+                    &item_use.tree,
+                    None,
+                    &mut bindings,
+                    &mut contains_glob,
+                );
+                for binding in bindings {
+                    violations.push(format!(
+                        "{label}: ancestor scope can shadow candidate-test macro {binding}! with an import or alias"
+                    ));
+                }
+                if contains_glob {
+                    violations.push(format!(
+                        "{label}: ancestor glob import can shadow candidate-test macros"
+                    ));
+                }
+            }
+            Item::ExternCrate(item_extern_crate) => {
+                let local = item_extern_crate
+                    .rename
+                    .as_ref()
+                    .map(|(_, identifier)| identifier)
+                    .unwrap_or(&item_extern_crate.ident);
+                let name = identifier_name(local);
+                if is_candidate_test_ancestor_guard_macro(&name) {
+                    violations.push(format!(
+                        "{label}: ancestor extern-crate alias can shadow candidate-test macro {name}!"
+                    ));
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn check_candidate_test_module_export_hazards(
+    module: &ItemMod,
+    label: &str,
+    violations: &mut Vec<String>,
+) {
+    if module
+        .attrs
+        .iter()
+        .any(|attribute| path_is_identifier(attribute.path(), "macro_use"))
+    {
+        violations.push(format!(
+            "{label}: nested module {} uses #[macro_use] and can shadow candidate-test macros",
+            module.ident
+        ));
+    }
+    let Some((_, items)) = &module.content else {
+        return;
+    };
+    for item in items {
+        match item {
+            Item::Macro(item_macro) => {
+                if item_macro
+                    .attrs
+                    .iter()
+                    .any(|attribute| path_is_identifier(attribute.path(), "macro_export"))
+                {
+                    violations.push(format!(
+                        "{label}: nested module {} exports a macro that can shadow candidate-test macros",
+                        module.ident
+                    ));
+                }
+                if item_macro.ident.is_none() {
+                    violations.push(format!(
+                        "{label}: nested module {} invokes an item macro that can export candidate-test macro bindings",
+                        module.ident
+                    ));
+                }
+            }
+            Item::Mod(nested) => {
+                check_candidate_test_module_export_hazards(nested, label, violations);
+            }
+            Item::ExternCrate(item_extern_crate)
+                if item_extern_crate
+                    .attrs
+                    .iter()
+                    .any(|attribute| path_is_identifier(attribute.path(), "macro_use")) =>
+            {
+                violations.push(format!(
+                    "{label}: nested module {} imports macros that can shadow candidate-test macros",
+                    module.ident
+                ));
+            }
+            _ => {}
+        }
+    }
+}
+
+fn collect_use_tree_candidate_macro_bindings(
+    tree: &UseTree,
+    parent: Option<&syn::Ident>,
+    bindings: &mut BTreeSet<String>,
+    contains_glob: &mut bool,
+) {
+    match tree {
+        UseTree::Path(path) => collect_use_tree_candidate_macro_bindings(
+            &path.tree,
+            Some(&path.ident),
+            bindings,
+            contains_glob,
+        ),
+        UseTree::Name(name) => {
+            let local = if identifier_is(&name.ident, "self") {
+                parent
+            } else {
+                Some(&name.ident)
+            };
+            if let Some(local) = local {
+                let local = identifier_name(local);
+                if is_candidate_test_ancestor_guard_macro(&local) {
+                    bindings.insert(local);
+                }
+            }
+        }
+        UseTree::Rename(rename) => {
+            let local = identifier_name(&rename.rename);
+            if is_candidate_test_ancestor_guard_macro(&local) {
+                bindings.insert(local);
+            }
+        }
+        UseTree::Glob(_) => *contains_glob = true,
+        UseTree::Group(group) => {
+            for nested in &group.items {
+                collect_use_tree_candidate_macro_bindings(nested, parent, bindings, contains_glob);
+            }
+        }
+    }
+}
+
+fn use_tree_mentions_identifier(tree: &UseTree, expected: &str) -> bool {
+    match tree {
+        UseTree::Path(path) => {
+            identifier_is(&path.ident, expected)
+                || use_tree_mentions_identifier(&path.tree, expected)
+        }
+        UseTree::Name(name) => identifier_is(&name.ident, expected),
+        UseTree::Rename(rename) => identifier_is(&rename.ident, expected),
+        UseTree::Glob(_) => false,
+        UseTree::Group(group) => group
+            .items
+            .iter()
+            .any(|item| use_tree_mentions_identifier(item, expected)),
+    }
+}
+
+fn is_candidate_test_allowed_macro(name: &str) -> bool {
+    CANDIDATE_TEST_ALLOWED_MACROS.contains(&name)
+}
+
+fn is_candidate_test_ancestor_guard_macro(name: &str) -> bool {
+    is_candidate_test_allowed_macro(name) || name == "compile_error"
 }
 
 #[derive(Default)]
@@ -454,17 +1769,17 @@ fn exact_cfg_test_attribute(attribute: &Attribute) -> bool {
         )
 }
 
-fn check_candidate_test(test: &CandidateTest<'_>, violations: &mut Vec<String>) {
+fn check_candidate_test(test: &CandidateTest<'_>, label: &str, violations: &mut Vec<String>) {
     let item = test.item;
     let name = identifier_name(&item.sig.ident);
     if test.cfg_test_ancestor_count != 1 {
         violations.push(format!(
-            "native-fs candidate tests: test {name} must be nested under exactly one #[cfg(test)] ancestor"
+            "{label}: test {name} must be nested under exactly one #[cfg(test)] ancestor"
         ));
     }
     if test.unsupported_conditional_ancestor_count != 0 {
         violations.push(format!(
-            "native-fs candidate tests: test {name} has an unsupported ancestor conditional attribute"
+            "{label}: test {name} has an unsupported ancestor conditional attribute"
         ));
     }
     let test_attribute_count = item
@@ -474,26 +1789,24 @@ fn check_candidate_test(test: &CandidateTest<'_>, violations: &mut Vec<String>) 
         .count();
     if test_attribute_count != 1 {
         violations.push(format!(
-            "native-fs candidate tests: test {name} must have exactly one #[test] attribute"
+            "{label}: test {name} must have exactly one #[test] attribute"
         ));
     }
     for attribute in &item.attrs {
         match prohibited_candidate_test_attribute(&attribute.meta) {
-            Ok(Some("ignore")) => violations.push(format!(
-                "native-fs candidate tests: ignored test {name} is forbidden"
-            )),
-            Ok(Some("should_panic")) => violations.push(format!(
-                "native-fs candidate tests: should-panic test {name} is forbidden"
-            )),
+            Ok(Some("ignore")) => {
+                violations.push(format!("{label}: ignored test {name} is forbidden"))
+            }
+            Ok(Some("should_panic")) => {
+                violations.push(format!("{label}: should-panic test {name} is forbidden"))
+            }
             Ok(Some(_)) | Ok(None) => {}
-            Err(()) => violations.push(format!(
-                "native-fs candidate tests: test {name} has an unparseable cfg_attr"
-            )),
+            Err(()) => violations.push(format!("{label}: test {name} has an unparseable cfg_attr")),
         }
     }
     if candidate_test_platform(&item.attrs).is_err() {
         violations.push(format!(
-            "native-fs candidate tests: test {name} has an unsupported conditional attribute"
+            "{label}: test {name} has an unsupported conditional attribute"
         ));
     }
     if !item.sig.inputs.is_empty()
@@ -507,16 +1820,102 @@ fn check_candidate_test(test: &CandidateTest<'_>, violations: &mut Vec<String>) 
         || item.sig.generics.where_clause.is_some()
     {
         violations.push(format!(
-            "native-fs candidate tests: test {name} must be a plain zero-argument unit test"
+            "{label}: test {name} must be a plain zero-argument unit test"
         ));
     }
     let mut return_visitor = CandidateTestReturnVisitor::default();
     return_visitor.visit_block(&item.block);
     if return_visitor.found {
         violations.push(format!(
-            "native-fs candidate tests: test {name} contains an early-success return"
+            "{label}: test {name} contains an early-success return"
         ));
     }
+}
+
+fn check_required_candidate_test_body(
+    test: &CandidateTest<'_>,
+    label: &str,
+    violations: &mut Vec<String>,
+) {
+    let name = identifier_name(&test.item.sig.ident);
+    if test.item.block.stmts.is_empty() {
+        violations.push(format!("{label}: required test {name} has an empty body"));
+        return;
+    }
+    let mut evidence = CandidateTestEvidenceVisitor::default();
+    evidence.visit_block(&test.item.block);
+    if evidence.assertions == 0 {
+        violations.push(format!(
+            "{label}: required test {name} must contain an explicit assertion"
+        ));
+    }
+    if evidence.actions == 0 {
+        violations.push(format!(
+            "{label}: required test {name} must exercise at least one function or method call outside macro expansion"
+        ));
+    }
+    if evidence.unsupported_conditionals != 0 {
+        violations.push(format!(
+            "{label}: required test {name} contains an unsupported body conditional attribute"
+        ));
+    }
+    for unsupported in evidence.unsupported_macros {
+        violations.push(format!(
+            "{label}: required test {name} invokes unsupported macro {unsupported}!"
+        ));
+    }
+}
+
+#[derive(Default)]
+struct CandidateTestEvidenceVisitor {
+    assertions: usize,
+    actions: usize,
+    unsupported_conditionals: usize,
+    unsupported_macros: BTreeSet<String>,
+}
+
+impl<'ast> Visit<'ast> for CandidateTestEvidenceVisitor {
+    fn visit_attribute(&mut self, attribute: &'ast Attribute) {
+        if path_is_identifier(attribute.path(), "cfg_attr")
+            || path_is_identifier(attribute.path(), "cfg")
+        {
+            self.unsupported_conditionals += 1;
+        }
+        syn::visit::visit_attribute(self, attribute);
+    }
+
+    fn visit_expr_call(&mut self, expression: &'ast syn::ExprCall) {
+        self.actions += 1;
+        syn::visit::visit_expr_call(self, expression);
+    }
+
+    fn visit_expr_method_call(&mut self, expression: &'ast syn::ExprMethodCall) {
+        self.actions += 1;
+        syn::visit::visit_expr_method_call(self, expression);
+    }
+
+    fn visit_macro(&mut self, expression: &'ast syn::Macro) {
+        let Some(segment) = expression.path.segments.last() else {
+            self.unsupported_macros.insert("<empty-path>".to_owned());
+            return;
+        };
+        let name = identifier_name(&segment.ident);
+        if matches!(name.as_str(), "assert" | "assert_eq" | "assert_ne") {
+            self.assertions += 1;
+            if let Ok(arguments) = Punctuated::<syn::Expr, Token![,]>::parse_terminated
+                .parse2(expression.tokens.clone())
+            {
+                for argument in &arguments {
+                    self.visit_expr(argument);
+                }
+            }
+        }
+        if !is_candidate_test_allowed_macro(&name) {
+            self.unsupported_macros.insert(name);
+        }
+    }
+
+    fn visit_item_fn(&mut self, _item: &'ast syn::ItemFn) {}
 }
 
 fn prohibited_candidate_test_attribute(meta: &Meta) -> Result<Option<&'static str>, ()> {
@@ -613,6 +2012,274 @@ pub fn production_source_text_violations(source: &str) -> Vec<String> {
     violations.sort_unstable();
     violations.dedup();
     violations
+}
+
+/// Rejects evidence-only conditional compilation in candidate production code.
+#[doc(hidden)]
+pub fn candidate_production_source_violations(source: &str) -> Vec<String> {
+    const SOURCE_LABEL: &str = "inline candidate production source";
+
+    let file = match syn::parse_file(source) {
+        Ok(file) => file,
+        Err(error) => {
+            return vec![format!(
+                "native-fs candidate production source: cannot parse {SOURCE_LABEL}: {error}"
+            )];
+        }
+    };
+    let mut violations = Vec::new();
+    check_candidate_implementation_cfg_file(&file, SOURCE_LABEL, &mut violations);
+    violations.sort_unstable();
+    violations.dedup();
+    violations
+}
+
+fn check_candidate_implementation_cfg_sources(
+    repository_root: &Path,
+    violations: &mut Vec<String>,
+) {
+    let mut visited = BTreeSet::new();
+    for relative_source in [
+        CANDIDATE_TEST_SOURCE_PATH,
+        REPOSITORY_CANDIDATE_TEST_SOURCE_PATH,
+    ] {
+        let source = repository_root.join(relative_source);
+        let module_directory = module_directory_for_file(&source);
+        scan_candidate_implementation_cfg_file(
+            repository_root,
+            &source,
+            &module_directory,
+            &mut visited,
+            violations,
+        );
+    }
+}
+
+fn scan_candidate_implementation_cfg_file(
+    repository_root: &Path,
+    source: &Path,
+    module_directory: &Path,
+    visited: &mut BTreeSet<PathBuf>,
+    violations: &mut Vec<String>,
+) {
+    let canonical = match fs::canonicalize(source) {
+        Ok(path) => path,
+        Err(error) => {
+            violations.push(format!(
+                "native-fs candidate production source: cannot inspect {}: {error}",
+                display_source_path(repository_root, source)
+            ));
+            return;
+        }
+    };
+    if !visited.insert(canonical) {
+        return;
+    }
+    let source_text = match fs::read_to_string(source) {
+        Ok(source_text) => source_text,
+        Err(error) => {
+            violations.push(format!(
+                "native-fs candidate production source: cannot read {}: {error}",
+                display_source_path(repository_root, source)
+            ));
+            return;
+        }
+    };
+    let file = match syn::parse_file(&source_text) {
+        Ok(file) => file,
+        Err(error) => {
+            violations.push(format!(
+                "native-fs candidate production source: cannot parse {}: {error}",
+                display_source_path(repository_root, source)
+            ));
+            return;
+        }
+    };
+    let source_label = display_source_path(repository_root, source);
+    check_candidate_implementation_cfg_file(&file, &source_label, violations);
+    scan_candidate_implementation_cfg_modules(
+        repository_root,
+        &source_label,
+        module_directory,
+        &file.items,
+        visited,
+        violations,
+    );
+}
+
+fn scan_candidate_implementation_cfg_modules(
+    repository_root: &Path,
+    source_label: &str,
+    module_directory: &Path,
+    items: &[Item],
+    visited: &mut BTreeSet<PathBuf>,
+    violations: &mut Vec<String>,
+) {
+    for item in items {
+        let Item::Mod(module) = item else {
+            continue;
+        };
+        if exact_candidate_test_module(module) {
+            continue;
+        }
+        if let Some(attribute) = module_source_override(&module.attrs) {
+            violations.push(format!(
+                "native-fs candidate production source: module {} in {source_label} uses forbidden {attribute} source redirection",
+                module.ident
+            ));
+            continue;
+        }
+        if let Some((_, nested_items)) = &module.content {
+            scan_candidate_implementation_cfg_modules(
+                repository_root,
+                source_label,
+                &module_directory.join(identifier_name(&module.ident)),
+                nested_items,
+                visited,
+                violations,
+            );
+            continue;
+        }
+        let Some(module_file) = resolve_module_file(module_directory, module) else {
+            violations.push(format!(
+                "native-fs candidate production source: cannot resolve module {} from {source_label}",
+                module.ident
+            ));
+            continue;
+        };
+        let nested_directory = module_directory_for_file(&module_file);
+        scan_candidate_implementation_cfg_file(
+            repository_root,
+            &module_file,
+            &nested_directory,
+            visited,
+            violations,
+        );
+    }
+}
+
+fn check_candidate_implementation_cfg_file(
+    file: &syn::File,
+    source_label: &str,
+    violations: &mut Vec<String>,
+) {
+    let mut visitor = CandidateImplementationCfgVisitor {
+        source_label,
+        violations,
+    };
+    visitor.visit_file(file);
+}
+
+fn exact_candidate_test_module(module: &ItemMod) -> bool {
+    identifier_is(&module.ident, "tests")
+        && module.attrs.len() == 1
+        && exact_cfg_test_attribute(&module.attrs[0])
+        && matches!(module.vis, Visibility::Inherited)
+}
+
+struct CandidateImplementationCfgVisitor<'a> {
+    source_label: &'a str,
+    violations: &'a mut Vec<String>,
+}
+
+impl<'ast> Visit<'ast> for CandidateImplementationCfgVisitor<'_> {
+    fn visit_item_mod(&mut self, module: &'ast ItemMod) {
+        if exact_candidate_test_module(module) {
+            return;
+        }
+        syn::visit::visit_item_mod(self, module);
+    }
+
+    fn visit_item_macro(&mut self, item: &'ast syn::ItemMacro) {
+        if path_is_identifier(&item.mac.path, "macro_rules") {
+            self.violations.push(format!(
+                "native-fs candidate production source: macro_rules! is forbidden in {} because it can hide evidence-only cfg",
+                self.source_label
+            ));
+        }
+        syn::visit::visit_item_macro(self, item);
+    }
+
+    fn visit_macro(&mut self, expression: &'ast syn::Macro) {
+        if path_ends_in_identifier(&expression.path, "cfg") {
+            self.violations.push(format!(
+                "native-fs candidate production source: cfg! is forbidden in {}",
+                self.source_label
+            ));
+        } else if path_ends_in_identifier(&expression.path, "include") {
+            self.violations.push(format!(
+                "native-fs candidate production source: include! is forbidden in {}",
+                self.source_label
+            ));
+        } else if !is_admitted_candidate_implementation_macro(&expression.path) {
+            let name = expression.path.segments.last().map_or_else(
+                || "<empty-path>".to_owned(),
+                |segment| identifier_name(&segment.ident),
+            );
+            self.violations.push(format!(
+                "native-fs candidate production source: macro {name}! is not an admitted exact core builtin in {}",
+                self.source_label
+            ));
+        }
+        syn::visit::visit_macro(self, expression);
+    }
+
+    fn visit_attribute(&mut self, attribute: &'ast Attribute) {
+        if path_is_identifier(attribute.path(), "cfg_attr") {
+            self.violations.push(format!(
+                "native-fs candidate production source: cfg_attr is forbidden in {}",
+                self.source_label
+            ));
+        } else if path_is_identifier(attribute.path(), "cfg") {
+            match candidate_implementation_evidence_cfg(attribute) {
+                Ok(Some(condition)) => self.violations.push(format!(
+                    "native-fs candidate production source: evidence-only cfg condition {condition} is forbidden in {}",
+                    self.source_label
+                )),
+                Ok(None) => {}
+                Err(()) => self.violations.push(format!(
+                    "native-fs candidate production source: unparseable cfg attribute is forbidden in {}",
+                    self.source_label
+                )),
+            }
+        }
+        syn::visit::visit_attribute(self, attribute);
+    }
+}
+
+fn candidate_implementation_evidence_cfg(
+    attribute: &Attribute,
+) -> Result<Option<&'static str>, ()> {
+    let Meta::List(list) = &attribute.meta else {
+        return Err(());
+    };
+    let arguments = parse_meta_arguments(list).ok_or(())?;
+    for argument in &arguments {
+        if let Some(condition) = evidence_only_cfg_meta(argument)? {
+            return Ok(Some(condition));
+        }
+    }
+    Ok(None)
+}
+
+fn evidence_only_cfg_meta(meta: &Meta) -> Result<Option<&'static str>, ()> {
+    match meta {
+        Meta::Path(path) if path_is_identifier(path, "test") => Ok(Some("test")),
+        Meta::Path(path) if path_is_identifier(path, "debug_assertions") => {
+            Ok(Some("debug_assertions"))
+        }
+        Meta::Path(path) if path_is_identifier(path, "miri") => Ok(Some("miri")),
+        Meta::Path(_) | Meta::NameValue(_) => Ok(None),
+        Meta::List(list) => {
+            let arguments = parse_meta_arguments(list).ok_or(())?;
+            for argument in &arguments {
+                if let Some(condition) = evidence_only_cfg_meta(argument)? {
+                    return Ok(Some(condition));
+                }
+            }
+            Ok(None)
+        }
+    }
 }
 
 /// Loads Cargo metadata and checks the production parser source graph.
@@ -1398,7 +3065,7 @@ impl<'ast> Visit<'ast> for ProductionFilesystemVisitor<'_> {
     }
 
     fn visit_macro(&mut self, item: &'ast syn::Macro) {
-        if path_is_identifier(&item.path, "include") {
+        if path_ends_in_identifier(&item.path, "include") {
             self.report_unverified_include();
         }
         if let Some(hazard) = macro_expression_hazard(&item.tokens) {
@@ -1456,6 +3123,9 @@ impl<'ast> Visit<'ast> for ProductionFilesystemVisitor<'_> {
     }
 
     fn visit_item_use(&mut self, item: &'ast syn::ItemUse) {
+        if use_tree_mentions_identifier(&item.tree, "include") {
+            self.report_unverified_include();
+        }
         if use_tree_reaches_std_fs(&item.tree, &mut Vec::new(), &self.aliases) {
             self.report("std::fs import");
         }
@@ -1549,7 +3219,10 @@ fn meta_can_override_module_path(meta: &Meta) -> bool {
 
 fn module_directory_for_file(source: &Path) -> PathBuf {
     let parent = source.parent().unwrap_or_else(|| Path::new("."));
-    if source.file_name().and_then(|name| name.to_str()) == Some("mod.rs") {
+    if matches!(
+        source.file_name().and_then(|name| name.to_str()),
+        Some("mod.rs" | "lib.rs" | "main.rs")
+    ) {
         parent.to_path_buf()
     } else {
         source
@@ -1674,6 +3347,66 @@ pub fn check_metadata_fixture(
     }
 }
 
+/// Checks independent runtime and repository native-filesystem closure fixtures.
+#[doc(hidden)]
+pub fn check_metadata_fixture_with_repository(
+    manifest_metadata: &Value,
+    lockfile: &str,
+    baseline: &Value,
+    repository_baseline: &Value,
+    target_metadata: &BTreeMap<String, Value>,
+    profiles: RepositoryMetadataProfiles<'_>,
+) -> NativeFsReport {
+    let mut report = check_metadata_fixture(manifest_metadata, lockfile, baseline, target_metadata);
+    check_complete_local_repository_declarations(
+        profiles.local_declarations,
+        &mut report.violations,
+    );
+    check_facade_candidate_profiles(profiles.facade, &mut report.violations);
+    if let Err(violation) =
+        check_xtask_empty_profile(XTASK_REPOSITORY_RESOLUTION_TARGET, profiles.xtask_empty)
+    {
+        report.violations.push(violation);
+    }
+    if let Err(violation) =
+        check_xtask_repository_profile(XTASK_REPOSITORY_RESOLUTION_TARGET, profiles.xtask_all)
+    {
+        report.violations.push(violation);
+    }
+    let checksums = match parse_lockfile_checksums(lockfile) {
+        Ok(checksums) => checksums,
+        Err(violation) => {
+            report.violations.push(violation);
+            report.profiles_checked += profiles.repository.len() + profiles.facade.len() + 2;
+            report.violations.sort_unstable();
+            report.violations.dedup();
+            return report;
+        }
+    };
+
+    if let Some(snapshot) = build_repository_delta_snapshot(
+        baseline,
+        profiles.repository,
+        &checksums,
+        &mut report.violations,
+    ) {
+        check_repository_baseline_shape(repository_baseline, &mut report.violations);
+        let difference_start = report.violations.len();
+        collect_differences(
+            repository_baseline,
+            &snapshot,
+            "repository baseline",
+            difference_start,
+            &mut report.violations,
+        );
+    }
+
+    report.profiles_checked += profiles.repository.len() + profiles.facade.len() + 2;
+    report.violations.sort_unstable();
+    report.violations.dedup();
+    report
+}
+
 /// Builds the canonical resolved-closure document for fixture and maintenance tooling.
 #[doc(hidden)]
 pub fn resolved_closure_snapshot(
@@ -1696,11 +3429,66 @@ pub fn resolved_closure_snapshot(
     }
 }
 
+/// Builds the repository-only closure delta relative to the frozen runtime baseline.
+#[doc(hidden)]
+pub fn repository_resolved_closure_snapshot(
+    runtime_baseline: &Value,
+    repository_target_metadata: &BTreeMap<String, Value>,
+    lockfile: &str,
+) -> Result<Value, Vec<String>> {
+    let mut violations = Vec::new();
+    let checksums = match parse_lockfile_checksums(lockfile) {
+        Ok(checksums) => checksums,
+        Err(violation) => {
+            return Err(vec![violation]);
+        }
+    };
+    let snapshot = build_repository_delta_snapshot(
+        runtime_baseline,
+        repository_target_metadata,
+        &checksums,
+        &mut violations,
+    );
+    violations.sort_unstable();
+    violations.dedup();
+    match (snapshot, violations.is_empty()) {
+        (Some(snapshot), true) => Ok(snapshot),
+        _ => Err(violations),
+    }
+}
+
 fn load_metadata(
     repository_root: &Path,
     manifest_path: &str,
     target: Option<&str>,
     features: Option<&str>,
+    no_deps: bool,
+) -> Result<Value, String> {
+    load_metadata_inner(
+        repository_root,
+        manifest_path,
+        target,
+        features,
+        false,
+        no_deps,
+    )
+}
+
+fn load_metadata_all_features(
+    repository_root: &Path,
+    manifest_path: &str,
+    target: Option<&str>,
+    no_deps: bool,
+) -> Result<Value, String> {
+    load_metadata_inner(repository_root, manifest_path, target, None, true, no_deps)
+}
+
+fn load_metadata_inner(
+    repository_root: &Path,
+    manifest_path: &str,
+    target: Option<&str>,
+    features: Option<&str>,
+    all_features: bool,
     no_deps: bool,
 ) -> Result<Value, String> {
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
@@ -1715,8 +3503,12 @@ fn load_metadata(
             "--manifest-path",
         ])
         .arg(manifest)
-        .arg("--no-default-features")
         .current_dir(repository_root);
+    if all_features {
+        command.arg("--all-features");
+    } else {
+        command.arg("--no-default-features");
+    }
     if no_deps {
         command.arg("--no-deps");
     }
@@ -1795,6 +3587,96 @@ fn parse_lockfile_checksums(lockfile: &str) -> Result<BTreeMap<ChecksumKey, Stri
     Ok(checksums)
 }
 
+fn check_complete_local_repository_declarations(metadata: &Value, violations: &mut Vec<String>) {
+    const LABEL: &str = "native-fs complete local declarations";
+    const XTASK_MANIFEST: &str = "crates/baozi-xtask/Cargo.toml";
+
+    let Some(packages) = metadata.get("packages").and_then(Value::as_array) else {
+        violations.push(format!("{LABEL}: metadata omitted packages"));
+        return;
+    };
+    let Some(workspace_root) = metadata.get("workspace_root").and_then(Value::as_str) else {
+        violations.push(format!("{LABEL}: metadata omitted workspace_root"));
+        return;
+    };
+    let expected_xtask_manifest = Path::new(workspace_root).join(XTASK_MANIFEST);
+    let mut authentic_xtask_count = 0;
+
+    for package in packages {
+        let Some(dependencies) = package.get("dependencies").and_then(Value::as_array) else {
+            if package.get("source") == Some(&Value::Null) {
+                let owner = string_field(package, "name").unwrap_or("<unnamed>");
+                violations.push(format!(
+                    "{LABEL}: local package {owner} omitted dependencies"
+                ));
+            }
+            continue;
+        };
+        if package.get("source") != Some(&Value::Null) {
+            let owner = string_field(package, "name").unwrap_or("<unnamed>");
+            check_unregistered_repository_feature_requests(
+                owner,
+                package,
+                dependencies,
+                violations,
+            );
+            continue;
+        }
+        let Some(owner) = string_field(package, "name") else {
+            violations.push(format!("{LABEL}: local package omitted its name"));
+            continue;
+        };
+        let Some(package_id) = string_field(package, "id") else {
+            violations.push(format!("{LABEL}: local package {owner} omitted its id"));
+            continue;
+        };
+        let manifest_matches_xtask = package
+            .get("manifest_path")
+            .and_then(Value::as_str)
+            .is_some_and(|manifest| Path::new(manifest) == expected_xtask_manifest);
+        let claims_xtask_identity = owner == XTASK_PACKAGE || manifest_matches_xtask;
+
+        let authentic_xtask = if claims_xtask_identity {
+            match check_workspace_package(
+                metadata,
+                package,
+                package_id,
+                XTASK_PACKAGE,
+                XTASK_MANIFEST,
+                LABEL,
+            ) {
+                Ok(()) => {
+                    authentic_xtask_count += 1;
+                    true
+                }
+                Err(violation) => {
+                    violations.push(violation);
+                    false
+                }
+            }
+        } else {
+            false
+        };
+
+        if authentic_xtask {
+            check_xtask_repository_dependency(package, violations);
+        } else {
+            check_unregistered_repository_feature_requests(
+                owner,
+                package,
+                dependencies,
+                violations,
+            );
+        }
+    }
+
+    if authentic_xtask_count != 1 {
+        violations.push(format!(
+            "{LABEL}: expected exactly one authentic {XTASK_PACKAGE} declaration, found {authentic_xtask_count}"
+        ));
+    }
+}
+
 fn check_manifest(metadata: &Value, violations: &mut Vec<String>) {
     let Some(workspace_packages) = metadata.get("packages").and_then(Value::as_array) else {
         violations.push("native-fs manifest: metadata omitted packages".to_owned());
@@ -1815,6 +3697,40 @@ fn check_manifest(metadata: &Value, violations: &mut Vec<String>) {
             violations.push(format!("native-fs manifest: {owner} omitted dependencies"));
             continue;
         };
+        let registered_xtask = if owner == XTASK_PACKAGE {
+            match string_field(workspace_package, "id") {
+                Some(package_id) => match check_workspace_package(
+                    metadata,
+                    workspace_package,
+                    package_id,
+                    XTASK_PACKAGE,
+                    "crates/baozi-xtask/Cargo.toml",
+                    "native-fs manifest",
+                ) {
+                    Ok(()) => true,
+                    Err(violation) => {
+                        violations.push(violation);
+                        false
+                    }
+                },
+                None => {
+                    violations.push(format!(
+                        "native-fs manifest: {XTASK_PACKAGE} omitted its package id"
+                    ));
+                    false
+                }
+            }
+        } else {
+            false
+        };
+        if !registered_xtask {
+            check_unregistered_repository_feature_requests(
+                owner,
+                workspace_package,
+                dependencies,
+                violations,
+            );
+        }
         for dependency in dependencies {
             let Some(name) = string_field(dependency, "name") else {
                 violations.push(format!(
@@ -1829,6 +3745,11 @@ fn check_manifest(metadata: &Value, violations: &mut Vec<String>) {
             }
         }
     }
+
+    let Some(xtask) = find_unique_package(metadata, XTASK_PACKAGE, "manifest", violations) else {
+        return;
+    };
+    check_xtask_repository_dependency(xtask, violations);
 
     let Some(package) = find_unique_package(metadata, "baozi-io", "manifest", violations) else {
         return;
@@ -1863,23 +3784,42 @@ fn check_manifest(metadata: &Value, violations: &mut Vec<String>) {
             "native-fs manifest: baozi-io/fs-candidate must be exactly {expected_fs_features:?}, found {actual_fs_features:?}"
         ));
     }
+    let actual_repository_features = features
+        .get("repository-fs-candidate")
+        .and_then(Value::as_array)
+        .and_then(|values| sorted_strings(values).ok());
+    let expected_repository_features = vec!["dep:cap-fs-ext".to_owned(), "fs-candidate".to_owned()];
+    if actual_repository_features.as_ref() != Some(&expected_repository_features) {
+        violations.push(format!(
+            "native-fs manifest: baozi-io/repository-fs-candidate must be exactly {expected_repository_features:?}, found {actual_repository_features:?}"
+        ));
+    }
 
     let Some(dependencies) = package.get("dependencies").and_then(Value::as_array) else {
         violations.push("native-fs manifest: baozi-io omitted dependencies".to_owned());
         return;
     };
+    check_baozi_io_production_dependency_set(dependencies, violations);
 
-    for forbidden in ["cap-primitives", "cap-fs-ext"] {
-        if dependencies
-            .iter()
-            .any(|dependency| string_field(dependency, "name") == Some(forbidden))
-        {
-            violations.push(format!(
-                "native-fs manifest: baozi-io must not depend directly on {forbidden}"
-            ));
-        }
+    if dependencies
+        .iter()
+        .any(|dependency| string_field(dependency, "name") == Some("cap-primitives"))
+    {
+        violations.push(
+            "native-fs manifest: baozi-io must not depend directly on cap-primitives".to_owned(),
+        );
     }
 
+    check_manifest_dependency(
+        dependencies,
+        ManifestDependency {
+            name: "cap-fs-ext",
+            requirement: "=4.0.2",
+            target: CAP_STD_TARGET,
+            features: &["std"],
+        },
+        violations,
+    );
     check_manifest_dependency(
         dependencies,
         ManifestDependency {
@@ -1914,6 +3854,14 @@ fn check_manifest(metadata: &Value, violations: &mut Vec<String>) {
             "native-fs manifest: baozi/native-fs-candidate must be exactly {expected_facade_native_fs:?}, found {facade_native_fs:?}"
         ));
     }
+    match feature_reaches_repository_fs(facade_features, "native-fs-candidate") {
+        Ok(false) => {}
+        Ok(true) => violations.push(
+            "native-fs manifest: baozi/native-fs-candidate must not reach baozi-io/repository-fs-candidate"
+                .to_owned(),
+        ),
+        Err(violation) => violations.push(violation),
+    }
     for portable_feature in ["default", "all-formats"] {
         match feature_reaches_native_fs(facade_features, portable_feature) {
             Ok(false) => {}
@@ -1935,7 +3883,226 @@ fn check_manifest(metadata: &Value, violations: &mut Vec<String>) {
     );
 }
 
+fn check_baozi_io_production_dependency_set(dependencies: &[Value], violations: &mut Vec<String>) {
+    let expected = BTreeSet::from([
+        "cap-fs-ext".to_owned(),
+        "cap-std".to_owned(),
+        "rustix".to_owned(),
+        "thiserror".to_owned(),
+    ]);
+    let mut actual = BTreeSet::new();
+    let mut duplicate = BTreeSet::new();
+    for dependency in dependencies {
+        match dependency.get("kind") {
+            None | Some(Value::Null) => {}
+            Some(Value::String(kind)) if kind == "build" => {}
+            Some(Value::String(kind)) if kind == "dev" => continue,
+            _ => {
+                violations.push(
+                    "native-fs manifest: baozi-io has a dependency with an unsupported kind"
+                        .to_owned(),
+                );
+                continue;
+            }
+        }
+        let Some(name) = string_field(dependency, "name") else {
+            violations.push(
+                "native-fs manifest: baozi-io has a production dependency without a name"
+                    .to_owned(),
+            );
+            continue;
+        };
+        if !actual.insert(name.to_owned()) {
+            duplicate.insert(name.to_owned());
+        }
+    }
+    if actual != expected || !duplicate.is_empty() {
+        violations.push(format!(
+            "native-fs manifest: baozi-io production dependency set must be exactly {expected:?} with no duplicates, found {actual:?}, duplicates {duplicate:?}"
+        ));
+    }
+}
+
+fn check_unregistered_repository_feature_requests(
+    owner: &str,
+    package: &Value,
+    dependencies: &[Value],
+    violations: &mut Vec<String>,
+) {
+    let mut dependency_keys = BTreeSet::new();
+    for dependency in dependencies {
+        if string_field(dependency, "name") != Some("baozi-io") {
+            continue;
+        }
+        let key = string_field(dependency, "rename").unwrap_or("baozi-io");
+        dependency_keys.insert(key.to_owned());
+        let requested = dependency
+            .get("features")
+            .and_then(Value::as_array)
+            .and_then(|values| sorted_strings(values).ok());
+        if requested.as_ref().is_some_and(|features| {
+            features
+                .iter()
+                .any(|feature| feature == "repository-fs-candidate")
+        }) {
+            violations.push(format!(
+                "native-fs manifest: {owner} must not request baozi-io/repository-fs-candidate on a dependency edge"
+            ));
+        }
+    }
+    if dependency_keys.is_empty() {
+        return;
+    }
+
+    let Some(features) = package.get("features").and_then(Value::as_object) else {
+        violations.push(format!(
+            "native-fs manifest: {owner} omitted its feature table while depending on baozi-io"
+        ));
+        return;
+    };
+    for (feature, values) in features {
+        let Some(values) = values.as_array() else {
+            violations.push(format!(
+                "native-fs manifest: {owner}/{feature} omitted a string feature list"
+            ));
+            continue;
+        };
+        for value in values {
+            let Some(value) = value.as_str() else {
+                violations.push(format!(
+                    "native-fs manifest: {owner}/{feature} contains a non-string feature"
+                ));
+                continue;
+            };
+            let forwarded_dependency = value
+                .strip_suffix("/repository-fs-candidate")
+                .map(|key| key.strip_suffix('?').unwrap_or(key));
+            if forwarded_dependency.is_some_and(|key| dependency_keys.contains(key)) {
+                violations.push(format!(
+                    "native-fs manifest: {owner}/{feature} must not forward baozi-io/repository-fs-candidate"
+                ));
+            }
+        }
+    }
+}
+
+fn check_xtask_repository_dependency(package: &Value, violations: &mut Vec<String>) {
+    let Some(feature_table) = package.get("features").and_then(Value::as_object) else {
+        violations.push(format!(
+            "native-fs manifest: {XTASK_PACKAGE} omitted its feature table"
+        ));
+        return;
+    };
+    let default_features = feature_table
+        .get("default")
+        .and_then(Value::as_array)
+        .and_then(|values| sorted_strings(values).ok());
+    if default_features.as_deref() != Some(&[]) {
+        violations.push(format!(
+            "native-fs manifest: {XTASK_PACKAGE}/default must be empty, found {default_features:?}"
+        ));
+    }
+    let repository_feature = feature_table
+        .get("repository-input-candidate")
+        .and_then(Value::as_array)
+        .and_then(|values| sorted_strings(values).ok());
+    let expected_repository_feature = vec!["dep:baozi-io".to_owned()];
+    if repository_feature.as_ref() != Some(&expected_repository_feature) {
+        violations.push(format!(
+            "native-fs manifest: {XTASK_PACKAGE}/repository-input-candidate must be exactly {expected_repository_feature:?}, found {repository_feature:?}"
+        ));
+    }
+    for feature in feature_table.keys() {
+        if feature == "repository-input-candidate" {
+            continue;
+        }
+        match feature_reaches_dependency(feature_table, feature, "baozi-io", XTASK_PACKAGE) {
+            Ok(false) => {}
+            Ok(true) => violations.push(format!(
+                "native-fs manifest: {XTASK_PACKAGE}/{feature} must not provide an alternate activation path to baozi-io"
+            )),
+            Err(violation) => violations.push(violation),
+        }
+    }
+
+    let Some(dependencies) = package.get("dependencies").and_then(Value::as_array) else {
+        violations.push(format!(
+            "native-fs manifest: {XTASK_PACKAGE} omitted dependencies"
+        ));
+        return;
+    };
+    let matching: Vec<_> = dependencies
+        .iter()
+        .filter(|dependency| string_field(dependency, "name") == Some("baozi-io"))
+        .collect();
+    let dependency = match matching.as_slice() {
+        [dependency] => *dependency,
+        _ => {
+            violations.push(format!(
+                "native-fs manifest: expected exactly one {XTASK_PACKAGE} direct baozi-io repository edge, found {}",
+                matching.len()
+            ));
+            return;
+        }
+    };
+    let features = dependency
+        .get("features")
+        .and_then(Value::as_array)
+        .and_then(|values| sorted_strings(values).ok());
+    let expected_features = vec!["repository-fs-candidate".to_owned()];
+    let exact = dependency.get("source") == Some(&Value::Null)
+        && dependency.get("kind") == Some(&Value::Null)
+        && dependency.get("rename") == Some(&Value::Null)
+        && dependency.get("optional").and_then(Value::as_bool) == Some(true)
+        && dependency
+            .get("uses_default_features")
+            .and_then(Value::as_bool)
+            == Some(false)
+        && string_field(dependency, "target") == Some(XTASK_REPOSITORY_TARGET)
+        && features.as_ref() == Some(&expected_features);
+    if !exact {
+        violations.push(format!(
+            "native-fs manifest: {XTASK_PACKAGE} direct baozi-io repository edge drifted from path source, normal optional kind, default-features=false, features={expected_features:?}, target={XTASK_REPOSITORY_TARGET}"
+        ));
+    }
+}
+
 fn feature_reaches_native_fs(features: &Map<String, Value>, root: &str) -> Result<bool, String> {
+    feature_reaches_any(
+        features,
+        root,
+        &[
+            "native-fs",
+            "native-fs-candidate",
+            "baozi-io/fs",
+            "baozi-io?/fs",
+            "baozi-io/fs-candidate",
+            "baozi-io?/fs-candidate",
+            "baozi-io/repository-fs-candidate",
+            "baozi-io?/repository-fs-candidate",
+        ],
+    )
+}
+
+fn feature_reaches_repository_fs(
+    features: &Map<String, Value>,
+    root: &str,
+) -> Result<bool, String> {
+    feature_reaches_any(
+        features,
+        root,
+        &[
+            "baozi-io/repository-fs-candidate",
+            "baozi-io?/repository-fs-candidate",
+        ],
+    )
+}
+
+fn feature_reaches_any(
+    features: &Map<String, Value>,
+    root: &str,
+    forbidden: &[&str],
+) -> Result<bool, String> {
     let mut pending = VecDeque::from([root.to_owned()]);
     let mut visited = BTreeSet::new();
     while let Some(feature) = pending.pop_front() {
@@ -1952,15 +4119,7 @@ fn feature_reaches_native_fs(features: &Map<String, Value>, root: &str) -> Resul
             let value = value.as_str().ok_or_else(|| {
                 format!("native-fs manifest: baozi/{feature} contains a non-string feature")
             })?;
-            if matches!(
-                value,
-                "native-fs"
-                    | "native-fs-candidate"
-                    | "baozi-io/fs"
-                    | "baozi-io?/fs"
-                    | "baozi-io/fs-candidate"
-                    | "baozi-io?/fs-candidate"
-            ) {
+            if forbidden.contains(&value) {
                 return Ok(true);
             }
             if !value.starts_with("dep:") && !value.contains('/') {
@@ -1969,6 +4128,335 @@ fn feature_reaches_native_fs(features: &Map<String, Value>, root: &str) -> Resul
         }
     }
     Ok(false)
+}
+
+fn feature_reaches_dependency(
+    features: &Map<String, Value>,
+    root: &str,
+    dependency: &str,
+    owner: &str,
+) -> Result<bool, String> {
+    let mut pending = VecDeque::from([root.to_owned()]);
+    let mut visited = BTreeSet::new();
+    let explicit_dependency = format!("dep:{dependency}");
+    let dependency_feature_prefix = format!("{dependency}/");
+    let weak_dependency_feature_prefix = format!("{dependency}?/");
+    while let Some(feature) = pending.pop_front() {
+        if !visited.insert(feature.clone()) {
+            continue;
+        }
+        let values = features
+            .get(&feature)
+            .and_then(Value::as_array)
+            .ok_or_else(|| {
+                format!("native-fs manifest: {owner}/{feature} omitted a string feature list")
+            })?;
+        for value in values {
+            let value = value.as_str().ok_or_else(|| {
+                format!("native-fs manifest: {owner}/{feature} contains a non-string feature")
+            })?;
+            if value == explicit_dependency.as_str()
+                || value == dependency
+                || value.starts_with(&dependency_feature_prefix)
+                || value.starts_with(&weak_dependency_feature_prefix)
+            {
+                return Ok(true);
+            }
+            if !value.starts_with("dep:") && !value.contains('/') {
+                pending.push_back(value.to_owned());
+            }
+        }
+    }
+    Ok(false)
+}
+
+fn check_facade_candidate_profiles(
+    profiles: &BTreeMap<String, Value>,
+    violations: &mut Vec<String>,
+) {
+    let expected = string_set(REPOSITORY_CANDIDATE_TARGETS);
+    let actual = profiles.keys().cloned().collect::<BTreeSet<_>>();
+    if actual != expected {
+        violations.push(format!(
+            "native-fs facade candidate profiles: target set must be {expected:?}, found {actual:?}"
+        ));
+    }
+    for target in REPOSITORY_CANDIDATE_TARGETS {
+        let Some(metadata) = profiles.get(*target) else {
+            continue;
+        };
+        if let Err(violation) = check_facade_candidate_profile(target, metadata) {
+            violations.push(violation);
+        }
+    }
+}
+
+fn check_facade_candidate_profile(target: &str, metadata: &Value) -> Result<(), String> {
+    let label = format!("native-fs facade candidate profile {target}");
+    let document = MetadataDocument::parse(metadata, target)?;
+    let root = document.unique_package_id(FACADE_PACKAGE)?;
+    check_workspace_package(
+        metadata,
+        document.package(root)?,
+        root,
+        FACADE_PACKAGE,
+        "crates/baozi/Cargo.toml",
+        &label,
+    )?;
+    let root_node = document.node(root)?;
+    let root_features = root_node
+        .get("features")
+        .and_then(Value::as_array)
+        .ok_or_else(|| format!("{label}: {FACADE_PACKAGE} omitted resolved features"))?;
+    let root_features = sorted_strings(root_features)?;
+    if !root_features
+        .iter()
+        .any(|feature| feature == "native-fs-candidate")
+    {
+        return Err(format!(
+            "{label}: {FACADE_PACKAGE} must resolve native-fs-candidate"
+        ));
+    }
+
+    let reachable = document.production_closure(&[root.to_owned()])?;
+    let mut io_packages = Vec::new();
+    let mut cap_fs_ext = 0;
+    for id in &reachable {
+        let package = document.package(id)?;
+        match string_field(package, "name") {
+            Some("baozi-io") => io_packages.push(id.as_str()),
+            Some("cap-fs-ext") => cap_fs_ext += 1,
+            _ => {}
+        }
+    }
+    let io_id = match io_packages.as_slice() {
+        [id] => *id,
+        _ => {
+            return Err(format!(
+                "{label}: expected exactly one reachable baozi-io package, found {}",
+                io_packages.len()
+            ));
+        }
+    };
+    check_workspace_package(
+        metadata,
+        document.package(io_id)?,
+        io_id,
+        "baozi-io",
+        "crates/baozi-io/Cargo.toml",
+        &label,
+    )?;
+    let io_features = document
+        .node(io_id)?
+        .get("features")
+        .and_then(Value::as_array)
+        .ok_or_else(|| format!("{label}: baozi-io omitted resolved features"))?;
+    let io_features = sorted_nondefault_features(io_features)?;
+    let expected_io_features = vec!["fs-candidate".to_owned()];
+    if io_features != expected_io_features {
+        return Err(format!(
+            "{label}: baozi-io resolved features must be exactly {expected_io_features:?}, found {io_features:?}"
+        ));
+    }
+
+    if cap_fs_ext != 0 {
+        return Err(format!(
+            "{label}: cap-fs-ext is forbidden in the resolved facade candidate closure"
+        ));
+    }
+    Ok(())
+}
+
+fn check_xtask_empty_profile(target: &str, metadata: &Value) -> Result<(), String> {
+    let label = format!("native-fs xtask empty profile {target}");
+    let document = MetadataDocument::parse(metadata, target)?;
+    let xtask_id = document.unique_package_id(XTASK_PACKAGE)?;
+    check_workspace_package(
+        metadata,
+        document.package(xtask_id)?,
+        xtask_id,
+        XTASK_PACKAGE,
+        "crates/baozi-xtask/Cargo.toml",
+        &label,
+    )?;
+    let xtask_node = document.node(xtask_id)?;
+    let features = xtask_node
+        .get("features")
+        .and_then(Value::as_array)
+        .ok_or_else(|| format!("{label}: {XTASK_PACKAGE} omitted resolved features"))?;
+    if !sorted_nondefault_features(features)?.is_empty() {
+        return Err(format!("{label}: {XTASK_PACKAGE} must resolve no features"));
+    }
+    let reachable = document.production_closure(&[xtask_id.to_owned()])?;
+    for id in reachable {
+        if string_field(document.package(&id)?, "name") == Some("baozi-io") {
+            return Err(format!(
+                "{label}: empty-feature xtask must not reach baozi-io"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn check_xtask_repository_profile(target: &str, metadata: &Value) -> Result<(), String> {
+    let label = format!("native-fs xtask repository profile {target}");
+    let document = MetadataDocument::parse(metadata, target)?;
+    let xtask_id = document.unique_package_id(XTASK_PACKAGE)?;
+    let io_id = document.unique_package_id("baozi-io")?;
+    check_workspace_package(
+        metadata,
+        document.package(xtask_id)?,
+        xtask_id,
+        XTASK_PACKAGE,
+        "crates/baozi-xtask/Cargo.toml",
+        &label,
+    )?;
+    check_workspace_package(
+        metadata,
+        document.package(io_id)?,
+        io_id,
+        "baozi-io",
+        "crates/baozi-io/Cargo.toml",
+        &label,
+    )?;
+
+    let xtask_node = document.node(xtask_id)?;
+    let xtask_features = xtask_node
+        .get("features")
+        .and_then(Value::as_array)
+        .ok_or_else(|| format!("{label}: {XTASK_PACKAGE} omitted resolved features"))?;
+    let xtask_features = sorted_nondefault_features(xtask_features)?;
+    let expected_xtask_features = vec!["repository-input-candidate".to_owned()];
+    if xtask_features != expected_xtask_features {
+        return Err(format!(
+            "{label}: {XTASK_PACKAGE} resolved features must be exactly {expected_xtask_features:?}, found {xtask_features:?}"
+        ));
+    }
+    let direct_io_edges = production_dependencies(xtask_node, target)?
+        .into_iter()
+        .filter(|dependency| dependency.package == io_id)
+        .collect::<Vec<_>>();
+    if direct_io_edges.len() != 1 {
+        return Err(format!(
+            "{label}: {XTASK_PACKAGE} must have exactly one resolved direct edge to workspace baozi-io, found {}",
+            direct_io_edges.len()
+        ));
+    }
+    let reachable = document.production_closure(&[xtask_id.to_owned()])?;
+    let mut incoming_io_edges = Vec::new();
+    for parent_id in &reachable {
+        for dependency in production_dependencies(document.node(parent_id)?, target)? {
+            if dependency.package == io_id {
+                incoming_io_edges.push((parent_id.as_str(), dependency.name));
+            }
+        }
+        let package = document.package(parent_id)?;
+        if package.get("source") == Some(&Value::Null)
+            && parent_id != xtask_id
+            && parent_id != io_id
+        {
+            return Err(format!(
+                "{label}: unexpected local package {} is reachable from xtask",
+                required_string(package, "name", "package")?
+            ));
+        }
+    }
+    if incoming_io_edges.len() != 1 || incoming_io_edges[0].0 != xtask_id {
+        return Err(format!(
+            "{label}: workspace baozi-io must have exactly one reachable incoming edge owned by xtask, found {incoming_io_edges:?}"
+        ));
+    }
+    let io_package = document.package(io_id)?;
+    if io_package.get("source") != Some(&Value::Null) {
+        return Err(format!(
+            "{label}: resolved baozi-io must be a workspace path package"
+        ));
+    }
+    let io_features = document
+        .node(io_id)?
+        .get("features")
+        .and_then(Value::as_array)
+        .ok_or_else(|| format!("{label}: baozi-io omitted resolved features"))?;
+    let io_features = sorted_nondefault_features(io_features)?;
+    let expected_io_features = vec![
+        "fs-candidate".to_owned(),
+        "repository-fs-candidate".to_owned(),
+    ];
+    if io_features != expected_io_features {
+        return Err(format!(
+            "{label}: workspace baozi-io resolved features must be exactly {expected_io_features:?}, found {io_features:?}"
+        ));
+    }
+    Ok(())
+}
+
+fn check_workspace_package(
+    metadata: &Value,
+    package: &Value,
+    package_id: &str,
+    expected_name: &str,
+    relative_manifest: &str,
+    label: &str,
+) -> Result<(), String> {
+    if package.get("source") != Some(&Value::Null) {
+        return Err(format!(
+            "{label}: package {package_id} must be a workspace path package"
+        ));
+    }
+    if string_field(package, "id") != Some(package_id) {
+        return Err(format!(
+            "{label}: package identity must contain id {package_id}"
+        ));
+    }
+    let actual_name = string_field(package, "name")
+        .ok_or_else(|| format!("{label}: package {package_id} omitted name"))?;
+    if actual_name != expected_name {
+        return Err(format!(
+            "{label}: package {package_id} name must be {expected_name}, found {actual_name}"
+        ));
+    }
+    let packages = metadata
+        .get("packages")
+        .and_then(Value::as_array)
+        .ok_or_else(|| format!("{label}: metadata omitted packages"))?;
+    let package_count = packages
+        .iter()
+        .filter(|candidate| string_field(candidate, "id") == Some(package_id))
+        .count();
+    if package_count != 1 {
+        return Err(format!(
+            "{label}: package {package_id} must appear exactly once in packages, found {package_count}"
+        ));
+    }
+    let workspace_root = metadata
+        .get("workspace_root")
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("{label}: metadata omitted workspace_root"))?;
+    let manifest_path = package
+        .get("manifest_path")
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("{label}: package {package_id} omitted manifest_path"))?;
+    let expected_manifest = Path::new(workspace_root).join(relative_manifest);
+    if Path::new(manifest_path) != expected_manifest {
+        return Err(format!(
+            "{label}: package {package_id} manifest_path must be {}, found {manifest_path}",
+            expected_manifest.display()
+        ));
+    }
+    let workspace_members = metadata
+        .get("workspace_members")
+        .and_then(Value::as_array)
+        .ok_or_else(|| format!("{label}: metadata omitted workspace_members"))?;
+    let member_count = workspace_members
+        .iter()
+        .filter(|member| member.as_str() == Some(package_id))
+        .count();
+    if member_count != 1 {
+        return Err(format!(
+            "{label}: package {package_id} must appear exactly once in workspace_members, found {member_count}"
+        ));
+    }
+    Ok(())
 }
 
 struct ManifestDependency<'a> {
@@ -2047,6 +4535,7 @@ fn build_snapshot(
             continue;
         };
         match build_dependency_audit_profile(
+            DependencyAuditKind::Runtime,
             *profile,
             metadata,
             checksums,
@@ -2082,7 +4571,7 @@ fn build_snapshot(
 
     let identities = identities.into_iter().collect::<Map<_, _>>();
     Some(Value::Object(Map::from_iter([
-        ("schema".to_owned(), Value::from(2)),
+        ("schema".to_owned(), Value::from(3)),
         ("review_basis".to_owned(), review_basis()),
         (
             "metadata_semantics".to_owned(),
@@ -2113,6 +4602,262 @@ fn build_snapshot(
             ),
         ),
     ])))
+}
+
+fn build_repository_delta_snapshot(
+    runtime_baseline: &Value,
+    target_metadata: &BTreeMap<String, Value>,
+    checksums: &BTreeMap<ChecksumKey, String>,
+    violations: &mut Vec<String>,
+) -> Option<Value> {
+    let Some(runtime_identities) = runtime_baseline
+        .get("package_identities")
+        .and_then(Value::as_object)
+    else {
+        violations.push(
+            "native-fs repository baseline: runtime baseline omitted package identities".to_owned(),
+        );
+        return None;
+    };
+    let Some(runtime_profiles) = runtime_baseline
+        .get("dependency_audit_profiles")
+        .and_then(Value::as_object)
+    else {
+        violations.push(
+            "native-fs repository baseline: runtime baseline omitted dependency audit profiles"
+                .to_owned(),
+        );
+        return None;
+    };
+
+    let mut repository_identities = BTreeMap::new();
+    let mut repository_profiles = Map::new();
+    let mut complete = true;
+    for profile in DEPENDENCY_AUDIT_PROFILES {
+        let Some(metadata) = target_metadata.get(profile.target) else {
+            violations.push(format!(
+                "native-fs repository profile {}: missing cargo metadata for {}",
+                profile.name, profile.target
+            ));
+            complete = false;
+            continue;
+        };
+        match build_dependency_audit_profile(
+            DependencyAuditKind::Repository,
+            *profile,
+            metadata,
+            checksums,
+            &mut repository_identities,
+            violations,
+        ) {
+            Ok(snapshot) => {
+                repository_profiles.insert(profile.name.to_owned(), snapshot);
+            }
+            Err(violation) => {
+                violations.push(violation);
+                complete = false;
+            }
+        }
+    }
+    if !complete {
+        return None;
+    }
+
+    let repository_identities = repository_identities.into_iter().collect::<Map<_, _>>();
+    let mut profile_deltas = Map::new();
+    for profile in DEPENDENCY_AUDIT_PROFILES {
+        let Some(runtime_profile) = runtime_profiles
+            .get(profile.name)
+            .and_then(Value::as_object)
+        else {
+            violations.push(format!(
+                "native-fs repository baseline: runtime baseline omitted profile {}",
+                profile.name
+            ));
+            complete = false;
+            continue;
+        };
+        let Some(repository_profile) = repository_profiles
+            .get(profile.name)
+            .and_then(Value::as_object)
+        else {
+            violations.push(format!(
+                "native-fs repository baseline: repository snapshot omitted profile {}",
+                profile.name
+            ));
+            complete = false;
+            continue;
+        };
+        let roots = match value_string_set_delta(
+            runtime_profile.get("roots"),
+            repository_profile.get("roots"),
+            &format!("native-fs repository profile {} roots", profile.name),
+        ) {
+            Ok(delta) => delta,
+            Err(violation) => {
+                violations.push(violation);
+                complete = false;
+                continue;
+            }
+        };
+        let full_package_keys = match value_string_set_delta(
+            runtime_profile.get("full_package_keys"),
+            repository_profile.get("full_package_keys"),
+            &format!(
+                "native-fs repository profile {} full package keys",
+                profile.name
+            ),
+        ) {
+            Ok(delta) => delta,
+            Err(violation) => {
+                violations.push(violation);
+                complete = false;
+                continue;
+            }
+        };
+        let Some(runtime_nodes) = runtime_profile.get("nodes").and_then(Value::as_object) else {
+            violations.push(format!(
+                "native-fs repository baseline: runtime profile {} omitted nodes",
+                profile.name
+            ));
+            complete = false;
+            continue;
+        };
+        let Some(repository_nodes) = repository_profile.get("nodes").and_then(Value::as_object)
+        else {
+            violations.push(format!(
+                "native-fs repository baseline: repository profile {} omitted nodes",
+                profile.name
+            ));
+            complete = false;
+            continue;
+        };
+        profile_deltas.insert(
+            profile.name.to_owned(),
+            Value::Object(Map::from_iter([
+                (
+                    "target".to_owned(),
+                    Value::String(profile.target.to_owned()),
+                ),
+                ("roots".to_owned(), roots),
+                ("full_package_keys".to_owned(), full_package_keys),
+                (
+                    "nodes".to_owned(),
+                    object_delta(runtime_nodes, repository_nodes),
+                ),
+            ])),
+        );
+    }
+    if !complete {
+        return None;
+    }
+
+    Some(Value::Object(Map::from_iter([
+        ("schema".to_owned(), Value::from(2)),
+        (
+            "runtime_baseline".to_owned(),
+            Value::String(BASELINE_PATH.to_owned()),
+        ),
+        (
+            "runtime_baseline_schema".to_owned(),
+            Value::from(
+                runtime_baseline
+                    .get("schema")
+                    .and_then(Value::as_u64)
+                    .unwrap_or_default(),
+            ),
+        ),
+        (
+            "review_basis".to_owned(),
+            repository_review_basis(),
+        ),
+        (
+            "metadata_semantics".to_owned(),
+            Value::String(
+                "cargo metadata --locked --filter-platform; repository-fs-candidate normal/build closure delta from the frozen runtime baseline"
+                    .to_owned(),
+            ),
+        ),
+        (
+            "package_identities".to_owned(),
+            object_delta(runtime_identities, &repository_identities),
+        ),
+        (
+            "dependency_audit_profiles".to_owned(),
+            Value::Object(profile_deltas),
+        ),
+        (
+            "repository_operational_candidate_targets".to_owned(),
+            string_array(REPOSITORY_OPERATIONAL_CANDIDATE_TARGETS),
+        ),
+        (
+            "repository_fail_closed_targets".to_owned(),
+            string_array(REPOSITORY_FAIL_CLOSED_TARGETS),
+        ),
+    ])))
+}
+
+fn object_delta(baseline: &Map<String, Value>, actual: &Map<String, Value>) -> Value {
+    let mut added = Map::new();
+    let mut changed = Map::new();
+    let mut removed = Vec::new();
+    for (key, value) in actual {
+        match baseline.get(key) {
+            None => {
+                added.insert(key.clone(), value.clone());
+            }
+            Some(previous) if previous != value => {
+                changed.insert(key.clone(), value.clone());
+            }
+            Some(_) => {}
+        }
+    }
+    for key in baseline.keys() {
+        if !actual.contains_key(key) {
+            removed.push(Value::String(key.clone()));
+        }
+    }
+    Value::Object(Map::from_iter([
+        ("added".to_owned(), Value::Object(added)),
+        ("changed".to_owned(), Value::Object(changed)),
+        ("removed".to_owned(), Value::Array(removed)),
+    ]))
+}
+
+fn value_string_set_delta(
+    baseline: Option<&Value>,
+    actual: Option<&Value>,
+    owner: &str,
+) -> Result<Value, String> {
+    let baseline = baseline
+        .and_then(Value::as_array)
+        .ok_or_else(|| format!("{owner}: runtime baseline omitted a string array"))?;
+    let actual = actual
+        .and_then(Value::as_array)
+        .ok_or_else(|| format!("{owner}: repository snapshot omitted a string array"))?;
+    let baseline: BTreeSet<_> = sorted_strings(baseline)?.into_iter().collect();
+    let actual: BTreeSet<_> = sorted_strings(actual)?.into_iter().collect();
+    let added = actual
+        .difference(&baseline)
+        .cloned()
+        .map(Value::String)
+        .collect();
+    let removed = baseline
+        .difference(&actual)
+        .cloned()
+        .map(Value::String)
+        .collect();
+    Ok(Value::Object(Map::from_iter([
+        ("added".to_owned(), Value::Array(added)),
+        ("removed".to_owned(), Value::Array(removed)),
+    ])))
+}
+
+fn repository_review_basis() -> Value {
+    Value::Object(Map::from_iter([(
+        "authority".to_owned(),
+        Value::String("docs/research/u4c-repository-input-capability.md".to_owned()),
+    )]))
 }
 
 fn review_basis() -> Value {
@@ -2153,6 +4898,7 @@ fn review_basis() -> Value {
 }
 
 fn build_dependency_audit_profile(
+    kind: DependencyAuditKind,
     profile: DependencyAuditProfile,
     metadata: &Value,
     checksums: &BTreeMap<ChecksumKey, String>,
@@ -2162,22 +4908,64 @@ fn build_dependency_audit_profile(
     let document = MetadataDocument::parse(metadata, profile.target)?;
     let root = document.unique_package_id("baozi-io")?;
     let root_node = document.node(root)?;
+    let full_reachable = document.production_closure(&[root.to_owned()])?;
+    let profile_label = dependency_audit_profile_label(kind, profile.name);
+    let mut full_package_keys = BTreeSet::new();
+    for id in &full_reachable {
+        if id == root {
+            continue;
+        }
+        let package = document.package(id)?;
+        let key = package_key(package)?;
+        if !full_package_keys.insert(key.clone()) {
+            return Err(format!(
+                "{profile_label}: duplicate full-closure package key {key}"
+            ));
+        }
+        if string_field(package, "source") != Some(CRATES_IO_SOURCE) {
+            violations.push(format!(
+                "{profile_label}: full-closure package {key} must come from {CRATES_IO_SOURCE}"
+            ));
+        }
+    }
+    let root_features = root_node
+        .get("features")
+        .and_then(Value::as_array)
+        .ok_or_else(|| format!("{profile_label}: baozi-io omitted resolved features"))?;
+    let actual_root_features = sorted_nondefault_features(root_features)?;
+    let expected_root_features = match kind {
+        DependencyAuditKind::Runtime => vec!["fs-candidate".to_owned()],
+        DependencyAuditKind::Repository => {
+            vec![
+                "fs-candidate".to_owned(),
+                "repository-fs-candidate".to_owned(),
+            ]
+        }
+    };
+    if actual_root_features != expected_root_features {
+        violations.push(format!(
+            "{profile_label}: baozi-io resolved features must be exactly {expected_root_features:?}, found {actual_root_features:?}"
+        ));
+    }
 
     let mut roots = Vec::new();
     for dependency in production_dependencies(root_node, profile.target)? {
         let package = document.package(&dependency.package)?;
         let name = required_string(package, "name", "package")?;
-        if matches!(name, "cap-std" | "rustix") {
+        if NATIVE_FILESYSTEM_PACKAGES.contains(&name) {
             roots.push(dependency.package);
         }
     }
     roots.sort_unstable();
     roots.dedup();
 
-    let expected_names: BTreeSet<_> = if profile.direct_rustix {
-        ["cap-std", "rustix"].into_iter().collect()
-    } else {
-        ["cap-std"].into_iter().collect()
+    let expected_names: BTreeSet<_> = match (kind, profile.direct_rustix) {
+        (DependencyAuditKind::Runtime, true) => ["cap-std", "rustix"].into_iter().collect(),
+        (DependencyAuditKind::Runtime, false) => ["cap-std"].into_iter().collect(),
+        (DependencyAuditKind::Repository, true) => {
+            ["cap-fs-ext", "cap-std", "rustix"].into_iter().collect()
+        }
+        (DependencyAuditKind::Repository, false) => ["cap-fs-ext", "cap-std"].into_iter().collect(),
     };
     let actual_names = roots
         .iter()
@@ -2189,41 +4977,43 @@ fn build_dependency_audit_profile(
         .collect::<Result<BTreeSet<_>, _>>()?;
     if actual_names != expected_names {
         violations.push(format!(
-            "native-fs profile {}: direct roots must be {expected_names:?}, found {actual_names:?}",
-            profile.name
+            "{profile_label}: direct roots must be {expected_names:?}, found {actual_names:?}"
         ));
     }
 
     let reachable = document.production_closure(&roots)?;
+    for id in &full_reachable {
+        let package = document.package(id)?;
+        let name = required_string(package, "name", "package")?;
+        if NATIVE_FILESYSTEM_PACKAGES.contains(&name) && !reachable.contains(id) {
+            violations.push(format!(
+                "{profile_label}: native package {name} is reachable outside the admitted direct native dependency subgraph"
+            ));
+        }
+    }
     let mut node_snapshots = Map::new();
     let mut profile_keys = BTreeSet::new();
     for id in &reachable {
         let package = document.package(id)?;
         let key = package_key(package)?;
         if !profile_keys.insert(key.clone()) {
-            return Err(format!(
-                "native-fs profile {}: duplicate package key {key}",
-                profile.name
-            ));
+            return Err(format!("{profile_label}: duplicate package key {key}"));
         }
         let identity = package_identity(package, checksums)?;
         if string_field(&identity, "source") != Some(CRATES_IO_SOURCE) {
             violations.push(format!(
-                "native-fs profile {}: {key} must come from {CRATES_IO_SOURCE}",
-                profile.name
+                "{profile_label}: {key} must come from {CRATES_IO_SOURCE}"
             ));
         }
         if identity.get("checksum").and_then(Value::as_str).is_none() {
             violations.push(format!(
-                "native-fs profile {}: {key} must have a crates.io checksum",
-                profile.name
+                "{profile_label}: {key} must have a crates.io checksum"
             ));
         }
         match identities.get(&key) {
             Some(existing) if existing != &identity => {
                 violations.push(format!(
-                    "native-fs profile {}: {key} has inconsistent package identity",
-                    profile.name
+                    "{profile_label}: {key} has inconsistent package identity"
                 ));
             }
             None => {
@@ -2236,7 +5026,7 @@ fn build_dependency_audit_profile(
         let features = node
             .get("features")
             .and_then(Value::as_array)
-            .ok_or_else(|| format!("native-fs profile {}: {key} omitted features", profile.name))?;
+            .ok_or_else(|| format!("{profile_label}: {key} omitted features"))?;
         let features = sorted_strings(features)?;
         let mut dependencies = Vec::new();
         for dependency in production_dependencies(node, profile.target)? {
@@ -2265,7 +5055,14 @@ fn build_dependency_audit_profile(
         );
     }
 
-    check_critical_packages(profile, &reachable, &document, checksums, violations)?;
+    check_critical_packages(
+        kind,
+        profile,
+        &full_reachable,
+        &document,
+        checksums,
+        violations,
+    )?;
 
     let mut root_keys = roots
         .iter()
@@ -2281,29 +5078,42 @@ fn build_dependency_audit_profile(
             "roots".to_owned(),
             Value::Array(root_keys.into_iter().map(Value::String).collect()),
         ),
+        (
+            "full_package_keys".to_owned(),
+            Value::Array(full_package_keys.into_iter().map(Value::String).collect()),
+        ),
         ("nodes".to_owned(), Value::Object(node_snapshots)),
     ])))
 }
 
+fn dependency_audit_profile_label(kind: DependencyAuditKind, profile: &str) -> String {
+    match kind {
+        DependencyAuditKind::Runtime => format!("native-fs profile {profile}"),
+        DependencyAuditKind::Repository => format!("native-fs repository profile {profile}"),
+    }
+}
+
 fn check_critical_packages(
+    kind: DependencyAuditKind,
     profile: DependencyAuditProfile,
     reachable: &BTreeSet<String>,
     document: &MetadataDocument<'_>,
     checksums: &BTreeMap<ChecksumKey, String>,
     violations: &mut Vec<String>,
 ) -> Result<(), String> {
+    let profile_label = dependency_audit_profile_label(kind, profile.name);
     let packages = reachable
         .iter()
         .map(|id| document.package(id))
         .collect::<Result<Vec<_>, _>>()?;
 
-    if packages
-        .iter()
-        .any(|package| string_field(package, "name") == Some("cap-fs-ext"))
+    if kind == DependencyAuditKind::Runtime
+        && packages
+            .iter()
+            .any(|package| string_field(package, "name") == Some("cap-fs-ext"))
     {
         violations.push(format!(
-            "native-fs profile {}: cap-fs-ext is forbidden in the resolved closure",
-            profile.name
+            "{profile_label}: cap-fs-ext is forbidden in the resolved closure"
         ));
     }
 
@@ -2312,7 +5122,11 @@ fn check_critical_packages(
             .iter()
             .filter(|package| string_field(package, "name") == Some(expected.name))
             .collect();
-        let required = expected.name != "rustix" || profile.direct_rustix;
+        let required = match expected.name {
+            "cap-fs-ext" => kind == DependencyAuditKind::Repository,
+            "rustix" => profile.direct_rustix,
+            _ => true,
+        };
         if matching.is_empty() && !required {
             continue;
         }
@@ -2320,8 +5134,7 @@ fn check_critical_packages(
             [package] => **package,
             _ => {
                 violations.push(format!(
-                    "native-fs profile {}: expected exactly one {} package, found {}",
-                    profile.name,
+                    "{profile_label}: expected exactly one {} package, found {}",
                     expected.name,
                     matching.len()
                 ));
@@ -2334,9 +5147,24 @@ fn check_critical_packages(
             && checksum == expected.checksum;
         if !exact {
             violations.push(format!(
-                "native-fs profile {}: {} must resolve to {} from {CRATES_IO_SOURCE} with checksum {}",
-                profile.name, expected.name, expected.version, expected.checksum
+                "{profile_label}: {} must resolve to {} from {CRATES_IO_SOURCE} with checksum {}",
+                expected.name, expected.version, expected.checksum
             ));
+        }
+        if expected.name == "cap-fs-ext" && kind == DependencyAuditKind::Repository {
+            let id = required_string(package, "id", "package")?;
+            let node = document.node(id)?;
+            let features = node
+                .get("features")
+                .and_then(Value::as_array)
+                .ok_or_else(|| format!("{profile_label}: cap-fs-ext omitted resolved features"))?;
+            let actual: BTreeSet<_> = sorted_strings(features)?.into_iter().collect();
+            let expected = BTreeSet::from(["cap-std".to_owned(), "std".to_owned()]);
+            if actual != expected {
+                violations.push(format!(
+                    "{profile_label}: cap-fs-ext resolved features must be exactly {expected:?}, found {actual:?}"
+                ));
+            }
         }
     }
     Ok(())
@@ -2369,7 +5197,8 @@ fn check_portable_profile(target: &str, metadata: &Value) -> Result<(), String> 
                 )
             })?;
             if (name == "baozi" && matches!(feature, "native-fs" | "native-fs-candidate"))
-                || (name == "baozi-io" && matches!(feature, "fs" | "fs-candidate"))
+                || (name == "baozi-io"
+                    && matches!(feature, "fs" | "fs-candidate" | "repository-fs-candidate"))
             {
                 forbidden_features.insert(format!("{name}/{feature}"));
             }
@@ -2577,8 +5406,8 @@ fn package_checksum<'a>(
 }
 
 fn check_baseline_shape(baseline: &Value, violations: &mut Vec<String>) {
-    if baseline.get("schema").and_then(Value::as_u64) != Some(2) {
-        violations.push("native-fs baseline: schema must be 2".to_owned());
+    if baseline.get("schema").and_then(Value::as_u64) != Some(3) {
+        violations.push("native-fs baseline: schema must be 3".to_owned());
     }
     let expected_profiles: BTreeSet<_> = DEPENDENCY_AUDIT_PROFILES
         .iter()
@@ -2619,6 +5448,100 @@ fn check_baseline_shape(baseline: &Value, violations: &mut Vec<String>) {
     if actual_portable.as_ref() != Some(&expected_portable) {
         violations.push(format!(
             "native-fs baseline: portable targets must be {expected_portable:?}, found {actual_portable:?}"
+        ));
+    }
+}
+
+fn check_repository_baseline_shape(baseline: &Value, violations: &mut Vec<String>) {
+    check_repository_target_partition(violations);
+    if baseline.get("schema").and_then(Value::as_u64) != Some(2) {
+        violations.push("native-fs repository baseline: schema must be 2".to_owned());
+    }
+    if string_field(baseline, "runtime_baseline") != Some(BASELINE_PATH) {
+        violations.push(format!(
+            "native-fs repository baseline: runtime_baseline must be {BASELINE_PATH:?}"
+        ));
+    }
+    if baseline
+        .get("runtime_baseline_schema")
+        .and_then(Value::as_u64)
+        != Some(3)
+    {
+        violations
+            .push("native-fs repository baseline: runtime_baseline_schema must be 3".to_owned());
+    }
+
+    let expected_profiles: BTreeSet<_> = DEPENDENCY_AUDIT_PROFILES
+        .iter()
+        .map(|profile| profile.name)
+        .collect();
+    let actual_profiles = baseline
+        .get("dependency_audit_profiles")
+        .and_then(Value::as_object)
+        .map(|profiles| profiles.keys().map(String::as_str).collect::<BTreeSet<_>>());
+    if actual_profiles.as_ref() != Some(&expected_profiles) {
+        violations.push(format!(
+            "native-fs repository baseline: dependency audit profile set must be {expected_profiles:?}, found {actual_profiles:?}"
+        ));
+    }
+    if let Some(profiles) = baseline
+        .get("dependency_audit_profiles")
+        .and_then(Value::as_object)
+    {
+        for profile in DEPENDENCY_AUDIT_PROFILES {
+            let actual_target = profiles
+                .get(profile.name)
+                .and_then(|value| string_field(value, "target"));
+            if actual_target != Some(profile.target) {
+                violations.push(format!(
+                    "native-fs repository baseline: profile {} target must be {:?}, found {actual_target:?}",
+                    profile.name, profile.target
+                ));
+            }
+        }
+    }
+
+    let mut expected_targets: Vec<_> = REPOSITORY_OPERATIONAL_CANDIDATE_TARGETS
+        .iter()
+        .map(|target| (*target).to_owned())
+        .collect();
+    expected_targets.sort_unstable();
+    let actual_targets = baseline
+        .get("repository_operational_candidate_targets")
+        .and_then(Value::as_array)
+        .and_then(|values| sorted_strings(values).ok());
+    if actual_targets.as_ref() != Some(&expected_targets) {
+        violations.push(format!(
+            "native-fs repository baseline: repository operational candidate targets must be {expected_targets:?}, found {actual_targets:?}"
+        ));
+    }
+    if let Some(values) = baseline
+        .get("repository_operational_candidate_targets")
+        .and_then(Value::as_array)
+    {
+        let mut unique = BTreeSet::new();
+        for value in values {
+            if let Some(target) = value.as_str()
+                && !unique.insert(target)
+            {
+                violations.push(format!(
+                    "native-fs repository baseline: repository operational candidate targets contain duplicate {target:?}"
+                ));
+            }
+        }
+    }
+    let mut expected_fail_closed: Vec<_> = REPOSITORY_FAIL_CLOSED_TARGETS
+        .iter()
+        .map(|target| (*target).to_owned())
+        .collect();
+    expected_fail_closed.sort_unstable();
+    let actual_fail_closed = baseline
+        .get("repository_fail_closed_targets")
+        .and_then(Value::as_array)
+        .and_then(|values| sorted_strings(values).ok());
+    if actual_fail_closed.as_ref() != Some(&expected_fail_closed) {
+        violations.push(format!(
+            "native-fs repository baseline: repository fail-closed targets must be {expected_fail_closed:?}, found {actual_fail_closed:?}"
         ));
     }
 }
@@ -2835,6 +5758,12 @@ fn sorted_strings(values: &[Value]) -> Result<Vec<String>, String> {
         .collect::<Result<Vec<_>, _>>()?;
     strings.sort_unstable();
     Ok(strings)
+}
+
+fn sorted_nondefault_features(values: &[Value]) -> Result<Vec<String>, String> {
+    let mut features = sorted_strings(values)?;
+    features.retain(|feature| feature != "default");
+    Ok(features)
 }
 
 fn string_field<'a>(value: &'a Value, field: &str) -> Option<&'a str> {

@@ -82,7 +82,7 @@ requires the candidate feature to fail with the same explicit Baozi diagnostic o
 `wasm32-unknown-unknown`, `wasm32-wasip1`, Build Monitored `x86_64-apple-darwin`, and audit-only
 `x86_64-unknown-freebsd`, plus ABI-distinct `x86_64-unknown-linux-gnux32`, after first proving each
 target is installed. The `native-fs-check` command separately compares normal/build dependency
-closures for the three runtime candidates plus the FreeBSD audit profile against schema 2 of
+closures for the three runtime candidates plus the FreeBSD audit profile against schema 3 of
 [`native-filesystem-resolved-closure.json`](../research/native-filesystem-resolved-closure.json),
 whose `runtime_candidate_targets`, `dependency_audit_profiles`, and
 `release_registered_targets` fields keep those universes distinct. It also checks package sources,

@@ -195,14 +195,24 @@ pub(super) fn validate_complex_fixture_graph(
     session: &mut StoreValidationSession<'_, '_>,
     directory_ref: CanonicalRecordRef<super::schema::ComplexDirectorySchema>,
     evidence_ref: OutcomeEvidenceRecordRef<OutcomeEvidenceSchema>,
+    expected_image_count: usize,
+    expected_canonical_block_count: u32,
 ) -> bool {
-    validate_complex_fixture_graph_inner(session, directory_ref, evidence_ref).is_some()
+    validate_complex_fixture_graph_inner(
+        session,
+        directory_ref,
+        evidence_ref,
+        expected_image_count,
+        expected_canonical_block_count,
+    )
+    .is_some()
 }
 
 #[cfg(test)]
 pub(super) fn validate_complex_fixture_evidence_graph(
     session: &mut StoreEvidenceValidationSession<'_, '_>,
     evidence_ref: OutcomeEvidenceRecordRef<OutcomeEvidenceSchema>,
+    expected_canonical_block_count: u32,
 ) -> bool {
     let Some(evidence) = session.records(evidence_ref) else {
         return false;
@@ -212,7 +222,7 @@ pub(super) fn validate_complex_fixture_evidence_graph(
         && evidence.scalar::<u32>(0, evidence_field::SCHEMA_REVISION) == Some(SCHEMA_REVISION)
         && evidence.scalar::<u32>(0, evidence_field::OUTCOME) == Some(EVIDENCE_OUTCOME_CANDIDATE)
         && evidence.scalar::<u32>(0, evidence_field::CANONICAL_BLOCK_COUNT)
-            == Some(super::schema::COMPLEX_CANONICAL_BLOCK_COUNT)
+            == Some(expected_canonical_block_count)
         && evidence.scalar::<u32>(0, evidence_field::NODE_COUNT)
             == Some(super::schema::COMPLEX_NODE_COUNT)
 }
@@ -232,6 +242,8 @@ fn validate_complex_fixture_graph_inner(
     session: &mut StoreValidationSession<'_, '_>,
     directory_ref: CanonicalRecordRef<super::schema::ComplexDirectorySchema>,
     evidence_ref: OutcomeEvidenceRecordRef<OutcomeEvidenceSchema>,
+    expected_image_count: usize,
+    expected_canonical_block_count: u32,
 ) -> Option<()> {
     use super::schema::{
         complex_animation_field as animation, complex_directory_field as directory_field,
@@ -254,8 +266,12 @@ fn validate_complex_fixture_graph_inner(
         directory.scalar::<u32>(0, directory_field::SCHEMA_REVISION),
         super::schema::COMPLEX_SCHEMA_REVISION,
     )?;
+    let expected_image_count_u32 = u32::try_from(expected_image_count).ok()?;
+    require_scalar(
+        directory.scalar::<u32>(0, directory_field::IMAGE_COUNT),
+        expected_image_count_u32,
+    )?;
     for count_field in [
-        directory_field::IMAGE_COUNT,
         directory_field::SAMPLER_COUNT,
         directory_field::TEXTURE_COUNT,
         directory_field::MATERIAL_BINDING_COUNT,
@@ -335,7 +351,7 @@ fn validate_complex_fixture_graph_inner(
     let overrides = session.canonical_records(overrides_ref)?;
     let animations = session.canonical_records(animations_ref)?;
     let source_attachments = session.canonical_records(source_attachments_ref)?;
-    if images.rows() != 1
+    if images.rows() != expected_image_count
         || images.fields() != super::schema::COMPLEX_IMAGE_FIELD_COUNT
         || samplers.rows() != 1
         || samplers.fields() != super::schema::COMPLEX_SAMPLER_FIELD_COUNT
@@ -369,14 +385,18 @@ fn validate_complex_fixture_graph_inner(
         return None;
     }
 
-    require_scalar(images.scalar::<u32>(0, image::IMAGE), 0)?;
-    let mime_ref = images.utf8_ref::<super::schema::ComplexImageMimeSchema>(0, image::MIME)?;
-    let payload_ref =
-        images.bytes_ref::<super::schema::ComplexImagePayloadSchema>(0, image::PAYLOAD)?;
-    if session.canonical_utf8(mime_ref)? != super::schema::COMPLEX_IMAGE_MIME
-        || session.canonical_bytes(payload_ref)? != super::schema::COMPLEX_IMAGE_PAYLOAD
-    {
-        return None;
+    for row in 0..expected_image_count {
+        let expected_image = u32::try_from(row).ok()?;
+        require_scalar(images.scalar::<u32>(row, image::IMAGE), expected_image)?;
+        let mime_ref =
+            images.utf8_ref::<super::schema::ComplexImageMimeSchema>(row, image::MIME)?;
+        let payload_ref =
+            images.bytes_ref::<super::schema::ComplexImagePayloadSchema>(row, image::PAYLOAD)?;
+        if session.canonical_utf8(mime_ref)? != super::schema::COMPLEX_IMAGE_MIME
+            || session.canonical_bytes(payload_ref)? != super::schema::COMPLEX_IMAGE_PAYLOAD
+        {
+            return None;
+        }
     }
     require_scalar(samplers.scalar::<u32>(0, sampler::SAMPLER), 0)?;
     require_scalar(
@@ -663,7 +683,7 @@ fn validate_complex_fixture_graph_inner(
     )?;
     require_scalar(
         evidence.scalar::<u32>(0, evidence_field::CANONICAL_BLOCK_COUNT),
-        super::schema::COMPLEX_CANONICAL_BLOCK_COUNT,
+        expected_canonical_block_count,
     )?;
     require_scalar(
         evidence.scalar::<u32>(0, evidence_field::NODE_COUNT),

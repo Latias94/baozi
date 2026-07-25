@@ -1,11 +1,8 @@
 use std::error::Error;
 use std::fmt;
 use std::io;
-use std::sync::Arc;
 
 use thiserror::Error;
-
-type SharedError = Arc<dyn Error + Send + Sync + 'static>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PathErrorCode {
@@ -137,16 +134,11 @@ pub enum AssetOpenErrorKind {
 pub struct AssetOpenError {
     stage: AssetOpenStage,
     kind: AssetOpenErrorKind,
-    source: Option<SharedError>,
 }
 
 impl AssetOpenError {
     pub const fn new(stage: AssetOpenStage, kind: AssetOpenErrorKind) -> Self {
-        Self {
-            stage,
-            kind,
-            source: None,
-        }
+        Self { stage, kind }
     }
 
     pub fn from_io(stage: AssetOpenStage, error: io::Error) -> Self {
@@ -169,19 +161,7 @@ impl AssetOpenError {
             (_, io::ErrorKind::WouldBlock) => AssetOpenErrorKind::WouldBlock,
             _ => AssetOpenErrorKind::Backend,
         };
-        Self {
-            stage,
-            kind,
-            source: Some(Arc::new(error)),
-        }
-    }
-
-    pub fn backend(stage: AssetOpenStage, error: impl Error + Send + Sync + 'static) -> Self {
-        Self {
-            stage,
-            kind: AssetOpenErrorKind::Backend,
-            source: Some(Arc::new(error)),
-        }
+        Self { stage, kind }
     }
 
     pub const fn stage(&self) -> AssetOpenStage {
@@ -191,10 +171,6 @@ impl AssetOpenError {
     pub const fn kind(&self) -> AssetOpenErrorKind {
         self.kind
     }
-
-    pub fn source_ref(&self) -> Option<&(dyn Error + Send + Sync + 'static)> {
-        self.source.as_deref()
-    }
 }
 
 impl fmt::Debug for AssetOpenError {
@@ -203,7 +179,6 @@ impl fmt::Debug for AssetOpenError {
             .debug_struct("AssetOpenError")
             .field("stage", &self.stage)
             .field("kind", &self.kind)
-            .field("has_source", &self.source.is_some())
             .finish()
     }
 }
@@ -218,13 +193,7 @@ impl fmt::Display for AssetOpenError {
     }
 }
 
-impl Error for AssetOpenError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        self.source
-            .as_deref()
-            .map(|source| source as &(dyn Error + 'static))
-    }
-}
+impl Error for AssetOpenError {}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AssetReadErrorKind {
@@ -248,12 +217,11 @@ pub enum AssetReadContractViolation {
 #[derive(Clone)]
 pub struct AssetReadError {
     kind: AssetReadErrorKind,
-    source: Option<SharedError>,
 }
 
 impl AssetReadError {
     pub const fn new(kind: AssetReadErrorKind) -> Self {
-        Self { kind, source: None }
+        Self { kind }
     }
 
     pub fn from_io(error: io::Error) -> Self {
@@ -264,17 +232,7 @@ impl AssetReadError {
             io::ErrorKind::InvalidData => AssetReadErrorKind::InvalidData,
             _ => AssetReadErrorKind::Backend,
         };
-        Self {
-            kind,
-            source: Some(Arc::new(error)),
-        }
-    }
-
-    pub fn backend(error: impl Error + Send + Sync + 'static) -> Self {
-        Self {
-            kind: AssetReadErrorKind::Backend,
-            source: Some(Arc::new(error)),
-        }
+        Self { kind }
     }
 
     pub const fn contract_violation(violation: AssetReadContractViolation) -> Self {
@@ -284,10 +242,6 @@ impl AssetReadError {
     pub const fn kind(&self) -> AssetReadErrorKind {
         self.kind
     }
-
-    pub fn source_ref(&self) -> Option<&(dyn Error + Send + Sync + 'static)> {
-        self.source.as_deref()
-    }
 }
 
 impl fmt::Debug for AssetReadError {
@@ -295,7 +249,6 @@ impl fmt::Debug for AssetReadError {
         formatter
             .debug_struct("AssetReadError")
             .field("kind", &self.kind)
-            .field("has_source", &self.source.is_some())
             .finish()
     }
 }
@@ -306,20 +259,14 @@ impl fmt::Display for AssetReadError {
     }
 }
 
-impl Error for AssetReadError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        self.source
-            .as_deref()
-            .map(|source| source as &(dyn Error + 'static))
-    }
-}
+impl Error for AssetReadError {}
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn open_errors_retain_typed_sources() {
+    fn open_errors_pack_stable_codes_without_sources() {
         let error = AssetOpenError::from_io(
             AssetOpenStage::Open,
             io::Error::new(io::ErrorKind::PermissionDenied, "denied"),
@@ -327,41 +274,28 @@ mod tests {
 
         assert_eq!(error.stage(), AssetOpenStage::Open);
         assert_eq!(error.kind(), AssetOpenErrorKind::PermissionDenied);
-        assert_eq!(
-            error
-                .source_ref()
-                .and_then(|source| source.downcast_ref::<io::Error>())
-                .map(io::Error::kind),
-            Some(io::ErrorKind::PermissionDenied)
-        );
+        assert!(error.source().is_none());
     }
 
     #[test]
-    fn read_errors_retain_typed_sources() {
+    fn read_errors_pack_stable_codes_without_sources() {
         let error = AssetReadError::from_io(io::Error::new(
             io::ErrorKind::WouldBlock,
             "temporarily unavailable",
         ));
 
         assert_eq!(error.kind(), AssetReadErrorKind::WouldBlock);
-        assert_eq!(
-            error
-                .source_ref()
-                .and_then(|source| source.downcast_ref::<io::Error>())
-                .map(io::Error::kind),
-            Some(io::ErrorKind::WouldBlock)
-        );
+        assert!(error.source().is_none());
     }
 
     #[test]
-    fn public_error_messages_do_not_copy_unbounded_backend_detail() {
-        let detail = "x".repeat(64 * 1024);
-        let open = AssetOpenError::backend(AssetOpenStage::Open, io::Error::other(detail.clone()));
-        let read = AssetReadError::backend(io::Error::other(detail));
+    fn backend_errors_are_inert_and_bounded() {
+        let open = AssetOpenError::new(AssetOpenStage::Open, AssetOpenErrorKind::Backend);
+        let read = AssetReadError::new(AssetReadErrorKind::Backend);
 
         assert!(open.to_string().len() < 128);
         assert!(read.to_string().len() < 128);
-        assert!(open.source().is_some());
-        assert!(read.source().is_some());
+        assert!(open.source().is_none());
+        assert!(read.source().is_none());
     }
 }

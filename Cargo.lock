@@ -12,6 +12,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "allocation-counter"
+version = "0.8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "beb9e990c0a33699f1984d85a6abead615ccc72dd8130bf3e15dcabe2ca149c9"
+
+[[package]]
 name = "ambient-authority"
 version = "0.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -57,8 +63,11 @@ dependencies = [
 name = "baozi-core"
 version = "0.1.0"
 dependencies = [
+ "allocation-counter",
  "baozi-operation",
  "mint",
+ "serde",
+ "serde_json",
  "sha2",
  "thiserror",
  "tracing",
@@ -126,6 +135,7 @@ dependencies = [
 name = "baozi-io"
 version = "0.1.0"
 dependencies = [
+ "cap-fs-ext",
  "cap-std",
  "rustix",
  "thiserror",
@@ -162,7 +172,9 @@ dependencies = [
 name = "baozi-xtask"
 version = "0.1.0"
 dependencies = [
+ "baozi-io",
  "proc-macro2",
+ "quote",
  "serde",
  "serde_json",
  "sha2",
@@ -196,6 +208,18 @@ name = "byteorder"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1fd0f2584146f6f2ef48085050886acf353beff7305ebd1ae69500e27c67f64b"
+
+[[package]]
+name = "cap-fs-ext"
+version = "4.0.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d78e5a3368ae89b7cb68186411452b4b9fac8b41be9c19bf3f47c2d2c8e36e6b"
+dependencies = [
+ "cap-primitives",
+ "cap-std",
+ "io-lifetimes 3.0.1",
+ "windows-sys 0.61.2",
+]
 
 [[package]]
 name = "cap-primitives"

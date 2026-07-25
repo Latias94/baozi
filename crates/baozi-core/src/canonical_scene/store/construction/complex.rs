@@ -56,11 +56,22 @@ type ComplexValidatedStoreSuccess = baozi_operation::ValidatedStoreSuccess<
 type ComplexPreparedStoreSuccess =
     PreparedStoreSuccess<RecordBlock, ComplexDirectorySchema, RecordBlock, OutcomeEvidenceSchema>;
 
+mod semantic;
+
+pub(in crate::canonical_scene::store) use semantic::COMPLEX_SEMANTIC_TRANSCRIPT_SCHEMA_ID;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ComplexFixtureFault {
     CrossTableIndex,
+    ReferenceTarget,
+    SequenceValue,
+    Utf8Value,
+    BytesValue,
     OrphanCanonicalBlock,
 }
+
+const COMPLEX_FIXED_CANONICAL_BLOCK_COUNT: usize = COMPLEX_CANONICAL_BLOCK_COUNT as usize - 2;
+pub(in crate::canonical_scene::store) const COMPLEX_MAX_IMAGE_COUNT: usize = 40;
 
 struct ComplexFixtureDraft {
     brand: ConstructionBrand,
@@ -74,6 +85,7 @@ struct PendingComplexDestinationCommitments;
 struct ValidatedComplexFixture {
     store: ComplexValidatedStoreSuccess,
     directory: CanonicalBlockRef<ComplexDirectorySchema>,
+    canonical_block_count: u32,
     proof: ComplexFixtureValidationProof,
     commitments: PendingComplexDestinationCommitments,
 }
@@ -116,6 +128,27 @@ impl ComplexFixture {
         self.canonical
             .records(self.directory.into_store())
             .is_some()
+    }
+
+    /// Reads the validated, published typed views; constants alone are never a digest input.
+    pub(in crate::canonical_scene::store) fn semantic_transcript(&self) -> Option<String> {
+        semantic::semantic_transcript(&self.canonical, self.directory)
+    }
+
+    pub(in crate::canonical_scene::store) fn inspect_fixed_image_views(
+        &self,
+        expected_image_count: usize,
+    ) -> Option<()> {
+        semantic::inspect_fixed_image_views(&self.canonical, self.directory, expected_image_count)
+    }
+
+    pub(in crate::canonical_scene::store) fn rejects_foreign_directory(
+        &self,
+        foreign: &Self,
+    ) -> bool {
+        self.canonical
+            .records(foreign.directory.into_store())
+            .is_none()
     }
 }
 
@@ -184,6 +217,7 @@ impl PreparedComplexFixture {
 
 pub(super) fn prepare(
     operation: SceneConstructionOperation<'static>,
+    image_count: usize,
     fault: Option<ComplexFixtureFault>,
     reserve_generation: impl FnOnce() -> Result<ReservedSceneGeneration, SceneGenerationError>,
 ) -> Result<PreparedComplexFixture, SceneConstructionError> {
@@ -199,7 +233,15 @@ pub(super) fn prepare(
             PreparedTracerSceneFallback { store },
         ));
     };
-    let canonical_blocks = complex_canonical_block_count(fault);
+    if !(1..=COMPLEX_MAX_IMAGE_COUNT).contains(&image_count) {
+        let store = raw.prepare_minimal_fallback(SEMANTIC_REJECTION_CODE)?;
+        return Ok(PreparedComplexFixture::MinimalFallback(
+            PreparedTracerSceneFallback { store },
+        ));
+    }
+    let canonical_blocks = complex_canonical_block_count(image_count, fault);
+    let canonical_blocks_u32 = u32::try_from(canonical_blocks)
+        .map_err(|_| SceneConstructionError::StorePlan(StorePlanError::SizeOverflow))?;
     let publication_plan = complex_publication_plan(keys, canonical_blocks)?;
     let mut assembly = match raw.try_publication_assembly(publication_plan) {
         Ok(assembly) => assembly,
@@ -221,16 +263,38 @@ pub(super) fn prepare(
         };
     }
 
-    let evidence = retain_or_fallback!(retain_evidence(&mut assembly));
-    let image_mime = retain_or_fallback!(retain_image_mime(&mut assembly));
-    let image_payload = retain_or_fallback!(retain_image_payload(&mut assembly));
-    let images = retain_or_fallback!(retain_images(&mut assembly, image_mime, image_payload));
+    let evidence = retain_or_fallback!(retain_evidence(&mut assembly, canonical_blocks_u32));
+    let mut image_mimes = [None; COMPLEX_MAX_IMAGE_COUNT];
+    let mut image_payloads = [None; COMPLEX_MAX_IMAGE_COUNT];
+    for index in 0..image_count {
+        let leaf_fault = (index == image_count - 1).then_some(fault).flatten();
+        image_mimes[index] = Some(retain_or_fallback!(retain_image_mime(
+            &mut assembly,
+            leaf_fault
+        )));
+        image_payloads[index] = Some(retain_or_fallback!(retain_image_payload(
+            &mut assembly,
+            leaf_fault
+        )));
+    }
+    let images = retain_or_fallback!(retain_images(
+        &mut assembly,
+        &image_mimes,
+        &image_payloads,
+        image_count,
+    ));
     let samplers = retain_or_fallback!(retain_samplers(&mut assembly));
-    let textures = retain_or_fallback!(retain_textures(&mut assembly, images, samplers, fault));
+    let textures = retain_or_fallback!(retain_textures(
+        &mut assembly,
+        images,
+        samplers,
+        image_count,
+        fault,
+    ));
     let material_bindings = retain_or_fallback!(retain_material_bindings(&mut assembly, textures));
     let materials = retain_or_fallback!(retain_materials(&mut assembly, material_bindings));
     let joints = retain_or_fallback!(retain_joints(&mut assembly));
-    let inverse_binds = retain_or_fallback!(retain_inverse_binds(&mut assembly));
+    let inverse_binds = retain_or_fallback!(retain_inverse_binds(&mut assembly, fault));
     let influences = retain_or_fallback!(retain_influences(&mut assembly, joints));
     let skins = retain_or_fallback!(retain_skins(
         &mut assembly,
@@ -287,6 +351,7 @@ pub(super) fn prepare(
     }
     let directory = retain_or_fallback!(retain_directory(
         &mut assembly,
+        image_count,
         images,
         samplers,
         textures,
@@ -317,20 +382,28 @@ pub(super) fn prepare(
         draft.directory.into_store(),
         evidence,
         |session, directory, evidence| {
-            brand_matches && validate_complex_fixture_graph(session, directory, evidence)
+            brand_matches
+                && validate_complex_fixture_graph(
+                    session,
+                    directory,
+                    evidence,
+                    image_count,
+                    canonical_blocks_u32,
+                )
         },
     ) {
         StoreSuccessValidation::Valid(store) => prepare_validated_success(
             ValidatedComplexFixture {
                 store,
                 directory,
+                canonical_block_count: canonical_blocks_u32,
                 proof: ComplexFixtureValidationProof,
                 commitments,
             },
             reserve_generation,
         ),
         StoreSuccessValidation::Rejected(failure) => {
-            prepare_rich_failure(failure, SEMANTIC_REJECTION_CODE)
+            prepare_rich_failure(failure, SEMANTIC_REJECTION_CODE, canonical_blocks_u32)
         }
         StoreSuccessValidation::FallbackOnly(fallback) => {
             let store = fallback.prepare_minimal_fallback()?;
@@ -341,12 +414,24 @@ pub(super) fn prepare(
     }
 }
 
-fn complex_canonical_block_count(fault: Option<ComplexFixtureFault>) -> usize {
-    COMPLEX_CANONICAL_BLOCK_COUNT as usize
+fn complex_canonical_block_count(image_count: usize, fault: Option<ComplexFixtureFault>) -> usize {
+    COMPLEX_FIXED_CANONICAL_BLOCK_COUNT
+        + image_count * 2
         + usize::from(matches!(
             fault,
             Some(ComplexFixtureFault::OrphanCanonicalBlock)
         ))
+}
+
+pub(super) fn scaled_complex_attribution_slots(image_count: usize) -> Option<usize> {
+    (1..=COMPLEX_MAX_IMAGE_COUNT)
+        .contains(&image_count)
+        .then(|| {
+            complex_canonical_block_count(
+                image_count,
+                Some(ComplexFixtureFault::OrphanCanonicalBlock),
+            ) + 1
+        })
 }
 
 fn complex_publication_plan(
@@ -363,6 +448,7 @@ fn complex_publication_plan(
 
 fn retain_evidence(
     assembly: &mut SceneStoreAssembly,
+    canonical_block_count: u32,
 ) -> Result<OutcomeEvidenceRecordRef<OutcomeEvidenceSchema>, StoreRuntimeError> {
     assembly.try_retain_outcome_evidence_records(
         RecordPlan::new(1, EVIDENCE_FIELD_COUNT).map_err(StoreRuntimeError::Plan)?,
@@ -371,7 +457,7 @@ fn retain_evidence(
             writer.write_row(|row| {
                 row.write_scalar(SCHEMA_REVISION)?;
                 row.write_scalar(EVIDENCE_OUTCOME_CANDIDATE)?;
-                row.write_scalar(COMPLEX_CANONICAL_BLOCK_COUNT)?;
+                row.write_scalar(canonical_block_count)?;
                 row.write_scalar(COMPLEX_NODE_COUNT)
             })
         },
@@ -380,43 +466,67 @@ fn retain_evidence(
 
 fn retain_image_mime(
     assembly: &mut SceneStoreAssembly,
+    fault: Option<ComplexFixtureFault>,
 ) -> Result<CanonicalBlockRef<ComplexImageMimeSchema>, StoreRuntimeError> {
+    const MUTATED_IMAGE_MIME: &str = "image/gif";
+    let mime = if matches!(fault, Some(ComplexFixtureFault::Utf8Value)) {
+        MUTATED_IMAGE_MIME
+    } else {
+        COMPLEX_IMAGE_MIME
+    };
     assembly
         .try_retain_canonical_utf8(
-            Utf8Plan::new(COMPLEX_IMAGE_MIME.len()).map_err(StoreRuntimeError::Plan)?,
+            Utf8Plan::new(mime.len()).map_err(StoreRuntimeError::Plan)?,
             ComplexImageMimeSchema,
-            |writer| writer.write_str(COMPLEX_IMAGE_MIME),
+            |writer| writer.write_str(mime),
         )
         .map(CanonicalBlockRef::from_store)
 }
 
 fn retain_image_payload(
     assembly: &mut SceneStoreAssembly,
+    fault: Option<ComplexFixtureFault>,
 ) -> Result<CanonicalBlockRef<ComplexImagePayloadSchema>, StoreRuntimeError> {
+    const MUTATED_IMAGE_PAYLOAD: &[u8] = b"BAD\x0d\x0a";
+    let payload = if matches!(fault, Some(ComplexFixtureFault::BytesValue)) {
+        MUTATED_IMAGE_PAYLOAD
+    } else {
+        COMPLEX_IMAGE_PAYLOAD
+    };
     assembly
         .try_retain_canonical_bytes(
-            BytesPlan::new(COMPLEX_IMAGE_PAYLOAD.len()).map_err(StoreRuntimeError::Plan)?,
+            BytesPlan::new(payload.len()).map_err(StoreRuntimeError::Plan)?,
             ComplexImagePayloadSchema,
-            |writer| writer.write_bytes(COMPLEX_IMAGE_PAYLOAD),
+            |writer| writer.write_bytes(payload),
         )
         .map(CanonicalBlockRef::from_store)
 }
 
 fn retain_images(
     assembly: &mut SceneStoreAssembly,
-    mime: CanonicalBlockRef<ComplexImageMimeSchema>,
-    payload: CanonicalBlockRef<ComplexImagePayloadSchema>,
+    mimes: &[Option<CanonicalBlockRef<ComplexImageMimeSchema>>; COMPLEX_MAX_IMAGE_COUNT],
+    payloads: &[Option<CanonicalBlockRef<ComplexImagePayloadSchema>>; COMPLEX_MAX_IMAGE_COUNT],
+    image_count: usize,
 ) -> Result<CanonicalBlockRef<ComplexImageTableSchema>, StoreRuntimeError> {
     assembly
         .try_retain_canonical_records(
-            RecordPlan::new(1, COMPLEX_IMAGE_FIELD_COUNT).map_err(StoreRuntimeError::Plan)?,
+            RecordPlan::new(image_count, COMPLEX_IMAGE_FIELD_COUNT)
+                .map_err(StoreRuntimeError::Plan)?,
             ComplexImageTableSchema,
             |writer| {
-                writer.write_row(|row| {
-                    row.write_scalar(0_u32)?;
-                    row.write_utf8_ref(mime.into_store())?;
-                    row.write_bytes_ref(payload.into_store())
-                })
+                for index in 0..image_count {
+                    let image =
+                        u32::try_from(index).expect("the admitted complex image count fits u32");
+                    let mime = mimes[index].expect("every admitted image has a MIME block");
+                    let payload =
+                        payloads[index].expect("every admitted image has a payload block");
+                    writer.write_row(|row| {
+                        row.write_scalar(image)?;
+                        row.write_utf8_ref(mime.into_store())?;
+                        row.write_bytes_ref(payload.into_store())
+                    })?;
+                }
+                Ok(())
             },
         )
         .map(CanonicalBlockRef::from_store)
@@ -444,9 +554,15 @@ fn retain_textures(
     assembly: &mut SceneStoreAssembly,
     images: CanonicalBlockRef<ComplexImageTableSchema>,
     samplers: CanonicalBlockRef<ComplexSamplerTableSchema>,
+    image_count: usize,
     fault: Option<ComplexFixtureFault>,
 ) -> Result<CanonicalBlockRef<ComplexTextureTableSchema>, StoreRuntimeError> {
-    let image_index = u32::from(matches!(fault, Some(ComplexFixtureFault::CrossTableIndex)));
+    let image_index = if matches!(fault, Some(ComplexFixtureFault::CrossTableIndex)) {
+        u32::try_from(image_count)
+            .map_err(|_| StoreRuntimeError::Plan(StorePlanError::SizeOverflow))?
+    } else {
+        0
+    };
     assembly
         .try_retain_canonical_records(
             RecordPlan::new(1, COMPLEX_TEXTURE_FIELD_COUNT).map_err(StoreRuntimeError::Plan)?,
@@ -455,7 +571,11 @@ fn retain_textures(
                 writer.write_row(|row| {
                     row.write_scalar(0_u32)?;
                     row.write_scalar(image_index)?;
-                    row.write_record_ref(images.into_store())?;
+                    if matches!(fault, Some(ComplexFixtureFault::ReferenceTarget)) {
+                        row.write_record_ref(samplers.into_store())?;
+                    } else {
+                        row.write_record_ref(images.into_store())?;
+                    }
                     row.write_scalar(0_u32)?;
                     row.write_record_ref(samplers.into_store())
                 })
@@ -517,13 +637,18 @@ fn retain_joints(
 
 fn retain_inverse_binds(
     assembly: &mut SceneStoreAssembly,
+    fault: Option<ComplexFixtureFault>,
 ) -> Result<CanonicalBlockRef<ComplexInverseBindMatricesSchema>, StoreRuntimeError> {
+    let mut values = COMPLEX_INVERSE_BIND_MATRICES;
+    if matches!(fault, Some(ComplexFixtureFault::SequenceValue)) {
+        values[COMPLEX_INVERSE_BIND_SCALAR_COUNT - 1] = 2.0;
+    }
     assembly
         .try_retain_canonical_sequence(
             baozi_operation::SequencePlan::<f32>::new(COMPLEX_INVERSE_BIND_SCALAR_COUNT)
                 .map_err(StoreRuntimeError::Plan)?,
             ComplexInverseBindMatricesSchema,
-            |writer| writer.extend_from_slice(&COMPLEX_INVERSE_BIND_MATRICES),
+            |writer| writer.extend_from_slice(&values),
         )
         .map(CanonicalBlockRef::from_store)
 }
@@ -852,6 +977,7 @@ fn retain_source_attachments(
 )]
 fn retain_directory(
     assembly: &mut SceneStoreAssembly,
+    image_count: usize,
     images: CanonicalBlockRef<ComplexImageTableSchema>,
     samplers: CanonicalBlockRef<ComplexSamplerTableSchema>,
     textures: CanonicalBlockRef<ComplexTextureTableSchema>,
@@ -868,6 +994,8 @@ fn retain_directory(
     animations: CanonicalBlockRef<ComplexAnimationTableSchema>,
     source_attachments: CanonicalBlockRef<ComplexSourceAttachmentSchema>,
 ) -> Result<CanonicalBlockRef<ComplexDirectorySchema>, StoreRuntimeError> {
+    let image_count = u32::try_from(image_count)
+        .map_err(|_| StoreRuntimeError::Plan(StorePlanError::SizeOverflow))?;
     assembly
         .try_retain_canonical_records(
             RecordPlan::new(1, COMPLEX_DIRECTORY_FIELD_COUNT).map_err(StoreRuntimeError::Plan)?,
@@ -875,7 +1003,7 @@ fn retain_directory(
             |writer| {
                 writer.write_row(|row| {
                     row.write_scalar(COMPLEX_SCHEMA_REVISION)?;
-                    row.write_scalar(1_u32)?;
+                    row.write_scalar(image_count)?;
                     row.write_record_ref(images.into_store())?;
                     row.write_scalar(1_u32)?;
                     row.write_record_ref(samplers.into_store())?;
@@ -928,6 +1056,7 @@ fn prepare_validated_success(
     let ValidatedComplexFixture {
         store: validated,
         directory,
+        canonical_block_count,
         proof,
         commitments,
     } = candidate;
@@ -937,6 +1066,7 @@ fn prepare_validated_success(
             return prepare_rich_failure(
                 validated.downgrade_to_rich_failure(super::GENERATION_EXHAUSTED_CODE),
                 super::GENERATION_EXHAUSTED_CODE,
+                canonical_block_count,
             );
         }
     };
@@ -968,9 +1098,12 @@ fn prepare_validated_success(
 fn prepare_rich_failure(
     failure: SceneStoreFailureAssembly,
     cause: u32,
+    canonical_block_count: u32,
 ) -> Result<PreparedComplexFixture, SceneConstructionError> {
     let evidence = failure.evidence_root();
-    match failure.validate_rich_failure(evidence, validate_complex_fixture_evidence_graph) {
+    match failure.validate_rich_failure(evidence, |session, evidence| {
+        validate_complex_fixture_evidence_graph(session, evidence, canonical_block_count)
+    }) {
         StoreFailureValidation::Valid(validated) => {
             map_prepared_failure(validated.try_prepare(cause, final_progress())?)
         }

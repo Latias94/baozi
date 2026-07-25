@@ -21,6 +21,8 @@ use super::schema::{
 };
 use super::validation::authored_matrix_is_valid;
 
+mod production_probe;
+
 fn test_limits() -> SceneConstructionLimits {
     SceneConstructionLimits {
         operation_live_bytes: u64::MAX,
@@ -41,9 +43,17 @@ fn test_factory(max_live_accounts: u64) -> PhysicalStorageAccountFactory {
 }
 
 fn test_account(factory: &PhysicalStorageAccountFactory) -> PhysicalStorageAccount {
+    test_account_with_allocation_limit(factory, 256)
+}
+
+fn test_account_with_allocation_limit(
+    factory: &PhysicalStorageAccountFactory,
+    max_live_allocations: u64,
+) -> PhysicalStorageAccount {
     factory
         .try_create_account(
-            PhysicalStorageAccountLimits::new(u64::MAX, 256).expect("test account limits"),
+            PhysicalStorageAccountLimits::new(u64::MAX, max_live_allocations)
+                .expect("test account limits"),
         )
         .expect("test physical account")
 }
@@ -807,13 +817,17 @@ fn canonical_store_u4c_metrics_v1_probe() {
 }
 
 #[test]
-fn canonical_store_complex_fixture_rejects_cross_table_and_orphan_candidates() {
+fn canonical_store_complex_fixture_rejects_representative_validation_faults() {
     let factory = test_factory(1);
     let account = test_account(&factory);
     let nonce = AtomicU64::new(0);
 
     for fault in [
         super::construction::ComplexFixtureFault::CrossTableIndex,
+        super::construction::ComplexFixtureFault::ReferenceTarget,
+        super::construction::ComplexFixtureFault::SequenceValue,
+        super::construction::ComplexFixtureFault::Utf8Value,
+        super::construction::ComplexFixtureFault::BytesValue,
         super::construction::ComplexFixtureFault::OrphanCanonicalBlock,
     ] {
         let prepared = SceneConstructionOperation::with_account(&account, test_limits())
@@ -843,6 +857,50 @@ fn canonical_store_complex_fixture_rejects_cross_table_and_orphan_candidates() {
         assert_eq!(account.snapshot().live_retained_allocations(), 0);
     }
 
+    drop(account);
+    assert_eq!(factory.snapshot().live_accounts(), 0);
+}
+
+#[test]
+fn canonical_store_complex_fixture_scales_reachable_image_leaves() {
+    let factory = test_factory(1);
+    let account = test_account(&factory);
+    let nonce = AtomicU64::new(0);
+
+    for (image_count, expected_blocks) in [(1, 26), (14, 52), (40, 104)] {
+        let prepared = SceneConstructionOperation::with_account_for_scaled_complex_fixture(
+            &account,
+            test_limits(),
+            image_count,
+        )
+        .expect("scaled complex fixture operation")
+        .prepare(None, || SceneGenerationId::reserve_from(&nonce))
+        .expect("scaled complex fixture should prepare");
+        let parts = match prepared.handoff() {
+            super::construction::ComplexFixtureTerminal::Success(parts) => parts,
+            super::construction::ComplexFixtureTerminal::RichFailure(_) => {
+                panic!("scaled complex fixture must validate")
+            }
+            super::construction::ComplexFixtureTerminal::MinimalFallback(_) => {
+                panic!("scaled complex fixture must not fall back")
+            }
+        };
+        assert_eq!(parts.fixture.canonical_block_count(), expected_blocks);
+        parts
+            .fixture
+            .inspect_fixed_image_views(image_count)
+            .expect("scaled complex image views must remain inspectable");
+        let transcript = parts
+            .fixture
+            .semantic_transcript()
+            .expect("scaled complex fixture must have a semantic transcript");
+        assert!(transcript.contains(&format!("u32:directory.image_count={image_count}\n")));
+        drop(parts);
+        assert_eq!(account.snapshot().live_retained_bytes(), 0);
+        assert_eq!(account.snapshot().live_retained_allocations(), 0);
+    }
+
+    assert_eq!(nonce.load(Ordering::Relaxed), 3);
     drop(account);
     assert_eq!(factory.snapshot().live_accounts(), 0);
 }

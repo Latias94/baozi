@@ -39,11 +39,13 @@ use super::validation::{validate_evidence_graph, validate_scene_graph};
 mod complex;
 
 #[cfg(test)]
-mod u4d;
+mod u4c_lookup;
 
 #[cfg(test)]
-pub(super) use complex::{ComplexFixtureFault, ComplexFixtureTerminal, PreparedComplexFixture};
-
+pub(super) use complex::{
+    COMPLEX_SEMANTIC_TRANSCRIPT_SCHEMA_ID, ComplexFixtureFault, ComplexFixtureTerminal,
+    PreparedComplexFixture,
+};
 const STORE_CATALOG: StoreSemanticCatalogId =
     StoreSemanticCatalogId::new(*b"baozi-core-scene", NonZeroU32::MIN);
 const STORE_PHASE: StorePhaseSemanticId = StorePhaseSemanticId::new(STORE_CATALOG, NonZeroU64::MIN);
@@ -554,12 +556,50 @@ pub(crate) struct SceneConstructionOperation<'scene> {
     lineage: SceneConstructionLineage<'scene>,
 }
 
+#[cfg(test)]
+pub(super) struct ScaledComplexFixtureOperation {
+    operation: SceneConstructionOperation<'static>,
+    image_count: usize,
+}
+
+#[cfg(test)]
+impl ScaledComplexFixtureOperation {
+    pub(super) fn prepare(
+        self,
+        fault: Option<ComplexFixtureFault>,
+        reserve_generation: impl FnOnce() -> Result<ReservedSceneGeneration, SceneGenerationError>,
+    ) -> Result<PreparedComplexFixture, SceneConstructionError> {
+        complex::prepare(self.operation, self.image_count, fault, reserve_generation)
+    }
+}
+
 impl SceneConstructionOperation<'static> {
     pub(crate) fn with_account(
         account: &PhysicalStorageAccount,
         limits: SceneConstructionLimits,
     ) -> Result<Self, SceneConstructionStartError> {
         Self::start(account, limits, SceneConstructionLineage::Fresh)
+    }
+
+    #[cfg(test)]
+    pub(super) fn with_account_for_scaled_complex_fixture(
+        account: &PhysicalStorageAccount,
+        limits: SceneConstructionLimits,
+        image_count: usize,
+    ) -> Result<ScaledComplexFixtureOperation, SceneConstructionStartError> {
+        let attribution_slots = complex::scaled_complex_attribution_slots(image_count)
+            .expect("the scaled complex image count must be admitted");
+        let operation = Self::start_with_control_and_attribution_slots(
+            account,
+            limits,
+            SceneConstructionLineage::Fresh,
+            OperationControl::default(),
+            attribution_slots,
+        )?;
+        Ok(ScaledComplexFixtureOperation {
+            operation,
+            image_count,
+        })
     }
 
     pub(crate) fn with_private_account(
@@ -617,7 +657,7 @@ impl SceneConstructionOperation<'static> {
         fault: Option<ComplexFixtureFault>,
         reserve_generation: impl FnOnce() -> Result<ReservedSceneGeneration, SceneGenerationError>,
     ) -> Result<PreparedComplexFixture, SceneConstructionError> {
-        complex::prepare(self, fault, reserve_generation)
+        complex::prepare(self, 1, fault, reserve_generation)
     }
 }
 
@@ -734,6 +774,22 @@ impl<'scene> SceneConstructionOperation<'scene> {
         lineage: SceneConstructionLineage<'scene>,
         control: OperationControl<SceneConstructionPhase, SceneConstructionUnit>,
     ) -> Result<Self, SceneConstructionStartError> {
+        Self::start_with_control_and_attribution_slots(
+            account,
+            limits,
+            lineage,
+            control,
+            TERMINAL_ATTRIBUTION_SLOTS,
+        )
+    }
+
+    fn start_with_control_and_attribution_slots(
+        account: &PhysicalStorageAccount,
+        limits: SceneConstructionLimits,
+        lineage: SceneConstructionLineage<'scene>,
+        control: OperationControl<SceneConstructionPhase, SceneConstructionUnit>,
+        terminal_attribution_slots: usize,
+    ) -> Result<Self, SceneConstructionStartError> {
         let brand = ConstructionBrand::reserve()?;
         let domain = StoreKeyDomain::try_new(STORE_CATALOG)?;
         let keys = SceneStoreKeys {
@@ -757,7 +813,7 @@ impl<'scene> SceneConstructionOperation<'scene> {
         )?;
         let ledger_plan = StoreLedgerPlan::try_new(domain, ledger_limits, &[keys.phase])?;
         let terminal_limits =
-            RetainedStoreBatchLimits::new(TERMINAL_ATTRIBUTION_SLOTS, TERMINAL_COMMITMENT_SLOTS)?;
+            RetainedStoreBatchLimits::new(terminal_attribution_slots, TERMINAL_COMMITMENT_SLOTS)?;
         let terminal_writer = RetainedStoreWriterPlan::new(
             keys.phase,
             keys.dimension,

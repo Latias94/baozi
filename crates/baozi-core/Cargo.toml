@@ -26,4 +26,7 @@ triomphe.workspace = true
 
 [dev-dependencies]
 # The sealed U4c observer is test-only. Normal baozi-core builds must not expose it.
+allocation-counter = "=0.8.1"
 baozi-operation = { workspace = true, features = ["_u4c-collector"] }
+serde = { version = "1", features = ["derive"] }
+serde_json.workspace = true

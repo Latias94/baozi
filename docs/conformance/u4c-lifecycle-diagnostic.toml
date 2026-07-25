@@ -41,35 +41,35 @@ unobserved = [
 
 [[source_anchors]]
 path = "Cargo.lock"
-sha256 = "435ab9e7d41c54d64fbc23fc24b19b266cccb6e3aa03f31c57a175d443666a4e"
+sha256 = "19cc8c8487065784f1641f91898d1504eb98d9a7a536741045a88033971eaf2d"
 
 [[source_anchors]]
 path = "crates/baozi-core/Cargo.toml"
-sha256 = "31a65c478400f1ab094b390130dd04fd768ed54ce91c7b739d9847148a62a968"
+sha256 = "415ab83f89366f438542162c3eee71e4643139904435bf1f4ae17d079bb1e821"
 
 [[source_anchors]]
 path = "crates/baozi-core/src/canonical_scene/store/construction.rs"
-sha256 = "2d8a4c75511a623821540ef13283d24a2f9c5a31a001653b291f88bf9243ae40"
+sha256 = "77b2a36aaa71d3c720b29dbaa9b1cda9ddd58e414fa9a99d16c9e8dffbfcea01"
 
 [[source_anchors]]
 path = "crates/baozi-core/src/canonical_scene/store/tests.rs"
-sha256 = "5782feb75527ba9e8bb7bac5c3404fab4c0ae277d159677e21f56e968d41c063"
+sha256 = "a59a8a459c64037cfff20b4a8fad1ec2e5703477b6e51e8b237efe280c6e7a45"
 
 [[source_anchors]]
 path = "crates/baozi-operation/Cargo.toml"
-sha256 = "78784ca48d7f99e60493703b7279d5e20219077fff16febf7fb1952cb5aa3a6f"
+sha256 = "bed3120424517e2c3d02df9a5499f4d8f896410231c36641a518c9adccbf47fb"
 
 [[source_anchors]]
 path = "crates/baozi-operation/src/concrete_store.rs"
-sha256 = "5f2021883c4b26f2523ed811e53a3c82358d97a21ae378af247a9118c2a6e323"
+sha256 = "997e7edfcacfb15bb9a1c0edb3effe6734f6da3a238768ad36c4b8b761168ed5"
 
 [[source_anchors]]
 path = "crates/baozi-operation/src/retained.rs"
-sha256 = "48ca744e49c4e12acd3c00fbd55be7b5a54013e3a03b056d510dcbbaee4a312e"
+sha256 = "f633ec14bfb09b5bafe71e704e53f4622e7265d63ef6eecb7b45be545eaad6b8"
 
 [[source_anchors]]
 path = "crates/baozi-xtask/Cargo.toml"
-sha256 = "7bb70dd9f2e744b649439833ae0b4e0e3f123ae626bde0bc1185b6f0c6527aa3"
+sha256 = "f94be7889ebfd660d30e8d18667c9c4eeca863a76c165ee52855ee96cc433f56"
 
 [[source_anchors]]
 path = "crates/baozi-xtask/src/main.rs"
