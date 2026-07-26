@@ -1013,26 +1013,6 @@ impl<Kind, Tag> Clone for CanonicalStoreRef<Kind, Tag> {
     }
 }
 
-impl<Kind, Tag> CanonicalStoreRef<Kind, Tag> {
-    #[cfg(feature = "_u4c-collector")]
-    #[doc(hidden)]
-    pub fn __u4c_probe_with_identity_index(self, index: usize) -> Self {
-        Self {
-            raw: self.raw.u4c_probe_with_identity_index(index),
-            marker: PhantomData,
-        }
-    }
-
-    #[cfg(feature = "_u4c-collector")]
-    #[doc(hidden)]
-    pub fn __u4c_probe_with_identity_tag<IdentityTag: 'static>(self) -> Self {
-        Self {
-            raw: self.raw.u4c_probe_with_identity_tag::<IdentityTag>(),
-            marker: PhantomData,
-        }
-    }
-}
-
 impl<Kind, Tag> PartialEq for CanonicalStoreRef<Kind, Tag> {
     fn eq(&self, other: &Self) -> bool {
         self.raw == other.raw

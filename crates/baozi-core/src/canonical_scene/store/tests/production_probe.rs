@@ -14,7 +14,7 @@ fn canonical_store_u4c_production_v1_probe() {
         collect_inherited_hot_leaf_scenario(),
         collect_validation_faults(),
     );
-    println!("{REPORT_PREFIX}{}", render(&report));
+    println!("\n{REPORT_PREFIX}{}", render(&report));
 }
 
 #[test]

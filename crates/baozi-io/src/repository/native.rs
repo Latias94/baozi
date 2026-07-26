@@ -166,6 +166,11 @@ impl RepositoryCapture {
     pub fn files(&self) -> &[RepositoryFile] {
         &self.files
     }
+
+    /// Returns the captured directory paths in deterministic capture order.
+    pub fn directory_paths(&self) -> impl ExactSizeIterator<Item = &RepositoryPath> {
+        self.directories.iter().map(|directory| &directory.path)
+    }
 }
 
 impl fmt::Debug for RepositoryCapture {

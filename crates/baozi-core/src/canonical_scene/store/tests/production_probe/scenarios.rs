@@ -536,10 +536,14 @@ fn collect_validation_fault(descriptor: ValidationFaultDescriptor) -> Validation
     let physical_after_release = account.snapshot();
     drop(account);
     let factory_after_account_release = factory.snapshot();
+    let mutation_transcript = descriptor.fault.mutation_transcript();
 
     ValidationFaultReport {
         scenario_id: descriptor.scenario_id,
         field_class: descriptor.field_class,
+        mutation_schema_id: "baozi.complex-fixture.mutation-transcript.v1",
+        mutation_transcript_bytes: mutation_transcript.len(),
+        mutation_transcript_sha256: sha256_hex(mutation_transcript.as_bytes()),
         image_count: FAULT_IMAGE_COUNT,
         generation_reservations: nonce.load(Ordering::Relaxed),
         evidence,

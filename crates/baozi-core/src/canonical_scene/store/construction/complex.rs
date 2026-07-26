@@ -70,6 +70,19 @@ pub(crate) enum ComplexFixtureFault {
     OrphanCanonicalBlock,
 }
 
+impl ComplexFixtureFault {
+    pub(in crate::canonical_scene::store) const fn mutation_transcript(self) -> &'static str {
+        match self {
+            Self::CrossTableIndex => "texture.image-index=first-out-of-range-index",
+            Self::ReferenceTarget => "texture.images-ref=sampler-table",
+            Self::SequenceValue => "inverse-bind.last-scalar=f32:0x40000000",
+            Self::Utf8Value => "image.mime=image/gif",
+            Self::BytesValue => "image.payload=hex:4241440d0a",
+            Self::OrphanCanonicalBlock => "canonical-directory.omits-retained-block",
+        }
+    }
+}
+
 const COMPLEX_FIXED_CANONICAL_BLOCK_COUNT: usize = COMPLEX_CANONICAL_BLOCK_COUNT as usize - 2;
 pub(in crate::canonical_scene::store) const COMPLEX_MAX_IMAGE_COUNT: usize = 40;
 

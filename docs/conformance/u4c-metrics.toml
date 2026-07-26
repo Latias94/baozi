@@ -1,0 +1,594 @@
+schema_version = 2
+evidence_scope = "u4c-production"
+
+[runner]
+probe_package = "baozi-core"
+probe_target = "canonical_scene::store::tests::production_probe::canonical_store_u4c_production_v1_probe"
+jobs = 1
+test_threads = 1
+
+[report_contract]
+prefix = "BAOZI_U4C_PRODUCTION_V1="
+schema_id = "baozi.u4c.production-report"
+schema_version = 1
+report_revision = 4
+scenario_set_id = "canonical-store-production-v1"
+payload_bytes = 39807
+sha256 = "a8e939df7fb3a325ae42a601166b2f62391abeacbb6848b6e4e0790f22e06703"
+
+[identity]
+rustc_release = "1.95.0"
+rustup_toolchain = "1.95.0"
+host = "x86_64-unknown-linux-gnu"
+target = "x86_64-unknown-linux-gnu"
+profile = "test"
+allocator = "allocation-counter-0.8.1"
+rustc_verbose_sha256 = "4fdff2578428e9c5c08ddd7a0d3079c1a106b1cdaa46e73e46f7cd32b0fb9cad"
+cargo_verbose_sha256 = "c034ed37e1ee0ec102326f27e9b3b8fe6a481f8c8ad28df58a2e117b241c0f0e"
+libstd_sha256 = "2f4c8945547a8487dd6a5bf38cd94167a3566876006b9abda7544ba9825b9a95"
+toolchain_file_count = 67
+toolchain_sha256 = "37022136302024533fda3e2427228345fad17547f61be94a802a62a75efe7794"
+
+[closure]
+worktree_premise = "trusted-static-worktree"
+generated_outputs = []
+
+[closure.limits]
+max_roots = 16
+max_entries = 4096
+max_files = 4096
+max_directories = 512
+max_depth = 32
+max_path_bytes = 512
+max_file_bytes = 1048576
+max_total_bytes = 16777216
+max_work = 262144
+
+[closure.build_outputs]
+build_script_records = 18
+out_directories = 18
+files = 4
+directories = 18
+total_bytes = 2470
+transcript_sha256 = "dfc87187fbcdf8956e223eb90a29f89e2cf9342a4497816aa5cdedc2bca5d253"
+tree_sha256 = "d600f81eff132b9f3a08e97502118d7046638f06cdbc57221b1401f3380ee9a6"
+
+[closure.build_outputs.limits]
+max_roots = 64
+max_entries = 4096
+max_files = 2048
+max_directories = 2048
+max_depth = 16
+max_path_bytes = 512
+max_file_bytes = 16777216
+max_total_bytes = 67108864
+max_work = 262144
+
+[[closure.source_trees]]
+path = "crates"
+file_count = 279
+sha256 = "2ced8e80735ba9ca0b5238481c9c8d39ae4181dc369f8c833a1fe51b6a864b5e"
+
+[[closure.fixed_inputs]]
+path = "Cargo.lock"
+sha256 = "19cc8c8487065784f1641f91898d1504eb98d9a7a536741045a88033971eaf2d"
+
+[[closure.fixed_inputs]]
+path = "Cargo.toml"
+sha256 = "9dc73225701e36a080a5c5aad9d30e73761375fea505795574fd142377928980"
+
+[[closure.packages]]
+name = "allocation-counter"
+version = "0.8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "beb9e990c0a33699f1984d85a6abead615ccc72dd8130bf3e15dcabe2ca149c9"
+
+[[closure.packages]]
+name = "ambient-authority"
+version = "0.0.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e9d4ee0d472d1cd2e28c97dfa124b3d8d992e10eb0a035f33f5d12e3a177ba3b"
+
+[[closure.packages]]
+name = "baozi-core"
+version = "0.1.0"
+repository_manifest = "crates/baozi-core/Cargo.toml"
+
+[[closure.packages]]
+name = "baozi-io"
+version = "0.1.0"
+repository_manifest = "crates/baozi-io/Cargo.toml"
+
+[[closure.packages]]
+name = "baozi-operation"
+version = "0.1.0"
+repository_manifest = "crates/baozi-operation/Cargo.toml"
+
+[[closure.packages]]
+name = "baozi-xtask"
+version = "0.1.0"
+repository_manifest = "crates/baozi-xtask/Cargo.toml"
+
+[[closure.packages]]
+name = "bitflags"
+version = "2.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b4388bee8683e3d04af747c73422af53102d2bd24d9eadb6cbc100baef4b43f8"
+
+[[closure.packages]]
+name = "block-buffer"
+version = "0.10.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3078c7629b62d3f0439517fa394996acacc5cbc91c5a20d8c658e77abd503a71"
+
+[[closure.packages]]
+name = "cap-fs-ext"
+version = "4.0.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d78e5a3368ae89b7cb68186411452b4b9fac8b41be9c19bf3f47c2d2c8e36e6b"
+
+[[closure.packages]]
+name = "cap-primitives"
+version = "4.0.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cdadbd7c002d3a484b35243669abdae85a0ebaded5a61117169dc3400f9a7ff0"
+
+[[closure.packages]]
+name = "cap-std"
+version = "4.0.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7281235d6e96d3544ca18bba9049be92f4190f8d923e3caef1b5f66cfa752608"
+
+[[closure.packages]]
+name = "cfg-if"
+version = "1.0.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
+
+[[closure.packages]]
+name = "cpufeatures"
+version = "0.2.17"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "59ed5838eebb26a2bb2e58f6d5b5316989ae9d08bab10e0e6d103e656d1b0280"
+
+[[closure.packages]]
+name = "crypto-common"
+version = "0.1.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "78c8292055d1c1df0cce5d180393dc8cce0abec0a7102adb6c7b1eef6016d60a"
+
+[[closure.packages]]
+name = "digest"
+version = "0.10.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9ed9a281f7bc9b7576e61468ba615a66a5c8cfdff42420a70aa82701a3b1e292"
+
+[[closure.packages]]
+name = "equivalent"
+version = "1.0.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "877a4ace8713b0bcf2a4e7eec82529c029f1d0619886d18145fea96c3ffe5c0f"
+
+[[closure.packages]]
+name = "errno"
+version = "0.3.14"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
+
+[[closure.packages]]
+name = "fs-set-times"
+version = "0.20.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "94e7099f6313ecacbe1256e8ff9d617b75d1bcb16a6fddef94866d225a01a14a"
+
+[[closure.packages]]
+name = "generic-array"
+version = "0.14.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "85649ca51fd72272d7821adaf274ad91c288277713d9c18820d8499a7ff69e9a"
+
+[[closure.packages]]
+name = "hashbrown"
+version = "0.17.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
+
+[[closure.packages]]
+name = "indexmap"
+version = "2.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d466e9454f08e4a911e14806c24e16fba1b4c121d1ea474396f396069cf949d9"
+
+[[closure.packages]]
+name = "io-extras"
+version = "0.19.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "20fd6de4ccfcc187e38bc21cfa543cb5a302cb86a8b114eb7f0bf0dc9f8ac00f"
+
+[[closure.packages]]
+name = "io-lifetimes"
+version = "2.0.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "06432fb54d3be7964ecd3649233cddf80db2832f47fec34c01f65b3d9d774983"
+
+[[closure.packages]]
+name = "io-lifetimes"
+version = "3.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2f0fb0570afe1fed943c5c3d4102d5358592d8625fda6a0007fdbe65a92fba96"
+
+[[closure.packages]]
+name = "ipnet"
+version = "2.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d98f6fed1fde3f8c21bc40a1abb88dd75e67924f9cffc3ef95607bad8017f8e2"
+
+[[closure.packages]]
+name = "itoa"
+version = "1.0.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
+
+[[closure.packages]]
+name = "libc"
+version = "0.2.186"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
+
+[[closure.packages]]
+name = "linux-raw-sys"
+version = "0.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
+
+[[closure.packages]]
+name = "maybe-owned"
+version = "0.3.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4facc753ae494aeb6e3c22f839b158aebd4f9270f55cd3c79906c45476c47ab4"
+
+[[closure.packages]]
+name = "memchr"
+version = "2.8.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
+
+[[closure.packages]]
+name = "once_cell"
+version = "1.21.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
+
+[[closure.packages]]
+name = "proc-macro2"
+version = "1.0.106"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8fd00f0bb2e90d81d1044c2b32617f68fcb9fa3bb7640c23e9c748e53fb30934"
+
+[[closure.packages]]
+name = "quote"
+version = "1.0.46"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dfbc457d0c7a0759a614551b11a6409e5951f6c7537be1f1b7682b9ae9230368"
+
+[[closure.packages]]
+name = "rustix"
+version = "1.1.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b6fe4565b9518b83ef4f91bb47ce29620ca828bd32cb7e408f0062e9930ba190"
+
+[[closure.packages]]
+name = "rustix-linux-procfs"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2fc84bf7e9aa16c4f2c758f27412dc9841341e16aa682d9c7ac308fe3ee12056"
+
+[[closure.packages]]
+name = "scopeguard"
+version = "1.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
+
+[[closure.packages]]
+name = "serde"
+version = "1.0.228"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9a8e94ea7f378bd32cbbd37198a4a91436180c5bb472411e48b5ec2e2124ae9e"
+
+[[closure.packages]]
+name = "serde_core"
+version = "1.0.228"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "41d385c7d4ca58e59fc732af25c3983b67ac852c1a25000afe1175de458b67ad"
+
+[[closure.packages]]
+name = "serde_derive"
+version = "1.0.228"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d540f220d3187173da220f885ab66608367b6574e925011a9353e4badda91d79"
+
+[[closure.packages]]
+name = "serde_json"
+version = "1.0.150"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e8014e44b4736ed0538adeecded0fce2a272f22dc9578a7eb6b2d9993c74cfb9"
+
+[[closure.packages]]
+name = "serde_spanned"
+version = "0.6.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bf41e0cfaf7226dca15e8197172c295a782857fcb97fad1808a166870dee75a3"
+
+[[closure.packages]]
+name = "sha2"
+version = "0.10.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a7507d819769d01a365ab707794a4084392c824f54a7a6a7862f8c3d0892b283"
+
+[[closure.packages]]
+name = "syn"
+version = "2.0.118"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1b9ae57f904213ebb649ce6895b8a66c66f0203b9319718f69a5612a065b1422"
+
+[[closure.packages]]
+name = "thiserror"
+version = "2.0.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4288b5bcbc7920c07a1149a35cf9590a2aa808e0bc1eafaade0b80947865fbc4"
+
+[[closure.packages]]
+name = "thiserror-impl"
+version = "2.0.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ebc4ee7f67670e9b64d05fa4253e753e016c6c95ff35b89b7941d6b856dec1d5"
+
+[[closure.packages]]
+name = "toml"
+version = "0.8.23"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dc1beb996b9d83529a9e75c17a1686767d148d70663143c7854d8b4a09ced362"
+
+[[closure.packages]]
+name = "toml_datetime"
+version = "0.6.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "22cddaf88f4fbc13c51aebbf5f8eceb5c7c5a9da2ac40a13519eb5b0a0e8f11c"
+
+[[closure.packages]]
+name = "toml_edit"
+version = "0.22.27"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "41fe8c660ae4257887cf66394862d21dbca4a6ddd26f04a3560410406a2f819a"
+
+[[closure.packages]]
+name = "triomphe"
+version = "0.1.16"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b40688ea6389c8171614b25491f71d4a27946e0c7ce2da1c6de27e25abf1a0ae"
+
+[[closure.packages]]
+name = "typenum"
+version = "1.20.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b6f5e870be6c3b371b77fe0ee0bafb859fa4964b4404c27de1d380043c4dda20"
+
+[[closure.packages]]
+name = "unicode-ident"
+version = "1.0.24"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
+
+[[closure.packages]]
+name = "version_check"
+version = "0.9.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
+
+[[closure.packages]]
+name = "winnow"
+version = "0.7.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "df79d97927682d2fd8adb29682d1140b343be4ac0f08fd68b7765d9c059d3945"
+
+[[closure.packages]]
+name = "zmij"
+version = "1.0.21"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b8848ee67ecc8aedbaf3e4122217aff892639231befc6a1b58d29fff4c2cabaa"
+
+[[closure.build_scripts]]
+name = "cap-fs-ext"
+version = "4.0.2"
+
+[[closure.build_scripts]]
+name = "cap-primitives"
+version = "4.0.2"
+
+[[closure.build_scripts]]
+name = "cap-std"
+version = "4.0.2"
+
+[[closure.build_scripts]]
+name = "generic-array"
+version = "0.14.7"
+
+[[closure.build_scripts]]
+name = "io-extras"
+version = "0.19.0"
+
+[[closure.build_scripts]]
+name = "io-lifetimes"
+version = "2.0.4"
+
+[[closure.build_scripts]]
+name = "io-lifetimes"
+version = "3.0.1"
+
+[[closure.build_scripts]]
+name = "libc"
+version = "0.2.186"
+
+[[closure.build_scripts]]
+name = "proc-macro2"
+version = "1.0.106"
+
+[[closure.build_scripts]]
+name = "quote"
+version = "1.0.46"
+
+[[closure.build_scripts]]
+name = "rustix"
+version = "1.1.4"
+
+[[closure.build_scripts]]
+name = "serde"
+version = "1.0.228"
+
+[[closure.build_scripts]]
+name = "serde_core"
+version = "1.0.228"
+
+[[closure.build_scripts]]
+name = "serde_json"
+version = "1.0.150"
+
+[[closure.build_scripts]]
+name = "thiserror"
+version = "2.0.18"
+
+[[closure.build_scripts]]
+name = "zmij"
+version = "1.0.21"
+
+[[closure.proc_macros]]
+name = "serde_derive"
+version = "1.0.228"
+
+[[closure.proc_macros]]
+name = "thiserror-impl"
+version = "2.0.18"
+
+[collector_gate]
+package = "baozi-operation"
+test_target = "u4c_collector"
+feature = "_u4c-collector"
+
+[[semantic_vectors]]
+scenario_id = "complex-members-n-v1"
+observed_bytes = 5442
+sha256 = "605bbf17840a36372900e3321940d870d3f0de8e7d33f76dc69a0ff86c7f87b4"
+
+[[semantic_vectors]]
+scenario_id = "complex-members-2n-v1"
+observed_bytes = 7802
+sha256 = "baba8f8f0030f22573412b6287f7046a888051e3f795aaab5e3bff2a505a4b61"
+
+[[semantic_vectors]]
+scenario_id = "complex-members-4n-v1"
+observed_bytes = 12638
+sha256 = "fe19ec438593ff4d7d7b1d35e63c115a233d89dcbbed092f75d7ab0a93060173"
+
+[[mutations]]
+scenario_id = "complex.scalar.texture-image-index.v1"
+field_class = "scalar"
+transcript_bytes = 44
+transcript_sha256 = "d81b4749e02b6988ede94ceb397be9fab9de0c44a82fbe710275c0430182eb77"
+failure_code = 1396899842
+outcome_evidence_blocks = 2
+
+[[mutations]]
+scenario_id = "complex.reference.texture-images.v1"
+field_class = "reference"
+transcript_bytes = 32
+transcript_sha256 = "b9fdaef35bbd1a0b7d0d64e5f9b5403bf53d8dd369c3be28b76a8a95fc97447e"
+failure_code = 1396899842
+outcome_evidence_blocks = 2
+
+[[mutations]]
+scenario_id = "complex.sequence.inverse-bind.v1"
+field_class = "sequence"
+transcript_bytes = 39
+transcript_sha256 = "dc71b88e7be3ce781984a2505454ed13c932585e5b0eb6aa38c7eaa3060dc369"
+failure_code = 1396899842
+outcome_evidence_blocks = 2
+
+[[mutations]]
+scenario_id = "complex.utf8.image-mime.v1"
+field_class = "utf8"
+transcript_bytes = 20
+transcript_sha256 = "007023e926c518d9d280f0af32282885225592286c3db6880cdec7d567764f12"
+failure_code = 1396899842
+outcome_evidence_blocks = 2
+
+[[mutations]]
+scenario_id = "complex.bytes.image-payload.v1"
+field_class = "bytes"
+transcript_bytes = 28
+transcript_sha256 = "4f741c689323967e942b7f62a1feee51bc048ce204f960bc0d0510b8937aed2b"
+failure_code = 1396899842
+outcome_evidence_blocks = 2
+
+[[mutations]]
+scenario_id = "complex.orphan.canonical-block.v1"
+field_class = "orphan"
+transcript_bytes = 40
+transcript_sha256 = "b9235da6864d5fe53a3dcecf879754837241007d520542da32f6296ab856c3d9"
+failure_code = 1396899842
+outcome_evidence_blocks = 2
+
+[[scenarios]]
+scenario_id = "complex-members-n-v1"
+image_count = 1
+canonical_block_count = 26
+semantic_cells = 146
+references = 43
+blocks = 27
+producer_events = 270
+target_live_retained_bytes = 21792
+target_live_retained_allocations = 122
+
+[[scenarios]]
+scenario_id = "complex-members-2n-v1"
+image_count = 14
+canonical_block_count = 52
+semantic_cells = 341
+references = 69
+blocks = 53
+producer_events = 569
+target_live_retained_bytes = 29000
+target_live_retained_allocations = 174
+
+[[scenarios]]
+scenario_id = "complex-members-4n-v1"
+image_count = 40
+canonical_block_count = 104
+semantic_cells = 731
+references = 121
+blocks = 105
+producer_events = 1167
+target_live_retained_bytes = 41176
+target_live_retained_allocations = 278
+
+[measurement]
+scale_completed_lookups = 7
+scale_rejected_lookups = 1
+scale_lookup_events = 50
+scale_member_probes = 6
+max_lookup_events = 8
+max_member_probes = 1
+hot_view_max_allocations = 0
+hot_view_max_element_decodes = 0
+hot_view_max_payload_copy_bytes = 0
+hot_view_max_payload_backing_allocations = 0
+
+[coverage]
+required_entry_points = [
+    "canonical-obj-corner-smoothing",
+    "backend-free-gltf-shape",
+    "facade-equivalent-inspection",
+    "bounded-snapshot",
+    "unchanged-view",
+    "changed-scene-edit",
+]
+mapped_entry_points = []

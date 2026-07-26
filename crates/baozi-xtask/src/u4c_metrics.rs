@@ -1,5 +1,6 @@
 //! U4c lifecycle diagnostics and measurement-scope admission.
 
+mod production;
 mod spec;
 
 use serde::{Deserialize, Serialize};
@@ -181,13 +182,15 @@ impl MetricsV1 {
     }
 }
 
-/// Runs the V1 lifecycle probe against a checked-in diagnostic specification.
-///
-/// This is intentionally not U4 exit evidence. The specification must state that scope explicitly.
+/// Collects U4c evidence from a checked-in diagnostic or production specification.
 pub fn collect_repository(
     repository_root: &Path,
     specification_path: &Path,
 ) -> Result<Value, String> {
+    if production::is_canonical_specification_path(repository_root, specification_path) {
+        return production::collect(repository_root, specification_path);
+    }
+
     let evidence_scope = spec::read_evidence_scope(repository_root, specification_path)?;
     collect_evidence_scope(&evidence_scope, repository_root, specification_path)
 }
@@ -198,13 +201,11 @@ fn collect_evidence_scope(
     specification_path: &Path,
 ) -> Result<Value, String> {
     match evidence_scope {
-        "lifecycle-diagnostic" => {
-            collect_lifecycle_diagnostic(repository_root, specification_path)
-        }
-        "u4c-production" => Err(
-            "U4c production specifications are not accepted until the sealed collector and exact closure discovery are implemented; production evidence cannot qualify U4 exit"
-                .to_owned(),
-        ),
+        "lifecycle-diagnostic" => collect_lifecycle_diagnostic(repository_root, specification_path),
+        "u4c-production" => Err(format!(
+            "U4c production evidence must use the canonical specification {:?}",
+            production::SPECIFICATION_PATH
+        )),
         evidence_scope => Err(format!(
             "unsupported U4c evidence_scope {evidence_scope:?}; expected \"lifecycle-diagnostic\" or \"u4c-production\""
         )),
@@ -311,13 +312,23 @@ mod tests {
     }
 
     #[test]
-    fn production_scope_fails_before_any_probe_or_contract_claim() {
+    fn production_scope_requires_the_canonical_repository_route() {
         let missing = Path::new("path-that-must-not-be-read");
         let error = collect_evidence_scope("u4c-production", missing, missing)
-            .expect_err("production scope must fail closed");
+            .expect_err("an unmanaged production specification must fail closed");
 
-        assert!(error.contains("not accepted"), "{error}");
-        assert!(error.contains("cannot qualify U4 exit"), "{error}");
+        assert!(error.contains("canonical"), "{error}");
+        assert!(error.contains("u4c-metrics.toml"), "{error}");
+    }
+
+    #[cfg(not(feature = "repository-input-candidate"))]
+    #[test]
+    fn canonical_production_specification_bypasses_legacy_scope_reading() {
+        let repository_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let error = collect_repository(&repository_root, Path::new(production::SPECIFICATION_PATH))
+            .expect_err("the default feature set must reject production capture");
+
+        assert!(error.contains("repository-input-candidate"), "{error}");
     }
 
     #[test]

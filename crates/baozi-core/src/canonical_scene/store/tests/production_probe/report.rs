@@ -12,7 +12,7 @@ use sha2::{Digest, Sha256};
 pub(super) const REPORT_PREFIX: &str = "BAOZI_U4C_PRODUCTION_V1=";
 const REPORT_SCHEMA_ID: &str = "baozi.u4c.production-report";
 const REPORT_SCHEMA_VERSION: u32 = 1;
-const REPORT_REVISION: u32 = 3;
+const REPORT_REVISION: u32 = 4;
 const SCENARIO_SET_ID: &str = "canonical-store-production-v1";
 
 #[derive(Serialize)]
@@ -98,6 +98,9 @@ pub(super) struct HotLeafObservationReport {
 pub(super) struct ValidationFaultReport {
     pub(super) scenario_id: &'static str,
     pub(super) field_class: &'static str,
+    pub(super) mutation_schema_id: &'static str,
+    pub(super) mutation_transcript_bytes: usize,
+    pub(super) mutation_transcript_sha256: String,
     pub(super) image_count: usize,
     pub(super) generation_reservations: u64,
     pub(super) evidence: EvidenceReport,

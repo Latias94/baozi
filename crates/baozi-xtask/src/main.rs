@@ -5,7 +5,8 @@ use std::process::ExitCode;
 const USAGE: &str = concat!(
     "usage: cargo run -p baozi-xtask -- ",
     "<crate-graph-check|native-fs-check|runtime-admission-check>\n",
-    "       cargo run -p baozi-xtask -- u4c-metrics --spec <path>"
+    "       cargo run -p baozi-xtask --features repository-input-candidate -- ",
+    "u4c-metrics --spec <path>"
 );
 
 fn main() -> ExitCode {

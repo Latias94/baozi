@@ -39,9 +39,6 @@ use super::validation::{validate_evidence_graph, validate_scene_graph};
 mod complex;
 
 #[cfg(test)]
-mod u4c_lookup;
-
-#[cfg(test)]
 pub(super) use complex::{
     COMPLEX_SEMANTIC_TRANSCRIPT_SCHEMA_ID, ComplexFixtureFault, ComplexFixtureTerminal,
     PreparedComplexFixture,

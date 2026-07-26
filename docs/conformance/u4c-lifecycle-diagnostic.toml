@@ -49,7 +49,7 @@ sha256 = "415ab83f89366f438542162c3eee71e4643139904435bf1f4ae17d079bb1e821"
 
 [[source_anchors]]
 path = "crates/baozi-core/src/canonical_scene/store/construction.rs"
-sha256 = "77b2a36aaa71d3c720b29dbaa9b1cda9ddd58e414fa9a99d16c9e8dffbfcea01"
+sha256 = "efefde3df92311f8424c1f8730df9c00bce948b2037f4ca53ccde7d2f1ac1c08"
 
 [[source_anchors]]
 path = "crates/baozi-core/src/canonical_scene/store/tests.rs"
@@ -61,7 +61,7 @@ sha256 = "bed3120424517e2c3d02df9a5499f4d8f896410231c36641a518c9adccbf47fb"
 
 [[source_anchors]]
 path = "crates/baozi-operation/src/concrete_store.rs"
-sha256 = "997e7edfcacfb15bb9a1c0edb3effe6734f6da3a238768ad36c4b8b761168ed5"
+sha256 = "f853f56991f7bd11089411d8f141c0c9208c16d62730cb20905c1bcb4c9c92d2"
 
 [[source_anchors]]
 path = "crates/baozi-operation/src/retained.rs"
@@ -73,11 +73,11 @@ sha256 = "f94be7889ebfd660d30e8d18667c9c4eeca863a76c165ee52855ee96cc433f56"
 
 [[source_anchors]]
 path = "crates/baozi-xtask/src/main.rs"
-sha256 = "8931bf6138fcf72db936894634620e124aa501d925f0c09cc938886c25df5ec0"
+sha256 = "cd41c80747874925893e90d9309b3c0d1fba43f1117e6526a8c18119d04f2e8b"
 
 [[source_anchors]]
 path = "crates/baozi-xtask/src/u4c_metrics.rs"
-sha256 = "f52dd9388acb8108323794b44d4e458597a61e1627a8755f507bcd5b602b7609"
+sha256 = "9521897b259d3ce696574e4b4c8cbaaee0f8c87b739ea3b62986e1caad0d57eb"
 
 [[source_anchors]]
 path = "crates/baozi-xtask/src/u4c_metrics/spec.rs"
