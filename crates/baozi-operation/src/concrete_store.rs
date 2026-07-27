@@ -64,6 +64,19 @@
 //! }
 //! ```
 //!
+//! Controlled callbacks cannot forge fail-closed runtime states or operation-work causes:
+//!
+//! ```compile_fail,E0451
+//! use baozi_operation::{StoreControlledError, StoreWorkError};
+//!
+//! let _forged = StoreControlledError {
+//!     cause: panic!("private controlled cause"),
+//! };
+//! let _forged_work = StoreWorkError {
+//!     cause: panic!("private operation-work cause"),
+//! };
+//! ```
+//!
 //! Fixed-width `RecordBlock` storage is permanently excluded from cross-generation sharing
 //! because it may contain publication-local references:
 //!
@@ -125,7 +138,7 @@ use crate::retained::{
     RetainedFailureValidation, RetainedFallbackOnly, RetainedOperation,
     RetainedOperationStartError, RetainedOperationStartPlan, RetainedPublicationAssembly,
     RetainedPublicationError, RetainedPublicationPrepareError, RetainedSuccessValidation,
-    ValidatedRetainedFailure, ValidatedRetainedSuccess,
+    RetainedWorkControl, ValidatedRetainedFailure, ValidatedRetainedSuccess,
 };
 #[cfg(test)]
 use crate::retained::{RetainedAllocationError, RetainedWriterError};
@@ -184,7 +197,8 @@ pub use transcript::{
 };
 
 pub use validation::{
-    StoreDestination, StoreEvidenceValidationSession, StoreRuntimeError, StoreValidationSession,
+    StoreControlledError, StoreDestination, StoreEvidenceValidationSession, StoreRuntimeError,
+    StoreValidationSession, StoreWorkError,
 };
 
 const MAX_RECORD_FIELDS: usize = 32;
@@ -194,6 +208,18 @@ const BUILD_CODE_CAPACITY_ENVELOPE_VIOLATED: u32 = 2;
 const BUILD_CODE_CAPACITY_EXCEEDED: u32 = 3;
 const BUILD_CODE_INCOMPLETE: u32 = 4;
 const BUILD_CODE_ROW_WIDTH: u32 = 5;
+const CONTAINMENT_FALLBACK_CODE: u32 = 0x434f_4e54;
+const UNVERIFIED_CONTROLLED_CAUSE_FALLBACK_CODE: u32 = 0x554e_5652;
+
+fn work_failure_code(cause: &StoreWorkError) -> PreparationFailureCode {
+    if let Some(cause) = cause.control_cause() {
+        PreparationFailureCode::from_control(cause)
+    } else if cause.ledger_cause().is_some() {
+        PreparationFailureCode::ledger()
+    } else {
+        PreparationFailureCode::domain(UNVERIFIED_CONTROLLED_CAUSE_FALLBACK_CODE)
+    }
+}
 
 #[allow(
     private_interfaces,
@@ -1623,6 +1649,8 @@ type RawStoreOperation<O, PP, U> =
     RetainedOperation<O, StorePhaseKey, PP, U, StoreDimensionKey, StoreFallbackEnvelope>;
 type RawStoreControlCheckpoint<'a, O, PP, U> =
     RetainedControlCheckpoint<'a, O, StorePhaseKey, PP, U, StoreDimensionKey>;
+type RawStoreWorkControl<'a, O, PP, U> =
+    RetainedWorkControl<'a, O, StorePhaseKey, PP, U, StoreDimensionKey>;
 type RawStoreAssembly<O, PP, U> = RetainedPublicationAssembly<
     O,
     StorePhaseKey,
@@ -1709,6 +1737,86 @@ where
 {
     raw: RawStoreControlCheckpoint<'a, O, PP, U>,
     domain: &'a StoreKeyDomain,
+}
+
+/// Poll-and-work capability lent to one controlled canonical builder or validator.
+///
+/// The work dimension is validated and bound before the callback begins. This capability cannot
+/// reserve storage, report progress, mutate retained tables, or enter publication. Any rejected
+/// control action is sticky: ignoring the returned error still rejects the enclosing operation.
+pub struct RetainedStoreWorkControl<'a, O, PP, U>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    raw: RawStoreWorkControl<'a, O, PP, U>,
+    sticky: Option<StoreWorkError>,
+}
+
+enum StoreBuildCallbackFailure {
+    VerifiedBuild(StoreBuildError),
+    VerifiedWork(StoreWorkError),
+    UnverifiedCause,
+}
+
+enum StoreWorkCallbackFailure {
+    Verified(StoreWorkError),
+    UnverifiedCause,
+}
+
+impl<O, PP, U> RetainedStoreWorkControl<'_, O, PP, U>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    /// Polls cancellation and deadline state.
+    pub fn poll(&mut self) -> Result<(), StoreWorkError> {
+        let result = self.raw.poll().map_err(StoreWorkError::control);
+        self.preserve(result)
+    }
+
+    /// Records attempted-and-consumed work against the prebound dimension.
+    pub fn charge_observed(&mut self, amount: u64) -> Result<(), StoreWorkError> {
+        let result = self
+            .raw
+            .charge_observed(amount)
+            .map_err(StoreWorkError::ledger);
+        self.preserve(result)
+    }
+
+    fn preserve(&mut self, result: Result<(), StoreWorkError>) -> Result<(), StoreWorkError> {
+        if let Err(cause) = &result {
+            self.sticky.get_or_insert_with(|| cause.clone());
+        }
+        result
+    }
+
+    fn finish_build<T>(
+        self,
+        callback: Result<T, StoreControlledError>,
+    ) -> Result<T, StoreBuildCallbackFailure> {
+        match (self.sticky, callback) {
+            (Some(cause), _) => Err(StoreBuildCallbackFailure::VerifiedWork(cause)),
+            (None, Ok(value)) => Ok(value),
+            (None, Err(cause)) => match cause.into_build_or_work() {
+                Ok(cause) => Err(StoreBuildCallbackFailure::VerifiedBuild(cause)),
+                Err(_) => Err(StoreBuildCallbackFailure::UnverifiedCause),
+            },
+        }
+    }
+
+    fn finish_validation<T>(
+        self,
+        callback: Result<T, StoreWorkError>,
+    ) -> Result<T, StoreWorkCallbackFailure> {
+        match (self.sticky, callback) {
+            (Some(cause), _) => Err(StoreWorkCallbackFailure::Verified(cause)),
+            (None, Ok(value)) => Ok(value),
+            (None, Err(_)) => Err(StoreWorkCallbackFailure::UnverifiedCause),
+        }
+    }
 }
 
 impl<O, PP, U> RetainedStoreControlCheckpoint<'_, O, PP, U>
@@ -2015,7 +2123,8 @@ where
         match self.raw.try_publication_assembly(plan.into_raw()) {
             Ok(raw) => Ok(RetainedStorePublicationAssembly {
                 raw,
-                fallback_only: false,
+                fallback_cause: None,
+                success_rejection: None,
                 domain,
             }),
             Err(error) => {
@@ -2130,7 +2239,8 @@ where
     U: ProgressUnit,
 {
     raw: RawStoreAssembly<O, PP, U>,
-    fallback_only: bool,
+    fallback_cause: Option<PreparationFailureCode>,
+    success_rejection: Option<PreparationFailureCode>,
     domain: StoreKeyDomain,
 }
 
@@ -2166,8 +2276,22 @@ where
         self.raw.outcome_evidence_commitment_len()
     }
 
+    fn is_fallback_only(&self) -> bool {
+        self.fallback_cause.is_some()
+    }
+
     fn ensure_writable(&self) -> Result<(), StoreRuntimeError> {
-        if self.fallback_only {
+        if self.is_fallback_only() {
+            Err(StoreRuntimeError::FallbackOnly)
+        } else if self.success_rejection.is_some() {
+            Err(StoreRuntimeError::SuccessOutcomeRejected)
+        } else {
+            Ok(())
+        }
+    }
+
+    fn ensure_evidence_writable(&self) -> Result<(), StoreRuntimeError> {
+        if self.is_fallback_only() {
             Err(StoreRuntimeError::FallbackOnly)
         } else {
             Ok(())
@@ -2190,10 +2314,48 @@ where
             Ok(value) => Ok(value),
             Err(error) => {
                 if publication_error_requires_containment(&error) {
-                    self.fallback_only = true;
+                    self.fallback_cause =
+                        Some(PreparationFailureCode::domain(CONTAINMENT_FALLBACK_CODE));
                 }
                 Err(map_publication_error(&error))
             }
+        }
+    }
+
+    fn map_controlled_action<T>(
+        &mut self,
+        result: Result<T, RetainedPublicationError<StoreDimensionKey>>,
+        callback_failure: Option<StoreBuildCallbackFailure>,
+    ) -> Result<T, StoreRuntimeError> {
+        let Some(callback_failure) = callback_failure else {
+            return self.map_action(result);
+        };
+        match result {
+            Ok(_) => {
+                self.fallback_cause =
+                    Some(PreparationFailureCode::domain(CONTAINMENT_FALLBACK_CODE));
+                Err(StoreRuntimeError::ConstructionInvariantUnverified)
+            }
+            Err(error) if publication_error_requires_containment(&error) => {
+                self.fallback_cause =
+                    Some(PreparationFailureCode::domain(CONTAINMENT_FALLBACK_CODE));
+                Err(map_publication_error(&error))
+            }
+            Err(_) => match callback_failure {
+                StoreBuildCallbackFailure::VerifiedBuild(cause) => {
+                    Err(StoreRuntimeError::Build(cause))
+                }
+                StoreBuildCallbackFailure::VerifiedWork(cause) => {
+                    self.success_rejection = Some(work_failure_code(&cause));
+                    Err(cause.into_runtime())
+                }
+                StoreBuildCallbackFailure::UnverifiedCause => {
+                    self.fallback_cause = Some(PreparationFailureCode::domain(
+                        UNVERIFIED_CONTROLLED_CAUSE_FALLBACK_CODE,
+                    ));
+                    Err(StoreRuntimeError::UnverifiedControlledCause)
+                }
+            },
         }
     }
 
@@ -2221,6 +2383,46 @@ where
         })
     }
 
+    /// Retains one canonical scalar sequence with operation-controlled polling and work charging.
+    pub fn try_retain_canonical_sequence_controlled<T, Tag>(
+        &mut self,
+        plan: SequencePlan<T>,
+        work_dimension: StoreDimensionKey,
+        tag: Tag,
+        build: impl for<'control> FnOnce(
+            &mut SequenceWriter<T>,
+            &mut RetainedStoreWorkControl<'control, O, PP, U>,
+        ) -> Result<(), StoreControlledError>,
+    ) -> Result<CanonicalSequenceRef<T, Tag>, StoreRuntimeError>
+    where
+        T: StoredScalar,
+        Tag: Copy + Send + Sync + 'static,
+    {
+        self.ensure_writable()?;
+        self.validate_dimension(work_dimension)?;
+        let allocation = plan.allocation_plan().map_err(StoreRuntimeError::Plan)?;
+        let mut callback_cause = None;
+        let result = self.raw.try_retain_canonical_controlled(
+            work_dimension,
+            allocation,
+            |emplacer, raw| {
+                let mut writer = <T as sealed::StoredScalar>::new_writer(plan.capacity, plan.len)?;
+                let mut control = RetainedStoreWorkControl { raw, sticky: None };
+                let callback = build(&mut writer, &mut control);
+                if let Err(cause) = control.finish_build(callback) {
+                    callback_cause = Some(cause);
+                    return Err(RetainedBuildFailureCode::new(BUILD_CODE_DOMAIN));
+                }
+                Ok(emplacer.place(writer.finish()?, tag))
+            },
+        );
+        self.map_controlled_action(result, callback_cause)
+            .map(|raw| CanonicalStoreRef {
+                raw,
+                marker: PhantomData,
+            })
+    }
+
     /// Retains one exact outcome-evidence scalar sequence.
     pub fn try_retain_outcome_evidence_sequence<T, Tag>(
         &mut self,
@@ -2232,7 +2434,7 @@ where
         T: StoredScalar,
         Tag: Copy + Send + Sync + 'static,
     {
-        self.ensure_writable()?;
+        self.ensure_evidence_writable()?;
         let allocation = plan.allocation_plan().map_err(StoreRuntimeError::Plan)?;
         let result = self
             .raw
@@ -2280,7 +2482,7 @@ where
     where
         Tag: Copy + Send + Sync + 'static,
     {
-        self.ensure_writable()?;
+        self.ensure_evidence_writable()?;
         let allocation = plan.allocation_plan().map_err(StoreRuntimeError::Plan)?;
         let result = self
             .raw
@@ -2328,7 +2530,7 @@ where
     where
         Tag: Copy + Send + Sync + 'static,
     {
-        self.ensure_writable()?;
+        self.ensure_evidence_writable()?;
         let allocation = plan.allocation_plan().map_err(StoreRuntimeError::Plan)?;
         let result = self
             .raw
@@ -2366,6 +2568,45 @@ where
         })
     }
 
+    /// Retains one canonical record block with operation-controlled polling and work charging.
+    pub fn try_retain_canonical_records_controlled<Tag>(
+        &mut self,
+        plan: RecordPlan,
+        work_dimension: StoreDimensionKey,
+        tag: Tag,
+        build: impl for<'control> FnOnce(
+            &mut CanonicalRecordWriter,
+            &mut RetainedStoreWorkControl<'control, O, PP, U>,
+        ) -> Result<(), StoreControlledError>,
+    ) -> Result<CanonicalRecordRef<Tag>, StoreRuntimeError>
+    where
+        Tag: Copy + Send + Sync + 'static,
+    {
+        self.ensure_writable()?;
+        self.validate_dimension(work_dimension)?;
+        let allocation = plan.allocation_plan().map_err(StoreRuntimeError::Plan)?;
+        let mut callback_cause = None;
+        let result = self.raw.try_retain_canonical_controlled(
+            work_dimension,
+            allocation,
+            |emplacer, raw| {
+                let mut writer = CanonicalRecordWriter::new(plan)?;
+                let mut control = RetainedStoreWorkControl { raw, sticky: None };
+                let callback = build(&mut writer, &mut control);
+                if let Err(cause) = control.finish_build(callback) {
+                    callback_cause = Some(cause);
+                    return Err(RetainedBuildFailureCode::new(BUILD_CODE_DOMAIN));
+                }
+                Ok(emplacer.place(writer.finish()?, tag))
+            },
+        );
+        self.map_controlled_action(result, callback_cause)
+            .map(|raw| CanonicalStoreRef {
+                raw,
+                marker: PhantomData,
+            })
+    }
+
     /// Retains one outcome-evidence fixed-width record block.
     pub fn try_retain_outcome_evidence_records<Tag>(
         &mut self,
@@ -2376,7 +2617,7 @@ where
     where
         Tag: Copy + Send + Sync + 'static,
     {
-        self.ensure_writable()?;
+        self.ensure_evidence_writable()?;
         let allocation = plan.allocation_plan().map_err(StoreRuntimeError::Plan)?;
         let result = self
             .raw
@@ -2422,7 +2663,7 @@ where
         SlotKind: ShareableStoreKind,
         SlotTag: Copy + Send + Sync + 'static,
     {
-        self.ensure_writable()?;
+        self.ensure_evidence_writable()?;
         let result = self
             .raw
             .try_share_outcome_evidence(source.share_source().aggregate(), source_ref.raw);
@@ -2450,7 +2691,7 @@ where
         dimension: StoreDimensionKey,
         amount: u64,
     ) -> Result<(), StoreRuntimeError> {
-        self.ensure_writable()?;
+        self.ensure_evidence_writable()?;
         self.validate_dimension(dimension)?;
         let result = self.raw.try_commit_outcome_evidence(dimension, amount);
         self.map_action(result)
@@ -2471,19 +2712,52 @@ where
         CanonicalTag: Copy + Send + Sync + 'static,
         EvidenceTag: Copy + Send + Sync + 'static,
     {
-        let domain = self.domain;
-        if self.fallback_only {
+        let Self {
+            raw,
+            fallback_cause,
+            success_rejection,
+            domain,
+        } = self;
+        if let Some(cause) = fallback_cause {
             return StoreSuccessValidation::FallbackOnly(StoreFallbackOnly {
-                state: StoreFallbackState::Assembly(self.raw),
+                state: StoreFallbackState::Assembly { raw, cause },
                 domain,
             });
         }
-        match self
-            .raw
-            .validate_success(canonical_root.raw, evidence_root.raw, |raw, _, _| {
-                let mut session = StoreValidationSession { raw };
-                validate(&mut session, canonical_root, evidence_root)
-            }) {
+        if let Some(cause) = success_rejection {
+            return match raw
+                .validate_success(canonical_root.raw, evidence_root.raw, |_, _, _| false)
+            {
+                RetainedSuccessValidation::Valid(raw) => {
+                    StoreSuccessValidation::Rejected(StoreFailureAssembly {
+                        raw: raw.downgrade_to_rich_failure(cause),
+                        fallback_only: false,
+                        forced_cause: Some(cause),
+                        evidence_root,
+                        domain,
+                    })
+                }
+                RetainedSuccessValidation::Rejected(raw) => {
+                    StoreSuccessValidation::Rejected(StoreFailureAssembly {
+                        raw: raw.with_fallback_cause(cause),
+                        fallback_only: false,
+                        forced_cause: Some(cause),
+                        evidence_root,
+                        domain,
+                    })
+                }
+                RetainedSuccessValidation::FallbackOnly(raw) => {
+                    StoreSuccessValidation::FallbackOnly(StoreFallbackOnly {
+                        state: StoreFallbackState::Validated(raw),
+                        domain,
+                    })
+                }
+            };
+        }
+        match raw.validate_success(canonical_root.raw, evidence_root.raw, |raw, _, _| {
+            let mut session = StoreValidationSession { raw };
+            validate(&mut session, canonical_root, evidence_root)
+        }) {
             RetainedSuccessValidation::Valid(raw) => {
                 StoreSuccessValidation::Valid(ValidatedStoreSuccess {
                     raw,
@@ -2496,12 +2770,180 @@ where
                 StoreSuccessValidation::Rejected(StoreFailureAssembly {
                     raw,
                     fallback_only: false,
+                    forced_cause: None,
                     evidence_root,
                     domain,
                 })
             }
             RetainedSuccessValidation::FallbackOnly(raw) => {
                 StoreSuccessValidation::FallbackOnly(StoreFallbackOnly {
+                    state: StoreFallbackState::Validated(raw),
+                    domain,
+                })
+            }
+        }
+    }
+
+    /// Consumes the writable graph and validates it with prebound operation work control.
+    ///
+    /// Semantic `Ok(false)` is a rejection. A returned or ignored control error is an
+    /// interruption and preserves the evidence-only failure owner. Invalid roots, poisoned state,
+    /// and callback panic retain the existing fallback-only containment semantics.
+    pub fn validate_success_controlled<CanonicalKind, CanonicalTag, EvidenceKind, EvidenceTag>(
+        self,
+        work_dimension: StoreDimensionKey,
+        canonical_root: CanonicalStoreRef<CanonicalKind, CanonicalTag>,
+        evidence_root: OutcomeEvidenceStoreRef<EvidenceKind, EvidenceTag>,
+        validate: impl for<'session, 'storage, 'control> FnOnce(
+            &mut StoreValidationSession<'session, 'storage>,
+            CanonicalStoreRef<CanonicalKind, CanonicalTag>,
+            OutcomeEvidenceStoreRef<EvidenceKind, EvidenceTag>,
+            &mut RetainedStoreWorkControl<'control, O, PP, U>,
+        ) -> Result<bool, StoreWorkError>,
+    ) -> StoreControlledSuccessValidation<
+        O,
+        PP,
+        U,
+        CanonicalKind,
+        CanonicalTag,
+        EvidenceKind,
+        EvidenceTag,
+    >
+    where
+        CanonicalTag: Copy + Send + Sync + 'static,
+        EvidenceTag: Copy + Send + Sync + 'static,
+    {
+        if let Err(cause) = self.validate_dimension(work_dimension) {
+            return StoreControlledSuccessValidation::InvalidWorkDimension {
+                assembly: self,
+                cause,
+            };
+        }
+        let Self {
+            raw,
+            fallback_cause,
+            success_rejection,
+            domain,
+        } = self;
+        if let Some(cause) = fallback_cause {
+            return StoreControlledSuccessValidation::FallbackOnly(StoreFallbackOnly {
+                state: StoreFallbackState::Assembly { raw, cause },
+                domain,
+            });
+        }
+        if let Some(cause) = success_rejection {
+            return match raw
+                .validate_success(canonical_root.raw, evidence_root.raw, |_, _, _| false)
+            {
+                RetainedSuccessValidation::Valid(raw) => {
+                    StoreControlledSuccessValidation::Rejected(StoreFailureAssembly {
+                        raw: raw.downgrade_to_rich_failure(cause),
+                        fallback_only: false,
+                        forced_cause: Some(cause),
+                        evidence_root,
+                        domain,
+                    })
+                }
+                RetainedSuccessValidation::Rejected(raw) => {
+                    StoreControlledSuccessValidation::Rejected(StoreFailureAssembly {
+                        raw: raw.with_fallback_cause(cause),
+                        fallback_only: false,
+                        forced_cause: Some(cause),
+                        evidence_root,
+                        domain,
+                    })
+                }
+                RetainedSuccessValidation::FallbackOnly(raw) => {
+                    StoreControlledSuccessValidation::FallbackOnly(StoreFallbackOnly {
+                        state: StoreFallbackState::Validated(raw),
+                        domain,
+                    })
+                }
+            };
+        }
+        let mut callback_cause = None;
+        let validation = raw.validate_success_controlled(
+            work_dimension,
+            canonical_root.raw,
+            evidence_root.raw,
+            |raw, _, _, raw_control| {
+                let mut session = StoreValidationSession { raw };
+                let mut control = RetainedStoreWorkControl {
+                    raw: raw_control,
+                    sticky: None,
+                };
+                let callback = validate(&mut session, canonical_root, evidence_root, &mut control);
+                match control.finish_validation(callback) {
+                    Ok(accepted) => accepted,
+                    Err(cause) => {
+                        callback_cause = Some(cause);
+                        false
+                    }
+                }
+            },
+        );
+        match validation {
+            RetainedSuccessValidation::Valid(raw) => match callback_cause {
+                Some(StoreWorkCallbackFailure::Verified(cause)) => {
+                    let forced_cause = work_failure_code(&cause);
+                    let failure = StoreFailureAssembly {
+                        raw: raw.downgrade_to_rich_failure(forced_cause),
+                        fallback_only: false,
+                        forced_cause: Some(forced_cause),
+                        evidence_root,
+                        domain,
+                    };
+                    StoreControlledSuccessValidation::Interrupted { failure, cause }
+                }
+                Some(StoreWorkCallbackFailure::UnverifiedCause) => {
+                    StoreControlledSuccessValidation::FallbackOnly(StoreFallbackOnly {
+                        state: StoreFallbackState::FailureAssembly(raw.downgrade_to_rich_failure(
+                            PreparationFailureCode::domain(
+                                UNVERIFIED_CONTROLLED_CAUSE_FALLBACK_CODE,
+                            ),
+                        )),
+                        domain,
+                    })
+                }
+                None => StoreControlledSuccessValidation::Valid(ValidatedStoreSuccess {
+                    raw,
+                    canonical_root,
+                    evidence_root,
+                    domain,
+                }),
+            },
+            RetainedSuccessValidation::Rejected(raw) => match callback_cause {
+                Some(StoreWorkCallbackFailure::Verified(cause)) => {
+                    let forced_cause = work_failure_code(&cause);
+                    let failure = StoreFailureAssembly {
+                        raw: raw.with_fallback_cause(forced_cause),
+                        fallback_only: false,
+                        forced_cause: Some(forced_cause),
+                        evidence_root,
+                        domain,
+                    };
+                    StoreControlledSuccessValidation::Interrupted { failure, cause }
+                }
+                Some(StoreWorkCallbackFailure::UnverifiedCause) => {
+                    StoreControlledSuccessValidation::FallbackOnly(StoreFallbackOnly {
+                        state: StoreFallbackState::FailureAssembly(raw.with_fallback_cause(
+                            PreparationFailureCode::domain(
+                                UNVERIFIED_CONTROLLED_CAUSE_FALLBACK_CODE,
+                            ),
+                        )),
+                        domain,
+                    })
+                }
+                None => StoreControlledSuccessValidation::Rejected(StoreFailureAssembly {
+                    raw,
+                    fallback_only: false,
+                    forced_cause: None,
+                    evidence_root,
+                    domain,
+                }),
+            },
+            RetainedSuccessValidation::FallbackOnly(raw) => {
+                StoreControlledSuccessValidation::FallbackOnly(StoreFallbackOnly {
                     state: StoreFallbackState::Validated(raw),
                     domain,
                 })
@@ -2521,29 +2963,53 @@ where
     where
         EvidenceTag: Copy + Send + Sync + 'static,
     {
-        let domain = self.domain;
-        if self.fallback_only {
+        let Self {
+            raw,
+            fallback_cause,
+            success_rejection,
+            domain,
+        } = self;
+        if let Some(cause) = fallback_cause {
             return StoreFailureValidation::FallbackOnly(StoreFallbackOnly {
-                state: StoreFallbackState::Assembly(self.raw),
+                state: StoreFallbackState::Assembly { raw, cause },
                 domain,
             });
         }
         map_failure_validation(
-            self.raw.validate_rich_failure(evidence_root.raw, |raw, _| {
+            raw.validate_rich_failure(evidence_root.raw, |raw, _| {
                 let mut session = StoreEvidenceValidationSession { raw };
                 validate(&mut session, evidence_root)
             }),
             evidence_root,
             domain,
+            success_rejection,
         )
     }
 
     /// Discards candidate tables and prepares only the pre-admitted fallback.
     pub fn prepare_minimal_fallback(self) -> Result<PreparedStoreFallback, StorePrepareError> {
-        let domain = self.domain;
-        self.raw
-            .prepare_minimal_fallback()
-            .map(|raw| classify_prepared_fallback(raw, domain))
+        self.prepare_minimal_fallback_with(0)
+    }
+
+    /// Discards candidate tables and freezes a caller-owned inert domain cause in the fallback.
+    ///
+    /// A previously verified control, ledger, or containment cause takes precedence over this
+    /// requested code.
+    pub fn prepare_minimal_fallback_with(
+        self,
+        cause: u32,
+    ) -> Result<PreparedStoreFallback, StorePrepareError> {
+        let Self {
+            raw,
+            fallback_cause,
+            success_rejection,
+            domain,
+        } = self;
+        let cause = fallback_cause
+            .or(success_rejection)
+            .unwrap_or(PreparationFailureCode::domain(cause));
+        let raw = raw.prepare_minimal_fallback_with(cause);
+        raw.map(|raw| classify_prepared_fallback(raw, domain))
             .map_err(StorePrepareError::from_raw)
     }
 }
@@ -2558,6 +3024,34 @@ where
 {
     Valid(ValidatedStoreSuccess<O, PP, U, CanonicalKind, CanonicalTag, EvidenceKind, EvidenceTag>),
     Rejected(StoreFailureAssembly<O, PP, U, EvidenceKind, EvidenceTag>),
+    FallbackOnly(StoreFallbackOnly<O, PP, U>),
+}
+
+/// Linear result of controlled exact success-graph validation.
+#[must_use = "every controlled validation branch retains the complete publication owner"]
+pub enum StoreControlledSuccessValidation<
+    O,
+    PP,
+    U,
+    CanonicalKind,
+    CanonicalTag,
+    EvidenceKind,
+    EvidenceTag,
+> where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    InvalidWorkDimension {
+        assembly: RetainedStorePublicationAssembly<O, PP, U>,
+        cause: StoreRuntimeError,
+    },
+    Valid(ValidatedStoreSuccess<O, PP, U, CanonicalKind, CanonicalTag, EvidenceKind, EvidenceTag>),
+    Rejected(StoreFailureAssembly<O, PP, U, EvidenceKind, EvidenceTag>),
+    Interrupted {
+        failure: StoreFailureAssembly<O, PP, U, EvidenceKind, EvidenceTag>,
+        cause: StoreWorkError,
+    },
     FallbackOnly(StoreFallbackOnly<O, PP, U>),
 }
 
@@ -2591,11 +3085,11 @@ where
         self,
         fallback_cause: u32,
     ) -> StoreFailureAssembly<O, PP, U, EvidenceKind, EvidenceTag> {
+        let fallback_cause = PreparationFailureCode::domain(fallback_cause);
         StoreFailureAssembly {
-            raw: self
-                .raw
-                .downgrade_to_rich_failure(PreparationFailureCode::domain(fallback_cause)),
+            raw: self.raw.downgrade_to_rich_failure(fallback_cause),
             fallback_only: false,
+            forced_cause: Some(fallback_cause),
             evidence_root: self.evidence_root,
             domain: self.domain,
         }
@@ -2641,6 +3135,7 @@ where
 {
     raw: RawStoreFailureAssembly<O, PP, U>,
     fallback_only: bool,
+    forced_cause: Option<PreparationFailureCode>,
     evidence_root: OutcomeEvidenceStoreRef<EvidenceKind, EvidenceTag>,
     domain: StoreKeyDomain,
 }
@@ -2670,6 +3165,10 @@ where
 
     pub(super) fn outcome_evidence_commitment_len(&self) -> usize {
         self.raw.outcome_evidence_commitment_len()
+    }
+
+    fn is_fallback_only(&self) -> bool {
+        self.fallback_only
     }
 
     fn ensure_writable(&self) -> Result<(), StoreRuntimeError> {
@@ -2849,28 +3348,55 @@ where
     where
         EvidenceTag: Copy + Send + Sync + 'static,
     {
-        let domain = self.domain;
-        if self.fallback_only {
+        let Self {
+            raw,
+            fallback_only,
+            forced_cause,
+            evidence_root: _,
+            domain,
+        } = self;
+        if fallback_only {
             return StoreFailureValidation::FallbackOnly(StoreFallbackOnly {
-                state: StoreFallbackState::FailureAssembly(self.raw),
+                state: StoreFallbackState::FailureAssembly(raw),
                 domain,
             });
         }
         map_failure_validation(
-            self.raw.validate_rich_failure(evidence_root.raw, |raw, _| {
+            raw.validate_rich_failure(evidence_root.raw, |raw, _| {
                 let mut session = StoreEvidenceValidationSession { raw };
                 validate(&mut session, evidence_root)
             }),
             evidence_root,
             domain,
+            forced_cause,
         )
     }
 
     /// Discards failure details and prepares only minimal fallback.
     pub fn prepare_minimal_fallback(self) -> Result<PreparedStoreFallback, StorePrepareError> {
-        let domain = self.domain;
-        self.raw
-            .prepare_minimal_fallback()
+        self.prepare_minimal_fallback_with(0)
+    }
+
+    /// Discards failure details and freezes a caller-owned inert domain cause in the fallback.
+    ///
+    /// A verified rejected-success cause or an existing fallback-only cause takes precedence.
+    pub fn prepare_minimal_fallback_with(
+        self,
+        cause: u32,
+    ) -> Result<PreparedStoreFallback, StorePrepareError> {
+        let Self {
+            raw,
+            fallback_only,
+            forced_cause,
+            evidence_root: _,
+            domain,
+        } = self;
+        let raw = match forced_cause {
+            Some(cause) => raw.with_fallback_cause(cause),
+            None if fallback_only => raw,
+            None => raw.with_fallback_cause(PreparationFailureCode::domain(cause)),
+        };
+        raw.prepare_minimal_fallback()
             .map(|raw| classify_prepared_fallback(raw, domain))
             .map_err(StorePrepareError::from_raw)
     }
@@ -2902,6 +3428,7 @@ fn map_failure_validation<O, PP, U, EvidenceKind, EvidenceTag>(
     >,
     evidence_root: OutcomeEvidenceStoreRef<EvidenceKind, EvidenceTag>,
     domain: StoreKeyDomain,
+    forced_cause: Option<PreparationFailureCode>,
 ) -> StoreFailureValidation<O, PP, U, EvidenceKind, EvidenceTag>
 where
     O: OperationOwner,
@@ -2912,14 +3439,19 @@ where
         RetainedFailureValidation::Valid(raw) => {
             StoreFailureValidation::Valid(ValidatedStoreFailure {
                 raw,
+                forced_cause,
                 evidence_root,
                 domain,
             })
         }
         RetainedFailureValidation::Rejected(raw) => {
             StoreFailureValidation::Rejected(StoreFailureAssembly {
-                raw,
+                raw: match forced_cause {
+                    Some(cause) => raw.with_fallback_cause(cause),
+                    None => raw,
+                },
                 fallback_only: false,
+                forced_cause,
                 evidence_root,
                 domain,
             })
@@ -2942,6 +3474,7 @@ where
     U: ProgressUnit,
 {
     raw: RawValidatedStoreFailure<O, PP, U>,
+    forced_cause: Option<PreparationFailureCode>,
     evidence_root: OutcomeEvidenceStoreRef<EvidenceKind, EvidenceTag>,
     domain: StoreKeyDomain,
 }
@@ -2952,25 +3485,46 @@ where
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    /// Freezes rich-failure evidence and its domain cause.
+    /// Freezes rich-failure evidence and its terminal cause.
+    ///
+    /// A verified control, ledger, or admission-downgrade cause carried by this linear owner takes
+    /// precedence over the caller's domain code. Ordinary semantic rejection has no forced cause,
+    /// so its caller-supplied code remains authoritative.
     pub fn try_prepare(
         self,
         cause: u32,
         final_progress: FinalProgress<PP, U>,
     ) -> Result<PreparedStoreFailureOutcome<EvidenceKind, EvidenceTag>, StorePrepareError> {
-        let domain = self.domain;
-        self.raw
-            .try_prepare(PreparationFailureCode::domain(cause), final_progress)
-            .map(|raw| classify_prepared_failure(raw, self.evidence_root, domain))
-            .map_err(StorePrepareError::from_raw)
+        let Self {
+            raw,
+            forced_cause,
+            evidence_root,
+            domain,
+        } = self;
+        raw.try_prepare(
+            forced_cause.unwrap_or(PreparationFailureCode::domain(cause)),
+            final_progress,
+        )
+        .map(|raw| classify_prepared_failure(raw, evidence_root, domain))
+        .map_err(StorePrepareError::from_raw)
     }
 
     /// Discards rich failure and prepares only minimal fallback.
+    ///
+    /// Any verified cause carried from the rejected success path remains the frozen fallback
+    /// cause.
     pub fn prepare_minimal_fallback(self) -> Result<PreparedStoreFallback, StorePrepareError> {
-        let domain = self.domain;
-        self.raw
-            .prepare_minimal_fallback()
-            .map(|raw| classify_prepared_fallback(raw, domain))
+        let Self {
+            raw,
+            forced_cause,
+            evidence_root: _,
+            domain,
+        } = self;
+        let raw = match forced_cause {
+            Some(cause) => raw.prepare_minimal_fallback_with(cause),
+            None => raw.prepare_minimal_fallback(),
+        };
+        raw.map(|raw| classify_prepared_fallback(raw, domain))
             .map_err(StorePrepareError::from_raw)
     }
 }
@@ -2981,7 +3535,10 @@ where
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    Assembly(RawStoreAssembly<O, PP, U>),
+    Assembly {
+        raw: RawStoreAssembly<O, PP, U>,
+        cause: PreparationFailureCode,
+    },
     FailureAssembly(RawStoreFailureAssembly<O, PP, U>),
     Validated(RawStoreFallbackOnly<O, PP, U>),
 }
@@ -3008,7 +3565,7 @@ where
     pub fn prepare_minimal_fallback(self) -> Result<PreparedStoreFallback, StorePrepareError> {
         let domain = self.domain;
         let raw = match self.state {
-            StoreFallbackState::Assembly(raw) => raw.prepare_minimal_fallback(),
+            StoreFallbackState::Assembly { raw, cause } => raw.prepare_minimal_fallback_with(cause),
             StoreFallbackState::FailureAssembly(raw) => raw.prepare_minimal_fallback(),
             StoreFallbackState::Validated(raw) => raw.prepare_minimal_fallback(),
         };

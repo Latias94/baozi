@@ -265,13 +265,14 @@ where
             && continuation.cursor.counters.canonical
                 == continuation.final_endpoint.counters.canonical
             && expected.is_prefix_of(final_state);
-        let state = if !assembly.fallback_only && endpoints_are_compatible && actual == expected {
-            FailureExecutionState::Active
-        } else {
-            FailureExecutionState::Abandoned {
-                failed_instruction: continuation.cursor.next_ordinal,
-            }
-        };
+        let state =
+            if !assembly.is_fallback_only() && endpoints_are_compatible && actual == expected {
+                FailureExecutionState::Active
+            } else {
+                FailureExecutionState::Abandoned {
+                    failed_instruction: continuation.cursor.next_ordinal,
+                }
+            };
         Self {
             assembly,
             continuation,
@@ -356,12 +357,14 @@ where
         let result = action(&mut self.assembly);
         let after = evidence_state(&self.assembly);
         match result {
-            Ok(value) if !self.assembly.fallback_only && before.try_apply(delta) == Some(after) => {
+            Ok(value)
+                if !self.assembly.is_fallback_only() && before.try_apply(delta) == Some(after) =>
+            {
                 self.advance(delta)?;
                 Ok(value)
             }
             Ok(_) => self.abandon_invariant(),
-            Err(cause) if self.assembly.fallback_only => {
+            Err(cause) if self.assembly.is_fallback_only() => {
                 let failed_instruction = self.continuation.cursor.next_ordinal;
                 self.state = FailureExecutionState::Abandoned { failed_instruction };
                 Err(StoreExecutionError::Contained {

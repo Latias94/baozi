@@ -1506,7 +1506,7 @@ where
     reason = "crate-private until the U4 canonical consumers switch atomically"
 )]
 impl PreparationFailureCode {
-    pub(super) fn from_control(cause: &ControlCause) -> Self {
+    pub(crate) fn from_control(cause: &ControlCause) -> Self {
         let code = match cause {
             ControlCause::Cancelled { .. } => 1,
             ControlCause::DeadlineExceeded => 2,

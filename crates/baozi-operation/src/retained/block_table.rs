@@ -33,10 +33,10 @@ use crate::{CapacityPlan, OperationOwner};
 use std::any::TypeId;
 use std::fmt;
 use std::marker::PhantomData;
-use std::num::NonZeroUsize;
+use std::num::{NonZeroU64, NonZeroUsize};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 pub(super) type InvariantRetainedBrand<Block, Tag> = PhantomData<fn(Block, Tag) -> (Block, Tag)>;
 
@@ -299,7 +299,13 @@ pub(super) struct RetainedBlockMember<Block> {
     pub(super) allocation: RetainedAllocation<Block>,
     tag: TypeId,
     origin: RetainedBlockOrigin,
-    reachable: AtomicBool,
+    visit_epoch: AtomicU64,
+}
+
+impl<Block> RetainedBlockMember<Block> {
+    fn first_visit_in(&self, epoch: NonZeroU64) -> bool {
+        self.visit_epoch.swap(epoch.get(), Ordering::AcqRel) != epoch.get()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -336,18 +342,6 @@ impl<Block> RetainedBlockTable<Block> {
         self.members
             .get(identity.index)
             .and_then(|member| (member.tag == identity.tag).then(|| member.allocation.as_ref()))
-    }
-
-    pub(super) fn reset_reachable(&self) {
-        for member in &self.members {
-            member.reachable.store(false, Ordering::Release);
-        }
-    }
-
-    pub(super) fn all_reachable(&self) -> bool {
-        self.members
-            .iter()
-            .all(|member| member.reachable.load(Ordering::Acquire))
     }
 }
 
@@ -1080,7 +1074,7 @@ pub(super) fn release_retained_table_payload<Block>(
         allocation,
         tag: _,
         origin,
-        reachable: _,
+        visit_epoch: _,
     } in members
     {
         let outcome = if mode == RetainedReleaseMode::BeforeAttribution
@@ -1124,11 +1118,13 @@ pub(super) fn release_retained_table_payload<Block>(
 /// Read-only reachability session for a success-capable canonical/evidence graph.
 ///
 /// Validation must visit every unique slot in both tables. Repeated DAG edges are valid and count
-/// once. Any lookup returning `None` invalidates the whole session even if the callback ignores it.
+/// once within this session's nonzero epoch. Any lookup returning `None` invalidates the whole
+/// session even if the callback ignores it.
 pub(crate) struct RetainedClosureSession<'a, CanonicalBlock, EvidenceBlock> {
     pub(super) canonical: &'a RetainedBlockTable<CanonicalBlock>,
     pub(super) evidence: &'a RetainedBlockTable<EvidenceBlock>,
     pub(super) set_id: RetainedSetId,
+    pub(super) epoch: NonZeroU64,
     pub(super) canonical_seen: usize,
     pub(super) evidence_seen: usize,
     pub(super) valid: bool,
@@ -1156,7 +1152,7 @@ impl<'a, CanonicalBlock, EvidenceBlock> RetainedClosureSession<'a, CanonicalBloc
             self.valid = false;
             return None;
         }
-        if !member.reachable.swap(true, Ordering::AcqRel) {
+        if member.first_visit_in(self.epoch) {
             let Some(seen) = self.canonical_seen.checked_add(1) else {
                 self.valid = false;
                 return None;
@@ -1186,7 +1182,7 @@ impl<'a, CanonicalBlock, EvidenceBlock> RetainedClosureSession<'a, CanonicalBloc
             self.valid = false;
             return None;
         }
-        if !member.reachable.swap(true, Ordering::AcqRel) {
+        if member.first_visit_in(self.epoch) {
             let Some(seen) = self.evidence_seen.checked_add(1) else {
                 self.valid = false;
                 return None;
@@ -1199,11 +1195,12 @@ impl<'a, CanonicalBlock, EvidenceBlock> RetainedClosureSession<'a, CanonicalBloc
 
 /// Read-only reachability session for an evidence-only graph.
 ///
-/// Validation must visit every unique evidence slot. Repeated DAG edges count once, and a failed
-/// lookup invalidates the complete session.
+/// Validation must visit every unique evidence slot. Repeated DAG edges count once within this
+/// session's nonzero epoch, and a failed lookup invalidates the complete session.
 pub(crate) struct RetainedEvidenceClosureSession<'a, EvidenceBlock> {
     pub(super) evidence: &'a RetainedBlockTable<EvidenceBlock>,
     pub(super) set_id: RetainedSetId,
+    pub(super) epoch: NonZeroU64,
     pub(super) seen: usize,
     pub(super) valid: bool,
     pub(super) not_send_or_sync: PhantomData<Rc<()>>,
@@ -1230,7 +1227,7 @@ impl<'a, EvidenceBlock> RetainedEvidenceClosureSession<'a, EvidenceBlock> {
             self.valid = false;
             return None;
         }
-        if !member.reachable.swap(true, Ordering::AcqRel) {
+        if member.first_visit_in(self.epoch) {
             let Some(seen) = self.seen.checked_add(1) else {
                 self.valid = false;
                 return None;
@@ -1762,7 +1759,7 @@ where
         allocation,
         tag: TypeId::of::<Tag>(),
         origin: RetainedBlockOrigin::New,
-        reachable: AtomicBool::new(false),
+        visit_epoch: AtomicU64::new(0),
     });
     #[cfg(feature = "_u4c-collector")]
     record_slot_publication(BlockKind::New);
@@ -1848,7 +1845,7 @@ where
         allocation,
         tag: TypeId::of::<Tag>(),
         origin: RetainedBlockOrigin::Inherited,
-        reachable: AtomicBool::new(false),
+        visit_epoch: AtomicU64::new(0),
     });
     #[cfg(feature = "_u4c-collector")]
     record_slot_publication(BlockKind::Inherited);

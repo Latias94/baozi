@@ -565,7 +565,7 @@ fn validated_success_downgrade_reuses_the_same_failure_tail() {
         ledger_evidence,
     } = prepared.handoff();
     assert_eq!(ledger_evidence.header().current_live_bytes(), 0);
-    assert_eq!(store_failure_cause(&ledger_evidence).code(), 92);
+    assert_eq!(store_failure_cause(&ledger_evidence).code(), 91);
     drop(outcome_evidence);
     drop(ledger_evidence);
     assert_eq!(account.snapshot().live_retained_bytes(), 0);

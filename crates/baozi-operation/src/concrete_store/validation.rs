@@ -7,6 +7,7 @@ use super::{
     StoreDimensionKey, StoreKeyDomain, StorePhaseKey, StorePlanError, StoredBlock, StoredScalar,
     sealed,
 };
+use crate::control::ControlCause;
 use crate::ledger::{LedgerCause, PhaseCompletionError};
 use crate::retained::{
     AccountPoisoned, RetainedAllocationError, RetainedClosureSession,
@@ -203,6 +204,166 @@ pub enum StoreDestination {
     OutcomeEvidence,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum StoreWorkErrorCause {
+    Control(ControlCause),
+    Ledger(LedgerCause<StoreDimensionKey>),
+}
+
+/// Failure issued by one borrowed operation-work capability.
+///
+/// Values of this type can be cloned for reporting, but a controlled callback accepts them as
+/// authoritative only when its own capability observed the same sticky failure. This prevents a
+/// cause captured from another operation from being replayed as current cancellation or budget
+/// evidence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoreWorkError {
+    cause: StoreWorkErrorCause,
+}
+
+impl StoreWorkError {
+    pub(super) const fn control(cause: ControlCause) -> Self {
+        Self {
+            cause: StoreWorkErrorCause::Control(cause),
+        }
+    }
+
+    pub(super) const fn ledger(cause: LedgerCause<StoreDimensionKey>) -> Self {
+        Self {
+            cause: StoreWorkErrorCause::Ledger(cause),
+        }
+    }
+
+    /// Returns the operation control failure, when polling observed a terminal state.
+    pub const fn control_cause(&self) -> Option<&ControlCause> {
+        match &self.cause {
+            StoreWorkErrorCause::Control(cause) => Some(cause),
+            StoreWorkErrorCause::Ledger(_) => None,
+        }
+    }
+
+    /// Returns the work-ledger failure, when observed work could not be charged.
+    pub const fn ledger_cause(&self) -> Option<&LedgerCause<StoreDimensionKey>> {
+        match &self.cause {
+            StoreWorkErrorCause::Ledger(cause) => Some(cause),
+            StoreWorkErrorCause::Control(_) => None,
+        }
+    }
+
+    pub(super) fn into_runtime(self) -> StoreRuntimeError {
+        match self.cause {
+            StoreWorkErrorCause::Control(cause) => StoreRuntimeError::Control(cause),
+            StoreWorkErrorCause::Ledger(cause) => StoreRuntimeError::Ledger(cause),
+        }
+    }
+}
+
+impl fmt::Display for StoreWorkError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self.cause {
+            StoreWorkErrorCause::Control(cause) => {
+                write!(formatter, "retained store control rejected work: {cause}")
+            }
+            StoreWorkErrorCause::Ledger(cause) => {
+                write!(formatter, "retained store ledger rejected work: {cause}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for StoreWorkError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match &self.cause {
+            StoreWorkErrorCause::Control(cause) => Some(cause),
+            StoreWorkErrorCause::Ledger(cause) => Some(cause),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum StoreControlledErrorCause {
+    Build(StoreBuildError),
+    Work(StoreWorkError),
+}
+
+/// Failure vocabulary available inside one operation-controlled store callback.
+///
+/// Downstream code can create only ordinary writer failures through [`StoreBuildError`].
+/// Cancellation and budget failures originate from the borrowed
+/// [`crate::RetainedStoreWorkControl`] as [`StoreWorkError`] values and remain subject to sticky
+/// same-capability verification.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoreControlledError {
+    cause: StoreControlledErrorCause,
+}
+
+impl StoreControlledError {
+    /// Returns the ordinary writer failure, when construction rejected its input.
+    pub const fn build_cause(&self) -> Option<&StoreBuildError> {
+        match &self.cause {
+            StoreControlledErrorCause::Build(cause) => Some(cause),
+            StoreControlledErrorCause::Work(_) => None,
+        }
+    }
+
+    /// Returns the operation control failure, when polling observed a terminal state.
+    pub const fn control_cause(&self) -> Option<&ControlCause> {
+        match &self.cause {
+            StoreControlledErrorCause::Work(cause) => cause.control_cause(),
+            StoreControlledErrorCause::Build(_) => None,
+        }
+    }
+
+    /// Returns the work-ledger failure, when observed work could not be charged.
+    pub const fn ledger_cause(&self) -> Option<&LedgerCause<StoreDimensionKey>> {
+        match &self.cause {
+            StoreControlledErrorCause::Work(cause) => cause.ledger_cause(),
+            StoreControlledErrorCause::Build(_) => None,
+        }
+    }
+
+    pub(super) fn into_build_or_work(self) -> Result<StoreBuildError, StoreWorkError> {
+        match self.cause {
+            StoreControlledErrorCause::Build(cause) => Ok(cause),
+            StoreControlledErrorCause::Work(cause) => Err(cause),
+        }
+    }
+}
+
+impl From<StoreBuildError> for StoreControlledError {
+    fn from(cause: StoreBuildError) -> Self {
+        Self {
+            cause: StoreControlledErrorCause::Build(cause),
+        }
+    }
+}
+
+impl From<StoreWorkError> for StoreControlledError {
+    fn from(cause: StoreWorkError) -> Self {
+        Self {
+            cause: StoreControlledErrorCause::Work(cause),
+        }
+    }
+}
+
+impl fmt::Display for StoreControlledError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self.cause {
+            StoreControlledErrorCause::Build(cause) => cause.fmt(formatter),
+            StoreControlledErrorCause::Work(cause) => cause.fmt(formatter),
+        }
+    }
+}
+
+impl std::error::Error for StoreControlledError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match &self.cause {
+            StoreControlledErrorCause::Build(cause) => Some(cause),
+            StoreControlledErrorCause::Work(cause) => Some(cause),
+        }
+    }
+}
+
 /// Public failure vocabulary for the concrete retained store.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -210,6 +371,7 @@ pub enum StoreRuntimeError {
     Plan(StorePlanError),
     BatchCapacity,
     BatchAllocationFailed,
+    Control(ControlCause),
     Ledger(LedgerCause<StoreDimensionKey>),
     ForeignPhaseDomain {
         phase: StorePhaseKey,
@@ -269,6 +431,10 @@ pub enum StoreRuntimeError {
     /// A retained physical charge could not be proven released. This does not assert that payload
     /// or nested storage destruction failed.
     ChargeReleaseUnverified,
+    /// A controlled callback rejected the success path while preserving evidence publication.
+    SuccessOutcomeRejected,
+    /// A callback returned a control or ledger cause that its current capability did not issue.
+    UnverifiedControlledCause,
     FallbackOnly,
     Poisoned,
 }
@@ -281,6 +447,7 @@ impl fmt::Display for StoreRuntimeError {
             Self::BatchAllocationFailed => {
                 formatter.write_str("retained store batch allocation failed")
             }
+            Self::Control(cause) => write!(formatter, "retained store control rejected work: {cause}"),
             Self::Ledger(cause) => {
                 write!(formatter, "retained store ledger rejected action: {cause}")
             }
@@ -353,6 +520,12 @@ impl fmt::Display for StoreRuntimeError {
             Self::ChargeReleaseUnverified => {
                 formatter.write_str("retained physical charge release could not be verified")
             }
+            Self::SuccessOutcomeRejected => {
+                formatter.write_str("retained store success outcome was already rejected")
+            }
+            Self::UnverifiedControlledCause => formatter.write_str(
+                "retained store callback returned an unverified control or ledger cause",
+            ),
             Self::FallbackOnly => {
                 formatter.write_str("retained store is restricted to minimal fallback")
             }
@@ -365,6 +538,7 @@ impl std::error::Error for StoreRuntimeError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Plan(cause) => Some(cause),
+            Self::Control(cause) => Some(cause),
             Self::Ledger(cause) => Some(cause),
             Self::Build(cause) => Some(cause),
             Self::AccountPoisoned(cause) | Self::AccountPoisonedWithRetainedCharge(cause) => {

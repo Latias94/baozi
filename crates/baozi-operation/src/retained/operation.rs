@@ -26,7 +26,7 @@ use super::{
     test_retained_final_owner_allocator_entries,
 };
 use crate::control::discard_untrusted_panic_payload;
-use crate::coordinator::OperationCoordinator;
+use crate::coordinator::{OperationCoordinator, OperationPollCheckpoint};
 use crate::ledger::{
     AttributionBatchPlan, CanonicalOutput, LedgerCause, LedgerLimits, LiveReservation,
     OutcomeEvidenceDestination, PhaseCompletionError, StartupAccountShareEnvelope,
@@ -69,7 +69,43 @@ where
     U: ProgressUnit,
     D: Copy + Ord + fmt::Debug,
 {
-    coordinator: &'a mut OperationCoordinator<O, P, PP, U, D>,
+    poll: OperationPollCheckpoint<'a, PP, U>,
+    ledger: &'a crate::ledger::Ledger<O, P, D>,
+}
+
+/// Poll-and-observed-work authority bound to one prevalidated dimension.
+///
+/// This private capability is moved into a retained builder or validator closure. It cannot
+/// reserve storage, report progress, mutate tables, or enter publication.
+pub(crate) struct RetainedWorkControl<'a, O, P, PP, U, D>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+    D: Copy + Ord + fmt::Debug,
+{
+    poll: OperationPollCheckpoint<'a, PP, U>,
+    ledger: &'a crate::ledger::Ledger<O, P, D>,
+    dimension: D,
+}
+
+impl<O, P, PP, U, D> RetainedWorkControl<'_, O, P, PP, U, D>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+    D: Copy + Ord + fmt::Debug,
+{
+    pub(crate) fn poll(&mut self) -> Result<(), ControlCause> {
+        self.poll.poll()
+    }
+
+    pub(crate) fn charge_observed(&self, amount: u64) -> Result<(), LedgerCause<D>> {
+        self.ledger
+            .charge_observed_batch(&[(self.dimension, amount)])
+    }
 }
 
 impl<O, P, PP, U, D> RetainedControlCheckpoint<'_, O, P, PP, U, D>
@@ -81,17 +117,15 @@ where
     D: Copy + Ord + fmt::Debug,
 {
     pub(crate) fn poll(&mut self) -> Result<(), ControlCause> {
-        self.coordinator.checkpoint().poll()
+        self.poll.poll()
     }
 
     pub(crate) fn contains_phase(&self, phase: P) -> bool {
-        self.coordinator.retained_ledger().contains_phase(phase)
+        self.ledger.contains_phase(phase)
     }
 
     pub(crate) fn contains_dimension(&self, dimension: D) -> bool {
-        self.coordinator
-            .retained_ledger()
-            .contains_dimension(dimension)
+        self.ledger.contains_dimension(dimension)
     }
 
     pub(crate) fn charge_observed(
@@ -99,9 +133,7 @@ where
         dimension: D,
         amount: u64,
     ) -> Result<(), LedgerCause<D>> {
-        self.coordinator
-            .checkpoint()
-            .charge_observed_batch(&[(dimension, amount)])
+        self.ledger.charge_observed_batch(&[(dimension, amount)])
     }
 
     pub(crate) fn reserve(
@@ -110,9 +142,7 @@ where
         dimension: D,
         bytes: u64,
     ) -> Result<LiveReservation<O, P, D>, LedgerCause<D>> {
-        self.coordinator
-            .checkpoint()
-            .reserve(phase, dimension, bytes)
+        self.ledger.reserve(phase, dimension, bytes)
     }
 
     pub(crate) fn resize(
@@ -120,9 +150,7 @@ where
         reservation: &mut LiveReservation<O, P, D>,
         bytes: u64,
     ) -> Result<(), LedgerCause<D>> {
-        self.coordinator
-            .checkpoint()
-            .resize_reservation(reservation, bytes)
+        self.ledger.resize_reservation(reservation, bytes)
     }
 
     pub(crate) fn transition(
@@ -132,8 +160,7 @@ where
         dimension: D,
         bytes: u64,
     ) -> Result<(), LedgerCause<D>> {
-        self.coordinator
-            .checkpoint()
+        self.ledger
             .transition_reservation(reservation, phase, dimension, bytes)
     }
 
@@ -141,7 +168,7 @@ where
         &self,
         reservation: &LiveReservation<O, P, D>,
     ) -> Result<(), LedgerCause<D>> {
-        self.coordinator.validate_live_reservation(reservation)
+        self.ledger.validate_live_reservation(reservation)
     }
 }
 
@@ -161,9 +188,26 @@ where
     F: Send + Sync + 'static,
 {
     pub(crate) fn control_checkpoint(&mut self) -> RetainedControlCheckpoint<'_, O, P, PP, U, D> {
-        RetainedControlCheckpoint {
-            coordinator: &mut self.coordinator,
-        }
+        let (poll, ledger) = self.coordinator.split_poll_checkpoint_and_retained_ledger();
+        RetainedControlCheckpoint { poll, ledger }
+    }
+
+    pub(crate) fn split_work_control(
+        &mut self,
+        dimension: D,
+    ) -> (
+        RetainedWorkControl<'_, O, P, PP, U, D>,
+        &crate::ledger::Ledger<O, P, D>,
+    ) {
+        let (poll, ledger) = self.coordinator.split_poll_checkpoint_and_retained_ledger();
+        (
+            RetainedWorkControl {
+                poll,
+                ledger,
+                dimension,
+            },
+            ledger,
+        )
     }
 
     pub fn contains_dimension(&self, dimension: D) -> bool {
@@ -635,6 +679,7 @@ where
                 RetainedOutcomeMode::FailureOnly
             },
             containment: AssemblyContainmentProvenance::Healthy,
+            last_validation_epoch: 0,
         })
     }
 }

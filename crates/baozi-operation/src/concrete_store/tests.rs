@@ -38,6 +38,7 @@ const fn test_dimension_semantic(local: u64) -> StoreDimensionSemanticId {
 struct TestKeys {
     phase: StorePhaseKey,
     dimension: StoreDimensionKey,
+    work_dimension: StoreDimensionKey,
 }
 
 fn test_vocabulary() -> (StoreKeyDomain, TestKeys) {
@@ -49,6 +50,9 @@ fn test_vocabulary() -> (StoreKeyDomain, TestKeys) {
         dimension: domain
             .try_admit_dimension(test_dimension_semantic(1))
             .expect("test dimension key"),
+        work_dimension: domain
+            .try_admit_dimension(test_dimension_semantic(2))
+            .expect("test work dimension key"),
     };
     (domain, keys)
 }
@@ -86,6 +90,7 @@ struct TestTag;
 struct TestRootTag;
 
 type TestOperation = RetainedStoreOperation<TestOwner, TestProgress, TestUnit>;
+type TestAssembly = RetainedStorePublicationAssembly<TestOwner, TestProgress, TestUnit>;
 
 fn test_factory() -> PhysicalStorageAccountFactory {
     PhysicalStorageAccountFactory::try_new(
@@ -119,11 +124,36 @@ fn test_operation(
     account: &PhysicalStorageAccount,
     evidence_limit: u64,
 ) -> (TestOperation, TestKeys) {
+    test_operation_with_control_and_work_limits(
+        account,
+        evidence_limit,
+        OperationControl::default(),
+        u64::MAX,
+        u64::MAX,
+    )
+}
+
+fn test_operation_with_control_and_work_limits(
+    account: &PhysicalStorageAccount,
+    evidence_limit: u64,
+    control: OperationControl<TestProgress, TestUnit>,
+    attempted_limit: u64,
+    consumed_limit: u64,
+) -> (TestOperation, TestKeys) {
     let (domain, keys) = test_vocabulary();
-    let policy = DimensionPolicy::reservable_bytes(u64::MAX, u64::MAX, u64::MAX, u64::MAX)
+    let storage_policy = DimensionPolicy::reservable_bytes(u64::MAX, u64::MAX, u64::MAX, u64::MAX)
         .with_published_outcome_evidence_limit(evidence_limit);
-    let ledger_limits =
-        LedgerLimits::new(u64::MAX, [(keys.dimension, policy)]).expect("test ledger limits");
+    let work_policy =
+        DimensionPolicy::reservable_bytes(attempted_limit, consumed_limit, u64::MAX, u64::MAX)
+            .with_published_outcome_evidence_limit(u64::MAX);
+    let ledger_limits = LedgerLimits::new(
+        u64::MAX,
+        [
+            (keys.dimension, storage_policy),
+            (keys.work_dimension, work_policy),
+        ],
+    )
+    .expect("test ledger limits");
     let ledger_plan = StoreLedgerPlan::try_new(domain, ledger_limits, &[keys.phase])
         .expect("test store ledger plan");
     let start = RetainedStoreStartPlan::new(
@@ -136,10 +166,32 @@ fn test_operation(
         1,
     );
     (
-        TestOperation::try_start(OperationControl::default(), ledger_plan, account, start)
-            .expect("test operation"),
+        TestOperation::try_start(control, ledger_plan, account, start).expect("test operation"),
         keys,
     )
+}
+
+fn test_simple_controlled_validation_graph(
+    assembly: &mut TestAssembly,
+) -> (
+    CanonicalSequenceRef<u8, TestRootTag>,
+    OutcomeEvidenceSequenceRef<u8, TestTag>,
+) {
+    let canonical_root = assembly
+        .try_retain_canonical_sequence(
+            SequencePlan::<u8>::new(1).expect("canonical sequence plan"),
+            TestRootTag,
+            |writer| writer.push(7),
+        )
+        .expect("canonical root");
+    let evidence_root = assembly
+        .try_retain_outcome_evidence_sequence(
+            SequencePlan::<u8>::new(1).expect("evidence sequence plan"),
+            TestTag,
+            |writer| writer.push(9),
+        )
+        .expect("evidence root");
+    (canonical_root, evidence_root)
 }
 
 fn test_publication_plan(
@@ -167,6 +219,19 @@ fn test_final_progress() -> FinalProgress<TestProgress, TestUnit> {
     FinalProgress::new(TestProgress::Build, TestUnit::Items, 1)
 }
 
+fn failure_outcome_header<EvidenceKind, EvidenceTag>(
+    outcome: PreparedStoreFailureOutcome<EvidenceKind, EvidenceTag>,
+) -> StoreLedgerEvidenceHeader {
+    match outcome {
+        PreparedStoreFailureOutcome::RichFailure(prepared) => {
+            prepared.handoff().ledger_evidence.header()
+        }
+        PreparedStoreFailureOutcome::MinimalFallback(prepared) => {
+            prepared.handoff().ledger_evidence.header()
+        }
+    }
+}
+
 fn test_physical_delta(
     before: crate::PhysicalStorageAccountSnapshot,
     after: crate::PhysicalStorageAccountSnapshot,
@@ -181,6 +246,94 @@ fn test_physical_delta(
             .checked_sub(before.live_retained_allocations())
             .expect("test retained allocations grow monotonically"),
     )
+}
+
+#[test]
+fn publication_assembly_minimal_fallback_freezes_requested_domain_cause() {
+    const REQUESTED_CAUSE: u32 = 0x51f0_0001;
+
+    let factory = test_factory();
+    let account = test_account(&factory);
+    let (operation, keys) = test_operation(&account, 16);
+    let assembly = operation
+        .try_publication_assembly(test_publication_plan(keys, 1, 1))
+        .expect("minimal-fallback assembly");
+
+    let published = assembly
+        .prepare_minimal_fallback_with(REQUESTED_CAUSE)
+        .expect("requested-cause fallback")
+        .handoff();
+    let StoreTerminalCause::Failure(cause) = published.ledger_evidence.header().terminal_cause()
+    else {
+        panic!("minimal fallback must freeze a failure cause");
+    };
+    assert_eq!(cause.class(), StorePreparationFailureClass::Requested);
+    assert_eq!(cause.code(), REQUESTED_CAUSE);
+}
+
+#[test]
+fn failure_assembly_minimal_fallback_freezes_requested_domain_cause() {
+    const REQUESTED_CAUSE: u32 = 0x51f0_0002;
+
+    let factory = test_factory();
+    let account = test_account(&factory);
+    let (operation, keys) = test_operation(&account, 16);
+    let mut assembly = operation
+        .try_publication_assembly(test_publication_plan(keys, 1, 1))
+        .expect("failure assembly");
+    let (canonical_root, evidence_root) = test_simple_controlled_validation_graph(&mut assembly);
+    let failure = match assembly.validate_success(canonical_root, evidence_root, |_, _, _| false) {
+        StoreSuccessValidation::Rejected(failure) => failure,
+        _ => panic!("semantic rejection must preserve a failure assembly"),
+    };
+
+    let published = failure
+        .prepare_minimal_fallback_with(REQUESTED_CAUSE)
+        .expect("requested-cause failure fallback")
+        .handoff();
+    let StoreTerminalCause::Failure(cause) = published.ledger_evidence.header().terminal_cause()
+    else {
+        panic!("failure fallback must freeze a failure cause");
+    };
+    assert_eq!(cause.class(), StorePreparationFailureClass::Requested);
+    assert_eq!(cause.code(), REQUESTED_CAUSE);
+}
+
+#[test]
+fn admission_downgrade_cause_overrides_later_minimal_fallback_code() {
+    const DOWNGRADE_CAUSE: u32 = 0x51f0_0003;
+    const LATER_CAUSE: u32 = 0x51f0_0004;
+
+    let factory = test_factory();
+    let account = test_account(&factory);
+    let (operation, keys) = test_operation(&account, 16);
+    let mut assembly = operation
+        .try_publication_assembly(test_publication_plan(keys, 1, 1))
+        .expect("validated success assembly");
+    let (canonical_root, evidence_root) = test_simple_controlled_validation_graph(&mut assembly);
+    let validated = match assembly.validate_success(
+        canonical_root,
+        evidence_root,
+        |session, canonical_root, evidence_root| {
+            session.canonical_sequence(canonical_root).is_some()
+                && session.outcome_evidence_sequence(evidence_root).is_some()
+        },
+    ) {
+        StoreSuccessValidation::Valid(validated) => validated,
+        _ => panic!("complete graph must validate before admission downgrade"),
+    };
+
+    let published = validated
+        .downgrade_to_rich_failure(DOWNGRADE_CAUSE)
+        .prepare_minimal_fallback_with(LATER_CAUSE)
+        .expect("admission-downgrade fallback")
+        .handoff();
+    let StoreTerminalCause::Failure(cause) = published.ledger_evidence.header().terminal_cause()
+    else {
+        panic!("admission downgrade must freeze a failure cause");
+    };
+    assert_eq!(cause.class(), StorePreparationFailureClass::Requested);
+    assert_eq!(cause.code(), DOWNGRADE_CAUSE);
 }
 
 fn public_method_block<'a>(source: &'a str, signature: &str) -> &'a str {
@@ -631,7 +784,7 @@ fn containment_mapping_preserves_retained_charge_and_restricts_the_facade_immedi
         Err(StoreRuntimeError::AccountPoisonedWithRetainedCharge(cause))
             if cause == poisoned
     ));
-    assert!(assembly.fallback_only);
+    assert!(assembly.is_fallback_only());
     assert!(matches!(
         assembly.ensure_writable(),
         Err(StoreRuntimeError::FallbackOnly)
@@ -862,6 +1015,597 @@ fn primary_rejection_dependency_unwind_stops_before_attribution_ack() {
 }
 
 #[test]
+fn controlled_builders_and_validation_poll_and_charge_exact_work() {
+    let factory = test_factory();
+    let account = test_account(&factory);
+    let (operation, keys) = test_operation(&account, 16);
+    let mut assembly = operation
+        .try_publication_assembly(test_publication_plan(keys, 2, 1))
+        .expect("controlled assembly");
+    let ledger = assembly.raw.test_ledger_probe();
+    let leaf = assembly
+        .try_retain_canonical_sequence_controlled(
+            SequencePlan::<u8>::new(1).expect("sequence plan"),
+            keys.work_dimension,
+            TestTag,
+            |writer, control| {
+                control.poll()?;
+                control.charge_observed(2)?;
+                writer.push(7)?;
+                Ok(())
+            },
+        )
+        .expect("controlled sequence");
+    let canonical_root = assembly
+        .try_retain_canonical_records_controlled(
+            RecordPlan::new(1, 1).expect("record plan"),
+            keys.work_dimension,
+            TestRootTag,
+            |writer, control| {
+                control.poll()?;
+                control.charge_observed(3)?;
+                writer.write_row(|row| row.write_sequence_ref(leaf))?;
+                Ok(())
+            },
+        )
+        .expect("controlled records");
+    let evidence_root = assembly
+        .try_retain_outcome_evidence_sequence(
+            SequencePlan::<u8>::new(1).expect("evidence plan"),
+            TestTag,
+            |writer| writer.push(9),
+        )
+        .expect("evidence root");
+    let validated = assembly.validate_success_controlled(
+        keys.work_dimension,
+        canonical_root,
+        evidence_root,
+        |session, canonical_root, evidence_root, control| {
+            control.poll()?;
+            control.charge_observed(5)?;
+            let Some(root) = session.canonical_records(canonical_root) else {
+                return Ok(false);
+            };
+            let Some(leaf) = root.sequence_ref::<u8, TestTag>(0, 0) else {
+                return Ok(false);
+            };
+            Ok(session.canonical_sequence(leaf).is_some()
+                && session.outcome_evidence_sequence(evidence_root).is_some())
+        },
+    );
+    assert!(matches!(
+        validated,
+        StoreControlledSuccessValidation::Valid(_)
+    ));
+    let dimension = ledger
+        .dimension_evidence(keys.work_dimension)
+        .expect("work dimension evidence");
+    assert_eq!(dimension.attempted(), 10);
+    assert_eq!(dimension.consumed(), 10);
+}
+
+#[test]
+fn controlled_builder_domain_rejection_rolls_back_and_remains_retryable() {
+    let factory = test_factory();
+    let account = test_account(&factory);
+    let (operation, keys) = test_operation(&account, 16);
+    let mut assembly = operation
+        .try_publication_assembly(test_publication_plan(keys, 1, 1))
+        .expect("controlled retry assembly");
+    let rejection = StoreBuildError::domain(7).expect("test domain code");
+    let error = assembly
+        .try_retain_canonical_sequence_controlled(
+            SequencePlan::<u8>::new(1).expect("rejected sequence plan"),
+            keys.work_dimension,
+            TestTag,
+            |_, _| Err(rejection.into()),
+        )
+        .expect_err("domain builder rejection");
+    assert_eq!(error, StoreRuntimeError::Build(rejection));
+    assert_eq!(assembly.canonical_len(), 0);
+    assert!(!assembly.is_fallback_only());
+
+    let canonical_root = assembly
+        .try_retain_canonical_sequence_controlled(
+            SequencePlan::<u8>::new(1).expect("retry sequence plan"),
+            keys.work_dimension,
+            TestRootTag,
+            |writer, control| {
+                control.poll()?;
+                writer.push(7)?;
+                Ok(())
+            },
+        )
+        .expect("retry succeeds");
+    let evidence_root = assembly
+        .try_retain_outcome_evidence_sequence(
+            SequencePlan::<u8>::new(1).expect("evidence plan"),
+            TestTag,
+            |writer| writer.push(9),
+        )
+        .expect("evidence root");
+    assert!(matches!(
+        assembly.validate_success(
+            canonical_root,
+            evidence_root,
+            |session, canonical_root, evidence_root| {
+                session.canonical_sequence(canonical_root).is_some()
+                    && session.outcome_evidence_sequence(evidence_root).is_some()
+            },
+        ),
+        StoreSuccessValidation::Valid(_)
+    ));
+}
+
+#[test]
+fn ignored_control_error_is_sticky_and_permanently_rejects_success() {
+    let factory = test_factory();
+    let account = test_account(&factory);
+    let (operation, keys) = test_operation_with_control_and_work_limits(
+        &account,
+        16,
+        OperationControl::default(),
+        0,
+        0,
+    );
+    let mut assembly = operation
+        .try_publication_assembly(test_publication_plan(keys, 2, 1))
+        .expect("sticky assembly");
+    let canonical_root = assembly
+        .try_retain_canonical_sequence(
+            SequencePlan::<u8>::new(1).expect("canonical root plan"),
+            TestRootTag,
+            |writer| writer.push(7),
+        )
+        .expect("complete canonical root");
+    let evidence_root = assembly
+        .try_retain_outcome_evidence_sequence(
+            SequencePlan::<u8>::new(1).expect("evidence sequence plan"),
+            TestTag,
+            |writer| writer.push(9),
+        )
+        .expect("neutral evidence");
+    let ledger = assembly.raw.test_ledger_probe();
+    let before_physical = account.snapshot();
+    let before_active = ledger.active_reservations();
+    let before_live = ledger.current_live_bytes();
+    let error = assembly
+        .try_retain_canonical_sequence_controlled(
+            SequencePlan::<u8>::new(1).expect("sequence plan"),
+            keys.work_dimension,
+            TestTag,
+            |writer, control| {
+                let _ = control.charge_observed(1);
+                writer.push(7)?;
+                Ok(())
+            },
+        )
+        .expect_err("ignored budget error remains sticky");
+    assert!(matches!(error, StoreRuntimeError::Ledger(_)));
+    assert_eq!(assembly.canonical_len(), 1);
+    assert_eq!(ledger.active_reservations(), before_active);
+    assert_eq!(ledger.current_live_bytes(), before_live);
+    let after_physical = account.snapshot();
+    assert_eq!(
+        after_physical.live_retained_bytes(),
+        before_physical.live_retained_bytes()
+    );
+    assert_eq!(
+        after_physical.live_retained_allocations(),
+        before_physical.live_retained_allocations()
+    );
+    assert!(matches!(
+        assembly.try_retain_canonical_sequence(
+            SequencePlan::<u8>::new(1).expect("retry sequence plan"),
+            TestTag,
+            |writer| writer.push(8),
+        ),
+        Err(StoreRuntimeError::SuccessOutcomeRejected)
+    ));
+    let failure = match assembly.validate_success(
+        canonical_root,
+        evidence_root,
+        |session, canonical_root, evidence_root| {
+            session.canonical_sequence(canonical_root).is_some()
+                && session.outcome_evidence_sequence(evidence_root).is_some()
+        },
+    ) {
+        StoreSuccessValidation::Rejected(failure) => failure,
+        _ => panic!("a prior budget rejection must seal an otherwise complete success graph"),
+    };
+    let validated = match failure.validate_rich_failure(evidence_root, |session, root| {
+        session.sequence(root).is_some()
+    }) {
+        StoreFailureValidation::Valid(validated) => validated,
+        _ => panic!("budget rejection evidence must validate"),
+    };
+    let header = failure_outcome_header(
+        validated
+            .try_prepare(0xdead_beef, test_final_progress())
+            .expect("budget rejection rich failure"),
+    );
+    let StoreTerminalCause::Failure(cause) = header.terminal_cause() else {
+        panic!("budget rejection must freeze a failure cause");
+    };
+    assert_eq!(cause.class(), StorePreparationFailureClass::Ledger);
+    assert_eq!(cause.code(), 1);
+}
+
+#[test]
+fn direct_rich_failure_preserves_work_cause_across_rejection_and_fallback() {
+    let factory = test_factory();
+    let account = test_account(&factory);
+    let (operation, keys) = test_operation_with_control_and_work_limits(
+        &account,
+        16,
+        OperationControl::default(),
+        0,
+        0,
+    );
+    let mut assembly = operation
+        .try_publication_assembly(test_publication_plan(keys, 1, 2))
+        .expect("direct rich-failure assembly");
+    let evidence_root = assembly
+        .try_retain_outcome_evidence_sequence(
+            SequencePlan::<u8>::new(1).expect("evidence plan"),
+            TestTag,
+            |writer| writer.push(9),
+        )
+        .expect("evidence root");
+    let evidence_detail = assembly
+        .try_retain_outcome_evidence_sequence(
+            SequencePlan::<u8>::new(1).expect("evidence detail plan"),
+            TestRootTag,
+            |writer| writer.push(10),
+        )
+        .expect("evidence detail");
+    let error = assembly
+        .try_retain_canonical_sequence_controlled(
+            SequencePlan::<u8>::new(1).expect("canonical plan"),
+            keys.work_dimension,
+            TestRootTag,
+            |_, control| {
+                control.charge_observed(1)?;
+                Ok(())
+            },
+        )
+        .expect_err("work budget must reject canonical construction");
+    assert!(matches!(error, StoreRuntimeError::Ledger(_)));
+
+    let failure = match assembly.validate_rich_failure(evidence_root, |session, root| {
+        let _ = session.sequence(root);
+        false
+    }) {
+        StoreFailureValidation::Rejected(failure) => failure,
+        _ => panic!("first rich-failure validation must reject semantically"),
+    };
+    let validated = match failure.validate_rich_failure(evidence_root, |session, root| {
+        session.sequence(root).is_some() && session.sequence(evidence_detail).is_some()
+    }) {
+        StoreFailureValidation::Valid(validated) => validated,
+        _ => panic!("second rich-failure validation must use a fresh epoch"),
+    };
+    let published = validated
+        .prepare_minimal_fallback()
+        .expect("forced-cause fallback")
+        .handoff();
+    let StoreTerminalCause::Failure(cause) = published.ledger_evidence.header().terminal_cause()
+    else {
+        panic!("forced work cause must survive rich-failure fallback");
+    };
+    assert_eq!(cause.class(), StorePreparationFailureClass::Ledger);
+    assert_eq!(cause.code(), 1);
+}
+
+#[test]
+fn controlled_error_from_another_operation_is_not_a_verified_callback_cause() {
+    let first_factory = test_factory();
+    let first_account = test_account(&first_factory);
+    let (first_operation, first_keys) = test_operation_with_control_and_work_limits(
+        &first_account,
+        16,
+        OperationControl::default(),
+        0,
+        0,
+    );
+    let mut first_assembly = first_operation
+        .try_publication_assembly(test_publication_plan(first_keys, 1, 1))
+        .expect("first assembly");
+    let mut captured = None;
+    let first_error = first_assembly
+        .try_retain_canonical_sequence_controlled(
+            SequencePlan::<u8>::new(1).expect("first sequence plan"),
+            first_keys.work_dimension,
+            TestTag,
+            |_, control| {
+                let cause = control
+                    .charge_observed(1)
+                    .expect_err("first work limit must reject");
+                captured = Some(cause.clone());
+                Err(cause.into())
+            },
+        )
+        .expect_err("first controlled block must be rejected");
+    assert!(matches!(first_error, StoreRuntimeError::Ledger(_)));
+
+    let second_factory = test_factory();
+    let second_account = test_account(&second_factory);
+    let (second_operation, second_keys) = test_operation(&second_account, 16);
+    let mut second_assembly = second_operation
+        .try_publication_assembly(test_publication_plan(second_keys, 1, 1))
+        .expect("second assembly");
+    let replay_error = second_assembly
+        .try_retain_canonical_sequence_controlled(
+            SequencePlan::<u8>::new(1).expect("second sequence plan"),
+            second_keys.work_dimension,
+            TestTag,
+            |_, _| Err(captured.take().expect("captured controlled cause").into()),
+        )
+        .expect_err("foreign controlled cause must fail closed");
+    assert!(matches!(
+        replay_error,
+        StoreRuntimeError::UnverifiedControlledCause
+    ));
+    assert!(matches!(
+        second_assembly.try_retain_canonical_sequence(
+            SequencePlan::<u8>::new(1).expect("ordinary sequence plan"),
+            TestTag,
+            |writer| writer.push(7),
+        ),
+        Err(StoreRuntimeError::FallbackOnly)
+    ));
+    let published = second_assembly
+        .prepare_minimal_fallback()
+        .expect("unverified-cause fallback")
+        .handoff();
+    let StoreTerminalCause::Failure(cause) = published.ledger_evidence.header().terminal_cause()
+    else {
+        panic!("unverified controlled cause must freeze a failure cause");
+    };
+    assert_eq!(cause.class(), StorePreparationFailureClass::Requested);
+    assert_eq!(cause.code(), UNVERIFIED_CONTROLLED_CAUSE_FALLBACK_CODE);
+}
+
+#[test]
+fn controlled_validation_rejects_a_work_cause_from_another_operation() {
+    let first_factory = test_factory();
+    let first_account = test_account(&first_factory);
+    let (first_operation, first_keys) = test_operation_with_control_and_work_limits(
+        &first_account,
+        16,
+        OperationControl::default(),
+        0,
+        0,
+    );
+    let mut first_assembly = first_operation
+        .try_publication_assembly(test_publication_plan(first_keys, 1, 1))
+        .expect("first assembly");
+    let mut captured = None;
+    let first_error = first_assembly
+        .try_retain_canonical_sequence_controlled(
+            SequencePlan::<u8>::new(1).expect("first sequence plan"),
+            first_keys.work_dimension,
+            TestTag,
+            |_, control| {
+                let cause = control
+                    .charge_observed(1)
+                    .expect_err("first work limit must reject");
+                captured = Some(cause.clone());
+                Err(cause.into())
+            },
+        )
+        .expect_err("first controlled block must be rejected");
+    assert!(matches!(first_error, StoreRuntimeError::Ledger(_)));
+    drop(first_assembly);
+
+    let second_factory = test_factory();
+    let second_account = test_account(&second_factory);
+    let (second_operation, second_keys) = test_operation(&second_account, 16);
+    let mut second_assembly = second_operation
+        .try_publication_assembly(test_publication_plan(second_keys, 1, 1))
+        .expect("second assembly");
+    let (canonical_root, evidence_root) =
+        test_simple_controlled_validation_graph(&mut second_assembly);
+    let fallback = match second_assembly.validate_success_controlled(
+        second_keys.work_dimension,
+        canonical_root,
+        evidence_root,
+        |_, _, _, _| Err(captured.take().expect("captured work cause")),
+    ) {
+        StoreControlledSuccessValidation::FallbackOnly(fallback) => fallback,
+        _ => panic!("a foreign validator work cause must fail closed"),
+    };
+    let published = fallback
+        .prepare_minimal_fallback()
+        .expect("unverified validator fallback")
+        .handoff();
+    let StoreTerminalCause::Failure(cause) = published.ledger_evidence.header().terminal_cause()
+    else {
+        panic!("unverified validator cause must freeze a failure cause");
+    };
+    assert_eq!(cause.class(), StorePreparationFailureClass::Requested);
+    assert_eq!(cause.code(), UNVERIFIED_CONTROLLED_CAUSE_FALLBACK_CODE);
+}
+
+#[test]
+fn cancellation_interruption_preserves_rich_failure_owner() {
+    let factory = test_factory();
+    let account = test_account(&factory);
+    let cancellation = crate::CancellationToken::new();
+    let (operation, keys) = test_operation_with_control_and_work_limits(
+        &account,
+        16,
+        OperationControl::default().with_cancellation(cancellation.clone()),
+        u64::MAX,
+        u64::MAX,
+    );
+    let mut assembly = operation
+        .try_publication_assembly(test_publication_plan(keys, 1, 1))
+        .expect("cancellation assembly");
+    let (canonical_root, evidence_root) = test_simple_controlled_validation_graph(&mut assembly);
+    cancellation.cancel();
+    let (failure, cause) = match assembly.validate_success_controlled(
+        keys.work_dimension,
+        canonical_root,
+        evidence_root,
+        |_, _, _, control| {
+            control.poll()?;
+            Ok(true)
+        },
+    ) {
+        StoreControlledSuccessValidation::Interrupted { failure, cause } => (failure, cause),
+        _ => panic!("cancellation must interrupt without poisoning"),
+    };
+    assert!(cause.control_cause().is_some());
+    let validated = match failure.validate_rich_failure(evidence_root, |session, root| {
+        session.sequence(root).is_some()
+    }) {
+        StoreFailureValidation::Valid(validated) => validated,
+        _ => panic!("cancellation evidence must validate"),
+    };
+    let header = failure_outcome_header(
+        validated
+            .try_prepare(0xdead_beef, test_final_progress())
+            .expect("cancellation rich failure"),
+    );
+    let StoreTerminalCause::Failure(cause) = header.terminal_cause() else {
+        panic!("cancellation must freeze a failure cause");
+    };
+    assert_eq!(cause.class(), StorePreparationFailureClass::Control);
+}
+
+#[test]
+fn budget_interruption_preserves_rich_failure_owner() {
+    let factory = test_factory();
+    let account = test_account(&factory);
+    let (operation, keys) = test_operation_with_control_and_work_limits(
+        &account,
+        16,
+        OperationControl::default(),
+        0,
+        0,
+    );
+    let mut assembly = operation
+        .try_publication_assembly(test_publication_plan(keys, 1, 1))
+        .expect("budget assembly");
+    let (canonical_root, evidence_root) = test_simple_controlled_validation_graph(&mut assembly);
+    let (failure, cause) = match assembly.validate_success_controlled(
+        keys.work_dimension,
+        canonical_root,
+        evidence_root,
+        |_, _, _, control| {
+            control.charge_observed(1)?;
+            Ok(true)
+        },
+    ) {
+        StoreControlledSuccessValidation::Interrupted { failure, cause } => (failure, cause),
+        _ => panic!("budget rejection must interrupt without poisoning"),
+    };
+    assert!(cause.ledger_cause().is_some());
+    let validated = match failure.validate_rich_failure(evidence_root, |session, root| {
+        session.sequence(root).is_some()
+    }) {
+        StoreFailureValidation::Valid(validated) => validated,
+        _ => panic!("budget evidence must validate"),
+    };
+    let header = failure_outcome_header(
+        validated
+            .try_prepare(0xdead_beef, test_final_progress())
+            .expect("budget rich failure"),
+    );
+    let StoreTerminalCause::Failure(cause) = header.terminal_cause() else {
+        panic!("budget interruption must freeze a failure cause");
+    };
+    assert_eq!(cause.class(), StorePreparationFailureClass::Ledger);
+}
+
+#[test]
+fn invalid_controlled_validation_dimension_returns_the_writable_assembly() {
+    let first_factory = test_factory();
+    let first_account = test_account(&first_factory);
+    let second_factory = test_factory();
+    let second_account = test_account(&second_factory);
+    let (first_operation, first_keys) = test_operation(&first_account, 16);
+    let (_second_operation, second_keys) = test_operation(&second_account, 16);
+    let mut assembly = first_operation
+        .try_publication_assembly(test_publication_plan(first_keys, 1, 1))
+        .expect("first assembly");
+    let (canonical_root, evidence_root) = test_simple_controlled_validation_graph(&mut assembly);
+
+    let (assembly, cause) = match assembly.validate_success_controlled(
+        second_keys.work_dimension,
+        canonical_root,
+        evidence_root,
+        |_, _, _, _| Ok(true),
+    ) {
+        StoreControlledSuccessValidation::InvalidWorkDimension { assembly, cause } => {
+            (assembly, cause)
+        }
+        _ => panic!("a foreign work dimension must return the untouched assembly"),
+    };
+    assert!(matches!(
+        cause,
+        StoreRuntimeError::ForeignDimensionDomain { .. }
+    ));
+    assert!(matches!(
+        assembly.validate_success_controlled(
+            first_keys.work_dimension,
+            canonical_root,
+            evidence_root,
+            |session, canonical_root, evidence_root, _| {
+                Ok(session.canonical_sequence(canonical_root).is_some()
+                    && session.outcome_evidence_sequence(evidence_root).is_some())
+            },
+        ),
+        StoreControlledSuccessValidation::Valid(_)
+    ));
+}
+
+#[test]
+fn controlled_validation_distinguishes_semantic_rejection_from_panic() {
+    {
+        let factory = test_factory();
+        let account = test_account(&factory);
+        let (operation, keys) = test_operation(&account, 16);
+        let mut assembly = operation
+            .try_publication_assembly(test_publication_plan(keys, 1, 1))
+            .expect("semantic assembly");
+        let (canonical_root, evidence_root) =
+            test_simple_controlled_validation_graph(&mut assembly);
+        assert!(matches!(
+            assembly.validate_success_controlled(
+                keys.work_dimension,
+                canonical_root,
+                evidence_root,
+                |_, _, _, _| Ok(false),
+            ),
+            StoreControlledSuccessValidation::Rejected(_)
+        ));
+    }
+    {
+        let factory = test_factory();
+        let account = test_account(&factory);
+        let (operation, keys) = test_operation(&account, 16);
+        let mut assembly = operation
+            .try_publication_assembly(test_publication_plan(keys, 1, 1))
+            .expect("panic assembly");
+        let (canonical_root, evidence_root) =
+            test_simple_controlled_validation_graph(&mut assembly);
+        assert!(matches!(
+            assembly.validate_success_controlled(
+                keys.work_dimension,
+                canonical_root,
+                evidence_root,
+                |_, _, _, _| -> Result<bool, StoreWorkError> {
+                    panic!("controlled validator panic")
+                },
+            ),
+            StoreControlledSuccessValidation::FallbackOnly(_)
+        ));
+    }
+}
+
+#[test]
 fn public_store_surface_does_not_export_raw_or_generic_owning_authority() {
     let root = include_str!("../lib.rs");
     let source = include_str!("../concrete_store.rs");
@@ -949,6 +1693,37 @@ fn retained_store_control_checkpoint_is_narrow_and_validates_keys_before_forward
         .find("self.raw")
         .expect("reserve forwards only after key validation");
     assert!(phase_validation < dimension_validation && dimension_validation < forwarding);
+}
+
+#[test]
+fn retained_store_work_control_exposes_only_poll_and_prebound_work_charge() {
+    let source = include_str!("../concrete_store.rs");
+    let declaration = type_declaration(source, "pub struct RetainedStoreWorkControl");
+    let implementation = implementation_block(source, "impl<O, PP, U> RetainedStoreWorkControl");
+    assert!(!declaration.contains("pub raw:"));
+    assert!(!declaration.contains("pub sticky:"));
+    for required in ["pub fn poll(", "pub fn charge_observed("] {
+        assert!(
+            implementation.contains(required),
+            "work control is missing `{required}`"
+        );
+    }
+    for forbidden in [
+        "pub fn reserve(",
+        "pub fn resize(",
+        "pub fn transition(",
+        "pub fn report_progress(",
+        "pub fn try_commit",
+        "pub fn try_retain",
+        "pub fn validate_",
+        "pub fn prepare_",
+        "pub fn publish",
+    ] {
+        assert!(
+            !implementation.contains(forbidden),
+            "work control regained excluded authority through `{forbidden}`"
+        );
+    }
 }
 
 #[test]

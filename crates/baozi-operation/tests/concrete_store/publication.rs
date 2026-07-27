@@ -162,7 +162,7 @@ fn validated_success_downgrade_preserves_evidence_and_publishes_exact_rich_failu
         outcome_evidence,
         ledger_evidence,
     } = prepared.handoff();
-    assert_eq!(store_failure_cause(&ledger_evidence).code(), 74);
+    assert_eq!(store_failure_cause(&ledger_evidence).code(), 73);
     let evidence_view = outcome_evidence.outcome_evidence();
     let root = evidence_view.root();
     let preserved = root

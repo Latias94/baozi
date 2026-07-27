@@ -143,7 +143,7 @@ impl PreparationFailureCode {
         }
     }
 
-    pub(super) const fn ledger() -> Self {
+    pub(crate) const fn ledger() -> Self {
         Self {
             class: PreparationFailureClass::Ledger,
             code: 1,

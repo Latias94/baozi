@@ -96,6 +96,22 @@ enum ProgressDelivery {
     Final,
 }
 
+/// Poll-only control authority whose borrow is disjoint from the operation ledger.
+///
+/// Retained construction uses this private checkpoint while the same coordinator's ledger is
+/// borrowed independently for accounting. It deliberately excludes progress, reservation, and
+/// publication authority.
+pub(crate) struct OperationPollCheckpoint<'a, PP, U> {
+    control: &'a mut OperationControl<PP, U>,
+    terminal: &'a mut Option<ControlCause>,
+}
+
+impl<PP, U> OperationPollCheckpoint<'_, PP, U> {
+    pub(crate) fn poll(&mut self) -> Result<(), ControlCause> {
+        poll_operation_control(self.control, self.terminal)
+    }
+}
+
 /// Serializes operation control and owns one generic ledger.
 ///
 /// Ledger phases (`LP`) and progress phases (`PP`) are deliberately distinct vocabularies. Import
@@ -204,34 +220,7 @@ where
 
     /// Polls cancellation and deadline state.
     pub fn poll(&mut self) -> Result<(), ControlCause> {
-        if let Some(cause) = self.terminal.clone() {
-            return Err(cause);
-        }
-        let cancellation = self.control.cancellation.as_ref().map(Arc::clone);
-        let cancelled = catch_unwind(move || {
-            cancellation.is_some_and(|cancellation| cancellation.is_cancelled())
-        });
-        let cancelled = match cancelled {
-            Ok(cancelled) => cancelled,
-            Err(payload) => {
-                self.control.discard_cancellation();
-                discard_untrusted_panic_payload(payload);
-                return self.fail(ControlCause::CancellationSignalPanicked);
-            }
-        };
-        if cancelled {
-            return self.fail(ControlCause::Cancelled {
-                origin: CancellationOrigin::Signal,
-            });
-        }
-        if self
-            .control
-            .deadline
-            .is_some_and(|deadline| Instant::now() >= deadline)
-        {
-            return self.fail(ControlCause::DeadlineExceeded);
-        }
-        Ok(())
+        poll_operation_control(&mut self.control, &mut self.terminal)
     }
 
     /// Validates, coalesces, and serially delivers owner-defined progress.
@@ -536,6 +525,18 @@ where
         &self.ledger
     }
 
+    pub(crate) fn split_poll_checkpoint_and_retained_ledger(
+        &mut self,
+    ) -> (OperationPollCheckpoint<'_, PP, U>, &Ledger<O, LP, D>) {
+        let Self {
+            control,
+            ledger,
+            terminal,
+            ..
+        } = self;
+        (OperationPollCheckpoint { control, terminal }, ledger)
+    }
+
     pub(crate) fn try_prepare_typed_control(
         &mut self,
         final_progress: FinalProgress<PP, U>,
@@ -608,6 +609,48 @@ where
         self.progress.insert(position, (key, state));
         Ok(())
     }
+}
+
+fn poll_operation_control<PP, U>(
+    control: &mut OperationControl<PP, U>,
+    terminal: &mut Option<ControlCause>,
+) -> Result<(), ControlCause> {
+    if let Some(cause) = terminal.clone() {
+        return Err(cause);
+    }
+    let cancellation = control.cancellation.as_ref().map(Arc::clone);
+    let cancelled = catch_unwind(move || cancellation.is_some_and(|signal| signal.is_cancelled()));
+    let cancelled = match cancelled {
+        Ok(cancelled) => cancelled,
+        Err(payload) => {
+            control.discard_cancellation();
+            discard_untrusted_panic_payload(payload);
+            return fail_operation_control(terminal, ControlCause::CancellationSignalPanicked);
+        }
+    };
+    if cancelled {
+        return fail_operation_control(
+            terminal,
+            ControlCause::Cancelled {
+                origin: CancellationOrigin::Signal,
+            },
+        );
+    }
+    if control
+        .deadline
+        .is_some_and(|deadline| Instant::now() >= deadline)
+    {
+        return fail_operation_control(terminal, ControlCause::DeadlineExceeded);
+    }
+    Ok(())
+}
+
+fn fail_operation_control(
+    terminal: &mut Option<ControlCause>,
+    cause: ControlCause,
+) -> Result<(), ControlCause> {
+    *terminal = Some(cause.clone());
+    Err(cause)
 }
 
 /// A borrowed low-authority view over one operation coordinator.

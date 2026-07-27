@@ -250,12 +250,14 @@ where
     ) -> Result<T, StoreExecutionError> {
         let after = self.table_state();
         match result {
-            Ok(value) if !self.assembly.fallback_only && before.try_apply(delta) == Some(after) => {
+            Ok(value)
+                if !self.assembly.is_fallback_only() && before.try_apply(delta) == Some(after) =>
+            {
                 self.advance(delta)?;
                 Ok(value)
             }
             Ok(_) => self.abandon_invariant(),
-            Err(cause) if self.assembly.fallback_only => {
+            Err(cause) if self.assembly.is_fallback_only() => {
                 let failed_instruction = self.cursor.next_ordinal;
                 self.state = ExecutionState::Abandoned { failed_instruction };
                 Err(StoreExecutionError::Contained {
@@ -290,7 +292,9 @@ where
     ) -> Result<T, StoreExecutionError> {
         let after = self.table_state();
         match result {
-            Ok(value) if !self.assembly.fallback_only && before.try_apply(delta) == Some(after) => {
+            Ok(value)
+                if !self.assembly.is_fallback_only() && before.try_apply(delta) == Some(after) =>
+            {
                 self.advance(delta)?;
                 Ok(value)
             }
@@ -303,7 +307,7 @@ where
                     cause,
                 })
             }
-            Err(cause) if self.assembly.fallback_only => {
+            Err(cause) if self.assembly.is_fallback_only() => {
                 let failed_instruction = self.cursor.next_ordinal;
                 self.state = ExecutionState::Abandoned { failed_instruction };
                 Err(StoreExecutionError::BatchContained {

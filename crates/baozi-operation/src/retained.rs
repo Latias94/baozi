@@ -113,6 +113,7 @@ pub use physical::{
 use std::any::TypeId;
 use std::fmt;
 use std::marker::PhantomData;
+use std::num::NonZeroU64;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 #[cfg(test)]
 use std::sync::atomic::AtomicUsize;
@@ -142,7 +143,7 @@ pub(crate) use terminal_output::{
 };
 use triomphe::{Arc, UniqueArc};
 
-pub(crate) use operation::{RetainedControlCheckpoint, RetainedOperation};
+pub(crate) use operation::{RetainedControlCheckpoint, RetainedOperation, RetainedWorkControl};
 #[cfg(test)]
 use operation_start::map_qualified_startup_batch_error;
 pub(crate) use operation_start::{
@@ -199,6 +200,8 @@ where
     handle_share_work: RetainedHandleSharePlan<D>,
     mode: RetainedOutcomeMode,
     containment: AssemblyContainmentProvenance,
+    /// Last issued validation epoch. Zero remains reserved for never-visited table members.
+    last_validation_epoch: u64,
 }
 
 /// Exact success closure whose owning assembly can no longer be mutated.
@@ -235,6 +238,24 @@ where
 {
     assembly: RetainedPublicationAssembly<O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>,
     fallback_cause: PreparationFailureCode,
+}
+
+impl<O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
+    RetainedFailureAssembly<O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+    D: Copy + Ord + fmt::Debug + Send + Sync + 'static,
+    F: Send + Sync + 'static,
+    CanonicalBlock: Send + Sync + 'static,
+    EvidenceBlock: Send + Sync + 'static,
+{
+    pub(crate) fn with_fallback_cause(mut self, cause: PreparationFailureCode) -> Self {
+        self.fallback_cause = cause;
+        self
+    }
 }
 
 /// Exact rich-failure closure whose owning assembly can no longer be mutated.
@@ -320,11 +341,24 @@ where
     CanonicalBlock: Send + Sync + 'static,
     EvidenceBlock: Send + Sync + 'static,
 {
+    fn try_next_validation_epoch(&mut self) -> Result<NonZeroU64, RetainedClosureValidationError> {
+        let Some(next) = self
+            .last_validation_epoch
+            .checked_add(1)
+            .and_then(NonZeroU64::new)
+        else {
+            self.containment = AssemblyContainmentProvenance::NewFaultPending;
+            return Err(RetainedClosureValidationError::Poisoned);
+        };
+        self.last_validation_epoch = next.get();
+        Ok(next)
+    }
+
     /// Validates the exact canonical and outcome-evidence closure without transferring ownership.
     ///
     /// The callback must visit every unique member. Repeated DAG edges are accepted. A callback
-    /// panic is contained, returns [`RetainedClosureValidationError::Panicked`], and resets the
-    /// reachability marks so the consuming caller can publish the pre-admitted fallback.
+    /// panic is contained and returns [`RetainedClosureValidationError::Panicked`]. Each attempt
+    /// uses a fresh assembly-local epoch, so rejection and panic need no table-wide cleanup.
     fn try_validate_success<CanonicalTag, EvidenceTag>(
         &mut self,
         canonical_root: CanonicalRetainedSlot<CanonicalBlock, CanonicalTag>,
@@ -348,6 +382,7 @@ where
         if self.mode != RetainedOutcomeMode::SuccessCapable {
             return Err(RetainedClosureValidationError::WrongOutcomeMode);
         }
+        let epoch = self.try_next_validation_epoch()?;
         let (Some(canonical), Some(evidence)) =
             (self.canonical_table.as_ref(), self.evidence_table.as_ref())
         else {
@@ -356,8 +391,6 @@ where
         };
         let canonical = canonical.as_ref();
         let evidence = evidence.as_ref();
-        canonical.reset_reachable();
-        evidence.reset_reachable();
         if canonical_root.identity.tag != TypeId::of::<CanonicalTag>()
             || evidence_root.identity.tag != TypeId::of::<EvidenceTag>()
             || canonical
@@ -373,6 +406,7 @@ where
             canonical,
             evidence,
             set_id: self.set_id,
+            epoch,
             canonical_seen: 0,
             evidence_seen: 0,
             valid: true,
@@ -384,20 +418,14 @@ where
             Ok(accepted) => accepted,
             Err(payload) => {
                 discard_untrusted_panic_payload(payload);
-                canonical.reset_reachable();
-                evidence.reset_reachable();
                 return Err(RetainedClosureValidationError::Panicked);
             }
         };
         let exact = accepted
             && session.valid
             && session.canonical_seen == canonical.members.len()
-            && session.evidence_seen == evidence.members.len()
-            && canonical.all_reachable()
-            && evidence.all_reachable();
+            && session.evidence_seen == evidence.members.len();
         if !exact {
-            canonical.reset_reachable();
-            evidence.reset_reachable();
             return Err(RetainedClosureValidationError::Rejected);
         }
         Ok(RetainedSuccessClosureProof {
@@ -429,12 +457,12 @@ where
         if self.containment != AssemblyContainmentProvenance::Healthy {
             return Err(RetainedClosureValidationError::Poisoned);
         }
+        let epoch = self.try_next_validation_epoch()?;
         let Some(evidence) = self.evidence_table.as_ref() else {
             self.containment = AssemblyContainmentProvenance::NewFaultPending;
             return Err(RetainedClosureValidationError::Poisoned);
         };
         let evidence = evidence.as_ref();
-        evidence.reset_reachable();
         if evidence_root.identity.tag != TypeId::of::<EvidenceTag>()
             || evidence
                 .member(evidence_root.identity, self.set_id)
@@ -445,6 +473,7 @@ where
         let mut session = RetainedEvidenceClosureSession {
             evidence,
             set_id: self.set_id,
+            epoch,
             seen: 0,
             valid: true,
             not_send_or_sync: PhantomData,
@@ -454,16 +483,11 @@ where
                 Ok(accepted) => accepted,
                 Err(payload) => {
                     discard_untrusted_panic_payload(payload);
-                    evidence.reset_reachable();
                     return Err(RetainedClosureValidationError::Panicked);
                 }
             };
-        let exact = accepted
-            && session.valid
-            && session.seen == evidence.members.len()
-            && evidence.all_reachable();
+        let exact = accepted && session.valid && session.seen == evidence.members.len();
         if !exact {
-            evidence.reset_reachable();
             return Err(RetainedClosureValidationError::Rejected);
         }
         Ok(RetainedEvidenceClosureProof {
@@ -495,6 +519,138 @@ where
         EvidenceTag: Copy + Send + Sync + 'static,
     {
         match self.try_validate_success(canonical_root, evidence_root, validate) {
+            Ok(proof) => RetainedSuccessValidation::Valid(ValidatedRetainedSuccess {
+                assembly: self,
+                proof,
+            }),
+            Err(RetainedClosureValidationError::Rejected) => {
+                RetainedSuccessValidation::Rejected(RetainedFailureAssembly {
+                    assembly: self,
+                    fallback_cause: PreparationFailureCode::from_closure_validation(
+                        RetainedClosureValidationError::Rejected,
+                    ),
+                })
+            }
+            Err(cause) => RetainedSuccessValidation::FallbackOnly(RetainedFallbackOnly {
+                assembly: self,
+                cause: PreparationFailureCode::from_closure_validation(cause),
+            }),
+        }
+    }
+
+    /// Validates a success graph while lending poll and prebound observed-work authority to the
+    /// validator inside the existing panic boundary.
+    pub(crate) fn validate_success_controlled<CanonicalTag, EvidenceTag>(
+        mut self,
+        work_dimension: D,
+        canonical_root: CanonicalRetainedSlot<CanonicalBlock, CanonicalTag>,
+        evidence_root: OutcomeEvidenceRetainedSlot<EvidenceBlock, EvidenceTag>,
+        validate: impl for<'session, 'control> FnOnce(
+            &mut RetainedClosureSession<'session, CanonicalBlock, EvidenceBlock>,
+            CanonicalRetainedSlot<CanonicalBlock, CanonicalTag>,
+            OutcomeEvidenceRetainedSlot<EvidenceBlock, EvidenceTag>,
+            RetainedWorkControl<'control, O, P, PP, U, D>,
+        ) -> bool,
+    ) -> RetainedSuccessValidation<O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
+    where
+        CanonicalTag: Copy + Send + Sync + 'static,
+        EvidenceTag: Copy + Send + Sync + 'static,
+    {
+        let validation = if self.containment != AssemblyContainmentProvenance::Healthy {
+            Err(RetainedClosureValidationError::Poisoned)
+        } else if self.mode != RetainedOutcomeMode::SuccessCapable {
+            Err(RetainedClosureValidationError::WrongOutcomeMode)
+        } else {
+            let epoch = match self.try_next_validation_epoch() {
+                Ok(epoch) => epoch,
+                Err(cause) => {
+                    return RetainedSuccessValidation::FallbackOnly(RetainedFallbackOnly {
+                        assembly: self,
+                        cause: PreparationFailureCode::from_closure_validation(cause),
+                    });
+                }
+            };
+            let control = match self.operation.as_mut() {
+                Some(operation) => Some(operation.split_work_control(work_dimension).0),
+                None => {
+                    self.containment = AssemblyContainmentProvenance::NewFaultPending;
+                    None
+                }
+            };
+            let parts = match (
+                self.canonical_table.as_ref(),
+                self.evidence_table.as_ref(),
+                control,
+            ) {
+                (Some(canonical), Some(evidence), Some(control)) => {
+                    Some((canonical.as_ref(), evidence.as_ref(), control, epoch))
+                }
+                _ => {
+                    self.containment = AssemblyContainmentProvenance::NewFaultPending;
+                    None
+                }
+            };
+            match parts {
+                Some((canonical, evidence, control, epoch)) => {
+                    if canonical_root.identity.tag != TypeId::of::<CanonicalTag>()
+                        || evidence_root.identity.tag != TypeId::of::<EvidenceTag>()
+                        || canonical
+                            .member(canonical_root.identity, self.set_id)
+                            .is_none()
+                        || evidence
+                            .member(evidence_root.identity, self.set_id)
+                            .is_none()
+                    {
+                        Err(RetainedClosureValidationError::InvalidRoot)
+                    } else {
+                        let mut session = RetainedClosureSession {
+                            canonical,
+                            evidence,
+                            set_id: self.set_id,
+                            epoch,
+                            canonical_seen: 0,
+                            evidence_seen: 0,
+                            valid: true,
+                            not_send_or_sync: PhantomData,
+                        };
+                        let accepted = match catch_unwind(AssertUnwindSafe(|| {
+                            validate(&mut session, canonical_root, evidence_root, control)
+                        })) {
+                            Ok(accepted) => accepted,
+                            Err(payload) => {
+                                discard_untrusted_panic_payload(payload);
+                                return RetainedSuccessValidation::FallbackOnly(
+                                    RetainedFallbackOnly {
+                                        assembly: self,
+                                        cause: PreparationFailureCode::from_closure_validation(
+                                            RetainedClosureValidationError::Panicked,
+                                        ),
+                                    },
+                                );
+                            }
+                        };
+                        let exact = accepted
+                            && session.valid
+                            && session.canonical_seen == canonical.members.len()
+                            && session.evidence_seen == evidence.members.len();
+                        if exact {
+                            Ok(RetainedSuccessClosureProof {
+                                set_id: self.set_id,
+                                canonical_count: canonical.members.len(),
+                                evidence_count: evidence.members.len(),
+                                canonical_root: canonical_root.identity,
+                                evidence_root: evidence_root.identity,
+                                marker: PhantomData,
+                            })
+                        } else {
+                            Err(RetainedClosureValidationError::Rejected)
+                        }
+                    }
+                }
+                None => Err(RetainedClosureValidationError::Poisoned),
+            }
+        };
+        match validation {
             Ok(proof) => RetainedSuccessValidation::Valid(ValidatedRetainedSuccess {
                 assembly: self,
                 proof,
@@ -651,6 +807,72 @@ where
             RetainedPublicationError::CanonicalSlotLimit,
             plan,
             build,
+        );
+        match result {
+            Ok(identity) => Ok(CanonicalRetainedSlot {
+                identity,
+                marker: PhantomData,
+            }),
+            Err(error) => {
+                if let Some(containment) = retained_publication_error_containment(&error) {
+                    self.containment = containment;
+                }
+                Err(error)
+            }
+        }
+    }
+
+    /// Retains one canonical block while lending only poll and prebound observed-work authority to
+    /// its constructing closure.
+    ///
+    /// The callback remains inside the ordinary retained-allocation panic boundary. A returned
+    /// build code therefore rolls the current block back cleanly, while a panic preserves the
+    /// existing fail-closed containment behavior.
+    pub(crate) fn try_retain_canonical_controlled<Tag>(
+        &mut self,
+        work_dimension: D,
+        plan: RetainedAllocationPlan,
+        build: impl for<'placement, 'control> FnOnce(
+            BlockEmplacer<'placement, CanonicalBlock>,
+            RetainedWorkControl<'control, O, P, PP, U, D>,
+        ) -> Result<
+            BlockPlacement<'placement, CanonicalBlock, Tag>,
+            RetainedBuildFailureCode,
+        >,
+    ) -> Result<CanonicalRetainedSlot<CanonicalBlock, Tag>, RetainedPublicationError<D>>
+    where
+        Tag: Copy + Send + Sync + 'static,
+    {
+        if self.containment != AssemblyContainmentProvenance::Healthy {
+            return Err(RetainedPublicationError::Poisoned);
+        }
+        let canonical_plan = self
+            .canonical_plan
+            .ok_or(RetainedPublicationError::WrongOutcomeMode)?;
+        let (control, ledger) = self
+            .operation
+            .as_mut()
+            .ok_or(RetainedPublicationError::Poisoned)?
+            .split_work_control(work_dimension);
+        let result = try_retain_block(
+            ledger,
+            self.account
+                .as_ref()
+                .ok_or(RetainedPublicationError::Poisoned)?,
+            self.handle_share_work,
+            canonical_plan.writer.phase,
+            canonical_plan.writer.attribution_dimension,
+            self.canonical_batch
+                .as_mut()
+                .ok_or(RetainedPublicationError::Poisoned)?,
+            self.canonical_table
+                .as_mut()
+                .ok_or(RetainedPublicationError::Poisoned)?,
+            self.set_id,
+            RetainedMembershipDestination::Canonical,
+            RetainedPublicationError::CanonicalSlotLimit,
+            plan,
+            move |emplacer| build(emplacer, control),
         );
         match result {
             Ok(identity) => Ok(CanonicalRetainedSlot {
@@ -1017,8 +1239,18 @@ where
         PreparedRetainedPublication<CanonicalBlock, EvidenceBlock, F, P, D>,
         RetainedPublicationPrepareError,
     > {
+        self.prepare_minimal_fallback_with(PreparationFailureCode::requested())
+    }
+
+    pub(crate) fn prepare_minimal_fallback_with(
+        self,
+        cause: PreparationFailureCode,
+    ) -> Result<
+        PreparedRetainedPublication<CanonicalBlock, EvidenceBlock, F, P, D>,
+        RetainedPublicationPrepareError,
+    > {
         self.try_prepare_terminal(RetainedTerminalRequest::MinimalFallback {
-            requested_cause: PreparationFailureCode::requested(),
+            requested_cause: cause,
         })
     }
 
@@ -1066,7 +1298,6 @@ where
                     && proof.set_id == self.set_id
                     && self.canonical_table.as_ref().is_some_and(|table| {
                         table.as_ref().members.len() == proof.canonical_count
-                            && table.as_ref().all_reachable()
                             && table
                                 .as_ref()
                                 .member(proof.canonical_root, self.set_id)
@@ -1074,7 +1305,6 @@ where
                     })
                     && self.evidence_table.as_ref().is_some_and(|table| {
                         table.as_ref().members.len() == proof.evidence_count
-                            && table.as_ref().all_reachable()
                             && table
                                 .as_ref()
                                 .member(proof.evidence_root, self.set_id)
@@ -1118,7 +1348,6 @@ where
                 let proof_valid = proof.set_id == self.set_id
                     && self.evidence_table.as_ref().is_some_and(|table| {
                         table.as_ref().members.len() == proof.evidence_count
-                            && table.as_ref().all_reachable()
                             && table
                                 .as_ref()
                                 .member(proof.evidence_root, self.set_id)
@@ -1594,6 +1823,16 @@ where
         RetainedPublicationPrepareError,
     > {
         self.assembly.prepare_minimal_fallback()
+    }
+
+    pub(crate) fn prepare_minimal_fallback_with(
+        self,
+        cause: PreparationFailureCode,
+    ) -> Result<
+        PreparedRetainedPublication<CanonicalBlock, EvidenceBlock, F, P, D>,
+        RetainedPublicationPrepareError,
+    > {
+        self.assembly.prepare_minimal_fallback_with(cause)
     }
 }
 
