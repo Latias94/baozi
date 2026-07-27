@@ -165,7 +165,9 @@ Assimp demonstrates the maintenance cost of those constraints; Baozi should borr
   `BytesBlock`, `Utf8Block`, and bounded allocation-free `RecordBlock` values. Only the three leaf
   kinds may inherit physical backing; geometry index scalar payload may share only as a sealed scalar
   sequence, while every record/directory/reference/header/generation-local lookup-index structure is
-  rebuilt. A future pure-record share requires static reference-free proof plus an ADR amendment.
+  rebuilt. A future pure-record share requires static reference-free proof plus independent
+  implementation/conformance review; it changes ADR 0044 only if the lineage proof boundary or
+  another durable ownership invariant changes.
   Core's `CanonicalBlockRef<Schema>` is a non-owning typed projection over a sealed, unstable in-
   memory schema, never an allocation owner or stable wire. Operation validates physical typed
   variants/membership/account/destination/ownership closure; core validates semantic kinds/
@@ -409,7 +411,7 @@ flowchart TB
 - **Goal:** Atomically replace the old geometry, material/texture, skin/morph/animation, identity, validation, and derived-data model and restore a green workspace before semantic format work continues.
 - **Requirements:** R2, R4, R6-R7, R9-R14, R19, R21, AE7-AE10, AE12, AE17.
 - **Dependencies:** U3, U3.5.
-- **Files:** `Cargo.toml`, `crates/baozi-operation/Cargo.toml`, `crates/baozi-operation/src/`, `crates/baozi-core/Cargo.toml`, `crates/baozi-core/src/scene.rs`, `crates/baozi-core/src/identity.rs`, `crates/baozi-core/src/shared_storage.rs`, `crates/baozi-core/src/material.rs`, `crates/baozi-core/src/validation.rs`, `crates/baozi-core/src/lib.rs`, new focused core modules under `crates/baozi-core/src/`, `crates/baozi-core/tests/scene_validation.rs`, new tests under `crates/baozi-core/tests/`, `crates/baozi-test-support/src/snapshot.rs`, `crates/baozi-import/src/`, `crates/baozi-postprocess/src/`, `crates/baozi-format-stl/src/`, `crates/baozi-format-obj/src/`, `crates/baozi-format-ply/src/`, `crates/baozi-format-gltf/src/`, `crates/baozi/src/`, affected `fuzz/fuzz_targets/`, `crates/baozi-xtask/src/`, new `docs/conformance/u4c-metrics.toml`, `docs/adr/0003-core-scene-ir-and-material-model.md`, `docs/adr/0020-import-lifecycle-and-report-contract.md`, `docs/adr/0022-per-import-resource-ledger-and-budget-accounting.md`, `docs/adr/0032-postprocess-remap-and-derived-data-contract.md`, `docs/adr/0042-shared-canonical-storage-accounts-and-generation-lineage.md`, `docs/research/fallible-shared-storage-admission.md`.
+- **Files:** `Cargo.toml`, `crates/baozi-operation/Cargo.toml`, `crates/baozi-operation/src/`, `crates/baozi-core/Cargo.toml`, `crates/baozi-core/src/scene.rs`, `crates/baozi-core/src/identity.rs`, `crates/baozi-core/src/shared_storage.rs`, `crates/baozi-core/src/material.rs`, `crates/baozi-core/src/validation.rs`, `crates/baozi-core/src/lib.rs`, new focused core modules under `crates/baozi-core/src/`, `crates/baozi-core/tests/scene_validation.rs`, new tests under `crates/baozi-core/tests/`, `crates/baozi-test-support/src/snapshot.rs`, `crates/baozi-import/src/`, `crates/baozi-postprocess/src/`, `crates/baozi-format-stl/src/`, `crates/baozi-format-obj/src/`, `crates/baozi-format-ply/src/`, `crates/baozi-format-gltf/src/`, `crates/baozi/src/`, affected `fuzz/fuzz_targets/`, `crates/baozi-xtask/src/`, new `docs/conformance/u4c-metrics.toml`, `docs/adr/0003-core-scene-ir-and-material-model.md`, `docs/adr/0020-import-lifecycle-and-report-contract.md`, `docs/adr/0022-per-import-resource-ledger-and-budget-accounting.md`, `docs/adr/0032-postprocess-remap-and-derived-data-contract.md`, historical `docs/adr/0042-shared-canonical-storage-accounts-and-generation-lineage.md`, `docs/adr/0044-retained-physical-storage-ownership-and-account-lineage.md`, `docs/research/fallible-shared-storage-admission.md`.
 - **Approach:** Use one `SceneConstructionOperation`-backed canonical construction seam as the only
   pre-validation API; `SceneDraft` carries only a construction brand and canonical directory-slot
   descriptor, and `ValidatedScene` is the invariant-bearing result. Model logical Mesh and MeshPrimitive under the ownership/cardinality
@@ -445,8 +447,10 @@ flowchart TB
   Geometry index scalar payload may inherit only as a sealed `ScalarSequenceBlock`; every
   `RecordBlock`, directory, reference, header, and generation-local lookup/index structure is rebuilt
   even when currently scalar-only; a future pure-record share needs a static reference-free marker
-  and ADR amendment. Operation validates physical typed variant/table/account/destination/fresh-slot/
-  structural ownership closure; core validates schema-allowed kinds, roots, reachability, references,
+  and independent implementation/conformance review. It changes ADR 0044 only if the lineage proof
+  boundary or another durable ownership invariant changes. Operation validates physical typed
+  variant/table/account/destination/fresh-slot/structural ownership closure; core validates
+  schema-allowed kinds, roots, reachability, references,
   cardinality, and orphans. Use separate canonical/evidence tables; preflight count/width/record-
   fields/overflow/table/max-new/root-plus-actual-new attribution before set-id/work/account/refcount/
   allocator effects. Every backing allocation uses a `CapacityPlan` governed by the exact capacity-
@@ -473,8 +477,8 @@ flowchart TB
   changing `FormatImporter::parse(&mut ParseScope) -> ParseResult<SceneDraft>`; keep validation inside
   its declared linear cell/reference work envelope. Mechanically migrate every consumer and delete
   legacy Scene/storage/accounting paths rather than preserving parallel public models.
-- **Storage cutover gate:** Implement ADR 0042's private generic final-owner foundation and operation-
-  owned concrete metered store, then atomically migrate import, postprocess, snapshot/golden adapters,
+- **Storage cutover gate:** Implement ADR 0044's allocation-bound physical owner and operation-owned
+  concrete metered construction protocol, then atomically migrate import, postprocess, snapshot/golden adapters,
   fuzz targets, facade workflows, and every format to account-bound canonical/evidence typed tables.
   Source/rustdoc/compile-fail gates find exactly one physical `Drop` protocol and no public generic
   retained constructor, arbitrary owning payload/backing, declared footprint, visitor/attach path,
@@ -554,8 +558,9 @@ runtime behavior, public API, drop order, or probe semantics.
 
 #### U4c Metric Contract
 
-U4c exit requires a checked-in, production-oriented measurement specification using ADR 0042's
-physical-account and canonical vocabulary. The checked-in
+U4c exit requires a checked-in, production-oriented measurement specification using ADR 0044's
+physical-account invariants and the U4c implementation vocabulary defined by this plan and the
+conformance specification. The checked-in
 `cargo run -j 1 --locked -p baozi-xtask -- u4c-metrics --spec docs/conformance/u4c-lifecycle-diagnostic.toml`
 command currently accepts only a versioned `lifecycle-diagnostic` specification. It checks the
 declared Rust/host identity, source-anchor digests, one serial V1 retained-lifecycle probe, and its
@@ -606,8 +611,9 @@ Backend-only glTF safety research may run in parallel, but it is not a U4 depend
   one reservation and burn that gap on later downgrade/drop. Exact wrappers retain only already
   qualified but domain-unexposed owners, prepared drop destroys storage before account owners without
   reopening the ledger, and type-specific pure handoff only exposes/moves owners. Keep one long-lived
-  bounded facade factory; run the frozen repository U4c spec with the pinned xtask and amend the ADR
-  on any tool/fixture/digest drift or exact threshold violation; require independent transcript/per-
+  bounded facade factory; run the frozen repository U4c spec with the pinned xtask and revise that
+  implementation/conformance specification under independent review on any tool/fixture/digest drift
+  or exact threshold violation; require independent transcript/per-
   field vectors before layout permutations; and block U4 exit until all legacy/scaffolding symbols
   are absent.
 - **Test scenarios:** Multi-primitive logical mesh; OBJ Corner through the facade and backend-free core fixtures for glTF multi-primitive/morph/skin/animation shape; mixed topology/material; valid and invalid domain cardinality; one/two/three component UV storage; over-four influences and invalid offsets/joints/weights; skin matrix-space invariants; sparse/dense morph and defaults; Image/Texture/Sampler sharing; all SceneSpace conventions; authored matrix versus TRS base pose, component-channel overlay, target-specific `SourceDefault`, and no implicit matrix decomposition; long `f64` times, node TRS/morph targets, interpolation/extrapolation; no source-scope record, one valid record, duplicate-record rejection, exact-budget detail, preserve-or-fail excess, authorized charged detail collapse with typed loss subject, loss-evidence/diagnostic-budget rollback before submission, and failure-after-record retention; provenance aliases and lineage; `SourceIdentity` continuity across generations while private `ProvenanceNodeId` values never escape their arena; stale/foreign-generation and foreign-owner handle rejection before range lookup; every changed edit reserves exactly one output generation and sibling edits from one input receive different final tokens; ordered per-step entity and Vertex/Corner/Face/Instance remaps use owning-report typed step-state paths/ordinals with complete owner-local identities and cannot perform Scene lookup, persist, convert, or compare across reports; only the composed input-to-final envelope names `from_generation`/`to_generation`, with Vertex/Corner/Face endpoints `(PrimitiveId, domain_index)` and Instance endpoints `MeshInstanceId`; per-step relations compose deterministically across matching report states for deletion, split, merge, generated, and explicitly unchanged cases; failure may name the preserved input generation but no candidate output generation; shared payloads report complete logical footprint in each generation but one physical account charge until final drop; changed edits attribute new wrappers/replacements without recharging inherited payloads; foreign-account clone/rebrand, account-limit, allocation, validation, and publication failures leave the input account unchanged and publish no generation; concurrent final-owner extraction has exactly one winner, allocator barriers keep charged headroom unavailable through outer-control and nested-backing deallocation, caught non-builder unwind cleanup proves fallback with zero leak, uncertain dependency/storage release keeps payload/lease/attribution coupled and poisoned and returns typed fatal containment rather than refunding early, process-isolated abort/double-panic/exit/OOM are distinguished, account-control bytes/live accounts remain independently bounded, and retained inline payloads cannot exceed the declared extraction ceiling; provenance lineage agrees with the composed relation; multiple ValidationIssues in stable order; deep, wide, shared-subtree, and diamond graphs with deterministic linear work counts; large aggregate attribute/influence/morph/animation cell budgets; public API compile-fail coverage for direct proof construction/direct structural mutation plus a positive downstream test that obtains proof only through the central validator, and a common-workflow facade test that never handles proof or ledger internals; derived-data invalidation and generation rebinding; all affected fuzz targets compile after the public cutover.
@@ -712,8 +718,9 @@ Backend-only glTF safety research may run in parallel, but it is not a U4 depend
   The repository-owned U4c specification, sealed collector, complete measurement closure,
   independently frozen fixture digests/mutation vectors, allocator/account tracer, `N/2N/4N`
   lookup scenarios, and production entry-point mapping all pass without behavioral, resource, or
-  closure drift or the ADR is amended. Independent semantic
-  transcript/per-field vectors pass before supplemental layout permutations; all workspace crates
+  closure drift or the implementation/conformance specification is independently revised.
+  Independent semantic transcript/per-field vectors pass before supplemental layout permutations;
+  all workspace crates
   compile; legacy `Scene`, `SharedStorage`, reservation-transfer, full-output-recharge, owning core
   wrapper, public raw retained, migration bridge/candidate, fixed-four/single-primitive/conflated-
   texture, and direct-mutation searches are empty. No allocation can be inherited without a shareable
@@ -918,7 +925,7 @@ Backend-only glTF safety research may run in parallel, but it is not a U4 depend
   dual rail are deleted.
 - The common facade exposes one long-lived runtime created from a finite documented profile, retains one bounded factory, and creates private per-import accounts without exposing proof, physical-account, ledger, reservation, or lease types. Advanced explicit accounts are deliberate aggregate retention domains and never imply lineage; there is no global or per-request factory.
 - Checked-in independently authored semantic transcript expected values and per-field mutation vectors cover node/transform, geometry, material/texture/image, skin/morph/animation, metadata, and provenance before layout permutations are accepted. Block/slot/capacity/padding/sharing permutations are supplemental only; U8 extends the same oracle through provenance-qualified corpus and cross-platform digest evidence.
-- U4c exit requires a separate repository-owned `docs/conformance/u4c-metrics.toml` and a pinned production comparator command; the current `u4c-lifecycle-diagnostic.toml` V1 report is not a substitute. Before production measurement an independent reviewer freezes semantically equivalent fixtures, expected digests, semantic mutation vectors, the allocation/copy/decode/lookup taxonomy, allocator/account procedure, and the full measurement closure: observer sources, schema/generator inputs, build scripts, procedural macros, generated-output hashes, and local path dependencies. Any undeclared closure input or generated output invalidates the result. Each mapped production scenario proves its declared canonical/evidence blocks and physical charge, no full-payload copy or per-element decode for an unchanged typed view, its fixture-specific bounded lookup budget at `N`, `2N`, and `4N`, and that no producer bypasses the sealed collector. LOC, tokenizer output, and comparisons with alternate layouts are not release gates. Otherwise execution stops and ADR 0042 is amended.
+- U4c exit requires a separate repository-owned `docs/conformance/u4c-metrics.toml` and a pinned production comparator command; the current `u4c-lifecycle-diagnostic.toml` V1 report is not a substitute. Before production measurement an independent reviewer freezes semantically equivalent fixtures, expected digests, semantic mutation vectors, the allocation/copy/decode/lookup taxonomy, allocator/account procedure, and the full measurement closure: observer sources, schema/generator inputs, build scripts, procedural macros, generated-output hashes, and local path dependencies. Any undeclared closure input or generated output invalidates the result. Each mapped production scenario proves its declared canonical/evidence blocks and physical charge, no full-payload copy or per-element decode for an unchanged typed view, its fixture-specific bounded lookup budget at `N`, `2N`, and `4N`, and that no producer bypasses the sealed collector. LOC, tokenizer output, and comparisons with alternate layouts are not release gates. Otherwise execution stops and the implementation/conformance specification is revised under independent review. Only a change to the durable physical-ownership, release-order, containment, lineage, or semantic-exclusion invariants requires ADR 0044 amendment or supersession.
 - Every successful import publishes one complete origin-correct input manifest with explicit replay status; producer attestation, closed-input qualification, and build identity remain unavailable until a separate Accepted decision and consumer exist.
 - STL, OBJ/MTL, PLY, and glTF pass parser-local, facade/session, golden, malformed, limit, and fuzz gates on their declared support tiers; glTF also proves source-scene selection/closure and authored matrix/TRS behavior.
 - ADR 0006 is the public compatibility authority, ADR 0024 is superseded, the new canonical-architecture ADRs are indexed and internally consistent, and transient verification status lives outside durable decisions.
@@ -1056,7 +1063,7 @@ behavior/resource observations rather than candidate-layout comparisons.
 ### 2026-07-19: Correct U4 retained-builder containment
 
 This append-only execution correction supersedes only the derived builder-unwind wording in KTD34,
-the U4 storage scenarios, and their verification prose. It does not change ADR authority; ADR 0042
+the U4 storage scenarios, and their verification prose. It does not change ADR authority; ADR 0044
 governs the retained physical-ownership protocol.
 
 - A retained fallback/evidence builder panic during operation startup returns the owner-specific start
@@ -1067,4 +1074,4 @@ governs the retained physical-ownership protocol.
 - Only a non-builder unwind may continue to fallback after candidate cleanup is verified, operation
   live attribution is zero, and the exact startup baseline remains intact.
 - Abort, double panic, process exit, OOM, or any unverified cleanup remains outside an in-process clean
-  fallback claim and requires the containment specified by ADR 0042 or an admitted process boundary.
+  fallback claim and requires the containment specified by ADR 0044 or an admitted process boundary.

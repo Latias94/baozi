@@ -1,7 +1,7 @@
 ---
-status: accepted
+status: superseded
 date: 2026-07-16
-updated: 2026-07-25
+updated: 2026-07-27
 authors:
   - Codex
 decision_type: architecture
@@ -17,37 +17,22 @@ related:
   - docs/adr/0026-validation-snapshot-and-fuzz-gates.md
   - docs/adr/0032-postprocess-remap-and-derived-data-contract.md
   - docs/adr/0036-source-identity-provenance-and-metadata.md
+superseded_by:
+  - docs/adr/0044-retained-physical-storage-ownership-and-account-lineage.md
 ---
 
 # ADR 0042: Shared Canonical Storage Accounts and Generation Lineage
 
 ## Status and Authority
 
-This accepted ADR is the sole authority for physical accounting of retained Baozi allocations,
-account-bound canonical storage, atomic retained-allocation construction, and account lineage across
-validated Scene generations and their published evidence.
+This ADR is superseded by
+[ADR 0044](0044-retained-physical-storage-ownership-and-account-lineage.md) and owns no active
+architectural concern. ADR 0044 preserves the durable physical-ownership and lineage invariants while
+removing U4-specific types, commands, source closures, hashes, fixtures, and thresholds from
+architectural authority.
 
-Acceptance selects the architecture required by the canonical Scene cutover. It does not claim that
-the current reservation-transfer implementation, `SharedStorage`, edit pipeline, import reports, or
-postprocess reports already conform.
-
-Implementation progress is intentionally tracked in the canonical architecture plan and executable
-evidence rather than this durable decision. Acceptance specifies the required end state; it neither
-claims that every current consumer conforms nor weakens when implementation status changes.
-
-The adjacent authorities remain separate:
-
-| Authority | Owned decision |
-| --- | --- |
-| ADR 0003 | Canonical Scene ownership and generation-qualified identity |
-| ADR 0009 | Storage representation, borrowing, sharing, and layout policy |
-| ADR 0022 | One operation's attempted, consumed, live-attribution, peak, and committed evidence |
-| ADR 0032 | Edit/postprocess replacement, remap, invalidation, and generation transitions |
-| ADR 0042 | Unique retained-allocation charge, physical account admission, allocation-bound lease, and cross-generation account lineage |
-
-ADR 0022 can report why one operation allocated or retained storage, but a completed operation cannot
-remain the physical owner of allocations shared by later generations. Conversely, this ADR does not
-replace operation work budgets or committed logical-output evidence.
+The remainder of this record is retained as historical implementation context and amendment history.
+It must not be used as current authority or as a requirement to preserve the recorded U4 mechanisms.
 
 ## Context
 

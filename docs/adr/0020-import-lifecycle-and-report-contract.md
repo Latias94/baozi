@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-07-09
-updated: 2026-07-22
+updated: 2026-07-27
 authors:
   - Codex
 decision_type: architecture
@@ -17,7 +17,7 @@ depends_on:
   - docs/adr/0036-source-identity-provenance-and-metadata.md
   - docs/adr/0039-source-document-scene-selection-and-import-closure.md
   - docs/adr/0041-resource-dependency-graph-and-successful-input-manifest.md
-  - docs/adr/0042-shared-canonical-storage-accounts-and-generation-lineage.md
+  - docs/adr/0044-retained-physical-storage-ownership-and-account-lineage.md
 related:
   - docs/adr/0013-post-process-pipeline-semantics-presets-and-mutation-model.md
   - docs/adr/0014-parser-security-unsafe-ffi-and-panic-boundary-policy.md
@@ -85,7 +85,7 @@ the frozen snapshot. Neither path has an import ledger, lifecycle phase, diagnos
 or asset open.
 
 `ImportSession::try_start` then obtains either a host-supplied physical-account capability or creates
-a private account through ADR 0042's explicit host-owned account factory, creates the real operation
+a private account through ADR 0044's explicit host-owned account factory, creates the real operation
 ledger, and preflights the complete minimal-terminal aggregate. A private two-phase startup guard
 first admits the complete operation-attribution aggregate under the ledger's one lock, releases that
 lock, and then admits the complete physical aggregate under the account's one lock. The locks are
@@ -94,7 +94,7 @@ admission returns an ordinary typed rejection that proves no physical mutation, 
 structurally rolls back the first aggregate before returning `SessionStartError`. If that transition
 panics, observes poison after mutation, or cannot prove charge/owner disposition, it instead preserves
 the provisional attribution coupled with every possible physical owner, poisons the account/path,
-and follows ADR 0042's fail-closed startup-containment result without refund or an accepted session.
+and follows ADR 0044's fail-closed startup-containment result without refund or an accepted session.
 Only the ready pair may enter the first retained allocator and fallibly
 allocate/bind the envelope. The session remains externally unaccepted until both planes succeed, so
 session acceptance is atomic even though the two accounting planes remain independently linearized.
@@ -136,7 +136,7 @@ one account transition through the private guard described above. A future singl
 implementation must preserve the same observable admission, rollback, evidence, query, and failure
 contract without merging the two locks or accounting snapshots.
 
-Session startup delegates construction and containment of its fallback/evidence storage to ADR 0042.
+Session startup delegates construction and containment of its fallback/evidence storage to ADR 0044.
 The import lifecycle accepts a session only after that storage has reached the exact startup-baseline
 state required by later terminal downgrade. Every failed startup maps to `SessionStartError` with no
 accepted session, report, failure, or fallback publication. This ADR owns that lifecycle mapping; it
@@ -153,10 +153,10 @@ ledger start, terminal-envelope admission, and terminal-envelope allocation. It 
 
 A retained startup builder panic maps to `SessionStartError` and creates no session or import
 terminal. A retained candidate/report builder panic after successful startup maps to
-`FinalizationContainmentError` and cannot publish minimal fallback. ADR 0042 owns the physical
+`FinalizationContainmentError` and cannot publish minimal fallback. ADR 0044 owns the physical
 containment facts preserved by either mapping.
 
-For an explicit account, `try_start` first performs ADR 0042's operation-start admission under the
+For an explicit account, `try_start` first performs ADR 0044's operation-start admission under the
 shared physical-account poison/counter linearization state. Poison-first returns allocation-free
 typed `SessionStartError::AccountPoisoned` before an import ledger, work/counter charge, asset IO,
 retained-share/refcount access, or allocator call. Every account clone observes the same latch; no
@@ -591,7 +591,7 @@ completes, destroys domain-unexposed publication owners in storage-before-accoun
 reopen the ledger, roll back destination commitments, or expose a public terminal.
 
 Final publication eligibility is still part of preparation. It checks the shared account poison
-latch under ADR 0042's linearization state before any exact wrapper is returned. Poison-first,
+latch under ADR 0044's linearization state before any exact wrapper is returned. Poison-first,
 including a poison that follows an earlier successful start/retain admission, returns
 `FinalizationContainmentError`, exposes the shared account poison snapshot/count/evidence, publishes
 no prepared terminal, and makes handoff unreachable. If publication eligibility linearizes first,
@@ -618,7 +618,7 @@ intact `StartupBaselineOwner` uses
 the minimal fallback and also publishes evidence only. All three exact forms reach zero operation-live attribution during
 preparation, before their pure handoffs, while physical leases remain bound to returned storage.
 
-ADR 0042 owns all startup and later retained-storage cleanup facts, evidence precedence, and
+ADR 0044 owns all startup and later retained-storage cleanup facts, evidence precedence, and
 membership-specific release rules. The import finalizer consumes only the resulting typed lifecycle
 outcome and cannot reinterpret physical containment as a clean report-quality downgrade.
 
@@ -748,7 +748,7 @@ Negative:
 | Session bootstrap fails before the terminal envelope exists | Critical | checked complete sealed-cell/header semantic layout plus per-backing `CapacityPlan`, ledger-first/physical-second aggregate admission, structural rollback only for typed no-mutation second-plane rejection, fail-closed coupled containment for panic/post-mutation poison/uncertain disposition, fixed-size allocation-free `SessionStartError`, no asset IO, and exactly-one returned-terminal guarantee begins only after `try_start` succeeds |
 | Two accounting locks are mistaken for one cross-plane transaction lock | Critical | each plane admits its complete aggregate under its own non-nested lock; a private guard makes only external session acceptance atomic and tests prove no shared internal linearization point is claimed |
 | Process-local evidence keys outlive their mapping or enter stable identity | Critical | the Baozi-owned result/evidence owner retains the `StoreKeyDomain` anchor and immutable normalized catalog through query lifetime; plugins receive only host-minted keys, and transcript/digest/wire tests exclude the runtime brand |
-| A cloned explicit account bypasses containment poison | Critical | operation start uses ADR 0042's shared monotonic account latch; every clone rejects with typed `AccountPoisoned`, and import/facade APIs expose no reset, ignore, state replacement, or reuse path |
+| A cloned explicit account bypasses containment poison | Critical | operation start uses ADR 0044's shared monotonic account latch; every clone rejects with typed `AccountPoisoned`, and import/facade APIs expose no reset, ignore, state replacement, or reuse path |
 | Account poison races a previously admitted import | Critical | start/retain charge remains coupled, all later admissions reject, and final publication eligibility observes poison under the account linearization state and returns fatal containment before an exact prepared wrapper exists |
 | ParseScope grows back into a raw service locator | High | Capability allowlist, private fields, and compile-fail boundary tests. |
 | Failure conversion drops lower-layer cause/evidence | High | Exhaustive outcome tests at every lifecycle phase. |
@@ -760,7 +760,7 @@ Negative:
 | Failure-outcome preparation recursively needs another allocation | Critical | Pre-admit one checked-layout minimal account-bound terminal envelope before risky work; destroy partial rich evidence and perform one infallible prepared handoff only after cleanup is proved. |
 | Prepared outcome handoff still reaches a failure or panic boundary | Critical | Preparation completes final downgrade and destination commitments, returns an exact typed terminal wrapper with zero live attribution, and performs all allocation, validation, accounting, control, callback, and account work; type-specific handoff only exposes owners and cannot fail or panic. |
 | A retained-builder panic is reported as fallback | Critical | Startup panic returns `SessionStartError` with side containment; later candidate/report panic returns fatal containment; fallback requires verified candidate cleanup and intact `StartupBaselineOwner`. |
-| Import lifecycle reinterprets retained containment as a report downgrade | Critical | Consume ADR 0042's typed startup/finalization result without reproducing or weakening its physical cleanup protocol. |
+| Import lifecycle reinterprets retained containment as a report downgrade | Critical | Consume ADR 0044's typed startup/finalization result without reproducing or weakening its physical cleanup protocol. |
 | Generation allocation remains after attribution freeze | Critical | Reserve `ReservedSceneGeneration` as the final fallible pre-freeze identity acquisition; rejection/exhaustion consumes no nonce and becomes ordinary rich failure, any later preparation failure/cancellation/caught-unwind/prepared-success drop may burn the gap, and only exact `PreparedSuccess` can own/consume a reservation. |
 | Failure evidence is counted as canonical output or loses its physical owner | Critical | `PublishedOutcomeEvidence` is independent of zero committed canonical output and every retained slot keeps its account-bound lease. |
 | Import code duplicates or bypasses retained storage authority | Critical | `baozi-operation` keeps the generic rail private and exposes one concrete store; core owns only sealed schema plus non-owning projections, and import owns only sealed outcome composition. |
@@ -786,7 +786,7 @@ Negative:
 | --- | --- |
 | Session-before-IO | Invalid requests create no session and perform zero IO; a primary-open failure observes one created session and one finalizer. |
 | Session bootstrap | Invalid/zero/exact account-factory and physical limits plus shared account-poison start admission, key normalization, count conversion, complete `FallbackDimensionCell<D>`/`FallbackPhaseCell<P>` `Layout::array`, ordered semantic `Layout::extend`/`pad_to_align`, per-actual-allocation `CapacityPlan`, and aggregate requested-envelope/block checked sum either return one allocation-free `SessionStartError` with zero accepted session/IO or produce a private ready pair. Tests prove one complete ledger aggregate admission, then one complete physical aggregate admission, no nested locks or shared cross-plane linearization point, deterministic first-plane rollback only on typed no-mutation second-plane rejection, coupled fail-closed containment on panic/post-mutation poison/uncertain disposition, and zero retained allocator entry until both succeed. A poison-first typed account rejection leaves no accepted ledger/work/IO/refcount/allocator state. No dimension-only, unchecked `size_of`, or aggregate-layout-as-single-backing formula is accepted. |
-| Startup retained outcome | Operation integration fixtures prove every retained-start failure returns one `SessionStartError` with no accepted session or terminal, while successful startup supplies the exact baseline required for later downgrade. Retained builder containment after startup returns `FinalizationContainmentError`; physical cleanup conformance remains ADR 0042's test authority. |
+| Startup retained outcome | Operation integration fixtures prove every retained-start failure returns one `SessionStartError` with no accepted session or terminal, while successful startup supplies the exact baseline required for later downgrade. Retained builder containment after startup returns `FinalizationContainmentError`; physical cleanup conformance remains ADR 0044's test authority. |
 | Fallback evidence ownership | Compile-fail, shape, and plugin-unload tests prove each cell contains one inert Baozi-owned copied key plus its snapshot; keys have no `Drop`, external/plugin object, trait object/vtable, or function pointer and are normalized before the first ledger entry. The Baozi-owned result/evidence owner keeps the process-local `StoreKeyDomain` anchor and immutable normalized mapping through query lifetime; plugins receive only host-minted keys. Brand variation leaves semantic transcripts, digests, wire values, cache/build identities, and user-visible meaning unchanged. `FallbackHeader<P>` retains schema revision, terminal cause, last completed phase, counts, operation-wide current/peak live bytes, active reservations, and current/peak evidence-storage bytes; no global field is reconstructed from cells. Prepared minimal fallback has zero current live, active reservations, and current evidence storage, preserves both peaks, and remains queryable without plugin code. |
 | Pre-session panic | Submitted-layer codec panic is one bounded `RequestError`; default-codec panic prevents snapshot creation as `RegistryBuildError`; both have zero sessions, finalizers, import ledgers, diagnostic streams, and asset opens. |
 | Single finalization | After session creation, success, every failure phase, cancellation, and caught unwind call the outcome finalizer exactly once; it returns one report/failure when cleanup is proved or one fatal containment error when release remains uncertain. Abort/double-panic/exit/OOM are asserted only by the isolating parent process. |
@@ -820,6 +820,21 @@ Negative:
 | Crate ownership | Dependency and public-API checks find no backend type or executable backend object in public outcomes/stable schemas, no `baozi-operation` upward dependency, no postprocess-to-import edge, and no reversed core dependency. |
 
 ## Amendment History
+
+### 2026-07-27: Follow retained physical-ownership authority supersession
+
+- Affected: frontmatter `depends_on`, session startup, final publication, containment risks, metrics,
+  and acceptance criteria.
+- Previous: current import lifecycle text cited ADR 0042, which combined durable retained ownership
+  invariants with U4-specific implementation and measurement details.
+- New: ADR 0044 is the sole retained physical-ownership and lineage authority. Import lifecycle,
+  outcome, and containment mappings are unchanged. Older amendment entries preserve the ADR
+  identifier in effect when they were recorded and do not restore ADR 0042 authority.
+- Impact: none; this is an atomic authority-navigation update.
+- Review: reciprocal supersession, Accepted dependency graph, current-text reference scan, and direct
+  ADR review.
+- Rationale: import consumes the physical protocol's durable outcomes without making its temporary
+  implementation specification part of the lifecycle contract.
 
 ### 2026-07-22: Seal format failures as host-owned inert evidence
 

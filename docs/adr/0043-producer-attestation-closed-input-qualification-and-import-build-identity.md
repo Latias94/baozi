@@ -13,7 +13,7 @@ depends_on:
   - docs/adr/0022-per-import-resource-ledger-and-budget-accounting.md
   - docs/adr/0026-validation-snapshot-and-fuzz-gates.md
   - docs/adr/0041-resource-dependency-graph-and-successful-input-manifest.md
-  - docs/adr/0042-shared-canonical-storage-accounts-and-generation-lineage.md
+  - docs/adr/0044-retained-physical-storage-ownership-and-account-lineage.md
 related:
   - docs/adr/0006-public-api-versioning-and-crate-stability-policy.md
   - docs/adr/0017-serialization-snapshot-and-cache-boundary.md
@@ -166,7 +166,7 @@ This proposal cannot become Accepted until one atomic reviewed change supplies:
 5. exact resolver semantic/proof-scheme binding and ambient-IO bypass rejection;
 6. separate manifest-failure versus identity-unavailable fault-injection tests;
 7. implementation, test, and CI tracers in the repository conformance inventory; and
-8. an atomic update to ADRs 0011, 0017, 0020, 0021, 0022, 0041, and 0042, the authority index,
+8. an atomic update to ADRs 0011, 0017, 0020, 0021, 0022, 0041, and 0044, the authority index,
    asset-cooker/artifact policy, and the implementation plan wherever they choose to consume the
    accepted identity.
 

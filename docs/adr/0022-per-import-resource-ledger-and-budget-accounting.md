@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-07-09
-updated: 2026-07-21
+updated: 2026-07-27
 authors:
   - Codex
 decision_type: architecture
@@ -16,7 +16,7 @@ related:
   - docs/adr/0036-source-identity-provenance-and-metadata.md
   - docs/adr/0037-archive-and-container-security.md
   - docs/adr/0041-resource-dependency-graph-and-successful-input-manifest.md
-  - docs/adr/0042-shared-canonical-storage-accounts-and-generation-lineage.md
+  - docs/adr/0044-retained-physical-storage-ownership-and-account-lineage.md
 ---
 
 # ADR 0022: Per-Import Resource Ledger and Phase Budget Accounting
@@ -45,7 +45,7 @@ does not merge distinct operation histories into one ambiguous total.
 
 `baozi-operation` owns the runtime-neutral reservation types, the sole
 prepare/frozen-publication/infallible-handoff state-machine primitive, checked counter primitives,
-generic ledger engine, and owner-neutral ledger-evidence snapshot machinery. ADR 0042 separately
+generic ledger engine, and owner-neutral ledger-evidence snapshot machinery. ADR 0044 separately
 authorizes that crate's private generic final-owner foundation and concrete retained store. This ADR
 does not derive physical-allocation lifetime authority from ledger ownership and does not expose a
 generic retained payload or caller-declared footprint.
@@ -216,7 +216,7 @@ Safely prepared fallback records zero current live bytes, active reservations, a
 evidence bytes while preserving the actual operation-wide and evidence-storage peaks.
 
 The complete header-plus-cell `Layout` is a checked semantic shape/overflow preflight, not evidence of
-one allocator request. ADR 0042 may give the fixed header owner and keyed evidence backing separate
+one allocator request. ADR 0044 may give the fixed header owner and keyed evidence backing separate
 actual allocations; every actual allocation has its own policy-governed `CapacityPlan` and full
 layout/capacity charge. A separate crate-private evidence anchor pairs the concrete-store revision
 with the capacity-policy revision. Before retained payload/evidence allocator entry, bootstrap checked-sums all requested envelopes and
@@ -317,10 +317,10 @@ evidence that actually outlives the adapter call.
 
 This ADR owns only operation attribution. It does not define or consume a physical-account type,
 retained-allocation representation, allocation-bound lease, deallocator, or generation-lineage API.
-ADR 0042 is the downstream decision that depends on these attribution semantics and supplies that
+ADR 0044 is the downstream decision that depends on these attribution semantics and supplies that
 separate physical lifetime implementation.
 
-The operation owner nevertheless must compose its ledger with ADR 0042's monotonic shared account-
+The operation owner nevertheless must compose its ledger with ADR 0044's monotonic shared account-
 poison contract. Fresh/derived operation start, every retain/share admission, and final publication
 eligibility linearize against the physical account's poison/counter state. Poison-first start rejects
 before an operation ledger or attempted/consumed/work counter exists. If an operation or retain
@@ -363,15 +363,15 @@ destination commitment, or expose a public terminal. An operation failure leaves
 output at zero but may publish typed failure evidence; a preparation failure with verified cleanup destroys
 every unpublished rich aggregate before releasing its covering owners and then uses the pre-admitted
 assembly-independent terminal envelope. Uncertain cleanup retains the coupled owners and cannot
-select fallback. ADR 0042's concrete store must satisfy this provider contract before
+select fallback. ADR 0044's concrete store must satisfy this provider contract before
 U4 conformance; replacing it must preserve the same one-way dependency and must not expose its raw
 generic foundation.
 
-Inherited shared payloads authorized by ADR 0042's exact input-lineage source are not attributed as
+Inherited shared payloads authorized by ADR 0044's exact input-lineage source are not attributed as
 new physical allocation by a later operation. Same account alone is insufficient. The operation still
 records complete committed logical output by semantic presence/length plus clone/branch/container
 work and every fresh target slot, wrapper, replacement, index, remap, report, or evidence allocation
-it caused. ADR 0042 defines the non-rebrandable account lineage and unique physical-byte owner.
+it caused. ADR 0044 defines the non-rebrandable account lineage and unique physical-byte owner.
 
 ### Pre-Session Request Admission
 
@@ -438,7 +438,7 @@ The ledger supports byte and non-byte dimensions. At minimum it accounts for:
   and bounded terminal-evidence items/bytes; and
 - operation-attributed current/peak-live bytes globally and by phase.
 
-ADR 0042 separately owns account-qualified physical current/peak bytes and live-allocation count.
+ADR 0044 separately owns account-qualified physical current/peak bytes and live-allocation count.
 
 Per-resource limits remain fast local gates. Aggregate counters and peak-live are additional gates,
 not replacements.
@@ -547,7 +547,7 @@ cost. Rejected.
 
 More bookkeeping, but it separately models cumulative attempted abuse, completed/observed
 `Consumed` work, operation-local overlap, published canonical output, and retained success/failure
-evidence without mutating another operation's evidence. ADR 0042 separately owns physical allocation
+evidence without mutating another operation's evidence. ADR 0044 separately owns physical allocation
 lifetime across generations. Chosen.
 
 ## Consequences
@@ -560,12 +560,12 @@ Positive:
 - A failed import can publish bounded retained evidence without fabricating canonical committed
   output or leaking operation-live attribution.
 - Shared dependency caching has explicit physical-versus-logical accounting.
-- Retained-output attribution integrates with ADR 0042 without making the operation ledger the
+- Retained-output attribution integrates with ADR 0044 without making the operation ledger the
   allocation's lifetime owner.
 
 Negative:
 
-- Retained output requires an attribution admission in addition to ADR 0042's physical admission.
+- Retained output requires an attribution admission in addition to ADR 0044's physical admission.
 - Opaque backend accounting remains conservative and needs external RSS evidence; a known unbounded
   path remains inadmissible regardless of allowance size.
 - Statistics and tests become more detailed than a single byte total.
@@ -575,12 +575,12 @@ Negative:
 | Risk | Severity | Mitigation |
 | --- | --- | --- |
 | Reservation drift undercounts actual capacity | Critical | One `baozi-import` metered-storage owner, capacity-based tests, checked arithmetic, destructor-order tests, and heap/RSS scale gates. |
-| Attribution commit double-counts or controls the physical owner | High | ADR 0042's deep retained-allocation module commits only operation evidence and exposes no lease-control token. |
+| Attribution commit double-counts or controls the physical owner | High | ADR 0044's deep retained-allocation module commits only operation evidence and exposes no lease-control token. |
 | Structural retained plan mutates state before an overflow or capacity failure | Critical | Validate count/width/overflow/table/max-new/attribution structure before set-id, work, account, or allocator side effects. |
 | Observed allocator capacity differs from admission | Critical | Govern the plan by the capacity-policy revision and match a separate concrete-store/policy evidence anchor, charge the full envelope before entry, request only desired additional capacity, accept desired-through-envelope in `finish`, retain conservative charge while live, and destroy over-envelope storage before releasing owners with `CapacityEnvelopeViolated`. This is a post-allocation defense, not proof that transient RSS never exceeded the envelope. |
 | Repeated exact `len + 1` growth becomes quadratic | Critical | Fixed plans keep logical-minimum semantics, while growable and replacement wrappers preserve that requirement and put a geometric target in the allocator-facing plan. Scale gates count successful replacements and all moved source elements/bytes, rejecting linear replacement counts or superlinear movement. |
 | A physical-account limit is presented as an exact process-memory limit | Critical | Define it as Baozi-requested policy-governed layout/capacity only; exclude allocator-private overhead/overgrant, deny strict claims for unknown or unverified allocator paths, and require an OS/subprocess limit for a hard process-memory boundary. |
-| Operation accounting ignores shared account poison | Critical | operation start/retain/share/final-publication eligibility composes with ADR 0042's physical-account linearization state; a typed poison rejection before physical mutation rolls back the unobservable provisional ledger graph, while poison observed after mutation or start/retain/share-admission-first evidence/charge remains coupled and fails closed before handoff |
+| Operation accounting ignores shared account poison | Critical | operation start/retain/share/final-publication eligibility composes with ADR 0044's physical-account linearization state; a typed poison rejection before physical mutation rolls back the unobservable provisional ledger graph, while poison observed after mutation or start/retain/share-admission-first evidence/charge remains coupled and fails closed before handoff |
 | Two independent accounting locks are presented as one snapshot | Critical | the ledger-first and physical-second transitions each admit one complete aggregate under one lock, never nest locks, expose no shared internal linearization point, and use a private guard to make only external operation acceptance atomic |
 | Failure evidence has no legal attribution terminal state | Critical | preparation applies the outcome-evidence destination commitment, the exact wrapper privately owns the still-unexposed evidence, public `PublishedOutcomeEvidence` appears only after handoff, and a pre-admitted terminal envelope supports exact infallible failure handoffs |
 | A prepared handoff discovers another failure or panic source | Critical | preparation completes terminal classification and destination commitment and reaches zero operation-live attribution; exact prepared wrappers have no pending token and their handoffs are pure consuming owner exposure. |
@@ -625,7 +625,7 @@ Negative:
 | Account poison composition | Across cloned explicit accounts, poison-first operation start/retain/share returns typed `AccountPoisoned` before attempted/consumed/live counters, work permits, set/slot, refcount/range, or allocator effects. If start/admission linearizes first, existing operation evidence and charge remain, later admissions reject, and final publication eligibility returns `FinalizationContainmentError` with no exact prepared wrapper or handoff. Physical snapshots expose one latch/count/evidence; ledger snapshots are not rewritten to fabricate that physical state. |
 | Minimal fallback evidence | Header assertions preserve schema/cause/last-phase/counts plus operation-wide current/peak live, active-reservation, and current/peak evidence-storage values without deriving globals from cells; prepared fallback has all current values zero. Cell shape, key-normalization, producer-unload, and query tests prove every dynamic entry owns only one inert Baozi-domain key plus its snapshot and no external/plugin object, vtable, function pointer, callback, or `Drop`. The Baozi-owned result/evidence owner retains the process-local domain anchor and immutable catalog for the complete query lifetime, plugins receive only host-minted keys, and changing a runtime brand cannot change any semantic transcript, digest, wire, cache/build identity, or user-visible meaning. |
 | Shared metered storage | Compile-time API checks and format-source scans find one `baozi-import` reserve/grow/shrink/transfer/rollback implementation; all first-party parser collections use it, allocation drops before its token, and injected transition failures preserve both owners exactly. Monotonic one-element replacement fixtures at `N`, `2N`, and `4N` prove logarithmic replacement count and linear total moved elements/bytes; source scans reject repeated fixed `desired = len + 1` growth rails. |
-| Retained-store authority | Rustdoc/source/compile-fail gates find no public generic retained constructor, arbitrary owning payload, caller-supplied backing allocation, visitor/attach path, or caller-declared footprint; domain code uses only ADR 0042's concrete store and non-owning qualified projections. |
+| Retained-store authority | Rustdoc/source/compile-fail gates find no public generic retained constructor, arbitrary owning payload, caller-supplied backing allocation, visitor/attach path, or caller-declared footprint; domain code uses only ADR 0044's concrete store and non-owning qualified projections. |
 | Linear work accounting | Permit admission charges attempted work, completion charges consumed work, and unfinished work retains attempted-only evidence; owner-specific integration fixtures prove their polling and terminal transport separately. |
 | Decoded text surfaces | Exact and one-byte-under tests cover whole-text inputs, mixed text/binary headers, and container JSON chunks; borrowed validation creates no fictitious live bytes, while materialized copies reserve actual capacity. |
 | Packed format failure evidence | Packed descriptor/code/detail capacity is reserved before the borrowed producer runs, remains covered through failure finalization, and the terminal outcome retains no backend/plugin object or hidden foreign allocation. |
@@ -646,6 +646,21 @@ Negative:
 | Clone and branch admission | Exact/excess transient clone loops and sibling/deep-branch fixtures charge non-refundable work before reference-count changes and cannot bypass retained-handle, container, branch, or generation limits. |
 
 ## Amendment History
+
+### 2026-07-27: Follow retained physical-ownership authority supersession
+
+- Affected headings: frontmatter `related`, operation/physical boundary, retained-output integration,
+  risks, metrics, and acceptance criteria.
+- Previous rule: current accounting text cited ADR 0042, which combined durable retained ownership
+  invariants with U4-specific implementation and measurement details.
+- New rule: ADR 0044 is the sole retained physical-ownership and lineage authority. Operation
+  attribution and committed-evidence semantics are unchanged. Older amendment entries preserve the
+  ADR identifier in effect when they were recorded and do not restore ADR 0042 authority.
+- Compatibility impact: none; this is an atomic authority-navigation update.
+- Required review: reciprocal supersession, one-way operation-to-physical ownership boundary,
+  current-text reference scan, and direct ADR review.
+- Rationale: the generic ledger must compose with durable physical guarantees without inheriting
+  temporary retained-store mechanics.
 
 ### 2026-07-21: Separate logical capacity requirements from geometric allocation targets
 

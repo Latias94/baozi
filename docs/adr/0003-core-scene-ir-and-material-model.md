@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-07-08
-updated: 2026-07-20
+updated: 2026-07-27
 authors:
   - Codex
 decision_type: architecture
@@ -17,7 +17,7 @@ related:
   - docs/adr/0036-source-identity-provenance-and-metadata.md
   - docs/adr/0039-source-document-scene-selection-and-import-closure.md
   - docs/adr/0040-camera-and-light-canonical-semantics.md
-  - docs/adr/0042-shared-canonical-storage-accounts-and-generation-lineage.md
+  - docs/adr/0044-retained-physical-storage-ownership-and-account-lineage.md
 ---
 
 # ADR 0003: Canonical Scene IR Ownership and State Model
@@ -56,7 +56,7 @@ operation-owned retained-storage foundation exists, but core has not yet integra
 atomic workspace switch and deletion gates complete.
 
 Opening `SceneEdit` is a derived-operation start against the input Scene's inherited
-`PhysicalStorageAccount`. It performs ADR 0042's shared poison/counter admission before edit work,
+`PhysicalStorageAccount`. It performs ADR 0044's shared poison/counter admission before edit work,
 clone/share/refcount access, or replacement allocation. Poison-first returns typed
 `AccountPoisoned` and leaves the input untouched. If edit start or a retained admission linearizes
 first and another account clone later latches poison, its charge remains coupled, all later
@@ -110,7 +110,7 @@ The aggregate owns these collections:
 
 Canonical presence is semantic rather than inferred from storage allocation. Core record/header fields
 carry an explicit presence discriminator plus semantic element count wherever `Absent` and
-`PresentEmpty` differ. A zero count therefore does not erase source meaning, while ADR 0042 may forbid
+`PresentEmpty` differ. A zero count therefore does not erase source meaning, while ADR 0044 may forbid
 a physical zero-length payload block and represent present-empty content entirely in its owning
 record/header.
 
@@ -164,7 +164,7 @@ intact, the finalizer selects
 `PreparedMinimalFallback`. A retained canonical or
 evidence builder panic never selects that fallback. The retained store returns
 `FinalizationContainmentError`, and core constructs no fallback, generation, proof, or remap from that
-path. ADR 0042 exclusively owns physical-side disposition, charge/attribution coupling, cleanup
+path. ADR 0044 exclusively owns physical-side disposition, charge/attribution coupling, cleanup
 precedence, and retained allocation membership below core's non-owning block views.
 Double panic, `panic = "abort"`, process exit, and OOM require process isolation. Once reservation has succeeded, any later
 publication-preparation failure, cancellation, caught unwind, or prepared-success drop burns that invisible
@@ -240,8 +240,8 @@ postprocess one atomic mutation boundary. Chosen.
 | Generation allocation fails after publication evidence is frozen | Critical | Reserve `ReservedSceneGeneration` as the final fallible pre-freeze identity acquisition; rejection/exhaustion becomes a rich failure with no nonce, later freeze/preparation failure may burn a successful reservation, and handoff only consumes exact `PreparedSuccess`. |
 | Failed preparation reuses or exposes a reserved nonce | Critical | The linear private reservation burns on drop, has no public conversion except prepared handoff, and never returns a nonce to the allocator. |
 | A success-capable prepared wrapper defers terminal classification to handoff | Critical | Preparation completes control downgrade and returns exact success, rich-failure, or minimal-fallback wrappers; only exact success can contain `ReservedSceneGeneration`. |
-| A retained-builder panic is reported as a clean fallback | Critical | ADR 0042 returns typed fatal containment; core constructs no fallback, generation, or proof from that path. |
-| A derived edit starts or commits through a poisoned account clone | Critical | begin-edit and final publication eligibility linearize against ADR 0042's one shared latch; poison-first has zero work/refcount/allocation effects, start/retain-admission-first retains charge and fails finalization before handoff, and no reset/reuse API exists |
+| A retained-builder panic is reported as a clean fallback | Critical | ADR 0044 returns typed fatal containment; core constructs no fallback, generation, or proof from that path. |
+| A derived edit starts or commits through a poisoned account clone | Critical | begin-edit and final publication eligibility linearize against ADR 0044's one shared latch; poison-first has zero work/refcount/allocation effects, start/retain-admission-first retains charge and fails finalization before handoff, and no reset/reuse API exists |
 
 ## Success Metrics
 
@@ -266,7 +266,7 @@ postprocess one atomic mutation boundary. Chosen.
   Only a subsequent failure to append, validate, or prepare that rich failure or a non-unwind root
   integrity fault with verified candidate cleanup and a confirmed intact retained startup baseline
   selects the minimal fallback. A
-  retained-builder panic instead requires ADR 0042 typed fatal containment with no fallback or zero-
+  retained-builder panic instead requires ADR 0044 typed fatal containment with no fallback or zero-
   leak claim; abort/double-panic/exit/OOM fixtures are process-isolated. Separate later-preparation-failure,
   cancellation, caught-unwind, and prepared-drop tests prove any path after successful reservation may burn
   an invisible gap, while no failed path publishes/reuses an ID or constructs a proof.
@@ -296,6 +296,21 @@ postprocess one atomic mutation boundary. Chosen.
 - Public API tests prove the import-inspect path does not require builder, proof, or ledger internals.
 
 ## Amendment History
+
+### 2026-07-27: Follow retained physical-ownership authority supersession
+
+- Affected headings: frontmatter `related`, `Decision`, canonical presence, failure containment,
+  `Risks and Mitigations`, `Success Metrics`, and `Acceptance Criteria`.
+- Previous rule: current canonical lifecycle text cited ADR 0042, which combined durable retained
+  ownership invariants with U4-specific implementation and measurement details.
+- New rule: ADR 0044 is the sole retained physical-ownership and lineage authority. Canonical Scene
+  semantics and lifecycle consequences are unchanged. Older amendment entries preserve the ADR
+  identifier in effect when they were recorded and do not restore ADR 0042 authority.
+- Compatibility impact: none; this is an atomic authority-navigation update.
+- Required review: reciprocal supersession, dependency direction, current-text reference scan, and
+  direct ADR review.
+- Rationale: core should depend on durable ownership guarantees without freezing a temporary U4
+  storage implementation.
 
 ### 2026-07-20: Consume operation publication ownership without redefining attribution
 
