@@ -552,10 +552,34 @@ where
             .map_or(0, |table| table.as_ref().members.len())
     }
 
+    pub fn canonical_new_blocks(&self) -> usize {
+        self.canonical_table
+            .as_ref()
+            .map_or(0, |table| table.as_ref().new_block_count())
+    }
+
+    pub fn canonical_commitment_len(&self) -> usize {
+        self.canonical_batch
+            .as_ref()
+            .map_or(0, AttributionReservationBatch::commitment_len)
+    }
+
     pub fn outcome_evidence_len(&self) -> usize {
         self.evidence_table
             .as_ref()
             .map_or(0, |table| table.as_ref().members.len())
+    }
+
+    pub fn outcome_evidence_new_blocks(&self) -> usize {
+        self.evidence_table
+            .as_ref()
+            .map_or(0, |table| table.as_ref().new_block_count())
+    }
+
+    pub fn outcome_evidence_commitment_len(&self) -> usize {
+        self.evidence_batch
+            .as_ref()
+            .map_or(0, AttributionReservationBatch::commitment_len)
     }
 
     pub fn contains_dimension(&self, dimension: D) -> bool {
@@ -1458,6 +1482,14 @@ where
 {
     pub fn outcome_evidence_len(&self) -> usize {
         self.assembly.outcome_evidence_len()
+    }
+
+    pub fn outcome_evidence_new_blocks(&self) -> usize {
+        self.assembly.outcome_evidence_new_blocks()
+    }
+
+    pub fn outcome_evidence_commitment_len(&self) -> usize {
+        self.assembly.outcome_evidence_commitment_len()
     }
 
     pub fn contains_dimension(&self, dimension: D) -> bool {

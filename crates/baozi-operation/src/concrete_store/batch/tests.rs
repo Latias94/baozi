@@ -970,3 +970,107 @@ fn mid_batch_panic_uses_single_block_containment_and_never_returns_a_range() {
         Err(crate::StorePrepareError::FinalizationContainment(_))
     ));
 }
+
+#[test]
+fn transcript_batch_failure_preserves_the_ticket_for_exact_retry() {
+    let factory = test_factory();
+    let account = test_account(&factory);
+    let (operation, keys) = test_operation(&account);
+    let values = [[1_u8], [2_u8], [3_u8]];
+    let items = [
+        SequenceBatchItem::new(&values[0]).expect("first transcript batch item"),
+        SequenceBatchItem::new(&values[1]).expect("second transcript batch item"),
+        SequenceBatchItem::new(&values[2]).expect("third transcript batch item"),
+    ];
+    let mut transcript = operation
+        .try_begin_success_transcript(writer_plan(keys, 8, 4), writer_plan(keys, 8, 4))
+        .expect("transcript");
+    let batch_ticket = transcript
+        .plan_canonical_sequence_batch(
+            SequenceBatchPlan::new(&items).expect("transcript batch plan"),
+            BatchTag,
+        )
+        .expect("transcript batch ticket");
+    let _evidence_ticket = transcript
+        .plan_outcome_evidence_sequence::<u8, _>(1, EvidenceTag)
+        .expect("transcript evidence ticket");
+    let mut execution = transcript.try_open().expect("transcript execution");
+
+    test_fail_batch_build_at(1);
+    let error = execution
+        .try_execute_canonical_sequence_batch(&batch_ticket)
+        .expect_err("injected batch failure");
+    assert!(matches!(
+        error,
+        crate::StoreExecutionError::Batch(StoreBatchRuntimeError::Execution {
+            failed_item: 1,
+            cause: StoreRuntimeError::Build(cause),
+        }) if cause.class() == crate::StoreBuildFailureClass::IncompleteWrite
+    ));
+    assert_eq!(execution.primary_cursor(), 0);
+
+    let range = execution
+        .try_execute_canonical_sequence_batch(&batch_ticket)
+        .expect("the exact ticket remains retryable");
+    assert_eq!(range.len(), 3);
+    assert_eq!(execution.primary_cursor(), 1);
+    drop(
+        execution
+            .prepare_minimal_fallback()
+            .expect("retry fallback")
+            .handoff(),
+    );
+    assert_eq!(account.snapshot().live_retained_bytes(), 0);
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
+}
+
+#[test]
+fn transcript_batch_containment_abandons_the_executor() {
+    let factory = test_factory();
+    let account = test_account(&factory);
+    let (operation, keys) = test_operation(&account);
+    let values = [[1_u8], [2_u8], [3_u8]];
+    let items = [
+        SequenceBatchItem::new(&values[0]).expect("first transcript panic item"),
+        SequenceBatchItem::new(&values[1]).expect("second transcript panic item"),
+        SequenceBatchItem::new(&values[2]).expect("third transcript panic item"),
+    ];
+    let mut transcript = operation
+        .try_begin_success_transcript(writer_plan(keys, 8, 4), writer_plan(keys, 8, 4))
+        .expect("transcript");
+    let batch_ticket = transcript
+        .plan_canonical_sequence_batch(
+            SequenceBatchPlan::new(&items).expect("transcript panic batch plan"),
+            BatchTag,
+        )
+        .expect("transcript panic batch ticket");
+    let _evidence_ticket = transcript
+        .plan_outcome_evidence_sequence::<u8, _>(1, EvidenceTag)
+        .expect("transcript evidence ticket");
+    let mut execution = transcript.try_open().expect("transcript execution");
+
+    test_panic_batch_build_at(1);
+    let error = execution
+        .try_execute_canonical_sequence_batch(&batch_ticket)
+        .expect_err("injected batch panic");
+    assert!(matches!(
+        error,
+        crate::StoreExecutionError::BatchContained {
+            failed_instruction: 0,
+            cause: StoreBatchRuntimeError::Abandoned {
+                failed_item: 1,
+                cause: StoreRuntimeError::BuilderPanicked,
+            },
+        }
+    ));
+    assert!(matches!(
+        execution.try_execute_canonical_sequence_batch(&batch_ticket),
+        Err(crate::StoreExecutionError::Abandoned {
+            failed_instruction: 0
+        })
+    ));
+    assert!(matches!(
+        execution.prepare_minimal_fallback(),
+        Err(crate::StorePrepareError::FinalizationContainment(_))
+    ));
+}

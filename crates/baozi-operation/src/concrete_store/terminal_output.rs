@@ -345,6 +345,10 @@ impl<Kind, Tag> PublishedCanonicalStore<Kind, Tag> {
         &self.raw
     }
 
+    pub(super) fn belongs_to_account(&self, account: &PhysicalStorageAccount) -> bool {
+        self.raw.aggregate().belongs_to(account)
+    }
+
     /// Returns the typed root reference without transferring ownership.
     pub const fn root_ref(&self) -> CanonicalStoreRef<Kind, Tag> {
         self.root
@@ -457,6 +461,10 @@ pub struct PublishedOutcomeEvidenceStore<Kind, Tag> {
 impl<Kind, Tag> PublishedOutcomeEvidenceStore<Kind, Tag> {
     pub(super) fn share_source(&self) -> &PublishedOutcomeEvidenceOutput<StoredBlock> {
         &self.raw
+    }
+
+    pub(super) fn belongs_to_account(&self, account: &PhysicalStorageAccount) -> bool {
+        self.raw.aggregate().belongs_to(account)
     }
 
     /// Returns the typed root reference without transferring ownership.

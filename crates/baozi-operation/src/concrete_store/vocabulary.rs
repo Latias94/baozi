@@ -573,6 +573,22 @@ impl RetainedStoreWriterPlan {
             [self.capacity_dimension, self.attribution_dimension],
         )
     }
+
+    pub(super) const fn transcript_parts(
+        self,
+    ) -> (
+        StorePhaseKey,
+        StoreDimensionKey,
+        StoreDimensionKey,
+        RetainedStoreBatchLimits,
+    ) {
+        (
+            self.phase,
+            self.capacity_dimension,
+            self.attribution_dimension,
+            self.limits,
+        )
+    }
 }
 
 /// Work dimensions charged before a same-account retained handle is shared.

@@ -144,6 +144,7 @@ use validation::{
 
 mod batch;
 mod terminal_output;
+mod transcript;
 mod validation;
 mod vocabulary;
 
@@ -167,6 +168,19 @@ pub use terminal_output::{
     PublishedStoreFallbackOutput, PublishedStoreFallbackParts, PublishedStoreSuccessParts,
     StoreDimensionSnapshot, StoreLedgerEvidence, StoreLedgerEvidenceHeader, StorePhaseSnapshot,
     StorePreparationFailure, StorePreparationFailureClass, StoreTerminalCause,
+};
+
+pub use transcript::{
+    PlannedCanonicalBytes, PlannedCanonicalBytesBatch, PlannedCanonicalCommit,
+    PlannedCanonicalRecords, PlannedCanonicalSequence, PlannedCanonicalSequenceBatch,
+    PlannedCanonicalShare, PlannedCanonicalUtf8, PlannedCanonicalUtf8Batch,
+    PlannedOutcomeEvidenceBytes, PlannedOutcomeEvidenceCommit, PlannedOutcomeEvidenceRecords,
+    PlannedOutcomeEvidenceSequence, PlannedOutcomeEvidenceShare, PlannedOutcomeEvidenceUtf8,
+    RetainedStoreExecution, RetainedStoreTranscript, StoreExecutionError,
+    StoreFailureContinuationExecution, StoreTranscriptFailureValidation,
+    StoreTranscriptIdentityExhausted, StoreTranscriptOpenError, StoreTranscriptPlanError,
+    StoreTranscriptStartCause, StoreTranscriptStartError, StoreTranscriptStateError,
+    StoreTranscriptSuccessValidation, ValidatedTranscriptStoreSuccess,
 };
 
 pub use validation::{
@@ -1837,28 +1851,65 @@ where
             .map_err(map_phase_completion_error)
     }
 
+    fn validate_phase_key(&self, phase: StorePhaseKey) -> Result<(), StoreRuntimeError> {
+        if !self.domain.owns_phase(phase) {
+            return Err(StoreRuntimeError::ForeignPhaseDomain { phase });
+        }
+        if !self.raw.contains_phase(phase) {
+            return Err(StoreRuntimeError::Ledger(LedgerCause::UnknownPhase));
+        }
+        Ok(())
+    }
+
+    fn validate_dimension_key(
+        &self,
+        dimension: StoreDimensionKey,
+    ) -> Result<(), StoreRuntimeError> {
+        if !self.domain.owns_dimension(dimension) {
+            return Err(StoreRuntimeError::ForeignDimensionDomain { dimension });
+        }
+        if !self.raw.contains_dimension(dimension) {
+            return Err(StoreRuntimeError::Ledger(LedgerCause::UnknownDimension {
+                dimension,
+            }));
+        }
+        Ok(())
+    }
+
+    fn validate_writer_plan(
+        &self,
+        writer: RetainedStoreWriterPlan,
+    ) -> Result<(), StoreRuntimeError> {
+        let (phase, dimensions) = writer.keys_for_publication_validation();
+        self.validate_writer_keys(phase, dimensions)
+    }
+
+    fn validate_writer_keys(
+        &self,
+        phase: StorePhaseKey,
+        dimensions: [StoreDimensionKey; 2],
+    ) -> Result<(), StoreRuntimeError> {
+        self.validate_phase_key(phase)?;
+        for dimension in dimensions {
+            self.validate_dimension_key(dimension)?;
+        }
+        Ok(())
+    }
+
+    fn validate_commitment_dimension(
+        &self,
+        dimension: StoreDimensionKey,
+    ) -> Result<(), StoreRuntimeError> {
+        self.validate_dimension_key(dimension)
+    }
+
     fn validate_publication_plan_keys(
         &self,
         plan: &RetainedStorePublicationPlan,
     ) -> Result<(), StoreRuntimeError> {
         for table in plan.tables_for_validation().into_iter().flatten() {
             let (phase, dimensions) = table.keys_for_publication_validation();
-            if !self.domain.owns_phase(phase) {
-                return Err(StoreRuntimeError::ForeignPhaseDomain { phase });
-            }
-            if !self.raw.contains_phase(phase) {
-                return Err(StoreRuntimeError::Ledger(LedgerCause::UnknownPhase));
-            }
-            for dimension in dimensions {
-                if !self.domain.owns_dimension(dimension) {
-                    return Err(StoreRuntimeError::ForeignDimensionDomain { dimension });
-                }
-                if !self.raw.contains_dimension(dimension) {
-                    return Err(StoreRuntimeError::Ledger(LedgerCause::UnknownDimension {
-                        dimension,
-                    }));
-                }
-            }
+            self.validate_writer_keys(phase, dimensions)?;
         }
         Ok(())
     }
@@ -2094,9 +2145,25 @@ where
         self.raw.canonical_len()
     }
 
+    pub(super) fn canonical_new_blocks(&self) -> usize {
+        self.raw.canonical_new_blocks()
+    }
+
+    pub(super) fn canonical_commitment_len(&self) -> usize {
+        self.raw.canonical_commitment_len()
+    }
+
     /// Returns the number of outcome-evidence table members.
     pub fn outcome_evidence_len(&self) -> usize {
         self.raw.outcome_evidence_len()
+    }
+
+    pub(super) fn outcome_evidence_new_blocks(&self) -> usize {
+        self.raw.outcome_evidence_new_blocks()
+    }
+
+    pub(super) fn outcome_evidence_commitment_len(&self) -> usize {
+        self.raw.outcome_evidence_commitment_len()
     }
 
     fn ensure_writable(&self) -> Result<(), StoreRuntimeError> {
@@ -2595,6 +2662,14 @@ where
     /// Returns the current outcome-evidence member count.
     pub fn outcome_evidence_len(&self) -> usize {
         self.raw.outcome_evidence_len()
+    }
+
+    pub(super) fn outcome_evidence_new_blocks(&self) -> usize {
+        self.raw.outcome_evidence_new_blocks()
+    }
+
+    pub(super) fn outcome_evidence_commitment_len(&self) -> usize {
+        self.raw.outcome_evidence_commitment_len()
     }
 
     fn ensure_writable(&self) -> Result<(), StoreRuntimeError> {

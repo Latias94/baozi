@@ -553,3 +553,5 @@ mod failure;
 mod publication;
 #[path = "concrete_store/sharing.rs"]
 mod sharing;
+#[path = "concrete_store/transcript.rs"]
+mod transcript;

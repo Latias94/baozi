@@ -531,6 +531,10 @@ where
         self.attributions.len()
     }
 
+    pub(crate) fn commitment_len(&self) -> usize {
+        self.commitments.len()
+    }
+
     pub(crate) fn attributed_bytes(&self) -> Option<u64> {
         self.attributions
             .iter()

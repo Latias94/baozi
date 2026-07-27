@@ -321,6 +321,10 @@ impl<Block> RetainedBlockTable<Block> {
         self.members.len()
     }
 
+    pub(super) fn new_block_count(&self) -> usize {
+        self.new_blocks
+    }
+
     pub(super) fn member(
         &self,
         identity: RetainedSlotIdentity,
@@ -904,7 +908,7 @@ mod published_table_capability {
                 .source_allocation(identity, self.set_id)
         }
 
-        fn belongs_to(&self, account: &PhysicalStorageAccount) -> bool {
+        pub(in crate::retained) fn belongs_to(&self, account: &PhysicalStorageAccount) -> bool {
             self.table.source_sharing_capability().belongs_to(account)
         }
 
@@ -1287,6 +1291,10 @@ impl<Block> PublishedCanonicalAggregate<Block> {
             .lookup_member::<Tag>(slot.identity, RetainedMembershipDestination::Canonical)
     }
 
+    pub(crate) fn belongs_to(&self, account: &PhysicalStorageAccount) -> bool {
+        self.inner.belongs_to(account)
+    }
+
     pub fn len(&self) -> usize {
         self.inner.len()
     }
@@ -1330,6 +1338,10 @@ impl<Block> PublishedOutcomeEvidenceAggregate<Block> {
             slot.identity,
             RetainedMembershipDestination::OutcomeEvidence,
         )
+    }
+
+    pub(crate) fn belongs_to(&self, account: &PhysicalStorageAccount) -> bool {
+        self.inner.belongs_to(account)
     }
 
     pub fn len(&self) -> usize {
