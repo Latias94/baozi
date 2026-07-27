@@ -2,6 +2,7 @@ use crate::{CapacityPlan, CapacityPlanError, OperationOwner, ReplacementCapacity
 use std::fmt;
 use std::marker::PhantomData;
 use std::mem::size_of;
+use std::num::NonZeroU64;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 mod commitment;
@@ -909,6 +910,15 @@ struct LedgerState<P, D> {
     last_completed_phase: Option<CompletedPhase<P>>,
 }
 
+struct ReservationProjection {
+    dimension_position: usize,
+    dimension_live: u64,
+    operation_live: u64,
+    phase_position: usize,
+    phase_live: u64,
+    active_reservations: u64,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PublicationState {
     Open,
@@ -938,6 +948,14 @@ impl<P, D> LedgerTestProbe<P, D> {
 
     pub(crate) fn current_live_bytes(&self) -> u64 {
         lock(&self.state).current_live_bytes
+    }
+
+    pub(crate) fn dimension_evidence(&self, dimension: D) -> Option<DimensionSnapshot>
+    where
+        D: Copy + Ord,
+    {
+        let state = lock(&self.state);
+        dimension_entry(&state.dimensions, dimension).map(|entry| dimension_snapshot(entry.state))
     }
 
     pub(crate) fn is_terminal_qualified(&self) -> bool {
@@ -1119,6 +1137,33 @@ where
         Ok(())
     }
 
+    /// Preflights repeated attempted-and-consumed work without changing evidence.
+    ///
+    /// The projection aggregates each fixed-array dimension under one ledger lock, so runtime
+    /// batch size does not turn qualification into a linear loop. Actual work must still be
+    /// charged immediately before each action; this method grants no work capability and therefore
+    /// cannot bypass non-refundable accounting.
+    pub(crate) fn preflight_repeated_observed_batch<const N: usize>(
+        &self,
+        charges: &[(D, u64); N],
+        repetitions: NonZeroU64,
+    ) -> Result<(), LedgerCause<D>> {
+        let state = lock(&self.state);
+        Self::ensure_open(&state)?;
+        let mut repeated = *charges;
+        for (dimension, amount) in &mut repeated {
+            *amount =
+                amount
+                    .checked_mul(repetitions.get())
+                    .ok_or(LedgerCause::ArithmeticOverflow {
+                        class: CounterClass::Attempted,
+                        dimension: *dimension,
+                    })?;
+        }
+        let _ = preflight_observed_charges(&state, &repeated)?;
+        Ok(())
+    }
+
     /// Atomically charges a batch of completed work without allocating.
     ///
     /// Dimensions must be non-decreasing; adjacent repetitions are aggregated before validation.
@@ -1219,7 +1264,46 @@ where
         bytes: u64,
     ) -> Result<ReservationCore<O, P, D>, LedgerCause<D>> {
         let mut state = lock(&self.state);
-        Self::ensure_open(&state)?;
+        let projection =
+            self.project_reservation(&state, phase, dimension, bytes, NonZeroU64::MIN)?;
+        let ReservationProjection {
+            dimension_position,
+            dimension_live,
+            operation_live,
+            phase_position,
+            phase_live,
+            active_reservations,
+        } = projection;
+
+        let dimension_state = &mut state.dimensions[dimension_position].state;
+        dimension_state.current_live_bytes = dimension_live;
+        dimension_state.peak_live_bytes = dimension_state.peak_live_bytes.max(dimension_live);
+        let phase_state = &mut state.phase_states[phase_position];
+        phase_state.current_live_bytes = phase_live;
+        phase_state.peak_live_bytes = phase_state.peak_live_bytes.max(phase_live);
+        state.current_live_bytes = operation_live;
+        state.peak_live_bytes = state.peak_live_bytes.max(operation_live);
+        state.active_reservations = active_reservations;
+
+        Ok(ReservationCore::new(
+            Arc::clone(&self.state),
+            phase,
+            phase_position,
+            dimension,
+            dimension_position,
+            bytes,
+        ))
+    }
+
+    fn project_reservation(
+        &self,
+        state: &LedgerState<P, D>,
+        phase: P,
+        dimension: D,
+        bytes: u64,
+        reservation_count: NonZeroU64,
+    ) -> Result<ReservationProjection, LedgerCause<D>> {
+        Self::ensure_open(state)?;
         let dimension_position = state
             .dimensions
             .binary_search_by_key(&dimension, |entry| entry.dimension)
@@ -1261,7 +1345,7 @@ where
                 limit: self.operation_live_byte_limit,
             });
         }
-        let phase_position = phase_position(&state, phase)?;
+        let phase_position = phase_position(state, phase)?;
         let current_phase = state.phase_states[phase_position].current_live_bytes;
         let phase_live =
             current_phase
@@ -1270,33 +1354,39 @@ where
                     class: CounterClass::Live,
                     dimension,
                 })?;
-        let active_reservations =
-            state
-                .active_reservations
-                .checked_add(1)
-                .ok_or(LedgerCause::ArithmeticOverflow {
-                    class: CounterClass::Live,
-                    dimension,
-                })?;
+        let active_reservations = state
+            .active_reservations
+            .checked_add(reservation_count.get())
+            .ok_or(LedgerCause::ArithmeticOverflow {
+                class: CounterClass::Live,
+                dimension,
+            })?;
 
-        let dimension_state = &mut state.dimensions[dimension_position].state;
-        dimension_state.current_live_bytes = dimension_live;
-        dimension_state.peak_live_bytes = dimension_state.peak_live_bytes.max(dimension_live);
-        let phase_state = &mut state.phase_states[phase_position];
-        phase_state.current_live_bytes = phase_live;
-        phase_state.peak_live_bytes = phase_state.peak_live_bytes.max(phase_live);
-        state.current_live_bytes = operation_live;
-        state.peak_live_bytes = state.peak_live_bytes.max(operation_live);
-        state.active_reservations = active_reservations;
-
-        Ok(ReservationCore::new(
-            Arc::clone(&self.state),
-            phase,
-            phase_position,
-            dimension,
+        Ok(ReservationProjection {
             dimension_position,
-            bytes,
-        ))
+            dimension_live,
+            operation_live,
+            phase_position,
+            phase_live,
+            active_reservations,
+        })
+    }
+
+    /// Checks aggregate reservation headroom under the same lock and rules as [`Self::reserve`].
+    ///
+    /// This qualification does not reserve capacity. A later reservation can still lose a race to
+    /// another owner of this ledger, so callers must preserve their ordinary execution-failure
+    /// containment after a successful preflight.
+    pub(crate) fn preflight_reservation_batch(
+        &self,
+        phase: P,
+        dimension: D,
+        bytes: u64,
+        reservation_count: NonZeroU64,
+    ) -> Result<(), LedgerCause<D>> {
+        let state = lock(&self.state);
+        self.project_reservation(&state, phase, dimension, bytes, reservation_count)
+            .map(drop)
     }
 
     #[allow(
@@ -4196,6 +4286,83 @@ fn dimension_entry_mut<D: Copy + Ord>(
         .binary_search_by_key(&dimension, |entry| entry.dimension)
         .ok()
         .map(|position| &mut dimensions[position])
+}
+
+fn preflight_observed_charges<P, D, const N: usize>(
+    state: &LedgerState<P, D>,
+    charges: &[(D, u64); N],
+) -> Result<[usize; N], LedgerCause<D>>
+where
+    D: Copy + Ord,
+{
+    let mut positions = [0_usize; N];
+    for (index, &(dimension, _)) in charges.iter().enumerate() {
+        positions[index] = state
+            .dimensions
+            .binary_search_by_key(&dimension, |entry| entry.dimension)
+            .map_err(|_| LedgerCause::UnknownDimension { dimension })?;
+    }
+
+    for (index, &(dimension, _)) in charges.iter().enumerate() {
+        if positions[..index].contains(&positions[index]) {
+            continue;
+        }
+        let amount = charges
+            .iter()
+            .zip(positions)
+            .filter(|(_, position)| *position == positions[index])
+            .try_fold(0_u64, |total, ((_, amount), _)| {
+                total
+                    .checked_add(*amount)
+                    .ok_or(LedgerCause::ArithmeticOverflow {
+                        class: CounterClass::Attempted,
+                        dimension,
+                    })
+            })?;
+        let entry = &state.dimensions[positions[index]];
+        let attempted =
+            entry
+                .state
+                .attempted
+                .checked_add(amount)
+                .ok_or(LedgerCause::ArithmeticOverflow {
+                    class: CounterClass::Attempted,
+                    dimension,
+                })?;
+        if attempted > entry.policy.attempted_limit {
+            return Err(LedgerCause::LimitExceeded {
+                class: CounterClass::Attempted,
+                dimension,
+                value: attempted,
+                limit: entry.policy.attempted_limit,
+            });
+        }
+        let consumed =
+            entry
+                .state
+                .consumed
+                .checked_add(amount)
+                .ok_or(LedgerCause::ArithmeticOverflow {
+                    class: CounterClass::Consumed,
+                    dimension,
+                })?;
+        if consumed > attempted {
+            return Err(LedgerCause::ConsumedExceedsAttempted {
+                dimension,
+                consumed,
+                attempted,
+            });
+        }
+        if consumed > entry.policy.consumed_limit {
+            return Err(LedgerCause::LimitExceeded {
+                class: CounterClass::Consumed,
+                dimension,
+                value: consumed,
+                limit: entry.policy.consumed_limit,
+            });
+        }
+    }
+    Ok(positions)
 }
 
 fn validate_dimension_state<D: Copy>(

@@ -55,6 +55,7 @@ enum Phase {
 enum Dimension {
     Bytes,
     Records,
+    Unknown,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -213,6 +214,92 @@ fn frozen_phase_catalog_rejects_unknown_phase_without_allocation_or_counter_muta
         )
     };
     assert_eq!(after, before);
+}
+
+#[test]
+fn aggregate_reservation_preflight_enforces_operation_headroom_without_mutation() {
+    let limits = LedgerLimits::new(
+        6,
+        [(
+            Dimension::Bytes,
+            DimensionPolicy::reservable_bytes(16, 16, 16, 16),
+        )],
+    )
+    .expect("aggregate preflight policy");
+    let ledger = Ledger::<Owner, Phase, Dimension>::try_new(limits, &[Phase::Build])
+        .expect("aggregate preflight ledger");
+    let existing = ledger
+        .reserve(Phase::Build, Dimension::Bytes, 2)
+        .expect("existing live reservation");
+    let before = {
+        let state = lock(&ledger.state);
+        (
+            state.current_live_bytes,
+            state.peak_live_bytes,
+            state.active_reservations,
+            state.dimensions[0].state,
+            state.phase_states[0].current_live_bytes,
+            state.phase_states[0].peak_live_bytes,
+        )
+    };
+
+    assert!(matches!(
+        ledger.preflight_reservation_batch(
+            Phase::Build,
+            Dimension::Bytes,
+            5,
+            NonZeroU64::new(2).expect("nonzero batch"),
+        ),
+        Err(LedgerCause::LimitExceeded {
+            class: CounterClass::Live,
+            dimension: Dimension::Bytes,
+            value: 7,
+            limit: 6,
+        })
+    ));
+    let after_rejection = {
+        let state = lock(&ledger.state);
+        (
+            state.current_live_bytes,
+            state.peak_live_bytes,
+            state.active_reservations,
+            state.dimensions[0].state,
+            state.phase_states[0].current_live_bytes,
+            state.phase_states[0].peak_live_bytes,
+        )
+    };
+    assert_eq!(after_rejection, before);
+
+    ledger
+        .preflight_reservation_batch(
+            Phase::Build,
+            Dimension::Bytes,
+            4,
+            NonZeroU64::new(2).expect("nonzero retry batch"),
+        )
+        .expect("smaller aggregate remains retryable");
+    let after_retry = {
+        let state = lock(&ledger.state);
+        (
+            state.current_live_bytes,
+            state.peak_live_bytes,
+            state.active_reservations,
+            state.dimensions[0].state,
+            state.phase_states[0].current_live_bytes,
+            state.phase_states[0].peak_live_bytes,
+        )
+    };
+    assert_eq!(after_retry, before);
+
+    let first = ledger
+        .reserve(Phase::Build, Dimension::Bytes, 2)
+        .expect("first preflighted item");
+    let second = ledger
+        .reserve(Phase::Build, Dimension::Bytes, 2)
+        .expect("second preflighted item");
+    assert_eq!(ledger.test_probe().current_live_bytes(), 6);
+    drop((first, second, existing));
+    assert_eq!(ledger.test_probe().current_live_bytes(), 0);
 }
 
 #[test]
@@ -538,6 +625,100 @@ fn observed_batch_preserves_the_ordered_non_refundable_prefix_on_failure() {
         .expect("record evidence");
     assert_eq!(records.attempted(), 17);
     assert_eq!(records.consumed(), 0);
+}
+
+#[test]
+fn repeated_observed_preflight_aggregates_duplicate_dimensions_without_mutation() {
+    let ledger = test_ledger(limits());
+    let exact = NonZeroU64::new(8).expect("exact repetition count");
+
+    ledger
+        .preflight_repeated_observed_batch(&[(Dimension::Bytes, 1), (Dimension::Bytes, 1)], exact)
+        .expect("two charges repeated eight times fit the exact limit");
+    let unchanged = ledger
+        .dimension_evidence(Dimension::Bytes)
+        .expect("byte evidence");
+    assert_eq!(unchanged.attempted(), 0);
+    assert_eq!(unchanged.consumed(), 0);
+
+    ledger
+        .preflight_repeated_observed_batch(
+            &[(Dimension::Bytes, 0), (Dimension::Bytes, 0)],
+            NonZeroU64::new(u64::MAX).expect("maximum repetition count"),
+        )
+        .expect("zero work remains zero for every nonzero repetition count");
+    let zero_unchanged = ledger
+        .dimension_evidence(Dimension::Bytes)
+        .expect("byte evidence after zero-work preflight");
+    assert_eq!(zero_unchanged.attempted(), 0);
+    assert_eq!(zero_unchanged.consumed(), 0);
+
+    let excess = NonZeroU64::new(9).expect("excess repetition count");
+    assert!(matches!(
+        ledger.preflight_repeated_observed_batch(
+            &[(Dimension::Bytes, 1), (Dimension::Bytes, 1)],
+            excess,
+        ),
+        Err(LedgerCause::LimitExceeded {
+            class: CounterClass::Attempted,
+            dimension: Dimension::Bytes,
+            value: 18,
+            limit: 16,
+        })
+    ));
+    let still_unchanged = ledger
+        .dimension_evidence(Dimension::Bytes)
+        .expect("byte evidence after rejection");
+    assert_eq!(still_unchanged.attempted(), 0);
+    assert_eq!(still_unchanged.consumed(), 0);
+}
+
+#[test]
+fn repeated_observed_preflight_binds_distinct_dimensions_and_checks_arithmetic() {
+    let ledger = test_ledger(limits());
+    ledger
+        .preflight_repeated_observed_batch(
+            &[(Dimension::Bytes, 1), (Dimension::Records, 2)],
+            NonZeroU64::new(8).expect("repetition count"),
+        )
+        .expect("distinct dimensions fit their exact limits");
+
+    assert!(matches!(
+        ledger.preflight_repeated_observed_batch(
+            &[(Dimension::Unknown, 1), (Dimension::Bytes, 1)],
+            NonZeroU64::new(1).expect("repetition count"),
+        ),
+        Err(LedgerCause::UnknownDimension {
+            dimension: Dimension::Unknown,
+        })
+    ));
+    assert!(matches!(
+        ledger.preflight_repeated_observed_batch(
+            &[(Dimension::Bytes, u64::MAX), (Dimension::Records, 1)],
+            NonZeroU64::new(2).expect("repetition count"),
+        ),
+        Err(LedgerCause::ArithmeticOverflow {
+            class: CounterClass::Attempted,
+            dimension: Dimension::Bytes,
+        })
+    ));
+    assert!(matches!(
+        ledger.preflight_repeated_observed_batch(
+            &[(Dimension::Bytes, u64::MAX), (Dimension::Bytes, 1)],
+            NonZeroU64::new(1).expect("repetition count"),
+        ),
+        Err(LedgerCause::ArithmeticOverflow {
+            class: CounterClass::Attempted,
+            dimension: Dimension::Bytes,
+        })
+    ));
+    for dimension in [Dimension::Bytes, Dimension::Records] {
+        let evidence = ledger
+            .dimension_evidence(dimension)
+            .expect("preflight dimension evidence");
+        assert_eq!(evidence.attempted(), 0);
+        assert_eq!(evidence.consumed(), 0);
+    }
 }
 
 #[test]
@@ -2238,14 +2419,29 @@ fn reservation_admission_and_resize_use_one_preflight_then_numeric_slots() {
         .split("fn reserve_core(")
         .nth(1)
         .expect("reservation admission exists")
-        .split("pub(crate) fn reserve_operation_attribution")
+        .split("fn project_reservation(")
         .next()
         .expect("reservation admission boundary exists");
     let first_mutation = reserve
         .find("dimension_state.current_live_bytes = dimension_live")
         .expect("dimension accounting mutation exists");
-    assert!(reserve[..first_mutation].contains("binary_search_by_key"));
-    assert!(reserve[..first_mutation].contains("phase_position(&state, phase)"));
+    assert!(
+        reserve[..first_mutation].contains("self.project_reservation("),
+        "reservation admission must complete the shared projection before its first write"
+    );
+    let projection = production
+        .split("fn project_reservation(")
+        .nth(1)
+        .expect("shared reservation projection exists")
+        .split("/// Checks aggregate reservation headroom")
+        .next()
+        .expect("shared reservation projection boundary exists");
+    assert!(projection.contains("binary_search_by_key"));
+    assert!(projection.contains("phase_position(state, phase)"));
+    assert!(
+        !projection.contains("current_live_bytes ="),
+        "shared reservation projection must remain read-only"
+    );
     for forbidden in [
         "?",
         "binary_search",

@@ -41,6 +41,7 @@ fn retained_production_source() -> String {
         include_str!("ownership.rs"),
         include_str!("physical.rs"),
         include_str!("publication_contract.rs"),
+        include_str!("range.rs"),
         include_str!("startup.rs"),
         include_str!("terminal.rs"),
         include_str!("terminal_failure.rs"),
@@ -65,6 +66,60 @@ fn allocation_module_remains_table_agnostic() {
     }
 }
 
+#[test]
+fn retained_batch_range_uses_invariant_brands_and_no_table_internals() {
+    let table = include_str!("block_table.rs");
+    let range = include_str!("range.rs");
+
+    assert!(table.contains("type InvariantRetainedBrand<Block, Tag>"));
+    assert!(table.contains("PhantomData<fn(Block, Tag) -> (Block, Tag)>"));
+    assert!(table.contains("marker: InvariantRetainedBrand<Block, Tag>"));
+    assert!(range.contains("marker: InvariantRetainedBrand<Block, Tag>"));
+    assert!(range.contains("QualifiedCanonicalRetainBatch"));
+    assert!(range.contains("try_qualify_canonical_retain_batch"));
+    assert!(range.contains("preflight_repeated_observed_batch"));
+    for table_internal in [
+        ".members",
+        ".total_blocks",
+        ".max_new_blocks",
+        ".new_blocks",
+        ".qualified_capacity",
+    ] {
+        assert!(
+            !range.contains(table_internal),
+            "range orchestration copied private table invariant `{table_internal}`"
+        );
+    }
+}
+
+#[test]
+fn retained_batch_rollback_has_one_storage_first_attribution_suffix_seam() {
+    let table = include_str!("block_table.rs");
+    let reservation = include_str!("../ledger/reservation.rs");
+    let seam = "finish_last_attribution_after_storage_rollback";
+
+    assert_eq!(table.matches(seam).count(), 1);
+    assert_eq!(reservation.matches(seam).count(), 1);
+    let rollback = table
+        .split("pub(in crate::retained) fn try_rollback_prefix")
+        .nth(1)
+        .expect("retained batch rollback exists")
+        .split("pub(in crate::retained) fn try_complete")
+        .next()
+        .expect("retained batch rollback boundary exists");
+    let storage_drop = rollback
+        .find("drop_retained_allocation_before_attribution")
+        .expect("batch rollback releases retained storage");
+    let attribution_finish = rollback
+        .find(seam)
+        .expect("batch rollback resolves attribution");
+    assert!(
+        storage_drop < attribution_finish,
+        "batch rollback must release storage before attribution"
+    );
+    assert!(!reservation.contains("pop_attribution_for_storage_rollback"));
+}
+
 fn retained_non_final_owner_production_source() -> String {
     [
         retained_root_production_source(),
@@ -80,6 +135,7 @@ fn retained_non_final_owner_production_source() -> String {
         include_str!("ownership.rs"),
         include_str!("physical.rs"),
         include_str!("publication_contract.rs"),
+        include_str!("range.rs"),
         include_str!("startup.rs"),
         include_str!("terminal.rs"),
         include_str!("terminal_failure.rs"),

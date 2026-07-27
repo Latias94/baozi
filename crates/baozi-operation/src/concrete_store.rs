@@ -74,6 +74,36 @@
 //! require_shareable::<RecordBlock>();
 //! ```
 //!
+//! Store reference brands are invariant, so function-pointer lifetime subtyping cannot retag a
+//! reference kind or its domain tag:
+//!
+//! ```compile_fail
+//! use std::marker::PhantomData;
+//! use baozi_operation::CanonicalStoreRange;
+//!
+//! struct LifetimeKind<'a>(PhantomData<&'a ()>);
+//! struct Tag;
+//!
+//! fn narrow_kind<'short>(
+//!     range: CanonicalStoreRange<LifetimeKind<'static>, Tag>,
+//! ) -> CanonicalStoreRange<LifetimeKind<'short>, Tag> {
+//!     range
+//! }
+//! ```
+//!
+//! ```compile_fail
+//! use std::marker::PhantomData;
+//! use baozi_operation::{ByteBlock, CanonicalStoreRange};
+//!
+//! struct LifetimeTag<'a>(PhantomData<&'a ()>);
+//!
+//! fn narrow_tag<'short>(
+//!     range: CanonicalStoreRange<ByteBlock, LifetimeTag<'static>>,
+//! ) -> CanonicalStoreRange<ByteBlock, LifetimeTag<'short>> {
+//!     range
+//! }
+//! ```
+//!
 //! Builder callbacks are contained only for one ordinary unwind. A second panic while unwinding,
 //! or a build compiled with `panic = "abort"`, cannot be contained by `catch_unwind`; untrusted
 //! adapters that require those boundaries must run in an isolated process.
@@ -82,20 +112,20 @@ use std::fmt;
 use std::marker::PhantomData;
 
 use crate::capacity::{CapacityPlan, CapacityPlanError};
-use crate::control::{OperationControl, ProgressPhase, ProgressUnit};
+use crate::control::{ControlCause, OperationControl, ProgressPhase, ProgressUnit};
 use crate::coordinator::FinalProgress;
-use crate::ledger::LedgerCause;
 #[cfg(test)]
 use crate::ledger::PhaseCompletionError;
+use crate::ledger::{LedgerCause, LiveReservation};
 use crate::owner::OperationOwner;
 use crate::retained::{
     CanonicalRetainedSlot, FinalizationContainmentError, OutcomeEvidenceRetainedSlot,
     PhysicalStorageAccount, PreparationFailureCode, RetainedAllocationPlan,
-    RetainedBuildFailureCode, RetainedFailureAssembly, RetainedFailureValidation,
-    RetainedFallbackOnly, RetainedOperation, RetainedOperationStartError,
-    RetainedOperationStartPlan, RetainedPublicationAssembly, RetainedPublicationError,
-    RetainedPublicationPrepareError, RetainedSuccessValidation, ValidatedRetainedFailure,
-    ValidatedRetainedSuccess,
+    RetainedBuildFailureCode, RetainedControlCheckpoint, RetainedFailureAssembly,
+    RetainedFailureValidation, RetainedFallbackOnly, RetainedOperation,
+    RetainedOperationStartError, RetainedOperationStartPlan, RetainedPublicationAssembly,
+    RetainedPublicationError, RetainedPublicationPrepareError, RetainedSuccessValidation,
+    ValidatedRetainedFailure, ValidatedRetainedSuccess,
 };
 #[cfg(test)]
 use crate::retained::{RetainedAllocationError, RetainedWriterError};
@@ -112,10 +142,16 @@ use validation::{
     publication_error_requires_containment, validate_store_dimension,
 };
 
+mod batch;
 mod terminal_output;
 mod validation;
 mod vocabulary;
 
+pub use batch::{
+    BytesBatchItem, BytesBatchPlan, CanonicalBytesRange, CanonicalSequenceRange,
+    CanonicalStoreRange, CanonicalUtf8Range, SequenceBatchItem, SequenceBatchPlan,
+    StoreBatchRuntimeError, Utf8BatchItem, Utf8BatchPlan,
+};
 pub use vocabulary::{
     RetainedStoreBatchLimits, RetainedStoreBlockTablePlan, RetainedStorePublicationPlan,
     RetainedStoreSharePlan, RetainedStoreStartPlan, RetainedStoreWriterPlan, StoreDimensionKey,
@@ -400,7 +436,7 @@ impl From<CapacityPlanError> for StorePlanError {
 pub struct SequencePlan<T: StoredScalar> {
     len: usize,
     capacity: CapacityPlan,
-    marker: PhantomData<fn() -> T>,
+    marker: PhantomData<fn(T) -> T>,
 }
 
 impl<T: StoredScalar> SequencePlan<T> {
@@ -628,7 +664,7 @@ pub struct SequenceWriter<T> {
     storage: SequenceStorage,
     expected_len: usize,
     qualified_capacity: usize,
-    marker: PhantomData<fn() -> T>,
+    marker: PhantomData<fn(T) -> T>,
 }
 
 impl<T: StoredScalar> SequenceWriter<T> {
@@ -971,7 +1007,7 @@ impl Utf8Writer {
 }
 
 /// Marker for a scalar-sequence block reference.
-pub struct ScalarSequence<T: StoredScalar>(PhantomData<fn() -> T>);
+pub struct ScalarSequence<T: StoredScalar>(PhantomData<fn(T) -> T>);
 
 /// Marker for a binary block reference.
 pub enum ByteBlock {}
@@ -1002,7 +1038,7 @@ impl ShareableStoreKind for Utf8Block {}
 #[must_use = "a canonical block reference identifies a member of one publication set"]
 pub struct CanonicalStoreRef<Kind, Tag> {
     raw: CanonicalRetainedSlot<StoredBlock, Tag>,
-    marker: PhantomData<fn() -> Kind>,
+    marker: PhantomData<fn(Kind) -> Kind>,
 }
 
 impl<Kind, Tag> Copy for CanonicalStoreRef<Kind, Tag> {}
@@ -1031,7 +1067,7 @@ impl<Kind, Tag> fmt::Debug for CanonicalStoreRef<Kind, Tag> {
 #[must_use = "an outcome-evidence block reference identifies one publication-set member"]
 pub struct OutcomeEvidenceStoreRef<Kind, Tag> {
     raw: OutcomeEvidenceRetainedSlot<StoredBlock, Tag>,
-    marker: PhantomData<fn() -> Kind>,
+    marker: PhantomData<fn(Kind) -> Kind>,
 }
 
 impl<Kind, Tag> Copy for OutcomeEvidenceStoreRef<Kind, Tag> {}
@@ -1571,6 +1607,8 @@ impl std::error::Error for RetainedStoreStartError {
 
 type RawStoreOperation<O, PP, U> =
     RetainedOperation<O, StorePhaseKey, PP, U, StoreDimensionKey, StoreFallbackEnvelope>;
+type RawStoreControlCheckpoint<'a, O, PP, U> =
+    RetainedControlCheckpoint<'a, O, StorePhaseKey, PP, U, StoreDimensionKey>;
 type RawStoreAssembly<O, PP, U> = RetainedPublicationAssembly<
     O,
     StorePhaseKey,
@@ -1622,6 +1660,143 @@ type RawStoreFallbackOnly<O, PP, U> = RetainedFallbackOnly<
     StoredBlock,
 >;
 
+/// Opaque live-storage reservation owned by the concrete retained-store protocol.
+///
+/// The raw ledger token remains private. Producers can only return this capability to the
+/// checkpoint that created it for owner validation, resizing, transition, or RAII release.
+#[must_use = "dropping a retained-store reservation releases its live-byte accounting"]
+pub struct RetainedStoreReservation<O>
+where
+    O: OperationOwner,
+{
+    raw: LiveReservation<O, StorePhaseKey, StoreDimensionKey>,
+}
+
+#[cfg(test)]
+impl<O> RetainedStoreReservation<O>
+where
+    O: OperationOwner,
+{
+    fn covered_bytes_for_test(&self) -> u64 {
+        self.raw.bytes()
+    }
+}
+
+/// Borrowed control-and-budget capability for one retained-store producer.
+///
+/// The checkpoint cannot report progress, open or publish output, or mutate retained storage.
+/// Every supplied phase and dimension must belong to the store domain and the operation's frozen
+/// catalog before it reaches the raw ledger.
+pub struct RetainedStoreControlCheckpoint<'a, O, PP, U>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    raw: RawStoreControlCheckpoint<'a, O, PP, U>,
+    domain: &'a StoreKeyDomain,
+}
+
+impl<O, PP, U> RetainedStoreControlCheckpoint<'_, O, PP, U>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    fn validate_phase(&self, phase: StorePhaseKey) -> Result<(), StoreRuntimeError> {
+        if !self.domain.owns_phase(phase) {
+            return Err(StoreRuntimeError::ForeignPhaseDomain { phase });
+        }
+        if !self.raw.contains_phase(phase) {
+            return Err(StoreRuntimeError::Ledger(LedgerCause::UnknownPhase));
+        }
+        Ok(())
+    }
+
+    fn validate_dimension(&self, dimension: StoreDimensionKey) -> Result<(), StoreRuntimeError> {
+        if !self.domain.owns_dimension(dimension) {
+            return Err(StoreRuntimeError::ForeignDimensionDomain { dimension });
+        }
+        if !self.raw.contains_dimension(dimension) {
+            return Err(StoreRuntimeError::Ledger(LedgerCause::UnknownDimension {
+                dimension,
+            }));
+        }
+        Ok(())
+    }
+
+    /// Polls cancellation and deadline state without exposing progress reporting.
+    pub fn poll(&mut self) -> Result<(), ControlCause> {
+        self.raw.poll()
+    }
+
+    /// Records one non-refundable attempted-and-consumed work unit.
+    ///
+    /// If attempted charging succeeds and consumed charging fails, the attempted prefix remains
+    /// recorded.
+    pub fn charge_observed(
+        &mut self,
+        dimension: StoreDimensionKey,
+        amount: u64,
+    ) -> Result<(), StoreRuntimeError> {
+        self.validate_dimension(dimension)?;
+        self.raw
+            .charge_observed(dimension, amount)
+            .map_err(StoreRuntimeError::Ledger)
+    }
+
+    /// Reserves live bytes before allocation or backend entry.
+    pub fn reserve(
+        &mut self,
+        phase: StorePhaseKey,
+        dimension: StoreDimensionKey,
+        bytes: u64,
+    ) -> Result<RetainedStoreReservation<O>, StoreRuntimeError> {
+        self.validate_phase(phase)?;
+        self.validate_dimension(dimension)?;
+        self.raw
+            .reserve(phase, dimension, bytes)
+            .map(|raw| RetainedStoreReservation { raw })
+            .map_err(StoreRuntimeError::Ledger)
+    }
+
+    /// Resizes one live token while preserving it unchanged on rejection.
+    pub fn resize(
+        &mut self,
+        reservation: &mut RetainedStoreReservation<O>,
+        bytes: u64,
+    ) -> Result<(), StoreRuntimeError> {
+        self.raw
+            .resize(&mut reservation.raw, bytes)
+            .map_err(StoreRuntimeError::Ledger)
+    }
+
+    /// Atomically replaces a live token's phase, dimension, and byte capacity.
+    pub fn transition(
+        &mut self,
+        reservation: &mut RetainedStoreReservation<O>,
+        phase: StorePhaseKey,
+        dimension: StoreDimensionKey,
+        bytes: u64,
+    ) -> Result<(), StoreRuntimeError> {
+        self.validate_phase(phase)?;
+        self.validate_dimension(dimension)?;
+        self.raw
+            .transition(&mut reservation.raw, phase, dimension, bytes)
+            .map_err(StoreRuntimeError::Ledger)
+    }
+
+    /// Verifies that a live token belongs to this operation without mutating accounting.
+    pub fn validate_live_owner(
+        &self,
+        reservation: &RetainedStoreReservation<O>,
+    ) -> Result<(), StoreRuntimeError> {
+        self.raw
+            .validate_live_owner(&reservation.raw)
+            .map_err(StoreRuntimeError::Ledger)
+    }
+}
+
 /// Linear owner for one coordinator, physical account, and pre-admitted fallback.
 #[must_use = "the retained store operation must be opened or published as fallback"]
 pub struct RetainedStoreOperation<O, PP, U>
@@ -1640,6 +1815,15 @@ where
     PP: ProgressPhase,
     U: ProgressUnit,
 {
+    /// Borrows the producer-facing control and budget checkpoint.
+    pub fn control_checkpoint(&mut self) -> RetainedStoreControlCheckpoint<'_, O, PP, U> {
+        let Self { raw, domain } = self;
+        RetainedStoreControlCheckpoint {
+            raw: raw.control_checkpoint(),
+            domain,
+        }
+    }
+
     /// Records one semantically completed phase after concrete domain and catalog validation.
     pub fn try_complete_phase(&self, phase: StorePhaseKey) -> Result<(), StoreRuntimeError> {
         if !self.domain.owns_phase(phase) {

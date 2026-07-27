@@ -482,9 +482,9 @@ struct StartupReservationProjection<P, D> {
 
 #[derive(Clone, Copy)]
 struct StartupWorkProjection<D> {
-    dimension: D,
     dimension_position: usize,
     amount: u64,
+    marker: PhantomData<fn(D) -> D>,
 }
 
 struct StartupLedgerAdmission<P, D> {
@@ -1000,76 +1000,14 @@ where
             steps[3].charges[0],
             steps[3].charges[1],
         ];
-        let mut work = work_specs.map(|(dimension, amount)| StartupWorkProjection {
-            dimension,
+        let work_positions = super::preflight_observed_charges(state, &work_specs)?;
+        let mut work = work_specs.map(|(_, amount)| StartupWorkProjection {
             dimension_position: usize::MAX,
             amount,
+            marker: PhantomData,
         });
-        for projection in &mut work {
-            projection.dimension_position = state
-                .dimensions
-                .binary_search_by_key(&projection.dimension, |entry| entry.dimension)
-                .map_err(|_| LedgerCause::UnknownDimension {
-                    dimension: projection.dimension,
-                })?;
-        }
-        for (index, projection) in work.iter().enumerate() {
-            if work[..index]
-                .iter()
-                .any(|prior| prior.dimension_position == projection.dimension_position)
-            {
-                continue;
-            }
-            let added = work
-                .iter()
-                .filter(|candidate| candidate.dimension_position == projection.dimension_position)
-                .try_fold(0_u64, |total, candidate| {
-                    total
-                        .checked_add(candidate.amount)
-                        .ok_or(LedgerCause::ArithmeticOverflow {
-                            class: CounterClass::Attempted,
-                            dimension: projection.dimension,
-                        })
-                })?;
-            let entry = &state.dimensions[projection.dimension_position];
-            let attempted = entry.state.attempted.checked_add(added).ok_or(
-                LedgerCause::ArithmeticOverflow {
-                    class: CounterClass::Attempted,
-                    dimension: projection.dimension,
-                },
-            )?;
-            if attempted > entry.policy.attempted_limit {
-                return Err(LedgerCause::LimitExceeded {
-                    class: CounterClass::Attempted,
-                    dimension: projection.dimension,
-                    value: attempted,
-                    limit: entry.policy.attempted_limit,
-                });
-            }
-            let consumed =
-                entry
-                    .state
-                    .consumed
-                    .checked_add(added)
-                    .ok_or(LedgerCause::ArithmeticOverflow {
-                        class: CounterClass::Consumed,
-                        dimension: projection.dimension,
-                    })?;
-            if consumed > attempted {
-                return Err(LedgerCause::ConsumedExceedsAttempted {
-                    dimension: projection.dimension,
-                    consumed,
-                    attempted,
-                });
-            }
-            if consumed > entry.policy.consumed_limit {
-                return Err(LedgerCause::LimitExceeded {
-                    class: CounterClass::Consumed,
-                    dimension: projection.dimension,
-                    value: consumed,
-                    limit: entry.policy.consumed_limit,
-                });
-            }
+        for (projection, position) in work.iter_mut().zip(work_positions) {
+            projection.dimension_position = position;
         }
 
         for index in 0..commitments.len() {

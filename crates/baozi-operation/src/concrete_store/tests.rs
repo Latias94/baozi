@@ -223,10 +223,11 @@ fn type_declaration<'a>(source: &'a str, marker: &str) -> &'a str {
 
 fn concrete_store_source() -> String {
     let root = include_str!("../concrete_store.rs");
+    let batch = include_str!("batch.rs");
     let validation = include_str!("validation.rs");
     let vocabulary = include_str!("vocabulary.rs");
     let terminal = include_str!("terminal_output.rs");
-    format!("{root}\n{validation}\n{vocabulary}\n{terminal}")
+    format!("{root}\n{batch}\n{validation}\n{vocabulary}\n{terminal}")
 }
 
 #[test]
@@ -881,6 +882,148 @@ fn public_store_surface_does_not_export_raw_or_generic_owning_authority() {
     assert!(!root.contains("CanonicalBlockRef"));
     assert!(!root.contains("OutcomeEvidenceBlockRef"));
     assert!(!terminal.contains("pub(super) raw:"));
+}
+
+#[test]
+fn public_store_reference_and_range_brands_are_invariant() {
+    let root = include_str!("../concrete_store.rs");
+    let batch = include_str!("batch.rs");
+
+    assert!(root.contains("pub struct ScalarSequence<T: StoredScalar>(PhantomData<fn(T) -> T>);"));
+    assert!(root.contains("marker: PhantomData<fn(Kind) -> Kind>"));
+    assert!(batch.contains("marker: PhantomData<fn(Kind) -> Kind>"));
+    assert!(!root.contains("marker: PhantomData<fn() -> Kind>"));
+    assert!(!batch.contains("marker: PhantomData<fn() -> Kind>"));
+}
+
+#[test]
+fn retained_store_control_checkpoint_is_narrow_and_validates_keys_before_forwarding() {
+    let source = include_str!("../concrete_store.rs");
+    let declaration = type_declaration(source, "pub struct RetainedStoreControlCheckpoint");
+    let reservation_declaration = type_declaration(source, "pub struct RetainedStoreReservation");
+    let implementation =
+        implementation_block(source, "impl<O, PP, U> RetainedStoreControlCheckpoint");
+
+    assert!(!declaration.contains("pub raw:"));
+    assert!(!reservation_declaration.contains("pub raw:"));
+    assert!(!declaration.contains("OperationCheckpoint"));
+    assert!(!implementation.contains("LiveReservation<"));
+    for required in [
+        "pub fn poll(",
+        "pub fn charge_observed(",
+        "pub fn reserve(",
+        "pub fn resize(",
+        "pub fn transition(",
+        "pub fn validate_live_owner(",
+    ] {
+        assert!(
+            implementation.contains(required),
+            "checkpoint surface is missing `{required}`"
+        );
+    }
+    for forbidden in [
+        "report_progress",
+        "prepare_publication",
+        "try_publication_assembly",
+        "canonical",
+        "outcome_evidence",
+        "pub fn split(",
+        "pub fn transfer(",
+        "pub fn charge_attempted(",
+        "pub fn charge_consumed(",
+    ] {
+        assert!(
+            !implementation.contains(forbidden),
+            "checkpoint regained excluded authority through `{forbidden}`"
+        );
+    }
+
+    let reserve = public_method_block(source, "pub fn reserve(");
+    let phase_validation = reserve
+        .find("self.validate_phase(phase)?")
+        .expect("reserve validates its phase");
+    let dimension_validation = reserve
+        .find("self.validate_dimension(dimension)?")
+        .expect("reserve validates its dimension");
+    let forwarding = reserve
+        .find("self.raw")
+        .expect("reserve forwards only after key validation");
+    assert!(phase_validation < dimension_validation && dimension_validation < forwarding);
+}
+
+#[test]
+fn retained_store_control_checkpoint_enforces_domain_catalog_and_live_owner() {
+    let first_factory = test_factory();
+    let first_account = test_account(&first_factory);
+    let second_factory = test_factory();
+    let second_account = test_account(&second_factory);
+    let (mut first, first_keys) = test_operation(&first_account, u64::MAX);
+    let (mut second, second_keys) = test_operation(&second_account, u64::MAX);
+
+    let mut second_reservation = second
+        .control_checkpoint()
+        .reserve(second_keys.phase, second_keys.dimension, 3)
+        .expect("second operation reservation");
+
+    {
+        let mut first_checkpoint = first.control_checkpoint();
+        first_checkpoint.poll().expect("checkpoint poll");
+        assert!(matches!(
+            first_checkpoint.charge_observed(second_keys.dimension, 1),
+            Err(StoreRuntimeError::ForeignDimensionDomain { .. })
+        ));
+        assert!(matches!(
+            first_checkpoint.reserve(second_keys.phase, second_keys.dimension, 1),
+            Err(StoreRuntimeError::ForeignPhaseDomain { .. })
+        ));
+        assert!(matches!(
+            first_checkpoint.validate_live_owner(&second_reservation),
+            Err(StoreRuntimeError::Ledger(LedgerCause::OwnerMismatch))
+        ));
+        assert!(matches!(
+            first_checkpoint.resize(&mut second_reservation, 4),
+            Err(StoreRuntimeError::Ledger(LedgerCause::OwnerMismatch))
+        ));
+        assert_eq!(second_reservation.covered_bytes_for_test(), 3);
+
+        first_checkpoint
+            .charge_observed(first_keys.dimension, 1)
+            .expect("same-domain observed work");
+        let mut first_reservation = first_checkpoint
+            .reserve(first_keys.phase, first_keys.dimension, 2)
+            .expect("same-domain reservation");
+        first_checkpoint
+            .validate_live_owner(&first_reservation)
+            .expect("same-operation reservation owner");
+        first_checkpoint
+            .resize(&mut first_reservation, 4)
+            .expect("same-operation resize");
+        assert_eq!(first_reservation.covered_bytes_for_test(), 4);
+        first_checkpoint
+            .transition(
+                &mut first_reservation,
+                first_keys.phase,
+                first_keys.dimension,
+                5,
+            )
+            .expect("same-domain transition");
+        assert_eq!(first_reservation.covered_bytes_for_test(), 5);
+    }
+    drop(second_reservation);
+
+    let first_fallback = first
+        .prepare_minimal_fallback(1)
+        .expect("first checkpoint fallback")
+        .handoff();
+    let second_fallback = second
+        .prepare_minimal_fallback(2)
+        .expect("second checkpoint fallback")
+        .handoff();
+    drop((first_fallback, second_fallback));
+    assert_eq!(first_account.snapshot().live_retained_bytes(), 0);
+    assert_eq!(first_account.snapshot().live_retained_allocations(), 0);
+    assert_eq!(second_account.snapshot().live_retained_bytes(), 0);
+    assert_eq!(second_account.snapshot().live_retained_allocations(), 0);
 }
 
 #[test]

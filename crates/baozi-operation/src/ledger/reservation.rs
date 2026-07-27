@@ -498,6 +498,26 @@ where
         Ok(())
     }
 
+    /// Resolves the newest attribution after its retained storage rollback was observed.
+    ///
+    /// A verified storage release drops the matching token. Uncertain cleanup keeps the live
+    /// attribution fail-closed. This narrow suffix operation exists only for construction
+    /// transaction rollback; publication paths never detach attribution.
+    pub(crate) fn finish_last_attribution_after_storage_rollback(
+        &mut self,
+        storage_released: bool,
+    ) -> bool {
+        let Some(attribution) = self.attributions.pop() else {
+            return false;
+        };
+        if storage_released {
+            drop(attribution);
+        } else {
+            std::mem::forget(attribution);
+        }
+        true
+    }
+
     pub(super) fn push_positioned_commitment(
         &mut self,
         commitment: OutputCommitment<D, Destination>,

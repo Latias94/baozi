@@ -28,11 +28,11 @@ use super::{
 use crate::control::discard_untrusted_panic_payload;
 use crate::coordinator::OperationCoordinator;
 use crate::ledger::{
-    AttributionBatchPlan, CanonicalOutput, LedgerLimits, OutcomeEvidenceDestination,
-    PhaseCompletionError, StartupAccountShareEnvelope, StartupAttributionBatchPlans,
-    StartupRetainedAttribution,
+    AttributionBatchPlan, CanonicalOutput, LedgerCause, LedgerLimits, LiveReservation,
+    OutcomeEvidenceDestination, PhaseCompletionError, StartupAccountShareEnvelope,
+    StartupAttributionBatchPlans, StartupRetainedAttribution,
 };
-use crate::{OperationControl, OperationOwner, ProgressPhase, ProgressUnit};
+use crate::{ControlCause, OperationControl, OperationOwner, ProgressPhase, ProgressUnit};
 use std::fmt;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
@@ -57,6 +57,94 @@ where
     terminal_account_share_work: RetainedHandleSharePlan<D>,
 }
 
+/// Borrowed control-and-ledger capability for retained producers.
+///
+/// This facade deliberately excludes progress reporting, publication, terminal evidence, and
+/// retained-storage mutation.
+pub(crate) struct RetainedControlCheckpoint<'a, O, P, PP, U, D>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+    D: Copy + Ord + fmt::Debug,
+{
+    coordinator: &'a mut OperationCoordinator<O, P, PP, U, D>,
+}
+
+impl<O, P, PP, U, D> RetainedControlCheckpoint<'_, O, P, PP, U, D>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+    D: Copy + Ord + fmt::Debug,
+{
+    pub(crate) fn poll(&mut self) -> Result<(), ControlCause> {
+        self.coordinator.checkpoint().poll()
+    }
+
+    pub(crate) fn contains_phase(&self, phase: P) -> bool {
+        self.coordinator.retained_ledger().contains_phase(phase)
+    }
+
+    pub(crate) fn contains_dimension(&self, dimension: D) -> bool {
+        self.coordinator
+            .retained_ledger()
+            .contains_dimension(dimension)
+    }
+
+    pub(crate) fn charge_observed(
+        &mut self,
+        dimension: D,
+        amount: u64,
+    ) -> Result<(), LedgerCause<D>> {
+        self.coordinator
+            .checkpoint()
+            .charge_observed_batch(&[(dimension, amount)])
+    }
+
+    pub(crate) fn reserve(
+        &mut self,
+        phase: P,
+        dimension: D,
+        bytes: u64,
+    ) -> Result<LiveReservation<O, P, D>, LedgerCause<D>> {
+        self.coordinator
+            .checkpoint()
+            .reserve(phase, dimension, bytes)
+    }
+
+    pub(crate) fn resize(
+        &mut self,
+        reservation: &mut LiveReservation<O, P, D>,
+        bytes: u64,
+    ) -> Result<(), LedgerCause<D>> {
+        self.coordinator
+            .checkpoint()
+            .resize_reservation(reservation, bytes)
+    }
+
+    pub(crate) fn transition(
+        &mut self,
+        reservation: &mut LiveReservation<O, P, D>,
+        phase: P,
+        dimension: D,
+        bytes: u64,
+    ) -> Result<(), LedgerCause<D>> {
+        self.coordinator
+            .checkpoint()
+            .transition_reservation(reservation, phase, dimension, bytes)
+    }
+
+    pub(crate) fn validate_live_owner(
+        &self,
+        reservation: &LiveReservation<O, P, D>,
+    ) -> Result<(), LedgerCause<D>> {
+        self.coordinator.validate_live_reservation(reservation)
+    }
+}
+
 #[allow(
     dead_code,
     clippy::result_large_err,
@@ -72,6 +160,12 @@ where
     D: TerminalEvidenceKey + fmt::Debug,
     F: Send + Sync + 'static,
 {
+    pub(crate) fn control_checkpoint(&mut self) -> RetainedControlCheckpoint<'_, O, P, PP, U, D> {
+        RetainedControlCheckpoint {
+            coordinator: &mut self.coordinator,
+        }
+    }
+
     pub fn contains_dimension(&self, dimension: D) -> bool {
         self.coordinator
             .retained_ledger()

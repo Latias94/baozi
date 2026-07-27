@@ -9,7 +9,8 @@ use super::allocation::{
 use super::final_owner::{FinalOwnerAllocation, unreachable_final_owner_state};
 use super::ownership::{
     RetainedStorageDropOutcome, drop_retained_allocation_before_attribution,
-    finish_pre_attribution_cleanup, map_inherited_cleanup_error,
+    finish_pre_attribution_cleanup, join_pre_attribution_cleanup_cause,
+    map_inherited_cleanup_error,
 };
 use super::{
     PendingAccountActionAdmission, PhysicalStorageAccount, RetainedBatchLimits,
@@ -19,7 +20,8 @@ use super::{
 };
 use crate::control::discard_untrusted_panic_payload;
 use crate::ledger::{
-    AttributionBatchPlan, AttributionReservationBatch, Ledger, PublicationDestination,
+    AttributionBatchPlan, AttributionReservationBatch, CanonicalOutput, Ledger,
+    PublicationDestination,
 };
 #[cfg(feature = "_u4c-collector")]
 use crate::u4c_collector::{
@@ -31,9 +33,12 @@ use crate::{CapacityPlan, OperationOwner};
 use std::any::TypeId;
 use std::fmt;
 use std::marker::PhantomData;
+use std::num::NonZeroUsize;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
+
+pub(super) type InvariantRetainedBrand<Block, Tag> = PhantomData<fn(Block, Tag) -> (Block, Tag)>;
 
 pub(super) struct TableRetainedPolicy;
 
@@ -168,7 +173,7 @@ impl RetainedSlotIdentity {
 #[must_use = "a retained slot is required to reference and validate its block"]
 pub(crate) struct CanonicalRetainedSlot<Block, Tag> {
     pub(super) identity: RetainedSlotIdentity,
-    pub(super) marker: PhantomData<fn() -> (Block, Tag)>,
+    pub(super) marker: InvariantRetainedBrand<Block, Tag>,
 }
 
 impl<Block, Tag> Copy for CanonicalRetainedSlot<Block, Tag> {}
@@ -213,7 +218,7 @@ impl<Block, Tag> CanonicalRetainedSlot<Block, Tag> {
 #[must_use = "a retained slot is required to reference and validate its block"]
 pub(crate) struct OutcomeEvidenceRetainedSlot<Block, Tag> {
     pub(super) identity: RetainedSlotIdentity,
-    pub(super) marker: PhantomData<fn() -> (Block, Tag)>,
+    pub(super) marker: InvariantRetainedBrand<Block, Tag>,
 }
 
 impl<Block, Tag> Copy for OutcomeEvidenceRetainedSlot<Block, Tag> {}
@@ -265,7 +270,7 @@ pub(crate) struct BlockEmplacer<'a, Block> {
 pub(crate) struct BlockPlacement<'a, Block, Tag> {
     block: Block,
     block_marker: PhantomData<&'a mut Block>,
-    tag_marker: PhantomData<fn() -> Tag>,
+    tag_marker: PhantomData<fn(Tag) -> Tag>,
 }
 
 impl<'a, Block> BlockEmplacer<'a, Block> {
@@ -339,6 +344,356 @@ impl<Block> RetainedBlockTable<Block> {
         self.members
             .iter()
             .all(|member| member.reachable.load(Ordering::Acquire))
+    }
+}
+
+/// Non-authoritative proof that one canonical batch can extend a table without structural growth.
+///
+/// The proof owns no table, storage, mutation, or attribution capability. Its private expected
+/// state is consumed only after the ordinary single-block rail has retained every item.
+pub(in crate::retained) struct QualifiedCanonicalRetainBatch<Block, Tag> {
+    set_id: RetainedSetId,
+    first_index: usize,
+    len: NonZeroUsize,
+    initial_new_blocks: usize,
+    initial_attributions: usize,
+    initial_attributed_bytes: u64,
+    final_members: usize,
+    final_new_blocks: usize,
+    final_attributions: usize,
+    final_attributed_bytes: u64,
+    marker: InvariantRetainedBrand<Block, Tag>,
+}
+
+/// Completed structural proof consumed by the non-owning range constructor.
+pub(in crate::retained) struct CompletedCanonicalRetainBatch<Block, Tag> {
+    first: RetainedSlotIdentity,
+    len: NonZeroUsize,
+    marker: InvariantRetainedBrand<Block, Tag>,
+}
+
+impl<Block, Tag> CompletedCanonicalRetainBatch<Block, Tag> {
+    pub(in crate::retained) fn into_parts(self) -> (RetainedSlotIdentity, NonZeroUsize) {
+        (self.first, self.len)
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(in crate::retained) fn try_qualify_canonical_retain_batch<O, P, D, Block, Tag>(
+    account: &PhysicalStorageAccount,
+    table: &RetainedTableAllocation<Block>,
+    batch: &AttributionReservationBatch<O, P, D, CanonicalOutput>,
+    table_plan: RetainedBlockTablePlan<P, D>,
+    set_id: RetainedSetId,
+    count: NonZeroUsize,
+    aggregate_attributed_bytes: u64,
+    slot_limit_error: RetainedPublicationError<D>,
+) -> Result<QualifiedCanonicalRetainBatch<Block, Tag>, RetainedPublicationError<D>>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+    Block: Send + Sync + 'static,
+    Tag: Copy + Send + Sync + 'static,
+{
+    if !retained_block_table_is_exact(
+        table,
+        batch,
+        account,
+        set_id,
+        RetainedMembershipDestination::Canonical,
+    ) {
+        return Err(RetainedPublicationError::Writer(
+            RetainedWriterError::OwnershipUnverified,
+        ));
+    }
+
+    let table_value = table.as_ref();
+    if table_plan.total_blocks != table_value.total_blocks
+        || table_plan.max_new_blocks != table_value.max_new_blocks
+    {
+        return Err(RetainedPublicationError::Writer(
+            RetainedWriterError::OwnershipUnverified,
+        ));
+    }
+    let final_members = table_value.members.len().checked_add(count.get()).ok_or(
+        RetainedPublicationError::Writer(RetainedWriterError::MembershipExhausted),
+    )?;
+    let final_new_blocks =
+        table_value
+            .new_blocks
+            .checked_add(count.get())
+            .ok_or(RetainedPublicationError::Writer(
+                RetainedWriterError::MembershipExhausted,
+            ))?;
+    if final_members > table_value.total_blocks || final_new_blocks > table_value.max_new_blocks {
+        return Err(slot_limit_error);
+    }
+    if final_members > table_value.members.capacity()
+        || final_members > table_value.qualified_capacity
+    {
+        return Err(RetainedPublicationError::Writer(
+            RetainedWriterError::BatchCapacity,
+        ));
+    }
+    if u64::try_from(final_members).is_err() {
+        return Err(RetainedPublicationError::Writer(
+            RetainedWriterError::MembershipExhausted,
+        ));
+    }
+
+    let final_attributions = batch.attribution_len().checked_add(count.get()).ok_or(
+        RetainedPublicationError::Writer(RetainedWriterError::MembershipExhausted),
+    )?;
+    if final_attributions > table_plan.writer.limits.attribution_slots {
+        return Err(RetainedPublicationError::Writer(
+            RetainedWriterError::AttributionBatchFull,
+        ));
+    }
+    let final_attributed_bytes = batch
+        .attributed_bytes()
+        .and_then(|bytes| bytes.checked_add(aggregate_attributed_bytes))
+        .ok_or(RetainedPublicationError::Writer(
+            RetainedWriterError::OwnershipUnverified,
+        ))?;
+
+    Ok(QualifiedCanonicalRetainBatch {
+        set_id,
+        first_index: table_value.members.len(),
+        len: count,
+        initial_new_blocks: table_value.new_blocks,
+        initial_attributions: batch.attribution_len(),
+        initial_attributed_bytes: batch.attributed_bytes().ok_or(
+            RetainedPublicationError::Writer(RetainedWriterError::OwnershipUnverified),
+        )?,
+        final_members,
+        final_new_blocks,
+        final_attributions,
+        final_attributed_bytes,
+        marker: PhantomData,
+    })
+}
+
+impl<Block, Tag> QualifiedCanonicalRetainBatch<Block, Tag>
+where
+    Block: Send + Sync + 'static,
+    Tag: Copy + Send + Sync + 'static,
+{
+    pub(in crate::retained) const fn len(&self) -> usize {
+        self.len.get()
+    }
+
+    /// Rolls back every completed member in this batch prefix.
+    ///
+    /// Each member is removed newest-first, its retained storage is released, and only then is the
+    /// matching attribution dropped. A verified cleanup restores the exact pre-batch table and
+    /// ledger shape. Any ownership or release uncertainty is returned as containment evidence.
+    pub(in crate::retained) fn try_rollback_prefix<O, P, D>(
+        &self,
+        account: &PhysicalStorageAccount,
+        table: &mut RetainedTableAllocation<Block>,
+        batch: &mut AttributionReservationBatch<O, P, D, CanonicalOutput>,
+    ) -> Result<(), RetainedPublicationError<D>>
+    where
+        O: OperationOwner,
+        P: Copy + Ord,
+        D: Copy + Ord,
+    {
+        if !retained_block_table_is_exact(
+            table,
+            batch,
+            account,
+            self.set_id,
+            RetainedMembershipDestination::Canonical,
+        ) {
+            return Err(RetainedPublicationError::Writer(
+                RetainedWriterError::OwnershipUnverified,
+            ));
+        }
+
+        let table_value = table.as_ref();
+        let completed = table_value
+            .members
+            .len()
+            .checked_sub(self.first_index)
+            .ok_or(RetainedPublicationError::Writer(
+                RetainedWriterError::OwnershipUnverified,
+            ))?;
+        let expected_new_blocks = self.initial_new_blocks.checked_add(completed).ok_or(
+            RetainedPublicationError::Writer(RetainedWriterError::MembershipExhausted),
+        )?;
+        let expected_attributions = self.initial_attributions.checked_add(completed).ok_or(
+            RetainedPublicationError::Writer(RetainedWriterError::MembershipExhausted),
+        )?;
+        if completed > self.len.get()
+            || table_value.new_blocks != expected_new_blocks
+            || batch.attribution_len() != expected_attributions
+        {
+            return Err(RetainedPublicationError::Writer(
+                RetainedWriterError::OwnershipUnverified,
+            ));
+        }
+
+        let expected_tag = TypeId::of::<Tag>();
+        let prefix_is_exact = table_value.members[self.first_index..]
+            .iter()
+            .enumerate()
+            .all(|(offset, member)| {
+                let Some(index) = self.first_index.checked_add(offset) else {
+                    return false;
+                };
+                let Some(ordinal) = u64::try_from(index)
+                    .ok()
+                    .and_then(|index| index.checked_add(1))
+                else {
+                    return false;
+                };
+                member.tag == expected_tag
+                    && member.origin == RetainedBlockOrigin::New
+                    && member.allocation.membership()
+                        == Some(RetainedMembership {
+                            set_id: self.set_id,
+                            destination: RetainedMembershipDestination::Canonical,
+                            ordinal,
+                        })
+            });
+        if !prefix_is_exact {
+            return Err(RetainedPublicationError::Writer(
+                RetainedWriterError::OwnershipUnverified,
+            ));
+        }
+
+        let Some(table_value) = table.table_mut_during_construction() else {
+            let poisoned = account.record_poison(AccountPoisonReason::OwnershipGraphUnverified);
+            return Err(RetainedPublicationError::Writer(
+                RetainedWriterError::AccountPoisoned(poisoned),
+            ));
+        };
+        while table_value.members.len() > self.first_index {
+            let Some(member) = table_value.members.pop() else {
+                let poisoned = account.record_poison(AccountPoisonReason::OwnershipGraphUnverified);
+                return Err(RetainedPublicationError::Writer(
+                    RetainedWriterError::AccountPoisoned(poisoned),
+                ));
+            };
+            let Some(next_new_blocks) = table_value.new_blocks.checked_sub(1) else {
+                let poisoned = account.record_poison(AccountPoisonReason::OwnershipGraphUnverified);
+                std::mem::forget(member);
+                return Err(RetainedPublicationError::Writer(
+                    RetainedWriterError::AccountPoisoned(poisoned),
+                ));
+            };
+            table_value.new_blocks = next_new_blocks;
+            let outcome = drop_retained_allocation_before_attribution(member.allocation, account);
+            if !batch.finish_last_attribution_after_storage_rollback(
+                outcome == RetainedStorageDropOutcome::Clean,
+            ) {
+                let poisoned = account.record_poison(AccountPoisonReason::OwnershipGraphUnverified);
+                if outcome == RetainedStorageDropOutcome::Clean {
+                    return Err(RetainedPublicationError::Writer(
+                        RetainedWriterError::AccountPoisoned(poisoned),
+                    ));
+                }
+                return Err(RetainedPublicationError::Writer(
+                    join_pre_attribution_cleanup_cause(
+                        outcome,
+                        RetainedWriterError::AccountPoisoned(poisoned),
+                    ),
+                ));
+            }
+            if outcome != RetainedStorageDropOutcome::Clean {
+                return Err(RetainedPublicationError::Writer(
+                    join_pre_attribution_cleanup_cause(
+                        outcome,
+                        RetainedWriterError::OwnershipUnverified,
+                    ),
+                ));
+            }
+        }
+
+        if table_value.new_blocks != self.initial_new_blocks
+            || batch.attribution_len() != self.initial_attributions
+            || batch.attributed_bytes() != Some(self.initial_attributed_bytes)
+        {
+            let poisoned = account.record_poison(AccountPoisonReason::OwnershipGraphUnverified);
+            return Err(RetainedPublicationError::Writer(
+                RetainedWriterError::AccountPoisoned(poisoned),
+            ));
+        }
+        Ok(())
+    }
+
+    pub(in crate::retained) fn try_complete<O, P, D>(
+        self,
+        account: &PhysicalStorageAccount,
+        table: &RetainedTableAllocation<Block>,
+        batch: &AttributionReservationBatch<O, P, D, CanonicalOutput>,
+    ) -> Result<CompletedCanonicalRetainBatch<Block, Tag>, RetainedPublicationError<D>>
+    where
+        O: OperationOwner,
+        P: Copy + Ord,
+        D: Copy + Ord,
+    {
+        let table_value = table.as_ref();
+        let exact = retained_block_table_is_exact(
+            table,
+            batch,
+            account,
+            self.set_id,
+            RetainedMembershipDestination::Canonical,
+        ) && table_value.members.len() == self.final_members
+            && table_value.new_blocks == self.final_new_blocks
+            && batch.attribution_len() == self.final_attributions
+            && batch.attributed_bytes() == Some(self.final_attributed_bytes);
+        if !exact {
+            return Err(RetainedPublicationError::Writer(
+                RetainedWriterError::OwnershipUnverified,
+            ));
+        }
+
+        let expected_tag = TypeId::of::<Tag>();
+        let Some(last_index) = self.first_index.checked_add(self.len.get()) else {
+            return Err(RetainedPublicationError::Writer(
+                RetainedWriterError::MembershipExhausted,
+            ));
+        };
+        let completed_segment = table_value.members[self.first_index..last_index]
+            .iter()
+            .enumerate()
+            .all(|(offset, member)| {
+                let Some(index) = self.first_index.checked_add(offset) else {
+                    return false;
+                };
+                let Some(ordinal) = u64::try_from(index)
+                    .ok()
+                    .and_then(|index| index.checked_add(1))
+                else {
+                    return false;
+                };
+                member.tag == expected_tag
+                    && member.origin == RetainedBlockOrigin::New
+                    && member.allocation.membership()
+                        == Some(RetainedMembership {
+                            set_id: self.set_id,
+                            destination: RetainedMembershipDestination::Canonical,
+                            ordinal,
+                        })
+            });
+        if !completed_segment {
+            return Err(RetainedPublicationError::Writer(
+                RetainedWriterError::OwnershipUnverified,
+            ));
+        }
+
+        Ok(CompletedCanonicalRetainBatch {
+            first: RetainedSlotIdentity {
+                set_id: self.set_id,
+                index: self.first_index,
+                tag: expected_tag,
+            },
+            len: self.len,
+            marker: PhantomData,
+        })
     }
 }
 
@@ -993,7 +1348,7 @@ pub(super) struct QualifiedRetainedBlockTableStoragePlan<P, D, Block> {
     max_new_blocks: usize,
     member_capacity: CapacityPlan,
     charge: AdmissionCharge,
-    block: PhantomData<fn() -> Block>,
+    block: PhantomData<fn(Block) -> Block>,
 }
 
 pub(super) struct QualifiedRetainedBlockTablePlan<O, P, D, Destination, Block>

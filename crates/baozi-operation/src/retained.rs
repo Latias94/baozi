@@ -15,6 +15,7 @@ mod operation_start;
 mod ownership;
 mod physical;
 mod publication_contract;
+mod range;
 mod startup;
 mod terminal;
 mod terminal_failure;
@@ -141,7 +142,7 @@ pub(crate) use terminal_output::{
 };
 use triomphe::{Arc, UniqueArc};
 
-pub(crate) use operation::RetainedOperation;
+pub(crate) use operation::{RetainedControlCheckpoint, RetainedOperation};
 #[cfg(test)]
 use operation_start::map_qualified_startup_batch_error;
 pub(crate) use operation_start::{
@@ -162,6 +163,10 @@ use publication_contract::{
 };
 pub(crate) use publication_contract::{
     RetainedPublicationError, RetainedPublicationOpenError, RetainedPublicationPlan,
+};
+use range::{CanonicalBatchPreflightContext, try_preflight_canonical_batch};
+pub(crate) use range::{
+    CanonicalRetainBatchError, CanonicalRetainBatchSource, CanonicalRetainedRange,
 };
 pub(crate) use startup::{ReadyStartupGraphSplitAuthority, StartedLedger};
 use startup::{
@@ -572,6 +577,14 @@ where
             .test_probe()
     }
 
+    #[cfg(test)]
+    pub(crate) fn test_canonical_attributed_bytes(&self) -> u64 {
+        self.canonical_batch
+            .as_ref()
+            .and_then(AttributionReservationBatch::attributed_bytes)
+            .expect("test canonical attribution bytes remain exact")
+    }
+
     pub fn try_retain_canonical<Tag>(
         &mut self,
         plan: RetainedAllocationPlan,
@@ -627,6 +640,150 @@ where
                 Err(error)
             }
         }
+    }
+
+    /// Retains one structurally and aggregate-ledger-preflighted homogeneous canonical batch.
+    ///
+    /// Every item still traverses the ordinary single-block retain rail, preserving its physical
+    /// admission, attribution binding, panic containment, and immutable placement semantics.
+    /// Physical-account admission remains race-safe per item rather than reserved by the batch
+    /// snapshot. An ordinary execution failure releases the retained prefix storage-first and
+    /// leaves the assembly writable. A panic or unverified cleanup returns no range and enters
+    /// fail-closed containment.
+    pub fn try_retain_canonical_batch<Tag, Source>(
+        &mut self,
+        source: &Source,
+        tag: Tag,
+    ) -> Result<CanonicalRetainedRange<CanonicalBlock, Tag>, CanonicalRetainBatchError<D>>
+    where
+        Tag: Copy + Send + Sync + 'static,
+        Source: CanonicalRetainBatchSource<CanonicalBlock, Tag>,
+    {
+        if self.containment != AssemblyContainmentProvenance::Healthy {
+            return Err(CanonicalRetainBatchError::Preflight(
+                RetainedPublicationError::Poisoned,
+            ));
+        }
+        let canonical_plan = self
+            .canonical_plan
+            .ok_or(CanonicalRetainBatchError::Preflight(
+                RetainedPublicationError::WrongOutcomeMode,
+            ))?;
+        let preflight = try_preflight_canonical_batch::<O, P, D, CanonicalBlock, Tag, Source>(
+            source,
+            CanonicalBatchPreflightContext {
+                ledger: self
+                    .operation
+                    .as_ref()
+                    .ok_or(CanonicalRetainBatchError::Preflight(
+                        RetainedPublicationError::Poisoned,
+                    ))?
+                    .coordinator
+                    .retained_ledger(),
+                account: self
+                    .account
+                    .as_ref()
+                    .ok_or(CanonicalRetainBatchError::Preflight(
+                        RetainedPublicationError::Poisoned,
+                    ))?,
+                table: self.canonical_table.as_ref().ok_or(
+                    CanonicalRetainBatchError::Preflight(RetainedPublicationError::Poisoned),
+                )?,
+                batch: self.canonical_batch.as_ref().ok_or(
+                    CanonicalRetainBatchError::Preflight(RetainedPublicationError::Poisoned),
+                )?,
+                handle_share_work: self.handle_share_work,
+                table_plan: canonical_plan,
+                set_id: self.set_id,
+                slot_limit_error: RetainedPublicationError::CanonicalSlotLimit,
+            },
+        );
+        let qualified = match preflight {
+            Ok(qualified) => qualified,
+            Err(error) => {
+                if let Some(containment) = retained_publication_error_containment(&error) {
+                    self.containment = containment;
+                }
+                return Err(CanonicalRetainBatchError::Preflight(error));
+            }
+        };
+
+        for index in 0..qualified.len() {
+            let result = match source.allocation_plan(index) {
+                Some(plan) => self
+                    .try_retain_canonical(plan, |emplacer| source.build(index, emplacer, tag))
+                    .map(drop),
+                None => Err(RetainedPublicationError::Writer(
+                    RetainedWriterError::InvalidPublicationPlan,
+                )),
+            };
+            let Err(cause) = result else {
+                continue;
+            };
+            let rollback = match (
+                self.account.as_ref(),
+                self.canonical_table.as_mut(),
+                self.canonical_batch.as_mut(),
+            ) {
+                (Some(account), Some(table), Some(batch)) => {
+                    qualified.try_rollback_prefix(account, table, batch)
+                }
+                _ => Err(RetainedPublicationError::Poisoned),
+            };
+            if let Err(rollback_cause) = rollback {
+                self.containment = retained_publication_error_containment(&rollback_cause)
+                    .unwrap_or(AssemblyContainmentProvenance::NewFaultPending);
+                return Err(CanonicalRetainBatchError::Abandoned {
+                    failed_item: index,
+                    cause: rollback_cause,
+                });
+            }
+            if self.containment != AssemblyContainmentProvenance::Healthy
+                || retained_publication_error_containment(&cause).is_some()
+            {
+                return Err(CanonicalRetainBatchError::Abandoned {
+                    failed_item: index,
+                    cause,
+                });
+            }
+            return Err(CanonicalRetainBatchError::Execution {
+                failed_item: index,
+                cause,
+            });
+        }
+
+        let completed_len = qualified.len();
+        let completed = match qualified.try_complete(
+            self.account
+                .as_ref()
+                .ok_or_else(|| CanonicalRetainBatchError::Abandoned {
+                    failed_item: completed_len.saturating_sub(1),
+                    cause: RetainedPublicationError::Poisoned,
+                })?,
+            self.canonical_table
+                .as_ref()
+                .ok_or_else(|| CanonicalRetainBatchError::Abandoned {
+                    failed_item: completed_len.saturating_sub(1),
+                    cause: RetainedPublicationError::Poisoned,
+                })?,
+            self.canonical_batch
+                .as_ref()
+                .ok_or_else(|| CanonicalRetainBatchError::Abandoned {
+                    failed_item: completed_len.saturating_sub(1),
+                    cause: RetainedPublicationError::Poisoned,
+                })?,
+        ) {
+            Ok(completed) => completed,
+            Err(cause) => {
+                self.containment = retained_publication_error_containment(&cause)
+                    .unwrap_or(AssemblyContainmentProvenance::NewFaultPending);
+                return Err(CanonicalRetainBatchError::Abandoned {
+                    failed_item: completed_len.saturating_sub(1),
+                    cause,
+                });
+            }
+        };
+        Ok(CanonicalRetainedRange::from_completed_batch(completed))
     }
 
     /// Inherits one immutable canonical block from a published same-account aggregate.
