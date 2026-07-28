@@ -32,7 +32,7 @@ use super::publication::{
 };
 use super::{
     FreshNodeSceneOwner, NODE_SCENE_BUILD_INVARIANT_CODE, NODE_SCENE_COMMITMENT_REJECTION_CODE,
-    NodeSceneBlockRefs, NodeSceneBuildFaults, NodeSceneCandidate, NodeSceneCandidateOwner,
+    NodeSceneBuildFaults, NodeSceneCandidate, NodeSceneCandidateOwner,
     NodeSceneConstructionRejection, NodeSceneDraft, NodeSceneWorkMeter,
     PreparedNodeSceneConstruction, RejectedNodeSceneConstruction, ValidatedNodeSceneConstruction,
 };
@@ -383,13 +383,6 @@ impl ValidatedNodeSceneConstruction<'_> {
                 return prepare_node_post_evidence_failure(assembly, evidence, &plans, cause);
             }
         };
-        let refs = NodeSceneBlockRefs {
-            directory,
-            nodes,
-            references,
-            transforms,
-        };
-
         prepare_node_scene_candidate(
             NodeSceneCandidate {
                 owner: NodeSceneCandidateOwner {
@@ -398,7 +391,6 @@ impl ValidatedNodeSceneConstruction<'_> {
                     keys,
                 },
                 draft: NodeSceneDraft { brand, directory },
-                refs,
                 evidence,
                 canonical_block_count: plans.canonical_block_count,
                 node_count: plans.node_count,

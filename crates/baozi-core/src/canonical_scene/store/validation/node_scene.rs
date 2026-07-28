@@ -3,23 +3,80 @@ use baozi_operation::{
     StoreValidationSession,
 };
 
-use crate::entity::AuthoredTransform;
-use crate::math::{Mat4, Quat, Vec3};
-
+use super::super::construction::node_scene::authored_transform::{
+    authored_transform_scalar_count, decode_authored_transform,
+};
 use super::super::production::{Presence, ValidatedNodeBatch};
 use super::super::schema::{
-    NODE_SCENE_CHILD_REFERENCE_FIELD_COUNT, NODE_SCENE_DIRECTORY_FIELD_COUNT,
+    CanonicalBlockRef, NODE_SCENE_CHILD_REFERENCE_FIELD_COUNT, NODE_SCENE_DIRECTORY_FIELD_COUNT,
     NODE_SCENE_EVIDENCE_FIELD_COUNT, NODE_SCENE_EVIDENCE_OUTCOME_CANDIDATE,
-    NODE_SCENE_MATRIX_SCALAR_COUNT, NODE_SCENE_NODE_FIELD_COUNT,
-    NODE_SCENE_POPULATED_CANONICAL_BLOCK_COUNT, NODE_SCENE_REQUIRED_CANONICAL_BLOCK_COUNT,
-    NODE_SCENE_SCHEMA_REVISION, NODE_SCENE_TRANSFORM_MATRIX, NODE_SCENE_TRANSFORM_SYNTHETIC,
-    NODE_SCENE_TRANSFORM_TRS, NODE_SCENE_TRS_SCALAR_COUNT, NodeSceneAuthoredTransformSchema,
+    NODE_SCENE_NODE_FIELD_COUNT, NODE_SCENE_POPULATED_CANONICAL_BLOCK_COUNT,
+    NODE_SCENE_REQUIRED_CANONICAL_BLOCK_COUNT, NODE_SCENE_SCHEMA_REVISION,
+    NODE_SCENE_TRANSFORM_SYNTHETIC, NodeSceneAuthoredTransformSchema,
     NodeSceneChildReferenceTableSchema, NodeSceneDirectorySchema, NodeSceneNodeTableSchema,
     NodeSceneOutcomeEvidenceSchema, PRESENCE_ABSENT, PRESENCE_PRESENT,
     node_scene_child_reference_field, node_scene_directory_field, node_scene_evidence_field,
     node_scene_node_field,
 };
-use super::{authored_matrix_is_valid, require_optional_collection, require_scalar};
+use super::{require_optional_collection, require_scalar};
+
+/// Immutable semantic authority minted only by central node-scene validation.
+#[derive(Clone, Copy)]
+pub(in crate::canonical_scene::store) struct NodeSceneValidationProof {
+    nodes: CanonicalBlockRef<NodeSceneNodeTableSchema>,
+    references: Option<CanonicalBlockRef<NodeSceneChildReferenceTableSchema>>,
+    transforms: Option<CanonicalBlockRef<NodeSceneAuthoredTransformSchema>>,
+    source_node_count: usize,
+    source_root_count: usize,
+    source_edge_count: usize,
+}
+
+impl NodeSceneValidationProof {
+    pub(in crate::canonical_scene::store) const fn nodes(
+        self,
+    ) -> CanonicalBlockRef<NodeSceneNodeTableSchema> {
+        self.nodes
+    }
+
+    pub(in crate::canonical_scene::store) const fn references(
+        self,
+    ) -> Option<CanonicalBlockRef<NodeSceneChildReferenceTableSchema>> {
+        self.references
+    }
+
+    pub(in crate::canonical_scene::store) const fn transforms(
+        self,
+    ) -> Option<CanonicalBlockRef<NodeSceneAuthoredTransformSchema>> {
+        self.transforms
+    }
+
+    pub(in crate::canonical_scene::store) const fn source_node_count(self) -> usize {
+        self.source_node_count
+    }
+
+    pub(in crate::canonical_scene::store) const fn source_root_count(self) -> usize {
+        self.source_root_count
+    }
+
+    pub(in crate::canonical_scene::store) const fn source_edge_count(self) -> usize {
+        self.source_edge_count
+    }
+
+    #[cfg(test)]
+    pub(in crate::canonical_scene::store) fn install_layout_fault_for_test(
+        &mut self,
+        source_node_count: usize,
+        source_root_count: usize,
+    ) -> bool {
+        let Some(source_edge_count) = source_node_count.checked_sub(source_root_count) else {
+            return false;
+        };
+        self.source_node_count = source_node_count;
+        self.source_root_count = source_root_count;
+        self.source_edge_count = source_edge_count;
+        true
+    }
+}
 
 pub(in crate::canonical_scene::store) fn validate_node_scene_graph<R, E>(
     session: &mut StoreValidationSession<'_, '_>,
@@ -27,9 +84,9 @@ pub(in crate::canonical_scene::store) fn validate_node_scene_graph<R, E>(
     evidence_ref: OutcomeEvidenceRecordRef<NodeSceneOutcomeEvidenceSchema>,
     expected: &ValidatedNodeBatch<'_, R>,
     mut observe_work: impl FnMut(u64) -> Result<(), E>,
-) -> Result<bool, E> {
+) -> Result<Option<NodeSceneValidationProof>, E> {
     let mut work_failure = None;
-    let accepted = validate_node_scene_graph_inner(
+    let proof = validate_node_scene_graph_inner(
         session,
         directory_ref,
         evidence_ref,
@@ -41,11 +98,10 @@ pub(in crate::canonical_scene::store) fn validate_node_scene_graph<R, E>(
                 None
             }
         },
-    )
-    .is_some();
+    );
     match work_failure {
         Some(cause) => Err(cause),
-        None => Ok(accepted),
+        None => Ok(proof),
     }
 }
 
@@ -75,7 +131,7 @@ fn validate_node_scene_graph_inner<R>(
     evidence_ref: OutcomeEvidenceRecordRef<NodeSceneOutcomeEvidenceSchema>,
     expected: &ValidatedNodeBatch<'_, R>,
     observe_work: &mut impl FnMut(u64) -> Option<()>,
-) -> Option<()> {
+) -> Option<NodeSceneValidationProof> {
     observe_work(1)?;
     let directory = session.canonical_records(directory_ref)?;
     if directory.rows() != 1 || directory.fields() != NODE_SCENE_DIRECTORY_FIELD_COUNT {
@@ -139,7 +195,7 @@ fn validate_node_scene_graph_inner<R>(
         return None;
     }
 
-    let (_references_ref, references, transforms_ref, transforms) = if has_source_nodes {
+    let (references_ref, references, transforms_ref, transforms) = if has_source_nodes {
         let references_ref = directory.record_ref::<NodeSceneChildReferenceTableSchema>(
             0,
             node_scene_directory_field::REFERENCES,
@@ -185,10 +241,11 @@ fn validate_node_scene_graph_inner<R>(
         (None, None, None, None)
     };
 
-    let expected_root_count = match input.roots() {
+    let source_root_count = match input.roots() {
         Presence::Absent => return None,
-        Presence::Present(roots) => u32::try_from(roots.len()).ok()?,
+        Presence::Present(roots) => roots.len(),
     };
+    let expected_root_count = u32::try_from(source_root_count).ok()?;
 
     observe_work(1)?;
     require_scalar(nodes.scalar::<u32>(0, node_scene_node_field::NODE), 0)?;
@@ -265,11 +322,7 @@ fn validate_node_scene_graph_inner<R>(
         child_reference_offset = child_reference_offset.checked_add(expected_child_count)?;
 
         let kind = nodes.scalar::<u8>(row, node_scene_node_field::TRANSFORM_KIND)?;
-        let transform_len = match kind {
-            NODE_SCENE_TRANSFORM_MATRIX => NODE_SCENE_MATRIX_SCALAR_COUNT,
-            NODE_SCENE_TRANSFORM_TRS => NODE_SCENE_TRS_SCALAR_COUNT,
-            _ => return None,
-        };
+        let transform_len = authored_transform_scalar_count(kind)?;
         observe_work(u64::try_from(transform_len).ok()?)?;
         require_scalar(
             nodes.scalar::<u32>(row, node_scene_node_field::TRANSFORM_OFFSET),
@@ -290,7 +343,7 @@ fn validate_node_scene_graph_inner<R>(
         let values = transforms
             .as_ref()?
             .get(transform_offset..next_transform_offset)?;
-        let stored_transform = authored_transform_from_values(kind, values)?;
+        let stored_transform = decode_authored_transform(kind, values)?;
         if !stored_transform.has_same_authored_bits(expected_node.authored_transform()) {
             return None;
         }
@@ -332,41 +385,13 @@ fn validate_node_scene_graph_inner<R>(
         evidence.scalar::<u32>(0, node_scene_evidence_field::NODE_COUNT),
         node_count_u32,
     )?;
-    Some(())
-}
-
-fn authored_transform_from_values(kind: u8, values: &[f32]) -> Option<AuthoredTransform> {
-    match kind {
-        NODE_SCENE_TRANSFORM_MATRIX => authored_matrix_from_values(values),
-        NODE_SCENE_TRANSFORM_TRS => authored_trs_from_values(values),
-        _ => None,
-    }
-}
-
-fn authored_matrix_from_values(values: &[f32]) -> Option<AuthoredTransform> {
-    if !authored_matrix_is_valid(values) {
-        return None;
-    }
-    let values = <&[f32; NODE_SCENE_MATRIX_SCALAR_COUNT]>::try_from(values).ok()?;
-    AuthoredTransform::try_matrix(Mat4 {
-        cols: [
-            [values[0], values[1], values[2], values[3]],
-            [values[4], values[5], values[6], values[7]],
-            [values[8], values[9], values[10], values[11]],
-            [values[12], values[13], values[14], values[15]],
-        ],
+    let source_edge_count = source_node_count.checked_sub(source_root_count)?;
+    Some(NodeSceneValidationProof {
+        nodes: CanonicalBlockRef::from_store(nodes_ref),
+        references: references_ref.map(CanonicalBlockRef::from_store),
+        transforms: transforms_ref.map(CanonicalBlockRef::from_store),
+        source_node_count,
+        source_root_count,
+        source_edge_count,
     })
-    .ok()
-}
-
-fn authored_trs_from_values(values: &[f32]) -> Option<AuthoredTransform> {
-    let Ok(values) = <&[f32; NODE_SCENE_TRS_SCALAR_COUNT]>::try_from(values) else {
-        return None;
-    };
-    AuthoredTransform::try_trs(
-        Vec3::new(values[0], values[1], values[2]),
-        Quat::from_xyzw(values[3], values[4], values[5], values[6]),
-        Vec3::new(values[7], values[8], values[9]),
-    )
-    .ok()
 }

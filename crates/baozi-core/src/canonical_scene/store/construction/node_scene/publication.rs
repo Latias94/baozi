@@ -22,9 +22,9 @@ use super::{
     NODE_SCENE_WORK_INTERRUPTION_CODE, NodeSceneCandidate, NodeSceneCandidateOwner,
     NodeSceneConstructionTerminal, NodeSceneRichFailure, NodeSceneStoreFailureAssembly,
     NodeSceneStoreFailureValidation, NodeSceneSuccessParts, NodeSceneSuccessReport,
-    NodeSceneValidationProof, NodeSceneWorkMeter, PendingNodeSceneCommitments,
-    PreparedNodeSceneConstruction, PreparedNodeSceneRichFailure, PreparedNodeSceneSuccess,
-    ValidatedNodeScene, ValidatedNodeSceneCandidate,
+    NodeSceneWorkMeter, PendingNodeSceneCommitments, PreparedNodeSceneConstruction,
+    PreparedNodeSceneRichFailure, PreparedNodeSceneSuccess, ValidatedNodeScene,
+    ValidatedNodeSceneCandidate,
 };
 
 pub(super) fn prepare_node_scene_candidate<'input>(
@@ -41,7 +41,6 @@ pub(super) fn prepare_node_scene_candidate<'input>(
                 keys,
             },
         draft,
-        refs,
         evidence,
         canonical_block_count,
         node_count,
@@ -63,21 +62,22 @@ pub(super) fn prepare_node_scene_candidate<'input>(
             );
         }
     };
-    let brand_matches = draft.brand == brand && draft.directory == refs.directory;
+    let brand_matches = draft.brand == brand;
+    let mut proof = None;
     let validation = assembly.validate_success_controlled(
         keys.dimension,
         draft.directory.into_store(),
         evidence,
         |session, directory, evidence, control| {
-            let accepted = if brand_matches {
+            proof = if brand_matches {
                 validate_node_scene_graph(session, directory, evidence, &batch, |amount| {
                     work.observe(control, amount)
                 })?
             } else {
-                false
+                None
             };
             work.finish(control)?;
-            Ok(accepted)
+            Ok(proof.is_some())
         },
     );
     // The central validator is the final reader of the compiled plan and its reservation.
@@ -86,17 +86,24 @@ pub(super) fn prepare_node_scene_candidate<'input>(
         StoreControlledSuccessValidation::InvalidWorkDimension { assembly, cause } => {
             prepare_node_minimal_fallback_from_assembly(assembly, node_scene_failure_code(&cause))
         }
-        StoreControlledSuccessValidation::Valid(store) => prepare_validated_node_scene(
-            ValidatedNodeSceneCandidate {
-                store,
-                refs,
+        StoreControlledSuccessValidation::Valid(store) => match proof {
+            Some(proof) => prepare_validated_node_scene(
+                ValidatedNodeSceneCandidate {
+                    store,
+                    canonical_block_count,
+                    node_count,
+                    proof,
+                    pending_commitments,
+                },
+                reserve_generation,
+            ),
+            None => prepare_node_rich_failure(
+                store.downgrade_to_rich_failure(NODE_SCENE_BUILD_INVARIANT_CODE),
                 canonical_block_count,
                 node_count,
-                proof: NodeSceneValidationProof,
-                pending_commitments,
-            },
-            reserve_generation,
-        ),
+                NODE_SCENE_BUILD_INVARIANT_CODE,
+            ),
+        },
         StoreControlledSuccessValidation::Rejected(failure) => prepare_node_rich_failure(
             failure,
             canonical_block_count,
@@ -198,7 +205,6 @@ fn prepare_validated_node_scene(
 ) -> Result<PreparedNodeSceneConstruction, SceneConstructionError> {
     let ValidatedNodeSceneCandidate {
         store,
-        refs,
         canonical_block_count,
         node_count,
         proof,
@@ -221,7 +227,6 @@ fn prepare_validated_node_scene(
             PreparedNodeSceneSuccess {
                 generation,
                 store,
-                refs,
                 proof,
             },
         )),
@@ -335,8 +340,7 @@ impl PreparedNodeSceneConstruction {
                     scene: ValidatedNodeScene {
                         generation: prepared.generation.into_id(),
                         canonical: published.canonical,
-                        refs: prepared.refs,
-                        _proof: prepared.proof,
+                        proof: prepared.proof,
                     },
                     report: NodeSceneSuccessReport {
                         outcome_evidence: published.outcome_evidence,

@@ -13,7 +13,9 @@ use super::schema::{
     SCHEMA_REVISION, directory_field, evidence_field, node_field, reference_field,
 };
 
-pub(super) use node_scene::{validate_node_scene_evidence_graph, validate_node_scene_graph};
+pub(in crate::canonical_scene::store) use node_scene::{
+    NodeSceneValidationProof, validate_node_scene_evidence_graph, validate_node_scene_graph,
+};
 
 pub(super) fn authored_matrix_is_valid(values: &[f32]) -> bool {
     values.len() == MATRIX_SCALARS_PER_NODE

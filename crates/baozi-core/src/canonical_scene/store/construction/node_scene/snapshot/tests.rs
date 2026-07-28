@@ -5,7 +5,7 @@ use baozi_operation::{
 
 use crate::SceneValidationLimits;
 use crate::canonical_scene::store::construction::node_scene::{
-    NodeSceneConstructionTerminal, NodeSceneSuccessParts,
+    NodeSceneConstructionTerminal, NodeSceneSuccessParts, ValidatedNodeScene,
 };
 use crate::canonical_scene::store::construction::{
     SceneConstructionLimits, SceneConstructionOperation,
@@ -17,9 +17,9 @@ use crate::entity::AuthoredTransform;
 use crate::math::{Mat4, Quat, Vec3};
 
 use super::{
-    MAX_COLLECTION_ITEMS, MAX_PREVIEW_BYTES, MAX_WORK, NodeSceneSnapshotAlgorithm,
-    NodeSceneSnapshotError, NodeSceneSnapshotLimit, NodeSceneSnapshotLimits, SnapshotWorkMeter,
-    capture_node_scene, capture_node_scene_with_test_transcript,
+    MAX_COLLECTION_ITEMS, MAX_PREVIEW_BYTES, MAX_WORK, NodeSceneSnapshot,
+    NodeSceneSnapshotAlgorithm, NodeSceneSnapshotError, NodeSceneSnapshotLimit,
+    NodeSceneSnapshotLimits, SnapshotWorkMeter, capture_node_scene_with_test_transcript,
 };
 
 const KNOWN_SINGLE_TRS_DIGEST: [u8; 32] = [
@@ -60,6 +60,14 @@ fn operation_limits() -> SceneConstructionLimits {
 
 fn snapshot_limits(bytes: usize, items: usize) -> NodeSceneSnapshotLimits {
     NodeSceneSnapshotLimits::try_new(bytes, items, MAX_WORK).expect("valid snapshot limits")
+}
+
+fn capture_node_scene(
+    scene: &ValidatedNodeScene,
+    limits: NodeSceneSnapshotLimits,
+    cancellation: Option<&CancellationToken>,
+) -> Result<NodeSceneSnapshot, NodeSceneSnapshotError> {
+    scene.capture_snapshot(limits, cancellation)
 }
 
 fn factory() -> PhysicalStorageAccountFactory {
@@ -169,7 +177,7 @@ fn known_vector_is_stable_and_human_reviewable() {
     assert_eq!(snapshot.totals.root_count, 1);
     assert_eq!(snapshot.totals.edge_count, 0);
     assert_eq!(snapshot.totals.transcript_bytes, 181);
-    assert_eq!(snapshot.totals.work_units, 20);
+    assert_eq!(snapshot.totals.work_units, 21);
     assert!(snapshot.preview.text.contains("roots(present,total=1)=[0]"));
     assert!(snapshot.preview.text.contains("transform=trs(total=10)"));
     assert!(
@@ -208,7 +216,63 @@ fn matrix_and_child_known_vector_pins_remaining_v1_framing() {
     assert_eq!(snapshot.totals.root_count, 1);
     assert_eq!(snapshot.totals.edge_count, 1);
     assert_eq!(snapshot.totals.transcript_bytes, 304);
-    assert_eq!(snapshot.totals.work_units, 40);
+    assert_eq!(snapshot.totals.work_units, 41);
+}
+
+#[test]
+fn collection_framing_distinguishes_root_child_partitions() {
+    let factory = factory();
+    let account = account(&factory);
+    let first_roots = [NodeLocalId::new(0)];
+    let first_nodes = [
+        NodeAuthoringNode::new(Presence::Absent, trs(0.0)),
+        NodeAuthoringNode::new(parent(0, 0), trs(1.0)),
+        NodeAuthoringNode::new(parent(0, 1), trs(2.0)),
+        NodeAuthoringNode::new(parent(1, 0), trs(3.0)),
+    ];
+    let second_roots = [NodeLocalId::new(0)];
+    let second_nodes = [
+        NodeAuthoringNode::new(Presence::Absent, trs(0.0)),
+        NodeAuthoringNode::new(parent(0, 0), trs(1.0)),
+        NodeAuthoringNode::new(parent(1, 0), trs(2.0)),
+        NodeAuthoringNode::new(parent(1, 1), trs(3.0)),
+    ];
+    let first = build_scene(&account, &first_roots, &first_nodes);
+    let second = build_scene(&account, &second_roots, &second_nodes);
+    let limits = snapshot_limits(16_384, 64);
+
+    let first_snapshot =
+        capture_node_scene(&first.scene, limits, None).expect("first partition snapshot");
+    let second_snapshot =
+        capture_node_scene(&second.scene, limits, None).expect("second partition snapshot");
+
+    assert_eq!(first_snapshot.totals.node_count, 4);
+    assert_eq!(first_snapshot.totals.root_count, 1);
+    assert_eq!(first_snapshot.totals.edge_count, 3);
+    assert_eq!(first_snapshot.totals, second_snapshot.totals);
+    assert_ne!(first_snapshot.digest, second_snapshot.digest);
+}
+
+#[test]
+fn empty_scene_snapshot_is_complete_and_deterministic() {
+    let factory = factory();
+    let first_account = account(&factory);
+    let second_account = account(&factory);
+    let first = build_scene(&first_account, &[], &[]);
+    let second = build_scene(&second_account, &[], &[]);
+    let limits = snapshot_limits(4_096, 64);
+
+    let first_snapshot =
+        capture_node_scene(&first.scene, limits, None).expect("first empty snapshot");
+    let second_snapshot =
+        capture_node_scene(&second.scene, limits, None).expect("second empty snapshot");
+
+    assert_eq!(first_snapshot.digest, second_snapshot.digest);
+    assert_eq!(first_snapshot.preview, second_snapshot.preview);
+    assert_eq!(first_snapshot.totals, second_snapshot.totals);
+    assert_eq!(first_snapshot.totals.node_count, 0);
+    assert_eq!(first_snapshot.totals.root_count, 0);
+    assert_eq!(first_snapshot.totals.edge_count, 0);
 }
 
 #[test]
@@ -313,6 +377,59 @@ fn sibling_order_representation_and_signed_zero_are_semantic() {
 }
 
 #[test]
+fn proof_qualified_read_failures_do_not_publish_partial_snapshots() {
+    let factory = factory();
+    let account = account(&factory);
+
+    let mut missing_reference = single_root_scene(&account, AuthoredTransform::identity_trs());
+    assert!(
+        missing_reference
+            .scene
+            .install_semantic_layout_fault_for_test(2, 2)
+    );
+
+    let roots = [NodeLocalId::new(0)];
+    let nodes = [
+        NodeAuthoringNode::new(Presence::Absent, trs(0.0)),
+        NodeAuthoringNode::new(parent(0, 0), trs(1.0)),
+    ];
+    let mut missing_node = build_scene(&account, &roots, &nodes);
+    assert!(
+        missing_node
+            .scene
+            .install_semantic_layout_fault_for_test(3, 1)
+    );
+    let mut truncated_proof = build_scene(&account, &roots, &nodes);
+    assert!(
+        truncated_proof
+            .scene
+            .install_semantic_layout_fault_for_test(1, 1)
+    );
+    let retained = account.snapshot();
+
+    assert!(matches!(
+        capture_node_scene(&missing_reference.scene, snapshot_limits(4_096, 64), None),
+        Err(NodeSceneSnapshotError::InconsistentView {
+            reason: "validated node table row count disagrees with validation proof"
+        })
+    ));
+    assert!(matches!(
+        capture_node_scene(&missing_node.scene, snapshot_limits(4_096, 64), None),
+        Err(NodeSceneSnapshotError::InconsistentView {
+            reason: "validated node table row count disagrees with validation proof"
+        })
+    ));
+    assert!(matches!(
+        capture_node_scene(&truncated_proof.scene, snapshot_limits(4_096, 64), None),
+        Err(NodeSceneSnapshotError::InconsistentView {
+            reason: "validated node table row count disagrees with validation proof"
+        })
+    ));
+
+    assert_eq!(account.snapshot(), retained);
+}
+
+#[test]
 fn limits_cancellation_and_capture_leave_physical_state_unchanged() {
     assert!(matches!(
         NodeSceneSnapshotLimits::try_new(MAX_PREVIEW_BYTES + 1, 1, 1),
@@ -392,6 +509,23 @@ fn limits_cancellation_and_capture_leave_physical_state_unchanged() {
         capture_node_scene(&parts.scene, snapshot_limits(4_096, 64), None).expect("full snapshot");
     assert_eq!(full.digest, KNOWN_SINGLE_TRS_DIGEST);
     assert_eq!(account.snapshot(), retained);
+
+    let exact_work = NodeSceneSnapshotLimits::try_new(4_096, 64, full.totals.work_units)
+        .expect("exact work configuration");
+    assert!(capture_node_scene(&parts.scene, exact_work, None).is_ok());
+    let one_short = NodeSceneSnapshotLimits::try_new(
+        4_096,
+        64,
+        full.totals
+            .work_units
+            .checked_sub(1)
+            .expect("nonzero snapshot work"),
+    )
+    .expect("one-short work configuration");
+    assert!(matches!(
+        capture_node_scene(&parts.scene, one_short, None),
+        Err(NodeSceneSnapshotError::WorkBudgetExceeded { .. })
+    ));
 }
 
 #[test]
@@ -415,26 +549,45 @@ fn traversal_scales_linearly_while_preview_stays_bounded() {
     let mut observed = Vec::new();
 
     for node_count in [1_usize, 10, 100, 1_000] {
-        let roots = (0..node_count)
-            .map(|index| NodeLocalId::new(u32::try_from(index).expect("test node index")))
-            .collect::<Vec<_>>();
+        let roots = [NodeLocalId::new(0)];
         let nodes = (0..node_count)
-            .map(|_| NodeAuthoringNode::new(Presence::Absent, AuthoredTransform::identity_trs()))
+            .map(|index| {
+                let parent_ref = if index == 0 {
+                    Presence::Absent
+                } else {
+                    parent(0, u32::try_from(index - 1).expect("test child ordinal"))
+                };
+                NodeAuthoringNode::new(parent_ref, AuthoredTransform::identity_trs())
+            })
             .collect::<Vec<_>>();
         let parts = build_scene(&account, &roots, &nodes);
-        let snapshot =
-            capture_node_scene(&parts.scene, snapshot_limits(64, 1), None).expect("scale snapshot");
+        let mut captured = None;
+        let allocations = allocation_counter::measure(|| {
+            captured = Some(capture_node_scene(
+                &parts.scene,
+                snapshot_limits(64, 1),
+                None,
+            ));
+        });
+        let snapshot = captured
+            .expect("scale capture result")
+            .expect("scale snapshot");
 
         assert!(snapshot.preview.text.len() <= 64);
         assert_eq!(
             snapshot.totals.transcript_bytes,
             88 + 93 * node_count as u64
         );
-        assert_eq!(snapshot.totals.work_units, 6 + 14 * node_count as u64);
+        assert_eq!(snapshot.totals.work_units, 7 + 14 * node_count as u64);
         assert_eq!(snapshot.totals.node_count, node_count);
-        assert_eq!(snapshot.totals.root_count, node_count);
-        assert_eq!(snapshot.totals.edge_count, 0);
-        observed.push((snapshot.totals.transcript_bytes, snapshot.totals.work_units));
+        assert_eq!(snapshot.totals.root_count, 1);
+        assert_eq!(snapshot.totals.edge_count, node_count - 1);
+        observed.push((
+            snapshot.totals.transcript_bytes,
+            snapshot.totals.work_units,
+            allocations.count_total,
+            allocations.bytes_total,
+        ));
     }
 
     assert_eq!(observed[1].0 - observed[0].0, 9 * 93);
@@ -443,4 +596,10 @@ fn traversal_scales_linearly_while_preview_stays_bounded() {
     assert_eq!(observed[2].1 - observed[0].1, 99 * 14);
     assert_eq!(observed[3].0 - observed[0].0, 999 * 93);
     assert_eq!(observed[3].1 - observed[0].1, 999 * 14);
+    assert_eq!(observed[1].2, observed[0].2);
+    assert_eq!(observed[2].2, observed[0].2);
+    assert_eq!(observed[3].2, observed[0].2);
+    assert_eq!(observed[1].3, observed[0].3);
+    assert_eq!(observed[2].3, observed[0].3);
+    assert_eq!(observed[3].3, observed[0].3);
 }

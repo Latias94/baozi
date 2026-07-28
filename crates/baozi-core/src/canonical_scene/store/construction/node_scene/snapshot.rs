@@ -4,7 +4,8 @@ use thiserror::Error;
 
 use crate::entity::{AuthoredTransform, AuthoredTransformKind};
 
-use super::construction::node_scene::ValidatedNodeScene;
+use super::ValidatedNodeScene;
+use super::semantic::NodeSceneSemanticError;
 
 const NODE_SCENE_SNAPSHOT_DOMAIN: &str = "baozi.canonical-node-scene.snapshot";
 const NODE_SCENE_SNAPSHOT_SCHEMA_REVISION: u32 = 1;
@@ -163,14 +164,16 @@ pub(in crate::canonical_scene::store) enum NodeSceneSnapshotError {
     PreviewAllocation,
 }
 
-/// Captures a complete private canonical node-scene digest and bounded preview.
-pub(in crate::canonical_scene::store) fn capture_node_scene(
-    scene: &ValidatedNodeScene,
-    limits: NodeSceneSnapshotLimits,
-    cancellation: Option<&CancellationToken>,
-) -> Result<NodeSceneSnapshot, NodeSceneSnapshotError> {
-    capture_node_scene_with_encoder(scene, limits, cancellation, CanonicalDigestEncoder::new())
-        .map(|output| output.snapshot)
+impl ValidatedNodeScene {
+    /// Captures a complete private canonical node-scene digest and bounded preview.
+    pub(in crate::canonical_scene::store) fn capture_snapshot(
+        &self,
+        limits: NodeSceneSnapshotLimits,
+        cancellation: Option<&CancellationToken>,
+    ) -> Result<NodeSceneSnapshot, NodeSceneSnapshotError> {
+        capture_node_scene_with_encoder(self, limits, cancellation, CanonicalDigestEncoder::new())
+            .map(|output| output.snapshot)
+    }
 }
 
 #[cfg(test)]
@@ -199,23 +202,11 @@ fn capture_node_scene_with_encoder(
 ) -> Result<NodeSceneCaptureOutput, NodeSceneSnapshotError> {
     let mut work = SnapshotWorkMeter::new(limits.max_work, cancellation);
     work.poll()?;
-
-    let node_count = scene
-        .source_node_count()
-        .ok_or(NodeSceneSnapshotError::InconsistentView {
-            reason: "missing source node count",
-        })?;
-    let root_count = scene
-        .source_root_count()
-        .ok_or(NodeSceneSnapshotError::InconsistentView {
-            reason: "missing source root count",
-        })?;
-    let expected_edges =
-        node_count
-            .checked_sub(root_count)
-            .ok_or(NodeSceneSnapshotError::InconsistentView {
-                reason: "root count exceeds node count",
-            })?;
+    work.observe()?;
+    let source = scene.semantic_view().map_err(map_snapshot_invariant)?;
+    let node_count = source.node_count();
+    let root_count = source.root_count();
+    let edge_count = source.edge_count();
 
     if limits.max_preview_bytes != 0 {
         // Preview allocation is observable snapshot work and must be admitted
@@ -240,24 +231,20 @@ fn capture_node_scene_with_encoder(
     transcript.write_tag(TAG_ROOTS)?;
     transcript.tagged_u8(TAG_PRESENCE, PRESENCE_PRESENT)?;
     preview.begin_roots(root_count);
+    let mut cursor = source.into_cursor().map_err(map_snapshot_invariant)?;
+    let mut roots = cursor.take_roots().map_err(map_snapshot_invariant)?;
     for root_ordinal in 0..root_count {
         work.observe()?;
-        let child =
-            scene
-                .child(None, root_ordinal)
-                .ok_or(NodeSceneSnapshotError::InconsistentView {
-                    reason: "root collection ended before declared total",
-                })?;
-        ensure_node_reference(child, node_count)?;
+        let child = roots.next().map_err(map_snapshot_invariant)?.ok_or(
+            NodeSceneSnapshotError::InconsistentView {
+                reason: "root collection ended before declared total",
+            },
+        )?;
         transcript.write_tag(TAG_ROOT_REFERENCE)?;
         transcript.tagged_usize(TAG_REFERENCE, child)?;
         preview.reference(root_ordinal, child)?;
     }
-    if scene.child(None, root_count).is_some() {
-        return Err(NodeSceneSnapshotError::InconsistentView {
-            reason: "root collection exceeds declared total",
-        });
-    }
+    roots.finish().map_err(map_snapshot_invariant)?;
     transcript.tagged_usize(TAG_COLLECTION_TOTAL, root_count)?;
     preview.end_collection();
 
@@ -265,14 +252,16 @@ fn capture_node_scene_with_encoder(
     transcript.write_tag(TAG_NODES)?;
     transcript.tagged_u8(TAG_PRESENCE, PRESENCE_PRESENT)?;
     preview.begin_nodes(node_count);
-    let mut edge_count = 0_usize;
-    for node_index in 0..node_count {
+    for _ in 0..node_count {
         work.observe()?;
-        let transform = scene.authored_transform(node_index).ok_or(
+        let node = cursor.next_node().map_err(map_snapshot_invariant)?.ok_or(
             NodeSceneSnapshotError::InconsistentView {
-                reason: "node has no authored transform",
+                reason: "node collection ended before declared total",
             },
         )?;
+        let node_index = node.source_index();
+        let transform = node.authored_transform();
+        let child_count = node.child_count();
         transcript.write_tag(TAG_NODE)?;
         transcript.tagged_usize(TAG_REFERENCE, node_index)?;
         let render_node = preview.begin_node(node_index)?;
@@ -288,41 +277,25 @@ fn capture_node_scene_with_encoder(
         transcript.write_tag(TAG_CHILDREN)?;
         transcript.tagged_u8(TAG_PRESENCE, PRESENCE_PRESENT)?;
         preview.begin_children(render_node);
-        let mut child_ordinal = 0_usize;
-        while let Some(child) = scene.child(Some(node_index), child_ordinal) {
-            if edge_count == expected_edges {
-                return Err(NodeSceneSnapshotError::InconsistentView {
-                    reason: "child collections exceed the forest edge total",
-                });
-            }
+        let mut children = node.into_children();
+        for child_ordinal in 0..child_count {
             work.observe()?;
-            ensure_node_reference(child, node_count)?;
+            let child = children.next().map_err(map_snapshot_invariant)?.ok_or(
+                NodeSceneSnapshotError::InconsistentView {
+                    reason: "child collection ended before declared total",
+                },
+            )?;
             transcript.write_tag(TAG_CHILD_REFERENCE)?;
             transcript.tagged_usize(TAG_REFERENCE, child)?;
             preview.child_reference(render_node, child_ordinal, child)?;
-            child_ordinal =
-                child_ordinal
-                    .checked_add(1)
-                    .ok_or(NodeSceneSnapshotError::InconsistentView {
-                        reason: "child ordinal overflowed",
-                    })?;
-            edge_count =
-                edge_count
-                    .checked_add(1)
-                    .ok_or(NodeSceneSnapshotError::InconsistentView {
-                        reason: "edge total overflowed",
-                    })?;
         }
-        transcript.tagged_usize(TAG_COLLECTION_TOTAL, child_ordinal)?;
-        preview.end_node(render_node, child_ordinal);
+        children.finish().map_err(map_snapshot_invariant)?;
+        transcript.tagged_usize(TAG_COLLECTION_TOTAL, child_count)?;
+        preview.end_node(render_node, child_count);
     }
+    cursor.finish().map_err(map_snapshot_invariant)?;
     transcript.tagged_usize(TAG_COLLECTION_TOTAL, node_count)?;
 
-    if edge_count != expected_edges {
-        return Err(NodeSceneSnapshotError::InconsistentView {
-            reason: "root and edge totals do not close over nodes",
-        });
-    }
     preview.summary(node_count, root_count, edge_count);
     work.finish()?;
     let work_units = work.observed();
@@ -347,6 +320,12 @@ fn capture_node_scene_with_encoder(
     })
 }
 
+fn map_snapshot_invariant(error: NodeSceneSemanticError) -> NodeSceneSnapshotError {
+    NodeSceneSnapshotError::InconsistentView {
+        reason: error.reason(),
+    }
+}
+
 fn validate_usize_limit(
     limit: NodeSceneSnapshotLimit,
     value: usize,
@@ -357,18 +336,6 @@ fn validate_usize_limit(
             limit,
             value: u64::try_from(value).unwrap_or(u64::MAX),
             maximum: u64::try_from(maximum).unwrap_or(u64::MAX),
-        });
-    }
-    Ok(())
-}
-
-fn ensure_node_reference(
-    reference: usize,
-    node_count: usize,
-) -> Result<(), NodeSceneSnapshotError> {
-    if reference >= node_count {
-        return Err(NodeSceneSnapshotError::InconsistentView {
-            reason: "child reference is outside the node collection",
         });
     }
     Ok(())

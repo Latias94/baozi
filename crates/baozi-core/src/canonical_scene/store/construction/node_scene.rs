@@ -13,17 +13,20 @@ use super::super::production::{
     NodeAuthoringFailure, OperationAuthoringControlError, ValidatedNodeBatch,
 };
 use super::super::schema::{
-    CanonicalBlockRef, NodeSceneAuthoredTransformSchema, NodeSceneChildReferenceTableSchema,
-    NodeSceneDirectorySchema, NodeSceneNodeTableSchema, NodeSceneOutcomeEvidenceSchema,
+    CanonicalBlockRef, NodeSceneDirectorySchema, NodeSceneOutcomeEvidenceSchema,
 };
+use super::super::validation::NodeSceneValidationProof;
 use super::{
     ConstructionBrand, PreparedTracerSceneFallback, SceneConstructionOperation,
     SceneConstructionOwner, SceneConstructionPhase, SceneConstructionUnit, SceneStoreAssembly,
     SceneStoreKeys, SceneStoreOperation, TracerSceneFallback,
 };
 
+pub(in crate::canonical_scene::store) mod authored_transform;
 mod materialization;
 mod publication;
+pub(in crate::canonical_scene::store) mod semantic;
+pub(in crate::canonical_scene::store) mod snapshot;
 mod view;
 
 #[cfg(test)]
@@ -205,14 +208,6 @@ pub(in crate::canonical_scene::store) struct RejectedNodeSceneConstruction<'scen
     failure: NodeSceneConstructionRejection,
 }
 
-#[derive(Clone, Copy)]
-struct NodeSceneBlockRefs {
-    directory: CanonicalBlockRef<NodeSceneDirectorySchema>,
-    nodes: CanonicalBlockRef<NodeSceneNodeTableSchema>,
-    references: Option<CanonicalBlockRef<NodeSceneChildReferenceTableSchema>>,
-    transforms: Option<CanonicalBlockRef<NodeSceneAuthoredTransformSchema>>,
-}
-
 struct NodeSceneDraft {
     brand: ConstructionBrand,
     directory: CanonicalBlockRef<NodeSceneDirectorySchema>,
@@ -227,18 +222,15 @@ struct NodeSceneCandidateOwner {
 struct NodeSceneCandidate {
     owner: NodeSceneCandidateOwner,
     draft: NodeSceneDraft,
-    refs: NodeSceneBlockRefs,
     evidence: OutcomeEvidenceRecordRef<NodeSceneOutcomeEvidenceSchema>,
     canonical_block_count: u32,
     node_count: u32,
 }
 
 struct PendingNodeSceneCommitments;
-struct NodeSceneValidationProof;
 
 struct ValidatedNodeSceneCandidate {
     store: ValidatedNodeStoreSuccess,
-    refs: NodeSceneBlockRefs,
     canonical_block_count: u32,
     node_count: u32,
     proof: NodeSceneValidationProof,
@@ -248,7 +240,6 @@ struct ValidatedNodeSceneCandidate {
 pub(in crate::canonical_scene::store) struct PreparedNodeSceneSuccess {
     generation: ReservedSceneGeneration,
     store: PreparedNodeStoreSuccess,
-    refs: NodeSceneBlockRefs,
     proof: NodeSceneValidationProof,
 }
 
@@ -271,8 +262,7 @@ pub(in crate::canonical_scene::store) enum PreparedNodeSceneConstruction {
 pub(in crate::canonical_scene::store) struct ValidatedNodeScene {
     generation: SceneGenerationId,
     canonical: PublishedCanonicalStore<RecordBlock, NodeSceneDirectorySchema>,
-    refs: NodeSceneBlockRefs,
-    _proof: NodeSceneValidationProof,
+    proof: NodeSceneValidationProof,
 }
 
 pub(in crate::canonical_scene::store) struct NodeSceneSuccessReport {
