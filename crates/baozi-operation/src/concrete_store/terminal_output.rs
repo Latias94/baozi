@@ -598,6 +598,16 @@ pub struct PublishedOutcomeEvidenceStoreRef<'a, Kind, Tag> {
 }
 
 impl<Kind, Tag> PublishedOutcomeEvidenceStoreRef<'_, Kind, Tag> {
+    /// Returns the number of retained blocks in this evidence table.
+    pub fn len(&self) -> usize {
+        self.raw.aggregate().len()
+    }
+
+    /// Returns whether this evidence table contains no retained blocks.
+    pub fn is_empty(&self) -> bool {
+        self.raw.aggregate().is_empty()
+    }
+
     /// Resolves one typed scalar sequence.
     pub fn sequence<T: StoredScalar, SlotTag>(
         &self,

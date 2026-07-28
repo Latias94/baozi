@@ -1693,7 +1693,168 @@ fn evidence_primary_rejection_uses_minimal_fallback_without_retry() {
 }
 
 #[test]
-fn success_primary_rejection_drops_both_tables_before_minimal_fallback() {
+fn success_canonical_primary_rejection_downgrades_to_retained_rich_failure() {
+    static CANONICAL_DROPS: AtomicU64 = AtomicU64::new(0);
+    static EVIDENCE_DROPS: AtomicU64 = AtomicU64::new(0);
+
+    CANONICAL_DROPS.store(0, Ordering::SeqCst);
+    EVIDENCE_DROPS.store(0, Ordering::SeqCst);
+    let factory = account_factory(1);
+    let account = account(&factory, u64::MAX, 128);
+    let policy = DimensionPolicy::reservable_bytes(u64::MAX, u64::MAX, 0, u64::MAX)
+        .with_published_outcome_evidence_limit(64);
+    let limits = LedgerLimits::new(u64::MAX, [(TestDimension::Bytes, policy)]).unwrap();
+    let start = RetainedOperationStartPlan::new(
+        writer_plan(2, 2),
+        share_work(),
+        empty_plan(),
+        OutputCommitment::new(TestDimension::Bytes, 1),
+        OutputCommitment::new(TestDimension::Bytes, 1),
+    );
+    let operation =
+        TestOperation::try_start(OperationControl::default(), limits, &account, start, || {
+            Ok(7_u32)
+        })
+        .unwrap_or_else(|_| panic!("canonical rejection operation must start"));
+    drop(account);
+    let mut assembly: TestPublication<DropCounter, DropCounter> = operation
+        .try_publication_assembly(publication_plan(1, 1))
+        .unwrap_or_else(|_| panic!("canonical rejection assembly must open"));
+    let canonical = assembly
+        .try_retain_canonical(empty_plan(), |emplacer| {
+            Ok(emplacer.place(DropCounter(&CANONICAL_DROPS), CanonicalRootTag))
+        })
+        .unwrap_or_else(|_| panic!("canonical drop counter must retain"));
+    let evidence = assembly
+        .try_retain_outcome_evidence(empty_plan(), |emplacer| {
+            Ok(emplacer.place(DropCounter(&EVIDENCE_DROPS), EvidenceRootTag))
+        })
+        .unwrap_or_else(|_| panic!("evidence drop counter must retain"));
+    assembly
+        .try_commit_canonical(TestDimension::Bytes, 1)
+        .unwrap_or_else(|_| panic!("canonical commitment must fit the preallocated batch"));
+
+    let validated =
+        match assembly.validate_success(canonical, evidence, |session, canonical, evidence| {
+            session.canonical(canonical).is_some() && session.outcome_evidence(evidence).is_some()
+        }) {
+            RetainedSuccessValidation::Valid(validated) => validated,
+            _ => panic!("canonical rejection candidate must validate"),
+        };
+    let prepared = validated
+        .try_prepare(final_progress())
+        .unwrap_or_else(|_| panic!("canonical rejection must prepare a rich failure"));
+    assert_eq!(CANONICAL_DROPS.load(Ordering::SeqCst), 1);
+    assert_eq!(EVIDENCE_DROPS.load(Ordering::SeqCst), 0);
+    let published = handoff_for_test(prepared);
+    match &published {
+        PublishedRetainedPublicationParts::RichFailure {
+            ledger_evidence, ..
+        } => {
+            assert_eq!(
+                published_failure_cause(ledger_evidence).class(),
+                PreparationFailureClass::Ledger
+            );
+        }
+        _ => panic!("canonical ledger rejection must retain rich failure evidence"),
+    }
+    assert_eq!(EVIDENCE_DROPS.load(Ordering::SeqCst), 0);
+    drop(published);
+    assert_eq!(EVIDENCE_DROPS.load(Ordering::SeqCst), 1);
+    assert_eq!(factory.snapshot().live_accounts(), 0);
+}
+
+#[test]
+fn evidence_only_retry_panic_retains_storage_and_attribution_fail_closed() {
+    static CANONICAL_DROPS: AtomicU64 = AtomicU64::new(0);
+    static EVIDENCE_DROPS: AtomicU64 = AtomicU64::new(0);
+
+    CANONICAL_DROPS.store(0, Ordering::SeqCst);
+    EVIDENCE_DROPS.store(0, Ordering::SeqCst);
+    let factory = account_factory(1);
+    let account = account(&factory, u64::MAX, 128);
+    let policy = DimensionPolicy::reservable_bytes(u64::MAX, u64::MAX, 0, u64::MAX)
+        .with_published_outcome_evidence_limit(64);
+    let limits = LedgerLimits::new(u64::MAX, [(TestDimension::Bytes, policy)]).unwrap();
+    let start = RetainedOperationStartPlan::new(
+        writer_plan(2, 2),
+        share_work(),
+        empty_plan(),
+        OutputCommitment::new(TestDimension::Bytes, 1),
+        OutputCommitment::new(TestDimension::Bytes, 1),
+    );
+    let operation =
+        TestOperation::try_start(OperationControl::default(), limits, &account, start, || {
+            Ok(7_u32)
+        })
+        .unwrap_or_else(|_| panic!("retry-panic operation must start"));
+    let ledger = operation.coordinator.retained_ledger().test_probe();
+    let mut assembly: TestPublication<DropCounter, DropCounter> = operation
+        .try_publication_assembly(publication_plan(1, 1))
+        .unwrap_or_else(|_| panic!("retry-panic publication must open"));
+    let canonical = assembly
+        .try_retain_canonical(empty_plan(), |emplacer| {
+            Ok(emplacer.place(DropCounter(&CANONICAL_DROPS), CanonicalRootTag))
+        })
+        .unwrap_or_else(|_| panic!("retry-panic canonical block must retain"));
+    let evidence = assembly
+        .try_retain_outcome_evidence(empty_plan(), |emplacer| {
+            Ok(emplacer.place(DropCounter(&EVIDENCE_DROPS), EvidenceRootTag))
+        })
+        .unwrap_or_else(|_| panic!("retry-panic evidence block must retain"));
+    assembly
+        .try_commit_canonical(TestDimension::Bytes, 1)
+        .unwrap_or_else(|_| panic!("retry-panic canonical commitment must fit"));
+    let validated =
+        match assembly.validate_success(canonical, evidence, |session, canonical, evidence| {
+            session.canonical(canonical).is_some() && session.outcome_evidence(evidence).is_some()
+        }) {
+            RetainedSuccessValidation::Valid(validated) => validated,
+            _ => panic!("retry-panic candidate must validate"),
+        };
+    let before = account.snapshot();
+    let ledger_before = (ledger.active_reservations(), ledger.current_live_bytes());
+
+    panic_next_evidence_only_primary_bind();
+    let result = validated.try_prepare(final_progress());
+
+    assert!(matches!(
+        result,
+        Err(RetainedPublicationPrepareError::FinalizationContainment(cause))
+            if cause.reason() == AccountPoisonReason::PrimaryPublicationBindingPanicked
+    ));
+    assert_eq!(CANONICAL_DROPS.load(Ordering::SeqCst), 0);
+    assert_eq!(EVIDENCE_DROPS.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        (ledger.active_reservations(), ledger.current_live_bytes()),
+        ledger_before
+    );
+    let after = account.snapshot();
+    assert_eq!(after.live_retained_bytes(), before.live_retained_bytes());
+    assert_eq!(
+        after.live_retained_allocations(),
+        before.live_retained_allocations()
+    );
+    assert_eq!(
+        after.total_admitted_retained_bytes(),
+        before.total_admitted_retained_bytes()
+    );
+    assert_eq!(
+        after.total_admitted_retained_allocations(),
+        before.total_admitted_retained_allocations()
+    );
+    assert_eq!(
+        after
+            .first_poison_evidence()
+            .map(AccountPoisonEvidence::reason),
+        Some(AccountPoisonReason::PrimaryPublicationBindingPanicked)
+    );
+    drop(account);
+    assert_eq!(factory.snapshot().live_accounts(), 1);
+}
+
+#[test]
+fn success_double_primary_rejection_drops_both_tables_before_minimal_fallback() {
     static CANONICAL_DROPS: AtomicU64 = AtomicU64::new(0);
     static EVIDENCE_DROPS: AtomicU64 = AtomicU64::new(0);
 
@@ -1703,7 +1864,7 @@ fn success_primary_rejection_drops_both_tables_before_minimal_fallback() {
     let operation = test_operation(&factory, 4);
     let mut assembly: TestPublication<DropCounter, DropCounter> = operation
         .try_publication_assembly(publication_plan(1, 1))
-        .unwrap_or_else(|_| panic!("success rejection assembly must open"));
+        .unwrap_or_else(|_| panic!("double rejection assembly must open"));
     let canonical = assembly
         .try_retain_canonical(empty_plan(), |emplacer| {
             Ok(emplacer.place(DropCounter(&CANONICAL_DROPS), CanonicalRootTag))
@@ -1727,7 +1888,7 @@ fn success_primary_rejection_drops_both_tables_before_minimal_fallback() {
         };
     let prepared = validated
         .try_prepare(final_progress())
-        .unwrap_or_else(|_| panic!("success rejection must prepare minimal fallback"));
+        .unwrap_or_else(|_| panic!("double rejection must prepare minimal fallback"));
     assert_eq!(CANONICAL_DROPS.load(Ordering::SeqCst), 1);
     assert_eq!(EVIDENCE_DROPS.load(Ordering::SeqCst), 1);
     match handoff_for_test(prepared) {
@@ -1739,7 +1900,7 @@ fn success_primary_rejection_drops_both_tables_before_minimal_fallback() {
                 PreparationFailureClass::Ledger
             );
         }
-        _ => panic!("success ledger rejection must publish minimal fallback"),
+        _ => panic!("double primary rejection must publish minimal fallback"),
     }
     assert_eq!(factory.snapshot().live_accounts(), 0);
 }

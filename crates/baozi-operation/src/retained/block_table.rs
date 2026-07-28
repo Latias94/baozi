@@ -902,7 +902,7 @@ mod published_table_capability {
                 .source_allocation(identity, self.set_id)
         }
 
-        pub(in crate::retained) fn belongs_to(&self, account: &PhysicalStorageAccount) -> bool {
+        fn belongs_to(&self, account: &PhysicalStorageAccount) -> bool {
             self.table.source_sharing_capability().belongs_to(account)
         }
 
@@ -948,6 +948,13 @@ mod published_table_capability {
         pub(in crate::retained) fn test_table_allocation_identity(&self) -> *const () {
             self.table.allocation_identity()
         }
+    }
+
+    pub(super) fn aggregate_belongs_to<Block>(
+        aggregate: &PublishedRetainedAggregate<Block>,
+        account: &PhysicalStorageAccount,
+    ) -> bool {
+        aggregate.belongs_to(account)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1289,7 +1296,7 @@ impl<Block> PublishedCanonicalAggregate<Block> {
     }
 
     pub(crate) fn belongs_to(&self, account: &PhysicalStorageAccount) -> bool {
-        self.inner.belongs_to(account)
+        published_table_capability::aggregate_belongs_to(&self.inner, account)
     }
 
     pub fn len(&self) -> usize {
@@ -1338,7 +1345,7 @@ impl<Block> PublishedOutcomeEvidenceAggregate<Block> {
     }
 
     pub(crate) fn belongs_to(&self, account: &PhysicalStorageAccount) -> bool {
-        self.inner.belongs_to(account)
+        published_table_capability::aggregate_belongs_to(&self.inner, account)
     }
 
     pub fn len(&self) -> usize {

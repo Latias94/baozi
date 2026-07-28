@@ -1456,6 +1456,181 @@ fn typed_terminal_qualification_rejects_a_foreign_discard_batch() {
     assert_eq!(probe_values(&foreign_probe), (0, 0));
 }
 
+#[test]
+fn typed_primary_rejection_preserves_batches_for_evidence_only_retry() {
+    macro_rules! batch_state {
+        ($batch:expr) => {{
+            let batch = $batch;
+            (
+                batch.attribution_len(),
+                batch.commitment_len(),
+                batch.attributed_bytes(),
+                batch.active_count(),
+                batch.live_bytes(),
+                batch.attributions.capacity(),
+                batch.commitments.capacity(),
+                batch.capacity_cover.is_some(),
+            )
+        }};
+    }
+
+    let limits = LedgerLimits::new(
+        u64::MAX,
+        [(
+            Dimension::Bytes,
+            DimensionPolicy::reservable_bytes(u64::MAX, u64::MAX, 0, u64::MAX)
+                .with_published_outcome_evidence_limit(u64::MAX),
+        )],
+    )
+    .expect("canonical-rejecting policy");
+    let ledger = test_ledger(limits);
+    let probe = ledger.test_probe();
+    let canonical_assembly = ledger
+        .try_attribution_batch::<CanonicalOutput>(Phase::Build, Dimension::Bytes, 1, 1)
+        .expect("canonical assembly");
+    let evidence_assembly = ledger
+        .try_attribution_batch::<OutcomeEvidenceDestination>(Phase::Build, Dimension::Bytes, 2, 1)
+        .expect("evidence assembly");
+    let fallback = ledger
+        .try_attribution_batch::<OutcomeEvidenceDestination>(Phase::Build, Dimension::Bytes, 0, 0)
+        .expect("empty fallback");
+    let mut evidence = ledger
+        .try_attribution_batch::<OutcomeEvidenceDestination>(Phase::Build, Dimension::Bytes, 1, 0)
+        .expect("baseline evidence");
+    let baseline_evidence = ledger
+        .reserve_operation_attribution::<OutcomeEvidenceDestination>(
+            Phase::Build,
+            Dimension::Bytes,
+            2,
+        )
+        .expect("baseline evidence attribution");
+    assert!(evidence.try_push_attribution(baseline_evidence).is_ok());
+    let mut baseline = ledger
+        .try_fallback_baseline(canonical_assembly, evidence_assembly, fallback, evidence)
+        .unwrap_or_else(|_| panic!("primary baseline must bind"));
+
+    let mut canonical_source = ledger
+        .try_attribution_batch::<CanonicalOutput>(Phase::Build, Dimension::Bytes, 1, 1)
+        .expect("canonical source");
+    let canonical_attribution = ledger
+        .reserve_operation_attribution::<CanonicalOutput>(Phase::Build, Dimension::Bytes, 3)
+        .expect("canonical source attribution");
+    assert!(
+        canonical_source
+            .try_push_attribution(canonical_attribution)
+            .is_ok()
+    );
+    assert!(
+        ledger
+            .try_push_commitment(
+                &mut canonical_source,
+                OutputCommitment::new(Dimension::Bytes, 1),
+            )
+            .is_ok()
+    );
+    let mut evidence_source = ledger
+        .try_attribution_batch::<OutcomeEvidenceDestination>(Phase::Build, Dimension::Bytes, 1, 1)
+        .expect("outcome evidence source");
+    let outcome_evidence_attribution = ledger
+        .reserve_operation_attribution::<OutcomeEvidenceDestination>(
+            Phase::Build,
+            Dimension::Bytes,
+            4,
+        )
+        .expect("outcome evidence source attribution");
+    assert!(
+        evidence_source
+            .try_push_attribution(outcome_evidence_attribution)
+            .is_ok()
+    );
+    assert!(
+        ledger
+            .try_push_commitment(
+                &mut evidence_source,
+                OutputCommitment::new(Dimension::Bytes, 5),
+            )
+            .is_ok()
+    );
+
+    let snapshot_before = ledger.try_snapshot().expect("pre-rejection snapshot");
+    let probe_before = probe_values(&probe);
+    let publication_before = lock(&ledger.state).publication;
+    let baseline_before = (
+        batch_state!(&baseline.canonical_assembly),
+        batch_state!(&baseline.evidence_assembly),
+        batch_state!(&baseline.fallback),
+        batch_state!(&baseline.evidence),
+    );
+    let canonical_source_before = batch_state!(&canonical_source);
+    let evidence_source_before = batch_state!(&evidence_source);
+
+    let rejection = ledger
+        .try_bind_primary(
+            &mut baseline,
+            Some(&mut canonical_source),
+            Some(&mut evidence_source),
+            true,
+        )
+        .expect_err("canonical commitment must reject the first primary bind");
+
+    assert!(matches!(
+        rejection,
+        LedgerCause::LimitExceeded {
+            class: CounterClass::Committed,
+            dimension: Dimension::Bytes,
+            value: 1,
+            limit: 0,
+        }
+    ));
+    assert_eq!(
+        ledger.try_snapshot().expect("post-rejection snapshot"),
+        snapshot_before
+    );
+    assert_eq!(probe_values(&probe), probe_before);
+    assert_eq!(lock(&ledger.state).publication, publication_before);
+    assert_eq!(
+        (
+            batch_state!(&baseline.canonical_assembly),
+            batch_state!(&baseline.evidence_assembly),
+            batch_state!(&baseline.fallback),
+            batch_state!(&baseline.evidence),
+        ),
+        baseline_before
+    );
+    assert_eq!(batch_state!(&canonical_source), canonical_source_before);
+    assert_eq!(batch_state!(&evidence_source), evidence_source_before);
+
+    ledger
+        .try_bind_primary(
+            &mut baseline,
+            Some(&mut canonical_source),
+            Some(&mut evidence_source),
+            false,
+        )
+        .unwrap_or_else(|_| panic!("evidence-only retry must bind the intact owners"));
+    let proof = ledger.finish_bound_primary(
+        baseline,
+        Some(canonical_source),
+        Some(evidence_source),
+        false,
+    );
+    let discard = match proof.try_into_qualified_discards() {
+        Ok(QualifiedTypedDiscardFreezeProof::Canonical(discard)) => discard,
+        Ok(_) => panic!("evidence-only retry must leave only canonical storage for discard"),
+        Err(_) => panic!("bound evidence-only retry must qualify for terminal freeze"),
+    };
+    let snapshot = discard.release_discard_after_physical_cleanup().freeze();
+    assert_eq!(snapshot.current_live_bytes(), 0);
+    assert_eq!(snapshot.active_reservations(), 0);
+    let dimension = snapshot
+        .dimensions()
+        .find_map(|(dimension, snapshot)| (dimension == Dimension::Bytes).then_some(snapshot))
+        .expect("bytes dimension");
+    assert_eq!(dimension.committed_canonical_output(), 0);
+    assert_eq!(dimension.published_outcome_evidence(), 5);
+    assert_eq!(probe_values(&probe), (0, 0));
+}
+
 static PANIC_ON_BOUND_ORD: AtomicBool = AtomicBool::new(false);
 static REVERSE_BOUND_ORD: AtomicBool = AtomicBool::new(false);
 static BOUND_ORD_COMPARISONS_REMAINING: AtomicUsize = AtomicUsize::new(usize::MAX);

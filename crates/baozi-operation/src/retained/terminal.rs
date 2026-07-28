@@ -2,6 +2,27 @@
 
 use super::*;
 
+#[cfg(test)]
+thread_local! {
+    static PANIC_NEXT_EVIDENCE_ONLY_PRIMARY_BIND: std::cell::Cell<bool> = const {
+        std::cell::Cell::new(false)
+    };
+}
+
+#[cfg(test)]
+pub(super) fn panic_next_evidence_only_primary_bind() {
+    PANIC_NEXT_EVIDENCE_ONLY_PRIMARY_BIND.with(|panic| panic.set(true));
+}
+
+#[cfg(test)]
+fn maybe_panic_evidence_only_primary_bind(publish_canonical: bool) {
+    if !publish_canonical
+        && PANIC_NEXT_EVIDENCE_ONLY_PRIMARY_BIND.with(|panic| panic.replace(false))
+    {
+        panic!("injected evidence-only primary bind panic");
+    }
+}
+
 pub(super) struct TerminalPhysicalOwnershipManifest<P, D, F, CanonicalBlock, EvidenceBlock> {
     fallback: Option<DetachedRetainedPart<F>>,
     evidence: Option<DetachedRetainedPart<TerminalLedgerEvidence<P, D>>>,
@@ -1280,30 +1301,59 @@ where
         TerminalFallbackGuard::new(attribution, physical)
     }
 
+    fn try_bind_once(
+        &mut self,
+        publish_canonical: bool,
+    ) -> Result<Result<(), LedgerCause<D>>, Box<dyn std::any::Any + Send>> {
+        catch_unwind(AssertUnwindSafe(|| {
+            #[cfg(test)]
+            maybe_panic_evidence_only_primary_bind(publish_canonical);
+            self.attribution_mut().try_bind(publish_canonical)
+        }))
+    }
+
+    fn contain_primary_binding_panic(
+        self,
+        payload: Box<dyn std::any::Any + Send>,
+    ) -> RetainedPublicationPrepareError {
+        discard_untrusted_panic_payload(payload);
+        self.physical()
+            .record_new_fault(AccountPoisonReason::PrimaryPublicationBindingPanicked);
+        let containment =
+            self.contain_after_recorded(AccountPoisonReason::PrimaryPublicationBindingPanicked);
+        RetainedPublicationPrepareError::FinalizationContainment(containment)
+    }
+
     pub(super) fn try_advance(
         mut self,
-        terminal: RetainedTerminalMode,
+        mut terminal: RetainedTerminalMode,
     ) -> Result<
         TerminalPrimaryTransition<O, P, D, F, CanonicalBlock, EvidenceBlock>,
         RetainedPublicationPrepareError,
     > {
         let publish_canonical = matches!(terminal, RetainedTerminalMode::Success { .. });
-        let bind_result = catch_unwind(AssertUnwindSafe(|| {
-            self.attribution_mut().try_bind(publish_canonical)
-        }));
-        match bind_result {
+        match self.try_bind_once(publish_canonical) {
             Err(payload) => {
-                discard_untrusted_panic_payload(payload);
-                self.physical()
-                    .record_new_fault(AccountPoisonReason::PrimaryPublicationBindingPanicked);
-                let containment = self
-                    .contain_after_recorded(AccountPoisonReason::PrimaryPublicationBindingPanicked);
-                return Err(RetainedPublicationPrepareError::FinalizationContainment(
-                    containment,
-                ));
+                return Err(self.contain_primary_binding_panic(payload));
             }
             Ok(Err(_cause)) => {
-                return Ok(TerminalPrimaryTransition::Fallback(self.into_fallback()));
+                let RetainedTerminalMode::Success { evidence_root, .. } = terminal else {
+                    return Ok(TerminalPrimaryTransition::Fallback(self.into_fallback()));
+                };
+                match self.try_bind_once(false) {
+                    Err(payload) => {
+                        return Err(self.contain_primary_binding_panic(payload));
+                    }
+                    Ok(Err(_cause)) => {
+                        return Ok(TerminalPrimaryTransition::Fallback(self.into_fallback()));
+                    }
+                    Ok(Ok(())) => {
+                        terminal = RetainedTerminalMode::RichFailure {
+                            evidence_root,
+                            cause: PreparationFailureCode::ledger(),
+                        };
+                    }
+                }
             }
             Ok(Ok(())) => {}
         }

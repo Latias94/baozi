@@ -2,6 +2,7 @@ use super::evidence::{
     fail_next_terminal_evidence_qualification, panic_next_terminal_evidence_qualification,
     panic_next_terminal_evidence_write,
 };
+use super::terminal::panic_next_evidence_only_primary_bind;
 use super::*;
 use crate::DimensionPolicy;
 use crate::ledger::LedgerTestProbe;

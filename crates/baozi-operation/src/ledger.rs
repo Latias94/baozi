@@ -2199,6 +2199,16 @@ where
         dead_code,
         reason = "crate-private until the U4 canonical consumers switch atomically"
     )]
+    /// Attempts to bind the typed primary publication graph without consuming its owners.
+    ///
+    /// An ordinary `Err` is transactional: the ledger, `baseline`, and every supplied
+    /// canonical or outcome-evidence source batch remain unchanged. In particular, their
+    /// reservations, capacity covers, and commitment entries remain owned by the caller and may
+    /// be reused for a later compatible bind attempt. The first mutation is source absorption,
+    /// which occurs only after every validation and preflight check succeeds.
+    ///
+    /// A panic is not an ordinary rejection; callers must contain it before deciding whether any
+    /// retained physical ownership can be released.
     pub(crate) fn try_bind_primary(
         &self,
         baseline: &mut FallbackBatchBaseline<O, P, D>,
