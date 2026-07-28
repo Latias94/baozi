@@ -460,7 +460,17 @@ fn canonical_store_post_reservation_failures_each_burn_one_invisible_gap() {
                 assert!(matches!(&prepared, PreparedSceneConstruction::Success(_)));
                 drop(prepared);
             }
-            Scenario::RichPreparationFailure | Scenario::PreparationFailure => {
+            Scenario::PreparationFailure => {
+                assert!(matches!(
+                    &prepared,
+                    PreparedSceneConstruction::RichFailure(_)
+                ));
+                assert!(matches!(
+                    prepared.handoff(),
+                    SceneConstructionTerminal::RichFailure(_)
+                ));
+            }
+            Scenario::RichPreparationFailure => {
                 assert!(matches!(
                     &prepared,
                     PreparedSceneConstruction::MinimalFallback(_)

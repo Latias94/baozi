@@ -35,6 +35,8 @@ use super::schema::{
 };
 use super::validation::{validate_evidence_graph, validate_scene_graph};
 
+pub(super) mod node_scene;
+
 #[cfg(test)]
 mod complex;
 

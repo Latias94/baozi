@@ -57,6 +57,57 @@ pub(super) const PRESENCE_PRESENT: u8 = 1;
 pub(super) const EVIDENCE_OUTCOME_CANDIDATE: u32 = 1;
 pub(super) const CANONICAL_BLOCK_COUNT: u32 = 4;
 
+pub(super) const NODE_SCENE_SCHEMA_REVISION: u32 = 1;
+pub(super) const NODE_SCENE_DIRECTORY_FIELD_COUNT: usize = 11;
+pub(super) const NODE_SCENE_NODE_FIELD_COUNT: usize = 8;
+pub(super) const NODE_SCENE_CHILD_REFERENCE_FIELD_COUNT: usize = 2;
+pub(super) const NODE_SCENE_EVIDENCE_FIELD_COUNT: usize = 4;
+pub(super) const NODE_SCENE_REQUIRED_CANONICAL_BLOCK_COUNT: u32 = 2;
+pub(super) const NODE_SCENE_POPULATED_CANONICAL_BLOCK_COUNT: u32 = 4;
+pub(super) const NODE_SCENE_MATRIX_SCALAR_COUNT: usize = 16;
+pub(super) const NODE_SCENE_TRS_SCALAR_COUNT: usize = 10;
+pub(super) const NODE_SCENE_TRANSFORM_SYNTHETIC: u8 = 0;
+pub(super) const NODE_SCENE_TRANSFORM_MATRIX: u8 = 1;
+pub(super) const NODE_SCENE_TRANSFORM_TRS: u8 = 2;
+pub(super) const NODE_SCENE_EVIDENCE_OUTCOME_CANDIDATE: u32 = 1;
+
+pub(super) mod node_scene_directory_field {
+    pub(crate) const SCHEMA_REVISION: usize = 0;
+    pub(crate) const ROOT_NODE: usize = 1;
+    pub(crate) const NODE_COUNT: usize = 2;
+    pub(crate) const NODES: usize = 3;
+    pub(crate) const REFERENCE_PRESENCE: usize = 4;
+    pub(crate) const REFERENCE_COUNT: usize = 5;
+    pub(crate) const REFERENCES: usize = 6;
+    pub(crate) const TRANSFORM_PRESENCE: usize = 7;
+    pub(crate) const TRANSFORM_SCALAR_COUNT: usize = 8;
+    pub(crate) const TRANSFORMS: usize = 9;
+    pub(crate) const SOURCE_ROOT_COUNT: usize = 10;
+}
+
+pub(super) mod node_scene_node_field {
+    pub(crate) const NODE: usize = 0;
+    pub(crate) const CHILDREN_PRESENCE: usize = 1;
+    pub(crate) const CHILD_REFERENCE_OFFSET: usize = 2;
+    pub(crate) const CHILD_REFERENCE_COUNT: usize = 3;
+    pub(crate) const TRANSFORM_KIND: usize = 4;
+    pub(crate) const TRANSFORM_OFFSET: usize = 5;
+    pub(crate) const TRANSFORM_LENGTH: usize = 6;
+    pub(crate) const TRANSFORMS: usize = 7;
+}
+
+pub(super) mod node_scene_child_reference_field {
+    pub(crate) const REFERENCE: usize = 0;
+    pub(crate) const CHILD: usize = 1;
+}
+
+pub(super) mod node_scene_evidence_field {
+    pub(crate) const SCHEMA_REVISION: usize = 0;
+    pub(crate) const OUTCOME: usize = 1;
+    pub(crate) const CANONICAL_BLOCK_COUNT: usize = 2;
+    pub(crate) const NODE_COUNT: usize = 3;
+}
+
 pub(super) trait CanonicalSchema: Copy + Send + Sync + 'static {
     type StoreKind;
 }
@@ -76,6 +127,21 @@ pub(super) struct AuthoredMatrixSchema;
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) struct OutcomeEvidenceSchema;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) struct NodeSceneDirectorySchema;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) struct NodeSceneNodeTableSchema;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) struct NodeSceneChildReferenceTableSchema;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) struct NodeSceneAuthoredTransformSchema;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) struct NodeSceneOutcomeEvidenceSchema;
+
 impl CanonicalSchema for DirectorySchema {
     type StoreKind = RecordBlock;
 }
@@ -89,6 +155,22 @@ impl CanonicalSchema for ReferenceTableSchema {
 }
 
 impl CanonicalSchema for AuthoredMatrixSchema {
+    type StoreKind = ScalarSequence<f32>;
+}
+
+impl CanonicalSchema for NodeSceneDirectorySchema {
+    type StoreKind = RecordBlock;
+}
+
+impl CanonicalSchema for NodeSceneNodeTableSchema {
+    type StoreKind = RecordBlock;
+}
+
+impl CanonicalSchema for NodeSceneChildReferenceTableSchema {
+    type StoreKind = RecordBlock;
+}
+
+impl CanonicalSchema for NodeSceneAuthoredTransformSchema {
     type StoreKind = ScalarSequence<f32>;
 }
 
