@@ -1,4 +1,15 @@
-use super::*;
+use baozi_operation::{PhysicalStorageAccount, StoreLedgerEvidence};
+
+use crate::canonical_scene::store::schema::{
+    NODE_SCENE_MATRIX_SCALAR_COUNT, NODE_SCENE_TRANSFORM_MATRIX, NODE_SCENE_TRANSFORM_TRS,
+    NODE_SCENE_TRS_SCALAR_COUNT, node_scene_child_reference_field, node_scene_directory_field,
+    node_scene_node_field,
+};
+use crate::entity::AuthoredTransform;
+use crate::identity::SceneGenerationId;
+use crate::math::{Mat4, Quat, Vec3};
+
+use super::{NodeSceneRichFailure, NodeSceneSuccessReport, ValidatedNodeScene};
 
 impl ValidatedNodeScene {
     pub(in crate::canonical_scene::store) const fn generation(&self) -> SceneGenerationId {

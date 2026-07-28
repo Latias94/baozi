@@ -581,15 +581,13 @@ fn cycle_and_derived_lineage_can_only_terminate_as_fallback() {
     };
     let empty_roots = [];
     let empty_nodes = [];
-    let rejected = match SceneConstructionOperation::derived_from_exact_input(
-        &legacy_scene,
-        test_limits(),
-    )
-    .expect("derived node Scene operation")
-    .try_validate_node_batch(
-        NodeAuthoringBatch::new(Presence::Present(&empty_roots), &empty_nodes),
-        SceneValidationLimits::default(),
-    ) {
+    let rejected =
+        match SceneConstructionOperation::derived_from_exact_input(&legacy_scene, test_limits())
+            .expect("derived node Scene operation")
+            .try_validate_node_batch(
+                NodeAuthoringBatch::new(Presence::Present(&empty_roots), &empty_nodes),
+                SceneValidationLimits::default(),
+            ) {
             Ok(_) => panic!("derived lineage must not reach validated construction"),
             Err(rejected) => rejected,
         };
@@ -620,8 +618,7 @@ fn physical_budget_boundaries_release_storage_and_preserve_committed_evidence() 
 
     for max_live_allocations in 1..=128 {
         let account = test_account(&factory, max_live_allocations);
-        let operation = match SceneConstructionOperation::with_account(&account, test_limits())
-        {
+        let operation = match SceneConstructionOperation::with_account(&account, test_limits()) {
             Ok(operation) => operation,
             Err(_) => {
                 assert_eq!(account.snapshot().live_retained_bytes(), 0);
@@ -684,9 +681,7 @@ fn physical_budget_boundaries_release_storage_and_preserve_committed_evidence() 
 #[test]
 fn internal_block_allocation_failure_is_a_storage_rejection() {
     assert_eq!(
-        post_evidence_build_failure_code(
-            baozi_operation::StoreBuildFailureClass::AllocationFailed,
-        ),
+        post_evidence_build_failure_code(baozi_operation::StoreBuildFailureClass::AllocationFailed,),
         Some(NODE_SCENE_STORAGE_REJECTION_CODE)
     );
     assert_eq!(
