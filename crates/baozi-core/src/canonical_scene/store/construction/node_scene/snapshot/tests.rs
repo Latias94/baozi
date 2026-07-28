@@ -4,6 +4,7 @@ use baozi_operation::{
 };
 
 use crate::SceneValidationLimits;
+use crate::attribute::{AttributeDomain, AttributeSemantic};
 use crate::canonical_scene::store::construction::node_scene::{
     NodeSceneConstructionTerminal, NodeSceneSuccessParts, ValidatedNodeScene,
 };
@@ -11,7 +12,10 @@ use crate::canonical_scene::store::construction::{
     SceneConstructionLimits, SceneConstructionOperation,
 };
 use crate::canonical_scene::store::production::{
-    NodeAuthoringBatch, NodeAuthoringNode, NodeLocalId, NodeParent, Presence,
+    AuthoringRange, GeometryAttributeAuthoring, GeometryAuthoringBatch,
+    GeometryLogicalMeshAuthoring, GeometryMeshInstanceAuthoring, GeometryPrimitiveAuthoring,
+    GeometryTopologyAuthoring, LogicalMeshLocalId, MaterialLocalId, NodeAuthoringBatch,
+    NodeAuthoringNode, NodeLocalId, NodeParent, Presence, SceneAuthoringBatch,
 };
 use crate::entity::AuthoredTransform;
 use crate::math::{Mat4, Quat, Vec3};
@@ -23,28 +27,52 @@ use super::{
 };
 
 const KNOWN_SINGLE_TRS_DIGEST: [u8; 32] = [
-    0x11, 0x09, 0x82, 0xe7, 0xe5, 0xa1, 0xd0, 0xc9, 0x3b, 0xa9, 0xc2, 0x5b, 0xab, 0xc6, 0x4e, 0x1e,
-    0xcf, 0x4f, 0xe7, 0xed, 0x67, 0xaf, 0x6a, 0xe8, 0x29, 0x1c, 0x9a, 0x97, 0x0c, 0x8c, 0x33, 0x39,
+    0xab, 0xe2, 0xf5, 0x68, 0xa0, 0x49, 0x2f, 0x8c, 0xd1, 0x2b, 0x51, 0xff, 0x70, 0x2c, 0x0b, 0xce,
+    0xd8, 0x10, 0x08, 0x94, 0xfe, 0x97, 0xdc, 0xfa, 0xaf, 0xdf, 0xc7, 0x45, 0x40, 0x37, 0x44, 0x42,
 ];
 const KNOWN_SINGLE_TRS_TRANSCRIPT_HEX: &str = concat!(
-    "01230000000000000062616f7a692e63616e6f6e6963616c2d6e6f64652d7363656e652e736e",
-    "617073686f740201000000030600000000000000736861323536040c01080d00000000000000000b",
-    "0100000000000000050c01060d00000000000000000a020e000000000e000000000e000000000e",
-    "000000000e000000000e000000000e0000803f0e0000803f0e0000803f0e0000803f0b0a000000",
-    "00000000070c010b00000000000000000b0100000000000000",
+    "011e0000000000000062616f7a692e63616e6f6e6963616c2d7363656e652e736e617073686f74",
+    "0202000000030600000000000000736861323536040c01080d00000000000000000b010000000000",
+    "0000050c01060d00000000000000000a020e000000000e000000000e000000000e000000000e0000",
+    "00000e000000000e0000803f0e0000803f0e0000803f0e0000803f0b0a00000000000000070c010b",
+    "00000000000000000b01000000000000000f0c01100c010b0000000000000000120c010b00000000",
+    "00000000140c010b0000000000000000190c010b0000000000000000280c010b0000000000000000",
 );
 const KNOWN_MATRIX_CHILD_DIGEST: [u8; 32] = [
-    0xa6, 0xd5, 0xf9, 0xab, 0xb1, 0xcc, 0xdb, 0xcd, 0xdc, 0xae, 0x5b, 0xc8, 0x1b, 0x41, 0x7f, 0xd3,
-    0x17, 0x2e, 0x93, 0xa4, 0x1f, 0x7e, 0x54, 0x36, 0x81, 0xa3, 0x47, 0x0e, 0x12, 0x3f, 0x3c, 0x8e,
+    0x80, 0x72, 0x57, 0xea, 0xf8, 0x2e, 0x83, 0x21, 0x22, 0xc2, 0x0d, 0x49, 0x2b, 0xc8, 0x2c, 0x4c,
+    0x4c, 0x00, 0x9e, 0x69, 0x43, 0x93, 0x4e, 0xac, 0x89, 0xd8, 0xe9, 0xde, 0xd1, 0x78, 0x00, 0x0b,
 ];
 const KNOWN_MATRIX_CHILD_TRANSCRIPT_HEX: &str = concat!(
-    "01230000000000000062616f7a692e63616e6f6e6963616c2d6e6f64652d7363656e652e736e617073686f74",
-    "0201000000030600000000000000736861323536040c01080d00000000000000000b0100000000000000050c",
-    "01060d00000000000000000a010e0000803f0e000000000e000000000e000000000e000000000e0000803f0e",
-    "000000000e000000000e000000000e000000000e0000803f0e000000000e000080400e000000000e00000000",
-    "0e0000803f0b1000000000000000070c01090d01000000000000000b0100000000000000060d010000000000",
-    "00000a020e000000410e000000000e000000000e000000000e000000000e000000000e0000803f0e0000803f",
-    "0e0000803f0e0000803f0b0a00000000000000070c010b00000000000000000b0200000000000000",
+    "011e0000000000000062616f7a692e63616e6f6e6963616c2d7363656e652e736e617073686f74020200000003",
+    "0600000000000000736861323536040c01080d00000000000000000b0100000000000000050c01060d00000000",
+    "000000000a010e0000803f0e000000000e000000000e000000000e000000000e0000803f0e000000000e000000",
+    "000e000000000e000000000e0000803f0e000000000e000080400e000000000e000000000e0000803f0b100000",
+    "0000000000070c01090d01000000000000000b0100000000000000060d01000000000000000a020e000000410e",
+    "000000000e000000000e000000000e000000000e000000000e0000803f0e0000803f0e0000803f0e0000803f0b",
+    "0a00000000000000070c010b00000000000000000b02000000000000000f0c01100c010b000000000000000012",
+    "0c010b0000000000000000140c010b0000000000000000190c010b0000000000000000280c010b000000000000",
+    "0000",
+);
+const EMPTY_GEOMETRY_TRANSCRIPT_HEX: &str = concat!(
+    "0f0c01100c010b0000000000000000120c010b0000000000000000140c010b000000000000000019",
+    "0c010b0000000000000000280c010b0000000000000000",
+);
+const KNOWN_POINT_GEOMETRY_DIGEST: [u8; 32] = [
+    0x78, 0x8d, 0x04, 0x88, 0x0d, 0x18, 0x7b, 0x56, 0x4a, 0x89, 0xd0, 0x90, 0xdf, 0xc4, 0x90, 0x32,
+    0x55, 0xb9, 0xdb, 0xd2, 0xed, 0xdb, 0xe0, 0x87, 0xb6, 0x7f, 0xfc, 0x05, 0xc4, 0x72, 0x02, 0xd2,
+];
+const KNOWN_POINT_GEOMETRY_TRANSCRIPT_HEX: &str = concat!(
+    "011e0000000000000062616f7a692e63616e6f6e6963616c2d7363656e652e736e617073686f74020200000003",
+    "0600000000000000736861323536040c01080d00000000000000000b0100000000000000050c01060d00000000",
+    "000000000a020e000000000e000000000e000000000e000000000e000000000e000000000e0000803f0e000080",
+    "3f0e0000803f0e0000803f0b0a00000000000000070c010b00000000000000000b01000000000000000f0c0110",
+    "0c01110d00000000000000000b0100000000000000120c01130d00000000000000002c00000000000000000b01",
+    "000000000000000b0100000000000000140c01150d00000000000000002e002f01000000300100000031010000",
+    "00160c000b0000000000000000170c000b0000000000000000180c010d0000000000000000192d000000000000",
+    "00000b01000000000000000b0100000000000000190c011a0d00000000000000001b001c000000001d001e001f",
+    "032000210022010000002301000000240300000000000000250c010e0000803f0e000000400e000040400b030000",
+    "0000000000260c000b0000000000000000270c000b00000000000000000b0100000000000000280c01290d0000",
+    "0000000000002a00000000000000002b00000000000000000b0100000000000000",
 );
 
 fn operation_limits() -> SceneConstructionLimits {
@@ -91,15 +119,30 @@ fn build_scene(
     roots: &[NodeLocalId],
     nodes: &[NodeAuthoringNode],
 ) -> NodeSceneSuccessParts {
-    let prepared = SceneConstructionOperation::with_account(account, operation_limits())
-        .expect("snapshot Scene operation")
-        .try_validate_node_batch(
-            NodeAuthoringBatch::new(Presence::Present(roots), nodes),
-            SceneValidationLimits::default(),
-        )
-        .unwrap_or_else(|_| panic!("snapshot input must pass authoring validation"))
-        .prepare()
-        .expect("snapshot Scene must prepare");
+    build_scene_with_geometry(account, roots, nodes, GeometryAuthoringBatch::empty())
+}
+
+fn build_scene_with_geometry<'input>(
+    account: &PhysicalStorageAccount,
+    roots: &'input [NodeLocalId],
+    nodes: &'input [NodeAuthoringNode],
+    geometry: GeometryAuthoringBatch<'input>,
+) -> NodeSceneSuccessParts {
+    let input = SceneAuthoringBatch::new(
+        NodeAuthoringBatch::new(Presence::Present(roots), nodes),
+        geometry,
+    );
+    let prepared = SceneConstructionOperation::with_account_for_scene_input(
+        account,
+        operation_limits(),
+        input,
+        SceneValidationLimits::default(),
+    )
+    .expect("snapshot Scene input admission")
+    .try_validate()
+    .unwrap_or_else(|_| panic!("snapshot input must pass authoring validation"))
+    .prepare()
+    .expect("snapshot Scene must prepare");
     match prepared.handoff() {
         NodeSceneConstructionTerminal::Success(parts) => parts,
         NodeSceneConstructionTerminal::RichFailure(_) => {
@@ -157,6 +200,212 @@ fn single_root_scene(
     build_scene(account, &roots, &nodes)
 }
 
+fn point_geometry_scene(
+    account: &PhysicalStorageAccount,
+    positions: &[f32],
+) -> NodeSceneSuccessParts {
+    let roots = [NodeLocalId::new(0)];
+    let nodes = [NodeAuthoringNode::new(
+        Presence::Absent,
+        AuthoredTransform::identity_trs(),
+    )];
+    let attributes = [GeometryAttributeAuthoring::f32(
+        AttributeSemantic::Position,
+        AttributeDomain::Vertex,
+        3,
+        positions,
+        Presence::Absent,
+    )];
+    let primitives = [GeometryPrimitiveAuthoring::new(
+        GeometryTopologyAuthoring::Points,
+        Presence::Absent,
+        Presence::Present(MaterialLocalId::new(0)),
+        AuthoringRange::new(0, 1),
+    )];
+    let logical_meshes = [GeometryLogicalMeshAuthoring::new(AuthoringRange::new(0, 1))];
+    let instances = [GeometryMeshInstanceAuthoring::new(
+        NodeLocalId::new(0),
+        LogicalMeshLocalId::new(0),
+    )];
+    build_scene_with_geometry(
+        account,
+        &roots,
+        &nodes,
+        GeometryAuthoringBatch::new(1, &logical_meshes, &primitives, &attributes, &instances),
+    )
+}
+
+fn point_index_presence_scene(
+    account: &PhysicalStorageAccount,
+    indices_present: bool,
+) -> NodeSceneSuccessParts {
+    let roots = [];
+    let nodes = [];
+    let positions = [0.0_f32, 0.0, 0.0];
+    let empty_indices = [];
+    let indices: Presence<&[u32]> = if indices_present {
+        Presence::Present(&empty_indices)
+    } else {
+        Presence::Absent
+    };
+    let attributes = [GeometryAttributeAuthoring::f32(
+        AttributeSemantic::Position,
+        AttributeDomain::Vertex,
+        3,
+        &positions,
+        Presence::Absent,
+    )];
+    let primitives = [GeometryPrimitiveAuthoring::new(
+        GeometryTopologyAuthoring::Points,
+        indices,
+        Presence::Absent,
+        AuthoringRange::new(0, 1),
+    )];
+    let logical_meshes = [GeometryLogicalMeshAuthoring::new(AuthoringRange::new(0, 1))];
+    build_scene_with_geometry(
+        account,
+        &roots,
+        &nodes,
+        GeometryAuthoringBatch::new(0, &logical_meshes, &primitives, &attributes, &[]),
+    )
+}
+
+fn corner_normal_scene<'input>(
+    account: &PhysicalStorageAccount,
+    normal_values: &'input [f32],
+    normal_source_indices: Presence<&'input [u32]>,
+) -> NodeSceneSuccessParts {
+    let roots = [];
+    let nodes = [];
+    let positions = [0.0_f32, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+    let attributes = [
+        GeometryAttributeAuthoring::f32(
+            AttributeSemantic::Position,
+            AttributeDomain::Vertex,
+            3,
+            &positions,
+            Presence::Absent,
+        ),
+        GeometryAttributeAuthoring::f32(
+            AttributeSemantic::Normal,
+            AttributeDomain::Corner,
+            3,
+            normal_values,
+            normal_source_indices,
+        ),
+    ];
+    let primitives = [GeometryPrimitiveAuthoring::new(
+        GeometryTopologyAuthoring::TriangleList,
+        Presence::Absent,
+        Presence::Absent,
+        AuthoringRange::new(0, 2),
+    )];
+    let logical_meshes = [GeometryLogicalMeshAuthoring::new(AuthoringRange::new(0, 1))];
+    build_scene_with_geometry(
+        account,
+        &roots,
+        &nodes,
+        GeometryAuthoringBatch::new(0, &logical_meshes, &primitives, &attributes, &[]),
+    )
+}
+
+fn all_attribute_payload_kinds_scene(account: &PhysicalStorageAccount) -> NodeSceneSuccessParts {
+    let roots = [NodeLocalId::new(0)];
+    let nodes = [NodeAuthoringNode::new(
+        Presence::Absent,
+        AuthoredTransform::identity_trs(),
+    )];
+    let triangle_indices = [0_u32, 1, 2];
+    let polygon_boundaries = [3_u32];
+    let first_positions = [0.0_f32, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+    let second_positions = [0.0_f32, 0.0, 1.0, 1.0, 0.0, 1.0, 0.0, 1.0, 1.0];
+    let third_positions = [0.0_f32, 0.0, 2.0, 1.0, 0.0, 2.0, 0.0, 1.0, 2.0];
+    let sparse_indices = [0_u32];
+    let sparse_u32_values = [7_u32];
+    let sparse_u32_default = [0_u32];
+    let sparse_f32_values = [0.25_f32, 0.5, 0.75];
+    let sparse_f32_default = [0.0_f32, 0.0, 0.0];
+    let dense_u32_values = [3_u32];
+    let attributes = [
+        GeometryAttributeAuthoring::f32(
+            AttributeSemantic::Position,
+            AttributeDomain::Vertex,
+            3,
+            &first_positions,
+            Presence::Absent,
+        ),
+        GeometryAttributeAuthoring::sparse_u32(
+            AttributeSemantic::SmoothingGroup,
+            AttributeDomain::Face,
+            1,
+            1,
+            &sparse_indices,
+            &sparse_u32_values,
+            &sparse_u32_default,
+        ),
+        GeometryAttributeAuthoring::f32(
+            AttributeSemantic::Position,
+            AttributeDomain::Vertex,
+            3,
+            &second_positions,
+            Presence::Absent,
+        ),
+        GeometryAttributeAuthoring::sparse_f32(
+            AttributeSemantic::Color(0),
+            AttributeDomain::Face,
+            3,
+            1,
+            &sparse_indices,
+            &sparse_f32_values,
+            &sparse_f32_default,
+        ),
+        GeometryAttributeAuthoring::f32(
+            AttributeSemantic::Position,
+            AttributeDomain::Vertex,
+            3,
+            &third_positions,
+            Presence::Absent,
+        ),
+        GeometryAttributeAuthoring::u32(
+            AttributeSemantic::SmoothingGroup,
+            AttributeDomain::Face,
+            1,
+            &dense_u32_values,
+        ),
+    ];
+    let primitives = [
+        GeometryPrimitiveAuthoring::new(
+            GeometryTopologyAuthoring::TriangleList,
+            Presence::Present(&triangle_indices),
+            Presence::Present(MaterialLocalId::new(0)),
+            AuthoringRange::new(0, 2),
+        ),
+        GeometryPrimitiveAuthoring::new(
+            GeometryTopologyAuthoring::Polygons(&polygon_boundaries),
+            Presence::Present(&triangle_indices),
+            Presence::Absent,
+            AuthoringRange::new(2, 2),
+        ),
+        GeometryPrimitiveAuthoring::new(
+            GeometryTopologyAuthoring::TriangleList,
+            Presence::Absent,
+            Presence::Absent,
+            AuthoringRange::new(4, 2),
+        ),
+    ];
+    let logical_meshes = [GeometryLogicalMeshAuthoring::new(AuthoringRange::new(0, 3))];
+    let instances = [GeometryMeshInstanceAuthoring::new(
+        NodeLocalId::new(0),
+        LogicalMeshLocalId::new(0),
+    )];
+    build_scene_with_geometry(
+        account,
+        &roots,
+        &nodes,
+        GeometryAuthoringBatch::new(1, &logical_meshes, &primitives, &attributes, &instances),
+    )
+}
+
 #[test]
 fn known_vector_is_stable_and_human_reviewable() {
     let factory = factory();
@@ -167,8 +416,8 @@ fn known_vector_is_stable_and_human_reviewable() {
         capture_node_scene_with_test_transcript(&parts.scene, snapshot_limits(4_096, 64), None)
             .expect("known Scene snapshot");
 
-    assert_eq!(snapshot.domain, "baozi.canonical-node-scene.snapshot");
-    assert_eq!(snapshot.schema_revision, 1);
+    assert_eq!(snapshot.domain, "baozi.canonical-scene.snapshot");
+    assert_eq!(snapshot.schema_revision, 2);
     assert_eq!(snapshot.algorithm, NodeSceneSnapshotAlgorithm::Sha256);
     assert_eq!(snapshot.digest, KNOWN_SINGLE_TRS_DIGEST);
     assert!(transcript.complete);
@@ -176,8 +425,13 @@ fn known_vector_is_stable_and_human_reviewable() {
     assert_eq!(snapshot.totals.node_count, 1);
     assert_eq!(snapshot.totals.root_count, 1);
     assert_eq!(snapshot.totals.edge_count, 0);
-    assert_eq!(snapshot.totals.transcript_bytes, 181);
-    assert_eq!(snapshot.totals.work_units, 21);
+    assert_eq!(snapshot.totals.material_count, 0);
+    assert_eq!(snapshot.totals.logical_mesh_count, 0);
+    assert_eq!(snapshot.totals.primitive_count, 0);
+    assert_eq!(snapshot.totals.attribute_count, 0);
+    assert_eq!(snapshot.totals.mesh_instance_count, 0);
+    assert_eq!(snapshot.totals.transcript_bytes, 239);
+    assert_eq!(snapshot.totals.work_units, 27);
     assert!(snapshot.preview.text.contains("roots(present,total=1)=[0]"));
     assert!(snapshot.preview.text.contains("transform=trs(total=10)"));
     assert!(
@@ -186,6 +440,7 @@ fn known_vector_is_stable_and_human_reviewable() {
             .text
             .contains("children(present)=[];total=0")
     );
+    assert!(snapshot.preview.text.contains("geometry(present)"));
     assert!(!snapshot.preview.bytes_truncated);
     assert!(!snapshot.preview.items_truncated);
 
@@ -195,7 +450,7 @@ fn known_vector_is_stable_and_human_reviewable() {
 }
 
 #[test]
-fn matrix_and_child_known_vector_pins_remaining_v1_framing() {
+fn matrix_and_child_known_vector_pins_node_framing_and_empty_geometry() {
     let factory = factory();
     let account = account(&factory);
     let roots = [NodeLocalId::new(0)];
@@ -215,8 +470,52 @@ fn matrix_and_child_known_vector_pins_remaining_v1_framing() {
     assert_eq!(snapshot.totals.node_count, 2);
     assert_eq!(snapshot.totals.root_count, 1);
     assert_eq!(snapshot.totals.edge_count, 1);
-    assert_eq!(snapshot.totals.transcript_bytes, 304);
-    assert_eq!(snapshot.totals.work_units, 41);
+    assert_eq!(snapshot.totals.transcript_bytes, 362);
+    assert_eq!(snapshot.totals.work_units, 47);
+}
+
+#[test]
+fn point_geometry_known_vector_pins_complete_scene_framing() {
+    let factory = factory();
+    let account = account(&factory);
+    let positions = [1.0_f32, 2.0, 3.0];
+    let parts = point_geometry_scene(&account, &positions);
+
+    let (snapshot, transcript) =
+        capture_node_scene_with_test_transcript(&parts.scene, snapshot_limits(8_192, 64), None)
+            .expect("point-geometry known Scene snapshot");
+
+    assert_eq!(snapshot.digest, KNOWN_POINT_GEOMETRY_DIGEST);
+    assert!(transcript.complete);
+    assert_hex(&transcript.bytes, KNOWN_POINT_GEOMETRY_TRANSCRIPT_HEX);
+    assert_eq!(snapshot.totals.node_count, 1);
+    assert_eq!(snapshot.totals.material_count, 1);
+    assert_eq!(snapshot.totals.logical_mesh_count, 1);
+    assert_eq!(snapshot.totals.primitive_count, 1);
+    assert_eq!(snapshot.totals.attribute_count, 1);
+    assert_eq!(snapshot.totals.mesh_instance_count, 1);
+    assert_eq!(snapshot.totals.polygon_boundary_count, 0);
+    assert_eq!(snapshot.totals.primitive_index_count, 0);
+    assert_eq!(snapshot.totals.sparse_index_count, 0);
+    assert_eq!(snapshot.totals.canonical_scalar_count, 3);
+    assert_eq!(snapshot.totals.f32_scalar_count, 3);
+    assert_eq!(snapshot.totals.u32_scalar_count, 0);
+    assert_eq!(snapshot.totals.transcript_bytes, 484);
+    assert_eq!(snapshot.totals.work_units, 40);
+    assert!(snapshot.preview.text.contains("material[0]"));
+    assert!(
+        snapshot
+            .preview
+            .text
+            .contains("primitive[0] topology=points")
+    );
+    assert!(snapshot.preview.text.contains("values(present,total=3)"));
+    assert!(
+        snapshot
+            .preview
+            .text
+            .contains("mesh_instance[0] owner_node=0")
+    );
 }
 
 #[test]
@@ -262,8 +561,9 @@ fn empty_scene_snapshot_is_complete_and_deterministic() {
     let second = build_scene(&second_account, &[], &[]);
     let limits = snapshot_limits(4_096, 64);
 
-    let first_snapshot =
-        capture_node_scene(&first.scene, limits, None).expect("first empty snapshot");
+    let (first_snapshot, transcript) =
+        capture_node_scene_with_test_transcript(&first.scene, limits, None)
+            .expect("first empty snapshot");
     let second_snapshot =
         capture_node_scene(&second.scene, limits, None).expect("second empty snapshot");
 
@@ -273,6 +573,218 @@ fn empty_scene_snapshot_is_complete_and_deterministic() {
     assert_eq!(first_snapshot.totals.node_count, 0);
     assert_eq!(first_snapshot.totals.root_count, 0);
     assert_eq!(first_snapshot.totals.edge_count, 0);
+    assert_eq!(first_snapshot.totals.material_count, 0);
+    assert_eq!(first_snapshot.totals.logical_mesh_count, 0);
+    assert_eq!(first_snapshot.totals.primitive_count, 0);
+    assert_eq!(first_snapshot.totals.attribute_count, 0);
+    assert_eq!(first_snapshot.totals.mesh_instance_count, 0);
+    assert_eq!(first_snapshot.totals.polygon_boundary_count, 0);
+    assert_eq!(first_snapshot.totals.primitive_index_count, 0);
+    assert_eq!(first_snapshot.totals.sparse_index_count, 0);
+    assert_eq!(first_snapshot.totals.canonical_scalar_count, 0);
+    assert_eq!(first_snapshot.totals.transcript_bytes, 146);
+    assert_eq!(first_snapshot.totals.work_units, 13);
+    let empty_tail_bytes = EMPTY_GEOMETRY_TRANSCRIPT_HEX.len() / 2;
+    assert!(transcript.complete);
+    assert_hex(
+        &transcript.bytes[transcript.bytes.len() - empty_tail_bytes..],
+        EMPTY_GEOMETRY_TRANSCRIPT_HEX,
+    );
+}
+
+#[test]
+fn geometry_tables_payload_kinds_and_totals_are_complete() {
+    let factory = factory();
+    let account = account(&factory);
+    let parts = all_attribute_payload_kinds_scene(&account);
+
+    let snapshot = capture_node_scene(&parts.scene, snapshot_limits(32_768, 64), None)
+        .expect("complete geometry snapshot");
+
+    assert_eq!(snapshot.totals.material_count, 1);
+    assert_eq!(snapshot.totals.logical_mesh_count, 1);
+    assert_eq!(snapshot.totals.primitive_count, 3);
+    assert_eq!(snapshot.totals.attribute_count, 6);
+    assert_eq!(snapshot.totals.mesh_instance_count, 1);
+    assert_eq!(snapshot.totals.polygon_boundary_count, 1);
+    assert_eq!(snapshot.totals.primitive_index_count, 6);
+    assert_eq!(snapshot.totals.sparse_index_count, 2);
+    assert_eq!(snapshot.totals.canonical_scalar_count, 36);
+    assert_eq!(snapshot.totals.f32_scalar_count, 33);
+    assert_eq!(snapshot.totals.u32_scalar_count, 3);
+    assert_eq!(snapshot.totals.work_units, 108);
+    assert!(snapshot.preview.text.contains("payload=dense"));
+    assert!(snapshot.preview.text.contains("payload=sparse"));
+    assert!(snapshot.preview.text.contains("sparse_default(present"));
+    assert!(snapshot.preview.text.contains("polygon_boundaries(present"));
+    assert!(
+        snapshot
+            .preview
+            .text
+            .contains("summary(nodes=1,roots=1,edges=0")
+    );
+    assert!(!snapshot.preview.bytes_truncated);
+    assert!(!snapshot.preview.items_truncated);
+}
+
+#[test]
+fn absent_and_present_empty_geometry_leaves_remain_distinct() {
+    let factory = factory();
+    let account = account(&factory);
+    let absent = point_index_presence_scene(&account, false);
+    let present_empty = point_index_presence_scene(&account, true);
+    let limits = snapshot_limits(16_384, 64);
+
+    let absent_snapshot =
+        capture_node_scene(&absent.scene, limits, None).expect("absent-index snapshot");
+    let present_empty_snapshot = capture_node_scene(&present_empty.scene, limits, None)
+        .expect("present-empty-index snapshot");
+
+    assert_ne!(absent_snapshot.digest, present_empty_snapshot.digest);
+    assert_eq!(absent_snapshot.totals, present_empty_snapshot.totals);
+    assert!(
+        absent_snapshot
+            .preview
+            .text
+            .contains("indices(absent,total=0)=[]")
+    );
+    assert!(
+        present_empty_snapshot
+            .preview
+            .text
+            .contains("indices(present,total=0)=[]")
+    );
+}
+
+#[test]
+fn projected_and_expanded_attributes_have_the_same_canonical_snapshot() {
+    let factory = factory();
+    let account = account(&factory);
+    let projected_values = [0.0_f32, 0.0, 1.0, 0.0, 1.0, 0.0];
+    let projection = [0_u32, 1, 0];
+    let expanded_values = [0.0_f32, 0.0, 1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+    let projected =
+        corner_normal_scene(&account, &projected_values, Presence::Present(&projection));
+    let expanded = corner_normal_scene(&account, &expanded_values, Presence::Absent);
+    let limits = snapshot_limits(16_384, 64);
+
+    let projected_snapshot =
+        capture_node_scene(&projected.scene, limits, None).expect("projected snapshot");
+    let expanded_snapshot =
+        capture_node_scene(&expanded.scene, limits, None).expect("expanded snapshot");
+
+    assert_eq!(projected_snapshot.digest, expanded_snapshot.digest);
+    assert_eq!(projected_snapshot.preview, expanded_snapshot.preview);
+    assert_eq!(projected_snapshot.totals, expanded_snapshot.totals);
+    assert_eq!(projected_snapshot.totals.canonical_scalar_count, 18);
+    assert_eq!(projected_snapshot.totals.f32_scalar_count, 18);
+}
+
+#[test]
+fn geometry_mutation_after_preview_boundary_changes_complete_digest() {
+    let factory = factory();
+    let account = account(&factory);
+    let left_positions = [1.0_f32, 2.0, 3.0];
+    let right_positions = [1.0_f32, 2.0, 4.0];
+    let left = point_geometry_scene(&account, &left_positions);
+    let right = point_geometry_scene(&account, &right_positions);
+    let limits = snapshot_limits(8_192, 1);
+
+    let left_snapshot =
+        capture_node_scene(&left.scene, limits, None).expect("left geometry snapshot");
+    let right_snapshot =
+        capture_node_scene(&right.scene, limits, None).expect("right geometry snapshot");
+
+    assert_eq!(left_snapshot.preview, right_snapshot.preview);
+    assert!(left_snapshot.preview.items_truncated);
+    assert_ne!(left_snapshot.digest, right_snapshot.digest);
+    assert_eq!(left_snapshot.totals, right_snapshot.totals);
+}
+
+#[test]
+fn geometry_capture_honors_cancellation_and_exact_work_bounds() {
+    let factory = factory();
+    let account = account(&factory);
+    let parts = all_attribute_payload_kinds_scene(&account);
+    let retained = account.snapshot();
+    let cancellation = CancellationToken::new();
+    cancellation.cancel();
+
+    assert!(matches!(
+        capture_node_scene(
+            &parts.scene,
+            snapshot_limits(32_768, 64),
+            Some(&cancellation)
+        ),
+        Err(NodeSceneSnapshotError::Cancelled)
+    ));
+
+    let full = capture_node_scene(&parts.scene, snapshot_limits(32_768, 64), None)
+        .expect("full geometry work measurement");
+    let exact = NodeSceneSnapshotLimits::try_new(32_768, 64, full.totals.work_units)
+        .expect("exact geometry work limit");
+    assert!(capture_node_scene(&parts.scene, exact, None).is_ok());
+    let one_short = NodeSceneSnapshotLimits::try_new(
+        32_768,
+        64,
+        full.totals
+            .work_units
+            .checked_sub(1)
+            .expect("nonzero geometry snapshot work"),
+    )
+    .expect("one-short geometry work limit");
+    assert!(matches!(
+        capture_node_scene(&parts.scene, one_short, None),
+        Err(NodeSceneSnapshotError::WorkBudgetExceeded { .. })
+    ));
+    assert_eq!(account.snapshot(), retained);
+}
+
+#[test]
+fn geometry_collection_fault_fails_before_a_snapshot_can_be_published() {
+    let factory = factory();
+    let account = account(&factory);
+    let positions = [1.0_f32, 2.0, 3.0];
+    let parts = point_geometry_scene(&account, &positions);
+    let retained = account.snapshot();
+    let source = parts.scene.semantic_view().expect("point semantic view");
+    let mut nodes = source.into_cursor().expect("point semantic cursor");
+    let mut roots = nodes.take_roots().expect("point roots");
+    assert_eq!(roots.next().expect("point root"), Some(0));
+    roots.finish().expect("complete point roots");
+    let node = nodes
+        .next_node()
+        .expect("point node read")
+        .expect("point node");
+    node.into_children()
+        .finish()
+        .expect("complete point children");
+    let mut geometry = nodes.into_geometry().expect("point geometry cursor");
+    let wrong_counts = super::GeometryCollectionCounts {
+        materials: 2,
+        logical_meshes: 1,
+        primitives: 1,
+        attributes: 1,
+        mesh_instances: 1,
+    };
+    let mut transcript = super::CanonicalDigestEncoder::new();
+    let mut preview = super::PreviewSink::new(4_096, 64).expect("fault preview");
+    let mut work = SnapshotWorkMeter::new(MAX_WORK, None);
+
+    let failure = super::write_geometry(
+        &mut geometry,
+        wrong_counts,
+        &mut transcript,
+        &mut preview,
+        &mut work,
+    );
+    assert!(matches!(
+        failure,
+        Err(NodeSceneSnapshotError::InconsistentView {
+            reason: "material collection ended before declared total"
+        })
+    ));
+    assert_eq!(account.snapshot(), retained);
 }
 
 #[test]
@@ -587,9 +1099,9 @@ fn traversal_scales_linearly_while_preview_stays_bounded() {
         assert!(snapshot.preview.text.len() <= 64);
         assert_eq!(
             snapshot.totals.transcript_bytes,
-            88 + 93 * node_count as u64
+            146 + 93 * node_count as u64
         );
-        assert_eq!(snapshot.totals.work_units, 7 + 14 * node_count as u64);
+        assert_eq!(snapshot.totals.work_units, 13 + 14 * node_count as u64);
         assert_eq!(snapshot.totals.node_count, node_count);
         assert_eq!(snapshot.totals.root_count, 1);
         assert_eq!(snapshot.totals.edge_count, node_count - 1);

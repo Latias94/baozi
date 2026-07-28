@@ -1,18 +1,24 @@
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use baozi_operation::{
-    CancellationToken, PhysicalStorageAccountFactory, PhysicalStorageAccountFactoryLimits,
-    PhysicalStorageAccountLimits, StorePreparationFailureClass, StoreTerminalCause,
+    CancellationSignal, CancellationToken, PhysicalStorageAccountFactory,
+    PhysicalStorageAccountFactoryLimits, PhysicalStorageAccountLimits,
+    StorePreparationFailureClass, StoreTerminalCause,
 };
 
 use crate::SceneValidationLimits;
+use crate::attribute::{AttributeDomain, AttributeSemantic};
 use crate::canonical_scene::store::construction::{
     STORE_DIMENSION, SceneConstructionLimits, SceneConstructionOperation,
     SceneConstructionTerminal, TwoNodeAuthoredMatrices,
 };
 use crate::canonical_scene::store::production::{
-    NodeAuthoringBatch, NodeAuthoringFailure, NodeAuthoringLimit, NodeAuthoringNode,
-    NodeAuthoringSemanticError, NodeLocalId, NodeParent, Presence,
+    AuthoringRange, GeometryAttributeAuthoring, GeometryAuthoringBatch,
+    GeometryLogicalMeshAuthoring, GeometryMeshInstanceAuthoring, GeometryPrimitiveAuthoring,
+    GeometryTopologyAuthoring, LogicalMeshLocalId, NodeAuthoringBatch, NodeAuthoringFailure,
+    NodeAuthoringLimit, NodeAuthoringNode, NodeAuthoringSemanticError, NodeLocalId, NodeParent,
+    Presence, SceneAuthoringBatch,
 };
 use crate::entity::AuthoredTransform;
 use crate::identity::{SceneGenerationError, SceneGenerationId};
@@ -25,14 +31,50 @@ use super::{
     PreparedNodeSceneConstruction,
 };
 
+const SINGLE_TRS_AUTHORING_VALIDATION_WORK: u64 = 41;
 const SINGLE_TRS_WORK_BEFORE_FIRST_PAYLOAD_WRITE: u64 = 43;
-const SINGLE_TRS_SUCCESS_WORK: u64 = 78;
-const SINGLE_TRS_WORK_BEFORE_EVIDENCE_VALIDATION: u64 = 77;
+const SINGLE_TRS_BUILD_INVARIANT_FAILURE_WORK: u64 = 80;
+const SINGLE_TRS_GENERATION_FAILURE_WORK: u64 = 82;
 const SINGLE_TRS_ROOTS: [NodeLocalId; 1] = [NodeLocalId::new(0)];
 const SINGLE_TRS_NODES: [NodeAuthoringNode; 1] = [NodeAuthoringNode::new(
     Presence::Absent,
     AuthoredTransform::identity_trs(),
 )];
+
+#[derive(Clone)]
+struct CancelOnSignalPoll {
+    polls: Arc<AtomicUsize>,
+    cancel_on: Arc<AtomicUsize>,
+}
+
+impl CancelOnSignalPoll {
+    fn new() -> Self {
+        Self {
+            polls: Arc::new(AtomicUsize::new(0)),
+            cancel_on: Arc::new(AtomicUsize::new(usize::MAX)),
+        }
+    }
+
+    fn polls(&self) -> usize {
+        self.polls.load(Ordering::Acquire)
+    }
+
+    fn cancel_after_additional_polls(&self, additional: usize) {
+        self.cancel_on.store(
+            self.polls()
+                .checked_add(additional)
+                .expect("test cancellation poll threshold"),
+            Ordering::Release,
+        );
+    }
+}
+
+impl CancellationSignal for CancelOnSignalPoll {
+    fn is_cancelled(&self) -> bool {
+        let poll = self.polls.fetch_add(1, Ordering::AcqRel) + 1;
+        poll >= self.cancel_on.load(Ordering::Acquire)
+    }
+}
 
 fn test_limits() -> SceneConstructionLimits {
     SceneConstructionLimits {
@@ -200,7 +242,7 @@ fn source_ordered_forest_materializes_canonical_graph_and_preserves_authored_bit
 
     assert_eq!(parts.scene.source_node_count(), Some(5));
     assert_eq!(parts.scene.source_root_count(), Some(2));
-    assert_eq!(parts.scene.canonical_block_count(), 4);
+    assert_eq!(parts.scene.canonical_block_count(), 5);
     assert!(parts.scene.account().is_same_account(&account));
     assert!(generation_before < parts.scene.generation());
     assert!(parts.scene.generation() < generation_after);
@@ -249,8 +291,8 @@ fn source_ordered_forest_materializes_canonical_graph_and_preserves_authored_bit
     assert_eq!(dimension.current_live_bytes(), 0);
     assert!(dimension.peak_live_bytes() > 0);
     assert_eq!(dimension.pending_publication(), 0);
-    assert_eq!(dimension.committed(), 4);
-    assert_eq!(dimension.committed_canonical_output(), 4);
+    assert_eq!(dimension.committed(), 5);
+    assert_eq!(dimension.committed_canonical_output(), 5);
     assert_eq!(
         dimension.published_outcome_evidence(),
         2,
@@ -265,7 +307,144 @@ fn source_ordered_forest_materializes_canonical_graph_and_preserves_authored_bit
 }
 
 #[test]
-fn present_empty_scene_publishes_only_directory_and_node_table() {
+fn obj_shaped_geometry_uses_one_scene_root_and_one_generation() {
+    let factory = test_factory();
+    let account = test_account(&factory, 256);
+    let positions = [0.0_f32, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+    let position_indices = [0_u32, 1, 2, 0, 2, 1];
+    let normal_sources = [0.0_f32, 0.0, 1.0, 0.0, 0.0, -1.0];
+    let normal_indices = [0_u32, 0, 0, 1, 1, 1];
+    let texcoord_sources = [0.0_f32, 0.0, 1.0, 0.0, 0.0, 1.0, 0.5, 0.5];
+    let texcoord_indices = [0_u32, 1, 2, 3, 2, 1];
+    let smoothing_groups = [1_u32, 0];
+    let attributes = [
+        GeometryAttributeAuthoring::f32(
+            AttributeSemantic::Position,
+            AttributeDomain::Vertex,
+            3,
+            &positions,
+            Presence::Absent,
+        ),
+        GeometryAttributeAuthoring::f32(
+            AttributeSemantic::Normal,
+            AttributeDomain::Corner,
+            3,
+            &normal_sources,
+            Presence::Present(&normal_indices),
+        ),
+        GeometryAttributeAuthoring::f32(
+            AttributeSemantic::Texcoord(0),
+            AttributeDomain::Corner,
+            2,
+            &texcoord_sources,
+            Presence::Present(&texcoord_indices),
+        ),
+        GeometryAttributeAuthoring::u32(
+            AttributeSemantic::SmoothingGroup,
+            AttributeDomain::Face,
+            1,
+            &smoothing_groups,
+        ),
+    ];
+    let primitives = [GeometryPrimitiveAuthoring::new(
+        GeometryTopologyAuthoring::TriangleList,
+        Presence::Present(&position_indices),
+        Presence::Absent,
+        AuthoringRange::new(0, 4),
+    )];
+    let logical_meshes = [GeometryLogicalMeshAuthoring::new(AuthoringRange::new(0, 1))];
+    let instances = [GeometryMeshInstanceAuthoring::new(
+        NodeLocalId::new(0),
+        LogicalMeshLocalId::new(0),
+    )];
+    let input = SceneAuthoringBatch::new(
+        single_trs_batch(),
+        GeometryAuthoringBatch::new(0, &logical_meshes, &primitives, &attributes, &instances),
+    );
+
+    let prepared = SceneConstructionOperation::with_account_for_scene_input(
+        &account,
+        test_limits(),
+        input,
+        SceneValidationLimits::default(),
+    )
+    .expect("OBJ-shaped Scene input admission")
+    .try_validate()
+    .unwrap_or_else(|_| panic!("OBJ-shaped Scene input validation"))
+    .prepare()
+    .expect("OBJ-shaped Scene publication");
+    let parts = successful_parts(prepared);
+
+    assert_eq!(parts.scene.source_node_count(), Some(1));
+    assert_eq!(parts.scene.canonical_block_count(), 14);
+    assert_eq!(parts.report.outcome_evidence_block_count(), 1);
+
+    drop(parts);
+    assert_eq!(account.snapshot().live_retained_bytes(), 0);
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
+}
+
+#[test]
+fn scene_input_admission_exceeds_the_legacy_fixed_slot_bound() {
+    const PRIMITIVE_COUNT: usize = 12;
+
+    let factory = test_factory();
+    let account = test_account(&factory, 256);
+    let roots = [];
+    let nodes = [];
+    let position = [0.0_f32, 0.0, 0.0];
+    let index = [0_u32];
+    let attributes = (0..PRIMITIVE_COUNT)
+        .map(|_| {
+            GeometryAttributeAuthoring::f32(
+                AttributeSemantic::Position,
+                AttributeDomain::Vertex,
+                3,
+                &position,
+                Presence::Absent,
+            )
+        })
+        .collect::<Vec<_>>();
+    let primitives = (0..PRIMITIVE_COUNT)
+        .map(|primitive| {
+            GeometryPrimitiveAuthoring::new(
+                GeometryTopologyAuthoring::Points,
+                Presence::Present(&index),
+                Presence::Absent,
+                AuthoringRange::new(u32::try_from(primitive).expect("test primitive index"), 1),
+            )
+        })
+        .collect::<Vec<_>>();
+    let logical_meshes = [GeometryLogicalMeshAuthoring::new(AuthoringRange::new(
+        0,
+        u32::try_from(PRIMITIVE_COUNT).expect("test primitive count"),
+    ))];
+    let input = SceneAuthoringBatch::new(
+        NodeAuthoringBatch::new(Presence::Present(&roots), &nodes),
+        GeometryAuthoringBatch::new(0, &logical_meshes, &primitives, &attributes, &[]),
+    );
+
+    let prepared = SceneConstructionOperation::with_account_for_scene_input(
+        &account,
+        test_limits(),
+        input,
+        SceneValidationLimits::default(),
+    )
+    .expect("dynamic Scene attribution admission")
+    .try_validate()
+    .unwrap_or_else(|_| panic!("dynamic Scene attribution validation"))
+    .prepare()
+    .expect("dynamic Scene attribution publication");
+    let parts = successful_parts(prepared);
+
+    assert_eq!(parts.scene.canonical_block_count(), 30);
+    drop(parts);
+    assert_eq!(account.snapshot().live_retained_bytes(), 0);
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
+}
+
+#[test]
+fn present_empty_scene_publishes_scene_node_and_geometry_directories() {
     let factory = test_factory();
     let account = test_account(&factory, 256);
     let roots = [];
@@ -283,7 +462,7 @@ fn present_empty_scene_publishes_only_directory_and_node_table() {
 
     assert_eq!(parts.scene.source_node_count(), Some(0));
     assert_eq!(parts.scene.source_root_count(), Some(0));
-    assert_eq!(parts.scene.canonical_block_count(), 2);
+    assert_eq!(parts.scene.canonical_block_count(), 3);
     assert_eq!(parts.scene.parent(0), None);
     assert_eq!(parts.scene.child(None, 0), None);
     assert_eq!(parts.scene.authored_transform(0), None);
@@ -303,18 +482,18 @@ fn canonical_logical_byte_rejection_never_opens_publication() {
 
     let rejected = match operation.try_validate_node_batch(
         single_trs_batch(),
-        SceneValidationLimits::default().with_max_canonical_bytes(133),
+        SceneValidationLimits::default().with_max_canonical_bytes(167),
     ) {
         Ok(_) => panic!("one byte below the canonical requirement must reject"),
         Err(rejected) => rejected,
     };
     assert!(matches!(
         rejected.failure(),
-        NodeSceneConstructionRejection::Authoring(NodeAuthoringFailure::Semantic(
+        NodeSceneConstructionRejection::NodeAuthoring(NodeAuthoringFailure::Semantic(
             NodeAuthoringSemanticError::LimitExceeded {
                 limit: NodeAuthoringLimit::CanonicalBytes,
-                actual: 134,
-                maximum: 133,
+                actual: 168,
+                maximum: 167,
             }
         ))
     ));
@@ -361,8 +540,74 @@ fn cancellation_after_authoring_validation_publishes_rich_failure() {
         .ledger_evidence()
         .dimension_by_semantic(STORE_DIMENSION)
         .expect("node Scene work evidence");
-    assert_eq!(work.attempted(), SINGLE_TRS_WORK_BEFORE_FIRST_PAYLOAD_WRITE);
-    assert_eq!(work.consumed(), SINGLE_TRS_WORK_BEFORE_FIRST_PAYLOAD_WRITE);
+    assert_eq!(work.attempted(), SINGLE_TRS_AUTHORING_VALIDATION_WORK);
+    assert_eq!(work.consumed(), SINGLE_TRS_AUTHORING_VALIDATION_WORK);
+    assert_released(failure, &account);
+}
+
+#[test]
+fn empty_geometry_leaf_scan_observes_periodic_cancellation() {
+    const PRIMITIVE_COUNT: usize = 300;
+    const PRE_LEAF_AND_PERIODIC_POLLS: usize = 6;
+
+    let factory = test_factory();
+    let account = test_account(&factory, 256);
+    let roots = [];
+    let nodes = [];
+    let primitives = (0..PRIMITIVE_COUNT)
+        .map(|_| {
+            GeometryPrimitiveAuthoring::new(
+                GeometryTopologyAuthoring::Points,
+                Presence::Absent,
+                Presence::Absent,
+                AuthoringRange::new(0, 0),
+            )
+        })
+        .collect::<Vec<_>>();
+    let logical_meshes = [GeometryLogicalMeshAuthoring::new(AuthoringRange::new(
+        0,
+        u32::try_from(PRIMITIVE_COUNT).expect("test primitive count"),
+    ))];
+    let input = SceneAuthoringBatch::new(
+        NodeAuthoringBatch::new(Presence::Present(&roots), &nodes),
+        GeometryAuthoringBatch::new(0, &logical_meshes, &primitives, &[], &[]),
+    );
+    let cancellation = CancelOnSignalPoll::new();
+    let validated =
+        SceneConstructionOperation::with_account_and_cancellation_for_scene_input_for_test(
+            &account,
+            test_limits(),
+            input,
+            SceneValidationLimits::default(),
+            cancellation.clone(),
+        )
+        .expect("empty-primitive Scene admission")
+        .try_validate()
+        .unwrap_or_else(|_| panic!("empty-primitive Scene validation"));
+    let validation_polls = cancellation.polls();
+
+    // Scratch contributes four polls, the synthetic node table starts the shared work meter,
+    // and the sixth poll is reached by the 256-unit node-plus-empty-leaf work interval.
+    cancellation.cancel_after_additional_polls(PRE_LEAF_AND_PERIODIC_POLLS);
+    let failure = rich_failure(
+        validated
+            .prepare()
+            .expect("empty geometry leaf cancellation must prepare rich failure"),
+    );
+
+    assert_eq!(
+        terminal_failure_class(failure.ledger_evidence()),
+        StorePreparationFailureClass::Control,
+    );
+    assert_eq!(
+        cancellation.polls(),
+        validation_polls + PRE_LEAF_AND_PERIODIC_POLLS,
+    );
+    let work = failure
+        .ledger_evidence()
+        .dimension_by_semantic(STORE_DIMENSION)
+        .expect("empty geometry cancellation work evidence");
+    assert_eq!(work.attempted(), work.consumed());
     assert_released(failure, &account);
 }
 
@@ -439,7 +684,7 @@ fn generation_exhaustion_discards_canonical_storage_and_preserves_evidence() {
         .ledger_evidence()
         .dimension_by_semantic(STORE_DIMENSION)
         .expect("node Scene work evidence");
-    assert_eq!(work.attempted(), SINGLE_TRS_SUCCESS_WORK);
+    assert_eq!(work.attempted(), SINGLE_TRS_GENERATION_FAILURE_WORK);
     assert_released(failure, &account);
 }
 
@@ -461,10 +706,57 @@ fn authored_transform_bit_fault_is_a_build_invariant_rich_failure() {
         .ledger_evidence()
         .dimension_by_semantic(STORE_DIMENSION)
         .expect("node Scene work evidence");
-    assert_eq!(work.attempted(), SINGLE_TRS_WORK_BEFORE_EVIDENCE_VALIDATION);
+    assert_eq!(work.attempted(), SINGLE_TRS_BUILD_INVARIANT_FAILURE_WORK);
     assert_eq!(
         terminal_failure_code(failure.ledger_evidence()),
         NODE_SCENE_BUILD_INVARIANT_CODE
+    );
+    assert_released(failure, &account);
+}
+
+#[test]
+fn geometry_payload_bit_fault_is_a_build_invariant_rich_failure() {
+    let factory = test_factory();
+    let account = test_account(&factory, 256);
+    let roots = [];
+    let nodes = [];
+    let positions = [0.0_f32, 0.0, 0.0];
+    let attributes = [GeometryAttributeAuthoring::f32(
+        AttributeSemantic::Position,
+        AttributeDomain::Vertex,
+        3,
+        &positions,
+        Presence::Absent,
+    )];
+    let primitives = [GeometryPrimitiveAuthoring::new(
+        GeometryTopologyAuthoring::Points,
+        Presence::Absent,
+        Presence::Absent,
+        AuthoringRange::new(0, 1),
+    )];
+    let logical_meshes = [GeometryLogicalMeshAuthoring::new(AuthoringRange::new(0, 1))];
+    let input = SceneAuthoringBatch::new(
+        NodeAuthoringBatch::new(Presence::Present(&roots), &nodes),
+        GeometryAuthoringBatch::new(0, &logical_meshes, &primitives, &attributes, &[]),
+    );
+    let validated = SceneConstructionOperation::with_account_for_scene_input(
+        &account,
+        test_limits(),
+        input,
+        SceneValidationLimits::default(),
+    )
+    .expect("geometry semantic fault operation")
+    .try_validate()
+    .unwrap_or_else(|_| panic!("single-point geometry must validate"));
+
+    let failure = rich_failure(
+        validated
+            .prepare_with_faults(NodeSceneBuildFaults::altered_geometry_f32())
+            .expect("geometry payload mismatch must prepare rich failure"),
+    );
+    assert_eq!(
+        terminal_failure_code(failure.ledger_evidence()),
+        NODE_SCENE_BUILD_INVARIANT_CODE,
     );
     assert_released(failure, &account);
 }
@@ -552,7 +844,7 @@ fn cycle_and_derived_lineage_can_only_terminate_as_fallback() {
     };
     assert!(matches!(
         rejected.failure(),
-        &NodeSceneConstructionRejection::Authoring(NodeAuthoringFailure::Semantic(
+        &NodeSceneConstructionRejection::NodeAuthoring(NodeAuthoringFailure::Semantic(
             NodeAuthoringSemanticError::Cycle { .. }
         ))
     ));

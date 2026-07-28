@@ -3,20 +3,26 @@ use baozi_operation::{
     StoreValidationSession,
 };
 
+mod geometry;
+
+use super::super::construction::node_scene::SceneEvidenceCounts;
 use super::super::node_scene::{authored_transform_scalar_count, decode_authored_transform};
-use super::super::production::{Presence, ValidatedNodeBatch};
+use super::super::production::{Presence, ValidatedGeometryBatch, ValidatedNodeBatch};
+use super::super::schema::geometry::{
+    GeometryAttributeTableSchema, GeometryLogicalMeshTableSchema, GeometryMaterialTableSchema,
+    GeometryMeshInstanceTableSchema, GeometryPrimitiveTableSchema,
+};
 use super::super::schema::{
-    CanonicalBlockRef, NODE_SCENE_CHILD_REFERENCE_FIELD_COUNT, NODE_SCENE_DIRECTORY_FIELD_COUNT,
-    NODE_SCENE_EVIDENCE_FIELD_COUNT, NODE_SCENE_EVIDENCE_OUTCOME_CANDIDATE,
-    NODE_SCENE_NODE_FIELD_COUNT, NODE_SCENE_POPULATED_CANONICAL_BLOCK_COUNT,
-    NODE_SCENE_REQUIRED_CANONICAL_BLOCK_COUNT, NODE_SCENE_SCHEMA_REVISION,
+    CanonicalBlockRef, NODE_SCENE_CHILD_REFERENCE_FIELD_COUNT, NODE_SCENE_EVIDENCE_FIELD_COUNT,
+    NODE_SCENE_EVIDENCE_OUTCOME_CANDIDATE, NODE_SCENE_NODE_FIELD_COUNT,
     NODE_SCENE_TRANSFORM_SYNTHETIC, NodeSceneAuthoredTransformSchema,
-    NodeSceneChildReferenceTableSchema, NodeSceneDirectorySchema, NodeSceneNodeTableSchema,
-    NodeSceneOutcomeEvidenceSchema, PRESENCE_ABSENT, PRESENCE_PRESENT,
-    node_scene_child_reference_field, node_scene_directory_field, node_scene_evidence_field,
-    node_scene_node_field,
+    NodeSceneChildReferenceTableSchema, NodeSceneNodeTableSchema, NodeSceneOutcomeEvidenceSchema,
+    PRESENCE_ABSENT, PRESENCE_PRESENT, SCENE_DIRECTORY_FIELD_COUNT, SCENE_SCHEMA_REVISION,
+    SceneDirectorySchema, SceneGeometryDirectorySchema, node_scene_child_reference_field,
+    node_scene_evidence_field, node_scene_node_field, scene_directory_field,
 };
 use super::{require_optional_collection, require_scalar};
+use geometry::validate_geometry_graph;
 
 /// Immutable semantic authority minted only by central node-scene validation.
 #[derive(Clone, Copy)]
@@ -24,9 +30,19 @@ pub(in crate::canonical_scene::store) struct NodeSceneValidationProof {
     nodes: CanonicalBlockRef<NodeSceneNodeTableSchema>,
     references: Option<CanonicalBlockRef<NodeSceneChildReferenceTableSchema>>,
     transforms: Option<CanonicalBlockRef<NodeSceneAuthoredTransformSchema>>,
+    materials: Option<CanonicalBlockRef<GeometryMaterialTableSchema>>,
+    logical_meshes: Option<CanonicalBlockRef<GeometryLogicalMeshTableSchema>>,
+    primitives: Option<CanonicalBlockRef<GeometryPrimitiveTableSchema>>,
+    attributes: Option<CanonicalBlockRef<GeometryAttributeTableSchema>>,
+    mesh_instances: Option<CanonicalBlockRef<GeometryMeshInstanceTableSchema>>,
     source_node_count: usize,
     source_root_count: usize,
     source_edge_count: usize,
+    material_count: usize,
+    logical_mesh_count: usize,
+    primitive_count: usize,
+    attribute_count: usize,
+    mesh_instance_count: usize,
 }
 
 impl NodeSceneValidationProof {
@@ -48,6 +64,36 @@ impl NodeSceneValidationProof {
         self.transforms
     }
 
+    pub(in crate::canonical_scene::store) const fn materials(
+        self,
+    ) -> Option<CanonicalBlockRef<GeometryMaterialTableSchema>> {
+        self.materials
+    }
+
+    pub(in crate::canonical_scene::store) const fn logical_meshes(
+        self,
+    ) -> Option<CanonicalBlockRef<GeometryLogicalMeshTableSchema>> {
+        self.logical_meshes
+    }
+
+    pub(in crate::canonical_scene::store) const fn primitives(
+        self,
+    ) -> Option<CanonicalBlockRef<GeometryPrimitiveTableSchema>> {
+        self.primitives
+    }
+
+    pub(in crate::canonical_scene::store) const fn attributes(
+        self,
+    ) -> Option<CanonicalBlockRef<GeometryAttributeTableSchema>> {
+        self.attributes
+    }
+
+    pub(in crate::canonical_scene::store) const fn mesh_instances(
+        self,
+    ) -> Option<CanonicalBlockRef<GeometryMeshInstanceTableSchema>> {
+        self.mesh_instances
+    }
+
     pub(in crate::canonical_scene::store) const fn source_node_count(self) -> usize {
         self.source_node_count
     }
@@ -58,6 +104,26 @@ impl NodeSceneValidationProof {
 
     pub(in crate::canonical_scene::store) const fn source_edge_count(self) -> usize {
         self.source_edge_count
+    }
+
+    pub(in crate::canonical_scene::store) const fn material_count(self) -> usize {
+        self.material_count
+    }
+
+    pub(in crate::canonical_scene::store) const fn logical_mesh_count(self) -> usize {
+        self.logical_mesh_count
+    }
+
+    pub(in crate::canonical_scene::store) const fn primitive_count(self) -> usize {
+        self.primitive_count
+    }
+
+    pub(in crate::canonical_scene::store) const fn attribute_count(self) -> usize {
+        self.attribute_count
+    }
+
+    pub(in crate::canonical_scene::store) const fn mesh_instance_count(self) -> usize {
+        self.mesh_instance_count
     }
 
     #[cfg(test)]
@@ -78,9 +144,10 @@ impl NodeSceneValidationProof {
 
 pub(in crate::canonical_scene::store) fn validate_node_scene_graph<R, E>(
     session: &mut StoreValidationSession<'_, '_>,
-    directory_ref: CanonicalRecordRef<NodeSceneDirectorySchema>,
+    directory_ref: CanonicalRecordRef<SceneDirectorySchema>,
     evidence_ref: OutcomeEvidenceRecordRef<NodeSceneOutcomeEvidenceSchema>,
-    expected: &ValidatedNodeBatch<'_, R>,
+    expected_nodes: &ValidatedNodeBatch<'_, R>,
+    expected_geometry: &ValidatedGeometryBatch<'_, impl Sized>,
     mut observe_work: impl FnMut(u64) -> Result<(), E>,
 ) -> Result<Option<NodeSceneValidationProof>, E> {
     let mut work_failure = None;
@@ -88,7 +155,8 @@ pub(in crate::canonical_scene::store) fn validate_node_scene_graph<R, E>(
         session,
         directory_ref,
         evidence_ref,
-        expected,
+        expected_nodes,
+        expected_geometry,
         &mut |amount| match observe_work(amount) {
             Ok(()) => Some(()),
             Err(cause) => {
@@ -106,8 +174,7 @@ pub(in crate::canonical_scene::store) fn validate_node_scene_graph<R, E>(
 pub(in crate::canonical_scene::store) fn validate_node_scene_evidence_graph(
     session: &mut StoreEvidenceValidationSession<'_, '_>,
     evidence_ref: OutcomeEvidenceRecordRef<NodeSceneOutcomeEvidenceSchema>,
-    canonical_block_count: u32,
-    node_count: u32,
+    counts: SceneEvidenceCounts,
 ) -> bool {
     let Some(evidence) = session.records(evidence_ref) else {
         return false;
@@ -115,36 +182,50 @@ pub(in crate::canonical_scene::store) fn validate_node_scene_evidence_graph(
     evidence.rows() == 1
         && evidence.fields() == NODE_SCENE_EVIDENCE_FIELD_COUNT
         && evidence.scalar::<u32>(0, node_scene_evidence_field::SCHEMA_REVISION)
-            == Some(NODE_SCENE_SCHEMA_REVISION)
+            == Some(SCENE_SCHEMA_REVISION)
         && evidence.scalar::<u32>(0, node_scene_evidence_field::OUTCOME)
             == Some(NODE_SCENE_EVIDENCE_OUTCOME_CANDIDATE)
         && evidence.scalar::<u32>(0, node_scene_evidence_field::CANONICAL_BLOCK_COUNT)
-            == Some(canonical_block_count)
-        && evidence.scalar::<u32>(0, node_scene_evidence_field::NODE_COUNT) == Some(node_count)
+            == Some(counts.canonical_block_count)
+        && evidence.scalar::<u32>(0, node_scene_evidence_field::NODE_COUNT)
+            == Some(counts.node_count)
+        && evidence.scalar::<u32>(0, node_scene_evidence_field::MATERIAL_COUNT)
+            == Some(counts.material_count)
+        && evidence.scalar::<u32>(0, node_scene_evidence_field::LOGICAL_MESH_COUNT)
+            == Some(counts.logical_mesh_count)
+        && evidence.scalar::<u32>(0, node_scene_evidence_field::PRIMITIVE_COUNT)
+            == Some(counts.primitive_count)
+        && evidence.scalar::<u32>(0, node_scene_evidence_field::ATTRIBUTE_COUNT)
+            == Some(counts.attribute_count)
+        && evidence.scalar::<u32>(0, node_scene_evidence_field::MESH_INSTANCE_COUNT)
+            == Some(counts.mesh_instance_count)
+        && evidence.scalar::<u32>(0, node_scene_evidence_field::PAYLOAD_BLOCK_COUNT)
+            == Some(counts.payload_block_count)
 }
 
-fn validate_node_scene_graph_inner<R>(
+fn validate_node_scene_graph_inner<NR, GR>(
     session: &mut StoreValidationSession<'_, '_>,
-    directory_ref: CanonicalRecordRef<NodeSceneDirectorySchema>,
+    directory_ref: CanonicalRecordRef<SceneDirectorySchema>,
     evidence_ref: OutcomeEvidenceRecordRef<NodeSceneOutcomeEvidenceSchema>,
-    expected: &ValidatedNodeBatch<'_, R>,
+    expected: &ValidatedNodeBatch<'_, NR>,
+    expected_geometry: &ValidatedGeometryBatch<'_, GR>,
     observe_work: &mut impl FnMut(u64) -> Option<()>,
 ) -> Option<NodeSceneValidationProof> {
     observe_work(1)?;
     let directory = session.canonical_records(directory_ref)?;
-    if directory.rows() != 1 || directory.fields() != NODE_SCENE_DIRECTORY_FIELD_COUNT {
+    if directory.rows() != 1 || directory.fields() != SCENE_DIRECTORY_FIELD_COUNT {
         return None;
     }
     require_scalar(
-        directory.scalar::<u32>(0, node_scene_directory_field::SCHEMA_REVISION),
-        NODE_SCENE_SCHEMA_REVISION,
+        directory.scalar::<u32>(0, scene_directory_field::SCHEMA_REVISION),
+        SCENE_SCHEMA_REVISION,
     )?;
     require_scalar(
-        directory.scalar::<u32>(0, node_scene_directory_field::ROOT_NODE),
+        directory.scalar::<u32>(0, scene_directory_field::ROOT_NODE),
         0,
     )?;
 
-    let node_count_u32 = directory.scalar::<u32>(0, node_scene_directory_field::NODE_COUNT)?;
+    let node_count_u32 = directory.scalar::<u32>(0, scene_directory_field::NODE_COUNT)?;
     require_scalar(
         Some(node_count_u32),
         u32::try_from(expected.canonical_node_count()).ok()?,
@@ -176,18 +257,18 @@ fn validate_node_scene_graph_inner<R>(
         PRESENCE_ABSENT
     };
     require_optional_collection(
-        directory.scalar::<u8>(0, node_scene_directory_field::REFERENCE_PRESENCE),
-        directory.scalar::<u32>(0, node_scene_directory_field::REFERENCE_COUNT),
+        directory.scalar::<u8>(0, scene_directory_field::REFERENCE_PRESENCE),
+        directory.scalar::<u32>(0, scene_directory_field::REFERENCE_COUNT),
         expected_presence,
         source_node_count_u32,
     )?;
     require_scalar(
-        directory.scalar::<u8>(0, node_scene_directory_field::TRANSFORM_PRESENCE),
+        directory.scalar::<u8>(0, scene_directory_field::TRANSFORM_PRESENCE),
         expected_presence,
     )?;
 
     let nodes_ref =
-        directory.record_ref::<NodeSceneNodeTableSchema>(0, node_scene_directory_field::NODES)?;
+        directory.record_ref::<NodeSceneNodeTableSchema>(0, scene_directory_field::NODES)?;
     let nodes = session.canonical_records(nodes_ref)?;
     if nodes.rows() != node_count || nodes.fields() != NODE_SCENE_NODE_FIELD_COUNT {
         return None;
@@ -196,7 +277,7 @@ fn validate_node_scene_graph_inner<R>(
     let (references_ref, references, transforms_ref, transforms) = if has_source_nodes {
         let references_ref = directory.record_ref::<NodeSceneChildReferenceTableSchema>(
             0,
-            node_scene_directory_field::REFERENCES,
+            scene_directory_field::REFERENCES,
         )?;
         let references = session.canonical_records(references_ref)?;
         if references.rows() != source_node_count
@@ -206,11 +287,11 @@ fn validate_node_scene_graph_inner<R>(
         }
         let transforms_ref = directory.sequence_ref::<f32, NodeSceneAuthoredTransformSchema>(
             0,
-            node_scene_directory_field::TRANSFORMS,
+            scene_directory_field::TRANSFORMS,
         )?;
         let transforms = session.canonical_sequence(transforms_ref)?.as_slice();
         require_scalar(
-            directory.scalar::<u32>(0, node_scene_directory_field::TRANSFORM_SCALAR_COUNT),
+            directory.scalar::<u32>(0, scene_directory_field::TRANSFORM_SCALAR_COUNT),
             expected_transform_scalar_count_u32,
         )?;
         if transforms.len() != usize::try_from(expected_transform_scalar_count).ok()? {
@@ -224,16 +305,16 @@ fn validate_node_scene_graph_inner<R>(
         )
     } else {
         require_scalar(
-            directory.scalar::<u8>(0, node_scene_directory_field::REFERENCES),
+            directory.scalar::<u8>(0, scene_directory_field::REFERENCES),
             0,
         )?;
         require_scalar(
-            directory.scalar::<u32>(0, node_scene_directory_field::TRANSFORM_SCALAR_COUNT),
+            directory.scalar::<u32>(0, scene_directory_field::TRANSFORM_SCALAR_COUNT),
             0,
         )?;
         require_scalar(Some(expected_transform_scalar_count_u32), 0)?;
         require_scalar(
-            directory.scalar::<u8>(0, node_scene_directory_field::TRANSFORMS),
+            directory.scalar::<u8>(0, scene_directory_field::TRANSFORMS),
             0,
         )?;
         (None, None, None, None)
@@ -350,18 +431,26 @@ fn validate_node_scene_graph_inner<R>(
 
     require_scalar(Some(child_reference_offset), source_node_count_u32)?;
     require_scalar(
-        directory.scalar::<u32>(0, node_scene_directory_field::SOURCE_ROOT_COUNT),
+        directory.scalar::<u32>(0, scene_directory_field::SOURCE_ROOT_COUNT),
         expected_root_count,
     )?;
     if has_source_nodes && transform_offset != transforms?.len() {
         return None;
     }
 
-    let expected_canonical_blocks = if has_source_nodes {
-        NODE_SCENE_POPULATED_CANONICAL_BLOCK_COUNT
-    } else {
-        NODE_SCENE_REQUIRED_CANONICAL_BLOCK_COUNT
-    };
+    let geometry_ref =
+        directory.record_ref::<SceneGeometryDirectorySchema>(0, scene_directory_field::GEOMETRY)?;
+    let geometry_refs = validate_geometry_graph(
+        session,
+        geometry_ref,
+        nodes_ref,
+        expected,
+        expected_geometry,
+        observe_work,
+    )?;
+
+    let expected_canonical_blocks =
+        expected_scene_canonical_block_count(has_source_nodes, expected_geometry)?;
     observe_work(1)?;
     let evidence = session.outcome_evidence_records(evidence_ref)?;
     if evidence.rows() != 1 || evidence.fields() != NODE_SCENE_EVIDENCE_FIELD_COUNT {
@@ -369,7 +458,7 @@ fn validate_node_scene_graph_inner<R>(
     }
     require_scalar(
         evidence.scalar::<u32>(0, node_scene_evidence_field::SCHEMA_REVISION),
-        NODE_SCENE_SCHEMA_REVISION,
+        SCENE_SCHEMA_REVISION,
     )?;
     require_scalar(
         evidence.scalar::<u32>(0, node_scene_evidence_field::OUTCOME),
@@ -383,13 +472,67 @@ fn validate_node_scene_graph_inner<R>(
         evidence.scalar::<u32>(0, node_scene_evidence_field::NODE_COUNT),
         node_count_u32,
     )?;
+    require_scalar(
+        evidence.scalar::<u32>(0, node_scene_evidence_field::MATERIAL_COUNT),
+        expected_geometry.material_count(),
+    )?;
+    require_scalar(
+        evidence.scalar::<u32>(0, node_scene_evidence_field::LOGICAL_MESH_COUNT),
+        expected_geometry.logical_mesh_count(),
+    )?;
+    require_scalar(
+        evidence.scalar::<u32>(0, node_scene_evidence_field::PRIMITIVE_COUNT),
+        expected_geometry.primitive_count(),
+    )?;
+    require_scalar(
+        evidence.scalar::<u32>(0, node_scene_evidence_field::ATTRIBUTE_COUNT),
+        expected_geometry.attribute_count(),
+    )?;
+    require_scalar(
+        evidence.scalar::<u32>(0, node_scene_evidence_field::MESH_INSTANCE_COUNT),
+        expected_geometry.mesh_instance_count(),
+    )?;
+    require_scalar(
+        evidence.scalar::<u32>(0, node_scene_evidence_field::PAYLOAD_BLOCK_COUNT),
+        expected_geometry.payload_block_count(),
+    )?;
     let source_edge_count = source_node_count.checked_sub(source_root_count)?;
     Some(NodeSceneValidationProof {
         nodes: CanonicalBlockRef::from_store(nodes_ref),
         references: references_ref.map(CanonicalBlockRef::from_store),
         transforms: transforms_ref.map(CanonicalBlockRef::from_store),
+        materials: geometry_refs.materials,
+        logical_meshes: geometry_refs.logical_meshes,
+        primitives: geometry_refs.primitives,
+        attributes: geometry_refs.attributes,
+        mesh_instances: geometry_refs.mesh_instances,
         source_node_count,
         source_root_count,
         source_edge_count,
+        material_count: usize::try_from(expected_geometry.material_count()).ok()?,
+        logical_mesh_count: usize::try_from(expected_geometry.logical_mesh_count()).ok()?,
+        primitive_count: usize::try_from(expected_geometry.primitive_count()).ok()?,
+        attribute_count: usize::try_from(expected_geometry.attribute_count()).ok()?,
+        mesh_instance_count: usize::try_from(expected_geometry.mesh_instance_count()).ok()?,
     })
+}
+
+fn expected_scene_canonical_block_count<R>(
+    has_source_nodes: bool,
+    geometry: &ValidatedGeometryBatch<'_, R>,
+) -> Option<u32> {
+    let node_optional_blocks = if has_source_nodes { 2_u32 } else { 0 };
+    let geometry_table_blocks = [
+        geometry.material_count(),
+        geometry.logical_mesh_count(),
+        geometry.primitive_count(),
+        geometry.attribute_count(),
+        geometry.mesh_instance_count(),
+    ]
+    .into_iter()
+    .try_fold(0_u32, |count, rows| count.checked_add(u32::from(rows != 0)))?;
+    3_u32
+        .checked_add(node_optional_blocks)?
+        .checked_add(geometry_table_blocks)?
+        .checked_add(geometry.payload_block_count())
 }

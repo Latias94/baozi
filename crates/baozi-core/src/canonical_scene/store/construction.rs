@@ -23,9 +23,11 @@ use baozi_operation::{
 };
 use thiserror::Error;
 
+use crate::SceneValidationLimits;
 use crate::identity::{ReservedSceneGeneration, SceneGenerationError, SceneGenerationId};
 use crate::math::Mat4;
 
+use super::production::{SceneAuthoringBatch, SceneInputPreflight, SceneInputPreflightError};
 use super::schema::{
     AuthoredMatrixSchema, CANONICAL_BLOCK_COUNT, CanonicalBlockRef, DIRECTORY_FIELD_COUNT,
     DirectorySchema, EVIDENCE_FIELD_COUNT, EVIDENCE_OUTCOME_CANDIDATE, MATRIX_SCALAR_COUNT,
@@ -92,6 +94,12 @@ impl OperationOwner for SceneConstructionOwner {}
 
 type SceneStoreOperation =
     RetainedStoreOperation<SceneConstructionOwner, SceneConstructionPhase, SceneConstructionUnit>;
+type SceneStoreControlCheckpoint<'a> = baozi_operation::RetainedStoreControlCheckpoint<
+    'a,
+    SceneConstructionOwner,
+    SceneConstructionPhase,
+    SceneConstructionUnit,
+>;
 type SceneStoreAssembly = RetainedStorePublicationAssembly<
     SceneConstructionOwner,
     SceneConstructionPhase,
@@ -134,6 +142,8 @@ pub(crate) struct SceneConstructionLimits {
 
 #[derive(Debug, Error)]
 pub(crate) enum SceneConstructionStartError {
+    #[error("canonical Scene input preflight failed before operation start")]
+    InputPreflight(#[from] SceneInputPreflightError),
     #[error("canonical Scene construction-brand space is exhausted")]
     BrandExhausted,
     #[error("a private physical storage account could not be created")]
@@ -555,6 +565,14 @@ pub(crate) struct SceneConstructionOperation<'scene> {
     lineage: SceneConstructionLineage<'scene>,
 }
 
+/// A fresh operation sealed to the exact producer description admitted before startup.
+#[must_use = "the admitted Scene input must be validated or deliberately dropped"]
+pub(in crate::canonical_scene::store) struct SceneAuthoringOperation<'input> {
+    operation: SceneConstructionOperation<'static>,
+    input: SceneAuthoringBatch<'input>,
+    validation_limits: SceneValidationLimits,
+}
+
 #[cfg(test)]
 pub(super) struct ScaledComplexFixtureOperation {
     operation: SceneConstructionOperation<'static>,
@@ -578,6 +596,50 @@ impl SceneConstructionOperation<'static> {
         limits: SceneConstructionLimits,
     ) -> Result<Self, SceneConstructionStartError> {
         Self::start(account, limits, SceneConstructionLineage::Fresh)
+    }
+
+    pub(in crate::canonical_scene::store) fn with_account_for_scene_input<'input>(
+        account: &PhysicalStorageAccount,
+        limits: SceneConstructionLimits,
+        input: SceneAuthoringBatch<'input>,
+        validation_limits: SceneValidationLimits,
+    ) -> Result<SceneAuthoringOperation<'input>, SceneConstructionStartError> {
+        let preflight = SceneInputPreflight::try_new(input, validation_limits)?;
+        let operation = Self::start_with_control_and_attribution_slots(
+            account,
+            limits,
+            SceneConstructionLineage::Fresh,
+            OperationControl::default(),
+            preflight.terminal_attribution_slots(),
+        )?;
+        Ok(SceneAuthoringOperation {
+            operation,
+            input,
+            validation_limits,
+        })
+    }
+
+    #[cfg(test)]
+    pub(super) fn with_account_and_cancellation_for_scene_input_for_test<'input>(
+        account: &PhysicalStorageAccount,
+        limits: SceneConstructionLimits,
+        input: SceneAuthoringBatch<'input>,
+        validation_limits: SceneValidationLimits,
+        cancellation: impl baozi_operation::CancellationSignal,
+    ) -> Result<SceneAuthoringOperation<'input>, SceneConstructionStartError> {
+        let preflight = SceneInputPreflight::try_new(input, validation_limits)?;
+        let operation = Self::start_with_control_and_attribution_slots(
+            account,
+            limits,
+            SceneConstructionLineage::Fresh,
+            OperationControl::default().with_cancellation(cancellation),
+            preflight.terminal_attribution_slots(),
+        )?;
+        Ok(SceneAuthoringOperation {
+            operation,
+            input,
+            validation_limits,
+        })
     }
 
     #[cfg(test)]

@@ -3,6 +3,8 @@
     reason = "node authoring failures retain bounded control evidence inline without a failure-path allocation"
 )]
 
+pub(super) mod geometry;
+
 use std::error::Error;
 use std::fmt;
 
@@ -32,10 +34,99 @@ const LOGICAL_REFERENCE_BYTES: u64 = 4;
 // This is the schema-owned logical representation, not a retained allocation envelope. It counts
 // stable scalar widths and one logical identity width per reachable reference while excluding table
 // capacity, slot ordinals, alignment, and allocator metadata.
-const NODE_SCENE_DIRECTORY_BASE_BYTES: u64 =
-    (6 * LOGICAL_U32_BYTES) + (2 * LOGICAL_U8_BYTES) + LOGICAL_REFERENCE_BYTES;
-const NODE_SCENE_DIRECTORY_POPULATED_REFERENCE_BYTES: u64 = 2 * LOGICAL_REFERENCE_BYTES;
+const SCENE_DIRECTORY_BASE_BYTES: u64 =
+    (6 * LOGICAL_U32_BYTES) + (2 * LOGICAL_U8_BYTES) + (2 * LOGICAL_REFERENCE_BYTES);
+const SCENE_DIRECTORY_EMPTY_OPTION_BYTES: u64 = 2 * LOGICAL_U8_BYTES;
+const SCENE_DIRECTORY_POPULATED_REFERENCE_BYTES: u64 = 2 * LOGICAL_REFERENCE_BYTES;
+pub(super) const EMPTY_GEOMETRY_DIRECTORY_BYTES: u64 =
+    LOGICAL_U32_BYTES + (5 * (LOGICAL_U32_BYTES + LOGICAL_U8_BYTES));
+
+#[derive(Clone, Copy)]
+pub(super) struct NodeShapeScratchEnvelope {
+    peak_bytes: u64,
+    retained_bytes: u64,
+}
+
+impl NodeShapeScratchEnvelope {
+    pub(super) const fn peak_bytes(self) -> u64 {
+        self.peak_bytes
+    }
+
+    pub(super) const fn retained_bytes(self) -> u64 {
+        self.retained_bytes
+    }
+}
+
+pub(super) fn node_shape_scratch_envelope(
+    input: NodeAuthoringBatch<'_>,
+) -> Result<NodeShapeScratchEnvelope, NodeAuthoringSemanticError> {
+    let count = input.nodes().len();
+    let canonical_order = scratch_envelope(
+        CapacityPlan::for_type::<usize>(0, 0, count).map_err(|cause| {
+            NodeAuthoringSemanticError::ScratchCapacity {
+                resource: "canonical node order",
+                cause,
+            }
+        })?,
+        "canonical node order",
+    )?;
+    let canonical_index = scratch_envelope(
+        CapacityPlan::for_type::<u32>(0, 0, count).map_err(|cause| {
+            NodeAuthoringSemanticError::ScratchCapacity {
+                resource: "canonical index by local node",
+                cause,
+            }
+        })?,
+        "canonical index by local node",
+    )?;
+    let visit_state = scratch_envelope(
+        CapacityPlan::for_type::<VisitState>(0, 0, count).map_err(|cause| {
+            NodeAuthoringSemanticError::ScratchCapacity {
+                resource: "node graph visit state",
+                cause,
+            }
+        })?,
+        "node graph visit state",
+    )?;
+    let child_ranges = scratch_envelope(
+        CapacityPlan::for_type::<ChildRange>(0, 0, count).map_err(|cause| {
+            NodeAuthoringSemanticError::ScratchCapacity {
+                resource: "child ranges by local node",
+                cause,
+            }
+        })?,
+        "child ranges by local node",
+    )?;
+    let ordered_children = scratch_envelope(
+        CapacityPlan::for_type::<usize>(0, 0, count).map_err(|cause| {
+            NodeAuthoringSemanticError::ScratchCapacity {
+                resource: "ordered child table",
+                cause,
+            }
+        })?,
+        "ordered child table",
+    )?;
+    let peak_bytes = checked_sum_bytes(
+        [
+            canonical_order,
+            canonical_index,
+            visit_state,
+            child_ranges,
+            ordered_children,
+        ],
+        "node shape scratch envelope",
+    )?;
+    let retained_bytes = checked_sum_bytes(
+        [canonical_order, canonical_index, child_ranges],
+        "retained node shape scratch envelope",
+    )?;
+    Ok(NodeShapeScratchEnvelope {
+        peak_bytes,
+        retained_bytes,
+    })
+}
 const NODE_SCENE_NODE_BASE_BYTES: u64 = (5 * LOGICAL_U32_BYTES) + (2 * LOGICAL_U8_BYTES);
+const NODE_SCENE_SYNTHETIC_TRANSFORM_SLOT_BYTES: u64 = LOGICAL_U8_BYTES;
 const NODE_SCENE_NODE_TRANSFORM_REFERENCE_BYTES: u64 = LOGICAL_REFERENCE_BYTES;
 const NODE_SCENE_REFERENCE_BYTES: u64 = 2 * LOGICAL_U32_BYTES;
 
@@ -148,6 +239,8 @@ pub(in crate::canonical_scene::store) struct ValidatedNodeBatch<'a, R> {
     matrix_scalar_count: u64,
     trs_scalar_count: u64,
     canonical_bytes: u64,
+    validation_work: u64,
+    scratch_bytes: u64,
     // Compiled storage must be destroyed before the reservation covering it.
     canonical_order: Vec<usize>,
     canonical_index_by_local: Vec<u32>,
@@ -180,6 +273,23 @@ impl<R> ValidatedNodeBatch<'_, R> {
 
     pub(in crate::canonical_scene::store) const fn canonical_bytes(&self) -> u64 {
         self.canonical_bytes
+    }
+
+    pub(super) const fn canonical_non_geometry_bytes(&self) -> Option<u64> {
+        self.canonical_bytes
+            .checked_sub(EMPTY_GEOMETRY_DIRECTORY_BYTES)
+    }
+
+    pub(in crate::canonical_scene::store) const fn semantic_cell_count(&self) -> u64 {
+        self.matrix_scalar_count + self.trs_scalar_count
+    }
+
+    pub(in crate::canonical_scene::store) const fn validation_work(&self) -> u64 {
+        self.validation_work
+    }
+
+    pub(in crate::canonical_scene::store) const fn scratch_bytes(&self) -> u64 {
+        self.scratch_bytes
     }
 
     pub(in crate::canonical_scene::store) fn canonical_order(&self) -> &[usize] {
@@ -217,6 +327,9 @@ impl<R> fmt::Debug for ValidatedNodeBatch<'_, R> {
             .field("canonical_order", &self.canonical_order)
             .field("canonical_index_by_local", &self.canonical_index_by_local)
             .field("child_ranges_by_local", &self.child_ranges_by_local)
+            .field("canonical_bytes", &self.canonical_bytes)
+            .field("validation_work", &self.validation_work)
+            .field("scratch_bytes", &self.scratch_bytes)
             .field("reservation", &"<held>")
             .finish()
     }
@@ -762,6 +875,8 @@ where
         matrix_scalar_count: context.matrix_scalars,
         trs_scalar_count: context.trs_scalars,
         canonical_bytes,
+        validation_work: context.work,
+        scratch_bytes: retained_bytes,
         canonical_order,
         canonical_index_by_local,
         child_ranges_by_local,
@@ -1009,10 +1124,14 @@ fn node_scene_logical_bytes(
     }
 
     let directory_bytes = if source_node_count == 0 {
-        NODE_SCENE_DIRECTORY_BASE_BYTES
+        SCENE_DIRECTORY_BASE_BYTES
+            .checked_add(SCENE_DIRECTORY_EMPTY_OPTION_BYTES)
+            .ok_or(NodeAuthoringSemanticError::AccountingOverflow {
+                dimension: "canonical directory",
+            })?
     } else {
-        NODE_SCENE_DIRECTORY_BASE_BYTES
-            .checked_add(NODE_SCENE_DIRECTORY_POPULATED_REFERENCE_BYTES)
+        SCENE_DIRECTORY_BASE_BYTES
+            .checked_add(SCENE_DIRECTORY_POPULATED_REFERENCE_BYTES)
             .ok_or(NodeAuthoringSemanticError::AccountingOverflow {
                 dimension: "canonical directory",
             })?
@@ -1024,7 +1143,8 @@ fn node_scene_logical_bytes(
             dimension: "canonical node records",
         })?;
     let node_bytes = NODE_SCENE_NODE_BASE_BYTES
-        .checked_add(source_node_bytes)
+        .checked_add(NODE_SCENE_SYNTHETIC_TRANSFORM_SLOT_BYTES)
+        .and_then(|bytes| bytes.checked_add(source_node_bytes))
         .ok_or(NodeAuthoringSemanticError::AccountingOverflow {
             dimension: "canonical node records",
         })?;
@@ -1042,6 +1162,7 @@ fn node_scene_logical_bytes(
     checked_sum_bytes(
         [
             directory_bytes,
+            EMPTY_GEOMETRY_DIRECTORY_BYTES,
             node_bytes,
             reference_bytes,
             transform_bytes,

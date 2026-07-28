@@ -1,8 +1,8 @@
 use baozi_operation::{
     OutcomeEvidenceRecordRef, PublishedCanonicalStore, PublishedOutcomeEvidenceStore,
     PublishedRichFailureStore, RecordBlock, RetainedStoreReservation, RetainedStoreWorkControl,
-    StoreFailureAssembly, StoreFailureValidation, StoreLedgerEvidence, StoreWorkError,
-    ValidatedStoreSuccess,
+    StoreFailureAssembly, StoreFailureValidation, StoreLedgerEvidence, StoreRuntimeError,
+    StoreWorkError, ValidatedStoreSuccess,
 };
 use thiserror::Error;
 
@@ -10,18 +10,20 @@ use crate::SCENE_VALIDATION_POLL_INTERVAL;
 use crate::identity::{ReservedSceneGeneration, SceneGenerationId};
 
 use super::super::production::{
-    NodeAuthoringFailure, OperationAuthoringControlError, ValidatedNodeBatch,
+    GeometryAuthoringFailure, NodeAuthoringFailure, OperationAuthoringControlError,
+    SceneAuthoringAggregateError, ValidatedGeometryBatch, ValidatedNodeBatch,
 };
 use super::super::schema::{
-    CanonicalBlockRef, NodeSceneDirectorySchema, NodeSceneOutcomeEvidenceSchema,
+    CanonicalBlockRef, NodeSceneOutcomeEvidenceSchema, SceneDirectorySchema,
 };
 use super::super::validation::NodeSceneValidationProof;
 use super::{
     ConstructionBrand, PreparedTracerSceneFallback, SceneConstructionOperation,
     SceneConstructionOwner, SceneConstructionPhase, SceneConstructionUnit, SceneStoreAssembly,
-    SceneStoreKeys, SceneStoreOperation, TracerSceneFallback,
+    SceneStoreControlCheckpoint, SceneStoreKeys, SceneStoreOperation, TracerSceneFallback,
 };
 
+mod geometry;
 mod materialization;
 mod publication;
 pub(in crate::canonical_scene::store) mod semantic;
@@ -40,6 +42,7 @@ const NODE_SCENE_STORAGE_REJECTION_CODE: u32 = 0x5343_1005;
 #[derive(Clone, Copy)]
 struct NodeSceneBuildFaults {
     alter_first_authored_transform: bool,
+    alter_first_geometry_f32: bool,
     outcome_evidence_commitment: u64,
 }
 
@@ -47,6 +50,7 @@ impl NodeSceneBuildFaults {
     const fn none() -> Self {
         Self {
             alter_first_authored_transform: false,
+            alter_first_geometry_f32: false,
             outcome_evidence_commitment: 1,
         }
     }
@@ -67,11 +71,27 @@ impl NodeSceneBuildFaults {
         }
     }
 
+    #[cfg(test)]
+    const fn altered_geometry_f32() -> Self {
+        Self {
+            alter_first_geometry_f32: true,
+            ..Self::none()
+        }
+    }
+
     fn transform_scalar(&mut self, value: f32) -> f32 {
         if !self.alter_first_authored_transform {
             return value;
         }
         self.alter_first_authored_transform = false;
+        f32::from_bits(value.to_bits() ^ 1)
+    }
+
+    fn geometry_f32(&mut self, value: f32) -> f32 {
+        if !self.alter_first_geometry_f32 {
+            return value;
+        }
+        self.alter_first_geometry_f32 = false;
         f32::from_bits(value.to_bits() ^ 1)
     }
 }
@@ -131,6 +151,32 @@ impl NodeSceneWorkMeter {
         self.poll_now(control)
     }
 
+    fn observe_checkpoint(
+        &mut self,
+        control: &mut SceneStoreControlCheckpoint<'_>,
+        keys: SceneStoreKeys,
+        amount: u64,
+    ) -> Result<(), StoreRuntimeError> {
+        if amount == 0 {
+            return Ok(());
+        }
+        if !self.started {
+            self.poll_checkpoint_now(control)?;
+        }
+        let mut remaining = amount;
+        while remaining != 0 {
+            let until_poll = SCENE_VALIDATION_POLL_INTERVAL - self.work_since_poll;
+            let chunk = remaining.min(until_poll);
+            control.charge_observed(keys.dimension, chunk)?;
+            self.work_since_poll += chunk;
+            remaining -= chunk;
+            if self.work_since_poll == SCENE_VALIDATION_POLL_INTERVAL {
+                self.poll_checkpoint_now(control)?;
+            }
+        }
+        Ok(())
+    }
+
     fn poll_now(
         &mut self,
         control: &mut RetainedStoreWorkControl<
@@ -145,6 +191,16 @@ impl NodeSceneWorkMeter {
         self.work_since_poll = 0;
         Ok(())
     }
+
+    fn poll_checkpoint_now(
+        &mut self,
+        control: &mut SceneStoreControlCheckpoint<'_>,
+    ) -> Result<(), StoreRuntimeError> {
+        control.poll().map_err(StoreRuntimeError::Control)?;
+        self.started = true;
+        self.work_since_poll = 0;
+        Ok(())
+    }
 }
 
 type ValidatedNodeStoreSuccess = ValidatedStoreSuccess<
@@ -152,13 +208,13 @@ type ValidatedNodeStoreSuccess = ValidatedStoreSuccess<
     SceneConstructionPhase,
     SceneConstructionUnit,
     RecordBlock,
-    NodeSceneDirectorySchema,
+    SceneDirectorySchema,
     RecordBlock,
     NodeSceneOutcomeEvidenceSchema,
 >;
 type PreparedNodeStoreSuccess = baozi_operation::PreparedStoreSuccess<
     RecordBlock,
-    NodeSceneDirectorySchema,
+    SceneDirectorySchema,
     RecordBlock,
     NodeSceneOutcomeEvidenceSchema,
 >;
@@ -188,16 +244,22 @@ struct FreshNodeSceneOwner {
 /// A validated node-domain input coupled to the exact fresh operation that paid for it.
 #[must_use = "the validated node Scene construction must be prepared or deliberately dropped"]
 pub(in crate::canonical_scene::store) struct ValidatedNodeSceneConstruction<'input> {
+    geometry: ValidatedGeometryBatch<'input, RetainedStoreReservation<SceneConstructionOwner>>,
+    nodes: ValidatedNodeBatch<'input, RetainedStoreReservation<SceneConstructionOwner>>,
+    // The operation owner must outlive every compiled-plan reservation above.
     owner: FreshNodeSceneOwner,
-    batch: ValidatedNodeBatch<'input, RetainedStoreReservation<SceneConstructionOwner>>,
 }
 
 #[derive(Debug, Error)]
 pub(in crate::canonical_scene::store) enum NodeSceneConstructionRejection {
     #[error("derived Scene lineage cannot author a fresh node-domain Scene")]
     DerivedLineage,
-    #[error("node-domain authoring validation rejected the batch")]
-    Authoring(#[source] NodeAuthoringFailure<OperationAuthoringControlError>),
+    #[error("node-domain authoring validation rejected the Scene batch")]
+    NodeAuthoring(#[source] NodeAuthoringFailure<OperationAuthoringControlError>),
+    #[error("geometry-domain authoring validation rejected the Scene batch")]
+    GeometryAuthoring(#[source] GeometryAuthoringFailure<OperationAuthoringControlError>),
+    #[error("aggregate authoring validation rejected the Scene batch")]
+    Aggregate(#[source] SceneAuthoringAggregateError),
 }
 
 /// A consumed validation attempt which can only terminate as minimal fallback.
@@ -209,7 +271,7 @@ pub(in crate::canonical_scene::store) struct RejectedNodeSceneConstruction<'scen
 
 struct NodeSceneDraft {
     brand: ConstructionBrand,
-    directory: CanonicalBlockRef<NodeSceneDirectorySchema>,
+    directory: CanonicalBlockRef<SceneDirectorySchema>,
 }
 
 struct NodeSceneCandidateOwner {
@@ -222,16 +284,26 @@ struct NodeSceneCandidate {
     owner: NodeSceneCandidateOwner,
     draft: NodeSceneDraft,
     evidence: OutcomeEvidenceRecordRef<NodeSceneOutcomeEvidenceSchema>,
-    canonical_block_count: u32,
-    node_count: u32,
+    evidence_counts: SceneEvidenceCounts,
+}
+
+#[derive(Clone, Copy)]
+pub(in crate::canonical_scene::store) struct SceneEvidenceCounts {
+    pub(in crate::canonical_scene::store) canonical_block_count: u32,
+    pub(in crate::canonical_scene::store) node_count: u32,
+    pub(in crate::canonical_scene::store) material_count: u32,
+    pub(in crate::canonical_scene::store) logical_mesh_count: u32,
+    pub(in crate::canonical_scene::store) primitive_count: u32,
+    pub(in crate::canonical_scene::store) attribute_count: u32,
+    pub(in crate::canonical_scene::store) mesh_instance_count: u32,
+    pub(in crate::canonical_scene::store) payload_block_count: u32,
 }
 
 struct PendingNodeSceneCommitments;
 
 struct ValidatedNodeSceneCandidate {
     store: ValidatedNodeStoreSuccess,
-    canonical_block_count: u32,
-    node_count: u32,
+    evidence_counts: SceneEvidenceCounts,
     proof: NodeSceneValidationProof,
     pending_commitments: PendingNodeSceneCommitments,
 }
@@ -260,7 +332,7 @@ pub(in crate::canonical_scene::store) enum PreparedNodeSceneConstruction {
 /// Private inspector over a centrally validated node-domain Scene.
 pub(in crate::canonical_scene::store) struct ValidatedNodeScene {
     generation: SceneGenerationId,
-    canonical: PublishedCanonicalStore<RecordBlock, NodeSceneDirectorySchema>,
+    canonical: PublishedCanonicalStore<RecordBlock, SceneDirectorySchema>,
     proof: NodeSceneValidationProof,
     #[cfg(test)]
     semantic_read_fault: Option<semantic::NodeSceneSemanticReadFault>,

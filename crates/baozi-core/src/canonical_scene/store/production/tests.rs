@@ -14,6 +14,9 @@ use super::plan::{
 };
 use super::*;
 
+mod geometry;
+mod scene;
+
 #[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
 enum TestControlError {
     #[error("test control cancelled validation")]
@@ -225,7 +228,7 @@ fn valid_forest_compiles_parent_before_child_order_and_counts() {
     assert_eq!(batch.reference_count(), 5);
     assert_eq!(batch.matrix_scalar_count(), 32);
     assert_eq!(batch.trs_scalar_count(), 30);
-    assert_eq!(batch.canonical_bytes(), 478);
+    assert_eq!(batch.canonical_bytes(), 512);
     assert_eq!(batch.canonical_order(), &[2, 0, 3, 1, 4]);
     assert_eq!(batch.canonical_index_by_local(), &[2, 4, 1, 3, 5]);
     assert_eq!(control.live.get(), 1);
@@ -358,7 +361,7 @@ fn present_empty_is_valid_and_absent_is_not() {
     let batch = validate(
         Presence::Present(&roots),
         &nodes,
-        SceneValidationLimits::default().with_max_canonical_bytes(52),
+        SceneValidationLimits::default().with_max_canonical_bytes(88),
         &mut control,
     )
     .expect("present empty forest");
@@ -366,7 +369,7 @@ fn present_empty_is_valid_and_absent_is_not() {
     assert_eq!(batch.reference_count(), 0);
     assert_eq!(batch.matrix_scalar_count(), 0);
     assert_eq!(batch.trs_scalar_count(), 0);
-    assert_eq!(batch.canonical_bytes(), 52);
+    assert_eq!(batch.canonical_bytes(), 88);
     assert!(batch.canonical_order().is_empty());
     assert!(batch.canonical_index_by_local().is_empty());
     drop(batch);
@@ -598,7 +601,7 @@ fn node_edge_semantic_reference_scratch_and_work_limits_are_typed() {
         (
             Presence::Present(roots.as_slice()),
             nodes.as_slice(),
-            SceneValidationLimits::default().with_max_canonical_bytes(133),
+            SceneValidationLimits::default().with_max_canonical_bytes(167),
             NodeAuthoringLimit::CanonicalBytes,
         ),
         (

@@ -9,6 +9,14 @@ use crate::entity::AuthoredTransform;
 
 use super::ValidatedNodeScene;
 
+mod geometry;
+
+pub(in crate::canonical_scene::store) use geometry::{
+    NodeSceneGeometryAttributePayload, NodeSceneGeometryAttributeSemantic, NodeSceneGeometryCursor,
+    NodeSceneGeometryF32Cursor, NodeSceneGeometryNormalization, NodeSceneGeometryPayloadKind,
+    NodeSceneGeometryScalarKind, NodeSceneGeometryU32Cursor,
+};
+
 pub(in crate::canonical_scene::store) type NodeSceneSemanticResult<T> =
     Result<T, NodeSceneSemanticError>;
 
@@ -37,22 +45,23 @@ impl NodeSceneSemanticError {
 
 /// One-time typed projections governed by the central validation proof.
 ///
-/// This layer closes the constant-time physical table shape against the proof,
-/// but deliberately does not revalidate directory semantics, topology,
-/// identity, or strict-forward order. Traversal then fails closed whenever a
-/// proof-bound scalar or transform slice cannot be read mechanically.
+/// This layer closes the constant-time physical table shape against the proof.
+/// Traversal decodes only proof-bound fields and fails closed whenever a typed
+/// scalar, cross-table reference, transform slice, or payload leaf cannot be
+/// read mechanically.
 #[must_use = "the semantic view must be traversed or deliberately discarded"]
 pub(in crate::canonical_scene::store) struct NodeSceneSemanticView<'scene> {
     nodes: CanonicalRecordView<'scene>,
     references: Option<CanonicalRecordView<'scene>>,
     transforms: Option<SequenceView<'scene, f32>>,
+    geometry: geometry::NodeSceneGeometryTables<'scene>,
     proof: NodeSceneValidationProof,
     #[cfg(test)]
     read_fault: Option<NodeSceneSemanticReadFault>,
 }
 
 impl ValidatedNodeScene {
-    /// Resolves each typed retained view once under the attached validation proof.
+    /// Resolves fixed typed tables once; payload leaves remain row-demand driven.
     pub(in crate::canonical_scene::store) fn semantic_view(
         &self,
     ) -> NodeSceneSemanticResult<NodeSceneSemanticView<'_>> {
@@ -122,6 +131,7 @@ impl<'scene> NodeSceneSemanticView<'scene> {
             ),
             None => None,
         };
+        let geometry = geometry::NodeSceneGeometryTables::try_new(&scene.canonical, proof)?;
 
         let expected_node_rows = proof
             .source_node_count()
@@ -178,6 +188,7 @@ impl<'scene> NodeSceneSemanticView<'scene> {
             nodes,
             references,
             transforms,
+            geometry,
             proof,
             #[cfg(test)]
             read_fault: scene.semantic_read_fault,
@@ -196,6 +207,26 @@ impl<'scene> NodeSceneSemanticView<'scene> {
         self.proof.source_edge_count()
     }
 
+    pub(in crate::canonical_scene::store) const fn material_count(&self) -> usize {
+        self.proof.material_count()
+    }
+
+    pub(in crate::canonical_scene::store) const fn logical_mesh_count(&self) -> usize {
+        self.proof.logical_mesh_count()
+    }
+
+    pub(in crate::canonical_scene::store) const fn primitive_count(&self) -> usize {
+        self.proof.primitive_count()
+    }
+
+    pub(in crate::canonical_scene::store) const fn attribute_count(&self) -> usize {
+        self.proof.attribute_count()
+    }
+
+    pub(in crate::canonical_scene::store) const fn mesh_instance_count(&self) -> usize {
+        self.proof.mesh_instance_count()
+    }
+
     pub(in crate::canonical_scene::store) fn into_cursor(
         self,
     ) -> NodeSceneSemanticResult<NodeSceneSemanticCursor<'scene>> {
@@ -211,6 +242,7 @@ impl<'scene> NodeSceneSemanticView<'scene> {
             nodes: self.nodes,
             references: self.references,
             transforms: self.transforms,
+            geometry: self.geometry,
             proof: self.proof,
             roots: Some(roots),
             next_node_index: 0,
@@ -226,6 +258,7 @@ pub(in crate::canonical_scene::store) struct NodeSceneSemanticCursor<'scene> {
     nodes: CanonicalRecordView<'scene>,
     references: Option<CanonicalRecordView<'scene>>,
     transforms: Option<SequenceView<'scene, f32>>,
+    geometry: geometry::NodeSceneGeometryTables<'scene>,
     proof: NodeSceneValidationProof,
     roots: Option<NodeSceneChildCursor<'scene>>,
     next_node_index: usize,
@@ -336,7 +369,16 @@ impl<'scene> NodeSceneSemanticCursor<'scene> {
         }))
     }
 
-    pub(in crate::canonical_scene::store) fn finish(self) -> NodeSceneSemanticResult<()> {
+    /// Closes node traversal and advances into the geometry tables governed by
+    /// the same immutable validation proof.
+    pub(in crate::canonical_scene::store) fn into_geometry(
+        self,
+    ) -> NodeSceneSemanticResult<NodeSceneGeometryCursor<'scene>> {
+        self.ensure_node_phase_finished()?;
+        Ok(self.geometry.into_cursor(self.proof))
+    }
+
+    fn ensure_node_phase_finished(&self) -> NodeSceneSemanticResult<()> {
         if self.roots.is_some() {
             return Err(invariant("synthetic-root cursor was not taken"));
         }

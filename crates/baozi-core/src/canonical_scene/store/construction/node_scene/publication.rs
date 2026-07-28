@@ -4,7 +4,7 @@ use baozi_operation::{
     StoreControlledSuccessValidation, StoreFailureValidation, StoreRuntimeError, StoreWorkError,
 };
 
-use crate::canonical_scene::store::production::ValidatedNodeBatch;
+use crate::canonical_scene::store::production::{ValidatedGeometryBatch, ValidatedNodeBatch};
 use crate::canonical_scene::store::schema::NodeSceneOutcomeEvidenceSchema;
 use crate::canonical_scene::store::validation::{
     validate_node_scene_evidence_graph, validate_node_scene_graph,
@@ -23,13 +23,14 @@ use super::{
     NodeSceneConstructionTerminal, NodeSceneRichFailure, NodeSceneStoreFailureAssembly,
     NodeSceneStoreFailureValidation, NodeSceneSuccessParts, NodeSceneSuccessReport,
     NodeSceneWorkMeter, PendingNodeSceneCommitments, PreparedNodeSceneConstruction,
-    PreparedNodeSceneRichFailure, PreparedNodeSceneSuccess, ValidatedNodeScene,
-    ValidatedNodeSceneCandidate,
+    PreparedNodeSceneRichFailure, PreparedNodeSceneSuccess, SceneEvidenceCounts,
+    ValidatedNodeScene, ValidatedNodeSceneCandidate,
 };
 
 pub(super) fn prepare_node_scene_candidate<'input>(
     candidate: NodeSceneCandidate,
-    batch: ValidatedNodeBatch<'input, RetainedStoreReservation<SceneConstructionOwner>>,
+    nodes: ValidatedNodeBatch<'input, RetainedStoreReservation<SceneConstructionOwner>>,
+    geometry: ValidatedGeometryBatch<'input, RetainedStoreReservation<SceneConstructionOwner>>,
     mut work: NodeSceneWorkMeter,
     reserve_generation: impl FnOnce() -> Result<ReservedSceneGeneration, SceneGenerationError>,
 ) -> Result<PreparedNodeSceneConstruction, SceneConstructionError> {
@@ -42,22 +43,33 @@ pub(super) fn prepare_node_scene_candidate<'input>(
             },
         draft,
         evidence,
-        canonical_block_count,
-        node_count,
+        evidence_counts,
     } = candidate;
+    if u32::try_from(assembly.canonical_len()) != Ok(evidence_counts.canonical_block_count)
+        || assembly.outcome_evidence_len() != 1
+    {
+        drop(geometry);
+        drop(nodes);
+        return prepare_node_rich_failure_from_assembly(
+            assembly,
+            evidence,
+            evidence_counts,
+            NODE_SCENE_BUILD_INVARIANT_CODE,
+        );
+    }
     let pending_commitments = match register_node_scene_canonical_commitment(
         &mut assembly,
         keys,
-        canonical_block_count,
+        evidence_counts.canonical_block_count,
     ) {
         Ok(commitments) => commitments,
         Err(_) => {
-            drop(batch);
+            drop(geometry);
+            drop(nodes);
             return prepare_node_rich_failure_from_assembly(
                 assembly,
                 evidence,
-                canonical_block_count,
-                node_count,
+                evidence_counts,
                 NODE_SCENE_COMMITMENT_REJECTION_CODE,
             );
         }
@@ -70,9 +82,14 @@ pub(super) fn prepare_node_scene_candidate<'input>(
         evidence,
         |session, directory, evidence, control| {
             proof = if brand_matches {
-                validate_node_scene_graph(session, directory, evidence, &batch, |amount| {
-                    work.observe(control, amount)
-                })?
+                validate_node_scene_graph(
+                    session,
+                    directory,
+                    evidence,
+                    &nodes,
+                    &geometry,
+                    |amount| work.observe(control, amount),
+                )?
             } else {
                 None
             };
@@ -81,7 +98,8 @@ pub(super) fn prepare_node_scene_candidate<'input>(
         },
     );
     // The central validator is the final reader of the compiled plan and its reservation.
-    drop(batch);
+    drop(geometry);
+    drop(nodes);
     match validation {
         StoreControlledSuccessValidation::InvalidWorkDimension { assembly, cause } => {
             prepare_node_minimal_fallback_from_assembly(assembly, node_scene_failure_code(&cause))
@@ -90,8 +108,7 @@ pub(super) fn prepare_node_scene_candidate<'input>(
             Some(proof) => prepare_validated_node_scene(
                 ValidatedNodeSceneCandidate {
                     store,
-                    canonical_block_count,
-                    node_count,
+                    evidence_counts,
                     proof,
                     pending_commitments,
                 },
@@ -99,22 +116,17 @@ pub(super) fn prepare_node_scene_candidate<'input>(
             ),
             None => prepare_node_rich_failure(
                 store.downgrade_to_rich_failure(NODE_SCENE_BUILD_INVARIANT_CODE),
-                canonical_block_count,
-                node_count,
+                evidence_counts,
                 NODE_SCENE_BUILD_INVARIANT_CODE,
             ),
         },
-        StoreControlledSuccessValidation::Rejected(failure) => prepare_node_rich_failure(
-            failure,
-            canonical_block_count,
-            node_count,
-            NODE_SCENE_BUILD_INVARIANT_CODE,
-        ),
+        StoreControlledSuccessValidation::Rejected(failure) => {
+            prepare_node_rich_failure(failure, evidence_counts, NODE_SCENE_BUILD_INVARIANT_CODE)
+        }
         StoreControlledSuccessValidation::Interrupted { failure, cause } => {
             prepare_node_rich_failure(
                 failure,
-                canonical_block_count,
-                node_count,
+                evidence_counts,
                 controlled_interruption_code(&cause),
             )
         }
@@ -205,8 +217,7 @@ fn prepare_validated_node_scene(
 ) -> Result<PreparedNodeSceneConstruction, SceneConstructionError> {
     let ValidatedNodeSceneCandidate {
         store,
-        canonical_block_count,
-        node_count,
+        evidence_counts,
         proof,
         pending_commitments,
     } = candidate;
@@ -215,8 +226,7 @@ fn prepare_validated_node_scene(
         Err(SceneGenerationError::Exhausted) => {
             return prepare_node_rich_failure(
                 store.downgrade_to_rich_failure(GENERATION_EXHAUSTED_CODE),
-                canonical_block_count,
-                node_count,
+                evidence_counts,
                 GENERATION_EXHAUSTED_CODE,
             );
         }
@@ -247,14 +257,13 @@ fn prepare_validated_node_scene(
 
 fn prepare_node_rich_failure(
     failure: NodeSceneStoreFailureAssembly,
-    canonical_block_count: u32,
-    node_count: u32,
+    evidence_counts: SceneEvidenceCounts,
     cause: u32,
 ) -> Result<PreparedNodeSceneConstruction, SceneConstructionError> {
     let evidence = failure.evidence_root();
     finish_node_rich_failure_validation(
         failure.validate_rich_failure(evidence, |session, evidence| {
-            validate_node_scene_evidence_graph(session, evidence, canonical_block_count, node_count)
+            validate_node_scene_evidence_graph(session, evidence, evidence_counts)
         }),
         cause,
     )
@@ -263,13 +272,12 @@ fn prepare_node_rich_failure(
 pub(super) fn prepare_node_rich_failure_from_assembly(
     assembly: SceneStoreAssembly,
     evidence: OutcomeEvidenceRecordRef<NodeSceneOutcomeEvidenceSchema>,
-    canonical_block_count: u32,
-    node_count: u32,
+    evidence_counts: SceneEvidenceCounts,
     cause: u32,
 ) -> Result<PreparedNodeSceneConstruction, SceneConstructionError> {
     finish_node_rich_failure_validation(
         assembly.validate_rich_failure(evidence, |session, evidence| {
-            validate_node_scene_evidence_graph(session, evidence, canonical_block_count, node_count)
+            validate_node_scene_evidence_graph(session, evidence, evidence_counts)
         }),
         cause,
     )

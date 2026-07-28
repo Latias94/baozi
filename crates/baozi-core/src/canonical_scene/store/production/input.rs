@@ -1,5 +1,7 @@
 use crate::entity::AuthoredTransform;
 
+pub(super) mod geometry;
+
 /// Distinguishes an absent source field from a present value, including an empty slice.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(in crate::canonical_scene::store) enum Presence<T> {
@@ -104,6 +106,35 @@ impl NodeAuthoringNode {
 pub(in crate::canonical_scene::store) struct NodeAuthoringBatch<'a> {
     roots: Presence<&'a [NodeLocalId]>,
     nodes: &'a [NodeAuthoringNode],
+}
+
+/// One borrowed producer input for every domain of a canonical Scene.
+///
+/// The store accepts this aggregate as a unit so admission, validation, and
+/// publication cannot observe a node graph without its geometry domain.
+#[derive(Debug, Clone, Copy)]
+pub(in crate::canonical_scene::store) struct SceneAuthoringBatch<'a> {
+    nodes: NodeAuthoringBatch<'a>,
+    geometry: geometry::GeometryAuthoringBatch<'a>,
+}
+
+impl<'a> SceneAuthoringBatch<'a> {
+    pub(in crate::canonical_scene::store) const fn new(
+        nodes: NodeAuthoringBatch<'a>,
+        geometry: geometry::GeometryAuthoringBatch<'a>,
+    ) -> Self {
+        Self { nodes, geometry }
+    }
+
+    pub(in crate::canonical_scene::store) const fn nodes(self) -> NodeAuthoringBatch<'a> {
+        self.nodes
+    }
+
+    pub(in crate::canonical_scene::store) const fn geometry(
+        self,
+    ) -> geometry::GeometryAuthoringBatch<'a> {
+        self.geometry
+    }
 }
 
 impl<'a> NodeAuthoringBatch<'a> {
