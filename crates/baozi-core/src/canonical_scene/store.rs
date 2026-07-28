@@ -3,6 +3,7 @@
 mod construction;
 mod production;
 mod schema;
+mod snapshot;
 mod validation;
 
 #[cfg(test)]
