@@ -789,6 +789,10 @@ fn containment_mapping_preserves_retained_charge_and_restricts_the_facade_immedi
         assembly.ensure_writable(),
         Err(StoreRuntimeError::FallbackOnly)
     ));
+    assert!(matches!(
+        assembly.try_control_checkpoint(),
+        Err(StoreRuntimeError::FallbackOnly)
+    ));
     assert!(publication_error_requires_containment(
         &RetainedPublicationError::<StoreDimensionKey>::Writer(
             RetainedWriterError::AccountPoisoned(poisoned)
@@ -1200,6 +1204,10 @@ fn ignored_control_error_is_sticky_and_permanently_rejects_success() {
             TestTag,
             |writer| writer.push(8),
         ),
+        Err(StoreRuntimeError::SuccessOutcomeRejected)
+    ));
+    assert!(matches!(
+        assembly.try_control_checkpoint(),
         Err(StoreRuntimeError::SuccessOutcomeRejected)
     ));
     let failure = match assembly.validate_success(
@@ -1799,6 +1807,56 @@ fn retained_store_control_checkpoint_enforces_domain_catalog_and_live_owner() {
     assert_eq!(first_account.snapshot().live_retained_allocations(), 0);
     assert_eq!(second_account.snapshot().live_retained_bytes(), 0);
     assert_eq!(second_account.snapshot().live_retained_allocations(), 0);
+}
+
+#[test]
+fn publication_assembly_lends_transient_control_without_mutating_tables() {
+    let factory = test_factory();
+    let account = test_account(&factory);
+    let (operation, keys) = test_operation(&account, u64::MAX);
+    let mut assembly = operation
+        .try_publication_assembly(test_publication_plan(keys, 1, 1))
+        .expect("transient-control assembly");
+
+    let mut reservation = {
+        let mut checkpoint = assembly
+            .try_control_checkpoint()
+            .expect("writable assembly checkpoint");
+        checkpoint.poll().expect("assembly checkpoint poll");
+        checkpoint
+            .charge_observed(keys.dimension, 1)
+            .expect("assembly checkpoint work");
+        let mut reservation = checkpoint
+            .reserve(keys.phase, keys.dimension, 2)
+            .expect("assembly checkpoint reservation");
+        checkpoint
+            .resize(&mut reservation, 4)
+            .expect("assembly checkpoint resize");
+        reservation
+    };
+    assert_eq!(assembly.canonical_len(), 0);
+    assert_eq!(assembly.outcome_evidence_len(), 0);
+
+    {
+        let mut checkpoint = assembly
+            .try_control_checkpoint()
+            .expect("second writable assembly checkpoint");
+        checkpoint
+            .validate_live_owner(&reservation)
+            .expect("assembly retains the reservation owner");
+        checkpoint
+            .resize(&mut reservation, 0)
+            .expect("assembly checkpoint releases live bytes");
+    }
+    drop(reservation);
+    drop(
+        assembly
+            .prepare_minimal_fallback()
+            .expect("assembly checkpoint fallback")
+            .handoff(),
+    );
+    assert_eq!(account.snapshot().live_retained_bytes(), 0);
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
 }
 
 #[test]

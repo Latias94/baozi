@@ -2250,6 +2250,30 @@ where
     PP: ProgressPhase,
     U: ProgressUnit,
 {
+    /// Borrows transient storage and control authority from the operation owned by this assembly.
+    ///
+    /// The checkpoint cannot inspect or mutate either publication table. Callers must release every
+    /// returned reservation before preparing a terminal publication.
+    pub fn try_control_checkpoint(
+        &mut self,
+    ) -> Result<RetainedStoreControlCheckpoint<'_, O, PP, U>, StoreRuntimeError> {
+        self.ensure_writable()?;
+        let raw = match self.raw.try_control_checkpoint() {
+            Ok(raw) => raw,
+            Err(error) => {
+                if publication_error_requires_containment(&error) {
+                    self.fallback_cause =
+                        Some(PreparationFailureCode::domain(CONTAINMENT_FALLBACK_CODE));
+                }
+                return Err(map_publication_error(&error));
+            }
+        };
+        Ok(RetainedStoreControlCheckpoint {
+            raw,
+            domain: &self.domain,
+        })
+    }
+
     /// Returns the number of canonical table members.
     pub fn canonical_len(&self) -> usize {
         self.raw.canonical_len()

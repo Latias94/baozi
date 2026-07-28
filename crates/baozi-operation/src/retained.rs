@@ -341,6 +341,19 @@ where
     CanonicalBlock: Send + Sync + 'static,
     EvidenceBlock: Send + Sync + 'static,
 {
+    pub(crate) fn try_control_checkpoint(
+        &mut self,
+    ) -> Result<RetainedControlCheckpoint<'_, O, P, PP, U, D>, RetainedPublicationError<D>> {
+        if self.containment != AssemblyContainmentProvenance::Healthy {
+            return Err(RetainedPublicationError::Poisoned);
+        }
+        let Some(operation) = self.operation.as_mut() else {
+            self.containment = AssemblyContainmentProvenance::NewFaultPending;
+            return Err(RetainedPublicationError::Poisoned);
+        };
+        Ok(operation.control_checkpoint())
+    }
+
     fn try_next_validation_epoch(&mut self) -> Result<NonZeroU64, RetainedClosureValidationError> {
         let Some(next) = self
             .last_validation_epoch
