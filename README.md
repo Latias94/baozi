@@ -47,11 +47,11 @@ Import bytes from memory:
 use baozi::{Importer, Result};
 
 fn main() -> Result<()> {
-    let report = Importer::new().read_bytes(
+    let report = Importer::new()?.read_bytes(
         "triangle.obj",
         b"v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n",
     )?;
-    println!("meshes={}", report.scene().meshes.len());
+    println!("meshes={}", report.scene().meshes().len());
     Ok(())
 }
 ```

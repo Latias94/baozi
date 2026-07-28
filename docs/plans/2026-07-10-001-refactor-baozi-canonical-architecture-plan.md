@@ -547,6 +547,29 @@ flowchart TB
 | U4e | Atomic workspace-wide public switch of every format, import/postprocess/snapshot/fuzz/facade consumer and the bounded facade runtime/account profile | Temporary private call-site shims only inside the atomic switch; no committed public dual rail | Full workspace compile/tests, facade packaged workflow, exact terminal/generation/report-step-state/account/lineage/capacity gates, measured production-path equivalents for every canonical entry point, and no public legacy constructor | Cross-workspace reviewable cutover commit; U4f owns all remaining deletion |
 | U4f | Delete legacy `Scene`, `SharedStorage`, recharge/transfer paths, private bridges, rejected candidates, and all migration scaffolding; run full U4 gates | None | Legacy/source/API searches empty, independent digest oracle plus supplemental layout permutations pass, workspace/fuzz/docs/package gates green | Core/operation integration cleanup commit owns final deletion |
 
+#### U4d Vertical-Slice Sequencing
+
+U4d reduces private-rail duration by closing complete private capability slices, not by adding
+isolated schema or accounting mechanisms. After the node-graph construction slice, work proceeds in
+this dependency order: canonical complete digest plus bounded preview; an OBJ capability closure;
+the backend-free glTF capability closure; one changed `SceneEdit` path with real remap relations; and
+the facade-equivalent common workflow with its bounded public outcome/error projection. Each slice
+includes source-shaped producer input, store-owned construction, central validation, inspection,
+semantic mutation vectors, failure/resource cases, and the applicable digest/preview evidence.
+
+`baozi-operation` is feature-frozen during these slices. It may receive correctness fixes, API
+contraction, or a capability proven necessary by a failing current slice, but no speculative ledger
+dimension, terminal family, storage primitive, or conformance mechanism. A new operation mechanism
+must name the consuming slice and land with that slice's production-path test; a disconnected tracer
+does not justify extending the private rail.
+
+The rejected alternative is a public geometry-then-appearance-then-deform migration. Canonical
+references, validation, edits, and publication span those domains, so that sequence would require a
+mixed legacy/canonical `Scene` or a durable compatibility adapter. U4e therefore remains the one
+atomic public Scene-lifecycle switch, followed immediately by U4f deletion. Canonical cutover
+digest/preview and a real changed-remap consumer are U4 blockers; broad legacy-format golden coverage
+and the first SemVer baseline remain later U5/U8 and U9 work respectively.
+
 #### U4 Re-entry Constraints
 
 Progress belongs to git history and test evidence, not this plan. The private retained-store tracer

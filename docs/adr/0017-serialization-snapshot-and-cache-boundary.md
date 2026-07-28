@@ -43,8 +43,9 @@ Baozi separates the public Rust API and normalized snapshot schema, and reserves
 boundary for any future persistent cache.
 
 - Public Scene types are not a stable serialized file format.
-- Serde support is opt-in and feature-gated; derived representations are unstable unless a separate
-  schema explicitly says otherwise.
+- Baozi exposes no public Serde representation today. Any future Serde support must be opt-in and
+  feature-gated; derived representations are unstable unless a separate schema explicitly says
+  otherwise.
 - Golden snapshots use a dedicated normalized representation owned by test support.
 - This ADR does not authorize a persistent cache API, artifact schema, lookup key, storage owner,
   eviction policy, fallback mode, or public feature.
