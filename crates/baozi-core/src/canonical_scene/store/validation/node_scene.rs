@@ -3,9 +3,7 @@ use baozi_operation::{
     StoreValidationSession,
 };
 
-use super::super::construction::node_scene::authored_transform::{
-    authored_transform_scalar_count, decode_authored_transform,
-};
+use super::super::node_scene::{authored_transform_scalar_count, decode_authored_transform};
 use super::super::production::{Presence, ValidatedNodeBatch};
 use super::super::schema::{
     CanonicalBlockRef, NODE_SCENE_CHILD_REFERENCE_FIELD_COUNT, NODE_SCENE_DIRECTORY_FIELD_COUNT,

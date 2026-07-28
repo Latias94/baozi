@@ -22,7 +22,6 @@ use super::{
     SceneStoreKeys, SceneStoreOperation, TracerSceneFallback,
 };
 
-pub(in crate::canonical_scene::store) mod authored_transform;
 mod materialization;
 mod publication;
 pub(in crate::canonical_scene::store) mod semantic;
@@ -263,6 +262,8 @@ pub(in crate::canonical_scene::store) struct ValidatedNodeScene {
     generation: SceneGenerationId,
     canonical: PublishedCanonicalStore<RecordBlock, NodeSceneDirectorySchema>,
     proof: NodeSceneValidationProof,
+    #[cfg(test)]
+    semantic_read_fault: Option<semantic::NodeSceneSemanticReadFault>,
 }
 
 pub(in crate::canonical_scene::store) struct NodeSceneSuccessReport {

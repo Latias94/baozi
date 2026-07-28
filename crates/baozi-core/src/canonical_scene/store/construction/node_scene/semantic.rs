@@ -1,5 +1,6 @@
 use baozi_operation::{CanonicalRecordView, SequenceView, StoredScalar};
 
+use crate::canonical_scene::store::node_scene::decode_authored_transform;
 use crate::canonical_scene::store::schema::{
     node_scene_child_reference_field, node_scene_node_field,
 };
@@ -7,10 +8,16 @@ use crate::canonical_scene::store::validation::NodeSceneValidationProof;
 use crate::entity::AuthoredTransform;
 
 use super::ValidatedNodeScene;
-use super::authored_transform::decode_authored_transform;
 
 pub(in crate::canonical_scene::store) type NodeSceneSemanticResult<T> =
     Result<T, NodeSceneSemanticError>;
+
+#[cfg(test)]
+#[derive(Clone, Copy)]
+pub(super) enum NodeSceneSemanticReadFault {
+    ChildReferenceRow(usize),
+    AuthoredTransformNode(usize),
+}
 
 /// A physical typed-view failure below an already validated semantic proof.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -40,6 +47,8 @@ pub(in crate::canonical_scene::store) struct NodeSceneSemanticView<'scene> {
     references: Option<CanonicalRecordView<'scene>>,
     transforms: Option<SequenceView<'scene, f32>>,
     proof: NodeSceneValidationProof,
+    #[cfg(test)]
+    read_fault: Option<NodeSceneSemanticReadFault>,
 }
 
 impl ValidatedNodeScene {
@@ -58,6 +67,32 @@ impl ValidatedNodeScene {
     ) -> bool {
         self.proof
             .install_layout_fault_for_test(source_node_count, source_root_count)
+    }
+
+    #[cfg(test)]
+    pub(in crate::canonical_scene::store) fn install_foreign_semantic_proof_for_test(
+        &mut self,
+        donor: &Self,
+    ) {
+        self.proof = donor.proof;
+    }
+
+    #[cfg(test)]
+    pub(in crate::canonical_scene::store) fn install_child_reference_read_fault_for_test(
+        &mut self,
+        row: usize,
+    ) {
+        self.semantic_read_fault = Some(NodeSceneSemanticReadFault::ChildReferenceRow(row));
+    }
+
+    #[cfg(test)]
+    pub(in crate::canonical_scene::store) fn install_authored_transform_read_fault_for_test(
+        &mut self,
+        source_node_index: usize,
+    ) {
+        self.semantic_read_fault = Some(NodeSceneSemanticReadFault::AuthoredTransformNode(
+            source_node_index,
+        ));
     }
 }
 
@@ -144,6 +179,8 @@ impl<'scene> NodeSceneSemanticView<'scene> {
             references,
             transforms,
             proof,
+            #[cfg(test)]
+            read_fault: scene.semantic_read_fault,
         })
     }
 
@@ -167,6 +204,8 @@ impl<'scene> NodeSceneSemanticView<'scene> {
             0,
             self.proof.source_root_count(),
             self.proof.source_root_count(),
+            #[cfg(test)]
+            self.read_fault,
         )?;
         Ok(NodeSceneSemanticCursor {
             nodes: self.nodes,
@@ -175,6 +214,8 @@ impl<'scene> NodeSceneSemanticView<'scene> {
             proof: self.proof,
             roots: Some(roots),
             next_node_index: 0,
+            #[cfg(test)]
+            read_fault: self.read_fault,
         })
     }
 }
@@ -188,6 +229,8 @@ pub(in crate::canonical_scene::store) struct NodeSceneSemanticCursor<'scene> {
     proof: NodeSceneValidationProof,
     roots: Option<NodeSceneChildCursor<'scene>>,
     next_node_index: usize,
+    #[cfg(test)]
+    read_fault: Option<NodeSceneSemanticReadFault>,
 }
 
 impl<'scene> NodeSceneSemanticCursor<'scene> {
@@ -258,6 +301,13 @@ impl<'scene> NodeSceneSemanticCursor<'scene> {
         let transform_end = transform_offset
             .checked_add(transform_length)
             .ok_or_else(|| invariant("validated source-node transform range overflows"))?;
+        #[cfg(test)]
+        if matches!(
+            self.read_fault,
+            Some(NodeSceneSemanticReadFault::AuthoredTransformNode(index)) if index == source_index
+        ) {
+            return Err(invariant("injected authored-transform read failure"));
+        }
         let transforms = self
             .transforms
             .ok_or_else(|| invariant("validated authored-transform view is absent"))?;
@@ -268,8 +318,14 @@ impl<'scene> NodeSceneSemanticCursor<'scene> {
         let authored_transform = decode_authored_transform(transform_kind, values)
             .ok_or_else(|| invariant("validated authored-transform payload is undecodable"))?;
 
-        let children =
-            NodeSceneChildCursor::try_new(self.references, child_offset, child_end, child_count)?;
+        let children = NodeSceneChildCursor::try_new(
+            self.references,
+            child_offset,
+            child_end,
+            child_count,
+            #[cfg(test)]
+            self.read_fault,
+        )?;
         self.next_node_index = source_index
             .checked_add(1)
             .ok_or_else(|| invariant("node cursor index overflows"))?;
@@ -326,6 +382,8 @@ pub(in crate::canonical_scene::store) struct NodeSceneChildCursor<'scene> {
     next_row: usize,
     end_row: usize,
     declared_count: usize,
+    #[cfg(test)]
+    read_fault: Option<NodeSceneSemanticReadFault>,
 }
 
 impl<'scene> NodeSceneChildCursor<'scene> {
@@ -334,6 +392,7 @@ impl<'scene> NodeSceneChildCursor<'scene> {
         start: usize,
         end: usize,
         declared_count: usize,
+        #[cfg(test)] read_fault: Option<NodeSceneSemanticReadFault>,
     ) -> NodeSceneSemanticResult<Self> {
         if end.checked_sub(start) != Some(declared_count) {
             return Err(invariant("validated child-reference range is inconsistent"));
@@ -353,6 +412,8 @@ impl<'scene> NodeSceneChildCursor<'scene> {
             next_row: start,
             end_row: end,
             declared_count,
+            #[cfg(test)]
+            read_fault,
         })
     }
 
@@ -371,6 +432,13 @@ impl<'scene> NodeSceneChildCursor<'scene> {
             return Err(invariant("child cursor advanced beyond its declared range"));
         }
         let row = self.next_row;
+        #[cfg(test)]
+        if matches!(
+            self.read_fault,
+            Some(NodeSceneSemanticReadFault::ChildReferenceRow(fault_row)) if fault_row == row
+        ) {
+            return Err(invariant("injected child-reference read failure"));
+        }
         let references = self
             .references
             .ok_or_else(|| invariant("validated child-reference view is absent"))?;

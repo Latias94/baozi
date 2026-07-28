@@ -1,4 +1,4 @@
-use crate::canonical_scene::store::schema::{
+use super::schema::{
     NODE_SCENE_MATRIX_SCALAR_COUNT, NODE_SCENE_TRANSFORM_MATRIX, NODE_SCENE_TRANSFORM_TRS,
     NODE_SCENE_TRS_SCALAR_COUNT,
 };

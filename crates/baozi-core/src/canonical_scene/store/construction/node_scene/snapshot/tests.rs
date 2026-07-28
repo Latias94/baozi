@@ -377,52 +377,63 @@ fn sibling_order_representation_and_signed_zero_are_semantic() {
 }
 
 #[test]
-fn proof_qualified_read_failures_do_not_publish_partial_snapshots() {
+fn proof_and_mid_traversal_read_failures_do_not_publish_partial_snapshots() {
     let factory = factory();
     let account = account(&factory);
 
-    let mut missing_reference = single_root_scene(&account, AuthoredTransform::identity_trs());
+    let mut layout_mismatch = single_root_scene(&account, AuthoredTransform::identity_trs());
     assert!(
-        missing_reference
+        layout_mismatch
             .scene
             .install_semantic_layout_fault_for_test(2, 2)
     );
+    let donor = single_root_scene(&account, trs(1.0));
+    let mut foreign_proof = single_root_scene(&account, trs(2.0));
+    foreign_proof
+        .scene
+        .install_foreign_semantic_proof_for_test(&donor.scene);
 
     let roots = [NodeLocalId::new(0)];
     let nodes = [
         NodeAuthoringNode::new(Presence::Absent, trs(0.0)),
         NodeAuthoringNode::new(parent(0, 0), trs(1.0)),
     ];
-    let mut missing_node = build_scene(&account, &roots, &nodes);
-    assert!(
-        missing_node
-            .scene
-            .install_semantic_layout_fault_for_test(3, 1)
-    );
-    let mut truncated_proof = build_scene(&account, &roots, &nodes);
-    assert!(
-        truncated_proof
-            .scene
-            .install_semantic_layout_fault_for_test(1, 1)
-    );
+    let mut child_read_failure = build_scene(&account, &roots, &nodes);
+    child_read_failure
+        .scene
+        .install_child_reference_read_fault_for_test(1);
+    let mut transform_read_failure = build_scene(&account, &roots, &nodes);
+    transform_read_failure
+        .scene
+        .install_authored_transform_read_fault_for_test(1);
     let retained = account.snapshot();
 
     assert!(matches!(
-        capture_node_scene(&missing_reference.scene, snapshot_limits(4_096, 64), None),
+        capture_node_scene(&layout_mismatch.scene, snapshot_limits(4_096, 64), None),
         Err(NodeSceneSnapshotError::InconsistentView {
             reason: "validated node table row count disagrees with validation proof"
         })
     ));
     assert!(matches!(
-        capture_node_scene(&missing_node.scene, snapshot_limits(4_096, 64), None),
+        capture_node_scene(&foreign_proof.scene, snapshot_limits(4_096, 64), None),
         Err(NodeSceneSnapshotError::InconsistentView {
-            reason: "validated node table row count disagrees with validation proof"
+            reason: "validated node table is unavailable or mistyped"
         })
     ));
     assert!(matches!(
-        capture_node_scene(&truncated_proof.scene, snapshot_limits(4_096, 64), None),
+        capture_node_scene(&child_read_failure.scene, snapshot_limits(4_096, 64), None),
         Err(NodeSceneSnapshotError::InconsistentView {
-            reason: "validated node table row count disagrees with validation proof"
+            reason: "injected child-reference read failure"
+        })
+    ));
+    assert!(matches!(
+        capture_node_scene(
+            &transform_read_failure.scene,
+            snapshot_limits(4_096, 64),
+            None
+        ),
+        Err(NodeSceneSnapshotError::InconsistentView {
+            reason: "injected authored-transform read failure"
         })
     ));
 

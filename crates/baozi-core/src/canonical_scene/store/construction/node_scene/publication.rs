@@ -341,6 +341,8 @@ impl PreparedNodeSceneConstruction {
                         generation: prepared.generation.into_id(),
                         canonical: published.canonical,
                         proof: prepared.proof,
+                        #[cfg(test)]
+                        semantic_read_fault: None,
                     },
                     report: NodeSceneSuccessReport {
                         outcome_evidence: published.outcome_evidence,
