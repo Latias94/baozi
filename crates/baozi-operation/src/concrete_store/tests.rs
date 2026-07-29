@@ -1089,6 +1089,337 @@ fn controlled_builders_and_validation_poll_and_charge_exact_work() {
 }
 
 #[test]
+fn controlled_bytes_and_utf8_write_exact_payloads_and_charge_exact_work() {
+    const BINARY_PAYLOAD: &[u8] = b"\0\x01\x02\x03\x04\x05";
+    const TEXT_PAYLOAD: &str = "baozi!";
+
+    let factory = test_factory();
+    let account = test_account(&factory);
+    let (operation, keys) = test_operation(&account, 16);
+    let mut assembly = operation
+        .try_publication_assembly(test_publication_plan(keys, 3, 1))
+        .expect("controlled payload assembly");
+    let ledger = assembly.raw.test_ledger_probe();
+
+    let before_binary = account.snapshot();
+    let binary = assembly
+        .try_retain_canonical_bytes_controlled(
+            BytesPlan::new(BINARY_PAYLOAD.len()).expect("binary plan"),
+            keys.work_dimension,
+            TestTag,
+            |writer, control| {
+                control.poll()?;
+                control.charge_observed(
+                    u64::try_from(BINARY_PAYLOAD.len()).expect("binary length fits u64"),
+                )?;
+                writer.write_bytes(BINARY_PAYLOAD)?;
+                Ok(())
+            },
+        )
+        .expect("controlled binary block");
+    let after_binary = account.snapshot();
+
+    let text = assembly
+        .try_retain_canonical_utf8_controlled(
+            Utf8Plan::new(TEXT_PAYLOAD.len()).expect("UTF-8 plan"),
+            keys.work_dimension,
+            TestTag,
+            |writer, control| {
+                control.poll()?;
+                control.charge_observed(
+                    u64::try_from(TEXT_PAYLOAD.len()).expect("UTF-8 length fits u64"),
+                )?;
+                writer.write_str(TEXT_PAYLOAD)?;
+                Ok(())
+            },
+        )
+        .expect("controlled UTF-8 block");
+    let after_text = account.snapshot();
+
+    let canonical_root = assembly
+        .try_retain_canonical_records(
+            RecordPlan::new(1, 2).expect("canonical root plan"),
+            TestRootTag,
+            |writer| {
+                writer.write_row(|row| {
+                    row.write_bytes_ref(binary)?;
+                    row.write_utf8_ref(text)
+                })
+            },
+        )
+        .expect("canonical root");
+    let evidence_root = assembly
+        .try_retain_outcome_evidence_sequence(
+            SequencePlan::<u8>::new(1).expect("evidence plan"),
+            TestTag,
+            |writer| writer.push(9),
+        )
+        .expect("evidence root");
+
+    assert!(matches!(
+        assembly.validate_success(
+            canonical_root,
+            evidence_root,
+            |session, canonical_root, evidence_root| {
+                let Some(root) = session.canonical_records(canonical_root) else {
+                    return false;
+                };
+                let Some(binary) = root.bytes_ref::<TestTag>(0, 0) else {
+                    return false;
+                };
+                let Some(text) = root.utf8_ref::<TestTag>(0, 1) else {
+                    return false;
+                };
+                session.canonical_bytes(binary) == Some(BINARY_PAYLOAD)
+                    && session.canonical_utf8(text) == Some(TEXT_PAYLOAD)
+                    && session.outcome_evidence_sequence(evidence_root).is_some()
+            },
+        ),
+        StoreSuccessValidation::Valid(_)
+    ));
+
+    let binary_charge = test_physical_delta(before_binary, after_binary);
+    let text_charge = test_physical_delta(after_binary, after_text);
+    assert_eq!(binary_charge, text_charge);
+    assert_eq!(binary_charge.1, 2);
+    let dimension = ledger
+        .dimension_evidence(keys.work_dimension)
+        .expect("work dimension evidence");
+    assert_eq!(dimension.attempted(), 12);
+    assert_eq!(dimension.consumed(), 12);
+}
+
+#[test]
+fn controlled_bytes_map_work_rejection_like_controlled_sequences() {
+    let factory = test_factory();
+    let account = test_account(&factory);
+    let (operation, keys) = test_operation_with_control_and_work_limits(
+        &account,
+        16,
+        OperationControl::default(),
+        0,
+        0,
+    );
+    let mut assembly = operation
+        .try_publication_assembly(test_publication_plan(keys, 1, 1))
+        .expect("work-rejection assembly");
+    let ledger = assembly.raw.test_ledger_probe();
+    let before_physical = account.snapshot();
+    let before_active = ledger.active_reservations();
+    let before_live = ledger.current_live_bytes();
+
+    let error = assembly
+        .try_retain_canonical_bytes_controlled(
+            BytesPlan::new(1).expect("binary plan"),
+            keys.work_dimension,
+            TestTag,
+            |writer, control| {
+                control.charge_observed(1)?;
+                writer.write_bytes(&[7])?;
+                Ok(())
+            },
+        )
+        .expect_err("work budget must reject controlled bytes");
+
+    assert!(matches!(error, StoreRuntimeError::Ledger(_)));
+    assert_eq!(assembly.canonical_len(), 0);
+    assert_eq!(ledger.active_reservations(), before_active);
+    assert_eq!(ledger.current_live_bytes(), before_live);
+    let after_physical = account.snapshot();
+    assert_eq!(
+        after_physical.live_retained_bytes(),
+        before_physical.live_retained_bytes()
+    );
+    assert_eq!(
+        after_physical.live_retained_allocations(),
+        before_physical.live_retained_allocations()
+    );
+    assert!(matches!(
+        assembly.try_retain_canonical_sequence(
+            SequencePlan::<u8>::new(1).expect("retry sequence plan"),
+            TestTag,
+            |writer| writer.push(8),
+        ),
+        Err(StoreRuntimeError::SuccessOutcomeRejected)
+    ));
+}
+
+#[test]
+fn controlled_utf8_maps_cancellation_like_controlled_sequences() {
+    let factory = test_factory();
+    let account = test_account(&factory);
+    let cancellation = crate::CancellationToken::new();
+    let (operation, keys) = test_operation_with_control_and_work_limits(
+        &account,
+        16,
+        OperationControl::default().with_cancellation(cancellation.clone()),
+        u64::MAX,
+        u64::MAX,
+    );
+    let mut assembly = operation
+        .try_publication_assembly(test_publication_plan(keys, 1, 1))
+        .expect("cancellation assembly");
+    let ledger = assembly.raw.test_ledger_probe();
+    let before_physical = account.snapshot();
+    let before_active = ledger.active_reservations();
+    let before_live = ledger.current_live_bytes();
+    cancellation.cancel();
+
+    let error = assembly
+        .try_retain_canonical_utf8_controlled(
+            Utf8Plan::new(1).expect("UTF-8 plan"),
+            keys.work_dimension,
+            TestTag,
+            |writer, control| {
+                control.poll()?;
+                writer.write_str("x")?;
+                Ok(())
+            },
+        )
+        .expect_err("cancellation must reject controlled UTF-8");
+
+    assert!(matches!(error, StoreRuntimeError::Control(_)));
+    assert_eq!(assembly.canonical_len(), 0);
+    assert_eq!(ledger.active_reservations(), before_active);
+    assert_eq!(ledger.current_live_bytes(), before_live);
+    let after_physical = account.snapshot();
+    assert_eq!(
+        after_physical.live_retained_bytes(),
+        before_physical.live_retained_bytes()
+    );
+    assert_eq!(
+        after_physical.live_retained_allocations(),
+        before_physical.live_retained_allocations()
+    );
+    assert!(matches!(
+        assembly.try_retain_canonical_sequence(
+            SequencePlan::<u8>::new(1).expect("retry sequence plan"),
+            TestTag,
+            |writer| writer.push(8),
+        ),
+        Err(StoreRuntimeError::SuccessOutcomeRejected)
+    ));
+}
+
+#[test]
+fn controlled_bytes_underwrite_rolls_back_and_remains_retryable() {
+    let factory = test_factory();
+    let account = test_account(&factory);
+    let (operation, keys) = test_operation(&account, 16);
+    let mut assembly = operation
+        .try_publication_assembly(test_publication_plan(keys, 1, 1))
+        .expect("binary retry assembly");
+    let ledger = assembly.raw.test_ledger_probe();
+    let before_physical = account.snapshot();
+    let before_active = ledger.active_reservations();
+    let before_live = ledger.current_live_bytes();
+
+    let error = assembly
+        .try_retain_canonical_bytes_controlled(
+            BytesPlan::new(3).expect("underwritten binary plan"),
+            keys.work_dimension,
+            TestTag,
+            |writer, _| {
+                writer.write_bytes(&[1, 2])?;
+                Ok(())
+            },
+        )
+        .expect_err("underwritten binary block must fail");
+
+    assert_eq!(
+        error,
+        StoreRuntimeError::Build(StoreBuildError::incomplete_write())
+    );
+    assert_eq!(assembly.canonical_len(), 0);
+    assert_eq!(ledger.active_reservations(), before_active);
+    assert_eq!(ledger.current_live_bytes(), before_live);
+    let after_physical = account.snapshot();
+    assert_eq!(
+        after_physical.live_retained_bytes(),
+        before_physical.live_retained_bytes()
+    );
+    assert_eq!(
+        after_physical.live_retained_allocations(),
+        before_physical.live_retained_allocations()
+    );
+    assert!(!assembly.is_fallback_only());
+
+    let _ = assembly
+        .try_retain_canonical_bytes_controlled(
+            BytesPlan::new(3).expect("retry binary plan"),
+            keys.work_dimension,
+            TestTag,
+            |writer, control| {
+                control.poll()?;
+                writer.write_bytes(&[1, 2, 3])?;
+                Ok(())
+            },
+        )
+        .expect("binary retry succeeds");
+    assert_eq!(assembly.canonical_len(), 1);
+}
+
+#[test]
+fn controlled_utf8_rejects_non_fitting_multibyte_text_and_remains_retryable() {
+    const MULTIBYTE_TEXT: &str = "\u{e9}";
+
+    let factory = test_factory();
+    let account = test_account(&factory);
+    let (operation, keys) = test_operation(&account, 16);
+    let mut assembly = operation
+        .try_publication_assembly(test_publication_plan(keys, 1, 1))
+        .expect("UTF-8 retry assembly");
+    let ledger = assembly.raw.test_ledger_probe();
+    let before_physical = account.snapshot();
+    let before_active = ledger.active_reservations();
+    let before_live = ledger.current_live_bytes();
+
+    let error = assembly
+        .try_retain_canonical_utf8_controlled(
+            Utf8Plan::new(1).expect("undersized UTF-8 plan"),
+            keys.work_dimension,
+            TestTag,
+            |writer, _| {
+                writer.write_str(MULTIBYTE_TEXT)?;
+                Ok(())
+            },
+        )
+        .expect_err("multi-byte text must not exceed its encoded-byte plan");
+
+    assert_eq!(
+        error,
+        StoreRuntimeError::Build(StoreBuildError::capacity_exceeded())
+    );
+    assert_eq!(assembly.canonical_len(), 0);
+    assert_eq!(ledger.active_reservations(), before_active);
+    assert_eq!(ledger.current_live_bytes(), before_live);
+    let after_physical = account.snapshot();
+    assert_eq!(
+        after_physical.live_retained_bytes(),
+        before_physical.live_retained_bytes()
+    );
+    assert_eq!(
+        after_physical.live_retained_allocations(),
+        before_physical.live_retained_allocations()
+    );
+    assert!(!assembly.is_fallback_only());
+
+    let _ = assembly
+        .try_retain_canonical_utf8_controlled(
+            Utf8Plan::new(MULTIBYTE_TEXT.len()).expect("retry UTF-8 plan"),
+            keys.work_dimension,
+            TestTag,
+            |writer, control| {
+                control.poll()?;
+                writer.write_str(MULTIBYTE_TEXT)?;
+                Ok(())
+            },
+        )
+        .expect("UTF-8 retry succeeds");
+    assert_eq!(assembly.canonical_len(), 1);
+}
+
+#[test]
 fn controlled_builder_domain_rejection_rolls_back_and_remains_retryable() {
     let factory = test_factory();
     let account = test_account(&factory);

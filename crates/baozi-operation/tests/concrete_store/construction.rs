@@ -816,7 +816,15 @@ fn exact_plans_reject_empty_excess_and_wrong_record_kinds() {
         BytesPlan::new(0),
         Err(baozi_operation::StorePlanError::EmptyPayload)
     ));
-    assert!(RecordPlan::new(1, 33).is_err());
+    assert!(RecordPlan::new(1, 39).is_ok());
+    assert!(RecordPlan::new(1, 64).is_ok());
+    assert!(matches!(
+        RecordPlan::new(1, 65),
+        Err(baozi_operation::StorePlanError::InvalidRecordFieldCount {
+            fields: 65,
+            limit: 64,
+        })
+    ));
 
     let factory = factory(1);
     let account = account(&factory);

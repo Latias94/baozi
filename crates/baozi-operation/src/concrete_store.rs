@@ -201,7 +201,8 @@ pub use validation::{
     StoreValidationSession, StoreWorkError,
 };
 
-const MAX_RECORD_FIELDS: usize = 32;
+// Flat records stay deliberately bounded; schemas approaching this ceiling need a cohesion review.
+const MAX_RECORD_FIELDS: usize = 64;
 const BUILD_CODE_DOMAIN: u32 = 0x0100_0000;
 const BUILD_CODE_ALLOCATION_FAILED: u32 = 1;
 const BUILD_CODE_CAPACITY_ENVELOPE_VIOLATED: u32 = 2;
@@ -570,7 +571,7 @@ pub struct RecordPlan {
 }
 
 impl RecordPlan {
-    /// Plans non-empty fixed-width records with at most 32 allocation-free fields per row.
+    /// Plans non-empty fixed-width records with at most 64 allocation-free fields per row.
     pub fn new(rows: usize, fields: usize) -> Result<Self, StorePlanError> {
         if rows == 0 {
             return Err(StorePlanError::EmptyPayload);
@@ -2496,6 +2497,45 @@ where
         })
     }
 
+    /// Retains one canonical binary block with operation-controlled polling and work charging.
+    pub fn try_retain_canonical_bytes_controlled<Tag>(
+        &mut self,
+        plan: BytesPlan,
+        work_dimension: StoreDimensionKey,
+        tag: Tag,
+        build: impl for<'control> FnOnce(
+            &mut BytesWriter,
+            &mut RetainedStoreWorkControl<'control, O, PP, U>,
+        ) -> Result<(), StoreControlledError>,
+    ) -> Result<CanonicalBytesRef<Tag>, StoreRuntimeError>
+    where
+        Tag: Copy + Send + Sync + 'static,
+    {
+        self.ensure_writable()?;
+        self.validate_dimension(work_dimension)?;
+        let allocation = plan.allocation_plan().map_err(StoreRuntimeError::Plan)?;
+        let mut callback_cause = None;
+        let result = self.raw.try_retain_canonical_controlled(
+            work_dimension,
+            allocation,
+            |emplacer, raw| {
+                let mut writer = BytesWriter::new(plan)?;
+                let mut control = RetainedStoreWorkControl { raw, sticky: None };
+                let callback = build(&mut writer, &mut control);
+                if let Err(cause) = control.finish_build(callback) {
+                    callback_cause = Some(cause);
+                    return Err(RetainedBuildFailureCode::new(BUILD_CODE_DOMAIN));
+                }
+                Ok(emplacer.place(writer.finish()?, tag))
+            },
+        );
+        self.map_controlled_action(result, callback_cause)
+            .map(|raw| CanonicalStoreRef {
+                raw,
+                marker: PhantomData,
+            })
+    }
+
     /// Retains one exact outcome-evidence binary block.
     pub fn try_retain_outcome_evidence_bytes<Tag>(
         &mut self,
@@ -2542,6 +2582,45 @@ where
             raw,
             marker: PhantomData,
         })
+    }
+
+    /// Retains one canonical UTF-8 block with operation-controlled polling and work charging.
+    pub fn try_retain_canonical_utf8_controlled<Tag>(
+        &mut self,
+        plan: Utf8Plan,
+        work_dimension: StoreDimensionKey,
+        tag: Tag,
+        build: impl for<'control> FnOnce(
+            &mut Utf8Writer,
+            &mut RetainedStoreWorkControl<'control, O, PP, U>,
+        ) -> Result<(), StoreControlledError>,
+    ) -> Result<CanonicalUtf8Ref<Tag>, StoreRuntimeError>
+    where
+        Tag: Copy + Send + Sync + 'static,
+    {
+        self.ensure_writable()?;
+        self.validate_dimension(work_dimension)?;
+        let allocation = plan.allocation_plan().map_err(StoreRuntimeError::Plan)?;
+        let mut callback_cause = None;
+        let result = self.raw.try_retain_canonical_controlled(
+            work_dimension,
+            allocation,
+            |emplacer, raw| {
+                let mut writer = Utf8Writer::new(plan)?;
+                let mut control = RetainedStoreWorkControl { raw, sticky: None };
+                let callback = build(&mut writer, &mut control);
+                if let Err(cause) = control.finish_build(callback) {
+                    callback_cause = Some(cause);
+                    return Err(RetainedBuildFailureCode::new(BUILD_CODE_DOMAIN));
+                }
+                Ok(emplacer.place(writer.finish()?, tag))
+            },
+        );
+        self.map_controlled_action(result, callback_cause)
+            .map(|raw| CanonicalStoreRef {
+                raw,
+                marker: PhantomData,
+            })
     }
 
     /// Retains one exact outcome-evidence UTF-8 block.
