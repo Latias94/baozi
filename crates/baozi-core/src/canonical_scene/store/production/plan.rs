@@ -3,6 +3,9 @@
     reason = "node authoring failures retain bounded control evidence inline without a failure-path allocation"
 )]
 
+pub(super) mod animation;
+pub(super) mod appearance;
+pub(super) mod deformation;
 pub(super) mod geometry;
 
 use std::error::Error;

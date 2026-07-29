@@ -1,5 +1,6 @@
 use crate::attribute::{AttributeDomain, AttributeSemantic};
 
+use super::appearance::MaterialLocalId;
 use super::{NodeLocalId, Presence};
 
 /// One checked-at-validation contiguous range in a flat authoring table.
@@ -20,20 +21,6 @@ impl AuthoringRange {
 
     pub(in crate::canonical_scene::store) const fn count(self) -> u32 {
         self.count
-    }
-}
-
-/// Identity of one material descriptor within an authoring batch.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(in crate::canonical_scene::store) struct MaterialLocalId(u32);
-
-impl MaterialLocalId {
-    pub(in crate::canonical_scene::store) const fn new(index: u32) -> Self {
-        Self(index)
-    }
-
-    pub(in crate::canonical_scene::store) const fn index(self) -> u32 {
-        self.0
     }
 }
 
@@ -278,7 +265,6 @@ impl GeometryMeshInstanceAuthoring {
 /// Borrowed, flat geometry-domain input supplied by a format adapter.
 #[derive(Debug, Clone, Copy)]
 pub(in crate::canonical_scene::store) struct GeometryAuthoringBatch<'a> {
-    material_count: u32,
     logical_meshes: &'a [GeometryLogicalMeshAuthoring],
     primitives: &'a [GeometryPrimitiveAuthoring<'a>],
     attributes: &'a [GeometryAttributeAuthoring<'a>],
@@ -287,33 +273,21 @@ pub(in crate::canonical_scene::store) struct GeometryAuthoringBatch<'a> {
 
 impl<'a> GeometryAuthoringBatch<'a> {
     pub(in crate::canonical_scene::store) const fn empty() -> Self {
-        Self {
-            material_count: 0,
-            logical_meshes: &[],
-            primitives: &[],
-            attributes: &[],
-            mesh_instances: &[],
-        }
+        Self::new(&[], &[], &[], &[])
     }
 
     pub(in crate::canonical_scene::store) const fn new(
-        material_count: u32,
         logical_meshes: &'a [GeometryLogicalMeshAuthoring],
         primitives: &'a [GeometryPrimitiveAuthoring<'a>],
         attributes: &'a [GeometryAttributeAuthoring<'a>],
         mesh_instances: &'a [GeometryMeshInstanceAuthoring],
     ) -> Self {
         Self {
-            material_count,
             logical_meshes,
             primitives,
             attributes,
             mesh_instances,
         }
-    }
-
-    pub(in crate::canonical_scene::store) const fn material_count(self) -> u32 {
-        self.material_count
     }
 
     pub(in crate::canonical_scene::store) const fn logical_meshes(

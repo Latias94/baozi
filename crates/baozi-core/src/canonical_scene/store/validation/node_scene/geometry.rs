@@ -8,17 +8,17 @@ use crate::canonical_scene::store::production::{
     GeometryTopologyAuthoring, Presence, ValidatedGeometryBatch, ValidatedGeometryPrimitive,
     ValidatedNodeBatch,
 };
+use crate::canonical_scene::store::schema::appearance::AppearanceMaterialTableSchema;
 use crate::canonical_scene::store::schema::geometry::{
     GEOMETRY_ATTRIBUTE_FIELD_COUNT, GEOMETRY_LOGICAL_MESH_FIELD_COUNT,
-    GEOMETRY_MATERIAL_FIELD_COUNT, GEOMETRY_MESH_INSTANCE_FIELD_COUNT, GEOMETRY_NORMALIZATION_NONE,
-    GEOMETRY_PAYLOAD_DENSE, GEOMETRY_PAYLOAD_SPARSE, GEOMETRY_PRIMITIVE_FIELD_COUNT,
-    GEOMETRY_SCALAR_F32, GEOMETRY_SCALAR_U32, GeometryAttributeTableSchema,
-    GeometryF32ValuesSchema, GeometryLogicalMeshTableSchema, GeometryMaterialTableSchema,
-    GeometryMeshInstanceTableSchema, GeometryPolygonBoundariesSchema,
-    GeometryPrimitiveIndicesSchema, GeometryPrimitiveTableSchema, GeometrySparseF32DefaultsSchema,
-    GeometrySparseIndicesSchema, GeometrySparseU32DefaultsSchema, GeometryU32ValuesSchema,
-    encode_geometry_domain, encode_geometry_semantic, encode_geometry_topology,
-    geometry_attribute_field, geometry_logical_mesh_field, geometry_material_field,
+    GEOMETRY_MESH_INSTANCE_FIELD_COUNT, GEOMETRY_NORMALIZATION_NONE, GEOMETRY_PAYLOAD_DENSE,
+    GEOMETRY_PAYLOAD_SPARSE, GEOMETRY_PRIMITIVE_FIELD_COUNT, GEOMETRY_SCALAR_F32,
+    GEOMETRY_SCALAR_U32, GeometryAttributeTableSchema, GeometryF32ValuesSchema,
+    GeometryLogicalMeshTableSchema, GeometryMeshInstanceTableSchema,
+    GeometryPolygonBoundariesSchema, GeometryPrimitiveIndicesSchema, GeometryPrimitiveTableSchema,
+    GeometrySparseF32DefaultsSchema, GeometrySparseIndicesSchema, GeometrySparseU32DefaultsSchema,
+    GeometryU32ValuesSchema, encode_geometry_domain, encode_geometry_semantic,
+    encode_geometry_topology, geometry_attribute_field, geometry_logical_mesh_field,
     geometry_mesh_instance_field, geometry_primitive_field,
 };
 use crate::canonical_scene::store::schema::{
@@ -31,7 +31,6 @@ use super::super::require_scalar;
 
 #[derive(Clone, Copy)]
 pub(super) struct GeometryValidatedRefs {
-    pub(super) materials: Option<CanonicalBlockRef<GeometryMaterialTableSchema>>,
     pub(super) logical_meshes: Option<CanonicalBlockRef<GeometryLogicalMeshTableSchema>>,
     pub(super) primitives: Option<CanonicalBlockRef<GeometryPrimitiveTableSchema>>,
     pub(super) attributes: Option<CanonicalBlockRef<GeometryAttributeTableSchema>>,
@@ -42,6 +41,7 @@ pub(super) fn validate_geometry_graph<NR, GR>(
     session: &mut StoreValidationSession<'_, '_>,
     geometry_ref: CanonicalRecordRef<SceneGeometryDirectorySchema>,
     nodes_ref: CanonicalRecordRef<NodeSceneNodeTableSchema>,
+    appearance_materials: Option<CanonicalRecordRef<AppearanceMaterialTableSchema>>,
     expected_nodes: &ValidatedNodeBatch<'_, NR>,
     expected: &ValidatedGeometryBatch<'_, GR>,
     observe_work: &mut impl FnMut(u64) -> Option<()>,
@@ -56,14 +56,6 @@ pub(super) fn validate_geometry_graph<NR, GR>(
         SCENE_GEOMETRY_SCHEMA_REVISION,
     )?;
 
-    let materials = optional_table_ref::<GeometryMaterialTableSchema>(
-        session,
-        directory,
-        scene_geometry_directory_field::MATERIAL_COUNT,
-        scene_geometry_directory_field::MATERIALS,
-        expected.material_count(),
-        GEOMETRY_MATERIAL_FIELD_COUNT,
-    )?;
     let logical_meshes = optional_table_ref::<GeometryLogicalMeshTableSchema>(
         session,
         directory,
@@ -97,12 +89,11 @@ pub(super) fn validate_geometry_graph<NR, GR>(
         GEOMETRY_MESH_INSTANCE_FIELD_COUNT,
     )?;
 
-    validate_material_table(session, materials, expected, observe_work)?;
     validate_attribute_table(session, attributes, expected, observe_work)?;
     validate_primitive_table(
         session,
         primitives,
-        materials,
+        appearance_materials,
         attributes,
         expected,
         observe_work,
@@ -119,7 +110,6 @@ pub(super) fn validate_geometry_graph<NR, GR>(
     )?;
 
     Some(GeometryValidatedRefs {
-        materials: materials.map(CanonicalBlockRef::from_store),
         logical_meshes: logical_meshes.map(CanonicalBlockRef::from_store),
         primitives: primitives.map(CanonicalBlockRef::from_store),
         attributes: attributes.map(CanonicalBlockRef::from_store),
@@ -152,26 +142,6 @@ where
         }
         Some(Some(reference))
     }
-}
-
-fn validate_material_table<R>(
-    session: &mut StoreValidationSession<'_, '_>,
-    reference: Option<CanonicalRecordRef<GeometryMaterialTableSchema>>,
-    expected: &ValidatedGeometryBatch<'_, R>,
-    observe_work: &mut impl FnMut(u64) -> Option<()>,
-) -> Option<()> {
-    let Some(reference) = reference else {
-        return (expected.material_count() == 0).then_some(());
-    };
-    let table = session.canonical_records(reference)?;
-    for row in 0..table.rows() {
-        observe_work(1)?;
-        require_scalar(
-            table.scalar::<u32>(row, geometry_material_field::MATERIAL),
-            u32::try_from(row).ok()?,
-        )?;
-    }
-    Some(())
 }
 
 fn validate_logical_mesh_table<R>(
@@ -216,7 +186,7 @@ fn validate_logical_mesh_table<R>(
 fn validate_primitive_table<R>(
     session: &mut StoreValidationSession<'_, '_>,
     reference: Option<CanonicalRecordRef<GeometryPrimitiveTableSchema>>,
-    material_reference: Option<CanonicalRecordRef<GeometryMaterialTableSchema>>,
+    material_reference: Option<CanonicalRecordRef<AppearanceMaterialTableSchema>>,
     attribute_reference: Option<CanonicalRecordRef<GeometryAttributeTableSchema>>,
     expected: &ValidatedGeometryBatch<'_, R>,
     observe_work: &mut impl FnMut(u64) -> Option<()>,
@@ -275,7 +245,7 @@ fn validate_primitive_table<R>(
                     material.index(),
                 )?;
                 require_scalar(
-                    table.record_ref::<GeometryMaterialTableSchema>(
+                    table.record_ref::<AppearanceMaterialTableSchema>(
                         row,
                         geometry_primitive_field::MATERIALS,
                     ),

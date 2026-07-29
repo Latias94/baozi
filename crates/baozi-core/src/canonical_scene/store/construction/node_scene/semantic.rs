@@ -9,8 +9,20 @@ use crate::entity::AuthoredTransform;
 
 use super::ValidatedNodeScene;
 
+mod animation;
+mod appearance;
+mod deformation;
 mod geometry;
 
+pub(in crate::canonical_scene::store) use animation::{
+    NodeSceneAnimationCursor, NodeSceneAnimationExtrapolation, NodeSceneAnimationInterpolation,
+    NodeSceneAnimationTarget, NodeSceneAnimationTimeDomain,
+};
+pub(in crate::canonical_scene::store) use appearance::NodeSceneAppearanceCursor;
+pub(in crate::canonical_scene::store) use deformation::{
+    NodeSceneDeformationCursor, NodeSceneDeformationF32Cursor, NodeSceneDeformationMorphPayload,
+    NodeSceneDeformationVec3Cursor,
+};
 pub(in crate::canonical_scene::store) use geometry::{
     NodeSceneGeometryAttributePayload, NodeSceneGeometryAttributeSemantic, NodeSceneGeometryCursor,
     NodeSceneGeometryF32Cursor, NodeSceneGeometryNormalization, NodeSceneGeometryPayloadKind,
@@ -54,7 +66,10 @@ pub(in crate::canonical_scene::store) struct NodeSceneSemanticView<'scene> {
     nodes: CanonicalRecordView<'scene>,
     references: Option<CanonicalRecordView<'scene>>,
     transforms: Option<SequenceView<'scene, f32>>,
+    appearance: appearance::NodeSceneAppearanceTables<'scene>,
     geometry: geometry::NodeSceneGeometryTables<'scene>,
+    deformation: deformation::NodeSceneDeformationTables<'scene>,
+    animation: animation::NodeSceneAnimationTables<'scene>,
     proof: NodeSceneValidationProof,
     #[cfg(test)]
     read_fault: Option<NodeSceneSemanticReadFault>,
@@ -131,7 +146,11 @@ impl<'scene> NodeSceneSemanticView<'scene> {
             ),
             None => None,
         };
+        let appearance = appearance::NodeSceneAppearanceTables::try_new(&scene.canonical, proof)?;
         let geometry = geometry::NodeSceneGeometryTables::try_new(&scene.canonical, proof)?;
+        let deformation =
+            deformation::NodeSceneDeformationTables::try_new(&scene.canonical, proof)?;
+        let animation = animation::NodeSceneAnimationTables::try_new(&scene.canonical, proof)?;
 
         let expected_node_rows = proof
             .source_node_count()
@@ -188,7 +207,10 @@ impl<'scene> NodeSceneSemanticView<'scene> {
             nodes,
             references,
             transforms,
+            appearance,
             geometry,
+            deformation,
+            animation,
             proof,
             #[cfg(test)]
             read_fault: scene.semantic_read_fault,
@@ -207,24 +229,72 @@ impl<'scene> NodeSceneSemanticView<'scene> {
         self.proof.source_edge_count()
     }
 
-    pub(in crate::canonical_scene::store) const fn material_count(&self) -> usize {
+    pub(in crate::canonical_scene::store) fn material_count(&self) -> usize {
         self.proof.material_count()
     }
 
-    pub(in crate::canonical_scene::store) const fn logical_mesh_count(&self) -> usize {
+    pub(in crate::canonical_scene::store) fn image_count(&self) -> usize {
+        self.proof.image_count()
+    }
+
+    pub(in crate::canonical_scene::store) fn sampler_count(&self) -> usize {
+        self.proof.sampler_count()
+    }
+
+    pub(in crate::canonical_scene::store) fn texture_count(&self) -> usize {
+        self.proof.texture_count()
+    }
+
+    pub(in crate::canonical_scene::store) fn material_binding_count(&self) -> usize {
+        self.proof.material_binding_count()
+    }
+
+    pub(in crate::canonical_scene::store) fn logical_mesh_count(&self) -> usize {
         self.proof.logical_mesh_count()
     }
 
-    pub(in crate::canonical_scene::store) const fn primitive_count(&self) -> usize {
+    pub(in crate::canonical_scene::store) fn primitive_count(&self) -> usize {
         self.proof.primitive_count()
     }
 
-    pub(in crate::canonical_scene::store) const fn attribute_count(&self) -> usize {
+    pub(in crate::canonical_scene::store) fn attribute_count(&self) -> usize {
         self.proof.attribute_count()
     }
 
-    pub(in crate::canonical_scene::store) const fn mesh_instance_count(&self) -> usize {
+    pub(in crate::canonical_scene::store) fn mesh_instance_count(&self) -> usize {
         self.proof.mesh_instance_count()
+    }
+
+    pub(in crate::canonical_scene::store) fn skin_count(&self) -> usize {
+        self.proof.skin_count()
+    }
+
+    pub(in crate::canonical_scene::store) fn logical_morph_count(&self) -> usize {
+        self.proof.logical_morph_count()
+    }
+
+    pub(in crate::canonical_scene::store) fn morph_definition_count(&self) -> usize {
+        self.proof.morph_definition_count()
+    }
+
+    pub(in crate::canonical_scene::store) fn primitive_deformation_count(&self) -> usize {
+        self.proof.primitive_deformation_count()
+    }
+
+    pub(in crate::canonical_scene::store) fn morph_target_count(&self) -> usize {
+        self.proof.morph_target_count()
+    }
+
+    pub(in crate::canonical_scene::store) fn morph_delta_count(&self) -> usize {
+        self.proof.morph_delta_count()
+    }
+
+    pub(in crate::canonical_scene::store) fn animation_clip_count(&self) -> usize {
+        self.proof.animation_clip_count()
+    }
+
+    pub(in crate::canonical_scene::store) fn animation_channel_count(&self) -> usize {
+        self.proof.animation_channel_count()
     }
 
     pub(in crate::canonical_scene::store) fn into_cursor(
@@ -242,10 +312,14 @@ impl<'scene> NodeSceneSemanticView<'scene> {
             nodes: self.nodes,
             references: self.references,
             transforms: self.transforms,
-            geometry: self.geometry,
+            appearance: Some(self.appearance.into_cursor(self.proof)),
+            geometry: Some(self.geometry.into_cursor(self.proof)),
+            deformation: Some(self.deformation.into_cursor(self.proof)),
+            animation: Some(self.animation.into_cursor(self.proof)),
             proof: self.proof,
             roots: Some(roots),
             next_node_index: 0,
+            phase: NodeSceneCursorPhase::Nodes,
             #[cfg(test)]
             read_fault: self.read_fault,
         })
@@ -258,12 +332,25 @@ pub(in crate::canonical_scene::store) struct NodeSceneSemanticCursor<'scene> {
     nodes: CanonicalRecordView<'scene>,
     references: Option<CanonicalRecordView<'scene>>,
     transforms: Option<SequenceView<'scene, f32>>,
-    geometry: geometry::NodeSceneGeometryTables<'scene>,
+    appearance: Option<NodeSceneAppearanceCursor<'scene>>,
+    geometry: Option<NodeSceneGeometryCursor<'scene>>,
+    deformation: Option<NodeSceneDeformationCursor<'scene>>,
+    animation: Option<NodeSceneAnimationCursor<'scene>>,
     proof: NodeSceneValidationProof,
     roots: Option<NodeSceneChildCursor<'scene>>,
     next_node_index: usize,
+    phase: NodeSceneCursorPhase,
     #[cfg(test)]
     read_fault: Option<NodeSceneSemanticReadFault>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum NodeSceneCursorPhase {
+    Nodes,
+    Appearance,
+    Geometry,
+    Deformation,
+    Animation,
 }
 
 impl<'scene> NodeSceneSemanticCursor<'scene> {
@@ -369,13 +456,79 @@ impl<'scene> NodeSceneSemanticCursor<'scene> {
         }))
     }
 
-    /// Closes node traversal and advances into the geometry tables governed by
-    /// the same immutable validation proof.
-    pub(in crate::canonical_scene::store) fn into_geometry(
-        self,
-    ) -> NodeSceneSemanticResult<NodeSceneGeometryCursor<'scene>> {
+    /// Advances into appearance after the node graph has been exhausted.
+    pub(in crate::canonical_scene::store) fn appearance(
+        &mut self,
+    ) -> NodeSceneSemanticResult<&mut NodeSceneAppearanceCursor<'scene>> {
+        if self.phase > NodeSceneCursorPhase::Appearance {
+            return Err(invariant(
+                "semantic cursor cannot return to the appearance domain",
+            ));
+        }
         self.ensure_node_phase_finished()?;
-        Ok(self.geometry.into_cursor(self.proof))
+        self.phase = NodeSceneCursorPhase::Appearance;
+        self.appearance
+            .as_mut()
+            .ok_or_else(|| invariant("appearance cursor was already consumed"))
+    }
+
+    /// Advances into geometry after appearance has been exhausted.
+    pub(in crate::canonical_scene::store) fn geometry(
+        &mut self,
+    ) -> NodeSceneSemanticResult<&mut NodeSceneGeometryCursor<'scene>> {
+        if self.phase > NodeSceneCursorPhase::Geometry {
+            return Err(invariant(
+                "semantic cursor cannot return to the geometry domain",
+            ));
+        }
+        self.ensure_node_phase_finished()?;
+        self.close_appearance_before_geometry()?;
+        self.geometry
+            .as_mut()
+            .ok_or_else(|| invariant("geometry cursor was already consumed"))
+    }
+
+    /// Advances into deformation after geometry has been exhausted.
+    pub(in crate::canonical_scene::store) fn deformation(
+        &mut self,
+    ) -> NodeSceneSemanticResult<&mut NodeSceneDeformationCursor<'scene>> {
+        if self.phase > NodeSceneCursorPhase::Deformation {
+            return Err(invariant(
+                "semantic cursor cannot return to the deformation domain",
+            ));
+        }
+        self.ensure_node_phase_finished()?;
+        self.close_appearance_before_geometry()?;
+        self.close_geometry_before_deformation()?;
+        self.deformation
+            .as_mut()
+            .ok_or_else(|| invariant("deformation cursor was already consumed"))
+    }
+
+    /// Advances into animation after deformation has been exhausted.
+    pub(in crate::canonical_scene::store) fn animation(
+        &mut self,
+    ) -> NodeSceneSemanticResult<&mut NodeSceneAnimationCursor<'scene>> {
+        self.ensure_node_phase_finished()?;
+        self.close_appearance_before_geometry()?;
+        self.close_geometry_before_deformation()?;
+        self.close_deformation_before_animation()?;
+        self.animation
+            .as_mut()
+            .ok_or_else(|| invariant("animation cursor was already consumed"))
+    }
+
+    /// Closes every semantic phase reached by this proof-qualified traversal.
+    pub(in crate::canonical_scene::store) fn finish(mut self) -> NodeSceneSemanticResult<()> {
+        self.ensure_node_phase_finished()?;
+        self.close_appearance_before_geometry()?;
+        self.close_geometry_before_deformation()?;
+        self.close_deformation_before_animation()?;
+        self.animation
+            .take()
+            .ok_or_else(|| invariant("animation cursor was already consumed"))?
+            .finish()?;
+        Ok(())
     }
 
     fn ensure_node_phase_finished(&self) -> NodeSceneSemanticResult<()> {
@@ -385,6 +538,51 @@ impl<'scene> NodeSceneSemanticCursor<'scene> {
         if self.next_node_index != self.proof.source_node_count() {
             return Err(invariant(
                 "node cursor ended before its proof-qualified count",
+            ));
+        }
+        Ok(())
+    }
+
+    fn close_appearance_before_geometry(&mut self) -> NodeSceneSemanticResult<()> {
+        if self.phase < NodeSceneCursorPhase::Geometry {
+            self.appearance
+                .take()
+                .ok_or_else(|| invariant("appearance cursor was already consumed"))?
+                .finish()?;
+            self.phase = NodeSceneCursorPhase::Geometry;
+        } else if self.appearance.is_some() {
+            return Err(invariant(
+                "appearance cursor remains live after entering geometry",
+            ));
+        }
+        Ok(())
+    }
+
+    fn close_geometry_before_deformation(&mut self) -> NodeSceneSemanticResult<()> {
+        if self.phase < NodeSceneCursorPhase::Deformation {
+            self.geometry
+                .take()
+                .ok_or_else(|| invariant("geometry cursor was already consumed"))?
+                .finish()?;
+            self.phase = NodeSceneCursorPhase::Deformation;
+        } else if self.geometry.is_some() {
+            return Err(invariant(
+                "geometry cursor remains live after entering deformation",
+            ));
+        }
+        Ok(())
+    }
+
+    fn close_deformation_before_animation(&mut self) -> NodeSceneSemanticResult<()> {
+        if self.phase < NodeSceneCursorPhase::Animation {
+            self.deformation
+                .take()
+                .ok_or_else(|| invariant("deformation cursor was already consumed"))?
+                .finish()?;
+            self.phase = NodeSceneCursorPhase::Animation;
+        } else if self.deformation.is_some() {
+            return Err(invariant(
+                "deformation cursor remains live after entering animation",
             ));
         }
         Ok(())

@@ -6,10 +6,13 @@ use baozi_operation::__u4c::MeasurementSession;
 use crate::identity::SceneGenerationId;
 
 use super::super::super::construction::node_scene::{
-    OBJ_SOURCE_VECTOR_SCHEMA_ID, ObjCapabilityCanonicalShapeObservation,
-    ObjCapabilitySourceShapeObservation, build_obj_capability_scene_for_probe,
-    capture_obj_capability_snapshots_for_probe, collect_obj_capability_vectors_for_probe,
-    inspect_obj_capability_semantics_for_probe,
+    GLTF_SOURCE_VECTOR_SCHEMA_ID, GltfCapabilityCanonicalShapeObservation,
+    GltfCapabilitySourceShapeObservation, OBJ_SOURCE_VECTOR_SCHEMA_ID,
+    ObjCapabilityCanonicalShapeObservation, ObjCapabilitySourceShapeObservation,
+    build_gltf_capability_scene_for_probe, build_obj_capability_scene_for_probe,
+    capture_gltf_capability_snapshots_for_probe, capture_obj_capability_snapshots_for_probe,
+    collect_gltf_capability_vectors_for_probe, collect_obj_capability_vectors_for_probe,
+    inspect_gltf_capability_semantics_for_probe, inspect_obj_capability_semantics_for_probe,
 };
 use super::super::super::construction::{
     COMPLEX_SEMANTIC_TRANSCRIPT_SCHEMA_ID, ComplexFixtureFault, ComplexFixtureTerminal,
@@ -19,11 +22,13 @@ use super::super::{
     authored_fixture, test_account, test_account_with_allocation_limit, test_factory, test_limits,
 };
 use super::report::{
-    FaultPhysicalReport, FixedVectorReport, HotLeafObservationReport, InheritedHotLeafReport,
-    ObjBoundedPreviewReport, ObjCanonicalShapeReport, ObjCapabilityReport, ObjMutationReport,
-    ObjPhysicalReport, ObjSnapshotTotalsReport, ObjSourceShapeReport, ScalePhysicalReport,
-    ScaleScenarioReport, SemanticTranscriptReport, ShareGenerationReport, SharePhysicalReport,
-    ValidationFaultReport, evidence_report, hex_encode, phase_report, release_report, sha256_hex,
+    CapabilityBoundedPreviewReport, CapabilityMutationReport, CapabilityPhysicalReport,
+    FaultPhysicalReport, FixedVectorReport, GltfCanonicalShapeReport, GltfCapabilityReport,
+    GltfSnapshotTotalsReport, GltfSourceShapeReport, HotLeafObservationReport,
+    InheritedHotLeafReport, ObjCanonicalShapeReport, ObjCapabilityReport, ObjSnapshotTotalsReport,
+    ObjSourceShapeReport, ScalePhysicalReport, ScaleScenarioReport, SemanticTranscriptReport,
+    ShareGenerationReport, SharePhysicalReport, ValidationFaultReport, evidence_report, hex_encode,
+    phase_report, release_report, sha256_hex,
 };
 
 const COMPLEX_PREVIEW_LIMIT_BYTES: usize = 192;
@@ -241,7 +246,7 @@ pub(super) fn collect_obj_capability() -> ObjCapabilityReport {
         transcript_bytes: full_snapshot.totals.transcript_bytes,
         work_units: full_snapshot.totals.work_units,
     };
-    let bounded_preview = ObjBoundedPreviewReport {
+    let bounded_preview = CapabilityBoundedPreviewReport {
         schema_id: "baozi.canonical-scene.bounded-preview.v1",
         bytes: bounded_snapshot.preview.text.len(),
         sha256: sha256_hex(bounded_snapshot.preview.text.as_bytes()),
@@ -264,7 +269,7 @@ pub(super) fn collect_obj_capability() -> ObjCapabilityReport {
     let mutations = vector_observations
         .mutations
         .into_iter()
-        .map(|mutation| ObjMutationReport {
+        .map(|mutation| CapabilityMutationReport {
             field_class: mutation.field_class,
             source_vector: FixedVectorReport {
                 schema_id: OBJ_SOURCE_VECTOR_SCHEMA_ID,
@@ -322,7 +327,7 @@ pub(super) fn collect_obj_capability() -> ObjCapabilityReport {
         ),
         snapshot: phase_report(SNAPSHOT_ID, snapshot_measurement, snapshot_allocations),
         release: release_report(RELEASE_ID, release_allocations),
-        physical_account: ObjPhysicalReport {
+        physical_account: CapabilityPhysicalReport {
             baseline: physical_baseline.into(),
             retained: physical_retained.into(),
             after_inspection: physical_after_inspection.into(),
@@ -355,6 +360,291 @@ fn canonical_shape_report(
         corner_normal_elements: shape.corner_normal_elements,
         corner_texcoord_elements: shape.corner_texcoord_elements,
         face_smoothing_group_elements: shape.face_smoothing_group_elements,
+    }
+}
+
+pub(super) fn collect_gltf_capability() -> GltfCapabilityReport {
+    const SCENARIO_ID: &str = "backend-free-gltf-shape-v1";
+    const CONSTRUCTION_ID: &str = "canonical-gltf-five-domain-construction-v1";
+    const INSPECTION_ID: &str = "canonical-gltf-five-domain-inspection-v1";
+    const SNAPSHOT_ID: &str = "canonical-gltf-five-domain-snapshot-v1";
+    const RELEASE_ID: &str = "canonical-gltf-five-domain-release-v1";
+
+    let vector_observations = collect_gltf_capability_vectors_for_probe();
+    let factory = test_factory(1);
+    let account = test_account_with_allocation_limit(&factory, 512);
+    let generation_source = AtomicU64::new(0);
+    let physical_baseline = account.snapshot();
+
+    let construction_session =
+        MeasurementSession::begin().expect("glTF construction measurement must start");
+    let mut parts = None;
+    let construction_allocations = allocation_counter::measure(|| {
+        parts = Some(build_gltf_capability_scene_for_probe(
+            &account,
+            &generation_source,
+        ));
+    });
+    let construction_measurement = construction_session
+        .finish()
+        .expect("glTF construction measurement must finish");
+    let parts = parts.expect("glTF construction closure must publish a Scene");
+    let physical_retained = account.snapshot();
+    let canonical_block_count = parts.scene.canonical_block_count();
+    let outcome_evidence_block_count = parts.report.outcome_evidence_block_count();
+    let evidence = evidence_report(outcome_evidence_block_count, parts.report.ledger_evidence());
+
+    let inspection_session =
+        MeasurementSession::begin().expect("glTF typed inspection measurement must start");
+    let mut canonical_shape = None;
+    let inspection_allocations = allocation_counter::measure(|| {
+        canonical_shape = Some(inspect_gltf_capability_semantics_for_probe(&parts));
+    });
+    let inspection_measurement = inspection_session
+        .finish()
+        .expect("glTF typed inspection measurement must finish");
+    let physical_after_inspection = account.snapshot();
+    let canonical_shape = canonical_shape.expect("glTF typed inspection must return its shape");
+
+    let snapshot_session =
+        MeasurementSession::begin().expect("glTF snapshot measurement must start");
+    let mut snapshots = None;
+    let snapshot_allocations = allocation_counter::measure(|| {
+        snapshots = Some(capture_gltf_capability_snapshots_for_probe(&parts));
+    });
+    let snapshot_measurement = snapshot_session
+        .finish()
+        .expect("glTF snapshot measurement must finish");
+    let (full_snapshot, bounded_snapshot) =
+        snapshots.expect("glTF snapshot closure must return both snapshots");
+    let physical_after_snapshot = account.snapshot();
+
+    assert_eq!(bounded_snapshot.digest, full_snapshot.digest);
+    assert_eq!(bounded_snapshot.totals, full_snapshot.totals);
+    assert_eq!(
+        vector_observations.baseline_snapshot_digest,
+        full_snapshot.digest,
+    );
+    assert!(!full_snapshot.preview.bytes_truncated);
+    assert!(!full_snapshot.preview.items_truncated);
+    assert!(bounded_snapshot.preview.text.len() <= 96);
+    assert!(bounded_snapshot.preview.bytes_truncated || bounded_snapshot.preview.items_truncated);
+    assert!(bounded_snapshot.preview.items_omitted_by_limit > 0);
+    assert_eq!(vector_observations.mutations.len(), 7);
+    for (index, mutation) in vector_observations.mutations.iter().enumerate() {
+        assert_ne!(mutation.source_vector, vector_observations.source_vector);
+        assert_ne!(mutation.snapshot_digest, full_snapshot.digest);
+        for earlier in &vector_observations.mutations[..index] {
+            assert_ne!(mutation.source_vector, earlier.source_vector);
+            assert_ne!(mutation.snapshot_digest, earlier.snapshot_digest);
+        }
+    }
+    assert_eq!(
+        (
+            vector_observations.source_shape.node_count,
+            vector_observations.source_shape.image_count,
+            vector_observations.source_shape.primitive_count,
+            vector_observations.source_shape.skin_count,
+            vector_observations.source_shape.animation_channel_count,
+        ),
+        (
+            canonical_shape.node_count,
+            canonical_shape.image_count,
+            canonical_shape.primitive_count,
+            canonical_shape.skin_count,
+            canonical_shape.animation_channel_count,
+        ),
+    );
+
+    let full_snapshot_digest_hex = hex_encode(&full_snapshot.digest);
+    let bounded_snapshot_digest_hex = hex_encode(&bounded_snapshot.digest);
+    let snapshot_totals = GltfSnapshotTotalsReport {
+        node_count: full_snapshot.totals.node_count,
+        root_count: full_snapshot.totals.root_count,
+        edge_count: full_snapshot.totals.edge_count,
+        image_count: full_snapshot.totals.image_count,
+        sampler_count: full_snapshot.totals.sampler_count,
+        texture_count: full_snapshot.totals.texture_count,
+        material_count: full_snapshot.totals.material_count,
+        material_binding_count: full_snapshot.totals.material_binding_count,
+        image_payload_bytes: full_snapshot.totals.image_payload_bytes,
+        media_type_bytes: full_snapshot.totals.media_type_bytes,
+        logical_mesh_count: full_snapshot.totals.logical_mesh_count,
+        primitive_count: full_snapshot.totals.primitive_count,
+        attribute_count: full_snapshot.totals.attribute_count,
+        mesh_instance_count: full_snapshot.totals.mesh_instance_count,
+        polygon_boundary_count: full_snapshot.totals.polygon_boundary_count,
+        primitive_index_count: full_snapshot.totals.primitive_index_count,
+        sparse_index_count: full_snapshot.totals.sparse_index_count,
+        canonical_scalar_count: full_snapshot.totals.canonical_scalar_count,
+        f32_scalar_count: full_snapshot.totals.f32_scalar_count,
+        u32_scalar_count: full_snapshot.totals.u32_scalar_count,
+        skin_count: full_snapshot.totals.skin_count,
+        logical_morph_count: full_snapshot.totals.logical_morph_count,
+        morph_definition_count: full_snapshot.totals.morph_definition_count,
+        primitive_deformation_count: full_snapshot.totals.primitive_deformation_count,
+        morph_target_count: full_snapshot.totals.morph_target_count,
+        morph_delta_count: full_snapshot.totals.morph_delta_count,
+        deformation_mesh_instance_count: full_snapshot.totals.deformation_mesh_instance_count,
+        skin_joint_count: full_snapshot.totals.skin_joint_count,
+        inverse_bind_matrix_count: full_snapshot.totals.inverse_bind_matrix_count,
+        skin_correction_matrix_count: full_snapshot.totals.skin_correction_matrix_count,
+        skin_name_bytes: full_snapshot.totals.skin_name_bytes,
+        morph_default_weight_count: full_snapshot.totals.morph_default_weight_count,
+        morph_name_bytes: full_snapshot.totals.morph_name_bytes,
+        influence_row_count: full_snapshot.totals.influence_row_count,
+        influence_count: full_snapshot.totals.influence_count,
+        morph_value_vector_count: full_snapshot.totals.morph_value_vector_count,
+        morph_sparse_index_count: full_snapshot.totals.morph_sparse_index_count,
+        instance_morph_weight_count: full_snapshot.totals.instance_morph_weight_count,
+        animation_clip_count: full_snapshot.totals.animation_clip_count,
+        animation_channel_count: full_snapshot.totals.animation_channel_count,
+        animation_time_scalar_count: full_snapshot.totals.animation_time_scalar_count,
+        animation_value_scalar_count: full_snapshot.totals.animation_value_scalar_count,
+        animation_in_tangent_scalar_count: full_snapshot.totals.animation_in_tangent_scalar_count,
+        animation_out_tangent_scalar_count: full_snapshot.totals.animation_out_tangent_scalar_count,
+        transcript_bytes: full_snapshot.totals.transcript_bytes,
+        work_units: full_snapshot.totals.work_units,
+    };
+    let bounded_preview = CapabilityBoundedPreviewReport {
+        schema_id: "baozi.canonical-scene.bounded-preview.v1",
+        bytes: bounded_snapshot.preview.text.len(),
+        sha256: sha256_hex(bounded_snapshot.preview.text.as_bytes()),
+        items_omitted_by_limit: bounded_snapshot.preview.items_omitted_by_limit,
+        bytes_truncated: bounded_snapshot.preview.bytes_truncated,
+        items_truncated: bounded_snapshot.preview.items_truncated,
+    };
+    let source_vector = FixedVectorReport {
+        schema_id: GLTF_SOURCE_VECTOR_SCHEMA_ID,
+        observed_bytes: vector_observations.source_vector.len(),
+        sha256: sha256_hex(&vector_observations.source_vector),
+    };
+    let mutations = vector_observations
+        .mutations
+        .into_iter()
+        .map(|mutation| CapabilityMutationReport {
+            field_class: mutation.field_class,
+            source_vector: FixedVectorReport {
+                schema_id: GLTF_SOURCE_VECTOR_SCHEMA_ID,
+                observed_bytes: mutation.source_vector.len(),
+                sha256: sha256_hex(&mutation.source_vector),
+            },
+            snapshot_digest_hex: hex_encode(&mutation.snapshot_digest),
+        })
+        .collect();
+
+    let release_allocations = allocation_counter::measure(move || {
+        drop(full_snapshot);
+        drop(bounded_snapshot);
+        drop(parts);
+    });
+    assert_allocator_lifecycle_balanced(
+        "canonical glTF capability",
+        &[
+            &construction_allocations,
+            &inspection_allocations,
+            &snapshot_allocations,
+            &release_allocations,
+        ],
+    );
+    let physical_after_release = account.snapshot();
+    drop(account);
+    let factory_after_account_release = factory.snapshot();
+
+    GltfCapabilityReport {
+        entry_point: "backend-free-gltf-shape",
+        scenario_id: SCENARIO_ID,
+        source_shape: gltf_source_shape_report(vector_observations.source_shape),
+        canonical_shape: gltf_canonical_shape_report(canonical_shape),
+        source_vector,
+        mutations,
+        generation_reservations: generation_source.load(Ordering::Relaxed),
+        canonical_block_count,
+        outcome_evidence_block_count,
+        full_snapshot_digest_hex,
+        bounded_snapshot_digest_hex,
+        snapshot_totals,
+        bounded_preview,
+        evidence,
+        construction: phase_report(
+            CONSTRUCTION_ID,
+            construction_measurement,
+            construction_allocations,
+        ),
+        inspection: phase_report(
+            INSPECTION_ID,
+            inspection_measurement,
+            inspection_allocations,
+        ),
+        snapshot: phase_report(SNAPSHOT_ID, snapshot_measurement, snapshot_allocations),
+        release: release_report(RELEASE_ID, release_allocations),
+        physical_account: CapabilityPhysicalReport {
+            baseline: physical_baseline.into(),
+            retained: physical_retained.into(),
+            after_inspection: physical_after_inspection.into(),
+            after_snapshot: physical_after_snapshot.into(),
+            after_release: physical_after_release.into(),
+        },
+        factory_after_account_release: factory_after_account_release.into(),
+    }
+}
+
+fn gltf_source_shape_report(shape: GltfCapabilitySourceShapeObservation) -> GltfSourceShapeReport {
+    GltfSourceShapeReport {
+        node_count: shape.node_count,
+        root_count: shape.root_count,
+        image_count: shape.image_count,
+        image_payload_bytes: shape.image_payload_bytes,
+        media_type_bytes: shape.media_type_bytes,
+        sampler_count: shape.sampler_count,
+        texture_count: shape.texture_count,
+        material_count: shape.material_count,
+        material_binding_count: shape.material_binding_count,
+        logical_mesh_count: shape.logical_mesh_count,
+        primitive_count: shape.primitive_count,
+        attribute_count: shape.attribute_count,
+        mesh_instance_count: shape.mesh_instance_count,
+        skin_count: shape.skin_count,
+        skin_joint_count: shape.skin_joint_count,
+        morph_definition_count: shape.morph_definition_count,
+        morph_target_count: shape.morph_target_count,
+        morph_delta_count: shape.morph_delta_count,
+        influence_row_count: shape.influence_row_count,
+        influence_count: shape.influence_count,
+        animation_clip_count: shape.animation_clip_count,
+        animation_channel_count: shape.animation_channel_count,
+        animation_key_count: shape.animation_key_count,
+    }
+}
+
+fn gltf_canonical_shape_report(
+    shape: GltfCapabilityCanonicalShapeObservation,
+) -> GltfCanonicalShapeReport {
+    GltfCanonicalShapeReport {
+        node_count: shape.node_count,
+        root_count: shape.root_count,
+        edge_count: shape.edge_count,
+        image_count: shape.image_count,
+        sampler_count: shape.sampler_count,
+        texture_count: shape.texture_count,
+        material_count: shape.material_count,
+        material_binding_count: shape.material_binding_count,
+        logical_mesh_count: shape.logical_mesh_count,
+        primitive_count: shape.primitive_count,
+        attribute_count: shape.attribute_count,
+        mesh_instance_count: shape.mesh_instance_count,
+        skin_count: shape.skin_count,
+        skin_joint_count: shape.skin_joint_count,
+        logical_morph_count: shape.logical_morph_count,
+        morph_definition_count: shape.morph_definition_count,
+        primitive_deformation_count: shape.primitive_deformation_count,
+        morph_target_count: shape.morph_target_count,
+        morph_delta_count: shape.morph_delta_count,
+        influence_row_count: shape.influence_row_count,
+        influence_count: shape.influence_count,
+        animation_clip_count: shape.animation_clip_count,
+        animation_channel_count: shape.animation_channel_count,
+        animation_key_count: shape.animation_key_count,
     }
 }
 

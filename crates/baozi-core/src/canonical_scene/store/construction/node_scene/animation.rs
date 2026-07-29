@@ -1,0 +1,733 @@
+use baozi_operation::{
+    CanonicalRecordRowWriter, RecordBlock, RecordPlan, ScalarSequence, SequencePlan,
+    StoreBuildError, StorePlanError, StoreRuntimeError, StoredScalar,
+};
+
+use crate::canonical_scene::store::production::{Presence, ValidatedAnimationBatch};
+use crate::canonical_scene::store::schema::animation::{
+    ANIMATION_CHANNEL_FIELD_COUNT, ANIMATION_CLIP_FIELD_COUNT, ANIMATION_DIRECTORY_FIELD_COUNT,
+    ANIMATION_SCHEMA_REVISION, ANIMATION_TARGET_MESH_INSTANCE_MORPH_WEIGHTS,
+    ANIMATION_TARGET_NODE_ROTATION, ANIMATION_TARGET_NODE_SCALE, ANIMATION_TARGET_NODE_TRANSLATION,
+    AnimationChannelTableSchema, AnimationClipTableSchema, AnimationDirectorySchema,
+    AnimationInTangentsSchema, AnimationOutTangentsSchema, AnimationTimesSchema,
+    AnimationValuesSchema, encode_animation_extrapolation, encode_animation_interpolation,
+    encode_animation_target_kind, encode_animation_time_domain,
+};
+use crate::canonical_scene::store::schema::deformation::DeformationMeshInstanceTableSchema;
+use crate::canonical_scene::store::schema::{
+    CanonicalBlockRef, CanonicalSchema, NodeSceneNodeTableSchema, PRESENCE_ABSENT, PRESENCE_PRESENT,
+};
+
+use super::super::{SceneStoreAssembly, SceneStoreKeys};
+use super::NodeSceneWorkMeter;
+
+pub(super) struct AnimationMaterializationPlans {
+    clips: Option<RecordPlan>,
+    channels: Option<RecordPlan>,
+    times: Option<SequencePlan<f64>>,
+    values: Option<SequencePlan<f32>>,
+    in_tangents: Option<SequencePlan<f32>>,
+    out_tangents: Option<SequencePlan<f32>>,
+    directory: RecordPlan,
+    clip_count: u32,
+    channel_count: u32,
+    time_scalar_count: u64,
+    value_scalar_count: u64,
+    in_tangent_scalar_count: u64,
+    out_tangent_scalar_count: u64,
+    table_block_count: usize,
+    payload_block_count: u32,
+    canonical_block_count: usize,
+}
+
+impl AnimationMaterializationPlans {
+    pub(super) fn new<R>(batch: &ValidatedAnimationBatch<'_, R>) -> Result<Self, StorePlanError> {
+        let clip_count = batch.clip_count();
+        let channel_count = batch.channel_count();
+        let time_scalar_count = batch.time_scalar_count();
+        let value_scalar_count = batch.value_scalar_count();
+        let in_tangent_scalar_count = batch.in_tangent_scalar_count();
+        let out_tangent_scalar_count = batch.out_tangent_scalar_count();
+
+        let clips = record_plan_if_nonempty(clip_count, ANIMATION_CLIP_FIELD_COUNT)?;
+        let channels = record_plan_if_nonempty(channel_count, ANIMATION_CHANNEL_FIELD_COUNT)?;
+        let times = sequence_plan_if_nonempty(time_scalar_count)?;
+        let values = sequence_plan_if_nonempty(value_scalar_count)?;
+        let in_tangents = sequence_plan_if_nonempty(in_tangent_scalar_count)?;
+        let out_tangents = sequence_plan_if_nonempty(out_tangent_scalar_count)?;
+
+        let payload_block_count = [
+            times.is_some(),
+            values.is_some(),
+            in_tangents.is_some(),
+            out_tangents.is_some(),
+        ]
+        .into_iter()
+        .try_fold(0_u32, |count, present| {
+            count.checked_add(u32::from(present))
+        })
+        .ok_or(StorePlanError::SizeOverflow)?;
+        let invalid_empty_shape = channel_count == 0
+            && (time_scalar_count != 0
+                || value_scalar_count != 0
+                || in_tangent_scalar_count != 0
+                || out_tangent_scalar_count != 0);
+        let invalid_nonempty_shape = channel_count != 0
+            && (clip_count == 0 || time_scalar_count == 0 || value_scalar_count == 0);
+        if payload_block_count != batch.payload_block_count()
+            || invalid_empty_shape
+            || invalid_nonempty_shape
+            || in_tangent_scalar_count != out_tangent_scalar_count
+        {
+            return Err(StorePlanError::InvalidBlockTable);
+        }
+
+        let table_block_count = [clips.is_some(), channels.is_some()]
+            .into_iter()
+            .filter(|present| *present)
+            .count();
+        let canonical_block_count = 1_usize
+            .checked_add(table_block_count)
+            .and_then(|count| {
+                usize::try_from(payload_block_count)
+                    .ok()
+                    .and_then(|payloads| count.checked_add(payloads))
+            })
+            .ok_or(StorePlanError::SizeOverflow)?;
+
+        Ok(Self {
+            clips,
+            channels,
+            times,
+            values,
+            in_tangents,
+            out_tangents,
+            directory: RecordPlan::new(1, ANIMATION_DIRECTORY_FIELD_COUNT)?,
+            clip_count,
+            channel_count,
+            time_scalar_count,
+            value_scalar_count,
+            in_tangent_scalar_count,
+            out_tangent_scalar_count,
+            table_block_count,
+            payload_block_count,
+            canonical_block_count,
+        })
+    }
+
+    pub(super) const fn canonical_block_count(&self) -> usize {
+        self.canonical_block_count
+    }
+
+    pub(super) const fn table_block_count(&self) -> usize {
+        self.table_block_count
+    }
+
+    pub(super) const fn payload_block_count(&self) -> u32 {
+        self.payload_block_count
+    }
+
+    pub(super) const fn clip_count(&self) -> u32 {
+        self.clip_count
+    }
+
+    pub(super) const fn channel_count(&self) -> u32 {
+        self.channel_count
+    }
+
+    pub(super) const fn time_scalar_count(&self) -> u64 {
+        self.time_scalar_count
+    }
+
+    pub(super) const fn value_scalar_count(&self) -> u64 {
+        self.value_scalar_count
+    }
+
+    pub(super) const fn in_tangent_scalar_count(&self) -> u64 {
+        self.in_tangent_scalar_count
+    }
+
+    pub(super) const fn out_tangent_scalar_count(&self) -> u64 {
+        self.out_tangent_scalar_count
+    }
+
+    fn matches_batch<R>(&self, batch: &ValidatedAnimationBatch<'_, R>) -> bool {
+        self.clip_count == batch.clip_count()
+            && self.channel_count == batch.channel_count()
+            && self.time_scalar_count == batch.time_scalar_count()
+            && self.value_scalar_count == batch.value_scalar_count()
+            && self.in_tangent_scalar_count == batch.in_tangent_scalar_count()
+            && self.out_tangent_scalar_count == batch.out_tangent_scalar_count()
+            && self.payload_block_count == batch.payload_block_count()
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct AnimationTargetTableRefs {
+    nodes: CanonicalBlockRef<NodeSceneNodeTableSchema>,
+    mesh_instances: Option<CanonicalBlockRef<DeformationMeshInstanceTableSchema>>,
+}
+
+impl AnimationTargetTableRefs {
+    pub(super) const fn new(
+        nodes: CanonicalBlockRef<NodeSceneNodeTableSchema>,
+        mesh_instances: Option<CanonicalBlockRef<DeformationMeshInstanceTableSchema>>,
+    ) -> Self {
+        Self {
+            nodes,
+            mesh_instances,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct RetainedAnimationRefs {
+    directory: CanonicalBlockRef<AnimationDirectorySchema>,
+}
+
+impl RetainedAnimationRefs {
+    pub(super) const fn directory(self) -> CanonicalBlockRef<AnimationDirectorySchema> {
+        self.directory
+    }
+}
+
+#[derive(Clone, Copy)]
+struct AnimationPayloadRefs {
+    times: Option<CanonicalBlockRef<AnimationTimesSchema>>,
+    values: Option<CanonicalBlockRef<AnimationValuesSchema>>,
+    in_tangents: Option<CanonicalBlockRef<AnimationInTangentsSchema>>,
+    out_tangents: Option<CanonicalBlockRef<AnimationOutTangentsSchema>>,
+}
+
+#[derive(Clone, Copy)]
+enum AnimationF32PayloadPart {
+    Values,
+    InTangents,
+    OutTangents,
+}
+
+pub(super) fn retain_animation<R>(
+    assembly: &mut SceneStoreAssembly,
+    plans: &AnimationMaterializationPlans,
+    batch: &ValidatedAnimationBatch<'_, R>,
+    targets: AnimationTargetTableRefs,
+    keys: SceneStoreKeys,
+    work: &mut NodeSceneWorkMeter,
+    failure: StoreBuildError,
+) -> Result<RetainedAnimationRefs, StoreRuntimeError> {
+    if !plans.matches_batch(batch) {
+        return Err(StoreRuntimeError::Build(failure));
+    }
+
+    let times = match plans.times {
+        Some(plan) => Some(retain_animation_times(
+            assembly, plan, plans, batch, keys, work, failure,
+        )?),
+        None => None,
+    };
+    let values = match plans.values {
+        Some(plan) => Some(retain_animation_f32_payload(
+            assembly,
+            plan,
+            AnimationValuesSchema,
+            AnimationF32PayloadPart::Values,
+            plans,
+            batch,
+            keys,
+            work,
+            failure,
+        )?),
+        None => None,
+    };
+    let in_tangents = match plans.in_tangents {
+        Some(plan) => Some(retain_animation_f32_payload(
+            assembly,
+            plan,
+            AnimationInTangentsSchema,
+            AnimationF32PayloadPart::InTangents,
+            plans,
+            batch,
+            keys,
+            work,
+            failure,
+        )?),
+        None => None,
+    };
+    let out_tangents = match plans.out_tangents {
+        Some(plan) => Some(retain_animation_f32_payload(
+            assembly,
+            plan,
+            AnimationOutTangentsSchema,
+            AnimationF32PayloadPart::OutTangents,
+            plans,
+            batch,
+            keys,
+            work,
+            failure,
+        )?),
+        None => None,
+    };
+    let payloads = AnimationPayloadRefs {
+        times,
+        values,
+        in_tangents,
+        out_tangents,
+    };
+
+    let channels = match plans.channels {
+        Some(plan) => Some(retain_animation_channels(
+            assembly, plan, plans, batch, payloads, targets, keys, work, failure,
+        )?),
+        None => None,
+    };
+    let clips = match plans.clips {
+        Some(plan) => Some(retain_animation_clips(
+            assembly, plan, plans, batch, channels, keys, work, failure,
+        )?),
+        None => None,
+    };
+    let directory = retain_animation_directory(
+        assembly, plans, clips, channels, payloads, keys, work, failure,
+    )?;
+    Ok(RetainedAnimationRefs { directory })
+}
+
+fn retain_animation_times<R>(
+    assembly: &mut SceneStoreAssembly,
+    plan: SequencePlan<f64>,
+    plans: &AnimationMaterializationPlans,
+    batch: &ValidatedAnimationBatch<'_, R>,
+    keys: SceneStoreKeys,
+    work: &mut NodeSceneWorkMeter,
+    failure: StoreBuildError,
+) -> Result<CanonicalBlockRef<AnimationTimesSchema>, StoreRuntimeError> {
+    assembly
+        .try_retain_canonical_sequence_controlled(
+            plan,
+            keys.dimension,
+            AnimationTimesSchema,
+            |writer, control| {
+                let channel_count = usize::try_from(plans.channel_count).map_err(|_| failure)?;
+                let mut scalar_offset = 0_u64;
+                for channel_index in 0..channel_count {
+                    let channel = batch.channel(channel_index).ok_or(failure)?;
+                    let values = channel.times();
+                    let count = u32::try_from(values.len()).map_err(|_| failure)?;
+                    let expected_offset = u32::try_from(scalar_offset).map_err(|_| failure)?;
+                    if values.is_empty()
+                        || channel.time_offset() != expected_offset
+                        || channel.time_count() != count
+                    {
+                        return Err(failure.into());
+                    }
+                    work.observe(control, u64::from(count))?;
+                    writer.extend_from_slice(values)?;
+                    scalar_offset = scalar_offset.checked_add(u64::from(count)).ok_or(failure)?;
+                }
+                if scalar_offset != plans.time_scalar_count {
+                    return Err(failure.into());
+                }
+                Ok(())
+            },
+        )
+        .map(CanonicalBlockRef::from_store)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn retain_animation_f32_payload<R, Tag>(
+    assembly: &mut SceneStoreAssembly,
+    plan: SequencePlan<f32>,
+    tag: Tag,
+    part: AnimationF32PayloadPart,
+    plans: &AnimationMaterializationPlans,
+    batch: &ValidatedAnimationBatch<'_, R>,
+    keys: SceneStoreKeys,
+    work: &mut NodeSceneWorkMeter,
+    failure: StoreBuildError,
+) -> Result<CanonicalBlockRef<Tag>, StoreRuntimeError>
+where
+    Tag: CanonicalSchema<StoreKind = ScalarSequence<f32>>,
+{
+    let expected_total = match part {
+        AnimationF32PayloadPart::Values => plans.value_scalar_count,
+        AnimationF32PayloadPart::InTangents => plans.in_tangent_scalar_count,
+        AnimationF32PayloadPart::OutTangents => plans.out_tangent_scalar_count,
+    };
+    assembly
+        .try_retain_canonical_sequence_controlled(plan, keys.dimension, tag, |writer, control| {
+            let channel_count = usize::try_from(plans.channel_count).map_err(|_| failure)?;
+            let mut scalar_offset = 0_u64;
+            for channel_index in 0..channel_count {
+                let channel = batch.channel(channel_index).ok_or(failure)?;
+                let (authored_offset, planned_count, values) = match part {
+                    AnimationF32PayloadPart::Values => (
+                        Presence::Present(channel.value_offset()),
+                        channel.value_count(),
+                        Presence::Present(channel.values()),
+                    ),
+                    AnimationF32PayloadPart::InTangents => (
+                        channel.in_tangent_offset(),
+                        channel.in_tangent_count(),
+                        channel.in_tangents(),
+                    ),
+                    AnimationF32PayloadPart::OutTangents => (
+                        channel.out_tangent_offset(),
+                        channel.out_tangent_count(),
+                        channel.out_tangents(),
+                    ),
+                };
+                match (authored_offset, values) {
+                    (Presence::Absent, Presence::Absent) if planned_count == 0 => {}
+                    (Presence::Present(offset), Presence::Present(values)) => {
+                        let count = u32::try_from(values.len()).map_err(|_| failure)?;
+                        let expected_offset = u32::try_from(scalar_offset).map_err(|_| failure)?;
+                        if values.is_empty() || offset != expected_offset || planned_count != count
+                        {
+                            return Err(failure.into());
+                        }
+                        work.observe(control, u64::from(count))?;
+                        writer.extend_from_slice(values)?;
+                        scalar_offset =
+                            scalar_offset.checked_add(u64::from(count)).ok_or(failure)?;
+                    }
+                    _ => return Err(failure.into()),
+                }
+            }
+            if scalar_offset != expected_total {
+                return Err(failure.into());
+            }
+            Ok(())
+        })
+        .map(CanonicalBlockRef::from_store)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn retain_animation_channels<R>(
+    assembly: &mut SceneStoreAssembly,
+    plan: RecordPlan,
+    plans: &AnimationMaterializationPlans,
+    batch: &ValidatedAnimationBatch<'_, R>,
+    payloads: AnimationPayloadRefs,
+    targets: AnimationTargetTableRefs,
+    keys: SceneStoreKeys,
+    work: &mut NodeSceneWorkMeter,
+    failure: StoreBuildError,
+) -> Result<CanonicalBlockRef<AnimationChannelTableSchema>, StoreRuntimeError> {
+    assembly
+        .try_retain_canonical_records_controlled(
+            plan,
+            keys.dimension,
+            AnimationChannelTableSchema,
+            |writer, control| {
+                let times = payloads.times.ok_or(failure)?;
+                let values = payloads.values.ok_or(failure)?;
+                let channel_count = usize::try_from(plans.channel_count).map_err(|_| failure)?;
+                for channel_index in 0..channel_count {
+                    work.observe(control, 1)?;
+                    let channel = batch.channel(channel_index).ok_or(failure)?;
+                    let channel_id = u32::try_from(channel_index).map_err(|_| failure)?;
+                    let source_channel =
+                        u32::try_from(channel.input_index()).map_err(|_| failure)?;
+                    if source_channel != channel_id {
+                        return Err(failure.into());
+                    }
+                    let expected_value_count = channel
+                        .time_count()
+                        .checked_mul(channel.value_width())
+                        .ok_or(failure)?;
+                    if channel.time_count() == 0
+                        || channel.value_width() == 0
+                        || channel.value_count() != expected_value_count
+                    {
+                        return Err(failure.into());
+                    }
+                    let target_kind = encode_animation_target_kind(channel.target());
+                    writer.write_row(|row| {
+                        row.write_scalar(channel_id)?;
+                        row.write_scalar(target_kind)?;
+                        row.write_scalar(channel.canonical_target_index())?;
+                        write_animation_target_ref(row, target_kind, targets, failure)?;
+                        row.write_scalar(encode_animation_interpolation(channel.interpolation()))?;
+                        row.write_scalar(encode_animation_extrapolation(
+                            channel.pre_extrapolation(),
+                        ))?;
+                        row.write_scalar(encode_animation_extrapolation(
+                            channel.post_extrapolation(),
+                        ))?;
+                        row.write_scalar(channel.time_count())?;
+                        row.write_scalar(channel.value_width())?;
+                        row.write_scalar(channel.time_offset())?;
+                        row.write_scalar(channel.time_count())?;
+                        row.write_sequence_ref(times.into_store())?;
+                        row.write_scalar(channel.value_offset())?;
+                        row.write_scalar(channel.value_count())?;
+                        row.write_sequence_ref(values.into_store())?;
+                        write_optional_channel_sequence_ref(
+                            row,
+                            channel.in_tangent_offset(),
+                            channel.in_tangent_count(),
+                            channel.value_count(),
+                            payloads.in_tangents,
+                            failure,
+                        )?;
+                        write_optional_channel_sequence_ref(
+                            row,
+                            channel.out_tangent_offset(),
+                            channel.out_tangent_count(),
+                            channel.value_count(),
+                            payloads.out_tangents,
+                            failure,
+                        )
+                    })?;
+                }
+                Ok(())
+            },
+        )
+        .map(CanonicalBlockRef::from_store)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn retain_animation_clips<R>(
+    assembly: &mut SceneStoreAssembly,
+    plan: RecordPlan,
+    plans: &AnimationMaterializationPlans,
+    batch: &ValidatedAnimationBatch<'_, R>,
+    channels: Option<CanonicalBlockRef<AnimationChannelTableSchema>>,
+    keys: SceneStoreKeys,
+    work: &mut NodeSceneWorkMeter,
+    failure: StoreBuildError,
+) -> Result<CanonicalBlockRef<AnimationClipTableSchema>, StoreRuntimeError> {
+    assembly
+        .try_retain_canonical_records_controlled(
+            plan,
+            keys.dimension,
+            AnimationClipTableSchema,
+            |writer, control| {
+                let clip_count = usize::try_from(plans.clip_count).map_err(|_| failure)?;
+                let mut channel_offset = 0_u32;
+                for clip_index in 0..clip_count {
+                    work.observe(control, 1)?;
+                    let clip = batch.clip(clip_index).ok_or(failure)?;
+                    let clip_id = u32::try_from(clip_index).map_err(|_| failure)?;
+                    let source_clip = u32::try_from(clip.input_index()).map_err(|_| failure)?;
+                    let range = clip.channel_range();
+                    if source_clip != clip_id || range.offset() != channel_offset {
+                        return Err(failure.into());
+                    }
+                    channel_offset = channel_offset.checked_add(range.count()).ok_or(failure)?;
+                    let (time_domain, rate) = encode_animation_time_domain(clip.time_domain());
+                    writer.write_row(|row| {
+                        row.write_scalar(clip_id)?;
+                        row.write_scalar(clip.duration())?;
+                        row.write_scalar(time_domain)?;
+                        write_optional_rate(row, rate)?;
+                        row.write_scalar(range.offset())?;
+                        row.write_scalar(range.count())?;
+                        write_optional_record_presence(row, range.count() != 0, channels, failure)
+                    })?;
+                }
+                if channel_offset != plans.channel_count {
+                    return Err(failure.into());
+                }
+                Ok(())
+            },
+        )
+        .map(CanonicalBlockRef::from_store)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn retain_animation_directory(
+    assembly: &mut SceneStoreAssembly,
+    plans: &AnimationMaterializationPlans,
+    clips: Option<CanonicalBlockRef<AnimationClipTableSchema>>,
+    channels: Option<CanonicalBlockRef<AnimationChannelTableSchema>>,
+    payloads: AnimationPayloadRefs,
+    keys: SceneStoreKeys,
+    work: &mut NodeSceneWorkMeter,
+    failure: StoreBuildError,
+) -> Result<CanonicalBlockRef<AnimationDirectorySchema>, StoreRuntimeError> {
+    assembly
+        .try_retain_canonical_records_controlled(
+            plans.directory,
+            keys.dimension,
+            AnimationDirectorySchema,
+            |writer, control| {
+                work.observe(control, 1)?;
+                writer.write_row(|row| {
+                    row.write_scalar(ANIMATION_SCHEMA_REVISION)?;
+                    write_optional_record_group(row, plans.clip_count, clips, failure)?;
+                    write_optional_record_group(row, plans.channel_count, channels, failure)?;
+                    write_optional_sequence_group::<f64, _>(
+                        row,
+                        plans.time_scalar_count,
+                        payloads.times,
+                        failure,
+                    )?;
+                    write_optional_sequence_group::<f32, _>(
+                        row,
+                        plans.value_scalar_count,
+                        payloads.values,
+                        failure,
+                    )?;
+                    write_optional_sequence_group::<f32, _>(
+                        row,
+                        plans.in_tangent_scalar_count,
+                        payloads.in_tangents,
+                        failure,
+                    )?;
+                    write_optional_sequence_group::<f32, _>(
+                        row,
+                        plans.out_tangent_scalar_count,
+                        payloads.out_tangents,
+                        failure,
+                    )
+                })?;
+                Ok(())
+            },
+        )
+        .map(CanonicalBlockRef::from_store)
+}
+
+fn write_animation_target_ref(
+    row: &mut CanonicalRecordRowWriter<'_>,
+    target_kind: u8,
+    targets: AnimationTargetTableRefs,
+    failure: StoreBuildError,
+) -> Result<(), StoreBuildError> {
+    match target_kind {
+        ANIMATION_TARGET_NODE_TRANSLATION
+        | ANIMATION_TARGET_NODE_ROTATION
+        | ANIMATION_TARGET_NODE_SCALE => row.write_record_ref(targets.nodes.into_store()),
+        ANIMATION_TARGET_MESH_INSTANCE_MORPH_WEIGHTS => {
+            row.write_record_ref(targets.mesh_instances.ok_or(failure)?.into_store())
+        }
+        _ => Err(failure),
+    }
+}
+
+fn write_optional_rate(
+    row: &mut CanonicalRecordRowWriter<'_>,
+    rate: Presence<f64>,
+) -> Result<(), StoreBuildError> {
+    match rate {
+        Presence::Absent => {
+            row.write_scalar(PRESENCE_ABSENT)?;
+            row.write_scalar(0_u8)
+        }
+        Presence::Present(rate) => {
+            row.write_scalar(PRESENCE_PRESENT)?;
+            row.write_scalar(rate)
+        }
+    }
+}
+
+fn write_optional_record_presence<Tag>(
+    row: &mut CanonicalRecordRowWriter<'_>,
+    present: bool,
+    reference: Option<CanonicalBlockRef<Tag>>,
+    failure: StoreBuildError,
+) -> Result<(), StoreBuildError>
+where
+    Tag: CanonicalSchema<StoreKind = RecordBlock>,
+{
+    if present {
+        row.write_scalar(PRESENCE_PRESENT)?;
+        row.write_record_ref(reference.ok_or(failure)?.into_store())
+    } else {
+        row.write_scalar(PRESENCE_ABSENT)?;
+        row.write_scalar(0_u8)
+    }
+}
+
+fn write_optional_channel_sequence_ref<Tag>(
+    row: &mut CanonicalRecordRowWriter<'_>,
+    offset: Presence<u32>,
+    count: u32,
+    expected_present_count: u32,
+    reference: Option<CanonicalBlockRef<Tag>>,
+    failure: StoreBuildError,
+) -> Result<(), StoreBuildError>
+where
+    Tag: CanonicalSchema<StoreKind = ScalarSequence<f32>>,
+{
+    match offset {
+        Presence::Absent if count == 0 => {
+            row.write_scalar(PRESENCE_ABSENT)?;
+            row.write_scalar(0_u32)?;
+            row.write_scalar(0_u32)?;
+            row.write_scalar(0_u8)
+        }
+        Presence::Present(offset) if count != 0 && count == expected_present_count => {
+            row.write_scalar(PRESENCE_PRESENT)?;
+            row.write_scalar(offset)?;
+            row.write_scalar(count)?;
+            row.write_sequence_ref(reference.ok_or(failure)?.into_store())
+        }
+        Presence::Absent | Presence::Present(_) => Err(failure),
+    }
+}
+
+fn write_optional_record_group<Tag>(
+    row: &mut CanonicalRecordRowWriter<'_>,
+    count: u32,
+    reference: Option<CanonicalBlockRef<Tag>>,
+    failure: StoreBuildError,
+) -> Result<(), StoreBuildError>
+where
+    Tag: CanonicalSchema<StoreKind = RecordBlock>,
+{
+    row.write_scalar(count)?;
+    if count == 0 && reference.is_some() {
+        return Err(failure);
+    }
+    write_optional_record_presence(row, count != 0, reference, failure)
+}
+
+fn write_optional_sequence_group<T, Tag>(
+    row: &mut CanonicalRecordRowWriter<'_>,
+    count: u64,
+    reference: Option<CanonicalBlockRef<Tag>>,
+    failure: StoreBuildError,
+) -> Result<(), StoreBuildError>
+where
+    T: StoredScalar,
+    Tag: CanonicalSchema<StoreKind = ScalarSequence<T>>,
+{
+    row.write_scalar(count)?;
+    if count == 0 {
+        if reference.is_some() {
+            return Err(failure);
+        }
+        row.write_scalar(PRESENCE_ABSENT)?;
+        row.write_scalar(0_u8)
+    } else {
+        row.write_scalar(PRESENCE_PRESENT)?;
+        row.write_sequence_ref(reference.ok_or(failure)?.into_store())
+    }
+}
+
+fn record_plan_if_nonempty(
+    count: u32,
+    fields: usize,
+) -> Result<Option<RecordPlan>, StorePlanError> {
+    if count == 0 {
+        Ok(None)
+    } else {
+        Ok(Some(RecordPlan::new(
+            usize::try_from(count).map_err(|_| StorePlanError::SizeOverflow)?,
+            fields,
+        )?))
+    }
+}
+
+fn sequence_plan_if_nonempty<T: StoredScalar>(
+    count: u64,
+) -> Result<Option<SequencePlan<T>>, StorePlanError> {
+    if count == 0 {
+        Ok(None)
+    } else {
+        Ok(Some(SequencePlan::new(
+            usize::try_from(count).map_err(|_| StorePlanError::SizeOverflow)?,
+        )?))
+    }
+}

@@ -1,0 +1,176 @@
+use super::geometry::AuthoringRange;
+use super::{NodeLocalId, Presence};
+
+/// Built-in authored time domains accepted by the canonical producer seam.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(in crate::canonical_scene::store) enum AnimationTimeDomainAuthoring {
+    Seconds,
+    Frames { rate: f64 },
+    Ticks { rate: Option<f64> },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::canonical_scene::store) enum AnimationInterpolationAuthoring {
+    Step,
+    Linear,
+    CubicSpline,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::canonical_scene::store) enum AnimationExtrapolationAuthoring {
+    SourceDefault,
+    Constant,
+    Linear,
+    Repeat,
+}
+
+/// Dense target identity within one source-shaped authoring batch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(in crate::canonical_scene::store) enum AnimationTargetAuthoring {
+    NodeTranslation(NodeLocalId),
+    NodeRotation(NodeLocalId),
+    NodeScale(NodeLocalId),
+    MeshInstanceMorphWeights(u32),
+}
+
+/// One typed channel payload. Target semantics determine `value_width`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(in crate::canonical_scene::store) struct AnimationChannelAuthoring<'a> {
+    target: AnimationTargetAuthoring,
+    interpolation: AnimationInterpolationAuthoring,
+    pre_extrapolation: AnimationExtrapolationAuthoring,
+    post_extrapolation: AnimationExtrapolationAuthoring,
+    times: &'a [f64],
+    values: &'a [f32],
+    in_tangents: Presence<&'a [f32]>,
+    out_tangents: Presence<&'a [f32]>,
+}
+
+impl<'a> AnimationChannelAuthoring<'a> {
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::canonical_scene::store) const fn new(
+        target: AnimationTargetAuthoring,
+        interpolation: AnimationInterpolationAuthoring,
+        pre_extrapolation: AnimationExtrapolationAuthoring,
+        post_extrapolation: AnimationExtrapolationAuthoring,
+        times: &'a [f64],
+        values: &'a [f32],
+        in_tangents: Presence<&'a [f32]>,
+        out_tangents: Presence<&'a [f32]>,
+    ) -> Self {
+        Self {
+            target,
+            interpolation,
+            pre_extrapolation,
+            post_extrapolation,
+            times,
+            values,
+            in_tangents,
+            out_tangents,
+        }
+    }
+
+    pub(in crate::canonical_scene::store) const fn target(self) -> AnimationTargetAuthoring {
+        self.target
+    }
+
+    pub(in crate::canonical_scene::store) const fn interpolation(
+        self,
+    ) -> AnimationInterpolationAuthoring {
+        self.interpolation
+    }
+
+    pub(in crate::canonical_scene::store) const fn pre_extrapolation(
+        self,
+    ) -> AnimationExtrapolationAuthoring {
+        self.pre_extrapolation
+    }
+
+    pub(in crate::canonical_scene::store) const fn post_extrapolation(
+        self,
+    ) -> AnimationExtrapolationAuthoring {
+        self.post_extrapolation
+    }
+
+    pub(in crate::canonical_scene::store) const fn times(self) -> &'a [f64] {
+        self.times
+    }
+
+    pub(in crate::canonical_scene::store) const fn values(self) -> &'a [f32] {
+        self.values
+    }
+
+    pub(in crate::canonical_scene::store) const fn in_tangents(self) -> Presence<&'a [f32]> {
+        self.in_tangents
+    }
+
+    pub(in crate::canonical_scene::store) const fn out_tangents(self) -> Presence<&'a [f32]> {
+        self.out_tangents
+    }
+}
+
+/// One source animation clip retaining a contiguous range of source channels.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(in crate::canonical_scene::store) struct AnimationClipAuthoring {
+    duration: f64,
+    time_domain: AnimationTimeDomainAuthoring,
+    channels: AuthoringRange,
+}
+
+impl AnimationClipAuthoring {
+    pub(in crate::canonical_scene::store) const fn new(
+        duration: f64,
+        time_domain: AnimationTimeDomainAuthoring,
+        channels: AuthoringRange,
+    ) -> Self {
+        Self {
+            duration,
+            time_domain,
+            channels,
+        }
+    }
+
+    pub(in crate::canonical_scene::store) const fn duration(self) -> f64 {
+        self.duration
+    }
+
+    pub(in crate::canonical_scene::store) const fn time_domain(
+        self,
+    ) -> AnimationTimeDomainAuthoring {
+        self.time_domain
+    }
+
+    pub(in crate::canonical_scene::store) const fn channels(self) -> AuthoringRange {
+        self.channels
+    }
+}
+
+/// Borrowed animation-domain input supplied by a format adapter.
+#[derive(Debug, Clone, Copy)]
+pub(in crate::canonical_scene::store) struct AnimationAuthoringBatch<'a> {
+    clips: &'a [AnimationClipAuthoring],
+    channels: &'a [AnimationChannelAuthoring<'a>],
+}
+
+impl<'a> AnimationAuthoringBatch<'a> {
+    pub(in crate::canonical_scene::store) const fn empty() -> Self {
+        Self::new(&[], &[])
+    }
+
+    pub(in crate::canonical_scene::store) const fn new(
+        clips: &'a [AnimationClipAuthoring],
+        channels: &'a [AnimationChannelAuthoring<'a>],
+    ) -> Self {
+        Self { clips, channels }
+    }
+
+    pub(in crate::canonical_scene::store) const fn clips(self) -> &'a [AnimationClipAuthoring] {
+        self.clips
+    }
+
+    pub(in crate::canonical_scene::store) const fn channels(
+        self,
+    ) -> &'a [AnimationChannelAuthoring<'a>] {
+        self.channels
+    }
+}

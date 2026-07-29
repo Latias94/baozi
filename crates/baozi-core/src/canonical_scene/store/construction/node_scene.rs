@@ -10,8 +10,10 @@ use crate::SCENE_VALIDATION_POLL_INTERVAL;
 use crate::identity::{ReservedSceneGeneration, SceneGenerationId};
 
 use super::super::production::{
+    AnimationAuthoringFailure, AppearanceAuthoringFailure, DeformationAuthoringFailure,
     GeometryAuthoringFailure, NodeAuthoringFailure, OperationAuthoringControlError,
-    SceneAuthoringAggregateError, ValidatedGeometryBatch, ValidatedNodeBatch,
+    SceneAuthoringAggregateError, ValidatedAnimationBatch, ValidatedAppearanceBatch,
+    ValidatedDeformationBatch, ValidatedGeometryBatch, ValidatedNodeBatch,
 };
 use super::super::schema::{
     CanonicalBlockRef, NodeSceneOutcomeEvidenceSchema, SceneDirectorySchema,
@@ -23,6 +25,9 @@ use super::{
     SceneStoreControlCheckpoint, SceneStoreKeys, SceneStoreOperation, TracerSceneFallback,
 };
 
+mod animation;
+mod appearance;
+mod deformation;
 mod geometry;
 mod materialization;
 mod publication;
@@ -35,10 +40,13 @@ mod tests;
 
 #[cfg(test)]
 pub(in crate::canonical_scene::store) use tests::{
-    OBJ_SOURCE_VECTOR_SCHEMA_ID, ObjCapabilityCanonicalShapeObservation,
-    ObjCapabilitySourceShapeObservation, build_obj_capability_scene_for_probe,
-    capture_obj_capability_snapshots_for_probe, collect_obj_capability_vectors_for_probe,
-    inspect_obj_capability_semantics_for_probe,
+    GLTF_SOURCE_VECTOR_SCHEMA_ID, GltfCapabilityCanonicalShapeObservation,
+    GltfCapabilitySourceShapeObservation, OBJ_SOURCE_VECTOR_SCHEMA_ID,
+    ObjCapabilityCanonicalShapeObservation, ObjCapabilitySourceShapeObservation,
+    build_gltf_capability_scene_for_probe, build_obj_capability_scene_for_probe,
+    capture_gltf_capability_snapshots_for_probe, capture_obj_capability_snapshots_for_probe,
+    collect_gltf_capability_vectors_for_probe, collect_obj_capability_vectors_for_probe,
+    inspect_gltf_capability_semantics_for_probe, inspect_obj_capability_semantics_for_probe,
 };
 
 const NODE_SCENE_BUILD_INVARIANT_CODE: u32 = 0x5343_1001;
@@ -249,10 +257,14 @@ struct FreshNodeSceneOwner {
     keys: SceneStoreKeys,
 }
 
-/// A validated node-domain input coupled to the exact fresh operation that paid for it.
+/// A validated five-domain Scene input coupled to the exact fresh operation that paid for it.
 #[must_use = "the validated node Scene construction must be prepared or deliberately dropped"]
 pub(in crate::canonical_scene::store) struct ValidatedNodeSceneConstruction<'input> {
+    animations: ValidatedAnimationBatch<'input, RetainedStoreReservation<SceneConstructionOwner>>,
+    deformation:
+        ValidatedDeformationBatch<'input, RetainedStoreReservation<SceneConstructionOwner>>,
     geometry: ValidatedGeometryBatch<'input, RetainedStoreReservation<SceneConstructionOwner>>,
+    appearance: ValidatedAppearanceBatch<'input, RetainedStoreReservation<SceneConstructionOwner>>,
     nodes: ValidatedNodeBatch<'input, RetainedStoreReservation<SceneConstructionOwner>>,
     // The operation owner must outlive every compiled-plan reservation above.
     owner: FreshNodeSceneOwner,
@@ -264,8 +276,14 @@ pub(in crate::canonical_scene::store) enum NodeSceneConstructionRejection {
     DerivedLineage,
     #[error("node-domain authoring validation rejected the Scene batch")]
     NodeAuthoring(#[source] NodeAuthoringFailure<OperationAuthoringControlError>),
+    #[error("appearance-domain authoring validation rejected the Scene batch")]
+    AppearanceAuthoring(#[source] AppearanceAuthoringFailure<OperationAuthoringControlError>),
     #[error("geometry-domain authoring validation rejected the Scene batch")]
     GeometryAuthoring(#[source] GeometryAuthoringFailure<OperationAuthoringControlError>),
+    #[error("deformation-domain authoring validation rejected the Scene batch")]
+    DeformationAuthoring(#[source] DeformationAuthoringFailure<OperationAuthoringControlError>),
+    #[error("animation-domain authoring validation rejected the Scene batch")]
+    AnimationAuthoring(#[source] AnimationAuthoringFailure<OperationAuthoringControlError>),
     #[error("aggregate authoring validation rejected the Scene batch")]
     Aggregate(#[source] SceneAuthoringAggregateError),
 }
@@ -299,11 +317,23 @@ struct NodeSceneCandidate {
 pub(in crate::canonical_scene::store) struct SceneEvidenceCounts {
     pub(in crate::canonical_scene::store) canonical_block_count: u32,
     pub(in crate::canonical_scene::store) node_count: u32,
+    pub(in crate::canonical_scene::store) image_count: u32,
+    pub(in crate::canonical_scene::store) sampler_count: u32,
+    pub(in crate::canonical_scene::store) texture_count: u32,
     pub(in crate::canonical_scene::store) material_count: u32,
+    pub(in crate::canonical_scene::store) material_binding_count: u32,
     pub(in crate::canonical_scene::store) logical_mesh_count: u32,
     pub(in crate::canonical_scene::store) primitive_count: u32,
     pub(in crate::canonical_scene::store) attribute_count: u32,
     pub(in crate::canonical_scene::store) mesh_instance_count: u32,
+    pub(in crate::canonical_scene::store) skin_count: u32,
+    pub(in crate::canonical_scene::store) logical_morph_count: u32,
+    pub(in crate::canonical_scene::store) morph_definition_count: u32,
+    pub(in crate::canonical_scene::store) primitive_deformation_count: u32,
+    pub(in crate::canonical_scene::store) morph_target_count: u32,
+    pub(in crate::canonical_scene::store) morph_delta_count: u32,
+    pub(in crate::canonical_scene::store) animation_clip_count: u32,
+    pub(in crate::canonical_scene::store) animation_channel_count: u32,
     pub(in crate::canonical_scene::store) payload_block_count: u32,
 }
 

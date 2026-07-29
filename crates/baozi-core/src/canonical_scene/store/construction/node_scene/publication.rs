@@ -1,10 +1,9 @@
 use baozi_operation::{
     CounterClass, LedgerCause, OutcomeEvidenceRecordRef, PreparedStoreFailureOutcome,
-    PreparedStoreSuccessOutcome, RecordBlock, RetainedStoreReservation, StoreBuildFailureClass,
+    PreparedStoreSuccessOutcome, RecordBlock, StoreBuildFailureClass,
     StoreControlledSuccessValidation, StoreFailureValidation, StoreRuntimeError, StoreWorkError,
 };
 
-use crate::canonical_scene::store::production::{ValidatedGeometryBatch, ValidatedNodeBatch};
 use crate::canonical_scene::store::schema::NodeSceneOutcomeEvidenceSchema;
 use crate::canonical_scene::store::validation::{
     validate_node_scene_evidence_graph, validate_node_scene_graph,
@@ -13,9 +12,10 @@ use crate::identity::{ReservedSceneGeneration, SceneGenerationError};
 
 use super::super::{
     GENERATION_EXHAUSTED_CODE, PreparedTracerSceneFallback, SceneConstructionError,
-    SceneConstructionOwner, SceneStoreAssembly, SceneStoreKeys, SceneStoreOperation,
-    TracerSceneFallback, burn_generation_reservation, final_progress,
+    SceneStoreAssembly, SceneStoreKeys, SceneStoreOperation, TracerSceneFallback,
+    burn_generation_reservation, final_progress,
 };
+use super::materialization::ValidatedNodeSceneBatches;
 use super::{
     NODE_SCENE_BUILD_INVARIANT_CODE, NODE_SCENE_COMMITMENT_REJECTION_CODE,
     NODE_SCENE_CONTROL_INTERRUPTION_CODE, NODE_SCENE_STORAGE_REJECTION_CODE,
@@ -29,8 +29,7 @@ use super::{
 
 pub(super) fn prepare_node_scene_candidate<'input>(
     candidate: NodeSceneCandidate,
-    nodes: ValidatedNodeBatch<'input, RetainedStoreReservation<SceneConstructionOwner>>,
-    geometry: ValidatedGeometryBatch<'input, RetainedStoreReservation<SceneConstructionOwner>>,
+    batches: ValidatedNodeSceneBatches<'input>,
     mut work: NodeSceneWorkMeter,
     reserve_generation: impl FnOnce() -> Result<ReservedSceneGeneration, SceneGenerationError>,
 ) -> Result<PreparedNodeSceneConstruction, SceneConstructionError> {
@@ -48,8 +47,7 @@ pub(super) fn prepare_node_scene_candidate<'input>(
     if u32::try_from(assembly.canonical_len()) != Ok(evidence_counts.canonical_block_count)
         || assembly.outcome_evidence_len() != 1
     {
-        drop(geometry);
-        drop(nodes);
+        drop(batches);
         return prepare_node_rich_failure_from_assembly(
             assembly,
             evidence,
@@ -64,8 +62,7 @@ pub(super) fn prepare_node_scene_candidate<'input>(
     ) {
         Ok(commitments) => commitments,
         Err(_) => {
-            drop(geometry);
-            drop(nodes);
+            drop(batches);
             return prepare_node_rich_failure_from_assembly(
                 assembly,
                 evidence,
@@ -86,8 +83,12 @@ pub(super) fn prepare_node_scene_candidate<'input>(
                     session,
                     directory,
                     evidence,
-                    &nodes,
-                    &geometry,
+                    &batches.nodes,
+                    &batches.appearance,
+                    &batches.geometry,
+                    &batches.deformation,
+                    &batches.animations,
+                    evidence_counts,
                     |amount| work.observe(control, amount),
                 )?
             } else {
@@ -98,8 +99,7 @@ pub(super) fn prepare_node_scene_candidate<'input>(
         },
     );
     // The central validator is the final reader of the compiled plan and its reservation.
-    drop(geometry);
-    drop(nodes);
+    drop(batches);
     match validation {
         StoreControlledSuccessValidation::InvalidWorkDimension { assembly, cause } => {
             prepare_node_minimal_fallback_from_assembly(assembly, node_scene_failure_code(&cause))

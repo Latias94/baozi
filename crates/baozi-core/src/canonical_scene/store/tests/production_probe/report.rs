@@ -12,7 +12,7 @@ use sha2::{Digest, Sha256};
 pub(super) const REPORT_PREFIX: &str = "BAOZI_U4C_PRODUCTION_V1=";
 const REPORT_SCHEMA_ID: &str = "baozi.u4c.production-report";
 const REPORT_SCHEMA_VERSION: u32 = 1;
-const REPORT_REVISION: u32 = 5;
+const REPORT_REVISION: u32 = 6;
 const SCENARIO_SET_ID: &str = "canonical-store-production-v1";
 
 #[derive(Serialize)]
@@ -24,6 +24,7 @@ pub(super) struct ProductionReport {
     scale_scenarios: Vec<ScaleScenarioReport>,
     inherited_hot_leaf_scenario: InheritedHotLeafReport,
     obj_capability: ObjCapabilityReport,
+    gltf_capability: GltfCapabilityReport,
     validation_faults: Vec<ValidationFaultReport>,
 }
 
@@ -32,6 +33,7 @@ impl ProductionReport {
         scale_scenarios: Vec<ScaleScenarioReport>,
         inherited_hot_leaf_scenario: InheritedHotLeafReport,
         obj_capability: ObjCapabilityReport,
+        gltf_capability: GltfCapabilityReport,
         validation_faults: Vec<ValidationFaultReport>,
     ) -> Self {
         Self {
@@ -42,6 +44,7 @@ impl ProductionReport {
             scale_scenarios,
             inherited_hot_leaf_scenario,
             obj_capability,
+            gltf_capability,
             validation_faults,
         }
     }
@@ -93,20 +96,20 @@ pub(super) struct ObjCapabilityReport {
     pub(super) source_vector: FixedVectorReport,
     pub(super) equivalent_source_vector: FixedVectorReport,
     pub(super) equivalent_snapshot_digest_hex: String,
-    pub(super) mutations: Vec<ObjMutationReport>,
+    pub(super) mutations: Vec<CapabilityMutationReport>,
     pub(super) generation_reservations: u64,
     pub(super) canonical_block_count: usize,
     pub(super) outcome_evidence_block_count: usize,
     pub(super) full_snapshot_digest_hex: String,
     pub(super) bounded_snapshot_digest_hex: String,
     pub(super) snapshot_totals: ObjSnapshotTotalsReport,
-    pub(super) bounded_preview: ObjBoundedPreviewReport,
+    pub(super) bounded_preview: CapabilityBoundedPreviewReport,
     pub(super) evidence: EvidenceReport,
     pub(super) construction: PhaseReport,
     pub(super) inspection: PhaseReport,
     pub(super) snapshot: PhaseReport,
     pub(super) release: ReleaseReport,
-    pub(super) physical_account: ObjPhysicalReport,
+    pub(super) physical_account: CapabilityPhysicalReport,
     pub(super) factory_after_account_release: PhysicalFactoryReport,
 }
 
@@ -139,7 +142,7 @@ pub(super) struct FixedVectorReport {
 }
 
 #[derive(Serialize)]
-pub(super) struct ObjMutationReport {
+pub(super) struct CapabilityMutationReport {
     pub(super) field_class: &'static str,
     pub(super) source_vector: FixedVectorReport,
     pub(super) snapshot_digest_hex: String,
@@ -166,13 +169,142 @@ pub(super) struct ObjSnapshotTotalsReport {
 }
 
 #[derive(Serialize)]
-pub(super) struct ObjBoundedPreviewReport {
+pub(super) struct CapabilityBoundedPreviewReport {
     pub(super) schema_id: &'static str,
     pub(super) bytes: usize,
     pub(super) sha256: String,
     pub(super) items_omitted_by_limit: u64,
     pub(super) bytes_truncated: bool,
     pub(super) items_truncated: bool,
+}
+
+#[derive(Serialize)]
+pub(super) struct GltfCapabilityReport {
+    pub(super) entry_point: &'static str,
+    pub(super) scenario_id: &'static str,
+    pub(super) source_shape: GltfSourceShapeReport,
+    pub(super) canonical_shape: GltfCanonicalShapeReport,
+    pub(super) source_vector: FixedVectorReport,
+    pub(super) mutations: Vec<CapabilityMutationReport>,
+    pub(super) generation_reservations: u64,
+    pub(super) canonical_block_count: usize,
+    pub(super) outcome_evidence_block_count: usize,
+    pub(super) full_snapshot_digest_hex: String,
+    pub(super) bounded_snapshot_digest_hex: String,
+    pub(super) snapshot_totals: GltfSnapshotTotalsReport,
+    pub(super) bounded_preview: CapabilityBoundedPreviewReport,
+    pub(super) evidence: EvidenceReport,
+    pub(super) construction: PhaseReport,
+    pub(super) inspection: PhaseReport,
+    pub(super) snapshot: PhaseReport,
+    pub(super) release: ReleaseReport,
+    pub(super) physical_account: CapabilityPhysicalReport,
+    pub(super) factory_after_account_release: PhysicalFactoryReport,
+}
+
+#[derive(Serialize)]
+pub(super) struct GltfSourceShapeReport {
+    pub(super) node_count: usize,
+    pub(super) root_count: usize,
+    pub(super) image_count: usize,
+    pub(super) image_payload_bytes: usize,
+    pub(super) media_type_bytes: usize,
+    pub(super) sampler_count: usize,
+    pub(super) texture_count: usize,
+    pub(super) material_count: usize,
+    pub(super) material_binding_count: usize,
+    pub(super) logical_mesh_count: usize,
+    pub(super) primitive_count: usize,
+    pub(super) attribute_count: usize,
+    pub(super) mesh_instance_count: usize,
+    pub(super) skin_count: usize,
+    pub(super) skin_joint_count: usize,
+    pub(super) morph_definition_count: usize,
+    pub(super) morph_target_count: usize,
+    pub(super) morph_delta_count: usize,
+    pub(super) influence_row_count: usize,
+    pub(super) influence_count: usize,
+    pub(super) animation_clip_count: usize,
+    pub(super) animation_channel_count: usize,
+    pub(super) animation_key_count: usize,
+}
+
+#[derive(Serialize)]
+pub(super) struct GltfCanonicalShapeReport {
+    pub(super) node_count: usize,
+    pub(super) root_count: usize,
+    pub(super) edge_count: usize,
+    pub(super) image_count: usize,
+    pub(super) sampler_count: usize,
+    pub(super) texture_count: usize,
+    pub(super) material_count: usize,
+    pub(super) material_binding_count: usize,
+    pub(super) logical_mesh_count: usize,
+    pub(super) primitive_count: usize,
+    pub(super) attribute_count: usize,
+    pub(super) mesh_instance_count: usize,
+    pub(super) skin_count: usize,
+    pub(super) skin_joint_count: usize,
+    pub(super) logical_morph_count: usize,
+    pub(super) morph_definition_count: usize,
+    pub(super) primitive_deformation_count: usize,
+    pub(super) morph_target_count: usize,
+    pub(super) morph_delta_count: usize,
+    pub(super) influence_row_count: usize,
+    pub(super) influence_count: usize,
+    pub(super) animation_clip_count: usize,
+    pub(super) animation_channel_count: usize,
+    pub(super) animation_key_count: usize,
+}
+
+#[derive(Serialize)]
+pub(super) struct GltfSnapshotTotalsReport {
+    pub(super) node_count: usize,
+    pub(super) root_count: usize,
+    pub(super) edge_count: usize,
+    pub(super) image_count: usize,
+    pub(super) sampler_count: usize,
+    pub(super) texture_count: usize,
+    pub(super) material_count: usize,
+    pub(super) material_binding_count: usize,
+    pub(super) image_payload_bytes: u64,
+    pub(super) media_type_bytes: u64,
+    pub(super) logical_mesh_count: usize,
+    pub(super) primitive_count: usize,
+    pub(super) attribute_count: usize,
+    pub(super) mesh_instance_count: usize,
+    pub(super) polygon_boundary_count: u64,
+    pub(super) primitive_index_count: u64,
+    pub(super) sparse_index_count: u64,
+    pub(super) canonical_scalar_count: u64,
+    pub(super) f32_scalar_count: u64,
+    pub(super) u32_scalar_count: u64,
+    pub(super) skin_count: usize,
+    pub(super) logical_morph_count: usize,
+    pub(super) morph_definition_count: usize,
+    pub(super) primitive_deformation_count: usize,
+    pub(super) morph_target_count: usize,
+    pub(super) morph_delta_count: usize,
+    pub(super) deformation_mesh_instance_count: usize,
+    pub(super) skin_joint_count: u64,
+    pub(super) inverse_bind_matrix_count: u64,
+    pub(super) skin_correction_matrix_count: u64,
+    pub(super) skin_name_bytes: u64,
+    pub(super) morph_default_weight_count: u64,
+    pub(super) morph_name_bytes: u64,
+    pub(super) influence_row_count: u64,
+    pub(super) influence_count: u64,
+    pub(super) morph_value_vector_count: u64,
+    pub(super) morph_sparse_index_count: u64,
+    pub(super) instance_morph_weight_count: u64,
+    pub(super) animation_clip_count: usize,
+    pub(super) animation_channel_count: usize,
+    pub(super) animation_time_scalar_count: u64,
+    pub(super) animation_value_scalar_count: u64,
+    pub(super) animation_in_tangent_scalar_count: u64,
+    pub(super) animation_out_tangent_scalar_count: u64,
+    pub(super) transcript_bytes: u64,
+    pub(super) work_units: u64,
 }
 
 #[derive(Serialize)]
@@ -317,7 +449,7 @@ pub(super) struct FaultPhysicalReport {
 }
 
 #[derive(Serialize)]
-pub(super) struct ObjPhysicalReport {
+pub(super) struct CapabilityPhysicalReport {
     pub(super) baseline: PhysicalAccountReport,
     pub(super) retained: PhysicalAccountReport,
     pub(super) after_inspection: PhysicalAccountReport,

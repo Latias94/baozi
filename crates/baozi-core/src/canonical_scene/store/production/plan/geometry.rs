@@ -22,9 +22,10 @@ use crate::{
 
 use super::super::control::{OperationAuthoringControl, OperationAuthoringControlError};
 use super::super::input::Presence;
+use super::super::input::appearance::MaterialLocalId;
 use super::super::input::geometry::{
     AuthoringRange, GeometryAttributeAuthoring, GeometryAttributePayloadAuthoring,
-    GeometryAuthoringBatch, GeometryPrimitiveAuthoring, GeometryTopologyAuthoring, MaterialLocalId,
+    GeometryAuthoringBatch, GeometryPrimitiveAuthoring, GeometryTopologyAuthoring,
 };
 
 const LOGICAL_U8_BYTES: u64 = 1;
@@ -33,8 +34,7 @@ const LOGICAL_U64_BYTES: u64 = 8;
 const LOGICAL_F32_BYTES: u64 = 4;
 const LOGICAL_REFERENCE_BYTES: u64 = 4;
 
-const GEOMETRY_DIRECTORY_FIXED_BYTES: u64 = 6 * LOGICAL_U32_BYTES;
-const MATERIAL_ROW_BYTES: u64 = LOGICAL_U32_BYTES;
+const GEOMETRY_DIRECTORY_FIXED_BYTES: u64 = 5 * LOGICAL_U32_BYTES;
 const LOGICAL_MESH_ROW_BYTES: u64 = 3 * LOGICAL_U32_BYTES + LOGICAL_REFERENCE_BYTES;
 const MESH_INSTANCE_ROW_BYTES: u64 = 3 * LOGICAL_U32_BYTES + 2 * LOGICAL_REFERENCE_BYTES;
 const PRIMITIVE_FIXED_BYTES: u64 = 9 * LOGICAL_U32_BYTES + 4 * LOGICAL_U8_BYTES;
@@ -227,11 +227,13 @@ pub(in crate::canonical_scene::store) enum GeometryAuthoringSemanticError {
         boundary_corners: u32,
         corner_count: u32,
     },
-    #[error("primitive {primitive} material {material} exceeds material count {material_count}")]
+    #[error(
+        "primitive {primitive} material {material} exceeds appearance material count {appearance_material_count}"
+    )]
     MaterialOutOfRange {
         primitive: usize,
         material: u32,
-        material_count: u32,
+        appearance_material_count: u32,
     },
     #[error("mesh instance {instance} owner node {owner} exceeds authored node count {node_count}")]
     InstanceOwnerOutOfRange {
@@ -485,7 +487,6 @@ impl ValidatedGeometryAttributeView<'_, '_> {
 #[must_use = "dropping the validated geometry batch releases its compiled-plan reservation"]
 pub(in crate::canonical_scene::store) struct ValidatedGeometryBatch<'input, R> {
     input: GeometryAuthoringBatch<'input>,
-    material_count: u32,
     logical_mesh_count: u32,
     primitive_count: u32,
     mesh_instance_count: u32,
@@ -511,10 +512,6 @@ pub(in crate::canonical_scene::store) struct ValidatedGeometryBatch<'input, R> {
 impl<'input, R> ValidatedGeometryBatch<'input, R> {
     pub(in crate::canonical_scene::store) const fn input(&self) -> GeometryAuthoringBatch<'input> {
         self.input
-    }
-
-    pub(in crate::canonical_scene::store) const fn material_count(&self) -> u32 {
-        self.material_count
     }
 
     pub(in crate::canonical_scene::store) const fn logical_mesh_count(&self) -> u32 {
@@ -610,7 +607,6 @@ impl<R> fmt::Debug for ValidatedGeometryBatch<'_, R> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("ValidatedGeometryBatch")
-            .field("material_count", &self.material_count)
             .field("logical_mesh_count", &self.logical_mesh_count)
             .field("primitive_count", &self.primitive_count)
             .field("mesh_instance_count", &self.mesh_instance_count)
@@ -898,6 +894,7 @@ impl<'control, C: SceneValidationControl> GeometryValidationContext<'control, C>
 pub(in crate::canonical_scene::store) fn validate_geometry_batch<'input, O, PP, U>(
     input: GeometryAuthoringBatch<'input>,
     authored_node_count: usize,
+    appearance_material_count: u32,
     limits: SceneValidationLimits,
     control: &mut OperationAuthoringControl<'_, O, PP, U>,
 ) -> Result<
@@ -909,25 +906,39 @@ where
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    validate_geometry_batch_inner(input, authored_node_count, limits, control)
+    validate_geometry_batch_inner(
+        input,
+        authored_node_count,
+        appearance_material_count,
+        limits,
+        control,
+    )
 }
 
 #[cfg(test)]
 pub(in crate::canonical_scene::store) fn validate_geometry_batch_with_control<'input, C>(
     input: GeometryAuthoringBatch<'input>,
     authored_node_count: usize,
+    appearance_material_count: u32,
     limits: SceneValidationLimits,
     control: &mut C,
 ) -> Result<ValidatedGeometryBatch<'input, C::Reservation>, GeometryAuthoringFailure<C::Error>>
 where
     C: SceneValidationControl,
 {
-    validate_geometry_batch_inner(input, authored_node_count, limits, control)
+    validate_geometry_batch_inner(
+        input,
+        authored_node_count,
+        appearance_material_count,
+        limits,
+        control,
+    )
 }
 
 fn validate_geometry_batch_inner<'input, C>(
     input: GeometryAuthoringBatch<'input>,
     authored_node_count: usize,
+    appearance_material_count: u32,
     limits: SceneValidationLimits,
     control: &mut C,
 ) -> Result<ValidatedGeometryBatch<'input, C::Reservation>, GeometryAuthoringFailure<C::Error>>
@@ -941,10 +952,8 @@ where
     let primitive_count = collection_count(input.primitives().len(), "primitives")?;
     let attribute_count = collection_count(input.attributes().len(), "attributes")?;
     let mesh_instance_count = collection_count(input.mesh_instances().len(), "mesh instances")?;
-    let material_count = input.material_count();
     let entity_count = checked_sum(
         [
-            u64::from(material_count),
             u64::from(logical_mesh_count),
             u64::from(primitive_count),
             u64::from(attribute_count),
@@ -991,8 +1000,6 @@ where
         attribute_plans,
         reservation,
     };
-
-    context.work(SceneValidationWork::Entity, u64::from(material_count))?;
 
     let mut expected_primitive_offset = 0_u32;
     for (logical_mesh_index, logical_mesh) in input.logical_meshes().iter().copied().enumerate() {
@@ -1083,11 +1090,11 @@ where
         context.add_relations(u64::from(attribute_range.count()))?;
 
         if let Presence::Present(material) = primitive.material() {
-            if material.index() >= material_count {
+            if material.index() >= appearance_material_count {
                 return Err(GeometryAuthoringSemanticError::MaterialOutOfRange {
                     primitive: primitive_index,
                     material: material.index(),
-                    material_count,
+                    appearance_material_count,
                 }
                 .into());
             }
@@ -1152,7 +1159,6 @@ where
     } = storage;
     let validated = ValidatedGeometryBatch {
         input,
-        material_count,
         logical_mesh_count,
         primitive_count,
         mesh_instance_count,
@@ -1974,14 +1980,12 @@ fn geometry_structural_bytes<C>(
 where
     C: SceneValidationControl,
 {
-    let material_count = input.material_count();
     let logical_mesh_count = collection_count(input.logical_meshes().len(), "logical meshes")?;
     let primitive_count = collection_count(input.primitives().len(), "primitives")?;
     let attribute_count = collection_count(input.attributes().len(), "attributes")?;
     let mesh_instance_count = collection_count(input.mesh_instances().len(), "mesh instances")?;
     let directory_reference_bytes = checked_sum_bytes(
         [
-            reference_slot_bytes(material_count != 0),
             reference_slot_bytes(logical_mesh_count != 0),
             reference_slot_bytes(primitive_count != 0),
             reference_slot_bytes(attribute_count != 0),
@@ -2067,11 +2071,6 @@ where
         [
             GEOMETRY_DIRECTORY_FIXED_BYTES,
             directory_reference_bytes,
-            checked_bytes(
-                u64::from(material_count),
-                MATERIAL_ROW_BYTES,
-                "canonical material records",
-            )?,
             checked_bytes(
                 u64::from(logical_mesh_count),
                 LOGICAL_MESH_ROW_BYTES,

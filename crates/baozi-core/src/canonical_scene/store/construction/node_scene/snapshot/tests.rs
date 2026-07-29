@@ -12,10 +12,12 @@ use crate::canonical_scene::store::construction::{
     SceneConstructionLimits, SceneConstructionOperation,
 };
 use crate::canonical_scene::store::production::{
-    AuthoringRange, GeometryAttributeAuthoring, GeometryAuthoringBatch,
-    GeometryLogicalMeshAuthoring, GeometryMeshInstanceAuthoring, GeometryPrimitiveAuthoring,
-    GeometryTopologyAuthoring, LogicalMeshLocalId, MaterialLocalId, NodeAuthoringBatch,
-    NodeAuthoringNode, NodeLocalId, NodeParent, Presence, SceneAuthoringBatch,
+    AnimationAuthoringBatch, AppearanceAuthoringBatch, AuthoringRange, DeformationAuthoringBatch,
+    GeometryAttributeAuthoring, GeometryAuthoringBatch, GeometryLogicalMeshAuthoring,
+    GeometryMeshInstanceAuthoring, GeometryPrimitiveAuthoring, GeometryTopologyAuthoring,
+    LogicalMeshLocalId, LogicalMorphAuthoring, MaterialAuthoring, MaterialLocalId,
+    MeshInstanceDeformationAuthoring, NodeAuthoringBatch, NodeAuthoringNode, NodeLocalId,
+    NodeParent, Presence, PrimitiveDeformationAuthoring, SceneAuthoringBatch,
 };
 use crate::entity::AuthoredTransform;
 use crate::math::{Mat4, Quat, Vec3};
@@ -27,52 +29,60 @@ use super::{
 };
 
 const KNOWN_SINGLE_TRS_DIGEST: [u8; 32] = [
-    0xab, 0xe2, 0xf5, 0x68, 0xa0, 0x49, 0x2f, 0x8c, 0xd1, 0x2b, 0x51, 0xff, 0x70, 0x2c, 0x0b, 0xce,
-    0xd8, 0x10, 0x08, 0x94, 0xfe, 0x97, 0xdc, 0xfa, 0xaf, 0xdf, 0xc7, 0x45, 0x40, 0x37, 0x44, 0x42,
+    0xe9, 0x21, 0x7e, 0xd7, 0x71, 0xf4, 0xa4, 0x1f, 0x5c, 0x2b, 0x68, 0x39, 0x12, 0x16, 0xb5, 0x23,
+    0xde, 0x17, 0x73, 0x54, 0x64, 0x98, 0xe5, 0x8a, 0x5a, 0x3c, 0x28, 0x9c, 0xb4, 0xbd, 0x99, 0x31,
 ];
-const KNOWN_SINGLE_TRS_TRANSCRIPT_HEX: &str = concat!(
+const KNOWN_SINGLE_TRS_TRANSCRIPT_PREFIX_HEX: &str = concat!(
     "011e0000000000000062616f7a692e63616e6f6e6963616c2d7363656e652e736e617073686f74",
-    "0202000000030600000000000000736861323536040c01080d00000000000000000b010000000000",
+    "0203000000030600000000000000736861323536040c01080d00000000000000000b010000000000",
     "0000050c01060d00000000000000000a020e000000000e000000000e000000000e000000000e0000",
     "00000e000000000e0000803f0e0000803f0e0000803f0e0000803f0b0a00000000000000070c010b",
-    "00000000000000000b01000000000000000f0c01100c010b0000000000000000120c010b00000000",
-    "00000000140c010b0000000000000000190c010b0000000000000000280c010b0000000000000000",
+    "00000000000000000b0100000000000000",
 );
 const KNOWN_MATRIX_CHILD_DIGEST: [u8; 32] = [
-    0x80, 0x72, 0x57, 0xea, 0xf8, 0x2e, 0x83, 0x21, 0x22, 0xc2, 0x0d, 0x49, 0x2b, 0xc8, 0x2c, 0x4c,
-    0x4c, 0x00, 0x9e, 0x69, 0x43, 0x93, 0x4e, 0xac, 0x89, 0xd8, 0xe9, 0xde, 0xd1, 0x78, 0x00, 0x0b,
+    0xdd, 0x36, 0x15, 0x82, 0x0c, 0xa5, 0xa2, 0x77, 0xc0, 0x8e, 0x6b, 0x49, 0x98, 0x3b, 0xfb, 0x29,
+    0xbe, 0xb9, 0xd2, 0xf6, 0x4a, 0xf8, 0xb8, 0x7b, 0xad, 0x4d, 0xfe, 0x2c, 0xff, 0x4e, 0x89, 0xd5,
 ];
-const KNOWN_MATRIX_CHILD_TRANSCRIPT_HEX: &str = concat!(
-    "011e0000000000000062616f7a692e63616e6f6e6963616c2d7363656e652e736e617073686f74020200000003",
+const KNOWN_MATRIX_CHILD_TRANSCRIPT_PREFIX_HEX: &str = concat!(
+    "011e0000000000000062616f7a692e63616e6f6e6963616c2d7363656e652e736e617073686f74020300000003",
     "0600000000000000736861323536040c01080d00000000000000000b0100000000000000050c01060d00000000",
     "000000000a010e0000803f0e000000000e000000000e000000000e000000000e0000803f0e000000000e000000",
     "000e000000000e000000000e0000803f0e000000000e000080400e000000000e000000000e0000803f0b100000",
     "0000000000070c01090d01000000000000000b0100000000000000060d01000000000000000a020e000000410e",
     "000000000e000000000e000000000e000000000e000000000e0000803f0e0000803f0e0000803f0e0000803f0b",
-    "0a00000000000000070c010b00000000000000000b02000000000000000f0c01100c010b000000000000000012",
-    "0c010b0000000000000000140c010b0000000000000000190c010b0000000000000000280c010b000000000000",
-    "0000",
+    "0a00000000000000070c010b00000000000000000b0200000000000000",
 );
-const EMPTY_GEOMETRY_TRANSCRIPT_HEX: &str = concat!(
-    "0f0c01100c010b0000000000000000120c010b0000000000000000140c010b000000000000000019",
-    "0c010b0000000000000000280c010b0000000000000000",
+const EMPTY_CANONICAL_DOMAINS_TRANSCRIPT_HEX: &str = concat!(
+    "330c01340c010b0000000000000000380c010b0000000000000000400c010b000000000000000010",
+    "0c010b0000000000000000440c010b00000000000000000f0c01120c010b0000000000000000140c",
+    "010b0000000000000000190c010b0000000000000000280c010b00000000000000004a0c014b0c01",
+    "0b00000000000000005d0c010b0000000000000000610c010b0000000000000000660c010b000000",
+    "00000000006e0c010b0000000000000000710c010b0000000000000000280c010b00000000000000",
+    "00780c01790c010b00000000000000007f0c010b0000000000000000",
 );
 const KNOWN_POINT_GEOMETRY_DIGEST: [u8; 32] = [
-    0x78, 0x8d, 0x04, 0x88, 0x0d, 0x18, 0x7b, 0x56, 0x4a, 0x89, 0xd0, 0x90, 0xdf, 0xc4, 0x90, 0x32,
-    0x55, 0xb9, 0xdb, 0xd2, 0xed, 0xdb, 0xe0, 0x87, 0xb6, 0x7f, 0xfc, 0x05, 0xc4, 0x72, 0x02, 0xd2,
+    0x12, 0xd5, 0xd7, 0x43, 0xed, 0x39, 0x01, 0x02, 0xe3, 0xc5, 0x64, 0x19, 0x46, 0x79, 0x32, 0x9f,
+    0x44, 0xd0, 0xd5, 0x48, 0x2d, 0x38, 0xc9, 0xac, 0x4f, 0x4f, 0xeb, 0xec, 0x05, 0x6b, 0x41, 0xec,
 ];
 const KNOWN_POINT_GEOMETRY_TRANSCRIPT_HEX: &str = concat!(
-    "011e0000000000000062616f7a692e63616e6f6e6963616c2d7363656e652e736e617073686f74020200000003",
+    "011e0000000000000062616f7a692e63616e6f6e6963616c2d7363656e652e736e617073686f74020300000003",
     "0600000000000000736861323536040c01080d00000000000000000b0100000000000000050c01060d00000000",
     "000000000a020e000000000e000000000e000000000e000000000e000000000e000000000e0000803f0e000080",
-    "3f0e0000803f0e0000803f0b0a00000000000000070c010b00000000000000000b01000000000000000f0c0110",
-    "0c01110d00000000000000000b0100000000000000120c01130d00000000000000002c00000000000000000b01",
-    "000000000000000b0100000000000000140c01150d00000000000000002e002f01000000300100000031010000",
-    "00160c000b0000000000000000170c000b0000000000000000180c010d0000000000000000192d000000000000",
-    "00000b01000000000000000b0100000000000000190c011a0d00000000000000001b001c000000001d001e001f",
-    "032000210022010000002301000000240300000000000000250c010e0000803f0e000000400e000040400b030000",
-    "0000000000260c000b0000000000000000270c000b00000000000000000b0100000000000000280c01290d0000",
-    "0000000000002a00000000000000002b00000000000000000b0100000000000000",
+    "3f0e0000803f0e0000803f0b0a00000000000000070c010b00000000000000000b0100000000000000330c0134",
+    "0c010b0000000000000000380c010b0000000000000000400c010b0000000000000000100c01110d0000000000",
+    "0000004800000000000000000b00000000000000000b0100000000000000440c010b00000000000000000f0c01",
+    "120c01130d00000000000000002c00000000000000000b01000000000000000b0100000000000000140c01150d",
+    "00000000000000002e002f0100000030010000003101000000160c000b0000000000000000170c000b00000000",
+    "00000000180c010d0000000000000000192d00000000000000000b01000000000000000b010000000000000019",
+    "0c011a0d00000000000000001b001c000000001d001e001f032000210022010000002301000000240300000000",
+    "000000250c010e0000803f0e000000400e000040400b0300000000000000260c000b0000000000000000270c00",
+    "0b00000000000000000b0100000000000000280c01290d00000000000000002a00000000000000002b00000000",
+    "000000000b01000000000000004a0c014b0c010b00000000000000005d0c015e0d00000000000000005f000000",
+    "00000000000b0000000000000000600c010b00000000000000000b0100000000000000610c010b000000000000",
+    "0000660c01670d0000000000000000680c000b00000000000000006e0c000d00000000000000000b0000000000",
+    "0000000b01000000000000006e0c010b0000000000000000710c010b0000000000000000280c01290d00000000",
+    "000000004c0c00600c000b00000000000000000b0100000000000000780c01790c010b00000000000000007f0c",
+    "010b0000000000000000",
 );
 
 fn operation_limits() -> SceneConstructionLimits {
@@ -128,9 +138,48 @@ fn build_scene_with_geometry<'input>(
     nodes: &'input [NodeAuthoringNode],
     geometry: GeometryAuthoringBatch<'input>,
 ) -> NodeSceneSuccessParts {
+    build_scene_with_appearance_and_geometry(
+        account,
+        roots,
+        nodes,
+        AppearanceAuthoringBatch::empty(),
+        geometry,
+    )
+}
+
+fn build_scene_with_appearance_and_geometry<'input>(
+    account: &PhysicalStorageAccount,
+    roots: &'input [NodeLocalId],
+    nodes: &'input [NodeAuthoringNode],
+    appearance: AppearanceAuthoringBatch<'input>,
+    geometry: GeometryAuthoringBatch<'input>,
+) -> NodeSceneSuccessParts {
+    let logical_morphs = vec![
+        LogicalMorphAuthoring::new(AuthoringRange::new(0, 0), &[]);
+        geometry.logical_meshes().len()
+    ];
+    let primitive_deformations = vec![
+        PrimitiveDeformationAuthoring::new(Presence::Absent, &[]);
+        geometry.primitives().len()
+    ];
+    let mesh_instance_deformations =
+        vec![
+            MeshInstanceDeformationAuthoring::new(Presence::Absent, Presence::Absent);
+            geometry.mesh_instances().len()
+        ];
+    let deformation = DeformationAuthoringBatch::new(
+        &[],
+        &[],
+        &logical_morphs,
+        &primitive_deformations,
+        &mesh_instance_deformations,
+    );
     let input = SceneAuthoringBatch::new(
         NodeAuthoringBatch::new(Presence::Present(roots), nodes),
+        appearance,
         geometry,
+        deformation,
+        AnimationAuthoringBatch::empty(),
     );
     let prepared = SceneConstructionOperation::with_account_for_scene_input(
         account,
@@ -140,7 +189,12 @@ fn build_scene_with_geometry<'input>(
     )
     .expect("snapshot Scene input admission")
     .try_validate()
-    .unwrap_or_else(|_| panic!("snapshot input must pass authoring validation"))
+    .unwrap_or_else(|rejected| {
+        panic!(
+            "snapshot input must pass authoring validation: {:?}",
+            rejected.failure()
+        )
+    })
     .prepare()
     .expect("snapshot Scene must prepare");
     match prepared.handoff() {
@@ -180,15 +234,18 @@ fn matrix(translation_x: f32) -> AuthoredTransform {
 }
 
 fn assert_hex(actual: &[u8], expected: &str) {
+    assert_hex_parts(actual, &[expected]);
+}
+
+fn assert_hex_parts(actual: &[u8], expected: &[&str]) {
     const HEX: &[u8; 16] = b"0123456789abcdef";
-    assert_eq!(actual.len().checked_mul(2), Some(expected.len()));
-    for (index, byte) in actual.iter().copied().enumerate() {
-        assert_eq!(expected.as_bytes()[index * 2], HEX[usize::from(byte >> 4)]);
-        assert_eq!(
-            expected.as_bytes()[index * 2 + 1],
-            HEX[usize::from(byte & 0x0f)]
-        );
+    let mut encoded = String::with_capacity(actual.len().saturating_mul(2));
+    for byte in actual.iter().copied() {
+        encoded.push(char::from(HEX[usize::from(byte >> 4)]));
+        encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
     }
+    let expected = expected.concat();
+    assert_eq!(encoded, expected);
 }
 
 fn single_root_scene(
@@ -227,11 +284,13 @@ fn point_geometry_scene(
         NodeLocalId::new(0),
         LogicalMeshLocalId::new(0),
     )];
-    build_scene_with_geometry(
+    let materials = [MaterialAuthoring::new(AuthoringRange::new(0, 0))];
+    build_scene_with_appearance_and_geometry(
         account,
         &roots,
         &nodes,
-        GeometryAuthoringBatch::new(1, &logical_meshes, &primitives, &attributes, &instances),
+        AppearanceAuthoringBatch::new(&[], &[], &[], &[], &materials),
+        GeometryAuthoringBatch::new(&logical_meshes, &primitives, &attributes, &instances),
     )
 }
 
@@ -266,7 +325,7 @@ fn point_index_presence_scene(
         account,
         &roots,
         &nodes,
-        GeometryAuthoringBatch::new(0, &logical_meshes, &primitives, &attributes, &[]),
+        GeometryAuthoringBatch::new(&logical_meshes, &primitives, &attributes, &[]),
     )
 }
 
@@ -305,7 +364,7 @@ fn corner_normal_scene<'input>(
         account,
         &roots,
         &nodes,
-        GeometryAuthoringBatch::new(0, &logical_meshes, &primitives, &attributes, &[]),
+        GeometryAuthoringBatch::new(&logical_meshes, &primitives, &attributes, &[]),
     )
 }
 
@@ -398,11 +457,13 @@ fn all_attribute_payload_kinds_scene(account: &PhysicalStorageAccount) -> NodeSc
         NodeLocalId::new(0),
         LogicalMeshLocalId::new(0),
     )];
-    build_scene_with_geometry(
+    let materials = [MaterialAuthoring::new(AuthoringRange::new(0, 0))];
+    build_scene_with_appearance_and_geometry(
         account,
         &roots,
         &nodes,
-        GeometryAuthoringBatch::new(1, &logical_meshes, &primitives, &attributes, &instances),
+        AppearanceAuthoringBatch::new(&[], &[], &[], &[], &materials),
+        GeometryAuthoringBatch::new(&logical_meshes, &primitives, &attributes, &instances),
     )
 }
 
@@ -417,21 +478,40 @@ fn known_vector_is_stable_and_human_reviewable() {
             .expect("known Scene snapshot");
 
     assert_eq!(snapshot.domain, "baozi.canonical-scene.snapshot");
-    assert_eq!(snapshot.schema_revision, 2);
+    assert_eq!(snapshot.schema_revision, 3);
     assert_eq!(snapshot.algorithm, NodeSceneSnapshotAlgorithm::Sha256);
     assert_eq!(snapshot.digest, KNOWN_SINGLE_TRS_DIGEST);
     assert!(transcript.complete);
-    assert_hex(&transcript.bytes, KNOWN_SINGLE_TRS_TRANSCRIPT_HEX);
+    assert_hex_parts(
+        &transcript.bytes,
+        &[
+            KNOWN_SINGLE_TRS_TRANSCRIPT_PREFIX_HEX,
+            EMPTY_CANONICAL_DOMAINS_TRANSCRIPT_HEX,
+        ],
+    );
     assert_eq!(snapshot.totals.node_count, 1);
     assert_eq!(snapshot.totals.root_count, 1);
     assert_eq!(snapshot.totals.edge_count, 0);
+    assert_eq!(snapshot.totals.image_count, 0);
+    assert_eq!(snapshot.totals.sampler_count, 0);
+    assert_eq!(snapshot.totals.texture_count, 0);
     assert_eq!(snapshot.totals.material_count, 0);
+    assert_eq!(snapshot.totals.material_binding_count, 0);
     assert_eq!(snapshot.totals.logical_mesh_count, 0);
     assert_eq!(snapshot.totals.primitive_count, 0);
     assert_eq!(snapshot.totals.attribute_count, 0);
     assert_eq!(snapshot.totals.mesh_instance_count, 0);
-    assert_eq!(snapshot.totals.transcript_bytes, 239);
-    assert_eq!(snapshot.totals.work_units, 27);
+    assert_eq!(snapshot.totals.skin_count, 0);
+    assert_eq!(snapshot.totals.logical_morph_count, 0);
+    assert_eq!(snapshot.totals.morph_definition_count, 0);
+    assert_eq!(snapshot.totals.primitive_deformation_count, 0);
+    assert_eq!(snapshot.totals.morph_target_count, 0);
+    assert_eq!(snapshot.totals.morph_delta_count, 0);
+    assert_eq!(snapshot.totals.deformation_mesh_instance_count, 0);
+    assert_eq!(snapshot.totals.animation_clip_count, 0);
+    assert_eq!(snapshot.totals.animation_channel_count, 0);
+    assert_eq!(snapshot.totals.transcript_bytes, 404);
+    assert_eq!(snapshot.totals.work_units, 43);
     assert!(snapshot.preview.text.contains("roots(present,total=1)=[0]"));
     assert!(snapshot.preview.text.contains("transform=trs(total=10)"));
     assert!(
@@ -450,7 +530,7 @@ fn known_vector_is_stable_and_human_reviewable() {
 }
 
 #[test]
-fn matrix_and_child_known_vector_pins_node_framing_and_empty_geometry() {
+fn matrix_and_child_known_vector_pins_node_framing_and_empty_domains() {
     let factory = factory();
     let account = account(&factory);
     let roots = [NodeLocalId::new(0)];
@@ -466,12 +546,18 @@ fn matrix_and_child_known_vector_pins_node_framing_and_empty_geometry() {
 
     assert_eq!(snapshot.digest, KNOWN_MATRIX_CHILD_DIGEST);
     assert!(transcript.complete);
-    assert_hex(&transcript.bytes, KNOWN_MATRIX_CHILD_TRANSCRIPT_HEX);
+    assert_hex_parts(
+        &transcript.bytes,
+        &[
+            KNOWN_MATRIX_CHILD_TRANSCRIPT_PREFIX_HEX,
+            EMPTY_CANONICAL_DOMAINS_TRANSCRIPT_HEX,
+        ],
+    );
     assert_eq!(snapshot.totals.node_count, 2);
     assert_eq!(snapshot.totals.root_count, 1);
     assert_eq!(snapshot.totals.edge_count, 1);
-    assert_eq!(snapshot.totals.transcript_bytes, 362);
-    assert_eq!(snapshot.totals.work_units, 47);
+    assert_eq!(snapshot.totals.transcript_bytes, 527);
+    assert_eq!(snapshot.totals.work_units, 63);
 }
 
 #[test]
@@ -494,14 +580,21 @@ fn point_geometry_known_vector_pins_complete_scene_framing() {
     assert_eq!(snapshot.totals.primitive_count, 1);
     assert_eq!(snapshot.totals.attribute_count, 1);
     assert_eq!(snapshot.totals.mesh_instance_count, 1);
+    assert_eq!(snapshot.totals.logical_morph_count, 1);
+    assert_eq!(snapshot.totals.primitive_deformation_count, 1);
+    assert_eq!(snapshot.totals.deformation_mesh_instance_count, 1);
+    assert_eq!(snapshot.totals.skin_count, 0);
+    assert_eq!(snapshot.totals.morph_definition_count, 0);
+    assert_eq!(snapshot.totals.morph_target_count, 0);
+    assert_eq!(snapshot.totals.morph_delta_count, 0);
     assert_eq!(snapshot.totals.polygon_boundary_count, 0);
     assert_eq!(snapshot.totals.primitive_index_count, 0);
     assert_eq!(snapshot.totals.sparse_index_count, 0);
     assert_eq!(snapshot.totals.canonical_scalar_count, 3);
     assert_eq!(snapshot.totals.f32_scalar_count, 3);
     assert_eq!(snapshot.totals.u32_scalar_count, 0);
-    assert_eq!(snapshot.totals.transcript_bytes, 484);
-    assert_eq!(snapshot.totals.work_units, 40);
+    assert_eq!(snapshot.totals.transcript_bytes, 775);
+    assert_eq!(snapshot.totals.work_units, 59);
     assert!(snapshot.preview.text.contains("material[0]"));
     assert!(
         snapshot
@@ -573,7 +666,11 @@ fn empty_scene_snapshot_is_complete_and_deterministic() {
     assert_eq!(first_snapshot.totals.node_count, 0);
     assert_eq!(first_snapshot.totals.root_count, 0);
     assert_eq!(first_snapshot.totals.edge_count, 0);
+    assert_eq!(first_snapshot.totals.image_count, 0);
+    assert_eq!(first_snapshot.totals.sampler_count, 0);
+    assert_eq!(first_snapshot.totals.texture_count, 0);
     assert_eq!(first_snapshot.totals.material_count, 0);
+    assert_eq!(first_snapshot.totals.material_binding_count, 0);
     assert_eq!(first_snapshot.totals.logical_mesh_count, 0);
     assert_eq!(first_snapshot.totals.primitive_count, 0);
     assert_eq!(first_snapshot.totals.attribute_count, 0);
@@ -582,13 +679,19 @@ fn empty_scene_snapshot_is_complete_and_deterministic() {
     assert_eq!(first_snapshot.totals.primitive_index_count, 0);
     assert_eq!(first_snapshot.totals.sparse_index_count, 0);
     assert_eq!(first_snapshot.totals.canonical_scalar_count, 0);
-    assert_eq!(first_snapshot.totals.transcript_bytes, 146);
-    assert_eq!(first_snapshot.totals.work_units, 13);
-    let empty_tail_bytes = EMPTY_GEOMETRY_TRANSCRIPT_HEX.len() / 2;
+    assert_eq!(first_snapshot.totals.skin_count, 0);
+    assert_eq!(first_snapshot.totals.logical_morph_count, 0);
+    assert_eq!(first_snapshot.totals.primitive_deformation_count, 0);
+    assert_eq!(first_snapshot.totals.deformation_mesh_instance_count, 0);
+    assert_eq!(first_snapshot.totals.animation_clip_count, 0);
+    assert_eq!(first_snapshot.totals.animation_channel_count, 0);
+    assert_eq!(first_snapshot.totals.transcript_bytes, 311);
+    assert_eq!(first_snapshot.totals.work_units, 29);
+    let empty_tail_bytes = EMPTY_CANONICAL_DOMAINS_TRANSCRIPT_HEX.len() / 2;
     assert!(transcript.complete);
     assert_hex(
         &transcript.bytes[transcript.bytes.len() - empty_tail_bytes..],
-        EMPTY_GEOMETRY_TRANSCRIPT_HEX,
+        EMPTY_CANONICAL_DOMAINS_TRANSCRIPT_HEX,
     );
 }
 
@@ -612,7 +715,7 @@ fn geometry_tables_payload_kinds_and_totals_are_complete() {
     assert_eq!(snapshot.totals.canonical_scalar_count, 36);
     assert_eq!(snapshot.totals.f32_scalar_count, 33);
     assert_eq!(snapshot.totals.u32_scalar_count, 3);
-    assert_eq!(snapshot.totals.work_units, 108);
+    assert_eq!(snapshot.totals.work_units, 129);
     assert!(snapshot.preview.text.contains("payload=dense"));
     assert!(snapshot.preview.text.contains("payload=sparse"));
     assert!(snapshot.preview.text.contains("sparse_default(present"));
@@ -759,10 +862,45 @@ fn geometry_collection_fault_fails_before_a_snapshot_can_be_published() {
     node.into_children()
         .finish()
         .expect("complete point children");
-    let mut geometry = nodes.into_geometry().expect("point geometry cursor");
+    let appearance = nodes.appearance().expect("point appearance cursor");
+    assert!(
+        appearance
+            .next_image()
+            .expect("point image exhaustion")
+            .is_none()
+    );
+    assert!(
+        appearance
+            .next_sampler()
+            .expect("point sampler exhaustion")
+            .is_none()
+    );
+    assert!(
+        appearance
+            .next_texture()
+            .expect("point texture exhaustion")
+            .is_none()
+    );
+    let material = appearance
+        .next_material()
+        .expect("point material read")
+        .expect("point material");
+    assert_eq!(material.source_index(), 0);
+    assert!(
+        appearance
+            .next_material()
+            .expect("point material exhaustion")
+            .is_none()
+    );
+    assert!(
+        appearance
+            .next_binding()
+            .expect("point binding exhaustion")
+            .is_none()
+    );
+    let geometry = nodes.geometry().expect("point geometry cursor");
     let wrong_counts = super::GeometryCollectionCounts {
-        materials: 2,
-        logical_meshes: 1,
+        logical_meshes: 2,
         primitives: 1,
         attributes: 1,
         mesh_instances: 1,
@@ -772,7 +910,7 @@ fn geometry_collection_fault_fails_before_a_snapshot_can_be_published() {
     let mut work = SnapshotWorkMeter::new(MAX_WORK, None);
 
     let failure = super::write_geometry(
-        &mut geometry,
+        geometry,
         wrong_counts,
         &mut transcript,
         &mut preview,
@@ -781,7 +919,7 @@ fn geometry_collection_fault_fails_before_a_snapshot_can_be_published() {
     assert!(matches!(
         failure,
         Err(NodeSceneSnapshotError::InconsistentView {
-            reason: "material collection ended before declared total"
+            reason: "logical-mesh collection ended before declared total"
         })
     ));
     assert_eq!(account.snapshot(), retained);
@@ -1099,9 +1237,9 @@ fn traversal_scales_linearly_while_preview_stays_bounded() {
         assert!(snapshot.preview.text.len() <= 64);
         assert_eq!(
             snapshot.totals.transcript_bytes,
-            146 + 93 * node_count as u64
+            311 + 93 * node_count as u64
         );
-        assert_eq!(snapshot.totals.work_units, 13 + 14 * node_count as u64);
+        assert_eq!(snapshot.totals.work_units, 29 + 14 * node_count as u64);
         assert_eq!(snapshot.totals.node_count, node_count);
         assert_eq!(snapshot.totals.root_count, 1);
         assert_eq!(snapshot.totals.edge_count, node_count - 1);

@@ -3,8 +3,8 @@ mod scenarios;
 
 use report::{ProductionReport, REPORT_PREFIX, hex_encode, render, sha256_hex};
 use scenarios::{
-    collect_inherited_hot_leaf_scenario, collect_obj_capability, collect_scale_scenarios,
-    collect_validation_faults,
+    collect_gltf_capability, collect_inherited_hot_leaf_scenario, collect_obj_capability,
+    collect_scale_scenarios, collect_validation_faults,
 };
 
 #[test]
@@ -14,6 +14,7 @@ fn canonical_store_u4c_production_v1_probe() {
         collect_scale_scenarios(),
         collect_inherited_hot_leaf_scenario(),
         collect_obj_capability(),
+        collect_gltf_capability(),
         collect_validation_faults(),
     );
     println!("\n{REPORT_PREFIX}{}", render(&report));

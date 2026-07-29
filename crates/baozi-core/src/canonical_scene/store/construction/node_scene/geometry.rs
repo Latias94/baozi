@@ -8,16 +8,17 @@ use crate::canonical_scene::store::production::{
     GeometryAttributePayloadAuthoring, GeometryAttributePayloadKind, GeometryAttributeScalarKind,
     GeometryTopologyAuthoring, Presence, ValidatedGeometryBatch, ValidatedNodeBatch,
 };
+use crate::canonical_scene::store::schema::appearance::AppearanceMaterialTableSchema;
 use crate::canonical_scene::store::schema::geometry::{
     GEOMETRY_ATTRIBUTE_FIELD_COUNT, GEOMETRY_LOGICAL_MESH_FIELD_COUNT,
-    GEOMETRY_MATERIAL_FIELD_COUNT, GEOMETRY_MESH_INSTANCE_FIELD_COUNT, GEOMETRY_NORMALIZATION_NONE,
-    GEOMETRY_PAYLOAD_DENSE, GEOMETRY_PAYLOAD_SPARSE, GEOMETRY_PRIMITIVE_FIELD_COUNT,
-    GEOMETRY_SCALAR_F32, GEOMETRY_SCALAR_U32, GeometryAttributeTableSchema,
-    GeometryF32ValuesSchema, GeometryLogicalMeshTableSchema, GeometryMaterialTableSchema,
-    GeometryMeshInstanceTableSchema, GeometryPolygonBoundariesSchema,
-    GeometryPrimitiveIndicesSchema, GeometryPrimitiveTableSchema, GeometrySparseF32DefaultsSchema,
-    GeometrySparseIndicesSchema, GeometrySparseU32DefaultsSchema, GeometryU32ValuesSchema,
-    encode_geometry_domain, encode_geometry_semantic, encode_geometry_topology,
+    GEOMETRY_MESH_INSTANCE_FIELD_COUNT, GEOMETRY_NORMALIZATION_NONE, GEOMETRY_PAYLOAD_DENSE,
+    GEOMETRY_PAYLOAD_SPARSE, GEOMETRY_PRIMITIVE_FIELD_COUNT, GEOMETRY_SCALAR_F32,
+    GEOMETRY_SCALAR_U32, GeometryAttributeTableSchema, GeometryF32ValuesSchema,
+    GeometryLogicalMeshTableSchema, GeometryMeshInstanceTableSchema,
+    GeometryPolygonBoundariesSchema, GeometryPrimitiveIndicesSchema, GeometryPrimitiveTableSchema,
+    GeometrySparseF32DefaultsSchema, GeometrySparseIndicesSchema, GeometrySparseU32DefaultsSchema,
+    GeometryU32ValuesSchema, encode_geometry_domain, encode_geometry_semantic,
+    encode_geometry_topology,
 };
 use crate::canonical_scene::store::schema::{
     CanonicalBlockRef, CanonicalSchema, PRESENCE_ABSENT, PRESENCE_PRESENT,
@@ -31,13 +32,11 @@ use super::super::{
 use super::{NodeSceneBuildFaults, NodeSceneWorkMeter};
 
 pub(super) struct GeometryMaterializationPlans {
-    materials: Option<RecordPlan>,
     logical_meshes: Option<RecordPlan>,
     primitives: Option<RecordPlan>,
     attributes: Option<RecordPlan>,
     mesh_instances: Option<RecordPlan>,
     directory: RecordPlan,
-    material_count: u32,
     logical_mesh_count: u32,
     primitive_count: u32,
     attribute_count: u32,
@@ -48,12 +47,10 @@ pub(super) struct GeometryMaterializationPlans {
 
 impl GeometryMaterializationPlans {
     pub(super) fn new<R>(batch: &ValidatedGeometryBatch<'_, R>) -> Result<Self, StorePlanError> {
-        let material_count = batch.material_count();
         let logical_mesh_count = batch.logical_mesh_count();
         let primitive_count = batch.primitive_count();
         let attribute_count = batch.attribute_count();
         let mesh_instance_count = batch.mesh_instance_count();
-        let materials = record_plan_if_nonempty(material_count, GEOMETRY_MATERIAL_FIELD_COUNT)?;
         let logical_meshes =
             record_plan_if_nonempty(logical_mesh_count, GEOMETRY_LOGICAL_MESH_FIELD_COUNT)?;
         let primitives = record_plan_if_nonempty(primitive_count, GEOMETRY_PRIMITIVE_FIELD_COUNT)?;
@@ -61,7 +58,6 @@ impl GeometryMaterializationPlans {
         let mesh_instances =
             record_plan_if_nonempty(mesh_instance_count, GEOMETRY_MESH_INSTANCE_FIELD_COUNT)?;
         let table_block_count = [
-            materials.is_some(),
             logical_meshes.is_some(),
             primitives.is_some(),
             attributes.is_some(),
@@ -80,13 +76,11 @@ impl GeometryMaterializationPlans {
             })
             .ok_or(StorePlanError::SizeOverflow)?;
         Ok(Self {
-            materials,
             logical_meshes,
             primitives,
             attributes,
             mesh_instances,
             directory: RecordPlan::new(1, SCENE_GEOMETRY_DIRECTORY_FIELD_COUNT)?,
-            material_count,
             logical_mesh_count,
             primitive_count,
             attribute_count,
@@ -98,10 +92,6 @@ impl GeometryMaterializationPlans {
 
     pub(super) const fn canonical_block_count(&self) -> usize {
         self.canonical_block_count
-    }
-
-    pub(super) const fn material_count(&self) -> u32 {
-        self.material_count
     }
 
     pub(super) const fn logical_mesh_count(&self) -> u32 {
@@ -173,26 +163,27 @@ pub(super) struct GeometryReferenceScratch {
     _reservation: RetainedStoreReservation<SceneConstructionOwner>,
 }
 
-impl GeometryReferenceScratch {
+pub(super) struct GeometryReferenceScratchPlan {
+    primitive_plan: CapacityPlan,
+    attribute_plan: CapacityPlan,
+    primitive_count: usize,
+    attribute_count: usize,
+    envelope: u64,
+}
+
+impl GeometryReferenceScratchPlan {
     pub(super) fn try_new<R>(
         checkpoint: &mut SceneStoreControlCheckpoint<'_>,
-        keys: SceneStoreKeys,
         batch: &ValidatedGeometryBatch<'_, R>,
     ) -> Result<Self, StoreRuntimeError> {
-        let primitive_plan = CapacityPlan::for_type::<PrimitiveLeafRefs>(
-            0,
-            0,
-            usize::try_from(batch.primitive_count())
-                .map_err(|_| StoreRuntimeError::Plan(StorePlanError::SizeOverflow))?,
-        )
-        .map_err(|_| StoreRuntimeError::Plan(StorePlanError::SizeOverflow))?;
-        let attribute_plan = CapacityPlan::for_type::<AttributeLeafRefs>(
-            0,
-            0,
-            usize::try_from(batch.attribute_count())
-                .map_err(|_| StoreRuntimeError::Plan(StorePlanError::SizeOverflow))?,
-        )
-        .map_err(|_| StoreRuntimeError::Plan(StorePlanError::SizeOverflow))?;
+        let primitive_count = usize::try_from(batch.primitive_count())
+            .map_err(|_| StoreRuntimeError::Plan(StorePlanError::SizeOverflow))?;
+        let attribute_count = usize::try_from(batch.attribute_count())
+            .map_err(|_| StoreRuntimeError::Plan(StorePlanError::SizeOverflow))?;
+        let primitive_plan = CapacityPlan::for_type::<PrimitiveLeafRefs>(0, 0, primitive_count)
+            .map_err(|_| StoreRuntimeError::Plan(StorePlanError::SizeOverflow))?;
+        let attribute_plan = CapacityPlan::for_type::<AttributeLeafRefs>(0, 0, attribute_count)
+            .map_err(|_| StoreRuntimeError::Plan(StorePlanError::SizeOverflow))?;
         let envelope = primitive_plan
             .envelope_delta_bytes()
             .ok()
@@ -205,6 +196,29 @@ impl GeometryReferenceScratch {
             .ok_or(StoreRuntimeError::Plan(StorePlanError::SizeOverflow))?;
 
         checkpoint.poll().map_err(StoreRuntimeError::Control)?;
+        Ok(Self {
+            primitive_plan,
+            attribute_plan,
+            primitive_count,
+            attribute_count,
+            envelope,
+        })
+    }
+}
+
+impl GeometryReferenceScratch {
+    pub(super) fn try_new(
+        checkpoint: &mut SceneStoreControlCheckpoint<'_>,
+        keys: SceneStoreKeys,
+        plan: GeometryReferenceScratchPlan,
+    ) -> Result<Self, StoreRuntimeError> {
+        let GeometryReferenceScratchPlan {
+            primitive_plan,
+            attribute_plan,
+            primitive_count,
+            attribute_count,
+            envelope,
+        } = plan;
         let mut reservation = checkpoint.reserve(keys.phase, keys.dimension, envelope)?;
         checkpoint.validate_live_owner(&reservation)?;
 
@@ -238,16 +252,14 @@ impl GeometryReferenceScratch {
             checkpoint,
             keys,
             &mut primitive_refs,
-            usize::try_from(batch.primitive_count())
-                .map_err(|_| StoreRuntimeError::Plan(StorePlanError::SizeOverflow))?,
+            primitive_count,
             PrimitiveLeafRefs::EMPTY,
         )?;
         fill_reference_scratch(
             checkpoint,
             keys,
             &mut attribute_refs,
-            usize::try_from(batch.attribute_count())
-                .map_err(|_| StoreRuntimeError::Plan(StorePlanError::SizeOverflow))?,
+            attribute_count,
             AttributeLeafRefs::EMPTY,
         )?;
         checkpoint.poll().map_err(StoreRuntimeError::Control)?;
@@ -299,11 +311,40 @@ fn record_plan_if_nonempty(
 
 #[derive(Clone, Copy)]
 struct GeometryTableRefs {
-    materials: Option<CanonicalBlockRef<GeometryMaterialTableSchema>>,
     logical_meshes: Option<CanonicalBlockRef<GeometryLogicalMeshTableSchema>>,
     primitives: Option<CanonicalBlockRef<GeometryPrimitiveTableSchema>>,
     attributes: Option<CanonicalBlockRef<GeometryAttributeTableSchema>>,
     mesh_instances: Option<CanonicalBlockRef<GeometryMeshInstanceTableSchema>>,
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct RetainedGeometryRefs {
+    directory: CanonicalBlockRef<SceneGeometryDirectorySchema>,
+    tables: GeometryTableRefs,
+}
+
+impl RetainedGeometryRefs {
+    pub(super) const fn directory(self) -> CanonicalBlockRef<SceneGeometryDirectorySchema> {
+        self.directory
+    }
+
+    pub(super) const fn logical_meshes(
+        self,
+    ) -> Option<CanonicalBlockRef<GeometryLogicalMeshTableSchema>> {
+        self.tables.logical_meshes
+    }
+
+    pub(super) const fn primitives(
+        self,
+    ) -> Option<CanonicalBlockRef<GeometryPrimitiveTableSchema>> {
+        self.tables.primitives
+    }
+
+    pub(super) const fn mesh_instances(
+        self,
+    ) -> Option<CanonicalBlockRef<GeometryMeshInstanceTableSchema>> {
+        self.tables.mesh_instances
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -314,11 +355,12 @@ pub(super) fn retain_geometry<R, NR>(
     batch: &ValidatedGeometryBatch<'_, R>,
     nodes: &ValidatedNodeBatch<'_, NR>,
     node_table: CanonicalBlockRef<super::super::super::schema::NodeSceneNodeTableSchema>,
+    appearance_materials: Option<CanonicalBlockRef<AppearanceMaterialTableSchema>>,
     keys: SceneStoreKeys,
     work: &mut NodeSceneWorkMeter,
     faults: &mut NodeSceneBuildFaults,
     failure: StoreBuildError,
-) -> Result<CanonicalBlockRef<SceneGeometryDirectorySchema>, StoreRuntimeError> {
+) -> Result<RetainedGeometryRefs, StoreRuntimeError> {
     let primitive_payload_blocks = retain_primitive_leaves(
         assembly,
         batch,
@@ -343,16 +385,6 @@ pub(super) fn retain_geometry<R, NR>(
         return Err(StoreRuntimeError::Build(failure));
     }
 
-    let materials = match plans.materials {
-        Some(plan) => Some(retain_material_table(
-            assembly,
-            plan,
-            plans.material_count,
-            keys,
-            work,
-        )?),
-        None => None,
-    };
     let attributes = match plans.attributes {
         Some(plan) => Some(retain_attribute_table(
             assembly,
@@ -371,7 +403,7 @@ pub(super) fn retain_geometry<R, NR>(
             plan,
             batch,
             &scratch.primitive_refs,
-            materials,
+            appearance_materials,
             attributes,
             keys,
             work,
@@ -400,13 +432,16 @@ pub(super) fn retain_geometry<R, NR>(
         None => None,
     };
     let refs = GeometryTableRefs {
-        materials,
         logical_meshes,
         primitives,
         attributes,
         mesh_instances,
     };
-    retain_geometry_directory(assembly, plans, refs, keys, work, failure)
+    let directory = retain_geometry_directory(assembly, plans, refs, keys, work, failure)?;
+    Ok(RetainedGeometryRefs {
+        directory,
+        tables: refs,
+    })
 }
 
 fn retain_primitive_leaves<R>(
@@ -702,29 +737,6 @@ fn retain_projected_f32_sequence(
         .map(CanonicalBlockRef::from_store)
 }
 
-fn retain_material_table(
-    assembly: &mut SceneStoreAssembly,
-    plan: RecordPlan,
-    material_count: u32,
-    keys: SceneStoreKeys,
-    work: &mut NodeSceneWorkMeter,
-) -> Result<CanonicalBlockRef<GeometryMaterialTableSchema>, StoreRuntimeError> {
-    assembly
-        .try_retain_canonical_records_controlled(
-            plan,
-            keys.dimension,
-            GeometryMaterialTableSchema,
-            |writer, control| {
-                for material in 0..material_count {
-                    work.observe(control, 1)?;
-                    writer.write_row(|row| row.write_scalar(material))?;
-                }
-                Ok(())
-            },
-        )
-        .map(CanonicalBlockRef::from_store)
-}
-
 fn retain_attribute_table<R>(
     assembly: &mut SceneStoreAssembly,
     plan: RecordPlan,
@@ -805,7 +817,7 @@ fn retain_primitive_table<R>(
     plan: RecordPlan,
     batch: &ValidatedGeometryBatch<'_, R>,
     refs: &[PrimitiveLeafRefs],
-    materials: Option<CanonicalBlockRef<GeometryMaterialTableSchema>>,
+    appearance_materials: Option<CanonicalBlockRef<AppearanceMaterialTableSchema>>,
     attributes: Option<CanonicalBlockRef<GeometryAttributeTableSchema>>,
     keys: SceneStoreKeys,
     work: &mut NodeSceneWorkMeter,
@@ -863,7 +875,9 @@ fn retain_primitive_table<R>(
                         row.write_scalar(material_presence)?;
                         row.write_scalar(material_index)?;
                         if material_presence == PRESENCE_PRESENT {
-                            row.write_record_ref(materials.ok_or(failure)?.into_store())?;
+                            row.write_record_ref(
+                                appearance_materials.ok_or(failure)?.into_store(),
+                            )?;
                         } else {
                             row.write_scalar(0_u8)?;
                         }
@@ -979,12 +993,6 @@ fn retain_geometry_directory(
                 writer
                     .write_row(|row| {
                         row.write_scalar(SCENE_GEOMETRY_SCHEMA_REVISION)?;
-                        write_optional_table_ref(
-                            row,
-                            plans.material_count,
-                            refs.materials,
-                            failure,
-                        )?;
                         write_optional_table_ref(
                             row,
                             plans.logical_mesh_count,

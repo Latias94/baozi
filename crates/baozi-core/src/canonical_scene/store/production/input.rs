@@ -1,5 +1,8 @@
 use crate::entity::AuthoredTransform;
 
+pub(super) mod animation;
+pub(super) mod appearance;
+pub(super) mod deformation;
 pub(super) mod geometry;
 
 /// Distinguishes an absent source field from a present value, including an empty slice.
@@ -111,29 +114,60 @@ pub(in crate::canonical_scene::store) struct NodeAuthoringBatch<'a> {
 /// One borrowed producer input for every domain of a canonical Scene.
 ///
 /// The store accepts this aggregate as a unit so admission, validation, and
-/// publication cannot observe a node graph without its geometry domain.
+/// publication cannot observe a node graph without the appearance, geometry,
+/// deformation, and animation domains that qualify the same Scene.
 #[derive(Debug, Clone, Copy)]
 pub(in crate::canonical_scene::store) struct SceneAuthoringBatch<'a> {
     nodes: NodeAuthoringBatch<'a>,
+    appearance: appearance::AppearanceAuthoringBatch<'a>,
     geometry: geometry::GeometryAuthoringBatch<'a>,
+    deformation: deformation::DeformationAuthoringBatch<'a>,
+    animations: animation::AnimationAuthoringBatch<'a>,
 }
 
 impl<'a> SceneAuthoringBatch<'a> {
     pub(in crate::canonical_scene::store) const fn new(
         nodes: NodeAuthoringBatch<'a>,
+        appearance: appearance::AppearanceAuthoringBatch<'a>,
         geometry: geometry::GeometryAuthoringBatch<'a>,
+        deformation: deformation::DeformationAuthoringBatch<'a>,
+        animations: animation::AnimationAuthoringBatch<'a>,
     ) -> Self {
-        Self { nodes, geometry }
+        Self {
+            nodes,
+            appearance,
+            geometry,
+            deformation,
+            animations,
+        }
     }
 
     pub(in crate::canonical_scene::store) const fn nodes(self) -> NodeAuthoringBatch<'a> {
         self.nodes
     }
 
+    pub(in crate::canonical_scene::store) const fn appearance(
+        self,
+    ) -> appearance::AppearanceAuthoringBatch<'a> {
+        self.appearance
+    }
+
     pub(in crate::canonical_scene::store) const fn geometry(
         self,
     ) -> geometry::GeometryAuthoringBatch<'a> {
         self.geometry
+    }
+
+    pub(in crate::canonical_scene::store) const fn deformation(
+        self,
+    ) -> deformation::DeformationAuthoringBatch<'a> {
+        self.deformation
+    }
+
+    pub(in crate::canonical_scene::store) const fn animations(
+        self,
+    ) -> animation::AnimationAuthoringBatch<'a> {
+        self.animations
     }
 }
 

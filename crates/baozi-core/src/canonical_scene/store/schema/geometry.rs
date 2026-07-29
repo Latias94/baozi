@@ -5,7 +5,6 @@ use crate::attribute::{AttributeDomain, AttributeSemantic};
 use crate::geometry::TopologyKind;
 use baozi_operation::{RecordBlock, ScalarSequence};
 
-pub(in super::super) const GEOMETRY_MATERIAL_FIELD_COUNT: usize = 1;
 pub(in super::super) const GEOMETRY_LOGICAL_MESH_FIELD_COUNT: usize = 4;
 pub(in super::super) const GEOMETRY_MESH_INSTANCE_FIELD_COUNT: usize = 5;
 pub(in super::super) const GEOMETRY_PRIMITIVE_FIELD_COUNT: usize = 17;
@@ -73,10 +72,6 @@ pub(in super::super) const fn encode_geometry_domain(domain: AttributeDomain) ->
     }
 }
 
-pub(in super::super) mod geometry_material_field {
-    pub(crate) const MATERIAL: usize = 0;
-}
-
 pub(in super::super) mod geometry_logical_mesh_field {
     pub(crate) const LOGICAL_MESH: usize = 0;
     pub(crate) const PRIMITIVE_OFFSET: usize = 1;
@@ -130,9 +125,6 @@ pub(in super::super) mod geometry_attribute_field {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(in super::super) struct GeometryMaterialTableSchema;
-
-#[derive(Clone, Copy, PartialEq, Eq)]
 pub(in super::super) struct GeometryLogicalMeshTableSchema;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -164,10 +156,6 @@ pub(in super::super) struct GeometrySparseF32DefaultsSchema;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(in super::super) struct GeometrySparseU32DefaultsSchema;
-
-impl CanonicalSchema for GeometryMaterialTableSchema {
-    type StoreKind = RecordBlock;
-}
 
 impl CanonicalSchema for GeometryLogicalMeshTableSchema {
     type StoreKind = RecordBlock;

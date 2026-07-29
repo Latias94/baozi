@@ -3,21 +3,21 @@ use baozi_operation::{
 };
 
 use crate::attribute::AttributeDomain;
+use crate::canonical_scene::store::schema::appearance::AppearanceMaterialTableSchema;
 use crate::canonical_scene::store::schema::geometry::{
     GEOMETRY_ATTRIBUTE_FIELD_COUNT, GEOMETRY_DOMAIN_CORNER, GEOMETRY_DOMAIN_FACE,
-    GEOMETRY_DOMAIN_VERTEX, GEOMETRY_LOGICAL_MESH_FIELD_COUNT, GEOMETRY_MATERIAL_FIELD_COUNT,
-    GEOMETRY_MESH_INSTANCE_FIELD_COUNT, GEOMETRY_NORMALIZATION_NONE, GEOMETRY_PAYLOAD_DENSE,
-    GEOMETRY_PAYLOAD_SPARSE, GEOMETRY_PRIMITIVE_FIELD_COUNT, GEOMETRY_SCALAR_F32,
-    GEOMETRY_SCALAR_U32, GEOMETRY_SEMANTIC_COLOR, GEOMETRY_SEMANTIC_NORMAL,
-    GEOMETRY_SEMANTIC_POSITION, GEOMETRY_SEMANTIC_SMOOTHING_GROUP, GEOMETRY_SEMANTIC_TANGENT,
-    GEOMETRY_SEMANTIC_TEXCOORD, GEOMETRY_TOPOLOGY_LINE_LIST, GEOMETRY_TOPOLOGY_LINE_LOOP,
-    GEOMETRY_TOPOLOGY_LINE_STRIP, GEOMETRY_TOPOLOGY_POINTS, GEOMETRY_TOPOLOGY_POLYGONS,
-    GEOMETRY_TOPOLOGY_TRIANGLE_FAN, GEOMETRY_TOPOLOGY_TRIANGLE_LIST,
-    GEOMETRY_TOPOLOGY_TRIANGLE_STRIP, GeometryF32ValuesSchema, GeometryPolygonBoundariesSchema,
-    GeometryPrimitiveIndicesSchema, GeometrySparseF32DefaultsSchema, GeometrySparseIndicesSchema,
-    GeometrySparseU32DefaultsSchema, GeometryU32ValuesSchema, geometry_attribute_field,
-    geometry_logical_mesh_field, geometry_material_field, geometry_mesh_instance_field,
-    geometry_primitive_field,
+    GEOMETRY_DOMAIN_VERTEX, GEOMETRY_LOGICAL_MESH_FIELD_COUNT, GEOMETRY_MESH_INSTANCE_FIELD_COUNT,
+    GEOMETRY_NORMALIZATION_NONE, GEOMETRY_PAYLOAD_DENSE, GEOMETRY_PAYLOAD_SPARSE,
+    GEOMETRY_PRIMITIVE_FIELD_COUNT, GEOMETRY_SCALAR_F32, GEOMETRY_SCALAR_U32,
+    GEOMETRY_SEMANTIC_COLOR, GEOMETRY_SEMANTIC_NORMAL, GEOMETRY_SEMANTIC_POSITION,
+    GEOMETRY_SEMANTIC_SMOOTHING_GROUP, GEOMETRY_SEMANTIC_TANGENT, GEOMETRY_SEMANTIC_TEXCOORD,
+    GEOMETRY_TOPOLOGY_LINE_LIST, GEOMETRY_TOPOLOGY_LINE_LOOP, GEOMETRY_TOPOLOGY_LINE_STRIP,
+    GEOMETRY_TOPOLOGY_POINTS, GEOMETRY_TOPOLOGY_POLYGONS, GEOMETRY_TOPOLOGY_TRIANGLE_FAN,
+    GEOMETRY_TOPOLOGY_TRIANGLE_LIST, GEOMETRY_TOPOLOGY_TRIANGLE_STRIP, GeometryF32ValuesSchema,
+    GeometryPolygonBoundariesSchema, GeometryPrimitiveIndicesSchema,
+    GeometrySparseF32DefaultsSchema, GeometrySparseIndicesSchema, GeometrySparseU32DefaultsSchema,
+    GeometryU32ValuesSchema, geometry_attribute_field, geometry_logical_mesh_field,
+    geometry_mesh_instance_field, geometry_primitive_field,
 };
 use crate::canonical_scene::store::schema::{
     CanonicalBlockRef, CanonicalSchema, PRESENCE_ABSENT, PRESENCE_PRESENT, SceneDirectorySchema,
@@ -29,10 +29,9 @@ use super::{NodeSceneSemanticResult, invariant, read_scalar, read_u32_as_usize};
 
 type SceneCanonicalStore = PublishedCanonicalStore<RecordBlock, SceneDirectorySchema>;
 
-/// The five proof-bound geometry table projections retained by the one Scene.
+/// The four proof-bound geometry table projections retained by the one Scene.
 pub(super) struct NodeSceneGeometryTables<'scene> {
     canonical: &'scene SceneCanonicalStore,
-    materials: Option<CanonicalRecordView<'scene>>,
     logical_meshes: Option<CanonicalRecordView<'scene>>,
     primitives: Option<CanonicalRecordView<'scene>>,
     attributes: Option<CanonicalRecordView<'scene>>,
@@ -44,15 +43,6 @@ impl<'scene> NodeSceneGeometryTables<'scene> {
         canonical: &'scene SceneCanonicalStore,
         proof: NodeSceneValidationProof,
     ) -> NodeSceneSemanticResult<Self> {
-        let materials = resolve_table(
-            canonical,
-            proof.materials(),
-            proof.material_count(),
-            GEOMETRY_MATERIAL_FIELD_COUNT,
-            "validated material table is unavailable or mistyped",
-            "validated material table presence disagrees with validation proof",
-            "validated material table layout disagrees with validation proof",
-        )?;
         let logical_meshes = resolve_table(
             canonical,
             proof.logical_meshes(),
@@ -92,7 +82,6 @@ impl<'scene> NodeSceneGeometryTables<'scene> {
 
         Ok(Self {
             canonical,
-            materials,
             logical_meshes,
             primitives,
             attributes,
@@ -107,8 +96,7 @@ impl<'scene> NodeSceneGeometryTables<'scene> {
         NodeSceneGeometryCursor {
             tables: self,
             proof,
-            phase: GeometryCursorPhase::Materials,
-            next_material: 0,
+            phase: GeometryCursorPhase::LogicalMeshes,
             next_logical_mesh: 0,
             next_primitive: 0,
             next_attribute: 0,
@@ -146,7 +134,6 @@ where
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum GeometryCursorPhase {
-    Materials,
     LogicalMeshes,
     Primitives,
     Attributes,
@@ -159,7 +146,6 @@ pub(in crate::canonical_scene::store) struct NodeSceneGeometryCursor<'scene> {
     tables: NodeSceneGeometryTables<'scene>,
     proof: NodeSceneValidationProof,
     phase: GeometryCursorPhase,
-    next_material: usize,
     next_logical_mesh: usize,
     next_primitive: usize,
     next_attribute: usize,
@@ -167,51 +153,20 @@ pub(in crate::canonical_scene::store) struct NodeSceneGeometryCursor<'scene> {
 }
 
 impl<'scene> NodeSceneGeometryCursor<'scene> {
-    pub(in crate::canonical_scene::store) const fn material_count(&self) -> usize {
-        self.proof.material_count()
-    }
-
-    pub(in crate::canonical_scene::store) const fn logical_mesh_count(&self) -> usize {
+    pub(in crate::canonical_scene::store) fn logical_mesh_count(&self) -> usize {
         self.proof.logical_mesh_count()
     }
 
-    pub(in crate::canonical_scene::store) const fn primitive_count(&self) -> usize {
+    pub(in crate::canonical_scene::store) fn primitive_count(&self) -> usize {
         self.proof.primitive_count()
     }
 
-    pub(in crate::canonical_scene::store) const fn attribute_count(&self) -> usize {
+    pub(in crate::canonical_scene::store) fn attribute_count(&self) -> usize {
         self.proof.attribute_count()
     }
 
-    pub(in crate::canonical_scene::store) const fn mesh_instance_count(&self) -> usize {
+    pub(in crate::canonical_scene::store) fn mesh_instance_count(&self) -> usize {
         self.proof.mesh_instance_count()
-    }
-
-    pub(in crate::canonical_scene::store) fn next_material(
-        &mut self,
-    ) -> NodeSceneSemanticResult<Option<NodeSceneGeometryMaterial>> {
-        self.enter_phase(GeometryCursorPhase::Materials)?;
-        let Some(row) = next_row(
-            self.next_material,
-            self.proof.material_count(),
-            "material cursor advanced beyond its proof-qualified count",
-        )?
-        else {
-            return Ok(None);
-        };
-        let table = self
-            .tables
-            .materials
-            .ok_or_else(|| invariant("validated material table view is absent"))?;
-        require_row_ordinal(
-            table,
-            row,
-            geometry_material_field::MATERIAL,
-            "validated material identity is unreadable",
-            "validated material identity disagrees with its row",
-        )?;
-        self.next_material = advance_row(row, "material cursor index overflows")?;
-        Ok(Some(NodeSceneGeometryMaterial { source_index: row }))
     }
 
     pub(in crate::canonical_scene::store) fn next_logical_mesh(
@@ -349,7 +304,12 @@ impl<'scene> NodeSceneGeometryCursor<'scene> {
             "validated primitive-index count is unreadable",
             "validated primitive-index payload is unavailable or mistyped",
         )?;
-        let material = read_optional_material(table, row, self.proof)?;
+        let material = read_optional_material(
+            table,
+            row,
+            self.proof.material_count(),
+            self.proof.materials(),
+        )?;
         let attribute_offset = read_u32_as_usize(
             table,
             row,
@@ -593,11 +553,6 @@ impl<'scene> NodeSceneGeometryCursor<'scene> {
     }
 
     pub(in crate::canonical_scene::store) fn finish(self) -> NodeSceneSemanticResult<()> {
-        if self.next_material != self.proof.material_count() {
-            return Err(invariant(
-                "material cursor ended before its proof-qualified count",
-            ));
-        }
         if self.next_logical_mesh != self.proof.logical_mesh_count() {
             return Err(invariant(
                 "logical-mesh cursor ended before its proof-qualified count",
@@ -627,13 +582,6 @@ impl<'scene> NodeSceneGeometryCursor<'scene> {
                 "geometry cursor cannot return to an earlier table phase",
             ));
         }
-        if target >= GeometryCursorPhase::LogicalMeshes
-            && self.next_material != self.proof.material_count()
-        {
-            return Err(invariant(
-                "material table must be exhausted before logical meshes",
-            ));
-        }
         if target >= GeometryCursorPhase::Primitives
             && self.next_logical_mesh != self.proof.logical_mesh_count()
         {
@@ -657,18 +605,6 @@ impl<'scene> NodeSceneGeometryCursor<'scene> {
         }
         self.phase = target;
         Ok(())
-    }
-}
-
-/// One material-table row in source order.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(in crate::canonical_scene::store) struct NodeSceneGeometryMaterial {
-    source_index: usize,
-}
-
-impl NodeSceneGeometryMaterial {
-    pub(in crate::canonical_scene::store) const fn source_index(self) -> usize {
-        self.source_index
     }
 }
 
@@ -1229,7 +1165,8 @@ where
 fn read_optional_material(
     table: CanonicalRecordView<'_>,
     row: usize,
-    proof: NodeSceneValidationProof,
+    material_count: usize,
+    materials: Option<CanonicalBlockRef<AppearanceMaterialTableSchema>>,
 ) -> NodeSceneSemanticResult<Option<usize>> {
     let presence = read_scalar::<u8>(
         table,
@@ -1254,7 +1191,7 @@ fn read_optional_material(
                 table,
                 row,
                 geometry_primitive_field::MATERIALS,
-                "validated absent primitive material retains a table reference",
+                "validated absent primitive material retains an appearance-material table reference",
             )?;
             Ok(None)
         }
@@ -1265,20 +1202,20 @@ fn read_optional_material(
                 geometry_primitive_field::MATERIAL,
                 "validated primitive material identity is unreadable",
             )?;
-            if material >= proof.material_count() {
+            if material >= material_count {
                 return Err(invariant(
-                    "validated primitive material is outside material space",
+                    "validated primitive material is outside appearance material space",
                 ));
             }
-            let materials = proof
-                .materials()
-                .ok_or_else(|| invariant("validated primitive material-table proof is absent"))?;
+            let materials = materials.ok_or_else(|| {
+                invariant("validated primitive appearance-material table proof is absent")
+            })?;
             require_exact_record_reference(
                 table,
                 row,
                 geometry_primitive_field::MATERIALS,
                 materials,
-                "validated primitive material-table reference is unreadable",
+                "validated primitive appearance-material table reference is unreadable",
             )?;
             Ok(Some(material))
         }

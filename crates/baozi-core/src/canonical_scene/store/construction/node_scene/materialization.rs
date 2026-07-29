@@ -6,12 +6,22 @@ use baozi_operation::{
 
 use crate::SceneValidationLimits;
 #[cfg(test)]
-use crate::canonical_scene::store::production::{GeometryAuthoringBatch, NodeAuthoringBatch};
 use crate::canonical_scene::store::production::{
-    OperationAuthoringControl, Presence, SceneAuthoringBatch, ValidatedGeometryBatch,
-    ValidatedNodeBatch, geometry_limits_after_nodes, validate_geometry_batch, validate_node_batch,
+    AnimationAuthoringBatch, AppearanceAuthoringBatch, DeformationAuthoringBatch,
+    GeometryAuthoringBatch, NodeAuthoringBatch,
+};
+use crate::canonical_scene::store::production::{
+    AnimationTargetCatalog, OperationAuthoringControl, Presence, SceneAuthoringBatch,
+    ValidatedAnimationBatch, ValidatedAppearanceBatch, ValidatedDeformationBatch,
+    ValidatedGeometryBatch, ValidatedNodeBatch, animation_limits_after_deformation,
+    appearance_limits_after_nodes, deformation_limits_after_geometry,
+    geometry_limits_after_appearance, validate_animation_batch, validate_appearance_batch,
+    validate_deformation_batch, validate_geometry_batch, validate_node_batch,
     validate_scene_aggregate,
 };
+use crate::canonical_scene::store::schema::animation::AnimationDirectorySchema;
+use crate::canonical_scene::store::schema::appearance::AppearanceDirectorySchema;
+use crate::canonical_scene::store::schema::deformation::DeformationDirectorySchema;
 use crate::canonical_scene::store::schema::{
     CanonicalBlockRef, NODE_SCENE_CHILD_REFERENCE_FIELD_COUNT, NODE_SCENE_EVIDENCE_FIELD_COUNT,
     NODE_SCENE_EVIDENCE_OUTCOME_CANDIDATE, NODE_SCENE_MATRIX_SCALAR_COUNT,
@@ -29,7 +39,15 @@ use super::super::{
     SceneConstructionLineage, SceneConstructionOperation, SceneConstructionOwner,
     SceneStoreAssembly, SceneStoreKeys,
 };
-use super::geometry::{GeometryMaterializationPlans, GeometryReferenceScratch, retain_geometry};
+use super::animation::{AnimationMaterializationPlans, AnimationTargetTableRefs, retain_animation};
+use super::appearance::{AppearanceMaterializationPlans, retain_appearance};
+use super::deformation::{
+    DeformationDependencyTableRefs, DeformationMaterializationPlans, retain_deformation,
+};
+use super::geometry::{
+    GeometryMaterializationPlans, GeometryReferenceScratch, GeometryReferenceScratchPlan,
+    retain_geometry,
+};
 use super::publication::{
     node_scene_failure_code, post_evidence_failure_code,
     prepare_node_minimal_fallback_from_assembly, prepare_node_minimal_fallback_from_operation,
@@ -78,7 +96,13 @@ impl<'scene> SceneConstructionOperation<'scene> {
         limits: SceneValidationLimits,
     ) -> Result<ValidatedNodeSceneConstruction<'input>, RejectedNodeSceneConstruction<'scene>> {
         self.try_validate_scene_batch(
-            SceneAuthoringBatch::new(input, GeometryAuthoringBatch::empty()),
+            SceneAuthoringBatch::new(
+                input,
+                AppearanceAuthoringBatch::empty(),
+                GeometryAuthoringBatch::empty(),
+                DeformationAuthoringBatch::empty(),
+                AnimationAuthoringBatch::empty(),
+            ),
             limits,
         )
     }
@@ -111,9 +135,37 @@ impl<'scene> SceneConstructionOperation<'scene> {
                 });
             }
         };
-        let geometry_limits = match geometry_limits_after_nodes(&nodes, limits) {
+        let appearance_limits = match appearance_limits_after_nodes(&nodes, limits) {
+            Ok(appearance_limits) => appearance_limits,
+            Err(failure) => {
+                drop(nodes);
+                return Err(RejectedNodeSceneConstruction {
+                    operation: self,
+                    failure: NodeSceneConstructionRejection::Aggregate(failure),
+                });
+            }
+        };
+        let appearance_validation = {
+            let checkpoint = self.raw.control_checkpoint();
+            let mut control =
+                OperationAuthoringControl::new(checkpoint, keys.phase, keys.dimension);
+            validate_appearance_batch(input.appearance(), appearance_limits, &mut control)
+        };
+        let appearance = match appearance_validation {
+            Ok(appearance) => appearance,
+            Err(failure) => {
+                drop(nodes);
+                return Err(RejectedNodeSceneConstruction {
+                    operation: self,
+                    failure: NodeSceneConstructionRejection::AppearanceAuthoring(failure),
+                });
+            }
+        };
+        let geometry_limits = match geometry_limits_after_appearance(&appearance, appearance_limits)
+        {
             Ok(geometry_limits) => geometry_limits,
             Err(failure) => {
+                drop(appearance);
                 drop(nodes);
                 return Err(RejectedNodeSceneConstruction {
                     operation: self,
@@ -128,6 +180,7 @@ impl<'scene> SceneConstructionOperation<'scene> {
             validate_geometry_batch(
                 input.geometry(),
                 input.nodes().nodes().len(),
+                appearance.material_count(),
                 geometry_limits,
                 &mut control,
             )
@@ -135,6 +188,7 @@ impl<'scene> SceneConstructionOperation<'scene> {
         let geometry = match geometry_validation {
             Ok(geometry) => geometry,
             Err(failure) => {
+                drop(appearance);
                 drop(nodes);
                 return Err(RejectedNodeSceneConstruction {
                     operation: self,
@@ -142,8 +196,89 @@ impl<'scene> SceneConstructionOperation<'scene> {
                 });
             }
         };
-        if let Err(failure) = validate_scene_aggregate(&nodes, &geometry, limits) {
+        let deformation_limits = match deformation_limits_after_geometry(&geometry, geometry_limits)
+        {
+            Ok(deformation_limits) => deformation_limits,
+            Err(failure) => {
+                drop(geometry);
+                drop(appearance);
+                drop(nodes);
+                return Err(RejectedNodeSceneConstruction {
+                    operation: self,
+                    failure: NodeSceneConstructionRejection::Aggregate(failure),
+                });
+            }
+        };
+        let deformation_validation = {
+            let checkpoint = self.raw.control_checkpoint();
+            let mut control =
+                OperationAuthoringControl::new(checkpoint, keys.phase, keys.dimension);
+            validate_deformation_batch(
+                input.deformation(),
+                &nodes,
+                &geometry,
+                deformation_limits,
+                &mut control,
+            )
+        };
+        let deformation = match deformation_validation {
+            Ok(deformation) => deformation,
+            Err(failure) => {
+                drop(geometry);
+                drop(appearance);
+                drop(nodes);
+                return Err(RejectedNodeSceneConstruction {
+                    operation: self,
+                    failure: NodeSceneConstructionRejection::DeformationAuthoring(failure),
+                });
+            }
+        };
+        let animation_limits =
+            match animation_limits_after_deformation(&deformation, deformation_limits) {
+                Ok(animation_limits) => animation_limits,
+                Err(failure) => {
+                    drop(deformation);
+                    drop(geometry);
+                    drop(appearance);
+                    drop(nodes);
+                    return Err(RejectedNodeSceneConstruction {
+                        operation: self,
+                        failure: NodeSceneConstructionRejection::Aggregate(failure),
+                    });
+                }
+            };
+        let animation_validation = {
+            let checkpoint = self.raw.control_checkpoint();
+            let mut control =
+                OperationAuthoringControl::new(checkpoint, keys.phase, keys.dimension);
+            let targets = AnimationTargetCatalog::new(&nodes, &deformation);
+            validate_animation_batch(input.animations(), &targets, animation_limits, &mut control)
+        };
+        let animations = match animation_validation {
+            Ok(animations) => animations,
+            Err(failure) => {
+                drop(deformation);
+                drop(geometry);
+                drop(appearance);
+                drop(nodes);
+                return Err(RejectedNodeSceneConstruction {
+                    operation: self,
+                    failure: NodeSceneConstructionRejection::AnimationAuthoring(failure),
+                });
+            }
+        };
+        if let Err(failure) = validate_scene_aggregate(
+            &nodes,
+            &appearance,
+            &geometry,
+            &deformation,
+            &animations,
+            limits,
+        ) {
+            drop(animations);
+            drop(deformation);
             drop(geometry);
+            drop(appearance);
             drop(nodes);
             return Err(RejectedNodeSceneConstruction {
                 operation: self,
@@ -158,7 +293,10 @@ impl<'scene> SceneConstructionOperation<'scene> {
         } = self;
         debug_assert!(matches!(&lineage, SceneConstructionLineage::Fresh));
         Ok(ValidatedNodeSceneConstruction {
+            animations,
+            deformation,
             geometry,
+            appearance,
             nodes,
             owner: FreshNodeSceneOwner { raw, brand, keys },
         })
@@ -186,12 +324,35 @@ struct NodeSceneDirectoryRefs {
     transforms: Option<CanonicalBlockRef<NodeSceneAuthoredTransformSchema>>,
 }
 
+#[derive(Clone, Copy)]
+struct SceneDomainDirectoryRefs {
+    appearance: CanonicalBlockRef<AppearanceDirectorySchema>,
+    geometry: CanonicalBlockRef<SceneGeometryDirectorySchema>,
+    deformation: CanonicalBlockRef<DeformationDirectorySchema>,
+    animation: CanonicalBlockRef<AnimationDirectorySchema>,
+}
+
+pub(super) struct ValidatedNodeSceneBatches<'input> {
+    pub(super) animations:
+        ValidatedAnimationBatch<'input, RetainedStoreReservation<SceneConstructionOwner>>,
+    pub(super) deformation:
+        ValidatedDeformationBatch<'input, RetainedStoreReservation<SceneConstructionOwner>>,
+    pub(super) geometry:
+        ValidatedGeometryBatch<'input, RetainedStoreReservation<SceneConstructionOwner>>,
+    pub(super) appearance:
+        ValidatedAppearanceBatch<'input, RetainedStoreReservation<SceneConstructionOwner>>,
+    pub(super) nodes: ValidatedNodeBatch<'input, RetainedStoreReservation<SceneConstructionOwner>>,
+}
+
 struct NodeSceneMaterializationPlans {
     evidence: RecordPlan,
     transforms: Option<SequencePlan<f32>>,
     references: Option<RecordPlan>,
     nodes: RecordPlan,
+    appearance: AppearanceMaterializationPlans,
     geometry: GeometryMaterializationPlans,
+    deformation: DeformationMaterializationPlans,
+    animation: AnimationMaterializationPlans,
     directory: RecordPlan,
     publication: RetainedStorePublicationPlan,
     canonical_block_count: u32,
@@ -199,6 +360,7 @@ struct NodeSceneMaterializationPlans {
     source_node_count: u32,
     source_root_count: u32,
     transform_scalar_count: u32,
+    payload_block_count: u32,
     build_invariant: StoreBuildError,
 }
 
@@ -207,18 +369,42 @@ impl NodeSceneMaterializationPlans {
         SceneEvidenceCounts {
             canonical_block_count: self.canonical_block_count,
             node_count: self.node_count,
-            material_count: self.geometry.material_count(),
+            image_count: self.appearance.image_count(),
+            sampler_count: self.appearance.sampler_count(),
+            texture_count: self.appearance.texture_count(),
+            material_count: self.appearance.material_count(),
+            material_binding_count: self.appearance.binding_count(),
             logical_mesh_count: self.geometry.logical_mesh_count(),
             primitive_count: self.geometry.primitive_count(),
             attribute_count: self.geometry.attribute_count(),
             mesh_instance_count: self.geometry.mesh_instance_count(),
-            payload_block_count: self.geometry.payload_block_count(),
+            skin_count: self.deformation.skin_count(),
+            logical_morph_count: self.deformation.logical_morph_count(),
+            morph_definition_count: self.deformation.morph_definition_count(),
+            primitive_deformation_count: self.deformation.primitive_count(),
+            morph_target_count: self.deformation.morph_target_count(),
+            morph_delta_count: self.deformation.morph_delta_count(),
+            animation_clip_count: self.animation.clip_count(),
+            animation_channel_count: self.animation.channel_count(),
+            payload_block_count: self.payload_block_count,
         }
     }
 
     fn new(
         nodes_batch: &ValidatedNodeBatch<'_, RetainedStoreReservation<SceneConstructionOwner>>,
+        appearance_batch: &ValidatedAppearanceBatch<
+            '_,
+            RetainedStoreReservation<SceneConstructionOwner>,
+        >,
         geometry_batch: &ValidatedGeometryBatch<
+            '_,
+            RetainedStoreReservation<SceneConstructionOwner>,
+        >,
+        deformation_batch: &ValidatedDeformationBatch<
+            '_,
+            RetainedStoreReservation<SceneConstructionOwner>,
+        >,
+        animation_batch: &ValidatedAnimationBatch<
             '_,
             RetainedStoreReservation<SceneConstructionOwner>,
         >,
@@ -251,7 +437,10 @@ impl NodeSceneMaterializationPlans {
             usize::try_from(node_count).map_err(|_| StorePlanError::SizeOverflow)?,
             NODE_SCENE_NODE_FIELD_COUNT,
         )?;
+        let appearance = AppearanceMaterializationPlans::new(appearance_batch)?;
         let geometry = GeometryMaterializationPlans::new(geometry_batch)?;
+        let deformation = DeformationMaterializationPlans::new(deformation_batch)?;
+        let animation = AnimationMaterializationPlans::new(animation_batch)?;
         let directory = RecordPlan::new(1, SCENE_DIRECTORY_FIELD_COUNT)?;
         let references = if source_node_count == 0 {
             None
@@ -274,10 +463,19 @@ impl NodeSceneMaterializationPlans {
         let sequence_block_count = [transforms].into_iter().flatten().count();
         let canonical_block_count_usize = record_block_count
             .checked_add(sequence_block_count)
+            .and_then(|count| count.checked_add(appearance.canonical_block_count()))
             .and_then(|count| count.checked_add(geometry.canonical_block_count()))
+            .and_then(|count| count.checked_add(deformation.canonical_block_count()))
+            .and_then(|count| count.checked_add(animation.canonical_block_count()))
             .ok_or(StorePlanError::SizeOverflow)?;
         let canonical_block_count =
             u32::try_from(canonical_block_count_usize).map_err(|_| StorePlanError::SizeOverflow)?;
+        let payload_block_count = appearance
+            .payload_block_count()
+            .checked_add(geometry.payload_block_count())
+            .and_then(|count| count.checked_add(deformation.payload_block_count()))
+            .and_then(|count| count.checked_add(animation.payload_block_count()))
+            .ok_or(StorePlanError::SizeOverflow)?;
         let evidence_block_count = [Some(evidence)].into_iter().flatten().count();
 
         let canonical_writer = node_scene_writer_plan(
@@ -310,7 +508,10 @@ impl NodeSceneMaterializationPlans {
             transforms,
             references,
             nodes,
+            appearance,
             geometry,
+            deformation,
+            animation,
             directory,
             publication,
             canonical_block_count,
@@ -318,6 +519,7 @@ impl NodeSceneMaterializationPlans {
             source_node_count,
             source_root_count,
             transform_scalar_count,
+            payload_block_count,
             build_invariant,
         })
     }
@@ -367,16 +569,32 @@ impl ValidatedNodeSceneConstruction<'_> {
         mut faults: NodeSceneBuildFaults,
     ) -> Result<PreparedNodeSceneConstruction, SceneConstructionError> {
         let Self {
+            animations,
+            deformation,
             geometry: geometry_batch,
+            appearance,
             nodes: node_batch,
             owner,
         } = self;
+        let batches = ValidatedNodeSceneBatches {
+            animations,
+            deformation,
+            geometry: geometry_batch,
+            appearance,
+            nodes: node_batch,
+        };
         let FreshNodeSceneOwner { raw, brand, keys } = owner;
-        let plans = match NodeSceneMaterializationPlans::new(&node_batch, &geometry_batch, keys) {
+        let plans = match NodeSceneMaterializationPlans::new(
+            &batches.nodes,
+            &batches.appearance,
+            &batches.geometry,
+            &batches.deformation,
+            &batches.animations,
+            keys,
+        ) {
             Ok(plans) => plans,
-            Err(_) => {
-                drop(geometry_batch);
-                drop(node_batch);
+            Err(_cause) => {
+                drop(batches);
                 return prepare_node_minimal_fallback_from_operation(
                     raw,
                     NODE_SCENE_BUILD_INVARIANT_CODE,
@@ -387,8 +605,7 @@ impl ValidatedNodeSceneConstruction<'_> {
         {
             Ok(assembly) => assembly,
             Err(error) => {
-                drop(geometry_batch);
-                drop(node_batch);
+                drop(batches);
                 let cause = node_scene_failure_code(error.cause());
                 let operation = error.try_into_operation()?;
                 return prepare_node_minimal_fallback_from_operation(operation, cause);
@@ -398,8 +615,7 @@ impl ValidatedNodeSceneConstruction<'_> {
         let evidence = match retain_node_scene_evidence(&mut assembly, &plans) {
             Ok(evidence) => evidence,
             Err(cause) => {
-                drop(geometry_batch);
-                drop(node_batch);
+                drop(batches);
                 return prepare_node_minimal_fallback_from_assembly(
                     assembly,
                     node_scene_failure_code(&cause),
@@ -409,19 +625,17 @@ impl ValidatedNodeSceneConstruction<'_> {
         if let Err(_cause) =
             assembly.try_commit_outcome_evidence(keys.dimension, faults.outcome_evidence_commitment)
         {
-            drop(geometry_batch);
-            drop(node_batch);
+            drop(batches);
             return prepare_node_minimal_fallback_from_assembly(
                 assembly,
                 NODE_SCENE_COMMITMENT_REJECTION_CODE,
             );
         }
-        let geometry_scratch =
-            match try_create_geometry_reference_scratch(&mut assembly, keys, &geometry_batch) {
-                Ok(scratch) => scratch,
+        let geometry_scratch_plan =
+            match try_plan_geometry_reference_scratch(&mut assembly, &batches.geometry) {
+                Ok(plan) => plan,
                 Err(cause) => {
-                    drop(geometry_batch);
-                    drop(node_batch);
+                    drop(batches);
                     return prepare_node_post_evidence_failure(assembly, evidence, &plans, cause);
                 }
             };
@@ -430,7 +644,7 @@ impl ValidatedNodeSceneConstruction<'_> {
             Some(plan) => match retain_node_scene_transforms(
                 &mut assembly,
                 plan,
-                &node_batch,
+                &batches.nodes,
                 &plans,
                 keys,
                 &mut work,
@@ -438,9 +652,7 @@ impl ValidatedNodeSceneConstruction<'_> {
             ) {
                 Ok(transforms) => Some(transforms),
                 Err(cause) => {
-                    drop(geometry_scratch);
-                    drop(geometry_batch);
-                    drop(node_batch);
+                    drop(batches);
                     return prepare_node_post_evidence_failure(assembly, evidence, &plans, cause);
                 }
             },
@@ -450,16 +662,14 @@ impl ValidatedNodeSceneConstruction<'_> {
             Some(plan) => match retain_node_scene_references(
                 &mut assembly,
                 plan,
-                &node_batch,
+                &batches.nodes,
                 &plans,
                 keys,
                 &mut work,
             ) {
                 Ok(references) => Some(references),
                 Err(cause) => {
-                    drop(geometry_scratch);
-                    drop(geometry_batch);
-                    drop(node_batch);
+                    drop(batches);
                     return prepare_node_post_evidence_failure(assembly, evidence, &plans, cause);
                 }
             },
@@ -469,26 +679,48 @@ impl ValidatedNodeSceneConstruction<'_> {
             &mut assembly,
             plans.nodes,
             transforms,
-            &node_batch,
+            &batches.nodes,
             &plans,
             keys,
             &mut work,
         ) {
             Ok(nodes) => nodes,
             Err(cause) => {
-                drop(geometry_scratch);
-                drop(geometry_batch);
-                drop(node_batch);
+                drop(batches);
                 return prepare_node_post_evidence_failure(assembly, evidence, &plans, cause);
             }
         };
-        let geometry_ref = match retain_geometry(
+        let appearance_refs = match retain_appearance(
+            &mut assembly,
+            &plans.appearance,
+            &batches.appearance,
+            keys,
+            &mut work,
+            plans.build_invariant,
+        ) {
+            Ok(appearance) => appearance,
+            Err(cause) => {
+                drop(batches);
+                return prepare_node_post_evidence_failure(assembly, evidence, &plans, cause);
+            }
+        };
+        let geometry_scratch =
+            match try_create_geometry_reference_scratch(&mut assembly, keys, geometry_scratch_plan)
+            {
+                Ok(scratch) => scratch,
+                Err(cause) => {
+                    drop(batches);
+                    return prepare_node_post_evidence_failure(assembly, evidence, &plans, cause);
+                }
+            };
+        let geometry_refs = match retain_geometry(
             &mut assembly,
             &plans.geometry,
             geometry_scratch,
-            &geometry_batch,
-            &node_batch,
+            &batches.geometry,
+            &batches.nodes,
             nodes_ref,
+            appearance_refs.materials(),
             keys,
             &mut work,
             &mut faults,
@@ -496,8 +728,43 @@ impl ValidatedNodeSceneConstruction<'_> {
         ) {
             Ok(geometry) => geometry,
             Err(cause) => {
-                drop(geometry_batch);
-                drop(node_batch);
+                drop(batches);
+                return prepare_node_post_evidence_failure(assembly, evidence, &plans, cause);
+            }
+        };
+        let deformation_refs = match retain_deformation(
+            &mut assembly,
+            &plans.deformation,
+            &batches.deformation,
+            &batches.nodes,
+            DeformationDependencyTableRefs::new(
+                nodes_ref,
+                geometry_refs.logical_meshes(),
+                geometry_refs.primitives(),
+                geometry_refs.mesh_instances(),
+            ),
+            keys,
+            &mut work,
+            plans.build_invariant,
+        ) {
+            Ok(deformation) => deformation,
+            Err(cause) => {
+                drop(batches);
+                return prepare_node_post_evidence_failure(assembly, evidence, &plans, cause);
+            }
+        };
+        let animation_refs = match retain_animation(
+            &mut assembly,
+            &plans.animation,
+            &batches.animations,
+            AnimationTargetTableRefs::new(nodes_ref, deformation_refs.mesh_instances()),
+            keys,
+            &mut work,
+            plans.build_invariant,
+        ) {
+            Ok(animation) => animation,
+            Err(cause) => {
+                drop(batches);
                 return prepare_node_post_evidence_failure(assembly, evidence, &plans, cause);
             }
         };
@@ -509,15 +776,19 @@ impl ValidatedNodeSceneConstruction<'_> {
                 references,
                 transforms,
             },
-            geometry_ref,
+            SceneDomainDirectoryRefs {
+                appearance: appearance_refs.directory(),
+                geometry: geometry_refs.directory(),
+                deformation: deformation_refs.directory(),
+                animation: animation_refs.directory(),
+            },
             &plans,
             keys,
             &mut work,
         ) {
             Ok(directory) => directory,
             Err(cause) => {
-                drop(geometry_batch);
-                drop(node_batch);
+                drop(batches);
                 return prepare_node_post_evidence_failure(assembly, evidence, &plans, cause);
             }
         };
@@ -532,21 +803,28 @@ impl ValidatedNodeSceneConstruction<'_> {
                 evidence,
                 evidence_counts: plans.evidence_counts(),
             },
-            node_batch,
-            geometry_batch,
+            batches,
             work,
             reserve_generation,
         )
     }
 }
 
-fn try_create_geometry_reference_scratch<R>(
+fn try_plan_geometry_reference_scratch<R>(
+    assembly: &mut SceneStoreAssembly,
+    geometry: &ValidatedGeometryBatch<'_, R>,
+) -> Result<GeometryReferenceScratchPlan, StoreRuntimeError> {
+    let mut checkpoint = assembly.try_control_checkpoint()?;
+    GeometryReferenceScratchPlan::try_new(&mut checkpoint, geometry)
+}
+
+fn try_create_geometry_reference_scratch(
     assembly: &mut SceneStoreAssembly,
     keys: SceneStoreKeys,
-    geometry: &ValidatedGeometryBatch<'_, R>,
+    plan: GeometryReferenceScratchPlan,
 ) -> Result<GeometryReferenceScratch, StoreRuntimeError> {
     let mut checkpoint = assembly.try_control_checkpoint()?;
-    GeometryReferenceScratch::try_new(&mut checkpoint, keys, geometry)
+    GeometryReferenceScratch::try_new(&mut checkpoint, keys, plan)
 }
 
 fn retain_node_scene_evidence(
@@ -562,12 +840,24 @@ fn retain_node_scene_evidence(
                 row.write_scalar(NODE_SCENE_EVIDENCE_OUTCOME_CANDIDATE)?;
                 row.write_scalar(plans.canonical_block_count)?;
                 row.write_scalar(plans.node_count)?;
-                row.write_scalar(plans.geometry.material_count())?;
+                row.write_scalar(plans.appearance.image_count())?;
+                row.write_scalar(plans.appearance.sampler_count())?;
+                row.write_scalar(plans.appearance.texture_count())?;
+                row.write_scalar(plans.appearance.material_count())?;
+                row.write_scalar(plans.appearance.binding_count())?;
                 row.write_scalar(plans.geometry.logical_mesh_count())?;
                 row.write_scalar(plans.geometry.primitive_count())?;
                 row.write_scalar(plans.geometry.attribute_count())?;
                 row.write_scalar(plans.geometry.mesh_instance_count())?;
-                row.write_scalar(plans.geometry.payload_block_count())
+                row.write_scalar(plans.deformation.skin_count())?;
+                row.write_scalar(plans.deformation.logical_morph_count())?;
+                row.write_scalar(plans.deformation.morph_definition_count())?;
+                row.write_scalar(plans.deformation.primitive_count())?;
+                row.write_scalar(plans.deformation.morph_target_count())?;
+                row.write_scalar(plans.deformation.morph_delta_count())?;
+                row.write_scalar(plans.animation.clip_count())?;
+                row.write_scalar(plans.animation.channel_count())?;
+                row.write_scalar(plans.payload_block_count)
             })
         },
     )
@@ -756,7 +1046,7 @@ fn retain_node_scene_directory(
     assembly: &mut SceneStoreAssembly,
     plan: RecordPlan,
     refs: NodeSceneDirectoryRefs,
-    geometry: CanonicalBlockRef<SceneGeometryDirectorySchema>,
+    domains: SceneDomainDirectoryRefs,
     plans: &NodeSceneMaterializationPlans,
     keys: SceneStoreKeys,
     work: &mut NodeSceneWorkMeter,
@@ -767,6 +1057,12 @@ fn retain_node_scene_directory(
         references,
         transforms,
     } = refs;
+    let SceneDomainDirectoryRefs {
+        appearance,
+        geometry,
+        deformation,
+        animation,
+    } = domains;
     assembly
         .try_retain_canonical_records_controlled(
             plan,
@@ -801,7 +1097,10 @@ fn retain_node_scene_directory(
                             row.write_sequence_ref(transforms.into_store())?;
                         }
                         row.write_scalar(plans.source_root_count)?;
-                        row.write_record_ref(geometry.into_store())
+                        row.write_record_ref(appearance.into_store())?;
+                        row.write_record_ref(geometry.into_store())?;
+                        row.write_record_ref(deformation.into_store())?;
+                        row.write_record_ref(animation.into_store())
                     })
                     .map_err(StoreControlledError::from)
             },

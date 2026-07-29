@@ -39,6 +39,7 @@ fn reject_geometry(
     let error = expect_semantic(validate_geometry_batch_with_control(
         input,
         authored_node_count,
+        0,
         SceneValidationLimits::default(),
         &mut control,
     ));
@@ -95,19 +96,18 @@ fn obj_corner_domains_preserve_shared_positions_without_tuple_vertex_expansion()
         NodeLocalId::new(0),
         LogicalMeshLocalId::new(0),
     )];
-    let input =
-        GeometryAuthoringBatch::new(0, &logical_meshes, &primitives, &attributes, &instances);
+    let input = GeometryAuthoringBatch::new(&logical_meshes, &primitives, &attributes, &instances);
     let mut control = TestControl::default();
 
     let validated = validate_geometry_batch_with_control(
         input,
         1,
+        0,
         SceneValidationLimits::default(),
         &mut control,
     )
     .expect("OBJ-shaped geometry must preserve independent attribute domains");
 
-    assert_eq!(validated.material_count(), 0);
     assert_eq!(validated.logical_mesh_count(), 1);
     assert_eq!(validated.primitive_count(), 1);
     assert_eq!(validated.mesh_instance_count(), 1);
@@ -115,7 +115,7 @@ fn obj_corner_domains_preserve_shared_positions_without_tuple_vertex_expansion()
     assert_eq!(validated.f32_scalar_count(), 39);
     assert_eq!(validated.u32_scalar_count(), 8);
     assert_eq!(validated.payload_block_count(), 5);
-    assert_eq!(validated.canonical_bytes(), 459);
+    assert_eq!(validated.canonical_bytes(), 454);
     assert_eq!(validated.validation_work(), 73);
     assert_eq!(control.work, 73);
 
@@ -175,7 +175,8 @@ fn absent_and_present_empty_index_streams_remain_distinct() {
     )];
     let mut absent_control = TestControl::default();
     let absent = validate_geometry_batch_with_control(
-        GeometryAuthoringBatch::new(0, &logical_meshes, &absent_primitives, &attributes, &[]),
+        GeometryAuthoringBatch::new(&logical_meshes, &absent_primitives, &attributes, &[]),
+        0,
         0,
         SceneValidationLimits::default(),
         &mut absent_control,
@@ -195,7 +196,8 @@ fn absent_and_present_empty_index_streams_remain_distinct() {
     )];
     let mut empty_control = TestControl::default();
     let present_empty = validate_geometry_batch_with_control(
-        GeometryAuthoringBatch::new(0, &logical_meshes, &empty_primitives, &attributes, &[]),
+        GeometryAuthoringBatch::new(&logical_meshes, &empty_primitives, &attributes, &[]),
+        0,
         0,
         SceneValidationLimits::default(),
         &mut empty_control,
@@ -245,7 +247,8 @@ fn sparse_attribute_counts_indices_values_and_default_without_dense_expansion() 
     let mut control = TestControl::default();
 
     let validated = validate_geometry_batch_with_control(
-        GeometryAuthoringBatch::new(0, &logical_meshes, &primitives, &attributes, &[]),
+        GeometryAuthoringBatch::new(&logical_meshes, &primitives, &attributes, &[]),
+        0,
         0,
         SceneValidationLimits::default(),
         &mut control,
@@ -255,7 +258,7 @@ fn sparse_attribute_counts_indices_values_and_default_without_dense_expansion() 
     assert_eq!(validated.f32_scalar_count(), 12);
     assert_eq!(validated.u32_scalar_count(), 1);
     assert_eq!(validated.payload_block_count(), 4);
-    assert_eq!(validated.canonical_bytes(), 231);
+    assert_eq!(validated.canonical_bytes(), 226);
     let primitive = validated.primitive(0).expect("sparse primitive plan");
     let color = primitive.attribute(1).expect("sparse color plan");
     assert_eq!(color.source_element_count(), 1);
@@ -286,7 +289,8 @@ fn nonempty_vertex_domain_requires_position() {
 
     assert!(matches!(
         expect_semantic(validate_geometry_batch_with_control(
-            GeometryAuthoringBatch::new(0, &logical_meshes, &primitives, &attributes, &[]),
+            GeometryAuthoringBatch::new(&logical_meshes, &primitives, &attributes, &[]),
+            0,
             0,
             SceneValidationLimits::default(),
             &mut control,
@@ -319,7 +323,7 @@ fn flat_ownership_and_cross_table_references_are_exact() {
     let misplaced_mesh = [GeometryLogicalMeshAuthoring::new(AuthoringRange::new(1, 1))];
     assert!(matches!(
         reject_geometry(
-            GeometryAuthoringBatch::new(0, &misplaced_mesh, &valid_primitive, &attributes, &[],),
+            GeometryAuthoringBatch::new(&misplaced_mesh, &valid_primitive, &attributes, &[]),
             0,
         ),
         GeometryAuthoringSemanticError::LogicalMeshRangeOrder {
@@ -337,7 +341,7 @@ fn flat_ownership_and_cross_table_references_are_exact() {
     )];
     assert!(matches!(
         reject_geometry(
-            GeometryAuthoringBatch::new(0, &valid_mesh, &misplaced_attributes, &attributes, &[],),
+            GeometryAuthoringBatch::new(&valid_mesh, &misplaced_attributes, &attributes, &[]),
             0,
         ),
         GeometryAuthoringSemanticError::PrimitiveAttributeRangeOrder {
@@ -355,15 +359,33 @@ fn flat_ownership_and_cross_table_references_are_exact() {
     )];
     assert!(matches!(
         reject_geometry(
-            GeometryAuthoringBatch::new(0, &valid_mesh, &unknown_material, &attributes, &[],),
+            GeometryAuthoringBatch::new(&valid_mesh, &unknown_material, &attributes, &[]),
             0,
         ),
         GeometryAuthoringSemanticError::MaterialOutOfRange {
             primitive: 0,
             material: 0,
-            material_count: 0,
+            appearance_material_count: 0,
         }
     ));
+
+    let mut material_control = TestControl::default();
+    let material_geometry = validate_geometry_batch_with_control(
+        GeometryAuthoringBatch::new(&valid_mesh, &unknown_material, &attributes, &[]),
+        0,
+        1,
+        SceneValidationLimits::default(),
+        &mut material_control,
+    )
+    .expect("appearance-owned material identity must validate through its explicit count");
+    assert_eq!(material_geometry.entity_count(), 3);
+    assert_eq!(
+        material_geometry
+            .primitive(0)
+            .expect("material primitive")
+            .material(),
+        Some(MaterialLocalId::new(0))
+    );
 
     let unknown_owner = [GeometryMeshInstanceAuthoring::new(
         NodeLocalId::new(0),
@@ -371,13 +393,7 @@ fn flat_ownership_and_cross_table_references_are_exact() {
     )];
     assert!(matches!(
         reject_geometry(
-            GeometryAuthoringBatch::new(
-                0,
-                &valid_mesh,
-                &valid_primitive,
-                &attributes,
-                &unknown_owner,
-            ),
+            GeometryAuthoringBatch::new(&valid_mesh, &valid_primitive, &attributes, &unknown_owner,),
             0,
         ),
         GeometryAuthoringSemanticError::InstanceOwnerOutOfRange {
@@ -393,13 +409,7 @@ fn flat_ownership_and_cross_table_references_are_exact() {
     )];
     assert!(matches!(
         reject_geometry(
-            GeometryAuthoringBatch::new(
-                0,
-                &valid_mesh,
-                &valid_primitive,
-                &attributes,
-                &unknown_mesh,
-            ),
+            GeometryAuthoringBatch::new(&valid_mesh, &valid_primitive, &attributes, &unknown_mesh,),
             1,
         ),
         GeometryAuthoringSemanticError::InstanceMeshOutOfRange {
@@ -431,7 +441,7 @@ fn malformed_indices_topology_projection_and_floats_are_rejected() {
     )];
     assert!(matches!(
         reject_geometry(
-            GeometryAuthoringBatch::new(0, &mesh, &indexed, &position, &[]),
+            GeometryAuthoringBatch::new(&mesh, &indexed, &position, &[]),
             0,
         ),
         GeometryAuthoringSemanticError::VertexIndexOutOfRange {
@@ -450,7 +460,7 @@ fn malformed_indices_topology_projection_and_floats_are_rejected() {
     )];
     assert!(matches!(
         reject_geometry(
-            GeometryAuthoringBatch::new(0, &mesh, &incomplete_triangle, &position, &[]),
+            GeometryAuthoringBatch::new(&mesh, &incomplete_triangle, &position, &[]),
             0,
         ),
         GeometryAuthoringSemanticError::ListCornerCount {
@@ -487,7 +497,7 @@ fn malformed_indices_topology_projection_and_floats_are_rejected() {
     )];
     assert!(matches!(
         reject_geometry(
-            GeometryAuthoringBatch::new(0, &mesh, &projected_primitive, &projected, &[]),
+            GeometryAuthoringBatch::new(&mesh, &projected_primitive, &projected, &[]),
             0,
         ),
         GeometryAuthoringSemanticError::SourceProjectionOutOfRange {
@@ -514,7 +524,7 @@ fn malformed_indices_topology_projection_and_floats_are_rejected() {
     )];
     assert!(matches!(
         reject_geometry(
-            GeometryAuthoringBatch::new(0, &mesh, &points, &invalid_position, &[]),
+            GeometryAuthoringBatch::new(&mesh, &points, &invalid_position, &[]),
             0,
         ),
         GeometryAuthoringSemanticError::NonFiniteAttributeValue {
@@ -557,7 +567,7 @@ fn sparse_shape_order_and_defaults_are_rejected_before_publication() {
     ];
     assert!(matches!(
         reject_geometry(
-            GeometryAuthoringBatch::new(0, &mesh, &primitive, &short_default_attributes, &[],),
+            GeometryAuthoringBatch::new(&mesh, &primitive, &short_default_attributes, &[]),
             0,
         ),
         GeometryAuthoringSemanticError::SparseDefaultShape {
@@ -590,7 +600,7 @@ fn sparse_shape_order_and_defaults_are_rejected_before_publication() {
     ];
     assert!(matches!(
         reject_geometry(
-            GeometryAuthoringBatch::new(0, &mesh, &primitive, &duplicate_attributes, &[]),
+            GeometryAuthoringBatch::new(&mesh, &primitive, &duplicate_attributes, &[]),
             0,
         ),
         GeometryAuthoringSemanticError::SparseIndexOrder {
@@ -617,7 +627,7 @@ fn geometry_limits_are_typed_and_fail_without_leaking_scratch() {
         AuthoringRange::new(0, 1),
     )];
     let logical_meshes = [GeometryLogicalMeshAuthoring::new(AuthoringRange::new(0, 1))];
-    let input = GeometryAuthoringBatch::new(0, &logical_meshes, &primitives, &attributes, &[]);
+    let input = GeometryAuthoringBatch::new(&logical_meshes, &primitives, &attributes, &[]);
     let cases = [
         (
             SceneValidationLimits::default().with_max_entities(2),
@@ -655,6 +665,7 @@ fn geometry_limits_are_typed_and_fail_without_leaking_scratch() {
             expect_semantic(validate_geometry_batch_with_control(
                 input,
                 0,
+                0,
                 limits,
                 &mut control,
             )),
@@ -686,7 +697,8 @@ fn zero_work_rejects_before_geometry_scratch_allocation() {
 
     assert!(matches!(
         expect_semantic(validate_geometry_batch_with_control(
-            GeometryAuthoringBatch::new(0, &logical_meshes, &primitives, &attributes, &[]),
+            GeometryAuthoringBatch::new(&logical_meshes, &primitives, &attributes, &[]),
+            0,
             0,
             SceneValidationLimits::default().with_max_work(0),
             &mut control,
@@ -726,7 +738,8 @@ fn empty_primitive_structural_scan_polls_before_scratch_allocation() {
 
     assert!(matches!(
         validate_geometry_batch_with_control(
-            GeometryAuthoringBatch::new(0, &logical_meshes, &primitives, &[], &[]),
+            GeometryAuthoringBatch::new(&logical_meshes, &primitives, &[], &[]),
+            0,
             0,
             SceneValidationLimits::default(),
             &mut control,
@@ -770,12 +783,13 @@ fn empty_attribute_semantic_pass_is_work_bounded_and_cancellable() {
         ),
     )];
     let logical_meshes = [GeometryLogicalMeshAuthoring::new(AuthoringRange::new(0, 1))];
-    let input = || GeometryAuthoringBatch::new(0, &logical_meshes, &primitives, &attributes, &[]);
+    let input = || GeometryAuthoringBatch::new(&logical_meshes, &primitives, &attributes, &[]);
 
     let mut bounded = TestControl::default();
     assert!(matches!(
         expect_semantic(validate_geometry_batch_with_control(
             input(),
+            0,
             0,
             SceneValidationLimits::default().with_max_work(WORK_BEFORE_SEMANTIC_PASS),
             &mut bounded,
@@ -797,6 +811,7 @@ fn empty_attribute_semantic_pass_is_work_bounded_and_cancellable() {
     assert!(matches!(
         validate_geometry_batch_with_control(
             input(),
+            0,
             0,
             SceneValidationLimits::default(),
             &mut cancelled,
@@ -828,7 +843,7 @@ fn periodic_cancellation_and_drop_order_cover_compiled_geometry_storage() {
         AuthoringRange::new(0, 1),
     )];
     let logical_meshes = [GeometryLogicalMeshAuthoring::new(AuthoringRange::new(0, 1))];
-    let input = GeometryAuthoringBatch::new(0, &logical_meshes, &primitives, &attributes, &[]);
+    let input = GeometryAuthoringBatch::new(&logical_meshes, &primitives, &attributes, &[]);
     let mut cancelled = TestControl {
         cancel_on_poll: Some(2),
         ..TestControl::default()
@@ -837,6 +852,7 @@ fn periodic_cancellation_and_drop_order_cover_compiled_geometry_storage() {
     assert!(matches!(
         validate_geometry_batch_with_control(
             input,
+            0,
             0,
             SceneValidationLimits::default(),
             &mut cancelled,
@@ -854,7 +870,8 @@ fn periodic_cancellation_and_drop_order_cover_compiled_geometry_storage() {
     };
     assert!(matches!(
         validate_geometry_batch_with_control(
-            GeometryAuthoringBatch::new(0, &[], &[], &[], &[]),
+            GeometryAuthoringBatch::new(&[], &[], &[], &[]),
+            0,
             0,
             SceneValidationLimits::default(),
             &mut final_poll_cancelled,
@@ -874,6 +891,7 @@ fn periodic_cancellation_and_drop_order_cover_compiled_geometry_storage() {
     };
     let mut validated = validate_geometry_batch_with_control(
         input,
+        0,
         0,
         SceneValidationLimits::default(),
         &mut control,

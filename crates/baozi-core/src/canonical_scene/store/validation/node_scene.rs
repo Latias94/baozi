@@ -3,14 +3,42 @@ use baozi_operation::{
     StoreValidationSession,
 };
 
+mod animation;
+mod appearance;
+mod deformation;
 mod geometry;
 
 use super::super::construction::node_scene::SceneEvidenceCounts;
 use super::super::node_scene::{authored_transform_scalar_count, decode_authored_transform};
-use super::super::production::{Presence, ValidatedGeometryBatch, ValidatedNodeBatch};
+use super::super::production::{
+    Presence, ValidatedAnimationBatch, ValidatedAppearanceBatch, ValidatedDeformationBatch,
+    ValidatedGeometryBatch, ValidatedNodeBatch,
+};
+use super::super::schema::animation::{
+    AnimationChannelTableSchema, AnimationClipTableSchema, AnimationDirectorySchema,
+    AnimationInTangentsSchema, AnimationOutTangentsSchema, AnimationTimesSchema,
+    AnimationValuesSchema,
+};
+use super::super::schema::appearance::{
+    AppearanceBindingTableSchema, AppearanceDirectorySchema, AppearanceEncodedImagePayloadSchema,
+    AppearanceImageTableSchema, AppearanceMaterialTableSchema, AppearanceMediaTypeSchema,
+    AppearanceSamplerTableSchema, AppearanceTextureTableSchema,
+};
+use super::super::schema::deformation::{
+    DeformationDirectorySchema, DeformationInfluenceJointSchema,
+    DeformationInfluenceRowOffsetSchema, DeformationInfluenceSourceOrderSchema,
+    DeformationInfluenceWeightSchema, DeformationInstanceMorphWeightSchema,
+    DeformationInverseBindMatrixSchema, DeformationLogicalMorphTableSchema,
+    DeformationMeshInstanceTableSchema, DeformationMorphDefaultWeightSchema,
+    DeformationMorphDefinitionTableSchema, DeformationMorphDeltaTableSchema,
+    DeformationMorphNameSchema, DeformationMorphSparseIndexSchema,
+    DeformationMorphTargetTableSchema, DeformationMorphValueSchema,
+    DeformationPrimitiveTableSchema, DeformationSkinCorrectionMatrixSchema,
+    DeformationSkinJointNodeSchema, DeformationSkinNameSchema, DeformationSkinTableSchema,
+};
 use super::super::schema::geometry::{
-    GeometryAttributeTableSchema, GeometryLogicalMeshTableSchema, GeometryMaterialTableSchema,
-    GeometryMeshInstanceTableSchema, GeometryPrimitiveTableSchema,
+    GeometryAttributeTableSchema, GeometryLogicalMeshTableSchema, GeometryMeshInstanceTableSchema,
+    GeometryPrimitiveTableSchema,
 };
 use super::super::schema::{
     CanonicalBlockRef, NODE_SCENE_CHILD_REFERENCE_FIELD_COUNT, NODE_SCENE_EVIDENCE_FIELD_COUNT,
@@ -22,7 +50,12 @@ use super::super::schema::{
     node_scene_evidence_field, node_scene_node_field, scene_directory_field,
 };
 use super::{require_optional_collection, require_scalar};
-use geometry::validate_geometry_graph;
+use animation::{AnimationValidatedRefs, validate_animation_graph};
+use appearance::{AppearanceValidatedRefs, validate_appearance_graph};
+use deformation::{
+    DeformationValidatedRefs, DeformationValidationDependencies, validate_deformation_graph,
+};
+use geometry::{GeometryValidatedRefs, validate_geometry_graph};
 
 /// Immutable semantic authority minted only by central node-scene validation.
 #[derive(Clone, Copy)]
@@ -30,19 +63,14 @@ pub(in crate::canonical_scene::store) struct NodeSceneValidationProof {
     nodes: CanonicalBlockRef<NodeSceneNodeTableSchema>,
     references: Option<CanonicalBlockRef<NodeSceneChildReferenceTableSchema>>,
     transforms: Option<CanonicalBlockRef<NodeSceneAuthoredTransformSchema>>,
-    materials: Option<CanonicalBlockRef<GeometryMaterialTableSchema>>,
-    logical_meshes: Option<CanonicalBlockRef<GeometryLogicalMeshTableSchema>>,
-    primitives: Option<CanonicalBlockRef<GeometryPrimitiveTableSchema>>,
-    attributes: Option<CanonicalBlockRef<GeometryAttributeTableSchema>>,
-    mesh_instances: Option<CanonicalBlockRef<GeometryMeshInstanceTableSchema>>,
+    appearance: AppearanceValidatedRefs,
+    geometry: GeometryValidatedRefs,
+    deformation: DeformationValidatedRefs,
+    animation: AnimationValidatedRefs,
     source_node_count: usize,
     source_root_count: usize,
     source_edge_count: usize,
-    material_count: usize,
-    logical_mesh_count: usize,
-    primitive_count: usize,
-    attribute_count: usize,
-    mesh_instance_count: usize,
+    counts: SceneEvidenceCounts,
 }
 
 impl NodeSceneValidationProof {
@@ -64,34 +92,226 @@ impl NodeSceneValidationProof {
         self.transforms
     }
 
+    pub(in crate::canonical_scene::store) const fn appearance_images(
+        self,
+    ) -> Option<CanonicalBlockRef<AppearanceImageTableSchema>> {
+        self.appearance.images
+    }
+
+    pub(in crate::canonical_scene::store) const fn appearance_samplers(
+        self,
+    ) -> Option<CanonicalBlockRef<AppearanceSamplerTableSchema>> {
+        self.appearance.samplers
+    }
+
+    pub(in crate::canonical_scene::store) const fn appearance_textures(
+        self,
+    ) -> Option<CanonicalBlockRef<AppearanceTextureTableSchema>> {
+        self.appearance.textures
+    }
+
     pub(in crate::canonical_scene::store) const fn materials(
         self,
-    ) -> Option<CanonicalBlockRef<GeometryMaterialTableSchema>> {
-        self.materials
+    ) -> Option<CanonicalBlockRef<AppearanceMaterialTableSchema>> {
+        self.appearance.materials
+    }
+
+    pub(in crate::canonical_scene::store) const fn appearance_bindings(
+        self,
+    ) -> Option<CanonicalBlockRef<AppearanceBindingTableSchema>> {
+        self.appearance.bindings
+    }
+
+    pub(in crate::canonical_scene::store) const fn appearance_image_payloads(
+        self,
+    ) -> Option<CanonicalBlockRef<AppearanceEncodedImagePayloadSchema>> {
+        self.appearance.image_payloads
+    }
+
+    pub(in crate::canonical_scene::store) const fn appearance_media_types(
+        self,
+    ) -> Option<CanonicalBlockRef<AppearanceMediaTypeSchema>> {
+        self.appearance.media_types
     }
 
     pub(in crate::canonical_scene::store) const fn logical_meshes(
         self,
     ) -> Option<CanonicalBlockRef<GeometryLogicalMeshTableSchema>> {
-        self.logical_meshes
+        self.geometry.logical_meshes
     }
 
     pub(in crate::canonical_scene::store) const fn primitives(
         self,
     ) -> Option<CanonicalBlockRef<GeometryPrimitiveTableSchema>> {
-        self.primitives
+        self.geometry.primitives
     }
 
     pub(in crate::canonical_scene::store) const fn attributes(
         self,
     ) -> Option<CanonicalBlockRef<GeometryAttributeTableSchema>> {
-        self.attributes
+        self.geometry.attributes
     }
 
     pub(in crate::canonical_scene::store) const fn mesh_instances(
         self,
     ) -> Option<CanonicalBlockRef<GeometryMeshInstanceTableSchema>> {
-        self.mesh_instances
+        self.geometry.mesh_instances
+    }
+
+    pub(in crate::canonical_scene::store) const fn deformation_skins(
+        self,
+    ) -> Option<CanonicalBlockRef<DeformationSkinTableSchema>> {
+        self.deformation.skins
+    }
+
+    pub(in crate::canonical_scene::store) const fn deformation_logical_morphs(
+        self,
+    ) -> Option<CanonicalBlockRef<DeformationLogicalMorphTableSchema>> {
+        self.deformation.logical_morphs
+    }
+
+    pub(in crate::canonical_scene::store) const fn deformation_morph_definitions(
+        self,
+    ) -> Option<CanonicalBlockRef<DeformationMorphDefinitionTableSchema>> {
+        self.deformation.morph_definitions
+    }
+
+    pub(in crate::canonical_scene::store) const fn deformation_primitives(
+        self,
+    ) -> Option<CanonicalBlockRef<DeformationPrimitiveTableSchema>> {
+        self.deformation.primitives
+    }
+
+    pub(in crate::canonical_scene::store) const fn deformation_morph_targets(
+        self,
+    ) -> Option<CanonicalBlockRef<DeformationMorphTargetTableSchema>> {
+        self.deformation.morph_targets
+    }
+
+    pub(in crate::canonical_scene::store) const fn deformation_morph_deltas(
+        self,
+    ) -> Option<CanonicalBlockRef<DeformationMorphDeltaTableSchema>> {
+        self.deformation.morph_deltas
+    }
+
+    pub(in crate::canonical_scene::store) const fn deformation_mesh_instances(
+        self,
+    ) -> Option<CanonicalBlockRef<DeformationMeshInstanceTableSchema>> {
+        self.deformation.mesh_instances
+    }
+
+    pub(in crate::canonical_scene::store) const fn deformation_joint_nodes(
+        self,
+    ) -> Option<CanonicalBlockRef<DeformationSkinJointNodeSchema>> {
+        self.deformation.joint_nodes
+    }
+
+    pub(in crate::canonical_scene::store) const fn deformation_inverse_bind_matrices(
+        self,
+    ) -> Option<CanonicalBlockRef<DeformationInverseBindMatrixSchema>> {
+        self.deformation.inverse_bind_matrices
+    }
+
+    pub(in crate::canonical_scene::store) const fn deformation_skin_correction_matrices(
+        self,
+    ) -> Option<CanonicalBlockRef<DeformationSkinCorrectionMatrixSchema>> {
+        self.deformation.skin_correction_matrices
+    }
+
+    pub(in crate::canonical_scene::store) const fn deformation_skin_names(
+        self,
+    ) -> Option<CanonicalBlockRef<DeformationSkinNameSchema>> {
+        self.deformation.skin_names
+    }
+
+    pub(in crate::canonical_scene::store) const fn deformation_influence_row_offsets(
+        self,
+    ) -> Option<CanonicalBlockRef<DeformationInfluenceRowOffsetSchema>> {
+        self.deformation.influence_row_offsets
+    }
+
+    pub(in crate::canonical_scene::store) const fn deformation_influence_joints(
+        self,
+    ) -> Option<CanonicalBlockRef<DeformationInfluenceJointSchema>> {
+        self.deformation.influence_joints
+    }
+
+    pub(in crate::canonical_scene::store) const fn deformation_influence_weights(
+        self,
+    ) -> Option<CanonicalBlockRef<DeformationInfluenceWeightSchema>> {
+        self.deformation.influence_weights
+    }
+
+    pub(in crate::canonical_scene::store) const fn deformation_influence_source_orders(
+        self,
+    ) -> Option<CanonicalBlockRef<DeformationInfluenceSourceOrderSchema>> {
+        self.deformation.influence_source_orders
+    }
+
+    pub(in crate::canonical_scene::store) const fn deformation_morph_defaults(
+        self,
+    ) -> Option<CanonicalBlockRef<DeformationMorphDefaultWeightSchema>> {
+        self.deformation.morph_defaults
+    }
+
+    pub(in crate::canonical_scene::store) const fn deformation_morph_names(
+        self,
+    ) -> Option<CanonicalBlockRef<DeformationMorphNameSchema>> {
+        self.deformation.morph_names
+    }
+
+    pub(in crate::canonical_scene::store) const fn deformation_morph_values(
+        self,
+    ) -> Option<CanonicalBlockRef<DeformationMorphValueSchema>> {
+        self.deformation.morph_values
+    }
+
+    pub(in crate::canonical_scene::store) const fn deformation_morph_sparse_indices(
+        self,
+    ) -> Option<CanonicalBlockRef<DeformationMorphSparseIndexSchema>> {
+        self.deformation.morph_sparse_indices
+    }
+
+    pub(in crate::canonical_scene::store) const fn deformation_instance_morph_weights(
+        self,
+    ) -> Option<CanonicalBlockRef<DeformationInstanceMorphWeightSchema>> {
+        self.deformation.instance_morph_weights
+    }
+
+    pub(in crate::canonical_scene::store) const fn animation_clips(
+        self,
+    ) -> Option<CanonicalBlockRef<AnimationClipTableSchema>> {
+        self.animation.clips
+    }
+
+    pub(in crate::canonical_scene::store) const fn animation_channels(
+        self,
+    ) -> Option<CanonicalBlockRef<AnimationChannelTableSchema>> {
+        self.animation.channels
+    }
+
+    pub(in crate::canonical_scene::store) const fn animation_times(
+        self,
+    ) -> Option<CanonicalBlockRef<AnimationTimesSchema>> {
+        self.animation.times
+    }
+
+    pub(in crate::canonical_scene::store) const fn animation_values(
+        self,
+    ) -> Option<CanonicalBlockRef<AnimationValuesSchema>> {
+        self.animation.values
+    }
+
+    pub(in crate::canonical_scene::store) const fn animation_in_tangents(
+        self,
+    ) -> Option<CanonicalBlockRef<AnimationInTangentsSchema>> {
+        self.animation.in_tangents
+    }
+
+    pub(in crate::canonical_scene::store) const fn animation_out_tangents(
+        self,
+    ) -> Option<CanonicalBlockRef<AnimationOutTangentsSchema>> {
+        self.animation.out_tangents
     }
 
     pub(in crate::canonical_scene::store) const fn source_node_count(self) -> usize {
@@ -106,24 +326,72 @@ impl NodeSceneValidationProof {
         self.source_edge_count
     }
 
-    pub(in crate::canonical_scene::store) const fn material_count(self) -> usize {
-        self.material_count
+    pub(in crate::canonical_scene::store) fn material_count(self) -> usize {
+        count_as_usize(self.counts.material_count)
     }
 
-    pub(in crate::canonical_scene::store) const fn logical_mesh_count(self) -> usize {
-        self.logical_mesh_count
+    pub(in crate::canonical_scene::store) fn image_count(self) -> usize {
+        count_as_usize(self.counts.image_count)
     }
 
-    pub(in crate::canonical_scene::store) const fn primitive_count(self) -> usize {
-        self.primitive_count
+    pub(in crate::canonical_scene::store) fn sampler_count(self) -> usize {
+        count_as_usize(self.counts.sampler_count)
     }
 
-    pub(in crate::canonical_scene::store) const fn attribute_count(self) -> usize {
-        self.attribute_count
+    pub(in crate::canonical_scene::store) fn texture_count(self) -> usize {
+        count_as_usize(self.counts.texture_count)
     }
 
-    pub(in crate::canonical_scene::store) const fn mesh_instance_count(self) -> usize {
-        self.mesh_instance_count
+    pub(in crate::canonical_scene::store) fn material_binding_count(self) -> usize {
+        count_as_usize(self.counts.material_binding_count)
+    }
+
+    pub(in crate::canonical_scene::store) fn logical_mesh_count(self) -> usize {
+        count_as_usize(self.counts.logical_mesh_count)
+    }
+
+    pub(in crate::canonical_scene::store) fn primitive_count(self) -> usize {
+        count_as_usize(self.counts.primitive_count)
+    }
+
+    pub(in crate::canonical_scene::store) fn attribute_count(self) -> usize {
+        count_as_usize(self.counts.attribute_count)
+    }
+
+    pub(in crate::canonical_scene::store) fn mesh_instance_count(self) -> usize {
+        count_as_usize(self.counts.mesh_instance_count)
+    }
+
+    pub(in crate::canonical_scene::store) fn skin_count(self) -> usize {
+        count_as_usize(self.counts.skin_count)
+    }
+
+    pub(in crate::canonical_scene::store) fn logical_morph_count(self) -> usize {
+        count_as_usize(self.counts.logical_morph_count)
+    }
+
+    pub(in crate::canonical_scene::store) fn morph_definition_count(self) -> usize {
+        count_as_usize(self.counts.morph_definition_count)
+    }
+
+    pub(in crate::canonical_scene::store) fn primitive_deformation_count(self) -> usize {
+        count_as_usize(self.counts.primitive_deformation_count)
+    }
+
+    pub(in crate::canonical_scene::store) fn morph_target_count(self) -> usize {
+        count_as_usize(self.counts.morph_target_count)
+    }
+
+    pub(in crate::canonical_scene::store) fn morph_delta_count(self) -> usize {
+        count_as_usize(self.counts.morph_delta_count)
+    }
+
+    pub(in crate::canonical_scene::store) fn animation_clip_count(self) -> usize {
+        count_as_usize(self.counts.animation_clip_count)
+    }
+
+    pub(in crate::canonical_scene::store) fn animation_channel_count(self) -> usize {
+        count_as_usize(self.counts.animation_channel_count)
     }
 
     #[cfg(test)]
@@ -142,12 +410,17 @@ impl NodeSceneValidationProof {
     }
 }
 
-pub(in crate::canonical_scene::store) fn validate_node_scene_graph<R, E>(
+#[allow(clippy::too_many_arguments)]
+pub(in crate::canonical_scene::store) fn validate_node_scene_graph<NR, AR, GR, DR, ANR, E>(
     session: &mut StoreValidationSession<'_, '_>,
     directory_ref: CanonicalRecordRef<SceneDirectorySchema>,
     evidence_ref: OutcomeEvidenceRecordRef<NodeSceneOutcomeEvidenceSchema>,
-    expected_nodes: &ValidatedNodeBatch<'_, R>,
-    expected_geometry: &ValidatedGeometryBatch<'_, impl Sized>,
+    expected_nodes: &ValidatedNodeBatch<'_, NR>,
+    expected_appearance: &ValidatedAppearanceBatch<'_, AR>,
+    expected_geometry: &ValidatedGeometryBatch<'_, GR>,
+    expected_deformation: &ValidatedDeformationBatch<'_, DR>,
+    expected_animation: &ValidatedAnimationBatch<'_, ANR>,
+    expected_counts: SceneEvidenceCounts,
     mut observe_work: impl FnMut(u64) -> Result<(), E>,
 ) -> Result<Option<NodeSceneValidationProof>, E> {
     let mut work_failure = None;
@@ -156,7 +429,11 @@ pub(in crate::canonical_scene::store) fn validate_node_scene_graph<R, E>(
         directory_ref,
         evidence_ref,
         expected_nodes,
+        expected_appearance,
         expected_geometry,
+        expected_deformation,
+        expected_animation,
+        expected_counts,
         &mut |amount| match observe_work(amount) {
             Ok(()) => Some(()),
             Err(cause) => {
@@ -189,8 +466,16 @@ pub(in crate::canonical_scene::store) fn validate_node_scene_evidence_graph(
             == Some(counts.canonical_block_count)
         && evidence.scalar::<u32>(0, node_scene_evidence_field::NODE_COUNT)
             == Some(counts.node_count)
+        && evidence.scalar::<u32>(0, node_scene_evidence_field::IMAGE_COUNT)
+            == Some(counts.image_count)
+        && evidence.scalar::<u32>(0, node_scene_evidence_field::SAMPLER_COUNT)
+            == Some(counts.sampler_count)
+        && evidence.scalar::<u32>(0, node_scene_evidence_field::TEXTURE_COUNT)
+            == Some(counts.texture_count)
         && evidence.scalar::<u32>(0, node_scene_evidence_field::MATERIAL_COUNT)
             == Some(counts.material_count)
+        && evidence.scalar::<u32>(0, node_scene_evidence_field::MATERIAL_BINDING_COUNT)
+            == Some(counts.material_binding_count)
         && evidence.scalar::<u32>(0, node_scene_evidence_field::LOGICAL_MESH_COUNT)
             == Some(counts.logical_mesh_count)
         && evidence.scalar::<u32>(0, node_scene_evidence_field::PRIMITIVE_COUNT)
@@ -199,16 +484,37 @@ pub(in crate::canonical_scene::store) fn validate_node_scene_evidence_graph(
             == Some(counts.attribute_count)
         && evidence.scalar::<u32>(0, node_scene_evidence_field::MESH_INSTANCE_COUNT)
             == Some(counts.mesh_instance_count)
+        && evidence.scalar::<u32>(0, node_scene_evidence_field::SKIN_COUNT)
+            == Some(counts.skin_count)
+        && evidence.scalar::<u32>(0, node_scene_evidence_field::LOGICAL_MORPH_COUNT)
+            == Some(counts.logical_morph_count)
+        && evidence.scalar::<u32>(0, node_scene_evidence_field::MORPH_DEFINITION_COUNT)
+            == Some(counts.morph_definition_count)
+        && evidence.scalar::<u32>(0, node_scene_evidence_field::PRIMITIVE_DEFORMATION_COUNT)
+            == Some(counts.primitive_deformation_count)
+        && evidence.scalar::<u32>(0, node_scene_evidence_field::MORPH_TARGET_COUNT)
+            == Some(counts.morph_target_count)
+        && evidence.scalar::<u32>(0, node_scene_evidence_field::MORPH_DELTA_COUNT)
+            == Some(counts.morph_delta_count)
+        && evidence.scalar::<u32>(0, node_scene_evidence_field::ANIMATION_CLIP_COUNT)
+            == Some(counts.animation_clip_count)
+        && evidence.scalar::<u32>(0, node_scene_evidence_field::ANIMATION_CHANNEL_COUNT)
+            == Some(counts.animation_channel_count)
         && evidence.scalar::<u32>(0, node_scene_evidence_field::PAYLOAD_BLOCK_COUNT)
             == Some(counts.payload_block_count)
 }
 
-fn validate_node_scene_graph_inner<NR, GR>(
+#[allow(clippy::too_many_arguments)]
+fn validate_node_scene_graph_inner<NR, AR, GR, DR, ANR>(
     session: &mut StoreValidationSession<'_, '_>,
     directory_ref: CanonicalRecordRef<SceneDirectorySchema>,
     evidence_ref: OutcomeEvidenceRecordRef<NodeSceneOutcomeEvidenceSchema>,
     expected: &ValidatedNodeBatch<'_, NR>,
+    expected_appearance: &ValidatedAppearanceBatch<'_, AR>,
     expected_geometry: &ValidatedGeometryBatch<'_, GR>,
+    expected_deformation: &ValidatedDeformationBatch<'_, DR>,
+    expected_animation: &ValidatedAnimationBatch<'_, ANR>,
+    expected_counts: SceneEvidenceCounts,
     observe_work: &mut impl FnMut(u64) -> Option<()>,
 ) -> Option<NodeSceneValidationProof> {
     observe_work(1)?;
@@ -438,19 +744,63 @@ fn validate_node_scene_graph_inner<NR, GR>(
         return None;
     }
 
+    let appearance_ref =
+        directory.record_ref::<AppearanceDirectorySchema>(0, scene_directory_field::APPEARANCE)?;
+    let appearance_refs =
+        validate_appearance_graph(session, appearance_ref, expected_appearance, observe_work)?;
+
     let geometry_ref =
         directory.record_ref::<SceneGeometryDirectorySchema>(0, scene_directory_field::GEOMETRY)?;
     let geometry_refs = validate_geometry_graph(
         session,
         geometry_ref,
         nodes_ref,
+        appearance_refs.materials.map(CanonicalBlockRef::into_store),
         expected,
         expected_geometry,
         observe_work,
     )?;
 
-    let expected_canonical_blocks =
-        expected_scene_canonical_block_count(has_source_nodes, expected_geometry)?;
+    let node_ref = CanonicalBlockRef::from_store(nodes_ref);
+    let deformation_ref = directory
+        .record_ref::<DeformationDirectorySchema>(0, scene_directory_field::DEFORMATION)?;
+    let deformation_refs = validate_deformation_graph(
+        session,
+        deformation_ref,
+        DeformationValidationDependencies::new(
+            node_ref,
+            geometry_refs.logical_meshes,
+            geometry_refs.primitives,
+            geometry_refs.mesh_instances,
+        ),
+        expected,
+        expected_deformation,
+        observe_work,
+    )?;
+
+    let animation_ref =
+        directory.record_ref::<AnimationDirectorySchema>(0, scene_directory_field::ANIMATION)?;
+    let animation_refs = validate_animation_graph(
+        session,
+        animation_ref,
+        nodes_ref,
+        deformation_refs
+            .mesh_instances
+            .map(CanonicalBlockRef::into_store),
+        expected_animation,
+        observe_work,
+    )?;
+
+    if !evidence_counts_match_batches(
+        expected_counts,
+        expected,
+        expected_appearance,
+        expected_geometry,
+        expected_deformation,
+        expected_animation,
+    ) {
+        return None;
+    }
     observe_work(1)?;
     let evidence = session.outcome_evidence_records(evidence_ref)?;
     if evidence.rows() != 1 || evidence.fields() != NODE_SCENE_EVIDENCE_FIELD_COUNT {
@@ -466,73 +816,135 @@ fn validate_node_scene_graph_inner<NR, GR>(
     )?;
     require_scalar(
         evidence.scalar::<u32>(0, node_scene_evidence_field::CANONICAL_BLOCK_COUNT),
-        expected_canonical_blocks,
+        expected_counts.canonical_block_count,
     )?;
     require_scalar(
         evidence.scalar::<u32>(0, node_scene_evidence_field::NODE_COUNT),
-        node_count_u32,
+        expected_counts.node_count,
+    )?;
+    require_scalar(
+        evidence.scalar::<u32>(0, node_scene_evidence_field::IMAGE_COUNT),
+        expected_counts.image_count,
+    )?;
+    require_scalar(
+        evidence.scalar::<u32>(0, node_scene_evidence_field::SAMPLER_COUNT),
+        expected_counts.sampler_count,
+    )?;
+    require_scalar(
+        evidence.scalar::<u32>(0, node_scene_evidence_field::TEXTURE_COUNT),
+        expected_counts.texture_count,
     )?;
     require_scalar(
         evidence.scalar::<u32>(0, node_scene_evidence_field::MATERIAL_COUNT),
-        expected_geometry.material_count(),
+        expected_counts.material_count,
+    )?;
+    require_scalar(
+        evidence.scalar::<u32>(0, node_scene_evidence_field::MATERIAL_BINDING_COUNT),
+        expected_counts.material_binding_count,
     )?;
     require_scalar(
         evidence.scalar::<u32>(0, node_scene_evidence_field::LOGICAL_MESH_COUNT),
-        expected_geometry.logical_mesh_count(),
+        expected_counts.logical_mesh_count,
     )?;
     require_scalar(
         evidence.scalar::<u32>(0, node_scene_evidence_field::PRIMITIVE_COUNT),
-        expected_geometry.primitive_count(),
+        expected_counts.primitive_count,
     )?;
     require_scalar(
         evidence.scalar::<u32>(0, node_scene_evidence_field::ATTRIBUTE_COUNT),
-        expected_geometry.attribute_count(),
+        expected_counts.attribute_count,
     )?;
     require_scalar(
         evidence.scalar::<u32>(0, node_scene_evidence_field::MESH_INSTANCE_COUNT),
-        expected_geometry.mesh_instance_count(),
+        expected_counts.mesh_instance_count,
+    )?;
+    require_scalar(
+        evidence.scalar::<u32>(0, node_scene_evidence_field::SKIN_COUNT),
+        expected_counts.skin_count,
+    )?;
+    require_scalar(
+        evidence.scalar::<u32>(0, node_scene_evidence_field::LOGICAL_MORPH_COUNT),
+        expected_counts.logical_morph_count,
+    )?;
+    require_scalar(
+        evidence.scalar::<u32>(0, node_scene_evidence_field::MORPH_DEFINITION_COUNT),
+        expected_counts.morph_definition_count,
+    )?;
+    require_scalar(
+        evidence.scalar::<u32>(0, node_scene_evidence_field::PRIMITIVE_DEFORMATION_COUNT),
+        expected_counts.primitive_deformation_count,
+    )?;
+    require_scalar(
+        evidence.scalar::<u32>(0, node_scene_evidence_field::MORPH_TARGET_COUNT),
+        expected_counts.morph_target_count,
+    )?;
+    require_scalar(
+        evidence.scalar::<u32>(0, node_scene_evidence_field::MORPH_DELTA_COUNT),
+        expected_counts.morph_delta_count,
+    )?;
+    require_scalar(
+        evidence.scalar::<u32>(0, node_scene_evidence_field::ANIMATION_CLIP_COUNT),
+        expected_counts.animation_clip_count,
+    )?;
+    require_scalar(
+        evidence.scalar::<u32>(0, node_scene_evidence_field::ANIMATION_CHANNEL_COUNT),
+        expected_counts.animation_channel_count,
     )?;
     require_scalar(
         evidence.scalar::<u32>(0, node_scene_evidence_field::PAYLOAD_BLOCK_COUNT),
-        expected_geometry.payload_block_count(),
+        expected_counts.payload_block_count,
     )?;
     let source_edge_count = source_node_count.checked_sub(source_root_count)?;
     Some(NodeSceneValidationProof {
-        nodes: CanonicalBlockRef::from_store(nodes_ref),
+        nodes: node_ref,
         references: references_ref.map(CanonicalBlockRef::from_store),
         transforms: transforms_ref.map(CanonicalBlockRef::from_store),
-        materials: geometry_refs.materials,
-        logical_meshes: geometry_refs.logical_meshes,
-        primitives: geometry_refs.primitives,
-        attributes: geometry_refs.attributes,
-        mesh_instances: geometry_refs.mesh_instances,
+        appearance: appearance_refs,
+        geometry: geometry_refs,
+        deformation: deformation_refs,
+        animation: animation_refs,
         source_node_count,
         source_root_count,
         source_edge_count,
-        material_count: usize::try_from(expected_geometry.material_count()).ok()?,
-        logical_mesh_count: usize::try_from(expected_geometry.logical_mesh_count()).ok()?,
-        primitive_count: usize::try_from(expected_geometry.primitive_count()).ok()?,
-        attribute_count: usize::try_from(expected_geometry.attribute_count()).ok()?,
-        mesh_instance_count: usize::try_from(expected_geometry.mesh_instance_count()).ok()?,
+        counts: expected_counts,
     })
 }
 
-fn expected_scene_canonical_block_count<R>(
-    has_source_nodes: bool,
-    geometry: &ValidatedGeometryBatch<'_, R>,
-) -> Option<u32> {
-    let node_optional_blocks = if has_source_nodes { 2_u32 } else { 0 };
-    let geometry_table_blocks = [
-        geometry.material_count(),
-        geometry.logical_mesh_count(),
-        geometry.primitive_count(),
-        geometry.attribute_count(),
-        geometry.mesh_instance_count(),
-    ]
-    .into_iter()
-    .try_fold(0_u32, |count, rows| count.checked_add(u32::from(rows != 0)))?;
-    3_u32
-        .checked_add(node_optional_blocks)?
-        .checked_add(geometry_table_blocks)?
+#[allow(clippy::too_many_arguments)]
+fn evidence_counts_match_batches<NR, AR, GR, DR, ANR>(
+    counts: SceneEvidenceCounts,
+    nodes: &ValidatedNodeBatch<'_, NR>,
+    appearance: &ValidatedAppearanceBatch<'_, AR>,
+    geometry: &ValidatedGeometryBatch<'_, GR>,
+    deformation: &ValidatedDeformationBatch<'_, DR>,
+    animation: &ValidatedAnimationBatch<'_, ANR>,
+) -> bool {
+    let payload_block_count = appearance
+        .payload_block_count()
         .checked_add(geometry.payload_block_count())
+        .and_then(|count| count.checked_add(deformation.payload_block_count()))
+        .and_then(|count| count.checked_add(animation.payload_block_count()));
+    u32::try_from(nodes.canonical_node_count()) == Ok(counts.node_count)
+        && appearance.image_count() == counts.image_count
+        && appearance.sampler_count() == counts.sampler_count
+        && appearance.texture_count() == counts.texture_count
+        && appearance.material_count() == counts.material_count
+        && appearance.binding_count() == counts.material_binding_count
+        && geometry.logical_mesh_count() == counts.logical_mesh_count
+        && geometry.primitive_count() == counts.primitive_count
+        && geometry.attribute_count() == counts.attribute_count
+        && geometry.mesh_instance_count() == counts.mesh_instance_count
+        && deformation.skin_count() == counts.skin_count
+        && deformation.logical_morph_count() == counts.logical_morph_count
+        && deformation.morph_definition_count() == counts.morph_definition_count
+        && deformation.primitive_count() == counts.primitive_deformation_count
+        && deformation.morph_target_count() == counts.morph_target_count
+        && deformation.morph_delta_count() == counts.morph_delta_count
+        && animation.clip_count() == counts.animation_clip_count
+        && animation.channel_count() == counts.animation_channel_count
+        && payload_block_count == Some(counts.payload_block_count)
+}
+
+fn count_as_usize(count: u32) -> usize {
+    usize::try_from(count).unwrap_or(usize::MAX)
 }

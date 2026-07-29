@@ -16,10 +16,12 @@ use crate::canonical_scene::store::construction::node_scene::{
 };
 use crate::canonical_scene::store::construction::{STORE_DIMENSION, SceneConstructionOperation};
 use crate::canonical_scene::store::production::{
-    AuthoringRange, GeometryAttributeAuthoring, GeometryAuthoringBatch, GeometryAuthoringFailure,
+    AnimationAuthoringBatch, AppearanceAuthoringBatch, AuthoringRange, DeformationAuthoringBatch,
+    GeometryAttributeAuthoring, GeometryAuthoringBatch, GeometryAuthoringFailure,
     GeometryAuthoringSemanticError, GeometryLogicalMeshAuthoring, GeometryMeshInstanceAuthoring,
-    GeometryPrimitiveAuthoring, GeometryTopologyAuthoring, LogicalMeshLocalId, NodeLocalId,
-    Presence, SceneAuthoringBatch,
+    GeometryPrimitiveAuthoring, GeometryTopologyAuthoring, LogicalMeshLocalId,
+    LogicalMorphAuthoring, MeshInstanceDeformationAuthoring, NodeLocalId, Presence,
+    PrimitiveDeformationAuthoring, SceneAuthoringBatch,
 };
 use crate::geometry::TopologyKind;
 use crate::identity::{ReservedSceneGeneration, SceneGenerationError, SceneGenerationId};
@@ -33,8 +35,8 @@ const OBJ_POSITIONS: [[f32; 3]; 3] = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.
 const OBJ_TEXCOORDS: [[f32; 2]; 4] = [[0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [0.5, 0.5]];
 const OBJ_NORMALS: [[f32; 3]; 2] = [[0.0, 0.0, 1.0], [0.0, 0.0, -1.0]];
 const KNOWN_OBJ_CAPABILITY_DIGEST: [u8; 32] = [
-    0x9f, 0xc1, 0x9b, 0x53, 0xaf, 0x3d, 0x8f, 0x92, 0xb5, 0xcc, 0x59, 0x0f, 0xce, 0xdc, 0xc6, 0x79,
-    0x13, 0x4d, 0xbc, 0x72, 0xee, 0xbc, 0xe4, 0xbc, 0x32, 0xce, 0x37, 0x26, 0x66, 0x31, 0xf1, 0x36,
+    0x79, 0x85, 0x9f, 0xac, 0x88, 0x5f, 0x80, 0x54, 0x79, 0x4d, 0x06, 0xe2, 0x7a, 0x9b, 0x67, 0x5c,
+    0xd4, 0x7b, 0xc2, 0x1c, 0xc0, 0x6f, 0x50, 0x4d, 0x80, 0x7b, 0xbf, 0xc9, 0xf2, 0x0e, 0xe7, 0xce,
 ];
 const OBJ_FACES: [ObjTriangle; 2] = [
     ObjTriangle {
@@ -193,9 +195,28 @@ impl ObjCanonicalProjection<'_> {
             LogicalMeshLocalId::new(0),
         )];
         let geometry =
-            GeometryAuthoringBatch::new(0, &logical_meshes, &primitives, &attributes, &instances);
+            GeometryAuthoringBatch::new(&logical_meshes, &primitives, &attributes, &instances);
+        let logical_morphs = [LogicalMorphAuthoring::new(AuthoringRange::new(0, 0), &[])];
+        let primitive_deformations = [PrimitiveDeformationAuthoring::new(Presence::Absent, &[])];
+        let mesh_instance_deformations = [MeshInstanceDeformationAuthoring::new(
+            Presence::Absent,
+            Presence::Absent,
+        )];
+        let deformation = DeformationAuthoringBatch::new(
+            &[],
+            &[],
+            &logical_morphs,
+            &primitive_deformations,
+            &mesh_instance_deformations,
+        );
 
-        use_input(SceneAuthoringBatch::new(single_trs_batch(), geometry))
+        use_input(SceneAuthoringBatch::new(
+            single_trs_batch(),
+            AppearanceAuthoringBatch::empty(),
+            geometry,
+            deformation,
+            AnimationAuthoringBatch::empty(),
+        ))
     }
 }
 
@@ -528,13 +549,41 @@ pub(in crate::canonical_scene::store) fn inspect_obj_capability_semantics_for_pr
     children.finish().expect("complete OBJ child traversal");
     assert!(cursor.next_node().expect("OBJ node exhaustion").is_none());
 
-    let mut geometry = cursor.into_geometry().expect("OBJ geometry cursor");
-    assert!(
-        geometry
-            .next_material()
-            .expect("OBJ material exhaustion")
-            .is_none()
-    );
+    {
+        let appearance = cursor.appearance().expect("OBJ appearance cursor");
+        assert!(
+            appearance
+                .next_image()
+                .expect("OBJ image exhaustion")
+                .is_none()
+        );
+        assert!(
+            appearance
+                .next_sampler()
+                .expect("OBJ sampler exhaustion")
+                .is_none()
+        );
+        assert!(
+            appearance
+                .next_texture()
+                .expect("OBJ texture exhaustion")
+                .is_none()
+        );
+        assert!(
+            appearance
+                .next_material()
+                .expect("OBJ material exhaustion")
+                .is_none()
+        );
+        assert!(
+            appearance
+                .next_binding()
+                .expect("OBJ material-binding exhaustion")
+                .is_none()
+        );
+    }
+
+    let geometry = cursor.geometry().expect("OBJ geometry cursor");
 
     let logical_mesh = geometry
         .next_logical_mesh()
@@ -674,7 +723,98 @@ pub(in crate::canonical_scene::store) fn inspect_obj_capability_semantics_for_pr
             .expect("OBJ mesh-instance exhaustion")
             .is_none()
     );
-    geometry.finish().expect("complete OBJ geometry traversal");
+
+    let deformation = cursor.deformation().expect("OBJ deformation cursor");
+    assert!(
+        deformation
+            .next_skin()
+            .expect("OBJ skin exhaustion")
+            .is_none()
+    );
+    let mut logical_morph = deformation
+        .next_logical_morph()
+        .expect("OBJ logical-morph read")
+        .expect("OBJ aligned logical-morph row");
+    assert_eq!(logical_morph.source_index(), 0);
+    assert_eq!(logical_morph.definition_offset(), 0);
+    assert_eq!(logical_morph.definition_count(), 0);
+    let mut default_weights = logical_morph
+        .take_default_weights()
+        .expect("OBJ logical-morph default weights");
+    assert_eq!(
+        default_weights.next().expect("OBJ default exhaustion"),
+        None
+    );
+    default_weights
+        .finish()
+        .expect("complete OBJ default-weight traversal");
+    assert!(
+        deformation
+            .next_logical_morph()
+            .expect("OBJ logical-morph exhaustion")
+            .is_none()
+    );
+    assert!(
+        deformation
+            .next_morph_definition()
+            .expect("OBJ morph-definition exhaustion")
+            .is_none()
+    );
+    let mut primitive_deformation = deformation
+        .next_primitive()
+        .expect("OBJ primitive-deformation read")
+        .expect("OBJ aligned primitive-deformation row");
+    assert_eq!(primitive_deformation.source_index(), 0);
+    assert!(primitive_deformation.take_influences().is_none());
+    assert_eq!(primitive_deformation.morph_target_offset(), 0);
+    assert_eq!(primitive_deformation.morph_target_count(), 0);
+    assert!(
+        deformation
+            .next_primitive()
+            .expect("OBJ primitive-deformation exhaustion")
+            .is_none()
+    );
+    assert!(
+        deformation
+            .next_morph_target()
+            .expect("OBJ morph-target exhaustion")
+            .is_none()
+    );
+    assert!(
+        deformation
+            .next_morph_delta()
+            .expect("OBJ morph-delta exhaustion")
+            .is_none()
+    );
+    let mut mesh_instance_deformation = deformation
+        .next_mesh_instance()
+        .expect("OBJ mesh-instance deformation read")
+        .expect("OBJ aligned mesh-instance deformation row");
+    assert_eq!(mesh_instance_deformation.source_index(), 0);
+    assert_eq!(mesh_instance_deformation.skin(), None);
+    assert!(!mesh_instance_deformation.morph_weights_present());
+    assert!(mesh_instance_deformation.take_morph_weights().is_none());
+    assert!(
+        deformation
+            .next_mesh_instance()
+            .expect("OBJ mesh-instance deformation exhaustion")
+            .is_none()
+    );
+
+    let animation = cursor.animation().expect("OBJ animation cursor");
+    assert!(
+        animation
+            .next_clip()
+            .expect("OBJ animation-clip exhaustion")
+            .is_none()
+    );
+    assert!(
+        animation
+            .next_channel()
+            .expect("OBJ animation-channel exhaustion")
+            .is_none()
+    );
+    cursor.finish().expect("complete OBJ semantic traversal");
 
     ObjCapabilityCanonicalShapeObservation {
         topology: "triangle_list",

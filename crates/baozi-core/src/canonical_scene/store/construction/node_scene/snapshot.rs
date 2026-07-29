@@ -13,15 +13,19 @@ use super::semantic::{
     NodeSceneGeometryScalarKind, NodeSceneGeometryU32Cursor, NodeSceneSemanticError,
 };
 
+mod animation;
+mod appearance;
+mod deformation;
+
 const CANONICAL_SCENE_SNAPSHOT_DOMAIN: &str = "baozi.canonical-scene.snapshot";
-const CANONICAL_SCENE_SNAPSHOT_SCHEMA_REVISION: u32 = 2;
+const CANONICAL_SCENE_SNAPSHOT_SCHEMA_REVISION: u32 = 3;
 const NODE_SCENE_SNAPSHOT_ALGORITHM_ID: &str = "sha256";
 const NODE_SCENE_SNAPSHOT_POLL_INTERVAL: u64 = 64;
 const MAX_PREVIEW_BYTES: usize = 1 << 20;
 const MAX_COLLECTION_ITEMS: usize = 1 << 20;
 const MAX_WORK: u64 = 100_000_000;
 #[cfg(test)]
-const TEST_TRANSCRIPT_MAX_BYTES: usize = 512;
+const TEST_TRANSCRIPT_MAX_BYTES: usize = 4 * 1024;
 
 const TAG_DOMAIN: u8 = 1;
 const TAG_SCHEMA_REVISION: u8 = 2;
@@ -169,7 +173,13 @@ pub(in crate::canonical_scene::store) struct NodeSceneSnapshotTotals {
     pub(in crate::canonical_scene::store) node_count: usize,
     pub(in crate::canonical_scene::store) root_count: usize,
     pub(in crate::canonical_scene::store) edge_count: usize,
+    pub(in crate::canonical_scene::store) image_count: usize,
+    pub(in crate::canonical_scene::store) sampler_count: usize,
+    pub(in crate::canonical_scene::store) texture_count: usize,
     pub(in crate::canonical_scene::store) material_count: usize,
+    pub(in crate::canonical_scene::store) material_binding_count: usize,
+    pub(in crate::canonical_scene::store) image_payload_bytes: u64,
+    pub(in crate::canonical_scene::store) media_type_bytes: u64,
     pub(in crate::canonical_scene::store) logical_mesh_count: usize,
     pub(in crate::canonical_scene::store) primitive_count: usize,
     pub(in crate::canonical_scene::store) attribute_count: usize,
@@ -180,6 +190,30 @@ pub(in crate::canonical_scene::store) struct NodeSceneSnapshotTotals {
     pub(in crate::canonical_scene::store) canonical_scalar_count: u64,
     pub(in crate::canonical_scene::store) f32_scalar_count: u64,
     pub(in crate::canonical_scene::store) u32_scalar_count: u64,
+    pub(in crate::canonical_scene::store) skin_count: usize,
+    pub(in crate::canonical_scene::store) logical_morph_count: usize,
+    pub(in crate::canonical_scene::store) morph_definition_count: usize,
+    pub(in crate::canonical_scene::store) primitive_deformation_count: usize,
+    pub(in crate::canonical_scene::store) morph_target_count: usize,
+    pub(in crate::canonical_scene::store) morph_delta_count: usize,
+    pub(in crate::canonical_scene::store) deformation_mesh_instance_count: usize,
+    pub(in crate::canonical_scene::store) skin_joint_count: u64,
+    pub(in crate::canonical_scene::store) inverse_bind_matrix_count: u64,
+    pub(in crate::canonical_scene::store) skin_correction_matrix_count: u64,
+    pub(in crate::canonical_scene::store) skin_name_bytes: u64,
+    pub(in crate::canonical_scene::store) morph_default_weight_count: u64,
+    pub(in crate::canonical_scene::store) morph_name_bytes: u64,
+    pub(in crate::canonical_scene::store) influence_row_count: u64,
+    pub(in crate::canonical_scene::store) influence_count: u64,
+    pub(in crate::canonical_scene::store) morph_value_vector_count: u64,
+    pub(in crate::canonical_scene::store) morph_sparse_index_count: u64,
+    pub(in crate::canonical_scene::store) instance_morph_weight_count: u64,
+    pub(in crate::canonical_scene::store) animation_clip_count: usize,
+    pub(in crate::canonical_scene::store) animation_channel_count: usize,
+    pub(in crate::canonical_scene::store) animation_time_scalar_count: u64,
+    pub(in crate::canonical_scene::store) animation_value_scalar_count: u64,
+    pub(in crate::canonical_scene::store) animation_in_tangent_scalar_count: u64,
+    pub(in crate::canonical_scene::store) animation_out_tangent_scalar_count: u64,
     pub(in crate::canonical_scene::store) transcript_bytes: u64,
     pub(in crate::canonical_scene::store) work_units: u64,
 }
@@ -218,7 +252,6 @@ struct TestCanonicalTranscript {
 
 #[derive(Clone, Copy)]
 struct GeometryCollectionCounts {
-    materials: usize,
     logical_meshes: usize,
     primitives: usize,
     attributes: usize,
@@ -233,6 +266,21 @@ struct GeometryPayloadTotals {
     canonical_scalars: u64,
     f32_scalars: u64,
     u32_scalars: u64,
+}
+
+#[derive(Clone, Copy)]
+struct NodeSceneSummary {
+    nodes: usize,
+    roots: usize,
+    edges: usize,
+    appearance: appearance::AppearanceCollectionCounts,
+    appearance_payloads: appearance::AppearancePayloadTotals,
+    geometry: GeometryCollectionCounts,
+    geometry_payloads: GeometryPayloadTotals,
+    deformation: deformation::DeformationCollectionCounts,
+    deformation_payloads: deformation::DeformationPayloadTotals,
+    animation: animation::AnimationCollectionCounts,
+    animation_payloads: animation::AnimationPayloadTotals,
 }
 
 impl GeometryPayloadTotals {
@@ -344,12 +392,31 @@ fn capture_node_scene_with_encoder(
     let node_count = source.node_count();
     let root_count = source.root_count();
     let edge_count = source.edge_count();
-    let geometry_counts = GeometryCollectionCounts {
+    let appearance_counts = appearance::AppearanceCollectionCounts {
+        images: source.image_count(),
+        samplers: source.sampler_count(),
+        textures: source.texture_count(),
         materials: source.material_count(),
+        bindings: source.material_binding_count(),
+    };
+    let geometry_counts = GeometryCollectionCounts {
         logical_meshes: source.logical_mesh_count(),
         primitives: source.primitive_count(),
         attributes: source.attribute_count(),
         mesh_instances: source.mesh_instance_count(),
+    };
+    let deformation_counts = deformation::DeformationCollectionCounts {
+        skins: source.skin_count(),
+        logical_morphs: source.logical_morph_count(),
+        morph_definitions: source.morph_definition_count(),
+        primitives: source.primitive_deformation_count(),
+        morph_targets: source.morph_target_count(),
+        morph_deltas: source.morph_delta_count(),
+        mesh_instances: source.mesh_instance_count(),
+    };
+    let animation_counts = animation::AnimationCollectionCounts {
+        clips: source.animation_clip_count(),
+        channels: source.animation_channel_count(),
     };
 
     if limits.max_preview_bytes != 0 {
@@ -442,23 +509,49 @@ fn capture_node_scene_with_encoder(
     }
     transcript.tagged_usize(TAG_COLLECTION_TOTAL, node_count)?;
 
-    let mut geometry = cursor.into_geometry().map_err(map_snapshot_invariant)?;
+    let appearance_totals = appearance::write_appearance(
+        cursor.appearance().map_err(map_snapshot_invariant)?,
+        appearance_counts,
+        &mut transcript,
+        &mut preview,
+        &mut work,
+    )?;
     let geometry_totals = write_geometry(
-        &mut geometry,
+        cursor.geometry().map_err(map_snapshot_invariant)?,
         geometry_counts,
         &mut transcript,
         &mut preview,
         &mut work,
     )?;
-    geometry.finish().map_err(map_snapshot_invariant)?;
+    let deformation_totals = deformation::write_deformation(
+        cursor.deformation().map_err(map_snapshot_invariant)?,
+        deformation_counts,
+        &mut transcript,
+        &mut preview,
+        &mut work,
+    )?;
+    let animation_totals = animation::write_animation(
+        cursor.animation().map_err(map_snapshot_invariant)?,
+        animation_counts,
+        &mut transcript,
+        &mut preview,
+        &mut work,
+    )?;
+    cursor.finish().map_err(map_snapshot_invariant)?;
 
-    preview.summary(
-        node_count,
-        root_count,
-        edge_count,
-        geometry_counts,
-        geometry_totals,
-    );
+    preview.summary(NodeSceneSummary {
+        nodes: node_count,
+        roots: root_count,
+        edges: edge_count,
+        appearance: appearance_counts,
+        appearance_payloads: appearance_totals,
+        geometry: geometry_counts,
+        geometry_payloads: geometry_totals,
+        deformation: deformation_counts,
+        deformation_payloads: deformation_totals,
+        animation: animation_counts,
+        animation_payloads: animation_totals,
+    });
     work.finish()?;
     let work_units = work.observed();
     let encoded = transcript.finish();
@@ -473,7 +566,13 @@ fn capture_node_scene_with_encoder(
                 node_count,
                 root_count,
                 edge_count,
-                material_count: geometry_counts.materials,
+                image_count: appearance_counts.images,
+                sampler_count: appearance_counts.samplers,
+                texture_count: appearance_counts.textures,
+                material_count: appearance_counts.materials,
+                material_binding_count: appearance_counts.bindings,
+                image_payload_bytes: appearance_totals.image_payload_bytes,
+                media_type_bytes: appearance_totals.media_type_bytes,
                 logical_mesh_count: geometry_counts.logical_meshes,
                 primitive_count: geometry_counts.primitives,
                 attribute_count: geometry_counts.attributes,
@@ -484,6 +583,30 @@ fn capture_node_scene_with_encoder(
                 canonical_scalar_count: geometry_totals.canonical_scalars,
                 f32_scalar_count: geometry_totals.f32_scalars,
                 u32_scalar_count: geometry_totals.u32_scalars,
+                skin_count: deformation_counts.skins,
+                logical_morph_count: deformation_counts.logical_morphs,
+                morph_definition_count: deformation_counts.morph_definitions,
+                primitive_deformation_count: deformation_counts.primitives,
+                morph_target_count: deformation_counts.morph_targets,
+                morph_delta_count: deformation_counts.morph_deltas,
+                deformation_mesh_instance_count: deformation_counts.mesh_instances,
+                skin_joint_count: deformation_totals.skin_joints,
+                inverse_bind_matrix_count: deformation_totals.inverse_bind_matrices,
+                skin_correction_matrix_count: deformation_totals.skin_correction_matrices,
+                skin_name_bytes: deformation_totals.skin_name_bytes,
+                morph_default_weight_count: deformation_totals.morph_default_weights,
+                morph_name_bytes: deformation_totals.morph_name_bytes,
+                influence_row_count: deformation_totals.influence_rows,
+                influence_count: deformation_totals.influences,
+                morph_value_vector_count: deformation_totals.morph_value_vectors,
+                morph_sparse_index_count: deformation_totals.morph_sparse_indices,
+                instance_morph_weight_count: deformation_totals.instance_morph_weights,
+                animation_clip_count: animation_counts.clips,
+                animation_channel_count: animation_counts.channels,
+                animation_time_scalar_count: animation_totals.time_scalars,
+                animation_value_scalar_count: animation_totals.value_scalars,
+                animation_in_tangent_scalar_count: animation_totals.in_tangent_scalars,
+                animation_out_tangent_scalar_count: animation_totals.out_tangent_scalars,
                 transcript_bytes: encoded.bytes,
                 work_units,
             },
@@ -504,30 +627,6 @@ fn write_geometry(
     transcript.write_tag(TAG_GEOMETRY)?;
     transcript.tagged_u8(TAG_PRESENCE, PRESENCE_PRESENT)?;
     preview.begin_geometry();
-
-    begin_geometry_collection(
-        transcript,
-        preview,
-        work,
-        TAG_MATERIALS,
-        "materials",
-        counts.materials,
-    )?;
-    for _ in 0..counts.materials {
-        work.observe()?;
-        let material = cursor
-            .next_material()
-            .map_err(map_snapshot_invariant)?
-            .ok_or(NodeSceneSnapshotError::InconsistentView {
-                reason: "material collection ended before declared total",
-            })?;
-        let source_index = material.source_index();
-        transcript.write_tag(TAG_MATERIAL)?;
-        transcript.tagged_usize(TAG_REFERENCE, source_index)?;
-        let render = preview.begin_geometry_item("material", source_index)?;
-        preview.end_geometry_item(render);
-    }
-    transcript.tagged_usize(TAG_COLLECTION_TOTAL, counts.materials)?;
 
     begin_geometry_collection(
         transcript,
@@ -1733,42 +1832,108 @@ impl PreviewSink {
         self.push_str("\n");
     }
 
-    fn summary(
-        &mut self,
-        nodes: usize,
-        roots: usize,
-        edges: usize,
-        counts: GeometryCollectionCounts,
-        payloads: GeometryPayloadTotals,
-    ) {
+    fn summary(&mut self, summary: NodeSceneSummary) {
+        let NodeSceneSummary {
+            nodes,
+            roots,
+            edges,
+            appearance,
+            appearance_payloads,
+            geometry,
+            geometry_payloads,
+            deformation,
+            deformation_payloads,
+            animation,
+            animation_payloads,
+        } = summary;
         self.push_str("summary(nodes=");
         self.push_usize(nodes);
         self.push_str(",roots=");
         self.push_usize(roots);
         self.push_str(",edges=");
         self.push_usize(edges);
+        self.push_str(",images=");
+        self.push_usize(appearance.images);
+        self.push_str(",samplers=");
+        self.push_usize(appearance.samplers);
+        self.push_str(",textures=");
+        self.push_usize(appearance.textures);
         self.push_str(",materials=");
-        self.push_usize(counts.materials);
+        self.push_usize(appearance.materials);
+        self.push_str(",bindings=");
+        self.push_usize(appearance.bindings);
+        self.push_str(",image_payload_bytes=");
+        self.push_u64(appearance_payloads.image_payload_bytes);
+        self.push_str(",media_type_bytes=");
+        self.push_u64(appearance_payloads.media_type_bytes);
         self.push_str(",logical_meshes=");
-        self.push_usize(counts.logical_meshes);
+        self.push_usize(geometry.logical_meshes);
         self.push_str(",primitives=");
-        self.push_usize(counts.primitives);
+        self.push_usize(geometry.primitives);
         self.push_str(",attributes=");
-        self.push_usize(counts.attributes);
+        self.push_usize(geometry.attributes);
         self.push_str(",mesh_instances=");
-        self.push_usize(counts.mesh_instances);
+        self.push_usize(geometry.mesh_instances);
         self.push_str(",polygon_boundaries=");
-        self.push_u64(payloads.polygon_boundaries);
+        self.push_u64(geometry_payloads.polygon_boundaries);
         self.push_str(",primitive_indices=");
-        self.push_u64(payloads.primitive_indices);
+        self.push_u64(geometry_payloads.primitive_indices);
         self.push_str(",sparse_indices=");
-        self.push_u64(payloads.sparse_indices);
+        self.push_u64(geometry_payloads.sparse_indices);
         self.push_str(",canonical_scalars=");
-        self.push_u64(payloads.canonical_scalars);
+        self.push_u64(geometry_payloads.canonical_scalars);
         self.push_str(",f32_scalars=");
-        self.push_u64(payloads.f32_scalars);
+        self.push_u64(geometry_payloads.f32_scalars);
         self.push_str(",u32_scalars=");
-        self.push_u64(payloads.u32_scalars);
+        self.push_u64(geometry_payloads.u32_scalars);
+        self.push_str(",skins=");
+        self.push_usize(deformation.skins);
+        self.push_str(",logical_morphs=");
+        self.push_usize(deformation.logical_morphs);
+        self.push_str(",morph_definitions=");
+        self.push_usize(deformation.morph_definitions);
+        self.push_str(",primitive_deformations=");
+        self.push_usize(deformation.primitives);
+        self.push_str(",morph_targets=");
+        self.push_usize(deformation.morph_targets);
+        self.push_str(",morph_deltas=");
+        self.push_usize(deformation.morph_deltas);
+        self.push_str(",deformation_mesh_instances=");
+        self.push_usize(deformation.mesh_instances);
+        self.push_str(",skin_joints=");
+        self.push_u64(deformation_payloads.skin_joints);
+        self.push_str(",inverse_bind_matrices=");
+        self.push_u64(deformation_payloads.inverse_bind_matrices);
+        self.push_str(",skin_correction_matrices=");
+        self.push_u64(deformation_payloads.skin_correction_matrices);
+        self.push_str(",skin_name_bytes=");
+        self.push_u64(deformation_payloads.skin_name_bytes);
+        self.push_str(",morph_default_weights=");
+        self.push_u64(deformation_payloads.morph_default_weights);
+        self.push_str(",morph_name_bytes=");
+        self.push_u64(deformation_payloads.morph_name_bytes);
+        self.push_str(",influence_rows=");
+        self.push_u64(deformation_payloads.influence_rows);
+        self.push_str(",influences=");
+        self.push_u64(deformation_payloads.influences);
+        self.push_str(",morph_value_vectors=");
+        self.push_u64(deformation_payloads.morph_value_vectors);
+        self.push_str(",morph_sparse_indices=");
+        self.push_u64(deformation_payloads.morph_sparse_indices);
+        self.push_str(",instance_morph_weights=");
+        self.push_u64(deformation_payloads.instance_morph_weights);
+        self.push_str(",animation_clips=");
+        self.push_usize(animation.clips);
+        self.push_str(",animation_channels=");
+        self.push_usize(animation.channels);
+        self.push_str(",animation_times=");
+        self.push_u64(animation_payloads.time_scalars);
+        self.push_str(",animation_values=");
+        self.push_u64(animation_payloads.value_scalars);
+        self.push_str(",animation_in_tangents=");
+        self.push_u64(animation_payloads.in_tangent_scalars);
+        self.push_str(",animation_out_tangents=");
+        self.push_u64(animation_payloads.out_tangent_scalars);
         self.push_str(")\n");
     }
 
