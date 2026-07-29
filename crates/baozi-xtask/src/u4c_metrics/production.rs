@@ -12,6 +12,7 @@
 )]
 
 mod build_output;
+mod obj;
 
 use build_output::BuildOutputSpecification;
 #[cfg(feature = "repository-input-candidate")]
@@ -44,7 +45,7 @@ use std::process::{self, Command};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 pub(super) const SPECIFICATION_PATH: &str = "docs/conformance/u4c-metrics.toml";
-const SPECIFICATION_SCHEMA_VERSION: u64 = 2;
+const SPECIFICATION_SCHEMA_VERSION: u64 = 3;
 const PRODUCTION_SCOPE: &str = "u4c-production";
 const PRODUCTION_PROBE_PACKAGE: &str = "baozi-core";
 const PRODUCTION_PROBE_CARGO_TARGET: &str = "baozi_core";
@@ -97,6 +98,7 @@ struct ProductionSpecification {
     semantic_vectors: Vec<SemanticVectorSpecification>,
     mutations: Vec<MutationSpecification>,
     scenarios: Vec<ScaleScenarioSpecification>,
+    obj_capability: obj::ObjCapabilitySpecification,
     measurement: MeasurementSpecification,
     coverage: CoverageSpecification,
     #[cfg(feature = "repository-input-candidate")]
@@ -277,6 +279,17 @@ struct CoverageSpecification {
 struct CoverageMappingSpecification {
     entry_point: String,
     scenario_id: String,
+}
+
+impl CoverageSpecification {
+    fn qualifies_u4_exit(&self) -> bool {
+        self.mapped_entry_points.len() == self.required_entry_points.len()
+            && self
+                .mapped_entry_points
+                .iter()
+                .zip(&self.required_entry_points)
+                .all(|(mapping, required)| mapping.entry_point == *required)
+    }
 }
 
 pub(super) fn collect(repository_root: &Path, specification_path: &Path) -> Result<Value, String> {
@@ -472,7 +485,7 @@ impl ProductionSpecification {
         if self.report_contract.prefix != PRODUCTION_REPORT_PREFIX
             || self.report_contract.schema_id != "baozi.u4c.production-report"
             || self.report_contract.schema_version != 1
-            || self.report_contract.report_revision != 4
+            || self.report_contract.report_revision != 5
             || self.report_contract.scenario_set_id != "canonical-store-production-v1"
             || self.report_contract.payload_bytes == 0
             || !is_lowercase_sha256(&self.report_contract.sha256)
@@ -535,6 +548,7 @@ impl ProductionSpecification {
         validate_semantic_vectors(&self.semantic_vectors)?;
         validate_mutations(&self.mutations)?;
         validate_scenarios(&self.scenarios)?;
+        obj::validate_specification(&self.obj_capability)?;
         if self.measurement.scale_completed_lookups != 7
             || self.measurement.scale_rejected_lookups != 1
             || self.measurement.scale_lookup_events != 50
@@ -551,7 +565,7 @@ impl ProductionSpecification {
                     .to_owned(),
             );
         }
-        validate_coverage(&self.coverage)?;
+        validate_coverage(&self.coverage, &self.obj_capability)?;
 
         Ok(())
     }
@@ -843,7 +857,10 @@ fn validate_scenarios(values: &[ScaleScenarioSpecification]) -> Result<(), Strin
     Ok(())
 }
 
-fn validate_coverage(coverage: &CoverageSpecification) -> Result<(), String> {
+fn validate_coverage(
+    coverage: &CoverageSpecification,
+    obj_capability: &obj::ObjCapabilitySpecification,
+) -> Result<(), String> {
     let required = coverage
         .required_entry_points
         .iter()
@@ -854,12 +871,17 @@ fn validate_coverage(coverage: &CoverageSpecification) -> Result<(), String> {
         &required,
         REQUIRED_COVERAGE_ENTRY_POINTS,
     )?;
-    if let Some(mapping) = coverage.mapped_entry_points.first() {
-        return Err(format!(
-            "U4c production report revision 4 carries no production entry-point evidence; \
-             mapping {} to {} is forbidden until U4d adds path-bound report evidence",
-            mapping.entry_point, mapping.scenario_id
-        ));
+    let [mapping] = coverage.mapped_entry_points.as_slice() else {
+        return Err(
+            "U4c production report revision 5 must map exactly the admitted OBJ capability"
+                .to_owned(),
+        );
+    };
+    if !obj_capability.matches_mapping(mapping) {
+        return Err(
+            "U4c production OBJ coverage mapping must bind the typed path-bound scenario"
+                .to_owned(),
+        );
     }
     Ok(())
 }
@@ -2708,6 +2730,7 @@ struct ProductionReport {
     scenario_set_id: String,
     scale_scenarios: Vec<ScaleScenarioReport>,
     inherited_hot_leaf_scenario: InheritedHotLeafReport,
+    obj_capability: obj::ObjCapabilityReport,
     validation_faults: Vec<ValidationFaultReport>,
 }
 
@@ -2920,7 +2943,7 @@ struct FaultPhysicalReport {
 }
 
 #[cfg(feature = "repository-input-candidate")]
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 struct PhysicalAccountReport {
     live_retained_bytes: u64,
@@ -3010,9 +3033,10 @@ fn validate_production_report(
 
     validate_scale_reports(specification, &report.scale_scenarios)?;
     validate_inherited_hot_leaf(specification, &report.inherited_hot_leaf_scenario)?;
+    obj::validate_report(specification, &report.obj_capability)?;
     validate_validation_faults(specification, &report.validation_faults)?;
 
-    Ok(false)
+    Ok(specification.coverage.qualifies_u4_exit())
 }
 
 #[cfg(feature = "repository-input-candidate")]
@@ -3106,17 +3130,15 @@ fn validate_scale_reports(
             &report.physical_account.target_retained,
             &format!("{} target retained", expected.scenario_id),
         )?;
-        if report.physical_account.target_retained.live_retained_bytes
-            != expected.target_live_retained_bytes
-            || report
-                .physical_account
-                .target_retained
-                .live_retained_allocations
-                != expected.target_live_retained_allocations
-        {
+        let target_live_retained = live_retained_charge(&report.physical_account.target_retained);
+        let expected_live_retained = (
+            expected.target_live_retained_bytes,
+            expected.target_live_retained_allocations,
+        );
+        if target_live_retained != expected_live_retained {
             return Err(format!(
-                "U4c production scale scenario {} physical target charge drifted",
-                expected.scenario_id
+                "U4c production scale scenario {} physical target charge drifted: expected {:?} bytes/allocations, found {:?}",
+                expected.scenario_id, expected_live_retained, target_live_retained,
             ));
         }
         validate_healthy_account(
@@ -3127,6 +3149,16 @@ fn validate_scale_reports(
             &report.physical_account.after_target_release,
             &format!("{} after target release", expected.scenario_id),
         )?;
+        if live_retained_charge(&report.physical_account.after_typed_inspection)
+            != live_retained_charge(&report.physical_account.target_retained)
+            || live_retained_charge(&report.physical_account.after_target_release)
+                != live_retained_charge(&report.physical_account.foreign_baseline)
+        {
+            return Err(format!(
+                "U4c production scale scenario {} physical live-charge lifecycle drifted",
+                expected.scenario_id
+            ));
+        }
         validate_released_account(
             &report.physical_account.after_foreign_release,
             &format!("{} after foreign release", expected.scenario_id),
@@ -3504,6 +3536,14 @@ fn validate_healthy_account(snapshot: &PhysicalAccountReport, label: &str) -> Re
 }
 
 #[cfg(feature = "repository-input-candidate")]
+fn live_retained_charge(snapshot: &PhysicalAccountReport) -> (u64, u64) {
+    (
+        snapshot.live_retained_bytes,
+        snapshot.live_retained_allocations,
+    )
+}
+
+#[cfg(feature = "repository-input-candidate")]
 fn validate_released_account(snapshot: &PhysicalAccountReport, label: &str) -> Result<(), String> {
     validate_healthy_account(snapshot, label)?;
     if snapshot.live_retained_bytes != 0 || snapshot.live_retained_allocations != 0 {
@@ -3583,19 +3623,47 @@ mod tests {
     }
 
     #[test]
-    fn rejects_coverage_mapping_without_path_bound_report_evidence() {
+    fn rejects_coverage_mapping_to_an_untyped_scenario() {
         let managed = std::str::from_utf8(include_bytes!(
             "../../../../docs/conformance/u4c-metrics.toml"
         ))
         .expect("managed U4c production specification must be UTF-8");
         let mapped = managed.replace(
-            "mapped_entry_points = []",
-            "mapped_entry_points = [{ entry_point = \"canonical-obj-corner-smoothing\", scenario_id = \"complex-members-n-v1\" }]",
+            "{ entry_point = \"canonical-obj-corner-smoothing\", scenario_id = \"canonical-obj-corner-smoothing-v1\" }",
+            "{ entry_point = \"canonical-obj-corner-smoothing\", scenario_id = \"complex-members-n-v1\" }",
         );
 
         let error = ProductionSpecification::parse(mapped.as_bytes())
             .expect_err("synthetic coverage mapping must be rejected");
-        assert!(error.contains("path-bound report evidence"), "{error}");
+        assert!(error.contains("coverage mapping"), "{error}");
+    }
+
+    #[test]
+    fn rejects_missing_obj_coverage_mapping() {
+        let managed = std::str::from_utf8(include_bytes!(
+            "../../../../docs/conformance/u4c-metrics.toml"
+        ))
+        .expect("managed U4c production specification must be UTF-8");
+        let unmapped = managed.replace(
+            "mapped_entry_points = [\n    { entry_point = \"canonical-obj-corner-smoothing\", scenario_id = \"canonical-obj-corner-smoothing-v1\" },\n]",
+            "mapped_entry_points = []",
+        );
+
+        let error = ProductionSpecification::parse(unmapped.as_bytes())
+            .expect_err("the typed OBJ scenario must remain mapped");
+        assert!(error.contains("must map exactly"), "{error}");
+    }
+
+    #[test]
+    fn one_of_six_mapped_entry_points_does_not_qualify_u4_exit() {
+        let specification = ProductionSpecification::parse(include_bytes!(
+            "../../../../docs/conformance/u4c-metrics.toml"
+        ))
+        .expect("managed U4c production specification must parse");
+
+        assert_eq!(specification.coverage.required_entry_points.len(), 6);
+        assert_eq!(specification.coverage.mapped_entry_points.len(), 1);
+        assert!(!specification.coverage.qualifies_u4_exit());
     }
 
     #[test]

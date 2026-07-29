@@ -1,9 +1,10 @@
 mod report;
 mod scenarios;
 
-use report::{ProductionReport, REPORT_PREFIX, render, sha256_hex};
+use report::{ProductionReport, REPORT_PREFIX, hex_encode, render, sha256_hex};
 use scenarios::{
-    collect_inherited_hot_leaf_scenario, collect_scale_scenarios, collect_validation_faults,
+    collect_inherited_hot_leaf_scenario, collect_obj_capability, collect_scale_scenarios,
+    collect_validation_faults,
 };
 
 #[test]
@@ -12,6 +13,7 @@ fn canonical_store_u4c_production_v1_probe() {
     let report = ProductionReport::new(
         collect_scale_scenarios(),
         collect_inherited_hot_leaf_scenario(),
+        collect_obj_capability(),
         collect_validation_faults(),
     );
     println!("\n{REPORT_PREFIX}{}", render(&report));
@@ -43,5 +45,6 @@ fn production_report_static_vectors_are_stable() {
         sha256_hex(b"abc"),
         "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
     );
+    assert_eq!(hex_encode(&[0x00, 0xab, 0xff]), "00abff");
     assert!(REPORT_PREFIX.is_ascii());
 }

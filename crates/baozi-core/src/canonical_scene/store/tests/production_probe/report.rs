@@ -12,7 +12,7 @@ use sha2::{Digest, Sha256};
 pub(super) const REPORT_PREFIX: &str = "BAOZI_U4C_PRODUCTION_V1=";
 const REPORT_SCHEMA_ID: &str = "baozi.u4c.production-report";
 const REPORT_SCHEMA_VERSION: u32 = 1;
-const REPORT_REVISION: u32 = 4;
+const REPORT_REVISION: u32 = 5;
 const SCENARIO_SET_ID: &str = "canonical-store-production-v1";
 
 #[derive(Serialize)]
@@ -23,6 +23,7 @@ pub(super) struct ProductionReport {
     scenario_set_id: &'static str,
     scale_scenarios: Vec<ScaleScenarioReport>,
     inherited_hot_leaf_scenario: InheritedHotLeafReport,
+    obj_capability: ObjCapabilityReport,
     validation_faults: Vec<ValidationFaultReport>,
 }
 
@@ -30,6 +31,7 @@ impl ProductionReport {
     pub(super) fn new(
         scale_scenarios: Vec<ScaleScenarioReport>,
         inherited_hot_leaf_scenario: InheritedHotLeafReport,
+        obj_capability: ObjCapabilityReport,
         validation_faults: Vec<ValidationFaultReport>,
     ) -> Self {
         Self {
@@ -39,6 +41,7 @@ impl ProductionReport {
             scenario_set_id: SCENARIO_SET_ID,
             scale_scenarios,
             inherited_hot_leaf_scenario,
+            obj_capability,
             validation_faults,
         }
     }
@@ -79,6 +82,97 @@ pub(super) struct InheritedHotLeafReport {
     pub(super) derived_release: ReleaseReport,
     pub(super) physical_account: SharePhysicalReport,
     pub(super) factory_after_account_release: PhysicalFactoryReport,
+}
+
+#[derive(Serialize)]
+pub(super) struct ObjCapabilityReport {
+    pub(super) entry_point: &'static str,
+    pub(super) scenario_id: &'static str,
+    pub(super) source_shape: ObjSourceShapeReport,
+    pub(super) canonical_shape: ObjCanonicalShapeReport,
+    pub(super) source_vector: FixedVectorReport,
+    pub(super) equivalent_source_vector: FixedVectorReport,
+    pub(super) equivalent_snapshot_digest_hex: String,
+    pub(super) mutations: Vec<ObjMutationReport>,
+    pub(super) generation_reservations: u64,
+    pub(super) canonical_block_count: usize,
+    pub(super) outcome_evidence_block_count: usize,
+    pub(super) full_snapshot_digest_hex: String,
+    pub(super) bounded_snapshot_digest_hex: String,
+    pub(super) snapshot_totals: ObjSnapshotTotalsReport,
+    pub(super) bounded_preview: ObjBoundedPreviewReport,
+    pub(super) evidence: EvidenceReport,
+    pub(super) construction: PhaseReport,
+    pub(super) inspection: PhaseReport,
+    pub(super) snapshot: PhaseReport,
+    pub(super) release: ReleaseReport,
+    pub(super) physical_account: ObjPhysicalReport,
+    pub(super) factory_after_account_release: PhysicalFactoryReport,
+}
+
+#[derive(Serialize)]
+pub(super) struct ObjSourceShapeReport {
+    pub(super) position_count: usize,
+    pub(super) texcoord_count: usize,
+    pub(super) normal_count: usize,
+    pub(super) face_count: usize,
+    pub(super) corner_count: usize,
+}
+
+#[derive(Serialize)]
+pub(super) struct ObjCanonicalShapeReport {
+    pub(super) topology: &'static str,
+    pub(super) vertex_count: u32,
+    pub(super) corner_count: u32,
+    pub(super) face_count: u32,
+    pub(super) vertex_position_elements: u32,
+    pub(super) corner_normal_elements: u32,
+    pub(super) corner_texcoord_elements: u32,
+    pub(super) face_smoothing_group_elements: u32,
+}
+
+#[derive(Serialize)]
+pub(super) struct FixedVectorReport {
+    pub(super) schema_id: &'static str,
+    pub(super) observed_bytes: usize,
+    pub(super) sha256: String,
+}
+
+#[derive(Serialize)]
+pub(super) struct ObjMutationReport {
+    pub(super) field_class: &'static str,
+    pub(super) source_vector: FixedVectorReport,
+    pub(super) snapshot_digest_hex: String,
+}
+
+#[derive(Serialize)]
+pub(super) struct ObjSnapshotTotalsReport {
+    pub(super) node_count: usize,
+    pub(super) root_count: usize,
+    pub(super) edge_count: usize,
+    pub(super) material_count: usize,
+    pub(super) logical_mesh_count: usize,
+    pub(super) primitive_count: usize,
+    pub(super) attribute_count: usize,
+    pub(super) mesh_instance_count: usize,
+    pub(super) polygon_boundary_count: u64,
+    pub(super) primitive_index_count: u64,
+    pub(super) sparse_index_count: u64,
+    pub(super) canonical_scalar_count: u64,
+    pub(super) f32_scalar_count: u64,
+    pub(super) u32_scalar_count: u64,
+    pub(super) transcript_bytes: u64,
+    pub(super) work_units: u64,
+}
+
+#[derive(Serialize)]
+pub(super) struct ObjBoundedPreviewReport {
+    pub(super) schema_id: &'static str,
+    pub(super) bytes: usize,
+    pub(super) sha256: String,
+    pub(super) items_omitted_by_limit: u64,
+    pub(super) bytes_truncated: bool,
+    pub(super) items_truncated: bool,
 }
 
 #[derive(Serialize)]
@@ -219,6 +313,15 @@ pub(super) struct FaultPhysicalReport {
     pub(super) baseline: PhysicalAccountReport,
     pub(super) retained: PhysicalAccountReport,
     pub(super) after_handoff: PhysicalAccountReport,
+    pub(super) after_release: PhysicalAccountReport,
+}
+
+#[derive(Serialize)]
+pub(super) struct ObjPhysicalReport {
+    pub(super) baseline: PhysicalAccountReport,
+    pub(super) retained: PhysicalAccountReport,
+    pub(super) after_inspection: PhysicalAccountReport,
+    pub(super) after_snapshot: PhysicalAccountReport,
     pub(super) after_release: PhysicalAccountReport,
 }
 
@@ -386,9 +489,13 @@ impl From<PhysicalStorageAccountFactorySnapshot> for PhysicalFactoryReport {
 
 pub(super) fn sha256_hex(bytes: &[u8]) -> String {
     let digest = Sha256::digest(bytes);
-    let mut hex = String::with_capacity(digest.len() * 2);
-    for byte in digest {
-        write!(hex, "{byte:02x}").expect("writing SHA-256 hex cannot fail");
+    hex_encode(&digest)
+}
+
+pub(super) fn hex_encode(bytes: &[u8]) -> String {
+    let mut hex = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        write!(hex, "{byte:02x}").expect("writing digest hex cannot fail");
     }
     hex
 }

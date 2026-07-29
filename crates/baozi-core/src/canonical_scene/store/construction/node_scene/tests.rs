@@ -15,10 +15,9 @@ use crate::canonical_scene::store::construction::{
 };
 use crate::canonical_scene::store::production::{
     AuthoringRange, GeometryAttributeAuthoring, GeometryAuthoringBatch,
-    GeometryLogicalMeshAuthoring, GeometryMeshInstanceAuthoring, GeometryPrimitiveAuthoring,
-    GeometryTopologyAuthoring, LogicalMeshLocalId, NodeAuthoringBatch, NodeAuthoringFailure,
-    NodeAuthoringLimit, NodeAuthoringNode, NodeAuthoringSemanticError, NodeLocalId, NodeParent,
-    Presence, SceneAuthoringBatch,
+    GeometryLogicalMeshAuthoring, GeometryPrimitiveAuthoring, GeometryTopologyAuthoring,
+    NodeAuthoringBatch, NodeAuthoringFailure, NodeAuthoringLimit, NodeAuthoringNode,
+    NodeAuthoringSemanticError, NodeLocalId, NodeParent, Presence, SceneAuthoringBatch,
 };
 use crate::entity::AuthoredTransform;
 use crate::identity::{SceneGenerationError, SceneGenerationId};
@@ -29,6 +28,15 @@ use super::{
     NODE_SCENE_BUILD_INVARIANT_CODE, NODE_SCENE_STORAGE_REJECTION_CODE, NodeSceneBuildFaults,
     NodeSceneConstructionRejection, NodeSceneConstructionTerminal, NodeSceneRichFailure,
     PreparedNodeSceneConstruction,
+};
+
+mod obj_capability;
+
+pub(in crate::canonical_scene::store) use obj_capability::{
+    OBJ_SOURCE_VECTOR_SCHEMA_ID, ObjCapabilityCanonicalShapeObservation,
+    ObjCapabilitySourceShapeObservation, build_obj_capability_scene_for_probe,
+    capture_obj_capability_snapshots_for_probe, collect_obj_capability_vectors_for_probe,
+    inspect_obj_capability_semantics_for_probe,
 };
 
 const SINGLE_TRS_AUTHORING_VALIDATION_WORK: u64 = 41;
@@ -304,84 +312,6 @@ fn source_ordered_forest_materializes_canonical_graph_and_preserves_authored_bit
     assert_eq!(account.snapshot().live_retained_allocations(), 0);
     drop(account);
     assert_eq!(factory.snapshot().live_accounts(), 0);
-}
-
-#[test]
-fn obj_shaped_geometry_uses_one_scene_root_and_one_generation() {
-    let factory = test_factory();
-    let account = test_account(&factory, 256);
-    let positions = [0.0_f32, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0];
-    let position_indices = [0_u32, 1, 2, 0, 2, 1];
-    let normal_sources = [0.0_f32, 0.0, 1.0, 0.0, 0.0, -1.0];
-    let normal_indices = [0_u32, 0, 0, 1, 1, 1];
-    let texcoord_sources = [0.0_f32, 0.0, 1.0, 0.0, 0.0, 1.0, 0.5, 0.5];
-    let texcoord_indices = [0_u32, 1, 2, 3, 2, 1];
-    let smoothing_groups = [1_u32, 0];
-    let attributes = [
-        GeometryAttributeAuthoring::f32(
-            AttributeSemantic::Position,
-            AttributeDomain::Vertex,
-            3,
-            &positions,
-            Presence::Absent,
-        ),
-        GeometryAttributeAuthoring::f32(
-            AttributeSemantic::Normal,
-            AttributeDomain::Corner,
-            3,
-            &normal_sources,
-            Presence::Present(&normal_indices),
-        ),
-        GeometryAttributeAuthoring::f32(
-            AttributeSemantic::Texcoord(0),
-            AttributeDomain::Corner,
-            2,
-            &texcoord_sources,
-            Presence::Present(&texcoord_indices),
-        ),
-        GeometryAttributeAuthoring::u32(
-            AttributeSemantic::SmoothingGroup,
-            AttributeDomain::Face,
-            1,
-            &smoothing_groups,
-        ),
-    ];
-    let primitives = [GeometryPrimitiveAuthoring::new(
-        GeometryTopologyAuthoring::TriangleList,
-        Presence::Present(&position_indices),
-        Presence::Absent,
-        AuthoringRange::new(0, 4),
-    )];
-    let logical_meshes = [GeometryLogicalMeshAuthoring::new(AuthoringRange::new(0, 1))];
-    let instances = [GeometryMeshInstanceAuthoring::new(
-        NodeLocalId::new(0),
-        LogicalMeshLocalId::new(0),
-    )];
-    let input = SceneAuthoringBatch::new(
-        single_trs_batch(),
-        GeometryAuthoringBatch::new(0, &logical_meshes, &primitives, &attributes, &instances),
-    );
-
-    let prepared = SceneConstructionOperation::with_account_for_scene_input(
-        &account,
-        test_limits(),
-        input,
-        SceneValidationLimits::default(),
-    )
-    .expect("OBJ-shaped Scene input admission")
-    .try_validate()
-    .unwrap_or_else(|_| panic!("OBJ-shaped Scene input validation"))
-    .prepare()
-    .expect("OBJ-shaped Scene publication");
-    let parts = successful_parts(prepared);
-
-    assert_eq!(parts.scene.source_node_count(), Some(1));
-    assert_eq!(parts.scene.canonical_block_count(), 14);
-    assert_eq!(parts.report.outcome_evidence_block_count(), 1);
-
-    drop(parts);
-    assert_eq!(account.snapshot().live_retained_bytes(), 0);
-    assert_eq!(account.snapshot().live_retained_allocations(), 0);
 }
 
 #[test]

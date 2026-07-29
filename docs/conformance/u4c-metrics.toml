@@ -1,4 +1,4 @@
-schema_version = 2
+schema_version = 3
 evidence_scope = "u4c-production"
 
 [runner]
@@ -11,10 +11,10 @@ test_threads = 1
 prefix = "BAOZI_U4C_PRODUCTION_V1="
 schema_id = "baozi.u4c.production-report"
 schema_version = 1
-report_revision = 4
+report_revision = 5
 scenario_set_id = "canonical-store-production-v1"
-payload_bytes = 39807
-sha256 = "a8e939df7fb3a325ae42a601166b2f62391abeacbb6848b6e4e0790f22e06703"
+payload_bytes = 47121
+sha256 = "7b08c6799d76866f8e3887a7c6bb0746318825e4285795a0795f8ead726a537c"
 
 [identity]
 rustc_release = "1.95.0"
@@ -66,8 +66,8 @@ max_work = 262144
 
 [[closure.source_trees]]
 path = "crates"
-file_count = 279
-sha256 = "2ced8e80735ba9ca0b5238481c9c8d39ae4181dc369f8c833a1fe51b6a864b5e"
+file_count = 313
+sha256 = "c00d16ee5246881417553f51cad48bfe6d6e059aa3f67bd0c815fd799ba2b77b"
 
 [[closure.fixed_inputs]]
 path = "Cargo.lock"
@@ -545,7 +545,7 @@ semantic_cells = 146
 references = 43
 blocks = 27
 producer_events = 270
-target_live_retained_bytes = 21792
+target_live_retained_bytes = 22320
 target_live_retained_allocations = 122
 
 [[scenarios]]
@@ -556,7 +556,7 @@ semantic_cells = 341
 references = 69
 blocks = 53
 producer_events = 569
-target_live_retained_bytes = 29000
+target_live_retained_bytes = 29784
 target_live_retained_allocations = 174
 
 [[scenarios]]
@@ -567,8 +567,138 @@ semantic_cells = 731
 references = 121
 blocks = 105
 producer_events = 1167
-target_live_retained_bytes = 41176
+target_live_retained_bytes = 42472
 target_live_retained_allocations = 278
+
+[obj_capability]
+entry_point = "canonical-obj-corner-smoothing"
+scenario_id = "canonical-obj-corner-smoothing-v1"
+generation_reservations = 1
+canonical_block_count = 14
+outcome_evidence_block_count = 1
+full_snapshot_digest_hex = "9fc19b53af3d8f92b5cc590fcedcc679134dbc72eebce4bc32ce37266631f136"
+equivalent_snapshot_digest_hex = "9fc19b53af3d8f92b5cc590fcedcc679134dbc72eebce4bc32ce37266631f136"
+construction_semantic_cells = 172
+construction_references = 18
+construction_blocks = 15
+construction_producer_events = 235
+retained_bytes = 10544
+retained_allocations = 37
+
+[obj_capability.source_shape]
+position_count = 3
+texcoord_count = 4
+normal_count = 2
+face_count = 2
+corner_count = 6
+
+[obj_capability.canonical_shape]
+topology = "triangle_list"
+vertex_count = 3
+corner_count = 6
+face_count = 2
+vertex_position_elements = 3
+corner_normal_elements = 6
+corner_texcoord_elements = 6
+face_smoothing_group_elements = 2
+
+[obj_capability.snapshot_totals]
+node_count = 1
+root_count = 1
+edge_count = 0
+material_count = 0
+logical_mesh_count = 1
+primitive_count = 1
+attribute_count = 4
+mesh_instance_count = 1
+polygon_boundary_count = 0
+primitive_index_count = 6
+sparse_index_count = 0
+canonical_scalar_count = 41
+f32_scalar_count = 39
+u32_scalar_count = 2
+transcript_bytes = 931
+work_units = 95
+
+[obj_capability.bounded_preview]
+schema_id = "baozi.canonical-scene.bounded-preview.v1"
+bytes = 95
+sha256 = "f56445f2ab276906b64e61c4cf8cfaab43b03eb78fa57d1445fcda88e5bc3233"
+items_omitted_by_limit = 25
+bytes_truncated = true
+items_truncated = true
+
+[obj_capability.construction_budget]
+max_payload_copy_bytes = 5548
+
+[obj_capability.construction_budget.allocations]
+max_count_total = 71
+max_bytes_total = 19968
+max_count_peak = 65
+max_bytes_peak = 19312
+max_count_current = 37
+max_bytes_current = 8644
+
+[obj_capability.snapshot_budget]
+completed_lookups = 24
+lookup_events = 192
+member_probes = 24
+max_lookup_events = 8
+max_member_probes_per_lookup = 1
+
+[obj_capability.snapshot_budget.allocations]
+max_count_total = 2
+max_bytes_total = 8288
+max_count_peak = 2
+max_bytes_peak = 8288
+max_count_current = 2
+max_bytes_current = 8288
+
+[obj_capability.source_vector]
+schema_id = "baozi.normalized-obj-capability-source.v1"
+observed_bytes = 262
+sha256 = "711d47be11918f2b2acc6825d6cfd77b8fb590fee97ca176d42104df004b40a6"
+
+[obj_capability.equivalent_source_vector]
+schema_id = "baozi.normalized-obj-capability-source.v1"
+observed_bytes = 262
+sha256 = "14a3b49b2e1794c65dc9dba5848817f4788d462eeeef1122c3641f18af45588b"
+
+[[obj_capability.mutations]]
+field_class = "position_index"
+snapshot_digest_hex = "59b81577d7c1d11727e23acc2d3b03ff9a233e7912c58b4d242005e6099482d8"
+
+[obj_capability.mutations.source_vector]
+schema_id = "baozi.normalized-obj-capability-source.v1"
+observed_bytes = 262
+sha256 = "ec1d440503a1fb79ae6e046a052a0929ebfe9c0c52bdd3a759cda82eadf291fb"
+
+[[obj_capability.mutations]]
+field_class = "texcoord_index"
+snapshot_digest_hex = "90acda7f7ec4af91282d1a633942c5a5cf5959aad4166686b1ac4e12522c924a"
+
+[obj_capability.mutations.source_vector]
+schema_id = "baozi.normalized-obj-capability-source.v1"
+observed_bytes = 262
+sha256 = "e700b1c98d17e922327f5b7c9a086d8449c0caa159ff219f8c1681af68708226"
+
+[[obj_capability.mutations]]
+field_class = "normal_index"
+snapshot_digest_hex = "2b3fcde6bb87906c24a50bdedb05d3bbd4b4443e7f5f232c20635505db9b76df"
+
+[obj_capability.mutations.source_vector]
+schema_id = "baozi.normalized-obj-capability-source.v1"
+observed_bytes = 262
+sha256 = "88748d0c578b6a82691890828e329791278a2729033e11232367fa58108f0a71"
+
+[[obj_capability.mutations]]
+field_class = "smoothing_group"
+snapshot_digest_hex = "b917930e7a33bc504d603cf0cda6c185595a32407236bb4debc052b9f8ad62aa"
+
+[obj_capability.mutations.source_vector]
+schema_id = "baozi.normalized-obj-capability-source.v1"
+observed_bytes = 262
+sha256 = "c92dc4410198568bfb0650f48452205a7cd7a4279a72fd6eea4de2eb222b34fe"
 
 [measurement]
 scale_completed_lookups = 7
@@ -591,4 +721,6 @@ required_entry_points = [
     "unchanged-view",
     "changed-scene-edit",
 ]
-mapped_entry_points = []
+mapped_entry_points = [
+    { entry_point = "canonical-obj-corner-smoothing", scenario_id = "canonical-obj-corner-smoothing-v1" },
+]

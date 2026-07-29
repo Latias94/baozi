@@ -33,6 +33,14 @@ mod view;
 #[cfg(test)]
 mod tests;
 
+#[cfg(test)]
+pub(in crate::canonical_scene::store) use tests::{
+    OBJ_SOURCE_VECTOR_SCHEMA_ID, ObjCapabilityCanonicalShapeObservation,
+    ObjCapabilitySourceShapeObservation, build_obj_capability_scene_for_probe,
+    capture_obj_capability_snapshots_for_probe, collect_obj_capability_vectors_for_probe,
+    inspect_obj_capability_semantics_for_probe,
+};
+
 const NODE_SCENE_BUILD_INVARIANT_CODE: u32 = 0x5343_1001;
 const NODE_SCENE_CONTROL_INTERRUPTION_CODE: u32 = 0x5343_1002;
 const NODE_SCENE_WORK_INTERRUPTION_CODE: u32 = 0x5343_1003;

@@ -5,6 +5,12 @@ use baozi_operation::__u4c::MeasurementSession;
 
 use crate::identity::SceneGenerationId;
 
+use super::super::super::construction::node_scene::{
+    OBJ_SOURCE_VECTOR_SCHEMA_ID, ObjCapabilityCanonicalShapeObservation,
+    ObjCapabilitySourceShapeObservation, build_obj_capability_scene_for_probe,
+    capture_obj_capability_snapshots_for_probe, collect_obj_capability_vectors_for_probe,
+    inspect_obj_capability_semantics_for_probe,
+};
 use super::super::super::construction::{
     COMPLEX_SEMANTIC_TRANSCRIPT_SCHEMA_ID, ComplexFixtureFault, ComplexFixtureTerminal,
     SceneConstructionOperation, SceneConstructionTerminal,
@@ -13,9 +19,11 @@ use super::super::{
     authored_fixture, test_account, test_account_with_allocation_limit, test_factory, test_limits,
 };
 use super::report::{
-    FaultPhysicalReport, HotLeafObservationReport, InheritedHotLeafReport, ScalePhysicalReport,
+    FaultPhysicalReport, FixedVectorReport, HotLeafObservationReport, InheritedHotLeafReport,
+    ObjBoundedPreviewReport, ObjCanonicalShapeReport, ObjCapabilityReport, ObjMutationReport,
+    ObjPhysicalReport, ObjSnapshotTotalsReport, ObjSourceShapeReport, ScalePhysicalReport,
     ScaleScenarioReport, SemanticTranscriptReport, ShareGenerationReport, SharePhysicalReport,
-    ValidationFaultReport, evidence_report, phase_report, release_report, sha256_hex,
+    ValidationFaultReport, evidence_report, hex_encode, phase_report, release_report, sha256_hex,
 };
 
 const COMPLEX_PREVIEW_LIMIT_BYTES: usize = 192;
@@ -129,6 +137,225 @@ fn assert_allocator_lifecycle_balanced(label: &str, observations: &[&AllocationI
         bytes_current, 0,
         "{label} must release every byte observed during construction"
     );
+}
+
+pub(super) fn collect_obj_capability() -> ObjCapabilityReport {
+    const SCENARIO_ID: &str = "canonical-obj-corner-smoothing-v1";
+    const CONSTRUCTION_ID: &str = "canonical-obj-corner-smoothing-construction-v1";
+    const INSPECTION_ID: &str = "canonical-obj-corner-smoothing-inspection-v1";
+    const SNAPSHOT_ID: &str = "canonical-obj-corner-smoothing-snapshot-v1";
+    const RELEASE_ID: &str = "canonical-obj-corner-smoothing-release-v1";
+
+    let vector_observations = collect_obj_capability_vectors_for_probe();
+    let factory = test_factory(1);
+    let account = test_account(&factory);
+    let generation_source = AtomicU64::new(0);
+    let physical_baseline = account.snapshot();
+
+    let construction_session =
+        MeasurementSession::begin().expect("OBJ construction measurement must start");
+    let mut parts = None;
+    let construction_allocations = allocation_counter::measure(|| {
+        parts = Some(build_obj_capability_scene_for_probe(
+            &account,
+            &generation_source,
+        ));
+    });
+    let construction_measurement = construction_session
+        .finish()
+        .expect("OBJ construction measurement must finish");
+    let parts = parts.expect("OBJ construction closure must publish a Scene");
+    let physical_retained = account.snapshot();
+    let canonical_block_count = parts.scene.canonical_block_count();
+    let outcome_evidence_block_count = parts.report.outcome_evidence_block_count();
+    let evidence = evidence_report(outcome_evidence_block_count, parts.report.ledger_evidence());
+
+    let inspection_session =
+        MeasurementSession::begin().expect("OBJ typed inspection measurement must start");
+    let mut canonical_shape = None;
+    let inspection_allocations = allocation_counter::measure(|| {
+        canonical_shape = Some(inspect_obj_capability_semantics_for_probe(&parts));
+    });
+    let inspection_measurement = inspection_session
+        .finish()
+        .expect("OBJ typed inspection measurement must finish");
+    let physical_after_inspection = account.snapshot();
+    let canonical_shape = canonical_shape.expect("OBJ typed inspection must return its shape");
+
+    let snapshot_session =
+        MeasurementSession::begin().expect("OBJ snapshot measurement must start");
+    let mut snapshots = None;
+    let snapshot_allocations = allocation_counter::measure(|| {
+        snapshots = Some(capture_obj_capability_snapshots_for_probe(&parts));
+    });
+    let snapshot_measurement = snapshot_session
+        .finish()
+        .expect("OBJ snapshot measurement must finish");
+    let (full_snapshot, bounded_snapshot) =
+        snapshots.expect("OBJ snapshot closure must return both snapshots");
+    let physical_after_snapshot = account.snapshot();
+
+    assert_eq!(bounded_snapshot.digest, full_snapshot.digest);
+    assert_eq!(
+        vector_observations.baseline_snapshot_digest,
+        full_snapshot.digest,
+    );
+    assert_eq!(
+        vector_observations.equivalent_snapshot_digest,
+        full_snapshot.digest,
+    );
+    assert_ne!(
+        vector_observations.equivalent_source_vector,
+        vector_observations.source_vector,
+    );
+    for (index, mutation) in vector_observations.mutations.iter().enumerate() {
+        assert_ne!(mutation.snapshot_digest, full_snapshot.digest);
+        for earlier in &vector_observations.mutations[..index] {
+            assert_ne!(mutation.snapshot_digest, earlier.snapshot_digest);
+        }
+    }
+    assert_eq!(bounded_snapshot.totals, full_snapshot.totals);
+    assert!(!full_snapshot.preview.bytes_truncated);
+    assert!(!full_snapshot.preview.items_truncated);
+    assert!(bounded_snapshot.preview.text.len() <= 96);
+    assert!(bounded_snapshot.preview.items_truncated);
+    assert!(bounded_snapshot.preview.items_omitted_by_limit > 0);
+
+    let full_snapshot_digest_hex = hex_encode(&full_snapshot.digest);
+    let bounded_snapshot_digest_hex = hex_encode(&bounded_snapshot.digest);
+    let snapshot_totals = ObjSnapshotTotalsReport {
+        node_count: full_snapshot.totals.node_count,
+        root_count: full_snapshot.totals.root_count,
+        edge_count: full_snapshot.totals.edge_count,
+        material_count: full_snapshot.totals.material_count,
+        logical_mesh_count: full_snapshot.totals.logical_mesh_count,
+        primitive_count: full_snapshot.totals.primitive_count,
+        attribute_count: full_snapshot.totals.attribute_count,
+        mesh_instance_count: full_snapshot.totals.mesh_instance_count,
+        polygon_boundary_count: full_snapshot.totals.polygon_boundary_count,
+        primitive_index_count: full_snapshot.totals.primitive_index_count,
+        sparse_index_count: full_snapshot.totals.sparse_index_count,
+        canonical_scalar_count: full_snapshot.totals.canonical_scalar_count,
+        f32_scalar_count: full_snapshot.totals.f32_scalar_count,
+        u32_scalar_count: full_snapshot.totals.u32_scalar_count,
+        transcript_bytes: full_snapshot.totals.transcript_bytes,
+        work_units: full_snapshot.totals.work_units,
+    };
+    let bounded_preview = ObjBoundedPreviewReport {
+        schema_id: "baozi.canonical-scene.bounded-preview.v1",
+        bytes: bounded_snapshot.preview.text.len(),
+        sha256: sha256_hex(bounded_snapshot.preview.text.as_bytes()),
+        items_omitted_by_limit: bounded_snapshot.preview.items_omitted_by_limit,
+        bytes_truncated: bounded_snapshot.preview.bytes_truncated,
+        items_truncated: bounded_snapshot.preview.items_truncated,
+    };
+    let source_vector = FixedVectorReport {
+        schema_id: OBJ_SOURCE_VECTOR_SCHEMA_ID,
+        observed_bytes: vector_observations.source_vector.len(),
+        sha256: sha256_hex(&vector_observations.source_vector),
+    };
+    let equivalent_source_vector = FixedVectorReport {
+        schema_id: OBJ_SOURCE_VECTOR_SCHEMA_ID,
+        observed_bytes: vector_observations.equivalent_source_vector.len(),
+        sha256: sha256_hex(&vector_observations.equivalent_source_vector),
+    };
+    let equivalent_snapshot_digest_hex =
+        hex_encode(&vector_observations.equivalent_snapshot_digest);
+    let mutations = vector_observations
+        .mutations
+        .into_iter()
+        .map(|mutation| ObjMutationReport {
+            field_class: mutation.field_class,
+            source_vector: FixedVectorReport {
+                schema_id: OBJ_SOURCE_VECTOR_SCHEMA_ID,
+                observed_bytes: mutation.source_vector.len(),
+                sha256: sha256_hex(&mutation.source_vector),
+            },
+            snapshot_digest_hex: hex_encode(&mutation.snapshot_digest),
+        })
+        .collect();
+
+    let release_allocations = allocation_counter::measure(move || {
+        drop(full_snapshot);
+        drop(bounded_snapshot);
+        drop(parts);
+    });
+    assert_allocator_lifecycle_balanced(
+        "canonical OBJ capability",
+        &[
+            &construction_allocations,
+            &inspection_allocations,
+            &snapshot_allocations,
+            &release_allocations,
+        ],
+    );
+    let physical_after_release = account.snapshot();
+    drop(account);
+    let factory_after_account_release = factory.snapshot();
+
+    ObjCapabilityReport {
+        entry_point: "canonical-obj-corner-smoothing",
+        scenario_id: SCENARIO_ID,
+        source_shape: source_shape_report(vector_observations.source_shape),
+        canonical_shape: canonical_shape_report(canonical_shape),
+        source_vector,
+        equivalent_source_vector,
+        equivalent_snapshot_digest_hex,
+        mutations,
+        generation_reservations: generation_source.load(Ordering::Relaxed),
+        canonical_block_count,
+        outcome_evidence_block_count,
+        full_snapshot_digest_hex,
+        bounded_snapshot_digest_hex,
+        snapshot_totals,
+        bounded_preview,
+        evidence,
+        construction: phase_report(
+            CONSTRUCTION_ID,
+            construction_measurement,
+            construction_allocations,
+        ),
+        inspection: phase_report(
+            INSPECTION_ID,
+            inspection_measurement,
+            inspection_allocations,
+        ),
+        snapshot: phase_report(SNAPSHOT_ID, snapshot_measurement, snapshot_allocations),
+        release: release_report(RELEASE_ID, release_allocations),
+        physical_account: ObjPhysicalReport {
+            baseline: physical_baseline.into(),
+            retained: physical_retained.into(),
+            after_inspection: physical_after_inspection.into(),
+            after_snapshot: physical_after_snapshot.into(),
+            after_release: physical_after_release.into(),
+        },
+        factory_after_account_release: factory_after_account_release.into(),
+    }
+}
+
+fn source_shape_report(shape: ObjCapabilitySourceShapeObservation) -> ObjSourceShapeReport {
+    ObjSourceShapeReport {
+        position_count: shape.position_count,
+        texcoord_count: shape.texcoord_count,
+        normal_count: shape.normal_count,
+        face_count: shape.face_count,
+        corner_count: shape.corner_count,
+    }
+}
+
+fn canonical_shape_report(
+    shape: ObjCapabilityCanonicalShapeObservation,
+) -> ObjCanonicalShapeReport {
+    ObjCanonicalShapeReport {
+        topology: shape.topology,
+        vertex_count: shape.vertex_count,
+        corner_count: shape.corner_count,
+        face_count: shape.face_count,
+        vertex_position_elements: shape.vertex_position_elements,
+        corner_normal_elements: shape.corner_normal_elements,
+        corner_texcoord_elements: shape.corner_texcoord_elements,
+        face_smoothing_group_elements: shape.face_smoothing_group_elements,
+    }
 }
 
 pub(super) fn collect_scale_scenarios() -> Vec<ScaleScenarioReport> {

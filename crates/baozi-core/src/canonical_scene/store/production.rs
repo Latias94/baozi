@@ -20,6 +20,8 @@ pub(super) use input::geometry::{GeometryAttributePayloadAuthoring, GeometryTopo
 #[cfg(test)]
 pub(super) use input::{NodeAuthoringBatch, NodeAuthoringNode, NodeLocalId, NodeParent};
 pub(super) use input::{Presence, SceneAuthoringBatch};
+#[cfg(test)]
+pub(super) use plan::geometry::GeometryAuthoringSemanticError;
 pub(super) use plan::geometry::{
     GeometryAttributePayloadKind, GeometryAttributeScalarKind, GeometryAuthoringFailure,
     ValidatedGeometryBatch, ValidatedGeometryPrimitive, validate_geometry_batch,
