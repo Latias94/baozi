@@ -1,6 +1,21 @@
 use serde::Deserialize;
 
+use super::capability::{
+    BoundedPreview as ObjBoundedPreview,
+    ConstructionBudgetSpecification as ObjConstructionBudgetSpecification, FixedVector,
+    SnapshotBudgetSpecification as ObjSnapshotBudgetSpecification,
+    validate_fixed_vector as validate_capability_fixed_vector,
+};
+#[cfg(feature = "repository-input-candidate")]
+use super::capability::{
+    PhysicalLifecycleReport as ObjPhysicalReport, validate_allocation_lifecycle,
+    validate_bounded_preview_report,
+    validate_fixed_vector_report as validate_capability_fixed_vector_report,
+    validate_nonproducing_phase,
+};
 use super::{CoverageMappingSpecification, is_lowercase_sha256, validate_exact_list};
+
+const SOURCE_VECTOR_SCHEMA_ID: &str = "baozi.normalized-obj-capability-source.v1";
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -58,14 +73,6 @@ struct ObjCanonicalShape {
     face_smoothing_group_elements: u64,
 }
 
-#[derive(Debug, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-struct FixedVector {
-    schema_id: String,
-    observed_bytes: u64,
-    sha256: String,
-}
-
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ObjMutation {
@@ -93,79 +100,6 @@ struct ObjSnapshotTotals {
     u32_scalar_count: u64,
     transcript_bytes: u64,
     work_units: u64,
-}
-
-#[derive(Debug, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-struct ObjBoundedPreview {
-    schema_id: String,
-    bytes: u64,
-    sha256: String,
-    items_omitted_by_limit: u64,
-    bytes_truncated: bool,
-    items_truncated: bool,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ObjConstructionBudgetSpecification {
-    allocations: AllocationBudgetSpecification,
-    max_payload_copy_bytes: u64,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ObjSnapshotBudgetSpecification {
-    allocations: AllocationBudgetSpecification,
-    completed_lookups: u64,
-    lookup_events: u64,
-    member_probes: u64,
-    max_lookup_events: u64,
-    max_member_probes_per_lookup: u64,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct AllocationBudgetSpecification {
-    max_count_total: u64,
-    max_bytes_total: u64,
-    max_count_peak: u64,
-    max_bytes_peak: u64,
-    max_count_current: u64,
-    max_bytes_current: u64,
-}
-
-impl AllocationBudgetSpecification {
-    fn is_well_formed(self) -> bool {
-        self.max_count_current > 0
-            && self.max_count_current <= self.max_count_peak
-            && self.max_count_peak <= self.max_count_total
-            && self.max_bytes_current > 0
-            && self.max_bytes_current <= self.max_bytes_peak
-            && self.max_bytes_peak <= self.max_bytes_total
-    }
-
-    #[cfg(feature = "repository-input-candidate")]
-    fn contains(self, allocations: &super::AllocationReport) -> bool {
-        let Ok(count_current) = u64::try_from(allocations.count_current) else {
-            return false;
-        };
-        let Ok(bytes_current) = u64::try_from(allocations.bytes_current) else {
-            return false;
-        };
-        count_current > 0
-            && count_current <= allocations.count_max
-            && allocations.count_max <= allocations.count_total
-            && allocations.count_total <= self.max_count_total
-            && allocations.count_max <= self.max_count_peak
-            && count_current <= self.max_count_current
-            && bytes_current > 0
-            && bytes_current <= allocations.bytes_max
-            && allocations.bytes_max <= allocations.bytes_total
-            && allocations.bytes_total <= self.max_bytes_total
-            && allocations.bytes_max <= self.max_bytes_peak
-            && bytes_current <= self.max_bytes_current
-    }
 }
 
 pub(super) fn validate_specification(
@@ -214,21 +148,11 @@ pub(super) fn validate_specification(
         || totals.u32_scalar_count != 2
         || totals.transcript_bytes == 0
         || totals.work_units == 0
-        || preview.bytes == 0
-        || preview.bytes > 96
-        || preview.schema_id != "baozi.canonical-scene.bounded-preview.v1"
-        || !is_lowercase_sha256(&preview.sha256)
-        || preview.items_omitted_by_limit == 0
+        || !preview.has_common_invariants()
         || !preview.bytes_truncated
         || !preview.items_truncated
-        || !construction_budget.allocations.is_well_formed()
-        || construction_budget.max_payload_copy_bytes == 0
-        || !snapshot_budget.allocations.is_well_formed()
-        || snapshot_budget.completed_lookups == 0
-        || snapshot_budget.lookup_events < snapshot_budget.completed_lookups
-        || snapshot_budget.member_probes > snapshot_budget.lookup_events
-        || snapshot_budget.max_lookup_events == 0
-        || snapshot_budget.max_member_probes_per_lookup == 0
+        || !construction_budget.is_well_formed()
+        || !snapshot_budget.is_well_formed()
         || specification.construction_semantic_cells == 0
         || specification.construction_references == 0
         || specification.construction_blocks == 0
@@ -290,13 +214,7 @@ pub(super) fn validate_specification(
 }
 
 fn validate_fixed_vector(vector: &FixedVector) -> Result<(), String> {
-    if vector.schema_id != "baozi.normalized-obj-capability-source.v1"
-        || vector.observed_bytes == 0
-        || !is_lowercase_sha256(&vector.sha256)
-    {
-        return Err("U4c production OBJ fixed vector is invalid".to_owned());
-    }
-    Ok(())
+    validate_capability_fixed_vector(vector, SOURCE_VECTOR_SCHEMA_ID, "U4c production OBJ")
 }
 
 #[cfg(feature = "repository-input-candidate")]
@@ -325,17 +243,6 @@ pub(super) struct ObjCapabilityReport {
     release: super::ReleaseReport,
     physical_account: ObjPhysicalReport,
     factory_after_account_release: super::PhysicalFactoryReport,
-}
-
-#[cfg(feature = "repository-input-candidate")]
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ObjPhysicalReport {
-    baseline: super::PhysicalAccountReport,
-    retained: super::PhysicalAccountReport,
-    after_inspection: super::PhysicalAccountReport,
-    after_snapshot: super::PhysicalAccountReport,
-    after_release: super::PhysicalAccountReport,
 }
 
 #[cfg(feature = "repository-input-candidate")]
@@ -450,10 +357,7 @@ fn validate_fixed_vector_report(
     report: &FixedVector,
     expected: &FixedVector,
 ) -> Result<(), String> {
-    if report != expected || !is_lowercase_sha256(&report.sha256) {
-        return Err("U4c production OBJ fixed-vector evidence drifted".to_owned());
-    }
-    Ok(())
+    validate_capability_fixed_vector_report(report, expected, "U4c production OBJ")
 }
 
 #[cfg(feature = "repository-input-candidate")]
@@ -528,61 +432,16 @@ fn validate_snapshot_phase(
 }
 
 #[cfg(feature = "repository-input-candidate")]
-fn validate_nonproducing_phase(report: &PhaseReport, label: &str) -> Result<(), String> {
-    let taxonomy = &report.taxonomy;
-    if taxonomy.semantic_cell_writes != 0
-        || taxonomy.reference_writes != 0
-        || taxonomy.producer_events != 0
-        || taxonomy.payload_copy_bytes != 0
-        || taxonomy.payload_backing_allocations != 0
-        || taxonomy.block_begins != 0
-        || taxonomy.block_seals != 0
-        || taxonomy.slot_publications != 0
-        || taxonomy.new_block_begins != 0
-        || taxonomy.new_block_seals != 0
-        || taxonomy.new_slot_publications != 0
-        || taxonomy.inherited_block_begins != 0
-        || taxonomy.inherited_block_seals != 0
-        || taxonomy.inherited_slot_publications != 0
-        || taxonomy.element_decodes != 0
-    {
-        return Err(format!("{label} performed a producer-side event"));
-    }
-    Ok(())
-}
-
-#[cfg(feature = "repository-input-candidate")]
-fn validate_allocation_lifecycle(
-    reports: [&super::AllocationReport; 4],
-    label: &str,
-) -> Result<(), String> {
-    let count_current = reports.iter().try_fold(0_i64, |total, report| {
-        total.checked_add(report.count_current)
-    });
-    let bytes_current = reports.iter().try_fold(0_i64, |total, report| {
-        total.checked_add(report.bytes_current)
-    });
-    if count_current != Some(0) || bytes_current != Some(0) {
-        return Err(format!("{label} did not balance to zero"));
-    }
-    Ok(())
-}
-
-#[cfg(feature = "repository-input-candidate")]
 fn validate_bounded_preview(
     report: &ObjBoundedPreview,
     expected: &ObjBoundedPreview,
 ) -> Result<(), String> {
-    if report != expected || !is_lowercase_sha256(&report.sha256) || report.bytes > 96 {
-        return Err("U4c production OBJ bounded preview evidence drifted".to_owned());
-    }
-    Ok(())
+    validate_bounded_preview_report(report, expected, "U4c production OBJ")
 }
 
 #[cfg(all(test, feature = "repository-input-candidate"))]
 mod tests {
     use super::*;
-    use crate::u4c_metrics::production::AllocationReport;
 
     #[test]
     fn rejects_same_length_bounded_preview_drift() {
@@ -604,132 +463,5 @@ mod tests {
         };
 
         assert!(validate_bounded_preview(&report, &expected).is_err());
-    }
-
-    #[test]
-    fn rejects_phase_allocation_budget_overrun() {
-        let allocations = AllocationReport {
-            count_total: 3,
-            count_current: 2,
-            count_max: 3,
-            bytes_total: 9,
-            bytes_current: 8,
-            bytes_max: 9,
-        };
-        let exact = AllocationBudgetSpecification {
-            max_count_total: 3,
-            max_bytes_total: 9,
-            max_count_peak: 3,
-            max_bytes_peak: 9,
-            max_count_current: 2,
-            max_bytes_current: 8,
-        };
-
-        assert!(
-            !AllocationBudgetSpecification {
-                max_count_total: 2,
-                ..exact
-            }
-            .contains(&allocations)
-        );
-        assert!(
-            !AllocationBudgetSpecification {
-                max_bytes_total: 8,
-                ..exact
-            }
-            .contains(&allocations)
-        );
-        assert!(
-            !AllocationBudgetSpecification {
-                max_count_peak: 2,
-                ..exact
-            }
-            .contains(&allocations)
-        );
-        assert!(
-            !AllocationBudgetSpecification {
-                max_bytes_peak: 8,
-                ..exact
-            }
-            .contains(&allocations)
-        );
-        assert!(
-            !AllocationBudgetSpecification {
-                max_count_current: 1,
-                ..exact
-            }
-            .contains(&allocations)
-        );
-        assert!(
-            !AllocationBudgetSpecification {
-                max_bytes_current: 7,
-                ..exact
-            }
-            .contains(&allocations)
-        );
-        assert!(exact.contains(&allocations));
-        assert!(exact.is_well_formed());
-        assert!(
-            !AllocationBudgetSpecification {
-                max_count_peak: 0,
-                ..exact
-            }
-            .is_well_formed()
-        );
-
-        let impossible = AllocationReport {
-            count_total: 1,
-            count_current: 1,
-            count_max: 0,
-            bytes_total: 1,
-            bytes_current: 1,
-            bytes_max: 0,
-        };
-        assert!(
-            !AllocationBudgetSpecification {
-                max_count_total: 1,
-                max_bytes_total: 1,
-                max_count_peak: 1,
-                max_bytes_peak: 1,
-                max_count_current: 1,
-                max_bytes_current: 1,
-            }
-            .contains(&impossible)
-        );
-    }
-
-    #[test]
-    fn rejects_unbalanced_phase_allocation_deltas() {
-        fn delta(count_current: i64, bytes_current: i64) -> AllocationReport {
-            AllocationReport {
-                count_total: 0,
-                count_current,
-                count_max: 0,
-                bytes_total: 0,
-                bytes_current,
-                bytes_max: 0,
-            }
-        }
-
-        let construction = delta(37, 8_644);
-        let inspection = delta(0, 0);
-        let snapshot = delta(2, 8_288);
-        let balanced_release = delta(-39, -16_932);
-        let unbalanced_release = delta(-38, -16_932);
-
-        assert!(
-            validate_allocation_lifecycle(
-                [&construction, &inspection, &snapshot, &balanced_release,],
-                "balanced",
-            )
-            .is_ok()
-        );
-        assert!(
-            validate_allocation_lifecycle(
-                [&construction, &inspection, &snapshot, &unbalanced_release,],
-                "unbalanced",
-            )
-            .is_err()
-        );
     }
 }

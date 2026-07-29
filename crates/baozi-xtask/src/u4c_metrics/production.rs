@@ -12,6 +12,8 @@
 )]
 
 mod build_output;
+mod capability;
+mod gltf;
 mod obj;
 
 use build_output::BuildOutputSpecification;
@@ -45,7 +47,7 @@ use std::process::{self, Command};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 pub(super) const SPECIFICATION_PATH: &str = "docs/conformance/u4c-metrics.toml";
-const SPECIFICATION_SCHEMA_VERSION: u64 = 3;
+const SPECIFICATION_SCHEMA_VERSION: u64 = 4;
 const PRODUCTION_SCOPE: &str = "u4c-production";
 const PRODUCTION_PROBE_PACKAGE: &str = "baozi-core";
 const PRODUCTION_PROBE_CARGO_TARGET: &str = "baozi_core";
@@ -99,6 +101,7 @@ struct ProductionSpecification {
     mutations: Vec<MutationSpecification>,
     scenarios: Vec<ScaleScenarioSpecification>,
     obj_capability: obj::ObjCapabilitySpecification,
+    gltf_capability: gltf::GltfCapabilitySpecification,
     measurement: MeasurementSpecification,
     coverage: CoverageSpecification,
     #[cfg(feature = "repository-input-candidate")]
@@ -485,7 +488,7 @@ impl ProductionSpecification {
         if self.report_contract.prefix != PRODUCTION_REPORT_PREFIX
             || self.report_contract.schema_id != "baozi.u4c.production-report"
             || self.report_contract.schema_version != 1
-            || self.report_contract.report_revision != 5
+            || self.report_contract.report_revision != 6
             || self.report_contract.scenario_set_id != "canonical-store-production-v1"
             || self.report_contract.payload_bytes == 0
             || !is_lowercase_sha256(&self.report_contract.sha256)
@@ -549,6 +552,7 @@ impl ProductionSpecification {
         validate_mutations(&self.mutations)?;
         validate_scenarios(&self.scenarios)?;
         obj::validate_specification(&self.obj_capability)?;
+        gltf::validate_specification(&self.gltf_capability)?;
         if self.measurement.scale_completed_lookups != 7
             || self.measurement.scale_rejected_lookups != 1
             || self.measurement.scale_lookup_events != 50
@@ -565,7 +569,7 @@ impl ProductionSpecification {
                     .to_owned(),
             );
         }
-        validate_coverage(&self.coverage, &self.obj_capability)?;
+        validate_coverage(&self.coverage, &self.obj_capability, &self.gltf_capability)?;
 
         Ok(())
     }
@@ -860,6 +864,7 @@ fn validate_scenarios(values: &[ScaleScenarioSpecification]) -> Result<(), Strin
 fn validate_coverage(
     coverage: &CoverageSpecification,
     obj_capability: &obj::ObjCapabilitySpecification,
+    gltf_capability: &gltf::GltfCapabilitySpecification,
 ) -> Result<(), String> {
     let required = coverage
         .required_entry_points
@@ -871,15 +876,21 @@ fn validate_coverage(
         &required,
         REQUIRED_COVERAGE_ENTRY_POINTS,
     )?;
-    let [mapping] = coverage.mapped_entry_points.as_slice() else {
+    let [obj_mapping, gltf_mapping] = coverage.mapped_entry_points.as_slice() else {
         return Err(
-            "U4c production report revision 5 must map exactly the admitted OBJ capability"
+            "U4c production report revision 6 must map exactly the admitted OBJ and glTF capabilities"
                 .to_owned(),
         );
     };
-    if !obj_capability.matches_mapping(mapping) {
+    if !obj_capability.matches_mapping(obj_mapping) {
         return Err(
             "U4c production OBJ coverage mapping must bind the typed path-bound scenario"
+                .to_owned(),
+        );
+    }
+    if !gltf_capability.matches_mapping(gltf_mapping) {
+        return Err(
+            "U4c production glTF coverage mapping must bind the backend-free five-domain scenario"
                 .to_owned(),
         );
     }
@@ -2731,6 +2742,7 @@ struct ProductionReport {
     scale_scenarios: Vec<ScaleScenarioReport>,
     inherited_hot_leaf_scenario: InheritedHotLeafReport,
     obj_capability: obj::ObjCapabilityReport,
+    gltf_capability: gltf::GltfCapabilityReport,
     validation_faults: Vec<ValidationFaultReport>,
 }
 
@@ -3034,6 +3046,7 @@ fn validate_production_report(
     validate_scale_reports(specification, &report.scale_scenarios)?;
     validate_inherited_hot_leaf(specification, &report.inherited_hot_leaf_scenario)?;
     obj::validate_report(specification, &report.obj_capability)?;
+    gltf::validate_report(specification, &report.gltf_capability)?;
     validate_validation_faults(specification, &report.validation_faults)?;
 
     Ok(specification.coverage.qualifies_u4_exit())
@@ -3645,8 +3658,8 @@ mod tests {
         ))
         .expect("managed U4c production specification must be UTF-8");
         let unmapped = managed.replace(
-            "mapped_entry_points = [\n    { entry_point = \"canonical-obj-corner-smoothing\", scenario_id = \"canonical-obj-corner-smoothing-v1\" },\n]",
-            "mapped_entry_points = []",
+            "    { entry_point = \"canonical-obj-corner-smoothing\", scenario_id = \"canonical-obj-corner-smoothing-v1\" },\n",
+            "",
         );
 
         let error = ProductionSpecification::parse(unmapped.as_bytes())
@@ -3655,14 +3668,30 @@ mod tests {
     }
 
     #[test]
-    fn one_of_six_mapped_entry_points_does_not_qualify_u4_exit() {
+    fn rejects_coverage_mapping_to_the_wrong_gltf_scenario() {
+        let managed = std::str::from_utf8(include_bytes!(
+            "../../../../docs/conformance/u4c-metrics.toml"
+        ))
+        .expect("managed U4c production specification must be UTF-8");
+        let mapped = managed.replace(
+            "{ entry_point = \"backend-free-gltf-shape\", scenario_id = \"backend-free-gltf-shape-v1\" }",
+            "{ entry_point = \"backend-free-gltf-shape\", scenario_id = \"complex-members-n-v1\" }",
+        );
+
+        let error = ProductionSpecification::parse(mapped.as_bytes())
+            .expect_err("synthetic glTF coverage mapping must be rejected");
+        assert!(error.contains("glTF coverage mapping"), "{error}");
+    }
+
+    #[test]
+    fn two_of_six_mapped_entry_points_do_not_qualify_u4_exit() {
         let specification = ProductionSpecification::parse(include_bytes!(
             "../../../../docs/conformance/u4c-metrics.toml"
         ))
         .expect("managed U4c production specification must parse");
 
         assert_eq!(specification.coverage.required_entry_points.len(), 6);
-        assert_eq!(specification.coverage.mapped_entry_points.len(), 1);
+        assert_eq!(specification.coverage.mapped_entry_points.len(), 2);
         assert!(!specification.coverage.qualifies_u4_exit());
     }
 
