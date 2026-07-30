@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-07-09
-updated: 2026-07-13
+updated: 2026-07-30
 authors:
   - Codex
 decision_type: architecture
@@ -36,8 +36,8 @@ before `ImportSession` or asset IO. ADR 0021 owns when registry freeze invokes d
 snapshot publication, and registration health.
 
 Accepted makes the typed envelopes, precedence, codec compilation, and private request store
-authoritative. It does not make a top-level serialized request wire a stable public, persistence, or
-network contract.
+authoritative. Top-level request serialization is outside the current architecture; the unused BZIR
+request-wire experiment is retired rather than preserved as a second configuration contract.
 
 ### Canonical Ownership Boundary
 
@@ -220,28 +220,29 @@ containment.
 There is no permissive path that converts these programming/configuration errors into parser
 diagnostics. Strictness controls source recovery, not request validity.
 
-### Conformance, Loss, Recovery, and Serialization
+### Conformance, Loss, Recovery, and Wire Exclusion
 
-The current top-level BZIR request encoding is an experimental pre-release transport with an explicit
-configuration schema version. Its common section serializes `ConformancePolicy` and `LossPolicy`;
-each format recovery profile remains inside that format's versioned envelope. For example, ADR
-0035's OBJ/MTL invalid-UTF-8 recovery can be chosen only by the OBJ-owned typed option, then is
-accepted only if the common conformance/loss policies allow it. glTF's descriptor exposes no such
-recovery choice.
+`ConformancePolicy` and `LossPolicy` remain typed common configuration. Each format recovery profile
+remains inside that format's versioned typed envelope. For example, ADR 0035's OBJ/MTL invalid-UTF-8
+recovery can be chosen only by the OBJ-owned typed option, then is accepted only if the common
+conformance/loss policies allow it. glTF's descriptor exposes no such recovery choice.
 
 A descriptor `TextProfile` owns lexical rules and immutable format hard caps, not a competing request
 budget. For every matching dimension the effective decoder limit is
 `min(TextProfile hard cap, ImportConfig ResourceLimits)`. A format envelope may select only an
 advertised recovery mode and may never raise either bound.
 
-An admitted serialization uses explicit field/variant identifiers defined by its configuration
-schema, canonical map ordering, bounded payload sizes, and strict unknown-field/version rejection. A
-Rust `serde` derive or struct layout is not itself a config contract. BZIR v1 currently pins canonical
-vectors for regression and evaluation only; those vectors do not create a facade, semver, persistence,
-or network compatibility promise. Before the first release, U9 removes its public package-API
-reachability and retains the vectors only as internal regression evidence. Any later stable request
-wire requires a new Accepted architecture update, a real facade or production consumer, packaged-
-consumer tests, compatibility vectors, version-evolution rules, and public documentation.
+The pre-release BZIR request wire has no production producer or consumer and duplicates the typed
+configuration authority above. U4g deletes its encoder, decoder, hidden package reachability, and
+wire-only vectors together. Baozi retains no compatibility shim, reserved namespace, or regression
+obligation for that retired protocol. Format-owned option, preset, precedence, and codec tests remain
+the durable configuration evidence.
+
+Any later stable request wire requires a new Accepted architecture update, a real facade or
+production consumer, explicit field/variant identifiers, canonical ordering, bounded payloads,
+strict unknown-field/version rejection, packaged-consumer tests, compatibility vectors,
+version-evolution rules, and public documentation. A Rust `serde` derive or struct layout is never by
+itself a configuration contract.
 
 ### Presets
 
@@ -357,4 +358,4 @@ Negative:
 | No global input | Parallel tests prove environment or another request cannot change a session config. |
 | Preset transparency | Expanding a preset and supplying the resulting overlays explicitly yields an equal frozen request. |
 | Loss authority separation | Allowing one loss kind never authorizes another; provenance/detail collapse requires `ProvenanceEvidenceLoss`, while filtered retained-domain semantics require `SourceSemanticLoss`. |
-| Experimental wire boundary | BZIR vectors pass canonical round-trip, unknown-field, and version-mismatch tests but are not re-exported by the facade or described as a stable public contract; U9 removes public package reachability before publication. |
+| No speculative request wire | Source, rustdoc, feature, and packaged-consumer gates cannot reach a BZIR request encoder, decoder, envelope, or wire-only vector; typed option and preset conformance remains green without them. |
