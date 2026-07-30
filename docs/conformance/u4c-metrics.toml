@@ -67,7 +67,7 @@ max_work = 262144
 [[closure.source_trees]]
 path = "crates"
 file_count = 337
-sha256 = "cbb2c371b9c48a5fd58522a1be9fe62f6f288c8326e4f411716321c3523789f9"
+sha256 = "52c48ca38e96215b3fbecb56320591b90c1560aa196214f5ac14661e39e6a1c2"
 
 [[closure.fixed_inputs]]
 path = "Cargo.lock"
@@ -939,4 +939,6 @@ required_entry_points = [
 mapped_entry_points = [
     { entry_point = "canonical-obj-corner-smoothing", scenario_id = "canonical-obj-corner-smoothing-v1" },
     { entry_point = "backend-free-gltf-shape", scenario_id = "backend-free-gltf-shape-v1" },
+    { entry_point = "facade-equivalent-inspection", scenario_id = "canonical-gltf-five-domain-inspection-v1" },
+    { entry_point = "bounded-snapshot", scenario_id = "canonical-gltf-five-domain-snapshot-v1" },
 ]

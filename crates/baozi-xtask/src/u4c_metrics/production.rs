@@ -70,6 +70,13 @@ const REQUIRED_COVERAGE_ENTRY_POINTS: &[&str] = &[
     "unchanged-view",
     "changed-scene-edit",
 ];
+const ADMITTED_CONSUMER_COVERAGE: &[(&str, &str)] = &[
+    (
+        "facade-equivalent-inspection",
+        "canonical-gltf-five-domain-inspection-v1",
+    ),
+    ("bounded-snapshot", "canonical-gltf-five-domain-snapshot-v1"),
+];
 const REQUIRED_SCALE_SCENARIOS: &[&str] = &[
     "complex-members-n-v1",
     "complex-members-2n-v1",
@@ -285,7 +292,7 @@ struct CoverageMappingSpecification {
 }
 
 impl CoverageSpecification {
-    fn qualifies_u4_exit(&self) -> bool {
+    fn qualifies_u4d_exit(&self) -> bool {
         self.mapped_entry_points.len() == self.required_entry_points.len()
             && self
                 .mapped_entry_points
@@ -418,7 +425,7 @@ fn collect_canonical_specification(repository_root: &Path) -> Result<Value, Stri
     verify_prepared_executables(&prepared_executables)?;
     let (payload, report) =
         parse_production_probe_stdout(&probe_output, &specification.report_contract.prefix)?;
-    let qualifies_u4_exit = validate_production_report(&specification, &payload, &report)?;
+    let qualifies_u4d_exit = validate_production_report(&specification, &payload, &report)?;
     build_output_authority.verify_unchanged(&retained_build_outputs)?;
     cargo_sandbox.verify_unchanged()?;
     repository
@@ -428,7 +435,8 @@ fn collect_canonical_specification(repository_root: &Path) -> Result<Value, Stri
     Ok(json!({
         "evidence_scope": PRODUCTION_SCOPE,
         "u4c_contract_verified": true,
-        "qualifies_u4_exit": qualifies_u4_exit,
+        "qualifies_u4d_exit": qualifies_u4d_exit,
+        "qualifies_u4_exit": false,
         "specification_sha256": specification.specification_sha256,
         "report_sha256": specification.report_contract.sha256,
         "closure": {
@@ -876,10 +884,11 @@ fn validate_coverage(
         &required,
         REQUIRED_COVERAGE_ENTRY_POINTS,
     )?;
-    let [obj_mapping, gltf_mapping] = coverage.mapped_entry_points.as_slice() else {
+    let [obj_mapping, gltf_mapping, consumer_mappings @ ..] =
+        coverage.mapped_entry_points.as_slice()
+    else {
         return Err(
-            "U4c production report revision 6 must map exactly the admitted OBJ and glTF capabilities"
-                .to_owned(),
+            "U4c production coverage must map the admitted producer capabilities".to_owned(),
         );
     };
     if !obj_capability.matches_mapping(obj_mapping) {
@@ -891,6 +900,19 @@ fn validate_coverage(
     if !gltf_capability.matches_mapping(gltf_mapping) {
         return Err(
             "U4c production glTF coverage mapping must bind the backend-free five-domain scenario"
+                .to_owned(),
+        );
+    }
+    if consumer_mappings.len() != ADMITTED_CONSUMER_COVERAGE.len()
+        || consumer_mappings
+            .iter()
+            .zip(ADMITTED_CONSUMER_COVERAGE)
+            .any(|(mapping, (entry_point, scenario_id))| {
+                mapping.entry_point != *entry_point || mapping.scenario_id != *scenario_id
+            })
+    {
+        return Err(
+            "U4c production consumer coverage mapping must bind inspection and snapshot evidence"
                 .to_owned(),
         );
     }
@@ -3049,7 +3071,7 @@ fn validate_production_report(
     gltf::validate_report(specification, &report.gltf_capability)?;
     validate_validation_faults(specification, &report.validation_faults)?;
 
-    Ok(specification.coverage.qualifies_u4_exit())
+    Ok(specification.coverage.qualifies_u4d_exit())
 }
 
 #[cfg(feature = "repository-input-candidate")]
@@ -3664,7 +3686,7 @@ mod tests {
 
         let error = ProductionSpecification::parse(unmapped.as_bytes())
             .expect_err("the typed OBJ scenario must remain mapped");
-        assert!(error.contains("must map exactly"), "{error}");
+        assert!(error.contains("OBJ coverage mapping"), "{error}");
     }
 
     #[test]
@@ -3684,15 +3706,60 @@ mod tests {
     }
 
     #[test]
-    fn two_of_six_mapped_entry_points_do_not_qualify_u4_exit() {
+    fn four_of_six_mapped_entry_points_do_not_qualify_u4_exit() {
         let specification = ProductionSpecification::parse(include_bytes!(
             "../../../../docs/conformance/u4c-metrics.toml"
         ))
         .expect("managed U4c production specification must parse");
 
         assert_eq!(specification.coverage.required_entry_points.len(), 6);
-        assert_eq!(specification.coverage.mapped_entry_points.len(), 2);
-        assert!(!specification.coverage.qualifies_u4_exit());
+        assert_eq!(specification.coverage.mapped_entry_points.len(), 4);
+        assert!(!specification.coverage.qualifies_u4d_exit());
+    }
+
+    #[test]
+    fn complete_private_coverage_qualifies_only_u4d_exit() {
+        let coverage = CoverageSpecification {
+            required_entry_points: REQUIRED_COVERAGE_ENTRY_POINTS
+                .iter()
+                .map(ToString::to_string)
+                .collect(),
+            mapped_entry_points: REQUIRED_COVERAGE_ENTRY_POINTS
+                .iter()
+                .map(|entry_point| CoverageMappingSpecification {
+                    entry_point: (*entry_point).to_owned(),
+                    scenario_id: format!("{entry_point}-scenario-v1"),
+                })
+                .collect(),
+        };
+
+        assert!(coverage.qualifies_u4d_exit());
+    }
+
+    #[test]
+    fn rejects_consumer_coverage_mapping_drift() {
+        let managed = std::str::from_utf8(include_bytes!(
+            "../../../../docs/conformance/u4c-metrics.toml"
+        ))
+        .expect("managed U4c production specification must be UTF-8");
+        for (entry_point, scenario_id) in [
+            (
+                "facade-equivalent-inspection",
+                "canonical-gltf-five-domain-inspection-v1",
+            ),
+            ("bounded-snapshot", "canonical-gltf-five-domain-snapshot-v1"),
+        ] {
+            let expected =
+                format!("{{ entry_point = \"{entry_point}\", scenario_id = \"{scenario_id}\" }}");
+            let drifted = format!(
+                "{{ entry_point = \"{entry_point}\", scenario_id = \"wrong-scenario-v1\" }}"
+            );
+            let malformed = managed.replace(&expected, &drifted);
+
+            let error = ProductionSpecification::parse(malformed.as_bytes())
+                .expect_err("consumer coverage mapping drift must be rejected");
+            assert!(error.contains("coverage mapping"), "{error}");
+        }
     }
 
     #[test]
