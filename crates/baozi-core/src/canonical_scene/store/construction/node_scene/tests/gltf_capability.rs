@@ -145,7 +145,7 @@ pub(in crate::canonical_scene::store) struct GltfCapabilitySourceShapeObservatio
     pub(in crate::canonical_scene::store) animation_key_count: usize,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::canonical_scene::store) struct GltfCapabilityCanonicalShapeObservation {
     pub(in crate::canonical_scene::store) node_count: usize,
     pub(in crate::canonical_scene::store) root_count: usize,

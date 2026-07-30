@@ -11,10 +11,10 @@ test_threads = 1
 prefix = "BAOZI_U4C_PRODUCTION_V1="
 schema_id = "baozi.u4c.production-report"
 schema_version = 1
-report_revision = 6
+report_revision = 7
 scenario_set_id = "canonical-store-production-v1"
-payload_bytes = 56674
-sha256 = "f7b1c88fc07d800bb10aa97d7211275676deb20f2bbc2244dc1c8bfd4df491ae"
+payload_bytes = 58759
+sha256 = "c8a8bb01d246984f7dad7c4f7161e7f929f8eb0fbbd7b3efbc7ed3722cb4349f"
 
 [identity]
 rustc_release = "1.95.0"
@@ -67,7 +67,7 @@ max_work = 262144
 [[closure.source_trees]]
 path = "crates"
 file_count = 337
-sha256 = "52c48ca38e96215b3fbecb56320591b90c1560aa196214f5ac14661e39e6a1c2"
+sha256 = "9541bed64c30cc1324ccae08949ccb90d168fb95c87337c347da57f6aa1eee9f"
 
 [[closure.fixed_inputs]]
 path = "Cargo.lock"
@@ -941,4 +941,5 @@ mapped_entry_points = [
     { entry_point = "backend-free-gltf-shape", scenario_id = "backend-free-gltf-shape-v1" },
     { entry_point = "facade-equivalent-inspection", scenario_id = "canonical-gltf-five-domain-inspection-v1" },
     { entry_point = "bounded-snapshot", scenario_id = "canonical-gltf-five-domain-snapshot-v1" },
+    { entry_point = "unchanged-view", scenario_id = "canonical-gltf-five-domain-unchanged-view-v1" },
 ]

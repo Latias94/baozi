@@ -24,11 +24,11 @@ use super::super::{
 use super::report::{
     CapabilityBoundedPreviewReport, CapabilityMutationReport, CapabilityPhysicalReport,
     FaultPhysicalReport, FixedVectorReport, GltfCanonicalShapeReport, GltfCapabilityReport,
-    GltfSnapshotTotalsReport, GltfSourceShapeReport, HotLeafObservationReport,
-    InheritedHotLeafReport, ObjCanonicalShapeReport, ObjCapabilityReport, ObjSnapshotTotalsReport,
-    ObjSourceShapeReport, ScalePhysicalReport, ScaleScenarioReport, SemanticTranscriptReport,
-    ShareGenerationReport, SharePhysicalReport, ValidationFaultReport, evidence_report, hex_encode,
-    phase_report, release_report, sha256_hex,
+    GltfSnapshotTotalsReport, GltfSourceShapeReport, GltfUnchangedViewReport,
+    HotLeafObservationReport, InheritedHotLeafReport, ObjCanonicalShapeReport, ObjCapabilityReport,
+    ObjSnapshotTotalsReport, ObjSourceShapeReport, ReadOnlyPhysicalReport, ScalePhysicalReport,
+    ScaleScenarioReport, SemanticTranscriptReport, ShareGenerationReport, SharePhysicalReport,
+    ValidationFaultReport, evidence_report, hex_encode, phase_report, release_report, sha256_hex,
 };
 
 const COMPLEX_PREVIEW_LIMIT_BYTES: usize = 192;
@@ -368,6 +368,7 @@ pub(super) fn collect_gltf_capability() -> GltfCapabilityReport {
     const CONSTRUCTION_ID: &str = "canonical-gltf-five-domain-construction-v1";
     const INSPECTION_ID: &str = "canonical-gltf-five-domain-inspection-v1";
     const SNAPSHOT_ID: &str = "canonical-gltf-five-domain-snapshot-v1";
+    const UNCHANGED_VIEW_ID: &str = "canonical-gltf-five-domain-unchanged-view-v1";
     const RELEASE_ID: &str = "canonical-gltf-five-domain-release-v1";
 
     let vector_observations = collect_gltf_capability_vectors_for_probe();
@@ -419,6 +420,28 @@ pub(super) fn collect_gltf_capability() -> GltfCapabilityReport {
         snapshots.expect("glTF snapshot closure must return both snapshots");
     let physical_after_snapshot = account.snapshot();
 
+    let unchanged_generation = parts.scene.generation();
+    let unchanged_generation_reservations_before = generation_source.load(Ordering::Relaxed);
+    let unchanged_canonical_block_count_before = parts.scene.canonical_block_count();
+    let unchanged_physical_before = account.snapshot();
+    let unchanged_view_session =
+        MeasurementSession::begin().expect("glTF unchanged view measurement must start");
+    let mut unchanged_observations = None;
+    let unchanged_view_allocations = allocation_counter::measure(|| {
+        let first = inspect_gltf_capability_semantics_for_probe(&parts);
+        let second = inspect_gltf_capability_semantics_for_probe(&parts);
+        unchanged_observations = Some((first, second));
+    });
+    let unchanged_view_measurement = unchanged_view_session
+        .finish()
+        .expect("glTF unchanged view measurement must finish");
+    let unchanged_physical_after = account.snapshot();
+    let (unchanged_observation, repeated_unchanged_observation) =
+        unchanged_observations.expect("glTF unchanged view must return both observations");
+    let unchanged_generation_preserved = parts.scene.generation() == unchanged_generation;
+    let unchanged_generation_reservations_after = generation_source.load(Ordering::Relaxed);
+    let unchanged_canonical_block_count_after = parts.scene.canonical_block_count();
+
     assert_eq!(bounded_snapshot.digest, full_snapshot.digest);
     assert_eq!(bounded_snapshot.totals, full_snapshot.totals);
     assert_eq!(
@@ -431,6 +454,18 @@ pub(super) fn collect_gltf_capability() -> GltfCapabilityReport {
     assert!(bounded_snapshot.preview.bytes_truncated || bounded_snapshot.preview.items_truncated);
     assert!(bounded_snapshot.preview.items_omitted_by_limit > 0);
     assert_eq!(vector_observations.mutations.len(), 7);
+    assert_eq!(unchanged_observation, canonical_shape);
+    assert_eq!(repeated_unchanged_observation, canonical_shape);
+    assert!(unchanged_generation_preserved);
+    assert_eq!(
+        unchanged_generation_reservations_after,
+        unchanged_generation_reservations_before,
+    );
+    assert_eq!(
+        unchanged_canonical_block_count_after,
+        unchanged_canonical_block_count_before,
+    );
+    assert_eq!(unchanged_physical_after, unchanged_physical_before);
     for (index, mutation) in vector_observations.mutations.iter().enumerate() {
         assert_ne!(mutation.source_vector, vector_observations.source_vector);
         assert_ne!(mutation.snapshot_digest, full_snapshot.digest);
@@ -544,6 +579,7 @@ pub(super) fn collect_gltf_capability() -> GltfCapabilityReport {
             &construction_allocations,
             &inspection_allocations,
             &snapshot_allocations,
+            &unchanged_view_allocations,
             &release_allocations,
         ],
     );
@@ -577,6 +613,24 @@ pub(super) fn collect_gltf_capability() -> GltfCapabilityReport {
             inspection_allocations,
         ),
         snapshot: phase_report(SNAPSHOT_ID, snapshot_measurement, snapshot_allocations),
+        unchanged_view: GltfUnchangedViewReport {
+            observation: gltf_canonical_shape_report(unchanged_observation),
+            repeated_observation_matches: unchanged_observation == repeated_unchanged_observation,
+            generation_preserved: unchanged_generation_preserved,
+            generation_reservations_before: unchanged_generation_reservations_before,
+            generation_reservations_after: unchanged_generation_reservations_after,
+            canonical_block_count_before: unchanged_canonical_block_count_before,
+            canonical_block_count_after: unchanged_canonical_block_count_after,
+            phase: phase_report(
+                UNCHANGED_VIEW_ID,
+                unchanged_view_measurement,
+                unchanged_view_allocations,
+            ),
+            physical_account: ReadOnlyPhysicalReport {
+                before: unchanged_physical_before.into(),
+                after: unchanged_physical_after.into(),
+            },
+        },
         release: release_report(RELEASE_ID, release_allocations),
         physical_account: CapabilityPhysicalReport {
             baseline: physical_baseline.into(),

@@ -353,9 +353,33 @@ pub(super) struct GltfCapabilityReport {
     construction: super::PhaseReport,
     inspection: super::PhaseReport,
     snapshot: super::PhaseReport,
+    unchanged_view: GltfUnchangedViewReport,
     release: super::ReleaseReport,
     physical_account: GltfPhysicalReport,
     factory_after_account_release: super::PhysicalFactoryReport,
+}
+
+#[cfg(feature = "repository-input-candidate")]
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GltfUnchangedViewReport {
+    observation: GltfCanonicalShape,
+    repeated_observation_matches: bool,
+    generation_preserved: bool,
+    generation_reservations_before: u64,
+    generation_reservations_after: u64,
+    canonical_block_count_before: u64,
+    canonical_block_count_after: u64,
+    phase: super::PhaseReport,
+    physical_account: GltfReadOnlyPhysicalReport,
+}
+
+#[cfg(feature = "repository-input-candidate")]
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GltfReadOnlyPhysicalReport {
+    before: super::PhysicalAccountReport,
+    after: super::PhysicalAccountReport,
 }
 
 #[cfg(feature = "repository-input-candidate")]
@@ -428,6 +452,7 @@ pub(super) fn validate_report(
     )?;
     validate_nonproducing_phase(&report.inspection, "U4c production glTF typed inspection")?;
     validate_snapshot_phase(&report.snapshot, expected)?;
+    validate_unchanged_view(report, expected, &specification.measurement)?;
     if report.release.scenario_id != "canonical-gltf-five-domain-release-v1" {
         return Err("U4c production glTF release scenario identity drifted".to_owned());
     }
@@ -437,6 +462,7 @@ pub(super) fn validate_report(
             &report.construction.allocations,
             &report.inspection.allocations,
             &report.snapshot.allocations,
+            &report.unchanged_view.phase.allocations,
             &report.release.allocations,
         ],
         "U4c production glTF allocation lifecycle",
@@ -459,6 +485,36 @@ pub(super) fn validate_report(
         &report.factory_after_account_release,
         "U4c glTF factory release",
     )
+}
+
+#[cfg(feature = "repository-input-candidate")]
+fn validate_unchanged_view(
+    report: &GltfCapabilityReport,
+    expected: &GltfCapabilitySpecification,
+    measurement: &super::MeasurementSpecification,
+) -> Result<(), String> {
+    let unchanged = &report.unchanged_view;
+    if unchanged.observation != report.canonical_shape
+        || !unchanged.repeated_observation_matches
+        || !unchanged.generation_preserved
+        || unchanged.generation_reservations_before != expected.generation_reservations
+        || unchanged.generation_reservations_after != expected.generation_reservations
+        || unchanged.canonical_block_count_before != expected.canonical_block_count
+        || unchanged.canonical_block_count_after != expected.canonical_block_count
+        || unchanged.physical_account.before != report.physical_account.retained
+        || unchanged.physical_account.after != unchanged.physical_account.before
+    {
+        return Err("U4c production glTF unchanged-view invariants drifted".to_owned());
+    }
+    if unchanged.phase.scenario_id != "canonical-gltf-five-domain-unchanged-view-v1" {
+        return Err("U4c production glTF unchanged-view identity drifted".to_owned());
+    }
+    validate_hot_view_phase(
+        &unchanged.phase,
+        measurement,
+        "U4c production glTF unchanged view",
+    )?;
+    validate_nonproducing_phase(&unchanged.phase, "U4c production glTF unchanged view")
 }
 
 #[cfg(feature = "repository-input-candidate")]

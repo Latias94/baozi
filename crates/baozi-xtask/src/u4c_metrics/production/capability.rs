@@ -205,10 +205,13 @@ pub(super) fn validate_nonproducing_phase(report: &PhaseReport, label: &str) -> 
 }
 
 #[cfg(feature = "repository-input-candidate")]
-pub(super) fn validate_allocation_lifecycle(
-    reports: [&AllocationReport; 4],
+pub(super) fn validate_allocation_lifecycle<const PHASES: usize>(
+    reports: [&AllocationReport; PHASES],
     label: &str,
 ) -> Result<(), String> {
+    if reports.is_empty() {
+        return Err(format!("{label} has no allocation lifecycle phases"));
+    }
     let count_current = reports.iter().try_fold(0_i64, |total, report| {
         total.checked_add(report.count_current)
     });
@@ -245,6 +248,15 @@ mod tests {
             max_lookup_events: 4,
             max_member_probes_per_lookup: 3,
         }
+    }
+
+    #[cfg(feature = "repository-input-candidate")]
+    #[test]
+    fn rejects_an_empty_allocation_lifecycle() {
+        let error = validate_allocation_lifecycle([], "empty lifecycle")
+            .expect_err("an empty lifecycle must not balance vacuously");
+
+        assert!(error.contains("no allocation lifecycle phases"), "{error}");
     }
 
     #[test]

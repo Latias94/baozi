@@ -12,7 +12,7 @@ use sha2::{Digest, Sha256};
 pub(super) const REPORT_PREFIX: &str = "BAOZI_U4C_PRODUCTION_V1=";
 const REPORT_SCHEMA_ID: &str = "baozi.u4c.production-report";
 const REPORT_SCHEMA_VERSION: u32 = 1;
-const REPORT_REVISION: u32 = 6;
+const REPORT_REVISION: u32 = 7;
 const SCENARIO_SET_ID: &str = "canonical-store-production-v1";
 
 #[derive(Serialize)]
@@ -197,6 +197,7 @@ pub(super) struct GltfCapabilityReport {
     pub(super) construction: PhaseReport,
     pub(super) inspection: PhaseReport,
     pub(super) snapshot: PhaseReport,
+    pub(super) unchanged_view: GltfUnchangedViewReport,
     pub(super) release: ReleaseReport,
     pub(super) physical_account: CapabilityPhysicalReport,
     pub(super) factory_after_account_release: PhysicalFactoryReport,
@@ -255,6 +256,19 @@ pub(super) struct GltfCanonicalShapeReport {
     pub(super) animation_clip_count: usize,
     pub(super) animation_channel_count: usize,
     pub(super) animation_key_count: usize,
+}
+
+#[derive(Serialize)]
+pub(super) struct GltfUnchangedViewReport {
+    pub(super) observation: GltfCanonicalShapeReport,
+    pub(super) repeated_observation_matches: bool,
+    pub(super) generation_preserved: bool,
+    pub(super) generation_reservations_before: u64,
+    pub(super) generation_reservations_after: u64,
+    pub(super) canonical_block_count_before: usize,
+    pub(super) canonical_block_count_after: usize,
+    pub(super) phase: PhaseReport,
+    pub(super) physical_account: ReadOnlyPhysicalReport,
 }
 
 #[derive(Serialize)]
@@ -455,6 +469,12 @@ pub(super) struct CapabilityPhysicalReport {
     pub(super) after_inspection: PhysicalAccountReport,
     pub(super) after_snapshot: PhysicalAccountReport,
     pub(super) after_release: PhysicalAccountReport,
+}
+
+#[derive(Serialize)]
+pub(super) struct ReadOnlyPhysicalReport {
+    pub(super) before: PhysicalAccountReport,
+    pub(super) after: PhysicalAccountReport,
 }
 
 #[derive(Serialize)]

@@ -54,6 +54,7 @@ const PRODUCTION_PROBE_CARGO_TARGET: &str = "baozi_core";
 const PRODUCTION_PROBE_TARGET: &str =
     "canonical_scene::store::tests::production_probe::canonical_store_u4c_production_v1_probe";
 const PRODUCTION_REPORT_PREFIX: &str = "BAOZI_U4C_PRODUCTION_V1=";
+const PRODUCTION_REPORT_REVISION: u64 = 7;
 const XTASK_PACKAGE: &str = "baozi-xtask";
 const XTASK_CARGO_TARGET: &str = "baozi-xtask";
 const COLLECTOR_PACKAGE: &str = "baozi-operation";
@@ -76,6 +77,10 @@ const ADMITTED_CONSUMER_COVERAGE: &[(&str, &str)] = &[
         "canonical-gltf-five-domain-inspection-v1",
     ),
     ("bounded-snapshot", "canonical-gltf-five-domain-snapshot-v1"),
+    (
+        "unchanged-view",
+        "canonical-gltf-five-domain-unchanged-view-v1",
+    ),
 ];
 const REQUIRED_SCALE_SCENARIOS: &[&str] = &[
     "complex-members-n-v1",
@@ -496,7 +501,7 @@ impl ProductionSpecification {
         if self.report_contract.prefix != PRODUCTION_REPORT_PREFIX
             || self.report_contract.schema_id != "baozi.u4c.production-report"
             || self.report_contract.schema_version != 1
-            || self.report_contract.report_revision != 6
+            || self.report_contract.report_revision != PRODUCTION_REPORT_REVISION
             || self.report_contract.scenario_set_id != "canonical-store-production-v1"
             || self.report_contract.payload_bytes == 0
             || !is_lowercase_sha256(&self.report_contract.sha256)
@@ -912,7 +917,7 @@ fn validate_coverage(
             })
     {
         return Err(
-            "U4c production consumer coverage mapping must bind inspection and snapshot evidence"
+            "U4c production consumer coverage mapping must bind inspection, snapshot, and unchanged-view evidence"
                 .to_owned(),
         );
     }
@@ -3706,14 +3711,14 @@ mod tests {
     }
 
     #[test]
-    fn four_of_six_mapped_entry_points_do_not_qualify_u4_exit() {
+    fn five_of_six_mapped_entry_points_do_not_qualify_u4_exit() {
         let specification = ProductionSpecification::parse(include_bytes!(
             "../../../../docs/conformance/u4c-metrics.toml"
         ))
         .expect("managed U4c production specification must parse");
 
         assert_eq!(specification.coverage.required_entry_points.len(), 6);
-        assert_eq!(specification.coverage.mapped_entry_points.len(), 4);
+        assert_eq!(specification.coverage.mapped_entry_points.len(), 5);
         assert!(!specification.coverage.qualifies_u4d_exit());
     }
 
@@ -3748,6 +3753,10 @@ mod tests {
                 "canonical-gltf-five-domain-inspection-v1",
             ),
             ("bounded-snapshot", "canonical-gltf-five-domain-snapshot-v1"),
+            (
+                "unchanged-view",
+                "canonical-gltf-five-domain-unchanged-view-v1",
+            ),
         ] {
             let expected =
                 format!("{{ entry_point = \"{entry_point}\", scenario_id = \"{scenario_id}\" }}");
