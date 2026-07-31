@@ -27,8 +27,9 @@ use crate::math::{Mat4, Quat, Vec3};
 use super::publication::post_evidence_build_failure_code;
 use super::{
     NODE_SCENE_BUILD_INVARIANT_CODE, NODE_SCENE_STORAGE_REJECTION_CODE, NodeSceneBuildFaults,
-    NodeSceneConstructionRejection, NodeSceneConstructionTerminal, NodeSceneDraftBuild,
-    NodeSceneRichFailure, PreparedNodeSceneConstruction,
+    NodeSceneConstructionRejection, NodeSceneConstructionTerminal, NodeSceneDraft,
+    NodeSceneDraftBuild, NodeSceneRichFailure, PendingNodeSceneDraft,
+    PreparedNodeSceneConstruction,
 };
 
 mod gltf_capability;
@@ -244,6 +245,17 @@ fn finish_draft_from_local_authoring_vecs(
         .expect("local authoring buffers must materialize an owned draft")
 }
 
+fn exact_draft_pair_from_local_authoring_vecs(
+    account: &baozi_operation::PhysicalStorageAccount,
+) -> (NodeSceneDraft, PendingNodeSceneDraft) {
+    match finish_draft_from_local_authoring_vecs(account) {
+        NodeSceneDraftBuild::Draft { draft, owner } => (draft, owner),
+        NodeSceneDraftBuild::Failure(_) => {
+            panic!("valid materialization must preserve an exact canonical draft pair")
+        }
+    }
+}
+
 #[test]
 fn materialized_draft_outlives_source_buffers_before_central_prepare_and_handoff() {
     let factory = test_factory();
@@ -251,15 +263,11 @@ fn materialized_draft_outlives_source_buffers_before_central_prepare_and_handoff
     let generation_source = AtomicU64::new(0);
 
     // The helper's Vec-backed authoring storage is gone before central validation starts.
-    let draft = finish_draft_from_local_authoring_vecs(&account);
-    let pending = match draft {
-        NodeSceneDraftBuild::Draft(pending) => pending,
-        NodeSceneDraftBuild::Failure(_) => {
-            panic!("valid materialization must preserve a pending canonical draft")
-        }
-    };
-    let prepared = pending
-        .prepare_with_generation_source(|| SceneGenerationId::reserve_from(&generation_source))
+    let (draft, owner) = exact_draft_pair_from_local_authoring_vecs(&account);
+    let prepared = owner
+        .prepare_with_generation_source(draft, || {
+            SceneGenerationId::reserve_from(&generation_source)
+        })
         .expect("owned draft must centrally prepare without source buffers");
     let parts = successful_parts(prepared);
 
@@ -272,23 +280,107 @@ fn materialized_draft_outlives_source_buffers_before_central_prepare_and_handoff
 }
 
 #[test]
-fn dropping_materialized_draft_without_prepare_releases_retained_storage() {
+fn dropping_draft_descriptor_does_not_release_its_retained_owner() {
     let factory = test_factory();
     let account = test_account(&factory, 256);
 
-    let pending = match finish_draft_from_local_authoring_vecs(&account) {
-        NodeSceneDraftBuild::Draft(pending) => pending,
-        NodeSceneDraftBuild::Failure(_) => {
-            panic!("valid materialization must preserve a pending canonical draft")
-        }
-    };
-    assert!(account.snapshot().live_retained_bytes() > 0);
-    assert!(account.snapshot().live_retained_allocations() > 0);
+    let (draft, owner) = exact_draft_pair_from_local_authoring_vecs(&account);
+    let retained = account.snapshot();
+    assert!(retained.live_retained_bytes() > 0);
+    assert!(retained.live_retained_allocations() > 0);
 
-    drop(pending);
+    {
+        let _descriptor = draft;
+    }
+
+    assert_eq!(account.snapshot(), retained);
+    drop(owner);
 
     assert_eq!(account.snapshot().live_retained_bytes(), 0);
     assert_eq!(account.snapshot().live_retained_allocations(), 0);
+}
+
+#[test]
+fn dropping_draft_owner_releases_storage_while_descriptor_remains_inert() {
+    let factory = test_factory();
+    let account = test_account(&factory, 256);
+
+    let (_descriptor, owner) = exact_draft_pair_from_local_authoring_vecs(&account);
+    assert!(account.snapshot().live_retained_bytes() > 0);
+    assert!(account.snapshot().live_retained_allocations() > 0);
+
+    drop(owner);
+
+    assert_eq!(account.snapshot().live_retained_bytes(), 0);
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
+}
+
+#[test]
+fn foreign_brand_descriptor_fails_before_generation_reservation() {
+    let factory = test_factory();
+    let account = test_account(&factory, 512);
+    let (local_draft, local_owner) = exact_draft_pair_from_local_authoring_vecs(&account);
+    let (foreign_draft, foreign_owner) = exact_draft_pair_from_local_authoring_vecs(&account);
+    let mismatched = NodeSceneDraft {
+        brand: foreign_draft.brand,
+        directory: local_draft.directory,
+    };
+    drop(foreign_owner);
+
+    let failure = rich_failure(
+        local_owner
+            .prepare_with_generation_source(mismatched, || {
+                panic!("foreign brand must fail before generation reservation")
+            })
+            .expect("foreign brand must preserve rich build-invariant evidence"),
+    );
+    assert_eq!(
+        terminal_failure_code(failure.ledger_evidence()),
+        NODE_SCENE_BUILD_INVARIANT_CODE
+    );
+    assert_eq!(
+        failure
+            .ledger_evidence()
+            .dimension_by_semantic(STORE_DIMENSION)
+            .expect("foreign-brand failure dimension")
+            .committed_canonical_output(),
+        0
+    );
+    assert_released(failure, &account);
+}
+
+#[test]
+fn foreign_directory_descriptor_fails_before_generation_reservation() {
+    let factory = test_factory();
+    let account = test_account(&factory, 512);
+    let (local_draft, local_owner) = exact_draft_pair_from_local_authoring_vecs(&account);
+    let (foreign_draft, foreign_owner) = exact_draft_pair_from_local_authoring_vecs(&account);
+    let mismatched = NodeSceneDraft {
+        brand: local_draft.brand,
+        directory: foreign_draft.directory,
+    };
+    drop(foreign_owner);
+
+    let failure = rich_failure(
+        local_owner
+            .prepare_with_generation_source(mismatched, || {
+                panic!("foreign directory must fail before generation reservation")
+            })
+            .expect("foreign directory must preserve rich build-invariant evidence"),
+    );
+    assert_eq!(
+        terminal_failure_code(failure.ledger_evidence()),
+        NODE_SCENE_BUILD_INVARIANT_CODE
+    );
+    assert_eq!(
+        failure
+            .ledger_evidence()
+            .dimension_by_semantic(STORE_DIMENSION)
+            .expect("foreign-directory failure dimension")
+            .committed_canonical_output(),
+        0
+    );
+    assert_released(failure, &account);
 }
 
 #[test]

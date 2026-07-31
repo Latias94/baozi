@@ -55,9 +55,9 @@ use super::publication::{
 use super::{
     FreshNodeSceneOwner, NODE_SCENE_BUILD_INVARIANT_CODE, NODE_SCENE_COMMITMENT_REJECTION_CODE,
     NodeSceneBuildFaults, NodeSceneConstructionRejection, NodeSceneDraft, NodeSceneDraftBuild,
-    NodeSceneWorkMeter, PendingNodeSceneDraft, PendingNodeSceneDraftOwner,
-    PreparedNodeSceneConstruction, PreparedNodeSceneFailure, RejectedNodeSceneConstruction,
-    SceneEvidenceCounts, ValidatedNodeSceneConstruction,
+    NodeSceneWorkMeter, PendingNodeSceneDraft, PreparedNodeSceneConstruction,
+    PreparedNodeSceneFailure, RejectedNodeSceneConstruction, SceneEvidenceCounts,
+    ValidatedNodeSceneConstruction,
 };
 
 impl RejectedNodeSceneConstruction {
@@ -530,7 +530,9 @@ impl NodeSceneDraftBuild {
         reserve_generation: impl FnOnce() -> Result<ReservedSceneGeneration, SceneGenerationError>,
     ) -> Result<PreparedNodeSceneConstruction, SceneConstructionError> {
         match self {
-            Self::Draft(draft) => draft.prepare_with_generation_source(reserve_generation),
+            Self::Draft { draft, owner } => {
+                owner.prepare_with_generation_source(draft, reserve_generation)
+            }
             Self::Failure(failure) => Ok(failure.into()),
         }
     }
@@ -820,13 +822,12 @@ impl ValidatedNodeSceneConstruction<'_> {
         };
         let evidence_counts = plans.evidence_counts();
         let deformation_uniqueness_capacity = batches.deformation.maximum_uniqueness_capacity();
-        let draft = PendingNodeSceneDraft {
-            owner: PendingNodeSceneDraftOwner {
-                assembly,
-                brand,
-                keys,
-            },
-            draft: NodeSceneDraft { brand, directory },
+        let draft = NodeSceneDraft { brand, directory };
+        let owner = PendingNodeSceneDraft {
+            assembly,
+            brand,
+            keys,
+            expected_directory: directory,
             evidence,
             evidence_counts,
             work,
@@ -834,7 +835,7 @@ impl ValidatedNodeSceneConstruction<'_> {
         };
         // No source authoring slice or compiled validation plan crosses the draft boundary.
         drop(batches);
-        Ok(NodeSceneDraftBuild::Draft(draft))
+        Ok(NodeSceneDraftBuild::Draft { draft, owner })
     }
 }
 

@@ -297,25 +297,21 @@ pub(in crate::canonical_scene::store) struct RejectedNodeSceneConstruction {
     failure: NodeSceneConstructionRejection,
 }
 
-struct NodeSceneDraft {
+pub(in crate::canonical_scene::store) struct NodeSceneDraft {
     brand: ConstructionBrand,
     directory: CanonicalBlockRef<SceneDirectorySchema>,
 }
 
-struct PendingNodeSceneDraftOwner {
+/// Retained materialization owner awaiting its exact parser-facing descriptor.
+///
+/// The expected directory remains private to the owner so central validation can reject a
+/// descriptor from another construction before registering commitments or allocating scratch.
+#[must_use = "a pending node Scene draft owner must be centrally prepared or deliberately dropped"]
+pub(in crate::canonical_scene::store) struct PendingNodeSceneDraft {
     assembly: SceneStoreAssembly,
     brand: ConstructionBrand,
     keys: SceneStoreKeys,
-}
-
-/// Frozen materialization owner awaiting central canonical-graph validation.
-///
-/// The owner is intentionally opaque: its exact directory/evidence pairing and operation
-/// authority can only be consumed linearly by the central prepare path.
-#[must_use = "a pending node Scene draft must be centrally prepared or deliberately dropped"]
-pub(in crate::canonical_scene::store) struct PendingNodeSceneDraft {
-    owner: PendingNodeSceneDraftOwner,
-    draft: NodeSceneDraft,
+    expected_directory: CanonicalBlockRef<SceneDirectorySchema>,
     evidence: OutcomeEvidenceRecordRef<NodeSceneOutcomeEvidenceSchema>,
     evidence_counts: SceneEvidenceCounts,
     work: NodeSceneWorkMeter,
@@ -329,7 +325,10 @@ pub(in crate::canonical_scene::store) struct PendingNodeSceneDraft {
     reason = "the failure owner stays inline so materialization preserves exact containment"
 )]
 pub(in crate::canonical_scene::store) enum NodeSceneDraftBuild {
-    Draft(PendingNodeSceneDraft),
+    Draft {
+        draft: NodeSceneDraft,
+        owner: PendingNodeSceneDraft,
+    },
     Failure(PreparedNodeSceneFailure),
 }
 

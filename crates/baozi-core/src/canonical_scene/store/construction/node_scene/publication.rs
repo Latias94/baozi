@@ -19,10 +19,10 @@ use super::scratch::NodeSceneValidationScratchOwner;
 use super::{
     NODE_SCENE_BUILD_INVARIANT_CODE, NODE_SCENE_COMMITMENT_REJECTION_CODE,
     NODE_SCENE_CONTROL_INTERRUPTION_CODE, NODE_SCENE_STORAGE_REJECTION_CODE,
-    NODE_SCENE_WORK_INTERRUPTION_CODE, NodeSceneConstructionTerminal, NodeSceneRichFailure,
-    NodeSceneStoreFailureAssembly, NodeSceneStoreFailureValidation, NodeSceneSuccessParts,
-    NodeSceneSuccessReport, PendingNodeSceneCommitments, PendingNodeSceneDraft,
-    PendingNodeSceneDraftOwner, PreparedNodeSceneConstruction, PreparedNodeSceneFailure,
+    NODE_SCENE_WORK_INTERRUPTION_CODE, NodeSceneConstructionTerminal, NodeSceneDraft,
+    NodeSceneRichFailure, NodeSceneStoreFailureAssembly, NodeSceneStoreFailureValidation,
+    NodeSceneSuccessParts, NodeSceneSuccessReport, PendingNodeSceneCommitments,
+    PendingNodeSceneDraft, PreparedNodeSceneConstruction, PreparedNodeSceneFailure,
     PreparedNodeSceneRichFailure, PreparedNodeSceneSuccess, SceneEvidenceCounts,
     ValidatedNodeScene, ValidatedNodeSceneCandidate,
 };
@@ -30,29 +30,39 @@ use super::{
 impl PendingNodeSceneDraft {
     pub(in crate::canonical_scene::store) fn prepare_with_generation_source(
         self,
+        draft: NodeSceneDraft,
         reserve_generation: impl FnOnce() -> Result<ReservedSceneGeneration, SceneGenerationError>,
     ) -> Result<PreparedNodeSceneConstruction, SceneConstructionError> {
-        prepare_pending_node_scene_draft(self, reserve_generation)
+        prepare_pending_node_scene_draft(self, draft, reserve_generation)
     }
 }
 
 fn prepare_pending_node_scene_draft(
-    pending: PendingNodeSceneDraft,
+    owner: PendingNodeSceneDraft,
+    draft: NodeSceneDraft,
     reserve_generation: impl FnOnce() -> Result<ReservedSceneGeneration, SceneGenerationError>,
 ) -> Result<PreparedNodeSceneConstruction, SceneConstructionError> {
     let PendingNodeSceneDraft {
-        owner:
-            PendingNodeSceneDraftOwner {
-                mut assembly,
-                brand,
-                keys,
-            },
-        draft,
+        mut assembly,
+        brand,
+        keys,
+        expected_directory,
         evidence,
         evidence_counts,
         mut work,
         deformation_uniqueness_capacity,
-    } = pending;
+    } = owner;
+    // CanonicalBlockRef equality includes the destination identity and slot, so this rejects both
+    // a foreign construction brand and a same-brand descriptor projected from another store.
+    if draft.brand != brand || draft.directory != expected_directory {
+        return prepare_node_rich_failure_from_assembly(
+            assembly,
+            evidence,
+            evidence_counts,
+            NODE_SCENE_BUILD_INVARIANT_CODE,
+        )
+        .map(Into::into);
+    }
     if u32::try_from(assembly.canonical_len()) != Ok(evidence_counts.canonical_block_count)
         || assembly.outcome_evidence_len() != 1
     {
@@ -96,7 +106,6 @@ fn prepare_pending_node_scene_draft(
             );
         }
     };
-    let brand_matches = draft.brand == brand;
     let mut proof = None;
     let validation = {
         let mut scratch_view = scratch.validation_view();
@@ -105,20 +114,16 @@ fn prepare_pending_node_scene_draft(
             draft.directory.into_store(),
             evidence,
             |session, directory, evidence, control| {
-                proof = if brand_matches {
-                    validate_node_scene_canonical_graph(
-                        session,
-                        directory,
-                        evidence,
-                        evidence_counts,
-                        evidence_counts.canonical_block_count,
-                        deformation_uniqueness_capacity,
-                        &mut scratch_view,
-                        |amount| work.observe(control, amount),
-                    )?
-                } else {
-                    None
-                };
+                proof = validate_node_scene_canonical_graph(
+                    session,
+                    directory,
+                    evidence,
+                    evidence_counts,
+                    evidence_counts.canonical_block_count,
+                    deformation_uniqueness_capacity,
+                    &mut scratch_view,
+                    |amount| work.observe(control, amount),
+                )?;
                 work.finish(control)?;
                 Ok(proof.is_some())
             },
