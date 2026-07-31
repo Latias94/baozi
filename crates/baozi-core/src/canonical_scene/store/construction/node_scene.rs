@@ -32,6 +32,7 @@ pub(crate) mod edit;
 mod geometry;
 mod materialization;
 mod publication;
+mod scratch;
 pub(in crate::canonical_scene::store) mod semantic;
 pub(in crate::canonical_scene::store) mod snapshot;
 mod view;
@@ -103,7 +104,7 @@ impl NodeSceneBuildFaults {
             return value;
         }
         self.alter_first_authored_transform = false;
-        f32::from_bits(value.to_bits() ^ 1)
+        f32::NAN
     }
 
     fn geometry_f32(&mut self, value: f32) -> f32 {
@@ -111,7 +112,7 @@ impl NodeSceneBuildFaults {
             return value;
         }
         self.alter_first_geometry_f32 = false;
-        f32::from_bits(value.to_bits() ^ 1)
+        f32::NAN
     }
 }
 
@@ -301,17 +302,35 @@ struct NodeSceneDraft {
     directory: CanonicalBlockRef<SceneDirectorySchema>,
 }
 
-struct NodeSceneCandidateOwner {
+struct PendingNodeSceneDraftOwner {
     assembly: SceneStoreAssembly,
     brand: ConstructionBrand,
     keys: SceneStoreKeys,
 }
 
-struct NodeSceneCandidate {
-    owner: NodeSceneCandidateOwner,
+/// Frozen materialization owner awaiting central canonical-graph validation.
+///
+/// The owner is intentionally opaque: its exact directory/evidence pairing and operation
+/// authority can only be consumed linearly by the central prepare path.
+#[must_use = "a pending node Scene draft must be centrally prepared or deliberately dropped"]
+pub(in crate::canonical_scene::store) struct PendingNodeSceneDraft {
+    owner: PendingNodeSceneDraftOwner,
     draft: NodeSceneDraft,
     evidence: OutcomeEvidenceRecordRef<NodeSceneOutcomeEvidenceSchema>,
     evidence_counts: SceneEvidenceCounts,
+    work: NodeSceneWorkMeter,
+    deformation_uniqueness_capacity: usize,
+}
+
+/// The exact outcome of source-backed materialization before central graph validation.
+#[must_use = "a node Scene draft build owns either central validation work or a failure"]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "the failure owner stays inline so materialization preserves exact containment"
+)]
+pub(in crate::canonical_scene::store) enum NodeSceneDraftBuild {
+    Draft(PendingNodeSceneDraft),
+    Failure(PreparedNodeSceneFailure),
 }
 
 #[derive(Clone, Copy)]
@@ -357,6 +376,16 @@ pub(in crate::canonical_scene::store) struct PreparedNodeSceneRichFailure {
     store: PreparedNodeStoreFailure,
 }
 
+#[must_use = "every prepared node Scene failure owns an exact frozen publication"]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "prepared failure owners remain inline so terminal handoff is allocation-free"
+)]
+pub(in crate::canonical_scene::store) enum PreparedNodeSceneFailure {
+    RichFailure(PreparedNodeSceneRichFailure),
+    MinimalFallback(PreparedTracerSceneFallback),
+}
+
 #[must_use = "every prepared node Scene owns an exact frozen publication"]
 #[allow(
     clippy::large_enum_variant,
@@ -366,6 +395,15 @@ pub(in crate::canonical_scene::store) enum PreparedNodeSceneConstruction {
     Success(PreparedNodeSceneSuccess),
     RichFailure(PreparedNodeSceneRichFailure),
     MinimalFallback(PreparedTracerSceneFallback),
+}
+
+impl From<PreparedNodeSceneFailure> for PreparedNodeSceneConstruction {
+    fn from(failure: PreparedNodeSceneFailure) -> Self {
+        match failure {
+            PreparedNodeSceneFailure::RichFailure(failure) => Self::RichFailure(failure),
+            PreparedNodeSceneFailure::MinimalFallback(fallback) => Self::MinimalFallback(fallback),
+        }
+    }
 }
 
 /// Private inspector over a centrally validated node-domain Scene.

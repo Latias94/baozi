@@ -3,7 +3,6 @@ mod graph;
 mod plan;
 mod publication;
 mod report;
-mod scratch;
 mod source;
 
 #[cfg(test)]

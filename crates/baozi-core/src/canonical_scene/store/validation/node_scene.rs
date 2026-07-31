@@ -1002,7 +1002,7 @@ pub(in crate::canonical_scene::store) fn validate_node_scene_canonical_graph<E>(
     evidence_ref: OutcomeEvidenceRecordRef<NodeSceneOutcomeEvidenceSchema>,
     expected_counts: SceneEvidenceCounts,
     canonical_unique_block_count: u32,
-    expected_deformation_uniqueness_mark_count: usize,
+    deformation_uniqueness_capacity: usize,
     scratch: &mut NodeSceneValidationScratch<'_>,
     mut observe_work: impl FnMut(u64) -> Result<(), E>,
 ) -> Result<Option<NodeSceneValidationProof>, E> {
@@ -1013,7 +1013,7 @@ pub(in crate::canonical_scene::store) fn validate_node_scene_canonical_graph<E>(
         evidence_ref,
         expected_counts,
         canonical_unique_block_count,
-        expected_deformation_uniqueness_mark_count,
+        deformation_uniqueness_capacity,
         scratch,
         &mut |amount| match observe_work(amount) {
             Ok(()) => Some(()),
@@ -1039,14 +1039,12 @@ fn validate_node_scene_canonical_graph_inner(
     evidence_ref: OutcomeEvidenceRecordRef<NodeSceneOutcomeEvidenceSchema>,
     expected_counts: SceneEvidenceCounts,
     canonical_unique_block_count: u32,
-    expected_deformation_uniqueness_mark_count: usize,
+    deformation_uniqueness_capacity: usize,
     scratch: &mut NodeSceneValidationScratch<'_>,
     observe_work: &mut impl FnMut(u64) -> Option<()>,
 ) -> Option<NodeSceneValidationProof> {
-    let scratch_requirements = NodeSceneValidationScratch::requirements(
-        expected_counts,
-        expected_deformation_uniqueness_mark_count,
-    )?;
+    let scratch_requirements =
+        NodeSceneValidationScratch::requirements(expected_counts, deformation_uniqueness_capacity)?;
     scratch.validate_known_capacity(scratch_requirements)?;
     scratch.initialize(scratch_requirements, observe_work)?;
     let node_structure = validate_node_canonical_structure(

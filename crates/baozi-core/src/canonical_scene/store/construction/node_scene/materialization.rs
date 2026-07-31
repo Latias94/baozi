@@ -50,14 +50,14 @@ use super::geometry::{
 use super::publication::{
     node_scene_failure_code, post_evidence_failure_code,
     prepare_node_minimal_fallback_from_assembly, prepare_node_minimal_fallback_from_operation,
-    prepare_node_rich_failure_from_assembly, prepare_node_scene_candidate,
+    prepare_node_rich_failure_from_assembly,
 };
 use super::{
     FreshNodeSceneOwner, NODE_SCENE_BUILD_INVARIANT_CODE, NODE_SCENE_COMMITMENT_REJECTION_CODE,
-    NodeSceneBuildFaults, NodeSceneCandidate, NodeSceneCandidateOwner,
-    NodeSceneConstructionRejection, NodeSceneDraft, NodeSceneWorkMeter,
-    PreparedNodeSceneConstruction, RejectedNodeSceneConstruction, SceneEvidenceCounts,
-    ValidatedNodeSceneConstruction,
+    NodeSceneBuildFaults, NodeSceneConstructionRejection, NodeSceneDraft, NodeSceneDraftBuild,
+    NodeSceneWorkMeter, PendingNodeSceneDraft, PendingNodeSceneDraftOwner,
+    PreparedNodeSceneConstruction, PreparedNodeSceneFailure, RejectedNodeSceneConstruction,
+    SceneEvidenceCounts, ValidatedNodeSceneConstruction,
 };
 
 impl RejectedNodeSceneConstruction {
@@ -316,16 +316,13 @@ struct SceneDomainDirectoryRefs {
     animation: CanonicalBlockRef<AnimationDirectorySchema>,
 }
 
-pub(super) struct ValidatedNodeSceneBatches<'input> {
-    pub(super) animations:
-        ValidatedAnimationBatch<'input, RetainedStoreReservation<SceneConstructionOwner>>,
-    pub(super) deformation:
+struct ValidatedNodeSceneBatches<'input> {
+    animations: ValidatedAnimationBatch<'input, RetainedStoreReservation<SceneConstructionOwner>>,
+    deformation:
         ValidatedDeformationBatch<'input, RetainedStoreReservation<SceneConstructionOwner>>,
-    pub(super) geometry:
-        ValidatedGeometryBatch<'input, RetainedStoreReservation<SceneConstructionOwner>>,
-    pub(super) appearance:
-        ValidatedAppearanceBatch<'input, RetainedStoreReservation<SceneConstructionOwner>>,
-    pub(super) nodes: ValidatedNodeBatch<'input, RetainedStoreReservation<SceneConstructionOwner>>,
+    geometry: ValidatedGeometryBatch<'input, RetainedStoreReservation<SceneConstructionOwner>>,
+    appearance: ValidatedAppearanceBatch<'input, RetainedStoreReservation<SceneConstructionOwner>>,
+    nodes: ValidatedNodeBatch<'input, RetainedStoreReservation<SceneConstructionOwner>>,
 }
 
 struct NodeSceneMaterializationPlans {
@@ -521,8 +518,26 @@ fn node_scene_writer_plan(
     ))
 }
 
+impl NodeSceneDraftBuild {
+    fn failure(
+        prepared: Result<PreparedNodeSceneFailure, SceneConstructionError>,
+    ) -> Result<Self, SceneConstructionError> {
+        prepared.map(Self::Failure)
+    }
+
+    pub(super) fn prepare_with_generation_source(
+        self,
+        reserve_generation: impl FnOnce() -> Result<ReservedSceneGeneration, SceneGenerationError>,
+    ) -> Result<PreparedNodeSceneConstruction, SceneConstructionError> {
+        match self {
+            Self::Draft(draft) => draft.prepare_with_generation_source(reserve_generation),
+            Self::Failure(failure) => Ok(failure.into()),
+        }
+    }
+}
+
 impl ValidatedNodeSceneConstruction<'_> {
-    /// Materializes only the batch already coupled to this typestate.
+    /// Materializes and centrally validates only the batch already coupled to this typestate.
     pub(in crate::canonical_scene::store) fn prepare(
         self,
     ) -> Result<PreparedNodeSceneConstruction, SceneConstructionError> {
@@ -533,10 +548,8 @@ impl ValidatedNodeSceneConstruction<'_> {
         self,
         reserve_generation: impl FnOnce() -> Result<ReservedSceneGeneration, SceneGenerationError>,
     ) -> Result<PreparedNodeSceneConstruction, SceneConstructionError> {
-        self.prepare_with_generation_source_and_faults(
-            reserve_generation,
-            NodeSceneBuildFaults::none(),
-        )
+        self.finish_draft_with_faults(NodeSceneBuildFaults::none())?
+            .prepare_with_generation_source(reserve_generation)
     }
 
     #[cfg(test)]
@@ -544,14 +557,21 @@ impl ValidatedNodeSceneConstruction<'_> {
         self,
         faults: NodeSceneBuildFaults,
     ) -> Result<PreparedNodeSceneConstruction, SceneConstructionError> {
-        self.prepare_with_generation_source_and_faults(SceneGenerationId::reserve, faults)
+        self.finish_draft_with_faults(faults)?
+            .prepare_with_generation_source(SceneGenerationId::reserve)
     }
 
-    fn prepare_with_generation_source_and_faults(
+    /// Freezes an owned draft after materialization and releases every source-backed batch.
+    pub(in crate::canonical_scene::store) fn finish_draft(
         self,
-        reserve_generation: impl FnOnce() -> Result<ReservedSceneGeneration, SceneGenerationError>,
+    ) -> Result<NodeSceneDraftBuild, SceneConstructionError> {
+        self.finish_draft_with_faults(NodeSceneBuildFaults::none())
+    }
+
+    fn finish_draft_with_faults(
+        self,
         mut faults: NodeSceneBuildFaults,
-    ) -> Result<PreparedNodeSceneConstruction, SceneConstructionError> {
+    ) -> Result<NodeSceneDraftBuild, SceneConstructionError> {
         let Self {
             animations,
             deformation,
@@ -579,10 +599,10 @@ impl ValidatedNodeSceneConstruction<'_> {
             Ok(plans) => plans,
             Err(_cause) => {
                 drop(batches);
-                return prepare_node_minimal_fallback_from_operation(
+                return NodeSceneDraftBuild::failure(prepare_node_minimal_fallback_from_operation(
                     raw,
                     NODE_SCENE_BUILD_INVARIANT_CODE,
-                );
+                ));
             }
         };
         let mut assembly: SceneStoreAssembly = match raw.try_publication_assembly(plans.publication)
@@ -592,7 +612,9 @@ impl ValidatedNodeSceneConstruction<'_> {
                 drop(batches);
                 let cause = node_scene_failure_code(error.cause());
                 let operation = error.try_into_operation()?;
-                return prepare_node_minimal_fallback_from_operation(operation, cause);
+                return NodeSceneDraftBuild::failure(prepare_node_minimal_fallback_from_operation(
+                    operation, cause,
+                ));
             }
         };
 
@@ -600,27 +622,29 @@ impl ValidatedNodeSceneConstruction<'_> {
             Ok(evidence) => evidence,
             Err(cause) => {
                 drop(batches);
-                return prepare_node_minimal_fallback_from_assembly(
+                return NodeSceneDraftBuild::failure(prepare_node_minimal_fallback_from_assembly(
                     assembly,
                     node_scene_failure_code(&cause),
-                );
+                ));
             }
         };
         if let Err(_cause) =
             assembly.try_commit_outcome_evidence(keys.dimension, faults.outcome_evidence_commitment)
         {
             drop(batches);
-            return prepare_node_minimal_fallback_from_assembly(
+            return NodeSceneDraftBuild::failure(prepare_node_minimal_fallback_from_assembly(
                 assembly,
                 NODE_SCENE_COMMITMENT_REJECTION_CODE,
-            );
+            ));
         }
         let geometry_scratch_plan =
             match try_plan_geometry_reference_scratch(&mut assembly, &batches.geometry) {
                 Ok(plan) => plan,
                 Err(cause) => {
                     drop(batches);
-                    return prepare_node_post_evidence_failure(assembly, evidence, &plans, cause);
+                    return NodeSceneDraftBuild::failure(prepare_node_post_evidence_failure(
+                        assembly, evidence, &plans, cause,
+                    ));
                 }
             };
         let mut work = NodeSceneWorkMeter::new();
@@ -637,7 +661,9 @@ impl ValidatedNodeSceneConstruction<'_> {
                 Ok(transforms) => Some(transforms),
                 Err(cause) => {
                     drop(batches);
-                    return prepare_node_post_evidence_failure(assembly, evidence, &plans, cause);
+                    return NodeSceneDraftBuild::failure(prepare_node_post_evidence_failure(
+                        assembly, evidence, &plans, cause,
+                    ));
                 }
             },
             None => None,
@@ -654,7 +680,9 @@ impl ValidatedNodeSceneConstruction<'_> {
                 Ok(references) => Some(references),
                 Err(cause) => {
                     drop(batches);
-                    return prepare_node_post_evidence_failure(assembly, evidence, &plans, cause);
+                    return NodeSceneDraftBuild::failure(prepare_node_post_evidence_failure(
+                        assembly, evidence, &plans, cause,
+                    ));
                 }
             },
             None => None,
@@ -671,7 +699,9 @@ impl ValidatedNodeSceneConstruction<'_> {
             Ok(nodes) => nodes,
             Err(cause) => {
                 drop(batches);
-                return prepare_node_post_evidence_failure(assembly, evidence, &plans, cause);
+                return NodeSceneDraftBuild::failure(prepare_node_post_evidence_failure(
+                    assembly, evidence, &plans, cause,
+                ));
             }
         };
         let appearance_refs = match retain_appearance(
@@ -685,7 +715,9 @@ impl ValidatedNodeSceneConstruction<'_> {
             Ok(appearance) => appearance,
             Err(cause) => {
                 drop(batches);
-                return prepare_node_post_evidence_failure(assembly, evidence, &plans, cause);
+                return NodeSceneDraftBuild::failure(prepare_node_post_evidence_failure(
+                    assembly, evidence, &plans, cause,
+                ));
             }
         };
         let geometry_scratch =
@@ -694,7 +726,9 @@ impl ValidatedNodeSceneConstruction<'_> {
                 Ok(scratch) => scratch,
                 Err(cause) => {
                     drop(batches);
-                    return prepare_node_post_evidence_failure(assembly, evidence, &plans, cause);
+                    return NodeSceneDraftBuild::failure(prepare_node_post_evidence_failure(
+                        assembly, evidence, &plans, cause,
+                    ));
                 }
             };
         let geometry_refs = match retain_geometry(
@@ -713,7 +747,9 @@ impl ValidatedNodeSceneConstruction<'_> {
             Ok(geometry) => geometry,
             Err(cause) => {
                 drop(batches);
-                return prepare_node_post_evidence_failure(assembly, evidence, &plans, cause);
+                return NodeSceneDraftBuild::failure(prepare_node_post_evidence_failure(
+                    assembly, evidence, &plans, cause,
+                ));
             }
         };
         let deformation_refs = match retain_deformation(
@@ -734,7 +770,9 @@ impl ValidatedNodeSceneConstruction<'_> {
             Ok(deformation) => deformation,
             Err(cause) => {
                 drop(batches);
-                return prepare_node_post_evidence_failure(assembly, evidence, &plans, cause);
+                return NodeSceneDraftBuild::failure(prepare_node_post_evidence_failure(
+                    assembly, evidence, &plans, cause,
+                ));
             }
         };
         let animation_refs = match retain_animation(
@@ -749,7 +787,9 @@ impl ValidatedNodeSceneConstruction<'_> {
             Ok(animation) => animation,
             Err(cause) => {
                 drop(batches);
-                return prepare_node_post_evidence_failure(assembly, evidence, &plans, cause);
+                return NodeSceneDraftBuild::failure(prepare_node_post_evidence_failure(
+                    assembly, evidence, &plans, cause,
+                ));
             }
         };
         let directory = match retain_node_scene_directory(
@@ -773,24 +813,28 @@ impl ValidatedNodeSceneConstruction<'_> {
             Ok(directory) => directory,
             Err(cause) => {
                 drop(batches);
-                return prepare_node_post_evidence_failure(assembly, evidence, &plans, cause);
+                return NodeSceneDraftBuild::failure(prepare_node_post_evidence_failure(
+                    assembly, evidence, &plans, cause,
+                ));
             }
         };
-        prepare_node_scene_candidate(
-            NodeSceneCandidate {
-                owner: NodeSceneCandidateOwner {
-                    assembly,
-                    brand,
-                    keys,
-                },
-                draft: NodeSceneDraft { brand, directory },
-                evidence,
-                evidence_counts: plans.evidence_counts(),
+        let evidence_counts = plans.evidence_counts();
+        let deformation_uniqueness_capacity = batches.deformation.maximum_uniqueness_capacity();
+        let draft = PendingNodeSceneDraft {
+            owner: PendingNodeSceneDraftOwner {
+                assembly,
+                brand,
+                keys,
             },
-            batches,
+            draft: NodeSceneDraft { brand, directory },
+            evidence,
+            evidence_counts,
             work,
-            reserve_generation,
-        )
+            deformation_uniqueness_capacity,
+        };
+        // No source authoring slice or compiled validation plan crosses the draft boundary.
+        drop(batches);
+        Ok(NodeSceneDraftBuild::Draft(draft))
     }
 }
 
@@ -1097,7 +1141,7 @@ fn prepare_node_post_evidence_failure(
     evidence: OutcomeEvidenceRecordRef<NodeSceneOutcomeEvidenceSchema>,
     plans: &NodeSceneMaterializationPlans,
     cause: StoreRuntimeError,
-) -> Result<PreparedNodeSceneConstruction, SceneConstructionError> {
+) -> Result<PreparedNodeSceneFailure, SceneConstructionError> {
     match post_evidence_failure_code(&cause) {
         Some(cause) => prepare_node_rich_failure_from_assembly(
             assembly,

@@ -6,7 +6,7 @@ use baozi_operation::{
 
 use crate::canonical_scene::store::schema::NodeSceneOutcomeEvidenceSchema;
 use crate::canonical_scene::store::validation::{
-    validate_node_scene_evidence_graph, validate_node_scene_graph,
+    validate_node_scene_canonical_graph, validate_node_scene_evidence_graph,
 };
 use crate::identity::{ReservedSceneGeneration, SceneGenerationError};
 
@@ -15,27 +15,34 @@ use super::super::{
     SceneStoreAssembly, SceneStoreKeys, SceneStoreOperation, TracerSceneFallback,
     burn_generation_reservation, final_progress,
 };
-use super::materialization::ValidatedNodeSceneBatches;
+use super::scratch::NodeSceneValidationScratchOwner;
 use super::{
     NODE_SCENE_BUILD_INVARIANT_CODE, NODE_SCENE_COMMITMENT_REJECTION_CODE,
     NODE_SCENE_CONTROL_INTERRUPTION_CODE, NODE_SCENE_STORAGE_REJECTION_CODE,
-    NODE_SCENE_WORK_INTERRUPTION_CODE, NodeSceneCandidate, NodeSceneCandidateOwner,
-    NodeSceneConstructionTerminal, NodeSceneRichFailure, NodeSceneStoreFailureAssembly,
-    NodeSceneStoreFailureValidation, NodeSceneSuccessParts, NodeSceneSuccessReport,
-    NodeSceneWorkMeter, PendingNodeSceneCommitments, PreparedNodeSceneConstruction,
+    NODE_SCENE_WORK_INTERRUPTION_CODE, NodeSceneConstructionTerminal, NodeSceneRichFailure,
+    NodeSceneStoreFailureAssembly, NodeSceneStoreFailureValidation, NodeSceneSuccessParts,
+    NodeSceneSuccessReport, PendingNodeSceneCommitments, PendingNodeSceneDraft,
+    PendingNodeSceneDraftOwner, PreparedNodeSceneConstruction, PreparedNodeSceneFailure,
     PreparedNodeSceneRichFailure, PreparedNodeSceneSuccess, SceneEvidenceCounts,
     ValidatedNodeScene, ValidatedNodeSceneCandidate,
 };
 
-pub(super) fn prepare_node_scene_candidate<'input>(
-    candidate: NodeSceneCandidate,
-    batches: ValidatedNodeSceneBatches<'input>,
-    mut work: NodeSceneWorkMeter,
+impl PendingNodeSceneDraft {
+    pub(in crate::canonical_scene::store) fn prepare_with_generation_source(
+        self,
+        reserve_generation: impl FnOnce() -> Result<ReservedSceneGeneration, SceneGenerationError>,
+    ) -> Result<PreparedNodeSceneConstruction, SceneConstructionError> {
+        prepare_pending_node_scene_draft(self, reserve_generation)
+    }
+}
+
+fn prepare_pending_node_scene_draft(
+    pending: PendingNodeSceneDraft,
     reserve_generation: impl FnOnce() -> Result<ReservedSceneGeneration, SceneGenerationError>,
 ) -> Result<PreparedNodeSceneConstruction, SceneConstructionError> {
-    let NodeSceneCandidate {
+    let PendingNodeSceneDraft {
         owner:
-            NodeSceneCandidateOwner {
+            PendingNodeSceneDraftOwner {
                 mut assembly,
                 brand,
                 keys,
@@ -43,17 +50,19 @@ pub(super) fn prepare_node_scene_candidate<'input>(
         draft,
         evidence,
         evidence_counts,
-    } = candidate;
+        mut work,
+        deformation_uniqueness_capacity,
+    } = pending;
     if u32::try_from(assembly.canonical_len()) != Ok(evidence_counts.canonical_block_count)
         || assembly.outcome_evidence_len() != 1
     {
-        drop(batches);
         return prepare_node_rich_failure_from_assembly(
             assembly,
             evidence,
             evidence_counts,
             NODE_SCENE_BUILD_INVARIANT_CODE,
-        );
+        )
+        .map(Into::into);
     }
     let pending_commitments = match register_node_scene_canonical_commitment(
         &mut assembly,
@@ -62,47 +71,64 @@ pub(super) fn prepare_node_scene_candidate<'input>(
     ) {
         Ok(commitments) => commitments,
         Err(_) => {
-            drop(batches);
             return prepare_node_rich_failure_from_assembly(
                 assembly,
                 evidence,
                 evidence_counts,
                 NODE_SCENE_COMMITMENT_REJECTION_CODE,
+            )
+            .map(Into::into);
+        }
+    };
+    let mut scratch = match NodeSceneValidationScratchOwner::try_new(
+        &mut assembly,
+        keys,
+        evidence_counts,
+        deformation_uniqueness_capacity,
+    ) {
+        Ok(scratch) => scratch,
+        Err(cause) => {
+            return prepare_node_draft_post_evidence_failure(
+                assembly,
+                evidence,
+                evidence_counts,
+                cause,
             );
         }
     };
     let brand_matches = draft.brand == brand;
     let mut proof = None;
-    let validation = assembly.validate_success_controlled(
-        keys.dimension,
-        draft.directory.into_store(),
-        evidence,
-        |session, directory, evidence, control| {
-            proof = if brand_matches {
-                validate_node_scene_graph(
-                    session,
-                    directory,
-                    evidence,
-                    &batches.nodes,
-                    &batches.appearance,
-                    &batches.geometry,
-                    &batches.deformation,
-                    &batches.animations,
-                    evidence_counts,
-                    |amount| work.observe(control, amount),
-                )?
-            } else {
-                None
-            };
-            work.finish(control)?;
-            Ok(proof.is_some())
-        },
-    );
-    // The central validator is the final reader of the compiled plan and its reservation.
-    drop(batches);
+    let validation = {
+        let mut scratch_view = scratch.validation_view();
+        assembly.validate_success_controlled(
+            keys.dimension,
+            draft.directory.into_store(),
+            evidence,
+            |session, directory, evidence, control| {
+                proof = if brand_matches {
+                    validate_node_scene_canonical_graph(
+                        session,
+                        directory,
+                        evidence,
+                        evidence_counts,
+                        evidence_counts.canonical_block_count,
+                        deformation_uniqueness_capacity,
+                        &mut scratch_view,
+                        |amount| work.observe(control, amount),
+                    )?
+                } else {
+                    None
+                };
+                work.finish(control)?;
+                Ok(proof.is_some())
+            },
+        )
+    };
+    drop(scratch);
     match validation {
         StoreControlledSuccessValidation::InvalidWorkDimension { assembly, cause } => {
             prepare_node_minimal_fallback_from_assembly(assembly, node_scene_failure_code(&cause))
+                .map(Into::into)
         }
         StoreControlledSuccessValidation::Valid(store) => match proof {
             Some(proof) => prepare_validated_node_scene(
@@ -192,6 +218,24 @@ pub(super) fn node_scene_failure_code(cause: &StoreRuntimeError) -> u32 {
     post_evidence_failure_code(cause).unwrap_or(NODE_SCENE_BUILD_INVARIANT_CODE)
 }
 
+fn prepare_node_draft_post_evidence_failure(
+    assembly: SceneStoreAssembly,
+    evidence: OutcomeEvidenceRecordRef<NodeSceneOutcomeEvidenceSchema>,
+    evidence_counts: SceneEvidenceCounts,
+    cause: StoreRuntimeError,
+) -> Result<PreparedNodeSceneConstruction, SceneConstructionError> {
+    match post_evidence_failure_code(&cause) {
+        Some(cause) => {
+            prepare_node_rich_failure_from_assembly(assembly, evidence, evidence_counts, cause)
+                .map(Into::into)
+        }
+        None => {
+            prepare_node_minimal_fallback_from_assembly(assembly, node_scene_failure_code(&cause))
+                .map(Into::into)
+        }
+    }
+}
+
 fn controlled_interruption_code(cause: &StoreWorkError) -> u32 {
     if cause.control_cause().is_some() {
         NODE_SCENE_CONTROL_INTERRUPTION_CODE
@@ -267,6 +311,7 @@ fn prepare_node_rich_failure(
         }),
         cause,
     )
+    .map(Into::into)
 }
 
 pub(super) fn prepare_node_rich_failure_from_assembly(
@@ -274,7 +319,7 @@ pub(super) fn prepare_node_rich_failure_from_assembly(
     evidence: OutcomeEvidenceRecordRef<NodeSceneOutcomeEvidenceSchema>,
     evidence_counts: SceneEvidenceCounts,
     cause: u32,
-) -> Result<PreparedNodeSceneConstruction, SceneConstructionError> {
+) -> Result<PreparedNodeSceneFailure, SceneConstructionError> {
     finish_node_rich_failure_validation(
         assembly.validate_rich_failure(evidence, |session, evidence| {
             validate_node_scene_evidence_graph(session, evidence, evidence_counts)
@@ -286,20 +331,20 @@ pub(super) fn prepare_node_rich_failure_from_assembly(
 fn finish_node_rich_failure_validation(
     validation: NodeSceneStoreFailureValidation,
     cause: u32,
-) -> Result<PreparedNodeSceneConstruction, SceneConstructionError> {
+) -> Result<PreparedNodeSceneFailure, SceneConstructionError> {
     match validation {
-        StoreFailureValidation::Valid(validated) => {
-            map_node_prepared_failure(validated.try_prepare(cause, final_progress())?)
-        }
+        StoreFailureValidation::Valid(validated) => Ok(map_node_prepared_failure(
+            validated.try_prepare(cause, final_progress())?,
+        )),
         StoreFailureValidation::Rejected(rejected) => {
             let store = rejected.prepare_minimal_fallback_with(cause)?;
-            Ok(PreparedNodeSceneConstruction::MinimalFallback(
+            Ok(PreparedNodeSceneFailure::MinimalFallback(
                 PreparedTracerSceneFallback { store },
             ))
         }
         StoreFailureValidation::FallbackOnly(fallback) => {
             let store = fallback.prepare_minimal_fallback()?;
-            Ok(PreparedNodeSceneConstruction::MinimalFallback(
+            Ok(PreparedNodeSceneFailure::MinimalFallback(
                 PreparedTracerSceneFallback { store },
             ))
         }
@@ -308,23 +353,23 @@ fn finish_node_rich_failure_validation(
 
 fn map_node_prepared_failure(
     prepared: PreparedStoreFailureOutcome<RecordBlock, NodeSceneOutcomeEvidenceSchema>,
-) -> Result<PreparedNodeSceneConstruction, SceneConstructionError> {
-    Ok(match prepared {
+) -> PreparedNodeSceneFailure {
+    match prepared {
         PreparedStoreFailureOutcome::RichFailure(store) => {
-            PreparedNodeSceneConstruction::RichFailure(PreparedNodeSceneRichFailure { store })
+            PreparedNodeSceneFailure::RichFailure(PreparedNodeSceneRichFailure { store })
         }
         PreparedStoreFailureOutcome::MinimalFallback(store) => {
-            PreparedNodeSceneConstruction::MinimalFallback(PreparedTracerSceneFallback { store })
+            PreparedNodeSceneFailure::MinimalFallback(PreparedTracerSceneFallback { store })
         }
-    })
+    }
 }
 
 pub(super) fn prepare_node_minimal_fallback_from_operation(
     operation: SceneStoreOperation,
     cause: u32,
-) -> Result<PreparedNodeSceneConstruction, SceneConstructionError> {
+) -> Result<PreparedNodeSceneFailure, SceneConstructionError> {
     let store = operation.prepare_minimal_fallback(cause)?;
-    Ok(PreparedNodeSceneConstruction::MinimalFallback(
+    Ok(PreparedNodeSceneFailure::MinimalFallback(
         PreparedTracerSceneFallback { store },
     ))
 }
@@ -332,9 +377,9 @@ pub(super) fn prepare_node_minimal_fallback_from_operation(
 pub(super) fn prepare_node_minimal_fallback_from_assembly(
     assembly: SceneStoreAssembly,
     cause: u32,
-) -> Result<PreparedNodeSceneConstruction, SceneConstructionError> {
+) -> Result<PreparedNodeSceneFailure, SceneConstructionError> {
     let store = assembly.prepare_minimal_fallback_with(cause)?;
-    Ok(PreparedNodeSceneConstruction::MinimalFallback(
+    Ok(PreparedNodeSceneFailure::MinimalFallback(
         PreparedTracerSceneFallback { store },
     ))
 }

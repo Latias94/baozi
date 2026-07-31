@@ -2,30 +2,34 @@ use baozi_operation::{CapacityPlan, RetainedStoreReservation, StorePlanError, St
 
 use crate::canonical_scene::store::validation::NodeSceneValidationScratch;
 
-use super::super::super::SceneConstructionOwner;
-use super::super::{NodeSceneWorkMeter, SceneEvidenceCounts, SceneStoreAssembly, SceneStoreKeys};
+use super::super::SceneConstructionOwner;
+use super::{
+    NodeSceneWorkMeter, SceneEvidenceCounts, SceneStoreAssembly, SceneStoreControlCheckpoint,
+    SceneStoreKeys,
+};
 
-/// Operation-accounted scratch retained only across canonical validation.
-pub(super) struct NodeTransformValidationScratch {
+/// Operation-accounted storage retained only across central canonical validation.
+pub(in crate::canonical_scene::store) struct NodeSceneValidationScratchOwner {
+    // Storage must drop before the reservation that accounts for it.
     deformation_palette_maxima: Vec<Option<u32>>,
     deformation_uniqueness_marks: Vec<u64>,
     animation_target_marks: Vec<u32>,
     _reservation: RetainedStoreReservation<SceneConstructionOwner>,
 }
 
-impl NodeTransformValidationScratch {
-    pub(super) fn try_new<L>(
+impl NodeSceneValidationScratchOwner {
+    pub(in crate::canonical_scene::store) fn try_new<L>(
         assembly: &mut SceneStoreAssembly<L>,
         keys: SceneStoreKeys,
         counts: SceneEvidenceCounts,
-        deformation_uniqueness_mark_count: usize,
+        deformation_uniqueness_capacity: usize,
     ) -> Result<Self, StoreRuntimeError> {
         let palette_count = NodeSceneValidationScratch::required_deformation_palette_marks(counts)
             .ok_or(StoreRuntimeError::Plan(StorePlanError::SizeOverflow))?;
         let animation_count = NodeSceneValidationScratch::required_animation_target_marks(counts)
             .ok_or(StoreRuntimeError::Plan(StorePlanError::SizeOverflow))?;
         let palette_plan = scratch_plan::<Option<u32>>(palette_count)?;
-        let uniqueness_plan = scratch_plan::<u64>(deformation_uniqueness_mark_count)?;
+        let uniqueness_plan = scratch_plan::<u64>(deformation_uniqueness_capacity)?;
         let animation_plan = scratch_plan::<u32>(animation_count)?;
         let envelope = palette_plan
             .envelope_delta_bytes()
@@ -87,7 +91,7 @@ impl NodeTransformValidationScratch {
             keys,
             &mut work,
             &mut deformation_uniqueness_marks,
-            deformation_uniqueness_mark_count,
+            deformation_uniqueness_capacity,
             0,
         )?;
         fill_scratch(
@@ -108,7 +112,9 @@ impl NodeTransformValidationScratch {
         })
     }
 
-    pub(super) fn validation_view(&mut self) -> NodeSceneValidationScratch<'_> {
+    pub(in crate::canonical_scene::store) fn validation_view(
+        &mut self,
+    ) -> NodeSceneValidationScratch<'_> {
         NodeSceneValidationScratch::new(
             &mut self.deformation_palette_maxima,
             &mut self.deformation_uniqueness_marks,
@@ -142,7 +148,7 @@ fn qualified_bytes(
 }
 
 fn fill_scratch<T: Copy>(
-    checkpoint: &mut super::super::super::SceneStoreControlCheckpoint<'_>,
+    checkpoint: &mut SceneStoreControlCheckpoint<'_>,
     keys: SceneStoreKeys,
     work: &mut NodeSceneWorkMeter,
     values: &mut Vec<T>,

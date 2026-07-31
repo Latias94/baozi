@@ -27,8 +27,8 @@ use crate::math::{Mat4, Quat, Vec3};
 use super::publication::post_evidence_build_failure_code;
 use super::{
     NODE_SCENE_BUILD_INVARIANT_CODE, NODE_SCENE_STORAGE_REJECTION_CODE, NodeSceneBuildFaults,
-    NodeSceneConstructionRejection, NodeSceneConstructionTerminal, NodeSceneRichFailure,
-    PreparedNodeSceneConstruction,
+    NodeSceneConstructionRejection, NodeSceneConstructionTerminal, NodeSceneDraftBuild,
+    NodeSceneRichFailure, PreparedNodeSceneConstruction,
 };
 
 mod gltf_capability;
@@ -51,8 +51,8 @@ pub(in crate::canonical_scene::store) use obj_capability::{
 
 const SINGLE_TRS_AUTHORING_VALIDATION_WORK: u64 = 41;
 const SINGLE_TRS_WORK_BEFORE_FIRST_PAYLOAD_WRITE: u64 = 43;
-const SINGLE_TRS_BUILD_INVARIANT_FAILURE_WORK: u64 = 89;
-const SINGLE_TRS_GENERATION_FAILURE_WORK: u64 = 94;
+const SINGLE_TRS_BUILD_INVARIANT_FAILURE_WORK: u64 = 101;
+const SINGLE_TRS_GENERATION_FAILURE_WORK: u64 = 106;
 const SINGLE_TRS_ROOTS: [NodeLocalId; 1] = [NodeLocalId::new(0)];
 const SINGLE_TRS_NODES: [NodeAuthoringNode; 1] = [NodeAuthoringNode::new(
     Presence::Absent,
@@ -223,6 +223,72 @@ fn trs_transform(translation_x: f32) -> AuthoredTransform {
         Vec3::new(1.0, 2.0, 0.5),
     )
     .expect("valid authored TRS")
+}
+
+fn finish_draft_from_local_authoring_vecs(
+    account: &baozi_operation::PhysicalStorageAccount,
+) -> NodeSceneDraftBuild {
+    let roots = vec![NodeLocalId::new(0)];
+    let nodes = vec![NodeAuthoringNode::new(
+        Presence::Absent,
+        AuthoredTransform::identity_trs(),
+    )];
+    SceneConstructionOperation::with_account(account, test_limits())
+        .expect("local-buffer node Scene operation")
+        .try_validate_node_batch(
+            NodeAuthoringBatch::new(Presence::Present(&roots), &nodes),
+            SceneValidationLimits::default(),
+        )
+        .unwrap_or_else(|_| panic!("local authoring buffers must validate"))
+        .finish_draft()
+        .expect("local authoring buffers must materialize an owned draft")
+}
+
+#[test]
+fn materialized_draft_outlives_source_buffers_before_central_prepare_and_handoff() {
+    let factory = test_factory();
+    let account = test_account(&factory, 256);
+    let generation_source = AtomicU64::new(0);
+
+    // The helper's Vec-backed authoring storage is gone before central validation starts.
+    let draft = finish_draft_from_local_authoring_vecs(&account);
+    let pending = match draft {
+        NodeSceneDraftBuild::Draft(pending) => pending,
+        NodeSceneDraftBuild::Failure(_) => {
+            panic!("valid materialization must preserve a pending canonical draft")
+        }
+    };
+    let prepared = pending
+        .prepare_with_generation_source(|| SceneGenerationId::reserve_from(&generation_source))
+        .expect("owned draft must centrally prepare without source buffers");
+    let parts = successful_parts(prepared);
+
+    assert_eq!(parts.scene.source_node_count(), Some(1));
+    assert_eq!(parts.scene.source_root_count(), Some(1));
+    assert_eq!(generation_source.load(Ordering::Relaxed), 1);
+    drop(parts);
+    assert_eq!(account.snapshot().live_retained_bytes(), 0);
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
+}
+
+#[test]
+fn dropping_materialized_draft_without_prepare_releases_retained_storage() {
+    let factory = test_factory();
+    let account = test_account(&factory, 256);
+
+    let pending = match finish_draft_from_local_authoring_vecs(&account) {
+        NodeSceneDraftBuild::Draft(pending) => pending,
+        NodeSceneDraftBuild::Failure(_) => {
+            panic!("valid materialization must preserve a pending canonical draft")
+        }
+    };
+    assert!(account.snapshot().live_retained_bytes() > 0);
+    assert!(account.snapshot().live_retained_allocations() > 0);
+
+    drop(pending);
+
+    assert_eq!(account.snapshot().live_retained_bytes(), 0);
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
 }
 
 #[test]
@@ -647,7 +713,7 @@ fn generation_exhaustion_discards_canonical_storage_and_preserves_evidence() {
 }
 
 #[test]
-fn authored_transform_bit_fault_is_a_build_invariant_rich_failure() {
+fn invalid_authored_transform_fault_is_a_build_invariant_rich_failure() {
     let factory = test_factory();
     let account = test_account(&factory, 256);
     let validated = SceneConstructionOperation::with_account(&account, test_limits())
@@ -658,7 +724,7 @@ fn authored_transform_bit_fault_is_a_build_invariant_rich_failure() {
     let failure = rich_failure(
         validated
             .prepare_with_faults(NodeSceneBuildFaults::altered_authored_transform())
-            .expect("authored transform mismatch must prepare rich failure"),
+            .expect("invalid authored transform must prepare rich failure"),
     );
     let work = failure
         .ledger_evidence()
@@ -673,7 +739,7 @@ fn authored_transform_bit_fault_is_a_build_invariant_rich_failure() {
 }
 
 #[test]
-fn geometry_payload_bit_fault_is_a_build_invariant_rich_failure() {
+fn invalid_geometry_payload_fault_is_a_build_invariant_rich_failure() {
     let factory = test_factory();
     let account = test_account(&factory, 256);
     let roots = [];
@@ -715,7 +781,7 @@ fn geometry_payload_bit_fault_is_a_build_invariant_rich_failure() {
     let failure = rich_failure(
         validated
             .prepare_with_faults(NodeSceneBuildFaults::altered_geometry_f32())
-            .expect("geometry payload mismatch must prepare rich failure"),
+            .expect("invalid geometry payload must prepare rich failure"),
     );
     assert_eq!(
         terminal_failure_code(failure.ledger_evidence()),
@@ -890,6 +956,64 @@ fn physical_budget_boundaries_release_storage_and_preserve_committed_evidence() 
         observed_rich_storage_rejection,
         "a budget that admits evidence but rejects canonical storage must retain rich evidence"
     );
+    assert_eq!(factory.snapshot().live_accounts(), 0);
+}
+
+#[test]
+fn materialization_failure_never_calls_the_generation_source() {
+    let factory = test_factory();
+    let mut observed_materialization_failure = false;
+
+    for max_live_allocations in 1..=128 {
+        let account = test_account(&factory, max_live_allocations);
+        let operation = match SceneConstructionOperation::with_account(&account, test_limits()) {
+            Ok(operation) => operation,
+            Err(_) => {
+                drop(account);
+                continue;
+            }
+        };
+        let roots = [NodeLocalId::new(0)];
+        let nodes = [NodeAuthoringNode::new(
+            Presence::Absent,
+            AuthoredTransform::identity_trs(),
+        )];
+        let validated = operation
+            .try_validate_node_batch(
+                NodeAuthoringBatch::new(Presence::Present(&roots), &nodes),
+                SceneValidationLimits::default(),
+            )
+            .unwrap_or_else(|_| panic!("physical output limits must not reject semantics"));
+        let build = validated
+            .finish_draft()
+            .expect("materialization failure must retain an exact failure owner");
+
+        if matches!(&build, NodeSceneDraftBuild::Failure(_)) {
+            let prepared = build
+                .prepare_with_generation_source(|| {
+                    panic!("materialization failure must not call the generation source")
+                })
+                .expect("materialization failure must remain prepared");
+            let terminal = prepared.handoff();
+            assert!(!matches!(
+                &terminal,
+                NodeSceneConstructionTerminal::Success(_)
+            ));
+            drop(terminal);
+            assert_eq!(account.snapshot().live_retained_bytes(), 0);
+            assert_eq!(account.snapshot().live_retained_allocations(), 0);
+            observed_materialization_failure = true;
+            drop(account);
+            break;
+        }
+
+        drop(build);
+        assert_eq!(account.snapshot().live_retained_bytes(), 0);
+        assert_eq!(account.snapshot().live_retained_allocations(), 0);
+        drop(account);
+    }
+
+    assert!(observed_materialization_failure);
     assert_eq!(factory.snapshot().live_accounts(), 0);
 }
 

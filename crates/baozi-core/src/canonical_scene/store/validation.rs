@@ -15,7 +15,7 @@ use super::schema::{
 
 pub(in crate::canonical_scene::store) use node_scene::{
     NodeSceneValidationProof, NodeSceneValidationScratch, validate_node_scene_canonical_graph,
-    validate_node_scene_evidence_graph, validate_node_scene_graph,
+    validate_node_scene_evidence_graph,
 };
 
 pub(super) fn authored_matrix_is_valid(values: &[f32]) -> bool {

@@ -11,6 +11,7 @@ use super::super::super::{
     SceneConstructionStartError, SceneConstructionUnit, try_plan_scene_operation,
 };
 use super::super::publication::node_scene_failure_code;
+use super::super::scratch::NodeSceneValidationScratchOwner;
 use super::super::{SceneStoreKeys, SceneStoreOperation};
 use super::graph::{NodeSceneRewriteError, try_rewrite_node_scene};
 use super::plan::PendingNodeTransformEdit;
@@ -19,7 +20,6 @@ use super::publication::{
     prepare_edit_minimal_from_operation, prepare_edit_post_evidence_failure,
     prepare_edit_post_evidence_invariant,
 };
-use super::scratch::NodeTransformValidationScratch;
 
 #[derive(Debug, Error)]
 pub(in crate::canonical_scene::store) enum NodeTransformEditPrepareError {
@@ -124,7 +124,7 @@ impl PendingNodeTransformEdit<'_> {
             )
             .map_err(Into::into);
         }
-        let scratch = match NodeTransformValidationScratch::try_new(
+        let scratch = match NodeSceneValidationScratchOwner::try_new(
             &mut assembly,
             start.keys,
             self.counts.evidence,

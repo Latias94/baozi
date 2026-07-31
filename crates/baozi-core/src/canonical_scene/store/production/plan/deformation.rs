@@ -705,6 +705,7 @@ pub(in crate::canonical_scene::store) struct ValidatedDeformationBatch<'input, R
     canonical_bytes: u64,
     validation_work: u64,
     scratch_bytes: u64,
+    maximum_uniqueness_capacity: usize,
     skin_plans: Vec<ValidatedSkinPlan>,
     logical_morph_plans: Vec<ValidatedLogicalMorphPlan>,
     morph_definition_plans: Vec<ValidatedMorphTargetDefinitionPlan>,
@@ -835,6 +836,10 @@ impl<'input, R> ValidatedDeformationBatch<'input, R> {
         self.scratch_bytes
     }
 
+    pub(in crate::canonical_scene::store) const fn maximum_uniqueness_capacity(&self) -> usize {
+        self.maximum_uniqueness_capacity
+    }
+
     pub(in crate::canonical_scene::store) fn skin(
         &self,
         index: usize,
@@ -916,6 +921,10 @@ impl<R> fmt::Debug for ValidatedDeformationBatch<'_, R> {
             .field("canonical_bytes", &self.canonical_bytes)
             .field("validation_work", &self.validation_work)
             .field("scratch_bytes", &self.scratch_bytes)
+            .field(
+                "maximum_uniqueness_capacity",
+                &self.maximum_uniqueness_capacity,
+            )
             .field("reservation", &"<held>")
             .finish()
     }
@@ -1632,6 +1641,7 @@ where
         canonical_bytes,
         validation_work,
         scratch_bytes: retained_scratch_bytes,
+        maximum_uniqueness_capacity: scratch_shape.maximum_uniqueness_count,
         skin_plans,
         logical_morph_plans,
         morph_definition_plans,

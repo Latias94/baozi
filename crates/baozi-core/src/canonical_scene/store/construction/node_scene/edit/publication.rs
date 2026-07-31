@@ -15,6 +15,7 @@ use super::super::super::{
     GENERATION_EXHAUSTED_CODE, SceneConstructionError, SceneStoreAssembly, SceneStoreKeys,
     SceneStoreOperation, TracerSceneFallback, burn_generation_reservation, final_progress,
 };
+use super::super::scratch::NodeSceneValidationScratchOwner;
 use super::super::{
     NODE_SCENE_BUILD_INVARIANT_CODE, NODE_SCENE_CONTROL_INTERRUPTION_CODE,
     NODE_SCENE_WORK_INTERRUPTION_CODE, NodeSceneRichFailure, NodeSceneStoreFailureValidation,
@@ -22,7 +23,6 @@ use super::super::{
 };
 use super::graph::RewrittenNodeSceneGraph;
 use super::report::{CanonicalInvalidations, CanonicalRemapSet};
-use super::scratch::NodeTransformValidationScratch;
 
 type PreparedEditStoreSuccess = PreparedStoreSuccess<
     RecordBlock,
@@ -90,7 +90,7 @@ pub(in crate::canonical_scene::store) enum NodeTransformEditTerminal {
 pub(super) fn prepare_edit_candidate<'scene>(
     assembly: SceneStoreAssembly<CanonicalInheritanceSource<'scene>>,
     graph: RewrittenNodeSceneGraph,
-    mut scratch: NodeTransformValidationScratch,
+    mut scratch: NodeSceneValidationScratchOwner,
     keys: SceneStoreKeys,
     input_generation: SceneGenerationId,
     counts: SceneEvidenceCounts,
