@@ -656,7 +656,7 @@ pub(super) struct RetainedPayload<T> {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(super) struct RetainedSetId(u64);
+pub(crate) struct RetainedSetId(u64);
 
 static NEXT_RETAINED_SET_ID: AtomicU64 = AtomicU64::new(1);
 

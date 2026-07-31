@@ -75,12 +75,81 @@ pub(in crate::canonical_scene::store) struct NodeSceneSemanticView<'scene> {
     read_fault: Option<NodeSceneSemanticReadFault>,
 }
 
+/// One proof-qualified authored transform resolved by source-node index.
+#[derive(Clone, Copy)]
+pub(in crate::canonical_scene::store) struct NodeSceneSemanticAuthoredTransform {
+    authored_transform: AuthoredTransform,
+    transform_offset: usize,
+    sequence_scalar_count: usize,
+}
+
+impl NodeSceneSemanticAuthoredTransform {
+    pub(in crate::canonical_scene::store) const fn authored_transform(self) -> AuthoredTransform {
+        self.authored_transform
+    }
+
+    pub(in crate::canonical_scene::store) const fn transform_offset(self) -> usize {
+        self.transform_offset
+    }
+
+    pub(in crate::canonical_scene::store) const fn sequence_scalar_count(self) -> usize {
+        self.sequence_scalar_count
+    }
+}
+
 impl ValidatedNodeScene {
     /// Resolves fixed typed tables once; payload leaves remain row-demand driven.
     pub(in crate::canonical_scene::store) fn semantic_view(
         &self,
     ) -> NodeSceneSemanticResult<NodeSceneSemanticView<'_>> {
         NodeSceneSemanticView::try_new(self)
+    }
+
+    /// Reads one source-node transform without projecting unrelated Scene domains.
+    pub(in crate::canonical_scene::store) fn semantic_authored_transform_at(
+        &self,
+        source_index: usize,
+    ) -> NodeSceneSemanticResult<NodeSceneSemanticAuthoredTransform> {
+        if source_index >= self.proof.source_node_count() {
+            return Err(invariant(
+                "source node index exceeds the validation proof while reading its transform",
+            ));
+        }
+        let expected_node_rows = self
+            .proof
+            .source_node_count()
+            .checked_add(1)
+            .ok_or_else(|| invariant("proof-qualified node table row count overflows"))?;
+        let nodes = self
+            .canonical
+            .records(self.proof.nodes().into_store())
+            .ok_or_else(|| invariant("validated node table is unavailable or mistyped"))?;
+        if nodes.rows() != expected_node_rows {
+            return Err(invariant(
+                "validated node table row count disagrees with validation proof",
+            ));
+        }
+        let transforms_ref = self
+            .proof
+            .transforms()
+            .ok_or_else(|| invariant("validated authored-transform reference is absent"))?;
+        let transforms = self
+            .canonical
+            .sequence(transforms_ref.into_store())
+            .ok_or_else(|| {
+                invariant("validated authored-transform sequence is unavailable or mistyped")
+            })?;
+        let row = source_index
+            .checked_add(1)
+            .ok_or_else(|| invariant("canonical node row index overflows"))?;
+        read_node_authored_transform(
+            nodes,
+            Some(transforms),
+            source_index,
+            row,
+            #[cfg(test)]
+            self.semantic_read_fault,
+        )
     }
 
     #[cfg(test)]
@@ -400,43 +469,15 @@ impl<'scene> NodeSceneSemanticCursor<'scene> {
             .checked_add(child_count)
             .ok_or_else(|| invariant("validated source-node child range overflows"))?;
 
-        let transform_kind = read_scalar::<u8>(
+        let authored_transform = read_node_authored_transform(
             self.nodes,
+            self.transforms,
+            source_index,
             row,
-            node_scene_node_field::TRANSFORM_KIND,
-            "validated source-node transform kind is unreadable",
-        )?;
-        let transform_offset = read_u32_as_usize(
-            self.nodes,
-            row,
-            node_scene_node_field::TRANSFORM_OFFSET,
-            "validated source-node transform offset is unreadable",
-        )?;
-        let transform_length = read_u32_as_usize(
-            self.nodes,
-            row,
-            node_scene_node_field::TRANSFORM_LENGTH,
-            "validated source-node transform length is unreadable",
-        )?;
-        let transform_end = transform_offset
-            .checked_add(transform_length)
-            .ok_or_else(|| invariant("validated source-node transform range overflows"))?;
-        #[cfg(test)]
-        if matches!(
+            #[cfg(test)]
             self.read_fault,
-            Some(NodeSceneSemanticReadFault::AuthoredTransformNode(index)) if index == source_index
-        ) {
-            return Err(invariant("injected authored-transform read failure"));
-        }
-        let transforms = self
-            .transforms
-            .ok_or_else(|| invariant("validated authored-transform view is absent"))?;
-        let values = transforms
-            .as_slice()
-            .get(transform_offset..transform_end)
-            .ok_or_else(|| invariant("validated authored-transform range is unreadable"))?;
-        let authored_transform = decode_authored_transform(transform_kind, values)
-            .ok_or_else(|| invariant("validated authored-transform payload is undecodable"))?;
+        )?
+        .authored_transform();
 
         let children = NodeSceneChildCursor::try_new(
             self.references,
@@ -587,6 +628,56 @@ impl<'scene> NodeSceneSemanticCursor<'scene> {
         }
         Ok(())
     }
+}
+
+fn read_node_authored_transform(
+    nodes: CanonicalRecordView<'_>,
+    transforms: Option<SequenceView<'_, f32>>,
+    _source_index: usize,
+    row: usize,
+    #[cfg(test)] read_fault: Option<NodeSceneSemanticReadFault>,
+) -> NodeSceneSemanticResult<NodeSceneSemanticAuthoredTransform> {
+    let transform_kind = read_scalar::<u8>(
+        nodes,
+        row,
+        node_scene_node_field::TRANSFORM_KIND,
+        "validated source-node transform kind is unreadable",
+    )?;
+    let transform_offset = read_u32_as_usize(
+        nodes,
+        row,
+        node_scene_node_field::TRANSFORM_OFFSET,
+        "validated source-node transform offset is unreadable",
+    )?;
+    let transform_length = read_u32_as_usize(
+        nodes,
+        row,
+        node_scene_node_field::TRANSFORM_LENGTH,
+        "validated source-node transform length is unreadable",
+    )?;
+    let transform_end = transform_offset
+        .checked_add(transform_length)
+        .ok_or_else(|| invariant("validated source-node transform range overflows"))?;
+    #[cfg(test)]
+    if matches!(
+        read_fault,
+        Some(NodeSceneSemanticReadFault::AuthoredTransformNode(index)) if index == _source_index
+    ) {
+        return Err(invariant("injected authored-transform read failure"));
+    }
+    let transforms =
+        transforms.ok_or_else(|| invariant("validated authored-transform view is absent"))?;
+    let values = transforms
+        .as_slice()
+        .get(transform_offset..transform_end)
+        .ok_or_else(|| invariant("validated authored-transform range is unreadable"))?;
+    let authored_transform = decode_authored_transform(transform_kind, values)
+        .ok_or_else(|| invariant("validated authored-transform payload is undecodable"))?;
+    Ok(NodeSceneSemanticAuthoredTransform {
+        authored_transform,
+        transform_offset,
+        sequence_scalar_count: transforms.len(),
+    })
 }
 
 /// One decoded source node coupled to its mechanically readable child range.

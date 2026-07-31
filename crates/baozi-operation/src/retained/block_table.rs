@@ -14,13 +14,13 @@ use super::ownership::{
 };
 use super::{
     PendingAccountActionAdmission, PhysicalStorageAccount, RetainedBatchLimits,
-    RetainedHandleSharePlan, RetainedPublicationError, RetainedWriterError, RetainedWriterPlan,
-    map_account_action_admission_error, map_batch_error, try_admit_retained_share_work,
-    try_admit_retained_share_work_before_physical,
+    RetainedHandleSharePlan, RetainedPublicationError, RetainedWorkControl, RetainedWriterError,
+    RetainedWriterPlan, map_account_action_admission_error, map_batch_error,
+    try_admit_retained_share_work, try_admit_retained_share_work_before_physical,
 };
-use crate::control::discard_untrusted_panic_payload;
+use crate::control::{ControlCause, discard_untrusted_panic_payload};
 use crate::ledger::{
-    AttributionBatchPlan, AttributionReservationBatch, CanonicalOutput, Ledger,
+    AttributionBatchPlan, AttributionReservationBatch, CanonicalOutput, Ledger, LedgerCause,
     PublicationDestination,
 };
 #[cfg(feature = "_u4c-collector")]
@@ -134,6 +134,7 @@ pub(crate) struct RetainedBlockTablePlan<P, D> {
     pub(super) writer: RetainedWriterPlan<P, D>,
     total_blocks: usize,
     max_new_blocks: usize,
+    canonical_source_mapping_capacity: usize,
 }
 
 impl<P: Copy, D: Copy> RetainedBlockTablePlan<P, D> {
@@ -149,7 +150,14 @@ impl<P: Copy, D: Copy> RetainedBlockTablePlan<P, D> {
             writer,
             total_blocks,
             max_new_blocks,
+            canonical_source_mapping_capacity: 0,
         }
+    }
+
+    /// Preallocates the dense source-index map required by canonical inheritance and rewrites.
+    pub(crate) const fn with_canonical_source_mapping_capacity(mut self, capacity: usize) -> Self {
+        self.canonical_source_mapping_capacity = capacity;
+        self
     }
 }
 
@@ -309,26 +317,142 @@ impl<Block> RetainedBlockMember<Block> {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RetainedBlockOrigin {
+pub(super) enum RetainedBlockOrigin {
     New,
-    Inherited,
+    Inherited { source: RetainedSlotIdentity },
+    Rewritten { source: RetainedSlotIdentity },
+}
+
+impl RetainedBlockOrigin {
+    const fn owns_new_allocation(self) -> bool {
+        matches!(self, Self::New | Self::Rewritten { .. })
+    }
+
+    const fn source_identity(self) -> Option<RetainedSlotIdentity> {
+        match self {
+            Self::New => None,
+            Self::Inherited { source } | Self::Rewritten { source } => Some(source),
+        }
+    }
+}
+
+struct CanonicalSourceMapping {
+    entries: Vec<Option<NonZeroUsize>>,
+    qualified_capacity: usize,
+    source_set: Option<RetainedSetId>,
+    mapped_entries: usize,
+    #[cfg(test)]
+    probes: AtomicU64,
+}
+
+enum CanonicalSourceBindingStateError {
+    Unavailable,
+    Unbound,
+    Mismatch,
+    Corrupt,
+}
+
+impl CanonicalSourceMapping {
+    fn shape_is_exact(&self) -> bool {
+        self.entries.capacity() == self.qualified_capacity
+            && self.entries.len() <= self.qualified_capacity
+            && self.mapped_entries <= self.entries.len()
+    }
+
+    fn lookup(&self, source_identity: RetainedSlotIdentity) -> Result<Option<usize>, ()> {
+        #[cfg(test)]
+        self.probes.fetch_add(1, Ordering::Relaxed);
+        if self.source_set != Some(source_identity.set_id) || !self.shape_is_exact() {
+            return Err(());
+        }
+        let Some(mapped_ordinal) = self.entries.get(source_identity.index).copied() else {
+            return Err(());
+        };
+        mapped_ordinal
+            .map(|ordinal| ordinal.get().checked_sub(1).ok_or(()))
+            .transpose()
+    }
+
+    fn record(
+        &mut self,
+        source_identity: RetainedSlotIdentity,
+        destination_index: usize,
+    ) -> Result<(), ()> {
+        if self.source_set != Some(source_identity.set_id) || !self.shape_is_exact() {
+            return Err(());
+        }
+        let next_mapped_entries = self.mapped_entries.checked_add(1).ok_or(())?;
+        if next_mapped_entries > self.entries.len() {
+            return Err(());
+        }
+        let entry = self.entries.get_mut(source_identity.index).ok_or(())?;
+        if entry.is_some() {
+            return Err(());
+        }
+        let ordinal = destination_index
+            .checked_add(1)
+            .and_then(NonZeroUsize::new)
+            .ok_or(())?;
+        *entry = Some(ordinal);
+        self.mapped_entries = next_mapped_entries;
+        Ok(())
+    }
+
+    fn clear(&mut self, source_identity: RetainedSlotIdentity) -> Result<(), ()> {
+        if self.source_set != Some(source_identity.set_id) || !self.shape_is_exact() {
+            return Err(());
+        }
+        let next_mapped_entries = self.mapped_entries.checked_sub(1).ok_or(())?;
+        let entry = self.entries.get_mut(source_identity.index).ok_or(())?;
+        if entry.take().is_none() {
+            return Err(());
+        }
+        self.mapped_entries = next_mapped_entries;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn take_probe_count(&self) -> u64 {
+        self.probes.swap(0, Ordering::Relaxed)
+    }
 }
 
 pub(super) struct RetainedBlockTable<Block> {
     pub(super) members: Vec<RetainedBlockMember<Block>>,
+    canonical_source_mapping: Option<CanonicalSourceMapping>,
+    root_membership: RetainedMembership,
     total_blocks: usize,
     max_new_blocks: usize,
-    new_blocks: usize,
+    // Updated only after a complete append, so any partial mutation fails exactness closed.
+    committed_members: usize,
+    committed_new_blocks: usize,
+    committed_derived_members: usize,
+    committed_new_block_bytes: u64,
     qualified_capacity: usize,
 }
 
+#[derive(Debug, Clone, Copy)]
+enum RetainedBlockPopExpectation {
+    New { tag: TypeId },
+    Inherited,
+}
+
+impl RetainedBlockPopExpectation {
+    fn matches<Block>(self, member: &RetainedBlockMember<Block>) -> bool {
+        match self {
+            Self::New { tag } => member.tag == tag && member.origin == RetainedBlockOrigin::New,
+            Self::Inherited => matches!(member.origin, RetainedBlockOrigin::Inherited { .. }),
+        }
+    }
+}
+
 impl<Block> RetainedBlockTable<Block> {
-    fn member_count(&self) -> usize {
-        self.members.len()
+    pub(super) fn member_count(&self) -> usize {
+        self.committed_members
     }
 
     pub(super) fn new_block_count(&self) -> usize {
-        self.new_blocks
+        self.committed_new_blocks
     }
 
     pub(super) fn member(
@@ -336,12 +460,330 @@ impl<Block> RetainedBlockTable<Block> {
         identity: RetainedSlotIdentity,
         set_id: RetainedSetId,
     ) -> Option<&Block> {
-        if identity.set_id != set_id {
+        if identity.set_id != set_id || identity.index >= self.committed_members {
             return None;
         }
         self.members
             .get(identity.index)
             .and_then(|member| (member.tag == identity.tag).then(|| member.allocation.as_ref()))
+    }
+
+    fn committed_summary_is_bounded(&self) -> bool {
+        self.root_membership.ordinal == 0
+            && self.members.capacity() == self.qualified_capacity
+            && self.members.len() == self.committed_members
+            && self.committed_members <= self.total_blocks
+            && self.committed_members <= self.members.capacity()
+            && self.committed_new_blocks <= self.max_new_blocks
+            && self.committed_new_blocks <= self.committed_members
+            && self.committed_derived_members <= self.committed_members
+            && self
+                .committed_new_blocks
+                .checked_add(self.committed_derived_members)
+                .is_some_and(|covered_members| covered_members >= self.committed_members)
+    }
+
+    fn try_push_committed_member(
+        &mut self,
+        account: &PhysicalStorageAccount,
+        set_id: RetainedSetId,
+        destination: RetainedMembershipDestination,
+        member: RetainedBlockMember<Block>,
+    ) -> Result<RetainedSlotIdentity, ()> {
+        if !self.committed_summary_is_bounded()
+            || self.root_membership
+                != (RetainedMembership {
+                    set_id,
+                    destination,
+                    ordinal: 0,
+                })
+            || (destination == RetainedMembershipDestination::Canonical
+                && !canonical_source_mapping_is_exact(self, set_id))
+            || (destination != RetainedMembershipDestination::Canonical
+                && self.canonical_source_mapping.is_some())
+        {
+            return Err(());
+        }
+
+        let index = self.committed_members;
+        let ordinal = u64::try_from(index)
+            .ok()
+            .and_then(|index| index.checked_add(1))
+            .ok_or(())?;
+        if member.allocation.membership()
+            != Some(RetainedMembership {
+                set_id,
+                destination,
+                ordinal,
+            })
+            || !member.allocation.belongs_to(account)
+        {
+            return Err(());
+        }
+
+        let owns_new_allocation = member.origin.owns_new_allocation();
+        let source_identity = member.origin.source_identity();
+        let new_block_increment = if owns_new_allocation { 1 } else { 0 };
+        let derived_member_increment = if source_identity.is_some() { 1 } else { 0 };
+        let next_committed_members = self.committed_members.checked_add(1).ok_or(())?;
+        let next_committed_new_blocks = self
+            .committed_new_blocks
+            .checked_add(new_block_increment)
+            .ok_or(())?;
+        let next_committed_derived_members = self
+            .committed_derived_members
+            .checked_add(derived_member_increment)
+            .ok_or(())?;
+        let next_committed_new_block_bytes = if owns_new_allocation {
+            self.committed_new_block_bytes
+                .checked_add(member.allocation.charged_bytes())
+                .ok_or(())?
+        } else {
+            self.committed_new_block_bytes
+        };
+        if next_committed_members > self.total_blocks
+            || next_committed_members > self.members.capacity()
+            || next_committed_new_blocks > self.max_new_blocks
+        {
+            return Err(());
+        }
+
+        let tag = member.tag;
+        self.members.push(member);
+        if destination == RetainedMembershipDestination::Canonical
+            && let Some(source_identity) = source_identity
+        {
+            self.record_canonical_source_mapping(account, set_id, source_identity, index)?;
+        }
+
+        self.committed_members = next_committed_members;
+        self.committed_new_blocks = next_committed_new_blocks;
+        self.committed_derived_members = next_committed_derived_members;
+        self.committed_new_block_bytes = next_committed_new_block_bytes;
+        Ok(RetainedSlotIdentity { set_id, index, tag })
+    }
+
+    fn try_pop_committed_member(
+        &mut self,
+        expectation: RetainedBlockPopExpectation,
+    ) -> Result<RetainedBlockMember<Block>, ()> {
+        if !self.committed_summary_is_bounded() {
+            return Err(());
+        }
+        let member = self.members.last().ok_or(())?;
+        if !expectation.matches(member) {
+            return Err(());
+        }
+
+        let owns_new_allocation = member.origin.owns_new_allocation();
+        let has_source = member.origin.source_identity().is_some();
+        let new_block_decrement = if owns_new_allocation { 1 } else { 0 };
+        let derived_member_decrement = if has_source { 1 } else { 0 };
+        let next_committed_members = self.committed_members.checked_sub(1).ok_or(())?;
+        let next_committed_new_blocks = self
+            .committed_new_blocks
+            .checked_sub(new_block_decrement)
+            .ok_or(())?;
+        let next_committed_derived_members = self
+            .committed_derived_members
+            .checked_sub(derived_member_decrement)
+            .ok_or(())?;
+        let next_committed_new_block_bytes = if owns_new_allocation {
+            self.committed_new_block_bytes
+                .checked_sub(member.allocation.charged_bytes())
+                .ok_or(())?
+        } else {
+            self.committed_new_block_bytes
+        };
+
+        let member = self.members.pop().ok_or(())?;
+        self.committed_members = next_committed_members;
+        self.committed_new_blocks = next_committed_new_blocks;
+        self.committed_derived_members = next_committed_derived_members;
+        self.committed_new_block_bytes = next_committed_new_block_bytes;
+        Ok(member)
+    }
+
+    fn validate_canonical_source_binding(
+        &self,
+        source_set: RetainedSetId,
+        source_len: usize,
+    ) -> Result<(), CanonicalSourceBindingStateError> {
+        let mapping = self
+            .canonical_source_mapping
+            .as_ref()
+            .ok_or(CanonicalSourceBindingStateError::Unavailable)?;
+        if !self.committed_summary_is_bounded()
+            || self.root_membership.destination != RetainedMembershipDestination::Canonical
+            || self.root_membership.set_id == source_set
+            || !mapping.shape_is_exact()
+            || mapping.mapped_entries != self.committed_derived_members
+        {
+            return Err(CanonicalSourceBindingStateError::Corrupt);
+        }
+        match mapping.source_set {
+            None if mapping.entries.is_empty() => Err(CanonicalSourceBindingStateError::Unbound),
+            None => Err(CanonicalSourceBindingStateError::Corrupt),
+            Some(bound_set)
+                if bound_set == source_set
+                    && mapping.entries.len() == source_len
+                    && source_len != 0 =>
+            {
+                Ok(())
+            }
+            Some(bound_set) if bound_set != source_set => {
+                Err(CanonicalSourceBindingStateError::Mismatch)
+            }
+            Some(_) => Err(CanonicalSourceBindingStateError::Corrupt),
+        }
+    }
+
+    fn require_canonical_source_binding<D>(
+        &self,
+        account: &PhysicalStorageAccount,
+        source_set: RetainedSetId,
+        source_len: usize,
+    ) -> Result<(), RetainedPublicationError<D>> {
+        match self.validate_canonical_source_binding(source_set, source_len) {
+            Ok(()) => Ok(()),
+            Err(CanonicalSourceBindingStateError::Unavailable) => Err(
+                RetainedPublicationError::Writer(RetainedWriterError::InvalidPublicationPlan),
+            ),
+            Err(
+                CanonicalSourceBindingStateError::Unbound
+                | CanonicalSourceBindingStateError::Mismatch,
+            ) => Err(RetainedPublicationError::InvalidSourceSlot),
+            Err(CanonicalSourceBindingStateError::Corrupt) => {
+                let poisoned = account.record_poison(AccountPoisonReason::OwnershipGraphUnverified);
+                Err(RetainedPublicationError::Writer(
+                    RetainedWriterError::AccountPoisoned(poisoned),
+                ))
+            }
+        }
+    }
+
+    fn canonical_source_mapping(
+        &self,
+        account: &PhysicalStorageAccount,
+        destination_set: RetainedSetId,
+        source_identity: RetainedSlotIdentity,
+    ) -> Result<Option<(RetainedSlotIdentity, RetainedBlockOrigin)>, ()> {
+        if self.root_membership
+            != (RetainedMembership {
+                set_id: destination_set,
+                destination: RetainedMembershipDestination::Canonical,
+                ordinal: 0,
+            })
+            || destination_set == source_identity.set_id
+            || !self.committed_summary_is_bounded()
+            || self
+                .canonical_source_mapping
+                .as_ref()
+                .is_none_or(|mapping| mapping.mapped_entries != self.committed_derived_members)
+        {
+            return Err(());
+        }
+        let Some(index) = self
+            .canonical_source_mapping
+            .as_ref()
+            .ok_or(())?
+            .lookup(source_identity)?
+        else {
+            return Ok(None);
+        };
+        let member = self.members.get(index).ok_or(())?;
+        let ordinal = u64::try_from(index)
+            .ok()
+            .and_then(|index| index.checked_add(1))
+            .ok_or(())?;
+        if member.tag != source_identity.tag
+            || member.origin.source_identity() != Some(source_identity)
+            || !member.allocation.belongs_to(account)
+            || member.allocation.membership()
+                != Some(RetainedMembership {
+                    set_id: destination_set,
+                    destination: RetainedMembershipDestination::Canonical,
+                    ordinal,
+                })
+        {
+            return Err(());
+        }
+        Ok(Some((
+            RetainedSlotIdentity {
+                set_id: destination_set,
+                index,
+                tag: source_identity.tag,
+            },
+            member.origin,
+        )))
+    }
+
+    fn record_canonical_source_mapping(
+        &mut self,
+        account: &PhysicalStorageAccount,
+        destination_set: RetainedSetId,
+        source_identity: RetainedSlotIdentity,
+        destination_index: usize,
+    ) -> Result<(), ()> {
+        if self.root_membership
+            != (RetainedMembership {
+                set_id: destination_set,
+                destination: RetainedMembershipDestination::Canonical,
+                ordinal: 0,
+            })
+            || self
+                .canonical_source_mapping
+                .as_ref()
+                .is_none_or(|mapping| mapping.mapped_entries != self.committed_derived_members)
+        {
+            return Err(());
+        }
+        let member = self.members.get(destination_index).ok_or(())?;
+        let ordinal = u64::try_from(destination_index)
+            .ok()
+            .and_then(|index| index.checked_add(1))
+            .ok_or(())?;
+        if member.tag != source_identity.tag
+            || member.origin.source_identity() != Some(source_identity)
+            || !member.allocation.belongs_to(account)
+            || member.allocation.membership()
+                != Some(RetainedMembership {
+                    set_id: destination_set,
+                    destination: RetainedMembershipDestination::Canonical,
+                    ordinal,
+                })
+        {
+            return Err(());
+        }
+        self.canonical_source_mapping
+            .as_mut()
+            .ok_or(())?
+            .record(source_identity, destination_index)
+    }
+
+    fn clear_canonical_source_mapping(
+        &mut self,
+        source_identity: RetainedSlotIdentity,
+    ) -> Result<(), ()> {
+        let expected_mapped_entries = self.committed_derived_members.checked_add(1).ok_or(())?;
+        if self
+            .canonical_source_mapping
+            .as_ref()
+            .is_none_or(|mapping| mapping.mapped_entries != expected_mapped_entries)
+        {
+            return Err(());
+        }
+        self.canonical_source_mapping
+            .as_mut()
+            .ok_or(())?
+            .clear(source_identity)
+    }
+
+    #[cfg(test)]
+    pub(super) fn take_canonical_source_mapping_probe_count(&self) -> u64 {
+        self.canonical_source_mapping
+            .as_ref()
+            .map_or(0, CanonicalSourceMapping::take_probe_count)
     }
 }
 
@@ -354,10 +796,14 @@ pub(in crate::retained) struct QualifiedCanonicalRetainBatch<Block, Tag> {
     first_index: usize,
     len: NonZeroUsize,
     initial_new_blocks: usize,
+    initial_derived_members: usize,
+    initial_new_block_bytes: u64,
     initial_attributions: usize,
     initial_attributed_bytes: u64,
     final_members: usize,
     final_new_blocks: usize,
+    final_derived_members: usize,
+    final_new_block_bytes: u64,
     final_attributions: usize,
     final_attributed_bytes: u64,
     marker: InvariantRetainedBrand<Block, Tag>,
@@ -414,16 +860,24 @@ where
             RetainedWriterError::OwnershipUnverified,
         ));
     }
-    let final_members = table_value.members.len().checked_add(count.get()).ok_or(
-        RetainedPublicationError::Writer(RetainedWriterError::MembershipExhausted),
-    )?;
-    let final_new_blocks =
-        table_value
-            .new_blocks
-            .checked_add(count.get())
-            .ok_or(RetainedPublicationError::Writer(
-                RetainedWriterError::MembershipExhausted,
-            ))?;
+    let final_members = table_value
+        .committed_members
+        .checked_add(count.get())
+        .ok_or(RetainedPublicationError::Writer(
+            RetainedWriterError::MembershipExhausted,
+        ))?;
+    let final_new_blocks = table_value
+        .committed_new_blocks
+        .checked_add(count.get())
+        .ok_or(RetainedPublicationError::Writer(
+            RetainedWriterError::MembershipExhausted,
+        ))?;
+    let final_new_block_bytes = table_value
+        .committed_new_block_bytes
+        .checked_add(aggregate_attributed_bytes)
+        .ok_or(RetainedPublicationError::Writer(
+            RetainedWriterError::OwnershipUnverified,
+        ))?;
     if final_members > table_value.total_blocks || final_new_blocks > table_value.max_new_blocks {
         return Err(slot_limit_error);
     }
@@ -457,15 +911,19 @@ where
 
     Ok(QualifiedCanonicalRetainBatch {
         set_id,
-        first_index: table_value.members.len(),
+        first_index: table_value.committed_members,
         len: count,
-        initial_new_blocks: table_value.new_blocks,
+        initial_new_blocks: table_value.committed_new_blocks,
+        initial_derived_members: table_value.committed_derived_members,
+        initial_new_block_bytes: table_value.committed_new_block_bytes,
         initial_attributions: batch.attribution_len(),
         initial_attributed_bytes: batch.attributed_bytes().ok_or(
             RetainedPublicationError::Writer(RetainedWriterError::OwnershipUnverified),
         )?,
         final_members,
         final_new_blocks,
+        final_derived_members: table_value.committed_derived_members,
+        final_new_block_bytes,
         final_attributions,
         final_attributed_bytes,
         marker: PhantomData,
@@ -511,8 +969,7 @@ where
 
         let table_value = table.as_ref();
         let completed = table_value
-            .members
-            .len()
+            .committed_members
             .checked_sub(self.first_index)
             .ok_or(RetainedPublicationError::Writer(
                 RetainedWriterError::OwnershipUnverified,
@@ -524,38 +981,10 @@ where
             RetainedPublicationError::Writer(RetainedWriterError::MembershipExhausted),
         )?;
         if completed > self.len.get()
-            || table_value.new_blocks != expected_new_blocks
+            || table_value.committed_new_blocks != expected_new_blocks
+            || table_value.committed_derived_members != self.initial_derived_members
             || batch.attribution_len() != expected_attributions
         {
-            return Err(RetainedPublicationError::Writer(
-                RetainedWriterError::OwnershipUnverified,
-            ));
-        }
-
-        let expected_tag = TypeId::of::<Tag>();
-        let prefix_is_exact = table_value.members[self.first_index..]
-            .iter()
-            .enumerate()
-            .all(|(offset, member)| {
-                let Some(index) = self.first_index.checked_add(offset) else {
-                    return false;
-                };
-                let Some(ordinal) = u64::try_from(index)
-                    .ok()
-                    .and_then(|index| index.checked_add(1))
-                else {
-                    return false;
-                };
-                member.tag == expected_tag
-                    && member.origin == RetainedBlockOrigin::New
-                    && member.allocation.membership()
-                        == Some(RetainedMembership {
-                            set_id: self.set_id,
-                            destination: RetainedMembershipDestination::Canonical,
-                            ordinal,
-                        })
-            });
-        if !prefix_is_exact {
             return Err(RetainedPublicationError::Writer(
                 RetainedWriterError::OwnershipUnverified,
             ));
@@ -567,21 +996,27 @@ where
                 RetainedWriterError::AccountPoisoned(poisoned),
             ));
         };
-        while table_value.members.len() > self.first_index {
-            let Some(member) = table_value.members.pop() else {
-                let poisoned = account.record_poison(AccountPoisonReason::OwnershipGraphUnverified);
-                return Err(RetainedPublicationError::Writer(
-                    RetainedWriterError::AccountPoisoned(poisoned),
-                ));
-            };
-            let Some(next_new_blocks) = table_value.new_blocks.checked_sub(1) else {
+        while table_value.committed_members > self.first_index {
+            let member =
+                match table_value.try_pop_committed_member(RetainedBlockPopExpectation::New {
+                    tag: TypeId::of::<Tag>(),
+                }) {
+                    Ok(member) => member,
+                    Err(()) => {
+                        let poisoned =
+                            account.record_poison(AccountPoisonReason::OwnershipGraphUnverified);
+                        return Err(RetainedPublicationError::Writer(
+                            RetainedWriterError::AccountPoisoned(poisoned),
+                        ));
+                    }
+                };
+            if member.origin != RetainedBlockOrigin::New {
                 let poisoned = account.record_poison(AccountPoisonReason::OwnershipGraphUnverified);
                 std::mem::forget(member);
                 return Err(RetainedPublicationError::Writer(
                     RetainedWriterError::AccountPoisoned(poisoned),
                 ));
-            };
-            table_value.new_blocks = next_new_blocks;
+            }
             let outcome = drop_retained_allocation_before_attribution(member.allocation, account);
             if !batch.finish_last_attribution_after_storage_rollback(
                 outcome == RetainedStorageDropOutcome::Clean,
@@ -609,7 +1044,10 @@ where
             }
         }
 
-        if table_value.new_blocks != self.initial_new_blocks
+        if table_value.committed_members != self.first_index
+            || table_value.committed_new_blocks != self.initial_new_blocks
+            || table_value.committed_derived_members != self.initial_derived_members
+            || table_value.committed_new_block_bytes != self.initial_new_block_bytes
             || batch.attribution_len() != self.initial_attributions
             || batch.attributed_bytes() != Some(self.initial_attributed_bytes)
         {
@@ -639,8 +1077,10 @@ where
             account,
             self.set_id,
             RetainedMembershipDestination::Canonical,
-        ) && table_value.members.len() == self.final_members
-            && table_value.new_blocks == self.final_new_blocks
+        ) && table_value.committed_members == self.final_members
+            && table_value.committed_new_blocks == self.final_new_blocks
+            && table_value.committed_derived_members == self.final_derived_members
+            && table_value.committed_new_block_bytes == self.final_new_block_bytes
             && batch.attribution_len() == self.final_attributions
             && batch.attributed_bytes() == Some(self.final_attributed_bytes);
         if !exact {
@@ -650,39 +1090,6 @@ where
         }
 
         let expected_tag = TypeId::of::<Tag>();
-        let Some(last_index) = self.first_index.checked_add(self.len.get()) else {
-            return Err(RetainedPublicationError::Writer(
-                RetainedWriterError::MembershipExhausted,
-            ));
-        };
-        let completed_segment = table_value.members[self.first_index..last_index]
-            .iter()
-            .enumerate()
-            .all(|(offset, member)| {
-                let Some(index) = self.first_index.checked_add(offset) else {
-                    return false;
-                };
-                let Some(ordinal) = u64::try_from(index)
-                    .ok()
-                    .and_then(|index| index.checked_add(1))
-                else {
-                    return false;
-                };
-                member.tag == expected_tag
-                    && member.origin == RetainedBlockOrigin::New
-                    && member.allocation.membership()
-                        == Some(RetainedMembership {
-                            set_id: self.set_id,
-                            destination: RetainedMembershipDestination::Canonical,
-                            ordinal,
-                        })
-            });
-        if !completed_segment {
-            return Err(RetainedPublicationError::Writer(
-                RetainedWriterError::OwnershipUnverified,
-            ));
-        }
-
         Ok(CompletedCanonicalRetainBatch {
             first: RetainedSlotIdentity {
                 set_id: self.set_id,
@@ -698,9 +1105,10 @@ where
 mod published_table_capability {
     use super::{
         AccountPoisonReason, AssertUnwindSafe, Ledger, OperationOwner, PhysicalStorageAccount,
-        RetainedAllocation, RetainedBlockMember, RetainedHandleSharePlan, RetainedLookupMember,
-        RetainedMembership, RetainedMembershipDestination, RetainedPublicationError, RetainedSetId,
-        RetainedSlotIdentity, RetainedTableAllocation, RetainedWriterError, TypeId, catch_unwind,
+        RetainedAllocation, RetainedBlockMember, RetainedBlockOrigin, RetainedHandleSharePlan,
+        RetainedLookupMember, RetainedMembership, RetainedMembershipDestination,
+        RetainedPublicationError, RetainedSetId, RetainedSlotIdentity, RetainedTableAllocation,
+        RetainedWriterError, TypeId, canonical_source_mapping_is_exact, catch_unwind,
         discard_untrusted_panic_payload, map_account_action_admission_error,
     };
     use std::fmt;
@@ -721,6 +1129,11 @@ mod published_table_capability {
     struct ProbedPublishedMember<'a, Block> {
         block: &'a Block,
         schema_tag: TypeId,
+    }
+
+    pub(super) struct PublishedInheritanceSourceMember<'a, Block> {
+        pub(super) allocation: &'a RetainedAllocation<Block>,
+        pub(super) identity: RetainedSlotIdentity,
     }
 
     impl<'a, Block> PublishedLookupCapability<'a, Block> {
@@ -906,6 +1319,10 @@ mod published_table_capability {
             self.table.source_sharing_capability().belongs_to(account)
         }
 
+        pub(super) const fn set_id(&self) -> RetainedSetId {
+            self.set_id
+        }
+
         pub(in crate::retained) fn lookup_member<Tag>(
             &self,
             identity: RetainedSlotIdentity,
@@ -916,6 +1333,66 @@ mod published_table_capability {
         {
             self.table
                 .lookup_member::<Tag>(self.set_id, identity, expected_destination)
+        }
+
+        pub(super) fn rewrite_source_allocation(
+            &self,
+            identity: RetainedSlotIdentity,
+            expected_destination: RetainedMembershipDestination,
+        ) -> Option<&RetainedAllocation<Block>> {
+            if self.table.lookup_capability().table_membership()
+                != Some(RetainedMembership {
+                    set_id: self.set_id,
+                    destination: expected_destination,
+                    ordinal: 0,
+                })
+            {
+                return None;
+            }
+            let allocation = self.source_allocation(identity)?;
+            let ordinal = u64::try_from(identity.index).ok()?.checked_add(1)?;
+            (allocation.membership()
+                == Some(RetainedMembership {
+                    set_id: self.set_id,
+                    destination: expected_destination,
+                    ordinal,
+                }))
+            .then_some(allocation)
+        }
+
+        pub(super) fn inheritance_source_member(
+            &self,
+            index: usize,
+            expected_destination: RetainedMembershipDestination,
+        ) -> Option<PublishedInheritanceSourceMember<'_, Block>> {
+            if self.table.lookup_capability().table_membership()
+                != Some(RetainedMembership {
+                    set_id: self.set_id,
+                    destination: expected_destination,
+                    ordinal: 0,
+                })
+            {
+                return None;
+            }
+            let member = self.table.table.as_ref().members.get(index)?;
+            let ordinal = u64::try_from(index).ok()?.checked_add(1)?;
+            if member.allocation.membership()
+                != Some(RetainedMembership {
+                    set_id: self.set_id,
+                    destination: expected_destination,
+                    ordinal,
+                })
+            {
+                return None;
+            }
+            Some(PublishedInheritanceSourceMember {
+                allocation: &member.allocation,
+                identity: RetainedSlotIdentity {
+                    set_id: self.set_id,
+                    index,
+                    tag: member.tag,
+                },
+            })
         }
 
         pub(in crate::retained) fn len(&self) -> usize {
@@ -976,6 +1453,40 @@ mod published_table_capability {
         Block: Send + Sync + 'static,
         Tag: Copy + Send + Sync + 'static,
     {
+        if source_identity.tag != TypeId::of::<Tag>() {
+            return Err(RetainedPublicationError::InvalidSourceSlot);
+        }
+        share_retained_block_runtime(
+            ledger,
+            account,
+            handle_share_work,
+            table,
+            set_id,
+            destination,
+            slot_limit_error,
+            source,
+            source_identity,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn share_retained_block_runtime<O, P, D, Block>(
+        ledger: &Ledger<O, P, D>,
+        account: &PhysicalStorageAccount,
+        handle_share_work: RetainedHandleSharePlan<D>,
+        table: &mut RetainedTableAllocation<Block>,
+        set_id: RetainedSetId,
+        destination: RetainedMembershipDestination,
+        slot_limit_error: RetainedPublicationError<D>,
+        source: &PublishedRetainedAggregate<Block>,
+        source_identity: RetainedSlotIdentity,
+    ) -> Result<RetainedSlotIdentity, RetainedPublicationError<D>>
+    where
+        O: OperationOwner,
+        P: Copy + Ord,
+        D: Copy + Ord + fmt::Debug + Send + Sync + 'static,
+        Block: Send + Sync + 'static,
+    {
         let preflight = account
             .try_begin_account_preflight()
             .map_err(RetainedWriterError::AccountPoisoned)
@@ -985,29 +1496,16 @@ mod published_table_capability {
                 RetainedWriterError::ForeignAccount,
             ));
         }
-        let table_value = table.as_ref();
-        if table_value.members.len() >= table_value.total_blocks
-            || table_value.members.len() >= table_value.members.capacity()
-        {
-            return Err(slot_limit_error);
-        }
-        let index = table_value.members.len();
-        let ordinal = u64::try_from(index)
-            .ok()
-            .and_then(|index| index.checked_add(1))
-            .ok_or(RetainedPublicationError::Writer(
-                RetainedWriterError::MembershipExhausted,
-            ))?;
-        if source_identity.tag != TypeId::of::<Tag>() || source_identity.set_id != source.set_id {
-            return Err(RetainedPublicationError::InvalidSourceSlot);
-        }
         if !source.belongs_to(account) {
             return Err(RetainedPublicationError::Writer(
                 RetainedWriterError::ForeignAccount,
             ));
         }
+        if source_identity.set_id != source.set_id {
+            return Err(RetainedPublicationError::InvalidSourceSlot);
+        }
         let source_allocation = source
-            .source_allocation(source_identity)
+            .rewrite_source_allocation(source_identity, destination)
             .ok_or(RetainedPublicationError::InvalidSourceSlot)?;
         if !source_allocation.belongs_to(account) {
             drop(preflight);
@@ -1016,6 +1514,58 @@ mod published_table_capability {
                 RetainedWriterError::AccountPoisoned(cause),
             ));
         }
+        let table_value = table.as_ref();
+        let source_mapping_is_exact = destination != RetainedMembershipDestination::Canonical
+            || canonical_source_mapping_is_exact(table_value, set_id);
+        if table_value.root_membership
+            != (RetainedMembership {
+                set_id,
+                destination,
+                ordinal: 0,
+            })
+            || !table_value.committed_summary_is_bounded()
+            || !source_mapping_is_exact
+            || (destination != RetainedMembershipDestination::Canonical
+                && table_value.canonical_source_mapping.is_some())
+        {
+            drop(preflight);
+            let cause = account.record_poison(AccountPoisonReason::OwnershipGraphUnverified);
+            return Err(RetainedPublicationError::Writer(
+                RetainedWriterError::AccountPoisoned(cause),
+            ));
+        }
+        if destination == RetainedMembershipDestination::Canonical {
+            table_value.require_canonical_source_binding(account, source.set_id(), source.len())?;
+            match table_value.canonical_source_mapping(account, set_id, source_identity) {
+                Ok(Some((identity, RetainedBlockOrigin::Inherited { .. }))) => {
+                    return Ok(identity);
+                }
+                Ok(Some((_, RetainedBlockOrigin::Rewritten { .. }))) => {
+                    return Err(RetainedPublicationError::InvalidSourceSlot);
+                }
+                Ok(Some((_, RetainedBlockOrigin::New))) | Err(()) => {
+                    drop(preflight);
+                    let cause =
+                        account.record_poison(AccountPoisonReason::OwnershipGraphUnverified);
+                    return Err(RetainedPublicationError::Writer(
+                        RetainedWriterError::AccountPoisoned(cause),
+                    ));
+                }
+                Ok(None) => {}
+            }
+        }
+        if table_value.committed_members >= table_value.total_blocks
+            || table_value.committed_members >= table_value.members.capacity()
+        {
+            return Err(slot_limit_error);
+        }
+        let index = table_value.committed_members;
+        let ordinal = u64::try_from(index)
+            .ok()
+            .and_then(|index| index.checked_add(1))
+            .ok_or(RetainedPublicationError::Writer(
+                RetainedWriterError::MembershipExhausted,
+            ))?;
         let share_admission = preflight
             .admit_action()
             .map_err(map_account_action_admission_error)
@@ -1027,7 +1577,7 @@ mod published_table_capability {
             ));
         };
         match catch_unwind(AssertUnwindSafe(|| {
-            super::try_share_retained_block_after_admission::<O, P, D, Block, Tag>(
+            super::try_share_retained_block_after_admission_runtime::<O, P, D, Block>(
                 ledger,
                 share_admission,
                 handle_share_work,
@@ -1036,6 +1586,7 @@ mod published_table_capability {
                 destination,
                 index,
                 ordinal,
+                source_identity,
                 source_allocation,
             )
         })) {
@@ -1084,19 +1635,18 @@ pub(super) fn release_retained_table_payload<Block>(
         visit_epoch: _,
     } in members
     {
-        let outcome = if mode == RetainedReleaseMode::BeforeAttribution
-            && origin == RetainedBlockOrigin::New
-        {
-            match allocation.try_release_unique_before_attribution() {
-                Ok(outcome) => outcome,
-                Err((allocation, poisoned)) => {
-                    std::mem::forget(allocation);
-                    FinalOwnerReleaseOutcome::OwnershipUnverified(poisoned)
+        let outcome =
+            if mode == RetainedReleaseMode::BeforeAttribution && origin.owns_new_allocation() {
+                match allocation.try_release_unique_before_attribution() {
+                    Ok(outcome) => outcome,
+                    Err((allocation, poisoned)) => {
+                        std::mem::forget(allocation);
+                        FinalOwnerReleaseOutcome::OwnershipUnverified(poisoned)
+                    }
                 }
-            }
-        } else {
-            allocation.release_storage()
-        };
+            } else {
+                allocation.release_storage()
+            };
         match outcome {
             FinalOwnerReleaseOutcome::Clean => {}
             FinalOwnerReleaseOutcome::StorageReleaseUnverified(poisoned) => {
@@ -1299,12 +1849,152 @@ impl<Block> PublishedCanonicalAggregate<Block> {
         published_table_capability::aggregate_belongs_to(&self.inner, account)
     }
 
+    pub(super) const fn set_id(&self) -> RetainedSetId {
+        self.inner.set_id()
+    }
+
+    fn rewrite_source_block(
+        &self,
+        identity: RetainedSlotIdentity,
+        account: &PhysicalStorageAccount,
+    ) -> Option<&Block> {
+        if !self.belongs_to(account) {
+            return None;
+        }
+        let allocation = self
+            .inner
+            .rewrite_source_allocation(identity, RetainedMembershipDestination::Canonical)?;
+        allocation
+            .belongs_to(account)
+            .then_some(allocation.as_ref())
+    }
+
+    fn inheritance_source_member(
+        &self,
+        index: usize,
+        account: &PhysicalStorageAccount,
+    ) -> Option<published_table_capability::PublishedInheritanceSourceMember<'_, Block>> {
+        if !self.belongs_to(account) {
+            return None;
+        }
+        let member = self
+            .inner
+            .inheritance_source_member(index, RetainedMembershipDestination::Canonical)?;
+        member.allocation.belongs_to(account).then_some(member)
+    }
+
     pub fn len(&self) -> usize {
         self.inner.len()
     }
 
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+}
+
+pub(crate) enum CanonicalSourceBindError<D> {
+    Publication(RetainedPublicationError<D>),
+    Control(ControlCause),
+    Ledger(LedgerCause<D>),
+}
+
+pub(crate) enum CanonicalLeafInheritanceError<D> {
+    Publication(RetainedPublicationError<D>),
+    Control(ControlCause),
+    Ledger(LedgerCause<D>),
+}
+
+impl<D> From<RetainedPublicationError<D>> for CanonicalLeafInheritanceError<D> {
+    fn from(cause: RetainedPublicationError<D>) -> Self {
+        Self::Publication(cause)
+    }
+}
+
+pub(crate) trait CanonicalRetainedLeafPolicy: Send + Sync + 'static {
+    fn is_shareable_canonical_leaf(&self) -> bool;
+}
+
+impl<D> From<RetainedPublicationError<D>> for CanonicalSourceBindError<D> {
+    fn from(cause: RetainedPublicationError<D>) -> Self {
+        Self::Publication(cause)
+    }
+}
+
+/// One checked source-to-destination member mapping used only while rebuilding a canonical block.
+pub(crate) struct CanonicalRetainedRewriteTarget<'source, 'destination, Block> {
+    source_block: &'source Block,
+    destination_block: &'destination Block,
+    destination_identity: RetainedSlotIdentity,
+}
+
+impl<'source, 'destination, Block> CanonicalRetainedRewriteTarget<'source, 'destination, Block> {
+    pub(crate) const fn source_block(&self) -> &'source Block {
+        self.source_block
+    }
+
+    pub(crate) const fn destination_block(&self) -> &'destination Block {
+        self.destination_block
+    }
+
+    pub(crate) const fn destination_identity(&self) -> RetainedSlotIdentity {
+        self.destination_identity
+    }
+}
+
+/// Allocation-free, bounded lookup from one published source member to an existing destination
+/// member that was inherited or rewritten from that exact source identity.
+pub(crate) struct CanonicalRetainedRewriteMap<'source, 'destination, Block> {
+    source: &'source PublishedCanonicalAggregate<Block>,
+    destination: &'destination RetainedBlockTable<Block>,
+    account: &'source PhysicalStorageAccount,
+    destination_set: RetainedSetId,
+}
+
+impl<'source, 'destination, Block> CanonicalRetainedRewriteMap<'source, 'destination, Block> {
+    fn new(
+        source: &'source PublishedCanonicalAggregate<Block>,
+        destination: &'destination RetainedBlockTable<Block>,
+        account: &'source PhysicalStorageAccount,
+        destination_set: RetainedSetId,
+    ) -> Self {
+        Self {
+            source,
+            destination,
+            account,
+            destination_set,
+        }
+    }
+
+    pub(crate) fn resolve(
+        &self,
+        source_identity: RetainedSlotIdentity,
+    ) -> Option<CanonicalRetainedRewriteTarget<'source, 'destination, Block>> {
+        if source_identity.set_id == self.destination_set {
+            return None;
+        }
+        let source = self.source;
+        let source_block = source.rewrite_source_block(source_identity, self.account)?;
+        let destination = self.destination;
+        let (destination_identity, _) = match destination.canonical_source_mapping(
+            self.account,
+            self.destination_set,
+            source_identity,
+        ) {
+            Ok(Some(mapped)) => mapped,
+            Ok(None) => return None,
+            Err(()) => {
+                let _ = self
+                    .account
+                    .record_poison(AccountPoisonReason::OwnershipGraphUnverified);
+                return None;
+            }
+        };
+        let member = destination.members.get(destination_identity.index)?;
+        Some(CanonicalRetainedRewriteTarget {
+            source_block,
+            destination_block: member.allocation.as_ref(),
+            destination_identity,
+        })
     }
 }
 
@@ -1363,6 +2053,7 @@ pub(super) struct QualifiedRetainedBlockTableStoragePlan<P, D, Block> {
     total_blocks: usize,
     max_new_blocks: usize,
     member_capacity: CapacityPlan,
+    canonical_source_mapping_capacity: Option<CapacityPlan>,
     charge: AdmissionCharge,
     block: PhantomData<fn(Block) -> Block>,
 }
@@ -1383,6 +2074,7 @@ pub(super) fn try_qualify_retained_block_table_plan<O, P, D, Destination, Block>
     account: &PhysicalStorageAccount,
     source: RetainedBlockTablePlan<P, D>,
     terminal_limits: RetainedBatchLimits,
+    membership_destination: RetainedMembershipDestination,
 ) -> Result<QualifiedRetainedBlockTablePlan<O, P, D, Destination, Block>, RetainedWriterError<D>>
 where
     O: OperationOwner,
@@ -1401,6 +2093,8 @@ where
         || required_attributions > terminal_limits.attribution_slots
         || source.writer.limits.attribution_slots > terminal_limits.attribution_slots
         || source.writer.limits.commitment_slots > terminal_limits.commitment_slots
+        || (source.canonical_source_mapping_capacity != 0
+            && membership_destination != RetainedMembershipDestination::Canonical)
     {
         return Err(RetainedWriterError::InvalidPublicationPlan);
     }
@@ -1414,10 +2108,33 @@ where
     let member_capacity =
         CapacityPlan::for_type::<RetainedBlockMember<Block>>(0, 0, source.total_blocks)
             .map_err(|_| RetainedWriterError::BatchCapacity)?;
-    let nested_bytes = member_capacity
+    let member_bytes = member_capacity
         .envelope_delta_bytes()
         .map_err(|_| RetainedWriterError::BatchCapacity)?;
-    let allocation = RetainedAllocationPlan::new(nested_bytes, u64::from(nested_bytes != 0))
+    let canonical_source_mapping_capacity = if source.canonical_source_mapping_capacity == 0 {
+        None
+    } else {
+        Some(
+            CapacityPlan::for_type::<Option<NonZeroUsize>>(
+                0,
+                0,
+                source.canonical_source_mapping_capacity,
+            )
+            .map_err(|_| RetainedWriterError::BatchCapacity)?,
+        )
+    };
+    let mapping_bytes = canonical_source_mapping_capacity
+        .map(CapacityPlan::envelope_delta_bytes)
+        .transpose()
+        .map_err(|_| RetainedWriterError::BatchCapacity)?
+        .unwrap_or(0);
+    let nested_bytes = member_bytes
+        .checked_add(mapping_bytes)
+        .ok_or(RetainedWriterError::BatchCapacity)?;
+    let nested_allocations = u64::from(member_bytes != 0)
+        .checked_add(u64::from(mapping_bytes != 0))
+        .ok_or(RetainedWriterError::BatchCapacity)?;
+    let allocation = RetainedAllocationPlan::new(nested_bytes, nested_allocations)
         .map_err(|_| RetainedWriterError::BatchCapacity)?;
     let charge = account
         .checked_retained_table_charge::<Block>(allocation)
@@ -1431,6 +2148,7 @@ where
             total_blocks: source.total_blocks,
             max_new_blocks: source.max_new_blocks,
             member_capacity,
+            canonical_source_mapping_capacity,
             charge,
             block: PhantomData,
         },
@@ -1459,6 +2177,7 @@ where
         total_blocks,
         max_new_blocks,
         member_capacity,
+        canonical_source_mapping_capacity,
         charge,
         block: _,
     } = plan;
@@ -1500,6 +2219,11 @@ where
             return Err(RetainedWriterError::Physical(cause));
         }
     };
+    let membership = RetainedMembership {
+        set_id,
+        destination: membership_destination,
+        ordinal: 0,
+    };
     let mut table = match account
         .try_retain_with_admitted_charge::<RetainedBlockTable<Block>, TableRetainedPolicy>(
             match physical_admission.as_mut() {
@@ -1520,12 +2244,43 @@ where
                 {
                     return Err(RetainedBuildFailureCode::new(2));
                 }
+                let canonical_source_mapping = match canonical_source_mapping_capacity {
+                    Some(mapping_capacity) => {
+                        let mut entries = Vec::new();
+                        if entries
+                            .try_reserve_exact(mapping_capacity.allocator_additional())
+                            .is_err()
+                        {
+                            return Err(RetainedBuildFailureCode::new(1));
+                        }
+                        if mapping_capacity
+                            .finish(entries.len(), entries.capacity())
+                            .is_err()
+                        {
+                            return Err(RetainedBuildFailureCode::new(2));
+                        }
+                        Some(CanonicalSourceMapping {
+                            qualified_capacity: entries.capacity(),
+                            entries,
+                            source_set: None,
+                            mapped_entries: 0,
+                            #[cfg(test)]
+                            probes: AtomicU64::new(0),
+                        })
+                    }
+                    None => None,
+                };
                 Ok(RetainedBlockTable {
                     qualified_capacity: members.capacity(),
                     members,
+                    canonical_source_mapping,
+                    root_membership: membership,
                     total_blocks,
                     max_new_blocks,
-                    new_blocks: 0,
+                    committed_members: 0,
+                    committed_new_blocks: 0,
+                    committed_derived_members: 0,
+                    committed_new_block_bytes: 0,
                 })
             },
         ) {
@@ -1538,11 +2293,6 @@ where
             }
             return Err(RetainedWriterError::Physical(cause));
         }
-    };
-    let membership = RetainedMembership {
-        set_id,
-        destination: membership_destination,
-        ordinal: 0,
     };
     if table.assign_membership(membership).is_err() {
         let outcome = drop_retained_allocation_before_attribution(table, account);
@@ -1586,9 +2336,11 @@ pub(super) fn try_retain_block<O, P, D, Destination, Block, Tag>(
     set_id: RetainedSetId,
     destination: RetainedMembershipDestination,
     slot_limit_error: RetainedPublicationError<D>,
+    origin: RetainedBlockOrigin,
     plan: RetainedAllocationPlan,
     build: impl for<'a> FnOnce(
         BlockEmplacer<'a, Block>,
+        &'a RetainedBlockTable<Block>,
     ) -> Result<BlockPlacement<'a, Block, Tag>, RetainedBuildFailureCode>,
 ) -> Result<RetainedSlotIdentity, RetainedPublicationError<D>>
 where
@@ -1599,6 +2351,11 @@ where
     Block: Send + Sync + 'static,
     Tag: Copy + Send + Sync + 'static,
 {
+    if !origin.owns_new_allocation() {
+        return Err(RetainedPublicationError::Writer(
+            RetainedWriterError::InvalidPublicationPlan,
+        ));
+    }
     let preflight = account
         .try_begin_account_preflight()
         .map_err(RetainedWriterError::AccountPoisoned)
@@ -1608,24 +2365,37 @@ where
             RetainedWriterError::ForeignAccount,
         ));
     }
-    let (index, next_new_blocks) = {
+    let index = {
         let table = table.as_ref();
-        if table.members.len() >= table.total_blocks || table.new_blocks >= table.max_new_blocks {
+        let source_mapping_is_exact = destination != RetainedMembershipDestination::Canonical
+            || canonical_source_mapping_is_exact(table, set_id);
+        if table.root_membership
+            != (RetainedMembership {
+                set_id,
+                destination,
+                ordinal: 0,
+            })
+            || !table.committed_summary_is_bounded()
+            || !source_mapping_is_exact
+            || (destination != RetainedMembershipDestination::Canonical
+                && table.canonical_source_mapping.is_some())
+        {
+            let poisoned = account.record_poison(AccountPoisonReason::OwnershipGraphUnverified);
+            return Err(RetainedPublicationError::Writer(
+                RetainedWriterError::AccountPoisoned(poisoned),
+            ));
+        }
+        if table.committed_members >= table.total_blocks
+            || table.committed_new_blocks >= table.max_new_blocks
+        {
             return Err(slot_limit_error);
         }
-        if table.members.len() >= table.members.capacity() {
+        if table.committed_members >= table.members.capacity() {
             return Err(RetainedPublicationError::Writer(
                 RetainedWriterError::BatchCapacity,
             ));
         }
-        let next_new_blocks =
-            table
-                .new_blocks
-                .checked_add(1)
-                .ok_or(RetainedPublicationError::Writer(
-                    RetainedWriterError::MembershipExhausted,
-                ))?;
-        (table.members.len(), next_new_blocks)
+        table.committed_members
     };
     let ordinal = u64::try_from(index)
         .ok()
@@ -1698,9 +2468,12 @@ where
         || {
             #[cfg(feature = "_u4c-collector")]
             record_block_begin(BlockKind::New);
-            let block = build(BlockEmplacer {
-                marker: PhantomData,
-            })
+            let block = build(
+                BlockEmplacer {
+                    marker: PhantomData,
+                },
+                table,
+            )
             .map(BlockPlacement::into_block);
             #[cfg(feature = "_u4c-collector")]
             if block.is_ok() {
@@ -1762,21 +2535,467 @@ where
             ),
         ));
     };
-    table.members.push(RetainedBlockMember {
-        allocation,
-        tag: TypeId::of::<Tag>(),
-        origin: RetainedBlockOrigin::New,
-        visit_epoch: AtomicU64::new(0),
-    });
+    let identity = table
+        .try_push_committed_member(
+            account,
+            set_id,
+            destination,
+            RetainedBlockMember {
+                allocation,
+                tag: TypeId::of::<Tag>(),
+                origin,
+                visit_epoch: AtomicU64::new(0),
+            },
+        )
+        .map_err(|()| {
+            let poisoned = account.record_poison(AccountPoisonReason::OwnershipGraphUnverified);
+            RetainedPublicationError::Writer(RetainedWriterError::AccountPoisoned(poisoned))
+        })?;
     #[cfg(feature = "_u4c-collector")]
     record_slot_publication(BlockKind::New);
-    table.new_blocks = next_new_blocks;
-    Ok(RetainedSlotIdentity {
-        set_id,
-        index,
-        tag: TypeId::of::<Tag>(),
-    })
+    Ok(identity)
 }
+
+pub(super) fn try_bind_canonical_source_mapping<O, P, PP, U, D, Block>(
+    account: &PhysicalStorageAccount,
+    table: &mut RetainedTableAllocation<Block>,
+    destination_set: RetainedSetId,
+    source: &PublishedCanonicalAggregate<Block>,
+    mut control: RetainedWorkControl<'_, O, P, PP, U, D>,
+) -> Result<(), CanonicalSourceBindError<D>>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    PP: crate::ProgressPhase,
+    U: crate::ProgressUnit,
+    D: Copy + Ord + fmt::Debug + Send + Sync + 'static,
+    Block: Send + Sync + 'static,
+{
+    drop(
+        account
+            .try_begin_account_preflight()
+            .map_err(RetainedWriterError::AccountPoisoned)
+            .map_err(RetainedPublicationError::Writer)?,
+    );
+    if !table.belongs_to(account) || !source.belongs_to(account) {
+        return Err(RetainedPublicationError::Writer(RetainedWriterError::ForeignAccount).into());
+    }
+    if table.as_ref().root_membership
+        != (RetainedMembership {
+            set_id: destination_set,
+            destination: RetainedMembershipDestination::Canonical,
+            ordinal: 0,
+        })
+    {
+        let poisoned = account.record_poison(AccountPoisonReason::OwnershipGraphUnverified);
+        return Err(CanonicalSourceBindError::Publication(
+            RetainedPublicationError::Writer(RetainedWriterError::AccountPoisoned(poisoned)),
+        ));
+    }
+    let source_set = source.set_id();
+    let source_len = source.len();
+    if source_set == destination_set || source_len == 0 {
+        return Err(RetainedPublicationError::InvalidSourceSlot.into());
+    }
+    match table
+        .as_ref()
+        .validate_canonical_source_binding(source_set, source_len)
+    {
+        Ok(()) => return Ok(()),
+        Err(CanonicalSourceBindingStateError::Unbound) => {}
+        Err(CanonicalSourceBindingStateError::Unavailable) => {
+            return Err(CanonicalSourceBindError::Publication(
+                RetainedPublicationError::Writer(RetainedWriterError::InvalidPublicationPlan),
+            ));
+        }
+        Err(CanonicalSourceBindingStateError::Mismatch) => {
+            return Err(RetainedPublicationError::InvalidSourceSlot.into());
+        }
+        Err(CanonicalSourceBindingStateError::Corrupt) => {
+            let poisoned = account.record_poison(AccountPoisonReason::OwnershipGraphUnverified);
+            return Err(CanonicalSourceBindError::Publication(
+                RetainedPublicationError::Writer(RetainedWriterError::AccountPoisoned(poisoned)),
+            ));
+        }
+    }
+    let table_value = table.table_mut_during_construction().ok_or_else(|| {
+        let poisoned = account.record_poison(AccountPoisonReason::OwnershipGraphUnverified);
+        CanonicalSourceBindError::Publication(RetainedPublicationError::Writer(
+            RetainedWriterError::AccountPoisoned(poisoned),
+        ))
+    })?;
+    let mapping = table_value.canonical_source_mapping.as_mut().ok_or({
+        CanonicalSourceBindError::Publication(RetainedPublicationError::Writer(
+            RetainedWriterError::InvalidPublicationPlan,
+        ))
+    })?;
+    if !mapping.entries.is_empty()
+        || !mapping.shape_is_exact()
+        || mapping.mapped_entries != 0
+        || source_len > mapping.qualified_capacity
+    {
+        return Err(RetainedPublicationError::InvalidSourceSlot.into());
+    }
+
+    let fill = catch_unwind(AssertUnwindSafe(|| {
+        for _ in 0..source_len {
+            control.poll().map_err(CanonicalSourceBindError::Control)?;
+            control
+                .charge_observed(1)
+                .map_err(CanonicalSourceBindError::Ledger)?;
+            mapping.entries.push(None);
+        }
+        Ok::<(), CanonicalSourceBindError<D>>(())
+    }));
+    match fill {
+        Ok(Ok(()))
+            if mapping.entries.len() == source_len
+                && mapping.entries.capacity() == mapping.qualified_capacity =>
+        {
+            mapping.source_set = Some(source_set);
+            Ok(())
+        }
+        Ok(Ok(())) => {
+            mapping.entries.clear();
+            let poisoned = account.record_poison(AccountPoisonReason::OwnershipGraphUnverified);
+            Err(CanonicalSourceBindError::Publication(
+                RetainedPublicationError::Writer(RetainedWriterError::AccountPoisoned(poisoned)),
+            ))
+        }
+        Ok(Err(cause)) => {
+            mapping.entries.clear();
+            Err(cause)
+        }
+        Err(payload) => {
+            mapping.entries.clear();
+            let poisoned = account.record_poison(AccountPoisonReason::RetainedBuilderPanicked);
+            discard_untrusted_panic_payload(payload);
+            Err(CanonicalSourceBindError::Publication(
+                RetainedPublicationError::Writer(RetainedWriterError::AccountPoisoned(poisoned)),
+            ))
+        }
+    }
+}
+
+fn inherited_prefix_release_error<D>(
+    outcome: FinalOwnerReleaseOutcome,
+) -> Option<RetainedPublicationError<D>> {
+    match outcome {
+        FinalOwnerReleaseOutcome::Clean => None,
+        FinalOwnerReleaseOutcome::StorageReleaseUnverified(_) => Some(
+            RetainedPublicationError::Writer(RetainedWriterError::StorageDropUnverified),
+        ),
+        FinalOwnerReleaseOutcome::ChargeReleaseUnverified(_) => Some(
+            RetainedPublicationError::Writer(RetainedWriterError::ChargeReleaseUnverified),
+        ),
+        FinalOwnerReleaseOutcome::OwnershipUnverified(_) => Some(RetainedPublicationError::Writer(
+            RetainedWriterError::OwnershipUnverified,
+        )),
+    }
+}
+
+fn try_rollback_inherited_prefix<D, Block>(
+    account: &PhysicalStorageAccount,
+    table: &mut RetainedTableAllocation<Block>,
+    initial_members: usize,
+) -> Result<(), RetainedPublicationError<D>>
+where
+    Block: Send + Sync + 'static,
+{
+    let Some(table) = table.table_mut_during_construction() else {
+        let poisoned = account.record_poison(AccountPoisonReason::OwnershipGraphUnverified);
+        return Err(RetainedPublicationError::Writer(
+            RetainedWriterError::AccountPoisoned(poisoned),
+        ));
+    };
+    if !table.committed_summary_is_bounded()
+        || !canonical_source_mapping_is_exact(table, table.root_membership.set_id)
+        || table.committed_members < initial_members
+    {
+        let poisoned = account.record_poison(AccountPoisonReason::OwnershipGraphUnverified);
+        return Err(RetainedPublicationError::Writer(
+            RetainedWriterError::AccountPoisoned(poisoned),
+        ));
+    }
+    while table.committed_members > initial_members {
+        let member = match table.try_pop_committed_member(RetainedBlockPopExpectation::Inherited) {
+            Ok(member) => member,
+            Err(()) => {
+                let poisoned = account.record_poison(AccountPoisonReason::OwnershipGraphUnverified);
+                return Err(RetainedPublicationError::Writer(
+                    RetainedWriterError::AccountPoisoned(poisoned),
+                ));
+            }
+        };
+        let RetainedBlockOrigin::Inherited { source } = member.origin else {
+            std::mem::forget(member);
+            let poisoned = account.record_poison(AccountPoisonReason::OwnershipGraphUnverified);
+            return Err(RetainedPublicationError::Writer(
+                RetainedWriterError::AccountPoisoned(poisoned),
+            ));
+        };
+        if let Some(cause) = inherited_prefix_release_error(member.allocation.release_storage()) {
+            return Err(cause);
+        }
+        if table.clear_canonical_source_mapping(source).is_err() {
+            let poisoned = account.record_poison(AccountPoisonReason::OwnershipGraphUnverified);
+            return Err(RetainedPublicationError::Writer(
+                RetainedWriterError::AccountPoisoned(poisoned),
+            ));
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn try_inherit_all_canonical_leaves<O, P, PP, U, D, Block>(
+    ledger: &Ledger<O, P, D>,
+    account: &PhysicalStorageAccount,
+    handle_share_work: RetainedHandleSharePlan<D>,
+    table: &mut RetainedTableAllocation<Block>,
+    destination_set: RetainedSetId,
+    source: &PublishedCanonicalAggregate<Block>,
+    mut control: RetainedWorkControl<'_, O, P, PP, U, D>,
+) -> Result<(), CanonicalLeafInheritanceError<D>>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    PP: crate::ProgressPhase,
+    U: crate::ProgressUnit,
+    D: Copy + Ord + fmt::Debug + Send + Sync + 'static,
+    Block: CanonicalRetainedLeafPolicy,
+{
+    drop(
+        account
+            .try_begin_account_preflight()
+            .map_err(RetainedWriterError::AccountPoisoned)
+            .map_err(RetainedPublicationError::Writer)?,
+    );
+    if !table.belongs_to(account) || !source.belongs_to(account) {
+        return Err(RetainedPublicationError::Writer(RetainedWriterError::ForeignAccount).into());
+    }
+    table
+        .as_ref()
+        .require_canonical_source_binding(account, source.set_id(), source.len())?;
+    let initial_members = table.as_ref().committed_members;
+    let inherit = catch_unwind(AssertUnwindSafe(|| {
+        for source_index in 0..source.len() {
+            control
+                .poll()
+                .map_err(CanonicalLeafInheritanceError::Control)?;
+            control
+                .charge_observed(1)
+                .map_err(CanonicalLeafInheritanceError::Ledger)?;
+            let Some(member) = source.inheritance_source_member(source_index, account) else {
+                let poisoned = account.record_poison(AccountPoisonReason::OwnershipGraphUnverified);
+                return Err(CanonicalLeafInheritanceError::Publication(
+                    RetainedPublicationError::Writer(RetainedWriterError::AccountPoisoned(
+                        poisoned,
+                    )),
+                ));
+            };
+            if !member.allocation.as_ref().is_shareable_canonical_leaf() {
+                continue;
+            }
+            match table
+                .as_ref()
+                .canonical_source_mapping(account, destination_set, member.identity)
+            {
+                Ok(Some(_)) => continue,
+                Ok(None) => {}
+                Err(()) => {
+                    let poisoned =
+                        account.record_poison(AccountPoisonReason::OwnershipGraphUnverified);
+                    return Err(CanonicalLeafInheritanceError::Publication(
+                        RetainedPublicationError::Writer(RetainedWriterError::AccountPoisoned(
+                            poisoned,
+                        )),
+                    ));
+                }
+            }
+            published_table_capability::share_retained_block_runtime(
+                ledger,
+                account,
+                handle_share_work,
+                table,
+                destination_set,
+                RetainedMembershipDestination::Canonical,
+                RetainedPublicationError::CanonicalSlotLimit,
+                &source.inner,
+                member.identity,
+            )
+            .map(drop)
+            .map_err(CanonicalLeafInheritanceError::Publication)?;
+        }
+        Ok(())
+    }));
+    let cause = match inherit {
+        Ok(Ok(())) => return Ok(()),
+        Ok(Err(cause)) => cause,
+        Err(payload) => {
+            let poisoned = account.record_poison(AccountPoisonReason::RetainedBuilderPanicked);
+            discard_untrusted_panic_payload(payload);
+            CanonicalLeafInheritanceError::Publication(RetainedPublicationError::Writer(
+                RetainedWriterError::AccountPoisoned(poisoned),
+            ))
+        }
+    };
+    match try_rollback_inherited_prefix(account, table, initial_members) {
+        Ok(()) => Err(cause),
+        Err(rollback) => Err(CanonicalLeafInheritanceError::Publication(rollback)),
+    }
+}
+
+fn try_validate_canonical_rewrite_source<'source, D, Block, Tag>(
+    account: &PhysicalStorageAccount,
+    table: &RetainedTableAllocation<Block>,
+    set_id: RetainedSetId,
+    source: &'source PublishedCanonicalAggregate<Block>,
+    source_identity: RetainedSlotIdentity,
+) -> Result<&'source Block, RetainedPublicationError<D>>
+where
+    Tag: Copy + Send + Sync + 'static,
+{
+    if !source.belongs_to(account) || !table.belongs_to(account) {
+        return Err(RetainedPublicationError::Writer(
+            RetainedWriterError::ForeignAccount,
+        ));
+    }
+    if source_identity.tag != TypeId::of::<Tag>() || source_identity.set_id == set_id {
+        return Err(RetainedPublicationError::InvalidSourceSlot);
+    }
+    let source_block = source
+        .rewrite_source_block(source_identity, account)
+        .ok_or(RetainedPublicationError::InvalidSourceSlot)?;
+    table
+        .as_ref()
+        .require_canonical_source_binding(account, source.set_id(), source.len())?;
+    match table
+        .as_ref()
+        .canonical_source_mapping(account, set_id, source_identity)
+    {
+        Ok(None) => Ok(source_block),
+        Ok(Some(_)) => Err(RetainedPublicationError::InvalidSourceSlot),
+        Err(()) => {
+            let poisoned = account.record_poison(AccountPoisonReason::OwnershipGraphUnverified);
+            Err(RetainedPublicationError::Writer(
+                RetainedWriterError::AccountPoisoned(poisoned),
+            ))
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn try_retain_rewritten_canonical_block<O, P, D, Block, Tag>(
+    ledger: &Ledger<O, P, D>,
+    account: &PhysicalStorageAccount,
+    handle_share_work: RetainedHandleSharePlan<D>,
+    phase: P,
+    attribution_dimension: D,
+    batch: &mut AttributionReservationBatch<O, P, D, CanonicalOutput>,
+    table: &mut RetainedTableAllocation<Block>,
+    set_id: RetainedSetId,
+    source: &PublishedCanonicalAggregate<Block>,
+    source_identity: RetainedSlotIdentity,
+    plan: RetainedAllocationPlan,
+    build: impl for<'a> FnOnce(
+        BlockEmplacer<'a, Block>,
+    ) -> Result<BlockPlacement<'a, Block, Tag>, RetainedBuildFailureCode>,
+) -> Result<RetainedSlotIdentity, RetainedPublicationError<D>>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord + fmt::Debug + Send + Sync + 'static,
+    Block: Send + Sync + 'static,
+    Tag: Copy + Send + Sync + 'static,
+{
+    let _source_block = try_validate_canonical_rewrite_source::<D, Block, Tag>(
+        account,
+        table,
+        set_id,
+        source,
+        source_identity,
+    )?;
+    try_retain_block(
+        ledger,
+        account,
+        handle_share_work,
+        phase,
+        attribution_dimension,
+        batch,
+        table,
+        set_id,
+        RetainedMembershipDestination::Canonical,
+        RetainedPublicationError::CanonicalSlotLimit,
+        RetainedBlockOrigin::Rewritten {
+            source: source_identity,
+        },
+        plan,
+        |emplacer, _| build(emplacer),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn try_rewrite_canonical_block_controlled<O, P, PP, U, D, Block, Tag>(
+    ledger: &Ledger<O, P, D>,
+    account: &PhysicalStorageAccount,
+    handle_share_work: RetainedHandleSharePlan<D>,
+    phase: P,
+    attribution_dimension: D,
+    batch: &mut AttributionReservationBatch<O, P, D, CanonicalOutput>,
+    table: &mut RetainedTableAllocation<Block>,
+    set_id: RetainedSetId,
+    source: &PublishedCanonicalAggregate<Block>,
+    source_identity: RetainedSlotIdentity,
+    allocation_plan: RetainedAllocationPlan,
+    control: RetainedWorkControl<'_, O, P, PP, U, D>,
+    build: impl for<'placement, 'source, 'destination, 'control> FnOnce(
+        BlockEmplacer<'placement, Block>,
+        &'source Block,
+        CanonicalRetainedRewriteMap<'source, 'destination, Block>,
+        RetainedWorkControl<'control, O, P, PP, U, D>,
+    ) -> Result<
+        BlockPlacement<'placement, Block, Tag>,
+        RetainedBuildFailureCode,
+    >,
+) -> Result<RetainedSlotIdentity, RetainedPublicationError<D>>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    PP: crate::ProgressPhase,
+    U: crate::ProgressUnit,
+    D: Copy + Ord + fmt::Debug + Send + Sync + 'static,
+    Block: Send + Sync + 'static,
+    Tag: Copy + Send + Sync + 'static,
+{
+    let source_block = try_validate_canonical_rewrite_source::<D, Block, Tag>(
+        account,
+        table,
+        set_id,
+        source,
+        source_identity,
+    )?;
+    try_retain_block(
+        ledger,
+        account,
+        handle_share_work,
+        phase,
+        attribution_dimension,
+        batch,
+        table,
+        set_id,
+        RetainedMembershipDestination::Canonical,
+        RetainedPublicationError::CanonicalSlotLimit,
+        RetainedBlockOrigin::Rewritten {
+            source: source_identity,
+        },
+        allocation_plan,
+        move |emplacer, destination| {
+            let mapping = CanonicalRetainedRewriteMap::new(source, destination, account, set_id);
+            build(emplacer, source_block, mapping, control)
+        },
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn try_share_retained_block<O, P, D, Block, Tag>(
     ledger: &Ledger<O, P, D>,
@@ -1818,6 +3037,7 @@ pub(super) fn try_share_retained_block_after_admission<O, P, D, Block, Tag>(
     destination: RetainedMembershipDestination,
     index: usize,
     ordinal: u64,
+    source_identity: RetainedSlotIdentity,
     source_allocation: &RetainedAllocation<Block>,
 ) -> Result<RetainedSlotIdentity, RetainedPublicationError<D>>
 where
@@ -1827,7 +3047,52 @@ where
     Block: Send + Sync + 'static,
     Tag: Copy + Send + Sync + 'static,
 {
+    if source_identity.tag != TypeId::of::<Tag>() {
+        return Err(RetainedPublicationError::InvalidSourceSlot);
+    }
+    try_share_retained_block_after_admission_runtime(
+        ledger,
+        share_admission,
+        handle_share_work,
+        table,
+        set_id,
+        destination,
+        index,
+        ordinal,
+        source_identity,
+        source_allocation,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn try_share_retained_block_after_admission_runtime<O, P, D, Block>(
+    ledger: &Ledger<O, P, D>,
+    share_admission: PendingAccountActionAdmission<'_>,
+    handle_share_work: RetainedHandleSharePlan<D>,
+    table: &mut RetainedBlockTable<Block>,
+    set_id: RetainedSetId,
+    destination: RetainedMembershipDestination,
+    index: usize,
+    ordinal: u64,
+    source_identity: RetainedSlotIdentity,
+    source_allocation: &RetainedAllocation<Block>,
+) -> Result<RetainedSlotIdentity, RetainedPublicationError<D>>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord + fmt::Debug + Send + Sync + 'static,
+    Block: Send + Sync + 'static,
+{
     let account = share_admission.account;
+    let expected_ordinal = u64::try_from(table.committed_members)
+        .ok()
+        .and_then(|index| index.checked_add(1));
+    if index != table.committed_members || expected_ordinal != Some(ordinal) {
+        let poisoned = account.record_poison(AccountPoisonReason::OwnershipGraphUnverified);
+        return Err(RetainedPublicationError::Writer(
+            RetainedWriterError::AccountPoisoned(poisoned),
+        ));
+    }
     let admitted_share_work = try_admit_retained_share_work(ledger, handle_share_work)
         .map_err(RetainedPublicationError::Writer)?;
     let mut allocation =
@@ -1848,22 +3113,124 @@ where
         record_block_begin(BlockKind::Inherited);
         record_block_seal(BlockKind::Inherited);
     }
-    table.members.push(RetainedBlockMember {
-        allocation,
-        tag: TypeId::of::<Tag>(),
-        origin: RetainedBlockOrigin::Inherited,
-        visit_epoch: AtomicU64::new(0),
-    });
+    let identity = table
+        .try_push_committed_member(
+            account,
+            set_id,
+            destination,
+            RetainedBlockMember {
+                allocation,
+                tag: source_identity.tag,
+                origin: RetainedBlockOrigin::Inherited {
+                    source: source_identity,
+                },
+                visit_epoch: AtomicU64::new(0),
+            },
+        )
+        .map_err(|()| {
+            let poisoned = account.record_poison(AccountPoisonReason::OwnershipGraphUnverified);
+            RetainedPublicationError::Writer(RetainedWriterError::AccountPoisoned(poisoned))
+        })?;
     #[cfg(feature = "_u4c-collector")]
     record_slot_publication(BlockKind::Inherited);
-    Ok(RetainedSlotIdentity {
-        set_id,
-        index,
-        tag: TypeId::of::<Tag>(),
-    })
+    Ok(identity)
+}
+
+fn canonical_source_mapping_is_exact<Block>(
+    table: &RetainedBlockTable<Block>,
+    destination_set: RetainedSetId,
+) -> bool {
+    if table.root_membership
+        != (RetainedMembership {
+            set_id: destination_set,
+            destination: RetainedMembershipDestination::Canonical,
+            ordinal: 0,
+        })
+    {
+        return false;
+    }
+    let Some(mapping) = table.canonical_source_mapping.as_ref() else {
+        return table.committed_derived_members == 0;
+    };
+    if !mapping.shape_is_exact() {
+        return false;
+    }
+    let Some(source_set) = mapping.source_set else {
+        return mapping.entries.is_empty()
+            && mapping.mapped_entries == 0
+            && table.committed_derived_members == 0;
+    };
+    source_set != destination_set
+        && !mapping.entries.is_empty()
+        && mapping.mapped_entries == table.committed_derived_members
 }
 
 pub(super) fn retained_block_table_is_exact<O, P, D, Destination, Block>(
+    table: &RetainedTableAllocation<Block>,
+    batch: &AttributionReservationBatch<O, P, D, Destination>,
+    account: &PhysicalStorageAccount,
+    set_id: RetainedSetId,
+    destination: RetainedMembershipDestination,
+) -> bool
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+    Destination: PublicationDestination,
+{
+    let exact = (|| {
+        if !table.belongs_to(account)
+            || table.membership()
+                != Some(RetainedMembership {
+                    set_id,
+                    destination,
+                    ordinal: 0,
+                })
+        {
+            return false;
+        }
+        let table_charge = table.charged_bytes();
+        let table_value = table.as_ref();
+        if table_value.root_membership
+            != (RetainedMembership {
+                set_id,
+                destination,
+                ordinal: 0,
+            })
+            || !table_value.committed_summary_is_bounded()
+        {
+            return false;
+        }
+        if destination == RetainedMembershipDestination::Canonical {
+            if !canonical_source_mapping_is_exact(table_value, set_id) {
+                return false;
+            }
+        } else if table_value.canonical_source_mapping.is_some() {
+            return false;
+        }
+        let Some(attributed) = table_value.committed_new_blocks.checked_add(1) else {
+            return false;
+        };
+        let Some(attributed_bytes) =
+            table_charge.checked_add(table_value.committed_new_block_bytes)
+        else {
+            return false;
+        };
+        attributed == batch.attribution_len() && batch.attributed_bytes() == Some(attributed_bytes)
+    })();
+
+    #[cfg(test)]
+    assert_eq!(
+        exact,
+        audit_retained_block_table_is_exact(table, batch, account, set_id, destination),
+        "incremental retained-table proof diverged from the full structural audit"
+    );
+
+    exact
+}
+
+#[cfg(test)]
+fn audit_retained_block_table_is_exact<O, P, D, Destination, Block>(
     table: &RetainedTableAllocation<Block>,
     batch: &AttributionReservationBatch<O, P, D, Destination>,
     account: &PhysicalStorageAccount,
@@ -1886,17 +3253,26 @@ where
     {
         return false;
     }
-    let mut attributed_bytes = table.charged_bytes();
-    let table = table.as_ref();
-    if table.members.capacity() != table.qualified_capacity
-        || table.members.len() > table.total_blocks
-        || table.new_blocks > table.max_new_blocks
-        || table.members.len() > table.members.capacity()
+
+    let mut audited_new_blocks = 0_usize;
+    let mut audited_derived_members = 0_usize;
+    let mut audited_new_block_bytes = 0_u64;
+    let table_charge = table.charged_bytes();
+    let table_value = table.as_ref();
+    if table_value.root_membership
+        != (RetainedMembership {
+            set_id,
+            destination,
+            ordinal: 0,
+        })
+        || table_value.members.capacity() != table_value.qualified_capacity
+        || table_value.members.len() > table_value.total_blocks
+        || table_value.members.len() > table_value.members.capacity()
     {
         return false;
     }
-    let mut new_blocks = 0_usize;
-    for (index, member) in table.members.iter().enumerate() {
+
+    for (index, member) in table_value.members.iter().enumerate() {
         let Some(ordinal) = u64::try_from(index)
             .ok()
             .and_then(|index| index.checked_add(1))
@@ -1913,22 +3289,129 @@ where
         {
             return false;
         }
-        if member.origin == RetainedBlockOrigin::New {
-            let Some(next_new_blocks) = new_blocks.checked_add(1) else {
+        if member.origin.owns_new_allocation() {
+            let Some(next_new_blocks) = audited_new_blocks.checked_add(1) else {
                 return false;
             };
-            let Some(next_bytes) = attributed_bytes.checked_add(member.allocation.charged_bytes())
+            let Some(next_new_block_bytes) =
+                audited_new_block_bytes.checked_add(member.allocation.charged_bytes())
             else {
                 return false;
             };
-            new_blocks = next_new_blocks;
-            attributed_bytes = next_bytes;
+            audited_new_blocks = next_new_blocks;
+            audited_new_block_bytes = next_new_block_bytes;
+        }
+        if member.origin.source_identity().is_some() {
+            let Some(next_derived_members) = audited_derived_members.checked_add(1) else {
+                return false;
+            };
+            audited_derived_members = next_derived_members;
         }
     }
-    let Some(attributed) = new_blocks.checked_add(1) else {
+
+    if table_value.committed_members != table_value.members.len()
+        || table_value.committed_new_blocks != audited_new_blocks
+        || table_value.committed_derived_members != audited_derived_members
+        || table_value.committed_new_block_bytes != audited_new_block_bytes
+        || audited_new_blocks > table_value.max_new_blocks
+    {
+        return false;
+    }
+    if destination == RetainedMembershipDestination::Canonical {
+        if !audit_canonical_source_mapping_is_exact(table_value, set_id) {
+            return false;
+        }
+    } else if table_value.canonical_source_mapping.is_some() {
+        return false;
+    }
+
+    let Some(attributed) = audited_new_blocks.checked_add(1) else {
         return false;
     };
-    new_blocks == table.new_blocks
-        && attributed == batch.attribution_len()
-        && batch.attributed_bytes() == Some(attributed_bytes)
+    let Some(attributed_bytes) = table_charge.checked_add(audited_new_block_bytes) else {
+        return false;
+    };
+    attributed == batch.attribution_len() && batch.attributed_bytes() == Some(attributed_bytes)
+}
+
+#[cfg(test)]
+fn audit_canonical_source_mapping_is_exact<Block>(
+    table: &RetainedBlockTable<Block>,
+    destination_set: RetainedSetId,
+) -> bool {
+    if table.root_membership
+        != (RetainedMembership {
+            set_id: destination_set,
+            destination: RetainedMembershipDestination::Canonical,
+            ordinal: 0,
+        })
+    {
+        return false;
+    }
+    let Some(mapping) = table.canonical_source_mapping.as_ref() else {
+        return table
+            .members
+            .iter()
+            .all(|member| member.origin.source_identity().is_none());
+    };
+    if !mapping.shape_is_exact() {
+        return false;
+    }
+    let Some(source_set) = mapping.source_set else {
+        return mapping.entries.is_empty()
+            && mapping.mapped_entries == 0
+            && table
+                .members
+                .iter()
+                .all(|member| member.origin.source_identity().is_none());
+    };
+    if source_set == destination_set || mapping.entries.is_empty() {
+        return false;
+    }
+
+    let mut audited_derived_members = 0_usize;
+    for (destination_index, member) in table.members.iter().enumerate() {
+        let Some(source_identity) = member.origin.source_identity() else {
+            continue;
+        };
+        let Some(expected_ordinal) = destination_index.checked_add(1).and_then(NonZeroUsize::new)
+        else {
+            return false;
+        };
+        if source_identity.set_id != source_set
+            || source_identity.index >= mapping.entries.len()
+            || mapping.entries[source_identity.index] != Some(expected_ordinal)
+        {
+            return false;
+        }
+        let Some(next_derived_members) = audited_derived_members.checked_add(1) else {
+            return false;
+        };
+        audited_derived_members = next_derived_members;
+    }
+
+    let mut audited_mapped_entries = 0_usize;
+    for (source_index, destination_ordinal) in mapping.entries.iter().copied().enumerate() {
+        let Some(destination_ordinal) = destination_ordinal else {
+            continue;
+        };
+        let Some(destination_index) = destination_ordinal.get().checked_sub(1) else {
+            return false;
+        };
+        let Some(member) = table.members.get(destination_index) else {
+            return false;
+        };
+        let Some(source_identity) = member.origin.source_identity() else {
+            return false;
+        };
+        if source_identity.set_id != source_set || source_identity.index != source_index {
+            return false;
+        }
+        let Some(next_mapped_entries) = audited_mapped_entries.checked_add(1) else {
+            return false;
+        };
+        audited_mapped_entries = next_mapped_entries;
+    }
+    audited_mapped_entries == audited_derived_members
+        && mapping.mapped_entries == audited_mapped_entries
 }

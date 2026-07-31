@@ -34,11 +34,17 @@ impl SceneGenerationId {
 
 /// A linear reservation for one never-reused scene generation identity.
 ///
-/// Dropping a reservation burns its identity. Only consuming it can expose the
-/// identity to crate internals.
+/// Dropping a reservation burns its identity. Borrowed projection supports
+/// fallible pre-publication relations; only consuming it transfers the identity
+/// into an immutable Scene.
 pub(crate) struct ReservedSceneGeneration(u64);
 
 impl ReservedSceneGeneration {
+    /// Borrows the reserved identity without consuming its linear publication authority.
+    pub(crate) const fn id(&self) -> SceneGenerationId {
+        SceneGenerationId(self.0)
+    }
+
     /// Consumes the reservation without mutating the generation sequence.
     pub(crate) const fn into_id(self) -> SceneGenerationId {
         SceneGenerationId(self.0)

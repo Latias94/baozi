@@ -640,8 +640,9 @@ fn poisoned_inherited_share_has_no_lookup_work_clone_or_target_side_effect() {
     let account = account(&factory, u64::MAX, 128);
     let (source, source_slot, source_evidence, _source_evidence_slot) =
         publish_scalar_source(&account);
-    let operation = test_operation_on_account_with_control(
+    let operation = test_derived_operation_on_account_with_control(
         &account,
+        &source,
         64,
         RetainedBatchLimits::new(2, 2),
         OperationControl::default(),
@@ -693,15 +694,19 @@ fn admission_first_inherited_share_completes_then_later_share_is_rejected() {
     let account = account(&factory, u64::MAX, 128);
     let (source, source_slot, source_evidence, _source_evidence_slot) =
         publish_scalar_source(&account);
-    let operation = test_operation_on_account_with_control(
+    let operation = test_derived_operation_on_account_with_control(
         &account,
+        &source,
         64,
         RetainedBatchLimits::new(3, 2),
         OperationControl::default(),
     );
     let mut assembly: TestPublication<u64, u64> = operation
-        .try_publication_assembly(publication_plan(2, 1))
+        .try_publication_assembly(publication_plan_with_canonical_source_mapping(2, 1, 1))
         .unwrap_or_else(|_| panic!("admission-first share target must open"));
+    assembly
+        .try_bind_canonical_source(source.aggregate(), TestDimension::Bytes)
+        .unwrap_or_else(|_| panic!("canonical source map must bind before admitted share"));
     let poisoner = account
         .try_retain_with(empty_plan(), || {
             Ok::<_, RetainedBuildFailureCode>(PanickingDropProbe(&DROP_COUNT))
@@ -751,6 +756,7 @@ fn admission_first_inherited_share_completes_then_later_share_is_rejected() {
         RetainedMembershipDestination::Canonical,
         0,
         1,
+        source_slot.identity,
         source_allocation,
     )
     .unwrap_or_else(|_| panic!("admission-first share must complete"));

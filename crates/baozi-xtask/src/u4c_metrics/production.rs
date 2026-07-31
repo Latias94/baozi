@@ -47,14 +47,14 @@ use std::process::{self, Command};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 pub(super) const SPECIFICATION_PATH: &str = "docs/conformance/u4c-metrics.toml";
-const SPECIFICATION_SCHEMA_VERSION: u64 = 4;
+const SPECIFICATION_SCHEMA_VERSION: u64 = 5;
 const PRODUCTION_SCOPE: &str = "u4c-production";
 const PRODUCTION_PROBE_PACKAGE: &str = "baozi-core";
 const PRODUCTION_PROBE_CARGO_TARGET: &str = "baozi_core";
 const PRODUCTION_PROBE_TARGET: &str =
     "canonical_scene::store::tests::production_probe::canonical_store_u4c_production_v1_probe";
 const PRODUCTION_REPORT_PREFIX: &str = "BAOZI_U4C_PRODUCTION_V1=";
-const PRODUCTION_REPORT_REVISION: u64 = 7;
+const PRODUCTION_REPORT_REVISION: u64 = 10;
 const XTASK_PACKAGE: &str = "baozi-xtask";
 const XTASK_CARGO_TARGET: &str = "baozi-xtask";
 const COLLECTOR_PACKAGE: &str = "baozi-operation";
@@ -71,7 +71,7 @@ const REQUIRED_COVERAGE_ENTRY_POINTS: &[&str] = &[
     "unchanged-view",
     "changed-scene-edit",
 ];
-const ADMITTED_CONSUMER_COVERAGE: &[(&str, &str)] = &[
+const MEASURED_PRIVATE_TRACER_COVERAGE: &[(&str, &str)] = &[
     (
         "facade-equivalent-inspection",
         "canonical-gltf-five-domain-inspection-v1",
@@ -80,6 +80,10 @@ const ADMITTED_CONSUMER_COVERAGE: &[(&str, &str)] = &[
     (
         "unchanged-view",
         "canonical-gltf-five-domain-unchanged-view-v1",
+    ),
+    (
+        "changed-scene-edit",
+        "canonical-gltf-node-transform-edit-v1",
     ),
 ];
 const REQUIRED_SCALE_SCENARIOS: &[&str] = &[
@@ -297,7 +301,7 @@ struct CoverageMappingSpecification {
 }
 
 impl CoverageSpecification {
-    fn qualifies_u4d_exit(&self) -> bool {
+    fn has_complete_private_tracer_mapping(&self) -> bool {
         self.mapped_entry_points.len() == self.required_entry_points.len()
             && self
                 .mapped_entry_points
@@ -908,16 +912,16 @@ fn validate_coverage(
                 .to_owned(),
         );
     }
-    if consumer_mappings.len() != ADMITTED_CONSUMER_COVERAGE.len()
+    if consumer_mappings.len() != MEASURED_PRIVATE_TRACER_COVERAGE.len()
         || consumer_mappings
             .iter()
-            .zip(ADMITTED_CONSUMER_COVERAGE)
+            .zip(MEASURED_PRIVATE_TRACER_COVERAGE)
             .any(|(mapping, (entry_point, scenario_id))| {
                 mapping.entry_point != *entry_point || mapping.scenario_id != *scenario_id
             })
     {
         return Err(
-            "U4c production consumer coverage mapping must bind inspection, snapshot, and unchanged-view evidence"
+            "U4d private tracer coverage mapping must bind inspection, snapshot, unchanged-view, and changed-scene-edit evidence"
                 .to_owned(),
         );
     }
@@ -2865,6 +2869,36 @@ struct SemanticTranscriptReport {
 struct EvidenceReport {
     outcome_evidence_block_count: u64,
     ledger_header: LedgerHeaderReport,
+    dimensions: Vec<LedgerDimensionReport>,
+}
+
+#[derive(Debug, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct LedgerDimensionReport {
+    semantic_id_hex: String,
+    attempted: u64,
+    consumed: u64,
+    current_live_bytes: u64,
+    peak_live_bytes: u64,
+    pending_publication: u64,
+    committed: u64,
+    committed_canonical_output: u64,
+    published_outcome_evidence: u64,
+}
+
+impl LedgerDimensionReport {
+    fn has_terminal_invariants(&self) -> bool {
+        self.semantic_id_hex.len() == 58
+            && self
+                .semantic_id_hex
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+            && self.attempted >= self.consumed
+            && self.current_live_bytes == 0
+            && self.peak_live_bytes >= self.current_live_bytes
+            && self.pending_publication == 0
+            && self.committed_canonical_output <= self.committed
+    }
 }
 
 #[cfg(feature = "repository-input-candidate")]
@@ -3076,7 +3110,7 @@ fn validate_production_report(
     gltf::validate_report(specification, &report.gltf_capability)?;
     validate_validation_faults(specification, &report.validation_faults)?;
 
-    Ok(specification.coverage.qualifies_u4d_exit())
+    Ok(specification.coverage.has_complete_private_tracer_mapping())
 }
 
 #[cfg(feature = "repository-input-candidate")]
@@ -3518,7 +3552,7 @@ fn validate_success_evidence(evidence: &EvidenceReport, label: &str) -> Result<(
     {
         return Err(format!("{label} success evidence drifted"));
     }
-    Ok(())
+    validate_ledger_dimensions(evidence, label)
 }
 
 #[cfg(feature = "repository-input-candidate")]
@@ -3538,6 +3572,25 @@ fn validate_failure_evidence(evidence: &EvidenceReport, label: &str) -> Result<(
         || header.peak_evidence_bytes == 0
     {
         return Err(format!("{label} failure evidence drifted"));
+    }
+    validate_ledger_dimensions(evidence, label)
+}
+
+#[cfg(feature = "repository-input-candidate")]
+fn validate_ledger_dimensions(evidence: &EvidenceReport, label: &str) -> Result<(), String> {
+    let dimension_count = u64::try_from(evidence.dimensions.len())
+        .map_err(|_| format!("{label} ledger dimension count overflowed"))?;
+    if dimension_count != evidence.ledger_header.dimension_count {
+        return Err(format!("{label} ledger dimension enumeration drifted"));
+    }
+
+    let mut semantic_ids = BTreeSet::new();
+    for dimension in &evidence.dimensions {
+        if !dimension.has_terminal_invariants()
+            || !semantic_ids.insert(dimension.semantic_id_hex.as_str())
+        {
+            return Err(format!("{label} ledger dimension evidence drifted"));
+        }
     }
     Ok(())
 }
@@ -3711,19 +3764,28 @@ mod tests {
     }
 
     #[test]
-    fn five_of_six_mapped_entry_points_do_not_qualify_u4_exit() {
-        let specification = ProductionSpecification::parse(include_bytes!(
-            "../../../../docs/conformance/u4c-metrics.toml"
-        ))
-        .expect("managed U4c production specification must parse");
+    fn five_of_six_entry_points_do_not_complete_u4d_private_mapping() {
+        let coverage = CoverageSpecification {
+            required_entry_points: REQUIRED_COVERAGE_ENTRY_POINTS
+                .iter()
+                .map(ToString::to_string)
+                .collect(),
+            mapped_entry_points: REQUIRED_COVERAGE_ENTRY_POINTS[..5]
+                .iter()
+                .map(|entry_point| CoverageMappingSpecification {
+                    entry_point: (*entry_point).to_owned(),
+                    scenario_id: format!("{entry_point}-scenario-v1"),
+                })
+                .collect(),
+        };
 
-        assert_eq!(specification.coverage.required_entry_points.len(), 6);
-        assert_eq!(specification.coverage.mapped_entry_points.len(), 5);
-        assert!(!specification.coverage.qualifies_u4d_exit());
+        assert_eq!(coverage.required_entry_points.len(), 6);
+        assert_eq!(coverage.mapped_entry_points.len(), 5);
+        assert!(!coverage.has_complete_private_tracer_mapping());
     }
 
     #[test]
-    fn complete_private_coverage_qualifies_only_u4d_exit() {
+    fn all_entry_points_complete_u4d_private_mapping() {
         let coverage = CoverageSpecification {
             required_entry_points: REQUIRED_COVERAGE_ENTRY_POINTS
                 .iter()
@@ -3738,7 +3800,7 @@ mod tests {
                 .collect(),
         };
 
-        assert!(coverage.qualifies_u4d_exit());
+        assert!(coverage.has_complete_private_tracer_mapping());
     }
 
     #[test]
@@ -3756,6 +3818,10 @@ mod tests {
             (
                 "unchanged-view",
                 "canonical-gltf-five-domain-unchanged-view-v1",
+            ),
+            (
+                "changed-scene-edit",
+                "canonical-gltf-node-transform-edit-v1",
             ),
         ] {
             let expected =

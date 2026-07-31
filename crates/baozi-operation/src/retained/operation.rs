@@ -2,10 +2,11 @@ use super::ownership::finish_pre_attribution_batch_cleanup;
 use super::publication_contract::retained_open_failure_is_recoverable;
 use super::startup;
 use super::{
-    AccountPoisonReason, AssemblyContainmentProvenance, FallbackPublicationBaseline,
-    PhysicalStorageAccount, PreparationFailureCode, PreparedRetainedPublication,
-    PrimaryPublicationBatches, QualifiedRetainedBlockTablePlan, RetainedAllocationError,
-    RetainedAllocationPlan, RetainedBatchLimits, RetainedBuildFailureCode, RetainedHandleSharePlan,
+    AccountPoisonReason, AssemblyContainmentProvenance, CanonicalLineageAuthority,
+    FallbackPublicationBaseline, PhysicalStorageAccount, PreparationFailureCode,
+    PreparedRetainedPublication, PrimaryPublicationBatches, PublishedCanonicalAggregate,
+    QualifiedRetainedBlockTablePlan, RetainedAllocationError, RetainedAllocationPlan,
+    RetainedBatchLimits, RetainedBuildFailureCode, RetainedHandleSharePlan,
     RetainedMembershipDestination, RetainedOperationStartError, RetainedOperationStartPlan,
     RetainedOutcomeMode, RetainedPublicationAssembly, RetainedPublicationOpenError,
     RetainedPublicationPlan, RetainedPublicationPrepareError, RetainedStorageDropOutcome,
@@ -55,6 +56,7 @@ where
     pub(super) baseline: FallbackPublicationBaseline<O, P, D, F>,
     terminal_writer: RetainedWriterPlan<P, D>,
     terminal_account_share_work: RetainedHandleSharePlan<D>,
+    canonical_lineage: CanonicalLineageAuthority,
 }
 
 /// Borrowed control-and-ledger capability for retained producers.
@@ -239,6 +241,7 @@ where
             &phase_catalog,
             account,
             plan,
+            CanonicalLineageAuthority::fresh(),
             build_fallback,
         )
     }
@@ -257,6 +260,32 @@ where
             phase_catalog,
             account,
             plan,
+            CanonicalLineageAuthority::fresh(),
+            build_fallback,
+        )
+    }
+
+    pub(crate) fn try_start_derived_with_phase_catalog<CanonicalBlock>(
+        control: OperationControl<PP, U>,
+        ledger_limits: LedgerLimits<D>,
+        phase_catalog: &[P],
+        account: &PhysicalStorageAccount,
+        source: &PublishedCanonicalAggregate<CanonicalBlock>,
+        plan: RetainedOperationStartPlan<P, D>,
+        build_fallback: impl FnOnce() -> Result<F, RetainedBuildFailureCode>,
+    ) -> Result<Self, RetainedOperationStartError<D>> {
+        if !source.belongs_to(account) {
+            return Err(RetainedOperationStartError::Writer(
+                RetainedWriterError::ForeignAccount,
+            ));
+        }
+        Self::try_start_inner(
+            control,
+            ledger_limits,
+            phase_catalog,
+            account,
+            plan,
+            CanonicalLineageAuthority::derived(source),
             build_fallback,
         )
     }
@@ -267,6 +296,7 @@ where
         phase_catalog: &[P],
         account: &PhysicalStorageAccount,
         plan: RetainedOperationStartPlan<P, D>,
+        canonical_lineage: CanonicalLineageAuthority,
         build_fallback: impl FnOnce() -> Result<F, RetainedBuildFailureCode>,
     ) -> Result<Self, RetainedOperationStartError<D>> {
         if plan.terminal_writer.limits.attribution_slots == 0
@@ -438,6 +468,7 @@ where
             baseline,
             terminal_writer: plan.terminal_writer,
             terminal_account_share_work: plan.terminal_account_share_work,
+            canonical_lineage,
         })
     }
 
@@ -480,7 +511,7 @@ where
 
     pub fn try_publication_assembly<CanonicalBlock, EvidenceBlock>(
         self,
-        plan: RetainedPublicationPlan<P, D>,
+        mut plan: RetainedPublicationPlan<P, D>,
     ) -> Result<
         RetainedPublicationAssembly<O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>,
         RetainedPublicationOpenError<Self, D>,
@@ -489,6 +520,11 @@ where
         CanonicalBlock: Send + Sync + 'static,
         EvidenceBlock: Send + Sync + 'static,
     {
+        if let Some(capacity) = self.canonical_lineage.source_mapping_capacity()
+            && let Some(canonical) = plan.canonical.as_mut()
+        {
+            *canonical = canonical.with_canonical_source_mapping_capacity(capacity);
+        }
         let terminal_limits = self.terminal_writer.limits;
         let evidence_qualified = match try_qualify_retained_block_table_plan::<
             O,
@@ -497,7 +533,10 @@ where
             OutcomeEvidenceDestination,
             EvidenceBlock,
         >(
-            self.account(), plan.outcome_evidence, terminal_limits
+            self.account(),
+            plan.outcome_evidence,
+            terminal_limits,
+            RetainedMembershipDestination::OutcomeEvidence,
         ) {
             Ok(qualified) => qualified,
             Err(cause) => {
@@ -515,8 +554,12 @@ where
                 D,
                 CanonicalOutput,
                 CanonicalBlock,
-            >(self.account(), canonical, terminal_limits)
-            {
+            >(
+                self.account(),
+                canonical,
+                terminal_limits,
+                RetainedMembershipDestination::Canonical,
+            ) {
                 Ok(qualified) => Some(qualified),
                 Err(cause) => {
                     return Err(RetainedPublicationOpenError {
@@ -662,6 +705,7 @@ where
                 });
             }
         };
+        let canonical_lineage = self.canonical_lineage;
         Ok(RetainedPublicationAssembly {
             canonical_table,
             evidence_table: Some(evidence_table),
@@ -669,6 +713,7 @@ where
             evidence_batch: Some(evidence_batch),
             account: Some(account),
             operation: Some(self),
+            canonical_lineage,
             set_id,
             canonical_plan,
             evidence_plan,

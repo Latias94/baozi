@@ -132,13 +132,15 @@ use crate::ledger::PhaseCompletionError;
 use crate::ledger::{LedgerCause, LiveReservation};
 use crate::owner::OperationOwner;
 use crate::retained::{
-    CanonicalRetainedSlot, FinalizationContainmentError, OutcomeEvidenceRetainedSlot,
-    PhysicalStorageAccount, PreparationFailureCode, RetainedAllocationPlan,
-    RetainedBuildFailureCode, RetainedControlCheckpoint, RetainedFailureAssembly,
-    RetainedFailureValidation, RetainedFallbackOnly, RetainedOperation,
-    RetainedOperationStartError, RetainedOperationStartPlan, RetainedPublicationAssembly,
-    RetainedPublicationError, RetainedPublicationPrepareError, RetainedSuccessValidation,
-    RetainedWorkControl, ValidatedRetainedFailure, ValidatedRetainedSuccess,
+    CanonicalLeafInheritanceError, CanonicalRetainedLeafPolicy, CanonicalRetainedRewriteMap,
+    CanonicalRetainedSlot, CanonicalSourceBindError, FinalizationContainmentError,
+    OutcomeEvidenceRetainedSlot, PhysicalStorageAccount, PreparationFailureCode,
+    PublishedCanonicalOutput, RetainedAllocationPlan, RetainedBuildFailureCode,
+    RetainedControlCheckpoint, RetainedFailureAssembly, RetainedFailureValidation,
+    RetainedFallbackOnly, RetainedOperation, RetainedOperationStartError,
+    RetainedOperationStartPlan, RetainedPublicationAssembly, RetainedPublicationError,
+    RetainedPublicationPrepareError, RetainedSuccessValidation, RetainedWorkControl,
+    ValidatedRetainedFailure, ValidatedRetainedSuccess,
 };
 #[cfg(test)]
 use crate::retained::{RetainedAllocationError, RetainedWriterError};
@@ -149,6 +151,8 @@ use crate::u4c_collector::{
 };
 use terminal_output::{
     classify_prepared_failure, classify_prepared_fallback, classify_prepared_success,
+    read_canonical_source_bytes, read_canonical_source_records, read_canonical_source_sequence,
+    read_canonical_source_utf8,
 };
 use validation::{
     map_phase_completion_error, map_publication_error, map_writer_error,
@@ -191,9 +195,10 @@ pub use transcript::{
     PlannedOutcomeEvidenceSequence, PlannedOutcomeEvidenceShare, PlannedOutcomeEvidenceUtf8,
     RetainedStoreExecution, RetainedStoreTranscript, StoreExecutionError,
     StoreFailureContinuationExecution, StoreTranscriptFailureValidation,
-    StoreTranscriptIdentityExhausted, StoreTranscriptOpenError, StoreTranscriptPlanError,
-    StoreTranscriptStartCause, StoreTranscriptStartError, StoreTranscriptStateError,
-    StoreTranscriptSuccessValidation, ValidatedTranscriptStoreSuccess,
+    StoreTranscriptIdentityExhausted, StoreTranscriptOpenError, StoreTranscriptOpenResult,
+    StoreTranscriptPlanError, StoreTranscriptStartCause, StoreTranscriptStartError,
+    StoreTranscriptStartResult, StoreTranscriptStateError, StoreTranscriptSuccessValidation,
+    ValidatedTranscriptStoreSuccess,
 };
 
 pub use validation::{
@@ -830,6 +835,26 @@ enum StoredBlock {
     Records(RecordStorage),
 }
 
+impl StoredBlock {
+    const fn kind(&self) -> BlockKind {
+        match self {
+            Self::Sequence(storage) => BlockKind::Sequence(storage.kind()),
+            Self::Bytes(_) => BlockKind::Bytes,
+            Self::Utf8(_) => BlockKind::Utf8,
+            Self::Records(_) => BlockKind::Records,
+        }
+    }
+}
+
+impl CanonicalRetainedLeafPolicy for StoredBlock {
+    fn is_shareable_canonical_leaf(&self) -> bool {
+        matches!(
+            Self::kind(self),
+            BlockKind::Sequence(_) | BlockKind::Bytes | BlockKind::Utf8
+        )
+    }
+}
+
 macro_rules! impl_stored_scalar {
     ($type:ty, $kind:literal, $sequence:ident, $cell:ident) => {
         #[allow(
@@ -1344,6 +1369,38 @@ impl RecordWriterCore {
     }
 }
 
+fn checked_source_record(source: &StoredBlock, plan: RecordPlan) -> Option<&RecordStorage> {
+    let StoredBlock::Records(storage) = source else {
+        return None;
+    };
+    let parsed = RecordPlan::new(storage.rows, storage.fields).ok()?;
+    (parsed.rows == plan.rows
+        && parsed.fields == plan.fields
+        && parsed.cells == plan.cells
+        && parsed.cells == storage.cells.len()
+        && storage.cells.len() <= storage.qualified_capacity
+        && storage.cells.capacity() == storage.qualified_capacity)
+        .then_some(storage)
+}
+
+fn mapped_canonical_record_cell(
+    cell: RecordCell,
+    mapping: &CanonicalRetainedRewriteMap<'_, '_, StoredBlock>,
+) -> Option<RecordCell> {
+    match cell {
+        RecordCell::Scalar(value) => Some(RecordCell::Scalar(value)),
+        RecordCell::CanonicalReference { kind, identity } => {
+            let target = mapping.resolve(identity)?;
+            (target.source_block().kind() == kind && target.destination_block().kind() == kind)
+                .then_some(RecordCell::CanonicalReference {
+                    kind,
+                    identity: target.destination_identity(),
+                })
+        }
+        RecordCell::OutcomeEvidenceReference { .. } => None,
+    }
+}
+
 /// Scoped writer for canonical fixed-width records.
 pub struct CanonicalRecordWriter {
     core: RecordWriterCore,
@@ -1703,6 +1760,47 @@ type RawStoreFallbackOnly<O, PP, U> = RetainedFallbackOnly<
     StoredBlock,
 >;
 
+/// Typestate marker for a store operation that cannot inherit canonical storage.
+///
+/// Canonical inheritance methods do not exist on a fresh assembly:
+///
+/// ```compile_fail,E0599
+/// use baozi_operation::{
+///     FreshStoreLineage, OperationOwner, ProgressPhase, ProgressUnit,
+///     RetainedStorePublicationAssembly, StoreDimensionKey,
+/// };
+///
+/// fn bind_without_source<O, PP, U>(
+///     assembly: &mut RetainedStorePublicationAssembly<O, PP, U, FreshStoreLineage>,
+///     dimension: StoreDimensionKey,
+/// ) where
+///     O: OperationOwner,
+///     PP: ProgressPhase,
+///     U: ProgressUnit,
+/// {
+///     assembly.try_bind_canonical_source(dimension);
+/// }
+/// ```
+pub struct FreshStoreLineage {
+    _private: (),
+}
+
+/// Unforgeable authority to inherit only from one exact published canonical generation.
+///
+/// The authority borrows the source for the complete writable operation lifetime. It has no public
+/// constructor and can only be obtained through [`RetainedStoreOperation::try_start_derived`].
+pub struct CanonicalInheritanceSource<'source> {
+    source: &'source PublishedCanonicalOutput<StoredBlock>,
+}
+
+/// Store operation statically bound to one exact canonical source generation.
+pub type DerivedRetainedStoreOperation<'source, O, PP, U> =
+    RetainedStoreOperation<O, PP, U, CanonicalInheritanceSource<'source>>;
+
+/// Writable publication assembly statically bound to one exact canonical source generation.
+pub type DerivedRetainedStorePublicationAssembly<'source, O, PP, U> =
+    RetainedStorePublicationAssembly<O, PP, U, CanonicalInheritanceSource<'source>>;
+
 /// Opaque live-storage reservation owned by the concrete retained-store protocol.
 ///
 /// The raw ledger token remains private. Producers can only return this capability to the
@@ -1922,7 +2020,7 @@ where
 
 /// Linear owner for one coordinator, physical account, and pre-admitted fallback.
 #[must_use = "the retained store operation must be opened or published as fallback"]
-pub struct RetainedStoreOperation<O, PP, U>
+pub struct RetainedStoreOperation<O, PP, U, L = FreshStoreLineage>
 where
     O: OperationOwner,
     PP: ProgressPhase,
@@ -1930,9 +2028,10 @@ where
 {
     raw: RawStoreOperation<O, PP, U>,
     domain: StoreKeyDomain,
+    lineage: L,
 }
 
-impl<O, PP, U> RetainedStoreOperation<O, PP, U>
+impl<O, PP, U, L> RetainedStoreOperation<O, PP, U, L>
 where
     O: OperationOwner,
     PP: ProgressPhase,
@@ -1940,7 +2039,11 @@ where
 {
     /// Borrows the producer-facing control and budget checkpoint.
     pub fn control_checkpoint(&mut self) -> RetainedStoreControlCheckpoint<'_, O, PP, U> {
-        let Self { raw, domain } = self;
+        let Self {
+            raw,
+            domain,
+            lineage: _,
+        } = self;
         RetainedStoreControlCheckpoint {
             raw: raw.control_checkpoint(),
             domain,
@@ -2023,82 +2126,6 @@ where
         Ok(())
     }
 
-    /// Starts one operation and pre-admits its allocation-free minimal fallback.
-    pub fn try_start(
-        control: OperationControl<PP, U>,
-        ledger_plan: StoreLedgerPlan,
-        account: &PhysicalStorageAccount,
-        plan: RetainedStoreStartPlan,
-    ) -> Result<Self, RetainedStoreStartError> {
-        let (terminal_phase, dimensions) = plan.keys_for_start_validation();
-        if !ledger_plan.owns_phase(terminal_phase) {
-            return Err(RetainedStoreStartError::Runtime(
-                StoreRuntimeError::ForeignPhaseDomain {
-                    phase: terminal_phase,
-                },
-            ));
-        }
-        if !ledger_plan.contains_phase(terminal_phase) {
-            return Err(RetainedStoreStartError::Runtime(StoreRuntimeError::Ledger(
-                LedgerCause::UnknownPhase,
-            )));
-        }
-        for dimension in dimensions {
-            if !ledger_plan.owns_dimension(dimension) {
-                return Err(RetainedStoreStartError::Runtime(
-                    StoreRuntimeError::ForeignDimensionDomain { dimension },
-                ));
-            }
-            if !ledger_plan.contains_dimension(dimension) {
-                return Err(RetainedStoreStartError::Runtime(StoreRuntimeError::Ledger(
-                    LedgerCause::UnknownDimension { dimension },
-                )));
-            }
-        }
-        let allocation_plan = RetainedAllocationPlan::new(0, 0).map_err(|_| {
-            RetainedStoreStartError::Runtime(StoreRuntimeError::InvalidPublicationPlan)
-        })?;
-        let (
-            terminal_writer,
-            share,
-            fallback,
-            fallback_dimension,
-            fallback_amount,
-            snapshot_dimension,
-            snapshot_amount,
-        ) = plan.into_raw_start_parts();
-        let raw_plan = RetainedOperationStartPlan::for_publication(
-            terminal_writer,
-            share,
-            allocation_plan,
-            fallback_dimension,
-            fallback_amount,
-            snapshot_dimension,
-            snapshot_amount,
-        );
-        let (domain, ledger_limits, phases) = ledger_plan.into_parts();
-        RetainedOperation::try_start_with_phase_catalog(
-            control,
-            ledger_limits,
-            &phases,
-            account,
-            raw_plan,
-            || Ok(fallback),
-        )
-        .map(|raw| Self { raw, domain })
-        .map_err(|cause| match cause {
-            RetainedOperationStartError::InvalidTerminalLimits => {
-                RetainedStoreStartError::InvalidTerminalLimits
-            }
-            RetainedOperationStartError::TerminalEvidenceCatalogInvariant => {
-                RetainedStoreStartError::Runtime(StoreRuntimeError::ConstructionInvariantUnverified)
-            }
-            RetainedOperationStartError::Writer(cause) => {
-                RetainedStoreStartError::Runtime(map_writer_error(&cause))
-            }
-        })
-    }
-
     /// Returns the shared physical account used by every retained block.
     pub fn account(&self) -> &PhysicalStorageAccount {
         self.raw.account()
@@ -2113,26 +2140,36 @@ where
     pub fn try_publication_assembly(
         self,
         plan: RetainedStorePublicationPlan,
-    ) -> Result<RetainedStorePublicationAssembly<O, PP, U>, RetainedStoreOpenError<O, PP, U>> {
+    ) -> Result<RetainedStorePublicationAssembly<O, PP, U, L>, RetainedStoreOpenError<O, PP, U, L>>
+    {
         if let Err(cause) = self.validate_publication_plan_keys(&plan) {
             return Err(RetainedStoreOpenError {
                 operation: Some(self),
                 cause,
             });
         }
-        let domain = self.domain;
-        match self.raw.try_publication_assembly(plan.into_raw()) {
+        let Self {
+            raw,
+            domain,
+            lineage,
+        } = self;
+        match raw.try_publication_assembly(plan.into_raw()) {
             Ok(raw) => Ok(RetainedStorePublicationAssembly {
                 raw,
                 fallback_cause: None,
                 success_rejection: None,
                 domain,
+                lineage,
             }),
             Err(error) => {
                 let cause = map_writer_error(error.cause());
                 match error.try_into_operation() {
                     Ok(raw) => Err(RetainedStoreOpenError {
-                        operation: Some(Self { raw, domain }),
+                        operation: Some(Self {
+                            raw,
+                            domain,
+                            lineage,
+                        }),
                         cause,
                     }),
                     Err(_) => Err(RetainedStoreOpenError {
@@ -2157,19 +2194,151 @@ where
     }
 }
 
-/// Failure to open concrete retained tables, preserving the operation only after proven rollback.
-#[must_use = "recover the operation when the error reports a rollback-safe failure"]
-pub struct RetainedStoreOpenError<O, PP, U>
+impl<O, PP, U> RetainedStoreOperation<O, PP, U, FreshStoreLineage>
 where
     O: OperationOwner,
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    operation: Option<RetainedStoreOperation<O, PP, U>>,
+    /// Starts a fresh operation that cannot inherit from any canonical source.
+    pub fn try_start(
+        control: OperationControl<PP, U>,
+        ledger_plan: StoreLedgerPlan,
+        account: &PhysicalStorageAccount,
+        plan: RetainedStoreStartPlan,
+    ) -> Result<Self, RetainedStoreStartError> {
+        try_start_store_raw(control, ledger_plan, account, None, plan).map(|(raw, domain)| Self {
+            raw,
+            domain,
+            lineage: FreshStoreLineage { _private: () },
+        })
+    }
+
+    /// Starts an operation that may inherit only from `source`'s exact canonical generation.
+    ///
+    /// The physical account and canonical source-map capacity are derived from `source`.
+    pub fn try_start_derived<'source, SourceRootKind, SourceRootTag>(
+        control: OperationControl<PP, U>,
+        ledger_plan: StoreLedgerPlan,
+        source: &'source PublishedCanonicalStore<SourceRootKind, SourceRootTag>,
+        plan: RetainedStoreStartPlan,
+    ) -> Result<DerivedRetainedStoreOperation<'source, O, PP, U>, RetainedStoreStartError> {
+        let source = source.share_source();
+        try_start_store_raw(control, ledger_plan, source.account(), Some(source), plan).map(
+            |(raw, domain)| RetainedStoreOperation {
+                raw,
+                domain,
+                lineage: CanonicalInheritanceSource { source },
+            },
+        )
+    }
+}
+
+fn try_start_store_raw<O, PP, U>(
+    control: OperationControl<PP, U>,
+    ledger_plan: StoreLedgerPlan,
+    account: &PhysicalStorageAccount,
+    source: Option<&PublishedCanonicalOutput<StoredBlock>>,
+    plan: RetainedStoreStartPlan,
+) -> Result<(RawStoreOperation<O, PP, U>, StoreKeyDomain), RetainedStoreStartError>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    let (terminal_phase, dimensions) = plan.keys_for_start_validation();
+    if !ledger_plan.owns_phase(terminal_phase) {
+        return Err(RetainedStoreStartError::Runtime(
+            StoreRuntimeError::ForeignPhaseDomain {
+                phase: terminal_phase,
+            },
+        ));
+    }
+    if !ledger_plan.contains_phase(terminal_phase) {
+        return Err(RetainedStoreStartError::Runtime(StoreRuntimeError::Ledger(
+            LedgerCause::UnknownPhase,
+        )));
+    }
+    for dimension in dimensions {
+        if !ledger_plan.owns_dimension(dimension) {
+            return Err(RetainedStoreStartError::Runtime(
+                StoreRuntimeError::ForeignDimensionDomain { dimension },
+            ));
+        }
+        if !ledger_plan.contains_dimension(dimension) {
+            return Err(RetainedStoreStartError::Runtime(StoreRuntimeError::Ledger(
+                LedgerCause::UnknownDimension { dimension },
+            )));
+        }
+    }
+    let allocation_plan = RetainedAllocationPlan::new(0, 0)
+        .map_err(|_| RetainedStoreStartError::Runtime(StoreRuntimeError::InvalidPublicationPlan))?;
+    let (
+        terminal_writer,
+        share,
+        fallback,
+        fallback_dimension,
+        fallback_amount,
+        snapshot_dimension,
+        snapshot_amount,
+    ) = plan.into_raw_start_parts();
+    let raw_plan = RetainedOperationStartPlan::for_publication(
+        terminal_writer,
+        share,
+        allocation_plan,
+        fallback_dimension,
+        fallback_amount,
+        snapshot_dimension,
+        snapshot_amount,
+    );
+    let (domain, ledger_limits, phases) = ledger_plan.into_parts();
+    let result = match source {
+        Some(source) => RetainedOperation::try_start_derived_with_phase_catalog(
+            control,
+            ledger_limits,
+            &phases,
+            account,
+            source.aggregate(),
+            raw_plan,
+            || Ok(fallback),
+        ),
+        None => RetainedOperation::try_start_with_phase_catalog(
+            control,
+            ledger_limits,
+            &phases,
+            account,
+            raw_plan,
+            || Ok(fallback),
+        ),
+    };
+    result
+        .map(|raw| (raw, domain))
+        .map_err(|cause| match cause {
+            RetainedOperationStartError::InvalidTerminalLimits => {
+                RetainedStoreStartError::InvalidTerminalLimits
+            }
+            RetainedOperationStartError::TerminalEvidenceCatalogInvariant => {
+                RetainedStoreStartError::Runtime(StoreRuntimeError::ConstructionInvariantUnverified)
+            }
+            RetainedOperationStartError::Writer(cause) => {
+                RetainedStoreStartError::Runtime(map_writer_error(&cause))
+            }
+        })
+}
+
+/// Failure to open concrete retained tables, preserving the operation only after proven rollback.
+#[must_use = "recover the operation when the error reports a rollback-safe failure"]
+pub struct RetainedStoreOpenError<O, PP, U, L = FreshStoreLineage>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    operation: Option<RetainedStoreOperation<O, PP, U, L>>,
     cause: StoreRuntimeError,
 }
 
-impl<O, PP, U> RetainedStoreOpenError<O, PP, U>
+impl<O, PP, U, L> RetainedStoreOpenError<O, PP, U, L>
 where
     O: OperationOwner,
     PP: ProgressPhase,
@@ -2181,12 +2350,14 @@ where
     }
 
     /// Recovers the operation only when every failed open step proved rollback.
-    pub fn try_into_operation(self) -> Result<RetainedStoreOperation<O, PP, U>, StoreRuntimeError> {
+    pub fn try_into_operation(
+        self,
+    ) -> Result<RetainedStoreOperation<O, PP, U, L>, StoreRuntimeError> {
         self.operation.ok_or(self.cause)
     }
 }
 
-impl<O, PP, U> fmt::Debug for RetainedStoreOpenError<O, PP, U>
+impl<O, PP, U, L> fmt::Debug for RetainedStoreOpenError<O, PP, U, L>
 where
     O: OperationOwner,
     PP: ProgressPhase,
@@ -2201,7 +2372,7 @@ where
     }
 }
 
-impl<O, PP, U> fmt::Display for RetainedStoreOpenError<O, PP, U>
+impl<O, PP, U, L> fmt::Display for RetainedStoreOpenError<O, PP, U, L>
 where
     O: OperationOwner,
     PP: ProgressPhase,
@@ -2216,7 +2387,7 @@ where
     }
 }
 
-impl<O, PP, U> std::error::Error for RetainedStoreOpenError<O, PP, U>
+impl<O, PP, U, L> std::error::Error for RetainedStoreOpenError<O, PP, U, L>
 where
     O: OperationOwner,
     PP: ProgressPhase,
@@ -2233,7 +2404,7 @@ where
 /// panics and aborting panic runtimes require process isolation and are outside this in-process
 /// contract.
 #[must_use = "the retained store assembly must be validated or published as fallback"]
-pub struct RetainedStorePublicationAssembly<O, PP, U>
+pub struct RetainedStorePublicationAssembly<O, PP, U, L = FreshStoreLineage>
 where
     O: OperationOwner,
     PP: ProgressPhase,
@@ -2243,9 +2414,10 @@ where
     fallback_cause: Option<PreparationFailureCode>,
     success_rejection: Option<PreparationFailureCode>,
     domain: StoreKeyDomain,
+    lineage: L,
 }
 
-impl<O, PP, U> RetainedStorePublicationAssembly<O, PP, U>
+impl<O, PP, U, L> RetainedStorePublicationAssembly<O, PP, U, L>
 where
     O: OperationOwner,
     PP: ProgressPhase,
@@ -2384,6 +2556,85 @@ where
         }
     }
 
+    fn map_source_bind_action(
+        &mut self,
+        result: Result<(), CanonicalSourceBindError<StoreDimensionKey>>,
+    ) -> Result<(), StoreRuntimeError> {
+        match result {
+            Ok(()) => Ok(()),
+            Err(CanonicalSourceBindError::Publication(cause)) => self.map_action(Err(cause)),
+            Err(CanonicalSourceBindError::Control(cause)) => {
+                let cause = StoreWorkError::control(cause);
+                self.success_rejection = Some(work_failure_code(&cause));
+                Err(cause.into_runtime())
+            }
+            Err(CanonicalSourceBindError::Ledger(cause)) => {
+                let cause = StoreWorkError::ledger(cause);
+                self.success_rejection = Some(work_failure_code(&cause));
+                Err(cause.into_runtime())
+            }
+        }
+    }
+
+    fn map_leaf_inheritance_action(
+        &mut self,
+        result: Result<(), CanonicalLeafInheritanceError<StoreDimensionKey>>,
+    ) -> Result<(), StoreRuntimeError> {
+        match result {
+            Ok(()) => Ok(()),
+            Err(CanonicalLeafInheritanceError::Publication(cause)) => self.map_action(Err(cause)),
+            Err(CanonicalLeafInheritanceError::Control(cause)) => {
+                let cause = StoreWorkError::control(cause);
+                self.success_rejection = Some(work_failure_code(&cause));
+                Err(cause.into_runtime())
+            }
+            Err(CanonicalLeafInheritanceError::Ledger(cause)) => {
+                let cause = StoreWorkError::ledger(cause);
+                self.success_rejection = Some(work_failure_code(&cause));
+                Err(cause.into_runtime())
+            }
+        }
+    }
+
+    /// Binds the exact same-account canonical source used by inheritance and rewrite operations.
+    ///
+    /// Binding initializes the preallocated dense source map once, polling and charging one work
+    /// unit per source member. A cancelled or budget-rejected bind clears the partial map before
+    /// rejecting this assembly's success outcome; a different source set cannot replace a
+    /// successful binding.
+    fn try_bind_canonical_source_from(
+        &mut self,
+        source: &PublishedCanonicalOutput<StoredBlock>,
+        work_dimension: StoreDimensionKey,
+    ) -> Result<(), StoreRuntimeError> {
+        self.ensure_writable()?;
+        self.validate_dimension(work_dimension)?;
+        let result = self
+            .raw
+            .try_bind_canonical_source(source.aggregate(), work_dimension);
+        self.map_source_bind_action(result)
+    }
+
+    /// Inherits every eligible immutable leaf from the exact bound canonical source.
+    ///
+    /// Scalar sequences, bytes, and UTF-8 blocks are shared once, while record blocks are skipped.
+    /// Historical source lineage does not affect eligibility: a leaf rewritten in an earlier
+    /// generation can be inherited when unchanged in this destination. The operation polls and
+    /// charges once per source member and rolls back the newly inherited prefix after an ordinary
+    /// failure.
+    fn try_inherit_all_canonical_leaves_from(
+        &mut self,
+        source: &PublishedCanonicalOutput<StoredBlock>,
+        work_dimension: StoreDimensionKey,
+    ) -> Result<(), StoreRuntimeError> {
+        self.ensure_writable()?;
+        self.validate_dimension(work_dimension)?;
+        let result = self
+            .raw
+            .try_inherit_all_canonical_leaves(source.aggregate(), work_dimension);
+        self.map_leaf_inheritance_action(result)
+    }
+
     /// Retains one exact canonical scalar sequence.
     pub fn try_retain_canonical_sequence<T, Tag>(
         &mut self,
@@ -2402,6 +2653,47 @@ where
             let block = finish_scoped_writer(writer, build, SequenceWriter::finish)?;
             Ok(emplacer.place(block, tag))
         });
+        self.map_action(result).map(|raw| CanonicalStoreRef {
+            raw,
+            marker: PhantomData,
+        })
+    }
+
+    /// Replaces one exact same-account canonical sequence with newly constructed immutable
+    /// storage while preserving its source lineage.
+    ///
+    /// The exact typed source reference is checked before retained allocation or work charging.
+    /// The replacement may have a different element count, which permits structural edits such as
+    /// replacing a matrix representation with TRS components. One source slot can map to only one
+    /// destination slot; sharing and rewriting the same source in one destination are mutually
+    /// exclusive.
+    fn try_rewrite_canonical_sequence_from<T, Tag>(
+        &mut self,
+        source: &PublishedCanonicalOutput<StoredBlock>,
+        source_ref: CanonicalSequenceRef<T, Tag>,
+        plan: SequencePlan<T>,
+        tag: Tag,
+        build: impl FnOnce(&mut SequenceWriter<T>) -> Result<(), StoreBuildError>,
+    ) -> Result<CanonicalSequenceRef<T, Tag>, StoreRuntimeError>
+    where
+        T: StoredScalar,
+        Tag: Copy + Send + Sync + 'static,
+    {
+        self.ensure_writable()?;
+        if read_canonical_source_sequence(source, source_ref).is_none() {
+            return Err(StoreRuntimeError::InvalidSourceSlot);
+        }
+        let allocation = plan.allocation_plan().map_err(StoreRuntimeError::Plan)?;
+        let result = self.raw.try_retain_rewritten_canonical(
+            source.aggregate(),
+            source_ref.raw,
+            allocation,
+            |emplacer| {
+                let writer = <T as sealed::StoredScalar>::new_writer(plan.capacity, plan.len)?;
+                let block = finish_scoped_writer(writer, build, SequenceWriter::finish)?;
+                Ok(emplacer.place(block, tag))
+            },
+        );
         self.map_action(result).map(|raw| CanonicalStoreRef {
             raw,
             marker: PhantomData,
@@ -2428,6 +2720,54 @@ where
         let allocation = plan.allocation_plan().map_err(StoreRuntimeError::Plan)?;
         let mut callback_cause = None;
         let result = self.raw.try_retain_canonical_controlled(
+            work_dimension,
+            allocation,
+            |emplacer, raw| {
+                let mut writer = <T as sealed::StoredScalar>::new_writer(plan.capacity, plan.len)?;
+                let mut control = RetainedStoreWorkControl { raw, sticky: None };
+                let callback = build(&mut writer, &mut control);
+                if let Err(cause) = control.finish_build(callback) {
+                    callback_cause = Some(cause);
+                    return Err(RetainedBuildFailureCode::new(BUILD_CODE_DOMAIN));
+                }
+                Ok(emplacer.place(writer.finish()?, tag))
+            },
+        );
+        self.map_controlled_action(result, callback_cause)
+            .map(|raw| CanonicalStoreRef {
+                raw,
+                marker: PhantomData,
+            })
+    }
+
+    /// Replaces one exact same-account canonical sequence with operation-controlled polling and
+    /// work charging while preserving its source lineage.
+    fn try_rewrite_canonical_sequence_controlled_from<T, Tag>(
+        &mut self,
+        source: &PublishedCanonicalOutput<StoredBlock>,
+        source_ref: CanonicalSequenceRef<T, Tag>,
+        plan: SequencePlan<T>,
+        work_dimension: StoreDimensionKey,
+        tag: Tag,
+        build: impl for<'control> FnOnce(
+            &mut SequenceWriter<T>,
+            &mut RetainedStoreWorkControl<'control, O, PP, U>,
+        ) -> Result<(), StoreControlledError>,
+    ) -> Result<CanonicalSequenceRef<T, Tag>, StoreRuntimeError>
+    where
+        T: StoredScalar,
+        Tag: Copy + Send + Sync + 'static,
+    {
+        self.ensure_writable()?;
+        self.validate_dimension(work_dimension)?;
+        if read_canonical_source_sequence(source, source_ref).is_none() {
+            return Err(StoreRuntimeError::InvalidSourceSlot);
+        }
+        let allocation = plan.allocation_plan().map_err(StoreRuntimeError::Plan)?;
+        let mut callback_cause = None;
+        let result = self.raw.try_retain_rewritten_canonical_controlled(
+            source.aggregate(),
+            source_ref.raw,
             work_dimension,
             allocation,
             |emplacer, raw| {
@@ -2671,6 +3011,118 @@ where
         })
     }
 
+    /// Replaces one exact same-account canonical record block with newly authored immutable
+    /// records while preserving its source lineage.
+    ///
+    /// `plan` describes the destination shape, which may differ from the source. Embedded
+    /// references can only be written through the typed canonical record writer, so callers may
+    /// target already admitted destination-local members without observing physical identities.
+    fn try_rewrite_canonical_records_with_from<Tag>(
+        &mut self,
+        source: &PublishedCanonicalOutput<StoredBlock>,
+        source_ref: CanonicalRecordRef<Tag>,
+        plan: RecordPlan,
+        tag: Tag,
+        build: impl FnOnce(&mut CanonicalRecordWriter) -> Result<(), StoreBuildError>,
+    ) -> Result<CanonicalRecordRef<Tag>, StoreRuntimeError>
+    where
+        Tag: Copy + Send + Sync + 'static,
+    {
+        self.ensure_writable()?;
+        if read_canonical_source_records(source, source_ref).is_none() {
+            return Err(StoreRuntimeError::InvalidSourceSlot);
+        }
+        let allocation = plan.allocation_plan().map_err(StoreRuntimeError::Plan)?;
+        let result = self.raw.try_retain_rewritten_canonical(
+            source.aggregate(),
+            source_ref.raw,
+            allocation,
+            |emplacer| {
+                let writer = CanonicalRecordWriter::new(plan)?;
+                let block = finish_scoped_writer(writer, build, CanonicalRecordWriter::finish)?;
+                Ok(emplacer.place(block, tag))
+            },
+        );
+        self.map_action(result).map(|raw| CanonicalStoreRef {
+            raw,
+            marker: PhantomData,
+        })
+    }
+
+    /// Copies one same-account canonical record block and rewrites every embedded canonical
+    /// reference through the exact bound source map.
+    ///
+    /// Every source cell is polled and charged exactly once inside the retained builder boundary.
+    /// Record blocks themselves are never shared.
+    fn try_rewrite_canonical_records_controlled_from<Tag>(
+        &mut self,
+        source: &PublishedCanonicalOutput<StoredBlock>,
+        source_ref: CanonicalRecordRef<Tag>,
+        plan: RecordPlan,
+        work_dimension: StoreDimensionKey,
+        tag: Tag,
+    ) -> Result<CanonicalRecordRef<Tag>, StoreRuntimeError>
+    where
+        Tag: Copy + Send + Sync + 'static,
+    {
+        self.ensure_writable()?;
+        self.validate_dimension(work_dimension)?;
+        if read_canonical_source_records(source, source_ref).is_none() {
+            return Err(StoreRuntimeError::InvalidSourceSlot);
+        }
+        let allocation = plan.allocation_plan().map_err(StoreRuntimeError::Plan)?;
+        let mut callback_cause = None;
+        let result = self.raw.try_rewrite_canonical_controlled(
+            source.aggregate(),
+            source_ref.raw,
+            work_dimension,
+            allocation,
+            |emplacer, source_block, mapping, raw| {
+                let mut control = RetainedStoreWorkControl { raw, sticky: None };
+                let callback = (|| -> Result<StoredBlock, StoreControlledError> {
+                    let storage = checked_source_record(source_block, plan)
+                        .ok_or_else(StoreBuildError::capacity_envelope_violated)?;
+                    let mut writer = RecordWriterCore::new(plan)?;
+                    for source_cell in storage.cells.iter().copied() {
+                        control.poll()?;
+                        control.charge_observed(1)?;
+                        if writer.storage.cells.len() >= plan.cells {
+                            return Err(StoreBuildError::capacity_exceeded().into());
+                        }
+                        let cell = mapped_canonical_record_cell(source_cell, &mapping)
+                            .ok_or_else(StoreBuildError::capacity_envelope_violated)?;
+                        writer.storage.cells.push(cell);
+                        #[cfg(feature = "_u4c-collector")]
+                        {
+                            match cell {
+                                RecordCell::Scalar(_) => record_semantic_cell_write(),
+                                RecordCell::CanonicalReference { .. }
+                                | RecordCell::OutcomeEvidenceReference { .. } => {
+                                    record_reference_write();
+                                }
+                            }
+                            record_payload_copy_bytes(std::mem::size_of::<RecordCell>());
+                        }
+                    }
+                    writer.finish().map_err(Into::into)
+                })();
+                let block = match control.finish_build(callback) {
+                    Ok(block) => block,
+                    Err(cause) => {
+                        callback_cause = Some(cause);
+                        return Err(RetainedBuildFailureCode::new(BUILD_CODE_DOMAIN));
+                    }
+                };
+                Ok(emplacer.place(block, tag))
+            },
+        );
+        self.map_controlled_action(result, callback_cause)
+            .map(|raw| CanonicalStoreRef {
+                raw,
+                marker: PhantomData,
+            })
+    }
+
     /// Retains one canonical record block with operation-controlled polling and work charging.
     pub fn try_retain_canonical_records_controlled<Tag>(
         &mut self,
@@ -2690,6 +3142,53 @@ where
         let allocation = plan.allocation_plan().map_err(StoreRuntimeError::Plan)?;
         let mut callback_cause = None;
         let result = self.raw.try_retain_canonical_controlled(
+            work_dimension,
+            allocation,
+            |emplacer, raw| {
+                let mut writer = CanonicalRecordWriter::new(plan)?;
+                let mut control = RetainedStoreWorkControl { raw, sticky: None };
+                let callback = build(&mut writer, &mut control);
+                if let Err(cause) = control.finish_build(callback) {
+                    callback_cause = Some(cause);
+                    return Err(RetainedBuildFailureCode::new(BUILD_CODE_DOMAIN));
+                }
+                Ok(emplacer.place(writer.finish()?, tag))
+            },
+        );
+        self.map_controlled_action(result, callback_cause)
+            .map(|raw| CanonicalStoreRef {
+                raw,
+                marker: PhantomData,
+            })
+    }
+
+    /// Replaces one exact same-account canonical record block through a typed writer with
+    /// operation-controlled polling and work charging.
+    fn try_rewrite_canonical_records_with_controlled_from<Tag>(
+        &mut self,
+        source: &PublishedCanonicalOutput<StoredBlock>,
+        source_ref: CanonicalRecordRef<Tag>,
+        plan: RecordPlan,
+        work_dimension: StoreDimensionKey,
+        tag: Tag,
+        build: impl for<'control> FnOnce(
+            &mut CanonicalRecordWriter,
+            &mut RetainedStoreWorkControl<'control, O, PP, U>,
+        ) -> Result<(), StoreControlledError>,
+    ) -> Result<CanonicalRecordRef<Tag>, StoreRuntimeError>
+    where
+        Tag: Copy + Send + Sync + 'static,
+    {
+        self.ensure_writable()?;
+        self.validate_dimension(work_dimension)?;
+        if read_canonical_source_records(source, source_ref).is_none() {
+            return Err(StoreRuntimeError::InvalidSourceSlot);
+        }
+        let allocation = plan.allocation_plan().map_err(StoreRuntimeError::Plan)?;
+        let mut callback_cause = None;
+        let result = self.raw.try_retain_rewritten_canonical_controlled(
+            source.aggregate(),
+            source_ref.raw,
             work_dimension,
             allocation,
             |emplacer, raw| {
@@ -2737,9 +3236,9 @@ where
     }
 
     /// Shares one canonical same-account block and returns a fresh destination reference.
-    pub fn try_share_canonical<SourceRootKind, SourceRootTag, SlotKind, SlotTag>(
+    fn try_share_canonical_from<SlotKind, SlotTag>(
         &mut self,
-        source: &PublishedCanonicalStore<SourceRootKind, SourceRootTag>,
+        source: &PublishedCanonicalOutput<StoredBlock>,
         source_ref: CanonicalStoreRef<SlotKind, SlotTag>,
     ) -> Result<CanonicalStoreRef<SlotKind, SlotTag>, StoreRuntimeError>
     where
@@ -2749,7 +3248,7 @@ where
         self.ensure_writable()?;
         let result = self
             .raw
-            .try_share_canonical(source.share_source().aggregate(), source_ref.raw);
+            .try_share_canonical(source.aggregate(), source_ref.raw);
         self.map_action(result).map(|raw| CanonicalStoreRef {
             raw,
             marker: PhantomData,
@@ -2820,6 +3319,7 @@ where
             fallback_cause,
             success_rejection,
             domain,
+            lineage: _,
         } = self;
         if let Some(cause) = fallback_cause {
             return StoreSuccessValidation::FallbackOnly(StoreFallbackOnly {
@@ -2911,6 +3411,7 @@ where
         CanonicalTag,
         EvidenceKind,
         EvidenceTag,
+        L,
     >
     where
         CanonicalTag: Copy + Send + Sync + 'static,
@@ -2927,6 +3428,7 @@ where
             fallback_cause,
             success_rejection,
             domain,
+            lineage: _,
         } = self;
         if let Some(cause) = fallback_cause {
             return StoreControlledSuccessValidation::FallbackOnly(StoreFallbackOnly {
@@ -3071,6 +3573,7 @@ where
             fallback_cause,
             success_rejection,
             domain,
+            lineage: _,
         } = self;
         if let Some(cause) = fallback_cause {
             return StoreFailureValidation::FallbackOnly(StoreFallbackOnly {
@@ -3107,6 +3610,7 @@ where
             fallback_cause,
             success_rejection,
             domain,
+            lineage: _,
         } = self;
         let cause = fallback_cause
             .or(success_rejection)
@@ -3114,6 +3618,150 @@ where
         let raw = raw.prepare_minimal_fallback_with(cause);
         raw.map(|raw| classify_prepared_fallback(raw, domain))
             .map_err(StorePrepareError::from_raw)
+    }
+}
+
+impl<'source, O, PP, U>
+    RetainedStorePublicationAssembly<O, PP, U, CanonicalInheritanceSource<'source>>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    /// Binds the exact canonical source selected when this derived operation started.
+    pub fn try_bind_canonical_source(
+        &mut self,
+        work_dimension: StoreDimensionKey,
+    ) -> Result<(), StoreRuntimeError> {
+        let source = self.lineage.source;
+        self.try_bind_canonical_source_from(source, work_dimension)
+    }
+
+    /// Inherits every eligible immutable leaf from the exact bound canonical source.
+    pub fn try_inherit_all_canonical_leaves(
+        &mut self,
+        work_dimension: StoreDimensionKey,
+    ) -> Result<(), StoreRuntimeError> {
+        let source = self.lineage.source;
+        self.try_inherit_all_canonical_leaves_from(source, work_dimension)
+    }
+
+    /// Replaces one exact-source canonical sequence with newly constructed immutable storage.
+    pub fn try_rewrite_canonical_sequence<T, Tag>(
+        &mut self,
+        source_ref: CanonicalSequenceRef<T, Tag>,
+        plan: SequencePlan<T>,
+        tag: Tag,
+        build: impl FnOnce(&mut SequenceWriter<T>) -> Result<(), StoreBuildError>,
+    ) -> Result<CanonicalSequenceRef<T, Tag>, StoreRuntimeError>
+    where
+        T: StoredScalar,
+        Tag: Copy + Send + Sync + 'static,
+    {
+        let source = self.lineage.source;
+        self.try_rewrite_canonical_sequence_from(source, source_ref, plan, tag, build)
+    }
+
+    /// Replaces one exact-source canonical sequence with controlled polling and work charging.
+    pub fn try_rewrite_canonical_sequence_controlled<T, Tag>(
+        &mut self,
+        source_ref: CanonicalSequenceRef<T, Tag>,
+        plan: SequencePlan<T>,
+        work_dimension: StoreDimensionKey,
+        tag: Tag,
+        build: impl for<'control> FnOnce(
+            &mut SequenceWriter<T>,
+            &mut RetainedStoreWorkControl<'control, O, PP, U>,
+        ) -> Result<(), StoreControlledError>,
+    ) -> Result<CanonicalSequenceRef<T, Tag>, StoreRuntimeError>
+    where
+        T: StoredScalar,
+        Tag: Copy + Send + Sync + 'static,
+    {
+        let source = self.lineage.source;
+        self.try_rewrite_canonical_sequence_controlled_from(
+            source,
+            source_ref,
+            plan,
+            work_dimension,
+            tag,
+            build,
+        )
+    }
+
+    /// Replaces one exact-source canonical record block through a typed writer.
+    pub fn try_rewrite_canonical_records_with<Tag>(
+        &mut self,
+        source_ref: CanonicalRecordRef<Tag>,
+        plan: RecordPlan,
+        tag: Tag,
+        build: impl FnOnce(&mut CanonicalRecordWriter) -> Result<(), StoreBuildError>,
+    ) -> Result<CanonicalRecordRef<Tag>, StoreRuntimeError>
+    where
+        Tag: Copy + Send + Sync + 'static,
+    {
+        let source = self.lineage.source;
+        self.try_rewrite_canonical_records_with_from(source, source_ref, plan, tag, build)
+    }
+
+    /// Rewrites one exact-source canonical record block through the bound source map.
+    pub fn try_rewrite_canonical_records_controlled<Tag>(
+        &mut self,
+        source_ref: CanonicalRecordRef<Tag>,
+        plan: RecordPlan,
+        work_dimension: StoreDimensionKey,
+        tag: Tag,
+    ) -> Result<CanonicalRecordRef<Tag>, StoreRuntimeError>
+    where
+        Tag: Copy + Send + Sync + 'static,
+    {
+        let source = self.lineage.source;
+        self.try_rewrite_canonical_records_controlled_from(
+            source,
+            source_ref,
+            plan,
+            work_dimension,
+            tag,
+        )
+    }
+
+    /// Replaces one exact-source canonical record block with controlled authored output.
+    pub fn try_rewrite_canonical_records_with_controlled<Tag>(
+        &mut self,
+        source_ref: CanonicalRecordRef<Tag>,
+        plan: RecordPlan,
+        work_dimension: StoreDimensionKey,
+        tag: Tag,
+        build: impl for<'control> FnOnce(
+            &mut CanonicalRecordWriter,
+            &mut RetainedStoreWorkControl<'control, O, PP, U>,
+        ) -> Result<(), StoreControlledError>,
+    ) -> Result<CanonicalRecordRef<Tag>, StoreRuntimeError>
+    where
+        Tag: Copy + Send + Sync + 'static,
+    {
+        let source = self.lineage.source;
+        self.try_rewrite_canonical_records_with_controlled_from(
+            source,
+            source_ref,
+            plan,
+            work_dimension,
+            tag,
+            build,
+        )
+    }
+
+    /// Shares one exact-source canonical immutable leaf into a fresh destination slot.
+    pub fn try_share_canonical<SlotKind, SlotTag>(
+        &mut self,
+        source_ref: CanonicalStoreRef<SlotKind, SlotTag>,
+    ) -> Result<CanonicalStoreRef<SlotKind, SlotTag>, StoreRuntimeError>
+    where
+        SlotKind: ShareableStoreKind,
+        SlotTag: Copy + Send + Sync + 'static,
+    {
+        let source = self.lineage.source;
+        self.try_share_canonical_from(source, source_ref)
     }
 }
 
@@ -3140,13 +3788,14 @@ pub enum StoreControlledSuccessValidation<
     CanonicalTag,
     EvidenceKind,
     EvidenceTag,
+    L = FreshStoreLineage,
 > where
     O: OperationOwner,
     PP: ProgressPhase,
     U: ProgressUnit,
 {
     InvalidWorkDimension {
-        assembly: RetainedStorePublicationAssembly<O, PP, U>,
+        assembly: RetainedStorePublicationAssembly<O, PP, U, L>,
         cause: StoreRuntimeError,
     },
     Valid(ValidatedStoreSuccess<O, PP, U, CanonicalKind, CanonicalTag, EvidenceKind, EvidenceTag>),

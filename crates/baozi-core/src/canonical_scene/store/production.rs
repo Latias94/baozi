@@ -64,13 +64,13 @@ pub(super) use plan::deformation::{
 pub(super) use plan::geometry::GeometryAuthoringSemanticError;
 pub(super) use plan::geometry::{
     GeometryAttributePayloadKind, GeometryAttributeScalarKind, GeometryAuthoringFailure,
-    ValidatedGeometryBatch, ValidatedGeometryPrimitive, validate_geometry_batch,
+    ValidatedGeometryBatch, validate_geometry_batch,
 };
 pub(super) use plan::{NodeAuthoringFailure, ValidatedNodeBatch, validate_node_batch};
 #[cfg(test)]
 pub(super) use plan::{NodeAuthoringLimit, NodeAuthoringSemanticError};
 pub(super) use scene::{
-    SceneAuthoringAggregateError, SceneInputPreflight, SceneInputPreflightError,
+    SceneAuthoringAggregateError, SceneInputEnvelope, SceneInputEnvelopeError,
     animation_limits_after_deformation, appearance_limits_after_nodes,
     deformation_limits_after_geometry, geometry_limits_after_appearance, validate_scene_aggregate,
 };

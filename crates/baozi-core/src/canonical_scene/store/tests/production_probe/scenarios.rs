@@ -1,10 +1,19 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use allocation_counter::AllocationInfo;
-use baozi_operation::__u4c::MeasurementSession;
+use baozi_operation::{__u4c::MeasurementSession, StoreTerminalCause};
 
-use crate::identity::SceneGenerationId;
+use crate::derived::DerivedAbsenceReason;
+use crate::entity::AuthoredTransform;
+use crate::identity::{NodeId, SceneGenerationId};
+use crate::math::{Quat, Vec3};
+use crate::remap::RemapChange;
 
+use super::super::super::construction::node_scene::edit::{
+    CanonicalRemapSet, NodeTransformEditStart, NodeTransformEditTerminal,
+    try_begin_node_transform_edit,
+};
+use super::super::super::construction::node_scene::snapshot::NodeSceneSnapshotLimits;
 use super::super::super::construction::node_scene::{
     GLTF_SOURCE_VECTOR_SCHEMA_ID, GltfCapabilityCanonicalShapeObservation,
     GltfCapabilitySourceShapeObservation, OBJ_SOURCE_VECTOR_SCHEMA_ID,
@@ -12,7 +21,9 @@ use super::super::super::construction::node_scene::{
     build_gltf_capability_scene_for_probe, build_obj_capability_scene_for_probe,
     capture_gltf_capability_snapshots_for_probe, capture_obj_capability_snapshots_for_probe,
     collect_gltf_capability_vectors_for_probe, collect_obj_capability_vectors_for_probe,
-    inspect_gltf_capability_semantics_for_probe, inspect_obj_capability_semantics_for_probe,
+    inspect_gltf_capability_semantics_for_probe,
+    inspect_gltf_capability_semantics_with_first_transform_for_probe,
+    inspect_obj_capability_semantics_for_probe,
 };
 use super::super::super::construction::{
     COMPLEX_SEMANTIC_TRANSCRIPT_SCHEMA_ID, ComplexFixtureFault, ComplexFixtureTerminal,
@@ -24,11 +35,12 @@ use super::super::{
 use super::report::{
     CapabilityBoundedPreviewReport, CapabilityMutationReport, CapabilityPhysicalReport,
     FaultPhysicalReport, FixedVectorReport, GltfCanonicalShapeReport, GltfCapabilityReport,
-    GltfSnapshotTotalsReport, GltfSourceShapeReport, GltfUnchangedViewReport,
-    HotLeafObservationReport, InheritedHotLeafReport, ObjCanonicalShapeReport, ObjCapabilityReport,
-    ObjSnapshotTotalsReport, ObjSourceShapeReport, ReadOnlyPhysicalReport, ScalePhysicalReport,
-    ScaleScenarioReport, SemanticTranscriptReport, ShareGenerationReport, SharePhysicalReport,
-    ValidationFaultReport, evidence_report, hex_encode, phase_report, release_report, sha256_hex,
+    GltfChangedSceneEditPhysicalReport, GltfChangedSceneEditReport, GltfSnapshotTotalsReport,
+    GltfSourceShapeReport, GltfUnchangedViewReport, HotLeafObservationReport,
+    InheritedHotLeafReport, ObjCanonicalShapeReport, ObjCapabilityReport, ObjSnapshotTotalsReport,
+    ObjSourceShapeReport, ReadOnlyPhysicalReport, ScalePhysicalReport, ScaleScenarioReport,
+    SemanticTranscriptReport, ShareGenerationReport, SharePhysicalReport, ValidationFaultReport,
+    evidence_report, hex_encode, phase_report, release_report, sha256_hex,
 };
 
 const COMPLEX_PREVIEW_LIMIT_BYTES: usize = 192;
@@ -369,6 +381,11 @@ pub(super) fn collect_gltf_capability() -> GltfCapabilityReport {
     const INSPECTION_ID: &str = "canonical-gltf-five-domain-inspection-v1";
     const SNAPSHOT_ID: &str = "canonical-gltf-five-domain-snapshot-v1";
     const UNCHANGED_VIEW_ID: &str = "canonical-gltf-five-domain-unchanged-view-v1";
+    const CHANGED_SCENE_EDIT_ID: &str = "canonical-gltf-node-transform-edit-v1";
+    const EDIT_SNAPSHOT_ID: &str = "canonical-gltf-node-transform-edit-snapshot-v1";
+    const EDIT_INPUT_RELEASE_ID: &str = "canonical-gltf-edit-input-release-v1";
+    const EDIT_REPORT_RELEASE_ID: &str = "canonical-gltf-edit-report-release-v1";
+    const EDIT_OUTPUT_RELEASE_ID: &str = "canonical-gltf-edit-output-release-v1";
     const RELEASE_ID: &str = "canonical-gltf-five-domain-release-v1";
 
     let vector_observations = collect_gltf_capability_vectors_for_probe();
@@ -399,7 +416,7 @@ pub(super) fn collect_gltf_capability() -> GltfCapabilityReport {
         MeasurementSession::begin().expect("glTF typed inspection measurement must start");
     let mut canonical_shape = None;
     let inspection_allocations = allocation_counter::measure(|| {
-        canonical_shape = Some(inspect_gltf_capability_semantics_for_probe(&parts));
+        canonical_shape = Some(inspect_gltf_capability_semantics_for_probe(&parts.scene));
     });
     let inspection_measurement = inspection_session
         .finish()
@@ -428,8 +445,8 @@ pub(super) fn collect_gltf_capability() -> GltfCapabilityReport {
         MeasurementSession::begin().expect("glTF unchanged view measurement must start");
     let mut unchanged_observations = None;
     let unchanged_view_allocations = allocation_counter::measure(|| {
-        let first = inspect_gltf_capability_semantics_for_probe(&parts);
-        let second = inspect_gltf_capability_semantics_for_probe(&parts);
+        let first = inspect_gltf_capability_semantics_for_probe(&parts.scene);
+        let second = inspect_gltf_capability_semantics_for_probe(&parts.scene);
         unchanged_observations = Some((first, second));
     });
     let unchanged_view_measurement = unchanged_view_session
@@ -453,7 +470,7 @@ pub(super) fn collect_gltf_capability() -> GltfCapabilityReport {
     assert!(bounded_snapshot.preview.text.len() <= 96);
     assert!(bounded_snapshot.preview.bytes_truncated || bounded_snapshot.preview.items_truncated);
     assert!(bounded_snapshot.preview.items_omitted_by_limit > 0);
-    assert_eq!(vector_observations.mutations.len(), 7);
+    assert_eq!(vector_observations.mutations.len(), 9);
     assert_eq!(unchanged_observation, canonical_shape);
     assert_eq!(repeated_unchanged_observation, canonical_shape);
     assert!(unchanged_generation_preserved);
@@ -568,10 +585,229 @@ pub(super) fn collect_gltf_capability() -> GltfCapabilityReport {
         })
         .collect();
 
+    let edit_replacement = AuthoredTransform::try_trs(
+        Vec3::new(7.0, 0.0, 0.0),
+        Quat::IDENTITY,
+        Vec3::new(1.0, 1.0, 1.0),
+    )
+    .expect("production edit replacement must be a finite authored TRS");
+    let edit_input_generation = parts.scene.generation();
+    let edit_node = NodeId::new(edit_input_generation, 0);
+    let edit_generation_reservations_before = generation_source.load(Ordering::Relaxed);
+    let edit_canonical_block_count_before = parts.scene.canonical_block_count();
+    let edit_physical_before = account.snapshot();
+    let edit_session =
+        MeasurementSession::begin().expect("glTF changed edit measurement must start");
+    let mut edit_terminal = None;
+    let mut edit_physical_before_handoff = None;
+    let edit_allocations = allocation_counter::measure(|| {
+        let NodeTransformEditStart::Changed(pending) =
+            try_begin_node_transform_edit(&parts.scene, edit_node, edit_replacement)
+                .expect("changed glTF authored bits must enter edit planning")
+        else {
+            panic!("changed glTF authored bits cannot classify as unchanged");
+        };
+        let prepared = pending
+            .prepare_with_generation_source(test_limits(), || {
+                SceneGenerationId::reserve_from(&generation_source)
+            })
+            .expect("exact-source glTF node transform edit must prepare");
+        edit_physical_before_handoff = Some(account.snapshot());
+        edit_terminal = Some(prepared.handoff());
+    });
+    let edit_measurement = edit_session
+        .finish()
+        .expect("glTF changed edit measurement must finish");
+    let NodeTransformEditTerminal::Success(output) =
+        edit_terminal.expect("glTF changed edit closure must publish a terminal")
+    else {
+        panic!("valid exact-source glTF node transform edit must publish success");
+    };
+    let edit_physical_before_handoff = edit_physical_before_handoff
+        .expect("changed glTF edit must snapshot its prepared physical account");
+    let edit_physical_with_output = account.snapshot();
+    let handoff_physical_account_preserved =
+        edit_physical_before_handoff == edit_physical_with_output;
+    let edit_output_generation = output.scene.generation();
+    let edit_generation_reservations_after = generation_source.load(Ordering::Relaxed);
+    let edit_canonical_block_count_after = output.scene.canonical_block_count();
+    let edit_output_shape = inspect_gltf_capability_semantics_with_first_transform_for_probe(
+        &output.scene,
+        edit_replacement,
+    );
+    let edit_input_shape = inspect_gltf_capability_semantics_for_probe(&parts.scene);
+    let replacement_authored_bits_preserved = output
+        .scene
+        .authored_transform(0)
+        .expect("edited glTF authored transform")
+        .has_same_authored_bits(edit_replacement);
+    let input_authored_bits_preserved = parts
+        .scene
+        .authored_transform(0)
+        .expect("input glTF authored transform after edit")
+        .has_same_authored_bits(AuthoredTransform::identity_trs());
+    let exact_physical_account_preserved = output
+        .scene
+        .account()
+        .is_same_account(parts.scene.account());
+    let generation_changed = edit_output_generation != edit_input_generation;
+    let all_subjects_explicitly_unchanged = all_remaps_bind_exact_unchanged(
+        output.report.remaps(),
+        edit_input_generation,
+        edit_output_generation,
+    );
+    let target_rebind_matches = output
+        .report
+        .remaps()
+        .nodes()
+        .try_rebind_unchanged(edit_node)
+        .expect("changed edit node remap must remain valid")
+        == Some(NodeId::new(edit_output_generation, 0));
+    let remap_storage_bytes = output.report.remaps().retained_allocation_bytes();
+    let scene_bounds_invalidated =
+        output.report.invalidations().scene_bounds() == Some(DerivedAbsenceReason::Invalidated);
+    let edit_outcome_evidence_block_count = output.report.outcome_evidence_block_count();
+    let edit_evidence = evidence_report(
+        edit_outcome_evidence_block_count,
+        output.report.ledger_evidence(),
+    );
+    let input_readable_after_publication = edit_input_shape == canonical_shape;
+    let output_shape_matches_input = edit_output_shape == canonical_shape;
+
+    let edit_snapshot_limits = NodeSceneSnapshotLimits::try_new(64 * 1024, 128, 1_000_000)
+        .expect("changed glTF edit snapshot limits must be valid");
+    let edit_snapshot_session =
+        MeasurementSession::begin().expect("glTF changed edit snapshot measurement must start");
+    let mut edit_snapshots = None;
+    let edit_snapshot_allocations = allocation_counter::measure(|| {
+        edit_snapshots = Some((
+            parts
+                .scene
+                .capture_snapshot(edit_snapshot_limits, None)
+                .expect("input glTF scene snapshot after edit"),
+            output
+                .scene
+                .capture_snapshot(edit_snapshot_limits, None)
+                .expect("edited glTF scene snapshot"),
+        ));
+    });
+    let edit_snapshot_measurement = edit_snapshot_session
+        .finish()
+        .expect("glTF changed edit snapshot measurement must finish");
+    let (input_after_edit_snapshot, output_edit_snapshot) =
+        edit_snapshots.expect("changed glTF edit snapshots must be captured");
+    let input_after_edit_snapshot_digest_hex = hex_encode(&input_after_edit_snapshot.digest);
+    let output_snapshot_digest_hex = hex_encode(&output_edit_snapshot.digest);
+
+    let output_scene = output.scene;
+    let output_report = output.report;
+    let mut output_after_input_release_shape = None;
+    let mut output_report_readable_after_input_release = false;
+    let input_release_allocations = allocation_counter::measure(|| {
+        drop(parts);
+        output_report_readable_after_input_release = matches!(
+            output_report.ledger_evidence().header().terminal_cause(),
+            StoreTerminalCause::Success
+        );
+        output_after_input_release_shape = Some(
+            inspect_gltf_capability_semantics_with_first_transform_for_probe(
+                &output_scene,
+                edit_replacement,
+            ),
+        );
+    });
+    let edit_physical_after_input_release = account.snapshot();
+    let output_readable_after_input_release =
+        output_after_input_release_shape == Some(canonical_shape);
+
+    let mut output_after_report_release_shape = None;
+    let output_report_release_allocations = allocation_counter::measure(|| {
+        drop(output_report);
+        output_after_report_release_shape = Some(
+            inspect_gltf_capability_semantics_with_first_transform_for_probe(
+                &output_scene,
+                edit_replacement,
+            ),
+        );
+    });
+    let edit_physical_after_output_report_release = account.snapshot();
+    let output_readable_after_report_release =
+        output_after_report_release_shape == Some(canonical_shape);
+
+    let output_scene_release_allocations = allocation_counter::measure(|| drop(output_scene));
+    let edit_physical_after_output_scene_release = account.snapshot();
+
+    assert!(replacement_authored_bits_preserved);
+    assert!(input_authored_bits_preserved);
+    assert!(input_readable_after_publication);
+    assert!(output_shape_matches_input);
+    assert!(output_report_readable_after_input_release);
+    assert_eq!(input_after_edit_snapshot.digest, full_snapshot.digest);
+    assert_ne!(output_edit_snapshot.digest, full_snapshot.digest);
+    assert!(output_readable_after_input_release);
+    assert!(output_readable_after_report_release);
+    assert!(exact_physical_account_preserved);
+    assert!(handoff_physical_account_preserved);
+    assert!(generation_changed);
+    assert_eq!(edit_generation_reservations_before, 1);
+    assert_eq!(edit_generation_reservations_after, 2);
+    assert_eq!(
+        edit_canonical_block_count_after,
+        edit_canonical_block_count_before,
+    );
+    assert!(all_subjects_explicitly_unchanged);
+    assert!(target_rebind_matches);
+    assert_eq!(remap_storage_bytes, 0);
+    assert!(scene_bounds_invalidated);
+    assert!(edit_outcome_evidence_block_count > 0);
+    assert!(edit_measurement.new_block_begins() > 0);
+    assert!(edit_measurement.inherited_block_begins() > 0);
+    assert_eq!(
+        edit_measurement.new_block_begins(),
+        edit_measurement.payload_backing_allocations(),
+    );
+    assert!(
+        edit_physical_with_output.live_retained_allocations()
+            > edit_physical_before.live_retained_allocations(),
+    );
+    assert!(
+        edit_physical_with_output.live_retained_bytes()
+            > edit_physical_before.live_retained_bytes(),
+    );
+    assert!(edit_physical_after_input_release.live_retained_allocations() > 0);
+    assert!(edit_physical_after_input_release.live_retained_bytes() > 0);
+    assert!(
+        edit_physical_after_input_release.live_retained_allocations()
+            < edit_physical_with_output.live_retained_allocations(),
+    );
+    assert!(
+        edit_physical_after_input_release.live_retained_bytes()
+            < edit_physical_with_output.live_retained_bytes(),
+    );
+    assert!(edit_physical_after_output_report_release.live_retained_allocations() > 0);
+    assert!(edit_physical_after_output_report_release.live_retained_bytes() > 0);
+    assert!(
+        edit_physical_after_output_report_release.live_retained_allocations()
+            < edit_physical_after_input_release.live_retained_allocations(),
+    );
+    assert!(
+        edit_physical_after_output_report_release.live_retained_bytes()
+            < edit_physical_after_input_release.live_retained_bytes(),
+    );
+    assert_eq!(
+        edit_physical_after_output_scene_release.live_retained_allocations(),
+        0,
+    );
+    assert_eq!(
+        edit_physical_after_output_scene_release.live_retained_bytes(),
+        0,
+    );
+
     let release_allocations = allocation_counter::measure(move || {
         drop(full_snapshot);
         drop(bounded_snapshot);
-        drop(parts);
+        drop(input_after_edit_snapshot);
+        drop(output_edit_snapshot);
     });
     assert_allocator_lifecycle_balanced(
         "canonical glTF capability",
@@ -580,6 +816,11 @@ pub(super) fn collect_gltf_capability() -> GltfCapabilityReport {
             &inspection_allocations,
             &snapshot_allocations,
             &unchanged_view_allocations,
+            &edit_allocations,
+            &edit_snapshot_allocations,
+            &input_release_allocations,
+            &output_report_release_allocations,
+            &output_scene_release_allocations,
             &release_allocations,
         ],
     );
@@ -594,7 +835,7 @@ pub(super) fn collect_gltf_capability() -> GltfCapabilityReport {
         canonical_shape: gltf_canonical_shape_report(canonical_shape),
         source_vector,
         mutations,
-        generation_reservations: generation_source.load(Ordering::Relaxed),
+        source_generation_reservations: unchanged_generation_reservations_after,
         canonical_block_count,
         outcome_evidence_block_count,
         full_snapshot_digest_hex,
@@ -631,6 +872,55 @@ pub(super) fn collect_gltf_capability() -> GltfCapabilityReport {
                 after: unchanged_physical_after.into(),
             },
         },
+        changed_scene_edit: GltfChangedSceneEditReport {
+            entry_point: "changed-scene-edit",
+            scenario_id: CHANGED_SCENE_EDIT_ID,
+            output_shape: gltf_canonical_shape_report(edit_output_shape),
+            replacement_authored_bits_preserved,
+            input_authored_bits_preserved,
+            input_readable_after_publication,
+            output_report_readable_after_input_release,
+            output_readable_after_input_release,
+            output_readable_after_report_release,
+            exact_physical_account_preserved,
+            handoff_physical_account_preserved,
+            generation_changed,
+            generation_reservations_before: edit_generation_reservations_before,
+            generation_reservations_after: edit_generation_reservations_after,
+            canonical_block_count_before: edit_canonical_block_count_before,
+            canonical_block_count_after: edit_canonical_block_count_after,
+            all_subjects_explicitly_unchanged,
+            target_rebind_matches,
+            remap_storage_bytes,
+            scene_bounds_invalidated,
+            outcome_evidence_block_count: edit_outcome_evidence_block_count,
+            evidence: edit_evidence,
+            phase: phase_report(CHANGED_SCENE_EDIT_ID, edit_measurement, edit_allocations),
+            input_snapshot_digest_hex: input_after_edit_snapshot_digest_hex,
+            output_snapshot_digest_hex,
+            snapshot: phase_report(
+                EDIT_SNAPSHOT_ID,
+                edit_snapshot_measurement,
+                edit_snapshot_allocations,
+            ),
+            input_release: release_report(EDIT_INPUT_RELEASE_ID, input_release_allocations),
+            output_report_release: release_report(
+                EDIT_REPORT_RELEASE_ID,
+                output_report_release_allocations,
+            ),
+            output_scene_release: release_report(
+                EDIT_OUTPUT_RELEASE_ID,
+                output_scene_release_allocations,
+            ),
+            physical_account: GltfChangedSceneEditPhysicalReport {
+                before: edit_physical_before.into(),
+                before_handoff: edit_physical_before_handoff.into(),
+                with_output: edit_physical_with_output.into(),
+                after_input_release: edit_physical_after_input_release.into(),
+                after_output_report_release: edit_physical_after_output_report_release.into(),
+                after_output_scene_release: edit_physical_after_output_scene_release.into(),
+            },
+        },
         release: release_report(RELEASE_ID, release_allocations),
         physical_account: CapabilityPhysicalReport {
             baseline: physical_baseline.into(),
@@ -641,6 +931,39 @@ pub(super) fn collect_gltf_capability() -> GltfCapabilityReport {
         },
         factory_after_account_release: factory_after_account_release.into(),
     }
+}
+
+fn all_remaps_bind_exact_unchanged(
+    remaps: &CanonicalRemapSet,
+    input_generation: SceneGenerationId,
+    output_generation: SceneGenerationId,
+) -> bool {
+    macro_rules! exact_unchanged {
+        ($remap:expr) => {{
+            let remap = $remap;
+            remap.input_generation() == input_generation
+                && remap.output_generation() == output_generation
+                && remap.change() == RemapChange::ExplicitlyUnchanged
+        }};
+    }
+
+    exact_unchanged!(remaps.nodes())
+        && exact_unchanged!(remaps.mesh_instances())
+        && exact_unchanged!(remaps.logical_meshes())
+        && exact_unchanged!(remaps.primitives())
+        && exact_unchanged!(remaps.morph_targets())
+        && exact_unchanged!(remaps.materials())
+        && exact_unchanged!(remaps.images())
+        && exact_unchanged!(remaps.samplers())
+        && exact_unchanged!(remaps.textures())
+        && exact_unchanged!(remaps.skins())
+        && exact_unchanged!(remaps.animation_clips())
+        && exact_unchanged!(remaps.cameras())
+        && exact_unchanged!(remaps.lights())
+        && exact_unchanged!(remaps.vertices())
+        && exact_unchanged!(remaps.corners())
+        && exact_unchanged!(remaps.faces())
+        && exact_unchanged!(remaps.instances())
 }
 
 fn gltf_source_shape_report(shape: GltfCapabilitySourceShapeObservation) -> GltfSourceShapeReport {

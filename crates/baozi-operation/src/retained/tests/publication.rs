@@ -701,7 +701,7 @@ fn terminal_evidence_qualification_panic_contains_the_complete_fallback_graph() 
 }
 
 #[test]
-fn inherited_blocks_use_fresh_slots_without_new_attribution_or_physical_charge() {
+fn inherited_blocks_deduplicate_source_slots_without_new_attribution_or_physical_charge() {
     let factory = account_factory(1);
     let account = account(&factory, u64::MAX, 128);
     let (source_canonical, source_canonical_slot, source_evidence, source_evidence_slot) =
@@ -717,27 +717,47 @@ fn inherited_blocks_use_fresh_slots_without_new_attribution_or_physical_charge()
         .test_member_share_call_count(source_evidence_slot.identity)
         .expect("evidence source slot must resolve");
 
-    let operation = test_operation_on_account_with_control(
+    let operation = test_derived_operation_on_account_with_control(
         &account,
+        &source_canonical,
         64,
         RetainedBatchLimits::new(3, 2),
         OperationControl::default(),
     );
     let plan = RetainedPublicationPlan::success(
-        RetainedBlockTablePlan::new(writer_plan(2, 2), 3, 1),
+        RetainedBlockTablePlan::new(writer_plan(2, 2), 3, 1)
+            .with_canonical_source_mapping_capacity(source_canonical.aggregate().len()),
         RetainedBlockTablePlan::new(writer_plan(1, 2), 3, 0),
     );
     let mut assembly: TestPublication<u64, u64> = operation
         .try_publication_assembly(plan)
         .unwrap_or_else(|_| panic!("inherited publication must open"));
+    assembly
+        .try_bind_canonical_source(source_canonical.aggregate(), TestDimension::Bytes)
+        .unwrap_or_else(|_| panic!("canonical source map must bind"));
+    assert_eq!(
+        assembly.test_take_canonical_source_mapping_probe_count(),
+        0,
+        "binding initializes the dense map without lookup probes"
+    );
     let physical_before_shares = account.snapshot();
 
     let canonical_root = assembly
         .try_share_canonical(source_canonical.aggregate(), source_canonical_slot)
         .unwrap_or_else(|_| panic!("first canonical share must succeed"));
+    assert_eq!(
+        assembly.test_take_canonical_source_mapping_probe_count(),
+        1,
+        "a first source lookup performs one dense-map probe"
+    );
     let canonical_second = assembly
         .try_share_canonical(source_canonical.aggregate(), source_canonical_slot)
         .unwrap_or_else(|_| panic!("second canonical share must succeed"));
+    assert_eq!(
+        assembly.test_take_canonical_source_mapping_probe_count(),
+        1,
+        "a duplicate source lookup remains one dense-map probe"
+    );
     let evidence_root = assembly
         .try_share_outcome_evidence(source_evidence.aggregate(), source_evidence_slot)
         .unwrap_or_else(|_| panic!("first evidence share must succeed"));
@@ -749,8 +769,13 @@ fn inherited_blocks_use_fresh_slots_without_new_attribution_or_physical_charge()
         .unwrap_or_else(|_| panic!("third evidence share must succeed"));
 
     assert_eq!(account.snapshot(), physical_before_shares);
-    assert_eq!(assembly.canonical_len(), 2);
+    assert_eq!(canonical_second, canonical_root);
+    assert_eq!(assembly.canonical_len(), 1);
     assert_eq!(assembly.outcome_evidence_len(), 3);
+    assert!(
+        assembly.test_storage_graph_is_exact(),
+        "inherited-only incremental proofs must match the full structural audit"
+    );
     assert_eq!(
         assembly
             .canonical_batch
@@ -773,7 +798,7 @@ fn inherited_blocks_use_fresh_slots_without_new_attribution_or_physical_charge()
             .inner
             .test_member_share_call_count(source_canonical_slot.identity)
             .expect("canonical source slot must remain observable"),
-        canonical_shares_before + 2
+        canonical_shares_before + 1
     );
     assert_eq!(
         source_evidence
@@ -791,7 +816,7 @@ fn inherited_blocks_use_fresh_slots_without_new_attribution_or_physical_charge()
             Ok(emplacer.place(13, CanonicalRootTag))
         })
         .unwrap_or_else(|_| panic!("one new canonical block must fit"));
-    assert_eq!(assembly.canonical_len(), 3);
+    assert_eq!(assembly.canonical_len(), 2);
     assert_eq!(
         assembly
             .canonical_batch
@@ -802,6 +827,10 @@ fn inherited_blocks_use_fresh_slots_without_new_attribution_or_physical_charge()
     );
     assert!(
         account.snapshot().live_retained_bytes() > physical_before_shares.live_retained_bytes()
+    );
+    assert!(
+        assembly.test_storage_graph_is_exact(),
+        "mixed inherited/new incremental proofs must match the full structural audit"
     );
 
     let validated = match assembly.validate_success(
@@ -843,6 +872,160 @@ fn inherited_blocks_use_fresh_slots_without_new_attribution_or_physical_charge()
         _ => panic!("inherited publication must succeed"),
     }
     drop(published);
+    assert!(
+        !account.snapshot().poisoned(),
+        "normal inherited publication release must not poison the physical account"
+    );
+    drop(source_canonical);
+    drop(source_evidence);
+    drop(account);
+    assert_eq!(
+        factory.snapshot().live_accounts(),
+        0,
+        "normal inherited publication ownership must release every account reference"
+    );
+}
+
+#[test]
+fn dense_canonical_source_lookup_is_constant_and_physically_accounted() {
+    const SOURCE_BLOCKS: usize = 65;
+    const REPEATED_LOOKUPS: u64 = 64;
+
+    let factory = account_factory(1);
+    let account = account(&factory, u64::MAX, 512);
+    let source_operation = test_operation_on_account_with_control(
+        &account,
+        64,
+        RetainedBatchLimits::new(SOURCE_BLOCKS + 1, 2),
+        OperationControl::default(),
+    );
+    let mut source: TestPublication<u64, u64> = source_operation
+        .try_publication_assembly(publication_plan(SOURCE_BLOCKS, 1))
+        .unwrap_or_else(|_| panic!("dense source publication must open"));
+    let mut source_slots = Vec::with_capacity(SOURCE_BLOCKS);
+    for value in 0..SOURCE_BLOCKS {
+        let value = u64::try_from(value).expect("test source ordinal fits u64");
+        let slot = source
+            .try_retain_canonical(empty_plan(), |emplacer| {
+                Ok(emplacer.place(value, CanonicalLeafTag))
+            })
+            .unwrap_or_else(|_| panic!("dense source member must retain"));
+        source_slots.push(slot);
+    }
+    let evidence = source
+        .try_retain_outcome_evidence(empty_plan(), |emplacer| {
+            Ok(emplacer.place(7, EvidenceRootTag))
+        })
+        .unwrap_or_else(|_| panic!("dense source evidence must retain"));
+    let source_root = source_slots[SOURCE_BLOCKS - 1];
+    let source = match source.validate_success(source_root, evidence, |session, _, evidence| {
+        source_slots
+            .iter()
+            .enumerate()
+            .all(|(index, slot)| session.canonical(*slot).copied() == u64::try_from(index).ok())
+            && session.outcome_evidence(evidence) == Some(&7)
+    }) {
+        RetainedSuccessValidation::Valid(validated) => handoff_for_test(
+            validated
+                .try_prepare(final_progress())
+                .unwrap_or_else(|_| panic!("dense source publication must prepare")),
+        ),
+        _ => panic!("dense source publication must validate"),
+    };
+    let (source_canonical, source_evidence) = match source {
+        PublishedRetainedPublicationParts::Success {
+            canonical,
+            outcome_evidence,
+            ledger_evidence,
+        } => {
+            drop(ledger_evidence);
+            (canonical, outcome_evidence)
+        }
+        _ => panic!("dense source publication must succeed"),
+    };
+
+    let undersized_operation = test_operation_on_account_with_control(
+        &account,
+        64,
+        RetainedBatchLimits::new(1, 2),
+        OperationControl::default(),
+    );
+    let undersized_plan = RetainedPublicationPlan::success(
+        RetainedBlockTablePlan::new(writer_plan(1, 2), 1, 0)
+            .with_canonical_source_mapping_capacity(SOURCE_BLOCKS - 1),
+        RetainedBlockTablePlan::new(writer_plan(1, 2), 1, 0),
+    );
+    let mut undersized: TestPublication<u64, u64> = undersized_operation
+        .try_publication_assembly(undersized_plan)
+        .unwrap_or_else(|_| panic!("undersized dense-map target must open"));
+    assert!(matches!(
+        undersized.try_bind_canonical_source(source_canonical.aggregate(), TestDimension::Bytes,),
+        Err(CanonicalSourceBindError::Publication(
+            RetainedPublicationError::InvalidSourceSlot
+        ))
+    ));
+    assert_eq!(
+        undersized.test_take_canonical_source_mapping_probe_count(),
+        0
+    );
+    assert_eq!(undersized.canonical_len(), 0);
+    drop(undersized);
+
+    let target_operation = test_derived_operation_on_account_with_control(
+        &account,
+        &source_canonical,
+        64,
+        RetainedBatchLimits::new(1, 2),
+        OperationControl::default(),
+    );
+    let target_plan = RetainedPublicationPlan::success(
+        RetainedBlockTablePlan::new(writer_plan(1, 2), 1, 0)
+            .with_canonical_source_mapping_capacity(SOURCE_BLOCKS),
+        RetainedBlockTablePlan::new(writer_plan(1, 2), 1, 0),
+    );
+    let before_target = account.snapshot();
+    let mut target: TestPublication<u64, u64> = target_operation
+        .try_publication_assembly(target_plan)
+        .unwrap_or_else(|_| panic!("dense-map target publication must open"));
+    let after_target = account.snapshot();
+    assert_eq!(
+        after_target
+            .live_retained_allocations()
+            .checked_sub(before_target.live_retained_allocations())
+            .expect("dense-map target allocation count grows"),
+        5,
+        "the canonical map is one physically accounted nested table allocation"
+    );
+    target
+        .try_bind_canonical_source(source_canonical.aggregate(), TestDimension::Bytes)
+        .unwrap_or_else(|_| panic!("dense source map must bind"));
+    assert_eq!(target.test_take_canonical_source_mapping_probe_count(), 0);
+
+    let source_slot = source_slots[SOURCE_BLOCKS - 2];
+    let destination = target
+        .try_share_canonical(source_canonical.aggregate(), source_slot)
+        .unwrap_or_else(|_| panic!("far source slot must share"));
+    assert_eq!(target.test_take_canonical_source_mapping_probe_count(), 1);
+    for _ in 0..REPEATED_LOOKUPS {
+        assert_eq!(
+            target
+                .try_share_canonical(source_canonical.aggregate(), source_slot)
+                .unwrap_or_else(|_| panic!("duplicate dense-map lookup must share")),
+            destination
+        );
+    }
+    assert_eq!(
+        target.test_take_canonical_source_mapping_probe_count(),
+        REPEATED_LOOKUPS,
+        "each lookup probes exactly one dense-map entry regardless of source size"
+    );
+    assert_eq!(target.canonical_len(), 1);
+
+    drop(target);
+    assert!(account.snapshot().live_retained_bytes() < before_target.live_retained_bytes());
+    assert!(
+        account.snapshot().live_retained_allocations() < before_target.live_retained_allocations()
+    );
     drop(source_canonical);
     drop(source_evidence);
     drop(account);
@@ -850,12 +1033,48 @@ fn inherited_blocks_use_fresh_slots_without_new_attribution_or_physical_charge()
 }
 
 #[test]
-fn foreign_aggregate_is_rejected_before_member_access_or_reference_clone() {
-    let factory = account_factory(2);
-    let source_account = account(&factory, u64::MAX, 128);
-    let target_account = account(&factory, u64::MAX, 128);
-    let (source_canonical, source_slot, source_evidence, _) =
-        publish_scalar_source(&source_account);
+fn canonical_source_binding_checks_account_health_before_mapping_work() {
+    let factory = account_factory(1);
+    let account = account(&factory, u64::MAX, 128);
+    let (source_canonical, _, source_evidence, _) = publish_scalar_source(&account);
+    let operation = test_derived_operation_on_account_with_control(
+        &account,
+        &source_canonical,
+        64,
+        RetainedBatchLimits::new(2, 2),
+        OperationControl::default(),
+    );
+    let mut assembly: TestPublication<u64, u64> = operation
+        .try_publication_assembly(publication_plan_with_canonical_source_mapping(1, 1, 1))
+        .unwrap_or_else(|_| panic!("poison-first binding target must open"));
+    let first_poison = account.test_record_poison(AccountPoisonReason::OwnershipGraphUnverified);
+
+    assert!(matches!(
+        assembly.try_bind_canonical_source(source_canonical.aggregate(), TestDimension::Bytes),
+        Err(CanonicalSourceBindError::Publication(
+            RetainedPublicationError::Writer(RetainedWriterError::AccountPoisoned(cause))
+        )) if cause == first_poison
+    ));
+    assert_eq!(assembly.test_take_canonical_source_mapping_probe_count(), 0);
+    assert_eq!(assembly.canonical_len(), 0);
+
+    drop(assembly);
+    drop(source_canonical);
+    drop(source_evidence);
+    drop(account);
+    assert_eq!(
+        factory.snapshot().live_accounts(),
+        1,
+        "an explicitly poisoned account remains quarantined after all handles are dropped"
+    );
+}
+
+#[test]
+fn non_authoritative_same_account_aggregate_is_rejected_before_member_access_or_reference_clone() {
+    let factory = account_factory(1);
+    let account = account(&factory, u64::MAX, 128);
+    let (source_canonical, source_slot, source_evidence, _) = publish_scalar_source(&account);
+    let (bound_canonical, _, bound_evidence, _) = publish_scalar_source(&account);
     let table_shares_before = source_canonical
         .aggregate()
         .inner
@@ -867,22 +1086,21 @@ fn foreign_aggregate_is_rejected_before_member_access_or_reference_clone() {
         .expect("source slot must resolve");
     let _ = take_test_member_lookups();
 
-    let operation = test_operation_on_account_with_control(
-        &target_account,
+    let operation = test_derived_operation_on_account_with_control(
+        &account,
+        &bound_canonical,
         64,
         RetainedBatchLimits::new(2, 2),
         OperationControl::default(),
     );
     let mut assembly: TestPublication<u64, u64> = operation
         .try_publication_assembly(publication_plan(1, 1))
-        .unwrap_or_else(|_| panic!("foreign-account target must open"));
+        .unwrap_or_else(|_| panic!("exact-source target must open"));
     let result = assembly.try_share_canonical(source_canonical.aggregate(), source_slot);
 
     assert!(matches!(
         result,
-        Err(RetainedPublicationError::Writer(
-            RetainedWriterError::ForeignAccount
-        ))
+        Err(RetainedPublicationError::InvalidSourceSlot)
     ));
     assert_eq!(take_test_member_lookups(), 0);
     assert_eq!(assembly.canonical_len(), 0);
@@ -904,12 +1122,13 @@ fn foreign_aggregate_is_rejected_before_member_access_or_reference_clone() {
     drop(handoff_for_test(
         assembly
             .prepare_minimal_fallback()
-            .unwrap_or_else(|_| panic!("foreign rejection must preserve fallback")),
+            .unwrap_or_else(|_| panic!("source rejection must preserve fallback")),
     ));
     drop(source_canonical);
     drop(source_evidence);
-    drop(source_account);
-    drop(target_account);
+    drop(bound_canonical);
+    drop(bound_evidence);
+    drop(account);
     assert_eq!(factory.snapshot().live_accounts(), 0);
 }
 
@@ -924,7 +1143,7 @@ fn share_work_rejection_does_not_clone_or_mutate_the_target_table() {
         .test_member_share_call_count(source_slot.identity)
         .expect("source slot must resolve");
     let physical_before_operation = account.snapshot();
-    let policy = DimensionPolicy::reservable_bytes(15, 15, u64::MAX, u64::MAX)
+    let policy = DimensionPolicy::reservable_bytes(16, 16, u64::MAX, u64::MAX)
         .with_published_outcome_evidence_limit(u64::MAX);
     let limits = LedgerLimits::new(u64::MAX, [(TestDimension::Bytes, policy)]).unwrap();
     let start = RetainedOperationStartPlan::new(
@@ -934,14 +1153,22 @@ fn share_work_rejection_does_not_clone_or_mutate_the_target_table() {
         OutputCommitment::new(TestDimension::Bytes, 1),
         OutputCommitment::new(TestDimension::Bytes, 1),
     );
-    let operation =
-        TestOperation::try_start(OperationControl::default(), limits, &account, start, || {
-            Ok(7_u32)
-        })
-        .unwrap_or_else(|_| panic!("exact share-work operation must start"));
+    let operation = TestOperation::try_start_derived_with_phase_catalog(
+        OperationControl::default(),
+        limits,
+        &[TestPhase::Build],
+        &account,
+        source_canonical.aggregate(),
+        start,
+        || Ok(7_u32),
+    )
+    .unwrap_or_else(|_| panic!("exact share-work operation must start"));
     let mut assembly: TestPublication<u64, u64> = operation
-        .try_publication_assembly(publication_plan(1, 1))
+        .try_publication_assembly(publication_plan_with_canonical_source_mapping(1, 1, 1))
         .unwrap_or_else(|_| panic!("exact share-work tables must open"));
+    assembly
+        .try_bind_canonical_source(source_canonical.aggregate(), TestDimension::Bytes)
+        .unwrap_or_else(|_| panic!("canonical source map must bind before share work"));
     let physical_before_share = account.snapshot();
 
     let result = assembly.try_share_canonical(source_canonical.aggregate(), source_slot);

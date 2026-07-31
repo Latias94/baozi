@@ -473,6 +473,8 @@ struct SharedCanonicalTag;
 struct SharedOutcomeEvidenceTag;
 
 type TestOperation = RetainedStoreOperation<TestOwner, TestProgress, TestUnit>;
+type DerivedTestOperation<'source> =
+    baozi_operation::DerivedRetainedStoreOperation<'source, TestOwner, TestProgress, TestUnit>;
 type SharedCanonical = PublishedCanonicalStore<ScalarSequence<u8>, SharedCanonicalTag>;
 type SharedOutcomeEvidence =
     PublishedOutcomeEvidenceStore<ScalarSequence<u8>, SharedOutcomeEvidenceTag>;
@@ -551,6 +553,30 @@ fn operation(account: &PhysicalStorageAccount) -> (TestOperation, TestKeys) {
     (
         TestOperation::try_start(OperationControl::default(), ledger_plan, account, start)
             .expect("test operation"),
+        keys,
+    )
+}
+
+fn derived_operation<'source>(
+    source: &'source SharedCanonical,
+) -> (DerivedTestOperation<'source>, TestKeys) {
+    let (domain, keys) = keys();
+    let policy = DimensionPolicy::reservable_bytes(u64::MAX, u64::MAX, u64::MAX, u64::MAX)
+        .with_published_outcome_evidence_limit(u64::MAX);
+    let limits = LedgerLimits::new(u64::MAX, [(keys.dimension, policy)]).expect("test limits");
+    let ledger_plan = StoreLedgerPlan::try_new(domain, limits, &[keys.phase]).expect("test ledger");
+    let start = RetainedStoreStartPlan::new(
+        writer_plan(keys, 32, 8),
+        RetainedStoreSharePlan::new(keys.dimension, keys.dimension),
+        StoreFallbackEnvelope::new(91),
+        keys.dimension,
+        1,
+        keys.dimension,
+        1,
+    );
+    (
+        TestOperation::try_start_derived(OperationControl::default(), ledger_plan, source, start)
+            .expect("derived test operation"),
         keys,
     )
 }
@@ -873,13 +899,16 @@ fn inherited_shares_emit_lifecycles_without_copying_or_hot_leaf_lookup() {
     let _lock = collector_test_lock();
     let account = account();
     let source = publish_shared_source(&account);
-    let (operation, keys) = operation(&account);
+    let (operation, keys) = derived_operation(&source.canonical);
     let session = MeasurementSession::begin().expect("collector session");
     let mut assembly = operation
         .try_publication_assembly(publication_plan(keys, 1, 1))
         .expect("shared publication assembly");
+    assembly
+        .try_bind_canonical_source(keys.dimension)
+        .expect("canonical source map");
     let canonical_root = assembly
-        .try_share_canonical(&source.canonical, source.canonical_root)
+        .try_share_canonical(source.canonical_root)
         .expect("shared canonical root");
     let outcome_evidence_root = assembly
         .try_share_outcome_evidence(&source.outcome_evidence, source.outcome_evidence_root)
@@ -943,6 +972,73 @@ fn inherited_shares_emit_lifecycles_without_copying_or_hot_leaf_lookup() {
 }
 
 #[test]
+fn canonical_rewrite_preflight_completes_the_typed_lookup_taxonomy() {
+    let _lock = collector_test_lock();
+    let account = account();
+    let source = publish_shared_source(&account);
+    let (operation, keys) = derived_operation(&source.canonical);
+    let session = MeasurementSession::begin().expect("collector session");
+    let mut assembly = operation
+        .try_publication_assembly(publication_plan(keys, 1, 1))
+        .expect("rewrite publication assembly");
+    assembly
+        .try_bind_canonical_source(keys.dimension)
+        .expect("canonical source map");
+    let canonical_root = assembly
+        .try_rewrite_canonical_sequence(
+            source.canonical_root,
+            SequencePlan::<u8>::new(1).expect("replacement sequence plan"),
+            SharedCanonicalTag,
+            |writer| writer.push(42),
+        )
+        .expect("typed canonical rewrite");
+    let outcome_evidence_root = assembly
+        .try_retain_outcome_evidence_sequence(
+            SequencePlan::<u8>::new(1).expect("replacement evidence plan"),
+            SharedOutcomeEvidenceTag,
+            |writer| writer.push(74),
+        )
+        .expect("replacement outcome evidence");
+    let validated = match assembly.validate_success(
+        canonical_root,
+        outcome_evidence_root,
+        |validation, canonical_root, outcome_evidence_root| {
+            validation
+                .canonical_sequence(canonical_root)
+                .and_then(|view| view.get(0))
+                == Some(42)
+                && validation
+                    .outcome_evidence_sequence(outcome_evidence_root)
+                    .and_then(|view| view.get(0))
+                    == Some(74)
+        },
+    ) {
+        StoreSuccessValidation::Valid(validated) => validated,
+        _ => panic!("rewritten publication must validate"),
+    };
+    let prepared = match validated
+        .try_prepare(final_progress())
+        .expect("rewrite preparation")
+    {
+        PreparedStoreSuccessOutcome::Success(prepared) => prepared,
+        _ => panic!("rewritten publication must prepare success"),
+    };
+    let published = prepared.handoff();
+
+    let report = session
+        .finish()
+        .expect("rewrite preflight must close its checked source lookup");
+    assert_eq!(report.completed_lookups(), 1);
+    assert_eq!(report.rejected_lookups(), 0);
+    assert_eq!(report.lookup_events(), 8);
+    assert_eq!(report.max_lookup_events(), 8);
+    assert_eq!(report.member_probes(), 1);
+    assert_eq!(report.max_member_probes_per_lookup(), 1);
+    assert_eq!(published.canonical.root().get(0), Some(42));
+    assert_eq!(published.outcome_evidence.root().get(0), Some(74));
+}
+
+#[test]
 fn source_gates_keep_public_views_on_the_checked_lookup_seam() {
     let concrete_store = include_str!("../src/concrete_store.rs");
     let terminal_output = include_str!("../src/concrete_store/terminal_output.rs");
@@ -953,29 +1049,40 @@ fn source_gates_keep_public_views_on_the_checked_lookup_seam() {
         terminal_output
             .matches("project_sequence_view(self.raw.aggregate().lookup_member(slot.raw)?)")
             .count(),
-        3,
-        "all canonical, outcome-evidence, and rich-failure sequence views use the checked seam"
+        2,
+        "outcome-evidence and rich-failure sequence views use the checked seam"
+    );
+    assert!(terminal_output.contains("read_canonical_source_sequence(&self.raw, slot)"));
+    assert!(
+        terminal_output
+            .contains("project_sequence_view(source.aggregate().lookup_member(slot.raw)?)")
     );
     assert_eq!(
         terminal_output
             .matches("project_bytes_view(self.raw.aggregate().lookup_member(slot.raw)?)")
             .count(),
-        3,
-        "all binary views use the checked seam"
+        2,
+        "outcome-evidence and rich-failure binary views use the checked seam"
+    );
+    assert!(terminal_output.contains("read_canonical_source_bytes(&self.raw, slot)"));
+    assert!(
+        terminal_output.contains("project_bytes_view(source.aggregate().lookup_member(slot.raw)?)")
     );
     assert_eq!(
         terminal_output
             .matches("project_utf8_view(self.raw.aggregate().lookup_member(slot.raw)?)")
             .count(),
-        3,
-        "all UTF-8 views use the checked seam"
+        2,
+        "outcome-evidence and rich-failure UTF-8 views use the checked seam"
     );
-    assert_eq!(
+    assert!(terminal_output.contains("read_canonical_source_utf8(&self.raw, slot)"));
+    assert!(
+        terminal_output.contains("project_utf8_view(source.aggregate().lookup_member(slot.raw)?)")
+    );
+    assert!(terminal_output.contains("read_canonical_source_records(&self.raw, slot)"));
+    assert!(
         terminal_output
-            .matches("project_canonical_record_view(self.raw.aggregate().lookup_member(slot.raw)?)")
-            .count(),
-        1,
-        "canonical record views use the checked seam"
+            .contains("project_canonical_record_view(source.aggregate().lookup_member(slot.raw)?)")
     );
     assert_eq!(
         terminal_output
@@ -1289,6 +1396,13 @@ fn ast_gate_seals_the_published_lookup_call_graph() {
     let source_share = free_function(capability_items, "share_retained_block");
     assert_lookup_call_shape(
         &source_share.block,
+        &["Err", "TypeId::of", "share_retained_block_runtime"],
+        &[],
+    );
+
+    let source_share_runtime = free_function(capability_items, "share_retained_block_runtime");
+    assert_lookup_call_shape(
+        &source_share_runtime.block,
         &[
             "AssertUnwindSafe",
             "Err",
@@ -1298,6 +1412,12 @@ fn ast_gate_seals_the_published_lookup_call_graph() {
             "Err",
             "Err",
             "Err",
+            "Err",
+            "Err",
+            "Err",
+            "Ok",
+            "RetainedPublicationError::Writer",
+            "RetainedPublicationError::Writer",
             "RetainedPublicationError::Writer",
             "RetainedPublicationError::Writer",
             "RetainedPublicationError::Writer",
@@ -1307,11 +1427,15 @@ fn ast_gate_seals_the_published_lookup_call_graph() {
             "RetainedWriterError::AccountPoisoned",
             "RetainedWriterError::AccountPoisoned",
             "RetainedWriterError::AccountPoisoned",
-            "TypeId::of",
+            "RetainedWriterError::AccountPoisoned",
+            "RetainedWriterError::AccountPoisoned",
+            "canonical_source_mapping_is_exact",
             "catch_unwind",
             "discard_untrusted_panic_payload",
             "drop",
-            "super::try_share_retained_block_after_admission",
+            "drop",
+            "drop",
+            "super::try_share_retained_block_after_admission_runtime",
             "u64::try_from",
         ],
         &[
@@ -1321,10 +1445,11 @@ fn ast_gate_seals_the_published_lookup_call_graph() {
             "belongs_to",
             "belongs_to",
             "belongs_to",
+            "canonical_source_mapping",
             "capacity",
             "checked_add",
-            "len",
-            "len",
+            "committed_summary_is_bounded",
+            "is_some",
             "len",
             "map_err",
             "map_err",
@@ -1336,7 +1461,11 @@ fn ast_gate_seals_the_published_lookup_call_graph() {
             "record_poison",
             "record_poison",
             "record_poison",
-            "source_allocation",
+            "record_poison",
+            "record_poison",
+            "require_canonical_source_binding",
+            "rewrite_source_allocation",
+            "set_id",
             "table_mut_during_construction",
             "try_begin_account_preflight",
         ],

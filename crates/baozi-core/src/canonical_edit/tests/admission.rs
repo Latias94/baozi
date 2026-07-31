@@ -194,9 +194,7 @@ fn commit_admission_covers_three_primitive_rebind_growth_before_allocation() {
         CanonicalEditCloneContext::new(SceneValidationLimits::default(), &mut planning_control);
     let edit_plan = CanonicalEditPlan::try_new(
         &input,
-        CanonicalInvalidations {
-            scene_bounds: Some(DerivedAbsenceReason::Invalidated),
-        },
+        CanonicalInvalidations::scene_bounds_invalidated(),
         &mut planning_context,
     )
     .expect("fixture edit plan");

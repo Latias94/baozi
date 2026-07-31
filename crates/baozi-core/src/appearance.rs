@@ -262,6 +262,12 @@ pub enum MaterialFactorField {
     LegacyEmissive,
     LegacyShininess,
     LegacyOpacity,
+    Clearcoat,
+    ClearcoatRoughness,
+    Transmission,
+    Thickness,
+    SheenColor,
+    SheenRoughness,
 }
 
 /// Why a typed material factor was rejected.
@@ -426,6 +432,80 @@ impl LegacyMaterialFactors {
     }
 }
 
+/// Stable supplemental PBR factors shared by clearcoat, transmission, thickness, and sheen.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SupplementalPbrFactors {
+    clearcoat: f32,
+    clearcoat_roughness: f32,
+    transmission: f32,
+    thickness: f32,
+    sheen_color: Vec3,
+    sheen_roughness: f32,
+}
+
+impl SupplementalPbrFactors {
+    pub fn try_new(
+        clearcoat: f32,
+        clearcoat_roughness: f32,
+        transmission: f32,
+        thickness: f32,
+        sheen_color: Vec3,
+        sheen_roughness: f32,
+    ) -> Result<Self, MaterialFactorError> {
+        validate_unit_factor(clearcoat, MaterialFactorField::Clearcoat)?;
+        validate_unit_factor(clearcoat_roughness, MaterialFactorField::ClearcoatRoughness)?;
+        validate_unit_factor(transmission, MaterialFactorField::Transmission)?;
+        validate_nonnegative_factor(thickness, MaterialFactorField::Thickness)?;
+        validate_nonnegative_vec3(sheen_color, MaterialFactorField::SheenColor)?;
+        validate_unit_factor(sheen_roughness, MaterialFactorField::SheenRoughness)?;
+        Ok(Self {
+            clearcoat,
+            clearcoat_roughness,
+            transmission,
+            thickness,
+            sheen_color,
+            sheen_roughness,
+        })
+    }
+
+    pub const fn clearcoat(self) -> f32 {
+        self.clearcoat
+    }
+
+    pub const fn clearcoat_roughness(self) -> f32 {
+        self.clearcoat_roughness
+    }
+
+    pub const fn transmission(self) -> f32 {
+        self.transmission
+    }
+
+    pub const fn thickness(self) -> f32 {
+        self.thickness
+    }
+
+    pub const fn sheen_color(self) -> Vec3 {
+        self.sheen_color
+    }
+
+    pub const fn sheen_roughness(self) -> f32 {
+        self.sheen_roughness
+    }
+}
+
+impl Default for SupplementalPbrFactors {
+    fn default() -> Self {
+        Self {
+            clearcoat: 0.0,
+            clearcoat_roughness: 0.0,
+            transmission: 0.0,
+            thickness: 0.0,
+            sheen_color: Vec3::ZERO,
+            sheen_roughness: 0.0,
+        }
+    }
+}
+
 /// Independent typed factor groups retained by one material.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct MaterialFactors {
@@ -433,6 +513,7 @@ pub struct MaterialFactors {
     pbr_metallic_roughness: Option<PbrMetallicRoughnessFactors>,
     pbr_specular_glossiness: Option<PbrSpecularGlossinessFactors>,
     legacy: Option<LegacyMaterialFactors>,
+    supplemental_pbr: SupplementalPbrFactors,
 }
 
 impl MaterialFactors {
@@ -442,12 +523,29 @@ impl MaterialFactors {
         pbr_specular_glossiness: Option<PbrSpecularGlossinessFactors>,
         legacy: Option<LegacyMaterialFactors>,
     ) -> Result<Self, MaterialFactorError> {
+        Self::try_new_with_supplemental_pbr(
+            emissive,
+            pbr_metallic_roughness,
+            pbr_specular_glossiness,
+            legacy,
+            SupplementalPbrFactors::default(),
+        )
+    }
+
+    pub fn try_new_with_supplemental_pbr(
+        emissive: Vec3,
+        pbr_metallic_roughness: Option<PbrMetallicRoughnessFactors>,
+        pbr_specular_glossiness: Option<PbrSpecularGlossinessFactors>,
+        legacy: Option<LegacyMaterialFactors>,
+        supplemental_pbr: SupplementalPbrFactors,
+    ) -> Result<Self, MaterialFactorError> {
         validate_nonnegative_vec3(emissive, MaterialFactorField::Emissive)?;
         Ok(Self {
             emissive,
             pbr_metallic_roughness,
             pbr_specular_glossiness,
             legacy,
+            supplemental_pbr,
         })
     }
 
@@ -457,6 +555,14 @@ impl MaterialFactors {
             pbr_metallic_roughness: None,
             pbr_specular_glossiness: None,
             legacy: None,
+            supplemental_pbr: SupplementalPbrFactors {
+                clearcoat: 0.0,
+                clearcoat_roughness: 0.0,
+                transmission: 0.0,
+                thickness: 0.0,
+                sheen_color: Vec3::ZERO,
+                sheen_roughness: 0.0,
+            },
         }
     }
 
@@ -474,6 +580,10 @@ impl MaterialFactors {
 
     pub const fn legacy(self) -> Option<LegacyMaterialFactors> {
         self.legacy
+    }
+
+    pub const fn supplemental_pbr(self) -> SupplementalPbrFactors {
+        self.supplemental_pbr
     }
 }
 
@@ -546,9 +656,7 @@ pub enum TextureRole {
     Occlusion,
     Emissive,
     Opacity,
-    Height,
     Displacement,
-    Lightmap,
     Clearcoat,
     ClearcoatRoughness,
     ClearcoatNormal,
@@ -580,9 +688,7 @@ impl TextureRole {
             | Self::Occlusion
             | Self::Emissive
             | Self::Opacity
-            | Self::Height
             | Self::Displacement
-            | Self::Lightmap
             | Self::Clearcoat
             | Self::ClearcoatRoughness
             | Self::ClearcoatNormal
@@ -605,9 +711,7 @@ impl TextureRole {
             Self::Occlusion => TextureRoleKind::Occlusion,
             Self::Emissive => TextureRoleKind::Emissive,
             Self::Opacity => TextureRoleKind::Opacity,
-            Self::Height => TextureRoleKind::Height,
             Self::Displacement => TextureRoleKind::Displacement,
-            Self::Lightmap => TextureRoleKind::Lightmap,
             Self::Clearcoat => TextureRoleKind::Clearcoat,
             Self::ClearcoatRoughness => TextureRoleKind::ClearcoatRoughness,
             Self::ClearcoatNormal => TextureRoleKind::ClearcoatNormal,
@@ -625,7 +729,6 @@ impl TextureRole {
             | Self::Diffuse
             | Self::Specular
             | Self::Emissive
-            | Self::Lightmap
             | Self::SheenColor => TextureUsageClass::Color,
             Self::Metallic
             | Self::Roughness
@@ -633,7 +736,6 @@ impl TextureRole {
             | Self::Normal
             | Self::Occlusion
             | Self::Opacity
-            | Self::Height
             | Self::Displacement
             | Self::Clearcoat
             | Self::ClearcoatRoughness
@@ -647,7 +749,8 @@ impl TextureRole {
 
     const fn channel_lane_range(&self) -> Option<(u8, u8)> {
         match self {
-            Self::BaseColor | Self::Diffuse | Self::Specular | Self::Lightmap => Some((3, 4)),
+            Self::BaseColor | Self::Diffuse => Some((3, 4)),
+            Self::Specular => Some((3, 3)),
             Self::Emissive | Self::SheenColor => Some((3, 3)),
             Self::MetallicRoughness => Some((2, 2)),
             Self::Normal | Self::ClearcoatNormal => Some((2, 3)),
@@ -655,7 +758,6 @@ impl TextureRole {
             | Self::Roughness
             | Self::Occlusion
             | Self::Opacity
-            | Self::Height
             | Self::Displacement
             | Self::Clearcoat
             | Self::ClearcoatRoughness
@@ -680,9 +782,7 @@ pub enum TextureRoleKind {
     Occlusion,
     Emissive,
     Opacity,
-    Height,
     Displacement,
-    Lightmap,
     Clearcoat,
     ClearcoatRoughness,
     ClearcoatNormal,
@@ -691,6 +791,34 @@ pub enum TextureRoleKind {
     SheenColor,
     SheenRoughness,
     Namespaced,
+}
+
+impl TextureRoleKind {
+    pub(crate) const BUILTIN_COUNT: usize = 18;
+
+    const fn builtin_index(self) -> Option<usize> {
+        match self {
+            Self::BaseColor => Some(0),
+            Self::Diffuse => Some(1),
+            Self::Specular => Some(2),
+            Self::Metallic => Some(3),
+            Self::Roughness => Some(4),
+            Self::MetallicRoughness => Some(5),
+            Self::Normal => Some(6),
+            Self::Occlusion => Some(7),
+            Self::Emissive => Some(8),
+            Self::Opacity => Some(9),
+            Self::Displacement => Some(10),
+            Self::Clearcoat => Some(11),
+            Self::ClearcoatRoughness => Some(12),
+            Self::ClearcoatNormal => Some(13),
+            Self::Transmission => Some(14),
+            Self::Thickness => Some(15),
+            Self::SheenColor => Some(16),
+            Self::SheenRoughness => Some(17),
+            Self::Namespaced => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1141,9 +1269,9 @@ pub enum TextureSourceKeyError {
 
 /// The stable owner-local authority key of one texture binding.
 ///
-/// An unkeyed role has one canonical authority. Formats that admit ordered
-/// layers assign distinct bounded source keys, making `(role, source_key)` the
-/// deterministic authority without treating a filename as identity.
+/// Every built-in role has one canonical authority regardless of source key.
+/// A namespaced role may use a bounded source key to distinguish authorities
+/// defined by its owning schema without treating a filename as identity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TextureBindingAuthorityKey<'a> {
     role: &'a TextureRole,
@@ -1157,6 +1285,86 @@ impl<'a> TextureBindingAuthorityKey<'a> {
 
     pub const fn source_key(self) -> Option<&'a TextureSourceKey> {
         self.source_key
+    }
+}
+
+/// Borrowed material-use semantics independent from texture identity and storage layout.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct TextureBindingSemanticsRef<'a> {
+    role: &'a TextureRole,
+    coordinate_source: &'a TextureCoordinateSource,
+    channel_mapping: &'a TextureChannelMapping,
+    color_interpretation: &'a ColorInterpretation,
+    transform: TextureTransform,
+    strength: TextureStrength,
+    blend: &'a TextureBlendOperation,
+    source_key: Option<&'a TextureSourceKey>,
+}
+
+impl<'a> TextureBindingSemanticsRef<'a> {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) const fn new(
+        role: &'a TextureRole,
+        coordinate_source: &'a TextureCoordinateSource,
+        channel_mapping: &'a TextureChannelMapping,
+        color_interpretation: &'a ColorInterpretation,
+        transform: TextureTransform,
+        strength: TextureStrength,
+        blend: &'a TextureBlendOperation,
+        source_key: Option<&'a TextureSourceKey>,
+    ) -> Self {
+        Self {
+            role,
+            coordinate_source,
+            channel_mapping,
+            color_interpretation,
+            transform,
+            strength,
+            blend,
+            source_key,
+        }
+    }
+
+    pub(crate) const fn role(self) -> &'a TextureRole {
+        self.role
+    }
+
+    pub(crate) const fn coordinate_source(self) -> &'a TextureCoordinateSource {
+        self.coordinate_source
+    }
+
+    pub(crate) const fn channel_mapping(self) -> &'a TextureChannelMapping {
+        self.channel_mapping
+    }
+
+    pub(crate) const fn color_interpretation(self) -> &'a ColorInterpretation {
+        self.color_interpretation
+    }
+
+    pub(crate) const fn transform(self) -> TextureTransform {
+        self.transform
+    }
+
+    pub(crate) const fn strength(self) -> TextureStrength {
+        self.strength
+    }
+
+    pub(crate) const fn blend(self) -> &'a TextureBlendOperation {
+        self.blend
+    }
+
+    pub(crate) const fn source_key(self) -> Option<&'a TextureSourceKey> {
+        self.source_key
+    }
+
+    const fn authority_key(self) -> TextureBindingAuthorityKey<'a> {
+        TextureBindingAuthorityKey {
+            role: self.role,
+            source_key: match self.role {
+                TextureRole::Namespaced { .. } => self.source_key,
+                _ => None,
+            },
+        }
     }
 }
 
@@ -1195,8 +1403,16 @@ impl TextureBinding {
         provenance: Provenance,
         extensions: impl IntoIterator<Item = ExtensionEntry>,
     ) -> Result<Self, AppearanceBuildError> {
-        validate_binding_color_interpretation(&role, &color_interpretation)?;
-        validate_binding_channel_mapping(&role, &channel_mapping)?;
+        validate_texture_binding_semantics(TextureBindingSemanticsRef::new(
+            &role,
+            &coordinate_source,
+            &channel_mapping,
+            &color_interpretation,
+            transform,
+            strength,
+            &blend,
+            source_key.as_ref(),
+        ))?;
         let extensions = try_collect_extension_entries(
             extensions,
             AppearanceExtensionOwner::TextureBinding,
@@ -1301,8 +1517,24 @@ impl TextureBinding {
     pub const fn authority_key(&self) -> TextureBindingAuthorityKey<'_> {
         TextureBindingAuthorityKey {
             role: &self.role,
-            source_key: self.source_key.as_ref(),
+            source_key: match &self.role {
+                TextureRole::Namespaced { .. } => self.source_key.as_ref(),
+                _ => None,
+            },
         }
+    }
+
+    pub(crate) const fn semantics(&self) -> TextureBindingSemanticsRef<'_> {
+        TextureBindingSemanticsRef::new(
+            &self.role,
+            &self.coordinate_source,
+            &self.channel_mapping,
+            &self.color_interpretation,
+            self.transform,
+            self.strength,
+            &self.blend,
+            self.source_key.as_ref(),
+        )
     }
 
     /// Returns every schema reference that the Scene validator must resolve as
@@ -1460,6 +1692,47 @@ impl<'a> TextureBindingView<'a> {
     }
 }
 
+/// Borrowed material-level semantics independent from retained representation.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct MaterialSemanticsRef<'a> {
+    shading_model: &'a ShadingModel,
+    alpha_mode: &'a AlphaMode,
+    double_sided: bool,
+    factors: MaterialFactors,
+}
+
+impl<'a> MaterialSemanticsRef<'a> {
+    pub(crate) const fn new(
+        shading_model: &'a ShadingModel,
+        alpha_mode: &'a AlphaMode,
+        double_sided: bool,
+        factors: MaterialFactors,
+    ) -> Self {
+        Self {
+            shading_model,
+            alpha_mode,
+            double_sided,
+            factors,
+        }
+    }
+
+    pub(crate) const fn shading_model(self) -> &'a ShadingModel {
+        self.shading_model
+    }
+
+    pub(crate) const fn alpha_mode(self) -> &'a AlphaMode {
+        self.alpha_mode
+    }
+
+    pub(crate) const fn double_sided(self) -> bool {
+        self.double_sided
+    }
+
+    pub(crate) const fn factors(self) -> MaterialFactors {
+        self.factors
+    }
+}
+
 /// One canonical material with independent typed factor groups.
 ///
 /// Material and binding extensions are descriptive/source facts only. Every
@@ -1499,7 +1772,12 @@ impl CanonicalMaterialDescriptor {
         provenance: Provenance,
         extensions: impl IntoIterator<Item = ExtensionEntry>,
     ) -> Result<Self, AppearanceBuildError> {
-        validate_required_factor_group(&shading_model, factors)?;
+        validate_material_semantics(MaterialSemanticsRef::new(
+            &shading_model,
+            &alpha_mode,
+            double_sided,
+            factors,
+        ))?;
         let (texture_bindings, texture_references) =
             try_collect_canonical_texture_bindings(texture_bindings)?;
         let candidate = Material::try_from_prepared_parts(
@@ -1545,14 +1823,21 @@ impl Material {
         provenance: Provenance,
         extensions: impl IntoIterator<Item = ExtensionEntry>,
     ) -> Result<Self, AppearanceBuildError> {
-        validate_required_factor_group(&shading_model, factors)?;
+        validate_material_semantics(MaterialSemanticsRef::new(
+            &shading_model,
+            &alpha_mode,
+            double_sided,
+            factors,
+        ))?;
         validate_collection_size::<TextureBinding>(
             AppearanceBuildResource::TextureBindings,
             texture_bindings.len(),
             MAX_TEXTURE_BINDINGS_PER_MATERIAL,
             MAX_APPEARANCE_COLLECTION_STORAGE_BYTES,
         )?;
-        validate_unique_binding_authorities(&texture_bindings)?;
+        validate_material_texture_binding_semantics(
+            texture_bindings.iter().map(TextureBinding::semantics),
+        )?;
         let extensions = try_collect_extension_entries(
             extensions,
             AppearanceExtensionOwner::Material,
@@ -1625,6 +1910,15 @@ impl Material {
 
     pub const fn factors(&self) -> MaterialFactors {
         self.factors
+    }
+
+    pub(crate) const fn semantics(&self) -> MaterialSemanticsRef<'_> {
+        MaterialSemanticsRef::new(
+            &self.shading_model,
+            &self.alpha_mode,
+            self.double_sided,
+            self.factors,
+        )
     }
 
     pub(crate) fn texture_bindings(&self) -> &[TextureBinding] {
@@ -1803,10 +2097,29 @@ pub enum AppearanceBuildError {
         actual: u8,
     },
 
+    #[error("texture role {role:?} violates its {requirement:?} strength requirement")]
+    IncompatibleStrength {
+        role: TextureRoleKind,
+        requirement: TextureStrengthRequirement,
+    },
+
+    #[error("built-in texture role {role:?} requires Replace blend semantics")]
+    BuiltInRoleRequiresReplace { role: TextureRoleKind },
+
     #[error("texture binding at index {duplicate_index} duplicates authority at {first_index}")]
     DuplicateBindingAuthority {
         first_index: usize,
         duplicate_index: usize,
+    },
+
+    #[error(
+        "texture role {duplicate_role:?} at index {duplicate_index} conflicts with {first_role:?} authority at index {first_index}"
+    )]
+    ConflictingBindingRoles {
+        first_index: usize,
+        first_role: TextureRoleKind,
+        duplicate_index: usize,
+        duplicate_role: TextureRoleKind,
     },
 
     #[error("extension collection for {owner:?} is invalid")]
@@ -1836,6 +2149,15 @@ pub enum AppearanceBuildError {
     AllocationFailed { resource: AppearanceBuildResource },
 }
 
+/// The role-specific numeric contract for one texture binding strength.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TextureStrengthRequirement {
+    UnitInterval,
+    Nonnegative,
+    ExactlyOne,
+    FiniteSigned,
+}
+
 #[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AppearanceRetainedFootprintError {
     #[error("appearance retained-footprint accounting overflowed")]
@@ -1854,10 +2176,11 @@ fn unwrap_uncontrolled_retained_footprint(
     }
 }
 
-fn validate_required_factor_group(
-    shading_model: &ShadingModel,
-    factors: MaterialFactors,
+pub(crate) fn validate_material_semantics(
+    semantics: MaterialSemanticsRef<'_>,
 ) -> Result<(), AppearanceBuildError> {
+    let shading_model = semantics.shading_model();
+    let factors = semantics.factors();
     let required = match shading_model {
         ShadingModel::PbrMetallicRoughness if factors.pbr_metallic_roughness.is_none() => {
             Some(MaterialFactorGroup::PbrMetallicRoughness)
@@ -1913,6 +2236,15 @@ fn validate_binding_color_interpretation(
     }
 }
 
+pub(crate) fn validate_texture_binding_semantics(
+    semantics: TextureBindingSemanticsRef<'_>,
+) -> Result<(), AppearanceBuildError> {
+    validate_binding_color_interpretation(semantics.role(), semantics.color_interpretation())?;
+    validate_binding_channel_mapping(semantics.role(), semantics.channel_mapping())?;
+    validate_binding_strength(semantics.role(), semantics.strength())?;
+    validate_binding_blend(semantics.role(), semantics.blend())
+}
+
 fn validate_binding_channel_mapping(
     role: &TextureRole,
     mapping: &TextureChannelMapping,
@@ -1935,25 +2267,126 @@ fn validate_binding_channel_mapping(
     }
 }
 
-fn validate_unique_binding_authorities(
-    bindings: &[TextureBinding],
+fn validate_binding_strength(
+    role: &TextureRole,
+    strength: TextureStrength,
 ) -> Result<(), AppearanceBuildError> {
-    let mut first_indices = HashMap::new();
-    first_indices.try_reserve(bindings.len()).map_err(|_| {
-        AppearanceBuildError::AllocationFailed {
-            resource: AppearanceBuildResource::BindingAuthorityScratch,
+    let requirement = match role {
+        TextureRole::BaseColor
+        | TextureRole::Diffuse
+        | TextureRole::Specular
+        | TextureRole::Occlusion
+        | TextureRole::Opacity => TextureStrengthRequirement::UnitInterval,
+        TextureRole::Emissive | TextureRole::SheenColor => TextureStrengthRequirement::Nonnegative,
+        TextureRole::Metallic
+        | TextureRole::Roughness
+        | TextureRole::MetallicRoughness
+        | TextureRole::Clearcoat
+        | TextureRole::ClearcoatRoughness
+        | TextureRole::Transmission
+        | TextureRole::Thickness
+        | TextureRole::SheenRoughness => TextureStrengthRequirement::ExactlyOne,
+        TextureRole::Normal | TextureRole::ClearcoatNormal | TextureRole::Displacement => {
+            TextureStrengthRequirement::FiniteSigned
         }
-    })?;
+        TextureRole::Namespaced { .. } => return Ok(()),
+    };
+    let value = strength.get();
+    let valid = match requirement {
+        TextureStrengthRequirement::UnitInterval => (0.0..=1.0).contains(&value),
+        TextureStrengthRequirement::Nonnegative => value >= 0.0,
+        TextureStrengthRequirement::ExactlyOne => value == 1.0,
+        TextureStrengthRequirement::FiniteSigned => value.is_finite(),
+    };
+    if valid {
+        Ok(())
+    } else {
+        Err(AppearanceBuildError::IncompatibleStrength {
+            role: role.kind(),
+            requirement,
+        })
+    }
+}
 
-    for (duplicate_index, binding) in bindings.iter().enumerate() {
-        let authority = binding.authority_key();
-        if let Some(&first_index) = first_indices.get(&authority) {
-            return Err(AppearanceBuildError::DuplicateBindingAuthority {
+fn validate_binding_blend(
+    role: &TextureRole,
+    blend: &TextureBlendOperation,
+) -> Result<(), AppearanceBuildError> {
+    if matches!(role, TextureRole::Namespaced { .. })
+        || matches!(blend, TextureBlendOperation::Replace)
+    {
+        Ok(())
+    } else {
+        Err(AppearanceBuildError::BuiltInRoleRequiresReplace { role: role.kind() })
+    }
+}
+
+pub(crate) fn validate_material_texture_binding_semantics<'a>(
+    bindings: impl ExactSizeIterator<Item = TextureBindingSemanticsRef<'a>>,
+) -> Result<(), AppearanceBuildError> {
+    let binding_count = bindings.len();
+    let mut builtin_first_indices = [None; TextureRoleKind::BUILTIN_COUNT];
+    let mut namespaced_first_indices = HashMap::new();
+    let mut namespaced_capacity_reserved = false;
+    let mut metallic = None;
+    let mut roughness = None;
+    let mut metallic_roughness = None;
+    for (duplicate_index, binding) in bindings.enumerate() {
+        let role = binding.role().kind();
+        if let Some(role_index) = role.builtin_index() {
+            let first_index = &mut builtin_first_indices[role_index];
+            if let Some(first_index) = *first_index {
+                return Err(AppearanceBuildError::DuplicateBindingAuthority {
+                    first_index,
+                    duplicate_index,
+                });
+            }
+            *first_index = Some(duplicate_index);
+        } else {
+            if !namespaced_capacity_reserved {
+                namespaced_first_indices
+                    .try_reserve(binding_count)
+                    .map_err(|_| AppearanceBuildError::AllocationFailed {
+                        resource: AppearanceBuildResource::BindingAuthorityScratch,
+                    })?;
+                namespaced_capacity_reserved = true;
+            }
+            let authority = binding.authority_key();
+            if let Some(&first_index) = namespaced_first_indices.get(&authority) {
+                return Err(AppearanceBuildError::DuplicateBindingAuthority {
+                    first_index,
+                    duplicate_index,
+                });
+            }
+            namespaced_first_indices.insert(authority, duplicate_index);
+        }
+
+        let conflict = match role {
+            TextureRoleKind::Metallic => {
+                metallic_roughness.map(|index| (index, TextureRoleKind::MetallicRoughness))
+            }
+            TextureRoleKind::Roughness => {
+                metallic_roughness.map(|index| (index, TextureRoleKind::MetallicRoughness))
+            }
+            TextureRoleKind::MetallicRoughness => metallic
+                .map(|index| (index, TextureRoleKind::Metallic))
+                .or_else(|| roughness.map(|index| (index, TextureRoleKind::Roughness))),
+            _ => None,
+        };
+        if let Some((first_index, first_role)) = conflict {
+            return Err(AppearanceBuildError::ConflictingBindingRoles {
                 first_index,
+                first_role,
                 duplicate_index,
+                duplicate_role: role,
             });
         }
-        first_indices.insert(authority, duplicate_index);
+        match role {
+            TextureRoleKind::Metallic => metallic = Some(duplicate_index),
+            TextureRoleKind::Roughness => roughness = Some(duplicate_index),
+            TextureRoleKind::MetallicRoughness => metallic_roughness = Some(duplicate_index),
+            _ => {}
+        }
     }
     Ok(())
 }
@@ -2391,6 +2824,29 @@ mod tests {
     }
 
     #[test]
+    fn supplemental_pbr_factors_are_typed_and_independent() {
+        let supplemental =
+            SupplementalPbrFactors::try_new(0.8, 0.2, 0.6, 1.5, Vec3::new(0.4, 0.3, 0.2), 0.7)
+                .expect("supplemental PBR factors should be valid");
+        let factors = MaterialFactors::try_new_with_supplemental_pbr(
+            Vec3::ZERO,
+            None,
+            None,
+            None,
+            supplemental,
+        )
+        .expect("supplemental factors should compose independently");
+
+        assert_eq!(factors.supplemental_pbr(), supplemental);
+        assert_eq!(
+            SupplementalPbrFactors::try_new(0.0, 0.0, 0.0, -0.1, Vec3::ZERO, 0.0,),
+            Err(MaterialFactorError::Negative {
+                field: MaterialFactorField::Thickness,
+            })
+        );
+    }
+
+    #[test]
     fn invalid_numeric_factors_and_binding_values_fail_closed() {
         assert_eq!(
             PbrMetallicRoughnessFactors::try_new(Color::WHITE, f32::NAN, 0.5),
@@ -2574,7 +3030,7 @@ mod tests {
     }
 
     #[test]
-    fn distinct_source_keys_admit_ordered_layers_for_one_role() {
+    fn distinct_source_keys_do_not_create_builtin_layer_authority() {
         let (_arena, provenance) = test_provenance_fixture();
         let first = binding(
             texture_index(0),
@@ -2593,7 +3049,138 @@ mod tests {
             provenance,
         );
 
-        assert!(unlit_material([first, second], provenance).is_ok());
+        assert_eq!(first.authority_key().source_key(), None);
+        assert_eq!(second.authority_key().source_key(), None);
+
+        assert_eq!(
+            unlit_material([first, second], provenance),
+            Err(AppearanceBuildError::DuplicateBindingAuthority {
+                first_index: 0,
+                duplicate_index: 1,
+            })
+        );
+    }
+
+    #[test]
+    fn specular_requires_exactly_three_mapped_lanes() {
+        let (_arena, provenance) = test_provenance_fixture();
+        let result = TextureBinding::try_new_unchecked_reference_for_test(
+            texture_index(0),
+            TextureRole::Specular,
+            TextureCoordinateSource::uv_set(0).expect("UV set should be valid"),
+            TextureChannelMapping::swizzle(TextureChannelSwizzle::RGBA),
+            ColorInterpretation::LinearColor,
+            TextureTransform::IDENTITY,
+            TextureStrength::ONE,
+            TextureBlendOperation::Replace,
+            None,
+            provenance,
+            [],
+        );
+
+        assert_eq!(
+            result,
+            Err(AppearanceBuildError::IncompatibleChannelCount {
+                role: TextureRoleKind::Specular,
+                minimum: 3,
+                maximum: 3,
+                actual: 4,
+            })
+        );
+    }
+
+    #[test]
+    fn builtin_binding_strength_and_blend_are_role_constrained() {
+        let (_arena, provenance) = test_provenance_fixture();
+        let invalid_strength = TextureBinding::try_new_unchecked_reference_for_test(
+            texture_index(0),
+            TextureRole::Metallic,
+            TextureCoordinateSource::uv_set(0).expect("UV set should be valid"),
+            TextureChannelMapping::swizzle(TextureChannelSwizzle::RED),
+            ColorInterpretation::Data,
+            TextureTransform::IDENTITY,
+            TextureStrength::try_new(0.5).expect("finite strength should construct"),
+            TextureBlendOperation::Replace,
+            None,
+            provenance,
+            [],
+        );
+        assert_eq!(
+            invalid_strength,
+            Err(AppearanceBuildError::IncompatibleStrength {
+                role: TextureRoleKind::Metallic,
+                requirement: TextureStrengthRequirement::ExactlyOne,
+            })
+        );
+
+        let invalid_blend = TextureBinding::try_new_unchecked_reference_for_test(
+            texture_index(0),
+            TextureRole::BaseColor,
+            TextureCoordinateSource::uv_set(0).expect("UV set should be valid"),
+            TextureChannelMapping::swizzle(TextureChannelSwizzle::RGB),
+            ColorInterpretation::SrgbColor,
+            TextureTransform::IDENTITY,
+            TextureStrength::ONE,
+            TextureBlendOperation::Multiply,
+            None,
+            provenance,
+            [],
+        );
+        assert_eq!(
+            invalid_blend,
+            Err(AppearanceBuildError::BuiltInRoleRequiresReplace {
+                role: TextureRoleKind::BaseColor,
+            })
+        );
+
+        assert!(
+            TextureBinding::try_new_unchecked_reference_for_test(
+                texture_index(0),
+                TextureRole::Normal,
+                TextureCoordinateSource::uv_set(0).expect("UV set should be valid"),
+                TextureChannelMapping::swizzle(TextureChannelSwizzle::RGB),
+                ColorInterpretation::Data,
+                TextureTransform::IDENTITY,
+                TextureStrength::try_new(-1.0).expect("finite signed strength should construct"),
+                TextureBlendOperation::Replace,
+                None,
+                provenance,
+                [],
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn combined_metallic_roughness_rejects_separate_factor_authority() {
+        let (_arena, provenance) = test_provenance_fixture();
+        let combined = binding(
+            texture_index(0),
+            TextureRole::MetallicRoughness,
+            ColorInterpretation::Data,
+            TextureChannelSwizzle::try_new(&[TextureChannel::Blue, TextureChannel::Green])
+                .expect("two-lane mapping should be valid"),
+            None,
+            provenance,
+        );
+        let separate = binding(
+            texture_index(1),
+            TextureRole::Metallic,
+            ColorInterpretation::Data,
+            TextureChannelSwizzle::RED,
+            None,
+            provenance,
+        );
+
+        assert_eq!(
+            unlit_material([combined, separate], provenance),
+            Err(AppearanceBuildError::ConflictingBindingRoles {
+                first_index: 0,
+                first_role: TextureRoleKind::MetallicRoughness,
+                duplicate_index: 1,
+                duplicate_role: TextureRoleKind::Metallic,
+            })
+        );
     }
 
     #[test]
@@ -2733,12 +3320,15 @@ mod tests {
     fn qualified_texture_binding_count_accepts_maximum_and_rejects_next() {
         let (_arena, provenance) = test_provenance_fixture();
         let generation = SceneGenerationId::allocate().expect("generation should allocate");
+        let layered_role_schema = schema("test:layered-role");
         let bindings = |count| {
-            (0..count).map(|index| {
+            let layered_role_schema = layered_role_schema.clone();
+            (0..count).map(move |index| {
                 let index = u32::try_from(index).expect("fixture index should fit");
                 CanonicalTextureBindingDescriptor::try_new(
                     TextureId::new(generation, index),
-                    TextureRole::BaseColor,
+                    TextureRole::try_namespaced(Some(layered_role_schema.clone()))
+                        .expect("layered role schema should be accepted"),
                     TextureCoordinateSource::uv_set(0).expect("UV set should be valid"),
                     TextureChannelMapping::swizzle(TextureChannelSwizzle::RGB),
                     ColorInterpretation::SrgbColor,

@@ -1,0 +1,713 @@
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use baozi_operation::{
+    CancellationToken, OperationControl, PhysicalStorageAccount, PhysicalStorageAccountSnapshot,
+    StorePreparationFailureClass, StoreTerminalCause,
+};
+
+use crate::SceneValidationLimits;
+use crate::derived::DerivedAbsenceReason;
+use crate::entity::AuthoredTransform;
+use crate::identity::{
+    NodeId, SceneEntityKind, SceneGenerationError, SceneGenerationId, SceneLookupError,
+};
+use crate::math::{Mat4, Quat, Vec3};
+use crate::remap::RemapChange;
+
+use super::super::NodeSceneSuccessParts;
+use super::super::tests::{
+    build_gltf_capability_scene_for_probe, single_trs_batch, test_account, test_factory,
+    test_limits,
+};
+use super::CanonicalRemapSet;
+use super::source::{
+    NodeTransformEditStart, NodeTransformEditStartError, try_begin_node_transform_edit,
+};
+use crate::canonical_scene::store::construction::SceneConstructionOperation;
+
+fn build_single_trs_scene(
+    account: &PhysicalStorageAccount,
+    generation_source: &AtomicU64,
+) -> NodeSceneSuccessParts {
+    try_build_single_trs_scene(account, generation_source)
+        .expect("single-node edit fixture must publish success")
+}
+
+fn try_build_single_trs_scene(
+    account: &PhysicalStorageAccount,
+    generation_source: &AtomicU64,
+) -> Option<NodeSceneSuccessParts> {
+    let operation = SceneConstructionOperation::with_account(account, test_limits()).ok()?;
+    let validated = operation
+        .try_validate_node_batch(single_trs_batch(), SceneValidationLimits::default())
+        .ok()?;
+    let prepared = validated
+        .prepare_with_generation_source(|| SceneGenerationId::reserve_from(generation_source))
+        .ok()?;
+    match prepared.handoff() {
+        super::super::NodeSceneConstructionTerminal::Success(parts) => Some(parts),
+        terminal => {
+            drop(terminal);
+            None
+        }
+    }
+}
+
+fn changed_trs(translation_x: f32) -> AuthoredTransform {
+    AuthoredTransform::try_trs(
+        Vec3::new(translation_x, 0.0, 0.0),
+        Quat::IDENTITY,
+        Vec3::new(1.0, 1.0, 1.0),
+    )
+    .expect("finite transform-edit fixture")
+}
+
+fn changed_matrix(translation_x: f32) -> AuthoredTransform {
+    AuthoredTransform::try_matrix(Mat4 {
+        cols: [
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [translation_x, 0.0, 0.0, 1.0],
+        ],
+    })
+    .expect("finite affine transform-edit fixture")
+}
+
+fn assert_no_physical_change(
+    before: PhysicalStorageAccountSnapshot,
+    account: &PhysicalStorageAccount,
+) {
+    assert_eq!(account.snapshot(), before);
+}
+
+#[test]
+fn unchanged_authored_bits_return_the_exact_input_without_reserving_a_generation() {
+    let factory = test_factory();
+    let account = test_account(&factory, 512);
+    let generation_source = AtomicU64::new(0);
+    let parts = build_single_trs_scene(&account, &generation_source);
+    let source = &parts.scene;
+    let node = NodeId::new(source.generation(), 0);
+    let replacement = source
+        .authored_transform(0)
+        .expect("single-node fixture authored transform");
+    let generation_before = generation_source.load(Ordering::Relaxed);
+    let account_before = account.snapshot();
+
+    let started = try_begin_node_transform_edit(source, node, replacement)
+        .expect("identical authored bits must classify without failure");
+
+    let NodeTransformEditStart::Unchanged(returned) = started else {
+        panic!("identical authored bits must not open a changed edit");
+    };
+    assert!(std::ptr::eq(returned, source));
+    assert_eq!(
+        generation_source.load(Ordering::Relaxed),
+        generation_before,
+        "unchanged classification must not reserve a generation",
+    );
+    assert_no_physical_change(account_before, &account);
+}
+
+#[test]
+fn changed_trs_publishes_one_exact_lineage_generation_with_complete_unchanged_remaps() {
+    let factory = test_factory();
+    let account = test_account(&factory, 512);
+    let generation_source = AtomicU64::new(0);
+    let parts = build_gltf_capability_scene_for_probe(&account, &generation_source);
+    let source = &parts.scene;
+    let input_generation = source.generation();
+    let node = NodeId::new(input_generation, 0);
+    let replacement = changed_trs(7.0);
+    let NodeTransformEditStart::Changed(pending) =
+        try_begin_node_transform_edit(source, node, replacement)
+            .expect("changed authored bits must enter edit planning")
+    else {
+        panic!("changed authored bits must not classify as unchanged");
+    };
+    let expected_new_allocations = pending
+        .counts
+        .canonical_attribution_slots
+        .as_u32()
+        .checked_add(pending.counts.outcome_evidence_attribution_slots.as_u32())
+        .expect("test allocation delta");
+    let physical_before = account.snapshot();
+
+    let prepared = pending
+        .prepare_with_generation_source(test_limits(), || {
+            SceneGenerationId::reserve_from(&generation_source)
+        })
+        .expect("valid exact-input transform edit must prepare");
+    let super::NodeTransformEditTerminal::Success(output) = prepared.handoff() else {
+        panic!("valid exact-input transform edit must publish success");
+    };
+
+    let output_generation = output.scene.generation();
+    assert_ne!(output_generation, input_generation);
+    assert_eq!(generation_source.load(Ordering::Relaxed), 2);
+    assert!(output.scene.account().is_same_account(source.account()));
+    assert!(
+        output
+            .scene
+            .authored_transform(0)
+            .expect("edited authored transform")
+            .has_same_authored_bits(replacement),
+    );
+    assert!(
+        source
+            .authored_transform(0)
+            .expect("input authored transform remains readable")
+            .has_same_authored_bits(AuthoredTransform::identity_trs()),
+    );
+    let live_allocation_delta = account
+        .snapshot()
+        .live_retained_allocations()
+        .checked_sub(physical_before.live_retained_allocations())
+        .expect("a successful edit cannot release source-owned physical storage");
+    assert!(
+        live_allocation_delta >= u64::from(expected_new_allocations),
+        "every attributed destination owner must remain physically accounted; nested backing allocations are counted separately",
+    );
+    assert_eq!(
+        output.report.invalidations().scene_bounds(),
+        Some(DerivedAbsenceReason::Invalidated),
+    );
+    assert_all_subjects_unchanged(output.report.remaps(), input_generation, output_generation);
+    assert_eq!(
+        output
+            .report
+            .remaps()
+            .nodes()
+            .try_rebind_unchanged(node)
+            .expect("unchanged node relation must remain valid"),
+        Some(NodeId::new(output_generation, 0)),
+    );
+}
+
+#[test]
+fn trs_to_matrix_rewrites_node_offsets_and_directory_shape_before_publication() {
+    let factory = test_factory();
+    let account = test_account(&factory, 512);
+    let generation_source = AtomicU64::new(0);
+    let parts = build_single_trs_scene(&account, &generation_source);
+    let source = &parts.scene;
+    let input_generation = source.generation();
+    let node = NodeId::new(input_generation, 0);
+    let replacement = changed_matrix(5.0);
+    let NodeTransformEditStart::Changed(pending) =
+        try_begin_node_transform_edit(source, node, replacement)
+            .expect("TRS-to-matrix authored bits must enter edit planning")
+    else {
+        panic!("TRS-to-matrix replacement cannot classify as unchanged");
+    };
+
+    let prepared = pending
+        .prepare_with_generation_source(test_limits(), || {
+            SceneGenerationId::reserve_from(&generation_source)
+        })
+        .expect("shape-changing exact-input transform edit must prepare");
+    let super::NodeTransformEditTerminal::Success(output) = prepared.handoff() else {
+        panic!("shape-changing exact-input transform edit must publish success");
+    };
+
+    assert_ne!(output.scene.generation(), input_generation);
+    assert!(
+        output
+            .scene
+            .authored_transform(0)
+            .expect("shape-changed authored transform")
+            .has_same_authored_bits(replacement),
+    );
+    assert!(
+        source
+            .authored_transform(0)
+            .expect("source authored transform remains readable")
+            .has_same_authored_bits(AuthoredTransform::identity_trs()),
+    );
+    assert_all_subjects_unchanged(
+        output.report.remaps(),
+        input_generation,
+        output.scene.generation(),
+    );
+}
+
+#[test]
+fn generation_mismatch_rejects_before_operation_or_allocation() {
+    let factory = test_factory();
+    let account = test_account(&factory, 512);
+    let generation_source = AtomicU64::new(0);
+    let parts = build_single_trs_scene(&account, &generation_source);
+    let source = &parts.scene;
+    let foreign_generation = SceneGenerationId::reserve_from(&generation_source)
+        .expect("foreign test generation")
+        .into_id();
+    let foreign_node = NodeId::new(foreign_generation, 0);
+    let generation_before = generation_source.load(Ordering::Relaxed);
+    let account_before = account.snapshot();
+
+    let error = match try_begin_node_transform_edit(source, foreign_node, changed_trs(3.0)) {
+        Ok(_) => panic!("a foreign-generation node cannot open an edit"),
+        Err(error) => error,
+    };
+
+    assert!(matches!(
+        error,
+        NodeTransformEditStartError::Lookup(SceneLookupError::GenerationMismatch {
+            kind: SceneEntityKind::Node,
+            expected,
+            actual,
+        }) if expected == source.generation() && actual == foreign_generation
+    ));
+    assert_eq!(
+        generation_source.load(Ordering::Relaxed),
+        generation_before,
+        "generation rejection must precede reservation",
+    );
+    assert_no_physical_change(account_before, &account);
+}
+
+#[test]
+fn physical_plan_rebuilds_every_record_and_inherits_only_payload_leaves() {
+    let factory = test_factory();
+    let account = test_account(&factory, 512);
+    let generation_source = AtomicU64::new(0);
+    let parts = build_gltf_capability_scene_for_probe(&account, &generation_source);
+    let source = &parts.scene;
+    let node = NodeId::new(source.generation(), 0);
+
+    let NodeTransformEditStart::Changed(same_layout) =
+        try_begin_node_transform_edit(source, node, changed_trs(11.0))
+            .expect("TRS replacement plan")
+    else {
+        panic!("changed TRS fixture must enter edit planning");
+    };
+    let NodeTransformEditStart::Changed(shape_change) =
+        try_begin_node_transform_edit(source, node, changed_matrix(13.0))
+            .expect("TRS-to-matrix replacement plan")
+    else {
+        panic!("TRS-to-matrix fixture must enter edit planning");
+    };
+
+    let total = same_layout.counts.canonical_blocks.as_usize();
+    let payload = same_layout.counts.payload_blocks.as_usize();
+    assert!(payload > 0, "fixture must contain shareable payload leaves");
+    assert!(
+        total > payload,
+        "fixture must contain structural RecordBlock values"
+    );
+    assert_eq!(
+        same_layout.counts.inherited_payload_leaves.as_usize(),
+        payload,
+    );
+    assert_eq!(
+        same_layout.counts.new_canonical_blocks.as_usize(),
+        total - payload,
+        "every RecordBlock and non-payload semantic leaf must be rebuilt",
+    );
+    assert_eq!(
+        same_layout.counts.canonical_attribution_slots.as_usize(),
+        total - payload + 1,
+        "the destination table root and every actual new block require attribution",
+    );
+    assert_eq!(
+        same_layout.counts.custom_semantic_rewrite_blocks.as_usize(),
+        1,
+    );
+    assert_eq!(
+        shape_change
+            .counts
+            .custom_semantic_rewrite_blocks
+            .as_usize(),
+        3,
+    );
+    assert_eq!(
+        shape_change.counts.new_canonical_blocks.as_usize(),
+        total - payload,
+        "the one/three custom rewrite distinction must not undercount physical new blocks",
+    );
+    assert_eq!(
+        shape_change.counts.inherited_payload_leaves.as_usize(),
+        payload,
+    );
+}
+
+#[test]
+fn cancellation_after_evidence_commit_preserves_rich_failure_and_the_input() {
+    let factory = test_factory();
+    let account = test_account(&factory, 512);
+    let generation_source = AtomicU64::new(0);
+    let parts = build_single_trs_scene(&account, &generation_source);
+    let source = &parts.scene;
+    let node = NodeId::new(source.generation(), 0);
+    let NodeTransformEditStart::Changed(pending) =
+        try_begin_node_transform_edit(source, node, changed_trs(19.0))
+            .expect("cancelled transform edit plan")
+    else {
+        panic!("changed transform must enter edit planning");
+    };
+    let cancellation = CancellationToken::new();
+    cancellation.cancel();
+
+    let prepared = pending
+        .prepare_with_control_and_generation_source_for_test(
+            test_limits(),
+            OperationControl::default().with_cancellation(cancellation),
+            || SceneGenerationId::reserve_from(&generation_source),
+        )
+        .expect("cooperative cancellation must prepare an exact terminal");
+    let super::NodeTransformEditTerminal::RichFailure(failure) = prepared.handoff() else {
+        panic!("post-evidence cancellation must preserve rich failure evidence");
+    };
+
+    assert_eq!(failure.outcome_evidence_block_count(), 1);
+    assert_eq!(
+        terminal_failure_class(failure.ledger_evidence()),
+        StorePreparationFailureClass::Control,
+    );
+    assert_eq!(generation_source.load(Ordering::Relaxed), 1);
+    assert!(
+        source
+            .authored_transform(0)
+            .expect("cancelled input transform remains readable")
+            .has_same_authored_bits(AuthoredTransform::identity_trs()),
+    );
+    drop(failure);
+    drop(parts);
+    assert_eq!(account.snapshot().live_retained_bytes(), 0);
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
+}
+
+#[test]
+fn generation_exhaustion_preserves_rich_failure_without_consuming_a_nonce() {
+    let factory = test_factory();
+    let account = test_account(&factory, 512);
+    let generation_source = AtomicU64::new(0);
+    let parts = build_single_trs_scene(&account, &generation_source);
+    let source = &parts.scene;
+    let node = NodeId::new(source.generation(), 0);
+    let NodeTransformEditStart::Changed(pending) =
+        try_begin_node_transform_edit(source, node, changed_trs(23.0))
+            .expect("generation-exhaustion transform edit plan")
+    else {
+        panic!("changed transform must enter edit planning");
+    };
+
+    let prepared = pending
+        .prepare_with_generation_source(test_limits(), || Err(SceneGenerationError::Exhausted))
+        .expect("generation exhaustion must prepare rich failure");
+    let super::NodeTransformEditTerminal::RichFailure(failure) = prepared.handoff() else {
+        panic!("generation exhaustion must preserve rich evidence");
+    };
+
+    assert_eq!(failure.outcome_evidence_block_count(), 1);
+    assert_eq!(generation_source.load(Ordering::Relaxed), 1);
+    assert!(
+        source
+            .authored_transform(0)
+            .expect("generation-exhausted input transform remains readable")
+            .has_same_authored_bits(AuthoredTransform::identity_trs()),
+    );
+    drop(failure);
+    drop(parts);
+    assert_eq!(account.snapshot().live_retained_bytes(), 0);
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
+}
+
+#[test]
+fn central_validation_rejection_preserves_rich_evidence_and_the_input() {
+    let factory = test_factory();
+    let account = test_account(&factory, 512);
+    let generation_source = AtomicU64::new(0);
+    let parts = build_single_trs_scene(&account, &generation_source);
+    let source = &parts.scene;
+    let node = NodeId::new(source.generation(), 0);
+    let NodeTransformEditStart::Changed(mut pending) =
+        try_begin_node_transform_edit(source, node, changed_trs(27.0))
+            .expect("central-validation transform edit plan")
+    else {
+        panic!("changed transform must enter edit planning");
+    };
+    pending.counts.evidence.node_count = pending
+        .counts
+        .evidence
+        .node_count
+        .checked_add(1)
+        .expect("test evidence count remains representable");
+
+    let prepared = pending
+        .prepare_with_generation_source(test_limits(), || {
+            SceneGenerationId::reserve_from(&generation_source)
+        })
+        .expect("central validation rejection must prepare rich failure");
+    let super::NodeTransformEditTerminal::RichFailure(failure) = prepared.handoff() else {
+        panic!("central validation rejection must preserve rich evidence");
+    };
+
+    assert_eq!(failure.outcome_evidence_block_count(), 1);
+    assert_eq!(
+        terminal_failure_code(failure.ledger_evidence()),
+        super::super::NODE_SCENE_BUILD_INVARIANT_CODE,
+    );
+    assert_eq!(generation_source.load(Ordering::Relaxed), 1);
+    assert!(
+        source
+            .authored_transform(0)
+            .expect("validation-rejected input transform remains readable")
+            .has_same_authored_bits(AuthoredTransform::identity_trs()),
+    );
+    drop(failure);
+    drop(parts);
+    assert_eq!(account.snapshot().live_retained_bytes(), 0);
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
+}
+
+#[test]
+fn dropping_prepared_success_burns_one_gap_and_releases_only_unpublished_output() {
+    let factory = test_factory();
+    let account = test_account(&factory, 512);
+    let generation_source = AtomicU64::new(0);
+    let parts = build_single_trs_scene(&account, &generation_source);
+    let source = &parts.scene;
+    let node = NodeId::new(source.generation(), 0);
+    let live_source = account.snapshot();
+    let NodeTransformEditStart::Changed(pending) =
+        try_begin_node_transform_edit(source, node, changed_trs(29.0))
+            .expect("prepared-drop transform edit plan")
+    else {
+        panic!("changed transform must enter edit planning");
+    };
+
+    let prepared = pending
+        .prepare_with_generation_source(test_limits(), || {
+            SceneGenerationId::reserve_from(&generation_source)
+        })
+        .expect("valid transform edit must prepare success");
+    assert_eq!(generation_source.load(Ordering::Relaxed), 2);
+    drop(prepared);
+
+    let after_drop = account.snapshot();
+    assert_eq!(
+        after_drop.live_retained_bytes(),
+        live_source.live_retained_bytes()
+    );
+    assert_eq!(
+        after_drop.live_retained_allocations(),
+        live_source.live_retained_allocations(),
+    );
+    assert!(
+        source
+            .authored_transform(0)
+            .expect("prepared-drop input transform remains readable")
+            .has_same_authored_bits(AuthoredTransform::identity_trs()),
+    );
+    let next = SceneGenerationId::reserve_from(&generation_source)
+        .expect("generation after prepared-drop gap remains reservable")
+        .into_id();
+    assert_ne!(next, source.generation());
+    assert_eq!(generation_source.load(Ordering::Relaxed), 3);
+
+    drop(parts);
+    assert_eq!(account.snapshot().live_retained_bytes(), 0);
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
+}
+
+#[test]
+fn dropping_input_first_keeps_the_derived_scene_and_report_readable() {
+    let factory = test_factory();
+    let account = test_account(&factory, 512);
+    let generation_source = AtomicU64::new(0);
+    let parts = build_gltf_capability_scene_for_probe(&account, &generation_source);
+    let node = NodeId::new(parts.scene.generation(), 0);
+    let replacement = changed_trs(31.0);
+    let NodeTransformEditStart::Changed(pending) =
+        try_begin_node_transform_edit(&parts.scene, node, replacement)
+            .expect("input-first release transform edit plan")
+    else {
+        panic!("changed transform must enter edit planning");
+    };
+    let prepared = pending
+        .prepare_with_generation_source(test_limits(), || {
+            SceneGenerationId::reserve_from(&generation_source)
+        })
+        .expect("input-first release transform edit must prepare");
+    let super::NodeTransformEditTerminal::Success(output) = prepared.handoff() else {
+        panic!("input-first release transform edit must publish success");
+    };
+
+    drop(parts);
+    assert!(
+        output
+            .scene
+            .authored_transform(0)
+            .expect("derived transform after input release")
+            .has_same_authored_bits(replacement),
+    );
+    assert_eq!(output.report.outcome_evidence_block_count(), 1);
+    let super::publication::NodeTransformEditSuccessParts { scene, report } = output;
+    drop(report);
+    assert!(
+        scene
+            .authored_transform(0)
+            .expect("derived transform after report release")
+            .has_same_authored_bits(replacement),
+    );
+    drop(scene);
+    assert_eq!(account.snapshot().live_retained_bytes(), 0);
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
+}
+
+#[test]
+fn dropping_derived_scene_first_keeps_the_input_and_report_readable() {
+    let factory = test_factory();
+    let account = test_account(&factory, 512);
+    let generation_source = AtomicU64::new(0);
+    let parts = build_gltf_capability_scene_for_probe(&account, &generation_source);
+    let node = NodeId::new(parts.scene.generation(), 0);
+    let NodeTransformEditStart::Changed(pending) =
+        try_begin_node_transform_edit(&parts.scene, node, changed_trs(37.0))
+            .expect("output-first release transform edit plan")
+    else {
+        panic!("changed transform must enter edit planning");
+    };
+    let prepared = pending
+        .prepare_with_generation_source(test_limits(), || {
+            SceneGenerationId::reserve_from(&generation_source)
+        })
+        .expect("output-first release transform edit must prepare");
+    let super::NodeTransformEditTerminal::Success(output) = prepared.handoff() else {
+        panic!("output-first release transform edit must publish success");
+    };
+    let super::publication::NodeTransformEditSuccessParts { scene, report } = output;
+
+    drop(scene);
+    assert!(
+        parts
+            .scene
+            .authored_transform(0)
+            .expect("input transform after derived scene release")
+            .has_same_authored_bits(AuthoredTransform::identity_trs()),
+    );
+    assert_eq!(report.outcome_evidence_block_count(), 1);
+    assert!(matches!(
+        report.ledger_evidence().header().terminal_cause(),
+        StoreTerminalCause::Success,
+    ));
+    drop(parts);
+    assert!(account.snapshot().live_retained_bytes() > 0);
+    drop(report);
+    assert_eq!(account.snapshot().live_retained_bytes(), 0);
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
+}
+
+#[test]
+fn post_evidence_storage_rejection_preserves_rich_failure_evidence() {
+    let factory = test_factory();
+    let mut observed_rich_storage_rejection = false;
+
+    for max_live_allocations in 1..=128 {
+        let account = test_account(&factory, max_live_allocations);
+        let generation_source = AtomicU64::new(0);
+        let Some(parts) = try_build_single_trs_scene(&account, &generation_source) else {
+            assert_eq!(account.snapshot().live_retained_bytes(), 0);
+            assert_eq!(account.snapshot().live_retained_allocations(), 0);
+            drop(account);
+            continue;
+        };
+        let source = &parts.scene;
+        let node = NodeId::new(source.generation(), 0);
+        let NodeTransformEditStart::Changed(pending) =
+            try_begin_node_transform_edit(source, node, changed_trs(17.0))
+                .expect("bounded transform edit plan")
+        else {
+            panic!("changed transform must enter edit planning");
+        };
+
+        if let Ok(prepared) = pending.prepare_with_generation_source(test_limits(), || {
+            SceneGenerationId::reserve_from(&generation_source)
+        }) {
+            match prepared.handoff() {
+                super::NodeTransformEditTerminal::RichFailure(failure)
+                    if terminal_failure_code(failure.ledger_evidence())
+                        == super::super::NODE_SCENE_STORAGE_REJECTION_CODE =>
+                {
+                    assert_eq!(failure.outcome_evidence_block_count(), 1);
+                    assert!(failure.account().is_same_account(&account));
+                    drop(failure);
+                    observed_rich_storage_rejection = true;
+                }
+                terminal => drop(terminal),
+            }
+        }
+
+        drop(parts);
+        assert_eq!(account.snapshot().live_retained_bytes(), 0);
+        assert_eq!(account.snapshot().live_retained_allocations(), 0);
+        drop(account);
+
+        if observed_rich_storage_rejection {
+            break;
+        }
+    }
+
+    assert!(
+        observed_rich_storage_rejection,
+        "a storage budget that admits edit evidence but rejects canonical output must preserve rich evidence",
+    );
+}
+
+fn terminal_failure_code(evidence: &baozi_operation::StoreLedgerEvidence) -> u32 {
+    match evidence.header().terminal_cause() {
+        StoreTerminalCause::Failure(cause) => cause.code(),
+        StoreTerminalCause::Success => {
+            panic!("a rejected node transform edit must freeze a failure cause")
+        }
+        _ => panic!("an unknown terminal cause cannot prove a node transform edit failure"),
+    }
+}
+
+fn terminal_failure_class(
+    evidence: &baozi_operation::StoreLedgerEvidence,
+) -> StorePreparationFailureClass {
+    match evidence.header().terminal_cause() {
+        StoreTerminalCause::Failure(cause) => cause.class(),
+        StoreTerminalCause::Success => {
+            panic!("a rejected node transform edit must freeze a failure cause")
+        }
+        _ => panic!("an unknown terminal cause cannot prove a node transform edit failure"),
+    }
+}
+
+fn assert_all_subjects_unchanged(
+    remaps: &CanonicalRemapSet,
+    input_generation: SceneGenerationId,
+    output_generation: SceneGenerationId,
+) {
+    macro_rules! assert_unchanged {
+        ($remap:expr) => {{
+            let remap = $remap;
+            assert_eq!(remap.input_generation(), input_generation);
+            assert_eq!(remap.output_generation(), output_generation);
+            assert_eq!(remap.change(), RemapChange::ExplicitlyUnchanged);
+        }};
+    }
+
+    assert_unchanged!(remaps.nodes());
+    assert_unchanged!(remaps.mesh_instances());
+    assert_unchanged!(remaps.logical_meshes());
+    assert_unchanged!(remaps.primitives());
+    assert_unchanged!(remaps.morph_targets());
+    assert_unchanged!(remaps.materials());
+    assert_unchanged!(remaps.images());
+    assert_unchanged!(remaps.samplers());
+    assert_unchanged!(remaps.textures());
+    assert_unchanged!(remaps.skins());
+    assert_unchanged!(remaps.animation_clips());
+    assert_unchanged!(remaps.cameras());
+    assert_unchanged!(remaps.lights());
+    assert_unchanged!(remaps.vertices());
+    assert_unchanged!(remaps.corners());
+    assert_unchanged!(remaps.faces());
+    assert_unchanged!(remaps.instances());
+    assert_eq!(remaps.retained_allocation_bytes(), 0);
+}

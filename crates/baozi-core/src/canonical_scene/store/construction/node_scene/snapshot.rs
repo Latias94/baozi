@@ -18,7 +18,7 @@ mod appearance;
 mod deformation;
 
 const CANONICAL_SCENE_SNAPSHOT_DOMAIN: &str = "baozi.canonical-scene.snapshot";
-const CANONICAL_SCENE_SNAPSHOT_SCHEMA_REVISION: u32 = 3;
+const CANONICAL_SCENE_SNAPSHOT_SCHEMA_REVISION: u32 = 4;
 const NODE_SCENE_SNAPSHOT_ALGORITHM_ID: &str = "sha256";
 const NODE_SCENE_SNAPSHOT_POLL_INTERVAL: u64 = 64;
 const MAX_PREVIEW_BYTES: usize = 1 << 20;
@@ -180,6 +180,9 @@ pub(in crate::canonical_scene::store) struct NodeSceneSnapshotTotals {
     pub(in crate::canonical_scene::store) material_binding_count: usize,
     pub(in crate::canonical_scene::store) image_payload_bytes: u64,
     pub(in crate::canonical_scene::store) media_type_bytes: u64,
+    pub(in crate::canonical_scene::store) source_key_bytes: u64,
+    pub(in crate::canonical_scene::store) binding_semantic_scalar_count: u64,
+    pub(in crate::canonical_scene::store) material_factor_scalar_count: u64,
     pub(in crate::canonical_scene::store) logical_mesh_count: usize,
     pub(in crate::canonical_scene::store) primitive_count: usize,
     pub(in crate::canonical_scene::store) attribute_count: usize,
@@ -573,6 +576,9 @@ fn capture_node_scene_with_encoder(
                 material_binding_count: appearance_counts.bindings,
                 image_payload_bytes: appearance_totals.image_payload_bytes,
                 media_type_bytes: appearance_totals.media_type_bytes,
+                source_key_bytes: appearance_totals.source_key_bytes,
+                binding_semantic_scalar_count: appearance_totals.binding_semantic_scalars,
+                material_factor_scalar_count: appearance_totals.material_factor_scalars,
                 logical_mesh_count: geometry_counts.logical_meshes,
                 primitive_count: geometry_counts.primitives,
                 attribute_count: geometry_counts.attributes,
@@ -1866,6 +1872,12 @@ impl PreviewSink {
         self.push_u64(appearance_payloads.image_payload_bytes);
         self.push_str(",media_type_bytes=");
         self.push_u64(appearance_payloads.media_type_bytes);
+        self.push_str(",source_key_bytes=");
+        self.push_u64(appearance_payloads.source_key_bytes);
+        self.push_str(",binding_semantic_scalars=");
+        self.push_u64(appearance_payloads.binding_semantic_scalars);
+        self.push_str(",material_factor_scalars=");
+        self.push_u64(appearance_payloads.material_factor_scalars);
         self.push_str(",logical_meshes=");
         self.push_usize(geometry.logical_meshes);
         self.push_str(",primitives=");

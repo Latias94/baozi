@@ -1,4 +1,10 @@
-use crate::appearance::TextureRoleKind;
+use crate::appearance::TextureChannelMapping;
+use crate::canonical_scene::store::schema::appearance::{
+    APPEARANCE_CHANNEL_ZERO, encode_appearance_alpha_mode, encode_appearance_blend_operation,
+    encode_appearance_channel, encode_appearance_color_interpretation,
+    encode_appearance_coordinate_source, encode_appearance_shading_model,
+    encode_appearance_texture_role,
+};
 use crate::image::{MipmapFilter, SamplerState, TexelFilter, TextureAddressMode};
 
 use super::super::semantic::NodeSceneAppearanceCursor;
@@ -31,6 +37,30 @@ const TAG_TEXTURE_REFERENCE: u8 = 70;
 const TAG_TEXTURE_ROLE: u8 = 71;
 const TAG_BINDING_OFFSET: u8 = 72;
 const TAG_MEDIA_TYPE_BYTES: u8 = 73;
+const TAG_SHADING_MODEL: u8 = 142;
+const TAG_ALPHA_MODE: u8 = 143;
+const TAG_ALPHA_CUTOFF_BITS: u8 = 144;
+const TAG_DOUBLE_SIDED: u8 = 145;
+const TAG_PBR_METALLIC_ROUGHNESS_PRESENCE: u8 = 146;
+const TAG_PBR_SPECULAR_GLOSSINESS_PRESENCE: u8 = 147;
+const TAG_LEGACY_PRESENCE: u8 = 148;
+const TAG_FACTOR_OFFSET: u8 = 149;
+const TAG_FACTOR_VALUES: u8 = 150;
+const TAG_COORDINATE_SOURCE: u8 = 151;
+const TAG_COORDINATE_SET: u8 = 152;
+const TAG_CHANNEL_LANE_COUNT: u8 = 153;
+const TAG_CHANNEL_0: u8 = 154;
+const TAG_CHANNEL_1: u8 = 155;
+const TAG_CHANNEL_2: u8 = 156;
+const TAG_CHANNEL_3: u8 = 157;
+const TAG_COLOR_INTERPRETATION: u8 = 158;
+const TAG_SEMANTIC_SCALAR_OFFSET: u8 = 159;
+const TAG_SEMANTIC_SCALAR_VALUES: u8 = 160;
+const TAG_BLEND_OPERATION: u8 = 161;
+const TAG_SOURCE_KEY: u8 = 162;
+const TAG_SOURCE_KEY_OFFSET: u8 = 163;
+const TAG_SOURCE_KEY_BYTES: u8 = 164;
+const TAG_F32_BITS: u8 = 165;
 
 const SNAPSHOT_PAYLOAD_CHUNK_BYTES: usize = 4 * 1024;
 
@@ -47,6 +77,9 @@ pub(super) struct AppearanceCollectionCounts {
 pub(super) struct AppearancePayloadTotals {
     pub(super) image_payload_bytes: u64,
     pub(super) media_type_bytes: u64,
+    pub(super) source_key_bytes: u64,
+    pub(super) binding_semantic_scalars: u64,
+    pub(super) material_factor_scalars: u64,
 }
 
 pub(super) fn write_appearance(
@@ -72,8 +105,22 @@ pub(super) fn write_appearance(
     )?;
     write_samplers(cursor, counts.samplers, transcript, preview, work)?;
     write_textures(cursor, counts.textures, transcript, preview, work)?;
-    write_materials(cursor, counts.materials, transcript, preview, work)?;
-    write_bindings(cursor, counts.bindings, transcript, preview, work)?;
+    write_materials(
+        cursor,
+        counts.materials,
+        transcript,
+        preview,
+        work,
+        &mut totals,
+    )?;
+    write_bindings(
+        cursor,
+        counts.bindings,
+        transcript,
+        preview,
+        work,
+        &mut totals,
+    )?;
     preview.push_str("appearance_end\n");
     Ok(totals)
 }
@@ -208,6 +255,7 @@ fn write_materials(
     transcript: &mut CanonicalDigestEncoder,
     preview: &mut PreviewSink,
     work: &mut SnapshotWorkMeter<'_>,
+    totals: &mut AppearancePayloadTotals,
 ) -> Result<(), NodeSceneSnapshotError> {
     begin_geometry_collection(transcript, preview, work, TAG_MATERIALS, "materials", count)?;
     for _ in 0..count {
@@ -218,25 +266,74 @@ fn write_materials(
             .ok_or(NodeSceneSnapshotError::InconsistentView {
                 reason: "material collection ended before declared total",
             })?;
+        let shading_model = encode_appearance_shading_model(material.shading_model())
+            .ok_or(unsupported("namespaced material shading model"))?;
+        let alpha_mode = encode_appearance_alpha_mode(material.alpha_mode())
+            .ok_or(unsupported("namespaced material alpha mode"))?;
+        let alpha_cutoff = material.alpha_mode().mask_cutoff().unwrap_or(0.0);
+        let factors = material.factors();
         transcript.write_tag(TAG_MATERIAL)?;
         transcript.tagged_usize(TAG_REFERENCE, material.source_index())?;
+        transcript.tagged_u8(TAG_SHADING_MODEL, shading_model)?;
+        transcript.tagged_u8(TAG_ALPHA_MODE, alpha_mode)?;
+        transcript.tagged_u32(TAG_ALPHA_CUTOFF_BITS, alpha_cutoff.to_bits())?;
+        transcript.tagged_u8(TAG_DOUBLE_SIDED, encode_presence(material.double_sided()))?;
+        transcript.tagged_u8(
+            TAG_PBR_METALLIC_ROUGHNESS_PRESENCE,
+            encode_presence(factors.pbr_metallic_roughness().is_some()),
+        )?;
+        transcript.tagged_u8(
+            TAG_PBR_SPECULAR_GLOSSINESS_PRESENCE,
+            encode_presence(factors.pbr_specular_glossiness().is_some()),
+        )?;
+        transcript.tagged_u8(
+            TAG_LEGACY_PRESENCE,
+            encode_presence(factors.legacy().is_some()),
+        )?;
         transcript.tagged_usize(TAG_BINDING_OFFSET, material.binding_offset())?;
         transcript.tagged_usize(TAG_COLLECTION_TOTAL, material.binding_count())?;
+        transcript.tagged_usize(TAG_FACTOR_OFFSET, material.factor_offset())?;
+        write_metered_f32_bits(
+            transcript,
+            work,
+            TAG_FACTOR_VALUES,
+            material.factor_values(),
+        )?;
+        totals.material_factor_scalars = add_bytes(
+            totals.material_factor_scalars,
+            material.factor_values().len(),
+            "material factor scalars",
+        )?;
         let render = preview.begin_geometry_item("material", material.source_index())?;
+        preview.geometry_field_u32(render, "shading", u32::from(shading_model));
+        preview.geometry_field_u32(render, "alpha", u32::from(alpha_mode));
+        preview.geometry_field_word(
+            render,
+            "double_sided",
+            if material.double_sided() {
+                "true"
+            } else {
+                "false"
+            },
+        );
         preview.geometry_field_usize(render, "binding_offset", material.binding_offset());
         preview.geometry_field_usize(render, "binding_count", material.binding_count());
+        preview.geometry_field_usize(render, "factor_offset", material.factor_offset());
+        preview.geometry_field_usize(render, "factor_count", material.factor_values().len());
         preview.end_geometry_item(render);
     }
     transcript.tagged_usize(TAG_COLLECTION_TOTAL, count)?;
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)]
 fn write_bindings(
     cursor: &mut NodeSceneAppearanceCursor<'_>,
     count: usize,
     transcript: &mut CanonicalDigestEncoder,
     preview: &mut PreviewSink,
     work: &mut SnapshotWorkMeter<'_>,
+    totals: &mut AppearancePayloadTotals,
 ) -> Result<(), NodeSceneSnapshotError> {
     begin_geometry_collection(transcript, preview, work, TAG_BINDINGS, "bindings", count)?;
     for _ in 0..count {
@@ -247,14 +344,83 @@ fn write_bindings(
             .ok_or(NodeSceneSnapshotError::InconsistentView {
                 reason: "material-binding collection ended before declared total",
             })?;
-        let role = encode_texture_role(binding.role())?;
+        let role = encode_appearance_texture_role(binding.role_semantics())
+            .ok_or(unsupported("namespaced texture role"))?;
+        let (coordinate_source, coordinate_set) =
+            encode_appearance_coordinate_source(binding.coordinate_source())
+                .ok_or(unsupported("namespaced texture coordinate source"))?;
+        let swizzle = match binding.channel_mapping() {
+            TextureChannelMapping::Swizzle(swizzle) => *swizzle,
+            TextureChannelMapping::Namespaced { .. } => {
+                return Err(unsupported("namespaced texture channel mapping"));
+            }
+        };
+        let mut channels = [APPEARANCE_CHANNEL_ZERO; 4];
+        for (destination, channel) in channels.iter_mut().zip(swizzle.channels().iter().copied()) {
+            *destination = encode_appearance_channel(channel);
+        }
+        let color_interpretation =
+            encode_appearance_color_interpretation(binding.color_interpretation())
+                .ok_or(unsupported("namespaced color interpretation"))?;
+        let blend = encode_appearance_blend_operation(binding.blend())
+            .ok_or(unsupported("noncanonical texture blend operation"))?;
         transcript.write_tag(TAG_BINDING)?;
         transcript.tagged_usize(TAG_REFERENCE, binding.source_index())?;
         transcript.tagged_usize(TAG_TEXTURE_REFERENCE, binding.texture())?;
         transcript.tagged_u8(TAG_TEXTURE_ROLE, role)?;
+        transcript.tagged_u8(TAG_COORDINATE_SOURCE, coordinate_source)?;
+        transcript.tagged_u32(TAG_COORDINATE_SET, coordinate_set)?;
+        transcript.tagged_u8(TAG_CHANNEL_LANE_COUNT, swizzle.lane_count())?;
+        transcript.tagged_u8(TAG_CHANNEL_0, channels[0])?;
+        transcript.tagged_u8(TAG_CHANNEL_1, channels[1])?;
+        transcript.tagged_u8(TAG_CHANNEL_2, channels[2])?;
+        transcript.tagged_u8(TAG_CHANNEL_3, channels[3])?;
+        transcript.tagged_u8(TAG_COLOR_INTERPRETATION, color_interpretation)?;
+        transcript.tagged_usize(TAG_SEMANTIC_SCALAR_OFFSET, binding.semantic_offset())?;
+        write_metered_f32_bits(
+            transcript,
+            work,
+            TAG_SEMANTIC_SCALAR_VALUES,
+            binding.semantic_values(),
+        )?;
+        totals.binding_semantic_scalars = add_bytes(
+            totals.binding_semantic_scalars,
+            binding.semantic_values().len(),
+            "binding semantic scalars",
+        )?;
+        transcript.tagged_u8(TAG_BLEND_OPERATION, blend)?;
+        transcript.tagged_usize(TAG_SOURCE_KEY_OFFSET, binding.source_key_offset())?;
+        transcript.write_tag(TAG_SOURCE_KEY)?;
+        match binding.source_key() {
+            Some(source_key) => {
+                transcript.tagged_u8(TAG_PRESENCE, PRESENCE_PRESENT)?;
+                write_metered_bytes(
+                    transcript,
+                    work,
+                    TAG_SOURCE_KEY_BYTES,
+                    source_key.as_bytes(),
+                )?;
+                totals.source_key_bytes = add_bytes(
+                    totals.source_key_bytes,
+                    source_key.len(),
+                    "source-key bytes",
+                )?;
+            }
+            None => transcript.tagged_u8(TAG_PRESENCE, PRESENCE_ABSENT)?,
+        }
         let render = preview.begin_geometry_item("binding", binding.source_index())?;
         preview.geometry_field_usize(render, "texture", binding.texture());
         preview.geometry_field_u32(render, "role", u32::from(role));
+        preview.geometry_field_u32(render, "coordinate", u32::from(coordinate_source));
+        preview.geometry_field_u32(render, "coordinate_set", coordinate_set);
+        preview.geometry_field_u32(render, "channels", u32::from(swizzle.lane_count()));
+        preview.geometry_field_u32(render, "color", u32::from(color_interpretation));
+        preview.geometry_field_usize(render, "semantic_offset", binding.semantic_offset());
+        preview.geometry_field_word(
+            render,
+            "source_key",
+            binding.source_key().unwrap_or("absent"),
+        );
         preview.end_geometry_item(render);
     }
     transcript.tagged_usize(TAG_COLLECTION_TOTAL, count)?;
@@ -274,6 +440,21 @@ fn write_metered_bytes(
     for chunk in bytes.chunks(SNAPSHOT_PAYLOAD_CHUNK_BYTES) {
         work.observe()?;
         transcript.write_bytes(chunk)?;
+    }
+    Ok(())
+}
+
+fn write_metered_f32_bits(
+    transcript: &mut CanonicalDigestEncoder,
+    work: &mut SnapshotWorkMeter<'_>,
+    tag: u8,
+    values: &[f32],
+) -> Result<(), NodeSceneSnapshotError> {
+    transcript.write_tag(tag)?;
+    transcript.tagged_usize(TAG_COLLECTION_TOTAL, values.len())?;
+    for value in values {
+        work.observe()?;
+        transcript.tagged_u32(TAG_F32_BITS, value.to_bits())?;
     }
     Ok(())
 }
@@ -311,29 +492,11 @@ const fn encode_address_mode(value: TextureAddressMode) -> u8 {
     }
 }
 
-fn encode_texture_role(value: TextureRoleKind) -> Result<u8, NodeSceneSnapshotError> {
-    match value {
-        TextureRoleKind::BaseColor => Ok(0),
-        TextureRoleKind::Diffuse => Ok(1),
-        TextureRoleKind::Specular => Ok(2),
-        TextureRoleKind::Metallic => Ok(3),
-        TextureRoleKind::Roughness => Ok(4),
-        TextureRoleKind::MetallicRoughness => Ok(5),
-        TextureRoleKind::Normal => Ok(6),
-        TextureRoleKind::Occlusion => Ok(7),
-        TextureRoleKind::Emissive => Ok(8),
-        TextureRoleKind::Opacity => Ok(9),
-        TextureRoleKind::Height => Ok(10),
-        TextureRoleKind::Displacement => Ok(11),
-        TextureRoleKind::Lightmap => Ok(12),
-        TextureRoleKind::Clearcoat => Ok(13),
-        TextureRoleKind::ClearcoatRoughness => Ok(14),
-        TextureRoleKind::ClearcoatNormal => Ok(15),
-        TextureRoleKind::Transmission => Ok(16),
-        TextureRoleKind::Thickness => Ok(17),
-        TextureRoleKind::SheenColor => Ok(18),
-        TextureRoleKind::SheenRoughness => Ok(19),
-        TextureRoleKind::Namespaced => Err(unsupported("namespaced texture role")),
+const fn encode_presence(value: bool) -> u8 {
+    if value {
+        PRESENCE_PRESENT
+    } else {
+        PRESENCE_ABSENT
     }
 }
 

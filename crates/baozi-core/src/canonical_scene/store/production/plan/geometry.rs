@@ -427,7 +427,7 @@ pub(in crate::canonical_scene::store) struct ValidatedGeometryAttributeView<'vie
     plan: &'view ValidatedGeometryAttribute,
 }
 
-impl ValidatedGeometryAttributeView<'_, '_> {
+impl<'input> ValidatedGeometryAttributeView<'_, 'input> {
     pub(in crate::canonical_scene::store) const fn semantic(&self) -> &AttributeSemantic {
         self.input.semantic()
     }
@@ -470,7 +470,7 @@ impl ValidatedGeometryAttributeView<'_, '_> {
 
     pub(in crate::canonical_scene::store) const fn authored_payload(
         &self,
-    ) -> GeometryAttributePayloadAuthoring<'_> {
+    ) -> GeometryAttributePayloadAuthoring<'input> {
         self.input.payload()
     }
 

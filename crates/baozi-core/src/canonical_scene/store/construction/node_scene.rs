@@ -28,6 +28,7 @@ use super::{
 mod animation;
 mod appearance;
 mod deformation;
+pub(crate) mod edit;
 mod geometry;
 mod materialization;
 mod publication;
@@ -46,7 +47,9 @@ pub(in crate::canonical_scene::store) use tests::{
     build_gltf_capability_scene_for_probe, build_obj_capability_scene_for_probe,
     capture_gltf_capability_snapshots_for_probe, capture_obj_capability_snapshots_for_probe,
     collect_gltf_capability_vectors_for_probe, collect_obj_capability_vectors_for_probe,
-    inspect_gltf_capability_semantics_for_probe, inspect_obj_capability_semantics_for_probe,
+    inspect_gltf_capability_semantics_for_probe,
+    inspect_gltf_capability_semantics_with_first_transform_for_probe,
+    inspect_obj_capability_semantics_for_probe,
 };
 
 const NODE_SCENE_BUILD_INVARIANT_CODE: u32 = 0x5343_1001;
@@ -272,8 +275,6 @@ pub(in crate::canonical_scene::store) struct ValidatedNodeSceneConstruction<'inp
 
 #[derive(Debug, Error)]
 pub(in crate::canonical_scene::store) enum NodeSceneConstructionRejection {
-    #[error("derived Scene lineage cannot author a fresh node-domain Scene")]
-    DerivedLineage,
     #[error("node-domain authoring validation rejected the Scene batch")]
     NodeAuthoring(#[source] NodeAuthoringFailure<OperationAuthoringControlError>),
     #[error("appearance-domain authoring validation rejected the Scene batch")]
@@ -290,8 +291,8 @@ pub(in crate::canonical_scene::store) enum NodeSceneConstructionRejection {
 
 /// A consumed validation attempt which can only terminate as minimal fallback.
 #[must_use = "a rejected node Scene construction still owns a terminal fallback"]
-pub(in crate::canonical_scene::store) struct RejectedNodeSceneConstruction<'scene> {
-    operation: SceneConstructionOperation<'scene>,
+pub(in crate::canonical_scene::store) struct RejectedNodeSceneConstruction {
+    operation: SceneConstructionOperation,
     failure: NodeSceneConstructionRejection,
 }
 

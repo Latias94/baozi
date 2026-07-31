@@ -7,4 +7,10 @@ mod schema;
 mod validation;
 
 #[cfg(test)]
+pub(crate) use construction::node_scene::edit::CanonicalSubjectRemap;
+pub(crate) use construction::node_scene::edit::{
+    CanonicalInvalidations, CanonicalRemapSet, CanonicalRemapSetError,
+};
+
+#[cfg(test)]
 mod tests;

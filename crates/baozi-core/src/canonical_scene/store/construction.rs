@@ -7,18 +7,19 @@ use std::num::{NonZeroU32, NonZeroU64};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use baozi_operation::{
-    DimensionPolicy, FinalProgress, LedgerLimits, LedgerLimitsError, OperationControl,
-    OperationOwner, OutcomeEvidenceRecordRef, PhysicalStorageAccount,
-    PhysicalStorageAccountCreateError, PhysicalStorageAccountFactory, PhysicalStorageAccountLimits,
-    PreparedStoreFailureOutcome, PreparedStoreSuccessOutcome, ProgressPhase, ProgressUnit,
-    PublishedCanonicalStore, PublishedOutcomeEvidenceStore, PublishedRichFailureStore,
-    PublishedStoreFallbackOutput, RecordBlock, RecordPlan, RetainedStoreBatchLimits,
-    RetainedStoreBlockTablePlan, RetainedStoreOperation, RetainedStorePublicationAssembly,
-    RetainedStorePublicationPlan, RetainedStoreSharePlan, RetainedStoreStartError,
-    RetainedStoreStartPlan, RetainedStoreWriterPlan, SequencePlan, StoreDimensionKey,
-    StoreDimensionSemanticId, StoreFailureAssembly, StoreFailureValidation, StoreKeyDomain,
-    StoreKeyDomainCreateError, StoreLedgerEvidence, StoreLedgerPlan, StoreLedgerPlanError,
-    StorePhaseKey, StorePhaseSemanticId, StorePlanError, StorePrepareError, StoreRuntimeError,
+    CanonicalInheritanceSource, DerivedRetainedStoreOperation, DimensionPolicy, FinalProgress,
+    FreshStoreLineage, LedgerLimits, LedgerLimitsError, OperationControl, OperationOwner,
+    OutcomeEvidenceRecordRef, PhysicalStorageAccount, PhysicalStorageAccountCreateError,
+    PhysicalStorageAccountFactory, PhysicalStorageAccountLimits, PreparedStoreFailureOutcome,
+    PreparedStoreSuccessOutcome, ProgressPhase, ProgressUnit, PublishedCanonicalStore,
+    PublishedOutcomeEvidenceStore, PublishedRichFailureStore, PublishedStoreFallbackOutput,
+    RecordBlock, RecordPlan, RetainedStoreBatchLimits, RetainedStoreBlockTablePlan,
+    RetainedStoreOperation, RetainedStorePublicationAssembly, RetainedStorePublicationPlan,
+    RetainedStoreSharePlan, RetainedStoreStartError, RetainedStoreStartPlan,
+    RetainedStoreWriterPlan, SequencePlan, StoreDimensionKey, StoreDimensionSemanticId,
+    StoreFailureAssembly, StoreFailureValidation, StoreKeyDomain, StoreKeyDomainCreateError,
+    StoreLedgerEvidence, StoreLedgerPlan, StoreLedgerPlanError, StorePhaseKey,
+    StorePhaseSemanticId, StorePlanError, StorePrepareError, StoreRuntimeError,
     StoreSemanticCatalogId, StoreSuccessValidation, ValidatedStoreSuccess,
 };
 use thiserror::Error;
@@ -27,7 +28,7 @@ use crate::SceneValidationLimits;
 use crate::identity::{ReservedSceneGeneration, SceneGenerationError, SceneGenerationId};
 use crate::math::Mat4;
 
-use super::production::{SceneAuthoringBatch, SceneInputPreflight, SceneInputPreflightError};
+use super::production::{SceneAuthoringBatch, SceneInputEnvelope, SceneInputEnvelopeError};
 use super::schema::{
     AuthoredMatrixSchema, CANONICAL_BLOCK_COUNT, CanonicalBlockRef, DIRECTORY_FIELD_COUNT,
     DirectorySchema, EVIDENCE_FIELD_COUNT, EVIDENCE_OUTCOME_CANDIDATE, MATRIX_SCALAR_COUNT,
@@ -63,7 +64,7 @@ const TERMINAL_COMMITMENT_SLOTS: usize = 8;
 static NEXT_CONSTRUCTION_BRAND: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-enum SceneConstructionPhase {
+pub(in crate::canonical_scene::store) enum SceneConstructionPhase {
     Publication,
 }
 
@@ -78,7 +79,7 @@ impl ProgressPhase for SceneConstructionPhase {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-enum SceneConstructionUnit {
+pub(in crate::canonical_scene::store) enum SceneConstructionUnit {
     Scene,
 }
 
@@ -92,18 +93,29 @@ struct SceneConstructionOwner;
 
 impl OperationOwner for SceneConstructionOwner {}
 
-type SceneStoreOperation =
-    RetainedStoreOperation<SceneConstructionOwner, SceneConstructionPhase, SceneConstructionUnit>;
+type SceneStoreOperation<L = FreshStoreLineage> = RetainedStoreOperation<
+    SceneConstructionOwner,
+    SceneConstructionPhase,
+    SceneConstructionUnit,
+    L,
+>;
+type DerivedSceneStoreOperation<'scene> = DerivedRetainedStoreOperation<
+    'scene,
+    SceneConstructionOwner,
+    SceneConstructionPhase,
+    SceneConstructionUnit,
+>;
 type SceneStoreControlCheckpoint<'a> = baozi_operation::RetainedStoreControlCheckpoint<
     'a,
     SceneConstructionOwner,
     SceneConstructionPhase,
     SceneConstructionUnit,
 >;
-type SceneStoreAssembly = RetainedStorePublicationAssembly<
+type SceneStoreAssembly<L = FreshStoreLineage> = RetainedStorePublicationAssembly<
     SceneConstructionOwner,
     SceneConstructionPhase,
     SceneConstructionUnit,
+    L,
 >;
 type SceneStoreFailureAssembly = StoreFailureAssembly<
     SceneConstructionOwner,
@@ -142,8 +154,8 @@ pub(crate) struct SceneConstructionLimits {
 
 #[derive(Debug, Error)]
 pub(crate) enum SceneConstructionStartError {
-    #[error("canonical Scene input preflight failed before operation start")]
-    InputPreflight(#[from] SceneInputPreflightError),
+    #[error("canonical Scene input envelope could not be admitted before operation start")]
+    InputEnvelope(#[from] SceneInputEnvelopeError),
     #[error("canonical Scene construction-brand space is exhausted")]
     BrandExhausted,
     #[error("a private physical storage account could not be created")]
@@ -341,8 +353,8 @@ impl ValidatedTracerScene {
         self.refs
     }
 
-    fn inheritance_source(&self) -> CanonicalInheritanceSource<'_> {
-        CanonicalInheritanceSource {
+    fn inheritance_source(&self) -> TracerInheritanceSource<'_> {
+        TracerInheritanceSource {
             exact_input: self,
             authorized_matrix: self.refs.matrices,
         }
@@ -481,14 +493,9 @@ impl PreparedSceneConstruction {
     }
 }
 
-struct CanonicalInheritanceSource<'scene> {
+struct TracerInheritanceSource<'scene> {
     exact_input: &'scene ValidatedTracerScene,
     authorized_matrix: CanonicalBlockRef<AuthoredMatrixSchema>,
-}
-
-enum SceneConstructionLineage<'scene> {
-    Fresh,
-    Derived(CanonicalInheritanceSource<'scene>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -529,14 +536,14 @@ struct SceneStoreKeys {
     dimension: StoreDimensionKey,
 }
 
-struct SceneCandidateOwner {
-    assembly: SceneStoreAssembly,
+struct SceneCandidateOwner<L = FreshStoreLineage> {
+    assembly: SceneStoreAssembly<L>,
     brand: ConstructionBrand,
     keys: SceneStoreKeys,
 }
 
-struct SceneCandidate {
-    owner: SceneCandidateOwner,
+struct SceneCandidate<L = FreshStoreLineage> {
+    owner: SceneCandidateOwner<L>,
     draft: SceneDraft,
     refs: SceneBlockRefs,
     evidence: OutcomeEvidenceRecordRef<OutcomeEvidenceSchema>,
@@ -558,24 +565,32 @@ struct ValidatedSceneCandidate {
     pending_commitments: PendingDestinationCommitments,
 }
 
-pub(crate) struct SceneConstructionOperation<'scene> {
+#[must_use = "the Scene construction operation must be prepared or deliberately dropped"]
+pub(crate) struct SceneConstructionOperation {
     raw: SceneStoreOperation,
     brand: ConstructionBrand,
     keys: SceneStoreKeys,
-    lineage: SceneConstructionLineage<'scene>,
+}
+
+#[must_use = "the derived Scene construction operation must be prepared or deliberately dropped"]
+pub(crate) struct DerivedSceneConstructionOperation<'scene> {
+    raw: DerivedSceneStoreOperation<'scene>,
+    brand: ConstructionBrand,
+    keys: SceneStoreKeys,
+    source: TracerInheritanceSource<'scene>,
 }
 
 /// A fresh operation sealed to the exact producer description admitted before startup.
 #[must_use = "the admitted Scene input must be validated or deliberately dropped"]
 pub(in crate::canonical_scene::store) struct SceneAuthoringOperation<'input> {
-    operation: SceneConstructionOperation<'static>,
+    operation: SceneConstructionOperation,
     input: SceneAuthoringBatch<'input>,
     validation_limits: SceneValidationLimits,
 }
 
 #[cfg(test)]
 pub(super) struct ScaledComplexFixtureOperation {
-    operation: SceneConstructionOperation<'static>,
+    operation: SceneConstructionOperation,
     image_count: usize,
 }
 
@@ -590,12 +605,12 @@ impl ScaledComplexFixtureOperation {
     }
 }
 
-impl SceneConstructionOperation<'static> {
+impl SceneConstructionOperation {
     pub(crate) fn with_account(
         account: &PhysicalStorageAccount,
         limits: SceneConstructionLimits,
     ) -> Result<Self, SceneConstructionStartError> {
-        Self::start(account, limits, SceneConstructionLineage::Fresh)
+        Self::start(account, limits)
     }
 
     pub(in crate::canonical_scene::store) fn with_account_for_scene_input<'input>(
@@ -604,13 +619,12 @@ impl SceneConstructionOperation<'static> {
         input: SceneAuthoringBatch<'input>,
         validation_limits: SceneValidationLimits,
     ) -> Result<SceneAuthoringOperation<'input>, SceneConstructionStartError> {
-        let preflight = SceneInputPreflight::try_new(input, validation_limits)?;
+        let envelope = SceneInputEnvelope::try_new(input, validation_limits)?;
         let operation = Self::start_with_control_and_attribution_slots(
             account,
             limits,
-            SceneConstructionLineage::Fresh,
             OperationControl::default(),
-            preflight.terminal_attribution_slots(),
+            envelope.terminal_attribution_slots(),
         )?;
         Ok(SceneAuthoringOperation {
             operation,
@@ -627,13 +641,12 @@ impl SceneConstructionOperation<'static> {
         validation_limits: SceneValidationLimits,
         cancellation: impl baozi_operation::CancellationSignal,
     ) -> Result<SceneAuthoringOperation<'input>, SceneConstructionStartError> {
-        let preflight = SceneInputPreflight::try_new(input, validation_limits)?;
+        let envelope = SceneInputEnvelope::try_new(input, validation_limits)?;
         let operation = Self::start_with_control_and_attribution_slots(
             account,
             limits,
-            SceneConstructionLineage::Fresh,
             OperationControl::default().with_cancellation(cancellation),
-            preflight.terminal_attribution_slots(),
+            envelope.terminal_attribution_slots(),
         )?;
         Ok(SceneAuthoringOperation {
             operation,
@@ -653,7 +666,6 @@ impl SceneConstructionOperation<'static> {
         let operation = Self::start_with_control_and_attribution_slots(
             account,
             limits,
-            SceneConstructionLineage::Fresh,
             OperationControl::default(),
             attribution_slots,
         )?;
@@ -669,7 +681,7 @@ impl SceneConstructionOperation<'static> {
         limits: SceneConstructionLimits,
     ) -> Result<Self, SceneConstructionStartError> {
         let account = factory.try_create_account(account_limits)?;
-        Self::start(&account, limits, SceneConstructionLineage::Fresh)
+        Self::start(&account, limits)
     }
 
     #[cfg(test)]
@@ -681,7 +693,6 @@ impl SceneConstructionOperation<'static> {
         Self::start_with_control(
             account,
             limits,
-            SceneConstructionLineage::Fresh,
             OperationControl::default().with_cancellation(cancellation),
         )
     }
@@ -694,7 +705,6 @@ impl SceneConstructionOperation<'static> {
         Self::start_with_control(
             account,
             limits,
-            SceneConstructionLineage::Fresh,
             OperationControl::default().with_progress_observer(|_| {
                 panic!("test progress observer panic during terminal preparation")
             }),
@@ -705,8 +715,8 @@ impl SceneConstructionOperation<'static> {
         self,
         authored: TwoNodeAuthoredMatrices,
     ) -> Result<PreparedSceneConstruction, SceneConstructionError> {
-        self.prepare_two_node(
-            MatrixConstruction::Fresh(authored.scalars()),
+        self.prepare_fresh_two_node_with(
+            authored,
             SceneBuildFaults::none(),
             SceneGenerationId::reserve,
         )
@@ -720,31 +730,29 @@ impl SceneConstructionOperation<'static> {
     ) -> Result<PreparedComplexFixture, SceneConstructionError> {
         complex::prepare(self, 1, fault, reserve_generation)
     }
-}
 
-impl<'scene> SceneConstructionOperation<'scene> {
-    pub(crate) fn derived_from_exact_input(
+    pub(crate) fn derived_from_exact_input<'scene>(
         input: &'scene ValidatedTracerScene,
         limits: SceneConstructionLimits,
-    ) -> Result<Self, SceneConstructionStartError> {
-        Self::start(
-            input.account(),
+    ) -> Result<DerivedSceneConstructionOperation<'scene>, SceneConstructionStartError> {
+        let source = input.inheritance_source();
+        let start = try_plan_scene_operation(
             limits,
-            SceneConstructionLineage::Derived(input.inheritance_source()),
-        )
-    }
-
-    pub(crate) fn prepare_derived_two_node(
-        self,
-    ) -> Result<PreparedSceneConstruction, SceneConstructionError> {
-        self.prepare_two_node(
-            MatrixConstruction::Inherited {
-                requested_scene: None,
-                requested_matrix: None,
-            },
-            SceneBuildFaults::none(),
-            SceneGenerationId::reserve,
-        )
+            OperationControl::default(),
+            TERMINAL_ATTRIBUTION_SLOTS,
+        )?;
+        let raw = SceneStoreOperation::try_start_derived(
+            start.control,
+            start.ledger_plan,
+            &input.canonical,
+            start.start_plan,
+        )?;
+        Ok(DerivedSceneConstructionOperation {
+            raw,
+            brand: start.brand,
+            keys: start.keys,
+            source,
+        })
     }
 
     #[cfg(test)]
@@ -753,26 +761,7 @@ impl<'scene> SceneConstructionOperation<'scene> {
         authored: TwoNodeAuthoredMatrices,
         reserve_generation: impl FnOnce() -> Result<ReservedSceneGeneration, SceneGenerationError>,
     ) -> Result<PreparedSceneConstruction, SceneConstructionError> {
-        self.prepare_two_node(
-            MatrixConstruction::Fresh(authored.scalars()),
-            SceneBuildFaults::none(),
-            reserve_generation,
-        )
-    }
-
-    #[cfg(test)]
-    pub(super) fn prepare_derived_two_node_with_generation_source(
-        self,
-        reserve_generation: impl FnOnce() -> Result<ReservedSceneGeneration, SceneGenerationError>,
-    ) -> Result<PreparedSceneConstruction, SceneConstructionError> {
-        self.prepare_two_node(
-            MatrixConstruction::Inherited {
-                requested_scene: None,
-                requested_matrix: None,
-            },
-            SceneBuildFaults::none(),
-            reserve_generation,
-        )
+        self.prepare_fresh_two_node_with(authored, SceneBuildFaults::none(), reserve_generation)
     }
 
     #[cfg(test)]
@@ -782,8 +771,8 @@ impl<'scene> SceneConstructionOperation<'scene> {
         fault: TestSceneFault,
         reserve_generation: impl FnOnce() -> Result<ReservedSceneGeneration, SceneGenerationError>,
     ) -> Result<PreparedSceneConstruction, SceneConstructionError> {
-        self.prepare_two_node(
-            MatrixConstruction::Fresh(authored.scalars()),
+        self.prepare_fresh_two_node_with(
+            authored,
             SceneBuildFaults::from_test_fault(fault),
             reserve_generation,
         )
@@ -796,11 +785,97 @@ impl<'scene> SceneConstructionOperation<'scene> {
         fault: TestPostReservationFault,
         reserve_generation: impl FnOnce() -> Result<ReservedSceneGeneration, SceneGenerationError>,
     ) -> Result<PreparedSceneConstruction, SceneConstructionError> {
-        self.prepare_two_node(
-            MatrixConstruction::Fresh(authored.scalars()),
+        self.prepare_fresh_two_node_with(
+            authored,
             SceneBuildFaults::with_post_reservation_fault(fault),
             reserve_generation,
         )
+    }
+
+    fn start(
+        account: &PhysicalStorageAccount,
+        limits: SceneConstructionLimits,
+    ) -> Result<Self, SceneConstructionStartError> {
+        Self::start_with_control(account, limits, OperationControl::default())
+    }
+
+    fn start_with_control(
+        account: &PhysicalStorageAccount,
+        limits: SceneConstructionLimits,
+        control: OperationControl<SceneConstructionPhase, SceneConstructionUnit>,
+    ) -> Result<Self, SceneConstructionStartError> {
+        Self::start_with_control_and_attribution_slots(
+            account,
+            limits,
+            control,
+            TERMINAL_ATTRIBUTION_SLOTS,
+        )
+    }
+
+    fn start_with_control_and_attribution_slots(
+        account: &PhysicalStorageAccount,
+        limits: SceneConstructionLimits,
+        control: OperationControl<SceneConstructionPhase, SceneConstructionUnit>,
+        terminal_attribution_slots: usize,
+    ) -> Result<Self, SceneConstructionStartError> {
+        let start = try_plan_scene_operation(limits, control, terminal_attribution_slots)?;
+        let raw = SceneStoreOperation::try_start(
+            start.control,
+            start.ledger_plan,
+            account,
+            start.start_plan,
+        )?;
+        Ok(Self {
+            raw,
+            brand: start.brand,
+            keys: start.keys,
+        })
+    }
+
+    fn prepare_fresh_two_node_with(
+        self,
+        authored: TwoNodeAuthoredMatrices,
+        faults: SceneBuildFaults,
+        reserve_generation: impl FnOnce() -> Result<ReservedSceneGeneration, SceneGenerationError>,
+    ) -> Result<PreparedSceneConstruction, SceneConstructionError> {
+        let Self { raw, brand, keys } = self;
+        let mut values = authored.scalars();
+        prepare_two_node(
+            raw,
+            brand,
+            keys,
+            faults,
+            reserve_generation,
+            move |assembly| {
+                if faults.invalid_matrix() {
+                    values[3] = 1.0;
+                }
+                retain_authored_matrices(assembly, &values)
+                    .map(|matrix| (matrix, matrix))
+                    .map_err(|_| MatrixConstructionFailure::Storage)
+            },
+        )
+    }
+}
+
+impl DerivedSceneConstructionOperation<'_> {
+    pub(crate) fn prepare_derived_two_node(
+        self,
+    ) -> Result<PreparedSceneConstruction, SceneConstructionError> {
+        self.prepare_derived_two_node_with(
+            None,
+            None,
+            SceneBuildFaults::none(),
+            SceneGenerationId::reserve,
+        )
+    }
+
+    #[cfg(test)]
+    pub(super) fn prepare_derived_two_node_with_generation_source(
+        self,
+        reserve_generation: impl FnOnce() -> Result<ReservedSceneGeneration, SceneGenerationError>,
+    ) -> Result<PreparedSceneConstruction, SceneConstructionError> {
+        self.prepare_derived_two_node_with(None, None, SceneBuildFaults::none(), reserve_generation)
     }
 
     #[cfg(test)]
@@ -811,97 +886,18 @@ impl<'scene> SceneConstructionOperation<'scene> {
         fault: Option<TestSceneFault>,
         reserve_generation: impl FnOnce() -> Result<ReservedSceneGeneration, SceneGenerationError>,
     ) -> Result<PreparedSceneConstruction, SceneConstructionError> {
-        self.prepare_two_node(
-            MatrixConstruction::Inherited {
-                requested_scene: Some(requested_scene),
-                requested_matrix: Some(requested_matrix),
-            },
+        self.prepare_derived_two_node_with(
+            Some(requested_scene),
+            Some(requested_matrix),
             fault.map_or_else(SceneBuildFaults::none, SceneBuildFaults::from_test_fault),
             reserve_generation,
         )
     }
 
-    fn start(
-        account: &PhysicalStorageAccount,
-        limits: SceneConstructionLimits,
-        lineage: SceneConstructionLineage<'scene>,
-    ) -> Result<Self, SceneConstructionStartError> {
-        Self::start_with_control(account, limits, lineage, OperationControl::default())
-    }
-
-    fn start_with_control(
-        account: &PhysicalStorageAccount,
-        limits: SceneConstructionLimits,
-        lineage: SceneConstructionLineage<'scene>,
-        control: OperationControl<SceneConstructionPhase, SceneConstructionUnit>,
-    ) -> Result<Self, SceneConstructionStartError> {
-        Self::start_with_control_and_attribution_slots(
-            account,
-            limits,
-            lineage,
-            control,
-            TERMINAL_ATTRIBUTION_SLOTS,
-        )
-    }
-
-    fn start_with_control_and_attribution_slots(
-        account: &PhysicalStorageAccount,
-        limits: SceneConstructionLimits,
-        lineage: SceneConstructionLineage<'scene>,
-        control: OperationControl<SceneConstructionPhase, SceneConstructionUnit>,
-        terminal_attribution_slots: usize,
-    ) -> Result<Self, SceneConstructionStartError> {
-        let brand = ConstructionBrand::reserve()?;
-        let domain = StoreKeyDomain::try_new(STORE_CATALOG)?;
-        let keys = SceneStoreKeys {
-            phase: domain
-                .try_admit_phase(STORE_PHASE)
-                .ok_or(SceneConstructionStartError::KeyAdmissionInvariant)?,
-            dimension: domain
-                .try_admit_dimension(STORE_DIMENSION)
-                .ok_or(SceneConstructionStartError::KeyAdmissionInvariant)?,
-        };
-        let dimension_policy = DimensionPolicy::reservable_bytes(
-            limits.attempted_work,
-            limits.consumed_work,
-            limits.committed_output,
-            limits.dimension_live_bytes,
-        )
-        .with_published_outcome_evidence_limit(limits.published_evidence);
-        let ledger_limits = LedgerLimits::new(
-            limits.operation_live_bytes,
-            [(keys.dimension, dimension_policy)],
-        )?;
-        let ledger_plan = StoreLedgerPlan::try_new(domain, ledger_limits, &[keys.phase])?;
-        let terminal_limits =
-            RetainedStoreBatchLimits::new(terminal_attribution_slots, TERMINAL_COMMITMENT_SLOTS)?;
-        let terminal_writer = RetainedStoreWriterPlan::new(
-            keys.phase,
-            keys.dimension,
-            keys.dimension,
-            terminal_limits,
-        );
-        let start_plan = RetainedStoreStartPlan::new(
-            terminal_writer,
-            RetainedStoreSharePlan::new(keys.dimension, keys.dimension),
-            baozi_operation::StoreFallbackEnvelope::new(FALLBACK_CODE),
-            keys.dimension,
-            1,
-            keys.dimension,
-            1,
-        );
-        let raw = SceneStoreOperation::try_start(control, ledger_plan, account, start_plan)?;
-        Ok(Self {
-            raw,
-            brand,
-            keys,
-            lineage,
-        })
-    }
-
-    fn prepare_two_node(
+    fn prepare_derived_two_node_with(
         self,
-        matrix_construction: MatrixConstruction<'_>,
+        requested_scene: Option<&ValidatedTracerScene>,
+        requested_matrix: Option<CanonicalBlockRef<AuthoredMatrixSchema>>,
         faults: SceneBuildFaults,
         reserve_generation: impl FnOnce() -> Result<ReservedSceneGeneration, SceneGenerationError>,
     ) -> Result<PreparedSceneConstruction, SceneConstructionError> {
@@ -909,128 +905,198 @@ impl<'scene> SceneConstructionOperation<'scene> {
             raw,
             brand,
             keys,
-            lineage,
+            source,
         } = self;
-        let inherited = matches!(matrix_construction, MatrixConstruction::Inherited { .. });
-        let publication_plan = scene_publication_plan(keys, inherited, faults)?;
-        let mut assembly = match raw.try_publication_assembly(publication_plan) {
-            Ok(assembly) => assembly,
-            Err(error) => {
-                let operation = error.try_into_operation()?;
-                let prepared = operation.prepare_minimal_fallback(FALLBACK_CODE)?;
-                return Ok(PreparedSceneConstruction::MinimalFallback(
-                    PreparedTracerSceneFallback { store: prepared },
-                ));
-            }
-        };
-
-        let evidence = match retain_outcome_evidence(&mut assembly) {
-            Ok(evidence) => evidence,
-            Err(_) => return prepare_minimal_fallback_from_assembly(assembly),
-        };
-
-        let (matrix, directory_matrix) = match (matrix_construction, lineage) {
-            (MatrixConstruction::Fresh(mut values), SceneConstructionLineage::Fresh) => {
-                if faults.invalid_matrix() {
-                    values[3] = 1.0;
-                }
-                match retain_authored_matrices(&mut assembly, &values) {
-                    Ok(matrix) => (matrix, matrix),
-                    Err(_) => return prepare_minimal_fallback_from_assembly(assembly),
-                }
-            }
-            (
-                MatrixConstruction::Inherited {
-                    requested_scene,
-                    requested_matrix,
-                },
-                SceneConstructionLineage::Derived(source),
-            ) => {
+        prepare_two_node(
+            raw,
+            brand,
+            keys,
+            faults,
+            reserve_generation,
+            move |assembly| {
                 let requested_scene = requested_scene.unwrap_or(source.exact_input);
                 let requested_matrix = requested_matrix.unwrap_or(source.authorized_matrix);
                 if !source.authorizes(requested_scene, requested_matrix) {
-                    return prepare_rich_failure_from_assembly(
-                        assembly,
-                        evidence,
-                        SEMANTIC_REJECTION_CODE,
-                    );
+                    return Err(MatrixConstructionFailure::Semantic);
                 }
-                let shared = assembly
-                    .try_share_canonical(&requested_scene.canonical, requested_matrix.into_store());
-                match shared {
-                    Ok(matrix) => {
-                        let target_matrix = CanonicalBlockRef::from_store(matrix);
-                        let directory_matrix = if faults.source_slot_in_directory() {
-                            requested_matrix
-                        } else {
-                            target_matrix
-                        };
-                        (target_matrix, directory_matrix)
-                    }
-                    Err(_) => return prepare_minimal_fallback_from_assembly(assembly),
-                }
-            }
-            _ => {
-                return prepare_rich_failure_from_assembly(
-                    assembly,
-                    evidence,
-                    SEMANTIC_REJECTION_CODE,
-                );
-            }
-        };
-
-        if faults.orphan()
-            && assembly
-                .try_retain_canonical_sequence(
-                    SequencePlan::<u8>::new(1).map_err(StoreRuntimeError::Plan)?,
-                    OrphanSchema,
-                    |writer| writer.push(1),
-                )
-                .is_err()
-        {
-            return prepare_minimal_fallback_from_assembly(assembly);
-        }
-
-        let references = match retain_references(&mut assembly, faults) {
-            Ok(references) => references,
-            Err(_) => return prepare_minimal_fallback_from_assembly(assembly),
-        };
-        let nodes = match retain_nodes(&mut assembly, matrix, faults) {
-            Ok(nodes) => nodes,
-            Err(_) => return prepare_minimal_fallback_from_assembly(assembly),
-        };
-        let directory =
-            match retain_directory(&mut assembly, nodes, references, directory_matrix, faults) {
-                Ok(directory) => directory,
-                Err(_) => return prepare_minimal_fallback_from_assembly(assembly),
-            };
-        let refs = SceneBlockRefs {
-            directory,
-            nodes,
-            references,
-            matrices: matrix,
-        };
-        let candidate = SceneCandidate {
-            owner: SceneCandidateOwner {
-                assembly,
-                brand,
-                keys,
+                assembly
+                    .try_bind_canonical_source(keys.dimension)
+                    .map_err(|_| MatrixConstructionFailure::Storage)?;
+                let target_matrix = assembly
+                    .try_share_canonical(requested_matrix.into_store())
+                    .map(CanonicalBlockRef::from_store)
+                    .map_err(|_| MatrixConstructionFailure::Storage)?;
+                let directory_matrix = if faults.source_slot_in_directory() {
+                    requested_matrix
+                } else {
+                    target_matrix
+                };
+                Ok((target_matrix, directory_matrix))
             },
-            draft: SceneDraft { brand, directory },
-            refs,
-            evidence,
-            outcome_evidence_commitment: faults.outcome_evidence_commitment(),
-        };
-        prepare_scene_candidate(candidate, faults.post_reservation(), reserve_generation)
+        )
     }
 }
 
-enum MatrixConstruction<'request> {
-    Fresh([f32; MATRIX_SCALAR_COUNT]),
-    Inherited {
-        requested_scene: Option<&'request ValidatedTracerScene>,
-        requested_matrix: Option<CanonicalBlockRef<AuthoredMatrixSchema>>,
-    },
+struct SceneOperationStart {
+    brand: ConstructionBrand,
+    keys: SceneStoreKeys,
+    control: OperationControl<SceneConstructionPhase, SceneConstructionUnit>,
+    ledger_plan: StoreLedgerPlan,
+    start_plan: RetainedStoreStartPlan,
+}
+
+fn try_plan_scene_operation(
+    limits: SceneConstructionLimits,
+    control: OperationControl<SceneConstructionPhase, SceneConstructionUnit>,
+    terminal_attribution_slots: usize,
+) -> Result<SceneOperationStart, SceneConstructionStartError> {
+    let brand = ConstructionBrand::reserve()?;
+    let domain = StoreKeyDomain::try_new(STORE_CATALOG)?;
+    let keys = SceneStoreKeys {
+        phase: domain
+            .try_admit_phase(STORE_PHASE)
+            .ok_or(SceneConstructionStartError::KeyAdmissionInvariant)?,
+        dimension: domain
+            .try_admit_dimension(STORE_DIMENSION)
+            .ok_or(SceneConstructionStartError::KeyAdmissionInvariant)?,
+    };
+    let dimension_policy = DimensionPolicy::reservable_bytes(
+        limits.attempted_work,
+        limits.consumed_work,
+        limits.committed_output,
+        limits.dimension_live_bytes,
+    )
+    .with_published_outcome_evidence_limit(limits.published_evidence);
+    let ledger_limits = LedgerLimits::new(
+        limits.operation_live_bytes,
+        [(keys.dimension, dimension_policy)],
+    )?;
+    let ledger_plan = StoreLedgerPlan::try_new(domain, ledger_limits, &[keys.phase])?;
+    let terminal_limits =
+        RetainedStoreBatchLimits::new(terminal_attribution_slots, TERMINAL_COMMITMENT_SLOTS)?;
+    let terminal_writer =
+        RetainedStoreWriterPlan::new(keys.phase, keys.dimension, keys.dimension, terminal_limits);
+    let start_plan = RetainedStoreStartPlan::new(
+        terminal_writer,
+        RetainedStoreSharePlan::new(keys.dimension, keys.dimension),
+        baozi_operation::StoreFallbackEnvelope::new(FALLBACK_CODE),
+        keys.dimension,
+        1,
+        keys.dimension,
+        1,
+    );
+    Ok(SceneOperationStart {
+        brand,
+        keys,
+        control,
+        ledger_plan,
+        start_plan,
+    })
+}
+
+enum MatrixConstructionFailure {
+    Semantic,
+    Storage,
+}
+
+trait ScenePublicationLineage {
+    const INHERITS_CANONICAL_STORAGE: bool;
+}
+
+impl ScenePublicationLineage for FreshStoreLineage {
+    const INHERITS_CANONICAL_STORAGE: bool = false;
+}
+
+impl ScenePublicationLineage for CanonicalInheritanceSource<'_> {
+    const INHERITS_CANONICAL_STORAGE: bool = true;
+}
+
+fn prepare_two_node<L: ScenePublicationLineage>(
+    raw: SceneStoreOperation<L>,
+    brand: ConstructionBrand,
+    keys: SceneStoreKeys,
+    faults: SceneBuildFaults,
+    reserve_generation: impl FnOnce() -> Result<ReservedSceneGeneration, SceneGenerationError>,
+    construct_matrix: impl FnOnce(
+        &mut SceneStoreAssembly<L>,
+    ) -> Result<
+        (
+            CanonicalBlockRef<AuthoredMatrixSchema>,
+            CanonicalBlockRef<AuthoredMatrixSchema>,
+        ),
+        MatrixConstructionFailure,
+    >,
+) -> Result<PreparedSceneConstruction, SceneConstructionError> {
+    let publication_plan = scene_publication_plan(keys, L::INHERITS_CANONICAL_STORAGE, faults)?;
+    let mut assembly = match raw.try_publication_assembly(publication_plan) {
+        Ok(assembly) => assembly,
+        Err(error) => {
+            let operation = error.try_into_operation()?;
+            let prepared = operation.prepare_minimal_fallback(FALLBACK_CODE)?;
+            return Ok(PreparedSceneConstruction::MinimalFallback(
+                PreparedTracerSceneFallback { store: prepared },
+            ));
+        }
+    };
+
+    let evidence = match retain_outcome_evidence(&mut assembly) {
+        Ok(evidence) => evidence,
+        Err(_) => return prepare_minimal_fallback_from_assembly(assembly),
+    };
+
+    let (matrix, directory_matrix) = match construct_matrix(&mut assembly) {
+        Ok(matrix) => matrix,
+        Err(MatrixConstructionFailure::Semantic) => {
+            return prepare_rich_failure_from_assembly(assembly, evidence, SEMANTIC_REJECTION_CODE);
+        }
+        Err(MatrixConstructionFailure::Storage) => {
+            return prepare_minimal_fallback_from_assembly(assembly);
+        }
+    };
+
+    if faults.orphan()
+        && assembly
+            .try_retain_canonical_sequence(
+                SequencePlan::<u8>::new(1).map_err(StoreRuntimeError::Plan)?,
+                OrphanSchema,
+                |writer| writer.push(1),
+            )
+            .is_err()
+    {
+        return prepare_minimal_fallback_from_assembly(assembly);
+    }
+
+    let references = match retain_references(&mut assembly, faults) {
+        Ok(references) => references,
+        Err(_) => return prepare_minimal_fallback_from_assembly(assembly),
+    };
+    let nodes = match retain_nodes(&mut assembly, matrix, faults) {
+        Ok(nodes) => nodes,
+        Err(_) => return prepare_minimal_fallback_from_assembly(assembly),
+    };
+    let directory =
+        match retain_directory(&mut assembly, nodes, references, directory_matrix, faults) {
+            Ok(directory) => directory,
+            Err(_) => return prepare_minimal_fallback_from_assembly(assembly),
+        };
+    let refs = SceneBlockRefs {
+        directory,
+        nodes,
+        references,
+        matrices: matrix,
+    };
+    let candidate = SceneCandidate {
+        owner: SceneCandidateOwner {
+            assembly,
+            brand,
+            keys,
+        },
+        draft: SceneDraft { brand, directory },
+        refs,
+        evidence,
+        outcome_evidence_commitment: faults.outcome_evidence_commitment(),
+    };
+    prepare_scene_candidate(candidate, faults.post_reservation(), reserve_generation)
 }
 
 #[cfg(test)]
@@ -1198,7 +1264,7 @@ impl SceneBuildFaults {
 #[derive(Clone, Copy)]
 struct OrphanSchema;
 
-impl CanonicalInheritanceSource<'_> {
+impl TracerInheritanceSource<'_> {
     fn authorizes(
         &self,
         source_scene: &ValidatedTracerScene,
@@ -1242,8 +1308,8 @@ fn scene_writer_plan(
     ))
 }
 
-fn retain_outcome_evidence(
-    assembly: &mut SceneStoreAssembly,
+fn retain_outcome_evidence<L>(
+    assembly: &mut SceneStoreAssembly<L>,
 ) -> Result<OutcomeEvidenceRecordRef<OutcomeEvidenceSchema>, StoreRuntimeError> {
     assembly.try_retain_outcome_evidence_records(
         RecordPlan::new(1, EVIDENCE_FIELD_COUNT).map_err(StoreRuntimeError::Plan)?,
@@ -1259,8 +1325,8 @@ fn retain_outcome_evidence(
     )
 }
 
-fn retain_authored_matrices(
-    assembly: &mut SceneStoreAssembly,
+fn retain_authored_matrices<L>(
+    assembly: &mut SceneStoreAssembly<L>,
     values: &[f32; MATRIX_SCALAR_COUNT],
 ) -> Result<CanonicalBlockRef<AuthoredMatrixSchema>, StoreRuntimeError> {
     assembly
@@ -1272,8 +1338,8 @@ fn retain_authored_matrices(
         .map(CanonicalBlockRef::from_store)
 }
 
-fn retain_references(
-    assembly: &mut SceneStoreAssembly,
+fn retain_references<L>(
+    assembly: &mut SceneStoreAssembly<L>,
     faults: SceneBuildFaults,
 ) -> Result<CanonicalBlockRef<ReferenceTableSchema>, StoreRuntimeError> {
     let wrong_reference = faults.wrong_reference();
@@ -1293,8 +1359,8 @@ fn retain_references(
         .map(CanonicalBlockRef::from_store)
 }
 
-fn retain_nodes(
-    assembly: &mut SceneStoreAssembly,
+fn retain_nodes<L>(
+    assembly: &mut SceneStoreAssembly<L>,
     matrices: CanonicalBlockRef<AuthoredMatrixSchema>,
     faults: SceneBuildFaults,
 ) -> Result<CanonicalBlockRef<NodeTableSchema>, StoreRuntimeError> {
@@ -1331,8 +1397,8 @@ fn retain_nodes(
         .map(CanonicalBlockRef::from_store)
 }
 
-fn retain_directory(
-    assembly: &mut SceneStoreAssembly,
+fn retain_directory<L>(
+    assembly: &mut SceneStoreAssembly<L>,
     nodes: CanonicalBlockRef<NodeTableSchema>,
     references: CanonicalBlockRef<ReferenceTableSchema>,
     matrices: CanonicalBlockRef<AuthoredMatrixSchema>,
@@ -1366,8 +1432,8 @@ fn retain_directory(
         .map(CanonicalBlockRef::from_store)
 }
 
-fn prepare_scene_candidate(
-    candidate: SceneCandidate,
+fn prepare_scene_candidate<L>(
+    candidate: SceneCandidate<L>,
     post_reservation: PostReservationAction,
     reserve_generation: impl FnOnce() -> Result<ReservedSceneGeneration, SceneGenerationError>,
 ) -> Result<PreparedSceneConstruction, SceneConstructionError> {
@@ -1422,8 +1488,8 @@ fn prepare_scene_candidate(
     }
 }
 
-fn register_pending_destination_commitments(
-    assembly: &mut SceneStoreAssembly,
+fn register_pending_destination_commitments<L>(
+    assembly: &mut SceneStoreAssembly<L>,
     keys: SceneStoreKeys,
     outcome_evidence: u64,
 ) -> Result<PendingDestinationCommitments, StoreRuntimeError> {
@@ -1491,8 +1557,8 @@ fn prepare_validated_success(
 
 fn burn_generation_reservation(_reservation: ReservedSceneGeneration) {}
 
-fn prepare_rich_failure_from_assembly(
-    assembly: SceneStoreAssembly,
+fn prepare_rich_failure_from_assembly<L>(
+    assembly: SceneStoreAssembly<L>,
     evidence: OutcomeEvidenceRecordRef<OutcomeEvidenceSchema>,
     cause: u32,
 ) -> Result<PreparedSceneConstruction, SceneConstructionError> {
@@ -1552,8 +1618,8 @@ fn map_prepared_failure(
     })
 }
 
-fn prepare_minimal_fallback_from_assembly(
-    assembly: SceneStoreAssembly,
+fn prepare_minimal_fallback_from_assembly<L>(
+    assembly: SceneStoreAssembly<L>,
 ) -> Result<PreparedSceneConstruction, SceneConstructionError> {
     let store = assembly.prepare_minimal_fallback()?;
     Ok(PreparedSceneConstruction::MinimalFallback(

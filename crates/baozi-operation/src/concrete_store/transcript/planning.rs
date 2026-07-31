@@ -1,12 +1,13 @@
 use std::fmt;
 
 use super::super::{
-    ByteBlock, BytesBatchPlan, BytesPlan, CanonicalBytesRef, CanonicalSequenceRef,
-    CanonicalUtf8Ref, OutcomeEvidenceBytesRef, OutcomeEvidenceSequenceRef, OutcomeEvidenceUtf8Ref,
-    PreparedStoreFallback, PublishedCanonicalStore, PublishedOutcomeEvidenceStore, RecordPlan,
-    RetainedStoreBlockTablePlan, RetainedStoreOperation, RetainedStorePublicationPlan,
-    RetainedStoreWriterPlan, ScalarSequence, SequenceBatchPlan, SequencePlan, StoreDestination,
-    StorePlanError, StorePrepareError, StoreRuntimeError, StoredScalar, Utf8BatchPlan, Utf8Plan,
+    ByteBlock, BytesBatchPlan, BytesPlan, CanonicalBytesRef, CanonicalInheritanceSource,
+    CanonicalSequenceRef, CanonicalUtf8Ref, FreshStoreLineage, OutcomeEvidenceBytesRef,
+    OutcomeEvidenceSequenceRef, OutcomeEvidenceUtf8Ref, PreparedStoreFallback,
+    PublishedOutcomeEvidenceStore, RecordPlan, RetainedStoreBlockTablePlan, RetainedStoreOperation,
+    RetainedStorePublicationPlan, RetainedStoreWriterPlan, ScalarSequence, SequenceBatchPlan,
+    SequencePlan, StoreDestination, StorePlanError, StorePrepareError, StoreRuntimeError,
+    StoredScalar, Utf8BatchPlan, Utf8Plan,
 };
 use super::execution::RetainedStoreExecution;
 use super::{
@@ -52,13 +53,13 @@ use crate::{OperationOwner, ProgressPhase, ProgressUnit};
 /// }
 /// ```
 #[must_use = "open the transcript, recover it, or publish the pre-admitted fallback"]
-pub struct RetainedStoreTranscript<O, PP, U>
+pub struct RetainedStoreTranscript<O, PP, U, L = FreshStoreLineage>
 where
     O: OperationOwner,
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    operation: RetainedStoreOperation<O, PP, U>,
+    operation: RetainedStoreOperation<O, PP, U, L>,
     identity: TranscriptId,
     canonical_writer: Option<RetainedStoreWriterPlan>,
     evidence_writer: RetainedStoreWriterPlan,
@@ -67,7 +68,15 @@ where
     segment: PlanningSegment,
 }
 
-impl<O, PP, U> RetainedStoreOperation<O, PP, U>
+/// Result of opening structural transcript planning for an admitted store operation.
+pub type StoreTranscriptStartResult<O, PP, U, L = FreshStoreLineage> =
+    Result<RetainedStoreTranscript<O, PP, U, L>, StoreTranscriptStartError<O, PP, U, L>>;
+
+/// Result of consuming a complete transcript plan into its execution phase.
+pub type StoreTranscriptOpenResult<O, PP, U, L = FreshStoreLineage> =
+    Result<RetainedStoreExecution<O, PP, U, L>, StoreTranscriptOpenError<O, PP, U, L>>;
+
+impl<O, PP, U, L> RetainedStoreOperation<O, PP, U, L>
 where
     O: OperationOwner,
     PP: ProgressPhase,
@@ -77,23 +86,23 @@ where
         self,
         canonical_writer: RetainedStoreWriterPlan,
         evidence_writer: RetainedStoreWriterPlan,
-    ) -> Result<RetainedStoreTranscript<O, PP, U>, StoreTranscriptStartError<O, PP, U>> {
+    ) -> StoreTranscriptStartResult<O, PP, U, L> {
         begin_transcript(self, Some(canonical_writer), evidence_writer)
     }
 
     pub fn try_begin_rich_failure_transcript(
         self,
         evidence_writer: RetainedStoreWriterPlan,
-    ) -> Result<RetainedStoreTranscript<O, PP, U>, StoreTranscriptStartError<O, PP, U>> {
+    ) -> StoreTranscriptStartResult<O, PP, U, L> {
         begin_transcript(self, None, evidence_writer)
     }
 }
 
-fn begin_transcript<O, PP, U>(
-    operation: RetainedStoreOperation<O, PP, U>,
+fn begin_transcript<O, PP, U, L>(
+    operation: RetainedStoreOperation<O, PP, U, L>,
     canonical_writer: Option<RetainedStoreWriterPlan>,
     evidence_writer: RetainedStoreWriterPlan,
-) -> Result<RetainedStoreTranscript<O, PP, U>, StoreTranscriptStartError<O, PP, U>>
+) -> StoreTranscriptStartResult<O, PP, U, L>
 where
     O: OperationOwner,
     PP: ProgressPhase,
@@ -196,7 +205,7 @@ macro_rules! plan_simple_batch {
     };
 }
 
-impl<O, PP, U> RetainedStoreTranscript<O, PP, U>
+impl<O, PP, U, L> RetainedStoreTranscript<O, PP, U, L>
 where
     O: OperationOwner,
     PP: ProgressPhase,
@@ -419,37 +428,7 @@ where
             .map(PlannedOutcomeEvidenceCommit::new)
     }
 
-    fn mint_canonical_share<'a, SRK, SRT, Kind, Tag>(
-        &mut self,
-        source: &'a PublishedCanonicalStore<SRK, SRT>,
-        source_ref: super::super::CanonicalStoreRef<Kind, Tag>,
-    ) -> Result<PlannedCanonicalShare<'a, SRK, SRT, Kind, Tag>, StoreTranscriptPlanError>
-    where
-        Tag: Copy + Send + Sync + 'static,
-    {
-        if !source.belongs_to_account(self.operation.account()) {
-            return Err(StoreTranscriptPlanError::Runtime(
-                StoreRuntimeError::ForeignAccount,
-            ));
-        }
-        let member = source
-            .share_source()
-            .aggregate()
-            .lookup_member(source_ref.raw);
-        if member.is_none_or(|member| !member.schema_tag_matches()) {
-            return Err(StoreTranscriptPlanError::Runtime(
-                StoreRuntimeError::InvalidSourceSlot,
-            ));
-        }
-        self.mint(
-            CounterDelta::shared_block(StoreDestination::Canonical),
-            CanonicalStoreSharePlan { source, source_ref },
-            (),
-        )
-        .map(PlannedCanonicalShare::new)
-    }
-
-    fn mint_evidence_share<'a, SRK, SRT, Kind, Tag>(
+    fn mint_checked_evidence_share<'a, SRK, SRT, Kind, Tag>(
         &mut self,
         source: &'a PublishedOutcomeEvidenceStore<SRK, SRT>,
         source_ref: super::super::OutcomeEvidenceStoreRef<Kind, Tag>,
@@ -462,67 +441,12 @@ where
                 StoreRuntimeError::ForeignAccount,
             ));
         }
-        let member = source
-            .share_source()
-            .aggregate()
-            .lookup_member(source_ref.raw);
-        if member.is_none_or(|member| !member.schema_tag_matches()) {
-            return Err(StoreTranscriptPlanError::Runtime(
-                StoreRuntimeError::InvalidSourceSlot,
-            ));
-        }
         self.mint(
             CounterDelta::shared_block(StoreDestination::OutcomeEvidence),
             OutcomeEvidenceStoreSharePlan { source, source_ref },
             (),
         )
         .map(PlannedOutcomeEvidenceShare::new)
-    }
-
-    pub fn plan_canonical_sequence_share<'a, SRK, SRT, T, Tag>(
-        &mut self,
-        source: &'a PublishedCanonicalStore<SRK, SRT>,
-        source_ref: CanonicalSequenceRef<T, Tag>,
-    ) -> Result<PlannedCanonicalShare<'a, SRK, SRT, ScalarSequence<T>, Tag>, StoreTranscriptPlanError>
-    where
-        T: StoredScalar,
-        Tag: Copy + Send + Sync + 'static,
-    {
-        if source.sequence(source_ref).is_none() {
-            return Err(invalid_source_slot());
-        }
-        self.mint_canonical_share(source, source_ref)
-    }
-
-    pub fn plan_canonical_bytes_share<'a, SRK, SRT, Tag>(
-        &mut self,
-        source: &'a PublishedCanonicalStore<SRK, SRT>,
-        source_ref: CanonicalBytesRef<Tag>,
-    ) -> Result<PlannedCanonicalShare<'a, SRK, SRT, ByteBlock, Tag>, StoreTranscriptPlanError>
-    where
-        Tag: Copy + Send + Sync + 'static,
-    {
-        if source.bytes(source_ref).is_none() {
-            return Err(invalid_source_slot());
-        }
-        self.mint_canonical_share(source, source_ref)
-    }
-
-    pub fn plan_canonical_utf8_share<'a, SRK, SRT, Tag>(
-        &mut self,
-        source: &'a PublishedCanonicalStore<SRK, SRT>,
-        source_ref: CanonicalUtf8Ref<Tag>,
-    ) -> Result<
-        PlannedCanonicalShare<'a, SRK, SRT, super::super::Utf8Block, Tag>,
-        StoreTranscriptPlanError,
-    >
-    where
-        Tag: Copy + Send + Sync + 'static,
-    {
-        if source.utf8(source_ref).is_none() {
-            return Err(invalid_source_slot());
-        }
-        self.mint_canonical_share(source, source_ref)
     }
 
     pub fn plan_outcome_evidence_sequence_share<'a, SRK, SRT, T, Tag>(
@@ -540,7 +464,7 @@ where
         if source.sequence(source_ref).is_none() {
             return Err(invalid_source_slot());
         }
-        self.mint_evidence_share(source, source_ref)
+        self.mint_checked_evidence_share(source, source_ref)
     }
 
     pub fn plan_outcome_evidence_bytes_share<'a, SRK, SRT, Tag>(
@@ -554,7 +478,7 @@ where
         if source.bytes(source_ref).is_none() {
             return Err(invalid_source_slot());
         }
-        self.mint_evidence_share(source, source_ref)
+        self.mint_checked_evidence_share(source, source_ref)
     }
 
     pub fn plan_outcome_evidence_utf8_share<'a, SRK, SRT, Tag>(
@@ -571,7 +495,7 @@ where
         if source.utf8(source_ref).is_none() {
             return Err(invalid_source_slot());
         }
-        self.mint_evidence_share(source, source_ref)
+        self.mint_checked_evidence_share(source, source_ref)
     }
 
     fn publication_plan(&self) -> Result<RetainedStorePublicationPlan, StoreTranscriptPlanError> {
@@ -603,9 +527,7 @@ where
         }
     }
 
-    pub fn try_open(
-        self,
-    ) -> Result<RetainedStoreExecution<O, PP, U>, StoreTranscriptOpenError<O, PP, U>> {
+    pub fn try_open(self) -> StoreTranscriptOpenResult<O, PP, U, L> {
         let plan = match self.publication_plan() {
             Ok(plan) => plan,
             Err(cause) => {
@@ -625,9 +547,15 @@ where
             segment,
         } = self;
         let primary = primary_endpoint.unwrap_or(progress);
+        let canonical_source_binding_dimension =
+            canonical_writer.map(RetainedStoreWriterPlan::capacity_dimension);
         match operation.try_publication_assembly(plan) {
             Ok(assembly) => Ok(RetainedStoreExecution::new(
-                assembly, identity, primary, progress,
+                assembly,
+                identity,
+                primary,
+                progress,
+                canonical_source_binding_dimension,
             )),
             Err(error) => {
                 let cause = error.cause().clone();
@@ -654,6 +582,71 @@ where
     }
 }
 
+impl<'source, O, PP, U> RetainedStoreTranscript<O, PP, U, CanonicalInheritanceSource<'source>>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    fn mint_checked_canonical_share<Kind, Tag>(
+        &mut self,
+        source_ref: super::super::CanonicalStoreRef<Kind, Tag>,
+    ) -> Result<PlannedCanonicalShare<Kind, Tag>, StoreTranscriptPlanError>
+    where
+        Tag: Copy + Send + Sync + 'static,
+    {
+        self.mint(
+            CounterDelta::shared_block(StoreDestination::Canonical),
+            CanonicalStoreSharePlan { source_ref },
+            (),
+        )
+        .map(PlannedCanonicalShare::new)
+    }
+
+    pub fn plan_canonical_sequence_share<T, Tag>(
+        &mut self,
+        source_ref: CanonicalSequenceRef<T, Tag>,
+    ) -> Result<PlannedCanonicalShare<ScalarSequence<T>, Tag>, StoreTranscriptPlanError>
+    where
+        T: StoredScalar,
+        Tag: Copy + Send + Sync + 'static,
+    {
+        let source = self.operation.lineage.source;
+        if super::super::read_canonical_source_sequence(source, source_ref).is_none() {
+            return Err(invalid_source_slot());
+        }
+        self.mint_checked_canonical_share(source_ref)
+    }
+
+    pub fn plan_canonical_bytes_share<Tag>(
+        &mut self,
+        source_ref: CanonicalBytesRef<Tag>,
+    ) -> Result<PlannedCanonicalShare<ByteBlock, Tag>, StoreTranscriptPlanError>
+    where
+        Tag: Copy + Send + Sync + 'static,
+    {
+        let source = self.operation.lineage.source;
+        if super::super::read_canonical_source_bytes(source, source_ref).is_none() {
+            return Err(invalid_source_slot());
+        }
+        self.mint_checked_canonical_share(source_ref)
+    }
+
+    pub fn plan_canonical_utf8_share<Tag>(
+        &mut self,
+        source_ref: CanonicalUtf8Ref<Tag>,
+    ) -> Result<PlannedCanonicalShare<super::super::Utf8Block, Tag>, StoreTranscriptPlanError>
+    where
+        Tag: Copy + Send + Sync + 'static,
+    {
+        let source = self.operation.lineage.source;
+        if super::super::read_canonical_source_utf8(source, source_ref).is_none() {
+            return Err(invalid_source_slot());
+        }
+        self.mint_checked_canonical_share(source_ref)
+    }
+}
+
 fn invalid_source_slot() -> StoreTranscriptPlanError {
     StoreTranscriptPlanError::Runtime(StoreRuntimeError::InvalidSourceSlot)
 }
@@ -674,17 +667,17 @@ fn plan_runtime_error(error: StoreTranscriptPlanError) -> StoreRuntimeError {
 
 /// Failure to open transcript-derived block tables.
 #[must_use = "recover the transcript when table opening proved rollback"]
-pub struct StoreTranscriptOpenError<O, PP, U>
+pub struct StoreTranscriptOpenError<O, PP, U, L = FreshStoreLineage>
 where
     O: OperationOwner,
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    transcript: Option<RetainedStoreTranscript<O, PP, U>>,
+    transcript: Option<RetainedStoreTranscript<O, PP, U, L>>,
     cause: StoreRuntimeError,
 }
 
-impl<O, PP, U> StoreTranscriptOpenError<O, PP, U>
+impl<O, PP, U, L> StoreTranscriptOpenError<O, PP, U, L>
 where
     O: OperationOwner,
     PP: ProgressPhase,
@@ -696,12 +689,12 @@ where
 
     pub fn try_into_transcript(
         self,
-    ) -> Result<RetainedStoreTranscript<O, PP, U>, StoreRuntimeError> {
+    ) -> Result<RetainedStoreTranscript<O, PP, U, L>, StoreRuntimeError> {
         self.transcript.ok_or(self.cause)
     }
 }
 
-impl<O, PP, U> fmt::Debug for StoreTranscriptOpenError<O, PP, U>
+impl<O, PP, U, L> fmt::Debug for StoreTranscriptOpenError<O, PP, U, L>
 where
     O: OperationOwner,
     PP: ProgressPhase,
@@ -716,7 +709,7 @@ where
     }
 }
 
-impl<O, PP, U> fmt::Display for StoreTranscriptOpenError<O, PP, U>
+impl<O, PP, U, L> fmt::Display for StoreTranscriptOpenError<O, PP, U, L>
 where
     O: OperationOwner,
     PP: ProgressPhase,
@@ -731,7 +724,7 @@ where
     }
 }
 
-impl<O, PP, U> std::error::Error for StoreTranscriptOpenError<O, PP, U>
+impl<O, PP, U, L> std::error::Error for StoreTranscriptOpenError<O, PP, U, L>
 where
     O: OperationOwner,
     PP: ProgressPhase,

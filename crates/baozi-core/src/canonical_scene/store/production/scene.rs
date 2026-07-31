@@ -2,87 +2,47 @@ use thiserror::Error;
 
 use crate::SceneValidationLimits;
 
-use super::input::animation::AnimationAuthoringBatch;
-use super::input::appearance::{AppearanceAuthoringBatch, ImagePayloadAuthoring};
-use super::input::deformation::{DeformationAuthoringBatch, MorphDeltaPayloadAuthoring};
-use super::input::geometry::{
-    GeometryAttributePayloadAuthoring, GeometryAuthoringBatch, GeometryTopologyAuthoring,
-};
 use super::input::{Presence, SceneAuthoringBatch};
-use super::plan::NodeAuthoringSemanticError;
-use super::plan::animation::{AnimationAuthoringSemanticError, animation_shape_scratch_envelope};
-use super::plan::appearance::{
-    AppearanceAuthoringSemanticError, appearance_shape_scratch_envelope,
-};
-use super::plan::deformation::{
-    DeformationAuthoringSemanticError, deformation_shape_scratch_envelope,
-};
-use super::plan::geometry::{GeometryAuthoringSemanticError, geometry_shape_scratch_envelope};
-use super::plan::node_shape_scratch_envelope;
 use super::{
     ValidatedAnimationBatch, ValidatedAppearanceBatch, ValidatedDeformationBatch,
     ValidatedGeometryBatch, ValidatedNodeBatch,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(in crate::canonical_scene::store) struct SceneInputPreflight {
+pub(in crate::canonical_scene::store) struct SceneInputEnvelope {
     terminal_attribution_slots: usize,
 }
 
-impl SceneInputPreflight {
+impl SceneInputEnvelope {
+    /// Derives only the bounded admission envelope available from top-level slice lengths.
+    ///
+    /// Nested shape, scratch, references, and semantics remain the responsibility of the
+    /// operation-bound domain validators. This boundary must stay O(1) in input size so no
+    /// unmetered producer data is traversed before cancellation and work accounting exist.
     pub(in crate::canonical_scene::store) fn try_new(
         input: SceneAuthoringBatch<'_>,
         limits: SceneValidationLimits,
-    ) -> Result<Self, SceneInputPreflightError> {
-        let shape = preflight_input_shape(input)?;
-        require_limit("nodes", shape.canonical_nodes, limits.max_nodes())?;
-        require_limit("entities", shape.entities, limits.max_entities())?;
+    ) -> Result<Self, SceneInputEnvelopeError> {
+        let shape = SceneTopLevelShape::from_input(input);
+        shape.require_top_level_count_domains()?;
 
-        let node_scratch = node_shape_scratch_envelope(input.nodes())?;
-        let appearance_scratch = appearance_shape_scratch_envelope(input.appearance())?;
-        let geometry_scratch = geometry_shape_scratch_envelope(input.geometry())?;
-        let deformation_scratch = deformation_shape_scratch_envelope(input.deformation())?;
-        let animation_scratch = animation_shape_scratch_envelope(
-            input.animations(),
-            input.nodes().nodes().len(),
-            input.geometry().mesh_instances().len(),
+        let canonical_nodes = shape.canonical_node_count()?;
+        require_envelope_limit("nodes", canonical_nodes, limits.max_nodes())?;
+        require_envelope_limit(
+            "entity lower bound",
+            shape.entity_lower_bound(canonical_nodes)?,
+            limits.max_entities(),
         )?;
 
-        let mut peak_scratch = node_scratch.peak_bytes();
-        let mut retained_scratch = node_scratch.retained_bytes();
-        retained_scratch = accumulated_scratch(
-            retained_scratch,
-            appearance_scratch,
-            "appearance validation scratch envelope",
-        )?;
-        peak_scratch = peak_scratch.max(retained_scratch);
-        retained_scratch = accumulated_scratch(
-            retained_scratch,
-            geometry_scratch,
-            "geometry validation scratch envelope",
-        )?;
-        peak_scratch = peak_scratch.max(retained_scratch);
-        let deformation_peak = accumulated_scratch(
-            retained_scratch,
-            deformation_scratch.peak_bytes(),
-            "deformation validation scratch envelope",
-        )?;
-        peak_scratch = peak_scratch.max(deformation_peak);
-        retained_scratch = accumulated_scratch(
-            retained_scratch,
-            deformation_scratch.retained_bytes(),
-            "retained deformation validation scratch",
-        )?;
-        let animation_peak = accumulated_scratch(
-            retained_scratch,
-            animation_scratch,
-            "animation validation scratch envelope",
-        )?;
-        peak_scratch = peak_scratch.max(animation_peak);
-        require_limit("scratch bytes", peak_scratch, limits.max_scratch_bytes())?;
+        let terminal_attribution_slots = shape
+            .canonical_block_upper_bound()?
+            .checked_add(1)
+            .ok_or(SceneInputEnvelopeError::AccountingOverflow {
+                dimension: "terminal attribution slots",
+            })?;
 
         Ok(Self {
-            terminal_attribution_slots: shape.terminal_attribution_slots,
+            terminal_attribution_slots,
         })
     }
 
@@ -91,463 +51,195 @@ impl SceneInputPreflight {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default)]
-struct DomainBlockUpperBounds {
-    node: usize,
-    appearance: usize,
-    geometry: usize,
-    deformation: usize,
-    animation: usize,
-}
-
 #[derive(Debug, Clone, Copy)]
-struct ScenePreflightShape {
-    canonical_nodes: u64,
-    entities: u64,
-    terminal_attribution_slots: usize,
+struct SceneTopLevelShape {
+    roots: usize,
+    nodes: usize,
+    images: usize,
+    samplers: usize,
+    textures: usize,
+    material_bindings: usize,
+    materials: usize,
+    logical_meshes: usize,
+    primitives: usize,
+    attributes: usize,
+    mesh_instances: usize,
+    skins: usize,
+    morph_target_definitions: usize,
+    logical_morphs: usize,
+    primitive_deformations: usize,
+    mesh_instance_deformations: usize,
+    animation_clips: usize,
+    animation_channels: usize,
 }
 
-fn preflight_input_shape(
-    input: SceneAuthoringBatch<'_>,
-) -> Result<ScenePreflightShape, SceneInputPreflightError> {
-    let maximum_u32_count = u64::from(u32::MAX);
-    let authored_nodes = input.nodes().nodes().len();
-    let maximum_authored_nodes = maximum_u32_count.saturating_sub(1);
-    require_count_domain("authored nodes", authored_nodes, maximum_authored_nodes)?;
-    if let Presence::Present(roots) = input.nodes().roots() {
-        require_count_domain("authored roots", roots.len(), maximum_u32_count)?;
-    }
-
-    let canonical_nodes = usize_to_u64(authored_nodes, "canonical node count")?
-        .checked_add(1)
-        .ok_or(SceneInputPreflightError::AccountingOverflow {
-            dimension: "canonical node count",
-        })?;
-    let mut entities = canonical_nodes;
-    let mut blocks = DomainBlockUpperBounds {
-        node: 1_usize
-            .checked_add(usize::from(authored_nodes != 0).checked_mul(2).ok_or(
-                SceneInputPreflightError::AccountingOverflow {
-                    dimension: "node payload block upper bound",
-                },
-            )?)
-            .ok_or(SceneInputPreflightError::AccountingOverflow {
-                dimension: "node block upper bound",
-            })?,
-        ..DomainBlockUpperBounds::default()
-    };
-
-    let appearance = inspect_appearance_shape(input.appearance(), maximum_u32_count)?;
-    entities = checked_entity_add(entities, appearance.entities, "appearance entities")?;
-    blocks.appearance = appearance.block_upper_bound;
-
-    let geometry = inspect_geometry_shape(input.geometry(), maximum_u32_count)?;
-    entities = checked_entity_add(entities, geometry.entities, "geometry entities")?;
-    blocks.geometry = geometry.block_upper_bound;
-
-    let deformation = inspect_deformation_shape(input.deformation(), maximum_u32_count)?;
-    entities = checked_entity_add(entities, deformation.entities, "deformation entities")?;
-    blocks.deformation = deformation.block_upper_bound;
-
-    let animation = inspect_animation_shape(input.animations(), maximum_u32_count)?;
-    entities = checked_entity_add(entities, animation.entities, "animation entities")?;
-    blocks.animation = animation.block_upper_bound;
-
-    let canonical_block_upper_bound = [
-        1_usize,
-        blocks.node,
-        blocks.appearance,
-        blocks.geometry,
-        blocks.deformation,
-        blocks.animation,
-    ]
-    .into_iter()
-    .try_fold(0_usize, usize::checked_add)
-    .ok_or(SceneInputPreflightError::AccountingOverflow {
-        dimension: "canonical block upper bound",
-    })?;
-    let terminal_attribution_slots = canonical_block_upper_bound.checked_add(1).ok_or(
-        SceneInputPreflightError::AccountingOverflow {
-            dimension: "terminal attribution slots",
-        },
-    )?;
-
-    Ok(ScenePreflightShape {
-        canonical_nodes,
-        entities,
-        terminal_attribution_slots,
-    })
-}
-
-#[derive(Debug, Clone, Copy)]
-struct DomainInputShape {
-    entities: u64,
-    block_upper_bound: usize,
-}
-
-fn inspect_appearance_shape(
-    input: AppearanceAuthoringBatch<'_>,
-    maximum: u64,
-) -> Result<DomainInputShape, SceneInputPreflightError> {
-    let collections = [
-        ("images", input.images().len()),
-        ("samplers", input.samplers().len()),
-        ("textures", input.textures().len()),
-        ("material bindings", input.bindings().len()),
-        ("materials", input.materials().len()),
-    ];
-    require_collections(collections, maximum)?;
-    let entities = sum_collection_entities(collections, "appearance entity count")?;
-
-    let mut payload_bytes = 0_u64;
-    let mut media_type_bytes = 0_u64;
-    let mut has_media_type = false;
-    for image in input.images() {
-        match image.payload() {
-            ImagePayloadAuthoring::Encoded { bytes, media_type } => {
-                require_count_domain("encoded image payload bytes", bytes.len(), maximum)?;
-                payload_bytes =
-                    checked_len_add(payload_bytes, bytes.len(), "encoded image payload bytes")?;
-                if let Presence::Present(media_type) = media_type {
-                    has_media_type = true;
-                    require_count_domain(
-                        "image media type bytes",
-                        media_type.as_str().len(),
-                        maximum,
-                    )?;
-                    media_type_bytes = checked_len_add(
-                        media_type_bytes,
-                        media_type.as_str().len(),
-                        "image media type bytes",
-                    )?;
-                }
-            }
+impl SceneTopLevelShape {
+    fn from_input(input: SceneAuthoringBatch<'_>) -> Self {
+        let nodes = input.nodes();
+        let appearance = input.appearance();
+        let geometry = input.geometry();
+        let deformation = input.deformation();
+        let animations = input.animations();
+        Self {
+            roots: match nodes.roots() {
+                Presence::Absent => 0,
+                Presence::Present(roots) => roots.len(),
+            },
+            nodes: nodes.nodes().len(),
+            images: appearance.images().len(),
+            samplers: appearance.samplers().len(),
+            textures: appearance.textures().len(),
+            material_bindings: appearance.bindings().len(),
+            materials: appearance.materials().len(),
+            logical_meshes: geometry.logical_meshes().len(),
+            primitives: geometry.primitives().len(),
+            attributes: geometry.attributes().len(),
+            mesh_instances: geometry.mesh_instances().len(),
+            skins: deformation.skins().len(),
+            morph_target_definitions: deformation.morph_target_definitions().len(),
+            logical_morphs: deformation.logical_meshes().len(),
+            primitive_deformations: deformation.primitives().len(),
+            mesh_instance_deformations: deformation.mesh_instances().len(),
+            animation_clips: animations.clips().len(),
+            animation_channels: animations.channels().len(),
         }
     }
-    require_aggregate_count_domain("encoded image payload bytes", payload_bytes, maximum)?;
-    require_aggregate_count_domain("image media type bytes", media_type_bytes, maximum)?;
 
-    let table_blocks = collections
+    fn require_top_level_count_domains(self) -> Result<(), SceneInputEnvelopeError> {
+        let maximum = u64::from(u32::MAX);
+        require_count_domain("authored nodes", self.nodes, maximum.saturating_sub(1))?;
+        for (collection, count) in [
+            ("authored roots", self.roots),
+            ("images", self.images),
+            ("samplers", self.samplers),
+            ("textures", self.textures),
+            ("material bindings", self.material_bindings),
+            ("materials", self.materials),
+            ("logical meshes", self.logical_meshes),
+            ("primitives", self.primitives),
+            ("attributes", self.attributes),
+            ("mesh instances", self.mesh_instances),
+            ("skins", self.skins),
+            ("morph target definitions", self.morph_target_definitions),
+            ("logical morphs", self.logical_morphs),
+            ("primitive deformation", self.primitive_deformations),
+            ("mesh instance deformation", self.mesh_instance_deformations),
+            ("animation clips", self.animation_clips),
+            ("animation channels", self.animation_channels),
+        ] {
+            require_count_domain(collection, count, maximum)?;
+        }
+        Ok(())
+    }
+
+    fn canonical_node_count(self) -> Result<u64, SceneInputEnvelopeError> {
+        usize_to_u64(self.nodes, "canonical node count")?
+            .checked_add(1)
+            .ok_or(SceneInputEnvelopeError::AccountingOverflow {
+                dimension: "canonical node count",
+            })
+    }
+
+    fn entity_lower_bound(self, canonical_nodes: u64) -> Result<u64, SceneInputEnvelopeError> {
+        [
+            canonical_nodes,
+            usize_to_u64(self.images, "appearance entity lower bound")?,
+            usize_to_u64(self.samplers, "appearance entity lower bound")?,
+            usize_to_u64(self.textures, "appearance entity lower bound")?,
+            usize_to_u64(self.material_bindings, "appearance entity lower bound")?,
+            usize_to_u64(self.materials, "appearance entity lower bound")?,
+            usize_to_u64(self.logical_meshes, "geometry entity lower bound")?,
+            usize_to_u64(self.primitives, "geometry entity lower bound")?,
+            usize_to_u64(self.attributes, "geometry entity lower bound")?,
+            usize_to_u64(self.mesh_instances, "geometry entity lower bound")?,
+            usize_to_u64(self.skins, "deformation entity lower bound")?,
+            usize_to_u64(
+                self.morph_target_definitions,
+                "deformation entity lower bound",
+            )?,
+            usize_to_u64(self.animation_clips, "animation entity lower bound")?,
+            usize_to_u64(self.animation_channels, "animation entity lower bound")?,
+        ]
         .into_iter()
-        .try_fold(0_usize, |count, (_, rows)| {
-            count.checked_add(usize::from(rows != 0))
+        .try_fold(0_u64, u64::checked_add)
+        .ok_or(SceneInputEnvelopeError::AccountingOverflow {
+            dimension: "entity lower bound",
         })
-        .ok_or(SceneInputPreflightError::AccountingOverflow {
-            dimension: "appearance table block upper bound",
-        })?;
-    let payload_blocks = usize::from(payload_bytes != 0)
-        .checked_add(usize::from(has_media_type))
-        .ok_or(SceneInputPreflightError::AccountingOverflow {
-            dimension: "appearance payload block upper bound",
-        })?;
-    let block_upper_bound = 1_usize
-        .checked_add(table_blocks)
-        .and_then(|count| count.checked_add(payload_blocks))
-        .ok_or(SceneInputPreflightError::AccountingOverflow {
-            dimension: "appearance block upper bound",
-        })?;
-    Ok(DomainInputShape {
-        entities,
-        block_upper_bound,
-    })
-}
-
-fn inspect_geometry_shape(
-    input: GeometryAuthoringBatch<'_>,
-    maximum: u64,
-) -> Result<DomainInputShape, SceneInputPreflightError> {
-    let collections = [
-        ("logical meshes", input.logical_meshes().len()),
-        ("primitives", input.primitives().len()),
-        ("attributes", input.attributes().len()),
-        ("mesh instances", input.mesh_instances().len()),
-    ];
-    require_collections(collections, maximum)?;
-    let entities = sum_collection_entities(collections, "geometry entity count")?;
-
-    for primitive in input.primitives() {
-        if let GeometryTopologyAuthoring::Polygons(boundaries) = primitive.topology() {
-            require_count_domain("polygon boundaries", boundaries.len(), maximum)?;
-        }
-        if let Presence::Present(indices) = primitive.indices() {
-            require_count_domain("primitive indices", indices.len(), maximum)?;
-        }
-    }
-    for attribute in input.attributes() {
-        match attribute.payload() {
-            GeometryAttributePayloadAuthoring::DenseF32 {
-                source_values,
-                source_indices,
-                ..
-            } => {
-                require_count_domain("dense F32 attribute values", source_values.len(), maximum)?;
-                if let Presence::Present(indices) = source_indices {
-                    require_count_domain("dense F32 source indices", indices.len(), maximum)?;
-                }
-            }
-            GeometryAttributePayloadAuthoring::DenseU32 { values, .. } => {
-                require_count_domain("dense U32 attribute values", values.len(), maximum)?;
-            }
-            GeometryAttributePayloadAuthoring::SparseF32 {
-                indices,
-                values,
-                default,
-                ..
-            } => {
-                require_count_domain("sparse F32 attribute indices", indices.len(), maximum)?;
-                require_count_domain("sparse F32 attribute values", values.len(), maximum)?;
-                require_count_domain("sparse F32 attribute default", default.len(), maximum)?;
-            }
-            GeometryAttributePayloadAuthoring::SparseU32 {
-                indices,
-                values,
-                default,
-                ..
-            } => {
-                require_count_domain("sparse U32 attribute indices", indices.len(), maximum)?;
-                require_count_domain("sparse U32 attribute values", values.len(), maximum)?;
-                require_count_domain("sparse U32 attribute default", default.len(), maximum)?;
-            }
-        }
     }
 
-    let table_blocks = collections
-        .into_iter()
-        .try_fold(0_usize, |count, (_, rows)| {
-            count.checked_add(usize::from(rows != 0))
-        })
-        .ok_or(SceneInputPreflightError::AccountingOverflow {
-            dimension: "geometry table block upper bound",
-        })?;
-    let primitive_payload_blocks = input.primitives().len().checked_mul(2).ok_or(
-        SceneInputPreflightError::AccountingOverflow {
-            dimension: "primitive payload block upper bound",
-        },
-    )?;
-    let attribute_payload_blocks = input.attributes().len().checked_mul(3).ok_or(
-        SceneInputPreflightError::AccountingOverflow {
-            dimension: "attribute payload block upper bound",
-        },
-    )?;
-    let block_upper_bound = 1_usize
-        .checked_add(table_blocks)
-        .and_then(|count| count.checked_add(primitive_payload_blocks))
-        .and_then(|count| count.checked_add(attribute_payload_blocks))
-        .ok_or(SceneInputPreflightError::AccountingOverflow {
-            dimension: "geometry block upper bound",
-        })?;
-    Ok(DomainInputShape {
-        entities,
-        block_upper_bound,
-    })
-}
-
-fn inspect_deformation_shape(
-    input: DeformationAuthoringBatch<'_>,
-    maximum: u64,
-) -> Result<DomainInputShape, SceneInputPreflightError> {
-    let collections = [
-        ("skins", input.skins().len()),
-        (
-            "morph target definitions",
-            input.morph_target_definitions().len(),
-        ),
-        ("logical morphs", input.logical_meshes().len()),
-        ("primitive deformation", input.primitives().len()),
-        ("mesh instance deformation", input.mesh_instances().len()),
-    ];
-    require_collections(collections, maximum)?;
-
-    let mut morph_target_count = 0_u64;
-    let mut morph_delta_count = 0_u64;
-    let mut payload_presence = [false; 13];
-    for skin in input.skins() {
-        require_count_domain("skin joints", skin.joints().len(), maximum)?;
-        require_count_domain(
-            "skin inverse-bind matrices",
-            skin.inverse_bind_matrices().len(),
-            maximum,
+    fn canonical_block_upper_bound(self) -> Result<usize, SceneInputEnvelopeError> {
+        let node = checked_block_sum(
+            [1, scaled_presence(self.nodes, 2)?],
+            "node block upper bound",
         )?;
-        payload_presence[0] |= !skin.joints().is_empty();
-        payload_presence[1] |= !skin.inverse_bind_matrices().is_empty();
-        payload_presence[2] |= skin.matrix_spaces().correction().is_some();
-        payload_presence[3] |= matches!(skin.name(), Presence::Present(_));
-    }
-    for logical in input.logical_meshes() {
-        require_count_domain(
-            "logical morph default weights",
-            logical.default_weights().len(),
-            maximum,
+        let appearance = checked_block_sum(
+            [
+                1,
+                presence(self.images),
+                presence(self.samplers),
+                presence(self.textures),
+                presence(self.material_bindings),
+                presence(self.materials),
+                // A nonempty image table may require both aggregate payload blocks.
+                scaled_presence(self.images, 2)?,
+                // Bindings always retain semantic scalars and may retain source keys.
+                scaled_presence(self.material_bindings, 2)?,
+                // Every material retains one fixed-width factor payload.
+                presence(self.materials),
+            ],
+            "appearance block upper bound",
         )?;
-        payload_presence[8] |= !logical.default_weights().is_empty();
-    }
-    for definition in input.morph_target_definitions() {
-        payload_presence[9] |= matches!(definition.name(), Presence::Present(_));
-    }
-    for primitive in input.primitives() {
-        if let Presence::Present(rows) = primitive.influences() {
-            require_count_domain(
-                "influence row offsets",
-                rows.vertex_offsets().len(),
-                maximum,
-            )?;
-            require_count_domain("influences", rows.influences().len(), maximum)?;
-            payload_presence[4] |= !rows.vertex_offsets().is_empty();
-            if !rows.influences().is_empty() {
-                payload_presence[5] = true;
-                payload_presence[6] = true;
-                payload_presence[7] = true;
-            }
-        }
-        require_count_domain(
-            "primitive morph targets",
-            primitive.morph_targets().len(),
-            maximum,
+        let geometry = checked_block_sum(
+            [
+                1,
+                presence(self.logical_meshes),
+                presence(self.primitives),
+                presence(self.attributes),
+                presence(self.mesh_instances),
+                checked_block_mul(self.primitives, 2, "primitive payload block upper bound")?,
+                checked_block_mul(self.attributes, 3, "attribute payload block upper bound")?,
+            ],
+            "geometry block upper bound",
         )?;
-        morph_target_count = checked_len_add(
-            morph_target_count,
-            primitive.morph_targets().len(),
-            "morph target count",
+        let deformation = checked_block_sum(
+            [
+                1,
+                presence(self.skins),
+                presence(self.logical_morphs),
+                presence(self.morph_target_definitions),
+                // A primitive slice may produce primitive, morph-target, and morph-delta tables.
+                scaled_presence(self.primitive_deformations, 3)?,
+                presence(self.mesh_instance_deformations),
+                // Skin payloads: joints, inverse binds, correction matrices, and names.
+                scaled_presence(self.skins, 4)?,
+                presence(self.logical_morphs),
+                presence(self.morph_target_definitions),
+                // Primitive payloads: influence rows and three columns, values, sparse indices.
+                scaled_presence(self.primitive_deformations, 6)?,
+                presence(self.mesh_instance_deformations),
+            ],
+            "deformation block upper bound",
         )?;
-        for target in primitive.morph_targets() {
-            require_count_domain("morph target deltas", target.deltas().len(), maximum)?;
-            morph_delta_count = checked_len_add(
-                morph_delta_count,
-                target.deltas().len(),
-                "morph delta count",
-            )?;
-            for delta in target.deltas() {
-                match delta.payload() {
-                    MorphDeltaPayloadAuthoring::Dense { values } => {
-                        require_count_domain("morph delta values", values.len(), maximum)?;
-                        payload_presence[10] |= !values.is_empty();
-                    }
-                    MorphDeltaPayloadAuthoring::Sparse {
-                        indices, values, ..
-                    } => {
-                        require_count_domain("morph sparse indices", indices.len(), maximum)?;
-                        require_count_domain("morph delta values", values.len(), maximum)?;
-                        payload_presence[10] |= !values.is_empty();
-                        payload_presence[11] |= !indices.is_empty();
-                    }
-                }
-            }
-        }
-    }
-    for instance in input.mesh_instances() {
-        if let Presence::Present(weights) = instance.morph_weights() {
-            require_count_domain("instance morph weights", weights.len(), maximum)?;
-            payload_presence[12] |= !weights.is_empty();
-        }
-    }
-    require_aggregate_count_domain("morph targets", morph_target_count, maximum)?;
-    require_aggregate_count_domain("morph deltas", morph_delta_count, maximum)?;
+        let animation = checked_block_sum(
+            [
+                1,
+                presence(self.animation_clips),
+                presence(self.animation_channels),
+                // A nonempty channel table may require all four aggregate payload blocks.
+                scaled_presence(self.animation_channels, 4)?,
+            ],
+            "animation block upper bound",
+        )?;
 
-    let entities = [
-        usize_to_u64(input.skins().len(), "skin entity count")?,
-        usize_to_u64(
-            input.morph_target_definitions().len(),
-            "morph definition entity count",
-        )?,
-        morph_target_count,
-        morph_delta_count,
-    ]
-    .into_iter()
-    .try_fold(0_u64, u64::checked_add)
-    .ok_or(SceneInputPreflightError::AccountingOverflow {
-        dimension: "deformation entity count",
-    })?;
-    let table_blocks = [
-        !input.skins().is_empty(),
-        !input.logical_meshes().is_empty(),
-        !input.morph_target_definitions().is_empty(),
-        !input.primitives().is_empty(),
-        morph_target_count != 0,
-        morph_delta_count != 0,
-        !input.mesh_instances().is_empty(),
-    ]
-    .into_iter()
-    .filter(|present| *present)
-    .count();
-    let payload_blocks = payload_presence
-        .into_iter()
-        .filter(|present| *present)
-        .count();
-    let block_upper_bound = 1_usize
-        .checked_add(table_blocks)
-        .and_then(|count| count.checked_add(payload_blocks))
-        .ok_or(SceneInputPreflightError::AccountingOverflow {
-            dimension: "deformation block upper bound",
-        })?;
-    Ok(DomainInputShape {
-        entities,
-        block_upper_bound,
-    })
-}
-
-fn inspect_animation_shape(
-    input: AnimationAuthoringBatch<'_>,
-    maximum: u64,
-) -> Result<DomainInputShape, SceneInputPreflightError> {
-    let collections = [
-        ("animation clips", input.clips().len()),
-        ("animation channels", input.channels().len()),
-    ];
-    require_collections(collections, maximum)?;
-    let entities = sum_collection_entities(collections, "animation entity count")?;
-
-    let mut time_count = 0_u64;
-    let mut value_count = 0_u64;
-    let mut in_tangent_count = 0_u64;
-    let mut out_tangent_count = 0_u64;
-    for channel in input.channels() {
-        require_count_domain("animation times", channel.times().len(), maximum)?;
-        require_count_domain("animation values", channel.values().len(), maximum)?;
-        time_count = checked_len_add(time_count, channel.times().len(), "animation times")?;
-        value_count = checked_len_add(value_count, channel.values().len(), "animation values")?;
-        if let Presence::Present(tangents) = channel.in_tangents() {
-            require_count_domain("animation in-tangents", tangents.len(), maximum)?;
-            in_tangent_count =
-                checked_len_add(in_tangent_count, tangents.len(), "animation in-tangents")?;
-        }
-        if let Presence::Present(tangents) = channel.out_tangents() {
-            require_count_domain("animation out-tangents", tangents.len(), maximum)?;
-            out_tangent_count =
-                checked_len_add(out_tangent_count, tangents.len(), "animation out-tangents")?;
-        }
+        checked_block_sum(
+            [1, node, appearance, geometry, deformation, animation],
+            "canonical block upper bound",
+        )
     }
-    for (collection, count) in [
-        ("animation times", time_count),
-        ("animation values", value_count),
-        ("animation in-tangents", in_tangent_count),
-        ("animation out-tangents", out_tangent_count),
-    ] {
-        require_aggregate_count_domain(collection, count, maximum)?;
-    }
-
-    let table_blocks = usize::from(!input.clips().is_empty())
-        .checked_add(usize::from(!input.channels().is_empty()))
-        .ok_or(SceneInputPreflightError::AccountingOverflow {
-            dimension: "animation table block upper bound",
-        })?;
-    let payload_blocks = [time_count, value_count, in_tangent_count, out_tangent_count]
-        .into_iter()
-        .filter(|count| *count != 0)
-        .count();
-    let block_upper_bound = 1_usize
-        .checked_add(table_blocks)
-        .and_then(|count| count.checked_add(payload_blocks))
-        .ok_or(SceneInputPreflightError::AccountingOverflow {
-            dimension: "animation block upper bound",
-        })?;
-    Ok(DomainInputShape {
-        entities,
-        block_upper_bound,
-    })
 }
 
 #[derive(Debug, Error)]
-pub(in crate::canonical_scene::store) enum SceneInputPreflightError {
+pub(crate) enum SceneInputEnvelopeError {
     #[error(
         "Scene input collection {collection} count {count} exceeds canonical maximum {maximum}"
     )]
@@ -556,24 +248,42 @@ pub(in crate::canonical_scene::store) enum SceneInputPreflightError {
         count: u64,
         maximum: u64,
     },
-    #[error("Scene input preflight accounting overflowed for {dimension}")]
+    #[error("Scene input envelope accounting overflowed for {dimension}")]
     AccountingOverflow { dimension: &'static str },
-    #[error("Scene input preflight {limit} {actual} exceeds configured maximum {maximum}")]
+    #[error("Scene input envelope {limit} {actual} exceeds configured maximum {maximum}")]
     LimitExceeded {
         limit: &'static str,
         actual: u64,
         maximum: u64,
     },
-    #[error("node-domain scratch capacity preflight failed")]
-    NodeScratch(#[from] NodeAuthoringSemanticError),
-    #[error("appearance-domain scratch capacity preflight failed")]
-    AppearanceScratch(#[from] AppearanceAuthoringSemanticError),
-    #[error("geometry-domain scratch capacity preflight failed")]
-    GeometryScratch(#[from] GeometryAuthoringSemanticError),
-    #[error("deformation-domain scratch capacity preflight failed")]
-    DeformationScratch(#[from] DeformationAuthoringSemanticError),
-    #[error("animation-domain scratch capacity preflight failed")]
-    AnimationScratch(#[from] AnimationAuthoringSemanticError),
+}
+
+const fn presence(count: usize) -> usize {
+    if count == 0 { 0 } else { 1 }
+}
+
+fn scaled_presence(count: usize, blocks: usize) -> Result<usize, SceneInputEnvelopeError> {
+    checked_block_mul(presence(count), blocks, "conditional block upper bound")
+}
+
+fn checked_block_mul(
+    count: usize,
+    blocks: usize,
+    dimension: &'static str,
+) -> Result<usize, SceneInputEnvelopeError> {
+    count
+        .checked_mul(blocks)
+        .ok_or(SceneInputEnvelopeError::AccountingOverflow { dimension })
+}
+
+fn checked_block_sum<const N: usize>(
+    blocks: [usize; N],
+    dimension: &'static str,
+) -> Result<usize, SceneInputEnvelopeError> {
+    blocks
+        .into_iter()
+        .try_fold(0_usize, usize::checked_add)
+        .ok_or(SceneInputEnvelopeError::AccountingOverflow { dimension })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -803,15 +513,15 @@ fn remaining_limits_after(
         )?))
 }
 
-fn require_limit(
+fn require_envelope_limit(
     limit: &'static str,
     actual: u64,
     maximum: u64,
-) -> Result<(), SceneInputPreflightError> {
+) -> Result<(), SceneInputEnvelopeError> {
     if actual <= maximum {
         Ok(())
     } else {
-        Err(SceneInputPreflightError::LimitExceeded {
+        Err(SceneInputEnvelopeError::LimitExceeded {
             limit,
             actual,
             maximum,
@@ -819,37 +529,16 @@ fn require_limit(
     }
 }
 
-fn require_collections<const N: usize>(
-    collections: [(&'static str, usize); N],
-    maximum: u64,
-) -> Result<(), SceneInputPreflightError> {
-    for (collection, count) in collections {
-        require_count_domain(collection, count, maximum)?;
-    }
-    Ok(())
-}
-
 fn require_count_domain(
     collection: &'static str,
     count: usize,
     maximum: u64,
-) -> Result<(), SceneInputPreflightError> {
-    require_aggregate_count_domain(
-        collection,
-        usize_to_u64(count, "input collection count")?,
-        maximum,
-    )
-}
-
-fn require_aggregate_count_domain(
-    collection: &'static str,
-    count: u64,
-    maximum: u64,
-) -> Result<(), SceneInputPreflightError> {
+) -> Result<(), SceneInputEnvelopeError> {
+    let count = usize_to_u64(count, "input collection count")?;
     if count <= maximum {
         Ok(())
     } else {
-        Err(SceneInputPreflightError::CountDomain {
+        Err(SceneInputEnvelopeError::CountDomain {
             collection,
             count,
             maximum,
@@ -857,51 +546,8 @@ fn require_aggregate_count_domain(
     }
 }
 
-fn sum_collection_entities<const N: usize>(
-    collections: [(&'static str, usize); N],
-    dimension: &'static str,
-) -> Result<u64, SceneInputPreflightError> {
-    let mut total = 0_u64;
-    for (_, count) in collections {
-        total = total
-            .checked_add(usize_to_u64(count, dimension)?)
-            .ok_or(SceneInputPreflightError::AccountingOverflow { dimension })?;
-    }
-    Ok(total)
-}
-
-fn checked_entity_add(
-    entities: u64,
-    domain_entities: u64,
-    dimension: &'static str,
-) -> Result<u64, SceneInputPreflightError> {
-    entities
-        .checked_add(domain_entities)
-        .ok_or(SceneInputPreflightError::AccountingOverflow { dimension })
-}
-
-fn checked_len_add(
-    total: u64,
-    additional: usize,
-    dimension: &'static str,
-) -> Result<u64, SceneInputPreflightError> {
-    total
-        .checked_add(usize_to_u64(additional, dimension)?)
-        .ok_or(SceneInputPreflightError::AccountingOverflow { dimension })
-}
-
-fn accumulated_scratch(
-    retained: u64,
-    stage: u64,
-    dimension: &'static str,
-) -> Result<u64, SceneInputPreflightError> {
-    retained
-        .checked_add(stage)
-        .ok_or(SceneInputPreflightError::AccountingOverflow { dimension })
-}
-
-fn usize_to_u64(value: usize, dimension: &'static str) -> Result<u64, SceneInputPreflightError> {
-    u64::try_from(value).map_err(|_| SceneInputPreflightError::AccountingOverflow { dimension })
+fn usize_to_u64(value: usize, dimension: &'static str) -> Result<u64, SceneInputEnvelopeError> {
+    u64::try_from(value).map_err(|_| SceneInputEnvelopeError::AccountingOverflow { dimension })
 }
 
 fn remaining(

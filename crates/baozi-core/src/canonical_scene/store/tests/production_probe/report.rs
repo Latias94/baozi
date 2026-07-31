@@ -12,7 +12,7 @@ use sha2::{Digest, Sha256};
 pub(super) const REPORT_PREFIX: &str = "BAOZI_U4C_PRODUCTION_V1=";
 const REPORT_SCHEMA_ID: &str = "baozi.u4c.production-report";
 const REPORT_SCHEMA_VERSION: u32 = 1;
-const REPORT_REVISION: u32 = 7;
+const REPORT_REVISION: u32 = 10;
 const SCENARIO_SET_ID: &str = "canonical-store-production-v1";
 
 #[derive(Serialize)]
@@ -186,7 +186,7 @@ pub(super) struct GltfCapabilityReport {
     pub(super) canonical_shape: GltfCanonicalShapeReport,
     pub(super) source_vector: FixedVectorReport,
     pub(super) mutations: Vec<CapabilityMutationReport>,
-    pub(super) generation_reservations: u64,
+    pub(super) source_generation_reservations: u64,
     pub(super) canonical_block_count: usize,
     pub(super) outcome_evidence_block_count: usize,
     pub(super) full_snapshot_digest_hex: String,
@@ -198,6 +198,7 @@ pub(super) struct GltfCapabilityReport {
     pub(super) inspection: PhaseReport,
     pub(super) snapshot: PhaseReport,
     pub(super) unchanged_view: GltfUnchangedViewReport,
+    pub(super) changed_scene_edit: GltfChangedSceneEditReport,
     pub(super) release: ReleaseReport,
     pub(super) physical_account: CapabilityPhysicalReport,
     pub(super) factory_after_account_release: PhysicalFactoryReport,
@@ -269,6 +270,50 @@ pub(super) struct GltfUnchangedViewReport {
     pub(super) canonical_block_count_after: usize,
     pub(super) phase: PhaseReport,
     pub(super) physical_account: ReadOnlyPhysicalReport,
+}
+
+#[derive(Serialize)]
+pub(super) struct GltfChangedSceneEditReport {
+    pub(super) entry_point: &'static str,
+    pub(super) scenario_id: &'static str,
+    pub(super) output_shape: GltfCanonicalShapeReport,
+    pub(super) replacement_authored_bits_preserved: bool,
+    pub(super) input_authored_bits_preserved: bool,
+    pub(super) input_readable_after_publication: bool,
+    pub(super) output_report_readable_after_input_release: bool,
+    pub(super) output_readable_after_input_release: bool,
+    pub(super) output_readable_after_report_release: bool,
+    pub(super) exact_physical_account_preserved: bool,
+    pub(super) handoff_physical_account_preserved: bool,
+    pub(super) generation_changed: bool,
+    pub(super) generation_reservations_before: u64,
+    pub(super) generation_reservations_after: u64,
+    pub(super) canonical_block_count_before: usize,
+    pub(super) canonical_block_count_after: usize,
+    pub(super) all_subjects_explicitly_unchanged: bool,
+    pub(super) target_rebind_matches: bool,
+    pub(super) remap_storage_bytes: u64,
+    pub(super) scene_bounds_invalidated: bool,
+    pub(super) outcome_evidence_block_count: usize,
+    pub(super) evidence: EvidenceReport,
+    pub(super) phase: PhaseReport,
+    pub(super) input_snapshot_digest_hex: String,
+    pub(super) output_snapshot_digest_hex: String,
+    pub(super) snapshot: PhaseReport,
+    pub(super) input_release: ReleaseReport,
+    pub(super) output_report_release: ReleaseReport,
+    pub(super) output_scene_release: ReleaseReport,
+    pub(super) physical_account: GltfChangedSceneEditPhysicalReport,
+}
+
+#[derive(Serialize)]
+pub(super) struct GltfChangedSceneEditPhysicalReport {
+    pub(super) before: PhysicalAccountReport,
+    pub(super) before_handoff: PhysicalAccountReport,
+    pub(super) with_output: PhysicalAccountReport,
+    pub(super) after_input_release: PhysicalAccountReport,
+    pub(super) after_output_report_release: PhysicalAccountReport,
+    pub(super) after_output_scene_release: PhysicalAccountReport,
 }
 
 #[derive(Serialize)]
@@ -402,6 +447,20 @@ struct AllocationReport {
 pub(super) struct EvidenceReport {
     outcome_evidence_block_count: usize,
     ledger_header: LedgerHeaderReport,
+    dimensions: Vec<LedgerDimensionReport>,
+}
+
+#[derive(Serialize)]
+struct LedgerDimensionReport {
+    semantic_id_hex: String,
+    attempted: u64,
+    consumed: u64,
+    current_live_bytes: u64,
+    peak_live_bytes: u64,
+    pending_publication: u64,
+    committed: u64,
+    committed_canonical_output: u64,
+    published_outcome_evidence: u64,
 }
 
 #[derive(Serialize)]
@@ -528,6 +587,24 @@ pub(super) fn evidence_report(
     evidence: &StoreLedgerEvidence,
 ) -> EvidenceReport {
     let header = evidence.header();
+    let dimensions = (0..header.dimension_count())
+        .map(|index| {
+            let dimension = evidence
+                .dimension_at(index)
+                .expect("ledger evidence header must enumerate every dimension");
+            LedgerDimensionReport {
+                semantic_id_hex: hex_encode(&dimension.dimension().to_canonical_bytes()),
+                attempted: dimension.attempted(),
+                consumed: dimension.consumed(),
+                current_live_bytes: dimension.current_live_bytes(),
+                peak_live_bytes: dimension.peak_live_bytes(),
+                pending_publication: dimension.pending_publication(),
+                committed: dimension.committed(),
+                committed_canonical_output: dimension.committed_canonical_output(),
+                published_outcome_evidence: dimension.published_outcome_evidence(),
+            }
+        })
+        .collect();
     EvidenceReport {
         outcome_evidence_block_count,
         ledger_header: LedgerHeaderReport {
@@ -541,6 +618,7 @@ pub(super) fn evidence_report(
             current_evidence_bytes: header.current_evidence_bytes(),
             peak_evidence_bytes: header.peak_evidence_bytes(),
         },
+        dimensions,
     }
 }
 

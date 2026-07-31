@@ -1,4 +1,9 @@
 use crate::SceneValidationLimits;
+use crate::appearance::{
+    AlphaMode, ColorInterpretation, MaterialFactors, MaterialSemanticsRef, ShadingModel,
+    TextureBindingSemanticsRef, TextureBlendOperation, TextureChannelMapping,
+    TextureChannelSwizzle, TextureCoordinateSource, TextureRole, TextureStrength, TextureTransform,
+};
 
 use super::super::plan::animation::{
     AnimationTargetCatalog, validate_animation_batch_with_control,
@@ -7,14 +12,16 @@ use super::super::plan::appearance::validate_appearance_batch_with_control;
 use super::super::plan::deformation::validate_deformation_batch_with_control;
 use super::super::plan::geometry::validate_geometry_batch_with_control;
 use super::super::scene::{
-    SceneAuthoringAggregateError, SceneAuthoringAggregateLimit, SceneInputPreflight,
-    SceneInputPreflightError, animation_limits_after_deformation, appearance_limits_after_nodes,
+    SceneAuthoringAggregateError, SceneAuthoringAggregateLimit, SceneInputEnvelope,
+    SceneInputEnvelopeError, animation_limits_after_deformation, appearance_limits_after_nodes,
     deformation_limits_after_geometry, geometry_limits_after_appearance, validate_scene_aggregate,
 };
 use super::super::{
-    AnimationAuthoringBatch, AppearanceAuthoringBatch, DeformationAuthoringBatch,
-    GeometryAuthoringBatch, NodeAuthoringBatch, NodeAuthoringNode, NodeLocalId, Presence,
-    SceneAuthoringBatch,
+    AnimationAuthoringBatch, AnimationChannelAuthoring, AnimationExtrapolationAuthoring,
+    AnimationInterpolationAuthoring, AnimationTargetAuthoring, AppearanceAuthoringBatch,
+    AuthoringRange, DeformationAuthoringBatch, GeometryAuthoringBatch, MaterialAuthoring,
+    MaterialBindingAuthoring, NodeAuthoringBatch, NodeAuthoringNode, NodeLocalId, Presence,
+    SceneAuthoringBatch, TextureLocalId,
 };
 use super::{TestControl, trs, validate};
 
@@ -39,10 +46,10 @@ fn checked_total(values: [u64; 5]) -> u64 {
 }
 
 #[test]
-fn scene_preflight_accounts_for_the_complete_five_domain_shape() {
+fn scene_envelope_accounts_for_the_complete_five_domain_shape() {
     let empty_roots = [];
     let empty_nodes = [];
-    let empty = SceneInputPreflight::try_new(
+    let empty = SceneInputEnvelope::try_new(
         empty_scene_input(Presence::Present(&empty_roots), &empty_nodes),
         SceneValidationLimits::default(),
     )
@@ -51,7 +58,7 @@ fn scene_preflight_accounts_for_the_complete_five_domain_shape() {
 
     let roots = [NodeLocalId::new(0)];
     let nodes = [trs(Presence::Absent)];
-    let populated_nodes = SceneInputPreflight::try_new(
+    let populated_nodes = SceneInputEnvelope::try_new(
         empty_scene_input(Presence::Present(&roots), &nodes),
         SceneValidationLimits::default(),
     )
@@ -60,32 +67,111 @@ fn scene_preflight_accounts_for_the_complete_five_domain_shape() {
 }
 
 #[test]
-fn scene_preflight_rejects_real_input_limit_overflow() {
+fn scene_envelope_rejects_top_level_input_limit_overflow() {
     let roots = [NodeLocalId::new(0)];
     let nodes = [trs(Presence::Absent)];
 
     assert!(matches!(
-        SceneInputPreflight::try_new(
+        SceneInputEnvelope::try_new(
             empty_scene_input(Presence::Present(&roots), &nodes),
             SceneValidationLimits::default().with_max_nodes(1),
         ),
-        Err(SceneInputPreflightError::LimitExceeded {
+        Err(SceneInputEnvelopeError::LimitExceeded {
             limit: "nodes",
             actual: 2,
             maximum: 1,
         })
     ));
     assert!(matches!(
-        SceneInputPreflight::try_new(
+        SceneInputEnvelope::try_new(
             empty_scene_input(Presence::Present(&roots), &nodes),
             SceneValidationLimits::default().with_max_entities(1),
         ),
-        Err(SceneInputPreflightError::LimitExceeded {
-            limit: "entities",
+        Err(SceneInputEnvelopeError::LimitExceeded {
+            limit: "entity lower bound",
             actual: 2,
             maximum: 1,
         })
     ));
+}
+
+#[test]
+fn scene_envelope_reserves_nested_worst_case_without_deep_validation() {
+    let channels = [AnimationChannelAuthoring::new(
+        AnimationTargetAuthoring::NodeTranslation(NodeLocalId::new(99)),
+        AnimationInterpolationAuthoring::CubicSpline,
+        AnimationExtrapolationAuthoring::SourceDefault,
+        AnimationExtrapolationAuthoring::SourceDefault,
+        &[],
+        &[],
+        Presence::Absent,
+        Presence::Absent,
+    )];
+    let input = SceneAuthoringBatch::new(
+        NodeAuthoringBatch::new(Presence::Absent, &[]),
+        AppearanceAuthoringBatch::empty(),
+        GeometryAuthoringBatch::empty(),
+        DeformationAuthoringBatch::empty(),
+        AnimationAuthoringBatch::new(&[], &channels),
+    );
+    let limits = SceneValidationLimits::default()
+        .with_max_nodes(1)
+        .with_max_entities(2)
+        .with_max_payload_cells(0)
+        .with_max_work(0)
+        .with_max_scratch_bytes(0);
+
+    let envelope = SceneInputEnvelope::try_new(input, limits)
+        .expect("the envelope must not inspect invalid nested animation semantics");
+
+    // One channel conservatively admits its table plus all four possible payload blocks.
+    assert_eq!(envelope.terminal_attribution_slots(), 12);
+}
+
+#[test]
+fn scene_envelope_reserves_complete_appearance_payload_envelope() {
+    let role = TextureRole::BaseColor;
+    let coordinate_source =
+        TextureCoordinateSource::uv_set(0).expect("test UV set should be valid");
+    let channel_mapping = TextureChannelMapping::swizzle(TextureChannelSwizzle::RGBA);
+    let color_interpretation = ColorInterpretation::SrgbColor;
+    let blend = TextureBlendOperation::Replace;
+    let binding_semantics = TextureBindingSemanticsRef::new(
+        &role,
+        &coordinate_source,
+        &channel_mapping,
+        &color_interpretation,
+        TextureTransform::IDENTITY,
+        TextureStrength::ONE,
+        &blend,
+        None,
+    );
+    let shading = ShadingModel::Unlit;
+    let alpha = AlphaMode::Opaque;
+    let material_semantics =
+        MaterialSemanticsRef::new(&shading, &alpha, false, MaterialFactors::empty());
+    let bindings = [MaterialBindingAuthoring::new(
+        TextureLocalId::new(0),
+        binding_semantics,
+    )];
+    let materials = [MaterialAuthoring::new(
+        AuthoringRange::new(0, 1),
+        material_semantics,
+    )];
+    let input = SceneAuthoringBatch::new(
+        NodeAuthoringBatch::new(Presence::Absent, &[]),
+        AppearanceAuthoringBatch::new(&[], &[], &[], &bindings, &materials),
+        GeometryAuthoringBatch::empty(),
+        DeformationAuthoringBatch::empty(),
+        AnimationAuthoringBatch::empty(),
+    );
+
+    let envelope = SceneInputEnvelope::try_new(input, SceneValidationLimits::default())
+        .expect("appearance envelope should be representable without deep validation");
+
+    // Binding semantics, optional source keys, and material factors each own
+    // an independently attributable aggregate payload block.
+    assert_eq!(envelope.terminal_attribution_slots(), 12);
 }
 
 #[test]

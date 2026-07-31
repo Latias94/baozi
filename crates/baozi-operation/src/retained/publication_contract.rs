@@ -210,7 +210,7 @@ pub(crate) enum RetainedPublicationError<D> {
     OutcomeEvidenceSlotLimit,
     /// A canonical action was requested from an evidence-only assembly.
     WrongOutcomeMode,
-    /// An inherited source slot is stale, foreign to its aggregate, or carries the wrong tag.
+    /// A source slot, rewrite plan, or source-to-destination mapping is stale or inconsistent.
     InvalidSourceSlot,
     /// A prior failure made safe rollback or publication unverifiable.
     Poisoned,
@@ -241,7 +241,7 @@ impl<D: fmt::Debug> fmt::Display for RetainedPublicationError<D> {
                 formatter.write_str("canonical action requires a success-capable plan")
             }
             Self::InvalidSourceSlot => {
-                formatter.write_str("retained inherited source slot is invalid")
+                formatter.write_str("retained source slot or rewrite mapping is invalid")
             }
             Self::Poisoned => formatter.write_str("retained publication assembly is poisoned"),
         }

@@ -67,14 +67,18 @@ pub(super) use block_table::RetainedSlotIdentity;
 #[cfg(test)]
 use block_table::try_share_retained_block_after_admission;
 pub(crate) use block_table::{
-    BlockEmplacer, BlockPlacement, CanonicalRetainedSlot, OutcomeEvidenceRetainedSlot,
-    PublishedCanonicalAggregate, PublishedOutcomeEvidenceAggregate, RetainedBlockTablePlan,
-    RetainedClosureSession, RetainedEvidenceClosureSession, RetainedLookupMember,
+    BlockEmplacer, BlockPlacement, CanonicalLeafInheritanceError, CanonicalRetainedLeafPolicy,
+    CanonicalRetainedRewriteMap, CanonicalRetainedSlot, CanonicalSourceBindError,
+    OutcomeEvidenceRetainedSlot, PublishedCanonicalAggregate, PublishedOutcomeEvidenceAggregate,
+    RetainedBlockTablePlan, RetainedClosureSession, RetainedEvidenceClosureSession,
+    RetainedLookupMember,
 };
 use block_table::{
-    QualifiedRetainedBlockTablePlan, RetainedTableAllocation, record_forgotten_table_edges,
-    retained_block_table_is_exact, try_create_retained_block_table,
-    try_qualify_retained_block_table_plan, try_retain_block, try_share_retained_block,
+    QualifiedRetainedBlockTablePlan, RetainedBlockOrigin, RetainedTableAllocation,
+    record_forgotten_table_edges, retained_block_table_is_exact, try_bind_canonical_source_mapping,
+    try_create_retained_block_table, try_inherit_all_canonical_leaves,
+    try_qualify_retained_block_table_plan, try_retain_block, try_retain_rewritten_canonical_block,
+    try_rewrite_canonical_block_controlled, try_share_retained_block,
 };
 pub(crate) use evidence::{
     FallbackHeaderSnapshot, PreparationFailureClass, PreparationFailureCode, TerminalEvidenceCause,
@@ -175,6 +179,45 @@ use startup::{
     StartupPhysicalNoMutation,
 };
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum CanonicalLineageAuthority {
+    Fresh,
+    Derived {
+        source_set: RetainedSetId,
+        source_len: usize,
+    },
+}
+
+impl CanonicalLineageAuthority {
+    pub(super) const fn fresh() -> Self {
+        Self::Fresh
+    }
+
+    pub(super) fn derived<Block>(source: &PublishedCanonicalAggregate<Block>) -> Self {
+        Self::Derived {
+            source_set: source.set_id(),
+            source_len: source.len(),
+        }
+    }
+
+    pub(super) const fn source_mapping_capacity(self) -> Option<usize> {
+        match self {
+            Self::Fresh => None,
+            Self::Derived { source_len, .. } => Some(source_len),
+        }
+    }
+
+    fn require_source<D, Block>(
+        self,
+        source: &PublishedCanonicalAggregate<Block>,
+    ) -> Result<(), RetainedPublicationError<D>> {
+        match self {
+            Self::Derived { source_set, .. } if source_set == source.set_id() => Ok(()),
+            Self::Fresh | Self::Derived { .. } => Err(RetainedPublicationError::InvalidSourceSlot),
+        }
+    }
+}
+
 /// Stable operation owner for two preplanned, physically accounted block tables.
 #[must_use = "the assembly owns the operation, retained storage, and live attribution"]
 pub(crate) struct RetainedPublicationAssembly<O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
@@ -194,6 +237,7 @@ where
     evidence_batch: Option<AttributionReservationBatch<O, P, D, OutcomeEvidenceDestination>>,
     account: Option<PhysicalStorageAccount>,
     operation: Option<RetainedOperation<O, P, PP, U, D, F>>,
+    canonical_lineage: CanonicalLineageAuthority,
     set_id: RetainedSetId,
     canonical_plan: Option<RetainedBlockTablePlan<P, D>>,
     evidence_plan: RetainedBlockTablePlan<P, D>,
@@ -436,15 +480,15 @@ where
         };
         let exact = accepted
             && session.valid
-            && session.canonical_seen == canonical.members.len()
-            && session.evidence_seen == evidence.members.len();
+            && session.canonical_seen == canonical.member_count()
+            && session.evidence_seen == evidence.member_count();
         if !exact {
             return Err(RetainedClosureValidationError::Rejected);
         }
         Ok(RetainedSuccessClosureProof {
             set_id: self.set_id,
-            canonical_count: canonical.members.len(),
-            evidence_count: evidence.members.len(),
+            canonical_count: canonical.member_count(),
+            evidence_count: evidence.member_count(),
             canonical_root: canonical_root.identity,
             evidence_root: evidence_root.identity,
             marker: PhantomData,
@@ -499,13 +543,13 @@ where
                     return Err(RetainedClosureValidationError::Panicked);
                 }
             };
-        let exact = accepted && session.valid && session.seen == evidence.members.len();
+        let exact = accepted && session.valid && session.seen == evidence.member_count();
         if !exact {
             return Err(RetainedClosureValidationError::Rejected);
         }
         Ok(RetainedEvidenceClosureProof {
             set_id: self.set_id,
-            evidence_count: evidence.members.len(),
+            evidence_count: evidence.member_count(),
             evidence_root: evidence_root.identity,
             marker: PhantomData,
         })
@@ -644,13 +688,13 @@ where
                         };
                         let exact = accepted
                             && session.valid
-                            && session.canonical_seen == canonical.members.len()
-                            && session.evidence_seen == evidence.members.len();
+                            && session.canonical_seen == canonical.member_count()
+                            && session.evidence_seen == evidence.member_count();
                         if exact {
                             Ok(RetainedSuccessClosureProof {
                                 set_id: self.set_id,
-                                canonical_count: canonical.members.len(),
-                                evidence_count: evidence.members.len(),
+                                canonical_count: canonical.member_count(),
+                                evidence_count: evidence.member_count(),
                                 canonical_root: canonical_root.identity,
                                 evidence_root: evidence_root.identity,
                                 marker: PhantomData,
@@ -718,7 +762,7 @@ where
     pub fn canonical_len(&self) -> usize {
         self.canonical_table
             .as_ref()
-            .map_or(0, |table| table.as_ref().members.len())
+            .map_or(0, |table| table.as_ref().member_count())
     }
 
     pub fn canonical_new_blocks(&self) -> usize {
@@ -736,7 +780,7 @@ where
     pub fn outcome_evidence_len(&self) -> usize {
         self.evidence_table
             .as_ref()
-            .map_or(0, |table| table.as_ref().members.len())
+            .map_or(0, |table| table.as_ref().member_count())
     }
 
     pub fn outcome_evidence_new_blocks(&self) -> usize {
@@ -760,6 +804,107 @@ where
         })
     }
 
+    pub(crate) fn try_bind_canonical_source(
+        &mut self,
+        source: &PublishedCanonicalAggregate<CanonicalBlock>,
+        work_dimension: D,
+    ) -> Result<(), CanonicalSourceBindError<D>> {
+        self.canonical_lineage
+            .require_source(source)
+            .map_err(CanonicalSourceBindError::Publication)?;
+        if self.containment != AssemblyContainmentProvenance::Healthy {
+            return Err(CanonicalSourceBindError::Publication(
+                RetainedPublicationError::Poisoned,
+            ));
+        }
+        if self.mode != RetainedOutcomeMode::SuccessCapable {
+            return Err(CanonicalSourceBindError::Publication(
+                RetainedPublicationError::WrongOutcomeMode,
+            ));
+        }
+        let (control, _) = self
+            .operation
+            .as_mut()
+            .ok_or(CanonicalSourceBindError::Publication(
+                RetainedPublicationError::Poisoned,
+            ))?
+            .split_work_control(work_dimension);
+        let result = try_bind_canonical_source_mapping(
+            self.account
+                .as_ref()
+                .ok_or(CanonicalSourceBindError::Publication(
+                    RetainedPublicationError::Poisoned,
+                ))?,
+            self.canonical_table
+                .as_mut()
+                .ok_or(CanonicalSourceBindError::Publication(
+                    RetainedPublicationError::WrongOutcomeMode,
+                ))?,
+            self.set_id,
+            source,
+            control,
+        );
+        if let Err(CanonicalSourceBindError::Publication(error)) = &result
+            && let Some(containment) = retained_publication_error_containment(error)
+        {
+            self.containment = containment;
+        }
+        result
+    }
+
+    pub(crate) fn try_inherit_all_canonical_leaves(
+        &mut self,
+        source: &PublishedCanonicalAggregate<CanonicalBlock>,
+        work_dimension: D,
+    ) -> Result<(), CanonicalLeafInheritanceError<D>>
+    where
+        CanonicalBlock: CanonicalRetainedLeafPolicy,
+    {
+        self.canonical_lineage
+            .require_source(source)
+            .map_err(CanonicalLeafInheritanceError::Publication)?;
+        if self.containment != AssemblyContainmentProvenance::Healthy {
+            return Err(CanonicalLeafInheritanceError::Publication(
+                RetainedPublicationError::Poisoned,
+            ));
+        }
+        if self.mode != RetainedOutcomeMode::SuccessCapable {
+            return Err(CanonicalLeafInheritanceError::Publication(
+                RetainedPublicationError::WrongOutcomeMode,
+            ));
+        }
+        let (control, ledger) = self
+            .operation
+            .as_mut()
+            .ok_or(CanonicalLeafInheritanceError::Publication(
+                RetainedPublicationError::Poisoned,
+            ))?
+            .split_work_control(work_dimension);
+        let result = try_inherit_all_canonical_leaves(
+            ledger,
+            self.account
+                .as_ref()
+                .ok_or(CanonicalLeafInheritanceError::Publication(
+                    RetainedPublicationError::Poisoned,
+                ))?,
+            self.handle_share_work,
+            self.canonical_table
+                .as_mut()
+                .ok_or(CanonicalLeafInheritanceError::Publication(
+                    RetainedPublicationError::WrongOutcomeMode,
+                ))?,
+            self.set_id,
+            source,
+            control,
+        );
+        if let Err(CanonicalLeafInheritanceError::Publication(error)) = &result
+            && let Some(containment) = retained_publication_error_containment(error)
+        {
+            self.containment = containment;
+        }
+        result
+    }
+
     #[cfg(test)]
     pub(crate) fn test_ledger_probe(&self) -> crate::ledger::LedgerTestProbe<P, D> {
         self.operation
@@ -776,6 +921,18 @@ where
             .as_ref()
             .and_then(AttributionReservationBatch::attributed_bytes)
             .expect("test canonical attribution bytes remain exact")
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_take_canonical_source_mapping_probe_count(&self) -> u64 {
+        self.canonical_table.as_ref().map_or(0, |table| {
+            table.as_ref().take_canonical_source_mapping_probe_count()
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_storage_graph_is_exact(&self) -> bool {
+        self.has_exact_storage_graph()
     }
 
     pub fn try_retain_canonical<Tag>(
@@ -818,8 +975,9 @@ where
             self.set_id,
             RetainedMembershipDestination::Canonical,
             RetainedPublicationError::CanonicalSlotLimit,
+            RetainedBlockOrigin::New,
             plan,
-            build,
+            |emplacer, _| build(emplacer),
         );
         match result {
             Ok(identity) => Ok(CanonicalRetainedSlot {
@@ -884,6 +1042,133 @@ where
             self.set_id,
             RetainedMembershipDestination::Canonical,
             RetainedPublicationError::CanonicalSlotLimit,
+            RetainedBlockOrigin::New,
+            plan,
+            move |emplacer, _| build(emplacer, control),
+        );
+        match result {
+            Ok(identity) => Ok(CanonicalRetainedSlot {
+                identity,
+                marker: PhantomData,
+            }),
+            Err(error) => {
+                if let Some(containment) = retained_publication_error_containment(&error) {
+                    self.containment = containment;
+                }
+                Err(error)
+            }
+        }
+    }
+
+    /// Retains one newly constructed canonical block as the unique replacement mapping for an
+    /// exact published same-account source slot.
+    pub(crate) fn try_retain_rewritten_canonical<Tag>(
+        &mut self,
+        source: &PublishedCanonicalAggregate<CanonicalBlock>,
+        source_slot: CanonicalRetainedSlot<CanonicalBlock, Tag>,
+        plan: RetainedAllocationPlan,
+        build: impl for<'a> FnOnce(
+            BlockEmplacer<'a, CanonicalBlock>,
+        ) -> Result<
+            BlockPlacement<'a, CanonicalBlock, Tag>,
+            RetainedBuildFailureCode,
+        >,
+    ) -> Result<CanonicalRetainedSlot<CanonicalBlock, Tag>, RetainedPublicationError<D>>
+    where
+        Tag: Copy + Send + Sync + 'static,
+    {
+        self.canonical_lineage.require_source(source)?;
+        if self.containment != AssemblyContainmentProvenance::Healthy {
+            return Err(RetainedPublicationError::Poisoned);
+        }
+        let canonical_plan = self
+            .canonical_plan
+            .ok_or(RetainedPublicationError::WrongOutcomeMode)?;
+        let result = try_retain_rewritten_canonical_block(
+            self.operation
+                .as_ref()
+                .ok_or(RetainedPublicationError::Poisoned)?
+                .coordinator
+                .retained_ledger(),
+            self.account
+                .as_ref()
+                .ok_or(RetainedPublicationError::Poisoned)?,
+            self.handle_share_work,
+            canonical_plan.writer.phase,
+            canonical_plan.writer.attribution_dimension,
+            self.canonical_batch
+                .as_mut()
+                .ok_or(RetainedPublicationError::Poisoned)?,
+            self.canonical_table
+                .as_mut()
+                .ok_or(RetainedPublicationError::Poisoned)?,
+            self.set_id,
+            source,
+            source_slot.identity,
+            plan,
+            build,
+        );
+        match result {
+            Ok(identity) => Ok(CanonicalRetainedSlot {
+                identity,
+                marker: PhantomData,
+            }),
+            Err(error) => {
+                if let Some(containment) = retained_publication_error_containment(&error) {
+                    self.containment = containment;
+                }
+                Err(error)
+            }
+        }
+    }
+
+    /// Retains one controlled canonical replacement while preserving exact source lineage.
+    pub(crate) fn try_retain_rewritten_canonical_controlled<Tag>(
+        &mut self,
+        source: &PublishedCanonicalAggregate<CanonicalBlock>,
+        source_slot: CanonicalRetainedSlot<CanonicalBlock, Tag>,
+        work_dimension: D,
+        plan: RetainedAllocationPlan,
+        build: impl for<'placement, 'control> FnOnce(
+            BlockEmplacer<'placement, CanonicalBlock>,
+            RetainedWorkControl<'control, O, P, PP, U, D>,
+        ) -> Result<
+            BlockPlacement<'placement, CanonicalBlock, Tag>,
+            RetainedBuildFailureCode,
+        >,
+    ) -> Result<CanonicalRetainedSlot<CanonicalBlock, Tag>, RetainedPublicationError<D>>
+    where
+        Tag: Copy + Send + Sync + 'static,
+    {
+        self.canonical_lineage.require_source(source)?;
+        if self.containment != AssemblyContainmentProvenance::Healthy {
+            return Err(RetainedPublicationError::Poisoned);
+        }
+        let canonical_plan = self
+            .canonical_plan
+            .ok_or(RetainedPublicationError::WrongOutcomeMode)?;
+        let (control, ledger) = self
+            .operation
+            .as_mut()
+            .ok_or(RetainedPublicationError::Poisoned)?
+            .split_work_control(work_dimension);
+        let result = try_retain_rewritten_canonical_block(
+            ledger,
+            self.account
+                .as_ref()
+                .ok_or(RetainedPublicationError::Poisoned)?,
+            self.handle_share_work,
+            canonical_plan.writer.phase,
+            canonical_plan.writer.attribution_dimension,
+            self.canonical_batch
+                .as_mut()
+                .ok_or(RetainedPublicationError::Poisoned)?,
+            self.canonical_table
+                .as_mut()
+                .ok_or(RetainedPublicationError::Poisoned)?,
+            self.set_id,
+            source,
+            source_slot.identity,
             plan,
             move |emplacer| build(emplacer, control),
         );
@@ -1058,6 +1343,7 @@ where
     where
         Tag: Copy + Send + Sync + 'static,
     {
+        self.canonical_lineage.require_source(source)?;
         if self.containment != AssemblyContainmentProvenance::Healthy {
             return Err(RetainedPublicationError::Poisoned);
         }
@@ -1082,6 +1368,76 @@ where
             RetainedPublicationError::CanonicalSlotLimit,
             &source.inner,
             source_slot.identity,
+        );
+        match result {
+            Ok(identity) => Ok(CanonicalRetainedSlot {
+                identity,
+                marker: PhantomData,
+            }),
+            Err(error) => {
+                if let Some(containment) = retained_publication_error_containment(&error) {
+                    self.containment = containment;
+                }
+                Err(error)
+            }
+        }
+    }
+
+    /// Rebuilds one canonical block through the exact bound source map and operation work control.
+    pub(crate) fn try_rewrite_canonical_controlled<Tag>(
+        &mut self,
+        source: &PublishedCanonicalAggregate<CanonicalBlock>,
+        source_slot: CanonicalRetainedSlot<CanonicalBlock, Tag>,
+        work_dimension: D,
+        allocation_plan: RetainedAllocationPlan,
+        build: impl for<'placement, 'source, 'destination, 'control> FnOnce(
+            BlockEmplacer<'placement, CanonicalBlock>,
+            &'source CanonicalBlock,
+            CanonicalRetainedRewriteMap<'source, 'destination, CanonicalBlock>,
+            RetainedWorkControl<'control, O, P, PP, U, D>,
+        ) -> Result<
+            BlockPlacement<'placement, CanonicalBlock, Tag>,
+            RetainedBuildFailureCode,
+        >,
+    ) -> Result<CanonicalRetainedSlot<CanonicalBlock, Tag>, RetainedPublicationError<D>>
+    where
+        Tag: Copy + Send + Sync + 'static,
+    {
+        self.canonical_lineage.require_source(source)?;
+        if self.containment != AssemblyContainmentProvenance::Healthy {
+            return Err(RetainedPublicationError::Poisoned);
+        }
+        if self.mode != RetainedOutcomeMode::SuccessCapable {
+            return Err(RetainedPublicationError::WrongOutcomeMode);
+        }
+        let canonical_plan = self
+            .canonical_plan
+            .ok_or(RetainedPublicationError::WrongOutcomeMode)?;
+        let (control, ledger) = self
+            .operation
+            .as_mut()
+            .ok_or(RetainedPublicationError::Poisoned)?
+            .split_work_control(work_dimension);
+        let result = try_rewrite_canonical_block_controlled(
+            ledger,
+            self.account
+                .as_ref()
+                .ok_or(RetainedPublicationError::Poisoned)?,
+            self.handle_share_work,
+            canonical_plan.writer.phase,
+            canonical_plan.writer.attribution_dimension,
+            self.canonical_batch
+                .as_mut()
+                .ok_or(RetainedPublicationError::Poisoned)?,
+            self.canonical_table
+                .as_mut()
+                .ok_or(RetainedPublicationError::Poisoned)?,
+            self.set_id,
+            source,
+            source_slot.identity,
+            allocation_plan,
+            control,
+            build,
         );
         match result {
             Ok(identity) => Ok(CanonicalRetainedSlot {
@@ -1134,8 +1490,9 @@ where
             self.set_id,
             RetainedMembershipDestination::OutcomeEvidence,
             RetainedPublicationError::OutcomeEvidenceSlotLimit,
+            RetainedBlockOrigin::New,
             plan,
-            build,
+            |emplacer, _| build(emplacer),
         );
         match result {
             Ok(identity) => Ok(OutcomeEvidenceRetainedSlot {
@@ -1310,14 +1667,14 @@ where
                 let proof_valid = self.mode == RetainedOutcomeMode::SuccessCapable
                     && proof.set_id == self.set_id
                     && self.canonical_table.as_ref().is_some_and(|table| {
-                        table.as_ref().members.len() == proof.canonical_count
+                        table.as_ref().member_count() == proof.canonical_count
                             && table
                                 .as_ref()
                                 .member(proof.canonical_root, self.set_id)
                                 .is_some()
                     })
                     && self.evidence_table.as_ref().is_some_and(|table| {
-                        table.as_ref().members.len() == proof.evidence_count
+                        table.as_ref().member_count() == proof.evidence_count
                             && table
                                 .as_ref()
                                 .member(proof.evidence_root, self.set_id)
@@ -1360,7 +1717,7 @@ where
             } => {
                 let proof_valid = proof.set_id == self.set_id
                     && self.evidence_table.as_ref().is_some_and(|table| {
-                        table.as_ref().members.len() == proof.evidence_count
+                        table.as_ref().member_count() == proof.evidence_count
                             && table
                                 .as_ref()
                                 .member(proof.evidence_root, self.set_id)

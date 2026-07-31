@@ -1,24 +1,32 @@
-use baozi_operation::{CanonicalRecordView, PublishedCanonicalStore, RecordBlock};
+use baozi_operation::{
+    CanonicalRecordView, PublishedCanonicalStore, RecordBlock, ScalarSequence, SequenceView,
+    StoredScalar, Utf8Block,
+};
 
-use crate::appearance::TextureRoleKind;
+use crate::appearance::{
+    AlphaMode, ColorInterpretation, MaterialFactors, MaterialSemanticsRef, ShadingModel,
+    TextureBindingSemanticsRef, TextureBlendOperation, TextureChannel, TextureChannelMapping,
+    TextureChannelSwizzle, TextureCoordinateSource, TextureRole, TextureRoleKind, TextureSourceKey,
+    TextureStrength, TextureTransform, validate_material_semantics,
+    validate_texture_binding_semantics,
+};
 use crate::canonical_scene::store::schema::appearance::{
     APPEARANCE_ADDRESS_CLAMP_TO_BORDER, APPEARANCE_ADDRESS_CLAMP_TO_EDGE,
     APPEARANCE_ADDRESS_MIRRORED_REPEAT, APPEARANCE_ADDRESS_REPEAT, APPEARANCE_BINDING_FIELD_COUNT,
-    APPEARANCE_IMAGE_FIELD_COUNT, APPEARANCE_IMAGE_PAYLOAD_ENCODED,
+    APPEARANCE_BINDING_SEMANTIC_STRIDE, APPEARANCE_CHANNEL_ZERO, APPEARANCE_IMAGE_FIELD_COUNT,
+    APPEARANCE_IMAGE_PAYLOAD_ENCODED, APPEARANCE_MATERIAL_FACTOR_STRIDE,
     APPEARANCE_MATERIAL_FIELD_COUNT, APPEARANCE_MEDIA_TYPE_UTF8, APPEARANCE_MIPMAP_FILTER_LINEAR,
     APPEARANCE_MIPMAP_FILTER_NEAREST, APPEARANCE_MIPMAP_FILTER_NONE, APPEARANCE_PRESENCE_ABSENT,
-    APPEARANCE_PRESENCE_PRESENT, APPEARANCE_ROLE_BASE_COLOR, APPEARANCE_ROLE_CLEARCOAT,
-    APPEARANCE_ROLE_CLEARCOAT_NORMAL, APPEARANCE_ROLE_CLEARCOAT_ROUGHNESS, APPEARANCE_ROLE_DIFFUSE,
-    APPEARANCE_ROLE_DISPLACEMENT, APPEARANCE_ROLE_EMISSIVE, APPEARANCE_ROLE_HEIGHT,
-    APPEARANCE_ROLE_LIGHTMAP, APPEARANCE_ROLE_METALLIC, APPEARANCE_ROLE_METALLIC_ROUGHNESS,
-    APPEARANCE_ROLE_NORMAL, APPEARANCE_ROLE_OCCLUSION, APPEARANCE_ROLE_OPACITY,
-    APPEARANCE_ROLE_ROUGHNESS, APPEARANCE_ROLE_SHEEN_COLOR, APPEARANCE_ROLE_SHEEN_ROUGHNESS,
-    APPEARANCE_ROLE_SPECULAR, APPEARANCE_ROLE_THICKNESS, APPEARANCE_ROLE_TRANSMISSION,
-    APPEARANCE_SAMPLER_FIELD_COUNT, APPEARANCE_TEXEL_FILTER_LINEAR,
+    APPEARANCE_PRESENCE_PRESENT, APPEARANCE_SAMPLER_FIELD_COUNT, APPEARANCE_TEXEL_FILTER_LINEAR,
     APPEARANCE_TEXEL_FILTER_NEAREST, APPEARANCE_TEXTURE_FIELD_COUNT,
-    AppearanceEncodedImagePayloadSchema, AppearanceMediaTypeSchema, appearance_binding_field,
-    appearance_image_field, appearance_material_field, appearance_sampler_field,
-    appearance_texture_field,
+    AppearanceBindingSemanticScalarSchema, AppearanceEncodedImagePayloadSchema,
+    AppearanceMaterialFactorScalarSchema, AppearanceMediaTypeSchema, AppearanceSourceKeySchema,
+    appearance_binding_field, appearance_image_field, appearance_material_field,
+    appearance_sampler_field, appearance_texture_field, decode_appearance_alpha_mode,
+    decode_appearance_binding_numeric_semantics, decode_appearance_blend_operation,
+    decode_appearance_channel, decode_appearance_color_interpretation,
+    decode_appearance_coordinate_source, decode_appearance_material_factors,
+    decode_appearance_shading_model, decode_appearance_texture_role,
 };
 use crate::canonical_scene::store::schema::{
     CanonicalBlockRef, CanonicalSchema, SceneDirectorySchema,
@@ -38,6 +46,9 @@ pub(super) struct NodeSceneAppearanceTables<'scene> {
     bindings: Option<CanonicalRecordView<'scene>>,
     image_payloads: Option<&'scene [u8]>,
     media_types: Option<&'scene str>,
+    source_keys: Option<&'scene str>,
+    binding_semantic_scalars: Option<&'scene [f32]>,
+    material_factor_scalars: Option<&'scene [f32]>,
 }
 
 impl<'scene> NodeSceneAppearanceTables<'scene> {
@@ -45,6 +56,40 @@ impl<'scene> NodeSceneAppearanceTables<'scene> {
         canonical: &'scene SceneCanonicalStore,
         proof: NodeSceneValidationProof,
     ) -> NodeSceneSemanticResult<Self> {
+        let binding_semantic_scalars = resolve_sequence(
+            canonical,
+            proof.appearance_binding_semantic_scalars(),
+            "validated binding-semantic payload is unavailable or mistyped",
+        )?;
+        let material_factor_scalars = resolve_sequence(
+            canonical,
+            proof.appearance_material_factor_scalars(),
+            "validated material-factor payload is unavailable or mistyped",
+        )?;
+        require_exact_payload_len(
+            binding_semantic_scalars,
+            proof.material_binding_count(),
+            APPEARANCE_BINDING_SEMANTIC_STRIDE,
+            "validated binding-semantic payload length disagrees with validation proof",
+        )?;
+        require_exact_payload_len(
+            material_factor_scalars,
+            proof.material_count(),
+            APPEARANCE_MATERIAL_FACTOR_STRIDE,
+            "validated material-factor payload length disagrees with validation proof",
+        )?;
+
+        let source_keys = resolve_utf8(
+            canonical,
+            proof.appearance_source_keys(),
+            "validated source-key payload is unavailable or mistyped",
+        )?;
+        if source_keys.is_some_and(str::is_empty) {
+            return Err(invariant(
+                "validated present source-key payload has no UTF-8 bytes",
+            ));
+        }
+
         Ok(Self {
             images: resolve_table(
                 canonical,
@@ -101,6 +146,9 @@ impl<'scene> NodeSceneAppearanceTables<'scene> {
                 proof.appearance_media_types(),
                 "validated image media-type payload is unavailable or mistyped",
             )?,
+            source_keys,
+            binding_semantic_scalars,
+            material_factor_scalars,
         })
     }
 
@@ -119,6 +167,10 @@ impl<'scene> NodeSceneAppearanceTables<'scene> {
             next_texture: 0,
             next_material: 0,
             next_binding: 0,
+            next_material_binding_offset: 0,
+            next_material_factor_offset: 0,
+            next_binding_semantic_offset: 0,
+            next_source_key_offset: 0,
         }
     }
 }
@@ -164,11 +216,14 @@ fn resolve_bytes<'scene>(
         .transpose()
 }
 
-fn resolve_utf8<'scene>(
+fn resolve_utf8<'scene, Tag>(
     canonical: &'scene SceneCanonicalStore,
-    reference: Option<CanonicalBlockRef<AppearanceMediaTypeSchema>>,
+    reference: Option<CanonicalBlockRef<Tag>>,
     unavailable_reason: &'static str,
-) -> NodeSceneSemanticResult<Option<&'scene str>> {
+) -> NodeSceneSemanticResult<Option<&'scene str>>
+where
+    Tag: CanonicalSchema<StoreKind = Utf8Block>,
+{
     reference
         .map(|reference| {
             canonical
@@ -176,6 +231,43 @@ fn resolve_utf8<'scene>(
                 .ok_or_else(|| invariant(unavailable_reason))
         })
         .transpose()
+}
+
+fn resolve_sequence<'scene, T, Tag>(
+    canonical: &'scene SceneCanonicalStore,
+    reference: Option<CanonicalBlockRef<Tag>>,
+    unavailable_reason: &'static str,
+) -> NodeSceneSemanticResult<Option<&'scene [T]>>
+where
+    T: StoredScalar,
+    Tag: CanonicalSchema<StoreKind = ScalarSequence<T>>,
+{
+    reference
+        .map(|reference| {
+            let sequence: SequenceView<'scene, T> = canonical
+                .sequence(reference.into_store())
+                .ok_or_else(|| invariant(unavailable_reason))?;
+            if sequence.as_slice().is_empty() {
+                return Err(invariant(
+                    "validated present appearance payload has no scalar values",
+                ));
+            }
+            Ok(sequence.as_slice())
+        })
+        .transpose()
+}
+
+fn require_exact_payload_len<T>(
+    payload: Option<&[T]>,
+    rows: usize,
+    stride: usize,
+    reason: &'static str,
+) -> NodeSceneSemanticResult<()> {
+    let expected = rows.checked_mul(stride).ok_or_else(|| invariant(reason))?;
+    if payload.map_or(0, <[T]>::len) != expected || (expected == 0) != payload.is_none() {
+        return Err(invariant(reason));
+    }
+    Ok(())
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -199,6 +291,10 @@ pub(in crate::canonical_scene::store) struct NodeSceneAppearanceCursor<'scene> {
     next_texture: usize,
     next_material: usize,
     next_binding: usize,
+    next_material_binding_offset: usize,
+    next_material_factor_offset: usize,
+    next_binding_semantic_offset: usize,
+    next_source_key_offset: usize,
 }
 
 impl<'scene> NodeSceneAppearanceCursor<'scene> {
@@ -502,9 +598,10 @@ impl<'scene> NodeSceneAppearanceCursor<'scene> {
         }))
     }
 
+    #[allow(clippy::too_many_lines)]
     pub(in crate::canonical_scene::store) fn next_material(
         &mut self,
-    ) -> NodeSceneSemanticResult<Option<NodeSceneAppearanceMaterial>> {
+    ) -> NodeSceneSemanticResult<Option<NodeSceneAppearanceMaterial<'scene>>> {
         self.enter_phase(AppearanceCursorPhase::Materials)?;
         let Some(row) = next_row(
             self.next_material,
@@ -525,6 +622,56 @@ impl<'scene> NodeSceneAppearanceCursor<'scene> {
             "validated material identity is unreadable",
             "validated material identity disagrees with its row",
         )?;
+        let shading_model = decode_appearance_shading_model(read_scalar(
+            table,
+            row,
+            appearance_material_field::SHADING_MODEL,
+            "validated material shading model is unreadable",
+        )?)
+        .ok_or_else(|| invariant("validated material shading-model code is unknown"))?;
+        let alpha_cutoff = read_scalar::<f32>(
+            table,
+            row,
+            appearance_material_field::ALPHA_CUTOFF,
+            "validated material alpha cutoff is unreadable",
+        )?;
+        let alpha_mode = decode_appearance_alpha_mode(
+            read_scalar(
+                table,
+                row,
+                appearance_material_field::ALPHA_MODE,
+                "validated material alpha mode is unreadable",
+            )?,
+            alpha_cutoff,
+        )
+        .ok_or_else(|| invariant("validated material alpha-mode encoding is invalid"))?;
+        let double_sided = decode_presence(
+            read_scalar(
+                table,
+                row,
+                appearance_material_field::DOUBLE_SIDED,
+                "validated material double-sided flag is unreadable",
+            )?,
+            "validated material double-sided flag is invalid",
+        )?;
+        let pbr_metallic_roughness_presence = read_scalar(
+            table,
+            row,
+            appearance_material_field::PBR_METALLIC_ROUGHNESS_PRESENCE,
+            "validated metallic-roughness presence is unreadable",
+        )?;
+        let pbr_specular_glossiness_presence = read_scalar(
+            table,
+            row,
+            appearance_material_field::PBR_SPECULAR_GLOSSINESS_PRESENCE,
+            "validated specular-glossiness presence is unreadable",
+        )?;
+        let legacy_presence = read_scalar(
+            table,
+            row,
+            appearance_material_field::LEGACY_PRESENCE,
+            "validated legacy-factor presence is unreadable",
+        )?;
         let binding_offset = read_u32_as_usize(
             table,
             row,
@@ -537,14 +684,17 @@ impl<'scene> NodeSceneAppearanceCursor<'scene> {
             appearance_material_field::BINDING_COUNT,
             "validated material binding count is unreadable",
         )?;
-        if binding_offset
-            .checked_add(binding_count)
-            .is_none_or(|end| end > self.proof.material_binding_count())
-        {
+        if binding_offset != self.next_material_binding_offset {
             return Err(invariant(
-                "validated material binding range is outside binding space",
+                "validated material binding ranges are not contiguous",
             ));
         }
+        let binding_end = binding_offset
+            .checked_add(binding_count)
+            .filter(|end| *end <= self.proof.material_binding_count())
+            .ok_or_else(|| {
+                invariant("validated material binding range is outside binding space")
+            })?;
         if binding_count == 0 {
             if table.scalar::<u8>(row, appearance_material_field::BINDINGS) != Some(0) {
                 return Err(invariant(
@@ -561,17 +711,78 @@ impl<'scene> NodeSceneAppearanceCursor<'scene> {
                 "validated material binding reference disagrees with validation proof",
             )?;
         }
+
+        let factor_offset = read_u32_as_usize(
+            table,
+            row,
+            appearance_material_field::FACTOR_OFFSET,
+            "validated material factor offset is unreadable",
+        )?;
+        let factor_count = read_u32_as_usize(
+            table,
+            row,
+            appearance_material_field::FACTOR_COUNT,
+            "validated material factor count is unreadable",
+        )?;
+        if factor_offset != self.next_material_factor_offset
+            || factor_count != APPEARANCE_MATERIAL_FACTOR_STRIDE
+        {
+            return Err(invariant(
+                "validated material factor range is not canonical",
+            ));
+        }
+        require_sequence_ref::<AppearanceMaterialFactorScalarSchema>(
+            table,
+            row,
+            appearance_material_field::FACTORS,
+            self.proof.appearance_material_factor_scalars(),
+            "validated material factor reference is unreadable",
+            "validated material factor reference disagrees with validation proof",
+        )?;
+        let factor_values = slice_payload(
+            self.tables.material_factor_scalars,
+            factor_offset,
+            factor_count,
+            "validated material factor range is unreadable",
+        )?;
+        let factors = decode_appearance_material_factors(
+            factor_values,
+            pbr_metallic_roughness_presence,
+            pbr_specular_glossiness_presence,
+            legacy_presence,
+        )
+        .ok_or_else(|| invariant("validated material factors are invalid"))?;
+        validate_material_semantics(MaterialSemanticsRef::new(
+            &shading_model,
+            &alpha_mode,
+            double_sided,
+            factors,
+        ))
+        .map_err(|_| invariant("validated material semantics are inconsistent"))?;
+
+        let factor_end = factor_offset
+            .checked_add(factor_count)
+            .ok_or_else(|| invariant("validated material factor range overflows"))?;
+        self.next_material_binding_offset = binding_end;
+        self.next_material_factor_offset = factor_end;
         self.next_material = advance_row(row, "material cursor index overflows")?;
         Ok(Some(NodeSceneAppearanceMaterial {
             source_index: row,
+            shading_model,
+            alpha_mode,
+            double_sided,
+            factors,
             binding_offset,
             binding_count,
+            factor_offset,
+            factor_values,
         }))
     }
 
+    #[allow(clippy::too_many_lines)]
     pub(in crate::canonical_scene::store) fn next_binding(
         &mut self,
-    ) -> NodeSceneSemanticResult<Option<NodeSceneAppearanceBinding>> {
+    ) -> NodeSceneSemanticResult<Option<NodeSceneAppearanceBinding<'scene>>> {
         self.enter_phase(AppearanceCursorPhase::Bindings)?;
         let Some(row) = next_row(
             self.next_binding,
@@ -617,11 +828,186 @@ impl<'scene> NodeSceneAppearanceCursor<'scene> {
             appearance_binding_field::ROLE,
             "validated material-binding role is unreadable",
         )?)?;
+        let coordinate_source = decode_appearance_coordinate_source(
+            read_scalar(
+                table,
+                row,
+                appearance_binding_field::COORDINATE_SOURCE,
+                "validated material-binding coordinate source is unreadable",
+            )?,
+            read_scalar(
+                table,
+                row,
+                appearance_binding_field::COORDINATE_SET,
+                "validated material-binding coordinate set is unreadable",
+            )?,
+        )
+        .ok_or_else(|| invariant("validated material-binding coordinate source is invalid"))?;
+        let lane_count = usize::from(read_scalar::<u8>(
+            table,
+            row,
+            appearance_binding_field::CHANNEL_LANE_COUNT,
+            "validated material-binding channel count is unreadable",
+        )?);
+        if !(1..=4).contains(&lane_count) {
+            return Err(invariant(
+                "validated material-binding channel count is invalid",
+            ));
+        }
+        let channel_fields = [
+            appearance_binding_field::CHANNEL_0,
+            appearance_binding_field::CHANNEL_1,
+            appearance_binding_field::CHANNEL_2,
+            appearance_binding_field::CHANNEL_3,
+        ];
+        let mut channels = [TextureChannel::Zero; 4];
+        for (index, field) in channel_fields.into_iter().enumerate() {
+            let tag = read_scalar::<u8>(
+                table,
+                row,
+                field,
+                "validated material-binding channel is unreadable",
+            )?;
+            if index >= lane_count && tag != APPEARANCE_CHANNEL_ZERO {
+                return Err(invariant(
+                    "validated material-binding channel padding is not canonical",
+                ));
+            }
+            channels[index] = decode_appearance_channel(tag)
+                .ok_or_else(|| invariant("validated material-binding channel code is unknown"))?;
+        }
+        let channel_mapping = TextureChannelMapping::swizzle(
+            TextureChannelSwizzle::try_new(&channels[..lane_count])
+                .map_err(|_| invariant("validated material-binding channel mapping is invalid"))?,
+        );
+        let color_interpretation = decode_appearance_color_interpretation(read_scalar(
+            table,
+            row,
+            appearance_binding_field::COLOR_INTERPRETATION,
+            "validated material-binding color interpretation is unreadable",
+        )?)
+        .ok_or_else(|| invariant("validated material-binding color interpretation is invalid"))?;
+
+        let semantic_offset = read_u32_as_usize(
+            table,
+            row,
+            appearance_binding_field::SEMANTIC_SCALAR_OFFSET,
+            "validated material-binding semantic offset is unreadable",
+        )?;
+        let semantic_count = read_u32_as_usize(
+            table,
+            row,
+            appearance_binding_field::SEMANTIC_SCALAR_COUNT,
+            "validated material-binding semantic count is unreadable",
+        )?;
+        if semantic_offset != self.next_binding_semantic_offset
+            || semantic_count != APPEARANCE_BINDING_SEMANTIC_STRIDE
+        {
+            return Err(invariant(
+                "validated material-binding semantic range is not canonical",
+            ));
+        }
+        require_sequence_ref::<AppearanceBindingSemanticScalarSchema>(
+            table,
+            row,
+            appearance_binding_field::SEMANTIC_SCALARS,
+            self.proof.appearance_binding_semantic_scalars(),
+            "validated material-binding semantic reference is unreadable",
+            "validated material-binding semantic reference disagrees with validation proof",
+        )?;
+        let semantic_values = slice_payload(
+            self.tables.binding_semantic_scalars,
+            semantic_offset,
+            semantic_count,
+            "validated material-binding semantic range is unreadable",
+        )?;
+        let (transform, strength) = decode_appearance_binding_numeric_semantics(semantic_values)
+            .ok_or_else(|| invariant("validated material-binding numeric semantics are invalid"))?;
+        let blend = decode_appearance_blend_operation(read_scalar(
+            table,
+            row,
+            appearance_binding_field::BLEND_OPERATION,
+            "validated material-binding blend operation is unreadable",
+        )?)
+        .ok_or_else(|| invariant("validated material-binding blend operation is invalid"))?;
+
+        let source_key_offset = read_u32_as_usize(
+            table,
+            row,
+            appearance_binding_field::SOURCE_KEY_OFFSET,
+            "validated material-binding source-key offset is unreadable",
+        )?;
+        let source_key_count = read_u32_as_usize(
+            table,
+            row,
+            appearance_binding_field::SOURCE_KEY_COUNT,
+            "validated material-binding source-key count is unreadable",
+        )?;
+        if source_key_offset != self.next_source_key_offset {
+            return Err(invariant(
+                "validated material-binding source-key ranges are not contiguous",
+            ));
+        }
+        let source_key = if source_key_count == 0 {
+            if table.scalar::<u8>(row, appearance_binding_field::SOURCE_KEYS) != Some(0) {
+                return Err(invariant(
+                    "validated absent material-binding source key has a nonzero sentinel",
+                ));
+            }
+            None
+        } else {
+            require_utf8_ref::<AppearanceSourceKeySchema>(
+                table,
+                row,
+                appearance_binding_field::SOURCE_KEYS,
+                self.proof.appearance_source_keys(),
+                "validated material-binding source-key reference is unreadable",
+                "validated material-binding source-key reference disagrees with validation proof",
+            )?;
+            Some(slice_utf8_payload(
+                self.tables.source_keys,
+                source_key_offset,
+                source_key_count,
+                "validated material-binding source-key range is unreadable",
+            )?)
+        };
+        let source_key_value = source_key
+            .map(TextureSourceKey::try_new)
+            .transpose()
+            .map_err(|_| invariant("validated material-binding source key is invalid"))?;
+        validate_texture_binding_semantics(TextureBindingSemanticsRef::new(
+            &role,
+            &coordinate_source,
+            &channel_mapping,
+            &color_interpretation,
+            transform,
+            strength,
+            &blend,
+            source_key_value.as_ref(),
+        ))
+        .map_err(|_| invariant("validated material-binding semantics are inconsistent"))?;
+
+        self.next_binding_semantic_offset = semantic_offset
+            .checked_add(semantic_count)
+            .ok_or_else(|| invariant("validated material-binding semantic range overflows"))?;
+        self.next_source_key_offset = source_key_offset
+            .checked_add(source_key_count)
+            .ok_or_else(|| invariant("validated material-binding source-key range overflows"))?;
         self.next_binding = advance_row(row, "material-binding cursor index overflows")?;
         Ok(Some(NodeSceneAppearanceBinding {
             source_index: row,
             texture,
             role,
+            coordinate_source,
+            channel_mapping,
+            color_interpretation,
+            transform,
+            strength,
+            semantic_offset,
+            semantic_values,
+            blend,
+            source_key_offset,
+            source_key,
         }))
     }
 
@@ -638,6 +1024,12 @@ impl<'scene> NodeSceneAppearanceCursor<'scene> {
         }
         if self.next_image_payload_offset != self.tables.image_payloads.map_or(0, <[u8]>::len)
             || self.next_media_type_offset != self.tables.media_types.map_or(0, str::len)
+            || self.next_material_binding_offset != self.proof.material_binding_count()
+            || self.next_material_factor_offset
+                != self.tables.material_factor_scalars.map_or(0, <[f32]>::len)
+            || self.next_binding_semantic_offset
+                != self.tables.binding_semantic_scalars.map_or(0, <[f32]>::len)
+            || self.next_source_key_offset != self.tables.source_keys.map_or(0, str::len)
         {
             return Err(invariant(
                 "appearance payload cursors ended before their proof-bound storage",
@@ -738,45 +1130,135 @@ impl NodeSceneAppearanceTexture {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(in crate::canonical_scene::store) struct NodeSceneAppearanceMaterial {
+#[derive(Debug, Clone, PartialEq)]
+pub(in crate::canonical_scene::store) struct NodeSceneAppearanceMaterial<'scene> {
     source_index: usize,
+    shading_model: ShadingModel,
+    alpha_mode: AlphaMode,
+    double_sided: bool,
+    factors: MaterialFactors,
     binding_offset: usize,
     binding_count: usize,
+    factor_offset: usize,
+    factor_values: &'scene [f32],
 }
 
-impl NodeSceneAppearanceMaterial {
-    pub(in crate::canonical_scene::store) const fn source_index(self) -> usize {
+impl<'scene> NodeSceneAppearanceMaterial<'scene> {
+    pub(in crate::canonical_scene::store) const fn source_index(&self) -> usize {
         self.source_index
     }
 
-    pub(in crate::canonical_scene::store) const fn binding_offset(self) -> usize {
+    pub(in crate::canonical_scene::store) const fn shading_model(&self) -> &ShadingModel {
+        &self.shading_model
+    }
+
+    pub(in crate::canonical_scene::store) const fn alpha_mode(&self) -> &AlphaMode {
+        &self.alpha_mode
+    }
+
+    pub(in crate::canonical_scene::store) const fn double_sided(&self) -> bool {
+        self.double_sided
+    }
+
+    pub(in crate::canonical_scene::store) const fn factors(&self) -> MaterialFactors {
+        self.factors
+    }
+
+    pub(in crate::canonical_scene::store) const fn binding_offset(&self) -> usize {
         self.binding_offset
     }
 
-    pub(in crate::canonical_scene::store) const fn binding_count(self) -> usize {
+    pub(in crate::canonical_scene::store) const fn binding_count(&self) -> usize {
         self.binding_count
+    }
+
+    pub(in crate::canonical_scene::store) const fn factor_offset(&self) -> usize {
+        self.factor_offset
+    }
+
+    pub(in crate::canonical_scene::store) const fn factor_values(&self) -> &'scene [f32] {
+        self.factor_values
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(in crate::canonical_scene::store) struct NodeSceneAppearanceBinding {
+#[derive(Debug, Clone, PartialEq)]
+pub(in crate::canonical_scene::store) struct NodeSceneAppearanceBinding<'scene> {
     source_index: usize,
     texture: usize,
-    role: TextureRoleKind,
+    role: TextureRole,
+    coordinate_source: TextureCoordinateSource,
+    channel_mapping: TextureChannelMapping,
+    color_interpretation: ColorInterpretation,
+    transform: TextureTransform,
+    strength: TextureStrength,
+    semantic_offset: usize,
+    semantic_values: &'scene [f32],
+    blend: TextureBlendOperation,
+    source_key_offset: usize,
+    source_key: Option<&'scene str>,
 }
 
-impl NodeSceneAppearanceBinding {
-    pub(in crate::canonical_scene::store) const fn source_index(self) -> usize {
+impl<'scene> NodeSceneAppearanceBinding<'scene> {
+    pub(in crate::canonical_scene::store) const fn source_index(&self) -> usize {
         self.source_index
     }
 
-    pub(in crate::canonical_scene::store) const fn texture(self) -> usize {
+    pub(in crate::canonical_scene::store) const fn texture(&self) -> usize {
         self.texture
     }
 
-    pub(in crate::canonical_scene::store) const fn role(self) -> TextureRoleKind {
-        self.role
+    pub(in crate::canonical_scene::store) const fn role(&self) -> TextureRoleKind {
+        self.role.kind()
+    }
+
+    pub(in crate::canonical_scene::store) const fn role_semantics(&self) -> &TextureRole {
+        &self.role
+    }
+
+    pub(in crate::canonical_scene::store) const fn coordinate_source(
+        &self,
+    ) -> &TextureCoordinateSource {
+        &self.coordinate_source
+    }
+
+    pub(in crate::canonical_scene::store) const fn channel_mapping(
+        &self,
+    ) -> &TextureChannelMapping {
+        &self.channel_mapping
+    }
+
+    pub(in crate::canonical_scene::store) const fn color_interpretation(
+        &self,
+    ) -> &ColorInterpretation {
+        &self.color_interpretation
+    }
+
+    pub(in crate::canonical_scene::store) const fn transform(&self) -> TextureTransform {
+        self.transform
+    }
+
+    pub(in crate::canonical_scene::store) const fn strength(&self) -> TextureStrength {
+        self.strength
+    }
+
+    pub(in crate::canonical_scene::store) const fn semantic_offset(&self) -> usize {
+        self.semantic_offset
+    }
+
+    pub(in crate::canonical_scene::store) const fn semantic_values(&self) -> &'scene [f32] {
+        self.semantic_values
+    }
+
+    pub(in crate::canonical_scene::store) const fn blend(&self) -> &TextureBlendOperation {
+        &self.blend
+    }
+
+    pub(in crate::canonical_scene::store) const fn source_key_offset(&self) -> usize {
+        self.source_key_offset
+    }
+
+    pub(in crate::canonical_scene::store) const fn source_key(&self) -> Option<&'scene str> {
+        self.source_key
     }
 }
 
@@ -830,32 +1312,81 @@ fn decode_address_mode(value: u8) -> NodeSceneSemanticResult<TextureAddressMode>
     }
 }
 
-fn decode_texture_role(value: u8) -> NodeSceneSemanticResult<TextureRoleKind> {
+fn decode_texture_role(value: u8) -> NodeSceneSemanticResult<TextureRole> {
+    decode_appearance_texture_role(value)
+        .ok_or_else(|| invariant("validated material-binding texture-role code is unknown"))
+}
+
+fn decode_presence(value: u8, reason: &'static str) -> NodeSceneSemanticResult<bool> {
     match value {
-        APPEARANCE_ROLE_BASE_COLOR => Ok(TextureRoleKind::BaseColor),
-        APPEARANCE_ROLE_DIFFUSE => Ok(TextureRoleKind::Diffuse),
-        APPEARANCE_ROLE_SPECULAR => Ok(TextureRoleKind::Specular),
-        APPEARANCE_ROLE_METALLIC => Ok(TextureRoleKind::Metallic),
-        APPEARANCE_ROLE_ROUGHNESS => Ok(TextureRoleKind::Roughness),
-        APPEARANCE_ROLE_METALLIC_ROUGHNESS => Ok(TextureRoleKind::MetallicRoughness),
-        APPEARANCE_ROLE_NORMAL => Ok(TextureRoleKind::Normal),
-        APPEARANCE_ROLE_OCCLUSION => Ok(TextureRoleKind::Occlusion),
-        APPEARANCE_ROLE_EMISSIVE => Ok(TextureRoleKind::Emissive),
-        APPEARANCE_ROLE_OPACITY => Ok(TextureRoleKind::Opacity),
-        APPEARANCE_ROLE_HEIGHT => Ok(TextureRoleKind::Height),
-        APPEARANCE_ROLE_DISPLACEMENT => Ok(TextureRoleKind::Displacement),
-        APPEARANCE_ROLE_LIGHTMAP => Ok(TextureRoleKind::Lightmap),
-        APPEARANCE_ROLE_CLEARCOAT => Ok(TextureRoleKind::Clearcoat),
-        APPEARANCE_ROLE_CLEARCOAT_ROUGHNESS => Ok(TextureRoleKind::ClearcoatRoughness),
-        APPEARANCE_ROLE_CLEARCOAT_NORMAL => Ok(TextureRoleKind::ClearcoatNormal),
-        APPEARANCE_ROLE_TRANSMISSION => Ok(TextureRoleKind::Transmission),
-        APPEARANCE_ROLE_THICKNESS => Ok(TextureRoleKind::Thickness),
-        APPEARANCE_ROLE_SHEEN_COLOR => Ok(TextureRoleKind::SheenColor),
-        APPEARANCE_ROLE_SHEEN_ROUGHNESS => Ok(TextureRoleKind::SheenRoughness),
-        _ => Err(invariant(
-            "validated material-binding texture-role code is unknown",
-        )),
+        APPEARANCE_PRESENCE_ABSENT => Ok(false),
+        APPEARANCE_PRESENCE_PRESENT => Ok(true),
+        _ => Err(invariant(reason)),
     }
+}
+
+fn slice_payload<'scene, T>(
+    payload: Option<&'scene [T]>,
+    offset: usize,
+    count: usize,
+    reason: &'static str,
+) -> NodeSceneSemanticResult<&'scene [T]> {
+    let end = offset.checked_add(count).ok_or_else(|| invariant(reason))?;
+    payload
+        .and_then(|payload| payload.get(offset..end))
+        .ok_or_else(|| invariant(reason))
+}
+
+fn slice_utf8_payload<'scene>(
+    payload: Option<&'scene str>,
+    offset: usize,
+    count: usize,
+    reason: &'static str,
+) -> NodeSceneSemanticResult<&'scene str> {
+    let end = offset.checked_add(count).ok_or_else(|| invariant(reason))?;
+    payload
+        .and_then(|payload| payload.get(offset..end))
+        .ok_or_else(|| invariant(reason))
+}
+
+fn require_sequence_ref<Tag>(
+    table: CanonicalRecordView<'_>,
+    row: usize,
+    field: usize,
+    expected: Option<CanonicalBlockRef<Tag>>,
+    unreadable_reason: &'static str,
+    mismatch_reason: &'static str,
+) -> NodeSceneSemanticResult<()>
+where
+    Tag: CanonicalSchema<StoreKind = ScalarSequence<f32>>,
+{
+    let reference = table
+        .sequence_ref::<f32, Tag>(row, field)
+        .ok_or_else(|| invariant(unreadable_reason))?;
+    if Some(CanonicalBlockRef::from_store(reference)) != expected {
+        return Err(invariant(mismatch_reason));
+    }
+    Ok(())
+}
+
+fn require_utf8_ref<Tag>(
+    table: CanonicalRecordView<'_>,
+    row: usize,
+    field: usize,
+    expected: Option<CanonicalBlockRef<Tag>>,
+    unreadable_reason: &'static str,
+    mismatch_reason: &'static str,
+) -> NodeSceneSemanticResult<()>
+where
+    Tag: CanonicalSchema<StoreKind = Utf8Block>,
+{
+    let reference = table
+        .utf8_ref::<Tag>(row, field)
+        .ok_or_else(|| invariant(unreadable_reason))?;
+    if Some(CanonicalBlockRef::from_store(reference)) != expected {
+        return Err(invariant(mismatch_reason));
+    }
+    Ok(())
 }
 
 fn require_record_ref<Tag>(

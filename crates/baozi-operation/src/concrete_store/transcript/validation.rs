@@ -594,7 +594,7 @@ where
     }
 }
 
-impl<O, PP, U> RetainedStoreExecution<O, PP, U>
+impl<O, PP, U, L> RetainedStoreExecution<O, PP, U, L>
 where
     O: OperationOwner,
     PP: ProgressPhase,

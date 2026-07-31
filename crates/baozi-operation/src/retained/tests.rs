@@ -84,6 +84,10 @@ fn retained_batch_range_uses_invariant_brands_and_no_table_internals() {
         ".total_blocks",
         ".max_new_blocks",
         ".new_blocks",
+        ".committed_members",
+        ".committed_new_blocks",
+        ".committed_derived_members",
+        ".committed_new_block_bytes",
         ".qualified_capacity",
     ] {
         assert!(
@@ -119,6 +123,80 @@ fn retained_batch_rollback_has_one_storage_first_attribution_suffix_seam() {
         "batch rollback must release storage before attribution"
     );
     assert!(!reservation.contains("pop_attribution_for_storage_rollback"));
+}
+
+#[test]
+fn retained_exactness_production_path_uses_only_incremental_proofs() {
+    let table = include_str!("block_table.rs");
+    let summary_exact = table
+        .split("fn committed_summary_is_bounded")
+        .nth(1)
+        .expect("committed table summary check exists")
+        .split("fn try_push_committed_member")
+        .next()
+        .expect("committed table summary boundary exists");
+    let mapping_exact = table
+        .split("fn canonical_source_mapping_is_exact")
+        .nth(1)
+        .expect("canonical source mapping exactness check exists")
+        .split("pub(super) fn retained_block_table_is_exact")
+        .next()
+        .expect("canonical source mapping exactness boundary exists");
+    let table_exact = table
+        .split("pub(super) fn retained_block_table_is_exact")
+        .nth(1)
+        .expect("retained table exactness check exists")
+        .split("fn audit_retained_block_table_is_exact")
+        .next()
+        .expect("test-only retained table audit boundary exists");
+
+    for production_check in [summary_exact, mapping_exact, table_exact] {
+        for scan in [".iter()", ".enumerate()", "for ("] {
+            assert!(
+                !production_check.contains(scan),
+                "production exactness check must not contain structural scan `{scan}`"
+            );
+        }
+    }
+    for proof in [
+        "root_membership",
+        "committed_members",
+        "committed_new_blocks",
+        "committed_derived_members",
+        "committed_new_block_bytes",
+        "mapped_entries",
+    ] {
+        assert!(
+            summary_exact.contains(proof)
+                || mapping_exact.contains(proof)
+                || table_exact.contains(proof),
+            "production exactness must consume incremental proof `{proof}`"
+        );
+    }
+
+    let (before_audit, audit) = table
+        .split_once("fn audit_retained_block_table_is_exact")
+        .expect("full retained table audit exists");
+    assert!(before_audit.trim_end().ends_with("#[cfg(test)]"));
+    assert!(audit.contains("members.iter().enumerate()"));
+    assert!(audit.contains("for (source_index, destination_ordinal)"));
+    assert!(audit.contains("mapping.entries"));
+
+    assert_eq!(table.matches("self.members.push(").count(), 1);
+    assert_eq!(table.matches("self.members.pop()").count(), 1);
+    assert_eq!(table.matches("self.mapped_entries =").count(), 2);
+    for counter in [
+        "committed_members",
+        "committed_new_blocks",
+        "committed_derived_members",
+        "committed_new_block_bytes",
+    ] {
+        assert_eq!(
+            table.matches(&format!("self.{counter} =")).count(),
+            2,
+            "committed counter `{counter}` must change only through push/pop proof transitions"
+        );
+    }
 }
 
 fn retained_non_final_owner_production_source() -> String {
@@ -491,6 +569,26 @@ fn publication_plan(
     )
 }
 
+fn publication_plan_with_canonical_source_mapping(
+    canonical_blocks: usize,
+    evidence_blocks: usize,
+    source_blocks: usize,
+) -> RetainedPublicationPlan<TestPhase, TestDimension> {
+    RetainedPublicationPlan::success(
+        RetainedBlockTablePlan::new(
+            writer_plan(canonical_blocks + 1, 2),
+            canonical_blocks,
+            canonical_blocks,
+        )
+        .with_canonical_source_mapping_capacity(source_blocks),
+        RetainedBlockTablePlan::new(
+            writer_plan(evidence_blocks + 1, 2),
+            evidence_blocks,
+            evidence_blocks,
+        ),
+    )
+}
+
 fn test_operation(factory: &PhysicalStorageAccountFactory, evidence_limit: u64) -> TestOperation {
     test_operation_with_writer_limits(factory, evidence_limit, RetainedBatchLimits::new(2, 2))
 }
@@ -532,6 +630,38 @@ fn test_operation_on_account_with_control(
         Ok(operation) => operation,
         Err(_) => panic!("test operation bootstrap must succeed"),
     }
+}
+
+fn test_derived_operation_on_account_with_control<CanonicalBlock>(
+    account: &PhysicalStorageAccount,
+    source: &PublishedCanonicalOutput<CanonicalBlock>,
+    evidence_limit: u64,
+    writer_limits: RetainedBatchLimits,
+    control: OperationControl<TestProgress, TestUnit>,
+) -> TestOperation {
+    let policy = DimensionPolicy::reservable_bytes(u64::MAX, u64::MAX, u64::MAX, u64::MAX)
+        .with_published_outcome_evidence_limit(evidence_limit);
+    let limits = LedgerLimits::new(u64::MAX, [(TestDimension::Bytes, policy)]).unwrap();
+    let plan = RetainedOperationStartPlan::new(
+        writer_plan(
+            writer_limits.attribution_slots(),
+            writer_limits.commitment_slots(),
+        ),
+        share_work(),
+        empty_plan(),
+        OutputCommitment::new(TestDimension::Bytes, 1),
+        OutputCommitment::new(TestDimension::Bytes, 1),
+    );
+    RetainedOperation::try_start_derived_with_phase_catalog(
+        control,
+        limits,
+        &[TestPhase::Build],
+        account,
+        source.aggregate(),
+        plan,
+        || Ok(7_u32),
+    )
+    .unwrap_or_else(|_| panic!("derived test operation bootstrap must succeed"))
 }
 
 fn test_operation_with_fallback<F>(

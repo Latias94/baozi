@@ -165,6 +165,51 @@ fn project_outcome_evidence_record_view(
     Some(view)
 }
 
+// Keep every canonical-source preflight on the same checked lookup rail as published readers.
+// The rewrite and transcript planners must not inspect a retained member after only the first
+// four taxonomy stages, otherwise their validation both bypasses the typed projection and leaves
+// an active collector lookup behind.
+pub(super) fn read_canonical_source_sequence<'a, T, Tag>(
+    source: &'a PublishedCanonicalOutput<StoredBlock>,
+    slot: CanonicalSequenceRef<T, Tag>,
+) -> Option<SequenceView<'a, T>>
+where
+    T: StoredScalar,
+    Tag: Copy + Send + Sync + 'static,
+{
+    project_sequence_view(source.aggregate().lookup_member(slot.raw)?)
+}
+
+pub(super) fn read_canonical_source_bytes<Tag>(
+    source: &PublishedCanonicalOutput<StoredBlock>,
+    slot: CanonicalBytesRef<Tag>,
+) -> Option<&[u8]>
+where
+    Tag: Copy + Send + Sync + 'static,
+{
+    project_bytes_view(source.aggregate().lookup_member(slot.raw)?)
+}
+
+pub(super) fn read_canonical_source_utf8<Tag>(
+    source: &PublishedCanonicalOutput<StoredBlock>,
+    slot: CanonicalUtf8Ref<Tag>,
+) -> Option<&str>
+where
+    Tag: Copy + Send + Sync + 'static,
+{
+    project_utf8_view(source.aggregate().lookup_member(slot.raw)?)
+}
+
+pub(super) fn read_canonical_source_records<'a, Tag>(
+    source: &'a PublishedCanonicalOutput<StoredBlock>,
+    slot: CanonicalRecordRef<Tag>,
+) -> Option<CanonicalRecordView<'a>>
+where
+    Tag: Copy + Send + Sync + 'static,
+{
+    project_canonical_record_view(source.aggregate().lookup_member(slot.raw)?)
+}
+
 pub(super) fn classify_prepared_success<CanonicalKind, CanonicalTag, EvidenceKind, EvidenceTag>(
     raw: RawPreparedStore,
     canonical_root: CanonicalStoreRef<CanonicalKind, CanonicalTag>,
@@ -345,10 +390,6 @@ impl<Kind, Tag> PublishedCanonicalStore<Kind, Tag> {
         &self.raw
     }
 
-    pub(super) fn belongs_to_account(&self, account: &PhysicalStorageAccount) -> bool {
-        self.raw.aggregate().belongs_to(account)
-    }
-
     /// Returns the typed root reference without transferring ownership.
     pub const fn root_ref(&self) -> CanonicalStoreRef<Kind, Tag> {
         self.root
@@ -377,7 +418,7 @@ impl<Kind, Tag> PublishedCanonicalStore<Kind, Tag> {
     where
         SlotTag: Copy + Send + Sync + 'static,
     {
-        project_sequence_view(self.raw.aggregate().lookup_member(slot.raw)?)
+        read_canonical_source_sequence(&self.raw, slot)
     }
 
     /// Resolves one binary block.
@@ -385,7 +426,7 @@ impl<Kind, Tag> PublishedCanonicalStore<Kind, Tag> {
     where
         SlotTag: Copy + Send + Sync + 'static,
     {
-        project_bytes_view(self.raw.aggregate().lookup_member(slot.raw)?)
+        read_canonical_source_bytes(&self.raw, slot)
     }
 
     /// Resolves one UTF-8 block.
@@ -393,7 +434,7 @@ impl<Kind, Tag> PublishedCanonicalStore<Kind, Tag> {
     where
         SlotTag: Copy + Send + Sync + 'static,
     {
-        project_utf8_view(self.raw.aggregate().lookup_member(slot.raw)?)
+        read_canonical_source_utf8(&self.raw, slot)
     }
 
     /// Resolves one canonical record block.
@@ -404,7 +445,7 @@ impl<Kind, Tag> PublishedCanonicalStore<Kind, Tag> {
     where
         SlotTag: Copy + Send + Sync + 'static,
     {
-        project_canonical_record_view(self.raw.aggregate().lookup_member(slot.raw)?)
+        read_canonical_source_records(&self.raw, slot)
     }
 }
 

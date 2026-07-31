@@ -13,7 +13,9 @@ use super::capability::{
 };
 use super::{CoverageMappingSpecification, is_lowercase_sha256, validate_exact_list};
 
-const SOURCE_VECTOR_SCHEMA_ID: &str = "baozi.selected-gltf-shape-capability-source.v1";
+const SOURCE_VECTOR_SCHEMA_ID: &str = "baozi.selected-gltf-shape-capability-source.v2";
+const CANONICAL_SCENE_DIMENSION_SEMANTIC_ID_HEX: &str =
+    "0262616f7a692d636f72652d7363656e65000000010000000000000001";
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -24,7 +26,7 @@ pub(super) struct GltfCapabilitySpecification {
     canonical_shape: GltfCanonicalShape,
     source_vector: FixedVector,
     mutations: Vec<GltfMutation>,
-    generation_reservations: u64,
+    source_generation_reservations: u64,
     canonical_block_count: u64,
     outcome_evidence_block_count: u64,
     full_snapshot_digest_hex: String,
@@ -32,12 +34,47 @@ pub(super) struct GltfCapabilitySpecification {
     bounded_preview: GltfBoundedPreview,
     construction_budget: ConstructionBudgetSpecification,
     snapshot_budget: SnapshotBudgetSpecification,
+    changed_scene_edit: ChangedSceneEditSpecification,
     construction_semantic_cells: u64,
     construction_references: u64,
     construction_blocks: u64,
     construction_producer_events: u64,
     retained_bytes: u64,
     retained_allocations: u64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ChangedSceneEditSpecification {
+    entry_point: String,
+    scenario_id: String,
+    output_snapshot_digest_hex: String,
+    semantic_cells: u64,
+    references: u64,
+    blocks: u64,
+    new_blocks: u64,
+    inherited_blocks: u64,
+    producer_events: u64,
+    completed_lookups: u64,
+    lookup_events: u64,
+    member_probes: u64,
+    max_lookup_events: u64,
+    max_member_probes_per_lookup: u64,
+    budget: ConstructionBudgetSpecification,
+    snapshot_budget: SnapshotBudgetSpecification,
+    ledger_dimension: super::LedgerDimensionReport,
+    physical_account: ChangedSceneEditPhysicalSpecification,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ChangedSceneEditPhysicalSpecification {
+    with_output_live_bytes: u64,
+    with_output_live_allocations: u64,
+    after_input_release_live_bytes: u64,
+    after_input_release_live_allocations: u64,
+    after_output_report_release_live_bytes: u64,
+    after_output_report_release_live_allocations: u64,
 }
 
 impl GltfCapabilitySpecification {
@@ -171,6 +208,13 @@ pub(super) fn validate_specification(
     let preview = &specification.bounded_preview;
     let construction_budget = &specification.construction_budget;
     let snapshot_budget = &specification.snapshot_budget;
+    let changed_edit = &specification.changed_scene_edit;
+    let Some(changed_edit_maximum_lookup_events) = changed_edit
+        .completed_lookups
+        .checked_mul(changed_edit.max_lookup_events)
+    else {
+        return Err("U4d changed SceneEdit lookup envelope overflowed".to_owned());
+    };
     if specification.entry_point != "backend-free-gltf-shape"
         || specification.scenario_id != "backend-free-gltf-shape-v1"
         || source.node_count != 3
@@ -220,7 +264,7 @@ pub(super) fn validate_specification(
         || canonical.animation_clip_count != source.animation_clip_count
         || canonical.animation_channel_count != source.animation_channel_count
         || canonical.animation_key_count != source.animation_key_count
-        || specification.generation_reservations != 1
+        || specification.source_generation_reservations != 1
         || specification.canonical_block_count == 0
         || specification.outcome_evidence_block_count == 0
         || !is_lowercase_sha256(&specification.full_snapshot_digest_hex)
@@ -273,6 +317,61 @@ pub(super) fn validate_specification(
         || !preview.has_common_invariants()
         || !construction_budget.is_well_formed()
         || !snapshot_budget.is_well_formed()
+        || changed_edit.entry_point != "changed-scene-edit"
+        || changed_edit.scenario_id != "canonical-gltf-node-transform-edit-v1"
+        || !is_lowercase_sha256(&changed_edit.output_snapshot_digest_hex)
+        || changed_edit.output_snapshot_digest_hex == specification.full_snapshot_digest_hex
+        || changed_edit.semantic_cells == 0
+        || changed_edit.references == 0
+        || changed_edit.blocks == 0
+        || changed_edit.new_blocks == 0
+        || changed_edit.inherited_blocks == 0
+        || changed_edit
+            .new_blocks
+            .checked_add(changed_edit.inherited_blocks)
+            != Some(changed_edit.blocks)
+        || changed_edit.producer_events == 0
+        || changed_edit.completed_lookups == 0
+        || changed_edit.lookup_events != changed_edit_maximum_lookup_events
+        || changed_edit.member_probes != changed_edit.completed_lookups
+        || changed_edit.max_lookup_events == 0
+        || changed_edit.max_member_probes_per_lookup != 1
+        || !changed_edit.budget.is_well_formed()
+        || !changed_edit.snapshot_budget.is_well_formed()
+        || !changed_edit.ledger_dimension.has_terminal_invariants()
+        || changed_edit.ledger_dimension.semantic_id_hex
+            != CANONICAL_SCENE_DIMENSION_SEMANTIC_ID_HEX
+        || changed_edit.ledger_dimension.committed == 0
+        || changed_edit.ledger_dimension.committed_canonical_output
+            != changed_edit.ledger_dimension.committed
+        || changed_edit.ledger_dimension.published_outcome_evidence == 0
+        || changed_edit.physical_account.with_output_live_bytes <= specification.retained_bytes
+        || changed_edit.physical_account.with_output_live_allocations
+            <= specification.retained_allocations
+        || changed_edit.physical_account.after_input_release_live_bytes
+            >= changed_edit.physical_account.with_output_live_bytes
+        || changed_edit
+            .physical_account
+            .after_input_release_live_allocations
+            >= changed_edit.physical_account.with_output_live_allocations
+        || changed_edit
+            .physical_account
+            .after_output_report_release_live_bytes
+            >= changed_edit.physical_account.after_input_release_live_bytes
+        || changed_edit
+            .physical_account
+            .after_output_report_release_live_allocations
+            >= changed_edit
+                .physical_account
+                .after_input_release_live_allocations
+        || changed_edit
+            .physical_account
+            .after_output_report_release_live_bytes
+            == 0
+        || changed_edit
+            .physical_account
+            .after_output_report_release_live_allocations
+            == 0
         || specification.construction_semantic_cells == 0
         || specification.construction_references == 0
         || specification.construction_blocks == 0
@@ -293,6 +392,8 @@ pub(super) fn validate_specification(
     let expected_mutations = [
         "node_transform_float_bits",
         "image_payload_bytes",
+        "material_binding_semantics",
+        "material_semantics",
         "primitive_material_reference",
         "skin_inverse_bind_float_bits",
         "influence_weight_float_bits",
@@ -342,7 +443,7 @@ pub(super) struct GltfCapabilityReport {
     canonical_shape: GltfCanonicalShape,
     source_vector: FixedVector,
     mutations: Vec<GltfMutation>,
-    generation_reservations: u64,
+    source_generation_reservations: u64,
     canonical_block_count: u64,
     outcome_evidence_block_count: u64,
     full_snapshot_digest_hex: String,
@@ -354,6 +455,7 @@ pub(super) struct GltfCapabilityReport {
     inspection: super::PhaseReport,
     snapshot: super::PhaseReport,
     unchanged_view: GltfUnchangedViewReport,
+    changed_scene_edit: GltfChangedSceneEditReport,
     release: super::ReleaseReport,
     physical_account: GltfPhysicalReport,
     factory_after_account_release: super::PhysicalFactoryReport,
@@ -383,6 +485,54 @@ struct GltfReadOnlyPhysicalReport {
 }
 
 #[cfg(feature = "repository-input-candidate")]
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GltfChangedSceneEditReport {
+    entry_point: String,
+    scenario_id: String,
+    output_shape: GltfCanonicalShape,
+    replacement_authored_bits_preserved: bool,
+    input_authored_bits_preserved: bool,
+    input_readable_after_publication: bool,
+    output_report_readable_after_input_release: bool,
+    output_readable_after_input_release: bool,
+    output_readable_after_report_release: bool,
+    exact_physical_account_preserved: bool,
+    handoff_physical_account_preserved: bool,
+    generation_changed: bool,
+    generation_reservations_before: u64,
+    generation_reservations_after: u64,
+    canonical_block_count_before: u64,
+    canonical_block_count_after: u64,
+    all_subjects_explicitly_unchanged: bool,
+    target_rebind_matches: bool,
+    remap_storage_bytes: u64,
+    scene_bounds_invalidated: bool,
+    outcome_evidence_block_count: u64,
+    evidence: super::EvidenceReport,
+    phase: super::PhaseReport,
+    input_snapshot_digest_hex: String,
+    output_snapshot_digest_hex: String,
+    snapshot: super::PhaseReport,
+    input_release: super::ReleaseReport,
+    output_report_release: super::ReleaseReport,
+    output_scene_release: super::ReleaseReport,
+    physical_account: GltfChangedSceneEditPhysicalReport,
+}
+
+#[cfg(feature = "repository-input-candidate")]
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GltfChangedSceneEditPhysicalReport {
+    before: super::PhysicalAccountReport,
+    before_handoff: super::PhysicalAccountReport,
+    with_output: super::PhysicalAccountReport,
+    after_input_release: super::PhysicalAccountReport,
+    after_output_report_release: super::PhysicalAccountReport,
+    after_output_scene_release: super::PhysicalAccountReport,
+}
+
+#[cfg(feature = "repository-input-candidate")]
 use super::{
     PhaseReport, ProductionSpecification, validate_healthy_account, validate_hot_view_phase,
     validate_producer_bound, validate_release, validate_released_account,
@@ -399,7 +549,7 @@ pub(super) fn validate_report(
         || report.scenario_id != expected.scenario_id
         || report.source_shape != expected.source_shape
         || report.canonical_shape != expected.canonical_shape
-        || report.generation_reservations != expected.generation_reservations
+        || report.source_generation_reservations != expected.source_generation_reservations
         || report.canonical_block_count != expected.canonical_block_count
         || report.outcome_evidence_block_count != expected.outcome_evidence_block_count
         || report.full_snapshot_digest_hex != expected.full_snapshot_digest_hex
@@ -453,6 +603,7 @@ pub(super) fn validate_report(
     validate_nonproducing_phase(&report.inspection, "U4c production glTF typed inspection")?;
     validate_snapshot_phase(&report.snapshot, expected)?;
     validate_unchanged_view(report, expected, &specification.measurement)?;
+    validate_changed_scene_edit(report, expected)?;
     if report.release.scenario_id != "canonical-gltf-five-domain-release-v1" {
         return Err("U4c production glTF release scenario identity drifted".to_owned());
     }
@@ -463,6 +614,11 @@ pub(super) fn validate_report(
             &report.inspection.allocations,
             &report.snapshot.allocations,
             &report.unchanged_view.phase.allocations,
+            &report.changed_scene_edit.phase.allocations,
+            &report.changed_scene_edit.snapshot.allocations,
+            &report.changed_scene_edit.input_release.allocations,
+            &report.changed_scene_edit.output_report_release.allocations,
+            &report.changed_scene_edit.output_scene_release.allocations,
             &report.release.allocations,
         ],
         "U4c production glTF allocation lifecycle",
@@ -497,8 +653,8 @@ fn validate_unchanged_view(
     if unchanged.observation != report.canonical_shape
         || !unchanged.repeated_observation_matches
         || !unchanged.generation_preserved
-        || unchanged.generation_reservations_before != expected.generation_reservations
-        || unchanged.generation_reservations_after != expected.generation_reservations
+        || unchanged.generation_reservations_before != expected.source_generation_reservations
+        || unchanged.generation_reservations_after != expected.source_generation_reservations
         || unchanged.canonical_block_count_before != expected.canonical_block_count
         || unchanged.canonical_block_count_after != expected.canonical_block_count
         || unchanged.physical_account.before != report.physical_account.retained
@@ -515,6 +671,194 @@ fn validate_unchanged_view(
         "U4c production glTF unchanged view",
     )?;
     validate_nonproducing_phase(&unchanged.phase, "U4c production glTF unchanged view")
+}
+
+#[cfg(feature = "repository-input-candidate")]
+fn validate_changed_scene_edit(
+    report: &GltfCapabilityReport,
+    expected: &GltfCapabilitySpecification,
+) -> Result<(), String> {
+    let edit = &report.changed_scene_edit;
+    let expected_edit = &expected.changed_scene_edit;
+    if edit.entry_point != expected_edit.entry_point
+        || edit.scenario_id != expected_edit.scenario_id
+        || edit.output_shape != report.canonical_shape
+        || !edit.replacement_authored_bits_preserved
+        || !edit.input_authored_bits_preserved
+        || !edit.input_readable_after_publication
+        || !edit.output_report_readable_after_input_release
+        || !edit.output_readable_after_input_release
+        || !edit.output_readable_after_report_release
+        || !edit.exact_physical_account_preserved
+        || !edit.handoff_physical_account_preserved
+        || !edit.generation_changed
+        || edit.generation_reservations_before != expected.source_generation_reservations
+        || edit.generation_reservations_after
+            != edit
+                .generation_reservations_before
+                .checked_add(1)
+                .ok_or_else(|| {
+                    "U4c production glTF changed edit generation count overflowed".to_owned()
+                })?
+        || edit.canonical_block_count_before != expected.canonical_block_count
+        || edit.canonical_block_count_after != expected.canonical_block_count
+        || !edit.all_subjects_explicitly_unchanged
+        || !edit.target_rebind_matches
+        || edit.remap_storage_bytes != 0
+        || !edit.scene_bounds_invalidated
+        || edit.outcome_evidence_block_count == 0
+        || edit.evidence.outcome_evidence_block_count != edit.outcome_evidence_block_count
+        || edit.evidence.dimensions.as_slice()
+            != std::slice::from_ref(&expected_edit.ledger_dimension)
+        || !is_lowercase_sha256(&edit.input_snapshot_digest_hex)
+        || !is_lowercase_sha256(&edit.output_snapshot_digest_hex)
+        || edit.input_snapshot_digest_hex != report.full_snapshot_digest_hex
+        || edit.output_snapshot_digest_hex != expected_edit.output_snapshot_digest_hex
+        || edit.output_snapshot_digest_hex == report.full_snapshot_digest_hex
+    {
+        return Err("U4c production glTF changed-scene-edit semantics drifted".to_owned());
+    }
+    validate_success_evidence(&edit.evidence, "U4c production glTF changed SceneEdit")?;
+
+    let taxonomy = &edit.phase.taxonomy;
+    if edit.phase.scenario_id != edit.scenario_id
+        || taxonomy.semantic_cell_writes != expected_edit.semantic_cells
+        || taxonomy.reference_writes != expected_edit.references
+        || taxonomy.block_begins != expected_edit.blocks
+        || taxonomy.block_seals != expected_edit.blocks
+        || taxonomy.slot_publications != expected_edit.blocks
+        || taxonomy.new_block_begins != expected_edit.new_blocks
+        || taxonomy.new_block_seals != expected_edit.new_blocks
+        || taxonomy.new_slot_publications != expected_edit.new_blocks
+        || taxonomy.inherited_block_begins != expected_edit.inherited_blocks
+        || taxonomy.inherited_block_seals != expected_edit.inherited_blocks
+        || taxonomy.inherited_slot_publications != expected_edit.inherited_blocks
+        || taxonomy.producer_events != expected_edit.producer_events
+        || taxonomy.payload_copy_bytes > expected_edit.budget.max_payload_copy_bytes
+        || taxonomy.payload_backing_allocations != taxonomy.new_block_begins
+        || taxonomy.element_decodes != 0
+        || taxonomy.completed_lookups != expected_edit.completed_lookups
+        || taxonomy.rejected_lookups != 0
+        || taxonomy.lookup_events != expected_edit.lookup_events
+        || taxonomy.max_lookup_events != expected_edit.max_lookup_events
+        || taxonomy.member_probes != expected_edit.member_probes
+        || taxonomy.max_member_probes_per_lookup != expected_edit.max_member_probes_per_lookup
+        || !expected_edit
+            .budget
+            .allocations
+            .contains(&edit.phase.allocations)
+    {
+        return Err("U4c production glTF changed-scene-edit transcript drifted".to_owned());
+    }
+    validate_producer_bound(&edit.phase, "U4c production glTF changed SceneEdit")?;
+    let snapshot_taxonomy = &edit.snapshot.taxonomy;
+    let snapshot_budget = &expected_edit.snapshot_budget;
+    if edit.snapshot.scenario_id != "canonical-gltf-node-transform-edit-snapshot-v1"
+        || snapshot_taxonomy.completed_lookups != snapshot_budget.completed_lookups
+        || snapshot_taxonomy.rejected_lookups != 0
+        || snapshot_taxonomy.lookup_events != snapshot_budget.lookup_events
+        || snapshot_taxonomy.member_probes != snapshot_budget.member_probes
+        || snapshot_taxonomy.max_lookup_events != snapshot_budget.max_lookup_events
+        || snapshot_taxonomy.max_member_probes_per_lookup
+            != snapshot_budget.max_member_probes_per_lookup
+        || !snapshot_budget
+            .allocations
+            .contains(&edit.snapshot.allocations)
+    {
+        return Err("U4c production glTF changed-scene-edit snapshot identity drifted".to_owned());
+    }
+    validate_nonproducing_phase(
+        &edit.snapshot,
+        "U4c production glTF changed SceneEdit snapshot",
+    )?;
+
+    if edit.input_release.scenario_id != "canonical-gltf-edit-input-release-v1"
+        || edit.output_report_release.scenario_id != "canonical-gltf-edit-report-release-v1"
+        || edit.output_scene_release.scenario_id != "canonical-gltf-edit-output-release-v1"
+    {
+        return Err("U4c production glTF changed-scene-edit release identity drifted".to_owned());
+    }
+    validate_release(
+        &edit.input_release,
+        "U4c production glTF changed SceneEdit input release",
+    )?;
+    validate_release(
+        &edit.output_report_release,
+        "U4c production glTF changed SceneEdit report release",
+    )?;
+    validate_release(
+        &edit.output_scene_release,
+        "U4c production glTF changed SceneEdit output release",
+    )?;
+
+    let physical = &edit.physical_account;
+    validate_healthy_account(&physical.before, "U4c glTF changed edit input")?;
+    validate_healthy_account(
+        &physical.before_handoff,
+        "U4c glTF changed edit prepared publication",
+    )?;
+    validate_healthy_account(&physical.with_output, "U4c glTF changed edit publication")?;
+    validate_healthy_account(
+        &physical.after_input_release,
+        "U4c glTF changed edit after input release",
+    )?;
+    validate_healthy_account(
+        &physical.after_output_report_release,
+        "U4c glTF changed edit after report release",
+    )?;
+    validate_released_account(
+        &physical.after_output_scene_release,
+        "U4c glTF changed edit after output release",
+    )?;
+    if physical.before != report.physical_account.after_snapshot
+        || physical.before != report.unchanged_view.physical_account.after
+        || physical.before_handoff != physical.with_output
+        || physical.with_output.live_retained_bytes <= physical.before.live_retained_bytes
+        || physical.with_output.live_retained_allocations
+            <= physical.before.live_retained_allocations
+        || physical.after_input_release.live_retained_bytes == 0
+        || physical.after_input_release.live_retained_allocations == 0
+        || physical.after_input_release.live_retained_bytes
+            >= physical.with_output.live_retained_bytes
+        || physical.after_input_release.live_retained_allocations
+            >= physical.with_output.live_retained_allocations
+        || physical.after_output_report_release.live_retained_bytes == 0
+        || physical
+            .after_output_report_release
+            .live_retained_allocations
+            == 0
+        || physical.after_output_report_release.live_retained_bytes
+            >= physical.after_input_release.live_retained_bytes
+        || physical
+            .after_output_report_release
+            .live_retained_allocations
+            >= physical.after_input_release.live_retained_allocations
+        || physical.with_output.live_retained_bytes
+            != expected_edit.physical_account.with_output_live_bytes
+        || physical.with_output.live_retained_allocations
+            != expected_edit.physical_account.with_output_live_allocations
+        || physical.after_input_release.live_retained_bytes
+            != expected_edit
+                .physical_account
+                .after_input_release_live_bytes
+        || physical.after_input_release.live_retained_allocations
+            != expected_edit
+                .physical_account
+                .after_input_release_live_allocations
+        || physical.after_output_report_release.live_retained_bytes
+            != expected_edit
+                .physical_account
+                .after_output_report_release_live_bytes
+        || physical
+            .after_output_report_release
+            .live_retained_allocations
+            != expected_edit
+                .physical_account
+                .after_output_report_release_live_allocations
+    {
+        return Err("U4c production glTF changed-scene-edit physical ownership drifted".to_owned());
+    }
+    Ok(())
 }
 
 #[cfg(feature = "repository-input-candidate")]
@@ -638,6 +982,45 @@ mod tests {
         snapshot_drift.snapshot_budget.max_lookup_events =
             snapshot_drift.snapshot_budget.lookup_events + 1;
         assert_rejected(&snapshot_drift);
+    }
+
+    #[test]
+    fn rejects_changed_scene_edit_copy_and_mapping_drift() {
+        let mut block_drift = managed_specification();
+        block_drift.changed_scene_edit.inherited_blocks -= 1;
+        assert_rejected(&block_drift);
+
+        let mut lookup_drift = managed_specification();
+        lookup_drift.changed_scene_edit.lookup_events -= 1;
+        assert_rejected(&lookup_drift);
+
+        let mut budget_drift = managed_specification();
+        budget_drift
+            .changed_scene_edit
+            .budget
+            .max_payload_copy_bytes = 0;
+        assert_rejected(&budget_drift);
+
+        let mut snapshot_drift = managed_specification();
+        snapshot_drift
+            .changed_scene_edit
+            .snapshot_budget
+            .completed_lookups = 0;
+        assert_rejected(&snapshot_drift);
+
+        let mut ledger_drift = managed_specification();
+        ledger_drift
+            .changed_scene_edit
+            .ledger_dimension
+            .semantic_id_hex = "00".to_owned();
+        assert_rejected(&ledger_drift);
+
+        let mut physical_drift = managed_specification();
+        physical_drift
+            .changed_scene_edit
+            .physical_account
+            .with_output_live_bytes = physical_drift.retained_bytes;
+        assert_rejected(&physical_drift);
     }
 
     #[test]

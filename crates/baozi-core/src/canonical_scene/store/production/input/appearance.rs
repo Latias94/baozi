@@ -1,4 +1,4 @@
-use crate::appearance::TextureRole;
+use crate::appearance::{MaterialSemanticsRef, TextureBindingSemanticsRef, TextureRole};
 use crate::extension::ExtensionMediaType;
 use crate::image::SamplerState;
 
@@ -98,18 +98,18 @@ impl TextureAuthoring {
 }
 
 /// One material-owned typed texture binding.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub(in crate::canonical_scene::store) struct MaterialBindingAuthoring<'a> {
     texture: TextureLocalId,
-    role: &'a TextureRole,
+    semantics: TextureBindingSemanticsRef<'a>,
 }
 
 impl<'a> MaterialBindingAuthoring<'a> {
     pub(in crate::canonical_scene::store) const fn new(
         texture: TextureLocalId,
-        role: &'a TextureRole,
+        semantics: TextureBindingSemanticsRef<'a>,
     ) -> Self {
-        Self { texture, role }
+        Self { texture, semantics }
     }
 
     pub(in crate::canonical_scene::store) const fn texture(self) -> TextureLocalId {
@@ -117,23 +117,40 @@ impl<'a> MaterialBindingAuthoring<'a> {
     }
 
     pub(in crate::canonical_scene::store) const fn role(self) -> &'a TextureRole {
-        self.role
+        self.semantics.role()
+    }
+
+    pub(in crate::canonical_scene::store) const fn semantics(
+        self,
+    ) -> TextureBindingSemanticsRef<'a> {
+        self.semantics
     }
 }
 
 /// One logical material owning a contiguous source-ordered binding range.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(in crate::canonical_scene::store) struct MaterialAuthoring {
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(in crate::canonical_scene::store) struct MaterialAuthoring<'a> {
     bindings: AuthoringRange,
+    semantics: MaterialSemanticsRef<'a>,
 }
 
-impl MaterialAuthoring {
-    pub(in crate::canonical_scene::store) const fn new(bindings: AuthoringRange) -> Self {
-        Self { bindings }
+impl<'a> MaterialAuthoring<'a> {
+    pub(in crate::canonical_scene::store) const fn new(
+        bindings: AuthoringRange,
+        semantics: MaterialSemanticsRef<'a>,
+    ) -> Self {
+        Self {
+            bindings,
+            semantics,
+        }
     }
 
     pub(in crate::canonical_scene::store) const fn bindings(self) -> AuthoringRange {
         self.bindings
+    }
+
+    pub(in crate::canonical_scene::store) const fn semantics(self) -> MaterialSemanticsRef<'a> {
+        self.semantics
     }
 }
 
@@ -144,7 +161,7 @@ pub(in crate::canonical_scene::store) struct AppearanceAuthoringBatch<'a> {
     samplers: &'a [SamplerAuthoring],
     textures: &'a [TextureAuthoring],
     bindings: &'a [MaterialBindingAuthoring<'a>],
-    materials: &'a [MaterialAuthoring],
+    materials: &'a [MaterialAuthoring<'a>],
 }
 
 impl<'a> AppearanceAuthoringBatch<'a> {
@@ -157,7 +174,7 @@ impl<'a> AppearanceAuthoringBatch<'a> {
         samplers: &'a [SamplerAuthoring],
         textures: &'a [TextureAuthoring],
         bindings: &'a [MaterialBindingAuthoring<'a>],
-        materials: &'a [MaterialAuthoring],
+        materials: &'a [MaterialAuthoring<'a>],
     ) -> Self {
         Self {
             images,
@@ -186,7 +203,7 @@ impl<'a> AppearanceAuthoringBatch<'a> {
         self.bindings
     }
 
-    pub(in crate::canonical_scene::store) const fn materials(self) -> &'a [MaterialAuthoring] {
+    pub(in crate::canonical_scene::store) const fn materials(self) -> &'a [MaterialAuthoring<'a>] {
         self.materials
     }
 }

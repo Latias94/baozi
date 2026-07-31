@@ -565,6 +565,10 @@ impl RetainedStoreWriterPlan {
         )
     }
 
+    pub(super) const fn capacity_dimension(self) -> StoreDimensionKey {
+        self.capacity_dimension
+    }
+
     pub(super) const fn keys_for_publication_validation(
         self,
     ) -> (StorePhaseKey, [StoreDimensionKey; 2]) {

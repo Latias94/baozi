@@ -11,7 +11,6 @@ use crate::SceneValidationLimits;
 use crate::attribute::{AttributeDomain, AttributeSemantic};
 use crate::canonical_scene::store::construction::{
     STORE_DIMENSION, SceneConstructionLimits, SceneConstructionOperation,
-    SceneConstructionTerminal, TwoNodeAuthoredMatrices,
 };
 use crate::canonical_scene::store::production::{
     AnimationAuthoringBatch, AppearanceAuthoringBatch, AuthoringRange, DeformationAuthoringBatch,
@@ -40,6 +39,7 @@ pub(in crate::canonical_scene::store) use gltf_capability::{
     GltfCapabilitySourceShapeObservation, build_gltf_capability_scene_for_probe,
     capture_gltf_capability_snapshots_for_probe, collect_gltf_capability_vectors_for_probe,
     inspect_gltf_capability_semantics_for_probe,
+    inspect_gltf_capability_semantics_with_first_transform_for_probe,
 };
 
 pub(in crate::canonical_scene::store) use obj_capability::{
@@ -94,7 +94,7 @@ impl CancellationSignal for CancelOnSignalPoll {
     }
 }
 
-fn test_limits() -> SceneConstructionLimits {
+pub(super) fn test_limits() -> SceneConstructionLimits {
     SceneConstructionLimits {
         operation_live_bytes: u64::MAX,
         dimension_live_bytes: u64::MAX,
@@ -105,7 +105,7 @@ fn test_limits() -> SceneConstructionLimits {
     }
 }
 
-fn test_factory() -> PhysicalStorageAccountFactory {
+pub(super) fn test_factory() -> PhysicalStorageAccountFactory {
     PhysicalStorageAccountFactory::try_new(
         PhysicalStorageAccountFactoryLimits::new(u64::MAX, 1)
             .expect("node Scene test factory limits"),
@@ -121,7 +121,7 @@ fn test_limits_with_work(work: u64) -> SceneConstructionLimits {
     }
 }
 
-fn single_trs_batch() -> NodeAuthoringBatch<'static> {
+pub(super) fn single_trs_batch() -> NodeAuthoringBatch<'static> {
     NodeAuthoringBatch::new(Presence::Present(&SINGLE_TRS_ROOTS), &SINGLE_TRS_NODES)
 }
 
@@ -129,7 +129,7 @@ fn parent(node: u32, child_ordinal: u32) -> Presence<NodeParent> {
     Presence::Present(NodeParent::new(NodeLocalId::new(node), child_ordinal))
 }
 
-fn test_account(
+pub(super) fn test_account(
     factory: &PhysicalStorageAccountFactory,
     max_live_allocations: u64,
 ) -> baozi_operation::PhysicalStorageAccount {
@@ -141,7 +141,9 @@ fn test_account(
         .expect("node Scene test account")
 }
 
-fn successful_parts(prepared: PreparedNodeSceneConstruction) -> super::NodeSceneSuccessParts {
+pub(super) fn successful_parts(
+    prepared: PreparedNodeSceneConstruction,
+) -> super::NodeSceneSuccessParts {
     match prepared.handoff() {
         NodeSceneConstructionTerminal::Success(parts) => parts,
         NodeSceneConstructionTerminal::RichFailure(_) => {
@@ -785,7 +787,7 @@ fn canonical_publication_limit_rejection_preserves_evidence_and_burns_generation
 }
 
 #[test]
-fn cycle_and_derived_lineage_can_only_terminate_as_fallback() {
+fn cycle_can_only_terminate_as_fallback() {
     let factory = test_factory();
     let account = test_account(&factory, 256);
     let cycle_nodes = [
@@ -818,46 +820,6 @@ fn cycle_and_derived_lineage_can_only_terminate_as_fallback() {
         NodeSceneConstructionTerminal::MinimalFallback(_)
     ));
     drop(cycle_terminal);
-
-    let legacy = SceneConstructionOperation::with_account(&account, test_limits())
-        .expect("legacy source operation")
-        .prepare_fresh_two_node(TwoNodeAuthoredMatrices::new(Mat4::IDENTITY, Mat4::IDENTITY))
-        .expect("legacy source preparation");
-    let legacy_scene = match legacy.handoff() {
-        SceneConstructionTerminal::Success(parts) => parts.scene,
-        SceneConstructionTerminal::RichFailure(_) => {
-            panic!("legacy source must succeed")
-        }
-        SceneConstructionTerminal::MinimalFallback(_) => {
-            panic!("legacy source must succeed")
-        }
-    };
-    let empty_roots = [];
-    let empty_nodes = [];
-    let rejected =
-        match SceneConstructionOperation::derived_from_exact_input(&legacy_scene, test_limits())
-            .expect("derived node Scene operation")
-            .try_validate_node_batch(
-                NodeAuthoringBatch::new(Presence::Present(&empty_roots), &empty_nodes),
-                SceneValidationLimits::default(),
-            ) {
-            Ok(_) => panic!("derived lineage must not reach validated construction"),
-            Err(rejected) => rejected,
-        };
-    assert!(matches!(
-        rejected.failure(),
-        &NodeSceneConstructionRejection::DerivedLineage
-    ));
-    let derived_terminal = rejected
-        .prepare_minimal_fallback()
-        .expect("derived rejection fallback")
-        .handoff();
-    assert!(matches!(
-        derived_terminal,
-        NodeSceneConstructionTerminal::MinimalFallback(_)
-    ));
-    drop(derived_terminal);
-    drop(legacy_scene);
 
     assert_eq!(account.snapshot().live_retained_bytes(), 0);
     assert_eq!(account.snapshot().live_retained_allocations(), 0);

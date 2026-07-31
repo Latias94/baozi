@@ -1,10 +1,11 @@
 use super::super::{
-    ByteBlock, BytesWriter, CanonicalBytesRange, CanonicalBytesRef, CanonicalRecordRef,
-    CanonicalRecordWriter, CanonicalSequenceRange, CanonicalSequenceRef, CanonicalStoreRef,
-    CanonicalUtf8Range, CanonicalUtf8Ref, OutcomeEvidenceBytesRef, OutcomeEvidenceRecordRef,
-    OutcomeEvidenceRecordWriter, OutcomeEvidenceSequenceRef, OutcomeEvidenceStoreRef,
-    OutcomeEvidenceUtf8Ref, PreparedStoreFallback, RetainedStorePublicationAssembly,
-    ScalarSequence, SequenceWriter, StoreBatchRuntimeError, StoreBuildError, StoreDestination,
+    ByteBlock, BytesWriter, CanonicalBytesRange, CanonicalBytesRef, CanonicalInheritanceSource,
+    CanonicalRecordRef, CanonicalRecordWriter, CanonicalSequenceRange, CanonicalSequenceRef,
+    CanonicalStoreRef, CanonicalUtf8Range, CanonicalUtf8Ref, FreshStoreLineage,
+    OutcomeEvidenceBytesRef, OutcomeEvidenceRecordRef, OutcomeEvidenceRecordWriter,
+    OutcomeEvidenceSequenceRef, OutcomeEvidenceStoreRef, OutcomeEvidenceUtf8Ref,
+    PreparedStoreFallback, RetainedStorePublicationAssembly, ScalarSequence, SequenceWriter,
+    StoreBatchRuntimeError, StoreBuildError, StoreDestination, StoreDimensionKey,
     StorePrepareError, StoreRuntimeError, StoredScalar, Utf8Writer,
 };
 use super::{
@@ -65,17 +66,18 @@ impl TableState {
 ///
 /// Retain instructions still allocate their admitted payload storage according to each ticket.
 #[must_use = "complete primary execution or consume it into terminal fallback"]
-pub struct RetainedStoreExecution<O, PP, U>
+pub struct RetainedStoreExecution<O, PP, U, L = FreshStoreLineage>
 where
     O: OperationOwner,
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    assembly: RetainedStorePublicationAssembly<O, PP, U>,
+    assembly: RetainedStorePublicationAssembly<O, PP, U, L>,
     identity: TranscriptId,
     cursor: TranscriptEndpoint,
     primary_endpoint: TranscriptEndpoint,
     final_endpoint: TranscriptEndpoint,
+    canonical_source_binding_dimension: Option<StoreDimensionKey>,
     state: ExecutionState,
 }
 
@@ -142,17 +144,18 @@ macro_rules! execute_simple_batch {
     };
 }
 
-impl<O, PP, U> RetainedStoreExecution<O, PP, U>
+impl<O, PP, U, L> RetainedStoreExecution<O, PP, U, L>
 where
     O: OperationOwner,
     PP: ProgressPhase,
     U: ProgressUnit,
 {
     pub(super) fn new(
-        assembly: RetainedStorePublicationAssembly<O, PP, U>,
+        assembly: RetainedStorePublicationAssembly<O, PP, U, L>,
         identity: TranscriptId,
         primary_endpoint: TranscriptEndpoint,
         final_endpoint: TranscriptEndpoint,
+        canonical_source_binding_dimension: Option<StoreDimensionKey>,
     ) -> Self {
         Self {
             assembly,
@@ -160,6 +163,7 @@ where
             cursor: TranscriptEndpoint::default(),
             primary_endpoint,
             final_endpoint,
+            canonical_source_binding_dimension,
             state: ExecutionState::Active,
         }
     }
@@ -233,7 +237,7 @@ where
         ticket: &PlannedStoreInstruction<Plan, Tag, Destination>,
         delta: CounterDelta,
         action: impl FnOnce(
-            &mut RetainedStorePublicationAssembly<O, PP, U>,
+            &mut RetainedStorePublicationAssembly<O, PP, U, L>,
         ) -> Result<T, StoreRuntimeError>,
     ) -> Result<T, StoreExecutionError> {
         self.ensure(ticket)?;
@@ -275,7 +279,7 @@ where
         ticket: &PlannedStoreInstruction<Plan, Tag, Destination>,
         delta: CounterDelta,
         action: impl FnOnce(
-            &mut RetainedStorePublicationAssembly<O, PP, U>,
+            &mut RetainedStorePublicationAssembly<O, PP, U, L>,
         ) -> Result<T, StoreBatchRuntimeError>,
     ) -> Result<T, StoreExecutionError> {
         self.ensure(ticket)?;
@@ -439,23 +443,6 @@ where
         )
     }
 
-    fn execute_canonical_share<SRK, SRT, Kind, Tag>(
-        &mut self,
-        ticket: &PlannedCanonicalShare<'_, SRK, SRT, Kind, Tag>,
-    ) -> Result<CanonicalStoreRef<Kind, Tag>, StoreExecutionError>
-    where
-        Kind: super::super::ShareableStoreKind,
-        Tag: Copy + Send + Sync + 'static,
-    {
-        let instruction = ticket.inner();
-        let (source, source_ref) = (instruction.plan.source, instruction.plan.source_ref);
-        self.run(
-            instruction,
-            CounterDelta::shared_block(StoreDestination::Canonical),
-            |assembly| assembly.try_share_canonical(source, source_ref),
-        )
-    }
-
     fn execute_evidence_share<SRK, SRT, Kind, Tag>(
         &mut self,
         ticket: &PlannedOutcomeEvidenceShare<'_, SRK, SRT, Kind, Tag>,
@@ -471,37 +458,6 @@ where
             CounterDelta::shared_block(StoreDestination::OutcomeEvidence),
             |assembly| assembly.try_share_outcome_evidence(source, source_ref),
         )
-    }
-
-    pub fn try_execute_canonical_sequence_share<SRK, SRT, T, Tag>(
-        &mut self,
-        ticket: &PlannedCanonicalShare<'_, SRK, SRT, ScalarSequence<T>, Tag>,
-    ) -> Result<CanonicalSequenceRef<T, Tag>, StoreExecutionError>
-    where
-        T: StoredScalar,
-        Tag: Copy + Send + Sync + 'static,
-    {
-        self.execute_canonical_share(ticket)
-    }
-
-    pub fn try_execute_canonical_bytes_share<SRK, SRT, Tag>(
-        &mut self,
-        ticket: &PlannedCanonicalShare<'_, SRK, SRT, ByteBlock, Tag>,
-    ) -> Result<CanonicalBytesRef<Tag>, StoreExecutionError>
-    where
-        Tag: Copy + Send + Sync + 'static,
-    {
-        self.execute_canonical_share(ticket)
-    }
-
-    pub fn try_execute_canonical_utf8_share<SRK, SRT, Tag>(
-        &mut self,
-        ticket: &PlannedCanonicalShare<'_, SRK, SRT, super::super::Utf8Block, Tag>,
-    ) -> Result<CanonicalUtf8Ref<Tag>, StoreExecutionError>
-    where
-        Tag: Copy + Send + Sync + 'static,
-    {
-        self.execute_canonical_share(ticket)
     }
 
     pub fn try_execute_outcome_evidence_sequence_share<SRK, SRT, T, Tag>(
@@ -541,7 +497,7 @@ where
     )]
     pub(super) fn try_into_primary_parts(
         self,
-    ) -> Result<PrimaryTranscriptParts<O, PP, U>, (Self, StoreExecutionError)> {
+    ) -> Result<PrimaryTranscriptParts<O, PP, U, L>, (Self, StoreExecutionError)> {
         if let ExecutionState::Abandoned { failed_instruction } = self.state {
             return Err((self, StoreExecutionError::Abandoned { failed_instruction }));
         }
@@ -570,5 +526,71 @@ where
 
     pub fn prepare_minimal_fallback(self) -> Result<PreparedStoreFallback, StorePrepareError> {
         self.assembly.prepare_minimal_fallback()
+    }
+}
+
+impl<'source, O, PP, U> RetainedStoreExecution<O, PP, U, CanonicalInheritanceSource<'source>>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    fn execute_canonical_share<Kind, Tag>(
+        &mut self,
+        ticket: &PlannedCanonicalShare<Kind, Tag>,
+    ) -> Result<CanonicalStoreRef<Kind, Tag>, StoreExecutionError>
+    where
+        Kind: super::super::ShareableStoreKind,
+        Tag: Copy + Send + Sync + 'static,
+    {
+        let Some(source_binding_dimension) = self.canonical_source_binding_dimension else {
+            return self.abandon_invariant();
+        };
+        let instruction = ticket.inner();
+        let source_ref = instruction.plan.source_ref;
+        self.run(
+            instruction,
+            CounterDelta::shared_block(StoreDestination::Canonical),
+            |assembly| {
+                let members_before = assembly.canonical_len();
+                assembly.try_bind_canonical_source(source_binding_dimension)?;
+                let shared = assembly.try_share_canonical(source_ref)?;
+                if assembly.canonical_len() == members_before {
+                    return Err(StoreRuntimeError::InvalidSourceSlot);
+                }
+                Ok(shared)
+            },
+        )
+    }
+
+    pub fn try_execute_canonical_sequence_share<T, Tag>(
+        &mut self,
+        ticket: &PlannedCanonicalShare<ScalarSequence<T>, Tag>,
+    ) -> Result<CanonicalSequenceRef<T, Tag>, StoreExecutionError>
+    where
+        T: StoredScalar,
+        Tag: Copy + Send + Sync + 'static,
+    {
+        self.execute_canonical_share(ticket)
+    }
+
+    pub fn try_execute_canonical_bytes_share<Tag>(
+        &mut self,
+        ticket: &PlannedCanonicalShare<ByteBlock, Tag>,
+    ) -> Result<CanonicalBytesRef<Tag>, StoreExecutionError>
+    where
+        Tag: Copy + Send + Sync + 'static,
+    {
+        self.execute_canonical_share(ticket)
+    }
+
+    pub fn try_execute_canonical_utf8_share<Tag>(
+        &mut self,
+        ticket: &PlannedCanonicalShare<super::super::Utf8Block, Tag>,
+    ) -> Result<CanonicalUtf8Ref<Tag>, StoreExecutionError>
+    where
+        Tag: Copy + Send + Sync + 'static,
+    {
+        self.execute_canonical_share(ticket)
     }
 }

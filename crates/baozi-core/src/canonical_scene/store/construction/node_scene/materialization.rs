@@ -36,8 +36,7 @@ use crate::identity::{ReservedSceneGeneration, SceneGenerationError, SceneGenera
 
 use super::super::{
     FALLBACK_CODE, PreparedTracerSceneFallback, SceneAuthoringOperation, SceneConstructionError,
-    SceneConstructionLineage, SceneConstructionOperation, SceneConstructionOwner,
-    SceneStoreAssembly, SceneStoreKeys,
+    SceneConstructionOperation, SceneConstructionOwner, SceneStoreAssembly, SceneStoreKeys,
 };
 use super::animation::{AnimationMaterializationPlans, AnimationTargetTableRefs, retain_animation};
 use super::appearance::{AppearanceMaterializationPlans, retain_appearance};
@@ -61,7 +60,7 @@ use super::{
     ValidatedNodeSceneConstruction,
 };
 
-impl RejectedNodeSceneConstruction<'_> {
+impl RejectedNodeSceneConstruction {
     pub(in crate::canonical_scene::store) const fn failure(
         &self,
     ) -> &NodeSceneConstructionRejection {
@@ -77,7 +76,6 @@ impl RejectedNodeSceneConstruction<'_> {
                     raw,
                     brand: _,
                     keys: _,
-                    lineage: _,
                 },
             failure: _,
         } = self;
@@ -88,13 +86,13 @@ impl RejectedNodeSceneConstruction<'_> {
     }
 }
 
-impl<'scene> SceneConstructionOperation<'scene> {
+impl SceneConstructionOperation {
     #[cfg(test)]
     pub(super) fn try_validate_node_batch<'input>(
         self,
         input: NodeAuthoringBatch<'input>,
         limits: SceneValidationLimits,
-    ) -> Result<ValidatedNodeSceneConstruction<'input>, RejectedNodeSceneConstruction<'scene>> {
+    ) -> Result<ValidatedNodeSceneConstruction<'input>, RejectedNodeSceneConstruction> {
         self.try_validate_scene_batch(
             SceneAuthoringBatch::new(
                 input,
@@ -111,14 +109,7 @@ impl<'scene> SceneConstructionOperation<'scene> {
         mut self,
         input: SceneAuthoringBatch<'input>,
         limits: SceneValidationLimits,
-    ) -> Result<ValidatedNodeSceneConstruction<'input>, RejectedNodeSceneConstruction<'scene>> {
-        if !matches!(&self.lineage, SceneConstructionLineage::Fresh) {
-            return Err(RejectedNodeSceneConstruction {
-                operation: self,
-                failure: NodeSceneConstructionRejection::DerivedLineage,
-            });
-        }
-
+    ) -> Result<ValidatedNodeSceneConstruction<'input>, RejectedNodeSceneConstruction> {
         let keys = self.keys;
         let validation = {
             let checkpoint = self.raw.control_checkpoint();
@@ -285,13 +276,7 @@ impl<'scene> SceneConstructionOperation<'scene> {
                 failure: NodeSceneConstructionRejection::Aggregate(failure),
             });
         }
-        let SceneConstructionOperation {
-            raw,
-            brand,
-            keys,
-            lineage,
-        } = self;
-        debug_assert!(matches!(&lineage, SceneConstructionLineage::Fresh));
+        let SceneConstructionOperation { raw, brand, keys } = self;
         Ok(ValidatedNodeSceneConstruction {
             animations,
             deformation,
@@ -306,8 +291,7 @@ impl<'scene> SceneConstructionOperation<'scene> {
 impl<'input> SceneAuthoringOperation<'input> {
     pub(in crate::canonical_scene::store) fn try_validate(
         self,
-    ) -> Result<ValidatedNodeSceneConstruction<'input>, RejectedNodeSceneConstruction<'static>>
-    {
+    ) -> Result<ValidatedNodeSceneConstruction<'input>, RejectedNodeSceneConstruction> {
         let Self {
             operation,
             input,

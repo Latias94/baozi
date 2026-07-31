@@ -37,10 +37,10 @@ use super::super::validation::{
 };
 use super::{
     ConstructionBrand, FALLBACK_CODE, PreparedTracerSceneFallback, PreparedTracerSceneRichFailure,
-    SEMANTIC_REJECTION_CODE, SceneConstructionError, SceneConstructionLineage,
-    SceneConstructionOperation, SceneConstructionOwner, SceneConstructionPhase,
-    SceneConstructionUnit, SceneStoreAssembly, SceneStoreFailureAssembly, SceneStoreKeys,
-    TracerSceneFallback, TracerSceneRichFailure, final_progress,
+    SEMANTIC_REJECTION_CODE, SceneConstructionError, SceneConstructionOperation,
+    SceneConstructionOwner, SceneConstructionPhase, SceneConstructionUnit, SceneStoreAssembly,
+    SceneStoreFailureAssembly, SceneStoreKeys, TracerSceneFallback, TracerSceneRichFailure,
+    final_progress,
 };
 use crate::identity::{ReservedSceneGeneration, SceneGenerationError, SceneGenerationId};
 
@@ -229,23 +229,12 @@ impl PreparedComplexFixture {
 }
 
 pub(super) fn prepare(
-    operation: SceneConstructionOperation<'static>,
+    operation: SceneConstructionOperation,
     image_count: usize,
     fault: Option<ComplexFixtureFault>,
     reserve_generation: impl FnOnce() -> Result<ReservedSceneGeneration, SceneGenerationError>,
 ) -> Result<PreparedComplexFixture, SceneConstructionError> {
-    let SceneConstructionOperation {
-        raw,
-        brand,
-        keys,
-        lineage,
-    } = operation;
-    let SceneConstructionLineage::Fresh = lineage else {
-        let store = raw.prepare_minimal_fallback(SEMANTIC_REJECTION_CODE)?;
-        return Ok(PreparedComplexFixture::MinimalFallback(
-            PreparedTracerSceneFallback { store },
-        ));
-    };
+    let SceneConstructionOperation { raw, brand, keys } = operation;
     if !(1..=COMPLEX_MAX_IMAGE_COUNT).contains(&image_count) {
         let store = raw.prepare_minimal_fallback(SEMANTIC_REJECTION_CODE)?;
         return Ok(PreparedComplexFixture::MinimalFallback(
