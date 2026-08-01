@@ -1,5 +1,6 @@
 //! Private retained-store tracer for the canonical Scene migration.
 
+pub(crate) mod api;
 mod construction;
 mod node_scene;
 mod production;
