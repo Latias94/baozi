@@ -12,8 +12,8 @@ use crate::identity::{ReservedSceneGeneration, SceneGenerationError};
 
 use super::super::{
     GENERATION_EXHAUSTED_CODE, PreparedTracerSceneFallback, SceneConstructionError,
-    SceneStoreAssembly, SceneStoreKeys, SceneStoreOperation, TracerSceneFallback,
-    burn_generation_reservation, final_progress,
+    SceneStoreAssembly, SceneStoreKeys, SceneStoreOpenRecovery, SceneStoreOperation,
+    TracerSceneFallback, burn_generation_reservation, final_progress,
 };
 use super::scratch::NodeSceneValidationScratchOwner;
 use super::{
@@ -34,6 +34,24 @@ impl PendingNodeSceneDraft {
         reserve_generation: impl FnOnce() -> Result<ReservedSceneGeneration, SceneGenerationError>,
     ) -> Result<PreparedNodeSceneConstruction, SceneConstructionError> {
         prepare_pending_node_scene_draft(self, draft, reserve_generation)
+    }
+
+    pub(in crate::canonical_scene::store) fn prepare_missing_draft(
+        self,
+    ) -> Result<PreparedNodeSceneConstruction, SceneConstructionError> {
+        let Self {
+            assembly,
+            evidence,
+            evidence_counts,
+            ..
+        } = self;
+        prepare_node_rich_failure_from_assembly(
+            assembly,
+            evidence,
+            evidence_counts,
+            NODE_SCENE_BUILD_INVARIANT_CODE,
+        )
+        .map(Into::into)
     }
 }
 
@@ -374,6 +392,16 @@ pub(super) fn prepare_node_minimal_fallback_from_operation(
     cause: u32,
 ) -> Result<PreparedNodeSceneFailure, SceneConstructionError> {
     let store = operation.prepare_minimal_fallback(cause)?;
+    Ok(PreparedNodeSceneFailure::MinimalFallback(
+        PreparedTracerSceneFallback { store },
+    ))
+}
+
+pub(super) fn prepare_node_minimal_fallback_from_open_recovery(
+    recovery: SceneStoreOpenRecovery,
+    cause: u32,
+) -> Result<PreparedNodeSceneFailure, SceneConstructionError> {
+    let store = recovery.prepare_minimal_fallback(cause)?;
     Ok(PreparedNodeSceneFailure::MinimalFallback(
         PreparedTracerSceneFallback { store },
     ))

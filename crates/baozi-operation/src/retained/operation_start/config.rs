@@ -6,6 +6,7 @@ use crate::retained::allocation::{RetainedAllocationError, RetainedAllocationPla
 use crate::retained::final_owner::unreachable_final_owner_state;
 use crate::retained::physical::{AccountActionAdmissionError, PendingRetainedRollback};
 use std::fmt;
+use std::num::NonZeroU64;
 
 /// Fixed capacities for one destination-typed retained writer or publication assembly.
 #[allow(
@@ -103,6 +104,48 @@ impl<D: Copy> RetainedHandleSharePlan<D> {
     }
 }
 
+/// Start-qualified terminal work reserved exclusively for rich-failure evidence.
+///
+/// Qualification proves that a direct failure table can charge every retained handle share after
+/// ordinary operation work is exhausted. A success-capable assembly keeps the authority dormant
+/// until a semantic or admission downgrade. The runtime capability remains finite and single-use,
+/// while every actual action records attempted and consumed work immediately in the protected
+/// ledger dimension.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RetainedFailureTerminalWorkPlan<D> {
+    dimension: D,
+    max_evidence_members: usize,
+}
+
+impl<D: Copy> RetainedFailureTerminalWorkPlan<D> {
+    pub(crate) const fn new(dimension: D, max_evidence_members: usize) -> Self {
+        Self {
+            dimension,
+            max_evidence_members,
+        }
+    }
+
+    pub(in crate::retained) const fn share_work(self) -> RetainedHandleSharePlan<D> {
+        RetainedHandleSharePlan::new(self.dimension, self.dimension)
+    }
+
+    pub(in crate::retained) const fn dimension(self) -> D {
+        self.dimension
+    }
+
+    pub(in crate::retained) const fn max_evidence_members(self) -> usize {
+        self.max_evidence_members
+    }
+
+    pub(in crate::retained) fn maximum_share_actions(self) -> Result<NonZeroU64, ()> {
+        if self.max_evidence_members == 0 {
+            return Err(());
+        }
+        let actions = self.max_evidence_members.checked_add(2).ok_or(())?;
+        NonZeroU64::new(u64::try_from(actions).map_err(|_| ())?).ok_or(())
+    }
+}
+
 /// Start-time bounds and fixed terminal commitments for one retained operation.
 #[allow(
     dead_code,
@@ -115,6 +158,7 @@ pub(crate) struct RetainedOperationStartPlan<P, D> {
     pub(in crate::retained) fallback_plan: RetainedAllocationPlan,
     pub(in crate::retained) fallback_commitment: OutputCommitment<D, OutcomeEvidenceDestination>,
     pub(in crate::retained) snapshot_commitment: OutputCommitment<D, OutcomeEvidenceDestination>,
+    pub(in crate::retained) failure_terminal_work: Option<RetainedFailureTerminalWorkPlan<D>>,
 }
 
 #[allow(
@@ -135,6 +179,7 @@ impl<P: Copy, D: Copy> RetainedOperationStartPlan<P, D> {
             fallback_plan,
             fallback_commitment,
             snapshot_commitment,
+            failure_terminal_work: None,
         }
     }
 
@@ -154,6 +199,14 @@ impl<P: Copy, D: Copy> RetainedOperationStartPlan<P, D> {
             OutputCommitment::new(fallback_dimension, fallback_amount),
             OutputCommitment::new(snapshot_dimension, snapshot_amount),
         )
+    }
+
+    pub(crate) const fn with_failure_terminal_work(
+        mut self,
+        plan: RetainedFailureTerminalWorkPlan<D>,
+    ) -> Self {
+        self.failure_terminal_work = Some(plan);
+        self
     }
 }
 

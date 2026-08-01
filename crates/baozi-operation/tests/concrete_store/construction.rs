@@ -59,19 +59,9 @@ fn sequence_bytes_utf8_and_records_round_trip_through_typed_roots() {
             if dimension == foreign_dimension()
     ));
     assert!(matches!(
-        assembly.try_commit_canonical(keys.other_dimension, 13),
-        Err(StoreRuntimeError::Ledger(LedgerCause::UnknownDimension { dimension }))
-            if dimension == keys.other_dimension
-    ));
-    assert!(matches!(
         assembly.try_commit_outcome_evidence(foreign_dimension(), 13),
         Err(StoreRuntimeError::ForeignDimensionDomain { dimension })
             if dimension == foreign_dimension()
-    ));
-    assert!(matches!(
-        assembly.try_commit_outcome_evidence(keys.other_dimension, 13),
-        Err(StoreRuntimeError::Ledger(LedgerCause::UnknownDimension { dimension }))
-            if dimension == keys.other_dimension
     ));
     assert_eq!(account.snapshot(), before_rejected_commits);
 

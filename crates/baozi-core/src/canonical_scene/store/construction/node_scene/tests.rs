@@ -10,15 +10,16 @@ use baozi_operation::{
 use crate::SceneValidationLimits;
 use crate::attribute::{AttributeDomain, AttributeSemantic};
 use crate::canonical_scene::store::construction::{
-    STORE_DIMENSION, SceneConstructionLimits, SceneConstructionOperation,
+    FAILURE_TERMINAL_WORK_DIMENSION, FAILURE_TERMINAL_WORK_LIMIT, STORE_DIMENSION,
+    SceneConstructionLimits, SceneConstructionOperation,
 };
 use crate::canonical_scene::store::production::{
     AnimationAuthoringBatch, AppearanceAuthoringBatch, AuthoringRange, DeformationAuthoringBatch,
     GeometryAttributeAuthoring, GeometryAuthoringBatch, GeometryLogicalMeshAuthoring,
     GeometryPrimitiveAuthoring, GeometryTopologyAuthoring, LogicalMorphAuthoring,
     NodeAuthoringBatch, NodeAuthoringFailure, NodeAuthoringLimit, NodeAuthoringNode,
-    NodeAuthoringSemanticError, NodeLocalId, NodeParent, Presence, PrimitiveDeformationAuthoring,
-    SceneAuthoringBatch,
+    NodeAuthoringSemanticError, NodeLocalId, NodeParent, OperationAuthoringControlError, Presence,
+    PrimitiveDeformationAuthoring, SceneAuthoringBatch,
 };
 use crate::entity::AuthoredTransform;
 use crate::identity::{SceneGenerationError, SceneGenerationId};
@@ -26,10 +27,10 @@ use crate::math::{Mat4, Quat, Vec3};
 
 use super::publication::post_evidence_build_failure_code;
 use super::{
-    NODE_SCENE_BUILD_INVARIANT_CODE, NODE_SCENE_STORAGE_REJECTION_CODE, NodeSceneBuildFaults,
-    NodeSceneConstructionRejection, NodeSceneConstructionTerminal, NodeSceneDraft,
-    NodeSceneDraftBuild, NodeSceneRichFailure, PendingNodeSceneDraft,
-    PreparedNodeSceneConstruction,
+    NODE_SCENE_BUILD_INVARIANT_CODE, NODE_SCENE_NODE_AUTHORING_REJECTION_CODE,
+    NODE_SCENE_STORAGE_REJECTION_CODE, NodeSceneBuildFaults, NodeSceneConstructionRejection,
+    NodeSceneConstructionTerminal, NodeSceneDraft, NodeSceneDraftBuild, NodeSceneRichFailure,
+    PendingNodeSceneDraft, PreparedNodeSceneConstruction,
 };
 
 mod gltf_capability;
@@ -115,9 +116,12 @@ pub(super) fn test_factory() -> PhysicalStorageAccountFactory {
 }
 
 fn test_limits_with_work(work: u64) -> SceneConstructionLimits {
+    let total_work = work
+        .checked_add(FAILURE_TERMINAL_WORK_LIMIT)
+        .expect("test ordinary and terminal work limits must fit");
     SceneConstructionLimits {
-        attempted_work: work,
-        consumed_work: work,
+        attempted_work: total_work,
+        consumed_work: total_work,
         ..test_limits()
     }
 }
@@ -460,13 +464,13 @@ fn source_ordered_forest_materializes_canonical_graph_and_preserves_authored_bit
         header.terminal_cause(),
         StoreTerminalCause::Success
     ));
-    assert_eq!(header.dimension_count(), 1);
+    assert_eq!(header.dimension_count(), 2);
     assert_eq!(header.phase_count(), 1);
     assert_eq!(header.current_live_bytes(), 0);
     assert!(header.peak_live_bytes() > 0);
     assert_eq!(header.active_reservations(), 0);
     let dimension = ledger
-        .dimension_at(0)
+        .dimension_by_semantic(STORE_DIMENSION)
         .expect("node Scene dimension evidence");
     assert!(dimension.attempted() > 0);
     assert_eq!(dimension.consumed(), dimension.attempted());
@@ -480,6 +484,17 @@ fn source_ordered_forest_materializes_canonical_graph_and_preserves_authored_bit
         2,
         "startup fallback and successful outcome evidence are both accounted"
     );
+    let failure_terminal_work = ledger
+        .dimension_by_semantic(FAILURE_TERMINAL_WORK_DIMENSION)
+        .expect("failure-terminal work dimension evidence");
+    assert_eq!(failure_terminal_work.attempted(), 0);
+    assert_eq!(failure_terminal_work.consumed(), 0);
+    assert_eq!(failure_terminal_work.current_live_bytes(), 0);
+    assert_eq!(failure_terminal_work.peak_live_bytes(), 0);
+    assert_eq!(failure_terminal_work.pending_publication(), 0);
+    assert_eq!(failure_terminal_work.committed(), 0);
+    assert_eq!(failure_terminal_work.committed_canonical_output(), 0);
+    assert_eq!(failure_terminal_work.published_outcome_evidence(), 0);
 
     drop(parts);
     assert_eq!(account.snapshot().live_retained_bytes(), 0);
@@ -583,7 +598,7 @@ fn present_empty_scene_publishes_every_domain_directory() {
 }
 
 #[test]
-fn canonical_logical_byte_rejection_never_opens_publication() {
+fn canonical_logical_byte_rejection_publishes_evidence_only_rich_failure() {
     let factory = test_factory();
     let account = test_account(&factory, 256);
     let operation = SceneConstructionOperation::with_account(&account, test_limits())
@@ -613,17 +628,118 @@ fn canonical_logical_byte_rejection_never_opens_publication() {
         "authoring rejection must not enter physical publication"
     );
 
-    let terminal = rejected
-        .prepare_minimal_fallback()
-        .expect("canonical byte rejection fallback")
-        .handoff();
+    let (prepared, rejection) = rejected
+        .prepare_rich_failure()
+        .expect("canonical byte rejection rich failure");
     assert!(matches!(
-        &terminal,
-        NodeSceneConstructionTerminal::MinimalFallback(_)
+        rejection,
+        NodeSceneConstructionRejection::NodeAuthoring(NodeAuthoringFailure::Semantic(
+            NodeAuthoringSemanticError::LimitExceeded {
+                limit: NodeAuthoringLimit::CanonicalBytes,
+                actual: 168,
+                maximum: 167,
+            }
+        ))
     ));
-    drop(terminal);
+    let failure = rich_failure(prepared);
+    assert_eq!(
+        terminal_failure_code(failure.ledger_evidence()),
+        NODE_SCENE_NODE_AUTHORING_REJECTION_CODE
+    );
+    assert_eq!(
+        failure
+            .ledger_evidence()
+            .dimension_by_semantic(STORE_DIMENSION)
+            .expect("authoring rejection dimension")
+            .committed_canonical_output(),
+        0
+    );
+    assert_released(failure, &account);
     assert_eq!(account.snapshot().live_retained_bytes(), 0);
     assert_eq!(account.snapshot().live_retained_allocations(), 0);
+}
+
+#[test]
+fn cancelled_authoring_rejection_preserves_exact_error_and_rich_evidence() {
+    let factory = test_factory();
+    let account = test_account(&factory, 256);
+    let cancellation = CancelOnSignalPoll::new();
+    let operation = SceneConstructionOperation::with_account_and_cancellation_for_test(
+        &account,
+        test_limits(),
+        cancellation.clone(),
+    )
+    .expect("cancelled node Scene operation");
+    cancellation.cancel_after_additional_polls(1);
+
+    let rejected = match operation
+        .try_validate_node_batch(single_trs_batch(), SceneValidationLimits::default())
+    {
+        Ok(_) => panic!("pre-cancelled authoring must reject"),
+        Err(rejected) => rejected,
+    };
+    let (prepared, rejection) = rejected
+        .prepare_rich_failure()
+        .expect("cancelled authoring rich failure");
+    assert!(matches!(
+        rejection,
+        NodeSceneConstructionRejection::NodeAuthoring(NodeAuthoringFailure::Control(
+            OperationAuthoringControlError::Control(_)
+        ))
+    ));
+    let failure = rich_failure(prepared);
+    assert_eq!(
+        terminal_failure_class(failure.ledger_evidence()),
+        StorePreparationFailureClass::Control
+    );
+    assert_released(failure, &account);
+}
+
+#[test]
+fn authoring_work_budget_rejection_preserves_exact_error_and_rich_evidence() {
+    const AUTHORING_WORK_LIMIT: u64 = 8;
+
+    let factory = test_factory();
+    let account = test_account(&factory, 256);
+    let operation = SceneConstructionOperation::with_account(
+        &account,
+        test_limits_with_work(AUTHORING_WORK_LIMIT),
+    )
+    .expect("work-bounded node Scene operation");
+
+    let rejected = match operation
+        .try_validate_node_batch(single_trs_batch(), SceneValidationLimits::default())
+    {
+        Ok(_) => panic!("exhausted authoring work budget must reject"),
+        Err(rejected) => rejected,
+    };
+    let (prepared, rejection) = rejected
+        .prepare_rich_failure()
+        .expect("work-budget authoring rich failure");
+    assert!(matches!(
+        rejection,
+        NodeSceneConstructionRejection::NodeAuthoring(NodeAuthoringFailure::Control(
+            OperationAuthoringControlError::Store(_)
+        ))
+    ));
+    let failure = rich_failure(prepared);
+    assert_eq!(
+        terminal_failure_class(failure.ledger_evidence()),
+        StorePreparationFailureClass::Ledger
+    );
+    let work = failure
+        .ledger_evidence()
+        .dimension_by_semantic(STORE_DIMENSION)
+        .expect("authoring budget rejection dimension");
+    assert_eq!(work.attempted(), AUTHORING_WORK_LIMIT + 1);
+    assert_eq!(work.consumed(), AUTHORING_WORK_LIMIT);
+    let terminal_work = failure
+        .ledger_evidence()
+        .dimension_by_semantic(FAILURE_TERMINAL_WORK_DIMENSION)
+        .expect("authoring failure-terminal work dimension");
+    assert_eq!(terminal_work.attempted(), FAILURE_TERMINAL_WORK_LIMIT);
+    assert_eq!(terminal_work.consumed(), FAILURE_TERMINAL_WORK_LIMIT);
+    assert_released(failure, &account);
 }
 
 #[test]
@@ -945,7 +1061,7 @@ fn canonical_publication_limit_rejection_preserves_evidence_and_burns_generation
 }
 
 #[test]
-fn cycle_can_only_terminate_as_fallback() {
+fn cycle_authoring_rejection_preserves_rich_evidence() {
     let factory = test_factory();
     let account = test_account(&factory, 256);
     let cycle_nodes = [
@@ -969,15 +1085,16 @@ fn cycle_can_only_terminate_as_fallback() {
             NodeAuthoringSemanticError::Cycle { .. }
         ))
     ));
-    let cycle_terminal = rejected
-        .prepare_minimal_fallback()
-        .expect("cycle rejection fallback")
-        .handoff();
+    let (prepared, rejection) = rejected
+        .prepare_rich_failure()
+        .expect("cycle rejection rich failure");
     assert!(matches!(
-        cycle_terminal,
-        NodeSceneConstructionTerminal::MinimalFallback(_)
+        rejection,
+        NodeSceneConstructionRejection::NodeAuthoring(NodeAuthoringFailure::Semantic(
+            NodeAuthoringSemanticError::Cycle { .. }
+        ))
     ));
-    drop(cycle_terminal);
+    assert_released(rich_failure(prepared), &account);
 
     assert_eq!(account.snapshot().live_retained_bytes(), 0);
     assert_eq!(account.snapshot().live_retained_allocations(), 0);

@@ -14,13 +14,13 @@ use baozi_operation::{
     PreparedStoreSuccessOutcome, ProgressPhase, ProgressUnit, PublishedCanonicalStore,
     PublishedOutcomeEvidenceStore, PublishedRichFailureStore, PublishedStoreFallbackOutput,
     RecordBlock, RecordPlan, RetainedStoreBatchLimits, RetainedStoreBlockTablePlan,
-    RetainedStoreOperation, RetainedStorePublicationAssembly, RetainedStorePublicationPlan,
-    RetainedStoreSharePlan, RetainedStoreStartError, RetainedStoreStartPlan,
-    RetainedStoreWriterPlan, SequencePlan, StoreDimensionKey, StoreDimensionSemanticId,
-    StoreFailureAssembly, StoreFailureValidation, StoreKeyDomain, StoreKeyDomainCreateError,
-    StoreLedgerEvidence, StoreLedgerPlan, StoreLedgerPlanError, StorePhaseKey,
-    StorePhaseSemanticId, StorePlanError, StorePrepareError, StoreRuntimeError,
-    StoreSemanticCatalogId, StoreSuccessValidation, ValidatedStoreSuccess,
+    RetainedStoreFailureTerminalWorkPlan, RetainedStoreOpenRecovery, RetainedStoreOperation,
+    RetainedStorePublicationAssembly, RetainedStorePublicationPlan, RetainedStoreSharePlan,
+    RetainedStoreStartError, RetainedStoreStartPlan, RetainedStoreWriterPlan, SequencePlan,
+    StoreDimensionKey, StoreDimensionSemanticId, StoreFailureAssembly, StoreFailureValidation,
+    StoreKeyDomain, StoreKeyDomainCreateError, StoreLedgerEvidence, StoreLedgerPlan,
+    StoreLedgerPlanError, StorePhaseKey, StorePhaseSemanticId, StorePlanError, StorePrepareError,
+    StoreRuntimeError, StoreSemanticCatalogId, StoreSuccessValidation, ValidatedStoreSuccess,
 };
 use thiserror::Error;
 
@@ -53,6 +53,8 @@ const STORE_CATALOG: StoreSemanticCatalogId =
 const STORE_PHASE: StorePhaseSemanticId = StorePhaseSemanticId::new(STORE_CATALOG, NonZeroU64::MIN);
 const STORE_DIMENSION: StoreDimensionSemanticId =
     StoreDimensionSemanticId::new(STORE_CATALOG, NonZeroU64::MIN);
+const FAILURE_TERMINAL_WORK_DIMENSION: StoreDimensionSemanticId =
+    StoreDimensionSemanticId::new(STORE_CATALOG, NonZeroU64::new(2).unwrap());
 const FALLBACK_CODE: u32 = 0x5343_0001;
 const SEMANTIC_REJECTION_CODE: u32 = 0x5343_0002;
 const GENERATION_EXHAUSTED_CODE: u32 = 0x5343_0003;
@@ -60,6 +62,8 @@ const GENERATION_EXHAUSTED_CODE: u32 = 0x5343_0003;
 const MAX_ADMITTED_CANONICAL_NEW_BLOCKS: usize = 27;
 const TERMINAL_ATTRIBUTION_SLOTS: usize = MAX_ADMITTED_CANONICAL_NEW_BLOCKS + 1;
 const TERMINAL_COMMITMENT_SLOTS: usize = 8;
+const FAILURE_TERMINAL_EVIDENCE_MEMBERS: usize = 1;
+const FAILURE_TERMINAL_WORK_LIMIT: u64 = 6;
 
 static NEXT_CONSTRUCTION_BRAND: AtomicU64 = AtomicU64::new(1);
 
@@ -94,6 +98,12 @@ struct SceneConstructionOwner;
 impl OperationOwner for SceneConstructionOwner {}
 
 type SceneStoreOperation<L = FreshStoreLineage> = RetainedStoreOperation<
+    SceneConstructionOwner,
+    SceneConstructionPhase,
+    SceneConstructionUnit,
+    L,
+>;
+type SceneStoreOpenRecovery<L = FreshStoreLineage> = RetainedStoreOpenRecovery<
     SceneConstructionOwner,
     SceneConstructionPhase,
     SceneConstructionUnit,
@@ -164,6 +174,8 @@ pub(crate) enum SceneConstructionStartError {
     KeyDomain(#[from] StoreKeyDomainCreateError),
     #[error("the canonical Scene store semantic key could not be admitted")]
     KeyAdmissionInvariant,
+    #[error("the canonical Scene work budget cannot cover its bounded terminal reserve")]
+    TerminalWorkBudget,
     #[error("canonical Scene ledger limits are invalid")]
     LedgerLimits(#[from] LedgerLimitsError<StoreDimensionKey>),
     #[error("the canonical Scene store ledger plan is invalid")]
@@ -534,6 +546,7 @@ impl TwoNodeAuthoredMatrices {
 struct SceneStoreKeys {
     phase: StorePhaseKey,
     dimension: StoreDimensionKey,
+    failure_terminal_work_dimension: StoreDimensionKey,
 }
 
 struct SceneCandidateOwner<L = FreshStoreLineage> {
@@ -619,11 +632,27 @@ impl SceneConstructionOperation {
         input: SceneAuthoringBatch<'input>,
         validation_limits: SceneValidationLimits,
     ) -> Result<SceneAuthoringOperation<'input>, SceneConstructionStartError> {
+        Self::with_account_and_control_for_scene_input(
+            account,
+            limits,
+            OperationControl::default(),
+            input,
+            validation_limits,
+        )
+    }
+
+    pub(in crate::canonical_scene::store) fn with_account_and_control_for_scene_input<'input>(
+        account: &PhysicalStorageAccount,
+        limits: SceneConstructionLimits,
+        control: OperationControl<SceneConstructionPhase, SceneConstructionUnit>,
+        input: SceneAuthoringBatch<'input>,
+        validation_limits: SceneValidationLimits,
+    ) -> Result<SceneAuthoringOperation<'input>, SceneConstructionStartError> {
         let envelope = SceneInputEnvelope::try_new(input, validation_limits)?;
         let operation = Self::start_with_control_and_attribution_slots(
             account,
             limits,
-            OperationControl::default(),
+            control,
             envelope.terminal_attribution_slots(),
         )?;
         Ok(SceneAuthoringOperation {
@@ -641,18 +670,13 @@ impl SceneConstructionOperation {
         validation_limits: SceneValidationLimits,
         cancellation: impl baozi_operation::CancellationSignal,
     ) -> Result<SceneAuthoringOperation<'input>, SceneConstructionStartError> {
-        let envelope = SceneInputEnvelope::try_new(input, validation_limits)?;
-        let operation = Self::start_with_control_and_attribution_slots(
+        Self::with_account_and_control_for_scene_input(
             account,
             limits,
             OperationControl::default().with_cancellation(cancellation),
-            envelope.terminal_attribution_slots(),
-        )?;
-        Ok(SceneAuthoringOperation {
-            operation,
             input,
             validation_limits,
-        })
+        )
     }
 
     #[cfg(test)]
@@ -950,6 +974,14 @@ fn try_plan_scene_operation(
     control: OperationControl<SceneConstructionPhase, SceneConstructionUnit>,
     terminal_attribution_slots: usize,
 ) -> Result<SceneOperationStart, SceneConstructionStartError> {
+    let ordinary_attempted_work = limits
+        .attempted_work
+        .checked_sub(FAILURE_TERMINAL_WORK_LIMIT)
+        .ok_or(SceneConstructionStartError::TerminalWorkBudget)?;
+    let ordinary_consumed_work = limits
+        .consumed_work
+        .checked_sub(FAILURE_TERMINAL_WORK_LIMIT)
+        .ok_or(SceneConstructionStartError::TerminalWorkBudget)?;
     let brand = ConstructionBrand::reserve()?;
     let domain = StoreKeyDomain::try_new(STORE_CATALOG)?;
     let keys = SceneStoreKeys {
@@ -959,23 +991,40 @@ fn try_plan_scene_operation(
         dimension: domain
             .try_admit_dimension(STORE_DIMENSION)
             .ok_or(SceneConstructionStartError::KeyAdmissionInvariant)?,
+        failure_terminal_work_dimension: domain
+            .try_admit_dimension(FAILURE_TERMINAL_WORK_DIMENSION)
+            .ok_or(SceneConstructionStartError::KeyAdmissionInvariant)?,
     };
     let dimension_policy = DimensionPolicy::reservable_bytes(
-        limits.attempted_work,
-        limits.consumed_work,
+        ordinary_attempted_work,
+        ordinary_consumed_work,
         limits.committed_output,
         limits.dimension_live_bytes,
     )
     .with_published_outcome_evidence_limit(limits.published_evidence);
     let ledger_limits = LedgerLimits::new(
         limits.operation_live_bytes,
-        [(keys.dimension, dimension_policy)],
+        [
+            (keys.dimension, dimension_policy),
+            (
+                keys.failure_terminal_work_dimension,
+                DimensionPolicy::counter(
+                    FAILURE_TERMINAL_WORK_LIMIT,
+                    FAILURE_TERMINAL_WORK_LIMIT,
+                    0,
+                ),
+            ),
+        ],
     )?;
     let ledger_plan = StoreLedgerPlan::try_new(domain, ledger_limits, &[keys.phase])?;
     let terminal_limits =
         RetainedStoreBatchLimits::new(terminal_attribution_slots, TERMINAL_COMMITMENT_SLOTS)?;
     let terminal_writer =
         RetainedStoreWriterPlan::new(keys.phase, keys.dimension, keys.dimension, terminal_limits);
+    let failure_terminal_work = RetainedStoreFailureTerminalWorkPlan::new(
+        keys.failure_terminal_work_dimension,
+        FAILURE_TERMINAL_EVIDENCE_MEMBERS,
+    )?;
     let start_plan = RetainedStoreStartPlan::new(
         terminal_writer,
         RetainedStoreSharePlan::new(keys.dimension, keys.dimension),
@@ -984,7 +1033,8 @@ fn try_plan_scene_operation(
         1,
         keys.dimension,
         1,
-    );
+    )
+    .with_failure_terminal_work(failure_terminal_work);
     Ok(SceneOperationStart {
         brand,
         keys,
@@ -1031,8 +1081,9 @@ fn prepare_two_node<L: ScenePublicationLineage>(
     let mut assembly = match raw.try_publication_assembly(publication_plan) {
         Ok(assembly) => assembly,
         Err(error) => {
-            let operation = error.try_into_operation()?;
-            let prepared = operation.prepare_minimal_fallback(FALLBACK_CODE)?;
+            let prepared = error
+                .into_recovery()?
+                .prepare_minimal_fallback(FALLBACK_CODE)?;
             return Ok(PreparedSceneConstruction::MinimalFallback(
                 PreparedTracerSceneFallback { store: prepared },
             ));

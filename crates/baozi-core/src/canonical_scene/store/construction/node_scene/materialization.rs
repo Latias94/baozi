@@ -35,8 +35,8 @@ use crate::entity::AuthoredTransformKind;
 use crate::identity::{ReservedSceneGeneration, SceneGenerationError, SceneGenerationId};
 
 use super::super::{
-    FALLBACK_CODE, PreparedTracerSceneFallback, SceneAuthoringOperation, SceneConstructionError,
-    SceneConstructionOperation, SceneConstructionOwner, SceneStoreAssembly, SceneStoreKeys,
+    SceneAuthoringOperation, SceneConstructionError, SceneConstructionOperation,
+    SceneConstructionOwner, SceneStoreAssembly, SceneStoreKeys, SceneStoreOperation,
 };
 use super::animation::{AnimationMaterializationPlans, AnimationTargetTableRefs, retain_animation};
 use super::appearance::{AppearanceMaterializationPlans, retain_appearance};
@@ -49,8 +49,8 @@ use super::geometry::{
 };
 use super::publication::{
     node_scene_failure_code, post_evidence_failure_code,
-    prepare_node_minimal_fallback_from_assembly, prepare_node_minimal_fallback_from_operation,
-    prepare_node_rich_failure_from_assembly,
+    prepare_node_minimal_fallback_from_assembly, prepare_node_minimal_fallback_from_open_recovery,
+    prepare_node_minimal_fallback_from_operation, prepare_node_rich_failure_from_assembly,
 };
 use super::{
     FreshNodeSceneOwner, NODE_SCENE_BUILD_INVARIANT_CODE, NODE_SCENE_COMMITMENT_REJECTION_CODE,
@@ -67,22 +67,27 @@ impl RejectedNodeSceneConstruction {
         &self.failure
     }
 
-    pub(in crate::canonical_scene::store) fn prepare_minimal_fallback(
+    pub(in crate::canonical_scene::store) fn prepare_rich_failure(
         self,
-    ) -> Result<PreparedNodeSceneConstruction, SceneConstructionError> {
+    ) -> Result<
+        (
+            PreparedNodeSceneConstruction,
+            NodeSceneConstructionRejection,
+        ),
+        SceneConstructionError,
+    > {
         let Self {
             operation:
                 SceneConstructionOperation {
                     raw,
                     brand: _,
-                    keys: _,
+                    keys,
                 },
-            failure: _,
+            failure,
         } = self;
-        let store = raw.prepare_minimal_fallback(FALLBACK_CODE)?;
-        Ok(PreparedNodeSceneConstruction::MinimalFallback(
-            PreparedTracerSceneFallback { store },
-        ))
+        let cause = failure.stable_code();
+        let prepared = prepare_node_authoring_rejection(raw, keys, cause)?.into();
+        Ok((prepared, failure))
     }
 }
 
@@ -518,6 +523,65 @@ fn node_scene_writer_plan(
     ))
 }
 
+fn prepare_node_authoring_rejection(
+    raw: SceneStoreOperation,
+    keys: SceneStoreKeys,
+    cause: u32,
+) -> Result<PreparedNodeSceneFailure, SceneConstructionError> {
+    let evidence_plan = match RecordPlan::new(1, NODE_SCENE_EVIDENCE_FIELD_COUNT) {
+        Ok(plan) => plan,
+        Err(_) => {
+            return prepare_node_minimal_fallback_from_operation(
+                raw,
+                NODE_SCENE_BUILD_INVARIANT_CODE,
+            );
+        }
+    };
+    let evidence_table = match node_scene_writer_plan(keys, 2)
+        .and_then(|writer| RetainedStoreBlockTablePlan::new(writer, 1, 1))
+    {
+        Ok(table) => table,
+        Err(_) => {
+            return prepare_node_minimal_fallback_from_operation(
+                raw,
+                NODE_SCENE_BUILD_INVARIANT_CODE,
+            );
+        }
+    };
+    let mut assembly = match raw
+        .try_publication_assembly(RetainedStorePublicationPlan::rich_failure(evidence_table))
+    {
+        Ok(assembly) => assembly,
+        Err(error) => {
+            let fallback_cause = node_scene_failure_code(error.cause());
+            return prepare_node_minimal_fallback_from_open_recovery(
+                error.into_recovery()?,
+                fallback_cause,
+            );
+        }
+    };
+    let counts = SceneEvidenceCounts::authoring_rejection();
+    let evidence = match retain_node_scene_evidence_counts(&mut assembly, evidence_plan, counts) {
+        Ok(evidence) => evidence,
+        Err(build_cause) => {
+            return prepare_node_minimal_fallback_from_assembly(
+                assembly,
+                node_scene_failure_code(&build_cause),
+            );
+        }
+    };
+    if assembly
+        .try_commit_outcome_evidence(keys.dimension, 1)
+        .is_err()
+    {
+        return prepare_node_minimal_fallback_from_assembly(
+            assembly,
+            NODE_SCENE_COMMITMENT_REJECTION_CODE,
+        );
+    }
+    prepare_node_rich_failure_from_assembly(assembly, evidence, counts, cause)
+}
+
 impl NodeSceneDraftBuild {
     fn failure(
         prepared: Result<PreparedNodeSceneFailure, SceneConstructionError>,
@@ -613,10 +677,9 @@ impl ValidatedNodeSceneConstruction<'_> {
             Err(error) => {
                 drop(batches);
                 let cause = node_scene_failure_code(error.cause());
-                let operation = error.try_into_operation()?;
-                return NodeSceneDraftBuild::failure(prepare_node_minimal_fallback_from_operation(
-                    operation, cause,
-                ));
+                return NodeSceneDraftBuild::failure(
+                    prepare_node_minimal_fallback_from_open_recovery(error.into_recovery()?, cause),
+                );
             }
         };
 
@@ -860,36 +923,40 @@ fn retain_node_scene_evidence(
     assembly: &mut SceneStoreAssembly,
     plans: &NodeSceneMaterializationPlans,
 ) -> Result<OutcomeEvidenceRecordRef<NodeSceneOutcomeEvidenceSchema>, StoreRuntimeError> {
-    assembly.try_retain_outcome_evidence_records(
-        plans.evidence,
-        NodeSceneOutcomeEvidenceSchema,
-        |writer| {
-            writer.write_row(|row| {
-                row.write_scalar(SCENE_SCHEMA_REVISION)?;
-                row.write_scalar(NODE_SCENE_EVIDENCE_OUTCOME_CANDIDATE)?;
-                row.write_scalar(plans.canonical_block_count)?;
-                row.write_scalar(plans.node_count)?;
-                row.write_scalar(plans.appearance.image_count())?;
-                row.write_scalar(plans.appearance.sampler_count())?;
-                row.write_scalar(plans.appearance.texture_count())?;
-                row.write_scalar(plans.appearance.material_count())?;
-                row.write_scalar(plans.appearance.binding_count())?;
-                row.write_scalar(plans.geometry.logical_mesh_count())?;
-                row.write_scalar(plans.geometry.primitive_count())?;
-                row.write_scalar(plans.geometry.attribute_count())?;
-                row.write_scalar(plans.geometry.mesh_instance_count())?;
-                row.write_scalar(plans.deformation.skin_count())?;
-                row.write_scalar(plans.deformation.logical_morph_count())?;
-                row.write_scalar(plans.deformation.morph_definition_count())?;
-                row.write_scalar(plans.deformation.primitive_count())?;
-                row.write_scalar(plans.deformation.morph_target_count())?;
-                row.write_scalar(plans.deformation.morph_delta_count())?;
-                row.write_scalar(plans.animation.clip_count())?;
-                row.write_scalar(plans.animation.channel_count())?;
-                row.write_scalar(plans.payload_block_count)
-            })
-        },
-    )
+    retain_node_scene_evidence_counts(assembly, plans.evidence, plans.evidence_counts())
+}
+
+fn retain_node_scene_evidence_counts(
+    assembly: &mut SceneStoreAssembly,
+    plan: RecordPlan,
+    counts: SceneEvidenceCounts,
+) -> Result<OutcomeEvidenceRecordRef<NodeSceneOutcomeEvidenceSchema>, StoreRuntimeError> {
+    assembly.try_retain_outcome_evidence_records(plan, NodeSceneOutcomeEvidenceSchema, |writer| {
+        writer.write_row(|row| {
+            row.write_scalar(SCENE_SCHEMA_REVISION)?;
+            row.write_scalar(NODE_SCENE_EVIDENCE_OUTCOME_CANDIDATE)?;
+            row.write_scalar(counts.canonical_block_count)?;
+            row.write_scalar(counts.node_count)?;
+            row.write_scalar(counts.image_count)?;
+            row.write_scalar(counts.sampler_count)?;
+            row.write_scalar(counts.texture_count)?;
+            row.write_scalar(counts.material_count)?;
+            row.write_scalar(counts.material_binding_count)?;
+            row.write_scalar(counts.logical_mesh_count)?;
+            row.write_scalar(counts.primitive_count)?;
+            row.write_scalar(counts.attribute_count)?;
+            row.write_scalar(counts.mesh_instance_count)?;
+            row.write_scalar(counts.skin_count)?;
+            row.write_scalar(counts.logical_morph_count)?;
+            row.write_scalar(counts.morph_definition_count)?;
+            row.write_scalar(counts.primitive_deformation_count)?;
+            row.write_scalar(counts.morph_target_count)?;
+            row.write_scalar(counts.morph_delta_count)?;
+            row.write_scalar(counts.animation_clip_count)?;
+            row.write_scalar(counts.animation_channel_count)?;
+            row.write_scalar(counts.payload_block_count)
+        })
+    })
 }
 
 fn retain_node_scene_transforms(

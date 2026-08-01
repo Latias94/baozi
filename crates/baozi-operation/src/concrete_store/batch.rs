@@ -500,7 +500,7 @@ where
         match result {
             Ok(raw) => Ok(CanonicalStoreRange::from_raw(raw)),
             Err(CanonicalRetainBatchError::Preflight(cause)) => self
-                .map_action(Err(cause))
+                .map_pure_preflight(Err(cause))
                 .map_err(StoreBatchRuntimeError::Preflight),
             Err(CanonicalRetainBatchError::Execution { failed_item, cause }) => self
                 .map_action(Err(cause))

@@ -17,8 +17,8 @@ mod validation;
 
 pub use execution::RetainedStoreExecution;
 pub use planning::{
-    RetainedStoreTranscript, StoreTranscriptOpenError, StoreTranscriptOpenResult,
-    StoreTranscriptStartResult,
+    RetainedStoreTranscript, StoreTranscriptOpenError, StoreTranscriptOpenRecovery,
+    StoreTranscriptOpenResult, StoreTranscriptStartResult,
 };
 pub use validation::{
     StoreFailureContinuationExecution, StoreTranscriptFailureValidation, StoreTranscriptStateError,

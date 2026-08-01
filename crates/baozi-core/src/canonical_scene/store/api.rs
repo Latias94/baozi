@@ -22,6 +22,8 @@ use super::construction::node_scene::{
     ValidatedNodeSceneConstruction,
 };
 
+pub(crate) mod continuation;
+
 /// A non-owning descriptor for one materialized canonical Scene directory.
 ///
 /// This type is intentionally neither `Clone` nor `Copy`. The matching retained owner is carried
@@ -34,7 +36,7 @@ pub(crate) struct SceneDraft(NodeSceneDraft);
 /// Dropping this value releases the unpublished retained state. Preparation consumes both the
 /// owner and descriptor so neither can survive a terminal publication decision.
 #[must_use = "a pending Scene draft owner must be centrally prepared or deliberately dropped"]
-pub(crate) struct PendingSceneDraftOwner(PendingNodeSceneDraft);
+struct PendingSceneDraftOwner(PendingNodeSceneDraft);
 
 /// The exact result of materialization before central canonical validation.
 #[must_use = "a Scene draft build owns either validation work or a prepared failure"]
@@ -42,7 +44,7 @@ pub(crate) struct PendingSceneDraftOwner(PendingNodeSceneDraft);
     clippy::large_enum_variant,
     reason = "the failure owner stays inline so containment does not allocate"
 )]
-pub(crate) enum SceneDraftBuild {
+enum SceneDraftBuild {
     Draft {
         draft: SceneDraft,
         owner: PendingSceneDraftOwner,
@@ -59,11 +61,6 @@ impl SceneDraftBuild {
             },
             NodeSceneDraftBuild::Failure(failure) => Self::Failure(PreparedSceneFailure(failure)),
         }
-    }
-
-    /// Consumes the descriptor-owner pair, or forwards an already prepared failure.
-    pub(crate) fn prepare(self) -> Result<PreparedSceneConstruction, SceneConstructionError> {
-        self.prepare_with_generation_source(SceneGenerationId::reserve)
     }
 
     fn prepare_with_generation_source(
@@ -89,11 +86,17 @@ impl PendingSceneDraftOwner {
             .prepare_with_generation_source(draft.0, reserve_generation)
             .map(PreparedSceneConstruction)
     }
+
+    fn prepare_missing_draft(self) -> Result<PreparedSceneConstruction, SceneConstructionError> {
+        self.0
+            .prepare_missing_draft()
+            .map(PreparedSceneConstruction)
+    }
 }
 
 /// A validated source batch coupled to the exact operation that admitted its work.
 #[must_use = "the validated Scene construction must be materialized or deliberately dropped"]
-pub(crate) struct ValidatedSceneConstruction<'input>(ValidatedNodeSceneConstruction<'input>);
+struct ValidatedSceneConstruction<'input>(ValidatedNodeSceneConstruction<'input>);
 
 impl<'input> ValidatedSceneConstruction<'input> {
     pub(in crate::canonical_scene::store) fn from_node_scene(
@@ -103,14 +106,8 @@ impl<'input> ValidatedSceneConstruction<'input> {
     }
 
     /// Materializes the source-backed input into a descriptor and its independent retained owner.
-    pub(crate) fn finish_draft(self) -> Result<SceneDraftBuild, SceneConstructionError> {
+    fn finish_draft(self) -> Result<SceneDraftBuild, SceneConstructionError> {
         self.0.finish_draft().map(SceneDraftBuild::from_node_scene)
-    }
-
-    /// Runs materialization, central validation, and terminal preparation through the
-    /// descriptor-owner path.
-    pub(crate) fn prepare(self) -> Result<PreparedSceneConstruction, SceneConstructionError> {
-        self.finish_draft()?.prepare()
     }
 
     /// Exercises the final opaque handoff with a deterministic generation source.
@@ -127,9 +124,19 @@ impl<'input> ValidatedSceneConstruction<'input> {
     }
 }
 
+#[cfg(test)]
+pub(in crate::canonical_scene::store) fn handoff_validated_node_scene_with_generation_source_for_test(
+    construction: ValidatedNodeSceneConstruction<'_>,
+    reserve_generation: impl FnOnce() -> Result<ReservedSceneGeneration, SceneGenerationError>,
+) -> Result<SceneConstructionTerminal, SceneConstructionError> {
+    ValidatedSceneConstruction::from_node_scene(construction)
+        .prepare_with_generation_source(reserve_generation)
+        .map(PreparedSceneConstruction::handoff)
+}
+
 /// A frozen failure publication which can only be forwarded to terminal handoff.
 #[must_use = "a prepared Scene failure must be handed off or deliberately dropped"]
-pub(crate) struct PreparedSceneFailure(PreparedNodeSceneFailure);
+struct PreparedSceneFailure(PreparedNodeSceneFailure);
 
 impl From<PreparedSceneFailure> for PreparedSceneConstruction {
     fn from(failure: PreparedSceneFailure) -> Self {

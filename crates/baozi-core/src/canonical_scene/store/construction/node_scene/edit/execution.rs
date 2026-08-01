@@ -17,7 +17,7 @@ use super::graph::{NodeSceneRewriteError, try_rewrite_node_scene};
 use super::plan::PendingNodeTransformEdit;
 use super::publication::{
     PreparedNodeTransformEdit, prepare_edit_candidate, prepare_edit_minimal_from_assembly,
-    prepare_edit_minimal_from_operation, prepare_edit_post_evidence_failure,
+    prepare_edit_minimal_from_open_recovery, prepare_edit_post_evidence_failure,
     prepare_edit_post_evidence_invariant,
 };
 
@@ -76,10 +76,11 @@ impl PendingNodeTransformEdit<'_> {
             Ok(assembly) => assembly,
             Err(error) => {
                 let cause = node_scene_failure_code(error.cause());
-                let operation = error
-                    .try_into_operation()
+                let recovery = error
+                    .into_recovery()
                     .map_err(SceneConstructionError::from)?;
-                return prepare_edit_minimal_from_operation(operation, cause).map_err(Into::into);
+                return prepare_edit_minimal_from_open_recovery(recovery, cause)
+                    .map_err(Into::into);
             }
         };
 

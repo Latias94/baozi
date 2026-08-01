@@ -125,12 +125,14 @@ use std::fmt;
 use std::marker::PhantomData;
 
 use crate::capacity::{CapacityPlan, CapacityPlanError};
-use crate::control::{ControlCause, OperationControl, ProgressPhase, ProgressUnit};
+use crate::control::{OperationControl, ProgressPhase, ProgressUnit};
 use crate::coordinator::FinalProgress;
 #[cfg(test)]
 use crate::ledger::PhaseCompletionError;
 use crate::ledger::{LedgerCause, LiveReservation};
 use crate::owner::OperationOwner;
+#[cfg(test)]
+use crate::retained::RetainedAllocationError;
 use crate::retained::{
     CanonicalLeafInheritanceError, CanonicalRetainedLeafPolicy, CanonicalRetainedRewriteMap,
     CanonicalRetainedSlot, CanonicalSourceBindError, FinalizationContainmentError,
@@ -139,11 +141,9 @@ use crate::retained::{
     RetainedControlCheckpoint, RetainedFailureAssembly, RetainedFailureValidation,
     RetainedFallbackOnly, RetainedOperation, RetainedOperationStartError,
     RetainedOperationStartPlan, RetainedPublicationAssembly, RetainedPublicationError,
-    RetainedPublicationPrepareError, RetainedSuccessValidation, RetainedWorkControl,
-    ValidatedRetainedFailure, ValidatedRetainedSuccess,
+    RetainedPublicationOpenRecovery, RetainedPublicationPrepareError, RetainedSuccessValidation,
+    RetainedWorkControl, RetainedWriterError, ValidatedRetainedFailure, ValidatedRetainedSuccess,
 };
-#[cfg(test)]
-use crate::retained::{RetainedAllocationError, RetainedWriterError};
 #[cfg(feature = "_u4c-collector")]
 use crate::u4c_collector::{
     record_payload_copy_bytes, record_reference_write, record_semantic_cell_write,
@@ -156,7 +156,7 @@ use terminal_output::{
 };
 use validation::{
     map_phase_completion_error, map_publication_error, map_writer_error,
-    publication_error_requires_containment, validate_store_dimension,
+    publication_error_requires_containment,
 };
 
 mod batch;
@@ -171,11 +171,11 @@ pub use batch::{
     StoreBatchRuntimeError, Utf8BatchItem, Utf8BatchPlan,
 };
 pub use vocabulary::{
-    RetainedStoreBatchLimits, RetainedStoreBlockTablePlan, RetainedStorePublicationPlan,
-    RetainedStoreSharePlan, RetainedStoreStartPlan, RetainedStoreWriterPlan, StoreDimensionKey,
-    StoreDimensionSemanticId, StoreFallbackEnvelope, StoreKeyDomain, StoreKeyDomainCreateError,
-    StoreLedgerPlan, StoreLedgerPlanError, StorePhaseKey, StorePhaseSemanticId,
-    StoreSemanticCatalogId,
+    RetainedStoreBatchLimits, RetainedStoreBlockTablePlan, RetainedStoreFailureTerminalWorkPlan,
+    RetainedStorePublicationPlan, RetainedStoreSharePlan, RetainedStoreStartPlan,
+    RetainedStoreWriterPlan, StoreDimensionKey, StoreDimensionSemanticId, StoreFallbackEnvelope,
+    StoreKeyDomain, StoreKeyDomainCreateError, StoreLedgerPlan, StoreLedgerPlanError,
+    StorePhaseKey, StorePhaseSemanticId, StoreSemanticCatalogId,
 };
 
 pub use terminal_output::{
@@ -195,10 +195,10 @@ pub use transcript::{
     PlannedOutcomeEvidenceSequence, PlannedOutcomeEvidenceShare, PlannedOutcomeEvidenceUtf8,
     RetainedStoreExecution, RetainedStoreTranscript, StoreExecutionError,
     StoreFailureContinuationExecution, StoreTranscriptFailureValidation,
-    StoreTranscriptIdentityExhausted, StoreTranscriptOpenError, StoreTranscriptOpenResult,
-    StoreTranscriptPlanError, StoreTranscriptStartCause, StoreTranscriptStartError,
-    StoreTranscriptStartResult, StoreTranscriptStateError, StoreTranscriptSuccessValidation,
-    ValidatedTranscriptStoreSuccess,
+    StoreTranscriptIdentityExhausted, StoreTranscriptOpenError, StoreTranscriptOpenRecovery,
+    StoreTranscriptOpenResult, StoreTranscriptPlanError, StoreTranscriptStartCause,
+    StoreTranscriptStartError, StoreTranscriptStartResult, StoreTranscriptStateError,
+    StoreTranscriptSuccessValidation, ValidatedTranscriptStoreSuccess,
 };
 
 pub use validation::{
@@ -436,6 +436,7 @@ pub enum StorePlanError {
     InvalidRecordFieldCount { fields: usize, limit: usize },
     SizeOverflow,
     InvalidBlockTable,
+    InvalidFailureTerminalWork,
     DomainCodeOutOfRange { code: u32 },
 }
 
@@ -452,6 +453,9 @@ impl fmt::Display for StorePlanError {
             Self::InvalidBlockTable => {
                 formatter.write_str("retained block-table plan is inconsistent")
             }
+            Self::InvalidFailureTerminalWork => formatter.write_str(
+                "retained rich-failure terminal work requires a finite non-zero evidence-member bound",
+            ),
             Self::DomainCodeOutOfRange { code } => {
                 write!(
                     formatter,
@@ -1836,6 +1840,7 @@ where
 {
     raw: RawStoreControlCheckpoint<'a, O, PP, U>,
     domain: &'a StoreKeyDomain,
+    terminal_only: bool,
 }
 
 /// Poll-and-work capability lent to one controlled canonical builder or validator.
@@ -1924,12 +1929,17 @@ where
     PP: ProgressPhase,
     U: ProgressUnit,
 {
+    fn ensure_mutable(&self) -> Result<(), StoreRuntimeError> {
+        if self.terminal_only {
+            Err(StoreRuntimeError::FallbackOnly)
+        } else {
+            Ok(())
+        }
+    }
+
     fn validate_phase(&self, phase: StorePhaseKey) -> Result<(), StoreRuntimeError> {
         if !self.domain.owns_phase(phase) {
             return Err(StoreRuntimeError::ForeignPhaseDomain { phase });
-        }
-        if !self.raw.contains_phase(phase) {
-            return Err(StoreRuntimeError::Ledger(LedgerCause::UnknownPhase));
         }
         Ok(())
     }
@@ -1938,17 +1948,13 @@ where
         if !self.domain.owns_dimension(dimension) {
             return Err(StoreRuntimeError::ForeignDimensionDomain { dimension });
         }
-        if !self.raw.contains_dimension(dimension) {
-            return Err(StoreRuntimeError::Ledger(LedgerCause::UnknownDimension {
-                dimension,
-            }));
-        }
         Ok(())
     }
 
     /// Polls cancellation and deadline state without exposing progress reporting.
-    pub fn poll(&mut self) -> Result<(), ControlCause> {
-        self.raw.poll()
+    pub fn poll(&mut self) -> Result<(), StoreRuntimeError> {
+        self.ensure_mutable()?;
+        self.raw.poll().map_err(StoreRuntimeError::Control)
     }
 
     /// Records one non-refundable attempted-and-consumed work unit.
@@ -1960,6 +1966,7 @@ where
         dimension: StoreDimensionKey,
         amount: u64,
     ) -> Result<(), StoreRuntimeError> {
+        self.ensure_mutable()?;
         self.validate_dimension(dimension)?;
         self.raw
             .charge_observed(dimension, amount)
@@ -1973,6 +1980,7 @@ where
         dimension: StoreDimensionKey,
         bytes: u64,
     ) -> Result<RetainedStoreReservation<O>, StoreRuntimeError> {
+        self.ensure_mutable()?;
         self.validate_phase(phase)?;
         self.validate_dimension(dimension)?;
         self.raw
@@ -1987,6 +1995,7 @@ where
         reservation: &mut RetainedStoreReservation<O>,
         bytes: u64,
     ) -> Result<(), StoreRuntimeError> {
+        self.ensure_mutable()?;
         self.raw
             .resize(&mut reservation.raw, bytes)
             .map_err(StoreRuntimeError::Ledger)
@@ -2000,6 +2009,7 @@ where
         dimension: StoreDimensionKey,
         bytes: u64,
     ) -> Result<(), StoreRuntimeError> {
+        self.ensure_mutable()?;
         self.validate_phase(phase)?;
         self.validate_dimension(dimension)?;
         self.raw
@@ -2044,14 +2054,19 @@ where
             domain,
             lineage: _,
         } = self;
+        let terminal_only = raw.is_terminal_only();
         RetainedStoreControlCheckpoint {
             raw: raw.control_checkpoint(),
             domain,
+            terminal_only,
         }
     }
 
     /// Records one semantically completed phase after concrete domain and catalog validation.
     pub fn try_complete_phase(&self, phase: StorePhaseKey) -> Result<(), StoreRuntimeError> {
+        if self.raw.is_terminal_only() {
+            return Err(StoreRuntimeError::FallbackOnly);
+        }
         if !self.domain.owns_phase(phase) {
             return Err(StoreRuntimeError::ForeignPhaseDomain { phase });
         }
@@ -2067,9 +2082,6 @@ where
         if !self.domain.owns_phase(phase) {
             return Err(StoreRuntimeError::ForeignPhaseDomain { phase });
         }
-        if !self.raw.contains_phase(phase) {
-            return Err(StoreRuntimeError::Ledger(LedgerCause::UnknownPhase));
-        }
         Ok(())
     }
 
@@ -2079,11 +2091,6 @@ where
     ) -> Result<(), StoreRuntimeError> {
         if !self.domain.owns_dimension(dimension) {
             return Err(StoreRuntimeError::ForeignDimensionDomain { dimension });
-        }
-        if !self.raw.contains_dimension(dimension) {
-            return Err(StoreRuntimeError::Ledger(LedgerCause::UnknownDimension {
-                dimension,
-            }));
         }
         Ok(())
     }
@@ -2105,6 +2112,13 @@ where
         for dimension in dimensions {
             self.validate_dimension_key(dimension)?;
         }
+        if !self.raw.contains_phase(phase)
+            || dimensions
+                .into_iter()
+                .any(|dimension| !self.raw.contains_dimension(dimension))
+        {
+            return Err(StoreRuntimeError::InvalidPublicationPlan);
+        }
         Ok(())
     }
 
@@ -2113,6 +2127,19 @@ where
         dimension: StoreDimensionKey,
     ) -> Result<(), StoreRuntimeError> {
         self.validate_dimension_key(dimension)
+    }
+
+    fn validate_transcript_commitment_dimension(
+        &self,
+        dimension: StoreDimensionKey,
+    ) -> Result<(), StoreRuntimeError> {
+        self.validate_commitment_dimension(dimension)?;
+        if !self.raw.contains_dimension(dimension) {
+            return Err(StoreRuntimeError::Ledger(LedgerCause::UnknownDimension {
+                dimension,
+            }));
+        }
+        Ok(())
     }
 
     fn validate_publication_plan_keys(
@@ -2135,16 +2162,24 @@ where
     #[allow(
         clippy::result_large_err,
         clippy::type_complexity,
-        reason = "rollback-safe open errors preserve the complete allocation-free operation owner"
+        reason = "rollback-safe open errors preserve bounded allocation-free recovery authority"
     )]
     pub fn try_publication_assembly(
         self,
         plan: RetainedStorePublicationPlan,
     ) -> Result<RetainedStorePublicationAssembly<O, PP, U, L>, RetainedStoreOpenError<O, PP, U, L>>
     {
+        if self.raw.is_terminal_only() {
+            return Err(RetainedStoreOpenError {
+                recovery: Some(RetainedStoreOpenRecovery::FallbackOnly(
+                    StoreOpenFallbackOnly { operation: self },
+                )),
+                cause: StoreRuntimeError::FallbackOnly,
+            });
+        }
         if let Err(cause) = self.validate_publication_plan_keys(&plan) {
             return Err(RetainedStoreOpenError {
-                operation: Some(self),
+                recovery: Some(RetainedStoreOpenRecovery::Retry(self)),
                 cause,
             });
         }
@@ -2163,17 +2198,33 @@ where
             }),
             Err(error) => {
                 let cause = map_writer_error(error.cause());
-                match error.try_into_operation() {
-                    Ok(raw) => Err(RetainedStoreOpenError {
-                        operation: Some(Self {
-                            raw,
-                            domain,
-                            lineage,
-                        }),
-                        cause,
-                    }),
+                match error.into_recovery() {
+                    Ok(RetainedPublicationOpenRecovery::Retry(raw)) => {
+                        Err(RetainedStoreOpenError {
+                            recovery: Some(RetainedStoreOpenRecovery::Retry(Self {
+                                raw,
+                                domain,
+                                lineage,
+                            })),
+                            cause,
+                        })
+                    }
+                    Ok(RetainedPublicationOpenRecovery::FallbackOnly(raw)) => {
+                        Err(RetainedStoreOpenError {
+                            recovery: Some(RetainedStoreOpenRecovery::FallbackOnly(
+                                StoreOpenFallbackOnly {
+                                    operation: Self {
+                                        raw,
+                                        domain,
+                                        lineage,
+                                    },
+                                },
+                            )),
+                            cause,
+                        })
+                    }
                     Err(_) => Err(RetainedStoreOpenError {
-                        operation: None,
+                        recovery: None,
                         cause,
                     }),
                 }
@@ -2246,7 +2297,7 @@ where
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    let (terminal_phase, dimensions) = plan.keys_for_start_validation();
+    let (terminal_phase, dimensions, failure_terminal_dimension) = plan.keys_for_start_validation();
     if !ledger_plan.owns_phase(terminal_phase) {
         return Err(RetainedStoreStartError::Runtime(
             StoreRuntimeError::ForeignPhaseDomain {
@@ -2271,9 +2322,24 @@ where
             )));
         }
     }
+    if !plan.failure_terminal_work_is_separate() {
+        return Err(RetainedStoreStartError::InvalidTerminalLimits);
+    }
+    if let Some(dimension) = failure_terminal_dimension {
+        if !ledger_plan.owns_dimension(dimension) {
+            return Err(RetainedStoreStartError::Runtime(
+                StoreRuntimeError::ForeignDimensionDomain { dimension },
+            ));
+        }
+        if !ledger_plan.contains_dimension(dimension) {
+            return Err(RetainedStoreStartError::Runtime(StoreRuntimeError::Ledger(
+                LedgerCause::UnknownDimension { dimension },
+            )));
+        }
+    }
     let allocation_plan = RetainedAllocationPlan::new(0, 0)
         .map_err(|_| RetainedStoreStartError::Runtime(StoreRuntimeError::InvalidPublicationPlan))?;
-    let (
+    let vocabulary::RawRetainedStoreStartParts {
         terminal_writer,
         share,
         fallback,
@@ -2281,8 +2347,9 @@ where
         fallback_amount,
         snapshot_dimension,
         snapshot_amount,
-    ) = plan.into_raw_start_parts();
-    let raw_plan = RetainedOperationStartPlan::for_publication(
+        failure_terminal_work,
+    } = plan.into_raw_start_parts();
+    let mut raw_plan = RetainedOperationStartPlan::for_publication(
         terminal_writer,
         share,
         allocation_plan,
@@ -2291,6 +2358,9 @@ where
         snapshot_dimension,
         snapshot_amount,
     );
+    if let Some(failure_terminal_work) = failure_terminal_work {
+        raw_plan = raw_plan.with_failure_terminal_work(failure_terminal_work);
+    }
     let (domain, ledger_limits, phases) = ledger_plan.into_parts();
     let result = match source {
         Some(source) => RetainedOperation::try_start_derived_with_phase_catalog(
@@ -2326,15 +2396,103 @@ where
         })
 }
 
-/// Failure to open concrete retained tables, preserving the operation only after proven rollback.
-#[must_use = "recover the operation when the error reports a rollback-safe failure"]
+/// Narrow owner returned after the single-use failure-terminal authority has been consumed.
+///
+/// This owner deliberately exposes only the pre-admitted minimal fallback. It cannot reopen block
+/// tables, create checkpoints, or begin a new transcript.
+#[must_use = "publish the pre-admitted minimal fallback"]
+pub struct StoreOpenFallbackOnly<O, PP, U, L = FreshStoreLineage>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    operation: RetainedStoreOperation<O, PP, U, L>,
+}
+
+impl<O, PP, U, L> StoreOpenFallbackOnly<O, PP, U, L>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    /// Publishes the pre-admitted minimal fallback without reopening retained tables.
+    pub fn prepare_minimal_fallback(
+        self,
+        cause: u32,
+    ) -> Result<PreparedStoreFallback, StorePrepareError> {
+        self.operation.prepare_minimal_fallback(cause)
+    }
+}
+
+impl<O, PP, U, L> fmt::Debug for StoreOpenFallbackOnly<O, PP, U, L>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("StoreOpenFallbackOnly")
+            .finish_non_exhaustive()
+    }
+}
+
+/// Capability preserved after a retained publication fails to open.
+#[must_use = "retry the operation or publish the pre-admitted minimal fallback"]
+pub enum RetainedStoreOpenRecovery<O, PP, U, L = FreshStoreLineage>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    /// Pure preflight or rollback-safe failure preserved the complete operation authority.
+    Retry(RetainedStoreOperation<O, PP, U, L>),
+    /// Opening consumed the single-use failure-terminal authority.
+    FallbackOnly(StoreOpenFallbackOnly<O, PP, U, L>),
+}
+
+impl<O, PP, U, L> RetainedStoreOpenRecovery<O, PP, U, L>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    /// Publishes the pre-admitted minimal fallback from either recovery state.
+    pub fn prepare_minimal_fallback(
+        self,
+        cause: u32,
+    ) -> Result<PreparedStoreFallback, StorePrepareError> {
+        match self {
+            Self::Retry(operation) => operation.prepare_minimal_fallback(cause),
+            Self::FallbackOnly(owner) => owner.prepare_minimal_fallback(cause),
+        }
+    }
+}
+
+impl<O, PP, U, L> fmt::Debug for RetainedStoreOpenRecovery<O, PP, U, L>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Retry(_) => formatter.write_str("Retry(..)"),
+            Self::FallbackOnly(_) => formatter.write_str("FallbackOnly(..)"),
+        }
+    }
+}
+
+/// Failure to open concrete retained tables, preserving only the authority proven safe to return.
+#[must_use = "recover the remaining authority or let the fail-closed owner drop"]
 pub struct RetainedStoreOpenError<O, PP, U, L = FreshStoreLineage>
 where
     O: OperationOwner,
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    operation: Option<RetainedStoreOperation<O, PP, U, L>>,
+    recovery: Option<RetainedStoreOpenRecovery<O, PP, U, L>>,
     cause: StoreRuntimeError,
 }
 
@@ -2349,11 +2507,11 @@ where
         &self.cause
     }
 
-    /// Recovers the operation only when every failed open step proved rollback.
-    pub fn try_into_operation(
+    /// Recovers either retry authority or a narrow fallback-only owner after proven rollback.
+    pub fn into_recovery(
         self,
-    ) -> Result<RetainedStoreOperation<O, PP, U, L>, StoreRuntimeError> {
-        self.operation.ok_or(self.cause)
+    ) -> Result<RetainedStoreOpenRecovery<O, PP, U, L>, StoreRuntimeError> {
+        self.recovery.ok_or(self.cause)
     }
 }
 
@@ -2364,10 +2522,15 @@ where
     U: ProgressUnit,
 {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let disposition = match &self.recovery {
+            Some(RetainedStoreOpenRecovery::Retry(_)) => "retry",
+            Some(RetainedStoreOpenRecovery::FallbackOnly(_)) => "fallback-only",
+            None => "fail-closed",
+        };
         formatter
             .debug_struct("RetainedStoreOpenError")
             .field("cause", &self.cause)
-            .field("recoverable", &self.operation.is_some())
+            .field("disposition", &disposition)
             .finish_non_exhaustive()
     }
 }
@@ -2444,6 +2607,7 @@ where
         Ok(RetainedStoreControlCheckpoint {
             raw,
             domain: &self.domain,
+            terminal_only: false,
         })
     }
 
@@ -2495,15 +2659,48 @@ where
         }
     }
 
-    fn validate_dimension(&self, dimension: StoreDimensionKey) -> Result<(), StoreRuntimeError> {
-        validate_store_dimension(
-            &self.domain,
-            dimension,
-            self.raw.contains_dimension(dimension),
-        )
+    fn validate_dimension(
+        &mut self,
+        dimension: StoreDimensionKey,
+    ) -> Result<(), StoreRuntimeError> {
+        if !self.domain.owns_dimension(dimension) {
+            return Err(StoreRuntimeError::ForeignDimensionDomain { dimension });
+        }
+        let result = self.raw.try_validate_work_dimension(dimension);
+        self.map_action(result)
+    }
+
+    fn record_success_rejection(&mut self, cause: PreparationFailureCode) {
+        if self.success_rejection.is_some() {
+            return;
+        }
+        self.raw.activate_failure_terminal_work();
+        self.success_rejection = Some(cause);
     }
 
     fn map_action<T>(
+        &mut self,
+        result: Result<T, RetainedPublicationError<StoreDimensionKey>>,
+    ) -> Result<T, StoreRuntimeError> {
+        match result {
+            Ok(value) => Ok(value),
+            Err(error) => {
+                if matches!(
+                    &error,
+                    RetainedPublicationError::Writer(RetainedWriterError::Ledger(_))
+                ) {
+                    self.record_success_rejection(PreparationFailureCode::ledger());
+                }
+                if publication_error_requires_containment(&error) {
+                    self.fallback_cause =
+                        Some(PreparationFailureCode::domain(CONTAINMENT_FALLBACK_CODE));
+                }
+                Err(map_publication_error(&error))
+            }
+        }
+    }
+
+    fn map_pure_preflight<T>(
         &mut self,
         result: Result<T, RetainedPublicationError<StoreDimensionKey>>,
     ) -> Result<T, StoreRuntimeError> {
@@ -2543,7 +2740,7 @@ where
                     Err(StoreRuntimeError::Build(cause))
                 }
                 StoreBuildCallbackFailure::VerifiedWork(cause) => {
-                    self.success_rejection = Some(work_failure_code(&cause));
+                    self.record_success_rejection(work_failure_code(&cause));
                     Err(cause.into_runtime())
                 }
                 StoreBuildCallbackFailure::UnverifiedCause => {
@@ -2565,12 +2762,12 @@ where
             Err(CanonicalSourceBindError::Publication(cause)) => self.map_action(Err(cause)),
             Err(CanonicalSourceBindError::Control(cause)) => {
                 let cause = StoreWorkError::control(cause);
-                self.success_rejection = Some(work_failure_code(&cause));
+                self.record_success_rejection(work_failure_code(&cause));
                 Err(cause.into_runtime())
             }
             Err(CanonicalSourceBindError::Ledger(cause)) => {
                 let cause = StoreWorkError::ledger(cause);
-                self.success_rejection = Some(work_failure_code(&cause));
+                self.record_success_rejection(work_failure_code(&cause));
                 Err(cause.into_runtime())
             }
         }
@@ -2585,12 +2782,12 @@ where
             Err(CanonicalLeafInheritanceError::Publication(cause)) => self.map_action(Err(cause)),
             Err(CanonicalLeafInheritanceError::Control(cause)) => {
                 let cause = StoreWorkError::control(cause);
-                self.success_rejection = Some(work_failure_code(&cause));
+                self.record_success_rejection(work_failure_code(&cause));
                 Err(cause.into_runtime())
             }
             Err(CanonicalLeafInheritanceError::Ledger(cause)) => {
                 let cause = StoreWorkError::ledger(cause);
-                self.success_rejection = Some(work_failure_code(&cause));
+                self.record_success_rejection(work_failure_code(&cause));
                 Err(cause.into_runtime())
             }
         }
@@ -3282,7 +3479,9 @@ where
         amount: u64,
     ) -> Result<(), StoreRuntimeError> {
         self.ensure_writable()?;
-        self.validate_dimension(dimension)?;
+        if !self.domain.owns_dimension(dimension) {
+            return Err(StoreRuntimeError::ForeignDimensionDomain { dimension });
+        }
         let result = self.raw.try_commit_canonical(dimension, amount);
         self.map_action(result)
     }
@@ -3294,7 +3493,9 @@ where
         amount: u64,
     ) -> Result<(), StoreRuntimeError> {
         self.ensure_evidence_writable()?;
-        self.validate_dimension(dimension)?;
+        if !self.domain.owns_dimension(dimension) {
+            return Err(StoreRuntimeError::ForeignDimensionDomain { dimension });
+        }
         let result = self.raw.try_commit_outcome_evidence(dimension, amount);
         self.map_action(result)
     }
@@ -3393,7 +3594,7 @@ where
     /// interruption and preserves the evidence-only failure owner. Invalid roots, poisoned state,
     /// and callback panic retain the existing fallback-only containment semantics.
     pub fn validate_success_controlled<CanonicalKind, CanonicalTag, EvidenceKind, EvidenceTag>(
-        self,
+        mut self,
         work_dimension: StoreDimensionKey,
         canonical_root: CanonicalStoreRef<CanonicalKind, CanonicalTag>,
         evidence_root: OutcomeEvidenceStoreRef<EvidenceKind, EvidenceTag>,
@@ -3931,14 +4132,6 @@ where
         }
     }
 
-    fn validate_dimension(&self, dimension: StoreDimensionKey) -> Result<(), StoreRuntimeError> {
-        validate_store_dimension(
-            &self.domain,
-            dimension,
-            self.raw.contains_dimension(dimension),
-        )
-    }
-
     fn map_action<T>(
         &mut self,
         result: Result<T, RetainedPublicationError<StoreDimensionKey>>,
@@ -4083,7 +4276,9 @@ where
         amount: u64,
     ) -> Result<(), StoreRuntimeError> {
         self.ensure_writable()?;
-        self.validate_dimension(dimension)?;
+        if !self.domain.owns_dimension(dimension) {
+            return Err(StoreRuntimeError::ForeignDimensionDomain { dimension });
+        }
         let result = self.raw.try_commit_outcome_evidence(dimension, amount);
         self.map_action(result)
     }

@@ -746,7 +746,7 @@ fn admission_first_inherited_share_completes_then_later_share_is_rejected() {
     >(
         ledger,
         share_admission,
-        assembly.handle_share_work,
+        assembly.ordinary_handle_share_work,
         assembly
             .canonical_table
             .as_mut()

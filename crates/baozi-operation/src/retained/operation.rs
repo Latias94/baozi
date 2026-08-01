@@ -1,23 +1,25 @@
 use super::ownership::finish_pre_attribution_batch_cleanup;
-use super::publication_contract::retained_open_failure_is_recoverable;
+use super::publication_contract::{
+    RetainedPublicationOpenDisposition, retained_open_failure_is_rollback_safe,
+};
 use super::startup;
 use super::{
     AccountPoisonReason, AssemblyContainmentProvenance, CanonicalLineageAuthority,
-    FallbackPublicationBaseline, PhysicalStorageAccount, PreparationFailureCode,
-    PreparedRetainedPublication, PrimaryPublicationBatches, PublishedCanonicalAggregate,
-    QualifiedRetainedBlockTablePlan, RetainedAllocationError, RetainedAllocationPlan,
-    RetainedBatchLimits, RetainedBuildFailureCode, RetainedHandleSharePlan,
-    RetainedMembershipDestination, RetainedOperationStartError, RetainedOperationStartPlan,
-    RetainedOutcomeMode, RetainedPublicationAssembly, RetainedPublicationOpenError,
-    RetainedPublicationPlan, RetainedPublicationPrepareError, RetainedStorageDropOutcome,
-    RetainedWriterError, RetainedWriterPlan, StartupCrossPlaneAdmissionFailure,
-    StartupCrossPlanePlan, StartupPhysicalManifest, StartupPhysicalNoMutation,
-    StartupRetainedPartGuard, StartupTerminalEvidenceBuildError, TerminalEvidenceBackingPlan,
-    TerminalEvidenceKey, TerminalFallbackAttribution, TerminalFallbackGuard,
-    TerminalLedgerEvidence, TerminalPhysicalOwnershipManifest,
-    drop_retained_table_with_account_anchor, map_batch_error, try_create_retained_block_table,
-    try_open_publication_account, try_qualify_retained_block_table_plan,
-    unreachable_final_owner_state,
+    FailureTerminalWorkState, FallbackPublicationBaseline, PhysicalStorageAccount,
+    PreparationFailureCode, PreparedRetainedPublication, PrimaryPublicationBatches,
+    PublishedCanonicalAggregate, QualifiedRetainedBlockTablePlan, RetainedAllocationError,
+    RetainedAllocationPlan, RetainedBatchLimits, RetainedBuildFailureCode,
+    RetainedFailureTerminalWorkPlan, RetainedHandleSharePlan, RetainedMembershipDestination,
+    RetainedOperationStartError, RetainedOperationStartPlan, RetainedOutcomeMode,
+    RetainedPublicationAssembly, RetainedPublicationOpenError, RetainedPublicationPlan,
+    RetainedPublicationPrepareError, RetainedStorageDropOutcome, RetainedWriterError,
+    RetainedWriterPlan, StartupCrossPlaneAdmissionFailure, StartupCrossPlanePlan,
+    StartupPhysicalManifest, StartupPhysicalNoMutation, StartupRetainedPartGuard,
+    StartupTerminalEvidenceBuildError, TerminalEvidenceBackingPlan, TerminalEvidenceKey,
+    TerminalFallbackAttribution, TerminalFallbackGuard, TerminalLedgerEvidence,
+    TerminalPhysicalOwnershipManifest, drop_retained_table_with_account_anchor, map_batch_error,
+    try_create_retained_block_table, try_open_publication_account,
+    try_qualify_retained_block_table_plan, unreachable_final_owner_state,
 };
 #[cfg(test)]
 use super::{
@@ -56,7 +58,29 @@ where
     pub(super) baseline: FallbackPublicationBaseline<O, P, D, F>,
     terminal_writer: RetainedWriterPlan<P, D>,
     terminal_account_share_work: RetainedHandleSharePlan<D>,
+    failure_terminal_work: Option<FailureTerminalWorkCapability<D>>,
+    failure_terminal_work_dimension: Option<D>,
+    sticky_terminal_cause: Option<PreparationFailureCode>,
     canonical_lineage: CanonicalLineageAuthority,
+}
+
+/// Start-qualified, finite, single-use authority for terminal failure evidence.
+///
+/// A success-capable assembly retains this authority until success becomes irreversible or the
+/// candidate is downgraded. Ordinary control, writer, and commitment APIs cannot address its
+/// protected ledger dimension.
+struct FailureTerminalWorkCapability<D> {
+    handle_share_work: RetainedHandleSharePlan<D>,
+    max_evidence_members: usize,
+}
+
+impl<D: Copy> FailureTerminalWorkCapability<D> {
+    fn from_qualified(plan: RetainedFailureTerminalWorkPlan<D>) -> Self {
+        Self {
+            handle_share_work: plan.share_work(),
+            max_evidence_members: plan.max_evidence_members(),
+        }
+    }
 }
 
 /// Borrowed control-and-ledger capability for retained producers.
@@ -73,6 +97,8 @@ where
 {
     poll: OperationPollCheckpoint<'a, PP, U>,
     ledger: &'a crate::ledger::Ledger<O, P, D>,
+    failure_terminal_work_dimension: Option<D>,
+    sticky_terminal_cause: &'a mut Option<PreparationFailureCode>,
 }
 
 /// Poll-and-observed-work authority bound to one prevalidated dimension.
@@ -90,6 +116,8 @@ where
     poll: OperationPollCheckpoint<'a, PP, U>,
     ledger: &'a crate::ledger::Ledger<O, P, D>,
     dimension: D,
+    failure_terminal_work_dimension: Option<D>,
+    sticky_terminal_cause: &'a mut Option<PreparationFailureCode>,
 }
 
 impl<O, P, PP, U, D> RetainedWorkControl<'_, O, P, PP, U, D>
@@ -101,12 +129,25 @@ where
     D: Copy + Ord + fmt::Debug,
 {
     pub(crate) fn poll(&mut self) -> Result<(), ControlCause> {
-        self.poll.poll()
+        self.poll.poll().inspect_err(|cause| {
+            self.sticky_terminal_cause
+                .get_or_insert_with(|| PreparationFailureCode::from_control(cause));
+        })
     }
 
-    pub(crate) fn charge_observed(&self, amount: u64) -> Result<(), LedgerCause<D>> {
-        self.ledger
-            .charge_observed_batch(&[(self.dimension, amount)])
+    pub(crate) fn charge_observed(&mut self, amount: u64) -> Result<(), LedgerCause<D>> {
+        let result = if self.failure_terminal_work_dimension == Some(self.dimension) {
+            Err(LedgerCause::UnknownDimension {
+                dimension: self.dimension,
+            })
+        } else {
+            self.ledger
+                .charge_observed_batch(&[(self.dimension, amount)])
+        };
+        result.inspect_err(|_| {
+            self.sticky_terminal_cause
+                .get_or_insert_with(PreparationFailureCode::ledger);
+        })
     }
 }
 
@@ -119,7 +160,10 @@ where
     D: Copy + Ord + fmt::Debug,
 {
     pub(crate) fn poll(&mut self) -> Result<(), ControlCause> {
-        self.poll.poll()
+        self.poll.poll().inspect_err(|cause| {
+            self.sticky_terminal_cause
+                .get_or_insert_with(|| PreparationFailureCode::from_control(cause));
+        })
     }
 
     pub(crate) fn contains_phase(&self, phase: P) -> bool {
@@ -127,7 +171,8 @@ where
     }
 
     pub(crate) fn contains_dimension(&self, dimension: D) -> bool {
-        self.ledger.contains_dimension(dimension)
+        self.failure_terminal_work_dimension != Some(dimension)
+            && self.ledger.contains_dimension(dimension)
     }
 
     pub(crate) fn charge_observed(
@@ -135,7 +180,13 @@ where
         dimension: D,
         amount: u64,
     ) -> Result<(), LedgerCause<D>> {
-        self.ledger.charge_observed_batch(&[(dimension, amount)])
+        self.validate_dimension(dimension)?;
+        self.ledger
+            .charge_observed_batch(&[(dimension, amount)])
+            .inspect_err(|_| {
+                self.sticky_terminal_cause
+                    .get_or_insert_with(PreparationFailureCode::ledger);
+            })
     }
 
     pub(crate) fn reserve(
@@ -144,7 +195,13 @@ where
         dimension: D,
         bytes: u64,
     ) -> Result<LiveReservation<O, P, D>, LedgerCause<D>> {
-        self.ledger.reserve(phase, dimension, bytes)
+        self.validate_dimension(dimension)?;
+        self.ledger
+            .reserve(phase, dimension, bytes)
+            .inspect_err(|_| {
+                self.sticky_terminal_cause
+                    .get_or_insert_with(PreparationFailureCode::ledger);
+            })
     }
 
     pub(crate) fn resize(
@@ -152,7 +209,12 @@ where
         reservation: &mut LiveReservation<O, P, D>,
         bytes: u64,
     ) -> Result<(), LedgerCause<D>> {
-        self.ledger.resize_reservation(reservation, bytes)
+        self.ledger
+            .resize_reservation(reservation, bytes)
+            .inspect_err(|_| {
+                self.sticky_terminal_cause
+                    .get_or_insert_with(PreparationFailureCode::ledger);
+            })
     }
 
     pub(crate) fn transition(
@@ -162,8 +224,13 @@ where
         dimension: D,
         bytes: u64,
     ) -> Result<(), LedgerCause<D>> {
+        self.validate_dimension(dimension)?;
         self.ledger
             .transition_reservation(reservation, phase, dimension, bytes)
+            .inspect_err(|_| {
+                self.sticky_terminal_cause
+                    .get_or_insert_with(PreparationFailureCode::ledger);
+            })
     }
 
     pub(crate) fn validate_live_owner(
@@ -171,6 +238,16 @@ where
         reservation: &LiveReservation<O, P, D>,
     ) -> Result<(), LedgerCause<D>> {
         self.ledger.validate_live_reservation(reservation)
+    }
+
+    fn validate_dimension(&mut self, dimension: D) -> Result<(), LedgerCause<D>> {
+        if self.contains_dimension(dimension) {
+            Ok(())
+        } else {
+            self.sticky_terminal_cause
+                .get_or_insert_with(PreparationFailureCode::ledger);
+            Err(LedgerCause::UnknownDimension { dimension })
+        }
     }
 }
 
@@ -190,8 +267,19 @@ where
     F: Send + Sync + 'static,
 {
     pub(crate) fn control_checkpoint(&mut self) -> RetainedControlCheckpoint<'_, O, P, PP, U, D> {
-        let (poll, ledger) = self.coordinator.split_poll_checkpoint_and_retained_ledger();
-        RetainedControlCheckpoint { poll, ledger }
+        let Self {
+            coordinator,
+            failure_terminal_work_dimension,
+            sticky_terminal_cause,
+            ..
+        } = self;
+        let (poll, ledger) = coordinator.split_poll_checkpoint_and_retained_ledger();
+        RetainedControlCheckpoint {
+            poll,
+            ledger,
+            failure_terminal_work_dimension: *failure_terminal_work_dimension,
+            sticky_terminal_cause,
+        }
     }
 
     pub(crate) fn split_work_control(
@@ -201,21 +289,31 @@ where
         RetainedWorkControl<'_, O, P, PP, U, D>,
         &crate::ledger::Ledger<O, P, D>,
     ) {
-        let (poll, ledger) = self.coordinator.split_poll_checkpoint_and_retained_ledger();
+        let Self {
+            coordinator,
+            failure_terminal_work_dimension,
+            sticky_terminal_cause,
+            ..
+        } = self;
+        let (poll, ledger) = coordinator.split_poll_checkpoint_and_retained_ledger();
         (
             RetainedWorkControl {
                 poll,
                 ledger,
                 dimension,
+                failure_terminal_work_dimension: *failure_terminal_work_dimension,
+                sticky_terminal_cause,
             },
             ledger,
         )
     }
 
     pub fn contains_dimension(&self, dimension: D) -> bool {
-        self.coordinator
-            .retained_ledger()
-            .contains_dimension(dimension)
+        self.failure_terminal_work_dimension != Some(dimension)
+            && self
+                .coordinator
+                .retained_ledger()
+                .contains_dimension(dimension)
     }
 
     pub fn contains_phase(&self, phase: P) -> bool {
@@ -304,6 +402,30 @@ where
         {
             return Err(RetainedOperationStartError::InvalidTerminalLimits);
         }
+        let failure_terminal_work = match plan.failure_terminal_work {
+            Some(failure_plan) => {
+                let failure_dimension = failure_plan.dimension();
+                let ordinary_share_charges = plan.terminal_account_share_work.charges();
+                if plan.terminal_writer.capacity_dimension == failure_dimension
+                    || plan.terminal_writer.attribution_dimension == failure_dimension
+                    || ordinary_share_charges
+                        .iter()
+                        .any(|(dimension, _)| *dimension == failure_dimension)
+                    || plan.fallback_commitment.dimension() == failure_dimension
+                    || plan.snapshot_commitment.dimension() == failure_dimension
+                {
+                    return Err(RetainedOperationStartError::InvalidTerminalLimits);
+                }
+                let maximum_share_actions = failure_plan
+                    .maximum_share_actions()
+                    .map_err(|()| RetainedOperationStartError::InvalidTerminalLimits)?;
+                Some((failure_plan, maximum_share_actions))
+            }
+            None => None,
+        };
+        let failure_terminal_work_dimension = failure_terminal_work
+            .as_ref()
+            .map(|(plan, _)| plan.dimension());
         let evidence_assembly = RetainedBatchLimits::new(
             plan.terminal_writer
                 .limits
@@ -420,10 +542,24 @@ where
             entries.set(Some(test_retained_final_owner_allocator_entries()));
         });
         let (started_ledger, baseline, start_guard) = ready.split();
-        let coordinator = OperationCoordinator::from_started_ledger(control, started_ledger);
-        let ledger = coordinator.retained_ledger();
         let startup_guard =
             StartupRetainedPartGuard::new(start_guard, baseline, plan.fallback_plan, evidence_plan);
+        let failure_terminal_work = match failure_terminal_work {
+            Some((failure_plan, maximum_share_actions)) => {
+                started_ledger
+                    .preflight_repeated_observed_batch(
+                        &failure_plan.share_work().charges(),
+                        maximum_share_actions,
+                    )
+                    .map_err(|cause| {
+                        RetainedOperationStartError::Writer(RetainedWriterError::Ledger(cause))
+                    })?;
+                Some(FailureTerminalWorkCapability::from_qualified(failure_plan))
+            }
+            None => None,
+        };
+        let coordinator = OperationCoordinator::from_started_ledger(control, started_ledger);
+        let ledger = coordinator.retained_ledger();
         let startup_owner_result = startup_guard.try_build(build_fallback, || {
             #[cfg(test)]
             {
@@ -468,12 +604,77 @@ where
             baseline,
             terminal_writer: plan.terminal_writer,
             terminal_account_share_work: plan.terminal_account_share_work,
+            failure_terminal_work,
+            failure_terminal_work_dimension,
+            sticky_terminal_cause: None,
             canonical_lineage,
         })
     }
 
     pub fn account(&self) -> &PhysicalStorageAccount {
         self.baseline.account()
+    }
+
+    pub(super) fn activate_failure_terminal_work(&mut self) -> Option<RetainedHandleSharePlan<D>> {
+        self.failure_terminal_work
+            .take()
+            .map(|capability| capability.handle_share_work)
+    }
+
+    pub(super) const fn sticky_terminal_cause(&self) -> Option<PreparationFailureCode> {
+        self.sticky_terminal_cause
+    }
+
+    pub(super) fn record_ledger_failure(&mut self) {
+        self.sticky_terminal_cause
+            .get_or_insert_with(PreparationFailureCode::ledger);
+    }
+
+    pub(super) fn record_product_graph_failure(&mut self, code: u32) {
+        self.sticky_terminal_cause
+            .get_or_insert_with(|| PreparationFailureCode::product_graph(code));
+    }
+
+    pub(super) const fn has_failure_terminal_work_configuration(&self) -> bool {
+        self.failure_terminal_work_dimension.is_some()
+    }
+
+    pub(crate) const fn is_terminal_only(&self) -> bool {
+        self.failure_terminal_work_dimension.is_some() && self.failure_terminal_work.is_none()
+    }
+
+    pub(super) fn validate_ordinary_dimension(
+        &mut self,
+        dimension: D,
+    ) -> Result<(), LedgerCause<D>> {
+        if self.contains_dimension(dimension) {
+            Ok(())
+        } else {
+            self.record_ledger_failure();
+            Err(LedgerCause::UnknownDimension { dimension })
+        }
+    }
+
+    fn into_publication_open_error(
+        mut self,
+        cause: RetainedWriterError<D>,
+        rollback_safe: bool,
+    ) -> RetainedPublicationOpenError<Self, D> {
+        let disposition = if !rollback_safe {
+            RetainedPublicationOpenDisposition::FailClosed
+        } else if self.is_terminal_only() {
+            RetainedPublicationOpenDisposition::FallbackOnly
+        } else {
+            RetainedPublicationOpenDisposition::Retry
+        };
+        if matches!(&cause, RetainedWriterError::Ledger(_)) {
+            self.record_ledger_failure();
+        }
+        RetainedPublicationOpenError {
+            operation: self,
+            cause,
+            disposition,
+        }
     }
 
     /// Freezes the pre-admitted terminal baseline without opening a block-table assembly.
@@ -490,6 +691,7 @@ where
         PreparedRetainedPublication<CanonicalBlock, EvidenceBlock, F, P, D>,
         RetainedPublicationPrepareError,
     > {
+        let cause = self.sticky_terminal_cause.unwrap_or(cause);
         let RetainedOperation {
             coordinator,
             baseline,
@@ -510,7 +712,7 @@ where
     }
 
     pub fn try_publication_assembly<CanonicalBlock, EvidenceBlock>(
-        self,
+        mut self,
         mut plan: RetainedPublicationPlan<P, D>,
     ) -> Result<
         RetainedPublicationAssembly<O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>,
@@ -520,6 +722,33 @@ where
         CanonicalBlock: Send + Sync + 'static,
         EvidenceBlock: Send + Sync + 'static,
     {
+        let failure_only = plan.canonical.is_none();
+        let writer_is_admitted = |writer: RetainedWriterPlan<P, D>| {
+            self.contains_phase(writer.phase)
+                && self.contains_dimension(writer.capacity_dimension)
+                && self.contains_dimension(writer.attribution_dimension)
+        };
+        if !writer_is_admitted(plan.outcome_evidence.writer)
+            || plan
+                .canonical
+                .is_some_and(|canonical| !writer_is_admitted(canonical.writer))
+        {
+            return Err(
+                self.into_publication_open_error(RetainedWriterError::InvalidPublicationPlan, true)
+            );
+        }
+        if let Some(capability) = self.failure_terminal_work.as_ref()
+            && plan.outcome_evidence.total_blocks() > capability.max_evidence_members
+        {
+            return Err(
+                self.into_publication_open_error(RetainedWriterError::InvalidPublicationPlan, true)
+            );
+        }
+        if self.is_terminal_only() {
+            return Err(
+                self.into_publication_open_error(RetainedWriterError::InvalidPublicationPlan, true)
+            );
+        }
         if let Some(capacity) = self.canonical_lineage.source_mapping_capacity()
             && let Some(canonical) = plan.canonical.as_mut()
         {
@@ -540,11 +769,7 @@ where
         ) {
             Ok(qualified) => qualified,
             Err(cause) => {
-                return Err(RetainedPublicationOpenError {
-                    operation: self,
-                    cause,
-                    recoverable: true,
-                });
+                return Err(self.into_publication_open_error(cause, true));
             }
         };
         let canonical_qualified = match plan.canonical {
@@ -562,21 +787,43 @@ where
             ) {
                 Ok(qualified) => Some(qualified),
                 Err(cause) => {
-                    return Err(RetainedPublicationOpenError {
-                        operation: self,
-                        cause,
-                        recoverable: true,
-                    });
+                    return Err(self.into_publication_open_error(cause, true));
                 }
             },
             None => None,
         };
-        let handle_share_work = self.terminal_account_share_work;
+        let ordinary_handle_share_work = self.terminal_account_share_work;
+        let (
+            open_handle_share_work,
+            failure_evidence_handle_share_work,
+            failure_terminal_work_state,
+        ) = if failure_only {
+            self.failure_terminal_work.take().map_or(
+                (
+                    ordinary_handle_share_work,
+                    None,
+                    FailureTerminalWorkState::Inactive,
+                ),
+                |capability| {
+                    (
+                        capability.handle_share_work,
+                        Some(capability.handle_share_work),
+                        FailureTerminalWorkState::Active,
+                    )
+                },
+            )
+        } else {
+            (
+                ordinary_handle_share_work,
+                None,
+                FailureTerminalWorkState::Inactive,
+            )
+        };
         let open_result = catch_unwind(AssertUnwindSafe(|| {
             try_open_publication_account(
                 self.coordinator.retained_ledger(),
                 self.account(),
-                handle_share_work,
+                open_handle_share_work,
             )
         }));
         let (account, set_id) = match open_result {
@@ -586,19 +833,11 @@ where
                         .record_poison(AccountPoisonReason::OwnershipGraphUnverified),
                 );
                 discard_untrusted_panic_payload(payload);
-                return Err(RetainedPublicationOpenError {
-                    operation: self,
-                    cause,
-                    recoverable: false,
-                });
+                return Err(self.into_publication_open_error(cause, false));
             }
             Ok(Err(cause)) => {
-                let recoverable = retained_open_failure_is_recoverable(&cause);
-                return Err(RetainedPublicationOpenError {
-                    operation: self,
-                    cause,
-                    recoverable,
-                });
+                let rollback_safe = retained_open_failure_is_rollback_safe(&cause);
+                return Err(self.into_publication_open_error(cause, rollback_safe));
             }
             Ok(Ok(open)) => open,
         };
@@ -617,11 +856,7 @@ where
                     Ok(batch) => batch,
                     Err(error) => {
                         drop(account);
-                        return Err(RetainedPublicationOpenError {
-                            operation: self,
-                            cause: map_batch_error(error),
-                            recoverable: true,
-                        });
+                        return Err(self.into_publication_open_error(map_batch_error(error), true));
                     }
                 };
                 (Some(source), Some(batch), Some(storage))
@@ -642,11 +877,7 @@ where
             Err(error) => {
                 drop(canonical_batch);
                 drop(account);
-                return Err(RetainedPublicationOpenError {
-                    operation: self,
-                    cause: map_batch_error(error),
-                    recoverable: true,
-                });
+                return Err(self.into_publication_open_error(map_batch_error(error), true));
             }
         };
         let canonical_table = if let Some(storage) = canonical_storage {
@@ -657,7 +888,7 @@ where
             let table = match try_create_retained_block_table(
                 self.coordinator.retained_ledger(),
                 &account,
-                handle_share_work,
+                open_handle_share_work,
                 batch,
                 storage,
                 set_id,
@@ -668,11 +899,8 @@ where
                     drop(evidence_batch);
                     drop(canonical_batch);
                     drop(account);
-                    return Err(RetainedPublicationOpenError {
-                        operation: self,
-                        recoverable: retained_open_failure_is_recoverable(&cause),
-                        cause,
-                    });
+                    let rollback_safe = retained_open_failure_is_rollback_safe(&cause);
+                    return Err(self.into_publication_open_error(cause, rollback_safe));
                 }
             };
             Some(table)
@@ -682,7 +910,7 @@ where
         let evidence_table = match try_create_retained_block_table(
             self.coordinator.retained_ledger(),
             &account,
-            handle_share_work,
+            open_handle_share_work,
             &mut evidence_batch,
             evidence_storage,
             set_id,
@@ -698,11 +926,8 @@ where
                     finish_pre_attribution_batch_cleanup(canonical_batch, canonical_cleanup, cause);
                 drop(evidence_batch);
                 drop(account);
-                return Err(RetainedPublicationOpenError {
-                    operation: self,
-                    recoverable: retained_open_failure_is_recoverable(&cause),
-                    cause,
-                });
+                let rollback_safe = retained_open_failure_is_rollback_safe(&cause);
+                return Err(self.into_publication_open_error(cause, rollback_safe));
             }
         };
         let canonical_lineage = self.canonical_lineage;
@@ -717,7 +942,10 @@ where
             set_id,
             canonical_plan,
             evidence_plan,
-            handle_share_work,
+            ordinary_handle_share_work,
+            failure_evidence_handle_share_work,
+            failure_terminal_work_state,
+            success_outcome_rejected: failure_only,
             mode: if canonical_plan.is_some() {
                 RetainedOutcomeMode::SuccessCapable
             } else {

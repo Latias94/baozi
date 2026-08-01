@@ -3,7 +3,10 @@ use super::*;
 use std::num::{NonZeroU32, NonZeroU64};
 
 use crate::ledger::LedgerLimits;
-use crate::retained::{test_fail_next_membership_assignment, test_panic_final_owner_drop_after};
+use crate::retained::{
+    fail_next_final_owner_allocation, test_fail_next_membership_assignment,
+    test_panic_final_owner_drop_after,
+};
 use crate::{
     AccountPoisonReason, DimensionPolicy, PhysicalStorageAccountFactory,
     PhysicalStorageAccountFactoryLimits, PhysicalStorageAccountLimits,
@@ -37,8 +40,11 @@ const fn test_dimension_semantic(local: u64) -> StoreDimensionSemanticId {
 #[derive(Clone, Copy)]
 struct TestKeys {
     phase: StorePhaseKey,
+    unregistered_phase: StorePhaseKey,
     dimension: StoreDimensionKey,
     work_dimension: StoreDimensionKey,
+    failure_terminal_dimension: StoreDimensionKey,
+    unregistered_dimension: StoreDimensionKey,
 }
 
 fn test_vocabulary() -> (StoreKeyDomain, TestKeys) {
@@ -47,12 +53,21 @@ fn test_vocabulary() -> (StoreKeyDomain, TestKeys) {
         phase: domain
             .try_admit_phase(test_phase_semantic(1))
             .expect("test phase key"),
+        unregistered_phase: domain
+            .try_admit_phase(test_phase_semantic(2))
+            .expect("unregistered test phase key"),
         dimension: domain
             .try_admit_dimension(test_dimension_semantic(1))
             .expect("test dimension key"),
         work_dimension: domain
             .try_admit_dimension(test_dimension_semantic(2))
             .expect("test work dimension key"),
+        failure_terminal_dimension: domain
+            .try_admit_dimension(test_dimension_semantic(3))
+            .expect("test failure-terminal dimension key"),
+        unregistered_dimension: domain
+            .try_admit_dimension(test_dimension_semantic(4))
+            .expect("unregistered test dimension key"),
     };
     (domain, keys)
 }
@@ -171,6 +186,46 @@ fn test_operation_with_control_and_work_limits(
     )
 }
 
+fn test_operation_with_failure_terminal_work(
+    account: &PhysicalStorageAccount,
+) -> (TestOperation, TestKeys) {
+    let (domain, keys) = test_vocabulary();
+    let storage_policy = DimensionPolicy::reservable_bytes(u64::MAX, u64::MAX, u64::MAX, u64::MAX)
+        .with_published_outcome_evidence_limit(u64::MAX);
+    let work_policy = DimensionPolicy::reservable_bytes(32, 32, u64::MAX, u64::MAX)
+        .with_published_outcome_evidence_limit(u64::MAX);
+    let failure_policy = DimensionPolicy::counter(6, 6, 0);
+    let ledger_limits = LedgerLimits::new(
+        u64::MAX,
+        [
+            (keys.dimension, storage_policy),
+            (keys.work_dimension, work_policy),
+            (keys.failure_terminal_dimension, failure_policy),
+        ],
+    )
+    .expect("failure-terminal test ledger limits");
+    let ledger_plan = StoreLedgerPlan::try_new(domain, ledger_limits, &[keys.phase])
+        .expect("failure-terminal test ledger plan");
+    let start = RetainedStoreStartPlan::new(
+        test_writer_plan(keys, 32, 8),
+        RetainedStoreSharePlan::new(keys.dimension, keys.dimension),
+        StoreFallbackEnvelope::new(91),
+        keys.dimension,
+        1,
+        keys.dimension,
+        1,
+    )
+    .with_failure_terminal_work(
+        RetainedStoreFailureTerminalWorkPlan::new(keys.failure_terminal_dimension, 1)
+            .expect("bounded failure-terminal work plan"),
+    );
+    (
+        TestOperation::try_start(OperationControl::default(), ledger_plan, account, start)
+            .expect("failure-terminal test operation"),
+        keys,
+    )
+}
+
 fn test_simple_controlled_validation_graph(
     assembly: &mut TestAssembly,
 ) -> (
@@ -246,6 +301,90 @@ fn test_physical_delta(
             .checked_sub(before.live_retained_allocations())
             .expect("test retained allocations grow monotonically"),
     )
+}
+
+#[test]
+fn failure_terminal_work_plan_rejects_empty_and_overflowing_bounds() {
+    let (_domain, keys) = test_vocabulary();
+    assert_eq!(
+        RetainedStoreFailureTerminalWorkPlan::new(keys.failure_terminal_dimension, 0),
+        Err(StorePlanError::InvalidFailureTerminalWork)
+    );
+    assert_eq!(
+        RetainedStoreFailureTerminalWorkPlan::new(keys.failure_terminal_dimension, usize::MAX,),
+        Err(StorePlanError::InvalidFailureTerminalWork)
+    );
+}
+
+#[test]
+fn store_start_rejects_failure_terminal_dimension_used_by_ordinary_paths() {
+    let factory = test_factory();
+    let account = test_account(&factory);
+    let (domain, keys) = test_vocabulary();
+    let policy = DimensionPolicy::reservable_bytes(u64::MAX, u64::MAX, u64::MAX, u64::MAX)
+        .with_published_outcome_evidence_limit(u64::MAX);
+    let limits =
+        LedgerLimits::new(u64::MAX, [(keys.dimension, policy)]).expect("test ledger limits");
+    let ledger_plan =
+        StoreLedgerPlan::try_new(domain, limits, &[keys.phase]).expect("test store ledger plan");
+    let failure_terminal_work = RetainedStoreFailureTerminalWorkPlan::new(keys.dimension, 1)
+        .expect("bounded failure terminal plan");
+    let start = RetainedStoreStartPlan::new(
+        test_writer_plan(keys, 8, 4),
+        RetainedStoreSharePlan::new(keys.dimension, keys.dimension),
+        StoreFallbackEnvelope::new(91),
+        keys.dimension,
+        1,
+        keys.dimension,
+        1,
+    )
+    .with_failure_terminal_work(failure_terminal_work);
+
+    assert!(matches!(
+        TestOperation::try_start(OperationControl::default(), ledger_plan, &account, start),
+        Err(RetainedStoreStartError::InvalidTerminalLimits)
+    ));
+}
+
+#[test]
+fn ordinary_control_cannot_spend_failure_terminal_work() {
+    let factory = test_factory();
+    let account = test_account(&factory);
+    let (mut operation, keys) = test_operation_with_failure_terminal_work(&account);
+
+    {
+        let mut checkpoint = operation.control_checkpoint();
+        assert_eq!(
+            checkpoint.charge_observed(keys.failure_terminal_dimension, 1),
+            Err(StoreRuntimeError::Ledger(LedgerCause::UnknownDimension {
+                dimension: keys.failure_terminal_dimension,
+            }))
+        );
+        assert!(matches!(
+            checkpoint.reserve(keys.phase, keys.failure_terminal_dimension, 1),
+            Err(StoreRuntimeError::Ledger(LedgerCause::UnknownDimension {
+                dimension,
+            })) if dimension == keys.failure_terminal_dimension
+        ));
+    }
+
+    let published = operation
+        .prepare_minimal_fallback(0x51f0_1001)
+        .expect("protected-dimension rejection must retain minimal fallback")
+        .handoff();
+    let failure_dimension = published
+        .ledger_evidence
+        .dimension(keys.failure_terminal_dimension)
+        .expect("published failure-terminal dimension");
+    assert_eq!(
+        (failure_dimension.attempted(), failure_dimension.consumed()),
+        (0, 0)
+    );
+    let StoreTerminalCause::Failure(cause) = published.ledger_evidence.header().terminal_cause()
+    else {
+        panic!("protected-dimension rejection must freeze a failure cause");
+    };
+    assert_eq!(cause.class(), StorePreparationFailureClass::Ledger);
 }
 
 #[test]
@@ -449,6 +588,323 @@ fn public_store_start_enters_retained_allocators_after_ready_only() {
     );
 
     drop(operation);
+    drop(account);
+    assert_eq!(factory.snapshot().live_accounts(), 0);
+}
+
+#[test]
+fn verified_work_rejection_activates_failure_terminal_work_before_evidence_append() {
+    let factory = test_factory();
+    let account = test_account(&factory);
+    let (operation, keys) = test_operation_with_failure_terminal_work(&account);
+    let mut assembly = operation
+        .try_publication_assembly(test_publication_plan(keys, 1, 1))
+        .expect("success-capable publication");
+
+    assert!(matches!(
+        assembly.try_retain_canonical_sequence_controlled(
+            SequencePlan::<u8>::new(1).expect("canonical sequence plan"),
+            keys.work_dimension,
+            TestRootTag,
+            |_writer, control| {
+                control.charge_observed(33)?;
+                Ok(())
+            },
+        ),
+        Err(StoreRuntimeError::Ledger(LedgerCause::LimitExceeded { .. }))
+    ));
+    let evidence_root = assembly
+        .try_retain_outcome_evidence_sequence(
+            SequencePlan::<u8>::new(1).expect("failure evidence plan"),
+            TestTag,
+            |writer| writer.push(9),
+        )
+        .expect("verified rejection must activate protected evidence work");
+    let protected = assembly
+        .raw
+        .test_ledger_probe()
+        .dimension_evidence(keys.failure_terminal_dimension)
+        .expect("protected failure-terminal dimension");
+    assert_eq!((protected.attempted(), protected.consumed()), (2, 2));
+
+    let validated = match assembly.validate_rich_failure(evidence_root, |session, root| {
+        session.sequence(root).is_some()
+    }) {
+        StoreFailureValidation::Valid(validated) => validated,
+        _ => panic!("verified rejection evidence must validate"),
+    };
+    let header = failure_outcome_header(
+        validated
+            .try_prepare(0x51f0_1002, test_final_progress())
+            .expect("verified rejection rich failure"),
+    );
+    let StoreTerminalCause::Failure(cause) = header.terminal_cause() else {
+        panic!("verified work rejection must publish failure");
+    };
+    assert_eq!(cause.class(), StorePreparationFailureClass::Ledger);
+    assert_eq!(account.snapshot().live_retained_bytes(), 0);
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
+    drop(account);
+    assert_eq!(factory.snapshot().live_accounts(), 0);
+}
+
+#[test]
+fn protected_commitment_failure_seals_success_assembly_evidence() {
+    let factory = test_factory();
+    let account = test_account(&factory);
+    let (operation, keys) = test_operation_with_failure_terminal_work(&account);
+    let mut assembly = operation
+        .try_publication_assembly(test_publication_plan(keys, 1, 1))
+        .expect("success-capable publication");
+
+    assert!(matches!(
+        assembly.try_retain_canonical_sequence_controlled(
+            SequencePlan::<u8>::new(1).expect("canonical sequence plan"),
+            keys.work_dimension,
+            TestRootTag,
+            |_writer, control| {
+                control.charge_observed(33)?;
+                Ok(())
+            },
+        ),
+        Err(StoreRuntimeError::Ledger(LedgerCause::LimitExceeded { .. }))
+    ));
+    assert!(matches!(
+        assembly.try_commit_outcome_evidence(keys.failure_terminal_dimension, 1),
+        Err(StoreRuntimeError::Ledger(LedgerCause::UnknownDimension { dimension }))
+            if dimension == keys.failure_terminal_dimension
+    ));
+    assert!(matches!(
+        assembly.try_retain_outcome_evidence_sequence(
+            SequencePlan::<u8>::new(1).expect("failure evidence plan"),
+            TestTag,
+            |writer| writer.push(9),
+        ),
+        Err(StoreRuntimeError::FallbackOnly)
+    ));
+
+    let published = assembly
+        .prepare_minimal_fallback()
+        .expect("sealed commitment failure must retain the minimal fallback")
+        .handoff();
+    drop(published);
+    assert_eq!(account.snapshot().live_retained_bytes(), 0);
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
+    drop(account);
+    assert_eq!(factory.snapshot().live_accounts(), 0);
+}
+
+#[test]
+fn protected_commitment_failure_seals_failure_assembly_evidence() {
+    let factory = test_factory();
+    let account = test_account(&factory);
+    let (operation, keys) = test_operation_with_failure_terminal_work(&account);
+    let mut assembly = operation
+        .try_publication_assembly(test_publication_plan(keys, 1, 1))
+        .expect("success-capable publication");
+    let (canonical_root, evidence_root) = test_simple_controlled_validation_graph(&mut assembly);
+    let mut failure = match assembly.validate_success(
+        canonical_root,
+        evidence_root,
+        |_session, _canonical, _evidence| false,
+    ) {
+        StoreSuccessValidation::Rejected(failure) => failure,
+        _ => panic!("semantic rejection must preserve a rich-failure assembly"),
+    };
+
+    assert!(matches!(
+        failure.try_commit(keys.failure_terminal_dimension, 1),
+        Err(StoreRuntimeError::Ledger(LedgerCause::UnknownDimension { dimension }))
+            if dimension == keys.failure_terminal_dimension
+    ));
+    assert!(matches!(
+        failure.try_retain_sequence(
+            SequencePlan::<u8>::new(1).expect("failure evidence plan"),
+            TestTag,
+            |writer| writer.push(9),
+        ),
+        Err(StoreRuntimeError::FallbackOnly)
+    ));
+
+    let published = failure
+        .prepare_minimal_fallback()
+        .expect("sealed commitment failure must retain the minimal fallback")
+        .handoff();
+    drop(published);
+    assert_eq!(account.snapshot().live_retained_bytes(), 0);
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
+    drop(account);
+    assert_eq!(factory.snapshot().live_accounts(), 0);
+}
+
+#[test]
+fn burned_failure_terminal_operation_returns_only_minimal_fallback_authority() {
+    let factory = test_factory();
+    let account = test_account(&factory);
+    let (operation, keys) = test_operation_with_failure_terminal_work(&account);
+    let plan = RetainedStorePublicationPlan::rich_failure(
+        RetainedStoreBlockTablePlan::new(test_writer_plan(keys, 2, 2), 1, 1)
+            .expect("failure-only table plan"),
+    );
+
+    fail_next_final_owner_allocation();
+    let error = match operation.try_publication_assembly(plan) {
+        Ok(_) => panic!("post-preflight allocation must fail"),
+        Err(error) => error,
+    };
+    let fallback_only = match error.into_recovery() {
+        Ok(RetainedStoreOpenRecovery::FallbackOnly(owner)) => owner,
+        Ok(RetainedStoreOpenRecovery::Retry(_)) => {
+            panic!("consumed terminal authority must not be returned as retryable")
+        }
+        Err(cause) => panic!("verified allocation cleanup must preserve fallback: {cause:?}"),
+    };
+
+    let published = fallback_only
+        .prepare_minimal_fallback(0x51f0_1003)
+        .expect("fallback-only ownership must prepare minimal fallback")
+        .handoff();
+    drop(published);
+    assert_eq!(account.snapshot().live_retained_bytes(), 0);
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
+    drop(account);
+    assert_eq!(factory.snapshot().live_accounts(), 0);
+}
+
+#[test]
+fn burned_failure_terminal_transcript_returns_only_minimal_fallback_authority() {
+    let factory = test_factory();
+    let account = test_account(&factory);
+    let (operation, keys) = test_operation_with_failure_terminal_work(&account);
+    let mut transcript = operation
+        .try_begin_rich_failure_transcript(test_writer_plan(keys, 2, 2))
+        .expect("failure transcript must begin");
+    let _evidence = transcript
+        .plan_outcome_evidence_sequence::<u8, _>(1, TestTag)
+        .expect("failure transcript evidence plan");
+
+    fail_next_final_owner_allocation();
+    let error = match transcript.try_open() {
+        Ok(_) => panic!("post-preflight transcript allocation must fail"),
+        Err(error) => error,
+    };
+    assert!(matches!(error.cause(), StoreRuntimeError::AllocationFailed));
+    let fallback_only = match error.into_recovery() {
+        Ok(StoreTranscriptOpenRecovery::FallbackOnly(owner)) => owner,
+        Ok(StoreTranscriptOpenRecovery::Retry(_)) => {
+            panic!("consumed transcript terminal authority must not be retryable")
+        }
+        Err(cause) => panic!("verified transcript cleanup must preserve fallback: {cause:?}"),
+    };
+
+    let published = fallback_only
+        .prepare_minimal_fallback(0x51f0_1004)
+        .expect("transcript fallback-only owner must prepare minimal fallback")
+        .handoff();
+    drop(published);
+    assert_eq!(account.snapshot().live_retained_bytes(), 0);
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
+    drop(account);
+    assert_eq!(factory.snapshot().live_accounts(), 0);
+}
+
+#[test]
+fn unregistered_publication_keys_preserve_failure_terminal_retry_authority() {
+    let factory = test_factory();
+    let account = test_account(&factory);
+    let (operation, keys) = test_operation_with_failure_terminal_work(&account);
+    let invalid_phase_writer = RetainedStoreWriterPlan::new(
+        keys.unregistered_phase,
+        keys.dimension,
+        keys.dimension,
+        RetainedStoreBatchLimits::new(2, 2).expect("invalid-phase writer limits"),
+    );
+    let invalid_phase_plan = RetainedStorePublicationPlan::rich_failure(
+        RetainedStoreBlockTablePlan::new(invalid_phase_writer, 1, 1)
+            .expect("invalid-phase table remains structurally bounded"),
+    );
+    let invalid_phase = match operation.try_publication_assembly(invalid_phase_plan) {
+        Ok(_) => panic!("an unregistered publication phase must fail preflight"),
+        Err(error) => error,
+    };
+    assert!(matches!(
+        invalid_phase.cause(),
+        StoreRuntimeError::InvalidPublicationPlan
+    ));
+    let operation = match invalid_phase.into_recovery() {
+        Ok(RetainedStoreOpenRecovery::Retry(operation)) => operation,
+        Ok(RetainedStoreOpenRecovery::FallbackOnly(_)) => {
+            panic!("pure phase preflight must not consume terminal authority")
+        }
+        Err(cause) => panic!("pure phase preflight failed closed: {cause:?}"),
+    };
+
+    let invalid_dimension_writer = RetainedStoreWriterPlan::new(
+        keys.phase,
+        keys.unregistered_dimension,
+        keys.dimension,
+        RetainedStoreBatchLimits::new(2, 2).expect("invalid-dimension writer limits"),
+    );
+    let invalid_dimension_plan = RetainedStorePublicationPlan::rich_failure(
+        RetainedStoreBlockTablePlan::new(invalid_dimension_writer, 1, 1)
+            .expect("invalid-dimension table remains structurally bounded"),
+    );
+    let invalid_dimension = match operation.try_publication_assembly(invalid_dimension_plan) {
+        Ok(_) => panic!("an unregistered publication dimension must fail preflight"),
+        Err(error) => error,
+    };
+    assert!(matches!(
+        invalid_dimension.cause(),
+        StoreRuntimeError::InvalidPublicationPlan
+    ));
+    let operation = match invalid_dimension.into_recovery() {
+        Ok(RetainedStoreOpenRecovery::Retry(operation)) => operation,
+        Ok(RetainedStoreOpenRecovery::FallbackOnly(_)) => {
+            panic!("pure dimension preflight must not consume terminal authority")
+        }
+        Err(cause) => panic!("pure dimension preflight failed closed: {cause:?}"),
+    };
+
+    let transcript_error = match operation.try_begin_rich_failure_transcript(invalid_phase_writer) {
+        Ok(_) => panic!("transcript planning must reject an unregistered writer phase"),
+        Err(error) => error,
+    };
+    assert!(matches!(
+        transcript_error.cause(),
+        StoreTranscriptStartCause::Runtime(StoreRuntimeError::InvalidPublicationPlan)
+    ));
+    let operation = transcript_error.into_operation();
+
+    let mut assembly = operation
+        .try_publication_assembly(RetainedStorePublicationPlan::rich_failure(
+            RetainedStoreBlockTablePlan::new(test_writer_plan(keys, 2, 2), 1, 1)
+                .expect("corrected failure-only table plan"),
+        ))
+        .expect("corrected publication plan must retain the original terminal authority");
+    let evidence = assembly
+        .try_retain_outcome_evidence_sequence(
+            SequencePlan::<u8>::new(1).expect("corrected evidence plan"),
+            TestTag,
+            |writer| writer.push(9),
+        )
+        .expect("corrected evidence root");
+    let validated = match assembly
+        .validate_rich_failure(evidence, |session, root| session.sequence(root).is_some())
+    {
+        StoreFailureValidation::Valid(validated) => validated,
+        _ => panic!("corrected failure evidence must validate"),
+    };
+    let header = failure_outcome_header(
+        validated
+            .try_prepare(0x51f0_1004, test_final_progress())
+            .expect("corrected rich failure must prepare"),
+    );
+    assert!(matches!(
+        header.terminal_cause(),
+        StoreTerminalCause::Failure(_)
+    ));
+    assert_eq!(account.snapshot().live_retained_bytes(), 0);
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
     drop(account);
     assert_eq!(factory.snapshot().live_accounts(), 0);
 }

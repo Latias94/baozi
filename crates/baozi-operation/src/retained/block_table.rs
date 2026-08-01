@@ -159,6 +159,10 @@ impl<P: Copy, D: Copy> RetainedBlockTablePlan<P, D> {
         self.canonical_source_mapping_capacity = capacity;
         self
     }
+
+    pub(in crate::retained) const fn total_blocks(self) -> usize {
+        self.total_blocks
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

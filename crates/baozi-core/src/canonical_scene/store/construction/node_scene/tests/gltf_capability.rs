@@ -2601,14 +2601,14 @@ fn reject_gltf_mutation(
             Err(rejected) => rejected,
         }
     });
-    inspect(rejected.failure());
-    let terminal = rejected
-        .prepare_minimal_fallback()
-        .expect("invalid glTF shape fallback")
-        .handoff();
+    let (prepared, rejection) = rejected
+        .prepare_rich_failure()
+        .expect("invalid glTF shape rich failure");
+    inspect(&rejection);
+    let terminal = prepared.handoff();
     assert!(matches!(
         &terminal,
-        NodeSceneConstructionTerminal::MinimalFallback(_)
+        NodeSceneConstructionTerminal::RichFailure(_)
     ));
     drop(terminal);
     assert_eq!(account.snapshot().live_retained_bytes(), 0);

@@ -248,8 +248,9 @@ pub(super) fn prepare(
     let mut assembly = match raw.try_publication_assembly(publication_plan) {
         Ok(assembly) => assembly,
         Err(error) => {
-            let operation = error.try_into_operation()?;
-            let store = operation.prepare_minimal_fallback(FALLBACK_CODE)?;
+            let store = error
+                .into_recovery()?
+                .prepare_minimal_fallback(FALLBACK_CODE)?;
             return Ok(PreparedComplexFixture::MinimalFallback(
                 PreparedTracerSceneFallback { store },
             ));

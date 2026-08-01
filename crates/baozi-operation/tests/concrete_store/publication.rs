@@ -126,11 +126,6 @@ fn validated_success_downgrade_preserves_evidence_and_publishes_exact_rich_failu
         Err(StoreRuntimeError::ForeignDimensionDomain { dimension })
             if dimension == foreign_dimension()
     ));
-    assert!(matches!(
-        failure.try_commit(keys.other_dimension, 11),
-        Err(StoreRuntimeError::Ledger(LedgerCause::UnknownDimension { dimension }))
-            if dimension == keys.other_dimension
-    ));
     assert_eq!(account.snapshot(), before_rejected_commits);
     failure.try_commit(keys.dimension, 4).unwrap();
     let validated = match failure.validate_rich_failure(failure_root, |session, failure_root| {

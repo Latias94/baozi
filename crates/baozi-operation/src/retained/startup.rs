@@ -60,6 +60,18 @@ where
     pub(crate) fn into_inner(self) -> Ledger<O, P, D> {
         self.ledger
     }
+
+    pub(crate) fn preflight_repeated_observed_batch<const N: usize>(
+        &self,
+        charges: &[(D, u64); N],
+        repetitions: std::num::NonZeroU64,
+    ) -> Result<(), LedgerCause<D>>
+    where
+        D: fmt::Debug,
+    {
+        self.ledger
+            .preflight_repeated_observed_batch(charges, repetitions)
+    }
 }
 
 /// The exact pair of retained charges committed by one operation start.

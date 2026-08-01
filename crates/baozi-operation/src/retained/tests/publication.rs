@@ -1,5 +1,862 @@
 use super::*;
 
+fn expect_retry_operation(
+    error: RetainedPublicationOpenError<TestOperation, TestDimension>,
+    context: &str,
+) -> TestOperation {
+    match error.into_recovery() {
+        Ok(RetainedPublicationOpenRecovery::Retry(operation)) => operation,
+        Ok(RetainedPublicationOpenRecovery::FallbackOnly(_)) => {
+            panic!("{context}: failure unexpectedly consumed terminal authority")
+        }
+        Err(cause) => panic!("{context}: open failed closed: {cause:?}"),
+    }
+}
+
+fn expect_fallback_only_operation(
+    error: RetainedPublicationOpenError<TestOperation, TestDimension>,
+    context: &str,
+) -> TestOperation {
+    match error.into_recovery() {
+        Ok(RetainedPublicationOpenRecovery::FallbackOnly(operation)) => operation,
+        Ok(RetainedPublicationOpenRecovery::Retry(_)) => {
+            panic!("{context}: consumed terminal authority was returned as retryable")
+        }
+        Err(cause) => panic!("{context}: verified rollback failed closed: {cause:?}"),
+    }
+}
+
+fn reject_invalid_publication_plan(
+    operation: TestOperation,
+    plan: RetainedPublicationPlan<TestPhase, TestDimension>,
+    context: &str,
+) -> TestOperation {
+    let error = match operation.try_publication_assembly::<u64, u64>(plan) {
+        Ok(_) => panic!("{context}: invalid publication plan unexpectedly opened"),
+        Err(error) => error,
+    };
+    assert!(
+        matches!(error.cause(), RetainedWriterError::InvalidPublicationPlan),
+        "{context}: unexpected failure: {}",
+        error.cause()
+    );
+    expect_retry_operation(error, context)
+}
+
+fn failure_terminal_operation(
+    account: &PhysicalStorageAccount,
+    ordinary_work_limit: u64,
+    max_evidence_members: usize,
+) -> TestOperation {
+    let failure_actions = max_evidence_members
+        .checked_add(2)
+        .and_then(|actions| u64::try_from(actions).ok())
+        .and_then(|actions| actions.checked_mul(2))
+        .unwrap_or_else(|| panic!("failure-terminal test bound must fit"));
+    failure_terminal_operation_with_limit(
+        account,
+        ordinary_work_limit,
+        max_evidence_members,
+        failure_actions,
+    )
+}
+
+fn failure_terminal_operation_with_limit(
+    account: &PhysicalStorageAccount,
+    ordinary_work_limit: u64,
+    max_evidence_members: usize,
+    failure_work_limit: u64,
+) -> TestOperation {
+    let ordinary_policy = DimensionPolicy::reservable_bytes(
+        ordinary_work_limit,
+        ordinary_work_limit,
+        u64::MAX,
+        u64::MAX,
+    )
+    .with_published_outcome_evidence_limit(64);
+    let failure_policy = DimensionPolicy::counter(failure_work_limit, failure_work_limit, 0);
+    let limits = LedgerLimits::new(
+        u64::MAX,
+        [
+            (TestDimension::Bytes, ordinary_policy),
+            (TestDimension::FailureTerminalWork, failure_policy),
+        ],
+    )
+    .unwrap_or_else(|_| panic!("failure-terminal test limits must qualify"));
+    let terminal_attribution_slots = max_evidence_members
+        .checked_add(1)
+        .unwrap_or_else(|| panic!("failure-terminal writer bound must fit"));
+    let plan = RetainedOperationStartPlan::new(
+        writer_plan(terminal_attribution_slots, 2),
+        share_work(),
+        empty_plan(),
+        OutputCommitment::new(TestDimension::Bytes, 1),
+        OutputCommitment::new(TestDimension::Bytes, 1),
+    )
+    .with_failure_terminal_work(RetainedFailureTerminalWorkPlan::new(
+        TestDimension::FailureTerminalWork,
+        max_evidence_members,
+    ));
+    TestOperation::try_start(OperationControl::default(), limits, account, plan, || {
+        Ok(7_u32)
+    })
+    .unwrap_or_else(|_| panic!("failure-terminal test operation must start"))
+}
+
+#[test]
+fn rejected_failure_terminal_preflight_rolls_back_started_storage() {
+    let factory = account_factory(1);
+    let account = account(&factory, u64::MAX, 128);
+    let ordinary_policy = DimensionPolicy::reservable_bytes(8, 8, u64::MAX, u64::MAX)
+        .with_published_outcome_evidence_limit(64);
+    let failure_policy = DimensionPolicy::counter(5, 5, 0);
+    let limits = LedgerLimits::new(
+        u64::MAX,
+        [
+            (TestDimension::Bytes, ordinary_policy),
+            (TestDimension::FailureTerminalWork, failure_policy),
+        ],
+    )
+    .unwrap_or_else(|_| panic!("failure-terminal rejection limits must qualify"));
+    let plan = RetainedOperationStartPlan::new(
+        writer_plan(2, 2),
+        share_work(),
+        empty_plan(),
+        OutputCommitment::new(TestDimension::Bytes, 1),
+        OutputCommitment::new(TestDimension::Bytes, 1),
+    )
+    .with_failure_terminal_work(RetainedFailureTerminalWorkPlan::new(
+        TestDimension::FailureTerminalWork,
+        1,
+    ));
+
+    assert!(
+        TestOperation::try_start(OperationControl::default(), limits, &account, plan, || Ok(
+            7_u32
+        ),)
+        .is_err()
+    );
+    assert_eq!(account.snapshot().live_retained_bytes(), 0);
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
+    drop(account);
+    assert_eq!(factory.snapshot().live_accounts(), 0);
+}
+
+#[test]
+fn publication_key_membership_preflight_preserves_terminal_capability() {
+    let factory = account_factory(1);
+    let account = account(&factory, u64::MAX, 128);
+    let operation = failure_terminal_operation(&account, 64, 1);
+    let invalid_phase = RetainedPublicationPlan::rich_failure(RetainedBlockTablePlan::new(
+        RetainedWriterPlan::new(
+            TestPhase::Unregistered,
+            TestDimension::Bytes,
+            TestDimension::Bytes,
+            RetainedBatchLimits::new(2, 2),
+        ),
+        1,
+        1,
+    ));
+    let phase_error = match operation.try_publication_assembly::<u64, u64>(invalid_phase) {
+        Ok(_) => panic!("an unregistered writer phase must fail pure preflight"),
+        Err(error) => error,
+    };
+    assert!(matches!(
+        phase_error.cause(),
+        RetainedWriterError::InvalidPublicationPlan
+    ));
+    let operation = expect_retry_operation(phase_error, "phase preflight");
+
+    let invalid_dimension = RetainedPublicationPlan::rich_failure(RetainedBlockTablePlan::new(
+        RetainedWriterPlan::new(
+            TestPhase::Build,
+            TestDimension::Unregistered,
+            TestDimension::Bytes,
+            RetainedBatchLimits::new(2, 2),
+        ),
+        1,
+        1,
+    ));
+    let dimension_error = match operation.try_publication_assembly::<u64, u64>(invalid_dimension) {
+        Ok(_) => panic!("an unregistered writer dimension must fail pure preflight"),
+        Err(error) => error,
+    };
+    assert!(matches!(
+        dimension_error.cause(),
+        RetainedWriterError::InvalidPublicationPlan
+    ));
+    let mut operation = expect_retry_operation(dimension_error, "dimension preflight");
+
+    let invalid_writers = [
+        (
+            "evidence attribution dimension",
+            false,
+            RetainedWriterPlan::new(
+                TestPhase::Build,
+                TestDimension::Bytes,
+                TestDimension::Unregistered,
+                RetainedBatchLimits::new(2, 2),
+            ),
+        ),
+        (
+            "canonical phase",
+            true,
+            RetainedWriterPlan::new(
+                TestPhase::Unregistered,
+                TestDimension::Bytes,
+                TestDimension::Bytes,
+                RetainedBatchLimits::new(2, 2),
+            ),
+        ),
+        (
+            "canonical capacity dimension",
+            true,
+            RetainedWriterPlan::new(
+                TestPhase::Build,
+                TestDimension::Unregistered,
+                TestDimension::Bytes,
+                RetainedBatchLimits::new(2, 2),
+            ),
+        ),
+        (
+            "canonical attribution dimension",
+            true,
+            RetainedWriterPlan::new(
+                TestPhase::Build,
+                TestDimension::Bytes,
+                TestDimension::Unregistered,
+                RetainedBatchLimits::new(2, 2),
+            ),
+        ),
+        (
+            "protected capacity dimension",
+            false,
+            RetainedWriterPlan::new(
+                TestPhase::Build,
+                TestDimension::FailureTerminalWork,
+                TestDimension::Bytes,
+                RetainedBatchLimits::new(2, 2),
+            ),
+        ),
+        (
+            "protected attribution dimension",
+            false,
+            RetainedWriterPlan::new(
+                TestPhase::Build,
+                TestDimension::Bytes,
+                TestDimension::FailureTerminalWork,
+                RetainedBatchLimits::new(2, 2),
+            ),
+        ),
+    ];
+    for (context, canonical_destination, writer) in invalid_writers {
+        let table = RetainedBlockTablePlan::new(writer, 1, 1);
+        let plan = if canonical_destination {
+            RetainedPublicationPlan::success(
+                table,
+                RetainedBlockTablePlan::new(writer_plan(2, 2), 1, 1),
+            )
+        } else {
+            RetainedPublicationPlan::rich_failure(table)
+        };
+        operation = reject_invalid_publication_plan(operation, plan, context);
+    }
+
+    let mut assembly: TestPublication<u64, u64> = operation
+        .try_publication_assembly(RetainedPublicationPlan::rich_failure(
+            RetainedBlockTablePlan::new(writer_plan(2, 2), 1, 1),
+        ))
+        .unwrap_or_else(|_| panic!("corrected plan must retain terminal capability"));
+    let evidence = assembly
+        .try_retain_outcome_evidence(empty_plan(), |emplacer| {
+            Ok(emplacer.place(7, EvidenceRootTag))
+        })
+        .unwrap_or_else(|_| panic!("corrected evidence must retain"));
+    let validated = match assembly.validate_rich_failure(evidence, |session, root| {
+        session.outcome_evidence(root) == Some(&7)
+    }) {
+        RetainedFailureValidation::Valid(validated) => validated,
+        _ => panic!("corrected rich-failure graph must validate"),
+    };
+    let published = handoff_for_test(
+        validated
+            .try_prepare(PreparationFailureCode::domain(703), final_progress())
+            .unwrap_or_else(|_| panic!("corrected rich failure must prepare")),
+    );
+    drop(published);
+    assert_eq!(account.snapshot().live_retained_bytes(), 0);
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
+    drop(account);
+    assert_eq!(factory.snapshot().live_accounts(), 0);
+}
+
+#[test]
+fn startup_qualified_failure_terminal_work_survives_exhausted_ordinary_work() {
+    let factory = account_factory(1);
+    let account = account(&factory, u64::MAX, 128);
+    let ordinary_policy = DimensionPolicy::reservable_bytes(8, 8, u64::MAX, u64::MAX)
+        .with_published_outcome_evidence_limit(64);
+    let failure_policy = DimensionPolicy::counter(6, 6, 0);
+    let limits = LedgerLimits::new(
+        u64::MAX,
+        [
+            (TestDimension::Bytes, ordinary_policy),
+            (TestDimension::FailureTerminalWork, failure_policy),
+        ],
+    )
+    .unwrap_or_else(|_| panic!("failure-terminal test limits must qualify"));
+    let plan = RetainedOperationStartPlan::new(
+        writer_plan(2, 2),
+        share_work(),
+        empty_plan(),
+        OutputCommitment::new(TestDimension::Bytes, 1),
+        OutputCommitment::new(TestDimension::Bytes, 1),
+    )
+    .with_failure_terminal_work(RetainedFailureTerminalWorkPlan::new(
+        TestDimension::FailureTerminalWork,
+        1,
+    ));
+    let operation =
+        TestOperation::try_start(OperationControl::default(), limits, &account, plan, || {
+            Ok(7_u32)
+        })
+        .unwrap_or_else(|_| panic!("failure-terminal operation must start"));
+
+    assert!(
+        operation
+            .coordinator
+            .retained_ledger()
+            .charge_observed_batch(&[(TestDimension::Bytes, 1)])
+            .is_err(),
+        "ordinary work must retain its non-refundable failing attempt"
+    );
+    let ordinary = operation
+        .coordinator
+        .dimension_evidence(TestDimension::Bytes)
+        .unwrap_or_else(|_| panic!("ordinary dimension evidence"));
+    assert_eq!(ordinary.attempted(), 9);
+    assert_eq!(ordinary.consumed(), 8);
+
+    let mut assembly: TestPublication<u64, u64> = operation
+        .try_publication_assembly(RetainedPublicationPlan::rich_failure(
+            RetainedBlockTablePlan::new(writer_plan(2, 2), 1, 1),
+        ))
+        .unwrap_or_else(|_| panic!("reserved rich-failure assembly must open"));
+    let evidence = assembly
+        .try_retain_outcome_evidence(empty_plan(), |emplacer| {
+            Ok(emplacer.place(7, EvidenceRootTag))
+        })
+        .unwrap_or_else(|_| panic!("reserved rich-failure evidence must retain"));
+    let validated = match assembly.validate_rich_failure(evidence, |session, root| {
+        session.outcome_evidence(root) == Some(&7)
+    }) {
+        RetainedFailureValidation::Valid(validated) => validated,
+        _ => panic!("reserved rich-failure evidence must validate"),
+    };
+    let published = handoff_for_test(
+        validated
+            .try_prepare(PreparationFailureCode::domain(701), final_progress())
+            .unwrap_or_else(|_| panic!("reserved rich failure must prepare")),
+    );
+    let PublishedRetainedPublicationParts::RichFailure {
+        outcome_evidence,
+        ledger_evidence,
+    } = published
+    else {
+        panic!("reserved terminal work must publish rich failure");
+    };
+    let ordinary = ledger_evidence
+        .dimension(TestDimension::Bytes)
+        .unwrap_or_else(|| panic!("published ordinary dimension"));
+    let failure = ledger_evidence
+        .dimension(TestDimension::FailureTerminalWork)
+        .unwrap_or_else(|| panic!("published failure-terminal dimension"));
+    assert_eq!((ordinary.attempted(), ordinary.consumed()), (9, 8));
+    assert_eq!((failure.attempted(), failure.consumed()), (6, 6));
+    drop(outcome_evidence);
+    drop(ledger_evidence);
+    assert_eq!(account.snapshot().live_retained_bytes(), 0);
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
+    drop(account);
+    assert_eq!(factory.snapshot().live_accounts(), 0);
+}
+
+#[test]
+fn recoverable_failure_terminal_preflight_preserves_capability_for_retry() {
+    let factory = account_factory(1);
+    let account = account(&factory, u64::MAX, 128);
+    let operation = failure_terminal_operation(&account, 64, 1);
+    let invalid_plan =
+        RetainedPublicationPlan::rich_failure(RetainedBlockTablePlan::new(writer_plan(2, 2), 2, 2));
+
+    let error = match operation.try_publication_assembly::<u64, u64>(invalid_plan) {
+        Ok(_) => panic!("oversized failure evidence plan must be rejected"),
+        Err(error) => error,
+    };
+    assert!(matches!(
+        error.cause(),
+        RetainedWriterError::InvalidPublicationPlan
+    ));
+    let operation = expect_retry_operation(error, "failure-terminal plan preflight");
+
+    let mut assembly: TestPublication<u64, u64> = operation
+        .try_publication_assembly(RetainedPublicationPlan::rich_failure(
+            RetainedBlockTablePlan::new(writer_plan(2, 2), 1, 1),
+        ))
+        .unwrap_or_else(|_| panic!("corrected rich-failure plan must retain capability"));
+    let evidence = assembly
+        .try_retain_outcome_evidence(empty_plan(), |emplacer| {
+            Ok(emplacer.place(7, EvidenceRootTag))
+        })
+        .unwrap_or_else(|_| panic!("corrected rich-failure evidence must retain"));
+    let validated = match assembly.validate_rich_failure(evidence, |session, root| {
+        session.outcome_evidence(root) == Some(&7)
+    }) {
+        RetainedFailureValidation::Valid(validated) => validated,
+        _ => panic!("corrected rich-failure graph must validate"),
+    };
+    let published = handoff_for_test(
+        validated
+            .try_prepare(PreparationFailureCode::domain(702), final_progress())
+            .unwrap_or_else(|_| panic!("corrected rich failure must prepare")),
+    );
+    let PublishedRetainedPublicationParts::RichFailure {
+        outcome_evidence,
+        ledger_evidence,
+    } = published
+    else {
+        panic!("corrected rich-failure plan must publish rich evidence");
+    };
+    let terminal = ledger_evidence
+        .dimension(TestDimension::FailureTerminalWork)
+        .unwrap_or_else(|| panic!("published failure-terminal dimension"));
+    assert_eq!((terminal.attempted(), terminal.consumed()), (6, 6));
+    drop(outcome_evidence);
+    drop(ledger_evidence);
+    assert_eq!(account.snapshot().live_retained_bytes(), 0);
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
+    drop(account);
+    assert_eq!(factory.snapshot().live_accounts(), 0);
+}
+
+#[test]
+fn post_preflight_open_failure_burns_failure_terminal_capability() {
+    let factory = account_factory(1);
+    let account = account(&factory, u64::MAX, 128);
+    let operation = failure_terminal_operation(&account, 64, 1);
+    let plan =
+        RetainedPublicationPlan::rich_failure(RetainedBlockTablePlan::new(writer_plan(2, 2), 1, 1));
+
+    fail_next_final_owner_allocation();
+    let error = match operation.try_publication_assembly::<u64, u64>(plan) {
+        Ok(_) => panic!("injected post-preflight allocation must fail"),
+        Err(error) => error,
+    };
+    assert!(matches!(
+        error.cause(),
+        RetainedWriterError::Physical(RetainedAllocationError::AllocationFailed)
+    ));
+    let operation = expect_fallback_only_operation(error, "post-preflight allocation failure");
+    let terminal = operation
+        .coordinator
+        .dimension_evidence(TestDimension::FailureTerminalWork)
+        .unwrap_or_else(|_| panic!("failure-terminal evidence after attempted open"));
+    assert_eq!((terminal.attempted(), terminal.consumed()), (4, 4));
+
+    let published = handoff_for_test(
+        operation
+            .prepare_minimal_fallback::<u64, u64>(PreparationFailureCode::domain(704))
+            .unwrap_or_else(|_| panic!("burned operation must retain minimal fallback")),
+    );
+    let PublishedRetainedPublicationParts::MinimalFallback {
+        fallback,
+        ledger_evidence,
+    } = published
+    else {
+        panic!("burned terminal authority must end in minimal fallback");
+    };
+    drop(fallback);
+    drop(ledger_evidence);
+    assert_eq!(account.snapshot().live_retained_bytes(), 0);
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
+    drop(account);
+    assert_eq!(factory.snapshot().live_accounts(), 0);
+}
+
+#[test]
+fn validated_success_can_downgrade_after_ordinary_work_is_exhausted() {
+    const ORDINARY_WORK_LIMIT: u64 = 64;
+    const DOWNGRADE_CAUSE: u32 = 703;
+
+    let factory = account_factory(1);
+    let account = account(&factory, u64::MAX, 128);
+    let operation = failure_terminal_operation(&account, ORDINARY_WORK_LIMIT, 2);
+    let mut assembly: TestPublication<u64, u64> = operation
+        .try_publication_assembly(publication_plan(1, 2))
+        .unwrap_or_else(|_| panic!("success-capable publication must open"));
+    let (canonical_root, evidence_root) = retain_scalar_success(&mut assembly);
+    let ordinary = assembly
+        .test_ledger_probe()
+        .dimension_evidence(TestDimension::Bytes)
+        .unwrap_or_else(|| panic!("ordinary dimension evidence before exhaustion"));
+    let remaining = ORDINARY_WORK_LIMIT
+        .checked_sub(ordinary.consumed())
+        .unwrap_or_else(|| panic!("success candidate exceeded ordinary work limit"));
+    assembly
+        .try_control_checkpoint()
+        .unwrap_or_else(|_| panic!("success candidate control checkpoint"))
+        .charge_observed(TestDimension::Bytes, remaining)
+        .unwrap_or_else(|_| panic!("ordinary work must exhaust exactly"));
+
+    let validated = match assembly.validate_success(
+        canonical_root,
+        evidence_root,
+        |session, canonical, evidence| {
+            session.canonical(canonical) == Some(&11)
+                && session.outcome_evidence(evidence) == Some(&7)
+        },
+    ) {
+        RetainedSuccessValidation::Valid(validated) => validated,
+        _ => panic!("complete success candidate must validate"),
+    };
+    let mut failure =
+        validated.downgrade_to_rich_failure(PreparationFailureCode::domain(DOWNGRADE_CAUSE));
+    let detail = failure
+        .try_retain_outcome_evidence(empty_plan(), |emplacer| {
+            Ok(emplacer.place(9, EvidenceDetailTag))
+        })
+        .unwrap_or_else(|_| panic!("protected terminal work must retain downgrade evidence"));
+    let validated = match failure.validate_rich_failure(evidence_root, |session, root| {
+        session.outcome_evidence(root) == Some(&7) && session.outcome_evidence(detail) == Some(&9)
+    }) {
+        RetainedFailureValidation::Valid(validated) => validated,
+        _ => panic!("downgraded evidence graph must validate"),
+    };
+    let published = handoff_for_test(
+        validated
+            .try_prepare(
+                PreparationFailureCode::domain(DOWNGRADE_CAUSE),
+                final_progress(),
+            )
+            .unwrap_or_else(|_| panic!("downgraded rich failure must prepare")),
+    );
+    let PublishedRetainedPublicationParts::RichFailure {
+        outcome_evidence,
+        ledger_evidence,
+    } = published
+    else {
+        panic!("admission downgrade must publish rich failure");
+    };
+    assert_eq!(
+        published_failure_cause(&ledger_evidence),
+        PreparationFailureCode::domain(DOWNGRADE_CAUSE)
+    );
+    let ordinary = ledger_evidence
+        .dimension(TestDimension::Bytes)
+        .unwrap_or_else(|| panic!("published ordinary dimension"));
+    let terminal = ledger_evidence
+        .dimension(TestDimension::FailureTerminalWork)
+        .unwrap_or_else(|| panic!("published failure-terminal dimension"));
+    assert_eq!(
+        (ordinary.attempted(), ordinary.consumed()),
+        (ORDINARY_WORK_LIMIT, ORDINARY_WORK_LIMIT)
+    );
+    assert_eq!((terminal.attempted(), terminal.consumed()), (2, 2));
+    drop(outcome_evidence);
+    drop(ledger_evidence);
+    assert_eq!(account.snapshot().live_retained_bytes(), 0);
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
+    drop(account);
+    assert_eq!(factory.snapshot().live_accounts(), 0);
+}
+
+#[test]
+fn successful_publication_leaves_failure_terminal_work_unused() {
+    let factory = account_factory(1);
+    let account = account(&factory, u64::MAX, 128);
+    let operation = failure_terminal_operation(&account, 64, 2);
+    let mut assembly: TestPublication<u64, u64> = operation
+        .try_publication_assembly(publication_plan(1, 1))
+        .unwrap_or_else(|_| panic!("success publication must open"));
+    let (canonical_root, evidence_root) = retain_scalar_success(&mut assembly);
+    let validated = match assembly.validate_success(
+        canonical_root,
+        evidence_root,
+        |session, canonical, evidence| {
+            session.canonical(canonical) == Some(&11)
+                && session.outcome_evidence(evidence) == Some(&7)
+        },
+    ) {
+        RetainedSuccessValidation::Valid(validated) => validated,
+        _ => panic!("success graph must validate"),
+    };
+    let published = handoff_for_test(
+        validated
+            .try_prepare(final_progress())
+            .unwrap_or_else(|_| panic!("success publication must prepare")),
+    );
+    let PublishedRetainedPublicationParts::Success {
+        canonical,
+        outcome_evidence,
+        ledger_evidence,
+    } = published
+    else {
+        panic!("valid success must publish canonical output");
+    };
+    let terminal = ledger_evidence
+        .dimension(TestDimension::FailureTerminalWork)
+        .unwrap_or_else(|| panic!("published failure-terminal dimension"));
+    assert_eq!((terminal.attempted(), terminal.consumed()), (0, 0));
+    drop(canonical);
+    drop(outcome_evidence);
+    drop(ledger_evidence);
+    assert_eq!(account.snapshot().live_retained_bytes(), 0);
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
+    drop(account);
+    assert_eq!(factory.snapshot().live_accounts(), 0);
+}
+
+#[test]
+fn direct_rich_validation_of_a_success_plan_activates_protected_work() {
+    let factory = account_factory(1);
+    let account = account(&factory, u64::MAX, 128);
+    let operation = failure_terminal_operation(&account, 64, 2);
+    let mut assembly: TestPublication<u64, u64> = operation
+        .try_publication_assembly(publication_plan(1, 2))
+        .unwrap_or_else(|_| panic!("success-capable publication must open"));
+    let (_canonical_root, evidence_root) = retain_scalar_success(&mut assembly);
+
+    let mut failure = match assembly.validate_rich_failure(evidence_root, |_session, _root| false) {
+        RetainedFailureValidation::Rejected(failure) => failure,
+        _ => panic!("direct rich validation must retain a failure assembly"),
+    };
+    let ordinary_before = failure
+        .assembly
+        .test_ledger_probe()
+        .dimension_evidence(TestDimension::Bytes)
+        .unwrap_or_else(|| panic!("ordinary evidence before protected append"));
+    let detail = failure
+        .try_retain_outcome_evidence(empty_plan(), |emplacer| {
+            Ok(emplacer.place(9, EvidenceDetailTag))
+        })
+        .unwrap_or_else(|_| panic!("direct rich validation must activate protected append work"));
+    let ordinary_after = failure
+        .assembly
+        .test_ledger_probe()
+        .dimension_evidence(TestDimension::Bytes)
+        .unwrap_or_else(|| panic!("ordinary evidence after protected append"));
+    let protected = failure
+        .assembly
+        .test_ledger_probe()
+        .dimension_evidence(TestDimension::FailureTerminalWork)
+        .unwrap_or_else(|| panic!("protected evidence after direct rich validation"));
+    assert_eq!(ordinary_after.attempted(), ordinary_before.attempted());
+    assert_eq!(ordinary_after.consumed(), ordinary_before.consumed());
+    assert!(ordinary_after.current_live_bytes() > ordinary_before.current_live_bytes());
+    assert_eq!((protected.attempted(), protected.consumed()), (2, 2));
+
+    let validated = match failure.validate_rich_failure(evidence_root, |session, root| {
+        session.outcome_evidence(root) == Some(&7) && session.outcome_evidence(detail) == Some(&9)
+    }) {
+        RetainedFailureValidation::Valid(validated) => validated,
+        _ => panic!("direct rich-failure graph must validate"),
+    };
+    let published = handoff_for_test(
+        validated
+            .try_prepare(PreparationFailureCode::domain(705), final_progress())
+            .unwrap_or_else(|_| panic!("direct rich failure must prepare")),
+    );
+    drop(published);
+    assert_eq!(account.snapshot().live_retained_bytes(), 0);
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
+    drop(account);
+    assert_eq!(factory.snapshot().live_accounts(), 0);
+}
+
+#[test]
+fn failed_protected_evidence_action_seals_the_terminal_rail() {
+    let factory = account_factory(1);
+    let account = account(&factory, u64::MAX, 128);
+    let operation = failure_terminal_operation_with_limit(&account, 64, 2, 64);
+    let mut assembly: TestPublication<u64, u64> = operation
+        .try_publication_assembly(RetainedPublicationPlan::rich_failure(
+            RetainedBlockTablePlan::new(writer_plan(3, 2), 2, 2),
+        ))
+        .unwrap_or_else(|_| panic!("protected failure assembly must open"));
+    let evidence_root = assembly
+        .try_retain_outcome_evidence(empty_plan(), |emplacer| {
+            Ok(emplacer.place(7, EvidenceRootTag))
+        })
+        .unwrap_or_else(|_| panic!("protected evidence root must retain"));
+
+    assert!(matches!(
+        assembly.try_retain_outcome_evidence::<EvidenceDetailTag>(empty_plan(), |_emplacer| {
+            Err(BUILD_FAILED)
+        }),
+        Err(RetainedPublicationError::Writer(RetainedWriterError::Physical(
+            RetainedAllocationError::Build(cause)
+        ))) if cause == BUILD_FAILED
+    ));
+    let after_first_failure = assembly
+        .test_ledger_probe()
+        .dimension_evidence(TestDimension::FailureTerminalWork)
+        .unwrap_or_else(|| panic!("failure-terminal evidence after protected failure"));
+
+    assert!(matches!(
+        assembly.try_retain_outcome_evidence::<EvidenceDetailTag>(empty_plan(), |emplacer| {
+            Ok(emplacer.place(9, EvidenceDetailTag))
+        }),
+        Err(RetainedPublicationError::FailureTerminalWorkSealed)
+    ));
+    let after_rejected_retry = assembly
+        .test_ledger_probe()
+        .dimension_evidence(TestDimension::FailureTerminalWork)
+        .unwrap_or_else(|| panic!("failure-terminal evidence after sealed retry"));
+    assert_eq!(after_rejected_retry, after_first_failure);
+
+    let fallback_only = match assembly.validate_rich_failure(evidence_root, |session, root| {
+        session.outcome_evidence(root) == Some(&7)
+    }) {
+        RetainedFailureValidation::FallbackOnly(fallback_only) => fallback_only,
+        _ => panic!("failed protected work must seal the graph to minimal fallback"),
+    };
+    let published = handoff_for_test(
+        fallback_only
+            .prepare_minimal_fallback()
+            .unwrap_or_else(|_| panic!("sealed protected rail must prepare minimal fallback")),
+    );
+    let PublishedRetainedPublicationParts::MinimalFallback {
+        fallback,
+        ledger_evidence,
+    } = published
+    else {
+        panic!("sealed protected rail must publish minimal fallback");
+    };
+    let cause = published_failure_cause(&ledger_evidence);
+    assert_eq!(cause.class(), PreparationFailureClass::ProductGraph);
+    assert_eq!(cause.code(), FAILURE_TERMINAL_WORK_SEALED_CODE);
+    drop(fallback);
+    drop(ledger_evidence);
+    assert_eq!(account.snapshot().live_retained_bytes(), 0);
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
+    drop(account);
+    assert_eq!(factory.snapshot().live_accounts(), 0);
+}
+
+#[test]
+fn active_and_failed_terminal_states_seal_canonical_and_success_paths() {
+    const ORDINARY_WORK_LIMIT: u64 = 64;
+
+    let factory = account_factory(1);
+    let account = account(&factory, u64::MAX, 128);
+    let operation = failure_terminal_operation(&account, ORDINARY_WORK_LIMIT, 3);
+    let mut assembly: TestPublication<u64, u64> = operation
+        .try_publication_assembly(publication_plan(2, 3))
+        .unwrap_or_else(|_| panic!("success-capable publication must open"));
+    let (canonical_root, evidence_root) = retain_scalar_success(&mut assembly);
+    let ordinary = assembly
+        .test_ledger_probe()
+        .dimension_evidence(TestDimension::Bytes)
+        .unwrap_or_else(|| panic!("ordinary evidence before terminal rejection"));
+    let failing_amount = ORDINARY_WORK_LIMIT
+        .checked_sub(ordinary.consumed())
+        .and_then(|remaining| remaining.checked_add(1))
+        .unwrap_or_else(|| panic!("ordinary failing amount must fit"));
+    assert!(matches!(
+        assembly
+            .try_control_checkpoint()
+            .unwrap_or_else(|_| panic!("ordinary control checkpoint"))
+            .charge_observed(TestDimension::Bytes, failing_amount),
+        Err(LedgerCause::LimitExceeded { .. })
+    ));
+
+    let detail = assembly
+        .try_retain_outcome_evidence(empty_plan(), |emplacer| {
+            Ok(emplacer.place(9, EvidenceDetailTag))
+        })
+        .unwrap_or_else(|_| panic!("recorded rejection must activate protected evidence work"));
+    let protected_after_activation = assembly
+        .test_ledger_probe()
+        .dimension_evidence(TestDimension::FailureTerminalWork)
+        .unwrap_or_else(|| panic!("protected evidence after activation"));
+    assert_eq!(
+        (
+            protected_after_activation.attempted(),
+            protected_after_activation.consumed()
+        ),
+        (2, 2)
+    );
+
+    assert!(matches!(
+        assembly.try_retain_canonical(empty_plan(), |emplacer| {
+            Ok(emplacer.place(12, CanonicalRootTag))
+        }),
+        Err(RetainedPublicationError::SuccessOutcomeRejected)
+    ));
+    let protected_after_canonical_retry = assembly
+        .test_ledger_probe()
+        .dimension_evidence(TestDimension::FailureTerminalWork)
+        .unwrap_or_else(|| panic!("protected evidence after canonical retry"));
+    assert_eq!(protected_after_canonical_retry, protected_after_activation);
+
+    assert!(matches!(
+        assembly.try_retain_outcome_evidence::<EvidenceDetailTag>(empty_plan(), |_emplacer| {
+            Err(BUILD_FAILED)
+        }),
+        Err(RetainedPublicationError::Writer(RetainedWriterError::Physical(
+            RetainedAllocationError::Build(cause)
+        ))) if cause == BUILD_FAILED
+    ));
+    let protected_after_failure = assembly
+        .test_ledger_probe()
+        .dimension_evidence(TestDimension::FailureTerminalWork)
+        .unwrap_or_else(|| panic!("protected evidence after sealed failure"));
+    assert!(matches!(
+        assembly.try_commit_outcome_evidence(TestDimension::Bytes, 1),
+        Err(RetainedPublicationError::FailureTerminalWorkSealed)
+    ));
+    let protected_after_commit = assembly
+        .test_ledger_probe()
+        .dimension_evidence(TestDimension::FailureTerminalWork)
+        .unwrap_or_else(|| panic!("protected evidence after sealed commitment"));
+    assert_eq!(protected_after_commit, protected_after_failure);
+
+    let fallback_only = match assembly.validate_success(
+        canonical_root,
+        evidence_root,
+        |session, canonical, evidence| {
+            session.canonical(canonical) == Some(&11)
+                && session.outcome_evidence(evidence) == Some(&7)
+                && session.outcome_evidence(detail) == Some(&9)
+        },
+    ) {
+        RetainedSuccessValidation::FallbackOnly(fallback_only) => fallback_only,
+        _ => panic!("failed protected work must prohibit success validation"),
+    };
+    let published = handoff_for_test(
+        fallback_only
+            .prepare_minimal_fallback()
+            .unwrap_or_else(|_| panic!("failed protected work must prepare minimal fallback")),
+    );
+    let PublishedRetainedPublicationParts::MinimalFallback {
+        fallback,
+        ledger_evidence,
+    } = published
+    else {
+        panic!("failed protected work must publish minimal fallback");
+    };
+    assert_eq!(
+        published_failure_cause(&ledger_evidence).class(),
+        PreparationFailureClass::Ledger
+    );
+    drop(fallback);
+    drop(ledger_evidence);
+    assert_eq!(account.snapshot().live_retained_bytes(), 0);
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
+    drop(account);
+    assert_eq!(factory.snapshot().live_accounts(), 0);
+}
+
 #[derive(Debug, Clone, Copy)]
 enum FailureGuardCase {
     RichEvidence,
@@ -1272,9 +2129,7 @@ fn invalid_publication_capacity_is_rejected_before_every_open_side_effect() {
             "{case}: unexpected preflight cause: {}",
             error.cause()
         );
-        let operation = error
-            .try_into_operation()
-            .unwrap_or_else(|_| panic!("{case}: pure preflight must return the operation"));
+        let operation = expect_retry_operation(error, case);
 
         assert_eq!(test_retained_set_id_requests(), set_ids_before, "{case}");
         assert_eq!(
@@ -1335,9 +2190,7 @@ fn recoverable_open_failures_prepare_the_baseline_without_tables_or_roots() {
         error.cause(),
         RetainedWriterError::InvalidPublicationPlan
     ));
-    let operation = error
-        .try_into_operation()
-        .unwrap_or_else(|_| panic!("invalid plan must return the untouched operation"));
+    let operation = expect_retry_operation(error, "invalid total/new relation");
     let published = handoff_for_test(
         operation
             .prepare_minimal_fallback::<u64, u64>(PreparationFailureCode::domain(71))
@@ -1374,9 +2227,7 @@ fn recoverable_open_failures_prepare_the_baseline_without_tables_or_roots() {
         error.cause(),
         RetainedWriterError::Physical(RetainedAllocationError::AllocationFailed)
     ));
-    let operation = error
-        .try_into_operation()
-        .unwrap_or_else(|_| panic!("verified allocation failure must return the operation"));
+    let operation = expect_retry_operation(error, "verified allocation failure");
     let published = handoff_for_test(
         operation
             .prepare_minimal_fallback::<u64, u64>(PreparationFailureCode::domain(72))
@@ -1405,9 +2256,7 @@ fn second_table_allocation_failure_releases_canonical_and_returns_operation() {
         error.cause(),
         RetainedWriterError::Physical(RetainedAllocationError::AllocationFailed)
     ));
-    let operation = error
-        .try_into_operation()
-        .unwrap_or_else(|_| panic!("clean canonical rollback must return the operation"));
+    let operation = expect_retry_operation(error, "clean canonical rollback");
     let published = handoff_for_test(
         operation
             .prepare_minimal_fallback::<u64, u64>(PreparationFailureCode::domain(73))
@@ -1433,7 +2282,7 @@ fn second_table_allocation_failure_reports_canonical_storage_cleanup_failure() {
         RetainedWriterError::StorageDropUnverified
     ));
     assert!(matches!(
-        error.try_into_operation(),
+        error.into_recovery(),
         Err(RetainedWriterError::StorageDropUnverified)
     ));
     assert_eq!(factory.snapshot().live_accounts(), 1);
@@ -1872,6 +2721,74 @@ fn success_control_rejection_atomically_downgrades_to_rich_failure() {
             assert_eq!(*outcome_evidence.outcome_evidence().root(), 7);
         }
         _ => panic!("control rejection must not publish canonical output"),
+    }
+    assert_eq!(factory.snapshot().live_accounts(), 0);
+}
+
+#[test]
+fn primary_ledger_rejection_replaces_only_a_provisional_requested_cause() {
+    assert_eq!(
+        cause_after_primary_ledger_rejection(PreparationFailureCode::domain(73)),
+        PreparationFailureCode::ledger()
+    );
+    for established in [
+        PreparationFailureCode::control(2),
+        PreparationFailureCode::product_graph(3),
+        PreparationFailureCode::ledger(),
+    ] {
+        assert_eq!(
+            cause_after_primary_ledger_rejection(established),
+            established
+        );
+    }
+}
+
+#[test]
+fn primary_binding_failure_preserves_the_earlier_control_cause() {
+    let factory = account_factory(1);
+    let account = account(&factory, u64::MAX, 128);
+    let control = OperationControl::default().with_progress_observer(
+        |_event: crate::ProgressEvent<TestProgress, TestUnit>| crate::ProgressDecision::Cancel,
+    );
+    let operation = test_operation_on_account_with_control(
+        &account,
+        4,
+        RetainedBatchLimits::new(2, 2),
+        control,
+    );
+    drop(account);
+    let mut assembly: TestPublication<u64, u64> = operation
+        .try_publication_assembly(publication_plan(1, 1))
+        .unwrap_or_else(|_| panic!("control rejection publication must open"));
+    let (canonical, evidence) = retain_scalar_success(&mut assembly);
+    assembly
+        .try_commit_outcome_evidence(TestDimension::Bytes, 4)
+        .unwrap_or_else(|_| panic!("evidence commitment must fit the preallocated batch"));
+    let validated =
+        match assembly.validate_success(canonical, evidence, |session, canonical, evidence| {
+            session.canonical(canonical) == Some(&11)
+                && session.outcome_evidence(evidence) == Some(&7)
+        }) {
+            RetainedSuccessValidation::Valid(validated) => validated,
+            _ => panic!("control rejection candidate must validate"),
+        };
+
+    match handoff_for_test(
+        validated
+            .try_prepare(final_progress())
+            .unwrap_or_else(|_| panic!("binding rejection must retain minimal fallback")),
+    ) {
+        PublishedRetainedPublicationParts::MinimalFallback {
+            fallback,
+            ledger_evidence,
+        } => {
+            assert_eq!(*fallback.value(), 7);
+            assert_eq!(
+                published_failure_cause(&ledger_evidence).class(),
+                PreparationFailureClass::Control
+            );
+        }
+        _ => panic!("failed evidence binding must publish minimal fallback"),
     }
     assert_eq!(factory.snapshot().live_accounts(), 0);
 }
@@ -3271,10 +4188,7 @@ fn invalid_and_allocation_failed_open_preserve_operation_for_retry() {
         invalid.cause(),
         RetainedWriterError::InvalidPublicationPlan
     ));
-    let operation = match invalid.try_into_operation() {
-        Ok(operation) => operation,
-        Err(_) => panic!("invalid plan must preserve operation ownership"),
-    };
+    let operation = expect_retry_operation(invalid, "invalid plan");
 
     fail_next_final_owner_allocation();
     let allocation = match operation.try_publication_assembly::<u64, u64>(publication_plan(1, 1)) {
@@ -3285,10 +4199,7 @@ fn invalid_and_allocation_failed_open_preserve_operation_for_retry() {
         allocation.cause(),
         RetainedWriterError::Physical(RetainedAllocationError::AllocationFailed)
     ));
-    let operation = match allocation.try_into_operation() {
-        Ok(operation) => operation,
-        Err(_) => panic!("verified allocation failure must preserve operation ownership"),
-    };
+    let operation = expect_retry_operation(allocation, "verified allocation failure");
     let assembly: TestPublication<u64, u64> = operation
         .try_publication_assembly(publication_plan(1, 1))
         .unwrap_or_else(|_| panic!("retry must open a valid assembly"));

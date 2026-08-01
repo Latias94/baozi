@@ -6,7 +6,7 @@ use crate::SceneValidationLimits;
 use crate::attribute::{AttributeDomain, AttributeSemantic};
 use crate::canonical_scene::store::api::{
     SceneConstructionTerminal as OpaqueSceneConstructionTerminal, SceneSuccessParts,
-    ValidatedScene, ValidatedSceneConstruction,
+    ValidatedScene, handoff_validated_node_scene_with_generation_source_for_test,
 };
 use crate::canonical_scene::store::construction::node_scene::semantic::{
     NodeSceneGeometryAttributePayload, NodeSceneGeometryAttributeSemantic,
@@ -384,10 +384,12 @@ fn build_published_obj_scene_with_generation_source(
         .expect("normalized OBJ Scene input admission")
         .try_validate()
         .unwrap_or_else(|_| panic!("normalized OBJ Scene input must pass central validation"));
-        let prepared = ValidatedSceneConstruction::from_node_scene(validated)
-            .prepare_with_generation_source(reserve_generation)
-            .expect("normalized OBJ opaque Scene publication");
-        match prepared.handoff() {
+        match handoff_validated_node_scene_with_generation_source_for_test(
+            validated,
+            reserve_generation,
+        )
+        .expect("normalized OBJ opaque Scene publication")
+        {
             OpaqueSceneConstructionTerminal::Success(parts) => parts,
             OpaqueSceneConstructionTerminal::RichFailure(_) => {
                 panic!("valid OBJ Scene must not publish rich failure")
@@ -1091,13 +1093,23 @@ fn incomplete_obj_corner_projection_is_rejected_by_central_validation() {
             other => panic!("unexpected incomplete OBJ projection rejection: {other:?}"),
         }
 
-        let terminal = rejected
-            .prepare_minimal_fallback()
-            .expect("invalid OBJ projection fallback")
-            .handoff();
+        let (prepared, rejection) = rejected
+            .prepare_rich_failure()
+            .expect("invalid OBJ projection rich failure");
+        assert!(matches!(
+            rejection,
+            NodeSceneConstructionRejection::GeometryAuthoring(GeometryAuthoringFailure::Semantic(
+                GeometryAuthoringSemanticError::SourceProjectionCardinality {
+                    attribute: 2,
+                    expected: 6,
+                    actual: 5,
+                },
+            ))
+        ));
+        let terminal = prepared.handoff();
         assert!(matches!(
             &terminal,
-            NodeSceneConstructionTerminal::MinimalFallback(_)
+            NodeSceneConstructionTerminal::RichFailure(_)
         ));
         drop(terminal);
     });

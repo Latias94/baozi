@@ -102,7 +102,7 @@ impl NodeSceneValidationScratchOwner {
             animation_count,
             0,
         )?;
-        checkpoint.poll().map_err(StoreRuntimeError::Control)?;
+        checkpoint.poll()?;
 
         Ok(Self {
             deformation_palette_maxima,

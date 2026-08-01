@@ -2,7 +2,9 @@ use super::evidence::{
     fail_next_terminal_evidence_qualification, panic_next_terminal_evidence_qualification,
     panic_next_terminal_evidence_write,
 };
-use super::terminal::panic_next_evidence_only_primary_bind;
+use super::terminal::{
+    cause_after_primary_ledger_rejection, panic_next_evidence_only_primary_bind,
+};
 use super::*;
 use crate::DimensionPolicy;
 use crate::ledger::LedgerTestProbe;
@@ -335,6 +337,7 @@ impl OperationOwner for TestOwner {}
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum TestPhase {
     Build,
+    Unregistered,
 }
 
 impl TerminalEvidenceKeySeal for TestPhase {}
@@ -370,6 +373,8 @@ impl ProgressUnit for TestUnit {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum TestDimension {
     Bytes,
+    FailureTerminalWork,
+    Unregistered,
 }
 
 impl TerminalEvidenceKeySeal for TestDimension {}

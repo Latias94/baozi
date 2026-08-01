@@ -1100,9 +1100,13 @@ fn recoverable_open_failure_preserves_exact_canonical_source_authority() {
         StoreRuntimeError::ForeignPhaseDomain { phase } if *phase == foreign_phase()
     ));
 
-    let recovered = error
-        .try_into_operation()
-        .expect("publication preflight failure must preserve the derived operation");
+    let recovered = match error.into_recovery() {
+        Ok(RetainedStoreOpenRecovery::Retry(operation)) => operation,
+        Ok(RetainedStoreOpenRecovery::FallbackOnly(_)) => {
+            panic!("publication preflight must not consume terminal authority")
+        }
+        Err(cause) => panic!("publication preflight failed closed: {cause:?}"),
+    };
     let valid_plan = RetainedStorePublicationPlan::success(
         RetainedStoreBlockTablePlan::new(writer_plan(keys, 1, 2), 1, 0).unwrap(),
         RetainedStoreBlockTablePlan::new(writer_plan(keys, 1, 2), 1, 0).unwrap(),

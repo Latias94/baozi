@@ -4,10 +4,11 @@ use super::super::{
     ByteBlock, BytesBatchPlan, BytesPlan, CanonicalBytesRef, CanonicalInheritanceSource,
     CanonicalSequenceRef, CanonicalUtf8Ref, FreshStoreLineage, OutcomeEvidenceBytesRef,
     OutcomeEvidenceSequenceRef, OutcomeEvidenceUtf8Ref, PreparedStoreFallback,
-    PublishedOutcomeEvidenceStore, RecordPlan, RetainedStoreBlockTablePlan, RetainedStoreOperation,
-    RetainedStorePublicationPlan, RetainedStoreWriterPlan, ScalarSequence, SequenceBatchPlan,
-    SequencePlan, StoreDestination, StorePlanError, StorePrepareError, StoreRuntimeError,
-    StoredScalar, Utf8BatchPlan, Utf8Plan,
+    PublishedOutcomeEvidenceStore, RecordPlan, RetainedStoreBlockTablePlan,
+    RetainedStoreOpenRecovery, RetainedStoreOperation, RetainedStorePublicationPlan,
+    RetainedStoreWriterPlan, ScalarSequence, SequenceBatchPlan, SequencePlan, StoreDestination,
+    StoreOpenFallbackOnly, StorePlanError, StorePrepareError, StoreRuntimeError, StoredScalar,
+    Utf8BatchPlan, Utf8Plan,
 };
 use super::execution::RetainedStoreExecution;
 use super::{
@@ -108,6 +109,12 @@ where
     PP: ProgressPhase,
     U: ProgressUnit,
 {
+    if operation.raw.is_terminal_only() {
+        return Err(StoreTranscriptStartError::new(
+            operation,
+            StoreTranscriptStartCause::Runtime(StoreRuntimeError::FallbackOnly),
+        ));
+    }
     if let Some(writer) = canonical_writer
         && let Err(cause) = operation.validate_writer_plan(writer)
     {
@@ -410,7 +417,7 @@ where
         amount: u64,
     ) -> Result<PlannedCanonicalCommit, StoreTranscriptPlanError> {
         self.operation
-            .validate_commitment_dimension(dimension)
+            .validate_transcript_commitment_dimension(dimension)
             .map_err(StoreTranscriptPlanError::Runtime)?;
         self.mint_commit(StoreDestination::Canonical, dimension, amount)
             .map(PlannedCanonicalCommit::new)
@@ -422,7 +429,7 @@ where
         amount: u64,
     ) -> Result<PlannedOutcomeEvidenceCommit, StoreTranscriptPlanError> {
         self.operation
-            .validate_commitment_dimension(dimension)
+            .validate_transcript_commitment_dimension(dimension)
             .map_err(StoreTranscriptPlanError::Runtime)?;
         self.mint_commit(StoreDestination::OutcomeEvidence, dimension, amount)
             .map(PlannedOutcomeEvidenceCommit::new)
@@ -532,7 +539,7 @@ where
             Ok(plan) => plan,
             Err(cause) => {
                 return Err(StoreTranscriptOpenError {
-                    transcript: Some(self),
+                    recovery: Some(StoreTranscriptOpenRecovery::Retry(self)),
                     cause: plan_runtime_error(cause),
                 });
             }
@@ -559,17 +566,25 @@ where
             )),
             Err(error) => {
                 let cause = error.cause().clone();
-                let transcript = error.try_into_operation().ok().map(|operation| Self {
-                    operation,
-                    identity,
-                    canonical_writer,
-                    evidence_writer,
-                    progress,
-                    primary_endpoint: (segment == PlanningSegment::FailureContinuation)
-                        .then_some(primary),
-                    segment,
-                });
-                Err(StoreTranscriptOpenError { transcript, cause })
+                let recovery = match error.into_recovery() {
+                    Ok(RetainedStoreOpenRecovery::Retry(operation)) => {
+                        Some(StoreTranscriptOpenRecovery::Retry(Self {
+                            operation,
+                            identity,
+                            canonical_writer,
+                            evidence_writer,
+                            progress,
+                            primary_endpoint: (segment == PlanningSegment::FailureContinuation)
+                                .then_some(primary),
+                            segment,
+                        }))
+                    }
+                    Ok(RetainedStoreOpenRecovery::FallbackOnly(owner)) => {
+                        Some(StoreTranscriptOpenRecovery::FallbackOnly(owner))
+                    }
+                    Err(_) => None,
+                };
+                Err(StoreTranscriptOpenError { recovery, cause })
             }
         }
     }
@@ -665,15 +680,65 @@ fn plan_runtime_error(error: StoreTranscriptPlanError) -> StoreRuntimeError {
     }
 }
 
+/// Capability preserved after transcript-derived block tables fail to open.
+#[must_use = "retry the transcript or publish the pre-admitted minimal fallback"]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "both variants transfer large linear owners without adding an unmetered failure-path allocation"
+)]
+pub enum StoreTranscriptOpenRecovery<O, PP, U, L = FreshStoreLineage>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    /// Pure preflight or rollback-safe failure preserved the complete transcript authority.
+    Retry(RetainedStoreTranscript<O, PP, U, L>),
+    /// Opening consumed the single-use failure-terminal authority.
+    FallbackOnly(StoreOpenFallbackOnly<O, PP, U, L>),
+}
+
+impl<O, PP, U, L> StoreTranscriptOpenRecovery<O, PP, U, L>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    /// Publishes the pre-admitted minimal fallback from either recovery state.
+    pub fn prepare_minimal_fallback(
+        self,
+        cause: u32,
+    ) -> Result<PreparedStoreFallback, StorePrepareError> {
+        match self {
+            Self::Retry(transcript) => transcript.prepare_minimal_fallback(cause),
+            Self::FallbackOnly(owner) => owner.prepare_minimal_fallback(cause),
+        }
+    }
+}
+
+impl<O, PP, U, L> fmt::Debug for StoreTranscriptOpenRecovery<O, PP, U, L>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Retry(_) => formatter.write_str("Retry(..)"),
+            Self::FallbackOnly(_) => formatter.write_str("FallbackOnly(..)"),
+        }
+    }
+}
+
 /// Failure to open transcript-derived block tables.
-#[must_use = "recover the transcript when table opening proved rollback"]
+#[must_use = "recover the remaining authority or let the fail-closed owner drop"]
 pub struct StoreTranscriptOpenError<O, PP, U, L = FreshStoreLineage>
 where
     O: OperationOwner,
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    transcript: Option<RetainedStoreTranscript<O, PP, U, L>>,
+    recovery: Option<StoreTranscriptOpenRecovery<O, PP, U, L>>,
     cause: StoreRuntimeError,
 }
 
@@ -687,10 +752,10 @@ where
         &self.cause
     }
 
-    pub fn try_into_transcript(
+    pub fn into_recovery(
         self,
-    ) -> Result<RetainedStoreTranscript<O, PP, U, L>, StoreRuntimeError> {
-        self.transcript.ok_or(self.cause)
+    ) -> Result<StoreTranscriptOpenRecovery<O, PP, U, L>, StoreRuntimeError> {
+        self.recovery.ok_or(self.cause)
     }
 }
 
@@ -701,10 +766,15 @@ where
     U: ProgressUnit,
 {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let disposition = match &self.recovery {
+            Some(StoreTranscriptOpenRecovery::Retry(_)) => "retry",
+            Some(StoreTranscriptOpenRecovery::FallbackOnly(_)) => "fallback-only",
+            None => "fail-closed",
+        };
         formatter
             .debug_struct("StoreTranscriptOpenError")
             .field("cause", &self.cause)
-            .field("recoverable", &self.transcript.is_some())
+            .field("disposition", &disposition)
             .finish_non_exhaustive()
     }
 }

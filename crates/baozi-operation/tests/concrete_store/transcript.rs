@@ -5,7 +5,8 @@ use baozi_operation::{
     OutcomeEvidenceSequenceRef, PublishedCanonicalStore, PublishedOutcomeEvidenceStore,
     PublishedStoreFallbackParts, ScalarSequence, SequenceBatchItem, SequenceBatchPlan,
     StoreBuildError, StoreExecutionError, StoreTranscriptFailureValidation,
-    StoreTranscriptPlanError, StoreTranscriptStartCause, StoreTranscriptSuccessValidation,
+    StoreTranscriptOpenRecovery, StoreTranscriptPlanError, StoreTranscriptStartCause,
+    StoreTranscriptSuccessValidation,
 };
 
 type TranscriptCanonicalSource = PublishedCanonicalStore<ScalarSequence<u32>, CanonicalRootTag>;
@@ -1081,9 +1082,7 @@ fn writer_and_commit_keys_are_qualified_before_they_become_irreversible() {
     };
     assert!(matches!(
         start_error.cause(),
-        StoreTranscriptStartCause::Runtime(StoreRuntimeError::Ledger(
-            LedgerCause::UnknownDimension { dimension }
-        )) if *dimension == keys.other_dimension
+        StoreTranscriptStartCause::Runtime(StoreRuntimeError::InvalidPublicationPlan)
     ));
     let operation = start_error.into_operation();
 
@@ -1225,9 +1224,13 @@ fn incomplete_derived_open_preserves_exact_source_authority_and_existing_tickets
         Ok(_) => panic!("success publication without evidence must not open"),
         Err(error) => error,
     };
-    let mut transcript = open_error
-        .try_into_transcript()
-        .expect("incomplete derived transcript must remain recoverable");
+    let mut transcript = match open_error.into_recovery() {
+        Ok(StoreTranscriptOpenRecovery::Retry(transcript)) => transcript,
+        Ok(StoreTranscriptOpenRecovery::FallbackOnly(_)) => {
+            panic!("incomplete transcript preflight must not consume terminal authority")
+        }
+        Err(cause) => panic!("incomplete derived transcript failed closed: {cause:?}"),
+    };
     assert!(matches!(
         transcript.plan_canonical_sequence_share(source_b.canonical_root),
         Err(StoreTranscriptPlanError::Runtime(
@@ -1275,9 +1278,13 @@ fn incomplete_open_returns_the_same_transcript_for_repair() {
         open_error.cause(),
         StoreRuntimeError::InvalidPublicationPlan
     ));
-    let mut transcript = open_error
-        .try_into_transcript()
-        .expect("structural plan rejection must return the transcript");
+    let mut transcript = match open_error.into_recovery() {
+        Ok(StoreTranscriptOpenRecovery::Retry(transcript)) => transcript,
+        Ok(StoreTranscriptOpenRecovery::FallbackOnly(_)) => {
+            panic!("structural plan rejection must not consume terminal authority")
+        }
+        Err(cause) => panic!("structural plan rejection failed closed: {cause:?}"),
+    };
     let evidence_ticket = transcript
         .plan_outcome_evidence_sequence::<u8, _>(1, EvidenceRootTag)
         .unwrap();

@@ -394,7 +394,7 @@ fn publication_key_preflight_rejects_unknown_phase_and_dimensions_without_side_e
     });
     assert!(matches!(
         phase_cause,
-        StoreRuntimeError::Ledger(LedgerCause::UnknownPhase)
+        StoreRuntimeError::InvalidPublicationPlan
     ));
 
     for unknown_attribution_dimension in [true, false] {
@@ -418,7 +418,7 @@ fn publication_key_preflight_rejects_unknown_phase_and_dimensions_without_side_e
         });
         assert!(matches!(
             dimension_cause,
-            StoreRuntimeError::Ledger(LedgerCause::UnknownDimension { .. })
+            StoreRuntimeError::InvalidPublicationPlan
         ));
     }
 }

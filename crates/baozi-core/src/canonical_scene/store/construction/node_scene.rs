@@ -58,6 +58,12 @@ const NODE_SCENE_CONTROL_INTERRUPTION_CODE: u32 = 0x5343_1002;
 const NODE_SCENE_WORK_INTERRUPTION_CODE: u32 = 0x5343_1003;
 const NODE_SCENE_COMMITMENT_REJECTION_CODE: u32 = 0x5343_1004;
 const NODE_SCENE_STORAGE_REJECTION_CODE: u32 = 0x5343_1005;
+const NODE_SCENE_NODE_AUTHORING_REJECTION_CODE: u32 = 0x5343_1101;
+const NODE_SCENE_APPEARANCE_AUTHORING_REJECTION_CODE: u32 = 0x5343_1102;
+const NODE_SCENE_GEOMETRY_AUTHORING_REJECTION_CODE: u32 = 0x5343_1103;
+const NODE_SCENE_DEFORMATION_AUTHORING_REJECTION_CODE: u32 = 0x5343_1104;
+const NODE_SCENE_ANIMATION_AUTHORING_REJECTION_CODE: u32 = 0x5343_1105;
+const NODE_SCENE_AGGREGATE_AUTHORING_REJECTION_CODE: u32 = 0x5343_1106;
 
 #[derive(Clone, Copy)]
 struct NodeSceneBuildFaults {
@@ -216,7 +222,7 @@ impl NodeSceneWorkMeter {
         &mut self,
         control: &mut SceneStoreControlCheckpoint<'_>,
     ) -> Result<(), StoreRuntimeError> {
-        control.poll().map_err(StoreRuntimeError::Control)?;
+        control.poll()?;
         self.started = true;
         self.work_since_poll = 0;
         Ok(())
@@ -290,8 +296,21 @@ pub(in crate::canonical_scene::store) enum NodeSceneConstructionRejection {
     Aggregate(#[source] SceneAuthoringAggregateError),
 }
 
-/// A consumed validation attempt which can only terminate as minimal fallback.
-#[must_use = "a rejected node Scene construction still owns a terminal fallback"]
+impl NodeSceneConstructionRejection {
+    const fn stable_code(&self) -> u32 {
+        match self {
+            Self::NodeAuthoring(_) => NODE_SCENE_NODE_AUTHORING_REJECTION_CODE,
+            Self::AppearanceAuthoring(_) => NODE_SCENE_APPEARANCE_AUTHORING_REJECTION_CODE,
+            Self::GeometryAuthoring(_) => NODE_SCENE_GEOMETRY_AUTHORING_REJECTION_CODE,
+            Self::DeformationAuthoring(_) => NODE_SCENE_DEFORMATION_AUTHORING_REJECTION_CODE,
+            Self::AnimationAuthoring(_) => NODE_SCENE_ANIMATION_AUTHORING_REJECTION_CODE,
+            Self::Aggregate(_) => NODE_SCENE_AGGREGATE_AUTHORING_REJECTION_CODE,
+        }
+    }
+}
+
+/// A consumed validation attempt which still owns its exact operation and rejection.
+#[must_use = "a rejected node Scene construction must preserve its rich failure or be dropped"]
 pub(in crate::canonical_scene::store) struct RejectedNodeSceneConstruction {
     operation: SceneConstructionOperation,
     failure: NodeSceneConstructionRejection,
@@ -354,6 +373,33 @@ pub(in crate::canonical_scene::store) struct SceneEvidenceCounts {
     pub(in crate::canonical_scene::store) animation_clip_count: u32,
     pub(in crate::canonical_scene::store) animation_channel_count: u32,
     pub(in crate::canonical_scene::store) payload_block_count: u32,
+}
+
+impl SceneEvidenceCounts {
+    const fn authoring_rejection() -> Self {
+        Self {
+            canonical_block_count: 0,
+            node_count: 0,
+            image_count: 0,
+            sampler_count: 0,
+            texture_count: 0,
+            material_count: 0,
+            material_binding_count: 0,
+            logical_mesh_count: 0,
+            primitive_count: 0,
+            attribute_count: 0,
+            mesh_instance_count: 0,
+            skin_count: 0,
+            logical_morph_count: 0,
+            morph_definition_count: 0,
+            primitive_deformation_count: 0,
+            morph_target_count: 0,
+            morph_delta_count: 0,
+            animation_clip_count: 0,
+            animation_channel_count: 0,
+            payload_block_count: 0,
+        }
+    }
 }
 
 struct PendingNodeSceneCommitments;

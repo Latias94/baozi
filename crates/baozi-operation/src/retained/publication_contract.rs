@@ -135,14 +135,26 @@ impl std::error::Error for RetainedClosureValidationError {}
 
 /// Failure to open a physically accounted retained publication.
 ///
-/// [`Self::try_into_operation`] returns the operation only when every failed construction step
-/// proved that storage and accounting were rolled back. An unverified payload drop deliberately
-/// retains the operation and its charges fail-closed inside this error.
+/// [`Self::into_recovery`] distinguishes a retry-capable operation from an operation whose
+/// single-use failure-terminal authority was consumed before a clean rollback. An unverified
+/// payload drop deliberately retains the operation and its charges fail-closed inside this error.
 #[must_use = "the error owns the operation until recovery is proven or the error is dropped"]
 pub(crate) struct RetainedPublicationOpenError<Operation, D> {
     pub(super) operation: Operation,
     pub(super) cause: RetainedWriterError<D>,
-    pub(super) recoverable: bool,
+    pub(super) disposition: RetainedPublicationOpenDisposition,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum RetainedPublicationOpenDisposition {
+    Retry,
+    FallbackOnly,
+    FailClosed,
+}
+
+pub(crate) enum RetainedPublicationOpenRecovery<Operation> {
+    Retry(Operation),
+    FallbackOnly(Operation),
 }
 
 impl<Operation, D: fmt::Debug> fmt::Debug for RetainedPublicationOpenError<Operation, D> {
@@ -150,7 +162,7 @@ impl<Operation, D: fmt::Debug> fmt::Debug for RetainedPublicationOpenError<Opera
         formatter
             .debug_struct("RetainedPublicationOpenError")
             .field("cause", &self.cause)
-            .field("recoverable", &self.recoverable)
+            .field("disposition", &self.disposition)
             .finish_non_exhaustive()
     }
 }
@@ -178,16 +190,22 @@ impl<Operation, D> RetainedPublicationOpenError<Operation, D> {
         &self.cause
     }
 
-    pub fn try_into_operation(self) -> Result<Operation, RetainedWriterError<D>> {
-        if self.recoverable {
-            Ok(self.operation)
-        } else {
-            Err(self.cause)
+    pub fn into_recovery(
+        self,
+    ) -> Result<RetainedPublicationOpenRecovery<Operation>, RetainedWriterError<D>> {
+        match self.disposition {
+            RetainedPublicationOpenDisposition::Retry => {
+                Ok(RetainedPublicationOpenRecovery::Retry(self.operation))
+            }
+            RetainedPublicationOpenDisposition::FallbackOnly => Ok(
+                RetainedPublicationOpenRecovery::FallbackOnly(self.operation),
+            ),
+            RetainedPublicationOpenDisposition::FailClosed => Err(self.cause),
         }
     }
 }
 
-pub(super) fn retained_open_failure_is_recoverable<D>(cause: &RetainedWriterError<D>) -> bool {
+pub(super) fn retained_open_failure_is_rollback_safe<D>(cause: &RetainedWriterError<D>) -> bool {
     !matches!(cause, RetainedWriterError::Physical(error) if error.charge_retained())
         && !matches!(
             cause,
@@ -210,8 +228,12 @@ pub(crate) enum RetainedPublicationError<D> {
     OutcomeEvidenceSlotLimit,
     /// A canonical action was requested from an evidence-only assembly.
     WrongOutcomeMode,
+    /// A trusted terminal cause has rejected canonical success for this assembly.
+    SuccessOutcomeRejected,
     /// A source slot, rewrite plan, or source-to-destination mapping is stale or inconsistent.
     InvalidSourceSlot,
+    /// The protected failure-evidence rail failed once and is now permanently fallback-only.
+    FailureTerminalWorkSealed,
     /// A prior failure made safe rollback or publication unverifiable.
     Poisoned,
 }
@@ -240,8 +262,14 @@ impl<D: fmt::Debug> fmt::Display for RetainedPublicationError<D> {
             Self::WrongOutcomeMode => {
                 formatter.write_str("canonical action requires a success-capable plan")
             }
+            Self::SuccessOutcomeRejected => {
+                formatter.write_str("canonical success has already been rejected")
+            }
             Self::InvalidSourceSlot => {
                 formatter.write_str("retained source slot or rewrite mapping is invalid")
+            }
+            Self::FailureTerminalWorkSealed => {
+                formatter.write_str("protected failure-evidence work is sealed to minimal fallback")
             }
             Self::Poisoned => formatter.write_str("retained publication assembly is poisoned"),
         }

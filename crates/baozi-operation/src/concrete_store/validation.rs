@@ -4,8 +4,7 @@ use super::{
     CanonicalBytesRef, CanonicalRecordRef, CanonicalRecordView, CanonicalSequenceRef,
     CanonicalUtf8Ref, OutcomeEvidenceBytesRef, OutcomeEvidenceRecordRef, OutcomeEvidenceRecordView,
     OutcomeEvidenceSequenceRef, OutcomeEvidenceUtf8Ref, SequenceView, StoreBuildError,
-    StoreDimensionKey, StoreKeyDomain, StorePhaseKey, StorePlanError, StoredBlock, StoredScalar,
-    sealed,
+    StoreDimensionKey, StorePhaseKey, StorePlanError, StoredBlock, StoredScalar, sealed,
 };
 use crate::control::ControlCause;
 use crate::ledger::{LedgerCause, PhaseCompletionError};
@@ -645,7 +644,11 @@ pub(super) fn map_publication_error(
             destination: StoreDestination::OutcomeEvidence,
         },
         RetainedPublicationError::WrongOutcomeMode => StoreRuntimeError::WrongOutcomeMode,
+        RetainedPublicationError::SuccessOutcomeRejected => {
+            StoreRuntimeError::SuccessOutcomeRejected
+        }
         RetainedPublicationError::InvalidSourceSlot => StoreRuntimeError::InvalidSourceSlot,
+        RetainedPublicationError::FailureTerminalWorkSealed => StoreRuntimeError::FallbackOnly,
         RetainedPublicationError::Poisoned => StoreRuntimeError::Poisoned,
     }
 }
@@ -654,20 +657,4 @@ pub(super) fn publication_error_requires_containment(
     error: &RetainedPublicationError<StoreDimensionKey>,
 ) -> bool {
     retained_publication_error_requires_containment(error)
-}
-
-pub(super) fn validate_store_dimension(
-    domain: &StoreKeyDomain,
-    dimension: StoreDimensionKey,
-    known: bool,
-) -> Result<(), StoreRuntimeError> {
-    if !domain.owns_dimension(dimension) {
-        return Err(StoreRuntimeError::ForeignDimensionDomain { dimension });
-    }
-    if !known {
-        return Err(StoreRuntimeError::Ledger(LedgerCause::UnknownDimension {
-            dimension,
-        }));
-    }
-    Ok(())
 }

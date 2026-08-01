@@ -195,7 +195,7 @@ impl GeometryReferenceScratchPlan {
             })
             .ok_or(StoreRuntimeError::Plan(StorePlanError::SizeOverflow))?;
 
-        checkpoint.poll().map_err(StoreRuntimeError::Control)?;
+        checkpoint.poll()?;
         Ok(Self {
             primitive_plan,
             attribute_plan,
@@ -262,7 +262,7 @@ impl GeometryReferenceScratch {
             attribute_count,
             AttributeLeafRefs::EMPTY,
         )?;
-        checkpoint.poll().map_err(StoreRuntimeError::Control)?;
+        checkpoint.poll()?;
         Ok(Self {
             primitive_refs,
             attribute_refs,
@@ -287,7 +287,7 @@ where
         .map_err(|_| StoreRuntimeError::AccountingOverflow)?;
     for index in 0..count {
         if index.is_multiple_of(poll_interval) {
-            checkpoint.poll().map_err(StoreRuntimeError::Control)?;
+            checkpoint.poll()?;
         }
         checkpoint.charge_observed(keys.dimension, 1)?;
         values.push(value);

@@ -23,6 +23,17 @@ fn maybe_panic_evidence_only_primary_bind(publish_canonical: bool) {
     }
 }
 
+pub(super) fn cause_after_primary_ledger_rejection(
+    cause: PreparationFailureCode,
+) -> PreparationFailureCode {
+    match cause.class() {
+        PreparationFailureClass::Requested => PreparationFailureCode::ledger(),
+        PreparationFailureClass::Control
+        | PreparationFailureClass::ProductGraph
+        | PreparationFailureClass::Ledger => cause,
+    }
+}
+
 pub(super) struct TerminalPhysicalOwnershipManifest<P, D, F, CanonicalBlock, EvidenceBlock> {
     fallback: Option<DetachedRetainedPart<F>>,
     evidence: Option<DetachedRetainedPart<TerminalLedgerEvidence<P, D>>>,
@@ -1208,7 +1219,10 @@ where
 {
     Success(TerminalSuccessFreezeGuard<O, P, D, F, CanonicalBlock, EvidenceBlock>),
     Rich(TerminalRichFreezeGuard<O, P, D, F, CanonicalBlock, EvidenceBlock>),
-    Fallback(TerminalFallbackGuard<O, P, D, F, CanonicalBlock, EvidenceBlock>),
+    Fallback(
+        TerminalFallbackGuard<O, P, D, F, CanonicalBlock, EvidenceBlock>,
+        PreparationFailureCode,
+    ),
 }
 
 pub(super) struct TerminalPrimaryGuard<O, P, D, F, CanonicalBlock, EvidenceBlock>
@@ -1337,15 +1351,25 @@ where
                 return Err(self.contain_primary_binding_panic(payload));
             }
             Ok(Err(_cause)) => {
-                let RetainedTerminalMode::Success { evidence_root, .. } = terminal else {
-                    return Ok(TerminalPrimaryTransition::Fallback(self.into_fallback()));
+                let evidence_root = match terminal {
+                    RetainedTerminalMode::Success { evidence_root, .. } => evidence_root,
+                    RetainedTerminalMode::RichFailure { cause, .. }
+                    | RetainedTerminalMode::MinimalFallback { cause } => {
+                        return Ok(TerminalPrimaryTransition::Fallback(
+                            self.into_fallback(),
+                            cause_after_primary_ledger_rejection(cause),
+                        ));
+                    }
                 };
                 match self.try_bind_once(false) {
                     Err(payload) => {
                         return Err(self.contain_primary_binding_panic(payload));
                     }
                     Ok(Err(_cause)) => {
-                        return Ok(TerminalPrimaryTransition::Fallback(self.into_fallback()));
+                        return Ok(TerminalPrimaryTransition::Fallback(
+                            self.into_fallback(),
+                            PreparationFailureCode::ledger(),
+                        ));
                     }
                     Ok(Ok(())) => {
                         terminal = RetainedTerminalMode::RichFailure {

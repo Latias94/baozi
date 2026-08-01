@@ -151,8 +151,9 @@ pub(crate) use operation::{RetainedControlCheckpoint, RetainedOperation, Retaine
 #[cfg(test)]
 use operation_start::map_qualified_startup_batch_error;
 pub(crate) use operation_start::{
-    RetainedBatchLimits, RetainedHandleSharePlan, RetainedOperationStartError,
-    RetainedOperationStartPlan, RetainedWriterError, RetainedWriterPlan,
+    RetainedBatchLimits, RetainedFailureTerminalWorkPlan, RetainedHandleSharePlan,
+    RetainedOperationStartError, RetainedOperationStartPlan, RetainedWriterError,
+    RetainedWriterPlan,
 };
 use operation_start::{
     StartupRetainedPartGuard, StartupTerminalEvidenceBuildError,
@@ -167,7 +168,8 @@ use publication_contract::{
     RetainedTerminalRequest, map_commitment_push_error, retained_publication_error_containment,
 };
 pub(crate) use publication_contract::{
-    RetainedPublicationError, RetainedPublicationOpenError, RetainedPublicationPlan,
+    RetainedPublicationError, RetainedPublicationOpenError, RetainedPublicationOpenRecovery,
+    RetainedPublicationPlan,
 };
 use range::{CanonicalBatchPreflightContext, try_preflight_canonical_batch};
 pub(crate) use range::{
@@ -241,11 +243,23 @@ where
     set_id: RetainedSetId,
     canonical_plan: Option<RetainedBlockTablePlan<P, D>>,
     evidence_plan: RetainedBlockTablePlan<P, D>,
-    handle_share_work: RetainedHandleSharePlan<D>,
+    ordinary_handle_share_work: RetainedHandleSharePlan<D>,
+    failure_evidence_handle_share_work: Option<RetainedHandleSharePlan<D>>,
+    failure_terminal_work_state: FailureTerminalWorkState,
+    success_outcome_rejected: bool,
     mode: RetainedOutcomeMode,
     containment: AssemblyContainmentProvenance,
     /// Last issued validation epoch. Zero remains reserved for never-visited table members.
     last_validation_epoch: u64,
+}
+
+const FAILURE_TERMINAL_WORK_SEALED_CODE: u32 = 0x4654_5753;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum FailureTerminalWorkState {
+    Inactive,
+    Active,
+    Failed,
 }
 
 /// Exact success closure whose owning assembly can no longer be mutated.
@@ -385,12 +399,129 @@ where
     CanonicalBlock: Send + Sync + 'static,
     EvidenceBlock: Send + Sync + 'static,
 {
+    pub(crate) fn activate_failure_terminal_work(&mut self) {
+        if self.success_outcome_rejected {
+            return;
+        }
+        self.success_outcome_rejected = true;
+        let Some(operation) = self.operation.as_mut() else {
+            self.containment = AssemblyContainmentProvenance::NewFaultPending;
+            self.failure_terminal_work_state = FailureTerminalWorkState::Failed;
+            return;
+        };
+        let configured = operation.has_failure_terminal_work_configuration();
+        match operation.activate_failure_terminal_work() {
+            Some(handle_share_work) => {
+                self.failure_evidence_handle_share_work = Some(handle_share_work);
+                self.failure_terminal_work_state = FailureTerminalWorkState::Active;
+            }
+            None if configured => {
+                operation.record_product_graph_failure(FAILURE_TERMINAL_WORK_SEALED_CODE);
+                self.failure_terminal_work_state = FailureTerminalWorkState::Failed;
+            }
+            None => {}
+        }
+    }
+
+    fn activate_failure_terminal_work_after_recorded_cause(&mut self) {
+        let cause_recorded = self
+            .operation
+            .as_ref()
+            .and_then(|operation| operation.sticky_terminal_cause())
+            .is_some();
+        if cause_recorded {
+            self.activate_failure_terminal_work();
+        }
+    }
+
+    fn ensure_failure_terminal_work_available(&self) -> Result<(), RetainedPublicationError<D>> {
+        if self.failure_terminal_work_state == FailureTerminalWorkState::Failed {
+            Err(RetainedPublicationError::FailureTerminalWorkSealed)
+        } else {
+            Ok(())
+        }
+    }
+
+    fn outcome_evidence_handle_share_work(
+        &self,
+    ) -> Result<RetainedHandleSharePlan<D>, RetainedPublicationError<D>> {
+        match self.failure_terminal_work_state {
+            FailureTerminalWorkState::Inactive => Ok(self.ordinary_handle_share_work),
+            FailureTerminalWorkState::Active => self
+                .failure_evidence_handle_share_work
+                .ok_or(RetainedPublicationError::FailureTerminalWorkSealed),
+            FailureTerminalWorkState::Failed => {
+                Err(RetainedPublicationError::FailureTerminalWorkSealed)
+            }
+        }
+    }
+
+    fn ensure_canonical_work_available(&mut self) -> Result<(), RetainedPublicationError<D>> {
+        self.activate_failure_terminal_work_after_recorded_cause();
+        if self.mode != RetainedOutcomeMode::SuccessCapable {
+            Err(RetainedPublicationError::WrongOutcomeMode)
+        } else if self.success_outcome_rejected {
+            Err(RetainedPublicationError::SuccessOutcomeRejected)
+        } else {
+            Ok(())
+        }
+    }
+
+    fn terminal_cause_or(&self, fallback: PreparationFailureCode) -> PreparationFailureCode {
+        self.operation
+            .as_ref()
+            .and_then(|operation| operation.sticky_terminal_cause())
+            .unwrap_or(fallback)
+    }
+
+    fn seal_failure_terminal_work(&mut self) {
+        if self.failure_terminal_work_state != FailureTerminalWorkState::Active {
+            return;
+        }
+        self.failure_terminal_work_state = FailureTerminalWorkState::Failed;
+        if let Some(operation) = self.operation.as_mut() {
+            operation.record_product_graph_failure(FAILURE_TERMINAL_WORK_SEALED_CODE);
+        } else {
+            self.containment = AssemblyContainmentProvenance::NewFaultPending;
+        }
+    }
+
+    fn observe_publication_error(&mut self, error: &RetainedPublicationError<D>) {
+        if matches!(
+            error,
+            RetainedPublicationError::Writer(RetainedWriterError::Ledger(_))
+        ) {
+            if let Some(operation) = self.operation.as_mut() {
+                operation.record_ledger_failure();
+            }
+            self.activate_failure_terminal_work();
+        }
+        if let Some(containment) = retained_publication_error_containment(error) {
+            self.containment = containment;
+        }
+    }
+
+    pub(crate) fn try_validate_work_dimension(
+        &mut self,
+        dimension: D,
+    ) -> Result<(), RetainedPublicationError<D>> {
+        if self.containment != AssemblyContainmentProvenance::Healthy {
+            return Err(RetainedPublicationError::Poisoned);
+        }
+        self.operation
+            .as_mut()
+            .ok_or(RetainedPublicationError::Poisoned)?
+            .validate_ordinary_dimension(dimension)
+            .map_err(|cause| RetainedPublicationError::Writer(RetainedWriterError::Ledger(cause)))
+    }
+
     pub(crate) fn try_control_checkpoint(
         &mut self,
     ) -> Result<RetainedControlCheckpoint<'_, O, P, PP, U, D>, RetainedPublicationError<D>> {
         if self.containment != AssemblyContainmentProvenance::Healthy {
             return Err(RetainedPublicationError::Poisoned);
         }
+        self.ensure_canonical_work_available()?;
         let Some(operation) = self.operation.as_mut() else {
             self.containment = AssemblyContainmentProvenance::NewFaultPending;
             return Err(RetainedPublicationError::Poisoned);
@@ -575,12 +706,30 @@ where
         CanonicalTag: Copy + Send + Sync + 'static,
         EvidenceTag: Copy + Send + Sync + 'static,
     {
+        self.activate_failure_terminal_work_after_recorded_cause();
+        if self.failure_terminal_work_state == FailureTerminalWorkState::Failed {
+            let cause = self.terminal_cause_or(PreparationFailureCode::product_graph(
+                FAILURE_TERMINAL_WORK_SEALED_CODE,
+            ));
+            return RetainedSuccessValidation::FallbackOnly(RetainedFallbackOnly {
+                assembly: self,
+                cause,
+            });
+        }
+        if self.success_outcome_rejected {
+            let fallback_cause = self.terminal_cause_or(PreparationFailureCode::requested());
+            return RetainedSuccessValidation::Rejected(RetainedFailureAssembly {
+                assembly: self,
+                fallback_cause,
+            });
+        }
         match self.try_validate_success(canonical_root, evidence_root, validate) {
             Ok(proof) => RetainedSuccessValidation::Valid(ValidatedRetainedSuccess {
                 assembly: self,
                 proof,
             }),
             Err(RetainedClosureValidationError::Rejected) => {
+                self.activate_failure_terminal_work();
                 RetainedSuccessValidation::Rejected(RetainedFailureAssembly {
                     assembly: self,
                     fallback_cause: PreparationFailureCode::from_closure_validation(
@@ -613,6 +762,23 @@ where
         CanonicalTag: Copy + Send + Sync + 'static,
         EvidenceTag: Copy + Send + Sync + 'static,
     {
+        self.activate_failure_terminal_work_after_recorded_cause();
+        if self.failure_terminal_work_state == FailureTerminalWorkState::Failed {
+            let cause = self.terminal_cause_or(PreparationFailureCode::product_graph(
+                FAILURE_TERMINAL_WORK_SEALED_CODE,
+            ));
+            return RetainedSuccessValidation::FallbackOnly(RetainedFallbackOnly {
+                assembly: self,
+                cause,
+            });
+        }
+        if self.success_outcome_rejected {
+            let fallback_cause = self.terminal_cause_or(PreparationFailureCode::requested());
+            return RetainedSuccessValidation::Rejected(RetainedFailureAssembly {
+                assembly: self,
+                fallback_cause,
+            });
+        }
         let validation = if self.containment != AssemblyContainmentProvenance::Healthy {
             Err(RetainedClosureValidationError::Poisoned)
         } else if self.mode != RetainedOutcomeMode::SuccessCapable {
@@ -713,6 +879,7 @@ where
                 proof,
             }),
             Err(RetainedClosureValidationError::Rejected) => {
+                self.activate_failure_terminal_work();
                 RetainedSuccessValidation::Rejected(RetainedFailureAssembly {
                     assembly: self,
                     fallback_cause: PreparationFailureCode::from_closure_validation(
@@ -739,6 +906,13 @@ where
     where
         EvidenceTag: Copy + Send + Sync + 'static,
     {
+        self.activate_failure_terminal_work();
+        if self.failure_terminal_work_state == FailureTerminalWorkState::Failed {
+            return RetainedFailureValidation::FallbackOnly(RetainedFallbackOnly {
+                assembly: self,
+                cause: PreparationFailureCode::product_graph(FAILURE_TERMINAL_WORK_SEALED_CODE),
+            });
+        }
         match self.try_validate_rich_failure(evidence_root, validate) {
             Ok(proof) => RetainedFailureValidation::Valid(ValidatedRetainedFailure {
                 assembly: self,
@@ -796,12 +970,9 @@ where
     }
 
     pub fn contains_dimension(&self, dimension: D) -> bool {
-        self.operation.as_ref().is_some_and(|operation| {
-            operation
-                .coordinator
-                .retained_ledger()
-                .contains_dimension(dimension)
-        })
+        self.operation
+            .as_ref()
+            .is_some_and(|operation| operation.contains_dimension(dimension))
     }
 
     pub(crate) fn try_bind_canonical_source(
@@ -809,14 +980,16 @@ where
         source: &PublishedCanonicalAggregate<CanonicalBlock>,
         work_dimension: D,
     ) -> Result<(), CanonicalSourceBindError<D>> {
-        self.canonical_lineage
-            .require_source(source)
-            .map_err(CanonicalSourceBindError::Publication)?;
         if self.containment != AssemblyContainmentProvenance::Healthy {
             return Err(CanonicalSourceBindError::Publication(
                 RetainedPublicationError::Poisoned,
             ));
         }
+        self.ensure_canonical_work_available()
+            .map_err(CanonicalSourceBindError::Publication)?;
+        self.canonical_lineage
+            .require_source(source)
+            .map_err(CanonicalSourceBindError::Publication)?;
         if self.mode != RetainedOutcomeMode::SuccessCapable {
             return Err(CanonicalSourceBindError::Publication(
                 RetainedPublicationError::WrongOutcomeMode,
@@ -844,10 +1017,8 @@ where
             source,
             control,
         );
-        if let Err(CanonicalSourceBindError::Publication(error)) = &result
-            && let Some(containment) = retained_publication_error_containment(error)
-        {
-            self.containment = containment;
+        if let Err(CanonicalSourceBindError::Publication(error)) = &result {
+            self.observe_publication_error(error);
         }
         result
     }
@@ -860,14 +1031,16 @@ where
     where
         CanonicalBlock: CanonicalRetainedLeafPolicy,
     {
-        self.canonical_lineage
-            .require_source(source)
-            .map_err(CanonicalLeafInheritanceError::Publication)?;
         if self.containment != AssemblyContainmentProvenance::Healthy {
             return Err(CanonicalLeafInheritanceError::Publication(
                 RetainedPublicationError::Poisoned,
             ));
         }
+        self.ensure_canonical_work_available()
+            .map_err(CanonicalLeafInheritanceError::Publication)?;
+        self.canonical_lineage
+            .require_source(source)
+            .map_err(CanonicalLeafInheritanceError::Publication)?;
         if self.mode != RetainedOutcomeMode::SuccessCapable {
             return Err(CanonicalLeafInheritanceError::Publication(
                 RetainedPublicationError::WrongOutcomeMode,
@@ -887,7 +1060,7 @@ where
                 .ok_or(CanonicalLeafInheritanceError::Publication(
                     RetainedPublicationError::Poisoned,
                 ))?,
-            self.handle_share_work,
+            self.ordinary_handle_share_work,
             self.canonical_table
                 .as_mut()
                 .ok_or(CanonicalLeafInheritanceError::Publication(
@@ -897,10 +1070,8 @@ where
             source,
             control,
         );
-        if let Err(CanonicalLeafInheritanceError::Publication(error)) = &result
-            && let Some(containment) = retained_publication_error_containment(error)
-        {
-            self.containment = containment;
+        if let Err(CanonicalLeafInheritanceError::Publication(error)) = &result {
+            self.observe_publication_error(error);
         }
         result
     }
@@ -951,6 +1122,7 @@ where
         if self.containment != AssemblyContainmentProvenance::Healthy {
             return Err(RetainedPublicationError::Poisoned);
         }
+        self.ensure_canonical_work_available()?;
         let canonical_plan = self
             .canonical_plan
             .ok_or(RetainedPublicationError::WrongOutcomeMode)?;
@@ -963,7 +1135,7 @@ where
             self.account
                 .as_ref()
                 .ok_or(RetainedPublicationError::Poisoned)?,
-            self.handle_share_work,
+            self.ordinary_handle_share_work,
             canonical_plan.writer.phase,
             canonical_plan.writer.attribution_dimension,
             self.canonical_batch
@@ -985,9 +1157,7 @@ where
                 marker: PhantomData,
             }),
             Err(error) => {
-                if let Some(containment) = retained_publication_error_containment(&error) {
-                    self.containment = containment;
-                }
+                self.observe_publication_error(&error);
                 Err(error)
             }
         }
@@ -1017,6 +1187,7 @@ where
         if self.containment != AssemblyContainmentProvenance::Healthy {
             return Err(RetainedPublicationError::Poisoned);
         }
+        self.ensure_canonical_work_available()?;
         let canonical_plan = self
             .canonical_plan
             .ok_or(RetainedPublicationError::WrongOutcomeMode)?;
@@ -1030,7 +1201,7 @@ where
             self.account
                 .as_ref()
                 .ok_or(RetainedPublicationError::Poisoned)?,
-            self.handle_share_work,
+            self.ordinary_handle_share_work,
             canonical_plan.writer.phase,
             canonical_plan.writer.attribution_dimension,
             self.canonical_batch
@@ -1052,9 +1223,7 @@ where
                 marker: PhantomData,
             }),
             Err(error) => {
-                if let Some(containment) = retained_publication_error_containment(&error) {
-                    self.containment = containment;
-                }
+                self.observe_publication_error(&error);
                 Err(error)
             }
         }
@@ -1077,10 +1246,11 @@ where
     where
         Tag: Copy + Send + Sync + 'static,
     {
-        self.canonical_lineage.require_source(source)?;
         if self.containment != AssemblyContainmentProvenance::Healthy {
             return Err(RetainedPublicationError::Poisoned);
         }
+        self.ensure_canonical_work_available()?;
+        self.canonical_lineage.require_source(source)?;
         let canonical_plan = self
             .canonical_plan
             .ok_or(RetainedPublicationError::WrongOutcomeMode)?;
@@ -1093,7 +1263,7 @@ where
             self.account
                 .as_ref()
                 .ok_or(RetainedPublicationError::Poisoned)?,
-            self.handle_share_work,
+            self.ordinary_handle_share_work,
             canonical_plan.writer.phase,
             canonical_plan.writer.attribution_dimension,
             self.canonical_batch
@@ -1114,9 +1284,7 @@ where
                 marker: PhantomData,
             }),
             Err(error) => {
-                if let Some(containment) = retained_publication_error_containment(&error) {
-                    self.containment = containment;
-                }
+                self.observe_publication_error(&error);
                 Err(error)
             }
         }
@@ -1140,10 +1308,11 @@ where
     where
         Tag: Copy + Send + Sync + 'static,
     {
-        self.canonical_lineage.require_source(source)?;
         if self.containment != AssemblyContainmentProvenance::Healthy {
             return Err(RetainedPublicationError::Poisoned);
         }
+        self.ensure_canonical_work_available()?;
+        self.canonical_lineage.require_source(source)?;
         let canonical_plan = self
             .canonical_plan
             .ok_or(RetainedPublicationError::WrongOutcomeMode)?;
@@ -1157,7 +1326,7 @@ where
             self.account
                 .as_ref()
                 .ok_or(RetainedPublicationError::Poisoned)?,
-            self.handle_share_work,
+            self.ordinary_handle_share_work,
             canonical_plan.writer.phase,
             canonical_plan.writer.attribution_dimension,
             self.canonical_batch
@@ -1178,9 +1347,7 @@ where
                 marker: PhantomData,
             }),
             Err(error) => {
-                if let Some(containment) = retained_publication_error_containment(&error) {
-                    self.containment = containment;
-                }
+                self.observe_publication_error(&error);
                 Err(error)
             }
         }
@@ -1208,6 +1375,8 @@ where
                 RetainedPublicationError::Poisoned,
             ));
         }
+        self.ensure_canonical_work_available()
+            .map_err(CanonicalRetainBatchError::Preflight)?;
         let canonical_plan = self
             .canonical_plan
             .ok_or(CanonicalRetainBatchError::Preflight(
@@ -1236,7 +1405,7 @@ where
                 batch: self.canonical_batch.as_ref().ok_or(
                     CanonicalRetainBatchError::Preflight(RetainedPublicationError::Poisoned),
                 )?,
-                handle_share_work: self.handle_share_work,
+                handle_share_work: self.ordinary_handle_share_work,
                 table_plan: canonical_plan,
                 set_id: self.set_id,
                 slot_limit_error: RetainedPublicationError::CanonicalSlotLimit,
@@ -1244,12 +1413,7 @@ where
         );
         let qualified = match preflight {
             Ok(qualified) => qualified,
-            Err(error) => {
-                if let Some(containment) = retained_publication_error_containment(&error) {
-                    self.containment = containment;
-                }
-                return Err(CanonicalRetainBatchError::Preflight(error));
-            }
+            Err(error) => return Err(CanonicalRetainBatchError::Preflight(error)),
         };
 
         for index in 0..qualified.len() {
@@ -1343,10 +1507,11 @@ where
     where
         Tag: Copy + Send + Sync + 'static,
     {
-        self.canonical_lineage.require_source(source)?;
         if self.containment != AssemblyContainmentProvenance::Healthy {
             return Err(RetainedPublicationError::Poisoned);
         }
+        self.ensure_canonical_work_available()?;
+        self.canonical_lineage.require_source(source)?;
         if self.mode != RetainedOutcomeMode::SuccessCapable {
             return Err(RetainedPublicationError::WrongOutcomeMode);
         }
@@ -1359,7 +1524,7 @@ where
             self.account
                 .as_ref()
                 .ok_or(RetainedPublicationError::Poisoned)?,
-            self.handle_share_work,
+            self.ordinary_handle_share_work,
             self.canonical_table
                 .as_mut()
                 .ok_or(RetainedPublicationError::Poisoned)?,
@@ -1375,9 +1540,7 @@ where
                 marker: PhantomData,
             }),
             Err(error) => {
-                if let Some(containment) = retained_publication_error_containment(&error) {
-                    self.containment = containment;
-                }
+                self.observe_publication_error(&error);
                 Err(error)
             }
         }
@@ -1403,10 +1566,11 @@ where
     where
         Tag: Copy + Send + Sync + 'static,
     {
-        self.canonical_lineage.require_source(source)?;
         if self.containment != AssemblyContainmentProvenance::Healthy {
             return Err(RetainedPublicationError::Poisoned);
         }
+        self.ensure_canonical_work_available()?;
+        self.canonical_lineage.require_source(source)?;
         if self.mode != RetainedOutcomeMode::SuccessCapable {
             return Err(RetainedPublicationError::WrongOutcomeMode);
         }
@@ -1423,7 +1587,7 @@ where
             self.account
                 .as_ref()
                 .ok_or(RetainedPublicationError::Poisoned)?,
-            self.handle_share_work,
+            self.ordinary_handle_share_work,
             canonical_plan.writer.phase,
             canonical_plan.writer.attribution_dimension,
             self.canonical_batch
@@ -1445,9 +1609,7 @@ where
                 marker: PhantomData,
             }),
             Err(error) => {
-                if let Some(containment) = retained_publication_error_containment(&error) {
-                    self.containment = containment;
-                }
+                self.observe_publication_error(&error);
                 Err(error)
             }
         }
@@ -1469,6 +1631,10 @@ where
         if self.containment != AssemblyContainmentProvenance::Healthy {
             return Err(RetainedPublicationError::Poisoned);
         }
+        self.activate_failure_terminal_work_after_recorded_cause();
+        self.ensure_failure_terminal_work_available()?;
+        let protected_action = self.failure_terminal_work_state == FailureTerminalWorkState::Active;
+        let handle_share_work = self.outcome_evidence_handle_share_work()?;
         let result = try_retain_block(
             self.operation
                 .as_ref()
@@ -1478,7 +1644,7 @@ where
             self.account
                 .as_ref()
                 .ok_or(RetainedPublicationError::Poisoned)?,
-            self.handle_share_work,
+            handle_share_work,
             self.evidence_plan.writer.phase,
             self.evidence_plan.writer.attribution_dimension,
             self.evidence_batch
@@ -1500,8 +1666,9 @@ where
                 marker: PhantomData,
             }),
             Err(error) => {
-                if let Some(containment) = retained_publication_error_containment(&error) {
-                    self.containment = containment;
+                self.observe_publication_error(&error);
+                if protected_action {
+                    self.seal_failure_terminal_work();
                 }
                 Err(error)
             }
@@ -1520,6 +1687,10 @@ where
         if self.containment != AssemblyContainmentProvenance::Healthy {
             return Err(RetainedPublicationError::Poisoned);
         }
+        self.activate_failure_terminal_work_after_recorded_cause();
+        self.ensure_failure_terminal_work_available()?;
+        let protected_action = self.failure_terminal_work_state == FailureTerminalWorkState::Active;
+        let handle_share_work = self.outcome_evidence_handle_share_work()?;
         let result = try_share_retained_block::<O, P, D, EvidenceBlock, Tag>(
             self.operation
                 .as_ref()
@@ -1529,7 +1700,7 @@ where
             self.account
                 .as_ref()
                 .ok_or(RetainedPublicationError::Poisoned)?,
-            self.handle_share_work,
+            handle_share_work,
             self.evidence_table
                 .as_mut()
                 .ok_or(RetainedPublicationError::Poisoned)?,
@@ -1545,8 +1716,9 @@ where
                 marker: PhantomData,
             }),
             Err(error) => {
-                if let Some(containment) = retained_publication_error_containment(&error) {
-                    self.containment = containment;
+                self.observe_publication_error(&error);
+                if protected_action {
+                    self.seal_failure_terminal_work();
                 }
                 Err(error)
             }
@@ -1561,22 +1733,30 @@ where
         if self.containment != AssemblyContainmentProvenance::Healthy {
             return Err(RetainedPublicationError::Poisoned);
         }
+        self.ensure_canonical_work_available()?;
         if self.mode != RetainedOutcomeMode::SuccessCapable {
             return Err(RetainedPublicationError::WrongOutcomeMode);
         }
-        let ledger = self
-            .operation
-            .as_ref()
-            .ok_or(RetainedPublicationError::Poisoned)?
-            .coordinator
-            .retained_ledger();
-        let batch = self
-            .canonical_batch
-            .as_mut()
-            .ok_or(RetainedPublicationError::Poisoned)?;
-        ledger
-            .try_push_commitment(batch, OutputCommitment::new(dimension, amount))
-            .map_err(map_commitment_push_error)
+        self.try_validate_work_dimension(dimension)?;
+        let result = {
+            let ledger = self
+                .operation
+                .as_ref()
+                .ok_or(RetainedPublicationError::Poisoned)?
+                .coordinator
+                .retained_ledger();
+            let batch = self
+                .canonical_batch
+                .as_mut()
+                .ok_or(RetainedPublicationError::Poisoned)?;
+            ledger
+                .try_push_commitment(batch, OutputCommitment::new(dimension, amount))
+                .map_err(map_commitment_push_error)
+        };
+        if let Err(error) = &result {
+            self.observe_publication_error(error);
+        }
+        result
     }
 
     pub fn try_commit_outcome_evidence(
@@ -1587,19 +1767,38 @@ where
         if self.containment != AssemblyContainmentProvenance::Healthy {
             return Err(RetainedPublicationError::Poisoned);
         }
-        let ledger = self
-            .operation
-            .as_ref()
-            .ok_or(RetainedPublicationError::Poisoned)?
-            .coordinator
-            .retained_ledger();
-        let batch = self
-            .evidence_batch
-            .as_mut()
-            .ok_or(RetainedPublicationError::Poisoned)?;
-        ledger
-            .try_push_commitment(batch, OutputCommitment::new(dimension, amount))
-            .map_err(map_commitment_push_error)
+        self.activate_failure_terminal_work_after_recorded_cause();
+        self.ensure_failure_terminal_work_available()?;
+        let protected_action = self.failure_terminal_work_state == FailureTerminalWorkState::Active;
+        if let Err(error) = self.try_validate_work_dimension(dimension) {
+            self.observe_publication_error(&error);
+            if protected_action {
+                self.seal_failure_terminal_work();
+            }
+            return Err(error);
+        }
+        let result = {
+            let ledger = self
+                .operation
+                .as_ref()
+                .ok_or(RetainedPublicationError::Poisoned)?
+                .coordinator
+                .retained_ledger();
+            let batch = self
+                .evidence_batch
+                .as_mut()
+                .ok_or(RetainedPublicationError::Poisoned)?;
+            ledger
+                .try_push_commitment(batch, OutputCommitment::new(dimension, amount))
+                .map_err(map_commitment_push_error)
+        };
+        if let Err(error) = &result {
+            self.observe_publication_error(error);
+            if protected_action {
+                self.seal_failure_terminal_work();
+            }
+        }
+        result
     }
 
     /// Discards every block table before attribution and publishes the pre-admitted fallback.
@@ -1687,9 +1886,12 @@ where
                         cause,
                     ));
                 }
-                let control_cause = match self.operation.as_mut() {
+                let terminal_cause = match self.operation.as_mut() {
                     Some(operation) => {
-                        prepare_terminal_control(&mut operation.coordinator, final_progress)
+                        let sticky_cause = operation.sticky_terminal_cause();
+                        let control_cause =
+                            prepare_terminal_control(&mut operation.coordinator, final_progress);
+                        sticky_cause.or(control_cause)
                     }
                     None => {
                         let cause = self
@@ -1699,7 +1901,7 @@ where
                         ));
                     }
                 };
-                control_cause.map_or(
+                terminal_cause.map_or(
                     RetainedTerminalMode::Success {
                         canonical_root: proof.canonical_root,
                         evidence_root: proof.evidence_root,
@@ -1730,9 +1932,12 @@ where
                         cause,
                     ));
                 }
-                let control_cause = match self.operation.as_mut() {
+                let terminal_cause = match self.operation.as_mut() {
                     Some(operation) => {
-                        prepare_terminal_control(&mut operation.coordinator, final_progress)
+                        let sticky_cause = operation.sticky_terminal_cause();
+                        let control_cause =
+                            prepare_terminal_control(&mut operation.coordinator, final_progress);
+                        sticky_cause.or(control_cause)
                     }
                     None => {
                         let cause = self
@@ -1744,18 +1949,20 @@ where
                 };
                 RetainedTerminalMode::RichFailure {
                     evidence_root: proof.evidence_root,
-                    cause: control_cause.unwrap_or(requested_cause),
+                    cause: terminal_cause.unwrap_or(requested_cause),
                 }
             }
             RetainedTerminalRequest::MinimalFallback { requested_cause } => {
                 let cause = match self.operation.as_mut() {
-                    Some(operation) => operation
-                        .coordinator
-                        .poll()
-                        .err()
-                        .map_or(requested_cause, |cause| {
-                            PreparationFailureCode::from_control(&cause)
-                        }),
+                    Some(operation) => {
+                        let sticky_cause = operation.sticky_terminal_cause();
+                        let control_cause = operation
+                            .coordinator
+                            .poll()
+                            .err()
+                            .map(|cause| PreparationFailureCode::from_control(&cause));
+                        sticky_cause.or(control_cause).unwrap_or(requested_cause)
+                    }
                     None => {
                         let cause = self
                             .poison_and_fail_closed(AccountPoisonReason::OwnershipGraphUnverified);
@@ -1827,8 +2034,8 @@ where
             TerminalPrimaryTransition::Rich(rich) => rich
                 .into_prepared(self.set_id)
                 .map_err(RetainedPublicationPrepareError::FinalizationContainment),
-            TerminalPrimaryTransition::Fallback(fallback_guard) => {
-                fallback_guard.try_prepare(PreparationFailureCode::ledger())
+            TerminalPrimaryTransition::Fallback(fallback_guard, cause) => {
+                fallback_guard.try_prepare(cause)
             }
         }
     }
@@ -2033,8 +2240,10 @@ where
         self,
         fallback_cause: PreparationFailureCode,
     ) -> RetainedFailureAssembly<O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock> {
+        let mut assembly = self.assembly;
+        assembly.activate_failure_terminal_work();
         RetainedFailureAssembly {
-            assembly: self.assembly,
+            assembly,
             fallback_cause,
         }
     }
@@ -2093,6 +2302,13 @@ where
 
     pub fn contains_dimension(&self, dimension: D) -> bool {
         self.assembly.contains_dimension(dimension)
+    }
+
+    pub(crate) fn try_validate_work_dimension(
+        &mut self,
+        dimension: D,
+    ) -> Result<(), RetainedPublicationError<D>> {
+        self.assembly.try_validate_work_dimension(dimension)
     }
 
     pub fn try_retain_outcome_evidence<Tag>(
@@ -2475,7 +2691,7 @@ fn take_test_member_lookups() -> usize {
 }
 
 #[cfg(test)]
-fn fail_next_final_owner_allocation() {
+pub(crate) fn fail_next_final_owner_allocation() {
     fail_final_owner_allocation_after(0);
 }
 

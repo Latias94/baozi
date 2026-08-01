@@ -78,9 +78,10 @@ where
     type Reservation = RetainedStoreReservation<O>;
 
     fn poll(&mut self) -> Result<(), Self::Error> {
-        self.checkpoint
-            .poll()
-            .map_err(OperationAuthoringControlError::Control)
+        self.checkpoint.poll().map_err(|error| match error {
+            StoreRuntimeError::Control(cause) => OperationAuthoringControlError::Control(cause),
+            cause => OperationAuthoringControlError::Store(cause),
+        })
     }
 
     fn charge_work(&mut self, _work: SceneValidationWork, amount: u64) -> Result<(), Self::Error> {

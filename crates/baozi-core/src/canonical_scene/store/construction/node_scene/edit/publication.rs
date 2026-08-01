@@ -13,7 +13,7 @@ use crate::identity::{ReservedSceneGeneration, SceneGenerationError, SceneGenera
 
 use super::super::super::{
     GENERATION_EXHAUSTED_CODE, SceneConstructionError, SceneStoreAssembly, SceneStoreKeys,
-    SceneStoreOperation, TracerSceneFallback, burn_generation_reservation, final_progress,
+    SceneStoreOpenRecovery, TracerSceneFallback, burn_generation_reservation, final_progress,
 };
 use super::super::scratch::NodeSceneValidationScratchOwner;
 use super::super::{
@@ -313,11 +313,11 @@ fn map_prepared_failure(
     })
 }
 
-pub(super) fn prepare_edit_minimal_from_operation<L>(
-    operation: SceneStoreOperation<L>,
+pub(super) fn prepare_edit_minimal_from_open_recovery<L>(
+    recovery: SceneStoreOpenRecovery<L>,
     cause: u32,
 ) -> Result<PreparedNodeTransformEdit, SceneConstructionError> {
-    let store = operation.prepare_minimal_fallback(cause)?;
+    let store = recovery.prepare_minimal_fallback(cause)?;
     Ok(PreparedNodeTransformEdit::minimal_fallback(
         PreparedNodeTransformEditMinimalFallback { store },
     ))

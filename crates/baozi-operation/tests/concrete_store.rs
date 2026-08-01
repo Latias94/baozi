@@ -9,13 +9,14 @@ use baozi_operation::{
     PhysicalStorageAccountLimits, PhysicalStorageAccountSnapshot, PreparedStoreFailureOutcome,
     PreparedStoreSuccessOutcome, ProgressPhase, ProgressUnit, PublishedStoreFailureParts,
     PublishedStoreSuccessParts, RecordPlan, RetainedStoreBatchLimits, RetainedStoreBlockTablePlan,
-    RetainedStoreOperation, RetainedStorePublicationPlan, RetainedStoreSharePlan,
-    RetainedStoreStartError, RetainedStoreStartPlan, RetainedStoreWriterPlan, SequencePlan,
-    StoreBuildFailureClass, StoreDimensionKey, StoreDimensionSemanticId, StoreFailureValidation,
-    StoreFallbackEnvelope, StoreKeyDomain, StoreLedgerEvidence, StoreLedgerPlan,
-    StoreLedgerPlanError, StorePhaseKey, StorePhaseSemanticId, StorePreparationFailure,
-    StorePreparationFailureClass, StorePrepareError, StoreRuntimeError, StoreSemanticCatalogId,
-    StoreSuccessValidation, StoreTerminalCause, Utf8Plan,
+    RetainedStoreOpenRecovery, RetainedStoreOperation, RetainedStorePublicationPlan,
+    RetainedStoreSharePlan, RetainedStoreStartError, RetainedStoreStartPlan,
+    RetainedStoreWriterPlan, SequencePlan, StoreBuildFailureClass, StoreDimensionKey,
+    StoreDimensionSemanticId, StoreFailureValidation, StoreFallbackEnvelope, StoreKeyDomain,
+    StoreLedgerEvidence, StoreLedgerPlan, StoreLedgerPlanError, StorePhaseKey,
+    StorePhaseSemanticId, StorePreparationFailure, StorePreparationFailureClass, StorePrepareError,
+    StoreRuntimeError, StoreSemanticCatalogId, StoreSuccessValidation, StoreTerminalCause,
+    Utf8Plan,
 };
 
 struct TestOwner;
@@ -410,8 +411,11 @@ where
     };
     let cause = error.cause().clone();
     assert_eq!(account.snapshot(), before);
-    let recovered = match error.try_into_operation() {
-        Ok(operation) => operation,
+    let recovered = match error.into_recovery() {
+        Ok(RetainedStoreOpenRecovery::Retry(operation)) => operation,
+        Ok(RetainedStoreOpenRecovery::FallbackOnly(_)) => {
+            panic!("key preflight must not consume terminal authority")
+        }
         Err(cause) => panic!("key preflight must preserve the operation: {cause:?}"),
     };
     assert_eq!(account.snapshot(), before);

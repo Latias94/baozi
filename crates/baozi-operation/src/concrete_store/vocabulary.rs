@@ -6,8 +6,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use super::StorePlanError;
 use crate::ledger::LedgerLimits;
 use crate::retained::{
-    RetainedBatchLimits, RetainedBlockTablePlan, RetainedHandleSharePlan, RetainedPublicationPlan,
-    RetainedWriterPlan,
+    RetainedBatchLimits, RetainedBlockTablePlan, RetainedFailureTerminalWorkPlan,
+    RetainedHandleSharePlan, RetainedPublicationPlan, RetainedWriterPlan,
 };
 
 /// Allocation-free terminal fallback payload.
@@ -617,6 +617,51 @@ impl RetainedStoreSharePlan {
     const fn into_raw(self) -> RetainedHandleSharePlan<StoreDimensionKey> {
         RetainedHandleSharePlan::new(self.clone_dimension, self.retained_handle_dimension)
     }
+
+    fn contains(self, dimension: StoreDimensionKey) -> bool {
+        self.clone_dimension == dimension || self.retained_handle_dimension == dimension
+    }
+}
+
+/// Finite terminal work reserved for rich-failure evidence publication.
+///
+/// The dimension must be present in the operation's [`StoreLedgerPlan`] and distinct from every
+/// ordinary start dimension. Startup preflights the exact upper bound for the publication account,
+/// evidence table root, and every admitted evidence member without consuming the counters. Normal
+/// control, writer, and commitment APIs cannot spend this dimension.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RetainedStoreFailureTerminalWorkPlan {
+    dimension: StoreDimensionKey,
+    max_evidence_members: usize,
+}
+
+impl RetainedStoreFailureTerminalWorkPlan {
+    /// Declares the dedicated terminal dimension and maximum rich-failure evidence members.
+    pub fn new(
+        dimension: StoreDimensionKey,
+        max_evidence_members: usize,
+    ) -> Result<Self, StorePlanError> {
+        if max_evidence_members == 0
+            || max_evidence_members
+                .checked_add(2)
+                .and_then(|actions| u64::try_from(actions).ok())
+                .is_none()
+        {
+            return Err(StorePlanError::InvalidFailureTerminalWork);
+        }
+        Ok(Self {
+            dimension,
+            max_evidence_members,
+        })
+    }
+
+    pub(super) const fn dimension(self) -> StoreDimensionKey {
+        self.dimension
+    }
+
+    const fn into_raw(self) -> RetainedFailureTerminalWorkPlan<StoreDimensionKey> {
+        RetainedFailureTerminalWorkPlan::new(self.dimension, self.max_evidence_members)
+    }
 }
 
 /// Start-time policy for the operation-owned concrete retained store.
@@ -629,6 +674,18 @@ pub struct RetainedStoreStartPlan {
     fallback_amount: u64,
     snapshot_dimension: StoreDimensionKey,
     snapshot_amount: u64,
+    failure_terminal_work: Option<RetainedStoreFailureTerminalWorkPlan>,
+}
+
+pub(super) struct RawRetainedStoreStartParts {
+    pub(super) terminal_writer: RetainedWriterPlan<StorePhaseKey, StoreDimensionKey>,
+    pub(super) share: RetainedHandleSharePlan<StoreDimensionKey>,
+    pub(super) fallback: StoreFallbackEnvelope,
+    pub(super) fallback_dimension: StoreDimensionKey,
+    pub(super) fallback_amount: u64,
+    pub(super) snapshot_dimension: StoreDimensionKey,
+    pub(super) snapshot_amount: u64,
+    pub(super) failure_terminal_work: Option<RetainedFailureTerminalWorkPlan<StoreDimensionKey>>,
 }
 
 impl RetainedStoreStartPlan {
@@ -651,12 +708,27 @@ impl RetainedStoreStartPlan {
             fallback_amount,
             snapshot_dimension,
             snapshot_amount,
+            failure_terminal_work: None,
         }
+    }
+
+    /// Reserves one finite, single-use work rail for rich-failure evidence after ordinary work is
+    /// exhausted, including a later downgrade from a validated success candidate.
+    pub const fn with_failure_terminal_work(
+        mut self,
+        plan: RetainedStoreFailureTerminalWorkPlan,
+    ) -> Self {
+        self.failure_terminal_work = Some(plan);
+        self
     }
 
     pub(super) const fn keys_for_start_validation(
         &self,
-    ) -> (StorePhaseKey, [StoreDimensionKey; 6]) {
+    ) -> (
+        StorePhaseKey,
+        [StoreDimensionKey; 6],
+        Option<StoreDimensionKey>,
+    ) {
         (
             self.terminal_writer.phase,
             [
@@ -667,29 +739,41 @@ impl RetainedStoreStartPlan {
                 self.fallback_dimension,
                 self.snapshot_dimension,
             ],
+            match self.failure_terminal_work {
+                Some(plan) => Some(plan.dimension()),
+                None => None,
+            },
         )
     }
 
-    pub(super) const fn into_raw_start_parts(
-        self,
-    ) -> (
-        RetainedWriterPlan<StorePhaseKey, StoreDimensionKey>,
-        RetainedHandleSharePlan<StoreDimensionKey>,
-        StoreFallbackEnvelope,
-        StoreDimensionKey,
-        u64,
-        StoreDimensionKey,
-        u64,
-    ) {
-        (
-            self.terminal_writer.into_raw(),
-            self.share.into_raw(),
-            self.fallback,
-            self.fallback_dimension,
-            self.fallback_amount,
-            self.snapshot_dimension,
-            self.snapshot_amount,
-        )
+    pub(super) fn failure_terminal_work_is_separate(&self) -> bool {
+        match self.failure_terminal_work {
+            Some(plan) => {
+                let dimension = plan.dimension();
+                self.terminal_writer.capacity_dimension != dimension
+                    && self.terminal_writer.attribution_dimension != dimension
+                    && !self.share.contains(dimension)
+                    && self.fallback_dimension != dimension
+                    && self.snapshot_dimension != dimension
+            }
+            None => true,
+        }
+    }
+
+    pub(super) const fn into_raw_start_parts(self) -> RawRetainedStoreStartParts {
+        RawRetainedStoreStartParts {
+            terminal_writer: self.terminal_writer.into_raw(),
+            share: self.share.into_raw(),
+            fallback: self.fallback,
+            fallback_dimension: self.fallback_dimension,
+            fallback_amount: self.fallback_amount,
+            snapshot_dimension: self.snapshot_dimension,
+            snapshot_amount: self.snapshot_amount,
+            failure_terminal_work: match self.failure_terminal_work {
+                Some(plan) => Some(plan.into_raw()),
+                None => None,
+            },
+        }
     }
 }
 
