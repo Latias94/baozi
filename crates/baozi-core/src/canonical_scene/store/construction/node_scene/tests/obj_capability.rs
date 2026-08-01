@@ -1,9 +1,13 @@
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use baozi_operation::{CancellationToken, PhysicalStorageAccount, StorePreparationFailureClass};
 
 use crate::SceneValidationLimits;
 use crate::attribute::{AttributeDomain, AttributeSemantic};
+use crate::canonical_scene::store::api::{
+    SceneConstructionTerminal as OpaqueSceneConstructionTerminal, SceneSuccessParts,
+    ValidatedScene, ValidatedSceneConstruction,
+};
 use crate::canonical_scene::store::construction::node_scene::semantic::{
     NodeSceneGeometryAttributePayload, NodeSceneGeometryAttributeSemantic,
     NodeSceneGeometryF32Cursor, NodeSceneGeometryU32Cursor,
@@ -354,12 +358,53 @@ fn build_obj_scene_with_generation_source(
     })
 }
 
+fn build_published_obj_scene(
+    account: &PhysicalStorageAccount,
+    projection: &ObjCanonicalProjection<'_>,
+) -> SceneSuccessParts {
+    build_published_obj_scene_with_generation_source(
+        account,
+        projection,
+        SceneGenerationId::reserve,
+    )
+}
+
+fn build_published_obj_scene_with_generation_source(
+    account: &PhysicalStorageAccount,
+    projection: &ObjCanonicalProjection<'_>,
+    reserve_generation: impl FnOnce() -> Result<ReservedSceneGeneration, SceneGenerationError>,
+) -> SceneSuccessParts {
+    projection.with_scene_input(|input| {
+        let validated = SceneConstructionOperation::with_account_for_scene_input(
+            account,
+            test_limits(),
+            input,
+            SceneValidationLimits::default(),
+        )
+        .expect("normalized OBJ Scene input admission")
+        .try_validate()
+        .unwrap_or_else(|_| panic!("normalized OBJ Scene input must pass central validation"));
+        let prepared = ValidatedSceneConstruction::from_node_scene(validated)
+            .prepare_with_generation_source(reserve_generation)
+            .expect("normalized OBJ opaque Scene publication");
+        match prepared.handoff() {
+            OpaqueSceneConstructionTerminal::Success(parts) => parts,
+            OpaqueSceneConstructionTerminal::RichFailure(_) => {
+                panic!("valid OBJ Scene must not publish rich failure")
+            }
+            OpaqueSceneConstructionTerminal::MinimalFallback(_) => {
+                panic!("valid OBJ Scene must not publish minimal fallback")
+            }
+        }
+    })
+}
+
 pub(in crate::canonical_scene::store) fn build_obj_capability_scene_for_probe(
     account: &PhysicalStorageAccount,
     generation_source: &AtomicU64,
-) -> NodeSceneSuccessParts {
+) -> SceneSuccessParts {
     let projection = project_obj_source(obj_source(&OBJ_TEXCOORDS, &OBJ_NORMALS, &OBJ_FACES));
-    build_obj_scene_with_generation_source(account, &projection, || {
+    build_published_obj_scene_with_generation_source(account, &projection, || {
         SceneGenerationId::reserve_from(generation_source)
     })
 }
@@ -520,10 +565,10 @@ fn assert_u32_values(mut values: NodeSceneGeometryU32Cursor<'_>, expected: &[u32
 }
 
 pub(in crate::canonical_scene::store) fn inspect_obj_capability_semantics_for_probe(
-    parts: &NodeSceneSuccessParts,
+    scene: &ValidatedScene,
 ) -> ObjCapabilityCanonicalShapeObservation {
-    let view = parts
-        .scene
+    let view = scene
+        .as_node_scene()
         .semantic_view()
         .expect("published OBJ Scene semantic view");
     assert_eq!(view.node_count(), 1);
@@ -829,14 +874,16 @@ pub(in crate::canonical_scene::store) fn inspect_obj_capability_semantics_for_pr
 }
 
 pub(in crate::canonical_scene::store) fn capture_obj_capability_snapshots_for_probe(
-    parts: &NodeSceneSuccessParts,
+    parts: &SceneSuccessParts,
 ) -> (NodeSceneSnapshot, NodeSceneSnapshot) {
     let full = parts
         .scene
+        .as_node_scene()
         .capture_snapshot(snapshot_limits(8_192, 64), None)
         .expect("complete OBJ snapshot with review preview");
     let bounded = parts
         .scene
+        .as_node_scene()
         .capture_snapshot(snapshot_limits(96, 1), None)
         .expect("complete OBJ snapshot with bounded preview");
     (full, bounded)
@@ -847,9 +894,9 @@ fn normalized_obj_corner_fixture_closes_the_canonical_scene_path() {
     let factory = test_factory();
     let account = test_account(&factory, 256);
     let projection = project_obj_source(obj_source(&OBJ_TEXCOORDS, &OBJ_NORMALS, &OBJ_FACES));
-    let parts = build_obj_scene(&account, &projection);
+    let parts = build_published_obj_scene(&account, &projection);
 
-    let canonical_shape = inspect_obj_capability_semantics_for_probe(&parts);
+    let canonical_shape = inspect_obj_capability_semantics_for_probe(&parts.scene);
     assert_eq!(canonical_shape.topology, "triangle_list");
     assert_eq!(canonical_shape.vertex_count, 3);
     assert_eq!(canonical_shape.corner_count, 6);
@@ -882,6 +929,98 @@ fn normalized_obj_corner_fixture_closes_the_canonical_scene_path() {
     drop(parts);
     assert_eq!(account.snapshot().live_retained_bytes(), 0);
     assert_eq!(account.snapshot().live_retained_allocations(), 0);
+}
+
+#[test]
+fn obj_scene_and_report_can_release_in_either_order_without_losing_the_survivor() {
+    let factory = test_factory();
+    let account = test_account(&factory, 256);
+    let projection = project_obj_source(obj_source(&OBJ_TEXCOORDS, &OBJ_NORMALS, &OBJ_FACES));
+    let generation_source = AtomicU64::new(0);
+
+    let SceneSuccessParts {
+        scene: report_first_scene,
+        report: report_first_report,
+    } = build_published_obj_scene_with_generation_source(&account, &projection, || {
+        SceneGenerationId::reserve_from(&generation_source)
+    });
+    let report_first_generation = report_first_scene.generation();
+    let report_first_reservations_before = generation_source.load(Ordering::Relaxed);
+    let report_first_retained = account.snapshot();
+    let report_first_evidence_blocks = report_first_report.outcome_evidence_block_count();
+
+    drop(report_first_report);
+    let report_first_scene_only = account.snapshot();
+    assert!(report_first_scene_only.live_retained_bytes() > 0);
+    assert!(
+        report_first_scene_only.live_retained_bytes() < report_first_retained.live_retained_bytes()
+    );
+    assert!(report_first_scene_only.live_retained_allocations() > 0);
+    assert!(
+        report_first_scene_only.live_retained_allocations()
+            < report_first_retained.live_retained_allocations()
+    );
+
+    let report_first_shape = inspect_obj_capability_semantics_for_probe(&report_first_scene);
+    assert_eq!(report_first_shape.corner_count, 6);
+    assert_eq!(report_first_scene.generation(), report_first_generation);
+    assert_eq!(
+        generation_source.load(Ordering::Relaxed),
+        report_first_reservations_before
+    );
+    let report_first_after_view = account.snapshot();
+    assert_eq!(
+        report_first_after_view.live_retained_bytes(),
+        report_first_scene_only.live_retained_bytes()
+    );
+    assert_eq!(
+        report_first_after_view.live_retained_allocations(),
+        report_first_scene_only.live_retained_allocations()
+    );
+    assert!(report_first_evidence_blocks > 0);
+
+    drop(report_first_scene);
+    assert_eq!(account.snapshot().live_retained_bytes(), 0);
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
+
+    let SceneSuccessParts {
+        scene: scene_first_scene,
+        report: scene_first_report,
+    } = build_published_obj_scene_with_generation_source(&account, &projection, || {
+        SceneGenerationId::reserve_from(&generation_source)
+    });
+    let scene_first_generation = scene_first_scene.generation();
+    let scene_first_retained = account.snapshot();
+    let scene_first_evidence_blocks = scene_first_report.outcome_evidence_block_count();
+
+    drop(scene_first_scene);
+    let scene_first_report_only = account.snapshot();
+    assert!(scene_first_report_only.live_retained_bytes() > 0);
+    assert!(
+        scene_first_report_only.live_retained_bytes() < scene_first_retained.live_retained_bytes()
+    );
+    assert!(scene_first_report_only.live_retained_allocations() > 0);
+    assert!(
+        scene_first_report_only.live_retained_allocations()
+            < scene_first_retained.live_retained_allocations()
+    );
+    assert_eq!(
+        scene_first_report
+            .ledger_evidence()
+            .header()
+            .active_reservations(),
+        0
+    );
+    assert_eq!(
+        scene_first_report.outcome_evidence_block_count(),
+        scene_first_evidence_blocks
+    );
+
+    drop(scene_first_report);
+    assert_eq!(account.snapshot().live_retained_bytes(), 0);
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
+    assert_ne!(scene_first_generation, report_first_generation);
+    assert_eq!(generation_source.load(Ordering::Relaxed), 2);
 }
 
 #[test]

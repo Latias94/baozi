@@ -63,25 +63,23 @@ impl SceneDraftBuild {
 
     /// Consumes the descriptor-owner pair, or forwards an already prepared failure.
     pub(crate) fn prepare(self) -> Result<PreparedSceneConstruction, SceneConstructionError> {
+        self.prepare_with_generation_source(SceneGenerationId::reserve)
+    }
+
+    fn prepare_with_generation_source(
+        self,
+        reserve_generation: impl FnOnce() -> Result<ReservedSceneGeneration, SceneGenerationError>,
+    ) -> Result<PreparedSceneConstruction, SceneConstructionError> {
         match self {
-            Self::Draft { draft, owner } => owner.prepare(draft),
+            Self::Draft { draft, owner } => {
+                owner.prepare_with_generation_source(draft, reserve_generation)
+            }
             Self::Failure(failure) => Ok(failure.into()),
         }
     }
 }
 
 impl PendingSceneDraftOwner {
-    /// Centrally validates and freezes the exact descriptor owned by this retained state.
-    ///
-    /// Generation reservation remains inside the underlying preparation path and therefore occurs
-    /// only after every earlier fallible validation and publication step has succeeded.
-    pub(crate) fn prepare(
-        self,
-        draft: SceneDraft,
-    ) -> Result<PreparedSceneConstruction, SceneConstructionError> {
-        self.prepare_with_generation_source(draft, SceneGenerationId::reserve)
-    }
-
     fn prepare_with_generation_source(
         self,
         draft: SceneDraft,
@@ -113,6 +111,19 @@ impl<'input> ValidatedSceneConstruction<'input> {
     /// descriptor-owner path.
     pub(crate) fn prepare(self) -> Result<PreparedSceneConstruction, SceneConstructionError> {
         self.finish_draft()?.prepare()
+    }
+
+    /// Exercises the final opaque handoff with a deterministic generation source.
+    ///
+    /// This is test-only so production callers can neither select nor observe the private
+    /// generation reservation step.
+    #[cfg(test)]
+    pub(in crate::canonical_scene::store) fn prepare_with_generation_source(
+        self,
+        reserve_generation: impl FnOnce() -> Result<ReservedSceneGeneration, SceneGenerationError>,
+    ) -> Result<PreparedSceneConstruction, SceneConstructionError> {
+        self.finish_draft()?
+            .prepare_with_generation_source(reserve_generation)
     }
 }
 

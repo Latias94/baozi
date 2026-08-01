@@ -191,7 +191,7 @@ pub(super) fn collect_obj_capability() -> ObjCapabilityReport {
         MeasurementSession::begin().expect("OBJ typed inspection measurement must start");
     let mut canonical_shape = None;
     let inspection_allocations = allocation_counter::measure(|| {
-        canonical_shape = Some(inspect_obj_capability_semantics_for_probe(&parts));
+        canonical_shape = Some(inspect_obj_capability_semantics_for_probe(&parts.scene));
     });
     let inspection_measurement = inspection_session
         .finish()
