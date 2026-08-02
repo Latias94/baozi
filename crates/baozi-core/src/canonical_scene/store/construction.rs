@@ -52,9 +52,9 @@ pub(super) use complex::{
 const STORE_CATALOG: StoreSemanticCatalogId =
     StoreSemanticCatalogId::new(*b"baozi-core-scene", NonZeroU32::MIN);
 const STORE_PHASE: StorePhaseSemanticId = StorePhaseSemanticId::new(STORE_CATALOG, NonZeroU64::MIN);
-const STORE_DIMENSION: StoreDimensionSemanticId =
+pub(super) const STORE_DIMENSION: StoreDimensionSemanticId =
     StoreDimensionSemanticId::new(STORE_CATALOG, NonZeroU64::MIN);
-const FAILURE_TERMINAL_WORK_DIMENSION: StoreDimensionSemanticId =
+pub(super) const FAILURE_TERMINAL_WORK_DIMENSION: StoreDimensionSemanticId =
     StoreDimensionSemanticId::new(STORE_CATALOG, NonZeroU64::new(2).unwrap());
 const FALLBACK_CODE: u32 = 0x5343_0001;
 const SEMANTIC_REJECTION_CODE: u32 = 0x5343_0002;

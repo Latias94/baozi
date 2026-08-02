@@ -3,17 +3,19 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use baozi_operation::{
     CancellationToken, PhysicalStorageAccount, PhysicalStorageAccountFactory,
     PhysicalStorageAccountFactoryLimits, PhysicalStorageAccountLimits,
-    PhysicalStorageAccountSnapshot, RecordBlock, ScalarSequence, StoreTerminalCause,
+    PhysicalStorageAccountSnapshot, RecordBlock, ScalarSequence, StoreDimensionSnapshot,
+    StoreTerminalCause,
 };
 
 use crate::identity::SceneGenerationId;
 use crate::math::{Mat4, Quat, Vec3};
 
 use super::construction::{
-    NodeSemanticSnapshot, OptionalCollectionSnapshot, PreparedSceneConstruction,
-    ReferenceSemanticSnapshot, SceneConstructionLimits, SceneConstructionOperation,
-    SceneConstructionTerminal, SceneSemanticSnapshot, TestPostReservationFault, TestSceneFault,
-    TracerSceneSuccessParts, TwoNodeAuthoredMatrices, ValidatedTracerScene,
+    FAILURE_TERMINAL_WORK_DIMENSION, NodeSemanticSnapshot, OptionalCollectionSnapshot,
+    PreparedSceneConstruction, ReferenceSemanticSnapshot, STORE_DIMENSION, SceneConstructionLimits,
+    SceneConstructionOperation, SceneConstructionTerminal, SceneSemanticSnapshot,
+    TestPostReservationFault, TestSceneFault, TracerSceneSuccessParts, TwoNodeAuthoredMatrices,
+    ValidatedTracerScene,
 };
 use super::schema::{
     AuthoredMatrixSchema, COMPLEX_SCHEMA_REVISION, CanonicalSchema, DirectorySchema,
@@ -666,14 +668,19 @@ fn canonical_store_complex_fixture_closes_typed_cross_table_graph() {
     assert_eq!(parts.fixture.canonical_block_count(), 26);
     assert!(parts.fixture.root_is_retained());
     assert_eq!(parts.report.outcome_evidence_block_count(), 1);
-    let dimension = parts
-        .report
-        .ledger_evidence()
-        .dimension_at(0)
-        .expect("the complex fixture has one ledger dimension");
-    assert_eq!(dimension.committed_canonical_output(), 26);
+    let ledger = parts.report.ledger_evidence();
+    assert_eq!(ledger.header().dimension_count(), 2);
+    let ordinary = ledger
+        .dimension_by_semantic(STORE_DIMENSION)
+        .expect("the complex fixture has its ordinary ledger dimension");
+    let failure_terminal = ledger
+        .dimension_by_semantic(FAILURE_TERMINAL_WORK_DIMENSION)
+        .expect("the complex fixture has its protected failure-terminal dimension");
+    assert_eq!(ordinary.committed_canonical_output(), 26);
     // The frozen ledger records the retained candidate evidence plus its terminal snapshot.
-    assert_eq!(dimension.published_outcome_evidence(), 2);
+    assert_eq!(ordinary.published_outcome_evidence(), 2);
+    assert_eq!(failure_terminal.attempted(), 0);
+    assert_eq!(failure_terminal.consumed(), 0);
 
     drop(parts);
     assert_eq!(account.snapshot().live_retained_bytes(), 0);
@@ -699,9 +706,39 @@ fn u4c_physical_snapshot_json(snapshot: PhysicalStorageAccountSnapshot) -> Strin
     )
 }
 
+fn u4c_dimension_json(role: &str, dimension: StoreDimensionSnapshot) -> String {
+    format!(
+        concat!(
+            r#"{{"role":"{}","semantic_id_hex":"{}","attempted":{},"consumed":{},"#,
+            r#""current_live_bytes":{},"peak_live_bytes":{},"pending_publication":{},"#,
+            r#""committed":{},"committed_canonical_output":{},"published_outcome_evidence":{}}}"#,
+        ),
+        role,
+        u4c_hex_encode(&dimension.dimension().to_canonical_bytes()),
+        dimension.attempted(),
+        dimension.consumed(),
+        dimension.current_live_bytes(),
+        dimension.peak_live_bytes(),
+        dimension.pending_publication(),
+        dimension.committed(),
+        dimension.committed_canonical_output(),
+        dimension.published_outcome_evidence(),
+    )
+}
+
+fn u4c_hex_encode(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(bytes.len() * 2);
+    for &byte in bytes {
+        encoded.push(char::from(HEX[usize::from(byte >> 4)]));
+        encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    encoded
+}
+
 #[test]
 #[ignore = "run via baozi-xtask u4c-metrics"]
-fn canonical_store_u4c_metrics_v1_probe() {
+fn canonical_store_u4c_metrics_v2_probe() {
     let factory = test_factory(1);
     let account = test_account(&factory);
     let nonce = AtomicU64::new(0);
@@ -738,9 +775,12 @@ fn canonical_store_u4c_metrics_v1_probe() {
     let root_retained = parts.fixture.root_is_retained();
     let ledger = parts.report.ledger_evidence();
     let header = ledger.header();
-    let dimension = ledger
-        .dimension_at(0)
-        .expect("the complex fixture has one ledger dimension");
+    let ordinary = ledger
+        .dimension_by_semantic(STORE_DIMENSION)
+        .expect("the complex fixture has its ordinary ledger dimension");
+    let failure_terminal = ledger
+        .dimension_by_semantic(FAILURE_TERMINAL_WORK_DIMENSION)
+        .expect("the complex fixture has its protected failure-terminal dimension");
     let terminal_success = matches!(header.terminal_cause(), StoreTerminalCause::Success);
     let dimension_count =
         u64::try_from(header.dimension_count()).expect("ledger dimension count fits u64");
@@ -752,11 +792,18 @@ fn canonical_store_u4c_metrics_v1_probe() {
     assert!(root_retained);
     assert_eq!(outcome_evidence_block_count, 1);
     assert!(terminal_success);
-    assert_eq!(
-        dimension.committed_canonical_output(),
-        canonical_block_count
-    );
-    assert_eq!(dimension.published_outcome_evidence(), 2);
+    assert_eq!(dimension_count, 2);
+    assert_eq!(ordinary.committed_canonical_output(), canonical_block_count);
+    assert_eq!(ordinary.committed(), canonical_block_count);
+    assert_eq!(ordinary.published_outcome_evidence(), 2);
+    assert_eq!(failure_terminal.attempted(), 0);
+    assert_eq!(failure_terminal.consumed(), 0);
+    assert_eq!(failure_terminal.current_live_bytes(), 0);
+    assert_eq!(failure_terminal.peak_live_bytes(), 0);
+    assert_eq!(failure_terminal.pending_publication(), 0);
+    assert_eq!(failure_terminal.committed(), 0);
+    assert_eq!(failure_terminal.committed_canonical_output(), 0);
+    assert_eq!(failure_terminal.published_outcome_evidence(), 0);
 
     drop(parts);
     let after_release = account.snapshot();
@@ -772,9 +819,7 @@ fn canonical_store_u4c_metrics_v1_probe() {
         concat!(
             r#"{{"terminal_success":{},"dimension_count":{},"phase_count":{},"#,
             r#""current_live_bytes":{},"peak_live_bytes":{},"active_reservations":{},"#,
-            r#""current_evidence_bytes":{},"peak_evidence_bytes":{},"attempted":{},"#,
-            r#""consumed":{},"pending_publication":{},"committed":{},"#,
-            r#""committed_canonical_output":{},"published_outcome_evidence":{}}}"#,
+            r#""current_evidence_bytes":{},"peak_evidence_bytes":{},"dimensions":[{},{}]}}"#,
         ),
         terminal_success,
         dimension_count,
@@ -784,12 +829,8 @@ fn canonical_store_u4c_metrics_v1_probe() {
         header.active_reservations(),
         header.current_evidence_bytes(),
         header.peak_evidence_bytes(),
-        dimension.attempted(),
-        dimension.consumed(),
-        dimension.pending_publication(),
-        dimension.committed(),
-        dimension.committed_canonical_output(),
-        dimension.published_outcome_evidence(),
+        u4c_dimension_json("ordinary", ordinary),
+        u4c_dimension_json("failure-terminal", failure_terminal),
     );
     let physical_account_json = format!(
         concat!(
@@ -810,7 +851,7 @@ fn canonical_store_u4c_metrics_v1_probe() {
     println!(
         concat!(
             "\n",
-            r#"BAOZI_U4C_METRICS_V1={{"schema_version":1,"fixture_schema_revision":{},"#,
+            r#"BAOZI_U4C_METRICS_V2={{"schema_version":2,"fixture_schema_revision":{},"#,
             r#""canonical_block_count":{},"outcome_evidence_block_count":{},"root_retained":{},"#,
             r#""generation_reservations":{},"ledger":{},"physical_account":{},"#,
             r#""factory_after_release":{}}}"#,

@@ -300,14 +300,20 @@ struct CoverageMappingSpecification {
     scenario_id: String,
 }
 
-impl CoverageSpecification {
-    fn has_complete_private_tracer_mapping(&self) -> bool {
-        self.mapped_entry_points.len() == self.required_entry_points.len()
-            && self
-                .mapped_entry_points
-                .iter()
-                .zip(&self.required_entry_points)
-                .all(|(mapping, required)| mapping.entry_point == *required)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ProductionEvidenceSummary {
+    declared_private_tracer_mapping_complete: bool,
+    qualifies_u4d_exit: bool,
+}
+
+impl ProductionEvidenceSummary {
+    fn after_validated_private_tracer_report() -> Self {
+        Self {
+            // The parsed specification and observed report already proved the complete frozen
+            // private-tracer mapping. This comparator does not evaluate the full U4d exit gate.
+            declared_private_tracer_mapping_complete: true,
+            qualifies_u4d_exit: false,
+        }
     }
 }
 
@@ -434,7 +440,7 @@ fn collect_canonical_specification(repository_root: &Path) -> Result<Value, Stri
     verify_prepared_executables(&prepared_executables)?;
     let (payload, report) =
         parse_production_probe_stdout(&probe_output, &specification.report_contract.prefix)?;
-    let qualifies_u4d_exit = validate_production_report(&specification, &payload, &report)?;
+    let evidence_summary = validate_production_report(&specification, &payload, &report)?;
     build_output_authority.verify_unchanged(&retained_build_outputs)?;
     cargo_sandbox.verify_unchanged()?;
     repository
@@ -444,7 +450,7 @@ fn collect_canonical_specification(repository_root: &Path) -> Result<Value, Stri
     Ok(json!({
         "evidence_scope": PRODUCTION_SCOPE,
         "u4c_contract_verified": true,
-        "qualifies_u4d_exit": qualifies_u4d_exit,
+        "qualifies_u4d_exit": evidence_summary.qualifies_u4d_exit,
         "qualifies_u4_exit": false,
         "specification_sha256": specification.specification_sha256,
         "report_sha256": specification.report_contract.sha256,
@@ -457,6 +463,7 @@ fn collect_canonical_specification(repository_root: &Path) -> Result<Value, Stri
         "coverage": {
             "required_entry_points": specification.coverage.required_entry_points,
             "mapped_entry_points": specification.coverage.mapped_entry_points.len(),
+            "declared_private_tracer_mapping_complete": evidence_summary.declared_private_tracer_mapping_complete,
         },
         "report": {
             "schema_id": report.schema_id,
@@ -3079,7 +3086,7 @@ fn validate_production_report(
     specification: &ProductionSpecification,
     payload: &str,
     report: &ProductionReport,
-) -> Result<bool, String> {
+) -> Result<ProductionEvidenceSummary, String> {
     let contract = &specification.report_contract;
     if report.schema_id != contract.schema_id
         || report.schema_version != contract.schema_version
@@ -3110,7 +3117,7 @@ fn validate_production_report(
     gltf::validate_report(specification, &report.gltf_capability)?;
     validate_validation_faults(specification, &report.validation_faults)?;
 
-    Ok(specification.coverage.has_complete_private_tracer_mapping())
+    Ok(ProductionEvidenceSummary::after_validated_private_tracer_report())
 }
 
 #[cfg(feature = "repository-input-candidate")]
@@ -3701,18 +3708,22 @@ mod tests {
 
     #[test]
     fn rejects_authored_exit_qualification() {
-        let authored = format!(
-            "qualifies_u4_exit = true\n{}",
-            std::str::from_utf8(include_bytes!(
-                "../../../../docs/conformance/u4c-metrics.toml"
-            ))
-            .expect("managed U4c production specification must be UTF-8")
-        );
+        let managed = std::str::from_utf8(include_bytes!(
+            "../../../../docs/conformance/u4c-metrics.toml"
+        ))
+        .expect("managed U4c production specification must be UTF-8");
 
-        assert!(
-            ProductionSpecification::parse(authored.as_bytes()).is_err(),
-            "exit qualification must be derived by the comparator, not authored in TOML"
-        );
+        for authored_field in [
+            "declared_private_tracer_mapping_complete = true",
+            "qualifies_u4d_exit = true",
+            "qualifies_u4_exit = true",
+        ] {
+            let authored = format!("{authored_field}\n{managed}");
+            assert!(
+                ProductionSpecification::parse(authored.as_bytes()).is_err(),
+                "qualification must be derived by the comparator, not authored as {authored_field:?}"
+            );
+        }
     }
 
     #[test]
@@ -3748,6 +3759,22 @@ mod tests {
     }
 
     #[test]
+    fn rejects_missing_private_tracer_mapping() {
+        let managed = std::str::from_utf8(include_bytes!(
+            "../../../../docs/conformance/u4c-metrics.toml"
+        ))
+        .expect("managed U4c production specification must be UTF-8");
+        let unmapped = managed.replace(
+            "    { entry_point = \"facade-equivalent-inspection\", scenario_id = \"canonical-gltf-five-domain-inspection-v1\" },\n",
+            "",
+        );
+
+        let error = ProductionSpecification::parse(unmapped.as_bytes())
+            .expect_err("the declared private tracer set must remain complete");
+        assert!(error.contains("private tracer coverage"), "{error}");
+    }
+
+    #[test]
     fn rejects_coverage_mapping_to_the_wrong_gltf_scenario() {
         let managed = std::str::from_utf8(include_bytes!(
             "../../../../docs/conformance/u4c-metrics.toml"
@@ -3764,43 +3791,10 @@ mod tests {
     }
 
     #[test]
-    fn five_of_six_entry_points_do_not_complete_u4d_private_mapping() {
-        let coverage = CoverageSpecification {
-            required_entry_points: REQUIRED_COVERAGE_ENTRY_POINTS
-                .iter()
-                .map(ToString::to_string)
-                .collect(),
-            mapped_entry_points: REQUIRED_COVERAGE_ENTRY_POINTS[..5]
-                .iter()
-                .map(|entry_point| CoverageMappingSpecification {
-                    entry_point: (*entry_point).to_owned(),
-                    scenario_id: format!("{entry_point}-scenario-v1"),
-                })
-                .collect(),
-        };
-
-        assert_eq!(coverage.required_entry_points.len(), 6);
-        assert_eq!(coverage.mapped_entry_points.len(), 5);
-        assert!(!coverage.has_complete_private_tracer_mapping());
-    }
-
-    #[test]
-    fn all_entry_points_complete_u4d_private_mapping() {
-        let coverage = CoverageSpecification {
-            required_entry_points: REQUIRED_COVERAGE_ENTRY_POINTS
-                .iter()
-                .map(ToString::to_string)
-                .collect(),
-            mapped_entry_points: REQUIRED_COVERAGE_ENTRY_POINTS
-                .iter()
-                .map(|entry_point| CoverageMappingSpecification {
-                    entry_point: (*entry_point).to_owned(),
-                    scenario_id: format!("{entry_point}-scenario-v1"),
-                })
-                .collect(),
-        };
-
-        assert!(coverage.has_complete_private_tracer_mapping());
+    fn complete_private_tracer_report_does_not_claim_u4d_exit() {
+        let evidence_summary = ProductionEvidenceSummary::after_validated_private_tracer_report();
+        assert!(evidence_summary.declared_private_tracer_mapping_complete);
+        assert!(!evidence_summary.qualifies_u4d_exit);
     }
 
     #[test]

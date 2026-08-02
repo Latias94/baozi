@@ -5,14 +5,15 @@ mod spec;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use std::collections::BTreeSet;
 use std::env;
 use std::ffi::OsString;
 use std::path::Path;
 use std::process::Command;
 
-pub(super) const PROBE_PREFIX: &str = "BAOZI_U4C_METRICS_V1=";
+pub(super) const PROBE_PREFIX: &str = "BAOZI_U4C_METRICS_V2=";
 pub(super) const PROBE_TARGET: &str =
-    "canonical_scene::store::tests::canonical_store_u4c_metrics_v1_probe";
+    "canonical_scene::store::tests::canonical_store_u4c_metrics_v2_probe";
 const PROBE_ARGUMENTS: &[&str] = &[
     "test",
     "-j",
@@ -31,21 +32,21 @@ const PROBE_ARGUMENTS: &[&str] = &[
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct MetricsV1 {
+pub(super) struct MetricsV2 {
     schema_version: u64,
     fixture_schema_revision: u64,
     canonical_block_count: u64,
     outcome_evidence_block_count: u64,
     root_retained: bool,
     generation_reservations: u64,
-    ledger: LedgerMetricsV1,
-    physical_account: PhysicalAccountMetricsV1,
-    factory_after_release: FactoryAfterReleaseV1,
+    ledger: LedgerMetricsV2,
+    physical_account: PhysicalAccountMetricsV2,
+    factory_after_release: FactoryAfterReleaseV2,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct LedgerMetricsV1 {
+struct LedgerMetricsV2 {
     terminal_success: bool,
     dimension_count: u64,
     phase_count: u64,
@@ -54,8 +55,25 @@ struct LedgerMetricsV1 {
     active_reservations: u64,
     current_evidence_bytes: u64,
     peak_evidence_bytes: u64,
+    dimensions: Vec<LedgerDimensionMetricsV2>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+enum LedgerDimensionRoleV2 {
+    Ordinary,
+    FailureTerminal,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct LedgerDimensionMetricsV2 {
+    role: LedgerDimensionRoleV2,
+    semantic_id_hex: String,
     attempted: u64,
     consumed: u64,
+    current_live_bytes: u64,
+    peak_live_bytes: u64,
     pending_publication: u64,
     committed: u64,
     committed_canonical_output: u64,
@@ -64,16 +82,16 @@ struct LedgerMetricsV1 {
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct PhysicalAccountMetricsV1 {
-    before_prepare: PhysicalAccountSnapshotV1,
-    prepared: PhysicalAccountSnapshotV1,
-    after_handoff: PhysicalAccountSnapshotV1,
-    after_release: PhysicalAccountSnapshotV1,
+struct PhysicalAccountMetricsV2 {
+    before_prepare: PhysicalAccountSnapshotV2,
+    prepared: PhysicalAccountSnapshotV2,
+    after_handoff: PhysicalAccountSnapshotV2,
+    after_release: PhysicalAccountSnapshotV2,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct PhysicalAccountSnapshotV1 {
+struct PhysicalAccountSnapshotV2 {
     live_retained_bytes: u64,
     live_retained_allocations: u64,
     peak_retained_bytes: u64,
@@ -85,17 +103,17 @@ struct PhysicalAccountSnapshotV1 {
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct FactoryAfterReleaseV1 {
+struct FactoryAfterReleaseV2 {
     live_accounts: u64,
     total_admitted_accounts: u64,
 }
 
-impl MetricsV1 {
+impl MetricsV2 {
     fn validate(&self) -> Result<(), String> {
         let physical_account = &self.physical_account;
         if physical_account.prepared != physical_account.after_handoff {
             return Err(
-                "U4c metrics V1 physical_account.after_handoff must equal physical_account.prepared"
+                "U4c metrics V2 physical_account.after_handoff must equal physical_account.prepared"
                     .to_owned(),
             );
         }
@@ -110,76 +128,136 @@ impl MetricsV1 {
         ] {
             if actual != 0 {
                 return Err(format!(
-                    "U4c metrics V1 physical_account.after_release.{field} must be 0, found {actual}"
+                    "U4c metrics V2 physical_account.after_release.{field} must be 0, found {actual}"
                 ));
             }
         }
         if after_release.poisoned {
             return Err(
-                "U4c metrics V1 physical_account.after_release.poisoned must be false".to_owned(),
+                "U4c metrics V2 physical_account.after_release.poisoned must be false".to_owned(),
             );
         }
 
         let factory_after_release = &self.factory_after_release;
         if factory_after_release.live_accounts != 0 {
             return Err(format!(
-                "U4c metrics V1 factory_after_release.live_accounts must be 0, found {}",
+                "U4c metrics V2 factory_after_release.live_accounts must be 0, found {}",
                 factory_after_release.live_accounts
             ));
         }
 
-        if self.schema_version != 1 {
+        if self.schema_version != 2 {
             return Err(format!(
-                "U4c metrics V1 schema_version must be 1, found {}",
+                "U4c metrics V2 schema_version must be 2, found {}",
                 self.schema_version
             ));
         }
         if !self.root_retained {
-            return Err("U4c metrics V1 root_retained must be true".to_owned());
+            return Err("U4c metrics V2 root_retained must be true".to_owned());
         }
         if self.generation_reservations != 1 {
             return Err(format!(
-                "U4c metrics V1 generation_reservations must be 1, found {}",
+                "U4c metrics V2 generation_reservations must be 1, found {}",
                 self.generation_reservations
             ));
         }
 
         let ledger = &self.ledger;
         if !ledger.terminal_success {
-            return Err("U4c metrics V1 ledger.terminal_success must be true".to_owned());
+            return Err("U4c metrics V2 ledger.terminal_success must be true".to_owned());
         }
         for (field, actual) in [
             ("current_live_bytes", ledger.current_live_bytes),
             ("active_reservations", ledger.active_reservations),
-            ("pending_publication", ledger.pending_publication),
+            ("current_evidence_bytes", ledger.current_evidence_bytes),
         ] {
             if actual != 0 {
                 return Err(format!(
-                    "U4c metrics V1 ledger.{field} must be 0 after terminal handoff, found {actual}"
+                    "U4c metrics V2 ledger.{field} must be 0 after terminal handoff, found {actual}"
                 ));
             }
         }
 
-        if ledger.committed_canonical_output != self.canonical_block_count {
+        let dimension_count = u64::try_from(ledger.dimensions.len())
+            .map_err(|_| "U4c metrics V2 ledger dimension count overflowed".to_owned())?;
+        if dimension_count != ledger.dimension_count || dimension_count != 2 {
             return Err(format!(
-                "U4c metrics V1 ledger.committed_canonical_output must equal canonical_block_count ({}), found {}",
-                self.canonical_block_count, ledger.committed_canonical_output
+                "U4c metrics V2 ledger must enumerate exactly two dimensions and match dimension_count; header {}, entries {dimension_count}",
+                ledger.dimension_count
+            ));
+        }
+
+        let mut semantic_ids = BTreeSet::new();
+        let mut ordinary = None;
+        let mut failure_terminal = None;
+        for dimension in &ledger.dimensions {
+            if !is_lowercase_hex(&dimension.semantic_id_hex, 58)
+                || !semantic_ids.insert(dimension.semantic_id_hex.as_str())
+                || dimension.current_live_bytes != 0
+                || dimension.pending_publication != 0
+                || dimension.consumed > dimension.attempted
+            {
+                return Err("U4c metrics V2 ledger dimension evidence drifted".to_owned());
+            }
+            let slot = match dimension.role {
+                LedgerDimensionRoleV2::Ordinary => &mut ordinary,
+                LedgerDimensionRoleV2::FailureTerminal => &mut failure_terminal,
+            };
+            if slot.replace(dimension).is_some() {
+                return Err("U4c metrics V2 ledger dimension role was duplicated".to_owned());
+            }
+        }
+
+        let ordinary = ordinary
+            .ok_or_else(|| "U4c metrics V2 ordinary ledger dimension is missing".to_owned())?;
+        let failure_terminal = failure_terminal.ok_or_else(|| {
+            "U4c metrics V2 failure-terminal ledger dimension is missing".to_owned()
+        })?;
+
+        if ordinary.committed_canonical_output != self.canonical_block_count
+            || ordinary.committed != ordinary.committed_canonical_output
+        {
+            return Err(format!(
+                "U4c metrics V2 ordinary committed canonical output must equal canonical_block_count ({})",
+                self.canonical_block_count
             ));
         }
 
         let expected_published_outcome_evidence = self
             .outcome_evidence_block_count
             .checked_add(1)
-            .ok_or_else(|| "U4c metrics V1 outcome evidence count overflowed".to_owned())?;
-        if ledger.published_outcome_evidence != expected_published_outcome_evidence {
+            .ok_or_else(|| "U4c metrics V2 outcome evidence count overflowed".to_owned())?;
+        if ordinary.published_outcome_evidence != expected_published_outcome_evidence {
             return Err(format!(
-                "U4c metrics V1 ledger.published_outcome_evidence must equal outcome_evidence_block_count + 1 ({expected_published_outcome_evidence}), found {}",
-                ledger.published_outcome_evidence
+                "U4c metrics V2 ordinary published outcome evidence must equal outcome_evidence_block_count + 1 ({expected_published_outcome_evidence}), found {}",
+                ordinary.published_outcome_evidence
             ));
+        }
+
+        if failure_terminal.attempted != 0
+            || failure_terminal.consumed != 0
+            || failure_terminal.current_live_bytes != 0
+            || failure_terminal.peak_live_bytes != 0
+            || failure_terminal.pending_publication != 0
+            || failure_terminal.committed != 0
+            || failure_terminal.committed_canonical_output != 0
+            || failure_terminal.published_outcome_evidence != 0
+        {
+            return Err(
+                "U4c metrics V2 success must leave the protected failure-terminal dimension unused"
+                    .to_owned(),
+            );
         }
 
         Ok(())
     }
+}
+
+fn is_lowercase_hex(value: &str, expected_len: usize) -> bool {
+    value.len() == expected_len
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 /// Collects U4c evidence from a checked-in diagnostic or production specification.
@@ -218,7 +296,7 @@ fn collect_lifecycle_diagnostic(
 ) -> Result<Value, String> {
     let specification = spec::LifecycleDiagnosticSpec::load(repository_root, specification_path)?;
     specification.verify_toolchain(repository_root)?;
-    let report = collect_v1_probe(repository_root)?;
+    let report = collect_v2_probe(repository_root)?;
     specification.verify_source_anchors(repository_root)?;
     specification.verify_report(&report)?;
 
@@ -231,7 +309,7 @@ fn collect_lifecycle_diagnostic(
     }))
 }
 
-fn collect_v1_probe(repository_root: &Path) -> Result<MetricsV1, String> {
+fn collect_v2_probe(repository_root: &Path) -> Result<MetricsV2, String> {
     let cargo = env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
     let output = Command::new(cargo)
         .args(PROBE_ARGUMENTS)
@@ -252,14 +330,14 @@ fn collect_v1_probe(repository_root: &Path) -> Result<MetricsV1, String> {
     parse_probe_stdout_metrics(stdout)
 }
 
-/// Parses and validates the one V1 metrics report emitted by the core probe.
+/// Parses and validates the one V2 metrics report emitted by the core probe.
 pub fn parse_probe_stdout(stdout: &str) -> Result<Value, String> {
     let report = parse_probe_stdout_metrics(stdout)?;
     serde_json::to_value(report)
-        .map_err(|error| format!("U4c metrics probe could not serialize V1 metrics: {error}"))
+        .map_err(|error| format!("U4c metrics probe could not serialize V2 metrics: {error}"))
 }
 
-fn parse_probe_stdout_metrics(stdout: &str) -> Result<MetricsV1, String> {
+fn parse_probe_stdout_metrics(stdout: &str) -> Result<MetricsV2, String> {
     let mut payload = None;
     let mut prefix_matches = 0usize;
 
@@ -273,17 +351,17 @@ fn parse_probe_stdout_metrics(stdout: &str) -> Result<MetricsV1, String> {
     }
 
     let payload = match prefix_matches {
-        0 => return Err("U4c metrics probe emitted no V1 metrics prefix".to_owned()),
-        1 => payload.ok_or_else(|| "U4c metrics probe omitted V1 metrics payload".to_owned())?,
+        0 => return Err("U4c metrics probe emitted no V2 metrics prefix".to_owned()),
+        1 => payload.ok_or_else(|| "U4c metrics probe omitted V2 metrics payload".to_owned())?,
         _ => {
             return Err(format!(
-                "U4c metrics probe emitted {prefix_matches} V1 metrics prefixes"
+                "U4c metrics probe emitted {prefix_matches} V2 metrics prefixes"
             ));
         }
     };
 
-    let report = serde_json::from_str::<MetricsV1>(payload)
-        .map_err(|error| format!("U4c metrics probe emitted invalid V1 JSON: {error}"))?;
+    let report = serde_json::from_str::<MetricsV2>(payload)
+        .map_err(|error| format!("U4c metrics probe emitted invalid V2 JSON: {error}"))?;
     report.validate()?;
     Ok(report)
 }
@@ -351,8 +429,8 @@ mod tests {
         assert!(parse_probe_stdout(&format!("test logs {PROBE_PREFIX}{metrics}\n")).is_err());
 
         let duplicate_payload = metrics.to_string().replacen(
-            "\"schema_version\":1",
-            "\"schema_version\":0,\"schema_version\":1",
+            "\"schema_version\":2",
+            "\"schema_version\":0,\"schema_version\":2",
             1,
         );
         assert!(parse_probe_stdout(&format!("{PROBE_PREFIX}{duplicate_payload}\n")).is_err());
@@ -400,7 +478,7 @@ mod tests {
     #[test]
     fn rejects_failed_value_semantics() {
         let mut metrics = valid_metrics();
-        metrics["ledger"]["pending_publication"] = json!(1);
+        metrics["ledger"]["dimensions"][0]["pending_publication"] = json!(1);
 
         assert!(parse_probe_stdout(&probe_stdout(&metrics)).is_err());
 
@@ -411,6 +489,19 @@ mod tests {
         let mut metrics = valid_metrics();
         metrics["generation_reservations"] = json!(0);
         assert!(parse_probe_stdout(&probe_stdout(&metrics)).is_err());
+
+        let mut metrics = valid_metrics();
+        metrics["ledger"]["dimensions"][1]["attempted"] = json!(1);
+        assert!(parse_probe_stdout(&probe_stdout(&metrics)).is_err());
+
+        let mut metrics = valid_metrics();
+        metrics["ledger"]["dimensions"][1]["role"] = json!("ordinary");
+        assert!(parse_probe_stdout(&probe_stdout(&metrics)).is_err());
+
+        let mut metrics = valid_metrics();
+        let ordinary_semantic_id = metrics["ledger"]["dimensions"][0]["semantic_id_hex"].clone();
+        metrics["ledger"]["dimensions"][1]["semantic_id_hex"] = ordinary_semantic_id;
+        assert!(parse_probe_stdout(&probe_stdout(&metrics)).is_err());
     }
 
     fn probe_stdout(metrics: &Value) -> String {
@@ -420,7 +511,7 @@ mod tests {
     fn valid_metrics() -> Value {
         let prepared = snapshot(8, 1, false);
         json!({
-            "schema_version": 1,
+            "schema_version": 2,
             "fixture_schema_revision": 1,
             "canonical_block_count": 26,
             "outcome_evidence_block_count": 1,
@@ -428,19 +519,37 @@ mod tests {
             "generation_reservations": 1,
             "ledger": {
                 "terminal_success": true,
-                "dimension_count": 1,
+                "dimension_count": 2,
                 "phase_count": 1,
                 "current_live_bytes": 0,
                 "peak_live_bytes": 8,
                 "active_reservations": 0,
                 "current_evidence_bytes": 0,
                 "peak_evidence_bytes": 1,
-                "attempted": 1,
-                "consumed": 1,
-                "pending_publication": 0,
-                "committed": 1,
-                "committed_canonical_output": 26,
-                "published_outcome_evidence": 2,
+                "dimensions": [
+                    dimension(DimensionFixture {
+                        role: "ordinary",
+                        semantic_id_hex:
+                            "0262616f7a692d636f72652d7363656e65000000010000000000000001",
+                        attempted: 1,
+                        consumed: 1,
+                        peak_live_bytes: 8,
+                        committed: 26,
+                        committed_canonical_output: 26,
+                        published_outcome_evidence: 2,
+                    }),
+                    dimension(DimensionFixture {
+                        role: "failure-terminal",
+                        semantic_id_hex:
+                            "0262616f7a692d636f72652d7363656e65000000010000000000000002",
+                        attempted: 0,
+                        consumed: 0,
+                        peak_live_bytes: 0,
+                        committed: 0,
+                        committed_canonical_output: 0,
+                        published_outcome_evidence: 0,
+                    }),
+                ],
             },
             "physical_account": {
                 "before_prepare": snapshot(0, 0, false),
@@ -452,6 +561,32 @@ mod tests {
                 "live_accounts": 0,
                 "total_admitted_accounts": 1,
             },
+        })
+    }
+
+    struct DimensionFixture<'input> {
+        role: &'input str,
+        semantic_id_hex: &'input str,
+        attempted: u64,
+        consumed: u64,
+        peak_live_bytes: u64,
+        committed: u64,
+        committed_canonical_output: u64,
+        published_outcome_evidence: u64,
+    }
+
+    fn dimension(fixture: DimensionFixture<'_>) -> Value {
+        json!({
+            "role": fixture.role,
+            "semantic_id_hex": fixture.semantic_id_hex,
+            "attempted": fixture.attempted,
+            "consumed": fixture.consumed,
+            "current_live_bytes": 0,
+            "peak_live_bytes": fixture.peak_live_bytes,
+            "pending_publication": 0,
+            "committed": fixture.committed,
+            "committed_canonical_output": fixture.committed_canonical_output,
+            "published_outcome_evidence": fixture.published_outcome_evidence,
         })
     }
 

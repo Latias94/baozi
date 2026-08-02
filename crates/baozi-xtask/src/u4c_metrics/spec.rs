@@ -1,4 +1,4 @@
-use super::{MetricsV1, PROBE_PREFIX, PROBE_TARGET};
+use super::{MetricsV2, PROBE_PREFIX, PROBE_TARGET};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
@@ -8,7 +8,7 @@ use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
-const SPECIFICATION_SCHEMA_VERSION: u64 = 1;
+const SPECIFICATION_SCHEMA_VERSION: u64 = 2;
 const LIFECYCLE_DIAGNOSTIC_SCOPE: &str = "lifecycle-diagnostic";
 const COMPLEX_FIXTURE_ID: &str = "canonical-store-complex-v1";
 const FIXTURE_SOURCE: &str = "crates/baozi-core/src/canonical_scene/store/tests.rs";
@@ -52,7 +52,7 @@ pub(super) struct LifecycleDiagnosticSpec {
     accounting: AccountingSpec,
     coverage: CoverageSpec,
     source_anchors: Vec<SourceAnchor>,
-    expected_metrics: MetricsV1,
+    expected_metrics: MetricsV2,
     #[serde(skip)]
     specification_sha256: String,
 }
@@ -203,7 +203,7 @@ impl LifecycleDiagnosticSpec {
         Ok(())
     }
 
-    pub(super) fn verify_report(&self, report: &MetricsV1) -> Result<(), String> {
+    pub(super) fn verify_report(&self, report: &MetricsV2) -> Result<(), String> {
         if report != &self.expected_metrics {
             let expected = serde_json::to_string(&self.expected_metrics)
                 .map_err(|error| format!("could not serialize expected U4c metrics: {error}"))?;
@@ -243,7 +243,7 @@ impl LifecycleDiagnosticSpec {
                 self.evidence_scope
             ));
         }
-        if self.probe.id != "canonical-store-u4c-metrics-v1" {
+        if self.probe.id != "canonical-store-u4c-metrics-v2" {
             return Err(format!(
                 "unsupported U4c lifecycle diagnostic probe id {:?}",
                 self.probe.id
