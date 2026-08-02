@@ -43,7 +43,7 @@ authorities:
 
 | Contract | Authority |
 | --- | --- |
-| `SceneBuilder`, `ValidatedScene`, and `SceneEdit` states | ADR 0003 |
+| `SceneConstruction`, `SceneDraft`, `ValidatedScene`, and `SceneEdit` states | ADR 0003 |
 | scene-space and numeric conventions | ADR 0008 |
 | primitive topology and Vertex/Corner/Face/Instance domains | ADR 0030 |
 | operation descriptors, read/write sets, remaps, loss records, invalidation, and `SceneEdit` transaction/commit/rollback | ADR 0032 |

@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-07-09
-updated: 2026-07-13
+updated: 2026-08-01
 authors:
   - Codex
 decision_type: architecture
@@ -29,9 +29,9 @@ related:
 
 glTF is broad enough that a bootstrap decoder accelerates useful coverage, but a decoder backend may
 allocate before Baozi admission, abort on malformed data, omit source spans, or encode assumptions
-that conflict with Baozi's canonical Scene. Translating backend handles directly into SceneBuilder
-would spread those assumptions through material, accessor, skin, morph, animation, and extension code,
-making replacement a whole-importer rewrite.
+that conflict with Baozi's canonical Scene. Translating backend handles directly through core's
+canonical authoring boundary would spread those assumptions through material, accessor, skin, morph,
+animation, and extension code, making replacement a whole-importer rewrite.
 
 The selected backend name, version, and active exceptions are transient implementation evidence kept
 in the linked backend research notes, not durable decisions in this ADR.
@@ -71,8 +71,8 @@ flowchart TB
     Backend --> Normalize[Owned format-private NormalizedGltf]
     Scope --> Normalize
     Normalize --> Drop[Drop backend state and release allowance]
-    Drop --> Builder[SceneBuilder from normalized semantics only]
-    Builder --> Validate[Central bounded validation]
+    Drop --> Author[Bounded core authoring from normalized semantics only]
+    Author --> Validate[Central bounded validation]
     Validate --> Report[ImportReport]
 ```
 
@@ -98,11 +98,11 @@ store decoder-backend handles, backend indices without explicit source identity,
 or borrowed memory whose lifetime requires retaining the backend graph.
 
 Scene construction is a separately testable normalized-model consumer. Its module may import glTF
-format-owned model/types and core `SceneBuilder`, but must not import, name, or accept a decoder-backend
-module/type. A hand-built normalized fixture must exercise it without invoking the backend. Backend
-drop and opaque-allowance release occur before builder entry; any intentionally retained primary or
-dependency snapshot remains separately reserved, so the peak records real overlap without charging a
-released backend allowance.
+format-owned model/types and borrow core's bounded authoring capability, but must not import, name, or
+accept a decoder-backend module/type. A hand-built normalized fixture must exercise it without
+invoking the backend. Backend drop and opaque-allowance release occur before canonical authoring;
+any intentionally retained primary or dependency snapshot remains separately reserved, so the peak
+records real overlap without charging a released backend allowance.
 
 Stable source range means a raw byte range into the immutable primary or dependency snapshot, not a
 backend object path or decoded character offset. If a claimed semantic or diagnostic cannot obtain a
@@ -261,8 +261,8 @@ Negative:
 | --- | --- |
 | Backend privacy | Public API, rustdoc, snapshots, reports, diagnostics, and core IR contain no backend type/name dependency. |
 | IO authority | Instrumented tests prove every external buffer/image request goes through `ParseScope` and policy. |
-| Normalized firewall | Scene construction tests run from a backend-independent normalized fixture; dependency/lint checks prove builder code imports no backend module or type. |
-| Backend lifetime | Drop instrumentation proves backend state and opaque allowance are gone before SceneBuilder entry, while snapshot/model/builder overlap remains visible in peak-live evidence. |
+| Normalized firewall | Scene construction tests run from a backend-independent normalized fixture; dependency/lint checks prove canonical authoring code imports no backend module or type. |
+| Backend lifetime | Drop instrumentation proves backend state and opaque allowance are gone before canonical authoring, while snapshot/model/construction overlap remains visible in peak-live evidence. |
 | Source mapping | Backend-provided and Baozi-reconstructed spans both resolve to stable raw ranges; a fixture with unavailable required ranges fails before canonical construction. |
 | Admission | Oversized/deep/dense JSON, invalid GLB lengths, accessor overflow, and sparse ranges fail before unsafe allocation/materialization. |
 | Admission versus maturity | A baseline-unsafe backend slice is absent from first-party registration/all-formats, while fixtures with only missing non-safety evidence remain eligible for Experimental. |
@@ -271,3 +271,17 @@ Negative:
 | Node transforms | Matrix/TRS mutual exclusion, exact affine bottom-row fixtures including signed zero and next-representable nonzero/away-from-one rejection, orthogonality fixtures at 0.5x, exactly 1x inclusive, the next representable value above 1x, and 2x the threshold, one/two/three zero scales, nonzero near-zero scales, odd/even negative scales, matrix decomposability/no-shear, omitted TRS defaults, bit-preserving authored-form retention, backend-independent classification, and matrix-target animation rejection have positive and negative fixtures. |
 | Replacement equivalence | Any alternate backend passes identical normalized-model and canonical golden/digest tests. |
 | Maturity truthfulness | Linux sanitizer and subprocess RSS/timeout gates execute before promotion; compile-only evidence cannot satisfy them. |
+
+## Amendment History
+
+### 2026-08-01: Align the normalized firewall with opaque canonical construction
+
+- Affected: `Context`, `Decision`, `Normalized Model Contract`, and `Acceptance Criteria`.
+- Previous: the backend firewall handed normalized semantics to a named core `SceneBuilder` seam.
+- New: the import session retains the opaque core construction continuation and glTF conversion
+  borrows only its bounded authoring capability after backend state and allowance are released.
+- Impact: backend replacement remains format-private while canonical storage ownership and
+  finalization cannot leak into the adapter.
+- Review: 2026-08-01 fixed-range architecture and glTF ownership review.
+- Rationale: the normalized firewall is unchanged; this amendment aligns its downstream seam with
+  ADR 0003 and ADR 0020's single canonical lifecycle.

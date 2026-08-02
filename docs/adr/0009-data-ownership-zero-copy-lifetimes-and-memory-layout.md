@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-07-09
-updated: 2026-07-19
+updated: 2026-08-01
 authors:
   - Codex
 decision_type: architecture
@@ -43,8 +43,8 @@ Core policy:
 - returned scenes own their nodes, mesh instances, logical meshes, materials, images, samplers,
   textures, animations, and metadata
 - mesh attribute buffers are contiguous owned buffers
-- every admitted image owns its immutable encoded bytes; large payloads may use shared ownership such
-  as `Arc<[u8]>`
+- every admitted image owns its immutable encoded bytes; large payloads may use a hidden immutable
+  shared backing without exposing its concrete container
 - dense IDs provide stable references inside one validated scene generation
 - public memory layout is not an ABI promise
 - zero-copy is an internal optimization boundary, not a public contract
@@ -60,9 +60,10 @@ flowchart LR
     Input[Primary and dependency snapshots] --> Parser[Parser backend]
     Parser --> Borrowed[Internal borrowed views]
     Parser --> Decode[Decode and validate]
-    Decode --> Builder[SceneBuilder owns data]
-    Builder --> Draft[Owned SceneDraft]
-    Draft --> Validator[Central validator]
+    Decode --> Author[Bounded core authoring capability]
+    Author --> Storage[Core-owned retained construction storage]
+    Storage --> Draft[Non-owning SceneDraft descriptor]
+    Draft --> Validator[Matching construction owner and central validator]
     Validator --> Scene[Owned ValidatedScene]
     Scene --> User[Read views or SceneEdit]
 
@@ -74,15 +75,16 @@ sequenceDiagram
     participant User
     participant Importer
     participant Parser
-    participant Builder
-    participant Validator
+    participant Construction as Core SceneConstruction
     participant Scene
 
     User->>Importer: read_memory(&[u8])
     Importer->>Parser: parse with temporary views
-    Parser->>Builder: copy/convert into owned buffers
-    Builder->>Validator: finish owned SceneDraft
-    Validator->>Scene: validate and mint proof
+    Importer->>Construction: retain opaque owner
+    Parser->>Construction: author through bounded borrowed capability
+    Construction-->>Importer: non-owning SceneDraft descriptor
+    Importer->>Construction: consume exact descriptor and prepare
+    Construction->>Scene: central validation and pure success handoff
     Importer-->>User: validated scene with no input lifetime
 ```
 
@@ -127,11 +129,8 @@ explicit split operation requires its own accepted contract, loss policy, proven
 
 ### Byte Payloads
 
-Embedded image payloads, compressed buffers, and retained raw sidecar data can use:
-
-```text
-Arc<[u8]>
-```
+Embedded image payloads, compressed buffers, and retained raw sidecar data may use a private
+immutable shared backing. Its concrete container is not part of the public or canonical contract.
 
 Rationale:
 
@@ -153,21 +152,23 @@ unsupported/loss evidence or no `Image`; they never produce a nominally usable d
 Names and metadata strings should be owned `String` values in the public scene. String interning may
 be added internally later, but it must not change public semantics.
 
-### SceneBuilder
+### Canonical Construction Boundary
 
-`SceneBuilder` is the mutable construction surface. It can accept borrowed parser data and convert it
-into owned storage.
+Producer input may remain borrowed only while one authoring call is active. The core-owned
+construction lifecycle copies, converts, or admits canonical data into Baozi-owned retained storage
+before returning a draft descriptor.
 
-Rules:
+`SceneDraft` owns no payload and carries no input lifetime. Its matching construction owner remains
+inside the host lifecycle until central preparation consumes both. A published `ValidatedScene` may
+use immutable shared backing only through Baozi's hidden retained-storage mechanism and never borrows
+parser input, resource snapshots, parser ASTs, or backend objects. No concrete backing type is part of
+the public contract.
 
-- builder methods may copy, validate, and perform representation-preserving canonicalization;
-  source repair requires diagnostics and provenance, while semantic normalization belongs to ADR
-  0013 postprocess
-- builder records source identity and provenance through ADR 0036 rather than overloading dense IDs
-  or names
-- builder finish returns an owned `SceneDraft` or structured construction errors; ADR 0003's central
-  validator alone can turn a draft into `ValidatedScene`
-- builder internals are not stable public memory layout
+The bounded authoring surface may perform representation-preserving canonicalization. Source repair
+requires diagnostics and provenance, while semantic normalization belongs to ADR 0013 postprocess.
+Source identity and provenance follow ADR 0036 rather than overloading dense IDs or names. Producer
+code cannot extract or replace the retained owner, physical account, operation ledger, validation
+proof, or generation authority.
 
 ## Zero-Copy Policy
 
@@ -175,8 +176,8 @@ Allowed:
 
 - parser borrows from an input buffer during parsing
 - binary parser creates temporary typed views after validating alignment and length
-- session-owned immutable resource snapshots may share bytes through `Arc<[u8]>`
-- image payloads are carried as `Arc<[u8]>` without decoding
+- session-owned immutable resource snapshots may share bytes through a hidden immutable backing
+- image payloads may retain the same admitted immutable backing without decoding
 - format backend AST borrows internally before conversion
 
 Typed byte casting helpers such as `bytemuck` may be introduced behind parser-private modules or
@@ -231,8 +232,8 @@ Parsers must avoid unbounded growth patterns on large assets:
 Canonical public flow:
 
 ```text
-SceneBuilder -> SceneDraft -> central validator -> ValidatedScene
-             -> SceneEdit -> central validator -> new ValidatedScene
+core SceneConstruction -> non-owning SceneDraft descriptor -> central validation -> ValidatedScene
+ValidatedScene -> SceneEdit -> central validation -> new ValidatedScene
 ```
 
 `SceneEdit` is the only canonical mutation transaction. It shares unchanged owned storage, builds
@@ -309,7 +310,7 @@ Decision: deferred. A borrowed inspection API can be reconsidered after the owne
 | Lifetime simplicity | Public facade returns owned `ValidatedScene`, not `Scene<'a>` | public API review |
 | Backend isolation | Scene does not expose parser AST or borrowed backend data | public API review |
 | Post-process usability | Steps replace affected buffers through `SceneEdit` without mutating input | integration tests |
-| Large payload sharing | Embedded bytes can be shared without copies after import | tests over embedded images |
+| Large payload sharing | Embedded bytes can be shared without copies after import without exposing a concrete backing type | tests over embedded images and public API review |
 | Session independence | External image bytes remain usable after resolver, session, and input snapshots are dropped | external-image lifetime tests |
 | Memory visibility | allocations and peak memory are benchmarked for large fixtures | Criterion benchmarks |
 | Fallible growth | Every input-derived capacity uses ledger reservation plus `try_reserve*` | exact/excess/allocation-failure tests |
@@ -319,33 +320,12 @@ Decision: deferred. A borrowed inspection API can be reconsidered after the owne
 
 | Risk | Severity | Likelihood | Mitigation |
 | --- | --- | --- | --- |
-| Copying hurts very large assets | Medium | Medium | Benchmark early; use `Arc<[u8]>` for payloads and optimize hot conversions |
+| Copying hurts very large assets | Medium | Medium | Benchmark early; use hidden immutable shared backing for payloads and optimize hot conversions |
 | Owned model blocks streaming workflows | Medium | Medium | Add streaming reader later as separate API, not main scene facade |
 | Mesh buffers need different layouts for SIMD | Medium | Medium | Keep SIMD layout internal and convert at algorithm boundaries |
 | Public fields expose layout too early | Medium | Medium | Use accessors where invariants matter and reserve ABI promises |
 | `u32` indices are insufficient for huge meshes | Medium | Low | Reject above the admitted limit and revisit through a dedicated index-width decision; never split silently. |
 | Cloning scenes is expensive | Low | High | Document clone cost and expose shared byte buffers where useful |
-
-## Implementation Plan
-
-### Phase 0: Owned Core Storage
-
-- Define owned `Scene`, `ValidatedScene`, `SceneBuilder`, dense IDs, and attribute buffers.
-- Use owned strings and metadata.
-- Use shared byte payloads for embedded assets.
-
-### Phase 1: Parser Boundary
-
-- Allow parsers to use borrowed views internally.
-- Convert parser output to owned scene data at builder boundaries.
-- Add tests that imported scenes outlive input buffers.
-
-### Phase 2: Performance Visibility
-
-- Add allocation and throughput benchmarks.
-- Optimize hot copies only after measurements.
-- Keep zero-copy parser optimizations behind internal modules.
-- Measure affected-set `SceneEdit` peak-live storage independently from parser decode storage.
 
 ## Consequences
 
@@ -372,6 +352,26 @@ Negative:
    Recommendation: defer until stable importers reveal real demand.
 
 ## Amendment History
+
+### 2026-08-01: Separate draft descriptors from canonical storage ownership
+
+- Affected headings: core policy, architecture diagrams, byte payloads, canonical construction
+  boundary, zero-copy policy, mutation policy, success metrics, risks, and removal of the transient
+  implementation plan.
+- Previous rule: the document described `SceneBuilder` and an owned `SceneDraft` as the canonical
+  storage owners and named `Arc<[u8]>` as the expected payload representation.
+- New rule: an opaque core `SceneConstruction` owns unpublished retained storage while producers
+  borrow a bounded authoring surface. `SceneDraft` is a non-owning descriptor with no payload or input
+  lifetime, and only its matching owner may drive central validation. Published Scenes may use hidden
+  immutable shared backing, but no concrete container is a public contract.
+- Compatibility impact: pre-release builder, draft, and payload-container APIs may break; public
+  lifetime independence and canonical semantics are unchanged.
+- Required review: parser-input lifetime compile checks, descriptor/owner API shape, resource/session
+  drop tests, hidden-backing public API review, SceneEdit sharing evidence, and direct ADR coherence
+  review.
+- Rationale: a fully owned published Scene does not require the intermediate descriptor to own
+  storage. Separating those concepts prevents producer code from extracting retained authority while
+  preserving internal zero-copy and sharing optimizations.
 
 ### 2026-07-19: Correct the storage-to-edit dependency direction
 

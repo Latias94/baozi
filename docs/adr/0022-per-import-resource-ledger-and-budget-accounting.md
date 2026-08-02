@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-07-09
-updated: 2026-07-27
+updated: 2026-08-01
 authors:
   - Codex
 decision_type: architecture
@@ -35,7 +35,8 @@ optional resource could refund attacker-controlled work and evade the aggregate 
 
 Every import session owns one import ledger. Every post-process invocation owns a separate operation
 ledger using the same accounting semantics. Every standalone core construction/validation invocation
-owns a real `SceneConstructionOperation` ledger; it is not a no-op adapter over a physical account.
+owns a real operation ledger inside its opaque `SceneConstruction` lifecycle; it is not a no-op
+adapter over a physical account.
 Each ledger has five distinct evidence classes:
 monotonic attempted counters, monotonic consumed counters, releasable live reservations, committed
 canonical output, and published outcome evidence. It records phase ownership and the maximum
@@ -54,18 +55,18 @@ interpretation in import outcomes, and the single ParseScope-bound metered-stora
 Baozi-owned parser `Vec`/`String` capacity to import reservations. Format crates compose that module
 and may add semantic wrappers, but cannot own a competing reserve/grow/shrink/transfer/rollback
 implementation. `baozi-postprocess` owns its operation limits, dimensions/phases, and interpretation
-in post-process outcomes. `baozi-core` owns `SceneConstructionOperation` limits, phases, dimensions,
-and interpretation for standalone construction/validation. The facade composes operation snapshots
+in post-process outcomes. `baozi-core` owns Scene-construction limits, phases, dimensions, and
+interpretation for standalone construction/validation. The facade composes operation snapshots
 but does not merge them. `baozi-io` owns path, backend, handle, IO causes, and immutable backend-local
 hard caps; it does not own a competing aggregate budget.
 
 The dependency direction is `baozi-core`, `baozi-import`, and `baozi-postprocess` toward the leaf
-`baozi-operation` crate. During import or postprocess, core builders/validators receive only a sealed
-borrowed operation capability and qualified concrete-store projections from the owning operation;
+`baozi-operation` crate. During import or postprocess, core authoring and validation paths receive
+only a sealed borrowed operation capability and qualified concrete-store projections from the owning operation;
 they never receive a raw reservation, generic retained constructor, or physical lease. During
-standalone use, core creates and owns `SceneConstructionOperation` itself. Core never depends on
-import, and postprocess never depends on import. Domain owners supply stable phase and dimension
-keys; `baozi-operation` cannot invent or interpret them.
+standalone use, core creates and owns one opaque `SceneConstruction` continuation backed by a private
+operation mechanism. Core never depends on import, and postprocess never depends on import. Domain
+owners supply stable phase and dimension keys; `baozi-operation` cannot invent or interpret them.
 
 Accepted freezes these semantics; conformance requires executable implementation and ledger evidence.
 
@@ -75,7 +76,7 @@ Accepted freezes these semantics; conformance requires executable implementation
 | --- | --- | --- | --- |
 | Attempted | Cumulative requested/untrusted work charged before an action | Never decreases | open attempts, logical references, declared decode cells, requested bytes, diagnostic bytes proposed |
 | Consumed | Cumulative work/bytes actually completed or observed | Never decreases | bytes successfully copied, read, or decoded; tokens scanned; graph edges visited; diagnostics encoded |
-| Live reservation | Capacity or conservative allowance attributable to the operation right now | A storage-covering reservation releases only after storage/allowance is gone; preparation may release retained-output attribution only after a bound physical lease independently covers retained storage and the destination commitment is ready | snapshot capacity, materialized decoded text, backend decode allowance, normalized model, SceneBuilder, staging buffers, newly allocated retained output, diagnostics, packed bounded failure evidence |
+| Live reservation | Capacity or conservative allowance attributable to the operation right now | A storage-covering reservation releases only after storage/allowance is gone; preparation may release retained-output attribution only after a bound physical lease independently covers retained storage and the destination commitment is ready | snapshot capacity, materialized decoded text, backend decode allowance, normalized model, unpublished canonical construction storage, staging buffers, newly allocated retained output, diagnostics, packed bounded failure evidence |
 | Committed canonical output | Per-generation logical canonical cells/bytes accepted by successful preparation | Monotonic once preparation commits the destination; domain-facing output is exposed only by handoff and this evidence is not a host physical-byte owner | validated nodes, primitives, attribute cells, strings, images, animation keys |
 | Published outcome evidence | Non-canonical retained bytes/items accepted for the selected success, rich-failure, minimal-fallback, or postprocess destination | Monotonic once preparation commits the destination; domain-facing evidence is exposed only by handoff and this class is neither canonical output nor a host physical-byte owner | diagnostics, losses, detection/source-scope records, manifests, remaps, bounded failure details, ledger/report storage |
 
@@ -95,6 +96,61 @@ a permit charges attempted work before the admitted action; successful completio
 work. Dropping or forgetting unfinished work never refunds the attempt or fabricates consumption.
 The operation owner defines control polling, outstanding-permit, and terminal-transport semantics;
 ADR 0020 exclusively defines those rules for detection.
+
+### Protected Failure-Terminal Work
+
+A failure-capable operation reserves a finite failure-terminal work allowance during startup. Each
+caller-facing attempted-work and consumed-work limit is the total hard limit including that
+allowance; the allowance is not additional hidden Baozi-owned overhead. The domain owner
+checked-subtracts the qualified allowance and distributes only the remainder to ordinary work.
+The operation provider independently checked-sums the attempted and consumed limits of every
+non-protected dimension and rejects unless those aggregates exactly equal the declared ordinary
+remainders. Startup rejects before operation acceptance when either total cannot cover the terminal
+allowance and every mandatory ordinary startup requirement, when an extra ordinary dimension would
+exceed either remainder, or when either aggregate sum overflows.
+
+This partition governs admission limits. A rejected action remains visible in monotonic Attempted
+evidence and may cross its configured threshold by the rejected request; completed work cannot cross
+the Consumed partition. The terminal allowance belongs to the existing Attempted and Consumed
+evidence classes, not to a sixth evidence class.
+
+Only an unforgeable linear failure-publication authority can spend the protected terminal dimension.
+Ordinary checkpoints, writers, reservations and transitions, retained-share plans, commitments,
+progress APIs, and caller-supplied dimension keys cannot address it. Possessing the dimension key or
+catalog membership grants no spend authority. A success-capable operation keeps the authority
+dormant while success remains possible; a failure-only operation activates it immediately.
+
+Before exact success becomes irreversible, every safely recoverable downgrade must retain that
+authority or an already complete failure path that requires no further allocation, callback,
+validation, or work charge. The authority is finite, single-use, non-cloneable, and non-renewable. If
+one protected action fails, rich-failure construction is sealed. Verified cleanup may then reach only
+the pre-admitted minimal fallback; uncertain ownership, charge, poison, panic, or cleanup disposition
+fails closed and publishes no terminal wrapper.
+
+A publication-open failure has exactly one authority disposition:
+
+- `Retry`: pure preflight failed, or verified rollback restored the complete operation and its unused
+  terminal authority;
+- `FallbackOnly`: the single-use authority was consumed, cleanup is verified, and only the
+  pre-admitted minimal fallback remains reachable; or
+- `FailClosed`: ownership, mutation, charge, poison, or cleanup disposition is uncertain, so no
+  recovery owner or terminal publication is returned.
+
+All pure structural, catalog, and key preflight precedes terminal-authority consumption.
+
+A frozen failure cause contains one typed class plus one class-specific bounded code:
+
+- `Requested` means a domain-requested or semantic failure for which no more specific trusted runtime
+  cause exists;
+- `Ledger` means a ledger admission, ownership, or accounting rejection;
+- `Control` means cancellation, deadline, observer, cancellation-signal, or progress-control failure;
+  and
+- `ProductGraph` means a safely contained root, closure, or product-graph integrity failure.
+
+The first trusted runtime cause is sticky and cannot be replaced by a later requested code. A primary
+ledger rejection may upgrade only a provisional `Requested` cause to `Ledger`; it preserves an
+earlier `Control`, `ProductGraph`, or `Ledger` cause. Poison or uncertain cleanup is not another
+terminal-cause class: it is fail-closed containment with no prepared publication.
 
 Retained storage remains part of operation-attributed current live while it is constructed and while
 outcome preparation can still fail. Newly allocated retained storage is already covered by a
@@ -302,8 +358,8 @@ the operation may fail or retry without an under-accounted interval. First-party
 not reproduce this protocol in local helpers.
 
 The generic reservation type is defined by `baozi-operation`; only the owning import, post-process, or
-standalone `SceneConstructionOperation` ledger instance can issue it. A reservation is branded to that
-instance so it cannot be transferred between operation domains or committed under the wrong outcome.
+standalone core construction ledger can issue it. A reservation is branded to that instance so it
+cannot be transferred between operation domains or committed under the wrong outcome.
 
 Bounded terminal evidence remains operation-owned live storage until preparation applies the
 outcome-evidence destination commitment and places its independent physical owner inside the exact
@@ -405,9 +461,10 @@ transaction staging, validation/commit, and report/failure finalization. Import 
 reports retain their own snapshots. A composed facade may present both, but cannot relabel
 post-process work as import work or refund one operation against another.
 
-A standalone `SceneConstructionOperation` has core-owned construction, validation, and outcome-
-preparation phases. Its explicit-account and private-account constructors use the same real ledger
-semantics and produce a distinct snapshot; neither path may substitute a no-op attribution adapter.
+A standalone opaque `SceneConstruction` continuation has core-owned construction, validation, and
+outcome-preparation phases. Its explicit-account and private-account constructors use the same real
+ledger semantics and produce a distinct snapshot; neither path may substitute a no-op attribution
+adapter.
 
 Each ledger records current and high-water live bytes by its own phases plus that operation's global
 high-water mark. Phase transition does not implicitly release anything; the owner must release or
@@ -436,6 +493,8 @@ The ledger supports byte and non-byte dimensions. At minimum it accounts for:
 - committed logical canonical footprint;
 - published success-report, failure-outcome, postprocess-report, manifest, diagnostic/loss, remap,
   and bounded terminal-evidence items/bytes; and
+- one owner-defined protected failure-terminal dimension whose finite Attempted/Consumed allowance is
+  visible in every frozen ledger report but inaccessible to ordinary work capabilities; and
 - operation-attributed current/peak-live bytes globally and by phase.
 
 ADR 0044 separately owns account-qualified physical current/peak bytes and live-allocation count.
@@ -506,8 +565,8 @@ stateDiagram-v2
     [*] --> Snapshot: reserve primary capacity
     Snapshot --> Decode: retain snapshot + reserve backend allowance
     Decode --> Normalize: reserve normalized model
-    Normalize --> Build: release backend; reserve SceneBuilder
-    Build --> Validate: retain builder storage as candidate output
+    Normalize --> Build: release backend; admit canonical construction storage
+    Build --> Validate: retain unpublished construction storage as candidate output
     Validate --> IdentityReserved: final fallible pre-freeze identity acquisition
     Validate --> PrepareRichFailure: identity rejection/exhaustion; no nonce
     IdentityReserved --> PrepareSuccess: apply destination commitments; live = 0
@@ -550,6 +609,22 @@ More bookkeeping, but it separately models cumulative attempted abuse, completed
 evidence without mutating another operation's evidence. ADR 0044 separately owns physical allocation
 lifetime across generations. Chosen.
 
+### Option D: Place failure-terminal work outside the caller's total
+
+This preserves the full ordinary budget, but makes the advertised hard limit untrue and permits
+hidden work after caller exhaustion. Rejected.
+
+### Option E: Share one ordinary dimension by convention
+
+This minimizes types, but any ordinary checkpoint can drain the failure allowance and make a
+success-to-failure downgrade depend on remaining business budget. Rejected.
+
+### Option F: Partition the caller total and protect the terminal allowance with linear authority
+
+This reduces ordinary work by one checked finite reserve, preserves a truthful caller cap, keeps
+bounded failure evidence available after ordinary exhaustion, and reports both portions through the
+existing evidence classes. Chosen for failure-capable operations.
+
 ## Consequences
 
 Positive:
@@ -559,6 +634,8 @@ Positive:
 - Success and failure reports explain which limit and phase ended an operation.
 - A failed import can publish bounded retained evidence without fabricating canonical committed
   output or leaking operation-live attribution.
+- Caller work limits remain truthful hard totals while a protected finite portion remains available
+  for terminal evidence after ordinary work is exhausted.
 - Shared dependency caching has explicit physical-versus-logical accounting.
 - Retained-output attribution integrates with ADR 0044 without making the operation ledger the
   allocation's lifetime owner.
@@ -589,8 +666,11 @@ Negative:
 | Process-local evidence keys lose their catalog or become persistent identity | Critical | the Baozi-owned result/evidence owner retains the `StoreKeyDomain` anchor and immutable normalized catalog through query lifetime; plugin code receives only host-minted keys and runtime brands are excluded from transcripts, digests, wire, cache, and build identity |
 | Domain identity exhaustion remains after ledger freeze | Critical | Require atomic reservation as the final fallible pre-freeze identity acquisition; rejection/exhaustion becomes ordinary rich failure with no nonce, later freeze failure may burn a successful value, and only exact-success handoff may consume it. |
 | Prepared drop releases ownership in the wrong order or fabricates rollback | Critical | exact prepared state owns already destination-qualified but domain-unexposed aggregates, contains no rollback-capable token, and destroys storage before account owners without reopening the ledger or exposing a terminal. |
-| Standalone validation bypasses operation attribution | Critical | core owns a real `SceneConstructionOperation` for both explicit-account and private-account paths; no no-op adapter exists. |
+| Standalone validation bypasses operation attribution | Critical | core's opaque `SceneConstruction` lifecycle owns one real operation ledger for both explicit-account and private-account paths; no no-op adapter exists. |
 | Rollback refunds attack work | High | Attempted/consumed counters expose no decrement API. |
+| Ordinary work drains terminal evidence authority | Critical | Partition the caller's total at startup and make the protected dimension spendable only by a finite single-use terminal capability; ordinary checkpoint, writer, reservation, share, commitment, and progress APIs reject it. |
+| A trusted terminal cause is overwritten by a later requested code | Critical | Preserve the first typed runtime cause, permit only `Requested` to `Ledger` upgrade on a primary ledger rejection, and keep poison or uncertain cleanup outside prepared terminal classification. |
+| A recoverable open failure returns more authority than cleanup proves | Critical | Return exactly `Retry`, `FallbackOnly`, or no recovery owner for fail-closed containment; perform every pure preflight before consuming the terminal capability. |
 | Conservative backend allowance rejects valid files | Medium | Calibrate admission with fixtures and profiles, but do not treat them as runtime proof; replace the backend or use an OS-limited subprocess where a hard hostile-input memory guarantee matters. |
 | Experimental is used to retain an unbounded opaque path | Critical | Disable/unregister, reject/replace, or process-isolate the path until a finite admission envelope is proven. |
 | Phase transitions leak reservations | High | RAII ownership plus end-of-phase and finalization assertions. |
@@ -609,6 +689,8 @@ Negative:
 | Startup allocator taxonomy | ledger control/bookkeeping allocations occur only after their complete ledger-side capacity admission, remain structurally owned by the provisional graph, and are never physical payload; every partial allocation failure and typed no-mutation physical rejection follows storage-first one-lock full-ledger rollback; retained payload/evidence allocator entries remain zero until readiness and the post-ready consuming split itself is allocation-, lock-, and counter-free | fault injection at every backing allocation, independent bookkeeping-versus-retained allocator probes, physical-entry/charge and accepted-operation probes, storage-before-single-lock rollback ordering, and consuming-split transition counters |
 | Poison/accounting composition | one shared poison latch is visible across account clones without rewriting monotonic operation evidence; poison-first does no work, start/retain/share-admission-first keeps exact work/charge and cannot publish | two-order operation-start/retain/share/finalization barriers plus ledger/account snapshot assertions |
 | Prepared handoff | preparation has selected an exact publishable terminal wrapper, applied destination commitments, retained only domain-unexposed owners, reserved any success identity, and reached zero live attribution; handoff reaches zero allocator, validator, control, callback, panic, classification, attribution transition, or accounting entry; fatal containment is not a prepared handoff | identity-exhaustion, API-shape, prepared-drop, verified-unwind, uncertain-cleanup, and injected-failure counters |
+| Protected terminal authority | caller totals include the terminal allowance; ordinary work sees only the checked remainder; success reports zero protected use, failures report the actual consumed prefix, and no ordinary capability can address the protected dimension | exact/one-under startup, ordinary-exhaustion downgrade, API-shape, dimension snapshot, retry/fallback-only/fail-closed, and partial-use sealing probes |
+| Typed terminal cause | semantic requests, ledger rejection, cancellation/deadline, and product-graph failure freeze `Requested`, `Ledger`, `Control`, and `ProductGraph` respectively without later cause degradation | isolated first-cause and precedence matrix |
 | Standalone parity | explicit-account and private-account core validation use the same non-noop ledger and publication state machine | core integration and snapshot-equivalence tests |
 
 ## Acceptance Criteria
@@ -627,6 +709,8 @@ Negative:
 | Shared metered storage | Compile-time API checks and format-source scans find one `baozi-import` reserve/grow/shrink/transfer/rollback implementation; all first-party parser collections use it, allocation drops before its token, and injected transition failures preserve both owners exactly. Monotonic one-element replacement fixtures at `N`, `2N`, and `4N` prove logarithmic replacement count and linear total moved elements/bytes; source scans reject repeated fixed `desired = len + 1` growth rails. |
 | Retained-store authority | Rustdoc/source/compile-fail gates find no public generic retained constructor, arbitrary owning payload, caller-supplied backing allocation, visitor/attach path, or caller-declared footprint; domain code uses only ADR 0044's concrete store and non-owning qualified projections. |
 | Linear work accounting | Permit admission charges attempted work, completion charges consumed work, and unfinished work retains attempted-only evidence; owner-specific integration fixtures prove their polling and terminal transport separately. |
+| Protected failure-terminal work | Exact/one-under tests prove caller attempted/consumed totals include the qualified terminal allowance, all non-protected dimension limits checked-sum to exactly the ordinary remainder, and insufficient totals, extra ordinary capacity, aggregate overflow, or protected-policy drift reject before operation/account/allocator effects. Ordinary charge/reserve/transition/writer/share/commitment/progress APIs reject the protected key without counter change. A success-capable operation can still prepare bounded rich failure after ordinary exhaustion, generation rejection, final-control cancellation, or late primary-ledger rejection. Success reports zero protected use; failure reports the actual prefix, a failed protected action seals further rich work, verified cleanup yields only `FallbackOnly`, and uncertain cleanup yields no recovery owner. |
+| Terminal cause precedence | Isolated fixtures prove semantic rejection freezes `Requested`, ledger ownership/admission rejection freezes `Ledger`, cancellation and deadline freeze `Control`, and safely contained root/closure failure freezes `ProductGraph`. A later requested code cannot overwrite a trusted cause, primary ledger rejection upgrades only provisional `Requested`, and poison/uncertain cleanup produces fail-closed containment rather than a prepared cause. |
 | Decoded text surfaces | Exact and one-byte-under tests cover whole-text inputs, mixed text/binary headers, and container JSON chunks; borrowed validation creates no fictitious live bytes, while materialized copies reserve actual capacity. |
 | Packed format failure evidence | Packed descriptor/code/detail capacity is reserved before the borrowed producer runs, remains covered through failure finalization, and the terminal outcome retains no backend/plugin object or hidden foreign allocation. |
 | Opaque-backend admission | A known abort, unbounded recursion, or pre-admission allocation path has no first-party in-process registration. Allowance admission and maturity evidence never prove real runtime memory use; a hostile/opaque path claiming a hard bound runs under an admitted OS-enforced subprocess limit. |
@@ -646,6 +730,31 @@ Negative:
 | Clone and branch admission | Exact/excess transient clone loops and sibling/deep-branch fixtures charge non-refundable work before reference-count changes and cannot bypass retained-handle, container, branch, or generation limits. |
 
 ## Amendment History
+
+### 2026-08-01: Protect failure-terminal work inside the caller's hard total
+
+- Affected headings: `Decision`, `Evidence Classes`, `Protected Failure-Terminal Work`, `Required
+  Dimensions`, `Diagnostics and Outcomes`, alternatives, consequences, risks, success metrics, and
+  acceptance criteria.
+- Previous rule: failure-capable operations pre-admitted bounded fallback storage, but the Accepted
+  decision did not define whether terminal work was hidden overhead, how ordinary APIs were excluded,
+  which authority survived success-to-failure downgrade, how recoverable open failures differed from
+  fail-closed containment, or how trusted terminal causes were classified and preserved.
+- New rule: each caller work limit is a truthful hard total containing a finite owner-qualified
+  terminal allowance. Ordinary work receives only the checked remainder. A linear single-use
+  capability exclusively spends the visible protected dimension, remains available until exact
+  success is irreversible or an allocation-free complete failure path already exists, and freezes one
+  sticky typed `Requested`, `Ledger`, `Control`, or `ProductGraph` cause. Open failures return exactly
+  `Retry`, `FallbackOnly`, or no recovery owner; uncertain cleanup remains fatal containment.
+- Compatibility impact: pre-release operation-limit, recovery, terminal-evidence, and conformance APIs
+  may break. Existing hard limits can expose less ordinary work because the terminal allowance is no
+  longer hidden outside the caller's total.
+- Required review: exact/one-under startup partition, ordinary-key exclusion, success-to-failure after
+  ordinary exhaustion, partial protected-work sealing, cause precedence, retry/fallback-only/fail-
+  closed API shape, report snapshots, and direct ADR coherence review.
+- Rationale: a hostile-input hard cap is not truthful if Baozi can add unreported work after caller
+  exhaustion, and bounded failure evidence is not dependable if ordinary capabilities can consume its
+  allowance or erase its trusted cause.
 
 ### 2026-07-27: Follow retained physical-ownership authority supersession
 

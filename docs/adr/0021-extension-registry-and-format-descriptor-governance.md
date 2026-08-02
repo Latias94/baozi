@@ -243,8 +243,8 @@ registrant's namespace is a structured registration error even when the duplicat
 Freezing a registry builder creates one immutable, stably ordered
 importer/codec/default-options/namespace/schema snapshot. Builder removal or replacement affects only
 snapshots created afterward. Existing requests and sessions retain their original importer/codec
-objects and compiled-default `Arc` values. A `SceneBuilder` copies the exact Baozi-owned declarative
-schema subset needed by retained typed descriptors into the resulting scene generation, so a
+objects and compiled-default `Arc` values. Canonical construction copies the exact Baozi-owned
+declarative schema subset needed by retained typed descriptors into the resulting scene generation, so a
 `ValidatedScene` can outlive and be edited after the originating plugin code is unloaded. Unloading
 code therefore requires dropping every registry snapshot/session that retains its trait objects.
 Validated scenes and terminal import outcomes contain only Baozi-owned declarative data, so neither

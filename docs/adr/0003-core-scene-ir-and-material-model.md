@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-07-08
-updated: 2026-07-27
+updated: 2026-08-01
 authors:
   - Codex
 decision_type: architecture
@@ -37,23 +37,28 @@ keeps the common aggregate and rejects that mutation model.
 
 ## Decision
 
-`baozi-core` owns the only canonical scene IR. Format backend models remain private and must be
-converted before crossing the format crate boundary. The canonical lifecycle has three distinct
-capabilities:
+`baozi-core` owns the only canonical Scene IR and the only lifecycle that can turn producer input
+into a validated generation. Format-private models cross that boundary only through an opaque,
+single-use, core-owned `SceneConstruction`. The canonical lifecycle has three distinct capabilities:
 
-- `SceneBuilder` owns an unvalidated draft and is the construction API for importers and trusted
-  producers. Finishing it produces only a construction-branded directory descriptor, not a public
-  generation.
-- `ValidatedScene` owns a scene generation plus an unforgeable validation proof. The core central
-  validator is the only proof constructor. Import, postprocess, and downstream code may invoke that
-  validator, but cannot construct a proof or `ValidatedScene` directly or bypass full validation.
+- `SceneConstruction` retains every unpublished canonical allocation plus validation and publication
+  authority. A trusted producer receives only a bounded authoring surface. Finishing authoring
+  returns a non-owning `SceneDraft` containing the construction brand and canonical directory-slot
+  descriptor; it transfers no retained owner, account, ledger, validation proof, or generation.
+- `ValidatedScene` owns a scene generation plus an unforgeable validation proof. The matching core
+  construction lifecycle is the only proof constructor. Import, postprocess, and standalone callers
+  may drive that lifecycle through public domain entry points, but cannot submit a draft without its
+  matching owner, construct a proof or `ValidatedScene` directly, or bypass complete validation.
 - `SceneEdit` isolates mutations from an existing `ValidatedScene`. Commit validates and returns a
   new generation; failure or cancellation publishes no partial state or generation.
 
-This is the accepted U4 target, not a claim that the workspace has completed the cutover. The
-operation-owned retained-storage foundation exists, but core has not yet integrated the final
-`CanonicalBlockRef`/`SceneConstructionOperation` path and the legacy Scene lifecycle remains until the
-atomic workspace switch and deletion gates complete.
+Preparation consumes the construction owner together with the producer's exact draft result. A
+missing, duplicated, already-consumed, or foreign descriptor cannot publish success. A core failure
+latched while authoring remains authoritative even if producer code catches the returned error or
+returns another value. Core completes central validation and terminal classification before handoff.
+Only the exact success branch may retain canonical ownership and one private generation reservation;
+failure branches structurally retain neither. Handoff is a pure ownership move and constructs
+`ValidatedScene` only for success.
 
 Opening `SceneEdit` is a derived-operation start against the input Scene's inherited
 `PhysicalStorageAccount`. It performs ADR 0044's shared poison/counter admission before edit work,
@@ -70,11 +75,12 @@ inspect never handle proof internals. A caller opts into `SceneEdit` only when c
 
 ```mermaid
 stateDiagram-v2
-    [*] --> Building: SceneBuilder
-    Building --> ContainmentFatal: retained builder panic; no reservation
-    Building --> Draft: finish
-    Draft --> CheckedDraft: central validation
-    Draft --> [*]: validation failure; no generation
+    [*] --> Building: core opens SceneConstruction
+    Building --> ContainmentFatal: retained construction panic; no reservation
+    Building --> Draft: finish exact descriptor
+    Draft --> CheckedDraft: matching owner consumes descriptor; central validation
+    Draft --> PreparedRichFailure: missing/foreign/latched failure; no generation
+    Draft --> [*]: validation failure without publishable evidence; no generation
     CheckedDraft --> Reserved: reserve one output generation
     CheckedDraft --> PreparedRichFailure: reservation rejection/exhaustion; consume no nonce
     Reserved --> PreparedSuccess: freeze and classify exact success
@@ -137,7 +143,7 @@ rules. This distinction is part of the canonical aggregate rather than a glTF-on
 Every published scene owns an opaque `SceneGenerationId` that is collision-free and never reused
 within the runtime generation domain. Core's private `SceneGenerationId::allocate()` is fallible and
 returns a linear `ReservedSceneGeneration` rather than a public ID, so nonce acquisition cannot occur
-in the final ownership handoff. The operation finalizer classifies the terminal result completely
+in the final ownership handoff. Construction preparation classifies the terminal result completely
 during preparation; it never returns one opaque success-capable prepared value whose outcome is
 decided only during handoff. The reservation typestate obeys this lifecycle:
 
@@ -172,7 +178,7 @@ nonce gap. The nonce is never returned to the domain and never reused, so no fai
 generation or proof. The two exact failure wrappers contain no reservation by the time they leave
 preparation.
 
-`SceneBuilder::finish` exposes no token. ADR 0032 gives immutable edit step states only report-scoped
+Finishing authoring exposes no token. ADR 0032 gives immutable edit step states only report-scoped
 typed ordinals/paths, never generation reservations or public `SceneGenerationId` values. Each
 `Changed` edit reserves and publishes exactly one generation for its final `ValidatedScene`; only the
 composed input-to-final remap is generation-qualified. Two edits branched from the same input
@@ -212,7 +218,7 @@ claims are forgeable. Rejected.
 This makes invariants simple, but large tools would clone unrelated buffers and cannot express
 transactional failure efficiently. Rejected.
 
-### Option C: Builder, validated generation, and isolated edit transaction
+### Option C: Core-owned construction, validated generation, and isolated edit transaction
 
 This keeps the success state trustworthy, permits focused copy-on-write replacement, and gives
 postprocess one atomic mutation boundary. Chosen.
@@ -222,9 +228,9 @@ postprocess one atomic mutation boundary. Chosen.
 - All format crates target the same Rust-owned aggregate without leaking backend types.
 - Breaking changes are required: direct field mutation and constructors for validated result types
   are removed rather than preserved behind compatibility aliases.
-- `SceneBuilder::finish` produces only an owned `SceneDraft`; every publication path passes that
-  draft or an edit candidate through the central validator, even when a producer performed local
-  checks.
+- Finishing authoring produces only a non-owning, branded `SceneDraft` descriptor. Every publication
+  path consumes that descriptor with its matching construction owner or validates an edit candidate,
+  even when a producer performed local checks.
 - Successful preparation may consume an unpublished generation nonce; aborting after reservation
   burns a never-reused gap rather than weakening the handoff or publishing partial identity.
 - Editors must retain or consume explicit remaps when they keep IDs across generations.
@@ -235,7 +241,7 @@ postprocess one atomic mutation boundary. Chosen.
 | --- | --- | --- |
 | Read-only access feels cumbersome | Medium | Provide typed slices, iterators, lookups, and convenience views for positions and triangle data. |
 | Edit transactions duplicate large data | High | Share unchanged storage and allocate only affected replacements; peak-live accounting remains mandatory. |
-| Internal code bypasses proof construction | High | Keep proof constructors private, expose only the central validating function as the legal minting path, and add compile-fail/public-API tests. |
+| Internal code bypasses proof construction | High | Keep proof constructors private, require the matching construction owner or edit transaction as the legal minting path, and add compile-fail/public-API tests. |
 | Validator and IR drift | High | Every new field lands with invariant tests and validator coverage in the same change. |
 | Generation allocation fails after publication evidence is frozen | Critical | Reserve `ReservedSceneGeneration` as the final fallible pre-freeze identity acquisition; rejection/exhaustion becomes a rich failure with no nonce, later freeze/preparation failure may burn a successful reservation, and handoff only consumes exact `PreparedSuccess`. |
 | Failed preparation reuses or exposes a reserved nonce | Critical | The linear private reservation burns on drop, has no public conversion except prepared handoff, and never returns a nonce to the allocator. |
@@ -252,15 +258,19 @@ postprocess one atomic mutation boundary. Chosen.
 | Terminal classification | only exact `PreparedSuccess` can own one generation reservation; exact rich-failure/minimal-fallback wrappers structurally cannot; retained-builder containment is not a prepared publication | API-shape, downgrade, startup-side, uncertain-cleanup, and compile-fail probes |
 | Poisoned lineage | every clone of one Scene account rejects new derived edits after poison; a pre-admitted edit cannot publish once poison linearizes before final eligibility | two-order barriers, input digest/proof/refcount/allocator probes, account snapshots, and no-bypass API scans |
 | Validation complexity | Complete validation visits each graph edge, entity, reference, and payload cell at most a constant number of times | deterministic validator work counters |
-| Publication integrity | Only the central validator can mint proof; import finalization and edit commit may publish only its successful result | compile-fail and rollback tests |
+| Publication integrity | Only the matching core construction or edit transaction can drive central validation and mint proof; import finalization and edit commit may publish only that successful result | compile-fail, foreign/missing-draft, and rollback tests |
 
 ## Acceptance Criteria
 
 - External code cannot mutate a validated collection or construct `ValidatedScene` directly; it can
-  obtain one only by passing a draft through the central validator.
-- `SceneBuilder::finish` and a checked draft expose no generation; preparation reserves a private
+  obtain one only by completing the matching core construction or a validated edit transaction.
+- A finished `SceneDraft` descriptor exposes no owner or generation; construction preparation reserves a private
   never-reused nonce before attribution freeze, and only infallible handoff converts it into the
   `SceneGenerationId` carried by the new `ValidatedScene`.
+- Missing, duplicated, already-consumed, and foreign draft descriptors cannot publish success. A
+  latched construction failure remains authoritative even when producer code catches the immediate
+  error, and panic after the continuation enters its consuming transition fails closed rather than
+  restoring reusable authority.
 - Exact/exhausted generation-domain tests prove reservation failure consumes no nonce and precedes
   attribution freeze, preserves ordinary rich-failure evidence, and records zero canonical output.
   Only a subsequent failure to append, validate, or prepare that rich failure or a non-unwind root
@@ -296,6 +306,28 @@ postprocess one atomic mutation boundary. Chosen.
 - Public API tests prove the import-inspect path does not require builder, proof, or ledger internals.
 
 ## Amendment History
+
+### 2026-08-01: Make canonical construction a core-owned opaque continuation
+
+- Affected headings: `Decision`, lifecycle diagram, generation identity, alternatives,
+  consequences, risks, success metrics, and acceptance criteria.
+- Previous rule: the Accepted text described an importer-facing `SceneBuilder` as the owner of an
+  unvalidated draft and implied that an independently owned draft could later be submitted to a
+  general validator.
+- New rule: one opaque single-use `SceneConstruction` owns unpublished canonical storage,
+  validation, terminal classification, and publication authority. Producers borrow only a bounded
+  authoring surface and return a non-owning branded directory descriptor. Preparation must consume
+  that exact descriptor with its matching owner; missing, foreign, duplicated, latched-failure, or
+  transition-panic paths cannot mint proof or generation. `ValidatedScene` remains constructible only
+  by pure exact-success handoff.
+- Compatibility impact: pre-release builder, validation, and producer APIs may break; no stable wire
+  or public retained-storage layout is affected.
+- Required review: descriptor/owner API shape, foreign and missing draft probes, caught-error and
+  transition-panic fail-closed tests, central validation coverage, generation reservation/drop, import
+  composition, and direct ADR coherence review.
+- Rationale: a descriptor cannot prove ownership of unpublished storage. Keeping the construction
+  owner inside core makes proof minting, generation identity, retained lifetime, and terminal cause
+  one non-forgeable lifecycle.
 
 ### 2026-07-27: Follow retained physical-ownership authority supersession
 

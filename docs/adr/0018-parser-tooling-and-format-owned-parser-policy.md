@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-07-09
-updated: 2026-07-13
+updated: 2026-08-01
 authors:
   - Codex
 decision_type: architecture
@@ -61,11 +61,12 @@ Core rules:
 - generated parsers must be checked in only when generation is deterministic and the generator is
   also available through a documented development workflow
 - parser adapters obtain primary/dependency snapshots, selected options, work charges, live
-  reservations, diagnostics, cancellation, progress, and Scene construction only through their
-  selected `ParseScope`; they receive no raw `AssetIo` or mutable import coordinator
-- `SceneBuilder` produces only `SceneDraft`; the core central validator is the sole proof constructor
-  and the import session invokes it for import results without excluding postprocess or downstream
-  callers from validating their own drafts
+  reservations, diagnostics, cancellation, progress, and a bounded borrow of core-owned Scene
+  authoring only through their selected `ParseScope`; they receive no raw `AssetIo`, mutable import
+  coordinator, retained owner, or ledger
+- the import session owns the opaque `SceneConstruction` continuation; the parser returns only its
+  branded, non-owning `SceneDraft` descriptor, and core's central validator is the sole proof
+  constructor
 - first-party and admitted parser paths cooperatively honor checked charges/reservations or reviewed
   conservative allowances; hostile or untrusted parser code requires process isolation because an
   in-process API cannot prevent arbitrary allocation, looping, abort, or process exit
@@ -92,7 +93,7 @@ Recommended first choices by format shape:
 
 ```mermaid
 flowchart LR
-    Session[Import session] --> Scope[Selected ParseScope]
+    Session[Import session owns SceneConstruction] --> Scope[Selected ParseScope]
     Scope --> Input[Immutable primary/dependency snapshots]
     Scope --> Capabilities[Options, budget, diagnostics, control]
     Scope --> Storage[ADR 0022-owned metered storage]
@@ -109,8 +110,8 @@ flowchart LR
     Binary --> Adapter
     Generated --> Adapter
     Adapter --> Normalized[Private normalized model/events]
-    Normalized --> Builder[SceneBuilder capability]
-    Builder --> Draft[SceneDraft]
+    Normalized --> Author[Borrowed bounded authoring capability]
+    Author --> Draft[Branded SceneDraft descriptor]
     Draft --> Session
     Session --> Validator[Core validator]
     Validator --> Validated[ValidatedScene or core failure]
@@ -122,19 +123,20 @@ sequenceDiagram
     participant Format as Format crate
     participant Scope as ParseScope
     participant Tool as Parser tool
-    participant Builder as SceneBuilder
+    participant Construction as Core SceneConstruction
     participant Validator as Core validator
 
+    Session->>Construction: create exact session-owned continuation
     Session->>Format: parse(selected ParseScope)
     Format->>Scope: snapshots/options/checked capabilities
     Scope-->>Format: bounded capability views
     Format->>Tool: parse bounded input
     Tool-->>Format: private AST/events/errors
     Format->>Scope: charge work/obtain metered storage/emit diagnostics
-    Format->>Builder: add Baozi-owned scene data
-    Builder-->>Format: SceneDraft
+    Format->>Construction: author through ParseScope's bounded borrow
+    Construction-->>Format: branded SceneDraft descriptor
     Format-->>Session: ParseResult<SceneDraft>
-    Session->>Validator: validate draft centrally
+    Session->>Validator: consume exact continuation plus descriptor
     Validator-->>Session: ValidatedScene or core-owned failure
 ```
 
@@ -227,7 +229,7 @@ Decision: chosen.
 | WASM hygiene | Format bytes path compiles for `wasm32-unknown-unknown` | target-specific `cargo check` |
 | Error quality | Malformed inputs return stable format causes or bounded diagnostics | malformed fixture tests |
 | Resource control | Admitted adapters charge or reserve before input-derived work/allocation | budget tests, allocation probes, fuzz seeds |
-| Validation authority | Parser APIs return `SceneDraft`, never parser-supplied proof | API-shape and invalid-draft tests |
+| Validation authority | Parser APIs return only the branded `SceneDraft` descriptor, never the construction owner or parser-supplied proof | API-shape, foreign-descriptor, and invalid-draft tests |
 
 ## Risks and Mitigations
 
@@ -261,3 +263,18 @@ Negative:
 - crates.io API: [`pest`](https://crates.io/api/v1/crates/pest)
 - crates.io API: [`logos`](https://crates.io/api/v1/crates/logos)
 - crates.io API: [`lalrpop`](https://crates.io/api/v1/crates/lalrpop)
+
+## Amendment History
+
+### 2026-08-01: Align parser tooling with the opaque construction boundary
+
+- Affected: `Decision`, `Architecture`, and `Success Metrics`.
+- Previous: parser adapters were described as driving an importer-facing `SceneBuilder` that owned
+  unvalidated construction state.
+- New: the import session owns one opaque core `SceneConstruction`; `ParseScope` lends only bounded
+  authoring authority, and parsers return a branded non-owning `SceneDraft` descriptor.
+- Impact: the pre-release parser boundary becomes narrower and prevents format code from retaining or
+  finalizing canonical storage independently.
+- Review: 2026-08-01 fixed-range architecture and parser-boundary review.
+- Rationale: this preserves the format-owned parser policy while aligning it with ADR 0003 and ADR
+  0020's single canonical lifecycle rather than selecting a new parser architecture.

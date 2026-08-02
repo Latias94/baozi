@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-07-09
-updated: 2026-07-27
+updated: 2026-08-01
 authors:
   - Codex
 decision_type: architecture
@@ -45,12 +45,17 @@ After request/options compilation, Baozi performs one fallible session-bootstrap
 primary binding or detection. Only a successful bootstrap creates `ImportSession`.
 The session owns the only outcome builder, stable primary input, selected-format evidence, optional
 source-scope evidence, dependency resolver, ledger, bounded diagnostics, and operation control. It
-grants the selected trusted importer only a capability-limited `ParseScope`.
+also creates and retains exactly one opaque core `SceneConstruction` bound to that existing session
+account, ledger, control, and publication context. It grants the selected trusted importer only a
+capability-limited `ParseScope` that borrows the construction's bounded authoring surface.
 
 The parser returns `ParseResult<SceneDraft>`. A draft contains only its core construction brand and
 canonical directory-slot descriptor; it does not own a separately mutable Scene or a generation
-identity. The public central validator in `baozi-core` is the only constructor of `ValidatedScene`
-proof; downstream code may legitimately call it, but cannot directly construct or forge proof.
+identity. The parser cannot move, replace, inspect, or finalize the construction owner and cannot
+reach its retained owner, account, ledger, validation, publication, or generation authority.
+`baozi-core` is the only constructor of `ValidatedScene` proof; standalone callers may drive a public
+core construction entry point, but no API accepts a draft descriptor without its matching owner and
+no caller can construct or forge proof directly.
 Successful preparation reserves ADR 0003's private `ReservedSceneGeneration` as its final fallible
 pre-freeze identity acquisition. Reservation rejection or exhaustion consumes no nonce and
 is classified during preparation as an ordinary rich failure with preserved evidence and zero
@@ -58,19 +63,22 @@ canonical output. It uses minimal fallback only if appending, validating, or pre
 failure itself then fails. No `SceneGenerationId` exists yet.
 `ValidatedScene` is constructible only when pure handoff consumes a successful reservation into the
 public generation ID.
-`ImportSession` is the only import outcome/stage/provenance finalizer. It always invokes the core
-validator on the returned draft and, after bootstrap succeeds, returns exactly one terminal API
-result. Safely finalizable paths return one `ImportReport` or `ImportFailure`. If the process survives
+`ImportSession` is the only import outcome/stage/provenance finalizer. On parser success it consumes
+the retained construction together with the exact returned descriptor. A missing, duplicated,
+already-consumed, or foreign descriptor is a trusted-extension contract failure and cannot publish a
+Scene. A core construction failure is latched before control returns to format code and remains
+authoritative even if the parser catches its error or returns another value. After bootstrap succeeds,
+the session returns exactly one terminal API result. Safely finalizable paths return one
+`ImportReport` or `ImportFailure`. If the process survives
 but storage/dependency release cannot be verified, it instead returns one fixed typed
 `FinalizationContainmentError`, keeps uncertain payload/lease/operation attribution coupled and
 charged, and publishes neither report nor fallback.
 
-A standalone public validation call performs the same core validation, generation reservation,
-preparation freeze, and handoff sequence under `SceneConstructionOperation`. Import composition uses the sealed pre-
-handoff validation capability so its canonical and report-evidence tables freeze in one outcome; it
-does not create an earlier independently published `ValidatedScene`.
-
-Accepted establishes authority; it does not claim the current prototype context already enforces it.
+Core owns canonical validation, proof construction, generation reservation, and canonical handoff.
+`ImportSession` owns import phase/provenance, successful-manifest ordering, report/failure evidence,
+and the single public import terminal. Import composition uses a sealed pre-handoff boundary so the
+canonical and report-evidence tables freeze in one outcome; it never creates an earlier independently
+published `ValidatedScene`.
 
 ### Lifecycle
 
@@ -177,12 +185,15 @@ canonical inheritance between independent Scenes.
 2. bind one immutable primary snapshot and its session-issued root-origin capability through either
    policy-authorized IO acquisition or admitted direct-byte copying;
 3. build one shared probe and select/force a format with evidence;
-4. create `ParseScope` for only the selected importer;
+4. create exactly one session-bound core `SceneConstruction`, retain its opaque owner in the session,
+   and create `ParseScope` for only the selected importer with a borrowed bounded authoring surface;
 5. acquire required/optional dependencies through session-issued origin-qualified capabilities and
    parse into format-private state as needed;
-6. construct a Scene draft only through the core construction capability;
-7. have `ImportSession` call the central `baozi-core` validation capability, which checks the draft
-   without minting a generation or exposing a `ValidatedScene`;
+6. construct a Scene draft only through that borrowed authoring surface and receive only the
+   descriptor issued by the session-bound construction;
+7. have `ImportSession` consume its retained construction with the exact returned descriptor, reject
+   missing/foreign/latched-failure state, and run central `baozi-core` validation without minting a
+   generation or exposing a `ValidatedScene`;
 8. reserve one private never-reused generation nonce as the final fallible pre-freeze identity
    acquisition,
    finish final control classification as exact `PreparedSuccess`, apply canonical/outcome
@@ -198,9 +209,9 @@ canonical inheritance between independent Scenes.
 
 Last-completed phase is a sealed read-only evidence value constructed by the session. It is present so
 callers can understand a failure, not so callers or parsers can advance state. Public code may obtain
-`ValidatedScene` only by successfully calling the core validator; it cannot directly construct proof
-or attach import phase/provenance to it. Only the session can construct import phase evidence, reports,
-or failures.
+`ValidatedScene` only through a matching core construction or validated edit transaction; it cannot
+directly construct proof or attach import phase/provenance to it. Only the session can construct
+import phase evidence, reports, or failures.
 
 ```mermaid
 stateDiagram-v2
@@ -330,8 +341,9 @@ inspect or relabel the domain result.
 - bounded diagnostic emission and loss facts;
 - one sealed, bounded source-scope evidence submission;
 - cancellation polling and progress reporting; and
-- a Scene construction capability whose output is only `SceneDraft` and cannot mint or submit
-  validation proof.
+- a borrowed bounded Scene-authoring capability whose output is only the session construction's
+  `SceneDraft` descriptor and which cannot move, replace, inspect, or finalize the owner or mint or
+  submit validation proof.
 
 It does not expose raw `AssetIo`, unrestricted path resolution, registry mutation, another format's
 options, resource-graph/cache internals, graph-node construction, caller-selected base paths,
@@ -504,10 +516,10 @@ extension code cannot forge an IO, budget, cancellation, validation, or format c
 session-internal branches with distinct cause ownership:
 
 1. A session-terminal `ScopeAbort` is produced only by `ParseScope` and the IO, dependency, budget,
-   control, diagnostic, SceneBuilder, or core capability methods it exposes after the capability has
+   control, diagnostic, Scene-authoring, or core capability methods it exposes after the capability has
    determined that the session cannot safely continue. Those methods return `ParseResult<T>` directly,
    making `?` the normal propagation path. The abort retains the original lower-layer cause and owner;
-   an IO error remains IO-owned, cancellation remains operation-owned, and a builder/core error remains
+   an IO error remains IO-owned, cancellation remains operation-owned, and a construction/core error remains
    core-owned rather than becoming a format parse error. A permitted optional-dependency `Unavailable`
    outcome is deliberately outside this branch.
 2. `FormatFailureEnvelope` seals the selected descriptor identity, a validated stable code, and
@@ -520,7 +532,7 @@ session-internal branches with distinct cause ownership:
 
 A failure returned by the session's final central-validator call is not parser transport and does not
 enter `ParseFailure`; it remains a core-owned validation cause finalized directly by `ImportSession`.
-The `ScopeAbort` core branch covers construction-time core/SceneBuilder capability failures reached
+The `ScopeAbort` core branch covers construction-time core authoring-capability failures reached
 while the parser is still running.
 
 A session-terminal capability-produced abort is also latched before it is returned. A trusted parser
@@ -554,8 +566,9 @@ values only for submitted request layers; registry-default failures are `Registr
 ### Prepared Outcome Publication
 
 The session finalizer has a fallible preparation boundary and an infallible ownership-handoff
-boundary. Success preparation validates the checked draft and canonical aggregate, successful input
-manifest, diagnostics/losses, source-scope evidence, ledger snapshot, account brand, physical leases,
+boundary. Success preparation consumes the session-owned construction with the exact draft
+descriptor, validates the canonical aggregate, completes the successful input manifest,
+diagnostics/losses, source-scope evidence, ledger snapshot, account brand, physical leases,
 private canonical-attribution and outcome-evidence-attribution destinations. It reserves
 `ReservedSceneGeneration` as the final fallible pre-freeze identity acquisition; it does
 not freeze or construct an earlier `ValidatedScene`. Reservation rejection or exhaustion leaves the
@@ -698,9 +711,9 @@ does not mutate an `ImportReport.stage` field.
 | Crate | Owns | May expose upward | Must not own/construct |
 | --- | --- | --- | --- |
 | `baozi-operation` | Runtime-neutral control/coordinator, reservation/ledger state machine, physical account, sole private generic final-owner/retained foundation, operation-owned concrete metered retained store, and frozen prepared-publication mechanism | Concrete sealed `ScalarSequenceBlock`, `BytesBlock`, `Utf8Block`, and bounded `RecordBlock` construction; qualified non-owning slots; `PhysicalStorageAccount`; owner-neutral ledger evidence. Raw generic payload, pending charge, reservation, and lease controls remain private | Public/domain generic retained authority, arbitrary owning payload/backing storage, caller-declared footprint, Scene, IO, request policy, import/post-process/core phases, format causes, domain outcomes, or a second retained/final-owner implementation |
-| `baozi-core` | Scene draft/build capability, `SceneConstructionOperation`, sealed unstable canonical in-memory schema, non-owning `CanonicalBlockRef<Schema>` projections and semantic views, public central validator, validation proof, and domain validation/edit errors | Typed core causes and `ValidatedScene`; downstream callers may validate drafts through explicit-account or private-account core APIs | Owning allocation wrapper, stable internal wire, physical protocol or `Drop` duplication, IO, import phase/provenance, registry, parser policy, or facade-composed error |
+| `baozi-core` | Opaque single-use `SceneConstruction`, bounded authoring surface, descriptor-only `SceneDraft`, sealed unstable canonical in-memory schema, non-owning `CanonicalBlockRef<Schema>` projections and semantic views, central validation, validation proof, and domain validation/edit errors | Typed core causes and `ValidatedScene`; standalone callers may drive explicit-account or private-account construction entry points but cannot separate a draft descriptor from its owner | Public owning allocation wrapper, stable internal wire, physical protocol or `Drop` duplication, IO, import phase/provenance, registry, parser policy, or facade-composed error |
 | `baozi-io` | Asset identity/path, bound handles/snapshots, backend IO errors | Typed IO causes and capability-bound resources | Optionality/loss, Scene, import outcome |
-| `baozi-import` | Request config/policy, session, import phase vocabularies, Probe, DetectionScope, ParseScope, resolver, effective budgets, diagnostics, private detection/parse failure classification, and detection/import outcomes | Typed request/import failure and report evidence | Validation-proof construction, shared operation mechanism duplication, format-private model, post-process stage, public facade error duplication |
+| `baozi-import` | Request config/policy, session, ownership and orchestration of one core construction, import phase vocabularies, Probe, DetectionScope, ParseScope, resolver, effective budgets, diagnostics, private detection/parse failure classification, and detection/import outcomes | Typed request/import failure and report evidence; a borrowed capability-limited authoring surface to the selected importer | Validation-proof construction, direct canonical retained ownership, shared operation mechanism duplication, format-private model, post-process stage, public facade error duplication |
 | `baozi-format-*` | Private decode/normalized model and bounded Baozi format causes/codes | `DetectionResult<DetectionOutcome>` and `ParseResult<SceneDraft>`; synchronous packing of stable failure facts through the selected ParseScope | Raw IO, parser-supplied proof/outcome, arbitrary detection/parse failure classification, phase/provenance construction, or retaining backend/plugin objects in public outcomes |
 | `baozi-postprocess` | Post-process phase vocabularies, effective operation budget, compiled plans, step transactions, remaps/losses, report/cause | Distinct typed post-process result using `baozi-operation` mechanisms | Dependency on `baozi-import`, import phase/outcome, shared operation mechanism duplication, or format-private state |
 | `baozi` facade | Public request/error composition and long-lived bounded runtime/profile ownership | Stable ergonomic API preserving lower structured causes; private per-import account creation through its retained factory; advanced explicit-account entry without exposing ledger/physical types in the common flow | Global/per-request/unbounded factory, canonical inheritance authority, duplicate domain state, or bypass constructors |
@@ -798,12 +811,12 @@ Negative:
 | Capability boundary | Compile-fail/API-shape tests prove detectors and parsers cannot reach raw IO, other options, reports, phases, arbitrary detection/parse failure constructors, dependency-requiredness relabeling, or a parser-supplied proof return path. |
 | DetectionResult shape | A heterogeneous `dyn FormatImporter` receives `Probe`, `ReadHint`, and `DetectionScope` and returns exactly `DetectionResult<DetectionOutcome>`; its opaque abort cannot be constructed, sent, or used to suppress the session latch. |
 | Detector work permit | Detection permits are single-outstanding and bounded to 4 KiB; begin polls then charges attempted work, complete charges consumed then polls, and zero/repeated/poll-during/drop/forgotten-permit violations latch the first terminal cause. |
-| Core proof authority | Public/downstream code can obtain `ValidatedScene` by calling the core validator, while direct proof construction/forgery fails to compile. |
+| Core proof authority | Public/downstream code can obtain `ValidatedScene` only by completing a matching core construction or validated edit transaction, while detached-draft validation and direct proof construction/forgery fail to compile. |
 | Core storage authority | Import Scene construction reaches only operation's concrete sealed scalar/bytes/record store through core's non-owning `CanonicalBlockRef<Schema>` projections. Rustdoc/source/compile-fail gates find no public raw generic rail, arbitrary owning `T`, backing `Vec`/`Arc`/`Mutex`, caller-declared footprint, owning core wrapper, import/core physical charge, lease, rollback, final-owner, or second retained implementation. |
-| Draft and generation boundary | `SceneDraft` contains only its construction brand and directory-slot descriptor; exact/exhausted domain tests prove reservation failure consumes no nonce, precedes freeze, and produces ordinary rich failure. Only exact-success handoff consumes a reservation into `SceneGenerationId`/`ValidatedScene`; any later preparation failure/cancellation/caught-unwind/exact-success drop may burn but never publish or reuse a gap, and failure wrappers structurally contain no reservation. |
+| Draft and generation boundary | `SceneDraft` contains only its construction brand and directory-slot descriptor. Missing, duplicated, already-consumed, foreign, caught-error, and panic-after-transition tests cannot publish success or recover reusable owner authority. Exact/exhausted domain tests prove reservation failure consumes no nonce, precedes freeze, and produces ordinary rich failure. Only exact-success handoff consumes a reservation into `SceneGenerationId`/`ValidatedScene`; any later preparation failure/cancellation/caught-unwind/exact-success drop may burn but never publish or reuse a gap, and failure wrappers structurally contain no reservation. |
 | Facade account lifecycle | Common facade construction requires a finite documented profile, retains one factory across repeated imports, creates a fresh unpoisoned private account per import, exposes no physical/ledger types, and has no global/per-request factory; advanced explicit accounts do not permit independent-Scene inheritance and cannot start another import after poison. |
 | Internal-layout exclusion | Reordering concrete blocks or changing slots, capacities, padding, or equivalent sharing leaves semantic Scene digest and public views unchanged; no internal store representation is a stable wire. |
-| Import validation authority | A trusted importer may call the public validator internally, but `parse` can return only a draft; the session revalidates it, and an invalid returned draft cannot produce success. |
+| Import construction authority | `ImportSession` retains exactly one session-bound construction while `ParseScope` lends only its authoring surface. `parse` can return only that construction's descriptor; a parser cannot move/finalize the owner, submit proof, substitute another construction, suppress a latched core cause, or publish an invalid/foreign draft. The session consumes the exact descriptor, completes central validation and manifest ordering, and composes canonical/report publication without first exposing an independent `ValidatedScene`. |
 | ParseResult shape | A heterogeneous `dyn FormatImporter` returns exactly `ParseResult<SceneDraft>`; capability methods compose with `?` without erasing the lower cause owner. |
 | Dependency API shape | ParseScope exposes one `(origin, role, hostile reference) -> ParseResult<DependencyOutcome>` capability; a required role can return only `Available` or a latched error, while only an optional role plus loss authority can return `Unavailable`. |
 | Optional dependency continuation | Missing, denied, failed-open, and acquisition-budget-exhausted optional fixtures return `Unavailable` only after complete terminal evidence is admitted and sealed role optionality/loss policy permit; acquisition-budget outcomes are session-dependent and make replay status `ObservedOnly`. Cycle/depth/node/edge/graph-work/proof/manifest/finalization/cancellation/deadline failures terminate the session. Permitted outcomes retain identity/cause/accounting/proof-or-none evidence, emit bounded loss diagnostics, preserve geometry, and perform one physical attempt per authority-qualified identity. |
@@ -820,6 +833,28 @@ Negative:
 | Crate ownership | Dependency and public-API checks find no backend type or executable backend object in public outcomes/stable schemas, no `baozi-operation` upward dependency, no postprocess-to-import edge, and no reversed core dependency. |
 
 ## Amendment History
+
+### 2026-08-01: Make ImportSession own the opaque core construction
+
+- Affected headings: `Decision`, lifecycle, `ParseScope Capabilities`, parse failure transport,
+  prepared outcome publication, crate ownership, and acceptance criteria.
+- Previous rule: the parser returned a descriptor-only draft, but the Accepted text still implied a
+  detached public validator and did not state who retained the matching construction owner or how its
+  accounting and publication authority composed with the single import session.
+- New rule: after selection, `ImportSession` creates and retains exactly one core
+  `SceneConstruction` bound to the session's existing account, ledger, control, manifest ordering, and
+  publication context. `ParseScope` lends only a bounded authoring surface. The parser returns the
+  matching descriptor; the session consumes both, preserves any latched typed core cause, runs central
+  validation, then freezes canonical and report evidence in one terminal. Missing, foreign,
+  duplicated, caught-error, and transition-panic paths cannot publish or restore reusable authority.
+- Compatibility impact: pre-release ParseScope, construction, validation, and import-finalization APIs
+  may break; `FormatImporter::parse(&mut ParseScope) -> ParseResult<SceneDraft>` remains the registered
+  parser shape.
+- Required review: one-ledger/account composition, owner/descriptor API shape, parser catch/foreign-
+  draft tests, manifest-before-generation ordering, joint canonical/report publication, fail-closed
+  transition panic, and direct ADR coherence review.
+- Rationale: import can have only one accounting and publication truth. Letting a parser or detached
+  validator own the canonical continuation would recreate a second lifecycle outside the session.
 
 ### 2026-07-27: Follow retained physical-ownership authority supersession
 

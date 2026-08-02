@@ -76,8 +76,8 @@ flowchart LR
     Owned --> Convert[Format-owned semantic converter]
     Dependency --> Convert
     Tool --> Convert
-    Convert --> Builder[Internal SceneBuilder]
-    Builder --> Validate[Central validator]
+    Convert --> Author[Bounded core authoring capability]
+    Author --> Validate[Central validator]
     Validate --> Scene[Validated canonical Scene]
 ```
 

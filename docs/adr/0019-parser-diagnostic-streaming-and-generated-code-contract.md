@@ -122,8 +122,8 @@ flowchart TB
     Scope --> Budget[Work and live reservations]
     Scope --> Diagnostics[Bounded diagnostic sink]
     Scope --> Control[Cancellation and progress]
-    Normalized --> Builder[SceneBuilder]
-    Builder --> Validate[Central validation outside parser]
+    Normalized --> Author[Borrowed bounded core authoring]
+    Author --> Validate[Central validation outside parser]
 ```
 
 ## Format Review Record

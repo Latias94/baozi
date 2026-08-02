@@ -57,7 +57,7 @@ of relying on ADR number, file date, or merge order.
 | --- | --- | --- |
 | Top-level architecture and crate-family responsibility, including the shared `baozi-operation` foundation | ADR 0001 | Assigns implementation families; detailed semantics remain with their domain ADRs. |
 | Runtime neutrality, host session admission, executor capacity, and subscriber ownership | ADR 0002 | ADR 0033 governs control inside one admitted operation. |
-| Canonical Scene aggregate, builder/proof/edit states, and scene-local identity | ADR 0003 | Geometry, deformation, mutation, and persistent identity are delegated below. |
+| Canonical Scene aggregate, construction/draft/proof/edit states, and scene-local identity | ADR 0003 | Geometry, deformation, mutation, and persistent identity are delegated below. |
 | Parser backend admission, isolation, and replacement | ADR 0004 | Does not own format maturity or facade features. |
 | Test layers, fixture provenance, independent oracles, and external-oracle safety | ADR 0005 | Per-field evidence mechanics belong to ADR 0026. |
 | Public compatibility, stability tiers, breaking changes, lockstep release topology, publication recovery, and versioning | ADR 0006 | Domain ADRs define semantics but cannot create a second compatibility or release policy. |

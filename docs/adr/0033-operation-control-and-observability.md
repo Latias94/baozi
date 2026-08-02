@@ -96,7 +96,7 @@ inversion preserves the crate direction: core/import/postprocess may depend on `
 ### Cancellation Bound
 
 Every primary/dependency snapshot read loop, detector boundary and bounded detector scan, parser loop,
-graph traversal, decode adapter, SceneBuilder loop, validation pass, and post-process step declares a
+graph traversal, decode adapter, canonical authoring loop, validation pass, and post-process step declares a
 maximum `work units between cancellation checks`. The owner performs another checkpoint after final
 validation and after any final phase-complete progress delivery but before publishing success. An
 observer cancellation request at either point is terminal and cannot race with success publication.

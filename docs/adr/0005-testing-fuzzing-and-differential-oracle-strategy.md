@@ -117,7 +117,7 @@ sequenceDiagram
 Unit tests cover:
 
 - ID handle creation and lookup
-- `SceneBuilder` invariants
+- opaque construction, branded draft-descriptor, and central validation invariants
 - validator failures and repairable diagnostics
 - material conversion helpers
 - path resolution

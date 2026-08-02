@@ -25,9 +25,9 @@ Construction, publication, and mutation use different capabilities:
 
 ```mermaid
 stateDiagram-v2
-    [*] --> SceneBuilder: trusted producer
-    SceneBuilder --> SceneDraft: finish draft
-    SceneDraft --> ValidatedSceneG: central validation succeeds
+    [*] --> SceneConstruction: import session or trusted producer creates
+    SceneConstruction --> SceneDraft: bounded authoring returns branded descriptor
+    SceneDraft --> ValidatedSceneG: exact owner plus descriptor validates
     SceneDraft --> [*]: validation fails
     ValidatedSceneG --> SceneEdit: begin edit
     SceneEdit --> PrivateCandidate: apply declared effects
@@ -36,9 +36,10 @@ stateDiagram-v2
     SceneEdit --> ValidatedSceneG: cancel or fail; input unchanged
 ```
 
-- `SceneBuilder` owns unvalidated construction state and produces only `SceneDraft`.
-- `SceneDraft` is not publishable scene proof. A format importer returns
-  `ParseResult<SceneDraft>` to its import session.
+- The opaque core-owned `SceneConstruction` continuation owns unvalidated construction state. An
+  import session retains it while `ParseScope` lends parsers only bounded authoring capabilities.
+- `SceneDraft` is a branded, non-owning directory-slot descriptor, not publishable scene proof. A
+  format importer returns `ParseResult<SceneDraft>` to the session that owns the exact continuation.
 - The central validator in `baozi-core` is the only constructor of `ValidatedScene`. Import sessions,
   postprocess code, and downstream producers may call it, but cannot forge its proof.
 - `ValidatedScene` exposes read-only views and typed iterators. Its collections are not publicly
@@ -272,5 +273,5 @@ types and mutation paths are removed rather than retained as `V2` names, aliases
 compatibility shims.
 
 Any future canonical field must land with all of its obligations in the same change: one owner,
-identity and remap behavior where applicable, builder/edit construction, central validation, budget
+identity and remap behavior where applicable, authoring/edit construction, central validation, budget
 accounting, provenance, snapshots, and read-only public access.

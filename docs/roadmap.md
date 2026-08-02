@@ -1,164 +1,128 @@
 # Baozi Roadmap
 
-This roadmap keeps implementation order aligned with the architecture decisions. It is not a promise
-that every listed format is already supported.
+This roadmap states product direction and implementation order. It is not an implementation-status
+ledger, a format-maturity claim, or a substitute for Accepted ADRs. Current progress belongs in the
+engineering-state record and repository conformance inventory.
 
 ## Product Direction
 
-Baozi should become a Rust-native importer with Assimp-class breadth over time. The path is not to
-bind to another importer as the primary design. The path is to define a durable scene IR, importer
-contract, IO policy, post-process pipeline, test oracle, and format promotion process, then add
-formats through repeatable vertical slices.
+Baozi is trusted, fidelity-preserving, engine-neutral 3D asset ingestion and offline compilation
+infrastructure for Rust ecosystems. Its differentiation is not the number of filename extensions it
+can open. It is the combination of:
 
-## Milestone 0: Workspace Foundation
+- one canonical, immutable Scene lifecycle;
+- bounded and attributable resource use for untrusted inputs;
+- explicit loss, provenance, source scope, and successful-input evidence;
+- deterministic, typed post-process compilation;
+- format-profile maturity backed by reproducible evidence; and
+- engine-neutral output suitable for runtime loaders, editors, and offline cookers.
 
-Status: in progress.
+Baozi may use narrow native or isolated adapters when a format cannot be implemented safely and
+economically in pure Rust. Decoder ownership, failure containment, and canonical semantics remain
+Baozi-owned. Assimp is a compatibility and differential oracle, not the production architecture.
 
-Exit criteria:
+## Current Architecture Sequence
 
-- workspace crate graph exists
-- facade compiles with default features and `all-formats`
-- core scene IR has IDs, materials, diagnostics, IO limits, and format registry contracts
-- architecture ADRs cover the major stability boundaries
-- CI-equivalent local commands pass
+### 1. Complete the Canonical Scene Cutover
 
-Key docs:
+The immediate priority is the U4 sequence defined by the canonical architecture plan:
 
-- ADR 0001 through ADR 0017
-- `docs/model/scene-ir.md`
-- `docs/security/parser-threat-model.md`
+1. complete the profile of the opaque core-owned Scene construction continuation;
+2. make import, every format producer, post-process, snapshot, fuzz, and facade use that one path in
+   an atomic workspace switch;
+3. delete the legacy Scene, `SceneBuilder`, `SharedStorage`, bridge code, and migration-only seams;
+4. remove the unused BZIR request wire; and
+5. record the resulting implementation state in the focused repository conformance inventory.
 
-## Milestone 1: First Real Parser Slice
+The cutover is incomplete while a public or production path can choose between legacy and canonical
+storage. No compatibility adapter is retained after the switch.
 
-Recommended target: binary and ASCII STL.
+Before the atomic switch, the U4 lifecycle and production comparators must match the current ledger
+and report vocabulary, run in CI, and fail closed on source-closure or evidence drift. The minimum U4
+contract and gate records must also exist so the cutover cannot silently bypass its architecture
+evidence.
 
-Why STL first:
+### 2. Close Resource and Text Input Boundaries
 
-- small format surface
-- no material sidecars
-- good parser security exercise
-- clear geometry-only snapshots
-- useful baseline for post-process validation
+After the single Scene lifecycle is established:
 
-Exit criteria:
+- centralize the origin-qualified resource graph and complete successful-input manifest;
+- centralize BOM, UTF-8, newline, and source-span mapping while keeping each grammar format-owned;
+- preserve bounded role, alias, cycle, depth, digest, and source identity evidence; and
+- keep producer/build qualification separate until its Proposed decision is accepted and has a real
+  consumer.
 
-- parser handles ASCII and binary STL detection
-- malformed fixtures return structured errors, not panics
-- resource limits are enforced before large allocation
-- raw snapshot format exists in `baozi-test-support`
-- support matrix records exact capability status
-- fuzz target exists before beta promotion
+### 3. Prove the Canonical Profile with Existing Formats
 
-## Milestone 2: Text Format and Sidecar Slice
+Existing STL, OBJ/MTL, PLY, and glTF work is used as proof material for the canonical contracts, not
+as four competing Scene models. OBJ/MTL proves text, sidecars, topology, materials, and unchanged
+typed views. glTF/GLB proves scenes, authored transforms, PBR appearance, external resources, skins,
+morphs, and animation.
 
-Recommended target: OBJ with MTL.
+No format receives a maturity promotion merely because its parser crate exists. Promotion follows
+the exact profile and evidence rules in ADR 0011.
 
-Status: first experimental slice implemented.
+### 4. Replace Fixed Post-Process Flags
 
-Why OBJ second:
+Implement ADR 0013 as a compiled, typed, loss-aware dependency plan rather than a fixed bitmask and
+global execution order. Each pass must declare prerequisites, invalidation, mutation, validation,
+loss, diagnostics, outcome, and generation/remap behavior. Tessellation remains behind its admitted
+adapter and resource envelope.
 
-- separate indices force vertex remapping decisions
-- polygon topology exercises triangulation boundary
-- MTL exercises material and texture path policy
-- sidecars exercise `AssetIo` and path security
+### 5. Build the Evidence and Release System
 
-Exit criteria:
+Complete the architecture conformance inventory, gate catalog, canonical lifecycle fuzzing, packaged
+facade consumer, provenance-qualified regression corpus, digest snapshots with bounded previews,
+feature/target/package matrices, and cross-platform evidence. Release work then closes locked tools,
+licenses, SBOM, attestation, signing, and reproducibility without conflating publication readiness
+with ADR acceptance or format maturity.
 
-- OBJ geometry, groups, smoothing metadata, and MTL references are represented for static face meshes
-- importer preserves polygons before requested triangulation
-- core `Mesh` face-boundary data and triangulation postprocess remain sufficient for OBJ polygons
-- sidecar loading obeys `AssetIo` scope rules
-- material mapping is documented against ADR 0012 and the OBJ format page
-- snapshots or direct field assertions cover raw and post-processed scenes
+## Format Priorities
 
-## Milestone 3: Flexible Vertex Properties
+Format work begins only when it strengthens a current architecture or product goal.
 
-Recommended target: PLY.
+| Priority | Format or profile | Role |
+| --- | --- | --- |
+| P0 | glTF 2.0 / GLB | Core game, editor, and offline-pipeline profile; GLB is the preferred single-file path. |
+| P0 | OBJ / common MTL | Static-model, debugging, and legacy-toolchain profile without promising every MTL dialect. |
+| P0 | PLY mesh and PLY point cloud | Two explicit scanning/tooling profiles rather than one ambiguous capability. |
+| P0 | STL | Manufacturing and regression baseline; not the default game-content format. |
+| P1 | VRM 1.0 | A glTF profile, not an independent parser architecture. |
+| P1 | Binary FBX 7.x game profile | Optional isolated ingestion path after U4 and evidence infrastructure are stable. |
+| P2 | Resolved USD stage | A composed Scene snapshot profile, not a claim of complete USD implementation. |
+| P2 | BVH / PMX / VMD | Demand-driven motion-capture and avatar profiles. |
+| P3 | Collada | Demand-driven legacy migration only. |
 
-Why PLY third:
+`.blend` is handled through a pinned, isolated Blender conversion workflow rather than direct parsing.
+Alembic requires a separate time-sequenced geometry model and remains out of scope for the current
+Scene IR. 3MF is considered only if Baozi deliberately enters manufacturing workflows.
 
-- property schema varies by file
-- point clouds and vertex colors are common
-- helps prove custom attribute policy from ADR 0015
+## Later Product Work
 
-Exit criteria:
-
-- ASCII and binary little-endian PLY are handled first
-- common position, normal, color, and UV properties map to typed channels
-- unknown bounded properties map to namespaced custom attributes or diagnostics
-- support matrix distinguishes point cloud and mesh capabilities
-
-## Milestone 4: Modern Scene Format
-
-Recommended target: glTF2 and GLB.
-
-Why glTF fourth:
-
-- validates PBR material model
-- validates textures and color space policy
-- validates skins, morph targets, and animation channels
-- validates buffer and URI policy
-
-Exit criteria:
-
-- GLB and external-buffer glTF work through `AssetIo`
-- metallic-roughness material mapping is documented
-- skins, morph targets, and basic animation channels map without IR redesign
-- strict and permissive import options are tested
-- fixtures cover coordinates, cameras, lights, and animation timing
-
-## Milestone 5: Post-Process Depth
-
-Exit criteria:
-
-- validation pass is implemented
-- triangulation pass is implemented
-- bounding box generation is implemented
-- coordinate/unit normalization is implemented
-- normal and tangent generation have documented math and tests
-- presets expand to explicit pipelines
-- destructive steps report diagnostics or stats
-
-## Milestone 6: Format Promotion System
-
-Exit criteria:
-
-- every format has a capability document under `docs/formats/`
-- stable promotion requires fixtures, fuzzing, differential evidence, and docs
-- support matrix is generated or checked against crate metadata
-- release notes distinguish parser maturity from crate existence
-
-## Later Milestones
-
-Potential later work:
-
-- Collada parser
-- FBX strategy and parser feasibility study
-- IQM, MD5, MD2/MD3, and MMD family formats
-- image decoding helpers behind optional features
-- exporter crates
-- persistent cache crate
-- C ABI or dynamic plugin strategy
-
-Each of these should get a design note or ADR before implementation if it changes public contracts.
+Exporter infrastructure follows ADR 0038 only after registry identity, transactional sinks, loss
+evidence, feature membership, and package gates are complete. Persistent caching, dynamic plugins,
+third-party passes, C ABI support, out-of-core Scene storage, and standalone skeleton models remain
+demand-driven. Each requires an Accepted decision only when it changes an existing public or durable
+architecture contract.
 
 ## Success Metrics
 
-| Metric | Target | Measurement |
-| --- | --- | --- |
-| Build health | workspace check, clippy, nextest, and deny pass | local/CI commands |
-| Parser safety | malformed fixtures never panic | parser tests |
-| Format honesty | support matrix never claims unimplemented support | docs review and tests |
-| IR stability | STL, OBJ, PLY, and glTF map without replacing core scene types | milestone reviews |
-| Post-process clarity | raw and processed snapshots are separately reviewable | golden tests |
-| License hygiene | default dependency tree remains compatible with MIT/Apache-2.0 consumers | `cargo deny --locked check` |
+| Metric | Target |
+| --- | --- |
+| Canonical lifecycle | Every producer and consumer uses one Scene path; legacy storage and adapters are absent. |
+| Resource safety | Hard caller limits include protected terminal evidence and all input-dependent work is bounded, cancellable, or isolated. |
+| Evidence integrity | Contract, gate, snapshot, corpus, and format evidence is reproducible and CI-enforced. |
+| Semantic fidelity | Loss, provenance, source scope, authored representation, and deterministic digests remain explicit. |
+| Format honesty | Support statements describe exact verified profiles and named evidence authority. |
+| Engine neutrality | Packaged downstream consumers can ingest canonical output without a Baozi-specific engine runtime. |
+| Release readiness | Locked builds, package consumers, licenses, SBOM, attestation, signatures, and supported target matrices pass independently of ADR status. |
 
-## Risks and Mitigations
+## Primary Risks
 
-| Risk | Severity | Likelihood | Mitigation |
-| --- | --- | --- | --- |
-| Parser count grows before core invariants are enforced | High | Medium | Keep milestones vertical and validator-first |
-| Complex formats expose missing animation or material semantics | High | Medium | Use ADR 0012 and ADR 0015 before glTF stabilization |
-| Snapshot format becomes noisy | Medium | Medium | Normalize snapshots separately from public API |
-| Support claims outrun implementation | High | Medium | Keep support matrix conservative |
-| Optional dependencies bloat default builds | Medium | Medium | Keep codecs and FFI out of default features |
+| Risk | Mitigation |
+| --- | --- |
+| Accepted decisions outrun implementation | Maintain explicit `unassessed`, `partial`, `conforming`, and `nonconforming` contract records with executable gates. |
+| Legacy and canonical paths diverge | Make U4e an atomic switch and U4f immediate deletion, with no compatibility adapter. |
+| Resource accounting leaks through helpers | Keep ownership and terminal policy in deep modules; expose bounded capabilities rather than raw ledger or retained-storage types. |
+| Format breadth outruns evidence | Promote exact profiles only after corpus, fuzz, malformed, limit, facade, and provenance gates pass. |
+| Infrastructure becomes architecture | Keep current progress, hashes, commands, and implementation type names out of durable ADR semantics. |

@@ -187,10 +187,17 @@ Promotion is one atomic reviewed change containing the decision, implementation 
 metadata, gate evidence, index update, and `status: accepted` transition. An implementation may be
 developed before acceptance; its authority changes only at promotion.
 
-Promotion requirements are stable gate IDs, not ADR-number special cases. The gate catalog defines
-the implementation, test, and CI tracer classes plus the executable command or workflow that supplies
-passing evidence. An unknown gate, absent required tracer class, or missing passing result blocks
-promotion. Tracer presence alone never proves a gate passed.
+Promotion requirements are stable gate IDs, not ADR-number special cases. The canonical gate catalog
+is `docs/conformance/gates.toml`; it defines the implementation, test, and CI tracer classes plus the
+executable command or workflow that supplies passing evidence. An unknown gate, absent required
+tracer class, or missing passing result blocks promotion. Tracer presence alone never proves a gate
+passed.
+
+Every future first transition from Proposed to Accepted, and every authority-affecting amendment,
+must retain a repository-auditable approval record identifying the approver, approval date, reviewed
+commit, pull request, or named review record, and the exact decision or amendment scope. Authors are
+not approvers merely by authorship. This rule is prospective: maintainers must not fabricate
+retroactive approval metadata for the initial pre-release baseline.
 
 ADR 0037 and ADR 0038 retain `implementation_tracer` while they remain deferred proposals. Any
 temporary compatibility exception in a proposal must be recorded as implementation-conformance debt
@@ -209,7 +216,8 @@ catalog is allowed.
 
 ## Conformance Inventory
 
-The architecture conformance inventory is separate from ADR status. Its minimum record contains:
+The canonical architecture conformance inventory is `docs/conformance/contracts.toml`. It is separate
+from ADR status. Its minimum record contains:
 
 - stable `contract_id` and one Accepted `authority_adr`;
 - `conformance_status`: `unassessed`, `partial`, `conforming`, or `nonconforming`;
@@ -223,6 +231,20 @@ and may reference the same stable contract IDs.
 
 Until that inventory exists, plans and progress records may locate incomplete work but cannot claim
 repository-wide conformance, format maturity, or release readiness.
+
+`docs/conformance/contracts.toml` and `docs/conformance/gates.toml` are the only handwritten
+structured authorities for architecture conformance and executable gate identity. Each file carries
+an explicit schema revision. Contract records identify their evidence subject and revision; gate
+records identify their gate class, exact command or workflow/job identity, applicability, and result
+or evidence identity. This policy owns the schema semantics; `baozi-xtask` implements the bounded
+parser and checker but cannot infer or extend fields from source or ADR prose. A change that adds or
+removes a required gate updates both files atomically.
+
+The focused repository checker reads only these two TOML files and repository-relative paths they
+explicitly reference. It must not scan ADR prose, the ADR index, source prose, Git history, or the
+repository tree to infer contracts or gates, and it must not recursively invoke Cargo. Human ADR
+review remains responsible for semantic authority and directness; the checker validates the bounded
+structured inventory and its explicit references.
 
 ## Human Review Responsibilities
 
@@ -259,4 +281,6 @@ readiness remain separate axes; implementation lag does not weaken the authority
 - An Accepted amendment has `updated` plus amendment history, or a replacement ADR uses reciprocal
   supersession.
 - Promotion gates and conformance claims have executable evidence rather than file-presence claims.
+- First acceptance and authority-affecting amendments retain an auditable approval record, and any
+  required contract/gate catalog change is atomic.
 - ADR index, lifecycle, dependency, and link changes receive direct review against the checklist above.

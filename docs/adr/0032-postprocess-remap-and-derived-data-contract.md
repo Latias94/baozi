@@ -46,11 +46,6 @@ transitions but owns no import/postprocess policy, dimensions, phase semantics, 
 Scene meaning. This ADR supplies the scene-specific read/write, remap, invalidation, loss, and edit
 ledger semantics to that shared mechanism rather than defining a second mechanism.
 
-This is the accepted postprocess target, not a current conformance claim. `SceneEdit` has not yet been
-cut over to the operation-owned retained store and canonical block projections; its retained
-transaction, report, and remap obligations become enforceable only through the atomic U4 workspace
-switch and deletion of the legacy path.
-
 ## Decision
 
 `SceneEdit` is the only canonical mutation capability. It starts from a
