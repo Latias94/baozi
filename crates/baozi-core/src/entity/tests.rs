@@ -76,8 +76,17 @@ fn camera_projection_rejects_invalid_frusta() {
         Err(CameraProjectionError::AspectRatio)
     );
     assert_eq!(
+        CameraProjection::perspective(1.0, None, 0.0, None),
+        Err(CameraProjectionError::NearPlane)
+    );
+    assert_eq!(
         CameraProjection::orthographic(1.0, 1.0, 2.0, 1.0),
         Err(CameraProjectionError::FarPlane)
+    );
+    assert!(CameraProjection::orthographic(1.0, 1.0, 0.0, 1.0).is_ok());
+    assert_eq!(
+        CameraProjection::orthographic(1.0, 1.0, -f32::MIN_POSITIVE, 1.0),
+        Err(CameraProjectionError::NearPlane)
     );
 }
 
@@ -89,6 +98,126 @@ fn light_kind_makes_spot_invariants_explicit() {
     );
     assert!(LightKind::spot(Some(10.0), 0.25, 0.5).is_ok());
     assert_eq!(LightKind::point(Some(0.0)), Err(LightError::InvalidRange));
+}
+
+#[test]
+fn light_emission_has_one_canonical_photometric_representation() {
+    let emission =
+        LightEmission::try_from_scaled_linear_srgb(Color::linear_rgba(2.0, 1.0, 0.5, 1.0), 4.0)
+            .expect("finite non-negative emission should canonicalize");
+    let tint = emission.tint();
+    let relative_luminance_numerator = rec709_luminance_numerator(tint);
+    assert!(
+        (relative_luminance_numerator - REC709_LUMINANCE_DENOMINATOR).abs()
+            <= LIGHT_TINT_LUMINANCE_TOLERANCE
+    );
+    assert_eq!(emission.intensity(), 4.706_f32);
+    assert_eq!(
+        [
+            emission.tint().x.to_bits(),
+            emission.tint().y.to_bits(),
+            emission.tint().z.to_bits(),
+            emission.intensity().to_bits(),
+        ],
+        [0x3FD9_9835, 0x3F59_9835, 0x3ED9_9835, 0x4096_978D]
+    );
+    assert_eq!(
+        validate_canonical_light_emission(tint, emission.intensity()),
+        Ok(())
+    );
+    assert_eq!(
+        LightEmission::try_from_scaled_linear_srgb(Color::linear_rgba(4.0, 2.0, 1.0, 1.0), 2.0,),
+        Ok(emission)
+    );
+
+    let zero =
+        LightEmission::try_from_scaled_linear_srgb(Color::linear_rgba(0.0, -0.0, 0.0, 1.0), 100.0)
+            .expect("black emission should canonicalize to the unique zero form");
+    assert_eq!(zero.tint(), Vec3::new(1.0, 1.0, 1.0));
+    assert_eq!(zero.intensity().to_bits(), 0.0_f32.to_bits());
+
+    let positive_subnormal =
+        LightEmission::try_from_scaled_linear_srgb(Color::WHITE, f32::from_bits(1))
+            .expect("positive subnormal canonical intensity remains representable");
+    assert_eq!(positive_subnormal.intensity().to_bits(), 1);
+}
+
+#[test]
+fn light_emission_rejects_noncanonical_alpha_and_unrepresentable_intensity() {
+    assert!(matches!(
+        LightEmission::try_from_scaled_linear_srgb(Color::linear_rgba(1.0, 1.0, 1.0, 0.5), 1.0,),
+        Err(LightEmissionError::InvalidAlpha)
+    ));
+    assert!(matches!(
+        LightEmission::try_from_scaled_linear_srgb(
+            Color::linear_rgba(f32::MAX, f32::MAX, f32::MAX, 1.0),
+            f32::MAX,
+        ),
+        Err(LightEmissionError::Unrepresentable)
+    ));
+    assert!(matches!(
+        LightEmission::try_from_scaled_linear_srgb(
+            Color::linear_rgba(f32::from_bits(1), 0.0, 0.0, 1.0),
+            f32::from_bits(1),
+        ),
+        Err(LightEmissionError::Unrepresentable)
+    ));
+    assert!(matches!(
+        LightEmission::try_from_scaled_linear_srgb(
+            Color::linear_rgba(f32::from_bits(1), f32::MAX, 0.0, 1.0),
+            1.0,
+        ),
+        Err(LightEmissionError::Unrepresentable)
+    ));
+    assert!(matches!(
+        validate_canonical_light_emission(Vec3::new(2.0, 1.0, 0.5), 1.0,),
+        Err(LightEmissionError::NonCanonicalTint)
+    ));
+
+    let pure_red =
+        LightEmission::try_from_scaled_linear_srgb(Color::linear_rgba(1.0, 0.0, 0.0, 1.0), 1.0)
+            .expect("pure red is representable");
+    assert_eq!(pure_red.tint().x.to_bits(), 0x4096_8475);
+    assert_eq!(pure_red.intensity().to_bits(), 0x3E59_B3D0);
+    assert_eq!(
+        validate_canonical_light_emission(
+            Vec3::new(f32::from_bits(pure_red.tint().x.to_bits() + 4), 0.0, 0.0),
+            pure_red.intensity(),
+        ),
+        Err(LightEmissionError::NonCanonicalTint)
+    );
+    assert_eq!(
+        validate_canonical_light_emission(
+            Vec3::new(pure_red.tint().x, -0.0, 0.0),
+            pure_red.intensity(),
+        ),
+        Err(LightEmissionError::NonCanonicalTint)
+    );
+
+    let inclusive_boundary = f32::from_bits(1.0_f32.to_bits() + 1);
+    assert_eq!(
+        validate_canonical_light_emission(
+            Vec3::new(inclusive_boundary, inclusive_boundary, inclusive_boundary),
+            1.0,
+        ),
+        Ok(())
+    );
+    let outside_boundary = f32::from_bits(1.0_f32.to_bits() + 2);
+    assert_eq!(
+        validate_canonical_light_emission(
+            Vec3::new(outside_boundary, outside_boundary, outside_boundary),
+            1.0,
+        ),
+        Err(LightEmissionError::NonCanonicalTint)
+    );
+    assert_eq!(
+        validate_canonical_light_emission(Vec3::new(1.0, 1.0, 0.0), 0.0),
+        Err(LightEmissionError::NonCanonicalZero)
+    );
+    assert_eq!(
+        validate_canonical_light_emission(Vec3::new(1.0, 1.0, 1.0), -0.0),
+        Err(LightEmissionError::NonCanonicalZero)
+    );
 }
 
 #[test]

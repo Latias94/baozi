@@ -1,6 +1,7 @@
 ---
 status: accepted
 date: 2026-07-13
+updated: 2026-08-02
 authors:
   - Codex
 decision_type: architecture
@@ -96,11 +97,38 @@ Every light has one unique emission representation: nonnegative finite linear-sR
 plus a nonnegative finite photometric intensity. For positive intensity, tint is normalized to unit
 relative luminance using `0.2126 R + 0.7152 G + 0.0722 B = 1`. Zero emission is represented only as
 zero intensity plus white unit-luminance tint. Alpha is not emission and, if a shared color carrier
-contains it, is exactly one. Intensity units are kind-specific:
+contains it at a conversion boundary, is exactly one; the coupled canonical emission value stores
+only RGB tint and intensity. Intensity units are kind-specific:
 
 - directional intensity is illuminance in lux;
 - point intensity is luminous intensity in candela; and
 - spot intensity is peak luminous intensity in candela on the local `-Z` optical axis.
+
+Canonicalization of a finite nonnegative source RGB multiplier `(R, G, B)` and a finite nonnegative
+intensity `I` is explicit and deterministic. The adapter passes them to the typed emission
+constructor rather than asking a Light entity constructor to infer a conversion. Each `f32` input is
+widened exactly to binary64. The constructor evaluates
+`N = ((2126 * R) + (7152 * G)) + (722 * B)` in that fixed, non-fused order, then computes each
+nonzero tint channel as `channel * 10000 / N` and intensity as `I * N / 10000`. Each final result is
+rounded once to nearest, ties-to-even `f32`; intermediate results remain binary64. Signed zero source
+channels become positive zero. If positive source intensity or any positive source channel rounds to
+zero or a non-finite canonical result, the conversion is unrepresentable and fails rather than
+silently losing energy. Positive subnormal canonical intensity remains valid. Zero input intensity
+or zero RGB luminance produces the exact positive-zero intensity plus `(1, 1, 1)` RGB tint
+representation. The original source fields remain provenance facts.
+
+Central validation does not renormalize. It widens stored canonical tint channels to binary64,
+recomputes `N` in the same fixed order, and requires `abs(N - 10000) <= 10000 * f32::EPSILON`.
+This inclusive bound admits the single rounding of three nonnegative normalized `f32` channels; it
+is not permission for an adapter to approximate source color or energy. Zero emission requires exact
+`(1, 1, 1)` RGB bits and positive-zero intensity bits. Positive emission rejects negative-zero
+tint channels. Stable digests retain these canonical `f32` bits rather than hashing the
+tolerance-equivalence class.
+
+The deterministic source conversion is the only authority that mints the coupled opaque emission
+value. There is no general constructor from canonical-looking raw tint and intensity parts. Central
+validation may check already retained parts and return success or a typed error, but it neither mints
+a second value nor grants producers authority to choose another bit pattern inside the tolerance.
 
 Point and spot lights use inverse-square distance attenuation for positive Scene-unit
 `distance_scene`; evaluation exactly at the emitter is undefined, and renderer regularization is not
@@ -236,3 +264,22 @@ semantics honest and extensible. Chosen.
 
 - [Assimp camera model at the reviewed commit](https://github.com/assimp/assimp/blob/bcc62230fc0471475528d732f4ad108a59bb7f6c/include/assimp/camera.h)
 - [Assimp light model at the reviewed commit](https://github.com/assimp/assimp/blob/bcc62230fc0471475528d732f4ad108a59bb7f6c/include/assimp/light.h)
+
+## Amendment History
+
+### 2026-08-02: Freeze canonical light-emission construction
+
+- Affected: `Decision / Light Emission` and its validation contract.
+- Previous: positive tint had to be unit-luminance and zero emission had one representation, but the
+  decision did not fix floating-point evaluation, rounding, underflow, or who could mint the coupled
+  value.
+- New: one typed source conversion owns a fixed binary64-to-`f32` algorithm and is the only emission
+  minting authority; validation checks retained parts without renormalizing or constructing another
+  value.
+- Impact: the private pre-release Light constructor no longer accepts independent color and intensity
+  parts; overflow, positive underflow, non-canonical zero, and alternate raw-part construction fail
+  closed before canonical publication.
+- Review: 2026-08-02 U4d light-emission contract review at baseline `1d63d2d`, with project-owner
+  authorization and independent Codex numerical and correctness review records.
+- Rationale: this closes an implementation-blocking ambiguity inside the existing camera/light
+  concern without changing its selected physical-light model, attachment seam, or loss policy.

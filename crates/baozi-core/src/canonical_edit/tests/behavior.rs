@@ -48,8 +48,8 @@ fn fully_populated_scene() -> CanonicalValidatedScene {
             Light::try_new(
                 None,
                 LightKind::Directional,
-                Color::linear_rgba(1.0, 1.0, 1.0, 1.0),
-                1.0,
+                LightEmission::try_from_scaled_linear_srgb(Color::WHITE, 1.0)
+                    .expect("light emission"),
                 provenance,
                 [],
             )

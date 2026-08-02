@@ -912,7 +912,9 @@ mod tests {
     };
     use crate::deform::SkinMatrixSpaces;
     use crate::derived::DerivedAbsenceReason;
-    use crate::entity::{AuthoredTransform, Camera, CameraProjection, Light, LightKind};
+    use crate::entity::{
+        AuthoredTransform, Camera, CameraProjection, Light, LightEmission, LightKind,
+    };
     use crate::extension::ExtensionSchemaSnapshot;
     use crate::geometry::{
         IndexStream, LogicalMeshBounds, MeshPrimitive, MorphBoundsPolicy, PrimitiveBounds, Topology,
@@ -1033,8 +1035,7 @@ mod tests {
                 Light::try_new(
                     None,
                     LightKind::Directional,
-                    Color::linear_rgba(1.0, 1.0, 1.0, 1.0),
-                    2.0,
+                    LightEmission::try_from_scaled_linear_srgb(Color::WHITE, 2.0).unwrap(),
                     provenance,
                     [],
                 )
@@ -1667,7 +1668,7 @@ mod tests {
         ));
 
         let (light_id, _) = scene.lights().next().unwrap();
-        assert_eq!(scene.light(light_id).unwrap().intensity(), 2.0);
+        assert_eq!(scene.light(light_id).unwrap().emission().intensity(), 2.0);
 
         assert_eq!(scene.nodes().len(), 2);
         for count in [

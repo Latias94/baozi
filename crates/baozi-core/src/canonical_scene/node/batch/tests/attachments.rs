@@ -1,7 +1,7 @@
 use super::*;
 use crate::canonical_scene::builder::assert_generation_mismatch_for_test;
 use crate::canonical_validation::validate_canonical_scene;
-use crate::entity::{Camera, CameraProjection, Light, LightKind};
+use crate::entity::{Camera, CameraProjection, Light, LightEmission, LightKind};
 use crate::identity::{CameraId, LightId, SceneEntityKind};
 use crate::math::Color;
 use crate::validation_control::SceneValidationLimits;
@@ -21,8 +21,7 @@ fn light(provenance: Provenance) -> Light {
     Light::try_new(
         None,
         LightKind::Directional,
-        Color::linear_rgba(1.0, 1.0, 1.0, 1.0),
-        1.0,
+        LightEmission::try_from_scaled_linear_srgb(Color::WHITE, 1.0).expect("light emission"),
         provenance,
         [],
     )

@@ -25,7 +25,8 @@ use crate::derived_input::{
     logical_mesh_bounds_input_stamp, primitive_bounds_input_stamp, scene_bounds_input_stamp,
 };
 use crate::entity::{
-    AuthoredTransform, AuthoredTransformKind, Camera, CameraProjection, Light, LightKind,
+    AuthoredTransform, AuthoredTransformKind, Camera, CameraProjection, Light, LightEmission,
+    LightKind,
 };
 use crate::extension::ExtensionSchemaSnapshot;
 use crate::geometry::{

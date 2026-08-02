@@ -328,7 +328,7 @@ impl CameraProjection {
         if aspect_ratio.is_some_and(|value| !value.is_finite() || value <= 0.0) {
             return Err(CameraProjectionError::AspectRatio);
         }
-        validate_depth_range(near, far)?;
+        validate_perspective_depth_range(near, far)?;
         Ok(Self(CameraProjectionState::Perspective {
             vertical_fov_radians,
             aspect_ratio,
@@ -349,7 +349,7 @@ impl CameraProjection {
         if !vertical_magnification.is_finite() || vertical_magnification <= 0.0 {
             return Err(CameraProjectionError::VerticalMagnification);
         }
-        validate_depth_range(near, Some(far))?;
+        validate_orthographic_depth_range(near, far)?;
         Ok(Self(CameraProjectionState::Orthographic {
             horizontal_magnification,
             vertical_magnification,
@@ -390,11 +390,24 @@ impl CameraProjection {
     }
 }
 
-fn validate_depth_range(near: f32, far: Option<f32>) -> Result<(), CameraProjectionError> {
+fn validate_perspective_depth_range(
+    near: f32,
+    far: Option<f32>,
+) -> Result<(), CameraProjectionError> {
     if !near.is_finite() || near <= 0.0 {
         return Err(CameraProjectionError::NearPlane);
     }
     if far.is_some_and(|value| !value.is_finite() || value <= near) {
+        return Err(CameraProjectionError::FarPlane);
+    }
+    Ok(())
+}
+
+fn validate_orthographic_depth_range(near: f32, far: f32) -> Result<(), CameraProjectionError> {
+    if !near.is_finite() || near < 0.0 {
+        return Err(CameraProjectionError::NearPlane);
+    }
+    if !far.is_finite() || far <= near {
         return Err(CameraProjectionError::FarPlane);
     }
     Ok(())
@@ -411,7 +424,9 @@ pub enum CameraProjectionError {
     HorizontalMagnification,
     #[error("camera vertical magnification must be finite and positive")]
     VerticalMagnification,
-    #[error("camera near plane must be finite and positive")]
+    #[error(
+        "camera near plane must be finite and positive for perspective or non-negative for orthographic"
+    )]
     NearPlane,
     #[error("camera far plane must be finite and greater than the near plane")]
     FarPlane,
@@ -521,13 +536,146 @@ fn validate_light_range(range: Option<f32>) -> Result<(), LightError> {
     Ok(())
 }
 
+const REC709_RED_NUMERATOR: f64 = 2_126.0;
+const REC709_GREEN_NUMERATOR: f64 = 7_152.0;
+const REC709_BLUE_NUMERATOR: f64 = 722.0;
+const REC709_LUMINANCE_DENOMINATOR: f64 = 10_000.0;
+const LIGHT_TINT_LUMINANCE_TOLERANCE: f64 = REC709_LUMINANCE_DENOMINATOR / 8_388_608.0;
+
+/// A validated canonical light tint and photometric intensity.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct LightEmission {
+    tint: Vec3,
+    intensity: f32,
+}
+
+impl LightEmission {
+    /// Converts a source RGB multiplier and scalar intensity into canonical emission.
+    pub(crate) fn try_from_scaled_linear_srgb(
+        color: Color,
+        intensity: f32,
+    ) -> Result<Self, LightEmissionError> {
+        validate_light_color(color)?;
+        if !intensity.is_finite() || intensity < 0.0 {
+            return Err(LightEmissionError::InvalidIntensity);
+        }
+
+        let luminance_numerator = rec709_luminance_numerator(Vec3::new(color.r, color.g, color.b));
+        if intensity == 0.0 || luminance_numerator == 0.0 {
+            return Ok(Self {
+                tint: Vec3::new(1.0, 1.0, 1.0),
+                intensity: 0.0,
+            });
+        }
+
+        let canonical_intensity =
+            (f64::from(intensity) * luminance_numerator / REC709_LUMINANCE_DENOMINATOR) as f32;
+        if !canonical_intensity.is_finite() || canonical_intensity == 0.0 {
+            return Err(LightEmissionError::Unrepresentable);
+        }
+
+        let normalize = |component: f32| -> Result<f32, LightEmissionError> {
+            if component == 0.0 {
+                return Ok(0.0);
+            }
+            let normalized =
+                (f64::from(component) * REC709_LUMINANCE_DENOMINATOR / luminance_numerator) as f32;
+            if !normalized.is_finite() || normalized == 0.0 {
+                return Err(LightEmissionError::Unrepresentable);
+            }
+            Ok(normalized)
+        };
+        let emission = Self {
+            tint: Vec3::new(
+                normalize(color.r)?,
+                normalize(color.g)?,
+                normalize(color.b)?,
+            ),
+            intensity: canonical_intensity,
+        };
+        validate_canonical_light_emission(emission.tint, emission.intensity)?;
+        Ok(emission)
+    }
+
+    pub(crate) const fn tint(self) -> Vec3 {
+        self.tint
+    }
+
+    pub(crate) const fn intensity(self) -> f32 {
+        self.intensity
+    }
+}
+
+pub(crate) fn validate_canonical_light_emission(
+    tint: Vec3,
+    intensity: f32,
+) -> Result<(), LightEmissionError> {
+    if ![tint.x, tint.y, tint.z]
+        .into_iter()
+        .all(|component| component.is_finite() && component >= 0.0)
+    {
+        return Err(LightEmissionError::InvalidColor);
+    }
+    if !intensity.is_finite() || intensity < 0.0 {
+        return Err(LightEmissionError::InvalidIntensity);
+    }
+
+    if intensity == 0.0 {
+        if intensity.to_bits() != 0.0_f32.to_bits()
+            || !has_exact_vec3_bits(tint, Vec3::new(1.0, 1.0, 1.0))
+        {
+            return Err(LightEmissionError::NonCanonicalZero);
+        }
+    } else {
+        if [tint.x, tint.y, tint.z]
+            .into_iter()
+            .any(|component| component == 0.0 && component.to_bits() != 0.0_f32.to_bits())
+        {
+            return Err(LightEmissionError::NonCanonicalTint);
+        }
+        let luminance_error =
+            (rec709_luminance_numerator(tint) - REC709_LUMINANCE_DENOMINATOR).abs();
+        if luminance_error > LIGHT_TINT_LUMINANCE_TOLERANCE {
+            return Err(LightEmissionError::NonCanonicalTint);
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_light_color(color: Color) -> Result<(), LightEmissionError> {
+    if ![color.r, color.g, color.b]
+        .into_iter()
+        .all(|component| component.is_finite() && component >= 0.0)
+    {
+        return Err(LightEmissionError::InvalidColor);
+    }
+    if color.a != 1.0 {
+        return Err(LightEmissionError::InvalidAlpha);
+    }
+    Ok(())
+}
+
+fn rec709_luminance_numerator(tint: Vec3) -> f64 {
+    let red = REC709_RED_NUMERATOR * f64::from(tint.x);
+    let green = REC709_GREEN_NUMERATOR * f64::from(tint.y);
+    let blue = REC709_BLUE_NUMERATOR * f64::from(tint.z);
+    (red + green) + blue
+}
+
+fn has_exact_vec3_bits(left: Vec3, right: Vec3) -> bool {
+    [left.x, left.y, left.z]
+        .into_iter()
+        .zip([right.x, right.y, right.z])
+        .all(|(left, right)| left.to_bits() == right.to_bits())
+}
+
 /// One scene-owned light.
 #[derive(Debug, PartialEq)]
 pub struct Light {
     name: Option<EntityName>,
     kind: LightKind,
-    color: Color,
-    intensity: f32,
+    emission: LightEmission,
     provenance: Provenance,
     extensions: Vec<ExtensionEntry>,
 }
@@ -536,26 +684,15 @@ impl Light {
     pub fn try_new(
         name: Option<EntityName>,
         kind: LightKind,
-        color: Color,
-        intensity: f32,
+        emission: LightEmission,
         provenance: Provenance,
         extensions: impl IntoIterator<Item = ExtensionEntry>,
     ) -> Result<Self, LightError> {
-        if ![color.r, color.g, color.b, color.a]
-            .into_iter()
-            .all(|component| component.is_finite() && component >= 0.0)
-        {
-            return Err(LightError::InvalidColor);
-        }
-        if !intensity.is_finite() || intensity < 0.0 {
-            return Err(LightError::InvalidIntensity);
-        }
         let extensions = try_collect_extensions(extensions).map_err(LightError::Collection)?;
         Ok(Self {
             name,
             kind,
-            color,
-            intensity,
+            emission,
             provenance,
             extensions,
         })
@@ -569,12 +706,8 @@ impl Light {
         self.kind
     }
 
-    pub const fn color(&self) -> Color {
-        self.color
-    }
-
-    pub const fn intensity(&self) -> f32 {
-        self.intensity
+    pub const fn emission(&self) -> LightEmission {
+        self.emission
     }
 
     pub const fn provenance(&self) -> Provenance {
@@ -637,12 +770,25 @@ pub enum LightError {
     InvalidRange,
     #[error("spot cone angles must be finite and satisfy 0 <= inner <= outer <= pi/2")]
     InvalidSpotCone,
-    #[error("light color components must be finite and non-negative")]
-    InvalidColor,
-    #[error("light intensity must be finite and non-negative")]
-    InvalidIntensity,
     #[error(transparent)]
     Collection(#[from] EntityCollectionError),
+}
+
+/// Why a light emission value was rejected.
+#[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LightEmissionError {
+    #[error("light tint components must be finite and non-negative")]
+    InvalidColor,
+    #[error("light tint alpha must be exactly one")]
+    InvalidAlpha,
+    #[error("light intensity must be finite and non-negative")]
+    InvalidIntensity,
+    #[error("zero light emission must use exact white tint and positive zero intensity")]
+    NonCanonicalZero,
+    #[error("positive light tint must be unit-luminance and use positive zero channels")]
+    NonCanonicalTint,
+    #[error("source light emission is not representable in canonical f32 storage")]
+    Unrepresentable,
 }
 
 /// A bounded entity collection could not be built.
