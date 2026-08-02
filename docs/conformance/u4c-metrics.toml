@@ -87,8 +87,8 @@ max_work = 262144
 
 [[closure.source_trees]]
 path = "crates"
-file_count = 348
-sha256 = "f6eba9d41230165796d352a4baca8530e7773f5826f7d2d1acb4be70e9939348"
+file_count = 350
+sha256 = "62e9d719b80715e532a16a15ac4eebeb70d33b009e3b139260169aab8815e750"
 
 [[closure.fixed_inputs]]
 path = "Cargo.lock"

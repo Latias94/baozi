@@ -59,6 +59,15 @@ cargo check --locked -p baozi --target wasm32-unknown-unknown --no-default-featu
 cargo check --locked -p baozi --target wasm32-wasip1 --no-default-features --features all-formats
 cargo run --locked -p baozi-xtask -- crate-graph-check
 cargo run --locked -p baozi-xtask -- native-fs-check
+cargo nextest run --locked -p baozi-xtask --test conformance
+cargo run --locked -p baozi-xtask -- repository-conformance-check
+```
+
+The U4c production evidence comparator is host-bound. Run its exact gate only on an
+`x86_64-unknown-linux-gnu` host; normal CI executes it on the Ubuntu runner:
+
+```bash
+cargo +1.95.0 run -j 1 --locked -p baozi-xtask --features repository-input-candidate --target x86_64-unknown-linux-gnu -- u4c-metrics --spec docs/conformance/u4c-metrics.toml
 ```
 
 There is currently no release-registered `native-fs` or low-level `fs` feature. The explicitly
@@ -97,6 +106,12 @@ support/tool dependencies, reverse paths, and production cycles, while allowing 
 The default nextest runs exclude `baozi-xtask`. Its repository-scanning fixture suites duplicate
 whole-tree work and can dominate otherwise parallel workspace tests. CI invokes the required
 repository checks directly; ADR review remains an authoring concern rather than a default Rust gate.
+The focused `conformance` test target and `repository-conformance-check` command are exceptions to
+that exclusion because they read only `docs/conformance/contracts.toml`,
+`docs/conformance/gates.toml`, and the repository-relative files explicitly named there. They do not
+scan ADR prose, source prose, Git history, or the repository tree, and the checker does not execute
+the cataloged commands. CI runs the U4c production comparator as its own step before checking the
+inventory relationship.
 
 A green dependency or candidate runner gate is not filesystem-conformance evidence. The three exact
 runtime candidates still require the complete platform-local race, link/reparse,

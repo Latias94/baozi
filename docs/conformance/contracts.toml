@@ -1,0 +1,100 @@
+schema_version = 1
+
+[[contracts]]
+contract_id = "u4-canonical-scene-lifecycle"
+authority_adr = "docs/adr/0003-core-scene-ir-and-material-model.md"
+conformance_status = "partial"
+evidence_subject = "baozi.u4.canonical-scene-lifecycle"
+evidence_revision = 1
+implementation_tracers = [
+  "crates/baozi-core/src/canonical_scene/store/api/continuation.rs",
+  "crates/baozi-core/src/scene.rs",
+  "crates/baozi-import/src/session.rs",
+]
+test_tracers = [
+  "docs/conformance/u4c-lifecycle-diagnostic.toml",
+  "docs/conformance/u4c-metrics.toml",
+]
+ci_tracers = [".github/workflows/ci.yml"]
+gate_ids = [
+  "u4c-lifecycle-v2",
+  "u4c-production-v2",
+  "u4c-production-ci",
+]
+
+[[contracts]]
+contract_id = "u4-private-producer-consumer-proof"
+authority_adr = "docs/adr/0003-core-scene-ir-and-material-model.md"
+conformance_status = "partial"
+evidence_subject = "baozi.u4.private-producer-consumer-proof"
+evidence_revision = 1
+implementation_tracers = [
+  "crates/baozi-core/src/canonical_scene/store/api/continuation.rs",
+  "crates/baozi-core/src/canonical_scene/store/production.rs",
+]
+test_tracers = [
+  "crates/baozi-core/src/canonical_scene/store/tests/production_probe.rs",
+  "crates/baozi-core/src/canonical_scene/store/tests/production_probe/scenarios.rs",
+  "docs/conformance/u4c-metrics.toml",
+]
+ci_tracers = [".github/workflows/ci.yml"]
+gate_ids = [
+  "u4c-production-v2",
+  "u4c-production-ci",
+]
+
+[[contracts]]
+contract_id = "u4-retained-physical-ownership"
+authority_adr = "docs/adr/0044-retained-physical-storage-ownership-and-account-lineage.md"
+conformance_status = "partial"
+evidence_subject = "baozi.u4.retained-physical-ownership"
+evidence_revision = 1
+implementation_tracers = [
+  "crates/baozi-operation/src/retained.rs",
+  "crates/baozi-core/src/canonical_scene/store/construction.rs",
+]
+test_tracers = [
+  "docs/conformance/u4c-lifecycle-diagnostic.toml",
+  "docs/conformance/u4c-metrics.toml",
+]
+ci_tracers = [".github/workflows/ci.yml"]
+gate_ids = [
+  "u4c-lifecycle-v2",
+  "u4c-production-v2",
+  "u4c-production-ci",
+]
+
+[[contracts]]
+contract_id = "u4-legacy-scene-deletion"
+authority_adr = "docs/adr/0003-core-scene-ir-and-material-model.md"
+conformance_status = "partial"
+evidence_subject = "baozi.u4.legacy-scene-deletion"
+evidence_revision = 1
+implementation_tracers = [
+  "crates/baozi-core/src/scene.rs",
+  "crates/baozi-core/src/shared_storage.rs",
+  "crates/baozi-import/src/request_wire.rs",
+]
+test_tracers = ["docs/conformance/u4c-metrics.toml"]
+ci_tracers = [".github/workflows/ci.yml"]
+gate_ids = [
+  "u4c-production-v2",
+  "u4c-production-ci",
+]
+
+[[contracts]]
+contract_id = "repository-architecture-conformance"
+authority_adr = "docs/adr/0007-workspace-crate-graph-feature-flags-msrv-and-ci-gates.md"
+conformance_status = "partial"
+evidence_subject = "baozi.repository.architecture-conformance"
+evidence_revision = 1
+implementation_tracers = [
+  "crates/baozi-xtask/src/conformance.rs",
+  "crates/baozi-xtask/src/main.rs",
+]
+test_tracers = ["crates/baozi-xtask/tests/conformance.rs"]
+ci_tracers = [".github/workflows/ci.yml"]
+gate_ids = [
+  "repository-conformance-tests",
+  "repository-conformance-ci",
+]

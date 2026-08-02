@@ -4,7 +4,7 @@ use std::process::ExitCode;
 
 const USAGE: &str = concat!(
     "usage: cargo run -p baozi-xtask -- ",
-    "<crate-graph-check|native-fs-check|runtime-admission-check>\n",
+    "<crate-graph-check|native-fs-check|repository-conformance-check|runtime-admission-check>\n",
     "       cargo run -p baozi-xtask --features repository-input-candidate -- ",
     "u4c-metrics --spec <path>"
 );
@@ -18,6 +18,9 @@ fn main() -> ExitCode {
         }
         [command] if command == "crate-graph-check" => run_crate_graph_check(),
         [command] if command == "native-fs-check" => run_native_fs_check(),
+        [command] if command == "repository-conformance-check" => {
+            run_repository_conformance_check()
+        }
         [command] if command == "runtime-admission-check" => run_runtime_admission_check(),
         [command, flag, specification] if command == "u4c-metrics" && flag == "--spec" => {
             run_u4c_metrics(Path::new(specification))
@@ -26,6 +29,40 @@ fn main() -> ExitCode {
             eprintln!("{USAGE}");
             ExitCode::from(2)
         }
+    }
+}
+
+fn run_repository_conformance_check() -> ExitCode {
+    let current_directory = match env::current_dir() {
+        Ok(path) => path,
+        Err(error) => {
+            eprintln!("failed to read the current directory: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let Some(repository_root) = find_repository_root(&current_directory) else {
+        eprintln!("failed to find a Baozi repository root from {current_directory:?}");
+        return ExitCode::FAILURE;
+    };
+
+    let report = baozi_xtask::conformance::check_repository(&repository_root);
+    if report.violations.is_empty() {
+        println!(
+            "Repository conformance inventory is structurally valid ({} contracts, {} gates, {} declared conforming)",
+            report.contracts_checked, report.gates_checked, report.declared_conforming_contracts
+        );
+        ExitCode::SUCCESS
+    } else {
+        for violation in &report.violations {
+            eprintln!("{violation}");
+        }
+        eprintln!(
+            "Repository conformance inventory failed ({} violations across {} contracts and {} gates)",
+            report.violations.len(),
+            report.contracts_checked,
+            report.gates_checked
+        );
+        ExitCode::FAILURE
     }
 }
 

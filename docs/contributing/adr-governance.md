@@ -191,7 +191,8 @@ Promotion requirements are stable gate IDs, not ADR-number special cases. The ca
 is `docs/conformance/gates.toml`; it defines the implementation, test, and CI tracer classes plus the
 executable command or workflow that supplies passing evidence. An unknown gate, absent required
 tracer class, or missing passing result blocks promotion. Tracer presence alone never proves a gate
-passed.
+passed. A cataloged `success_condition` describes how an external runner recognizes success; it is
+not itself a passing result.
 
 Every future first transition from Proposed to Accepted, and every authority-affecting amendment,
 must retain a repository-auditable approval record identifying the approver, approval date, reviewed
@@ -235,16 +236,19 @@ repository-wide conformance, format maturity, or release readiness.
 `docs/conformance/contracts.toml` and `docs/conformance/gates.toml` are the only handwritten
 structured authorities for architecture conformance and executable gate identity. Each file carries
 an explicit schema revision. Contract records identify their evidence subject and revision; gate
-records identify their gate class, exact command or workflow/job identity, applicability, and result
-or evidence identity. This policy owns the schema semantics; `baozi-xtask` implements the bounded
-parser and checker but cannot infer or extend fields from source or ADR prose. A change that adds or
-removes a required gate updates both files atomically.
+records identify their gate class, exact command or workflow/job identity, applicability, success
+condition, and evidence identity. This policy owns the schema semantics; `baozi-xtask` implements the
+bounded parser and checker but cannot infer or extend fields from source or ADR prose. A change that
+adds or removes a required gate updates both files atomically.
 
 The focused repository checker reads only these two TOML files and repository-relative paths they
 explicitly reference. It must not scan ADR prose, the ADR index, source prose, Git history, or the
 repository tree to infer contracts or gates, and it must not recursively invoke Cargo. Human ADR
-review remains responsible for semantic authority and directness; the checker validates the bounded
-structured inventory and its explicit references.
+review remains responsible for semantic authority, workflow identity, and directness; the checker
+validates the bounded structured inventory and its explicit references. The structural checker does
+not authenticate command execution or parse workflow contents. Until an admitted external result
+verifier supplies passing gate evidence, a structural invocation rejects every `conforming`
+declaration.
 
 ## Human Review Responsibilities
 

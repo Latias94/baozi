@@ -1,8 +1,9 @@
 use std::process::Command;
 
-const SUPPORTED_COMMANDS: [&str; 4] = [
+const SUPPORTED_COMMANDS: [&str; 5] = [
     "crate-graph-check",
     "native-fs-check",
+    "repository-conformance-check",
     "runtime-admission-check",
     "u4c-metrics",
 ];

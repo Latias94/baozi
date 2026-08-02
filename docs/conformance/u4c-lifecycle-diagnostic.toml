@@ -73,7 +73,7 @@ sha256 = "f94be7889ebfd660d30e8d18667c9c4eeca863a76c165ee52855ee96cc433f56"
 
 [[source_anchors]]
 path = "crates/baozi-xtask/src/main.rs"
-sha256 = "cd41c80747874925893e90d9309b3c0d1fba43f1117e6526a8c18119d04f2e8b"
+sha256 = "404e8a2f3e8cfd30e8e5a3f1f649d883833c961c88fc53a891fcf136724438a6"
 
 [[source_anchors]]
 path = "crates/baozi-xtask/src/u4c_metrics.rs"
