@@ -7,8 +7,8 @@ use super::super::{
     PublishedOutcomeEvidenceStore, RecordPlan, RetainedStoreBlockTablePlan,
     RetainedStoreOpenRecovery, RetainedStoreOperation, RetainedStorePublicationPlan,
     RetainedStoreWriterPlan, ScalarSequence, SequenceBatchPlan, SequencePlan, StoreDestination,
-    StoreOpenFallbackOnly, StorePlanError, StorePrepareError, StoreRuntimeError, StoredScalar,
-    Utf8BatchPlan, Utf8Plan,
+    StoreOpenFallbackOnly, StoreOpenRecoveryAuthority, StorePlanError, StorePrepareError,
+    StoreRuntimeError, StoredScalar, Utf8BatchPlan, Utf8Plan,
 };
 use super::execution::RetainedStoreExecution;
 use super::{
@@ -539,7 +539,7 @@ where
             Ok(plan) => plan,
             Err(cause) => {
                 return Err(StoreTranscriptOpenError {
-                    recovery: Some(StoreTranscriptOpenRecovery::Retry(self)),
+                    recovery: Some(StoreTranscriptRecoveryAuthority::Retry(self)),
                     cause: plan_runtime_error(cause),
                 });
             }
@@ -564,11 +564,10 @@ where
                 progress,
                 canonical_source_binding_dimension,
             )),
-            Err(error) => {
-                let cause = error.cause().clone();
-                let recovery = match error.into_recovery() {
-                    Ok(RetainedStoreOpenRecovery::Retry(operation)) => {
-                        Some(StoreTranscriptOpenRecovery::Retry(Self {
+            Err(error) => match error.into_disposition() {
+                Ok(RetainedStoreOpenRecovery { cause, authority }) => match authority {
+                    StoreOpenRecoveryAuthority::Retry(operation) => Err(StoreTranscriptOpenError {
+                        recovery: Some(StoreTranscriptRecoveryAuthority::Retry(Self {
                             operation,
                             identity,
                             canonical_writer,
@@ -577,15 +576,21 @@ where
                             primary_endpoint: (segment == PlanningSegment::FailureContinuation)
                                 .then_some(primary),
                             segment,
-                        }))
+                        })),
+                        cause,
+                    }),
+                    StoreOpenRecoveryAuthority::FallbackOnly(owner) => {
+                        Err(StoreTranscriptOpenError {
+                            recovery: Some(StoreTranscriptRecoveryAuthority::FallbackOnly(owner)),
+                            cause,
+                        })
                     }
-                    Ok(RetainedStoreOpenRecovery::FallbackOnly(owner)) => {
-                        Some(StoreTranscriptOpenRecovery::FallbackOnly(owner))
-                    }
-                    Err(_) => None,
-                };
-                Err(StoreTranscriptOpenError { recovery, cause })
-            }
+                },
+                Err(cause) => Err(StoreTranscriptOpenError {
+                    recovery: None,
+                    cause,
+                }),
+            },
         }
     }
 
@@ -680,22 +685,33 @@ fn plan_runtime_error(error: StoreTranscriptPlanError) -> StoreRuntimeError {
     }
 }
 
-/// Capability preserved after transcript-derived block tables fail to open.
-#[must_use = "retry the transcript or publish the pre-admitted minimal fallback"]
 #[allow(
     clippy::large_enum_variant,
-    reason = "both variants transfer large linear owners without adding an unmetered failure-path allocation"
+    reason = "linear transcript recovery stays inline so fallback containment never allocates indirection"
 )]
-pub enum StoreTranscriptOpenRecovery<O, PP, U, L = FreshStoreLineage>
+enum StoreTranscriptRecoveryAuthority<O, PP, U, L>
 where
     O: OperationOwner,
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    /// Pure preflight or rollback-safe failure preserved the complete transcript authority.
     Retry(RetainedStoreTranscript<O, PP, U, L>),
-    /// Opening consumed the single-use failure-terminal authority.
     FallbackOnly(StoreOpenFallbackOnly<O, PP, U, L>),
+}
+
+/// Exact transcript-open cause coupled to the authority proven safe after rollback.
+///
+/// The transcript and fallback owner remain private. Repair uses the narrow planning methods on
+/// this wrapper, retry consumes the complete wrapper, and fallback must classify its exact cause.
+#[must_use = "repair and retry the transcript or map the exact cause before fallback"]
+pub struct StoreTranscriptOpenRecovery<O, PP, U, L = FreshStoreLineage>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    cause: StoreRuntimeError,
+    authority: StoreTranscriptRecoveryAuthority<O, PP, U, L>,
 }
 
 impl<O, PP, U, L> StoreTranscriptOpenRecovery<O, PP, U, L>
@@ -704,15 +720,96 @@ where
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    /// Publishes the pre-admitted minimal fallback from either recovery state.
-    pub fn prepare_minimal_fallback(
-        self,
-        cause: u32,
-    ) -> Result<PreparedStoreFallback, StorePrepareError> {
-        match self {
-            Self::Retry(transcript) => transcript.prepare_minimal_fallback(cause),
-            Self::FallbackOnly(owner) => owner.prepare_minimal_fallback(cause),
+    /// Returns the exact typed open cause without separating it from linear authority.
+    pub const fn cause(&self) -> &StoreRuntimeError {
+        &self.cause
+    }
+
+    /// Returns whether structural preflight or verified rollback preserved retry authority.
+    pub const fn is_retryable(&self) -> bool {
+        matches!(&self.authority, StoreTranscriptRecoveryAuthority::Retry(_))
+    }
+
+    /// Returns whether opening consumed the single-use failure-terminal authority.
+    pub const fn is_fallback_only(&self) -> bool {
+        matches!(
+            &self.authority,
+            StoreTranscriptRecoveryAuthority::FallbackOnly(_)
+        )
+    }
+
+    fn retry_transcript_mut(
+        &mut self,
+    ) -> Result<&mut RetainedStoreTranscript<O, PP, U, L>, StoreTranscriptPlanError> {
+        match &mut self.authority {
+            StoreTranscriptRecoveryAuthority::Retry(transcript) => Ok(transcript),
+            StoreTranscriptRecoveryAuthority::FallbackOnly(_) => Err(
+                StoreTranscriptPlanError::Runtime(StoreRuntimeError::FallbackOnly),
+            ),
         }
+    }
+
+    /// Adds one missing outcome-evidence sequence without exposing the transcript owner.
+    pub fn plan_outcome_evidence_sequence<T, Tag>(
+        &mut self,
+        elements: usize,
+        tag: Tag,
+    ) -> Result<PlannedOutcomeEvidenceSequence<T, Tag>, StoreTranscriptPlanError>
+    where
+        T: StoredScalar,
+        Tag: Copy + Send + Sync + 'static,
+    {
+        self.retry_transcript_mut()?
+            .plan_outcome_evidence_sequence(elements, tag)
+    }
+
+    /// Retries opening without exposing the transcript or fallback owner.
+    pub fn retry_open(self) -> StoreTranscriptOpenResult<O, PP, U, L> {
+        match self.authority {
+            StoreTranscriptRecoveryAuthority::Retry(transcript) => transcript.try_open(),
+            StoreTranscriptRecoveryAuthority::FallbackOnly(owner) => {
+                Err(StoreTranscriptOpenError {
+                    recovery: Some(StoreTranscriptRecoveryAuthority::FallbackOnly(owner)),
+                    cause: self.cause,
+                })
+            }
+        }
+    }
+
+    /// Maps the exact cause before publishing the pre-admitted minimal fallback.
+    pub fn prepare_minimal_fallback_with(
+        self,
+        classify: impl FnOnce(&StoreRuntimeError) -> u32,
+    ) -> Result<PreparedStoreFallback, StorePrepareError> {
+        let code = classify(&self.cause);
+        match self.authority {
+            StoreTranscriptRecoveryAuthority::Retry(transcript) => {
+                transcript.prepare_minimal_fallback(code)
+            }
+            StoreTranscriptRecoveryAuthority::FallbackOnly(owner) => {
+                owner.prepare_minimal_fallback(code)
+            }
+        }
+    }
+}
+
+impl<'source, O, PP, U> StoreTranscriptOpenRecovery<O, PP, U, CanonicalInheritanceSource<'source>>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    /// Adds one canonical source share without exposing the recovered transcript owner.
+    pub fn plan_canonical_sequence_share<T, Tag>(
+        &mut self,
+        source_ref: CanonicalSequenceRef<T, Tag>,
+    ) -> Result<PlannedCanonicalShare<ScalarSequence<T>, Tag>, StoreTranscriptPlanError>
+    where
+        T: StoredScalar,
+        Tag: Copy + Send + Sync + 'static,
+    {
+        self.retry_transcript_mut()?
+            .plan_canonical_sequence_share(source_ref)
     }
 }
 
@@ -723,10 +820,16 @@ where
     U: ProgressUnit,
 {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Retry(_) => formatter.write_str("Retry(..)"),
-            Self::FallbackOnly(_) => formatter.write_str("FallbackOnly(..)"),
-        }
+        let disposition = if self.is_retryable() {
+            "retry"
+        } else {
+            "fallback-only"
+        };
+        formatter
+            .debug_struct("StoreTranscriptOpenRecovery")
+            .field("cause", &self.cause)
+            .field("disposition", &disposition)
+            .finish_non_exhaustive()
     }
 }
 
@@ -738,7 +841,7 @@ where
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    recovery: Option<StoreTranscriptOpenRecovery<O, PP, U, L>>,
+    recovery: Option<StoreTranscriptRecoveryAuthority<O, PP, U, L>>,
     cause: StoreRuntimeError,
 }
 
@@ -752,10 +855,16 @@ where
         &self.cause
     }
 
-    pub fn into_recovery(
+    pub fn into_disposition(
         self,
     ) -> Result<StoreTranscriptOpenRecovery<O, PP, U, L>, StoreRuntimeError> {
-        self.recovery.ok_or(self.cause)
+        match self.recovery {
+            Some(authority) => Ok(StoreTranscriptOpenRecovery {
+                cause: self.cause,
+                authority,
+            }),
+            None => Err(self.cause),
+        }
     }
 }
 
@@ -767,8 +876,8 @@ where
 {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let disposition = match &self.recovery {
-            Some(StoreTranscriptOpenRecovery::Retry(_)) => "retry",
-            Some(StoreTranscriptOpenRecovery::FallbackOnly(_)) => "fallback-only",
+            Some(StoreTranscriptRecoveryAuthority::Retry(_)) => "retry",
+            Some(StoreTranscriptRecoveryAuthority::FallbackOnly(_)) => "fallback-only",
             None => "fail-closed",
         };
         formatter

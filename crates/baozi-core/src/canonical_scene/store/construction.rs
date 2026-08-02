@@ -14,13 +14,14 @@ use baozi_operation::{
     PreparedStoreSuccessOutcome, ProgressPhase, ProgressUnit, PublishedCanonicalStore,
     PublishedOutcomeEvidenceStore, PublishedRichFailureStore, PublishedStoreFallbackOutput,
     RecordBlock, RecordPlan, RetainedStoreBatchLimits, RetainedStoreBlockTablePlan,
-    RetainedStoreFailureTerminalWorkPlan, RetainedStoreOpenRecovery, RetainedStoreOperation,
-    RetainedStorePublicationAssembly, RetainedStorePublicationPlan, RetainedStoreSharePlan,
-    RetainedStoreStartError, RetainedStoreStartPlan, RetainedStoreWriterPlan, SequencePlan,
-    StoreDimensionKey, StoreDimensionSemanticId, StoreFailureAssembly, StoreFailureValidation,
-    StoreKeyDomain, StoreKeyDomainCreateError, StoreLedgerEvidence, StoreLedgerPlan,
-    StoreLedgerPlanError, StorePhaseKey, StorePhaseSemanticId, StorePlanError, StorePrepareError,
-    StoreRuntimeError, StoreSemanticCatalogId, StoreSuccessValidation, ValidatedStoreSuccess,
+    RetainedStoreFailureTerminalWorkPlan, RetainedStoreFailureTerminalWorkRequirement,
+    RetainedStoreOpenRecovery, RetainedStoreOperation, RetainedStorePublicationAssembly,
+    RetainedStorePublicationPlan, RetainedStoreSharePlan, RetainedStoreStartError,
+    RetainedStoreStartPlan, RetainedStoreWriterPlan, SequencePlan, StoreDimensionKey,
+    StoreDimensionSemanticId, StoreFailureAssembly, StoreFailureValidation, StoreKeyDomain,
+    StoreKeyDomainCreateError, StoreLedgerEvidence, StoreLedgerPlan, StoreLedgerPlanError,
+    StorePhaseKey, StorePhaseSemanticId, StorePlanError, StorePrepareError, StoreRuntimeError,
+    StoreSemanticCatalogId, StoreSuccessValidation, ValidatedStoreSuccess,
 };
 use thiserror::Error;
 
@@ -58,14 +59,70 @@ const FAILURE_TERMINAL_WORK_DIMENSION: StoreDimensionSemanticId =
 const FALLBACK_CODE: u32 = 0x5343_0001;
 const SEMANTIC_REJECTION_CODE: u32 = 0x5343_0002;
 const GENERATION_EXHAUSTED_CODE: u32 = 0x5343_0003;
+const OPEN_PLAN_REJECTION_CODE: u32 = 0x5343_0004;
+const OPEN_RESOURCE_REJECTION_CODE: u32 = 0x5343_0005;
+const OPEN_CONTROL_REJECTION_CODE: u32 = 0x5343_0006;
+const OPEN_LEDGER_REJECTION_CODE: u32 = 0x5343_0007;
+const OPEN_CONTAINMENT_REJECTION_CODE: u32 = 0x5343_0008;
 // A publication table itself consumes one attribution slot in addition to its new members.
 const MAX_ADMITTED_CANONICAL_NEW_BLOCKS: usize = 27;
 const TERMINAL_ATTRIBUTION_SLOTS: usize = MAX_ADMITTED_CANONICAL_NEW_BLOCKS + 1;
 const TERMINAL_COMMITMENT_SLOTS: usize = 8;
 const FAILURE_TERMINAL_EVIDENCE_MEMBERS: usize = 1;
-const FAILURE_TERMINAL_WORK_LIMIT: u64 = 6;
 
 static NEXT_CONSTRUCTION_BRAND: AtomicU64 = AtomicU64::new(1);
+
+fn failure_terminal_work_requirement()
+-> Result<RetainedStoreFailureTerminalWorkRequirement, StorePlanError> {
+    RetainedStoreFailureTerminalWorkPlan::requirement_for_evidence_members(
+        FAILURE_TERMINAL_EVIDENCE_MEMBERS,
+    )
+}
+
+fn tracer_scene_open_failure_code(cause: &StoreRuntimeError) -> u32 {
+    match cause {
+        StoreRuntimeError::Plan(_)
+        | StoreRuntimeError::BatchCapacity
+        | StoreRuntimeError::ForeignPhaseDomain { .. }
+        | StoreRuntimeError::ForeignDimensionDomain { .. }
+        | StoreRuntimeError::PhaseCompletionRegression { .. }
+        | StoreRuntimeError::PhaseCompletionPublicationPending
+        | StoreRuntimeError::PhaseCompletionPublicationCompleted
+        | StoreRuntimeError::PhaseCompletionCatalogShapeMismatch
+        | StoreRuntimeError::SlotLimit { .. }
+        | StoreRuntimeError::WrongOutcomeMode
+        | StoreRuntimeError::InvalidSourceSlot
+        | StoreRuntimeError::InvalidPublicationPlan => OPEN_PLAN_REJECTION_CODE,
+        StoreRuntimeError::BatchAllocationFailed
+        | StoreRuntimeError::AccountingOverflow
+        | StoreRuntimeError::PhysicalByteLimit { .. }
+        | StoreRuntimeError::PhysicalAllocationLimit { .. }
+        | StoreRuntimeError::AllocationFailed
+        | StoreRuntimeError::MembershipExhausted => OPEN_RESOURCE_REJECTION_CODE,
+        StoreRuntimeError::Control(_) => OPEN_CONTROL_REJECTION_CODE,
+        StoreRuntimeError::Ledger(_) => OPEN_LEDGER_REJECTION_CODE,
+        StoreRuntimeError::AccountPoisoned(_)
+        | StoreRuntimeError::AccountPoisonedWithRetainedCharge(_)
+        | StoreRuntimeError::Build(_)
+        | StoreRuntimeError::BuilderPanicked
+        | StoreRuntimeError::ConstructionInvariantUnverified
+        | StoreRuntimeError::ForeignAccount
+        | StoreRuntimeError::StorageDropUnverified
+        | StoreRuntimeError::OwnershipUnverified
+        | StoreRuntimeError::ChargeReleaseUnverified
+        | StoreRuntimeError::SuccessOutcomeRejected
+        | StoreRuntimeError::UnverifiedControlledCause
+        | StoreRuntimeError::FallbackOnly
+        | StoreRuntimeError::Poisoned => OPEN_CONTAINMENT_REJECTION_CODE,
+        _ => OPEN_CONTAINMENT_REJECTION_CODE,
+    }
+}
+
+fn prepare_tracer_scene_open_fallback<L>(
+    recovery: SceneStoreOpenRecovery<L>,
+) -> Result<baozi_operation::PreparedStoreFallback, SceneConstructionError> {
+    Ok(recovery.prepare_minimal_fallback_with(tracer_scene_open_failure_code)?)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(in crate::canonical_scene::store) enum SceneConstructionPhase {
@@ -974,14 +1031,6 @@ fn try_plan_scene_operation(
     control: OperationControl<SceneConstructionPhase, SceneConstructionUnit>,
     terminal_attribution_slots: usize,
 ) -> Result<SceneOperationStart, SceneConstructionStartError> {
-    let ordinary_attempted_work = limits
-        .attempted_work
-        .checked_sub(FAILURE_TERMINAL_WORK_LIMIT)
-        .ok_or(SceneConstructionStartError::TerminalWorkBudget)?;
-    let ordinary_consumed_work = limits
-        .consumed_work
-        .checked_sub(FAILURE_TERMINAL_WORK_LIMIT)
-        .ok_or(SceneConstructionStartError::TerminalWorkBudget)?;
     let brand = ConstructionBrand::reserve()?;
     let domain = StoreKeyDomain::try_new(STORE_CATALOG)?;
     let keys = SceneStoreKeys {
@@ -995,9 +1044,21 @@ fn try_plan_scene_operation(
             .try_admit_dimension(FAILURE_TERMINAL_WORK_DIMENSION)
             .ok_or(SceneConstructionStartError::KeyAdmissionInvariant)?,
     };
+    let failure_terminal_work = RetainedStoreFailureTerminalWorkPlan::new(
+        keys.failure_terminal_work_dimension,
+        FAILURE_TERMINAL_EVIDENCE_MEMBERS,
+        limits.attempted_work,
+        limits.consumed_work,
+    )
+    .map_err(|cause| match cause {
+        StorePlanError::InvalidFailureTerminalWork => {
+            SceneConstructionStartError::TerminalWorkBudget
+        }
+        cause => SceneConstructionStartError::StorePlan(cause),
+    })?;
     let dimension_policy = DimensionPolicy::reservable_bytes(
-        ordinary_attempted_work,
-        ordinary_consumed_work,
+        failure_terminal_work.ordinary_attempted_work_limit(),
+        failure_terminal_work.ordinary_consumed_work_limit(),
         limits.committed_output,
         limits.dimension_live_bytes,
     )
@@ -1008,11 +1069,7 @@ fn try_plan_scene_operation(
             (keys.dimension, dimension_policy),
             (
                 keys.failure_terminal_work_dimension,
-                DimensionPolicy::counter(
-                    FAILURE_TERMINAL_WORK_LIMIT,
-                    FAILURE_TERMINAL_WORK_LIMIT,
-                    0,
-                ),
+                failure_terminal_work.requirement().dimension_policy(),
             ),
         ],
     )?;
@@ -1021,10 +1078,6 @@ fn try_plan_scene_operation(
         RetainedStoreBatchLimits::new(terminal_attribution_slots, TERMINAL_COMMITMENT_SLOTS)?;
     let terminal_writer =
         RetainedStoreWriterPlan::new(keys.phase, keys.dimension, keys.dimension, terminal_limits);
-    let failure_terminal_work = RetainedStoreFailureTerminalWorkPlan::new(
-        keys.failure_terminal_work_dimension,
-        FAILURE_TERMINAL_EVIDENCE_MEMBERS,
-    )?;
     let start_plan = RetainedStoreStartPlan::new(
         terminal_writer,
         RetainedStoreSharePlan::new(keys.dimension, keys.dimension),
@@ -1033,8 +1086,8 @@ fn try_plan_scene_operation(
         1,
         keys.dimension,
         1,
-    )
-    .with_failure_terminal_work(failure_terminal_work);
+        failure_terminal_work,
+    );
     Ok(SceneOperationStart {
         brand,
         keys,
@@ -1081,9 +1134,8 @@ fn prepare_two_node<L: ScenePublicationLineage>(
     let mut assembly = match raw.try_publication_assembly(publication_plan) {
         Ok(assembly) => assembly,
         Err(error) => {
-            let prepared = error
-                .into_recovery()?
-                .prepare_minimal_fallback(FALLBACK_CODE)?;
+            let recovery = error.into_disposition()?;
+            let prepared = prepare_tracer_scene_open_fallback(recovery)?;
             return Ok(PreparedSceneConstruction::MinimalFallback(
                 PreparedTracerSceneFallback { store: prepared },
             ));

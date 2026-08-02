@@ -15,6 +15,7 @@ use super::super::super::{
     GENERATION_EXHAUSTED_CODE, SceneConstructionError, SceneStoreAssembly, SceneStoreKeys,
     SceneStoreOpenRecovery, TracerSceneFallback, burn_generation_reservation, final_progress,
 };
+use super::super::publication::node_scene_failure_code;
 use super::super::scratch::NodeSceneValidationScratchOwner;
 use super::super::{
     NODE_SCENE_BUILD_INVARIANT_CODE, NODE_SCENE_CONTROL_INTERRUPTION_CODE,
@@ -315,9 +316,8 @@ fn map_prepared_failure(
 
 pub(super) fn prepare_edit_minimal_from_open_recovery<L>(
     recovery: SceneStoreOpenRecovery<L>,
-    cause: u32,
 ) -> Result<PreparedNodeTransformEdit, SceneConstructionError> {
-    let store = recovery.prepare_minimal_fallback(cause)?;
+    let store = recovery.prepare_minimal_fallback_with(node_scene_failure_code)?;
     Ok(PreparedNodeTransformEdit::minimal_fallback(
         PreparedNodeTransformEditMinimalFallback { store },
     ))

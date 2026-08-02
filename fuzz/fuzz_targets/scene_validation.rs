@@ -262,7 +262,7 @@ impl SceneValidationControl for FuzzValidationControl {
     }
 
     fn validate_reservation(
-        &self,
+        &mut self,
         _reservation: &Self::Reservation,
         _kind: SceneReservationKind,
     ) -> Result<(), Self::Error> {

@@ -9,7 +9,7 @@ use baozi_operation::{
     PhysicalStorageAccountLimits, PhysicalStorageAccountSnapshot, PreparedStoreFailureOutcome,
     PreparedStoreSuccessOutcome, ProgressPhase, ProgressUnit, PublishedStoreFailureParts,
     PublishedStoreSuccessParts, RecordPlan, RetainedStoreBatchLimits, RetainedStoreBlockTablePlan,
-    RetainedStoreOpenRecovery, RetainedStoreOperation, RetainedStorePublicationPlan,
+    RetainedStoreFailureTerminalWorkPlan, RetainedStoreOperation, RetainedStorePublicationPlan,
     RetainedStoreSharePlan, RetainedStoreStartError, RetainedStoreStartPlan,
     RetainedStoreWriterPlan, SequencePlan, StoreBuildFailureClass, StoreDimensionKey,
     StoreDimensionSemanticId, StoreFailureValidation, StoreFallbackEnvelope, StoreKeyDomain,
@@ -22,6 +22,9 @@ use baozi_operation::{
 struct TestOwner;
 
 impl OperationOwner for TestOwner {}
+
+const TEST_TERMINAL_ATTRIBUTION_SLOTS: usize = 32;
+const TEST_MAX_FAILURE_EVIDENCE_MEMBERS: usize = 5;
 
 #[derive(Default)]
 struct HashTranscript(Vec<u8>);
@@ -80,6 +83,7 @@ struct TestKeys {
     other_phase: StorePhaseKey,
     dimension: StoreDimensionKey,
     other_dimension: StoreDimensionKey,
+    failure_terminal_dimension: StoreDimensionKey,
 }
 
 struct TestVocabulary {
@@ -106,6 +110,9 @@ fn test_vocabulary_for(catalog: StoreSemanticCatalogId) -> TestVocabulary {
         other_dimension: domain
             .try_admit_dimension(dimension_semantic_for(catalog, 2))
             .expect("other test dimension key"),
+        failure_terminal_dimension: domain
+            .try_admit_dimension(dimension_semantic_for(catalog, 3))
+            .expect("failure-terminal test dimension key"),
     };
     TestVocabulary { domain, keys }
 }
@@ -144,7 +151,15 @@ fn assert_semantic_and_ordinal_evidence_queries(evidence: &StoreLedgerEvidence, 
         .expect("admitted dimension remains queryable by semantic identity");
     assert_eq!(dimension.dimension(), keys.dimension.semantic_id());
     assert_eq!(evidence.dimension_at(0), Some(dimension));
-    assert_eq!(evidence.dimension_at(1), None);
+    let failure_terminal = evidence
+        .dimension_by_semantic(keys.failure_terminal_dimension.semantic_id())
+        .expect("protected failure-terminal dimension remains explicit evidence");
+    assert_eq!(
+        failure_terminal.dimension(),
+        keys.failure_terminal_dimension.semantic_id()
+    );
+    assert_eq!(evidence.dimension_at(1), Some(failure_terminal));
+    assert_eq!(evidence.dimension_at(2), None);
     assert_eq!(
         evidence.dimension_by_semantic(keys.other_dimension.semantic_id()),
         None,
@@ -302,6 +317,16 @@ fn writer_plan(keys: TestKeys, attributions: usize, commitments: usize) -> Retai
     )
 }
 
+fn unbounded_failure_terminal_work(keys: TestKeys) -> RetainedStoreFailureTerminalWorkPlan {
+    RetainedStoreFailureTerminalWorkPlan::new(
+        keys.failure_terminal_dimension,
+        TEST_MAX_FAILURE_EVIDENCE_MEMBERS,
+        u64::MAX,
+        u64::MAX,
+    )
+    .unwrap()
+}
+
 fn operation(account: &PhysicalStorageAccount) -> (TestOperation, TestKeys) {
     operation_with_control(account, OperationControl::default())
 }
@@ -335,18 +360,41 @@ fn operation_with_catalog_and_evidence_limit(
     evidence_limit: u64,
 ) -> (TestOperation, TestKeys) {
     let TestVocabulary { domain, keys } = test_vocabulary_for(catalog);
-    let policy = DimensionPolicy::reservable_bytes(u64::MAX, u64::MAX, u64::MAX, u64::MAX)
-        .with_published_outcome_evidence_limit(evidence_limit);
-    let limits = LedgerLimits::new(u64::MAX, [(keys.dimension, policy)]).unwrap();
+    let failure_terminal_work = RetainedStoreFailureTerminalWorkPlan::new(
+        keys.failure_terminal_dimension,
+        TEST_MAX_FAILURE_EVIDENCE_MEMBERS,
+        u64::MAX,
+        u64::MAX,
+    )
+    .unwrap();
+    let policy = DimensionPolicy::reservable_bytes(
+        failure_terminal_work.ordinary_attempted_work_limit(),
+        failure_terminal_work.ordinary_consumed_work_limit(),
+        u64::MAX,
+        u64::MAX,
+    )
+    .with_published_outcome_evidence_limit(evidence_limit);
+    let limits = LedgerLimits::new(
+        u64::MAX,
+        [
+            (keys.dimension, policy),
+            (
+                keys.failure_terminal_dimension,
+                failure_terminal_work.requirement().dimension_policy(),
+            ),
+        ],
+    )
+    .unwrap();
     let ledger_plan = StoreLedgerPlan::try_new(domain, limits, &[keys.phase]).unwrap();
     let start = RetainedStoreStartPlan::new(
-        writer_plan(keys, 32, 8),
+        writer_plan(keys, TEST_TERMINAL_ATTRIBUTION_SLOTS, 8),
         RetainedStoreSharePlan::new(keys.dimension, keys.dimension),
         StoreFallbackEnvelope::new(91),
         keys.dimension,
         1,
         keys.dimension,
         1,
+        failure_terminal_work,
     );
     (
         TestOperation::try_start(control, ledger_plan, account, start).unwrap(),
@@ -409,17 +457,14 @@ where
         }
         Err(error) => error,
     };
-    let cause = error.cause().clone();
     assert_eq!(account.snapshot(), before);
-    let recovered = match error.into_recovery() {
-        Ok(RetainedStoreOpenRecovery::Retry(operation)) => operation,
-        Ok(RetainedStoreOpenRecovery::FallbackOnly(_)) => {
-            panic!("key preflight must not consume terminal authority")
-        }
-        Err(cause) => panic!("key preflight must preserve the operation: {cause:?}"),
-    };
+    let recovery = error
+        .into_disposition()
+        .expect("key preflight must preserve the operation");
+    assert!(recovery.is_retryable());
+    let cause = recovery.cause().clone();
     assert_eq!(account.snapshot(), before);
-    drop(recovered);
+    drop(recovery);
     cause
 }
 

@@ -4,14 +4,15 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use baozi_operation::{
     CancellationSignal, CancellationToken, PhysicalStorageAccountFactory,
     PhysicalStorageAccountFactoryLimits, PhysicalStorageAccountLimits,
-    StorePreparationFailureClass, StoreTerminalCause,
+    StorePreparationFailureClass, StoreRuntimeError, StoreTerminalCause,
 };
 
 use crate::SceneValidationLimits;
 use crate::attribute::{AttributeDomain, AttributeSemantic};
 use crate::canonical_scene::store::construction::{
-    FAILURE_TERMINAL_WORK_DIMENSION, FAILURE_TERMINAL_WORK_LIMIT, STORE_DIMENSION,
-    SceneConstructionLimits, SceneConstructionOperation,
+    FAILURE_TERMINAL_WORK_DIMENSION, FALLBACK_CODE, OPEN_PLAN_REJECTION_CODE,
+    OPEN_RESOURCE_REJECTION_CODE, STORE_DIMENSION, SceneConstructionLimits,
+    SceneConstructionOperation, failure_terminal_work_requirement, tracer_scene_open_failure_code,
 };
 use crate::canonical_scene::store::production::{
     AnimationAuthoringBatch, AppearanceAuthoringBatch, AuthoringRange, DeformationAuthoringBatch,
@@ -60,6 +61,18 @@ const SINGLE_TRS_NODES: [NodeAuthoringNode; 1] = [NodeAuthoringNode::new(
     Presence::Absent,
     AuthoredTransform::identity_trs(),
 )];
+
+#[test]
+fn tracer_open_recovery_classifies_exact_cause_before_fallback() {
+    let plan_code = tracer_scene_open_failure_code(&StoreRuntimeError::InvalidPublicationPlan);
+    let allocation_code = tracer_scene_open_failure_code(&StoreRuntimeError::AllocationFailed);
+
+    assert_eq!(plan_code, OPEN_PLAN_REJECTION_CODE);
+    assert_eq!(allocation_code, OPEN_RESOURCE_REJECTION_CODE);
+    assert_ne!(plan_code, FALLBACK_CODE);
+    assert_ne!(allocation_code, FALLBACK_CODE);
+    assert_ne!(plan_code, allocation_code);
+}
 
 #[derive(Clone)]
 struct CancelOnSignalPoll {
@@ -116,8 +129,11 @@ pub(super) fn test_factory() -> PhysicalStorageAccountFactory {
 }
 
 fn test_limits_with_work(work: u64) -> SceneConstructionLimits {
+    let terminal_work = failure_terminal_work_requirement()
+        .expect("node Scene failure-terminal work requirement")
+        .attempted_work_limit();
     let total_work = work
-        .checked_add(FAILURE_TERMINAL_WORK_LIMIT)
+        .checked_add(terminal_work)
         .expect("test ordinary and terminal work limits must fit");
     SceneConstructionLimits {
         attempted_work: total_work,
@@ -737,8 +753,16 @@ fn authoring_work_budget_rejection_preserves_exact_error_and_rich_evidence() {
         .ledger_evidence()
         .dimension_by_semantic(FAILURE_TERMINAL_WORK_DIMENSION)
         .expect("authoring failure-terminal work dimension");
-    assert_eq!(terminal_work.attempted(), FAILURE_TERMINAL_WORK_LIMIT);
-    assert_eq!(terminal_work.consumed(), FAILURE_TERMINAL_WORK_LIMIT);
+    let terminal_requirement =
+        failure_terminal_work_requirement().expect("node Scene failure-terminal work requirement");
+    assert_eq!(
+        terminal_work.attempted(),
+        terminal_requirement.attempted_work_limit()
+    );
+    assert_eq!(
+        terminal_work.consumed(),
+        terminal_requirement.consumed_work_limit()
+    );
     assert_released(failure, &account);
 }
 

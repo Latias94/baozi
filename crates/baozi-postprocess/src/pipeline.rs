@@ -745,7 +745,7 @@ impl SceneValidationControl for ExecutionState<'_> {
     }
 
     fn validate_reservation(
-        &self,
+        &mut self,
         reservation: &Self::Reservation,
         kind: SceneReservationKind,
     ) -> std::result::Result<(), Self::Error> {
@@ -1701,7 +1701,7 @@ mod tests {
             .expect("the original coordinator should retain owner validation");
         drop(owner_state);
 
-        let foreign_state = ExecutionState::new(&mut foreign_coordinator);
+        let mut foreign_state = ExecutionState::new(&mut foreign_coordinator);
         let error = foreign_state
             .validate_reservation(&reservation, SceneReservationKind::CanonicalOutput)
             .expect_err("transitioned zero-byte capability must still reject a foreign owner");

@@ -6,9 +6,10 @@ use crate::{
     DimensionPolicy, FinalProgress, OperationControl, PhysicalStorageAccount,
     PhysicalStorageAccountFactory, PhysicalStorageAccountFactoryLimits,
     PhysicalStorageAccountLimits, RetainedStoreBatchLimits, RetainedStoreBlockTablePlan,
-    RetainedStorePublicationPlan, RetainedStoreSharePlan, RetainedStoreStartPlan,
-    RetainedStoreWriterPlan, StoreDimensionKey, StoreDimensionSemanticId, StoreFallbackEnvelope,
-    StoreKeyDomain, StorePhaseKey, StorePhaseSemanticId, StoreSemanticCatalogId,
+    RetainedStoreFailureTerminalWorkPlan, RetainedStorePublicationPlan, RetainedStoreSharePlan,
+    RetainedStoreStartPlan, RetainedStoreWriterPlan, StoreDimensionKey, StoreDimensionSemanticId,
+    StoreFallbackEnvelope, StoreKeyDomain, StorePhaseKey, StorePhaseSemanticId,
+    StoreSemanticCatalogId,
 };
 use std::num::{NonZeroU32, NonZeroU64};
 
@@ -52,6 +53,7 @@ struct EvidenceTag;
 struct BatchKeys {
     phase: StorePhaseKey,
     dimension: StoreDimensionKey,
+    failure_terminal_dimension: StoreDimensionKey,
 }
 
 type BatchOperation = crate::RetainedStoreOperation<BatchTestOwner, BatchProgress, BatchUnit>;
@@ -86,6 +88,12 @@ fn test_domain() -> (StoreKeyDomain, BatchKeys) {
         dimension: domain
             .try_admit_dimension(dimension_semantic())
             .expect("batch test dimension"),
+        failure_terminal_dimension: domain
+            .try_admit_dimension(StoreDimensionSemanticId::new(
+                test_catalog(),
+                NonZeroU64::new(2).expect("failure-terminal dimension id is nonzero"),
+            ))
+            .expect("batch failure-terminal dimension"),
     };
     (domain, keys)
 }
@@ -135,10 +143,44 @@ fn test_operation_with_limits(
     work_limit: u64,
 ) -> (BatchOperation, BatchKeys) {
     let (domain, keys) = test_domain();
-    let policy = DimensionPolicy::reservable_bytes(work_limit, work_limit, u64::MAX, u64::MAX)
-        .with_published_outcome_evidence_limit(u64::MAX);
-    let limits = LedgerLimits::new(operation_live_byte_limit, [(keys.dimension, policy)])
-        .expect("batch ledger limits");
+    let failure_terminal_requirement =
+        RetainedStoreFailureTerminalWorkPlan::requirement_for_evidence_members(1)
+            .expect("batch failure-terminal requirement");
+    let ordinary_work = work_limit.min(
+        u64::MAX
+            .checked_sub(failure_terminal_requirement.attempted_work_limit())
+            .expect("terminal attempted work fits u64")
+            .min(
+                u64::MAX
+                    .checked_sub(failure_terminal_requirement.consumed_work_limit())
+                    .expect("terminal consumed work fits u64"),
+            ),
+    );
+    let policy =
+        DimensionPolicy::reservable_bytes(ordinary_work, ordinary_work, u64::MAX, u64::MAX)
+            .with_published_outcome_evidence_limit(u64::MAX);
+    let failure_terminal_work = RetainedStoreFailureTerminalWorkPlan::new(
+        keys.failure_terminal_dimension,
+        1,
+        ordinary_work
+            .checked_add(failure_terminal_requirement.attempted_work_limit())
+            .expect("batch total attempted work fits u64"),
+        ordinary_work
+            .checked_add(failure_terminal_requirement.consumed_work_limit())
+            .expect("batch total consumed work fits u64"),
+    )
+    .expect("batch failure-terminal work plan");
+    let limits = LedgerLimits::new(
+        operation_live_byte_limit,
+        [
+            (keys.dimension, policy),
+            (
+                keys.failure_terminal_dimension,
+                failure_terminal_work.requirement().dimension_policy(),
+            ),
+        ],
+    )
+    .expect("batch ledger limits");
     let ledger =
         crate::StoreLedgerPlan::try_new(domain, limits, &[keys.phase]).expect("batch ledger plan");
     let start = RetainedStoreStartPlan::new(
@@ -149,6 +191,7 @@ fn test_operation_with_limits(
         1,
         keys.dimension,
         1,
+        failure_terminal_work,
     );
     (
         BatchOperation::try_start(OperationControl::default(), ledger, account, start)

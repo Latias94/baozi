@@ -139,7 +139,7 @@ fn sequence_bytes_utf8_and_records_round_trip_through_typed_roots() {
         header.last_completed_phase(),
         Some(keys.phase.semantic_id())
     );
-    assert_eq!(header.dimension_count(), 1);
+    assert_eq!(header.dimension_count(), 2);
     assert_eq!(header.phase_count(), 1);
     assert_eq!(header.current_live_bytes(), 0);
     assert_eq!(header.active_reservations(), 0);

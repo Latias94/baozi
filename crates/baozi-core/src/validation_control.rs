@@ -314,13 +314,15 @@ pub trait SceneValidationControl {
 
     /// Verifies that a live token belongs to this control and has the expected kind.
     ///
-    /// This check must not poll, charge work, mutate the token, or change ledger
-    /// state. Edit transactions call it before any work so a foreign control
-    /// cannot adopt storage or obscure an owner mismatch with another failure.
+    /// This check must not poll, charge work, mutate the token, or change accounting
+    /// counters. An adapter may latch a sticky terminal failure so ignoring an owner
+    /// mismatch cannot later publish a different cause. Edit transactions call it
+    /// before any work so a foreign control cannot adopt storage or obscure an owner
+    /// mismatch with another failure.
     /// Zero-byte reservations remain linear capabilities and require the same
     /// owner validation as non-empty reservations.
     fn validate_reservation(
-        &self,
+        &mut self,
         reservation: &Self::Reservation,
         kind: SceneReservationKind,
     ) -> Result<(), Self::Error>;
@@ -539,7 +541,7 @@ impl SceneValidationControl for NoopSceneValidationControl {
     }
 
     fn validate_reservation(
-        &self,
+        &mut self,
         _reservation: &Self::Reservation,
         _kind: SceneReservationKind,
     ) -> Result<(), Self::Error> {

@@ -234,10 +234,15 @@ where
     }
 
     pub(crate) fn validate_live_owner(
-        &self,
+        &mut self,
         reservation: &LiveReservation<O, P, D>,
     ) -> Result<(), LedgerCause<D>> {
-        self.ledger.validate_live_reservation(reservation)
+        self.ledger
+            .validate_live_reservation(reservation)
+            .inspect_err(|_| {
+                self.sticky_terminal_cause
+                    .get_or_insert_with(PreparationFailureCode::ledger);
+            })
     }
 
     fn validate_dimension(&mut self, dimension: D) -> Result<(), LedgerCause<D>> {
@@ -416,10 +421,10 @@ where
                 {
                     return Err(RetainedOperationStartError::InvalidTerminalLimits);
                 }
-                let maximum_share_actions = failure_plan
-                    .maximum_share_actions()
+                let requirement = failure_plan
+                    .requirement()
                     .map_err(|()| RetainedOperationStartError::InvalidTerminalLimits)?;
-                Some((failure_plan, maximum_share_actions))
+                Some((failure_plan, requirement))
             }
             None => None,
         };
@@ -545,11 +550,11 @@ where
         let startup_guard =
             StartupRetainedPartGuard::new(start_guard, baseline, plan.fallback_plan, evidence_plan);
         let failure_terminal_work = match failure_terminal_work {
-            Some((failure_plan, maximum_share_actions)) => {
+            Some((failure_plan, requirement)) => {
                 started_ledger
                     .preflight_repeated_observed_batch(
                         &failure_plan.share_work().charges(),
-                        maximum_share_actions,
+                        requirement.maximum_share_actions(),
                     )
                     .map_err(|cause| {
                         RetainedOperationStartError::Writer(RetainedWriterError::Ledger(cause))

@@ -321,7 +321,7 @@ impl SceneValidationControl for TestControl {
     }
 
     fn validate_reservation(
-        &self,
+        &mut self,
         reservation: &Self::Reservation,
         kind: SceneReservationKind,
     ) -> Result<(), Self::Error> {

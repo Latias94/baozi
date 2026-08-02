@@ -21,6 +21,8 @@ struct PublishedSequenceGeneration {
 type DerivedTestOperation<'source> =
     baozi_operation::DerivedRetainedStoreOperation<'source, TestOwner, TestProgress, TestUnit>;
 
+const DERIVED_MAX_FAILURE_EVIDENCE_MEMBERS: usize = 3;
+
 fn derived_operation<'source>(
     source: &'source SourceCanonical,
 ) -> (DerivedTestOperation<'source>, TestKeys) {
@@ -32,18 +34,41 @@ fn derived_operation_with_control<'source>(
     control: OperationControl<TestProgress, TestUnit>,
 ) -> (DerivedTestOperation<'source>, TestKeys) {
     let TestVocabulary { domain, keys } = test_vocabulary();
-    let policy = DimensionPolicy::reservable_bytes(u64::MAX, u64::MAX, u64::MAX, u64::MAX)
-        .with_published_outcome_evidence_limit(u64::MAX);
-    let limits = LedgerLimits::new(u64::MAX, [(keys.dimension, policy)]).unwrap();
+    let failure_terminal_work = RetainedStoreFailureTerminalWorkPlan::new(
+        keys.failure_terminal_dimension,
+        DERIVED_MAX_FAILURE_EVIDENCE_MEMBERS,
+        u64::MAX,
+        u64::MAX,
+    )
+    .unwrap();
+    let policy = DimensionPolicy::reservable_bytes(
+        failure_terminal_work.ordinary_attempted_work_limit(),
+        failure_terminal_work.ordinary_consumed_work_limit(),
+        u64::MAX,
+        u64::MAX,
+    )
+    .with_published_outcome_evidence_limit(u64::MAX);
+    let limits = LedgerLimits::new(
+        u64::MAX,
+        [
+            (keys.dimension, policy),
+            (
+                keys.failure_terminal_dimension,
+                failure_terminal_work.requirement().dimension_policy(),
+            ),
+        ],
+    )
+    .unwrap();
     let ledger_plan = StoreLedgerPlan::try_new(domain, limits, &[keys.phase]).unwrap();
     let start = RetainedStoreStartPlan::new(
-        writer_plan(keys, 32, 8),
+        writer_plan(keys, TEST_TERMINAL_ATTRIBUTION_SLOTS, 8),
         RetainedStoreSharePlan::new(keys.dimension, keys.dimension),
         StoreFallbackEnvelope::new(91),
         keys.dimension,
         1,
         keys.dimension,
         1,
+        failure_terminal_work,
     );
     (
         TestOperation::try_start_derived(control, ledger_plan, source, start).unwrap(),
@@ -1095,23 +1120,19 @@ fn recoverable_open_failure_preserves_exact_canonical_source_authority() {
         Ok(_) => panic!("foreign writer phase must fail before publication allocation"),
         Err(error) => error,
     };
+    let recovery = error
+        .into_disposition()
+        .expect("publication preflight must preserve retry authority");
+    assert!(recovery.is_retryable());
     assert!(matches!(
-        error.cause(),
+        recovery.cause(),
         StoreRuntimeError::ForeignPhaseDomain { phase } if *phase == foreign_phase()
     ));
-
-    let recovered = match error.into_recovery() {
-        Ok(RetainedStoreOpenRecovery::Retry(operation)) => operation,
-        Ok(RetainedStoreOpenRecovery::FallbackOnly(_)) => {
-            panic!("publication preflight must not consume terminal authority")
-        }
-        Err(cause) => panic!("publication preflight failed closed: {cause:?}"),
-    };
     let valid_plan = RetainedStorePublicationPlan::success(
         RetainedStoreBlockTablePlan::new(writer_plan(keys, 1, 2), 1, 0).unwrap(),
         RetainedStoreBlockTablePlan::new(writer_plan(keys, 1, 2), 1, 0).unwrap(),
     );
-    let mut assembly = recovered.try_publication_assembly(valid_plan).unwrap();
+    let mut assembly = recovery.retry_publication_assembly(valid_plan).unwrap();
     assembly.try_bind_canonical_source(keys.dimension).unwrap();
     let before_wrong_source = account.snapshot();
     assert!(matches!(

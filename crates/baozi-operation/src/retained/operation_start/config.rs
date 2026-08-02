@@ -117,6 +117,23 @@ pub(crate) struct RetainedFailureTerminalWorkPlan<D> {
     max_evidence_members: usize,
 }
 
+/// Exact startup qualification derived from one bounded failure-terminal plan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RetainedFailureTerminalWorkRequirement {
+    maximum_share_actions: NonZeroU64,
+    observed_work_limit: u64,
+}
+
+impl RetainedFailureTerminalWorkRequirement {
+    pub(crate) const fn maximum_share_actions(self) -> NonZeroU64 {
+        self.maximum_share_actions
+    }
+
+    pub(crate) const fn observed_work_limit(self) -> u64 {
+        self.observed_work_limit
+    }
+}
+
 impl<D: Copy> RetainedFailureTerminalWorkPlan<D> {
     pub(crate) const fn new(dimension: D, max_evidence_members: usize) -> Self {
         Self {
@@ -137,12 +154,26 @@ impl<D: Copy> RetainedFailureTerminalWorkPlan<D> {
         self.max_evidence_members
     }
 
-    pub(in crate::retained) fn maximum_share_actions(self) -> Result<NonZeroU64, ()> {
+    pub(crate) fn requirement(self) -> Result<RetainedFailureTerminalWorkRequirement, ()> {
         if self.max_evidence_members == 0 {
             return Err(());
         }
         let actions = self.max_evidence_members.checked_add(2).ok_or(())?;
-        NonZeroU64::new(u64::try_from(actions).map_err(|_| ())?).ok_or(())
+        let maximum_share_actions =
+            NonZeroU64::new(u64::try_from(actions).map_err(|_| ())?).ok_or(())?;
+        let work_per_share = self
+            .share_work()
+            .charges()
+            .into_iter()
+            .try_fold(0_u64, |total, (_, amount)| total.checked_add(amount))
+            .ok_or(())?;
+        let observed_work_limit = work_per_share
+            .checked_mul(maximum_share_actions.get())
+            .ok_or(())?;
+        Ok(RetainedFailureTerminalWorkRequirement {
+            maximum_share_actions,
+            observed_work_limit,
+        })
     }
 }
 

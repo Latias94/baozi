@@ -553,11 +553,7 @@ fn prepare_node_authoring_rejection(
     {
         Ok(assembly) => assembly,
         Err(error) => {
-            let fallback_cause = node_scene_failure_code(error.cause());
-            return prepare_node_minimal_fallback_from_open_recovery(
-                error.into_recovery()?,
-                fallback_cause,
-            );
+            return prepare_node_minimal_fallback_from_open_recovery(error.into_disposition()?);
         }
     };
     let counts = SceneEvidenceCounts::authoring_rejection();
@@ -676,9 +672,8 @@ impl ValidatedNodeSceneConstruction<'_> {
             Ok(assembly) => assembly,
             Err(error) => {
                 drop(batches);
-                let cause = node_scene_failure_code(error.cause());
                 return NodeSceneDraftBuild::failure(
-                    prepare_node_minimal_fallback_from_open_recovery(error.into_recovery()?, cause),
+                    prepare_node_minimal_fallback_from_open_recovery(error.into_disposition()?),
                 );
             }
         };

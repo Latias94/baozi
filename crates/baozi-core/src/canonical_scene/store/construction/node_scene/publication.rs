@@ -399,9 +399,8 @@ pub(super) fn prepare_node_minimal_fallback_from_operation(
 
 pub(super) fn prepare_node_minimal_fallback_from_open_recovery(
     recovery: SceneStoreOpenRecovery,
-    cause: u32,
 ) -> Result<PreparedNodeSceneFailure, SceneConstructionError> {
-    let store = recovery.prepare_minimal_fallback(cause)?;
+    let store = recovery.prepare_minimal_fallback_with(node_scene_failure_code)?;
     Ok(PreparedNodeSceneFailure::MinimalFallback(
         PreparedTracerSceneFallback { store },
     ))

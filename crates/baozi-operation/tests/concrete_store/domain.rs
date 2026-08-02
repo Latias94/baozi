@@ -242,9 +242,25 @@ fn retained_store_start_rejects_phase_outside_frozen_catalog_without_retained_si
     let account = account(&factory);
     let before = account.snapshot();
     let TestVocabulary { domain, keys } = test_vocabulary();
-    let policy = DimensionPolicy::reservable_bytes(u64::MAX, u64::MAX, u64::MAX, u64::MAX)
-        .with_published_outcome_evidence_limit(u64::MAX);
-    let limits = LedgerLimits::new(u64::MAX, [(keys.dimension, policy)]).unwrap();
+    let failure_terminal_work = unbounded_failure_terminal_work(keys);
+    let policy = DimensionPolicy::reservable_bytes(
+        failure_terminal_work.ordinary_attempted_work_limit(),
+        failure_terminal_work.ordinary_consumed_work_limit(),
+        u64::MAX,
+        u64::MAX,
+    )
+    .with_published_outcome_evidence_limit(u64::MAX);
+    let limits = LedgerLimits::new(
+        u64::MAX,
+        [
+            (keys.dimension, policy),
+            (
+                keys.failure_terminal_dimension,
+                failure_terminal_work.requirement().dimension_policy(),
+            ),
+        ],
+    )
+    .unwrap();
     let ledger_plan = StoreLedgerPlan::try_new(domain, limits, &[keys.phase]).unwrap();
     let start = RetainedStoreStartPlan::new(
         RetainedStoreWriterPlan::new(
@@ -259,6 +275,7 @@ fn retained_store_start_rejects_phase_outside_frozen_catalog_without_retained_si
         1,
         keys.dimension,
         1,
+        failure_terminal_work,
     );
 
     let rejected =
@@ -290,9 +307,25 @@ fn retained_store_start_preflights_every_dimension_key_without_side_effects() {
         let mut dimensions = [keys.dimension; 6];
         dimensions[invalid_position] = keys.other_dimension;
         let before = account.snapshot();
-        let policy = DimensionPolicy::reservable_bytes(u64::MAX, u64::MAX, u64::MAX, u64::MAX)
-            .with_published_outcome_evidence_limit(u64::MAX);
-        let ledger_limits = LedgerLimits::new(u64::MAX, [(keys.dimension, policy)]).unwrap();
+        let failure_terminal_work = unbounded_failure_terminal_work(keys);
+        let policy = DimensionPolicy::reservable_bytes(
+            failure_terminal_work.ordinary_attempted_work_limit(),
+            failure_terminal_work.ordinary_consumed_work_limit(),
+            u64::MAX,
+            u64::MAX,
+        )
+        .with_published_outcome_evidence_limit(u64::MAX);
+        let ledger_limits = LedgerLimits::new(
+            u64::MAX,
+            [
+                (keys.dimension, policy),
+                (
+                    keys.failure_terminal_dimension,
+                    failure_terminal_work.requirement().dimension_policy(),
+                ),
+            ],
+        )
+        .unwrap();
         let ledger_plan = StoreLedgerPlan::try_new(domain, ledger_limits, &[keys.phase]).unwrap();
         let start = RetainedStoreStartPlan::new(
             RetainedStoreWriterPlan::new(
@@ -307,6 +340,7 @@ fn retained_store_start_preflights_every_dimension_key_without_side_effects() {
             1,
             dimensions[5],
             1,
+            failure_terminal_work,
         );
 
         let rejected =
@@ -348,9 +382,25 @@ fn retained_store_start_rejects_foreign_phase_and_dimension_domains_without_side
             )
         };
         let before = account.snapshot();
-        let policy = DimensionPolicy::reservable_bytes(u64::MAX, u64::MAX, u64::MAX, u64::MAX)
-            .with_published_outcome_evidence_limit(u64::MAX);
-        let limits = LedgerLimits::new(u64::MAX, [(keys.dimension, policy)]).unwrap();
+        let failure_terminal_work = unbounded_failure_terminal_work(keys);
+        let policy = DimensionPolicy::reservable_bytes(
+            failure_terminal_work.ordinary_attempted_work_limit(),
+            failure_terminal_work.ordinary_consumed_work_limit(),
+            u64::MAX,
+            u64::MAX,
+        )
+        .with_published_outcome_evidence_limit(u64::MAX);
+        let limits = LedgerLimits::new(
+            u64::MAX,
+            [
+                (keys.dimension, policy),
+                (
+                    keys.failure_terminal_dimension,
+                    failure_terminal_work.requirement().dimension_policy(),
+                ),
+            ],
+        )
+        .unwrap();
         let ledger_plan = StoreLedgerPlan::try_new(domain, limits, &[keys.phase]).unwrap();
         let start = RetainedStoreStartPlan::new(
             RetainedStoreWriterPlan::new(
@@ -365,6 +415,7 @@ fn retained_store_start_rejects_foreign_phase_and_dimension_domains_without_side
             1,
             keys.dimension,
             1,
+            failure_terminal_work,
         );
 
         let rejected =

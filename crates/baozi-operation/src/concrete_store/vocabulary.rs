@@ -4,7 +4,7 @@ use std::num::{NonZeroU32, NonZeroU64};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::StorePlanError;
-use crate::ledger::LedgerLimits;
+use crate::ledger::{DimensionPolicy, LedgerLimits};
 use crate::retained::{
     RetainedBatchLimits, RetainedBlockTablePlan, RetainedFailureTerminalWorkPlan,
     RetainedHandleSharePlan, RetainedPublicationPlan, RetainedWriterPlan,
@@ -474,6 +474,32 @@ impl StoreLedgerPlan {
         self.domain.owns_dimension(dimension)
     }
 
+    pub(super) fn failure_terminal_budget_matches(
+        &self,
+        plan: &RetainedStoreFailureTerminalWorkPlan,
+    ) -> bool {
+        if self.limits.dimension(plan.dimension()) != Some(plan.requirement().dimension_policy()) {
+            return false;
+        }
+        let ordinary = self
+            .limits
+            .dimensions()
+            .filter(|dimension| *dimension != plan.dimension())
+            .try_fold((0_u64, 0_u64), |(attempted, consumed), dimension| {
+                let policy = self.limits.dimension(dimension)?;
+                Some((
+                    attempted.checked_add(policy.attempted_limit())?,
+                    consumed.checked_add(policy.consumed_limit())?,
+                ))
+            });
+        matches!(
+            ordinary,
+            Some((attempted, consumed))
+                if attempted == plan.ordinary_attempted_work_limit()
+                    && consumed == plan.ordinary_consumed_work_limit()
+        )
+    }
+
     pub(super) fn into_parts(
         self,
     ) -> (
@@ -629,33 +655,98 @@ impl RetainedStoreSharePlan {
 /// ordinary start dimension. Startup preflights the exact upper bound for the publication account,
 /// evidence table root, and every admitted evidence member without consuming the counters. Normal
 /// control, writer, and commitment APIs cannot spend this dimension.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct RetainedStoreFailureTerminalWorkPlan {
     dimension: StoreDimensionKey,
     max_evidence_members: usize,
+    requirement: RetainedStoreFailureTerminalWorkRequirement,
+    ordinary_attempted_work_limit: u64,
+    ordinary_consumed_work_limit: u64,
+}
+
+/// Exact counter policy required by one bounded rich-failure terminal rail.
+///
+/// Callers include these counters inside their public total work budget, partition ordinary work
+/// with checked subtraction, and install [`Self::dimension_policy`] on the protected dimension.
+/// The operation crate owns the derivation from retained publication shape.
+#[derive(Debug, PartialEq, Eq)]
+#[must_use = "the protected terminal requirement must be included in the caller's hard budget"]
+pub struct RetainedStoreFailureTerminalWorkRequirement {
+    attempted_work_limit: u64,
+    consumed_work_limit: u64,
+}
+
+impl RetainedStoreFailureTerminalWorkRequirement {
+    /// Returns the attempted-work portion reserved from the caller's total hard limit.
+    pub const fn attempted_work_limit(&self) -> u64 {
+        self.attempted_work_limit
+    }
+
+    /// Returns the consumed-work portion reserved from the caller's total hard limit.
+    pub const fn consumed_work_limit(&self) -> u64 {
+        self.consumed_work_limit
+    }
+
+    /// Returns the counter-only policy for the protected terminal dimension.
+    pub const fn dimension_policy(&self) -> DimensionPolicy {
+        DimensionPolicy::counter(self.attempted_work_limit, self.consumed_work_limit, 0)
+    }
 }
 
 impl RetainedStoreFailureTerminalWorkPlan {
+    /// Derives the exact protected work requirement without requiring a runtime dimension key.
+    pub fn requirement_for_evidence_members(
+        max_evidence_members: usize,
+    ) -> Result<RetainedStoreFailureTerminalWorkRequirement, StorePlanError> {
+        let raw = RetainedFailureTerminalWorkPlan::new((), max_evidence_members);
+        let requirement = raw
+            .requirement()
+            .map_err(|()| StorePlanError::InvalidFailureTerminalWork)?;
+        Ok(RetainedStoreFailureTerminalWorkRequirement {
+            attempted_work_limit: requirement.observed_work_limit(),
+            consumed_work_limit: requirement.observed_work_limit(),
+        })
+    }
+
     /// Declares the dedicated terminal dimension and maximum rich-failure evidence members.
     pub fn new(
         dimension: StoreDimensionKey,
         max_evidence_members: usize,
+        total_attempted_work_limit: u64,
+        total_consumed_work_limit: u64,
     ) -> Result<Self, StorePlanError> {
-        if max_evidence_members == 0
-            || max_evidence_members
-                .checked_add(2)
-                .and_then(|actions| u64::try_from(actions).ok())
-                .is_none()
-        {
-            return Err(StorePlanError::InvalidFailureTerminalWork);
-        }
+        let requirement = Self::requirement_for_evidence_members(max_evidence_members)?;
+        let ordinary_attempted_work_limit = total_attempted_work_limit
+            .checked_sub(requirement.attempted_work_limit())
+            .ok_or(StorePlanError::InvalidFailureTerminalWork)?;
+        let ordinary_consumed_work_limit = total_consumed_work_limit
+            .checked_sub(requirement.consumed_work_limit())
+            .ok_or(StorePlanError::InvalidFailureTerminalWork)?;
         Ok(Self {
             dimension,
             max_evidence_members,
+            requirement,
+            ordinary_attempted_work_limit,
+            ordinary_consumed_work_limit,
         })
     }
 
-    pub(super) const fn dimension(self) -> StoreDimensionKey {
+    /// Returns the exact protected work requirement for this admitted plan.
+    pub const fn requirement(&self) -> &RetainedStoreFailureTerminalWorkRequirement {
+        &self.requirement
+    }
+
+    /// Returns the maximum attempted work available to every ordinary dimension combined.
+    pub const fn ordinary_attempted_work_limit(&self) -> u64 {
+        self.ordinary_attempted_work_limit
+    }
+
+    /// Returns the maximum consumed work available to every ordinary dimension combined.
+    pub const fn ordinary_consumed_work_limit(&self) -> u64 {
+        self.ordinary_consumed_work_limit
+    }
+
+    pub(super) const fn dimension(&self) -> StoreDimensionKey {
         self.dimension
     }
 
@@ -665,7 +756,7 @@ impl RetainedStoreFailureTerminalWorkPlan {
 }
 
 /// Start-time policy for the operation-owned concrete retained store.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct RetainedStoreStartPlan {
     terminal_writer: RetainedStoreWriterPlan,
     share: RetainedStoreSharePlan,
@@ -674,7 +765,7 @@ pub struct RetainedStoreStartPlan {
     fallback_amount: u64,
     snapshot_dimension: StoreDimensionKey,
     snapshot_amount: u64,
-    failure_terminal_work: Option<RetainedStoreFailureTerminalWorkPlan>,
+    failure_terminal_work: RetainedStoreFailureTerminalWorkPlan,
 }
 
 pub(super) struct RawRetainedStoreStartParts {
@@ -685,7 +776,7 @@ pub(super) struct RawRetainedStoreStartParts {
     pub(super) fallback_amount: u64,
     pub(super) snapshot_dimension: StoreDimensionKey,
     pub(super) snapshot_amount: u64,
-    pub(super) failure_terminal_work: Option<RetainedFailureTerminalWorkPlan<StoreDimensionKey>>,
+    pub(super) failure_terminal_work: RetainedFailureTerminalWorkPlan<StoreDimensionKey>,
 }
 
 impl RetainedStoreStartPlan {
@@ -699,6 +790,7 @@ impl RetainedStoreStartPlan {
         fallback_amount: u64,
         snapshot_dimension: StoreDimensionKey,
         snapshot_amount: u64,
+        failure_terminal_work: RetainedStoreFailureTerminalWorkPlan,
     ) -> Self {
         Self {
             terminal_writer,
@@ -708,27 +800,13 @@ impl RetainedStoreStartPlan {
             fallback_amount,
             snapshot_dimension,
             snapshot_amount,
-            failure_terminal_work: None,
+            failure_terminal_work,
         }
-    }
-
-    /// Reserves one finite, single-use work rail for rich-failure evidence after ordinary work is
-    /// exhausted, including a later downgrade from a validated success candidate.
-    pub const fn with_failure_terminal_work(
-        mut self,
-        plan: RetainedStoreFailureTerminalWorkPlan,
-    ) -> Self {
-        self.failure_terminal_work = Some(plan);
-        self
     }
 
     pub(super) const fn keys_for_start_validation(
         &self,
-    ) -> (
-        StorePhaseKey,
-        [StoreDimensionKey; 6],
-        Option<StoreDimensionKey>,
-    ) {
+    ) -> (StorePhaseKey, [StoreDimensionKey; 6], StoreDimensionKey) {
         (
             self.terminal_writer.phase,
             [
@@ -739,25 +817,21 @@ impl RetainedStoreStartPlan {
                 self.fallback_dimension,
                 self.snapshot_dimension,
             ],
-            match self.failure_terminal_work {
-                Some(plan) => Some(plan.dimension()),
-                None => None,
-            },
+            self.failure_terminal_work.dimension(),
         )
     }
 
     pub(super) fn failure_terminal_work_is_separate(&self) -> bool {
-        match self.failure_terminal_work {
-            Some(plan) => {
-                let dimension = plan.dimension();
-                self.terminal_writer.capacity_dimension != dimension
-                    && self.terminal_writer.attribution_dimension != dimension
-                    && !self.share.contains(dimension)
-                    && self.fallback_dimension != dimension
-                    && self.snapshot_dimension != dimension
-            }
-            None => true,
-        }
+        let dimension = self.failure_terminal_work.dimension();
+        self.terminal_writer.capacity_dimension != dimension
+            && self.terminal_writer.attribution_dimension != dimension
+            && !self.share.contains(dimension)
+            && self.fallback_dimension != dimension
+            && self.snapshot_dimension != dimension
+    }
+
+    pub(super) fn failure_terminal_budget_matches(&self, ledger_plan: &StoreLedgerPlan) -> bool {
+        ledger_plan.failure_terminal_budget_matches(&self.failure_terminal_work)
     }
 
     pub(super) const fn into_raw_start_parts(self) -> RawRetainedStoreStartParts {
@@ -769,10 +843,7 @@ impl RetainedStoreStartPlan {
             fallback_amount: self.fallback_amount,
             snapshot_dimension: self.snapshot_dimension,
             snapshot_amount: self.snapshot_amount,
-            failure_terminal_work: match self.failure_terminal_work {
-                Some(plan) => Some(plan.into_raw()),
-                None => None,
-            },
+            failure_terminal_work: self.failure_terminal_work.into_raw(),
         }
     }
 }

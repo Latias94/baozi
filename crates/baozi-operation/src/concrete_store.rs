@@ -172,10 +172,11 @@ pub use batch::{
 };
 pub use vocabulary::{
     RetainedStoreBatchLimits, RetainedStoreBlockTablePlan, RetainedStoreFailureTerminalWorkPlan,
-    RetainedStorePublicationPlan, RetainedStoreSharePlan, RetainedStoreStartPlan,
-    RetainedStoreWriterPlan, StoreDimensionKey, StoreDimensionSemanticId, StoreFallbackEnvelope,
-    StoreKeyDomain, StoreKeyDomainCreateError, StoreLedgerPlan, StoreLedgerPlanError,
-    StorePhaseKey, StorePhaseSemanticId, StoreSemanticCatalogId,
+    RetainedStoreFailureTerminalWorkRequirement, RetainedStorePublicationPlan,
+    RetainedStoreSharePlan, RetainedStoreStartPlan, RetainedStoreWriterPlan, StoreDimensionKey,
+    StoreDimensionSemanticId, StoreFallbackEnvelope, StoreKeyDomain, StoreKeyDomainCreateError,
+    StoreLedgerPlan, StoreLedgerPlanError, StorePhaseKey, StorePhaseSemanticId,
+    StoreSemanticCatalogId,
 };
 
 pub use terminal_output::{
@@ -2017,11 +2018,15 @@ where
             .map_err(StoreRuntimeError::Ledger)
     }
 
-    /// Verifies that a live token belongs to this operation without mutating accounting.
+    /// Verifies that a live token belongs to this operation without mutating its accounting.
+    ///
+    /// Rejection latches the operation's first terminal cause as a ledger failure, so ignoring the
+    /// returned error cannot later publish a requested-domain fallback.
     pub fn validate_live_owner(
-        &self,
+        &mut self,
         reservation: &RetainedStoreReservation<O>,
     ) -> Result<(), StoreRuntimeError> {
+        self.ensure_mutable()?;
         self.raw
             .validate_live_owner(&reservation.raw)
             .map_err(StoreRuntimeError::Ledger)
@@ -2171,7 +2176,7 @@ where
     {
         if self.raw.is_terminal_only() {
             return Err(RetainedStoreOpenError {
-                recovery: Some(RetainedStoreOpenRecovery::FallbackOnly(
+                recovery: Some(StoreOpenRecoveryAuthority::FallbackOnly(
                     StoreOpenFallbackOnly { operation: self },
                 )),
                 cause: StoreRuntimeError::FallbackOnly,
@@ -2179,7 +2184,7 @@ where
         }
         if let Err(cause) = self.validate_publication_plan_keys(&plan) {
             return Err(RetainedStoreOpenError {
-                recovery: Some(RetainedStoreOpenRecovery::Retry(self)),
+                recovery: Some(StoreOpenRecoveryAuthority::Retry(self)),
                 cause,
             });
         }
@@ -2201,7 +2206,7 @@ where
                 match error.into_recovery() {
                     Ok(RetainedPublicationOpenRecovery::Retry(raw)) => {
                         Err(RetainedStoreOpenError {
-                            recovery: Some(RetainedStoreOpenRecovery::Retry(Self {
+                            recovery: Some(StoreOpenRecoveryAuthority::Retry(Self {
                                 raw,
                                 domain,
                                 lineage,
@@ -2211,7 +2216,7 @@ where
                     }
                     Ok(RetainedPublicationOpenRecovery::FallbackOnly(raw)) => {
                         Err(RetainedStoreOpenError {
-                            recovery: Some(RetainedStoreOpenRecovery::FallbackOnly(
+                            recovery: Some(StoreOpenRecoveryAuthority::FallbackOnly(
                                 StoreOpenFallbackOnly {
                                     operation: Self {
                                         raw,
@@ -2325,17 +2330,22 @@ where
     if !plan.failure_terminal_work_is_separate() {
         return Err(RetainedStoreStartError::InvalidTerminalLimits);
     }
-    if let Some(dimension) = failure_terminal_dimension {
-        if !ledger_plan.owns_dimension(dimension) {
-            return Err(RetainedStoreStartError::Runtime(
-                StoreRuntimeError::ForeignDimensionDomain { dimension },
-            ));
-        }
-        if !ledger_plan.contains_dimension(dimension) {
-            return Err(RetainedStoreStartError::Runtime(StoreRuntimeError::Ledger(
-                LedgerCause::UnknownDimension { dimension },
-            )));
-        }
+    if !ledger_plan.owns_dimension(failure_terminal_dimension) {
+        return Err(RetainedStoreStartError::Runtime(
+            StoreRuntimeError::ForeignDimensionDomain {
+                dimension: failure_terminal_dimension,
+            },
+        ));
+    }
+    if !ledger_plan.contains_dimension(failure_terminal_dimension) {
+        return Err(RetainedStoreStartError::Runtime(StoreRuntimeError::Ledger(
+            LedgerCause::UnknownDimension {
+                dimension: failure_terminal_dimension,
+            },
+        )));
+    }
+    if !plan.failure_terminal_budget_matches(&ledger_plan) {
+        return Err(RetainedStoreStartError::InvalidTerminalLimits);
     }
     let allocation_plan = RetainedAllocationPlan::new(0, 0)
         .map_err(|_| RetainedStoreStartError::Runtime(StoreRuntimeError::InvalidPublicationPlan))?;
@@ -2349,7 +2359,7 @@ where
         snapshot_amount,
         failure_terminal_work,
     } = plan.into_raw_start_parts();
-    let mut raw_plan = RetainedOperationStartPlan::for_publication(
+    let raw_plan = RetainedOperationStartPlan::for_publication(
         terminal_writer,
         share,
         allocation_plan,
@@ -2357,10 +2367,8 @@ where
         fallback_amount,
         snapshot_dimension,
         snapshot_amount,
-    );
-    if let Some(failure_terminal_work) = failure_terminal_work {
-        raw_plan = raw_plan.with_failure_terminal_work(failure_terminal_work);
-    }
+    )
+    .with_failure_terminal_work(failure_terminal_work);
     let (domain, ledger_limits, phases) = ledger_plan.into_parts();
     let result = match source {
         Some(source) => RetainedOperation::try_start_derived_with_phase_catalog(
@@ -2401,7 +2409,7 @@ where
 /// This owner deliberately exposes only the pre-admitted minimal fallback. It cannot reopen block
 /// tables, create checkpoints, or begin a new transcript.
 #[must_use = "publish the pre-admitted minimal fallback"]
-pub struct StoreOpenFallbackOnly<O, PP, U, L = FreshStoreLineage>
+pub(crate) struct StoreOpenFallbackOnly<O, PP, U, L = FreshStoreLineage>
 where
     O: OperationOwner,
     PP: ProgressPhase,
@@ -2417,7 +2425,7 @@ where
     U: ProgressUnit,
 {
     /// Publishes the pre-admitted minimal fallback without reopening retained tables.
-    pub fn prepare_minimal_fallback(
+    pub(crate) fn prepare_minimal_fallback(
         self,
         cause: u32,
     ) -> Result<PreparedStoreFallback, StorePrepareError> {
@@ -2438,18 +2446,31 @@ where
     }
 }
 
-/// Capability preserved after a retained publication fails to open.
-#[must_use = "retry the operation or publish the pre-admitted minimal fallback"]
-pub enum RetainedStoreOpenRecovery<O, PP, U, L = FreshStoreLineage>
+enum StoreOpenRecoveryAuthority<O, PP, U, L>
 where
     O: OperationOwner,
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    /// Pure preflight or rollback-safe failure preserved the complete operation authority.
     Retry(RetainedStoreOperation<O, PP, U, L>),
-    /// Opening consumed the single-use failure-terminal authority.
     FallbackOnly(StoreOpenFallbackOnly<O, PP, U, L>),
+}
+
+/// Exact open cause coupled to the authority proven safe after rollback.
+///
+/// The linear operation and fallback-only owner remain private so callers cannot discard the
+/// cause and publish an unrelated domain code. Retry is available only through
+/// [`Self::retry_publication_assembly`], while fallback consumes this complete wrapper through
+/// [`Self::prepare_minimal_fallback_with`].
+#[must_use = "retry the publication or map the exact cause before publishing minimal fallback"]
+pub struct RetainedStoreOpenRecovery<O, PP, U, L = FreshStoreLineage>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    cause: StoreRuntimeError,
+    authority: StoreOpenRecoveryAuthority<O, PP, U, L>,
 }
 
 impl<O, PP, U, L> RetainedStoreOpenRecovery<O, PP, U, L>
@@ -2458,14 +2479,59 @@ where
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    /// Publishes the pre-admitted minimal fallback from either recovery state.
-    pub fn prepare_minimal_fallback(
+    /// Returns the exact typed open cause without separating it from linear authority.
+    pub const fn cause(&self) -> &StoreRuntimeError {
+        &self.cause
+    }
+
+    /// Returns whether pure preflight or verified rollback preserved retry authority.
+    pub const fn is_retryable(&self) -> bool {
+        matches!(&self.authority, StoreOpenRecoveryAuthority::Retry(_))
+    }
+
+    /// Returns whether opening consumed the single-use failure-terminal authority.
+    pub const fn is_fallback_only(&self) -> bool {
+        matches!(&self.authority, StoreOpenRecoveryAuthority::FallbackOnly(_))
+    }
+
+    /// Retries publication without exposing the retained operation owner.
+    ///
+    /// Calling this on a fallback-only disposition returns the same exact cause and authority as a
+    /// new open error; no plan work is attempted.
+    #[allow(
+        clippy::type_complexity,
+        reason = "the exact typestate pair keeps retry authority and its cause coupled without a public alias"
+    )]
+    pub fn retry_publication_assembly(
         self,
-        cause: u32,
+        plan: RetainedStorePublicationPlan,
+    ) -> Result<RetainedStorePublicationAssembly<O, PP, U, L>, RetainedStoreOpenError<O, PP, U, L>>
+    {
+        match self.authority {
+            StoreOpenRecoveryAuthority::Retry(operation) => {
+                operation.try_publication_assembly(plan)
+            }
+            StoreOpenRecoveryAuthority::FallbackOnly(owner) => Err(RetainedStoreOpenError {
+                recovery: Some(StoreOpenRecoveryAuthority::FallbackOnly(owner)),
+                cause: self.cause,
+            }),
+        }
+    }
+
+    /// Maps the exact open cause before publishing the pre-admitted minimal fallback.
+    pub fn prepare_minimal_fallback_with(
+        self,
+        classify: impl FnOnce(&StoreRuntimeError) -> u32,
     ) -> Result<PreparedStoreFallback, StorePrepareError> {
-        match self {
-            Self::Retry(operation) => operation.prepare_minimal_fallback(cause),
-            Self::FallbackOnly(owner) => owner.prepare_minimal_fallback(cause),
+        match self.authority {
+            StoreOpenRecoveryAuthority::Retry(operation) => {
+                let code = classify(&self.cause);
+                operation.prepare_minimal_fallback(code)
+            }
+            StoreOpenRecoveryAuthority::FallbackOnly(owner) => {
+                let code = classify(&self.cause);
+                owner.prepare_minimal_fallback(code)
+            }
         }
     }
 }
@@ -2477,10 +2543,16 @@ where
     U: ProgressUnit,
 {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Retry(_) => formatter.write_str("Retry(..)"),
-            Self::FallbackOnly(_) => formatter.write_str("FallbackOnly(..)"),
-        }
+        let disposition = if self.is_retryable() {
+            "retry"
+        } else {
+            "fallback-only"
+        };
+        formatter
+            .debug_struct("RetainedStoreOpenRecovery")
+            .field("cause", &self.cause)
+            .field("disposition", &disposition)
+            .finish_non_exhaustive()
     }
 }
 
@@ -2492,7 +2564,7 @@ where
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    recovery: Option<RetainedStoreOpenRecovery<O, PP, U, L>>,
+    recovery: Option<StoreOpenRecoveryAuthority<O, PP, U, L>>,
     cause: StoreRuntimeError,
 }
 
@@ -2507,11 +2579,17 @@ where
         &self.cause
     }
 
-    /// Recovers either retry authority or a narrow fallback-only owner after proven rollback.
-    pub fn into_recovery(
+    /// Couples the exact cause to recoverable authority, or returns the fail-closed cause.
+    pub fn into_disposition(
         self,
     ) -> Result<RetainedStoreOpenRecovery<O, PP, U, L>, StoreRuntimeError> {
-        self.recovery.ok_or(self.cause)
+        match self.recovery {
+            Some(authority) => Ok(RetainedStoreOpenRecovery {
+                cause: self.cause,
+                authority,
+            }),
+            None => Err(self.cause),
+        }
     }
 }
 
@@ -2523,8 +2601,8 @@ where
 {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let disposition = match &self.recovery {
-            Some(RetainedStoreOpenRecovery::Retry(_)) => "retry",
-            Some(RetainedStoreOpenRecovery::FallbackOnly(_)) => "fallback-only",
+            Some(StoreOpenRecoveryAuthority::Retry(_)) => "retry",
+            Some(StoreOpenRecoveryAuthority::FallbackOnly(_)) => "fallback-only",
             None => "fail-closed",
         };
         formatter

@@ -7,11 +7,32 @@ fn minimal_fallback_keeps_two_by_two_terminal_evidence_after_producer_unload() {
     let producer = fake_producer();
     let producer_unloaded = Arc::downgrade(&producer);
     let TestVocabulary { domain, keys } = test_vocabulary_for(producer.catalog);
-    let policy = DimensionPolicy::reservable_bytes(u64::MAX, u64::MAX, u64::MAX, u64::MAX)
+    let failure_terminal_work = RetainedStoreFailureTerminalWorkPlan::new(
+        keys.failure_terminal_dimension,
+        1,
+        u64::MAX,
+        u64::MAX,
+    )
+    .unwrap();
+    let policy = DimensionPolicy::reservable_bytes(
+        failure_terminal_work.ordinary_attempted_work_limit(),
+        failure_terminal_work.ordinary_consumed_work_limit(),
+        u64::MAX,
+        u64::MAX,
+    )
+    .with_published_outcome_evidence_limit(u64::MAX);
+    let secondary_policy = DimensionPolicy::reservable_bytes(0, 0, u64::MAX, u64::MAX)
         .with_published_outcome_evidence_limit(u64::MAX);
     let limits = LedgerLimits::new(
         u64::MAX,
-        [(keys.dimension, policy), (keys.other_dimension, policy)],
+        [
+            (keys.dimension, policy),
+            (keys.other_dimension, secondary_policy),
+            (
+                keys.failure_terminal_dimension,
+                failure_terminal_work.requirement().dimension_policy(),
+            ),
+        ],
     )
     .unwrap();
     let ledger_plan =
@@ -24,6 +45,7 @@ fn minimal_fallback_keeps_two_by_two_terminal_evidence_after_producer_unload() {
         1,
         keys.dimension,
         1,
+        failure_terminal_work,
     );
     let operation =
         TestOperation::try_start(OperationControl::default(), ledger_plan, &account, start)
@@ -50,9 +72,15 @@ fn minimal_fallback_keeps_two_by_two_terminal_evidence_after_producer_unload() {
     let second_dimension = evidence
         .dimension_by_semantic(keys.other_dimension.semantic_id())
         .expect("second semantic dimension");
+    let failure_terminal_dimension = evidence
+        .dimension_by_semantic(keys.failure_terminal_dimension.semantic_id())
+        .expect("protected failure-terminal dimension");
     assert_eq!(evidence.dimension_at(0), Some(first_dimension));
     assert_eq!(evidence.dimension_at(1), Some(second_dimension));
+    assert_eq!(evidence.dimension_at(2), Some(failure_terminal_dimension));
     assert_ne!(first_dimension.dimension(), second_dimension.dimension());
+    assert_eq!(failure_terminal_dimension.attempted(), 0);
+    assert_eq!(failure_terminal_dimension.consumed(), 0);
 
     let first_phase = evidence
         .phase_by_semantic(keys.phase.semantic_id())
@@ -63,9 +91,9 @@ fn minimal_fallback_keeps_two_by_two_terminal_evidence_after_producer_unload() {
     assert_eq!(evidence.phase_at(0), Some(first_phase));
     assert_eq!(evidence.phase_at(1), Some(second_phase));
     assert_ne!(first_phase.phase(), second_phase.phase());
-    assert_eq!(evidence.dimension_at(2), None);
+    assert_eq!(evidence.dimension_at(3), None);
     assert_eq!(evidence.phase_at(2), None);
-    assert_eq!(evidence.header().dimension_count(), 2);
+    assert_eq!(evidence.header().dimension_count(), 3);
     assert_eq!(evidence.header().phase_count(), 2);
 
     drop(evidence);

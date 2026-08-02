@@ -75,12 +75,10 @@ impl PendingNodeTransformEdit<'_> {
         let mut assembly = match raw.try_publication_assembly(publication) {
             Ok(assembly) => assembly,
             Err(error) => {
-                let cause = node_scene_failure_code(error.cause());
                 let recovery = error
-                    .into_recovery()
+                    .into_disposition()
                     .map_err(SceneConstructionError::from)?;
-                return prepare_edit_minimal_from_open_recovery(recovery, cause)
-                    .map_err(Into::into);
+                return prepare_edit_minimal_from_open_recovery(recovery).map_err(Into::into);
             }
         };
 

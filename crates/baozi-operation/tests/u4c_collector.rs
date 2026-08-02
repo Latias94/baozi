@@ -8,11 +8,12 @@ use baozi_operation::{
     PhysicalStorageAccountFactory, PhysicalStorageAccountFactoryLimits,
     PhysicalStorageAccountLimits, PreparedStoreSuccessOutcome, ProgressPhase, ProgressUnit,
     PublishedCanonicalStore, PublishedOutcomeEvidenceStore, PublishedStoreSuccessParts, RecordPlan,
-    RetainedStoreBatchLimits, RetainedStoreBlockTablePlan, RetainedStoreOperation,
-    RetainedStorePublicationPlan, RetainedStoreSharePlan, RetainedStoreStartPlan,
-    RetainedStoreWriterPlan, ScalarSequence, SequencePlan, StoreDimensionKey,
-    StoreDimensionSemanticId, StoreFallbackEnvelope, StoreKeyDomain, StoreLedgerPlan,
-    StorePhaseKey, StorePhaseSemanticId, StoreSemanticCatalogId, StoreSuccessValidation, Utf8Plan,
+    RetainedStoreBatchLimits, RetainedStoreBlockTablePlan, RetainedStoreFailureTerminalWorkPlan,
+    RetainedStoreOperation, RetainedStorePublicationPlan, RetainedStoreSharePlan,
+    RetainedStoreStartPlan, RetainedStoreWriterPlan, ScalarSequence, SequencePlan,
+    StoreDimensionKey, StoreDimensionSemanticId, StoreFallbackEnvelope, StoreKeyDomain,
+    StoreLedgerPlan, StorePhaseKey, StorePhaseSemanticId, StoreSemanticCatalogId,
+    StoreSuccessValidation, Utf8Plan,
 };
 use syn::visit::Visit;
 
@@ -20,6 +21,8 @@ use syn::visit::Visit;
 mod isolated_collector;
 
 static COLLECTOR_TEST_LOCK: Mutex<()> = Mutex::new(());
+const TEST_TERMINAL_ATTRIBUTION_SLOTS: usize = 32;
+const TEST_MAX_FAILURE_EVIDENCE_MEMBERS: usize = 4;
 
 fn module_items<'a>(items: &'a [syn::Item], name: &str) -> &'a [syn::Item] {
     let modules = items
@@ -483,6 +486,7 @@ type SharedOutcomeEvidence =
 struct TestKeys {
     phase: StorePhaseKey,
     dimension: StoreDimensionKey,
+    failure_terminal_dimension: StoreDimensionKey,
 }
 
 struct PublishedSharedSource {
@@ -522,6 +526,9 @@ fn keys() -> (StoreKeyDomain, TestKeys) {
         dimension: domain
             .try_admit_dimension(dimension_semantic(1))
             .expect("test dimension key"),
+        failure_terminal_dimension: domain
+            .try_admit_dimension(dimension_semantic(2))
+            .expect("test failure-terminal dimension key"),
     };
     (domain, keys)
 }
@@ -537,18 +544,41 @@ fn writer_plan(keys: TestKeys, attributions: usize, commitments: usize) -> Retai
 
 fn operation(account: &PhysicalStorageAccount) -> (TestOperation, TestKeys) {
     let (domain, keys) = keys();
-    let policy = DimensionPolicy::reservable_bytes(u64::MAX, u64::MAX, u64::MAX, u64::MAX)
-        .with_published_outcome_evidence_limit(u64::MAX);
-    let limits = LedgerLimits::new(u64::MAX, [(keys.dimension, policy)]).expect("test limits");
+    let failure_terminal_work = RetainedStoreFailureTerminalWorkPlan::new(
+        keys.failure_terminal_dimension,
+        TEST_MAX_FAILURE_EVIDENCE_MEMBERS,
+        u64::MAX,
+        u64::MAX,
+    )
+    .expect("test failure-terminal work plan");
+    let ordinary_policy = DimensionPolicy::reservable_bytes(
+        failure_terminal_work.ordinary_attempted_work_limit(),
+        failure_terminal_work.ordinary_consumed_work_limit(),
+        u64::MAX,
+        u64::MAX,
+    )
+    .with_published_outcome_evidence_limit(u64::MAX);
+    let limits = LedgerLimits::new(
+        u64::MAX,
+        [
+            (keys.dimension, ordinary_policy),
+            (
+                keys.failure_terminal_dimension,
+                failure_terminal_work.requirement().dimension_policy(),
+            ),
+        ],
+    )
+    .expect("test limits");
     let ledger_plan = StoreLedgerPlan::try_new(domain, limits, &[keys.phase]).expect("test ledger");
     let start = RetainedStoreStartPlan::new(
-        writer_plan(keys, 32, 8),
+        writer_plan(keys, TEST_TERMINAL_ATTRIBUTION_SLOTS, 8),
         RetainedStoreSharePlan::new(keys.dimension, keys.dimension),
         StoreFallbackEnvelope::new(91),
         keys.dimension,
         1,
         keys.dimension,
         1,
+        failure_terminal_work,
     );
     (
         TestOperation::try_start(OperationControl::default(), ledger_plan, account, start)
@@ -561,18 +591,41 @@ fn derived_operation<'source>(
     source: &'source SharedCanonical,
 ) -> (DerivedTestOperation<'source>, TestKeys) {
     let (domain, keys) = keys();
-    let policy = DimensionPolicy::reservable_bytes(u64::MAX, u64::MAX, u64::MAX, u64::MAX)
-        .with_published_outcome_evidence_limit(u64::MAX);
-    let limits = LedgerLimits::new(u64::MAX, [(keys.dimension, policy)]).expect("test limits");
+    let failure_terminal_work = RetainedStoreFailureTerminalWorkPlan::new(
+        keys.failure_terminal_dimension,
+        TEST_MAX_FAILURE_EVIDENCE_MEMBERS,
+        u64::MAX,
+        u64::MAX,
+    )
+    .expect("test failure-terminal work plan");
+    let ordinary_policy = DimensionPolicy::reservable_bytes(
+        failure_terminal_work.ordinary_attempted_work_limit(),
+        failure_terminal_work.ordinary_consumed_work_limit(),
+        u64::MAX,
+        u64::MAX,
+    )
+    .with_published_outcome_evidence_limit(u64::MAX);
+    let limits = LedgerLimits::new(
+        u64::MAX,
+        [
+            (keys.dimension, ordinary_policy),
+            (
+                keys.failure_terminal_dimension,
+                failure_terminal_work.requirement().dimension_policy(),
+            ),
+        ],
+    )
+    .expect("test limits");
     let ledger_plan = StoreLedgerPlan::try_new(domain, limits, &[keys.phase]).expect("test ledger");
     let start = RetainedStoreStartPlan::new(
-        writer_plan(keys, 32, 8),
+        writer_plan(keys, TEST_TERMINAL_ATTRIBUTION_SLOTS, 8),
         RetainedStoreSharePlan::new(keys.dimension, keys.dimension),
         StoreFallbackEnvelope::new(91),
         keys.dimension,
         1,
         keys.dimension,
         1,
+        failure_terminal_work,
     );
     (
         TestOperation::try_start_derived(OperationControl::default(), ledger_plan, source, start)

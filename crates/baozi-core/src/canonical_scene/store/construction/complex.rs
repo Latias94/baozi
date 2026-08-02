@@ -36,11 +36,11 @@ use super::super::validation::{
     validate_complex_fixture_evidence_graph, validate_complex_fixture_graph,
 };
 use super::{
-    ConstructionBrand, FALLBACK_CODE, PreparedTracerSceneFallback, PreparedTracerSceneRichFailure,
+    ConstructionBrand, PreparedTracerSceneFallback, PreparedTracerSceneRichFailure,
     SEMANTIC_REJECTION_CODE, SceneConstructionError, SceneConstructionOperation,
     SceneConstructionOwner, SceneConstructionPhase, SceneConstructionUnit, SceneStoreAssembly,
     SceneStoreFailureAssembly, SceneStoreKeys, TracerSceneFallback, TracerSceneRichFailure,
-    final_progress,
+    final_progress, prepare_tracer_scene_open_fallback,
 };
 use crate::identity::{ReservedSceneGeneration, SceneGenerationError, SceneGenerationId};
 
@@ -248,9 +248,8 @@ pub(super) fn prepare(
     let mut assembly = match raw.try_publication_assembly(publication_plan) {
         Ok(assembly) => assembly,
         Err(error) => {
-            let store = error
-                .into_recovery()?
-                .prepare_minimal_fallback(FALLBACK_CODE)?;
+            let recovery = error.into_disposition()?;
+            let store = prepare_tracer_scene_open_fallback(recovery)?;
             return Ok(PreparedComplexFixture::MinimalFallback(
                 PreparedTracerSceneFallback { store },
             ));

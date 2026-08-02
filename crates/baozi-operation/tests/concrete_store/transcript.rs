@@ -5,14 +5,15 @@ use baozi_operation::{
     OutcomeEvidenceSequenceRef, PublishedCanonicalStore, PublishedOutcomeEvidenceStore,
     PublishedStoreFallbackParts, ScalarSequence, SequenceBatchItem, SequenceBatchPlan,
     StoreBuildError, StoreExecutionError, StoreTranscriptFailureValidation,
-    StoreTranscriptOpenRecovery, StoreTranscriptPlanError, StoreTranscriptStartCause,
-    StoreTranscriptSuccessValidation,
+    StoreTranscriptPlanError, StoreTranscriptStartCause, StoreTranscriptSuccessValidation,
 };
 
 type TranscriptCanonicalSource = PublishedCanonicalStore<ScalarSequence<u32>, CanonicalRootTag>;
 type TranscriptEvidenceSource = PublishedOutcomeEvidenceStore<ScalarSequence<u8>, EvidenceRootTag>;
 type DerivedTranscriptOperation<'source> =
     baozi_operation::DerivedRetainedStoreOperation<'source, TestOwner, TestProgress, TestUnit>;
+
+const DERIVED_TRANSCRIPT_MAX_FAILURE_EVIDENCE_MEMBERS: usize = 3;
 
 struct TranscriptSource {
     canonical: TranscriptCanonicalSource,
@@ -29,18 +30,41 @@ fn derived_transcript_operation<'source>(
     source: &'source TranscriptCanonicalSource,
 ) -> (DerivedTranscriptOperation<'source>, TestKeys) {
     let TestVocabulary { domain, keys } = test_vocabulary();
-    let policy = DimensionPolicy::reservable_bytes(u64::MAX, u64::MAX, u64::MAX, u64::MAX)
-        .with_published_outcome_evidence_limit(u64::MAX);
-    let limits = LedgerLimits::new(u64::MAX, [(keys.dimension, policy)]).unwrap();
+    let failure_terminal_work = RetainedStoreFailureTerminalWorkPlan::new(
+        keys.failure_terminal_dimension,
+        DERIVED_TRANSCRIPT_MAX_FAILURE_EVIDENCE_MEMBERS,
+        u64::MAX,
+        u64::MAX,
+    )
+    .unwrap();
+    let policy = DimensionPolicy::reservable_bytes(
+        failure_terminal_work.ordinary_attempted_work_limit(),
+        failure_terminal_work.ordinary_consumed_work_limit(),
+        u64::MAX,
+        u64::MAX,
+    )
+    .with_published_outcome_evidence_limit(u64::MAX);
+    let limits = LedgerLimits::new(
+        u64::MAX,
+        [
+            (keys.dimension, policy),
+            (
+                keys.failure_terminal_dimension,
+                failure_terminal_work.requirement().dimension_policy(),
+            ),
+        ],
+    )
+    .unwrap();
     let ledger_plan = StoreLedgerPlan::try_new(domain, limits, &[keys.phase]).unwrap();
     let start = RetainedStoreStartPlan::new(
-        writer_plan(keys, 32, 8),
+        writer_plan(keys, TEST_TERMINAL_ATTRIBUTION_SLOTS, 8),
         RetainedStoreSharePlan::new(keys.dimension, keys.dimension),
         StoreFallbackEnvelope::new(91),
         keys.dimension,
         1,
         keys.dimension,
         1,
+        failure_terminal_work,
     );
     (
         TestOperation::try_start_derived(OperationControl::default(), ledger_plan, source, start)
@@ -355,7 +379,7 @@ fn ordinary_build_failure_leaves_instruction_retryable() {
 }
 
 #[test]
-fn semantic_rejection_runs_only_the_precompiled_failure_tail() {
+fn semantic_rejection_uses_the_precompiled_tail_and_seals_after_protected_failure() {
     let factory = factory(1);
     let account = account(&factory);
     let (operation, keys) = operation(&account);
@@ -375,7 +399,7 @@ fn semantic_rejection_runs_only_the_precompiled_failure_tail() {
     let failure_root_ticket = transcript
         .plan_outcome_evidence_records(1, 2, EvidenceRecordLeafTag)
         .unwrap();
-    let failure_commit = transcript
+    let _failure_commit = transcript
         .plan_outcome_evidence_commit(keys.dimension, 3)
         .unwrap();
 
@@ -452,65 +476,28 @@ fn semantic_rejection_runs_only_the_precompiled_failure_tail() {
         before_tail_failure.live_retained_allocations()
     );
 
-    let detail = failure
-        .try_execute_utf8(&detail_ticket, |writer| writer.write_str("rejected"))
-        .unwrap();
-    let failure_root = failure
-        .try_execute_records(&failure_root_ticket, |writer| {
-            writer.write_row(|row| {
-                row.write_sequence_ref(evidence_root)?;
-                row.write_utf8_ref(detail)
-            })
-        })
-        .unwrap();
-    failure.try_execute_commit(&failure_commit).unwrap();
-    assert!(failure.is_complete());
-    let validated = match failure
-        .try_validate_rich_failure(failure_root, |session, root| {
-            let Some(records) = session.records(root) else {
-                return false;
-            };
-            let Some(preserved) = records.sequence_ref::<u8, EvidenceRootTag>(0, 0) else {
-                return false;
-            };
-            let Some(detail) = records.utf8_ref::<EvidenceTextTag>(0, 1) else {
-                return false;
-            };
-            session.sequence(preserved).and_then(|view| view.get(0)) == Some(29)
-                && session.utf8(detail) == Some("rejected")
-        })
-        .unwrap()
-    {
-        StoreTranscriptFailureValidation::Valid(validated) => validated,
-        _ => panic!("completed rejection tail must validate"),
-    };
-    let prepared = match validated.try_prepare(81, final_progress()).unwrap() {
-        PreparedStoreFailureOutcome::RichFailure(prepared) => prepared,
-        PreparedStoreFailureOutcome::MinimalFallback(_) => {
-            panic!("validated transcript failure must remain rich")
-        }
-    };
-    let PublishedStoreFailureParts {
-        outcome_evidence,
-        ledger_evidence,
-    } = prepared.handoff();
+    let rejected_retry_called = Cell::new(false);
+    assert!(matches!(
+        failure.try_execute_utf8(&detail_ticket, |_writer| {
+            rejected_retry_called.set(true);
+            Ok(())
+        }),
+        Err(StoreExecutionError::Runtime(
+            StoreRuntimeError::FallbackOnly
+        ))
+    ));
+    assert!(!rejected_retry_called.get());
+
+    let PublishedStoreFallbackParts {
+        ledger_evidence, ..
+    } = failure.prepare_minimal_fallback().unwrap().handoff();
     assert_eq!(ledger_evidence.header().current_live_bytes(), 0);
     assert_eq!(ledger_evidence.header().active_reservations(), 0);
-    assert_eq!(store_failure_cause(&ledger_evidence).code(), 81);
     assert_eq!(
-        ledger_evidence
-            .dimension(keys.dimension)
-            .unwrap()
-            .published_outcome_evidence(),
-        4
+        store_failure_cause(&ledger_evidence).class(),
+        StorePreparationFailureClass::ProductGraph
     );
-    let view = outcome_evidence.outcome_evidence();
-    let root = view.root();
-    let preserved = root.sequence_ref::<u8, EvidenceRootTag>(0, 0).unwrap();
-    let detail = root.utf8_ref::<EvidenceTextTag>(0, 1).unwrap();
-    assert_eq!(view.sequence(preserved).unwrap().get(0), Some(29));
-    assert_eq!(view.utf8(detail), Some("rejected"));
-    drop(outcome_evidence);
+    assert_eq!(store_failure_cause(&ledger_evidence).code(), 0x4654_5753);
     drop(ledger_evidence);
     assert_eq!(account.snapshot().live_retained_bytes(), 0);
     assert_eq!(account.snapshot().live_retained_allocations(), 0);
@@ -1224,24 +1211,21 @@ fn incomplete_derived_open_preserves_exact_source_authority_and_existing_tickets
         Ok(_) => panic!("success publication without evidence must not open"),
         Err(error) => error,
     };
-    let mut transcript = match open_error.into_recovery() {
-        Ok(StoreTranscriptOpenRecovery::Retry(transcript)) => transcript,
-        Ok(StoreTranscriptOpenRecovery::FallbackOnly(_)) => {
-            panic!("incomplete transcript preflight must not consume terminal authority")
-        }
-        Err(cause) => panic!("incomplete derived transcript failed closed: {cause:?}"),
-    };
+    let mut recovery = open_error
+        .into_disposition()
+        .expect("incomplete derived transcript must preserve retry authority");
+    assert!(recovery.is_retryable());
     assert!(matches!(
-        transcript.plan_canonical_sequence_share(source_b.canonical_root),
+        recovery.plan_canonical_sequence_share(source_b.canonical_root),
         Err(StoreTranscriptPlanError::Runtime(
             StoreRuntimeError::InvalidSourceSlot
         ))
     ));
-    let evidence_ticket = transcript
+    let evidence_ticket = recovery
         .plan_outcome_evidence_sequence::<u8, _>(1, EvidenceRootTag)
         .unwrap();
 
-    let mut execution = transcript.try_open().unwrap();
+    let mut execution = recovery.retry_open().unwrap();
     let _shared = execution
         .try_execute_canonical_sequence_share(&canonical_ticket)
         .expect("recovered transcript must retain its exact source authority");
@@ -1278,18 +1262,15 @@ fn incomplete_open_returns_the_same_transcript_for_repair() {
         open_error.cause(),
         StoreRuntimeError::InvalidPublicationPlan
     ));
-    let mut transcript = match open_error.into_recovery() {
-        Ok(StoreTranscriptOpenRecovery::Retry(transcript)) => transcript,
-        Ok(StoreTranscriptOpenRecovery::FallbackOnly(_)) => {
-            panic!("structural plan rejection must not consume terminal authority")
-        }
-        Err(cause) => panic!("structural plan rejection failed closed: {cause:?}"),
-    };
-    let evidence_ticket = transcript
+    let mut recovery = open_error
+        .into_disposition()
+        .expect("structural plan rejection must preserve retry authority");
+    assert!(recovery.is_retryable());
+    let evidence_ticket = recovery
         .plan_outcome_evidence_sequence::<u8, _>(1, EvidenceRootTag)
         .unwrap();
 
-    let mut execution = transcript.try_open().unwrap();
+    let mut execution = recovery.retry_open().unwrap();
     let canonical_root = execution
         .try_execute_canonical_sequence(&canonical_ticket, |writer| writer.push(37))
         .unwrap();
