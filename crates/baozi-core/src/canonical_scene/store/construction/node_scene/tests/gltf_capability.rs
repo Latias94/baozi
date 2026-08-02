@@ -39,7 +39,7 @@ use crate::canonical_scene::store::production::{
     MorphTargetDefinitionAuthoring, MorphTargetIdentity, NodeAuthoringBatch, NodeAuthoringNode,
     NodeLocalId, NodeParent, Presence, PrimitiveDeformationAuthoring,
     PrimitiveMorphTargetAuthoring, SamplerAuthoring, SamplerLocalId, SceneAuthoringBatch,
-    SkinAuthoring, SkinLocalId, TextureAuthoring, TextureLocalId,
+    SkinAuthoring, SkinLocalId, SpatialAuthoringBatch, TextureAuthoring, TextureLocalId,
 };
 use crate::deform::{MorphDeltaSemantic, SkinMatrixSpace, SkinMatrixSpaces};
 use crate::entity::{AuthoredTransform, AuthoredTransformKind, EntityName};
@@ -48,6 +48,7 @@ use crate::geometry::TopologyKind;
 use crate::identity::{ReservedSceneGeneration, SceneGenerationError, SceneGenerationId};
 use crate::image::{MipmapFilter, SamplerState, TexelFilter, TextureAddressMode};
 use crate::math::{Color, Mat4, Quat, Vec2, Vec3};
+use crate::scene_space::SceneSpace;
 
 use super::{
     NodeSceneConstructionRejection, assert_released, rich_failure, terminal_failure_class,
@@ -1006,11 +1007,23 @@ fn with_gltf_capability_input<R>(
     };
     let roots = [NodeLocalId::new(0), NodeLocalId::new(1)];
     let nodes = [
-        NodeAuthoringNode::new(Presence::Absent, node_zero_transform),
-        NodeAuthoringNode::new(Presence::Absent, AuthoredTransform::identity_trs()),
+        NodeAuthoringNode::new(
+            Presence::Absent,
+            node_zero_transform,
+            Presence::Absent,
+            Presence::Absent,
+        ),
+        NodeAuthoringNode::new(
+            Presence::Absent,
+            AuthoredTransform::identity_trs(),
+            Presence::Absent,
+            Presence::Absent,
+        ),
         NodeAuthoringNode::new(
             Presence::Present(NodeParent::new(NodeLocalId::new(1), 0)),
             AuthoredTransform::identity_trs(),
+            Presence::Absent,
+            Presence::Absent,
         ),
     ];
     let node_batch = NodeAuthoringBatch::new(Presence::Present(&roots), &nodes);
@@ -1580,7 +1593,14 @@ fn with_gltf_capability_input<R>(
         ),
     };
     use_input(
-        SceneAuthoringBatch::new(node_batch, appearance, geometry, deformation, animations),
+        SceneAuthoringBatch::new(
+            SpatialAuthoringBatch::new(&SceneSpace::UNKNOWN, &[], &[]),
+            node_batch,
+            appearance,
+            geometry,
+            deformation,
+            animations,
+        ),
         selected_source_images,
     )
 }
@@ -2780,7 +2800,7 @@ fn gltf_shape_materializes_all_five_canonical_domains() {
     );
 
     let (full, bounded) = capture_gltf_capability_snapshots_for_probe(&parts);
-    assert_eq!(full.schema_revision, 4);
+    assert_eq!(full.schema_revision, 5);
     assert_eq!(bounded.digest, full.digest);
     assert_eq!(bounded.totals, full.totals);
     assert!(bounded.preview.bytes_truncated || bounded.preview.items_truncated);

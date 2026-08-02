@@ -5,7 +5,7 @@ use crate::SceneValidationLimits;
 use super::input::{Presence, SceneAuthoringBatch};
 use super::{
     ValidatedAnimationBatch, ValidatedAppearanceBatch, ValidatedDeformationBatch,
-    ValidatedGeometryBatch, ValidatedNodeBatch,
+    ValidatedGeometryBatch, ValidatedNodeBatch, ValidatedSpatialBatch,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -53,6 +53,8 @@ impl SceneInputEnvelope {
 
 #[derive(Debug, Clone, Copy)]
 struct SceneTopLevelShape {
+    cameras: usize,
+    lights: usize,
     roots: usize,
     nodes: usize,
     images: usize,
@@ -75,12 +77,15 @@ struct SceneTopLevelShape {
 
 impl SceneTopLevelShape {
     fn from_input(input: SceneAuthoringBatch<'_>) -> Self {
+        let spatial = input.spatial();
         let nodes = input.nodes();
         let appearance = input.appearance();
         let geometry = input.geometry();
         let deformation = input.deformation();
         let animations = input.animations();
         Self {
+            cameras: spatial.cameras().len(),
+            lights: spatial.lights().len(),
             roots: match nodes.roots() {
                 Presence::Absent => 0,
                 Presence::Present(roots) => roots.len(),
@@ -109,6 +114,8 @@ impl SceneTopLevelShape {
         let maximum = u64::from(u32::MAX);
         require_count_domain("authored nodes", self.nodes, maximum.saturating_sub(1))?;
         for (collection, count) in [
+            ("cameras", self.cameras),
+            ("lights", self.lights),
             ("authored roots", self.roots),
             ("images", self.images),
             ("samplers", self.samplers),
@@ -143,6 +150,8 @@ impl SceneTopLevelShape {
     fn entity_lower_bound(self, canonical_nodes: u64) -> Result<u64, SceneInputEnvelopeError> {
         [
             canonical_nodes,
+            usize_to_u64(self.cameras, "spatial entity lower bound")?,
+            usize_to_u64(self.lights, "spatial entity lower bound")?,
             usize_to_u64(self.images, "appearance entity lower bound")?,
             usize_to_u64(self.samplers, "appearance entity lower bound")?,
             usize_to_u64(self.textures, "appearance entity lower bound")?,
@@ -168,6 +177,17 @@ impl SceneTopLevelShape {
     }
 
     fn canonical_block_upper_bound(self) -> Result<usize, SceneInputEnvelopeError> {
+        let spatial = checked_block_sum(
+            [
+                1,
+                presence(self.cameras),
+                presence(self.lights),
+                // Admission reads only top-level slice lengths. Both bounded
+                // namespaced SceneSpace slots are reserved pessimistically.
+                2,
+            ],
+            "spatial block upper bound",
+        )?;
         let node = checked_block_sum(
             [1, scaled_presence(self.nodes, 2)?],
             "node block upper bound",
@@ -232,7 +252,15 @@ impl SceneTopLevelShape {
         )?;
 
         checked_block_sum(
-            [1, node, appearance, geometry, deformation, animation],
+            [
+                1,
+                spatial,
+                node,
+                appearance,
+                geometry,
+                deformation,
+                animation,
+            ],
             "canonical block upper bound",
         )
     }
@@ -322,6 +350,13 @@ struct SceneDomainMetrics {
     scratch_bytes: u64,
 }
 
+pub(in crate::canonical_scene::store) fn node_limits_after_spatial<R>(
+    spatial: &ValidatedSpatialBatch<'_, R>,
+    limits: SceneValidationLimits,
+) -> Result<SceneValidationLimits, SceneAuthoringAggregateError> {
+    remaining_limits_after(spatial_metrics(spatial), limits)
+}
+
 pub(in crate::canonical_scene::store) fn appearance_limits_after_nodes<R>(
     nodes: &ValidatedNodeBatch<'_, R>,
     limits: SceneValidationLimits,
@@ -350,7 +385,8 @@ pub(in crate::canonical_scene::store) fn animation_limits_after_deformation<R>(
     remaining_limits_after(deformation_metrics(deformation), remaining_limits)
 }
 
-pub(in crate::canonical_scene::store) fn validate_scene_aggregate<NR, AR, GR, DR, ANR>(
+pub(in crate::canonical_scene::store) fn validate_scene_aggregate<SR, NR, AR, GR, DR, ANR>(
+    spatial: &ValidatedSpatialBatch<'_, SR>,
     nodes: &ValidatedNodeBatch<'_, NR>,
     appearance: &ValidatedAppearanceBatch<'_, AR>,
     geometry: &ValidatedGeometryBatch<'_, GR>,
@@ -359,6 +395,7 @@ pub(in crate::canonical_scene::store) fn validate_scene_aggregate<NR, AR, GR, DR
     limits: SceneValidationLimits,
 ) -> Result<(), SceneAuthoringAggregateError> {
     let metrics = [
+        spatial_metrics(spatial),
         node_metrics(nodes)?,
         appearance_metrics(appearance),
         geometry_metrics(geometry),
@@ -400,6 +437,18 @@ pub(in crate::canonical_scene::store) fn validate_scene_aggregate<NR, AR, GR, DR
         metrics.map(|domain| domain.scratch_bytes),
         limits.max_scratch_bytes(),
     )
+}
+
+const fn spatial_metrics<R>(spatial: &ValidatedSpatialBatch<'_, R>) -> SceneDomainMetrics {
+    SceneDomainMetrics {
+        entities: spatial.entity_count(),
+        edges: spatial.edge_count(),
+        references: spatial.reference_count(),
+        semantic_cells: spatial.semantic_cell_count(),
+        work: spatial.validation_work(),
+        canonical_bytes: spatial.canonical_bytes(),
+        scratch_bytes: spatial.scratch_bytes(),
+    }
 }
 
 fn node_metrics<R>(

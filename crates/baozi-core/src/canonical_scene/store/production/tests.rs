@@ -16,6 +16,7 @@ use super::*;
 
 mod geometry;
 mod scene;
+mod spatial;
 
 #[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
 enum TestControlError {
@@ -31,6 +32,7 @@ enum TestControlError {
 
 struct TestReservation {
     live: Rc<Cell<usize>>,
+    current_bytes: Rc<Cell<u64>>,
     drop_stage: Option<Rc<Cell<u8>>>,
     kind: SceneReservationKind,
     bytes: u64,
@@ -48,12 +50,20 @@ impl Drop for TestReservation {
         let live = self.live.get();
         assert!(live > 0, "a reservation must be released exactly once");
         self.live.set(live - 1);
+        self.current_bytes.set(
+            self.current_bytes
+                .get()
+                .checked_sub(self.bytes)
+                .expect("test reservation bytes must remain live until drop"),
+        );
     }
 }
 
 #[derive(Default)]
 struct TestControl {
     live: Rc<Cell<usize>>,
+    current_bytes: Rc<Cell<u64>>,
+    peak_bytes: Rc<Cell<u64>>,
     polls: u64,
     work: u64,
     reserves: u64,
@@ -62,6 +72,17 @@ struct TestControl {
     reject_work_after: Option<u64>,
     reject_resize_on: Option<u64>,
     reservation_drop_stage: Option<Rc<Cell<u8>>>,
+}
+
+impl TestControl {
+    fn peak_bytes(&self) -> u64 {
+        self.peak_bytes.get()
+    }
+
+    fn update_peak_bytes(&self) {
+        self.peak_bytes
+            .set(self.peak_bytes.get().max(self.current_bytes.get()));
+    }
 }
 
 impl SceneValidationControl for TestControl {
@@ -96,8 +117,16 @@ impl SceneValidationControl for TestControl {
     ) -> Result<Self::Reservation, Self::Error> {
         self.reserves += 1;
         self.live.set(self.live.get() + 1);
+        self.current_bytes.set(
+            self.current_bytes
+                .get()
+                .checked_add(bytes)
+                .expect("test reservation bytes must be representable"),
+        );
+        self.update_peak_bytes();
         Ok(TestReservation {
             live: Rc::clone(&self.live),
+            current_bytes: Rc::clone(&self.current_bytes),
             drop_stage: self.reservation_drop_stage.as_ref().map(Rc::clone),
             kind,
             bytes,
@@ -129,7 +158,18 @@ impl SceneValidationControl for TestControl {
         if self.reject_resize_on == Some(self.resizes) {
             return Err(TestControlError::ResizeRejected);
         }
+        let without_reservation = self
+            .current_bytes
+            .get()
+            .checked_sub(reservation.bytes)
+            .expect("test reservation resize must retain its prior bytes");
+        self.current_bytes.set(
+            without_reservation
+                .checked_add(required_bytes)
+                .expect("test reservation resize bytes must be representable"),
+        );
         reservation.bytes = required_bytes;
+        self.update_peak_bytes();
         Ok(())
     }
 
@@ -143,8 +183,19 @@ impl SceneValidationControl for TestControl {
         if reservation.kind != from {
             return Err(TestControlError::ReservationKind);
         }
+        let without_reservation = self
+            .current_bytes
+            .get()
+            .checked_sub(reservation.bytes)
+            .expect("test reservation transition must retain its prior bytes");
+        self.current_bytes.set(
+            without_reservation
+                .checked_add(required_bytes)
+                .expect("test reservation transition bytes must be representable"),
+        );
         reservation.kind = to;
         reservation.bytes = required_bytes;
+        self.update_peak_bytes();
         Ok(())
     }
 }
@@ -163,13 +214,20 @@ fn parent(node: u32, child_ordinal: u32) -> Presence<NodeParent> {
 }
 
 fn trs(parent: Presence<NodeParent>) -> NodeAuthoringNode {
-    NodeAuthoringNode::new(parent, AuthoredTransform::identity_trs())
+    NodeAuthoringNode::new(
+        parent,
+        AuthoredTransform::identity_trs(),
+        Presence::Absent,
+        Presence::Absent,
+    )
 }
 
 fn matrix(parent: Presence<NodeParent>) -> NodeAuthoringNode {
     NodeAuthoringNode::new(
         parent,
         AuthoredTransform::try_matrix(Mat4::IDENTITY).expect("identity matrix transform"),
+        Presence::Absent,
+        Presence::Absent,
     )
 }
 

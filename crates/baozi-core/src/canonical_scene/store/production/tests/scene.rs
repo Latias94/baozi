@@ -11,25 +11,29 @@ use super::super::plan::animation::{
 use super::super::plan::appearance::validate_appearance_batch_with_control;
 use super::super::plan::deformation::validate_deformation_batch_with_control;
 use super::super::plan::geometry::validate_geometry_batch_with_control;
+use super::super::plan::spatial::validate_spatial_batch_with_control;
 use super::super::scene::{
     SceneAuthoringAggregateError, SceneAuthoringAggregateLimit, SceneInputEnvelope,
     SceneInputEnvelopeError, animation_limits_after_deformation, appearance_limits_after_nodes,
-    deformation_limits_after_geometry, geometry_limits_after_appearance, validate_scene_aggregate,
+    deformation_limits_after_geometry, geometry_limits_after_appearance, node_limits_after_spatial,
+    validate_scene_aggregate,
 };
 use super::super::{
     AnimationAuthoringBatch, AnimationChannelAuthoring, AnimationExtrapolationAuthoring,
     AnimationInterpolationAuthoring, AnimationTargetAuthoring, AppearanceAuthoringBatch,
     AuthoringRange, DeformationAuthoringBatch, GeometryAuthoringBatch, MaterialAuthoring,
     MaterialBindingAuthoring, NodeAuthoringBatch, NodeAuthoringNode, NodeLocalId, Presence,
-    SceneAuthoringBatch, TextureLocalId,
+    SceneAuthoringBatch, SpatialAuthoringBatch, TextureLocalId,
 };
 use super::{TestControl, trs, validate};
+use crate::scene_space::SceneSpace;
 
 fn empty_scene_input<'input>(
     roots: Presence<&'input [NodeLocalId]>,
     nodes: &'input [NodeAuthoringNode],
 ) -> SceneAuthoringBatch<'input> {
     SceneAuthoringBatch::new(
+        SpatialAuthoringBatch::new(&SceneSpace::UNKNOWN, &[], &[]),
         NodeAuthoringBatch::new(roots, nodes),
         AppearanceAuthoringBatch::empty(),
         GeometryAuthoringBatch::empty(),
@@ -38,7 +42,7 @@ fn empty_scene_input<'input>(
     )
 }
 
-fn checked_total(values: [u64; 5]) -> u64 {
+fn checked_total<const N: usize>(values: [u64; N]) -> u64 {
     values
         .into_iter()
         .try_fold(0_u64, u64::checked_add)
@@ -46,15 +50,15 @@ fn checked_total(values: [u64; 5]) -> u64 {
 }
 
 #[test]
-fn scene_envelope_accounts_for_the_complete_five_domain_shape() {
+fn scene_envelope_accounts_for_the_complete_scene_shape() {
     let empty_roots = [];
     let empty_nodes = [];
     let empty = SceneInputEnvelope::try_new(
         empty_scene_input(Presence::Present(&empty_roots), &empty_nodes),
         SceneValidationLimits::default(),
     )
-    .expect("the empty five-domain Scene shape is representable");
-    assert_eq!(empty.terminal_attribution_slots(), 7);
+    .expect("the empty Scene shape is representable");
+    assert_eq!(empty.terminal_attribution_slots(), 10);
 
     let roots = [NodeLocalId::new(0)];
     let nodes = [trs(Presence::Absent)];
@@ -63,7 +67,7 @@ fn scene_envelope_accounts_for_the_complete_five_domain_shape() {
         SceneValidationLimits::default(),
     )
     .expect("the populated node shape is representable");
-    assert_eq!(populated_nodes.terminal_attribution_slots(), 9);
+    assert_eq!(populated_nodes.terminal_attribution_slots(), 12);
 }
 
 #[test]
@@ -108,6 +112,7 @@ fn scene_envelope_reserves_nested_worst_case_without_deep_validation() {
         Presence::Absent,
     )];
     let input = SceneAuthoringBatch::new(
+        SpatialAuthoringBatch::new(&SceneSpace::UNKNOWN, &[], &[]),
         NodeAuthoringBatch::new(Presence::Absent, &[]),
         AppearanceAuthoringBatch::empty(),
         GeometryAuthoringBatch::empty(),
@@ -125,7 +130,7 @@ fn scene_envelope_reserves_nested_worst_case_without_deep_validation() {
         .expect("the envelope must not inspect invalid nested animation semantics");
 
     // One channel conservatively admits its table plus all four possible payload blocks.
-    assert_eq!(envelope.terminal_attribution_slots(), 12);
+    assert_eq!(envelope.terminal_attribution_slots(), 15);
 }
 
 #[test]
@@ -159,6 +164,7 @@ fn scene_envelope_reserves_complete_appearance_payload_envelope() {
         material_semantics,
     )];
     let input = SceneAuthoringBatch::new(
+        SpatialAuthoringBatch::new(&SceneSpace::UNKNOWN, &[], &[]),
         NodeAuthoringBatch::new(Presence::Absent, &[]),
         AppearanceAuthoringBatch::new(&[], &[], &[], &bindings, &materials),
         GeometryAuthoringBatch::empty(),
@@ -171,7 +177,7 @@ fn scene_envelope_reserves_complete_appearance_payload_envelope() {
 
     // Binding semantics, optional source keys, and material factors each own
     // an independently attributable aggregate payload block.
-    assert_eq!(envelope.terminal_attribution_slots(), 12);
+    assert_eq!(envelope.terminal_attribution_slots(), 15);
 }
 
 #[test]
@@ -181,6 +187,13 @@ fn scene_aggregate_accepts_exact_limits_and_rejects_each_one_short() {
     let mut control = TestControl::default();
     let defaults = SceneValidationLimits::default();
 
+    let spatial_batch = validate_spatial_batch_with_control(
+        SpatialAuthoringBatch::new(&SceneSpace::UNKNOWN, &[], &[]),
+        NodeAuthoringBatch::new(Presence::Present(&roots), &nodes),
+        defaults,
+        &mut control,
+    )
+    .expect("empty spatial domain validates independently");
     let node_batch = validate(Presence::Present(&roots), &nodes, defaults, &mut control)
         .expect("node domain validates independently");
     let appearance_batch = validate_appearance_batch_with_control(
@@ -215,6 +228,7 @@ fn scene_aggregate_accepts_exact_limits_and_rejects_each_one_short() {
     .expect("empty animation domain validates independently");
 
     let entities = checked_total([
+        spatial_batch.entity_count(),
         node_batch.canonical_node_count(),
         appearance_batch.entity_count(),
         geometry_batch.entity_count(),
@@ -222,6 +236,7 @@ fn scene_aggregate_accepts_exact_limits_and_rejects_each_one_short() {
         animation_batch.entity_count(),
     ]);
     let edges = checked_total([
+        spatial_batch.edge_count(),
         node_batch.reference_count(),
         appearance_batch.edge_count(),
         geometry_batch.edge_count(),
@@ -229,6 +244,7 @@ fn scene_aggregate_accepts_exact_limits_and_rejects_each_one_short() {
         animation_batch.edge_count(),
     ]);
     let references = checked_total([
+        spatial_batch.reference_count(),
         node_batch.reference_count(),
         appearance_batch.reference_count(),
         geometry_batch.reference_count(),
@@ -236,6 +252,7 @@ fn scene_aggregate_accepts_exact_limits_and_rejects_each_one_short() {
         animation_batch.reference_count(),
     ]);
     let semantic_cells = checked_total([
+        spatial_batch.semantic_cell_count(),
         node_batch.semantic_cell_count(),
         appearance_batch.semantic_cell_count(),
         geometry_batch.semantic_cell_count(),
@@ -243,6 +260,7 @@ fn scene_aggregate_accepts_exact_limits_and_rejects_each_one_short() {
         animation_batch.semantic_cell_count(),
     ]);
     let work = checked_total([
+        spatial_batch.validation_work(),
         node_batch.validation_work(),
         appearance_batch.validation_work(),
         geometry_batch.validation_work(),
@@ -250,6 +268,7 @@ fn scene_aggregate_accepts_exact_limits_and_rejects_each_one_short() {
         animation_batch.validation_work(),
     ]);
     let canonical_bytes = checked_total([
+        spatial_batch.canonical_bytes(),
         node_batch
             .canonical_non_geometry_bytes()
             .expect("test node canonical bytes are representable"),
@@ -259,6 +278,7 @@ fn scene_aggregate_accepts_exact_limits_and_rejects_each_one_short() {
         animation_batch.canonical_bytes(),
     ]);
     let scratch_bytes = checked_total([
+        spatial_batch.scratch_bytes(),
         node_batch.scratch_bytes(),
         appearance_batch.scratch_bytes(),
         geometry_batch.scratch_bytes(),
@@ -274,7 +294,9 @@ fn scene_aggregate_accepts_exact_limits_and_rejects_each_one_short() {
         .with_max_canonical_bytes(canonical_bytes)
         .with_max_scratch_bytes(scratch_bytes);
 
-    let appearance_limits = appearance_limits_after_nodes(&node_batch, exact)
+    let node_limits = node_limits_after_spatial(&spatial_batch, exact)
+        .expect("spatial metrics fit the exact Scene limits");
+    let appearance_limits = appearance_limits_after_nodes(&node_batch, node_limits)
         .expect("node metrics fit the exact Scene limits");
     let geometry_limits = geometry_limits_after_appearance(&appearance_batch, appearance_limits)
         .expect("appearance metrics fit the remaining Scene limits");
@@ -311,6 +333,7 @@ fn scene_aggregate_accepts_exact_limits_and_rejects_each_one_short() {
 
     assert!(
         validate_scene_aggregate(
+            &spatial_batch,
             &node_batch,
             &appearance_batch,
             &geometry_batch,
@@ -353,6 +376,7 @@ fn scene_aggregate_accepts_exact_limits_and_rejects_each_one_short() {
     ] {
         assert!(matches!(
             validate_scene_aggregate(
+                &spatial_batch,
                 &node_batch,
                 &appearance_batch,
                 &geometry_batch,
@@ -372,5 +396,6 @@ fn scene_aggregate_accepts_exact_limits_and_rejects_each_one_short() {
     drop(geometry_batch);
     drop(appearance_batch);
     drop(node_batch);
+    drop(spatial_batch);
     assert_eq!(control.live.get(), 0);
 }

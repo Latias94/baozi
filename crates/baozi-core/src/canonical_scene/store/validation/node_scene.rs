@@ -9,12 +9,13 @@ mod animation;
 mod appearance;
 mod deformation;
 mod geometry;
+mod spatial;
 
 use super::super::construction::node_scene::SceneEvidenceCounts;
 use super::super::node_scene::{authored_transform_scalar_count, decode_authored_transform};
 use super::super::production::{
     Presence, ValidatedAnimationBatch, ValidatedAppearanceBatch, ValidatedDeformationBatch,
-    ValidatedGeometryBatch, ValidatedNodeBatch,
+    ValidatedGeometryBatch, ValidatedNodeBatch, ValidatedSpatialBatch,
 };
 use super::super::schema::animation::{
     AnimationChannelTableSchema, AnimationClipTableSchema, AnimationDirectorySchema,
@@ -43,10 +44,14 @@ use super::super::schema::geometry::{
     GeometryAttributeTableSchema, GeometryLogicalMeshTableSchema, GeometryMeshInstanceTableSchema,
     GeometryPrimitiveTableSchema,
 };
+use super::super::schema::spatial::{
+    SpatialCameraTableSchema, SpatialDirectorySchema, SpatialLightTableSchema,
+    SpatialTangentBasisSchemaNameSchema, SpatialTangentEncodingSchemaNameSchema,
+};
 use super::super::schema::{
-    CanonicalBlockRef, NODE_SCENE_CHILD_REFERENCE_FIELD_COUNT, NODE_SCENE_EVIDENCE_FIELD_COUNT,
-    NODE_SCENE_EVIDENCE_OUTCOME_CANDIDATE, NODE_SCENE_NODE_FIELD_COUNT,
-    NODE_SCENE_TRANSFORM_SYNTHETIC, NodeSceneAuthoredTransformSchema,
+    CanonicalBlockRef, CanonicalSchema, NODE_SCENE_CHILD_REFERENCE_FIELD_COUNT,
+    NODE_SCENE_EVIDENCE_FIELD_COUNT, NODE_SCENE_EVIDENCE_OUTCOME_CANDIDATE,
+    NODE_SCENE_NODE_FIELD_COUNT, NODE_SCENE_TRANSFORM_SYNTHETIC, NodeSceneAuthoredTransformSchema,
     NodeSceneChildReferenceTableSchema, NodeSceneNodeTableSchema, NodeSceneOutcomeEvidenceSchema,
     PRESENCE_ABSENT, PRESENCE_PRESENT, SCENE_DIRECTORY_FIELD_COUNT, SCENE_SCHEMA_REVISION,
     SceneDirectorySchema, SceneGeometryDirectorySchema, node_scene_child_reference_field,
@@ -70,6 +75,7 @@ use geometry::{
     GeometryCanonicalCounts, GeometryCanonicalDependencies, GeometryValidatedRefs,
     GeometryValidatedShape, validate_geometry_canonical_structure, validate_geometry_graph,
 };
+use spatial::{SpatialValidatedRefs, validate_spatial_canonical_structure, validate_spatial_graph};
 
 trait NodeEquivalence {
     fn validate_counts(&mut self, node_count: usize, source_node_count: usize) -> Option<()>;
@@ -85,6 +91,13 @@ trait NodeEquivalence {
     fn validate_node_children(&mut self, row: usize, child_count: u32) -> Option<()>;
 
     fn validate_node_transform(&mut self, row: usize, transform: AuthoredTransform) -> Option<()>;
+
+    fn validate_node_spatial_attachments(
+        &mut self,
+        row: usize,
+        camera: Option<u32>,
+        light: Option<u32>,
+    ) -> Option<()>;
 }
 
 struct CanonicalNodeEquivalence;
@@ -118,6 +131,15 @@ impl NodeEquivalence for CanonicalNodeEquivalence {
         &mut self,
         _row: usize,
         _transform: AuthoredTransform,
+    ) -> Option<()> {
+        Some(())
+    }
+
+    fn validate_node_spatial_attachments(
+        &mut self,
+        _row: usize,
+        _camera: Option<u32>,
+        _light: Option<u32>,
     ) -> Option<()> {
         Some(())
     }
@@ -187,6 +209,26 @@ impl<R> NodeEquivalence for FreshNodeEquivalence<'_, '_, R> {
             .has_same_authored_bits(expected_node.authored_transform())
             .then_some(())
     }
+
+    fn validate_node_spatial_attachments(
+        &mut self,
+        row: usize,
+        camera: Option<u32>,
+        light: Option<u32>,
+    ) -> Option<()> {
+        let source_row = row.checked_sub(1)?;
+        let local = *self.expected.canonical_order().get(source_row)?;
+        let expected = *self.expected.input().nodes().get(local)?;
+        let expected_camera = match expected.camera() {
+            Presence::Absent => None,
+            Presence::Present(camera) => Some(camera.index()),
+        };
+        let expected_light = match expected.light() {
+            Presence::Absent => None,
+            Presence::Present(light) => Some(light.index()),
+        };
+        (camera == expected_camera && light == expected_light).then_some(())
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -195,6 +237,7 @@ struct NodeCanonicalStructure {
     nodes: CanonicalRecordRef<NodeSceneNodeTableSchema>,
     references: Option<CanonicalRecordRef<NodeSceneChildReferenceTableSchema>>,
     transforms: Option<CanonicalSequenceRef<f32, NodeSceneAuthoredTransformSchema>>,
+    spatial: SpatialValidatedRefs,
     appearance_directory: CanonicalRecordRef<AppearanceDirectorySchema>,
     geometry_directory: CanonicalRecordRef<SceneGeometryDirectorySchema>,
     deformation_directory: CanonicalRecordRef<DeformationDirectorySchema>,
@@ -205,6 +248,8 @@ struct NodeCanonicalStructure {
 }
 
 pub(in crate::canonical_scene::store) struct NodeSceneValidationScratch<'scratch> {
+    camera_placement_counts: &'scratch mut [u32],
+    light_placement_counts: &'scratch mut [u32],
     deformation_palette_maxima: &'scratch mut [Option<u32>],
     deformation_uniqueness_marks: &'scratch mut [u64],
     animation_target_marks: &'scratch mut [u32],
@@ -212,6 +257,8 @@ pub(in crate::canonical_scene::store) struct NodeSceneValidationScratch<'scratch
 
 #[derive(Clone, Copy)]
 struct NodeSceneValidationScratchRequirements {
+    camera_placement_counts: usize,
+    light_placement_counts: usize,
     deformation_palette_marks: usize,
     deformation_uniqueness_marks: usize,
     animation_target_marks: usize,
@@ -219,11 +266,15 @@ struct NodeSceneValidationScratchRequirements {
 
 impl<'scratch> NodeSceneValidationScratch<'scratch> {
     pub(in crate::canonical_scene::store) const fn new(
+        camera_placement_counts: &'scratch mut [u32],
+        light_placement_counts: &'scratch mut [u32],
         deformation_palette_maxima: &'scratch mut [Option<u32>],
         deformation_uniqueness_marks: &'scratch mut [u64],
         animation_target_marks: &'scratch mut [u32],
     ) -> Self {
         Self {
+            camera_placement_counts,
+            light_placement_counts,
             deformation_palette_maxima,
             deformation_uniqueness_marks,
             animation_target_marks,
@@ -234,6 +285,18 @@ impl<'scratch> NodeSceneValidationScratch<'scratch> {
         counts: SceneEvidenceCounts,
     ) -> Option<usize> {
         usize::try_from(counts.logical_mesh_count).ok()
+    }
+
+    pub(in crate::canonical_scene::store) fn required_camera_placement_counts(
+        counts: SceneEvidenceCounts,
+    ) -> Option<usize> {
+        usize::try_from(counts.camera_count).ok()
+    }
+
+    pub(in crate::canonical_scene::store) fn required_light_placement_counts(
+        counts: SceneEvidenceCounts,
+    ) -> Option<usize> {
+        usize::try_from(counts.light_count).ok()
     }
 
     pub(in crate::canonical_scene::store) fn required_animation_target_marks(
@@ -250,6 +313,8 @@ impl<'scratch> NodeSceneValidationScratch<'scratch> {
         deformation_uniqueness_marks: usize,
     ) -> Option<NodeSceneValidationScratchRequirements> {
         Some(NodeSceneValidationScratchRequirements {
+            camera_placement_counts: Self::required_camera_placement_counts(counts)?,
+            light_placement_counts: Self::required_light_placement_counts(counts)?,
             deformation_palette_marks: Self::required_deformation_palette_marks(counts)?,
             deformation_uniqueness_marks,
             animation_target_marks: Self::required_animation_target_marks(counts)?,
@@ -261,6 +326,8 @@ impl<'scratch> NodeSceneValidationScratch<'scratch> {
         requirements: NodeSceneValidationScratchRequirements,
     ) -> Option<()> {
         (self.deformation_palette_maxima.len() >= requirements.deformation_palette_marks
+            && self.camera_placement_counts.len() >= requirements.camera_placement_counts
+            && self.light_placement_counts.len() >= requirements.light_placement_counts
             && self.deformation_uniqueness_marks.len() >= requirements.deformation_uniqueness_marks
             && self.animation_target_marks.len() >= requirements.animation_target_marks)
             .then_some(())
@@ -271,6 +338,20 @@ impl<'scratch> NodeSceneValidationScratch<'scratch> {
         requirements: NodeSceneValidationScratchRequirements,
         observe_work: &mut impl FnMut(u64) -> Option<()>,
     ) -> Option<()> {
+        for count in self
+            .camera_placement_counts
+            .get_mut(..requirements.camera_placement_counts)?
+        {
+            observe_work(1)?;
+            *count = 0;
+        }
+        for count in self
+            .light_placement_counts
+            .get_mut(..requirements.light_placement_counts)?
+        {
+            observe_work(1)?;
+            *count = 0;
+        }
         for maximum in self
             .deformation_palette_maxima
             .get_mut(..requirements.deformation_palette_marks)?
@@ -300,6 +381,7 @@ impl<'scratch> NodeSceneValidationScratch<'scratch> {
 #[derive(Clone, Copy)]
 pub(in crate::canonical_scene::store) struct NodeSceneValidationProof {
     directory: CanonicalBlockRef<SceneDirectorySchema>,
+    spatial: SpatialValidatedRefs,
     appearance_directory: CanonicalBlockRef<AppearanceDirectorySchema>,
     geometry_directory: CanonicalBlockRef<SceneGeometryDirectorySchema>,
     deformation_directory: CanonicalBlockRef<DeformationDirectorySchema>,
@@ -323,6 +405,36 @@ impl NodeSceneValidationProof {
         self,
     ) -> CanonicalBlockRef<SceneDirectorySchema> {
         self.directory
+    }
+
+    pub(in crate::canonical_scene::store) const fn spatial_directory(
+        self,
+    ) -> CanonicalBlockRef<SpatialDirectorySchema> {
+        self.spatial.directory
+    }
+
+    pub(in crate::canonical_scene::store) const fn cameras(
+        self,
+    ) -> Option<CanonicalBlockRef<SpatialCameraTableSchema>> {
+        self.spatial.cameras
+    }
+
+    pub(in crate::canonical_scene::store) const fn lights(
+        self,
+    ) -> Option<CanonicalBlockRef<SpatialLightTableSchema>> {
+        self.spatial.lights
+    }
+
+    pub(in crate::canonical_scene::store) const fn tangent_basis_schema_name(
+        self,
+    ) -> Option<CanonicalBlockRef<SpatialTangentBasisSchemaNameSchema>> {
+        self.spatial.tangent_basis_schema_name
+    }
+
+    pub(in crate::canonical_scene::store) const fn tangent_encoding_schema_name(
+        self,
+    ) -> Option<CanonicalBlockRef<SpatialTangentEncodingSchemaNameSchema>> {
+        self.spatial.tangent_encoding_schema_name
     }
 
     pub(in crate::canonical_scene::store) const fn appearance_directory(
@@ -633,6 +745,14 @@ impl NodeSceneValidationProof {
         count_as_usize(self.counts.material_count)
     }
 
+    pub(in crate::canonical_scene::store) fn camera_count(self) -> usize {
+        count_as_usize(self.counts.camera_count)
+    }
+
+    pub(in crate::canonical_scene::store) fn light_count(self) -> usize {
+        count_as_usize(self.counts.light_count)
+    }
+
     pub(in crate::canonical_scene::store) fn image_count(self) -> usize {
         count_as_usize(self.counts.image_count)
     }
@@ -713,10 +833,16 @@ impl NodeSceneValidationProof {
     }
 }
 
-fn validate_node_canonical_structure(
+#[allow(clippy::too_many_arguments)]
+fn validate_node_canonical_structure<SR>(
     session: &mut StoreValidationSession<'_, '_>,
     directory_ref: CanonicalRecordRef<SceneDirectorySchema>,
     expected_node_count: Option<u32>,
+    expected_spatial: Option<&ValidatedSpatialBatch<'_, SR>>,
+    expected_camera_count: u32,
+    expected_light_count: u32,
+    mut camera_placement_counts: Option<&mut [u32]>,
+    mut light_placement_counts: Option<&mut [u32]>,
     equivalence: &mut impl NodeEquivalence,
     observe_work: &mut impl FnMut(u64) -> Option<()>,
 ) -> Option<NodeCanonicalStructure> {
@@ -733,6 +859,20 @@ fn validate_node_canonical_structure(
         directory.scalar::<u32>(0, scene_directory_field::ROOT_NODE),
         0,
     )?;
+    let spatial_directory =
+        directory.record_ref::<SpatialDirectorySchema>(0, scene_directory_field::SPATIAL)?;
+    let spatial = match expected_spatial {
+        Some(expected) => {
+            validate_spatial_graph(session, spatial_directory, expected, observe_work)?
+        }
+        None => validate_spatial_canonical_structure(
+            session,
+            spatial_directory,
+            expected_camera_count,
+            expected_light_count,
+            observe_work,
+        )?,
+    };
 
     let node_count_u32 = directory.scalar::<u32>(0, scene_directory_field::NODE_COUNT)?;
     if let Some(expected_node_count) = expected_node_count {
@@ -854,6 +994,18 @@ fn validate_node_canonical_structure(
         0,
     )?;
     require_scalar(nodes.scalar::<u8>(0, node_scene_node_field::TRANSFORMS), 0)?;
+    require_scalar(
+        nodes.scalar::<u8>(0, node_scene_node_field::CAMERA_PRESENCE),
+        PRESENCE_ABSENT,
+    )?;
+    require_scalar(nodes.scalar::<u8>(0, node_scene_node_field::CAMERA), 0)?;
+    require_scalar(nodes.scalar::<u8>(0, node_scene_node_field::CAMERAS), 0)?;
+    require_scalar(
+        nodes.scalar::<u8>(0, node_scene_node_field::LIGHT_PRESENCE),
+        PRESENCE_ABSENT,
+    )?;
+    require_scalar(nodes.scalar::<u8>(0, node_scene_node_field::LIGHT), 0)?;
+    require_scalar(nodes.scalar::<u8>(0, node_scene_node_field::LIGHTS), 0)?;
 
     if let Some(references) = references {
         for source_row in 0..source_node_count {
@@ -920,6 +1072,28 @@ fn validate_node_canonical_structure(
         let transform = decode_authored_transform(kind, values)?;
         equivalence.validate_node_transform(row, transform)?;
         transform_offset = next_transform_offset;
+
+        let camera = validate_node_spatial_attachment::<SpatialCameraTableSchema>(
+            nodes,
+            row,
+            node_scene_node_field::CAMERA_PRESENCE,
+            node_scene_node_field::CAMERA,
+            node_scene_node_field::CAMERAS,
+            spatial.cameras,
+            spatial.camera_count,
+            camera_placement_counts.as_deref_mut(),
+        )?;
+        let light = validate_node_spatial_attachment::<SpatialLightTableSchema>(
+            nodes,
+            row,
+            node_scene_node_field::LIGHT_PRESENCE,
+            node_scene_node_field::LIGHT,
+            node_scene_node_field::LIGHTS,
+            spatial.lights,
+            spatial.light_count,
+            light_placement_counts.as_deref_mut(),
+        )?;
+        equivalence.validate_node_spatial_attachments(row, camera, light)?;
     }
 
     require_scalar(Some(child_reference_offset), source_node_count_u32)?;
@@ -929,6 +1103,22 @@ fn validate_node_canonical_structure(
     )?;
     if has_source_nodes && transform_offset != transforms?.len() {
         return None;
+    }
+    if let Some(counts) = camera_placement_counts {
+        for &placements in counts.get(..usize::try_from(spatial.camera_count).ok()?)? {
+            observe_work(1)?;
+            if placements == 0 {
+                return None;
+            }
+        }
+    }
+    if let Some(counts) = light_placement_counts {
+        for &placements in counts.get(..usize::try_from(spatial.light_count).ok()?)? {
+            observe_work(1)?;
+            if placements == 0 {
+                return None;
+            }
+        }
     }
 
     let appearance_directory =
@@ -944,6 +1134,7 @@ fn validate_node_canonical_structure(
         nodes: nodes_ref,
         references: references_ref,
         transforms: transforms_ref,
+        spatial,
         appearance_directory,
         geometry_directory,
         deformation_directory,
@@ -955,10 +1146,50 @@ fn validate_node_canonical_structure(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(in crate::canonical_scene::store) fn validate_node_scene_graph<NR, AR, GR, DR, ANR, E>(
+fn validate_node_spatial_attachment<Tag>(
+    nodes: baozi_operation::CanonicalRecordView<'_>,
+    row: usize,
+    presence_field: usize,
+    local_field: usize,
+    table_field: usize,
+    expected_table: Option<CanonicalBlockRef<Tag>>,
+    expected_count: u32,
+    placement_counts: Option<&mut [u32]>,
+) -> Option<Option<u32>>
+where
+    Tag: CanonicalSchema<StoreKind = baozi_operation::RecordBlock>,
+{
+    match nodes.scalar::<u8>(row, presence_field)? {
+        PRESENCE_ABSENT => {
+            require_scalar(nodes.scalar::<u8>(row, local_field), 0_u8)?;
+            require_scalar(nodes.scalar::<u8>(row, table_field), 0_u8)?;
+            Some(None)
+        }
+        PRESENCE_PRESENT => {
+            let local = nodes.scalar::<u32>(row, local_field)?;
+            if local >= expected_count {
+                return None;
+            }
+            require_scalar(
+                nodes.record_ref::<Tag>(row, table_field),
+                expected_table?.into_store(),
+            )?;
+            if let Some(counts) = placement_counts {
+                let count = counts.get_mut(usize::try_from(local).ok()?)?;
+                *count = count.checked_add(1)?;
+            }
+            Some(Some(local))
+        }
+        _ => None,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(in crate::canonical_scene::store) fn validate_node_scene_graph<SR, NR, AR, GR, DR, ANR, E>(
     session: &mut StoreValidationSession<'_, '_>,
     directory_ref: CanonicalRecordRef<SceneDirectorySchema>,
     evidence_ref: OutcomeEvidenceRecordRef<NodeSceneOutcomeEvidenceSchema>,
+    expected_spatial: &ValidatedSpatialBatch<'_, SR>,
     expected_nodes: &ValidatedNodeBatch<'_, NR>,
     expected_appearance: &ValidatedAppearanceBatch<'_, AR>,
     expected_geometry: &ValidatedGeometryBatch<'_, GR>,
@@ -972,6 +1203,7 @@ pub(in crate::canonical_scene::store) fn validate_node_scene_graph<NR, AR, GR, D
         session,
         directory_ref,
         evidence_ref,
+        expected_spatial,
         expected_nodes,
         expected_appearance,
         expected_geometry,
@@ -1047,10 +1279,21 @@ fn validate_node_scene_canonical_graph_inner(
         NodeSceneValidationScratch::requirements(expected_counts, deformation_uniqueness_capacity)?;
     scratch.validate_known_capacity(scratch_requirements)?;
     scratch.initialize(scratch_requirements, observe_work)?;
-    let node_structure = validate_node_canonical_structure(
+    let camera_placement_counts = scratch
+        .camera_placement_counts
+        .get_mut(..scratch_requirements.camera_placement_counts)?;
+    let light_placement_counts = scratch
+        .light_placement_counts
+        .get_mut(..scratch_requirements.light_placement_counts)?;
+    let node_structure = validate_node_canonical_structure::<()>(
         session,
         directory_ref,
         Some(expected_counts.node_count),
+        None,
+        expected_counts.camera_count,
+        expected_counts.light_count,
+        Some(camera_placement_counts),
+        Some(light_placement_counts),
         &mut CanonicalNodeEquivalence,
         observe_work,
     )?;
@@ -1153,6 +1396,10 @@ pub(in crate::canonical_scene::store) fn validate_node_scene_evidence_graph(
             == Some(counts.canonical_block_count)
         && evidence.scalar::<u32>(0, node_scene_evidence_field::NODE_COUNT)
             == Some(counts.node_count)
+        && evidence.scalar::<u32>(0, node_scene_evidence_field::CAMERA_COUNT)
+            == Some(counts.camera_count)
+        && evidence.scalar::<u32>(0, node_scene_evidence_field::LIGHT_COUNT)
+            == Some(counts.light_count)
         && evidence.scalar::<u32>(0, node_scene_evidence_field::IMAGE_COUNT)
             == Some(counts.image_count)
         && evidence.scalar::<u32>(0, node_scene_evidence_field::SAMPLER_COUNT)
@@ -1216,6 +1463,8 @@ fn validate_node_scene_success_evidence(
             counts.canonical_block_count,
         ),
         (node_scene_evidence_field::NODE_COUNT, counts.node_count),
+        (node_scene_evidence_field::CAMERA_COUNT, counts.camera_count),
+        (node_scene_evidence_field::LIGHT_COUNT, counts.light_count),
         (node_scene_evidence_field::IMAGE_COUNT, counts.image_count),
         (
             node_scene_evidence_field::SAMPLER_COUNT,
@@ -1298,6 +1547,8 @@ fn validate_canonical_evidence_counts(
     animation: AnimationValidatedShape,
 ) -> Option<()> {
     for (actual, expected) in [
+        (node.spatial.camera_count, counts.camera_count),
+        (node.spatial.light_count, counts.light_count),
         (deformation.skin_count, counts.skin_count),
         (deformation.logical_morph_count, counts.logical_morph_count),
         (
@@ -1317,6 +1568,10 @@ fn validate_canonical_evidence_counts(
         require_scalar(Some(actual), expected)?;
     }
 
+    let spatial_payload_block_count = present_count(&[
+        node.spatial.tangent_basis_schema_name.is_some(),
+        node.spatial.tangent_encoding_schema_name.is_some(),
+    ])?;
     let appearance_payload_block_count = present_count(&[
         appearance.image_payloads.is_some(),
         appearance.media_types.is_some(),
@@ -1353,7 +1608,8 @@ fn validate_canonical_evidence_counts(
         Some(animation.payload_block_count),
         animation_payload_block_count,
     )?;
-    let payload_block_count = appearance_payload_block_count
+    let payload_block_count = spatial_payload_block_count
+        .checked_add(appearance_payload_block_count)?
         .checked_add(geometry.payload_block_count)?
         .checked_add(deformation_payload_block_count)?
         .checked_add(animation_payload_block_count)?;
@@ -1362,6 +1618,12 @@ fn validate_canonical_evidence_counts(
     let node_block_count = 2_u32
         .checked_add(u32::from(node.references.is_some()))?
         .checked_add(u32::from(node.transforms.is_some()))?;
+    let spatial_block_count = 1_u32.checked_add(present_count(&[
+        node.spatial.cameras.is_some(),
+        node.spatial.lights.is_some(),
+        node.spatial.tangent_basis_schema_name.is_some(),
+        node.spatial.tangent_encoding_schema_name.is_some(),
+    ])?)?;
     let appearance_block_count = 1_u32.checked_add(present_count(&[
         appearance.images.is_some(),
         appearance.samplers.is_some(),
@@ -1413,6 +1675,7 @@ fn validate_canonical_evidence_counts(
         animation.refs.out_tangents.is_some(),
     ])?)?;
     let canonical_logical_block_count = node_block_count
+        .checked_add(spatial_block_count)?
         .checked_add(appearance_block_count)?
         .checked_add(geometry_block_count)?
         .checked_add(deformation_block_count)?
@@ -1444,6 +1707,7 @@ fn assemble_node_scene_validation_proof(
 ) -> NodeSceneValidationProof {
     NodeSceneValidationProof {
         directory: CanonicalBlockRef::from_store(node.directory),
+        spatial: node.spatial,
         appearance_directory: CanonicalBlockRef::from_store(node.appearance_directory),
         geometry_directory: CanonicalBlockRef::from_store(node.geometry_directory),
         deformation_directory: CanonicalBlockRef::from_store(node.deformation_directory),
@@ -1464,10 +1728,11 @@ fn assemble_node_scene_validation_proof(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn validate_node_scene_graph_inner<NR, AR, GR, DR, ANR>(
+fn validate_node_scene_graph_inner<SR, NR, AR, GR, DR, ANR>(
     session: &mut StoreValidationSession<'_, '_>,
     directory_ref: CanonicalRecordRef<SceneDirectorySchema>,
     evidence_ref: OutcomeEvidenceRecordRef<NodeSceneOutcomeEvidenceSchema>,
+    expected_spatial: &ValidatedSpatialBatch<'_, SR>,
     expected: &ValidatedNodeBatch<'_, NR>,
     expected_appearance: &ValidatedAppearanceBatch<'_, AR>,
     expected_geometry: &ValidatedGeometryBatch<'_, GR>,
@@ -1479,6 +1744,11 @@ fn validate_node_scene_graph_inner<NR, AR, GR, DR, ANR>(
     let node_structure = validate_node_canonical_structure(
         session,
         directory_ref,
+        None,
+        Some(expected_spatial),
+        expected_spatial.camera_count(),
+        expected_spatial.light_count(),
+        None,
         None,
         &mut FreshNodeEquivalence { expected },
         observe_work,
@@ -1531,6 +1801,7 @@ fn validate_node_scene_graph_inner<NR, AR, GR, DR, ANR>(
 
     if !evidence_counts_match_batches(
         expected_counts,
+        expected_spatial,
         expected,
         expected_appearance,
         expected_geometry,
@@ -1551,20 +1822,24 @@ fn validate_node_scene_graph_inner<NR, AR, GR, DR, ANR>(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn evidence_counts_match_batches<NR, AR, GR, DR, ANR>(
+fn evidence_counts_match_batches<SR, NR, AR, GR, DR, ANR>(
     counts: SceneEvidenceCounts,
+    spatial: &ValidatedSpatialBatch<'_, SR>,
     nodes: &ValidatedNodeBatch<'_, NR>,
     appearance: &ValidatedAppearanceBatch<'_, AR>,
     geometry: &ValidatedGeometryBatch<'_, GR>,
     deformation: &ValidatedDeformationBatch<'_, DR>,
     animation: &ValidatedAnimationBatch<'_, ANR>,
 ) -> bool {
-    let payload_block_count = appearance
+    let payload_block_count = spatial
         .payload_block_count()
-        .checked_add(geometry.payload_block_count())
+        .checked_add(appearance.payload_block_count())
+        .and_then(|count| count.checked_add(geometry.payload_block_count()))
         .and_then(|count| count.checked_add(deformation.payload_block_count()))
         .and_then(|count| count.checked_add(animation.payload_block_count()));
     u32::try_from(nodes.canonical_node_count()) == Ok(counts.node_count)
+        && spatial.camera_count() == counts.camera_count
+        && spatial.light_count() == counts.light_count
         && appearance.image_count() == counts.image_count
         && appearance.sampler_count() == counts.sampler_count
         && appearance.texture_count() == counts.texture_count
@@ -1597,14 +1872,23 @@ mod tests {
 
     #[test]
     fn scratch_capacity_rejects_missing_uniqueness_marks_before_mutation() {
+        let mut cameras = [];
+        let mut lights = [];
         let mut palette = [Some(7)];
         let mut uniqueness = [11_u64, 12];
         let mut animation = [21_u32];
-        let scratch =
-            NodeSceneValidationScratch::new(&mut palette, &mut uniqueness, &mut animation);
+        let scratch = NodeSceneValidationScratch::new(
+            &mut cameras,
+            &mut lights,
+            &mut palette,
+            &mut uniqueness,
+            &mut animation,
+        );
         let counts = SceneEvidenceCounts {
             canonical_block_count: 0,
             node_count: 0,
+            camera_count: 0,
+            light_count: 0,
             image_count: 0,
             sampler_count: 0,
             texture_count: 0,
@@ -1635,19 +1919,28 @@ mod tests {
 
     #[test]
     fn scratch_initialization_restarts_after_cancellation() {
+        let mut cameras = [31_u32];
+        let mut lights = [41_u32];
         let mut palette = [Some(7), Some(u32::MAX)];
         let mut uniqueness = [11_u64, 12, 13];
         let mut animation = [21_u32, 22];
 
         let mut observed = 0_u64;
         let requirements = NodeSceneValidationScratchRequirements {
+            camera_placement_counts: 1,
+            light_placement_counts: 1,
             deformation_palette_marks: 2,
             deformation_uniqueness_marks: 3,
             animation_target_marks: 2,
         };
         {
-            let mut scratch =
-                NodeSceneValidationScratch::new(&mut palette, &mut uniqueness, &mut animation);
+            let mut scratch = NodeSceneValidationScratch::new(
+                &mut cameras,
+                &mut lights,
+                &mut palette,
+                &mut uniqueness,
+                &mut animation,
+            );
             assert_eq!(
                 scratch.initialize(requirements, &mut |amount| {
                     observed = observed.checked_add(amount)?;
@@ -1656,14 +1949,21 @@ mod tests {
                 None
             );
         }
-        assert_eq!(palette, [None, None]);
+        assert_eq!(cameras, [0]);
+        assert_eq!(lights, [0]);
+        assert_eq!(palette, [Some(7), Some(u32::MAX)]);
         assert_eq!(uniqueness, [11, 12, 13]);
         assert_eq!(animation, [21, 22]);
 
         observed = 0;
         {
-            let mut scratch =
-                NodeSceneValidationScratch::new(&mut palette, &mut uniqueness, &mut animation);
+            let mut scratch = NodeSceneValidationScratch::new(
+                &mut cameras,
+                &mut lights,
+                &mut palette,
+                &mut uniqueness,
+                &mut animation,
+            );
             assert_eq!(
                 scratch.initialize(requirements, &mut |amount| {
                     observed = observed.checked_add(amount)?;
@@ -1672,7 +1972,9 @@ mod tests {
                 Some(())
             );
         }
-        assert_eq!(observed, 7);
+        assert_eq!(observed, 9);
+        assert_eq!(cameras, [0]);
+        assert_eq!(lights, [0]);
         assert_eq!(palette, [None, None]);
         assert_eq!(uniqueness, [0, 0, 0]);
         assert_eq!(animation, [0, 0]);
@@ -1680,18 +1982,27 @@ mod tests {
 
     #[test]
     fn scratch_initialization_leaves_unqualified_capacity_untouched() {
+        let mut cameras = [31_u32, 32];
+        let mut lights = [41_u32, 42];
         let mut palette = [Some(7), Some(8)];
         let mut uniqueness = [11_u64, 12, 13];
         let mut animation = [21_u32, 22];
         let requirements = NodeSceneValidationScratchRequirements {
+            camera_placement_counts: 1,
+            light_placement_counts: 1,
             deformation_palette_marks: 1,
             deformation_uniqueness_marks: 2,
             animation_target_marks: 1,
         };
         let mut observed = 0_u64;
 
-        let mut scratch =
-            NodeSceneValidationScratch::new(&mut palette, &mut uniqueness, &mut animation);
+        let mut scratch = NodeSceneValidationScratch::new(
+            &mut cameras,
+            &mut lights,
+            &mut palette,
+            &mut uniqueness,
+            &mut animation,
+        );
         assert_eq!(
             scratch.initialize(requirements, &mut |amount| {
                 observed = observed.checked_add(amount)?;
@@ -1700,7 +2011,9 @@ mod tests {
             Some(())
         );
 
-        assert_eq!(observed, 4);
+        assert_eq!(observed, 6);
+        assert_eq!(cameras, [0, 32]);
+        assert_eq!(lights, [0, 42]);
         assert_eq!(palette, [None, Some(8)]);
         assert_eq!(uniqueness, [0, 0, 13]);
         assert_eq!(animation, [0, 22]);

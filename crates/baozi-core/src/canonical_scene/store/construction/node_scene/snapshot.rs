@@ -16,9 +16,10 @@ use super::semantic::{
 mod animation;
 mod appearance;
 mod deformation;
+mod spatial;
 
 const CANONICAL_SCENE_SNAPSHOT_DOMAIN: &str = "baozi.canonical-scene.snapshot";
-const CANONICAL_SCENE_SNAPSHOT_SCHEMA_REVISION: u32 = 4;
+const CANONICAL_SCENE_SNAPSHOT_SCHEMA_REVISION: u32 = 5;
 const NODE_SCENE_SNAPSHOT_ALGORITHM_ID: &str = "sha256";
 const NODE_SCENE_SNAPSHOT_POLL_INTERVAL: u64 = 64;
 const MAX_PREVIEW_BYTES: usize = 1 << 20;
@@ -173,6 +174,10 @@ pub(in crate::canonical_scene::store) struct NodeSceneSnapshotTotals {
     pub(in crate::canonical_scene::store) node_count: usize,
     pub(in crate::canonical_scene::store) root_count: usize,
     pub(in crate::canonical_scene::store) edge_count: usize,
+    pub(in crate::canonical_scene::store) camera_count: usize,
+    pub(in crate::canonical_scene::store) light_count: usize,
+    pub(in crate::canonical_scene::store) camera_attachment_count: usize,
+    pub(in crate::canonical_scene::store) light_attachment_count: usize,
     pub(in crate::canonical_scene::store) image_count: usize,
     pub(in crate::canonical_scene::store) sampler_count: usize,
     pub(in crate::canonical_scene::store) texture_count: usize,
@@ -276,6 +281,9 @@ struct NodeSceneSummary {
     nodes: usize,
     roots: usize,
     edges: usize,
+    spatial: spatial::SpatialCollectionCounts,
+    camera_attachments: usize,
+    light_attachments: usize,
     appearance: appearance::AppearanceCollectionCounts,
     appearance_payloads: appearance::AppearancePayloadTotals,
     geometry: GeometryCollectionCounts,
@@ -395,6 +403,10 @@ fn capture_node_scene_with_encoder(
     let node_count = source.node_count();
     let root_count = source.root_count();
     let edge_count = source.edge_count();
+    let spatial_counts = spatial::SpatialCollectionCounts {
+        cameras: source.camera_count(),
+        lights: source.light_count(),
+    };
     let appearance_counts = appearance::AppearanceCollectionCounts {
         images: source.image_count(),
         samplers: source.sampler_count(),
@@ -444,6 +456,14 @@ fn capture_node_scene_with_encoder(
     work.observe()?;
     transcript.tagged_bytes(TAG_ALGORITHM, NODE_SCENE_SNAPSHOT_ALGORITHM_ID.as_bytes())?;
 
+    spatial::write_spatial(
+        &source,
+        spatial_counts,
+        &mut transcript,
+        &mut preview,
+        &mut work,
+    )?;
+
     work.observe()?;
     transcript.write_tag(TAG_ROOTS)?;
     transcript.tagged_u8(TAG_PRESENCE, PRESENCE_PRESENT)?;
@@ -469,6 +489,8 @@ fn capture_node_scene_with_encoder(
     transcript.write_tag(TAG_NODES)?;
     transcript.tagged_u8(TAG_PRESENCE, PRESENCE_PRESENT)?;
     preview.begin_nodes(node_count);
+    let mut camera_attachment_count = 0_usize;
+    let mut light_attachment_count = 0_usize;
     for _ in 0..node_count {
         work.observe()?;
         let node = cursor.next_node().map_err(map_snapshot_invariant)?.ok_or(
@@ -478,6 +500,8 @@ fn capture_node_scene_with_encoder(
         )?;
         let node_index = node.source_index();
         let transform = node.authored_transform();
+        let camera = node.camera();
+        let light = node.light();
         let child_count = node.child_count();
         transcript.write_tag(TAG_NODE)?;
         transcript.tagged_usize(TAG_REFERENCE, node_index)?;
@@ -489,6 +513,34 @@ fn capture_node_scene_with_encoder(
             transform,
             render_node,
         )?;
+        spatial::write_node_attachment(
+            spatial::TAG_CAMERA_ATTACHMENT,
+            "camera",
+            camera,
+            &mut transcript,
+            &mut preview,
+            &mut work,
+            render_node,
+        )?;
+        spatial::write_node_attachment(
+            spatial::TAG_LIGHT_ATTACHMENT,
+            "light",
+            light,
+            &mut transcript,
+            &mut preview,
+            &mut work,
+            render_node,
+        )?;
+        camera_attachment_count = camera_attachment_count
+            .checked_add(if camera.is_some() { 1 } else { 0 })
+            .ok_or(NodeSceneSnapshotError::SemanticTotalOverflow {
+                total: "camera attachments",
+            })?;
+        light_attachment_count = light_attachment_count
+            .checked_add(if light.is_some() { 1 } else { 0 })
+            .ok_or(NodeSceneSnapshotError::SemanticTotalOverflow {
+                total: "light attachments",
+            })?;
 
         work.observe()?;
         transcript.write_tag(TAG_CHILDREN)?;
@@ -546,6 +598,9 @@ fn capture_node_scene_with_encoder(
         nodes: node_count,
         roots: root_count,
         edges: edge_count,
+        spatial: spatial_counts,
+        camera_attachments: camera_attachment_count,
+        light_attachments: light_attachment_count,
         appearance: appearance_counts,
         appearance_payloads: appearance_totals,
         geometry: geometry_counts,
@@ -569,6 +624,10 @@ fn capture_node_scene_with_encoder(
                 node_count,
                 root_count,
                 edge_count,
+                camera_count: spatial_counts.cameras,
+                light_count: spatial_counts.lights,
+                camera_attachment_count,
+                light_attachment_count,
                 image_count: appearance_counts.images,
                 sampler_count: appearance_counts.samplers,
                 texture_count: appearance_counts.textures,
@@ -1843,6 +1902,9 @@ impl PreviewSink {
             nodes,
             roots,
             edges,
+            spatial,
+            camera_attachments,
+            light_attachments,
             appearance,
             appearance_payloads,
             geometry,
@@ -1858,6 +1920,14 @@ impl PreviewSink {
         self.push_usize(roots);
         self.push_str(",edges=");
         self.push_usize(edges);
+        self.push_str(",cameras=");
+        self.push_usize(spatial.cameras);
+        self.push_str(",lights=");
+        self.push_usize(spatial.lights);
+        self.push_str(",camera_attachments=");
+        self.push_usize(camera_attachments);
+        self.push_str(",light_attachments=");
+        self.push_usize(light_attachments);
         self.push_str(",images=");
         self.push_usize(appearance.images);
         self.push_str(",samplers=");

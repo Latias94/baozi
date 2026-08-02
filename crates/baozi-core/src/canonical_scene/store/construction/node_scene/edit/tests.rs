@@ -6,13 +6,20 @@ use baozi_operation::{
 };
 
 use crate::SceneValidationLimits;
+use crate::canonical_scene::store::production::{
+    AnimationAuthoringBatch, AppearanceAuthoringBatch, CameraAuthoring, CameraLocalId,
+    DeformationAuthoringBatch, GeometryAuthoringBatch, LightAuthoring, LightLocalId,
+    NodeAuthoringBatch, NodeAuthoringNode, NodeLocalId, Presence, SceneAuthoringBatch,
+    SpatialAuthoringBatch,
+};
 use crate::derived::DerivedAbsenceReason;
-use crate::entity::AuthoredTransform;
+use crate::entity::{AuthoredTransform, CameraProjection, LightEmission, LightKind};
 use crate::identity::{
     NodeId, SceneEntityKind, SceneGenerationError, SceneGenerationId, SceneLookupError,
 };
-use crate::math::{Mat4, Quat, Vec3};
+use crate::math::{Color, Mat4, Quat, Vec3};
 use crate::remap::RemapChange;
+use crate::scene_space::SceneSpace;
 
 use super::super::NodeSceneSuccessParts;
 use super::super::tests::{
@@ -50,6 +57,54 @@ fn try_build_single_trs_scene(
             drop(terminal);
             None
         }
+    }
+}
+
+fn build_spatial_scene(
+    account: &PhysicalStorageAccount,
+    generation_source: &AtomicU64,
+    projection: CameraProjection,
+    light_kind: LightKind,
+    emission: LightEmission,
+) -> NodeSceneSuccessParts {
+    let scene_space = SceneSpace::STANDARD_TARGET;
+    let roots = [NodeLocalId::new(0)];
+    let nodes = [NodeAuthoringNode::new(
+        Presence::Absent,
+        AuthoredTransform::identity_trs(),
+        Presence::Present(CameraLocalId::new(0)),
+        Presence::Present(LightLocalId::new(0)),
+    )];
+    let cameras = [CameraAuthoring::new(projection)];
+    let lights = [LightAuthoring::new(light_kind, emission)];
+    let input = SceneAuthoringBatch::new(
+        SpatialAuthoringBatch::new(&scene_space, &cameras, &lights),
+        NodeAuthoringBatch::new(Presence::Present(&roots), &nodes),
+        AppearanceAuthoringBatch::empty(),
+        GeometryAuthoringBatch::empty(),
+        DeformationAuthoringBatch::empty(),
+        AnimationAuthoringBatch::empty(),
+    );
+    let validated = SceneConstructionOperation::with_account_for_scene_input(
+        account,
+        test_limits(),
+        input,
+        SceneValidationLimits::default(),
+    )
+    .expect("spatial edit fixture admission")
+    .try_validate()
+    .unwrap_or_else(|rejected| {
+        panic!(
+            "spatial edit fixture authoring validation failed: {:?}",
+            rejected.failure(),
+        )
+    });
+    let prepared = validated
+        .prepare_with_generation_source(|| SceneGenerationId::reserve_from(generation_source))
+        .expect("spatial edit fixture preparation");
+    match prepared.handoff() {
+        super::super::NodeSceneConstructionTerminal::Success(parts) => parts,
+        _ => panic!("spatial edit fixture must publish success"),
     }
 }
 
@@ -230,6 +285,97 @@ fn trs_to_matrix_rewrites_node_offsets_and_directory_shape_before_publication() 
         input_generation,
         output.scene.generation(),
     );
+}
+
+#[test]
+fn shape_changing_edit_preserves_spatial_values_and_attachment_closure() {
+    let factory = test_factory();
+    let account = test_account(&factory, 512);
+    let generation_source = AtomicU64::new(0);
+    let projection = CameraProjection::perspective(1.0, Some(1.5), 0.1, Some(100.0))
+        .expect("spatial edit camera");
+    let light_kind = LightKind::point(Some(50.0)).expect("spatial edit point light");
+    let emission = LightEmission::try_from_scaled_linear_srgb(Color::WHITE, 10.0)
+        .expect("spatial edit emission");
+    let parts = build_spatial_scene(
+        &account,
+        &generation_source,
+        projection,
+        light_kind,
+        emission,
+    );
+    let source = &parts.scene;
+    let input_generation = source.generation();
+    let node = NodeId::new(input_generation, 0);
+    let NodeTransformEditStart::Changed(pending) =
+        try_begin_node_transform_edit(source, node, changed_matrix(17.0))
+            .expect("shape-changing spatial edit plan")
+    else {
+        panic!("shape-changing spatial edit must not classify as unchanged");
+    };
+
+    let prepared = pending
+        .prepare_with_generation_source(test_limits(), || {
+            SceneGenerationId::reserve_from(&generation_source)
+        })
+        .expect("shape-changing spatial edit preparation");
+    let super::NodeTransformEditTerminal::Success(output) = prepared.handoff() else {
+        panic!("shape-changing spatial edit must publish success");
+    };
+
+    assert_ne!(output.scene.generation(), input_generation);
+    let view = output
+        .scene
+        .semantic_view()
+        .expect("edited spatial semantic view");
+    assert_eq!(view.camera_count(), 1);
+    assert_eq!(view.light_count(), 1);
+    assert_eq!(
+        view.scene_space().expect("edited SceneSpace").up_axis(),
+        crate::scene_space::Axis::PositiveY,
+    );
+    assert_eq!(
+        view.camera_at(0)
+            .expect("edited camera view")
+            .expect("edited camera zero")
+            .projection(),
+        projection,
+    );
+    let light = view
+        .light_at(0)
+        .expect("edited light view")
+        .expect("edited light zero");
+    assert_eq!(light.kind(), light_kind);
+    assert_eq!(light.tint(), emission.tint());
+    assert_eq!(light.intensity().to_bits(), emission.intensity().to_bits());
+
+    let mut camera_placements = view.camera_placements(0).expect("edited camera placements");
+    assert_eq!(camera_placements.next().expect("camera placement"), Some(0));
+    assert_eq!(
+        camera_placements.next().expect("camera placement end"),
+        None,
+    );
+    camera_placements
+        .finish()
+        .expect("complete edited camera placement scan");
+    let mut light_placements = view.light_placements(0).expect("edited light placements");
+    assert_eq!(light_placements.next().expect("light placement"), Some(0));
+    assert_eq!(light_placements.next().expect("light placement end"), None,);
+    light_placements
+        .finish()
+        .expect("complete edited light placement scan");
+
+    let mut cursor = view.into_cursor().expect("edited node cursor");
+    let mut roots = cursor.take_roots().expect("edited roots cursor");
+    assert_eq!(roots.next().expect("edited root"), Some(0));
+    assert_eq!(roots.next().expect("edited roots end"), None);
+    roots.finish().expect("complete edited roots scan");
+    let node = cursor
+        .next_node()
+        .expect("edited node read")
+        .expect("edited node zero");
+    assert_eq!(node.camera(), Some(0));
+    assert_eq!(node.light(), Some(0));
 }
 
 #[test]

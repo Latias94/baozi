@@ -350,6 +350,7 @@ impl CameraProjection {
             return Err(CameraProjectionError::VerticalMagnification);
         }
         validate_orthographic_depth_range(near, far)?;
+        let near = canonical_positive_zero(near);
         Ok(Self(CameraProjectionState::Orthographic {
             horizontal_magnification,
             vertical_magnification,
@@ -486,9 +487,23 @@ impl Camera {
     }
 }
 
-/// A source-preserving canonical light category.
+/// The source-preserving category of a canonical light.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LightKindCategory {
+    /// A light with direction but no position or range.
+    Directional,
+    /// An omnidirectional light emitted from one position.
+    Point,
+    /// A position and direction constrained by a cone.
+    Spot,
+}
+
+/// A source-preserving canonical light category and its validated parameters.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub enum LightKind {
+pub struct LightKind(LightKindState);
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum LightKindState {
     Directional,
     Point {
         range: Option<f32>,
@@ -501,17 +516,25 @@ pub enum LightKind {
 }
 
 impl LightKind {
-    pub fn point(range: Option<f32>) -> Result<Self, LightError> {
-        validate_light_range(range)?;
-        Ok(Self::Point { range })
+    /// Creates a directional light category.
+    pub const fn directional() -> Self {
+        Self(LightKindState::Directional)
     }
 
+    /// Creates a point light category with an optional positive range.
+    pub fn point(range: Option<f32>) -> Result<Self, LightError> {
+        validate_light_range(range)?;
+        Ok(Self(LightKindState::Point { range }))
+    }
+
+    /// Creates a spot light category with a validated cone and optional positive range.
     pub fn spot(
         range: Option<f32>,
         inner_cone_radians: f32,
         outer_cone_radians: f32,
     ) -> Result<Self, LightError> {
         validate_light_range(range)?;
+        let inner_cone_radians = canonical_positive_zero(inner_cone_radians);
         if !inner_cone_radians.is_finite()
             || !outer_cone_radians.is_finite()
             || inner_cone_radians < 0.0
@@ -521,11 +544,48 @@ impl LightKind {
         {
             return Err(LightError::InvalidSpotCone);
         }
-        Ok(Self::Spot {
+        Ok(Self(LightKindState::Spot {
             range,
             inner_cone_radians,
             outer_cone_radians,
-        })
+        }))
+    }
+
+    /// Returns the category without its parameters.
+    pub const fn category(self) -> LightKindCategory {
+        match self.0 {
+            LightKindState::Directional => LightKindCategory::Directional,
+            LightKindState::Point { .. } => LightKindCategory::Point,
+            LightKindState::Spot { .. } => LightKindCategory::Spot,
+        }
+    }
+
+    /// Returns the optional range of a point or spot light.
+    pub const fn range(self) -> Option<f32> {
+        match self.0 {
+            LightKindState::Directional => None,
+            LightKindState::Point { range } | LightKindState::Spot { range, .. } => range,
+        }
+    }
+
+    /// Returns the inner cone angle for a spot light.
+    pub const fn inner_cone_radians(self) -> Option<f32> {
+        match self.0 {
+            LightKindState::Spot {
+                inner_cone_radians, ..
+            } => Some(inner_cone_radians),
+            LightKindState::Directional | LightKindState::Point { .. } => None,
+        }
+    }
+
+    /// Returns the outer cone angle for a spot light.
+    pub const fn outer_cone_radians(self) -> Option<f32> {
+        match self.0 {
+            LightKindState::Spot {
+                outer_cone_radians, ..
+            } => Some(outer_cone_radians),
+            LightKindState::Directional | LightKindState::Point { .. } => None,
+        }
     }
 }
 
@@ -534,6 +594,10 @@ fn validate_light_range(range: Option<f32>) -> Result<(), LightError> {
         return Err(LightError::InvalidRange);
     }
     Ok(())
+}
+
+const fn canonical_positive_zero(value: f32) -> f32 {
+    if value == 0.0 { 0.0 } else { value }
 }
 
 const REC709_RED_NUMERATOR: f64 = 2_126.0;

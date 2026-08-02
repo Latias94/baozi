@@ -25,10 +25,11 @@ use crate::canonical_scene::store::production::{
     GeometryAuthoringSemanticError, GeometryLogicalMeshAuthoring, GeometryMeshInstanceAuthoring,
     GeometryPrimitiveAuthoring, GeometryTopologyAuthoring, LogicalMeshLocalId,
     LogicalMorphAuthoring, MeshInstanceDeformationAuthoring, NodeLocalId, Presence,
-    PrimitiveDeformationAuthoring, SceneAuthoringBatch,
+    PrimitiveDeformationAuthoring, SceneAuthoringBatch, SpatialAuthoringBatch,
 };
 use crate::geometry::TopologyKind;
 use crate::identity::{ReservedSceneGeneration, SceneGenerationError, SceneGenerationId};
+use crate::scene_space::SceneSpace;
 
 use super::{
     assert_released, rich_failure, single_trs_batch, successful_parts, terminal_failure_class,
@@ -39,8 +40,8 @@ const OBJ_POSITIONS: [[f32; 3]; 3] = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.
 const OBJ_TEXCOORDS: [[f32; 2]; 4] = [[0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [0.5, 0.5]];
 const OBJ_NORMALS: [[f32; 3]; 2] = [[0.0, 0.0, 1.0], [0.0, 0.0, -1.0]];
 const KNOWN_OBJ_CAPABILITY_DIGEST: [u8; 32] = [
-    0x20, 0x1f, 0x0d, 0xf1, 0x80, 0x96, 0x66, 0xa5, 0x38, 0xa5, 0xa6, 0x49, 0x43, 0xd1, 0xe2, 0x19,
-    0xe5, 0x09, 0x2f, 0x69, 0x42, 0x8d, 0x45, 0x27, 0xbf, 0xc0, 0x90, 0x6a, 0xfc, 0x30, 0xfa, 0xba,
+    0x8b, 0xd1, 0x9f, 0x1a, 0xb6, 0xdb, 0x2b, 0xd9, 0x80, 0xd2, 0xbd, 0xe8, 0x99, 0x54, 0xf2, 0x33,
+    0xd6, 0x0c, 0x1e, 0x7b, 0xe4, 0x05, 0xbc, 0xf2, 0x39, 0x51, 0xa4, 0xa7, 0x3d, 0x29, 0xbd, 0x4c,
 ];
 const OBJ_FACES: [ObjTriangle; 2] = [
     ObjTriangle {
@@ -215,6 +216,7 @@ impl ObjCanonicalProjection<'_> {
         );
 
         use_input(SceneAuthoringBatch::new(
+            SpatialAuthoringBatch::new(&SceneSpace::UNKNOWN, &[], &[]),
             single_trs_batch(),
             AppearanceAuthoringBatch::empty(),
             geometry,

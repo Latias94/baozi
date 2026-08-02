@@ -41,6 +41,10 @@ pub(super) use input::geometry::{
 };
 pub(super) use input::geometry::{GeometryAttributePayloadAuthoring, GeometryTopologyAuthoring};
 #[cfg(test)]
+pub(super) use input::spatial::{
+    CameraAuthoring, CameraLocalId, LightAuthoring, LightLocalId, SpatialAuthoringBatch,
+};
+#[cfg(test)]
 pub(super) use input::{NodeAuthoringBatch, NodeAuthoringNode, NodeLocalId, NodeParent};
 pub(super) use input::{Presence, SceneAuthoringBatch};
 #[cfg(test)]
@@ -66,11 +70,15 @@ pub(super) use plan::geometry::{
     GeometryAttributePayloadKind, GeometryAttributeScalarKind, GeometryAuthoringFailure,
     ValidatedGeometryBatch, validate_geometry_batch,
 };
+pub(super) use plan::spatial::{
+    SpatialAuthoringFailure, ValidatedSpatialBatch, validate_spatial_batch,
+};
 pub(super) use plan::{NodeAuthoringFailure, ValidatedNodeBatch, validate_node_batch};
 #[cfg(test)]
 pub(super) use plan::{NodeAuthoringLimit, NodeAuthoringSemanticError};
 pub(super) use scene::{
     SceneAuthoringAggregateError, SceneInputEnvelope, SceneInputEnvelopeError,
     animation_limits_after_deformation, appearance_limits_after_nodes,
-    deformation_limits_after_geometry, geometry_limits_after_appearance, validate_scene_aggregate,
+    deformation_limits_after_geometry, geometry_limits_after_appearance, node_limits_after_spatial,
+    validate_scene_aggregate,
 };

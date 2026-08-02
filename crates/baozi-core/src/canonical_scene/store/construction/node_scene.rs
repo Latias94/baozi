@@ -12,8 +12,9 @@ use crate::identity::{ReservedSceneGeneration, SceneGenerationId};
 use super::super::production::{
     AnimationAuthoringFailure, AppearanceAuthoringFailure, DeformationAuthoringFailure,
     GeometryAuthoringFailure, NodeAuthoringFailure, OperationAuthoringControlError,
-    SceneAuthoringAggregateError, ValidatedAnimationBatch, ValidatedAppearanceBatch,
-    ValidatedDeformationBatch, ValidatedGeometryBatch, ValidatedNodeBatch,
+    SceneAuthoringAggregateError, SpatialAuthoringFailure, ValidatedAnimationBatch,
+    ValidatedAppearanceBatch, ValidatedDeformationBatch, ValidatedGeometryBatch,
+    ValidatedNodeBatch, ValidatedSpatialBatch,
 };
 use super::super::schema::{
     CanonicalBlockRef, NodeSceneOutcomeEvidenceSchema, SceneDirectorySchema,
@@ -65,6 +66,7 @@ const NODE_SCENE_GEOMETRY_AUTHORING_REJECTION_CODE: u32 = 0x5343_1103;
 const NODE_SCENE_DEFORMATION_AUTHORING_REJECTION_CODE: u32 = 0x5343_1104;
 const NODE_SCENE_ANIMATION_AUTHORING_REJECTION_CODE: u32 = 0x5343_1105;
 const NODE_SCENE_AGGREGATE_AUTHORING_REJECTION_CODE: u32 = 0x5343_1106;
+const NODE_SCENE_SPATIAL_AUTHORING_REJECTION_CODE: u32 = 0x5343_1107;
 
 #[derive(Clone, Copy)]
 struct NodeSceneBuildFaults {
@@ -268,7 +270,7 @@ struct FreshNodeSceneOwner {
     keys: SceneStoreKeys,
 }
 
-/// A validated five-domain Scene input coupled to the exact fresh operation that paid for it.
+/// A validated canonical Scene input coupled to the exact fresh operation that paid for it.
 #[must_use = "the validated node Scene construction must be prepared or deliberately dropped"]
 pub(in crate::canonical_scene::store) struct ValidatedNodeSceneConstruction<'input> {
     animations: ValidatedAnimationBatch<'input, RetainedStoreReservation<SceneConstructionOwner>>,
@@ -277,12 +279,15 @@ pub(in crate::canonical_scene::store) struct ValidatedNodeSceneConstruction<'inp
     geometry: ValidatedGeometryBatch<'input, RetainedStoreReservation<SceneConstructionOwner>>,
     appearance: ValidatedAppearanceBatch<'input, RetainedStoreReservation<SceneConstructionOwner>>,
     nodes: ValidatedNodeBatch<'input, RetainedStoreReservation<SceneConstructionOwner>>,
+    spatial: ValidatedSpatialBatch<'input, RetainedStoreReservation<SceneConstructionOwner>>,
     // The operation owner must outlive every compiled-plan reservation above.
     owner: FreshNodeSceneOwner,
 }
 
 #[derive(Debug, Error)]
 pub(in crate::canonical_scene::store) enum NodeSceneConstructionRejection {
+    #[error("spatial authoring validation rejected the Scene batch")]
+    SpatialAuthoring(#[source] SpatialAuthoringFailure<OperationAuthoringControlError>),
     #[error("node-domain authoring validation rejected the Scene batch")]
     NodeAuthoring(#[source] NodeAuthoringFailure<OperationAuthoringControlError>),
     #[error("appearance-domain authoring validation rejected the Scene batch")]
@@ -300,6 +305,7 @@ pub(in crate::canonical_scene::store) enum NodeSceneConstructionRejection {
 impl NodeSceneConstructionRejection {
     const fn stable_code(&self) -> u32 {
         match self {
+            Self::SpatialAuthoring(_) => NODE_SCENE_SPATIAL_AUTHORING_REJECTION_CODE,
             Self::NodeAuthoring(_) => NODE_SCENE_NODE_AUTHORING_REJECTION_CODE,
             Self::AppearanceAuthoring(_) => NODE_SCENE_APPEARANCE_AUTHORING_REJECTION_CODE,
             Self::GeometryAuthoring(_) => NODE_SCENE_GEOMETRY_AUTHORING_REJECTION_CODE,
@@ -356,6 +362,8 @@ pub(in crate::canonical_scene::store) enum NodeSceneDraftBuild {
 pub(in crate::canonical_scene::store) struct SceneEvidenceCounts {
     pub(in crate::canonical_scene::store) canonical_block_count: u32,
     pub(in crate::canonical_scene::store) node_count: u32,
+    pub(in crate::canonical_scene::store) camera_count: u32,
+    pub(in crate::canonical_scene::store) light_count: u32,
     pub(in crate::canonical_scene::store) image_count: u32,
     pub(in crate::canonical_scene::store) sampler_count: u32,
     pub(in crate::canonical_scene::store) texture_count: u32,
@@ -381,6 +389,8 @@ impl SceneEvidenceCounts {
         Self {
             canonical_block_count: 0,
             node_count: 0,
+            camera_count: 0,
+            light_count: 0,
             image_count: 0,
             sampler_count: 0,
             texture_count: 0,

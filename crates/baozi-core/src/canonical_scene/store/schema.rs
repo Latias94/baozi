@@ -6,6 +6,7 @@ pub(super) mod animation;
 pub(super) mod appearance;
 pub(super) mod deformation;
 pub(super) mod geometry;
+pub(super) mod spatial;
 
 pub(super) const SCHEMA_REVISION: u32 = 1;
 pub(super) const NODE_COUNT: usize = 2;
@@ -62,13 +63,13 @@ pub(super) const PRESENCE_PRESENT: u8 = 1;
 pub(super) const EVIDENCE_OUTCOME_CANDIDATE: u32 = 1;
 pub(super) const CANONICAL_BLOCK_COUNT: u32 = 4;
 
-pub(super) const SCENE_SCHEMA_REVISION: u32 = 2;
-pub(super) const SCENE_DIRECTORY_FIELD_COUNT: usize = 15;
+pub(super) const SCENE_SCHEMA_REVISION: u32 = 3;
+pub(super) const SCENE_DIRECTORY_FIELD_COUNT: usize = 16;
 pub(super) const SCENE_GEOMETRY_SCHEMA_REVISION: u32 = 2;
 pub(super) const SCENE_GEOMETRY_DIRECTORY_FIELD_COUNT: usize = 9;
-pub(super) const NODE_SCENE_NODE_FIELD_COUNT: usize = 8;
+pub(super) const NODE_SCENE_NODE_FIELD_COUNT: usize = 14;
 pub(super) const NODE_SCENE_CHILD_REFERENCE_FIELD_COUNT: usize = 2;
-pub(super) const NODE_SCENE_EVIDENCE_FIELD_COUNT: usize = 22;
+pub(super) const NODE_SCENE_EVIDENCE_FIELD_COUNT: usize = 24;
 pub(super) const NODE_SCENE_MATRIX_SCALAR_COUNT: usize = 16;
 pub(super) const NODE_SCENE_TRS_SCALAR_COUNT: usize = 10;
 pub(super) const NODE_SCENE_TRANSFORM_SYNTHETIC: u8 = 0;
@@ -88,10 +89,11 @@ pub(super) mod scene_directory_field {
     pub(crate) const TRANSFORM_SCALAR_COUNT: usize = 8;
     pub(crate) const TRANSFORMS: usize = 9;
     pub(crate) const SOURCE_ROOT_COUNT: usize = 10;
-    pub(crate) const APPEARANCE: usize = 11;
-    pub(crate) const GEOMETRY: usize = 12;
-    pub(crate) const DEFORMATION: usize = 13;
-    pub(crate) const ANIMATION: usize = 14;
+    pub(crate) const SPATIAL: usize = 11;
+    pub(crate) const APPEARANCE: usize = 12;
+    pub(crate) const GEOMETRY: usize = 13;
+    pub(crate) const DEFORMATION: usize = 14;
+    pub(crate) const ANIMATION: usize = 15;
 }
 
 pub(super) mod scene_geometry_directory_field {
@@ -115,6 +117,12 @@ pub(super) mod node_scene_node_field {
     pub(crate) const TRANSFORM_OFFSET: usize = 5;
     pub(crate) const TRANSFORM_LENGTH: usize = 6;
     pub(crate) const TRANSFORMS: usize = 7;
+    pub(crate) const CAMERA_PRESENCE: usize = 8;
+    pub(crate) const CAMERA: usize = 9;
+    pub(crate) const CAMERAS: usize = 10;
+    pub(crate) const LIGHT_PRESENCE: usize = 11;
+    pub(crate) const LIGHT: usize = 12;
+    pub(crate) const LIGHTS: usize = 13;
 }
 
 pub(super) mod node_scene_child_reference_field {
@@ -127,24 +135,26 @@ pub(super) mod node_scene_evidence_field {
     pub(crate) const OUTCOME: usize = 1;
     pub(crate) const CANONICAL_BLOCK_COUNT: usize = 2;
     pub(crate) const NODE_COUNT: usize = 3;
-    pub(crate) const IMAGE_COUNT: usize = 4;
-    pub(crate) const SAMPLER_COUNT: usize = 5;
-    pub(crate) const TEXTURE_COUNT: usize = 6;
-    pub(crate) const MATERIAL_COUNT: usize = 7;
-    pub(crate) const MATERIAL_BINDING_COUNT: usize = 8;
-    pub(crate) const LOGICAL_MESH_COUNT: usize = 9;
-    pub(crate) const PRIMITIVE_COUNT: usize = 10;
-    pub(crate) const ATTRIBUTE_COUNT: usize = 11;
-    pub(crate) const MESH_INSTANCE_COUNT: usize = 12;
-    pub(crate) const SKIN_COUNT: usize = 13;
-    pub(crate) const LOGICAL_MORPH_COUNT: usize = 14;
-    pub(crate) const MORPH_DEFINITION_COUNT: usize = 15;
-    pub(crate) const PRIMITIVE_DEFORMATION_COUNT: usize = 16;
-    pub(crate) const MORPH_TARGET_COUNT: usize = 17;
-    pub(crate) const MORPH_DELTA_COUNT: usize = 18;
-    pub(crate) const ANIMATION_CLIP_COUNT: usize = 19;
-    pub(crate) const ANIMATION_CHANNEL_COUNT: usize = 20;
-    pub(crate) const PAYLOAD_BLOCK_COUNT: usize = 21;
+    pub(crate) const CAMERA_COUNT: usize = 4;
+    pub(crate) const LIGHT_COUNT: usize = 5;
+    pub(crate) const IMAGE_COUNT: usize = 6;
+    pub(crate) const SAMPLER_COUNT: usize = 7;
+    pub(crate) const TEXTURE_COUNT: usize = 8;
+    pub(crate) const MATERIAL_COUNT: usize = 9;
+    pub(crate) const MATERIAL_BINDING_COUNT: usize = 10;
+    pub(crate) const LOGICAL_MESH_COUNT: usize = 11;
+    pub(crate) const PRIMITIVE_COUNT: usize = 12;
+    pub(crate) const ATTRIBUTE_COUNT: usize = 13;
+    pub(crate) const MESH_INSTANCE_COUNT: usize = 14;
+    pub(crate) const SKIN_COUNT: usize = 15;
+    pub(crate) const LOGICAL_MORPH_COUNT: usize = 16;
+    pub(crate) const MORPH_DEFINITION_COUNT: usize = 17;
+    pub(crate) const PRIMITIVE_DEFORMATION_COUNT: usize = 18;
+    pub(crate) const MORPH_TARGET_COUNT: usize = 19;
+    pub(crate) const MORPH_DELTA_COUNT: usize = 20;
+    pub(crate) const ANIMATION_CLIP_COUNT: usize = 21;
+    pub(crate) const ANIMATION_CHANNEL_COUNT: usize = 22;
+    pub(crate) const PAYLOAD_BLOCK_COUNT: usize = 23;
 }
 
 pub(super) trait CanonicalSchema: Copy + Send + Sync + 'static {

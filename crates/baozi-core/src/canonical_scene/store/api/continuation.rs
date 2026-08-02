@@ -88,6 +88,7 @@ pub(crate) struct SceneAuthoringRejection {
 impl SceneAuthoringRejection {
     fn from_node_scene(source: NodeSceneConstructionRejection) -> Self {
         let domain = match &source {
+            NodeSceneConstructionRejection::SpatialAuthoring(_) => SceneAuthoringDomain::Spatial,
             NodeSceneConstructionRejection::NodeAuthoring(_) => SceneAuthoringDomain::Node,
             NodeSceneConstructionRejection::AppearanceAuthoring(_) => {
                 SceneAuthoringDomain::Appearance
@@ -123,6 +124,7 @@ impl std::error::Error for SceneAuthoringRejection {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SceneAuthoringDomain {
+    Spatial,
     Node,
     Appearance,
     Geometry,
@@ -309,9 +311,10 @@ mod tests {
     use crate::canonical_scene::store::production::{
         AnimationAuthoringBatch, AppearanceAuthoringBatch, DeformationAuthoringBatch,
         GeometryAuthoringBatch, NodeAuthoringBatch, NodeAuthoringNode, NodeLocalId, Presence,
-        SceneAuthoringBatch,
+        SceneAuthoringBatch, SpatialAuthoringBatch,
     };
     use crate::entity::AuthoredTransform;
+    use crate::scene_space::SceneSpace;
 
     use super::*;
     use crate::canonical_scene::store::api::SceneConstructionTerminal;
@@ -320,6 +323,8 @@ mod tests {
     const NODES: [NodeAuthoringNode; 1] = [NodeAuthoringNode::new(
         Presence::Absent,
         AuthoredTransform::identity_trs(),
+        Presence::Absent,
+        Presence::Absent,
     )];
 
     fn factory(max_live_accounts: u64) -> PhysicalStorageAccountFactory {
@@ -343,6 +348,7 @@ mod tests {
 
     fn scene_input() -> SceneAuthoringBatch<'static> {
         SceneAuthoringBatch::new(
+            SpatialAuthoringBatch::new(&SceneSpace::UNKNOWN, &[], &[]),
             NodeAuthoringBatch::new(Presence::Present(&ROOTS), &NODES),
             AppearanceAuthoringBatch::empty(),
             GeometryAuthoringBatch::empty(),

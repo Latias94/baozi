@@ -13,15 +13,21 @@ use crate::canonical_scene::store::construction::{
     SceneConstructionLimits, SceneConstructionOperation,
 };
 use crate::canonical_scene::store::production::{
-    AnimationAuthoringBatch, AppearanceAuthoringBatch, AuthoringRange, DeformationAuthoringBatch,
-    GeometryAttributeAuthoring, GeometryAuthoringBatch, GeometryLogicalMeshAuthoring,
-    GeometryMeshInstanceAuthoring, GeometryPrimitiveAuthoring, GeometryTopologyAuthoring,
-    LogicalMeshLocalId, LogicalMorphAuthoring, MaterialAuthoring, MaterialLocalId,
-    MeshInstanceDeformationAuthoring, NodeAuthoringBatch, NodeAuthoringNode, NodeLocalId,
-    NodeParent, Presence, PrimitiveDeformationAuthoring, SceneAuthoringBatch,
+    AnimationAuthoringBatch, AppearanceAuthoringBatch, AuthoringRange, CameraAuthoring,
+    CameraLocalId, DeformationAuthoringBatch, GeometryAttributeAuthoring, GeometryAuthoringBatch,
+    GeometryLogicalMeshAuthoring, GeometryMeshInstanceAuthoring, GeometryPrimitiveAuthoring,
+    GeometryTopologyAuthoring, LightAuthoring, LightLocalId, LogicalMeshLocalId,
+    LogicalMorphAuthoring, MaterialAuthoring, MaterialLocalId, MeshInstanceDeformationAuthoring,
+    NodeAuthoringBatch, NodeAuthoringNode, NodeLocalId, NodeParent, Presence,
+    PrimitiveDeformationAuthoring, SceneAuthoringBatch, SpatialAuthoringBatch,
 };
-use crate::entity::AuthoredTransform;
-use crate::math::{Mat4, Quat, Vec3};
+use crate::entity::{AuthoredTransform, CameraProjection, LightEmission, LightKind};
+use crate::extension::ExtensionSchemaId;
+use crate::math::{Color, Mat4, Quat, Vec3};
+use crate::scene_space::{
+    Axis, FrontFaceWinding, Handedness, SceneSpace, TangentBasisConvention,
+    TangentHandednessEncoding, TransformConvention, UvOrigin,
+};
 
 use super::{
     MAX_COLLECTION_ITEMS, MAX_PREVIEW_BYTES, MAX_WORK, NodeSceneSnapshot,
@@ -30,28 +36,43 @@ use super::{
 };
 
 const KNOWN_SINGLE_TRS_DIGEST: [u8; 32] = [
-    0xc3, 0xd4, 0xec, 0x35, 0xc3, 0x2f, 0x46, 0x57, 0x0c, 0x31, 0x2d, 0x99, 0x9c, 0x17, 0xb5, 0xad,
-    0xa5, 0x7c, 0x4c, 0x30, 0x59, 0x37, 0x91, 0x1e, 0xa5, 0x98, 0x18, 0x98, 0xfa, 0x36, 0xfe, 0x5f,
+    0x19, 0x61, 0x07, 0x75, 0xba, 0x0b, 0x4a, 0xa0, 0x76, 0xae, 0x95, 0xea, 0x7e, 0x46, 0xcf, 0x51,
+    0xe4, 0x05, 0x89, 0xd0, 0x26, 0x7b, 0xf1, 0xb9, 0xb8, 0x11, 0x4a, 0xea, 0x0f, 0x69, 0xe7, 0xb4,
 ];
 const KNOWN_SINGLE_TRS_TRANSCRIPT_PREFIX_HEX: &str = concat!(
-    "011e0000000000000062616f7a692e63616e6f6e6963616c2d7363656e652e736e617073686f74",
-    "0204000000030600000000000000736861323536040c01080d00000000000000000b010000000000",
-    "0000050c01060d00000000000000000a020e000000000e000000000e000000000e000000000e0000",
-    "00000e000000000e0000803f0e0000803f0e0000803f0e0000803f0b0a00000000000000070c010b",
-    "00000000000000000b0100000000000000",
+    "011e0000000000000062616f7a692e63616e6f6e6963616c2d7363656e652e736e617073686f740205000000030600",
+    "000000000000736861323536a60c01a7a800a900aa00ab0c00ac00ad00ae00af00b200b30c010b0000000000000000",
+    "ba0c010b0000000000000000040c01080d00000000000000000b0100000000000000050c01060d0000000000000000",
+    "0a020e000000000e000000000e000000000e000000000e000000000e000000000e0000803f0e0000803f0e0000803f",
+    "0e0000803f0b0a00000000000000c40c00c50c00070c010b00000000000000000b0100000000000000",
 );
 const KNOWN_MATRIX_CHILD_DIGEST: [u8; 32] = [
-    0xbb, 0x85, 0xdd, 0x9a, 0xf8, 0xbd, 0x41, 0xc7, 0x3a, 0x74, 0x09, 0x17, 0x2b, 0xb6, 0x95, 0xa9,
-    0xda, 0x7f, 0xeb, 0xfc, 0x4d, 0xea, 0x19, 0xc9, 0x80, 0xb6, 0x1d, 0x1d, 0x5a, 0x04, 0x49, 0xd2,
+    0x5c, 0xf9, 0x98, 0x88, 0x49, 0xec, 0x36, 0x93, 0xfc, 0x9b, 0x63, 0xf8, 0x02, 0x73, 0xf0, 0xd7,
+    0x53, 0x45, 0xa9, 0x28, 0x80, 0x16, 0x94, 0xc3, 0xe4, 0xd8, 0xd1, 0x05, 0xac, 0xb6, 0x0c, 0x7e,
 ];
+const KNOWN_SPATIAL_DIGEST: [u8; 32] = [
+    0x94, 0xfd, 0xab, 0x04, 0x39, 0x37, 0x69, 0x28, 0x92, 0x33, 0xf6, 0x31, 0x73, 0x8a, 0xdf, 0x11,
+    0x58, 0xa8, 0x35, 0xf7, 0x92, 0x25, 0x90, 0xe1, 0xe9, 0xac, 0x1c, 0x5e, 0x24, 0xd6, 0x7c, 0x90,
+];
+const KNOWN_SPATIAL_TRANSCRIPT_PREFIX_HEX: &str = concat!(
+    "011e0000000000000062616f7a692e63616e6f6e6963616c2d7363656e652e736e617073686f74020500000003060000000000000073",
+    "6861323536a60c01a7a802a904aa05ab0c01c67b14ae47e17a843fac01ad02ae01af02b015000000000000006578616d706c653a7461",
+    "6e67656e742d6261736973b102000000b202b014000000000000006578616d706c653a74616e67656e742d7369676eb103000000b30c",
+    "01b40d0000000000000000b500b6c70000803fb70c01c70000c03fb8c7cdcccc3db90c01c70000c8420b0100000000000000ba0c01bb",
+    "0d0000000000000000bc02bd0c01c700004842be0c01c70000803ebf0c01c70000403fc0c70000803fc1c70000803fc2c70000803fc3",
+    "c7000020410b0100000000000000040c01080d00000000000000000b0100000000000000050c01060d00000000000000000a020e0000",
+    "00000e000000000e000000000e000000000e000000000e000000000e0000803f0e0000803f0e0000803f0e0000803f0b0a0000000000",
+    "0000c40c010d0000000000000000c50c010d0000000000000000070c010b00000000000000000b0100000000000000",
+);
 const KNOWN_MATRIX_CHILD_TRANSCRIPT_PREFIX_HEX: &str = concat!(
-    "011e0000000000000062616f7a692e63616e6f6e6963616c2d7363656e652e736e617073686f74020400000003",
-    "0600000000000000736861323536040c01080d00000000000000000b0100000000000000050c01060d00000000",
+    "011e0000000000000062616f7a692e63616e6f6e6963616c2d7363656e652e736e617073686f74020500000003",
+    "0600000000000000736861323536a60c01a7a800a900aa00ab0c00ac00ad00ae00af00b200b30c01",
+    "0b0000000000000000ba0c010b0000000000000000040c01080d00000000000000000b0100000000000000050c01060d00000000",
     "000000000a010e0000803f0e000000000e000000000e000000000e000000000e0000803f0e000000000e000000",
     "000e000000000e000000000e0000803f0e000000000e000080400e000000000e000000000e0000803f0b100000",
-    "0000000000070c01090d01000000000000000b0100000000000000060d01000000000000000a020e000000410e",
+    "0000000000c40c00c50c00070c01090d01000000000000000b0100000000000000060d01000000000000000a020e000000410e",
     "000000000e000000000e000000000e000000000e000000000e0000803f0e0000803f0e0000803f0e0000803f0b",
-    "0a00000000000000070c010b00000000000000000b0200000000000000",
+    "0a00000000000000c40c00c50c00070c010b00000000000000000b0200000000000000",
 );
 const EMPTY_CANONICAL_DOMAINS_TRANSCRIPT_HEX: &str = concat!(
     "330c01340c010b0000000000000000380c010b0000000000000000400c010b000000000000000010",
@@ -62,14 +83,15 @@ const EMPTY_CANONICAL_DOMAINS_TRANSCRIPT_HEX: &str = concat!(
     "00780c01790c010b00000000000000007f0c010b0000000000000000",
 );
 const KNOWN_POINT_GEOMETRY_DIGEST: [u8; 32] = [
-    0xa3, 0xa6, 0x46, 0x52, 0x86, 0x57, 0x8a, 0x38, 0x05, 0x5d, 0x52, 0xba, 0x46, 0xc3, 0x0f, 0x7e,
-    0xc4, 0x37, 0xc3, 0x83, 0x64, 0xae, 0x32, 0xc1, 0xdf, 0xa9, 0x94, 0x72, 0x00, 0x98, 0x0d, 0xd6,
+    0xe5, 0xbd, 0x23, 0xe4, 0x06, 0x06, 0x12, 0x24, 0xbb, 0x23, 0x6e, 0xd5, 0xa9, 0xa4, 0x56, 0x5c,
+    0x66, 0x3d, 0x1c, 0xd6, 0x17, 0x88, 0x19, 0x75, 0xab, 0xf8, 0xee, 0x70, 0x91, 0xb3, 0x06, 0x14,
 ];
 const KNOWN_POINT_GEOMETRY_TRANSCRIPT_HEX: &str = concat!(
-    "011e0000000000000062616f7a692e63616e6f6e6963616c2d7363656e652e736e617073686f74020400000003060000",
-    "0000000000736861323536040c01080d00000000000000000b0100000000000000050c01060d00000000000000000a02",
+    "011e0000000000000062616f7a692e63616e6f6e6963616c2d7363656e652e736e617073686f74020500000003060000",
+    "0000000000736861323536a60c01a7a800a900aa00ab0c00ac00ad00ae00af00b200b30c010b0000000000000000",
+    "ba0c010b0000000000000000040c01080d00000000000000000b0100000000000000050c01060d00000000000000000a02",
     "0e000000000e000000000e000000000e000000000e000000000e000000000e0000803f0e0000803f0e0000803f0e0000",
-    "803f0b0a00000000000000070c010b00000000000000000b0100000000000000330c01340c010b000000000000000038",
+    "803f0b0a00000000000000c40c00c50c00070c010b00000000000000000b0100000000000000330c01340c010b000000000000000038",
     "0c010b0000000000000000400c010b0000000000000000100c01110d00000000000000008e008f009000000000910092",
     "00930094004800000000000000000b0000000000000000950000000000000000960b2700000000000000a500000000a5",
     "00000000a500000000a500000000a500000000a500000000a500000000a500000000a500000000a500000000a5000000",
@@ -158,6 +180,24 @@ fn build_scene_with_appearance_and_geometry<'input>(
     appearance: AppearanceAuthoringBatch<'input>,
     geometry: GeometryAuthoringBatch<'input>,
 ) -> NodeSceneSuccessParts {
+    build_scene_with_spatial_appearance_and_geometry(
+        account,
+        roots,
+        nodes,
+        SpatialAuthoringBatch::new(&SceneSpace::UNKNOWN, &[], &[]),
+        appearance,
+        geometry,
+    )
+}
+
+fn build_scene_with_spatial_appearance_and_geometry<'input>(
+    account: &PhysicalStorageAccount,
+    roots: &'input [NodeLocalId],
+    nodes: &'input [NodeAuthoringNode],
+    spatial: SpatialAuthoringBatch<'input>,
+    appearance: AppearanceAuthoringBatch<'input>,
+    geometry: GeometryAuthoringBatch<'input>,
+) -> NodeSceneSuccessParts {
     let logical_morphs = vec![
         LogicalMorphAuthoring::new(AuthoringRange::new(0, 0), &[]);
         geometry.logical_meshes().len()
@@ -179,6 +219,7 @@ fn build_scene_with_appearance_and_geometry<'input>(
         &mesh_instance_deformations,
     );
     let input = SceneAuthoringBatch::new(
+        spatial,
         NodeAuthoringBatch::new(Presence::Present(roots), nodes),
         appearance,
         geometry,
@@ -252,12 +293,90 @@ fn assert_hex_parts(actual: &[u8], expected: &[&str]) {
     assert_eq!(encoded, expected);
 }
 
+fn extension_schema(name: &str, version: u32) -> ExtensionSchemaId {
+    ExtensionSchemaId::new(name, version).expect("canonical spatial test schema")
+}
+
+fn namespaced_scene_space() -> SceneSpace {
+    SceneSpace {
+        handedness: Handedness::Left,
+        up_axis: Axis::NegativeY,
+        front_axis: Axis::PositiveZ,
+        unit_scale_to_meters: Some(0.01),
+        front_face_winding: FrontFaceWinding::Clockwise,
+        uv_origin: UvOrigin::LowerLeft,
+        transform_convention: TransformConvention::ColumnVectorLocalToParent,
+        tangent_basis: TangentBasisConvention::try_namespaced(Some(extension_schema(
+            "example:tangent-basis",
+            2,
+        )))
+        .expect("namespaced tangent-basis convention"),
+        tangent_handedness_encoding: TangentHandednessEncoding::try_namespaced(Some(
+            extension_schema("example:tangent-sign", 3),
+        ))
+        .expect("namespaced tangent-encoding convention"),
+    }
+}
+
+fn white_emission(intensity: f32) -> LightEmission {
+    LightEmission::try_from_scaled_linear_srgb(Color::WHITE, intensity)
+        .expect("canonical white spatial test emission")
+}
+
+fn capture_spatial_scene(
+    account: &PhysicalStorageAccount,
+    roots: &[NodeLocalId],
+    nodes: &[NodeAuthoringNode],
+    scene_space: &SceneSpace,
+    cameras: &[CameraAuthoring],
+    lights: &[LightAuthoring],
+) -> NodeSceneSnapshot {
+    let parts = build_scene_with_spatial_appearance_and_geometry(
+        account,
+        roots,
+        nodes,
+        SpatialAuthoringBatch::new(scene_space, cameras, lights),
+        AppearanceAuthoringBatch::empty(),
+        GeometryAuthoringBatch::empty(),
+    );
+    capture_node_scene(&parts.scene, snapshot_limits(16_384, 64), None)
+        .expect("canonical spatial test snapshot")
+}
+
+fn capture_single_spatial_digest(
+    account: &PhysicalStorageAccount,
+    scene_space: &SceneSpace,
+    projection: CameraProjection,
+    light_kind: LightKind,
+    emission: LightEmission,
+) -> [u8; 32] {
+    let roots = [NodeLocalId::new(0)];
+    let nodes = [NodeAuthoringNode::new(
+        Presence::Absent,
+        AuthoredTransform::identity_trs(),
+        Presence::Present(CameraLocalId::new(0)),
+        Presence::Present(LightLocalId::new(0)),
+    )];
+    let cameras = [CameraAuthoring::new(projection)];
+    let lights = [LightAuthoring::new(light_kind, emission)];
+    capture_spatial_scene(account, &roots, &nodes, scene_space, &cameras, &lights).digest
+}
+
+fn assert_digest_mutation(label: &str, baseline: [u8; 32], mutation: [u8; 32]) {
+    assert_ne!(baseline, mutation, "{label} was absent from the digest");
+}
+
 fn single_root_scene(
     account: &PhysicalStorageAccount,
     transform: AuthoredTransform,
 ) -> NodeSceneSuccessParts {
     let roots = [NodeLocalId::new(0)];
-    let nodes = [NodeAuthoringNode::new(Presence::Absent, transform)];
+    let nodes = [NodeAuthoringNode::new(
+        Presence::Absent,
+        transform,
+        Presence::Absent,
+        Presence::Absent,
+    )];
     build_scene(account, &roots, &nodes)
 }
 
@@ -269,6 +388,8 @@ fn point_geometry_scene(
     let nodes = [NodeAuthoringNode::new(
         Presence::Absent,
         AuthoredTransform::identity_trs(),
+        Presence::Absent,
+        Presence::Absent,
     )];
     let attributes = [GeometryAttributeAuthoring::f32(
         AttributeSemantic::Position,
@@ -384,6 +505,8 @@ fn all_attribute_payload_kinds_scene(account: &PhysicalStorageAccount) -> NodeSc
     let nodes = [NodeAuthoringNode::new(
         Presence::Absent,
         AuthoredTransform::identity_trs(),
+        Presence::Absent,
+        Presence::Absent,
     )];
     let triangle_indices = [0_u32, 1, 2];
     let polygon_boundaries = [3_u32];
@@ -496,7 +619,7 @@ fn known_vector_is_stable_and_human_reviewable() {
             .expect("known Scene snapshot");
 
     assert_eq!(snapshot.domain, "baozi.canonical-scene.snapshot");
-    assert_eq!(snapshot.schema_revision, 4);
+    assert_eq!(snapshot.schema_revision, 5);
     assert_eq!(snapshot.algorithm, NodeSceneSnapshotAlgorithm::Sha256);
     assert_eq!(snapshot.digest, KNOWN_SINGLE_TRS_DIGEST);
     assert!(transcript.complete);
@@ -528,8 +651,8 @@ fn known_vector_is_stable_and_human_reviewable() {
     assert_eq!(snapshot.totals.deformation_mesh_instance_count, 0);
     assert_eq!(snapshot.totals.animation_clip_count, 0);
     assert_eq!(snapshot.totals.animation_channel_count, 0);
-    assert_eq!(snapshot.totals.transcript_bytes, 404);
-    assert_eq!(snapshot.totals.work_units, 43);
+    assert_eq!(snapshot.totals.transcript_bytes, 457);
+    assert_eq!(snapshot.totals.work_units, 49);
     assert!(snapshot.preview.text.contains("roots(present,total=1)=[0]"));
     assert!(snapshot.preview.text.contains("transform=trs(total=10)"));
     assert!(
@@ -548,13 +671,625 @@ fn known_vector_is_stable_and_human_reviewable() {
 }
 
 #[test]
+fn spatial_known_vector_pins_scene_space_cameras_lights_and_attachments() {
+    let factory = factory();
+    let account = account(&factory);
+    let roots = [NodeLocalId::new(0)];
+    let nodes = [NodeAuthoringNode::new(
+        Presence::Absent,
+        AuthoredTransform::identity_trs(),
+        Presence::Present(CameraLocalId::new(0)),
+        Presence::Present(LightLocalId::new(0)),
+    )];
+    let scene_space = namespaced_scene_space();
+    let projection = CameraProjection::perspective(1.0, Some(1.5), 0.1, Some(100.0))
+        .expect("spatial known-vector camera");
+    let cameras = [CameraAuthoring::new(projection)];
+    let light_kind =
+        LightKind::spot(Some(50.0), 0.25, 0.75).expect("spatial known-vector spot light");
+    let emission = white_emission(10.0);
+    let lights = [LightAuthoring::new(light_kind, emission)];
+    let parts = build_scene_with_spatial_appearance_and_geometry(
+        &account,
+        &roots,
+        &nodes,
+        SpatialAuthoringBatch::new(&scene_space, &cameras, &lights),
+        AppearanceAuthoringBatch::empty(),
+        GeometryAuthoringBatch::empty(),
+    );
+
+    let view = parts.scene.semantic_view().expect("spatial semantic view");
+    assert_eq!(
+        view.scene_space().expect("SceneSpace view").up_axis(),
+        Axis::NegativeY
+    );
+    assert_eq!(
+        view.camera_at(0)
+            .expect("camera view")
+            .expect("camera zero")
+            .projection(),
+        projection
+    );
+    assert_eq!(
+        view.light_at(0)
+            .expect("light view")
+            .expect("light zero")
+            .kind(),
+        light_kind
+    );
+    let mut spatial_placements = view.spatial_placements();
+    let placement = spatial_placements
+        .next()
+        .expect("spatial placement")
+        .expect("source-node placement");
+    assert_eq!(placement.source_node(), 0);
+    assert_eq!(placement.camera(), Some(0));
+    assert_eq!(placement.light(), Some(0));
+    assert_eq!(
+        spatial_placements.next().expect("spatial placement end"),
+        None
+    );
+    spatial_placements
+        .finish()
+        .expect("complete spatial placement scan");
+    let mut camera_placements = view.camera_placements(0).expect("camera placements");
+    assert_eq!(camera_placements.next().expect("camera placement"), Some(0));
+    assert_eq!(
+        camera_placements.next().expect("camera placement end"),
+        None
+    );
+    camera_placements
+        .finish()
+        .expect("complete camera placement scan");
+    let mut light_placements = view.light_placements(0).expect("light placements");
+    assert_eq!(light_placements.next().expect("light placement"), Some(0));
+    assert_eq!(light_placements.next().expect("light placement end"), None);
+    light_placements
+        .finish()
+        .expect("complete light placement scan");
+    let mut cursor = view.into_cursor().expect("spatial node cursor");
+    let mut root_cursor = cursor.take_roots().expect("spatial roots");
+    assert_eq!(root_cursor.next().expect("spatial root"), Some(0));
+    assert_eq!(root_cursor.next().expect("spatial root end"), None);
+    root_cursor.finish().expect("complete spatial root scan");
+    let node = cursor
+        .next_node()
+        .expect("spatial node")
+        .expect("source node zero");
+    assert_eq!(node.camera(), Some(0));
+    assert_eq!(node.light(), Some(0));
+
+    let (snapshot, transcript) =
+        capture_node_scene_with_test_transcript(&parts.scene, snapshot_limits(16_384, 64), None)
+            .expect("spatial known-vector snapshot");
+    assert_eq!(snapshot.digest, KNOWN_SPATIAL_DIGEST);
+    assert!(transcript.complete);
+    assert_hex_parts(
+        &transcript.bytes,
+        &[
+            KNOWN_SPATIAL_TRANSCRIPT_PREFIX_HEX,
+            EMPTY_CANONICAL_DOMAINS_TRANSCRIPT_HEX,
+        ],
+    );
+    assert_eq!(snapshot.totals.transcript_bytes, 653);
+    assert_eq!(snapshot.totals.work_units, 62);
+    assert_eq!(snapshot.totals.camera_count, 1);
+    assert_eq!(snapshot.totals.light_count, 1);
+    assert_eq!(snapshot.totals.camera_attachment_count, 1);
+    assert_eq!(snapshot.totals.light_attachment_count, 1);
+    assert!(snapshot.preview.text.contains(concat!(
+        "scene_space handedness=left up_axis=negative_y front_axis=positive_z ",
+        "unit_scale_to_meters_bits=0x3f847ae147ae147b ",
+        "front_face_winding=clockwise uv_origin=lower_left ",
+        "transform_convention=column_vector_local_to_parent ",
+        "tangent_basis=namespaced tangent_basis_schema_name=example:tangent-basis ",
+        "tangent_basis_schema_version=2 tangent_handedness_encoding=namespaced ",
+        "tangent_handedness_encoding_schema_name=example:tangent-sign ",
+        "tangent_handedness_encoding_schema_version=3\n",
+    )));
+    assert!(snapshot.preview.text.contains(concat!(
+        "camera[0] projection=perspective vertical_fov=0x3f800000 ",
+        "aspect_ratio=0x3fc00000 near_plane=0x3dcccccd far_plane=0x42c80000",
+    )));
+    assert!(snapshot.preview.text.contains(concat!(
+        "light[0] kind=spot range=0x42480000 inner_cone=0x3e800000 ",
+        "outer_cone=0x3f400000 tint_r=0x3f800000 tint_g=0x3f800000 ",
+        "tint_b=0x3f800000 intensity=0x41200000",
+    )));
+    assert!(snapshot.preview.text.contains("camera=0 light=0"));
+    assert!(!snapshot.preview.bytes_truncated);
+    assert!(!snapshot.preview.items_truncated);
+}
+
+#[test]
+fn scene_space_field_mutation_vectors_are_digest_visible() {
+    let factory = factory();
+    let account = account(&factory);
+    let baseline = namespaced_scene_space();
+    let projection = CameraProjection::perspective(1.0, Some(1.5), 0.1, Some(100.0))
+        .expect("SceneSpace mutation camera");
+    let light_kind = LightKind::spot(Some(50.0), 0.25, 0.75).expect("SceneSpace mutation light");
+    let emission = white_emission(10.0);
+    let digest = |scene_space: &SceneSpace| {
+        capture_single_spatial_digest(&account, scene_space, projection, light_kind, emission)
+    };
+    let baseline_digest = digest(&baseline);
+    let mutations = [
+        (
+            "SceneSpace handedness",
+            SceneSpace {
+                handedness: Handedness::Right,
+                ..baseline.clone()
+            },
+        ),
+        (
+            "SceneSpace up axis",
+            SceneSpace {
+                up_axis: Axis::PositiveX,
+                ..baseline.clone()
+            },
+        ),
+        (
+            "SceneSpace front axis",
+            SceneSpace {
+                front_axis: Axis::NegativeX,
+                ..baseline.clone()
+            },
+        ),
+        (
+            "SceneSpace unit-scale bits",
+            SceneSpace {
+                unit_scale_to_meters: Some(0.02),
+                ..baseline.clone()
+            },
+        ),
+        (
+            "SceneSpace unit-scale presence",
+            SceneSpace {
+                unit_scale_to_meters: None,
+                ..baseline.clone()
+            },
+        ),
+        (
+            "SceneSpace front-face winding",
+            SceneSpace {
+                front_face_winding: FrontFaceWinding::CounterClockwise,
+                ..baseline.clone()
+            },
+        ),
+        (
+            "SceneSpace UV origin",
+            SceneSpace {
+                uv_origin: UvOrigin::UpperLeft,
+                ..baseline.clone()
+            },
+        ),
+        (
+            "SceneSpace transform convention",
+            SceneSpace {
+                transform_convention: TransformConvention::Unknown,
+                ..baseline.clone()
+            },
+        ),
+        (
+            "tangent-basis schema name",
+            SceneSpace {
+                tangent_basis: TangentBasisConvention::try_namespaced(Some(extension_schema(
+                    "example:tangent-basis-v2",
+                    2,
+                )))
+                .expect("mutated tangent-basis name"),
+                ..baseline.clone()
+            },
+        ),
+        (
+            "tangent-basis schema version",
+            SceneSpace {
+                tangent_basis: TangentBasisConvention::try_namespaced(Some(extension_schema(
+                    "example:tangent-basis",
+                    4,
+                )))
+                .expect("mutated tangent-basis version"),
+                ..baseline.clone()
+            },
+        ),
+        (
+            "tangent-encoding schema name",
+            SceneSpace {
+                tangent_handedness_encoding: TangentHandednessEncoding::try_namespaced(Some(
+                    extension_schema("example:tangent-sign-v2", 3),
+                ))
+                .expect("mutated tangent-encoding name"),
+                ..baseline.clone()
+            },
+        ),
+        (
+            "tangent-encoding schema version",
+            SceneSpace {
+                tangent_handedness_encoding: TangentHandednessEncoding::try_namespaced(Some(
+                    extension_schema("example:tangent-sign", 5),
+                ))
+                .expect("mutated tangent-encoding version"),
+                ..baseline.clone()
+            },
+        ),
+    ];
+
+    for (label, mutation) in mutations {
+        assert_digest_mutation(label, baseline_digest, digest(&mutation));
+    }
+
+    let basis_category_baseline = SceneSpace {
+        tangent_handedness_encoding: TangentHandednessEncoding::SignInW,
+        ..baseline.clone()
+    };
+    let basis_category_mutation = SceneSpace {
+        tangent_basis: TangentBasisConvention::MikkTspace,
+        ..basis_category_baseline.clone()
+    };
+    assert_digest_mutation(
+        "tangent-basis category",
+        digest(&basis_category_baseline),
+        digest(&basis_category_mutation),
+    );
+    let encoding_category_mutation = SceneSpace {
+        tangent_handedness_encoding: TangentHandednessEncoding::SignInW,
+        ..baseline.clone()
+    };
+    assert_digest_mutation(
+        "tangent-handedness encoding category",
+        baseline_digest,
+        digest(&encoding_category_mutation),
+    );
+}
+
+#[test]
+fn camera_and_light_field_mutation_vectors_are_digest_visible() {
+    let factory = factory();
+    let account = account(&factory);
+    let scene_space = namespaced_scene_space();
+    let baseline_projection = CameraProjection::perspective(1.0, Some(1.5), 0.1, Some(100.0))
+        .expect("camera mutation baseline");
+    let baseline_kind = LightKind::spot(Some(50.0), 0.25, 0.75).expect("light mutation baseline");
+    let baseline_emission = white_emission(10.0);
+    let camera_digest = |projection| {
+        capture_single_spatial_digest(
+            &account,
+            &scene_space,
+            projection,
+            baseline_kind,
+            baseline_emission,
+        )
+    };
+    let camera_baseline_digest = camera_digest(baseline_projection);
+    let camera_mutations = [
+        (
+            "camera projection kind",
+            CameraProjection::orthographic(1.0, 1.5, 0.1, 100.0)
+                .expect("orthographic projection-kind mutation"),
+        ),
+        (
+            "camera vertical field of view",
+            CameraProjection::perspective(1.1, Some(1.5), 0.1, Some(100.0))
+                .expect("vertical-field-of-view mutation"),
+        ),
+        (
+            "camera aspect-ratio bits",
+            CameraProjection::perspective(1.0, Some(1.6), 0.1, Some(100.0))
+                .expect("aspect-ratio bits mutation"),
+        ),
+        (
+            "camera aspect-ratio presence",
+            CameraProjection::perspective(1.0, None, 0.1, Some(100.0))
+                .expect("aspect-ratio presence mutation"),
+        ),
+        (
+            "camera near plane",
+            CameraProjection::perspective(1.0, Some(1.5), 0.2, Some(100.0))
+                .expect("near-plane mutation"),
+        ),
+        (
+            "camera far-plane bits",
+            CameraProjection::perspective(1.0, Some(1.5), 0.1, Some(101.0))
+                .expect("far-plane bits mutation"),
+        ),
+        (
+            "camera far-plane presence",
+            CameraProjection::perspective(1.0, Some(1.5), 0.1, None)
+                .expect("far-plane presence mutation"),
+        ),
+    ];
+    for (label, mutation) in camera_mutations {
+        assert_digest_mutation(label, camera_baseline_digest, camera_digest(mutation));
+    }
+
+    let orthographic =
+        CameraProjection::orthographic(2.0, 3.0, 0.0, 100.0).expect("orthographic preview camera");
+    let orthographic_baseline_digest = camera_digest(orthographic);
+    for (label, mutation) in [
+        (
+            "camera horizontal half extent",
+            CameraProjection::orthographic(2.5, 3.0, 0.0, 100.0)
+                .expect("horizontal-half-extent mutation"),
+        ),
+        (
+            "camera vertical half extent",
+            CameraProjection::orthographic(2.0, 3.5, 0.0, 100.0)
+                .expect("vertical-half-extent mutation"),
+        ),
+        (
+            "orthographic camera near plane",
+            CameraProjection::orthographic(2.0, 3.0, 0.1, 100.0)
+                .expect("orthographic near-plane mutation"),
+        ),
+        (
+            "orthographic camera far plane",
+            CameraProjection::orthographic(2.0, 3.0, 0.0, 101.0)
+                .expect("orthographic far-plane mutation"),
+        ),
+    ] {
+        assert_digest_mutation(label, orthographic_baseline_digest, camera_digest(mutation));
+    }
+    let roots = [NodeLocalId::new(0)];
+    let nodes = [NodeAuthoringNode::new(
+        Presence::Absent,
+        AuthoredTransform::identity_trs(),
+        Presence::Present(CameraLocalId::new(0)),
+        Presence::Present(LightLocalId::new(0)),
+    )];
+    let cameras = [CameraAuthoring::new(orthographic)];
+    let lights = [LightAuthoring::new(baseline_kind, baseline_emission)];
+    let orthographic_snapshot =
+        capture_spatial_scene(&account, &roots, &nodes, &scene_space, &cameras, &lights);
+    assert!(orthographic_snapshot.preview.text.contains(concat!(
+        "camera[0] projection=orthographic horizontal_half_extent=0x40000000 ",
+        "vertical_half_extent=0x40400000 near_plane=0x00000000 ",
+        "far_plane=0x42c80000",
+    )));
+
+    let light_digest = |kind, emission| {
+        capture_single_spatial_digest(&account, &scene_space, baseline_projection, kind, emission)
+    };
+    let light_baseline_digest = light_digest(baseline_kind, baseline_emission);
+    for (label, mutation) in [
+        (
+            "light range bits",
+            LightKind::spot(Some(51.0), 0.25, 0.75).expect("light range-bits mutation"),
+        ),
+        (
+            "light range presence",
+            LightKind::spot(None, 0.25, 0.75).expect("light range-presence mutation"),
+        ),
+        (
+            "light inner cone",
+            LightKind::spot(Some(50.0), 0.3, 0.75).expect("light inner-cone mutation"),
+        ),
+        (
+            "light outer cone",
+            LightKind::spot(Some(50.0), 0.25, 0.8).expect("light outer-cone mutation"),
+        ),
+    ] {
+        assert_digest_mutation(
+            label,
+            light_baseline_digest,
+            light_digest(mutation, baseline_emission),
+        );
+    }
+    assert_digest_mutation(
+        "light kind category",
+        light_digest(LightKind::directional(), baseline_emission),
+        light_digest(
+            LightKind::point(None).expect("point category mutation"),
+            baseline_emission,
+        ),
+    );
+
+    let tinted_emission = LightEmission::try_from_scaled_linear_srgb(
+        Color::linear_rgba(2.0, 1.0, 0.5, 1.0),
+        f32::from_bits(0x4107_ff21),
+    )
+    .expect("isolated light-tint mutation");
+    assert_eq!(
+        tinted_emission.intensity().to_bits(),
+        baseline_emission.intensity().to_bits(),
+        "tint vector must hold canonical intensity constant",
+    );
+    assert_ne!(tinted_emission.tint(), baseline_emission.tint());
+    assert_digest_mutation(
+        "light tint",
+        light_baseline_digest,
+        light_digest(baseline_kind, tinted_emission),
+    );
+
+    let stronger_emission = white_emission(11.0);
+    assert_eq!(stronger_emission.tint(), baseline_emission.tint());
+    assert_digest_mutation(
+        "light intensity",
+        light_baseline_digest,
+        light_digest(baseline_kind, stronger_emission),
+    );
+}
+
+#[test]
+fn spatial_attachment_presence_and_reference_mutations_are_digest_visible() {
+    let factory = factory();
+    let account = account(&factory);
+    let scene_space = namespaced_scene_space();
+    let projection = CameraProjection::perspective(1.0, Some(1.5), 0.1, Some(100.0))
+        .expect("attachment mutation camera");
+    let light_kind = LightKind::spot(Some(50.0), 0.25, 0.75).expect("attachment mutation light");
+    let emission = white_emission(10.0);
+    let roots = [NodeLocalId::new(0), NodeLocalId::new(1)];
+    let cameras = [CameraAuthoring::new(projection)];
+    let lights = [LightAuthoring::new(light_kind, emission)];
+    let both_attached = [
+        NodeAuthoringNode::new(
+            Presence::Absent,
+            AuthoredTransform::identity_trs(),
+            Presence::Present(CameraLocalId::new(0)),
+            Presence::Present(LightLocalId::new(0)),
+        ),
+        NodeAuthoringNode::new(
+            Presence::Absent,
+            AuthoredTransform::identity_trs(),
+            Presence::Present(CameraLocalId::new(0)),
+            Presence::Present(LightLocalId::new(0)),
+        ),
+    ];
+    let presence_baseline = capture_spatial_scene(
+        &account,
+        &roots,
+        &both_attached,
+        &scene_space,
+        &cameras,
+        &lights,
+    )
+    .digest;
+    let camera_absent = [
+        both_attached[0],
+        NodeAuthoringNode::new(
+            Presence::Absent,
+            AuthoredTransform::identity_trs(),
+            Presence::Absent,
+            Presence::Present(LightLocalId::new(0)),
+        ),
+    ];
+    assert_digest_mutation(
+        "camera attachment presence",
+        presence_baseline,
+        capture_spatial_scene(
+            &account,
+            &roots,
+            &camera_absent,
+            &scene_space,
+            &cameras,
+            &lights,
+        )
+        .digest,
+    );
+    let light_absent = [
+        both_attached[0],
+        NodeAuthoringNode::new(
+            Presence::Absent,
+            AuthoredTransform::identity_trs(),
+            Presence::Present(CameraLocalId::new(0)),
+            Presence::Absent,
+        ),
+    ];
+    assert_digest_mutation(
+        "light attachment presence",
+        presence_baseline,
+        capture_spatial_scene(
+            &account,
+            &roots,
+            &light_absent,
+            &scene_space,
+            &cameras,
+            &lights,
+        )
+        .digest,
+    );
+
+    let two_cameras = [
+        CameraAuthoring::new(projection),
+        CameraAuthoring::new(projection),
+    ];
+    let two_lights = [
+        LightAuthoring::new(light_kind, emission),
+        LightAuthoring::new(light_kind, emission),
+    ];
+    let reference_baseline_nodes = [
+        NodeAuthoringNode::new(
+            Presence::Absent,
+            AuthoredTransform::identity_trs(),
+            Presence::Present(CameraLocalId::new(0)),
+            Presence::Present(LightLocalId::new(0)),
+        ),
+        NodeAuthoringNode::new(
+            Presence::Absent,
+            AuthoredTransform::identity_trs(),
+            Presence::Present(CameraLocalId::new(1)),
+            Presence::Present(LightLocalId::new(1)),
+        ),
+    ];
+    let reference_baseline = capture_spatial_scene(
+        &account,
+        &roots,
+        &reference_baseline_nodes,
+        &scene_space,
+        &two_cameras,
+        &two_lights,
+    )
+    .digest;
+    let swapped_camera_references = [
+        NodeAuthoringNode::new(
+            Presence::Absent,
+            AuthoredTransform::identity_trs(),
+            Presence::Present(CameraLocalId::new(1)),
+            Presence::Present(LightLocalId::new(0)),
+        ),
+        NodeAuthoringNode::new(
+            Presence::Absent,
+            AuthoredTransform::identity_trs(),
+            Presence::Present(CameraLocalId::new(0)),
+            Presence::Present(LightLocalId::new(1)),
+        ),
+    ];
+    assert_digest_mutation(
+        "camera attachment reference",
+        reference_baseline,
+        capture_spatial_scene(
+            &account,
+            &roots,
+            &swapped_camera_references,
+            &scene_space,
+            &two_cameras,
+            &two_lights,
+        )
+        .digest,
+    );
+    let swapped_light_references = [
+        NodeAuthoringNode::new(
+            Presence::Absent,
+            AuthoredTransform::identity_trs(),
+            Presence::Present(CameraLocalId::new(0)),
+            Presence::Present(LightLocalId::new(1)),
+        ),
+        NodeAuthoringNode::new(
+            Presence::Absent,
+            AuthoredTransform::identity_trs(),
+            Presence::Present(CameraLocalId::new(1)),
+            Presence::Present(LightLocalId::new(0)),
+        ),
+    ];
+    assert_digest_mutation(
+        "light attachment reference",
+        reference_baseline,
+        capture_spatial_scene(
+            &account,
+            &roots,
+            &swapped_light_references,
+            &scene_space,
+            &two_cameras,
+            &two_lights,
+        )
+        .digest,
+    );
+}
+
+#[test]
 fn matrix_and_child_known_vector_pins_node_framing_and_empty_domains() {
     let factory = factory();
     let account = account(&factory);
     let roots = [NodeLocalId::new(0)];
     let nodes = [
-        NodeAuthoringNode::new(Presence::Absent, matrix(4.0)),
-        NodeAuthoringNode::new(parent(0, 0), trs(8.0)),
+        NodeAuthoringNode::new(
+            Presence::Absent,
+            matrix(4.0),
+            Presence::Absent,
+            Presence::Absent,
+        ),
+        NodeAuthoringNode::new(parent(0, 0), trs(8.0), Presence::Absent, Presence::Absent),
     ];
     let parts = build_scene(&account, &roots, &nodes);
 
@@ -574,8 +1309,8 @@ fn matrix_and_child_known_vector_pins_node_framing_and_empty_domains() {
     assert_eq!(snapshot.totals.node_count, 2);
     assert_eq!(snapshot.totals.root_count, 1);
     assert_eq!(snapshot.totals.edge_count, 1);
-    assert_eq!(snapshot.totals.transcript_bytes, 527);
-    assert_eq!(snapshot.totals.work_units, 63);
+    assert_eq!(snapshot.totals.transcript_bytes, 586);
+    assert_eq!(snapshot.totals.work_units, 71);
 }
 
 #[test]
@@ -611,8 +1346,8 @@ fn point_geometry_known_vector_pins_complete_scene_framing() {
     assert_eq!(snapshot.totals.canonical_scalar_count, 3);
     assert_eq!(snapshot.totals.f32_scalar_count, 3);
     assert_eq!(snapshot.totals.u32_scalar_count, 0);
-    assert_eq!(snapshot.totals.transcript_bytes, 1_006);
-    assert_eq!(snapshot.totals.work_units, 98);
+    assert_eq!(snapshot.totals.transcript_bytes, 1_059);
+    assert_eq!(snapshot.totals.work_units, 104);
     assert!(snapshot.preview.text.contains("material[0]"));
     assert!(
         snapshot
@@ -635,17 +1370,27 @@ fn collection_framing_distinguishes_root_child_partitions() {
     let account = account(&factory);
     let first_roots = [NodeLocalId::new(0)];
     let first_nodes = [
-        NodeAuthoringNode::new(Presence::Absent, trs(0.0)),
-        NodeAuthoringNode::new(parent(0, 0), trs(1.0)),
-        NodeAuthoringNode::new(parent(0, 1), trs(2.0)),
-        NodeAuthoringNode::new(parent(1, 0), trs(3.0)),
+        NodeAuthoringNode::new(
+            Presence::Absent,
+            trs(0.0),
+            Presence::Absent,
+            Presence::Absent,
+        ),
+        NodeAuthoringNode::new(parent(0, 0), trs(1.0), Presence::Absent, Presence::Absent),
+        NodeAuthoringNode::new(parent(0, 1), trs(2.0), Presence::Absent, Presence::Absent),
+        NodeAuthoringNode::new(parent(1, 0), trs(3.0), Presence::Absent, Presence::Absent),
     ];
     let second_roots = [NodeLocalId::new(0)];
     let second_nodes = [
-        NodeAuthoringNode::new(Presence::Absent, trs(0.0)),
-        NodeAuthoringNode::new(parent(0, 0), trs(1.0)),
-        NodeAuthoringNode::new(parent(1, 0), trs(2.0)),
-        NodeAuthoringNode::new(parent(1, 1), trs(3.0)),
+        NodeAuthoringNode::new(
+            Presence::Absent,
+            trs(0.0),
+            Presence::Absent,
+            Presence::Absent,
+        ),
+        NodeAuthoringNode::new(parent(0, 0), trs(1.0), Presence::Absent, Presence::Absent),
+        NodeAuthoringNode::new(parent(1, 0), trs(2.0), Presence::Absent, Presence::Absent),
+        NodeAuthoringNode::new(parent(1, 1), trs(3.0), Presence::Absent, Presence::Absent),
     ];
     let first = build_scene(&account, &first_roots, &first_nodes);
     let second = build_scene(&account, &second_roots, &second_nodes);
@@ -703,8 +1448,8 @@ fn empty_scene_snapshot_is_complete_and_deterministic() {
     assert_eq!(first_snapshot.totals.deformation_mesh_instance_count, 0);
     assert_eq!(first_snapshot.totals.animation_clip_count, 0);
     assert_eq!(first_snapshot.totals.animation_channel_count, 0);
-    assert_eq!(first_snapshot.totals.transcript_bytes, 311);
-    assert_eq!(first_snapshot.totals.work_units, 29);
+    assert_eq!(first_snapshot.totals.transcript_bytes, 358);
+    assert_eq!(first_snapshot.totals.work_units, 33);
     let empty_tail_bytes = EMPTY_CANONICAL_DOMAINS_TRANSCRIPT_HEX.len() / 2;
     assert!(transcript.complete);
     assert_hex(
@@ -733,7 +1478,7 @@ fn geometry_tables_payload_kinds_and_totals_are_complete() {
     assert_eq!(snapshot.totals.canonical_scalar_count, 36);
     assert_eq!(snapshot.totals.f32_scalar_count, 33);
     assert_eq!(snapshot.totals.u32_scalar_count, 3);
-    assert_eq!(snapshot.totals.work_units, 168);
+    assert_eq!(snapshot.totals.work_units, 174);
     assert!(snapshot.preview.text.contains("payload=dense"));
     assert!(snapshot.preview.text.contains("payload=sparse"));
     assert!(snapshot.preview.text.contains("sparse_default(present"));
@@ -949,12 +1694,32 @@ fn mutation_after_preview_boundary_changes_only_the_complete_digest() {
     let account = account(&factory);
     let roots = [NodeLocalId::new(0), NodeLocalId::new(1)];
     let left_nodes = [
-        NodeAuthoringNode::new(Presence::Absent, trs(1.0)),
-        NodeAuthoringNode::new(Presence::Absent, trs(2.0)),
+        NodeAuthoringNode::new(
+            Presence::Absent,
+            trs(1.0),
+            Presence::Absent,
+            Presence::Absent,
+        ),
+        NodeAuthoringNode::new(
+            Presence::Absent,
+            trs(2.0),
+            Presence::Absent,
+            Presence::Absent,
+        ),
     ];
     let right_nodes = [
-        NodeAuthoringNode::new(Presence::Absent, trs(1.0)),
-        NodeAuthoringNode::new(Presence::Absent, trs(3.0)),
+        NodeAuthoringNode::new(
+            Presence::Absent,
+            trs(1.0),
+            Presence::Absent,
+            Presence::Absent,
+        ),
+        NodeAuthoringNode::new(
+            Presence::Absent,
+            trs(3.0),
+            Presence::Absent,
+            Presence::Absent,
+        ),
     ];
     let left = build_scene(&account, &roots, &left_nodes);
     let right = build_scene(&account, &roots, &right_nodes);
@@ -983,13 +1748,23 @@ fn equivalent_semantics_ignore_local_indices_account_and_generation() {
 
     let first_roots = [NodeLocalId::new(0)];
     let first_nodes = [
-        NodeAuthoringNode::new(Presence::Absent, matrix(4.0)),
-        NodeAuthoringNode::new(parent(0, 0), trs(8.0)),
+        NodeAuthoringNode::new(
+            Presence::Absent,
+            matrix(4.0),
+            Presence::Absent,
+            Presence::Absent,
+        ),
+        NodeAuthoringNode::new(parent(0, 0), trs(8.0), Presence::Absent, Presence::Absent),
     ];
     let second_roots = [NodeLocalId::new(1)];
     let second_nodes = [
-        NodeAuthoringNode::new(parent(1, 0), trs(8.0)),
-        NodeAuthoringNode::new(Presence::Absent, matrix(4.0)),
+        NodeAuthoringNode::new(parent(1, 0), trs(8.0), Presence::Absent, Presence::Absent),
+        NodeAuthoringNode::new(
+            Presence::Absent,
+            matrix(4.0),
+            Presence::Absent,
+            Presence::Absent,
+        ),
     ];
     let first = build_scene(&first_account, &first_roots, &first_nodes);
     let second = build_scene(&second_account, &second_roots, &second_nodes);
@@ -1017,14 +1792,24 @@ fn sibling_order_representation_and_signed_zero_are_semantic() {
     let account = account(&factory);
     let roots = [NodeLocalId::new(0)];
     let ordered_nodes = [
-        NodeAuthoringNode::new(Presence::Absent, trs(0.0)),
-        NodeAuthoringNode::new(parent(0, 0), trs(1.0)),
-        NodeAuthoringNode::new(parent(0, 1), trs(2.0)),
+        NodeAuthoringNode::new(
+            Presence::Absent,
+            trs(0.0),
+            Presence::Absent,
+            Presence::Absent,
+        ),
+        NodeAuthoringNode::new(parent(0, 0), trs(1.0), Presence::Absent, Presence::Absent),
+        NodeAuthoringNode::new(parent(0, 1), trs(2.0), Presence::Absent, Presence::Absent),
     ];
     let swapped_nodes = [
-        NodeAuthoringNode::new(Presence::Absent, trs(0.0)),
-        NodeAuthoringNode::new(parent(0, 1), trs(1.0)),
-        NodeAuthoringNode::new(parent(0, 0), trs(2.0)),
+        NodeAuthoringNode::new(
+            Presence::Absent,
+            trs(0.0),
+            Presence::Absent,
+            Presence::Absent,
+        ),
+        NodeAuthoringNode::new(parent(0, 1), trs(1.0), Presence::Absent, Presence::Absent),
+        NodeAuthoringNode::new(parent(0, 0), trs(2.0), Presence::Absent, Presence::Absent),
     ];
     let ordered = build_scene(&account, &roots, &ordered_nodes);
     let swapped = build_scene(&account, &roots, &swapped_nodes);
@@ -1063,8 +1848,13 @@ fn proof_and_mid_traversal_read_failures_do_not_publish_partial_snapshots() {
 
     let roots = [NodeLocalId::new(0)];
     let nodes = [
-        NodeAuthoringNode::new(Presence::Absent, trs(0.0)),
-        NodeAuthoringNode::new(parent(0, 0), trs(1.0)),
+        NodeAuthoringNode::new(
+            Presence::Absent,
+            trs(0.0),
+            Presence::Absent,
+            Presence::Absent,
+        ),
+        NodeAuthoringNode::new(parent(0, 0), trs(1.0), Presence::Absent, Presence::Absent),
     ];
     let mut child_read_failure = build_scene(&account, &roots, &nodes);
     child_read_failure
@@ -1236,7 +2026,12 @@ fn traversal_scales_linearly_while_preview_stays_bounded() {
                 } else {
                     parent(0, u32::try_from(index - 1).expect("test child ordinal"))
                 };
-                NodeAuthoringNode::new(parent_ref, AuthoredTransform::identity_trs())
+                NodeAuthoringNode::new(
+                    parent_ref,
+                    AuthoredTransform::identity_trs(),
+                    Presence::Absent,
+                    Presence::Absent,
+                )
             })
             .collect::<Vec<_>>();
         let parts = build_scene(&account, &roots, &nodes);
@@ -1255,9 +2050,9 @@ fn traversal_scales_linearly_while_preview_stays_bounded() {
         assert!(snapshot.preview.text.len() <= 64);
         assert_eq!(
             snapshot.totals.transcript_bytes,
-            311 + 93 * node_count as u64
+            358 + 99 * node_count as u64
         );
-        assert_eq!(snapshot.totals.work_units, 29 + 14 * node_count as u64);
+        assert_eq!(snapshot.totals.work_units, 33 + 16 * node_count as u64);
         assert_eq!(snapshot.totals.node_count, node_count);
         assert_eq!(snapshot.totals.root_count, 1);
         assert_eq!(snapshot.totals.edge_count, node_count - 1);
@@ -1269,12 +2064,12 @@ fn traversal_scales_linearly_while_preview_stays_bounded() {
         ));
     }
 
-    assert_eq!(observed[1].0 - observed[0].0, 9 * 93);
-    assert_eq!(observed[2].0 - observed[0].0, 99 * 93);
-    assert_eq!(observed[1].1 - observed[0].1, 9 * 14);
-    assert_eq!(observed[2].1 - observed[0].1, 99 * 14);
-    assert_eq!(observed[3].0 - observed[0].0, 999 * 93);
-    assert_eq!(observed[3].1 - observed[0].1, 999 * 14);
+    assert_eq!(observed[1].0 - observed[0].0, 9 * 99);
+    assert_eq!(observed[2].0 - observed[0].0, 99 * 99);
+    assert_eq!(observed[1].1 - observed[0].1, 9 * 16);
+    assert_eq!(observed[2].1 - observed[0].1, 99 * 16);
+    assert_eq!(observed[3].0 - observed[0].0, 999 * 99);
+    assert_eq!(observed[3].1 - observed[0].1, 999 * 16);
     assert_eq!(observed[1].2, observed[0].2);
     assert_eq!(observed[2].2, observed[0].2);
     assert_eq!(observed[3].2, observed[0].2);

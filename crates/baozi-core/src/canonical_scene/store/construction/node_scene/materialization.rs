@@ -1,38 +1,44 @@
 use baozi_operation::{
-    OutcomeEvidenceRecordRef, RecordPlan, RetainedStoreBatchLimits, RetainedStoreBlockTablePlan,
-    RetainedStorePublicationPlan, RetainedStoreReservation, RetainedStoreWriterPlan, SequencePlan,
-    StoreBuildError, StoreControlledError, StorePlanError, StoreRuntimeError,
+    CanonicalRecordRowWriter, OutcomeEvidenceRecordRef, RecordBlock, RecordPlan,
+    RetainedStoreBatchLimits, RetainedStoreBlockTablePlan, RetainedStorePublicationPlan,
+    RetainedStoreReservation, RetainedStoreWriterPlan, SequencePlan, StoreBuildError,
+    StoreControlledError, StorePlanError, StoreRuntimeError,
 };
 
 use crate::SceneValidationLimits;
 #[cfg(test)]
 use crate::canonical_scene::store::production::{
     AnimationAuthoringBatch, AppearanceAuthoringBatch, DeformationAuthoringBatch,
-    GeometryAuthoringBatch, NodeAuthoringBatch,
+    GeometryAuthoringBatch, NodeAuthoringBatch, SpatialAuthoringBatch,
 };
 use crate::canonical_scene::store::production::{
     AnimationTargetCatalog, OperationAuthoringControl, Presence, SceneAuthoringBatch,
     ValidatedAnimationBatch, ValidatedAppearanceBatch, ValidatedDeformationBatch,
-    ValidatedGeometryBatch, ValidatedNodeBatch, animation_limits_after_deformation,
-    appearance_limits_after_nodes, deformation_limits_after_geometry,
-    geometry_limits_after_appearance, validate_animation_batch, validate_appearance_batch,
-    validate_deformation_batch, validate_geometry_batch, validate_node_batch,
-    validate_scene_aggregate,
+    ValidatedGeometryBatch, ValidatedNodeBatch, ValidatedSpatialBatch,
+    animation_limits_after_deformation, appearance_limits_after_nodes,
+    deformation_limits_after_geometry, geometry_limits_after_appearance, node_limits_after_spatial,
+    validate_animation_batch, validate_appearance_batch, validate_deformation_batch,
+    validate_geometry_batch, validate_node_batch, validate_scene_aggregate, validate_spatial_batch,
 };
 use crate::canonical_scene::store::schema::animation::AnimationDirectorySchema;
 use crate::canonical_scene::store::schema::appearance::AppearanceDirectorySchema;
 use crate::canonical_scene::store::schema::deformation::DeformationDirectorySchema;
+use crate::canonical_scene::store::schema::spatial::{
+    SpatialCameraTableSchema, SpatialDirectorySchema, SpatialLightTableSchema,
+};
 use crate::canonical_scene::store::schema::{
-    CanonicalBlockRef, NODE_SCENE_CHILD_REFERENCE_FIELD_COUNT, NODE_SCENE_EVIDENCE_FIELD_COUNT,
-    NODE_SCENE_EVIDENCE_OUTCOME_CANDIDATE, NODE_SCENE_MATRIX_SCALAR_COUNT,
-    NODE_SCENE_NODE_FIELD_COUNT, NODE_SCENE_TRANSFORM_MATRIX, NODE_SCENE_TRANSFORM_SYNTHETIC,
-    NODE_SCENE_TRANSFORM_TRS, NODE_SCENE_TRS_SCALAR_COUNT, NodeSceneAuthoredTransformSchema,
-    NodeSceneChildReferenceTableSchema, NodeSceneNodeTableSchema, NodeSceneOutcomeEvidenceSchema,
-    PRESENCE_ABSENT, PRESENCE_PRESENT, SCENE_DIRECTORY_FIELD_COUNT, SCENE_SCHEMA_REVISION,
-    SceneDirectorySchema, SceneGeometryDirectorySchema,
+    CanonicalBlockRef, CanonicalSchema, NODE_SCENE_CHILD_REFERENCE_FIELD_COUNT,
+    NODE_SCENE_EVIDENCE_FIELD_COUNT, NODE_SCENE_EVIDENCE_OUTCOME_CANDIDATE,
+    NODE_SCENE_MATRIX_SCALAR_COUNT, NODE_SCENE_NODE_FIELD_COUNT, NODE_SCENE_TRANSFORM_MATRIX,
+    NODE_SCENE_TRANSFORM_SYNTHETIC, NODE_SCENE_TRANSFORM_TRS, NODE_SCENE_TRS_SCALAR_COUNT,
+    NodeSceneAuthoredTransformSchema, NodeSceneChildReferenceTableSchema, NodeSceneNodeTableSchema,
+    NodeSceneOutcomeEvidenceSchema, PRESENCE_ABSENT, PRESENCE_PRESENT, SCENE_DIRECTORY_FIELD_COUNT,
+    SCENE_SCHEMA_REVISION, SceneDirectorySchema, SceneGeometryDirectorySchema,
 };
 use crate::entity::AuthoredTransformKind;
 use crate::identity::{ReservedSceneGeneration, SceneGenerationError, SceneGenerationId};
+#[cfg(test)]
+use crate::scene_space::SceneSpace;
 
 use super::super::{
     SceneAuthoringOperation, SceneConstructionError, SceneConstructionOperation,
@@ -52,6 +58,7 @@ use super::publication::{
     prepare_node_minimal_fallback_from_assembly, prepare_node_minimal_fallback_from_open_recovery,
     prepare_node_minimal_fallback_from_operation, prepare_node_rich_failure_from_assembly,
 };
+mod spatial;
 use super::{
     FreshNodeSceneOwner, NODE_SCENE_BUILD_INVARIANT_CODE, NODE_SCENE_COMMITMENT_REJECTION_CODE,
     NodeSceneBuildFaults, NodeSceneConstructionRejection, NodeSceneDraft, NodeSceneDraftBuild,
@@ -59,6 +66,7 @@ use super::{
     PreparedNodeSceneFailure, RejectedNodeSceneConstruction, SceneEvidenceCounts,
     ValidatedNodeSceneConstruction,
 };
+use spatial::{RetainedSpatialRefs, SpatialMaterializationPlans, retain_spatial};
 
 impl RejectedNodeSceneConstruction {
     pub(in crate::canonical_scene::store) const fn failure(
@@ -100,6 +108,7 @@ impl SceneConstructionOperation {
     ) -> Result<ValidatedNodeSceneConstruction<'input>, RejectedNodeSceneConstruction> {
         self.try_validate_scene_batch(
             SceneAuthoringBatch::new(
+                SpatialAuthoringBatch::new(&SceneSpace::UNKNOWN, &[], &[]),
                 input,
                 AppearanceAuthoringBatch::empty(),
                 GeometryAuthoringBatch::empty(),
@@ -116,25 +125,52 @@ impl SceneConstructionOperation {
         limits: SceneValidationLimits,
     ) -> Result<ValidatedNodeSceneConstruction<'input>, RejectedNodeSceneConstruction> {
         let keys = self.keys;
+        let spatial_validation = {
+            let checkpoint = self.raw.control_checkpoint();
+            let mut control =
+                OperationAuthoringControl::new(checkpoint, keys.phase, keys.dimension);
+            validate_spatial_batch(input.spatial(), input.nodes(), limits, &mut control)
+        };
+        let spatial = match spatial_validation {
+            Ok(spatial) => spatial,
+            Err(failure) => {
+                return Err(RejectedNodeSceneConstruction {
+                    operation: self,
+                    failure: NodeSceneConstructionRejection::SpatialAuthoring(failure),
+                });
+            }
+        };
+        let node_limits = match node_limits_after_spatial(&spatial, limits) {
+            Ok(node_limits) => node_limits,
+            Err(failure) => {
+                drop(spatial);
+                return Err(RejectedNodeSceneConstruction {
+                    operation: self,
+                    failure: NodeSceneConstructionRejection::Aggregate(failure),
+                });
+            }
+        };
         let validation = {
             let checkpoint = self.raw.control_checkpoint();
             let mut control =
                 OperationAuthoringControl::new(checkpoint, keys.phase, keys.dimension);
-            validate_node_batch(input.nodes(), limits, &mut control)
+            validate_node_batch(input.nodes(), node_limits, &mut control)
         };
         let nodes = match validation {
             Ok(nodes) => nodes,
             Err(failure) => {
+                drop(spatial);
                 return Err(RejectedNodeSceneConstruction {
                     operation: self,
                     failure: NodeSceneConstructionRejection::NodeAuthoring(failure),
                 });
             }
         };
-        let appearance_limits = match appearance_limits_after_nodes(&nodes, limits) {
+        let appearance_limits = match appearance_limits_after_nodes(&nodes, node_limits) {
             Ok(appearance_limits) => appearance_limits,
             Err(failure) => {
                 drop(nodes);
+                drop(spatial);
                 return Err(RejectedNodeSceneConstruction {
                     operation: self,
                     failure: NodeSceneConstructionRejection::Aggregate(failure),
@@ -151,6 +187,7 @@ impl SceneConstructionOperation {
             Ok(appearance) => appearance,
             Err(failure) => {
                 drop(nodes);
+                drop(spatial);
                 return Err(RejectedNodeSceneConstruction {
                     operation: self,
                     failure: NodeSceneConstructionRejection::AppearanceAuthoring(failure),
@@ -163,6 +200,7 @@ impl SceneConstructionOperation {
             Err(failure) => {
                 drop(appearance);
                 drop(nodes);
+                drop(spatial);
                 return Err(RejectedNodeSceneConstruction {
                     operation: self,
                     failure: NodeSceneConstructionRejection::Aggregate(failure),
@@ -186,6 +224,7 @@ impl SceneConstructionOperation {
             Err(failure) => {
                 drop(appearance);
                 drop(nodes);
+                drop(spatial);
                 return Err(RejectedNodeSceneConstruction {
                     operation: self,
                     failure: NodeSceneConstructionRejection::GeometryAuthoring(failure),
@@ -199,6 +238,7 @@ impl SceneConstructionOperation {
                 drop(geometry);
                 drop(appearance);
                 drop(nodes);
+                drop(spatial);
                 return Err(RejectedNodeSceneConstruction {
                     operation: self,
                     failure: NodeSceneConstructionRejection::Aggregate(failure),
@@ -223,6 +263,7 @@ impl SceneConstructionOperation {
                 drop(geometry);
                 drop(appearance);
                 drop(nodes);
+                drop(spatial);
                 return Err(RejectedNodeSceneConstruction {
                     operation: self,
                     failure: NodeSceneConstructionRejection::DeformationAuthoring(failure),
@@ -237,6 +278,7 @@ impl SceneConstructionOperation {
                     drop(geometry);
                     drop(appearance);
                     drop(nodes);
+                    drop(spatial);
                     return Err(RejectedNodeSceneConstruction {
                         operation: self,
                         failure: NodeSceneConstructionRejection::Aggregate(failure),
@@ -257,6 +299,7 @@ impl SceneConstructionOperation {
                 drop(geometry);
                 drop(appearance);
                 drop(nodes);
+                drop(spatial);
                 return Err(RejectedNodeSceneConstruction {
                     operation: self,
                     failure: NodeSceneConstructionRejection::AnimationAuthoring(failure),
@@ -264,6 +307,7 @@ impl SceneConstructionOperation {
             }
         };
         if let Err(failure) = validate_scene_aggregate(
+            &spatial,
             &nodes,
             &appearance,
             &geometry,
@@ -276,6 +320,7 @@ impl SceneConstructionOperation {
             drop(geometry);
             drop(appearance);
             drop(nodes);
+            drop(spatial);
             return Err(RejectedNodeSceneConstruction {
                 operation: self,
                 failure: NodeSceneConstructionRejection::Aggregate(failure),
@@ -288,6 +333,7 @@ impl SceneConstructionOperation {
             geometry,
             appearance,
             nodes,
+            spatial,
             owner: FreshNodeSceneOwner { raw, brand, keys },
         })
     }
@@ -315,6 +361,7 @@ struct NodeSceneDirectoryRefs {
 
 #[derive(Clone, Copy)]
 struct SceneDomainDirectoryRefs {
+    spatial: CanonicalBlockRef<SpatialDirectorySchema>,
     appearance: CanonicalBlockRef<AppearanceDirectorySchema>,
     geometry: CanonicalBlockRef<SceneGeometryDirectorySchema>,
     deformation: CanonicalBlockRef<DeformationDirectorySchema>,
@@ -328,6 +375,7 @@ struct ValidatedNodeSceneBatches<'input> {
     geometry: ValidatedGeometryBatch<'input, RetainedStoreReservation<SceneConstructionOwner>>,
     appearance: ValidatedAppearanceBatch<'input, RetainedStoreReservation<SceneConstructionOwner>>,
     nodes: ValidatedNodeBatch<'input, RetainedStoreReservation<SceneConstructionOwner>>,
+    spatial: ValidatedSpatialBatch<'input, RetainedStoreReservation<SceneConstructionOwner>>,
 }
 
 struct NodeSceneMaterializationPlans {
@@ -335,6 +383,7 @@ struct NodeSceneMaterializationPlans {
     transforms: Option<SequencePlan<f32>>,
     references: Option<RecordPlan>,
     nodes: RecordPlan,
+    spatial: SpatialMaterializationPlans,
     appearance: AppearanceMaterializationPlans,
     geometry: GeometryMaterializationPlans,
     deformation: DeformationMaterializationPlans,
@@ -355,6 +404,8 @@ impl NodeSceneMaterializationPlans {
         SceneEvidenceCounts {
             canonical_block_count: self.canonical_block_count,
             node_count: self.node_count,
+            camera_count: self.spatial.camera_count(),
+            light_count: self.spatial.light_count(),
             image_count: self.appearance.image_count(),
             sampler_count: self.appearance.sampler_count(),
             texture_count: self.appearance.texture_count(),
@@ -377,6 +428,7 @@ impl NodeSceneMaterializationPlans {
     }
 
     fn new(
+        spatial_batch: &ValidatedSpatialBatch<'_, RetainedStoreReservation<SceneConstructionOwner>>,
         nodes_batch: &ValidatedNodeBatch<'_, RetainedStoreReservation<SceneConstructionOwner>>,
         appearance_batch: &ValidatedAppearanceBatch<
             '_,
@@ -423,6 +475,7 @@ impl NodeSceneMaterializationPlans {
             usize::try_from(node_count).map_err(|_| StorePlanError::SizeOverflow)?,
             NODE_SCENE_NODE_FIELD_COUNT,
         )?;
+        let spatial = SpatialMaterializationPlans::new(spatial_batch)?;
         let appearance = AppearanceMaterializationPlans::new(appearance_batch)?;
         let geometry = GeometryMaterializationPlans::new(geometry_batch)?;
         let deformation = DeformationMaterializationPlans::new(deformation_batch)?;
@@ -449,6 +502,7 @@ impl NodeSceneMaterializationPlans {
         let sequence_block_count = [transforms].into_iter().flatten().count();
         let canonical_block_count_usize = record_block_count
             .checked_add(sequence_block_count)
+            .and_then(|count| count.checked_add(spatial.canonical_block_count()))
             .and_then(|count| count.checked_add(appearance.canonical_block_count()))
             .and_then(|count| count.checked_add(geometry.canonical_block_count()))
             .and_then(|count| count.checked_add(deformation.canonical_block_count()))
@@ -458,7 +512,8 @@ impl NodeSceneMaterializationPlans {
             u32::try_from(canonical_block_count_usize).map_err(|_| StorePlanError::SizeOverflow)?;
         let payload_block_count = appearance
             .payload_block_count()
-            .checked_add(geometry.payload_block_count())
+            .checked_add(spatial.payload_block_count())
+            .and_then(|count| count.checked_add(geometry.payload_block_count()))
             .and_then(|count| count.checked_add(deformation.payload_block_count()))
             .and_then(|count| count.checked_add(animation.payload_block_count()))
             .ok_or(StorePlanError::SizeOverflow)?;
@@ -494,6 +549,7 @@ impl NodeSceneMaterializationPlans {
             transforms,
             references,
             nodes,
+            spatial,
             appearance,
             geometry,
             deformation,
@@ -640,6 +696,7 @@ impl ValidatedNodeSceneConstruction<'_> {
             geometry: geometry_batch,
             appearance,
             nodes: node_batch,
+            spatial,
             owner,
         } = self;
         let batches = ValidatedNodeSceneBatches {
@@ -648,9 +705,11 @@ impl ValidatedNodeSceneConstruction<'_> {
             geometry: geometry_batch,
             appearance,
             nodes: node_batch,
+            spatial,
         };
         let FreshNodeSceneOwner { raw, brand, keys } = owner;
         let plans = match NodeSceneMaterializationPlans::new(
+            &batches.spatial,
             &batches.nodes,
             &batches.appearance,
             &batches.geometry,
@@ -708,6 +767,22 @@ impl ValidatedNodeSceneConstruction<'_> {
                 }
             };
         let mut work = NodeSceneWorkMeter::new();
+        let spatial_refs = match retain_spatial(
+            &mut assembly,
+            &plans.spatial,
+            &batches.spatial,
+            keys,
+            &mut work,
+            plans.build_invariant,
+        ) {
+            Ok(spatial) => spatial,
+            Err(cause) => {
+                drop(batches);
+                return NodeSceneDraftBuild::failure(prepare_node_post_evidence_failure(
+                    assembly, evidence, &plans, cause,
+                ));
+            }
+        };
         let transforms = match plans.transforms {
             Some(plan) => match retain_node_scene_transforms(
                 &mut assembly,
@@ -747,10 +822,14 @@ impl ValidatedNodeSceneConstruction<'_> {
             },
             None => None,
         };
+        let node_payloads = RetainedNodePayloadRefs {
+            transforms,
+            spatial: spatial_refs,
+        };
         let nodes_ref = match retain_node_scene_nodes(
             &mut assembly,
             plans.nodes,
-            transforms,
+            node_payloads,
             &batches.nodes,
             &plans,
             keys,
@@ -861,6 +940,7 @@ impl ValidatedNodeSceneConstruction<'_> {
                 transforms,
             },
             SceneDomainDirectoryRefs {
+                spatial: spatial_refs.directory(),
                 appearance: appearance_refs.directory(),
                 geometry: geometry_refs.directory(),
                 deformation: deformation_refs.directory(),
@@ -932,6 +1012,8 @@ fn retain_node_scene_evidence_counts(
             row.write_scalar(NODE_SCENE_EVIDENCE_OUTCOME_CANDIDATE)?;
             row.write_scalar(counts.canonical_block_count)?;
             row.write_scalar(counts.node_count)?;
+            row.write_scalar(counts.camera_count)?;
+            row.write_scalar(counts.light_count)?;
             row.write_scalar(counts.image_count)?;
             row.write_scalar(counts.sampler_count)?;
             row.write_scalar(counts.texture_count)?;
@@ -1044,15 +1126,25 @@ fn retain_node_scene_references(
         .map(CanonicalBlockRef::from_store)
 }
 
+#[derive(Clone, Copy)]
+struct RetainedNodePayloadRefs {
+    transforms: Option<CanonicalBlockRef<NodeSceneAuthoredTransformSchema>>,
+    spatial: RetainedSpatialRefs,
+}
+
 fn retain_node_scene_nodes(
     assembly: &mut SceneStoreAssembly,
     plan: RecordPlan,
-    transforms: Option<CanonicalBlockRef<NodeSceneAuthoredTransformSchema>>,
+    payloads: RetainedNodePayloadRefs,
     batch: &ValidatedNodeBatch<'_, RetainedStoreReservation<SceneConstructionOwner>>,
     plans: &NodeSceneMaterializationPlans,
     keys: SceneStoreKeys,
     work: &mut NodeSceneWorkMeter,
 ) -> Result<CanonicalBlockRef<NodeSceneNodeTableSchema>, StoreRuntimeError> {
+    let RetainedNodePayloadRefs {
+        transforms,
+        spatial,
+    } = payloads;
     let input = batch.input();
     let authored_nodes = input.nodes();
     let mapping = batch.canonical_index_by_local();
@@ -1072,7 +1164,19 @@ fn retain_node_scene_nodes(
                     row.write_scalar(NODE_SCENE_TRANSFORM_SYNTHETIC)?;
                     row.write_scalar(0_u32)?;
                     row.write_scalar(0_u32)?;
-                    row.write_scalar(0_u8)
+                    row.write_scalar(0_u8)?;
+                    write_node_spatial_attachment::<SpatialCameraTableSchema>(
+                        row,
+                        None,
+                        spatial.cameras(),
+                        failure,
+                    )?;
+                    write_node_spatial_attachment::<SpatialLightTableSchema>(
+                        row,
+                        None,
+                        spatial.lights(),
+                        failure,
+                    )
                 })?;
 
                 if batch.canonical_order().is_empty() {
@@ -1089,10 +1193,8 @@ fn retain_node_scene_nodes(
                 let mut child_reference_offset = plans.source_root_count;
                 for &local in batch.canonical_order() {
                     work.observe(control, 1)?;
-                    let authored = authored_nodes
-                        .get(local)
-                        .ok_or(failure)?
-                        .authored_transform();
+                    let authored_node = authored_nodes.get(local).ok_or(failure)?;
+                    let authored = authored_node.authored_transform();
                     let (kind, transform_length) = match authored.kind() {
                         AuthoredTransformKind::Matrix => (
                             NODE_SCENE_TRANSFORM_MATRIX,
@@ -1113,7 +1215,25 @@ fn retain_node_scene_nodes(
                         row.write_scalar(kind)?;
                         row.write_scalar(transform_offset)?;
                         row.write_scalar(transform_length)?;
-                        row.write_sequence_ref(transforms.into_store())
+                        row.write_sequence_ref(transforms.into_store())?;
+                        write_node_spatial_attachment::<SpatialCameraTableSchema>(
+                            row,
+                            match authored_node.camera() {
+                                Presence::Absent => None,
+                                Presence::Present(camera) => Some(camera.index()),
+                            },
+                            spatial.cameras(),
+                            failure,
+                        )?;
+                        write_node_spatial_attachment::<SpatialLightTableSchema>(
+                            row,
+                            match authored_node.light() {
+                                Presence::Absent => None,
+                                Presence::Present(light) => Some(light.index()),
+                            },
+                            spatial.lights(),
+                            failure,
+                        )
                     })?;
                     transform_offset = transform_offset
                         .checked_add(transform_length)
@@ -1149,6 +1269,7 @@ fn retain_node_scene_directory(
         transforms,
     } = refs;
     let SceneDomainDirectoryRefs {
+        spatial,
         appearance,
         geometry,
         deformation,
@@ -1188,6 +1309,7 @@ fn retain_node_scene_directory(
                             row.write_sequence_ref(transforms.into_store())?;
                         }
                         row.write_scalar(plans.source_root_count)?;
+                        row.write_record_ref(spatial.into_store())?;
                         row.write_record_ref(appearance.into_store())?;
                         row.write_record_ref(geometry.into_store())?;
                         row.write_record_ref(deformation.into_store())?;
@@ -1197,6 +1319,29 @@ fn retain_node_scene_directory(
             },
         )
         .map(CanonicalBlockRef::from_store)
+}
+
+fn write_node_spatial_attachment<Tag>(
+    row: &mut CanonicalRecordRowWriter<'_>,
+    local: Option<u32>,
+    table: Option<CanonicalBlockRef<Tag>>,
+    failure: StoreBuildError,
+) -> Result<(), StoreBuildError>
+where
+    Tag: CanonicalSchema<StoreKind = RecordBlock>,
+{
+    match local {
+        Some(local) => {
+            row.write_scalar(PRESENCE_PRESENT)?;
+            row.write_scalar(local)?;
+            row.write_record_ref(table.ok_or(failure)?.into_store())
+        }
+        None => {
+            row.write_scalar(PRESENCE_ABSENT)?;
+            row.write_scalar(0_u8)?;
+            row.write_scalar(0_u8)
+        }
+    }
 }
 
 fn prepare_node_post_evidence_failure(

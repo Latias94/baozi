@@ -21,11 +21,14 @@ use crate::canonical_scene::store::schema::geometry::{
     GeometryAttributeTableSchema, GeometryLogicalMeshTableSchema, GeometryMeshInstanceTableSchema,
     GeometryPrimitiveTableSchema,
 };
+use crate::canonical_scene::store::schema::spatial::{
+    SpatialCameraTableSchema, SpatialDirectorySchema, SpatialLightTableSchema,
+};
 use crate::canonical_scene::store::schema::{
     CanonicalBlockRef, CanonicalSchema, NODE_SCENE_EVIDENCE_FIELD_COUNT,
     NODE_SCENE_EVIDENCE_OUTCOME_CANDIDATE, NODE_SCENE_NODE_FIELD_COUNT,
     NODE_SCENE_TRANSFORM_MATRIX, NODE_SCENE_TRANSFORM_TRS, NodeSceneAuthoredTransformSchema,
-    NodeSceneNodeTableSchema, NodeSceneOutcomeEvidenceSchema, PRESENCE_PRESENT,
+    NodeSceneNodeTableSchema, NodeSceneOutcomeEvidenceSchema, PRESENCE_ABSENT, PRESENCE_PRESENT,
     SCENE_DIRECTORY_FIELD_COUNT, SCENE_SCHEMA_REVISION, SceneDirectorySchema,
     SceneGeometryDirectorySchema, node_scene_node_field,
 };
@@ -72,6 +75,7 @@ pub(super) fn try_rewrite_node_scene<'scene>(
             assembly.try_inherit_all_canonical_leaves(keys.dimension)?;
 
             let proof = pending.input.proof;
+            let spatial = rewrite_spatial(assembly, pending, keys)?;
             let references = rewrite_optional_record(
                 assembly,
                 pending.input,
@@ -85,6 +89,7 @@ pub(super) fn try_rewrite_node_scene<'scene>(
                     assembly,
                     pending,
                     transforms,
+                    spatial,
                     keys,
                     &mut work,
                     build_failure,
@@ -146,6 +151,7 @@ pub(super) fn try_rewrite_node_scene<'scene>(
                         nodes,
                         references,
                         transforms,
+                        spatial: spatial.directory,
                         appearance,
                         geometry,
                         deformation,
@@ -191,6 +197,8 @@ fn retain_edit_evidence(
                 row.write_scalar(NODE_SCENE_EVIDENCE_OUTCOME_CANDIDATE)?;
                 row.write_scalar(counts.canonical_block_count)?;
                 row.write_scalar(counts.node_count)?;
+                row.write_scalar(counts.camera_count)?;
+                row.write_scalar(counts.light_count)?;
                 row.write_scalar(counts.image_count)?;
                 row.write_scalar(counts.sampler_count)?;
                 row.write_scalar(counts.texture_count)?;
@@ -331,6 +339,7 @@ fn rewrite_nodes_with_shape(
     assembly: &mut SceneStoreAssembly<CanonicalInheritanceSource<'_>>,
     pending: &PendingNodeTransformEdit<'_>,
     transforms: CanonicalBlockRef<NodeSceneAuthoredTransformSchema>,
+    spatial: RewrittenSpatialRefs,
     keys: SceneStoreKeys,
     work: &mut NodeSceneWorkMeter,
     failure: StoreBuildError,
@@ -377,6 +386,38 @@ fn rewrite_nodes_with_shape(
                     let source_length = source
                         .scalar::<u32>(row_index, node_scene_node_field::TRANSFORM_LENGTH)
                         .ok_or(failure)?;
+                    let camera_presence = source
+                        .scalar::<u8>(row_index, node_scene_node_field::CAMERA_PRESENCE)
+                        .ok_or(failure)?;
+                    let camera = match camera_presence {
+                        PRESENCE_ABSENT => (source
+                            .scalar::<u8>(row_index, node_scene_node_field::CAMERA)
+                            == Some(0))
+                        .then_some(None)
+                        .ok_or(failure)?,
+                        PRESENCE_PRESENT => Some(
+                            source
+                                .scalar::<u32>(row_index, node_scene_node_field::CAMERA)
+                                .ok_or(failure)?,
+                        ),
+                        _ => return Err(StoreControlledError::from(failure)),
+                    };
+                    let light_presence = source
+                        .scalar::<u8>(row_index, node_scene_node_field::LIGHT_PRESENCE)
+                        .ok_or(failure)?;
+                    let light = match light_presence {
+                        PRESENCE_ABSENT => (source
+                            .scalar::<u8>(row_index, node_scene_node_field::LIGHT)
+                            == Some(0))
+                        .then_some(None)
+                        .ok_or(failure)?,
+                        PRESENCE_PRESENT => Some(
+                            source
+                                .scalar::<u32>(row_index, node_scene_node_field::LIGHT)
+                                .ok_or(failure)?,
+                        ),
+                        _ => return Err(StoreControlledError::from(failure)),
+                    };
                     let (kind, offset, length) = if row_index == target_row {
                         (target_kind, source_offset, target_length)
                     } else if row_index > target_row {
@@ -398,9 +439,31 @@ fn rewrite_nodes_with_shape(
                         row.write_scalar(offset)?;
                         row.write_scalar(length)?;
                         if row_index == 0 {
-                            row.write_scalar(0_u8)
+                            row.write_scalar(0_u8)?;
                         } else {
-                            row.write_sequence_ref(transforms.into_store())
+                            row.write_sequence_ref(transforms.into_store())?;
+                        }
+                        row.write_scalar(camera_presence)?;
+                        match camera {
+                            None => {
+                                row.write_scalar(0_u8)?;
+                                row.write_scalar(0_u8)?;
+                            }
+                            Some(camera) => {
+                                row.write_scalar(camera)?;
+                                row.write_record_ref(spatial.cameras.ok_or(failure)?.into_store())?
+                            }
+                        }
+                        row.write_scalar(light_presence)?;
+                        match light {
+                            None => {
+                                row.write_scalar(0_u8)?;
+                                row.write_scalar(0_u8)
+                            }
+                            Some(light) => {
+                                row.write_scalar(light)?;
+                                row.write_record_ref(spatial.lights.ok_or(failure)?.into_store())
+                            }
                         }
                     })?;
                 }
@@ -417,6 +480,7 @@ struct NodeSceneDirectoryRefs {
         crate::canonical_scene::store::schema::NodeSceneChildReferenceTableSchema,
     >,
     transforms: CanonicalBlockRef<NodeSceneAuthoredTransformSchema>,
+    spatial: CanonicalBlockRef<SpatialDirectorySchema>,
     appearance: CanonicalBlockRef<AppearanceDirectorySchema>,
     geometry: CanonicalBlockRef<SceneGeometryDirectorySchema>,
     deformation: CanonicalBlockRef<DeformationDirectorySchema>,
@@ -457,6 +521,7 @@ fn rewrite_directory_with_shape(
                         row.write_scalar(pending.counts.output_transform_scalars.as_u32())?;
                         row.write_sequence_ref(refs.transforms.into_store())?;
                         row.write_scalar(pending.counts.source_root_rows.as_u32())?;
+                        row.write_record_ref(refs.spatial.into_store())?;
                         row.write_record_ref(refs.appearance.into_store())?;
                         row.write_record_ref(refs.geometry.into_store())?;
                         row.write_record_ref(refs.deformation.into_store())?;
@@ -466,6 +531,51 @@ fn rewrite_directory_with_shape(
             },
         )
         .map(CanonicalBlockRef::from_store)
+}
+
+#[derive(Clone, Copy)]
+struct RewrittenSpatialRefs {
+    directory: CanonicalBlockRef<SpatialDirectorySchema>,
+    cameras: Option<CanonicalBlockRef<SpatialCameraTableSchema>>,
+    lights: Option<CanonicalBlockRef<SpatialLightTableSchema>>,
+}
+
+fn rewrite_spatial(
+    assembly: &mut SceneStoreAssembly<CanonicalInheritanceSource<'_>>,
+    pending: &PendingNodeTransformEdit<'_>,
+    keys: SceneStoreKeys,
+) -> Result<RewrittenSpatialRefs, StoreRuntimeError> {
+    let input = pending.input;
+    let proof = input.proof;
+    let cameras = rewrite_optional_record(
+        assembly,
+        input,
+        proof.cameras(),
+        pending.counts.cameras.as_usize(),
+        SpatialCameraTableSchema,
+        keys,
+    )?;
+    let lights = rewrite_optional_record(
+        assembly,
+        input,
+        proof.lights(),
+        pending.counts.lights.as_usize(),
+        SpatialLightTableSchema,
+        keys,
+    )?;
+    let directory = rewrite_required_record(
+        assembly,
+        input,
+        proof.spatial_directory(),
+        1,
+        SpatialDirectorySchema,
+        keys,
+    )?;
+    Ok(RewrittenSpatialRefs {
+        directory,
+        cameras,
+        lights,
+    })
 }
 
 fn rewrite_appearance(

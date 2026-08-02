@@ -93,10 +93,19 @@ fn camera_projection_rejects_invalid_frusta() {
 #[test]
 fn light_kind_makes_spot_invariants_explicit() {
     assert_eq!(
+        LightKind::directional().category(),
+        LightKindCategory::Directional
+    );
+    assert_eq!(
         LightKind::spot(None, 0.5, 0.25),
         Err(LightError::InvalidSpotCone)
     );
-    assert!(LightKind::spot(Some(10.0), 0.25, 0.5).is_ok());
+    let spot = LightKind::spot(Some(10.0), -0.0, 0.5)
+        .expect("a zero inner cone is valid and canonicalized");
+    assert_eq!(spot.category(), LightKindCategory::Spot);
+    assert_eq!(spot.range(), Some(10.0));
+    assert_eq!(spot.inner_cone_radians().map(f32::to_bits), Some(0));
+    assert_eq!(spot.outer_cone_radians(), Some(0.5));
     assert_eq!(LightKind::point(Some(0.0)), Err(LightError::InvalidRange));
 }
 

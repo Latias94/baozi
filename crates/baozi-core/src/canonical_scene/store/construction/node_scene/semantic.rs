@@ -13,6 +13,7 @@ mod animation;
 mod appearance;
 mod deformation;
 mod geometry;
+mod spatial;
 
 pub(in crate::canonical_scene::store) use animation::{
     NodeSceneAnimationCursor, NodeSceneAnimationExtrapolation, NodeSceneAnimationInterpolation,
@@ -27,6 +28,11 @@ pub(in crate::canonical_scene::store) use geometry::{
     NodeSceneGeometryAttributePayload, NodeSceneGeometryAttributeSemantic, NodeSceneGeometryCursor,
     NodeSceneGeometryF32Cursor, NodeSceneGeometryNormalization, NodeSceneGeometryPayloadKind,
     NodeSceneGeometryScalarKind, NodeSceneGeometryU32Cursor,
+};
+pub(in crate::canonical_scene::store) use spatial::{
+    NodeSceneSpatialCamera, NodeSceneSpatialLight, NodeSceneSpatialPlacementCursor,
+    NodeSceneSpatialPlacementsCursor, NodeSceneSpatialSceneSpace, NodeSceneSpatialTangentBasis,
+    NodeSceneSpatialTangentEncoding,
 };
 
 pub(in crate::canonical_scene::store) type NodeSceneSemanticResult<T> =
@@ -66,6 +72,7 @@ pub(in crate::canonical_scene::store) struct NodeSceneSemanticView<'scene> {
     nodes: CanonicalRecordView<'scene>,
     references: Option<CanonicalRecordView<'scene>>,
     transforms: Option<SequenceView<'scene, f32>>,
+    spatial: spatial::NodeSceneSpatialTables<'scene>,
     appearance: appearance::NodeSceneAppearanceTables<'scene>,
     geometry: geometry::NodeSceneGeometryTables<'scene>,
     deformation: deformation::NodeSceneDeformationTables<'scene>,
@@ -215,6 +222,7 @@ impl<'scene> NodeSceneSemanticView<'scene> {
             ),
             None => None,
         };
+        let spatial = spatial::NodeSceneSpatialTables::try_new(&scene.canonical, proof)?;
         let appearance = appearance::NodeSceneAppearanceTables::try_new(&scene.canonical, proof)?;
         let geometry = geometry::NodeSceneGeometryTables::try_new(&scene.canonical, proof)?;
         let deformation =
@@ -276,6 +284,7 @@ impl<'scene> NodeSceneSemanticView<'scene> {
             nodes,
             references,
             transforms,
+            spatial,
             appearance,
             geometry,
             deformation,
@@ -300,6 +309,57 @@ impl<'scene> NodeSceneSemanticView<'scene> {
 
     pub(in crate::canonical_scene::store) fn material_count(&self) -> usize {
         self.proof.material_count()
+    }
+
+    pub(in crate::canonical_scene::store) fn camera_count(&self) -> usize {
+        self.proof.camera_count()
+    }
+
+    pub(in crate::canonical_scene::store) fn light_count(&self) -> usize {
+        self.proof.light_count()
+    }
+
+    pub(in crate::canonical_scene::store) fn scene_space(
+        &self,
+    ) -> NodeSceneSemanticResult<NodeSceneSpatialSceneSpace<'scene>> {
+        self.spatial.scene_space()
+    }
+
+    pub(in crate::canonical_scene::store) fn camera_at(
+        &self,
+        source_index: usize,
+    ) -> NodeSceneSemanticResult<Option<NodeSceneSpatialCamera>> {
+        self.spatial.camera_at(source_index)
+    }
+
+    pub(in crate::canonical_scene::store) fn light_at(
+        &self,
+        source_index: usize,
+    ) -> NodeSceneSemanticResult<Option<NodeSceneSpatialLight>> {
+        self.spatial.light_at(source_index)
+    }
+
+    /// Scans all spatial attachments once in source-node order.
+    pub(in crate::canonical_scene::store) fn spatial_placements(
+        &self,
+    ) -> NodeSceneSpatialPlacementsCursor<'scene> {
+        NodeSceneSpatialPlacementsCursor::new(self.nodes, self.proof)
+    }
+
+    /// Scans at most every source node for placements of one camera.
+    pub(in crate::canonical_scene::store) fn camera_placements(
+        &self,
+        camera: usize,
+    ) -> NodeSceneSemanticResult<NodeSceneSpatialPlacementCursor<'scene>> {
+        NodeSceneSpatialPlacementCursor::camera(self.nodes, camera, self.proof)
+    }
+
+    /// Scans at most every source node for placements of one light.
+    pub(in crate::canonical_scene::store) fn light_placements(
+        &self,
+        light: usize,
+    ) -> NodeSceneSemanticResult<NodeSceneSpatialPlacementCursor<'scene>> {
+        NodeSceneSpatialPlacementCursor::light(self.nodes, light, self.proof)
     }
 
     pub(in crate::canonical_scene::store) fn image_count(&self) -> usize {
@@ -478,6 +538,20 @@ impl<'scene> NodeSceneSemanticCursor<'scene> {
             self.read_fault,
         )?
         .authored_transform();
+        let camera = read_node_spatial_attachment(
+            self.nodes,
+            row,
+            node_scene_node_field::CAMERA_PRESENCE,
+            node_scene_node_field::CAMERA,
+            "validated source-node camera attachment is unreadable",
+        )?;
+        let light = read_node_spatial_attachment(
+            self.nodes,
+            row,
+            node_scene_node_field::LIGHT_PRESENCE,
+            node_scene_node_field::LIGHT,
+            "validated source-node light attachment is unreadable",
+        )?;
 
         let children = NodeSceneChildCursor::try_new(
             self.references,
@@ -493,6 +567,8 @@ impl<'scene> NodeSceneSemanticCursor<'scene> {
         Ok(Some(NodeSceneSemanticNode {
             source_index,
             authored_transform,
+            camera,
+            light,
             children,
         }))
     }
@@ -685,6 +761,8 @@ fn read_node_authored_transform(
 pub(in crate::canonical_scene::store) struct NodeSceneSemanticNode<'scene> {
     source_index: usize,
     authored_transform: AuthoredTransform,
+    camera: Option<usize>,
+    light: Option<usize>,
     children: NodeSceneChildCursor<'scene>,
 }
 
@@ -695,6 +773,14 @@ impl<'scene> NodeSceneSemanticNode<'scene> {
 
     pub(in crate::canonical_scene::store) const fn authored_transform(&self) -> AuthoredTransform {
         self.authored_transform
+    }
+
+    pub(in crate::canonical_scene::store) const fn camera(&self) -> Option<usize> {
+        self.camera
+    }
+
+    pub(in crate::canonical_scene::store) const fn light(&self) -> Option<usize> {
+        self.light
     }
 
     pub(in crate::canonical_scene::store) const fn child_count(&self) -> usize {
@@ -803,6 +889,22 @@ fn read_u32_as_usize(
 ) -> NodeSceneSemanticResult<usize> {
     let value = read_scalar::<u32>(records, row, field, reason)?;
     usize::try_from(value).map_err(|_| invariant(reason))
+}
+
+fn read_node_spatial_attachment(
+    nodes: CanonicalRecordView<'_>,
+    row: usize,
+    presence_field: usize,
+    local_field: usize,
+    reason: &'static str,
+) -> NodeSceneSemanticResult<Option<usize>> {
+    match read_scalar::<u8>(nodes, row, presence_field, reason)? {
+        crate::canonical_scene::store::schema::PRESENCE_ABSENT => Ok(None),
+        crate::canonical_scene::store::schema::PRESENCE_PRESENT => {
+            Ok(Some(read_u32_as_usize(nodes, row, local_field, reason)?))
+        }
+        _ => Err(invariant(reason)),
+    }
 }
 
 fn read_scalar<T: StoredScalar>(

@@ -4,6 +4,7 @@ pub(super) mod animation;
 pub(super) mod appearance;
 pub(super) mod deformation;
 pub(super) mod geometry;
+pub(super) mod spatial;
 
 /// Distinguishes an absent source field from a present value, including an empty slice.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -77,16 +78,22 @@ impl NodeParent {
 pub(in crate::canonical_scene::store) struct NodeAuthoringNode {
     parent: Presence<NodeParent>,
     authored_transform: AuthoredTransform,
+    camera: Presence<spatial::CameraLocalId>,
+    light: Presence<spatial::LightLocalId>,
 }
 
 impl NodeAuthoringNode {
     pub(in crate::canonical_scene::store) const fn new(
         parent: Presence<NodeParent>,
         authored_transform: AuthoredTransform,
+        camera: Presence<spatial::CameraLocalId>,
+        light: Presence<spatial::LightLocalId>,
     ) -> Self {
         Self {
             parent,
             authored_transform,
+            camera,
+            light,
         }
     }
 
@@ -96,6 +103,16 @@ impl NodeAuthoringNode {
 
     pub(in crate::canonical_scene::store) const fn authored_transform(self) -> AuthoredTransform {
         self.authored_transform
+    }
+
+    pub(in crate::canonical_scene::store) const fn camera(
+        self,
+    ) -> Presence<spatial::CameraLocalId> {
+        self.camera
+    }
+
+    pub(in crate::canonical_scene::store) const fn light(self) -> Presence<spatial::LightLocalId> {
+        self.light
     }
 }
 
@@ -114,10 +131,12 @@ pub(in crate::canonical_scene::store) struct NodeAuthoringBatch<'a> {
 /// One borrowed producer input for every domain of a canonical Scene.
 ///
 /// The store accepts this aggregate as a unit so admission, validation, and
-/// publication cannot observe a node graph without the appearance, geometry,
-/// deformation, and animation domains that qualify the same Scene.
+/// publication cannot observe a node graph without its spatial foundation or
+/// the appearance, geometry, deformation, and animation domains that qualify
+/// the same Scene.
 #[derive(Debug, Clone, Copy)]
 pub(in crate::canonical_scene::store) struct SceneAuthoringBatch<'a> {
+    spatial: spatial::SpatialAuthoringBatch<'a>,
     nodes: NodeAuthoringBatch<'a>,
     appearance: appearance::AppearanceAuthoringBatch<'a>,
     geometry: geometry::GeometryAuthoringBatch<'a>,
@@ -127,6 +146,7 @@ pub(in crate::canonical_scene::store) struct SceneAuthoringBatch<'a> {
 
 impl<'a> SceneAuthoringBatch<'a> {
     pub(in crate::canonical_scene::store) const fn new(
+        spatial: spatial::SpatialAuthoringBatch<'a>,
         nodes: NodeAuthoringBatch<'a>,
         appearance: appearance::AppearanceAuthoringBatch<'a>,
         geometry: geometry::GeometryAuthoringBatch<'a>,
@@ -134,12 +154,19 @@ impl<'a> SceneAuthoringBatch<'a> {
         animations: animation::AnimationAuthoringBatch<'a>,
     ) -> Self {
         Self {
+            spatial,
             nodes,
             appearance,
             geometry,
             deformation,
             animations,
         }
+    }
+
+    pub(in crate::canonical_scene::store) const fn spatial(
+        self,
+    ) -> spatial::SpatialAuthoringBatch<'a> {
+        self.spatial
     }
 
     pub(in crate::canonical_scene::store) const fn nodes(self) -> NodeAuthoringBatch<'a> {

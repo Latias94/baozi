@@ -20,7 +20,7 @@ fn camera(provenance: Provenance) -> Camera {
 fn light(provenance: Provenance) -> Light {
     Light::try_new(
         None,
-        LightKind::Directional,
+        LightKind::directional(),
         LightEmission::try_from_scaled_linear_srgb(Color::WHITE, 1.0).expect("light emission"),
         provenance,
         [],
