@@ -3,7 +3,7 @@ type: "Current State"
 title: "Current Engineering State"
 description: "Derived summary of immutable engineering-memory shards."
 tags: ["engineering-memory", "derived"]
-source_fingerprint: "56ec5587e72ce9d9ab5900943595c947aa86d43f4c534a3d7698f7efb6c22fd6"
+source_fingerprint: "0bc0efa9a153d35b49094ffae9d545ccb01e5f93b28e2f50ad673a1c1a5c348b"
 ---
 
 # Current State
@@ -12,16 +12,18 @@ source_fingerprint: "56ec5587e72ce9d9ab5900943595c947aa86d43f4c534a3d7698f7efb6c
 
 This file is derived from immutable shards. Record new facts in shards, then render during integration.
 
-- Source fingerprint: `56ec5587e72ce9d9ab5900943595c947aa86d43f4c534a3d7698f7efb6c22fd6`
-- Immutable records: 68
+- Source fingerprint: `0bc0efa9a153d35b49094ffae9d545ccb01e5f93b28e2f50ad673a1c1a5c348b`
+- Immutable records: 71
 - Active lane heads: 1
 
 # Active Registrations
 
-- [Baozi canonical architecture fearless refactor](registry/2026-07/2026-07-10T124450Z-baozi-canonical-architecture-refactor-codex-root-dc0e27ca15a34c1eac4e5e546a51b106.md): `active` (baozi-canonical-architecture-refactor-codex-root; producer `codex-root`)
+- [Baozi canonical architecture fearless refactor](registry/2026-08/2026-08-02T022710Z-baozi-canonical-architecture-refactor-codex-root-4c8327266ddb4176aa9819f3cd1c0801.md): `active` (baozi-canonical-architecture-refactor-codex-root; producer `codex-root`)
 
 # Recent Evidence
 
+- **Memory Event**: [Work Progress: Terminal failure authority and canonical lifecycle documentation landed in feda2](logs/2026-08/2026-08-02T022709Z-work-progress-terminal-failure-authority-and-canonical-lifecycle-documentation-landed-in-feda2-f650eb57deb147938411398f66629e5f.md) - Terminal failure authority and canonical lifecycle documentation landed in feda2fd, 87c4d5d, and dd62856; U4c evidence recapture/CI is next,
+- **Memory Event**: [Verification: Serial verification passed: affected four-crate nextest 1304/1304, workspace exc](logs/2026-08/2026-08-02T022709Z-verification-serial-verification-passed-affected-four-crate-nextest-1304-1304-workspace-exc-c68d797c03184241bfa975aca553fb0b.md) - Serial verification passed: affected four-crate nextest 1304/1304, workspace excluding xtask 1661/1661 with 2 skipped, strict Clippy, doctes
 - **Memory Event**: [Decision: Decision: registry registration now enforces qualified reverse-DNS FormatId for ](logs/2026-07/2026-07-10T160411Z-decision-decision-registry-registration-now-enforces-qualified-reverse-dns-formatid-for-6a91d1ba5b994a97b0487290045bf166.md) - Decision: registry registration now enforces qualified reverse-DNS FormatId for every importer, including built-ins (`org.baozi.stl`, `.obj`
 - **Memory Event**: [Session Handoff: Resumed canonical architecture goal 019f4919-ef38-7b32-a0b7-476f42d35dd1 after a](logs/2026-07/2026-07-10T153320Z-session-handoff-resumed-canonical-architecture-goal-019f4919-ef38-7b32-a0b7-476f42d35dd1-after-a-912c2a2fe10744ad81fd549916eca145.md) - Resumed canonical architecture goal 019f4919-ef38-7b32-a0b7-476f42d35dd1 after agent-tree reset; commits 595d413 and efd1fb3 remain authorit
 - **Verification Evidence**: [Canonical architecture U2 verification](verification/2026-07/2026-07-10T124045Z-canonical-architecture-u2-verification-6b124e2bbe514eb8a66867bb87e3b00a.md) - ADR governance, workspace, feature, documentation, fuzz-check, and independent review gates passed for U2.
@@ -32,8 +34,6 @@ This file is derived from immutable shards. Record new facts in shards, then ren
 - **Work Progress**: [Canonical architecture U1 safety hardening complete](progress/2026-07/2026-07-10T061700Z-canonical-architecture-u1-safety-hardening-complete-b9cfb19f32f045dbaa60f898687ed024.md) - U1 input, detection, parser, facade, and resource-boundary hardening is implementation-complete and review-clean.
 - **Verification Evidence**: [Baozi canonical architecture plan review passed](verification/2026-07-10T023259Z-baozi-canonical-architecture-plan-review-passed.md) - Two ce-doc-review headless rounds resolved all actionable plan findings before implementation.
 - **Subagent Finding**: [Baozi canonical architecture planning and deepening findings](subagents/2026-07-10T012721Z-baozi-canonical-architecture-planning-and-deepening-findings.md) - Distilled architecture, security, performance, and Assimp comparison findings that changed the implementation plan.
-- **Verification Log**: [Verification: import governance foundation local gates](logs/2026-07/2026-07-09T192000Z-verification-import-governance-foundation-local-gates.md) - Local verification for the import-governance foundation refactor before commit and push.
-- **Progress Log**: [Progress: import governance foundation code and docs](logs/2026-07/2026-07-09T185649Z-progress-import-governance-foundation-code-and-docs.md) - Hardened Baozi import registry/report APIs, expanded IR validation/snapshots, added postprocess facade path, fuzz target, examples, benches, release/security docs, and ADRs.
 
 # Integration Notes
 

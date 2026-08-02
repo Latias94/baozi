@@ -4,6 +4,11 @@
 
 This file is a derived view of immutable shards. It is refreshed only during integration.
 
+## 2026-08-02
+* **Work Registration**: [Baozi canonical architecture fearless refactor](registry/2026-08/2026-08-02T022710Z-baozi-canonical-architecture-refactor-codex-root-4c8327266ddb4176aa9819f3cd1c0801.md) - Execute the Assimp-informed canonical architecture plan through U1-U9.
+* **Memory Event**: [Work Progress: Terminal failure authority and canonical lifecycle documentation landed in feda2](logs/2026-08/2026-08-02T022709Z-work-progress-terminal-failure-authority-and-canonical-lifecycle-documentation-landed-in-feda2-f650eb57deb147938411398f66629e5f.md) - Terminal failure authority and canonical lifecycle documentation landed in feda2fd, 87c4d5d, and dd62856; U4c evidence recapture/CI is next,
+* **Memory Event**: [Verification: Serial verification passed: affected four-crate nextest 1304/1304, workspace exc](logs/2026-08/2026-08-02T022709Z-verification-serial-verification-passed-affected-four-crate-nextest-1304-1304-workspace-exc-c68d797c03184241bfa975aca553fb0b.md) - Serial verification passed: affected four-crate nextest 1304/1304, workspace excluding xtask 1661/1661 with 2 skipped, strict Clippy, doctes
+
 ## 2026-07-10
 * **Memory Event**: [Decision: Decision: registry registration now enforces qualified reverse-DNS FormatId for ](logs/2026-07/2026-07-10T160411Z-decision-decision-registry-registration-now-enforces-qualified-reverse-dns-formatid-for-6a91d1ba5b994a97b0487290045bf166.md) - Decision: registry registration now enforces qualified reverse-DNS FormatId for every importer, including built-ins (`org.baozi.stl`, `.obj`
 * **Memory Event**: [Session Handoff: Resumed canonical architecture goal 019f4919-ef38-7b32-a0b7-476f42d35dd1 after a](logs/2026-07/2026-07-10T153320Z-session-handoff-resumed-canonical-architecture-goal-019f4919-ef38-7b32-a0b7-476f42d35dd1-after-a-912c2a2fe10744ad81fd549916eca145.md) - Resumed canonical architecture goal 019f4919-ef38-7b32-a0b7-476f42d35dd1 after agent-tree reset; commits 595d413 and efd1fb3 remain authorit
