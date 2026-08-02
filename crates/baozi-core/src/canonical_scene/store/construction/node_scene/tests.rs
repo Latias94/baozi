@@ -180,6 +180,49 @@ pub(super) fn successful_parts(
     }
 }
 
+pub(in crate::canonical_scene::store) fn build_evidence_publication_limit_terminal_for_probe(
+    account: &baozi_operation::PhysicalStorageAccount,
+) -> PreparedNodeSceneConstruction {
+    let limits = SceneConstructionLimits {
+        published_evidence: 2,
+        ..test_limits()
+    };
+    SceneConstructionOperation::with_account(account, limits)
+        .expect("baseline evidence limit must admit operation startup")
+        .try_validate_node_batch(single_trs_batch(), SceneValidationLimits::default())
+        .unwrap_or_else(|_| panic!("single-node input must validate"))
+        .prepare_with_faults(NodeSceneBuildFaults::excess_outcome_evidence_commitment())
+        .expect("evidence publication rejection must prepare fail closed")
+}
+
+pub(in crate::canonical_scene::store) fn build_protected_terminal_activation_for_probe(
+    account: &baozi_operation::PhysicalStorageAccount,
+) -> PreparedNodeSceneConstruction {
+    const ORDINARY_WORK_LIMIT: u64 = 8;
+
+    let operation = SceneConstructionOperation::with_account(
+        account,
+        test_limits_with_work(ORDINARY_WORK_LIMIT),
+    )
+    .expect("protected-terminal probe operation must start");
+    let rejected = match operation
+        .try_validate_node_batch(single_trs_batch(), SceneValidationLimits::default())
+    {
+        Ok(_) => panic!("ordinary work exhaustion must reject authoring"),
+        Err(rejected) => rejected,
+    };
+    let (prepared, rejection) = rejected
+        .prepare_rich_failure()
+        .expect("ordinary work exhaustion must retain protected rich evidence");
+    assert!(matches!(
+        rejection,
+        NodeSceneConstructionRejection::NodeAuthoring(NodeAuthoringFailure::Control(
+            OperationAuthoringControlError::Store(_)
+        ))
+    ));
+    prepared
+}
+
 fn rich_failure(prepared: PreparedNodeSceneConstruction) -> NodeSceneRichFailure {
     match prepared.handoff() {
         NodeSceneConstructionTerminal::Success(_) => {
@@ -1026,19 +1069,7 @@ fn invalid_geometry_payload_fault_is_a_build_invariant_rich_failure() {
 fn evidence_publication_limit_rejection_fails_closed() {
     let factory = test_factory();
     let account = test_account(&factory, 256);
-    let limits = SceneConstructionLimits {
-        published_evidence: 2,
-        ..test_limits()
-    };
-    let validated = SceneConstructionOperation::with_account(&account, limits)
-        .expect("baseline evidence limit must admit operation startup")
-        .try_validate_node_batch(single_trs_batch(), SceneValidationLimits::default())
-        .unwrap_or_else(|_| panic!("single-node input must validate"));
-
-    let terminal = validated
-        .prepare_with_faults(NodeSceneBuildFaults::excess_outcome_evidence_commitment())
-        .expect("evidence publication rejection must prepare fail closed")
-        .handoff();
+    let terminal = build_evidence_publication_limit_terminal_for_probe(&account).handoff();
     let NodeSceneConstructionTerminal::MinimalFallback(fallback) = terminal else {
         panic!("unbound evidence must terminate as minimal fallback");
     };

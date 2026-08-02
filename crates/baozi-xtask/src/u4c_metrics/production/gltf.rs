@@ -11,11 +11,12 @@ use super::capability::{
     validate_fixed_vector_report as validate_capability_fixed_vector_report,
     validate_nonproducing_phase,
 };
-use super::{CoverageMappingSpecification, is_lowercase_sha256, validate_exact_list};
+use super::{
+    CoverageMappingSpecification, LedgerContractSpecification, is_lowercase_sha256,
+    validate_exact_list, validate_success_dimensions,
+};
 
 const SOURCE_VECTOR_SCHEMA_ID: &str = "baozi.selected-gltf-shape-capability-source.v2";
-const CANONICAL_SCENE_DIMENSION_SEMANTIC_ID_HEX: &str =
-    "0262616f7a692d636f72652d7363656e65000000010000000000000001";
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -62,7 +63,7 @@ struct ChangedSceneEditSpecification {
     max_member_probes_per_lookup: u64,
     budget: ConstructionBudgetSpecification,
     snapshot_budget: SnapshotBudgetSpecification,
-    ledger_dimension: super::LedgerDimensionReport,
+    ledger_dimensions: Vec<super::LedgerDimensionReport>,
     physical_account: ChangedSceneEditPhysicalSpecification,
 }
 
@@ -201,6 +202,7 @@ struct GltfSnapshotTotals {
 
 pub(super) fn validate_specification(
     specification: &GltfCapabilitySpecification,
+    ledger_contract: &LedgerContractSpecification,
 ) -> Result<(), String> {
     let source = &specification.source_shape;
     let canonical = &specification.canonical_shape;
@@ -209,6 +211,11 @@ pub(super) fn validate_specification(
     let construction_budget = &specification.construction_budget;
     let snapshot_budget = &specification.snapshot_budget;
     let changed_edit = &specification.changed_scene_edit;
+    let changed_edit_dimensions = validate_success_dimensions(
+        ledger_contract,
+        &changed_edit.ledger_dimensions,
+        "U4c production glTF changed SceneEdit specification",
+    )?;
     let Some(changed_edit_maximum_lookup_events) = changed_edit
         .completed_lookups
         .checked_mul(changed_edit.max_lookup_events)
@@ -338,13 +345,10 @@ pub(super) fn validate_specification(
         || changed_edit.max_member_probes_per_lookup != 1
         || !changed_edit.budget.is_well_formed()
         || !changed_edit.snapshot_budget.is_well_formed()
-        || !changed_edit.ledger_dimension.has_terminal_invariants()
-        || changed_edit.ledger_dimension.semantic_id_hex
-            != CANONICAL_SCENE_DIMENSION_SEMANTIC_ID_HEX
-        || changed_edit.ledger_dimension.committed == 0
-        || changed_edit.ledger_dimension.committed_canonical_output
-            != changed_edit.ledger_dimension.committed
-        || changed_edit.ledger_dimension.published_outcome_evidence == 0
+        || changed_edit_dimensions.ordinary.committed == 0
+        || changed_edit_dimensions.ordinary.committed_canonical_output
+            != changed_edit_dimensions.ordinary.committed
+        || changed_edit_dimensions.ordinary.published_outcome_evidence == 0
         || changed_edit.physical_account.with_output_live_bytes <= specification.retained_bytes
         || changed_edit.physical_account.with_output_live_allocations
             <= specification.retained_allocations
@@ -534,8 +538,8 @@ struct GltfChangedSceneEditPhysicalReport {
 
 #[cfg(feature = "repository-input-candidate")]
 use super::{
-    PhaseReport, ProductionSpecification, validate_healthy_account, validate_hot_view_phase,
-    validate_producer_bound, validate_release, validate_released_account,
+    PhaseReport, ProductionSpecification, classify_ledger_dimensions, validate_healthy_account,
+    validate_hot_view_phase, validate_producer_bound, validate_release, validate_released_account,
     validate_released_factory, validate_success_evidence,
 };
 
@@ -585,12 +589,17 @@ pub(super) fn validate_report(
             ));
         }
     }
-    if report.evidence.outcome_evidence_block_count != report.outcome_evidence_block_count {
+    if report.evidence.retained_evidence_block_count != report.outcome_evidence_block_count {
         return Err(
             "U4c production glTF outcome evidence count disagrees with the ledger".to_owned(),
         );
     }
-    validate_success_evidence(&report.evidence, "U4c production glTF capability")?;
+    validate_success_evidence(
+        &specification.ledger_contract,
+        &report.evidence,
+        expected.canonical_block_count,
+        "U4c production glTF capability",
+    )?;
     validate_construction_phase(&report.construction, expected)?;
     if report.inspection.scenario_id != "canonical-gltf-five-domain-inspection-v1" {
         return Err("U4c production glTF inspection scenario identity drifted".to_owned());
@@ -603,7 +612,7 @@ pub(super) fn validate_report(
     validate_nonproducing_phase(&report.inspection, "U4c production glTF typed inspection")?;
     validate_snapshot_phase(&report.snapshot, expected)?;
     validate_unchanged_view(report, expected, &specification.measurement)?;
-    validate_changed_scene_edit(report, expected)?;
+    validate_changed_scene_edit(report, specification)?;
     if report.release.scenario_id != "canonical-gltf-five-domain-release-v1" {
         return Err("U4c production glTF release scenario identity drifted".to_owned());
     }
@@ -676,10 +685,23 @@ fn validate_unchanged_view(
 #[cfg(feature = "repository-input-candidate")]
 fn validate_changed_scene_edit(
     report: &GltfCapabilityReport,
-    expected: &GltfCapabilitySpecification,
+    specification: &ProductionSpecification,
 ) -> Result<(), String> {
+    let expected = &specification.gltf_capability;
     let edit = &report.changed_scene_edit;
     let expected_edit = &expected.changed_scene_edit;
+    let actual_dimensions = classify_ledger_dimensions(
+        &specification.ledger_contract,
+        &edit.evidence.dimensions,
+        "U4c production glTF changed SceneEdit report",
+    )?;
+    let expected_dimensions = classify_ledger_dimensions(
+        &specification.ledger_contract,
+        &expected_edit.ledger_dimensions,
+        "U4c production glTF changed SceneEdit specification",
+    )?;
+    let exact_dimensions_match = actual_dimensions.ordinary == expected_dimensions.ordinary
+        && actual_dimensions.failure_terminal == expected_dimensions.failure_terminal;
     if edit.entry_point != expected_edit.entry_point
         || edit.scenario_id != expected_edit.scenario_id
         || edit.output_shape != report.canonical_shape
@@ -707,9 +729,8 @@ fn validate_changed_scene_edit(
         || edit.remap_storage_bytes != 0
         || !edit.scene_bounds_invalidated
         || edit.outcome_evidence_block_count == 0
-        || edit.evidence.outcome_evidence_block_count != edit.outcome_evidence_block_count
-        || edit.evidence.dimensions.as_slice()
-            != std::slice::from_ref(&expected_edit.ledger_dimension)
+        || edit.evidence.retained_evidence_block_count != edit.outcome_evidence_block_count
+        || !exact_dimensions_match
         || !is_lowercase_sha256(&edit.input_snapshot_digest_hex)
         || !is_lowercase_sha256(&edit.output_snapshot_digest_hex)
         || edit.input_snapshot_digest_hex != report.full_snapshot_digest_hex
@@ -718,7 +739,12 @@ fn validate_changed_scene_edit(
     {
         return Err("U4c production glTF changed-scene-edit semantics drifted".to_owned());
     }
-    validate_success_evidence(&edit.evidence, "U4c production glTF changed SceneEdit")?;
+    validate_success_evidence(
+        &specification.ledger_contract,
+        &edit.evidence,
+        expected.canonical_block_count,
+        "U4c production glTF changed SceneEdit",
+    )?;
 
     let taxonomy = &edit.phase.taxonomy;
     if edit.phase.scenario_id != edit.scenario_id
@@ -941,9 +967,18 @@ mod tests {
         specification.gltf_capability
     }
 
+    fn managed_ledger_contract() -> super::super::LedgerContractSpecification {
+        let specification = super::super::ProductionSpecification::parse(include_bytes!(
+            "../../../../../docs/conformance/u4c-metrics.toml"
+        ))
+        .expect("managed U4c production specification must parse");
+        specification.ledger_contract
+    }
+
     fn assert_rejected(specification: &GltfCapabilitySpecification) {
+        let ledger_contract = managed_ledger_contract();
         assert!(
-            validate_specification(specification).is_err(),
+            validate_specification(specification, &ledger_contract).is_err(),
             "synthetic glTF capability drift must fail closed"
         );
     }
@@ -1009,11 +1044,24 @@ mod tests {
         assert_rejected(&snapshot_drift);
 
         let mut ledger_drift = managed_specification();
-        ledger_drift
+        let ordinary = ledger_drift
             .changed_scene_edit
-            .ledger_dimension
-            .semantic_id_hex = "00".to_owned();
+            .ledger_dimensions
+            .iter_mut()
+            .find(|dimension| dimension.role == super::super::LedgerDimensionRole::Ordinary)
+            .expect("managed changed SceneEdit ordinary dimension");
+        ordinary.semantic_id_hex = "00".to_owned();
         assert_rejected(&ledger_drift);
+
+        let mut protected_drift = managed_specification();
+        let failure_terminal = protected_drift
+            .changed_scene_edit
+            .ledger_dimensions
+            .iter_mut()
+            .find(|dimension| dimension.role == super::super::LedgerDimensionRole::FailureTerminal)
+            .expect("managed changed SceneEdit failure-terminal dimension");
+        failure_terminal.attempted = 1;
+        assert_rejected(&protected_drift);
 
         let mut physical_drift = managed_specification();
         physical_drift

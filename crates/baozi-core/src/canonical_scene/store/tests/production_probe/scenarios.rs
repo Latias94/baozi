@@ -16,18 +16,20 @@ use super::super::super::construction::node_scene::edit::{
 use super::super::super::construction::node_scene::snapshot::NodeSceneSnapshotLimits;
 use super::super::super::construction::node_scene::{
     GLTF_SOURCE_VECTOR_SCHEMA_ID, GltfCapabilityCanonicalShapeObservation,
-    GltfCapabilitySourceShapeObservation, OBJ_SOURCE_VECTOR_SCHEMA_ID,
-    ObjCapabilityCanonicalShapeObservation, ObjCapabilitySourceShapeObservation,
+    GltfCapabilitySourceShapeObservation, NodeSceneConstructionTerminal,
+    OBJ_SOURCE_VECTOR_SCHEMA_ID, ObjCapabilityCanonicalShapeObservation,
+    ObjCapabilitySourceShapeObservation, build_evidence_publication_limit_terminal_for_probe,
     build_gltf_capability_scene_for_probe, build_obj_capability_scene_for_probe,
-    capture_gltf_capability_snapshots_for_probe, capture_obj_capability_snapshots_for_probe,
-    collect_gltf_capability_vectors_for_probe, collect_obj_capability_vectors_for_probe,
-    inspect_gltf_capability_semantics_for_probe,
+    build_protected_terminal_activation_for_probe, capture_gltf_capability_snapshots_for_probe,
+    capture_obj_capability_snapshots_for_probe, collect_gltf_capability_vectors_for_probe,
+    collect_obj_capability_vectors_for_probe, inspect_gltf_capability_semantics_for_probe,
     inspect_gltf_capability_semantics_with_first_transform_for_probe,
     inspect_obj_capability_semantics_for_probe,
 };
 use super::super::super::construction::{
     COMPLEX_SEMANTIC_TRANSCRIPT_SCHEMA_ID, ComplexFixtureFault, ComplexFixtureTerminal,
-    SceneConstructionOperation, SceneConstructionTerminal,
+    FAILURE_TERMINAL_WORK_DIMENSION, STORE_DIMENSION, SceneConstructionOperation,
+    SceneConstructionTerminal,
 };
 use super::super::{
     authored_fixture, test_account, test_account_with_allocation_limit, test_factory, test_limits,
@@ -37,10 +39,11 @@ use super::report::{
     FaultPhysicalReport, FixedVectorReport, GltfCanonicalShapeReport, GltfCapabilityReport,
     GltfChangedSceneEditPhysicalReport, GltfChangedSceneEditReport, GltfSnapshotTotalsReport,
     GltfSourceShapeReport, GltfUnchangedViewReport, HotLeafObservationReport,
-    InheritedHotLeafReport, ObjCanonicalShapeReport, ObjCapabilityReport, ObjSnapshotTotalsReport,
-    ObjSourceShapeReport, ReadOnlyPhysicalReport, ScalePhysicalReport, ScaleScenarioReport,
-    SemanticTranscriptReport, ShareGenerationReport, SharePhysicalReport, ValidationFaultReport,
-    evidence_report, hex_encode, phase_report, release_report, sha256_hex,
+    InheritedHotLeafReport, MinimalFallbackReport, ObjCanonicalShapeReport, ObjCapabilityReport,
+    ObjSnapshotTotalsReport, ObjSourceShapeReport, ProtectedTerminalActivationReport,
+    ReadOnlyPhysicalReport, ScalePhysicalReport, ScaleScenarioReport, SemanticTranscriptReport,
+    ShareGenerationReport, SharePhysicalReport, ValidationFaultReport, evidence_report,
+    handoff_report, hex_encode, phase_report, release_report, sha256_hex,
 };
 
 const COMPLEX_PREVIEW_LIMIT_BYTES: usize = 192;
@@ -131,6 +134,33 @@ const VALIDATION_FAULT_DESCRIPTORS: [ValidationFaultDescriptor; 6] = [
 
 fn measure_release<T>(value: T) -> AllocationInfo {
     allocation_counter::measure(move || drop(value))
+}
+
+fn assert_zero_allocation_handoff(label: &str, observation: &AllocationInfo) {
+    assert_eq!(
+        observation.count_total, 0,
+        "{label} handoff must not allocate"
+    );
+    assert_eq!(
+        observation.count_current, 0,
+        "{label} handoff must not change the live allocation count"
+    );
+    assert_eq!(
+        observation.count_max, 0,
+        "{label} handoff must not allocate"
+    );
+    assert_eq!(
+        observation.bytes_total, 0,
+        "{label} handoff must not allocate"
+    );
+    assert_eq!(
+        observation.bytes_current, 0,
+        "{label} handoff must not change live allocation bytes"
+    );
+    assert_eq!(
+        observation.bytes_max, 0,
+        "{label} handoff must not allocate"
+    );
 }
 
 fn assert_allocator_lifecycle_balanced(label: &str, observations: &[&AllocationInfo]) {
@@ -1380,6 +1410,198 @@ pub(super) fn collect_validation_faults() -> Vec<ValidationFaultReport> {
         .collect()
 }
 
+pub(super) fn collect_minimal_fallback() -> MinimalFallbackReport {
+    const SCENARIO_ID: &str = "canonical-node-minimal-fallback-v1";
+    const CONSTRUCTION_ID: &str = "canonical-node-minimal-fallback-construction-v1";
+    const HANDOFF_ID: &str = "canonical-node-minimal-fallback-handoff-v1";
+    const RELEASE_ID: &str = "canonical-node-minimal-fallback-release-v1";
+    const FALLBACK_OUTPUT_COUNT: usize = 1;
+
+    let factory = test_factory(1);
+    let account = test_account(&factory);
+    let physical_baseline = account.snapshot();
+
+    let construction_session =
+        MeasurementSession::begin().expect("minimal fallback measurement must start");
+    let mut prepared = None;
+    let construction_allocations = allocation_counter::measure(|| {
+        prepared = Some(build_evidence_publication_limit_terminal_for_probe(
+            &account,
+        ));
+    });
+    let construction_measurement = construction_session
+        .finish()
+        .expect("minimal fallback measurement must finish");
+    let physical_retained = account.snapshot();
+
+    let mut terminal = None;
+    let handoff_allocations = allocation_counter::measure(|| {
+        terminal = Some(
+            prepared
+                .take()
+                .expect("minimal fallback construction must produce a prepared terminal")
+                .handoff(),
+        );
+    });
+    let physical_after_handoff = account.snapshot();
+    assert_eq!(physical_after_handoff, physical_retained);
+    assert_zero_allocation_handoff("minimal fallback", &handoff_allocations);
+
+    let fallback = match terminal.expect("minimal fallback handoff must set a terminal") {
+        NodeSceneConstructionTerminal::MinimalFallback(fallback) => fallback,
+        NodeSceneConstructionTerminal::Success(_) => {
+            panic!("evidence publication rejection must not publish canonical data")
+        }
+        NodeSceneConstructionTerminal::RichFailure(_) => {
+            panic!("unbound evidence must terminate as minimal fallback")
+        }
+    };
+    assert!(fallback.account().is_same_account(&account));
+    let fallback_code = fallback.fallback_code();
+    let ordinary_dimension = fallback
+        .ledger_evidence()
+        .dimension_by_semantic(STORE_DIMENSION)
+        .expect("minimal fallback evidence must contain the ordinary dimension");
+    assert_eq!(
+        ordinary_dimension.published_outcome_evidence(),
+        u64::try_from(FALLBACK_OUTPUT_COUNT)
+            .expect("fallback output count must fit u64")
+            .checked_add(1)
+            .expect("the ledger snapshot must fit the publication count"),
+        "ledger publication evidence must cover the fallback output and frozen ledger snapshot",
+    );
+    let evidence = evidence_report(0, fallback.ledger_evidence());
+
+    let release_allocations = measure_release(fallback);
+    assert_allocator_lifecycle_balanced(
+        "minimal fallback",
+        &[
+            &construction_allocations,
+            &handoff_allocations,
+            &release_allocations,
+        ],
+    );
+    let physical_after_release = account.snapshot();
+    assert_eq!(physical_after_release.live_retained_bytes(), 0);
+    assert_eq!(physical_after_release.live_retained_allocations(), 0);
+    drop(account);
+    let factory_after_account_release = factory.snapshot();
+    assert_eq!(
+        factory_after_account_release.live_account_control_bytes(),
+        0
+    );
+    assert_eq!(factory_after_account_release.live_accounts(), 0);
+
+    MinimalFallbackReport {
+        scenario_id: SCENARIO_ID,
+        fallback_code,
+        fallback_output_count: FALLBACK_OUTPUT_COUNT,
+        evidence,
+        construction: phase_report(
+            CONSTRUCTION_ID,
+            construction_measurement,
+            construction_allocations,
+        ),
+        handoff: handoff_report(HANDOFF_ID, handoff_allocations),
+        release: release_report(RELEASE_ID, release_allocations),
+        physical_account: FaultPhysicalReport {
+            baseline: physical_baseline.into(),
+            retained: physical_retained.into(),
+            after_handoff: physical_after_handoff.into(),
+            after_release: physical_after_release.into(),
+        },
+        factory_after_account_release: factory_after_account_release.into(),
+    }
+}
+
+pub(super) fn collect_protected_terminal_activation() -> ProtectedTerminalActivationReport {
+    const SCENARIO_ID: &str = "canonical-node-protected-terminal-activation-v1";
+    const CONSTRUCTION_ID: &str = "canonical-node-protected-terminal-construction-v1";
+    const HANDOFF_ID: &str = "canonical-node-protected-terminal-handoff-v1";
+    const RELEASE_ID: &str = "canonical-node-protected-terminal-release-v1";
+
+    let factory = test_factory(1);
+    let account = test_account(&factory);
+    let physical_baseline = account.snapshot();
+
+    let construction_session =
+        MeasurementSession::begin().expect("protected-terminal measurement must start");
+    let mut prepared = None;
+    let construction_allocations = allocation_counter::measure(|| {
+        prepared = Some(build_protected_terminal_activation_for_probe(&account));
+    });
+    let construction_measurement = construction_session
+        .finish()
+        .expect("protected-terminal measurement must finish");
+    let physical_retained = account.snapshot();
+
+    let mut terminal = None;
+    let handoff_allocations = allocation_counter::measure(|| {
+        terminal = Some(
+            prepared
+                .take()
+                .expect("protected-terminal construction must produce a prepared terminal")
+                .handoff(),
+        );
+    });
+    let physical_after_handoff = account.snapshot();
+    assert_eq!(physical_after_handoff, physical_retained);
+    assert_zero_allocation_handoff("protected-terminal rich failure", &handoff_allocations);
+
+    let failure = match terminal.expect("protected-terminal handoff must set a terminal") {
+        NodeSceneConstructionTerminal::RichFailure(failure) => failure,
+        NodeSceneConstructionTerminal::Success(_) => {
+            panic!("ordinary work exhaustion must not publish canonical data")
+        }
+        NodeSceneConstructionTerminal::MinimalFallback(_) => {
+            panic!("ordinary work exhaustion must preserve rich evidence")
+        }
+    };
+    let terminal_work = failure
+        .ledger_evidence()
+        .dimension_by_semantic(FAILURE_TERMINAL_WORK_DIMENSION)
+        .expect("protected-terminal evidence must contain its dedicated dimension");
+    assert!(terminal_work.attempted() > 0);
+    assert_eq!(terminal_work.attempted(), terminal_work.consumed());
+    let retained_evidence_blocks = failure.outcome_evidence_block_count();
+    let evidence = evidence_report(retained_evidence_blocks, failure.ledger_evidence());
+
+    let release_allocations = measure_release(failure);
+    assert_allocator_lifecycle_balanced(
+        "protected-terminal rich failure",
+        &[
+            &construction_allocations,
+            &handoff_allocations,
+            &release_allocations,
+        ],
+    );
+    let physical_after_release = account.snapshot();
+    assert_eq!(physical_after_release.live_retained_bytes(), 0);
+    assert_eq!(physical_after_release.live_retained_allocations(), 0);
+    drop(account);
+    let factory_after_account_release = factory.snapshot();
+    assert_eq!(factory_after_account_release.live_accounts(), 0);
+
+    ProtectedTerminalActivationReport {
+        scenario_id: SCENARIO_ID,
+        evidence,
+        construction: phase_report(
+            CONSTRUCTION_ID,
+            construction_measurement,
+            construction_allocations,
+        ),
+        handoff: handoff_report(HANDOFF_ID, handoff_allocations),
+        release: release_report(RELEASE_ID, release_allocations),
+        physical_account: FaultPhysicalReport {
+            baseline: physical_baseline.into(),
+            retained: physical_retained.into(),
+            after_handoff: physical_after_handoff.into(),
+            after_release: physical_after_release.into(),
+        },
+        factory_after_account_release: factory_after_account_release.into(),
+    }
+}
+
 fn collect_validation_fault(descriptor: ValidationFaultDescriptor) -> ValidationFaultReport {
     const FAULT_IMAGE_COUNT: usize = 14;
 
@@ -1418,9 +1640,7 @@ fn collect_validation_fault(descriptor: ValidationFaultDescriptor) -> Validation
         }
     };
     let physical_after_handoff = account.snapshot();
-    let evidence_count = failure
-        .outcome_evidence_block_count()
-        .expect("rich failure must expose evidence count");
+    let evidence_count = failure.outcome_evidence_block_count();
     let evidence = evidence_report(evidence_count, failure.ledger_evidence());
     let release_allocations = measure_release(failure);
     assert_allocator_lifecycle_balanced(

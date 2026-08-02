@@ -47,14 +47,23 @@ use std::process::{self, Command};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 pub(super) const SPECIFICATION_PATH: &str = "docs/conformance/u4c-metrics.toml";
-const SPECIFICATION_SCHEMA_VERSION: u64 = 5;
+const SPECIFICATION_SCHEMA_VERSION: u64 = 6;
 const PRODUCTION_SCOPE: &str = "u4c-production";
 const PRODUCTION_PROBE_PACKAGE: &str = "baozi-core";
 const PRODUCTION_PROBE_CARGO_TARGET: &str = "baozi_core";
 const PRODUCTION_PROBE_TARGET: &str =
-    "canonical_scene::store::tests::production_probe::canonical_store_u4c_production_v1_probe";
-const PRODUCTION_REPORT_PREFIX: &str = "BAOZI_U4C_PRODUCTION_V1=";
-const PRODUCTION_REPORT_REVISION: u64 = 10;
+    "canonical_scene::store::tests::production_probe::canonical_store_u4c_production_v2_probe";
+const PRODUCTION_REPORT_PREFIX: &str = "BAOZI_U4C_PRODUCTION_V2=";
+const PRODUCTION_REPORT_SCHEMA_VERSION: u64 = 2;
+const PRODUCTION_REPORT_REVISION: u64 = 1;
+const PRODUCTION_SCENARIO_SET_ID: &str = "canonical-store-production-v2";
+const MINIMAL_FALLBACK_SCENARIO_ID: &str = "canonical-node-minimal-fallback-v1";
+const PROTECTED_TERMINAL_ACTIVATION_SCENARIO_ID: &str =
+    "canonical-node-protected-terminal-activation-v1";
+const ORDINARY_DIMENSION_SEMANTIC_ID_HEX: &str =
+    "0262616f7a692d636f72652d7363656e65000000010000000000000001";
+const FAILURE_TERMINAL_DIMENSION_SEMANTIC_ID_HEX: &str =
+    "0262616f7a692d636f72652d7363656e65000000010000000000000002";
 const XTASK_PACKAGE: &str = "baozi-xtask";
 const XTASK_CARGO_TARGET: &str = "baozi-xtask";
 const COLLECTOR_PACKAGE: &str = "baozi-operation";
@@ -110,6 +119,9 @@ struct ProductionSpecification {
     evidence_scope: String,
     runner: RunnerSpecification,
     report_contract: ReportContractSpecification,
+    ledger_contract: LedgerContractSpecification,
+    protected_terminal_activation: ProtectedTerminalActivationSpecification,
+    minimal_fallback: MinimalFallbackSpecification,
     identity: IdentitySpecification,
     closure: ClosureSpecification,
     collector_gate: CollectorGateSpecification,
@@ -144,6 +156,36 @@ struct ReportContractSpecification {
     scenario_set_id: String,
     payload_bytes: u64,
     sha256: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LedgerContractSpecification {
+    ordinary_semantic_id_hex: String,
+    failure_terminal_semantic_id_hex: String,
+    rich_failure_protected_attempted_work: u64,
+    rich_failure_protected_consumed_work: u64,
+    minimal_fallback_protected_attempted_work: u64,
+    minimal_fallback_protected_consumed_work: u64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MinimalFallbackSpecification {
+    scenario_id: String,
+    fallback_code: u32,
+    terminal_failure_class: String,
+    terminal_failure_code: u32,
+    fallback_output_count: u64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProtectedTerminalActivationSpecification {
+    scenario_id: String,
+    terminal_failure_class: String,
+    terminal_failure_code: u32,
+    retained_evidence_blocks: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -254,7 +296,7 @@ struct MutationSpecification {
     transcript_bytes: u64,
     transcript_sha256: String,
     failure_code: u64,
-    outcome_evidence_blocks: u64,
+    retained_evidence_blocks: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -472,6 +514,8 @@ fn collect_canonical_specification(repository_root: &Path) -> Result<Value, Stri
             "scenario_set_id": report.scenario_set_id,
             "scale_scenarios": report.scale_scenarios.len(),
             "validation_faults": report.validation_faults.len(),
+            "protected_terminal_activation": report.protected_terminal_activation.scenario_id.as_str(),
+            "minimal_fallback": report.minimal_fallback.scenario_id.as_str(),
         },
     }))
 }
@@ -511,14 +555,17 @@ impl ProductionSpecification {
         }
         if self.report_contract.prefix != PRODUCTION_REPORT_PREFIX
             || self.report_contract.schema_id != "baozi.u4c.production-report"
-            || self.report_contract.schema_version != 1
+            || self.report_contract.schema_version != PRODUCTION_REPORT_SCHEMA_VERSION
             || self.report_contract.report_revision != PRODUCTION_REPORT_REVISION
-            || self.report_contract.scenario_set_id != "canonical-store-production-v1"
+            || self.report_contract.scenario_set_id != PRODUCTION_SCENARIO_SET_ID
             || self.report_contract.payload_bytes == 0
             || !is_lowercase_sha256(&self.report_contract.sha256)
         {
-            return Err("U4c production report_contract is not the frozen V1 contract".to_owned());
+            return Err("U4c production report_contract is not the frozen V2 contract".to_owned());
         }
+        self.ledger_contract.validate()?;
+        self.protected_terminal_activation.validate()?;
+        self.minimal_fallback.validate()?;
         if self.identity.rustc_release.is_empty()
             || self.identity.rustup_toolchain != self.identity.rustc_release
             || self.identity.host.is_empty()
@@ -576,7 +623,7 @@ impl ProductionSpecification {
         validate_mutations(&self.mutations)?;
         validate_scenarios(&self.scenarios)?;
         obj::validate_specification(&self.obj_capability)?;
-        gltf::validate_specification(&self.gltf_capability)?;
+        gltf::validate_specification(&self.gltf_capability, &self.ledger_contract)?;
         if self.measurement.scale_completed_lookups != 7
             || self.measurement.scale_rejected_lookups != 1
             || self.measurement.scale_lookup_events != 50
@@ -595,6 +642,59 @@ impl ProductionSpecification {
         }
         validate_coverage(&self.coverage, &self.obj_capability, &self.gltf_capability)?;
 
+        Ok(())
+    }
+}
+
+impl LedgerContractSpecification {
+    fn validate(&self) -> Result<(), String> {
+        if self.ordinary_semantic_id_hex != ORDINARY_DIMENSION_SEMANTIC_ID_HEX
+            || self.failure_terminal_semantic_id_hex != FAILURE_TERMINAL_DIMENSION_SEMANTIC_ID_HEX
+            || self.ordinary_semantic_id_hex == self.failure_terminal_semantic_id_hex
+            || self.rich_failure_protected_attempted_work == 0
+            || self.rich_failure_protected_attempted_work
+                != self.rich_failure_protected_consumed_work
+            || self.minimal_fallback_protected_attempted_work != 0
+            || self.minimal_fallback_protected_consumed_work != 0
+        {
+            return Err(
+                "U4c production ledger_contract must freeze the ordinary/protected vocabulary, an activated rich-failure prefix, and a dormant minimal-fallback prefix"
+                    .to_owned(),
+            );
+        }
+        Ok(())
+    }
+}
+
+impl MinimalFallbackSpecification {
+    fn validate(&self) -> Result<(), String> {
+        if self.scenario_id != MINIMAL_FALLBACK_SCENARIO_ID
+            || self.fallback_code == 0
+            || self.terminal_failure_class != "ledger"
+            || self.terminal_failure_code == 0
+            || self.fallback_output_count != 1
+        {
+            return Err(
+                "U4c production minimal_fallback must freeze the deterministic ledger rejection and its single bounded output"
+                    .to_owned(),
+            );
+        }
+        Ok(())
+    }
+}
+
+impl ProtectedTerminalActivationSpecification {
+    fn validate(&self) -> Result<(), String> {
+        if self.scenario_id != PROTECTED_TERMINAL_ACTIVATION_SCENARIO_ID
+            || self.terminal_failure_class != "ledger"
+            || self.terminal_failure_code == 0
+            || self.retained_evidence_blocks != 1
+        {
+            return Err(
+                "U4c production protected_terminal_activation must freeze one ordinary-exhaustion rich failure"
+                    .to_owned(),
+            );
+        }
         Ok(())
     }
 }
@@ -835,7 +935,7 @@ fn validate_mutations(values: &[MutationSpecification]) -> Result<(), String> {
             || value.transcript_bytes == 0
             || !is_lowercase_sha256(&value.transcript_sha256)
             || value.failure_code == 0
-            || value.outcome_evidence_blocks == 0
+            || value.retained_evidence_blocks == 0
         {
             return Err(format!(
                 "U4c production mutation {} must declare class, failure code, and evidence blocks",
@@ -2782,6 +2882,8 @@ struct ProductionReport {
     obj_capability: obj::ObjCapabilityReport,
     gltf_capability: gltf::GltfCapabilityReport,
     validation_faults: Vec<ValidationFaultReport>,
+    protected_terminal_activation: ProtectedTerminalActivationReport,
+    minimal_fallback: MinimalFallbackReport,
 }
 
 #[cfg(feature = "repository-input-candidate")]
@@ -2846,6 +2948,34 @@ struct ValidationFaultReport {
 #[cfg(feature = "repository-input-candidate")]
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct MinimalFallbackReport {
+    scenario_id: String,
+    fallback_code: u32,
+    fallback_output_count: u64,
+    evidence: EvidenceReport,
+    construction: PhaseReport,
+    handoff: HandoffReport,
+    release: ReleaseReport,
+    physical_account: FaultPhysicalReport,
+    factory_after_account_release: PhysicalFactoryReport,
+}
+
+#[cfg(feature = "repository-input-candidate")]
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProtectedTerminalActivationReport {
+    scenario_id: String,
+    evidence: EvidenceReport,
+    construction: PhaseReport,
+    handoff: HandoffReport,
+    release: ReleaseReport,
+    physical_account: FaultPhysicalReport,
+    factory_after_account_release: PhysicalFactoryReport,
+}
+
+#[cfg(feature = "repository-input-candidate")]
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ShareGenerationReport {
     construction: PhaseReport,
     evidence: EvidenceReport,
@@ -2874,14 +3004,22 @@ struct SemanticTranscriptReport {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct EvidenceReport {
-    outcome_evidence_block_count: u64,
+    retained_evidence_block_count: u64,
     ledger_header: LedgerHeaderReport,
     dimensions: Vec<LedgerDimensionReport>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+enum LedgerDimensionRole {
+    Ordinary,
+    FailureTerminal,
 }
 
 #[derive(Debug, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 struct LedgerDimensionReport {
+    role: LedgerDimensionRole,
     semantic_id_hex: String,
     attempted: u64,
     consumed: u64,
@@ -2906,6 +3044,32 @@ impl LedgerDimensionReport {
             && self.pending_publication == 0
             && self.committed_canonical_output <= self.committed
     }
+
+    fn has_zero_protected_storage_and_publication(&self) -> bool {
+        self.current_live_bytes == 0
+            && self.peak_live_bytes == 0
+            && self.pending_publication == 0
+            && self.committed == 0
+            && self.committed_canonical_output == 0
+            && self.published_outcome_evidence == 0
+    }
+
+    fn is_unused_failure_terminal(&self) -> bool {
+        self.attempted == 0
+            && self.consumed == 0
+            && self.has_zero_protected_storage_and_publication()
+    }
+
+    fn matches_protected_terminal(&self, attempted: u64, consumed: u64) -> bool {
+        self.attempted == attempted
+            && self.consumed == consumed
+            && self.has_zero_protected_storage_and_publication()
+    }
+}
+
+struct LedgerDimensionsByRole<'report> {
+    ordinary: &'report LedgerDimensionReport,
+    failure_terminal: &'report LedgerDimensionReport,
 }
 
 #[cfg(feature = "repository-input-candidate")]
@@ -2952,6 +3116,14 @@ struct ReleaseReport {
 #[cfg(feature = "repository-input-candidate")]
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct HandoffReport {
+    scenario_id: String,
+    allocations: AllocationReport,
+}
+
+#[cfg(feature = "repository-input-candidate")]
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct MeasurementTaxonomyReport {
     semantic_cell_writes: u64,
     reference_writes: u64,
@@ -2977,7 +3149,7 @@ struct MeasurementTaxonomyReport {
 }
 
 #[cfg(feature = "repository-input-candidate")]
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 struct AllocationReport {
     count_total: u64,
@@ -3013,7 +3185,7 @@ struct SharePhysicalReport {
 }
 
 #[cfg(feature = "repository-input-candidate")]
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct FaultPhysicalReport {
     baseline: PhysicalAccountReport,
@@ -3023,7 +3195,7 @@ struct FaultPhysicalReport {
 }
 
 #[cfg(feature = "repository-input-candidate")]
-#[derive(Debug, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 struct PhysicalAccountReport {
     live_retained_bytes: u64,
@@ -3116,6 +3288,8 @@ fn validate_production_report(
     obj::validate_report(specification, &report.obj_capability)?;
     gltf::validate_report(specification, &report.gltf_capability)?;
     validate_validation_faults(specification, &report.validation_faults)?;
+    validate_protected_terminal_activation(specification, &report.protected_terminal_activation)?;
+    validate_minimal_fallback(specification, &report.minimal_fallback)?;
 
     Ok(ProductionEvidenceSummary::after_validated_private_tracer_report())
 }
@@ -3179,7 +3353,12 @@ fn validate_scale_reports(
                 expected.scenario_id
             ));
         }
-        validate_success_evidence(&report.evidence, &expected.scenario_id)?;
+        validate_success_evidence(
+            &specification.ledger_contract,
+            &report.evidence,
+            expected.canonical_block_count,
+            &expected.scenario_id,
+        )?;
         validate_expected_producer_phase(
             &report.construction,
             expected,
@@ -3276,8 +3455,18 @@ fn validate_inherited_hot_leaf(
         &report.derived.construction,
         "U4c production derived inherited construction",
     )?;
-    validate_success_evidence(&report.fresh.evidence, "U4c production fresh inherited")?;
-    validate_success_evidence(&report.derived.evidence, "U4c production derived inherited")?;
+    validate_success_evidence(
+        &specification.ledger_contract,
+        &report.fresh.evidence,
+        report.fresh.canonical_block_count,
+        "U4c production fresh inherited",
+    )?;
+    validate_success_evidence(
+        &specification.ledger_contract,
+        &report.derived.evidence,
+        report.derived.canonical_block_count,
+        "U4c production derived inherited",
+    )?;
     let hot_views = [
         &report.fresh_hot_leaf,
         &report.derived_hot_leaf,
@@ -3351,7 +3540,7 @@ fn validate_validation_faults(
             || report.mutation_transcript_sha256 != expected.transcript_sha256
             || report.image_count == 0
             || report.generation_reservations != 0
-            || report.evidence.outcome_evidence_block_count != expected.outcome_evidence_blocks
+            || report.evidence.retained_evidence_block_count != expected.retained_evidence_blocks
             || report.evidence.ledger_header.terminal_cause.class != "failure"
             || report
                 .evidence
@@ -3367,7 +3556,13 @@ fn validate_validation_faults(
                 expected.scenario_id
             ));
         }
-        validate_failure_evidence(&report.evidence, &expected.scenario_id)?;
+        validate_rich_failure_evidence(
+            &specification.ledger_contract,
+            &report.evidence,
+            0,
+            0,
+            &expected.scenario_id,
+        )?;
         validate_producer_bound(
             &report.construction,
             &format!("U4c production mutation {}", expected.scenario_id),
@@ -3401,6 +3596,119 @@ fn validate_validation_faults(
         )?;
     }
     Ok(())
+}
+
+#[cfg(feature = "repository-input-candidate")]
+fn validate_minimal_fallback(
+    specification: &ProductionSpecification,
+    report: &MinimalFallbackReport,
+) -> Result<(), String> {
+    let expected = &specification.minimal_fallback;
+    let terminal = &report.evidence.ledger_header.terminal_cause;
+    if report.scenario_id != expected.scenario_id
+        || report.fallback_code != expected.fallback_code
+        || report.fallback_output_count != expected.fallback_output_count
+        || report.evidence.retained_evidence_block_count != 0
+        || terminal.class != "failure"
+        || terminal.failure_class.as_deref() != Some(expected.terminal_failure_class.as_str())
+        || terminal.code != Some(u64::from(expected.terminal_failure_code))
+    {
+        return Err("U4c production minimal-fallback semantic evidence drifted".to_owned());
+    }
+    validate_minimal_fallback_evidence(
+        &specification.ledger_contract,
+        &report.evidence,
+        expected.fallback_output_count,
+        &expected.scenario_id,
+    )?;
+    validate_producer_bound(
+        &report.construction,
+        "U4c production minimal-fallback construction",
+    )?;
+    validate_zero_allocation_handoff(&report.handoff, "U4c production minimal-fallback handoff")?;
+    validate_physical_handoff_preserved(
+        &report.physical_account,
+        "U4c production minimal-fallback handoff",
+    )?;
+    validate_release(&report.release, "U4c production minimal-fallback release")?;
+    validate_healthy_account(
+        &report.physical_account.baseline,
+        "U4c production minimal-fallback baseline",
+    )?;
+    validate_healthy_account(
+        &report.physical_account.retained,
+        "U4c production minimal-fallback retained",
+    )?;
+    validate_healthy_account(
+        &report.physical_account.after_handoff,
+        "U4c production minimal-fallback handoff",
+    )?;
+    validate_released_account(
+        &report.physical_account.after_release,
+        "U4c production minimal-fallback release",
+    )?;
+    validate_released_factory(
+        &report.factory_after_account_release,
+        "U4c production minimal-fallback factory release",
+    )
+}
+
+#[cfg(feature = "repository-input-candidate")]
+fn validate_protected_terminal_activation(
+    specification: &ProductionSpecification,
+    report: &ProtectedTerminalActivationReport,
+) -> Result<(), String> {
+    let expected = &specification.protected_terminal_activation;
+    let terminal = &report.evidence.ledger_header.terminal_cause;
+    if report.scenario_id != expected.scenario_id
+        || report.evidence.retained_evidence_block_count != expected.retained_evidence_blocks
+        || terminal.class != "failure"
+        || terminal.failure_class.as_deref() != Some(expected.terminal_failure_class.as_str())
+        || terminal.code != Some(u64::from(expected.terminal_failure_code))
+    {
+        return Err("U4c production protected-terminal semantic evidence drifted".to_owned());
+    }
+    validate_rich_failure_evidence(
+        &specification.ledger_contract,
+        &report.evidence,
+        specification
+            .ledger_contract
+            .rich_failure_protected_attempted_work,
+        specification
+            .ledger_contract
+            .rich_failure_protected_consumed_work,
+        &expected.scenario_id,
+    )?;
+    validate_producer_bound(
+        &report.construction,
+        "U4c production protected-terminal construction",
+    )?;
+    validate_zero_allocation_handoff(&report.handoff, "U4c production protected-terminal handoff")?;
+    validate_physical_handoff_preserved(
+        &report.physical_account,
+        "U4c production protected-terminal handoff",
+    )?;
+    validate_release(&report.release, "U4c production protected-terminal release")?;
+    validate_healthy_account(
+        &report.physical_account.baseline,
+        "U4c production protected-terminal baseline",
+    )?;
+    validate_healthy_account(
+        &report.physical_account.retained,
+        "U4c production protected-terminal retained",
+    )?;
+    validate_healthy_account(
+        &report.physical_account.after_handoff,
+        "U4c production protected-terminal handoff",
+    )?;
+    validate_released_account(
+        &report.physical_account.after_release,
+        "U4c production protected-terminal release",
+    )?;
+    validate_released_factory(
+        &report.factory_after_account_release,
+        "U4c production protected-terminal factory release",
+    )
 }
 
 #[cfg(feature = "repository-input-candidate")]
@@ -3542,14 +3850,19 @@ fn validate_hot_view_phase(
 }
 
 #[cfg(feature = "repository-input-candidate")]
-fn validate_success_evidence(evidence: &EvidenceReport, label: &str) -> Result<(), String> {
+fn validate_success_evidence(
+    contract: &LedgerContractSpecification,
+    evidence: &EvidenceReport,
+    expected_canonical_block_count: u64,
+    label: &str,
+) -> Result<(), String> {
     let header = &evidence.ledger_header;
-    if evidence.outcome_evidence_block_count == 0
+    if evidence.retained_evidence_block_count == 0
         || header.schema_revision != 1
         || header.terminal_cause.class != "success"
         || header.terminal_cause.failure_class.is_some()
         || header.terminal_cause.code.is_some()
-        || header.dimension_count == 0
+        || header.dimension_count != 2
         || header.phase_count == 0
         || header.current_live_bytes != 0
         || header.active_reservations != 0
@@ -3559,18 +3872,43 @@ fn validate_success_evidence(evidence: &EvidenceReport, label: &str) -> Result<(
     {
         return Err(format!("{label} success evidence drifted"));
     }
-    validate_ledger_dimensions(evidence, label)
+    let dimensions = validate_success_dimensions(contract, &evidence.dimensions, label)?;
+    let expected_published_outcome_evidence = evidence
+        .retained_evidence_block_count
+        .checked_add(1)
+        .ok_or_else(|| format!("{label} outcome evidence count overflowed"))?;
+    if dimensions.ordinary.committed != expected_canonical_block_count
+        || dimensions.ordinary.committed_canonical_output != expected_canonical_block_count
+    {
+        return Err(format!(
+            "{label} canonical commitment drifted: expected {expected_canonical_block_count}, found committed={} canonical={}",
+            dimensions.ordinary.committed, dimensions.ordinary.committed_canonical_output,
+        ));
+    }
+    if dimensions.ordinary.published_outcome_evidence != expected_published_outcome_evidence {
+        return Err(format!(
+            "{label} ordinary outcome evidence drifted: expected {expected_published_outcome_evidence}, found {}",
+            dimensions.ordinary.published_outcome_evidence
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(feature = "repository-input-candidate")]
-fn validate_failure_evidence(evidence: &EvidenceReport, label: &str) -> Result<(), String> {
+fn validate_rich_failure_evidence(
+    contract: &LedgerContractSpecification,
+    evidence: &EvidenceReport,
+    expected_protected_attempted_work: u64,
+    expected_protected_consumed_work: u64,
+    label: &str,
+) -> Result<(), String> {
     let header = &evidence.ledger_header;
-    if evidence.outcome_evidence_block_count == 0
+    if evidence.retained_evidence_block_count == 0
         || header.schema_revision != 1
         || header.terminal_cause.class != "failure"
         || header.terminal_cause.failure_class.is_none()
         || header.terminal_cause.code.is_none()
-        || header.dimension_count == 0
+        || header.dimension_count != 2
         || header.phase_count == 0
         || header.current_live_bytes != 0
         || header.active_reservations != 0
@@ -3580,24 +3918,199 @@ fn validate_failure_evidence(evidence: &EvidenceReport, label: &str) -> Result<(
     {
         return Err(format!("{label} failure evidence drifted"));
     }
-    validate_ledger_dimensions(evidence, label)
+    let dimensions = validate_rich_failure_dimensions(
+        contract,
+        &evidence.dimensions,
+        expected_protected_attempted_work,
+        expected_protected_consumed_work,
+        label,
+    )?;
+    let expected_published_outcome_evidence = evidence
+        .retained_evidence_block_count
+        .checked_add(1)
+        .ok_or_else(|| format!("{label} retained evidence count overflowed"))?;
+    if dimensions.ordinary.published_outcome_evidence != expected_published_outcome_evidence {
+        return Err(format!(
+            "{label} ordinary failure evidence drifted: expected {}, found {}",
+            expected_published_outcome_evidence, dimensions.ordinary.published_outcome_evidence
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(feature = "repository-input-candidate")]
-fn validate_ledger_dimensions(evidence: &EvidenceReport, label: &str) -> Result<(), String> {
-    let dimension_count = u64::try_from(evidence.dimensions.len())
-        .map_err(|_| format!("{label} ledger dimension count overflowed"))?;
-    if dimension_count != evidence.ledger_header.dimension_count {
-        return Err(format!("{label} ledger dimension enumeration drifted"));
+fn validate_minimal_fallback_evidence(
+    contract: &LedgerContractSpecification,
+    evidence: &EvidenceReport,
+    expected_fallback_output_count: u64,
+    label: &str,
+) -> Result<(), String> {
+    let header = &evidence.ledger_header;
+    if evidence.retained_evidence_block_count != 0
+        || expected_fallback_output_count == 0
+        || header.schema_revision != 1
+        || header.terminal_cause.class != "failure"
+        || header.terminal_cause.failure_class.is_none()
+        || header.terminal_cause.code.is_none()
+        || header.dimension_count != 2
+        || header.phase_count == 0
+        || header.current_live_bytes != 0
+        || header.active_reservations != 0
+        || header.current_evidence_bytes != 0
+        || header.peak_live_bytes == 0
+        || header.peak_evidence_bytes == 0
+    {
+        return Err(format!("{label} minimal-fallback evidence drifted"));
+    }
+    let dimensions = validate_minimal_fallback_dimensions(
+        contract,
+        &evidence.dimensions,
+        expected_fallback_output_count
+            .checked_add(1)
+            .ok_or_else(|| format!("{label} fallback publication count overflowed"))?,
+        label,
+    )?;
+    let expected_published_outcome_evidence = expected_fallback_output_count
+        .checked_add(1)
+        .ok_or_else(|| format!("{label} fallback publication count overflowed"))?;
+    if dimensions.ordinary.published_outcome_evidence != expected_published_outcome_evidence {
+        return Err(format!(
+            "{label} minimal-fallback commitment drifted: expected {expected_published_outcome_evidence}, found {}",
+            dimensions.ordinary.published_outcome_evidence
+        ));
+    }
+    Ok(())
+}
+
+fn classify_ledger_dimensions<'report>(
+    contract: &LedgerContractSpecification,
+    dimensions: &'report [LedgerDimensionReport],
+    label: &str,
+) -> Result<LedgerDimensionsByRole<'report>, String> {
+    if dimensions.len() != 2 {
+        return Err(format!(
+            "{label} must enumerate exactly ordinary and failure-terminal ledger dimensions"
+        ));
     }
 
     let mut semantic_ids = BTreeSet::new();
-    for dimension in &evidence.dimensions {
+    let mut ordinary = None;
+    let mut failure_terminal = None;
+    for dimension in dimensions {
         if !dimension.has_terminal_invariants()
             || !semantic_ids.insert(dimension.semantic_id_hex.as_str())
         {
             return Err(format!("{label} ledger dimension evidence drifted"));
         }
+        let (expected_semantic_id, slot) = match dimension.role {
+            LedgerDimensionRole::Ordinary => {
+                (contract.ordinary_semantic_id_hex.as_str(), &mut ordinary)
+            }
+            LedgerDimensionRole::FailureTerminal => (
+                contract.failure_terminal_semantic_id_hex.as_str(),
+                &mut failure_terminal,
+            ),
+        };
+        if dimension.semantic_id_hex != expected_semantic_id || slot.replace(dimension).is_some() {
+            return Err(format!(
+                "{label} ledger dimension role/semantic identity drifted"
+            ));
+        }
+    }
+
+    Ok(LedgerDimensionsByRole {
+        ordinary: ordinary
+            .ok_or_else(|| format!("{label} ordinary ledger dimension is missing"))?,
+        failure_terminal: failure_terminal
+            .ok_or_else(|| format!("{label} failure-terminal ledger dimension is missing"))?,
+    })
+}
+
+fn validate_success_dimensions<'report>(
+    contract: &LedgerContractSpecification,
+    dimensions: &'report [LedgerDimensionReport],
+    label: &str,
+) -> Result<LedgerDimensionsByRole<'report>, String> {
+    let dimensions = classify_ledger_dimensions(contract, dimensions, label)?;
+    if dimensions.ordinary.attempted == 0
+        || dimensions.ordinary.attempted != dimensions.ordinary.consumed
+        || dimensions.ordinary.peak_live_bytes == 0
+        || dimensions.ordinary.committed == 0
+        || dimensions.ordinary.committed_canonical_output != dimensions.ordinary.committed
+        || dimensions.ordinary.published_outcome_evidence == 0
+        || !dimensions.failure_terminal.is_unused_failure_terminal()
+    {
+        return Err(format!(
+            "{label} success ledger dimensions violate the ordinary/protected contract"
+        ));
+    }
+    Ok(dimensions)
+}
+
+fn validate_rich_failure_dimensions<'report>(
+    contract: &LedgerContractSpecification,
+    dimensions: &'report [LedgerDimensionReport],
+    expected_protected_attempted_work: u64,
+    expected_protected_consumed_work: u64,
+    label: &str,
+) -> Result<LedgerDimensionsByRole<'report>, String> {
+    let dimensions = classify_ledger_dimensions(contract, dimensions, label)?;
+    if dimensions.ordinary.committed != 0
+        || dimensions.ordinary.committed_canonical_output != 0
+        || dimensions.ordinary.published_outcome_evidence == 0
+        || !dimensions.failure_terminal.matches_protected_terminal(
+            expected_protected_attempted_work,
+            expected_protected_consumed_work,
+        )
+    {
+        return Err(format!(
+            "{label} rich-failure ledger dimensions violate the ordinary/protected contract"
+        ));
+    }
+    Ok(dimensions)
+}
+
+fn validate_minimal_fallback_dimensions<'report>(
+    contract: &LedgerContractSpecification,
+    dimensions: &'report [LedgerDimensionReport],
+    expected_published_outcome_evidence: u64,
+    label: &str,
+) -> Result<LedgerDimensionsByRole<'report>, String> {
+    let dimensions = classify_ledger_dimensions(contract, dimensions, label)?;
+    if dimensions.ordinary.committed != 0
+        || dimensions.ordinary.committed_canonical_output != 0
+        || dimensions.ordinary.published_outcome_evidence != expected_published_outcome_evidence
+        || !dimensions.failure_terminal.matches_protected_terminal(
+            contract.minimal_fallback_protected_attempted_work,
+            contract.minimal_fallback_protected_consumed_work,
+        )
+    {
+        return Err(format!(
+            "{label} minimal-fallback ledger dimensions violate the ordinary/protected contract"
+        ));
+    }
+    Ok(dimensions)
+}
+
+#[cfg(feature = "repository-input-candidate")]
+fn validate_zero_allocation_handoff(report: &HandoffReport, label: &str) -> Result<(), String> {
+    if report.scenario_id.is_empty() || report.allocations != AllocationReport::default() {
+        return Err(format!(
+            "{label} must be a zero-work, zero-allocation ownership move"
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(feature = "repository-input-candidate")]
+fn validate_physical_handoff_preserved(
+    report: &FaultPhysicalReport,
+    label: &str,
+) -> Result<(), String> {
+    if report.retained != report.after_handoff {
+        return Err(format!(
+            "{label} changed physical account ownership during handoff"
+        ));
     }
     Ok(())
 }
@@ -3704,6 +4217,372 @@ mod tests {
             Ok(4),
             "the managed closure has one specification, one workspace source tree, and two fixed files"
         );
+    }
+
+    #[test]
+    fn rejects_retired_v1_production_contracts() {
+        let managed = std::str::from_utf8(include_bytes!(
+            "../../../../docs/conformance/u4c-metrics.toml"
+        ))
+        .expect("managed U4c production specification must be UTF-8");
+
+        for retired in [
+            managed.replace("schema_version = 6", "schema_version = 5"),
+            managed.replace(
+                "canonical_store_u4c_production_v2_probe",
+                "canonical_store_u4c_production_v1_probe",
+            ),
+            managed.replace("BAOZI_U4C_PRODUCTION_V2=", "BAOZI_U4C_PRODUCTION_V1="),
+            managed.replace("schema_version = 2", "schema_version = 1"),
+            managed.replace("report_revision = 1", "report_revision = 10"),
+            managed.replace(
+                "scenario_set_id = \"canonical-store-production-v2\"",
+                "scenario_set_id = \"canonical-store-production-v1\"",
+            ),
+        ] {
+            assert!(
+                ProductionSpecification::parse(retired.as_bytes()).is_err(),
+                "retired V1 production contracts must not remain readable"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_ledger_vocabulary_and_role_drift() {
+        let managed = std::str::from_utf8(include_bytes!(
+            "../../../../docs/conformance/u4c-metrics.toml"
+        ))
+        .expect("managed U4c production specification must be UTF-8");
+        let ordinary_id = ORDINARY_DIMENSION_SEMANTIC_ID_HEX;
+        let first_failure_id = managed
+            .find(FAILURE_TERMINAL_DIMENSION_SEMANTIC_ID_HEX)
+            .expect("managed ledger contract must contain the protected semantic identity");
+        let second_failure_id = managed
+            [first_failure_id + FAILURE_TERMINAL_DIMENSION_SEMANTIC_ID_HEX.len()..]
+            .find(FAILURE_TERMINAL_DIMENSION_SEMANTIC_ID_HEX)
+            .map(|offset| {
+                first_failure_id + FAILURE_TERMINAL_DIMENSION_SEMANTIC_ID_HEX.len() + offset
+            })
+            .expect("managed changed SceneEdit must freeze the protected semantic identity");
+        let mut changed_edit_identity_drift = managed.to_owned();
+        changed_edit_identity_drift.replace_range(
+            second_failure_id..second_failure_id + FAILURE_TERMINAL_DIMENSION_SEMANTIC_ID_HEX.len(),
+            ordinary_id,
+        );
+
+        for malformed in [
+            managed.replace(
+                "rich_failure_protected_attempted_work = 6",
+                "rich_failure_protected_attempted_work = 0",
+            ),
+            managed.replace(
+                "minimal_fallback_protected_attempted_work = 0",
+                "minimal_fallback_protected_attempted_work = 1",
+            ),
+            managed.replacen(FAILURE_TERMINAL_DIMENSION_SEMANTIC_ID_HEX, ordinary_id, 1),
+            changed_edit_identity_drift,
+            managed.replace("role = \"failure-terminal\"", "role = \"ordinary\""),
+            managed.replace("role = \"failure-terminal\"", "role = \"unknown\""),
+        ] {
+            assert!(
+                ProductionSpecification::parse(malformed.as_bytes()).is_err(),
+                "managed production evidence must reject ledger vocabulary drift"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_minimal_fallback_contract_drift() {
+        let managed = std::str::from_utf8(include_bytes!(
+            "../../../../docs/conformance/u4c-metrics.toml"
+        ))
+        .expect("managed U4c production specification must be UTF-8");
+
+        let (before_minimal_fallback, minimal_fallback_and_after) = managed
+            .split_once("[minimal_fallback]")
+            .expect("managed production specification must contain minimal_fallback");
+        let minimal_failure_class_drift = format!(
+            "{before_minimal_fallback}[minimal_fallback]{}",
+            minimal_fallback_and_after.replacen(
+                "terminal_failure_class = \"ledger\"",
+                "terminal_failure_class = \"requested\"",
+                1,
+            )
+        );
+        let error = ProductionSpecification::parse(minimal_failure_class_drift.as_bytes())
+            .expect_err("minimal-fallback failure-class drift must fail closed");
+        assert!(
+            error.contains("minimal_fallback"),
+            "failure-class drift must be rejected by the minimal-fallback contract: {error}"
+        );
+
+        for malformed in [
+            managed.replace(
+                "scenario_id = \"canonical-node-minimal-fallback-v1\"",
+                "scenario_id = \"retired-minimal-fallback\"",
+            ),
+            managed.replace("fallback_code = 1396899841", "fallback_code = 0"),
+            managed.replace("fallback_output_count = 1", "fallback_output_count = 2"),
+        ] {
+            assert!(
+                ProductionSpecification::parse(malformed.as_bytes()).is_err(),
+                "managed production evidence must reject minimal-fallback contract drift"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_protected_terminal_activation_contract_drift() {
+        let managed = std::str::from_utf8(include_bytes!(
+            "../../../../docs/conformance/u4c-metrics.toml"
+        ))
+        .expect("managed U4c production specification must be UTF-8");
+
+        for malformed in [
+            managed.replace(
+                "scenario_id = \"canonical-node-protected-terminal-activation-v1\"",
+                "scenario_id = \"unprotected-terminal-activation\"",
+            ),
+            managed.replace(
+                "terminal_failure_code = 1\nretained_evidence_blocks = 1",
+                "terminal_failure_code = 1\nretained_evidence_blocks = 0",
+            ),
+        ] {
+            assert!(
+                ProductionSpecification::parse(malformed.as_bytes()).is_err(),
+                "managed production evidence must reject protected-terminal activation drift"
+            );
+        }
+    }
+
+    #[test]
+    fn ledger_dimension_roles_enforce_success_rich_and_minimal_failure_contracts() {
+        let contract = LedgerContractSpecification {
+            ordinary_semantic_id_hex: ORDINARY_DIMENSION_SEMANTIC_ID_HEX.to_owned(),
+            failure_terminal_semantic_id_hex: FAILURE_TERMINAL_DIMENSION_SEMANTIC_ID_HEX.to_owned(),
+            rich_failure_protected_attempted_work: 6,
+            rich_failure_protected_consumed_work: 6,
+            minimal_fallback_protected_attempted_work: 0,
+            minimal_fallback_protected_consumed_work: 0,
+        };
+        let ordinary_success = LedgerDimensionReport {
+            role: LedgerDimensionRole::Ordinary,
+            semantic_id_hex: ORDINARY_DIMENSION_SEMANTIC_ID_HEX.to_owned(),
+            attempted: 8,
+            consumed: 8,
+            current_live_bytes: 0,
+            peak_live_bytes: 64,
+            pending_publication: 0,
+            committed: 2,
+            committed_canonical_output: 2,
+            published_outcome_evidence: 2,
+        };
+        let protected_unused = LedgerDimensionReport {
+            role: LedgerDimensionRole::FailureTerminal,
+            semantic_id_hex: FAILURE_TERMINAL_DIMENSION_SEMANTIC_ID_HEX.to_owned(),
+            attempted: 0,
+            consumed: 0,
+            current_live_bytes: 0,
+            peak_live_bytes: 0,
+            pending_publication: 0,
+            committed: 0,
+            committed_canonical_output: 0,
+            published_outcome_evidence: 0,
+        };
+        let mut success = vec![ordinary_success, protected_unused];
+        assert!(validate_success_dimensions(&contract, &success, "test success").is_ok());
+        success.reverse();
+        assert!(validate_success_dimensions(&contract, &success, "test success").is_ok());
+        success.reverse();
+        assert!(validate_success_dimensions(&contract, &success[..1], "test success").is_err());
+
+        success[0].consumed = 7;
+        assert!(validate_success_dimensions(&contract, &success, "test success").is_err());
+        success[0].consumed = 8;
+        success[1].attempted = 1;
+        assert!(validate_success_dimensions(&contract, &success, "test success").is_err());
+
+        let ordinary_failure = LedgerDimensionReport {
+            role: LedgerDimensionRole::Ordinary,
+            semantic_id_hex: ORDINARY_DIMENSION_SEMANTIC_ID_HEX.to_owned(),
+            attempted: 8,
+            consumed: 8,
+            current_live_bytes: 0,
+            peak_live_bytes: 64,
+            pending_publication: 0,
+            committed: 0,
+            committed_canonical_output: 0,
+            published_outcome_evidence: 2,
+        };
+        let protected_failure = LedgerDimensionReport {
+            role: LedgerDimensionRole::FailureTerminal,
+            semantic_id_hex: FAILURE_TERMINAL_DIMENSION_SEMANTIC_ID_HEX.to_owned(),
+            attempted: 6,
+            consumed: 6,
+            current_live_bytes: 0,
+            peak_live_bytes: 0,
+            pending_publication: 0,
+            committed: 0,
+            committed_canonical_output: 0,
+            published_outcome_evidence: 0,
+        };
+        let mut failure = vec![ordinary_failure, protected_failure];
+        assert!(
+            validate_rich_failure_dimensions(&contract, &failure, 6, 6, "test failure").is_ok()
+        );
+
+        failure[1].consumed = 5;
+        assert!(
+            validate_rich_failure_dimensions(&contract, &failure, 6, 6, "test failure").is_err()
+        );
+        failure[1].consumed = 6;
+        failure[1].peak_live_bytes = 1;
+        assert!(
+            validate_rich_failure_dimensions(&contract, &failure, 6, 6, "test failure").is_err()
+        );
+        failure[1].peak_live_bytes = 0;
+        failure[1].published_outcome_evidence = 1;
+        assert!(
+            validate_rich_failure_dimensions(&contract, &failure, 6, 6, "test failure").is_err()
+        );
+        failure[1].published_outcome_evidence = 0;
+        failure[1].role = LedgerDimensionRole::Ordinary;
+        assert!(
+            validate_rich_failure_dimensions(&contract, &failure, 6, 6, "test failure").is_err()
+        );
+
+        failure[1].role = LedgerDimensionRole::FailureTerminal;
+        failure[1].attempted = 0;
+        failure[1].consumed = 0;
+        failure[0].published_outcome_evidence = 2;
+        assert!(
+            validate_minimal_fallback_dimensions(&contract, &failure, 2, "test fallback").is_ok()
+        );
+        failure[1].attempted = 1;
+        assert!(
+            validate_minimal_fallback_dimensions(&contract, &failure, 2, "test fallback").is_err()
+        );
+    }
+
+    #[cfg(feature = "repository-input-candidate")]
+    #[test]
+    fn evidence_validators_bind_header_cardinality_commitments_and_snapshot_publications() {
+        let contract = LedgerContractSpecification {
+            ordinary_semantic_id_hex: ORDINARY_DIMENSION_SEMANTIC_ID_HEX.to_owned(),
+            failure_terminal_semantic_id_hex: FAILURE_TERMINAL_DIMENSION_SEMANTIC_ID_HEX.to_owned(),
+            rich_failure_protected_attempted_work: 6,
+            rich_failure_protected_consumed_work: 6,
+            minimal_fallback_protected_attempted_work: 0,
+            minimal_fallback_protected_consumed_work: 0,
+        };
+        let mut evidence = EvidenceReport {
+            retained_evidence_block_count: 1,
+            ledger_header: LedgerHeaderReport {
+                schema_revision: 1,
+                terminal_cause: TerminalCauseReport {
+                    class: "success".to_owned(),
+                    failure_class: None,
+                    code: None,
+                },
+                dimension_count: 2,
+                phase_count: 1,
+                current_live_bytes: 0,
+                peak_live_bytes: 64,
+                active_reservations: 0,
+                current_evidence_bytes: 0,
+                peak_evidence_bytes: 64,
+            },
+            dimensions: vec![
+                LedgerDimensionReport {
+                    role: LedgerDimensionRole::Ordinary,
+                    semantic_id_hex: ORDINARY_DIMENSION_SEMANTIC_ID_HEX.to_owned(),
+                    attempted: 8,
+                    consumed: 8,
+                    current_live_bytes: 0,
+                    peak_live_bytes: 64,
+                    pending_publication: 0,
+                    committed: 2,
+                    committed_canonical_output: 2,
+                    published_outcome_evidence: 2,
+                },
+                LedgerDimensionReport {
+                    role: LedgerDimensionRole::FailureTerminal,
+                    semantic_id_hex: FAILURE_TERMINAL_DIMENSION_SEMANTIC_ID_HEX.to_owned(),
+                    attempted: 0,
+                    consumed: 0,
+                    current_live_bytes: 0,
+                    peak_live_bytes: 0,
+                    pending_publication: 0,
+                    committed: 0,
+                    committed_canonical_output: 0,
+                    published_outcome_evidence: 0,
+                },
+            ],
+        };
+
+        assert!(validate_success_evidence(&contract, &evidence, 2, "test success").is_ok());
+        assert!(validate_success_evidence(&contract, &evidence, 3, "test success").is_err());
+
+        evidence.dimensions[0].published_outcome_evidence = 1;
+        assert!(
+            validate_success_evidence(&contract, &evidence, 2, "test success").is_err(),
+            "success evidence must publish one ledger snapshot beyond its retained block"
+        );
+        evidence.dimensions[0].published_outcome_evidence = 2;
+
+        evidence.ledger_header.terminal_cause = TerminalCauseReport {
+            class: "failure".to_owned(),
+            failure_class: Some("ledger".to_owned()),
+            code: Some(1),
+        };
+        evidence.dimensions[0].committed = 0;
+        evidence.dimensions[0].committed_canonical_output = 0;
+        evidence.dimensions[1].attempted = 6;
+        evidence.dimensions[1].consumed = 6;
+        assert!(validate_rich_failure_evidence(&contract, &evidence, 6, 6, "test failure").is_ok());
+        evidence.dimensions[0].published_outcome_evidence = 1;
+        assert!(
+            validate_rich_failure_evidence(&contract, &evidence, 6, 6, "test failure").is_err(),
+            "rich failure evidence must publish one ledger snapshot beyond its retained block"
+        );
+
+        evidence.retained_evidence_block_count = 0;
+        evidence.dimensions[1].attempted = 0;
+        evidence.dimensions[1].consumed = 0;
+        assert!(
+            validate_minimal_fallback_evidence(&contract, &evidence, 1, "test fallback").is_err(),
+            "minimal fallback evidence must publish one ledger snapshot beyond its bounded output"
+        );
+        evidence.dimensions[0].published_outcome_evidence = 2;
+        assert!(
+            validate_minimal_fallback_evidence(&contract, &evidence, 1, "test fallback").is_ok()
+        );
+
+        evidence.ledger_header.dimension_count = 1;
+        assert!(
+            validate_minimal_fallback_evidence(&contract, &evidence, 1, "test fallback").is_err()
+        );
+    }
+
+    #[cfg(feature = "repository-input-candidate")]
+    #[test]
+    fn handoff_evidence_rejects_allocation_and_physical_account_drift() {
+        let mut handoff = HandoffReport {
+            scenario_id: "test-handoff".to_owned(),
+            allocations: AllocationReport::default(),
+        };
+        assert!(validate_zero_allocation_handoff(&handoff, "test handoff").is_ok());
+        handoff.allocations.count_total = 1;
+        let error = validate_zero_allocation_handoff(&handoff, "test handoff")
+            .expect_err("handoff allocation must fail closed");
+        assert!(error.contains("zero-allocation"));
+
+        let mut physical = FaultPhysicalReport::default();
+        assert!(validate_physical_handoff_preserved(&physical, "test handoff").is_ok());
+        physical.after_handoff.live_retained_bytes = 1;
+        let error = validate_physical_handoff_preserved(&physical, "test handoff")
+            .expect_err("physical ownership drift must fail closed");
+        assert!(error.contains("physical account ownership"));
     }
 
     #[test]

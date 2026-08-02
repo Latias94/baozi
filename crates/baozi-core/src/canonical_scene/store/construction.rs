@@ -470,12 +470,8 @@ impl TracerSceneRichFailure {
         &self.ledger_evidence
     }
 
-    pub(crate) fn outcome_evidence_block_count(&self) -> Option<usize> {
-        let published = self
-            .ledger_evidence
-            .dimension_by_semantic(STORE_DIMENSION)?
-            .published_outcome_evidence();
-        usize::try_from(published).ok()
+    pub(crate) fn outcome_evidence_block_count(&self) -> usize {
+        self.outcome_evidence.outcome_evidence().len()
     }
 }
 
@@ -511,6 +507,10 @@ impl TracerSceneFallback {
 
     pub(crate) const fn ledger_evidence(&self) -> &StoreLedgerEvidence {
         &self.ledger_evidence
+    }
+
+    pub(crate) fn fallback_code(&self) -> u32 {
+        self.fallback.value().code()
     }
 }
 

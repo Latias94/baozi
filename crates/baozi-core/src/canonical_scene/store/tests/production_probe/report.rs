@@ -9,11 +9,13 @@ use baozi_operation::{
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
-pub(super) const REPORT_PREFIX: &str = "BAOZI_U4C_PRODUCTION_V1=";
+use super::super::super::construction::{FAILURE_TERMINAL_WORK_DIMENSION, STORE_DIMENSION};
+
+pub(super) const REPORT_PREFIX: &str = "BAOZI_U4C_PRODUCTION_V2=";
 const REPORT_SCHEMA_ID: &str = "baozi.u4c.production-report";
-const REPORT_SCHEMA_VERSION: u32 = 1;
-const REPORT_REVISION: u32 = 10;
-const SCENARIO_SET_ID: &str = "canonical-store-production-v1";
+const REPORT_SCHEMA_VERSION: u32 = 2;
+const REPORT_REVISION: u32 = 1;
+const SCENARIO_SET_ID: &str = "canonical-store-production-v2";
 
 #[derive(Serialize)]
 pub(super) struct ProductionReport {
@@ -26,6 +28,8 @@ pub(super) struct ProductionReport {
     obj_capability: ObjCapabilityReport,
     gltf_capability: GltfCapabilityReport,
     validation_faults: Vec<ValidationFaultReport>,
+    protected_terminal_activation: ProtectedTerminalActivationReport,
+    minimal_fallback: MinimalFallbackReport,
 }
 
 impl ProductionReport {
@@ -35,6 +39,8 @@ impl ProductionReport {
         obj_capability: ObjCapabilityReport,
         gltf_capability: GltfCapabilityReport,
         validation_faults: Vec<ValidationFaultReport>,
+        protected_terminal_activation: ProtectedTerminalActivationReport,
+        minimal_fallback: MinimalFallbackReport,
     ) -> Self {
         Self {
             schema_id: REPORT_SCHEMA_ID,
@@ -46,6 +52,8 @@ impl ProductionReport {
             obj_capability,
             gltf_capability,
             validation_faults,
+            protected_terminal_activation,
+            minimal_fallback,
         }
     }
 }
@@ -396,6 +404,30 @@ pub(super) struct ValidationFaultReport {
 }
 
 #[derive(Serialize)]
+pub(super) struct MinimalFallbackReport {
+    pub(super) scenario_id: &'static str,
+    pub(super) fallback_code: u32,
+    pub(super) fallback_output_count: usize,
+    pub(super) evidence: EvidenceReport,
+    pub(super) construction: PhaseReport,
+    pub(super) handoff: HandoffReport,
+    pub(super) release: ReleaseReport,
+    pub(super) physical_account: FaultPhysicalReport,
+    pub(super) factory_after_account_release: PhysicalFactoryReport,
+}
+
+#[derive(Serialize)]
+pub(super) struct ProtectedTerminalActivationReport {
+    pub(super) scenario_id: &'static str,
+    pub(super) evidence: EvidenceReport,
+    pub(super) construction: PhaseReport,
+    pub(super) handoff: HandoffReport,
+    pub(super) release: ReleaseReport,
+    pub(super) physical_account: FaultPhysicalReport,
+    pub(super) factory_after_account_release: PhysicalFactoryReport,
+}
+
+#[derive(Serialize)]
 pub(super) struct PhaseReport {
     scenario_id: &'static str,
     taxonomy: MeasurementTaxonomy,
@@ -404,6 +436,12 @@ pub(super) struct PhaseReport {
 
 #[derive(Serialize)]
 pub(super) struct ReleaseReport {
+    scenario_id: &'static str,
+    allocations: AllocationReport,
+}
+
+#[derive(Serialize)]
+pub(super) struct HandoffReport {
     scenario_id: &'static str,
     allocations: AllocationReport,
 }
@@ -445,13 +483,14 @@ struct AllocationReport {
 
 #[derive(Serialize)]
 pub(super) struct EvidenceReport {
-    outcome_evidence_block_count: usize,
+    retained_evidence_block_count: usize,
     ledger_header: LedgerHeaderReport,
     dimensions: Vec<LedgerDimensionReport>,
 }
 
 #[derive(Serialize)]
 struct LedgerDimensionReport {
+    role: LedgerDimensionRole,
     semantic_id_hex: String,
     attempted: u64,
     consumed: u64,
@@ -461,6 +500,13 @@ struct LedgerDimensionReport {
     committed: u64,
     committed_canonical_output: u64,
     published_outcome_evidence: u64,
+}
+
+#[derive(Clone, Copy, Serialize)]
+#[serde(rename_all = "kebab-case")]
+enum LedgerDimensionRole {
+    Ordinary,
+    FailureTerminal,
 }
 
 #[derive(Serialize)]
@@ -582,18 +628,57 @@ pub(super) fn release_report(
     }
 }
 
+pub(super) fn handoff_report(
+    scenario_id: &'static str,
+    allocations: AllocationInfo,
+) -> HandoffReport {
+    HandoffReport {
+        scenario_id,
+        allocations: allocations.into(),
+    }
+}
+
 pub(super) fn evidence_report(
-    outcome_evidence_block_count: usize,
+    retained_evidence_block_count: usize,
     evidence: &StoreLedgerEvidence,
 ) -> EvidenceReport {
     let header = evidence.header();
+    assert_eq!(
+        header.dimension_count(),
+        2,
+        "U4c production V2 ledger evidence must contain exactly the ordinary and failure-terminal dimensions",
+    );
+    let mut saw_ordinary = false;
+    let mut saw_failure_terminal = false;
     let dimensions = (0..header.dimension_count())
         .map(|index| {
             let dimension = evidence
                 .dimension_at(index)
                 .expect("ledger evidence header must enumerate every dimension");
+            let semantic_id = dimension.dimension();
+            let role = if semantic_id == STORE_DIMENSION {
+                assert!(
+                    !saw_ordinary,
+                    "U4c production V2 ledger evidence must not duplicate the ordinary dimension",
+                );
+                saw_ordinary = true;
+                LedgerDimensionRole::Ordinary
+            } else if semantic_id == FAILURE_TERMINAL_WORK_DIMENSION {
+                assert!(
+                    !saw_failure_terminal,
+                    "U4c production V2 ledger evidence must not duplicate the failure-terminal dimension",
+                );
+                saw_failure_terminal = true;
+                LedgerDimensionRole::FailureTerminal
+            } else {
+                panic!(
+                    "U4c production V2 ledger evidence contains unknown dimension {}",
+                    hex_encode(&semantic_id.to_canonical_bytes()),
+                );
+            };
             LedgerDimensionReport {
-                semantic_id_hex: hex_encode(&dimension.dimension().to_canonical_bytes()),
+                role,
+                semantic_id_hex: hex_encode(&semantic_id.to_canonical_bytes()),
                 attempted: dimension.attempted(),
                 consumed: dimension.consumed(),
                 current_live_bytes: dimension.current_live_bytes(),
@@ -605,8 +690,12 @@ pub(super) fn evidence_report(
             }
         })
         .collect();
+    assert!(
+        saw_ordinary && saw_failure_terminal,
+        "U4c production V2 ledger evidence must contain both the ordinary and failure-terminal dimensions",
+    );
     EvidenceReport {
-        outcome_evidence_block_count,
+        retained_evidence_block_count,
         ledger_header: LedgerHeaderReport {
             schema_revision: header.schema_revision(),
             terminal_cause: terminal_cause_report(header.terminal_cause()),
@@ -738,4 +827,12 @@ pub(super) fn render(report: &ProductionReport) -> String {
     let _: serde_json::Value =
         serde_json::from_str(&rendered).expect("production report must be valid JSON");
     rendered
+}
+
+#[test]
+fn production_report_contract_is_v2() {
+    assert_eq!(REPORT_SCHEMA_ID, "baozi.u4c.production-report");
+    assert_eq!(REPORT_SCHEMA_VERSION, 2);
+    assert_eq!(REPORT_REVISION, 1);
+    assert_eq!(SCENARIO_SET_ID, "canonical-store-production-v2");
 }

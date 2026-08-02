@@ -301,12 +301,17 @@ pub(super) fn validate_report(
     }
     validate_snapshot_totals(&report.snapshot_totals, &expected.snapshot_totals)?;
     validate_bounded_preview(&report.bounded_preview, &expected.bounded_preview)?;
-    if report.evidence.outcome_evidence_block_count != report.outcome_evidence_block_count {
+    if report.evidence.retained_evidence_block_count != report.outcome_evidence_block_count {
         return Err(
             "U4c production OBJ outcome evidence count disagrees with the ledger".to_owned(),
         );
     }
-    validate_success_evidence(&report.evidence, "U4c production OBJ capability")?;
+    validate_success_evidence(
+        &specification.ledger_contract,
+        &report.evidence,
+        expected.canonical_block_count,
+        "U4c production OBJ capability",
+    )?;
     validate_construction_phase(&report.construction, expected)?;
     if report.inspection.scenario_id != "canonical-obj-corner-smoothing-inspection-v1" {
         return Err("U4c production OBJ inspection scenario identity drifted".to_owned());

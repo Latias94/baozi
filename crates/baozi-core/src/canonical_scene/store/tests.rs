@@ -346,15 +346,15 @@ fn canonical_store_generation_exhaustion_downgrades_without_consuming_nonce() {
         }
     };
     assert_eq!(account.snapshot(), before_handoff);
-    assert_eq!(failure.outcome_evidence_block_count(), Some(2));
+    assert_eq!(failure.outcome_evidence_block_count(), 1);
     assert!(matches!(
         failure.ledger_evidence().header().terminal_cause(),
         StoreTerminalCause::Failure(_)
     ));
     let dimension = failure
         .ledger_evidence()
-        .dimension_at(0)
-        .expect("the tracer has one ledger dimension");
+        .dimension_by_semantic(STORE_DIMENSION)
+        .expect("the tracer has its ordinary ledger dimension");
     assert_eq!(dimension.committed_canonical_output(), 0);
     assert_eq!(dimension.published_outcome_evidence(), 2);
 
@@ -894,7 +894,7 @@ fn canonical_store_complex_fixture_rejects_representative_validation_faults() {
         assert_eq!(nonce.load(Ordering::Relaxed), 0);
         match prepared.handoff() {
             super::construction::ComplexFixtureTerminal::RichFailure(failure) => {
-                assert_eq!(failure.outcome_evidence_block_count(), Some(2));
+                assert_eq!(failure.outcome_evidence_block_count(), 1);
                 drop(failure);
             }
             super::construction::ComplexFixtureTerminal::Success(_) => {
