@@ -100,6 +100,8 @@ impl SceneAuthoringRejection {
             NodeSceneConstructionRejection::AnimationAuthoring(_) => {
                 SceneAuthoringDomain::Animation
             }
+            NodeSceneConstructionRejection::ProfileOwnerCatalog(_)
+            | NodeSceneConstructionRejection::ProfileAuthoring(_) => SceneAuthoringDomain::Profile,
             NodeSceneConstructionRejection::Aggregate(_) => SceneAuthoringDomain::Aggregate,
         };
         Self { domain, source }
@@ -130,6 +132,7 @@ pub(crate) enum SceneAuthoringDomain {
     Geometry,
     Deformation,
     Animation,
+    Profile,
     Aggregate,
 }
 
@@ -302,18 +305,24 @@ impl<'account> SceneConstruction<'account> {
 #[cfg(test)]
 mod tests {
     use std::panic::{AssertUnwindSafe, catch_unwind};
+    use std::sync::OnceLock;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use baozi_operation::{
         OperationControl, PhysicalStorageAccountFactoryLimits, PhysicalStorageAccountLimits,
     };
 
+    use crate::FormatId;
     use crate::canonical_scene::store::production::{
         AnimationAuthoringBatch, AppearanceAuthoringBatch, DeformationAuthoringBatch,
-        GeometryAuthoringBatch, NodeAuthoringBatch, NodeAuthoringNode, NodeLocalId, Presence,
-        SceneAuthoringBatch, SpatialAuthoringBatch,
+        GeometryAuthoringBatch, LineageAuthoringBatch, MetadataAuthoringBatch, NodeAuthoringBatch,
+        NodeAuthoringNode, NodeLocalId, ObservedResourceAuthoring, OwnerProvenanceAuthoring,
+        Presence, ProfileAuthoringBatch, ProfileOwner, ProvenanceLocalId, ProvenanceNodeAuthoring,
+        ResourceIdentityLocalId, ResourceIdentityStability, SceneAuthoringBatch,
+        SessionOpaqueReason, SourceIdentityAuthoring, SourceIdentityLocalId, SpatialAuthoringBatch,
     };
     use crate::entity::AuthoredTransform;
+    use crate::provenance::{ResourceIdentity, SourceObjectKind, SourceObjectLocator};
     use crate::scene_space::SceneSpace;
 
     use super::*;
@@ -326,6 +335,71 @@ mod tests {
         Presence::Absent,
         Presence::Absent,
     )];
+
+    struct ProfileFixtureVocabulary {
+        resource: ResourceIdentity,
+        stability: ResourceIdentityStability,
+        format: FormatId,
+        locator: SourceObjectLocator,
+    }
+
+    struct ProfileFixture {
+        resources: [ObservedResourceAuthoring<'static>; 1],
+        sources: [SourceIdentityAuthoring<'static>; 1],
+        provenance: [ProvenanceNodeAuthoring<'static>; 1],
+        owners: [OwnerProvenanceAuthoring<'static>; 3],
+    }
+
+    impl ProfileFixture {
+        fn batch(&'static self) -> ProfileAuthoringBatch<'static> {
+            ProfileAuthoringBatch::new(
+                LineageAuthoringBatch::new(
+                    &self.resources,
+                    &self.sources,
+                    &self.provenance,
+                    &self.owners,
+                ),
+                MetadataAuthoringBatch::empty(),
+            )
+        }
+    }
+
+    fn profile_fixture() -> &'static ProfileFixture {
+        static VOCABULARY: OnceLock<ProfileFixtureVocabulary> = OnceLock::new();
+        static FIXTURE: OnceLock<ProfileFixture> = OnceLock::new();
+        let vocabulary = VOCABULARY.get_or_init(|| ProfileFixtureVocabulary {
+            resource: ResourceIdentity::new("fixtures/continuation/input")
+                .expect("test profile resource identity"),
+            stability: ResourceIdentityStability::session_opaque(SessionOpaqueReason::CallerLabel),
+            format: FormatId::new("org.baozi.fixture").expect("test profile format"),
+            locator: SourceObjectLocator::indexed(SourceObjectKind::Document, 0),
+        });
+        FIXTURE.get_or_init(|| {
+            static SOURCE_PROVENANCE: [ProvenanceLocalId; 1] = [ProvenanceLocalId::new(0)];
+            ProfileFixture {
+                resources: [ObservedResourceAuthoring::new(
+                    &vocabulary.resource,
+                    &vocabulary.stability,
+                )],
+                sources: [SourceIdentityAuthoring::new(
+                    ResourceIdentityLocalId::new(0),
+                    &vocabulary.format,
+                    &vocabulary.locator,
+                )],
+                provenance: [ProvenanceNodeAuthoring::source(SourceIdentityLocalId::new(
+                    0,
+                ))],
+                owners: [
+                    OwnerProvenanceAuthoring::new(ProfileOwner::Scene, &SOURCE_PROVENANCE),
+                    OwnerProvenanceAuthoring::new(ProfileOwner::SyntheticRoot, &SOURCE_PROVENANCE),
+                    OwnerProvenanceAuthoring::new(
+                        ProfileOwner::Node(NodeLocalId::new(0)),
+                        &SOURCE_PROVENANCE,
+                    ),
+                ],
+            }
+        })
+    }
 
     fn factory(max_live_accounts: u64) -> PhysicalStorageAccountFactory {
         PhysicalStorageAccountFactory::try_new(
@@ -354,6 +428,7 @@ mod tests {
             GeometryAuthoringBatch::empty(),
             DeformationAuthoringBatch::empty(),
             AnimationAuthoringBatch::empty(),
+            profile_fixture().batch(),
         )
     }
 

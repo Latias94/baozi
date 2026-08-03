@@ -9,13 +9,14 @@ mod animation;
 mod appearance;
 mod deformation;
 mod geometry;
+mod profile;
 mod spatial;
 
 use super::super::construction::node_scene::SceneEvidenceCounts;
 use super::super::node_scene::{authored_transform_scalar_count, decode_authored_transform};
 use super::super::production::{
     Presence, ValidatedAnimationBatch, ValidatedAppearanceBatch, ValidatedDeformationBatch,
-    ValidatedGeometryBatch, ValidatedNodeBatch, ValidatedSpatialBatch,
+    ValidatedGeometryBatch, ValidatedNodeBatch, ValidatedProfileBatch, ValidatedSpatialBatch,
 };
 use super::super::schema::animation::{
     AnimationChannelTableSchema, AnimationClipTableSchema, AnimationDirectorySchema,
@@ -43,6 +44,10 @@ use super::super::schema::deformation::{
 use super::super::schema::geometry::{
     GeometryAttributeTableSchema, GeometryLogicalMeshTableSchema, GeometryMeshInstanceTableSchema,
     GeometryPrimitiveTableSchema,
+};
+use super::super::schema::profile::{
+    ProfileDirectorySchema, ProfileMetadataDirectorySchema, ProfileMetadataEntryTableSchema,
+    ProfileOwnerTableSchema, ProfileSegmentTableSchema,
 };
 use super::super::schema::spatial::{
     SpatialCameraTableSchema, SpatialDirectorySchema, SpatialLightTableSchema,
@@ -74,6 +79,10 @@ use deformation::{
 use geometry::{
     GeometryCanonicalCounts, GeometryCanonicalDependencies, GeometryValidatedRefs,
     GeometryValidatedShape, validate_geometry_canonical_structure, validate_geometry_graph,
+};
+use profile::{
+    ProfileValidatedRefs, ProfileValidationScratch, validate_profile_canonical_structure,
+    validate_profile_graph,
 };
 use spatial::{SpatialValidatedRefs, validate_spatial_canonical_structure, validate_spatial_graph};
 
@@ -242,6 +251,7 @@ struct NodeCanonicalStructure {
     geometry_directory: CanonicalRecordRef<SceneGeometryDirectorySchema>,
     deformation_directory: CanonicalRecordRef<DeformationDirectorySchema>,
     animation_directory: CanonicalRecordRef<AnimationDirectorySchema>,
+    profile_directory: CanonicalRecordRef<ProfileDirectorySchema>,
     source_node_count: usize,
     source_root_count: usize,
     source_edge_count: usize,
@@ -253,6 +263,7 @@ pub(in crate::canonical_scene::store) struct NodeSceneValidationScratch<'scratch
     deformation_palette_maxima: &'scratch mut [Option<u32>],
     deformation_uniqueness_marks: &'scratch mut [u64],
     animation_target_marks: &'scratch mut [u32],
+    profile_provenance_depths: &'scratch mut [u32],
 }
 
 #[derive(Clone, Copy)]
@@ -262,6 +273,7 @@ struct NodeSceneValidationScratchRequirements {
     deformation_palette_marks: usize,
     deformation_uniqueness_marks: usize,
     animation_target_marks: usize,
+    profile_provenance_depths: usize,
 }
 
 impl<'scratch> NodeSceneValidationScratch<'scratch> {
@@ -271,6 +283,7 @@ impl<'scratch> NodeSceneValidationScratch<'scratch> {
         deformation_palette_maxima: &'scratch mut [Option<u32>],
         deformation_uniqueness_marks: &'scratch mut [u64],
         animation_target_marks: &'scratch mut [u32],
+        profile_provenance_depths: &'scratch mut [u32],
     ) -> Self {
         Self {
             camera_placement_counts,
@@ -278,6 +291,7 @@ impl<'scratch> NodeSceneValidationScratch<'scratch> {
             deformation_palette_maxima,
             deformation_uniqueness_marks,
             animation_target_marks,
+            profile_provenance_depths,
         }
     }
 
@@ -318,6 +332,7 @@ impl<'scratch> NodeSceneValidationScratch<'scratch> {
             deformation_palette_marks: Self::required_deformation_palette_marks(counts)?,
             deformation_uniqueness_marks,
             animation_target_marks: Self::required_animation_target_marks(counts)?,
+            profile_provenance_depths: usize::try_from(counts.profile_provenance_count).ok()?,
         })
     }
 
@@ -329,7 +344,8 @@ impl<'scratch> NodeSceneValidationScratch<'scratch> {
             && self.camera_placement_counts.len() >= requirements.camera_placement_counts
             && self.light_placement_counts.len() >= requirements.light_placement_counts
             && self.deformation_uniqueness_marks.len() >= requirements.deformation_uniqueness_marks
-            && self.animation_target_marks.len() >= requirements.animation_target_marks)
+            && self.animation_target_marks.len() >= requirements.animation_target_marks
+            && self.profile_provenance_depths.len() >= requirements.profile_provenance_depths)
             .then_some(())
     }
 
@@ -373,6 +389,13 @@ impl<'scratch> NodeSceneValidationScratch<'scratch> {
             observe_work(1)?;
             *mark = 0;
         }
+        for depth in self
+            .profile_provenance_depths
+            .get_mut(..requirements.profile_provenance_depths)?
+        {
+            observe_work(1)?;
+            *depth = 0;
+        }
         Some(())
     }
 }
@@ -393,6 +416,7 @@ pub(in crate::canonical_scene::store) struct NodeSceneValidationProof {
     geometry: GeometryValidatedRefs,
     deformation: DeformationValidatedRefs,
     animation: AnimationValidatedRefs,
+    profile: ProfileValidatedRefs,
     source_node_count: usize,
     source_root_count: usize,
     source_edge_count: usize,
@@ -717,6 +741,76 @@ impl NodeSceneValidationProof {
         self,
     ) -> Option<CanonicalBlockRef<AnimationOutTangentsSchema>> {
         self.animation.out_tangents
+    }
+
+    pub(in crate::canonical_scene::store) const fn profile_directory(
+        self,
+    ) -> CanonicalBlockRef<ProfileDirectorySchema> {
+        self.profile.directory
+    }
+
+    pub(in crate::canonical_scene::store) const fn profile_segments(
+        self,
+    ) -> CanonicalBlockRef<ProfileSegmentTableSchema> {
+        self.profile.segments
+    }
+
+    pub(in crate::canonical_scene::store) fn profile_segment_count(self) -> usize {
+        count_as_usize(self.profile.segment_count)
+    }
+
+    pub(in crate::canonical_scene::store) const fn profile_resource_count(self) -> u32 {
+        self.profile.resource_count
+    }
+
+    pub(in crate::canonical_scene::store) const fn profile_source_count(self) -> u32 {
+        self.profile.source_count
+    }
+
+    pub(in crate::canonical_scene::store) const fn profile_provenance_count(self) -> u32 {
+        self.profile.provenance_count
+    }
+
+    pub(in crate::canonical_scene::store) const fn profile_operation_count(self) -> u32 {
+        self.profile.operation_count
+    }
+
+    pub(in crate::canonical_scene::store) const fn profile_evidence_count(self) -> u32 {
+        self.profile.evidence_count
+    }
+
+    pub(in crate::canonical_scene::store) const fn profile_parent_count(self) -> u32 {
+        self.profile.parent_count
+    }
+
+    pub(in crate::canonical_scene::store) const fn profile_wide_count(self) -> u32 {
+        self.profile.wide_count
+    }
+
+    pub(in crate::canonical_scene::store) const fn profile_lineage_text_bytes(self) -> u32 {
+        self.profile.lineage_text_bytes
+    }
+
+    pub(in crate::canonical_scene::store) const fn profile_lineage_digest_bytes(self) -> u32 {
+        self.profile.lineage_digest_bytes
+    }
+
+    pub(in crate::canonical_scene::store) const fn profile_owners(
+        self,
+    ) -> CanonicalBlockRef<ProfileOwnerTableSchema> {
+        self.profile.owners
+    }
+
+    pub(in crate::canonical_scene::store) const fn profile_metadata_directory(
+        self,
+    ) -> CanonicalBlockRef<ProfileMetadataDirectorySchema> {
+        self.profile.metadata_directory
+    }
+
+    pub(in crate::canonical_scene::store) const fn profile_metadata_entries(
+        self,
+    ) -> Option<CanonicalBlockRef<ProfileMetadataEntryTableSchema>> {
+        self.profile.metadata_entries
     }
 
     pub(in crate::canonical_scene::store) const fn source_node_count(self) -> usize {
@@ -1129,6 +1223,8 @@ fn validate_node_canonical_structure<SR>(
         .record_ref::<DeformationDirectorySchema>(0, scene_directory_field::DEFORMATION)?;
     let animation_directory =
         directory.record_ref::<AnimationDirectorySchema>(0, scene_directory_field::ANIMATION)?;
+    let profile_directory =
+        directory.record_ref::<ProfileDirectorySchema>(0, scene_directory_field::PROFILE)?;
     Some(NodeCanonicalStructure {
         directory: directory_ref,
         nodes: nodes_ref,
@@ -1139,6 +1235,7 @@ fn validate_node_canonical_structure<SR>(
         geometry_directory,
         deformation_directory,
         animation_directory,
+        profile_directory,
         source_node_count,
         source_root_count,
         source_edge_count: source_node_count.checked_sub(source_root_count)?,
@@ -1185,7 +1282,16 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(in crate::canonical_scene::store) fn validate_node_scene_graph<SR, NR, AR, GR, DR, ANR, E>(
+pub(in crate::canonical_scene::store) fn validate_node_scene_graph<
+    SR,
+    NR,
+    AR,
+    GR,
+    DR,
+    ANR,
+    PR,
+    E,
+>(
     session: &mut StoreValidationSession<'_, '_>,
     directory_ref: CanonicalRecordRef<SceneDirectorySchema>,
     evidence_ref: OutcomeEvidenceRecordRef<NodeSceneOutcomeEvidenceSchema>,
@@ -1195,7 +1301,9 @@ pub(in crate::canonical_scene::store) fn validate_node_scene_graph<SR, NR, AR, G
     expected_geometry: &ValidatedGeometryBatch<'_, GR>,
     expected_deformation: &ValidatedDeformationBatch<'_, DR>,
     expected_animation: &ValidatedAnimationBatch<'_, ANR>,
+    expected_profile: &ValidatedProfileBatch<'_, PR>,
     expected_counts: SceneEvidenceCounts,
+    profile_scratch: &mut ProfileValidationScratch<'_>,
     mut observe_work: impl FnMut(u64) -> Result<(), E>,
 ) -> Result<Option<NodeSceneValidationProof>, E> {
     let mut work_failure = None;
@@ -1209,7 +1317,9 @@ pub(in crate::canonical_scene::store) fn validate_node_scene_graph<SR, NR, AR, G
         expected_geometry,
         expected_deformation,
         expected_animation,
+        expected_profile,
         expected_counts,
+        profile_scratch,
         &mut |amount| match observe_work(amount) {
             Ok(()) => Some(()),
             Err(cause) => {
@@ -1358,6 +1468,16 @@ fn validate_node_scene_canonical_graph_inner(
             .get_mut(..scratch_requirements.animation_target_marks)?,
         observe_work,
     )?;
+    let profile = validate_profile_canonical_structure(
+        session,
+        node_structure.profile_directory,
+        &mut ProfileValidationScratch::new(
+            scratch
+                .profile_provenance_depths
+                .get_mut(..scratch_requirements.profile_provenance_depths)?,
+        ),
+        observe_work,
+    )?;
     validate_canonical_evidence_counts(
         expected_counts,
         canonical_unique_block_count,
@@ -1366,6 +1486,7 @@ fn validate_node_scene_canonical_graph_inner(
         geometry,
         deformation,
         animation,
+        profile,
     )?;
     validate_node_scene_success_evidence(session, evidence_ref, expected_counts, observe_work)?;
     Some(assemble_node_scene_validation_proof(
@@ -1374,6 +1495,7 @@ fn validate_node_scene_canonical_graph_inner(
         geometry.refs,
         deformation,
         animation.refs,
+        profile,
         expected_counts,
     ))
 }
@@ -1436,6 +1558,26 @@ pub(in crate::canonical_scene::store) fn validate_node_scene_evidence_graph(
             == Some(counts.animation_channel_count)
         && evidence.scalar::<u32>(0, node_scene_evidence_field::PAYLOAD_BLOCK_COUNT)
             == Some(counts.payload_block_count)
+        && evidence.scalar::<u32>(0, node_scene_evidence_field::PROFILE_SEGMENT_COUNT)
+            == Some(counts.profile_segment_count)
+        && evidence.scalar::<u32>(0, node_scene_evidence_field::PROFILE_RESOURCE_COUNT)
+            == Some(counts.profile_resource_count)
+        && evidence.scalar::<u32>(0, node_scene_evidence_field::PROFILE_SOURCE_COUNT)
+            == Some(counts.profile_source_count)
+        && evidence.scalar::<u32>(0, node_scene_evidence_field::PROFILE_PROVENANCE_COUNT)
+            == Some(counts.profile_provenance_count)
+        && evidence.scalar::<u32>(0, node_scene_evidence_field::PROFILE_OPERATION_COUNT)
+            == Some(counts.profile_operation_count)
+        && evidence.scalar::<u32>(0, node_scene_evidence_field::PROFILE_PARENT_COUNT)
+            == Some(counts.profile_parent_count)
+        && evidence.scalar::<u32>(0, node_scene_evidence_field::PROFILE_OWNER_COUNT)
+            == Some(counts.profile_owner_count)
+        && evidence.scalar::<u32>(0, node_scene_evidence_field::PROFILE_ATTACHMENT_COUNT)
+            == Some(counts.profile_attachment_count)
+        && evidence.scalar::<u32>(0, node_scene_evidence_field::PROFILE_METADATA_ENTRY_COUNT)
+            == Some(counts.profile_metadata_entry_count)
+        && evidence.scalar::<u32>(0, node_scene_evidence_field::SHAREABLE_LEAF_BLOCK_COUNT)
+            == Some(counts.shareable_leaf_block_count)
 }
 
 fn validate_node_scene_success_evidence(
@@ -1531,12 +1673,53 @@ fn validate_node_scene_success_evidence(
             node_scene_evidence_field::PAYLOAD_BLOCK_COUNT,
             counts.payload_block_count,
         ),
+        (
+            node_scene_evidence_field::PROFILE_SEGMENT_COUNT,
+            counts.profile_segment_count,
+        ),
+        (
+            node_scene_evidence_field::PROFILE_RESOURCE_COUNT,
+            counts.profile_resource_count,
+        ),
+        (
+            node_scene_evidence_field::PROFILE_SOURCE_COUNT,
+            counts.profile_source_count,
+        ),
+        (
+            node_scene_evidence_field::PROFILE_PROVENANCE_COUNT,
+            counts.profile_provenance_count,
+        ),
+        (
+            node_scene_evidence_field::PROFILE_OPERATION_COUNT,
+            counts.profile_operation_count,
+        ),
+        (
+            node_scene_evidence_field::PROFILE_PARENT_COUNT,
+            counts.profile_parent_count,
+        ),
+        (
+            node_scene_evidence_field::PROFILE_OWNER_COUNT,
+            counts.profile_owner_count,
+        ),
+        (
+            node_scene_evidence_field::PROFILE_ATTACHMENT_COUNT,
+            counts.profile_attachment_count,
+        ),
+        (
+            node_scene_evidence_field::PROFILE_METADATA_ENTRY_COUNT,
+            counts.profile_metadata_entry_count,
+        ),
+        (
+            node_scene_evidence_field::SHAREABLE_LEAF_BLOCK_COUNT,
+            counts.shareable_leaf_block_count,
+        ),
     ] {
         require_scalar(evidence.scalar::<u32>(0, field), expected)?;
     }
     Some(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn validate_canonical_evidence_counts(
     counts: SceneEvidenceCounts,
     canonical_unique_block_count: u32,
@@ -1545,6 +1728,7 @@ fn validate_canonical_evidence_counts(
     geometry: GeometryValidatedShape,
     deformation: DeformationValidatedShape,
     animation: AnimationValidatedShape,
+    profile: ProfileValidatedRefs,
 ) -> Option<()> {
     for (actual, expected) in [
         (node.spatial.camera_count, counts.camera_count),
@@ -1564,6 +1748,58 @@ fn validate_canonical_evidence_counts(
         (deformation.mesh_instance_count, counts.mesh_instance_count),
         (animation.clip_count, counts.animation_clip_count),
         (animation.channel_count, counts.animation_channel_count),
+        (profile.segment_count, counts.profile_segment_count),
+        (profile.resource_count, counts.profile_resource_count),
+        (profile.source_count, counts.profile_source_count),
+        (profile.provenance_count, counts.profile_provenance_count),
+        (profile.operation_count, counts.profile_operation_count),
+        (profile.parent_count, counts.profile_parent_count),
+        (profile.owner_count, counts.profile_owner_count),
+        (profile.attachment_count, counts.profile_attachment_count),
+        (
+            profile.metadata_entry_count,
+            counts.profile_metadata_entry_count,
+        ),
+    ] {
+        require_scalar(Some(actual), expected)?;
+    }
+    let source_node_count = counts.node_count.checked_sub(1)?;
+    for (actual, expected) in [
+        (profile.owner_classes.nodes, source_node_count),
+        (profile.owner_classes.cameras, counts.camera_count),
+        (profile.owner_classes.lights, counts.light_count),
+        (profile.owner_classes.images, counts.image_count),
+        (profile.owner_classes.samplers, counts.sampler_count),
+        (profile.owner_classes.textures, counts.texture_count),
+        (
+            profile.owner_classes.texture_bindings,
+            counts.material_binding_count,
+        ),
+        (profile.owner_classes.materials, counts.material_count),
+        (
+            profile.owner_classes.logical_meshes,
+            counts.logical_mesh_count,
+        ),
+        (profile.owner_classes.primitives, counts.primitive_count),
+        (profile.owner_classes.attributes, counts.attribute_count),
+        (
+            profile.owner_classes.mesh_instances,
+            counts.mesh_instance_count,
+        ),
+        (profile.owner_classes.skins, counts.skin_count),
+        (
+            profile.owner_classes.morph_definitions,
+            counts.morph_definition_count,
+        ),
+        (profile.owner_classes.morph_deltas, counts.morph_delta_count),
+        (
+            profile.owner_classes.animation_clips,
+            counts.animation_clip_count,
+        ),
+        (
+            profile.owner_classes.animation_channels,
+            counts.animation_channel_count,
+        ),
     ] {
         require_scalar(Some(actual), expected)?;
     }
@@ -1608,12 +1844,19 @@ fn validate_canonical_evidence_counts(
         Some(animation.payload_block_count),
         animation_payload_block_count,
     )?;
-    let payload_block_count = spatial_payload_block_count
+    let domain_payload_block_count = spatial_payload_block_count
         .checked_add(appearance_payload_block_count)?
         .checked_add(geometry.payload_block_count)?
         .checked_add(deformation_payload_block_count)?
         .checked_add(animation_payload_block_count)?;
+    let payload_block_count = domain_payload_block_count.checked_add(profile.payload_leaf_count)?;
     require_scalar(Some(payload_block_count), counts.payload_block_count)?;
+    let shareable_leaf_block_count =
+        domain_payload_block_count.checked_add(profile.shareable_leaf_count)?;
+    require_scalar(
+        Some(shareable_leaf_block_count),
+        counts.shareable_leaf_block_count,
+    )?;
 
     let node_block_count = 2_u32
         .checked_add(u32::from(node.references.is_some()))?
@@ -1679,7 +1922,8 @@ fn validate_canonical_evidence_counts(
         .checked_add(appearance_block_count)?
         .checked_add(geometry_block_count)?
         .checked_add(deformation_block_count)?
-        .checked_add(animation_block_count)?;
+        .checked_add(animation_block_count)?
+        .checked_add(profile.canonical_block_count)?;
     require_scalar(
         Some(canonical_unique_block_count),
         counts.canonical_block_count,
@@ -1703,6 +1947,7 @@ fn assemble_node_scene_validation_proof(
     geometry: GeometryValidatedRefs,
     deformation: DeformationValidatedShape,
     animation: AnimationValidatedRefs,
+    profile: ProfileValidatedRefs,
     counts: SceneEvidenceCounts,
 ) -> NodeSceneValidationProof {
     NodeSceneValidationProof {
@@ -1719,6 +1964,7 @@ fn assemble_node_scene_validation_proof(
         geometry,
         deformation: deformation.refs,
         animation,
+        profile,
         source_node_count: node.source_node_count,
         source_root_count: node.source_root_count,
         source_edge_count: node.source_edge_count,
@@ -1728,7 +1974,7 @@ fn assemble_node_scene_validation_proof(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn validate_node_scene_graph_inner<SR, NR, AR, GR, DR, ANR>(
+fn validate_node_scene_graph_inner<SR, NR, AR, GR, DR, ANR, PR>(
     session: &mut StoreValidationSession<'_, '_>,
     directory_ref: CanonicalRecordRef<SceneDirectorySchema>,
     evidence_ref: OutcomeEvidenceRecordRef<NodeSceneOutcomeEvidenceSchema>,
@@ -1738,7 +1984,9 @@ fn validate_node_scene_graph_inner<SR, NR, AR, GR, DR, ANR>(
     expected_geometry: &ValidatedGeometryBatch<'_, GR>,
     expected_deformation: &ValidatedDeformationBatch<'_, DR>,
     expected_animation: &ValidatedAnimationBatch<'_, ANR>,
+    expected_profile: &ValidatedProfileBatch<'_, PR>,
     expected_counts: SceneEvidenceCounts,
+    profile_scratch: &mut ProfileValidationScratch<'_>,
     observe_work: &mut impl FnMut(u64) -> Option<()>,
 ) -> Option<NodeSceneValidationProof> {
     let node_structure = validate_node_canonical_structure(
@@ -1798,6 +2046,13 @@ fn validate_node_scene_graph_inner<SR, NR, AR, GR, DR, ANR>(
         expected_animation,
         observe_work,
     )?;
+    let profile = validate_profile_graph(
+        session,
+        node_structure.profile_directory,
+        expected_profile,
+        profile_scratch,
+        observe_work,
+    )?;
 
     if !evidence_counts_match_batches(
         expected_counts,
@@ -1807,6 +2062,7 @@ fn validate_node_scene_graph_inner<SR, NR, AR, GR, DR, ANR>(
         expected_geometry,
         expected_deformation,
         expected_animation,
+        expected_profile,
     ) {
         return None;
     }
@@ -1817,12 +2073,13 @@ fn validate_node_scene_graph_inner<SR, NR, AR, GR, DR, ANR>(
         geometry_refs,
         deformation,
         animation_refs,
+        profile,
         expected_counts,
     ))
 }
 
 #[allow(clippy::too_many_arguments)]
-fn evidence_counts_match_batches<SR, NR, AR, GR, DR, ANR>(
+fn evidence_counts_match_batches<SR, NR, AR, GR, DR, ANR, PR>(
     counts: SceneEvidenceCounts,
     spatial: &ValidatedSpatialBatch<'_, SR>,
     nodes: &ValidatedNodeBatch<'_, NR>,
@@ -1830,13 +2087,24 @@ fn evidence_counts_match_batches<SR, NR, AR, GR, DR, ANR>(
     geometry: &ValidatedGeometryBatch<'_, GR>,
     deformation: &ValidatedDeformationBatch<'_, DR>,
     animation: &ValidatedAnimationBatch<'_, ANR>,
+    profile: &ValidatedProfileBatch<'_, PR>,
 ) -> bool {
     let payload_block_count = spatial
         .payload_block_count()
         .checked_add(appearance.payload_block_count())
         .and_then(|count| count.checked_add(geometry.payload_block_count()))
         .and_then(|count| count.checked_add(deformation.payload_block_count()))
+        .and_then(|count| count.checked_add(animation.payload_block_count()))
+        .and_then(|count| count.checked_add(profile.retention_shape().payload_block_count()));
+    let profile_shape = profile.retention_shape();
+    let domain_payload_block_count = spatial
+        .payload_block_count()
+        .checked_add(appearance.payload_block_count())
+        .and_then(|count| count.checked_add(geometry.payload_block_count()))
+        .and_then(|count| count.checked_add(deformation.payload_block_count()))
         .and_then(|count| count.checked_add(animation.payload_block_count()));
+    let shareable_leaf_block_count = domain_payload_block_count
+        .and_then(|count| count.checked_add(profile_shape.shareable_leaf_block_count()));
     u32::try_from(nodes.canonical_node_count()) == Ok(counts.node_count)
         && spatial.camera_count() == counts.camera_count
         && spatial.light_count() == counts.light_count
@@ -1857,7 +2125,17 @@ fn evidence_counts_match_batches<SR, NR, AR, GR, DR, ANR>(
         && deformation.morph_delta_count() == counts.morph_delta_count
         && animation.clip_count() == counts.animation_clip_count
         && animation.channel_count() == counts.animation_channel_count
+        && profile.segment_count() == counts.profile_segment_count
+        && profile.resource_count() == counts.profile_resource_count
+        && profile.source_count() == counts.profile_source_count
+        && profile.provenance_node_count() == counts.profile_provenance_count
+        && profile.operation_count() == counts.profile_operation_count
+        && u64::from(counts.profile_parent_count) == profile.parent_edge_count()
+        && profile.owner_count() == u64::from(counts.profile_owner_count)
+        && profile.owner_attachment_count() == u64::from(counts.profile_attachment_count)
+        && profile.metadata_entry_count() == counts.profile_metadata_entry_count
         && payload_block_count == Some(counts.payload_block_count)
+        && shareable_leaf_block_count == Some(counts.shareable_leaf_block_count)
 }
 
 fn count_as_usize(count: u32) -> usize {
@@ -1877,12 +2155,14 @@ mod tests {
         let mut palette = [Some(7)];
         let mut uniqueness = [11_u64, 12];
         let mut animation = [21_u32];
+        let mut profile_depths = [];
         let scratch = NodeSceneValidationScratch::new(
             &mut cameras,
             &mut lights,
             &mut palette,
             &mut uniqueness,
             &mut animation,
+            &mut profile_depths,
         );
         let counts = SceneEvidenceCounts {
             canonical_block_count: 0,
@@ -1907,6 +2187,16 @@ mod tests {
             animation_clip_count: 0,
             animation_channel_count: 0,
             payload_block_count: 0,
+            profile_segment_count: 0,
+            profile_resource_count: 0,
+            profile_source_count: 0,
+            profile_provenance_count: 0,
+            profile_operation_count: 0,
+            profile_parent_count: 0,
+            profile_owner_count: 0,
+            profile_attachment_count: 0,
+            profile_metadata_entry_count: 0,
+            shareable_leaf_block_count: 0,
         };
 
         let requirements = NodeSceneValidationScratch::requirements(counts, 3)
@@ -1924,6 +2214,7 @@ mod tests {
         let mut palette = [Some(7), Some(u32::MAX)];
         let mut uniqueness = [11_u64, 12, 13];
         let mut animation = [21_u32, 22];
+        let mut profile_depths = [31_u32, 32];
 
         let mut observed = 0_u64;
         let requirements = NodeSceneValidationScratchRequirements {
@@ -1932,6 +2223,7 @@ mod tests {
             deformation_palette_marks: 2,
             deformation_uniqueness_marks: 3,
             animation_target_marks: 2,
+            profile_provenance_depths: 2,
         };
         {
             let mut scratch = NodeSceneValidationScratch::new(
@@ -1940,6 +2232,7 @@ mod tests {
                 &mut palette,
                 &mut uniqueness,
                 &mut animation,
+                &mut profile_depths,
             );
             assert_eq!(
                 scratch.initialize(requirements, &mut |amount| {
@@ -1954,6 +2247,7 @@ mod tests {
         assert_eq!(palette, [Some(7), Some(u32::MAX)]);
         assert_eq!(uniqueness, [11, 12, 13]);
         assert_eq!(animation, [21, 22]);
+        assert_eq!(profile_depths, [31, 32]);
 
         observed = 0;
         {
@@ -1963,6 +2257,7 @@ mod tests {
                 &mut palette,
                 &mut uniqueness,
                 &mut animation,
+                &mut profile_depths,
             );
             assert_eq!(
                 scratch.initialize(requirements, &mut |amount| {
@@ -1972,12 +2267,13 @@ mod tests {
                 Some(())
             );
         }
-        assert_eq!(observed, 9);
+        assert_eq!(observed, 11);
         assert_eq!(cameras, [0]);
         assert_eq!(lights, [0]);
         assert_eq!(palette, [None, None]);
         assert_eq!(uniqueness, [0, 0, 0]);
         assert_eq!(animation, [0, 0]);
+        assert_eq!(profile_depths, [0, 0]);
     }
 
     #[test]
@@ -1987,12 +2283,14 @@ mod tests {
         let mut palette = [Some(7), Some(8)];
         let mut uniqueness = [11_u64, 12, 13];
         let mut animation = [21_u32, 22];
+        let mut profile_depths = [51_u32, 52];
         let requirements = NodeSceneValidationScratchRequirements {
             camera_placement_counts: 1,
             light_placement_counts: 1,
             deformation_palette_marks: 1,
             deformation_uniqueness_marks: 2,
             animation_target_marks: 1,
+            profile_provenance_depths: 1,
         };
         let mut observed = 0_u64;
 
@@ -2002,6 +2300,7 @@ mod tests {
             &mut palette,
             &mut uniqueness,
             &mut animation,
+            &mut profile_depths,
         );
         assert_eq!(
             scratch.initialize(requirements, &mut |amount| {
@@ -2011,11 +2310,12 @@ mod tests {
             Some(())
         );
 
-        assert_eq!(observed, 6);
+        assert_eq!(observed, 7);
         assert_eq!(cameras, [0, 32]);
         assert_eq!(lights, [0, 42]);
         assert_eq!(palette, [None, Some(8)]);
         assert_eq!(uniqueness, [0, 0, 13]);
         assert_eq!(animation, [0, 22]);
+        assert_eq!(profile_depths, [0, 52]);
     }
 }

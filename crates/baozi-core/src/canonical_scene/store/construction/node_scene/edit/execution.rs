@@ -186,14 +186,12 @@ fn edit_publication_plan(
         .counts
         .new_canonical_blocks
         .as_usize()
-        .checked_add(pending.counts.inherited_payload_leaves.as_usize())
+        .checked_add(pending.counts.inherited_shareable_leaves.as_usize())
         .ok_or(StorePlanError::SizeOverflow)?;
     if pending.counts.custom_semantic_rewrite_blocks.as_usize() != expected_custom_rewrites
         || source_partition != pending.counts.source_node_rows.as_usize()
         || pending.counts.source_reference_rows.as_usize()
             != pending.counts.source_node_rows.as_usize()
-        || pending.counts.inherited_payload_leaves.as_usize()
-            != pending.counts.payload_blocks.as_usize()
         || physical_partition != pending.counts.canonical_blocks.as_usize()
     {
         return Err(StorePlanError::InvalidBlockTable);

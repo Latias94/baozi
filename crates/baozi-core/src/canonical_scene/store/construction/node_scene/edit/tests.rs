@@ -12,19 +12,26 @@ use crate::canonical_scene::store::production::{
     NodeAuthoringBatch, NodeAuthoringNode, NodeLocalId, Presence, SceneAuthoringBatch,
     SpatialAuthoringBatch,
 };
+use crate::canonical_scene::store::schema::profile::{
+    PROFILE_DIGEST_SHA256, PROFILE_OPERATION_TRANSFORM, PROFILE_PROVENANCE_OPERATION,
+    ProfileLineageAttachmentSchema, ProfileLineageDigestSchema, ProfileLineageOperationSchema,
+    ProfileLineageParentSchema, ProfileLineageProvenanceSchema, profile_owner_field,
+    profile_provenance_scalar, profile_segment_field,
+};
 use crate::derived::DerivedAbsenceReason;
 use crate::entity::{AuthoredTransform, CameraProjection, LightEmission, LightKind};
 use crate::identity::{
     NodeId, SceneEntityKind, SceneGenerationError, SceneGenerationId, SceneLookupError,
 };
 use crate::math::{Color, Mat4, Quat, Vec3};
+use crate::provenance::OptionsDigest;
 use crate::remap::RemapChange;
 use crate::scene_space::SceneSpace;
 
 use super::super::NodeSceneSuccessParts;
 use super::super::tests::{
-    build_gltf_capability_scene_for_probe, single_trs_batch, test_account, test_factory,
-    test_limits,
+    build_gltf_capability_scene_for_probe, profile_fixture, single_trs_batch, test_account,
+    test_factory, test_limits,
 };
 use super::CanonicalRemapSet;
 use super::source::{
@@ -77,13 +84,28 @@ fn build_spatial_scene(
     )];
     let cameras = [CameraAuthoring::new(projection)];
     let lights = [LightAuthoring::new(light_kind, emission)];
+    let spatial = SpatialAuthoringBatch::new(&scene_space, &cameras, &lights);
+    let node_batch = NodeAuthoringBatch::new(Presence::Present(&roots), &nodes);
+    let appearance = AppearanceAuthoringBatch::empty();
+    let geometry = GeometryAuthoringBatch::empty();
+    let deformation = DeformationAuthoringBatch::empty();
+    let animations = AnimationAuthoringBatch::empty();
+    let profile = profile_fixture(
+        spatial,
+        node_batch,
+        appearance,
+        geometry,
+        deformation,
+        animations,
+    );
     let input = SceneAuthoringBatch::new(
-        SpatialAuthoringBatch::new(&scene_space, &cameras, &lights),
-        NodeAuthoringBatch::new(Presence::Present(&roots), &nodes),
-        AppearanceAuthoringBatch::empty(),
-        GeometryAuthoringBatch::empty(),
-        DeformationAuthoringBatch::empty(),
-        AnimationAuthoringBatch::empty(),
+        spatial,
+        node_batch,
+        appearance,
+        geometry,
+        deformation,
+        animations,
+        profile.batch(),
     );
     let validated = SceneConstructionOperation::with_account_for_scene_input(
         account,
@@ -129,6 +151,215 @@ fn changed_matrix(translation_x: f32) -> AuthoredTransform {
     .expect("finite affine transform-edit fixture")
 }
 
+fn edit_options_digest(seed: u8) -> OptionsDigest {
+    OptionsDigest::sha256([seed; 32])
+}
+
+fn assert_transform_edit_lineage(
+    source: &super::super::ValidatedNodeScene,
+    output: &super::super::ValidatedNodeScene,
+    target_owner_row: usize,
+    options_digest: OptionsDigest,
+) {
+    let source_counts = source.proof.counts();
+    let output_counts = output.proof.counts();
+    assert_eq!(
+        output.proof.profile_segment_count(),
+        source.proof.profile_segment_count() + 1,
+    );
+    assert_eq!(
+        output_counts.profile_segment_count,
+        source_counts.profile_segment_count + 1,
+    );
+    assert_eq!(
+        output_counts.profile_provenance_count,
+        source_counts.profile_provenance_count + 1,
+    );
+    assert_eq!(
+        output_counts.profile_operation_count,
+        source_counts.profile_operation_count + 1,
+    );
+    assert_eq!(
+        output_counts.canonical_block_count,
+        source_counts.canonical_block_count + 4,
+    );
+    assert_eq!(
+        output_counts.payload_block_count,
+        source_counts.payload_block_count + 1,
+    );
+    assert_eq!(
+        output_counts.shareable_leaf_block_count,
+        source_counts.shareable_leaf_block_count + 4,
+    );
+
+    let source_owners = source
+        .canonical
+        .records(source.proof.profile_owners().into_store())
+        .expect("source profile owner table");
+    let source_offset_u32 = source_owners
+        .scalar::<u32>(target_owner_row, profile_owner_field::ATTACHMENT_OFFSET)
+        .expect("source target attachment offset");
+    let source_offset =
+        usize::try_from(source_offset_u32).expect("source target attachment offset fits usize");
+    let source_count_u32 = source_owners
+        .scalar::<u32>(target_owner_row, profile_owner_field::ATTACHMENT_COUNT)
+        .expect("source target attachment count");
+    let source_count =
+        usize::try_from(source_count_u32).expect("source target attachment count fits usize");
+    let source_attachment_ref = source_owners
+        .sequence_ref::<u32, ProfileLineageAttachmentSchema>(
+            target_owner_row,
+            profile_owner_field::ATTACHMENTS,
+        )
+        .expect("source profile attachment reference");
+    let source_attachments = source
+        .canonical
+        .sequence(source_attachment_ref)
+        .expect("source profile attachments");
+    let source_target_parents =
+        &source_attachments.as_slice()[source_offset..source_offset + source_count];
+
+    assert_eq!(
+        output_counts.profile_parent_count,
+        source_counts.profile_parent_count + source_count_u32,
+    );
+    assert_eq!(
+        output_counts.profile_attachment_count,
+        source_counts.profile_attachment_count - source_count_u32 + 1,
+    );
+
+    let segments = output
+        .canonical
+        .records(output.proof.profile_segments().into_store())
+        .expect("edited profile segment table");
+    let fresh_segment = source.proof.profile_segment_count();
+    assert_eq!(segments.rows(), fresh_segment + 1);
+    assert_eq!(
+        segments.scalar::<u32>(fresh_segment, profile_segment_field::SEGMENT),
+        Some(u32::try_from(fresh_segment).expect("fresh segment index fits u32")),
+    );
+    assert_eq!(
+        segments.scalar::<u32>(fresh_segment, profile_segment_field::PROVENANCE_COUNT),
+        Some(1),
+    );
+    assert_eq!(
+        segments.scalar::<u32>(fresh_segment, profile_segment_field::OPERATION_COUNT),
+        Some(1),
+    );
+    assert_eq!(
+        segments.scalar::<u32>(fresh_segment, profile_segment_field::PARENT_COUNT),
+        Some(source_count_u32),
+    );
+
+    let parent_ref = segments
+        .sequence_ref::<u32, ProfileLineageParentSchema>(
+            fresh_segment,
+            profile_segment_field::PARENTS,
+        )
+        .expect("fresh transform parent reference");
+    assert_eq!(
+        output
+            .canonical
+            .sequence(parent_ref)
+            .expect("fresh transform parents")
+            .as_slice(),
+        source_target_parents,
+    );
+
+    let provenance_ref = segments
+        .sequence_ref::<u32, ProfileLineageProvenanceSchema>(
+            fresh_segment,
+            profile_segment_field::PROVENANCE_NODES,
+        )
+        .expect("fresh transform provenance reference");
+    let provenance = output
+        .canonical
+        .sequence(provenance_ref)
+        .expect("fresh transform provenance");
+    assert_eq!(
+        provenance.as_slice()[profile_provenance_scalar::KIND],
+        u32::from(PROFILE_PROVENANCE_OPERATION),
+    );
+    assert_eq!(
+        provenance.as_slice()[profile_provenance_scalar::VARIANT_INDEX],
+        0,
+    );
+    assert_eq!(
+        provenance.as_slice()[profile_provenance_scalar::PARENT_OFFSET],
+        0,
+    );
+    assert_eq!(
+        provenance.as_slice()[profile_provenance_scalar::PARENT_COUNT],
+        source_count_u32,
+    );
+
+    let operation_ref = segments
+        .sequence_ref::<u32, ProfileLineageOperationSchema>(
+            fresh_segment,
+            profile_segment_field::OPERATIONS,
+        )
+        .expect("fresh transform operation reference");
+    let operation = output
+        .canonical
+        .sequence(operation_ref)
+        .expect("fresh transform operation");
+    assert_eq!(
+        operation.as_slice(),
+        &[
+            u32::from(PROFILE_OPERATION_TRANSFORM),
+            0,
+            0,
+            u32::from(PROFILE_DIGEST_SHA256),
+            0,
+            32,
+            0,
+            0,
+        ],
+    );
+    let digest_ref = segments
+        .bytes_ref::<ProfileLineageDigestSchema>(fresh_segment, profile_segment_field::DIGESTS)
+        .expect("fresh transform digest reference");
+    assert_eq!(
+        output
+            .canonical
+            .bytes(digest_ref)
+            .expect("fresh transform options digest"),
+        options_digest.as_bytes(),
+    );
+
+    let output_owners = output
+        .canonical
+        .records(output.proof.profile_owners().into_store())
+        .expect("edited profile owner table");
+    assert_eq!(
+        output_owners.scalar::<u32>(target_owner_row, profile_owner_field::ATTACHMENT_COUNT),
+        Some(1),
+    );
+    let output_attachment_ref = output_owners
+        .sequence_ref::<u32, ProfileLineageAttachmentSchema>(
+            target_owner_row,
+            profile_owner_field::ATTACHMENTS,
+        )
+        .expect("edited profile attachment reference");
+    let output_attachments = output
+        .canonical
+        .sequence(output_attachment_ref)
+        .expect("edited profile attachments");
+    let fresh_provenance = source_counts.profile_provenance_count;
+    assert_eq!(
+        &output_attachments.as_slice()[..source_offset],
+        &source_attachments.as_slice()[..source_offset],
+    );
+    assert_eq!(
+        output_attachments.as_slice()[source_offset],
+        fresh_provenance
+    );
+    assert_eq!(
+        &output_attachments.as_slice()[source_offset + 1..],
+        &source_attachments.as_slice()[source_offset + source_count..],
+    );
+}
+
 fn assert_no_physical_change(
     before: PhysicalStorageAccountSnapshot,
     account: &PhysicalStorageAccount,
@@ -150,7 +381,7 @@ fn unchanged_authored_bits_return_the_exact_input_without_reserving_a_generation
     let generation_before = generation_source.load(Ordering::Relaxed);
     let account_before = account.snapshot();
 
-    let started = try_begin_node_transform_edit(source, node, replacement)
+    let started = try_begin_node_transform_edit(source, node, replacement, edit_options_digest(1))
         .expect("identical authored bits must classify without failure");
 
     let NodeTransformEditStart::Unchanged(returned) = started else {
@@ -175,8 +406,9 @@ fn changed_trs_publishes_one_exact_lineage_generation_with_complete_unchanged_re
     let input_generation = source.generation();
     let node = NodeId::new(input_generation, 0);
     let replacement = changed_trs(7.0);
+    let options_digest = edit_options_digest(2);
     let NodeTransformEditStart::Changed(pending) =
-        try_begin_node_transform_edit(source, node, replacement)
+        try_begin_node_transform_edit(source, node, replacement, options_digest)
             .expect("changed authored bits must enter edit planning")
     else {
         panic!("changed authored bits must not classify as unchanged");
@@ -187,6 +419,7 @@ fn changed_trs_publishes_one_exact_lineage_generation_with_complete_unchanged_re
         .as_u32()
         .checked_add(pending.counts.outcome_evidence_attribution_slots.as_u32())
         .expect("test allocation delta");
+    let target_owner_row = pending.counts.profile.target_owner_row.as_usize();
     let physical_before = account.snapshot();
 
     let prepared = pending
@@ -229,6 +462,7 @@ fn changed_trs_publishes_one_exact_lineage_generation_with_complete_unchanged_re
         Some(DerivedAbsenceReason::Invalidated),
     );
     assert_all_subjects_unchanged(output.report.remaps(), input_generation, output_generation);
+    assert_transform_edit_lineage(source, &output.scene, target_owner_row, options_digest);
     assert_eq!(
         output
             .report
@@ -238,6 +472,57 @@ fn changed_trs_publishes_one_exact_lineage_generation_with_complete_unchanged_re
             .expect("unchanged node relation must remain valid"),
         Some(NodeId::new(output_generation, 0)),
     );
+}
+
+#[test]
+fn chained_transform_edits_parent_each_new_segment_to_the_previous_attachment() {
+    let factory = test_factory();
+    let account = test_account(&factory, 512);
+    let generation_source = AtomicU64::new(0);
+    let original = build_single_trs_scene(&account, &generation_source);
+    let first_digest = edit_options_digest(40);
+    let first_node = NodeId::new(original.scene.generation(), 0);
+    let NodeTransformEditStart::Changed(first_pending) =
+        try_begin_node_transform_edit(&original.scene, first_node, changed_trs(41.0), first_digest)
+            .expect("first chained transform edit plan")
+    else {
+        panic!("first chained transform must be changed");
+    };
+    let first_owner_row = first_pending.counts.profile.target_owner_row.as_usize();
+    let first_prepared = first_pending
+        .prepare_with_generation_source(test_limits(), || {
+            SceneGenerationId::reserve_from(&generation_source)
+        })
+        .expect("first chained transform edit preparation");
+    let super::NodeTransformEditTerminal::Success(first) = first_prepared.handoff() else {
+        panic!("first chained transform edit must publish success");
+    };
+    assert_transform_edit_lineage(&original.scene, &first.scene, first_owner_row, first_digest);
+
+    let second_digest = edit_options_digest(42);
+    let second_node = NodeId::new(first.scene.generation(), 0);
+    let NodeTransformEditStart::Changed(second_pending) =
+        try_begin_node_transform_edit(&first.scene, second_node, changed_trs(43.0), second_digest)
+            .expect("second chained transform edit plan")
+    else {
+        panic!("second chained transform must be changed");
+    };
+    let second_owner_row = second_pending.counts.profile.target_owner_row.as_usize();
+    let second_prepared = second_pending
+        .prepare_with_generation_source(test_limits(), || {
+            SceneGenerationId::reserve_from(&generation_source)
+        })
+        .expect("second chained transform edit preparation");
+    let super::NodeTransformEditTerminal::Success(second) = second_prepared.handoff() else {
+        panic!("second chained transform edit must publish success");
+    };
+    assert_transform_edit_lineage(&first.scene, &second.scene, second_owner_row, second_digest);
+
+    drop(second);
+    drop(first);
+    drop(original);
+    assert_eq!(account.snapshot().live_retained_bytes(), 0);
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
 }
 
 #[test]
@@ -251,7 +536,7 @@ fn trs_to_matrix_rewrites_node_offsets_and_directory_shape_before_publication() 
     let node = NodeId::new(input_generation, 0);
     let replacement = changed_matrix(5.0);
     let NodeTransformEditStart::Changed(pending) =
-        try_begin_node_transform_edit(source, node, replacement)
+        try_begin_node_transform_edit(source, node, replacement, edit_options_digest(3))
             .expect("TRS-to-matrix authored bits must enter edit planning")
     else {
         panic!("TRS-to-matrix replacement cannot classify as unchanged");
@@ -308,7 +593,7 @@ fn shape_changing_edit_preserves_spatial_values_and_attachment_closure() {
     let input_generation = source.generation();
     let node = NodeId::new(input_generation, 0);
     let NodeTransformEditStart::Changed(pending) =
-        try_begin_node_transform_edit(source, node, changed_matrix(17.0))
+        try_begin_node_transform_edit(source, node, changed_matrix(17.0), edit_options_digest(4))
             .expect("shape-changing spatial edit plan")
     else {
         panic!("shape-changing spatial edit must not classify as unchanged");
@@ -392,7 +677,12 @@ fn generation_mismatch_rejects_before_operation_or_allocation() {
     let generation_before = generation_source.load(Ordering::Relaxed);
     let account_before = account.snapshot();
 
-    let error = match try_begin_node_transform_edit(source, foreign_node, changed_trs(3.0)) {
+    let error = match try_begin_node_transform_edit(
+        source,
+        foreign_node,
+        changed_trs(3.0),
+        edit_options_digest(5),
+    ) {
         Ok(_) => panic!("a foreign-generation node cannot open an edit"),
         Err(error) => error,
     };
@@ -414,7 +704,7 @@ fn generation_mismatch_rejects_before_operation_or_allocation() {
 }
 
 #[test]
-fn physical_plan_rebuilds_every_record_and_inherits_only_payload_leaves() {
+fn physical_plan_rebuilds_every_record_and_inherits_each_unchanged_shareable_leaf() {
     let factory = test_factory();
     let account = test_account(&factory, 512);
     let generation_source = AtomicU64::new(0);
@@ -423,37 +713,39 @@ fn physical_plan_rebuilds_every_record_and_inherits_only_payload_leaves() {
     let node = NodeId::new(source.generation(), 0);
 
     let NodeTransformEditStart::Changed(same_layout) =
-        try_begin_node_transform_edit(source, node, changed_trs(11.0))
+        try_begin_node_transform_edit(source, node, changed_trs(11.0), edit_options_digest(6))
             .expect("TRS replacement plan")
     else {
         panic!("changed TRS fixture must enter edit planning");
     };
     let NodeTransformEditStart::Changed(shape_change) =
-        try_begin_node_transform_edit(source, node, changed_matrix(13.0))
+        try_begin_node_transform_edit(source, node, changed_matrix(13.0), edit_options_digest(7))
             .expect("TRS-to-matrix replacement plan")
     else {
         panic!("TRS-to-matrix fixture must enter edit planning");
     };
 
     let total = same_layout.counts.canonical_blocks.as_usize();
-    let payload = same_layout.counts.payload_blocks.as_usize();
+    let payload = usize::try_from(same_layout.counts.evidence.payload_block_count)
+        .expect("payload block count must fit the platform");
+    let shareable = same_layout.counts.inherited_shareable_leaves.as_usize();
     assert!(payload > 0, "fixture must contain shareable payload leaves");
     assert!(
-        total > payload,
+        shareable > payload,
+        "unchanged profile lineage leaves remain shareable while the attachment leaf is rewritten"
+    );
+    assert!(
+        total > shareable,
         "fixture must contain structural RecordBlock values"
     );
     assert_eq!(
-        same_layout.counts.inherited_payload_leaves.as_usize(),
-        payload,
-    );
-    assert_eq!(
         same_layout.counts.new_canonical_blocks.as_usize(),
-        total - payload,
-        "every RecordBlock and non-payload semantic leaf must be rebuilt",
+        total - shareable,
+        "every RecordBlock and edited semantic leaf must be rebuilt",
     );
     assert_eq!(
         same_layout.counts.canonical_attribution_slots.as_usize(),
-        total - payload + 1,
+        total - shareable + 1,
         "the destination table root and every actual new block require attribution",
     );
     assert_eq!(
@@ -469,12 +761,12 @@ fn physical_plan_rebuilds_every_record_and_inherits_only_payload_leaves() {
     );
     assert_eq!(
         shape_change.counts.new_canonical_blocks.as_usize(),
-        total - payload,
+        total - shareable,
         "the one/three custom rewrite distinction must not undercount physical new blocks",
     );
     assert_eq!(
-        shape_change.counts.inherited_payload_leaves.as_usize(),
-        payload,
+        shape_change.counts.inherited_shareable_leaves.as_usize(),
+        shareable,
     );
 }
 
@@ -487,7 +779,7 @@ fn cancellation_after_evidence_commit_preserves_rich_failure_and_the_input() {
     let source = &parts.scene;
     let node = NodeId::new(source.generation(), 0);
     let NodeTransformEditStart::Changed(pending) =
-        try_begin_node_transform_edit(source, node, changed_trs(19.0))
+        try_begin_node_transform_edit(source, node, changed_trs(19.0), edit_options_digest(8))
             .expect("cancelled transform edit plan")
     else {
         panic!("changed transform must enter edit planning");
@@ -533,7 +825,7 @@ fn generation_exhaustion_preserves_rich_failure_without_consuming_a_nonce() {
     let source = &parts.scene;
     let node = NodeId::new(source.generation(), 0);
     let NodeTransformEditStart::Changed(pending) =
-        try_begin_node_transform_edit(source, node, changed_trs(23.0))
+        try_begin_node_transform_edit(source, node, changed_trs(23.0), edit_options_digest(9))
             .expect("generation-exhaustion transform edit plan")
     else {
         panic!("changed transform must enter edit planning");
@@ -569,7 +861,7 @@ fn central_validation_rejection_preserves_rich_evidence_and_the_input() {
     let source = &parts.scene;
     let node = NodeId::new(source.generation(), 0);
     let NodeTransformEditStart::Changed(mut pending) =
-        try_begin_node_transform_edit(source, node, changed_trs(27.0))
+        try_begin_node_transform_edit(source, node, changed_trs(27.0), edit_options_digest(10))
             .expect("central-validation transform edit plan")
     else {
         panic!("changed transform must enter edit planning");
@@ -618,7 +910,7 @@ fn dropping_prepared_success_burns_one_gap_and_releases_only_unpublished_output(
     let node = NodeId::new(source.generation(), 0);
     let live_source = account.snapshot();
     let NodeTransformEditStart::Changed(pending) =
-        try_begin_node_transform_edit(source, node, changed_trs(29.0))
+        try_begin_node_transform_edit(source, node, changed_trs(29.0), edit_options_digest(11))
             .expect("prepared-drop transform edit plan")
     else {
         panic!("changed transform must enter edit planning");
@@ -667,7 +959,7 @@ fn dropping_input_first_keeps_the_derived_scene_and_report_readable() {
     let node = NodeId::new(parts.scene.generation(), 0);
     let replacement = changed_trs(31.0);
     let NodeTransformEditStart::Changed(pending) =
-        try_begin_node_transform_edit(&parts.scene, node, replacement)
+        try_begin_node_transform_edit(&parts.scene, node, replacement, edit_options_digest(12))
             .expect("input-first release transform edit plan")
     else {
         panic!("changed transform must enter edit planning");
@@ -710,10 +1002,13 @@ fn dropping_derived_scene_first_keeps_the_input_and_report_readable() {
     let generation_source = AtomicU64::new(0);
     let parts = build_gltf_capability_scene_for_probe(&account, &generation_source);
     let node = NodeId::new(parts.scene.generation(), 0);
-    let NodeTransformEditStart::Changed(pending) =
-        try_begin_node_transform_edit(&parts.scene, node, changed_trs(37.0))
-            .expect("output-first release transform edit plan")
-    else {
+    let NodeTransformEditStart::Changed(pending) = try_begin_node_transform_edit(
+        &parts.scene,
+        node,
+        changed_trs(37.0),
+        edit_options_digest(13),
+    )
+    .expect("output-first release transform edit plan") else {
         panic!("changed transform must enter edit planning");
     };
     let prepared = pending
@@ -763,7 +1058,7 @@ fn post_evidence_storage_rejection_preserves_rich_failure_evidence() {
         let source = &parts.scene;
         let node = NodeId::new(source.generation(), 0);
         let NodeTransformEditStart::Changed(pending) =
-            try_begin_node_transform_edit(source, node, changed_trs(17.0))
+            try_begin_node_transform_edit(source, node, changed_trs(17.0), edit_options_digest(14))
                 .expect("bounded transform edit plan")
         else {
             panic!("changed transform must enter edit planning");

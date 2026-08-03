@@ -10,6 +10,8 @@ mod tests;
 
 pub(super) use control::{OperationAuthoringControl, OperationAuthoringControlError};
 #[cfg(test)]
+pub(super) use input::ProfileAuthoringBatch;
+#[cfg(test)]
 pub(super) use input::animation::{
     AnimationAuthoringBatch, AnimationChannelAuthoring, AnimationClipAuthoring,
 };
@@ -41,6 +43,17 @@ pub(super) use input::geometry::{
 };
 pub(super) use input::geometry::{GeometryAttributePayloadAuthoring, GeometryTopologyAuthoring};
 #[cfg(test)]
+pub(super) use input::lineage::{
+    LineageAuthoringBatch, ObservedResourceAuthoring, OwnerProvenanceAuthoring, ProfileOwner,
+    ResourceIdentityLocalId, SourceIdentityAuthoring, SourceIdentityLocalId,
+};
+pub(super) use input::lineage::{
+    ProvenanceLocalId, ProvenanceNodeAuthoring, ProvenanceOperationAuthoring,
+    ResourceIdentityStability, SessionOpaqueReason,
+};
+#[cfg(test)]
+pub(super) use input::metadata::{MetadataAuthoringBatch, MetadataAuthoringEntry};
+#[cfg(test)]
 pub(super) use input::spatial::{
     CameraAuthoring, CameraLocalId, LightAuthoring, LightLocalId, SpatialAuthoringBatch,
 };
@@ -70,6 +83,12 @@ pub(super) use plan::geometry::{
     GeometryAttributePayloadKind, GeometryAttributeScalarKind, GeometryAuthoringFailure,
     ValidatedGeometryBatch, validate_geometry_batch,
 };
+pub(super) use plan::profile::{
+    CanonicalProfileOwner, ProfileAuthoringFailure, ProfileOwnerCatalog, ProfileOwnerCatalogError,
+    ValidatedProfileBatch, validate_profile_batch,
+};
+#[cfg(test)]
+pub(super) use plan::profile::{ProfileAuthoringLimit, ProfileAuthoringSemanticError};
 pub(super) use plan::spatial::{
     SpatialAuthoringFailure, ValidatedSpatialBatch, validate_spatial_batch,
 };
@@ -80,5 +99,5 @@ pub(super) use scene::{
     SceneAuthoringAggregateError, SceneInputEnvelope, SceneInputEnvelopeError,
     animation_limits_after_deformation, appearance_limits_after_nodes,
     deformation_limits_after_geometry, geometry_limits_after_appearance, node_limits_after_spatial,
-    validate_scene_aggregate,
+    profile_limits_after_animation, validate_scene_aggregate,
 };

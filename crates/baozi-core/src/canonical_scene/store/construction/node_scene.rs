@@ -1,8 +1,8 @@
 use baozi_operation::{
     OutcomeEvidenceRecordRef, PublishedCanonicalStore, PublishedOutcomeEvidenceStore,
     PublishedRichFailureStore, RecordBlock, RetainedStoreReservation, RetainedStoreWorkControl,
-    StoreFailureAssembly, StoreFailureValidation, StoreLedgerEvidence, StoreRuntimeError,
-    StoreWorkError, ValidatedStoreSuccess,
+    StoreBuildError, StoreControlledError, StoreFailureAssembly, StoreFailureValidation,
+    StoreLedgerEvidence, StoreRuntimeError, StoreWorkError, ValidatedStoreSuccess,
 };
 use thiserror::Error;
 
@@ -12,9 +12,10 @@ use crate::identity::{ReservedSceneGeneration, SceneGenerationId};
 use super::super::production::{
     AnimationAuthoringFailure, AppearanceAuthoringFailure, DeformationAuthoringFailure,
     GeometryAuthoringFailure, NodeAuthoringFailure, OperationAuthoringControlError,
-    SceneAuthoringAggregateError, SpatialAuthoringFailure, ValidatedAnimationBatch,
-    ValidatedAppearanceBatch, ValidatedDeformationBatch, ValidatedGeometryBatch,
-    ValidatedNodeBatch, ValidatedSpatialBatch,
+    ProfileAuthoringFailure, ProfileOwnerCatalogError, SceneAuthoringAggregateError,
+    SpatialAuthoringFailure, ValidatedAnimationBatch, ValidatedAppearanceBatch,
+    ValidatedDeformationBatch, ValidatedGeometryBatch, ValidatedNodeBatch, ValidatedProfileBatch,
+    ValidatedSpatialBatch,
 };
 use super::super::schema::{
     CanonicalBlockRef, NodeSceneOutcomeEvidenceSchema, SceneDirectorySchema,
@@ -32,6 +33,7 @@ mod deformation;
 pub(crate) mod edit;
 mod geometry;
 mod materialization;
+mod profile;
 mod publication;
 mod scratch;
 pub(in crate::canonical_scene::store) mod semantic;
@@ -67,6 +69,8 @@ const NODE_SCENE_DEFORMATION_AUTHORING_REJECTION_CODE: u32 = 0x5343_1104;
 const NODE_SCENE_ANIMATION_AUTHORING_REJECTION_CODE: u32 = 0x5343_1105;
 const NODE_SCENE_AGGREGATE_AUTHORING_REJECTION_CODE: u32 = 0x5343_1106;
 const NODE_SCENE_SPATIAL_AUTHORING_REJECTION_CODE: u32 = 0x5343_1107;
+const NODE_SCENE_PROFILE_AUTHORING_REJECTION_CODE: u32 = 0x5343_1108;
+const NODE_SCENE_PROFILE_OWNER_CATALOG_REJECTION_CODE: u32 = 0x5343_1109;
 
 #[derive(Clone, Copy)]
 struct NodeSceneBuildFaults {
@@ -232,6 +236,100 @@ impl NodeSceneWorkMeter {
     }
 }
 
+fn process_slice_in_chunks<T, E>(
+    values: &[T],
+    chunk_size: usize,
+    mut invalid_chunk_size: impl FnMut() -> E,
+    mut observe: impl FnMut(usize) -> Result<(), E>,
+    mut process: impl FnMut(&[T]) -> Result<(), E>,
+) -> Result<(), E> {
+    if chunk_size == 0 {
+        return Err(invalid_chunk_size());
+    }
+    for chunk in values.chunks(chunk_size) {
+        observe(chunk.len())?;
+        process(chunk)?;
+    }
+    Ok(())
+}
+
+fn process_str_in_chunks<E>(
+    value: &str,
+    chunk_size: usize,
+    mut invalid_chunk_size: impl FnMut() -> E,
+    mut observe: impl FnMut(usize) -> Result<(), E>,
+    mut process: impl FnMut(&str) -> Result<(), E>,
+) -> Result<(), E> {
+    if chunk_size == 0 {
+        return Err(invalid_chunk_size());
+    }
+    let mut start = 0;
+    while start != value.len() {
+        let mut end = start.saturating_add(chunk_size).min(value.len());
+        while end != start && !value.is_char_boundary(end) {
+            end -= 1;
+        }
+        if end == start {
+            return Err(invalid_chunk_size());
+        }
+        let chunk = value.get(start..end).ok_or_else(&mut invalid_chunk_size)?;
+        observe(chunk.len())?;
+        process(chunk)?;
+        start = end;
+    }
+    Ok(())
+}
+
+fn process_slice_in_work_chunks<T>(
+    values: &[T],
+    control: &mut RetainedStoreWorkControl<
+        '_,
+        SceneConstructionOwner,
+        SceneConstructionPhase,
+        SceneConstructionUnit,
+    >,
+    work: &mut NodeSceneWorkMeter,
+    failure: StoreBuildError,
+    mut process: impl FnMut(&[T]) -> Result<(), StoreBuildError>,
+) -> Result<(), StoreControlledError> {
+    let chunk_size = usize::try_from(SCENE_VALIDATION_POLL_INTERVAL).map_err(|_| failure)?;
+    process_slice_in_chunks(
+        values,
+        chunk_size,
+        || StoreControlledError::from(failure),
+        |count| {
+            work.observe(control, u64::try_from(count).map_err(|_| failure)?)?;
+            Ok(())
+        },
+        |chunk| process(chunk).map_err(Into::into),
+    )
+}
+
+fn process_str_in_work_chunks(
+    value: &str,
+    control: &mut RetainedStoreWorkControl<
+        '_,
+        SceneConstructionOwner,
+        SceneConstructionPhase,
+        SceneConstructionUnit,
+    >,
+    work: &mut NodeSceneWorkMeter,
+    failure: StoreBuildError,
+    mut process: impl FnMut(&str) -> Result<(), StoreBuildError>,
+) -> Result<(), StoreControlledError> {
+    let chunk_size = usize::try_from(SCENE_VALIDATION_POLL_INTERVAL).map_err(|_| failure)?;
+    process_str_in_chunks(
+        value,
+        chunk_size,
+        || StoreControlledError::from(failure),
+        |count| {
+            work.observe(control, u64::try_from(count).map_err(|_| failure)?)?;
+            Ok(())
+        },
+        |chunk| process(chunk).map_err(Into::into),
+    )
+}
+
 type ValidatedNodeStoreSuccess = ValidatedStoreSuccess<
     SceneConstructionOwner,
     SceneConstructionPhase,
@@ -273,6 +371,7 @@ struct FreshNodeSceneOwner {
 /// A validated canonical Scene input coupled to the exact fresh operation that paid for it.
 #[must_use = "the validated node Scene construction must be prepared or deliberately dropped"]
 pub(in crate::canonical_scene::store) struct ValidatedNodeSceneConstruction<'input> {
+    profile: ValidatedProfileBatch<'input, RetainedStoreReservation<SceneConstructionOwner>>,
     animations: ValidatedAnimationBatch<'input, RetainedStoreReservation<SceneConstructionOwner>>,
     deformation:
         ValidatedDeformationBatch<'input, RetainedStoreReservation<SceneConstructionOwner>>,
@@ -298,6 +397,10 @@ pub(in crate::canonical_scene::store) enum NodeSceneConstructionRejection {
     DeformationAuthoring(#[source] DeformationAuthoringFailure<OperationAuthoringControlError>),
     #[error("animation-domain authoring validation rejected the Scene batch")]
     AnimationAuthoring(#[source] AnimationAuthoringFailure<OperationAuthoringControlError>),
+    #[error("profile owner catalog construction rejected the Scene batch")]
+    ProfileOwnerCatalog(#[source] ProfileOwnerCatalogError),
+    #[error("profile authoring validation rejected the Scene batch")]
+    ProfileAuthoring(#[source] ProfileAuthoringFailure<OperationAuthoringControlError>),
     #[error("aggregate authoring validation rejected the Scene batch")]
     Aggregate(#[source] SceneAuthoringAggregateError),
 }
@@ -311,6 +414,8 @@ impl NodeSceneConstructionRejection {
             Self::GeometryAuthoring(_) => NODE_SCENE_GEOMETRY_AUTHORING_REJECTION_CODE,
             Self::DeformationAuthoring(_) => NODE_SCENE_DEFORMATION_AUTHORING_REJECTION_CODE,
             Self::AnimationAuthoring(_) => NODE_SCENE_ANIMATION_AUTHORING_REJECTION_CODE,
+            Self::ProfileOwnerCatalog(_) => NODE_SCENE_PROFILE_OWNER_CATALOG_REJECTION_CODE,
+            Self::ProfileAuthoring(_) => NODE_SCENE_PROFILE_AUTHORING_REJECTION_CODE,
             Self::Aggregate(_) => NODE_SCENE_AGGREGATE_AUTHORING_REJECTION_CODE,
         }
     }
@@ -382,6 +487,16 @@ pub(in crate::canonical_scene::store) struct SceneEvidenceCounts {
     pub(in crate::canonical_scene::store) animation_clip_count: u32,
     pub(in crate::canonical_scene::store) animation_channel_count: u32,
     pub(in crate::canonical_scene::store) payload_block_count: u32,
+    pub(in crate::canonical_scene::store) profile_segment_count: u32,
+    pub(in crate::canonical_scene::store) profile_resource_count: u32,
+    pub(in crate::canonical_scene::store) profile_source_count: u32,
+    pub(in crate::canonical_scene::store) profile_provenance_count: u32,
+    pub(in crate::canonical_scene::store) profile_operation_count: u32,
+    pub(in crate::canonical_scene::store) profile_parent_count: u32,
+    pub(in crate::canonical_scene::store) profile_owner_count: u32,
+    pub(in crate::canonical_scene::store) profile_attachment_count: u32,
+    pub(in crate::canonical_scene::store) profile_metadata_entry_count: u32,
+    pub(in crate::canonical_scene::store) shareable_leaf_block_count: u32,
 }
 
 impl SceneEvidenceCounts {
@@ -409,6 +524,16 @@ impl SceneEvidenceCounts {
             animation_clip_count: 0,
             animation_channel_count: 0,
             payload_block_count: 0,
+            profile_segment_count: 0,
+            profile_resource_count: 0,
+            profile_source_count: 0,
+            profile_provenance_count: 0,
+            profile_operation_count: 0,
+            profile_parent_count: 0,
+            profile_owner_count: 0,
+            profile_attachment_count: 0,
+            profile_metadata_entry_count: 0,
+            shareable_leaf_block_count: 0,
         }
     }
 }

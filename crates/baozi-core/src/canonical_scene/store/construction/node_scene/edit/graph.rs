@@ -1,3 +1,5 @@
+mod profile;
+
 use baozi_operation::{
     CanonicalInheritanceSource, CanonicalRecordView, OutcomeEvidenceRecordRef, RecordBlock,
     RecordPlan, RetainedStoreWorkControl, SequencePlan, SequenceWriter, StoreBuildError,
@@ -21,6 +23,7 @@ use crate::canonical_scene::store::schema::geometry::{
     GeometryAttributeTableSchema, GeometryLogicalMeshTableSchema, GeometryMeshInstanceTableSchema,
     GeometryPrimitiveTableSchema,
 };
+use crate::canonical_scene::store::schema::profile::ProfileDirectorySchema;
 use crate::canonical_scene::store::schema::spatial::{
     SpatialCameraTableSchema, SpatialDirectorySchema, SpatialLightTableSchema,
 };
@@ -36,7 +39,7 @@ use crate::entity::{AuthoredTransform, AuthoredTransformKind};
 
 use super::super::{
     NODE_SCENE_BUILD_INVARIANT_CODE, NodeSceneWorkMeter, SceneStoreAssembly, SceneStoreKeys,
-    ValidatedNodeScene,
+    ValidatedNodeScene, process_slice_in_work_chunks,
 };
 use super::plan::PendingNodeTransformEdit;
 
@@ -72,6 +75,8 @@ pub(super) fn try_rewrite_node_scene<'scene>(
                 .map_err(StoreRuntimeError::Plan)?;
             let mut work = NodeSceneWorkMeter::new();
             let transforms = rewrite_transforms(assembly, pending, keys, &mut work)?;
+            let profile_leaves =
+                profile::rewrite_lineage_leaves(assembly, pending, keys, &mut work)?;
             assembly.try_inherit_all_canonical_leaves(keys.dimension)?;
 
             let proof = pending.input.proof;
@@ -141,6 +146,16 @@ pub(super) fn try_rewrite_node_scene<'scene>(
                 AnimationDirectorySchema,
                 keys,
             )?;
+            let profile_segments =
+                profile::rewrite_segments(assembly, pending, profile_leaves, keys, &mut work)?;
+            let profile = profile::rewrite_profile_records(
+                assembly,
+                pending,
+                profile_segments,
+                profile_leaves,
+                keys,
+                &mut work,
+            )?;
 
             let directory = if pending.target.requires_node_shape_rewrite() {
                 let references = references.ok_or(StoreRuntimeError::InvalidSourceSlot)?;
@@ -156,6 +171,7 @@ pub(super) fn try_rewrite_node_scene<'scene>(
                         geometry,
                         deformation,
                         animation,
+                        profile,
                     },
                     keys,
                     &mut work,
@@ -216,7 +232,17 @@ fn retain_edit_evidence(
                 row.write_scalar(counts.morph_delta_count)?;
                 row.write_scalar(counts.animation_clip_count)?;
                 row.write_scalar(counts.animation_channel_count)?;
-                row.write_scalar(counts.payload_block_count)
+                row.write_scalar(counts.payload_block_count)?;
+                row.write_scalar(counts.profile_segment_count)?;
+                row.write_scalar(counts.profile_resource_count)?;
+                row.write_scalar(counts.profile_source_count)?;
+                row.write_scalar(counts.profile_provenance_count)?;
+                row.write_scalar(counts.profile_operation_count)?;
+                row.write_scalar(counts.profile_parent_count)?;
+                row.write_scalar(counts.profile_owner_count)?;
+                row.write_scalar(counts.profile_attachment_count)?;
+                row.write_scalar(counts.profile_metadata_entry_count)?;
+                row.write_scalar(counts.shareable_leaf_block_count)
             })
         },
     )
@@ -284,8 +310,9 @@ fn write_scalar_slice(
     values: &[f32],
     failure: StoreBuildError,
 ) -> Result<(), StoreControlledError> {
-    work.observe(control, u64::try_from(values.len()).map_err(|_| failure)?)?;
-    writer.extend_from_slice(values).map_err(Into::into)
+    process_slice_in_work_chunks(values, control, work, failure, |chunk| {
+        writer.extend_from_slice(chunk)
+    })
 }
 
 fn write_authored_transform(
@@ -485,6 +512,7 @@ struct NodeSceneDirectoryRefs {
     geometry: CanonicalBlockRef<SceneGeometryDirectorySchema>,
     deformation: CanonicalBlockRef<DeformationDirectorySchema>,
     animation: CanonicalBlockRef<AnimationDirectorySchema>,
+    profile: CanonicalBlockRef<ProfileDirectorySchema>,
 }
 
 fn rewrite_directory_with_shape(
@@ -525,7 +553,8 @@ fn rewrite_directory_with_shape(
                         row.write_record_ref(refs.appearance.into_store())?;
                         row.write_record_ref(refs.geometry.into_store())?;
                         row.write_record_ref(refs.deformation.into_store())?;
-                        row.write_record_ref(refs.animation.into_store())
+                        row.write_record_ref(refs.animation.into_store())?;
+                        row.write_record_ref(refs.profile.into_store())
                     })
                     .map_err(Into::into)
             },

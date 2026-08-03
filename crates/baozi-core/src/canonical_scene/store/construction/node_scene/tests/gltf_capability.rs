@@ -51,8 +51,9 @@ use crate::math::{Color, Mat4, Quat, Vec2, Vec3};
 use crate::scene_space::SceneSpace;
 
 use super::{
-    NodeSceneConstructionRejection, assert_released, rich_failure, terminal_failure_class,
-    terminal_failure_code, test_account, test_factory, test_limits, test_limits_with_work,
+    NodeSceneConstructionRejection, assert_released, exhaust_profile_for_test, profile_fixture,
+    rich_failure, terminal_failure_class, terminal_failure_code, test_account, test_factory,
+    test_limits, test_limits_with_work,
 };
 
 pub(in crate::canonical_scene::store) const GLTF_SOURCE_VECTOR_SCHEMA_ID: &str =
@@ -1592,14 +1593,24 @@ fn with_gltf_capability_input<R>(
             &source_images[..],
         ),
     };
+    let spatial = SpatialAuthoringBatch::new(&SceneSpace::UNKNOWN, &[], &[]);
+    let profile = profile_fixture(
+        spatial,
+        node_batch,
+        appearance,
+        geometry,
+        deformation,
+        animations,
+    );
     use_input(
         SceneAuthoringBatch::new(
-            SpatialAuthoringBatch::new(&SceneSpace::UNKNOWN, &[], &[]),
+            spatial,
             node_batch,
             appearance,
             geometry,
             deformation,
             animations,
+            profile.batch(),
         ),
         selected_source_images,
     )
@@ -2458,6 +2469,7 @@ pub(in crate::canonical_scene::store) fn inspect_gltf_capability_semantics_with_
                 .is_none()
         );
     }
+    exhaust_profile_for_test(cursor.profile().expect("glTF profile cursor"));
     cursor.finish().expect("complete glTF semantic traversal");
 
     assert_eq!(skin_joint_count, 2);
@@ -2588,6 +2600,7 @@ fn gltf_mixed_image_media_preserves_cumulative_offsets() {
         media_types.push(image.media_type());
     }
     assert_eq!(media_types, [Some("image/png"), None, Some("image/png")]);
+    exhaust_profile_for_test(cursor.profile().expect("mixed-media profile cursor"));
     cursor
         .finish()
         .expect("complete mixed-media semantic traversal");
@@ -2800,7 +2813,7 @@ fn gltf_shape_materializes_all_five_canonical_domains() {
     );
 
     let (full, bounded) = capture_gltf_capability_snapshots_for_probe(&parts);
-    assert_eq!(full.schema_revision, 5);
+    assert_eq!(full.schema_revision, 1);
     assert_eq!(bounded.digest, full.digest);
     assert_eq!(bounded.totals, full.totals);
     assert!(bounded.preview.bytes_truncated || bounded.preview.items_truncated);

@@ -1,5 +1,5 @@
 use baozi_operation::{
-    CancellationToken, PhysicalStorageAccount, PhysicalStorageAccountFactory,
+    CancellationToken, OperationControl, PhysicalStorageAccount, PhysicalStorageAccountFactory,
     PhysicalStorageAccountFactoryLimits, PhysicalStorageAccountLimits,
 };
 
@@ -23,12 +23,18 @@ use crate::canonical_scene::store::production::{
 };
 use crate::entity::{AuthoredTransform, CameraProjection, LightEmission, LightKind};
 use crate::extension::ExtensionSchemaId;
+use crate::identity::NodeId;
 use crate::math::{Color, Mat4, Quat, Vec3};
+use crate::provenance::OptionsDigest;
 use crate::scene_space::{
     Axis, FrontFaceWinding, Handedness, SceneSpace, TangentBasisConvention,
     TangentHandednessEncoding, TransformConvention, UvOrigin,
 };
 
+use super::super::edit::{
+    NodeTransformEditStart, NodeTransformEditTerminal, try_begin_node_transform_edit,
+};
+use super::super::tests::profile_fixture;
 use super::{
     MAX_COLLECTION_ITEMS, MAX_PREVIEW_BYTES, MAX_WORK, NodeSceneSnapshot,
     NodeSceneSnapshotAlgorithm, NodeSceneSnapshotError, NodeSceneSnapshotLimit,
@@ -36,26 +42,28 @@ use super::{
 };
 
 const KNOWN_SINGLE_TRS_DIGEST: [u8; 32] = [
-    0x19, 0x61, 0x07, 0x75, 0xba, 0x0b, 0x4a, 0xa0, 0x76, 0xae, 0x95, 0xea, 0x7e, 0x46, 0xcf, 0x51,
-    0xe4, 0x05, 0x89, 0xd0, 0x26, 0x7b, 0xf1, 0xb9, 0xb8, 0x11, 0x4a, 0xea, 0x0f, 0x69, 0xe7, 0xb4,
+    0x98, 0x1a, 0x93, 0x13, 0xb8, 0x48, 0xa7, 0x3c, 0x6f, 0xc2, 0xcd, 0xe5, 0x11, 0x86, 0xeb, 0xba,
+    0x57, 0xdb, 0x10, 0x15, 0xf3, 0x66, 0x7f, 0xf1, 0x01, 0xda, 0x59, 0xae, 0x13, 0x3d, 0x32, 0x54,
 ];
+// Known vectors are factored at canonical domain and owner-row boundaries, but every
+// assertion still compares the complete transcript byte for byte.
 const KNOWN_SINGLE_TRS_TRANSCRIPT_PREFIX_HEX: &str = concat!(
-    "011e0000000000000062616f7a692e63616e6f6e6963616c2d7363656e652e736e617073686f740205000000030600",
+    "011e0000000000000062616f7a692e63616e6f6e6963616c2d7363656e652e736e617073686f740201000000030600",
     "000000000000736861323536a60c01a7a800a900aa00ab0c00ac00ad00ae00af00b200b30c010b0000000000000000",
     "ba0c010b0000000000000000040c01080d00000000000000000b0100000000000000050c01060d0000000000000000",
     "0a020e000000000e000000000e000000000e000000000e000000000e000000000e0000803f0e0000803f0e0000803f",
     "0e0000803f0b0a00000000000000c40c00c50c00070c010b00000000000000000b0100000000000000",
 );
 const KNOWN_MATRIX_CHILD_DIGEST: [u8; 32] = [
-    0x5c, 0xf9, 0x98, 0x88, 0x49, 0xec, 0x36, 0x93, 0xfc, 0x9b, 0x63, 0xf8, 0x02, 0x73, 0xf0, 0xd7,
-    0x53, 0x45, 0xa9, 0x28, 0x80, 0x16, 0x94, 0xc3, 0xe4, 0xd8, 0xd1, 0x05, 0xac, 0xb6, 0x0c, 0x7e,
+    0xea, 0xee, 0x35, 0xad, 0x96, 0x8c, 0xd6, 0x31, 0xd6, 0x67, 0xfa, 0x47, 0x35, 0xaf, 0x7d, 0x3d,
+    0xb1, 0x66, 0x97, 0x23, 0x09, 0xf0, 0x59, 0xbd, 0x3b, 0xda, 0xe8, 0x4d, 0x16, 0x27, 0x66, 0x47,
 ];
 const KNOWN_SPATIAL_DIGEST: [u8; 32] = [
-    0x94, 0xfd, 0xab, 0x04, 0x39, 0x37, 0x69, 0x28, 0x92, 0x33, 0xf6, 0x31, 0x73, 0x8a, 0xdf, 0x11,
-    0x58, 0xa8, 0x35, 0xf7, 0x92, 0x25, 0x90, 0xe1, 0xe9, 0xac, 0x1c, 0x5e, 0x24, 0xd6, 0x7c, 0x90,
+    0xa9, 0xd5, 0x50, 0xa8, 0x01, 0xda, 0x57, 0x52, 0x0c, 0xcb, 0x40, 0xaf, 0x5e, 0xcb, 0xba, 0x68,
+    0x6c, 0x1d, 0x85, 0x8a, 0x26, 0xbe, 0x94, 0xf4, 0xa9, 0x51, 0x17, 0xb9, 0x69, 0x00, 0x8a, 0x6e,
 ];
 const KNOWN_SPATIAL_TRANSCRIPT_PREFIX_HEX: &str = concat!(
-    "011e0000000000000062616f7a692e63616e6f6e6963616c2d7363656e652e736e617073686f74020500000003060000000000000073",
+    "011e0000000000000062616f7a692e63616e6f6e6963616c2d7363656e652e736e617073686f74020100000003060000000000000073",
     "6861323536a60c01a7a802a904aa05ab0c01c67b14ae47e17a843fac01ad02ae01af02b015000000000000006578616d706c653a7461",
     "6e67656e742d6261736973b102000000b202b014000000000000006578616d706c653a74616e67656e742d7369676eb103000000b30c",
     "01b40d0000000000000000b500b6c70000803fb70c01c70000c03fb8c7cdcccc3db90c01c70000c8420b0100000000000000ba0c01bb",
@@ -65,7 +73,7 @@ const KNOWN_SPATIAL_TRANSCRIPT_PREFIX_HEX: &str = concat!(
     "0000c40c010d0000000000000000c50c010d0000000000000000070c010b00000000000000000b0100000000000000",
 );
 const KNOWN_MATRIX_CHILD_TRANSCRIPT_PREFIX_HEX: &str = concat!(
-    "011e0000000000000062616f7a692e63616e6f6e6963616c2d7363656e652e736e617073686f74020500000003",
+    "011e0000000000000062616f7a692e63616e6f6e6963616c2d7363656e652e736e617073686f74020100000003",
     "0600000000000000736861323536a60c01a7a800a900aa00ab0c00ac00ad00ae00af00b200b30c01",
     "0b0000000000000000ba0c010b0000000000000000040c01080d00000000000000000b0100000000000000050c01060d00000000",
     "000000000a010e0000803f0e000000000e000000000e000000000e000000000e0000803f0e000000000e000000",
@@ -74,7 +82,7 @@ const KNOWN_MATRIX_CHILD_TRANSCRIPT_PREFIX_HEX: &str = concat!(
     "000000000e000000000e000000000e000000000e000000000e0000803f0e0000803f0e0000803f0e0000803f0b",
     "0a00000000000000c40c00c50c00070c010b00000000000000000b0200000000000000",
 );
-const EMPTY_CANONICAL_DOMAINS_TRANSCRIPT_HEX: &str = concat!(
+const EMPTY_PRE_PROFILE_DOMAINS_TRANSCRIPT_HEX: &str = concat!(
     "330c01340c010b0000000000000000380c010b0000000000000000400c010b000000000000000010",
     "0c010b0000000000000000440c010b00000000000000000f0c01120c010b0000000000000000140c",
     "010b0000000000000000190c010b0000000000000000280c010b00000000000000004a0c014b0c01",
@@ -82,12 +90,82 @@ const EMPTY_CANONICAL_DOMAINS_TRANSCRIPT_HEX: &str = concat!(
     "00000000006e0c010b0000000000000000710c010b0000000000000000280c010b00000000000000",
     "00780c01790c010b00000000000000007f0c010b0000000000000000",
 );
+const EMPTY_SCENE_TRANSCRIPT_PREFIX_HEX: &str = concat!(
+    "011e0000000000000062616f7a692e63616e6f6e6963616c2d7363656e652e736e617073686f740201000000030600",
+    "000000000000736861323536a60c01a7a800a900aa00ab0c00ac00ad00ae00af00b200b30c010b0000000000000000",
+    "ba0c010b0000000000000000040c010b0000000000000000050c010b0000000000000000",
+);
+const FRESH_PROFILE_TRANSCRIPT_PREFIX_HEX: &str = concat!(
+    "c8ce01cb00ce00cf0000000000000000cb01ce00cf0000000000000000cb02ce00cf0000000000000000",
+    "cb03ce00cf0000000000000000cb04ce00cf0000000000000000cb05ce00cf0000000000000000",
+    "cb06ce00cf0000000000000000c9cc00ce01cf0100000000000000cacc00cd0000000000000000",
+    "cb00d20100000000000000cb01d20100000000000000cb02d20100000000000000cb03d20000000000000000",
+    "cb04d20000000000000000cb05d20000000000000000cb06d20100000000000000cb07d22a00000000000000",
+    "cb08d20000000000000000c9cc01ce01cf0100000000000000cacc01cd0000000000000000",
+    "cb00ce01d6190000000000000066697874757265732f6e6f64652d7363656e652f696e707574cb01d001cb05d000",
+    "c9cc02ce01cf0100000000000000cacc02cd0000000000000000cb00d20000000000000000",
+    "cb01ce01d611000000000000006f72672e62616f7a692e66697874757265cb02d000cb03d000",
+    "cb04d20000000000000000cb08ce00cf0000000000000000cb09ce00cf0000000000000000",
+    "c9cc03ce01cf0100000000000000cacc03cd0000000000000000cb00d20100000000000000",
+    "cb01d20000000000000000cb02ce01cf0000000000000000cb03d000cb04d20000000000000000",
+    "c9cc04ce01cf0000000000000000",
+);
+const PROFILE_OWNER_COLLECTION_2_HEX: &str = "c9cc05ce01cf0200000000000000";
+const PROFILE_OWNER_COLLECTION_3_HEX: &str = "c9cc05ce01cf0300000000000000";
+const PROFILE_OWNER_COLLECTION_4_HEX: &str = "c9cc05ce01cf0400000000000000";
+const PROFILE_OWNER_COLLECTION_5_HEX: &str = "c9cc05ce01cf0500000000000000";
+const PROFILE_OWNER_COLLECTION_8_HEX: &str = "c9cc05ce01cf0800000000000000";
+const PROFILE_SCENE_OWNER_ROW_HEX: &str = concat!(
+    "cacc05cd0000000000000000cb00d000cb01d100000000cb02d20000000000000000",
+    "cb03ce01cf0100000000000000d700000000",
+);
+const PROFILE_SYNTHETIC_ROOT_OWNER_ROW_HEX: &str = concat!(
+    "cacc05cd0100000000000000cb00d001cb01d100000000cb02d20100000000000000",
+    "cb03ce01cf0100000000000000d700000000",
+);
+const PROFILE_NODE_0_OWNER_ROW_HEX: &str = concat!(
+    "cacc05cd0200000000000000cb00d002cb01d101000000cb02d20200000000000000",
+    "cb03ce01cf0100000000000000d700000000",
+);
+const PROFILE_NODE_1_OWNER_ROW_HEX: &str = concat!(
+    "cacc05cd0300000000000000cb00d002cb01d102000000cb02d20300000000000000",
+    "cb03ce01cf0100000000000000d700000000",
+);
+const PROFILE_CAMERA_0_OWNER_ROW_HEX: &str = concat!(
+    "cacc05cd0300000000000000cb00d003cb01d100000000cb02d20300000000000000",
+    "cb03ce01cf0100000000000000d700000000",
+);
+const PROFILE_LIGHT_0_OWNER_ROW_HEX: &str = concat!(
+    "cacc05cd0400000000000000cb00d004cb01d100000000cb02d20400000000000000",
+    "cb03ce01cf0100000000000000d700000000",
+);
+const PROFILE_MATERIAL_0_OWNER_ROW_HEX: &str = concat!(
+    "cacc05cd0300000000000000cb00d009cb01d100000000cb02d20300000000000000",
+    "cb03ce01cf0100000000000000d700000000",
+);
+const PROFILE_LOGICAL_MESH_0_OWNER_ROW_HEX: &str = concat!(
+    "cacc05cd0400000000000000cb00d00acb01d100000000cb02d20400000000000000",
+    "cb03ce01cf0100000000000000d700000000",
+);
+const PROFILE_PRIMITIVE_0_OWNER_ROW_HEX: &str = concat!(
+    "cacc05cd0500000000000000cb00d00bcb01d100000000cb02d20500000000000000",
+    "cb03ce01cf0100000000000000d700000000",
+);
+const PROFILE_ATTRIBUTE_0_OWNER_ROW_HEX: &str = concat!(
+    "cacc05cd0600000000000000cb00d00ccb01d100000000cb02d20600000000000000",
+    "cb03ce01cf0100000000000000d700000000",
+);
+const PROFILE_MESH_INSTANCE_0_OWNER_ROW_HEX: &str = concat!(
+    "cacc05cd0700000000000000cb00d00dcb01d100000000cb02d20700000000000000",
+    "cb03ce01cf0100000000000000d700000000",
+);
+const EMPTY_PROFILE_METADATA_TRANSCRIPT_HEX: &str = "c9cc06ce00cf0000000000000000";
 const KNOWN_POINT_GEOMETRY_DIGEST: [u8; 32] = [
-    0xe5, 0xbd, 0x23, 0xe4, 0x06, 0x06, 0x12, 0x24, 0xbb, 0x23, 0x6e, 0xd5, 0xa9, 0xa4, 0x56, 0x5c,
-    0x66, 0x3d, 0x1c, 0xd6, 0x17, 0x88, 0x19, 0x75, 0xab, 0xf8, 0xee, 0x70, 0x91, 0xb3, 0x06, 0x14,
+    0x63, 0xd1, 0x2a, 0x0b, 0x2a, 0x09, 0x08, 0xfd, 0x93, 0x31, 0x4e, 0xbc, 0xf6, 0x88, 0xa8, 0x94,
+    0x25, 0xd2, 0x19, 0x9e, 0xa2, 0x1a, 0x4d, 0x5a, 0x4e, 0x5a, 0xbb, 0x5f, 0x85, 0xe3, 0xa1, 0xba,
 ];
 const KNOWN_POINT_GEOMETRY_TRANSCRIPT_HEX: &str = concat!(
-    "011e0000000000000062616f7a692e63616e6f6e6963616c2d7363656e652e736e617073686f74020500000003060000",
+    "011e0000000000000062616f7a692e63616e6f6e6963616c2d7363656e652e736e617073686f74020100000003060000",
     "0000000000736861323536a60c01a7a800a900aa00ab0c00ac00ad00ae00af00b200b30c010b0000000000000000",
     "ba0c010b0000000000000000040c01080d00000000000000000b0100000000000000050c01060d00000000000000000a02",
     "0e000000000e000000000e000000000e000000000e000000000e000000000e0000803f0e0000803f0e0000803f0e0000",
@@ -218,13 +296,24 @@ fn build_scene_with_spatial_appearance_and_geometry<'input>(
         &primitive_deformations,
         &mesh_instance_deformations,
     );
-    let input = SceneAuthoringBatch::new(
+    let node_batch = NodeAuthoringBatch::new(Presence::Present(roots), nodes);
+    let animations = AnimationAuthoringBatch::empty();
+    let profile = profile_fixture(
         spatial,
-        NodeAuthoringBatch::new(Presence::Present(roots), nodes),
+        node_batch,
         appearance,
         geometry,
         deformation,
-        AnimationAuthoringBatch::empty(),
+        animations,
+    );
+    let input = SceneAuthoringBatch::new(
+        spatial,
+        node_batch,
+        appearance,
+        geometry,
+        deformation,
+        animations,
+        profile.batch(),
     );
     let prepared = SceneConstructionOperation::with_account_for_scene_input(
         account,
@@ -278,17 +367,18 @@ fn matrix(translation_x: f32) -> AuthoredTransform {
     .expect("valid authored matrix")
 }
 
-fn assert_hex(actual: &[u8], expected: &str) {
-    assert_hex_parts(actual, &[expected]);
-}
-
-fn assert_hex_parts(actual: &[u8], expected: &[&str]) {
+fn encode_hex(actual: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut encoded = String::with_capacity(actual.len().saturating_mul(2));
     for byte in actual.iter().copied() {
         encoded.push(char::from(HEX[usize::from(byte >> 4)]));
         encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
     }
+    encoded
+}
+
+fn assert_hex_parts(actual: &[u8], expected: &[&str]) {
+    let encoded = encode_hex(actual);
     let expected = expected.concat();
     assert_eq!(encoded, expected);
 }
@@ -619,7 +709,7 @@ fn known_vector_is_stable_and_human_reviewable() {
             .expect("known Scene snapshot");
 
     assert_eq!(snapshot.domain, "baozi.canonical-scene.snapshot");
-    assert_eq!(snapshot.schema_revision, 5);
+    assert_eq!(snapshot.schema_revision, 1);
     assert_eq!(snapshot.algorithm, NodeSceneSnapshotAlgorithm::Sha256);
     assert_eq!(snapshot.digest, KNOWN_SINGLE_TRS_DIGEST);
     assert!(transcript.complete);
@@ -627,7 +717,13 @@ fn known_vector_is_stable_and_human_reviewable() {
         &transcript.bytes,
         &[
             KNOWN_SINGLE_TRS_TRANSCRIPT_PREFIX_HEX,
-            EMPTY_CANONICAL_DOMAINS_TRANSCRIPT_HEX,
+            EMPTY_PRE_PROFILE_DOMAINS_TRANSCRIPT_HEX,
+            FRESH_PROFILE_TRANSCRIPT_PREFIX_HEX,
+            PROFILE_OWNER_COLLECTION_3_HEX,
+            PROFILE_SCENE_OWNER_ROW_HEX,
+            PROFILE_SYNTHETIC_ROOT_OWNER_ROW_HEX,
+            PROFILE_NODE_0_OWNER_ROW_HEX,
+            EMPTY_PROFILE_METADATA_TRANSCRIPT_HEX,
         ],
     );
     assert_eq!(snapshot.totals.node_count, 1);
@@ -651,8 +747,18 @@ fn known_vector_is_stable_and_human_reviewable() {
     assert_eq!(snapshot.totals.deformation_mesh_instance_count, 0);
     assert_eq!(snapshot.totals.animation_clip_count, 0);
     assert_eq!(snapshot.totals.animation_channel_count, 0);
-    assert_eq!(snapshot.totals.transcript_bytes, 457);
-    assert_eq!(snapshot.totals.work_units, 49);
+    assert_eq!(snapshot.totals.profile_segment_count, 1);
+    assert_eq!(snapshot.totals.profile_resource_count, 1);
+    assert_eq!(snapshot.totals.profile_source_count, 1);
+    assert_eq!(snapshot.totals.profile_provenance_node_count, 1);
+    assert_eq!(snapshot.totals.profile_operation_count, 0);
+    assert_eq!(snapshot.totals.profile_evidence_count, 0);
+    assert_eq!(snapshot.totals.profile_parent_reference_count, 0);
+    assert_eq!(snapshot.totals.profile_owner_count, 3);
+    assert_eq!(snapshot.totals.profile_attachment_count, 3);
+    assert_eq!(snapshot.totals.profile_metadata_entry_count, 0);
+    assert_eq!(snapshot.totals.transcript_bytes, 1_134);
+    assert_eq!(snapshot.totals.work_units, 112);
     assert!(snapshot.preview.text.contains("roots(present,total=1)=[0]"));
     assert!(snapshot.preview.text.contains("transform=trs(total=10)"));
     assert!(
@@ -662,10 +768,108 @@ fn known_vector_is_stable_and_human_reviewable() {
             .contains("children(present)=[];total=0")
     );
     assert!(snapshot.preview.text.contains("geometry(present)"));
+    assert!(snapshot.preview.text.contains("profile(present)"));
     assert!(!snapshot.preview.bytes_truncated);
     assert!(!snapshot.preview.items_truncated);
 
     drop(parts);
+    assert_eq!(account.snapshot().live_retained_bytes(), 0);
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
+}
+
+#[test]
+fn dropped_profile_segment_does_not_advance_parent_cursor() {
+    let factory = factory();
+    let account = account(&factory);
+    let parts = single_root_scene(&account, AuthoredTransform::identity_trs());
+    let view = parts.scene.semantic_view().expect("profile semantic view");
+    let mut cursor = view.into_cursor().expect("profile semantic cursor");
+
+    let mut roots = cursor.take_roots().expect("profile roots");
+    assert_eq!(roots.next().expect("profile root"), Some(0));
+    assert_eq!(roots.next().expect("profile root end"), None);
+    roots.finish().expect("complete profile roots");
+
+    let node = cursor
+        .next_node()
+        .expect("profile node read")
+        .expect("profile node");
+    node.into_children()
+        .finish()
+        .expect("complete profile node children");
+    assert!(cursor.next_node().expect("profile node end").is_none());
+
+    {
+        let profile = cursor.profile().expect("profile cursor");
+        let segment = profile
+            .next_segment()
+            .expect("profile segment read")
+            .expect("profile segment");
+        assert_eq!(segment.segment_index(), 0);
+        drop(segment);
+
+        assert!(profile.next_owner().is_err());
+        let retry = profile
+            .next_segment()
+            .expect("profile segment retry")
+            .expect("profile segment retry value");
+        assert_eq!(retry.segment_index(), 0);
+        drop(retry);
+    }
+
+    assert!(cursor.finish().is_err());
+}
+
+#[test]
+fn changed_scene_edit_appends_snapshot_visible_profile_lineage() {
+    let factory = factory();
+    let account = account(&factory);
+    let source = single_root_scene(&account, AuthoredTransform::identity_trs());
+    let source_snapshot = capture_node_scene(
+        &source.scene,
+        snapshot_limits(MAX_PREVIEW_BYTES, MAX_COLLECTION_ITEMS),
+        None,
+    )
+    .expect("source profile snapshot");
+    let node = NodeId::new(source.scene.generation(), 0);
+    let NodeTransformEditStart::Changed(pending) = try_begin_node_transform_edit(
+        &source.scene,
+        node,
+        trs(9.0),
+        OptionsDigest::sha256([0x5a; 32]),
+    )
+    .expect("changed transform profile edit") else {
+        panic!("changed transform must append profile lineage");
+    };
+    let prepared = pending
+        .prepare(operation_limits(), OperationControl::default())
+        .expect("changed transform profile preparation");
+    let NodeTransformEditTerminal::Success(edited) = prepared.handoff() else {
+        panic!("valid changed transform must publish an edited Scene");
+    };
+
+    let snapshot = capture_node_scene(
+        &edited.scene,
+        snapshot_limits(MAX_PREVIEW_BYTES, MAX_COLLECTION_ITEMS),
+        None,
+    )
+    .expect("edited profile snapshot");
+    assert_ne!(snapshot.digest, source_snapshot.digest);
+    assert_eq!(snapshot.totals.profile_segment_count, 2);
+    assert_eq!(snapshot.totals.profile_resource_count, 1);
+    assert_eq!(snapshot.totals.profile_source_count, 1);
+    assert_eq!(snapshot.totals.profile_provenance_node_count, 2);
+    assert_eq!(snapshot.totals.profile_operation_count, 1);
+    assert_eq!(snapshot.totals.profile_evidence_count, 0);
+    assert_eq!(snapshot.totals.profile_parent_reference_count, 1);
+    assert_eq!(snapshot.totals.profile_owner_count, 3);
+    assert_eq!(snapshot.totals.profile_attachment_count, 3);
+    assert_eq!(snapshot.totals.profile_metadata_entry_count, 0);
+    assert_eq!(snapshot.totals.profile_lineage_digest_bytes, 32);
+    assert!(snapshot.preview.text.contains("profile_segment[1]"));
+
+    drop(edited);
+    drop(source);
     assert_eq!(account.snapshot().live_retained_bytes(), 0);
     assert_eq!(account.snapshot().live_retained_allocations(), 0);
 }
@@ -768,11 +972,19 @@ fn spatial_known_vector_pins_scene_space_cameras_lights_and_attachments() {
         &transcript.bytes,
         &[
             KNOWN_SPATIAL_TRANSCRIPT_PREFIX_HEX,
-            EMPTY_CANONICAL_DOMAINS_TRANSCRIPT_HEX,
+            EMPTY_PRE_PROFILE_DOMAINS_TRANSCRIPT_HEX,
+            FRESH_PROFILE_TRANSCRIPT_PREFIX_HEX,
+            PROFILE_OWNER_COLLECTION_5_HEX,
+            PROFILE_SCENE_OWNER_ROW_HEX,
+            PROFILE_SYNTHETIC_ROOT_OWNER_ROW_HEX,
+            PROFILE_NODE_0_OWNER_ROW_HEX,
+            PROFILE_CAMERA_0_OWNER_ROW_HEX,
+            PROFILE_LIGHT_0_OWNER_ROW_HEX,
+            EMPTY_PROFILE_METADATA_TRANSCRIPT_HEX,
         ],
     );
-    assert_eq!(snapshot.totals.transcript_bytes, 653);
-    assert_eq!(snapshot.totals.work_units, 62);
+    assert_eq!(snapshot.totals.transcript_bytes, 1_434);
+    assert_eq!(snapshot.totals.work_units, 137);
     assert_eq!(snapshot.totals.camera_count, 1);
     assert_eq!(snapshot.totals.light_count, 1);
     assert_eq!(snapshot.totals.camera_attachment_count, 1);
@@ -1303,14 +1515,21 @@ fn matrix_and_child_known_vector_pins_node_framing_and_empty_domains() {
         &transcript.bytes,
         &[
             KNOWN_MATRIX_CHILD_TRANSCRIPT_PREFIX_HEX,
-            EMPTY_CANONICAL_DOMAINS_TRANSCRIPT_HEX,
+            EMPTY_PRE_PROFILE_DOMAINS_TRANSCRIPT_HEX,
+            FRESH_PROFILE_TRANSCRIPT_PREFIX_HEX,
+            PROFILE_OWNER_COLLECTION_4_HEX,
+            PROFILE_SCENE_OWNER_ROW_HEX,
+            PROFILE_SYNTHETIC_ROOT_OWNER_ROW_HEX,
+            PROFILE_NODE_0_OWNER_ROW_HEX,
+            PROFILE_NODE_1_OWNER_ROW_HEX,
+            EMPTY_PROFILE_METADATA_TRANSCRIPT_HEX,
         ],
     );
     assert_eq!(snapshot.totals.node_count, 2);
     assert_eq!(snapshot.totals.root_count, 1);
     assert_eq!(snapshot.totals.edge_count, 1);
-    assert_eq!(snapshot.totals.transcript_bytes, 586);
-    assert_eq!(snapshot.totals.work_units, 71);
+    assert_eq!(snapshot.totals.transcript_bytes, 1_315);
+    assert_eq!(snapshot.totals.work_units, 140);
 }
 
 #[test]
@@ -1326,7 +1545,23 @@ fn point_geometry_known_vector_pins_complete_scene_framing() {
 
     assert_eq!(snapshot.digest, KNOWN_POINT_GEOMETRY_DIGEST);
     assert!(transcript.complete);
-    assert_hex(&transcript.bytes, KNOWN_POINT_GEOMETRY_TRANSCRIPT_HEX);
+    assert_hex_parts(
+        &transcript.bytes,
+        &[
+            KNOWN_POINT_GEOMETRY_TRANSCRIPT_HEX,
+            FRESH_PROFILE_TRANSCRIPT_PREFIX_HEX,
+            PROFILE_OWNER_COLLECTION_8_HEX,
+            PROFILE_SCENE_OWNER_ROW_HEX,
+            PROFILE_SYNTHETIC_ROOT_OWNER_ROW_HEX,
+            PROFILE_NODE_0_OWNER_ROW_HEX,
+            PROFILE_MATERIAL_0_OWNER_ROW_HEX,
+            PROFILE_LOGICAL_MESH_0_OWNER_ROW_HEX,
+            PROFILE_PRIMITIVE_0_OWNER_ROW_HEX,
+            PROFILE_ATTRIBUTE_0_OWNER_ROW_HEX,
+            PROFILE_MESH_INSTANCE_0_OWNER_ROW_HEX,
+            EMPTY_PROFILE_METADATA_TRANSCRIPT_HEX,
+        ],
+    );
     assert_eq!(snapshot.totals.node_count, 1);
     assert_eq!(snapshot.totals.material_count, 1);
     assert_eq!(snapshot.totals.logical_mesh_count, 1);
@@ -1346,8 +1581,8 @@ fn point_geometry_known_vector_pins_complete_scene_framing() {
     assert_eq!(snapshot.totals.canonical_scalar_count, 3);
     assert_eq!(snapshot.totals.f32_scalar_count, 3);
     assert_eq!(snapshot.totals.u32_scalar_count, 0);
-    assert_eq!(snapshot.totals.transcript_bytes, 1_059);
-    assert_eq!(snapshot.totals.work_units, 104);
+    assert_eq!(snapshot.totals.transcript_bytes, 1_996);
+    assert_eq!(snapshot.totals.work_units, 197);
     assert!(snapshot.preview.text.contains("material[0]"));
     assert!(
         snapshot
@@ -1448,13 +1683,26 @@ fn empty_scene_snapshot_is_complete_and_deterministic() {
     assert_eq!(first_snapshot.totals.deformation_mesh_instance_count, 0);
     assert_eq!(first_snapshot.totals.animation_clip_count, 0);
     assert_eq!(first_snapshot.totals.animation_channel_count, 0);
-    assert_eq!(first_snapshot.totals.transcript_bytes, 358);
-    assert_eq!(first_snapshot.totals.work_units, 33);
-    let empty_tail_bytes = EMPTY_CANONICAL_DOMAINS_TRANSCRIPT_HEX.len() / 2;
+    assert_eq!(first_snapshot.totals.profile_segment_count, 1);
+    assert_eq!(first_snapshot.totals.profile_resource_count, 1);
+    assert_eq!(first_snapshot.totals.profile_source_count, 1);
+    assert_eq!(first_snapshot.totals.profile_provenance_node_count, 1);
+    assert_eq!(first_snapshot.totals.profile_owner_count, 2);
+    assert_eq!(first_snapshot.totals.profile_attachment_count, 2);
+    assert_eq!(first_snapshot.totals.transcript_bytes, 983);
+    assert_eq!(first_snapshot.totals.work_units, 90);
     assert!(transcript.complete);
-    assert_hex(
-        &transcript.bytes[transcript.bytes.len() - empty_tail_bytes..],
-        EMPTY_CANONICAL_DOMAINS_TRANSCRIPT_HEX,
+    assert_hex_parts(
+        &transcript.bytes,
+        &[
+            EMPTY_SCENE_TRANSCRIPT_PREFIX_HEX,
+            EMPTY_PRE_PROFILE_DOMAINS_TRANSCRIPT_HEX,
+            FRESH_PROFILE_TRANSCRIPT_PREFIX_HEX,
+            PROFILE_OWNER_COLLECTION_2_HEX,
+            PROFILE_SCENE_OWNER_ROW_HEX,
+            PROFILE_SYNTHETIC_ROOT_OWNER_ROW_HEX,
+            EMPTY_PROFILE_METADATA_TRANSCRIPT_HEX,
+        ],
     );
 }
 
@@ -1478,7 +1726,9 @@ fn geometry_tables_payload_kinds_and_totals_are_complete() {
     assert_eq!(snapshot.totals.canonical_scalar_count, 36);
     assert_eq!(snapshot.totals.f32_scalar_count, 33);
     assert_eq!(snapshot.totals.u32_scalar_count, 3);
-    assert_eq!(snapshot.totals.work_units, 174);
+    assert_eq!(snapshot.totals.profile_owner_count, 15);
+    assert_eq!(snapshot.totals.profile_attachment_count, 15);
+    assert_eq!(snapshot.totals.work_units, 309);
     assert!(snapshot.preview.text.contains("payload=dense"));
     assert!(snapshot.preview.text.contains("payload=sparse"));
     assert!(snapshot.preview.text.contains("sparse_default(present"));
@@ -2050,12 +2300,14 @@ fn traversal_scales_linearly_while_preview_stays_bounded() {
         assert!(snapshot.preview.text.len() <= 64);
         assert_eq!(
             snapshot.totals.transcript_bytes,
-            358 + 99 * node_count as u64
+            983 + 151 * node_count as u64
         );
-        assert_eq!(snapshot.totals.work_units, 33 + 16 * node_count as u64);
+        assert_eq!(snapshot.totals.work_units, 90 + 22 * node_count as u64);
         assert_eq!(snapshot.totals.node_count, node_count);
         assert_eq!(snapshot.totals.root_count, 1);
         assert_eq!(snapshot.totals.edge_count, node_count - 1);
+        assert_eq!(snapshot.totals.profile_owner_count, node_count + 2);
+        assert_eq!(snapshot.totals.profile_attachment_count, node_count + 2);
         observed.push((
             snapshot.totals.transcript_bytes,
             snapshot.totals.work_units,
@@ -2064,12 +2316,12 @@ fn traversal_scales_linearly_while_preview_stays_bounded() {
         ));
     }
 
-    assert_eq!(observed[1].0 - observed[0].0, 9 * 99);
-    assert_eq!(observed[2].0 - observed[0].0, 99 * 99);
-    assert_eq!(observed[1].1 - observed[0].1, 9 * 16);
-    assert_eq!(observed[2].1 - observed[0].1, 99 * 16);
-    assert_eq!(observed[3].0 - observed[0].0, 999 * 99);
-    assert_eq!(observed[3].1 - observed[0].1, 999 * 16);
+    assert_eq!(observed[1].0 - observed[0].0, 9 * 151);
+    assert_eq!(observed[2].0 - observed[0].0, 99 * 151);
+    assert_eq!(observed[1].1 - observed[0].1, 9 * 22);
+    assert_eq!(observed[2].1 - observed[0].1, 99 * 22);
+    assert_eq!(observed[3].0 - observed[0].0, 999 * 151);
+    assert_eq!(observed[3].1 - observed[0].1, 999 * 22);
     assert_eq!(observed[1].2, observed[0].2);
     assert_eq!(observed[2].2, observed[0].2);
     assert_eq!(observed[3].2, observed[0].2);

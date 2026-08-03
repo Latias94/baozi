@@ -1,12 +1,15 @@
 use std::cell::Cell;
 use std::rc::Rc;
+use std::sync::OnceLock;
 
 use thiserror::Error;
 
 use crate::entity::{AuthoredTransform, AuthoredTransformKind};
 use crate::math::Mat4;
+use crate::provenance::{ResourceIdentity, SourceObjectKind, SourceObjectLocator};
 use crate::{
-    SceneReservationKind, SceneValidationControl, SceneValidationLimits, SceneValidationWork,
+    FormatId, SceneReservationKind, SceneValidationControl, SceneValidationLimits,
+    SceneValidationWork,
 };
 
 use super::plan::{
@@ -15,8 +18,163 @@ use super::plan::{
 use super::*;
 
 mod geometry;
+mod profile;
 mod scene;
 mod spatial;
+
+const PROFILE_SOURCE_PROVENANCE: [ProvenanceLocalId; 1] = [ProvenanceLocalId::new(0)];
+
+struct ProfileFixtureVocabulary {
+    resource: ResourceIdentity,
+    stability: ResourceIdentityStability,
+    format: FormatId,
+    locator: SourceObjectLocator,
+}
+
+fn profile_fixture_vocabulary() -> &'static ProfileFixtureVocabulary {
+    static VOCABULARY: OnceLock<ProfileFixtureVocabulary> = OnceLock::new();
+    VOCABULARY.get_or_init(|| ProfileFixtureVocabulary {
+        resource: ResourceIdentity::new("fixtures/production/input")
+            .expect("test profile resource identity"),
+        stability: ResourceIdentityStability::session_opaque(SessionOpaqueReason::CallerLabel),
+        format: FormatId::new("org.baozi.fixture").expect("test profile format"),
+        locator: SourceObjectLocator::indexed(SourceObjectKind::Document, 0),
+    })
+}
+
+struct ProfileFixture {
+    resources: [ObservedResourceAuthoring<'static>; 1],
+    sources: [SourceIdentityAuthoring<'static>; 1],
+    provenance: [ProvenanceNodeAuthoring<'static>; 1],
+    owners: Vec<OwnerProvenanceAuthoring<'static>>,
+}
+
+impl ProfileFixture {
+    fn batch(&self) -> ProfileAuthoringBatch<'_> {
+        ProfileAuthoringBatch::new(
+            LineageAuthoringBatch::new(
+                &self.resources,
+                &self.sources,
+                &self.provenance,
+                &self.owners,
+            ),
+            MetadataAuthoringBatch::empty(),
+        )
+    }
+}
+
+fn profile_fixture(
+    spatial: SpatialAuthoringBatch<'_>,
+    nodes: NodeAuthoringBatch<'_>,
+    appearance: AppearanceAuthoringBatch<'_>,
+    geometry: GeometryAuthoringBatch<'_>,
+    deformation: DeformationAuthoringBatch<'_>,
+    animation: AnimationAuthoringBatch<'_>,
+) -> ProfileFixture {
+    let vocabulary = profile_fixture_vocabulary();
+    let mut owners = vec![ProfileOwner::Scene, ProfileOwner::SyntheticRoot];
+    owners.extend(nodes.nodes().iter().enumerate().map(|(index, _)| {
+        ProfileOwner::Node(NodeLocalId::new(
+            u32::try_from(index).expect("test node index"),
+        ))
+    }));
+    owners.extend(indexed_profile_owners(
+        spatial.cameras().len(),
+        ProfileOwner::Camera,
+    ));
+    owners.extend(indexed_profile_owners(
+        spatial.lights().len(),
+        ProfileOwner::Light,
+    ));
+    owners.extend(indexed_profile_owners(
+        appearance.images().len(),
+        ProfileOwner::Image,
+    ));
+    owners.extend(indexed_profile_owners(
+        appearance.samplers().len(),
+        ProfileOwner::Sampler,
+    ));
+    owners.extend(indexed_profile_owners(
+        appearance.textures().len(),
+        ProfileOwner::Texture,
+    ));
+    owners.extend(indexed_profile_owners(
+        appearance.bindings().len(),
+        ProfileOwner::TextureBinding,
+    ));
+    owners.extend(indexed_profile_owners(
+        appearance.materials().len(),
+        ProfileOwner::Material,
+    ));
+    owners.extend(indexed_profile_owners(
+        geometry.logical_meshes().len(),
+        ProfileOwner::LogicalMesh,
+    ));
+    owners.extend(indexed_profile_owners(
+        geometry.primitives().len(),
+        ProfileOwner::Primitive,
+    ));
+    owners.extend(indexed_profile_owners(
+        geometry.attributes().len(),
+        ProfileOwner::Attribute,
+    ));
+    owners.extend(indexed_profile_owners(
+        geometry.mesh_instances().len(),
+        ProfileOwner::MeshInstance,
+    ));
+    owners.extend(indexed_profile_owners(
+        deformation.skins().len(),
+        ProfileOwner::Skin,
+    ));
+    owners.extend(indexed_profile_owners(
+        deformation.morph_target_definitions().len(),
+        ProfileOwner::MorphDefinition,
+    ));
+    let morph_delta_count = deformation
+        .primitives()
+        .iter()
+        .flat_map(|primitive| primitive.morph_targets())
+        .map(|target| target.deltas().len())
+        .sum();
+    owners.extend(indexed_profile_owners(
+        morph_delta_count,
+        ProfileOwner::MorphDelta,
+    ));
+    owners.extend(indexed_profile_owners(
+        animation.clips().len(),
+        ProfileOwner::AnimationClip,
+    ));
+    owners.extend(indexed_profile_owners(
+        animation.channels().len(),
+        ProfileOwner::AnimationChannel,
+    ));
+
+    ProfileFixture {
+        resources: [ObservedResourceAuthoring::new(
+            &vocabulary.resource,
+            &vocabulary.stability,
+        )],
+        sources: [SourceIdentityAuthoring::new(
+            ResourceIdentityLocalId::new(0),
+            &vocabulary.format,
+            &vocabulary.locator,
+        )],
+        provenance: [ProvenanceNodeAuthoring::source(SourceIdentityLocalId::new(
+            0,
+        ))],
+        owners: owners
+            .into_iter()
+            .map(|owner| OwnerProvenanceAuthoring::new(owner, &PROFILE_SOURCE_PROVENANCE))
+            .collect(),
+    }
+}
+
+fn indexed_profile_owners(
+    len: usize,
+    owner: impl Fn(u32) -> ProfileOwner,
+) -> impl Iterator<Item = ProfileOwner> {
+    (0..len).map(move |index| owner(u32::try_from(index).expect("test profile owner index")))
+}
 
 #[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
 enum TestControlError {

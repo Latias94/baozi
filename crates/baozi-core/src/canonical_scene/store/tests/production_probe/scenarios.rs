@@ -7,6 +7,7 @@ use crate::derived::DerivedAbsenceReason;
 use crate::entity::AuthoredTransform;
 use crate::identity::{NodeId, SceneGenerationId};
 use crate::math::{Quat, Vec3};
+use crate::provenance::OptionsDigest;
 use crate::remap::RemapChange;
 
 use super::super::super::construction::node_scene::edit::{
@@ -631,10 +632,13 @@ pub(super) fn collect_gltf_capability() -> GltfCapabilityReport {
     let mut edit_terminal = None;
     let mut edit_physical_before_handoff = None;
     let edit_allocations = allocation_counter::measure(|| {
-        let NodeTransformEditStart::Changed(pending) =
-            try_begin_node_transform_edit(&parts.scene, edit_node, edit_replacement)
-                .expect("changed glTF authored bits must enter edit planning")
-        else {
+        let NodeTransformEditStart::Changed(pending) = try_begin_node_transform_edit(
+            &parts.scene,
+            edit_node,
+            edit_replacement,
+            OptionsDigest::sha256([0; 32]),
+        )
+        .expect("changed glTF authored bits must enter edit planning") else {
             panic!("changed glTF authored bits cannot classify as unchanged");
         };
         let prepared = pending

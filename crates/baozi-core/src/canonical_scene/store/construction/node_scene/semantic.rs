@@ -13,6 +13,7 @@ mod animation;
 mod appearance;
 mod deformation;
 mod geometry;
+mod profile;
 mod spatial;
 
 pub(in crate::canonical_scene::store) use animation::{
@@ -28,6 +29,14 @@ pub(in crate::canonical_scene::store) use geometry::{
     NodeSceneGeometryAttributePayload, NodeSceneGeometryAttributeSemantic, NodeSceneGeometryCursor,
     NodeSceneGeometryF32Cursor, NodeSceneGeometryNormalization, NodeSceneGeometryPayloadKind,
     NodeSceneGeometryScalarKind, NodeSceneGeometryU32Cursor,
+};
+pub(in crate::canonical_scene::store) use profile::{
+    NodeSceneProfileCursor, NodeSceneProfileDigest, NodeSceneProfileEvidence,
+    NodeSceneProfileMetadataArray, NodeSceneProfileMetadataArrayKind,
+    NodeSceneProfileMetadataEntry, NodeSceneProfileMetadataValue, NodeSceneProfileOperation,
+    NodeSceneProfileOperationKind, NodeSceneProfileOwner, NodeSceneProfileProvenance,
+    NodeSceneProfileProvenanceKind, NodeSceneProfileResource, NodeSceneProfileResourceStability,
+    NodeSceneProfileSegmentCursor, NodeSceneProfileSource, NodeSceneProfileSourceLocator,
 };
 pub(in crate::canonical_scene::store) use spatial::{
     NodeSceneSpatialCamera, NodeSceneSpatialLight, NodeSceneSpatialPlacementCursor,
@@ -77,6 +86,7 @@ pub(in crate::canonical_scene::store) struct NodeSceneSemanticView<'scene> {
     geometry: geometry::NodeSceneGeometryTables<'scene>,
     deformation: deformation::NodeSceneDeformationTables<'scene>,
     animation: animation::NodeSceneAnimationTables<'scene>,
+    profile: profile::NodeSceneProfileTables<'scene>,
     proof: NodeSceneValidationProof,
     #[cfg(test)]
     read_fault: Option<NodeSceneSemanticReadFault>,
@@ -228,6 +238,7 @@ impl<'scene> NodeSceneSemanticView<'scene> {
         let deformation =
             deformation::NodeSceneDeformationTables::try_new(&scene.canonical, proof)?;
         let animation = animation::NodeSceneAnimationTables::try_new(&scene.canonical, proof)?;
+        let profile = profile::NodeSceneProfileTables::try_new(&scene.canonical, proof)?;
 
         let expected_node_rows = proof
             .source_node_count()
@@ -289,6 +300,7 @@ impl<'scene> NodeSceneSemanticView<'scene> {
             geometry,
             deformation,
             animation,
+            profile,
             proof,
             #[cfg(test)]
             read_fault: scene.semantic_read_fault,
@@ -445,6 +457,7 @@ impl<'scene> NodeSceneSemanticView<'scene> {
             geometry: Some(self.geometry.into_cursor(self.proof)),
             deformation: Some(self.deformation.into_cursor(self.proof)),
             animation: Some(self.animation.into_cursor(self.proof)),
+            profile: Some(self.profile.into_cursor()),
             proof: self.proof,
             roots: Some(roots),
             next_node_index: 0,
@@ -465,6 +478,7 @@ pub(in crate::canonical_scene::store) struct NodeSceneSemanticCursor<'scene> {
     geometry: Option<NodeSceneGeometryCursor<'scene>>,
     deformation: Option<NodeSceneDeformationCursor<'scene>>,
     animation: Option<NodeSceneAnimationCursor<'scene>>,
+    profile: Option<NodeSceneProfileCursor<'scene>>,
     proof: NodeSceneValidationProof,
     roots: Option<NodeSceneChildCursor<'scene>>,
     next_node_index: usize,
@@ -480,6 +494,7 @@ enum NodeSceneCursorPhase {
     Geometry,
     Deformation,
     Animation,
+    Profile,
 }
 
 impl<'scene> NodeSceneSemanticCursor<'scene> {
@@ -635,15 +650,30 @@ impl<'scene> NodeSceneSemanticCursor<'scene> {
             .ok_or_else(|| invariant("animation cursor was already consumed"))
     }
 
+    /// Advances into retained lineage and metadata after animation has been exhausted.
+    pub(in crate::canonical_scene::store) fn profile(
+        &mut self,
+    ) -> NodeSceneSemanticResult<&mut NodeSceneProfileCursor<'scene>> {
+        self.ensure_node_phase_finished()?;
+        self.close_appearance_before_geometry()?;
+        self.close_geometry_before_deformation()?;
+        self.close_deformation_before_animation()?;
+        self.close_animation_before_profile()?;
+        self.profile
+            .as_mut()
+            .ok_or_else(|| invariant("profile cursor was already consumed"))
+    }
+
     /// Closes every semantic phase reached by this proof-qualified traversal.
     pub(in crate::canonical_scene::store) fn finish(mut self) -> NodeSceneSemanticResult<()> {
         self.ensure_node_phase_finished()?;
         self.close_appearance_before_geometry()?;
         self.close_geometry_before_deformation()?;
         self.close_deformation_before_animation()?;
-        self.animation
+        self.close_animation_before_profile()?;
+        self.profile
             .take()
-            .ok_or_else(|| invariant("animation cursor was already consumed"))?
+            .ok_or_else(|| invariant("profile cursor was already consumed"))?
             .finish()?;
         Ok(())
     }
@@ -700,6 +730,21 @@ impl<'scene> NodeSceneSemanticCursor<'scene> {
         } else if self.deformation.is_some() {
             return Err(invariant(
                 "deformation cursor remains live after entering animation",
+            ));
+        }
+        Ok(())
+    }
+
+    fn close_animation_before_profile(&mut self) -> NodeSceneSemanticResult<()> {
+        if self.phase < NodeSceneCursorPhase::Profile {
+            self.animation
+                .take()
+                .ok_or_else(|| invariant("animation cursor was already consumed"))?
+                .finish()?;
+            self.phase = NodeSceneCursorPhase::Profile;
+        } else if self.animation.is_some() {
+            return Err(invariant(
+                "animation cursor remains live after entering profile",
             ));
         }
         Ok(())

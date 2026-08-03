@@ -19,7 +19,7 @@ use crate::math::{Color, Vec2, Vec3};
 
 use super::CanonicalSchema;
 
-pub(in super::super) const APPEARANCE_SCHEMA_REVISION: u32 = 3;
+pub(in super::super) const APPEARANCE_SCHEMA_REVISION: u32 = 1;
 
 pub(in super::super) const APPEARANCE_DIRECTORY_FIELD_COUNT: usize = 21;
 pub(in super::super) const APPEARANCE_IMAGE_FIELD_COUNT: usize = 10;

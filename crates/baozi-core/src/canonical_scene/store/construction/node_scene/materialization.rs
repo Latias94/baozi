@@ -9,16 +9,19 @@ use crate::SceneValidationLimits;
 #[cfg(test)]
 use crate::canonical_scene::store::production::{
     AnimationAuthoringBatch, AppearanceAuthoringBatch, DeformationAuthoringBatch,
-    GeometryAuthoringBatch, NodeAuthoringBatch, SpatialAuthoringBatch,
+    GeometryAuthoringBatch, LineageAuthoringBatch, MetadataAuthoringBatch, NodeAuthoringBatch,
+    NodeLocalId, OwnerProvenanceAuthoring, ProfileAuthoringBatch, ProfileOwner, ProvenanceLocalId,
+    ProvenanceNodeAuthoring, ProvenanceOperationAuthoring, SpatialAuthoringBatch,
 };
 use crate::canonical_scene::store::production::{
-    AnimationTargetCatalog, OperationAuthoringControl, Presence, SceneAuthoringBatch,
-    ValidatedAnimationBatch, ValidatedAppearanceBatch, ValidatedDeformationBatch,
-    ValidatedGeometryBatch, ValidatedNodeBatch, ValidatedSpatialBatch,
-    animation_limits_after_deformation, appearance_limits_after_nodes,
+    AnimationTargetCatalog, OperationAuthoringControl, Presence, ProfileOwnerCatalog,
+    SceneAuthoringBatch, ValidatedAnimationBatch, ValidatedAppearanceBatch,
+    ValidatedDeformationBatch, ValidatedGeometryBatch, ValidatedNodeBatch, ValidatedProfileBatch,
+    ValidatedSpatialBatch, animation_limits_after_deformation, appearance_limits_after_nodes,
     deformation_limits_after_geometry, geometry_limits_after_appearance, node_limits_after_spatial,
-    validate_animation_batch, validate_appearance_batch, validate_deformation_batch,
-    validate_geometry_batch, validate_node_batch, validate_scene_aggregate, validate_spatial_batch,
+    profile_limits_after_animation, validate_animation_batch, validate_appearance_batch,
+    validate_deformation_batch, validate_geometry_batch, validate_node_batch,
+    validate_profile_batch, validate_scene_aggregate, validate_spatial_batch,
 };
 use crate::canonical_scene::store::schema::animation::AnimationDirectorySchema;
 use crate::canonical_scene::store::schema::appearance::AppearanceDirectorySchema;
@@ -38,6 +41,8 @@ use crate::canonical_scene::store::schema::{
 use crate::entity::AuthoredTransformKind;
 use crate::identity::{ReservedSceneGeneration, SceneGenerationError, SceneGenerationId};
 #[cfg(test)]
+use crate::provenance::{OperationKind, OptionsDigest};
+#[cfg(test)]
 use crate::scene_space::SceneSpace;
 
 use super::super::{
@@ -53,6 +58,7 @@ use super::geometry::{
     GeometryMaterializationPlans, GeometryReferenceScratch, GeometryReferenceScratchPlan,
     retain_geometry,
 };
+use super::profile::{ProfileMaterializationPlans, retain_profile};
 use super::publication::{
     node_scene_failure_code, post_evidence_failure_code,
     prepare_node_minimal_fallback_from_assembly, prepare_node_minimal_fallback_from_open_recovery,
@@ -67,6 +73,60 @@ use super::{
     ValidatedNodeSceneConstruction,
 };
 use spatial::{RetainedSpatialRefs, SpatialMaterializationPlans, retain_spatial};
+
+#[cfg(test)]
+const TEST_PROFILE_MAX_NODES: usize = 64;
+#[cfg(test)]
+const TEST_PROFILE_PROVENANCE: [ProvenanceLocalId; 1] = [ProvenanceLocalId::new(0)];
+#[cfg(test)]
+static TEST_PROFILE_OPERATION_KIND: OperationKind = OperationKind::Generated;
+#[cfg(test)]
+static TEST_PROFILE_PROVENANCE_NODES: [ProvenanceNodeAuthoring<'static>; 1] =
+    [ProvenanceNodeAuthoring::operation(
+        ProvenanceOperationAuthoring::new(
+            &TEST_PROFILE_OPERATION_KIND,
+            OptionsDigest::sha256([0; 32]),
+            &[],
+            &[],
+        ),
+    )];
+#[cfg(test)]
+static TEST_PROFILE_OWNER_PROVENANCE: [OwnerProvenanceAuthoring<'static>;
+    TEST_PROFILE_MAX_NODES + 2] = test_profile_owner_provenance();
+
+#[cfg(test)]
+const fn test_profile_owner_provenance()
+-> [OwnerProvenanceAuthoring<'static>; TEST_PROFILE_MAX_NODES + 2] {
+    let mut rows = [OwnerProvenanceAuthoring::new(ProfileOwner::Scene, &TEST_PROFILE_PROVENANCE);
+        TEST_PROFILE_MAX_NODES + 2];
+    rows[1] = OwnerProvenanceAuthoring::new(ProfileOwner::SyntheticRoot, &TEST_PROFILE_PROVENANCE);
+    let mut node = 0;
+    while node < TEST_PROFILE_MAX_NODES {
+        rows[node + 2] = OwnerProvenanceAuthoring::new(
+            ProfileOwner::Node(NodeLocalId::new(node as u32)),
+            &TEST_PROFILE_PROVENANCE,
+        );
+        node += 1;
+    }
+    rows
+}
+
+#[cfg(test)]
+fn test_node_profile(node_count: usize) -> ProfileAuthoringBatch<'static> {
+    assert!(
+        node_count <= TEST_PROFILE_MAX_NODES,
+        "node-only test profile supports at most {TEST_PROFILE_MAX_NODES} authored nodes"
+    );
+    ProfileAuthoringBatch::new(
+        LineageAuthoringBatch::new(
+            &[],
+            &[],
+            &TEST_PROFILE_PROVENANCE_NODES,
+            &TEST_PROFILE_OWNER_PROVENANCE[..node_count + 2],
+        ),
+        MetadataAuthoringBatch::empty(),
+    )
+}
 
 impl RejectedNodeSceneConstruction {
     pub(in crate::canonical_scene::store) const fn failure(
@@ -106,6 +166,7 @@ impl SceneConstructionOperation {
         input: NodeAuthoringBatch<'input>,
         limits: SceneValidationLimits,
     ) -> Result<ValidatedNodeSceneConstruction<'input>, RejectedNodeSceneConstruction> {
+        let profile = test_node_profile(input.nodes().len());
         self.try_validate_scene_batch(
             SceneAuthoringBatch::new(
                 SpatialAuthoringBatch::new(&SceneSpace::UNKNOWN, &[], &[]),
@@ -114,6 +175,7 @@ impl SceneConstructionOperation {
                 GeometryAuthoringBatch::empty(),
                 DeformationAuthoringBatch::empty(),
                 AnimationAuthoringBatch::empty(),
+                profile,
             ),
             limits,
         )
@@ -306,6 +368,64 @@ impl SceneConstructionOperation {
                 });
             }
         };
+        let profile_limits = match profile_limits_after_animation(&animations, animation_limits) {
+            Ok(profile_limits) => profile_limits,
+            Err(failure) => {
+                drop(animations);
+                drop(deformation);
+                drop(geometry);
+                drop(appearance);
+                drop(nodes);
+                drop(spatial);
+                return Err(RejectedNodeSceneConstruction {
+                    operation: self,
+                    failure: NodeSceneConstructionRejection::Aggregate(failure),
+                });
+            }
+        };
+        let owners = match ProfileOwnerCatalog::from_validated(
+            &spatial,
+            &nodes,
+            &appearance,
+            &geometry,
+            &deformation,
+            &animations,
+        ) {
+            Ok(owners) => owners,
+            Err(failure) => {
+                drop(animations);
+                drop(deformation);
+                drop(geometry);
+                drop(appearance);
+                drop(nodes);
+                drop(spatial);
+                return Err(RejectedNodeSceneConstruction {
+                    operation: self,
+                    failure: NodeSceneConstructionRejection::ProfileOwnerCatalog(failure),
+                });
+            }
+        };
+        let profile_validation = {
+            let checkpoint = self.raw.control_checkpoint();
+            let mut control =
+                OperationAuthoringControl::new(checkpoint, keys.phase, keys.dimension);
+            validate_profile_batch(input.profile(), owners, profile_limits, &mut control)
+        };
+        let profile = match profile_validation {
+            Ok(profile) => profile,
+            Err(failure) => {
+                drop(animations);
+                drop(deformation);
+                drop(geometry);
+                drop(appearance);
+                drop(nodes);
+                drop(spatial);
+                return Err(RejectedNodeSceneConstruction {
+                    operation: self,
+                    failure: NodeSceneConstructionRejection::ProfileAuthoring(failure),
+                });
+            }
+        };
         if let Err(failure) = validate_scene_aggregate(
             &spatial,
             &nodes,
@@ -313,8 +433,10 @@ impl SceneConstructionOperation {
             &geometry,
             &deformation,
             &animations,
+            &profile,
             limits,
         ) {
+            drop(profile);
             drop(animations);
             drop(deformation);
             drop(geometry);
@@ -328,6 +450,7 @@ impl SceneConstructionOperation {
         }
         let SceneConstructionOperation { raw, brand, keys } = self;
         Ok(ValidatedNodeSceneConstruction {
+            profile,
             animations,
             deformation,
             geometry,
@@ -366,9 +489,12 @@ struct SceneDomainDirectoryRefs {
     geometry: CanonicalBlockRef<SceneGeometryDirectorySchema>,
     deformation: CanonicalBlockRef<DeformationDirectorySchema>,
     animation: CanonicalBlockRef<AnimationDirectorySchema>,
+    profile:
+        CanonicalBlockRef<crate::canonical_scene::store::schema::profile::ProfileDirectorySchema>,
 }
 
 struct ValidatedNodeSceneBatches<'input> {
+    profile: ValidatedProfileBatch<'input, RetainedStoreReservation<SceneConstructionOwner>>,
     animations: ValidatedAnimationBatch<'input, RetainedStoreReservation<SceneConstructionOwner>>,
     deformation:
         ValidatedDeformationBatch<'input, RetainedStoreReservation<SceneConstructionOwner>>,
@@ -388,6 +514,7 @@ struct NodeSceneMaterializationPlans {
     geometry: GeometryMaterializationPlans,
     deformation: DeformationMaterializationPlans,
     animation: AnimationMaterializationPlans,
+    profile: ProfileMaterializationPlans,
     directory: RecordPlan,
     publication: RetainedStorePublicationPlan,
     canonical_block_count: u32,
@@ -396,11 +523,13 @@ struct NodeSceneMaterializationPlans {
     source_root_count: u32,
     transform_scalar_count: u32,
     payload_block_count: u32,
+    shareable_leaf_block_count: u32,
     build_invariant: StoreBuildError,
 }
 
 impl NodeSceneMaterializationPlans {
     fn evidence_counts(&self) -> SceneEvidenceCounts {
+        let profile = self.profile.evidence_counts();
         SceneEvidenceCounts {
             canonical_block_count: self.canonical_block_count,
             node_count: self.node_count,
@@ -424,30 +553,30 @@ impl NodeSceneMaterializationPlans {
             animation_clip_count: self.animation.clip_count(),
             animation_channel_count: self.animation.channel_count(),
             payload_block_count: self.payload_block_count,
+            profile_segment_count: profile.segments,
+            profile_resource_count: profile.resources,
+            profile_source_count: profile.sources,
+            profile_provenance_count: profile.provenance,
+            profile_operation_count: profile.operations,
+            profile_parent_count: profile.parents,
+            profile_owner_count: profile.owners,
+            profile_attachment_count: profile.attachments,
+            profile_metadata_entry_count: profile.metadata_entries,
+            shareable_leaf_block_count: self.shareable_leaf_block_count,
         }
     }
 
     fn new(
-        spatial_batch: &ValidatedSpatialBatch<'_, RetainedStoreReservation<SceneConstructionOwner>>,
-        nodes_batch: &ValidatedNodeBatch<'_, RetainedStoreReservation<SceneConstructionOwner>>,
-        appearance_batch: &ValidatedAppearanceBatch<
-            '_,
-            RetainedStoreReservation<SceneConstructionOwner>,
-        >,
-        geometry_batch: &ValidatedGeometryBatch<
-            '_,
-            RetainedStoreReservation<SceneConstructionOwner>,
-        >,
-        deformation_batch: &ValidatedDeformationBatch<
-            '_,
-            RetainedStoreReservation<SceneConstructionOwner>,
-        >,
-        animation_batch: &ValidatedAnimationBatch<
-            '_,
-            RetainedStoreReservation<SceneConstructionOwner>,
-        >,
+        batches: &ValidatedNodeSceneBatches<'_>,
         keys: SceneStoreKeys,
     ) -> Result<Self, StorePlanError> {
+        let spatial_batch = &batches.spatial;
+        let nodes_batch = &batches.nodes;
+        let appearance_batch = &batches.appearance;
+        let geometry_batch = &batches.geometry;
+        let deformation_batch = &batches.deformation;
+        let animation_batch = &batches.animations;
+        let profile_batch = &batches.profile;
         let node_count = u32::try_from(nodes_batch.canonical_node_count())
             .map_err(|_| StorePlanError::SizeOverflow)?;
         let source_node_count = node_count
@@ -480,6 +609,7 @@ impl NodeSceneMaterializationPlans {
         let geometry = GeometryMaterializationPlans::new(geometry_batch)?;
         let deformation = DeformationMaterializationPlans::new(deformation_batch)?;
         let animation = AnimationMaterializationPlans::new(animation_batch)?;
+        let profile = ProfileMaterializationPlans::new(profile_batch)?;
         let directory = RecordPlan::new(1, SCENE_DIRECTORY_FIELD_COUNT)?;
         let references = if source_node_count == 0 {
             None
@@ -507,15 +637,22 @@ impl NodeSceneMaterializationPlans {
             .and_then(|count| count.checked_add(geometry.canonical_block_count()))
             .and_then(|count| count.checked_add(deformation.canonical_block_count()))
             .and_then(|count| count.checked_add(animation.canonical_block_count()))
+            .and_then(|count| count.checked_add(profile.canonical_block_count()))
             .ok_or(StorePlanError::SizeOverflow)?;
         let canonical_block_count =
             u32::try_from(canonical_block_count_usize).map_err(|_| StorePlanError::SizeOverflow)?;
-        let payload_block_count = appearance
+        let domain_payload_block_count = appearance
             .payload_block_count()
             .checked_add(spatial.payload_block_count())
             .and_then(|count| count.checked_add(geometry.payload_block_count()))
             .and_then(|count| count.checked_add(deformation.payload_block_count()))
             .and_then(|count| count.checked_add(animation.payload_block_count()))
+            .ok_or(StorePlanError::SizeOverflow)?;
+        let payload_block_count = domain_payload_block_count
+            .checked_add(profile.payload_block_count())
+            .ok_or(StorePlanError::SizeOverflow)?;
+        let shareable_leaf_block_count = domain_payload_block_count
+            .checked_add(profile.shareable_leaf_block_count())
             .ok_or(StorePlanError::SizeOverflow)?;
         let evidence_block_count = [Some(evidence)].into_iter().flatten().count();
 
@@ -554,6 +691,7 @@ impl NodeSceneMaterializationPlans {
             geometry,
             deformation,
             animation,
+            profile,
             directory,
             publication,
             canonical_block_count,
@@ -562,6 +700,7 @@ impl NodeSceneMaterializationPlans {
             source_root_count,
             transform_scalar_count,
             payload_block_count,
+            shareable_leaf_block_count,
             build_invariant,
         })
     }
@@ -691,6 +830,7 @@ impl ValidatedNodeSceneConstruction<'_> {
         mut faults: NodeSceneBuildFaults,
     ) -> Result<NodeSceneDraftBuild, SceneConstructionError> {
         let Self {
+            profile,
             animations,
             deformation,
             geometry: geometry_batch,
@@ -700,6 +840,7 @@ impl ValidatedNodeSceneConstruction<'_> {
             owner,
         } = self;
         let batches = ValidatedNodeSceneBatches {
+            profile,
             animations,
             deformation,
             geometry: geometry_batch,
@@ -708,15 +849,7 @@ impl ValidatedNodeSceneConstruction<'_> {
             spatial,
         };
         let FreshNodeSceneOwner { raw, brand, keys } = owner;
-        let plans = match NodeSceneMaterializationPlans::new(
-            &batches.spatial,
-            &batches.nodes,
-            &batches.appearance,
-            &batches.geometry,
-            &batches.deformation,
-            &batches.animations,
-            keys,
-        ) {
+        let plans = match NodeSceneMaterializationPlans::new(&batches, keys) {
             Ok(plans) => plans,
             Err(_cause) => {
                 drop(batches);
@@ -931,6 +1064,22 @@ impl ValidatedNodeSceneConstruction<'_> {
                 ));
             }
         };
+        let profile_refs = match retain_profile(
+            &mut assembly,
+            &plans.profile,
+            &batches.profile,
+            keys,
+            &mut work,
+            plans.build_invariant,
+        ) {
+            Ok(profile) => profile,
+            Err(cause) => {
+                drop(batches);
+                return NodeSceneDraftBuild::failure(prepare_node_post_evidence_failure(
+                    assembly, evidence, &plans, cause,
+                ));
+            }
+        };
         let directory = match retain_node_scene_directory(
             &mut assembly,
             plans.directory,
@@ -945,6 +1094,7 @@ impl ValidatedNodeSceneConstruction<'_> {
                 geometry: geometry_refs.directory(),
                 deformation: deformation_refs.directory(),
                 animation: animation_refs.directory(),
+                profile: profile_refs.directory(),
             },
             &plans,
             keys,
@@ -1031,7 +1181,17 @@ fn retain_node_scene_evidence_counts(
             row.write_scalar(counts.morph_delta_count)?;
             row.write_scalar(counts.animation_clip_count)?;
             row.write_scalar(counts.animation_channel_count)?;
-            row.write_scalar(counts.payload_block_count)
+            row.write_scalar(counts.payload_block_count)?;
+            row.write_scalar(counts.profile_segment_count)?;
+            row.write_scalar(counts.profile_resource_count)?;
+            row.write_scalar(counts.profile_source_count)?;
+            row.write_scalar(counts.profile_provenance_count)?;
+            row.write_scalar(counts.profile_operation_count)?;
+            row.write_scalar(counts.profile_parent_count)?;
+            row.write_scalar(counts.profile_owner_count)?;
+            row.write_scalar(counts.profile_attachment_count)?;
+            row.write_scalar(counts.profile_metadata_entry_count)?;
+            row.write_scalar(counts.shareable_leaf_block_count)
         })
     })
 }
@@ -1274,6 +1434,7 @@ fn retain_node_scene_directory(
         geometry,
         deformation,
         animation,
+        profile,
     } = domains;
     assembly
         .try_retain_canonical_records_controlled(
@@ -1313,7 +1474,8 @@ fn retain_node_scene_directory(
                         row.write_record_ref(appearance.into_store())?;
                         row.write_record_ref(geometry.into_store())?;
                         row.write_record_ref(deformation.into_store())?;
-                        row.write_record_ref(animation.into_store())
+                        row.write_record_ref(animation.into_store())?;
+                        row.write_record_ref(profile.into_store())
                     })
                     .map_err(StoreControlledError::from)
             },

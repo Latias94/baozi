@@ -16,10 +16,11 @@ use super::semantic::{
 mod animation;
 mod appearance;
 mod deformation;
+mod profile;
 mod spatial;
 
 const CANONICAL_SCENE_SNAPSHOT_DOMAIN: &str = "baozi.canonical-scene.snapshot";
-const CANONICAL_SCENE_SNAPSHOT_SCHEMA_REVISION: u32 = 5;
+const CANONICAL_SCENE_SNAPSHOT_SCHEMA_REVISION: u32 = 1;
 const NODE_SCENE_SNAPSHOT_ALGORITHM_ID: &str = "sha256";
 const NODE_SCENE_SNAPSHOT_POLL_INTERVAL: u64 = 64;
 const MAX_PREVIEW_BYTES: usize = 1 << 20;
@@ -222,6 +223,26 @@ pub(in crate::canonical_scene::store) struct NodeSceneSnapshotTotals {
     pub(in crate::canonical_scene::store) animation_value_scalar_count: u64,
     pub(in crate::canonical_scene::store) animation_in_tangent_scalar_count: u64,
     pub(in crate::canonical_scene::store) animation_out_tangent_scalar_count: u64,
+    pub(in crate::canonical_scene::store) profile_segment_count: usize,
+    pub(in crate::canonical_scene::store) profile_resource_count: usize,
+    pub(in crate::canonical_scene::store) profile_source_count: usize,
+    pub(in crate::canonical_scene::store) profile_provenance_node_count: usize,
+    pub(in crate::canonical_scene::store) profile_operation_count: usize,
+    pub(in crate::canonical_scene::store) profile_evidence_count: usize,
+    pub(in crate::canonical_scene::store) profile_owner_count: usize,
+    pub(in crate::canonical_scene::store) profile_attachment_count: usize,
+    pub(in crate::canonical_scene::store) profile_metadata_entry_count: usize,
+    pub(in crate::canonical_scene::store) profile_parent_reference_count: u64,
+    pub(in crate::canonical_scene::store) profile_wide_value_count: u64,
+    pub(in crate::canonical_scene::store) profile_lineage_text_bytes: u64,
+    pub(in crate::canonical_scene::store) profile_lineage_digest_bytes: u64,
+    pub(in crate::canonical_scene::store) profile_metadata_text_bytes: u64,
+    pub(in crate::canonical_scene::store) profile_metadata_payload_bytes: u64,
+    pub(in crate::canonical_scene::store) profile_metadata_bool_scalar_count: u64,
+    pub(in crate::canonical_scene::store) profile_metadata_i64_scalar_count: u64,
+    pub(in crate::canonical_scene::store) profile_metadata_u64_scalar_count: u64,
+    pub(in crate::canonical_scene::store) profile_metadata_f64_scalar_count: u64,
+    pub(in crate::canonical_scene::store) profile_metadata_f32_scalar_count: u64,
     pub(in crate::canonical_scene::store) transcript_bytes: u64,
     pub(in crate::canonical_scene::store) work_units: u64,
 }
@@ -292,6 +313,8 @@ struct NodeSceneSummary {
     deformation_payloads: deformation::DeformationPayloadTotals,
     animation: animation::AnimationCollectionCounts,
     animation_payloads: animation::AnimationPayloadTotals,
+    profile: profile::ProfileCollectionCounts,
+    profile_payloads: profile::ProfilePayloadTotals,
 }
 
 impl GeometryPayloadTotals {
@@ -592,6 +615,12 @@ fn capture_node_scene_with_encoder(
         &mut preview,
         &mut work,
     )?;
+    let (profile_counts, profile_totals) = profile::write_profile(
+        cursor.profile().map_err(map_snapshot_invariant)?,
+        &mut transcript,
+        &mut preview,
+        &mut work,
+    )?;
     cursor.finish().map_err(map_snapshot_invariant)?;
 
     preview.summary(NodeSceneSummary {
@@ -609,6 +638,8 @@ fn capture_node_scene_with_encoder(
         deformation_payloads: deformation_totals,
         animation: animation_counts,
         animation_payloads: animation_totals,
+        profile: profile_counts,
+        profile_payloads: profile_totals,
     });
     work.finish()?;
     let work_units = work.observed();
@@ -672,6 +703,26 @@ fn capture_node_scene_with_encoder(
                 animation_value_scalar_count: animation_totals.value_scalars,
                 animation_in_tangent_scalar_count: animation_totals.in_tangent_scalars,
                 animation_out_tangent_scalar_count: animation_totals.out_tangent_scalars,
+                profile_segment_count: profile_counts.segments,
+                profile_resource_count: profile_counts.resources,
+                profile_source_count: profile_counts.sources,
+                profile_provenance_node_count: profile_counts.provenance_nodes,
+                profile_operation_count: profile_counts.operations,
+                profile_evidence_count: profile_counts.evidence,
+                profile_owner_count: profile_counts.owners,
+                profile_attachment_count: profile_counts.attachments,
+                profile_metadata_entry_count: profile_counts.metadata_entries,
+                profile_parent_reference_count: profile_totals.parent_references,
+                profile_wide_value_count: profile_totals.wide_values,
+                profile_lineage_text_bytes: profile_totals.lineage_text_bytes,
+                profile_lineage_digest_bytes: profile_totals.lineage_digest_bytes,
+                profile_metadata_text_bytes: profile_totals.metadata_text_bytes,
+                profile_metadata_payload_bytes: profile_totals.metadata_payload_bytes,
+                profile_metadata_bool_scalar_count: profile_totals.metadata_bool_scalars,
+                profile_metadata_i64_scalar_count: profile_totals.metadata_i64_scalars,
+                profile_metadata_u64_scalar_count: profile_totals.metadata_u64_scalars,
+                profile_metadata_f64_scalar_count: profile_totals.metadata_f64_scalars,
+                profile_metadata_f32_scalar_count: profile_totals.metadata_f32_scalars,
                 transcript_bytes: encoded.bytes,
                 work_units,
             },
@@ -1913,6 +1964,8 @@ impl PreviewSink {
             deformation_payloads,
             animation,
             animation_payloads,
+            profile,
+            profile_payloads,
         } = summary;
         self.push_str("summary(nodes=");
         self.push_usize(nodes);
@@ -2016,6 +2069,46 @@ impl PreviewSink {
         self.push_u64(animation_payloads.in_tangent_scalars);
         self.push_str(",animation_out_tangents=");
         self.push_u64(animation_payloads.out_tangent_scalars);
+        self.push_str(",profile_segments=");
+        self.push_usize(profile.segments);
+        self.push_str(",profile_resources=");
+        self.push_usize(profile.resources);
+        self.push_str(",profile_sources=");
+        self.push_usize(profile.sources);
+        self.push_str(",profile_provenance_nodes=");
+        self.push_usize(profile.provenance_nodes);
+        self.push_str(",profile_operations=");
+        self.push_usize(profile.operations);
+        self.push_str(",profile_evidence=");
+        self.push_usize(profile.evidence);
+        self.push_str(",profile_owners=");
+        self.push_usize(profile.owners);
+        self.push_str(",profile_attachments=");
+        self.push_usize(profile.attachments);
+        self.push_str(",profile_metadata_entries=");
+        self.push_usize(profile.metadata_entries);
+        self.push_str(",profile_parent_references=");
+        self.push_u64(profile_payloads.parent_references);
+        self.push_str(",profile_wide_values=");
+        self.push_u64(profile_payloads.wide_values);
+        self.push_str(",profile_lineage_text_bytes=");
+        self.push_u64(profile_payloads.lineage_text_bytes);
+        self.push_str(",profile_lineage_digest_bytes=");
+        self.push_u64(profile_payloads.lineage_digest_bytes);
+        self.push_str(",profile_metadata_text_bytes=");
+        self.push_u64(profile_payloads.metadata_text_bytes);
+        self.push_str(",profile_metadata_payload_bytes=");
+        self.push_u64(profile_payloads.metadata_payload_bytes);
+        self.push_str(",profile_metadata_bool_scalars=");
+        self.push_u64(profile_payloads.metadata_bool_scalars);
+        self.push_str(",profile_metadata_i64_scalars=");
+        self.push_u64(profile_payloads.metadata_i64_scalars);
+        self.push_str(",profile_metadata_u64_scalars=");
+        self.push_u64(profile_payloads.metadata_u64_scalars);
+        self.push_str(",profile_metadata_f64_scalars=");
+        self.push_u64(profile_payloads.metadata_f64_scalars);
+        self.push_str(",profile_metadata_f32_scalars=");
+        self.push_u64(profile_payloads.metadata_f32_scalars);
         self.push_str(")\n");
     }
 

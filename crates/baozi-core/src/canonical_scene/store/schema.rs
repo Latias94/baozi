@@ -6,6 +6,7 @@ pub(super) mod animation;
 pub(super) mod appearance;
 pub(super) mod deformation;
 pub(super) mod geometry;
+pub(super) mod profile;
 pub(super) mod spatial;
 
 pub(super) const SCHEMA_REVISION: u32 = 1;
@@ -63,13 +64,13 @@ pub(super) const PRESENCE_PRESENT: u8 = 1;
 pub(super) const EVIDENCE_OUTCOME_CANDIDATE: u32 = 1;
 pub(super) const CANONICAL_BLOCK_COUNT: u32 = 4;
 
-pub(super) const SCENE_SCHEMA_REVISION: u32 = 3;
-pub(super) const SCENE_DIRECTORY_FIELD_COUNT: usize = 16;
-pub(super) const SCENE_GEOMETRY_SCHEMA_REVISION: u32 = 2;
+pub(super) const SCENE_SCHEMA_REVISION: u32 = 1;
+pub(super) const SCENE_DIRECTORY_FIELD_COUNT: usize = 17;
+pub(super) const SCENE_GEOMETRY_SCHEMA_REVISION: u32 = 1;
 pub(super) const SCENE_GEOMETRY_DIRECTORY_FIELD_COUNT: usize = 9;
 pub(super) const NODE_SCENE_NODE_FIELD_COUNT: usize = 14;
 pub(super) const NODE_SCENE_CHILD_REFERENCE_FIELD_COUNT: usize = 2;
-pub(super) const NODE_SCENE_EVIDENCE_FIELD_COUNT: usize = 24;
+pub(super) const NODE_SCENE_EVIDENCE_FIELD_COUNT: usize = 34;
 pub(super) const NODE_SCENE_MATRIX_SCALAR_COUNT: usize = 16;
 pub(super) const NODE_SCENE_TRS_SCALAR_COUNT: usize = 10;
 pub(super) const NODE_SCENE_TRANSFORM_SYNTHETIC: u8 = 0;
@@ -94,6 +95,7 @@ pub(super) mod scene_directory_field {
     pub(crate) const GEOMETRY: usize = 13;
     pub(crate) const DEFORMATION: usize = 14;
     pub(crate) const ANIMATION: usize = 15;
+    pub(crate) const PROFILE: usize = 16;
 }
 
 pub(super) mod scene_geometry_directory_field {
@@ -155,7 +157,21 @@ pub(super) mod node_scene_evidence_field {
     pub(crate) const ANIMATION_CLIP_COUNT: usize = 21;
     pub(crate) const ANIMATION_CHANNEL_COUNT: usize = 22;
     pub(crate) const PAYLOAD_BLOCK_COUNT: usize = 23;
+    pub(crate) const PROFILE_SEGMENT_COUNT: usize = 24;
+    pub(crate) const PROFILE_RESOURCE_COUNT: usize = 25;
+    pub(crate) const PROFILE_SOURCE_COUNT: usize = 26;
+    pub(crate) const PROFILE_PROVENANCE_COUNT: usize = 27;
+    pub(crate) const PROFILE_OPERATION_COUNT: usize = 28;
+    pub(crate) const PROFILE_PARENT_COUNT: usize = 29;
+    pub(crate) const PROFILE_OWNER_COUNT: usize = 30;
+    pub(crate) const PROFILE_ATTACHMENT_COUNT: usize = 31;
+    pub(crate) const PROFILE_METADATA_ENTRY_COUNT: usize = 32;
+    pub(crate) const SHAREABLE_LEAF_BLOCK_COUNT: usize = 33;
 }
+
+const _: [(); SCENE_DIRECTORY_FIELD_COUNT] = [(); scene_directory_field::PROFILE + 1];
+const _: [(); NODE_SCENE_EVIDENCE_FIELD_COUNT] =
+    [(); node_scene_evidence_field::SHAREABLE_LEAF_BLOCK_COUNT + 1];
 
 pub(super) trait CanonicalSchema: Copy + Send + Sync + 'static {
     type StoreKind;

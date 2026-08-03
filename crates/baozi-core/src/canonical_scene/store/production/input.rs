@@ -4,6 +4,8 @@ pub(super) mod animation;
 pub(super) mod appearance;
 pub(super) mod deformation;
 pub(super) mod geometry;
+pub(super) mod lineage;
+pub(super) mod metadata;
 pub(super) mod spatial;
 
 /// Distinguishes an absent source field from a present value, including an empty slice.
@@ -128,12 +130,44 @@ pub(in crate::canonical_scene::store) struct NodeAuthoringBatch<'a> {
     nodes: &'a [NodeAuthoringNode],
 }
 
+/// Source identity, lineage, and descriptive metadata for one canonical Scene batch.
+///
+/// Metadata may be empty, but the lineage batch must still cover the Scene, synthetic root, and
+/// every canonical owner admitted by the other authoring domains.
+#[derive(Debug, Clone, Copy)]
+pub(in crate::canonical_scene::store) struct ProfileAuthoringBatch<'a> {
+    lineage: lineage::LineageAuthoringBatch<'a>,
+    metadata: metadata::MetadataAuthoringBatch<'a>,
+}
+
+impl<'a> ProfileAuthoringBatch<'a> {
+    pub(in crate::canonical_scene::store) const fn new(
+        lineage: lineage::LineageAuthoringBatch<'a>,
+        metadata: metadata::MetadataAuthoringBatch<'a>,
+    ) -> Self {
+        Self { lineage, metadata }
+    }
+
+    pub(in crate::canonical_scene::store) const fn lineage(
+        self,
+    ) -> lineage::LineageAuthoringBatch<'a> {
+        self.lineage
+    }
+
+    pub(in crate::canonical_scene::store) const fn metadata(
+        self,
+    ) -> metadata::MetadataAuthoringBatch<'a> {
+        self.metadata
+    }
+}
+
 /// One borrowed producer input for every domain of a canonical Scene.
 ///
 /// The store accepts this aggregate as a unit so admission, validation, and
 /// publication cannot observe a node graph without its spatial foundation or
 /// the appearance, geometry, deformation, and animation domains that qualify
-/// the same Scene.
+/// the same Scene, or without the profile that accounts for every canonical
+/// owner's source identity, lineage, and metadata.
 #[derive(Debug, Clone, Copy)]
 pub(in crate::canonical_scene::store) struct SceneAuthoringBatch<'a> {
     spatial: spatial::SpatialAuthoringBatch<'a>,
@@ -142,6 +176,7 @@ pub(in crate::canonical_scene::store) struct SceneAuthoringBatch<'a> {
     geometry: geometry::GeometryAuthoringBatch<'a>,
     deformation: deformation::DeformationAuthoringBatch<'a>,
     animations: animation::AnimationAuthoringBatch<'a>,
+    profile: ProfileAuthoringBatch<'a>,
 }
 
 impl<'a> SceneAuthoringBatch<'a> {
@@ -152,6 +187,7 @@ impl<'a> SceneAuthoringBatch<'a> {
         geometry: geometry::GeometryAuthoringBatch<'a>,
         deformation: deformation::DeformationAuthoringBatch<'a>,
         animations: animation::AnimationAuthoringBatch<'a>,
+        profile: ProfileAuthoringBatch<'a>,
     ) -> Self {
         Self {
             spatial,
@@ -160,6 +196,7 @@ impl<'a> SceneAuthoringBatch<'a> {
             geometry,
             deformation,
             animations,
+            profile,
         }
     }
 
@@ -195,6 +232,10 @@ impl<'a> SceneAuthoringBatch<'a> {
         self,
     ) -> animation::AnimationAuthoringBatch<'a> {
         self.animations
+    }
+
+    pub(in crate::canonical_scene::store) const fn profile(self) -> ProfileAuthoringBatch<'a> {
+        self.profile
     }
 }
 

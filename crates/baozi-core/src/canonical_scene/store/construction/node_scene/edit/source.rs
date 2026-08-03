@@ -2,6 +2,7 @@ use thiserror::Error;
 
 use crate::entity::AuthoredTransform;
 use crate::identity::{NodeId, NodeIndex, SceneEntityKind, SceneLookupError, SceneStorageIndex};
+use crate::provenance::{OperationIdentity, OperationKind, OptionsDigest};
 
 use super::super::{ValidatedNodeScene, semantic::NodeSceneSemanticError};
 use super::plan::{NodeTransformEditPlanError, PendingNodeTransformEdit};
@@ -41,6 +42,7 @@ pub(in crate::canonical_scene::store) fn try_begin_node_transform_edit<'scene>(
     input: &'scene ValidatedNodeScene,
     node: NodeId,
     replacement: AuthoredTransform,
+    options_digest: OptionsDigest,
 ) -> Result<NodeTransformEditStart<'scene>, NodeTransformEditStartError> {
     let target = NodeIndex::from_handle(input.generation(), node)?;
     let proof = input.proof;
@@ -61,6 +63,7 @@ pub(in crate::canonical_scene::store) fn try_begin_node_transform_edit<'scene>(
         target_transform.transform_offset(),
         old_transform,
         replacement,
+        OperationIdentity::without_evidence(OperationKind::Transform, options_digest),
         source_node_count,
         proof.source_root_count(),
         proof.source_edge_count(),

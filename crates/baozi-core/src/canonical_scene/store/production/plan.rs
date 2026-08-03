@@ -7,6 +7,7 @@ pub(super) mod animation;
 pub(super) mod appearance;
 pub(super) mod deformation;
 pub(super) mod geometry;
+pub(super) mod profile;
 pub(super) mod spatial;
 
 use std::error::Error;

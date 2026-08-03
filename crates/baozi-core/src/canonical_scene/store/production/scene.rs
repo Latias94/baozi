@@ -2,10 +2,11 @@ use thiserror::Error;
 
 use crate::SceneValidationLimits;
 
+use super::super::schema::profile::FRESH_PROFILE_MAX_CANONICAL_BLOCKS;
 use super::input::{Presence, SceneAuthoringBatch};
 use super::{
     ValidatedAnimationBatch, ValidatedAppearanceBatch, ValidatedDeformationBatch,
-    ValidatedGeometryBatch, ValidatedNodeBatch, ValidatedSpatialBatch,
+    ValidatedGeometryBatch, ValidatedNodeBatch, ValidatedProfileBatch, ValidatedSpatialBatch,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -32,6 +33,11 @@ impl SceneInputEnvelope {
             "entity lower bound",
             shape.entity_lower_bound(canonical_nodes)?,
             limits.max_entities(),
+        )?;
+        require_envelope_limit(
+            "metadata entries",
+            usize_to_u64(shape.metadata_entries, "metadata entry count")?,
+            limits.max_metadata_entries(),
         )?;
 
         let terminal_attribution_slots = shape
@@ -73,6 +79,11 @@ struct SceneTopLevelShape {
     mesh_instance_deformations: usize,
     animation_clips: usize,
     animation_channels: usize,
+    resources: usize,
+    source_identities: usize,
+    provenance_nodes: usize,
+    owner_provenance: usize,
+    metadata_entries: usize,
 }
 
 impl SceneTopLevelShape {
@@ -83,6 +94,8 @@ impl SceneTopLevelShape {
         let geometry = input.geometry();
         let deformation = input.deformation();
         let animations = input.animations();
+        let profile = input.profile();
+        let lineage = profile.lineage();
         Self {
             cameras: spatial.cameras().len(),
             lights: spatial.lights().len(),
@@ -107,6 +120,11 @@ impl SceneTopLevelShape {
             mesh_instance_deformations: deformation.mesh_instances().len(),
             animation_clips: animations.clips().len(),
             animation_channels: animations.channels().len(),
+            resources: lineage.resources().len(),
+            source_identities: lineage.source_identities().len(),
+            provenance_nodes: lineage.provenance_nodes().len(),
+            owner_provenance: lineage.owner_provenance().len(),
+            metadata_entries: profile.metadata().entries().len(),
         }
     }
 
@@ -133,6 +151,11 @@ impl SceneTopLevelShape {
             ("mesh instance deformation", self.mesh_instance_deformations),
             ("animation clips", self.animation_clips),
             ("animation channels", self.animation_channels),
+            ("observed resources", self.resources),
+            ("source identities", self.source_identities),
+            ("provenance nodes", self.provenance_nodes),
+            ("owner provenance rows", self.owner_provenance),
+            ("metadata entries", self.metadata_entries),
         ] {
             require_count_domain(collection, count, maximum)?;
         }
@@ -168,6 +191,9 @@ impl SceneTopLevelShape {
             )?,
             usize_to_u64(self.animation_clips, "animation entity lower bound")?,
             usize_to_u64(self.animation_channels, "animation entity lower bound")?,
+            usize_to_u64(self.resources, "profile entity lower bound")?,
+            usize_to_u64(self.source_identities, "profile entity lower bound")?,
+            usize_to_u64(self.provenance_nodes, "profile entity lower bound")?,
         ]
         .into_iter()
         .try_fold(0_u64, u64::checked_add)
@@ -260,6 +286,7 @@ impl SceneTopLevelShape {
                 geometry,
                 deformation,
                 animation,
+                FRESH_PROFILE_MAX_CANONICAL_BLOCKS,
             ],
             "canonical block upper bound",
         )
@@ -385,13 +412,22 @@ pub(in crate::canonical_scene::store) fn animation_limits_after_deformation<R>(
     remaining_limits_after(deformation_metrics(deformation), remaining_limits)
 }
 
-pub(in crate::canonical_scene::store) fn validate_scene_aggregate<SR, NR, AR, GR, DR, ANR>(
+pub(in crate::canonical_scene::store) fn profile_limits_after_animation<R>(
+    animation: &ValidatedAnimationBatch<'_, R>,
+    remaining_limits: SceneValidationLimits,
+) -> Result<SceneValidationLimits, SceneAuthoringAggregateError> {
+    remaining_limits_after(animation_metrics(animation), remaining_limits)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(in crate::canonical_scene::store) fn validate_scene_aggregate<SR, NR, AR, GR, DR, ANR, PR>(
     spatial: &ValidatedSpatialBatch<'_, SR>,
     nodes: &ValidatedNodeBatch<'_, NR>,
     appearance: &ValidatedAppearanceBatch<'_, AR>,
     geometry: &ValidatedGeometryBatch<'_, GR>,
     deformation: &ValidatedDeformationBatch<'_, DR>,
     animation: &ValidatedAnimationBatch<'_, ANR>,
+    profile: &ValidatedProfileBatch<'_, PR>,
     limits: SceneValidationLimits,
 ) -> Result<(), SceneAuthoringAggregateError> {
     let metrics = [
@@ -401,6 +437,7 @@ pub(in crate::canonical_scene::store) fn validate_scene_aggregate<SR, NR, AR, GR
         geometry_metrics(geometry),
         deformation_metrics(deformation),
         animation_metrics(animation),
+        profile_metrics(profile),
     ];
     require_total(
         SceneAuthoringAggregateLimit::Entities,
@@ -517,6 +554,18 @@ const fn animation_metrics<R>(animation: &ValidatedAnimationBatch<'_, R>) -> Sce
         work: animation.validation_work(),
         canonical_bytes: animation.canonical_bytes(),
         scratch_bytes: animation.scratch_bytes(),
+    }
+}
+
+const fn profile_metrics<R>(profile: &ValidatedProfileBatch<'_, R>) -> SceneDomainMetrics {
+    SceneDomainMetrics {
+        entities: profile.entity_count(),
+        edges: profile.edge_count(),
+        references: profile.reference_count(),
+        semantic_cells: profile.payload_cell_count(),
+        work: profile.validation_work(),
+        canonical_bytes: profile.canonical_bytes(),
+        scratch_bytes: profile.scratch_bytes(),
     }
 }
 

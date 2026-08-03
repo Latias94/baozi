@@ -16,6 +16,7 @@ pub(in crate::canonical_scene::store) struct NodeSceneValidationScratchOwner {
     deformation_palette_maxima: Vec<Option<u32>>,
     deformation_uniqueness_marks: Vec<u64>,
     animation_target_marks: Vec<u32>,
+    profile_provenance_depths: Vec<u32>,
     _reservation: RetainedStoreReservation<SceneConstructionOwner>,
 }
 
@@ -34,11 +35,14 @@ impl NodeSceneValidationScratchOwner {
             .ok_or(StoreRuntimeError::Plan(StorePlanError::SizeOverflow))?;
         let animation_count = NodeSceneValidationScratch::required_animation_target_marks(counts)
             .ok_or(StoreRuntimeError::Plan(StorePlanError::SizeOverflow))?;
+        let profile_provenance_count = usize::try_from(counts.profile_provenance_count)
+            .map_err(|_| StoreRuntimeError::Plan(StorePlanError::SizeOverflow))?;
         let camera_plan = scratch_plan::<u32>(camera_count)?;
         let light_plan = scratch_plan::<u32>(light_count)?;
         let palette_plan = scratch_plan::<Option<u32>>(palette_count)?;
         let uniqueness_plan = scratch_plan::<u64>(deformation_uniqueness_capacity)?;
         let animation_plan = scratch_plan::<u32>(animation_count)?;
+        let profile_provenance_plan = scratch_plan::<u32>(profile_provenance_count)?;
         let envelope = camera_plan
             .envelope_delta_bytes()
             .ok()
@@ -66,6 +70,12 @@ impl NodeSceneValidationScratchOwner {
                     .ok()
                     .and_then(|fifth| subtotal.checked_add(fifth))
             })
+            .and_then(|subtotal| {
+                profile_provenance_plan
+                    .envelope_delta_bytes()
+                    .ok()
+                    .and_then(|sixth| subtotal.checked_add(sixth))
+            })
             .ok_or(StoreRuntimeError::Plan(StorePlanError::SizeOverflow))?;
 
         let mut checkpoint = assembly.try_control_checkpoint()?;
@@ -77,6 +87,7 @@ impl NodeSceneValidationScratchOwner {
         let mut deformation_palette_maxima = allocate_scratch(palette_plan)?;
         let mut deformation_uniqueness_marks = allocate_scratch(uniqueness_plan)?;
         let mut animation_target_marks = allocate_scratch(animation_plan)?;
+        let mut profile_provenance_depths = allocate_scratch(profile_provenance_plan)?;
         let actual = qualified_bytes(
             camera_plan,
             camera_placement_counts.len(),
@@ -113,6 +124,15 @@ impl NodeSceneValidationScratchOwner {
             )
             .ok()
             .and_then(|fifth| subtotal.checked_add(fifth))
+        })
+        .and_then(|subtotal| {
+            qualified_bytes(
+                profile_provenance_plan,
+                profile_provenance_depths.len(),
+                profile_provenance_depths.capacity(),
+            )
+            .ok()
+            .and_then(|sixth| subtotal.checked_add(sixth))
         })
         .ok_or(StoreRuntimeError::Plan(StorePlanError::SizeOverflow))?;
         checkpoint.resize(&mut reservation, actual)?;
@@ -158,6 +178,14 @@ impl NodeSceneValidationScratchOwner {
             animation_count,
             0,
         )?;
+        fill_scratch(
+            &mut checkpoint,
+            keys,
+            &mut work,
+            &mut profile_provenance_depths,
+            profile_provenance_count,
+            0,
+        )?;
         checkpoint.poll()?;
 
         Ok(Self {
@@ -166,6 +194,7 @@ impl NodeSceneValidationScratchOwner {
             deformation_palette_maxima,
             deformation_uniqueness_marks,
             animation_target_marks,
+            profile_provenance_depths,
             _reservation: reservation,
         })
     }
@@ -179,6 +208,7 @@ impl NodeSceneValidationScratchOwner {
             &mut self.deformation_palette_maxima,
             &mut self.deformation_uniqueness_marks,
             &mut self.animation_target_marks,
+            &mut self.profile_provenance_depths,
         )
     }
 }

@@ -32,16 +32,17 @@ use crate::identity::{ReservedSceneGeneration, SceneGenerationError, SceneGenera
 use crate::scene_space::SceneSpace;
 
 use super::{
-    assert_released, rich_failure, single_trs_batch, successful_parts, terminal_failure_class,
-    test_account, test_factory, test_limits, test_limits_with_work,
+    assert_released, exhaust_profile_for_test, profile_fixture, rich_failure, single_trs_batch,
+    successful_parts, terminal_failure_class, test_account, test_factory, test_limits,
+    test_limits_with_work,
 };
 
 const OBJ_POSITIONS: [[f32; 3]; 3] = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]];
 const OBJ_TEXCOORDS: [[f32; 2]; 4] = [[0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [0.5, 0.5]];
 const OBJ_NORMALS: [[f32; 3]; 2] = [[0.0, 0.0, 1.0], [0.0, 0.0, -1.0]];
 const KNOWN_OBJ_CAPABILITY_DIGEST: [u8; 32] = [
-    0x8b, 0xd1, 0x9f, 0x1a, 0xb6, 0xdb, 0x2b, 0xd9, 0x80, 0xd2, 0xbd, 0xe8, 0x99, 0x54, 0xf2, 0x33,
-    0xd6, 0x0c, 0x1e, 0x7b, 0xe4, 0x05, 0xbc, 0xf2, 0x39, 0x51, 0xa4, 0xa7, 0x3d, 0x29, 0xbd, 0x4c,
+    0xf5, 0xd3, 0xcf, 0x3c, 0xe8, 0x0f, 0xcf, 0xfb, 0x64, 0xe1, 0xf4, 0x88, 0x23, 0xae, 0xf5, 0xdb,
+    0x64, 0x24, 0x95, 0x20, 0x42, 0xb8, 0xa0, 0x93, 0xdd, 0x4c, 0xff, 0x31, 0xa1, 0xad, 0x31, 0xaa,
 ];
 const OBJ_FACES: [ObjTriangle; 2] = [
     ObjTriangle {
@@ -215,13 +216,26 @@ impl ObjCanonicalProjection<'_> {
             &mesh_instance_deformations,
         );
 
-        use_input(SceneAuthoringBatch::new(
-            SpatialAuthoringBatch::new(&SceneSpace::UNKNOWN, &[], &[]),
-            single_trs_batch(),
-            AppearanceAuthoringBatch::empty(),
+        let spatial = SpatialAuthoringBatch::new(&SceneSpace::UNKNOWN, &[], &[]);
+        let nodes = single_trs_batch();
+        let appearance = AppearanceAuthoringBatch::empty();
+        let animations = AnimationAuthoringBatch::empty();
+        let profile = profile_fixture(
+            spatial,
+            nodes,
+            appearance,
             geometry,
             deformation,
-            AnimationAuthoringBatch::empty(),
+            animations,
+        );
+        use_input(SceneAuthoringBatch::new(
+            spatial,
+            nodes,
+            appearance,
+            geometry,
+            deformation,
+            animations,
+            profile.batch(),
         ))
     }
 }
@@ -863,6 +877,7 @@ pub(in crate::canonical_scene::store) fn inspect_obj_capability_semantics_for_pr
             .expect("OBJ animation-channel exhaustion")
             .is_none()
     );
+    exhaust_profile_for_test(cursor.profile().expect("OBJ profile cursor"));
     cursor.finish().expect("complete OBJ semantic traversal");
 
     ObjCapabilityCanonicalShapeObservation {

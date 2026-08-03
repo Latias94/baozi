@@ -1,5 +1,5 @@
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, OnceLock};
 
 use baozi_operation::{
     CancellationSignal, CancellationToken, PhysicalStorageAccountFactory,
@@ -7,8 +7,10 @@ use baozi_operation::{
     StorePreparationFailureClass, StoreRuntimeError, StoreTerminalCause,
 };
 
+use crate::FormatId;
 use crate::SceneValidationLimits;
 use crate::attribute::{AttributeDomain, AttributeSemantic};
+use crate::canonical_scene::store::construction::node_scene::semantic::NodeSceneProfileCursor;
 use crate::canonical_scene::store::construction::{
     FAILURE_TERMINAL_WORK_DIMENSION, FALLBACK_CODE, OPEN_PLAN_REJECTION_CODE,
     OPEN_RESOURCE_REJECTION_CODE, STORE_DIMENSION, SceneConstructionLimits,
@@ -17,15 +19,19 @@ use crate::canonical_scene::store::construction::{
 use crate::canonical_scene::store::production::{
     AnimationAuthoringBatch, AppearanceAuthoringBatch, AuthoringRange, DeformationAuthoringBatch,
     GeometryAttributeAuthoring, GeometryAuthoringBatch, GeometryLogicalMeshAuthoring,
-    GeometryPrimitiveAuthoring, GeometryTopologyAuthoring, LogicalMorphAuthoring,
-    NodeAuthoringBatch, NodeAuthoringFailure, NodeAuthoringLimit, NodeAuthoringNode,
-    NodeAuthoringSemanticError, NodeLocalId, NodeParent, OperationAuthoringControlError, Presence,
-    PrimitiveDeformationAuthoring, SceneAuthoringBatch, SpatialAuthoringBatch,
-    SpatialAuthoringFailure,
+    GeometryPrimitiveAuthoring, GeometryTopologyAuthoring, LineageAuthoringBatch,
+    LogicalMorphAuthoring, MetadataAuthoringBatch, NodeAuthoringBatch, NodeAuthoringFailure,
+    NodeAuthoringLimit, NodeAuthoringNode, NodeAuthoringSemanticError, NodeLocalId, NodeParent,
+    ObservedResourceAuthoring, OperationAuthoringControlError, OwnerProvenanceAuthoring, Presence,
+    PrimitiveDeformationAuthoring, ProfileAuthoringBatch, ProfileOwner, ProvenanceLocalId,
+    ProvenanceNodeAuthoring, ResourceIdentityLocalId, ResourceIdentityStability,
+    SceneAuthoringBatch, SessionOpaqueReason, SourceIdentityAuthoring, SourceIdentityLocalId,
+    SpatialAuthoringBatch, SpatialAuthoringFailure,
 };
 use crate::entity::AuthoredTransform;
 use crate::identity::{SceneGenerationError, SceneGenerationId};
 use crate::math::{Mat4, Quat, Vec3};
+use crate::provenance::{ResourceIdentity, SourceObjectKind, SourceObjectLocator};
 use crate::scene_space::SceneSpace;
 
 use super::publication::post_evidence_build_failure_code;
@@ -36,8 +42,43 @@ use super::{
     PendingNodeSceneDraft, PreparedNodeSceneConstruction,
 };
 
+mod chunking;
 mod gltf_capability;
 mod obj_capability;
+
+fn exhaust_profile_for_test(profile: &mut NodeSceneProfileCursor<'_>) {
+    while let Some(mut segment) = profile.next_segment().expect("profile segment read") {
+        while segment
+            .next_resource()
+            .expect("profile resource read")
+            .is_some()
+        {}
+        while segment
+            .next_source()
+            .expect("profile source read")
+            .is_some()
+        {}
+        while segment
+            .next_provenance()
+            .expect("profile provenance read")
+            .is_some()
+        {}
+        while segment
+            .next_evidence()
+            .expect("profile evidence read")
+            .is_some()
+        {}
+        segment
+            .finish()
+            .expect("complete profile segment traversal");
+    }
+    while profile.next_owner().expect("profile owner read").is_some() {}
+    while profile
+        .next_metadata_entry()
+        .expect("profile metadata read")
+        .is_some()
+    {}
+}
 
 pub(in crate::canonical_scene::store) use gltf_capability::{
     GLTF_SOURCE_VECTOR_SCHEMA_ID, GltfCapabilityCanonicalShapeObservation,
@@ -54,10 +95,67 @@ pub(in crate::canonical_scene::store) use obj_capability::{
     inspect_obj_capability_semantics_for_probe,
 };
 
-const SINGLE_TRS_AUTHORING_VALIDATION_WORK: u64 = 43;
-const SINGLE_TRS_WORK_BEFORE_FIRST_PAYLOAD_WRITE: u64 = 46;
-const SINGLE_TRS_BUILD_INVARIANT_FAILURE_WORK: u64 = 107;
-const SINGLE_TRS_GENERATION_FAILURE_WORK: u64 = 112;
+const SINGLE_TRS_DOMAIN_AUTHORING_VALIDATION_WORK: u64 = 43;
+const SINGLE_TRS_PROFILE_OWNER_COUNT: u64 = 3;
+const SINGLE_TRS_PROFILE_PROVENANCE_COUNT: u64 = 1;
+const SINGLE_TRS_PROFILE_ATTACHMENT_COUNT: u64 = 3;
+const SINGLE_TRS_PROFILE_OPERATION_SEMANTIC_CELLS: u64 = 5;
+const SINGLE_TRS_PROFILE_DIGEST_BYTES: u64 = 32;
+const NODE_ONLY_PROFILE_CANONICAL_BLOCK_COUNT: u64 = 8;
+const SOURCE_BACKED_PROFILE_CANONICAL_BLOCK_COUNT: u64 = 10;
+const RETAINED_HANDLE_SHARE_WORK_PER_BLOCK: u64 = 2;
+const SINGLE_TRS_PROFILE_AUTHORING_VALIDATION_WORK: u64 = SINGLE_TRS_PROFILE_OWNER_COUNT
+    + SINGLE_TRS_PROFILE_PROVENANCE_COUNT
+    + SINGLE_TRS_PROFILE_OPERATION_SEMANTIC_CELLS
+    + SINGLE_TRS_PROFILE_OWNER_COUNT
+    + SINGLE_TRS_PROFILE_ATTACHMENT_COUNT * 2
+    + SINGLE_TRS_PROFILE_OWNER_COUNT * 3
+    + SINGLE_TRS_PROFILE_OWNER_COUNT;
+const SINGLE_TRS_AUTHORING_VALIDATION_WORK: u64 =
+    SINGLE_TRS_DOMAIN_AUTHORING_VALIDATION_WORK + SINGLE_TRS_PROFILE_AUTHORING_VALIDATION_WORK;
+const SINGLE_TRS_PROFILE_CONTENT_MATERIALIZATION_WORK: u64 = SINGLE_TRS_PROFILE_PROVENANCE_COUNT
+    * 2
+    + SINGLE_TRS_PROFILE_DIGEST_BYTES
+    + SINGLE_TRS_PROFILE_OWNER_COUNT
+    + SINGLE_TRS_PROFILE_ATTACHMENT_COUNT * 2
+    + SINGLE_TRS_PROFILE_PROVENANCE_COUNT * 6
+    + SINGLE_TRS_PROFILE_PROVENANCE_COUNT * 9
+    + 1
+    + 1
+    + SINGLE_TRS_PROFILE_OWNER_COUNT
+    + 1;
+const SINGLE_TRS_PROFILE_MATERIALIZATION_WORK: u64 = SINGLE_TRS_PROFILE_CONTENT_MATERIALIZATION_WORK
+    + NODE_ONLY_PROFILE_CANONICAL_BLOCK_COUNT * RETAINED_HANDLE_SHARE_WORK_PER_BLOCK;
+const SINGLE_TRS_PROFILE_SCRATCH_CONSTRUCTION_WORK: u64 = SINGLE_TRS_PROFILE_PROVENANCE_COUNT;
+const SINGLE_TRS_PROFILE_SCRATCH_VALIDATION_RESET_WORK: u64 = SINGLE_TRS_PROFILE_PROVENANCE_COUNT;
+const SINGLE_TRS_PROFILE_GRAPH_VALIDATION_WORK: u64 = 1
+    + 2
+    + SINGLE_TRS_PROFILE_PROVENANCE_COUNT * 2
+    + SINGLE_TRS_PROFILE_PROVENANCE_COUNT * 2
+    + SINGLE_TRS_PROFILE_DIGEST_BYTES
+    + SINGLE_TRS_PROFILE_OWNER_COUNT
+    + SINGLE_TRS_PROFILE_ATTACHMENT_COUNT
+    + 1;
+const SINGLE_TRS_WORK_BEFORE_FIRST_PAYLOAD_WRITE: u64 = SINGLE_TRS_AUTHORING_VALIDATION_WORK + 3;
+const SINGLE_TRS_DOMAIN_BUILD_INVARIANT_WORK_AFTER_AUTHORING: u64 = 64;
+const SINGLE_TRS_BUILD_INVARIANT_FAILURE_WORK: u64 = SINGLE_TRS_AUTHORING_VALIDATION_WORK
+    + SINGLE_TRS_PROFILE_MATERIALIZATION_WORK
+    + SINGLE_TRS_PROFILE_SCRATCH_CONSTRUCTION_WORK
+    + SINGLE_TRS_PROFILE_SCRATCH_VALIDATION_RESET_WORK
+    + SINGLE_TRS_DOMAIN_BUILD_INVARIANT_WORK_AFTER_AUTHORING;
+const SINGLE_TRS_DOMAIN_GENERATION_FAILURE_WORK_AFTER_AUTHORING: u64 = 69;
+const SINGLE_TRS_GENERATION_FAILURE_WORK: u64 = SINGLE_TRS_AUTHORING_VALIDATION_WORK
+    + SINGLE_TRS_PROFILE_MATERIALIZATION_WORK
+    + SINGLE_TRS_PROFILE_SCRATCH_CONSTRUCTION_WORK
+    + SINGLE_TRS_PROFILE_SCRATCH_VALIDATION_RESET_WORK
+    + SINGLE_TRS_PROFILE_GRAPH_VALIDATION_WORK
+    + SINGLE_TRS_DOMAIN_GENERATION_FAILURE_WORK_AFTER_AUTHORING;
+const SINGLE_TRS_DOMAIN_CENTRAL_VALIDATION_INTERRUPTION_WORK_AFTER_AUTHORING: u64 = 18;
+const SINGLE_TRS_CENTRAL_VALIDATION_INTERRUPTION_WORK: u64 = SINGLE_TRS_AUTHORING_VALIDATION_WORK
+    + SINGLE_TRS_PROFILE_MATERIALIZATION_WORK
+    + SINGLE_TRS_PROFILE_SCRATCH_CONSTRUCTION_WORK
+    + SINGLE_TRS_PROFILE_SCRATCH_VALIDATION_RESET_WORK
+    + SINGLE_TRS_DOMAIN_CENTRAL_VALIDATION_INTERRUPTION_WORK_AFTER_AUTHORING;
 const SINGLE_TRS_ROOTS: [NodeLocalId; 1] = [NodeLocalId::new(0)];
 const SINGLE_TRS_NODES: [NodeAuthoringNode; 1] = [NodeAuthoringNode::new(
     Presence::Absent,
@@ -65,6 +163,160 @@ const SINGLE_TRS_NODES: [NodeAuthoringNode; 1] = [NodeAuthoringNode::new(
     Presence::Absent,
     Presence::Absent,
 )];
+
+const PROFILE_SOURCE_PROVENANCE: [ProvenanceLocalId; 1] = [ProvenanceLocalId::new(0)];
+
+struct ProfileFixtureVocabulary {
+    resource: ResourceIdentity,
+    stability: ResourceIdentityStability,
+    format: FormatId,
+    locator: SourceObjectLocator,
+}
+
+fn profile_fixture_vocabulary() -> &'static ProfileFixtureVocabulary {
+    static VOCABULARY: OnceLock<ProfileFixtureVocabulary> = OnceLock::new();
+    VOCABULARY.get_or_init(|| ProfileFixtureVocabulary {
+        resource: ResourceIdentity::new("fixtures/node-scene/input")
+            .expect("test profile resource identity"),
+        stability: ResourceIdentityStability::session_opaque(SessionOpaqueReason::CallerLabel),
+        format: FormatId::new("org.baozi.fixture").expect("test profile format"),
+        locator: SourceObjectLocator::indexed(SourceObjectKind::Document, 0),
+    })
+}
+
+pub(super) struct ProfileFixture {
+    resources: [ObservedResourceAuthoring<'static>; 1],
+    sources: [SourceIdentityAuthoring<'static>; 1],
+    provenance: [ProvenanceNodeAuthoring<'static>; 1],
+    owners: Vec<OwnerProvenanceAuthoring<'static>>,
+}
+
+impl ProfileFixture {
+    pub(super) fn batch(&self) -> ProfileAuthoringBatch<'_> {
+        ProfileAuthoringBatch::new(
+            LineageAuthoringBatch::new(
+                &self.resources,
+                &self.sources,
+                &self.provenance,
+                &self.owners,
+            ),
+            MetadataAuthoringBatch::empty(),
+        )
+    }
+}
+
+pub(super) fn profile_fixture(
+    spatial: SpatialAuthoringBatch<'_>,
+    nodes: NodeAuthoringBatch<'_>,
+    appearance: AppearanceAuthoringBatch<'_>,
+    geometry: GeometryAuthoringBatch<'_>,
+    deformation: DeformationAuthoringBatch<'_>,
+    animation: AnimationAuthoringBatch<'_>,
+) -> ProfileFixture {
+    let vocabulary = profile_fixture_vocabulary();
+    let mut owners = vec![ProfileOwner::Scene, ProfileOwner::SyntheticRoot];
+    owners.extend(nodes.nodes().iter().enumerate().map(|(index, _)| {
+        ProfileOwner::Node(NodeLocalId::new(
+            u32::try_from(index).expect("test node index"),
+        ))
+    }));
+    owners.extend(indexed_profile_owners(
+        spatial.cameras().len(),
+        ProfileOwner::Camera,
+    ));
+    owners.extend(indexed_profile_owners(
+        spatial.lights().len(),
+        ProfileOwner::Light,
+    ));
+    owners.extend(indexed_profile_owners(
+        appearance.images().len(),
+        ProfileOwner::Image,
+    ));
+    owners.extend(indexed_profile_owners(
+        appearance.samplers().len(),
+        ProfileOwner::Sampler,
+    ));
+    owners.extend(indexed_profile_owners(
+        appearance.textures().len(),
+        ProfileOwner::Texture,
+    ));
+    owners.extend(indexed_profile_owners(
+        appearance.bindings().len(),
+        ProfileOwner::TextureBinding,
+    ));
+    owners.extend(indexed_profile_owners(
+        appearance.materials().len(),
+        ProfileOwner::Material,
+    ));
+    owners.extend(indexed_profile_owners(
+        geometry.logical_meshes().len(),
+        ProfileOwner::LogicalMesh,
+    ));
+    owners.extend(indexed_profile_owners(
+        geometry.primitives().len(),
+        ProfileOwner::Primitive,
+    ));
+    owners.extend(indexed_profile_owners(
+        geometry.attributes().len(),
+        ProfileOwner::Attribute,
+    ));
+    owners.extend(indexed_profile_owners(
+        geometry.mesh_instances().len(),
+        ProfileOwner::MeshInstance,
+    ));
+    owners.extend(indexed_profile_owners(
+        deformation.skins().len(),
+        ProfileOwner::Skin,
+    ));
+    owners.extend(indexed_profile_owners(
+        deformation.morph_target_definitions().len(),
+        ProfileOwner::MorphDefinition,
+    ));
+    let morph_delta_count = deformation
+        .primitives()
+        .iter()
+        .flat_map(|primitive| primitive.morph_targets())
+        .map(|target| target.deltas().len())
+        .sum();
+    owners.extend(indexed_profile_owners(
+        morph_delta_count,
+        ProfileOwner::MorphDelta,
+    ));
+    owners.extend(indexed_profile_owners(
+        animation.clips().len(),
+        ProfileOwner::AnimationClip,
+    ));
+    owners.extend(indexed_profile_owners(
+        animation.channels().len(),
+        ProfileOwner::AnimationChannel,
+    ));
+
+    ProfileFixture {
+        resources: [ObservedResourceAuthoring::new(
+            &vocabulary.resource,
+            &vocabulary.stability,
+        )],
+        sources: [SourceIdentityAuthoring::new(
+            ResourceIdentityLocalId::new(0),
+            &vocabulary.format,
+            &vocabulary.locator,
+        )],
+        provenance: [ProvenanceNodeAuthoring::source(SourceIdentityLocalId::new(
+            0,
+        ))],
+        owners: owners
+            .into_iter()
+            .map(|owner| OwnerProvenanceAuthoring::new(owner, &PROFILE_SOURCE_PROVENANCE))
+            .collect(),
+    }
+}
+
+fn indexed_profile_owners(
+    len: usize,
+    owner: impl Fn(u32) -> ProfileOwner,
+) -> impl Iterator<Item = ProfileOwner> {
+    (0..len).map(move |index| owner(u32::try_from(index).expect("test profile owner index")))
+}
 
 #[test]
 fn tracer_open_recovery_classifies_exact_cause_before_fallback() {
@@ -516,9 +768,15 @@ fn source_ordered_forest_materializes_canonical_graph_and_preserves_authored_bit
         .expect("generation after node Scene construction")
         .into_id();
 
+    let expected_canonical_block_count =
+        9 + usize::try_from(NODE_ONLY_PROFILE_CANONICAL_BLOCK_COUNT)
+            .expect("node-only profile canonical block count");
     assert_eq!(parts.scene.source_node_count(), Some(5));
     assert_eq!(parts.scene.source_root_count(), Some(2));
-    assert_eq!(parts.scene.canonical_block_count(), 9);
+    assert_eq!(
+        parts.scene.canonical_block_count(),
+        expected_canonical_block_count
+    );
     assert!(parts.scene.account().is_same_account(&account));
     assert!(generation_before < parts.scene.generation());
     assert!(parts.scene.generation() < generation_after);
@@ -567,8 +825,14 @@ fn source_ordered_forest_materializes_canonical_graph_and_preserves_authored_bit
     assert_eq!(dimension.current_live_bytes(), 0);
     assert!(dimension.peak_live_bytes() > 0);
     assert_eq!(dimension.pending_publication(), 0);
-    assert_eq!(dimension.committed(), 9);
-    assert_eq!(dimension.committed_canonical_output(), 9);
+    assert_eq!(
+        dimension.committed(),
+        u64::try_from(expected_canonical_block_count).expect("node Scene canonical block count")
+    );
+    assert_eq!(
+        dimension.committed_canonical_output(),
+        u64::try_from(expected_canonical_block_count).expect("node Scene canonical block count")
+    );
     assert_eq!(
         dimension.published_outcome_evidence(),
         2,
@@ -631,13 +895,29 @@ fn scene_input_admission_exceeds_the_legacy_fixed_slot_bound() {
     let logical_morphs = [LogicalMorphAuthoring::new(AuthoringRange::new(0, 0), &[])];
     let primitive_deformations =
         vec![PrimitiveDeformationAuthoring::new(Presence::Absent, &[]); PRIMITIVE_COUNT];
+    let spatial = SpatialAuthoringBatch::new(&SceneSpace::UNKNOWN, &[], &[]);
+    let node_batch = NodeAuthoringBatch::new(Presence::Present(&roots), &nodes);
+    let appearance = AppearanceAuthoringBatch::empty();
+    let geometry = GeometryAuthoringBatch::new(&logical_meshes, &primitives, &attributes, &[]);
+    let deformation =
+        DeformationAuthoringBatch::new(&[], &[], &logical_morphs, &primitive_deformations, &[]);
+    let animations = AnimationAuthoringBatch::empty();
+    let profile = profile_fixture(
+        spatial,
+        node_batch,
+        appearance,
+        geometry,
+        deformation,
+        animations,
+    );
     let input = SceneAuthoringBatch::new(
-        SpatialAuthoringBatch::new(&SceneSpace::UNKNOWN, &[], &[]),
-        NodeAuthoringBatch::new(Presence::Present(&roots), &nodes),
-        AppearanceAuthoringBatch::empty(),
-        GeometryAuthoringBatch::new(&logical_meshes, &primitives, &attributes, &[]),
-        DeformationAuthoringBatch::new(&[], &[], &logical_morphs, &primitive_deformations, &[]),
-        AnimationAuthoringBatch::empty(),
+        spatial,
+        node_batch,
+        appearance,
+        geometry,
+        deformation,
+        animations,
+        profile.batch(),
     );
 
     let prepared = SceneConstructionOperation::with_account_for_scene_input(
@@ -653,7 +933,13 @@ fn scene_input_admission_exceeds_the_legacy_fixed_slot_bound() {
     .expect("dynamic Scene attribution publication");
     let parts = successful_parts(prepared);
 
-    assert_eq!(parts.scene.canonical_block_count(), 36);
+    let expected_canonical_block_count = 36
+        + usize::try_from(SOURCE_BACKED_PROFILE_CANONICAL_BLOCK_COUNT)
+            .expect("source-backed profile canonical block count");
+    assert_eq!(
+        parts.scene.canonical_block_count(),
+        expected_canonical_block_count
+    );
     drop(parts);
     assert_eq!(account.snapshot().live_retained_bytes(), 0);
     assert_eq!(account.snapshot().live_retained_allocations(), 0);
@@ -678,7 +964,7 @@ fn present_empty_scene_publishes_every_domain_directory() {
 
     assert_eq!(parts.scene.source_node_count(), Some(0));
     assert_eq!(parts.scene.source_root_count(), Some(0));
-    assert_eq!(parts.scene.canonical_block_count(), 7);
+    assert_eq!(parts.scene.canonical_block_count(), 15);
     assert_eq!(parts.scene.parent(0), None);
     assert_eq!(parts.scene.child(None, 0), None);
     assert_eq!(parts.scene.authored_transform(0), None);
@@ -900,13 +1186,29 @@ fn empty_geometry_leaf_scan_observes_periodic_cancellation() {
     let logical_morphs = [LogicalMorphAuthoring::new(AuthoringRange::new(0, 0), &[])];
     let primitive_deformations =
         vec![PrimitiveDeformationAuthoring::new(Presence::Absent, &[]); PRIMITIVE_COUNT];
+    let spatial = SpatialAuthoringBatch::new(&SceneSpace::UNKNOWN, &[], &[]);
+    let node_batch = NodeAuthoringBatch::new(Presence::Present(&roots), &nodes);
+    let appearance = AppearanceAuthoringBatch::empty();
+    let geometry = GeometryAuthoringBatch::new(&logical_meshes, &primitives, &[], &[]);
+    let deformation =
+        DeformationAuthoringBatch::new(&[], &[], &logical_morphs, &primitive_deformations, &[]);
+    let animations = AnimationAuthoringBatch::empty();
+    let profile = profile_fixture(
+        spatial,
+        node_batch,
+        appearance,
+        geometry,
+        deformation,
+        animations,
+    );
     let input = SceneAuthoringBatch::new(
-        SpatialAuthoringBatch::new(&SceneSpace::UNKNOWN, &[], &[]),
-        NodeAuthoringBatch::new(Presence::Present(&roots), &nodes),
-        AppearanceAuthoringBatch::empty(),
-        GeometryAuthoringBatch::new(&logical_meshes, &primitives, &[], &[]),
-        DeformationAuthoringBatch::new(&[], &[], &logical_morphs, &primitive_deformations, &[]),
-        AnimationAuthoringBatch::empty(),
+        spatial,
+        node_batch,
+        appearance,
+        geometry,
+        deformation,
+        animations,
+        profile.batch(),
     );
     let cancellation = CancelOnSignalPoll::new();
     let validated =
@@ -978,7 +1280,7 @@ fn materialization_work_budget_interruption_publishes_rich_failure() {
 
 #[test]
 fn central_validation_work_budget_interruption_publishes_rich_failure() {
-    const WORK_LIMIT: u64 = 61;
+    const WORK_LIMIT: u64 = SINGLE_TRS_CENTRAL_VALIDATION_INTERRUPTION_WORK;
 
     let factory = test_factory();
     let account = test_account(&factory, 256);
@@ -1073,13 +1375,29 @@ fn invalid_geometry_payload_fault_is_a_build_invariant_rich_failure() {
     let logical_meshes = [GeometryLogicalMeshAuthoring::new(AuthoringRange::new(0, 1))];
     let logical_morphs = [LogicalMorphAuthoring::new(AuthoringRange::new(0, 0), &[])];
     let primitive_deformations = [PrimitiveDeformationAuthoring::new(Presence::Absent, &[])];
+    let spatial = SpatialAuthoringBatch::new(&SceneSpace::UNKNOWN, &[], &[]);
+    let node_batch = NodeAuthoringBatch::new(Presence::Present(&roots), &nodes);
+    let appearance = AppearanceAuthoringBatch::empty();
+    let geometry = GeometryAuthoringBatch::new(&logical_meshes, &primitives, &attributes, &[]);
+    let deformation =
+        DeformationAuthoringBatch::new(&[], &[], &logical_morphs, &primitive_deformations, &[]);
+    let animations = AnimationAuthoringBatch::empty();
+    let profile = profile_fixture(
+        spatial,
+        node_batch,
+        appearance,
+        geometry,
+        deformation,
+        animations,
+    );
     let input = SceneAuthoringBatch::new(
-        SpatialAuthoringBatch::new(&SceneSpace::UNKNOWN, &[], &[]),
-        NodeAuthoringBatch::new(Presence::Present(&roots), &nodes),
-        AppearanceAuthoringBatch::empty(),
-        GeometryAuthoringBatch::new(&logical_meshes, &primitives, &attributes, &[]),
-        DeformationAuthoringBatch::new(&[], &[], &logical_morphs, &primitive_deformations, &[]),
-        AnimationAuthoringBatch::empty(),
+        spatial,
+        node_batch,
+        appearance,
+        geometry,
+        deformation,
+        animations,
+        profile.batch(),
     );
     let validated = SceneConstructionOperation::with_account_for_scene_input(
         &account,
