@@ -13,8 +13,8 @@ schema_id = "baozi.u4c.production-report"
 schema_version = 2
 report_revision = 1
 scenario_set_id = "canonical-store-production-v2"
-payload_bytes = 80261
-sha256 = "b764a762e1c0e8f5df6b2566867fabc397eaa70faa756400c7d3142889168cbe"
+payload_bytes = 80272
+sha256 = "19575afdda6e5ceca655b7ed09dd02964d110dcf9fe94e8b2b70174cad1940f9"
 
 [ledger_contract]
 ordinary_semantic_id_hex = "0262616f7a692d636f72652d7363656e65000000010000000000000001"
@@ -87,8 +87,8 @@ max_work = 262144
 
 [[closure.source_trees]]
 path = "crates"
-file_count = 350
-sha256 = "62e9d719b80715e532a16a15ac4eebeb70d33b009e3b139260169aab8815e750"
+file_count = 358
+sha256 = "1cf205510b330b95579b33142d5b89a446a1845ca74fa270719c4095c1c618c7"
 
 [[closure.fixed_inputs]]
 path = "Cargo.lock"
@@ -595,16 +595,16 @@ target_live_retained_allocations = 278
 entry_point = "canonical-obj-corner-smoothing"
 scenario_id = "canonical-obj-corner-smoothing-v1"
 generation_reservations = 1
-canonical_block_count = 20
+canonical_block_count = 21
 outcome_evidence_block_count = 1
-full_snapshot_digest_hex = "201f0df1809666a538a5a64943d1e219e5092f69428d4527bfc0906afc30faba"
-equivalent_snapshot_digest_hex = "201f0df1809666a538a5a64943d1e219e5092f69428d4527bfc0906afc30faba"
-construction_semantic_cells = 286
-construction_references = 24
-construction_blocks = 21
-construction_producer_events = 373
-retained_bytes = 20600
-retained_allocations = 49
+full_snapshot_digest_hex = "8bd19f1ab6db2bd980d2bde89954f233d60c1e7be405bcf23951a4a73d29bd4c"
+equivalent_snapshot_digest_hex = "8bd19f1ab6db2bd980d2bde89954f233d60c1e7be405bcf23951a4a73d29bd4c"
+construction_semantic_cells = 323
+construction_references = 25
+construction_blocks = 22
+construction_producer_events = 414
+retained_bytes = 22624
+retained_allocations = 51
 
 [obj_capability.source_shape]
 position_count = 3
@@ -638,32 +638,32 @@ sparse_index_count = 0
 canonical_scalar_count = 41
 f32_scalar_count = 39
 u32_scalar_count = 2
-transcript_bytes = 1204
-work_units = 114
+transcript_bytes = 1257
+work_units = 120
 
 [obj_capability.bounded_preview]
 schema_id = "baozi.canonical-scene.bounded-preview.v1"
-bytes = 95
-sha256 = "514a7ee9d324710bf07fd617016a7fcd31039a78a7d79ce519ad479e7a255d98"
+bytes = 91
+sha256 = "06cc56db42a07fce32d809fec256a38cb1e8801cfc81ba1cf60266b234f98a53"
 items_omitted_by_limit = 25
 bytes_truncated = true
 items_truncated = true
 
 [obj_capability.construction_budget]
-max_payload_copy_bytes = 10348
+max_payload_copy_bytes = 11868
 
 [obj_capability.construction_budget.allocations]
-max_count_total = 90
-max_bytes_total = 31944
-max_count_peak = 80
-max_bytes_peak = 30996
-max_count_current = 49
-max_bytes_current = 15436
+max_count_total = 92
+max_bytes_total = 34504
+max_count_peak = 82
+max_bytes_peak = 33556
+max_count_current = 51
+max_bytes_current = 17156
 
 [obj_capability.snapshot_budget]
-completed_lookups = 32
-lookup_events = 256
-member_probes = 32
+completed_lookups = 34
+lookup_events = 272
+member_probes = 34
 max_lookup_events = 8
 max_member_probes_per_lookup = 1
 
@@ -687,7 +687,7 @@ sha256 = "14a3b49b2e1794c65dc9dba5848817f4788d462eeeef1122c3641f18af45588b"
 
 [[obj_capability.mutations]]
 field_class = "position_index"
-snapshot_digest_hex = "bfb1b3dbcdaa4cf8b1955e7225d9d148b81e94eb7a1a430769c2c6a9cc521f04"
+snapshot_digest_hex = "a9c3bd725f1f884de1a54e271a1f5a985c917f45753c0abbb675c344e1882da4"
 
 [obj_capability.mutations.source_vector]
 schema_id = "baozi.normalized-obj-capability-source.v1"
@@ -696,7 +696,7 @@ sha256 = "ec1d440503a1fb79ae6e046a052a0929ebfe9c0c52bdd3a759cda82eadf291fb"
 
 [[obj_capability.mutations]]
 field_class = "texcoord_index"
-snapshot_digest_hex = "232ea5e609650ea2f7e79511dcf73fc285aa753ff4c263c7f2ce52d7077c665c"
+snapshot_digest_hex = "e179ac0e0754d407c5c7d5e256478e76a70250be5be06fd38feb6a08560b15e1"
 
 [obj_capability.mutations.source_vector]
 schema_id = "baozi.normalized-obj-capability-source.v1"
@@ -705,7 +705,7 @@ sha256 = "e700b1c98d17e922327f5b7c9a086d8449c0caa159ff219f8c1681af68708226"
 
 [[obj_capability.mutations]]
 field_class = "normal_index"
-snapshot_digest_hex = "bc882ea1c09328158b9747517c221917883ec838a065cb8eef90a911a6307e10"
+snapshot_digest_hex = "28ee940a7c6e02f9742449063e27675fe76b221fa3bb2766ac1270aae73725fc"
 
 [obj_capability.mutations.source_vector]
 schema_id = "baozi.normalized-obj-capability-source.v1"
@@ -714,7 +714,7 @@ sha256 = "88748d0c578b6a82691890828e329791278a2729033e11232367fa58108f0a71"
 
 [[obj_capability.mutations]]
 field_class = "smoothing_group"
-snapshot_digest_hex = "9cfb4844cd2880e45c0938ee2deed8b4424d1046560b92fe6eb6777cf17949d0"
+snapshot_digest_hex = "c3a2d8c2430a61a7ce2ec8b1693c6532adc472f202d256c8b0f520ee2d1bc80f"
 
 [obj_capability.mutations.source_vector]
 schema_id = "baozi.normalized-obj-capability-source.v1"
@@ -725,47 +725,47 @@ sha256 = "c92dc4410198568bfb0650f48452205a7cd7a4279a72fd6eea4de2eb222b34fe"
 entry_point = "backend-free-gltf-shape"
 scenario_id = "backend-free-gltf-shape-v1"
 source_generation_reservations = 1
-canonical_block_count = 54
+canonical_block_count = 55
 outcome_evidence_block_count = 1
-full_snapshot_digest_hex = "96e255c03b96fd2b1ee1eb9a2c471740de26ef1493a1949a3e99972ca748805b"
-construction_semantic_cells = 906
-construction_references = 125
-construction_blocks = 55
-construction_producer_events = 1196
-retained_bytes = 52072
-retained_allocations = 117
+full_snapshot_digest_hex = "6cf6c7a2be61506cd0e74be1d558856f6ec9879d4d8dc1eed76a198c391e501d"
+construction_semantic_cells = 955
+construction_references = 126
+construction_blocks = 56
+construction_producer_events = 1249
+retained_bytes = 54736
+retained_allocations = 119
 
 [gltf_capability.changed_scene_edit]
 entry_point = "changed-scene-edit"
 scenario_id = "canonical-gltf-node-transform-edit-v1"
-output_snapshot_digest_hex = "88973d1a0a526c241d405c61b5597f6342b9d7dde321904b04b16d3a40201f63"
-semantic_cells = 562
-references = 125
-blocks = 55
-new_blocks = 27
+output_snapshot_digest_hex = "2a8547ee8ce4705dc46d9c2a7e1bf4103641e1946c658c8f95a90b028bcac894"
+semantic_cells = 611
+references = 126
+blocks = 56
+new_blocks = 28
 inherited_blocks = 28
-producer_events = 852
-completed_lookups = 54
-lookup_events = 432
-member_probes = 54
+producer_events = 905
+completed_lookups = 56
+lookup_events = 448
+member_probes = 56
 max_lookup_events = 8
 max_member_probes_per_lookup = 1
 
 [gltf_capability.changed_scene_edit.budget]
-max_payload_copy_bytes = 26400
+max_payload_copy_bytes = 28400
 
 [gltf_capability.changed_scene_edit.budget.allocations]
-max_count_total = 88
-max_bytes_total = 49028
-max_count_peak = 84
-max_bytes_peak = 48692
-max_count_current = 62
-max_bytes_current = 35808
+max_count_total = 90
+max_bytes_total = 51596
+max_count_peak = 86
+max_bytes_peak = 51260
+max_count_current = 64
+max_bytes_current = 38016
 
 [gltf_capability.changed_scene_edit.snapshot_budget]
-completed_lookups = 100
-lookup_events = 800
-member_probes = 100
+completed_lookups = 102
+lookup_events = 816
+member_probes = 102
 max_lookup_events = 8
 max_member_probes_per_lookup = 1
 
@@ -780,13 +780,13 @@ max_bytes_current = 131072
 [[gltf_capability.changed_scene_edit.ledger_dimensions]]
 role = "ordinary"
 semantic_id_hex = "0262616f7a692d636f72652d7363656e65000000010000000000000001"
-attempted = 1413
-consumed = 1413
+attempted = 1466
+consumed = 1466
 current_live_bytes = 0
-peak_live_bytes = 61368
+peak_live_bytes = 64152
 pending_publication = 0
-committed = 54
-committed_canonical_output = 54
+committed = 55
+committed_canonical_output = 55
 published_outcome_evidence = 2
 
 [[gltf_capability.changed_scene_edit.ledger_dimensions]]
@@ -802,12 +802,12 @@ committed_canonical_output = 0
 published_outcome_evidence = 0
 
 [gltf_capability.changed_scene_edit.physical_account]
-with_output_live_bytes = 99928
-with_output_live_allocations = 179
-after_input_release_live_bytes = 52584
-after_input_release_live_allocations = 118
-after_output_report_release_live_bytes = 50432
-after_output_report_release_live_allocations = 111
+with_output_live_bytes = 105256
+with_output_live_allocations = 183
+after_input_release_live_bytes = 55248
+after_input_release_live_allocations = 120
+after_output_report_release_live_bytes = 53096
+after_output_report_release_live_allocations = 113
 
 [gltf_capability.source_shape]
 node_count = 3
@@ -905,32 +905,32 @@ animation_time_scalar_count = 6
 animation_value_scalar_count = 18
 animation_in_tangent_scalar_count = 4
 animation_out_tangent_scalar_count = 4
-transcript_bytes = 4485
-work_units = 412
+transcript_bytes = 4550
+work_units = 422
 
 [gltf_capability.bounded_preview]
 schema_id = "baozi.canonical-scene.bounded-preview.v1"
-bytes = 95
-sha256 = "a38623e42629f4ea035a4fc05272ebff9f14356396b800f9cabdce085ab0c913"
+bytes = 91
+sha256 = "06cc56db42a07fce32d809fec256a38cb1e8801cfc81ba1cf60266b234f98a53"
 items_omitted_by_limit = 50
 bytes_truncated = true
 items_truncated = true
 
 [gltf_capability.construction_budget]
-max_payload_copy_bytes = 27629
+max_payload_copy_bytes = 29629
 
 [gltf_capability.construction_budget.allocations]
-max_count_total = 169
-max_bytes_total = 68852
-max_count_peak = 156
-max_bytes_peak = 67403
-max_count_current = 117
-max_bytes_current = 39517
+max_count_total = 171
+max_bytes_total = 71892
+max_count_peak = 158
+max_bytes_peak = 70443
+max_count_current = 119
+max_bytes_current = 41717
 
 [gltf_capability.snapshot_budget]
-completed_lookups = 100
-lookup_events = 800
-member_probes = 100
+completed_lookups = 102
+lookup_events = 816
+member_probes = 102
 max_lookup_events = 8
 max_member_probes_per_lookup = 1
 
@@ -949,7 +949,7 @@ sha256 = "03336b46e8e906623cfccbf305fc24307da98fc9eb25c98c2c6f3de6377b9ab2"
 
 [[gltf_capability.mutations]]
 field_class = "node_transform_float_bits"
-snapshot_digest_hex = "9207687d8c53236e0dfbaa5b776cb251779696b824ee5e3098d634caf91d2cba"
+snapshot_digest_hex = "6887d19de0d5852b404d6761b64b82f406c803f32a55135dd9912cabbca3b90e"
 
 [gltf_capability.mutations.source_vector]
 schema_id = "baozi.selected-gltf-shape-capability-source.v2"
@@ -958,7 +958,7 @@ sha256 = "b5c81b71393d724afe10efd70c0083aaaa1a77d7f10cc00017f43e0d720c8ca4"
 
 [[gltf_capability.mutations]]
 field_class = "image_payload_bytes"
-snapshot_digest_hex = "ebca3906c9900885faeae83026eec943a3203c7167cef6ae087c9b45f51b6d37"
+snapshot_digest_hex = "580cde53ba7c89ec08f8116babd86bdb070348bba855c999917aefc66ee635e4"
 
 [gltf_capability.mutations.source_vector]
 schema_id = "baozi.selected-gltf-shape-capability-source.v2"
@@ -967,7 +967,7 @@ sha256 = "f9bd840fdafd94497532719585b6093cdf237d3c7d9cea77b49ab6999c6853e7"
 
 [[gltf_capability.mutations]]
 field_class = "material_binding_semantics"
-snapshot_digest_hex = "4078c443e46d2ce6207518a076d6065d367ebe71c1d890b2582cf64bab0742ed"
+snapshot_digest_hex = "a174fa353e69b4ce3ed258bbfc658ed7be77d7e851efa80de427e9de21f55586"
 
 [gltf_capability.mutations.source_vector]
 schema_id = "baozi.selected-gltf-shape-capability-source.v2"
@@ -976,7 +976,7 @@ sha256 = "54a30e4430b6465c70f53adbdbc913817cd49fcc3958204b3695c69bd2e84d81"
 
 [[gltf_capability.mutations]]
 field_class = "material_semantics"
-snapshot_digest_hex = "2fa00370ae4d0f2b5a64ccf701ce66d7964198b8712d80114ac4a1a037929e33"
+snapshot_digest_hex = "08c0f11a96c125331d24de1f1ec6c3c4ba8344c7deddbbb7ee432c1e13f0a11e"
 
 [gltf_capability.mutations.source_vector]
 schema_id = "baozi.selected-gltf-shape-capability-source.v2"
@@ -985,7 +985,7 @@ sha256 = "df98892fd5cd8d3fc43491f25a2173024b77bb1c7a04f12567cb8b93a7ec0b72"
 
 [[gltf_capability.mutations]]
 field_class = "primitive_material_reference"
-snapshot_digest_hex = "0f20b01398bb014b5b9fa504b7deb2022dfdbde2b18e9479ac991269f7fa5e4a"
+snapshot_digest_hex = "e516900b1c24e7b9a6e10a78e70c30be8d9cb729ee29ff95210aaefebb2c421b"
 
 [gltf_capability.mutations.source_vector]
 schema_id = "baozi.selected-gltf-shape-capability-source.v2"
@@ -994,7 +994,7 @@ sha256 = "ef906e78c20dbf1e157524a5737fe4578f47972d5552bebf7abcc3c6645d110c"
 
 [[gltf_capability.mutations]]
 field_class = "skin_inverse_bind_float_bits"
-snapshot_digest_hex = "eeb759d625fabeeb5db2b6e3f2ce7e05447f482eff599d7d1f2a7b781898501e"
+snapshot_digest_hex = "16b87c6620f37de877896e5986f403772c2722ddc8cbcf9c12e751ec0589634f"
 
 [gltf_capability.mutations.source_vector]
 schema_id = "baozi.selected-gltf-shape-capability-source.v2"
@@ -1003,7 +1003,7 @@ sha256 = "d48fb0538784d5007d3bcbfd9e6af627341d0ebd5284117974d6c8b25bb59f6a"
 
 [[gltf_capability.mutations]]
 field_class = "influence_weight_float_bits"
-snapshot_digest_hex = "6e3c09b1d0bdc613add3baf4847ef19dc17f735cdea6b780d81b6816baefca83"
+snapshot_digest_hex = "47bdea1fad2c0b475bc658206e5978590247fc1282d7c3ea6e64c339b9740695"
 
 [gltf_capability.mutations.source_vector]
 schema_id = "baozi.selected-gltf-shape-capability-source.v2"
@@ -1012,7 +1012,7 @@ sha256 = "14188f29a0d1c708e75051b12b1f7abadff33fd8355ac05530f8f0736f2b1a95"
 
 [[gltf_capability.mutations]]
 field_class = "morph_sparse_index"
-snapshot_digest_hex = "4adbbf27e785227377f47e45ab2217f990d63197fd123487d73cd22f741b0451"
+snapshot_digest_hex = "98f6776fd5e4f6275cedfa55e061222f611a08442052a3040dc69cb5c2d89293"
 
 [gltf_capability.mutations.source_vector]
 schema_id = "baozi.selected-gltf-shape-capability-source.v2"
@@ -1021,7 +1021,7 @@ sha256 = "c200d6fc7d27cedabdc581ba570a09dc18963d75dbaa3d2cd3866d760f862c4b"
 
 [[gltf_capability.mutations]]
 field_class = "animation_value_float_bits"
-snapshot_digest_hex = "751a7f6826c8aeb4a927577cdbb876381a479d92bcd7ad2a6a2442d819d6b5ec"
+snapshot_digest_hex = "b1453aaabb77f39df72f8dd0fff1977ef183e47a9961aaf17e07fb35b9fef73a"
 
 [gltf_capability.mutations.source_vector]
 schema_id = "baozi.selected-gltf-shape-capability-source.v2"
