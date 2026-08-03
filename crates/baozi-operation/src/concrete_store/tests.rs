@@ -12,6 +12,8 @@ use crate::{
     PhysicalStorageAccountFactoryLimits, PhysicalStorageAccountLimits,
 };
 
+mod mapped_record_append;
+
 struct TestOwner;
 
 impl OperationOwner for TestOwner {}

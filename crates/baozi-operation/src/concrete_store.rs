@@ -4004,6 +4004,102 @@ where
         )
     }
 
+    /// Rewrites one exact-source canonical record block as a mapped prefix and appends only the
+    /// remaining rows through a controlled typed writer.
+    ///
+    /// `source_plan` must exactly describe the source block. `destination_plan` must use the same
+    /// field width and have at least as many rows. Historical canonical references are rewritten
+    /// through the bound source map before `append` receives the destination writer. Every copied
+    /// source cell is polled and charged exactly once.
+    pub fn try_rewrite_canonical_records_with_mapped_prefix_controlled<Tag>(
+        &mut self,
+        source_ref: CanonicalRecordRef<Tag>,
+        source_plan: RecordPlan,
+        destination_plan: RecordPlan,
+        work_dimension: StoreDimensionKey,
+        tag: Tag,
+        append: impl for<'control> FnOnce(
+            &mut CanonicalRecordWriter,
+            &mut RetainedStoreWorkControl<'control, O, PP, U>,
+        ) -> Result<(), StoreControlledError>,
+    ) -> Result<CanonicalRecordRef<Tag>, StoreRuntimeError>
+    where
+        Tag: Copy + Send + Sync + 'static,
+    {
+        let source = self.lineage.source;
+        self.ensure_writable()?;
+        self.validate_dimension(work_dimension)?;
+        let source_records = read_canonical_source_records(source, source_ref)
+            .ok_or(StoreRuntimeError::InvalidSourceSlot)?;
+        if source_records.rows() != source_plan.rows()
+            || source_records.fields() != source_plan.fields()
+        {
+            return Err(StoreRuntimeError::Build(
+                StoreBuildError::capacity_envelope_violated(),
+            ));
+        }
+        if source_plan.fields != destination_plan.fields {
+            return Err(StoreRuntimeError::Build(
+                StoreBuildError::invalid_record_width(),
+            ));
+        }
+        if source_plan.rows > destination_plan.rows {
+            return Err(StoreRuntimeError::Build(
+                StoreBuildError::capacity_exceeded(),
+            ));
+        }
+        let allocation = destination_plan
+            .allocation_plan()
+            .map_err(StoreRuntimeError::Plan)?;
+        let mut callback_cause = None;
+        let result = self.raw.try_rewrite_canonical_controlled(
+            source.aggregate(),
+            source_ref.raw,
+            work_dimension,
+            allocation,
+            |emplacer, source_block, mapping, raw| {
+                let mut writer = CanonicalRecordWriter::new(destination_plan)?;
+                let mut control = RetainedStoreWorkControl { raw, sticky: None };
+                let callback = (|| -> Result<(), StoreControlledError> {
+                    let storage = checked_source_record(source_block, source_plan)
+                        .ok_or_else(StoreBuildError::capacity_envelope_violated)?;
+                    for source_cell in storage.cells.iter().copied() {
+                        control.poll()?;
+                        control.charge_observed(1)?;
+                        if writer.core.storage.cells.len() >= destination_plan.cells {
+                            return Err(StoreBuildError::capacity_exceeded().into());
+                        }
+                        let cell = mapped_canonical_record_cell(source_cell, &mapping)
+                            .ok_or_else(StoreBuildError::capacity_envelope_violated)?;
+                        writer.core.storage.cells.push(cell);
+                        #[cfg(feature = "_u4c-collector")]
+                        {
+                            match cell {
+                                RecordCell::Scalar(_) => record_semantic_cell_write(),
+                                RecordCell::CanonicalReference { .. }
+                                | RecordCell::OutcomeEvidenceReference { .. } => {
+                                    record_reference_write();
+                                }
+                            }
+                            record_payload_copy_bytes(std::mem::size_of::<RecordCell>());
+                        }
+                    }
+                    append(&mut writer, &mut control)
+                })();
+                if let Err(cause) = control.finish_build(callback) {
+                    callback_cause = Some(cause);
+                    return Err(RetainedBuildFailureCode::new(BUILD_CODE_DOMAIN));
+                }
+                Ok(emplacer.place(writer.finish()?, tag))
+            },
+        );
+        self.map_controlled_action(result, callback_cause)
+            .map(|raw| CanonicalStoreRef {
+                raw,
+                marker: PhantomData,
+            })
+    }
+
     /// Replaces one exact-source canonical record block with controlled authored output.
     pub fn try_rewrite_canonical_records_with_controlled<Tag>(
         &mut self,
