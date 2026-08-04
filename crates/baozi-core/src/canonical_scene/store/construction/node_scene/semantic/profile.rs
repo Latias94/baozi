@@ -67,6 +67,33 @@ impl<'left, 'right> PartialEq<NodeSceneProfileProvenanceIndices<'right>>
 
 impl Eq for NodeSceneProfileProvenanceIndices<'_> {}
 
+#[cfg(test)]
+mod provenance_index_tests {
+    use super::*;
+
+    fn indices(scalars: &[u64]) -> NodeSceneProfileProvenanceIndices<'_> {
+        NodeSceneProfileProvenanceIndices::new(
+            QualifiedProvenanceAddressSlice::from_scalars(scalars, 1)
+                .expect("test qualified provenance address"),
+        )
+    }
+
+    #[test]
+    fn semantic_indices_ignore_physical_address_qualification() {
+        let left_scalars = [0, 7, 3, 3];
+        let right_scalars = [1, 11, 1, 3];
+        let different_global_scalars = [1, 11, 2, 4];
+
+        let left = indices(&left_scalars);
+        let right = indices(&right_scalars);
+        let different_global = indices(&different_global_scalars);
+
+        assert_eq!(left, right);
+        assert_ne!(left, different_global);
+        assert_eq!(format!("{left:?}"), "[Some(3)]");
+    }
+}
+
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
 struct ProfileLineageCounts {
     resources: usize,
