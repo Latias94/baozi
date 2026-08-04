@@ -3,6 +3,10 @@ use baozi_operation::{
     StoreRuntimeError,
 };
 
+use crate::canonical_scene::store::profile_provenance::{
+    PROFILE_PROVENANCE_ADDRESS_SCALARS, ProfileSegmentAddressDomain, ProfileSegmentNonce,
+    QualifiedProvenanceAddress, QualifiedProvenanceAddressSlice, issue_profile_segment_nonce,
+};
 use crate::canonical_scene::store::schema::CanonicalBlockRef;
 use crate::canonical_scene::store::schema::profile::{
     PROFILE_ABSENT_REFERENCE, PROFILE_DIGEST_BLAKE3, PROFILE_DIGEST_SHA256,
@@ -29,6 +33,7 @@ pub(super) struct RewrittenProfileLineageLeaves {
     pub(super) provenance: CanonicalBlockRef<ProfileLineageProvenanceSchema>,
     pub(super) operation: CanonicalBlockRef<ProfileLineageOperationSchema>,
     pub(super) digest: CanonicalBlockRef<ProfileLineageDigestSchema>,
+    pub(super) segment_nonce: ProfileSegmentNonce,
 }
 
 pub(super) fn rewrite_lineage_leaves<'scene>(
@@ -51,16 +56,27 @@ pub(super) fn rewrite_lineage_leaves<'scene>(
         .sequence(plan.source_attachments.into_store())
         .ok_or(StoreRuntimeError::InvalidSourceSlot)?;
     let source_values = source_attachments.as_slice();
-    if source_values.len() != plan.source_attachment_count.as_usize() {
-        return Err(StoreRuntimeError::InvalidSourceSlot);
-    }
+    let source_addresses = QualifiedProvenanceAddressSlice::from_scalars(
+        source_values,
+        plan.source_attachment_count.as_usize(),
+    )
+    .ok_or(StoreRuntimeError::InvalidSourceSlot)?;
     let target_start = plan.target_attachment_offset.as_usize();
     let target_end = target_start
         .checked_add(plan.target_attachment_count.as_usize())
         .ok_or(StoreRuntimeError::AccountingOverflow)?;
-    let target_parents = source_values
-        .get(target_start..target_end)
+    let target_parents = source_addresses
+        .get_range(target_start, plan.target_attachment_count.as_usize())
         .ok_or(StoreRuntimeError::InvalidSourceSlot)?;
+    let segment_nonce =
+        issue_profile_segment_nonce().map_err(|_| StoreRuntimeError::MembershipExhausted)?;
+    let fresh_address = QualifiedProvenanceAddress::new(
+        plan.source_segment_count.as_u32(),
+        segment_nonce,
+        0,
+        plan.fresh_provenance_index.as_u32(),
+    )
+    .ok_or(StoreRuntimeError::AccountingOverflow)?;
 
     // This exact source leaf must be mapped before bulk inheritance so the old attachment
     // storage is not retained into the edited generation.
@@ -71,13 +87,16 @@ pub(super) fn rewrite_lineage_leaves<'scene>(
             keys.dimension,
             ProfileLineageAttachmentSchema,
             |writer, control| {
-                let prefix = source_values.get(..target_start).ok_or(failure)?;
-                let suffix = source_values.get(target_end..).ok_or(failure)?;
+                let prefix = source_addresses.raw_prefix(target_start).ok_or(failure)?;
+                let suffix = source_addresses.raw_suffix(target_end).ok_or(failure)?;
                 process_slice_in_work_chunks(prefix, control, work, failure, |chunk| {
                     writer.extend_from_slice(chunk)
                 })?;
-                work.observe(control, 1)?;
-                writer.push(plan.fresh_provenance_index.as_u32())?;
+                work.observe(
+                    control,
+                    u64::try_from(PROFILE_PROVENANCE_ADDRESS_SCALARS).map_err(|_| failure)?,
+                )?;
+                writer.extend_from_slice(&fresh_address.into_scalars())?;
                 process_slice_in_work_chunks(suffix, control, work, failure, |chunk| {
                     writer.extend_from_slice(chunk)
                 })
@@ -94,24 +113,27 @@ pub(super) fn rewrite_lineage_leaves<'scene>(
             ProfileLineageParentSchema,
             |writer, control| {
                 let mut previous = None;
-                for parent in target_parents.iter().copied() {
+                let mut maximum_depth = 0_u32;
+                for parent in target_parents.iter() {
                     work.observe(control, 1)?;
-                    if parent >= plan.fresh_provenance_index.as_u32()
-                        || previous.is_some_and(|previous| previous >= parent)
+                    let parent = parent.ok_or(failure)?;
+                    let (global, depth) = resolve_qualified_depth(
+                        pending, &segments, parent, control, work, failure,
+                    )?;
+                    if global >= plan.fresh_provenance_index.as_u32()
+                        || previous.is_some_and(|previous| previous >= global)
                     {
                         return Err(failure.into());
                     }
-                    writer.push(parent)?;
-                    previous = Some(parent);
+                    work.observe(
+                        control,
+                        u64::try_from(PROFILE_PROVENANCE_ADDRESS_SCALARS).map_err(|_| failure)?,
+                    )?;
+                    writer.extend_from_slice(&parent.into_scalars())?;
+                    maximum_depth = maximum_depth.max(depth);
+                    previous = Some(global);
                 }
-                fresh_depth = Some(resolve_fresh_depth(
-                    pending,
-                    &segments,
-                    target_parents,
-                    control,
-                    work,
-                    failure,
-                )?);
+                fresh_depth = Some(maximum_depth.checked_add(1).ok_or(failure)?);
                 Ok(())
             },
         )
@@ -189,6 +211,7 @@ pub(super) fn rewrite_lineage_leaves<'scene>(
         provenance,
         operation,
         digest,
+        segment_nonce,
     })
 }
 
@@ -360,7 +383,9 @@ pub(super) fn rewrite_segments<'scene>(
                         row.write_scalar(0_u32)?;
                         row.write_scalar(PROFILE_ABSENT_REFERENCE)?;
                         row.write_scalar(u32::try_from(DIGEST_LEN).map_err(|_| failure)?)?;
-                        row.write_bytes_ref(leaves.digest.into_store())
+                        row.write_bytes_ref(leaves.digest.into_store())?;
+                        row.write_scalar(leaves.segment_nonce.get())?;
+                        row.write_scalar(pending.counts.profile.fresh_provenance_index.as_u32())
                     })
                     .map_err(Into::into)
             },
@@ -384,10 +409,10 @@ fn required_segment_view<'scene>(
     Ok(segments)
 }
 
-fn resolve_fresh_depth(
+fn resolve_qualified_depth(
     pending: &PendingNodeTransformEdit<'_>,
     segments: &CanonicalRecordView<'_>,
-    parents: &[u32],
+    address: QualifiedProvenanceAddress,
     control: &mut baozi_operation::RetainedStoreWorkControl<
         '_,
         super::super::super::super::SceneConstructionOwner,
@@ -396,66 +421,65 @@ fn resolve_fresh_depth(
     >,
     work: &mut NodeSceneWorkMeter,
     failure: StoreBuildError,
-) -> Result<u32, StoreControlledError> {
-    let mut parent_cursor = 0_usize;
-    let mut provenance_base = 0_u32;
-    let mut maximum_depth = 0_u32;
-
-    for segment_row in 0..segments.rows() {
-        if parent_cursor == parents.len() {
-            break;
-        }
-        work.observe(control, 1)?;
-        let count = segments
-            .scalar::<u32>(segment_row, profile_segment_field::PROVENANCE_COUNT)
-            .ok_or(failure)?;
-        let end = provenance_base.checked_add(count).ok_or(failure)?;
-        let next_parent = *parents.get(parent_cursor).ok_or(failure)?;
-        if next_parent < provenance_base {
-            return Err(failure.into());
-        }
-        if next_parent < end {
-            let provenance_ref = segments
-                .sequence_ref::<u32, ProfileLineageProvenanceSchema>(
-                    segment_row,
-                    profile_segment_field::PROVENANCE_NODES,
-                )
-                .ok_or(failure)?;
-            let provenance = pending
-                .input
-                .canonical
-                .sequence(provenance_ref)
-                .ok_or(failure)?;
-            let expected_scalars = usize::try_from(count)
-                .ok()
-                .and_then(|count| count.checked_mul(PROFILE_PROVENANCE_SCALAR_COUNT))
-                .ok_or(failure)?;
-            if provenance.as_slice().len() != expected_scalars {
-                return Err(failure.into());
-            }
-            while parent_cursor < parents.len() {
-                let parent = parents[parent_cursor];
-                if parent >= end {
-                    break;
-                }
-                let local = parent.checked_sub(provenance_base).ok_or(failure)?;
-                let scalar = usize::try_from(local)
-                    .ok()
-                    .and_then(|row| row.checked_mul(PROFILE_PROVENANCE_SCALAR_COUNT))
-                    .and_then(|offset| offset.checked_add(profile_provenance_scalar::DEPTH))
-                    .ok_or(failure)?;
-                work.observe(control, 1)?;
-                let depth = *provenance.as_slice().get(scalar).ok_or(failure)?;
-                maximum_depth = maximum_depth.max(depth);
-                parent_cursor = parent_cursor.checked_add(1).ok_or(failure)?;
-            }
-        }
-        provenance_base = end;
-    }
-    if parent_cursor != parents.len() {
+) -> Result<(u32, u32), StoreControlledError> {
+    let segment_ordinal = address.segment_ordinal().ok_or(failure)?;
+    let segment_row = usize::try_from(segment_ordinal).map_err(|_| failure)?;
+    if segment_row >= pending.counts.profile.source_segment_count.as_usize() {
         return Err(failure.into());
     }
-    maximum_depth.checked_add(1).ok_or_else(|| failure.into())
+    work.observe(control, 1)?;
+    if segments
+        .scalar::<u32>(segment_row, profile_segment_field::SEGMENT)
+        .ok_or(failure)?
+        != segment_ordinal
+    {
+        return Err(failure.into());
+    }
+    let nonce = segments
+        .scalar::<u64>(segment_row, profile_segment_field::NONCE)
+        .and_then(ProfileSegmentNonce::from_stored)
+        .ok_or(failure)?;
+    let provenance_base = segments
+        .scalar::<u32>(segment_row, profile_segment_field::PROVENANCE_BASE)
+        .ok_or(failure)?;
+    let count = segments
+        .scalar::<u32>(segment_row, profile_segment_field::PROVENANCE_COUNT)
+        .ok_or(failure)?;
+    let global = address
+        .validate_against(ProfileSegmentAddressDomain::new(
+            segment_ordinal,
+            nonce,
+            provenance_base,
+            count,
+        ))
+        .ok_or(failure)?;
+    let local = global.checked_sub(provenance_base).ok_or(failure)?;
+    let provenance_ref = segments
+        .sequence_ref::<u32, ProfileLineageProvenanceSchema>(
+            segment_row,
+            profile_segment_field::PROVENANCE_NODES,
+        )
+        .ok_or(failure)?;
+    let provenance = pending
+        .input
+        .canonical
+        .sequence(provenance_ref)
+        .ok_or(failure)?;
+    let expected_scalars = usize::try_from(count)
+        .ok()
+        .and_then(|count| count.checked_mul(PROFILE_PROVENANCE_SCALAR_COUNT))
+        .ok_or(failure)?;
+    if provenance.as_slice().len() != expected_scalars {
+        return Err(failure.into());
+    }
+    let scalar = usize::try_from(local)
+        .ok()
+        .and_then(|row| row.checked_mul(PROFILE_PROVENANCE_SCALAR_COUNT))
+        .and_then(|offset| offset.checked_add(profile_provenance_scalar::DEPTH))
+        .ok_or(failure)?;
+    work.observe(control, 1)?;
+    let depth = *provenance.as_slice().get(scalar).ok_or(failure)?;
+    Ok((global, depth))
 }
 
 const fn encode_digest_algorithm(algorithm: DigestAlgorithm) -> u8 {

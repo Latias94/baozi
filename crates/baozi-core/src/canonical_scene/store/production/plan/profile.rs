@@ -10,6 +10,7 @@ use baozi_operation::{
 use std::error::Error;
 use thiserror::Error;
 
+use crate::canonical_scene::store::profile_provenance::PROFILE_PROVENANCE_ADDRESS_LOGICAL_BYTES;
 use crate::canonical_scene::store::schema::profile::{
     PROFILE_DIRECTORY_LOGICAL_BYTES, PROFILE_EVIDENCE_SCALAR_COUNT,
     PROFILE_METADATA_DIRECTORY_LOGICAL_BYTES, PROFILE_METADATA_ENTRY_LOGICAL_BYTES,
@@ -1268,11 +1269,11 @@ fn retention_shape_from_metrics(
             provenance_scalars,
             operation_scalars,
             evidence_scalars,
-            u64::from(parent_count) * LOGICAL_U32_BYTES,
+            u64::from(parent_count) * PROFILE_PROVENANCE_ADDRESS_LOGICAL_BYTES,
             u64::from(wide_count) * LOGICAL_U64_BYTES,
             u64::from(lineage_text_bytes),
             u64::from(lineage_digest_bytes),
-            u64::from(attachment_count) * LOGICAL_U32_BYTES,
+            u64::from(attachment_count) * PROFILE_PROVENANCE_ADDRESS_LOGICAL_BYTES,
             u64::from(metadata_text_bytes),
             u64::from(metadata_payload_bytes),
             u64::from(metadata_bool_count) * LOGICAL_U8_BYTES,

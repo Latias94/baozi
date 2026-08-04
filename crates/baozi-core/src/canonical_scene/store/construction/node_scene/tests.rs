@@ -27,6 +27,7 @@ use crate::canonical_scene::store::production::{
     ProvenanceNodeAuthoring, ResourceIdentityLocalId, SceneAuthoringBatch, SessionOpaqueReason,
     SourceIdentityAuthoring, SourceIdentityLocalId, SpatialAuthoringBatch, SpatialAuthoringFailure,
 };
+use crate::canonical_scene::store::profile_provenance::PROFILE_PROVENANCE_ADDRESS_SCALARS;
 use crate::entity::AuthoredTransform;
 use crate::identity::{SceneGenerationError, SceneGenerationId};
 use crate::math::{Mat4, Quat, Vec3};
@@ -116,7 +117,7 @@ const SINGLE_TRS_PROFILE_CONTENT_MATERIALIZATION_WORK: u64 = SINGLE_TRS_PROFILE_
     * 2
     + SINGLE_TRS_PROFILE_DIGEST_BYTES
     + SINGLE_TRS_PROFILE_OWNER_COUNT
-    + SINGLE_TRS_PROFILE_ATTACHMENT_COUNT * 2
+    + SINGLE_TRS_PROFILE_ATTACHMENT_COUNT * (1 + PROFILE_PROVENANCE_ADDRESS_SCALARS as u64)
     + SINGLE_TRS_PROFILE_PROVENANCE_COUNT * 6
     + SINGLE_TRS_PROFILE_PROVENANCE_COUNT * 9
     + 1

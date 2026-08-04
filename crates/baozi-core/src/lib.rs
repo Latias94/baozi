@@ -38,6 +38,7 @@ pub mod math;
 #[allow(dead_code, reason = "U4-private-canonical-rail: remove at U4 cutover")]
 mod namespaced;
 mod ordered_map;
+mod process_nonce;
 #[allow(dead_code, reason = "U4-private-canonical-rail: remove at U4 cutover")]
 mod provenance;
 #[allow(dead_code, reason = "U4-private-canonical-rail: remove at U4 cutover")]

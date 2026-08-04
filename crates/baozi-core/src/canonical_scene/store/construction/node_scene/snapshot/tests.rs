@@ -21,6 +21,7 @@ use crate::canonical_scene::store::production::{
     NodeAuthoringBatch, NodeAuthoringNode, NodeLocalId, NodeParent, Presence,
     PrimitiveDeformationAuthoring, SceneAuthoringBatch, SpatialAuthoringBatch,
 };
+use crate::canonical_scene::store::schema::profile::profile_segment_field;
 use crate::entity::{AuthoredTransform, CameraProjection, LightEmission, LightKind};
 use crate::extension::ExtensionSchemaId;
 use crate::identity::NodeId;
@@ -773,6 +774,39 @@ fn known_vector_is_stable_and_human_reviewable() {
     assert!(!snapshot.preview.items_truncated);
 
     drop(parts);
+    assert_eq!(account.snapshot().live_retained_bytes(), 0);
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
+}
+
+#[test]
+fn fresh_segment_nonce_is_excluded_from_the_semantic_snapshot() {
+    let factory = factory();
+    let account = account(&factory);
+    let first = single_root_scene(&account, AuthoredTransform::identity_trs());
+    let second = single_root_scene(&account, AuthoredTransform::identity_trs());
+    let segment_nonce = |scene: &ValidatedNodeScene| {
+        scene
+            .canonical
+            .records(scene.proof.profile_segments().into_store())
+            .and_then(|segments| segments.scalar::<u64>(0, profile_segment_field::NONCE))
+            .expect("validated fresh profile segment nonce")
+    };
+    assert_ne!(segment_nonce(&first.scene), segment_nonce(&second.scene));
+
+    let (first_snapshot, first_transcript) =
+        capture_node_scene_with_test_transcript(&first.scene, snapshot_limits(4_096, 64), None)
+            .expect("first nonce-independent snapshot");
+    let (second_snapshot, second_transcript) =
+        capture_node_scene_with_test_transcript(&second.scene, snapshot_limits(4_096, 64), None)
+            .expect("second nonce-independent snapshot");
+
+    assert_eq!(first_snapshot.digest, second_snapshot.digest);
+    assert_eq!(first_snapshot.preview.text, second_snapshot.preview.text);
+    assert_eq!(first_snapshot.totals, second_snapshot.totals);
+    assert_eq!(first_transcript.bytes, second_transcript.bytes);
+
+    drop(second);
+    drop(first);
     assert_eq!(account.snapshot().live_retained_bytes(), 0);
     assert_eq!(account.snapshot().live_retained_allocations(), 0);
 }

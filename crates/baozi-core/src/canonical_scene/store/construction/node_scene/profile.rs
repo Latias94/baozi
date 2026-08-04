@@ -12,6 +12,9 @@ use baozi_operation::{
 };
 
 use crate::canonical_scene::store::production::{CanonicalProfileOwner, ValidatedProfileBatch};
+use crate::canonical_scene::store::profile_provenance::{
+    PROFILE_PROVENANCE_ADDRESS_SCALARS, ProfileSegmentNonce, issue_profile_segment_nonce,
+};
 use crate::canonical_scene::store::schema::profile::{
     FRESH_PROFILE_MAX_CANONICAL_BLOCKS, PROFILE_ABSENT_REFERENCE, PROFILE_DIRECTORY_FIELD_COUNT,
     PROFILE_EVIDENCE_SCALAR_COUNT, PROFILE_METADATA_DIRECTORY_FIELD_COUNT,
@@ -49,11 +52,11 @@ pub(super) struct ProfileMaterializationPlans {
     provenance: Option<SequencePlan<u32>>,
     operations: Option<SequencePlan<u32>>,
     evidence: Option<SequencePlan<u32>>,
-    parents: Option<SequencePlan<u32>>,
+    parents: Option<SequencePlan<u64>>,
     wide: Option<SequencePlan<u64>>,
     lineage_text: Option<Utf8Plan>,
     lineage_digests: Option<BytesPlan>,
-    attachments: Option<SequencePlan<u32>>,
+    attachments: Option<SequencePlan<u64>>,
     metadata_entries: Option<RecordPlan>,
     metadata_text: Option<Utf8Plan>,
     metadata_bytes: Option<BytesPlan>,
@@ -97,11 +100,11 @@ impl ProfileMaterializationPlans {
         let provenance = sequence_plan(provenance_scalars)?;
         let operations = sequence_plan(operation_scalars)?;
         let evidence = sequence_plan(evidence_scalars)?;
-        let parents = sequence_plan(shape.parent_count())?;
+        let parents = provenance_address_sequence_plan(shape.parent_count())?;
         let wide = sequence_plan_u64(shape.wide_count())?;
         let lineage_text = utf8_plan(shape.lineage_text_bytes())?;
         let lineage_digests = bytes_plan(shape.lineage_digest_bytes())?;
-        let attachments = sequence_plan(shape.attachment_count())?;
+        let attachments = provenance_address_sequence_plan(shape.attachment_count())?;
         let metadata_entries = record_plan(
             batch.metadata_entry_count(),
             PROFILE_METADATA_ENTRY_FIELD_COUNT,
@@ -258,9 +261,23 @@ pub(super) fn retain_profile<R>(
     work: &mut NodeSceneWorkMeter,
     failure: StoreBuildError,
 ) -> Result<RetainedProfileRefs, StoreRuntimeError> {
-    let lineage = lineage::retain_lineage(assembly, plans, batch, keys, work, failure)?;
+    // The assembly proves operation admission. Issuing here keeps pure authoring
+    // preflight and operation-start rejection free of invisible nonce gaps.
+    let segment_nonce =
+        issue_profile_segment_nonce().map_err(|_| StoreRuntimeError::MembershipExhausted)?;
+    let lineage =
+        lineage::retain_lineage(assembly, plans, batch, segment_nonce, keys, work, failure)?;
     let metadata = metadata::retain_metadata(assembly, plans, batch, keys, work, failure)?;
-    let segments = retain_segments(assembly, plans, batch, lineage, keys, work, failure)?;
+    let segments = retain_segments(
+        assembly,
+        plans,
+        batch,
+        lineage,
+        segment_nonce,
+        keys,
+        work,
+        failure,
+    )?;
     let owners = retain_owners(assembly, plans, batch, lineage, keys, work, failure)?;
     let directory = assembly
         .try_retain_canonical_records_controlled(
@@ -291,6 +308,7 @@ fn retain_segments<R>(
     plans: &ProfileMaterializationPlans,
     batch: &ValidatedProfileBatch<'_, R>,
     refs: ProfileLeafRefs,
+    segment_nonce: ProfileSegmentNonce,
     keys: SceneStoreKeys,
     work: &mut NodeSceneWorkMeter,
     failure: StoreBuildError,
@@ -354,7 +372,9 @@ fn retain_segments<R>(
                             shape.lineage_digest_bytes(),
                             refs.digests,
                             failure,
-                        )
+                        )?;
+                        row.write_scalar(segment_nonce.get())?;
+                        row.write_scalar(0_u32)
                     })
                     .map_err(StoreControlledError::from)
             },
@@ -536,6 +556,19 @@ fn sequence_plan(count: u32) -> Result<Option<SequencePlan<u32>>, StorePlanError
             usize::try_from(count).map_err(|_| StorePlanError::SizeOverflow)?,
         )?))
     }
+}
+
+fn provenance_address_sequence_plan(
+    count: u32,
+) -> Result<Option<SequencePlan<u64>>, StorePlanError> {
+    if count == 0 {
+        return Ok(None);
+    }
+    let count = usize::try_from(count)
+        .map_err(|_| StorePlanError::SizeOverflow)?
+        .checked_mul(PROFILE_PROVENANCE_ADDRESS_SCALARS)
+        .ok_or(StorePlanError::SizeOverflow)?;
+    SequencePlan::new(count).map(Some)
 }
 fn sequence_plan_u8(count: u32) -> Result<Option<SequencePlan<u8>>, StorePlanError> {
     if count == 0 {

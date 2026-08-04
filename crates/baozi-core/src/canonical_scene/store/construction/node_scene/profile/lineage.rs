@@ -7,6 +7,9 @@ use crate::canonical_scene::store::construction::{SceneStoreAssembly, SceneStore
 use crate::canonical_scene::store::production::{
     ProvenanceNodeAuthoring, ResourceIdentityStability, SessionOpaqueReason, ValidatedProfileBatch,
 };
+use crate::canonical_scene::store::profile_provenance::{
+    PROFILE_PROVENANCE_ADDRESS_SCALARS, ProfileSegmentNonce, QualifiedProvenanceAddress,
+};
 use crate::canonical_scene::store::schema::CanonicalBlockRef;
 use crate::canonical_scene::store::schema::profile::{
     PROFILE_DIGEST_BLAKE3, PROFILE_DIGEST_SHA256, PROFILE_EVIDENCE_SCALAR_COUNT,
@@ -62,6 +65,7 @@ pub(super) fn retain_lineage<R>(
     assembly: &mut SceneStoreAssembly,
     plans: &ProfileMaterializationPlans,
     batch: &ValidatedProfileBatch<'_, R>,
+    segment_nonce: ProfileSegmentNonce,
     keys: SceneStoreKeys,
     work: &mut NodeSceneWorkMeter,
     failure: StoreBuildError,
@@ -89,12 +93,26 @@ pub(super) fn retain_lineage<R>(
         None => (None, WideLayout::default()),
     };
     let parents = match plans.parents {
-        Some(plan) => Some(retain_parents(assembly, plan, batch, keys, work, failure)?),
+        Some(plan) => Some(retain_parents(
+            assembly,
+            plan,
+            batch,
+            segment_nonce,
+            keys,
+            work,
+            failure,
+        )?),
         None => None,
     };
     let attachments = match plans.attachments {
         Some(plan) => Some(retain_attachments(
-            assembly, plan, batch, keys, work, failure,
+            assembly,
+            plan,
+            batch,
+            segment_nonce,
+            keys,
+            work,
+            failure,
         )?),
         None => None,
     };
@@ -368,8 +386,9 @@ fn retain_wide_values<R>(
 
 fn retain_parents<R>(
     assembly: &mut SceneStoreAssembly,
-    plan: baozi_operation::SequencePlan<u32>,
+    plan: baozi_operation::SequencePlan<u64>,
     batch: &ValidatedProfileBatch<'_, R>,
+    segment_nonce: ProfileSegmentNonce,
     keys: SceneStoreKeys,
     work: &mut NodeSceneWorkMeter,
     failure: StoreBuildError,
@@ -386,9 +405,19 @@ fn retain_parents<R>(
                     if let ProvenanceNodeAuthoring::Operation(operation) = node {
                         for parent in operation.parents().iter().copied() {
                             work.observe(control, 1)?;
-                            let parent_index = parent.index();
-                            work.observe(control, 1)?;
-                            writer.push(parent_index)?;
+                            let address = QualifiedProvenanceAddress::new(
+                                0,
+                                segment_nonce,
+                                parent.index(),
+                                0,
+                            )
+                            .ok_or(failure)?;
+                            work.observe(
+                                control,
+                                u64::try_from(PROFILE_PROVENANCE_ADDRESS_SCALARS)
+                                    .map_err(|_| failure)?,
+                            )?;
+                            writer.extend_from_slice(&address.into_scalars())?;
                             cursor = cursor.checked_add(1).ok_or(failure)?;
                         }
                     }
@@ -404,8 +433,9 @@ fn retain_parents<R>(
 
 fn retain_attachments<R>(
     assembly: &mut SceneStoreAssembly,
-    plan: baozi_operation::SequencePlan<u32>,
+    plan: baozi_operation::SequencePlan<u64>,
     batch: &ValidatedProfileBatch<'_, R>,
+    segment_nonce: ProfileSegmentNonce,
     keys: SceneStoreKeys,
     work: &mut NodeSceneWorkMeter,
     failure: StoreBuildError,
@@ -423,9 +453,19 @@ fn retain_attachments<R>(
                         batch.owner_provenance_at(owner_ordinal).ok_or(failure)?;
                     for provenance in provenance.iter().copied() {
                         work.observe(control, 1)?;
-                        let provenance_index = provenance.index();
-                        work.observe(control, 1)?;
-                        writer.push(provenance_index)?;
+                        let address = QualifiedProvenanceAddress::new(
+                            0,
+                            segment_nonce,
+                            provenance.index(),
+                            0,
+                        )
+                        .ok_or(failure)?;
+                        work.observe(
+                            control,
+                            u64::try_from(PROFILE_PROVENANCE_ADDRESS_SCALARS)
+                                .map_err(|_| failure)?,
+                        )?;
+                        writer.extend_from_slice(&address.into_scalars())?;
                         cursor = cursor.checked_add(1).ok_or(failure)?;
                     }
                 }

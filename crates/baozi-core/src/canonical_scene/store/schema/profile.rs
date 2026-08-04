@@ -11,7 +11,7 @@ use super::CanonicalSchema;
 pub(in super::super) const PROFILE_SCHEMA_REVISION: u32 = 1;
 pub(in super::super) const PROFILE_METADATA_SCHEMA_REVISION: u32 = 1;
 pub(in super::super) const PROFILE_DIRECTORY_FIELD_COUNT: usize = 6;
-pub(in super::super) const PROFILE_SEGMENT_FIELD_COUNT: usize = 19;
+pub(in super::super) const PROFILE_SEGMENT_FIELD_COUNT: usize = 21;
 pub(in super::super) const PROFILE_OWNER_FIELD_COUNT: usize = 5;
 pub(in super::super) const PROFILE_METADATA_DIRECTORY_FIELD_COUNT: usize = 17;
 pub(in super::super) const PROFILE_METADATA_ENTRY_FIELD_COUNT: usize = 21;
@@ -25,7 +25,7 @@ pub(in super::super) const FRESH_PROFILE_MAX_CANONICAL_BLOCKS: usize = 22;
 pub(in super::super) const PROFILE_DIRECTORY_LOGICAL_BYTES: u64 =
     PROFILE_DIRECTORY_FIELD_COUNT as u64 * 4;
 pub(in super::super) const PROFILE_SEGMENT_LOGICAL_BYTES: u64 =
-    PROFILE_SEGMENT_FIELD_COUNT as u64 * 4;
+    (PROFILE_SEGMENT_FIELD_COUNT as u64 - 1) * 4 + 8;
 pub(in super::super) const PROFILE_OWNER_LOGICAL_BYTES: u64 = 1 + (4 * 4);
 pub(in super::super) const PROFILE_METADATA_DIRECTORY_LOGICAL_BYTES: u64 =
     PROFILE_METADATA_DIRECTORY_FIELD_COUNT as u64 * 4;
@@ -142,6 +142,8 @@ pub(in super::super) mod profile_directory_field {
 /// lineage payloads when appending a new segment. Segment order also defines
 /// generation-wide resource, source, and provenance ordinals: each domain is
 /// the prefix concatenation of that domain's leaves across all segments.
+/// `NONCE` is process-unique and `PROVENANCE_BASE` fixes the first global
+/// topology index owned by the segment.
 pub(in super::super) mod profile_segment_field {
     pub(crate) const SEGMENT: usize = 0;
     pub(crate) const RESOURCE_COUNT: usize = 1;
@@ -162,6 +164,8 @@ pub(in super::super) mod profile_segment_field {
     pub(crate) const TEXTS: usize = 16;
     pub(crate) const DIGEST_COUNT: usize = 17;
     pub(crate) const DIGESTS: usize = 18;
+    pub(crate) const NONCE: usize = 19;
+    pub(crate) const PROVENANCE_BASE: usize = 20;
 }
 
 /// Fixed-width resource rows stored in `ProfileLineageResourceSchema`.
@@ -213,8 +217,9 @@ pub(in super::super) mod profile_provenance_scalar {
 }
 
 /// Fixed-width operation rows stored in `ProfileLineageOperationSchema`.
-/// Parent ranges select generation-wide provenance ordinals from the segment's
-/// parent leaf, so a newly appended operation can reference historical nodes.
+/// Parent ranges select qualified provenance addresses from the segment's
+/// parent leaf, so a newly appended operation can reference historical nodes
+/// without accepting a sibling segment with the same local index.
 pub(in super::super) mod profile_operation_scalar {
     pub(crate) const KIND: usize = 0;
     pub(crate) const NAME_OFFSET: usize = 1;
@@ -240,7 +245,8 @@ pub(in super::super) mod profile_evidence_scalar {
 
 /// One row per canonical owner. The attachment range is non-empty and indexes
 /// the generation-wide attachment leaf in producer order. Every attachment
-/// value is a generation-wide provenance ordinal.
+/// value is a qualified provenance address; semantic views project only its
+/// generation-wide topology index.
 pub(in super::super) mod profile_owner_field {
     pub(crate) const OWNER_KIND: usize = 0;
     pub(crate) const OWNER_INDEX: usize = 1;
@@ -301,7 +307,7 @@ pub(in super::super) mod profile_metadata_entry_field {
 }
 
 const _: [(); PROFILE_DIRECTORY_FIELD_COUNT] = [(); profile_directory_field::METADATA + 1];
-const _: [(); PROFILE_SEGMENT_FIELD_COUNT] = [(); profile_segment_field::DIGESTS + 1];
+const _: [(); PROFILE_SEGMENT_FIELD_COUNT] = [(); profile_segment_field::PROVENANCE_BASE + 1];
 const _: [(); PROFILE_OWNER_FIELD_COUNT] = [(); profile_owner_field::ATTACHMENTS + 1];
 const _: [(); PROFILE_METADATA_DIRECTORY_FIELD_COUNT] =
     [(); profile_metadata_directory_field::F32_VALUES + 1];
@@ -355,13 +361,13 @@ scalar_schemas!(
     ProfileLineageProvenanceSchema,
     ProfileLineageOperationSchema,
     ProfileLineageEvidenceSchema,
-    ProfileLineageParentSchema,
-    ProfileLineageAttachmentSchema,
 );
 
 scalar_schemas!(
     u64;
     ProfileLineageWideSchema,
+    ProfileLineageParentSchema,
+    ProfileLineageAttachmentSchema,
 );
 
 scalar_schemas!(

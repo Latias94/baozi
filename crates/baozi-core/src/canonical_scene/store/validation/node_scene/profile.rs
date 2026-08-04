@@ -7,6 +7,10 @@ use crate::canonical_scene::store::production::{
     CanonicalProfileOwner, ProvenanceLocalId, ProvenanceNodeAuthoring, ResourceIdentityStability,
     SessionOpaqueReason, ValidatedProfileBatch,
 };
+use crate::canonical_scene::store::profile_provenance::{
+    PROFILE_PROVENANCE_ADDRESS_SCALARS, ProfileSegmentAddressDomain, ProfileSegmentNonce,
+    QualifiedProvenanceAddress, QualifiedProvenanceAddressSlice,
+};
 use crate::canonical_scene::store::schema::profile::*;
 use crate::canonical_scene::store::schema::{CanonicalBlockRef, CanonicalSchema};
 use crate::extension::{ExtensionArrayRef, ExtensionValueRef};
@@ -256,12 +260,15 @@ fn validate_profile_structure<R>(
     )?;
 
     let mut totals = ProfileTotals::default();
+    let mut previous_nonce = None;
     for row in 0..usize::try_from(segment_count).ok()? {
         observe_work(1)?;
-        let counts = resolve_segment_shape(session, segments, row)?;
+        let (counts, domain) =
+            resolve_segment_shape(session, segments, row, totals.provenance, previous_nonce)?;
         if counts.is_empty() {
             return None;
         }
+        previous_nonce = Some(domain.nonce());
         totals.append(counts)?;
     }
 
@@ -286,9 +293,11 @@ fn validate_profile_structure<R>(
 
     let mut prefixes = ProfileTotals::default();
     let mut maximum_depth = 0_u32;
+    let mut previous_nonce = None;
     for row in 0..usize::try_from(segment_count).ok()? {
         observe_work(1)?;
-        let counts = resolve_segment_shape(session, segments, row)?;
+        let (counts, domain) =
+            resolve_segment_shape(session, segments, row, prefixes.provenance, previous_nonce)?;
         validate_segment(
             session,
             segments,
@@ -300,6 +309,7 @@ fn validate_profile_structure<R>(
             &mut maximum_depth,
             observe_work,
         )?;
+        previous_nonce = Some(domain.nonce());
         prefixes.append(counts)?;
     }
     if prefixes.resources != totals.resources
@@ -338,6 +348,7 @@ fn validate_profile_structure<R>(
         session,
         owners,
         owner_count,
+        segments,
         totals.provenance,
         expected,
         observe_work,
@@ -437,7 +448,9 @@ fn resolve_segment_shape(
     session: &mut StoreValidationSession<'_, '_>,
     segments: CanonicalRecordView<'_>,
     row: usize,
-) -> Option<SegmentCounts> {
+    expected_provenance_base: u32,
+    previous_nonce: Option<ProfileSegmentNonce>,
+) -> Option<(SegmentCounts, ProfileSegmentAddressDomain)> {
     require_scalar(
         segments.scalar::<u32>(row, profile_segment_field::SEGMENT),
         u32::try_from(row).ok()?,
@@ -483,12 +496,12 @@ fn resolve_segment_shape(
         evidence.checked_mul(u32::try_from(PROFILE_EVIDENCE_SCALAR_COUNT).ok()?)?,
     )?;
     let parents = segments.scalar::<u32>(row, profile_segment_field::PARENT_COUNT)?;
-    optional_sequence::<u32, ProfileLineageParentSchema>(
+    optional_sequence::<u64, ProfileLineageParentSchema>(
         session,
         segments,
         row,
         profile_segment_field::PARENTS,
-        parents,
+        parents.checked_mul(u32::try_from(PROFILE_PROVENANCE_ADDRESS_SCALARS).ok()?)?,
     )?;
     let wide = segments.scalar::<u32>(row, profile_segment_field::WIDE_COUNT)?;
     optional_sequence::<u64, ProfileLineageWideSchema>(
@@ -514,7 +527,17 @@ fn resolve_segment_shape(
         profile_segment_field::DIGESTS,
         digests,
     )?;
-    Some(SegmentCounts {
+    let nonce = segments
+        .scalar::<u64>(row, profile_segment_field::NONCE)
+        .and_then(ProfileSegmentNonce::from_stored)?;
+    if previous_nonce.is_some_and(|previous| nonce <= previous) {
+        return None;
+    }
+    require_scalar(
+        segments.scalar::<u32>(row, profile_segment_field::PROVENANCE_BASE),
+        expected_provenance_base,
+    )?;
+    let counts = SegmentCounts {
         resources,
         sources,
         provenance,
@@ -524,7 +547,12 @@ fn resolve_segment_shape(
         wide,
         text,
         digests,
-    })
+    };
+    let ordinal = u32::try_from(row).ok()?;
+    Some((
+        counts,
+        ProfileSegmentAddressDomain::new(ordinal, nonce, expected_provenance_base, provenance),
+    ))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -579,13 +607,17 @@ fn validate_segment<R>(
         counts.evidence,
         PROFILE_EVIDENCE_SCALAR_COUNT,
     )?;
-    let parents = required_sequence_slice::<u32, ProfileLineageParentSchema>(
+    let parent_scalars = required_sequence_slice::<u64, ProfileLineageParentSchema>(
         session,
         segments,
         row,
         profile_segment_field::PARENTS,
         counts.parents,
-        1,
+        PROFILE_PROVENANCE_ADDRESS_SCALARS,
+    )?;
+    let parents = QualifiedProvenanceAddressSlice::from_scalars(
+        parent_scalars,
+        usize::try_from(counts.parents).ok()?,
     )?;
     let wide = required_sequence_slice::<u64, ProfileLineageWideSchema>(
         session,
@@ -643,6 +675,7 @@ fn validate_segment<R>(
         operations,
         evidence,
         parents,
+        segments,
         text,
         digests,
         wide,
@@ -901,12 +934,33 @@ fn validate_sources<R>(
     Some(())
 }
 
+fn validate_qualified_address(
+    segments: CanonicalRecordView<'_>,
+    address: QualifiedProvenanceAddress,
+) -> Option<u32> {
+    let ordinal = address.segment_ordinal()?;
+    let row = usize::try_from(ordinal).ok()?;
+    require_scalar(
+        segments.scalar::<u32>(row, profile_segment_field::SEGMENT),
+        ordinal,
+    )?;
+    let nonce = segments
+        .scalar::<u64>(row, profile_segment_field::NONCE)
+        .and_then(ProfileSegmentNonce::from_stored)?;
+    let base = segments.scalar::<u32>(row, profile_segment_field::PROVENANCE_BASE)?;
+    let count = segments.scalar::<u32>(row, profile_segment_field::PROVENANCE_COUNT)?;
+    address.validate_against(ProfileSegmentAddressDomain::new(
+        ordinal, nonce, base, count,
+    ))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn validate_provenance<R>(
     provenance: &[u32],
     operations: &[u32],
     evidence: &[u32],
-    parents: &[u32],
+    parents: QualifiedProvenanceAddressSlice<'_>,
+    segments: CanonicalRecordView<'_>,
     text: &str,
     digests: &[u8],
     wide: &[u64],
@@ -976,12 +1030,13 @@ fn validate_provenance<R>(
                     parent_count,
                 )?;
                 let parent_start = usize::try_from(parent_cursor).ok()?;
-                let parent_end = parent_start.checked_add(usize::try_from(parent_count).ok()?)?;
-                let parent_values = parents.get(parent_start..parent_end)?;
+                let parent_values =
+                    parents.get_range(parent_start, usize::try_from(parent_count).ok()?)?;
                 let mut previous = None;
                 let mut maximum_parent_depth = 0_u32;
-                for (parent_index, parent) in parent_values.iter().copied().enumerate() {
+                for (parent_index, address) in parent_values.iter().enumerate() {
                     observe_work(1)?;
+                    let parent = validate_qualified_address(segments, address?)?;
                     if parent >= global_index || previous.is_some_and(|previous| parent <= previous)
                     {
                         return None;
@@ -1264,6 +1319,7 @@ fn validate_owners<R>(
     session: &mut StoreValidationSession<'_, '_>,
     owners: CanonicalRecordView<'_>,
     owner_count: u32,
+    segments: CanonicalRecordView<'_>,
     provenance_count: u32,
     expected: Option<&ValidatedProfileBatch<'_, R>>,
     observe_work: &mut impl FnMut(u64) -> Option<()>,
@@ -1275,7 +1331,7 @@ fn validate_owners<R>(
     let mut classes = ProfileOwnerClassCounts::default();
     let mut attachment_cursor = 0_u32;
     let mut attachment_ref = None;
-    let mut attachment_values: Option<SequenceView<'_, u32>> = None;
+    let mut attachment_values: Option<SequenceView<'_, u64>> = None;
     let mut previous_owner = None;
     for row in 0..usize::try_from(owner_count).ok()? {
         observe_work(1)?;
@@ -1294,7 +1350,7 @@ fn validate_owners<R>(
         if count == 0 || offset != attachment_cursor {
             return None;
         }
-        let reference = owners.sequence_ref::<u32, ProfileLineageAttachmentSchema>(
+        let reference = owners.sequence_ref::<u64, ProfileLineageAttachmentSchema>(
             row,
             profile_owner_field::ATTACHMENTS,
         )?;
@@ -1311,9 +1367,16 @@ fn validate_owners<R>(
                 values
             }
         };
-        let start = usize::try_from(offset).ok()?;
-        let end = start.checked_add(usize::try_from(count).ok()?)?;
-        let values = values.as_slice().get(start..end)?;
+        let scalar_values = values.as_slice();
+        if scalar_values.len() % PROFILE_PROVENANCE_ADDRESS_SCALARS != 0 {
+            return None;
+        }
+        let all_addresses = QualifiedProvenanceAddressSlice::from_scalars(
+            scalar_values,
+            scalar_values.len() / PROFILE_PROVENANCE_ADDRESS_SCALARS,
+        )?;
+        let values =
+            all_addresses.get_range(usize::try_from(offset).ok()?, usize::try_from(count).ok()?)?;
         let expected_values = expected.and_then(|expected| {
             expected
                 .owner_provenance_at(owner_ordinal)
@@ -1323,8 +1386,9 @@ fn validate_owners<R>(
             return None;
         }
         let mut previous_provenance = None;
-        for (index, provenance) in values.iter().copied().enumerate() {
+        for (index, address) in values.iter().enumerate() {
             observe_work(1)?;
+            let provenance = validate_qualified_address(segments, address?)?;
             if provenance >= provenance_count
                 || previous_provenance.is_some_and(|previous| provenance <= previous)
                 || expected_values.is_some_and(|expected| {
@@ -1340,11 +1404,12 @@ fn validate_owners<R>(
         attachment_cursor = attachment_cursor.checked_add(count)?;
     }
     let values = attachment_values?;
-    (values.len() == usize::try_from(attachment_cursor).ok()?).then_some((
-        classes,
-        attachment_cursor,
-        attachment_ref?,
-    ))
+    let address_count = values
+        .len()
+        .checked_div(PROFILE_PROVENANCE_ADDRESS_SCALARS)?;
+    (values.len() % PROFILE_PROVENANCE_ADDRESS_SCALARS == 0
+        && address_count == usize::try_from(attachment_cursor).ok()?)
+    .then_some((classes, attachment_cursor, attachment_ref?))
 }
 
 #[derive(Clone, Copy)]

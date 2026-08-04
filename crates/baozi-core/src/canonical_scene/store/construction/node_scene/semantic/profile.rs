@@ -4,6 +4,9 @@ use baozi_operation::{
 };
 
 use crate::canonical_scene::store::production::{CanonicalProfileOwner, SessionOpaqueReason};
+use crate::canonical_scene::store::profile_provenance::{
+    PROFILE_PROVENANCE_ADDRESS_SCALARS, QualifiedProvenanceAddressSlice,
+};
 use crate::canonical_scene::store::schema::profile::*;
 use crate::canonical_scene::store::schema::{
     CanonicalBlockRef, CanonicalSchema, SceneDirectorySchema,
@@ -26,6 +29,43 @@ pub(in crate::canonical_scene::store) use metadata::{
 };
 use metadata::{decode_metadata_value, metadata_shape, require_metadata_lane_references};
 use storage::*;
+
+#[derive(Clone, Copy)]
+pub(in crate::canonical_scene::store) struct NodeSceneProfileProvenanceIndices<'scene> {
+    addresses: QualifiedProvenanceAddressSlice<'scene>,
+}
+
+impl<'scene> NodeSceneProfileProvenanceIndices<'scene> {
+    const fn new(addresses: QualifiedProvenanceAddressSlice<'scene>) -> Self {
+        Self { addresses }
+    }
+
+    pub(in crate::canonical_scene::store) const fn len(self) -> usize {
+        self.addresses.len()
+    }
+
+    pub(in crate::canonical_scene::store) fn iter(
+        self,
+    ) -> impl ExactSizeIterator<Item = Option<u32>> + 'scene {
+        self.addresses.global_indices()
+    }
+}
+
+impl std::fmt::Debug for NodeSceneProfileProvenanceIndices<'_> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_list().entries(self.iter()).finish()
+    }
+}
+
+impl<'left, 'right> PartialEq<NodeSceneProfileProvenanceIndices<'right>>
+    for NodeSceneProfileProvenanceIndices<'left>
+{
+    fn eq(&self, other: &NodeSceneProfileProvenanceIndices<'right>) -> bool {
+        self.len() == other.len() && self.iter().eq(other.iter())
+    }
+}
+
+impl Eq for NodeSceneProfileProvenanceIndices<'_> {}
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
 struct ProfileLineageCounts {
@@ -67,7 +107,7 @@ pub(super) struct NodeSceneProfileTables<'scene> {
     segments: CanonicalRecordView<'scene>,
     owners: CanonicalRecordView<'scene>,
     attachments_ref: CanonicalBlockRef<ProfileLineageAttachmentSchema>,
-    attachments: &'scene [u32],
+    attachments: QualifiedProvenanceAddressSlice<'scene>,
     metadata_entries: Option<CanonicalRecordView<'scene>>,
     metadata_text_ref: Option<CanonicalBlockRef<ProfileMetadataTextSchema>>,
     metadata_bytes_ref: Option<CanonicalBlockRef<ProfileMetadataBytesSchema>>,
@@ -183,7 +223,7 @@ impl<'scene> NodeSceneProfileTables<'scene> {
             "validated profile owner-table layout disagrees with its directory",
         )?;
         let attachments_ref = owners
-            .sequence_ref::<u32, ProfileLineageAttachmentSchema>(
+            .sequence_ref::<u64, ProfileLineageAttachmentSchema>(
                 0,
                 profile_owner_field::ATTACHMENTS,
             )
@@ -191,9 +231,14 @@ impl<'scene> NodeSceneProfileTables<'scene> {
             .ok_or_else(|| invariant("validated profile attachment reference is unreadable"))?;
         let attachments = canonical
             .sequence(attachments_ref.into_store())
-            .map(|values: SequenceView<'scene, u32>| values.as_slice())
+            .map(|values: SequenceView<'scene, u64>| values.as_slice())
             .filter(|values| !values.is_empty())
             .ok_or_else(|| invariant("validated profile attachments are unavailable or empty"))?;
+        let attachments = QualifiedProvenanceAddressSlice::from_scalars(
+            attachments,
+            u32_to_usize(proof.counts().profile_attachment_count)?,
+        )
+        .ok_or_else(|| invariant("validated profile attachment width is inconsistent"))?;
 
         require_record_reference(
             directory,
@@ -583,7 +628,7 @@ impl<'scene> NodeSceneProfileCursor<'scene> {
                 "validated profile attachment range is not canonical",
             ));
         }
-        require_sequence_reference::<u32, ProfileLineageAttachmentSchema>(
+        require_sequence_reference::<u64, ProfileLineageAttachmentSchema>(
             self.tables.owners,
             row,
             profile_owner_field::ATTACHMENTS,
@@ -591,12 +636,11 @@ impl<'scene> NodeSceneProfileCursor<'scene> {
             "validated profile attachment reference is unreadable",
             "validated profile attachment reference disagrees across owners",
         )?;
-        let attachments = slice_range(
-            self.tables.attachments,
-            attachment_offset,
-            attachment_count,
-            "validated profile attachment range is unreadable",
-        )?;
+        let attachments = self
+            .tables
+            .attachments
+            .get_range(attachment_offset, attachment_count)
+            .ok_or_else(|| invariant("validated profile attachment range is unreadable"))?;
 
         self.next_attachment = checked_add(attachment_offset, attachment_count)?;
         self.next_owner = advance(row, "profile owner cursor index overflows")?;
@@ -604,7 +648,7 @@ impl<'scene> NodeSceneProfileCursor<'scene> {
         Ok(Some(NodeSceneProfileOwner {
             owner,
             attachment_offset,
-            attachments,
+            attachments: NodeSceneProfileProvenanceIndices::new(attachments),
         }))
     }
 
@@ -918,7 +962,7 @@ impl<'scene> NodeSceneProfileCursor<'scene> {
 pub(in crate::canonical_scene::store) struct NodeSceneProfileOwner<'scene> {
     owner: CanonicalProfileOwner,
     attachment_offset: usize,
-    attachments: &'scene [u32],
+    attachments: NodeSceneProfileProvenanceIndices<'scene>,
 }
 
 impl<'scene> NodeSceneProfileOwner<'scene> {
@@ -930,7 +974,9 @@ impl<'scene> NodeSceneProfileOwner<'scene> {
         self.attachment_offset
     }
 
-    pub(in crate::canonical_scene::store) const fn attachments(self) -> &'scene [u32] {
+    pub(in crate::canonical_scene::store) const fn attachments(
+        self,
+    ) -> NodeSceneProfileProvenanceIndices<'scene> {
         self.attachments
     }
 }
@@ -955,7 +1001,7 @@ pub(in crate::canonical_scene::store) struct NodeSceneProfileSegmentCursor<'scen
     provenance: &'scene [u32],
     operations: &'scene [u32],
     evidence: &'scene [u32],
-    parents: &'scene [u32],
+    parents: QualifiedProvenanceAddressSlice<'scene>,
     wide: &'scene [u64],
     text: &'scene str,
     digests: &'scene [u8],
@@ -997,8 +1043,10 @@ impl<'scene, 'cursor> NodeSceneProfileSegmentCursor<'scene, 'cursor> {
         self.counts.evidence
     }
 
-    pub(in crate::canonical_scene::store) const fn parent_values(&self) -> &'scene [u32] {
-        self.parents
+    pub(in crate::canonical_scene::store) const fn parent_values(
+        &self,
+    ) -> NodeSceneProfileProvenanceIndices<'scene> {
+        NodeSceneProfileProvenanceIndices::new(self.parents)
     }
 
     pub(in crate::canonical_scene::store) const fn wide_values(&self) -> &'scene [u64] {
@@ -1262,12 +1310,10 @@ impl<'scene, 'cursor> NodeSceneProfileSegmentCursor<'scene, 'cursor> {
                 "validated profile provenance parent ranges are not contiguous",
             ));
         }
-        let parents = slice_range(
-            self.parents,
-            parent_offset,
-            parent_count,
-            "validated profile provenance parent range is unreadable",
-        )?;
+        let parents = self
+            .parents
+            .get_range(parent_offset, parent_count)
+            .ok_or_else(|| invariant("validated profile provenance parent range is unreadable"))?;
         let kind = match values[profile_provenance_scalar::KIND] {
             value if value == u32::from(PROFILE_PROVENANCE_SOURCE) => {
                 if depth != 1 || parent_count != 0 {
@@ -1314,7 +1360,7 @@ impl<'scene, 'cursor> NodeSceneProfileSegmentCursor<'scene, 'cursor> {
             index,
             depth,
             parent_offset: checked_add(self.prefixes.parents, parent_offset)?,
-            parents,
+            parents: NodeSceneProfileProvenanceIndices::new(parents),
             kind,
         }))
     }
@@ -1638,7 +1684,7 @@ pub(in crate::canonical_scene::store) struct NodeSceneProfileProvenance<'scene> 
     index: usize,
     depth: usize,
     parent_offset: usize,
-    parents: &'scene [u32],
+    parents: NodeSceneProfileProvenanceIndices<'scene>,
     kind: NodeSceneProfileProvenanceKind<'scene>,
 }
 
@@ -1655,7 +1701,9 @@ impl<'scene> NodeSceneProfileProvenance<'scene> {
         self.parent_offset
     }
 
-    pub(in crate::canonical_scene::store) const fn parents(self) -> &'scene [u32] {
+    pub(in crate::canonical_scene::store) const fn parents(
+        self,
+    ) -> NodeSceneProfileProvenanceIndices<'scene> {
         self.parents
     }
 
@@ -1830,13 +1878,13 @@ fn resolve_segment<'scene, 'cursor>(
         PROFILE_EVIDENCE_SCALAR_COUNT,
         "validated profile evidence leaf is inconsistent",
     )?;
-    let (_, parents) = resolve_optional_sequence::<u32, ProfileLineageParentSchema>(
+    let (_, parent_scalars) = resolve_optional_sequence::<u64, ProfileLineageParentSchema>(
         canonical,
         segments,
         row,
         profile_segment_field::PARENT_COUNT,
         profile_segment_field::PARENTS,
-        1,
+        PROFILE_PROVENANCE_ADDRESS_SCALARS,
         "validated profile parent leaf is inconsistent",
     )?;
     let (_, wide) = resolve_optional_sequence::<u64, ProfileLineageWideSchema>(
@@ -1890,7 +1938,11 @@ fn resolve_segment<'scene, 'cursor>(
                 .evidence
                 .checked_mul(PROFILE_EVIDENCE_SCALAR_COUNT)
                 .ok_or_else(|| invariant("validated profile evidence leaf length overflows"))?
-        || parents.map_or(0, <[u32]>::len) != counts.parents
+        || parent_scalars.map_or(0, <[u64]>::len)
+            != counts
+                .parents
+                .checked_mul(PROFILE_PROVENANCE_ADDRESS_SCALARS)
+                .ok_or_else(|| invariant("validated profile parent scalar count overflows"))?
         || wide.map_or(0, <[u64]>::len) != counts.wide
         || text.map_or(0, str::len) != counts.text
         || digests.map_or(0, <[u8]>::len) != counts.digests
@@ -1899,6 +1951,12 @@ fn resolve_segment<'scene, 'cursor>(
             "validated profile segment leaf lengths disagree with its row",
         ));
     }
+
+    let parents = QualifiedProvenanceAddressSlice::from_scalars(
+        parent_scalars.unwrap_or(&[]),
+        counts.parents,
+    )
+    .ok_or_else(|| invariant("validated profile parent address width is inconsistent"))?;
 
     Ok(NodeSceneProfileSegmentCursor {
         parent_progress,
@@ -1911,7 +1969,7 @@ fn resolve_segment<'scene, 'cursor>(
         provenance: provenance.unwrap_or(&[]),
         operations: operations.unwrap_or(&[]),
         evidence: evidence.unwrap_or(&[]),
-        parents: parents.unwrap_or(&[]),
+        parents,
         wide: wide.unwrap_or(&[]),
         text: text.unwrap_or(""),
         digests: digests.unwrap_or(&[]),

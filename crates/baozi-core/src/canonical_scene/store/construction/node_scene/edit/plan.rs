@@ -1,6 +1,7 @@
 use baozi_operation::{BytesPlan, RecordPlan, SequencePlan};
 use thiserror::Error;
 
+use crate::canonical_scene::store::profile_provenance::PROFILE_PROVENANCE_ADDRESS_SCALARS;
 use crate::canonical_scene::store::schema::profile::{
     PROFILE_OPERATION_SCALAR_COUNT, PROFILE_OWNER_FIELD_COUNT, PROFILE_OWNER_NODE,
     PROFILE_PROVENANCE_SCALAR_COUNT, PROFILE_SEGMENT_FIELD_COUNT, ProfileLineageAttachmentSchema,
@@ -174,8 +175,8 @@ pub(super) struct NodeTransformEditProfilePlan {
     pub(super) output_attachment_count: CheckedCount,
     pub(super) source_attachments: CanonicalBlockRef<ProfileLineageAttachmentSchema>,
     pub(super) fresh_provenance_index: CheckedCount,
-    pub(super) attachments: SequencePlan<u32>,
-    pub(super) parents: SequencePlan<u32>,
+    pub(super) attachments: SequencePlan<u64>,
+    pub(super) parents: SequencePlan<u64>,
     pub(super) provenance: SequencePlan<u32>,
     pub(super) operation: SequencePlan<u32>,
     pub(super) digest: BytesPlan,
@@ -487,7 +488,7 @@ impl NodeTransformEditProfilePlan {
             });
         }
         let source_attachments = owners
-            .sequence_ref::<u32, ProfileLineageAttachmentSchema>(
+            .sequence_ref::<u64, ProfileLineageAttachmentSchema>(
                 target_owner_row.as_usize(),
                 profile_owner_field::ATTACHMENTS,
             )
@@ -511,7 +512,13 @@ impl NodeTransformEditProfilePlan {
             .ok_or(NodeTransformEditPlanError::SizeOverflow {
                 quantity: "target profile attachment range",
             })?;
-        if attachments.as_slice().len() != source_attachment_count.as_usize()
+        let source_attachment_scalars = source_attachment_count
+            .as_usize()
+            .checked_mul(PROFILE_PROVENANCE_ADDRESS_SCALARS)
+            .ok_or(NodeTransformEditPlanError::SizeOverflow {
+                quantity: "source profile attachment scalar count",
+            })?;
+        if attachments.as_slice().len() != source_attachment_scalars
             || target_attachment_end > source_attachment_count.as_usize()
         {
             return Err(NodeTransformEditPlanError::InvalidSource {
@@ -543,15 +550,27 @@ impl NodeTransformEditProfilePlan {
             output_attachment_count,
             source_attachments,
             fresh_provenance_index,
-            attachments: SequencePlan::new(output_attachment_count.as_usize()).map_err(|_| {
-                NodeTransformEditPlanError::SizeOverflow {
-                    quantity: "output profile attachment allocation",
-                }
+            attachments: SequencePlan::new(
+                output_attachment_count
+                    .as_usize()
+                    .checked_mul(PROFILE_PROVENANCE_ADDRESS_SCALARS)
+                    .ok_or(NodeTransformEditPlanError::SizeOverflow {
+                        quantity: "output profile attachment scalar count",
+                    })?,
+            )
+            .map_err(|_| NodeTransformEditPlanError::SizeOverflow {
+                quantity: "output profile attachment allocation",
             })?,
-            parents: SequencePlan::new(target_attachment_count.as_usize()).map_err(|_| {
-                NodeTransformEditPlanError::SizeOverflow {
-                    quantity: "transform provenance parent allocation",
-                }
+            parents: SequencePlan::new(
+                target_attachment_count
+                    .as_usize()
+                    .checked_mul(PROFILE_PROVENANCE_ADDRESS_SCALARS)
+                    .ok_or(NodeTransformEditPlanError::SizeOverflow {
+                        quantity: "transform provenance parent scalar count",
+                    })?,
+            )
+            .map_err(|_| NodeTransformEditPlanError::SizeOverflow {
+                quantity: "transform provenance parent allocation",
             })?,
             provenance: SequencePlan::new(PROFILE_PROVENANCE_SCALAR_COUNT).map_err(|_| {
                 NodeTransformEditPlanError::SizeOverflow {

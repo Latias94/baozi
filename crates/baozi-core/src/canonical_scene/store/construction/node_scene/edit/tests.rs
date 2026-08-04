@@ -12,6 +12,9 @@ use crate::canonical_scene::store::production::{
     NodeAuthoringBatch, NodeAuthoringNode, NodeLocalId, Presence, SceneAuthoringBatch,
     SpatialAuthoringBatch,
 };
+use crate::canonical_scene::store::profile_provenance::{
+    PROFILE_PROVENANCE_ADDRESS_SCALARS, issued_profile_segment_nonce_count_for_test,
+};
 use crate::canonical_scene::store::schema::profile::{
     PROFILE_DIGEST_SHA256, PROFILE_OPERATION_TRANSFORM, PROFILE_PROVENANCE_OPERATION,
     ProfileLineageAttachmentSchema, ProfileLineageDigestSchema, ProfileLineageOperationSchema,
@@ -34,10 +37,13 @@ use super::super::tests::{
     test_factory, test_limits,
 };
 use super::CanonicalRemapSet;
+use super::execution::NodeTransformEditPrepareError;
 use super::source::{
     NodeTransformEditStart, NodeTransformEditStartError, try_begin_node_transform_edit,
 };
-use crate::canonical_scene::store::construction::SceneConstructionOperation;
+use crate::canonical_scene::store::construction::{
+    SceneConstructionLimits, SceneConstructionOperation,
+};
 
 fn build_single_trs_scene(
     account: &PhysicalStorageAccount,
@@ -207,7 +213,7 @@ fn assert_transform_edit_lineage(
     let source_count =
         usize::try_from(source_count_u32).expect("source target attachment count fits usize");
     let source_attachment_ref = source_owners
-        .sequence_ref::<u32, ProfileLineageAttachmentSchema>(
+        .sequence_ref::<u64, ProfileLineageAttachmentSchema>(
             target_owner_row,
             profile_owner_field::ATTACHMENTS,
         )
@@ -216,8 +222,10 @@ fn assert_transform_edit_lineage(
         .canonical
         .sequence(source_attachment_ref)
         .expect("source profile attachments");
-    let source_target_parents =
-        &source_attachments.as_slice()[source_offset..source_offset + source_count];
+    let source_scalar_offset = source_offset * PROFILE_PROVENANCE_ADDRESS_SCALARS;
+    let source_scalar_count = source_count * PROFILE_PROVENANCE_ADDRESS_SCALARS;
+    let source_target_parents = &source_attachments.as_slice()
+        [source_scalar_offset..source_scalar_offset + source_scalar_count];
 
     assert_eq!(
         output_counts.profile_parent_count,
@@ -234,6 +242,16 @@ fn assert_transform_edit_lineage(
         .expect("edited profile segment table");
     let fresh_segment = source.proof.profile_segment_count();
     assert_eq!(segments.rows(), fresh_segment + 1);
+    let source_segments = source
+        .canonical
+        .records(source.proof.profile_segments().into_store())
+        .expect("source profile segment table");
+    for row in 0..fresh_segment {
+        assert_eq!(
+            segments.scalar::<u64>(row, profile_segment_field::NONCE),
+            source_segments.scalar::<u64>(row, profile_segment_field::NONCE),
+        );
+    }
     assert_eq!(
         segments.scalar::<u32>(fresh_segment, profile_segment_field::SEGMENT),
         Some(u32::try_from(fresh_segment).expect("fresh segment index fits u32")),
@@ -250,9 +268,17 @@ fn assert_transform_edit_lineage(
         segments.scalar::<u32>(fresh_segment, profile_segment_field::PARENT_COUNT),
         Some(source_count_u32),
     );
+    let fresh_nonce = segments
+        .scalar::<u64>(fresh_segment, profile_segment_field::NONCE)
+        .expect("fresh segment nonce");
+    assert_ne!(fresh_nonce, 0);
+    assert_eq!(
+        segments.scalar::<u32>(fresh_segment, profile_segment_field::PROVENANCE_BASE),
+        Some(source_counts.profile_provenance_count),
+    );
 
     let parent_ref = segments
-        .sequence_ref::<u32, ProfileLineageParentSchema>(
+        .sequence_ref::<u64, ProfileLineageParentSchema>(
             fresh_segment,
             profile_segment_field::PARENTS,
         )
@@ -336,7 +362,7 @@ fn assert_transform_edit_lineage(
         Some(1),
     );
     let output_attachment_ref = output_owners
-        .sequence_ref::<u32, ProfileLineageAttachmentSchema>(
+        .sequence_ref::<u64, ProfileLineageAttachmentSchema>(
             target_owner_row,
             profile_owner_field::ATTACHMENTS,
         )
@@ -346,17 +372,25 @@ fn assert_transform_edit_lineage(
         .sequence(output_attachment_ref)
         .expect("edited profile attachments");
     let fresh_provenance = source_counts.profile_provenance_count;
+    let output_scalar_offset = source_offset * PROFILE_PROVENANCE_ADDRESS_SCALARS;
     assert_eq!(
-        &output_attachments.as_slice()[..source_offset],
-        &source_attachments.as_slice()[..source_offset],
+        &output_attachments.as_slice()[..output_scalar_offset],
+        &source_attachments.as_slice()[..source_scalar_offset],
     );
     assert_eq!(
-        output_attachments.as_slice()[source_offset],
-        fresh_provenance
+        &output_attachments.as_slice()
+            [output_scalar_offset..output_scalar_offset + PROFILE_PROVENANCE_ADDRESS_SCALARS],
+        &[
+            u64::try_from(fresh_segment).expect("fresh segment ordinal fits u64"),
+            fresh_nonce,
+            0,
+            u64::from(fresh_provenance),
+        ],
     );
+    let source_suffix = (source_offset + source_count) * PROFILE_PROVENANCE_ADDRESS_SCALARS;
     assert_eq!(
-        &output_attachments.as_slice()[source_offset + 1..],
-        &source_attachments.as_slice()[source_offset + source_count..],
+        &output_attachments.as_slice()[output_scalar_offset + PROFILE_PROVENANCE_ADDRESS_SCALARS..],
+        &source_attachments.as_slice()[source_suffix..],
     );
 }
 
@@ -380,6 +414,7 @@ fn unchanged_authored_bits_return_the_exact_input_without_reserving_a_generation
         .expect("single-node fixture authored transform");
     let generation_before = generation_source.load(Ordering::Relaxed);
     let account_before = account.snapshot();
+    let nonce_count_before = issued_profile_segment_nonce_count_for_test();
 
     let started = try_begin_node_transform_edit(source, node, replacement, edit_options_digest(1))
         .expect("identical authored bits must classify without failure");
@@ -392,6 +427,11 @@ fn unchanged_authored_bits_return_the_exact_input_without_reserving_a_generation
         generation_source.load(Ordering::Relaxed),
         generation_before,
         "unchanged classification must not reserve a generation",
+    );
+    assert_eq!(
+        issued_profile_segment_nonce_count_for_test(),
+        nonce_count_before,
+        "unchanged classification must not issue a provenance segment nonce",
     );
     assert_no_physical_change(account_before, &account);
 }
@@ -520,6 +560,73 @@ fn chained_transform_edits_parent_each_new_segment_to_the_previous_attachment() 
 
     drop(second);
     drop(first);
+    drop(original);
+    assert_eq!(account.snapshot().live_retained_bytes(), 0);
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
+}
+
+#[test]
+fn sibling_transform_edits_preserve_the_ancestor_nonce_and_mint_distinct_branch_nonces() {
+    let factory = test_factory();
+    let account = test_account(&factory, 512);
+    let generation_source = AtomicU64::new(0);
+    let original = build_single_trs_scene(&account, &generation_source);
+    let node = NodeId::new(original.scene.generation(), 0);
+
+    let NodeTransformEditStart::Changed(left_pending) = try_begin_node_transform_edit(
+        &original.scene,
+        node,
+        changed_trs(51.0),
+        edit_options_digest(50),
+    )
+    .expect("left sibling edit plan") else {
+        panic!("left sibling transform must be changed");
+    };
+    let left_prepared = left_pending
+        .prepare_with_generation_source(test_limits(), || {
+            SceneGenerationId::reserve_from(&generation_source)
+        })
+        .expect("left sibling edit preparation");
+    let super::NodeTransformEditTerminal::Success(left) = left_prepared.handoff() else {
+        panic!("left sibling edit must publish success");
+    };
+
+    let NodeTransformEditStart::Changed(right_pending) = try_begin_node_transform_edit(
+        &original.scene,
+        node,
+        changed_trs(53.0),
+        edit_options_digest(52),
+    )
+    .expect("right sibling edit plan") else {
+        panic!("right sibling transform must be changed");
+    };
+    let right_prepared = right_pending
+        .prepare_with_generation_source(test_limits(), || {
+            SceneGenerationId::reserve_from(&generation_source)
+        })
+        .expect("right sibling edit preparation");
+    let super::NodeTransformEditTerminal::Success(right) = right_prepared.handoff() else {
+        panic!("right sibling edit must publish success");
+    };
+
+    let segment_nonce = |scene: &super::super::ValidatedNodeScene, row: usize| {
+        scene
+            .canonical
+            .records(scene.proof.profile_segments().into_store())
+            .and_then(|segments| segments.scalar::<u64>(row, profile_segment_field::NONCE))
+            .expect("validated profile segment nonce")
+    };
+    let ancestor_nonce = segment_nonce(&original.scene, 0);
+    assert_eq!(segment_nonce(&left.scene, 0), ancestor_nonce);
+    assert_eq!(segment_nonce(&right.scene, 0), ancestor_nonce);
+    let left_nonce = segment_nonce(&left.scene, 1);
+    let right_nonce = segment_nonce(&right.scene, 1);
+    assert_ne!(left_nonce, ancestor_nonce);
+    assert_ne!(right_nonce, ancestor_nonce);
+    assert_ne!(left_nonce, right_nonce);
+
+    drop(right);
+    drop(left);
     drop(original);
     assert_eq!(account.snapshot().live_retained_bytes(), 0);
     assert_eq!(account.snapshot().live_retained_allocations(), 0);
@@ -704,6 +811,52 @@ fn generation_mismatch_rejects_before_operation_or_allocation() {
 }
 
 #[test]
+fn operation_start_rejection_does_not_consume_a_profile_segment_nonce() {
+    let factory = test_factory();
+    let account = test_account(&factory, 512);
+    let generation_source = AtomicU64::new(0);
+    let parts = build_single_trs_scene(&account, &generation_source);
+    let source = &parts.scene;
+    let node = NodeId::new(source.generation(), 0);
+    let NodeTransformEditStart::Changed(pending) =
+        try_begin_node_transform_edit(source, node, changed_trs(5.0), edit_options_digest(6))
+            .expect("start-rejected transform edit plan")
+    else {
+        panic!("changed transform must enter edit planning");
+    };
+    let nonce_count_before = issued_profile_segment_nonce_count_for_test();
+    let generation_before = generation_source.load(Ordering::Relaxed);
+    let rejecting_limits = SceneConstructionLimits {
+        attempted_work: 0,
+        consumed_work: 0,
+        ..test_limits()
+    };
+
+    let rejected = pending.prepare_with_generation_source(rejecting_limits, || {
+        SceneGenerationId::reserve_from(&generation_source)
+    });
+
+    assert!(matches!(
+        rejected,
+        Err(NodeTransformEditPrepareError::Start(_))
+    ));
+    assert_eq!(
+        issued_profile_segment_nonce_count_for_test(),
+        nonce_count_before,
+        "operation-start rejection must precede nonce issuance",
+    );
+    assert_eq!(
+        generation_source.load(Ordering::Relaxed),
+        generation_before,
+        "operation-start rejection must precede generation reservation",
+    );
+
+    drop(parts);
+    assert_eq!(account.snapshot().live_retained_bytes(), 0);
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
+}
+
+#[test]
 fn physical_plan_rebuilds_every_record_and_inherits_each_unchanged_shareable_leaf() {
     let factory = test_factory();
     let account = test_account(&factory, 512);
@@ -817,19 +970,25 @@ fn cancellation_after_evidence_commit_preserves_rich_failure_and_the_input() {
 }
 
 #[test]
-fn generation_exhaustion_preserves_rich_failure_without_consuming_a_nonce() {
+fn generation_exhaustion_after_admission_leaves_one_invisible_nonce_gap() {
     let factory = test_factory();
     let account = test_account(&factory, 512);
     let generation_source = AtomicU64::new(0);
     let parts = build_single_trs_scene(&account, &generation_source);
     let source = &parts.scene;
     let node = NodeId::new(source.generation(), 0);
+    let nonce_count_before = issued_profile_segment_nonce_count_for_test();
     let NodeTransformEditStart::Changed(pending) =
         try_begin_node_transform_edit(source, node, changed_trs(23.0), edit_options_digest(9))
             .expect("generation-exhaustion transform edit plan")
     else {
         panic!("changed transform must enter edit planning");
     };
+    assert_eq!(
+        issued_profile_segment_nonce_count_for_test(),
+        nonce_count_before,
+        "pure edit preflight must not issue a provenance segment nonce",
+    );
 
     let prepared = pending
         .prepare_with_generation_source(test_limits(), || Err(SceneGenerationError::Exhausted))
@@ -840,6 +999,11 @@ fn generation_exhaustion_preserves_rich_failure_without_consuming_a_nonce() {
 
     assert_eq!(failure.outcome_evidence_block_count(), 1);
     assert_eq!(generation_source.load(Ordering::Relaxed), 1);
+    assert_eq!(
+        issued_profile_segment_nonce_count_for_test(),
+        nonce_count_before + 1,
+        "a generation failure after retained assembly admission leaves one invisible nonce gap",
+    );
     assert!(
         source
             .authored_transform(0)
@@ -915,12 +1079,18 @@ fn dropping_prepared_success_burns_one_gap_and_releases_only_unpublished_output(
     else {
         panic!("changed transform must enter edit planning");
     };
+    let nonce_count_before = issued_profile_segment_nonce_count_for_test();
 
     let prepared = pending
         .prepare_with_generation_source(test_limits(), || {
             SceneGenerationId::reserve_from(&generation_source)
         })
         .expect("valid transform edit must prepare success");
+    assert_eq!(
+        issued_profile_segment_nonce_count_for_test(),
+        nonce_count_before + 1,
+        "one admitted changed edit must issue exactly one provenance segment nonce",
+    );
     assert_eq!(generation_source.load(Ordering::Relaxed), 2);
     drop(prepared);
 
@@ -1045,6 +1215,7 @@ fn dropping_derived_scene_first_keeps_the_input_and_report_readable() {
 fn post_evidence_storage_rejection_preserves_rich_failure_evidence() {
     let factory = test_factory();
     let mut observed_rich_storage_rejection = false;
+    let mut observed_post_nonce_storage_rejection = false;
 
     for max_live_allocations in 1..=128 {
         let account = test_account(&factory, max_live_allocations);
@@ -1063,6 +1234,7 @@ fn post_evidence_storage_rejection_preserves_rich_failure_evidence() {
         else {
             panic!("changed transform must enter edit planning");
         };
+        let nonce_count_before = issued_profile_segment_nonce_count_for_test();
 
         if let Ok(prepared) = pending.prepare_with_generation_source(test_limits(), || {
             SceneGenerationId::reserve_from(&generation_source)
@@ -1073,6 +1245,15 @@ fn post_evidence_storage_rejection_preserves_rich_failure_evidence() {
                         == super::super::NODE_SCENE_STORAGE_REJECTION_CODE =>
                 {
                     assert_eq!(failure.outcome_evidence_block_count(), 1);
+                    let issued_nonce_count = issued_profile_segment_nonce_count_for_test();
+                    let issued_nonce_delta = issued_nonce_count
+                        .checked_sub(nonce_count_before)
+                        .expect("profile nonce issuance count is monotonic on the test thread");
+                    assert!(
+                        issued_nonce_delta <= 1,
+                        "one edit attempt can issue at most one profile segment nonce",
+                    );
+                    observed_post_nonce_storage_rejection |= issued_nonce_delta == 1;
                     assert!(failure.account().is_same_account(&account));
                     drop(failure);
                     observed_rich_storage_rejection = true;
@@ -1086,7 +1267,7 @@ fn post_evidence_storage_rejection_preserves_rich_failure_evidence() {
         assert_eq!(account.snapshot().live_retained_allocations(), 0);
         drop(account);
 
-        if observed_rich_storage_rejection {
+        if observed_rich_storage_rejection && observed_post_nonce_storage_rejection {
             break;
         }
     }
@@ -1094,6 +1275,10 @@ fn post_evidence_storage_rejection_preserves_rich_failure_evidence() {
     assert!(
         observed_rich_storage_rejection,
         "a storage budget that admits edit evidence but rejects canonical output must preserve rich evidence",
+    );
+    assert!(
+        observed_post_nonce_storage_rejection,
+        "a storage rejection after profile rewrite starts must leave one invisible nonce gap",
     );
 }
 

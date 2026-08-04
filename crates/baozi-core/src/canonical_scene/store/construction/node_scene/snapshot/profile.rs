@@ -6,8 +6,9 @@ use super::super::semantic::{
     NodeSceneProfileMetadataArray, NodeSceneProfileMetadataArrayKind,
     NodeSceneProfileMetadataEntry, NodeSceneProfileMetadataValue, NodeSceneProfileOperation,
     NodeSceneProfileOperationKind, NodeSceneProfileOwner, NodeSceneProfileProvenance,
-    NodeSceneProfileProvenanceKind, NodeSceneProfileResource, NodeSceneProfileResourceStability,
-    NodeSceneProfileSegmentCursor, NodeSceneProfileSource, NodeSceneProfileSourceLocator,
+    NodeSceneProfileProvenanceIndices, NodeSceneProfileProvenanceKind, NodeSceneProfileResource,
+    NodeSceneProfileResourceStability, NodeSceneProfileSegmentCursor, NodeSceneProfileSource,
+    NodeSceneProfileSourceLocator,
 };
 use super::{
     CanonicalDigestEncoder, NodeSceneSnapshotError, PRESENCE_ABSENT, PRESENCE_PRESENT, PreviewSink,
@@ -548,7 +549,7 @@ fn write_provenance_row(
         PROVENANCE_PARENT_OFFSET,
         provenance.parent_offset(),
     )?;
-    write_u32_sequence_field(transcript, work, PROVENANCE_PARENTS, provenance.parents())?;
+    write_provenance_sequence_field(transcript, work, PROVENANCE_PARENTS, provenance.parents())?;
     let kind = match provenance.kind() {
         NodeSceneProfileProvenanceKind::Source { source } => {
             write_u8_field(transcript, work, PROVENANCE_KIND, 0)?;
@@ -717,7 +718,7 @@ fn write_owner(
         OWNER_ATTACHMENT_OFFSET,
         owner.attachment_offset(),
     )?;
-    write_u32_sequence_field(transcript, work, OWNER_ATTACHMENTS, owner.attachments())?;
+    write_provenance_sequence_field(transcript, work, OWNER_ATTACHMENTS, owner.attachments())?;
 
     let render = preview.begin_geometry_item("profile_owner", ordinal)?;
     preview.geometry_field_u32(render, "kind", u32::from(owner_kind));
@@ -1142,14 +1143,17 @@ fn write_digest_payload(
     write_metered_bytes(transcript, work, digest.bytes())
 }
 
-fn write_u32_sequence_field(
+fn write_provenance_sequence_field(
     transcript: &mut CanonicalDigestEncoder,
     work: &mut SnapshotWorkMeter<'_>,
     field: u8,
-    values: &[u32],
+    values: NodeSceneProfileProvenanceIndices<'_>,
 ) -> Result<(), NodeSceneSnapshotError> {
     write_sequence_header(transcript, work, field, values.len())?;
-    for value in values.iter().copied() {
+    for value in values.iter() {
+        let value = value.ok_or(NodeSceneSnapshotError::InconsistentView {
+            reason: "validated qualified provenance address is unreadable",
+        })?;
         work.observe()?;
         transcript.tagged_u32(TAG_REFERENCE, value)?;
     }

@@ -1,5 +1,6 @@
 use std::sync::OnceLock;
 
+use crate::canonical_scene::store::profile_provenance::issued_profile_segment_nonce_count_for_test;
 use crate::extension::{ExtensionArrayRef, ExtensionValueRef};
 use crate::math::Vec3;
 use crate::namespaced::NamespacedName;
@@ -800,6 +801,7 @@ fn exact_canonical_limit_succeeds_and_one_over_is_rejected() {
     )];
     let lineage = LineageAuthoringBatch::new(&resources, &sources, &provenance, &owner_rows);
     let metadata = MetadataAuthoringBatch::new(&metadata);
+    let nonce_count_before = issued_profile_segment_nonce_count_for_test();
 
     let baseline = validate_profile_batch_with_control(
         lineage,
@@ -840,6 +842,11 @@ fn exact_canonical_limit_succeeds_and_one_over_is_rejected() {
             }
         )) if actual == exact_bytes && maximum == exact_bytes - 1
     ));
+    assert_eq!(
+        issued_profile_segment_nonce_count_for_test(),
+        nonce_count_before,
+        "authoring preflight and exact-budget rejection must not issue a segment nonce",
+    );
 
     drop(domains);
     assert_eq!(control.live.get(), 0);
