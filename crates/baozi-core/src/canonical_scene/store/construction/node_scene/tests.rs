@@ -24,9 +24,8 @@ use crate::canonical_scene::store::production::{
     NodeAuthoringLimit, NodeAuthoringNode, NodeAuthoringSemanticError, NodeLocalId, NodeParent,
     ObservedResourceAuthoring, OperationAuthoringControlError, OwnerProvenanceAuthoring, Presence,
     PrimitiveDeformationAuthoring, ProfileAuthoringBatch, ProfileOwner, ProvenanceLocalId,
-    ProvenanceNodeAuthoring, ResourceIdentityLocalId, ResourceIdentityStability,
-    SceneAuthoringBatch, SessionOpaqueReason, SourceIdentityAuthoring, SourceIdentityLocalId,
-    SpatialAuthoringBatch, SpatialAuthoringFailure,
+    ProvenanceNodeAuthoring, ResourceIdentityLocalId, SceneAuthoringBatch, SessionOpaqueReason,
+    SourceIdentityAuthoring, SourceIdentityLocalId, SpatialAuthoringBatch, SpatialAuthoringFailure,
 };
 use crate::entity::AuthoredTransform;
 use crate::identity::{SceneGenerationError, SceneGenerationId};
@@ -168,7 +167,6 @@ const PROFILE_SOURCE_PROVENANCE: [ProvenanceLocalId; 1] = [ProvenanceLocalId::ne
 
 struct ProfileFixtureVocabulary {
     resource: ResourceIdentity,
-    stability: ResourceIdentityStability,
     format: FormatId,
     locator: SourceObjectLocator,
 }
@@ -178,7 +176,6 @@ fn profile_fixture_vocabulary() -> &'static ProfileFixtureVocabulary {
     VOCABULARY.get_or_init(|| ProfileFixtureVocabulary {
         resource: ResourceIdentity::new("fixtures/node-scene/input")
             .expect("test profile resource identity"),
-        stability: ResourceIdentityStability::session_opaque(SessionOpaqueReason::CallerLabel),
         format: FormatId::new("org.baozi.fixture").expect("test profile format"),
         locator: SourceObjectLocator::indexed(SourceObjectKind::Document, 0),
     })
@@ -292,9 +289,9 @@ pub(super) fn profile_fixture(
     ));
 
     ProfileFixture {
-        resources: [ObservedResourceAuthoring::new(
+        resources: [ObservedResourceAuthoring::session_opaque(
             &vocabulary.resource,
-            &vocabulary.stability,
+            SessionOpaqueReason::CallerLabel,
         )],
         sources: [SourceIdentityAuthoring::new(
             ResourceIdentityLocalId::new(0),

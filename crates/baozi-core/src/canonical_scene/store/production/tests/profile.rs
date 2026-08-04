@@ -24,9 +24,10 @@ use super::super::{
     ProfileAuthoringSemanticError, ProfileOwner, ProfileOwnerCatalog, ProvenanceLocalId,
     ProvenanceNodeAuthoring, ProvenanceOperationAuthoring, ResourceIdentityLocalId,
     ResourceIdentityStability, SessionOpaqueReason, SourceIdentityAuthoring, SourceIdentityLocalId,
-    SpatialAuthoringBatch, ValidatedAnimationBatch, ValidatedAppearanceBatch,
-    ValidatedDeformationBatch, ValidatedGeometryBatch, ValidatedNodeBatch, ValidatedProfileBatch,
-    ValidatedSpatialBatch,
+    SpatialAuthoringBatch, StableResourceIdentityFixture, ValidatedAnimationBatch,
+    ValidatedAppearanceBatch, ValidatedDeformationBatch, ValidatedGeometryBatch,
+    ValidatedNodeBatch, ValidatedProfileBatch, ValidatedSpatialBatch,
+    classify_stable_resource_identity_fixture,
 };
 use super::{TestControl, TestControlError, TestReservation, trs, validate};
 
@@ -37,7 +38,6 @@ const GENERATED_PROVENANCE: ProvenanceLocalId = ProvenanceLocalId::new(1);
 
 struct FixtureVocabulary {
     resource: ResourceIdentity,
-    stability: ResourceIdentityStability,
     format: FormatId,
     locator: SourceObjectLocator,
     display_name: SourceDisplayName,
@@ -50,7 +50,6 @@ fn vocabulary() -> &'static FixtureVocabulary {
     VOCABULARY.get_or_init(|| FixtureVocabulary {
         resource: ResourceIdentity::new("fixtures/profile/model.glb")
             .expect("test resource identity must be valid"),
-        stability: ResourceIdentityStability::session_opaque(SessionOpaqueReason::CallerLabel),
         format: FormatId::new("org.baozi.gltf").expect("test format id must be valid"),
         locator: SourceObjectLocator::indexed(SourceObjectKind::Document, 0),
         display_name: SourceDisplayName::new("profile fixture")
@@ -63,9 +62,9 @@ fn vocabulary() -> &'static FixtureVocabulary {
 
 fn resource_rows() -> [ObservedResourceAuthoring<'static>; 1] {
     let vocabulary = vocabulary();
-    [ObservedResourceAuthoring::new(
+    [ObservedResourceAuthoring::session_opaque(
         &vocabulary.resource,
-        &vocabulary.stability,
+        SessionOpaqueReason::CallerLabel,
     )]
 }
 
@@ -180,6 +179,61 @@ fn validated_domains<'input>(
 }
 
 #[test]
+fn stable_resource_identity_requires_fixture_authority_and_binds_exact_identity() {
+    let fixture = StableResourceIdentityFixture::ProfileModelV1;
+    let evidence = classify_stable_resource_identity_fixture(fixture);
+    let observed = ObservedResourceAuthoring::stable(evidence);
+
+    assert_eq!(
+        observed.identity().as_str(),
+        "fixtures/profile/stable-model.glb"
+    );
+    match observed.stability() {
+        ResourceIdentityStability::Stable {
+            owner,
+            schema,
+            version,
+        } => {
+            assert_eq!(owner.as_str(), "baozi-tests:profile-authority");
+            assert_eq!(schema.as_str(), "baozi-tests:profile-resource");
+            assert_eq!(version.get(), 1);
+        }
+        ResourceIdentityStability::SessionOpaque(reason) => {
+            panic!("fixture authority unexpectedly became session-opaque: {reason:?}")
+        }
+    }
+
+    let roots = [NodeLocalId::new(0)];
+    let nodes = [trs(Presence::Absent)];
+    let mut control = TestControl::default();
+    let domains = validated_domains(&roots, &nodes, &mut control);
+    let resources = [observed];
+    let sources = [source_row(RESOURCE_ID)];
+    let provenance = [ProvenanceNodeAuthoring::source(SOURCE_ID)];
+    let scene_provenance = [SOURCE_PROVENANCE];
+    let synthetic_root_provenance = [SOURCE_PROVENANCE];
+    let node_provenance = [SOURCE_PROVENANCE];
+    let owners = mandatory_owner_rows(
+        &scene_provenance,
+        &synthetic_root_provenance,
+        &node_provenance,
+    );
+
+    let validated = validate_profile_batch_with_control(
+        LineageAuthoringBatch::new(&resources, &sources, &provenance, &owners),
+        MetadataAuthoringBatch::empty(),
+        domains.owners(),
+        SceneValidationLimits::default(),
+        &mut control,
+    )
+    .expect("authority-backed stable identity must pass profile validation");
+    assert!(matches!(
+        validated.lineage().resources()[0].stability(),
+        ResourceIdentityStability::Stable { .. }
+    ));
+}
+
+#[test]
 fn full_profile_preserves_identity_lineage_owners_and_metadata() {
     let roots = [NodeLocalId::new(0)];
     let nodes = [trs(Presence::Absent)];
@@ -242,7 +296,10 @@ fn full_profile_preserves_identity_lineage_owners_and_metadata() {
         source.resource().identity().as_str(),
         "fixtures/profile/model.glb"
     );
-    assert_eq!(source.resource().stability(), &vocabulary().stability);
+    assert_eq!(
+        source.resource().stability(),
+        &ResourceIdentityStability::SessionOpaque(SessionOpaqueReason::CallerLabel)
+    );
     assert_eq!(source.source().format().as_str(), "org.baozi.gltf");
     assert_eq!(
         source.source().content_digest(),

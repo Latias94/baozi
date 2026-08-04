@@ -318,8 +318,8 @@ mod tests {
         GeometryAuthoringBatch, LineageAuthoringBatch, MetadataAuthoringBatch, NodeAuthoringBatch,
         NodeAuthoringNode, NodeLocalId, ObservedResourceAuthoring, OwnerProvenanceAuthoring,
         Presence, ProfileAuthoringBatch, ProfileOwner, ProvenanceLocalId, ProvenanceNodeAuthoring,
-        ResourceIdentityLocalId, ResourceIdentityStability, SceneAuthoringBatch,
-        SessionOpaqueReason, SourceIdentityAuthoring, SourceIdentityLocalId, SpatialAuthoringBatch,
+        ResourceIdentityLocalId, SceneAuthoringBatch, SessionOpaqueReason, SourceIdentityAuthoring,
+        SourceIdentityLocalId, SpatialAuthoringBatch,
     };
     use crate::entity::AuthoredTransform;
     use crate::provenance::{ResourceIdentity, SourceObjectKind, SourceObjectLocator};
@@ -338,7 +338,6 @@ mod tests {
 
     struct ProfileFixtureVocabulary {
         resource: ResourceIdentity,
-        stability: ResourceIdentityStability,
         format: FormatId,
         locator: SourceObjectLocator,
     }
@@ -370,16 +369,15 @@ mod tests {
         let vocabulary = VOCABULARY.get_or_init(|| ProfileFixtureVocabulary {
             resource: ResourceIdentity::new("fixtures/continuation/input")
                 .expect("test profile resource identity"),
-            stability: ResourceIdentityStability::session_opaque(SessionOpaqueReason::CallerLabel),
             format: FormatId::new("org.baozi.fixture").expect("test profile format"),
             locator: SourceObjectLocator::indexed(SourceObjectKind::Document, 0),
         });
         FIXTURE.get_or_init(|| {
             static SOURCE_PROVENANCE: [ProvenanceLocalId; 1] = [ProvenanceLocalId::new(0)];
             ProfileFixture {
-                resources: [ObservedResourceAuthoring::new(
+                resources: [ObservedResourceAuthoring::session_opaque(
                     &vocabulary.resource,
-                    &vocabulary.stability,
+                    SessionOpaqueReason::CallerLabel,
                 )],
                 sources: [SourceIdentityAuthoring::new(
                     ResourceIdentityLocalId::new(0),

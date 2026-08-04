@@ -52,6 +52,10 @@ pub(super) use input::lineage::{
     ResourceIdentityStability, SessionOpaqueReason,
 };
 #[cfg(test)]
+pub(super) use input::lineage::{
+    StableResourceIdentityFixture, classify_stable_resource_identity_fixture,
+};
+#[cfg(test)]
 pub(super) use input::metadata::{MetadataAuthoringBatch, MetadataAuthoringEntry};
 #[cfg(test)]
 pub(super) use input::spatial::{

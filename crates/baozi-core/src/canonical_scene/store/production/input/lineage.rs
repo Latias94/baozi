@@ -1,4 +1,6 @@
 use std::num::NonZeroU32;
+#[cfg(test)]
+use std::sync::OnceLock;
 
 use crate::FormatId;
 use crate::namespaced::NamespacedName;
@@ -18,7 +20,7 @@ pub(in crate::canonical_scene::store) enum SessionOpaqueReason {
     SessionFallback,
 }
 
-/// Replay-stability evidence kept separate from resource text and content identity.
+/// A read-only replay-stability classification attached to an observed identity.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(in crate::canonical_scene::store) enum ResourceIdentityStability {
     Stable {
@@ -29,23 +31,71 @@ pub(in crate::canonical_scene::store) enum ResourceIdentityStability {
     SessionOpaque(SessionOpaqueReason),
 }
 
-impl ResourceIdentityStability {
-    pub(in crate::canonical_scene::store) const fn stable(
-        owner: NamespacedName,
-        schema: NamespacedName,
-        version: NonZeroU32,
-    ) -> Self {
-        Self::Stable {
-            owner,
-            schema,
-            version,
-        }
-    }
+static SESSION_OPAQUE_CALLER_LABEL: ResourceIdentityStability =
+    ResourceIdentityStability::SessionOpaque(SessionOpaqueReason::CallerLabel);
+static SESSION_OPAQUE_GENERATED: ResourceIdentityStability =
+    ResourceIdentityStability::SessionOpaque(SessionOpaqueReason::Generated);
+static SESSION_OPAQUE_UNREGISTERED_RESOLVER: ResourceIdentityStability =
+    ResourceIdentityStability::SessionOpaque(SessionOpaqueReason::UnregisteredResolver);
+static SESSION_OPAQUE_SESSION_FALLBACK: ResourceIdentityStability =
+    ResourceIdentityStability::SessionOpaque(SessionOpaqueReason::SessionFallback);
 
-    pub(in crate::canonical_scene::store) const fn session_opaque(
-        reason: SessionOpaqueReason,
-    ) -> Self {
-        Self::SessionOpaque(reason)
+const fn session_opaque_stability(
+    reason: SessionOpaqueReason,
+) -> &'static ResourceIdentityStability {
+    match reason {
+        SessionOpaqueReason::CallerLabel => &SESSION_OPAQUE_CALLER_LABEL,
+        SessionOpaqueReason::Generated => &SESSION_OPAQUE_GENERATED,
+        SessionOpaqueReason::UnregisteredResolver => &SESSION_OPAQUE_UNREGISTERED_RESOLVER,
+        SessionOpaqueReason::SessionFallback => &SESSION_OPAQUE_SESSION_FALLBACK,
+    }
+}
+
+/// Sealed authority evidence that binds one exact observed resource identity.
+#[derive(Debug, Clone, Copy)]
+pub(in crate::canonical_scene::store) struct StableResourceIdentityEvidence<'input> {
+    identity: &'input ResourceIdentity,
+    stability: &'static ResourceIdentityStability,
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::canonical_scene::store) enum StableResourceIdentityFixture {
+    ProfileModelV1,
+}
+
+#[cfg(test)]
+struct StableResourceIdentityFixtureAuthority {
+    identity: ResourceIdentity,
+    stability: ResourceIdentityStability,
+}
+
+#[cfg(test)]
+fn profile_model_v1_authority() -> &'static StableResourceIdentityFixtureAuthority {
+    static AUTHORITY: OnceLock<StableResourceIdentityFixtureAuthority> = OnceLock::new();
+    AUTHORITY.get_or_init(|| StableResourceIdentityFixtureAuthority {
+        identity: ResourceIdentity::new("fixtures/profile/stable-model.glb")
+            .expect("stable fixture identity must be valid"),
+        stability: ResourceIdentityStability::Stable {
+            owner: NamespacedName::new("baozi-tests:profile-authority")
+                .expect("stable fixture owner must be valid"),
+            schema: NamespacedName::new("baozi-tests:profile-resource")
+                .expect("stable fixture schema must be valid"),
+            version: NonZeroU32::new(1).expect("stable fixture version must be nonzero"),
+        },
+    })
+}
+
+#[cfg(test)]
+pub(in crate::canonical_scene::store) fn classify_stable_resource_identity_fixture(
+    fixture: StableResourceIdentityFixture,
+) -> StableResourceIdentityEvidence<'static> {
+    let authority = match fixture {
+        StableResourceIdentityFixture::ProfileModelV1 => profile_model_v1_authority(),
+    };
+    StableResourceIdentityEvidence {
+        identity: &authority.identity,
+        stability: &authority.stability,
     }
 }
 
@@ -63,21 +113,30 @@ impl ResourceIdentityLocalId {
     }
 }
 
-/// One observed resource and its independent replay-stability classification.
+/// One observed resource with an inseparable replay-stability classification.
 #[derive(Debug, Clone, Copy)]
 pub(in crate::canonical_scene::store) struct ObservedResourceAuthoring<'input> {
     identity: &'input ResourceIdentity,
-    stability: &'input ResourceIdentityStability,
+    stability: &'static ResourceIdentityStability,
 }
 
 impl<'input> ObservedResourceAuthoring<'input> {
-    pub(in crate::canonical_scene::store) const fn new(
+    pub(in crate::canonical_scene::store) const fn stable(
+        evidence: StableResourceIdentityEvidence<'input>,
+    ) -> Self {
+        Self {
+            identity: evidence.identity,
+            stability: evidence.stability,
+        }
+    }
+
+    pub(in crate::canonical_scene::store) const fn session_opaque(
         identity: &'input ResourceIdentity,
-        stability: &'input ResourceIdentityStability,
+        reason: SessionOpaqueReason,
     ) -> Self {
         Self {
             identity,
-            stability,
+            stability: session_opaque_stability(reason),
         }
     }
 
@@ -87,7 +146,7 @@ impl<'input> ObservedResourceAuthoring<'input> {
 
     pub(in crate::canonical_scene::store) const fn stability(
         self,
-    ) -> &'input ResourceIdentityStability {
+    ) -> &'static ResourceIdentityStability {
         self.stability
     }
 }
