@@ -3,6 +3,7 @@ use baozi_operation::{
     PhysicalStorageAccountFactoryLimits, PhysicalStorageAccountLimits,
 };
 
+use crate::FormatId;
 use crate::SceneValidationLimits;
 use crate::appearance::{AlphaMode, MaterialFactors, MaterialSemanticsRef, ShadingModel};
 use crate::attribute::{AttributeDomain, AttributeSemantic};
@@ -21,10 +22,13 @@ use crate::canonical_scene::store::production::{
     CameraLocalId, CanonicalProfileOwner, DeformationAuthoringBatch, GeometryAttributeAuthoring,
     GeometryAuthoringBatch, GeometryLogicalMeshAuthoring, GeometryMeshInstanceAuthoring,
     GeometryPrimitiveAuthoring, GeometryTopologyAuthoring, LightAuthoring, LightLocalId,
-    LogicalMeshLocalId, LogicalMorphAuthoring, MaterialAuthoring, MaterialLocalId,
-    MeshInstanceDeformationAuthoring, MetadataAuthoringBatch, MetadataAuthoringEntry,
-    NodeAuthoringBatch, NodeAuthoringNode, NodeLocalId, NodeParent, Presence,
-    PrimitiveDeformationAuthoring, ProfileOwner, SceneAuthoringBatch, SpatialAuthoringBatch,
+    LineageAuthoringBatch, LogicalMeshLocalId, LogicalMorphAuthoring, MaterialAuthoring,
+    MaterialLocalId, MeshInstanceDeformationAuthoring, MetadataAuthoringBatch,
+    MetadataAuthoringEntry, NodeAuthoringBatch, NodeAuthoringNode, NodeLocalId, NodeParent,
+    ObservedResourceAuthoring, OwnerProvenanceAuthoring, Presence, PrimitiveDeformationAuthoring,
+    ProfileAuthoringBatch, ProfileOwner, ProvenanceLocalId, ProvenanceNodeAuthoring,
+    ProvenanceOperationAuthoring, ResourceIdentityLocalId, SceneAuthoringBatch,
+    SessionOpaqueReason, SourceIdentityAuthoring, SourceIdentityLocalId, SpatialAuthoringBatch,
 };
 use crate::canonical_scene::store::schema::profile::profile_segment_field;
 use crate::entity::{AuthoredTransform, CameraProjection, LightEmission, LightKind};
@@ -34,7 +38,9 @@ use crate::extension::{
 use crate::identity::NodeId;
 use crate::math::{Color, Mat4, Quat, Vec2, Vec3, Vec4};
 use crate::namespaced::NamespacedName;
-use crate::provenance::OptionsDigest;
+use crate::provenance::{
+    OperationKind, OptionsDigest, ResourceIdentity, SourceObjectKind, SourceObjectLocator,
+};
 use crate::scene_space::{
     Axis, FrontFaceWinding, Handedness, SceneSpace, TangentBasisConvention,
     TangentHandednessEncoding, TransformConvention, UvOrigin,
@@ -463,6 +469,13 @@ fn build_scene_with_spatial_appearance_geometry_and_metadata<'input>(
         animations,
         profile.batch_with_metadata(metadata),
     );
+    publish_scene_input(account, input)
+}
+
+fn publish_scene_input(
+    account: &PhysicalStorageAccount,
+    input: SceneAuthoringBatch<'_>,
+) -> NodeSceneSuccessParts {
     let prepared = SceneConstructionOperation::with_account_for_scene_input(
         account,
         operation_limits(),
@@ -1151,6 +1164,144 @@ fn fresh_segment_nonce_is_excluded_from_the_semantic_snapshot() {
 
     drop(second);
     drop(first);
+    assert_eq!(account.snapshot().live_retained_bytes(), 0);
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
+}
+
+#[test]
+fn snapshot_semantics_are_independent_of_validated_profile_segment_partitioning() {
+    const SOURCE_PROVENANCE: [ProvenanceLocalId; 1] = [ProvenanceLocalId::new(0)];
+    const OPERATION_PROVENANCE: [ProvenanceLocalId; 1] = [ProvenanceLocalId::new(1)];
+
+    let factory = factory();
+    let account = account(&factory);
+    let resource_identity = ResourceIdentity::new("fixtures/snapshot/segment-partitioning.glb")
+        .expect("segment-partitioning resource identity");
+    let format = FormatId::new("org.baozi.snapshot-segment-partitioning")
+        .expect("segment-partitioning format identity");
+    let locator = SourceObjectLocator::indexed(SourceObjectKind::Document, 0);
+    let resources = [ObservedResourceAuthoring::session_opaque(
+        &resource_identity,
+        SessionOpaqueReason::CallerLabel,
+    )];
+    let sources = [SourceIdentityAuthoring::new(
+        ResourceIdentityLocalId::new(0),
+        &format,
+        &locator,
+    )];
+    let operation_kind = OperationKind::Transform;
+    let options_digest = OptionsDigest::sha256([0x5a; 32]);
+    let operation =
+        ProvenanceOperationAuthoring::new(&operation_kind, options_digest, &SOURCE_PROVENANCE, &[]);
+    let source_only = [ProvenanceNodeAuthoring::source(SourceIdentityLocalId::new(
+        0,
+    ))];
+    let source_then_operation = [
+        ProvenanceNodeAuthoring::source(SourceIdentityLocalId::new(0)),
+        ProvenanceNodeAuthoring::operation(operation),
+    ];
+    let source_owners = [
+        OwnerProvenanceAuthoring::new(ProfileOwner::Scene, &SOURCE_PROVENANCE),
+        OwnerProvenanceAuthoring::new(ProfileOwner::SyntheticRoot, &SOURCE_PROVENANCE),
+        OwnerProvenanceAuthoring::new(ProfileOwner::Node(NodeLocalId::new(0)), &SOURCE_PROVENANCE),
+    ];
+    let final_owners = [
+        OwnerProvenanceAuthoring::new(ProfileOwner::Scene, &SOURCE_PROVENANCE),
+        OwnerProvenanceAuthoring::new(ProfileOwner::SyntheticRoot, &SOURCE_PROVENANCE),
+        OwnerProvenanceAuthoring::new(
+            ProfileOwner::Node(NodeLocalId::new(0)),
+            &OPERATION_PROVENANCE,
+        ),
+    ];
+    let roots = [NodeLocalId::new(0)];
+    let initial_nodes = [NodeAuthoringNode::new(
+        Presence::Absent,
+        AuthoredTransform::identity_trs(),
+        Presence::Absent,
+        Presence::Absent,
+    )];
+    let final_transform = trs(23.0);
+    let final_nodes = [NodeAuthoringNode::new(
+        Presence::Absent,
+        final_transform,
+        Presence::Absent,
+        Presence::Absent,
+    )];
+
+    let base_input = SceneAuthoringBatch::new(
+        SpatialAuthoringBatch::new(&SceneSpace::UNKNOWN, &[], &[]),
+        NodeAuthoringBatch::new(Presence::Present(&roots), &initial_nodes),
+        AppearanceAuthoringBatch::empty(),
+        GeometryAuthoringBatch::empty(),
+        DeformationAuthoringBatch::new(&[], &[], &[], &[], &[]),
+        AnimationAuthoringBatch::empty(),
+        ProfileAuthoringBatch::new(
+            LineageAuthoringBatch::new(&resources, &sources, &source_only, &source_owners),
+            MetadataAuthoringBatch::empty(),
+        ),
+    );
+    let base = publish_scene_input(&account, base_input);
+    let node = NodeId::new(base.scene.generation(), 0);
+    let NodeTransformEditStart::Changed(pending) =
+        try_begin_node_transform_edit(&base.scene, node, final_transform, options_digest)
+            .expect("segment-partitioning transform edit must start")
+    else {
+        panic!("different authored transform must require a SceneEdit");
+    };
+    let prepared = pending
+        .prepare(operation_limits(), OperationControl::default())
+        .expect("segment-partitioning transform edit must prepare");
+    let NodeTransformEditTerminal::Success(edited) = prepared.handoff() else {
+        panic!("segment-partitioning transform edit must publish");
+    };
+
+    let direct_input = SceneAuthoringBatch::new(
+        SpatialAuthoringBatch::new(&SceneSpace::UNKNOWN, &[], &[]),
+        NodeAuthoringBatch::new(Presence::Present(&roots), &final_nodes),
+        AppearanceAuthoringBatch::empty(),
+        GeometryAuthoringBatch::empty(),
+        DeformationAuthoringBatch::new(&[], &[], &[], &[], &[]),
+        AnimationAuthoringBatch::empty(),
+        ProfileAuthoringBatch::new(
+            LineageAuthoringBatch::new(&resources, &sources, &source_then_operation, &final_owners),
+            MetadataAuthoringBatch::empty(),
+        ),
+    );
+    let direct = publish_scene_input(&account, direct_input);
+
+    assert_eq!(direct.scene.proof.profile_segment_count(), 1);
+    assert_eq!(edited.scene.proof.profile_segment_count(), 2);
+    let limits = snapshot_limits(MAX_PREVIEW_BYTES, MAX_COLLECTION_ITEMS);
+    let (direct_snapshot, direct_transcript) =
+        capture_node_scene_with_test_transcript(&direct.scene, limits, None)
+            .expect("single-segment semantic snapshot");
+    let (edited_snapshot, edited_transcript) =
+        capture_node_scene_with_test_transcript(&edited.scene, limits, None)
+            .expect("two-segment semantic snapshot");
+
+    assert!(direct_transcript.complete);
+    assert!(edited_transcript.complete);
+    assert_eq!(direct_snapshot.domain, edited_snapshot.domain);
+    assert_eq!(
+        direct_snapshot.schema_revision,
+        edited_snapshot.schema_revision
+    );
+    assert_eq!(direct_snapshot.algorithm, edited_snapshot.algorithm);
+    assert_eq!(direct_snapshot.digest, edited_snapshot.digest);
+    assert_eq!(direct_snapshot.preview, edited_snapshot.preview);
+    assert_eq!(direct_transcript.bytes, edited_transcript.bytes);
+    let direct_work = direct_snapshot.totals.work_units;
+    let edited_work = edited_snapshot.totals.work_units;
+    let mut direct_totals = direct_snapshot.totals;
+    let mut edited_totals = edited_snapshot.totals;
+    direct_totals.work_units = 0;
+    edited_totals.work_units = 0;
+    assert_eq!(direct_totals, edited_totals);
+    assert!(edited_work > direct_work);
+
+    drop(direct);
+    drop(edited);
+    drop(base);
     assert_eq!(account.snapshot().live_retained_bytes(), 0);
     assert_eq!(account.snapshot().live_retained_allocations(), 0);
 }
