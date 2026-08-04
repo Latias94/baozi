@@ -36,15 +36,15 @@ use super::super::{
     authored_fixture, test_account, test_account_with_allocation_limit, test_factory, test_limits,
 };
 use super::report::{
-    CapabilityBoundedPreviewReport, CapabilityMutationReport, CapabilityPhysicalReport,
-    FaultPhysicalReport, FixedVectorReport, GltfCanonicalShapeReport, GltfCapabilityReport,
-    GltfChangedSceneEditPhysicalReport, GltfChangedSceneEditReport, GltfSnapshotTotalsReport,
+    CanonicalSnapshotTotalsReport, CapabilityBoundedPreviewReport, CapabilityMutationReport,
+    CapabilityPhysicalReport, FaultPhysicalReport, FixedVectorReport, GltfCanonicalShapeReport,
+    GltfCapabilityReport, GltfChangedSceneEditPhysicalReport, GltfChangedSceneEditReport,
     GltfSourceShapeReport, GltfUnchangedViewReport, HotLeafObservationReport,
     InheritedHotLeafReport, MinimalFallbackReport, ObjCanonicalShapeReport, ObjCapabilityReport,
-    ObjSnapshotTotalsReport, ObjSourceShapeReport, ProtectedTerminalActivationReport,
-    ReadOnlyPhysicalReport, ScalePhysicalReport, ScaleScenarioReport, SemanticTranscriptReport,
-    ShareGenerationReport, SharePhysicalReport, ValidationFaultReport, evidence_report,
-    handoff_report, hex_encode, phase_report, release_report, sha256_hex,
+    ObjSourceShapeReport, ProtectedTerminalActivationReport, ReadOnlyPhysicalReport,
+    ScalePhysicalReport, ScaleScenarioReport, SemanticTranscriptReport, ShareGenerationReport,
+    SharePhysicalReport, ValidationFaultReport, evidence_report, handoff_report, hex_encode,
+    phase_report, release_report, sha256_hex,
 };
 
 const COMPLEX_PREVIEW_LIMIT_BYTES: usize = 192;
@@ -271,24 +271,7 @@ pub(super) fn collect_obj_capability() -> ObjCapabilityReport {
 
     let full_snapshot_digest_hex = hex_encode(&full_snapshot.digest);
     let bounded_snapshot_digest_hex = hex_encode(&bounded_snapshot.digest);
-    let snapshot_totals = ObjSnapshotTotalsReport {
-        node_count: full_snapshot.totals.node_count,
-        root_count: full_snapshot.totals.root_count,
-        edge_count: full_snapshot.totals.edge_count,
-        material_count: full_snapshot.totals.material_count,
-        logical_mesh_count: full_snapshot.totals.logical_mesh_count,
-        primitive_count: full_snapshot.totals.primitive_count,
-        attribute_count: full_snapshot.totals.attribute_count,
-        mesh_instance_count: full_snapshot.totals.mesh_instance_count,
-        polygon_boundary_count: full_snapshot.totals.polygon_boundary_count,
-        primitive_index_count: full_snapshot.totals.primitive_index_count,
-        sparse_index_count: full_snapshot.totals.sparse_index_count,
-        canonical_scalar_count: full_snapshot.totals.canonical_scalar_count,
-        f32_scalar_count: full_snapshot.totals.f32_scalar_count,
-        u32_scalar_count: full_snapshot.totals.u32_scalar_count,
-        transcript_bytes: full_snapshot.totals.transcript_bytes,
-        work_units: full_snapshot.totals.work_units,
-    };
+    let snapshot_totals = CanonicalSnapshotTotalsReport::from(full_snapshot.totals);
     let bounded_preview = CapabilityBoundedPreviewReport {
         schema_id: "baozi.canonical-scene.bounded-preview.v1",
         bytes: bounded_snapshot.preview.text.len(),
@@ -541,54 +524,7 @@ pub(super) fn collect_gltf_capability() -> GltfCapabilityReport {
 
     let full_snapshot_digest_hex = hex_encode(&full_snapshot.digest);
     let bounded_snapshot_digest_hex = hex_encode(&bounded_snapshot.digest);
-    let snapshot_totals = GltfSnapshotTotalsReport {
-        node_count: full_snapshot.totals.node_count,
-        root_count: full_snapshot.totals.root_count,
-        edge_count: full_snapshot.totals.edge_count,
-        image_count: full_snapshot.totals.image_count,
-        sampler_count: full_snapshot.totals.sampler_count,
-        texture_count: full_snapshot.totals.texture_count,
-        material_count: full_snapshot.totals.material_count,
-        material_binding_count: full_snapshot.totals.material_binding_count,
-        image_payload_bytes: full_snapshot.totals.image_payload_bytes,
-        media_type_bytes: full_snapshot.totals.media_type_bytes,
-        logical_mesh_count: full_snapshot.totals.logical_mesh_count,
-        primitive_count: full_snapshot.totals.primitive_count,
-        attribute_count: full_snapshot.totals.attribute_count,
-        mesh_instance_count: full_snapshot.totals.mesh_instance_count,
-        polygon_boundary_count: full_snapshot.totals.polygon_boundary_count,
-        primitive_index_count: full_snapshot.totals.primitive_index_count,
-        sparse_index_count: full_snapshot.totals.sparse_index_count,
-        canonical_scalar_count: full_snapshot.totals.canonical_scalar_count,
-        f32_scalar_count: full_snapshot.totals.f32_scalar_count,
-        u32_scalar_count: full_snapshot.totals.u32_scalar_count,
-        skin_count: full_snapshot.totals.skin_count,
-        logical_morph_count: full_snapshot.totals.logical_morph_count,
-        morph_definition_count: full_snapshot.totals.morph_definition_count,
-        primitive_deformation_count: full_snapshot.totals.primitive_deformation_count,
-        morph_target_count: full_snapshot.totals.morph_target_count,
-        morph_delta_count: full_snapshot.totals.morph_delta_count,
-        deformation_mesh_instance_count: full_snapshot.totals.deformation_mesh_instance_count,
-        skin_joint_count: full_snapshot.totals.skin_joint_count,
-        inverse_bind_matrix_count: full_snapshot.totals.inverse_bind_matrix_count,
-        skin_correction_matrix_count: full_snapshot.totals.skin_correction_matrix_count,
-        skin_name_bytes: full_snapshot.totals.skin_name_bytes,
-        morph_default_weight_count: full_snapshot.totals.morph_default_weight_count,
-        morph_name_bytes: full_snapshot.totals.morph_name_bytes,
-        influence_row_count: full_snapshot.totals.influence_row_count,
-        influence_count: full_snapshot.totals.influence_count,
-        morph_value_vector_count: full_snapshot.totals.morph_value_vector_count,
-        morph_sparse_index_count: full_snapshot.totals.morph_sparse_index_count,
-        instance_morph_weight_count: full_snapshot.totals.instance_morph_weight_count,
-        animation_clip_count: full_snapshot.totals.animation_clip_count,
-        animation_channel_count: full_snapshot.totals.animation_channel_count,
-        animation_time_scalar_count: full_snapshot.totals.animation_time_scalar_count,
-        animation_value_scalar_count: full_snapshot.totals.animation_value_scalar_count,
-        animation_in_tangent_scalar_count: full_snapshot.totals.animation_in_tangent_scalar_count,
-        animation_out_tangent_scalar_count: full_snapshot.totals.animation_out_tangent_scalar_count,
-        transcript_bytes: full_snapshot.totals.transcript_bytes,
-        work_units: full_snapshot.totals.work_units,
-    };
+    let snapshot_totals = CanonicalSnapshotTotalsReport::from(full_snapshot.totals);
     let bounded_preview = CapabilityBoundedPreviewReport {
         schema_id: "baozi.canonical-scene.bounded-preview.v1",
         bytes: bounded_snapshot.preview.text.len(),

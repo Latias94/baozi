@@ -12,8 +12,8 @@ use super::capability::{
     validate_nonproducing_phase,
 };
 use super::{
-    CoverageMappingSpecification, LedgerContractSpecification, is_lowercase_sha256,
-    validate_exact_list, validate_success_dimensions,
+    CanonicalSnapshotTotals, CoverageMappingSpecification, LedgerContractSpecification,
+    is_lowercase_sha256, validate_exact_list, validate_success_dimensions,
 };
 
 const SOURCE_VECTOR_SCHEMA_ID: &str = "baozi.selected-gltf-shape-capability-source.v2";
@@ -31,7 +31,7 @@ pub(super) struct GltfCapabilitySpecification {
     canonical_block_count: u64,
     outcome_evidence_block_count: u64,
     full_snapshot_digest_hex: String,
-    snapshot_totals: GltfSnapshotTotals,
+    snapshot_totals: CanonicalSnapshotTotals,
     bounded_preview: GltfBoundedPreview,
     construction_budget: ConstructionBudgetSpecification,
     snapshot_budget: SnapshotBudgetSpecification,
@@ -150,57 +150,6 @@ struct GltfMutation {
     snapshot_digest_hex: String,
 }
 
-#[derive(Debug, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-struct GltfSnapshotTotals {
-    node_count: u64,
-    root_count: u64,
-    edge_count: u64,
-    image_count: u64,
-    sampler_count: u64,
-    texture_count: u64,
-    material_count: u64,
-    material_binding_count: u64,
-    image_payload_bytes: u64,
-    media_type_bytes: u64,
-    logical_mesh_count: u64,
-    primitive_count: u64,
-    attribute_count: u64,
-    mesh_instance_count: u64,
-    polygon_boundary_count: u64,
-    primitive_index_count: u64,
-    sparse_index_count: u64,
-    canonical_scalar_count: u64,
-    f32_scalar_count: u64,
-    u32_scalar_count: u64,
-    skin_count: u64,
-    logical_morph_count: u64,
-    morph_definition_count: u64,
-    primitive_deformation_count: u64,
-    morph_target_count: u64,
-    morph_delta_count: u64,
-    deformation_mesh_instance_count: u64,
-    skin_joint_count: u64,
-    inverse_bind_matrix_count: u64,
-    skin_correction_matrix_count: u64,
-    skin_name_bytes: u64,
-    morph_default_weight_count: u64,
-    morph_name_bytes: u64,
-    influence_row_count: u64,
-    influence_count: u64,
-    morph_value_vector_count: u64,
-    morph_sparse_index_count: u64,
-    instance_morph_weight_count: u64,
-    animation_clip_count: u64,
-    animation_channel_count: u64,
-    animation_time_scalar_count: u64,
-    animation_value_scalar_count: u64,
-    animation_in_tangent_scalar_count: u64,
-    animation_out_tangent_scalar_count: u64,
-    transcript_bytes: u64,
-    work_units: u64,
-}
-
 pub(super) fn validate_specification(
     specification: &GltfCapabilitySpecification,
     ledger_contract: &LedgerContractSpecification,
@@ -295,6 +244,7 @@ pub(super) fn validate_specification(
         || totals.node_count != canonical.node_count
         || totals.root_count != canonical.root_count
         || totals.edge_count != canonical.edge_count
+        || !totals.has_empty_spatial_domain()
         || totals.image_count != canonical.image_count
         || totals.sampler_count != canonical.sampler_count
         || totals.texture_count != canonical.texture_count
@@ -302,6 +252,9 @@ pub(super) fn validate_specification(
         || totals.material_binding_count != canonical.material_binding_count
         || totals.image_payload_bytes != source.image_payload_bytes
         || totals.media_type_bytes != source.media_type_bytes
+        || totals.source_key_bytes != 0
+        || totals.binding_semantic_scalar_count != 18
+        || totals.material_factor_scalar_count != 78
         || totals.logical_mesh_count != canonical.logical_mesh_count
         || totals.primitive_count != canonical.primitive_count
         || totals.attribute_count != canonical.attribute_count
@@ -336,6 +289,7 @@ pub(super) fn validate_specification(
         || totals.animation_value_scalar_count != 18
         || totals.animation_in_tangent_scalar_count != 4
         || totals.animation_out_tangent_scalar_count != 4
+        || !totals.has_fresh_profile(38)
         || totals.transcript_bytes == 0
         || totals.work_units == 0
         || !preview.has_common_invariants()
@@ -472,7 +426,7 @@ pub(super) struct GltfCapabilityReport {
     outcome_evidence_block_count: u64,
     full_snapshot_digest_hex: String,
     bounded_snapshot_digest_hex: String,
-    snapshot_totals: GltfSnapshotTotals,
+    snapshot_totals: CanonicalSnapshotTotals,
     bounded_preview: GltfBoundedPreview,
     evidence: super::EvidenceReport,
     construction: super::PhaseReport,
@@ -1036,6 +990,14 @@ mod tests {
         let mut totals_drift = managed_specification();
         totals_drift.snapshot_totals.canonical_scalar_count -= 1;
         assert_rejected(&totals_drift);
+
+        let mut profile_drift = managed_specification();
+        profile_drift.snapshot_totals.profile_owner_count -= 1;
+        assert_rejected(&profile_drift);
+
+        let mut spatial_drift = managed_specification();
+        spatial_drift.snapshot_totals.camera_count += 1;
+        assert_rejected(&spatial_drift);
 
         let mut preview_drift = managed_specification();
         preview_drift.bounded_preview.bytes = 97;

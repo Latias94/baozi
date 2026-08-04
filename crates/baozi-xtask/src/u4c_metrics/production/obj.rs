@@ -13,7 +13,9 @@ use super::capability::{
     validate_fixed_vector_report as validate_capability_fixed_vector_report,
     validate_nonproducing_phase,
 };
-use super::{CoverageMappingSpecification, is_lowercase_sha256, validate_exact_list};
+use super::{
+    CanonicalSnapshotTotals, CoverageMappingSpecification, is_lowercase_sha256, validate_exact_list,
+};
 
 const SOURCE_VECTOR_SCHEMA_ID: &str = "baozi.normalized-obj-capability-source.v1";
 
@@ -32,7 +34,7 @@ pub(super) struct ObjCapabilitySpecification {
     canonical_block_count: u64,
     outcome_evidence_block_count: u64,
     full_snapshot_digest_hex: String,
-    snapshot_totals: ObjSnapshotTotals,
+    snapshot_totals: CanonicalSnapshotTotals,
     bounded_preview: ObjBoundedPreview,
     construction_budget: ObjConstructionBudgetSpecification,
     snapshot_budget: ObjSnapshotBudgetSpecification,
@@ -81,27 +83,6 @@ struct ObjMutation {
     snapshot_digest_hex: String,
 }
 
-#[derive(Debug, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-struct ObjSnapshotTotals {
-    node_count: u64,
-    root_count: u64,
-    edge_count: u64,
-    material_count: u64,
-    logical_mesh_count: u64,
-    primitive_count: u64,
-    attribute_count: u64,
-    mesh_instance_count: u64,
-    polygon_boundary_count: u64,
-    primitive_index_count: u64,
-    sparse_index_count: u64,
-    canonical_scalar_count: u64,
-    f32_scalar_count: u64,
-    u32_scalar_count: u64,
-    transcript_bytes: u64,
-    work_units: u64,
-}
-
 pub(super) fn validate_specification(
     specification: &ObjCapabilitySpecification,
 ) -> Result<(), String> {
@@ -135,7 +116,17 @@ pub(super) fn validate_specification(
         || totals.node_count != 1
         || totals.root_count != 1
         || totals.edge_count != 0
+        || !totals.has_empty_spatial_domain()
+        || totals.image_count != 0
+        || totals.sampler_count != 0
+        || totals.texture_count != 0
         || totals.material_count != 0
+        || totals.material_binding_count != 0
+        || totals.image_payload_bytes != 0
+        || totals.media_type_bytes != 0
+        || totals.source_key_bytes != 0
+        || totals.binding_semantic_scalar_count != 0
+        || totals.material_factor_scalar_count != 0
         || totals.logical_mesh_count != 1
         || totals.primitive_count != 1
         || totals.attribute_count != 4
@@ -146,6 +137,31 @@ pub(super) fn validate_specification(
         || totals.canonical_scalar_count != 41
         || totals.f32_scalar_count != 39
         || totals.u32_scalar_count != 2
+        || totals.skin_count != 0
+        || totals.logical_morph_count != 1
+        || totals.morph_definition_count != 0
+        || totals.primitive_deformation_count != 1
+        || totals.morph_target_count != 0
+        || totals.morph_delta_count != 0
+        || totals.deformation_mesh_instance_count != 1
+        || totals.skin_joint_count != 0
+        || totals.inverse_bind_matrix_count != 0
+        || totals.skin_correction_matrix_count != 0
+        || totals.skin_name_bytes != 0
+        || totals.morph_default_weight_count != 0
+        || totals.morph_name_bytes != 0
+        || totals.influence_row_count != 0
+        || totals.influence_count != 0
+        || totals.morph_value_vector_count != 0
+        || totals.morph_sparse_index_count != 0
+        || totals.instance_morph_weight_count != 0
+        || totals.animation_clip_count != 0
+        || totals.animation_channel_count != 0
+        || totals.animation_time_scalar_count != 0
+        || totals.animation_value_scalar_count != 0
+        || totals.animation_in_tangent_scalar_count != 0
+        || totals.animation_out_tangent_scalar_count != 0
+        || !totals.has_fresh_profile(10)
         || totals.transcript_bytes == 0
         || totals.work_units == 0
         || !preview.has_common_invariants()
@@ -234,7 +250,7 @@ pub(super) struct ObjCapabilityReport {
     outcome_evidence_block_count: u64,
     full_snapshot_digest_hex: String,
     bounded_snapshot_digest_hex: String,
-    snapshot_totals: ObjSnapshotTotals,
+    snapshot_totals: CanonicalSnapshotTotals,
     bounded_preview: ObjBoundedPreview,
     evidence: super::EvidenceReport,
     construction: super::PhaseReport,
@@ -367,8 +383,8 @@ fn validate_fixed_vector_report(
 
 #[cfg(feature = "repository-input-candidate")]
 fn validate_snapshot_totals(
-    report: &ObjSnapshotTotals,
-    expected: &ObjSnapshotTotals,
+    report: &CanonicalSnapshotTotals,
+    expected: &CanonicalSnapshotTotals,
 ) -> Result<(), String> {
     if report != expected {
         return Err("U4c production OBJ snapshot totals drifted".to_owned());
@@ -447,6 +463,29 @@ fn validate_bounded_preview(
 #[cfg(all(test, feature = "repository-input-candidate"))]
 mod tests {
     use super::*;
+
+    fn managed_specification() -> ObjCapabilitySpecification {
+        let specification = super::super::ProductionSpecification::parse(include_bytes!(
+            "../../../../../docs/conformance/u4c-metrics.toml"
+        ))
+        .expect("managed U4c production specification must parse");
+        specification.obj_capability
+    }
+
+    #[test]
+    fn rejects_profile_and_spatial_snapshot_drift() {
+        let specification = managed_specification();
+        validate_specification(&specification)
+            .expect("managed OBJ capability specification must remain valid");
+
+        let mut profile_drift = managed_specification();
+        profile_drift.snapshot_totals.profile_attachment_count -= 1;
+        assert!(validate_specification(&profile_drift).is_err());
+
+        let mut spatial_drift = managed_specification();
+        spatial_drift.snapshot_totals.light_count += 1;
+        assert!(validate_specification(&spatial_drift).is_err());
+    }
 
     #[test]
     fn rejects_same_length_bounded_preview_drift() {

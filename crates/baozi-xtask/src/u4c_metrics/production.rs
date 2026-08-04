@@ -137,6 +137,114 @@ struct ProductionSpecification {
     specification_sha256: String,
 }
 
+#[derive(Debug, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct CanonicalSnapshotTotals {
+    node_count: u64,
+    root_count: u64,
+    edge_count: u64,
+    camera_count: u64,
+    light_count: u64,
+    camera_attachment_count: u64,
+    light_attachment_count: u64,
+    image_count: u64,
+    sampler_count: u64,
+    texture_count: u64,
+    material_count: u64,
+    material_binding_count: u64,
+    image_payload_bytes: u64,
+    media_type_bytes: u64,
+    source_key_bytes: u64,
+    binding_semantic_scalar_count: u64,
+    material_factor_scalar_count: u64,
+    logical_mesh_count: u64,
+    primitive_count: u64,
+    attribute_count: u64,
+    mesh_instance_count: u64,
+    polygon_boundary_count: u64,
+    primitive_index_count: u64,
+    sparse_index_count: u64,
+    canonical_scalar_count: u64,
+    f32_scalar_count: u64,
+    u32_scalar_count: u64,
+    skin_count: u64,
+    logical_morph_count: u64,
+    morph_definition_count: u64,
+    primitive_deformation_count: u64,
+    morph_target_count: u64,
+    morph_delta_count: u64,
+    deformation_mesh_instance_count: u64,
+    skin_joint_count: u64,
+    inverse_bind_matrix_count: u64,
+    skin_correction_matrix_count: u64,
+    skin_name_bytes: u64,
+    morph_default_weight_count: u64,
+    morph_name_bytes: u64,
+    influence_row_count: u64,
+    influence_count: u64,
+    morph_value_vector_count: u64,
+    morph_sparse_index_count: u64,
+    instance_morph_weight_count: u64,
+    animation_clip_count: u64,
+    animation_channel_count: u64,
+    animation_time_scalar_count: u64,
+    animation_value_scalar_count: u64,
+    animation_in_tangent_scalar_count: u64,
+    animation_out_tangent_scalar_count: u64,
+    profile_resource_count: u64,
+    profile_source_count: u64,
+    profile_provenance_node_count: u64,
+    profile_operation_count: u64,
+    profile_evidence_count: u64,
+    profile_owner_count: u64,
+    profile_attachment_count: u64,
+    profile_metadata_entry_count: u64,
+    profile_parent_reference_count: u64,
+    profile_wide_value_count: u64,
+    profile_lineage_text_bytes: u64,
+    profile_lineage_digest_bytes: u64,
+    profile_metadata_text_bytes: u64,
+    profile_metadata_payload_bytes: u64,
+    profile_metadata_bool_scalar_count: u64,
+    profile_metadata_i64_scalar_count: u64,
+    profile_metadata_u64_scalar_count: u64,
+    profile_metadata_f64_scalar_count: u64,
+    profile_metadata_f32_scalar_count: u64,
+    transcript_bytes: u64,
+    work_units: u64,
+}
+
+impl CanonicalSnapshotTotals {
+    fn has_empty_spatial_domain(&self) -> bool {
+        self.camera_count == 0
+            && self.light_count == 0
+            && self.camera_attachment_count == 0
+            && self.light_attachment_count == 0
+    }
+
+    fn has_fresh_profile(&self, expected_owner_count: u64) -> bool {
+        self.profile_resource_count == 1
+            && self.profile_source_count == 1
+            && self.profile_provenance_node_count == 1
+            && self.profile_operation_count == 0
+            && self.profile_evidence_count == 0
+            && self.profile_owner_count == expected_owner_count
+            && self.profile_attachment_count == expected_owner_count
+            && self.profile_metadata_entry_count == 0
+            && self.profile_parent_reference_count == 0
+            && self.profile_wide_value_count == 1
+            && self.profile_lineage_text_bytes == 42
+            && self.profile_lineage_digest_bytes == 0
+            && self.profile_metadata_text_bytes == 0
+            && self.profile_metadata_payload_bytes == 0
+            && self.profile_metadata_bool_scalar_count == 0
+            && self.profile_metadata_i64_scalar_count == 0
+            && self.profile_metadata_u64_scalar_count == 0
+            && self.profile_metadata_f64_scalar_count == 0
+            && self.profile_metadata_f32_scalar_count == 0
+    }
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RunnerSpecification {
