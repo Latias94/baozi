@@ -7,8 +7,8 @@ use super::super::semantic::{
     NodeSceneProfileMetadataEntry, NodeSceneProfileMetadataValue, NodeSceneProfileOperation,
     NodeSceneProfileOperationKind, NodeSceneProfileOwner, NodeSceneProfileProvenance,
     NodeSceneProfileProvenanceIndices, NodeSceneProfileProvenanceKind, NodeSceneProfileResource,
-    NodeSceneProfileResourceStability, NodeSceneProfileSegmentCursor, NodeSceneProfileSource,
-    NodeSceneProfileSourceLocator,
+    NodeSceneProfileResourceStability, NodeSceneProfileSource, NodeSceneProfileSourceLocator,
+    NodeSceneProfileStep, NodeSceneSemanticResult,
 };
 use super::{
     CanonicalDigestEncoder, NodeSceneSnapshotError, PRESENCE_ABSENT, PRESENCE_PRESENT, PreviewSink,
@@ -34,7 +34,6 @@ const TAG_REFERENCE: u8 = 215;
 
 const PROFILE_PAYLOAD_CHUNK_BYTES: usize = 4 * 1024;
 
-const COLLECTION_SEGMENTS: u8 = 0;
 const COLLECTION_RESOURCES: u8 = 1;
 const COLLECTION_SOURCES: u8 = 2;
 const COLLECTION_PROVENANCE: u8 = 3;
@@ -42,23 +41,12 @@ const COLLECTION_EVIDENCE: u8 = 4;
 const COLLECTION_OWNERS: u8 = 5;
 const COLLECTION_METADATA: u8 = 6;
 
-const ROW_SEGMENT: u8 = 0;
 const ROW_RESOURCE: u8 = 1;
 const ROW_SOURCE: u8 = 2;
 const ROW_PROVENANCE: u8 = 3;
 const ROW_EVIDENCE: u8 = 4;
 const ROW_OWNER: u8 = 5;
 const ROW_METADATA: u8 = 6;
-
-const SEGMENT_RESOURCES: u8 = 0;
-const SEGMENT_SOURCES: u8 = 1;
-const SEGMENT_PROVENANCE: u8 = 2;
-const SEGMENT_OPERATIONS: u8 = 3;
-const SEGMENT_EVIDENCE: u8 = 4;
-const SEGMENT_PARENTS: u8 = 5;
-const SEGMENT_WIDE_VALUES: u8 = 6;
-const SEGMENT_TEXT_BYTES: u8 = 7;
-const SEGMENT_DIGEST_BYTES: u8 = 8;
 
 const RESOURCE_IDENTITY: u8 = 0;
 const RESOURCE_STABILITY_KIND: u8 = 1;
@@ -120,7 +108,6 @@ const PROFILE_METADATA_F32_LANE: u8 = 6;
 
 #[derive(Clone, Copy)]
 pub(super) struct ProfileCollectionCounts {
-    pub(super) segments: usize,
     pub(super) resources: usize,
     pub(super) sources: usize,
     pub(super) provenance_nodes: usize,
@@ -154,7 +141,6 @@ pub(super) fn write_profile(
     work: &mut SnapshotWorkMeter<'_>,
 ) -> Result<(ProfileCollectionCounts, ProfilePayloadTotals), NodeSceneSnapshotError> {
     let counts = ProfileCollectionCounts {
-        segments: cursor.segment_count(),
         resources: cursor.resource_count(),
         sources: cursor.source_count(),
         provenance_nodes: cursor.provenance_count(),
@@ -251,107 +237,39 @@ pub(super) fn write_profile(
         lanes.f32s().map(<[f32]>::len),
     )?;
 
-    write_segments(cursor, counts, transcript, preview, work)?;
+    write_resources(cursor, counts.resources, transcript, preview, work)?;
+    write_sources(cursor, counts.sources, transcript, preview, work)?;
+    write_provenance(cursor, counts.provenance_nodes, transcript, preview, work)?;
+    write_evidence(cursor, counts.evidence, transcript, preview, work)?;
     write_owners(cursor, counts, transcript, preview, work)?;
     write_metadata(cursor, counts, transcript, preview, work)?;
     preview.push_str("profile_end\n");
     Ok((counts, totals))
 }
 
-fn write_segments(
-    cursor: &mut NodeSceneProfileCursor<'_>,
-    counts: ProfileCollectionCounts,
-    transcript: &mut CanonicalDigestEncoder,
-    preview: &mut PreviewSink,
+fn next_lineage_item<T>(
     work: &mut SnapshotWorkMeter<'_>,
-) -> Result<(), NodeSceneSnapshotError> {
-    begin_collection(
-        transcript,
-        preview,
-        work,
-        COLLECTION_SEGMENTS,
-        "profile_segments",
-        true,
-        counts.segments,
-    )?;
-    for ordinal in 0..counts.segments {
-        let mut segment = cursor
-            .next_segment()
-            .map_err(super::map_snapshot_invariant)?
-            .ok_or(NodeSceneSnapshotError::InconsistentView {
-                reason: "profile segment collection ended before declared total",
-            })?;
-        if segment.segment_index() != ordinal {
-            return Err(NodeSceneSnapshotError::InconsistentView {
-                reason: "profile segment index disagrees with its collection ordinal",
-            });
+    mut step: impl FnMut() -> NodeSceneSemanticResult<NodeSceneProfileStep<T>>,
+) -> Result<Option<T>, NodeSceneSnapshotError> {
+    loop {
+        // Admission and cancellation polling happen before either one physical
+        // segment checkpoint or one canonical row is decoded.
+        work.observe()?;
+        match step().map_err(super::map_snapshot_invariant)? {
+            NodeSceneProfileStep::Checkpoint => {}
+            NodeSceneProfileStep::Item(item) => return Ok(Some(item)),
+            NodeSceneProfileStep::End => return Ok(None),
         }
-        begin_row(transcript, work, ROW_SEGMENT, ordinal)?;
-        write_usize_field(
-            transcript,
-            work,
-            SEGMENT_RESOURCES,
-            segment.resource_count(),
-        )?;
-        write_usize_field(transcript, work, SEGMENT_SOURCES, segment.source_count())?;
-        write_usize_field(
-            transcript,
-            work,
-            SEGMENT_PROVENANCE,
-            segment.provenance_count(),
-        )?;
-        write_usize_field(
-            transcript,
-            work,
-            SEGMENT_OPERATIONS,
-            segment.operation_count(),
-        )?;
-        write_usize_field(transcript, work, SEGMENT_EVIDENCE, segment.evidence_count())?;
-        write_usize_field(
-            transcript,
-            work,
-            SEGMENT_PARENTS,
-            segment.parent_values().len(),
-        )?;
-        write_usize_field(
-            transcript,
-            work,
-            SEGMENT_WIDE_VALUES,
-            segment.wide_values().len(),
-        )?;
-        write_usize_field(transcript, work, SEGMENT_TEXT_BYTES, segment.text().len())?;
-        write_usize_field(
-            transcript,
-            work,
-            SEGMENT_DIGEST_BYTES,
-            segment.digest_bytes().len(),
-        )?;
-
-        let render = preview.begin_geometry_item("profile_segment", ordinal)?;
-        preview.geometry_field_usize(render, "resources", segment.resource_count());
-        preview.geometry_field_usize(render, "sources", segment.source_count());
-        preview.geometry_field_usize(render, "provenance", segment.provenance_count());
-        preview.geometry_field_usize(render, "operations", segment.operation_count());
-        preview.geometry_field_usize(render, "evidence", segment.evidence_count());
-        preview.geometry_field_usize(render, "parents", segment.parent_values().len());
-        preview.end_geometry_item(render);
-
-        write_resources(&mut segment, transcript, preview, work)?;
-        write_sources(&mut segment, transcript, preview, work)?;
-        write_provenance(&mut segment, transcript, preview, work)?;
-        write_evidence(&mut segment, transcript, preview, work)?;
-        segment.finish().map_err(super::map_snapshot_invariant)?;
     }
-    Ok(())
 }
 
 fn write_resources(
-    segment: &mut NodeSceneProfileSegmentCursor<'_, '_>,
+    cursor: &mut NodeSceneProfileCursor<'_>,
+    count: usize,
     transcript: &mut CanonicalDigestEncoder,
     preview: &mut PreviewSink,
     work: &mut SnapshotWorkMeter<'_>,
 ) -> Result<(), NodeSceneSnapshotError> {
-    let count = segment.resource_count();
     begin_collection(
         transcript,
         preview,
@@ -362,13 +280,17 @@ fn write_resources(
         count,
     )?;
     for _ in 0..count {
-        let resource = segment
-            .next_resource()
-            .map_err(super::map_snapshot_invariant)?
-            .ok_or(NodeSceneSnapshotError::InconsistentView {
+        let resource = next_lineage_item(work, || cursor.step_resource())?.ok_or(
+            NodeSceneSnapshotError::InconsistentView {
                 reason: "profile resource collection ended before declared total",
-            })?;
+            },
+        )?;
         write_resource(resource, transcript, preview, work)?;
+    }
+    if next_lineage_item(work, || cursor.step_resource())?.is_some() {
+        return Err(NodeSceneSnapshotError::InconsistentView {
+            reason: "profile resource collection exceeds its declared total",
+        });
     }
     Ok(())
 }
@@ -379,7 +301,7 @@ fn write_resource(
     preview: &mut PreviewSink,
     work: &mut SnapshotWorkMeter<'_>,
 ) -> Result<(), NodeSceneSnapshotError> {
-    begin_row(transcript, work, ROW_RESOURCE, resource.index())?;
+    begin_row(transcript, ROW_RESOURCE, resource.index())?;
     write_bytes_field(
         transcript,
         work,
@@ -419,12 +341,12 @@ fn write_resource(
 }
 
 fn write_sources(
-    segment: &mut NodeSceneProfileSegmentCursor<'_, '_>,
+    cursor: &mut NodeSceneProfileCursor<'_>,
+    count: usize,
     transcript: &mut CanonicalDigestEncoder,
     preview: &mut PreviewSink,
     work: &mut SnapshotWorkMeter<'_>,
 ) -> Result<(), NodeSceneSnapshotError> {
-    let count = segment.source_count();
     begin_collection(
         transcript,
         preview,
@@ -435,13 +357,17 @@ fn write_sources(
         count,
     )?;
     for _ in 0..count {
-        let source = segment
-            .next_source()
-            .map_err(super::map_snapshot_invariant)?
-            .ok_or(NodeSceneSnapshotError::InconsistentView {
+        let source = next_lineage_item(work, || cursor.step_source())?.ok_or(
+            NodeSceneSnapshotError::InconsistentView {
                 reason: "profile source collection ended before declared total",
-            })?;
+            },
+        )?;
         write_source(source, transcript, preview, work)?;
+    }
+    if next_lineage_item(work, || cursor.step_source())?.is_some() {
+        return Err(NodeSceneSnapshotError::InconsistentView {
+            reason: "profile source collection exceeds its declared total",
+        });
     }
     Ok(())
 }
@@ -452,7 +378,7 @@ fn write_source(
     preview: &mut PreviewSink,
     work: &mut SnapshotWorkMeter<'_>,
 ) -> Result<(), NodeSceneSnapshotError> {
-    begin_row(transcript, work, ROW_SOURCE, source.index())?;
+    begin_row(transcript, ROW_SOURCE, source.index())?;
     write_usize_field(transcript, work, SOURCE_RESOURCE, source.resource())?;
     write_bytes_field(transcript, work, SOURCE_FORMAT, source.format().as_bytes())?;
     match source.locator() {
@@ -508,12 +434,12 @@ fn write_source(
 }
 
 fn write_provenance(
-    segment: &mut NodeSceneProfileSegmentCursor<'_, '_>,
+    cursor: &mut NodeSceneProfileCursor<'_>,
+    count: usize,
     transcript: &mut CanonicalDigestEncoder,
     preview: &mut PreviewSink,
     work: &mut SnapshotWorkMeter<'_>,
 ) -> Result<(), NodeSceneSnapshotError> {
-    let count = segment.provenance_count();
     begin_collection(
         transcript,
         preview,
@@ -524,13 +450,17 @@ fn write_provenance(
         count,
     )?;
     for _ in 0..count {
-        let provenance = segment
-            .next_provenance()
-            .map_err(super::map_snapshot_invariant)?
-            .ok_or(NodeSceneSnapshotError::InconsistentView {
+        let provenance = next_lineage_item(work, || cursor.step_provenance())?.ok_or(
+            NodeSceneSnapshotError::InconsistentView {
                 reason: "profile provenance collection ended before declared total",
-            })?;
+            },
+        )?;
         write_provenance_row(provenance, transcript, preview, work)?;
+    }
+    if next_lineage_item(work, || cursor.step_provenance())?.is_some() {
+        return Err(NodeSceneSnapshotError::InconsistentView {
+            reason: "profile provenance collection exceeds its declared total",
+        });
     }
     Ok(())
 }
@@ -541,7 +471,7 @@ fn write_provenance_row(
     preview: &mut PreviewSink,
     work: &mut SnapshotWorkMeter<'_>,
 ) -> Result<(), NodeSceneSnapshotError> {
-    begin_row(transcript, work, ROW_PROVENANCE, provenance.index())?;
+    begin_row(transcript, ROW_PROVENANCE, provenance.index())?;
     write_usize_field(transcript, work, PROVENANCE_DEPTH, provenance.depth())?;
     write_usize_field(
         transcript,
@@ -612,12 +542,12 @@ fn write_operation(
 }
 
 fn write_evidence(
-    segment: &mut NodeSceneProfileSegmentCursor<'_, '_>,
+    cursor: &mut NodeSceneProfileCursor<'_>,
+    count: usize,
     transcript: &mut CanonicalDigestEncoder,
     preview: &mut PreviewSink,
     work: &mut SnapshotWorkMeter<'_>,
 ) -> Result<(), NodeSceneSnapshotError> {
-    let count = segment.evidence_count();
     begin_collection(
         transcript,
         preview,
@@ -628,13 +558,17 @@ fn write_evidence(
         count,
     )?;
     for _ in 0..count {
-        let evidence = segment
-            .next_evidence()
-            .map_err(super::map_snapshot_invariant)?
-            .ok_or(NodeSceneSnapshotError::InconsistentView {
+        let evidence = next_lineage_item(work, || cursor.step_evidence())?.ok_or(
+            NodeSceneSnapshotError::InconsistentView {
                 reason: "profile evidence collection ended before declared total",
-            })?;
+            },
+        )?;
         write_evidence_row(evidence, transcript, preview, work)?;
+    }
+    if next_lineage_item(work, || cursor.step_evidence())?.is_some() {
+        return Err(NodeSceneSnapshotError::InconsistentView {
+            reason: "profile evidence collection exceeds its declared total",
+        });
     }
     Ok(())
 }
@@ -645,7 +579,7 @@ fn write_evidence_row(
     preview: &mut PreviewSink,
     work: &mut SnapshotWorkMeter<'_>,
 ) -> Result<(), NodeSceneSnapshotError> {
-    begin_row(transcript, work, ROW_EVIDENCE, evidence.index())?;
+    begin_row(transcript, ROW_EVIDENCE, evidence.index())?;
     write_bytes_field(transcript, work, EVIDENCE_CODE, evidence.code().as_bytes())?;
     write_u64_field(
         transcript,
@@ -680,6 +614,7 @@ fn write_owners(
     )?;
     let mut observed_attachments = 0_usize;
     for ordinal in 0..counts.owners {
+        work.observe()?;
         let owner = cursor
             .next_owner()
             .map_err(super::map_snapshot_invariant)?
@@ -708,7 +643,7 @@ fn write_owner(
     preview: &mut PreviewSink,
     work: &mut SnapshotWorkMeter<'_>,
 ) -> Result<(), NodeSceneSnapshotError> {
-    begin_row(transcript, work, ROW_OWNER, ordinal)?;
+    begin_row(transcript, ROW_OWNER, ordinal)?;
     let (owner_kind, owner_index) = encode_owner(owner.owner());
     write_u8_field(transcript, work, OWNER_KIND, owner_kind)?;
     write_u32_field(transcript, work, OWNER_INDEX, owner_index)?;
@@ -746,6 +681,7 @@ fn write_metadata(
         counts.metadata_entries,
     )?;
     for ordinal in 0..counts.metadata_entries {
+        work.observe()?;
         let entry = cursor
             .next_metadata_entry()
             .map_err(super::map_snapshot_invariant)?
@@ -764,7 +700,7 @@ fn write_metadata_entry(
     preview: &mut PreviewSink,
     work: &mut SnapshotWorkMeter<'_>,
 ) -> Result<(), NodeSceneSnapshotError> {
-    begin_row(transcript, work, ROW_METADATA, ordinal)?;
+    begin_row(transcript, ROW_METADATA, ordinal)?;
     let (owner_kind, owner_index) = encode_owner(entry.owner());
     write_u8_field(transcript, work, METADATA_OWNER_KIND, owner_kind)?;
     write_u32_field(transcript, work, METADATA_OWNER_INDEX, owner_index)?;
@@ -959,11 +895,9 @@ fn begin_collection(
 
 fn begin_row(
     transcript: &mut CanonicalDigestEncoder,
-    work: &mut SnapshotWorkMeter<'_>,
     kind: u8,
     index: usize,
 ) -> Result<(), NodeSceneSnapshotError> {
-    work.observe()?;
     transcript.write_tag(TAG_ROW)?;
     transcript.tagged_u8(TAG_KIND, kind)?;
     transcript.tagged_usize(TAG_INDEX, index)
@@ -1340,4 +1274,51 @@ const fn encode_metadata_array_kind(kind: NodeSceneProfileMetadataArrayKind) -> 
 
 fn count_as_u64(count: usize, total: &'static str) -> Result<u64, NodeSceneSnapshotError> {
     u64::try_from(count).map_err(|_| NodeSceneSnapshotError::SemanticTotalOverflow { total })
+}
+
+#[cfg(test)]
+mod tests {
+    use baozi_operation::CancellationToken;
+
+    use super::super::NODE_SCENE_SNAPSHOT_POLL_INTERVAL;
+    use super::*;
+
+    #[test]
+    fn checkpoint_polling_stops_before_the_next_segment_step() {
+        let cancellation = CancellationToken::new();
+        let mut work = SnapshotWorkMeter::new(u64::MAX, Some(&cancellation));
+        let mut calls = 0_u64;
+
+        let result: Result<Option<()>, _> = next_lineage_item(&mut work, || {
+            calls += 1;
+            if calls == 1 {
+                cancellation.cancel();
+            }
+            Ok(NodeSceneProfileStep::Checkpoint)
+        });
+
+        assert!(matches!(result, Err(NodeSceneSnapshotError::Cancelled)));
+        assert_eq!(calls, NODE_SCENE_SNAPSHOT_POLL_INTERVAL - 1);
+    }
+
+    #[test]
+    fn one_short_checkpoint_budget_rejects_before_decoding_the_next_row() {
+        let mut work = SnapshotWorkMeter::new(1, None);
+        let mut calls = 0_u64;
+
+        let result: Result<Option<()>, _> = next_lineage_item(&mut work, || {
+            calls += 1;
+            Ok(if calls == 1 {
+                NodeSceneProfileStep::Checkpoint
+            } else {
+                NodeSceneProfileStep::Item(())
+            })
+        });
+
+        assert!(matches!(
+            result,
+            Err(NodeSceneSnapshotError::WorkBudgetExceeded { .. })
+        ));
+        assert_eq!(calls, 1);
+    }
 }

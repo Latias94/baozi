@@ -6,11 +6,8 @@ use baozi_operation::{CapacityPlan, GrowableCapacityPlan};
 use std::borrow::Borrow;
 use std::hash::{Hash, Hasher};
 use std::num::NonZeroU64;
+use std::sync::atomic::{AtomicU64, Ordering};
 use thiserror::Error;
-
-#[cfg(test)]
-use crate::process_nonce::fail_next_process_nonce_for_test;
-use crate::process_nonce::issue_process_nonce;
 
 /// Maximum encoded length of a sanitized resource identity.
 pub const MAX_RESOURCE_IDENTITY_LEN: usize = 512;
@@ -1013,9 +1010,16 @@ struct ProvenanceNodeId(usize);
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 struct ArenaNonce(NonZeroU64);
 
+static NEXT_ARENA_NONCE: AtomicU64 = AtomicU64::new(1);
+
+#[cfg(test)]
+thread_local! {
+    static FAIL_NEXT_ARENA_NONCE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 #[cfg(test)]
 fn fail_next_arena_nonce_for_test() {
-    fail_next_process_nonce_for_test();
+    FAIL_NEXT_ARENA_NONCE.with(|flag| flag.set(true));
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1024,9 +1028,19 @@ enum ArenaNonceError {
 }
 
 fn next_arena_nonce() -> Result<ArenaNonce, ArenaNonceError> {
-    issue_process_nonce()
+    #[cfg(test)]
+    if FAIL_NEXT_ARENA_NONCE.with(|flag| flag.replace(false)) {
+        return Err(ArenaNonceError::Exhausted);
+    }
+
+    let candidate = NEXT_ARENA_NONCE
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |candidate| {
+            NonZeroU64::new(candidate).and_then(|_| candidate.checked_add(1))
+        })
+        .map_err(|_| ArenaNonceError::Exhausted)?;
+    NonZeroU64::new(candidate)
         .map(ArenaNonce)
-        .map_err(|_| ArenaNonceError::Exhausted)
+        .ok_or(ArenaNonceError::Exhausted)
 }
 
 /// An opaque, non-empty attachment to one immutable provenance node.

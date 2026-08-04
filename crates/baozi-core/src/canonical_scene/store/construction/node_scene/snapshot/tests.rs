@@ -6,6 +6,7 @@ use baozi_operation::{
 use crate::SceneValidationLimits;
 use crate::appearance::{AlphaMode, MaterialFactors, MaterialSemanticsRef, ShadingModel};
 use crate::attribute::{AttributeDomain, AttributeSemantic};
+use crate::canonical_scene::store::construction::node_scene::semantic::NodeSceneProfileStep;
 use crate::canonical_scene::store::construction::node_scene::{
     NodeSceneConstructionTerminal, NodeSceneSuccessParts, ValidatedNodeScene,
 };
@@ -43,8 +44,8 @@ use super::{
 };
 
 const KNOWN_SINGLE_TRS_DIGEST: [u8; 32] = [
-    0x98, 0x1a, 0x93, 0x13, 0xb8, 0x48, 0xa7, 0x3c, 0x6f, 0xc2, 0xcd, 0xe5, 0x11, 0x86, 0xeb, 0xba,
-    0x57, 0xdb, 0x10, 0x15, 0xf3, 0x66, 0x7f, 0xf1, 0x01, 0xda, 0x59, 0xae, 0x13, 0x3d, 0x32, 0x54,
+    0x66, 0x2f, 0x11, 0x9f, 0x56, 0x4f, 0xe1, 0x52, 0x61, 0xe4, 0x76, 0xe9, 0x29, 0x71, 0x7a, 0x74,
+    0xc8, 0xd0, 0xea, 0x61, 0xa9, 0x13, 0xf8, 0x38, 0x2d, 0x82, 0x21, 0x0c, 0xd9, 0x28, 0x14, 0x28,
 ];
 // Known vectors are factored at canonical domain and owner-row boundaries, but every
 // assertion still compares the complete transcript byte for byte.
@@ -56,12 +57,12 @@ const KNOWN_SINGLE_TRS_TRANSCRIPT_PREFIX_HEX: &str = concat!(
     "0e0000803f0b0a00000000000000c40c00c50c00070c010b00000000000000000b0100000000000000",
 );
 const KNOWN_MATRIX_CHILD_DIGEST: [u8; 32] = [
-    0xea, 0xee, 0x35, 0xad, 0x96, 0x8c, 0xd6, 0x31, 0xd6, 0x67, 0xfa, 0x47, 0x35, 0xaf, 0x7d, 0x3d,
-    0xb1, 0x66, 0x97, 0x23, 0x09, 0xf0, 0x59, 0xbd, 0x3b, 0xda, 0xe8, 0x4d, 0x16, 0x27, 0x66, 0x47,
+    0x9c, 0x7d, 0x3b, 0x38, 0xb0, 0xdb, 0xc5, 0xa6, 0x2a, 0xe1, 0x97, 0x8c, 0xcd, 0xd4, 0xf0, 0x7c,
+    0x38, 0xd1, 0xbe, 0x4c, 0x94, 0xeb, 0xb6, 0xd1, 0xbd, 0xaf, 0x79, 0xad, 0xf2, 0x1f, 0xd9, 0xdc,
 ];
 const KNOWN_SPATIAL_DIGEST: [u8; 32] = [
-    0xa9, 0xd5, 0x50, 0xa8, 0x01, 0xda, 0x57, 0x52, 0x0c, 0xcb, 0x40, 0xaf, 0x5e, 0xcb, 0xba, 0x68,
-    0x6c, 0x1d, 0x85, 0x8a, 0x26, 0xbe, 0x94, 0xf4, 0xa9, 0x51, 0x17, 0xb9, 0x69, 0x00, 0x8a, 0x6e,
+    0x73, 0x4a, 0xb1, 0x8b, 0x33, 0x51, 0x4a, 0x08, 0xd4, 0x51, 0xf5, 0x25, 0xb4, 0xb2, 0x40, 0xd0,
+    0xa4, 0x3f, 0x40, 0x12, 0xb8, 0xcf, 0x7e, 0x55, 0x34, 0x8f, 0xc8, 0xea, 0xe6, 0x56, 0x53, 0x92,
 ];
 const KNOWN_SPATIAL_TRANSCRIPT_PREFIX_HEX: &str = concat!(
     "011e0000000000000062616f7a692e63616e6f6e6963616c2d7363656e652e736e617073686f74020100000003060000000000000073",
@@ -99,10 +100,7 @@ const EMPTY_SCENE_TRANSCRIPT_PREFIX_HEX: &str = concat!(
 const FRESH_PROFILE_TRANSCRIPT_PREFIX_HEX: &str = concat!(
     "c8ce01cb00ce00cf0000000000000000cb01ce00cf0000000000000000cb02ce00cf0000000000000000",
     "cb03ce00cf0000000000000000cb04ce00cf0000000000000000cb05ce00cf0000000000000000",
-    "cb06ce00cf0000000000000000c9cc00ce01cf0100000000000000cacc00cd0000000000000000",
-    "cb00d20100000000000000cb01d20100000000000000cb02d20100000000000000cb03d20000000000000000",
-    "cb04d20000000000000000cb05d20000000000000000cb06d20100000000000000cb07d22a00000000000000",
-    "cb08d20000000000000000c9cc01ce01cf0100000000000000cacc01cd0000000000000000",
+    "cb06ce00cf0000000000000000c9cc01ce01cf0100000000000000cacc01cd0000000000000000",
     "cb00ce01d6190000000000000066697874757265732f6e6f64652d7363656e652f696e707574cb01d001cb05d000",
     "c9cc02ce01cf0100000000000000cacc02cd0000000000000000cb00d20000000000000000",
     "cb01ce01d611000000000000006f72672e62616f7a692e66697874757265cb02d000cb03d000",
@@ -162,8 +160,8 @@ const PROFILE_MESH_INSTANCE_0_OWNER_ROW_HEX: &str = concat!(
 );
 const EMPTY_PROFILE_METADATA_TRANSCRIPT_HEX: &str = "c9cc06ce00cf0000000000000000";
 const KNOWN_POINT_GEOMETRY_DIGEST: [u8; 32] = [
-    0x63, 0xd1, 0x2a, 0x0b, 0x2a, 0x09, 0x08, 0xfd, 0x93, 0x31, 0x4e, 0xbc, 0xf6, 0x88, 0xa8, 0x94,
-    0x25, 0xd2, 0x19, 0x9e, 0xa2, 0x1a, 0x4d, 0x5a, 0x4e, 0x5a, 0xbb, 0x5f, 0x85, 0xe3, 0xa1, 0xba,
+    0xb6, 0x17, 0x73, 0x7a, 0x79, 0x37, 0x9f, 0xc6, 0xc4, 0xd9, 0xc5, 0x7d, 0xff, 0x92, 0x57, 0xcf,
+    0xb3, 0x31, 0xff, 0x13, 0xd7, 0x52, 0x4e, 0x3a, 0xff, 0x83, 0x25, 0xf3, 0x02, 0xfd, 0xb5, 0x89,
 ];
 const KNOWN_POINT_GEOMETRY_TRANSCRIPT_HEX: &str = concat!(
     "011e0000000000000062616f7a692e63616e6f6e6963616c2d7363656e652e736e617073686f74020100000003060000",
@@ -748,7 +746,6 @@ fn known_vector_is_stable_and_human_reviewable() {
     assert_eq!(snapshot.totals.deformation_mesh_instance_count, 0);
     assert_eq!(snapshot.totals.animation_clip_count, 0);
     assert_eq!(snapshot.totals.animation_channel_count, 0);
-    assert_eq!(snapshot.totals.profile_segment_count, 1);
     assert_eq!(snapshot.totals.profile_resource_count, 1);
     assert_eq!(snapshot.totals.profile_source_count, 1);
     assert_eq!(snapshot.totals.profile_provenance_node_count, 1);
@@ -758,8 +755,8 @@ fn known_vector_is_stable_and_human_reviewable() {
     assert_eq!(snapshot.totals.profile_owner_count, 3);
     assert_eq!(snapshot.totals.profile_attachment_count, 3);
     assert_eq!(snapshot.totals.profile_metadata_entry_count, 0);
-    assert_eq!(snapshot.totals.transcript_bytes, 1_134);
-    assert_eq!(snapshot.totals.work_units, 112);
+    assert_eq!(snapshot.totals.transcript_bytes, 1_009);
+    assert_eq!(snapshot.totals.work_units, 109);
     assert!(snapshot.preview.text.contains("roots(present,total=1)=[0]"));
     assert!(snapshot.preview.text.contains("transform=trs(total=10)"));
     assert!(
@@ -812,7 +809,7 @@ fn fresh_segment_nonce_is_excluded_from_the_semantic_snapshot() {
 }
 
 #[test]
-fn dropped_profile_segment_does_not_advance_parent_cursor() {
+fn profile_cursor_requires_each_global_lineage_phase_to_be_exhausted() {
     let factory = factory();
     let account = account(&factory);
     let parts = single_root_scene(&account, AuthoredTransform::identity_trs());
@@ -835,23 +832,234 @@ fn dropped_profile_segment_does_not_advance_parent_cursor() {
 
     {
         let profile = cursor.profile().expect("profile cursor");
-        let segment = profile
-            .next_segment()
-            .expect("profile segment read")
-            .expect("profile segment");
-        assert_eq!(segment.segment_index(), 0);
-        drop(segment);
-
+        assert!(profile.step_source().is_err());
+        assert!(matches!(
+            profile
+                .step_resource()
+                .expect("profile resource checkpoint"),
+            NodeSceneProfileStep::Checkpoint
+        ));
+        assert!(matches!(
+            profile.step_resource().expect("profile resource read"),
+            NodeSceneProfileStep::Item(_)
+        ));
+        assert!(profile.step_source().is_err());
+        assert!(matches!(
+            profile.step_resource().expect("profile resource end"),
+            NodeSceneProfileStep::End
+        ));
+        assert!(matches!(
+            profile.step_source().expect("profile source checkpoint"),
+            NodeSceneProfileStep::Checkpoint
+        ));
+        assert!(matches!(
+            profile.step_source().expect("profile source read"),
+            NodeSceneProfileStep::Item(_)
+        ));
         assert!(profile.next_owner().is_err());
-        let retry = profile
-            .next_segment()
-            .expect("profile segment retry")
-            .expect("profile segment retry value");
-        assert_eq!(retry.segment_index(), 0);
-        drop(retry);
     }
 
     assert!(cursor.finish().is_err());
+}
+
+#[test]
+fn profile_steps_bound_empty_segments_without_replaying_prior_domains() {
+    const EDIT_COUNT: usize = 32;
+
+    let factory = factory();
+    let account = account(&factory);
+    let NodeSceneSuccessParts { mut scene, report } =
+        single_root_scene(&account, AuthoredTransform::identity_trs());
+    drop(report);
+
+    for ordinal in 0..EDIT_COUNT {
+        let node = NodeId::new(scene.generation(), 0);
+        let NodeTransformEditStart::Changed(pending) = try_begin_node_transform_edit(
+            &scene,
+            node,
+            trs(ordinal as f32 + 1.0),
+            OptionsDigest::sha256([u8::try_from(ordinal).expect("bounded edit ordinal"); 32]),
+        )
+        .expect("bounded profile edit start") else {
+            panic!("each transform edit must append one profile segment");
+        };
+        let prepared = pending
+            .prepare(operation_limits(), OperationControl::default())
+            .expect("bounded profile edit preparation");
+        let NodeTransformEditTerminal::Success(edited) = prepared.handoff() else {
+            panic!("bounded profile edit must publish");
+        };
+        let previous = scene;
+        scene = edited.scene;
+        drop(edited.report);
+        drop(previous);
+    }
+
+    let full = capture_node_scene(
+        &scene,
+        snapshot_limits(MAX_PREVIEW_BYTES, MAX_COLLECTION_ITEMS),
+        None,
+    )
+    .expect("multi-segment profile snapshot");
+    let exact = NodeSceneSnapshotLimits::try_new(
+        MAX_PREVIEW_BYTES,
+        MAX_COLLECTION_ITEMS,
+        full.totals.work_units,
+    )
+    .expect("exact multi-segment snapshot work");
+    capture_node_scene(&scene, exact, None).expect("exact profile checkpoint budget");
+    let one_short = NodeSceneSnapshotLimits::try_new(
+        MAX_PREVIEW_BYTES,
+        MAX_COLLECTION_ITEMS,
+        full.totals
+            .work_units
+            .checked_sub(1)
+            .expect("nonzero multi-segment snapshot work"),
+    )
+    .expect("one-short multi-segment snapshot work");
+    assert!(matches!(
+        capture_node_scene(&scene, one_short, None),
+        Err(NodeSceneSnapshotError::WorkBudgetExceeded { .. })
+    ));
+
+    let view = scene.semantic_view().expect("multi-segment semantic view");
+    let mut cursor = view.into_cursor().expect("multi-segment semantic cursor");
+    let mut roots = cursor.take_roots().expect("multi-segment roots");
+    assert_eq!(roots.next().expect("multi-segment root"), Some(0));
+    assert_eq!(roots.next().expect("multi-segment root end"), None);
+    roots.finish().expect("complete multi-segment roots");
+    let node = cursor
+        .next_node()
+        .expect("multi-segment node read")
+        .expect("multi-segment node");
+    node.into_children()
+        .finish()
+        .expect("complete multi-segment node children");
+    assert!(
+        cursor
+            .next_node()
+            .expect("multi-segment node end")
+            .is_none()
+    );
+
+    {
+        let appearance = cursor.appearance().expect("multi-segment appearance");
+        assert!(appearance.next_image().expect("image end").is_none());
+        assert!(appearance.next_sampler().expect("sampler end").is_none());
+        assert!(appearance.next_texture().expect("texture end").is_none());
+        assert!(appearance.next_material().expect("material end").is_none());
+        assert!(appearance.next_binding().expect("binding end").is_none());
+    }
+    {
+        let geometry = cursor.geometry().expect("multi-segment geometry");
+        assert!(
+            geometry
+                .next_logical_mesh()
+                .expect("logical mesh end")
+                .is_none()
+        );
+        assert!(geometry.next_primitive().expect("primitive end").is_none());
+        assert!(geometry.next_attribute().expect("attribute end").is_none());
+        assert!(
+            geometry
+                .next_mesh_instance()
+                .expect("mesh instance end")
+                .is_none()
+        );
+    }
+    {
+        let deformation = cursor.deformation().expect("multi-segment deformation");
+        assert!(deformation.next_skin().expect("skin end").is_none());
+        assert!(
+            deformation
+                .next_logical_morph()
+                .expect("logical morph end")
+                .is_none()
+        );
+        assert!(
+            deformation
+                .next_morph_definition()
+                .expect("morph definition end")
+                .is_none()
+        );
+        assert!(
+            deformation
+                .next_primitive()
+                .expect("deformation primitive end")
+                .is_none()
+        );
+        assert!(
+            deformation
+                .next_morph_target()
+                .expect("morph target end")
+                .is_none()
+        );
+        assert!(
+            deformation
+                .next_morph_delta()
+                .expect("morph delta end")
+                .is_none()
+        );
+        assert!(
+            deformation
+                .next_mesh_instance()
+                .expect("deformation mesh instance end")
+                .is_none()
+        );
+    }
+    {
+        let animation = cursor.animation().expect("multi-segment animation");
+        assert!(animation.next_clip().expect("animation clip end").is_none());
+        assert!(
+            animation
+                .next_channel()
+                .expect("animation channel end")
+                .is_none()
+        );
+    }
+
+    let profile = cursor.profile().expect("multi-segment profile cursor");
+    macro_rules! drain_lineage_domain {
+        ($method:ident) => {{
+            let mut checkpoints = 0_usize;
+            let mut items = 0_usize;
+            loop {
+                match profile.$method().expect(stringify!($method)) {
+                    NodeSceneProfileStep::Checkpoint => checkpoints += 1,
+                    NodeSceneProfileStep::Item(_) => items += 1,
+                    NodeSceneProfileStep::End => break,
+                }
+            }
+            (checkpoints, items)
+        }};
+    }
+    let segment_count = EDIT_COUNT + 1;
+    assert_eq!(drain_lineage_domain!(step_resource), (segment_count, 1));
+    assert_eq!(drain_lineage_domain!(step_source), (segment_count, 1));
+    assert_eq!(
+        drain_lineage_domain!(step_provenance),
+        (segment_count, segment_count)
+    );
+    assert_eq!(drain_lineage_domain!(step_evidence), (segment_count, 0));
+    assert_eq!(
+        profile.decoded_lineage_rows_for_test(),
+        [1, 1, segment_count, 0]
+    );
+    assert_eq!(
+        profile.lineage_segment_checkpoints_for_test(),
+        [segment_count; 4]
+    );
+    while profile.next_owner().expect("profile owner read").is_some() {}
+    while profile
+        .next_metadata_entry()
+        .expect("profile metadata read")
+        .is_some()
+    {}
+    cursor.finish().expect("complete multi-segment traversal");
+
+    drop(scene);
+    assert_eq!(account.snapshot().live_retained_bytes(), 0);
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
 }
 
 #[test]
@@ -889,7 +1097,6 @@ fn changed_scene_edit_appends_snapshot_visible_profile_lineage() {
     )
     .expect("edited profile snapshot");
     assert_ne!(snapshot.digest, source_snapshot.digest);
-    assert_eq!(snapshot.totals.profile_segment_count, 2);
     assert_eq!(snapshot.totals.profile_resource_count, 1);
     assert_eq!(snapshot.totals.profile_source_count, 1);
     assert_eq!(snapshot.totals.profile_provenance_node_count, 2);
@@ -900,7 +1107,7 @@ fn changed_scene_edit_appends_snapshot_visible_profile_lineage() {
     assert_eq!(snapshot.totals.profile_attachment_count, 3);
     assert_eq!(snapshot.totals.profile_metadata_entry_count, 0);
     assert_eq!(snapshot.totals.profile_lineage_digest_bytes, 32);
-    assert!(snapshot.preview.text.contains("profile_segment[1]"));
+    assert!(snapshot.preview.text.contains("profile_provenance[1]"));
 
     drop(edited);
     drop(source);
@@ -1017,8 +1224,8 @@ fn spatial_known_vector_pins_scene_space_cameras_lights_and_attachments() {
             EMPTY_PROFILE_METADATA_TRANSCRIPT_HEX,
         ],
     );
-    assert_eq!(snapshot.totals.transcript_bytes, 1_434);
-    assert_eq!(snapshot.totals.work_units, 137);
+    assert_eq!(snapshot.totals.transcript_bytes, 1_309);
+    assert_eq!(snapshot.totals.work_units, 134);
     assert_eq!(snapshot.totals.camera_count, 1);
     assert_eq!(snapshot.totals.light_count, 1);
     assert_eq!(snapshot.totals.camera_attachment_count, 1);
@@ -1562,8 +1769,8 @@ fn matrix_and_child_known_vector_pins_node_framing_and_empty_domains() {
     assert_eq!(snapshot.totals.node_count, 2);
     assert_eq!(snapshot.totals.root_count, 1);
     assert_eq!(snapshot.totals.edge_count, 1);
-    assert_eq!(snapshot.totals.transcript_bytes, 1_315);
-    assert_eq!(snapshot.totals.work_units, 140);
+    assert_eq!(snapshot.totals.transcript_bytes, 1_190);
+    assert_eq!(snapshot.totals.work_units, 137);
 }
 
 #[test]
@@ -1615,8 +1822,8 @@ fn point_geometry_known_vector_pins_complete_scene_framing() {
     assert_eq!(snapshot.totals.canonical_scalar_count, 3);
     assert_eq!(snapshot.totals.f32_scalar_count, 3);
     assert_eq!(snapshot.totals.u32_scalar_count, 0);
-    assert_eq!(snapshot.totals.transcript_bytes, 1_996);
-    assert_eq!(snapshot.totals.work_units, 197);
+    assert_eq!(snapshot.totals.transcript_bytes, 1_871);
+    assert_eq!(snapshot.totals.work_units, 194);
     assert!(snapshot.preview.text.contains("material[0]"));
     assert!(
         snapshot
@@ -1717,14 +1924,13 @@ fn empty_scene_snapshot_is_complete_and_deterministic() {
     assert_eq!(first_snapshot.totals.deformation_mesh_instance_count, 0);
     assert_eq!(first_snapshot.totals.animation_clip_count, 0);
     assert_eq!(first_snapshot.totals.animation_channel_count, 0);
-    assert_eq!(first_snapshot.totals.profile_segment_count, 1);
     assert_eq!(first_snapshot.totals.profile_resource_count, 1);
     assert_eq!(first_snapshot.totals.profile_source_count, 1);
     assert_eq!(first_snapshot.totals.profile_provenance_node_count, 1);
     assert_eq!(first_snapshot.totals.profile_owner_count, 2);
     assert_eq!(first_snapshot.totals.profile_attachment_count, 2);
-    assert_eq!(first_snapshot.totals.transcript_bytes, 983);
-    assert_eq!(first_snapshot.totals.work_units, 90);
+    assert_eq!(first_snapshot.totals.transcript_bytes, 858);
+    assert_eq!(first_snapshot.totals.work_units, 87);
     assert!(transcript.complete);
     assert_hex_parts(
         &transcript.bytes,
@@ -1762,7 +1968,7 @@ fn geometry_tables_payload_kinds_and_totals_are_complete() {
     assert_eq!(snapshot.totals.u32_scalar_count, 3);
     assert_eq!(snapshot.totals.profile_owner_count, 15);
     assert_eq!(snapshot.totals.profile_attachment_count, 15);
-    assert_eq!(snapshot.totals.work_units, 309);
+    assert_eq!(snapshot.totals.work_units, 306);
     assert!(snapshot.preview.text.contains("payload=dense"));
     assert!(snapshot.preview.text.contains("payload=sparse"));
     assert!(snapshot.preview.text.contains("sparse_default(present"));
@@ -2334,9 +2540,9 @@ fn traversal_scales_linearly_while_preview_stays_bounded() {
         assert!(snapshot.preview.text.len() <= 64);
         assert_eq!(
             snapshot.totals.transcript_bytes,
-            983 + 151 * node_count as u64
+            858 + 151 * node_count as u64
         );
-        assert_eq!(snapshot.totals.work_units, 90 + 22 * node_count as u64);
+        assert_eq!(snapshot.totals.work_units, 87 + 22 * node_count as u64);
         assert_eq!(snapshot.totals.node_count, node_count);
         assert_eq!(snapshot.totals.root_count, 1);
         assert_eq!(snapshot.totals.edge_count, node_count - 1);

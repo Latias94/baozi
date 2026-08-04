@@ -13,7 +13,8 @@ use crate::canonical_scene::store::production::{
     SpatialAuthoringBatch,
 };
 use crate::canonical_scene::store::profile_provenance::{
-    PROFILE_PROVENANCE_ADDRESS_SCALARS, issued_profile_segment_nonce_count_for_test,
+    PROFILE_PROVENANCE_ADDRESS_SCALARS, corrupt_profile_address_for_test,
+    issued_profile_segment_nonce_count_for_test,
 };
 use crate::canonical_scene::store::schema::profile::{
     PROFILE_DIGEST_SHA256, PROFILE_OPERATION_TRANSFORM, PROFILE_PROVENANCE_OPERATION,
@@ -401,6 +402,18 @@ fn assert_no_physical_change(
     assert_eq!(account.snapshot(), before);
 }
 
+fn assert_no_live_storage_change(
+    before: PhysicalStorageAccountSnapshot,
+    account: &PhysicalStorageAccount,
+) {
+    let after = account.snapshot();
+    assert_eq!(after.live_retained_bytes(), before.live_retained_bytes());
+    assert_eq!(
+        after.live_retained_allocations(),
+        before.live_retained_allocations(),
+    );
+}
+
 #[test]
 fn unchanged_authored_bits_return_the_exact_input_without_reserving_a_generation() {
     let factory = test_factory();
@@ -625,8 +638,78 @@ fn sibling_transform_edits_preserve_the_ancestor_nonce_and_mint_distinct_branch_
     assert_ne!(right_nonce, ancestor_nonce);
     assert_ne!(left_nonce, right_nonce);
 
+    let retained_siblings = account.snapshot();
+    let NodeTransformEditStart::Changed(substituted_pending) = try_begin_node_transform_edit(
+        &original.scene,
+        node,
+        changed_trs(55.0),
+        edit_options_digest(54),
+    )
+    .expect("substituted sibling edit plan") else {
+        panic!("substituted sibling transform must be changed");
+    };
+    corrupt_profile_address_for_test(0, 1, left_nonce);
+    let substituted_prepared = substituted_pending
+        .prepare_with_generation_source(test_limits(), || {
+            SceneGenerationId::reserve_from(&generation_source)
+        })
+        .expect("substituted sibling address must prepare rich failure");
+    let super::NodeTransformEditTerminal::RichFailure(substituted_failure) =
+        substituted_prepared.handoff()
+    else {
+        panic!("substituted sibling address must fail central validation");
+    };
+    assert_eq!(
+        terminal_failure_code(substituted_failure.ledger_evidence()),
+        super::super::NODE_SCENE_BUILD_INVARIANT_CODE,
+    );
+    drop(substituted_failure);
+    assert_no_live_storage_change(retained_siblings, &account);
+
     drop(right);
     drop(left);
+    drop(original);
+    assert_eq!(account.snapshot().live_retained_bytes(), 0);
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
+}
+
+#[test]
+fn central_validation_rejects_each_corrupted_parent_address_component() {
+    let factory = test_factory();
+    let account = test_account(&factory, 512);
+    let generation_source = AtomicU64::new(0);
+    let original = build_single_trs_scene(&account, &generation_source);
+    let node = NodeId::new(original.scene.generation(), 0);
+    let retained_source = account.snapshot();
+
+    for (component, replacement) in [(0, 1), (1, u64::MAX), (2, 1), (3, 1)] {
+        let NodeTransformEditStart::Changed(pending) = try_begin_node_transform_edit(
+            &original.scene,
+            node,
+            changed_trs(57.0 + component as f32),
+            edit_options_digest(56 + component as u8),
+        )
+        .expect("corrupted parent edit plan") else {
+            panic!("corrupted parent transform must be changed");
+        };
+        corrupt_profile_address_for_test(1, component, replacement);
+
+        let prepared = pending
+            .prepare_with_generation_source(test_limits(), || {
+                SceneGenerationId::reserve_from(&generation_source)
+            })
+            .expect("corrupted parent address must prepare rich failure");
+        let super::NodeTransformEditTerminal::RichFailure(failure) = prepared.handoff() else {
+            panic!("corrupted parent address must fail central validation");
+        };
+        assert_eq!(
+            terminal_failure_code(failure.ledger_evidence()),
+            super::super::NODE_SCENE_BUILD_INVARIANT_CODE,
+        );
+        drop(failure);
+        assert_no_live_storage_change(retained_source, &account);
+    }
+
     drop(original);
     assert_eq!(account.snapshot().live_retained_bytes(), 0);
     assert_eq!(account.snapshot().live_retained_allocations(), 0);

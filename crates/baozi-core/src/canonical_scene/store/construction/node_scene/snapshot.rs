@@ -223,7 +223,6 @@ pub(in crate::canonical_scene::store) struct NodeSceneSnapshotTotals {
     pub(in crate::canonical_scene::store) animation_value_scalar_count: u64,
     pub(in crate::canonical_scene::store) animation_in_tangent_scalar_count: u64,
     pub(in crate::canonical_scene::store) animation_out_tangent_scalar_count: u64,
-    pub(in crate::canonical_scene::store) profile_segment_count: usize,
     pub(in crate::canonical_scene::store) profile_resource_count: usize,
     pub(in crate::canonical_scene::store) profile_source_count: usize,
     pub(in crate::canonical_scene::store) profile_provenance_node_count: usize,
@@ -703,7 +702,6 @@ fn capture_node_scene_with_encoder(
                 animation_value_scalar_count: animation_totals.value_scalars,
                 animation_in_tangent_scalar_count: animation_totals.in_tangent_scalars,
                 animation_out_tangent_scalar_count: animation_totals.out_tangent_scalars,
-                profile_segment_count: profile_counts.segments,
                 profile_resource_count: profile_counts.resources,
                 profile_source_count: profile_counts.sources,
                 profile_provenance_node_count: profile_counts.provenance_nodes,
@@ -2069,8 +2067,6 @@ impl PreviewSink {
         self.push_u64(animation_payloads.in_tangent_scalars);
         self.push_str(",animation_out_tangents=");
         self.push_u64(animation_payloads.out_tangent_scalars);
-        self.push_str(",profile_segments=");
-        self.push_usize(profile.segments);
         self.push_str(",profile_resources=");
         self.push_usize(profile.resources);
         self.push_str(",profile_sources=");

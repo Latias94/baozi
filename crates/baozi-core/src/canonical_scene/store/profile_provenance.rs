@@ -7,8 +7,7 @@
 //! constructs or validates that four-part address.
 
 use std::num::NonZeroU64;
-
-use crate::process_nonce::issue_process_nonce;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 pub(in crate::canonical_scene::store) const PROFILE_PROVENANCE_ADDRESS_SCALARS: usize = 4;
 pub(in crate::canonical_scene::store) const PROFILE_PROVENANCE_ADDRESS_LOGICAL_BYTES: u64 =
@@ -17,7 +16,43 @@ pub(in crate::canonical_scene::store) const PROFILE_PROVENANCE_ADDRESS_LOGICAL_B
 #[cfg(test)]
 thread_local! {
     static ISSUED_PROFILE_SEGMENT_NONCES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static FAIL_NEXT_PROFILE_SEGMENT_NONCE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static NEXT_PROFILE_ADDRESS_CORRUPTION: std::cell::Cell<Option<ProfileAddressCorruption>> = const { std::cell::Cell::new(None) };
 }
+
+#[cfg(test)]
+#[derive(Clone, Copy)]
+struct ProfileAddressCorruption {
+    addresses_to_skip: usize,
+    component: usize,
+    replacement: u64,
+}
+
+struct ProfileSegmentNonceSource {
+    next: AtomicU64,
+}
+
+impl ProfileSegmentNonceSource {
+    const fn new(next: u64) -> Self {
+        Self {
+            next: AtomicU64::new(next),
+        }
+    }
+
+    fn issue(&self) -> Result<ProfileSegmentNonce, ProfileSegmentNonceExhausted> {
+        let candidate = self
+            .next
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |candidate| {
+                NonZeroU64::new(candidate).and_then(|_| candidate.checked_add(1))
+            })
+            .map_err(|_| ProfileSegmentNonceExhausted)?;
+        NonZeroU64::new(candidate)
+            .map(ProfileSegmentNonce)
+            .ok_or(ProfileSegmentNonceExhausted)
+    }
+}
+
+static PROFILE_SEGMENT_NONCES: ProfileSegmentNonceSource = ProfileSegmentNonceSource::new(1);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(in crate::canonical_scene::store) struct ProfileSegmentNonce(NonZeroU64);
@@ -40,9 +75,12 @@ pub(in crate::canonical_scene::store) struct ProfileSegmentNonceExhausted;
 
 pub(in crate::canonical_scene::store) fn issue_profile_segment_nonce()
 -> Result<ProfileSegmentNonce, ProfileSegmentNonceExhausted> {
-    let nonce = issue_process_nonce()
-        .map(ProfileSegmentNonce)
-        .map_err(|_| ProfileSegmentNonceExhausted)?;
+    #[cfg(test)]
+    if FAIL_NEXT_PROFILE_SEGMENT_NONCE.with(|flag| flag.replace(false)) {
+        return Err(ProfileSegmentNonceExhausted);
+    }
+
+    let nonce = PROFILE_SEGMENT_NONCES.issue()?;
     #[cfg(test)]
     ISSUED_PROFILE_SEGMENT_NONCES.with(|count| count.set(count.get().saturating_add(1)));
     Ok(nonce)
@@ -51,6 +89,11 @@ pub(in crate::canonical_scene::store) fn issue_profile_segment_nonce()
 #[cfg(test)]
 pub(in crate::canonical_scene::store) fn issued_profile_segment_nonce_count_for_test() -> u64 {
     ISSUED_PROFILE_SEGMENT_NONCES.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+pub(in crate::canonical_scene::store) fn fail_next_profile_segment_nonce_for_test() {
+    FAIL_NEXT_PROFILE_SEGMENT_NONCE.with(|flag| flag.set(true));
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -88,15 +131,22 @@ impl QualifiedProvenanceAddress {
         })
     }
 
-    pub(in crate::canonical_scene::store) const fn into_scalars(
+    pub(in crate::canonical_scene::store) fn into_scalars(
         self,
     ) -> [u64; PROFILE_PROVENANCE_ADDRESS_SCALARS] {
-        [
+        let scalars = [
             self.segment_ordinal,
             self.segment_nonce.get(),
             self.local_index,
             self.global_index,
-        ]
+        ];
+        #[cfg(test)]
+        let scalars = {
+            let mut scalars = scalars;
+            apply_next_profile_address_corruption_for_test(&mut scalars);
+            scalars
+        };
+        scalars
     }
 
     pub(in crate::canonical_scene::store) fn segment_ordinal(self) -> Option<u32> {
@@ -120,6 +170,43 @@ impl QualifiedProvenanceAddress {
             && segment.provenance_base.checked_add(local) == Some(global))
         .then_some(global)
     }
+}
+
+#[cfg(test)]
+pub(in crate::canonical_scene::store) fn corrupt_profile_address_for_test(
+    addresses_to_skip: usize,
+    component: usize,
+    replacement: u64,
+) {
+    assert!(component < PROFILE_PROVENANCE_ADDRESS_SCALARS);
+    NEXT_PROFILE_ADDRESS_CORRUPTION.with(|corruption| {
+        assert!(
+            corruption
+                .replace(Some(ProfileAddressCorruption {
+                    addresses_to_skip,
+                    component,
+                    replacement,
+                }))
+                .is_none()
+        );
+    });
+}
+
+#[cfg(test)]
+fn apply_next_profile_address_corruption_for_test(
+    scalars: &mut [u64; PROFILE_PROVENANCE_ADDRESS_SCALARS],
+) {
+    NEXT_PROFILE_ADDRESS_CORRUPTION.with(|slot| {
+        let Some(mut corruption) = slot.take() else {
+            return;
+        };
+        if corruption.addresses_to_skip != 0 {
+            corruption.addresses_to_skip -= 1;
+            slot.set(Some(corruption));
+            return;
+        }
+        scalars[corruption.component] = corruption.replacement;
+    });
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -249,6 +336,26 @@ mod tests {
     }
 
     #[test]
+    fn zero_is_an_exhausted_nonce_source() {
+        assert_eq!(
+            ProfileSegmentNonceSource::new(0).issue(),
+            Err(ProfileSegmentNonceExhausted),
+        );
+    }
+
+    #[test]
+    fn issuance_stops_before_the_counter_can_wrap() {
+        let source = ProfileSegmentNonceSource::new(u64::MAX - 1);
+
+        assert_eq!(
+            source.issue().map(ProfileSegmentNonce::get),
+            Ok(u64::MAX - 1),
+        );
+        assert_eq!(source.issue(), Err(ProfileSegmentNonceExhausted));
+        assert_eq!(source.issue(), Err(ProfileSegmentNonceExhausted));
+    }
+
+    #[test]
     fn sibling_nonce_substitution_is_rejected() {
         let left_domain = ProfileSegmentAddressDomain::new(1, nonce(51), 7, 2);
         let right_domain = ProfileSegmentAddressDomain::new(1, nonce(52), 7, 2);
@@ -262,7 +369,7 @@ mod tests {
     #[test]
     fn segment_nonce_exhaustion_is_reported_without_counting_an_issuance() {
         let issued_before = issued_profile_segment_nonce_count_for_test();
-        crate::process_nonce::fail_next_process_nonce_for_test();
+        fail_next_profile_segment_nonce_for_test();
 
         assert_eq!(
             issue_profile_segment_nonce(),

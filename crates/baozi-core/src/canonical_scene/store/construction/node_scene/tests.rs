@@ -10,7 +10,9 @@ use baozi_operation::{
 use crate::FormatId;
 use crate::SceneValidationLimits;
 use crate::attribute::{AttributeDomain, AttributeSemantic};
-use crate::canonical_scene::store::construction::node_scene::semantic::NodeSceneProfileCursor;
+use crate::canonical_scene::store::construction::node_scene::semantic::{
+    NodeSceneProfileCursor, NodeSceneProfileStep,
+};
 use crate::canonical_scene::store::construction::{
     FAILURE_TERMINAL_WORK_DIMENSION, FALLBACK_CODE, OPEN_PLAN_REJECTION_CODE,
     OPEN_RESOURCE_REJECTION_CODE, STORE_DIMENSION, SceneConstructionLimits,
@@ -27,7 +29,9 @@ use crate::canonical_scene::store::production::{
     ProvenanceNodeAuthoring, ResourceIdentityLocalId, SceneAuthoringBatch, SessionOpaqueReason,
     SourceIdentityAuthoring, SourceIdentityLocalId, SpatialAuthoringBatch, SpatialAuthoringFailure,
 };
-use crate::canonical_scene::store::profile_provenance::PROFILE_PROVENANCE_ADDRESS_SCALARS;
+use crate::canonical_scene::store::profile_provenance::{
+    PROFILE_PROVENANCE_ADDRESS_SCALARS, corrupt_profile_address_for_test,
+};
 use crate::entity::AuthoredTransform;
 use crate::identity::{SceneGenerationError, SceneGenerationId};
 use crate::math::{Mat4, Quat, Vec3};
@@ -47,31 +51,22 @@ mod gltf_capability;
 mod obj_capability;
 
 fn exhaust_profile_for_test(profile: &mut NodeSceneProfileCursor<'_>) {
-    while let Some(mut segment) = profile.next_segment().expect("profile segment read") {
-        while segment
-            .next_resource()
-            .expect("profile resource read")
-            .is_some()
-        {}
-        while segment
-            .next_source()
-            .expect("profile source read")
-            .is_some()
-        {}
-        while segment
-            .next_provenance()
-            .expect("profile provenance read")
-            .is_some()
-        {}
-        while segment
-            .next_evidence()
-            .expect("profile evidence read")
-            .is_some()
-        {}
-        segment
-            .finish()
-            .expect("complete profile segment traversal");
-    }
+    while !matches!(
+        profile.step_resource().expect("profile resource step"),
+        NodeSceneProfileStep::End
+    ) {}
+    while !matches!(
+        profile.step_source().expect("profile source step"),
+        NodeSceneProfileStep::End
+    ) {}
+    while !matches!(
+        profile.step_provenance().expect("profile provenance step"),
+        NodeSceneProfileStep::End
+    ) {}
+    while !matches!(
+        profile.step_evidence().expect("profile evidence step"),
+        NodeSceneProfileStep::End
+    ) {}
     while profile.next_owner().expect("profile owner read").is_some() {}
     while profile
         .next_metadata_entry()
@@ -1348,6 +1343,31 @@ fn invalid_authored_transform_fault_is_a_build_invariant_rich_failure() {
         NODE_SCENE_BUILD_INVARIANT_CODE
     );
     assert_released(failure, &account);
+}
+
+#[test]
+fn central_validation_rejects_each_corrupted_owner_attachment_component() {
+    let factory = test_factory();
+    let account = test_account(&factory, 256);
+
+    for (component, replacement) in [(0, 1), (1, u64::MAX), (2, 1), (3, 1)] {
+        let validated = SceneConstructionOperation::with_account(&account, test_limits())
+            .expect("profile-address corruption operation")
+            .try_validate_node_batch(single_trs_batch(), SceneValidationLimits::default())
+            .unwrap_or_else(|_| panic!("single-node input must validate"));
+        corrupt_profile_address_for_test(0, component, replacement);
+
+        let failure = rich_failure(
+            validated
+                .prepare_with_faults(NodeSceneBuildFaults::none())
+                .expect("corrupted owner attachment must prepare rich failure"),
+        );
+        assert_eq!(
+            terminal_failure_code(failure.ledger_evidence()),
+            NODE_SCENE_BUILD_INVARIANT_CODE,
+        );
+        assert_released(failure, &account);
+    }
 }
 
 #[test]

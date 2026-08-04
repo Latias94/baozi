@@ -36,8 +36,8 @@ pub(in crate::canonical_scene::store) use profile::{
     NodeSceneProfileMetadataEntry, NodeSceneProfileMetadataValue, NodeSceneProfileOperation,
     NodeSceneProfileOperationKind, NodeSceneProfileOwner, NodeSceneProfileProvenance,
     NodeSceneProfileProvenanceIndices, NodeSceneProfileProvenanceKind, NodeSceneProfileResource,
-    NodeSceneProfileResourceStability, NodeSceneProfileSegmentCursor, NodeSceneProfileSource,
-    NodeSceneProfileSourceLocator,
+    NodeSceneProfileResourceStability, NodeSceneProfileSource, NodeSceneProfileSourceLocator,
+    NodeSceneProfileStep,
 };
 pub(in crate::canonical_scene::store) use spatial::{
     NodeSceneSpatialCamera, NodeSceneSpatialLight, NodeSceneSpatialPlacementCursor,
