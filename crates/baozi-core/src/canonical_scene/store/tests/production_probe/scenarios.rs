@@ -665,6 +665,9 @@ pub(super) fn collect_gltf_capability() -> GltfCapabilityReport {
     let edit_output_generation = output.scene.generation();
     let edit_generation_reservations_after = generation_source.load(Ordering::Relaxed);
     let edit_canonical_block_count_after = output.scene.canonical_block_count();
+    let edit_canonical_block_count_delta = edit_canonical_block_count_after
+        .checked_sub(edit_canonical_block_count_before)
+        .expect("changed glTF edit cannot remove canonical blocks");
     let edit_output_shape = inspect_gltf_capability_semantics_with_first_transform_for_probe(
         &output.scene,
         edit_replacement,
@@ -785,10 +788,7 @@ pub(super) fn collect_gltf_capability() -> GltfCapabilityReport {
     assert!(generation_changed);
     assert_eq!(edit_generation_reservations_before, 1);
     assert_eq!(edit_generation_reservations_after, 2);
-    assert_eq!(
-        edit_canonical_block_count_after,
-        edit_canonical_block_count_before,
-    );
+    assert!(edit_canonical_block_count_delta > 0);
     assert!(all_subjects_explicitly_unchanged);
     assert!(target_rebind_matches);
     assert_eq!(remap_storage_bytes, 0);

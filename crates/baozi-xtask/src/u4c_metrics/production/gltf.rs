@@ -50,6 +50,7 @@ struct ChangedSceneEditSpecification {
     entry_point: String,
     scenario_id: String,
     output_snapshot_digest_hex: String,
+    canonical_block_count_delta: u64,
     semantic_cells: u64,
     references: u64,
     blocks: u64,
@@ -222,6 +223,22 @@ pub(super) fn validate_specification(
     else {
         return Err("U4d changed SceneEdit lookup envelope overflowed".to_owned());
     };
+    let Some(changed_edit_canonical_block_count_after) = specification
+        .canonical_block_count
+        .checked_add(changed_edit.canonical_block_count_delta)
+    else {
+        return Err("U4d changed SceneEdit canonical block count overflowed".to_owned());
+    };
+    let Some(changed_edit_published_outcome_evidence) =
+        specification.outcome_evidence_block_count.checked_add(1)
+    else {
+        return Err("U4d changed SceneEdit outcome evidence count overflowed".to_owned());
+    };
+    let Some(changed_edit_published_block_count) = changed_edit_canonical_block_count_after
+        .checked_add(specification.outcome_evidence_block_count)
+    else {
+        return Err("U4d changed SceneEdit published block count overflowed".to_owned());
+    };
     if specification.entry_point != "backend-free-gltf-shape"
         || specification.scenario_id != "backend-free-gltf-shape-v1"
         || source.node_count != 3
@@ -328,6 +345,7 @@ pub(super) fn validate_specification(
         || changed_edit.scenario_id != "canonical-gltf-node-transform-edit-v1"
         || !is_lowercase_sha256(&changed_edit.output_snapshot_digest_hex)
         || changed_edit.output_snapshot_digest_hex == specification.full_snapshot_digest_hex
+        || changed_edit.canonical_block_count_delta == 0
         || changed_edit.semantic_cells == 0
         || changed_edit.references == 0
         || changed_edit.blocks == 0
@@ -337,6 +355,7 @@ pub(super) fn validate_specification(
             .new_blocks
             .checked_add(changed_edit.inherited_blocks)
             != Some(changed_edit.blocks)
+        || changed_edit.blocks != changed_edit_published_block_count
         || changed_edit.producer_events == 0
         || changed_edit.completed_lookups == 0
         || changed_edit.lookup_events != changed_edit_maximum_lookup_events
@@ -345,10 +364,11 @@ pub(super) fn validate_specification(
         || changed_edit.max_member_probes_per_lookup != 1
         || !changed_edit.budget.is_well_formed()
         || !changed_edit.snapshot_budget.is_well_formed()
-        || changed_edit_dimensions.ordinary.committed == 0
+        || changed_edit_dimensions.ordinary.committed != changed_edit_canonical_block_count_after
         || changed_edit_dimensions.ordinary.committed_canonical_output
-            != changed_edit_dimensions.ordinary.committed
-        || changed_edit_dimensions.ordinary.published_outcome_evidence == 0
+            != changed_edit_canonical_block_count_after
+        || changed_edit_dimensions.ordinary.published_outcome_evidence
+            != changed_edit_published_outcome_evidence
         || changed_edit.physical_account.with_output_live_bytes <= specification.retained_bytes
         || changed_edit.physical_account.with_output_live_allocations
             <= specification.retained_allocations
@@ -702,6 +722,18 @@ fn validate_changed_scene_edit(
     )?;
     let exact_dimensions_match = actual_dimensions.ordinary == expected_dimensions.ordinary
         && actual_dimensions.failure_terminal == expected_dimensions.failure_terminal;
+    let expected_canonical_block_count_after = expected
+        .canonical_block_count
+        .checked_add(expected_edit.canonical_block_count_delta)
+        .ok_or_else(|| {
+            "U4c production glTF changed edit canonical block count overflowed".to_owned()
+        })?;
+    let expected_published_block_count = edit
+        .canonical_block_count_after
+        .checked_add(edit.outcome_evidence_block_count)
+        .ok_or_else(|| {
+            "U4c production glTF changed edit published block count overflowed".to_owned()
+        })?;
     if edit.entry_point != expected_edit.entry_point
         || edit.scenario_id != expected_edit.scenario_id
         || edit.output_shape != report.canonical_shape
@@ -723,7 +755,11 @@ fn validate_changed_scene_edit(
                     "U4c production glTF changed edit generation count overflowed".to_owned()
                 })?
         || edit.canonical_block_count_before != expected.canonical_block_count
-        || edit.canonical_block_count_after != expected.canonical_block_count
+        || edit
+            .canonical_block_count_after
+            .checked_sub(edit.canonical_block_count_before)
+            != Some(expected_edit.canonical_block_count_delta)
+        || edit.canonical_block_count_after != expected_canonical_block_count_after
         || !edit.all_subjects_explicitly_unchanged
         || !edit.target_rebind_matches
         || edit.remap_storage_bytes != 0
@@ -742,7 +778,7 @@ fn validate_changed_scene_edit(
     validate_success_evidence(
         &specification.ledger_contract,
         &edit.evidence,
-        expected.canonical_block_count,
+        expected_canonical_block_count_after,
         "U4c production glTF changed SceneEdit",
     )?;
 
@@ -750,6 +786,7 @@ fn validate_changed_scene_edit(
     if edit.phase.scenario_id != edit.scenario_id
         || taxonomy.semantic_cell_writes != expected_edit.semantic_cells
         || taxonomy.reference_writes != expected_edit.references
+        || taxonomy.block_begins != expected_published_block_count
         || taxonomy.block_begins != expected_edit.blocks
         || taxonomy.block_seals != expected_edit.blocks
         || taxonomy.slot_publications != expected_edit.blocks
@@ -1021,9 +1058,18 @@ mod tests {
 
     #[test]
     fn rejects_changed_scene_edit_copy_and_mapping_drift() {
+        let mut delta_drift = managed_specification();
+        delta_drift.changed_scene_edit.canonical_block_count_delta += 1;
+        assert_rejected(&delta_drift);
+
         let mut block_drift = managed_specification();
         block_drift.changed_scene_edit.inherited_blocks -= 1;
         assert_rejected(&block_drift);
+
+        let mut unowned_block_drift = managed_specification();
+        unowned_block_drift.changed_scene_edit.blocks += 1;
+        unowned_block_drift.changed_scene_edit.new_blocks += 1;
+        assert_rejected(&unowned_block_drift);
 
         let mut lookup_drift = managed_specification();
         lookup_drift.changed_scene_edit.lookup_events -= 1;
@@ -1052,6 +1098,16 @@ mod tests {
             .expect("managed changed SceneEdit ordinary dimension");
         ordinary.semantic_id_hex = "00".to_owned();
         assert_rejected(&ledger_drift);
+
+        let mut outcome_evidence_drift = managed_specification();
+        let ordinary = outcome_evidence_drift
+            .changed_scene_edit
+            .ledger_dimensions
+            .iter_mut()
+            .find(|dimension| dimension.role == super::super::LedgerDimensionRole::Ordinary)
+            .expect("managed changed SceneEdit ordinary dimension");
+        ordinary.published_outcome_evidence += 1;
+        assert_rejected(&outcome_evidence_drift);
 
         let mut protected_drift = managed_specification();
         let failure_terminal = protected_drift
