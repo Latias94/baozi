@@ -14,7 +14,7 @@ pub(in super::super) const PROFILE_DIRECTORY_FIELD_COUNT: usize = 6;
 pub(in super::super) const PROFILE_SEGMENT_FIELD_COUNT: usize = 21;
 pub(in super::super) const PROFILE_OWNER_FIELD_COUNT: usize = 5;
 pub(in super::super) const PROFILE_METADATA_DIRECTORY_FIELD_COUNT: usize = 17;
-pub(in super::super) const PROFILE_METADATA_ENTRY_FIELD_COUNT: usize = 21;
+pub(in super::super) const PROFILE_METADATA_ENTRY_FIELD_COUNT: usize = 20;
 pub(in super::super) const PROFILE_RESOURCE_SCALAR_COUNT: usize = 9;
 pub(in super::super) const PROFILE_SOURCE_SCALAR_COUNT: usize = 19;
 pub(in super::super) const PROFILE_PROVENANCE_SCALAR_COUNT: usize = 5;
@@ -29,7 +29,7 @@ pub(in super::super) const PROFILE_SEGMENT_LOGICAL_BYTES: u64 =
 pub(in super::super) const PROFILE_OWNER_LOGICAL_BYTES: u64 = 1 + (4 * 4);
 pub(in super::super) const PROFILE_METADATA_DIRECTORY_LOGICAL_BYTES: u64 =
     PROFILE_METADATA_DIRECTORY_FIELD_COUNT as u64 * 4;
-pub(in super::super) const PROFILE_METADATA_ENTRY_LOGICAL_BYTES: u64 = 3 + (11 * 4) + (7 * 4);
+pub(in super::super) const PROFILE_METADATA_ENTRY_LOGICAL_BYTES: u64 = 3 + (10 * 4) + (7 * 4);
 
 /// Zero is the only valid scalar encoding for an absent optional block reference.
 pub(in super::super) const PROFILE_ABSENT_REFERENCE: u8 = 0;
@@ -280,8 +280,7 @@ pub(in super::super) mod profile_metadata_directory_field {
 ///
 /// `logical_element_count` preserves present-empty values independently from
 /// the selected lane range. For a dense vector array it counts vectors, while
-/// the f32 scalar range counts physical lanes. `PROVENANCE_INDEX` is a
-/// generation-wide provenance ordinal.
+/// the f32 scalar range counts physical lanes.
 pub(in super::super) mod profile_metadata_entry_field {
     pub(crate) const OWNER_KIND: usize = 0;
     pub(crate) const OWNER_INDEX: usize = 1;
@@ -303,7 +302,6 @@ pub(in super::super) mod profile_metadata_entry_field {
     pub(crate) const U64_VALUES: usize = 17;
     pub(crate) const F64_VALUES: usize = 18;
     pub(crate) const F32_VALUES: usize = 19;
-    pub(crate) const PROVENANCE_INDEX: usize = 20;
 }
 
 const _: [(); PROFILE_DIRECTORY_FIELD_COUNT] = [(); profile_directory_field::METADATA + 1];
@@ -312,7 +310,7 @@ const _: [(); PROFILE_OWNER_FIELD_COUNT] = [(); profile_owner_field::ATTACHMENTS
 const _: [(); PROFILE_METADATA_DIRECTORY_FIELD_COUNT] =
     [(); profile_metadata_directory_field::F32_VALUES + 1];
 const _: [(); PROFILE_METADATA_ENTRY_FIELD_COUNT] =
-    [(); profile_metadata_entry_field::PROVENANCE_INDEX + 1];
+    [(); profile_metadata_entry_field::F32_VALUES + 1];
 const _: [(); PROFILE_RESOURCE_SCALAR_COUNT] =
     [(); profile_resource_scalar::SESSION_OPAQUE_REASON + 1];
 const _: [(); PROFILE_SOURCE_SCALAR_COUNT] = [(); profile_source_scalar::CONTENT_DIGEST_COUNT + 1];

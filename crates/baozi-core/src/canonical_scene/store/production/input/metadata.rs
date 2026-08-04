@@ -1,15 +1,14 @@
 use crate::extension::ExtensionValueRef;
 use crate::namespaced::NamespacedName;
 
-use super::lineage::{ProfileOwner, ProvenanceLocalId};
+use super::lineage::ProfileOwner;
 
-/// One provenance-bearing descriptive metadata entry for a canonical owner.
+/// One descriptive metadata entry for a canonical owner.
 #[derive(Debug, Clone, Copy)]
 pub(in crate::canonical_scene::store) struct MetadataAuthoringEntry<'input> {
     owner: ProfileOwner,
     key: &'input NamespacedName,
     value: ExtensionValueRef<'input>,
-    provenance: ProvenanceLocalId,
 }
 
 impl<'input> MetadataAuthoringEntry<'input> {
@@ -17,14 +16,8 @@ impl<'input> MetadataAuthoringEntry<'input> {
         owner: ProfileOwner,
         key: &'input NamespacedName,
         value: ExtensionValueRef<'input>,
-        provenance: ProvenanceLocalId,
     ) -> Self {
-        Self {
-            owner,
-            key,
-            value,
-            provenance,
-        }
+        Self { owner, key, value }
     }
 
     pub(in crate::canonical_scene::store) const fn owner(self) -> ProfileOwner {
@@ -37,10 +30,6 @@ impl<'input> MetadataAuthoringEntry<'input> {
 
     pub(in crate::canonical_scene::store) const fn value(self) -> ExtensionValueRef<'input> {
         self.value
-    }
-
-    pub(in crate::canonical_scene::store) const fn provenance(self) -> ProvenanceLocalId {
-        self.provenance
     }
 }
 

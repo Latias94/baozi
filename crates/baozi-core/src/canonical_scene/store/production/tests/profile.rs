@@ -266,7 +266,6 @@ fn full_profile_preserves_identity_lineage_owners_and_metadata() {
         ProfileOwner::Node(NodeLocalId::new(0)),
         &vocabulary().metadata_key,
         ExtensionValueRef::F64(2.0),
-        SOURCE_PROVENANCE,
     )];
 
     let validated = validate_profile_batch_with_control(
@@ -333,7 +332,6 @@ fn full_profile_preserves_identity_lineage_owners_and_metadata() {
     assert_eq!(metadata.owner(), CanonicalProfileOwner::Node(1));
     assert_eq!(metadata.key().as_str(), "gltf:generator_version");
     assert_eq!(metadata.value(), ExtensionValueRef::F64(2.0));
-    assert_eq!(metadata.provenance(), SOURCE_PROVENANCE);
 
     drop(validated);
     drop(domains);
@@ -596,13 +594,11 @@ fn duplicate_metadata_keys_and_non_finite_values_are_rejected() {
             ProfileOwner::Scene,
             &vocabulary().metadata_key,
             ExtensionValueRef::U64(1),
-            SOURCE_PROVENANCE,
         ),
         MetadataAuthoringEntry::new(
             ProfileOwner::Scene,
             &vocabulary().metadata_key,
             ExtensionValueRef::U64(2),
-            SOURCE_PROVENANCE,
         ),
     ];
 
@@ -624,7 +620,6 @@ fn duplicate_metadata_keys_and_non_finite_values_are_rejected() {
         ProfileOwner::Scene,
         &vocabulary().metadata_key,
         ExtensionValueRef::F64(f64::NAN),
-        SOURCE_PROVENANCE,
     )];
     let non_finite = validate_profile_batch_with_control(
         LineageAuthoringBatch::new(&resources, &sources, &provenance, &owner_rows),
@@ -656,7 +651,6 @@ fn duplicate_metadata_keys_and_non_finite_values_are_rejected() {
         ProfileOwner::Scene,
         &vector_key,
         ExtensionValueRef::DenseArray(ExtensionArrayRef::Vec3(&vectors)),
-        SOURCE_PROVENANCE,
     )];
     let dense = validate_profile_batch_with_control(
         LineageAuthoringBatch::new(&resources, &sources, &provenance, &owner_rows),
@@ -692,29 +686,17 @@ fn metadata_owner_buckets_are_linear_and_owner_local_keys_must_be_ordered() {
     let first_key = NamespacedName::new("gltf:first").expect("metadata key must be canonical");
     let second_key = NamespacedName::new("gltf:second").expect("metadata key must be canonical");
     let interleaved = [
-        MetadataAuthoringEntry::new(
-            ProfileOwner::Scene,
-            &first_key,
-            ExtensionValueRef::U64(1),
-            SOURCE_PROVENANCE,
-        ),
+        MetadataAuthoringEntry::new(ProfileOwner::Scene, &first_key, ExtensionValueRef::U64(1)),
         MetadataAuthoringEntry::new(
             ProfileOwner::Node(NodeLocalId::new(0)),
             &first_key,
             ExtensionValueRef::U64(2),
-            SOURCE_PROVENANCE,
         ),
-        MetadataAuthoringEntry::new(
-            ProfileOwner::Scene,
-            &second_key,
-            ExtensionValueRef::U64(3),
-            SOURCE_PROVENANCE,
-        ),
+        MetadataAuthoringEntry::new(ProfileOwner::Scene, &second_key, ExtensionValueRef::U64(3)),
         MetadataAuthoringEntry::new(
             ProfileOwner::Node(NodeLocalId::new(0)),
             &second_key,
             ExtensionValueRef::U64(4),
-            SOURCE_PROVENANCE,
         ),
     ];
     let lineage = LineageAuthoringBatch::new(&resources, &sources, &provenance, &owner_rows);
@@ -746,18 +728,8 @@ fn metadata_owner_buckets_are_linear_and_owner_local_keys_must_be_ordered() {
     drop(validated);
 
     let reversed = [
-        MetadataAuthoringEntry::new(
-            ProfileOwner::Scene,
-            &second_key,
-            ExtensionValueRef::U64(1),
-            SOURCE_PROVENANCE,
-        ),
-        MetadataAuthoringEntry::new(
-            ProfileOwner::Scene,
-            &first_key,
-            ExtensionValueRef::U64(2),
-            SOURCE_PROVENANCE,
-        ),
+        MetadataAuthoringEntry::new(ProfileOwner::Scene, &second_key, ExtensionValueRef::U64(1)),
+        MetadataAuthoringEntry::new(ProfileOwner::Scene, &first_key, ExtensionValueRef::U64(2)),
     ];
     let rejected = validate_profile_batch_with_control(
         lineage,
@@ -797,7 +769,6 @@ fn exact_canonical_limit_succeeds_and_one_over_is_rejected() {
         ProfileOwner::Scene,
         &vocabulary().metadata_key,
         ExtensionValueRef::String("2.0"),
-        SOURCE_PROVENANCE,
     )];
     let lineage = LineageAuthoringBatch::new(&resources, &sources, &provenance, &owner_rows);
     let metadata = MetadataAuthoringBatch::new(&metadata);

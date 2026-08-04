@@ -186,6 +186,13 @@ pub(super) struct ProfileFixture {
 
 impl ProfileFixture {
     pub(super) fn batch(&self) -> ProfileAuthoringBatch<'_> {
+        self.batch_with_metadata(MetadataAuthoringBatch::empty())
+    }
+
+    pub(super) fn batch_with_metadata<'fixture>(
+        &'fixture self,
+        metadata: MetadataAuthoringBatch<'fixture>,
+    ) -> ProfileAuthoringBatch<'fixture> {
         ProfileAuthoringBatch::new(
             LineageAuthoringBatch::new(
                 &self.resources,
@@ -193,7 +200,7 @@ impl ProfileFixture {
                 &self.provenance,
                 &self.owners,
             ),
-            MetadataAuthoringBatch::empty(),
+            metadata,
         )
     }
 }

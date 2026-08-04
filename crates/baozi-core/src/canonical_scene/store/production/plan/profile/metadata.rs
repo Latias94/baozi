@@ -3,7 +3,6 @@ use super::*;
 pub(super) fn validate_metadata<C, R>(
     metadata: MetadataAuthoringBatch<'_>,
     owners: ProfileOwnerCatalog<'_>,
-    provenance_count: u32,
     limits: SceneValidationLimits,
     storage: &mut ProfileValidationStorage<R>,
     metrics: &mut ProfileMetrics,
@@ -83,7 +82,6 @@ where
     for (input_index, entry) in metadata.entries().iter().copied().enumerate() {
         context.work(SceneValidationWork::MetadataEntry, 1)?;
         let (owner, owner_ordinal) = owners.normalize(entry.owner())?;
-        require_provenance(entry.provenance(), provenance_count, "metadata entry")?;
         let key_bytes = usize_to_u64(entry.key().as_str().len(), "metadata key bytes")?;
         enforce_limit::<C::Error>(
             ProfileAuthoringLimit::MetadataKeyBytes,

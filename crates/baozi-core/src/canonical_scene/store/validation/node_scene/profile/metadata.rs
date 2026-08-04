@@ -3,7 +3,6 @@ use super::*;
 pub(super) fn validate_metadata<R>(
     session: &mut StoreValidationSession<'_, '_>,
     directory_ref: CanonicalRecordRef<ProfileMetadataDirectorySchema>,
-    provenance_count: u32,
     owner_classes: ProfileOwnerClassCounts,
     expected: Option<&ValidatedProfileBatch<'_, R>>,
     observe_work: &mut impl FnMut(u64) -> Option<()>,
@@ -222,13 +221,6 @@ pub(super) fn validate_metadata<R>(
             expected_entry.map(|entry| entry.value()),
             observe_work,
         )?;
-        let provenance =
-            row.scalar::<u32>(row_index, profile_metadata_entry_field::PROVENANCE_INDEX)?;
-        if provenance >= provenance_count
-            || expected_entry.is_some_and(|entry| provenance != entry.provenance().index())
-        {
-            return None;
-        }
     }
     if cursors.text != text_count
         || cursors.bytes != byte_count

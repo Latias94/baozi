@@ -95,8 +95,7 @@ const METADATA_ARRAY_ELEMENT_KIND: u8 = 4;
 const METADATA_LOGICAL_ELEMENT_COUNT: u8 = 5;
 const METADATA_VALUE: u8 = 6;
 const METADATA_MEDIA_TYPE: u8 = 7;
-const METADATA_PROVENANCE: u8 = 8;
-const METADATA_ARRAY_STORAGE_KIND: u8 = 9;
+const METADATA_ARRAY_STORAGE_KIND: u8 = 8;
 
 const PROFILE_METADATA_TEXT_LANE: u8 = 0;
 const PROFILE_METADATA_BYTE_LANE: u8 = 1;
@@ -706,14 +705,12 @@ fn write_metadata_entry(
     write_u32_field(transcript, work, METADATA_OWNER_INDEX, owner_index)?;
     write_bytes_field(transcript, work, METADATA_KEY, entry.key().as_bytes())?;
     let value_kind = write_metadata_value(entry.value(), transcript, work)?;
-    write_usize_field(transcript, work, METADATA_PROVENANCE, entry.provenance())?;
 
     let render = preview.begin_geometry_item("profile_metadata", ordinal)?;
     preview.geometry_field_u32(render, "owner_kind", u32::from(owner_kind));
     preview.geometry_field_u32(render, "owner_index", owner_index);
     preview.geometry_field_usize(render, "key_bytes", entry.key().len());
     preview.geometry_field_u32(render, "value_kind", u32::from(value_kind));
-    preview.geometry_field_usize(render, "provenance", entry.provenance());
     preview.end_geometry_item(render);
     Ok(())
 }

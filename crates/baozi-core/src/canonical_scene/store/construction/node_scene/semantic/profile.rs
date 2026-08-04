@@ -898,24 +898,11 @@ impl<'scene> NodeSceneProfileCursor<'scene> {
             scalar_offset,
             scalar_count,
         )?;
-        let provenance = read_u32_as_usize(
-            entries,
-            row,
-            profile_metadata_entry_field::PROVENANCE_INDEX,
-            "validated profile metadata provenance index is unreadable",
-        )?;
-        if provenance >= self.tables.lineage_counts.provenance {
-            return Err(invariant(
-                "validated profile metadata provenance is outside provenance space",
-            ));
-        }
 
         self.next_metadata_entry = advance(row, "profile metadata cursor index overflows")?;
         self.previous_metadata_owner = Some(owner);
         self.previous_metadata_key = Some(key);
-        Ok(Some(NodeSceneProfileMetadataEntry::new(
-            owner, key, value, provenance,
-        )))
+        Ok(Some(NodeSceneProfileMetadataEntry::new(owner, key, value)))
     }
 
     pub(in crate::canonical_scene::store) fn finish(mut self) -> NodeSceneSemanticResult<()> {

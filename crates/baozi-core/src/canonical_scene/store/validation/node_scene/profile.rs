@@ -361,14 +361,7 @@ fn validate_profile_structure<R>(
 
     let metadata_ref = directory
         .record_ref::<ProfileMetadataDirectorySchema>(0, profile_directory_field::METADATA)?;
-    let metadata = validate_metadata(
-        session,
-        metadata_ref,
-        totals.provenance,
-        owner_classes,
-        expected,
-        observe_work,
-    )?;
+    let metadata = validate_metadata(session, metadata_ref, owner_classes, expected, observe_work)?;
     let metadata_shareable_leaf_count = u32::try_from(
         [
             metadata.text.is_some(),

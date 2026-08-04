@@ -6,7 +6,10 @@ use baozi_operation::{
 use crate::SceneValidationLimits;
 use crate::appearance::{AlphaMode, MaterialFactors, MaterialSemanticsRef, ShadingModel};
 use crate::attribute::{AttributeDomain, AttributeSemantic};
-use crate::canonical_scene::store::construction::node_scene::semantic::NodeSceneProfileStep;
+use crate::canonical_scene::store::construction::node_scene::semantic::{
+    NodeSceneProfileCursor, NodeSceneProfileMetadataArray, NodeSceneProfileMetadataArrayKind,
+    NodeSceneProfileMetadataValue, NodeSceneProfileStep,
+};
 use crate::canonical_scene::store::construction::node_scene::{
     NodeSceneConstructionTerminal, NodeSceneSuccessParts, ValidatedNodeScene,
 };
@@ -15,18 +18,22 @@ use crate::canonical_scene::store::construction::{
 };
 use crate::canonical_scene::store::production::{
     AnimationAuthoringBatch, AppearanceAuthoringBatch, AuthoringRange, CameraAuthoring,
-    CameraLocalId, DeformationAuthoringBatch, GeometryAttributeAuthoring, GeometryAuthoringBatch,
-    GeometryLogicalMeshAuthoring, GeometryMeshInstanceAuthoring, GeometryPrimitiveAuthoring,
-    GeometryTopologyAuthoring, LightAuthoring, LightLocalId, LogicalMeshLocalId,
-    LogicalMorphAuthoring, MaterialAuthoring, MaterialLocalId, MeshInstanceDeformationAuthoring,
+    CameraLocalId, CanonicalProfileOwner, DeformationAuthoringBatch, GeometryAttributeAuthoring,
+    GeometryAuthoringBatch, GeometryLogicalMeshAuthoring, GeometryMeshInstanceAuthoring,
+    GeometryPrimitiveAuthoring, GeometryTopologyAuthoring, LightAuthoring, LightLocalId,
+    LogicalMeshLocalId, LogicalMorphAuthoring, MaterialAuthoring, MaterialLocalId,
+    MeshInstanceDeformationAuthoring, MetadataAuthoringBatch, MetadataAuthoringEntry,
     NodeAuthoringBatch, NodeAuthoringNode, NodeLocalId, NodeParent, Presence,
-    PrimitiveDeformationAuthoring, SceneAuthoringBatch, SpatialAuthoringBatch,
+    PrimitiveDeformationAuthoring, ProfileOwner, SceneAuthoringBatch, SpatialAuthoringBatch,
 };
 use crate::canonical_scene::store::schema::profile::profile_segment_field;
 use crate::entity::{AuthoredTransform, CameraProjection, LightEmission, LightKind};
-use crate::extension::ExtensionSchemaId;
+use crate::extension::{
+    ExtensionArrayRef, ExtensionMediaType, ExtensionSchemaId, ExtensionValueRef,
+};
 use crate::identity::NodeId;
-use crate::math::{Color, Mat4, Quat, Vec3};
+use crate::math::{Color, Mat4, Quat, Vec2, Vec3, Vec4};
+use crate::namespaced::NamespacedName;
 use crate::provenance::OptionsDigest;
 use crate::scene_space::{
     Axis, FrontFaceWinding, Handedness, SceneSpace, TangentBasisConvention,
@@ -46,6 +53,10 @@ use super::{
 const KNOWN_SINGLE_TRS_DIGEST: [u8; 32] = [
     0x66, 0x2f, 0x11, 0x9f, 0x56, 0x4f, 0xe1, 0x52, 0x61, 0xe4, 0x76, 0xe9, 0x29, 0x71, 0x7a, 0x74,
     0xc8, 0xd0, 0xea, 0x61, 0xa9, 0x13, 0xf8, 0x38, 0x2d, 0x82, 0x21, 0x0c, 0xd9, 0x28, 0x14, 0x28,
+];
+const KNOWN_GENERIC_METADATA_DIGEST: [u8; 32] = [
+    0x4b, 0xa1, 0x44, 0xc1, 0x99, 0x93, 0xa2, 0xdb, 0x94, 0xa0, 0x0a, 0x78, 0x4d, 0x3e, 0xde, 0x07,
+    0xd5, 0x27, 0xc4, 0xdb, 0xc8, 0x37, 0xca, 0x27, 0x5d, 0x72, 0xef, 0xcd, 0x21, 0xf3, 0x74, 0x37,
 ];
 // Known vectors are factored at canonical domain and owner-row boundaries, but every
 // assertion still compares the complete transcript byte for byte.
@@ -211,6 +222,107 @@ fn capture_node_scene(
     scene.capture_snapshot(limits, cancellation)
 }
 
+fn inspect_single_node_profile(
+    scene: &ValidatedNodeScene,
+    inspect: impl FnOnce(&mut NodeSceneProfileCursor<'_>),
+) {
+    let view = scene.semantic_view().expect("metadata semantic view");
+    let mut cursor = view.into_cursor().expect("metadata semantic cursor");
+    let mut roots = cursor.take_roots().expect("metadata roots");
+    assert_eq!(roots.next().expect("metadata root"), Some(0));
+    assert_eq!(roots.next().expect("metadata root end"), None);
+    roots.finish().expect("complete metadata roots");
+    let node = cursor
+        .next_node()
+        .expect("metadata node read")
+        .expect("metadata node");
+    node.into_children()
+        .finish()
+        .expect("complete metadata node children");
+    assert!(cursor.next_node().expect("metadata node end").is_none());
+
+    {
+        let appearance = cursor.appearance().expect("metadata appearance");
+        assert!(appearance.next_image().expect("image end").is_none());
+        assert!(appearance.next_sampler().expect("sampler end").is_none());
+        assert!(appearance.next_texture().expect("texture end").is_none());
+        assert!(appearance.next_material().expect("material end").is_none());
+        assert!(appearance.next_binding().expect("binding end").is_none());
+    }
+    {
+        let geometry = cursor.geometry().expect("metadata geometry");
+        assert!(
+            geometry
+                .next_logical_mesh()
+                .expect("logical mesh end")
+                .is_none()
+        );
+        assert!(geometry.next_primitive().expect("primitive end").is_none());
+        assert!(geometry.next_attribute().expect("attribute end").is_none());
+        assert!(
+            geometry
+                .next_mesh_instance()
+                .expect("mesh instance end")
+                .is_none()
+        );
+    }
+    {
+        let deformation = cursor.deformation().expect("metadata deformation");
+        assert!(deformation.next_skin().expect("skin end").is_none());
+        assert!(
+            deformation
+                .next_logical_morph()
+                .expect("logical morph end")
+                .is_none()
+        );
+        assert!(
+            deformation
+                .next_morph_definition()
+                .expect("morph definition end")
+                .is_none()
+        );
+        assert!(
+            deformation
+                .next_primitive()
+                .expect("deformation primitive end")
+                .is_none()
+        );
+        assert!(
+            deformation
+                .next_morph_target()
+                .expect("morph target end")
+                .is_none()
+        );
+        assert!(
+            deformation
+                .next_morph_delta()
+                .expect("morph delta end")
+                .is_none()
+        );
+        assert!(
+            deformation
+                .next_mesh_instance()
+                .expect("deformation mesh instance end")
+                .is_none()
+        );
+    }
+    {
+        let animation = cursor.animation().expect("metadata animation");
+        assert!(animation.next_clip().expect("animation clip end").is_none());
+        assert!(
+            animation
+                .next_channel()
+                .expect("animation channel end")
+                .is_none()
+        );
+    }
+
+    inspect(cursor.profile().expect("metadata profile"));
+    cursor
+        .finish()
+        .expect("complete metadata semantic traversal");
+}
+
 fn factory() -> PhysicalStorageAccountFactory {
     PhysicalStorageAccountFactory::try_new(
         PhysicalStorageAccountFactoryLimits::new(u64::MAX, 16)
@@ -275,6 +387,43 @@ fn build_scene_with_spatial_appearance_and_geometry<'input>(
     appearance: AppearanceAuthoringBatch<'input>,
     geometry: GeometryAuthoringBatch<'input>,
 ) -> NodeSceneSuccessParts {
+    build_scene_with_spatial_appearance_geometry_and_metadata(
+        account,
+        roots,
+        nodes,
+        spatial,
+        appearance,
+        geometry,
+        MetadataAuthoringBatch::empty(),
+    )
+}
+
+fn build_scene_with_metadata<'input>(
+    account: &PhysicalStorageAccount,
+    roots: &'input [NodeLocalId],
+    nodes: &'input [NodeAuthoringNode],
+    metadata: MetadataAuthoringBatch<'input>,
+) -> NodeSceneSuccessParts {
+    build_scene_with_spatial_appearance_geometry_and_metadata(
+        account,
+        roots,
+        nodes,
+        SpatialAuthoringBatch::new(&SceneSpace::UNKNOWN, &[], &[]),
+        AppearanceAuthoringBatch::empty(),
+        GeometryAuthoringBatch::empty(),
+        metadata,
+    )
+}
+
+fn build_scene_with_spatial_appearance_geometry_and_metadata<'input>(
+    account: &PhysicalStorageAccount,
+    roots: &'input [NodeLocalId],
+    nodes: &'input [NodeAuthoringNode],
+    spatial: SpatialAuthoringBatch<'input>,
+    appearance: AppearanceAuthoringBatch<'input>,
+    geometry: GeometryAuthoringBatch<'input>,
+    metadata: MetadataAuthoringBatch<'input>,
+) -> NodeSceneSuccessParts {
     let logical_morphs = vec![
         LogicalMorphAuthoring::new(AuthoringRange::new(0, 0), &[]);
         geometry.logical_meshes().len()
@@ -312,7 +461,7 @@ fn build_scene_with_spatial_appearance_and_geometry<'input>(
         geometry,
         deformation,
         animations,
-        profile.batch(),
+        profile.batch_with_metadata(metadata),
     );
     let prepared = SceneConstructionOperation::with_account_for_scene_input(
         account,
@@ -767,6 +916,204 @@ fn known_vector_is_stable_and_human_reviewable() {
     );
     assert!(snapshot.preview.text.contains("geometry(present)"));
     assert!(snapshot.preview.text.contains("profile(present)"));
+    assert!(!snapshot.preview.bytes_truncated);
+    assert!(!snapshot.preview.items_truncated);
+
+    drop(parts);
+    assert_eq!(account.snapshot().live_retained_bytes(), 0);
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
+}
+
+#[test]
+fn generic_metadata_round_trips_every_value_kind_without_provenance_ids() {
+    let factory = factory();
+    let account = account(&factory);
+    let roots = [NodeLocalId::new(0)];
+    let nodes = [NodeAuthoringNode::new(
+        Presence::Absent,
+        AuthoredTransform::identity_trs(),
+        Presence::Absent,
+        Presence::Absent,
+    )];
+    let keys = [
+        "test:a_bool",
+        "test:b_i64",
+        "test:c_u64",
+        "test:d_f64",
+        "test:e_string",
+        "test:f_bytes",
+        "test:g_vec2",
+        "test:h_vec3",
+        "test:i_vec4",
+        "test:j_color",
+        "test:k_mat4",
+        "test:l_dense_empty",
+    ]
+    .map(|key| NamespacedName::new(key).expect("canonical metadata key"));
+    let media_type =
+        ExtensionMediaType::new("application/octet-stream").expect("canonical metadata media type");
+    let byte_payload = [0_u8, 1, 2, 255];
+    let empty_vec3 = [];
+    let metadata = [
+        MetadataAuthoringEntry::new(ProfileOwner::Scene, &keys[0], ExtensionValueRef::Bool(true)),
+        MetadataAuthoringEntry::new(ProfileOwner::Scene, &keys[1], ExtensionValueRef::I64(-7)),
+        MetadataAuthoringEntry::new(ProfileOwner::Scene, &keys[2], ExtensionValueRef::U64(9)),
+        MetadataAuthoringEntry::new(ProfileOwner::Scene, &keys[3], ExtensionValueRef::F64(2.5)),
+        MetadataAuthoringEntry::new(
+            ProfileOwner::Scene,
+            &keys[4],
+            ExtensionValueRef::String("metadata"),
+        ),
+        MetadataAuthoringEntry::new(
+            ProfileOwner::Scene,
+            &keys[5],
+            ExtensionValueRef::Bytes {
+                media_type: &media_type,
+                payload: &byte_payload,
+            },
+        ),
+        MetadataAuthoringEntry::new(
+            ProfileOwner::Scene,
+            &keys[6],
+            ExtensionValueRef::Vec2(Vec2::new(1.0, 2.0)),
+        ),
+        MetadataAuthoringEntry::new(
+            ProfileOwner::Scene,
+            &keys[7],
+            ExtensionValueRef::Vec3(Vec3::new(3.0, 4.0, 5.0)),
+        ),
+        MetadataAuthoringEntry::new(
+            ProfileOwner::Scene,
+            &keys[8],
+            ExtensionValueRef::Vec4(Vec4::new(6.0, 7.0, 8.0, 9.0)),
+        ),
+        MetadataAuthoringEntry::new(
+            ProfileOwner::Scene,
+            &keys[9],
+            ExtensionValueRef::Color(Color::linear_rgba(0.1, 0.2, 0.3, 0.4)),
+        ),
+        MetadataAuthoringEntry::new(
+            ProfileOwner::Scene,
+            &keys[10],
+            ExtensionValueRef::Mat4(Mat4::IDENTITY),
+        ),
+        MetadataAuthoringEntry::new(
+            ProfileOwner::Scene,
+            &keys[11],
+            ExtensionValueRef::DenseArray(ExtensionArrayRef::Vec3(&empty_vec3)),
+        ),
+    ];
+    let parts = build_scene_with_metadata(
+        &account,
+        &roots,
+        &nodes,
+        MetadataAuthoringBatch::new(&metadata),
+    );
+
+    inspect_single_node_profile(&parts.scene, |profile| {
+        macro_rules! drain_lineage_domain {
+            ($method:ident) => {
+                loop {
+                    if matches!(
+                        profile.$method().expect(stringify!($method)),
+                        NodeSceneProfileStep::End
+                    ) {
+                        break;
+                    }
+                }
+            };
+        }
+        drain_lineage_domain!(step_resource);
+        drain_lineage_domain!(step_source);
+        drain_lineage_domain!(step_provenance);
+        drain_lineage_domain!(step_evidence);
+        let mut owner_count = 0_usize;
+        while profile.next_owner().expect("metadata owner read").is_some() {
+            owner_count += 1;
+        }
+        assert_eq!(owner_count, 3);
+
+        for (index, key) in keys.iter().enumerate() {
+            let entry = profile
+                .next_metadata_entry()
+                .expect("metadata entry read")
+                .expect("metadata entry");
+            assert_eq!(entry.owner(), CanonicalProfileOwner::Scene);
+            assert_eq!(entry.key(), key.as_str());
+            match (index, entry.value()) {
+                (0, NodeSceneProfileMetadataValue::Bool(value)) => assert!(value),
+                (1, NodeSceneProfileMetadataValue::I64(value)) => assert_eq!(value, -7),
+                (2, NodeSceneProfileMetadataValue::U64(value)) => assert_eq!(value, 9),
+                (3, NodeSceneProfileMetadataValue::F64(value)) => assert_eq!(value, 2.5),
+                (4, NodeSceneProfileMetadataValue::String(value)) => {
+                    assert_eq!(value, "metadata");
+                }
+                (
+                    5,
+                    NodeSceneProfileMetadataValue::Bytes {
+                        media_type,
+                        payload,
+                    },
+                ) => {
+                    assert_eq!(media_type, "application/octet-stream");
+                    assert_eq!(payload, &byte_payload);
+                }
+                (6, NodeSceneProfileMetadataValue::Vec2(values)) => {
+                    assert_eq!(values, &[1.0, 2.0]);
+                }
+                (7, NodeSceneProfileMetadataValue::Vec3(values)) => {
+                    assert_eq!(values, &[3.0, 4.0, 5.0]);
+                }
+                (8, NodeSceneProfileMetadataValue::Vec4(values)) => {
+                    assert_eq!(values, &[6.0, 7.0, 8.0, 9.0]);
+                }
+                (9, NodeSceneProfileMetadataValue::Color(values)) => {
+                    assert_eq!(values, &[0.1, 0.2, 0.3, 0.4]);
+                }
+                (10, NodeSceneProfileMetadataValue::Mat4(values)) => {
+                    assert_eq!(
+                        values,
+                        &[
+                            1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0,
+                            0.0, 1.0,
+                        ]
+                    );
+                }
+                (
+                    11,
+                    NodeSceneProfileMetadataValue::DenseArray {
+                        element_kind,
+                        logical_element_count,
+                        values: NodeSceneProfileMetadataArray::F32(values),
+                    },
+                ) => {
+                    assert_eq!(element_kind, NodeSceneProfileMetadataArrayKind::Vec3);
+                    assert_eq!(logical_element_count, 0);
+                    assert!(values.is_empty());
+                }
+                _ => panic!("metadata value kind or canonical ordering changed at {index}"),
+            }
+        }
+        assert!(
+            profile
+                .next_metadata_entry()
+                .expect("metadata entry end")
+                .is_none()
+        );
+    });
+
+    let (snapshot, transcript) =
+        capture_node_scene_with_test_transcript(&parts.scene, snapshot_limits(16_384, 128), None)
+            .expect("metadata snapshot");
+    assert!(transcript.complete);
+    assert_eq!(snapshot.totals.profile_metadata_entry_count, metadata.len());
+    assert_eq!(snapshot.digest, KNOWN_GENERIC_METADATA_DIGEST);
+    assert!(
+        snapshot
+            .preview
+            .text
+            .contains("profile_metadata(present,total=12)")
+    );
     assert!(!snapshot.preview.bytes_truncated);
     assert!(!snapshot.preview.items_truncated);
 

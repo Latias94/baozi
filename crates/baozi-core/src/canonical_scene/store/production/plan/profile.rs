@@ -655,10 +655,6 @@ impl<'input> ValidatedMetadataEntry<'input> {
     pub(in crate::canonical_scene::store) const fn value(self) -> ExtensionValueRef<'input> {
         self.input.value()
     }
-
-    pub(in crate::canonical_scene::store) const fn provenance(self) -> ProvenanceLocalId {
-        self.input.provenance()
-    }
 }
 
 #[must_use = "dropping the validated profile batch releases its compiled-plan reservation"]
@@ -1487,7 +1483,6 @@ where
     validate_metadata(
         metadata,
         owners,
-        provenance_node_count,
         limits,
         &mut storage,
         &mut metrics,

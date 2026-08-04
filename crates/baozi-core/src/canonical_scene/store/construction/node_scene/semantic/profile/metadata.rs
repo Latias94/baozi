@@ -51,7 +51,6 @@ pub(in crate::canonical_scene::store) struct NodeSceneProfileMetadataEntry<'scen
     owner: CanonicalProfileOwner,
     key: &'scene str,
     value: NodeSceneProfileMetadataValue<'scene>,
-    provenance: usize,
 }
 
 impl<'scene> NodeSceneProfileMetadataEntry<'scene> {
@@ -59,14 +58,8 @@ impl<'scene> NodeSceneProfileMetadataEntry<'scene> {
         owner: CanonicalProfileOwner,
         key: &'scene str,
         value: NodeSceneProfileMetadataValue<'scene>,
-        provenance: usize,
     ) -> Self {
-        Self {
-            owner,
-            key,
-            value,
-            provenance,
-        }
+        Self { owner, key, value }
     }
 
     pub(in crate::canonical_scene::store) const fn owner(self) -> CanonicalProfileOwner {
@@ -81,10 +74,6 @@ impl<'scene> NodeSceneProfileMetadataEntry<'scene> {
         self,
     ) -> NodeSceneProfileMetadataValue<'scene> {
         self.value
-    }
-
-    pub(in crate::canonical_scene::store) const fn provenance(self) -> usize {
-        self.provenance
     }
 }
 

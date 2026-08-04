@@ -567,8 +567,7 @@ fn retain_entries<R>(
                             matches!(encoding.lane, ScalarLane::F32) && encoding.scalar_count != 0,
                             refs.f32s,
                             failure,
-                        )?;
-                        row.write_scalar(entry.provenance().index())
+                        )
                     })?;
                 }
                 let shape = batch.retention_shape();
