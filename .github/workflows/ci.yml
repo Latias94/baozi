@@ -174,8 +174,11 @@ jobs:
       - name: Check native filesystem dependency admission
         run: cargo run --locked -p baozi-xtask -- native-fs-check
 
-      - name: Test focused conformance inventory
-        run: cargo nextest run --locked -p baozi-xtask --test conformance
+      - name: Test baozi-xtask
+        run: cargo nextest run --locked -p baozi-xtask
+
+      - name: Test all baozi-xtask features
+        run: cargo nextest run --locked -p baozi-xtask --all-features
 
       - name: Verify U4c production evidence
         run: cargo +1.95.0 run -j 1 --locked -p baozi-xtask --features repository-input-candidate --target x86_64-unknown-linux-gnu -- u4c-metrics --spec docs/conformance/u4c-metrics.toml
@@ -193,6 +196,25 @@ jobs:
         run: |
           cargo package --locked -p baozi-operation
           cargo package --locked -p baozi-io
+
+  u4c-lifecycle-diagnostic:
+    name: U4c lifecycle diagnostic (Windows Rust 1.97.1)
+    runs-on: windows-2025
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Install Rust 1.97.1
+        uses: dtolnay/rust-toolchain@1.97.1
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Verify U4c lifecycle diagnostic
+        run: cargo +1.97.1 run -j 1 --locked -p baozi-xtask -- u4c-metrics --spec docs/conformance/u4c-lifecycle-diagnostic.toml
 
   native-fs-candidate:
     name: Native filesystem candidate (${{ matrix.target }})

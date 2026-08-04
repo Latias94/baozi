@@ -27,6 +27,21 @@ args = [
 ]
 
 [[gates]]
+gate_id = "u4c-lifecycle-ci"
+tracer_class = "ci"
+executor = "workflow"
+success_condition = "required-workflow-status"
+evidence_identity = "github-actions/ci/u4c-lifecycle-diagnostic/verify-u4c-lifecycle-diagnostic"
+evidence_paths = [".github/workflows/ci.yml"]
+applicable_contracts = [
+  "u4-canonical-scene-lifecycle",
+  "u4-retained-physical-ownership",
+]
+workflow_path = ".github/workflows/ci.yml"
+job_id = "u4c-lifecycle-diagnostic"
+step_name = "Verify U4c lifecycle diagnostic"
+
+[[gates]]
 gate_id = "u4c-production-v2"
 tracer_class = "test"
 executor = "command"
@@ -38,6 +53,8 @@ applicable_contracts = [
   "u4-private-producer-consumer-proof",
   "u4-retained-physical-ownership",
   "u4-legacy-scene-deletion",
+  "validation-snapshot-fuzz-evidence",
+  "source-identity-provenance-metadata",
 ]
 program = "cargo"
 args = [
@@ -70,6 +87,8 @@ applicable_contracts = [
   "u4-private-producer-consumer-proof",
   "u4-retained-physical-ownership",
   "u4-legacy-scene-deletion",
+  "validation-snapshot-fuzz-evidence",
+  "source-identity-provenance-metadata",
 ]
 workflow_path = ".github/workflows/ci.yml"
 job_id = "rust"
@@ -110,3 +129,47 @@ applicable_contracts = ["repository-architecture-conformance"]
 workflow_path = ".github/workflows/ci.yml"
 job_id = "rust"
 step_name = "Check focused conformance inventory"
+
+[[gates]]
+gate_id = "postprocess-current-behavior-tests"
+tracer_class = "test"
+executor = "command"
+success_condition = "process-exit-zero"
+evidence_identity = "baozi.postprocess.current-behavior-tests/v1"
+evidence_paths = [
+  "crates/baozi-postprocess/src/pipeline.rs",
+  "crates/baozi-postprocess/tests/pipeline.rs",
+  "crates/baozi-postprocess/tests/operation_boundary.rs",
+]
+applicable_contracts = ["postprocess-pipeline-semantics"]
+program = "cargo"
+args = ["nextest", "run", "--locked", "-p", "baozi-postprocess"]
+
+[[gates]]
+gate_id = "obj-resource-current-behavior-tests"
+tracer_class = "test"
+executor = "command"
+success_condition = "process-exit-zero"
+evidence_identity = "baozi.obj.resource-current-behavior-tests/v1"
+evidence_paths = [
+  "crates/baozi-format-obj/src/mtl.rs",
+  "crates/baozi/tests/obj_facade.rs",
+]
+applicable_contracts = ["resource-dependency-graph-manifest"]
+program = "cargo"
+args = ["nextest", "run", "--locked", "-p", "baozi", "--test", "obj_facade"]
+
+[[gates]]
+gate_id = "workspace-tests-ci"
+tracer_class = "ci"
+executor = "workflow"
+success_condition = "required-workflow-status"
+evidence_identity = "github-actions/ci/rust/test-workspace"
+evidence_paths = [".github/workflows/ci.yml"]
+applicable_contracts = [
+  "postprocess-pipeline-semantics",
+  "resource-dependency-graph-manifest",
+]
+workflow_path = ".github/workflows/ci.yml"
+job_id = "rust"
+step_name = "Test workspace"

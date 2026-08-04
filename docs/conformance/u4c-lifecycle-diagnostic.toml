@@ -61,7 +61,7 @@ sha256 = "bed3120424517e2c3d02df9a5499f4d8f896410231c36641a518c9adccbf47fb"
 
 [[source_anchors]]
 path = "crates/baozi-operation/src/concrete_store.rs"
-sha256 = "a3e975cc3bfe0aa32a64043fcc34a5370fbae525e46ab9909e70a809a6831290"
+sha256 = "20a75ca637da019b636668eef8c7371633d97189f32ecda117054ab6395d8390"
 
 [[source_anchors]]
 path = "crates/baozi-operation/src/retained.rs"

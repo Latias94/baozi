@@ -18,6 +18,7 @@ test_tracers = [
 ci_tracers = [".github/workflows/ci.yml"]
 gate_ids = [
   "u4c-lifecycle-v2",
+  "u4c-lifecycle-ci",
   "u4c-production-v2",
   "u4c-production-ci",
 ]
@@ -60,6 +61,7 @@ test_tracers = [
 ci_tracers = [".github/workflows/ci.yml"]
 gate_ids = [
   "u4c-lifecycle-v2",
+  "u4c-lifecycle-ci",
   "u4c-production-v2",
   "u4c-production-ci",
 ]
@@ -97,4 +99,83 @@ ci_tracers = [".github/workflows/ci.yml"]
 gate_ids = [
   "repository-conformance-tests",
   "repository-conformance-ci",
+]
+
+[[contracts]]
+contract_id = "postprocess-pipeline-semantics"
+authority_adr = "docs/adr/0013-post-process-pipeline-semantics-presets-and-mutation-model.md"
+conformance_status = "nonconforming"
+evidence_subject = "baozi.postprocess.pipeline-semantics"
+evidence_revision = 1
+implementation_tracers = [
+  "crates/baozi-postprocess/src/pipeline.rs",
+  "crates/baozi-postprocess/src/operation.rs",
+]
+test_tracers = [
+  "crates/baozi-postprocess/tests/pipeline.rs",
+  "crates/baozi-postprocess/tests/operation_boundary.rs",
+]
+ci_tracers = [".github/workflows/ci.yml"]
+gate_ids = [
+  "postprocess-current-behavior-tests",
+  "workspace-tests-ci",
+]
+
+[[contracts]]
+contract_id = "validation-snapshot-fuzz-evidence"
+authority_adr = "docs/adr/0026-validation-snapshot-and-fuzz-gates.md"
+conformance_status = "partial"
+evidence_subject = "baozi.validation.snapshot-fuzz-evidence"
+evidence_revision = 1
+implementation_tracers = [
+  "crates/baozi-core/src/canonical_scene/store/construction/node_scene/snapshot.rs",
+  "crates/baozi-core/src/canonical_scene/store/construction/node_scene/snapshot/tests.rs",
+]
+test_tracers = [
+  "fuzz/fuzz_targets/scene_validation.rs",
+  "fuzz/fuzz_targets/gltf_import.rs",
+  "docs/conformance/u4c-metrics.toml",
+]
+ci_tracers = [".github/workflows/ci.yml"]
+gate_ids = [
+  "u4c-production-v2",
+  "u4c-production-ci",
+]
+
+[[contracts]]
+contract_id = "source-identity-provenance-metadata"
+authority_adr = "docs/adr/0036-source-identity-provenance-and-metadata.md"
+conformance_status = "partial"
+evidence_subject = "baozi.source-identity-provenance-metadata"
+evidence_revision = 1
+implementation_tracers = [
+  "crates/baozi-core/src/canonical_scene/store/profile_provenance.rs",
+  "crates/baozi-core/src/canonical_scene/store/schema/profile.rs",
+  "crates/baozi-core/src/canonical_scene/store/construction/node_scene/semantic/profile.rs",
+]
+test_tracers = [
+  "crates/baozi-core/src/canonical_scene/store/construction/node_scene/snapshot/tests.rs",
+  "docs/conformance/u4c-metrics.toml",
+]
+ci_tracers = [".github/workflows/ci.yml"]
+gate_ids = [
+  "u4c-production-v2",
+  "u4c-production-ci",
+]
+
+[[contracts]]
+contract_id = "resource-dependency-graph-manifest"
+authority_adr = "docs/adr/0041-resource-dependency-graph-and-successful-input-manifest.md"
+conformance_status = "nonconforming"
+evidence_subject = "baozi.resource-dependency-graph-manifest"
+evidence_revision = 1
+implementation_tracers = [
+  "crates/baozi-import/src/session.rs",
+  "crates/baozi-format-obj/src/mtl.rs",
+]
+test_tracers = ["crates/baozi/tests/obj_facade.rs"]
+ci_tracers = [".github/workflows/ci.yml"]
+gate_ids = [
+  "obj-resource-current-behavior-tests",
+  "workspace-tests-ci",
 ]

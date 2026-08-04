@@ -36,7 +36,8 @@ Review these pins when changing CI, investigating tooling failures, or promoting
 - `RUST_FUZZ_NIGHTLY` in `.github/workflows/ci.yml` and `.github/workflows/fuzz.yml`
 
 The dated fuzz nightly intentionally uses `dtolnay/rust-toolchain@master` with a `toolchain` input.
-Stable Rust CI uses the `dtolnay/rust-toolchain@1.95.0` action ref instead.
+The main Stable Rust job uses the `dtolnay/rust-toolchain@1.95.0` action ref. The separate
+U4c lifecycle diagnostic uses Rust 1.97.1 because its evidence identity is toolchain-qualified.
 
 ## Local Checks
 
@@ -59,8 +60,16 @@ cargo check --locked -p baozi --target wasm32-unknown-unknown --no-default-featu
 cargo check --locked -p baozi --target wasm32-wasip1 --no-default-features --features all-formats
 cargo run --locked -p baozi-xtask -- crate-graph-check
 cargo run --locked -p baozi-xtask -- native-fs-check
-cargo nextest run --locked -p baozi-xtask --test conformance
+cargo nextest run --locked -p baozi-xtask
+cargo nextest run --locked -p baozi-xtask --all-features
 cargo run --locked -p baozi-xtask -- repository-conformance-check
+```
+
+The U4c lifecycle diagnostic is Windows- and toolchain-qualified. Run its exact gate with
+Rust 1.97.1:
+
+```powershell
+cargo +1.97.1 run -j 1 --locked -p baozi-xtask -- u4c-metrics --spec docs/conformance/u4c-lifecycle-diagnostic.toml
 ```
 
 The U4c production evidence comparator is host-bound. Run its exact gate only on an
@@ -103,14 +112,14 @@ features in byte-only WebAssembly graphs. The separate `crate-graph-check` trave
 normal/build dependency edge, including optional, renamed, and target-conditional declarations. It
 enforces the complete ADR 0007 production direction table, rejects unclassified production crates,
 support/tool dependencies, reverse paths, and production cycles, while allowing dev-only test edges.
-The default nextest runs exclude `baozi-xtask`. Its repository-scanning fixture suites duplicate
-whole-tree work and can dominate otherwise parallel workspace tests. CI invokes the required
-repository checks directly; ADR review remains an authoring concern rather than a default Rust gate.
-The focused `conformance` test target and `repository-conformance-check` command are exceptions to
-that exclusion because they read only `docs/conformance/contracts.toml`,
-`docs/conformance/gates.toml`, and the repository-relative files explicitly named there. They do not
-scan ADR prose, source prose, Git history, or the repository tree, and the checker does not execute
-the cataloged commands. CI runs the U4c production comparator as its own step before checking the
+The workspace nextest runs exclude `baozi-xtask`. Its repository-scanning fixture suites duplicate
+whole-tree work and can dominate otherwise parallel workspace tests. CI runs the complete xtask
+package once with default features and once with all features, then invokes the required repository
+checks directly; ADR review remains an authoring concern rather than a default Rust gate. The
+`repository-conformance-check` command reads only `docs/conformance/contracts.toml`,
+`docs/conformance/gates.toml`, and the repository-relative files explicitly named there. It does not
+scan ADR prose, source prose, Git history, or the repository tree, and it does not execute the
+cataloged commands. CI runs the U4c production comparator as its own step before checking the
 inventory relationship.
 
 A green dependency or candidate runner gate is not filesystem-conformance evidence. The three exact
