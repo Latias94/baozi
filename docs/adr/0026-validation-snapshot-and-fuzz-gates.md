@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-07-09
-updated: 2026-07-10
+updated: 2026-08-04
 authors:
   - Codex
 decision_type: testing
@@ -93,11 +93,54 @@ provenance, remaps, losses, and structured diagnostics that belong to the select
 Encoding is canonical rather than derived from `Debug`, memory layout, or host endianness. Maps use
 their specified deterministic key order. Finite floats use a field-defined canonical encoding; any
 normalization of signed zero or precision is explicit in the schema and never inherited from a
-display epsilon. A change to field encoding, traversal meaning, or digest algorithm requires a
-snapshot schema version change and known-vector tests.
+display epsilon. A change to field encoding, traversal meaning, or digest algorithm follows the
+schema lifecycle below and always updates known-vector tests in the same change.
 
 Raw import, postprocessed output, validation, and report evidence use distinct domain tags. Equal
 bytes in two domains therefore do not create an accidental equivalence claim.
+
+### Snapshot Schema Lifecycle
+
+Every snapshot domain is in exactly one of two lifecycle states:
+
+1. **Draft.** Before Baozi publishes an explicit compatibility baseline for that domain, its latest
+   canonical encoding is the only retained implementation. An incompatible design improvement may
+   replace the draft encoding in place while keeping the intended first revision number. The same
+   change deletes the superseded writer, reader, vectors, and compatibility language; updates every
+   validator, direct expectation, digest, and preview total; and makes no claim that previously
+   generated draft bytes remain readable or comparable. Parallel `V2` types, compatibility decoders,
+   and migration shims are forbidden for an unpublished draft.
+2. **Frozen.** A domain becomes frozen only through an explicit reviewed baseline that names the
+   domain, revision, digest algorithm, known vectors, compatibility scope, and first release or
+   artifact contract that depends on it. After that event, revision numbers are never reused or
+   reset. Any incompatible encoding, traversal, or digest change advances the revision
+   monotonically; compatible implementation changes retain the revision and must preserve every
+   known vector.
+
+The lifecycle state and freeze baseline belong in the repository conformance inventory rather than
+an implicit code comment or a transient branch name. Until an explicit reviewed freeze record exists
+there, a domain is Draft. A normal CI artifact, passing vector, tag, package, or publication event
+cannot freeze a domain by implication. Updating a draft vector proves only the current
+implementation; it does not retroactively create a compatibility guarantee. Any Draft digest or
+evidence persisted or compared across commits binds the exact source-closure digest (or commit
+identity when the closure is exactly the tracked source) and vector-set digest in addition to
+domain, draft revision, and algorithm. The shorter tuple is not a stable cross-commit cache or
+comparison key.
+
+Physical storage topology is not snapshot semantics. Block identities, capacities, allocation
+owners, profile segment ordinals, and process-local nonces do not enter a semantic domain digest
+unless a separate domain explicitly defines them as its subject. Two centrally validated Scenes
+with equal canonical meaning but different retained segment partitioning must produce the same
+domain digest and bounded semantic preview.
+
+```mermaid
+stateDiagram-v2
+    [*] --> Draft
+    Draft --> Draft: Replace unpublished encoding and vectors
+    Draft --> Frozen: Record reviewed compatibility baseline
+    Frozen --> Frozen: Preserve vectors for compatible implementation changes
+    Frozen --> Frozen: Advance revision for incompatible changes
+```
 
 ### Bounded Preview and Traversal
 
@@ -188,6 +231,37 @@ Cons:
 
 Decision: chosen.
 
+### Option D: Monotonic revisions from the first prototype
+
+Pros:
+
+- every historical experiment has a distinct number
+- no explicit freeze event is needed
+
+Cons:
+
+- unpublished implementation churn creates dead compatibility versions with no consumer
+- historical experiment numbers do not prove that any pair of those experiments is compatible
+- a large revision number can be mistaken for maturity or compatibility evidence
+
+Decision: rejected before the first compatibility baseline. Monotonic revisions are mandatory after
+the domain is frozen.
+
+### Option E: Allow undocumented revision resets until release
+
+Pros:
+
+- minimal process during early development
+
+Cons:
+
+- reviewers cannot tell whether a changed vector is a draft replacement or a broken promise
+- stale artifacts can silently compare unequal under the same claimed schema identity
+- the freeze boundary becomes a convention rather than auditable evidence
+
+Decision: rejected. Draft replacement is permitted only under the explicit lifecycle and atomic
+evidence rules above.
+
 ## Consequences
 
 Positive:
@@ -196,12 +270,15 @@ Positive:
 - snapshot output stays reviewable for large assets
 - validators, direct tests, and fuzz reachability evolve with the IR
 - successful parser and postprocess fuzz cases cannot publish invalid Scene state
+- unpublished schema experiments do not create compatibility scaffolding, while the first frozen
+  baseline creates a precise monotonic contract
 
 Negative:
 
 - every semantic field has a higher implementation and review cost
 - snapshot schema changes require explicit versioning and golden updates
 - digest-only differences need focused fixtures or diagnostic tooling for localization
+- freezing a domain requires an explicit reviewed baseline and prevents later revision reuse
 
 ## Risks and Mitigations
 
@@ -214,6 +291,8 @@ Negative:
 | Fuzz target exercises only a private parser helper | High | Medium | Require facade/session reachability; treat private targets as supplemental evidence only. |
 | Snapshot regeneration becomes the only oracle | High | High | Require specification-derived or independently authored expectations for critical semantics. |
 | Compile-only fuzz checks are mistaken for runtime safety | High | Medium | Record sanitizer execution separately and prohibit maturity promotion on compilation alone. |
+| A draft reset is mistaken for a compatibility guarantee | High | Medium | Record Draft or Frozen state explicitly, prohibit parallel draft decoders, and bind the freeze event to reviewed vectors and a release or artifact contract. |
+| Physical retained-layout changes perturb semantic evidence | High | Medium | Exclude allocation and segment identities from semantic domains and test equal meaning across different segment partitioning. |
 
 ## Acceptance Criteria
 
@@ -221,6 +300,8 @@ Negative:
 | --- | --- |
 | Complete coverage | Mutating any selected canonical value, including one beyond the preview limit, changes the domain digest. |
 | Schema stability | Known vectors pin schema version, domain tags, type/length encoding, float policy, and digest algorithm. |
+| Lifecycle discipline | Draft replacement deletes superseded encodings atomically; a frozen domain names one reviewed baseline and every later incompatible change advances its revision. |
+| Storage independence | Equal canonical meaning under different retained segment partitioning produces the same semantic digest and preview. |
 | Bounded review output | Million-cell scenes remain within configured preview bytes and do not materialize full normalized text. |
 | Linear traversal | 1x/10x/100x scale tests report one bounded visit per encoded value plus documented capped ordering work. |
 | Field discipline | Each behavior-bearing field has validator, snapshot, direct, and parser- or generic-reachable fuzz evidence. |
@@ -233,3 +314,24 @@ Negative:
 Implementation and verification status change over time. Consult the canonical architecture plan,
 test-support snapshot implementation, format/facade test suites, fuzz workspace, and engineering
 verification records. Those artifacts demonstrate progress without changing this accepted decision.
+
+## Amendment History
+
+### 2026-08-04: Define the snapshot compatibility freeze boundary
+
+- Affected: `Complete Digest Contract`, `Snapshot Schema Lifecycle`, alternatives, consequences,
+  risks, and acceptance criteria.
+- Previous: every encoding or traversal change required a revision change, but the ADR did not say
+  when an unpublished draft first acquired a compatibility promise or whether retained storage
+  partitioning belonged to semantic evidence.
+- New: unpublished domains replace their sole Draft encoding and vectors atomically; only an
+  explicit reviewed conformance-inventory baseline freezes compatibility; Frozen revisions advance
+  monotonically; Draft evidence is source- and vector-set-qualified; and physical segment topology
+  is excluded from semantic digests.
+- Impact: Baozi can converge the current unpublished implementation on one final v1 without
+  compatibility shims, while no stale Draft artifact may impersonate a stable cross-commit result.
+  Frozen consumers gain an auditable monotonic revision promise and storage-independent semantics.
+- Review: 2026-08-04 architecture review and Codex adversarial document review.
+- Rationale: this closes an ambiguity inside the existing snapshot evidence concern and strengthens
+  its compatibility boundary without moving ownership, reversing the selected digest design, or
+  requiring a replacement ADR.
