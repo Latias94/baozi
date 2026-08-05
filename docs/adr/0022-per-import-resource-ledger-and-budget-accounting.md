@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-07-09
-updated: 2026-08-01
+updated: 2026-08-05
 authors:
   - Codex
 decision_type: architecture
@@ -61,12 +61,21 @@ but does not merge them. `baozi-io` owns path, backend, handle, IO causes, and i
 hard caps; it does not own a competing aggregate budget.
 
 The dependency direction is `baozi-core`, `baozi-import`, and `baozi-postprocess` toward the leaf
-`baozi-operation` crate. During import or postprocess, core authoring and validation paths receive
-only a sealed borrowed operation capability and qualified concrete-store projections from the owning operation;
-they never receive a raw reservation, generic retained constructor, or physical lease. During
-standalone use, core creates and owns one opaque `SceneConstruction` continuation backed by a private
-operation mechanism. Core never depends on import, and postprocess never depends on import. Domain
-owners supply stable phase and dimension keys; `baozi-operation` cannot invent or interpret them.
+`baozi-operation` crate. During import, operation bootstrap creates one session owner containing the
+sole import ledger/coordinator, account-bound minimal terminal baseline, outcome-evidence authority,
+terminal-cause latch, joint-preparation authority, and one dormant single-use scene authority. It
+does not create canonical tables before format selection, effective-limit freeze, and complete
+authoring-input preflight. Core preflights the complete input without that authority and returns one
+sealed canonical plan carrying exactly one non-authority, single-use activation request. The session
+owner atomically consumes that request with its
+dormant authority and moves only the resulting brand-coupled canonical lane into core. Core then
+receives only sealed borrowed work/control capabilities plus qualified concrete-store
+projections from the same ledger. It never receives a raw reservation, generic retained constructor,
+physical lease, outcome-evidence owner, or independent prepare/handoff capability, and it cannot start
+a second import ledger. During standalone use, core creates and owns one separate opaque
+`SceneConstruction` continuation backed by a private real operation session owner. Core never depends
+on import, and postprocess never depends on import. Domain owners supply stable phase and dimension
+keys; `baozi-operation` cannot invent or interpret them.
 
 Accepted freezes these semantics; conformance requires executable implementation and ledger evidence.
 
@@ -79,6 +88,71 @@ Accepted freezes these semantics; conformance requires executable implementation
 | Live reservation | Capacity or conservative allowance attributable to the operation right now | A storage-covering reservation releases only after storage/allowance is gone; preparation may release retained-output attribution only after a bound physical lease independently covers retained storage and the destination commitment is ready | snapshot capacity, materialized decoded text, backend decode allowance, normalized model, unpublished canonical construction storage, staging buffers, newly allocated retained output, diagnostics, packed bounded failure evidence |
 | Committed canonical output | Per-generation logical canonical cells/bytes accepted by successful preparation | Monotonic once preparation commits the destination; domain-facing output is exposed only by handoff and this evidence is not a host physical-byte owner | validated nodes, primitives, attribute cells, strings, images, animation keys |
 | Published outcome evidence | Non-canonical retained bytes/items accepted for the selected success, rich-failure, minimal-fallback, or postprocess destination | Monotonic once preparation commits the destination; domain-facing evidence is exposed only by handoff and this class is neither canonical output nor a host physical-byte owner | diagnostics, losses, detection/source-scope records, manifests, remaps, bounded failure details, ledger/report storage |
+
+### Import-Bound Session Activation and Joint Publication
+
+An import has one operation session owner, one coordinator, and one ledger from successful bootstrap
+until exact terminal preparation. Sharing only the physical account is insufficient, and attaching a
+retained subsystem to an already exposed raw coordinator is not the production seam. Bootstrap must
+create the long-lived operation owner itself, pre-admit the minimal terminal/evidence baseline, and
+retain one dormant non-copyable scene authority. No import-bound core constructor may accept only an
+account and then create another coordinator, ledger plan, or standalone ledger snapshot.
+
+The dormant authority exists so early open/detection/dependency failures and later canonical outcomes
+share one owner without forcing canonical allocation before exact planning is possible. Before
+activation, it owns no canonical table and cannot reserve, retain, validate, commit, prepare, or
+publish canonical output. It remains in the outcome owner while core performs complete
+`SceneAuthoringBatch` semantic/envelope/input/capacity/attribution preflight and returns one opaque
+`SealedCanonicalPlan` carrying exactly one extractable activation request. The request describes exact
+operation-neutral shape and requirements but owns no dormant authority, canonical table, publication
+join, or retry right; the remaining plan is brand-coupled to the lane returned from that request and is
+the only value core may use for materialization. The outcome owner may
+consume `(DormantAuthority, SealedActivationRequest)` exactly once. Verified rejection before mutation
+becomes `NeverActivated`; uncertain mutation or cleanup is fail-closed containment; success creates one
+brand-coupled canonical lane and permanently consumes the dormant state.
+
+After activation, the ownership pair is:
+
+- the outcome owner retains the coordinator/ledger, outcome-evidence table, protected terminal
+  authority, sticky terminal cause, final control/progress authority, and joint prepare/handoff seam;
+- the canonical lane retains only the canonical table/owners and the bounded capabilities needed for
+  materialization, validation, canonical-candidate construction, and commitment-intent description
+  under that same ledger. It has no destination-commit method.
+
+Neither value can prepare a public result alone. The outcome owner must consume exactly one brand-
+bound canonical disposition with outcome evidence: `NeverActivated` proves zero canonical retained-
+output table, allocation, reservation, and commitment while preserving attempted/consumed preflight
+work and released transient-scratch evidence; `Rejected` proves verified cleanup, zero canonical
+owner/live attribution, and preserves the original cause; `Candidate` owns the validated unpublished
+canonical aggregate and is the only success-capable branch. Uncertain cleanup or poison is containment
+and cannot masquerade as a disposition. A missing, duplicated, foreign-brand, early/double-activated,
+or independently prepared authority, lane, disposition, or candidate fails closed.
+
+For `Candidate`, the outcome owner first preflights all pre-generation destination/control facts and
+issues an opaque single-use freeze permit. The domain adapter passes that permit to core in the normal
+dependency direction. Core either returns `Rejected` plus the matching operation failure contribution
+without consuming a nonce, or reserves generation identity and splits its ready state into an
+operation-understandable freeze contribution plus a core-owned handoff token. Operation interprets
+neither generation identity nor the handoff token; it consumes
+only the contribution with outcome evidence during joint preparation. Import privately retains the
+core token until pure handoff. `NeverActivated` and `Rejected` can produce only zero-canonical rich or
+minimal failure.
+
+The producer-facing canonical checkpoint remains deliberately narrow. It may poll and perform only
+the pre-authorized work/reservation transitions needed by core; it cannot report arbitrary progress,
+freeze a ledger, consume protected terminal work, prepare publication, activate another authority,
+split another lane, or transfer ownership. The import host may use a separate sealed session
+capability for its broader phase, attempted/consumed, progress, snapshot, tightening, and exact scene-
+activation duties. These are concrete linear capability families, not a public trait-object operation
+port.
+
+Standalone core construction is a second real adapter over the same operation-owned session seam. It
+creates its own coordinator, ledger, minimal terminal, and dormant scene authority because no import
+exists; its snapshot is never attached to an import report. Postprocess owns a separate operation
+ledger but receives no fresh dormant source-scene authority: it opens a derived `SceneEdit` lane against
+the input Scene's inherited account/lineage and reuses only the joint commit/pure-handoff primitive.
+This preserves operation separation without allowing nested ledgers, standalone-construction reuse for
+an edit, or an attach bridge inside one import.
 
 `attempted` is charged before an external action or count-driven loop when possible. `consumed` is a
 separate counter charged only as bytes/work actually complete. For comparable dimensions,
@@ -154,44 +228,63 @@ terminal-cause class: it is fail-closed containment with no prepared publication
 
 Retained storage remains part of operation-attributed current live while it is constructed and while
 outcome preparation can still fail. Newly allocated retained storage is already covered by a
-separate account-bound physical lease. Preparation atomically releases operation-live attribution,
-applies the destination-qualified canonical and outcome-evidence commitments, and freezes terminal
-evidence with current operation live equal to zero. No pending or prepared-attribution token survives
-preparation. The exact prepared wrapper owns the already destination-qualified but still domain-
-unexposed publication owners. Preparation neither transfers nor releases their physical leases and
-does not add bytes a second time within either plane. Exact handoff only consumes the wrapper and
-exposes those owners through domain-facing output types; it performs no attribution
-reclassification or counter mutation.
+separate account-bound physical lease. All allocation, validation, checked arithmetic, callback,
+control downgrade, cleanup selection, destination-slot preflight, and ledger-lock work completes
+before operation constructs one closed `JointCommitIntent`. The intent owns the exact canonical freeze
+contribution or zero-canonical failure disposition, outcome-evidence candidate, fully validated
+destination plan, and terminal class. It has no destination commitment, final account publication
+eligibility, or domain-visible output.
+
+One private `qualify_and_commit` pivot consumes that intent. Before the pivot, ordinary rejection or
+drop destroys the unqualified owners in storage-before-account order and leaves every destination
+commitment at zero. The pivot's account-latch observation is its final fallible step and ADR 0044's
+publication-eligibility linearization: poison or any uncertainty resolves before eligibility and
+exposes no commitment or exact wrapper. Eligibility success continues in the same non-returning success
+path through allocation-free, lock-free, callback-free, panic-free, mechanically infallible moves over
+already reserved slots. That path applies the canonical/outcome-evidence commitments, releases
+operation-live attribution to zero, freezes the sole ledger snapshot, and constructs the exact
+operation wrapper. No qualification token is stored/exposed and no fallible, unwinding, or containment
+branch exists after eligibility. An implementation unable to prove this suffix must reject or contain
+the intent before observing eligibility.
+
+The exact prepared operation wrapper owns already destination-qualified but domain-unexposed
+publication owners. Preparation neither transfers nor releases their physical leases and does not add
+bytes a second time within either plane. Exact operation handoff only consumes the wrapper and exposes
+those owners through domain-facing output types; it performs no attribution reclassification or
+counter mutation.
 
 An operation that fails before Scene publication records zero committed canonical output but may
 successfully publish nonzero outcome evidence. That is not a successful import; it is a successful
 handoff of an exact failure wrapper. All allocation, validation, accounting, checked arithmetic,
 destination selection, account-brand validation, cancellation polling, callback work, and final
-control downgrade occurs during outcome preparation. Any domain-owned fallible identity reservation
-required for provisional success, such as core's generation nonce, is attempted before attribution
-freeze; the generic ledger does not interpret that identity. Atomic reservation rejection or
-exhaustion consumes no nonce, destroys the canonical candidate, and is an ordinary rich failure with
-preserved evidence and zero canonical output. It does not select minimal fallback merely because the
+control downgrade occurs before the closed commit intent. Any domain-owned fallible identity
+reservation required for provisional success, such as core's generation nonce, is sequenced through
+an operation-owned pre-generation freeze permit but remains domain-owned. The generic ledger neither
+constructs nor interprets that identity or its handoff token. Atomic reservation rejection or
+exhaustion consumes no nonce, converts the candidate into a typed zero-canonical `Rejected`
+disposition, and is an ordinary rich failure. It does not select minimal fallback merely because the
 identity was unavailable. Once reservation succeeds, any later freeze/product-graph preparation
-failure, cancellation, or caught unwind burns its never-reused identity. A non-builder unwind may
+failure, cancellation, or caught unwind drops the domain handoff token and burns its never-reused
+identity. A non-builder unwind may
 attempt the rich-failure terminal variant after all required candidate/publication cleanup is
 verified and the pre-admitted fallback/evidence attribution remains intact; a retained candidate/report builder panic instead
 enters side-local containment and prepares no terminal wrapper.
 
-Preparation returns a closed, already classified transport containing exactly one linear
+Operation preparation returns a closed, already classified transport containing exactly one linear
 `PreparedSuccess`, `PreparedRichFailure`, or `PreparedMinimalFallback`. It is not one opaque
-success-capable prepared wrapper classified during handoff. Only exact `PreparedSuccess` may bind and
-structurally own a domain reservation plus the destination-qualified canonical owner; both exact
-failure wrappers structurally contain no identity reservation or canonical owner. All three may own
+success-capable prepared wrapper classified during handoff. Exact operation `PreparedSuccess` may own
+the destination-qualified canonical owner but never a domain generation reservation or core handoff
+token; the domain adapter privately pairs those only in its own exact success aggregate. Both exact
+failure wrappers structurally contain no identity token or canonical owner. All three may own
 destination-qualified outcome-evidence owners, contain no pending/live attribution token, and have
-current operation live equal to zero. Their type-specific handoffs perform a pure consuming split
-that only exposes/moves those owners. No handoff performs identity allocation, validation,
-attribution reclassification, accounting or counter change, control poll, fallible or panicking lock
-protocol, user/extension callback, or terminal classification, and none can fail or panic under the
-published contract. Dropping a prepared wrapper destroys its unexposed publication owners in
-storage-before-account order; it neither reopens the ledger nor rolls back destination commitments,
-and no public terminal escapes because the frozen evidence owner is dropped with it. Dropping exact
-success also burns its private generation gap.
+current operation live equal to zero. Operation handoff purely exposes/moves those owners. A matching
+domain handoff token may then consume the canonical owner into the final proof/identity without any
+public intermediate. Neither move performs identity allocation, validation, attribution
+reclassification, accounting/counter change, control poll, lock protocol, user/extension callback, or
+terminal classification, and neither can fail or panic. Dropping a prepared operation wrapper destroys
+its unexposed publication owners in storage-before-account order; dropping the domain's paired exact
+success additionally burns its private identity gap. Neither path reopens the ledger, rolls back
+destination commitments, observes poison again, calls an extension, or exposes a public terminal.
 
 Starting a failure-capable operation is itself fallible and precedes the exactly-one returned-terminal
 contract. The owner-specific `try_start` must create the real ledger, obtain the separately owned
@@ -409,14 +502,16 @@ hidden overgrant, or exact process RSS. From the first allocator entry, backing 
 structurally owned with its covering admission and must be destroyed before
 that reservation, pending physical charge, or bound lease can be released.
 
-Prepared publication consumes each attribution reservation, applies its destination-qualified
-canonical or outcome-evidence commitment, and reaches zero operation-owned current live without
-releasing the independent physical owner. Each exact prepared terminal value contains no pending/live
-attribution capability; handoff only consumes the wrapper and exposes/moves its already qualified
-owners as `CommittedCanonicalOutput`/`PublishedOutcomeEvidence`. Dropping it destroys the unexposed
-publication owners in storage-before-account order; it does not reopen the ledger, roll back a
-destination commitment, or expose a public terminal. An operation failure leaves committed canonical
-output at zero but may publish typed failure evidence; a preparation failure with verified cleanup destroys
+Prepared publication first converts each attribution reservation into a prevalidated destination
+intent without applying it. The final ADR 0044 eligibility/infallible-commit pivot consumes those
+intents, applies their canonical or outcome-evidence commitments, freezes the snapshot, and reaches
+zero operation-owned current live without releasing the independent physical owner. Each exact
+prepared operation value contains no pending/live attribution capability; handoff only consumes the
+wrapper and exposes/moves its already qualified owners as
+`CommittedCanonicalOutput`/`PublishedOutcomeEvidence`. Dropping it destroys the unexposed publication
+owners in storage-before-account order; it does not reopen the ledger, roll back a destination
+commitment, observe poison again, call an extension, or expose a public terminal. An operation failure
+leaves committed canonical output at zero but may publish typed failure evidence; a preparation failure with verified cleanup destroys
 every unpublished rich aggregate before releasing its covering owners and then uses the pre-admitted
 assembly-independent terminal envelope. Uncertain cleanup retains the coupled owners and cannot
 select fallback. ADR 0044's concrete store must satisfy this provider contract before
@@ -565,23 +660,28 @@ stateDiagram-v2
     [*] --> Snapshot: reserve primary capacity
     Snapshot --> Decode: retain snapshot + reserve backend allowance
     Decode --> Normalize: reserve normalized model
-    Normalize --> Build: release backend; admit canonical construction storage
+    Normalize --> Build: seal plan, activate once, materialize canonical storage
     Build --> Validate: retain unpublished construction storage as candidate output
-    Validate --> IdentityReserved: final fallible pre-freeze identity acquisition
-    Validate --> PrepareRichFailure: identity rejection/exhaustion; no nonce
-    IdentityReserved --> PrepareSuccess: apply destination commitments; live = 0
-    IdentityReserved --> PrepareRichFailure: later downgrade; burn identity gap
-    Build --> PrepareMinimalFallback: invalid root or non-builder unwind; candidate clean; baseline exact
+    Validate --> FreezePermit: preflight destinations/control; no commitment
+    FreezePermit --> IdentityReserved: core reserves identity and splits contribution/token
+    FreezePermit --> RichFailureIntent: identity rejection/exhaustion; no nonce
+    IdentityReserved --> SuccessIntent: exact success contribution + evidence
+    IdentityReserved --> RichFailureIntent: later downgrade; burn identity gap
+    Build --> MinimalFallbackIntent: invalid root or non-builder unwind; candidate clean; baseline exact
     Build --> FatalContainment: retained builder panic or side containment; keep coupled charge
-    PrepareSuccess --> PreparedSuccess: exact variant; live attribution = 0
-    PrepareRichFailure --> PreparedRichFailure: rich append/validation/prepare succeeds
-    PrepareRichFailure --> PreparedMinimalFallback: rich preparation itself fails
-    PrepareRichFailure --> FatalContainment: cleanup/release proof unavailable
-    PrepareMinimalFallback --> PreparedMinimalFallback: pre-admitted envelope
+    RichFailureIntent --> MinimalFallbackIntent: rich preparation itself fails
+    RichFailureIntent --> FatalContainment: cleanup/release proof unavailable
+    SuccessIntent --> PreparedSuccess: final eligibility + infallible commit; live = 0
+    RichFailureIntent --> PreparedRichFailure: final eligibility + infallible commit; live = 0
+    MinimalFallbackIntent --> PreparedMinimalFallback: final eligibility + infallible commit; live = 0
+    SuccessIntent --> FatalContainment: poison or uncertainty before eligibility
+    RichFailureIntent --> FatalContainment: poison or uncertainty before eligibility
+    MinimalFallbackIntent --> FatalContainment: poison or uncertainty before eligibility
     PreparedSuccess --> SuccessHandoff: pure consuming owner exposure
     PreparedRichFailure --> FailureHandoff: pure consuming owner exposure
     PreparedMinimalFallback --> FailureHandoff: pure consuming owner exposure
-    SuccessHandoff --> [*]
+    SuccessHandoff --> CoreProofHandoff: paired domain token consumes canonical owner + identity
+    CoreProofHandoff --> [*]
     FailureHandoff --> [*]
     FatalContainment --> [*]: typed error; poisoned path; no fallback/refund claim
     note right of Decode
@@ -625,6 +725,25 @@ This reduces ordinary work by one checked finite reserve, preserves a truthful c
 bounded failure evidence available after ordinary exhaustion, and reports both portions through the
 existing evidence classes. Chosen for failure-capable operations.
 
+### Option G: Give import and core separate ledgers over one physical account
+
+This is locally easy because standalone core construction can be reused unchanged, but it creates two
+accounting truths for one import and cannot produce one authoritative terminal snapshot. Rejected.
+
+### Option H: Expose one broad dynamic operation port to core
+
+This keeps one coordinator, but a trait-object or callback surface carrying reserve, progress,
+prepare, publish, and transfer authority is shallow, difficult to make linear, and easy to widen.
+Rejected.
+
+### Option I: Bootstrap one session owner, then activate one canonical lane from dormant authority
+
+This preserves one import ledger and one early-failure owner, keeps domain meanings in their owning
+crates, leaves dormant authority in the outcome owner while core seals an authority-free plan, delays
+canonical allocation until their one-shot activation, restricts producer authority, and makes the
+eligibility/infallible-commit pivot the only publication point. Chosen for import and standalone
+construction; postprocess uses a derived edit lane.
+
 ## Consequences
 
 Positive:
@@ -639,6 +758,10 @@ Positive:
 - Shared dependency caching has explicit physical-versus-logical accounting.
 - Retained-output attribution integrates with ADR 0044 without making the operation ledger the
   allocation's lifetime owner.
+- Import-bound core authoring and validation contribute to one import-ledger snapshot without giving
+  core import-domain semantics or giving import raw canonical ownership.
+- Early open/detection/dependency failures and later canonical publication share one owner without
+  preallocating canonical tables from coarse global maxima.
 
 Negative:
 
@@ -646,6 +769,10 @@ Negative:
 - Opaque backend accounting remains conservative and needs external RSS evidence; a known unbounded
   path remains inadmissible regardless of allowance size.
 - Statistics and tests become more detailed than a single byte total.
+- The private operation seam needs brand-coupled lane typestates and two deliberately different
+  capability surfaces: a narrow producer checkpoint and a broader host-session capability.
+- The session owner must preserve one dormant authority through authority-free core preflight and
+  resolve the single activation as `NeverActivated`, activated lane, or fail-closed containment.
 
 ## Risks and Mitigations
 
@@ -657,14 +784,19 @@ Negative:
 | Observed allocator capacity differs from admission | Critical | Govern the plan by the capacity-policy revision and match a separate concrete-store/policy evidence anchor, charge the full envelope before entry, request only desired additional capacity, accept desired-through-envelope in `finish`, retain conservative charge while live, and destroy over-envelope storage before releasing owners with `CapacityEnvelopeViolated`. This is a post-allocation defense, not proof that transient RSS never exceeded the envelope. |
 | Repeated exact `len + 1` growth becomes quadratic | Critical | Fixed plans keep logical-minimum semantics, while growable and replacement wrappers preserve that requirement and put a geometric target in the allocator-facing plan. Scale gates count successful replacements and all moved source elements/bytes, rejecting linear replacement counts or superlinear movement. |
 | A physical-account limit is presented as an exact process-memory limit | Critical | Define it as Baozi-requested policy-governed layout/capacity only; exclude allocator-private overhead/overgrant, deny strict claims for unknown or unverified allocator paths, and require an OS/subprocess limit for a hard process-memory boundary. |
-| Operation accounting ignores shared account poison | Critical | operation start/retain/share/final-publication eligibility composes with ADR 0044's physical-account linearization state; a typed poison rejection before physical mutation rolls back the unobservable provisional ledger graph, while poison observed after mutation or start/retain/share-admission-first evidence/charge remains coupled and fails closed before handoff |
+| Operation accounting ignores shared account poison | Critical | operation start/retain/share composes with ADR 0044's account state, while terminal preparation first builds a zero-commit closed intent. Account publication eligibility is the pivot's final fallible observation: poison-first leaves zero destination commitment; eligibility-first permits only the lock-free infallible commit move to an exact wrapper. |
 | Two independent accounting locks are presented as one snapshot | Critical | the ledger-first and physical-second transitions each admit one complete aggregate under one lock, never nest locks, expose no shared internal linearization point, and use a private guard to make only external operation acceptance atomic |
+| Import-bound core construction starts a nested ledger after receiving the account | Critical | The only import path starts from the operation session owner's dormant authority; no account-only or attach-existing-coordinator path exists, and real session-owner integration proves one ledger snapshot with canonical phases/dimensions included. |
+| Bootstrap opens canonical tables before exact format/input planning | Critical | Startup pre-admits only the minimal terminal/evidence baseline and creates a dormant authority with zero canonical allocation. Selection, effective limits, complete envelope preflight, and exact attribution planning precede the single activation. |
+| Canonical or evidence storage prepares without its matching owner | Critical | The canonical disposition/freeze contribution and outcome evidence carry one operation brand and have no independent prepare/handoff entry point; only the outcome owner may form the joint intent and cross the eligibility/commit pivot. |
+| A host-facing checkpoint is reused as the producer-facing capability | Critical | Keep separate sealed capability families; core receives the narrow checkpoint, while only the session owner can report arbitrary progress, tighten limits, freeze evidence, spend protected terminal work, or prepare publication. |
 | Failure evidence has no legal attribution terminal state | Critical | preparation applies the outcome-evidence destination commitment, the exact wrapper privately owns the still-unexposed evidence, public `PublishedOutcomeEvidence` appears only after handoff, and a pre-admitted terminal envelope supports exact infallible failure handoffs |
-| A prepared handoff discovers another failure or panic source | Critical | preparation completes terminal classification and destination commitment and reaches zero operation-live attribution; exact prepared wrappers have no pending token and their handoffs are pure consuming owner exposure. |
+| Eligibility and ledger commitment leave a half-published terminal | Critical | Every fallible lock/check/callback and cleanup decision precedes the zero-commit intent. Poison or uncertainty resolves before eligibility. Eligibility success has one allocation-/lock-/callback-/panic-free non-returning suffix that freezes the snapshot, reaches zero live, and constructs the exact wrapper; no post-eligibility branch or stored token exists. |
+| A prepared handoff discovers another failure or panic source | Critical | preparation completes terminal classification and destination commitment and reaches zero operation-live attribution; exact operation wrappers and paired domain handoff tokens have no pending authority and perform only pure consuming owner exposure/proof conversion. |
 | A retained-builder panic is treated as clean fallback | Critical | startup panic returns a start error; later candidate/report panic returns fatal containment; fallback requires verified candidate cleanup and intact pre-admitted fallback/evidence attribution |
 | Startup accounting invents, loses, or prematurely releases attribution | Critical | a provisional complete ledger graph precedes physical admission but cannot reach a retained payload/evidence allocator entry or accepted operation; after complete ledger-side capacity admission it may structurally own ledger control/bookkeeping backings; failure at every bookkeeping backing allocation destroys every partial backing before one-lock full-ledger rollback and returns the fixed start error with zero physical entry/charge, retained payload/evidence allocator entry, or accepted operation; typed no-mutation physical rejection applies the same cleanup to the complete graph, uncertain transition state preserves the graph coupled with every possible physical owner, and the ready pair structurally couples every later retained allocation with matching attribution and charge without fabricating an owner |
 | Process-local evidence keys lose their catalog or become persistent identity | Critical | the Baozi-owned result/evidence owner retains the `StoreKeyDomain` anchor and immutable normalized catalog through query lifetime; plugin code receives only host-minted keys and runtime brands are excluded from transcripts, digests, wire, cache, and build identity |
-| Domain identity exhaustion remains after ledger freeze | Critical | Require atomic reservation as the final fallible pre-freeze identity acquisition; rejection/exhaustion becomes ordinary rich failure with no nonce, later freeze failure may burn a successful value, and only exact-success handoff may consume it. |
+| Domain identity crosses the leaf crate boundary or remains fallible after commitment | Critical | Operation issues only an opaque pre-generation freeze permit. The domain reserves and splits its identity in the normal dependency direction; operation consumes only the freeze contribution. Rejection becomes ordinary rich failure with no nonce, later preparation may burn the private domain token, and only the domain's paired pure handoff may expose identity/proof. |
 | Prepared drop releases ownership in the wrong order or fabricates rollback | Critical | exact prepared state owns already destination-qualified but domain-unexposed aggregates, contains no rollback-capable token, and destroys storage before account owners without reopening the ledger or exposing a terminal. |
 | Standalone validation bypasses operation attribution | Critical | core's opaque `SceneConstruction` lifecycle owns one real operation ledger for both explicit-account and private-account paths; no no-op adapter exists. |
 | Rollback refunds attack work | High | Attempted/consumed counters expose no decrement API. |
@@ -682,13 +814,15 @@ Negative:
 | --- | --- | --- |
 | Attribution closure | preparation maps every retained slot to exactly one destination commitment, final operation live is zero, no prepared-attribution token remains, and only handoff exposes the corresponding domain owner | success, ordinary failure, and rich-failure-preparation fault matrix |
 | Canonical/evidence independence | failure reports always retain zero committed canonical output while independently reporting exact published outcome evidence | ledger snapshot assertions at every failure phase |
+| Import ledger uniqueness | one import session owner, coordinator, and ledger snapshot cover detection through dormant-authority activation, canonical validation, and outcome finalization; no nested standalone core ledger or second snapshot exists | real import-owned session-owner integration, zero-before-activation allocation, early/exact/double activation, semantic phase/dimension assertions, report shape, and API/source scans |
+| Joint lane closure | one `NeverActivated`, `Rejected`, or `Candidate` canonical disposition and outcome evidence prepare only under the matching outcome owner; a candidate success additionally requires one freeze contribution paired outside operation with the core handoff token | early-failure and success/rich/minimal matrix, foreign/missing/duplicate tests, compile-fail capability tests, and drop-order probes |
 | Structural preflight | invalid count/width/overflow/table/max-new/attribution plans cause zero set-id, work, account, and allocator side effects | exact/excess boundary and fault-injection counters |
 | Capacity coverage | hostile input cannot make Baozi request beyond the admitted policy-governed envelope; actual may be smaller, over-envelope publishes nothing, and logical output uses semantic length without an exact-RSS claim | desired/actual/envelope allocator probes, source-anchor matching, and subprocess-limit tests |
 | Growth complexity | monotonic single-element growth uses geometric allocator/candidate targets; for an empty non-ZST container ending at logical length `N > 0`, successful replacements are at most `ceil(log2(N)) + 1` and total moved source elements are less than `2 * N` | exact replacement/moved-element counters at `N`, `2N`, and `4N`, plus checked byte-total assertions |
 | Retained attribution coupling | before readiness, typed no-mutation second-plane rejection rolls back the complete provisional attribution graph while uncertain second-plane completion preserves it coupled with every possible physical owner; after readiness every side has matching attribution and physical ownership, and no path fabricates an owner | typed-rejection rollback, uncertain second-plane containment, post-ready verified/uncertain cleanup, owner-count, and drop-order probes |
 | Startup allocator taxonomy | ledger control/bookkeeping allocations occur only after their complete ledger-side capacity admission, remain structurally owned by the provisional graph, and are never physical payload; every partial allocation failure and typed no-mutation physical rejection follows storage-first one-lock full-ledger rollback; retained payload/evidence allocator entries remain zero until readiness and the post-ready consuming split itself is allocation-, lock-, and counter-free | fault injection at every backing allocation, independent bookkeeping-versus-retained allocator probes, physical-entry/charge and accepted-operation probes, storage-before-single-lock rollback ordering, and consuming-split transition counters |
 | Poison/accounting composition | one shared poison latch is visible across account clones without rewriting monotonic operation evidence; poison-first does no work, start/retain/share-admission-first keeps exact work/charge and cannot publish | two-order operation-start/retain/share/finalization barriers plus ledger/account snapshot assertions |
-| Prepared handoff | preparation has selected an exact publishable terminal wrapper, applied destination commitments, retained only domain-unexposed owners, reserved any success identity, and reached zero live attribution; handoff reaches zero allocator, validator, control, callback, panic, classification, attribution transition, or accounting entry; fatal containment is not a prepared handoff | identity-exhaustion, API-shape, prepared-drop, verified-unwind, uncertain-cleanup, and injected-failure counters |
+| Commit pivot and prepared handoff | a zero-commit closed intent precedes final account eligibility; eligibility success continues without a return/fault boundary to apply commitments, freeze one snapshot, reach zero live, and construct the exact operation wrapper. Domain identity remains in a separately paired opaque token whose pure handoff alone constructs proof; fatal containment is resolved before eligibility and is not a prepared handoff | poison-before/eligibility-before barriers, identity-exhaustion, API-shape, proof of no post-eligibility injection point, prepared-drop, verified-unwind, and injected-failure counters |
 | Protected terminal authority | caller totals include the terminal allowance; ordinary work sees only the checked remainder; success reports zero protected use, failures report the actual consumed prefix, and no ordinary capability can address the protected dimension | exact/one-under startup, ordinary-exhaustion downgrade, API-shape, dimension snapshot, retry/fallback-only/fail-closed, and partial-use sealing probes |
 | Typed terminal cause | semantic requests, ledger rejection, cancellation/deadline, and product-graph failure freeze `Requested`, `Ledger`, `Control`, and `ProductGraph` respectively without later cause degradation | isolated first-cause and precedence matrix |
 | Standalone parity | explicit-account and private-account core validation use the same non-noop ledger and publication state machine | core integration and snapshot-equivalence tests |
@@ -717,12 +851,14 @@ Negative:
 | Publication token separation | This ledger tracks attribution rather than physical lifetime; preparation applies canonical plus outcome commitments for success and outcome-only commitment for failure, leaves preparation debris without a destination, and reaches zero operation live. No pending/live or prepared-attribution token survives; exact wrappers privately own already qualified but domain-unexposed owners, and public terminal values appear only after handoff. |
 | Outcome-evidence terminal state | Exact success, rich-failure, minimal-fallback, and postprocess fixtures apply the outcome-evidence destination commitment during preparation and expose non-canonical retained storage as `PublishedOutcomeEvidence` only through handoff; canonical output remains independently zero/nonzero and final operation live is zero. Fatal containment publishes no fallback and retains conservative coupled charge instead. |
 | Retained attribution coupling | Failure before physical mutation reaches no retained payload/evidence allocator entry and observes zero physical charge. At every bookkeeping backing-allocation fault, every partial backing is destroyed before one-lock full-ledger rollback and fixed start error return without physical entry or accepted operation; typed no-mutation physical rejection applies the same cleanup to the complete graph. Uncertain second-plane completion preserves that graph coupled with every possible physical owner. After the ready pair exists, verified physical cleanup releases exactly the matching attribution and uncertain physical cleanup preserves the matching paired attribution. No test may satisfy the invariant by fabricating an owner. An accepted operation retains the attribution needed by later fallback. |
-| Prepared publication | Every fallible allocation/validation/accounting/control/callback and final downgrade step precedes preparation completion; preparation returns exact `PreparedSuccess`, `PreparedRichFailure`, or `PreparedMinimalFallback`, applies destination commitments with zero operation live, leaves no attribution token, and structurally permits a reservation only in exact success. Prepared drop destroys domain-unexposed publication owners in storage-before-account order without reopening the ledger or exposing a terminal. Exact handoff is pure infallible consuming owner exposure. Reservation rejection/exhaustion produces ordinary rich failure; fallback requires verified candidate cleanup and intact pre-admitted fallback/evidence attribution. Retained candidate/report builder panic and uncertain cleanup return typed `FinalizationContainmentError`, keep exact ownership/charge coupled and poisoned, and are not prepared publications. |
-| Domain identity reservation | Owner-specific tests prove any fallible generation/publication identity reservation is the final pre-commit identity acquisition; rejection/exhaustion consumes no nonce, leaves the canonical destination unapplied, and prepares ordinary rich failure with zero canonical output. Handoff only consumes a successful reservation from exact success, while later destination-commit/product-graph preparation failure, cancellation, caught unwind, or exact-success drop may burn its never-reused gap without publishing an identity or reopening prepared ledger state. |
+| Prepared publication | Every fallible allocation/validation/accounting/control/callback and final downgrade step produces only a closed zero-commit intent. The final eligibility/infallible-commit pivot returns exact `PreparedSuccess`, `PreparedRichFailure`, or `PreparedMinimalFallback`, applies destination commitments with zero operation live, and leaves no attribution token or half-qualified state. Prepared drop destroys domain-unexposed publication owners in storage-before-account order without reopening the ledger, observing poison, calling extensions, or exposing a terminal. Retained candidate/evidence builder panic and uncertain cleanup return typed `FinalizationContainmentError`, keep exact ownership/charge coupled and poisoned, and are not prepared publications. |
+| Domain identity reservation | Owner-specific tests prove operation first issues one opaque pre-generation freeze permit; the domain consumes it into rejection or a ready split of freeze contribution plus private handoff token. Rejection/exhaustion consumes no nonce, leaves the canonical destination unapplied, and prepares ordinary rich failure. Operation never owns/interprets the token. Later preparation failure/cancellation/caught unwind or exact-success drop may burn the gap, while only the privately paired pure domain handoff can publish identity/proof. |
 | Dependency accounting | Repeated authorized references to one authority-qualified identity charge one physical read and N logical references/work units; equal logical names in different authority domains remain separate. |
 | Failure evidence | Cancellation and parse failures retain bounded stats, attempted counters, and peak-live by phase. |
 | Finalization invariant evidence | If ledger finalization detects live or pending state, its typed error retains the real immutable snapshot; callers cannot replace it with a zero or pre-finalization fallback snapshot or discard the original operation cause. |
-| Operation separation | Import, postprocess, and standalone core construction expose distinct ledgers; no operation changes, adopts, or refunds another operation's counters. |
+| Operation separation | Import, postprocess, and standalone core construction expose distinct ledgers; one import-bound core construction contributes to its owning import ledger and never exposes a nested standalone snapshot; no operation changes, adopts, or refunds another operation's counters. |
+| Import-bound lane composition | Bootstrap creates one real import session owner/coordinator plus one dormant single-use scene authority and zero canonical tables. Core completes authority-free input preflight and returns one sealed plan containing exactly one non-authority, single-use activation request. Only the outcome owner may extract and consume that request with the dormant authority; the remaining plan becomes usable only with the resulting same-brand lane moved into core. Finalization consumes exactly one canonical disposition with outcome evidence. Candidate success additionally proves freeze-permit/core-token separation. Foreign, missing, duplicate, early/double-activated, or independently prepared values fail closed. |
+| Capability separation | API-shape and compile-fail tests prove the producer checkpoint cannot report arbitrary progress, tighten/freeze the ledger, spend protected terminal work, prepare publication, split another lane, or transfer owners, while the session host capability is not exposed to core or format code. No public trait-object operation port exists. |
 | Dependency leaf | Graph checks prove `baozi-operation` has no upward workspace dependency, core does not depend on import, and postprocess does not depend on import. |
 | Branded reservations | Compile-fail/runtime tests reject cloning, forging, conversion, cross-ledger transfer, covering-token commit, and attribution commit under the wrong operation owner. |
 | Phase authority | Ledger and progress transitions cannot advance outcome phase evidence; only mapped session boundaries can do so. |
@@ -730,6 +866,31 @@ Negative:
 | Clone and branch admission | Exact/excess transient clone loops and sibling/deep-branch fixtures charge non-refundable work before reference-count changes and cannot bypass retained-handle, container, branch, or generation limits. |
 
 ## Amendment History
+
+### 2026-08-05: Make joint publication use the sole import ledger
+
+- Affected headings: frontmatter `updated`, `Decision`, `Import-Bound Session Activation and Joint
+  Publication`, alternatives, consequences, risks, success metrics, and acceptance criteria.
+- Previous rule: import owned one ledger and core received sealed capabilities, but the Accepted text
+  did not forbid an account-only core constructor from creating a nested construction ledger or define
+  how canonical and outcome-evidence ownership reunited for one terminal publication.
+- New rule: operation bootstrap creates one session/outcome owner with the sole coordinator/ledger,
+  minimal terminal, outcome-evidence/protected-terminal/joint-preparation authority, and one dormant
+  scene authority. Core performs complete preflight without that authority and returns a sealed
+  activation request; only the outcome owner consumes both and moves the resulting lane into core.
+  Finalization consumes one `NeverActivated`, `Rejected`, or `Candidate` disposition. Candidate
+  success separates the operation freeze permit/contribution from the core reservation/handoff token,
+  then one eligibility/infallible-commit pivot freezes the sole import-ledger snapshot. Standalone core
+  uses the same dormant seam; postprocess remains a separate derived-edit operation.
+- Compatibility impact: private pre-release coordinator, retained-store, construction, and
+  publication capability APIs may break; no published compatibility surface or stable wire changes.
+- Required review: real one-coordinator session-owner startup, zero canonical allocation before
+  activation, early/exact/double activation, one-ledger phase/dimension evidence, lane-brand mismatch,
+  independent-prepare rejection, producer-versus-host capability separation, protected terminal
+  isolation, prepared drop, and exact success/rich/minimal handoff.
+- Rationale: one import cannot have two accounting truths, but moving the whole import operation into
+  core would reverse semantic ownership. Linear lanes keep one ledger and one publication boundary
+  while exact later activation preserves budget precision, crate direction, and least authority.
 
 ### 2026-08-01: Protect failure-terminal work inside the caller's hard total
 

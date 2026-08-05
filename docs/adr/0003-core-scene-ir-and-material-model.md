@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-07-08
-updated: 2026-08-01
+updated: 2026-08-05
 authors:
   - Codex
 decision_type: architecture
@@ -41,10 +41,19 @@ keeps the common aggregate and rejects that mutation model.
 into a validated generation. Format-private models cross that boundary only through an opaque,
 single-use, core-owned `SceneConstruction`. The canonical lifecycle has three distinct capabilities:
 
-- `SceneConstruction` retains every unpublished canonical allocation plus validation and publication
-  authority. A trusted producer receives only a bounded authoring surface. Finishing authoring
-  returns a non-owning `SceneDraft` containing the construction brand and canonical directory-slot
-  descriptor; it transfers no retained owner, account, ledger, validation proof, or generation.
+- `SceneConstruction` owns semantic preflight, every unpublished canonical allocation after
+  activation, validation, and canonical-candidate authority. A trusted producer receives only one
+  bounded authoring surface. Before activation, import-bound construction owns no dormant operation
+  authority, canonical table, publication join, or generation reservation. Complete authoring-input
+  preflight returns one opaque `SealedCanonicalPlan` that carries exactly one non-authority,
+  single-use activation request. The matching import outcome owner atomically consumes its dormant
+  scene authority with that request and moves the
+  resulting canonical lane into core for materialization. Finishing authoring returns a non-owning
+  `SceneDraft` containing the construction brand and canonical directory-slot descriptor; it transfers
+  no retained owner, operation context, account, ledger, validation proof, or generation. The
+  construction neither creates a second ledger nor owns outcome-evidence or joint-preparation
+  authority. A standalone construction uses the same preflight/activation seam through a separate
+  core-owned operation adapter with its own real ledger.
 - `ValidatedScene` owns a scene generation plus an unforgeable validation proof. The matching core
   construction lifecycle is the only proof constructor. Import, postprocess, and standalone callers
   may drive that lifecycle through public domain entry points, but cannot submit a draft without its
@@ -55,10 +64,38 @@ single-use, core-owned `SceneConstruction`. The canonical lifecycle has three di
 Preparation consumes the construction owner together with the producer's exact draft result. A
 missing, duplicated, already-consumed, or foreign descriptor cannot publish success. A core failure
 latched while authoring remains authoritative even if producer code catches the returned error or
-returns another value. Core completes central validation and terminal classification before handoff.
-Only the exact success branch may retain canonical ownership and one private generation reservation;
-failure branches structurally retain neither. Handoff is a pure ownership move and constructs
-`ValidatedScene` only for success.
+returns another value. Core completes central validation and seals the canonical success or rejection
+before handoff; the owning operation completes terminal classification during joint preparation.
+Only the exact success domain aggregate may privately pair qualified canonical ownership with one
+core-owned generation handoff token; failure branches structurally retain neither. Handoff is a pure
+two-step ownership move and constructs `ValidatedScene` only for success.
+
+Composed operations use one sealed joint-preparation context owned by the operation domain. Session
+startup creates one outcome owner containing the sole operation ledger, account-bound minimal
+terminal baseline, outcome-evidence authority, terminal-cause latch, joint-preparation authority, and
+one dormant non-copyable scene authority. Startup does not allocate or activate canonical tables, and
+the authority remains inside the outcome owner while core performs complete semantic/envelope/input/
+  capacity/attribution preflight. A successful preflight returns one sealed plan that contains exactly
+  one non-authority, single-use activation request. The outcome owner extracts and consumes that request
+  with the dormant authority exactly once; the remaining plan becomes usable only with the resulting
+  same-brand lane. Ordinary
+rejection before mutation remains `NeverActivated`, uncertain mutation is containment, and success
+moves a brand-coupled canonical lane into core for materialization. That lane cannot prepare or
+publish independently. Before joint preparation, the outcome owner consumes exactly one brand-bound
+canonical disposition: `NeverActivated` with zero canonical retained-output admission/table/
+allocation/commitment, `Rejected` after
+verified cleanup with zero publishable canonical output, or `Candidate` with the sealed validated
+canonical owner. Fatal containment is not a disposition and cannot prepare a terminal. Final
+preparation consumes the exact disposition and matching outcome-evidence candidate. A missing,
+foreign, duplicated, or independently prepared authority, lane, disposition, or candidate fails
+closed. `NeverActivated` still preserves all attempted/consumed preflight work and any released
+transient-scratch evidence; it is not a claim that no work occurred. These disposition names describe
+durable states rather than stable public Rust identifiers.
+
+Import and standalone construction reuse the dormant-plan-activation seam. Postprocess does not:
+it opens a derived `SceneEdit` lane against the input Scene's inherited physical account and lineage,
+then reuses only the operation-owned joint-preparation/pure-handoff primitive. It cannot route a
+derived edit through standalone construction or obtain a fresh dormant source-scene authority.
 
 Opening `SceneEdit` is a derived-operation start against the input Scene's inherited
 `PhysicalStorageAccount`. It performs ADR 0044's shared poison/counter admission before edit work,
@@ -74,32 +111,69 @@ common inspect workflow. `ImportReport::scene()` exposes a read view, so callers
 inspect never handle proof internals. A caller opts into `SceneEdit` only when changing content.
 
 ```mermaid
+flowchart LR
+    S[Session bootstrap<br/>one ledger + one bound host-owned account capability] --> O[Outcome owner<br/>evidence + terminal + joint prepare]
+    O --> P[Dormant single-use scene authority]
+    O -->|selection + effective limits| SC[Core SceneConstruction<br/>no publication authority]
+    SC -->|complete input preflight| CP[Sealed canonical plan]
+    P --> A[Atomic activation]
+    CP --> A
+    A --> N[Canonical disposition<br/>NeverActivated]
+    A --> C[Canonical lane moved to core]
+    C --> R[Canonical disposition<br/>Rejected]
+    C --> CC[Canonical disposition<br/>Candidate]
+    O --> JP[Joint preparation]
+    N --> JP
+    R --> JP
+    CC --> JP
+    JP --> PS[Private exact-success aggregate<br/>operation PreparedSuccess + core handoff token]
+    JP --> PF[PreparedRichFailure or PreparedMinimalFallback]
+```
+
+```mermaid
 stateDiagram-v2
-    [*] --> Building: core opens SceneConstruction
-    Building --> ContainmentFatal: retained construction panic; no reservation
+    [*] --> Dormant: session bootstrap; zero canonical tables
+    Dormant --> NeverActivated: early failure; consume dormant authority
+    Dormant --> Planning: selection + limits; authority stays in outcome owner
+    Planning --> NeverActivated: parse/preflight failure; consume dormant authority
+    Planning --> Planned: seal complete canonical plan
+    Planned --> NeverActivated: activation rejects before mutation
+    Planned --> Building: consume dormant + request; lane moves to core
+    Planned --> ContainmentFatal: activation disposition uncertain
+    Building --> Rejected: verified materialization failure
+    Building --> ContainmentFatal: retained construction panic or uncertain cleanup
     Building --> Draft: finish exact descriptor
-    Draft --> CheckedDraft: matching owner consumes descriptor; central validation
-    Draft --> PreparedRichFailure: missing/foreign/latched failure; no generation
-    Draft --> [*]: validation failure without publishable evidence; no generation
-    CheckedDraft --> Reserved: reserve one output generation
-    CheckedDraft --> PreparedRichFailure: reservation rejection/exhaustion; consume no nonce
-    Reserved --> PreparedSuccess: freeze and classify exact success
-    Reserved --> PreparedRichFailure: later downgrade; burn gap
-    Reserved --> PreparedMinimalFallback: rich-failure preparation fails or non-unwind root fault; burn gap
-    Reserved --> ContainmentFatal: release proof unavailable; burn gap and poison coupled ownership
-    PreparedSuccess --> Validated: infallible reserved-token handoff
-    PreparedSuccess --> [*]: drop; burn private gap
+    Draft --> Rejected: missing/foreign/latched or validation failure
+    Draft --> Candidate: matching owner consumes descriptor; central validation succeeds
+    NeverActivated --> JointPreparing: combine with exact outcome evidence
+    Rejected --> JointPreparing: combine with exact outcome evidence
+    Candidate --> FreezePermit: operation preflights joint destination intent
+    FreezePermit --> Rejected: core generation reservation rejects; consume no nonce
+    FreezePermit --> Reserved: core reserves nonce and splits freeze contribution + handoff token
+    Reserved --> JointPreparing: operation consumes contribution + exact outcome evidence
+    JointPreparing --> PreparedRichFailure: final eligibility + infallible commit; no generation owner
+    JointPreparing --> PreparedMinimalFallback: final eligibility + infallible commit; fallback evidence
+    JointPreparing --> ExactSuccessAggregate: pivot yields operation PreparedSuccess; import pairs matching core token
+    JointPreparing --> ContainmentFatal: release proof unavailable; no exact terminal
+    Reserved --> ContainmentFatal: later uncertainty; burn gap and poison coupled ownership
+    ExactSuccessAggregate --> PublishedOwners: operation pure handoff
+    PublishedOwners --> Validated: core handoff token consumes canonical owner + reserved nonce
+    ExactSuccessAggregate --> [*]: drop aggregate; burn private gap
     PreparedRichFailure --> [*]: pure failure handoff; no generation
     PreparedMinimalFallback --> [*]: pure fallback handoff; no generation
     ContainmentFatal --> [*]: typed fatal containment error; no generation or fallback claim
     Validated --> Editing: begin edit
     Editing --> CheckedNext: validate candidate
-    CheckedNext --> ReservedNext: reserve exactly one final generation
-    CheckedNext --> Validated: validation or reservation failure; no candidate generation
-    ReservedNext --> PreparedSuccessNext: freeze and classify exact success
+    CheckedNext --> EditFreezePermit: operation preflights edit destination/control
+    CheckedNext --> Validated: validation failure; retain input
+    EditFreezePermit --> Validated: core reservation rejects; no nonce
+    EditFreezePermit --> ReservedNext: core reserves nonce and splits contribution/token
+    ReservedNext --> EditCommitIntent: operation consumes edit contribution + evidence
     ReservedNext --> Validated: later downgrade; burn gap and retain input
-    PreparedSuccessNext --> ValidatedNext: infallible reserved-token handoff
-    PreparedSuccessNext --> Validated: drop; burn private gap and retain input
+    EditCommitIntent --> ExactSuccessAggregateNext: pivot yields operation PreparedSuccess; pair edit token
+    ExactSuccessAggregateNext --> PublishedNext: operation pure owner exposure
+    PublishedNext --> ValidatedNext: core token consumes canonical owner + reserved nonce
+    ExactSuccessAggregateNext --> Validated: drop aggregate; burn private gap and retain input
     ValidatedNext --> Editing: begin another edit
 ```
 
@@ -143,23 +217,29 @@ rules. This distinction is part of the canonical aggregate rather than a glTF-on
 Every published scene owns an opaque `SceneGenerationId` that is collision-free and never reused
 within the runtime generation domain. Core's private `SceneGenerationId::allocate()` is fallible and
 returns a linear `ReservedSceneGeneration` rather than a public ID, so nonce acquisition cannot occur
-in the final ownership handoff. Construction preparation classifies the terminal result completely
-during preparation; it never returns one opaque success-capable prepared value whose outcome is
-decided only during handoff. The reservation typestate obeys this lifecycle:
+in the final ownership handoff. The matching operation outcome owner classifies the terminal result;
+core alone reserves and interprets generation identity. Neither crate calls upward into the other:
+the domain adapter sequences sealed tokens in the existing dependency direction. The reservation
+typestate obeys this lifecycle:
 
-1. after complete central validation, publication preparation attempts checked generation
-   reservation as its final fallible identity acquisition before attribution freeze; exhaustion or
-   collision rejection leaves the generation domain unchanged;
-2. successful reservation consumes a never-reused nonce but does not construct, expose, or publish a
-   `SceneGenerationId`;
-3. preparation finishes the final control downgrade and returns exactly one typed terminal variant:
-   `PreparedSuccess`, `PreparedRichFailure`, or `PreparedMinimalFallback`; only the exact
-   `PreparedSuccess` structurally owns the reservation together with the validated, destination-
-   qualified but still domain-unexposed canonical owner, while both failure wrappers structurally
-   contain no reservation or canonical owner; and
-4. `PreparedSuccess` handoff consumes the reservation by ownership conversion into the public
-   `SceneGenerationId`, constructs the only new `ValidatedScene` proof, and performs no allocation,
-   lock, checked counter transition, retry, or other fallible state change.
+1. after complete central validation and outcome-evidence assembly, the operation outcome owner
+   preflights every pre-generation destination/control condition and returns one opaque single-use
+   freeze permit. The permit applies no destination commitment and grants no generation authority;
+2. the domain adapter passes that permit into the candidate's one-shot core method. Reservation
+   rejection or exhaustion consumes no nonce and returns a brand-bound `Rejected` disposition plus
+   the matching operation failure contribution, so ordinary rich-failure preparation retains its
+   freeze/evidence authority;
+3. successful reservation consumes one never-reused nonce, then core splits the generation-ready
+   state into an operation-understandable freeze contribution and a core-owned handoff token. The
+   latter retains the reservation and validation proof; operation never interprets or constructs it;
+4. the operation outcome owner consumes the freeze contribution with exact outcome evidence through
+   the final eligibility/infallible-commit pivot. Exact failure wrappers structurally have no core
+   handoff token or canonical owner. Exact success is privately paired with the matching core handoff
+   token until handoff; and
+5. operation's pure handoff exposes the already qualified canonical owner, after which the matching
+   core token consumes that owner and reservation into `SceneGenerationId` plus `ValidatedScene`.
+   Both moves are allocation-free, lock-free, callback-free, accounting-free, and infallible; no
+   intermediate is public.
 
 Reservation rejection or exhaustion consumes no nonce and is classified as an ordinary rich failure
 with preserved evidence and zero canonical output. It does not by itself require the minimal
@@ -228,9 +308,9 @@ postprocess one atomic mutation boundary. Chosen.
 - All format crates target the same Rust-owned aggregate without leaking backend types.
 - Breaking changes are required: direct field mutation and constructors for validated result types
   are removed rather than preserved behind compatibility aliases.
-- Finishing authoring produces only a non-owning, branded `SceneDraft` descriptor. Every publication
-  path consumes that descriptor with its matching construction owner or validates an edit candidate,
-  even when a producer performed local checks.
+- Finishing authoring produces only a non-owning, branded `SceneDraft` descriptor. Every canonical-
+  success publication path consumes that descriptor with its matching construction owner or validates
+  an edit candidate, even when a producer performed local checks.
 - Successful preparation may consume an unpublished generation nonce; aborting after reservation
   burns a never-reused gap rather than weakening the handoff or publishing partial identity.
 - Editors must retain or consume explicit remaps when they keep IDs across generations.
@@ -243,30 +323,33 @@ postprocess one atomic mutation boundary. Chosen.
 | Edit transactions duplicate large data | High | Share unchanged storage and allocate only affected replacements; peak-live accounting remains mandatory. |
 | Internal code bypasses proof construction | High | Keep proof constructors private, require the matching construction owner or edit transaction as the legal minting path, and add compile-fail/public-API tests. |
 | Validator and IR drift | High | Every new field lands with invariant tests and validator coverage in the same change. |
-| Generation allocation fails after publication evidence is frozen | Critical | Reserve `ReservedSceneGeneration` as the final fallible pre-freeze identity acquisition; rejection/exhaustion becomes a rich failure with no nonce, later freeze/preparation failure may burn a successful reservation, and handoff only consumes exact `PreparedSuccess`. |
+| Generation allocation fails after destination commitment or leaks into operation | Critical | Operation first issues a zero-commit freeze permit; core alone rejects or reserves/splits the generation-ready value. Operation receives only the freeze contribution, while the private domain aggregate retains the core handoff token. Later preparation may burn the gap, and only paired pure core handoff publishes it. |
 | Failed preparation reuses or exposes a reserved nonce | Critical | The linear private reservation burns on drop, has no public conversion except prepared handoff, and never returns a nonce to the allocator. |
-| A success-capable prepared wrapper defers terminal classification to handoff | Critical | Preparation completes control downgrade and returns exact success, rich-failure, or minimal-fallback wrappers; only exact success can contain `ReservedSceneGeneration`. |
+| A success-capable prepared wrapper defers terminal classification to handoff | Critical | Operation preparation completes control downgrade and returns exact success, rich-failure, or minimal-fallback wrappers. Only the private domain success aggregate may pair operation success with a core generation handoff token; operation wrappers never contain `ReservedSceneGeneration`. |
 | A retained-builder panic is reported as a clean fallback | Critical | ADR 0044 returns typed fatal containment; core constructs no fallback, generation, or proof from that path. |
 | A derived edit starts or commits through a poisoned account clone | Critical | begin-edit and final publication eligibility linearize against ADR 0044's one shared latch; poison-first has zero work/refcount/allocation effects, start/retain-admission-first retains charge and fails finalization before handoff, and no reset/reuse API exists |
+| An import-bound construction silently creates a second ledger, activates canonical storage before exact input planning, or prepares it alone | Critical | Session startup keeps one dormant scene authority under the sole operation owner while core produces only a sealed preflight plan. Exact activation consumes that plan plus authority once and moves only the resulting lane into core. The lane has no independent prepare/handoff path. Integration plus compile-fail tests reject nested-ledger startup, early/double activation, foreign disposition/candidate pairing, and direct canonical publication. |
 
 ## Success Metrics
 
 | Metric | Target | Measurement |
 | --- | --- | --- |
 | Generation isolation | Stale, foreign-owner, and sibling-branch handles are rejected before lookup | exact/stale/branch API tests |
-| Generation publication | exhaustion becomes an ordinary rich failure before attribution freeze and consumes no nonce; successful handoff publishes exactly one reserved never-reused token; failed/prepared-drop paths publish none | exhaustion, cancellation, caught-unwind, and prepared-drop probes |
-| Terminal classification | only exact `PreparedSuccess` can own one generation reservation; exact rich-failure/minimal-fallback wrappers structurally cannot; retained-builder containment is not a prepared publication | API-shape, downgrade, startup-side, uncertain-cleanup, and compile-fail probes |
+| Generation publication | freeze-permit/core reservation rejection becomes ordinary rich failure with no nonce; only the privately paired core handoff publishes one never-reused token after operation commit, while failed/prepared-drop paths publish none | exhaustion, cancellation, caught-unwind, and paired prepared-drop probes |
+| Terminal classification | only the exact success domain aggregate can pair operation-prepared canonical ownership with one core-owned generation handoff token; exact rich-failure/minimal-fallback wrappers structurally cannot; retained-builder containment is not a prepared publication | API-shape, downgrade, startup-side, uncertain-cleanup, and compile-fail probes |
 | Poisoned lineage | every clone of one Scene account rejects new derived edits after poison; a pre-admitted edit cannot publish once poison linearizes before final eligibility | two-order barriers, input digest/proof/refcount/allocator probes, account snapshots, and no-bypass API scans |
 | Validation complexity | Complete validation visits each graph edge, entity, reference, and payload cell at most a constant number of times | deterministic validator work counters |
 | Publication integrity | Only the matching core construction or edit transaction can drive central validation and mint proof; import finalization and edit commit may publish only that successful result | compile-fail, foreign/missing-draft, and rollback tests |
+| Composed ledger uniqueness | every import exposes exactly one operation-ledger snapshot; dormant-authority activation and later canonical work contribute through that ledger rather than a nested core ledger | import-owned session-owner integration, early/exact/double activation probes, snapshot cardinality assertions, and dependency/API-shape scans |
 
 ## Acceptance Criteria
 
 - External code cannot mutate a validated collection or construct `ValidatedScene` directly; it can
   obtain one only by completing the matching core construction or a validated edit transaction.
-- A finished `SceneDraft` descriptor exposes no owner or generation; construction preparation reserves a private
-  never-reused nonce before attribution freeze, and only infallible handoff converts it into the
-  `SceneGenerationId` carried by the new `ValidatedScene`.
+- A finished `SceneDraft` descriptor exposes no owner or generation. Operation issues a zero-commit
+  freeze permit, core alone reserves and splits the private nonce, operation commits only the freeze
+  contribution, and the paired pure core handoff converts the token into the `SceneGenerationId`
+  carried by the new `ValidatedScene`.
 - Missing, duplicated, already-consumed, and foreign draft descriptors cannot publish success. A
   latched construction failure remains authoritative even when producer code catches the immediate
   error, and panic after the continuation enters its consuming transition fails closed rather than
@@ -280,10 +363,11 @@ postprocess one atomic mutation boundary. Chosen.
   leak claim; abort/double-panic/exit/OOM fixtures are process-isolated. Separate later-preparation-failure,
   cancellation, caught-unwind, and prepared-drop tests prove any path after successful reservation may burn
   an invisible gap, while no failed path publishes/reuses an ID or constructs a proof.
-- Preparation returns exact `PreparedSuccess`, `PreparedRichFailure`, or
-  `PreparedMinimalFallback` terminal wrappers. Only exact success can bind one
-  `ReservedSceneGeneration`; both failure wrappers structurally contain none, and each exact handoff
-  is a pure consuming split rather than terminal classification.
+- Operation preparation returns exact `PreparedSuccess`, `PreparedRichFailure`, or
+  `PreparedMinimalFallback` wrappers and no core generation value. Only the private domain exact-
+  success aggregate may pair operation success with one `SceneHandoffToken`; failure aggregates
+  structurally contain neither token nor canonical owner. Operation owner exposure and core proof
+  conversion are pure consuming moves rather than terminal classification.
 - Every importer success and postprocess success contains a valid proof from the central validator.
 - Root, reachability, unique derived parentage, duplicate child edges, and every dense reference are
   centrally validated.
@@ -304,8 +388,45 @@ postprocess one atomic mutation boundary. Chosen.
 - `Absent` and `PresentEmpty` survive validation and semantic digesting as distinct values without a
   physical zero-length payload allocation.
 - Public API tests prove the import-inspect path does not require builder, proof, or ledger internals.
+- Import-bound construction tests prove the session operation is the only ledger owner, bootstrap
+  issues only one dormant scene authority and retains it while core seals the complete input plan.
+  Activation consumes that authority plus request only after selection, effective-limit freeze, and
+  complete preflight, then moves the brand-coupled canonical lane into core. Early failures consume the
+  dormant authority into `NeverActivated`, canonical rejection
+  consumes the lane into `Rejected`, and success seals `Candidate`; only the matching outcome owner
+  can combine one of those dispositions with the outcome-evidence candidate. Standalone core tests
+  prove the separate adapter still owns one real ledger rather than a no-op attribution path.
 
 ## Amendment History
+
+### 2026-08-05: Bind canonical construction to one joint publication context
+
+- Affected headings: frontmatter `updated`, `Decision`, composition diagram, risks, success metrics,
+  and acceptance criteria.
+- Previous rule: core-owned construction was required to bind to an import session, but the Accepted
+  text did not distinguish canonical-lane ownership from ownership of the whole import operation. An
+  implementation could therefore share only the physical account while silently creating a second
+  construction ledger, or let canonical storage prepare independently from outcome evidence.
+- New rule: bootstrap creates one outcome owner with the sole import ledger, minimal terminal,
+  outcome-evidence/terminal/joint-preparation authority, and one dormant scene authority. The authority
+  remains in that owner while core produces a sealed complete-input plan containing exactly one
+  non-authority activation request; exact activation consumes the dormant authority and that request,
+  then binds the remaining plan to the resulting canonical lane. Finalization consumes exactly one brand-
+  bound `NeverActivated`, `Rejected`, or `Candidate` disposition. A candidate may cross the operation
+  freeze-permit/core-reservation seam, after which joint preparation and the paired pure core handoff
+  are the only path to a validated generation. The operation `PreparedSuccess` wrapper never owns the
+  reserved generation; only an import-private exact-success aggregate pairs it with the matching core
+  handoff token. This rule supersedes the older 2026-07-18 amendment's prepared-wrapper ownership
+  wording. Standalone core construction is a separate real adapter
+  over the same activation seam, not the import path and not a no-op ledger.
+- Compatibility impact: private pre-release operation/core/import construction and publication APIs
+  may break; no stable wire or published compatibility surface exists.
+- Required review: real import-owned session-owner integration, duplicate-ledger rejection,
+  dormant/exact/double activation, lane-brand mismatch, independent-prepare compile-fail coverage,
+  exact success/rich/minimal publication, drop order, and standalone ledger evidence.
+- Rationale: canonical proof ownership and import outcome ownership are different responsibilities.
+  A dormant single-use authority plus exact later activation preserves both without coarse bootstrap
+  reservation, a migration-only attach seam, two ledgers, or partial publication.
 
 ### 2026-08-01: Make canonical construction a core-owned opaque continuation
 
@@ -417,9 +538,11 @@ postprocess one atomic mutation boundary. Chosen.
   acquisition for a provisional success. Preparation completes terminal classification as exact
   success, rich failure, or minimal fallback before handoff. Reservation rejection/exhaustion
   consumes no nonce and becomes an ordinary rich failure; only failure to prepare that downgraded
-  evidence or an unrecoverable builder/root integrity fault selects minimal fallback. Only exact
-  `PreparedSuccess` owns `ReservedSceneGeneration`; failure wrappers structurally contain none.
-  Handoff is a pure consuming split that constructs `ValidatedScene` only for exact success. Edit step
+  evidence or an unrecoverable builder/root integrity fault selects minimal fallback. At that time the
+  exact `PreparedSuccess` wrapper was described as owning `ReservedSceneGeneration`; the 2026-08-05
+  amendment supersedes that ownership detail by pairing an operation wrapper with a core token only
+  inside the private exact-success aggregate. Failure wrappers structurally contain neither. Handoff
+  is a pure consuming split that constructs `ValidatedScene` only for exact success. Edit step
   states use report-scoped typed ordinals/paths and every changed edit publishes exactly one final
   generation; only its composed input-to-final remap is generation-qualified. Canonical headers also
   distinguish `Absent` from `PresentEmpty` without zero-length physical blocks.
