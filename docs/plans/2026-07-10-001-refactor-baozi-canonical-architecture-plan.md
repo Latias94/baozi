@@ -52,7 +52,7 @@ Assimp demonstrates the maintenance cost of those constraints; Baozi should borr
 - R1. Format detection must use a shared bounded probe whose exhaustion is an inconclusive result rather than a global IO failure, and detection order must not change the selected result.
 - R2. Every input-controlled parser or validator loop must either consume input or spend a bounded operation budget. Individual graph traversals are iterative and bounded; online dependency admission may revisit existing reachability under the explicit `O(E * (N + E))` worst-case contract in ADR 0041, while whole-graph validation and class construction remain linear before their separately bounded digest ordering. Separate node, edge, depth, and work limits are mandatory.
 - R3. External dependency access by first-party parsers must flow through one central required/optional resource API that binds authorization to the opened object and enforces path, scope, policy, byte, open, depth, and cancellation rules before backend IO.
-- R4. The facade must accept success only after `ImportSession` consumes the exact matching core-owned `SceneConstruction` and importer-returned descriptor, completes central validation, and constructs the validated-stage report; a detached draft cannot be independently validated, and in-process extension code is not treated as a sandboxed adversary.
+- R4. The facade must accept success only after one `ImportSession` outcome owner activates the exact sealed core plan, core consumes the matching importer-returned descriptor into a centrally validated candidate, operation jointly commits canonical ownership with outcome evidence, and the paired core handoff constructs `ValidatedScene`; a detached draft cannot be independently validated, and in-process extension code is not treated as a sandboxed adversary.
 
 **Import lifecycle and resource evidence**
 
@@ -143,10 +143,10 @@ Assimp demonstrates the maintenance cost of those constraints; Baozi should borr
 - KTD13. Keep parser-local tests for grammar details and add facade/session contract tests for validation, policy, statistics, stage, and failure evidence.
 - KTD14. Use checked-in golden snapshots with bounded previews plus a stable digest of complete canonical values; counts or key names alone are insufficient evidence.
 - KTD15. Make format maturity, evidence authority/issuer, public feature membership, platform support, fuzz status, and package publishability structured data checked by an internal xtask and CI. `baozi-xtask` consumes explicit conformance and evidence inventories only; it does not scan ADR text, ADR indexes, or repository history for routine CI or stage transitions. (session-settled: user-directed — chosen over ADR-scanning xtask gates: they are slow and do not prove implementation conformance.)
-- KTD16. Create ImportSession before any open or detection work. After selection it owns exactly one opaque core `SceneConstruction` bound to the session account, ledger, control, manifest ordering, and publication context. It exposes only a capability-limited ParseScope that borrows the authoring surface; parsers cannot access raw AssetIo, move/finalize the construction owner, construct reports or stages, or finalize validation.
+- KTD16. Create `ImportSession` before any open or detection work. Bootstrap one outcome owner containing the sole session ledger/coordinator, bound physical-account capability, minimal terminal/evidence baseline, outcome-evidence and joint-preparation authority, and one dormant single-use scene authority with zero canonical tables. After selection, core creates an authority-free `SceneConstruction`; complete preflight returns a sealed plan containing exactly one non-authority activation request. Only the outcome owner may consume that request with the dormant authority and move the resulting same-brand canonical lane into core. `ParseScope` exposes only bounded authoring operations; parsers cannot access raw `AssetIo`, any operation owner, retained authority, report/stage construction, validation, or publication.
 - KTD17. Treat asset bytes, reference strings, and returned Scene data as untrusted. Treat in-process importer, AssetIo, resolver, and opaque decode implementations as trusted extension code. Only a caught single non-builder unwind may publish minimal fallback after complete cleanup and zero live attribution are verified. A retained canonical/evidence/report builder panic before startup acceptance returns the owner-specific start error; the same panic after startup returns typed fatal containment with coupled ownership and no fallback. Uncertain release keeps payload/lease/attribution coupled and poisoned and returns typed fatal containment, while abort/double panic/exit/OOM, hostile plugins, and hard-bounded opaque decode require process isolation.
 - KTD18. Split resource evidence into exactly five classes: non-refundable `Attempted`, non-refundable `Consumed`, releasable live attribution with peak-live, `CommittedCanonicalOutput`, and `PublishedOutcomeEvidence`. Track Baozi-owned phase storage and declared opaque allowances separately so snapshots, normalized models, canonical output, outcome evidence, and scratch storage cannot silently multiply memory or conflate failure evidence with Scene output. An opaque allowance remains accounting evidence rather than proof of actual backend memory.
-- KTD19. Use one opaque core-owned `SceneConstruction` continuation as the sole pre-validation API; its private operation mechanism and retained owner never cross core/import. `SceneDraft` carries only its construction brand and canonical directory-slot descriptor, and `ValidatedScene` is the public invariant-bearing result. No legacy `SceneBuilder` adapter or legacy-to-canonical copy path survives the public cutover. Structural edits consume validation proof through SceneEdit and return a new proof, complete remaps, and derived-data invalidation. (session-settled: user-directed — chosen over a compatibility adapter: fearless refactoring requires one production Scene lifecycle.)
+- KTD19. Use one opaque core-owned, authority-free `SceneConstruction` as the sole pre-validation API. The import outcome owner and dormant scene authority never enter core; only the sealed activation request crosses core to import, and only the resulting brand-coupled canonical lane crosses import to core for materialization. These intermediate values remain hidden from parsers and public callers. `SceneDraft` carries only its construction brand and canonical directory-slot descriptor, and `ValidatedScene` is the public invariant-bearing result. No legacy `SceneBuilder` adapter or legacy-to-canonical copy path survives the public cutover. Structural edits use a derived `SceneEdit` lane over the input account/lineage and reuse only the joint-commit/pure-handoff primitive; they do not obtain a dormant source-construction authority. (session-settled: user-directed — chosen over a compatibility adapter: fearless refactoring requires one production Scene lifecycle.)
 - KTD20. Keep validation and post-discovery graph/class construction linear in their declared inputs, but state hostile online dependency admission honestly: the portable bounded reachability algorithm has worst-case `O(E * (N + E))` total work before final `O(N + E + B)` DAG/class construction and `O(E log E + N log N)` fixed-digest ordering. Explicit work limits, not timeouts, are the primary bound.
 - KTD21. Make postprocess steps transactional at the affected-buffer level: preflight and reserve first, construct replacements off to the side, validate, then atomically swap. Failure or cancellation discards staging without cloning or partially publishing the whole Scene.
 - KTD22. Preserve an acyclic crate graph: `baozi-operation` is a runtime-neutral dependency leaf that owns `OperationControl`, reservation/ledger state machines, and their coordinator; core owns IR, validation proof, remap, and domain errors; io owns paths, backends, handles, and IO-local hard caps; import owns sessions, request limits/effective budgets, conformance/loss policy, and outcomes; postprocess owns plans and reports; facade constructs or re-exports common policy and alone composes public errors.
@@ -180,7 +180,7 @@ Assimp demonstrates the maintenance cost of those constraints; Baozi should borr
   exact/transient RSS; hard process memory requires an OS/subprocess limit. Physical zero-length
   blocks are forbidden; core headers preserve `Absent` versus `PresentEmpty`. Physical layout, slot
   order, capacities, qualification evidence, and padding never enter the semantic Scene digest.
-- KTD34. Reserve one private never-reused `ReservedSceneGeneration` as the final fallible pre-commit identity acquisition for provisional success. Rejection or exhaustion consumes no nonce and enters ordinary rich-failure preparation with zero canonical output; only failure to append/validate/prepare that evidence, a root/equivalent integrity fault, or a caught single non-builder unwind with verified cleanup uses minimal fallback. A retained canonical/evidence/report builder panic before startup acceptance returns the owner-specific start error; after startup it returns `FinalizationContainmentError` with no fallback, prepared wrapper, generation, proof, remap, or handoff. Preparation completes final downgrade into exact `PreparedSuccess`, `PreparedRichFailure`, or `PreparedMinimalFallback`, applies canonical/outcome destination commitments, and reaches zero operation live with no pending or prepared-attribution token. Exact wrappers privately own already destination-qualified but domain-unexposed publication owners; only exact success structurally owns the reservation. Any later destination-commit/ledger/product-graph failure, cancellation, caught non-builder unwind, or prepared-success drop may burn one invisible gap. A finite protected terminal allowance is included in the caller's total work cap, isolated from ordinary capabilities, retained until exact success is irreversible or a no-more-work failure path is complete, and reported through the existing Attempted/Consumed classes. The first trusted typed cause is sticky. Pure preflight precedes capability consumption; safe recovery is exactly `Retry` or `FallbackOnly`, while uncertain in-process cleanup is not a prepared outcome: ownership/charge remain coupled and poisoned and the API returns `FinalizationContainmentError` with no recovery owner. Exact handoff purely consumes the wrapper, exposes/moves committed/published owners, constructs `SceneGenerationId`/`ValidatedScene` only for success, and mutates no attribution or counter; prepared drop destroys unexposed publication owners in storage-before-account order without reopening the ledger or exposing a terminal.
+- KTD34. After core has produced a centrally validated canonical `Candidate` and the outcome owner has completed evidence and destination preconditions, operation issues one zero-commit `SceneFreezePermit`. Core alone consumes it for the final fallible identity acquisition: rejection or exhaustion consumes no nonce and returns `Rejected` for ordinary rich-failure preparation with zero canonical output; success splits an operation-understandable freeze contribution from one core-owned `SceneHandoffToken` containing the reserved never-reused generation and proof. Operation combines only the contribution and exact outcome evidence into a closed zero-commit `JointCommitIntent`. Every fallible allocation, validation, account/control observation, callback, and cleanup decision precedes final account eligibility; eligibility success immediately enters one non-returning allocation-, lock-, callback-, and panic-free suffix that applies both destination commitments, reaches zero operation live, freezes the sole ledger snapshot, and constructs exact `PreparedSuccess`, `PreparedRichFailure`, or `PreparedMinimalFallback`. No post-eligibility error, unwind, containment branch, or stored qualification token exists. Operation wrappers own no core generation value; only an import-private exact-success aggregate pairs `PreparedSuccess` with the matching `SceneHandoffToken`, and dropping that aggregate may burn one invisible gap. Its two pure consuming handoffs expose the committed owners and then let core construct `SceneGenerationId`/`ValidatedScene` without allocation, validation, accounting, control polling, callback, or failure. A finite protected terminal allowance remains inside the caller's total work cap, unavailable to ordinary capabilities, retained until exact success is irreversible or a no-more-work failure path is complete, and reported through the existing Attempted/Consumed classes. The first trusted typed cause is sticky. Pure preflight precedes capability consumption; safe recovery is exactly `Retry` or `FallbackOnly`. A retained canonical/evidence/report builder panic before startup acceptance returns the owner-specific start error; after startup, or whenever in-process cleanup is uncertain, ownership and charge remain coupled and poisoned and the API returns `FinalizationContainmentError` with no fallback, prepared wrapper, generation/proof/remap, recovery owner, or handoff.
 - KTD35. Keep low-level account APIs explicit while making the common facade progressive: one long-lived runtime/importer object owns a bounded factory derived from a finite documented resource profile and creates one private account per import. No global or per-request factory exists; an advanced explicit account represents one aggregate retention domain but never grants canonical lineage.
 - KTD36. Keep operation attribution and physical retention as separate accounting planes. After complete pure preflight, admit the complete attribution aggregate under the ledger lock. Ledger control/bookkeeping allocation may follow only that complete first-plane capacity admission, remains structurally owned by the provisional graph, and appears in no physical manifest or charge. Before physical entry, each typed bookkeeping backing-allocation failure destroys every partial backing and rolls back the complete ledger aggregate under one lock. After complete bookkeeping materialization, admit the complete physical aggregate under the account lock. From physical transition entry onward, only typed no-mutation second-plane rejection is rollback-eligible; panic, poison observed after mutation, or uncertain disposition preserves coupled attribution/physical owners and fails closed without refund. The private guard exposes no accepted operation/session or retained payload/evidence allocator entry before both planes succeed. The locks are never nested and the internal snapshots have no common linearization point; only external acceptance is atomic. Treat `StoreKeyDomain` as a process-local minting/anti-confusion authority: the Baozi-owned result/evidence owner retains the host domain anchor and immutable normalized mapping through query lifetime, plugins receive only host-minted accepted keys while foreign-domain keys reject, and runtime brands never enter semantic transcripts, digests, wire, cache, or build identity.
 
@@ -200,34 +200,52 @@ Assimp demonstrates the maintenance cost of those constraints; Baozi should borr
 
 ```mermaid
 flowchart TB
-  Entry[Facade read request] --> Session[Create import session and outcome builder]
+  Entry[Facade read request] --> Session[Create import session<br/>sole outcome owner + dormant scene authority]
   Session --> Snapshot[Open and bound primary snapshot once]
   Snapshot --> Probe[Build immutable shared Probe]
   Probe --> Select[Select or force format with evidence]
-  Select --> Scope[Create capability-limited ParseScope]
-  Scope --> Budget[Preflight and reserve bounded work]
-  Budget --> Parse[Parse and increment attempted or consumed work]
-  Parse --> Draft[Build generation-free SceneDraft]
-  Draft --> Validate[Bounded structural and semantic validation]
-  Validate -->|valid| Prepare[Finish manifest and all fallible publication checks]
-  Prepare --> ReserveGeneration[Reserve never-reused generation nonce]
-  ReserveGeneration --> Freeze[Freeze canonical/evidence attribution; live = 0]
-  Freeze -->|failure after reservation; burn gap| Failure
-  Freeze --> Handoff[Pure reserved-token and ownership handoff]
+  Select --> Scope[Create ParseScope + authority-free SceneConstruction]
+  Scope --> Parse[Parse normalized input and spend bounded work]
+  Parse --> Plan[Core complete authority-free canonical preflight]
+  Plan --> Activate[Outcome owner consumes request + dormant authority]
+  Activate --> Build[Move same-brand lane to core and materialize]
+  Build --> Draft[Return descriptor-only SceneDraft]
+  Draft --> Validate[Consume exact descriptor; central validation -> Candidate]
+  Validate --> Prepare[Finish manifest, evidence, and destination preconditions]
+  Prepare --> Permit[Operation issues zero-commit freeze permit]
+  Permit --> ReserveGeneration[Core rejects without nonce or splits contribution + handoff token]
+  ReserveGeneration --> Intent[Operation builds zero-commit joint intent]
+  Intent --> Commit[Final eligibility + infallible no-fail commit; live = 0]
+  Commit --> Aggregate[Pair PreparedSuccess + core token privately]
+  Aggregate --> Handoff[Pure operation owner exposure + core proof handoff]
   Handoff --> Success[Validated ImportReport]
-  Snapshot -->|failure| Failure[ImportFailure with evidence]
-  Select -->|failure| Failure
-  Parse -->|failure or cancel| Failure
-  Validate -->|invalid| Failure
-  Prepare -->|failure| Failure
-  ReserveGeneration -->|rejected/exhausted; consume no nonce| Failure
+  Snapshot -->|verified failure| NeverActivated[Canonical disposition<br/>NeverActivated]
+  Select -->|verified failure| NeverActivated
+  Parse -->|failure or cancel| NeverActivated
+  Plan -->|reject or cancel| NeverActivated
+  Activate -->|verified reject before mutation| NeverActivated
+  NeverActivated --> Failure[ImportFailure with evidence]
+  Activate -->|uncertain mutation| Containment[FinalizationContainmentError]
+  Build -->|verified reject| Rejected[Canonical disposition<br/>Rejected]
+  Build -->|panic or uncertain cleanup| Containment
+  Validate -->|invalid| Rejected
+  Prepare -->|verified failure; discard candidate| Rejected
+  Prepare -->|uncertain cleanup| Containment
+  ReserveGeneration -->|rejected/exhausted; consume no nonce| Rejected
+  Intent -->|verified pre-eligibility failure| Rejected
+  Intent -->|uncertain cleanup| Containment
+  Rejected --> Failure
+  Aggregate -->|drop| Discard[Destroy unexposed owners; burn private gap<br/>no terminal exposed]
   Success --> Compile[Compile optional typed postprocess plan]
   Compile --> Execute[Execute steps with budgets and control]
   Execute --> FinalValidate[Final validation]
-  FinalValidate --> ProcessReserve[Reserve one final Scene generation]
-  ProcessReserve --> ProcessFreeze[Freeze output/evidence attribution]
-  ProcessFreeze -->|failure after reservation; burn at most one invisible gap| ProcessFailure
-  ProcessFreeze --> ProcessHandoff[Pure handoff]
+  FinalValidate --> ProcessPermit[Issue derived-edit freeze permit]
+  ProcessPermit --> ProcessReserve[Core splits edit contribution + token]
+  ProcessReserve --> ProcessIntent[Build zero-commit edit intent]
+  ProcessIntent --> ProcessCommit[Final eligibility + infallible commit]
+  ProcessCommit --> ProcessAggregate[Pair exact edit success + core token]
+  ProcessAggregate -->|drop| ProcessDiscard[Destroy unexposed edit output; burn gap<br/>retain input; no terminal exposed]
+  ProcessAggregate --> ProcessHandoff[Pure owner/proof handoff]
   ProcessHandoff --> Output[Validated PostProcessReport]
   Compile -->|conflict| ProcessFailure[Postprocess failure evidence]
   Execute -->|failure or cancel| ProcessFailure
@@ -342,7 +360,7 @@ flowchart TB
 | Self-attested third-party maturity appears first-party verified | Users rely on a support promise Baozi did not test | Store level and issuer authority separately; only managed exact-identity evidence may construct `BaoziVerified`. |
 | glTF backend still aborts under sanitizer | Cannot enter first-party inventory or public reachability | Keep the slice disabled and unregistered; harden, replace, or process-isolate it and rerun baseline admission before restoring the public facade feature. |
 | Shared Scene payload is charged once per generation, loses its charge, or crosses an unauthorized lineage | Host limits either reject valid edits or undercount retained memory; independent Scenes can smuggle storage | Give every allocation one lifetime-bound physical account, keep logical/operation/physical metrics typed separately, require exact-input lineage plus fresh target-local slots, and require a complete independently admitted copy across accounts. |
-| Generation exhaustion occurs after attribution freeze or consumes a nonce on rejection | Handoff becomes fallible or failed operations create unbounded avoidable identity gaps | Make atomic reservation the final fallible pre-freeze identity acquisition; rejection/exhaustion consumes no nonce, while any later preparation failure/cancellation/caught-unwind/prepared drop may burn an invisible never-reused gap. |
+| Generation exhaustion occurs after destination commitment, rejection consumes a nonce, or a post-eligibility failure branch exists | Handoff becomes fallible, a half-published terminal escapes, or failed operations create avoidable identity gaps | Issue a zero-commit freeze permit before core reservation; rejection/exhaustion consumes no nonce. After a successful reservation, a later pre-eligibility preparation failure, cancellation, caught unwind, or private exact-success aggregate drop may burn one invisible never-reused gap. Eligibility success has no error, unwind, containment, or stored-token branch. |
 | Allocator capacity exceeds the admitted retained footprint | A valid API path silently undercharges live physical storage | Govern `CapacityPlan` by the pinned capacity policy, match strict evidence through the separate store/policy source anchor, charge the full envelope before allocation, retain that conservative charge, and destroy over-envelope storage before owner release. |
 | Facade construction creates a global, unbounded, or per-request account factory | Common workflows bypass aggregate host limits or multiply control storage | Require one long-lived facade runtime from a finite documented profile, one bounded retained factory, and private per-import accounts; keep advanced explicit accounts as deliberate retention domains only. |
 | A format omits or order-dependently hashes one dependency | Cooker artifacts are falsely reproducible | Centralize graph/manifest finalization in `ImportSession`, require one terminal edge outcome, and use permutation plus one-field mutation vectors. |
@@ -417,18 +435,23 @@ flowchart TB
 - **Goal:** Atomically replace the old geometry, material/texture, skin/morph/animation, identity, validation, and derived-data model and restore a green workspace before semantic format work continues.
 - **Requirements:** R2, R4, R6-R7, R9-R14, R19, R21, AE7-AE10, AE12, AE17.
 - **Dependencies:** U3, U3.5.
-- **Files:** `Cargo.toml`, `crates/baozi-operation/Cargo.toml`, `crates/baozi-operation/src/`, `crates/baozi-core/Cargo.toml`, `crates/baozi-core/src/scene.rs`, `crates/baozi-core/src/identity.rs`, `crates/baozi-core/src/shared_storage.rs`, `crates/baozi-core/src/material.rs`, `crates/baozi-core/src/validation.rs`, `crates/baozi-core/src/lib.rs`, `crates/baozi-core/src/canonical_scene/store/api.rs`, `crates/baozi-core/src/canonical_scene/store/api/continuation.rs`, new focused core modules under `crates/baozi-core/src/`, `crates/baozi-core/tests/scene_validation.rs`, new tests under `crates/baozi-core/tests/`, `crates/baozi-test-support/src/snapshot.rs`, `crates/baozi-import/src/`, `crates/baozi-postprocess/src/`, `crates/baozi-format-stl/src/`, `crates/baozi-format-obj/src/`, `crates/baozi-format-ply/src/`, `crates/baozi-format-gltf/src/`, `crates/baozi/src/`, affected `fuzz/fuzz_targets/`, `crates/baozi-xtask/src/`, new `docs/conformance/u4c-metrics.toml`, `docs/adr/0003-core-scene-ir-and-material-model.md`, `docs/adr/0020-import-lifecycle-and-report-contract.md`, `docs/adr/0022-per-import-resource-ledger-and-budget-accounting.md`, `docs/adr/0032-postprocess-remap-and-derived-data-contract.md`, historical `docs/adr/0042-shared-canonical-storage-accounts-and-generation-lineage.md`, `docs/adr/0044-retained-physical-storage-ownership-and-account-lineage.md`, `docs/research/fallible-shared-storage-admission.md`.
-- **Approach:** Use one opaque core-owned `SceneConstruction` continuation as the only
-  pre-validation API; `SceneDraft` carries only a construction brand and canonical directory-slot
-  descriptor, and `ValidatedScene` is the invariant-bearing result. Model logical Mesh and MeshPrimitive under the ownership/cardinality
+- **Files:** `Cargo.toml`, `crates/baozi-operation/Cargo.toml`, `crates/baozi-operation/src/`, `crates/baozi-core/Cargo.toml`, `crates/baozi-core/src/scene.rs`, `crates/baozi-core/src/identity.rs`, `crates/baozi-core/src/shared_storage.rs`, `crates/baozi-core/src/material.rs`, `crates/baozi-core/src/validation.rs`, `crates/baozi-core/src/lib.rs`, `crates/baozi-core/src/canonical_scene/store/api.rs`, focused modules under `crates/baozi-core/src/canonical_scene/store/api/` and `crates/baozi-core/src/`, `crates/baozi-core/tests/scene_validation.rs`, new tests under `crates/baozi-core/tests/`, `crates/baozi-test-support/src/snapshot.rs`, `crates/baozi-import/src/`, `crates/baozi-postprocess/src/`, `crates/baozi-format-stl/src/`, `crates/baozi-format-obj/src/`, `crates/baozi-format-ply/src/`, `crates/baozi-format-gltf/src/`, `crates/baozi/src/`, affected `fuzz/fuzz_targets/`, `crates/baozi-xtask/src/`, new `docs/conformance/u4c-metrics.toml`, `docs/adr/0003-core-scene-ir-and-material-model.md`, `docs/adr/0020-import-lifecycle-and-report-contract.md`, `docs/adr/0022-per-import-resource-ledger-and-budget-accounting.md`, `docs/adr/0032-postprocess-remap-and-derived-data-contract.md`, historical `docs/adr/0042-shared-canonical-storage-accounts-and-generation-lineage.md`, `docs/adr/0044-retained-physical-storage-ownership-and-account-lineage.md`, `docs/research/fallible-shared-storage-admission.md`.
+- **Approach:** Bootstrap one import outcome owner with the sole ledger/coordinator, bound account,
+  terminal/evidence baseline, joint-preparation authority, and dormant single-use scene authority;
+  allocate no canonical table at startup. Core first runs complete authority-free preflight and returns
+  one sealed plan containing exactly one non-authority activation request. The outcome owner consumes
+  that request with the dormant authority, then moves only the resulting same-brand canonical lane
+  into the opaque core-owned `SceneConstruction` for materialization. `SceneDraft` carries only a
+  construction brand and canonical directory-slot descriptor, and `ValidatedScene` is the invariant-bearing result. Model logical Mesh and MeshPrimitive under the ownership/cardinality
   table above; provide domain-aware zero-copy typed views; preserve exactly affine authored matrix-
   or-TRS base poses, variable influences, explicit skin spaces, sparse/dense morphs and weights,
   `f64` animation, separate Image/Texture/Sampler, complete SceneSpace, and bounded metadata/
   provenance. `SceneDraft` is only a construction brand plus canonical directory-slot descriptor.
-  Core validates a generation-free aggregate, then a provisional success atomically reserves one
-  private never-reused `ReservedSceneGeneration` as the final fallible pre-commit identity
-  acquisition. Reservation rejection/exhaustion consumes no nonce, destroys the canonical
-  candidate, and enters ordinary rich-failure preparation with preserved evidence and zero canonical
+  Core consumes the exact descriptor and validates a generation-free aggregate into `Candidate`.
+  After outcome evidence and destination preconditions are complete, operation issues a zero-commit
+  freeze permit. Core consumes it to reject without a nonce or to split an operation-understandable
+  freeze contribution from one core-owned generation/proof handoff token. Reservation rejection or
+  exhaustion consumes no nonce, destroys the canonical candidate, and enters ordinary rich-failure preparation with preserved evidence and zero canonical
   output; only failure to append/validate/prepare that downgraded evidence, an invalid root or
   equivalent non-unwind integrity fault, or a caught single non-builder unwind whose complete cleanup
   and zero operation-live attribution are verified uses minimal fallback. A retained canonical,
@@ -437,14 +460,19 @@ flowchart TB
   but dependency/storage release cannot be proved, payload/lease/operation attribution remain
   coupled and poisoned and finalization returns `FinalizationContainmentError` without fallback,
   refund, or zero-leak claim; double panic, `panic = "abort"`, process exit, and OOM require process
-  isolation. Preparation completes final control downgrade, applies canonical/outcome destination
-  commitments, reaches operation live zero with no pending or prepared-attribution token, and returns
-  exact `PreparedSuccess`, `PreparedRichFailure`, or `PreparedMinimalFallback` wrappers that
-  privately own only already qualified but domain-unexposed publication owners. Only exact success
-  may hold the reservation; both failure wrappers structurally contain none. Each exact handoff is a
-  pure consuming split and domain exposure into `CommittedCanonicalOutput`/
-  `PublishedOutcomeEvidence`; only success constructs `SceneGenerationId`/`ValidatedScene`, and
-  handoff performs no attribution, counter, or terminal-classification mutation. Keep the generic
+  isolation. Operation combines only the freeze contribution and exact outcome evidence into a
+  zero-commit joint intent. All fallible work and uncertainty resolution precede final account
+  eligibility; eligibility success immediately enters one non-returning, allocation-/lock-/callback-/
+  panic-free suffix that applies canonical/outcome commitments, reaches operation live zero, freezes
+  the sole snapshot, and returns exact `PreparedSuccess`, `PreparedRichFailure`, or
+  `PreparedMinimalFallback`. Operation wrappers own no generation token. Only an import-private exact-
+  success aggregate pairs operation success with the matching core token; dropping it may burn the
+  private gap, while its two pure handoffs expose `CommittedCanonicalOutput`/
+  `PublishedOutcomeEvidence` and let core construct `SceneGenerationId`/`ValidatedScene` without
+  allocation, validation, accounting, control polling, callback, or failure. Standalone core
+  construction uses the same dormant-plan-activation seam through its own real operation owner;
+  `SceneEdit` uses a derived lane over the input account and lineage and never obtains a dormant source
+  authority. Keep the generic
   `RetainedAllocation<T>`-shaped rail, physical lease, and final-owner `Drop` private inside
   `baozi-operation`; expose one operation-owned concrete store for sealed `ScalarSequenceBlock`,
   `BytesBlock`, `Utf8Block`, and bounded allocation-free `RecordBlock` values; let core own only
@@ -494,10 +522,14 @@ flowchart TB
   UTF-8 leaves. Runtime gates prove policy-governed capacity envelopes and their request-versus-RSS
   threat boundary, root plus actual-new attribution, storage-before-owner drop, fresh inherited target
   slots, exact-input lineage authorization in addition to account equality, and exact success/rich-
-  failure/minimal-fallback classification before handoff. Generation reservation precedes destination
-  commitment only for success; operation live reaches zero; rejection/exhaustion is ordinary rich
-  failure with no nonce consumption; any later destination-commit/preparation failure, cancellation,
-  caught non-builder unwind, or prepared-success drop may burn the gap. A retained canonical,
+  failure/minimal-fallback classification before handoff. Only a validated candidate can obtain a
+  zero-commit freeze permit. Core reservation rejection/exhaustion is ordinary rich failure with no
+  nonce consumption; success splits an operation contribution from a core-owned handoff token.
+  Operation constructs a zero-commit joint intent, completes every fallible check and uncertainty
+  decision before final eligibility, and follows eligibility with one non-returning no-fail commitment
+  suffix that reaches operation live zero and freezes the snapshot. Operation wrappers own no
+  generation value; only the private exact-success aggregate pairs success with the core token, and
+  dropping that aggregate may burn the gap. A retained canonical,
   evidence, or report builder panic instead follows the owner-specific start-error/containment rule.
   Verified cleanup gates single non-builder unwind
   fallback, uncertain release keeps ownership coupled with account/operation/extension poison and
@@ -558,10 +590,10 @@ flowchart TB
 | Substage | Deliverable | Allowed temporary private seam | Gate | Commit and deletion owner |
 | --- | --- | --- | --- | --- |
 | U4a | Private generic final-owner foundation plus concrete sealed scalar-sequence/bytes/UTF-8/record store, policy-governed runtime `CapacityPlan` plus a separate concrete-store/policy evidence anchor, dual tables, exact terminal variants, account-bound fallback, and structural fault probes | Crate-private raw rail and store tracer; legacy public Scene remains unchanged | Operation tests; rustdoc/source/compile-fail authority and shareable-kind closure; fixed logical-minimum desired, growable/replacement logical-requirement preservation, allocator/candidate geometric desired, per-plan desired/actual/envelope request semantics, source-plus-candidate envelope admission, and logarithmic replacement/linear moved-element gates. U4a names the concrete-store/capacity-policy subject and exposes a stable source anchor that U4c can qualify; custom or unknown allocator/toolchain/target paths remain `Unverified` until that later evidence is captured. The gate also covers the request-versus-RSS boundary; prepare-time destination commitments, exact domain-unexposed owners, no prepared-attribution token, pure handoff, and drop order; complete sealed keyed dimension/phase cells, non-derivable global header evidence, Baozi-owned `StoreKeyDomain`/mapping lifetime, foreign-key rejection, post-plugin-unload query and brand-exclusion vectors; semantic aggregate versus per-actual-backing plans; ledger-first and physical-second complete aggregate admissions under non-nested locks, exact typed no-mutation rollback, uncertain-completion coupled containment, no common internal linearization point, no pre-ready retained payload/evidence allocator entry, and positive ledger control/bookkeeping allocation gates requiring complete first-plane capacity admission, independent allocation-class probes, graph ownership, every partial/full backing release before one-lock ledger rollback, zero physical entry/charge, and a fixed start error at every backing-allocation fault; phase/global evidence; shared-state monotonic poison latch/count/fixed evidence, clone snapshot/reuse/no-bypass, retain/share/start/publication two-order barriers, poison-first zero side effects, retain/share/start-admission-first charge plus fatal/no-handoff, publication-eligibility-first pure handoff; WASM/MSRV | Serial `baozi-operation` commits at independently green internal completion points; U4f deletes tracer/scaffolding |
-| U4b | Core two-node root/child tracer with authored transform, rebuilt record/directory/reference slots, one `ReservedSceneGeneration`, `CanonicalInheritanceSource`, fresh inherited leaf slots, empty semantics, validation, and pure handoff | Private core-to-store construction adapter; legacy public Scene remains authoritative | After U4a and residual U3 inert-format-evidence gates: exhaustion consumes no nonce and prepares ordinary rich failure; a non-builder rich-preparation fault reaches fallback; only exact success holds one reservation; later destination/preparation failure, cancellation, caught non-builder unwind, or prepared-success drop burns only one invisible gap, while retained builder panic is start-error/containment; source-slot/non-shareable-kind/same-account-independent-Scene rejection; parent/sibling positive cases; explicit expected semantic transcript | `baozi-core` reviewable commit; U4f deletes bridge/test-only constructors |
+| U4b | Core two-node root/child tracer with authored transform, rebuilt record/directory/reference slots, a freeze-permit/core-token generation seam, `CanonicalInheritanceSource`, fresh inherited leaf slots, empty semantics, validation, and pure handoff | Private core-to-store construction adapter; legacy public Scene remains authoritative | After U4a and residual U3 inert-format-evidence gates: permit rejection/exhaustion consumes no nonce and prepares ordinary rich failure; a non-builder rich-preparation fault reaches fallback; the reservation remains only in the core-owned handoff token, operation wrappers contain none, and only dropping the privately paired exact-success aggregate burns one invisible gap; retained builder panic is start-error/containment; source-slot/non-shareable-kind/same-account-independent-Scene rejection; parent/sibling positive cases; explicit expected semantic transcript | `baozi-core` reviewable commit; U4f deletes bridge/test-only constructors |
 | U4c | Harden and then freeze one retained measurement contract for complex-schema fixtures. Before recapture, operation owns the typed protected-terminal requirement, every trusted ledger rejection including owner mismatch latches the first `Ledger` cause, recovery carries its typed cause and exact authority together, and the report schema distinguishes ordinary from protected terminal work. The V2 lifecycle probe remains a serial diagnostic only; no alternate typed-arena design, LOC comparison, token ratio, or fixed implementation-shape contest is a U4 release condition. | Private instrumentation and fixtures only; no second Scene schema, producer adapter, or public facade reachability | First finish source-layout-only extraction of operation ledger, retained-publication, and concrete-store code without changing runtime behavior, public API, drop order, or probe semantics. Then freeze fixture/expected-digest values, semantic mutation vectors, allocation/copy/decode/lookup observation taxonomy, allocator/account procedure, and the complete measurement closure. The evidence schema identifies ordinary and protected dimensions by stable semantic role and freezes each role's identity, attempted, consumed, live/peak, pending, and commitment values. Success proves zero protected use; rich and minimal failure prove the exact protected prefix; rejection of the protected role through ordinary authority changes neither dimension. U4c exits when the collector, schema, fixtures, closure, and independent mutation vectors are qualified; production-entry qualification belongs to U4d. | Core/storage joint reviewable commit; U4f deletes instrumentation scaffolding |
 | U4d | Private producer/consumer proof: canonical OBJ corner/smoothing, backend-free glTF multi-primitive/skin/morph/animation shape, a profile-complete canonical authoring scenario, facade-equivalent inspection, bounded snapshot digest/preview, unchanged typed view, and one changed `SceneEdit` path | Private adapters into the replacement while legacy public Scene/facade remains the only public path | Every tracer uses only store-owned construction and the frozen U4c collector; U4d does not change the frozen terminal or measurement vocabulary. The profile-closure slice directly covers `SceneSpace`, camera/light identity and attachment, bounded metadata/provenance, external resource identity/reference, their validation/view/snapshot surfaces, and negative budget/reference cases. Each real construction or view entry point maps to one measured scenario, and the production comparator reports only the declared private-tracer evidence it actually validates. The focused conformance checker owns U4d exit and may qualify it only after OBJ, backend-free glTF, profile closure, edit, current Draft snapshot vectors, segment-partition invariance, unchanged-view, facade-equivalent mappings, structured inventory, and the CI gate all pass. U4d bootstraps the minimal `contracts.toml`/`gates.toml` schema, checker, required lifecycle/cutover contract IDs, exact commands, and CI gate without scanning ADR prose, ADR indexes, source prose, or Git history. | Serial format/core/test-support commits; U4e owns adapter replacement, U4f deletion |
-| U4e | Atomic workspace-wide public switch of every reachable format, import/postprocess/snapshot/fuzz/facade consumer and the bounded facade runtime/account profile after the opaque core-owned `SceneConstruction` continuation, `ValidatedScene` typed views/snapshot, and profile-complete canonical authoring seam exist | Temporary private call-site shims only inside the atomic switch; no committed public dual rail | Full workspace compile/tests, an isolated source-tree downstream common-workflow consumer, exact terminal/generation/report-step-state/account/lineage/capacity gates, and measured production-path equivalents for every canonical entry point. Every currently reachable first-party format must use the canonical path in this commit or be disabled/removed; no format may remain on the legacy rail. glTF remains unregistered until U6 admission. Only source semantics outside the format's declared admitted profile may reach policy-authorized structured loss/rejection; loss cannot substitute for core canonical fields. `ImportSession` retains the exact opaque continuation on its existing account/ledger/publication context, `ParseScope` borrows only authoring authority, and finalization consumes the continuation plus exact descriptor. `SceneDraft` stays descriptor-only; public APIs expose neither physical store/ledger types nor raw mutable collections. Lifecycle-cutover contract IDs become `conforming` in the same atomic switch; legacy-deletion contracts remain `partial` until U4f. | Cross-workspace reviewable cutover commit; U4f owns all remaining deletion |
+| U4e | Atomic workspace-wide public switch of every reachable format, import/postprocess/snapshot/fuzz/facade consumer and the bounded facade runtime/account profile after the dormant-plan-activation seam, profile-complete canonical authoring, `ValidatedScene` typed views/snapshot, and joint-commit/pure-handoff path exist | Temporary private call-site shims only inside the atomic switch; no committed public dual rail | Full workspace compile/tests, an isolated source-tree downstream common-workflow consumer, exact dormant/activation/disposition/terminal/generation/report-step-state/account/lineage/capacity gates, and measured production-path equivalents for every canonical entry point. Every currently reachable first-party format must use the canonical path in this commit or be disabled/removed; no format may remain on the legacy rail. glTF remains unregistered until U6 admission. Only source semantics outside the format's declared admitted profile may reach policy-authorized structured loss/rejection; loss cannot substitute for core canonical fields. `ImportSession` retains the sole outcome owner and dormant authority, core returns a sealed plan with one activation request, the outcome owner activates and moves only the canonical lane into core, `ParseScope` borrows only bounded authoring authority, and finalization consumes exactly one `NeverActivated`, `Rejected`, or `Candidate` disposition with outcome evidence. Candidate success follows the operation freeze-permit/core-token split, no-fail joint commit pivot, private exact-success aggregate, and pure core proof handoff. `SceneDraft` stays descriptor-only; public APIs expose neither physical store/ledger types nor raw mutable collections. Lifecycle-cutover contract IDs become `conforming` in the same atomic switch; legacy-deletion contracts remain `partial` until U4f. | Cross-workspace reviewable cutover commit; U4f owns all remaining deletion |
 | U4f | Delete legacy `Scene`, `SharedStorage`, recharge/transfer paths, private bridges, rejected candidates, and all migration scaffolding; run full U4 gates | None | Legacy/source/API searches empty, independent digest oracle plus supplemental layout permutations pass, workspace/fuzz/docs/package gates green | Core/operation integration cleanup commit owns final deletion |
 
 #### U4d Vertical-Slice Sequencing
@@ -664,9 +696,10 @@ Backend-only glTF safety research may run in parallel, but it is not a U4 depend
 - **Patterns to follow:** Operation-owned fallible concrete storage, sealed schemas, non-owning typed projections, typed IDs, deterministic semantic ordering, boundary validation, and existing snapshot normalization; deepen modules only at proven domain seams. Do not expose a generic storage framework, freeze an internal wire, or split `ParseScope`, canonical validation, or provenance merely because a file is large; let the canonical OBJ and glTF producer paths expose the smallest useful authoring interface first.
 - **Risks and controls:** Critical risks are hidden ownership behind a safe generic value, inheriting a
   `RecordBlock` that can contain source-set slots, presenting a Baozi request envelope as exact RSS,
-  operation/core authority overlap, same-account cross-Scene smuggling, source-slot reuse, an opaque
-  success-capable prepared wrapper, generation exhaustion after destination commitment, post-
-  reservation failure exposing or reusing identity, failure wrappers retaining a reservation,
+  operation/core authority overlap, dormant-authority escape, plan/request/lane brand substitution,
+  same-account cross-Scene smuggling, source-slot reuse, an opaque success-capable prepared wrapper,
+  generation exhaustion after destination commitment, a post-eligibility failure boundary, an
+  operation wrapper retaining the core generation token, or token/wrapper mismatch,
   storage/account destructor inversion, uncertain unwind cleanup being mislabeled as leak-free
   fallback, prepared drop exposing a terminal, an unbounded facade factory, a concrete production
   path with unmeasured copy/decode/lookup behavior, digest tests generated from the implementation
@@ -674,13 +707,15 @@ Backend-only glTF safety research may run in parallel, but it is not a U4 depend
   geometry index scalar payload only as a sealed scalar sequence and rebuild every record/directory/
   reference/header/generation-local lookup-index structure. Managed-qualify and fully charge requested
   capacity envelopes while using OS/subprocess limits for hard RSS; split physical structure from
-  semantic validation; require exact-input lineage plus fresh target slots. Classify exact success/
-  rich-failure/minimal-fallback and apply destination commitments during preparation; treat
-  reservation rejection/exhaustion as rich failure; permit fallback after a caught non-builder unwind only after verified
+  semantic validation; require exact-input lineage plus fresh target slots. Keep dormant authority in
+  the sole outcome owner, bind the remaining sealed plan to the activated lane, and classify exact
+  `NeverActivated`/`Rejected`/`Candidate` dispositions. Treat reservation rejection/exhaustion as rich
+  failure; let core retain the generation only in its handoff token; require a closed zero-commit joint
+  intent and put every fallible step before final eligibility; permit fallback after a caught non-builder unwind only after verified
   cleanup; keep uncertain payload/lease/attribution coupled and poisoned behind typed fatal
-  containment; use process isolation for abort/double-panic/exit/OOM; permit only exact success to hold
-  one reservation and burn that gap on later downgrade/drop. Exact wrappers retain only already
-  qualified but domain-unexposed owners, prepared drop destroys storage before account owners without
+  containment; use process isolation for abort/double-panic/exit/OOM. Operation wrappers retain only
+  already qualified but domain-unexposed owners and no generation value; only the private exact-success
+  aggregate pairs the matching core token and can burn its gap on drop. Prepared drop destroys storage before account owners without
   reopening the ledger, and type-specific pure handoff only exposes/moves owners. Keep one long-lived
   bounded facade factory; run the frozen repository U4c spec with the pinned xtask and revise that
   implementation/conformance specification under independent review on any tool/fixture/digest drift
@@ -706,6 +741,12 @@ Backend-only glTF safety research may run in parallel, but it is not a U4 depend
   identity; subject drift and custom/unknown paths are `Unverified`, while hard-memory fixtures use
   subprocess limits.
 
+  Snapshot-open, selection, parser, and complete authority-free preflight failures consume the dormant
+  authority exactly once into `NeverActivated`. Each case preserves its real Attempted/Consumed work
+  and released transient-scratch evidence while proving zero canonical table, allocation, reservation,
+  or commitment. Foreign, missing, duplicate, early, and repeated activation requests fail closed;
+  verified activation failure remains `NeverActivated`, while uncertain mutation enters containment.
+
   Compile-fail gates reject arbitrary `T`/`Vec`/`String`/`Arc`/`Mutex`/`Cell`/`Atomic*`, external
   schemas, raw retained authority, visitors, and attach attempts. Physical-store tests own typed
   variant/table/account/destination/fresh-slot/ownership closure; core tests own semantic kinds/root/
@@ -719,8 +760,9 @@ Backend-only glTF safety research may run in parallel, but it is not a U4 depend
   source-slot reuse, unauthorized reachability, independent same-account Scenes, foreign accounts,
   and refcount/range access before authorization all reject.
 
-  Exact `PreparedSuccess`/`PreparedRichFailure`/`PreparedMinimalFallback` API-shape tests permit only
-  success to own one reservation. Generation exhaustion consumes no nonce and returns ordinary rich
+  Exact `PreparedSuccess`/`PreparedRichFailure`/`PreparedMinimalFallback` API-shape tests prove no
+  operation wrapper owns a generation reservation. A matching `SceneFreezePermit` lets core reject
+  without consuming a nonce or split one operation contribution from one core handoff token. Generation exhaustion returns ordinary rich
   failure with zero canonical output; failure to prepare that downgrade, invalid root/equivalent
   integrity faults, and a caught single non-builder unwind with verified deallocation use the assembly-
   independent fallback. A retained canonical, evidence, or report builder panic returns its
@@ -731,10 +773,12 @@ Backend-only glTF safety research may run in parallel, but it is not a U4 depend
   admission-first, and final-publication-eligibility-first orderings across clones; source/API gates
   reject reset/unpoison/ignore/rebrand paths. Abort/double-panic/exit/OOM stay process-isolated.
 
-  After reservation, later destination-commit/ledger/product-graph preparation failure,
-  cancellation, caught non-builder unwind, or prepared-success drop may burn one invisible gap. A
-  retained builder panic never takes this path. Preparation
-  leaves no attribution token. Exact wrappers own already qualified but domain-unexposed owners;
+  Every destination/account/control/product-graph failure, cancellation, caught non-builder unwind,
+  and uncertainty decision occurs before final eligibility. Eligibility success has no error/unwind/
+  containment branch and infallibly freezes the exact wrapper. Dropping the private aggregate that
+  pairs operation success with the core token may burn one invisible gap; dropping an operation
+  wrapper alone cannot. A retained builder panic never takes this path. Preparation leaves no
+  attribution token. Exact wrappers own already qualified but domain-unexposed owners;
   prepared drop destroys their storage before account owners without reopening the ledger or exposing
   a terminal, and type-specific handoff only exposes/moves owners with no attribution/counter
   mutation.
@@ -776,13 +820,14 @@ Backend-only glTF safety research may run in parallel, but it is not a U4 depend
   and snapshot tests pass; `FormatImporter::parse(&mut ParseScope) -> ParseResult<SceneDraft>` remains
   exact; rustdoc/compile-fail/source gates prove no public generic authority, stable internal wire, or
   non-leaf inheritance. Snapshots prove final control classification and destination commitments
-  occur during preparation; only exact success owns one reserved generation; exhaustion consumes no
-  nonce and yields ordinary rich failure evidence; only rich-preparation/non-unwind integrity failure
+  occur during the no-fail joint commit pivot; operation wrappers own no generation, the core token is
+  pairable only with matching exact success, and exhaustion consumes no nonce and yields ordinary rich failure evidence; only rich-preparation/non-unwind integrity failure
   or a caught single non-builder unwind with verified cleanup yields minimal fallback. A retained
   builder panic follows the owner-specific start-error/containment rule instead. Uncertain cleanup instead
   produces coupled poisoned ownership and typed fatal containment, and abort/double-panic/exit/OOM are
-  process-isolated. Every exact wrapper has operation live zero, no prepared-attribution token, and
-  only already qualified but domain-unexposed owners. Prepared drop destroys those owners in storage-
+  process-isolated. Every exact wrapper has operation live zero, no prepared-attribution token or core
+  generation value, and only already qualified but domain-unexposed owners. Private exact-success
+  aggregate drop burns the paired gap; prepared-wrapper drop destroys those owners in storage-
   before-account order without reopening the ledger or exposing a terminal; handoff is pure consuming
   owner exposure with no attribution/counter mutation.
 
@@ -1008,24 +1053,30 @@ Backend-only glTF safety research may run in parallel, but it is not a U4 depend
   admitted materialization copy. Preparation freezes monotonic `Attempted`/`Consumed` values and the
   live-attribution snapshot with peak retained and current already zero, applies independent canonical
   and outcome-evidence destination commitments, and leaves no pending or prepared-attribution token.
-  The exact wrappers privately own only already qualified but domain-unexposed publication owners.
+  The exact operation wrappers privately own only already qualified but domain-unexposed publication owners and no core generation value.
   The final snapshot exposes exactly five public evidence classes: `Attempted`, `Consumed`, live
-  attribution with peak/current, `CommittedCanonicalOutput`, and `PublishedOutcomeEvidence`. Only
-  exact success may own one generation reservation. Handoff only exposes/moves the owners applicable
-  to its exact terminal and mutates no attribution or counter. Prepared drop destroys unexposed owners
+  attribution with peak/current, `CommittedCanonicalOutput`, and `PublishedOutcomeEvidence`. Only a
+  core-owned handoff token contains the reserved generation, and only the private exact-success
+  aggregate may pair that token with matching operation success. Handoff only exposes/moves the owners applicable
+  to its exact terminal and mutates no attribution or counter. Prepared-wrapper drop destroys unexposed owners
   in storage-before-account order without reopening the ledger or exposing a terminal. No account,
   slot, capacity, padding, or sharing fact enters a semantic digest or stable wire.
-- The workspace contains one canonical Scene lifecycle: `SceneDraft` is a brand plus directory-slot
-  descriptor; atomic generation reservation is the final fallible pre-commit identity acquisition for
-  provisional success; rejection/exhaustion consumes no nonce and produces ordinary rich failure with
+- The workspace contains one canonical Scene lifecycle: the import outcome owner retains one dormant
+  scene authority while core produces a sealed plan with one activation request; exact activation
+  binds the remaining plan to the resulting lane; and `SceneDraft` is a brand plus directory-slot
+  descriptor. After exact descriptor consumption and central validation produce `Candidate`, operation
+  issues a zero-commit freeze permit and core performs the final fallible generation acquisition.
+  Rejection/exhaustion consumes no nonce and produces ordinary rich failure with
   zero canonical output; rich-preparation/non-unwind integrity failure or a caught single non-builder unwind with
   verified cleanup uses minimal fallback. A retained builder panic never enters fallback. Uncertain cleanup keeps ownership/charge coupled and
-  poisoned and returns `FinalizationContainmentError` without a fallback or zero-leak claim. Any later
-  destination-commit/ledger/product-graph preparation failure, cancellation, caught non-builder unwind, or exact-
-  success drop after reservation may burn one invisible never-reused gap; a retained builder panic
+  poisoned and returns `FinalizationContainmentError` without a fallback or zero-leak claim. Core
+  success splits the operation contribution from its handoff token; operation forms a zero-commit
+  joint intent, resolves every fallible step before final eligibility, and follows eligibility with a
+  non-returning infallible commit. Only dropping the private exact-success aggregate after reservation
+  may burn one invisible never-reused gap; an operation wrapper never owns that gap. A retained builder panic
   enters typed containment rather than fallback; abort/double-panic/exit/OOM
   have only process-isolation containment; failure wrappers structurally contain no reservation; and
-  type-specific pure handoff consumes the wrapper, exposes/moves its owners, and constructs
+  the paired type-specific pure handoff consumes the operation wrapper plus core token, exposes/moves its owners, and constructs
   `ValidatedScene` only for success. Legacy `Scene`, `SharedStorage`, reservation-transfer, full-
   output-recharge, owning core allocation wrappers, compatibility adapters, and the canonical/legacy
   dual rail are deleted.
