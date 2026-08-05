@@ -22,22 +22,26 @@ use crate::canonical_scene::store::production::{
     AnimationAuthoringBatch, AppearanceAuthoringBatch, AuthoringRange, DeformationAuthoringBatch,
     GeometryAttributeAuthoring, GeometryAuthoringBatch, GeometryLogicalMeshAuthoring,
     GeometryPrimitiveAuthoring, GeometryTopologyAuthoring, LineageAuthoringBatch,
-    LogicalMorphAuthoring, MetadataAuthoringBatch, NodeAuthoringBatch, NodeAuthoringFailure,
-    NodeAuthoringLimit, NodeAuthoringNode, NodeAuthoringSemanticError, NodeLocalId, NodeParent,
-    ObservedResourceAuthoring, OperationAuthoringControlError, OwnerProvenanceAuthoring, Presence,
-    PrimitiveDeformationAuthoring, ProfileAuthoringBatch, ProfileOwner, ProvenanceLocalId,
-    ProvenanceNodeAuthoring, ResourceIdentityLocalId, SceneAuthoringBatch, SessionOpaqueReason,
-    SourceIdentityAuthoring, SourceIdentityLocalId, SpatialAuthoringBatch, SpatialAuthoringFailure,
+    LogicalMorphAuthoring, MetadataAuthoringBatch, MetadataAuthoringEntry, NodeAuthoringBatch,
+    NodeAuthoringFailure, NodeAuthoringLimit, NodeAuthoringNode, NodeAuthoringSemanticError,
+    NodeLocalId, NodeParent, ObservedResourceAuthoring, OperationAuthoringControlError,
+    OwnerProvenanceAuthoring, Presence, PrimitiveDeformationAuthoring, ProfileAuthoringBatch,
+    ProfileOwner, ProvenanceLocalId, ProvenanceNodeAuthoring, ResourceIdentityLocalId,
+    SceneAuthoringBatch, SessionOpaqueReason, SourceIdentityAuthoring, SourceIdentityLocalId,
+    SpatialAuthoringBatch, SpatialAuthoringFailure,
 };
 use crate::canonical_scene::store::profile_provenance::{
     PROFILE_PROVENANCE_ADDRESS_SCALARS, corrupt_profile_address_for_test,
 };
 use crate::entity::AuthoredTransform;
+use crate::extension::ExtensionValueRef;
 use crate::identity::{SceneGenerationError, SceneGenerationId};
 use crate::math::{Mat4, Quat, Vec3};
+use crate::namespaced::NamespacedName;
 use crate::provenance::{ResourceIdentity, SourceObjectKind, SourceObjectLocator};
 use crate::scene_space::SceneSpace;
 
+use super::profile::ProfileBuildFault;
 use super::publication::post_evidence_build_failure_code;
 use super::{
     NODE_SCENE_BUILD_INVARIANT_CODE, NODE_SCENE_NODE_AUTHORING_REJECTION_CODE,
@@ -1372,6 +1376,66 @@ fn central_validation_rejects_each_corrupted_owner_attachment_component() {
         assert_eq!(
             terminal_failure_code(failure.ledger_evidence()),
             NODE_SCENE_BUILD_INVARIANT_CODE,
+        );
+        assert_released(failure, &account);
+    }
+}
+
+#[test]
+fn central_validation_rejects_each_corrupted_profile_structure() {
+    let factory = test_factory();
+    let account = test_account(&factory, 256);
+
+    for fault in ProfileBuildFault::ALL {
+        let spatial = SpatialAuthoringBatch::new(&SceneSpace::UNKNOWN, &[], &[]);
+        let nodes = single_trs_batch();
+        let appearance = AppearanceAuthoringBatch::empty();
+        let geometry = GeometryAuthoringBatch::new(&[], &[], &[], &[]);
+        let deformation = DeformationAuthoringBatch::new(&[], &[], &[], &[], &[]);
+        let animations = AnimationAuthoringBatch::empty();
+        let profile = profile_fixture(
+            spatial,
+            nodes,
+            appearance,
+            geometry,
+            deformation,
+            animations,
+        );
+        let metadata_key =
+            NamespacedName::new("test:profile_fault").expect("profile fault metadata key");
+        let metadata = [MetadataAuthoringEntry::new(
+            ProfileOwner::Scene,
+            &metadata_key,
+            ExtensionValueRef::Bool(true),
+        )];
+        let input = SceneAuthoringBatch::new(
+            spatial,
+            nodes,
+            appearance,
+            geometry,
+            deformation,
+            animations,
+            profile.batch_with_metadata(MetadataAuthoringBatch::new(&metadata)),
+        );
+        let validated = SceneConstructionOperation::with_account_for_scene_input(
+            &account,
+            test_limits(),
+            input,
+            SceneValidationLimits::default(),
+        )
+        .unwrap_or_else(|_| panic!("{fault:?} profile fault operation must be admitted"))
+        .try_validate()
+        .unwrap_or_else(|_| panic!("{fault:?} profile fixture must validate before retention"));
+
+        let failure = rich_failure(
+            validated
+                .prepare_with_faults(NodeSceneBuildFaults::altered_profile(fault))
+                .unwrap_or_else(|_| panic!("{fault:?} must prepare a rich failure")),
+        );
+        assert_eq!(
+            terminal_failure_code(failure.ledger_evidence()),
+            NODE_SCENE_BUILD_INVARIANT_CODE,
+            "{fault:?} must fail at the central canonical boundary",
         );
         assert_released(failure, &account);
     }

@@ -1070,6 +1070,7 @@ impl ValidatedNodeSceneConstruction<'_> {
             &batches.profile,
             keys,
             &mut work,
+            &mut faults.profile,
             plans.build_invariant,
         ) {
             Ok(profile) => profile,

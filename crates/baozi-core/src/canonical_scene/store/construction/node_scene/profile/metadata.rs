@@ -20,7 +20,7 @@ use crate::canonical_scene::store::schema::profile::{
 use crate::canonical_scene::store::schema::{CanonicalBlockRef, CanonicalSchema};
 use crate::extension::{ExtensionArrayRef, ExtensionValueRef};
 
-use super::{MetadataLeafRefs, ProfileMaterializationPlans, encode_owner};
+use super::{MetadataLeafRefs, ProfileBuildFault, ProfileMaterializationPlans, encode_owner};
 use crate::canonical_scene::store::construction::node_scene::{
     NodeSceneWorkMeter, process_slice_in_work_chunks, process_str_in_work_chunks,
 };
@@ -69,6 +69,7 @@ pub(super) fn retain_metadata<R>(
     batch: &ValidatedProfileBatch<'_, R>,
     keys: SceneStoreKeys,
     work: &mut NodeSceneWorkMeter,
+    faults: &mut ProfileBuildFault,
     failure: StoreBuildError,
 ) -> Result<RetainedMetadataRefs, StoreRuntimeError> {
     let text = match plans.metadata_text {
@@ -111,11 +112,11 @@ pub(super) fn retain_metadata<R>(
     };
     refs.entries = match plans.metadata_entries {
         Some(plan) => Some(retain_entries(
-            assembly, plan, batch, refs, keys, work, failure,
+            assembly, plan, batch, refs, keys, work, faults, failure,
         )?),
         None => None,
     };
-    let directory = retain_directory(assembly, plans, batch, refs, keys, work, failure)?;
+    let directory = retain_directory(assembly, plans, batch, refs, keys, work, faults, failure)?;
     Ok(RetainedMetadataRefs { directory })
 }
 
@@ -484,6 +485,7 @@ fn retain_entries<R>(
     refs: MetadataLeafRefs,
     keys: SceneStoreKeys,
     work: &mut NodeSceneWorkMeter,
+    faults: &mut ProfileBuildFault,
     failure: StoreBuildError,
 ) -> Result<CanonicalBlockRef<ProfileMetadataEntryTableSchema>, StoreRuntimeError> {
     assembly
@@ -521,6 +523,9 @@ fn retain_entries<R>(
                         failure,
                     )?;
                     let (owner_kind, owner_index) = encode_owner(entry.owner());
+                    let stored_scalar_count = faults.metadata_scalar_count(encoding.scalar_count);
+                    let omit_bool_lane_reference = matches!(encoding.lane, ScalarLane::Bool)
+                        && faults.omit_metadata_bool_lane_reference();
                     work.observe(control, 1)?;
                     writer.write_row(|row| {
                         row.write_scalar(owner_kind)?;
@@ -535,12 +540,14 @@ fn retain_entries<R>(
                         row.write_scalar(byte_offset)?;
                         row.write_scalar(encoding.byte_count)?;
                         row.write_scalar(scalar_offset)?;
-                        row.write_scalar(encoding.scalar_count)?;
+                        row.write_scalar(stored_scalar_count)?;
                         write_utf8_lane(row, true, refs.text, failure)?;
                         write_bytes_lane(row, encoding.byte_count != 0, refs.bytes, failure)?;
                         write_sequence_lane(
                             row,
-                            matches!(encoding.lane, ScalarLane::Bool) && encoding.scalar_count != 0,
+                            matches!(encoding.lane, ScalarLane::Bool)
+                                && encoding.scalar_count != 0
+                                && !omit_bool_lane_reference,
                             refs.bools,
                             failure,
                         )?;
@@ -587,6 +594,10 @@ fn retain_entries<R>(
         .map(CanonicalBlockRef::from_store)
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the admitted writer boundary keeps storage, work, fault, and failure authority explicit"
+)]
 fn retain_directory<R>(
     assembly: &mut SceneStoreAssembly,
     plans: &ProfileMaterializationPlans,
@@ -594,6 +605,7 @@ fn retain_directory<R>(
     refs: MetadataLeafRefs,
     keys: SceneStoreKeys,
     work: &mut NodeSceneWorkMeter,
+    faults: &mut ProfileBuildFault,
     failure: StoreBuildError,
 ) -> Result<CanonicalBlockRef<ProfileMetadataDirectorySchema>, StoreRuntimeError> {
     assembly
@@ -607,12 +619,17 @@ fn retain_directory<R>(
                     .write_row(|row| {
                         row.write_scalar(PROFILE_METADATA_SCHEMA_REVISION)?;
                         let shape = batch.retention_shape();
-                        write_optional_record_ref(
-                            row,
-                            batch.metadata_entry_count(),
-                            refs.entries,
-                            failure,
-                        )?;
+                        if faults.omit_metadata_entries_reference() {
+                            row.write_scalar(batch.metadata_entry_count())?;
+                            row.write_scalar(PROFILE_ABSENT_REFERENCE)?;
+                        } else {
+                            write_optional_record_ref(
+                                row,
+                                batch.metadata_entry_count(),
+                                refs.entries,
+                                failure,
+                            )?;
+                        }
                         write_optional_utf8_ref(
                             row,
                             shape.metadata_text_bytes(),

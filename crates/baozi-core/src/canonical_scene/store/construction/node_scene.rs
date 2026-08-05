@@ -77,6 +77,7 @@ struct NodeSceneBuildFaults {
     alter_first_authored_transform: bool,
     alter_first_geometry_f32: bool,
     outcome_evidence_commitment: u64,
+    profile: profile::ProfileBuildFault,
 }
 
 impl NodeSceneBuildFaults {
@@ -85,6 +86,7 @@ impl NodeSceneBuildFaults {
             alter_first_authored_transform: false,
             alter_first_geometry_f32: false,
             outcome_evidence_commitment: 1,
+            profile: profile::ProfileBuildFault::none(),
         }
     }
 
@@ -108,6 +110,14 @@ impl NodeSceneBuildFaults {
     const fn altered_geometry_f32() -> Self {
         Self {
             alter_first_geometry_f32: true,
+            ..Self::none()
+        }
+    }
+
+    #[cfg(test)]
+    const fn altered_profile(fault: profile::ProfileBuildFault) -> Self {
+        Self {
+            profile: fault,
             ..Self::none()
         }
     }

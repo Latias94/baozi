@@ -37,6 +37,92 @@ use crate::canonical_scene::store::construction::{SceneStoreAssembly, SceneStore
 mod lineage;
 mod metadata;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ProfileBuildFault {
+    None,
+    SegmentOrdinal,
+    SegmentNonce,
+    SegmentProvenanceBase,
+    SegmentResourceReference,
+    OwnerKind,
+    OwnerAttachmentOffset,
+    MetadataEntriesReference,
+    MetadataScalarCount,
+    MetadataBoolLaneReference,
+}
+
+impl ProfileBuildFault {
+    pub(super) const fn none() -> Self {
+        Self::None
+    }
+
+    #[cfg(test)]
+    pub(super) const ALL: [Self; 9] = [
+        Self::SegmentOrdinal,
+        Self::SegmentNonce,
+        Self::SegmentProvenanceBase,
+        Self::SegmentResourceReference,
+        Self::OwnerKind,
+        Self::OwnerAttachmentOffset,
+        Self::MetadataEntriesReference,
+        Self::MetadataScalarCount,
+        Self::MetadataBoolLaneReference,
+    ];
+
+    fn take(&mut self, selected: Self) -> bool {
+        if *self == selected {
+            *self = Self::None;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn replace_once<T: Copy>(&mut self, selected: Self, value: T, replacement: T) -> T {
+        if self.take(selected) {
+            replacement
+        } else {
+            value
+        }
+    }
+
+    fn segment_ordinal(&mut self, value: u32) -> u32 {
+        self.replace_once(Self::SegmentOrdinal, value, 1)
+    }
+
+    fn segment_nonce(&mut self, value: u64) -> u64 {
+        self.replace_once(Self::SegmentNonce, value, 0)
+    }
+
+    fn segment_provenance_base(&mut self, value: u32) -> u32 {
+        self.replace_once(Self::SegmentProvenanceBase, value, 1)
+    }
+
+    fn omit_segment_resource_reference(&mut self) -> bool {
+        self.take(Self::SegmentResourceReference)
+    }
+
+    fn owner_kind(&mut self, value: u8) -> u8 {
+        self.replace_once(Self::OwnerKind, value, u8::MAX)
+    }
+
+    fn owner_attachment_offset(&mut self, value: u32) -> u32 {
+        self.replace_once(Self::OwnerAttachmentOffset, value, u32::MAX)
+    }
+
+    fn omit_metadata_entries_reference(&mut self) -> bool {
+        self.take(Self::MetadataEntriesReference)
+    }
+
+    fn metadata_scalar_count(&mut self, value: u32) -> u32 {
+        self.replace_once(Self::MetadataScalarCount, value, u32::MAX)
+    }
+
+    fn omit_metadata_bool_lane_reference(&mut self) -> bool {
+        self.take(Self::MetadataBoolLaneReference)
+    }
+}
+
 /// Preflighted retained-block shape for one fresh profile segment.
 ///
 /// This intentionally has no public generic mutation API. The caller builds every immutable
@@ -259,6 +345,7 @@ pub(super) fn retain_profile<R>(
     batch: &ValidatedProfileBatch<'_, R>,
     keys: SceneStoreKeys,
     work: &mut NodeSceneWorkMeter,
+    faults: &mut ProfileBuildFault,
     failure: StoreBuildError,
 ) -> Result<RetainedProfileRefs, StoreRuntimeError> {
     // The assembly proves operation admission. Issuing here keeps pure authoring
@@ -267,7 +354,7 @@ pub(super) fn retain_profile<R>(
         issue_profile_segment_nonce().map_err(|_| StoreRuntimeError::MembershipExhausted)?;
     let lineage =
         lineage::retain_lineage(assembly, plans, batch, segment_nonce, keys, work, failure)?;
-    let metadata = metadata::retain_metadata(assembly, plans, batch, keys, work, failure)?;
+    let metadata = metadata::retain_metadata(assembly, plans, batch, keys, work, faults, failure)?;
     let segments = retain_segments(
         assembly,
         plans,
@@ -276,9 +363,10 @@ pub(super) fn retain_profile<R>(
         segment_nonce,
         keys,
         work,
+        faults,
         failure,
     )?;
-    let owners = retain_owners(assembly, plans, batch, lineage, keys, work, failure)?;
+    let owners = retain_owners(assembly, plans, batch, lineage, keys, work, faults, failure)?;
     let directory = assembly
         .try_retain_canonical_records_controlled(
             plans.directory,
@@ -311,6 +399,7 @@ fn retain_segments<R>(
     segment_nonce: ProfileSegmentNonce,
     keys: SceneStoreKeys,
     work: &mut NodeSceneWorkMeter,
+    faults: &mut ProfileBuildFault,
     failure: StoreBuildError,
 ) -> Result<CanonicalBlockRef<ProfileSegmentTableSchema>, StoreRuntimeError> {
     let shape = batch.retention_shape();
@@ -323,13 +412,18 @@ fn retain_segments<R>(
                 work.observe(control, 1)?;
                 writer
                     .write_row(|row| {
-                        row.write_scalar(0_u32)?;
-                        write_optional_sequence_ref(
-                            row,
-                            batch.resource_count(),
-                            refs.resources,
-                            failure,
-                        )?;
+                        row.write_scalar(faults.segment_ordinal(0))?;
+                        if faults.omit_segment_resource_reference() {
+                            row.write_scalar(batch.resource_count())?;
+                            row.write_scalar(PROFILE_ABSENT_REFERENCE)?;
+                        } else {
+                            write_optional_sequence_ref(
+                                row,
+                                batch.resource_count(),
+                                refs.resources,
+                                failure,
+                            )?;
+                        }
                         write_optional_sequence_ref(
                             row,
                             batch.source_count(),
@@ -373,8 +467,8 @@ fn retain_segments<R>(
                             refs.digests,
                             failure,
                         )?;
-                        row.write_scalar(segment_nonce.get())?;
-                        row.write_scalar(0_u32)
+                        row.write_scalar(faults.segment_nonce(segment_nonce.get()))?;
+                        row.write_scalar(faults.segment_provenance_base(0))
                     })
                     .map_err(StoreControlledError::from)
             },
@@ -390,6 +484,7 @@ fn retain_owners<R>(
     refs: ProfileLeafRefs,
     keys: SceneStoreKeys,
     work: &mut NodeSceneWorkMeter,
+    faults: &mut ProfileBuildFault,
     failure: StoreBuildError,
 ) -> Result<CanonicalBlockRef<ProfileOwnerTableSchema>, StoreRuntimeError> {
     let attachments = refs.attachments;
@@ -408,10 +503,13 @@ fn retain_owners<R>(
                         return Err(failure.into());
                     }
                     let (owner_kind, owner_index) = encode_owner(owner);
+                    let owner_kind = faults.owner_kind(owner_kind);
+                    let stored_attachment_offset =
+                        faults.owner_attachment_offset(attachment_offset);
                     writer.write_row(|row| {
                         row.write_scalar(owner_kind)?;
                         row.write_scalar(owner_index)?;
-                        row.write_scalar(attachment_offset)?;
+                        row.write_scalar(stored_attachment_offset)?;
                         row.write_scalar(attachment_count)?;
                         row.write_sequence_ref(attachments.ok_or(failure)?.into_store())
                     })?;
