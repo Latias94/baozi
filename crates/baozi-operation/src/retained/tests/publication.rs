@@ -1,4 +1,6 @@
 use super::*;
+#[cfg(feature = "_u4-activation")]
+use std::num::NonZeroU64;
 
 fn expect_retry_operation(
     error: RetainedPublicationOpenError<TestOperation, TestDimension>,
@@ -101,6 +103,370 @@ fn failure_terminal_operation_with_limit(
         Ok(7_u32)
     })
     .unwrap_or_else(|_| panic!("failure-terminal test operation must start"))
+}
+
+#[cfg(feature = "_u4-activation")]
+fn ordinary_linear_work_operation(
+    account: &PhysicalStorageAccount,
+    attempted_limit: u64,
+    consumed_limit: u64,
+) -> TestOperation {
+    ordinary_linear_work_operation_with_control(
+        account,
+        attempted_limit,
+        consumed_limit,
+        OperationControl::default(),
+    )
+}
+
+#[cfg(feature = "_u4-activation")]
+fn ordinary_linear_work_operation_with_control(
+    account: &PhysicalStorageAccount,
+    attempted_limit: u64,
+    consumed_limit: u64,
+    control: OperationControl<TestProgress, TestUnit>,
+) -> TestOperation {
+    let storage_policy = DimensionPolicy::reservable_bytes(u64::MAX, u64::MAX, u64::MAX, u64::MAX)
+        .with_published_outcome_evidence_limit(64);
+    let work_policy = DimensionPolicy::counter(attempted_limit, consumed_limit, 0);
+    let limits = LedgerLimits::new(
+        u64::MAX,
+        [
+            (TestDimension::Bytes, storage_policy),
+            (TestDimension::Work, work_policy),
+        ],
+    )
+    .unwrap_or_else(|_| panic!("ordinary linear work limits must qualify"));
+    let plan = RetainedOperationStartPlan::new(
+        writer_plan(2, 2),
+        share_work(),
+        empty_plan(),
+        OutputCommitment::new(TestDimension::Bytes, 1),
+        OutputCommitment::new(TestDimension::Bytes, 1),
+    );
+    TestOperation::try_start(control, limits, account, plan, || Ok(7_u32))
+        .unwrap_or_else(|_| panic!("ordinary linear work operation must start"))
+}
+
+#[cfg(feature = "_u4-activation")]
+fn finish_ordinary_linear_work_test(assembly: TestPublication<u64, u64>) -> PreparationFailureCode {
+    let published = handoff_for_test(
+        assembly
+            .prepare_minimal_fallback()
+            .unwrap_or_else(|_| panic!("ordinary linear work fallback must prepare")),
+    );
+    let PublishedRetainedPublicationParts::MinimalFallback {
+        fallback,
+        ledger_evidence,
+    } = published
+    else {
+        panic!("ordinary linear work test must publish minimal fallback");
+    };
+    let cause = published_failure_cause(&ledger_evidence);
+    drop(fallback);
+    drop(ledger_evidence);
+    cause
+}
+
+#[cfg(feature = "_u4-activation")]
+#[test]
+fn ordinary_work_permit_records_exact_attempted_and_completed_work() {
+    let factory = account_factory(1);
+    let account = account(&factory, u64::MAX, 128);
+    let operation = ordinary_linear_work_operation(&account, 8, 8);
+    let mut assembly: TestPublication<u64, u64> = operation
+        .try_publication_assembly(publication_plan(1, 1))
+        .unwrap_or_else(|_| panic!("ordinary work publication must open"));
+
+    let _evidence = assembly
+        .try_retain_success_outcome_evidence_controlled(
+            TestDimension::Work,
+            empty_plan(),
+            |emplacer, control| {
+                let mut permit =
+                    match control.try_begin(NonZeroU64::new(3).expect("nonzero work envelope")) {
+                        Ok(permit) => permit,
+                        Err(_) => panic!("exact ordinary work envelope must be admitted"),
+                    };
+                assert_eq!(permit.remaining_units(), 3);
+                permit
+                    .poll()
+                    .unwrap_or_else(|_| panic!("work must remain live"));
+                assert!(
+                    permit
+                        .complete_units(NonZeroU64::new(2).expect("nonzero completed prefix"))
+                        .is_ok()
+                );
+                assert_eq!(permit.remaining_units(), 1);
+                assert!(
+                    permit
+                        .complete_units(NonZeroU64::new(1).expect("nonzero completed suffix"))
+                        .is_ok()
+                );
+                match permit.complete() {
+                    Ok(_control) => {}
+                    Err(RetainedWorkFinishError::Incomplete) => {
+                        panic!("exact ordinary work permit must complete")
+                    }
+                }
+                Ok(emplacer.place(7, EvidenceRootTag))
+            },
+        )
+        .unwrap_or_else(|_| panic!("exact ordinary work evidence must retain"));
+
+    let work = assembly
+        .test_ledger_probe()
+        .dimension_evidence(TestDimension::Work)
+        .unwrap_or_else(|| panic!("ordinary work evidence"));
+    assert_eq!((work.attempted(), work.consumed()), (3, 3));
+    assert_eq!(
+        finish_ordinary_linear_work_test(assembly).class(),
+        PreparationFailureClass::Requested
+    );
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
+    drop(account);
+    assert_eq!(factory.snapshot().live_accounts(), 0);
+}
+
+#[cfg(feature = "_u4-activation")]
+#[test]
+fn ordinary_work_permit_preserves_completed_prefix_when_dropped_incomplete() {
+    let factory = account_factory(1);
+    let account = account(&factory, u64::MAX, 128);
+    let operation = ordinary_linear_work_operation(&account, 8, 8);
+    let mut assembly: TestPublication<u64, u64> = operation
+        .try_publication_assembly(publication_plan(1, 1))
+        .unwrap_or_else(|_| panic!("incomplete-work publication must open"));
+
+    assert!(matches!(
+        assembly.try_retain_success_outcome_evidence_controlled::<EvidenceRootTag>(
+            TestDimension::Work,
+            empty_plan(),
+            |_emplacer, control| {
+                let mut permit = match control
+                    .try_begin(NonZeroU64::new(3).expect("nonzero work envelope"))
+                {
+                    Ok(permit) => permit,
+                    Err(_) => panic!("incomplete ordinary work envelope must be admitted"),
+                };
+                assert!(
+                    permit
+                        .complete_units(NonZeroU64::new(2).expect("nonzero completed prefix"))
+                        .is_ok()
+                );
+                drop(permit);
+                Err(BUILD_FAILED)
+            },
+        ),
+        Err(RetainedPublicationError::Writer(
+            RetainedWriterError::Physical(RetainedAllocationError::Build(cause))
+        )) if cause == BUILD_FAILED
+    ));
+    let work = assembly
+        .test_ledger_probe()
+        .dimension_evidence(TestDimension::Work)
+        .unwrap_or_else(|| panic!("incomplete ordinary work evidence"));
+    assert_eq!((work.attempted(), work.consumed()), (3, 2));
+    assert_eq!(
+        finish_ordinary_linear_work_test(assembly).class(),
+        PreparationFailureClass::ProductGraph
+    );
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
+    drop(account);
+    assert_eq!(factory.snapshot().live_accounts(), 0);
+}
+
+#[cfg(feature = "_u4-activation")]
+#[test]
+fn ordinary_work_permit_rejects_consumed_overrun_without_fabricating_completion() {
+    let factory = account_factory(1);
+    let account = account(&factory, u64::MAX, 128);
+    let operation = ordinary_linear_work_operation(&account, 8, 8);
+    let mut assembly: TestPublication<u64, u64> = operation
+        .try_publication_assembly(publication_plan(1, 1))
+        .unwrap_or_else(|_| panic!("overrun publication must open"));
+
+    assert!(matches!(
+        assembly.try_retain_success_outcome_evidence_controlled::<EvidenceRootTag>(
+            TestDimension::Work,
+            empty_plan(),
+            |_emplacer, control| {
+                let mut permit = match control
+                    .try_begin(NonZeroU64::new(3).expect("nonzero work envelope"))
+                {
+                    Ok(permit) => permit,
+                    Err(_) => panic!("overrun ordinary work envelope must be admitted"),
+                };
+                assert!(matches!(
+                    permit.complete_units(
+                        NonZeroU64::new(4).expect("nonzero overrun completion")
+                    ),
+                    Err(RetainedWorkConsumeError::ExceedsAttempted)
+                ));
+                Err(BUILD_FAILED)
+            },
+        ),
+        Err(RetainedPublicationError::Writer(
+            RetainedWriterError::Physical(RetainedAllocationError::Build(cause))
+        )) if cause == BUILD_FAILED
+    ));
+    let work = assembly
+        .test_ledger_probe()
+        .dimension_evidence(TestDimension::Work)
+        .unwrap_or_else(|| panic!("overrun ordinary work evidence"));
+    assert_eq!((work.attempted(), work.consumed()), (3, 0));
+    assert_eq!(
+        finish_ordinary_linear_work_test(assembly).class(),
+        PreparationFailureClass::ProductGraph
+    );
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
+    drop(account);
+    assert_eq!(factory.snapshot().live_accounts(), 0);
+}
+
+#[cfg(feature = "_u4-activation")]
+#[test]
+fn ordinary_work_admission_rejects_short_consumed_capacity_before_action() {
+    let factory = account_factory(1);
+    let account = account(&factory, u64::MAX, 128);
+    let operation = ordinary_linear_work_operation(&account, 8, 2);
+    let mut assembly: TestPublication<u64, u64> = operation
+        .try_publication_assembly(publication_plan(1, 1))
+        .unwrap_or_else(|_| panic!("short-capacity publication must open"));
+    let mut builder_ran = false;
+    let mut action_ran = false;
+
+    assert!(matches!(
+        assembly.try_retain_success_outcome_evidence_controlled::<EvidenceRootTag>(
+            TestDimension::Work,
+            empty_plan(),
+            |_emplacer, control| {
+                builder_ran = true;
+                match control.try_begin(NonZeroU64::new(3).expect("nonzero work envelope")) {
+                    Err(RetainedWorkStartError::Ledger(LedgerCause::LimitExceeded {
+                        class: CounterClass::Consumed,
+                        dimension: TestDimension::Work,
+                        value: 3,
+                        limit: 2,
+                    })) => return Err(BUILD_FAILED),
+                    Ok(_) => action_ran = true,
+                    Err(_) => panic!("short consumed capacity returned the wrong cause"),
+                }
+                Err(BUILD_FAILED)
+            },
+        ),
+        Err(RetainedPublicationError::Writer(
+            RetainedWriterError::Physical(RetainedAllocationError::Build(cause))
+        )) if cause == BUILD_FAILED
+    ));
+    assert!(builder_ran, "the retained builder callback must execute");
+    assert!(
+        !action_ran,
+        "the protected action must not start after rejection"
+    );
+    let work = assembly
+        .test_ledger_probe()
+        .dimension_evidence(TestDimension::Work)
+        .unwrap_or_else(|| panic!("short-capacity ordinary work evidence"));
+    assert_eq!((work.attempted(), work.consumed()), (3, 0));
+    assert_eq!(
+        finish_ordinary_linear_work_test(assembly).class(),
+        PreparationFailureClass::Ledger
+    );
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
+    drop(account);
+    assert_eq!(factory.snapshot().live_accounts(), 0);
+}
+
+#[cfg(feature = "_u4-activation")]
+#[test]
+fn ordinary_work_admission_observes_preexisting_cancellation_before_attempting_work() {
+    let factory = account_factory(1);
+    let account = account(&factory, u64::MAX, 128);
+    let cancellation = crate::CancellationToken::new();
+    let control = OperationControl::default().with_cancellation(cancellation.clone());
+    let operation = ordinary_linear_work_operation_with_control(&account, 8, 8, control);
+    let mut assembly: TestPublication<u64, u64> = operation
+        .try_publication_assembly(publication_plan(1, 1))
+        .unwrap_or_else(|error| panic!("cancellation publication must open: {error:?}"));
+    cancellation.cancel();
+    let mut action_ran = false;
+
+    assert!(matches!(
+        assembly.try_retain_success_outcome_evidence_controlled::<EvidenceRootTag>(
+            TestDimension::Work,
+            empty_plan(),
+            |_emplacer, control| {
+                match control.try_begin(NonZeroU64::new(3).expect("nonzero work envelope")) {
+                    Err(RetainedWorkStartError::Control(_)) => return Err(BUILD_FAILED),
+                    Ok(_) => action_ran = true,
+                    Err(_) => panic!("preexisting cancellation returned the wrong cause"),
+                }
+                Err(BUILD_FAILED)
+            },
+        ),
+        Err(RetainedPublicationError::Writer(
+            RetainedWriterError::Physical(RetainedAllocationError::Build(cause))
+        )) if cause == BUILD_FAILED
+    ));
+    assert!(
+        !action_ran,
+        "cancelled work must not enter the protected action"
+    );
+    let work = assembly
+        .test_ledger_probe()
+        .dimension_evidence(TestDimension::Work)
+        .unwrap_or_else(|| panic!("cancelled ordinary work evidence"));
+    assert_eq!((work.attempted(), work.consumed()), (0, 0));
+    assert_eq!(
+        finish_ordinary_linear_work_test(assembly).class(),
+        PreparationFailureClass::Control
+    );
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
+    drop(account);
+    assert_eq!(factory.snapshot().live_accounts(), 0);
+}
+
+#[cfg(feature = "_u4-activation")]
+#[test]
+fn ordinary_work_permit_cannot_address_the_protected_failure_dimension() {
+    let factory = account_factory(1);
+    let account = account(&factory, u64::MAX, 128);
+    let operation = failure_terminal_operation(&account, 64, 1);
+    let mut assembly: TestPublication<u64, u64> = operation
+        .try_publication_assembly(publication_plan(1, 1))
+        .unwrap_or_else(|_| panic!("protected-dimension publication must open"));
+
+    assert!(matches!(
+        assembly.try_retain_success_outcome_evidence_controlled::<EvidenceRootTag>(
+            TestDimension::FailureTerminalWork,
+            empty_plan(),
+            |_emplacer, control| {
+                assert!(matches!(
+                    control.try_begin(NonZeroU64::new(1).expect("nonzero work envelope")),
+                    Err(RetainedWorkStartError::Ledger(LedgerCause::UnknownDimension {
+                        dimension: TestDimension::FailureTerminalWork,
+                    }))
+                ));
+                Err(BUILD_FAILED)
+            },
+        ),
+        Err(RetainedPublicationError::Writer(
+            RetainedWriterError::Physical(RetainedAllocationError::Build(cause))
+        )) if cause == BUILD_FAILED
+    ));
+    let protected = assembly
+        .test_ledger_probe()
+        .dimension_evidence(TestDimension::FailureTerminalWork)
+        .unwrap_or_else(|| panic!("protected work evidence"));
+    assert_eq!((protected.attempted(), protected.consumed()), (0, 0));
+    assert_eq!(
+        finish_ordinary_linear_work_test(assembly).class(),
+        PreparationFailureClass::Ledger
+    );
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
+    drop(account);
+    assert_eq!(factory.snapshot().live_accounts(), 0);
 }
 
 #[test]

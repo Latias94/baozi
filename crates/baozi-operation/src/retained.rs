@@ -155,7 +155,8 @@ pub(crate) use operation::{
 #[cfg(feature = "_u4-activation")]
 pub(crate) use operation::{
     RetainedFailureWorkConsumeError, RetainedFailureWorkFinishError, RetainedFailureWorkPermit,
-    RetainedFailureWorkStartError,
+    RetainedFailureWorkStartError, RetainedWorkConsumeError, RetainedWorkFinishError,
+    RetainedWorkPermit, RetainedWorkStartError,
 };
 #[cfg(test)]
 use operation_start::map_qualified_startup_batch_error;
@@ -2055,6 +2056,70 @@ where
                 if protected_action {
                     self.seal_failure_terminal_work();
                 }
+                Err(error)
+            }
+        }
+    }
+
+    /// Retains success-path outcome evidence while lending ordinary linear work authority to its
+    /// constructing closure.
+    ///
+    /// The selected dimension cannot be the protected failure-terminal dimension. Allocation,
+    /// attribution, and table membership remain inside the existing single-block rollback and
+    /// panic-containment boundary.
+    #[cfg(feature = "_u4-activation")]
+    pub(crate) fn try_retain_success_outcome_evidence_controlled<Tag>(
+        &mut self,
+        work_dimension: D,
+        plan: RetainedAllocationPlan,
+        build: impl for<'placement, 'control> FnOnce(
+            BlockEmplacer<'placement, EvidenceBlock>,
+            RetainedWorkControl<'control, O, P, PP, U, D>,
+        ) -> Result<
+            BlockPlacement<'placement, EvidenceBlock, Tag>,
+            RetainedBuildFailureCode,
+        >,
+    ) -> Result<OutcomeEvidenceRetainedSlot<EvidenceBlock, Tag>, RetainedPublicationError<D>>
+    where
+        Tag: Copy + Send + Sync + 'static,
+    {
+        if self.containment != AssemblyContainmentProvenance::Healthy {
+            return Err(RetainedPublicationError::Poisoned);
+        }
+        self.ensure_canonical_work_available()?;
+        let (control, ledger) = self
+            .operation
+            .as_mut()
+            .ok_or(RetainedPublicationError::Poisoned)?
+            .split_work_control(work_dimension);
+        let result = try_retain_block(
+            ledger,
+            self.account
+                .as_ref()
+                .ok_or(RetainedPublicationError::Poisoned)?,
+            self.ordinary_handle_share_work,
+            self.evidence_plan.writer.phase,
+            self.evidence_plan.writer.attribution_dimension,
+            self.evidence_batch
+                .as_mut()
+                .ok_or(RetainedPublicationError::Poisoned)?,
+            self.evidence_table
+                .as_mut()
+                .ok_or(RetainedPublicationError::Poisoned)?,
+            self.set_id,
+            RetainedMembershipDestination::OutcomeEvidence,
+            RetainedPublicationError::OutcomeEvidenceSlotLimit,
+            RetainedBlockOrigin::New,
+            plan,
+            move |emplacer, _| build(emplacer, control),
+        );
+        match result {
+            Ok(identity) => Ok(OutcomeEvidenceRetainedSlot {
+                identity,
+                marker: PhantomData,
+            }),
+            Err(error) => {
+                self.observe_publication_error(&error);
                 Err(error)
             }
         }

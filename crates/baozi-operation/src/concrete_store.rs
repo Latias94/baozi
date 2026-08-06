@@ -133,6 +133,8 @@ use crate::ledger::{LedgerCause, LiveReservation};
 use crate::owner::OperationOwner;
 #[cfg(test)]
 use crate::retained::RetainedAllocationError;
+#[cfg(feature = "_u4-activation")]
+use crate::retained::{BlockEmplacer, BlockPlacement};
 use crate::retained::{
     CanonicalLeafInheritanceError, CanonicalRetainedLeafPolicy, CanonicalRetainedRewriteMap,
     CanonicalRetainedSlot, CanonicalSourceBindError, FinalizationContainmentError,
@@ -2812,6 +2814,35 @@ where
                 Err(map_publication_error(&error))
             }
         }
+    }
+
+    #[cfg(feature = "_u4-activation")]
+    fn try_retain_success_outcome_evidence_controlled<Kind, Tag>(
+        &mut self,
+        work_dimension: StoreDimensionKey,
+        allocation: RetainedAllocationPlan,
+        build: impl for<'placement, 'control> FnOnce(
+            BlockEmplacer<'placement, StoredBlock>,
+            RetainedWorkControl<'control, O, StorePhaseKey, PP, U, StoreDimensionKey>,
+        ) -> Result<
+            BlockPlacement<'placement, StoredBlock, Tag>,
+            RetainedBuildFailureCode,
+        >,
+    ) -> Result<OutcomeEvidenceStoreRef<Kind, Tag>, StoreRuntimeError>
+    where
+        Tag: Copy + Send + Sync + 'static,
+    {
+        self.ensure_evidence_writable()?;
+        self.validate_dimension(work_dimension)?;
+        let result = self.raw.try_retain_success_outcome_evidence_controlled(
+            work_dimension,
+            allocation,
+            build,
+        );
+        self.map_action(result).map(|raw| OutcomeEvidenceStoreRef {
+            raw,
+            marker: PhantomData,
+        })
     }
 
     fn map_pure_preflight<T>(

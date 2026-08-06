@@ -42,6 +42,9 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 
 const FAILURE_WORK_PERMIT_ABANDONED_CODE: u32 = 0x4657_5041;
 const FAILURE_WORK_PERMIT_OVERRUN_CODE: u32 = 0x4657_504f;
+const ORDINARY_WORK_PERMIT_ABANDONED_CODE: u32 = 0x4f57_5041;
+#[cfg(feature = "_u4-activation")]
+const ORDINARY_WORK_PERMIT_OVERRUN_CODE: u32 = 0x4f57_504f;
 
 /// Linear owner for one coordinator, one physical account, and its pre-admitted fallback.
 #[allow(
@@ -65,6 +68,7 @@ where
     failure_terminal_work: Option<FailureTerminalWorkCapability<D>>,
     failure_terminal_work_dimension: Option<D>,
     failure_work_permit_outstanding: bool,
+    ordinary_work_permit_outstanding: bool,
     sticky_terminal_cause: Option<PreparationFailureCode>,
     canonical_lineage: CanonicalLineageAuthority,
 }
@@ -173,7 +177,49 @@ where
     ledger: &'a crate::ledger::Ledger<O, P, D>,
     dimension: D,
     failure_terminal_work_dimension: Option<D>,
+    #[allow(
+        dead_code,
+        reason = "ordinary linear permits are enabled only for the U4 activation consumer"
+    )]
+    ordinary_work_permit_outstanding: &'a mut bool,
     sticky_terminal_cause: &'a mut Option<PreparationFailureCode>,
+}
+
+#[cfg(feature = "_u4-activation")]
+pub(crate) enum RetainedWorkStartError<D> {
+    Control(ControlCause),
+    Ledger(LedgerCause<D>),
+    Outstanding,
+}
+
+#[cfg(feature = "_u4-activation")]
+pub(crate) enum RetainedWorkConsumeError<D> {
+    Ledger(LedgerCause<D>),
+    ExceedsAttempted,
+}
+
+#[cfg(feature = "_u4-activation")]
+pub(crate) enum RetainedWorkFinishError {
+    Incomplete,
+}
+
+/// Linear completion authority for one admitted ordinary work action.
+///
+/// Admission records the complete attempted envelope before the action begins and confirms that
+/// the same consumed prefix still fits. Completed chunks alone advance consumed evidence. Dropping
+/// the permit without explicit completion records a product-graph fault.
+#[cfg(feature = "_u4-activation")]
+#[must_use = "the ordinary work permit must be completed or remain attempted-only"]
+pub(crate) struct RetainedWorkPermit<'a, O, P, PP, U, D>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+    D: Copy + Ord + fmt::Debug,
+{
+    control: Option<RetainedWorkControl<'a, O, P, PP, U, D>>,
+    remaining: u64,
 }
 
 /// Poll-and-work authority bound to the protected failure-terminal dimension.
@@ -261,6 +307,146 @@ where
                 PreparationFailureCode::ledger(),
             );
         })
+    }
+}
+
+#[cfg(feature = "_u4-activation")]
+impl<'a, O, P, PP, U, D> RetainedWorkControl<'a, O, P, PP, U, D>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+    D: Copy + Ord + fmt::Debug,
+{
+    pub(crate) fn try_begin(
+        mut self,
+        amount: NonZeroU64,
+    ) -> Result<RetainedWorkPermit<'a, O, P, PP, U, D>, RetainedWorkStartError<D>> {
+        if *self.ordinary_work_permit_outstanding {
+            record_terminal_cause_with_precedence(
+                self.sticky_terminal_cause,
+                PreparationFailureCode::product_graph(ORDINARY_WORK_PERMIT_ABANDONED_CODE),
+            );
+            return Err(RetainedWorkStartError::Outstanding);
+        }
+        self.poll().map_err(RetainedWorkStartError::Control)?;
+        let result = if self.failure_terminal_work_dimension == Some(self.dimension) {
+            Err(LedgerCause::UnknownDimension {
+                dimension: self.dimension,
+            })
+        } else {
+            self.ledger
+                .try_admit_linear_work(self.dimension, amount.get())
+        };
+        if let Err(cause) = result {
+            record_terminal_cause_with_precedence(
+                self.sticky_terminal_cause,
+                PreparationFailureCode::ledger(),
+            );
+            return Err(RetainedWorkStartError::Ledger(cause));
+        }
+        *self.ordinary_work_permit_outstanding = true;
+        Ok(RetainedWorkPermit {
+            control: Some(self),
+            remaining: amount.get(),
+        })
+    }
+}
+
+#[cfg(feature = "_u4-activation")]
+impl<'a, O, P, PP, U, D> RetainedWorkPermit<'a, O, P, PP, U, D>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+    D: Copy + Ord + fmt::Debug,
+{
+    pub(crate) fn poll(&mut self) -> Result<(), ControlCause> {
+        self.control
+            .as_mut()
+            .expect("an incomplete ordinary work permit retains its control")
+            .poll()
+    }
+
+    pub(crate) const fn remaining_units(&self) -> u64 {
+        self.remaining
+    }
+
+    pub(crate) fn complete_units(
+        &mut self,
+        amount: NonZeroU64,
+    ) -> Result<(), RetainedWorkConsumeError<D>> {
+        if amount.get() > self.remaining {
+            let control = self
+                .control
+                .as_mut()
+                .expect("an incomplete ordinary work permit retains its control");
+            record_terminal_cause_with_precedence(
+                control.sticky_terminal_cause,
+                PreparationFailureCode::product_graph(ORDINARY_WORK_PERMIT_OVERRUN_CODE),
+            );
+            return Err(RetainedWorkConsumeError::ExceedsAttempted);
+        }
+        let control = self
+            .control
+            .as_mut()
+            .expect("an incomplete ordinary work permit retains its control");
+        if let Err(cause) = control
+            .ledger
+            .charge_consumed(control.dimension, amount.get())
+        {
+            record_terminal_cause_with_precedence(
+                control.sticky_terminal_cause,
+                PreparationFailureCode::ledger(),
+            );
+            return Err(RetainedWorkConsumeError::Ledger(cause));
+        }
+        self.remaining -= amount.get();
+        Ok(())
+    }
+
+    pub(crate) fn complete(
+        mut self,
+    ) -> Result<RetainedWorkControl<'a, O, P, PP, U, D>, RetainedWorkFinishError> {
+        if self.remaining != 0 {
+            let control = self
+                .control
+                .as_mut()
+                .expect("an incomplete ordinary work permit retains its control");
+            record_terminal_cause_with_precedence(
+                control.sticky_terminal_cause,
+                PreparationFailureCode::product_graph(ORDINARY_WORK_PERMIT_ABANDONED_CODE),
+            );
+            return Err(RetainedWorkFinishError::Incomplete);
+        }
+        let control = self
+            .control
+            .take()
+            .expect("an ordinary work permit completes at most once");
+        *control.ordinary_work_permit_outstanding = false;
+        Ok(control)
+    }
+}
+
+#[cfg(feature = "_u4-activation")]
+impl<O, P, PP, U, D> Drop for RetainedWorkPermit<'_, O, P, PP, U, D>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+    D: Copy + Ord + fmt::Debug,
+{
+    fn drop(&mut self) {
+        let Some(control) = self.control.as_mut() else {
+            return;
+        };
+        record_terminal_cause_with_precedence(
+            control.sticky_terminal_cause,
+            PreparationFailureCode::product_graph(ORDINARY_WORK_PERMIT_ABANDONED_CODE),
+        );
     }
 }
 
@@ -567,6 +753,7 @@ where
         let Self {
             coordinator,
             failure_terminal_work_dimension,
+            ordinary_work_permit_outstanding,
             sticky_terminal_cause,
             ..
         } = self;
@@ -577,6 +764,7 @@ where
                 ledger,
                 dimension,
                 failure_terminal_work_dimension: *failure_terminal_work_dimension,
+                ordinary_work_permit_outstanding,
                 sticky_terminal_cause,
             },
             ledger,
@@ -882,6 +1070,7 @@ where
             failure_terminal_work,
             failure_terminal_work_dimension,
             failure_work_permit_outstanding: false,
+            ordinary_work_permit_outstanding: false,
             sticky_terminal_cause: None,
             canonical_lineage,
         })
@@ -938,18 +1127,18 @@ where
     }
 
     pub(super) const fn sticky_terminal_cause(&self) -> Option<PreparationFailureCode> {
-        match (
-            self.sticky_terminal_cause,
-            self.failure_work_permit_outstanding,
-        ) {
+        let permit_outstanding =
+            self.failure_work_permit_outstanding || self.ordinary_work_permit_outstanding;
+        let abandoned_code = if self.failure_work_permit_outstanding {
+            FAILURE_WORK_PERMIT_ABANDONED_CODE
+        } else {
+            ORDINARY_WORK_PERMIT_ABANDONED_CODE
+        };
+        match (self.sticky_terminal_cause, permit_outstanding) {
             (Some(cause), true) if matches!(cause.class(), PreparationFailureClass::Requested) => {
-                Some(PreparationFailureCode::product_graph(
-                    FAILURE_WORK_PERMIT_ABANDONED_CODE,
-                ))
+                Some(PreparationFailureCode::product_graph(abandoned_code))
             }
-            (None, true) => Some(PreparationFailureCode::product_graph(
-                FAILURE_WORK_PERMIT_ABANDONED_CODE,
-            )),
+            (None, true) => Some(PreparationFailureCode::product_graph(abandoned_code)),
             (cause, _) => cause,
         }
     }

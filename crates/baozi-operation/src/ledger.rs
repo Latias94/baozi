@@ -1087,6 +1087,50 @@ where
         Self::charge_consumed_open(&mut state, dimension, amount)
     }
 
+    /// Records one complete attempted-work envelope and preflights its future consumed prefix.
+    ///
+    /// Attempted work is non-refundable and therefore remains visible when either its own limit or
+    /// the matching consumed-capacity preflight rejects the action. Consumed work is not changed;
+    /// the linear permit created by the caller records only chunks that actually complete.
+    #[cfg(feature = "_u4-activation")]
+    pub(crate) fn try_admit_linear_work(
+        &self,
+        dimension: D,
+        amount: u64,
+    ) -> Result<(), LedgerCause<D>> {
+        let mut state = lock(&self.state);
+        Self::ensure_open(&state)?;
+        Self::charge_attempted_open(&mut state, dimension, amount)?;
+
+        let entry = dimension_entry(&state.dimensions, dimension)
+            .ok_or(LedgerCause::UnknownDimension { dimension })?;
+        let value =
+            entry
+                .state
+                .consumed
+                .checked_add(amount)
+                .ok_or(LedgerCause::ArithmeticOverflow {
+                    class: CounterClass::Consumed,
+                    dimension,
+                })?;
+        if value > entry.state.attempted {
+            return Err(LedgerCause::ConsumedExceedsAttempted {
+                dimension,
+                consumed: value,
+                attempted: entry.state.attempted,
+            });
+        }
+        if value > entry.policy.consumed_limit {
+            return Err(LedgerCause::LimitExceeded {
+                class: CounterClass::Consumed,
+                dimension,
+                value,
+                limit: entry.policy.consumed_limit,
+            });
+        }
+        Ok(())
+    }
+
     fn charge_consumed_open(
         state: &mut LedgerState<P, D>,
         dimension: D,

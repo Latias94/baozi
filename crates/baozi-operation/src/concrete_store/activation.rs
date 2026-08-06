@@ -35,7 +35,8 @@ use crate::retained::{
     FinalizationContainmentError, PreparationFailureCode, RetainedFailureWorkConsumeError,
     RetainedFailureWorkControl, RetainedFailureWorkFinishError, RetainedFailureWorkPermit,
     RetainedFailureWorkStartError, RetainedPublicationOpenRecovery,
-    RetainedPublicationPrepareError,
+    RetainedPublicationPrepareError, RetainedWorkConsumeError, RetainedWorkControl,
+    RetainedWorkFinishError, RetainedWorkPermit, RetainedWorkStartError,
 };
 
 mod canonical;
@@ -123,27 +124,42 @@ type RawFailureEvidenceWorkControl<'a, O, PP, U> =
     RetainedFailureWorkControl<'a, O, StorePhaseKey, PP, U, StoreDimensionKey>;
 type RawFailureEvidenceWorkPermit<'a, O, PP, U> =
     RetainedFailureWorkPermit<'a, O, StorePhaseKey, PP, U, StoreDimensionKey>;
+type RawOutcomeEvidenceWorkControl<'a, O, PP, U> =
+    RetainedWorkControl<'a, O, StorePhaseKey, PP, U, StoreDimensionKey>;
+type RawOutcomeEvidenceWorkPermit<'a, O, PP, U> =
+    RetainedWorkPermit<'a, O, StorePhaseKey, PP, U, StoreDimensionKey>;
 
-/// Permit-bound protected writer for one admitted failure-evidence member.
+enum OutcomeEvidenceWorkPermit<'a, O, PP, U>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    Ordinary(RawOutcomeEvidenceWorkPermit<'a, O, PP, U>),
+    Protected(RawFailureEvidenceWorkPermit<'a, O, PP, U>),
+}
+
+/// Permit-bound writer for one admitted outcome-evidence member.
 ///
 /// The complete sealed member plan is recorded as attempted before the builder runs. Each mutating
 /// method polls control state and records only the payload it actually advances as consumed. A
 /// writer error, cancellation, panic, or abandoned permit therefore preserves the unfinished
-/// attempted-only suffix and forces the terminal path away from rich evidence.
-pub struct FailureEvidenceBuildControl<'a, O, PP, U, W>
+/// attempted-only suffix. Success construction uses ordinary work; failure-only construction uses
+/// the protected terminal authority without exposing either distinction to the builder.
+pub struct OutcomeEvidenceBuildControl<'a, O, PP, U, W>
 where
     O: OperationOwner,
     PP: ProgressPhase,
     U: ProgressUnit,
 {
     writer: W,
-    permit: Option<RawFailureEvidenceWorkPermit<'a, O, PP, U>>,
+    permit: Option<OutcomeEvidenceWorkPermit<'a, O, PP, U>>,
     record_action_work: u64,
-    sticky: Option<FailureBuildCallbackError>,
+    sticky: Option<EvidenceBuildCallbackError>,
 }
 
 #[derive(Clone)]
-enum FailureBuildCallbackError {
+enum EvidenceBuildCallbackError {
     Build(StoreBuildError),
     Runtime(StoreRuntimeError),
 }
@@ -779,6 +795,7 @@ where
     assembly: &'lane mut RetainedStorePublicationAssembly<O, PP, U, L>,
     first_fault: &'lane mut Option<ActivationFirstFault>,
     failure_work: &'lane mut FailureEvidenceWorkBudget,
+    work_dimension: StoreDimensionKey,
 }
 
 /// One-shot decision for rejected or never-activated evidence.

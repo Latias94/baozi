@@ -599,6 +599,65 @@ fn consumed_batch_is_atomic_and_aggregates_duplicate_dimensions() {
     );
 }
 
+#[cfg(feature = "_u4-activation")]
+#[test]
+fn linear_work_admission_records_attempted_before_consumed_completion() {
+    let ledger = test_ledger(limits());
+
+    ledger
+        .try_admit_linear_work(Dimension::Records, 3)
+        .expect("three linear work units fit both counters");
+    let admitted = ledger
+        .dimension_evidence(Dimension::Records)
+        .expect("admitted work evidence");
+    assert_eq!((admitted.attempted(), admitted.consumed()), (3, 0));
+
+    ledger
+        .charge_consumed(Dimension::Records, 2)
+        .expect("the completed prefix fits the admitted envelope");
+    let prefix = ledger
+        .dimension_evidence(Dimension::Records)
+        .expect("completed-prefix evidence");
+    assert_eq!((prefix.attempted(), prefix.consumed()), (3, 2));
+
+    ledger
+        .charge_consumed(Dimension::Records, 1)
+        .expect("the exact completed suffix fits the admitted envelope");
+    let complete = ledger
+        .dimension_evidence(Dimension::Records)
+        .expect("completed linear work evidence");
+    assert_eq!((complete.attempted(), complete.consumed()), (3, 3));
+}
+
+#[cfg(feature = "_u4-activation")]
+#[test]
+fn linear_work_admission_preserves_attempted_when_consumed_capacity_is_short() {
+    let constrained = LedgerLimits::new(
+        16,
+        [(Dimension::Records, DimensionPolicy::counter(4, 2, 0))],
+    )
+    .expect("linear work limits");
+    let ledger = test_ledger(constrained);
+
+    assert!(matches!(
+        ledger.try_admit_linear_work(Dimension::Records, 3),
+        Err(LedgerCause::LimitExceeded {
+            class: CounterClass::Consumed,
+            dimension: Dimension::Records,
+            value: 3,
+            limit: 2,
+        })
+    ));
+    let rejected = ledger
+        .dimension_evidence(Dimension::Records)
+        .expect("rejected admission evidence");
+    assert_eq!(
+        (rejected.attempted(), rejected.consumed()),
+        (3, 0),
+        "consumed preflight rejection must retain attempted-only evidence"
+    );
+}
+
 #[test]
 fn observed_batch_preserves_the_ordered_non_refundable_prefix_on_failure() {
     let ledger = test_ledger(limits());

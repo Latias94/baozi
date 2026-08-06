@@ -1,5 +1,93 @@
 use super::*;
 
+fn centrally_rejected_sequence_work(elements: usize) -> (u64, u64) {
+    let values = (0..elements)
+        .map(|value| u8::try_from(value).expect("the test sequence fits in u8"))
+        .collect::<Vec<_>>();
+    let factory = factory(1);
+    let account = account(&factory);
+    let (operation, keys) = operation(&account);
+
+    let outcome = operation
+        .into_session_outcome_owner(evidence_plan(keys, 1))
+        .plan_and_activate(
+            |preflight| preflight.seal::<()>(canonical_plan(keys, 1)),
+            |lane| {
+                let root = lane
+                    .try_retain_sequence(
+                        SequencePlan::<u8>::new(1).unwrap(),
+                        keys.dimension,
+                        SequenceTag,
+                        |writer, _control| {
+                            writer.push(7)?;
+                            Ok(())
+                        },
+                    )
+                    .unwrap();
+                lane.accept::<_, ()>(root)
+            },
+        )
+        .unwrap();
+    let activated = match outcome {
+        CanonicalActivationOutcome::Activated(state) => state,
+        CanonicalActivationOutcome::Rejected(_)
+        | CanonicalActivationOutcome::NeverActivated(_)
+        | CanonicalActivationOutcome::Fallback(_) => panic!("materialization must activate"),
+    };
+    let canonical_root = *activated.output();
+    let outcome = activated
+        .validate_centrally(
+            keys.dimension,
+            canonical_root,
+            CanonicalOutputIntent::new(keys.dimension, 1),
+            |lane, _output| {
+                let evidence = lane
+                    .try_retain_sequence(
+                        SequencePlan::<u8>::new(elements).unwrap(),
+                        EvidenceLeafTag,
+                        |writer| writer.extend_from_slice(&values),
+                    )
+                    .unwrap();
+                lane.commit(keys.dimension, 1).unwrap();
+                lane.complete(evidence)
+            },
+            |_session, _canonical, _evidence, _output, _control| {
+                Ok(CanonicalValidationDecision::<(), _>::reject(
+                    ValidationRejection::Semantic,
+                    73,
+                ))
+            },
+        )
+        .unwrap();
+    let rejected = match outcome {
+        CanonicalCentralValidationOutcome::Rejected(rejected) => rejected,
+        CanonicalCentralValidationOutcome::Candidate(_)
+        | CanonicalCentralValidationOutcome::Fallback(_)
+        | CanonicalCentralValidationOutcome::Interrupted(_) => {
+            panic!("semantic rejection must retain the evidence owner")
+        }
+    };
+    let (prepared, _cause) = rejected.prepare_minimal_fallback().unwrap().into_parts();
+    let published = prepared.handoff();
+    let dimension = published
+        .ledger_evidence
+        .dimension(keys.dimension)
+        .expect("ordinary work evidence remains queryable");
+    let work = (dimension.attempted(), dimension.consumed());
+    let protected = published
+        .ledger_evidence
+        .dimension(keys.failure_terminal_dimension)
+        .expect("protected failure work remains queryable");
+    assert_eq!(
+        (protected.attempted(), protected.consumed()),
+        (0, 0),
+        "success-path evidence construction must not consume protected work"
+    );
+    drop(published);
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
+    work
+}
+
 #[test]
 fn matching_activation_can_only_publish_through_central_validation() {
     let factory = factory(1);
@@ -81,6 +169,190 @@ fn matching_activation_can_only_publish_through_central_validation() {
     assert_eq!(candidate.proof(), &"validated");
     assert_eq!(candidate.output(), &canonical_root);
     drop(candidate);
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
+}
+
+#[test]
+fn central_outcome_evidence_sequence_charges_exact_completed_work() {
+    let baseline = centrally_rejected_sequence_work(1);
+    let measured = centrally_rejected_sequence_work(4);
+
+    assert_eq!(measured.0.checked_sub(baseline.0), Some(3));
+    assert_eq!(measured.1.checked_sub(baseline.1), Some(3));
+}
+
+#[test]
+fn central_outcome_evidence_cancellation_preserves_the_completed_prefix() {
+    let factory = factory(1);
+    let account = account(&factory);
+    let cancellation = CancellationToken::new();
+    let control = OperationControl::default().with_cancellation(cancellation.clone());
+    let (operation, keys) = operation_with_control(&account, control);
+
+    let outcome = operation
+        .into_session_outcome_owner(evidence_plan(keys, 1))
+        .plan_and_activate(
+            |preflight| preflight.seal::<()>(canonical_plan(keys, 1)),
+            |lane| {
+                let root = lane
+                    .try_retain_sequence(
+                        SequencePlan::<u8>::new(1).unwrap(),
+                        keys.dimension,
+                        SequenceTag,
+                        |writer, _control| {
+                            writer.push(7)?;
+                            Ok(())
+                        },
+                    )
+                    .unwrap();
+                lane.accept::<_, ()>(root)
+            },
+        )
+        .unwrap();
+    let activated = match outcome {
+        CanonicalActivationOutcome::Activated(state) => state,
+        CanonicalActivationOutcome::Rejected(_)
+        | CanonicalActivationOutcome::NeverActivated(_)
+        | CanonicalActivationOutcome::Fallback(_) => panic!("materialization must activate"),
+    };
+    let canonical_root = *activated.output();
+    let outcome =
+        activated
+            .validate_centrally(
+                keys.dimension,
+                canonical_root,
+                CanonicalOutputIntent::new(keys.dimension, 1),
+                |lane, _output| {
+                    let evidence = lane.try_retain_sequence(
+                        SequencePlan::<u8>::new(2).unwrap(),
+                        EvidenceLeafTag,
+                        |writer| {
+                            writer.push(9)?;
+                            cancellation.cancel();
+                            writer.push(10)
+                        },
+                    );
+                    assert!(matches!(evidence, Err(StoreRuntimeError::Control(_))));
+                    lane.abort::<EvidenceLeafTag, EvidenceLeafTag>()
+                },
+                |_session,
+                 _canonical,
+                 _evidence,
+                 _output,
+                 _control|
+                 -> Result<
+                    CanonicalValidationDecision<(), ValidationRejection>,
+                    StoreWorkError,
+                > {
+                    unreachable!("cancelled evidence construction must skip central validation")
+                },
+            )
+            .unwrap();
+    let fallback = match outcome {
+        CanonicalCentralValidationOutcome::Fallback(fallback) => fallback,
+        CanonicalCentralValidationOutcome::Candidate(_)
+        | CanonicalCentralValidationOutcome::Rejected(_)
+        | CanonicalCentralValidationOutcome::Interrupted(_) => {
+            panic!("evidence construction cancellation must select minimal fallback")
+        }
+    };
+    assert!(matches!(fallback.cause(), StoreRuntimeError::Control(_)));
+    let (prepared, _cause) = fallback.into_parts();
+    let published = prepared.handoff();
+    let ordinary = published
+        .ledger_evidence
+        .dimension(keys.dimension)
+        .expect("ordinary work evidence remains queryable");
+    assert_eq!(ordinary.attempted() - ordinary.consumed(), 1);
+    assert_eq!(
+        store_failure_cause(&published.ledger_evidence).class(),
+        StorePreparationFailureClass::Control
+    );
+    drop(published);
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
+}
+
+#[test]
+fn central_outcome_evidence_underwrite_preserves_the_completed_prefix() {
+    let factory = factory(1);
+    let account = account(&factory);
+    let (operation, keys) = operation(&account);
+
+    let outcome = operation
+        .into_session_outcome_owner(evidence_plan(keys, 1))
+        .plan_and_activate(
+            |preflight| preflight.seal::<()>(canonical_plan(keys, 1)),
+            |lane| {
+                let root = lane
+                    .try_retain_sequence(
+                        SequencePlan::<u8>::new(1).unwrap(),
+                        keys.dimension,
+                        SequenceTag,
+                        |writer, _control| {
+                            writer.push(7)?;
+                            Ok(())
+                        },
+                    )
+                    .unwrap();
+                lane.accept::<_, ()>(root)
+            },
+        )
+        .unwrap();
+    let activated = match outcome {
+        CanonicalActivationOutcome::Activated(state) => state,
+        CanonicalActivationOutcome::Rejected(_)
+        | CanonicalActivationOutcome::NeverActivated(_)
+        | CanonicalActivationOutcome::Fallback(_) => panic!("materialization must activate"),
+    };
+    let canonical_root = *activated.output();
+    let outcome =
+        activated
+            .validate_centrally(
+                keys.dimension,
+                canonical_root,
+                CanonicalOutputIntent::new(keys.dimension, 1),
+                |lane, _output| {
+                    let evidence = lane.try_retain_sequence(
+                        SequencePlan::<u8>::new(2).unwrap(),
+                        EvidenceLeafTag,
+                        |writer| writer.push(9),
+                    );
+                    assert!(matches!(evidence, Err(StoreRuntimeError::Build(_))));
+                    lane.abort::<(), EvidenceLeafTag>()
+                },
+                |_session,
+                 _canonical,
+                 _evidence,
+                 _output,
+                 _control|
+                 -> Result<
+                    CanonicalValidationDecision<(), ValidationRejection>,
+                    StoreWorkError,
+                > {
+                    unreachable!("incomplete evidence must skip central validation")
+                },
+            )
+            .unwrap();
+    let fallback = match outcome {
+        CanonicalCentralValidationOutcome::Fallback(fallback) => fallback,
+        CanonicalCentralValidationOutcome::Candidate(_)
+        | CanonicalCentralValidationOutcome::Rejected(_)
+        | CanonicalCentralValidationOutcome::Interrupted(_) => {
+            panic!("incomplete evidence must select minimal fallback")
+        }
+    };
+    let (prepared, _cause) = fallback.into_parts();
+    let published = prepared.handoff();
+    let ordinary = published
+        .ledger_evidence
+        .dimension(keys.dimension)
+        .expect("ordinary work evidence remains queryable");
+    assert_eq!(ordinary.attempted() - ordinary.consumed(), 1);
+    assert_eq!(
+        store_failure_cause(&published.ledger_evidence).class(),
+        StorePreparationFailureClass::ProductGraph
+    );
+    drop(published);
     assert_eq!(account.snapshot().live_retained_allocations(), 0);
 }
 

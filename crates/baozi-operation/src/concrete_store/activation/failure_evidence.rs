@@ -43,21 +43,70 @@ impl CanonicalFailureTerminalWorkPlan {
     }
 }
 
-impl<O, PP, U, W> FailureEvidenceBuildControl<'_, O, PP, U, W>
+impl<O, PP, U> OutcomeEvidenceWorkPermit<'_, O, PP, U>
 where
     O: OperationOwner,
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    fn try_start<'control>(
+    fn poll(&mut self) -> Result<(), StoreRuntimeError> {
+        match self {
+            Self::Ordinary(permit) => permit.poll().map_err(StoreRuntimeError::Control),
+            Self::Protected(permit) => permit.poll().map_err(StoreRuntimeError::Control),
+        }
+    }
+
+    const fn remaining_units(&self) -> u64 {
+        match self {
+            Self::Ordinary(permit) => permit.remaining_units(),
+            Self::Protected(permit) => permit.remaining_units(),
+        }
+    }
+
+    fn complete_units(&mut self, amount: NonZeroU64) -> Result<(), StoreRuntimeError> {
+        match self {
+            Self::Ordinary(permit) => permit.complete_units(amount).map_err(|cause| match cause {
+                RetainedWorkConsumeError::Ledger(cause) => StoreRuntimeError::Ledger(cause),
+                RetainedWorkConsumeError::ExceedsAttempted => failure_work_envelope_exhausted(),
+            }),
+            Self::Protected(permit) => permit.complete_units(amount).map_err(|cause| match cause {
+                RetainedFailureWorkConsumeError::Ledger(cause) => StoreRuntimeError::Ledger(cause),
+                RetainedFailureWorkConsumeError::ExceedsAttempted => {
+                    failure_work_envelope_exhausted()
+                }
+            }),
+        }
+    }
+
+    fn complete(self) -> Result<(), StoreRuntimeError> {
+        match self {
+            Self::Ordinary(permit) => permit
+                .complete()
+                .map(|_| ())
+                .map_err(|RetainedWorkFinishError::Incomplete| failure_work_envelope_exhausted()),
+            Self::Protected(permit) => permit.complete().map(|_| ()).map_err(
+                |RetainedFailureWorkFinishError::Incomplete| failure_work_envelope_exhausted(),
+            ),
+        }
+    }
+}
+
+impl<O, PP, U, W> OutcomeEvidenceBuildControl<'_, O, PP, U, W>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    fn try_start_protected<'control>(
         mut raw: RawFailureEvidenceWorkControl<'control, O, PP, U>,
         construction_work: u64,
         record_action_work: u64,
         create_writer: impl FnOnce() -> Result<W, StoreBuildError>,
-    ) -> Result<FailureEvidenceBuildControl<'control, O, PP, U, W>, FailureBuildCallbackError> {
+    ) -> Result<OutcomeEvidenceBuildControl<'control, O, PP, U, W>, EvidenceBuildCallbackError>
+    {
         if construction_work == 0 || record_action_work == 0 {
             raw.record_product_graph_failure(FAILURE_WORK_ENVELOPE_EXHAUSTED_CODE);
-            return Err(FailureBuildCallbackError::Runtime(
+            return Err(EvidenceBuildCallbackError::Runtime(
                 failure_work_envelope_exhausted(),
             ));
         }
@@ -69,10 +118,52 @@ where
                 RetainedFailureWorkStartError::Ledger(cause) => StoreRuntimeError::Ledger(cause),
                 RetainedFailureWorkStartError::Outstanding => failure_work_envelope_exhausted(),
             };
-            FailureBuildCallbackError::Runtime(cause)
+            EvidenceBuildCallbackError::Runtime(cause)
         })?;
-        let writer = create_writer().map_err(FailureBuildCallbackError::Build)?;
-        Ok(FailureEvidenceBuildControl {
+        Self::from_permit(
+            OutcomeEvidenceWorkPermit::Protected(permit),
+            record_action_work,
+            create_writer,
+        )
+    }
+
+    pub(super) fn try_start_ordinary<'control>(
+        raw: RawOutcomeEvidenceWorkControl<'control, O, PP, U>,
+        construction_work: u64,
+        record_action_work: u64,
+        create_writer: impl FnOnce() -> Result<W, StoreBuildError>,
+    ) -> Result<OutcomeEvidenceBuildControl<'control, O, PP, U, W>, EvidenceBuildCallbackError>
+    {
+        if construction_work == 0 || record_action_work == 0 {
+            return Err(EvidenceBuildCallbackError::Runtime(
+                failure_work_envelope_exhausted(),
+            ));
+        }
+        let amount = NonZeroU64::new(construction_work)
+            .expect("nonzero construction work was checked before admission");
+        let permit = raw.try_begin(amount).map_err(|cause| {
+            let cause = match cause {
+                RetainedWorkStartError::Control(cause) => StoreRuntimeError::Control(cause),
+                RetainedWorkStartError::Ledger(cause) => StoreRuntimeError::Ledger(cause),
+                RetainedWorkStartError::Outstanding => failure_work_envelope_exhausted(),
+            };
+            EvidenceBuildCallbackError::Runtime(cause)
+        })?;
+        Self::from_permit(
+            OutcomeEvidenceWorkPermit::Ordinary(permit),
+            record_action_work,
+            create_writer,
+        )
+    }
+
+    fn from_permit<'control>(
+        permit: OutcomeEvidenceWorkPermit<'control, O, PP, U>,
+        record_action_work: u64,
+        create_writer: impl FnOnce() -> Result<W, StoreBuildError>,
+    ) -> Result<OutcomeEvidenceBuildControl<'control, O, PP, U, W>, EvidenceBuildCallbackError>
+    {
+        let writer = create_writer().map_err(EvidenceBuildCallbackError::Build)?;
+        Ok(OutcomeEvidenceBuildControl {
             writer,
             permit: Some(permit),
             record_action_work,
@@ -80,23 +171,22 @@ where
         })
     }
 
-    /// Polls cancellation and deadline state without exposing the protected dimension.
+    /// Polls cancellation and deadline state without exposing the underlying work dimension.
     pub fn poll(&mut self) -> Result<(), StoreRuntimeError> {
         if let Some(cause) = &self.sticky {
             return Err(match cause {
-                FailureBuildCallbackError::Build(cause) => StoreRuntimeError::Build(*cause),
-                FailureBuildCallbackError::Runtime(cause) => cause.clone(),
+                EvidenceBuildCallbackError::Build(cause) => StoreRuntimeError::Build(*cause),
+                EvidenceBuildCallbackError::Runtime(cause) => cause.clone(),
             });
         }
         let result = self
             .permit
             .as_mut()
-            .expect("a fault-free failure-evidence writer retains its work permit")
-            .poll()
-            .map_err(StoreRuntimeError::Control);
+            .expect("a fault-free outcome-evidence writer retains its work permit")
+            .poll();
         if let Err(cause) = &result {
             self.sticky
-                .get_or_insert_with(|| FailureBuildCallbackError::Runtime(cause.clone()));
+                .get_or_insert_with(|| EvidenceBuildCallbackError::Runtime(cause.clone()));
         }
         result
     }
@@ -108,32 +198,31 @@ where
     ) -> Result<T, StoreBuildError> {
         if let Some(cause) = &self.sticky {
             return Err(match cause {
-                FailureBuildCallbackError::Build(cause) => *cause,
-                FailureBuildCallbackError::Runtime(_) => failure_work_build_sentinel(),
+                EvidenceBuildCallbackError::Build(cause) => *cause,
+                EvidenceBuildCallbackError::Runtime(_) => failure_work_build_sentinel(),
             });
         }
         if let Err(cause) = self
             .permit
             .as_mut()
-            .expect("a fault-free failure-evidence writer retains its work permit")
+            .expect("a fault-free outcome-evidence writer retains its work permit")
             .poll()
-            .map_err(StoreRuntimeError::Control)
         {
-            self.sticky = Some(FailureBuildCallbackError::Runtime(cause));
+            self.sticky = Some(EvidenceBuildCallbackError::Runtime(cause));
             return Err(failure_work_build_sentinel());
         }
         if amount == 0 {
             return action(&mut self.writer).inspect_err(|cause| {
                 self.sticky
-                    .get_or_insert(FailureBuildCallbackError::Build(*cause));
+                    .get_or_insert(EvidenceBuildCallbackError::Build(*cause));
             });
         }
         let permit = self
             .permit
             .as_mut()
-            .expect("a fault-free failure-evidence writer retains its work permit");
+            .expect("a fault-free outcome-evidence writer retains its work permit");
         if amount > permit.remaining_units() {
-            self.sticky = Some(FailureBuildCallbackError::Runtime(
+            self.sticky = Some(EvidenceBuildCallbackError::Runtime(
                 failure_work_envelope_exhausted(),
             ));
             return Err(failure_work_build_sentinel());
@@ -144,51 +233,41 @@ where
         let value = match action(&mut self.writer) {
             Ok(value) => value,
             Err(cause) => {
-                self.sticky = Some(FailureBuildCallbackError::Build(cause));
+                self.sticky = Some(EvidenceBuildCallbackError::Build(cause));
                 return Err(cause);
             }
         };
         match permit.complete_units(amount) {
             Ok(()) => Ok(value),
-            Err(RetainedFailureWorkConsumeError::Ledger(cause)) => {
-                self.sticky = Some(FailureBuildCallbackError::Runtime(
-                    StoreRuntimeError::Ledger(cause),
-                ));
-                Err(failure_work_build_sentinel())
-            }
-            Err(RetainedFailureWorkConsumeError::ExceedsAttempted) => {
-                self.sticky = Some(FailureBuildCallbackError::Runtime(
-                    failure_work_envelope_exhausted(),
-                ));
+            Err(cause) => {
+                self.sticky = Some(EvidenceBuildCallbackError::Runtime(cause));
                 Err(failure_work_build_sentinel())
             }
         }
     }
 
-    fn finish(
+    pub(super) fn finish(
         mut self,
         callback: Result<(), StoreBuildError>,
         finish_writer: impl FnOnce(W) -> Result<super::StoredBlock, StoreBuildError>,
-    ) -> Result<super::StoredBlock, FailureBuildCallbackError> {
+    ) -> Result<super::StoredBlock, EvidenceBuildCallbackError> {
         if let Some(cause) = self.sticky.take() {
             return Err(cause);
         }
-        callback.map_err(FailureBuildCallbackError::Build)?;
-        let block = finish_writer(self.writer).map_err(FailureBuildCallbackError::Build)?;
+        callback.map_err(EvidenceBuildCallbackError::Build)?;
+        let block = finish_writer(self.writer).map_err(EvidenceBuildCallbackError::Build)?;
         let permit = self
             .permit
             .take()
-            .expect("a completed failure-evidence writer retains its work permit");
+            .expect("a completed outcome-evidence writer retains its work permit");
         permit
             .complete()
-            .map_err(|RetainedFailureWorkFinishError::Incomplete| {
-                FailureBuildCallbackError::Runtime(failure_work_envelope_exhausted())
-            })?;
+            .map_err(EvidenceBuildCallbackError::Runtime)?;
         Ok(block)
     }
 }
 
-impl<O, PP, U, T> FailureEvidenceBuildControl<'_, O, PP, U, SequenceWriter<T>>
+impl<O, PP, U, T> OutcomeEvidenceBuildControl<'_, O, PP, U, SequenceWriter<T>>
 where
     O: OperationOwner,
     PP: ProgressPhase,
@@ -204,7 +283,7 @@ where
     pub fn extend_from_slice(&mut self, values: &[T]) -> Result<(), StoreBuildError> {
         for chunk in values.chunks(FAILURE_EVIDENCE_BUILD_CHUNK_UNITS) {
             let amount = u64::try_from(chunk.len())
-                .expect("the fixed failure-evidence chunk length fits in u64");
+                .expect("the fixed outcome-evidence chunk length fits in u64");
             self.perform(amount, |writer| writer.extend_from_slice(chunk))?;
         }
         Ok(())
@@ -219,7 +298,7 @@ where
     }
 }
 
-impl<O, PP, U> FailureEvidenceBuildControl<'_, O, PP, U, BytesWriter>
+impl<O, PP, U> OutcomeEvidenceBuildControl<'_, O, PP, U, BytesWriter>
 where
     O: OperationOwner,
     PP: ProgressPhase,
@@ -229,7 +308,7 @@ where
     pub fn write_bytes(&mut self, bytes: &[u8]) -> Result<(), StoreBuildError> {
         for chunk in bytes.chunks(FAILURE_EVIDENCE_BUILD_CHUNK_UNITS) {
             let amount = u64::try_from(chunk.len())
-                .expect("the fixed failure-evidence chunk length fits in u64");
+                .expect("the fixed outcome-evidence chunk length fits in u64");
             self.perform(amount, |writer| writer.write_bytes(chunk))?;
         }
         Ok(())
@@ -244,7 +323,7 @@ where
     }
 }
 
-impl<O, PP, U> FailureEvidenceBuildControl<'_, O, PP, U, Utf8Writer>
+impl<O, PP, U> OutcomeEvidenceBuildControl<'_, O, PP, U, Utf8Writer>
 where
     O: OperationOwner,
     PP: ProgressPhase,
@@ -266,7 +345,7 @@ where
             );
             let chunk = &value[start..end];
             let amount = u64::try_from(chunk.len())
-                .expect("the fixed failure-evidence chunk length fits in u64");
+                .expect("the fixed outcome-evidence chunk length fits in u64");
             self.perform(amount, |writer| writer.write_str(chunk))?;
             start = end;
         }
@@ -282,7 +361,7 @@ where
     }
 }
 
-impl<O, PP, U> FailureEvidenceBuildControl<'_, O, PP, U, OutcomeEvidenceRecordWriter>
+impl<O, PP, U> OutcomeEvidenceBuildControl<'_, O, PP, U, OutcomeEvidenceRecordWriter>
 where
     O: OperationOwner,
     PP: ProgressPhase,
@@ -301,7 +380,7 @@ where
     }
 }
 
-fn failure_work_build_sentinel() -> StoreBuildError {
+pub(super) fn failure_work_build_sentinel() -> StoreBuildError {
     StoreBuildError::domain(FAILURE_WORK_ENVELOPE_EXHAUSTED_CODE)
         .expect("the failure-work envelope code is inside the domain range")
 }
@@ -748,13 +827,13 @@ struct FailureEvidenceMemberBuild<Tag, CreateWriter, FinishWriter> {
 }
 
 fn recover_failure_member_build<T>(
-    result: Result<T, FailureBuildCallbackError>,
+    result: Result<T, EvidenceBuildCallbackError>,
     controlled_failure: &mut Option<StoreRuntimeError>,
 ) -> Result<T, crate::retained::RetainedBuildFailureCode> {
     match result {
         Ok(value) => Ok(value),
-        Err(FailureBuildCallbackError::Build(cause)) => Err(cause.into()),
-        Err(FailureBuildCallbackError::Runtime(cause)) => {
+        Err(EvidenceBuildCallbackError::Build(cause)) => Err(cause.into()),
+        Err(EvidenceBuildCallbackError::Runtime(cause)) => {
             *controlled_failure = Some(cause);
             Err(failure_work_build_sentinel().into())
         }
@@ -775,7 +854,7 @@ where
     where
         Tag: Copy + Send + Sync + 'static,
         Build: for<'control> FnMut(
-            &mut FailureEvidenceBuildControl<'control, O, PP, U, W>,
+            &mut OutcomeEvidenceBuildControl<'control, O, PP, U, W>,
         ) -> Result<(), StoreBuildError>,
         CreateWriter: FnOnce() -> Result<W, StoreBuildError>,
         FinishWriter: FnOnce(W) -> Result<StoredBlock, StoreBuildError>,
@@ -794,7 +873,7 @@ where
             .raw
             .try_retain_outcome_evidence_controlled(allocation, |emplacer, raw_control| {
                 let mut control = recover_failure_member_build(
-                    FailureEvidenceBuildControl::try_start(
+                    OutcomeEvidenceBuildControl::try_start_protected(
                         raw_control,
                         construction_work,
                         action_work,
@@ -822,7 +901,7 @@ where
         plan: SequencePlan<T>,
         tag: Tag,
         build: impl for<'control> FnMut(
-            &mut FailureEvidenceBuildControl<'control, O, PP, U, SequenceWriter<T>>,
+            &mut OutcomeEvidenceBuildControl<'control, O, PP, U, SequenceWriter<T>>,
         ) -> Result<(), StoreBuildError>,
     ) -> Result<OutcomeEvidenceSequenceRef<T, Tag>, StoreRuntimeError>
     where
@@ -898,7 +977,7 @@ where
         plan: BytesPlan,
         tag: Tag,
         build: impl for<'control> FnMut(
-            &mut FailureEvidenceBuildControl<'control, O, PP, U, BytesWriter>,
+            &mut OutcomeEvidenceBuildControl<'control, O, PP, U, BytesWriter>,
         ) -> Result<(), StoreBuildError>,
     ) -> Result<OutcomeEvidenceBytesRef<Tag>, StoreRuntimeError>
     where
@@ -967,7 +1046,7 @@ where
         plan: Utf8Plan,
         tag: Tag,
         build: impl for<'control> FnMut(
-            &mut FailureEvidenceBuildControl<'control, O, PP, U, Utf8Writer>,
+            &mut OutcomeEvidenceBuildControl<'control, O, PP, U, Utf8Writer>,
         ) -> Result<(), StoreBuildError>,
     ) -> Result<OutcomeEvidenceUtf8Ref<Tag>, StoreRuntimeError>
     where
@@ -1036,7 +1115,7 @@ where
         plan: RecordPlan,
         tag: Tag,
         build: impl for<'control> FnMut(
-            &mut FailureEvidenceBuildControl<'control, O, PP, U, OutcomeEvidenceRecordWriter>,
+            &mut OutcomeEvidenceBuildControl<'control, O, PP, U, OutcomeEvidenceRecordWriter>,
         ) -> Result<(), StoreBuildError>,
     ) -> Result<OutcomeEvidenceRecordRef<Tag>, StoreRuntimeError>
     where

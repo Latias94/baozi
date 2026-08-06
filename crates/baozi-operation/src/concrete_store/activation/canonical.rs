@@ -107,6 +107,7 @@ where
                 assembly: &mut assembly,
                 first_fault: &mut evidence_fault,
                 failure_work: &mut failure_work,
+                work_dimension,
             };
             let build_evidence = build_evidence
                 .as_mut()
@@ -435,6 +436,30 @@ where
     }
 }
 
+struct CanonicalEvidenceMemberBuild<Tag, CreateWriter, FinishWriter> {
+    allocation: crate::retained::RetainedAllocationPlan,
+    construction_work: u64,
+    action_work: u64,
+    tag: Tag,
+    missing_builder: &'static str,
+    create_writer: CreateWriter,
+    finish_writer: FinishWriter,
+}
+
+fn recover_canonical_evidence_build<T>(
+    result: Result<T, EvidenceBuildCallbackError>,
+    controlled_failure: &mut Option<StoreRuntimeError>,
+) -> Result<T, crate::retained::RetainedBuildFailureCode> {
+    match result {
+        Ok(value) => Ok(value),
+        Err(EvidenceBuildCallbackError::Build(cause)) => Err(cause.into()),
+        Err(EvidenceBuildCallbackError::Runtime(cause)) => {
+            *controlled_failure = Some(cause);
+            Err(super::failure_evidence::failure_work_build_sentinel().into())
+        }
+    }
+}
+
 impl<O, PP, U, L> CanonicalOutcomeEvidenceLane<'_, O, PP, U, L>
 where
     O: OperationOwner,
@@ -443,10 +468,8 @@ where
 {
     fn qualify_failure_validation_member(
         &mut self,
-        units: usize,
+        amount: u64,
     ) -> Result<FailureEvidenceWorkBudget, StoreRuntimeError> {
-        let amount = u64::try_from(units)
-            .map_err(|_| StoreRuntimeError::Plan(StorePlanError::SizeOverflow))?;
         match (*self.failure_work).with_existing_member_validation(amount) {
             Ok(qualified) => Ok(qualified),
             Err(cause) => {
@@ -457,11 +480,81 @@ where
         }
     }
 
+    fn qualify_evidence_member(
+        &mut self,
+        allocation: Result<crate::retained::RetainedAllocationPlan, StorePlanError>,
+        units: usize,
+    ) -> Result<
+        (
+            crate::retained::RetainedAllocationPlan,
+            u64,
+            FailureEvidenceWorkBudget,
+        ),
+        StoreRuntimeError,
+    > {
+        let allocation = allocation.map_err(StoreRuntimeError::Plan)?;
+        let construction_work = u64::try_from(units)
+            .map_err(|_| StoreRuntimeError::Plan(StorePlanError::SizeOverflow))?;
+        let qualified = self.qualify_failure_validation_member(construction_work)?;
+        Ok((allocation, construction_work, qualified))
+    }
+
+    fn try_retain_evidence_member<Kind, W, Tag, Build, CreateWriter, FinishWriter>(
+        &mut self,
+        member: CanonicalEvidenceMemberBuild<Tag, CreateWriter, FinishWriter>,
+        build: &mut ManuallyDrop<Option<Build>>,
+    ) -> Result<OutcomeEvidenceStoreRef<Kind, Tag>, StoreRuntimeError>
+    where
+        Tag: Copy + Send + Sync + 'static,
+        Build: for<'control> FnMut(
+            &mut OutcomeEvidenceBuildControl<'control, O, PP, U, W>,
+        ) -> Result<(), StoreBuildError>,
+        CreateWriter: FnOnce() -> Result<W, StoreBuildError>,
+        FinishWriter: FnOnce(W) -> Result<StoredBlock, StoreBuildError>,
+    {
+        let CanonicalEvidenceMemberBuild {
+            allocation,
+            construction_work,
+            action_work,
+            tag,
+            missing_builder,
+            create_writer,
+            finish_writer,
+        } = member;
+        let mut controlled_failure = None;
+        let result = self
+            .assembly
+            .try_retain_success_outcome_evidence_controlled(
+                self.work_dimension,
+                allocation,
+                |emplacer, raw_control| {
+                    let mut control = recover_canonical_evidence_build(
+                        OutcomeEvidenceBuildControl::try_start_ordinary(
+                            raw_control,
+                            construction_work,
+                            action_work,
+                            create_writer,
+                        ),
+                        &mut controlled_failure,
+                    )?;
+                    let built = build.as_mut().expect(missing_builder)(&mut control);
+                    let block = recover_canonical_evidence_build(
+                        control.finish(built, finish_writer),
+                        &mut controlled_failure,
+                    )?;
+                    Ok(emplacer.place(block, tag))
+                },
+            );
+        controlled_failure.map_or(result, Err)
+    }
+
     pub fn try_retain_sequence<T, Tag>(
         &mut self,
         plan: SequencePlan<T>,
         tag: Tag,
-        build: impl FnMut(&mut SequenceWriter<T>) -> Result<(), StoreBuildError>,
+        build: impl for<'control> FnMut(
+            &mut OutcomeEvidenceBuildControl<'control, O, PP, U, SequenceWriter<T>>,
+        ) -> Result<(), StoreBuildError>,
     ) -> Result<OutcomeEvidenceSequenceRef<T, Tag>, StoreRuntimeError>
     where
         T: StoredScalar,
@@ -480,24 +573,30 @@ where
                 finish_scoped_callback(build, Err(cause)),
             );
         }
-        let qualified = match self.qualify_failure_validation_member(plan.element_count()) {
-            Ok(qualified) => qualified,
-            Err(cause) => {
-                return preserve_first_fault(
-                    self.first_fault,
-                    finish_scoped_callback(build, Err(cause)),
-                );
-            }
-        };
-        let result = self
-            .assembly
-            .try_retain_outcome_evidence_sequence(plan, tag, |writer| {
-                build
-                    .as_mut()
-                    .expect("the outcome-evidence sequence builder is executed at most once")(
-                    writer,
-                )
-            });
+        let (allocation, construction_work, qualified) =
+            match self.qualify_evidence_member(plan.allocation_plan(), plan.element_count()) {
+                Ok(qualified) => qualified,
+                Err(cause) => {
+                    return preserve_first_fault(
+                        self.first_fault,
+                        finish_scoped_callback(build, Err(cause)),
+                    );
+                }
+            };
+        let result = self.try_retain_evidence_member::<ScalarSequence<T>, _, _, _, _, _>(
+            CanonicalEvidenceMemberBuild {
+                allocation,
+                construction_work,
+                action_work: 1,
+                tag,
+                missing_builder: "the outcome-evidence sequence builder is executed at most once",
+                create_writer: || {
+                    <T as super::super::sealed::StoredScalar>::new_writer(plan.capacity, plan.len)
+                },
+                finish_writer: SequenceWriter::finish,
+            },
+            &mut build,
+        );
         let result = finish_scoped_callback(build, result);
         if result.is_ok() {
             *self.failure_work = qualified;
@@ -509,7 +608,9 @@ where
         &mut self,
         plan: BytesPlan,
         tag: Tag,
-        build: impl FnMut(&mut BytesWriter) -> Result<(), StoreBuildError>,
+        build: impl for<'control> FnMut(
+            &mut OutcomeEvidenceBuildControl<'control, O, PP, U, BytesWriter>,
+        ) -> Result<(), StoreBuildError>,
     ) -> Result<OutcomeEvidenceBytesRef<Tag>, StoreRuntimeError>
     where
         Tag: Copy + Send + Sync + 'static,
@@ -527,24 +628,28 @@ where
                 finish_scoped_callback(build, Err(cause)),
             );
         }
-        let qualified = match self.qualify_failure_validation_member(plan.bytes()) {
-            Ok(qualified) => qualified,
-            Err(cause) => {
-                return preserve_first_fault(
-                    self.first_fault,
-                    finish_scoped_callback(build, Err(cause)),
-                );
-            }
-        };
-        let result = self
-            .assembly
-            .try_retain_outcome_evidence_bytes(plan, tag, |writer| {
-                build
-                    .as_mut()
-                    .expect("the outcome-evidence bytes builder is executed at most once")(
-                    writer
-                )
-            });
+        let (allocation, construction_work, qualified) =
+            match self.qualify_evidence_member(plan.allocation_plan(), plan.bytes()) {
+                Ok(qualified) => qualified,
+                Err(cause) => {
+                    return preserve_first_fault(
+                        self.first_fault,
+                        finish_scoped_callback(build, Err(cause)),
+                    );
+                }
+            };
+        let result = self.try_retain_evidence_member::<ByteBlock, _, _, _, _, _>(
+            CanonicalEvidenceMemberBuild {
+                allocation,
+                construction_work,
+                action_work: 1,
+                tag,
+                missing_builder: "the outcome-evidence bytes builder is executed at most once",
+                create_writer: || BytesWriter::new(plan),
+                finish_writer: BytesWriter::finish,
+            },
+            &mut build,
+        );
         let result = finish_scoped_callback(build, result);
         if result.is_ok() {
             *self.failure_work = qualified;
@@ -556,7 +661,9 @@ where
         &mut self,
         plan: Utf8Plan,
         tag: Tag,
-        build: impl FnMut(&mut Utf8Writer) -> Result<(), StoreBuildError>,
+        build: impl for<'control> FnMut(
+            &mut OutcomeEvidenceBuildControl<'control, O, PP, U, Utf8Writer>,
+        ) -> Result<(), StoreBuildError>,
     ) -> Result<OutcomeEvidenceUtf8Ref<Tag>, StoreRuntimeError>
     where
         Tag: Copy + Send + Sync + 'static,
@@ -574,24 +681,28 @@ where
                 finish_scoped_callback(build, Err(cause)),
             );
         }
-        let qualified = match self.qualify_failure_validation_member(plan.bytes()) {
-            Ok(qualified) => qualified,
-            Err(cause) => {
-                return preserve_first_fault(
-                    self.first_fault,
-                    finish_scoped_callback(build, Err(cause)),
-                );
-            }
-        };
-        let result = self
-            .assembly
-            .try_retain_outcome_evidence_utf8(plan, tag, |writer| {
-                build
-                    .as_mut()
-                    .expect("the outcome-evidence UTF-8 builder is executed at most once")(
-                    writer
-                )
-            });
+        let (allocation, construction_work, qualified) =
+            match self.qualify_evidence_member(plan.allocation_plan(), plan.bytes()) {
+                Ok(qualified) => qualified,
+                Err(cause) => {
+                    return preserve_first_fault(
+                        self.first_fault,
+                        finish_scoped_callback(build, Err(cause)),
+                    );
+                }
+            };
+        let result = self.try_retain_evidence_member::<Utf8Block, _, _, _, _, _>(
+            CanonicalEvidenceMemberBuild {
+                allocation,
+                construction_work,
+                action_work: 1,
+                tag,
+                missing_builder: "the outcome-evidence UTF-8 builder is executed at most once",
+                create_writer: || Utf8Writer::new(plan),
+                finish_writer: Utf8Writer::finish,
+            },
+            &mut build,
+        );
         let result = finish_scoped_callback(build, result);
         if result.is_ok() {
             *self.failure_work = qualified;
@@ -603,7 +714,9 @@ where
         &mut self,
         plan: RecordPlan,
         tag: Tag,
-        build: impl FnMut(&mut OutcomeEvidenceRecordWriter) -> Result<(), StoreBuildError>,
+        build: impl for<'control> FnMut(
+            &mut OutcomeEvidenceBuildControl<'control, O, PP, U, OutcomeEvidenceRecordWriter>,
+        ) -> Result<(), StoreBuildError>,
     ) -> Result<OutcomeEvidenceRecordRef<Tag>, StoreRuntimeError>
     where
         Tag: Copy + Send + Sync + 'static,
@@ -633,24 +746,30 @@ where
                 );
             }
         };
-        let qualified = match self.qualify_failure_validation_member(cells) {
-            Ok(qualified) => qualified,
-            Err(cause) => {
-                return preserve_first_fault(
-                    self.first_fault,
-                    finish_scoped_callback(build, Err(cause)),
-                );
-            }
-        };
-        let result = self
-            .assembly
-            .try_retain_outcome_evidence_records(plan, tag, |writer| {
-                build
-                    .as_mut()
-                    .expect("the outcome-evidence record builder is executed at most once")(
-                    writer
-                )
-            });
+        let action_work =
+            u64::try_from(plan.fields()).expect("the fixed record field limit fits in u64");
+        let (allocation, construction_work, qualified) =
+            match self.qualify_evidence_member(plan.allocation_plan(), cells) {
+                Ok(qualified) => qualified,
+                Err(cause) => {
+                    return preserve_first_fault(
+                        self.first_fault,
+                        finish_scoped_callback(build, Err(cause)),
+                    );
+                }
+            };
+        let result = self.try_retain_evidence_member::<RecordBlock, _, _, _, _, _>(
+            CanonicalEvidenceMemberBuild {
+                allocation,
+                construction_work,
+                action_work,
+                tag,
+                missing_builder: "the outcome-evidence record builder is executed at most once",
+                create_writer: || OutcomeEvidenceRecordWriter::new(plan),
+                finish_writer: OutcomeEvidenceRecordWriter::finish,
+            },
+            &mut build,
+        );
         let result = finish_scoped_callback(build, result);
         if result.is_ok() {
             *self.failure_work = qualified;

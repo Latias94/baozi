@@ -84,9 +84,9 @@ pub mod __canonical_activation {
     pub use crate::concrete_store::activation::{
         CanonicalActivationOutcome, CanonicalCentralValidationOutcome,
         CanonicalFailureTerminalWorkPlan, CanonicalMaterialization, CanonicalOutputIntent,
-        CanonicalPreflightDecision, CanonicalValidationDecision, FailureEvidenceBuildControl,
-        FailureEvidenceDecision, FailureEvidenceMember, FailureEvidenceOutcome,
-        FailureEvidenceRecordRow, FailureEvidenceValidationSession, NeverActivatedStoreSession,
+        CanonicalPreflightDecision, CanonicalValidationDecision, FailureEvidenceDecision,
+        FailureEvidenceMember, FailureEvidenceOutcome, FailureEvidenceRecordRow,
+        FailureEvidenceValidationSession, NeverActivatedStoreSession, OutcomeEvidenceBuildControl,
         OutcomeEvidenceDecision, RetainedStoreSessionOutcomeOwner, RootedFailureValidation,
         StoreActivationContainment, StoreCanonicalRejection, StoreNeverActivatedCause,
     };
