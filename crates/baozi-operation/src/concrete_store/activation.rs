@@ -607,11 +607,65 @@ pub struct CanonicalPreflightDecision<E> {
     state: CanonicalPreflightState<E>,
 }
 
+#[allow(
+    clippy::large_enum_variant,
+    reason = "the bounded single-use plan stays inline so preflight requires no authority-path allocation"
+)]
 enum CanonicalPreflightState<E> {
     Activate {
         canonical_plan: RetainedStoreBlockTablePlan,
+        intent: CanonicalActivationIntent,
     },
     Rejected(VerifiedRejection<E>),
+}
+
+/// Operation-neutral canonical requirements consumed by one preflight decision.
+///
+/// This value owns no dormant authority, table, publication join, or retry right. The domain owner
+/// supplies semantic dimensions and an exact logical commitment; `baozi-operation` validates only
+/// domain/ledger membership and the declared materialized-block shape before the owning session
+/// consumes the plan once.
+pub struct CanonicalActivationPlan {
+    canonical_plan: RetainedStoreBlockTablePlan,
+    intent: CanonicalActivationIntent,
+}
+
+impl CanonicalActivationPlan {
+    /// Binds an exact materialized shape and semantic accounting requirements to one table plan.
+    pub fn new(
+        canonical_plan: RetainedStoreBlockTablePlan,
+        expected_materialized_blocks: usize,
+        validation_work_dimension: StoreDimensionKey,
+        canonical_commitment_dimension: StoreDimensionKey,
+        canonical_commitment_amount: NonZeroU64,
+    ) -> Result<Self, StorePlanError> {
+        if expected_materialized_blocks == 0
+            || expected_materialized_blocks > canonical_plan.activation_capacity()
+        {
+            return Err(StorePlanError::InvalidBlockTable);
+        }
+        Ok(Self {
+            canonical_plan,
+            intent: CanonicalActivationIntent {
+                work_dimension: validation_work_dimension,
+                commitment_dimension: canonical_commitment_dimension,
+                commitment_amount: canonical_commitment_amount.get(),
+                expected_materialized_blocks,
+            },
+        })
+    }
+
+    fn into_parts(self) -> (RetainedStoreBlockTablePlan, CanonicalActivationIntent) {
+        (self.canonical_plan, self.intent)
+    }
+}
+
+/// Single-use accounting and exact-shape intent stored inside the sealed preflight decision.
+struct CanonicalActivationIntent {
+    work_dimension: StoreDimensionKey,
+    commitment_dimension: StoreDimensionKey,
+    commitment_amount: u64,
+    expected_materialized_blocks: usize,
 }
 
 struct VerifiedRejection<E> {
@@ -661,13 +715,7 @@ where
     assembly: RetainedStorePublicationAssembly<O, PP, U, L>,
     output: T,
     failure_work: FailureEvidenceWorkBudget,
-}
-
-/// Canonical output commitment owned by the consuming validation transition.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct CanonicalOutputIntent {
-    dimension: StoreDimensionKey,
-    amount: u64,
+    intent: CanonicalActivationIntent,
 }
 
 /// Typed semantic outcome returned by the central validator callback.

@@ -16,16 +16,16 @@ where
 
     /// Consumes the candidate through the operation-owned evidence and validation seam.
     ///
-    /// The caller never receives the writable assembly. Evidence is built in a one-shot lane, then
-    /// the existing controlled validator produces either an opaque candidate or an eager-cleaned
-    /// failure owner. Any invalid root, ignored control fault, panic, or uncertain cleanup is
-    /// quarantined instead of becoming a fallback result.
+    /// The caller never receives the writable assembly. The validation-work dimension, canonical
+    /// commitment, and exact materialized shape come from the consumed activation plan, so none can
+    /// be replaced at this transition. Evidence is built in a one-shot lane, then the existing
+    /// controlled validator produces either an opaque candidate or an eager-cleaned failure owner.
+    /// Any invalid root, ignored control fault, panic, or uncertain cleanup is quarantined instead
+    /// of becoming a fallback result.
     #[allow(clippy::type_complexity, clippy::result_large_err)]
     pub fn validate_centrally<CanonicalKind, CanonicalTag, EvidenceKind, EvidenceTag, Proof, E>(
         self,
-        work_dimension: StoreDimensionKey,
         canonical_root: CanonicalStoreRef<CanonicalKind, CanonicalTag>,
-        canonical_output: CanonicalOutputIntent,
         build_evidence: impl for<'lane> FnMut(
             &mut CanonicalOutcomeEvidenceLane<'lane, O, PP, U, L>,
             &T,
@@ -66,12 +66,14 @@ where
             assembly,
             output,
             failure_work,
+            intent,
         } = self;
         let output = ManuallyDrop::new(output);
         let mut assembly = assembly;
         let mut failure_work = failure_work;
+        let work_dimension = intent.work_dimension;
         if let Err(cause) =
-            assembly.try_commit_canonical(canonical_output.dimension, canonical_output.amount)
+            assembly.try_commit_canonical(intent.commitment_dimension, intent.commitment_amount)
         {
             let classification = classify_activation_fault(&cause);
             let build_drop_failed = drop_optional_callback(build_evidence).is_err();
@@ -88,18 +90,18 @@ where
                     cause: assembly.contain_activation_fault(),
                 });
             }
-            match classification {
+            return match classification {
                 ActivationFaultClassification::Contract => {
                     let _ = drop_scoped_value(cause);
-                    return Err(StoreActivationContainment {
+                    Err(StoreActivationContainment {
                         cause: assembly.contain_activation_fault(),
-                    });
+                    })
                 }
                 ActivationFaultClassification::Recoverable(failure_code) => {
-                    return prepare_assembly_minimal(assembly, cause, failure_code)
-                        .map(CanonicalCentralValidationOutcome::Fallback);
+                    prepare_assembly_minimal(assembly, cause, failure_code)
+                        .map(CanonicalCentralValidationOutcome::Fallback)
                 }
-            }
+            };
         }
         let mut evidence_fault = None;
         let evidence = catch_unwind(AssertUnwindSafe(|| {
@@ -319,12 +321,6 @@ where
                 }
             }
         }
-    }
-}
-
-impl CanonicalOutputIntent {
-    pub const fn new(dimension: StoreDimensionKey, amount: u64) -> Self {
-        Self { dimension, amount }
     }
 }
 

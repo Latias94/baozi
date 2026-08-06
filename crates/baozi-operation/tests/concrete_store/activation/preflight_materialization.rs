@@ -597,6 +597,82 @@ fn later_contract_fault_upgrades_an_earlier_ordinary_materialization_fault() {
 }
 
 #[test]
+fn sealed_activation_plan_rejects_a_foreign_semantic_dimension_before_materialization() {
+    let factory = factory(1);
+    let account = account(&factory);
+    let (operation, keys) = operation(&account);
+    let materialize_called = Cell::new(false);
+    let table = RetainedStoreBlockTablePlan::new(writer_plan(keys, 2, 2), 1, 1).unwrap();
+    let activation_plan = CanonicalActivationPlan::new(
+        table,
+        1,
+        foreign_dimension(),
+        keys.dimension,
+        NonZeroU64::new(1).unwrap(),
+    )
+    .unwrap();
+    let mut activation_plan = Some(activation_plan);
+
+    let result = operation
+        .into_session_outcome_owner(evidence_plan(keys, 1))
+        .plan_and_activate(
+            move |preflight| {
+                preflight.seal::<()>(
+                    activation_plan
+                        .take()
+                        .expect("the sealed activation plan is consumed once"),
+                )
+            },
+            |lane| {
+                materialize_called.set(true);
+                lane.accept::<_, ()>(())
+            },
+        );
+
+    assert!(result.is_err());
+    assert!(!materialize_called.get());
+    assert!(account.snapshot().poisoned());
+}
+
+#[test]
+fn sealed_activation_plan_rejects_a_foreign_commitment_dimension_before_materialization() {
+    let factory = factory(1);
+    let account = account(&factory);
+    let (operation, keys) = operation(&account);
+    let materialize_called = Cell::new(false);
+    let table = RetainedStoreBlockTablePlan::new(writer_plan(keys, 2, 2), 1, 1).unwrap();
+    let activation_plan = CanonicalActivationPlan::new(
+        table,
+        1,
+        keys.dimension,
+        foreign_dimension(),
+        NonZeroU64::new(1).unwrap(),
+    )
+    .unwrap();
+    let mut activation_plan = Some(activation_plan);
+
+    let result = operation
+        .into_session_outcome_owner(evidence_plan(keys, 1))
+        .plan_and_activate(
+            move |preflight| {
+                preflight.seal::<()>(
+                    activation_plan
+                        .take()
+                        .expect("the sealed activation plan is consumed once"),
+                )
+            },
+            |lane| {
+                materialize_called.set(true);
+                lane.accept::<_, ()>(())
+            },
+        );
+
+    assert!(result.is_err());
+    assert!(!materialize_called.get());
+    assert!(account.snapshot().poisoned());
+}
+
+#[test]
 fn activation_panic_returns_full_containment_and_quarantines_the_account() {
     let factory = factory(1);
     let account = account(&factory);

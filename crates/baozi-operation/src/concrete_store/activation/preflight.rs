@@ -145,7 +145,10 @@ where
                     ),
                 ))
             }
-            CanonicalPreflightState::Activate { canonical_plan } => {
+            CanonicalPreflightState::Activate {
+                canonical_plan,
+                intent: activation_intent,
+            } => {
                 if first_fault.is_some() {
                     let _ = drop_optional_callback(materialize);
                     return Err(contain_operation(operation));
@@ -248,13 +251,24 @@ where
                             failure_code,
                         )
                     }
-                    (None, CanonicalMaterializationState::Activated(output)) => Ok(
-                        CanonicalActivationOutcome::Activated(ActivatedCanonicalStoreSession {
-                            assembly,
-                            output,
-                            failure_work,
-                        }),
-                    ),
+                    (None, CanonicalMaterializationState::Activated(output)) => {
+                        if assembly.canonical_len()
+                            != activation_intent.expected_materialized_blocks
+                        {
+                            let _ = drop_scoped_value(output);
+                            return Err(StoreActivationContainment {
+                                cause: assembly.contain_activation_fault(),
+                            });
+                        }
+                        Ok(CanonicalActivationOutcome::Activated(
+                            ActivatedCanonicalStoreSession {
+                                assembly,
+                                output,
+                                failure_work,
+                                intent: activation_intent,
+                            },
+                        ))
+                    }
                     (None, CanonicalMaterializationState::Rejected(rejection)) => finish_rejected(
                         assembly,
                         failure_work,
@@ -300,15 +314,26 @@ where
     /// Seals the mechanical table envelope after complete authority-free core preflight.
     pub fn seal<E>(
         self,
-        canonical_plan: RetainedStoreBlockTablePlan,
+        activation_plan: CanonicalActivationPlan,
     ) -> CanonicalPreflightDecision<E> {
+        let (canonical_plan, intent) = activation_plan.into_parts();
         if self.first_fault.is_none() {
             let (phase, dimensions) = canonical_plan.keys_for_publication_validation();
             let result = self.operation.validate_writer_keys(phase, dimensions);
             let _ = preserve_first_fault(self.first_fault, result);
         }
+        if self.first_fault.is_none() {
+            let result = self.operation.validate_activation_dimensions([
+                intent.work_dimension,
+                intent.commitment_dimension,
+            ]);
+            let _ = preserve_first_fault(self.first_fault, result);
+        }
         CanonicalPreflightDecision {
-            state: CanonicalPreflightState::Activate { canonical_plan },
+            state: CanonicalPreflightState::Activate {
+                canonical_plan,
+                intent,
+            },
         }
     }
 

@@ -80,15 +80,23 @@ pub use concrete_store::{
 /// privatized once core, import, formats, facade, snapshot, and fuzz use the same production path.
 #[cfg(feature = "_u4-activation")]
 #[doc(hidden)]
+/// Temporary canonical activation vocabulary.
+///
+/// Raw output commitment scalars can no longer be submitted or replaced at the central-validation
+/// transition; they must be consumed as part of the earlier activation plan:
+///
+/// ```compile_fail,E0432
+/// use baozi_operation::__canonical_activation::CanonicalOutputIntent;
+/// ```
 pub mod __canonical_activation {
     pub use crate::concrete_store::activation::{
-        CanonicalActivationOutcome, CanonicalCentralValidationOutcome,
-        CanonicalFailureTerminalWorkPlan, CanonicalMaterialization, CanonicalOutputIntent,
-        CanonicalPreflightDecision, CanonicalValidationDecision, FailureEvidenceDecision,
-        FailureEvidenceMember, FailureEvidenceOutcome, FailureEvidenceRecordRow,
-        FailureEvidenceValidationSession, NeverActivatedStoreSession, OutcomeEvidenceBuildControl,
-        OutcomeEvidenceDecision, RetainedStoreSessionOutcomeOwner, RootedFailureValidation,
-        StoreActivationContainment, StoreCanonicalRejection, StoreNeverActivatedCause,
+        CanonicalActivationOutcome, CanonicalActivationPlan, CanonicalCentralValidationOutcome,
+        CanonicalFailureTerminalWorkPlan, CanonicalMaterialization, CanonicalPreflightDecision,
+        CanonicalValidationDecision, FailureEvidenceDecision, FailureEvidenceMember,
+        FailureEvidenceOutcome, FailureEvidenceRecordRow, FailureEvidenceValidationSession,
+        NeverActivatedStoreSession, OutcomeEvidenceBuildControl, OutcomeEvidenceDecision,
+        RetainedStoreSessionOutcomeOwner, RootedFailureValidation, StoreActivationContainment,
+        StoreCanonicalRejection, StoreNeverActivatedCause,
     };
 }
 pub use control::{

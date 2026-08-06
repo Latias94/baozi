@@ -942,6 +942,11 @@ impl RetainedStoreBlockTablePlan {
     ) -> (StorePhaseKey, [StoreDimensionKey; 2]) {
         self.writer.keys_for_publication_validation()
     }
+
+    #[cfg(feature = "_u4-activation")]
+    pub(super) const fn activation_capacity(self) -> usize {
+        self.total_blocks
+    }
 }
 
 /// Independent canonical and outcome-evidence table plans.

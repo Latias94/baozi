@@ -1,5 +1,51 @@
 use super::*;
 
+fn split_dimension_operation(account: &PhysicalStorageAccount) -> (TestOperation, TestKeys) {
+    let TestVocabulary { domain, keys } = test_vocabulary();
+    let failure_terminal_work = unbounded_failure_terminal_work(keys);
+    let ordinary_attempted = failure_terminal_work.ordinary_attempted_work_limit();
+    let ordinary_consumed = failure_terminal_work.ordinary_consumed_work_limit();
+    let first_attempted = ordinary_attempted / 2;
+    let first_consumed = ordinary_consumed / 2;
+    let first_policy =
+        DimensionPolicy::reservable_bytes(first_attempted, first_consumed, 100, u64::MAX)
+            .with_published_outcome_evidence_limit(100);
+    let second_policy = DimensionPolicy::reservable_bytes(
+        ordinary_attempted - first_attempted,
+        ordinary_consumed - first_consumed,
+        100,
+        u64::MAX,
+    )
+    .with_published_outcome_evidence_limit(100);
+    let limits = LedgerLimits::new(
+        u64::MAX,
+        [
+            (keys.dimension, first_policy),
+            (keys.other_dimension, second_policy),
+            (
+                keys.failure_terminal_dimension,
+                failure_terminal_work.requirement().dimension_policy(),
+            ),
+        ],
+    )
+    .unwrap();
+    let ledger_plan = StoreLedgerPlan::try_new(domain, limits, &[keys.phase]).unwrap();
+    let start = RetainedStoreStartPlan::new(
+        writer_plan(keys, TEST_TERMINAL_ATTRIBUTION_SLOTS, 8),
+        RetainedStoreSharePlan::new(keys.dimension, keys.dimension),
+        StoreFallbackEnvelope::new(91),
+        keys.dimension,
+        1,
+        keys.dimension,
+        1,
+        failure_terminal_work,
+    );
+    (
+        TestOperation::try_start(OperationControl::default(), ledger_plan, account, start).unwrap(),
+        keys,
+    )
+}
+
 fn centrally_rejected_sequence_work(elements: usize) -> (u64, u64) {
     let values = (0..elements)
         .map(|value| u8::try_from(value).expect("the test sequence fits in u8"))
@@ -37,9 +83,7 @@ fn centrally_rejected_sequence_work(elements: usize) -> (u64, u64) {
     let canonical_root = *activated.output();
     let outcome = activated
         .validate_centrally(
-            keys.dimension,
             canonical_root,
-            CanonicalOutputIntent::new(keys.dimension, 1),
             |lane, _output| {
                 let evidence = lane
                     .try_retain_sequence(
@@ -125,9 +169,7 @@ fn matching_activation_can_only_publish_through_central_validation() {
     let canonical_root = *activated.output();
     let validated = activated
         .validate_centrally(
-            keys.dimension,
             canonical_root,
-            CanonicalOutputIntent::new(keys.dimension, 1),
             |lane, _output| {
                 let evidence = lane
                     .try_retain_sequence(
@@ -182,6 +224,108 @@ fn central_outcome_evidence_sequence_charges_exact_completed_work() {
 }
 
 #[test]
+fn activation_plan_keeps_validation_work_on_its_semantic_dimension() {
+    let factory = factory(1);
+    let account = account(&factory);
+    let (operation, keys) = split_dimension_operation(&account);
+    let table = RetainedStoreBlockTablePlan::new(writer_plan(keys, 2, 2), 1, 1).unwrap();
+    let activation_plan = CanonicalActivationPlan::new(
+        table,
+        1,
+        keys.other_dimension,
+        keys.dimension,
+        NonZeroU64::new(37).unwrap(),
+    )
+    .unwrap();
+    let mut activation_plan = Some(activation_plan);
+
+    let outcome = operation
+        .into_session_outcome_owner(evidence_plan(keys, 1))
+        .plan_and_activate(
+            move |preflight| {
+                preflight.seal::<()>(
+                    activation_plan
+                        .take()
+                        .expect("the sealed activation plan is consumed once"),
+                )
+            },
+            |lane| {
+                let root = lane
+                    .try_retain_sequence(
+                        SequencePlan::<u8>::new(1).unwrap(),
+                        keys.dimension,
+                        SequenceTag,
+                        |writer, _control| {
+                            writer.push(7)?;
+                            Ok(())
+                        },
+                    )
+                    .unwrap();
+                lane.accept::<_, ()>(root)
+            },
+        )
+        .unwrap();
+    let activated = match outcome {
+        CanonicalActivationOutcome::Activated(activated) => activated,
+        CanonicalActivationOutcome::Rejected(_)
+        | CanonicalActivationOutcome::NeverActivated(_)
+        | CanonicalActivationOutcome::Fallback(_) => panic!("materialization must activate"),
+    };
+    let canonical_root = *activated.output();
+    let outcome = activated
+        .validate_centrally(
+            canonical_root,
+            |lane, _output| {
+                let evidence = lane
+                    .try_retain_sequence(
+                        SequencePlan::<u8>::new(3).unwrap(),
+                        EvidenceLeafTag,
+                        |writer| writer.extend_from_slice(&[1, 2, 3]),
+                    )
+                    .unwrap();
+                lane.commit(keys.dimension, 1).unwrap();
+                lane.complete(evidence)
+            },
+            |_session, _canonical, _evidence, _output, _control| {
+                Ok(CanonicalValidationDecision::<(), _>::reject(
+                    ValidationRejection::Semantic,
+                    73,
+                ))
+            },
+        )
+        .unwrap();
+    let rejected = match outcome {
+        CanonicalCentralValidationOutcome::Rejected(rejected) => rejected,
+        CanonicalCentralValidationOutcome::Candidate(_)
+        | CanonicalCentralValidationOutcome::Fallback(_)
+        | CanonicalCentralValidationOutcome::Interrupted(_) => {
+            panic!("semantic rejection must retain the evidence owner")
+        }
+    };
+    let (prepared, _cause) = rejected.prepare_minimal_fallback().unwrap().into_parts();
+    let published = prepared.handoff();
+    let materialization = published
+        .ledger_evidence
+        .dimension(keys.dimension)
+        .expect("materialization dimension remains queryable");
+    let validation_work = published
+        .ledger_evidence
+        .dimension(keys.other_dimension)
+        .expect("validation-work dimension remains queryable");
+
+    assert_eq!(materialization.attempted(), materialization.consumed());
+    assert!(materialization.attempted() > validation_work.attempted());
+    assert_eq!(
+        (validation_work.attempted(), validation_work.consumed()),
+        (3, 3)
+    );
+    assert_eq!(materialization.committed_canonical_output(), 0);
+    assert_eq!(validation_work.committed_canonical_output(), 0);
+    drop(published);
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
+}
+
+#[test]
 fn central_outcome_evidence_cancellation_preserves_the_completed_prefix() {
     let factory = factory(1);
     let account = account(&factory);
@@ -219,9 +363,7 @@ fn central_outcome_evidence_cancellation_preserves_the_completed_prefix() {
     let outcome =
         activated
             .validate_centrally(
-                keys.dimension,
                 canonical_root,
-                CanonicalOutputIntent::new(keys.dimension, 1),
                 |lane, _output| {
                     let evidence = lane.try_retain_sequence(
                         SequencePlan::<u8>::new(2).unwrap(),
@@ -308,9 +450,7 @@ fn central_outcome_evidence_underwrite_preserves_the_completed_prefix() {
     let outcome =
         activated
             .validate_centrally(
-                keys.dimension,
                 canonical_root,
-                CanonicalOutputIntent::new(keys.dimension, 1),
                 |lane, _output| {
                     let evidence = lane.try_retain_sequence(
                         SequencePlan::<u8>::new(2).unwrap(),
@@ -425,9 +565,7 @@ fn foreign_canonical_root_is_contained_before_validation_callback() {
     let validation_called = Cell::new(false);
 
     let result = activated_a.validate_centrally(
-        keys_a.dimension,
         foreign_root,
-        CanonicalOutputIntent::new(keys_a.dimension, 1),
         |lane, _output| {
             let evidence = lane
                 .try_retain_sequence(
@@ -461,7 +599,7 @@ fn foreign_canonical_root_is_contained_before_validation_callback() {
 }
 
 #[test]
-fn foreign_validation_work_dimension_is_contained() {
+fn sealed_activation_preserves_unused_table_capacity() {
     let factory = factory(1);
     let account = account(&factory);
     let (operation, keys) = operation(&account);
@@ -469,7 +607,7 @@ fn foreign_validation_work_dimension_is_contained() {
     let outcome = operation
         .into_session_outcome_owner(evidence_plan(keys, 1))
         .plan_and_activate(
-            |preflight| preflight.seal::<()>(canonical_plan(keys, 1)),
+            |preflight| preflight.seal::<()>(canonical_plan_with_capacity(keys, 2, 1)),
             |lane| {
                 let root = lane
                     .try_retain_sequence(
@@ -486,40 +624,59 @@ fn foreign_validation_work_dimension_is_contained() {
             },
         )
         .unwrap();
+
     let activated = match outcome {
-        CanonicalActivationOutcome::Activated(state) => state,
+        CanonicalActivationOutcome::Activated(activated) => activated,
         CanonicalActivationOutcome::Rejected(_)
         | CanonicalActivationOutcome::NeverActivated(_)
         | CanonicalActivationOutcome::Fallback(_) => {
-            panic!("materialization must activate")
+            panic!("unused table capacity must remain a legal activation")
         }
     };
-    let canonical_root = *activated.output();
-    let validation_capture = PanicOnDrop;
-    let result = activated.validate_centrally(
-        foreign_dimension(),
-        canonical_root,
-        CanonicalOutputIntent::new(keys.dimension, 1),
-        |lane, _output| {
-            let evidence = lane
-                .try_retain_sequence(
-                    SequencePlan::<u8>::new(1).unwrap(),
-                    EvidenceLeafTag,
-                    |writer| writer.push(9),
-                )
-                .unwrap();
-            lane.commit(keys.dimension, 1).unwrap();
-            lane.complete(evidence)
-        },
-        move |_session, _canonical, _evidence, _output, _control| {
-            let _capture = &validation_capture;
-            Ok(CanonicalValidationDecision::<(), ValidationRejection>::accept(()))
-        },
-    );
+    assert_eq!(activated.canonical_len(), 1);
+    drop(activated);
+}
+
+#[test]
+fn sealed_activation_rejects_materialization_beyond_the_exact_shape() {
+    let factory = factory(1);
+    let account = account(&factory);
+    let (operation, keys) = operation(&account);
+
+    let result = operation
+        .into_session_outcome_owner(evidence_plan(keys, 1))
+        .plan_and_activate(
+            |preflight| preflight.seal::<()>(canonical_plan_with_capacity(keys, 2, 1)),
+            |lane| {
+                let root = lane
+                    .try_retain_sequence(
+                        SequencePlan::<u8>::new(1).unwrap(),
+                        keys.dimension,
+                        SequenceTag,
+                        |writer, _control| {
+                            writer.push(7)?;
+                            Ok(())
+                        },
+                    )
+                    .unwrap();
+                let _extra = lane
+                    .try_retain_sequence(
+                        SequencePlan::<u8>::new(1).unwrap(),
+                        keys.dimension,
+                        SequenceTag,
+                        |writer, _control| {
+                            writer.push(8)?;
+                            Ok(())
+                        },
+                    )
+                    .unwrap();
+                lane.accept::<_, ()>(root)
+            },
+        );
 
     let containment = match result {
         Err(containment) => containment,
-        Ok(_) => panic!("a foreign validation dimension must be contained"),
+        Ok(_) => panic!("materialization beyond the exact shape must not activate"),
     };
     assert_eq!(
         containment.cause().reason(),
@@ -529,17 +686,15 @@ fn foreign_validation_work_dimension_is_contained() {
 }
 
 #[test]
-fn uncalled_central_callbacks_drop_panics_are_contained() {
+fn sealed_activation_rejects_an_incomplete_exact_shape() {
     let factory = factory(1);
     let account = account(&factory);
     let (operation, keys) = operation(&account);
-    let evidence_capture = PanicOnDrop;
-    let validation_capture = PanicOnDrop;
 
-    let outcome = operation
+    let result = operation
         .into_session_outcome_owner(evidence_plan(keys, 1))
         .plan_and_activate(
-            |preflight| preflight.seal::<()>(canonical_plan(keys, 1)),
+            |preflight| preflight.seal::<()>(canonical_plan(keys, 2)),
             |lane| {
                 let root = lane
                     .try_retain_sequence(
@@ -554,42 +709,16 @@ fn uncalled_central_callbacks_drop_panics_are_contained() {
                     .unwrap();
                 lane.accept::<_, ()>(root)
             },
-        )
-        .unwrap();
-    let activated = match outcome {
-        CanonicalActivationOutcome::Activated(state) => state,
-        CanonicalActivationOutcome::Rejected(_)
-        | CanonicalActivationOutcome::NeverActivated(_)
-        | CanonicalActivationOutcome::Fallback(_) => {
-            panic!("materialization must reach central commitment")
-        }
-    };
-    let canonical_root = *activated.output();
-
-    let result =
-        activated.validate_centrally(
-            keys.dimension,
-            canonical_root,
-            CanonicalOutputIntent::new(foreign_dimension(), 1),
-            move |_lane, _output| -> OutcomeEvidenceDecision<(), EvidenceLeafTag> {
-                let _capture = &evidence_capture;
-                unreachable!("a foreign output commitment must skip evidence construction")
-            },
-            move |_session,
-                  _canonical,
-                  _evidence,
-                  _output,
-                  _control|
-                  -> Result<
-                CanonicalValidationDecision<(), ValidationRejection>,
-                StoreWorkError,
-            > {
-                let _capture = &validation_capture;
-                unreachable!("a foreign output commitment must skip central validation")
-            },
         );
 
-    assert!(result.is_err());
+    let containment = match result {
+        Err(containment) => containment,
+        Ok(_) => panic!("a partial canonical table must not activate"),
+    };
+    assert_eq!(
+        containment.cause().reason(),
+        AccountPoisonReason::OwnershipGraphUnverified
+    );
     assert!(account.snapshot().poisoned());
 }
 
@@ -629,9 +758,7 @@ fn clean_central_validation_panic_prepares_minimal_fallback_without_poisoning() 
     let outcome =
         activated
             .validate_centrally(
-                keys.dimension,
                 canonical_root,
-                CanonicalOutputIntent::new(keys.dimension, 1),
                 |lane, _output| {
                     let evidence = lane
                         .try_retain_sequence(
@@ -709,9 +836,7 @@ fn completed_central_validation_capture_drop_panic_is_contained() {
     let validation_capture = PanicOnDrop;
 
     let result = activated.validate_centrally(
-        keys.dimension,
         canonical_root,
-        CanonicalOutputIntent::new(keys.dimension, 1),
         |lane, _output| {
             let evidence = lane
                 .try_retain_sequence(
@@ -733,71 +858,6 @@ fn completed_central_validation_capture_drop_panic_is_contained() {
         Err(containment) => containment,
         Ok(_) => panic!("a completed validator capture drop panic must not return a candidate"),
     };
-    assert_eq!(
-        containment.cause().reason(),
-        AccountPoisonReason::OwnershipGraphUnverified
-    );
-    assert!(account.snapshot().poisoned());
-}
-
-#[test]
-fn foreign_canonical_commitment_is_contained_before_central_callbacks() {
-    let factory = factory(1);
-    let account = account(&factory);
-    let (operation, keys) = operation(&account);
-    let evidence_called = Cell::new(false);
-    let validation_called = Cell::new(false);
-
-    let outcome = operation
-        .into_session_outcome_owner(evidence_plan(keys, 1))
-        .plan_and_activate(
-            |preflight| preflight.seal::<()>(canonical_plan(keys, 1)),
-            |lane| {
-                let root = lane
-                    .try_retain_sequence(
-                        SequencePlan::<u8>::new(1).unwrap(),
-                        keys.dimension,
-                        SequenceTag,
-                        |writer, _control| {
-                            writer.push(7)?;
-                            Ok(())
-                        },
-                    )
-                    .unwrap();
-                lane.accept::<_, ()>(root)
-            },
-        )
-        .unwrap();
-    let activated = match outcome {
-        CanonicalActivationOutcome::Activated(state) => state,
-        CanonicalActivationOutcome::Rejected(_)
-        | CanonicalActivationOutcome::NeverActivated(_)
-        | CanonicalActivationOutcome::Fallback(_) => {
-            panic!("materialization must reach central commitment")
-        }
-    };
-    let canonical_root = *activated.output();
-
-    let result = activated.validate_centrally(
-        keys.dimension,
-        canonical_root,
-        CanonicalOutputIntent::new(foreign_dimension(), 1),
-        |_lane, _output| {
-            evidence_called.set(true);
-            OutcomeEvidenceDecision::<(), EvidenceLeafTag>::Abort
-        },
-        |_session, _canonical, _evidence, _output, _control| {
-            validation_called.set(true);
-            Ok(CanonicalValidationDecision::<(), ValidationRejection>::accept(()))
-        },
-    );
-
-    let containment = match result {
-        Err(containment) => containment,
-        Ok(_) => panic!("a foreign canonical commitment must fail closed"),
-    };
-    assert!(!evidence_called.get());
-    assert!(!validation_called.get());
     assert_eq!(
         containment.cause().reason(),
         AccountPoisonReason::OwnershipGraphUnverified
@@ -843,9 +903,7 @@ fn central_evidence_body_and_capture_drop_panics_are_isolated() {
     let canonical_root = *activated.output();
 
     let result = activated.validate_centrally(
-        keys.dimension,
         canonical_root,
-        CanonicalOutputIntent::new(keys.dimension, 1),
         move |_lane, _output| -> OutcomeEvidenceDecision<(), EvidenceLeafTag> {
             let _capture = &evidence_capture;
             panic!("contained evidence callback panic")
@@ -901,9 +959,7 @@ fn central_evidence_builder_body_and_capture_drop_panics_are_isolated() {
     let canonical_root = *activated.output();
 
     let result = activated.validate_centrally(
-        keys.dimension,
         canonical_root,
-        CanonicalOutputIntent::new(keys.dimension, 1),
         |lane, _output| -> OutcomeEvidenceDecision<(), EvidenceLeafTag> {
             let capture = PanicOnDrop;
             let cause = lane
@@ -973,9 +1029,7 @@ fn activation_only_records_commitment_intent_without_running_the_joint_commit() 
     let canonical_root = *activated.output();
     let result = activated
         .validate_centrally(
-            keys.dimension,
             canonical_root,
-            CanonicalOutputIntent::new(keys.dimension, 1),
             |lane, _output| {
                 evidence_called.set(true);
                 let evidence = lane
@@ -1055,9 +1109,7 @@ fn trusted_evidence_slot_limit_returns_product_graph_fallback_without_poisoning(
 
     let result = activated
         .validate_centrally(
-            keys.dimension,
             canonical_root,
-            CanonicalOutputIntent::new(keys.dimension, 1),
             |lane, _output| {
                 let _root = lane
                     .try_retain_sequence(
@@ -1151,9 +1203,7 @@ fn central_validation_rejection_can_validate_existing_rich_failure_evidence() {
     let canonical_root = *activated.output();
     let outcome = activated
         .validate_centrally(
-            keys.dimension,
             canonical_root,
-            CanonicalOutputIntent::new(keys.dimension, 1),
             |lane, _output| {
                 let sequence = lane
                     .try_retain_sequence(
@@ -1332,9 +1382,7 @@ fn central_evidence_validation_envelope_rejects_before_the_overflowing_builder()
     let outcome =
         activated
             .validate_centrally(
-                keys.dimension,
                 canonical_root,
-                CanonicalOutputIntent::new(keys.dimension, 1),
                 |lane, _output| {
                     let _first = lane
                         .try_retain_sequence(
@@ -1430,9 +1478,7 @@ fn central_control_interruption_can_validate_existing_rich_failure_evidence() {
     let canonical_root = *activated.output();
     let outcome = activated
         .validate_centrally(
-            keys.dimension,
             canonical_root,
-            CanonicalOutputIntent::new(keys.dimension, 1),
             |lane, _output| {
                 let evidence = lane
                     .try_retain_sequence(
@@ -1522,9 +1568,7 @@ fn central_ledger_interruption_can_reject_existing_rich_failure_evidence() {
     let canonical_root = *activated.output();
     let outcome = activated
         .validate_centrally(
-            keys.dimension,
             canonical_root,
-            CanonicalOutputIntent::new(keys.dimension, 1),
             |lane, _output| {
                 let evidence = lane
                     .try_retain_sequence(
@@ -1620,9 +1664,7 @@ fn outcome_evidence_abort_uses_the_first_fault_without_caller_echo() {
     let result =
         activated
             .validate_centrally(
-                keys.dimension,
                 canonical_root,
-                CanonicalOutputIntent::new(keys.dimension, 1),
                 |lane, _output| {
                     let _root = lane
                         .try_retain_sequence(
@@ -1724,9 +1766,7 @@ fn later_outcome_evidence_contract_fault_contains_an_earlier_slot_fault() {
     let canonical_root = *activated.output();
 
     let result = activated.validate_centrally(
-        keys.dimension,
         canonical_root,
-        CanonicalOutputIntent::new(keys.dimension, 1),
         |lane, _output| {
             let _root = lane
                 .try_retain_sequence(
@@ -1797,9 +1837,7 @@ fn sticky_validation_work_failure_overrides_a_later_accept_decision() {
 
     let result = activated
         .validate_centrally(
-            keys.dimension,
             canonical_root,
-            CanonicalOutputIntent::new(keys.dimension, 1),
             |lane, _output| {
                 let evidence = lane
                     .try_retain_sequence(
@@ -1873,9 +1911,7 @@ fn central_validation_rejection_eagerly_cleans_canonical_storage() {
     let canonical_root = *activated.output();
     let outcome = activated
         .validate_centrally(
-            keys.dimension,
             canonical_root,
-            CanonicalOutputIntent::new(keys.dimension, 1),
             |lane, _output| {
                 let evidence = lane
                     .try_retain_sequence(

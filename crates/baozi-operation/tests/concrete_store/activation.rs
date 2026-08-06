@@ -1,13 +1,15 @@
 use std::cell::Cell;
 
 use baozi_operation::__canonical_activation::{
-    CanonicalActivationOutcome, CanonicalCentralValidationOutcome, CanonicalMaterialization,
-    CanonicalOutputIntent, CanonicalPreflightDecision, CanonicalValidationDecision,
+    CanonicalActivationOutcome, CanonicalActivationPlan, CanonicalCentralValidationOutcome,
+    CanonicalMaterialization, CanonicalPreflightDecision, CanonicalValidationDecision,
     FailureEvidenceDecision, FailureEvidenceMember, FailureEvidenceOutcome,
     OutcomeEvidenceDecision, RootedFailureValidation, StoreCanonicalRejection,
     StoreNeverActivatedCause,
 };
-use baozi_operation::{RetainedStoreBlockTablePlan, StoreDestination, StoreWorkError};
+use baozi_operation::{
+    RetainedStoreBlockTablePlan, StoreDestination, StorePlanError, StoreWorkError,
+};
 
 use super::*;
 
@@ -42,8 +44,49 @@ fn failure_evidence_member_remains_linear() {
     let _ = <Member as AmbiguousIfClone<_>>::assert_not_clone;
 }
 
-fn canonical_plan(keys: TestKeys, blocks: usize) -> RetainedStoreBlockTablePlan {
-    RetainedStoreBlockTablePlan::new(writer_plan(keys, blocks + 1, 2), blocks, blocks).unwrap()
+fn canonical_plan(keys: TestKeys, blocks: usize) -> CanonicalActivationPlan {
+    canonical_plan_with_capacity(keys, blocks, blocks)
+}
+
+fn canonical_plan_with_capacity(
+    keys: TestKeys,
+    capacity: usize,
+    expected_materialized_blocks: usize,
+) -> CanonicalActivationPlan {
+    let table =
+        RetainedStoreBlockTablePlan::new(writer_plan(keys, capacity + 1, 2), capacity, capacity)
+            .unwrap();
+    let commitment_amount = NonZeroU64::new(
+        u64::try_from(expected_materialized_blocks)
+            .expect("test canonical block counts fit the ledger"),
+    )
+    .expect("test canonical activation always commits a non-zero output");
+    CanonicalActivationPlan::new(
+        table,
+        expected_materialized_blocks,
+        keys.dimension,
+        keys.dimension,
+        commitment_amount,
+    )
+    .unwrap()
+}
+
+#[test]
+fn activation_plan_rejects_impossible_exact_shapes() {
+    let factory = factory(1);
+    let account = account(&factory);
+    let (_operation, keys) = operation(&account);
+    let table = RetainedStoreBlockTablePlan::new(writer_plan(keys, 2, 2), 1, 1).unwrap();
+    let commitment = NonZeroU64::new(1).unwrap();
+
+    assert!(matches!(
+        CanonicalActivationPlan::new(table, 0, keys.dimension, keys.dimension, commitment),
+        Err(StorePlanError::InvalidBlockTable)
+    ));
+    assert!(matches!(
+        CanonicalActivationPlan::new(table, 2, keys.dimension, keys.dimension, commitment),
+        Err(StorePlanError::InvalidBlockTable)
+    ));
 }
 
 fn evidence_plan(keys: TestKeys, blocks: usize) -> RetainedStoreBlockTablePlan {

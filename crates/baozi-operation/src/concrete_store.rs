@@ -2143,6 +2143,20 @@ where
         Ok(())
     }
 
+    #[cfg(feature = "_u4-activation")]
+    fn validate_activation_dimensions(
+        &self,
+        dimensions: [StoreDimensionKey; 2],
+    ) -> Result<(), StoreRuntimeError> {
+        for dimension in dimensions {
+            self.validate_dimension_key(dimension)?;
+            if !self.raw.contains_dimension(dimension) {
+                return Err(StoreRuntimeError::InvalidPublicationPlan);
+            }
+        }
+        Ok(())
+    }
+
     fn validate_commitment_dimension(
         &self,
         dimension: StoreDimensionKey,
