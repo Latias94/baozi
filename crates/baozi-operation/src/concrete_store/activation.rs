@@ -49,9 +49,10 @@ const FAILURE_EVIDENCE_BUILD_CHUNK_UNITS: usize = 256;
 
 /// Operation-derived protected work plan for the canonical activation failure path.
 ///
-/// Construction and validation work are derived from sealed store plans. Each unit reserves the
-/// protected charge pair used by the retained terminal rail, so callers never provide either the
-/// protected dimension key or a self-attested work amount.
+/// The constructor accepts policy ceilings, not producer-attested work. Actual construction and
+/// validation work are derived from sealed store plans. Each derived unit reserves the protected
+/// charge pair used by the retained terminal rail, so producers never provide either the protected
+/// dimension key or a self-attested member work amount.
 #[derive(Debug, PartialEq, Eq)]
 pub struct CanonicalFailureTerminalWorkPlan {
     terminal_work: RetainedStoreFailureTerminalWorkPlan,
@@ -98,6 +99,19 @@ impl FailureEvidenceWorkBudget {
         self.remaining_validation_work -= amount;
         self.planned_validation_work = planned;
         Ok(())
+    }
+
+    fn with_existing_member_validation(mut self, amount: u64) -> Result<Self, StoreRuntimeError> {
+        if amount == 0 || self.remaining_members == 0 || amount > self.remaining_validation_work {
+            return Err(failure_work_envelope_exhausted());
+        }
+        let Some(planned) = self.planned_validation_work.checked_add(amount) else {
+            return Err(failure_work_envelope_exhausted());
+        };
+        self.remaining_members -= 1;
+        self.remaining_validation_work -= amount;
+        self.planned_validation_work = planned;
+        Ok(self)
     }
 
     fn planned_validation_work(&self) -> Result<NonZeroU64, StoreRuntimeError> {
@@ -764,6 +778,7 @@ where
 {
     assembly: &'lane mut RetainedStorePublicationAssembly<O, PP, U, L>,
     first_fault: &'lane mut Option<ActivationFirstFault>,
+    failure_work: &'lane mut FailureEvidenceWorkBudget,
 }
 
 /// One-shot decision for rejected or never-activated evidence.

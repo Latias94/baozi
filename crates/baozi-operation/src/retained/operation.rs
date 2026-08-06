@@ -924,7 +924,7 @@ where
             sticky_terminal_cause,
             ..
         } = self;
-        let (poll, ledger) = coordinator.split_poll_checkpoint_and_retained_ledger();
+        let (poll, ledger) = coordinator.split_terminal_poll_checkpoint_and_retained_ledger();
         (
             RetainedFailureWorkControl {
                 poll,

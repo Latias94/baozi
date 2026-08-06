@@ -69,6 +69,7 @@ where
         } = self;
         let output = ManuallyDrop::new(output);
         let mut assembly = assembly;
+        let mut failure_work = failure_work;
         if let Err(cause) =
             assembly.try_commit_canonical(canonical_output.dimension, canonical_output.amount)
         {
@@ -105,6 +106,7 @@ where
             let mut lane = CanonicalOutcomeEvidenceLane {
                 assembly: &mut assembly,
                 first_fault: &mut evidence_fault,
+                failure_work: &mut failure_work,
             };
             let build_evidence = build_evidence
                 .as_mut()
@@ -439,6 +441,22 @@ where
     PP: ProgressPhase,
     U: ProgressUnit,
 {
+    fn qualify_failure_validation_member(
+        &mut self,
+        units: usize,
+    ) -> Result<FailureEvidenceWorkBudget, StoreRuntimeError> {
+        let amount = u64::try_from(units)
+            .map_err(|_| StoreRuntimeError::Plan(StorePlanError::SizeOverflow))?;
+        match (*self.failure_work).with_existing_member_validation(amount) {
+            Ok(qualified) => Ok(qualified),
+            Err(cause) => {
+                self.assembly
+                    .reject_failure_terminal_work_envelope(FAILURE_WORK_ENVELOPE_EXHAUSTED_CODE);
+                Err(cause)
+            }
+        }
+    }
+
     pub fn try_retain_sequence<T, Tag>(
         &mut self,
         plan: SequencePlan<T>,
@@ -462,6 +480,15 @@ where
                 finish_scoped_callback(build, Err(cause)),
             );
         }
+        let qualified = match self.qualify_failure_validation_member(plan.element_count()) {
+            Ok(qualified) => qualified,
+            Err(cause) => {
+                return preserve_first_fault(
+                    self.first_fault,
+                    finish_scoped_callback(build, Err(cause)),
+                );
+            }
+        };
         let result = self
             .assembly
             .try_retain_outcome_evidence_sequence(plan, tag, |writer| {
@@ -471,7 +498,11 @@ where
                     writer,
                 )
             });
-        preserve_first_fault(self.first_fault, finish_scoped_callback(build, result))
+        let result = finish_scoped_callback(build, result);
+        if result.is_ok() {
+            *self.failure_work = qualified;
+        }
+        preserve_first_fault(self.first_fault, result)
     }
 
     pub fn try_retain_bytes<Tag>(
@@ -496,6 +527,15 @@ where
                 finish_scoped_callback(build, Err(cause)),
             );
         }
+        let qualified = match self.qualify_failure_validation_member(plan.bytes()) {
+            Ok(qualified) => qualified,
+            Err(cause) => {
+                return preserve_first_fault(
+                    self.first_fault,
+                    finish_scoped_callback(build, Err(cause)),
+                );
+            }
+        };
         let result = self
             .assembly
             .try_retain_outcome_evidence_bytes(plan, tag, |writer| {
@@ -505,7 +545,11 @@ where
                     writer
                 )
             });
-        preserve_first_fault(self.first_fault, finish_scoped_callback(build, result))
+        let result = finish_scoped_callback(build, result);
+        if result.is_ok() {
+            *self.failure_work = qualified;
+        }
+        preserve_first_fault(self.first_fault, result)
     }
 
     pub fn try_retain_utf8<Tag>(
@@ -530,6 +574,15 @@ where
                 finish_scoped_callback(build, Err(cause)),
             );
         }
+        let qualified = match self.qualify_failure_validation_member(plan.bytes()) {
+            Ok(qualified) => qualified,
+            Err(cause) => {
+                return preserve_first_fault(
+                    self.first_fault,
+                    finish_scoped_callback(build, Err(cause)),
+                );
+            }
+        };
         let result = self
             .assembly
             .try_retain_outcome_evidence_utf8(plan, tag, |writer| {
@@ -539,7 +592,11 @@ where
                     writer
                 )
             });
-        preserve_first_fault(self.first_fault, finish_scoped_callback(build, result))
+        let result = finish_scoped_callback(build, result);
+        if result.is_ok() {
+            *self.failure_work = qualified;
+        }
+        preserve_first_fault(self.first_fault, result)
     }
 
     pub fn try_retain_records<Tag>(
@@ -564,6 +621,27 @@ where
                 finish_scoped_callback(build, Err(cause)),
             );
         }
+        let cells = match plan.rows().checked_mul(plan.fields()) {
+            Some(cells) => cells,
+            None => {
+                return preserve_first_fault(
+                    self.first_fault,
+                    finish_scoped_callback(
+                        build,
+                        Err(StoreRuntimeError::Plan(StorePlanError::SizeOverflow)),
+                    ),
+                );
+            }
+        };
+        let qualified = match self.qualify_failure_validation_member(cells) {
+            Ok(qualified) => qualified,
+            Err(cause) => {
+                return preserve_first_fault(
+                    self.first_fault,
+                    finish_scoped_callback(build, Err(cause)),
+                );
+            }
+        };
         let result = self
             .assembly
             .try_retain_outcome_evidence_records(plan, tag, |writer| {
@@ -573,7 +651,11 @@ where
                     writer
                 )
             });
-        preserve_first_fault(self.first_fault, finish_scoped_callback(build, result))
+        let result = finish_scoped_callback(build, result);
+        if result.is_ok() {
+            *self.failure_work = qualified;
+        }
+        preserve_first_fault(self.first_fault, result)
     }
 
     pub fn commit(

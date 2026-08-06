@@ -2750,6 +2750,11 @@ where
         self.raw.record_terminal_cause(cause);
     }
 
+    #[cfg(feature = "_u4-activation")]
+    fn reject_failure_terminal_work_envelope(&mut self, code: u32) {
+        self.raw.reject_failure_terminal_work_envelope(code);
+    }
+
     fn ensure_writable(&self) -> Result<(), StoreRuntimeError> {
         if self.is_fallback_only() {
             Err(StoreRuntimeError::FallbackOnly)

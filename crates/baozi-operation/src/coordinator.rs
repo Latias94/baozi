@@ -104,11 +104,16 @@ enum ProgressDelivery {
 pub(crate) struct OperationPollCheckpoint<'a, PP, U> {
     control: &'a mut OperationControl<PP, U>,
     terminal: &'a mut Option<ControlCause>,
+    allow_preexisting_terminal: bool,
 }
 
 impl<PP, U> OperationPollCheckpoint<'_, PP, U> {
     pub(crate) fn poll(&mut self) -> Result<(), ControlCause> {
-        poll_operation_control(self.control, self.terminal)
+        if self.allow_preexisting_terminal {
+            Ok(())
+        } else {
+            poll_operation_control(self.control, self.terminal)
+        }
     }
 }
 
@@ -534,7 +539,39 @@ where
             terminal,
             ..
         } = self;
-        (OperationPollCheckpoint { control, terminal }, ledger)
+        (
+            OperationPollCheckpoint {
+                control,
+                terminal,
+                allow_preexisting_terminal: false,
+            },
+            ledger,
+        )
+    }
+
+    /// Splits the bounded terminal-work poll from the retained ledger.
+    ///
+    /// A control failure already accepted before this split cannot cancel the finite evidence
+    /// cleanup it selected. If control was still live at the split, later cancellation and
+    /// deadline failures remain observable at every protected-work poll.
+    pub(crate) fn split_terminal_poll_checkpoint_and_retained_ledger(
+        &mut self,
+    ) -> (OperationPollCheckpoint<'_, PP, U>, &Ledger<O, LP, D>) {
+        let Self {
+            control,
+            terminal,
+            ledger,
+            ..
+        } = self;
+        let allow_preexisting_terminal = terminal.is_some();
+        (
+            OperationPollCheckpoint {
+                control,
+                terminal,
+                allow_preexisting_terminal,
+            },
+            ledger,
+        )
     }
 
     pub(crate) fn try_prepare_typed_control(

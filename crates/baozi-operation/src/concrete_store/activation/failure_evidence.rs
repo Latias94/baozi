@@ -2,7 +2,10 @@ use super::super::validation::{StoreEvidenceMemberCompletion, StoreEvidenceMembe
 use super::*;
 
 impl CanonicalFailureTerminalWorkPlan {
-    /// Derives the complete protected requirement inside the caller's attempted/consumed totals.
+    /// Qualifies caller policy ceilings into the protected requirement inside the total work cap.
+    ///
+    /// The member count and work limits bound later operation-derived plans; they are not accepted
+    /// as evidence that a producer performed any particular amount of work.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         dimension: StoreDimensionKey,
