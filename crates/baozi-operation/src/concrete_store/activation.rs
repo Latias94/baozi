@@ -11,28 +11,30 @@ use std::num::NonZeroU64;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use super::{
-    BytesPlan, BytesWriter, CanonicalBytesRef, CanonicalRecordRef, CanonicalRecordWriter,
-    CanonicalSequenceRef, CanonicalStoreRef, CanonicalUtf8Ref, FreshStoreLineage,
-    OutcomeEvidenceBytesRef, OutcomeEvidenceRecordRef, OutcomeEvidenceRecordWriter,
+    ByteBlock, BytesPlan, BytesWriter, CanonicalBytesRef, CanonicalRecordRef,
+    CanonicalRecordWriter, CanonicalSequenceRef, CanonicalStoreRef, CanonicalUtf8Ref,
+    FreshStoreLineage, OutcomeEvidenceBytesRef, OutcomeEvidenceRecordRef,
+    OutcomeEvidenceRecordRowWriter, OutcomeEvidenceRecordView, OutcomeEvidenceRecordWriter,
     OutcomeEvidenceSequenceRef, OutcomeEvidenceStoreRef, OutcomeEvidenceUtf8Ref,
-    PreparedStoreFailureOutcome, PreparedStoreFallback, RawStoreFailureAssembly, RecordPlan,
-    RetainedStoreBlockTablePlan, RetainedStoreControlCheckpoint,
+    PreparedStoreFailureOutcome, PreparedStoreFallback, RawStoreFailureAssembly, RecordBlock,
+    RecordPlan, RetainedStoreBlockTablePlan, RetainedStoreControlCheckpoint,
     RetainedStoreFailureTerminalWorkPlan, RetainedStoreFailureTerminalWorkRequirement,
     RetainedStoreOperation, RetainedStorePublicationAssembly, RetainedStorePublicationPlan,
-    RetainedStoreReservation, RetainedStoreWorkControl, SequencePlan, SequenceWriter,
-    StoreBuildError, StoreControlledError, StoreControlledSuccessValidation, StoreDimensionKey,
-    StoreEvidenceValidationSession, StoreFailureAssembly, StoreFailureValidation,
-    StoreFallbackOnly, StoreKeyDomain, StorePhaseKey, StorePlanError, StorePrepareError,
-    StoreRuntimeError, StoreValidationSession, StoreWorkError, StoredScalar, Utf8Plan, Utf8Writer,
-    ValidatedStoreFailure, ValidatedStoreSuccess, classify_prepared_fallback, finish_scoped_writer,
-    map_publication_error, map_writer_error,
+    RetainedStoreReservation, RetainedStoreWorkControl, ScalarSequence, SequencePlan,
+    SequenceWriter, StoreBuildError, StoreControlledError, StoreControlledSuccessValidation,
+    StoreDimensionKey, StoreEvidenceValidationSession, StoreFailureAssembly,
+    StoreFailureValidation, StoreFallbackOnly, StoreKeyDomain, StorePhaseKey, StorePlanError,
+    StorePrepareError, StoreRuntimeError, StoreValidationSession, StoreWorkError, StoredBlock,
+    StoredScalar, Utf8Block, Utf8Plan, Utf8Writer, ValidatedStoreFailure, ValidatedStoreSuccess,
+    classify_prepared_fallback, map_publication_error, map_writer_error,
 };
 use crate::control::{ProgressPhase, ProgressUnit, discard_untrusted_panic_payload};
 use crate::coordinator::FinalProgress;
 use crate::owner::OperationOwner;
 use crate::retained::{
-    FinalizationContainmentError, PreparationFailureCode, RetainedFailureWorkControl,
-    RetainedFailureWorkPermit, RetainedFailureWorkStartError, RetainedPublicationOpenRecovery,
+    FinalizationContainmentError, PreparationFailureCode, RetainedFailureWorkConsumeError,
+    RetainedFailureWorkControl, RetainedFailureWorkFinishError, RetainedFailureWorkPermit,
+    RetainedFailureWorkStartError, RetainedPublicationOpenRecovery,
     RetainedPublicationPrepareError,
 };
 
@@ -43,12 +45,13 @@ mod preflight;
 
 const ACTIVATION_PRODUCT_GRAPH_FAILURE_CODE: u32 = 0x4143_5047;
 const FAILURE_WORK_ENVELOPE_EXHAUSTED_CODE: u32 = 0x4657_4545;
+const FAILURE_EVIDENCE_BUILD_CHUNK_UNITS: usize = 256;
 
 /// Operation-derived protected work plan for the canonical activation failure path.
 ///
-/// Construction and validation work are expressed in caller-visible logical units, but the
-/// operation owns the exact counter derivation. Each unit reserves the protected charge pair used
-/// by the retained terminal rail, so callers never need the protected dimension key or formula.
+/// Construction and validation work are derived from sealed store plans. Each unit reserves the
+/// protected charge pair used by the retained terminal rail, so callers never provide either the
+/// protected dimension key or a self-attested work amount.
 #[derive(Debug, PartialEq, Eq)]
 pub struct CanonicalFailureTerminalWorkPlan {
     terminal_work: RetainedStoreFailureTerminalWorkPlan,
@@ -66,6 +69,7 @@ struct FailureEvidenceWorkBudget {
     remaining_members: usize,
     remaining_construction_work: u64,
     remaining_validation_work: u64,
+    planned_validation_work: u64,
 }
 
 impl FailureEvidenceWorkBudget {
@@ -74,24 +78,30 @@ impl FailureEvidenceWorkBudget {
             remaining_members: envelope.max_evidence_members,
             remaining_construction_work: envelope.construction_work_limit,
             remaining_validation_work: envelope.validation_work_limit,
+            planned_validation_work: 0,
         }
     }
 
-    fn reserve_construction(&mut self, amount: u64) -> Result<(), StoreRuntimeError> {
-        if amount == 0 || self.remaining_members == 0 || amount > self.remaining_construction_work {
+    fn reserve_construction_member(&mut self, amount: u64) -> Result<(), StoreRuntimeError> {
+        if amount == 0
+            || self.remaining_members == 0
+            || amount > self.remaining_construction_work
+            || amount > self.remaining_validation_work
+        {
             return Err(failure_work_envelope_exhausted());
         }
+        let Some(planned) = self.planned_validation_work.checked_add(amount) else {
+            return Err(failure_work_envelope_exhausted());
+        };
         self.remaining_members -= 1;
         self.remaining_construction_work -= amount;
+        self.remaining_validation_work -= amount;
+        self.planned_validation_work = planned;
         Ok(())
     }
 
-    fn reserve_validation(&mut self, amount: u64) -> Result<(), ()> {
-        if amount == 0 || amount > self.remaining_validation_work {
-            return Err(());
-        }
-        self.remaining_validation_work -= amount;
-        Ok(())
+    fn planned_validation_work(&self) -> Result<NonZeroU64, StoreRuntimeError> {
+        NonZeroU64::new(self.planned_validation_work).ok_or_else(failure_work_envelope_exhausted)
     }
 }
 
@@ -100,37 +110,78 @@ type RawFailureEvidenceWorkControl<'a, O, PP, U> =
 type RawFailureEvidenceWorkPermit<'a, O, PP, U> =
     RetainedFailureWorkPermit<'a, O, StorePhaseKey, PP, U, StoreDimensionKey>;
 
-/// Permit-bound protected capability lent to one admitted evidence builder.
+/// Permit-bound protected writer for one admitted failure-evidence member.
 ///
-/// Construction is recorded as attempted before the callback and becomes consumed only after the
-/// primitive writer finishes successfully. A callback error, panic, or abandoned permit therefore
-/// remains attempted-only and forces the terminal path away from rich evidence.
-pub struct FailureEvidenceBuildControl<'a, O, PP, U>
+/// The complete sealed member plan is recorded as attempted before the builder runs. Each mutating
+/// method polls control state and records only the payload it actually advances as consumed. A
+/// writer error, cancellation, panic, or abandoned permit therefore preserves the unfinished
+/// attempted-only suffix and forces the terminal path away from rich evidence.
+pub struct FailureEvidenceBuildControl<'a, O, PP, U, W>
 where
     O: OperationOwner,
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    permit: RawFailureEvidenceWorkPermit<'a, O, PP, U>,
-    sticky: Option<StoreRuntimeError>,
+    writer: W,
+    permit: Option<RawFailureEvidenceWorkPermit<'a, O, PP, U>>,
+    record_action_work: u64,
+    sticky: Option<FailureBuildCallbackError>,
 }
 
+#[derive(Clone)]
 enum FailureBuildCallbackError {
     Build(StoreBuildError),
     Runtime(StoreRuntimeError),
 }
 
-/// Protected validation capability that charges each declared chunk before the caller performs it.
-pub struct FailureEvidenceValidationControl<'a, O, PP, U>
+/// Operation-owned validator for one exact rich-failure evidence graph.
+///
+/// No raw slice, string, record view, protected dimension, or caller-selected work amount crosses
+/// this boundary. Each concrete data unit advances under a linear permit and is recorded as
+/// consumed only after the caller's inspection closure returns normally. A repeated DAG edge to an
+/// already completed member succeeds without running that member's inspector again.
+pub struct FailureEvidenceValidationSession<'session, 'storage, 'control, O, PP, U>
 where
     O: OperationOwner,
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    raw: RawFailureEvidenceWorkControl<'a, O, PP, U>,
-    budget: &'a mut FailureEvidenceWorkBudget,
+    raw: StoreEvidenceValidationSession<'session, 'storage>,
+    permit: Option<RawFailureEvidenceWorkPermit<'control, O, PP, U>>,
     sticky: Option<StoreRuntimeError>,
-    began_chunk: bool,
+    completed_units: u64,
+    rejected: bool,
+}
+
+/// Session-branded authority to validate one root-reachable failure-evidence member.
+///
+/// Values are issued only for the validation root or a typed record edge. They are deliberately
+/// neither `Copy` nor constructible by callers, so a slot captured during construction cannot be
+/// substituted for a member reached from the validation root.
+#[must_use = "every root-reachable failure-evidence member must enter controlled validation"]
+pub struct FailureEvidenceMember<'session, Kind, Tag> {
+    raw: OutcomeEvidenceStoreRef<Kind, Tag>,
+    validation: PhantomData<fn(&'session mut ()) -> &'session mut ()>,
+}
+
+type FailureEvidenceSequenceMember<'session, T, Tag> =
+    FailureEvidenceMember<'session, ScalarSequence<T>, Tag>;
+type FailureEvidenceBytesMember<'session, Tag> = FailureEvidenceMember<'session, ByteBlock, Tag>;
+type FailureEvidenceUtf8Member<'session, Tag> = FailureEvidenceMember<'session, Utf8Block, Tag>;
+type FailureEvidenceRecordMember<'session, Tag> = FailureEvidenceMember<'session, RecordBlock, Tag>;
+
+/// One fixed-width record row whose fields can only be inspected through metered typed accessors.
+pub struct FailureEvidenceRecordRow<'row, 'session, 'storage, 'control, O, PP, U>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    session: &'row mut FailureEvidenceValidationSession<'session, 'storage, 'control, O, PP, U>,
+    view: OutcomeEvidenceRecordView<'storage>,
+    row: usize,
+    fields: usize,
+    visited: u64,
 }
 
 /// Linear owner for one session outcome and one still-dormant canonical authority.

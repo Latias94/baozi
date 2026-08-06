@@ -3,8 +3,9 @@ use std::cell::Cell;
 use baozi_operation::__canonical_activation::{
     CanonicalActivationOutcome, CanonicalCentralValidationOutcome, CanonicalMaterialization,
     CanonicalOutputIntent, CanonicalPreflightDecision, CanonicalValidationDecision,
-    FailureEvidenceDecision, FailureEvidenceOutcome, OutcomeEvidenceDecision,
-    RootedFailureValidation, StoreCanonicalRejection, StoreNeverActivatedCause,
+    FailureEvidenceDecision, FailureEvidenceMember, FailureEvidenceOutcome,
+    OutcomeEvidenceDecision, RootedFailureValidation, StoreCanonicalRejection,
+    StoreNeverActivatedCause,
 };
 use baozi_operation::{RetainedStoreBlockTablePlan, StoreDestination, StoreWorkError};
 
@@ -18,6 +19,28 @@ mod controlled_writers;
 mod failure_evidence;
 #[path = "activation/preflight_materialization.rs"]
 mod preflight_materialization;
+
+#[test]
+fn failure_evidence_member_remains_linear() {
+    trait AmbiguousIfCopy<Marker> {
+        fn assert_not_copy() {}
+    }
+    impl<T: ?Sized> AmbiguousIfCopy<()> for T {}
+    struct CopyMarker;
+    impl<T: Copy> AmbiguousIfCopy<CopyMarker> for T {}
+
+    trait AmbiguousIfClone<Marker> {
+        fn assert_not_clone() {}
+    }
+    impl<T: ?Sized> AmbiguousIfClone<()> for T {}
+    struct CloneMarker;
+    impl<T: Clone> AmbiguousIfClone<CloneMarker> for T {}
+
+    type Member =
+        FailureEvidenceMember<'static, baozi_operation::ScalarSequence<u8>, EvidenceLeafTag>;
+    let _ = <Member as AmbiguousIfCopy<_>>::assert_not_copy;
+    let _ = <Member as AmbiguousIfClone<_>>::assert_not_clone;
+}
 
 fn canonical_plan(keys: TestKeys, blocks: usize) -> RetainedStoreBlockTablePlan {
     RetainedStoreBlockTablePlan::new(writer_plan(keys, blocks + 1, 2), blocks, blocks).unwrap()
@@ -292,8 +315,42 @@ fn rejected_session_with_control(
     TestKeys,
 ) {
     let (operation, keys) = operation_with_control(account, control);
+    rejected_session_from_operation(operation, keys, 1)
+}
+
+fn rejected_session_with_failure_work_limits(
+    account: &PhysicalStorageAccount,
+    construction_work_limit: u64,
+    validation_work_limit: u64,
+) -> (
+    baozi_operation::__canonical_activation::NeverActivatedStoreSession<
+        TestOwner,
+        TestProgress,
+        TestUnit,
+        PreflightRejection,
+    >,
+    TestKeys,
+) {
+    let (operation, keys) =
+        operation_with_failure_work_limits(account, construction_work_limit, validation_work_limit);
+    rejected_session_from_operation(operation, keys, 1)
+}
+
+fn rejected_session_from_operation(
+    operation: TestOperation,
+    keys: TestKeys,
+    evidence_blocks: usize,
+) -> (
+    baozi_operation::__canonical_activation::NeverActivatedStoreSession<
+        TestOwner,
+        TestProgress,
+        TestUnit,
+        PreflightRejection,
+    >,
+    TestKeys,
+) {
     let outcome = operation
-        .into_session_outcome_owner(evidence_plan(keys, 1))
+        .into_session_outcome_owner(evidence_plan(keys, evidence_blocks))
         .plan_and_activate(
             |preflight| preflight.reject(PreflightRejection::Unsupported, 11),
             |_lane| -> CanonicalMaterialization<(), PreflightRejection> {

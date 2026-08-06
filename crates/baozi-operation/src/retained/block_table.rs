@@ -318,6 +318,21 @@ impl<Block> RetainedBlockMember<Block> {
     fn first_visit_in(&self, epoch: NonZeroU64) -> bool {
         self.visit_epoch.swap(epoch.get(), Ordering::AcqRel) != epoch.get()
     }
+
+    #[cfg(feature = "_u4-activation")]
+    fn completed_in(&self, epoch: NonZeroU64) -> bool {
+        self.visit_epoch.load(Ordering::Acquire) == epoch.get()
+    }
+
+    #[cfg(feature = "_u4-activation")]
+    fn try_complete_in(&self, epoch: NonZeroU64) -> bool {
+        let previous = self.visit_epoch.load(Ordering::Acquire);
+        previous != epoch.get()
+            && self
+                .visit_epoch
+                .compare_exchange(previous, epoch.get(), Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1767,12 +1782,34 @@ pub(crate) struct RetainedEvidenceClosureSession<'a, EvidenceBlock> {
     pub(super) not_send_or_sync: PhantomData<Rc<()>>,
 }
 
+/// Result of opening one evidence member for controlled validation.
+#[cfg(feature = "_u4-activation")]
+pub(crate) enum RetainedEvidenceMemberVisit<'a, EvidenceBlock, Tag> {
+    Completed(&'a EvidenceBlock),
+    Pending(RetainedPendingEvidenceMember<'a, EvidenceBlock, Tag>),
+}
+
+/// Linear completion authority for one inspected evidence member.
+#[cfg(feature = "_u4-activation")]
+#[must_use = "a pending evidence member must be completed or leave the closure incomplete"]
+pub(crate) struct RetainedPendingEvidenceMember<'a, EvidenceBlock, Tag> {
+    block: &'a EvidenceBlock,
+    slot: OutcomeEvidenceRetainedSlot<EvidenceBlock, Tag>,
+    epoch: NonZeroU64,
+}
+
+#[cfg(feature = "_u4-activation")]
+impl<'a, EvidenceBlock, Tag> RetainedPendingEvidenceMember<'a, EvidenceBlock, Tag> {
+    pub(crate) const fn block(&self) -> &'a EvidenceBlock {
+        self.block
+    }
+}
+
 impl<'a, EvidenceBlock> RetainedEvidenceClosureSession<'a, EvidenceBlock> {
-    /// Visits one outcome-evidence slot, returning `None` and invalidating the session on mismatch.
-    pub fn outcome_evidence<Tag>(
+    fn outcome_evidence_member<Tag>(
         &mut self,
         slot: OutcomeEvidenceRetainedSlot<EvidenceBlock, Tag>,
-    ) -> Option<&'a EvidenceBlock>
+    ) -> Option<&'a RetainedBlockMember<EvidenceBlock>>
     where
         Tag: Copy + Send + Sync + 'static,
     {
@@ -1788,6 +1825,18 @@ impl<'a, EvidenceBlock> RetainedEvidenceClosureSession<'a, EvidenceBlock> {
             self.valid = false;
             return None;
         }
+        Some(member)
+    }
+
+    /// Visits one outcome-evidence slot, returning `None` and invalidating the session on mismatch.
+    pub fn outcome_evidence<Tag>(
+        &mut self,
+        slot: OutcomeEvidenceRetainedSlot<EvidenceBlock, Tag>,
+    ) -> Option<&'a EvidenceBlock>
+    where
+        Tag: Copy + Send + Sync + 'static,
+    {
+        let member = self.outcome_evidence_member(slot)?;
         if member.first_visit_in(self.epoch) {
             let Some(seen) = self.seen.checked_add(1) else {
                 self.valid = false;
@@ -1796,6 +1845,77 @@ impl<'a, EvidenceBlock> RetainedEvidenceClosureSession<'a, EvidenceBlock> {
             self.seen = seen;
         }
         Some(member.allocation.as_ref())
+    }
+
+    /// Opens one evidence member without marking it complete in this validation epoch.
+    ///
+    /// A previously completed member is reported directly. A new member returns a linear pending
+    /// token that must be consumed by completion after its contents are inspected. Identity,
+    /// index, or tag mismatch invalidates the complete closure session.
+    #[cfg(feature = "_u4-activation")]
+    pub(crate) fn peek_outcome_evidence<Tag>(
+        &mut self,
+        slot: OutcomeEvidenceRetainedSlot<EvidenceBlock, Tag>,
+    ) -> Option<RetainedEvidenceMemberVisit<'a, EvidenceBlock, Tag>>
+    where
+        Tag: Copy + Send + Sync + 'static,
+    {
+        let member = self.outcome_evidence_member(slot)?;
+        if member.completed_in(self.epoch) {
+            Some(RetainedEvidenceMemberVisit::Completed(
+                member.allocation.as_ref(),
+            ))
+        } else {
+            Some(RetainedEvidenceMemberVisit::Pending(
+                RetainedPendingEvidenceMember {
+                    block: member.allocation.as_ref(),
+                    slot,
+                    epoch: self.epoch,
+                },
+            ))
+        }
+    }
+
+    /// Completes one previously opened evidence member in this validation epoch.
+    ///
+    /// Completion revalidates the token's epoch, complete slot identity, and backing member. A
+    /// duplicate completion or competing epoch update invalidates the closure instead of
+    /// increasing `seen` again.
+    #[cfg(feature = "_u4-activation")]
+    pub(crate) fn complete_outcome_evidence<Tag>(
+        &mut self,
+        pending: RetainedPendingEvidenceMember<'a, EvidenceBlock, Tag>,
+    ) -> bool
+    where
+        Tag: Copy + Send + Sync + 'static,
+    {
+        if pending.epoch != self.epoch {
+            self.valid = false;
+            return false;
+        }
+        let Some(member) = self.outcome_evidence_member(pending.slot) else {
+            return false;
+        };
+        if !std::ptr::eq(member.allocation.as_ref(), pending.block) {
+            self.valid = false;
+            return false;
+        }
+        if !member.try_complete_in(self.epoch) {
+            self.valid = false;
+            return false;
+        }
+        let Some(seen) = self.seen.checked_add(1) else {
+            self.valid = false;
+            return false;
+        };
+        self.seen = seen;
+        true
+    }
+
+    /// Invalidates the complete closure after a concrete-store projection mismatch.
+    #[cfg(feature = "_u4-activation")]
+    pub(crate) fn invalidate(&mut self) {
+        self.valid = false;
     }
 }
 

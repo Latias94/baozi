@@ -13,6 +13,8 @@ use crate::retained::{
     RetainedEvidenceClosureSession, RetainedPublicationError, RetainedWriterError,
     retained_publication_error_requires_containment,
 };
+#[cfg(feature = "_u4-activation")]
+use crate::retained::{RetainedEvidenceMemberVisit, RetainedPendingEvidenceMember};
 
 pub(super) fn sequence_view<T: StoredScalar>(block: &StoredBlock) -> Option<SequenceView<'_, T>> {
     if !sequence_kind_matches::<T>(block) {
@@ -156,7 +158,112 @@ pub struct StoreEvidenceValidationSession<'session, 'storage> {
     pub(super) raw: &'session mut RetainedEvidenceClosureSession<'storage, StoredBlock>,
 }
 
+#[cfg(feature = "_u4-activation")]
+pub(super) enum StoreEvidenceMemberVisit<'storage, View, Tag> {
+    Completed,
+    Pending {
+        view: View,
+        completion: StoreEvidenceMemberCompletion<'storage, Tag>,
+    },
+}
+
+#[cfg(feature = "_u4-activation")]
+pub(super) struct StoreEvidenceMemberCompletion<'storage, Tag> {
+    raw: RetainedPendingEvidenceMember<'storage, StoredBlock, Tag>,
+}
+
 impl<'storage> StoreEvidenceValidationSession<'_, 'storage> {
+    #[cfg(feature = "_u4-activation")]
+    fn project_visit<View, Tag>(
+        &mut self,
+        visit: RetainedEvidenceMemberVisit<'storage, StoredBlock, Tag>,
+        project: impl FnOnce(&'storage StoredBlock) -> Option<View>,
+    ) -> Option<StoreEvidenceMemberVisit<'storage, View, Tag>> {
+        match visit {
+            RetainedEvidenceMemberVisit::Completed(block) => {
+                if project(block).is_none() {
+                    self.raw.invalidate();
+                    return None;
+                }
+                Some(StoreEvidenceMemberVisit::Completed)
+            }
+            RetainedEvidenceMemberVisit::Pending(raw) => {
+                let Some(view) = project(raw.block()) else {
+                    self.raw.invalidate();
+                    return None;
+                };
+                Some(StoreEvidenceMemberVisit::Pending {
+                    view,
+                    completion: StoreEvidenceMemberCompletion { raw },
+                })
+            }
+        }
+    }
+
+    /// Peeks at one typed scalar sequence without completing its retained member.
+    #[cfg(feature = "_u4-activation")]
+    pub(super) fn peek_sequence<T: StoredScalar, Tag>(
+        &mut self,
+        slot: OutcomeEvidenceSequenceRef<T, Tag>,
+    ) -> Option<StoreEvidenceMemberVisit<'storage, SequenceView<'storage, T>, Tag>>
+    where
+        Tag: Copy + Send + Sync + 'static,
+    {
+        let visit = self.raw.peek_outcome_evidence(slot.raw)?;
+        self.project_visit(visit, sequence_view::<T>)
+    }
+
+    /// Peeks at one binary block without completing its retained member.
+    #[cfg(feature = "_u4-activation")]
+    pub(super) fn peek_bytes<Tag>(
+        &mut self,
+        slot: OutcomeEvidenceBytesRef<Tag>,
+    ) -> Option<StoreEvidenceMemberVisit<'storage, &'storage [u8], Tag>>
+    where
+        Tag: Copy + Send + Sync + 'static,
+    {
+        let visit = self.raw.peek_outcome_evidence(slot.raw)?;
+        self.project_visit(visit, bytes_view)
+    }
+
+    /// Peeks at one UTF-8 block without completing its retained member.
+    #[cfg(feature = "_u4-activation")]
+    pub(super) fn peek_utf8<Tag>(
+        &mut self,
+        slot: OutcomeEvidenceUtf8Ref<Tag>,
+    ) -> Option<StoreEvidenceMemberVisit<'storage, &'storage str, Tag>>
+    where
+        Tag: Copy + Send + Sync + 'static,
+    {
+        let visit = self.raw.peek_outcome_evidence(slot.raw)?;
+        self.project_visit(visit, utf8_view)
+    }
+
+    /// Peeks at one record block without completing its retained member.
+    #[cfg(feature = "_u4-activation")]
+    pub(super) fn peek_records<Tag>(
+        &mut self,
+        slot: OutcomeEvidenceRecordRef<Tag>,
+    ) -> Option<StoreEvidenceMemberVisit<'storage, OutcomeEvidenceRecordView<'storage>, Tag>>
+    where
+        Tag: Copy + Send + Sync + 'static,
+    {
+        let visit = self.raw.peek_outcome_evidence(slot.raw)?;
+        self.project_visit(visit, outcome_evidence_record_view)
+    }
+
+    /// Completes one typed evidence member after its complete contents were validated.
+    #[cfg(feature = "_u4-activation")]
+    pub(super) fn complete_member<Tag>(
+        &mut self,
+        completion: StoreEvidenceMemberCompletion<'storage, Tag>,
+    ) -> bool
+    where
+        Tag: Copy + Send + Sync + 'static,
+    {
+        self.raw.complete_outcome_evidence(completion.raw)
+    }
+
     /// Visits one outcome-evidence scalar sequence.
     pub fn sequence<T: StoredScalar, Tag>(
         &mut self,

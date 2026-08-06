@@ -4555,7 +4555,7 @@ where
         self,
         evidence_root: OutcomeEvidenceStoreRef<EvidenceKind, EvidenceTag>,
         validate: impl for<'session, 'storage, 'control> FnOnce(
-            &mut StoreEvidenceValidationSession<'session, 'storage>,
+            StoreEvidenceValidationSession<'session, 'storage>,
             OutcomeEvidenceStoreRef<EvidenceKind, EvidenceTag>,
             crate::retained::RetainedFailureWorkControl<
                 'control,
@@ -4585,8 +4585,8 @@ where
         }
         map_failure_validation(
             raw.validate_rich_failure_controlled(evidence_root.raw, |raw, _, control| {
-                let mut session = StoreEvidenceValidationSession { raw };
-                validate(&mut session, evidence_root, control)
+                let session = StoreEvidenceValidationSession { raw };
+                validate(session, evidence_root, control)
             }),
             evidence_root,
             domain,

@@ -392,12 +392,49 @@ fn operation_with_catalog_and_limits(
     evidence_limit: u64,
     committed_limit: u64,
 ) -> (TestOperation, TestKeys) {
+    operation_with_catalog_limits_and_failure_work(
+        account,
+        control,
+        catalog,
+        evidence_limit,
+        committed_limit,
+        TEST_FAILURE_EVIDENCE_CONSTRUCTION_WORK_LIMIT,
+        TEST_FAILURE_EVIDENCE_VALIDATION_WORK_LIMIT,
+    )
+}
+
+#[cfg(feature = "_u4-activation")]
+fn operation_with_failure_work_limits(
+    account: &PhysicalStorageAccount,
+    construction_work_limit: u64,
+    validation_work_limit: u64,
+) -> (TestOperation, TestKeys) {
+    operation_with_catalog_limits_and_failure_work(
+        account,
+        OperationControl::default(),
+        test_catalog(),
+        u64::MAX,
+        u64::MAX,
+        construction_work_limit,
+        validation_work_limit,
+    )
+}
+
+fn operation_with_catalog_limits_and_failure_work(
+    account: &PhysicalStorageAccount,
+    control: OperationControl<TestProgress, TestUnit>,
+    catalog: StoreSemanticCatalogId,
+    evidence_limit: u64,
+    committed_limit: u64,
+    construction_work_limit: u64,
+    validation_work_limit: u64,
+) -> (TestOperation, TestKeys) {
     let TestVocabulary { domain, keys } = test_vocabulary_for(catalog);
     let failure_terminal_work = RetainedStoreFailureTerminalWorkPlan::with_evidence_work(
         keys.failure_terminal_dimension,
         TEST_MAX_FAILURE_EVIDENCE_MEMBERS,
-        TEST_FAILURE_EVIDENCE_CONSTRUCTION_WORK_LIMIT,
-        TEST_FAILURE_EVIDENCE_VALIDATION_WORK_LIMIT,
+        construction_work_limit,
+        validation_work_limit,
         u64::MAX,
         u64::MAX,
     )

@@ -379,9 +379,8 @@ where
     pub fn validate_rich_failure(
         self,
         validate: impl for<'session, 'storage, 'control> FnMut(
-            &mut StoreEvidenceValidationSession<'session, 'storage>,
-            OutcomeEvidenceStoreRef<EvidenceKind, EvidenceTag>,
-            &mut FailureEvidenceValidationControl<'control, O, PP, U>,
+            &mut FailureEvidenceValidationSession<'session, 'storage, 'control, O, PP, U>,
+            FailureEvidenceMember<'session, EvidenceKind, EvidenceTag>,
         ) -> bool,
     ) -> Result<
         CanonicalRejectionFailureValidation<O, PP, U, E, EvidenceKind, EvidenceTag>,
@@ -414,9 +413,8 @@ where
     pub fn validate_rich_failure(
         self,
         validate: impl for<'session, 'storage, 'control> FnMut(
-            &mut StoreEvidenceValidationSession<'session, 'storage>,
-            OutcomeEvidenceStoreRef<EvidenceKind, EvidenceTag>,
-            &mut FailureEvidenceValidationControl<'control, O, PP, U>,
+            &mut FailureEvidenceValidationSession<'session, 'storage, 'control, O, PP, U>,
+            FailureEvidenceMember<'session, EvidenceKind, EvidenceTag>,
         ) -> bool,
     ) -> Result<
         RootedFailureValidation<O, PP, U, StoreWorkError, EvidenceKind, EvidenceTag>,

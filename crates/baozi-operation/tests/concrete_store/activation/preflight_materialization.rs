@@ -395,9 +395,8 @@ fn materialization_rejection_eagerly_cleans_canonical_storage() {
             let root = lane
                 .try_retain_sequence(
                     SequencePlan::<u8>::new(1).unwrap(),
-                    1,
                     EvidenceLeafTag,
-                    |writer, _control| writer.push(1),
+                    |writer| writer.push(1),
                 )
                 .unwrap();
             lane.commit(keys.dimension, 1).unwrap();

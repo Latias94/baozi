@@ -85,10 +85,10 @@ pub mod __canonical_activation {
         CanonicalActivationOutcome, CanonicalCentralValidationOutcome,
         CanonicalFailureTerminalWorkPlan, CanonicalMaterialization, CanonicalOutputIntent,
         CanonicalPreflightDecision, CanonicalValidationDecision, FailureEvidenceBuildControl,
-        FailureEvidenceDecision, FailureEvidenceOutcome, FailureEvidenceValidationControl,
-        NeverActivatedStoreSession, OutcomeEvidenceDecision, RetainedStoreSessionOutcomeOwner,
-        RootedFailureValidation, StoreActivationContainment, StoreCanonicalRejection,
-        StoreNeverActivatedCause,
+        FailureEvidenceDecision, FailureEvidenceMember, FailureEvidenceOutcome,
+        FailureEvidenceRecordRow, FailureEvidenceValidationSession, NeverActivatedStoreSession,
+        OutcomeEvidenceDecision, RetainedStoreSessionOutcomeOwner, RootedFailureValidation,
+        StoreActivationContainment, StoreCanonicalRejection, StoreNeverActivatedCause,
     };
 }
 pub use control::{

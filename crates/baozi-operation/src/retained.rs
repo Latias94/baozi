@@ -80,6 +80,8 @@ use block_table::{
     try_qualify_retained_block_table_plan, try_retain_block, try_retain_rewritten_canonical_block,
     try_rewrite_canonical_block_controlled, try_share_retained_block,
 };
+#[cfg(feature = "_u4-activation")]
+pub(crate) use block_table::{RetainedEvidenceMemberVisit, RetainedPendingEvidenceMember};
 pub(crate) use evidence::{
     FallbackHeaderSnapshot, PreparationFailureClass, PreparationFailureCode, TerminalEvidenceCause,
     TerminalEvidenceKey, TerminalEvidenceKeySeal,
@@ -151,7 +153,10 @@ pub(crate) use operation::{
     RetainedControlCheckpoint, RetainedFailureWorkControl, RetainedOperation, RetainedWorkControl,
 };
 #[cfg(feature = "_u4-activation")]
-pub(crate) use operation::{RetainedFailureWorkPermit, RetainedFailureWorkStartError};
+pub(crate) use operation::{
+    RetainedFailureWorkConsumeError, RetainedFailureWorkFinishError, RetainedFailureWorkPermit,
+    RetainedFailureWorkStartError,
+};
 #[cfg(test)]
 use operation_start::map_qualified_startup_batch_error;
 pub(crate) use operation_start::{

@@ -41,6 +41,7 @@ use std::num::NonZeroU64;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 const FAILURE_WORK_PERMIT_ABANDONED_CODE: u32 = 0x4657_5041;
+const FAILURE_WORK_PERMIT_OVERRUN_CODE: u32 = 0x4657_504f;
 
 /// Linear owner for one coordinator, one physical account, and its pre-admitted fallback.
 #[allow(
@@ -200,11 +201,21 @@ pub(crate) enum RetainedFailureWorkStartError<D> {
     Outstanding,
 }
 
+pub(crate) enum RetainedFailureWorkConsumeError<D> {
+    Ledger(LedgerCause<D>),
+    ExceedsAttempted,
+}
+
+pub(crate) enum RetainedFailureWorkFinishError {
+    Incomplete,
+}
+
 /// Linear completion authority for one admitted protected failure-work action.
 ///
-/// Creating the permit records attempted work. Only [`Self::complete`] records consumed work and
-/// clears the operation-owned outstanding latch. Dropping or forgetting the permit therefore
-/// preserves attempted-only evidence and prevents another protected action from starting.
+/// Creating the permit records the complete attempted work for one count-driven action. Bounded
+/// progress calls record only work that actually completes. A semantic rejection may close a
+/// partially completed permit explicitly; dropping or forgetting one instead preserves the
+/// attempted-only suffix and prevents another protected action from starting.
 #[must_use = "the protected failure-work permit must be completed or remain attempted-only"]
 pub(crate) struct RetainedFailureWorkPermit<'a, O, P, PP, U, D>
 where
@@ -215,7 +226,7 @@ where
     D: Copy + Ord + fmt::Debug,
 {
     control: Option<RetainedFailureWorkControl<'a, O, P, PP, U, D>>,
-    amount: NonZeroU64,
+    remaining: u64,
 }
 
 impl<O, P, PP, U, D> RetainedWorkControl<'_, O, P, PP, U, D>
@@ -291,19 +302,8 @@ where
         *self.permit_outstanding = true;
         Ok(RetainedFailureWorkPermit {
             control: Some(self),
-            amount,
+            remaining: amount.get(),
         })
-    }
-
-    pub(crate) fn charge_observed(&mut self, amount: u64) -> Result<(), LedgerCause<D>> {
-        self.ledger
-            .charge_observed_batch(&[(self.dimension, amount)])
-            .inspect_err(|_| {
-                record_terminal_cause_with_precedence(
-                    self.sticky_terminal_cause,
-                    PreparationFailureCode::ledger(),
-                );
-            })
     }
 
     pub(crate) fn record_product_graph_failure(&mut self, code: u32) {
@@ -329,23 +329,79 @@ where
             .poll()
     }
 
-    pub(crate) fn complete(
-        mut self,
-    ) -> Result<RetainedFailureWorkControl<'a, O, P, PP, U, D>, LedgerCause<D>> {
+    pub(crate) const fn remaining_units(&self) -> u64 {
+        self.remaining
+    }
+
+    pub(crate) fn record_product_graph_failure(&mut self, code: u32) {
+        self.control
+            .as_mut()
+            .expect("an incomplete failure-work permit retains its control")
+            .record_product_graph_failure(code);
+    }
+
+    pub(crate) fn complete_units(
+        &mut self,
+        amount: NonZeroU64,
+    ) -> Result<(), RetainedFailureWorkConsumeError<D>> {
+        if amount.get() > self.remaining {
+            let control = self
+                .control
+                .as_mut()
+                .expect("an incomplete failure-work permit retains its control");
+            control.record_product_graph_failure(FAILURE_WORK_PERMIT_OVERRUN_CODE);
+            return Err(RetainedFailureWorkConsumeError::ExceedsAttempted);
+        }
         let control = self
             .control
-            .take()
-            .expect("a failure-work permit completes at most once");
+            .as_mut()
+            .expect("an incomplete failure-work permit retains its control");
         if let Err(cause) = control
             .ledger
-            .charge_consumed(control.dimension, self.amount.get())
+            .charge_consumed(control.dimension, amount.get())
         {
             record_terminal_cause_with_precedence(
                 control.sticky_terminal_cause,
                 PreparationFailureCode::ledger(),
             );
-            return Err(cause);
+            return Err(RetainedFailureWorkConsumeError::Ledger(cause));
         }
+        self.remaining -= amount.get();
+        Ok(())
+    }
+
+    pub(crate) fn complete(
+        mut self,
+    ) -> Result<RetainedFailureWorkControl<'a, O, P, PP, U, D>, RetainedFailureWorkFinishError>
+    {
+        if self.remaining != 0 {
+            let control = self
+                .control
+                .as_mut()
+                .expect("an incomplete failure-work permit retains its control");
+            control.record_product_graph_failure(FAILURE_WORK_PERMIT_ABANDONED_CODE);
+            return Err(RetainedFailureWorkFinishError::Incomplete);
+        }
+        let control = self
+            .control
+            .take()
+            .expect("a failure-work permit completes at most once");
+        *control.permit_outstanding = false;
+        Ok(control)
+    }
+
+    pub(crate) fn finish_validation(
+        mut self,
+        accepted: bool,
+    ) -> Result<RetainedFailureWorkControl<'a, O, P, PP, U, D>, RetainedFailureWorkFinishError>
+    {
+        if accepted {
+            return self.complete();
+        }
+        let control = self
+            .control
+            .take()
+            .expect("a validation work permit resolves at most once");
         *control.permit_outstanding = false;
         Ok(control)
     }
