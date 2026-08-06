@@ -653,12 +653,15 @@ impl RetainedStoreSharePlan {
 ///
 /// The dimension must be present in the operation's [`StoreLedgerPlan`] and distinct from every
 /// ordinary start dimension. Startup preflights the exact upper bound for the publication account,
-/// evidence table root, and every admitted evidence member without consuming the counters. Normal
-/// control, writer, and commitment APIs cannot spend this dimension.
+/// evidence table root, every admitted evidence member, and the declared construction and
+/// validation envelopes without consuming the counters. Normal control, writer, and commitment
+/// APIs cannot spend this dimension.
 #[derive(Debug, PartialEq, Eq)]
 pub struct RetainedStoreFailureTerminalWorkPlan {
     dimension: StoreDimensionKey,
     max_evidence_members: usize,
+    construction_work_limit: u64,
+    validation_work_limit: u64,
     requirement: RetainedStoreFailureTerminalWorkRequirement,
     ordinary_attempted_work_limit: u64,
     ordinary_consumed_work_limit: u64,
@@ -698,7 +701,22 @@ impl RetainedStoreFailureTerminalWorkPlan {
     pub fn requirement_for_evidence_members(
         max_evidence_members: usize,
     ) -> Result<RetainedStoreFailureTerminalWorkRequirement, StorePlanError> {
-        let raw = RetainedFailureTerminalWorkPlan::new((), max_evidence_members);
+        Self::requirement_for_evidence_work(max_evidence_members, 0, 0)
+    }
+
+    /// Derives the exact protected work required by retained shares, evidence construction, and
+    /// evidence validation without requiring a runtime dimension key.
+    pub fn requirement_for_evidence_work(
+        max_evidence_members: usize,
+        construction_work_limit: u64,
+        validation_work_limit: u64,
+    ) -> Result<RetainedStoreFailureTerminalWorkRequirement, StorePlanError> {
+        let raw = RetainedFailureTerminalWorkPlan::with_evidence_work(
+            (),
+            max_evidence_members,
+            construction_work_limit,
+            validation_work_limit,
+        );
         let requirement = raw
             .requirement()
             .map_err(|()| StorePlanError::InvalidFailureTerminalWork)?;
@@ -715,7 +733,31 @@ impl RetainedStoreFailureTerminalWorkPlan {
         total_attempted_work_limit: u64,
         total_consumed_work_limit: u64,
     ) -> Result<Self, StorePlanError> {
-        let requirement = Self::requirement_for_evidence_members(max_evidence_members)?;
+        Self::with_evidence_work(
+            dimension,
+            max_evidence_members,
+            0,
+            0,
+            total_attempted_work_limit,
+            total_consumed_work_limit,
+        )
+    }
+
+    /// Declares one protected terminal dimension with independent construction and validation
+    /// work envelopes. Both envelopes remain inside the caller's total hard work cap.
+    pub fn with_evidence_work(
+        dimension: StoreDimensionKey,
+        max_evidence_members: usize,
+        construction_work_limit: u64,
+        validation_work_limit: u64,
+        total_attempted_work_limit: u64,
+        total_consumed_work_limit: u64,
+    ) -> Result<Self, StorePlanError> {
+        let requirement = Self::requirement_for_evidence_work(
+            max_evidence_members,
+            construction_work_limit,
+            validation_work_limit,
+        )?;
         let ordinary_attempted_work_limit = total_attempted_work_limit
             .checked_sub(requirement.attempted_work_limit())
             .ok_or(StorePlanError::InvalidFailureTerminalWork)?;
@@ -725,6 +767,8 @@ impl RetainedStoreFailureTerminalWorkPlan {
         Ok(Self {
             dimension,
             max_evidence_members,
+            construction_work_limit,
+            validation_work_limit,
             requirement,
             ordinary_attempted_work_limit,
             ordinary_consumed_work_limit,
@@ -751,7 +795,12 @@ impl RetainedStoreFailureTerminalWorkPlan {
     }
 
     const fn into_raw(self) -> RetainedFailureTerminalWorkPlan<StoreDimensionKey> {
-        RetainedFailureTerminalWorkPlan::new(self.dimension, self.max_evidence_members)
+        RetainedFailureTerminalWorkPlan::with_evidence_work(
+            self.dimension,
+            self.max_evidence_members,
+            self.construction_work_limit,
+            self.validation_work_limit,
+        )
     }
 }
 

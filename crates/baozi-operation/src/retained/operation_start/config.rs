@@ -106,15 +106,17 @@ impl<D: Copy> RetainedHandleSharePlan<D> {
 
 /// Start-qualified terminal work reserved exclusively for rich-failure evidence.
 ///
-/// Qualification proves that a direct failure table can charge every retained handle share after
-/// ordinary operation work is exhausted. A success-capable assembly keeps the authority dormant
-/// until a semantic or admission downgrade. The runtime capability remains finite and single-use,
-/// while every actual action records attempted and consumed work immediately in the protected
-/// ledger dimension.
+/// Qualification proves that a direct failure table can charge every retained handle share plus
+/// its declared construction and validation work after ordinary operation work is exhausted. A
+/// success-capable assembly keeps the authority dormant until a semantic or admission downgrade.
+/// The runtime capability remains finite and single-use, while every actual action records
+/// attempted and consumed work immediately in the protected ledger dimension.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct RetainedFailureTerminalWorkPlan<D> {
     dimension: D,
     max_evidence_members: usize,
+    construction_work_limit: u64,
+    validation_work_limit: u64,
 }
 
 /// Exact startup qualification derived from one bounded failure-terminal plan.
@@ -136,9 +138,20 @@ impl RetainedFailureTerminalWorkRequirement {
 
 impl<D: Copy> RetainedFailureTerminalWorkPlan<D> {
     pub(crate) const fn new(dimension: D, max_evidence_members: usize) -> Self {
+        Self::with_evidence_work(dimension, max_evidence_members, 0, 0)
+    }
+
+    pub(crate) const fn with_evidence_work(
+        dimension: D,
+        max_evidence_members: usize,
+        construction_work_limit: u64,
+        validation_work_limit: u64,
+    ) -> Self {
         Self {
             dimension,
             max_evidence_members,
+            construction_work_limit,
+            validation_work_limit,
         }
     }
 
@@ -154,6 +167,14 @@ impl<D: Copy> RetainedFailureTerminalWorkPlan<D> {
         self.max_evidence_members
     }
 
+    pub(in crate::retained) const fn construction_work_limit(self) -> u64 {
+        self.construction_work_limit
+    }
+
+    pub(in crate::retained) const fn validation_work_limit(self) -> u64 {
+        self.validation_work_limit
+    }
+
     pub(crate) fn requirement(self) -> Result<RetainedFailureTerminalWorkRequirement, ()> {
         if self.max_evidence_members == 0 {
             return Err(());
@@ -167,8 +188,15 @@ impl<D: Copy> RetainedFailureTerminalWorkPlan<D> {
             .into_iter()
             .try_fold(0_u64, |total, (_, amount)| total.checked_add(amount))
             .ok_or(())?;
-        let observed_work_limit = work_per_share
+        let retained_share_work_limit = work_per_share
             .checked_mul(maximum_share_actions.get())
+            .ok_or(())?;
+        let evidence_work_limit = self
+            .construction_work_limit
+            .checked_add(self.validation_work_limit)
+            .ok_or(())?;
+        let observed_work_limit = retained_share_work_limit
+            .checked_add(evidence_work_limit)
             .ok_or(())?;
         Ok(RetainedFailureTerminalWorkRequirement {
             maximum_share_actions,

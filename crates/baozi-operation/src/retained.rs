@@ -147,7 +147,9 @@ pub(crate) use terminal_output::{
 };
 use triomphe::{Arc, UniqueArc};
 
-pub(crate) use operation::{RetainedControlCheckpoint, RetainedOperation, RetainedWorkControl};
+pub(crate) use operation::{
+    RetainedControlCheckpoint, RetainedFailureWorkControl, RetainedOperation, RetainedWorkControl,
+};
 #[cfg(test)]
 use operation_start::map_qualified_startup_batch_error;
 pub(crate) use operation_start::{
@@ -161,6 +163,8 @@ use operation_start::{
     map_pending_rollback_or, try_admit_retained_share_work,
     try_admit_retained_share_work_before_physical, try_open_publication_account,
 };
+#[cfg(feature = "_u4-activation")]
+use publication_contract::RetainedPublicationOpenDisposition;
 pub(super) use publication_contract::retained_publication_error_requires_containment;
 use publication_contract::{
     AssemblyContainmentProvenance, RetainedClosureValidationError, RetainedEvidenceClosureProof,
@@ -253,6 +257,49 @@ where
     last_validation_epoch: u64,
 }
 
+impl<O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
+    RetainedPublicationAssembly<O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+    D: Copy + Ord + fmt::Debug + Send + Sync + 'static,
+    F: Send + Sync + 'static,
+    CanonicalBlock: Send + Sync + 'static,
+    EvidenceBlock: Send + Sync + 'static,
+{
+    pub(crate) fn record_terminal_cause(&mut self, cause: PreparationFailureCode) {
+        match self.operation.as_mut() {
+            Some(operation) => operation.record_terminal_cause(cause),
+            None => self.containment = AssemblyContainmentProvenance::NewFaultPending,
+        }
+    }
+
+    fn into_fallback_only(
+        mut self,
+        cause: PreparationFailureCode,
+    ) -> RetainedFallbackOnly<O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock> {
+        self.record_terminal_cause(cause);
+        RetainedFallbackOnly {
+            assembly: self,
+            cause,
+            activation_containment_required: false,
+        }
+    }
+
+    fn into_closure_validation_fallback(
+        self,
+        cause: RetainedClosureValidationError,
+    ) -> RetainedFallbackOnly<O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock> {
+        let activation_containment_required = cause != RetainedClosureValidationError::Panicked;
+        let mut fallback =
+            self.into_fallback_only(PreparationFailureCode::from_closure_validation(cause));
+        fallback.activation_containment_required = activation_containment_required;
+        fallback
+    }
+}
+
 const FAILURE_TERMINAL_WORK_SEALED_CODE: u32 = 0x4654_5753;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -302,17 +349,22 @@ impl<O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
     RetainedFailureAssembly<O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
 where
     O: OperationOwner,
-    P: Copy + Ord,
+    P: TerminalEvidenceKey,
     PP: ProgressPhase,
     U: ProgressUnit,
-    D: Copy + Ord + fmt::Debug + Send + Sync + 'static,
+    D: TerminalEvidenceKey + fmt::Debug,
     F: Send + Sync + 'static,
     CanonicalBlock: Send + Sync + 'static,
     EvidenceBlock: Send + Sync + 'static,
 {
     pub(crate) fn with_fallback_cause(mut self, cause: PreparationFailureCode) -> Self {
+        self.assembly.record_terminal_cause(cause);
         self.fallback_cause = cause;
         self
+    }
+
+    pub(crate) fn reject_failure_terminal_work_envelope(&mut self, code: u32) {
+        self.assembly.reject_failure_terminal_work_envelope(code);
     }
 }
 
@@ -348,6 +400,7 @@ where
 {
     assembly: RetainedPublicationAssembly<O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>,
     cause: PreparationFailureCode,
+    activation_containment_required: bool,
 }
 
 /// Linear result of validating a success candidate.
@@ -386,6 +439,95 @@ where
     FallbackOnly(RetainedFallbackOnly<O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>),
 }
 
+#[cfg(feature = "_u4-activation")]
+#[allow(clippy::result_large_err)]
+impl<O, P, PP, U, D, F> RetainedOperation<O, P, PP, U, D, F>
+where
+    O: OperationOwner,
+    P: TerminalEvidenceKey,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+    D: TerminalEvidenceKey + fmt::Debug,
+    F: Send + Sync + 'static,
+{
+    /// Quarantines a dormant operation while preserving its account-owned containment evidence.
+    ///
+    /// This is reserved for activation-contract faults and fail-closed publication opens. The
+    /// coordinator and attribution state are deliberately retained after the physical baseline is
+    /// detached, so no uncertain charge can be released as if rollback had been proved.
+    pub(crate) fn contain_activation_fault(mut self) -> FinalizationContainmentError {
+        let reason = self
+            .baseline
+            .first_account()
+            .map(PhysicalStorageAccount::snapshot)
+            .filter(|snapshot| snapshot.poisoned())
+            .and_then(|snapshot| snapshot.first_poison_evidence())
+            .map_or(
+                AccountPoisonReason::OwnershipGraphUnverified,
+                AccountPoisonEvidence::reason,
+            );
+        let already_poisoned = self
+            .baseline
+            .first_account()
+            .map(PhysicalStorageAccount::snapshot)
+            .is_some_and(|snapshot| snapshot.poisoned());
+        if !already_poisoned {
+            let account = match self.baseline.first_account() {
+                Some(account) => account,
+                None => unreachable_final_owner_state(),
+            };
+            let _ = account.record_poison(reason);
+        }
+        self.baseline.record_forgotten_physical_edges();
+        let snapshot = match self.baseline.first_account() {
+            Some(account) => account.snapshot(),
+            None => unreachable_final_owner_state(),
+        };
+        let cause = FinalizationContainmentError::new(AccountPoisoned::new(snapshot), reason);
+        self.baseline.fail_closed_after_recorded_poison();
+        std::mem::forget(self);
+        cause
+    }
+}
+
+#[cfg(feature = "_u4-activation")]
+impl<O, P, PP, U, D, F> RetainedPublicationOpenError<RetainedOperation<O, P, PP, U, D, F>, D>
+where
+    O: OperationOwner,
+    P: TerminalEvidenceKey,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+    D: TerminalEvidenceKey + fmt::Debug,
+    F: Send + Sync + 'static,
+{
+    /// Returns only rollback-proved recovery authority; fail-closed owners are quarantined here.
+    pub(crate) fn into_activation_recovery(
+        self,
+    ) -> RetainedActivationRecoveryResult<RetainedOperation<O, P, PP, U, D, F>> {
+        match self.disposition {
+            RetainedPublicationOpenDisposition::Retry => {
+                Ok(RetainedPublicationOpenRecovery::Retry(self.operation))
+            }
+            RetainedPublicationOpenDisposition::FallbackOnly => Ok(
+                RetainedPublicationOpenRecovery::FallbackOnly(self.operation),
+            ),
+            RetainedPublicationOpenDisposition::FailClosed => {
+                Err(self.operation.contain_activation_fault())
+            }
+        }
+    }
+}
+
+#[cfg(feature = "_u4-activation")]
+type RetainedActivationRecoveryResult<T> =
+    Result<RetainedPublicationOpenRecovery<T>, FinalizationContainmentError>;
+
+#[cfg(feature = "_u4-activation")]
+type RetainedFailureAssemblyResult<O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock> = Result<
+    RetainedFailureAssembly<O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>,
+    FinalizationContainmentError,
+>;
+
 #[allow(clippy::result_large_err)]
 impl<O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
     RetainedPublicationAssembly<O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
@@ -399,6 +541,135 @@ where
     CanonicalBlock: Send + Sync + 'static,
     EvidenceBlock: Send + Sync + 'static,
 {
+    #[cfg(feature = "_u4-activation")]
+    pub(crate) fn contain_activation_fault(mut self) -> FinalizationContainmentError {
+        let recorded = self
+            .first_containment_account()
+            .map(PhysicalStorageAccount::snapshot)
+            .filter(|snapshot| snapshot.poisoned());
+        match recorded {
+            Some(snapshot) => {
+                self.contain_after_recorded_poison(snapshot.first_poison_evidence().map_or(
+                    AccountPoisonReason::OwnershipGraphUnverified,
+                    AccountPoisonEvidence::reason,
+                ))
+            }
+            None => self.poison_and_fail_closed(AccountPoisonReason::OwnershipGraphUnverified),
+        }
+    }
+
+    /// Consumes a success-capable assembly and eagerly removes every canonical physical owner.
+    ///
+    /// Storage is released before its attribution batch. Only a verified evidence-only graph can
+    /// be returned; any uncertain release poisons the account and retains all remaining authority
+    /// fail-closed.
+    #[cfg(feature = "_u4-activation")]
+    pub(crate) fn try_discard_canonical_for_rejection(
+        mut self,
+        fallback_cause: PreparationFailureCode,
+    ) -> RetainedFailureAssemblyResult<O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock> {
+        if self.mode != RetainedOutcomeMode::SuccessCapable || !self.has_exact_storage_graph() {
+            let cause = self.poison_and_fail_closed(AccountPoisonReason::OwnershipGraphUnverified);
+            return Err(cause);
+        }
+        self.record_terminal_cause(fallback_cause);
+        self.activate_failure_terminal_work();
+        if self.failure_terminal_work_state == FailureTerminalWorkState::Failed {
+            let cause = self.poison_and_fail_closed(AccountPoisonReason::OwnershipGraphUnverified);
+            return Err(cause);
+        }
+        self.try_discard_canonical_ownership()?;
+
+        Ok(RetainedFailureAssembly {
+            assembly: self,
+            fallback_cause,
+        })
+    }
+
+    /// Converts an already-open evidence-only publication into its rooted-failure construction
+    /// state without ever creating canonical ownership.
+    #[cfg(feature = "_u4-activation")]
+    pub(crate) fn into_verified_failure_only(
+        mut self,
+        fallback_cause: PreparationFailureCode,
+    ) -> RetainedFailureAssemblyResult<O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock> {
+        if self.mode != RetainedOutcomeMode::FailureOnly
+            || !self.success_outcome_rejected
+            || !self.has_exact_storage_graph()
+            || !self.canonical_ownership_is_absent()
+        {
+            let cause = self.poison_and_fail_closed(AccountPoisonReason::OwnershipGraphUnverified);
+            return Err(cause);
+        }
+        self.record_terminal_cause(fallback_cause);
+        Ok(RetainedFailureAssembly {
+            assembly: self,
+            fallback_cause,
+        })
+    }
+
+    #[cfg(feature = "_u4-activation")]
+    fn try_discard_canonical_ownership(&mut self) -> Result<(), FinalizationContainmentError> {
+        if self.mode == RetainedOutcomeMode::FailureOnly && self.canonical_ownership_is_absent() {
+            return Ok(());
+        }
+        if self.mode != RetainedOutcomeMode::SuccessCapable || !self.has_exact_storage_graph() {
+            let cause = self.poison_and_fail_closed(AccountPoisonReason::OwnershipGraphUnverified);
+            return Err(cause);
+        }
+
+        let account = match self.account.as_ref() {
+            Some(account) => account,
+            None => {
+                let cause =
+                    self.poison_and_fail_closed(AccountPoisonReason::OwnershipGraphUnverified);
+                return Err(cause);
+            }
+        };
+        let canonical = match self.canonical_table.take() {
+            Some(canonical) => canonical,
+            None => {
+                let cause =
+                    self.poison_and_fail_closed(AccountPoisonReason::OwnershipGraphUnverified);
+                return Err(cause);
+            }
+        };
+        match drop_retained_table_with_account_anchor(canonical, account) {
+            RetainedStorageDropOutcome::Clean => {}
+            RetainedStorageDropOutcome::StorageReleaseUnverified(witness)
+            | RetainedStorageDropOutcome::ChargeReleaseUnverified(witness)
+            | RetainedStorageDropOutcome::StillSharedOwnershipFault(witness)
+            | RetainedStorageDropOutcome::ForeignOwnershipFault(witness) => {
+                let cause = self.contain_after_recorded_poison(witness.reason);
+                return Err(cause);
+            }
+            RetainedStorageDropOutcome::MissingFaultAnchor => {
+                let cause =
+                    self.poison_and_fail_closed(AccountPoisonReason::OwnershipGraphUnverified);
+                return Err(cause);
+            }
+        }
+        drop(self.canonical_batch.take());
+        self.canonical_plan = None;
+        self.mode = RetainedOutcomeMode::FailureOnly;
+        self.success_outcome_rejected = true;
+        if !self.has_exact_storage_graph() || !self.canonical_ownership_is_absent() {
+            let cause = self.poison_and_fail_closed(AccountPoisonReason::OwnershipGraphUnverified);
+            return Err(cause);
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "_u4-activation")]
+    fn canonical_ownership_is_absent(&self) -> bool {
+        self.canonical_plan.is_none()
+            && self.canonical_table.is_none()
+            && self.canonical_batch.is_none()
+            && self.canonical_len() == 0
+            && self.canonical_new_blocks() == 0
+            && self.canonical_commitment_len() == 0
+    }
+
     pub(crate) fn activate_failure_terminal_work(&mut self) {
         if self.success_outcome_rejected {
             return;
@@ -440,6 +711,15 @@ where
         } else {
             Ok(())
         }
+    }
+
+    pub(crate) fn reject_failure_terminal_work_envelope(&mut self, code: u32) {
+        if let Some(operation) = self.operation.as_mut() {
+            operation.record_product_graph_failure(code);
+        } else {
+            self.containment = AssemblyContainmentProvenance::NewFaultPending;
+        }
+        self.failure_terminal_work_state = FailureTerminalWorkState::Failed;
     }
 
     fn outcome_evidence_handle_share_work(
@@ -711,10 +991,7 @@ where
             let cause = self.terminal_cause_or(PreparationFailureCode::product_graph(
                 FAILURE_TERMINAL_WORK_SEALED_CODE,
             ));
-            return RetainedSuccessValidation::FallbackOnly(RetainedFallbackOnly {
-                assembly: self,
-                cause,
-            });
+            return RetainedSuccessValidation::FallbackOnly(self.into_fallback_only(cause));
         }
         if self.success_outcome_rejected {
             let fallback_cause = self.terminal_cause_or(PreparationFailureCode::requested());
@@ -737,10 +1014,9 @@ where
                     ),
                 })
             }
-            Err(cause) => RetainedSuccessValidation::FallbackOnly(RetainedFallbackOnly {
-                assembly: self,
-                cause: PreparationFailureCode::from_closure_validation(cause),
-            }),
+            Err(cause) => RetainedSuccessValidation::FallbackOnly(
+                self.into_closure_validation_fallback(cause),
+            ),
         }
     }
 
@@ -767,10 +1043,7 @@ where
             let cause = self.terminal_cause_or(PreparationFailureCode::product_graph(
                 FAILURE_TERMINAL_WORK_SEALED_CODE,
             ));
-            return RetainedSuccessValidation::FallbackOnly(RetainedFallbackOnly {
-                assembly: self,
-                cause,
-            });
+            return RetainedSuccessValidation::FallbackOnly(self.into_fallback_only(cause));
         }
         if self.success_outcome_rejected {
             let fallback_cause = self.terminal_cause_or(PreparationFailureCode::requested());
@@ -787,10 +1060,9 @@ where
             let epoch = match self.try_next_validation_epoch() {
                 Ok(epoch) => epoch,
                 Err(cause) => {
-                    return RetainedSuccessValidation::FallbackOnly(RetainedFallbackOnly {
-                        assembly: self,
-                        cause: PreparationFailureCode::from_closure_validation(cause),
-                    });
+                    return RetainedSuccessValidation::FallbackOnly(
+                        self.into_closure_validation_fallback(cause),
+                    );
                 }
             };
             let control = match self.operation.as_mut() {
@@ -843,12 +1115,9 @@ where
                             Err(payload) => {
                                 discard_untrusted_panic_payload(payload);
                                 return RetainedSuccessValidation::FallbackOnly(
-                                    RetainedFallbackOnly {
-                                        assembly: self,
-                                        cause: PreparationFailureCode::from_closure_validation(
-                                            RetainedClosureValidationError::Panicked,
-                                        ),
-                                    },
+                                    self.into_closure_validation_fallback(
+                                        RetainedClosureValidationError::Panicked,
+                                    ),
                                 );
                             }
                         };
@@ -887,10 +1156,9 @@ where
                     ),
                 })
             }
-            Err(cause) => RetainedSuccessValidation::FallbackOnly(RetainedFallbackOnly {
-                assembly: self,
-                cause: PreparationFailureCode::from_closure_validation(cause),
-            }),
+            Err(cause) => RetainedSuccessValidation::FallbackOnly(
+                self.into_closure_validation_fallback(cause),
+            ),
         }
     }
 
@@ -908,10 +1176,9 @@ where
     {
         self.activate_failure_terminal_work();
         if self.failure_terminal_work_state == FailureTerminalWorkState::Failed {
-            return RetainedFailureValidation::FallbackOnly(RetainedFallbackOnly {
-                assembly: self,
-                cause: PreparationFailureCode::product_graph(FAILURE_TERMINAL_WORK_SEALED_CODE),
-            });
+            return RetainedFailureValidation::FallbackOnly(self.into_fallback_only(
+                PreparationFailureCode::product_graph(FAILURE_TERMINAL_WORK_SEALED_CODE),
+            ));
         }
         match self.try_validate_rich_failure(evidence_root, validate) {
             Ok(proof) => RetainedFailureValidation::Valid(ValidatedRetainedFailure {
@@ -926,10 +1193,121 @@ where
                     ),
                 })
             }
-            Err(cause) => RetainedFailureValidation::FallbackOnly(RetainedFallbackOnly {
+            Err(cause) => RetainedFailureValidation::FallbackOnly(
+                self.into_closure_validation_fallback(cause),
+            ),
+        }
+    }
+
+    pub(crate) fn validate_rich_failure_controlled<EvidenceTag>(
+        mut self,
+        evidence_root: OutcomeEvidenceRetainedSlot<EvidenceBlock, EvidenceTag>,
+        validate: impl for<'session, 'control> FnOnce(
+            &mut RetainedEvidenceClosureSession<'session, EvidenceBlock>,
+            OutcomeEvidenceRetainedSlot<EvidenceBlock, EvidenceTag>,
+            RetainedFailureWorkControl<'control, O, P, PP, U, D>,
+        ) -> bool,
+    ) -> RetainedFailureValidation<O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
+    where
+        EvidenceTag: Copy + Send + Sync + 'static,
+    {
+        self.activate_failure_terminal_work();
+        if self.failure_terminal_work_state == FailureTerminalWorkState::Failed {
+            return RetainedFailureValidation::FallbackOnly(self.into_fallback_only(
+                PreparationFailureCode::product_graph(FAILURE_TERMINAL_WORK_SEALED_CODE),
+            ));
+        }
+        let validation = if self.containment != AssemblyContainmentProvenance::Healthy {
+            Err(RetainedClosureValidationError::Poisoned)
+        } else {
+            let epoch = match self.try_next_validation_epoch() {
+                Ok(epoch) => epoch,
+                Err(cause) => {
+                    return RetainedFailureValidation::FallbackOnly(
+                        self.into_closure_validation_fallback(cause),
+                    );
+                }
+            };
+            let work = self.failure_evidence_handle_share_work;
+            let control = match (self.operation.as_mut(), work) {
+                (Some(operation), Some(work)) => {
+                    Some(operation.split_failure_terminal_work_control(work).0)
+                }
+                _ => {
+                    self.containment = AssemblyContainmentProvenance::NewFaultPending;
+                    None
+                }
+            };
+            let parts = match (self.evidence_table.as_ref(), control) {
+                (Some(evidence), Some(control)) => Some((evidence.as_ref(), control, epoch)),
+                _ => {
+                    self.containment = AssemblyContainmentProvenance::NewFaultPending;
+                    None
+                }
+            };
+            match parts {
+                Some((evidence, control, epoch)) => {
+                    if evidence_root.identity.tag != TypeId::of::<EvidenceTag>()
+                        || evidence
+                            .member(evidence_root.identity, self.set_id)
+                            .is_none()
+                    {
+                        Err(RetainedClosureValidationError::InvalidRoot)
+                    } else {
+                        let mut session = RetainedEvidenceClosureSession {
+                            evidence,
+                            set_id: self.set_id,
+                            epoch,
+                            seen: 0,
+                            valid: true,
+                            not_send_or_sync: PhantomData,
+                        };
+                        let accepted = match catch_unwind(AssertUnwindSafe(|| {
+                            validate(&mut session, evidence_root, control)
+                        })) {
+                            Ok(accepted) => accepted,
+                            Err(payload) => {
+                                discard_untrusted_panic_payload(payload);
+                                return RetainedFailureValidation::FallbackOnly(
+                                    self.into_closure_validation_fallback(
+                                        RetainedClosureValidationError::Panicked,
+                                    ),
+                                );
+                            }
+                        };
+                        let exact =
+                            accepted && session.valid && session.seen == evidence.member_count();
+                        if exact {
+                            Ok(RetainedEvidenceClosureProof {
+                                set_id: self.set_id,
+                                evidence_count: evidence.member_count(),
+                                evidence_root: evidence_root.identity,
+                                marker: PhantomData,
+                            })
+                        } else {
+                            Err(RetainedClosureValidationError::Rejected)
+                        }
+                    }
+                }
+                None => Err(RetainedClosureValidationError::Poisoned),
+            }
+        };
+        match validation {
+            Ok(proof) => RetainedFailureValidation::Valid(ValidatedRetainedFailure {
                 assembly: self,
-                cause: PreparationFailureCode::from_closure_validation(cause),
+                proof,
             }),
+            Err(RetainedClosureValidationError::Rejected) => {
+                RetainedFailureValidation::Rejected(RetainedFailureAssembly {
+                    assembly: self,
+                    fallback_cause: PreparationFailureCode::from_closure_validation(
+                        RetainedClosureValidationError::Rejected,
+                    ),
+                })
+            }
+            Err(cause) => RetainedFailureValidation::FallbackOnly(
+                self.into_closure_validation_fallback(cause),
+            ),
         }
     }
 
@@ -1675,6 +2053,68 @@ where
         }
     }
 
+    pub(crate) fn try_retain_outcome_evidence_controlled<Tag>(
+        &mut self,
+        plan: RetainedAllocationPlan,
+        build: impl for<'placement, 'control> FnOnce(
+            BlockEmplacer<'placement, EvidenceBlock>,
+            RetainedFailureWorkControl<'control, O, P, PP, U, D>,
+        ) -> Result<
+            BlockPlacement<'placement, EvidenceBlock, Tag>,
+            RetainedBuildFailureCode,
+        >,
+    ) -> Result<OutcomeEvidenceRetainedSlot<EvidenceBlock, Tag>, RetainedPublicationError<D>>
+    where
+        Tag: Copy + Send + Sync + 'static,
+    {
+        if self.containment != AssemblyContainmentProvenance::Healthy {
+            return Err(RetainedPublicationError::Poisoned);
+        }
+        self.activate_failure_terminal_work_after_recorded_cause();
+        self.ensure_failure_terminal_work_available()?;
+        let protected_action = self.failure_terminal_work_state == FailureTerminalWorkState::Active;
+        let handle_share_work = self.outcome_evidence_handle_share_work()?;
+        let (control, ledger) = self
+            .operation
+            .as_mut()
+            .ok_or(RetainedPublicationError::Poisoned)?
+            .split_failure_terminal_work_control(handle_share_work);
+        let result = try_retain_block(
+            ledger,
+            self.account
+                .as_ref()
+                .ok_or(RetainedPublicationError::Poisoned)?,
+            handle_share_work,
+            self.evidence_plan.writer.phase,
+            self.evidence_plan.writer.attribution_dimension,
+            self.evidence_batch
+                .as_mut()
+                .ok_or(RetainedPublicationError::Poisoned)?,
+            self.evidence_table
+                .as_mut()
+                .ok_or(RetainedPublicationError::Poisoned)?,
+            self.set_id,
+            RetainedMembershipDestination::OutcomeEvidence,
+            RetainedPublicationError::OutcomeEvidenceSlotLimit,
+            RetainedBlockOrigin::New,
+            plan,
+            move |emplacer, _| build(emplacer, control),
+        );
+        match result {
+            Ok(identity) => Ok(OutcomeEvidenceRetainedSlot {
+                identity,
+                marker: PhantomData,
+            }),
+            Err(error) => {
+                self.observe_publication_error(&error);
+                if protected_action {
+                    self.seal_failure_terminal_work();
+                }
+                Err(error)
+            }
+        }
+    }
+
     /// Inherits one immutable outcome-evidence block from a published same-account aggregate.
     pub fn try_share_outcome_evidence<Tag>(
         &mut self,
@@ -1888,10 +2328,12 @@ where
                 }
                 let terminal_cause = match self.operation.as_mut() {
                     Some(operation) => {
-                        let sticky_cause = operation.sticky_terminal_cause();
                         let control_cause =
                             prepare_terminal_control(&mut operation.coordinator, final_progress);
-                        sticky_cause.or(control_cause)
+                        if let Some(cause) = control_cause {
+                            operation.record_terminal_cause(cause);
+                        }
+                        operation.sticky_terminal_cause()
                     }
                     None => {
                         let cause = self
@@ -1934,10 +2376,12 @@ where
                 }
                 let terminal_cause = match self.operation.as_mut() {
                     Some(operation) => {
-                        let sticky_cause = operation.sticky_terminal_cause();
                         let control_cause =
                             prepare_terminal_control(&mut operation.coordinator, final_progress);
-                        sticky_cause.or(control_cause)
+                        if let Some(cause) = control_cause {
+                            operation.record_terminal_cause(cause);
+                        }
+                        operation.sticky_terminal_cause()
                     }
                     None => {
                         let cause = self
@@ -1955,13 +2399,15 @@ where
             RetainedTerminalRequest::MinimalFallback { requested_cause } => {
                 let cause = match self.operation.as_mut() {
                     Some(operation) => {
-                        let sticky_cause = operation.sticky_terminal_cause();
                         let control_cause = operation
                             .coordinator
                             .poll()
                             .err()
                             .map(|cause| PreparationFailureCode::from_control(&cause));
-                        sticky_cause.or(control_cause).unwrap_or(requested_cause)
+                        if let Some(cause) = control_cause {
+                            operation.record_terminal_cause(cause);
+                        }
+                        operation.sticky_terminal_cause().unwrap_or(requested_cause)
                     }
                     None => {
                         let cause = self
@@ -2231,6 +2677,11 @@ where
     CanonicalBlock: Send + Sync + 'static,
     EvidenceBlock: Send + Sync + 'static,
 {
+    #[cfg(feature = "_u4-activation")]
+    pub(crate) fn contain_activation_fault(self) -> FinalizationContainmentError {
+        self.assembly.contain_activation_fault()
+    }
+
     /// Consumes a valid success proof after a later domain admission rejects the canonical result.
     ///
     /// Canonical ownership remains sealed and inaccessible until the existing rich-failure
@@ -2288,6 +2739,25 @@ where
     CanonicalBlock: Send + Sync + 'static,
     EvidenceBlock: Send + Sync + 'static,
 {
+    #[cfg(feature = "_u4-activation")]
+    pub(crate) fn try_discard_canonical_for_rejection(
+        mut self,
+    ) -> Result<Self, FinalizationContainmentError> {
+        self.assembly.try_discard_canonical_ownership()?;
+        Ok(self)
+    }
+
+    #[cfg(feature = "_u4-activation")]
+    pub(crate) fn contain_activation_fault(self) -> FinalizationContainmentError {
+        self.assembly.contain_activation_fault()
+    }
+
+    #[cfg(feature = "_u4-activation")]
+    pub(crate) fn canonical_ownership_is_absent(&self) -> bool {
+        self.assembly.mode == RetainedOutcomeMode::FailureOnly
+            && self.assembly.canonical_ownership_is_absent()
+    }
+
     pub fn outcome_evidence_len(&self) -> usize {
         self.assembly.outcome_evidence_len()
     }
@@ -2327,6 +2797,25 @@ where
         self.assembly.try_retain_outcome_evidence(plan, build)
     }
 
+    #[cfg(feature = "_u4-activation")]
+    pub(crate) fn try_retain_outcome_evidence_controlled<Tag>(
+        &mut self,
+        plan: RetainedAllocationPlan,
+        build: impl for<'placement, 'control> FnOnce(
+            BlockEmplacer<'placement, EvidenceBlock>,
+            RetainedFailureWorkControl<'control, O, P, PP, U, D>,
+        ) -> Result<
+            BlockPlacement<'placement, EvidenceBlock, Tag>,
+            RetainedBuildFailureCode,
+        >,
+    ) -> Result<OutcomeEvidenceRetainedSlot<EvidenceBlock, Tag>, RetainedPublicationError<D>>
+    where
+        Tag: Copy + Send + Sync + 'static,
+    {
+        self.assembly
+            .try_retain_outcome_evidence_controlled(plan, build)
+    }
+
     pub fn try_share_outcome_evidence<Tag>(
         &mut self,
         source: &PublishedOutcomeEvidenceAggregate<EvidenceBlock>,
@@ -2361,6 +2850,23 @@ where
         self.assembly.validate_rich_failure(evidence_root, validate)
     }
 
+    #[cfg(feature = "_u4-activation")]
+    pub(crate) fn validate_rich_failure_controlled<EvidenceTag>(
+        self,
+        evidence_root: OutcomeEvidenceRetainedSlot<EvidenceBlock, EvidenceTag>,
+        validate: impl for<'session, 'control> FnOnce(
+            &mut RetainedEvidenceClosureSession<'session, EvidenceBlock>,
+            OutcomeEvidenceRetainedSlot<EvidenceBlock, EvidenceTag>,
+            RetainedFailureWorkControl<'control, O, P, PP, U, D>,
+        ) -> bool,
+    ) -> RetainedFailureValidation<O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
+    where
+        EvidenceTag: Copy + Send + Sync + 'static,
+    {
+        self.assembly
+            .validate_rich_failure_controlled(evidence_root, validate)
+    }
+
     pub fn prepare_minimal_fallback(
         self,
     ) -> Result<
@@ -2386,6 +2892,11 @@ where
     CanonicalBlock: Send + Sync + 'static,
     EvidenceBlock: Send + Sync + 'static,
 {
+    #[cfg(feature = "_u4-activation")]
+    pub(crate) fn contain_activation_fault(self) -> FinalizationContainmentError {
+        self.assembly.contain_activation_fault()
+    }
+
     pub fn try_prepare(
         self,
         cause: PreparationFailureCode,
@@ -2434,6 +2945,16 @@ where
     CanonicalBlock: Send + Sync + 'static,
     EvidenceBlock: Send + Sync + 'static,
 {
+    #[cfg(feature = "_u4-activation")]
+    pub(crate) const fn activation_containment_required(&self) -> bool {
+        self.activation_containment_required
+    }
+
+    #[cfg(feature = "_u4-activation")]
+    pub(crate) fn contain_activation_fault(self) -> FinalizationContainmentError {
+        self.assembly.contain_activation_fault()
+    }
+
     /// Discards candidate tables and prepares only the pre-admitted terminal baseline.
     pub fn prepare_minimal_fallback(
         self,

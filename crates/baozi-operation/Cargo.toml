@@ -11,6 +11,7 @@ authors.workspace = true
 description.workspace = true
 
 [features]
+_u4-activation = []
 _u4c-collector = []
 
 [[test]]

@@ -11,9 +11,9 @@ use baozi_operation::{
     PublishedStoreSuccessParts, RecordPlan, RetainedStoreBatchLimits, RetainedStoreBlockTablePlan,
     RetainedStoreFailureTerminalWorkPlan, RetainedStoreOperation, RetainedStorePublicationPlan,
     RetainedStoreSharePlan, RetainedStoreStartError, RetainedStoreStartPlan,
-    RetainedStoreWriterPlan, SequencePlan, StoreBuildFailureClass, StoreDimensionKey,
-    StoreDimensionSemanticId, StoreFailureValidation, StoreFallbackEnvelope, StoreKeyDomain,
-    StoreLedgerEvidence, StoreLedgerPlan, StoreLedgerPlanError, StorePhaseKey,
+    RetainedStoreWriterPlan, SequencePlan, StoreBuildError, StoreBuildFailureClass,
+    StoreDimensionKey, StoreDimensionSemanticId, StoreFailureValidation, StoreFallbackEnvelope,
+    StoreKeyDomain, StoreLedgerEvidence, StoreLedgerPlan, StoreLedgerPlanError, StorePhaseKey,
     StorePhaseSemanticId, StorePreparationFailure, StorePreparationFailureClass, StorePrepareError,
     StoreRuntimeError, StoreSemanticCatalogId, StoreSuccessValidation, StoreTerminalCause,
     Utf8Plan,
@@ -25,6 +25,11 @@ impl OperationOwner for TestOwner {}
 
 const TEST_TERMINAL_ATTRIBUTION_SLOTS: usize = 32;
 const TEST_MAX_FAILURE_EVIDENCE_MEMBERS: usize = 5;
+const TEST_FAILURE_EVIDENCE_WORK_PER_MEMBER: u64 = 64;
+const TEST_FAILURE_EVIDENCE_CONSTRUCTION_WORK_LIMIT: u64 =
+    TEST_MAX_FAILURE_EVIDENCE_MEMBERS as u64 * TEST_FAILURE_EVIDENCE_WORK_PER_MEMBER;
+const TEST_FAILURE_EVIDENCE_VALIDATION_WORK_LIMIT: u64 =
+    TEST_MAX_FAILURE_EVIDENCE_MEMBERS as u64 * TEST_FAILURE_EVIDENCE_WORK_PER_MEMBER;
 
 #[derive(Default)]
 struct HashTranscript(Vec<u8>);
@@ -318,9 +323,11 @@ fn writer_plan(keys: TestKeys, attributions: usize, commitments: usize) -> Retai
 }
 
 fn unbounded_failure_terminal_work(keys: TestKeys) -> RetainedStoreFailureTerminalWorkPlan {
-    RetainedStoreFailureTerminalWorkPlan::new(
+    RetainedStoreFailureTerminalWorkPlan::with_evidence_work(
         keys.failure_terminal_dimension,
         TEST_MAX_FAILURE_EVIDENCE_MEMBERS,
+        TEST_FAILURE_EVIDENCE_CONSTRUCTION_WORK_LIMIT,
+        TEST_FAILURE_EVIDENCE_VALIDATION_WORK_LIMIT,
         u64::MAX,
         u64::MAX,
     )
@@ -345,6 +352,19 @@ fn operation_with_evidence_limit(
     operation_with_control_and_evidence_limit(account, OperationControl::default(), evidence_limit)
 }
 
+fn operation_with_commit_limit(
+    account: &PhysicalStorageAccount,
+    committed_limit: u64,
+) -> (TestOperation, TestKeys) {
+    operation_with_catalog_and_limits(
+        account,
+        OperationControl::default(),
+        test_catalog(),
+        u64::MAX,
+        committed_limit,
+    )
+}
+
 fn operation_with_control_and_evidence_limit(
     account: &PhysicalStorageAccount,
     control: OperationControl<TestProgress, TestUnit>,
@@ -359,10 +379,22 @@ fn operation_with_catalog_and_evidence_limit(
     catalog: StoreSemanticCatalogId,
     evidence_limit: u64,
 ) -> (TestOperation, TestKeys) {
+    operation_with_catalog_and_limits(account, control, catalog, evidence_limit, u64::MAX)
+}
+
+fn operation_with_catalog_and_limits(
+    account: &PhysicalStorageAccount,
+    control: OperationControl<TestProgress, TestUnit>,
+    catalog: StoreSemanticCatalogId,
+    evidence_limit: u64,
+    committed_limit: u64,
+) -> (TestOperation, TestKeys) {
     let TestVocabulary { domain, keys } = test_vocabulary_for(catalog);
-    let failure_terminal_work = RetainedStoreFailureTerminalWorkPlan::new(
+    let failure_terminal_work = RetainedStoreFailureTerminalWorkPlan::with_evidence_work(
         keys.failure_terminal_dimension,
         TEST_MAX_FAILURE_EVIDENCE_MEMBERS,
+        TEST_FAILURE_EVIDENCE_CONSTRUCTION_WORK_LIMIT,
+        TEST_FAILURE_EVIDENCE_VALIDATION_WORK_LIMIT,
         u64::MAX,
         u64::MAX,
     )
@@ -370,7 +402,7 @@ fn operation_with_catalog_and_evidence_limit(
     let policy = DimensionPolicy::reservable_bytes(
         failure_terminal_work.ordinary_attempted_work_limit(),
         failure_terminal_work.ordinary_consumed_work_limit(),
-        u64::MAX,
+        committed_limit,
         u64::MAX,
     )
     .with_published_outcome_evidence_limit(evidence_limit);
@@ -590,6 +622,9 @@ fn publish_sequence_source(account: &PhysicalStorageAccount) -> PublishedSource 
     }
 }
 
+#[cfg(feature = "_u4-activation")]
+#[path = "concrete_store/activation.rs"]
+mod activation;
 #[path = "concrete_store/construction.rs"]
 mod construction;
 #[path = "concrete_store/domain.rs"]

@@ -136,7 +136,7 @@ impl PreparationFailureCode {
         }
     }
 
-    pub(super) const fn product_graph(code: u32) -> Self {
+    pub(crate) const fn product_graph(code: u32) -> Self {
         Self {
             class: PreparationFailureClass::ProductGraph,
             code,

@@ -1,5 +1,11 @@
 use super::*;
 
+#[cfg(feature = "_u4-activation")]
+use super::activation::{
+    CanonicalActivationOutcome, CanonicalMaterialization, FailureEvidenceDecision,
+    FailureEvidenceOutcome,
+};
+
 use std::num::{NonZeroU32, NonZeroU64};
 
 use crate::ledger::LedgerLimits;
@@ -136,6 +142,55 @@ fn test_account(factory: &PhysicalStorageAccountFactory) -> PhysicalStorageAccou
             PhysicalStorageAccountLimits::new(u64::MAX, 256).expect("test account limits"),
         )
         .expect("test account")
+}
+
+#[cfg(feature = "_u4-activation")]
+#[test]
+fn activation_rich_failure_open_recovery_upgrades_the_requested_cause() {
+    let factory = test_factory();
+    let account = test_account(&factory);
+    let (operation, keys) = test_operation(&account, u64::MAX);
+    let evidence_plan = RetainedStoreBlockTablePlan::new(test_writer_plan(keys, 2, 2), 1, 1)
+        .expect("activation evidence plan");
+    let outcome = operation
+        .into_session_outcome_owner(evidence_plan)
+        .plan_and_activate(
+            |preflight| preflight.reject((), 77),
+            |_lane| -> CanonicalMaterialization<(), ()> {
+                unreachable!("preflight rejection cannot materialize canonical storage")
+            },
+        )
+        .expect("preflight rejection remains a recoverable activation outcome");
+    let rejected = match outcome {
+        CanonicalActivationOutcome::NeverActivated(rejected) => rejected,
+        CanonicalActivationOutcome::Activated(_)
+        | CanonicalActivationOutcome::Rejected(_)
+        | CanonicalActivationOutcome::Fallback(_) => {
+            panic!("preflight rejection must remain never activated")
+        }
+    };
+
+    fail_next_final_owner_allocation();
+    let outcome = rejected
+        .build_failure_evidence(|_lane| -> FailureEvidenceDecision<(), TestTag> {
+            unreachable!("recoverable publication-open failure must skip evidence building")
+        })
+        .expect("recoverable publication-open failure must retain minimal fallback authority");
+    let fallback = match outcome {
+        FailureEvidenceOutcome::MinimalFallback(fallback) => fallback,
+        FailureEvidenceOutcome::Rooted(_) => {
+            panic!("failed rich-failure open cannot return rooted evidence")
+        }
+    };
+    let (prepared, _cause) = fallback.into_parts();
+    let published = prepared.handoff();
+    let StoreTerminalCause::Failure(cause) = published.ledger_evidence.header().terminal_cause()
+    else {
+        panic!("minimal fallback must publish a failure cause")
+    };
+    assert_eq!(cause.class(), StorePreparationFailureClass::ProductGraph);
+    assert!(!account.snapshot().poisoned());
+    drop(published);
 }
 
 fn test_writer_plan(
@@ -423,6 +478,44 @@ fn failure_terminal_work_plan_owns_its_exact_counter_requirement() {
     assert_eq!(&independently_derived, requirement);
     assert_eq!(plan.ordinary_attempted_work_limit(), 4);
     assert_eq!(plan.ordinary_consumed_work_limit(), 4);
+}
+
+#[test]
+fn failure_terminal_work_counts_members_construction_and_validation_independently() {
+    let (_domain, keys) = test_vocabulary();
+    let plan = RetainedStoreFailureTerminalWorkPlan::with_evidence_work(
+        keys.failure_terminal_dimension,
+        2,
+        3,
+        5,
+        20,
+        20,
+    )
+    .expect("bounded failure-evidence work plan");
+
+    assert_eq!(plan.requirement().attempted_work_limit(), 16);
+    assert_eq!(plan.requirement().consumed_work_limit(), 16);
+    assert_eq!(plan.ordinary_attempted_work_limit(), 4);
+    assert_eq!(plan.ordinary_consumed_work_limit(), 4);
+    let independently_derived =
+        RetainedStoreFailureTerminalWorkPlan::requirement_for_evidence_work(2, 3, 5)
+            .expect("independently derived evidence-work requirement");
+    assert_eq!(&independently_derived, plan.requirement());
+    assert_eq!(
+        RetainedStoreFailureTerminalWorkPlan::with_evidence_work(
+            keys.failure_terminal_dimension,
+            2,
+            3,
+            5,
+            15,
+            16,
+        ),
+        Err(StorePlanError::InvalidFailureTerminalWork)
+    );
+    assert_eq!(
+        RetainedStoreFailureTerminalWorkPlan::requirement_for_evidence_work(1, u64::MAX, 1,),
+        Err(StorePlanError::InvalidFailureTerminalWork)
+    );
 }
 
 #[test]
@@ -2319,6 +2412,48 @@ fn controlled_utf8_maps_cancellation_like_controlled_sequences() {
         ),
         Err(StoreRuntimeError::SuccessOutcomeRejected)
     ));
+}
+
+#[test]
+fn controlled_work_stops_after_the_first_fault_without_charging_more_work() {
+    let factory = test_factory();
+    let account = test_account(&factory);
+    let cancellation = crate::CancellationToken::new();
+    let (operation, keys) = test_operation_with_control_and_work_limits(
+        &account,
+        16,
+        OperationControl::default().with_cancellation(cancellation.clone()),
+        u64::MAX,
+        u64::MAX,
+    );
+    let mut assembly = operation
+        .try_publication_assembly(test_publication_plan(keys, 1, 1))
+        .expect("first-fault assembly");
+    let ledger = assembly.raw.test_ledger_probe();
+    cancellation.cancel();
+
+    let error = assembly
+        .try_retain_canonical_sequence_controlled(
+            SequencePlan::<u8>::new(1).expect("sequence plan"),
+            keys.work_dimension,
+            TestTag,
+            |_writer, control| {
+                let first = control.poll().expect_err("cancellation must be observed");
+                let second = control
+                    .charge_observed(1)
+                    .expect_err("the first fault must stop later work charging");
+                assert_eq!(second.control_cause(), first.control_cause());
+                Err(first.into())
+            },
+        )
+        .expect_err("the controlled builder must preserve cancellation");
+
+    assert!(matches!(error, StoreRuntimeError::Control(_)));
+    let work = ledger
+        .dimension_evidence(keys.work_dimension)
+        .expect("work dimension evidence");
+    assert_eq!(work.attempted(), 0);
+    assert_eq!(work.consumed(), 0);
 }
 
 #[test]

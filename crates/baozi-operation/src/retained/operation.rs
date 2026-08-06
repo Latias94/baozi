@@ -6,9 +6,9 @@ use super::startup;
 use super::{
     AccountPoisonReason, AssemblyContainmentProvenance, CanonicalLineageAuthority,
     FailureTerminalWorkState, FallbackPublicationBaseline, PhysicalStorageAccount,
-    PreparationFailureCode, PreparedRetainedPublication, PrimaryPublicationBatches,
-    PublishedCanonicalAggregate, QualifiedRetainedBlockTablePlan, RetainedAllocationError,
-    RetainedAllocationPlan, RetainedBatchLimits, RetainedBuildFailureCode,
+    PreparationFailureClass, PreparationFailureCode, PreparedRetainedPublication,
+    PrimaryPublicationBatches, PublishedCanonicalAggregate, QualifiedRetainedBlockTablePlan,
+    RetainedAllocationError, RetainedAllocationPlan, RetainedBatchLimits, RetainedBuildFailureCode,
     RetainedFailureTerminalWorkPlan, RetainedHandleSharePlan, RetainedMembershipDestination,
     RetainedOperationStartError, RetainedOperationStartPlan, RetainedOutcomeMode,
     RetainedPublicationAssembly, RetainedPublicationOpenError, RetainedPublicationPlan,
@@ -72,6 +72,29 @@ where
 struct FailureTerminalWorkCapability<D> {
     handle_share_work: RetainedHandleSharePlan<D>,
     max_evidence_members: usize,
+    construction_work_limit: u64,
+    validation_work_limit: u64,
+}
+
+/// Records the first trusted terminal cause while keeping a requested cause provisional.
+///
+/// A requested semantic cause remains authoritative only until the operation observes its first
+/// trusted runtime failure. Once Control, ProductGraph, or Ledger is recorded, later causes cannot
+/// replace it.
+fn record_terminal_cause_with_precedence(
+    slot: &mut Option<PreparationFailureCode>,
+    cause: PreparationFailureCode,
+) {
+    match *slot {
+        None => *slot = Some(cause),
+        Some(existing)
+            if existing.class() == PreparationFailureClass::Requested
+                && cause.class() != PreparationFailureClass::Requested =>
+        {
+            *slot = Some(cause);
+        }
+        Some(_) => {}
+    }
 }
 
 impl<D: Copy> FailureTerminalWorkCapability<D> {
@@ -79,6 +102,34 @@ impl<D: Copy> FailureTerminalWorkCapability<D> {
         Self {
             handle_share_work: plan.share_work(),
             max_evidence_members: plan.max_evidence_members(),
+            construction_work_limit: plan.construction_work_limit(),
+            validation_work_limit: plan.validation_work_limit(),
+        }
+    }
+}
+
+impl<O, P, PP, U, D, F> RetainedOperation<O, P, PP, U, D, F>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+    D: Copy + Ord + fmt::Debug,
+    F: Send + Sync + 'static,
+{
+    pub(crate) fn record_terminal_cause(&mut self, cause: PreparationFailureCode) {
+        record_terminal_cause_with_precedence(&mut self.sticky_terminal_cause, cause);
+    }
+
+    #[cfg(feature = "_u4-activation")]
+    pub(crate) fn poll_terminal_control(&mut self) {
+        let cause = self
+            .coordinator
+            .poll()
+            .err()
+            .map(|cause| PreparationFailureCode::from_control(&cause));
+        if let Some(cause) = cause {
+            self.record_terminal_cause(cause);
         }
     }
 }
@@ -120,6 +171,24 @@ where
     sticky_terminal_cause: &'a mut Option<PreparationFailureCode>,
 }
 
+/// Poll-and-work authority bound to the protected failure-terminal dimension.
+///
+/// Only the retained failure path can construct this capability. The protected dimension never
+/// appears in an ordinary checkpoint or caller-selected work control.
+pub(crate) struct RetainedFailureWorkControl<'a, O, P, PP, U, D>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+    D: Copy + Ord + fmt::Debug,
+{
+    poll: OperationPollCheckpoint<'a, PP, U>,
+    ledger: &'a crate::ledger::Ledger<O, P, D>,
+    dimension: D,
+    sticky_terminal_cause: &'a mut Option<PreparationFailureCode>,
+}
+
 impl<O, P, PP, U, D> RetainedWorkControl<'_, O, P, PP, U, D>
 where
     O: OperationOwner,
@@ -130,8 +199,10 @@ where
 {
     pub(crate) fn poll(&mut self) -> Result<(), ControlCause> {
         self.poll.poll().inspect_err(|cause| {
-            self.sticky_terminal_cause
-                .get_or_insert_with(|| PreparationFailureCode::from_control(cause));
+            record_terminal_cause_with_precedence(
+                self.sticky_terminal_cause,
+                PreparationFailureCode::from_control(cause),
+            );
         })
     }
 
@@ -145,9 +216,47 @@ where
                 .charge_observed_batch(&[(self.dimension, amount)])
         };
         result.inspect_err(|_| {
-            self.sticky_terminal_cause
-                .get_or_insert_with(PreparationFailureCode::ledger);
+            record_terminal_cause_with_precedence(
+                self.sticky_terminal_cause,
+                PreparationFailureCode::ledger(),
+            );
         })
+    }
+}
+
+impl<O, P, PP, U, D> RetainedFailureWorkControl<'_, O, P, PP, U, D>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+    D: Copy + Ord + fmt::Debug,
+{
+    pub(crate) fn poll(&mut self) -> Result<(), ControlCause> {
+        self.poll.poll().inspect_err(|cause| {
+            record_terminal_cause_with_precedence(
+                self.sticky_terminal_cause,
+                PreparationFailureCode::from_control(cause),
+            );
+        })
+    }
+
+    pub(crate) fn charge_observed(&mut self, amount: u64) -> Result<(), LedgerCause<D>> {
+        self.ledger
+            .charge_observed_batch(&[(self.dimension, amount)])
+            .inspect_err(|_| {
+                record_terminal_cause_with_precedence(
+                    self.sticky_terminal_cause,
+                    PreparationFailureCode::ledger(),
+                );
+            })
+    }
+
+    pub(crate) fn record_product_graph_failure(&mut self, code: u32) {
+        record_terminal_cause_with_precedence(
+            self.sticky_terminal_cause,
+            PreparationFailureCode::product_graph(code),
+        );
     }
 }
 
@@ -161,8 +270,10 @@ where
 {
     pub(crate) fn poll(&mut self) -> Result<(), ControlCause> {
         self.poll.poll().inspect_err(|cause| {
-            self.sticky_terminal_cause
-                .get_or_insert_with(|| PreparationFailureCode::from_control(cause));
+            record_terminal_cause_with_precedence(
+                self.sticky_terminal_cause,
+                PreparationFailureCode::from_control(cause),
+            );
         })
     }
 
@@ -184,8 +295,10 @@ where
         self.ledger
             .charge_observed_batch(&[(dimension, amount)])
             .inspect_err(|_| {
-                self.sticky_terminal_cause
-                    .get_or_insert_with(PreparationFailureCode::ledger);
+                record_terminal_cause_with_precedence(
+                    self.sticky_terminal_cause,
+                    PreparationFailureCode::ledger(),
+                );
             })
     }
 
@@ -199,8 +312,10 @@ where
         self.ledger
             .reserve(phase, dimension, bytes)
             .inspect_err(|_| {
-                self.sticky_terminal_cause
-                    .get_or_insert_with(PreparationFailureCode::ledger);
+                record_terminal_cause_with_precedence(
+                    self.sticky_terminal_cause,
+                    PreparationFailureCode::ledger(),
+                );
             })
     }
 
@@ -212,8 +327,10 @@ where
         self.ledger
             .resize_reservation(reservation, bytes)
             .inspect_err(|_| {
-                self.sticky_terminal_cause
-                    .get_or_insert_with(PreparationFailureCode::ledger);
+                record_terminal_cause_with_precedence(
+                    self.sticky_terminal_cause,
+                    PreparationFailureCode::ledger(),
+                );
             })
     }
 
@@ -228,8 +345,10 @@ where
         self.ledger
             .transition_reservation(reservation, phase, dimension, bytes)
             .inspect_err(|_| {
-                self.sticky_terminal_cause
-                    .get_or_insert_with(PreparationFailureCode::ledger);
+                record_terminal_cause_with_precedence(
+                    self.sticky_terminal_cause,
+                    PreparationFailureCode::ledger(),
+                );
             })
     }
 
@@ -240,8 +359,10 @@ where
         self.ledger
             .validate_live_reservation(reservation)
             .inspect_err(|_| {
-                self.sticky_terminal_cause
-                    .get_or_insert_with(PreparationFailureCode::ledger);
+                record_terminal_cause_with_precedence(
+                    self.sticky_terminal_cause,
+                    PreparationFailureCode::ledger(),
+                );
             })
     }
 
@@ -249,8 +370,10 @@ where
         if self.contains_dimension(dimension) {
             Ok(())
         } else {
-            self.sticky_terminal_cause
-                .get_or_insert_with(PreparationFailureCode::ledger);
+            record_terminal_cause_with_precedence(
+                self.sticky_terminal_cause,
+                PreparationFailureCode::ledger(),
+            );
             Err(LedgerCause::UnknownDimension { dimension })
         }
     }
@@ -626,18 +749,54 @@ where
             .map(|capability| capability.handle_share_work)
     }
 
+    pub(crate) fn failure_terminal_work_limits(&self) -> Option<(usize, u64, u64)> {
+        self.failure_terminal_work.as_ref().map(|capability| {
+            (
+                capability.max_evidence_members,
+                capability.construction_work_limit,
+                capability.validation_work_limit,
+            )
+        })
+    }
+
+    pub(super) fn split_failure_terminal_work_control(
+        &mut self,
+        work: RetainedHandleSharePlan<D>,
+    ) -> (
+        RetainedFailureWorkControl<'_, O, P, PP, U, D>,
+        &crate::ledger::Ledger<O, P, D>,
+    ) {
+        let [(dimension, _), (paired_dimension, _)] = work.charges();
+        if dimension != paired_dimension {
+            self.record_product_graph_failure(0x4657_444d);
+        }
+        let Self {
+            coordinator,
+            sticky_terminal_cause,
+            ..
+        } = self;
+        let (poll, ledger) = coordinator.split_poll_checkpoint_and_retained_ledger();
+        (
+            RetainedFailureWorkControl {
+                poll,
+                ledger,
+                dimension,
+                sticky_terminal_cause,
+            },
+            ledger,
+        )
+    }
+
     pub(super) const fn sticky_terminal_cause(&self) -> Option<PreparationFailureCode> {
         self.sticky_terminal_cause
     }
 
     pub(super) fn record_ledger_failure(&mut self) {
-        self.sticky_terminal_cause
-            .get_or_insert_with(PreparationFailureCode::ledger);
+        self.record_terminal_cause(PreparationFailureCode::ledger());
     }
 
     pub(super) fn record_product_graph_failure(&mut self, code: u32) {
-        self.sticky_terminal_cause
-            .get_or_insert_with(|| PreparationFailureCode::product_graph(code));
+        self.record_terminal_cause(PreparationFailureCode::product_graph(code));
     }
 
     pub(super) const fn has_failure_terminal_work_configuration(&self) -> bool {

@@ -159,6 +159,9 @@ use validation::{
     publication_error_requires_containment,
 };
 
+#[cfg(feature = "_u4-activation")]
+#[doc(hidden)]
+pub mod activation;
 mod batch;
 mod terminal_output;
 mod transcript;
@@ -1878,12 +1881,18 @@ where
 {
     /// Polls cancellation and deadline state.
     pub fn poll(&mut self) -> Result<(), StoreWorkError> {
+        if let Some(cause) = self.sticky.clone() {
+            return Err(cause);
+        }
         let result = self.raw.poll().map_err(StoreWorkError::control);
         self.preserve(result)
     }
 
     /// Records attempted-and-consumed work against the prebound dimension.
     pub fn charge_observed(&mut self, amount: u64) -> Result<(), StoreWorkError> {
+        if let Some(cause) = self.sticky.clone() {
+            return Err(cause);
+        }
         let result = self
             .raw
             .charge_observed(amount)
@@ -2052,6 +2061,11 @@ where
     PP: ProgressPhase,
     U: ProgressUnit,
 {
+    #[cfg(feature = "_u4-activation")]
+    fn latch_activation_terminal_cause(&mut self, cause: PreparationFailureCode) {
+        self.raw.record_terminal_cause(cause);
+    }
+
     /// Borrows the producer-facing control and budget checkpoint.
     pub fn control_checkpoint(&mut self) -> RetainedStoreControlCheckpoint<'_, O, PP, U> {
         let Self {
@@ -2717,6 +2731,23 @@ where
 
     fn is_fallback_only(&self) -> bool {
         self.fallback_cause.is_some()
+    }
+
+    #[cfg(feature = "_u4-activation")]
+    fn contain_activation_fault(self) -> FinalizationContainmentError {
+        let Self {
+            raw,
+            fallback_cause: _,
+            success_rejection: _,
+            domain: _,
+            lineage: _,
+        } = self;
+        raw.contain_activation_fault()
+    }
+
+    #[cfg(feature = "_u4-activation")]
+    fn latch_activation_terminal_cause(&mut self, cause: PreparationFailureCode) {
+        self.raw.record_terminal_cause(cause);
     }
 
     fn ensure_writable(&self) -> Result<(), StoreRuntimeError> {
@@ -4203,6 +4234,11 @@ where
     PP: ProgressPhase,
     U: ProgressUnit,
 {
+    #[cfg(feature = "_u4-activation")]
+    pub(super) fn contain_activation_fault(self) -> FinalizationContainmentError {
+        self.raw.contain_activation_fault()
+    }
+
     /// Consumes a validated success after a later domain admission rejects canonical publication.
     ///
     /// The evidence root is preserved for bounded detail appends and rich-failure revalidation.
@@ -4274,6 +4310,27 @@ where
     PP: ProgressPhase,
     U: ProgressUnit,
 {
+    #[cfg(feature = "_u4-activation")]
+    pub(super) fn with_forced_cause(mut self, cause: PreparationFailureCode) -> Self {
+        self.raw = self.raw.with_fallback_cause(cause);
+        self.forced_cause = Some(cause);
+        self
+    }
+
+    #[cfg(feature = "_u4-activation")]
+    pub(super) fn try_discard_canonical_for_activation(
+        mut self,
+    ) -> Result<Self, FinalizationContainmentError> {
+        self.raw = self.raw.try_discard_canonical_for_rejection()?;
+        debug_assert!(self.raw.canonical_ownership_is_absent());
+        Ok(self)
+    }
+
+    #[cfg(feature = "_u4-activation")]
+    pub(super) fn contain_activation_fault(self) -> FinalizationContainmentError {
+        self.raw.contain_activation_fault()
+    }
+
     /// Returns the evidence root preserved across semantic or admission downgrade.
     pub const fn evidence_root(
         &self,
@@ -4493,6 +4550,50 @@ where
         )
     }
 
+    #[cfg(feature = "_u4-activation")]
+    pub(super) fn validate_rich_failure_controlled<EvidenceKind, EvidenceTag>(
+        self,
+        evidence_root: OutcomeEvidenceStoreRef<EvidenceKind, EvidenceTag>,
+        validate: impl for<'session, 'storage, 'control> FnOnce(
+            &mut StoreEvidenceValidationSession<'session, 'storage>,
+            OutcomeEvidenceStoreRef<EvidenceKind, EvidenceTag>,
+            crate::retained::RetainedFailureWorkControl<
+                'control,
+                O,
+                StorePhaseKey,
+                PP,
+                U,
+                StoreDimensionKey,
+            >,
+        ) -> bool,
+    ) -> StoreFailureValidation<O, PP, U, EvidenceKind, EvidenceTag>
+    where
+        EvidenceTag: Copy + Send + Sync + 'static,
+    {
+        let Self {
+            raw,
+            fallback_only,
+            forced_cause,
+            evidence_root: _,
+            domain,
+        } = self;
+        if fallback_only {
+            return StoreFailureValidation::FallbackOnly(StoreFallbackOnly {
+                state: StoreFallbackState::FailureAssembly(raw),
+                domain,
+            });
+        }
+        map_failure_validation(
+            raw.validate_rich_failure_controlled(evidence_root.raw, |raw, _, control| {
+                let mut session = StoreEvidenceValidationSession { raw };
+                validate(&mut session, evidence_root, control)
+            }),
+            evidence_root,
+            domain,
+            forced_cause,
+        )
+    }
+
     /// Discards failure details and prepares only minimal fallback.
     pub fn prepare_minimal_fallback(self) -> Result<PreparedStoreFallback, StorePrepareError> {
         self.prepare_minimal_fallback_with(0)
@@ -4606,6 +4707,11 @@ where
     PP: ProgressPhase,
     U: ProgressUnit,
 {
+    #[cfg(feature = "_u4-activation")]
+    pub(super) fn contain_activation_fault(self) -> FinalizationContainmentError {
+        self.raw.contain_activation_fault()
+    }
+
     /// Freezes rich-failure evidence and its terminal cause.
     ///
     /// A verified control, ledger, or admission-downgrade cause carried by this linear owner takes
@@ -4682,6 +4788,23 @@ where
     PP: ProgressPhase,
     U: ProgressUnit,
 {
+    #[cfg(feature = "_u4-activation")]
+    pub(super) fn activation_containment_required(&self) -> bool {
+        match &self.state {
+            StoreFallbackState::Validated(raw) => raw.activation_containment_required(),
+            StoreFallbackState::Assembly { .. } | StoreFallbackState::FailureAssembly(_) => false,
+        }
+    }
+
+    #[cfg(feature = "_u4-activation")]
+    pub(super) fn contain_activation_fault(self) -> FinalizationContainmentError {
+        match self.state {
+            StoreFallbackState::Assembly { raw, cause: _ } => raw.contain_activation_fault(),
+            StoreFallbackState::FailureAssembly(raw) => raw.contain_activation_fault(),
+            StoreFallbackState::Validated(raw) => raw.contain_activation_fault(),
+        }
+    }
+
     /// Discards every candidate table and prepares the assembly-independent fallback.
     pub fn prepare_minimal_fallback(self) -> Result<PreparedStoreFallback, StorePrepareError> {
         let domain = self.domain;

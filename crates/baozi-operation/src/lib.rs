@@ -73,6 +73,24 @@ pub use concrete_store::{
     Utf8BatchItem, Utf8BatchPlan, Utf8Block, Utf8Plan, Utf8Writer, ValidatedStoreFailure,
     ValidatedStoreSuccess, ValidatedTranscriptStoreSuccess,
 };
+
+/// Temporary internal seam for the U4 single-owner canonical activation cutover.
+///
+/// This module is intentionally excluded from the supported crate-root API. It is removed or
+/// privatized once core, import, formats, facade, snapshot, and fuzz use the same production path.
+#[cfg(feature = "_u4-activation")]
+#[doc(hidden)]
+pub mod __canonical_activation {
+    pub use crate::concrete_store::activation::{
+        CanonicalActivationOutcome, CanonicalCentralValidationOutcome,
+        CanonicalFailureTerminalWorkPlan, CanonicalMaterialization, CanonicalOutputIntent,
+        CanonicalPreflightDecision, CanonicalValidationDecision, FailureEvidenceBuildControl,
+        FailureEvidenceDecision, FailureEvidenceOutcome, FailureEvidenceValidationControl,
+        NeverActivatedStoreSession, OutcomeEvidenceDecision, RetainedStoreSessionOutcomeOwner,
+        RootedFailureValidation, StoreActivationContainment, StoreCanonicalRejection,
+        StoreNeverActivatedCause,
+    };
+}
 pub use control::{
     CancellationOrigin, CancellationSignal, CancellationToken, ControlCause, OperationControl,
     OperationPoll, ProgressDecision, ProgressDeliveryLimits, ProgressEvent, ProgressObserver,
