@@ -150,6 +150,8 @@ use triomphe::{Arc, UniqueArc};
 pub(crate) use operation::{
     RetainedControlCheckpoint, RetainedFailureWorkControl, RetainedOperation, RetainedWorkControl,
 };
+#[cfg(feature = "_u4-activation")]
+pub(crate) use operation::{RetainedFailureWorkPermit, RetainedFailureWorkStartError};
 #[cfg(test)]
 use operation_start::map_qualified_startup_batch_error;
 pub(crate) use operation_start::{

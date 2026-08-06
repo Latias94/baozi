@@ -37,7 +37,10 @@ use crate::ledger::{
 };
 use crate::{ControlCause, OperationControl, OperationOwner, ProgressPhase, ProgressUnit};
 use std::fmt;
+use std::num::NonZeroU64;
 use std::panic::{AssertUnwindSafe, catch_unwind};
+
+const FAILURE_WORK_PERMIT_ABANDONED_CODE: u32 = 0x4657_5041;
 
 /// Linear owner for one coordinator, one physical account, and its pre-admitted fallback.
 #[allow(
@@ -60,6 +63,7 @@ where
     terminal_account_share_work: RetainedHandleSharePlan<D>,
     failure_terminal_work: Option<FailureTerminalWorkCapability<D>>,
     failure_terminal_work_dimension: Option<D>,
+    failure_work_permit_outstanding: bool,
     sticky_terminal_cause: Option<PreparationFailureCode>,
     canonical_lineage: CanonicalLineageAuthority,
 }
@@ -186,7 +190,32 @@ where
     poll: OperationPollCheckpoint<'a, PP, U>,
     ledger: &'a crate::ledger::Ledger<O, P, D>,
     dimension: D,
+    permit_outstanding: &'a mut bool,
     sticky_terminal_cause: &'a mut Option<PreparationFailureCode>,
+}
+
+pub(crate) enum RetainedFailureWorkStartError<D> {
+    Control(ControlCause),
+    Ledger(LedgerCause<D>),
+    Outstanding,
+}
+
+/// Linear completion authority for one admitted protected failure-work action.
+///
+/// Creating the permit records attempted work. Only [`Self::complete`] records consumed work and
+/// clears the operation-owned outstanding latch. Dropping or forgetting the permit therefore
+/// preserves attempted-only evidence and prevents another protected action from starting.
+#[must_use = "the protected failure-work permit must be completed or remain attempted-only"]
+pub(crate) struct RetainedFailureWorkPermit<'a, O, P, PP, U, D>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+    D: Copy + Ord + fmt::Debug,
+{
+    control: Option<RetainedFailureWorkControl<'a, O, P, PP, U, D>>,
+    amount: NonZeroU64,
 }
 
 impl<O, P, PP, U, D> RetainedWorkControl<'_, O, P, PP, U, D>
@@ -224,7 +253,7 @@ where
     }
 }
 
-impl<O, P, PP, U, D> RetainedFailureWorkControl<'_, O, P, PP, U, D>
+impl<'a, O, P, PP, U, D> RetainedFailureWorkControl<'a, O, P, PP, U, D>
 where
     O: OperationOwner,
     P: Copy + Ord,
@@ -238,6 +267,31 @@ where
                 self.sticky_terminal_cause,
                 PreparationFailureCode::from_control(cause),
             );
+        })
+    }
+
+    pub(crate) fn try_begin(
+        mut self,
+        amount: NonZeroU64,
+    ) -> Result<RetainedFailureWorkPermit<'a, O, P, PP, U, D>, RetainedFailureWorkStartError<D>>
+    {
+        if *self.permit_outstanding {
+            self.record_product_graph_failure(FAILURE_WORK_PERMIT_ABANDONED_CODE);
+            return Err(RetainedFailureWorkStartError::Outstanding);
+        }
+        self.poll()
+            .map_err(RetainedFailureWorkStartError::Control)?;
+        if let Err(cause) = self.ledger.charge_attempted(self.dimension, amount.get()) {
+            record_terminal_cause_with_precedence(
+                self.sticky_terminal_cause,
+                PreparationFailureCode::ledger(),
+            );
+            return Err(RetainedFailureWorkStartError::Ledger(cause));
+        }
+        *self.permit_outstanding = true;
+        Ok(RetainedFailureWorkPermit {
+            control: Some(self),
+            amount,
         })
     }
 
@@ -257,6 +311,43 @@ where
             self.sticky_terminal_cause,
             PreparationFailureCode::product_graph(code),
         );
+    }
+}
+
+impl<'a, O, P, PP, U, D> RetainedFailureWorkPermit<'a, O, P, PP, U, D>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+    D: Copy + Ord + fmt::Debug,
+{
+    pub(crate) fn poll(&mut self) -> Result<(), ControlCause> {
+        self.control
+            .as_mut()
+            .expect("an incomplete failure-work permit retains its control")
+            .poll()
+    }
+
+    pub(crate) fn complete(
+        mut self,
+    ) -> Result<RetainedFailureWorkControl<'a, O, P, PP, U, D>, LedgerCause<D>> {
+        let control = self
+            .control
+            .take()
+            .expect("a failure-work permit completes at most once");
+        if let Err(cause) = control
+            .ledger
+            .charge_consumed(control.dimension, self.amount.get())
+        {
+            record_terminal_cause_with_precedence(
+                control.sticky_terminal_cause,
+                PreparationFailureCode::ledger(),
+            );
+            return Err(cause);
+        }
+        *control.permit_outstanding = false;
+        Ok(control)
     }
 }
 
@@ -734,6 +825,7 @@ where
             terminal_account_share_work: plan.terminal_account_share_work,
             failure_terminal_work,
             failure_terminal_work_dimension,
+            failure_work_permit_outstanding: false,
             sticky_terminal_cause: None,
             canonical_lineage,
         })
@@ -772,6 +864,7 @@ where
         }
         let Self {
             coordinator,
+            failure_work_permit_outstanding,
             sticky_terminal_cause,
             ..
         } = self;
@@ -781,6 +874,7 @@ where
                 poll,
                 ledger,
                 dimension,
+                permit_outstanding: failure_work_permit_outstanding,
                 sticky_terminal_cause,
             },
             ledger,
@@ -788,7 +882,20 @@ where
     }
 
     pub(super) const fn sticky_terminal_cause(&self) -> Option<PreparationFailureCode> {
-        self.sticky_terminal_cause
+        match (
+            self.sticky_terminal_cause,
+            self.failure_work_permit_outstanding,
+        ) {
+            (Some(cause), true) if matches!(cause.class(), PreparationFailureClass::Requested) => {
+                Some(PreparationFailureCode::product_graph(
+                    FAILURE_WORK_PERMIT_ABANDONED_CODE,
+                ))
+            }
+            (None, true) => Some(PreparationFailureCode::product_graph(
+                FAILURE_WORK_PERMIT_ABANDONED_CODE,
+            )),
+            (cause, _) => cause,
+        }
     }
 
     pub(super) fn record_ledger_failure(&mut self) {
@@ -855,7 +962,7 @@ where
         PreparedRetainedPublication<CanonicalBlock, EvidenceBlock, F, P, D>,
         RetainedPublicationPrepareError,
     > {
-        let cause = self.sticky_terminal_cause.unwrap_or(cause);
+        let cause = self.sticky_terminal_cause().unwrap_or(cause);
         let RetainedOperation {
             coordinator,
             baseline,

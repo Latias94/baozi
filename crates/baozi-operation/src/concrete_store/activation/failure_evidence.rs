@@ -46,13 +46,20 @@ where
     U: ProgressUnit,
 {
     fn try_start<'control>(
-        mut raw: RawFailureEvidenceWorkControl<'control, O, PP, U>,
+        raw: RawFailureEvidenceWorkControl<'control, O, PP, U>,
         construction_work: u64,
     ) -> Result<FailureEvidenceBuildControl<'control, O, PP, U>, StoreRuntimeError> {
-        raw.poll().map_err(StoreRuntimeError::Control)?;
-        raw.charge_observed(construction_work)
-            .map_err(StoreRuntimeError::Ledger)?;
-        Ok(FailureEvidenceBuildControl { raw, sticky: None })
+        let amount =
+            NonZeroU64::new(construction_work).ok_or_else(failure_work_envelope_exhausted)?;
+        let permit = raw.try_begin(amount).map_err(|cause| match cause {
+            RetainedFailureWorkStartError::Control(cause) => StoreRuntimeError::Control(cause),
+            RetainedFailureWorkStartError::Ledger(cause) => StoreRuntimeError::Ledger(cause),
+            RetainedFailureWorkStartError::Outstanding => failure_work_envelope_exhausted(),
+        })?;
+        Ok(FailureEvidenceBuildControl {
+            permit,
+            sticky: None,
+        })
     }
 
     /// Polls cancellation and deadline state without exposing the protected dimension.
@@ -60,7 +67,7 @@ where
         if let Some(cause) = self.sticky.clone() {
             return Err(cause);
         }
-        let result = self.raw.poll().map_err(StoreRuntimeError::Control);
+        let result = self.permit.poll().map_err(StoreRuntimeError::Control);
         if let Err(cause) = &result {
             self.sticky.get_or_insert_with(|| cause.clone());
         }
@@ -68,10 +75,18 @@ where
     }
 
     fn finish<T>(self, result: Result<T, StoreBuildError>) -> Result<T, FailureBuildCallbackError> {
-        match (self.sticky, result) {
-            (Some(cause), _) => Err(FailureBuildCallbackError::Runtime(cause)),
-            (None, Ok(value)) => Ok(value),
-            (None, Err(cause)) => Err(FailureBuildCallbackError::Build(cause)),
+        if let Some(cause) = self.sticky {
+            return Err(FailureBuildCallbackError::Runtime(cause));
+        }
+        match result {
+            Ok(value) => self
+                .permit
+                .complete()
+                .map(|_control| value)
+                .map_err(|cause| {
+                    FailureBuildCallbackError::Runtime(StoreRuntimeError::Ledger(cause))
+                }),
+            Err(cause) => Err(FailureBuildCallbackError::Build(cause)),
         }
     }
 }

@@ -2,6 +2,8 @@ use std::hash::{Hash, Hasher};
 use std::num::{NonZeroU32, NonZeroU64};
 use std::sync::{Arc, OnceLock};
 
+#[cfg(feature = "_u4-activation")]
+use baozi_operation::StoreBuildError;
 use baozi_operation::{
     AccountPoisonReason, BytesPlan, CancellationToken, CanonicalSequenceRef, DimensionPolicy,
     FinalProgress, LedgerCause, LedgerLimits, OperationControl, OperationOwner,
@@ -11,9 +13,9 @@ use baozi_operation::{
     PublishedStoreSuccessParts, RecordPlan, RetainedStoreBatchLimits, RetainedStoreBlockTablePlan,
     RetainedStoreFailureTerminalWorkPlan, RetainedStoreOperation, RetainedStorePublicationPlan,
     RetainedStoreSharePlan, RetainedStoreStartError, RetainedStoreStartPlan,
-    RetainedStoreWriterPlan, SequencePlan, StoreBuildError, StoreBuildFailureClass,
-    StoreDimensionKey, StoreDimensionSemanticId, StoreFailureValidation, StoreFallbackEnvelope,
-    StoreKeyDomain, StoreLedgerEvidence, StoreLedgerPlan, StoreLedgerPlanError, StorePhaseKey,
+    RetainedStoreWriterPlan, SequencePlan, StoreBuildFailureClass, StoreDimensionKey,
+    StoreDimensionSemanticId, StoreFailureValidation, StoreFallbackEnvelope, StoreKeyDomain,
+    StoreLedgerEvidence, StoreLedgerPlan, StoreLedgerPlanError, StorePhaseKey,
     StorePhaseSemanticId, StorePreparationFailure, StorePreparationFailureClass, StorePrepareError,
     StoreRuntimeError, StoreSemanticCatalogId, StoreSuccessValidation, StoreTerminalCause,
     Utf8Plan,
@@ -352,6 +354,7 @@ fn operation_with_evidence_limit(
     operation_with_control_and_evidence_limit(account, OperationControl::default(), evidence_limit)
 }
 
+#[cfg(feature = "_u4-activation")]
 fn operation_with_commit_limit(
     account: &PhysicalStorageAccount,
     committed_limit: u64,

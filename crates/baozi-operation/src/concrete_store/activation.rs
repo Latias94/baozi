@@ -7,6 +7,7 @@
 use std::fmt;
 use std::marker::PhantomData;
 use std::mem::ManuallyDrop;
+use std::num::NonZeroU64;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use super::{
@@ -31,7 +32,8 @@ use crate::coordinator::FinalProgress;
 use crate::owner::OperationOwner;
 use crate::retained::{
     FinalizationContainmentError, PreparationFailureCode, RetainedFailureWorkControl,
-    RetainedPublicationOpenRecovery, RetainedPublicationPrepareError,
+    RetainedFailureWorkPermit, RetainedFailureWorkStartError, RetainedPublicationOpenRecovery,
+    RetainedPublicationPrepareError,
 };
 
 mod canonical;
@@ -95,15 +97,21 @@ impl FailureEvidenceWorkBudget {
 
 type RawFailureEvidenceWorkControl<'a, O, PP, U> =
     RetainedFailureWorkControl<'a, O, StorePhaseKey, PP, U, StoreDimensionKey>;
+type RawFailureEvidenceWorkPermit<'a, O, PP, U> =
+    RetainedFailureWorkPermit<'a, O, StorePhaseKey, PP, U, StoreDimensionKey>;
 
-/// Poll-only protected capability lent to one exactly precharged evidence builder.
+/// Permit-bound protected capability lent to one admitted evidence builder.
+///
+/// Construction is recorded as attempted before the callback and becomes consumed only after the
+/// primitive writer finishes successfully. A callback error, panic, or abandoned permit therefore
+/// remains attempted-only and forces the terminal path away from rich evidence.
 pub struct FailureEvidenceBuildControl<'a, O, PP, U>
 where
     O: OperationOwner,
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    raw: RawFailureEvidenceWorkControl<'a, O, PP, U>,
+    permit: RawFailureEvidenceWorkPermit<'a, O, PP, U>,
     sticky: Option<StoreRuntimeError>,
 }
 

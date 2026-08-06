@@ -86,6 +86,52 @@ fn failure_evidence_builder_body_and_capture_drop_panics_are_isolated() {
 }
 
 #[test]
+fn failed_failure_evidence_builder_records_attempted_without_consumed_work() {
+    const FAILED_WORK: u64 = 7;
+
+    let factory = factory(1);
+    let account = account(&factory);
+    let (state, keys) = rejected_session_with_one_evidence_slot(&account);
+
+    let outcome = state
+        .build_failure_evidence(|lane| {
+            let expected = StoreBuildError::domain(73).unwrap();
+            let cause = lane
+                .try_retain_sequence(
+                    SequencePlan::<u8>::new(1).unwrap(),
+                    FAILED_WORK,
+                    EvidenceLeafTag,
+                    |_writer, _control| Err(expected),
+                )
+                .unwrap_err();
+            assert_eq!(cause, StoreRuntimeError::Build(expected));
+            lane.abort::<(), ()>()
+        })
+        .unwrap();
+    let fallback = match outcome {
+        FailureEvidenceOutcome::MinimalFallback(fallback) => fallback,
+        FailureEvidenceOutcome::Rooted(_) => panic!("failed evidence construction must downgrade"),
+    };
+    let (prepared, _cause) = fallback.into_parts();
+    let published = prepared.handoff();
+    let protected = published
+        .ledger_evidence
+        .dimension(keys.failure_terminal_dimension)
+        .expect("protected failure-work evidence remains queryable");
+    assert_eq!(
+        protected.attempted() - protected.consumed(),
+        FAILED_WORK,
+        "a failed builder must not fabricate completed work"
+    );
+    assert_eq!(
+        store_failure_cause(&published.ledger_evidence).class(),
+        StorePreparationFailureClass::ProductGraph
+    );
+    drop(published);
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
+}
+
+#[test]
 fn trusted_failure_evidence_fault_plus_abort_prepares_minimal_fallback() {
     let factory = factory(1);
     let account = account(&factory);
@@ -218,6 +264,15 @@ fn exact_failure_work_budget_preserves_rich_failure_and_zero_canonical_output() 
     let terminal = store_failure_cause(&published.ledger_evidence);
     assert_eq!(terminal.class(), StorePreparationFailureClass::Requested);
     assert_eq!(terminal.code(), 11);
+    let protected = published
+        .ledger_evidence
+        .dimension(keys.failure_terminal_dimension)
+        .expect("protected failure-work evidence remains queryable");
+    assert_eq!(
+        protected.attempted(),
+        protected.consumed(),
+        "successful construction and validation must complete every admitted work unit"
+    );
     assert_eq!(
         published
             .ledger_evidence
