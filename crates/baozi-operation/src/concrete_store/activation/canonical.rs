@@ -1,6 +1,7 @@
 use super::*;
 
-impl<O, PP, U, T, L> ActivatedCanonicalStoreSession<O, PP, U, T, L>
+impl<O, PP, U, T, CanonicalKind, CanonicalTag, L>
+    ActivatedCanonicalStoreSession<O, PP, U, T, CanonicalKind, CanonicalTag, L>
 where
     O: OperationOwner,
     PP: ProgressPhase,
@@ -23,9 +24,8 @@ where
     /// Any invalid root, ignored control fault, panic, or uncertain cleanup is quarantined instead
     /// of becoming a fallback result.
     #[allow(clippy::type_complexity, clippy::result_large_err)]
-    pub fn validate_centrally<CanonicalKind, CanonicalTag, EvidenceKind, EvidenceTag, Proof, E>(
+    pub fn validate_centrally<EvidenceKind, EvidenceTag, Proof, E>(
         self,
-        canonical_root: CanonicalStoreRef<CanonicalKind, CanonicalTag>,
         build_evidence: impl for<'lane> FnMut(
             &mut CanonicalOutcomeEvidenceLane<'lane, O, PP, U, L>,
             &T,
@@ -64,6 +64,7 @@ where
         let mut validate = ManuallyDrop::new(Some(validate));
         let Self {
             assembly,
+            canonical_root,
             output,
             failure_work,
             intent,
@@ -71,7 +72,7 @@ where
         let output = ManuallyDrop::new(output);
         let mut assembly = assembly;
         let mut failure_work = failure_work;
-        let work_dimension = intent.work_dimension;
+        let work_dimension = intent.validation_work_dimension;
         if let Err(cause) =
             assembly.try_commit_canonical(intent.commitment_dimension, intent.commitment_amount)
         {

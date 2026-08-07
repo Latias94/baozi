@@ -1337,6 +1337,22 @@ where
             .map_or(0, AttributionReservationBatch::commitment_len)
     }
 
+    #[cfg(feature = "_u4-activation")]
+    pub(crate) fn contains_canonical_member<Tag>(
+        &self,
+        slot: CanonicalRetainedSlot<CanonicalBlock, Tag>,
+    ) -> bool
+    where
+        Tag: Copy + Send + Sync + 'static,
+    {
+        self.containment == AssemblyContainmentProvenance::Healthy
+            && slot.identity.tag == TypeId::of::<Tag>()
+            && self
+                .canonical_table
+                .as_ref()
+                .is_some_and(|table| table.as_ref().member(slot.identity, self.set_id).is_some())
+    }
+
     pub fn outcome_evidence_len(&self) -> usize {
         self.evidence_table
             .as_ref()

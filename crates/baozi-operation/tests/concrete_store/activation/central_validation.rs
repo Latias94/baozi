@@ -58,11 +58,10 @@ fn centrally_rejected_sequence_work(elements: usize) -> (u64, u64) {
         .into_session_outcome_owner(evidence_plan(keys, 1))
         .plan_and_activate(
             |preflight| preflight.seal::<()>(canonical_plan(keys, 1)),
-            |lane| {
+            |mut lane| {
                 let root = lane
                     .try_retain_sequence(
                         SequencePlan::<u8>::new(1).unwrap(),
-                        keys.dimension,
                         SequenceTag,
                         |writer, _control| {
                             writer.push(7)?;
@@ -70,7 +69,7 @@ fn centrally_rejected_sequence_work(elements: usize) -> (u64, u64) {
                         },
                     )
                     .unwrap();
-                lane.accept::<_, ()>(root)
+                lane.complete::<_, (), _, _>(root, root)
             },
         )
         .unwrap();
@@ -80,10 +79,8 @@ fn centrally_rejected_sequence_work(elements: usize) -> (u64, u64) {
         | CanonicalActivationOutcome::NeverActivated(_)
         | CanonicalActivationOutcome::Fallback(_) => panic!("materialization must activate"),
     };
-    let canonical_root = *activated.output();
     let outcome = activated
         .validate_centrally(
-            canonical_root,
             |lane, _output| {
                 let evidence = lane
                     .try_retain_sequence(
@@ -142,11 +139,10 @@ fn matching_activation_can_only_publish_through_central_validation() {
         .into_session_outcome_owner(evidence_plan(keys, 1))
         .plan_and_activate(
             |preflight| preflight.seal::<()>(canonical_plan(keys, 1)),
-            |lane| {
+            |mut lane| {
                 let root = lane
                     .try_retain_sequence(
                         SequencePlan::<u8>::new(1).unwrap(),
-                        keys.dimension,
                         SequenceTag,
                         |writer, _control| {
                             writer.push(7)?;
@@ -154,7 +150,7 @@ fn matching_activation_can_only_publish_through_central_validation() {
                         },
                     )
                     .unwrap();
-                lane.accept::<_, ()>(root)
+                lane.complete::<_, (), _, _>(root, root)
             },
         )
         .unwrap();
@@ -166,10 +162,9 @@ fn matching_activation_can_only_publish_through_central_validation() {
             panic!("matching preflight must activate the canonical lane")
         }
     };
-    let canonical_root = *activated.output();
+    let expected_output = *activated.output();
     let validated = activated
         .validate_centrally(
-            canonical_root,
             |lane, _output| {
                 let evidence = lane
                     .try_retain_sequence(
@@ -209,7 +204,97 @@ fn matching_activation_can_only_publish_through_central_validation() {
         }
     };
     assert_eq!(candidate.proof(), &"validated");
-    assert_eq!(candidate.output(), &canonical_root);
+    assert_eq!(candidate.output(), &expected_output);
+    drop(candidate);
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
+}
+
+#[test]
+fn central_validation_uses_the_root_sealed_during_materialization() {
+    let factory = factory(1);
+    let account = account(&factory);
+    let (operation, keys) = operation(&account);
+
+    let outcome = operation
+        .into_session_outcome_owner(evidence_plan(keys, 1))
+        .plan_and_activate(
+            |preflight| preflight.seal::<()>(canonical_plan(keys, 2)),
+            |mut lane| {
+                let root = lane
+                    .try_retain_sequence(
+                        SequencePlan::<u8>::new(1).unwrap(),
+                        SequenceTag,
+                        |writer, _control| {
+                            writer.push(7)?;
+                            Ok(())
+                        },
+                    )
+                    .unwrap();
+                let other_root = lane
+                    .try_retain_sequence(
+                        SequencePlan::<u8>::new(1).unwrap(),
+                        SequenceTag,
+                        |writer, _control| {
+                            writer.push(8)?;
+                            Ok(())
+                        },
+                    )
+                    .unwrap();
+                lane.complete(root, other_root)
+            },
+        )
+        .unwrap();
+    let activated = match outcome {
+        CanonicalActivationOutcome::Activated(state) => state,
+        CanonicalActivationOutcome::Rejected(_)
+        | CanonicalActivationOutcome::NeverActivated(_)
+        | CanonicalActivationOutcome::Fallback(_) => panic!("materialization must activate"),
+    };
+
+    let outcome = activated
+        .validate_centrally(
+            |lane, _output| {
+                let evidence = lane
+                    .try_retain_sequence(
+                        SequencePlan::<u8>::new(1).unwrap(),
+                        EvidenceLeafTag,
+                        |writer| writer.push(9),
+                    )
+                    .unwrap();
+                lane.commit(keys.dimension, 1).unwrap();
+                lane.complete(evidence)
+            },
+            |session, canonical, evidence, output, control| {
+                control.poll()?;
+                let first_value = session
+                    .canonical_sequence(canonical)
+                    .and_then(|view| view.get(0));
+                let second_value = session
+                    .canonical_sequence(*output)
+                    .and_then(|view| view.get(0));
+                let evidence_value = session
+                    .outcome_evidence_sequence(evidence)
+                    .and_then(|view| view.get(0));
+                if first_value == Some(7) && second_value == Some(8) && evidence_value == Some(9) {
+                    Ok(CanonicalValidationDecision::accept("sealed-root"))
+                } else {
+                    Ok(CanonicalValidationDecision::reject(
+                        ValidationRejection::Semantic,
+                        72,
+                    ))
+                }
+            },
+        )
+        .unwrap();
+    let candidate = match outcome {
+        CanonicalCentralValidationOutcome::Candidate(candidate) => candidate,
+        CanonicalCentralValidationOutcome::Rejected(_)
+        | CanonicalCentralValidationOutcome::Fallback(_)
+        | CanonicalCentralValidationOutcome::Interrupted(_) => {
+            panic!("the sealed first root must reach central validation")
+        }
+    };
+    assert_eq!(candidate.proof(), &"sealed-root");
     drop(candidate);
     assert_eq!(account.snapshot().live_retained_allocations(), 0);
 }
@@ -232,6 +317,7 @@ fn activation_plan_keeps_validation_work_on_its_semantic_dimension() {
     let activation_plan = CanonicalActivationPlan::new(
         table,
         1,
+        keys.dimension,
         keys.other_dimension,
         keys.dimension,
         NonZeroU64::new(37).unwrap(),
@@ -249,11 +335,14 @@ fn activation_plan_keeps_validation_work_on_its_semantic_dimension() {
                         .expect("the sealed activation plan is consumed once"),
                 )
             },
-            |lane| {
+            |mut lane| {
+                lane.control_checkpoint()
+                    .unwrap()
+                    .charge_observed(5)
+                    .unwrap();
                 let root = lane
                     .try_retain_sequence(
                         SequencePlan::<u8>::new(1).unwrap(),
-                        keys.dimension,
                         SequenceTag,
                         |writer, _control| {
                             writer.push(7)?;
@@ -261,7 +350,7 @@ fn activation_plan_keeps_validation_work_on_its_semantic_dimension() {
                         },
                     )
                     .unwrap();
-                lane.accept::<_, ()>(root)
+                lane.complete::<_, (), _, _>(root, root)
             },
         )
         .unwrap();
@@ -271,10 +360,8 @@ fn activation_plan_keeps_validation_work_on_its_semantic_dimension() {
         | CanonicalActivationOutcome::NeverActivated(_)
         | CanonicalActivationOutcome::Fallback(_) => panic!("materialization must activate"),
     };
-    let canonical_root = *activated.output();
     let outcome = activated
         .validate_centrally(
-            canonical_root,
             |lane, _output| {
                 let evidence = lane
                     .try_retain_sequence(
@@ -337,11 +424,10 @@ fn central_outcome_evidence_cancellation_preserves_the_completed_prefix() {
         .into_session_outcome_owner(evidence_plan(keys, 1))
         .plan_and_activate(
             |preflight| preflight.seal::<()>(canonical_plan(keys, 1)),
-            |lane| {
+            |mut lane| {
                 let root = lane
                     .try_retain_sequence(
                         SequencePlan::<u8>::new(1).unwrap(),
-                        keys.dimension,
                         SequenceTag,
                         |writer, _control| {
                             writer.push(7)?;
@@ -349,7 +435,7 @@ fn central_outcome_evidence_cancellation_preserves_the_completed_prefix() {
                         },
                     )
                     .unwrap();
-                lane.accept::<_, ()>(root)
+                lane.complete::<_, (), _, _>(root, root)
             },
         )
         .unwrap();
@@ -359,11 +445,9 @@ fn central_outcome_evidence_cancellation_preserves_the_completed_prefix() {
         | CanonicalActivationOutcome::NeverActivated(_)
         | CanonicalActivationOutcome::Fallback(_) => panic!("materialization must activate"),
     };
-    let canonical_root = *activated.output();
     let outcome =
         activated
             .validate_centrally(
-                canonical_root,
                 |lane, _output| {
                     let evidence = lane.try_retain_sequence(
                         SequencePlan::<u8>::new(2).unwrap(),
@@ -424,11 +508,10 @@ fn central_outcome_evidence_underwrite_preserves_the_completed_prefix() {
         .into_session_outcome_owner(evidence_plan(keys, 1))
         .plan_and_activate(
             |preflight| preflight.seal::<()>(canonical_plan(keys, 1)),
-            |lane| {
+            |mut lane| {
                 let root = lane
                     .try_retain_sequence(
                         SequencePlan::<u8>::new(1).unwrap(),
-                        keys.dimension,
                         SequenceTag,
                         |writer, _control| {
                             writer.push(7)?;
@@ -436,7 +519,7 @@ fn central_outcome_evidence_underwrite_preserves_the_completed_prefix() {
                         },
                     )
                     .unwrap();
-                lane.accept::<_, ()>(root)
+                lane.complete::<_, (), _, _>(root, root)
             },
         )
         .unwrap();
@@ -446,11 +529,9 @@ fn central_outcome_evidence_underwrite_preserves_the_completed_prefix() {
         | CanonicalActivationOutcome::NeverActivated(_)
         | CanonicalActivationOutcome::Fallback(_) => panic!("materialization must activate"),
     };
-    let canonical_root = *activated.output();
     let outcome =
         activated
             .validate_centrally(
-                canonical_root,
                 |lane, _output| {
                     let evidence = lane.try_retain_sequence(
                         SequencePlan::<u8>::new(2).unwrap(),
@@ -497,51 +578,21 @@ fn central_outcome_evidence_underwrite_preserves_the_completed_prefix() {
 }
 
 #[test]
-fn foreign_canonical_root_is_contained_before_validation_callback() {
+fn foreign_canonical_root_is_contained_during_materialization_completion() {
     let factory = factory(2);
     let account_a = account(&factory);
     let account_b = account(&factory);
     let (operation_a, keys_a) = operation(&account_a);
     let (operation_b, keys_b) = operation(&account_b);
 
-    let outcome_a = operation_a
-        .into_session_outcome_owner(evidence_plan(keys_a, 1))
-        .plan_and_activate(
-            |preflight| preflight.seal::<()>(canonical_plan(keys_a, 1)),
-            |lane| {
-                let root = lane
-                    .try_retain_sequence(
-                        SequencePlan::<u8>::new(1).unwrap(),
-                        keys_a.dimension,
-                        SequenceTag,
-                        |writer, _control| {
-                            writer.push(1)?;
-                            Ok(())
-                        },
-                    )
-                    .unwrap();
-                lane.accept::<_, ()>(root)
-            },
-        )
-        .unwrap();
-    let activated_a = match outcome_a {
-        CanonicalActivationOutcome::Activated(state) => state,
-        CanonicalActivationOutcome::Rejected(_)
-        | CanonicalActivationOutcome::NeverActivated(_)
-        | CanonicalActivationOutcome::Fallback(_) => {
-            panic!("first operation must activate")
-        }
-    };
-
     let outcome_b = operation_b
         .into_session_outcome_owner(evidence_plan(keys_b, 1))
         .plan_and_activate(
             |preflight| preflight.seal::<()>(canonical_plan(keys_b, 1)),
-            |lane| {
+            |mut lane| {
                 let root = lane
                     .try_retain_sequence(
                         SequencePlan::<u8>::new(1).unwrap(),
-                        keys_b.dimension,
                         SequenceTag,
                         |writer, _control| {
                             writer.push(2)?;
@@ -549,7 +600,7 @@ fn foreign_canonical_root_is_contained_before_validation_callback() {
                         },
                     )
                     .unwrap();
-                lane.accept::<_, ()>(root)
+                lane.complete::<_, (), _, _>(root, root)
             },
         )
         .unwrap();
@@ -562,32 +613,30 @@ fn foreign_canonical_root_is_contained_before_validation_callback() {
         }
     };
     let foreign_root = *activated_b.output();
-    let validation_called = Cell::new(false);
 
-    let result = activated_a.validate_centrally(
-        foreign_root,
-        |lane, _output| {
-            let evidence = lane
-                .try_retain_sequence(
-                    SequencePlan::<u8>::new(1).unwrap(),
-                    EvidenceLeafTag,
-                    |writer| writer.push(3),
-                )
-                .unwrap();
-            lane.commit(keys_a.dimension, 1).unwrap();
-            lane.complete(evidence)
-        },
-        |_session, _canonical, _evidence, _output, _control| {
-            validation_called.set(true);
-            Ok(CanonicalValidationDecision::<(), ValidationRejection>::accept(()))
-        },
-    );
+    let result = operation_a
+        .into_session_outcome_owner(evidence_plan(keys_a, 1))
+        .plan_and_activate(
+            |preflight| preflight.seal::<()>(canonical_plan(keys_a, 1)),
+            |mut lane| {
+                let own_root = lane
+                    .try_retain_sequence(
+                        SequencePlan::<u8>::new(1).unwrap(),
+                        SequenceTag,
+                        |writer, _control| {
+                            writer.push(1)?;
+                            Ok(())
+                        },
+                    )
+                    .unwrap();
+                lane.complete::<_, (), _, _>(foreign_root, own_root)
+            },
+        );
 
     let containment = match result {
         Err(containment) => containment,
         Ok(_) => panic!("a foreign canonical root must be contained"),
     };
-    assert!(!validation_called.get());
     assert_eq!(
         containment.cause().reason(),
         AccountPoisonReason::OwnershipGraphUnverified
@@ -608,11 +657,10 @@ fn sealed_activation_preserves_unused_table_capacity() {
         .into_session_outcome_owner(evidence_plan(keys, 1))
         .plan_and_activate(
             |preflight| preflight.seal::<()>(canonical_plan_with_capacity(keys, 2, 1)),
-            |lane| {
+            |mut lane| {
                 let root = lane
                     .try_retain_sequence(
                         SequencePlan::<u8>::new(1).unwrap(),
-                        keys.dimension,
                         SequenceTag,
                         |writer, _control| {
                             writer.push(7)?;
@@ -620,7 +668,7 @@ fn sealed_activation_preserves_unused_table_capacity() {
                         },
                     )
                     .unwrap();
-                lane.accept::<_, ()>(root)
+                lane.complete::<_, (), _, _>(root, root)
             },
         )
         .unwrap();
@@ -647,11 +695,10 @@ fn sealed_activation_rejects_materialization_beyond_the_exact_shape() {
         .into_session_outcome_owner(evidence_plan(keys, 1))
         .plan_and_activate(
             |preflight| preflight.seal::<()>(canonical_plan_with_capacity(keys, 2, 1)),
-            |lane| {
+            |mut lane| {
                 let root = lane
                     .try_retain_sequence(
                         SequencePlan::<u8>::new(1).unwrap(),
-                        keys.dimension,
                         SequenceTag,
                         |writer, _control| {
                             writer.push(7)?;
@@ -662,7 +709,6 @@ fn sealed_activation_rejects_materialization_beyond_the_exact_shape() {
                 let _extra = lane
                     .try_retain_sequence(
                         SequencePlan::<u8>::new(1).unwrap(),
-                        keys.dimension,
                         SequenceTag,
                         |writer, _control| {
                             writer.push(8)?;
@@ -670,7 +716,7 @@ fn sealed_activation_rejects_materialization_beyond_the_exact_shape() {
                         },
                     )
                     .unwrap();
-                lane.accept::<_, ()>(root)
+                lane.complete::<_, (), _, _>(root, root)
             },
         );
 
@@ -695,11 +741,10 @@ fn sealed_activation_rejects_an_incomplete_exact_shape() {
         .into_session_outcome_owner(evidence_plan(keys, 1))
         .plan_and_activate(
             |preflight| preflight.seal::<()>(canonical_plan(keys, 2)),
-            |lane| {
+            |mut lane| {
                 let root = lane
                     .try_retain_sequence(
                         SequencePlan::<u8>::new(1).unwrap(),
-                        keys.dimension,
                         SequenceTag,
                         |writer, _control| {
                             writer.push(7)?;
@@ -707,7 +752,7 @@ fn sealed_activation_rejects_an_incomplete_exact_shape() {
                         },
                     )
                     .unwrap();
-                lane.accept::<_, ()>(root)
+                lane.complete::<_, (), _, _>(root, root)
             },
         );
 
@@ -731,11 +776,10 @@ fn clean_central_validation_panic_prepares_minimal_fallback_without_poisoning() 
         .into_session_outcome_owner(evidence_plan(keys, 1))
         .plan_and_activate(
             |preflight| preflight.seal::<()>(canonical_plan(keys, 1)),
-            |lane| {
+            |mut lane| {
                 let root = lane
                     .try_retain_sequence(
                         SequencePlan::<u8>::new(1).unwrap(),
-                        keys.dimension,
                         SequenceTag,
                         |writer, _control| {
                             writer.push(7)?;
@@ -743,7 +787,7 @@ fn clean_central_validation_panic_prepares_minimal_fallback_without_poisoning() 
                         },
                     )
                     .unwrap();
-                lane.accept::<_, ()>(root)
+                lane.complete::<_, (), _, _>(root, root)
             },
         )
         .unwrap();
@@ -753,12 +797,10 @@ fn clean_central_validation_panic_prepares_minimal_fallback_without_poisoning() 
         | CanonicalActivationOutcome::NeverActivated(_)
         | CanonicalActivationOutcome::Fallback(_) => panic!("materialization must activate"),
     };
-    let canonical_root = *activated.output();
 
     let outcome =
         activated
             .validate_centrally(
-                canonical_root,
                 |lane, _output| {
                     let evidence = lane
                         .try_retain_sequence(
@@ -810,11 +852,10 @@ fn completed_central_validation_capture_drop_panic_is_contained() {
         .into_session_outcome_owner(evidence_plan(keys, 1))
         .plan_and_activate(
             |preflight| preflight.seal::<()>(canonical_plan(keys, 1)),
-            |lane| {
+            |mut lane| {
                 let root = lane
                     .try_retain_sequence(
                         SequencePlan::<u8>::new(1).unwrap(),
-                        keys.dimension,
                         SequenceTag,
                         |writer, _control| {
                             writer.push(7)?;
@@ -822,7 +863,7 @@ fn completed_central_validation_capture_drop_panic_is_contained() {
                         },
                     )
                     .unwrap();
-                lane.accept::<_, ()>(root)
+                lane.complete::<_, (), _, _>(root, root)
             },
         )
         .unwrap();
@@ -832,11 +873,9 @@ fn completed_central_validation_capture_drop_panic_is_contained() {
         | CanonicalActivationOutcome::NeverActivated(_)
         | CanonicalActivationOutcome::Fallback(_) => panic!("materialization must activate"),
     };
-    let canonical_root = *activated.output();
     let validation_capture = PanicOnDrop;
 
     let result = activated.validate_centrally(
-        canonical_root,
         |lane, _output| {
             let evidence = lane
                 .try_retain_sequence(
@@ -876,11 +915,10 @@ fn central_evidence_body_and_capture_drop_panics_are_isolated() {
         .into_session_outcome_owner(evidence_plan(keys, 1))
         .plan_and_activate(
             |preflight| preflight.seal::<()>(canonical_plan(keys, 1)),
-            |lane| {
+            |mut lane| {
                 let root = lane
                     .try_retain_sequence(
                         SequencePlan::<u8>::new(1).unwrap(),
-                        keys.dimension,
                         SequenceTag,
                         |writer, _control| {
                             writer.push(7)?;
@@ -888,7 +926,7 @@ fn central_evidence_body_and_capture_drop_panics_are_isolated() {
                         },
                     )
                     .unwrap();
-                lane.accept::<_, ()>(root)
+                lane.complete::<_, (), _, _>(root, root)
             },
         )
         .unwrap();
@@ -900,10 +938,8 @@ fn central_evidence_body_and_capture_drop_panics_are_isolated() {
             panic!("materialization must reach central validation")
         }
     };
-    let canonical_root = *activated.output();
 
     let result = activated.validate_centrally(
-        canonical_root,
         move |_lane, _output| -> OutcomeEvidenceDecision<(), EvidenceLeafTag> {
             let _capture = &evidence_capture;
             panic!("contained evidence callback panic")
@@ -932,11 +968,10 @@ fn central_evidence_builder_body_and_capture_drop_panics_are_isolated() {
         .into_session_outcome_owner(evidence_plan(keys, 1))
         .plan_and_activate(
             |preflight| preflight.seal::<()>(canonical_plan(keys, 1)),
-            |lane| {
+            |mut lane| {
                 let root = lane
                     .try_retain_sequence(
                         SequencePlan::<u8>::new(1).unwrap(),
-                        keys.dimension,
                         SequenceTag,
                         |writer, _control| {
                             writer.push(7)?;
@@ -944,7 +979,7 @@ fn central_evidence_builder_body_and_capture_drop_panics_are_isolated() {
                         },
                     )
                     .unwrap();
-                lane.accept::<_, ()>(root)
+                lane.complete::<_, (), _, _>(root, root)
             },
         )
         .unwrap();
@@ -956,10 +991,8 @@ fn central_evidence_builder_body_and_capture_drop_panics_are_isolated() {
             panic!("materialization must reach central validation")
         }
     };
-    let canonical_root = *activated.output();
 
     let result = activated.validate_centrally(
-        canonical_root,
         |lane, _output| -> OutcomeEvidenceDecision<(), EvidenceLeafTag> {
             let capture = PanicOnDrop;
             let cause = lane
@@ -1002,11 +1035,10 @@ fn activation_only_records_commitment_intent_without_running_the_joint_commit() 
         .into_session_outcome_owner(evidence_plan(keys, 1))
         .plan_and_activate(
             |preflight| preflight.seal::<()>(canonical_plan(keys, 1)),
-            |lane| {
+            |mut lane| {
                 let root = lane
                     .try_retain_sequence(
                         SequencePlan::<u8>::new(1).unwrap(),
-                        keys.dimension,
                         SequenceTag,
                         |writer, _control| {
                             writer.push(7)?;
@@ -1014,7 +1046,7 @@ fn activation_only_records_commitment_intent_without_running_the_joint_commit() 
                         },
                     )
                     .unwrap();
-                lane.accept::<_, ()>(root)
+                lane.complete::<_, (), _, _>(root, root)
             },
         )
         .unwrap();
@@ -1026,10 +1058,8 @@ fn activation_only_records_commitment_intent_without_running_the_joint_commit() 
             panic!("materialization must reach central commitment")
         }
     };
-    let canonical_root = *activated.output();
     let result = activated
         .validate_centrally(
-            canonical_root,
             |lane, _output| {
                 evidence_called.set(true);
                 let evidence = lane
@@ -1081,11 +1111,10 @@ fn trusted_evidence_slot_limit_returns_product_graph_fallback_without_poisoning(
         .into_session_outcome_owner(evidence_plan(keys, 1))
         .plan_and_activate(
             |preflight| preflight.seal::<()>(canonical_plan(keys, 1)),
-            |lane| {
+            |mut lane| {
                 let root = lane
                     .try_retain_sequence(
                         SequencePlan::<u8>::new(1).unwrap(),
-                        keys.dimension,
                         SequenceTag,
                         |writer, _control| {
                             writer.push(7)?;
@@ -1093,7 +1122,7 @@ fn trusted_evidence_slot_limit_returns_product_graph_fallback_without_poisoning(
                         },
                     )
                     .unwrap();
-                lane.accept::<_, ()>(root)
+                lane.complete::<_, (), _, _>(root, root)
             },
         )
         .unwrap();
@@ -1105,11 +1134,9 @@ fn trusted_evidence_slot_limit_returns_product_graph_fallback_without_poisoning(
             panic!("materialization must reach central evidence construction")
         }
     };
-    let canonical_root = *activated.output();
 
     let result = activated
         .validate_centrally(
-            canonical_root,
             |lane, _output| {
                 let _root = lane
                     .try_retain_sequence(
@@ -1178,11 +1205,10 @@ fn central_validation_rejection_can_validate_existing_rich_failure_evidence() {
         .into_session_outcome_owner(evidence_plan(keys, 4))
         .plan_and_activate(
             |preflight| preflight.seal::<()>(canonical_plan(keys, 1)),
-            |lane| {
+            |mut lane| {
                 let root = lane
                     .try_retain_sequence(
                         SequencePlan::<u8>::new(1).unwrap(),
-                        keys.dimension,
                         SequenceTag,
                         |writer, _control| {
                             writer.push(7)?;
@@ -1190,7 +1216,7 @@ fn central_validation_rejection_can_validate_existing_rich_failure_evidence() {
                         },
                     )
                     .unwrap();
-                lane.accept::<_, ()>(root)
+                lane.complete::<_, (), _, _>(root, root)
             },
         )
         .unwrap();
@@ -1200,10 +1226,8 @@ fn central_validation_rejection_can_validate_existing_rich_failure_evidence() {
         | CanonicalActivationOutcome::NeverActivated(_)
         | CanonicalActivationOutcome::Fallback(_) => panic!("materialization must activate"),
     };
-    let canonical_root = *activated.output();
     let outcome = activated
         .validate_centrally(
-            canonical_root,
             |lane, _output| {
                 let sequence = lane
                     .try_retain_sequence(
@@ -1355,11 +1379,10 @@ fn central_evidence_validation_envelope_rejects_before_the_overflowing_builder()
         .into_session_outcome_owner(evidence_plan(keys, 2))
         .plan_and_activate(
             |preflight| preflight.seal::<()>(canonical_plan(keys, 1)),
-            |lane| {
+            |mut lane| {
                 let root = lane
                     .try_retain_sequence(
                         SequencePlan::<u8>::new(1).unwrap(),
-                        keys.dimension,
                         SequenceTag,
                         |writer, _control| {
                             writer.push(7)?;
@@ -1367,7 +1390,7 @@ fn central_evidence_validation_envelope_rejects_before_the_overflowing_builder()
                         },
                     )
                     .unwrap();
-                lane.accept::<_, ()>(root)
+                lane.complete::<_, (), _, _>(root, root)
             },
         )
         .unwrap();
@@ -1377,12 +1400,10 @@ fn central_evidence_validation_envelope_rejects_before_the_overflowing_builder()
         | CanonicalActivationOutcome::NeverActivated(_)
         | CanonicalActivationOutcome::Fallback(_) => panic!("materialization must activate"),
     };
-    let canonical_root = *activated.output();
     let overflowing_builder_called = Cell::new(false);
     let outcome =
         activated
             .validate_centrally(
-                canonical_root,
                 |lane, _output| {
                     let _first = lane
                         .try_retain_sequence(
@@ -1453,11 +1474,10 @@ fn central_control_interruption_can_validate_existing_rich_failure_evidence() {
         .into_session_outcome_owner(evidence_plan(keys, 1))
         .plan_and_activate(
             |preflight| preflight.seal::<()>(canonical_plan(keys, 1)),
-            |lane| {
+            |mut lane| {
                 let root = lane
                     .try_retain_sequence(
                         SequencePlan::<u8>::new(1).unwrap(),
-                        keys.dimension,
                         SequenceTag,
                         |writer, _control| {
                             writer.push(7)?;
@@ -1465,7 +1485,7 @@ fn central_control_interruption_can_validate_existing_rich_failure_evidence() {
                         },
                     )
                     .unwrap();
-                lane.accept::<_, ()>(root)
+                lane.complete::<_, (), _, _>(root, root)
             },
         )
         .unwrap();
@@ -1475,10 +1495,8 @@ fn central_control_interruption_can_validate_existing_rich_failure_evidence() {
         | CanonicalActivationOutcome::NeverActivated(_)
         | CanonicalActivationOutcome::Fallback(_) => panic!("materialization must activate"),
     };
-    let canonical_root = *activated.output();
     let outcome = activated
         .validate_centrally(
-            canonical_root,
             |lane, _output| {
                 let evidence = lane
                     .try_retain_sequence(
@@ -1543,11 +1561,10 @@ fn central_ledger_interruption_can_reject_existing_rich_failure_evidence() {
         .into_session_outcome_owner(evidence_plan(keys, 1))
         .plan_and_activate(
             |preflight| preflight.seal::<()>(canonical_plan(keys, 1)),
-            |lane| {
+            |mut lane| {
                 let root = lane
                     .try_retain_sequence(
                         SequencePlan::<u8>::new(1).unwrap(),
-                        keys.dimension,
                         SequenceTag,
                         |writer, _control| {
                             writer.push(7)?;
@@ -1555,7 +1572,7 @@ fn central_ledger_interruption_can_reject_existing_rich_failure_evidence() {
                         },
                     )
                     .unwrap();
-                lane.accept::<_, ()>(root)
+                lane.complete::<_, (), _, _>(root, root)
             },
         )
         .unwrap();
@@ -1565,10 +1582,8 @@ fn central_ledger_interruption_can_reject_existing_rich_failure_evidence() {
         | CanonicalActivationOutcome::NeverActivated(_)
         | CanonicalActivationOutcome::Fallback(_) => panic!("materialization must activate"),
     };
-    let canonical_root = *activated.output();
     let outcome = activated
         .validate_centrally(
-            canonical_root,
             |lane, _output| {
                 let evidence = lane
                     .try_retain_sequence(
@@ -1635,11 +1650,10 @@ fn outcome_evidence_abort_uses_the_first_fault_without_caller_echo() {
         .into_session_outcome_owner(evidence_plan(keys, 1))
         .plan_and_activate(
             |preflight| preflight.seal::<()>(canonical_plan(keys, 1)),
-            |lane| {
+            |mut lane| {
                 let root = lane
                     .try_retain_sequence(
                         SequencePlan::<u8>::new(1).unwrap(),
-                        keys.dimension,
                         SequenceTag,
                         |writer, _control| {
                             writer.push(7)?;
@@ -1647,7 +1661,7 @@ fn outcome_evidence_abort_uses_the_first_fault_without_caller_echo() {
                         },
                     )
                     .unwrap();
-                lane.accept::<_, ()>(root)
+                lane.complete::<_, (), _, _>(root, root)
             },
         )
         .unwrap();
@@ -1659,12 +1673,10 @@ fn outcome_evidence_abort_uses_the_first_fault_without_caller_echo() {
             panic!("materialization must reach central evidence construction")
         }
     };
-    let canonical_root = *activated.output();
 
     let result =
         activated
             .validate_centrally(
-                canonical_root,
                 |lane, _output| {
                     let _root = lane
                         .try_retain_sequence(
@@ -1739,11 +1751,10 @@ fn later_outcome_evidence_contract_fault_contains_an_earlier_slot_fault() {
         .into_session_outcome_owner(evidence_plan(keys, 1))
         .plan_and_activate(
             |preflight| preflight.seal::<()>(canonical_plan(keys, 1)),
-            |lane| {
+            |mut lane| {
                 let root = lane
                     .try_retain_sequence(
                         SequencePlan::<u8>::new(1).unwrap(),
-                        keys.dimension,
                         SequenceTag,
                         |writer, _control| {
                             writer.push(7)?;
@@ -1751,7 +1762,7 @@ fn later_outcome_evidence_contract_fault_contains_an_earlier_slot_fault() {
                         },
                     )
                     .unwrap();
-                lane.accept::<_, ()>(root)
+                lane.complete::<_, (), _, _>(root, root)
             },
         )
         .unwrap();
@@ -1763,10 +1774,8 @@ fn later_outcome_evidence_contract_fault_contains_an_earlier_slot_fault() {
             panic!("materialization must reach central evidence construction")
         }
     };
-    let canonical_root = *activated.output();
 
     let result = activated.validate_centrally(
-        canonical_root,
         |lane, _output| {
             let _root = lane
                 .try_retain_sequence(
@@ -1809,11 +1818,10 @@ fn sticky_validation_work_failure_overrides_a_later_accept_decision() {
         .into_session_outcome_owner(evidence_plan(keys, 1))
         .plan_and_activate(
             |preflight| preflight.seal::<()>(canonical_plan(keys, 1)),
-            |lane| {
+            |mut lane| {
                 let root = lane
                     .try_retain_sequence(
                         SequencePlan::<u8>::new(1).unwrap(),
-                        keys.dimension,
                         SequenceTag,
                         |writer, _control| {
                             writer.push(7)?;
@@ -1821,7 +1829,7 @@ fn sticky_validation_work_failure_overrides_a_later_accept_decision() {
                         },
                     )
                     .unwrap();
-                lane.accept::<_, ()>(root)
+                lane.complete::<_, (), _, _>(root, root)
             },
         )
         .unwrap();
@@ -1833,11 +1841,9 @@ fn sticky_validation_work_failure_overrides_a_later_accept_decision() {
             panic!("materialization must reach central validation")
         }
     };
-    let canonical_root = *activated.output();
 
     let result = activated
         .validate_centrally(
-            canonical_root,
             |lane, _output| {
                 let evidence = lane
                     .try_retain_sequence(
@@ -1884,11 +1890,10 @@ fn central_validation_rejection_eagerly_cleans_canonical_storage() {
         .into_session_outcome_owner(evidence_plan(keys, 1))
         .plan_and_activate(
             |preflight| preflight.seal::<()>(canonical_plan(keys, 1)),
-            |lane| {
+            |mut lane| {
                 let root = lane
                     .try_retain_sequence(
                         SequencePlan::<u8>::new(1).unwrap(),
-                        keys.dimension,
                         SequenceTag,
                         |writer, _control| {
                             writer.push(7)?;
@@ -1896,7 +1901,7 @@ fn central_validation_rejection_eagerly_cleans_canonical_storage() {
                         },
                     )
                     .unwrap();
-                lane.accept::<_, ()>(root)
+                lane.complete::<_, (), _, _>(root, root)
             },
         )
         .unwrap();
@@ -1908,10 +1913,8 @@ fn central_validation_rejection_eagerly_cleans_canonical_storage() {
             panic!("materialization must activate")
         }
     };
-    let canonical_root = *activated.output();
     let outcome = activated
         .validate_centrally(
-            canonical_root,
             |lane, _output| {
                 let evidence = lane
                     .try_retain_sequence(

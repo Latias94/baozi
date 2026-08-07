@@ -156,7 +156,7 @@ fn activation_rich_failure_open_recovery_upgrades_the_requested_cause() {
         .into_session_outcome_owner(evidence_plan)
         .plan_and_activate(
             |preflight| preflight.reject((), 77),
-            |_lane| -> CanonicalMaterialization<(), ()> {
+            |_lane| -> CanonicalMaterialization<'_, (), (), ScalarSequence<u8>, TestTag> {
                 unreachable!("preflight rejection cannot materialize canonical storage")
             },
         )

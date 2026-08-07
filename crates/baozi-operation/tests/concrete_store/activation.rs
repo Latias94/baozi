@@ -8,7 +8,7 @@ use baozi_operation::__canonical_activation::{
     StoreNeverActivatedCause,
 };
 use baozi_operation::{
-    RetainedStoreBlockTablePlan, StoreDestination, StorePlanError, StoreWorkError,
+    RetainedStoreBlockTablePlan, ScalarSequence, StoreDestination, StorePlanError, StoreWorkError,
 };
 
 use super::*;
@@ -66,6 +66,7 @@ fn canonical_plan_with_capacity(
         expected_materialized_blocks,
         keys.dimension,
         keys.dimension,
+        keys.dimension,
         commitment_amount,
     )
     .unwrap()
@@ -80,11 +81,25 @@ fn activation_plan_rejects_impossible_exact_shapes() {
     let commitment = NonZeroU64::new(1).unwrap();
 
     assert!(matches!(
-        CanonicalActivationPlan::new(table, 0, keys.dimension, keys.dimension, commitment),
+        CanonicalActivationPlan::new(
+            table,
+            0,
+            keys.dimension,
+            keys.dimension,
+            keys.dimension,
+            commitment,
+        ),
         Err(StorePlanError::InvalidBlockTable)
     ));
     assert!(matches!(
-        CanonicalActivationPlan::new(table, 2, keys.dimension, keys.dimension, commitment),
+        CanonicalActivationPlan::new(
+            table,
+            2,
+            keys.dimension,
+            keys.dimension,
+            keys.dimension,
+            commitment,
+        ),
         Err(StorePlanError::InvalidBlockTable)
     ));
 }
@@ -141,23 +156,21 @@ fn assert_ignored_controlled_writer_fault_is_contained(kind: ControlledWriterKin
         .into_session_outcome_owner(evidence_plan(keys, 1))
         .plan_and_activate(
             |preflight| preflight.seal::<()>(canonical_plan(keys, 1)),
-            |lane| {
+            |mut lane| {
+                let root = lane
+                    .try_retain_sequence(
+                        SequencePlan::<u8>::new(1).unwrap(),
+                        SequenceTag,
+                        |writer, _control| {
+                            writer.push(1)?;
+                            Ok(())
+                        },
+                    )
+                    .unwrap();
                 match kind {
                     ControlledWriterKind::Sequence => {
-                        let _ = lane
-                            .try_retain_sequence(
-                                SequencePlan::<u8>::new(1).unwrap(),
-                                keys.dimension,
-                                SequenceTag,
-                                |writer, _control| {
-                                    writer.push(1)?;
-                                    Ok(())
-                                },
-                            )
-                            .unwrap();
                         let ignored = lane.try_retain_sequence(
                             SequencePlan::<u8>::new(1).unwrap(),
-                            keys.dimension,
                             SequenceTag,
                             |writer, _control| {
                                 writer.push(2)?;
@@ -167,20 +180,8 @@ fn assert_ignored_controlled_writer_fault_is_contained(kind: ControlledWriterKin
                         assert_slot_limit(ignored.map(|_| ()), StoreDestination::Canonical);
                     }
                     ControlledWriterKind::Bytes => {
-                        let _ = lane
-                            .try_retain_bytes(
-                                BytesPlan::new(1).unwrap(),
-                                keys.dimension,
-                                BytesTag,
-                                |writer, _control| {
-                                    writer.write_bytes(&[1])?;
-                                    Ok(())
-                                },
-                            )
-                            .unwrap();
                         let ignored = lane.try_retain_bytes(
                             BytesPlan::new(1).unwrap(),
-                            keys.dimension,
                             BytesTag,
                             |writer, _control| {
                                 writer.write_bytes(&[2])?;
@@ -190,20 +191,8 @@ fn assert_ignored_controlled_writer_fault_is_contained(kind: ControlledWriterKin
                         assert_slot_limit(ignored.map(|_| ()), StoreDestination::Canonical);
                     }
                     ControlledWriterKind::Utf8 => {
-                        let _ = lane
-                            .try_retain_utf8(
-                                Utf8Plan::new(1).unwrap(),
-                                keys.dimension,
-                                TextTag,
-                                |writer, _control| {
-                                    writer.write_str("a")?;
-                                    Ok(())
-                                },
-                            )
-                            .unwrap();
                         let ignored = lane.try_retain_utf8(
                             Utf8Plan::new(1).unwrap(),
-                            keys.dimension,
                             TextTag,
                             |writer, _control| {
                                 writer.write_str("b")?;
@@ -213,20 +202,8 @@ fn assert_ignored_controlled_writer_fault_is_contained(kind: ControlledWriterKin
                         assert_slot_limit(ignored.map(|_| ()), StoreDestination::Canonical);
                     }
                     ControlledWriterKind::Records => {
-                        let _ = lane
-                            .try_retain_records(
-                                RecordPlan::new(1, 1).unwrap(),
-                                keys.dimension,
-                                CanonicalRootTag,
-                                |writer, _control| {
-                                    writer.write_row(|row| row.write_scalar(1_u8))?;
-                                    Ok(())
-                                },
-                            )
-                            .unwrap();
                         let ignored = lane.try_retain_records(
                             RecordPlan::new(1, 1).unwrap(),
-                            keys.dimension,
                             CanonicalRootTag,
                             |writer, _control| {
                                 writer.write_row(|row| row.write_scalar(2_u8))?;
@@ -236,7 +213,7 @@ fn assert_ignored_controlled_writer_fault_is_contained(kind: ControlledWriterKin
                         assert_slot_limit(ignored.map(|_| ()), StoreDestination::Canonical);
                     }
                 }
-                lane.accept::<_, ()>(())
+                lane.complete::<_, (), _, _>(root, root)
             },
         );
     let containment = match result {
@@ -268,13 +245,12 @@ fn assert_controlled_writer_body_and_drop_panics_are_isolated(kind: ControlledWr
         .into_session_outcome_owner(evidence_plan(keys, 1))
         .plan_and_activate(
             |preflight| preflight.seal::<()>(canonical_plan(keys, 1)),
-            |lane| {
+            |mut lane| {
                 match kind {
                     ControlledWriterKind::Sequence => {
                         let capture = PanicOnDrop;
                         let result = lane.try_retain_sequence(
                             SequencePlan::<u8>::new(1).unwrap(),
-                            keys.dimension,
                             SequenceTag,
                             move |_writer, _control| {
                                 let _capture = &capture;
@@ -287,7 +263,6 @@ fn assert_controlled_writer_body_and_drop_panics_are_isolated(kind: ControlledWr
                         let capture = PanicOnDrop;
                         let result = lane.try_retain_bytes(
                             BytesPlan::new(1).unwrap(),
-                            keys.dimension,
                             BytesTag,
                             move |_writer, _control| {
                                 let _capture = &capture;
@@ -300,7 +275,6 @@ fn assert_controlled_writer_body_and_drop_panics_are_isolated(kind: ControlledWr
                         let capture = PanicOnDrop;
                         let result = lane.try_retain_utf8(
                             Utf8Plan::new(1).unwrap(),
-                            keys.dimension,
                             TextTag,
                             move |_writer, _control| {
                                 let _capture = &capture;
@@ -313,7 +287,6 @@ fn assert_controlled_writer_body_and_drop_panics_are_isolated(kind: ControlledWr
                         let capture = PanicOnDrop;
                         let result = lane.try_retain_records(
                             RecordPlan::new(1, 1).unwrap(),
-                            keys.dimension,
                             CanonicalRootTag,
                             move |_writer, _control| {
                                 let _capture = &capture;
@@ -323,7 +296,7 @@ fn assert_controlled_writer_body_and_drop_panics_are_isolated(kind: ControlledWr
                         assert!(matches!(result, Err(StoreRuntimeError::BuilderPanicked)));
                     }
                 }
-                lane.accept::<_, ()>(())
+                lane.reject::<(), (), ScalarSequence<u8>, SequenceTag>((), 1)
             },
         );
 
@@ -396,9 +369,13 @@ fn rejected_session_from_operation(
         .into_session_outcome_owner(evidence_plan(keys, evidence_blocks))
         .plan_and_activate(
             |preflight| preflight.reject(PreflightRejection::Unsupported, 11),
-            |_lane| -> CanonicalMaterialization<(), PreflightRejection> {
-                unreachable!("preflight rejection cannot materialize")
-            },
+            |_lane| -> CanonicalMaterialization<
+                '_,
+                (),
+                PreflightRejection,
+                ScalarSequence<u8>,
+                SequenceTag,
+            > { unreachable!("preflight rejection cannot materialize") },
         )
         .unwrap();
     let state = match outcome {

@@ -46,15 +46,24 @@ where
         clippy::type_complexity,
         reason = "the scoped transition preserves every linear owner and exact typed cause"
     )]
-    pub fn plan_and_activate<T, E>(
+    pub fn plan_and_activate<T, E, CanonicalKind, CanonicalTag>(
         mut self,
         preflight: impl for<'scope> FnMut(
             CanonicalPreflight<'scope, O, PP, U, L>,
-        ) -> CanonicalPreflightDecision<E>,
+        ) -> CanonicalPreflightDecision<'scope, E>,
         materialize: impl for<'lane> FnMut(
-            &mut CanonicalLane<'lane, O, PP, U, L>,
-        ) -> CanonicalMaterialization<T, E>,
-    ) -> Result<CanonicalActivationOutcome<O, PP, U, T, E, L>, StoreActivationContainment> {
+            CanonicalLane<'lane, O, PP, U, L>,
+        ) -> CanonicalMaterialization<
+            'lane,
+            T,
+            E,
+            CanonicalKind,
+            CanonicalTag,
+        >,
+    ) -> Result<
+        CanonicalActivationOutcome<O, PP, U, T, E, CanonicalKind, CanonicalTag, L>,
+        StoreActivationContainment,
+    > {
         let mut preflight = ManuallyDrop::new(Some(preflight));
         let mut materialize = ManuallyDrop::new(Some(materialize));
         let mut operation = self
@@ -72,6 +81,7 @@ where
                 operation: &mut operation,
                 first_fault: &mut first_fault,
             })
+            .into_state()
         }));
         let preflight_drop_failed = drop_optional_callback(preflight).is_err();
         let preflight = match preflight_result {
@@ -107,7 +117,7 @@ where
             }
         };
 
-        match preflight.state {
+        match preflight {
             CanonicalPreflightState::Rejected(rejection) => {
                 if drop_optional_callback(materialize).is_err() {
                     let _ = drop_verified_rejection(rejection);
@@ -185,14 +195,16 @@ where
 
                 let mut first_fault = None;
                 let materialized = catch_unwind(AssertUnwindSafe(|| {
-                    let mut lane = CanonicalLane {
+                    let lane = CanonicalLane {
                         assembly: &mut assembly,
                         first_fault: &mut first_fault,
+                        materialization_work_dimension: activation_intent
+                            .materialization_work_dimension,
                     };
                     let materialize = materialize
                         .as_mut()
                         .expect("the materialization callback is executed at most once");
-                    materialize(&mut lane)
+                    materialize(lane).into_state()
                 }));
                 let materialize_drop_failed = drop_optional_callback(materialize).is_err();
                 let materialized = match materialized {
@@ -212,14 +224,21 @@ where
                 };
 
                 if assembly.is_fallback_only() {
-                    let _ = drop_materialization(materialized);
+                    match materialized {
+                        CanonicalMaterializationState::Activated { root: _, output } => {
+                            let _ = drop_scoped_value(output);
+                        }
+                        CanonicalMaterializationState::Rejected(rejection) => {
+                            let _ = drop_verified_rejection(rejection);
+                        }
+                    }
                     return Err(StoreActivationContainment {
                         cause: assembly.contain_activation_fault(),
                     });
                 }
 
-                match (first_fault, materialized.state) {
-                    (Some(fault), CanonicalMaterializationState::Activated(output)) => {
+                match (first_fault, materialized) {
+                    (Some(fault), CanonicalMaterializationState::Activated { root: _, output }) => {
                         let _ = drop_scoped_value(output);
                         let _fault = fault;
                         Err(StoreActivationContainment {
@@ -251,7 +270,7 @@ where
                             failure_code,
                         )
                     }
-                    (None, CanonicalMaterializationState::Activated(output)) => {
+                    (None, CanonicalMaterializationState::Activated { root, output }) => {
                         if assembly.canonical_len()
                             != activation_intent.expected_materialized_blocks
                         {
@@ -263,6 +282,7 @@ where
                         Ok(CanonicalActivationOutcome::Activated(
                             ActivatedCanonicalStoreSession {
                                 assembly,
+                                canonical_root: root,
                                 output,
                                 failure_work,
                                 intent: activation_intent,
@@ -315,7 +335,7 @@ where
     pub fn seal<E>(
         self,
         activation_plan: CanonicalActivationPlan,
-    ) -> CanonicalPreflightDecision<E> {
+    ) -> CanonicalPreflightDecision<'activation, E> {
         let (canonical_plan, intent) = activation_plan.into_parts();
         if self.first_fault.is_none() {
             let (phase, dimensions) = canonical_plan.keys_for_publication_validation();
@@ -324,7 +344,8 @@ where
         }
         if self.first_fault.is_none() {
             let result = self.operation.validate_activation_dimensions([
-                intent.work_dimension,
+                intent.materialization_work_dimension,
+                intent.validation_work_dimension,
                 intent.commitment_dimension,
             ]);
             let _ = preserve_first_fault(self.first_fault, result);
@@ -334,16 +355,22 @@ where
                 canonical_plan,
                 intent,
             },
+            scope: PhantomData,
         }
     }
 
     /// Records one explicit, verified pre-activation rejection and its terminal classification.
-    pub fn reject<E>(self, cause: E, stable_code: u32) -> CanonicalPreflightDecision<E> {
+    pub fn reject<E>(
+        self,
+        cause: E,
+        stable_code: u32,
+    ) -> CanonicalPreflightDecision<'activation, E> {
         CanonicalPreflightDecision {
             state: CanonicalPreflightState::Rejected(VerifiedRejection {
                 cause,
                 failure_code: PreparationFailureCode::domain(stable_code),
             }),
+            scope: PhantomData,
         }
     }
 }
@@ -423,6 +450,47 @@ where
     }
 }
 
+impl<'borrow, 'activation, O, PP, U>
+    CanonicalMaterializationCheckpoint<'borrow, 'activation, O, PP, U>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    pub fn poll(&mut self) -> Result<(), StoreRuntimeError> {
+        self.inner.poll()
+    }
+
+    pub fn charge_observed(&mut self, amount: u64) -> Result<(), StoreRuntimeError> {
+        self.inner
+            .charge_observed(self.materialization_work_dimension, amount)
+    }
+
+    pub fn reserve(
+        &mut self,
+        phase: StorePhaseKey,
+        dimension: StoreDimensionKey,
+        bytes: u64,
+    ) -> Result<CanonicalReservation<'activation, O>, StoreRuntimeError> {
+        self.inner.reserve(phase, dimension, bytes)
+    }
+
+    pub fn resize(
+        &mut self,
+        reservation: &mut CanonicalReservation<'activation, O>,
+        bytes: u64,
+    ) -> Result<(), StoreRuntimeError> {
+        self.inner.resize(reservation, bytes)
+    }
+
+    pub fn validate_live_owner(
+        &mut self,
+        reservation: &CanonicalReservation<'activation, O>,
+    ) -> Result<(), StoreRuntimeError> {
+        self.inner.validate_live_owner(reservation)
+    }
+}
+
 impl<'activation, O, PP, U, L> CanonicalLane<'activation, O, PP, U, L>
 where
     O: OperationOwner,
@@ -439,15 +507,19 @@ where
 
     pub fn control_checkpoint<'borrow>(
         &'borrow mut self,
-    ) -> Result<CanonicalControlCheckpoint<'borrow, 'activation, O, PP, U>, StoreRuntimeError> {
+    ) -> Result<CanonicalMaterializationCheckpoint<'borrow, 'activation, O, PP, U>, StoreRuntimeError>
+    {
         if let Some(cause) = preserved_fault(self.first_fault) {
             return Err(cause);
         }
         match self.assembly.try_control_checkpoint() {
-            Ok(raw) => Ok(CanonicalControlCheckpoint {
-                raw,
-                first_fault: self.first_fault,
-                activation: PhantomData,
+            Ok(raw) => Ok(CanonicalMaterializationCheckpoint {
+                inner: CanonicalControlCheckpoint {
+                    raw,
+                    first_fault: self.first_fault,
+                    activation: PhantomData,
+                },
+                materialization_work_dimension: self.materialization_work_dimension,
             }),
             Err(cause) => preserve_first_fault(self.first_fault, Err(cause)),
         }
@@ -456,7 +528,6 @@ where
     pub fn try_retain_sequence<T, Tag>(
         &mut self,
         plan: SequencePlan<T>,
-        work_dimension: StoreDimensionKey,
         tag: Tag,
         build: impl for<'control> FnMut(
             &mut SequenceWriter<T>,
@@ -475,10 +546,6 @@ where
                     .map(|_| ())
                     .map_err(StoreRuntimeError::Plan),
             );
-            note_later_contract(
-                self.first_fault,
-                validate_dimension_contract(&self.assembly.domain, work_dimension),
-            );
             return preserve_first_fault(
                 self.first_fault,
                 finish_scoped_callback(build, Err(cause)),
@@ -486,7 +553,7 @@ where
         }
         let result = self.assembly.try_retain_canonical_sequence_controlled(
             plan,
-            work_dimension,
+            self.materialization_work_dimension,
             tag,
             |writer, control| {
                 build
@@ -502,7 +569,6 @@ where
     pub fn try_retain_bytes<Tag>(
         &mut self,
         plan: BytesPlan,
-        work_dimension: StoreDimensionKey,
         tag: Tag,
         build: impl for<'control> FnMut(
             &mut BytesWriter,
@@ -520,10 +586,6 @@ where
                     .map(|_| ())
                     .map_err(StoreRuntimeError::Plan),
             );
-            note_later_contract(
-                self.first_fault,
-                validate_dimension_contract(&self.assembly.domain, work_dimension),
-            );
             return preserve_first_fault(
                 self.first_fault,
                 finish_scoped_callback(build, Err(cause)),
@@ -531,7 +593,7 @@ where
         }
         let result = self.assembly.try_retain_canonical_bytes_controlled(
             plan,
-            work_dimension,
+            self.materialization_work_dimension,
             tag,
             |writer, control| {
                 build
@@ -547,7 +609,6 @@ where
     pub fn try_retain_utf8<Tag>(
         &mut self,
         plan: Utf8Plan,
-        work_dimension: StoreDimensionKey,
         tag: Tag,
         build: impl for<'control> FnMut(
             &mut Utf8Writer,
@@ -565,10 +626,6 @@ where
                     .map(|_| ())
                     .map_err(StoreRuntimeError::Plan),
             );
-            note_later_contract(
-                self.first_fault,
-                validate_dimension_contract(&self.assembly.domain, work_dimension),
-            );
             return preserve_first_fault(
                 self.first_fault,
                 finish_scoped_callback(build, Err(cause)),
@@ -576,7 +633,7 @@ where
         }
         let result = self.assembly.try_retain_canonical_utf8_controlled(
             plan,
-            work_dimension,
+            self.materialization_work_dimension,
             tag,
             |writer, control| {
                 build
@@ -592,7 +649,6 @@ where
     pub fn try_retain_records<Tag>(
         &mut self,
         plan: RecordPlan,
-        work_dimension: StoreDimensionKey,
         tag: Tag,
         build: impl for<'control> FnMut(
             &mut CanonicalRecordWriter,
@@ -610,10 +666,6 @@ where
                     .map(|_| ())
                     .map_err(StoreRuntimeError::Plan),
             );
-            note_later_contract(
-                self.first_fault,
-                validate_dimension_contract(&self.assembly.domain, work_dimension),
-            );
             return preserve_first_fault(
                 self.first_fault,
                 finish_scoped_callback(build, Err(cause)),
@@ -621,7 +673,7 @@ where
         }
         let result = self.assembly.try_retain_canonical_records_controlled(
             plan,
-            work_dimension,
+            self.materialization_work_dimension,
             tag,
             |writer, control| {
                 build
@@ -634,18 +686,37 @@ where
         preserve_first_fault(self.first_fault, finish_scoped_callback(build, result))
     }
 
-    pub fn accept<T, E>(&mut self, output: T) -> CanonicalMaterialization<T, E> {
+    pub fn complete<T, E, Kind, Tag>(
+        self,
+        root: CanonicalStoreRef<Kind, Tag>,
+        output: T,
+    ) -> CanonicalMaterialization<'activation, T, E, Kind, Tag>
+    where
+        Tag: Copy + Send + Sync + 'static,
+    {
+        if !self.assembly.contains_activation_canonical_root(root) {
+            let _ = preserve_first_fault::<()>(
+                self.first_fault,
+                Err(StoreRuntimeError::InvalidSourceSlot),
+            );
+        }
         CanonicalMaterialization {
-            state: CanonicalMaterializationState::Activated(output),
+            state: CanonicalMaterializationState::Activated { root, output },
+            lane: PhantomData,
         }
     }
 
-    pub fn reject<T, E>(&mut self, cause: E, stable_code: u32) -> CanonicalMaterialization<T, E> {
+    pub fn reject<T, E, Kind, Tag>(
+        self,
+        cause: E,
+        stable_code: u32,
+    ) -> CanonicalMaterialization<'activation, T, E, Kind, Tag> {
         CanonicalMaterialization {
             state: CanonicalMaterializationState::Rejected(VerifiedRejection {
                 cause,
                 failure_code: PreparationFailureCode::domain(stable_code),
             }),
+            lane: PhantomData,
         }
     }
 }

@@ -2146,7 +2146,7 @@ where
     #[cfg(feature = "_u4-activation")]
     fn validate_activation_dimensions(
         &self,
-        dimensions: [StoreDimensionKey; 2],
+        dimensions: [StoreDimensionKey; 3],
     ) -> Result<(), StoreRuntimeError> {
         for dimension in dimensions {
             self.validate_dimension_key(dimension)?;
@@ -2730,6 +2730,17 @@ where
 
     pub(super) fn canonical_commitment_len(&self) -> usize {
         self.raw.canonical_commitment_len()
+    }
+
+    #[cfg(feature = "_u4-activation")]
+    fn contains_activation_canonical_root<Kind, Tag>(
+        &self,
+        root: CanonicalStoreRef<Kind, Tag>,
+    ) -> bool
+    where
+        Tag: Copy + Send + Sync + 'static,
+    {
+        self.raw.contains_canonical_member(root.raw)
     }
 
     /// Returns the number of outcome-evidence table members.

@@ -15,7 +15,13 @@ fn verified_preflight_rejection_never_opens_canonical_storage() {
                 assert_eq!(account.snapshot(), after_start);
                 preflight.reject(PreflightRejection::Unsupported, 11)
             },
-            |_lane| -> CanonicalMaterialization<(), PreflightRejection> {
+            |_lane| -> CanonicalMaterialization<
+                '_,
+                (),
+                PreflightRejection,
+                ScalarSequence<u8>,
+                SequenceTag,
+            > {
                 called.set(true);
                 unreachable!("verified rejection cannot expose a canonical lane")
             },
@@ -84,7 +90,7 @@ fn clean_preflight_panic_prepares_minimal_fallback_without_poisoning() {
             |_preflight| -> CanonicalPreflightDecision<()> {
                 panic!("recoverable preflight callback panic")
             },
-            |_lane| -> CanonicalMaterialization<(), ()> {
+            |_lane| -> CanonicalMaterialization<'_, (), (), ScalarSequence<u8>, SequenceTag> {
                 unreachable!("preflight panic must skip materialization")
             },
         )
@@ -134,9 +140,13 @@ fn later_preflight_contract_fault_contains_an_earlier_control_fault() {
                 }
                 preflight.reject(PreflightRejection::Unsupported, 11)
             },
-            |_lane| -> CanonicalMaterialization<(), PreflightRejection> {
-                unreachable!("preflight rejection cannot materialize")
-            },
+            |_lane| -> CanonicalMaterialization<
+                '_,
+                (),
+                PreflightRejection,
+                ScalarSequence<u8>,
+                SequenceTag,
+            > { unreachable!("preflight rejection cannot materialize") },
         );
 
     assert!(result.is_err());
@@ -156,7 +166,7 @@ fn foreign_preflight_envelope_is_contained_instead_of_reported() {
         .into_session_outcome_owner(evidence_plan(keys_a, 1))
         .plan_and_activate(
             |preflight| preflight.seal::<()>(canonical_plan(keys_b, 1)),
-            |_lane| -> CanonicalMaterialization<(), ()> {
+            |_lane| -> CanonicalMaterialization<'_, (), (), ScalarSequence<u8>, SequenceTag> {
                 called.set(true);
                 unreachable!("foreign envelope cannot expose a canonical lane")
             },
@@ -187,7 +197,7 @@ fn rollback_safe_contract_open_error_is_contained_before_materialization() {
         .into_session_outcome_owner(evidence_plan(keys, TEST_MAX_FAILURE_EVIDENCE_MEMBERS + 1))
         .plan_and_activate(
             |preflight| preflight.seal::<()>(canonical_plan(keys, 1)),
-            |_lane| -> CanonicalMaterialization<(), ()> {
+            |_lane| -> CanonicalMaterialization<'_, (), (), ScalarSequence<u8>, SequenceTag> {
                 materialization_called.set(true);
                 unreachable!("a contract-invalid publication plan cannot expose a canonical lane")
             },
@@ -216,7 +226,13 @@ fn uncalled_materialization_callback_drop_panic_is_contained() {
         .into_session_outcome_owner(evidence_plan(keys, 1))
         .plan_and_activate(
             |preflight| preflight.reject(PreflightRejection::Unsupported, 11),
-            move |_lane| -> CanonicalMaterialization<(), PreflightRejection> {
+            move |_lane| -> CanonicalMaterialization<
+                '_,
+                (),
+                PreflightRejection,
+                ScalarSequence<u8>,
+                SequenceTag,
+            > {
                 let _capture = &capture;
                 unreachable!("preflight rejection cannot invoke materialization")
             },
@@ -247,7 +263,7 @@ fn preflight_body_and_capture_drop_panics_are_isolated() {
                 let _capture = &capture;
                 panic!("contained preflight callback panic")
             },
-            |_lane| -> CanonicalMaterialization<(), ()> {
+            |_lane| -> CanonicalMaterialization<'_, (), (), ScalarSequence<u8>, SequenceTag> {
                 unreachable!("preflight panic must skip materialization")
             },
         );
@@ -268,12 +284,11 @@ fn materialization_callback_capture_is_destroyed_before_the_activated_outcome_es
         .into_session_outcome_owner(evidence_plan(keys, 1))
         .plan_and_activate(
             |preflight| preflight.seal::<()>(canonical_plan(keys, 1)),
-            move |lane| {
+            move |mut lane| {
                 let _capture = &capture;
                 let root = lane
                     .try_retain_sequence(
                         SequencePlan::<u8>::new(1).unwrap(),
-                        keys.dimension,
                         SequenceTag,
                         |writer, _control| {
                             writer.push(7)?;
@@ -281,7 +296,7 @@ fn materialization_callback_capture_is_destroyed_before_the_activated_outcome_es
                         },
                     )
                     .unwrap();
-                lane.accept::<_, ()>(root)
+                lane.complete::<_, (), _, _>(root, root)
             },
         )
         .unwrap();
@@ -301,12 +316,11 @@ fn materialization_callback_drop_panic_is_contained() {
         .into_session_outcome_owner(evidence_plan(keys, 1))
         .plan_and_activate(
             |preflight| preflight.seal::<()>(canonical_plan(keys, 1)),
-            move |lane| {
+            move |mut lane| {
                 let _capture = &capture;
                 let root = lane
                     .try_retain_sequence(
                         SequencePlan::<u8>::new(1).unwrap(),
-                        keys.dimension,
                         SequenceTag,
                         |writer, _control| {
                             writer.push(7)?;
@@ -314,7 +328,7 @@ fn materialization_callback_drop_panic_is_contained() {
                         },
                     )
                     .unwrap();
-                lane.accept::<_, ()>(root)
+                lane.complete::<_, (), _, _>(root, root)
             },
         );
 
@@ -340,7 +354,7 @@ fn materialization_body_and_capture_drop_panics_are_isolated() {
         .into_session_outcome_owner(evidence_plan(keys, 1))
         .plan_and_activate(
             |preflight| preflight.seal::<()>(canonical_plan(keys, 1)),
-            move |_lane| -> CanonicalMaterialization<(), ()> {
+            move |_lane| -> CanonicalMaterialization<'_, (), (), ScalarSequence<u8>, SequenceTag> {
                 let _capture = &capture;
                 panic!("contained materialization callback panic")
             },
@@ -360,11 +374,10 @@ fn materialization_rejection_eagerly_cleans_canonical_storage() {
         .into_session_outcome_owner(evidence_plan(keys, 1))
         .plan_and_activate(
             |preflight| preflight.seal(canonical_plan(keys, 1)),
-            |lane| {
+            |mut lane| {
                 let _ = lane
                     .try_retain_sequence(
                         SequencePlan::<u8>::new(1).unwrap(),
-                        keys.dimension,
                         SequenceTag,
                         |writer, _control| {
                             writer.push(9)?;
@@ -372,7 +385,10 @@ fn materialization_rejection_eagerly_cleans_canonical_storage() {
                         },
                     )
                     .unwrap();
-                lane.reject::<(), _>(MaterializationRejection::Semantic, 41)
+                lane.reject::<(), _, ScalarSequence<u8>, SequenceTag>(
+                    MaterializationRejection::Semantic,
+                    41,
+                )
             },
         )
         .unwrap();
@@ -437,11 +453,10 @@ fn materialization_product_graph_fault_is_sticky_through_rejection() {
         .into_session_outcome_owner(evidence_plan(keys, 1))
         .plan_and_activate(
             |preflight| preflight.seal(canonical_plan(keys, 1)),
-            |lane| {
+            |mut lane| {
                 let _ = lane
                     .try_retain_sequence(
                         SequencePlan::<u8>::new(1).unwrap(),
-                        keys.dimension,
                         SequenceTag,
                         |writer, _control| {
                             writer.push(9)?;
@@ -452,7 +467,6 @@ fn materialization_product_graph_fault_is_sticky_through_rejection() {
                 let cause = lane
                     .try_retain_sequence(
                         SequencePlan::<u8>::new(1).unwrap(),
-                        keys.dimension,
                         SequenceTag,
                         |writer, _control| {
                             writer.push(10)?;
@@ -472,7 +486,10 @@ fn materialization_product_graph_fault_is_sticky_through_rejection() {
                         destination: StoreDestination::Canonical
                     })
                 ));
-                lane.reject::<(), _>(MaterializationRejection::Semantic, 41)
+                lane.reject::<(), _, ScalarSequence<u8>, SequenceTag>(
+                    MaterializationRejection::Semantic,
+                    41,
+                )
             },
         )
         .unwrap();
@@ -513,18 +530,20 @@ fn materialization_build_fault_preserves_its_exact_product_graph_code() {
         .into_session_outcome_owner(evidence_plan(keys, 1))
         .plan_and_activate(
             |preflight| preflight.seal(canonical_plan(keys, 1)),
-            |lane| {
+            |mut lane| {
                 let expected = StoreBuildError::domain(73).unwrap();
                 let cause = lane
                     .try_retain_sequence(
                         SequencePlan::<u8>::new(1).unwrap(),
-                        keys.dimension,
                         SequenceTag,
                         |_writer, _control| Err(expected.into()),
                     )
                     .unwrap_err();
                 assert_eq!(cause, StoreRuntimeError::Build(expected));
-                lane.reject::<(), _>(MaterializationRejection::Semantic, 41)
+                lane.reject::<(), _, ScalarSequence<u8>, SequenceTag>(
+                    MaterializationRejection::Semantic,
+                    41,
+                )
             },
         )
         .unwrap();
@@ -546,58 +565,7 @@ fn materialization_build_fault_preserves_its_exact_product_graph_code() {
 }
 
 #[test]
-fn later_contract_fault_upgrades_an_earlier_ordinary_materialization_fault() {
-    let factory = factory(1);
-    let account = account(&factory);
-    let (operation, keys) = operation(&account);
-
-    let result = operation
-        .into_session_outcome_owner(evidence_plan(keys, 1))
-        .plan_and_activate(
-            |preflight| preflight.seal::<MaterializationRejection>(canonical_plan(keys, 1)),
-            |lane| {
-                let _ = lane
-                    .try_retain_sequence(
-                        SequencePlan::<u8>::new(1).unwrap(),
-                        keys.dimension,
-                        SequenceTag,
-                        |writer, _control| {
-                            writer.push(1)?;
-                            Ok(())
-                        },
-                    )
-                    .unwrap();
-                let ordinary = lane.try_retain_sequence(
-                    SequencePlan::<u8>::new(1).unwrap(),
-                    keys.dimension,
-                    SequenceTag,
-                    |writer, _control| {
-                        writer.push(2)?;
-                        Ok(())
-                    },
-                );
-                assert_slot_limit(ordinary.map(|_| ()), StoreDestination::Canonical);
-
-                let contract = lane.try_retain_sequence(
-                    SequencePlan::<u8>::new(1).unwrap(),
-                    foreign_dimension(),
-                    SequenceTag,
-                    |writer, _control| {
-                        writer.push(3)?;
-                        Ok(())
-                    },
-                );
-                assert_slot_limit(contract.map(|_| ()), StoreDestination::Canonical);
-                lane.reject::<(), _>(MaterializationRejection::Semantic, 21)
-            },
-        );
-
-    assert!(result.is_err());
-    assert!(account.snapshot().poisoned());
-}
-
-#[test]
-fn sealed_activation_plan_rejects_a_foreign_semantic_dimension_before_materialization() {
+fn sealed_activation_plan_rejects_a_foreign_materialization_dimension_before_materialization() {
     let factory = factory(1);
     let account = account(&factory);
     let (operation, keys) = operation(&account);
@@ -606,6 +574,46 @@ fn sealed_activation_plan_rejects_a_foreign_semantic_dimension_before_materializ
     let activation_plan = CanonicalActivationPlan::new(
         table,
         1,
+        foreign_dimension(),
+        keys.dimension,
+        keys.dimension,
+        NonZeroU64::new(1).unwrap(),
+    )
+    .unwrap();
+    let mut activation_plan = Some(activation_plan);
+
+    let result = operation
+        .into_session_outcome_owner(evidence_plan(keys, 1))
+        .plan_and_activate(
+            move |preflight| {
+                preflight.seal::<()>(
+                    activation_plan
+                        .take()
+                        .expect("the sealed activation plan is consumed once"),
+                )
+            },
+            |lane| {
+                materialize_called.set(true);
+                lane.reject::<(), (), ScalarSequence<u8>, SequenceTag>((), 1)
+            },
+        );
+
+    assert!(result.is_err());
+    assert!(!materialize_called.get());
+    assert!(account.snapshot().poisoned());
+}
+
+#[test]
+fn sealed_activation_plan_rejects_a_foreign_validation_dimension_before_materialization() {
+    let factory = factory(1);
+    let account = account(&factory);
+    let (operation, keys) = operation(&account);
+    let materialize_called = Cell::new(false);
+    let table = RetainedStoreBlockTablePlan::new(writer_plan(keys, 2, 2), 1, 1).unwrap();
+    let activation_plan = CanonicalActivationPlan::new(
+        table,
+        1,
+        keys.dimension,
         foreign_dimension(),
         keys.dimension,
         NonZeroU64::new(1).unwrap(),
@@ -625,7 +633,7 @@ fn sealed_activation_plan_rejects_a_foreign_semantic_dimension_before_materializ
             },
             |lane| {
                 materialize_called.set(true);
-                lane.accept::<_, ()>(())
+                lane.reject::<(), (), ScalarSequence<u8>, SequenceTag>((), 1)
             },
         );
 
@@ -645,6 +653,7 @@ fn sealed_activation_plan_rejects_a_foreign_commitment_dimension_before_material
         table,
         1,
         keys.dimension,
+        keys.dimension,
         foreign_dimension(),
         NonZeroU64::new(1).unwrap(),
     )
@@ -663,7 +672,7 @@ fn sealed_activation_plan_rejects_a_foreign_commitment_dimension_before_material
             },
             |lane| {
                 materialize_called.set(true);
-                lane.accept::<_, ()>(())
+                lane.reject::<(), (), ScalarSequence<u8>, SequenceTag>((), 1)
             },
         );
 
@@ -682,7 +691,9 @@ fn activation_panic_returns_full_containment_and_quarantines_the_account() {
         .into_session_outcome_owner(evidence_plan(keys, 1))
         .plan_and_activate(
             |preflight| preflight.seal::<()>(canonical_plan(keys, 1)),
-            |_lane| -> CanonicalMaterialization<(), ()> { panic!("contained activation panic") },
+            |_lane| -> CanonicalMaterialization<'_, (), (), ScalarSequence<u8>, SequenceTag> {
+                panic!("contained activation panic")
+            },
         );
     let containment = match result {
         Err(containment) => containment,

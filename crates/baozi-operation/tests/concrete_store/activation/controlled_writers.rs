@@ -10,7 +10,7 @@ fn activation_reservation_survives_reborrows_for_multiple_canonical_writes() {
         .into_session_outcome_owner(evidence_plan(keys, 1))
         .plan_and_activate(
             |preflight| preflight.seal::<()>(canonical_plan(keys, 2)),
-            |lane| {
+            |mut lane| {
                 let mut reservation = {
                     let mut checkpoint = lane.control_checkpoint().unwrap();
                     checkpoint.reserve(keys.phase, keys.dimension, 2).unwrap()
@@ -19,7 +19,6 @@ fn activation_reservation_survives_reborrows_for_multiple_canonical_writes() {
                 let _first = lane
                     .try_retain_sequence(
                         SequencePlan::<u8>::new(1).unwrap(),
-                        keys.dimension,
                         SequenceTag,
                         |writer, _control| {
                             writer.push(1)?;
@@ -37,7 +36,6 @@ fn activation_reservation_survives_reborrows_for_multiple_canonical_writes() {
                 let second = lane
                     .try_retain_sequence(
                         SequencePlan::<u8>::new(1).unwrap(),
-                        keys.dimension,
                         SequenceTag,
                         |writer, _control| {
                             writer.push(2)?;
@@ -51,7 +49,7 @@ fn activation_reservation_survives_reborrows_for_multiple_canonical_writes() {
                     checkpoint.resize(&mut reservation, 0).unwrap();
                 }
                 drop(reservation);
-                lane.accept::<_, ()>(second)
+                lane.complete::<_, (), _, _>(second, second)
             },
         )
         .unwrap();

@@ -227,12 +227,19 @@ where
     failure_work: FailureEvidenceWorkBudget,
 }
 
-fn finish_rejected<O, PP, U, T, E, L>(
+#[allow(
+    clippy::type_complexity,
+    reason = "the typed canonical root must remain coupled to every activation outcome"
+)]
+fn finish_rejected<O, PP, U, T, E, CanonicalKind, CanonicalTag, L>(
     assembly: RetainedStorePublicationAssembly<O, PP, U, L>,
     failure_work: FailureEvidenceWorkBudget,
     cause: StoreCanonicalRejection<E>,
     failure_code: PreparationFailureCode,
-) -> Result<CanonicalActivationOutcome<O, PP, U, T, E, L>, StoreActivationContainment>
+) -> Result<
+    CanonicalActivationOutcome<O, PP, U, T, E, CanonicalKind, CanonicalTag, L>,
+    StoreActivationContainment,
+>
 where
     O: OperationOwner,
     PP: ProgressPhase,
@@ -341,9 +348,11 @@ fn drop_verified_rejection<E>(rejection: VerifiedRejection<E>) -> Result<(), ()>
     drop_scoped_value(cause)
 }
 
-fn drop_materialization<T, E>(materialized: CanonicalMaterialization<T, E>) -> Result<(), ()> {
-    match materialized.state {
-        CanonicalMaterializationState::Activated(output) => drop_scoped_value(output),
+fn drop_materialization<T, E, Kind, Tag>(
+    materialized: CanonicalMaterializationState<T, E, Kind, Tag>,
+) -> Result<(), ()> {
+    match materialized {
+        CanonicalMaterializationState::Activated { root: _, output } => drop_scoped_value(output),
         CanonicalMaterializationState::Rejected(rejection) => drop_verified_rejection(rejection),
     }
 }
@@ -587,6 +596,17 @@ where
     activation: PhantomData<fn(&'activation ()) -> &'activation ()>,
 }
 
+/// Materialization checkpoint whose observed work is bound to the sealed activation plan.
+pub struct CanonicalMaterializationCheckpoint<'borrow, 'activation, O, PP, U>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    inner: CanonicalControlCheckpoint<'borrow, 'activation, O, PP, U>,
+    materialization_work_dimension: StoreDimensionKey,
+}
+
 /// Scoped live-storage reservation for canonical construction scratch.
 ///
 /// The invariant lifetime brand prevents a reservation from becoming part of a preflight decision
@@ -603,8 +623,15 @@ where
 
 /// Opaque result returned by the scoped preflight callback.
 #[must_use = "return the sealed activation or verified rejection to the owning session"]
-pub struct CanonicalPreflightDecision<E> {
+pub struct CanonicalPreflightDecision<'scope, E> {
     state: CanonicalPreflightState<E>,
+    scope: PhantomData<fn(&'scope ()) -> &'scope ()>,
+}
+
+impl<E> CanonicalPreflightDecision<'_, E> {
+    fn into_state(self) -> CanonicalPreflightState<E> {
+        self.state
+    }
 }
 
 #[allow(
@@ -635,6 +662,7 @@ impl CanonicalActivationPlan {
     pub fn new(
         canonical_plan: RetainedStoreBlockTablePlan,
         expected_materialized_blocks: usize,
+        materialization_work_dimension: StoreDimensionKey,
         validation_work_dimension: StoreDimensionKey,
         canonical_commitment_dimension: StoreDimensionKey,
         canonical_commitment_amount: NonZeroU64,
@@ -647,7 +675,8 @@ impl CanonicalActivationPlan {
         Ok(Self {
             canonical_plan,
             intent: CanonicalActivationIntent {
-                work_dimension: validation_work_dimension,
+                materialization_work_dimension,
+                validation_work_dimension,
                 commitment_dimension: canonical_commitment_dimension,
                 commitment_amount: canonical_commitment_amount.get(),
                 expected_materialized_blocks,
@@ -662,7 +691,8 @@ impl CanonicalActivationPlan {
 
 /// Single-use accounting and exact-shape intent stored inside the sealed preflight decision.
 struct CanonicalActivationIntent {
-    work_dimension: StoreDimensionKey,
+    materialization_work_dimension: StoreDimensionKey,
+    validation_work_dimension: StoreDimensionKey,
     commitment_dimension: StoreDimensionKey,
     commitment_amount: u64,
     expected_materialized_blocks: usize,
@@ -682,16 +712,27 @@ where
 {
     assembly: &'lane mut RetainedStorePublicationAssembly<O, PP, U, L>,
     first_fault: &'lane mut Option<ActivationFirstFault>,
+    materialization_work_dimension: StoreDimensionKey,
 }
 
 /// Opaque result returned by the scoped materialization callback.
 #[must_use = "return the materialized candidate or typed rejection to the owning session"]
-pub struct CanonicalMaterialization<T, E> {
-    state: CanonicalMaterializationState<T, E>,
+pub struct CanonicalMaterialization<'lane, T, E, Kind, Tag> {
+    state: CanonicalMaterializationState<T, E, Kind, Tag>,
+    lane: PhantomData<fn(&'lane ()) -> &'lane ()>,
 }
 
-enum CanonicalMaterializationState<T, E> {
-    Activated(T),
+impl<T, E, Kind, Tag> CanonicalMaterialization<'_, T, E, Kind, Tag> {
+    fn into_state(self) -> CanonicalMaterializationState<T, E, Kind, Tag> {
+        self.state
+    }
+}
+
+enum CanonicalMaterializationState<T, E, Kind, Tag> {
+    Activated {
+        root: CanonicalStoreRef<Kind, Tag>,
+        output: T,
+    },
     Rejected(VerifiedRejection<E>),
 }
 
@@ -706,13 +747,21 @@ pub enum StoreCanonicalRejection<E> {
 ///
 /// The activation seam deliberately exposes no writable assembly or raw ownership bridge.
 #[must_use = "the candidate must be prepared or explicitly downgraded"]
-pub struct ActivatedCanonicalStoreSession<O, PP, U, T, L = FreshStoreLineage>
-where
+pub struct ActivatedCanonicalStoreSession<
+    O,
+    PP,
+    U,
+    T,
+    CanonicalKind,
+    CanonicalTag,
+    L = FreshStoreLineage,
+> where
     O: OperationOwner,
     PP: ProgressPhase,
     U: ProgressUnit,
 {
     assembly: RetainedStorePublicationAssembly<O, PP, U, L>,
+    canonical_root: CanonicalStoreRef<CanonicalKind, CanonicalTag>,
     output: T,
     failure_work: FailureEvidenceWorkBudget,
     intent: CanonicalActivationIntent,
@@ -1115,13 +1164,21 @@ where
 
 /// Scoped activation disposition. No raw assembly is present in any outcome.
 #[must_use = "every branch retains its exact linear session owner"]
-pub enum CanonicalActivationOutcome<O, PP, U, T, E, L = FreshStoreLineage>
-where
+pub enum CanonicalActivationOutcome<
+    O,
+    PP,
+    U,
+    T,
+    E,
+    CanonicalKind,
+    CanonicalTag,
+    L = FreshStoreLineage,
+> where
     O: OperationOwner,
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    Activated(ActivatedCanonicalStoreSession<O, PP, U, T, L>),
+    Activated(ActivatedCanonicalStoreSession<O, PP, U, T, CanonicalKind, CanonicalTag, L>),
     Rejected(RejectedCanonicalStoreSession<O, PP, U, E>),
     NeverActivated(NeverActivatedStoreSession<O, PP, U, E, L>),
     Fallback(VerifiedMinimalFallback<StoreRuntimeError>),
