@@ -263,11 +263,11 @@ where
                     };
                     Ok(CanonicalCentralValidationOutcome::Candidate(
                         CanonicalCandidateStoreSession {
-                            _validated: validated,
                             destinations,
                             proof,
                             output: ManuallyDrop::into_inner(output),
                             _failure_work: failure_work,
+                            _validated: validated,
                         },
                     ))
                 }

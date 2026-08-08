@@ -966,7 +966,34 @@ where
     charges: [(D, u64); N],
     remaining: [u64; N],
     active: bool,
+    faulted: bool,
     operation_owner: PhantomData<fn() -> O>,
+}
+
+/// Result of transferring one completed work prefix out of a linear permit.
+///
+/// A ledger limit is checked against both public consumed evidence and the still-pending suffix.
+/// The check can therefore fail after the requested prefix has already completed in the caller.
+/// That prefix remains non-refundable and this result tells wrapper permits whether their mirrored
+/// remaining count must advance even though the ledger cause remains terminal.
+#[must_use = "linear work completion must preserve both progress and its ledger outcome"]
+pub(crate) enum LinearWorkCompletion<D> {
+    Completed,
+    CompletedWithLedgerFailure(LedgerCause<D>),
+    NotCompleted(LedgerCause<D>),
+}
+
+impl<D> LinearWorkCompletion<D> {
+    pub(crate) const fn prefix_was_applied(&self) -> bool {
+        matches!(self, Self::Completed | Self::CompletedWithLedgerFailure(_))
+    }
+
+    pub(crate) fn into_result(self) -> Result<(), LedgerCause<D>> {
+        match self {
+            Self::Completed => Ok(()),
+            Self::CompletedWithLedgerFailure(cause) | Self::NotCompleted(cause) => Err(cause),
+        }
+    }
 }
 
 impl<O, P, D, const N: usize> LinearWorkBatchPermit<O, P, D, N>
@@ -976,71 +1003,103 @@ where
     D: Copy + Ord + fmt::Debug,
 {
     pub(crate) fn complete(&mut self, index: usize, amount: u64) -> Result<(), LedgerCause<D>> {
-        if !self.active || index >= N || amount > self.remaining[index] {
-            return Err(LedgerCause::InactiveLinearWorkPermit);
+        self.complete_with_outcome(index, amount).into_result()
+    }
+
+    pub(crate) fn complete_with_outcome(
+        &mut self,
+        index: usize,
+        amount: u64,
+    ) -> LinearWorkCompletion<D> {
+        if !self.active || self.faulted || index >= N || amount > self.remaining[index] {
+            return LinearWorkCompletion::NotCompleted(LedgerCause::InactiveLinearWorkPermit);
         }
         let mut state = lock(&self.state);
         if let Err(cause) = Ledger::<O, P, D>::ensure_open(&state) {
             state.linear_work_faulted = true;
-            return Err(cause);
+            self.faulted = true;
+            return LinearWorkCompletion::NotCompleted(cause);
         }
         let position = self.positions[index];
         let (dimension, _) = self.charges[index];
         let Some(entry) = state.dimensions.get(position) else {
             state.linear_work_faulted = true;
-            return Err(LedgerCause::FinalSnapshotShapeMismatch);
+            self.faulted = true;
+            return LinearWorkCompletion::NotCompleted(LedgerCause::FinalSnapshotShapeMismatch);
         };
         if entry.dimension != dimension || entry.state.pending_consumed < amount {
             state.linear_work_faulted = true;
-            return Err(LedgerCause::InactiveLinearWorkPermit);
+            self.faulted = true;
+            return LinearWorkCompletion::NotCompleted(LedgerCause::InactiveLinearWorkPermit);
         }
         let Some(consumed) = entry.state.consumed.checked_add(amount) else {
             state.linear_work_faulted = true;
-            return Err(LedgerCause::ArithmeticOverflow {
+            self.faulted = true;
+            return LinearWorkCompletion::NotCompleted(LedgerCause::ArithmeticOverflow {
                 class: CounterClass::Consumed,
                 dimension,
             });
         };
         let pending_consumed = entry.state.pending_consumed - amount;
-        let Some(effective_consumed) = consumed.checked_add(pending_consumed) else {
-            state.linear_work_faulted = true;
-            return Err(LedgerCause::ArithmeticOverflow {
+        let attempted = entry.state.attempted;
+        let consumed_limit = entry.policy.consumed_limit;
+        let terminal_cause = match consumed.checked_add(pending_consumed) {
+            None => Some(LedgerCause::ArithmeticOverflow {
                 class: CounterClass::Consumed,
                 dimension,
-            });
+            }),
+            Some(effective_consumed) if effective_consumed > attempted => {
+                Some(LedgerCause::ConsumedExceedsAttempted {
+                    dimension,
+                    consumed: effective_consumed,
+                    attempted,
+                })
+            }
+            Some(effective_consumed) if effective_consumed > consumed_limit => {
+                Some(LedgerCause::LimitExceeded {
+                    class: CounterClass::Consumed,
+                    dimension,
+                    value: effective_consumed,
+                    limit: consumed_limit,
+                })
+            }
+            Some(_) => None,
         };
-        if effective_consumed > entry.state.attempted {
-            let attempted = entry.state.attempted;
-            state.linear_work_faulted = true;
-            return Err(LedgerCause::ConsumedExceedsAttempted {
-                dimension,
-                consumed: effective_consumed,
-                attempted,
-            });
-        }
-        if effective_consumed > entry.policy.consumed_limit {
-            let limit = entry.policy.consumed_limit;
-            state.linear_work_faulted = true;
-            return Err(LedgerCause::LimitExceeded {
-                class: CounterClass::Consumed,
-                dimension,
-                value: effective_consumed,
-                limit,
-            });
-        }
+
+        // The caller invokes this method only after the physical action has completed. Once the
+        // local envelope is valid, transfer that non-refundable prefix before reporting a terminal
+        // projection failure caused by competing pending capacity.
         let entry = &mut state.dimensions[position];
         entry.state.pending_consumed = pending_consumed;
         entry.state.consumed = consumed;
         self.remaining[index] -= amount;
+        let completed_prefix_exceeds_attempted = consumed > attempted;
+        let mut completion_failure = terminal_cause;
         if self.remaining.iter().all(|remaining| *remaining == 0) {
-            let Some(active) = state.active_linear_work_permits.checked_sub(1) else {
-                state.linear_work_faulted = true;
-                return Err(LedgerCause::InactiveLinearWorkPermit);
-            };
-            state.active_linear_work_permits = active;
-            self.active = false;
+            match state.active_linear_work_permits.checked_sub(1) {
+                Some(active) => {
+                    state.active_linear_work_permits = active;
+                    self.active = false;
+                }
+                None => {
+                    state.linear_work_faulted = true;
+                    if completion_failure.is_none() {
+                        completion_failure = Some(LedgerCause::InactiveLinearWorkPermit);
+                    }
+                }
+            }
         }
-        Ok(())
+        if let Some(cause) = completion_failure {
+            // A projection can fail only because the unfinished suffix is still reserved. Once
+            // that suffix is dropped, a completed prefix inside `attempted` remains a valid final
+            // snapshot and the caller's sticky Ledger cause rejects the operation. Only an actual
+            // prefix outside the attempted envelope is a persistent evidence-shape fault.
+            state.linear_work_faulted |= completed_prefix_exceeds_attempted;
+            self.faulted = true;
+            LinearWorkCompletion::CompletedWithLedgerFailure(cause)
+        } else {
+            LinearWorkCompletion::Completed
+        }
     }
 }
 
@@ -1381,6 +1440,7 @@ where
             charges: *charges,
             remaining: charges.map(|(_, amount)| amount),
             active,
+            faulted: false,
             operation_owner: PhantomData,
         })
     }
@@ -1402,6 +1462,17 @@ where
                     class: CounterClass::Consumed,
                     dimension,
                 })?;
+        if value > entry.state.attempted {
+            return Err(LedgerCause::ConsumedExceedsAttempted {
+                dimension,
+                consumed: value,
+                attempted: entry.state.attempted,
+            });
+        }
+        // `amount` describes work that has already completed. Pending capacity can reject the
+        // competing authority, but it cannot erase a non-refundable observed prefix that remains
+        // inside the caller's attempted-work envelope.
+        entry.state.consumed = value;
         let effective = value.checked_add(entry.state.pending_consumed).ok_or(
             LedgerCause::ArithmeticOverflow {
                 class: CounterClass::Consumed,
@@ -1416,9 +1487,6 @@ where
             });
         }
         if effective > policy.consumed_limit {
-            if entry.state.pending_consumed == 0 {
-                entry.state.consumed = value;
-            }
             return Err(LedgerCause::LimitExceeded {
                 class: CounterClass::Consumed,
                 dimension,
@@ -1426,7 +1494,6 @@ where
                 limit: policy.consumed_limit,
             });
         }
-        entry.state.consumed = value;
         Ok(())
     }
 

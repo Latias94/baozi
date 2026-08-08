@@ -104,6 +104,23 @@ fn activation_shape_with_validation_work(
     )
 }
 
+fn activation_shape_with_semantic_preflight_work(
+    keys: TestKeys,
+    canonical_blocks: usize,
+    evidence_blocks: usize,
+    semantic_preflight_work: u64,
+) -> TestActivation {
+    activation_shape_with_capacity_and_preflight_and_validation_work(
+        keys,
+        canonical_blocks,
+        canonical_blocks,
+        keys,
+        evidence_blocks,
+        semantic_preflight_work,
+        NonZeroU64::MIN,
+    )
+}
+
 fn activation_shape(
     keys: TestKeys,
     canonical_blocks: usize,
@@ -137,12 +154,33 @@ fn activation_shape_with_capacity_and_validation_work(
     evidence_blocks: usize,
     validation_work: NonZeroU64,
 ) -> TestActivation {
+    activation_shape_with_capacity_and_preflight_and_validation_work(
+        canonical_keys,
+        canonical_capacity,
+        expected_materialized_blocks,
+        evidence_keys,
+        evidence_blocks,
+        0,
+        validation_work,
+    )
+}
+
+fn activation_shape_with_capacity_and_preflight_and_validation_work(
+    canonical_keys: TestKeys,
+    canonical_capacity: usize,
+    expected_materialized_blocks: usize,
+    evidence_keys: TestKeys,
+    evidence_blocks: usize,
+    semantic_preflight_work: u64,
+    validation_work: NonZeroU64,
+) -> TestActivation {
     let canonical = CanonicalTableShape::new(canonical_capacity, canonical_capacity).unwrap();
     let evidence = CanonicalTableShape::new(evidence_blocks, evidence_blocks).unwrap();
     let requirements = CanonicalActivationRequirements::new(
         canonical,
         evidence,
         expected_materialized_blocks,
+        semantic_preflight_work,
         validation_work,
     )
     .unwrap();
@@ -171,6 +209,7 @@ fn activation_shape_with_dimensions(
         CanonicalTableShape::new(1, 1).unwrap(),
         CanonicalTableShape::new(1, 1).unwrap(),
         1,
+        0,
         NonZeroU64::MIN,
     )
     .unwrap();
@@ -199,6 +238,7 @@ fn activation_requirements_reject_impossible_exact_shapes() {
             CanonicalTableShape::new(1, 1).unwrap(),
             CanonicalTableShape::new(1, 1).unwrap(),
             0,
+            0,
             NonZeroU64::MIN,
         ),
         Err(StorePlanError::InvalidBlockTable)
@@ -208,6 +248,7 @@ fn activation_requirements_reject_impossible_exact_shapes() {
             CanonicalTableShape::new(1, 1).unwrap(),
             CanonicalTableShape::new(1, 1).unwrap(),
             2,
+            0,
             NonZeroU64::MIN,
         ),
         Err(StorePlanError::InvalidBlockTable)
@@ -217,6 +258,7 @@ fn activation_requirements_reject_impossible_exact_shapes() {
             CanonicalTableShape::new(1, 0).unwrap(),
             CanonicalTableShape::new(1, 1).unwrap(),
             1,
+            0,
             NonZeroU64::MIN,
         ),
         Err(StorePlanError::InvalidBlockTable)
@@ -237,10 +279,14 @@ fn structural_work_requirement_counts_operation_owned_share_actions() {
     let expanded_evidence_work = activation_shape(keys, 4, 2)
         .requirements
         .structural_work_requirement();
+    let pre_activation_work = activation_shape(keys, 4, 1)
+        .requirements
+        .pre_activation_structural_work_requirement();
 
     assert_eq!(work, 24);
     assert_eq!(expanded_canonical_work, 26);
     assert_eq!(expanded_evidence_work, 26);
+    assert_eq!(pre_activation_work, 8);
     drop(operation);
     assert_eq!(account.snapshot().live_retained_allocations(), 0);
 }

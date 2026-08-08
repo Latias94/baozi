@@ -99,6 +99,7 @@ where
         };
         let failure_work = self.failure_work;
         let mut first_fault = None;
+        let mut semantic_work_complete = request.semantic_preflight_work == 0;
         let preflight_result = catch_unwind(AssertUnwindSafe(|| {
             let preflight = preflight
                 .as_mut()
@@ -107,6 +108,7 @@ where
                 operation: &mut operation,
                 request: &request,
                 first_fault: &mut first_fault,
+                semantic_work_complete: &mut semantic_work_complete,
             })
             .into_state()
         }));
@@ -193,6 +195,7 @@ where
                     validation_work_dimension,
                     canonical_destination_dimension,
                     outcome_evidence_destination_dimension,
+                    semantic_preflight_work: _,
                     validation_work,
                     expected_materialized_blocks,
                 } = request;
@@ -354,6 +357,22 @@ where
     }
 }
 
+impl<O, PP, U, L> RetainedStoreOperation<O, PP, U, L>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    fn activation_work_control(
+        &mut self,
+        dimension: StoreDimensionKey,
+    ) -> Result<RetainedStoreWorkControl<'_, O, PP, U>, StoreRuntimeError> {
+        self.validate_activation_dimensions([dimension; 4])?;
+        let (raw, _) = self.raw.split_work_control(dimension);
+        Ok(RetainedStoreWorkControl { raw, sticky: None })
+    }
+}
+
 impl<'activation, O, PP, U, L> CanonicalPreflight<'activation, O, PP, U, L>
 where
     O: OperationOwner,
@@ -371,8 +390,64 @@ where
         }
     }
 
+    /// Runs every unit in the sealed semantic-preflight envelope exactly once.
+    ///
+    /// The full attempted envelope is admitted before the first inspector call. Each unit becomes
+    /// consumed only after its inspector returns normally, and control is polled before every unit.
+    /// Returning `false` rejects the semantics but does not short-circuit the remaining evidence.
+    pub fn inspect_semantic_work(
+        &mut self,
+        mut inspect: impl FnMut(u64) -> bool,
+    ) -> Result<bool, StoreRuntimeError> {
+        if let Some(cause) = preserved_fault(self.first_fault) {
+            return Err(cause);
+        }
+        if *self.semantic_work_complete || self.request.semantic_preflight_work == 0 {
+            return preserve_first_fault(
+                self.first_fault,
+                Err(StoreRuntimeError::ConstructionInvariantUnverified),
+            );
+        }
+        let amount = NonZeroU64::new(self.request.semantic_preflight_work)
+            .expect("zero semantic work is handled before admission");
+        let dimension = self.request.materialization_work_dimension;
+        let control = self.operation.activation_work_control(dimension);
+        let mut control = preserve_first_fault(self.first_fault, control)?;
+        let permit = try_begin_canonical_work(&mut control, amount);
+        let mut permit = match permit {
+            Ok(permit) => permit,
+            Err(cause) => {
+                return preserve_first_fault(self.first_fault, Err(cause.into_runtime()));
+            }
+        };
+        let mut accepted = true;
+        for index in 0..amount.get() {
+            if let Err(cause) = permit.poll() {
+                return preserve_first_fault(self.first_fault, Err(cause.into_runtime()));
+            }
+            accepted &= inspect(index);
+            if let Err(cause) = permit.complete_units(NonZeroU64::MIN) {
+                return preserve_first_fault(self.first_fault, Err(cause.into_runtime()));
+            }
+        }
+        if !permit.finish_exact() {
+            return preserve_first_fault(
+                self.first_fault,
+                Err(StoreRuntimeError::ConstructionInvariantUnverified),
+            );
+        }
+        *self.semantic_work_complete = true;
+        Ok(accepted)
+    }
+
     /// Accepts the session-owned activation shape after complete authority-free core preflight.
     pub fn seal<E>(self) -> CanonicalPreflightDecision<'activation, E> {
+        if !*self.semantic_work_complete {
+            let _ = preserve_first_fault::<()>(
+                self.first_fault,
+                Err(StoreRuntimeError::ConstructionInvariantUnverified),
+            );
+        }
         if self.first_fault.is_none() {
             let (phase, dimensions) = self
                 .request

@@ -154,6 +154,7 @@ fn activation_rich_failure_open_recovery_upgrades_the_requested_cause() {
         CanonicalTableShape::new(1, 1).expect("activation canonical shape"),
         CanonicalTableShape::new(1, 1).expect("activation evidence shape"),
         1,
+        0,
         NonZeroU64::MIN,
     )
     .expect("activation requirements");

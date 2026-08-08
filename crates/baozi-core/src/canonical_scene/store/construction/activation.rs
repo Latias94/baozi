@@ -14,7 +14,9 @@ use baozi_operation::{
 #[cfg(test)]
 use baozi_operation::{RetainedStoreFailureTerminalWorkPlan, StorePlanError};
 
-use super::super::validation::{scene_graph_validation_work, validate_scene_graph_metered};
+use super::super::validation::{
+    authored_matrix_scalar_is_valid, scene_graph_validation_work, validate_scene_graph_metered,
+};
 use super::{
     AuthoredMatrixSchema, CANONICAL_BLOCK_COUNT, CanonicalBlockRef, ConstructionBrand,
     DIRECTORY_FIELD_COUNT, DirectorySchema, EVIDENCE_FIELD_COUNT, EVIDENCE_OUTCOME_CANDIDATE,
@@ -166,9 +168,28 @@ fn scene_activation_requirements() -> Result<CanonicalActivationRequirements, Sc
         CanonicalTableShape::new(canonical_blocks, canonical_blocks)?,
         CanonicalTableShape::new(1, 1)?,
         canonical_blocks,
+        scene_activation_preflight_work(),
         NonZeroU64::new(scene_graph_validation_work())
             .expect("the Scene validation work is non-zero"),
     )?)
+}
+
+fn scene_activation_preflight_work() -> u64 {
+    u64::try_from(MATRIX_SCALAR_COUNT).expect("the fixed authored matrix width fits u64")
+}
+
+fn authored_activation_matrix_scalar_is_valid(
+    values: &[f32; MATRIX_SCALAR_COUNT],
+    index: u64,
+) -> bool {
+    let Ok(index) = usize::try_from(index) else {
+        return false;
+    };
+    let matrix_start = index / MATRIX_SCALARS_PER_NODE * MATRIX_SCALARS_PER_NODE;
+    let local_index = index % MATRIX_SCALARS_PER_NODE;
+    values
+        .get(matrix_start..matrix_start + MATRIX_SCALARS_PER_NODE)
+        .is_some_and(|matrix| authored_matrix_scalar_is_valid(matrix, local_index))
 }
 
 fn scene_activation_policy(
@@ -349,6 +370,10 @@ pub(in crate::canonical_scene::store) fn exact_scene_activation_work_limit() -> 
     materialization
         .total()
         .and_then(|work| {
+            work.checked_add(scene_activation_preflight_work())
+                .ok_or(StorePlanError::SizeOverflow)
+        })
+        .and_then(|work| {
             work.checked_add(evidence_work)
                 .ok_or(StorePlanError::SizeOverflow)
         })
@@ -365,6 +390,14 @@ pub(in crate::canonical_scene::store) fn exact_scene_activation_work_limit() -> 
                 .ok_or(StorePlanError::SizeOverflow)
         })
         .expect("the fixed activation total work fits u64")
+}
+
+#[cfg(test)]
+pub(in crate::canonical_scene::store) fn exact_scene_activation_preflight_ordinary_work() -> u64 {
+    scene_activation_requirements()
+        .expect("the fixed activation requirements are valid")
+        .pre_activation_work_requirement()
+        .expect("the fixed activation preflight work fits u64")
 }
 
 impl SceneConstructionOperation {
@@ -410,10 +443,22 @@ impl SceneConstructionOperation {
         let policy = scene_activation_policy(keys)?;
         let (owner, sealer) = raw.into_session_outcome_owner(policy);
         let request = sealer.seal(requirements);
+        let authored_preflight = materialization.authored;
 
         let outcome = owner.plan_and_activate(
             request,
-            |preflight| preflight.seal::<()>(),
+            move |mut preflight| {
+                let valid = preflight
+                    .inspect_semantic_work(|index| {
+                        authored_activation_matrix_scalar_is_valid(&authored_preflight, index)
+                    })
+                    .unwrap_or(false);
+                if valid {
+                    preflight.seal::<()>()
+                } else {
+                    preflight.reject((), SEMANTIC_REJECTION_CODE)
+                }
+            },
             move |mut lane| {
                 let matrices = match lane.try_retain_sequence(
                     materialization.matrices_plan,

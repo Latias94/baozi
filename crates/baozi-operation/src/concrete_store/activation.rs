@@ -47,6 +47,7 @@ mod canonical_validation;
 mod failure_evidence;
 mod fallback;
 mod preflight;
+mod validation_batch;
 
 pub use canonical_validation::{
     CanonicalValidationMember, CanonicalValidationRecordRow, CanonicalValidationSession,
@@ -765,9 +766,9 @@ enum EvidenceBuildCallbackError {
 /// Operation-owned validator for one exact rich-failure evidence graph.
 ///
 /// No raw slice, string, record view, protected dimension, or caller-selected work amount crosses
-/// this boundary. Each concrete data unit advances under a linear permit and is recorded as
-/// consumed only after the caller's inspection closure returns normally. A repeated DAG edge to an
-/// already completed member succeeds without running that member's inspector again.
+/// this boundary. Inspectors advance one concrete data unit at a time; completed prefixes are
+/// flushed to the linear permit at bounded checkpoints and semantic boundaries. A repeated DAG
+/// edge to an already completed member succeeds without running that member's inspector again.
 pub struct FailureEvidenceValidationSession<'session, 'storage, 'control, O, PP, U>
 where
     O: OperationOwner,
@@ -779,6 +780,7 @@ where
     sticky: &'control mut Option<StoreRuntimeError>,
     completed_units: u64,
     rejected: bool,
+    work_batch: validation_batch::ValidationWorkBatch,
 }
 
 /// Session-branded authority to validate one root-reachable failure-evidence member.
@@ -1173,6 +1175,7 @@ where
     operation: &'scope mut RetainedStoreOperation<O, PP, U, L>,
     request: &'scope BoundActivationRequest,
     first_fault: &'scope mut Option<ActivationFirstFault>,
+    semantic_work_complete: &'scope mut bool,
 }
 
 /// Control-and-budget facade whose every failure is preserved by the activation transaction.
@@ -1260,14 +1263,17 @@ impl CanonicalTableShape {
 
 /// Keyless requirements produced by canonical core preflight.
 ///
-/// The request describes only exact physical shape and validation work. Ledger roles, writer keys,
-/// destination dimensions, publication authority, and commitment amounts remain operation-owned.
+/// The request describes exact physical shape plus semantic-preflight and validation work. Ledger
+/// roles, writer keys, destination dimensions, publication authority, and commitment amounts
+/// remain operation-owned.
 #[must_use = "canonical requirements must be sealed by their operation-issued sealer"]
 pub struct CanonicalActivationRequirements {
     canonical: CanonicalTableShape,
     outcome_evidence: CanonicalTableShape,
     expected_materialized_blocks: usize,
+    semantic_preflight_work: u64,
     validation_work: NonZeroU64,
+    pre_activation_structural_work_requirement: u64,
     structural_work_requirement: u64,
 }
 
@@ -1276,6 +1282,7 @@ impl CanonicalActivationRequirements {
         canonical: CanonicalTableShape,
         outcome_evidence: CanonicalTableShape,
         expected_materialized_blocks: usize,
+        semantic_preflight_work: u64,
         validation_work: NonZeroU64,
     ) -> Result<Self, StorePlanError> {
         if expected_materialized_blocks == 0
@@ -1297,6 +1304,11 @@ impl CanonicalActivationRequirements {
                     .checked_add(amount)
                     .ok_or(StorePlanError::SizeOverflow)
             })?;
+        let pre_activation_structural_work_requirement =
+            u64::try_from(STARTUP_ACCOUNT_SHARE_STEP_COUNT)
+                .ok()
+                .and_then(|actions| actions.checked_mul(work_per_action))
+                .ok_or(StorePlanError::SizeOverflow)?;
         let structural_work_requirement = u64::try_from(actions)
             .ok()
             .and_then(|actions| actions.checked_mul(work_per_action))
@@ -1305,9 +1317,22 @@ impl CanonicalActivationRequirements {
             canonical,
             outcome_evidence,
             expected_materialized_blocks,
+            semantic_preflight_work,
             validation_work,
+            pre_activation_structural_work_requirement,
             structural_work_requirement,
         })
+    }
+
+    /// Returns the operation-owned work that is complete before the activation lane can open.
+    pub const fn pre_activation_structural_work_requirement(&self) -> u64 {
+        self.pre_activation_structural_work_requirement
+    }
+
+    /// Returns structural startup plus the exact producer semantic-preflight envelope.
+    pub const fn pre_activation_work_requirement(&self) -> Option<u64> {
+        self.pre_activation_structural_work_requirement
+            .checked_add(self.semantic_preflight_work)
     }
 
     /// Returns the work bound derived from the exact table plans this shape owns.
@@ -1387,6 +1412,7 @@ struct BoundActivationRequest {
     validation_work_dimension: StoreDimensionKey,
     canonical_destination_dimension: StoreDimensionKey,
     outcome_evidence_destination_dimension: StoreDimensionKey,
+    semantic_preflight_work: u64,
     validation_work: NonZeroU64,
     expected_materialized_blocks: usize,
 }
@@ -1403,7 +1429,9 @@ impl BoundActivationRoles {
             canonical,
             outcome_evidence,
             expected_materialized_blocks,
+            semantic_preflight_work,
             validation_work,
+            pre_activation_structural_work_requirement: _,
             structural_work_requirement: _,
         } = request.requirements;
         Ok(BoundActivationRequest {
@@ -1415,6 +1443,7 @@ impl BoundActivationRoles {
             outcome_evidence_destination_dimension: self
                 .policy
                 .outcome_evidence_destination_dimension,
+            semantic_preflight_work,
             validation_work,
             expected_materialized_blocks,
         })
@@ -1539,12 +1568,13 @@ pub struct CanonicalCandidateStoreSession<
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    _validated:
-        ValidatedStoreSuccess<O, PP, U, CanonicalKind, CanonicalTag, EvidenceKind, EvidenceTag>,
     destinations: ZeroCommitDestinationFacts,
     proof: Proof,
     output: T,
     _failure_work: FailureEvidenceWorkBudget,
+    // This owner must drop last so payload panics still trigger unwind-aware account containment.
+    _validated:
+        ValidatedStoreSuccess<O, PP, U, CanonicalKind, CanonicalTag, EvidenceKind, EvidenceTag>,
 }
 
 /// Exact destination facts derived from a validated physical closure.

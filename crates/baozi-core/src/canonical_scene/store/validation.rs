@@ -21,13 +21,23 @@ pub(in crate::canonical_scene::store) use node_scene::{
     validate_node_scene_evidence_graph,
 };
 
+pub(super) fn authored_matrix_scalar_is_valid(values: &[f32], index: usize) -> bool {
+    let Some(value) = values.get(index).copied() else {
+        return false;
+    };
+    value.is_finite()
+        && match index {
+            3 | 7 | 11 => value == 0.0,
+            15 => value == 1.0,
+            _ => true,
+        }
+}
+
 pub(super) fn authored_matrix_is_valid(values: &[f32]) -> bool {
     values.len() == MATRIX_SCALARS_PER_NODE
-        && values.iter().all(|value| value.is_finite())
-        && values[3] == 0.0
-        && values[7] == 0.0
-        && values[11] == 0.0
-        && values[15] == 1.0
+        && (0..MATRIX_SCALARS_PER_NODE).fold(true, |valid, index| {
+            valid & authored_matrix_scalar_is_valid(values, index)
+        })
 }
 
 pub(super) fn validate_scene_graph(

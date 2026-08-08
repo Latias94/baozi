@@ -539,20 +539,23 @@ fn failure_utf8_metering_preserves_a_scalar_across_the_chunk_boundary() {
 
 #[test]
 fn failure_validation_cancellation_preserves_the_completed_prefix() {
-    const PLANNED_WORK: u64 = 3;
+    const PLANNED_WORK: u64 = 257;
+    const COMPLETED_PREFIX: u64 = 256;
 
     let factory = factory(1);
     let account = account(&factory);
     let cancellation = CancellationToken::new();
     let control = OperationControl::default().with_cancellation(cancellation.clone());
     let (state, keys) = rejected_session_with_control(&account, control);
+    let values = vec![7; usize::try_from(PLANNED_WORK).unwrap()];
+    let inspected = Cell::new(0usize);
     let outcome = state
         .build_failure_evidence(|lane| {
             let root = lane
                 .try_retain_sequence(
                     SequencePlan::<u8>::new(usize::try_from(PLANNED_WORK).unwrap()).unwrap(),
                     EvidenceLeafTag,
-                    |writer| writer.extend_from_slice(&[7, 8, 9]),
+                    |writer| writer.extend_from_slice(&values),
                 )
                 .unwrap();
             lane.complete(root)
@@ -567,7 +570,8 @@ fn failure_validation_cancellation_preserves_the_completed_prefix() {
         .validate_rich_failure(|session, root| {
             session
                 .visit_sequence(root, |index, value| {
-                    assert_eq!(value, 7 + u8::try_from(index).unwrap());
+                    assert_eq!(value, 7);
+                    inspected.set(inspected.get() + 1);
                     if index == 0 {
                         cancellation.cancel();
                     }
@@ -583,6 +587,11 @@ fn failure_validation_cancellation_preserves_the_completed_prefix() {
         }
     };
     let (prepared, _cause) = fallback.into_parts();
+    assert_eq!(
+        inspected.get(),
+        usize::try_from(COMPLETED_PREFIX).unwrap(),
+        "cancellation is observed at the next bounded checkpoint"
+    );
     let published = prepared.handoff();
     let protected = published
         .ledger_evidence
@@ -590,8 +599,8 @@ fn failure_validation_cancellation_preserves_the_completed_prefix() {
         .expect("protected failure-work evidence remains queryable");
     assert_eq!(
         protected.attempted() - protected.consumed(),
-        PLANNED_WORK - 1,
-        "validation attempts the full plan and consumes only the completed prefix"
+        PLANNED_WORK - COMPLETED_PREFIX,
+        "validation stops at the bounded checkpoint and preserves the completed prefix"
     );
     assert_eq!(
         store_failure_cause(&published.ledger_evidence).class(),
@@ -1666,6 +1675,108 @@ fn clean_rich_failure_validation_panic_prepares_fallback_without_poisoning() {
         measured.1.checked_sub(baseline.1).unwrap(),
         0,
         "a panic in the first validation unit cannot fabricate completed work"
+    );
+    assert_eq!(
+        store_failure_cause(&published.ledger_evidence).class(),
+        StorePreparationFailureClass::ProductGraph
+    );
+    drop(published);
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
+}
+
+#[test]
+fn rich_failure_validation_panic_flushes_the_nonzero_completed_prefix() {
+    const PLANNED_WORK: usize = 7;
+    const COMPLETED_PREFIX: usize = 2;
+
+    let baseline = {
+        let factory = factory(1);
+        let account = account(&factory);
+        let (state, keys) = rejected_session_with_one_evidence_slot(&account);
+        let outcome = state
+            .build_failure_evidence(|lane| {
+                let root = lane
+                    .try_retain_sequence(
+                        SequencePlan::<u8>::new(PLANNED_WORK).unwrap(),
+                        EvidenceLeafTag,
+                        |writer| writer.extend_from_slice(&[7; PLANNED_WORK]),
+                    )
+                    .unwrap();
+                lane.complete(root)
+            })
+            .unwrap();
+        let rooted = match outcome {
+            FailureEvidenceOutcome::Rooted(rooted) => rooted,
+            FailureEvidenceOutcome::MinimalFallback(_) => {
+                panic!("the panic-prefix baseline must remain rooted")
+            }
+        };
+        let (prepared, _cause) = rooted.prepare_minimal_fallback().unwrap().into_parts();
+        let published = prepared.handoff();
+        let work =
+            protected_failure_work(&published.ledger_evidence, keys.failure_terminal_dimension);
+        drop(published);
+        assert_eq!(account.snapshot().live_retained_allocations(), 0);
+        work
+    };
+
+    let factory = factory(1);
+    let account = account(&factory);
+    let (state, keys) = rejected_session_with_one_evidence_slot(&account);
+    let outcome = state
+        .build_failure_evidence(|lane| {
+            let root = lane
+                .try_retain_sequence(
+                    SequencePlan::<u8>::new(PLANNED_WORK).unwrap(),
+                    EvidenceLeafTag,
+                    |writer| writer.extend_from_slice(&[7; PLANNED_WORK]),
+                )
+                .unwrap();
+            lane.complete(root)
+        })
+        .unwrap();
+    let rooted = match outcome {
+        FailureEvidenceOutcome::Rooted(rooted) => rooted,
+        FailureEvidenceOutcome::MinimalFallback(_) => panic!("valid evidence must remain rooted"),
+    };
+    let inspected = Cell::new(0usize);
+
+    let validation = rooted
+        .validate_rich_failure(|session, root| {
+            session
+                .visit_sequence(root, |index, value| -> bool {
+                    if index == COMPLETED_PREFIX {
+                        panic!("panic after the completed rich-failure validation prefix");
+                    }
+                    assert_eq!(value, 7);
+                    inspected.set(inspected.get() + 1);
+                    true
+                })
+                .unwrap()
+        })
+        .unwrap();
+    let fallback = match validation {
+        RootedFailureValidation::Fallback(fallback) => fallback,
+        RootedFailureValidation::Valid(_) | RootedFailureValidation::Rejected(_) => {
+            panic!("a rich-failure validator panic after completed work must select fallback")
+        }
+    };
+    assert_eq!(inspected.get(), COMPLETED_PREFIX);
+    assert!(!account.snapshot().poisoned());
+    let (prepared, cause) = fallback.into_parts();
+    assert!(matches!(cause, StoreRuntimeError::Build(_)));
+    let published = prepared.handoff();
+    let measured =
+        protected_failure_work(&published.ledger_evidence, keys.failure_terminal_dimension);
+    assert_eq!(
+        measured.0.checked_sub(baseline.0).unwrap(),
+        u64::try_from(PLANNED_WORK).unwrap(),
+        "the complete sealed validation plan remains attempted"
+    );
+    assert_eq!(
+        measured.1.checked_sub(baseline.1).unwrap(),
+        u64::try_from(COMPLETED_PREFIX).unwrap(),
+        "batch drop must flush only the completed rich-failure validation prefix"
     );
     assert_eq!(
         store_failure_cause(&published.ledger_evidence).class(),

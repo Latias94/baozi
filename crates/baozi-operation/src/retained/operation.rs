@@ -32,8 +32,8 @@ use crate::control::discard_untrusted_panic_payload;
 use crate::coordinator::{OperationCoordinator, OperationPollCheckpoint};
 use crate::ledger::{
     AttributionBatchPlan, CanonicalOutput, LedgerCause, LedgerLimits, LinearWorkBatchPermit,
-    LiveReservation, OutcomeEvidenceDestination, PhaseCompletionError, StartupAccountShareEnvelope,
-    StartupAttributionBatchPlans, StartupRetainedAttribution,
+    LinearWorkCompletion, LiveReservation, OutcomeEvidenceDestination, PhaseCompletionError,
+    StartupAccountShareEnvelope, StartupAttributionBatchPlans, StartupRetainedAttribution,
 };
 use crate::{ControlCause, OperationControl, OperationOwner, ProgressPhase, ProgressUnit};
 use std::fmt;
@@ -105,6 +105,17 @@ fn record_terminal_cause_with_precedence(
         }
         Some(_) => {}
     }
+}
+
+fn apply_linear_work_completion<D>(
+    completion: LinearWorkCompletion<D>,
+    mirrored_remaining: &mut u64,
+    amount: u64,
+) -> Result<(), LedgerCause<D>> {
+    if completion.prefix_was_applied() {
+        *mirrored_remaining -= amount;
+    }
+    completion.into_result()
 }
 
 impl<D: Copy> FailureTerminalWorkCapability<D> {
@@ -436,14 +447,16 @@ where
             );
             return Err(RetainedWorkConsumeError::ExceedsAttempted);
         }
-        if let Err(cause) = self.work.complete(0, amount.get()) {
+        let completion = self.work.complete_with_outcome(0, amount.get());
+        if let Err(cause) =
+            apply_linear_work_completion(completion, &mut self.remaining, amount.get())
+        {
             record_terminal_cause_with_precedence(
                 self.control.sticky_terminal_cause,
                 PreparationFailureCode::ledger(),
             );
             return Err(RetainedWorkConsumeError::Ledger(cause));
         }
-        self.remaining -= amount.get();
         Ok(())
     }
 
@@ -537,14 +550,16 @@ where
             .control
             .as_mut()
             .expect("an incomplete ordinary work permit retains its control");
-        if let Err(cause) = self.work.complete(0, amount.get()) {
+        let completion = self.work.complete_with_outcome(0, amount.get());
+        if let Err(cause) =
+            apply_linear_work_completion(completion, &mut self.remaining, amount.get())
+        {
             record_terminal_cause_with_precedence(
                 control.sticky_terminal_cause,
                 PreparationFailureCode::ledger(),
             );
             return Err(RetainedWorkConsumeError::Ledger(cause));
         }
-        self.remaining -= amount.get();
         Ok(())
     }
 
@@ -696,14 +711,16 @@ where
             .control
             .as_mut()
             .expect("an incomplete failure-work permit retains its control");
-        if let Err(cause) = self.work.complete(0, amount.get()) {
+        let completion = self.work.complete_with_outcome(0, amount.get());
+        if let Err(cause) =
+            apply_linear_work_completion(completion, &mut self.remaining, amount.get())
+        {
             record_terminal_cause_with_precedence(
                 control.sticky_terminal_cause,
                 PreparationFailureCode::ledger(),
             );
             return Err(RetainedFailureWorkConsumeError::Ledger(cause));
         }
-        self.remaining -= amount.get();
         Ok(())
     }
 

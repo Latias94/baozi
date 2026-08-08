@@ -10,6 +10,7 @@ use super::super::{
     OutcomeEvidenceStoreRef, RecordBlock, RetainedStoreWorkControl, ScalarSequence,
     StoreValidationSession, StoreWorkError, StoredScalar, Utf8Block,
 };
+use super::validation_batch::ValidationWorkBatch;
 use super::{
     CANONICAL_VALIDATION_CONTRACT_FAILURE_CODE, CanonicalWorkPermit, try_begin_canonical_work,
 };
@@ -61,8 +62,9 @@ impl<Kind, Tag> Eq for OutcomeEvidenceValidationMember<'_, Kind, Tag> {}
 
 /// Metered central-validation session for one canonical and outcome-evidence graph.
 ///
-/// Raw views and work completion are deliberately private. Every exposed visit polls control,
-/// reads one concrete unit, invokes the inspector, and only then records that unit as consumed.
+/// Raw views and work completion are deliberately private. Every exposed visit polls control;
+/// inspectors read one concrete unit at a time, while completed prefixes are flushed to the
+/// linear permit at bounded checkpoints and semantic boundaries.
 pub struct CanonicalValidationSession<'session, 'storage, 'control, 'operation, O, PP, U>
 where
     O: OperationOwner,
@@ -75,6 +77,7 @@ where
     rejected: bool,
     first_fault: &'control mut Option<CanonicalValidationFirstFault>,
     contract_failed: bool,
+    work_batch: ValidationWorkBatch,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -169,10 +172,36 @@ where
             rejected: false,
             first_fault,
             contract_failed: false,
+            work_batch: ValidationWorkBatch::new(),
         })
     }
 
+    fn flush_completed(&mut self) -> Result<(), StoreWorkError> {
+        let Some(completed) = self.work_batch.take_completed() else {
+            return Ok(());
+        };
+        let completion = self
+            .permit
+            .as_mut()
+            .expect("an unresolved canonical validation retains its work permit")
+            .complete_units(completed);
+        self.preserve(completion)
+    }
+
+    fn poll_now(&mut self) -> Result<(), StoreWorkError> {
+        self.flush_completed()?;
+        let poll = self
+            .permit
+            .as_mut()
+            .expect("an unresolved canonical validation retains its work permit")
+            .poll();
+        self.preserve(poll)?;
+        self.work_batch.note_poll();
+        Ok(())
+    }
+
     fn reject_contract(&mut self) {
+        let _ = self.flush_completed();
         self.first_fault
             .get_or_insert(CanonicalValidationFirstFault::Contract);
         if !self.contract_failed
@@ -183,6 +212,12 @@ where
         self.rejected = true;
         self.contract_failed = true;
         self.raw.invalidate();
+    }
+
+    fn reject_semantic(&mut self) -> Result<(), StoreWorkError> {
+        self.flush_completed()?;
+        self.rejected = true;
+        Ok(())
     }
 
     fn preserve<T>(&mut self, result: Result<T, StoreWorkError>) -> Result<T, StoreWorkError> {
@@ -198,12 +233,7 @@ where
         if let Some(cause) = self.sticky.clone() {
             return Err(cause);
         }
-        let poll = self
-            .permit
-            .as_mut()
-            .expect("an unresolved canonical validation retains its work permit")
-            .poll();
-        self.preserve(poll)
+        self.poll_now()
     }
 
     fn run_unit<R>(
@@ -213,61 +243,62 @@ where
         if let Some(cause) = self.sticky.clone() {
             return Err(cause);
         }
-        let remaining = self
+        if self.work_batch.poll_due() {
+            self.poll_now()?;
+        }
+        let permit_remaining = self
             .permit
             .as_ref()
             .expect("an unresolved canonical validation retains its work permit")
             .remaining_units();
+        let Some(remaining) = self.work_batch.effective_remaining(permit_remaining) else {
+            self.reject_contract();
+            return Ok(None);
+        };
         if remaining == 0 {
             self.reject_contract();
             return Ok(None);
         }
-        let poll = self
-            .permit
-            .as_mut()
-            .expect("an unresolved canonical validation retains its work permit")
-            .poll();
-        self.preserve(poll)?;
         let Some(value) = inspect(&mut self.raw) else {
             self.reject_contract();
             return Ok(None);
         };
-        let completion = self
-            .permit
-            .as_mut()
-            .expect("an unresolved canonical validation retains its work permit")
-            .complete_units(NonZeroU64::MIN);
-        self.preserve(completion)?;
+        if self.work_batch.note_completed_unit().is_err() {
+            self.reject_contract();
+            return Ok(None);
+        }
         Ok(Some(value))
     }
 
     fn complete_canonical<Tag>(
         &mut self,
         completion: StoreCanonicalMemberCompletion<'storage, Tag>,
-    ) -> bool
+    ) -> Result<bool, StoreWorkError>
     where
         Tag: Copy + Send + Sync + 'static,
     {
+        self.flush_completed()?;
         if self.raw.complete_canonical_member(completion) {
-            true
+            Ok(true)
         } else {
             self.reject_contract();
-            false
+            Ok(false)
         }
     }
 
     fn complete_outcome_evidence<Tag>(
         &mut self,
         completion: StoreOutcomeEvidenceMemberCompletion<'storage, Tag>,
-    ) -> bool
+    ) -> Result<bool, StoreWorkError>
     where
         Tag: Copy + Send + Sync + 'static,
     {
+        self.flush_completed()?;
         if self.raw.complete_outcome_evidence_member(completion) {
-            true
+            Ok(true)
         } else {
             self.reject_contract();
-            false
+            Ok(false)
         }
     }
 
@@ -305,11 +336,11 @@ where
                 return Ok(false);
             };
             if !accepted {
-                self.rejected = true;
+                self.reject_semantic()?;
                 return Ok(false);
             }
         }
-        Ok(self.complete_canonical(completion))
+        self.complete_canonical(completion)
     }
 
     /// Visits every byte in one canonical binary block exactly once.
@@ -345,11 +376,11 @@ where
                 return Ok(false);
             };
             if !accepted {
-                self.rejected = true;
+                self.reject_semantic()?;
                 return Ok(false);
             }
         }
-        Ok(self.complete_canonical(completion))
+        self.complete_canonical(completion)
     }
 
     /// Visits every encoded byte in one canonical UTF-8 block exactly once.
@@ -389,11 +420,11 @@ where
                 return Ok(false);
             };
             if !accepted {
-                self.rejected = true;
+                self.reject_semantic()?;
                 return Ok(false);
             }
         }
-        Ok(self.complete_canonical(completion))
+        self.complete_canonical(completion)
     }
 
     /// Visits every row and cell in one canonical record block exactly once.
@@ -454,11 +485,11 @@ where
                 return Ok(false);
             }
             if !accepted {
-                self.rejected = true;
+                self.reject_semantic()?;
                 return Ok(false);
             }
         }
-        Ok(self.complete_canonical(completion))
+        self.complete_canonical(completion)
     }
 
     /// Visits every scalar in one outcome-evidence sequence exactly once.
@@ -497,11 +528,11 @@ where
                 return Ok(false);
             };
             if !accepted {
-                self.rejected = true;
+                self.reject_semantic()?;
                 return Ok(false);
             }
         }
-        Ok(self.complete_outcome_evidence(completion))
+        self.complete_outcome_evidence(completion)
     }
 
     /// Visits every byte in one outcome-evidence binary block exactly once.
@@ -539,11 +570,11 @@ where
                 return Ok(false);
             };
             if !accepted {
-                self.rejected = true;
+                self.reject_semantic()?;
                 return Ok(false);
             }
         }
-        Ok(self.complete_outcome_evidence(completion))
+        self.complete_outcome_evidence(completion)
     }
 
     /// Visits every encoded byte in one outcome-evidence UTF-8 block exactly once.
@@ -585,11 +616,11 @@ where
                 return Ok(false);
             };
             if !accepted {
-                self.rejected = true;
+                self.reject_semantic()?;
                 return Ok(false);
             }
         }
-        Ok(self.complete_outcome_evidence(completion))
+        self.complete_outcome_evidence(completion)
     }
 
     /// Visits every row and cell in one outcome-evidence record block exactly once.
@@ -652,25 +683,21 @@ where
                 return Ok(false);
             }
             if !accepted {
-                self.rejected = true;
+                self.reject_semantic()?;
                 return Ok(false);
             }
         }
-        Ok(self.complete_outcome_evidence(completion))
+        self.complete_outcome_evidence(completion)
     }
 
     pub(super) fn finish(mut self, accepted: bool) -> Result<bool, StoreWorkError> {
+        self.flush_completed()?;
         if let Some(cause) = self.sticky.take() {
             return Err(cause);
         }
         let accepted = accepted && !self.rejected;
         if accepted {
-            let poll = self
-                .permit
-                .as_mut()
-                .expect("a finished canonical validation retains its work permit")
-                .poll();
-            self.preserve(poll)?;
+            self.poll_now()?;
         }
         let mut permit = self
             .permit
@@ -681,6 +708,19 @@ where
         } else {
             permit.resolve_partial();
             Ok(false)
+        }
+    }
+}
+
+impl<O, PP, U> Drop for CanonicalValidationSession<'_, '_, '_, '_, O, PP, U>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    fn drop(&mut self) {
+        if self.permit.is_some() {
+            let _ = self.flush_completed();
         }
     }
 }

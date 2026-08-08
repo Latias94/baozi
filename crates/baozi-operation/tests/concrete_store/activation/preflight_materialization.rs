@@ -63,6 +63,149 @@ fn verified_preflight_rejection_never_opens_canonical_storage() {
 }
 
 #[test]
+fn sealed_semantic_preflight_runs_its_exact_work_before_storage_open() {
+    const SEMANTIC_WORK: u64 = 3;
+
+    let factory = factory(1);
+    let account = account(&factory);
+    let (operation, keys) = operation(&account);
+    let after_start = account.snapshot();
+    let activation = activation_shape_with_semantic_preflight_work(keys, 1, 1, SEMANTIC_WORK);
+    let expected_work = activation
+        .requirements
+        .pre_activation_work_requirement()
+        .expect("the exact preflight envelope fits u64");
+    let inspected = Cell::new(0_u64);
+    let materialized = Cell::new(false);
+
+    let outcome = plan_activation!(
+        operation,
+        activation,
+        |mut preflight| {
+            let valid = preflight
+                .inspect_semantic_work(|index| {
+                    assert_eq!(account.snapshot(), after_start);
+                    inspected.set(inspected.get() + 1);
+                    index != 1
+                })
+                .unwrap();
+            assert!(!valid);
+            preflight.reject(PreflightRejection::Unsupported, 11)
+        },
+        |_lane| -> CanonicalMaterialization<
+            '_,
+            (),
+            PreflightRejection,
+            ScalarSequence<u8>,
+            SequenceTag,
+        > {
+            materialized.set(true);
+            unreachable!("semantic preflight rejection cannot materialize")
+        },
+    )
+    .unwrap();
+    let never_activated = match outcome {
+        CanonicalActivationOutcome::NeverActivated(state) => state,
+        CanonicalActivationOutcome::Activated(_)
+        | CanonicalActivationOutcome::Rejected(_)
+        | CanonicalActivationOutcome::Fallback(_) => {
+            panic!("semantic rejection must remain NeverActivated")
+        }
+    };
+    assert_eq!(inspected.get(), SEMANTIC_WORK);
+    assert!(!materialized.get());
+
+    let (prepared, _cause) = never_activated
+        .prepare_minimal_fallback()
+        .unwrap()
+        .into_parts();
+    let published = prepared.handoff();
+    let ordinary = published
+        .ledger_evidence
+        .dimension(keys.dimension)
+        .expect("semantic preflight work remains queryable");
+    assert_eq!(ordinary.attempted(), expected_work);
+    assert_eq!(ordinary.consumed(), expected_work);
+    assert_eq!(ordinary.committed_canonical_output(), 0);
+    drop(published);
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
+}
+
+#[test]
+fn sealing_without_the_planned_semantic_work_is_contained() {
+    let factory = factory(1);
+    let account = account(&factory);
+    let (operation, keys) = operation(&account);
+
+    let result = plan_activation!(
+        operation,
+        activation_shape_with_semantic_preflight_work(keys, 1, 1, 1),
+        |preflight| preflight.seal::<()>(),
+        |_lane| -> CanonicalMaterialization<'_, (), (), ScalarSequence<u8>, SequenceTag> {
+            unreachable!("an incomplete semantic preflight cannot materialize")
+        },
+    );
+
+    assert!(result.is_err());
+    assert!(account.snapshot().poisoned());
+}
+
+#[test]
+fn semantic_preflight_panic_preserves_only_the_completed_prefix() {
+    const SEMANTIC_WORK: u64 = 3;
+    const COMPLETED_PREFIX: u64 = 1;
+
+    let factory = factory(1);
+    let account = account(&factory);
+    let (operation, keys) = operation(&account);
+    let activation = activation_shape_with_semantic_preflight_work(keys, 1, 1, SEMANTIC_WORK);
+    let expected_attempted = activation
+        .requirements
+        .pre_activation_work_requirement()
+        .expect("the exact preflight envelope fits u64");
+    let structural_work = activation
+        .requirements
+        .pre_activation_structural_work_requirement();
+
+    let outcome = plan_activation!(
+        operation,
+        activation,
+        |mut preflight| -> CanonicalPreflightDecision<()> {
+            let _ = preflight.inspect_semantic_work(|index| {
+                if index == COMPLETED_PREFIX {
+                    panic!("contained semantic inspector panic");
+                }
+                true
+            });
+            unreachable!("the inspector panic must leave through the containment boundary")
+        },
+        |_lane| -> CanonicalMaterialization<'_, (), (), ScalarSequence<u8>, SequenceTag> {
+            unreachable!("semantic preflight panic cannot materialize")
+        },
+    )
+    .unwrap();
+    let fallback = match outcome {
+        CanonicalActivationOutcome::Fallback(fallback) => fallback,
+        CanonicalActivationOutcome::Activated(_)
+        | CanonicalActivationOutcome::Rejected(_)
+        | CanonicalActivationOutcome::NeverActivated(_) => {
+            panic!("semantic inspector panic must retain minimal fallback")
+        }
+    };
+    assert!(!account.snapshot().poisoned());
+    let (prepared, _cause) = fallback.into_parts();
+    let published = prepared.handoff();
+    let ordinary = published
+        .ledger_evidence
+        .dimension(keys.dimension)
+        .expect("partial semantic preflight work remains queryable");
+    assert_eq!(ordinary.attempted(), expected_attempted);
+    assert_eq!(ordinary.consumed(), structural_work + COMPLETED_PREFIX);
+    drop(published);
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
+}
+
+#[test]
 fn dropping_an_unconsumed_session_outcome_owner_fails_closed() {
     let factory = factory(1);
     let account = account(&factory);

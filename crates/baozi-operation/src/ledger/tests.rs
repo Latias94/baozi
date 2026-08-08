@@ -725,24 +725,6 @@ fn linear_work_pending_capacity_prevents_oversell_and_drop_releases_the_suffix()
         })
     ));
     assert!(matches!(
-        ledger.charge_consumed(Dimension::Records, 1),
-        Err(LedgerCause::LimitExceeded {
-            class: CounterClass::Consumed,
-            dimension: Dimension::Records,
-            value: 3,
-            limit: 2,
-        })
-    ));
-    assert!(matches!(
-        ledger.charge_consumed_batch(&[(Dimension::Records, 1)]),
-        Err(LedgerCause::LimitExceeded {
-            class: CounterClass::Consumed,
-            dimension: Dimension::Records,
-            value: 3,
-            limit: 2,
-        })
-    ));
-    assert!(matches!(
         ledger.preflight_repeated_observed_batch(&[(Dimension::Records, 1)], NonZeroU64::MIN,),
         Err(LedgerCause::LimitExceeded {
             class: CounterClass::Consumed,
@@ -757,7 +739,7 @@ fn linear_work_pending_capacity_prevents_oversell_and_drop_releases_the_suffix()
     assert_eq!(
         (reserved.attempted(), reserved.consumed()),
         (3, 0),
-        "neither a second admission nor an ordinary charge may consume reserved capacity"
+        "rejected admission and preflight paths cannot fabricate completed work"
     );
     {
         let state = lock(&ledger.state);
@@ -778,6 +760,63 @@ fn linear_work_pending_capacity_prevents_oversell_and_drop_releases_the_suffix()
     ledger
         .charge_consumed(Dimension::Records, 1)
         .expect("dropping the unfinished permit releases its pending suffix");
+}
+
+#[test]
+fn linear_completion_preserves_prefix_after_competing_observed_work() {
+    let constrained = LedgerLimits::new(
+        16,
+        [(Dimension::Records, DimensionPolicy::counter(3, 2, 0))],
+    )
+    .expect("pending observed-work limits");
+    let ledger = test_ledger(constrained);
+    let mut permit = ledger
+        .try_admit_linear_work(Dimension::Records, 2)
+        .expect("the linear permit reserves the consumed envelope");
+
+    assert!(matches!(
+        ledger.charge_observed_batch(&[(Dimension::Records, 1)]),
+        Err(LedgerCause::LimitExceeded {
+            class: CounterClass::Consumed,
+            dimension: Dimension::Records,
+            value: 3,
+            limit: 2,
+        })
+    ));
+    let rejected = ledger
+        .dimension_evidence(Dimension::Records)
+        .expect("the rejected observed prefix remains visible");
+    assert_eq!((rejected.attempted(), rejected.consumed()), (3, 1));
+
+    assert!(matches!(
+        permit.complete(0, 1),
+        Err(LedgerCause::LimitExceeded {
+            class: CounterClass::Consumed,
+            dimension: Dimension::Records,
+            value: 3,
+            limit: 2,
+        })
+    ));
+    assert!(matches!(
+        permit.complete(0, 1),
+        Err(LedgerCause::InactiveLinearWorkPermit)
+    ));
+    drop(permit);
+    {
+        let state = lock(&ledger.state);
+        let entry = dimension_entry(&state.dimensions, Dimension::Records)
+            .expect("record dimension remains frozen");
+        assert_eq!(entry.state.pending_consumed, 0);
+        assert_eq!(state.active_linear_work_permits, 0);
+        assert!(!state.linear_work_faulted);
+    }
+    let snapshot = ledger
+        .finish()
+        .expect("the terminal Ledger cause does not corrupt final evidence shape");
+    let records = snapshot
+        .dimension(Dimension::Records)
+        .expect("the final snapshot exposes the committed prefix");
+    assert_eq!((records.attempted(), records.consumed()), (3, 2));
 }
 
 #[test]

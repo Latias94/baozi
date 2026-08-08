@@ -612,6 +612,103 @@ fn completed_member_repeat_still_polls_control_without_recharging() {
 }
 
 #[test]
+fn canonical_validation_cancellation_is_bounded_and_preserves_the_completed_prefix() {
+    const CANONICAL_UNITS: usize = 257;
+    const EVIDENCE_UNITS: usize = 1;
+    const COMPLETED_PREFIX: usize = 256;
+
+    let factory = factory(1);
+    let account = account(&factory);
+    let cancellation = CancellationToken::new();
+    let control = OperationControl::default().with_cancellation(cancellation.clone());
+    let (operation, keys) = operation_with_control(&account, control);
+    let values = vec![7; CANONICAL_UNITS];
+
+    let outcome = plan_activation!(
+        operation,
+        activation_shape_with_validation_work(
+            keys,
+            1,
+            1,
+            NonZeroU64::new(u64::try_from(CANONICAL_UNITS + EVIDENCE_UNITS).unwrap()).unwrap(),
+        ),
+        |preflight| preflight.seal::<()>(),
+        |mut lane| {
+            let root = lane
+                .try_retain_sequence(
+                    SequencePlan::<u8>::new(CANONICAL_UNITS).unwrap(),
+                    SequenceTag,
+                    |writer| writer.extend_from_slice(&values),
+                )
+                .unwrap();
+            lane.complete::<_, (), _, _>(root, root)
+        },
+    )
+    .unwrap();
+    let activated = match outcome {
+        CanonicalActivationOutcome::Activated(state) => state,
+        CanonicalActivationOutcome::Rejected(_)
+        | CanonicalActivationOutcome::NeverActivated(_)
+        | CanonicalActivationOutcome::Fallback(_) => panic!("materialization must activate"),
+    };
+    let inspected = Cell::new(0usize);
+
+    let outcome = activated
+        .validate_centrally(
+            |lane, _output| {
+                let evidence = lane
+                    .try_retain_sequence(
+                        SequencePlan::<u8>::new(EVIDENCE_UNITS).unwrap(),
+                        EvidenceLeafTag,
+                        |writer| writer.push(9),
+                    )
+                    .unwrap();
+                lane.complete(evidence)
+            },
+            |session, canonical, _evidence, _output| {
+                let cause = session
+                    .visit_canonical_sequence(canonical, CANONICAL_UNITS, |index, value| {
+                        assert_eq!(value, 7);
+                        inspected.set(inspected.get() + 1);
+                        if index == 0 {
+                            cancellation.cancel();
+                        }
+                        true
+                    })
+                    .expect_err("cancellation must be observed at the bounded checkpoint");
+                Err::<CanonicalValidationDecision<(), ValidationRejection>, _>(cause)
+            },
+        )
+        .unwrap();
+
+    let interrupted = match outcome {
+        CanonicalCentralValidationOutcome::Interrupted(interrupted) => interrupted,
+        CanonicalCentralValidationOutcome::Candidate(_)
+        | CanonicalCentralValidationOutcome::Rejected(_)
+        | CanonicalCentralValidationOutcome::Fallback(_) => {
+            panic!("bounded canonical validation must preserve the Control interruption")
+        }
+    };
+    assert_eq!(inspected.get(), COMPLETED_PREFIX);
+    let (prepared, _cause) = interrupted.prepare_minimal_fallback().unwrap().into_parts();
+    let published = prepared.handoff();
+    let ordinary = published
+        .ledger_evidence
+        .dimension(keys.dimension)
+        .expect("ordinary validation work remains queryable");
+    assert_eq!(
+        ordinary.attempted() - ordinary.consumed(),
+        u64::try_from(CANONICAL_UNITS + EVIDENCE_UNITS - COMPLETED_PREFIX).unwrap()
+    );
+    assert_eq!(
+        store_failure_cause(&published.ledger_evidence).class(),
+        StorePreparationFailureClass::Control
+    );
+    drop(published);
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
+}
+
+#[test]
 fn canonical_record_inspector_false_is_a_semantic_rejection() {
     let factory = factory(1);
     let account = account(&factory);
@@ -1507,6 +1604,123 @@ fn clean_central_validation_panic_prepares_minimal_fallback_without_poisoning() 
 }
 
 #[test]
+fn canonical_validation_panic_flushes_the_nonzero_completed_prefix() {
+    const VALIDATION_UNITS: usize = 4;
+    const EVIDENCE_CONSTRUCTION_UNITS: u64 = 1;
+    const COMPLETED_PREFIX: usize = 2;
+
+    let factory = factory(1);
+    let account = account(&factory);
+    let (operation, keys) = split_dimension_operation(&account);
+    let TestActivation { policy, .. } = activation_shape_with_dimensions(
+        keys,
+        keys.dimension,
+        keys.other_dimension,
+        keys.dimension,
+        keys.dimension,
+    );
+    let activation = TestActivation {
+        policy,
+        requirements: CanonicalActivationRequirements::new(
+            CanonicalTableShape::new(1, 1).unwrap(),
+            CanonicalTableShape::new(1, 1).unwrap(),
+            1,
+            0,
+            NonZeroU64::new(u64::try_from(VALIDATION_UNITS).unwrap()).unwrap(),
+        )
+        .unwrap(),
+    };
+    let values = [7; VALIDATION_UNITS];
+    let outcome = plan_activation!(
+        operation,
+        activation,
+        |preflight| preflight.seal::<()>(),
+        |mut lane| {
+            let root = lane
+                .try_retain_sequence(
+                    SequencePlan::<u8>::new(VALIDATION_UNITS).unwrap(),
+                    SequenceTag,
+                    |writer| writer.extend_from_slice(&values),
+                )
+                .unwrap();
+            lane.complete::<_, (), _, _>(root, root)
+        },
+    )
+    .unwrap();
+    let activated = match outcome {
+        CanonicalActivationOutcome::Activated(activated) => activated,
+        CanonicalActivationOutcome::Rejected(_)
+        | CanonicalActivationOutcome::NeverActivated(_)
+        | CanonicalActivationOutcome::Fallback(_) => panic!("materialization must activate"),
+    };
+    let inspected = Cell::new(0usize);
+
+    let outcome = activated
+        .validate_centrally(
+            |lane, _output| {
+                let evidence = lane
+                    .try_retain_sequence(
+                        SequencePlan::<u8>::new(1).unwrap(),
+                        EvidenceLeafTag,
+                        |writer| writer.push(9),
+                    )
+                    .unwrap();
+                lane.complete(evidence)
+            },
+            |session, canonical, _evidence, _output| {
+                session
+                    .visit_canonical_sequence(canonical, VALIDATION_UNITS, |index, value| {
+                        if index == COMPLETED_PREFIX {
+                            panic!("panic after the completed canonical-validation prefix");
+                        }
+                        assert_eq!(value, 7);
+                        inspected.set(inspected.get() + 1);
+                        true
+                    })
+                    .map(|accepted| {
+                        if accepted {
+                            CanonicalValidationDecision::accept(())
+                        } else {
+                            CanonicalValidationDecision::reject(ValidationRejection::Semantic, 73)
+                        }
+                    })
+            },
+        )
+        .unwrap();
+    let fallback = match outcome {
+        CanonicalCentralValidationOutcome::Fallback(fallback) => fallback,
+        CanonicalCentralValidationOutcome::Candidate(_)
+        | CanonicalCentralValidationOutcome::Rejected(_)
+        | CanonicalCentralValidationOutcome::Interrupted(_) => {
+            panic!("a validator panic after completed work must select minimal fallback")
+        }
+    };
+    assert_eq!(inspected.get(), COMPLETED_PREFIX);
+    assert!(!account.snapshot().poisoned());
+    let (prepared, cause) = fallback.into_parts();
+    assert!(matches!(cause, StoreRuntimeError::Build(_)));
+    let published = prepared.handoff();
+    let validation = published
+        .ledger_evidence
+        .dimension(keys.other_dimension)
+        .expect("validation-work evidence remains queryable");
+    assert_eq!(
+        (validation.attempted(), validation.consumed()),
+        (
+            EVIDENCE_CONSTRUCTION_UNITS + u64::try_from(VALIDATION_UNITS).unwrap(),
+            EVIDENCE_CONSTRUCTION_UNITS + u64::try_from(COMPLETED_PREFIX).unwrap(),
+        ),
+        "batch drop must flush the exact completed prefix without refunding it"
+    );
+    assert_eq!(
+        store_failure_cause(&published.ledger_evidence).class(),
+        StorePreparationFailureClass::ProductGraph
+    );
+    drop(published);
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
+}
+
+#[test]
 fn completed_central_validation_capture_drop_panic_is_contained() {
     let factory = factory(1);
     let account = account(&factory);
@@ -1739,6 +1953,125 @@ fn candidate_reports_exact_member_counts_without_running_the_joint_commit() {
     drop(candidate);
     assert!(!account.snapshot().poisoned());
     assert_eq!(account.snapshot().live_retained_allocations(), 0);
+}
+
+#[test]
+fn candidate_proof_drop_panic_poison_contains_the_physical_owner() {
+    let factory = factory(1);
+    let account = account(&factory);
+    let (operation, keys) = operation(&account);
+    let outcome = plan_activation!(
+        operation,
+        activation_shape_with_validation_work(keys, 1, 1, NonZeroU64::new(2).unwrap(),),
+        |preflight| preflight.seal::<()>(),
+        |mut lane| {
+            let root = lane
+                .try_retain_sequence(SequencePlan::<u8>::new(1).unwrap(), SequenceTag, |writer| {
+                    writer.push(7)?;
+                    Ok(())
+                })
+                .unwrap();
+            lane.complete::<_, (), _, _>(root, root)
+        },
+    )
+    .unwrap();
+    let activated = match outcome {
+        CanonicalActivationOutcome::Activated(state) => state,
+        CanonicalActivationOutcome::Rejected(_)
+        | CanonicalActivationOutcome::NeverActivated(_)
+        | CanonicalActivationOutcome::Fallback(_) => panic!("materialization must activate"),
+    };
+    let result = activated
+        .validate_centrally(
+            |lane, _output| {
+                let evidence = lane
+                    .try_retain_sequence(
+                        SequencePlan::<u8>::new(1).unwrap(),
+                        EvidenceLeafTag,
+                        |writer| writer.push(1),
+                    )
+                    .unwrap();
+                lane.complete(evidence)
+            },
+            |session, canonical, evidence, _output| {
+                assert!(inspect_one_byte_pair(session, canonical, evidence, 7, 1)?);
+                Ok(CanonicalValidationDecision::<
+                    PanicOnDrop,
+                    ValidationRejection,
+                >::accept(PanicOnDrop))
+            },
+        )
+        .unwrap();
+    let candidate = match result {
+        CanonicalCentralValidationOutcome::Candidate(candidate) => candidate,
+        CanonicalCentralValidationOutcome::Rejected(_)
+        | CanonicalCentralValidationOutcome::Fallback(_)
+        | CanonicalCentralValidationOutcome::Interrupted(_) => {
+            panic!("valid central validation must produce a candidate")
+        }
+    };
+
+    let dropped = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(candidate)));
+    assert!(dropped.is_err());
+    assert!(account.snapshot().poisoned());
+}
+
+#[test]
+fn candidate_output_drop_panic_poison_contains_the_physical_owner() {
+    let factory = factory(1);
+    let account = account(&factory);
+    let (operation, keys) = operation(&account);
+    let outcome = plan_activation!(
+        operation,
+        activation_shape_with_validation_work(keys, 1, 1, NonZeroU64::new(2).unwrap(),),
+        |preflight| preflight.seal::<()>(),
+        |mut lane| {
+            let root = lane
+                .try_retain_sequence(SequencePlan::<u8>::new(1).unwrap(), SequenceTag, |writer| {
+                    writer.push(7)?;
+                    Ok(())
+                })
+                .unwrap();
+            lane.complete::<_, (), _, _>(root, PanicOnDrop)
+        },
+    )
+    .unwrap();
+    let activated = match outcome {
+        CanonicalActivationOutcome::Activated(state) => state,
+        CanonicalActivationOutcome::Rejected(_)
+        | CanonicalActivationOutcome::NeverActivated(_)
+        | CanonicalActivationOutcome::Fallback(_) => panic!("materialization must activate"),
+    };
+    let result = activated
+        .validate_centrally(
+            |lane, _output| {
+                let evidence = lane
+                    .try_retain_sequence(
+                        SequencePlan::<u8>::new(1).unwrap(),
+                        EvidenceLeafTag,
+                        |writer| writer.push(1),
+                    )
+                    .unwrap();
+                lane.complete(evidence)
+            },
+            |session, canonical, evidence, _output| {
+                assert!(inspect_one_byte_pair(session, canonical, evidence, 7, 1)?);
+                Ok(CanonicalValidationDecision::<(), ValidationRejection>::accept(()))
+            },
+        )
+        .unwrap();
+    let candidate = match result {
+        CanonicalCentralValidationOutcome::Candidate(candidate) => candidate,
+        CanonicalCentralValidationOutcome::Rejected(_)
+        | CanonicalCentralValidationOutcome::Fallback(_)
+        | CanonicalCentralValidationOutcome::Interrupted(_) => {
+            panic!("valid central validation must produce a candidate")
+        }
+    };
+
+    let dropped = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(candidate)));
+    assert!(dropped.is_err());
+    assert!(account.snapshot().poisoned());
 }
 
 #[test]

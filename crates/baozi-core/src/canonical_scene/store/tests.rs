@@ -11,8 +11,8 @@ use crate::identity::SceneGenerationId;
 use crate::math::{Mat4, Quat, Vec3};
 
 use super::construction::activation::{
-    SceneActivationTransition, exact_scene_activation_protected_work_limit,
-    exact_scene_activation_work_limit,
+    SceneActivationTransition, exact_scene_activation_preflight_ordinary_work,
+    exact_scene_activation_protected_work_limit, exact_scene_activation_work_limit,
 };
 use super::construction::{
     FAILURE_TERMINAL_WORK_DIMENSION, NodeSemanticSnapshot, OptionalCollectionSnapshot,
@@ -255,7 +255,7 @@ fn sealed_activation_one_short_work_budget_interrupts_before_candidate() {
 }
 
 #[test]
-fn sealed_activation_preserves_rich_failure_after_central_rejection() {
+fn sealed_activation_rejects_invalid_authored_semantics_before_activation() {
     let factory = test_factory(1);
     let account = test_account(&factory);
     let mut invalid_root = Mat4::IDENTITY;
@@ -268,7 +268,7 @@ fn sealed_activation_preserves_rich_failure_after_central_rejection() {
             .expect("sealed core activation");
     let prepared = match transition {
         SceneActivationTransition::Candidate(_) => {
-            panic!("a non-affine authored matrix must fail central validation")
+            panic!("a non-affine authored matrix must fail preflight")
         }
         SceneActivationTransition::Terminal(prepared) => prepared,
     };
@@ -278,7 +278,7 @@ fn sealed_activation_preserves_rich_failure_after_central_rejection() {
             panic!("a non-affine authored matrix must not publish")
         }
         SceneConstructionTerminal::MinimalFallback(_) => {
-            panic!("central semantic rejection must preserve qualified rich evidence")
+            panic!("preflight semantic rejection must preserve qualified rich evidence")
         }
     };
 
@@ -293,17 +293,16 @@ fn sealed_activation_preserves_rich_failure_after_central_rejection() {
         .ledger_evidence()
         .dimension_by_semantic(FAILURE_TERMINAL_WORK_DIMENSION)
         .expect("the activation has its protected failure dimension");
-    let rich_validation_work =
-        u64::try_from(super::schema::EVIDENCE_FIELD_COUNT).expect("the evidence width fits u64");
-    let full_ordinary_work = exact_scene_activation_work_limit()
-        .checked_sub(exact_scene_activation_protected_work_limit())
-        .expect("protected work is contained in the total activation limit");
-    assert_eq!(ordinary.attempted(), full_ordinary_work);
     assert_eq!(
-        ordinary.consumed() + rich_validation_work,
-        ordinary.attempted()
+        ordinary.attempted(),
+        exact_scene_activation_preflight_ordinary_work()
     );
-    assert_eq!(protected.attempted(), rich_validation_work);
+    assert_eq!(ordinary.attempted(), ordinary.consumed());
+    assert_eq!(ordinary.committed_canonical_output(), 0);
+    assert_eq!(
+        protected.attempted(),
+        exact_scene_activation_protected_work_limit()
+    );
     assert_eq!(protected.attempted(), protected.consumed());
 
     drop(failure);

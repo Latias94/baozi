@@ -1,4 +1,5 @@
 use super::super::validation::{StoreEvidenceMemberCompletion, StoreEvidenceMemberVisit};
+use super::validation_batch::ValidationWorkBatch;
 use super::*;
 
 impl CanonicalFailureTerminalWorkPlan {
@@ -494,7 +495,61 @@ where
     PP: ProgressPhase,
     U: ProgressUnit,
 {
+    fn flush_completed(&mut self) -> Result<(), StoreRuntimeError> {
+        let Some(completed) = self.work_batch.take_completed() else {
+            return Ok(());
+        };
+        let result = self
+            .permit
+            .as_mut()
+            .expect("an unresolved failure validation retains its work permit")
+            .complete_units(completed);
+        match result {
+            Ok(()) => {
+                let Some(total) = self.completed_units.checked_add(completed.get()) else {
+                    return Err(self.contract_failure());
+                };
+                self.completed_units = total;
+                Ok(())
+            }
+            Err(RetainedFailureWorkConsumeError::Ledger(cause)) => {
+                let cause = StoreRuntimeError::Ledger(cause);
+                self.sticky.get_or_insert_with(|| cause.clone());
+                Err(cause)
+            }
+            Err(RetainedFailureWorkConsumeError::ExceedsAttempted) => Err(self.contract_failure()),
+        }
+    }
+
+    fn poll_now(&mut self) -> Result<(), StoreRuntimeError> {
+        self.flush_completed()?;
+        let poll = self
+            .permit
+            .as_mut()
+            .expect("an unresolved failure validation retains its work permit")
+            .poll()
+            .map_err(StoreRuntimeError::Control);
+        if let Err(cause) = &poll {
+            self.sticky.get_or_insert_with(|| cause.clone());
+        }
+        poll?;
+        self.work_batch.note_poll();
+        Ok(())
+    }
+
+    fn reject_semantic(&mut self) -> Result<(), StoreRuntimeError> {
+        self.flush_completed()?;
+        self.rejected = true;
+        Ok(())
+    }
+
     fn contract_failure(&mut self) -> StoreRuntimeError {
+        if let Some(cause) = self.sticky.as_ref().cloned() {
+            return cause;
+        }
+        if let Err(cause) = self.flush_completed() {
+            return cause;
+        }
         if let Some(permit) = self.permit.as_mut() {
             permit.record_product_graph_failure(FAILURE_WORK_ENVELOPE_EXHAUSTED_CODE);
         }
@@ -503,20 +558,11 @@ where
         cause
     }
 
-    fn poll(&mut self) -> Result<(), StoreRuntimeError> {
+    fn poll_visit(&mut self) -> Result<(), StoreRuntimeError> {
         if let Some(cause) = self.sticky.as_ref().cloned() {
             return Err(cause);
         }
-        let poll = self
-            .permit
-            .as_mut()
-            .expect("validation retains its admitted work permit")
-            .poll()
-            .map_err(StoreRuntimeError::Control);
-        if let Err(cause) = &poll {
-            self.sticky.get_or_insert_with(|| cause.clone());
-        }
-        poll
+        self.poll_now()
     }
 
     fn complete_member<Tag>(
@@ -526,6 +572,7 @@ where
     where
         Tag: Copy + Send + Sync + 'static,
     {
+        self.flush_completed()?;
         if self.raw.complete_member(completion) {
             Ok(())
         } else {
@@ -537,30 +584,28 @@ where
         &mut self,
         inspect: impl FnOnce(&mut StoreEvidenceValidationSession<'session, 'storage>) -> Result<R, ()>,
     ) -> Result<R, StoreRuntimeError> {
-        self.poll()?;
+        if self.work_batch.poll_due() {
+            self.poll_now()?;
+        }
+        let remaining = self
+            .permit
+            .as_ref()
+            .expect("an unresolved failure validation retains its work permit")
+            .remaining_units();
+        let Some(remaining) = self.work_batch.effective_remaining(remaining) else {
+            return Err(self.contract_failure());
+        };
+        if remaining == 0 {
+            return Err(self.contract_failure());
+        }
         let value = match inspect(&mut self.raw) {
             Ok(value) => value,
             Err(()) => return Err(self.contract_failure()),
         };
-        let permit = self
-            .permit
-            .as_mut()
-            .expect("validation retains its admitted work permit");
-        match permit.complete_units(NonZeroU64::MIN) {
-            Ok(()) => {
-                let Some(completed_units) = self.completed_units.checked_add(1) else {
-                    return Err(self.contract_failure());
-                };
-                self.completed_units = completed_units;
-                Ok(value)
-            }
-            Err(RetainedFailureWorkConsumeError::Ledger(cause)) => {
-                let cause = StoreRuntimeError::Ledger(cause);
-                self.sticky.get_or_insert_with(|| cause.clone());
-                Err(cause)
-            }
-            Err(RetainedFailureWorkConsumeError::ExceedsAttempted) => Err(self.contract_failure()),
-        }
+        self.work_batch
+            .note_completed_unit()
+            .map_err(|()| self.contract_failure())?;
+        Ok(value)
     }
 
     /// Visits every scalar element until the inspector returns false.
@@ -573,7 +618,7 @@ where
         T: StoredScalar,
         Tag: Copy + Send + Sync + 'static,
     {
-        self.poll()?;
+        self.poll_visit()?;
         if self.rejected {
             return Ok(false);
         }
@@ -586,7 +631,7 @@ where
         };
         for (index, value) in view.as_slice().iter().copied().enumerate() {
             if !self.run_unit(|_raw| Ok(inspect(index, value)))? {
-                self.rejected = true;
+                self.reject_semantic()?;
                 return Ok(false);
             }
         }
@@ -603,7 +648,7 @@ where
     where
         Tag: Copy + Send + Sync + 'static,
     {
-        self.poll()?;
+        self.poll_visit()?;
         if self.rejected {
             return Ok(false);
         }
@@ -616,7 +661,7 @@ where
         };
         for (index, value) in view.iter().copied().enumerate() {
             if !self.run_unit(|_raw| Ok(inspect(index, value)))? {
-                self.rejected = true;
+                self.reject_semantic()?;
                 return Ok(false);
             }
         }
@@ -633,7 +678,7 @@ where
     where
         Tag: Copy + Send + Sync + 'static,
     {
-        self.poll()?;
+        self.poll_visit()?;
         if self.rejected {
             return Ok(false);
         }
@@ -646,7 +691,7 @@ where
         };
         for (index, value) in view.as_bytes().iter().copied().enumerate() {
             if !self.run_unit(|_raw| Ok(inspect(index, value)))? {
-                self.rejected = true;
+                self.reject_semantic()?;
                 return Ok(false);
             }
         }
@@ -666,7 +711,7 @@ where
     where
         Tag: Copy + Send + Sync + 'static,
     {
-        self.poll()?;
+        self.poll_visit()?;
         if self.rejected {
             return Ok(false);
         }
@@ -699,7 +744,7 @@ where
                 return Err(self.contract_failure());
             }
             if !accepted {
-                self.rejected = true;
+                self.reject_semantic()?;
                 return Ok(false);
             }
         }
@@ -708,6 +753,7 @@ where
     }
 
     fn finish(mut self, accepted: bool) -> Result<bool, StoreRuntimeError> {
+        self.flush_completed()?;
         if let Some(cause) = self.sticky.as_ref().cloned() {
             return Err(cause);
         }
@@ -715,6 +761,9 @@ where
             return Err(self.contract_failure());
         }
         let accepted = accepted && !self.rejected;
+        if accepted {
+            self.poll_now()?;
+        }
         let permit = self
             .permit
             .take()
@@ -727,6 +776,19 @@ where
         }
         result?;
         Ok(accepted)
+    }
+}
+
+impl<O, PP, U> Drop for FailureEvidenceValidationSession<'_, '_, '_, O, PP, U>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    fn drop(&mut self) {
+        if self.permit.is_some() {
+            let _ = self.flush_completed();
+        }
     }
 }
 
@@ -1385,6 +1447,7 @@ where
                     sticky: &mut controlled_failure,
                     completed_units: 0,
                     rejected: false,
+                    work_batch: ValidationWorkBatch::new(),
                 };
                 let validate = validate
                     .as_mut()
