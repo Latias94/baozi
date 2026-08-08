@@ -4,12 +4,16 @@ use baozi_operation::{
     CancellationToken, PhysicalStorageAccount, PhysicalStorageAccountFactory,
     PhysicalStorageAccountFactoryLimits, PhysicalStorageAccountLimits,
     PhysicalStorageAccountSnapshot, RecordBlock, ScalarSequence, StoreDimensionSnapshot,
-    StoreTerminalCause,
+    StorePreparationFailureClass, StoreTerminalCause,
 };
 
 use crate::identity::SceneGenerationId;
 use crate::math::{Mat4, Quat, Vec3};
 
+use super::construction::activation::{
+    SceneActivationTransition, exact_scene_activation_protected_work_limit,
+    exact_scene_activation_work_limit,
+};
 use super::construction::{
     FAILURE_TERMINAL_WORK_DIMENSION, NodeSemanticSnapshot, OptionalCollectionSnapshot,
     PreparedSceneConstruction, ReferenceSemanticSnapshot, STORE_DIMENSION, SceneConstructionLimits,
@@ -139,6 +143,171 @@ fn canonical_store_matrix_validation_requires_exact_finite_affine_bits() {
     let mut projective = identity;
     projective[3] = 1.0;
     assert!(!authored_matrix_is_valid(&projective));
+}
+
+#[test]
+fn sealed_activation_request_reaches_a_core_owned_validated_candidate() {
+    let factory = test_factory(1);
+    let account = test_account(&factory);
+    let mut limits = test_limits();
+    let exact_work = exact_scene_activation_work_limit();
+    limits.attempted_work = exact_work;
+    limits.consumed_work = exact_work;
+    let transition = SceneConstructionOperation::with_account_for_activation(&account, limits)
+        .expect("explicit-account construction operation")
+        .activate_fresh_two_node(authored_fixture())
+        .expect("sealed core activation");
+    let candidate = match transition {
+        SceneActivationTransition::Candidate(candidate) => candidate,
+        SceneActivationTransition::Terminal(prepared) => match prepared.handoff() {
+            SceneConstructionTerminal::Success(_) => {
+                panic!("activation must not publish before joint commit")
+            }
+            SceneConstructionTerminal::RichFailure(failure) => {
+                let _ = failure;
+                panic!("valid core input unexpectedly reached rich failure")
+            }
+            SceneConstructionTerminal::MinimalFallback(fallback) => {
+                panic!(
+                    "valid core input unexpectedly reached minimal fallback: code={:#010x}, cause={:?}",
+                    fallback.fallback_code(),
+                    fallback.ledger_evidence().header().terminal_cause()
+                )
+            }
+        },
+    };
+
+    assert_eq!(
+        candidate.canonical_blocks(),
+        usize::try_from(super::schema::CANONICAL_BLOCK_COUNT).unwrap()
+    );
+    assert_eq!(candidate.directory(), candidate.refs().directory);
+    assert!(candidate.has_validation_proof());
+    assert!(account.snapshot().live_retained_allocations() > 0);
+
+    drop(candidate);
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
+}
+
+#[test]
+fn sealed_activation_one_short_work_budget_interrupts_before_candidate() {
+    let factory = test_factory(1);
+    let account = test_account(&factory);
+    let mut limits = test_limits();
+    let exact_work = exact_scene_activation_work_limit();
+    let one_short = exact_work
+        .checked_sub(1)
+        .expect("the exact activation work limit is non-zero");
+    limits.attempted_work = one_short;
+    limits.consumed_work = one_short;
+
+    let transition = SceneConstructionOperation::with_account_for_activation(&account, limits)
+        .expect("the one-short budget still covers protected terminal work")
+        .activate_fresh_two_node(authored_fixture())
+        .expect("the late ledger interruption remains contained");
+    let prepared = match transition {
+        SceneActivationTransition::Candidate(_) => {
+            panic!("one-short ordinary work must not produce a validated candidate")
+        }
+        SceneActivationTransition::Terminal(prepared) => prepared,
+    };
+    let failure = match prepared.handoff() {
+        SceneConstructionTerminal::RichFailure(failure) => failure,
+        SceneConstructionTerminal::Success(_) => {
+            panic!("one-short ordinary work must not publish")
+        }
+        SceneConstructionTerminal::MinimalFallback(_) => {
+            panic!("a ledger interruption after qualified evidence must remain rich")
+        }
+    };
+    let terminal = match failure.ledger_evidence().header().terminal_cause() {
+        StoreTerminalCause::Failure(cause) => cause,
+        StoreTerminalCause::Success => panic!("the interrupted operation cannot report success"),
+        _ => panic!("the interrupted operation reported an unknown terminal cause"),
+    };
+
+    assert_eq!(terminal.class(), StorePreparationFailureClass::Ledger);
+    assert_eq!(failure.outcome_evidence_block_count(), 1);
+    assert!(failure.account().is_same_account(&account));
+    let ordinary = failure
+        .ledger_evidence()
+        .dimension_by_semantic(STORE_DIMENSION)
+        .expect("the activation has its ordinary work dimension");
+    let protected = failure
+        .ledger_evidence()
+        .dimension_by_semantic(FAILURE_TERMINAL_WORK_DIMENSION)
+        .expect("the activation has its protected failure dimension");
+    let rich_validation_work =
+        u64::try_from(super::schema::EVIDENCE_FIELD_COUNT).expect("the evidence width fits u64");
+    let full_ordinary_work = exact_work
+        .checked_sub(exact_scene_activation_protected_work_limit())
+        .expect("protected work is contained in the total activation limit");
+    assert_eq!(ordinary.attempted(), full_ordinary_work);
+    assert_eq!(
+        ordinary.consumed() + super::validation::scene_graph_validation_work(),
+        ordinary.attempted()
+    );
+    assert_eq!(protected.attempted(), rich_validation_work);
+    assert_eq!(protected.attempted(), protected.consumed());
+
+    drop(failure);
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
+}
+
+#[test]
+fn sealed_activation_preserves_rich_failure_after_central_rejection() {
+    let factory = test_factory(1);
+    let account = test_account(&factory);
+    let mut invalid_root = Mat4::IDENTITY;
+    invalid_root.cols[0][3] = 1.0;
+
+    let transition =
+        SceneConstructionOperation::with_account_for_activation(&account, test_limits())
+            .expect("explicit-account construction operation")
+            .activate_fresh_two_node(TwoNodeAuthoredMatrices::new(invalid_root, Mat4::IDENTITY))
+            .expect("sealed core activation");
+    let prepared = match transition {
+        SceneActivationTransition::Candidate(_) => {
+            panic!("a non-affine authored matrix must fail central validation")
+        }
+        SceneActivationTransition::Terminal(prepared) => prepared,
+    };
+    let failure = match prepared.handoff() {
+        SceneConstructionTerminal::RichFailure(failure) => failure,
+        SceneConstructionTerminal::Success(_) => {
+            panic!("a non-affine authored matrix must not publish")
+        }
+        SceneConstructionTerminal::MinimalFallback(_) => {
+            panic!("central semantic rejection must preserve qualified rich evidence")
+        }
+    };
+
+    assert_eq!(failure.outcome_evidence_block_count(), 1);
+    assert!(failure.account().is_same_account(&account));
+    assert!(account.snapshot().live_retained_allocations() > 0);
+    let ordinary = failure
+        .ledger_evidence()
+        .dimension_by_semantic(STORE_DIMENSION)
+        .expect("the activation has its ordinary work dimension");
+    let protected = failure
+        .ledger_evidence()
+        .dimension_by_semantic(FAILURE_TERMINAL_WORK_DIMENSION)
+        .expect("the activation has its protected failure dimension");
+    let rich_validation_work =
+        u64::try_from(super::schema::EVIDENCE_FIELD_COUNT).expect("the evidence width fits u64");
+    let full_ordinary_work = exact_scene_activation_work_limit()
+        .checked_sub(exact_scene_activation_protected_work_limit())
+        .expect("protected work is contained in the total activation limit");
+    assert_eq!(ordinary.attempted(), full_ordinary_work);
+    assert_eq!(
+        ordinary.consumed() + rich_validation_work,
+        ordinary.attempted()
+    );
+    assert_eq!(protected.attempted(), rich_validation_work);
+    assert_eq!(protected.attempted(), protected.consumed());
+
+    drop(failure);
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
 }
 
 #[test]

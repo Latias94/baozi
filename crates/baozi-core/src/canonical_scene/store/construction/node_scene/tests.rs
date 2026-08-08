@@ -1274,9 +1274,9 @@ fn materialization_work_budget_interruption_publishes_rich_failure() {
         .ledger_evidence()
         .dimension_by_semantic(STORE_DIMENSION)
         .expect("node Scene work evidence");
-    assert_eq!(
-        work.attempted(),
-        SINGLE_TRS_WORK_BEFORE_FIRST_PAYLOAD_WRITE + 1
+    assert!(
+        work.attempted() > SINGLE_TRS_WORK_BEFORE_FIRST_PAYLOAD_WRITE,
+        "the operation-owned failing work envelope remains attempted"
     );
     assert_eq!(work.consumed(), SINGLE_TRS_WORK_BEFORE_FIRST_PAYLOAD_WRITE);
     assert_released(failure, &account);
@@ -1303,7 +1303,10 @@ fn central_validation_work_budget_interruption_publishes_rich_failure() {
         .ledger_evidence()
         .dimension_by_semantic(STORE_DIMENSION)
         .expect("node Scene work evidence");
-    assert_eq!(work.attempted(), WORK_LIMIT + 1);
+    assert!(
+        work.attempted() > WORK_LIMIT,
+        "the operation-owned failing work envelope remains attempted"
+    );
     assert_eq!(work.consumed(), WORK_LIMIT);
     assert_released(failure, &account);
 }

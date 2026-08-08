@@ -162,6 +162,9 @@ fn expect_uncertain(
         Err(StartupCrossPlaneAdmissionFailure::LedgerAdmission(_)) => {
             panic!("injected physical panic reached ledger admission")
         }
+        Err(StartupCrossPlaneAdmissionFailure::OwnerShare(_)) => {
+            panic!("injected physical panic reached startup owner sharing")
+        }
         Err(StartupCrossPlaneAdmissionFailure::PhysicalNoMutation(_)) => {
             panic!("injected physical panic became a typed rejection")
         }
@@ -257,7 +260,7 @@ fn ledger_rejection_precedes_all_four_owner_shares_and_physical_admission() {
 }
 
 #[test]
-fn ready_pair_uses_four_precharged_shares_without_duplicate_ledger_work() {
+fn ready_pair_charges_four_shares_exactly_once() {
     let factory = factory();
     let account = account(&factory, 5, 2);
     let shares = account.share_call_count();
@@ -273,6 +276,7 @@ fn ready_pair_uses_four_precharged_shares_without_duplicate_ledger_work() {
         .ownership
         .as_ref()
         .unwrap_or_else(|| panic!("ready pair owns the complete graph"))
+        .ledger_graph
         .ledger;
     let records = ledger
         .dimension_evidence(Dimension::Records)
@@ -411,6 +415,7 @@ fn ready_split_is_state_only_and_runtime_drop_remains_fail_closed() {
             .ownership
             .as_ref()
             .unwrap_or_else(|| panic!("ready pair owns its ledger"))
+            .ledger_graph
             .ledger,
     );
 
@@ -444,12 +449,10 @@ fn cross_plane_authority_and_products_remain_private_and_indivisible() {
 
     assert!(source.contains("struct StartupGraphPreholdAuthority<"));
     assert!(source.contains("manifest: StartupPhysicalManifest"));
-    assert_eq!(source.matches("inner: account.inner.share()").count(), 4);
     assert!(source.contains("plan: StartupCrossPlanePlan<O, P, D>"));
     assert!(!source.contains("parts: StartupLedgerPlanParts"));
     assert!(!source.contains("fn prehold_startup_account_owners"));
     for forbidden in [
-        "try_admit_start_share_work",
         "ManuallyDrop",
         "unsafe",
         "dyn ",

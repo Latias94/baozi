@@ -1,17 +1,37 @@
 use std::cell::Cell;
 
 use baozi_operation::__canonical_activation::{
-    CanonicalActivationOutcome, CanonicalActivationPlan, CanonicalCentralValidationOutcome,
-    CanonicalMaterialization, CanonicalPreflightDecision, CanonicalValidationDecision,
-    FailureEvidenceDecision, FailureEvidenceMember, FailureEvidenceOutcome,
-    OutcomeEvidenceDecision, RootedFailureValidation, StoreCanonicalRejection,
-    StoreNeverActivatedCause,
+    CanonicalActivationOutcome, CanonicalActivationPolicy, CanonicalActivationRequestSealer,
+    CanonicalActivationRequirements, CanonicalCentralValidationOutcome, CanonicalMaterialization,
+    CanonicalPreflightDecision, CanonicalTableShape, CanonicalValidationDecision,
+    CanonicalValidationMember, CanonicalValidationSession, FailureEvidenceDecision,
+    FailureEvidenceMember, FailureEvidenceOutcome, OutcomeEvidenceDecision,
+    OutcomeEvidenceValidationMember, RootedFailureValidation, SealedCanonicalActivationRequest,
+    StoreCanonicalRejection, StoreNeverActivatedCause,
 };
-use baozi_operation::{
-    RetainedStoreBlockTablePlan, ScalarSequence, StoreDestination, StorePlanError, StoreWorkError,
-};
+use baozi_operation::{ScalarSequence, StoreDestination, StorePlanError, StoreWorkError};
 
 use super::*;
+
+/// Test-only pair of operation-owned role policy and keyless core requirements.
+///
+/// Keeping this pair in the parent module lets the child integration-test modules exercise the
+/// same sealing path without reconstructing ledger roles or commitment amounts locally.
+struct TestActivation {
+    policy: CanonicalActivationPolicy,
+    requirements: CanonicalActivationRequirements,
+}
+
+macro_rules! plan_activation {
+    ($operation:expr, $activation:expr, $preflight:expr, $materialize:expr $(,)?) => {{
+        let TestActivation {
+            policy,
+            requirements,
+        } = $activation;
+        let (owner, sealer) = $operation.into_session_outcome_owner(policy);
+        owner.plan_and_activate(sealer.seal(requirements), $preflight, $materialize)
+    }};
+}
 
 #[path = "activation/central_validation.rs"]
 mod central_validation;
@@ -44,68 +64,185 @@ fn failure_evidence_member_remains_linear() {
     let _ = <Member as AmbiguousIfClone<_>>::assert_not_clone;
 }
 
-fn canonical_plan(keys: TestKeys, blocks: usize) -> CanonicalActivationPlan {
-    canonical_plan_with_capacity(keys, blocks, blocks)
+#[test]
+fn canonical_activation_authorities_remain_linear() {
+    trait AmbiguousIfCopy<Marker> {
+        fn assert_not_copy() {}
+    }
+    impl<T: ?Sized> AmbiguousIfCopy<()> for T {}
+    struct CopyMarker;
+    impl<T: Copy> AmbiguousIfCopy<CopyMarker> for T {}
+
+    trait AmbiguousIfClone<Marker> {
+        fn assert_not_clone() {}
+    }
+    impl<T: ?Sized> AmbiguousIfClone<()> for T {}
+    struct CloneMarker;
+    impl<T: Clone> AmbiguousIfClone<CloneMarker> for T {}
+
+    let _ = <CanonicalActivationRequirements as AmbiguousIfCopy<_>>::assert_not_copy;
+    let _ = <CanonicalActivationRequirements as AmbiguousIfClone<_>>::assert_not_clone;
+    let _ = <CanonicalActivationRequestSealer as AmbiguousIfCopy<_>>::assert_not_copy;
+    let _ = <CanonicalActivationRequestSealer as AmbiguousIfClone<_>>::assert_not_clone;
+    let _ = <SealedCanonicalActivationRequest as AmbiguousIfCopy<_>>::assert_not_copy;
+    let _ = <SealedCanonicalActivationRequest as AmbiguousIfClone<_>>::assert_not_clone;
 }
 
-fn canonical_plan_with_capacity(
+fn activation_shape_with_validation_work(
     keys: TestKeys,
-    capacity: usize,
+    canonical_blocks: usize,
+    evidence_blocks: usize,
+    validation_work: NonZeroU64,
+) -> TestActivation {
+    activation_shape_with_capacity_and_validation_work(
+        keys,
+        canonical_blocks,
+        canonical_blocks,
+        keys,
+        evidence_blocks,
+        validation_work,
+    )
+}
+
+fn activation_shape(
+    keys: TestKeys,
+    canonical_blocks: usize,
+    evidence_blocks: usize,
+) -> TestActivation {
+    activation_shape_with_validation_work(keys, canonical_blocks, evidence_blocks, NonZeroU64::MIN)
+}
+
+fn activation_shape_with_capacity(
+    canonical_keys: TestKeys,
+    canonical_capacity: usize,
     expected_materialized_blocks: usize,
-) -> CanonicalActivationPlan {
-    let table =
-        RetainedStoreBlockTablePlan::new(writer_plan(keys, capacity + 1, 2), capacity, capacity)
-            .unwrap();
-    let commitment_amount = NonZeroU64::new(
-        u64::try_from(expected_materialized_blocks)
-            .expect("test canonical block counts fit the ledger"),
-    )
-    .expect("test canonical activation always commits a non-zero output");
-    CanonicalActivationPlan::new(
-        table,
+    evidence_keys: TestKeys,
+    evidence_blocks: usize,
+) -> TestActivation {
+    activation_shape_with_capacity_and_validation_work(
+        canonical_keys,
+        canonical_capacity,
         expected_materialized_blocks,
-        keys.dimension,
-        keys.dimension,
-        keys.dimension,
-        commitment_amount,
+        evidence_keys,
+        evidence_blocks,
+        NonZeroU64::MIN,
     )
-    .unwrap()
+}
+
+fn activation_shape_with_capacity_and_validation_work(
+    canonical_keys: TestKeys,
+    canonical_capacity: usize,
+    expected_materialized_blocks: usize,
+    evidence_keys: TestKeys,
+    evidence_blocks: usize,
+    validation_work: NonZeroU64,
+) -> TestActivation {
+    let canonical = CanonicalTableShape::new(canonical_capacity, canonical_capacity).unwrap();
+    let evidence = CanonicalTableShape::new(evidence_blocks, evidence_blocks).unwrap();
+    let requirements = CanonicalActivationRequirements::new(
+        canonical,
+        evidence,
+        expected_materialized_blocks,
+        validation_work,
+    )
+    .unwrap();
+    let policy = CanonicalActivationPolicy::new(
+        writer_plan(canonical_keys, canonical_capacity + 1, 2),
+        writer_plan(evidence_keys, evidence_blocks + 1, 2),
+        canonical_keys.dimension,
+        canonical_keys.dimension,
+        canonical_keys.dimension,
+        evidence_keys.dimension,
+    );
+    TestActivation {
+        policy,
+        requirements,
+    }
+}
+
+fn activation_shape_with_dimensions(
+    keys: TestKeys,
+    materialization_work_dimension: StoreDimensionKey,
+    validation_work_dimension: StoreDimensionKey,
+    canonical_destination_dimension: StoreDimensionKey,
+    outcome_evidence_destination_dimension: StoreDimensionKey,
+) -> TestActivation {
+    let requirements = CanonicalActivationRequirements::new(
+        CanonicalTableShape::new(1, 1).unwrap(),
+        CanonicalTableShape::new(1, 1).unwrap(),
+        1,
+        NonZeroU64::MIN,
+    )
+    .unwrap();
+    let policy = CanonicalActivationPolicy::new(
+        writer_plan(keys, 2, 2),
+        writer_plan(keys, 2, 2),
+        materialization_work_dimension,
+        validation_work_dimension,
+        canonical_destination_dimension,
+        outcome_evidence_destination_dimension,
+    );
+    TestActivation {
+        policy,
+        requirements,
+    }
 }
 
 #[test]
-fn activation_plan_rejects_impossible_exact_shapes() {
+fn activation_requirements_reject_impossible_exact_shapes() {
     let factory = factory(1);
     let account = account(&factory);
-    let (_operation, keys) = operation(&account);
-    let table = RetainedStoreBlockTablePlan::new(writer_plan(keys, 2, 2), 1, 1).unwrap();
-    let commitment = NonZeroU64::new(1).unwrap();
+    let (_operation, _keys) = operation(&account);
 
     assert!(matches!(
-        CanonicalActivationPlan::new(
-            table,
+        CanonicalActivationRequirements::new(
+            CanonicalTableShape::new(1, 1).unwrap(),
+            CanonicalTableShape::new(1, 1).unwrap(),
             0,
-            keys.dimension,
-            keys.dimension,
-            keys.dimension,
-            commitment,
+            NonZeroU64::MIN,
         ),
         Err(StorePlanError::InvalidBlockTable)
     ));
     assert!(matches!(
-        CanonicalActivationPlan::new(
-            table,
+        CanonicalActivationRequirements::new(
+            CanonicalTableShape::new(1, 1).unwrap(),
+            CanonicalTableShape::new(1, 1).unwrap(),
             2,
-            keys.dimension,
-            keys.dimension,
-            keys.dimension,
-            commitment,
+            NonZeroU64::MIN,
+        ),
+        Err(StorePlanError::InvalidBlockTable)
+    ));
+    assert!(matches!(
+        CanonicalActivationRequirements::new(
+            CanonicalTableShape::new(1, 0).unwrap(),
+            CanonicalTableShape::new(1, 1).unwrap(),
+            1,
+            NonZeroU64::MIN,
         ),
         Err(StorePlanError::InvalidBlockTable)
     ));
 }
 
-fn evidence_plan(keys: TestKeys, blocks: usize) -> RetainedStoreBlockTablePlan {
-    RetainedStoreBlockTablePlan::new(writer_plan(keys, blocks + 1, 2), blocks, blocks).unwrap()
+#[test]
+fn structural_work_requirement_counts_operation_owned_share_actions() {
+    let factory = factory(1);
+    let account = account(&factory);
+    let (operation, keys) = operation(&account);
+    let work = activation_shape(keys, 4, 1)
+        .requirements
+        .structural_work_requirement();
+    let expanded_canonical_work = activation_shape_with_capacity(keys, 5, 4, keys, 1)
+        .requirements
+        .structural_work_requirement();
+    let expanded_evidence_work = activation_shape(keys, 4, 2)
+        .requirements
+        .structural_work_requirement();
+
+    assert_eq!(work, 24);
+    assert_eq!(expanded_canonical_work, 26);
+    assert_eq!(expanded_evidence_work, 26);
+    drop(operation);
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -152,70 +289,60 @@ fn assert_ignored_controlled_writer_fault_is_contained(kind: ControlledWriterKin
     let account = account(&factory);
     let (operation, keys) = operation(&account);
 
-    let result = operation
-        .into_session_outcome_owner(evidence_plan(keys, 1))
-        .plan_and_activate(
-            |preflight| preflight.seal::<()>(canonical_plan(keys, 1)),
-            |mut lane| {
-                let root = lane
-                    .try_retain_sequence(
+    let result = plan_activation!(
+        operation,
+        activation_shape(keys, 1, 1),
+        |preflight| preflight.seal::<()>(),
+        |mut lane| {
+            let root = lane
+                .try_retain_sequence(SequencePlan::<u8>::new(1).unwrap(), SequenceTag, |writer| {
+                    writer.push(1)?;
+                    Ok(())
+                })
+                .unwrap();
+            match kind {
+                ControlledWriterKind::Sequence => {
+                    let ignored = lane.try_retain_sequence(
                         SequencePlan::<u8>::new(1).unwrap(),
                         SequenceTag,
-                        |writer, _control| {
-                            writer.push(1)?;
+                        |writer| {
+                            writer.push(2)?;
                             Ok(())
                         },
-                    )
-                    .unwrap();
-                match kind {
-                    ControlledWriterKind::Sequence => {
-                        let ignored = lane.try_retain_sequence(
-                            SequencePlan::<u8>::new(1).unwrap(),
-                            SequenceTag,
-                            |writer, _control| {
-                                writer.push(2)?;
-                                Ok(())
-                            },
-                        );
-                        assert_slot_limit(ignored.map(|_| ()), StoreDestination::Canonical);
-                    }
-                    ControlledWriterKind::Bytes => {
-                        let ignored = lane.try_retain_bytes(
-                            BytesPlan::new(1).unwrap(),
-                            BytesTag,
-                            |writer, _control| {
-                                writer.write_bytes(&[2])?;
-                                Ok(())
-                            },
-                        );
-                        assert_slot_limit(ignored.map(|_| ()), StoreDestination::Canonical);
-                    }
-                    ControlledWriterKind::Utf8 => {
-                        let ignored = lane.try_retain_utf8(
-                            Utf8Plan::new(1).unwrap(),
-                            TextTag,
-                            |writer, _control| {
-                                writer.write_str("b")?;
-                                Ok(())
-                            },
-                        );
-                        assert_slot_limit(ignored.map(|_| ()), StoreDestination::Canonical);
-                    }
-                    ControlledWriterKind::Records => {
-                        let ignored = lane.try_retain_records(
-                            RecordPlan::new(1, 1).unwrap(),
-                            CanonicalRootTag,
-                            |writer, _control| {
-                                writer.write_row(|row| row.write_scalar(2_u8))?;
-                                Ok(())
-                            },
-                        );
-                        assert_slot_limit(ignored.map(|_| ()), StoreDestination::Canonical);
-                    }
+                    );
+                    assert_slot_limit(ignored.map(|_| ()), StoreDestination::Canonical);
                 }
-                lane.complete::<_, (), _, _>(root, root)
-            },
-        );
+                ControlledWriterKind::Bytes => {
+                    let ignored =
+                        lane.try_retain_bytes(BytesPlan::new(1).unwrap(), BytesTag, |writer| {
+                            writer.write_bytes(&[2])?;
+                            Ok(())
+                        });
+                    assert_slot_limit(ignored.map(|_| ()), StoreDestination::Canonical);
+                }
+                ControlledWriterKind::Utf8 => {
+                    let ignored =
+                        lane.try_retain_utf8(Utf8Plan::new(1).unwrap(), TextTag, |writer| {
+                            writer.write_str("b")?;
+                            Ok(())
+                        });
+                    assert_slot_limit(ignored.map(|_| ()), StoreDestination::Canonical);
+                }
+                ControlledWriterKind::Records => {
+                    let ignored = lane.try_retain_records(
+                        RecordPlan::new(1, 1).unwrap(),
+                        CanonicalRootTag,
+                        |writer| {
+                            writer.write_row(|row| row.write_scalar(2_u8))?;
+                            Ok(())
+                        },
+                    );
+                    assert_slot_limit(ignored.map(|_| ()), StoreDestination::Canonical);
+                }
+            }
+            lane.complete::<_, (), _, _>(root, root)
+        },
+    );
     let containment = match result {
         Err(containment) => containment,
         Ok(_) => panic!("ignored first fault must be contained"),
@@ -241,64 +368,61 @@ fn assert_controlled_writer_body_and_drop_panics_are_isolated(kind: ControlledWr
     let account = account(&factory);
     let (operation, keys) = operation(&account);
 
-    let result = operation
-        .into_session_outcome_owner(evidence_plan(keys, 1))
-        .plan_and_activate(
-            |preflight| preflight.seal::<()>(canonical_plan(keys, 1)),
-            |mut lane| {
-                match kind {
-                    ControlledWriterKind::Sequence => {
-                        let capture = PanicOnDrop;
-                        let result = lane.try_retain_sequence(
-                            SequencePlan::<u8>::new(1).unwrap(),
-                            SequenceTag,
-                            move |_writer, _control| {
-                                let _capture = &capture;
-                                panic!("contained canonical sequence builder panic")
-                            },
-                        );
-                        assert!(matches!(result, Err(StoreRuntimeError::BuilderPanicked)));
-                    }
-                    ControlledWriterKind::Bytes => {
-                        let capture = PanicOnDrop;
-                        let result = lane.try_retain_bytes(
-                            BytesPlan::new(1).unwrap(),
-                            BytesTag,
-                            move |_writer, _control| {
-                                let _capture = &capture;
-                                panic!("contained canonical bytes builder panic")
-                            },
-                        );
-                        assert!(matches!(result, Err(StoreRuntimeError::BuilderPanicked)));
-                    }
-                    ControlledWriterKind::Utf8 => {
-                        let capture = PanicOnDrop;
-                        let result = lane.try_retain_utf8(
-                            Utf8Plan::new(1).unwrap(),
-                            TextTag,
-                            move |_writer, _control| {
-                                let _capture = &capture;
-                                panic!("contained canonical UTF-8 builder panic")
-                            },
-                        );
-                        assert!(matches!(result, Err(StoreRuntimeError::BuilderPanicked)));
-                    }
-                    ControlledWriterKind::Records => {
-                        let capture = PanicOnDrop;
-                        let result = lane.try_retain_records(
-                            RecordPlan::new(1, 1).unwrap(),
-                            CanonicalRootTag,
-                            move |_writer, _control| {
-                                let _capture = &capture;
-                                panic!("contained canonical record builder panic")
-                            },
-                        );
-                        assert!(matches!(result, Err(StoreRuntimeError::BuilderPanicked)));
-                    }
+    let result = plan_activation!(
+        operation,
+        activation_shape(keys, 1, 1),
+        |preflight| preflight.seal::<()>(),
+        |mut lane| {
+            match kind {
+                ControlledWriterKind::Sequence => {
+                    let capture = PanicOnDrop;
+                    let result = lane.try_retain_sequence(
+                        SequencePlan::<u8>::new(1).unwrap(),
+                        SequenceTag,
+                        move |_writer| {
+                            let _capture = &capture;
+                            panic!("contained canonical sequence builder panic")
+                        },
+                    );
+                    assert!(matches!(result, Err(StoreRuntimeError::BuilderPanicked)));
                 }
-                lane.reject::<(), (), ScalarSequence<u8>, SequenceTag>((), 1)
-            },
-        );
+                ControlledWriterKind::Bytes => {
+                    let capture = PanicOnDrop;
+                    let result = lane.try_retain_bytes(
+                        BytesPlan::new(1).unwrap(),
+                        BytesTag,
+                        move |_writer| {
+                            let _capture = &capture;
+                            panic!("contained canonical bytes builder panic")
+                        },
+                    );
+                    assert!(matches!(result, Err(StoreRuntimeError::BuilderPanicked)));
+                }
+                ControlledWriterKind::Utf8 => {
+                    let capture = PanicOnDrop;
+                    let result =
+                        lane.try_retain_utf8(Utf8Plan::new(1).unwrap(), TextTag, move |_writer| {
+                            let _capture = &capture;
+                            panic!("contained canonical UTF-8 builder panic")
+                        });
+                    assert!(matches!(result, Err(StoreRuntimeError::BuilderPanicked)));
+                }
+                ControlledWriterKind::Records => {
+                    let capture = PanicOnDrop;
+                    let result = lane.try_retain_records(
+                        RecordPlan::new(1, 1).unwrap(),
+                        CanonicalRootTag,
+                        move |_writer| {
+                            let _capture = &capture;
+                            panic!("contained canonical record builder panic")
+                        },
+                    );
+                    assert!(matches!(result, Err(StoreRuntimeError::BuilderPanicked)));
+                }
+            }
+            lane.reject::<(), (), ScalarSequence<u8>, SequenceTag>((), 1)
+        },
+    );
 
     assert!(result.is_err());
     assert!(account.snapshot().poisoned());
@@ -365,19 +489,19 @@ fn rejected_session_from_operation(
     >,
     TestKeys,
 ) {
-    let outcome = operation
-        .into_session_outcome_owner(evidence_plan(keys, evidence_blocks))
-        .plan_and_activate(
-            |preflight| preflight.reject(PreflightRejection::Unsupported, 11),
-            |_lane| -> CanonicalMaterialization<
-                '_,
-                (),
-                PreflightRejection,
-                ScalarSequence<u8>,
-                SequenceTag,
-            > { unreachable!("preflight rejection cannot materialize") },
-        )
-        .unwrap();
+    let outcome = plan_activation!(
+        operation,
+        activation_shape(keys, 1, evidence_blocks),
+        |preflight| preflight.reject(PreflightRejection::Unsupported, 11),
+        |_lane| -> CanonicalMaterialization<
+            '_,
+            (),
+            PreflightRejection,
+            ScalarSequence<u8>,
+            SequenceTag,
+        > { unreachable!("preflight rejection cannot materialize") },
+    )
+    .unwrap();
     let state = match outcome {
         CanonicalActivationOutcome::NeverActivated(state) => state,
         CanonicalActivationOutcome::Activated(_)

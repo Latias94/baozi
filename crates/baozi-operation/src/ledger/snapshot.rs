@@ -306,8 +306,20 @@ where
 pub(super) fn validate_final_snapshot_shape<P: Copy + PartialEq, D>(
     state: &LedgerState<P, D>,
 ) -> Result<(), LedgerCause<D>> {
+    if state.linear_work_faulted {
+        return Err(LedgerCause::FinalSnapshotShapeMismatch);
+    }
+    if state.active_linear_work_permits != 0 {
+        return Err(LedgerCause::OutstandingLinearWorkPermits {
+            count: state.active_linear_work_permits,
+        });
+    }
     if state.dimensions.len() != state.dimension_snapshot_staging.len()
         || !phase_catalog_shape_is_valid(state)
+        || state
+            .dimensions
+            .iter()
+            .any(|entry| entry.state.pending_consumed != 0)
     {
         return Err(LedgerCause::FinalSnapshotShapeMismatch);
     }
@@ -320,7 +332,13 @@ pub(super) fn validate_final_snapshot_shape<P: Copy + PartialEq, D>(
 )]
 pub(super) fn typed_terminal_snapshot_positions_are_valid<P, D>(state: &LedgerState<P, D>) -> bool {
     let phase_count = state.phases.len();
-    state.dimensions.len() == state.dimension_snapshot_staging.len()
+    !state.linear_work_faulted
+        && state.active_linear_work_permits == 0
+        && state
+            .dimensions
+            .iter()
+            .all(|entry| entry.state.pending_consumed == 0)
+        && state.dimensions.len() == state.dimension_snapshot_staging.len()
         && phase_count == state.phase_states.len()
         && phase_count == state.phase_snapshot_staging.len()
         && (0..phase_count).all(|state_position| {

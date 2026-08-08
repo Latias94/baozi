@@ -10,6 +10,7 @@ where
         mut operation: RetainedStoreOperation<O, PP, U, L>,
         outcome_evidence_plan: RetainedStoreBlockTablePlan,
         failure_work: FailureEvidenceWorkBudget,
+        outcome_evidence_destination_dimension: StoreDimensionKey,
         rejection: VerifiedRejection<E>,
     ) -> Self {
         operation.latch_activation_terminal_cause(rejection.failure_code);
@@ -19,6 +20,7 @@ where
             failure_code: rejection.failure_code,
             outcome_evidence_plan,
             failure_work,
+            outcome_evidence_destination_dimension,
         }
     }
 
@@ -26,6 +28,7 @@ where
         mut operation: RetainedStoreOperation<O, PP, U, L>,
         outcome_evidence_plan: RetainedStoreBlockTablePlan,
         failure_work: FailureEvidenceWorkBudget,
+        outcome_evidence_destination_dimension: StoreDimensionKey,
         cause: StoreRuntimeError,
         failure_code: PreparationFailureCode,
         fallback_only: bool,
@@ -41,6 +44,7 @@ where
             failure_code,
             outcome_evidence_plan,
             failure_work,
+            outcome_evidence_destination_dimension,
         }
     }
 
@@ -68,6 +72,7 @@ where
             failure_code,
             outcome_evidence_plan,
             failure_work,
+            outcome_evidence_destination_dimension,
         } = self;
         match authority {
             NeverActivatedAuthority::FallbackOnly(operation) => {
@@ -118,6 +123,7 @@ where
                             failure_code,
                             cause,
                             failure_work,
+                            outcome_evidence_destination_dimension,
                         }
                         .build(
                             ManuallyDrop::into_inner(build)
@@ -156,6 +162,7 @@ where
             failure_code,
             outcome_evidence_plan: _,
             failure_work: _,
+            outcome_evidence_destination_dimension: _,
         } = self;
         let operation = match authority {
             NeverActivatedAuthority::Operation(operation)

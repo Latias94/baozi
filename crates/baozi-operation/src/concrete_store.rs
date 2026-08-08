@@ -134,7 +134,7 @@ use crate::owner::OperationOwner;
 #[cfg(test)]
 use crate::retained::RetainedAllocationError;
 #[cfg(feature = "_u4-activation")]
-use crate::retained::{BlockEmplacer, BlockPlacement};
+use crate::retained::{BlockEmplacer, BlockPlacement, BorrowedRetainedWorkPermit};
 use crate::retained::{
     CanonicalLeafInheritanceError, CanonicalRetainedLeafPolicy, CanonicalRetainedRewriteMap,
     CanonicalRetainedSlot, CanonicalSourceBindError, FinalizationContainmentError,
@@ -175,6 +175,8 @@ pub use batch::{
     CanonicalStoreRange, CanonicalUtf8Range, SequenceBatchItem, SequenceBatchPlan,
     StoreBatchRuntimeError, Utf8BatchItem, Utf8BatchPlan,
 };
+#[cfg(feature = "_u4-activation")]
+use vocabulary::StoreActivationBrand;
 pub use vocabulary::{
     RetainedStoreBatchLimits, RetainedStoreBlockTablePlan, RetainedStoreFailureTerminalWorkPlan,
     RetainedStoreFailureTerminalWorkRequirement, RetainedStorePublicationPlan,
@@ -1719,6 +1721,9 @@ type RawStoreControlCheckpoint<'a, O, PP, U> =
     RetainedControlCheckpoint<'a, O, StorePhaseKey, PP, U, StoreDimensionKey>;
 type RawStoreWorkControl<'a, O, PP, U> =
     RetainedWorkControl<'a, O, StorePhaseKey, PP, U, StoreDimensionKey>;
+#[cfg(feature = "_u4-activation")]
+type RawStoreBorrowedWorkPermit<'borrow, 'operation, O, PP, U> =
+    BorrowedRetainedWorkPermit<'borrow, 'operation, O, StorePhaseKey, PP, U, StoreDimensionKey>;
 type RawStoreAssembly<O, PP, U> = RetainedPublicationAssembly<
     O,
     StorePhaseKey,
@@ -2146,7 +2151,7 @@ where
     #[cfg(feature = "_u4-activation")]
     fn validate_activation_dimensions(
         &self,
-        dimensions: [StoreDimensionKey; 3],
+        dimensions: [StoreDimensionKey; 4],
     ) -> Result<(), StoreRuntimeError> {
         for dimension in dimensions {
             self.validate_dimension_key(dimension)?;
@@ -4296,6 +4301,16 @@ where
     U: ProgressUnit,
 {
     #[cfg(feature = "_u4-activation")]
+    pub(super) const fn canonical_member_count(&self) -> usize {
+        self.raw.canonical_member_count()
+    }
+
+    #[cfg(feature = "_u4-activation")]
+    pub(super) const fn outcome_evidence_member_count(&self) -> usize {
+        self.raw.outcome_evidence_member_count()
+    }
+
+    #[cfg(feature = "_u4-activation")]
     pub(super) fn contain_activation_fault(self) -> FinalizationContainmentError {
         self.raw.contain_activation_fault()
     }
@@ -4768,6 +4783,16 @@ where
     PP: ProgressPhase,
     U: ProgressUnit,
 {
+    #[cfg(feature = "_u4-activation")]
+    pub(super) fn try_stage_exact_outcome_evidence(
+        &mut self,
+        dimension: StoreDimensionKey,
+    ) -> Result<(), StoreRuntimeError> {
+        self.raw
+            .try_stage_exact_outcome_evidence(dimension)
+            .map_err(|cause| map_publication_error(&cause))
+    }
+
     #[cfg(feature = "_u4-activation")]
     pub(super) fn contain_activation_fault(self) -> FinalizationContainmentError {
         self.raw.contain_activation_fault()

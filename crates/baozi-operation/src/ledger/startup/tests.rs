@@ -678,9 +678,10 @@ fn startup_graph_owns_exact_envelopes_and_drops_storage_before_one_ledger_rollba
         .try_fold(8_u64, u64::checked_add)
         .expect("startup graph live bytes");
 
-    let graph = ledger
+    let (graph, account_shares) = ledger
         .try_admit_startup_attribution_graph(parts)
-        .expect("startup graph admission");
+        .expect("startup graph admission")
+        .into_parts();
 
     assert_eq!(test_startup_graph_allocation_entries(), 8);
     assert_eq!(ledger.test_probe().active_reservations(), 6);
@@ -720,7 +721,7 @@ fn startup_graph_owns_exact_envelopes_and_drops_storage_before_one_ledger_rollba
     assert_eq!(ownership.evidence_assembly.commitments.len(), 0);
     assert_eq!(ownership.fallback.commitments.len(), 1);
     assert_eq!(ownership.evidence.commitments.len(), 1);
-    assert_eq!(ownership._account_shares.steps.len(), 4);
+    assert_eq!(account_shares.steps.len(), 4);
 
     drop(graph);
 
@@ -735,8 +736,8 @@ fn startup_graph_owns_exact_envelopes_and_drops_storage_before_one_ledger_rollba
     let records = ledger
         .dimension_evidence(Dimension::Records)
         .expect("record evidence");
-    assert_eq!(records.attempted(), 12);
-    assert_eq!(records.consumed(), 12);
+    assert_eq!(records.attempted(), 0);
+    assert_eq!(records.consumed(), 0);
     assert_eq!(records.published_outcome_evidence(), 0);
 }
 
@@ -1206,8 +1207,8 @@ fn every_startup_graph_allocator_failure_drops_eight_backings_then_rolls_back_si
         let records = ledger
             .dimension_evidence(Dimension::Records)
             .expect("record evidence");
-        assert_eq!(records.attempted(), 12);
-        assert_eq!(records.consumed(), 12);
+        assert_eq!(records.attempted(), 0);
+        assert_eq!(records.consumed(), 0);
     }
 }
 

@@ -694,7 +694,7 @@ fn startup_cross_plane_rail_has_one_qualified_ledger_path_and_no_legacy_authorit
     assert!(source.contains("plan: StartupCrossPlanePlan<O, P, D>"));
     assert_eq!(
         source
-            .matches(".try_admit_startup_attribution_graph(parts)")
+            .matches(".into_admitted_startup_attribution_graph(parts)")
             .count(),
         1
     );
@@ -704,7 +704,6 @@ fn startup_cross_plane_rail_has_one_qualified_ledger_path_and_no_legacy_authorit
         "try_reserve",
         "AdmissionLease",
         "PendingRetainedAdmission",
-        "try_admit_start_share_work",
         "ManuallyDrop",
         "unsafe",
     ] {

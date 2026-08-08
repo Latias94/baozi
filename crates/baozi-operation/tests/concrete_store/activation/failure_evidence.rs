@@ -13,7 +13,6 @@ fn one_unit_rooted_failure_protected_work() -> (u64, u64) {
                     |writer| writer.push(1),
                 )
                 .unwrap();
-            lane.commit(keys.dimension, 1).unwrap();
             lane.complete(root)
         })
         .unwrap();
@@ -41,7 +40,6 @@ macro_rules! assert_exact_failure_construction_work {
         let outcome = state
             .build_failure_evidence(|lane| {
                 let root = lane.$method($plan, $tag, $build).unwrap();
-                lane.commit(keys.dimension, 1).unwrap();
                 lane.complete(root)
             })
             .unwrap();
@@ -92,7 +90,7 @@ fn protected_failure_work(
 macro_rules! assert_exact_failure_validation_work {
     (
         $blocks:expr,
-        |$lane:ident, $dimension:ident| $build:block,
+        |$lane:ident| $build:block,
         $validate:expr,
         $expected:expr
     ) => {{
@@ -100,12 +98,7 @@ macro_rules! assert_exact_failure_validation_work {
             let factory = factory(1);
             let account = account(&factory);
             let (state, keys) = rejected_session_with_evidence_slots(&account, $blocks);
-            let outcome = state
-                .build_failure_evidence(|$lane| {
-                    let $dimension = keys.dimension;
-                    $build
-                })
-                .unwrap();
+            let outcome = state.build_failure_evidence(|$lane| $build).unwrap();
             let rooted = match outcome {
                 FailureEvidenceOutcome::Rooted(rooted) => rooted,
                 FailureEvidenceOutcome::MinimalFallback(_) => {
@@ -125,12 +118,7 @@ macro_rules! assert_exact_failure_validation_work {
             let factory = factory(1);
             let account = account(&factory);
             let (state, keys) = rejected_session_with_evidence_slots(&account, $blocks);
-            let outcome = state
-                .build_failure_evidence(|$lane| {
-                    let $dimension = keys.dimension;
-                    $build
-                })
-                .unwrap();
+            let outcome = state.build_failure_evidence(|$lane| $build).unwrap();
             let rooted = match outcome {
                 FailureEvidenceOutcome::Rooted(rooted) => rooted,
                 FailureEvidenceOutcome::MinimalFallback(_) => {
@@ -157,6 +145,17 @@ macro_rules! assert_exact_failure_validation_work {
             let published = prepared.handoff();
             let work =
                 protected_failure_work(&published.ledger_evidence, keys.failure_terminal_dimension);
+            assert_eq!(
+                published
+                    .ledger_evidence
+            .dimension(keys.dimension)
+            .unwrap()
+            .published_outcome_evidence(),
+                TEST_SNAPSHOT_OUTCOME_EVIDENCE
+                    .checked_add(u64::try_from($blocks).unwrap())
+                    .unwrap(),
+                "validated rich failure must publish the snapshot baseline plus the exact reachable evidence-member count"
+            );
             drop(published);
             assert_eq!(account.snapshot().live_retained_allocations(), 0);
             work
@@ -341,6 +340,88 @@ fn builder_error_before_first_write_attempts_the_full_sealed_plan() {
 }
 
 #[test]
+fn central_evidence_builder_error_preserves_domain_cause_before_partial_resolution() {
+    const PLANNED_WORK: usize = 3;
+    const DOMAIN_CODE: u32 = 74;
+
+    let factory = factory(1);
+    let account = account(&factory);
+    let (operation, keys) = operation(&account);
+    let outcome = plan_activation!(
+        operation,
+        activation_shape(keys, 1, 1),
+        |preflight| preflight.seal::<()>(),
+        |mut lane| {
+            let root = lane
+                .try_retain_sequence(SequencePlan::<u8>::new(1).unwrap(), SequenceTag, |writer| {
+                    writer.push(7)
+                })
+                .unwrap();
+            lane.complete::<_, (), _, _>(root, root)
+        },
+    )
+    .unwrap();
+    let activated = match outcome {
+        CanonicalActivationOutcome::Activated(activated) => activated,
+        CanonicalActivationOutcome::Rejected(_)
+        | CanonicalActivationOutcome::NeverActivated(_)
+        | CanonicalActivationOutcome::Fallback(_) => panic!("materialization must activate"),
+    };
+    let expected = StoreBuildError::domain(DOMAIN_CODE).unwrap();
+    let outcome =
+        activated
+            .validate_centrally(
+                |lane, _output| {
+                    let cause = lane
+                        .try_retain_sequence(
+                            SequencePlan::<u8>::new(PLANNED_WORK).unwrap(),
+                            EvidenceLeafTag,
+                            |_writer| Err(expected),
+                        )
+                        .unwrap_err();
+                    assert_eq!(cause, StoreRuntimeError::Build(expected));
+                    lane.abort::<ScalarSequence<u8>, EvidenceLeafTag>()
+                },
+                |_session,
+                 _canonical,
+                 _evidence,
+                 _output|
+                 -> Result<
+                    CanonicalValidationDecision<(), ValidationRejection>,
+                    StoreWorkError,
+                > {
+                    unreachable!("failed evidence construction cannot enter central validation")
+                },
+            )
+            .unwrap();
+    let fallback = match outcome {
+        CanonicalCentralValidationOutcome::Fallback(fallback) => fallback,
+        CanonicalCentralValidationOutcome::Candidate(_)
+        | CanonicalCentralValidationOutcome::Rejected(_)
+        | CanonicalCentralValidationOutcome::Interrupted(_) => {
+            panic!("a recoverable evidence build failure must select minimal fallback")
+        }
+    };
+    assert_eq!(fallback.cause(), &StoreRuntimeError::Build(expected));
+    let (prepared, _cause) = fallback.into_parts();
+    let published = prepared.handoff();
+    let ordinary = published
+        .ledger_evidence
+        .dimension(keys.dimension)
+        .expect("ordinary work evidence remains queryable");
+    assert_eq!(
+        ordinary.attempted() - ordinary.consumed(),
+        u64::try_from(PLANNED_WORK).unwrap(),
+        "the failed evidence plan remains attempted while no payload unit is fabricated as consumed"
+    );
+    let terminal = store_failure_cause(&published.ledger_evidence);
+    assert_eq!(terminal.class(), StorePreparationFailureClass::ProductGraph);
+    assert_eq!(terminal.code(), DOMAIN_CODE);
+    drop(published);
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
+}
+
+#[test]
 fn bytes_utf8_and_records_charge_exact_completed_construction_work() {
     assert_exact_failure_construction_work!(
         try_retain_bytes,
@@ -382,7 +463,7 @@ fn failure_validation_charges_each_binary_byte_exactly() {
 
     assert_exact_failure_validation_work!(
         1,
-        |lane, dimension| {
+        |lane| {
             let root = lane
                 .try_retain_bytes(
                     BytesPlan::new(PAYLOAD.len()).unwrap(),
@@ -390,7 +471,6 @@ fn failure_validation_charges_each_binary_byte_exactly() {
                     |writer| writer.write_bytes(PAYLOAD),
                 )
                 .unwrap();
-            lane.commit(dimension, 1).unwrap();
             lane.complete(root)
         },
         |session, root| {
@@ -410,7 +490,7 @@ fn failure_validation_charges_encoded_utf8_bytes_not_scalar_count() {
     assert_eq!(TEXT.chars().count(), 3);
     assert_exact_failure_validation_work!(
         1,
-        |lane, dimension| {
+        |lane| {
             let root = lane
                 .try_retain_utf8(
                     Utf8Plan::new(TEXT.len()).unwrap(),
@@ -418,7 +498,6 @@ fn failure_validation_charges_encoded_utf8_bytes_not_scalar_count() {
                     |writer| writer.write_str(TEXT),
                 )
                 .unwrap();
-            lane.commit(dimension, 1).unwrap();
             lane.complete(root)
         },
         |session, root| {
@@ -439,7 +518,7 @@ fn failure_utf8_metering_preserves_a_scalar_across_the_chunk_boundary() {
 
     assert_exact_failure_validation_work!(
         1,
-        |lane, dimension| {
+        |lane| {
             let root = lane
                 .try_retain_utf8(
                     Utf8Plan::new(text.len()).unwrap(),
@@ -447,7 +526,6 @@ fn failure_utf8_metering_preserves_a_scalar_across_the_chunk_boundary() {
                     |writer| writer.write_str(&text),
                 )
                 .unwrap();
-            lane.commit(dimension, 1).unwrap();
             lane.complete(root)
         },
         |session, root| {
@@ -477,7 +555,6 @@ fn failure_validation_cancellation_preserves_the_completed_prefix() {
                     |writer| writer.extend_from_slice(&[7, 8, 9]),
                 )
                 .unwrap();
-            lane.commit(keys.dimension, 1).unwrap();
             lane.complete(root)
         })
         .unwrap();
@@ -533,7 +610,7 @@ fn failure_validation_charges_record_cells_and_every_typed_reference() {
 
     assert_exact_failure_validation_work!(
         5,
-        |lane, dimension| {
+        |lane| {
             let sequence = lane
                 .try_retain_sequence(
                     SequencePlan::<u8>::new(1).unwrap(),
@@ -580,7 +657,6 @@ fn failure_validation_charges_record_cells_and_every_typed_reference() {
                     },
                 )
                 .unwrap();
-            lane.commit(dimension, 1).unwrap();
             lane.complete(root)
         },
         |session, root| {
@@ -656,7 +732,7 @@ fn failure_validation_charges_record_cells_and_every_typed_reference() {
 fn repeated_record_edges_validate_the_child_once_without_recharging_it() {
     assert_exact_failure_validation_work!(
         2,
-        |lane, dimension| {
+        |lane| {
             let child = lane
                 .try_retain_sequence(
                     SequencePlan::<u8>::new(1).unwrap(),
@@ -672,7 +748,6 @@ fn repeated_record_edges_validate_the_child_once_without_recharging_it() {
                     })
                 })
                 .unwrap();
-            lane.commit(dimension, 1).unwrap();
             lane.complete(root)
         },
         |session, root| {
@@ -746,7 +821,6 @@ fn semantic_rejection_stops_repeated_child_validation() {
                     })
                 })
                 .unwrap();
-            lane.commit(keys.dimension, 1).unwrap();
             lane.complete(root)
         })
         .unwrap();
@@ -817,7 +891,7 @@ fn semantic_rejection_stops_repeated_child_validation() {
 fn an_unreachable_local_member_forces_product_graph_fallback() {
     let factory = factory(1);
     let account = account(&factory);
-    let (state, keys) = rejected_session_with_evidence_slots(&account, 2);
+    let (state, _keys) = rejected_session_with_evidence_slots(&account, 2);
     let outcome = state
         .build_failure_evidence(|lane| {
             let _unreachable = lane
@@ -834,7 +908,6 @@ fn an_unreachable_local_member_forces_product_graph_fallback() {
                     |writer| writer.push(7),
                 )
                 .unwrap();
-            lane.commit(keys.dimension, 1).unwrap();
             lane.complete(root)
         })
         .unwrap();
@@ -871,7 +944,7 @@ fn an_unreachable_local_member_forces_product_graph_fallback() {
 fn foreign_record_reference_forces_product_graph_fallback() {
     let factory = factory(1);
     let account = account(&factory);
-    let (source_state, source_keys) = rejected_session_with_one_evidence_slot(&account);
+    let (source_state, _source_keys) = rejected_session_with_one_evidence_slot(&account);
     let mut foreign = None;
     let source_outcome = source_state
         .build_failure_evidence(|lane| {
@@ -883,7 +956,6 @@ fn foreign_record_reference_forces_product_graph_fallback() {
                 )
                 .unwrap();
             foreign = Some(root);
-            lane.commit(source_keys.dimension, 1).unwrap();
             lane.complete(root)
         })
         .unwrap();
@@ -894,7 +966,7 @@ fn foreign_record_reference_forces_product_graph_fallback() {
         }
     };
 
-    let (state, keys) = rejected_session_with_one_evidence_slot(&account);
+    let (state, _keys) = rejected_session_with_one_evidence_slot(&account);
     let outcome = state
         .build_failure_evidence(|lane| {
             let root = lane
@@ -906,7 +978,6 @@ fn foreign_record_reference_forces_product_graph_fallback() {
                     })
                 })
                 .unwrap();
-            lane.commit(keys.dimension, 1).unwrap();
             lane.complete(root)
         })
         .unwrap();
@@ -962,7 +1033,6 @@ fn accepted_record_row_with_an_unvisited_field_forces_product_graph_fallback() {
                         })
                     })
                     .unwrap();
-                lane.commit(keys.dimension, 1).unwrap();
                 lane.complete(root)
             })
             .unwrap();
@@ -994,7 +1064,6 @@ fn accepted_record_row_with_an_unvisited_field_forces_product_graph_fallback() {
                     })
                 })
                 .unwrap();
-            lane.commit(keys.dimension, 1).unwrap();
             lane.complete(root)
         })
         .unwrap();
@@ -1027,6 +1096,58 @@ fn accepted_record_row_with_an_unvisited_field_forces_product_graph_fallback() {
         protected_failure_work(&published.ledger_evidence, keys.failure_terminal_dimension);
     assert_eq!(measured.0.checked_sub(baseline.0).unwrap(), 2);
     assert_eq!(measured.1.checked_sub(baseline.1).unwrap(), 1);
+    assert_eq!(
+        store_failure_cause(&published.ledger_evidence).class(),
+        StorePreparationFailureClass::ProductGraph
+    );
+    drop(published);
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
+}
+
+#[test]
+fn rejected_record_row_with_an_unvisited_field_forces_product_graph_fallback() {
+    let factory = factory(1);
+    let account = account(&factory);
+    let (state, _keys) = rejected_session_with_evidence_slots(&account, 1);
+    let outcome = state
+        .build_failure_evidence(|lane| {
+            let root = lane
+                .try_retain_records(RecordPlan::new(1, 2).unwrap(), EvidenceRootTag, |writer| {
+                    writer.write_row(|row| {
+                        row.write_scalar(1_u8)?;
+                        row.write_scalar(2_u8)
+                    })
+                })
+                .unwrap();
+            lane.complete(root)
+        })
+        .unwrap();
+    let rooted = match outcome {
+        FailureEvidenceOutcome::Rooted(rooted) => rooted,
+        FailureEvidenceOutcome::MinimalFallback(_) => {
+            panic!("the record evidence must remain rooted before validation")
+        }
+    };
+    let validation = rooted
+        .validate_rich_failure(|session, root| {
+            let cause = session
+                .visit_records(root, |_row_index, row| {
+                    assert!(row.scalar::<u8, _>(0, |value| value == 1).unwrap());
+                    false
+                })
+                .unwrap_err();
+            assert!(matches!(cause, StoreRuntimeError::Build(_)));
+            true
+        })
+        .unwrap();
+    let fallback = match validation {
+        RootedFailureValidation::Fallback(fallback) => fallback,
+        RootedFailureValidation::Valid(_) | RootedFailureValidation::Rejected(_) => {
+            panic!("an unvisited field cannot become valid or a semantic rejection")
+        }
+    };
+    let (prepared, _cause) = fallback.into_parts();
+    let published = prepared.handoff();
     assert_eq!(
         store_failure_cause(&published.ledger_evidence).class(),
         StorePreparationFailureClass::ProductGraph
@@ -1078,13 +1199,13 @@ fn trusted_failure_evidence_fault_plus_abort_prepares_minimal_fallback() {
 }
 
 #[test]
-fn later_failure_evidence_contract_fault_contains_an_earlier_slot_fault() {
+fn completing_failure_evidence_after_an_earlier_slot_fault_is_contained() {
     let factory = factory(1);
     let account = account(&factory);
     let (state, _keys) = rejected_session_with_one_evidence_slot(&account);
 
     let result = state.build_failure_evidence(|lane| {
-        let _root = lane
+        let root = lane
             .try_retain_sequence(
                 SequencePlan::<u8>::new(1).unwrap(),
                 EvidenceLeafTag,
@@ -1097,9 +1218,7 @@ fn later_failure_evidence_contract_fault_contains_an_earlier_slot_fault() {
             |writer| writer.push(2),
         );
         assert_slot_limit(first.map(|_| ()), StoreDestination::OutcomeEvidence);
-        let later = lane.commit(foreign_dimension(), 1);
-        assert_slot_limit(later, StoreDestination::OutcomeEvidence);
-        lane.abort::<(), ()>()
+        lane.complete(root)
     });
 
     assert!(result.is_err());
@@ -1107,7 +1226,7 @@ fn later_failure_evidence_contract_fault_contains_an_earlier_slot_fault() {
 }
 
 #[test]
-fn exact_failure_work_budget_preserves_rich_failure_and_zero_canonical_output() {
+fn exact_failure_work_budget_preserves_rich_failure_and_accounts_exact_evidence() {
     let factory = factory(1);
     let account = account(&factory);
     let (state, keys) = rejected_session_with_one_evidence_slot(&account);
@@ -1132,7 +1251,6 @@ fn exact_failure_work_budget_preserves_rich_failure_and_zero_canonical_output() 
                     },
                 )
                 .unwrap();
-            lane.commit(keys.dimension, 1).unwrap();
             lane.complete(root)
         })
         .unwrap();
@@ -1187,8 +1305,9 @@ fn exact_failure_work_budget_preserves_rich_failure_and_zero_canonical_output() 
             .ledger_evidence
             .dimension(keys.dimension)
             .unwrap()
-            .committed_canonical_output(),
-        0
+            .published_outcome_evidence(),
+        TEST_SNAPSHOT_OUTCOME_EVIDENCE + 1,
+        "one validated evidence member must be staged in addition to the snapshot baseline"
     );
     drop(published);
     assert_eq!(account.snapshot().live_retained_allocations(), 0);
@@ -1270,7 +1389,7 @@ fn final_control_fault_upgrades_requested_rich_failure_cause() {
     let account = account(&factory);
     let cancellation = CancellationToken::new();
     let control = OperationControl::default().with_cancellation(cancellation.clone());
-    let (state, keys) = rejected_session_with_control(&account, control);
+    let (state, _keys) = rejected_session_with_control(&account, control);
     let outcome = state
         .build_failure_evidence(|lane| {
             let root = lane
@@ -1280,7 +1399,6 @@ fn final_control_fault_upgrades_requested_rich_failure_cause() {
                     |writer| writer.push(7),
                 )
                 .unwrap();
-            lane.commit(keys.dimension, 1).unwrap();
             lane.complete(root)
         })
         .unwrap();
@@ -1430,7 +1548,7 @@ fn failure_construction_polls_between_completed_units() {
 fn rich_failure_validation_body_and_capture_drop_panics_are_isolated() {
     let factory = factory(1);
     let account = account(&factory);
-    let (state, keys) = rejected_session_with_one_evidence_slot(&account);
+    let (state, _keys) = rejected_session_with_one_evidence_slot(&account);
     let capture = PanicOnDrop;
 
     let outcome = state
@@ -1442,7 +1560,6 @@ fn rich_failure_validation_body_and_capture_drop_panics_are_isolated() {
                     |writer| writer.push(7),
                 )
                 .unwrap();
-            lane.commit(keys.dimension, 1).unwrap();
             lane.complete(root)
         })
         .unwrap();
@@ -1479,7 +1596,6 @@ fn clean_rich_failure_validation_panic_prepares_fallback_without_poisoning() {
                         |writer| writer.extend_from_slice(&[7; PLANNED_WORK]),
                     )
                     .unwrap();
-                lane.commit(keys.dimension, 1).unwrap();
                 lane.complete(root)
             })
             .unwrap();
@@ -1510,7 +1626,6 @@ fn clean_rich_failure_validation_panic_prepares_fallback_without_poisoning() {
                     |writer| writer.extend_from_slice(&[7; PLANNED_WORK]),
                 )
                 .unwrap();
-            lane.commit(keys.dimension, 1).unwrap();
             lane.complete(root)
         })
         .unwrap();
@@ -1561,6 +1676,103 @@ fn clean_rich_failure_validation_panic_prepares_fallback_without_poisoning() {
 }
 
 #[test]
+fn rich_failure_control_then_panic_preserves_one_terminal_cause() {
+    let factory = factory(1);
+    let account = account(&factory);
+    let cancellation = CancellationToken::new();
+    let control = OperationControl::default().with_cancellation(cancellation.clone());
+    let (state, _keys) = rejected_session_with_control(&account, control);
+    let outcome = state
+        .build_failure_evidence(|lane| {
+            let root = lane
+                .try_retain_sequence(
+                    SequencePlan::<u8>::new(1).unwrap(),
+                    EvidenceLeafTag,
+                    |writer| writer.push(7),
+                )
+                .unwrap();
+            lane.complete(root)
+        })
+        .unwrap();
+    let rooted = match outcome {
+        FailureEvidenceOutcome::Rooted(rooted) => rooted,
+        FailureEvidenceOutcome::MinimalFallback(_) => panic!("valid evidence must remain rooted"),
+    };
+
+    let validation = rooted
+        .validate_rich_failure(|session, root| {
+            cancellation.cancel();
+            let cause = session
+                .visit_sequence(root, |_index, _value| true)
+                .unwrap_err();
+            assert!(matches!(cause, StoreRuntimeError::Control(_)));
+            panic!("panic after the first rich-failure control interruption")
+        })
+        .unwrap();
+    let fallback = match validation {
+        RootedFailureValidation::Fallback(fallback) => fallback,
+        RootedFailureValidation::Valid(_) | RootedFailureValidation::Rejected(_) => {
+            panic!("a validator panic after control interruption must select minimal fallback")
+        }
+    };
+    assert!(matches!(fallback.cause(), StoreRuntimeError::Control(_)));
+    let (prepared, _cause) = fallback.into_parts();
+    let published = prepared.handoff();
+    assert_eq!(
+        store_failure_cause(&published.ledger_evidence).class(),
+        StorePreparationFailureClass::Control
+    );
+    drop(published);
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
+}
+
+#[test]
+fn rich_failure_contract_then_panic_preserves_one_terminal_cause() {
+    let factory = factory(1);
+    let account = account(&factory);
+    let (state, _keys) = rejected_session_with_one_evidence_slot(&account);
+    let outcome = state
+        .build_failure_evidence(|lane| {
+            let root = lane
+                .try_retain_records(RecordPlan::new(1, 1).unwrap(), EvidenceRootTag, |writer| {
+                    writer.write_row(|row| row.write_scalar(7_u8))
+                })
+                .unwrap();
+            lane.complete(root)
+        })
+        .unwrap();
+    let rooted = match outcome {
+        FailureEvidenceOutcome::Rooted(rooted) => rooted,
+        FailureEvidenceOutcome::MinimalFallback(_) => panic!("valid evidence must remain rooted"),
+    };
+
+    let validation = rooted
+        .validate_rich_failure(|session, root| {
+            let cause = session
+                .visit_records(root, |_row_index, _row| true)
+                .unwrap_err();
+            assert!(matches!(cause, StoreRuntimeError::Build(_)));
+            panic!("panic after the first rich-failure validation contract error")
+        })
+        .unwrap();
+    let fallback = match validation {
+        RootedFailureValidation::Fallback(fallback) => fallback,
+        RootedFailureValidation::Valid(_) | RootedFailureValidation::Rejected(_) => {
+            panic!("a validator panic after contract failure must select minimal fallback")
+        }
+    };
+    assert!(matches!(fallback.cause(), StoreRuntimeError::Build(_)));
+    let (prepared, _cause) = fallback.into_parts();
+    let published = prepared.handoff();
+    assert_eq!(
+        store_failure_cause(&published.ledger_evidence).class(),
+        StorePreparationFailureClass::ProductGraph
+    );
+    drop(published);
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
+}
+
+#[test]
 fn rich_failure_semantic_rejection_preserves_the_rejected_owner() {
     let factory = factory(1);
     let account = account(&factory);
@@ -1574,7 +1786,6 @@ fn rich_failure_semantic_rejection_preserves_the_rejected_owner() {
                     |writer| writer.extend_from_slice(&[7, 8, 9]),
                 )
                 .unwrap();
-            lane.commit(keys.dimension, 1).unwrap();
             lane.complete(root)
         })
         .unwrap();

@@ -774,16 +774,6 @@ where
         self.membership
     }
 
-    /// Shares an already admitted retained allocation after the owning operation has charged all
-    /// clone and retained-handle work. The new handle deliberately starts without publication
-    /// membership so only the destination table can brand it.
-    pub(super) fn share_after_admitted_work(&self) -> Self {
-        Self {
-            inner: self.inner.share(),
-            membership: None,
-        }
-    }
-
     #[cfg(test)]
     pub(super) fn share_after_test_admission(&self) -> Self {
         Self {

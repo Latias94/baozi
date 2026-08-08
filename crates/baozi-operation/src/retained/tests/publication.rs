@@ -278,6 +278,379 @@ fn ordinary_work_permit_preserves_completed_prefix_when_dropped_incomplete() {
 
 #[cfg(feature = "_u4-activation")]
 #[test]
+fn borrowed_work_permit_resolves_verified_partial_work_without_abandonment() {
+    let factory = account_factory(1);
+    let account = account(&factory, u64::MAX, 128);
+    let operation = ordinary_linear_work_operation(&account, 8, 8);
+    let mut assembly: TestPublication<u64, u64> = operation
+        .try_publication_assembly(publication_plan(1, 1))
+        .unwrap_or_else(|_| panic!("partial-work publication must open"));
+
+    assert!(matches!(
+        assembly.try_retain_success_outcome_evidence_controlled::<EvidenceRootTag>(
+            TestDimension::Work,
+            empty_plan(),
+            |_emplacer, mut control| {
+                let mut permit = control
+                    .try_begin_borrowed(
+                        NonZeroU64::new(3).expect("nonzero borrowed work envelope"),
+                    )
+                    .unwrap_or_else(|_| panic!("borrowed work envelope must be admitted"));
+                permit
+                    .complete_units(
+                        NonZeroU64::new(2).expect("nonzero borrowed completed prefix"),
+                    )
+                    .unwrap_or_else(|_| panic!("borrowed completed prefix must fit"));
+                permit.finish_partial();
+                Err(BUILD_FAILED)
+            },
+        ),
+        Err(RetainedPublicationError::Writer(
+            RetainedWriterError::Physical(RetainedAllocationError::Build(cause))
+        )) if cause == BUILD_FAILED
+    ));
+    let work = assembly
+        .test_ledger_probe()
+        .dimension_evidence(TestDimension::Work)
+        .unwrap_or_else(|| panic!("borrowed work evidence"));
+    assert_eq!((work.attempted(), work.consumed()), (3, 2));
+    assert_eq!(
+        finish_ordinary_linear_work_test(assembly).class(),
+        PreparationFailureClass::Requested
+    );
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
+    drop(account);
+    assert_eq!(factory.snapshot().live_accounts(), 0);
+}
+
+#[cfg(feature = "_u4-activation")]
+#[test]
+fn dropped_borrowed_work_permit_preserves_prefix_and_latches_abandonment() {
+    let factory = account_factory(1);
+    let account = account(&factory, u64::MAX, 128);
+    let operation = ordinary_linear_work_operation(&account, 8, 8);
+    let mut assembly: TestPublication<u64, u64> = operation
+        .try_publication_assembly(publication_plan(1, 1))
+        .unwrap_or_else(|_| panic!("abandoned borrowed-work publication must open"));
+
+    assert!(matches!(
+        assembly.try_retain_success_outcome_evidence_controlled::<EvidenceRootTag>(
+            TestDimension::Work,
+            empty_plan(),
+            |_emplacer, mut control| {
+                let mut permit = control
+                    .try_begin_borrowed(
+                        NonZeroU64::new(3).expect("nonzero abandoned work envelope"),
+                    )
+                    .unwrap_or_else(|_| panic!("abandoned work envelope must be admitted"));
+                permit
+                    .complete_units(
+                        NonZeroU64::new(1).expect("nonzero abandoned completed prefix"),
+                    )
+                    .unwrap_or_else(|_| panic!("abandoned completed prefix must fit"));
+                drop(permit);
+                Err(BUILD_FAILED)
+            },
+        ),
+        Err(RetainedPublicationError::Writer(
+            RetainedWriterError::Physical(RetainedAllocationError::Build(cause))
+        )) if cause == BUILD_FAILED
+    ));
+    let work = assembly
+        .test_ledger_probe()
+        .dimension_evidence(TestDimension::Work)
+        .unwrap_or_else(|| panic!("abandoned borrowed-work evidence"));
+    assert_eq!((work.attempted(), work.consumed()), (3, 1));
+    assert_eq!(
+        finish_ordinary_linear_work_test(assembly).class(),
+        PreparationFailureClass::ProductGraph
+    );
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
+    drop(account);
+    assert_eq!(factory.snapshot().live_accounts(), 0);
+}
+
+#[cfg(feature = "_u4-activation")]
+fn assert_abandoned_validation_permit_cannot_validate_success(forget: bool) {
+    let factory = account_factory(1);
+    let account = account(&factory, u64::MAX, 128);
+    let operation = ordinary_linear_work_operation(&account, 8, 8);
+    let mut assembly: TestPublication<u64, u64> = operation
+        .try_publication_assembly(publication_plan(1, 1))
+        .unwrap_or_else(|_| panic!("abandoned-validation publication must open"));
+    let (canonical_root, evidence_root) = retain_scalar_success(&mut assembly);
+
+    let fallback = match assembly.validate_success_controlled(
+        TestDimension::Work,
+        canonical_root,
+        evidence_root,
+        |session, canonical, evidence, mut control| {
+            let mut permit = control
+                .try_begin_borrowed(NonZeroU64::MIN)
+                .unwrap_or_else(|_| panic!("validation work must be admitted"));
+            permit
+                .complete_units(NonZeroU64::MIN)
+                .unwrap_or_else(|_| panic!("validation work must complete"));
+            if forget {
+                std::mem::forget(permit);
+            } else {
+                drop(permit);
+            }
+            session.canonical(canonical) == Some(&11)
+                && session.outcome_evidence(evidence) == Some(&7)
+        },
+    ) {
+        RetainedSuccessValidation::FallbackOnly(fallback) => fallback,
+        RetainedSuccessValidation::Valid(_) | RetainedSuccessValidation::Rejected(_) => {
+            panic!("an abandoned validation permit must not produce a success proof")
+        }
+    };
+    let published = handoff_for_test(
+        fallback
+            .prepare_minimal_fallback()
+            .unwrap_or_else(|_| panic!("abandoned validation must prepare fallback")),
+    );
+    let PublishedRetainedPublicationParts::MinimalFallback {
+        ledger_evidence, ..
+    } = &published
+    else {
+        panic!("abandoned validation must publish minimal fallback")
+    };
+    assert_eq!(
+        published_failure_cause(ledger_evidence).class(),
+        PreparationFailureClass::ProductGraph
+    );
+    drop(published);
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
+    drop(account);
+    assert_eq!(factory.snapshot().live_accounts(), 0);
+}
+
+#[cfg(feature = "_u4-activation")]
+#[test]
+fn dropped_validation_permit_cannot_validate_success() {
+    assert_abandoned_validation_permit_cannot_validate_success(false);
+}
+
+#[cfg(feature = "_u4-activation")]
+#[test]
+fn forgotten_validation_permit_cannot_validate_success() {
+    assert_abandoned_validation_permit_cannot_validate_success(true);
+}
+
+#[cfg(feature = "_u4-activation")]
+#[test]
+fn partially_resolved_validation_work_cannot_validate_success() {
+    let factory = account_factory(1);
+    let account = account(&factory, u64::MAX, 128);
+    let operation = ordinary_linear_work_operation(&account, 8, 8);
+    let mut assembly: TestPublication<u64, u64> = operation
+        .try_publication_assembly(publication_plan(1, 1))
+        .unwrap_or_else(|_| panic!("partial-validation publication must open"));
+    let (canonical_root, evidence_root) = retain_scalar_success(&mut assembly);
+
+    let rejected = match assembly.validate_success_controlled(
+        TestDimension::Work,
+        canonical_root,
+        evidence_root,
+        |session, canonical, evidence, mut control| {
+            let mut permit = control
+                .try_begin_borrowed(
+                    NonZeroU64::new(3).expect("nonzero partial validation envelope"),
+                )
+                .unwrap_or_else(|_| panic!("partial validation work must be admitted"));
+            permit
+                .complete_units(NonZeroU64::new(2).expect("nonzero completed prefix"))
+                .unwrap_or_else(|_| panic!("partial validation prefix must fit"));
+            permit.finish_partial();
+            session.canonical(canonical) == Some(&11)
+                && session.outcome_evidence(evidence) == Some(&7)
+        },
+    ) {
+        RetainedSuccessValidation::Rejected(rejected) => rejected,
+        RetainedSuccessValidation::Valid(_) | RetainedSuccessValidation::FallbackOnly(_) => {
+            panic!("partially resolved validation work must reject success")
+        }
+    };
+    let published = handoff_for_test(
+        rejected
+            .prepare_minimal_fallback()
+            .unwrap_or_else(|_| panic!("partial validation rejection must prepare fallback")),
+    );
+    let PublishedRetainedPublicationParts::MinimalFallback {
+        ledger_evidence, ..
+    } = &published
+    else {
+        panic!("partial validation rejection must publish minimal fallback")
+    };
+    assert_eq!(
+        published_failure_cause(ledger_evidence).class(),
+        PreparationFailureClass::ProductGraph
+    );
+    let work = ledger_evidence
+        .dimension(TestDimension::Work)
+        .unwrap_or_else(|| panic!("partial validation work evidence"));
+    assert_eq!((work.attempted(), work.consumed()), (3, 2));
+    drop(published);
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
+    drop(account);
+    assert_eq!(factory.snapshot().live_accounts(), 0);
+}
+
+#[cfg(feature = "_u4-activation")]
+#[test]
+fn ignored_validation_control_failure_cannot_validate_success() {
+    let factory = account_factory(1);
+    let account = account(&factory, u64::MAX, 128);
+    let cancellation = crate::CancellationToken::new();
+    let operation = ordinary_linear_work_operation_with_control(
+        &account,
+        8,
+        8,
+        OperationControl::default().with_cancellation(cancellation.clone()),
+    );
+    let mut assembly: TestPublication<u64, u64> = operation
+        .try_publication_assembly(publication_plan(1, 1))
+        .unwrap_or_else(|_| panic!("control-failure publication must open"));
+    let (canonical_root, evidence_root) = retain_scalar_success(&mut assembly);
+
+    let rejected = match assembly.validate_success_controlled(
+        TestDimension::Work,
+        canonical_root,
+        evidence_root,
+        |session, canonical, evidence, mut control| {
+            cancellation.cancel();
+            assert!(control.poll().is_err());
+            session.canonical(canonical) == Some(&11)
+                && session.outcome_evidence(evidence) == Some(&7)
+        },
+    ) {
+        RetainedSuccessValidation::Rejected(rejected) => rejected,
+        RetainedSuccessValidation::Valid(_) | RetainedSuccessValidation::FallbackOnly(_) => {
+            panic!("ignored validation control failure must reject success")
+        }
+    };
+    let published = handoff_for_test(
+        rejected
+            .prepare_minimal_fallback()
+            .unwrap_or_else(|_| panic!("control rejection must prepare fallback")),
+    );
+    let PublishedRetainedPublicationParts::MinimalFallback {
+        ledger_evidence, ..
+    } = &published
+    else {
+        panic!("control rejection must publish minimal fallback")
+    };
+    assert_eq!(
+        published_failure_cause(ledger_evidence).class(),
+        PreparationFailureClass::Control
+    );
+    drop(published);
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
+    drop(account);
+    assert_eq!(factory.snapshot().live_accounts(), 0);
+}
+
+#[cfg(feature = "_u4-activation")]
+#[test]
+fn ignored_validation_ledger_failure_cannot_validate_success() {
+    let factory = account_factory(1);
+    let account = account(&factory, u64::MAX, 128);
+    let operation = ordinary_linear_work_operation(&account, 0, 0);
+    let mut assembly: TestPublication<u64, u64> = operation
+        .try_publication_assembly(publication_plan(1, 1))
+        .unwrap_or_else(|_| panic!("ledger-failure publication must open"));
+    let (canonical_root, evidence_root) = retain_scalar_success(&mut assembly);
+
+    let rejected = match assembly.validate_success_controlled(
+        TestDimension::Work,
+        canonical_root,
+        evidence_root,
+        |session, canonical, evidence, mut control| {
+            assert!(control.charge_observed(1).is_err());
+            session.canonical(canonical) == Some(&11)
+                && session.outcome_evidence(evidence) == Some(&7)
+        },
+    ) {
+        RetainedSuccessValidation::Rejected(rejected) => rejected,
+        RetainedSuccessValidation::Valid(_) | RetainedSuccessValidation::FallbackOnly(_) => {
+            panic!("ignored validation ledger failure must reject success")
+        }
+    };
+    let published = handoff_for_test(
+        rejected
+            .prepare_minimal_fallback()
+            .unwrap_or_else(|_| panic!("ledger rejection must prepare fallback")),
+    );
+    let PublishedRetainedPublicationParts::MinimalFallback {
+        ledger_evidence, ..
+    } = &published
+    else {
+        panic!("ledger rejection must publish minimal fallback")
+    };
+    assert_eq!(
+        published_failure_cause(ledger_evidence).class(),
+        PreparationFailureClass::Ledger
+    );
+    drop(published);
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
+    drop(account);
+    assert_eq!(factory.snapshot().live_accounts(), 0);
+}
+
+#[cfg(feature = "_u4-activation")]
+#[test]
+fn borrowed_work_permit_preserves_prefix_before_mid_action_cancellation() {
+    let factory = account_factory(1);
+    let account = account(&factory, u64::MAX, 128);
+    let cancellation = crate::CancellationToken::new();
+    let control = OperationControl::default().with_cancellation(cancellation.clone());
+    let operation = ordinary_linear_work_operation_with_control(&account, 8, 8, control);
+    let mut assembly: TestPublication<u64, u64> = operation
+        .try_publication_assembly(publication_plan(1, 1))
+        .unwrap_or_else(|_| panic!("cancellable borrowed-work publication must open"));
+
+    assert!(matches!(
+        assembly.try_retain_success_outcome_evidence_controlled::<EvidenceRootTag>(
+            TestDimension::Work,
+            empty_plan(),
+            |_emplacer, mut control| {
+                let mut permit = control
+                    .try_begin_borrowed(
+                        NonZeroU64::new(3).expect("nonzero cancellable work envelope"),
+                    )
+                    .unwrap_or_else(|_| panic!("cancellable work envelope must be admitted"));
+                permit
+                    .complete_units(
+                        NonZeroU64::new(1).expect("nonzero pre-cancellation prefix"),
+                    )
+                    .unwrap_or_else(|_| panic!("pre-cancellation prefix must fit"));
+                cancellation.cancel();
+                assert!(permit.poll().is_err());
+                permit.finish_partial();
+                Err(BUILD_FAILED)
+            },
+        ),
+        Err(RetainedPublicationError::Writer(
+            RetainedWriterError::Physical(RetainedAllocationError::Build(cause))
+        )) if cause == BUILD_FAILED
+    ));
+    let work = assembly
+        .test_ledger_probe()
+        .dimension_evidence(TestDimension::Work)
+        .unwrap_or_else(|| panic!("cancellable borrowed-work evidence"));
+    assert_eq!((work.attempted(), work.consumed()), (3, 1));
+    assert_eq!(
+        finish_ordinary_linear_work_test(assembly).class(),
+        PreparationFailureClass::Control
+    );
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
+    drop(account);
+    assert_eq!(factory.snapshot().live_accounts(), 0);
+}
+
+#[cfg(feature = "_u4-activation")]
+#[test]
 fn ordinary_work_permit_rejects_consumed_overrun_without_fabricating_completion() {
     let factory = account_factory(1);
     let account = account(&factory, u64::MAX, 128);
@@ -2366,7 +2739,7 @@ fn share_work_rejection_does_not_clone_or_mutate_the_target_table() {
         .test_member_share_call_count(source_slot.identity)
         .expect("source slot must resolve");
     let physical_before_operation = account.snapshot();
-    let policy = DimensionPolicy::reservable_bytes(16, 16, u64::MAX, u64::MAX)
+    let policy = DimensionPolicy::reservable_bytes(u64::MAX, 16, u64::MAX, u64::MAX)
         .with_published_outcome_evidence_limit(u64::MAX);
     let limits = LedgerLimits::new(u64::MAX, [(TestDimension::Bytes, policy)]).unwrap();
     let start = RetainedOperationStartPlan::new(
@@ -2393,15 +2766,38 @@ fn share_work_rejection_does_not_clone_or_mutate_the_target_table() {
         .try_bind_canonical_source(source_canonical.aggregate(), TestDimension::Bytes)
         .unwrap_or_else(|_| panic!("canonical source map must bind before share work"));
     let physical_before_share = account.snapshot();
+    let work_before_share = assembly
+        .test_ledger_probe()
+        .dimension_evidence(TestDimension::Bytes)
+        .unwrap_or_else(|| panic!("share work dimension must remain observable"));
+    assert_eq!(work_before_share.consumed(), 15);
 
     let result = assembly.try_share_canonical(source_canonical.aggregate(), source_slot);
 
     assert!(matches!(
         result,
         Err(RetainedPublicationError::Writer(
-            RetainedWriterError::Ledger(LedgerCause::LimitExceeded { .. })
+            RetainedWriterError::Ledger(LedgerCause::LimitExceeded {
+                class: CounterClass::Consumed,
+                dimension: TestDimension::Bytes,
+                value: 17,
+                limit: 16,
+            })
         ))
     ));
+    let work_after_share = assembly
+        .test_ledger_probe()
+        .dimension_evidence(TestDimension::Bytes)
+        .unwrap_or_else(|| panic!("rejected share work evidence must remain observable"));
+    assert_eq!(
+        work_after_share.attempted(),
+        work_before_share.attempted() + 2
+    );
+    assert_eq!(
+        work_after_share.consumed(),
+        work_before_share.consumed(),
+        "batch admission rejection must not report the first share unit as completed"
+    );
     assert_eq!(assembly.canonical_len(), 0);
     assert_eq!(account.snapshot(), physical_before_share);
     assert!(

@@ -528,13 +528,18 @@ pub(super) struct StartupAdmissionGuard<'account> {
     pub(super) evidence_lease_owner: Option<PhysicalStorageAccount>,
 }
 
-/// One pre-admitted clone/retained-handle pair for an ordinary retained writer.
+/// Test-only proof for physical-account fixtures that bypass operation-ledger work.
 ///
-/// The capability is consumed exactly once by the physical admission that performs the matching
-/// account/allocation clone.  Keeping it typed prevents rollback paths from manufacturing a new
-/// account handle after the work boundary.
+/// Production writers use `RetainedShareWorkPermit`, which admits Attempted separately and records
+/// Consumed only after the physical clone and handle construction complete.
+#[cfg(test)]
 pub(super) struct AdmittedRetainedShareWork {
     pub(super) private: (),
+}
+
+pub(super) enum RetainedShareAdmissionError<D> {
+    Ledger(LedgerCause<D>),
+    Physical(RetainedAllocationError),
 }
 
 pub(super) struct StartupAccountOwners {
@@ -544,6 +549,7 @@ pub(super) struct StartupAccountOwners {
     pub(super) evidence_lease_owner: PhysicalStorageAccount,
 }
 
+#[cfg(test)]
 impl AdmittedRetainedShareWork {
     pub(super) fn consume_account(
         self,
@@ -553,14 +559,6 @@ impl AdmittedRetainedShareWork {
         PhysicalStorageAccount {
             inner: account.inner.share(),
         }
-    }
-
-    pub(super) fn consume_allocation<T>(
-        self,
-        allocation: &RetainedAllocation<T>,
-    ) -> RetainedAllocation<T> {
-        let Self { private: () } = self;
-        allocation.share_after_admitted_work()
     }
 }
 
@@ -1026,6 +1024,7 @@ impl PhysicalStorageAccount {
         Ok(eligibility)
     }
 
+    #[cfg(test)]
     pub(super) fn try_admit_retained(
         &self,
         charge: AdmissionCharge,
@@ -1058,27 +1057,63 @@ impl PhysicalStorageAccount {
     /// The second account lock only commits the physical counter; it deliberately does not
     /// re-check the poison latch.  The single-use action capability is the proof that this retain
     /// began before any later poison transition.
-    pub(super) fn try_admit_retained_after_action(
+    pub(super) fn try_admit_retained_after_action<O, P, D>(
         &self,
         action: PendingAccountActionAdmission<'_>,
         charge: AdmissionCharge,
-        admitted_share_work: AdmittedRetainedShareWork,
-    ) -> Result<PendingRetainedAdmission<'_>, RetainedAllocationError> {
+        admitted_share_work: RetainedShareWorkPermit<'_, O, P, D>,
+    ) -> Result<PendingRetainedAdmission<'_>, RetainedShareAdmissionError<D>>
+    where
+        O: OperationOwner,
+        P: Copy + Ord,
+        D: Copy + Ord + fmt::Debug,
+    {
         if !action.account().is_same_account(self) {
             let poisoned = self.record_poison(AccountPoisonReason::OwnershipGraphUnverified);
-            return Err(RetainedAllocationError::AccountPoisoned(poisoned));
+            return Err(RetainedShareAdmissionError::Physical(
+                RetainedAllocationError::AccountPoisoned(poisoned),
+            ));
         }
         let mut state = lock_recovering_poison(&self.inner.value().linear);
-        let admitted_retained_owners = state
-            .admitted_retained_owners
-            .checked_add(1)
-            .ok_or(RetainedAllocationError::AccountingOverflow)?;
+        let admitted_retained_owners = state.admitted_retained_owners.checked_add(1).ok_or(
+            RetainedShareAdmissionError::Physical(RetainedAllocationError::AccountingOverflow),
+        )?;
         let limits = self.limits().counter_limits();
         try_admit_locked(&mut state.counters, limits, charge)
-            .map_err(map_retained_admission_error)?;
+            .map_err(map_retained_admission_error)
+            .map_err(RetainedShareAdmissionError::Physical)?;
         state.admitted_retained_owners = admitted_retained_owners;
         drop(state);
-        let lease_owner = admitted_share_work.consume_account(self);
+        let lease_owner = match admitted_share_work.try_share_account(self) {
+            Ok(owner) => owner,
+            Err(failure) => {
+                let (owner, cause) = failure.into_parts();
+                let pending = PendingRetainedAdmission {
+                    account: self,
+                    charge,
+                    state: PendingRetainedAdmissionState::Pending,
+                    lease_owner: Some(owner),
+                };
+                return Err(match pending.rollback_with_fault(None) {
+                    PendingRetainedRollback::Clean => RetainedShareAdmissionError::Ledger(cause),
+                    PendingRetainedRollback::FaultRecorded(poisoned) => {
+                        RetainedShareAdmissionError::Physical(
+                            RetainedAllocationError::AccountPoisoned(poisoned),
+                        )
+                    }
+                    PendingRetainedRollback::ChargeReleaseUnverified(_) => {
+                        RetainedShareAdmissionError::Physical(
+                            RetainedAllocationError::ChargeReleaseUnverified,
+                        )
+                    }
+                    PendingRetainedRollback::ChargeRetainedAfterPoison(poisoned) => {
+                        RetainedShareAdmissionError::Physical(
+                            RetainedAllocationError::AccountPoisonedWithRetainedCharge(poisoned),
+                        )
+                    }
+                });
+            }
+        };
         action.complete();
         Ok(PendingRetainedAdmission {
             account: self,

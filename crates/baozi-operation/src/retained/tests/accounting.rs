@@ -686,6 +686,49 @@ fn poisoned_inherited_share_has_no_lookup_work_clone_or_target_side_effect() {
 }
 
 #[test]
+fn physical_share_admission_rejection_preserves_attempted_only_work() {
+    let factory = account_factory(1);
+    let account = account(&factory, 1, 1);
+    let policy = DimensionPolicy::counter(8, 8, 0);
+    let limits = LedgerLimits::new(0, [(TestDimension::Bytes, policy)])
+        .unwrap_or_else(|_| panic!("share-work limits must qualify"));
+    let ledger =
+        Ledger::<TestOwner, TestPhase, TestDimension>::try_new(limits, &[TestPhase::Build])
+            .unwrap_or_else(|_| panic!("share-work ledger must open"));
+    let admission = account
+        .try_admit_account_action()
+        .unwrap_or_else(|_| panic!("account action must admit before the physical limit"));
+    let permit = try_admit_retained_share_work(&ledger, share_work())
+        .unwrap_or_else(|_| panic!("two share-work units must admit"));
+    let shares_before = account.share_call_count();
+
+    let result =
+        account.try_admit_retained_after_action(admission, AdmissionCharge::new(2, 2), permit);
+
+    assert!(matches!(
+        result,
+        Err(RetainedShareAdmissionError::Physical(
+            RetainedAllocationError::ByteLimitExceeded { .. }
+                | RetainedAllocationError::AllocationLimitExceeded { .. }
+        ))
+    ));
+    let evidence = ledger
+        .dimension_evidence(TestDimension::Bytes)
+        .unwrap_or_else(|_| panic!("share-work evidence must remain observable"));
+    assert_eq!((evidence.attempted(), evidence.consumed()), (2, 0));
+    assert_eq!(account.share_call_count(), shares_before);
+    assert_eq!(account.snapshot().live_retained_bytes(), 0);
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
+    let final_snapshot = ledger
+        .finish()
+        .expect("physical admission rejection must release the pending work permit");
+    let evidence = final_snapshot
+        .dimension(TestDimension::Bytes)
+        .unwrap_or_else(|| panic!("final share-work evidence must remain observable"));
+    assert_eq!((evidence.attempted(), evidence.consumed()), (2, 0));
+}
+
+#[test]
 fn admission_first_inherited_share_completes_then_later_share_is_rejected() {
     static DROP_COUNT: AtomicU64 = AtomicU64::new(0);
 

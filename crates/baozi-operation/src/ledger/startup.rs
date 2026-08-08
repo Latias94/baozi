@@ -5,7 +5,7 @@ use super::{
     PublicationDestination, ReservationCore, StorageCoveringReservation, dimension_entry, lock,
     phase_entry,
 };
-use crate::retained::ReadyStartupGraphSplitAuthority;
+use crate::retained::{AdmittedStartupLedgerGraph, ReadyStartupGraphSplitAuthority};
 use crate::{CapacityPlan, OperationOwner};
 use std::fmt;
 use std::marker::PhantomData;
@@ -60,7 +60,7 @@ fn test_startup_graph_storage_releases_at_ledger_lock() -> Option<usize> {
     STARTUP_GRAPH_STORAGE_RELEASES_AT_LEDGER_LOCK.with(std::cell::Cell::get)
 }
 
-const STARTUP_ACCOUNT_SHARE_STEP_COUNT: usize = 4;
+pub(crate) const STARTUP_ACCOUNT_SHARE_STEP_COUNT: usize = 4;
 
 /// One retained allocation attribution that startup must be able to reserve.
 ///
@@ -440,7 +440,6 @@ where
 }
 
 const STARTUP_RESERVATION_COUNT: u64 = 6;
-const STARTUP_WORK_CHARGE_COUNT: usize = STARTUP_ACCOUNT_SHARE_STEP_COUNT * 2;
 
 #[derive(Clone, Copy)]
 struct StartupReservationSpec<P, D> {
@@ -480,16 +479,8 @@ struct StartupReservationProjection<P, D> {
     dimension_position: usize,
 }
 
-#[derive(Clone, Copy)]
-struct StartupWorkProjection<D> {
-    dimension_position: usize,
-    amount: u64,
-    marker: PhantomData<fn(D) -> D>,
-}
-
 struct StartupLedgerAdmission<P, D> {
     reservations: [StartupReservationProjection<P, D>; STARTUP_RESERVATION_COUNT as usize],
-    work: [StartupWorkProjection<D>; STARTUP_WORK_CHARGE_COUNT],
     commitments: [OutputCommitment<D, OutcomeEvidenceDestination>; 2],
     operation_live_after: u64,
     active_reservations_after: u64,
@@ -619,6 +610,42 @@ where
     ownership.cores.release_locked(&mut state);
 }
 
+/// Sealed proof that only ledger startup can bind one admitted graph to its originating ledger.
+pub(crate) struct StartupLedgerGraphSeal {
+    _private: (),
+}
+
+/// Test-only view of the internal borrowed graph builder.
+///
+/// Production crosses the consuming `into_admitted_startup_attribution_graph` boundary instead.
+#[cfg(test)]
+pub(crate) struct StartupAttributionGraphAdmission<O, P, D>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+{
+    graph: StartupAttributionGraph<O, P, D>,
+    account_shares: StartupAccountShareEnvelope<D>,
+}
+
+#[cfg(test)]
+impl<O, P, D> StartupAttributionGraphAdmission<O, P, D>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+{
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        StartupAttributionGraph<O, P, D>,
+        StartupAccountShareEnvelope<D>,
+    ) {
+        (self.graph, self.account_shares)
+    }
+}
+
 /// Ready-owned ledger half of the complete cross-plane startup attribution graph.
 ///
 /// The cross-plane transition consumes this value into the production retained baseline only after
@@ -647,7 +674,6 @@ where
     fallback: StartupAttributionBatchBackings<O, P, D, OutcomeEvidenceDestination>,
     evidence: StartupAttributionBatchBackings<O, P, D, OutcomeEvidenceDestination>,
     cores: StartupLedgerCores<O, P, D>,
-    _account_shares: StartupAccountShareEnvelope<D>,
 }
 
 impl<O, P, D> StartupAttributionGraph<O, P, D>
@@ -699,7 +725,6 @@ where
             mut fallback,
             mut evidence,
             cores,
-            _account_shares: _,
         } = ownership;
         let StartupLedgerCores {
             canonical_assembly_cover,
@@ -749,17 +774,49 @@ where
     }
 }
 
+type BuiltStartupAttributionGraph<O, P, D> = (
+    StartupAttributionGraph<O, P, D>,
+    StartupAccountShareEnvelope<D>,
+);
+
 impl<O, P, D> Ledger<O, P, D>
 where
     O: OperationOwner,
     P: Copy + Ord,
     D: Copy + Ord + fmt::Debug,
 {
-    /// Atomically admits the complete ledger side of retained startup before allocator entry.
+    /// Atomically admits and binds the complete ledger side of retained startup.
+    pub(crate) fn into_admitted_startup_attribution_graph(
+        self,
+        parts: StartupLedgerPlanParts<O, P, D>,
+    ) -> Result<AdmittedStartupLedgerGraph<O, P, D>, AttributionBatchCreateError<D>> {
+        let (graph, account_shares) = self.try_build_startup_attribution_graph(parts)?;
+        Ok(AdmittedStartupLedgerGraph::from_ledger_startup(
+            StartupLedgerGraphSeal { _private: () },
+            graph,
+            self,
+            account_shares,
+        ))
+    }
+
+    /// Preserves direct ledger-module probes without exposing a borrowed production seam.
+    #[cfg(test)]
     pub(crate) fn try_admit_startup_attribution_graph(
         &self,
         parts: StartupLedgerPlanParts<O, P, D>,
-    ) -> Result<StartupAttributionGraph<O, P, D>, AttributionBatchCreateError<D>> {
+    ) -> Result<StartupAttributionGraphAdmission<O, P, D>, AttributionBatchCreateError<D>> {
+        let (graph, account_shares) = self.try_build_startup_attribution_graph(parts)?;
+        Ok(StartupAttributionGraphAdmission {
+            graph,
+            account_shares,
+        })
+    }
+
+    /// Builds the ledger-owned graph while the public production boundary retains `self`.
+    fn try_build_startup_attribution_graph(
+        &self,
+        parts: StartupLedgerPlanParts<O, P, D>,
+    ) -> Result<BuiltStartupAttributionGraph<O, P, D>, AttributionBatchCreateError<D>> {
         let StartupLedgerPlanParts {
             batches,
             retained_attributions,
@@ -811,7 +868,6 @@ where
                 fallback,
                 evidence,
                 cores,
-                _account_shares: account_shares,
             }),
         };
         graph.try_allocate_backings(
@@ -826,7 +882,7 @@ where
         };
         ownership.fallback.commitments.push(commitments[0]);
         ownership.evidence.commitments.push(commitments[1]);
-        Ok(graph)
+        Ok((graph, account_shares))
     }
 
     fn try_admit_startup_ledger(
@@ -1000,15 +1056,7 @@ where
             steps[3].charges[0],
             steps[3].charges[1],
         ];
-        let work_positions = super::preflight_observed_charges(state, &work_specs)?;
-        let mut work = work_specs.map(|(_, amount)| StartupWorkProjection {
-            dimension_position: usize::MAX,
-            amount,
-            marker: PhantomData,
-        });
-        for (projection, position) in work.iter_mut().zip(work_positions) {
-            projection.dimension_position = position;
-        }
+        let _ = super::preflight_observed_charges(state, &work_specs)?;
 
         for index in 0..commitments.len() {
             let commitment = commitments[index];
@@ -1057,7 +1105,6 @@ where
 
         Ok(StartupLedgerAdmission {
             reservations,
-            work,
             commitments,
             operation_live_after,
             active_reservations_after,
@@ -1080,11 +1127,6 @@ fn commit_startup_ledger<P: Copy + Ord, D: Copy + Ord>(
     state.current_live_bytes = admission.operation_live_after;
     state.peak_live_bytes = state.peak_live_bytes.max(admission.operation_live_after);
     state.active_reservations = admission.active_reservations_after;
-    for projection in &admission.work {
-        let dimension = &mut state.dimensions[projection.dimension_position].state;
-        dimension.attempted += projection.amount;
-        dimension.consumed += projection.amount;
-    }
 }
 
 fn empty_startup_batch<O, P, D, Destination>(

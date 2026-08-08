@@ -6,7 +6,6 @@ use super::terminal::{
     cause_after_primary_ledger_rejection, panic_next_evidence_only_primary_bind,
 };
 use super::*;
-#[cfg(feature = "_u4-activation")]
 use crate::CounterClass;
 use crate::DimensionPolicy;
 use crate::ledger::LedgerTestProbe;

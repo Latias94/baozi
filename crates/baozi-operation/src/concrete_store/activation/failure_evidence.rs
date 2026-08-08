@@ -49,6 +49,13 @@ where
     PP: ProgressPhase,
     U: ProgressUnit,
 {
+    fn record_product_graph_failure(&mut self, code: u32) {
+        match self {
+            Self::Ordinary(permit) => permit.record_product_graph_failure(code),
+            Self::Protected(permit) => permit.record_product_graph_failure(code),
+        }
+    }
+
     fn poll(&mut self) -> Result<(), StoreRuntimeError> {
         match self {
             Self::Ordinary(permit) => permit.poll().map_err(StoreRuntimeError::Control),
@@ -88,6 +95,21 @@ where
                 |RetainedFailureWorkFinishError::Incomplete| failure_work_envelope_exhausted(),
             ),
         }
+    }
+
+    fn finish_partial(self) {
+        match self {
+            Self::Ordinary(permit) => permit.finish_partial(),
+            Self::Protected(permit) => permit.finish_partial(),
+        }
+    }
+}
+
+fn evidence_build_failure_code(cause: StoreBuildError) -> u32 {
+    if cause.code() == 0 {
+        ACTIVATION_PRODUCT_GRAPH_FAILURE_CODE
+    } else {
+        cause.code()
     }
 }
 
@@ -157,12 +179,19 @@ where
     }
 
     fn from_permit<'control>(
-        permit: OutcomeEvidenceWorkPermit<'control, O, PP, U>,
+        mut permit: OutcomeEvidenceWorkPermit<'control, O, PP, U>,
         record_action_work: u64,
         create_writer: impl FnOnce() -> Result<W, StoreBuildError>,
     ) -> Result<OutcomeEvidenceBuildControl<'control, O, PP, U, W>, EvidenceBuildCallbackError>
     {
-        let writer = create_writer().map_err(EvidenceBuildCallbackError::Build)?;
+        let writer = match create_writer() {
+            Ok(writer) => writer,
+            Err(cause) => {
+                permit.record_product_graph_failure(evidence_build_failure_code(cause));
+                permit.finish_partial();
+                return Err(EvidenceBuildCallbackError::Build(cause));
+            }
+        };
         Ok(OutcomeEvidenceBuildControl {
             writer,
             permit: Some(permit),
@@ -187,8 +216,33 @@ where
         if let Err(cause) = &result {
             self.sticky
                 .get_or_insert_with(|| EvidenceBuildCallbackError::Runtime(cause.clone()));
+            self.resolve_partial();
         }
         result
+    }
+
+    fn record_build_failure(&mut self, cause: StoreBuildError) {
+        if let Some(permit) = self.permit.as_mut() {
+            permit.record_product_graph_failure(evidence_build_failure_code(cause));
+        }
+        self.sticky
+            .get_or_insert(EvidenceBuildCallbackError::Build(cause));
+    }
+
+    fn record_runtime_failure(&mut self, cause: StoreRuntimeError) {
+        if let StoreRuntimeError::Build(build) = &cause
+            && let Some(permit) = self.permit.as_mut()
+        {
+            permit.record_product_graph_failure(evidence_build_failure_code(*build));
+        }
+        self.sticky
+            .get_or_insert(EvidenceBuildCallbackError::Runtime(cause));
+    }
+
+    fn resolve_partial(&mut self) {
+        if let Some(permit) = self.permit.take() {
+            permit.finish_partial();
+        }
     }
 
     fn perform<T>(
@@ -202,29 +256,28 @@ where
                 EvidenceBuildCallbackError::Runtime(_) => failure_work_build_sentinel(),
             });
         }
-        if let Err(cause) = self
-            .permit
-            .as_mut()
-            .expect("a fault-free outcome-evidence writer retains its work permit")
-            .poll()
-        {
-            self.sticky = Some(EvidenceBuildCallbackError::Runtime(cause));
+        if self.poll().is_err() {
             return Err(failure_work_build_sentinel());
         }
         if amount == 0 {
-            return action(&mut self.writer).inspect_err(|cause| {
-                self.sticky
-                    .get_or_insert(EvidenceBuildCallbackError::Build(*cause));
-            });
+            return match action(&mut self.writer) {
+                Ok(value) => Ok(value),
+                Err(cause) => {
+                    self.record_build_failure(cause);
+                    self.resolve_partial();
+                    Err(cause)
+                }
+            };
         }
-        let permit = self
+        let remaining = self
             .permit
-            .as_mut()
-            .expect("a fault-free outcome-evidence writer retains its work permit");
-        if amount > permit.remaining_units() {
-            self.sticky = Some(EvidenceBuildCallbackError::Runtime(
-                failure_work_envelope_exhausted(),
-            ));
+            .as_ref()
+            .expect("a fault-free outcome-evidence writer retains its work permit")
+            .remaining_units();
+        if amount > remaining {
+            let cause = failure_work_envelope_exhausted();
+            self.record_runtime_failure(cause);
+            self.resolve_partial();
             return Err(failure_work_build_sentinel());
         }
         let amount =
@@ -233,33 +286,78 @@ where
         let value = match action(&mut self.writer) {
             Ok(value) => value,
             Err(cause) => {
-                self.sticky = Some(EvidenceBuildCallbackError::Build(cause));
+                self.record_build_failure(cause);
+                self.resolve_partial();
                 return Err(cause);
             }
         };
-        match permit.complete_units(amount) {
+        let completion = self
+            .permit
+            .as_mut()
+            .expect("a fault-free outcome-evidence writer retains its work permit")
+            .complete_units(amount);
+        match completion {
             Ok(()) => Ok(value),
             Err(cause) => {
-                self.sticky = Some(EvidenceBuildCallbackError::Runtime(cause));
+                self.record_runtime_failure(cause);
+                self.resolve_partial();
                 Err(failure_work_build_sentinel())
             }
         }
     }
 
     pub(super) fn finish(
-        mut self,
+        self,
         callback: Result<(), StoreBuildError>,
         finish_writer: impl FnOnce(W) -> Result<super::StoredBlock, StoreBuildError>,
     ) -> Result<super::StoredBlock, EvidenceBuildCallbackError> {
-        if let Some(cause) = self.sticky.take() {
+        let Self {
+            writer,
+            mut permit,
+            record_action_work: _,
+            sticky,
+        } = self;
+        if let Some(cause) = sticky {
+            if let Some(permit) = permit.take() {
+                permit.finish_partial();
+            }
             return Err(cause);
         }
-        callback.map_err(EvidenceBuildCallbackError::Build)?;
-        let block = finish_writer(self.writer).map_err(EvidenceBuildCallbackError::Build)?;
-        let permit = self
-            .permit
-            .take()
-            .expect("a completed outcome-evidence writer retains its work permit");
+        if let Err(cause) = callback {
+            permit
+                .as_mut()
+                .expect("a callback failure retains its outcome-evidence work permit")
+                .record_product_graph_failure(evidence_build_failure_code(cause));
+            permit
+                .take()
+                .expect("a callback failure resolves its outcome-evidence work permit")
+                .finish_partial();
+            return Err(EvidenceBuildCallbackError::Build(cause));
+        }
+        let block = match finish_writer(writer) {
+            Ok(block) => block,
+            Err(cause) => {
+                permit
+                    .as_mut()
+                    .expect("a writer failure retains its outcome-evidence work permit")
+                    .record_product_graph_failure(evidence_build_failure_code(cause));
+                permit
+                    .take()
+                    .expect("a writer failure resolves its outcome-evidence work permit")
+                    .finish_partial();
+                return Err(EvidenceBuildCallbackError::Build(cause));
+            }
+        };
+        let mut permit =
+            permit.expect("a completed outcome-evidence writer retains its work permit");
+        if permit.remaining_units() != 0 {
+            let cause = failure_work_envelope_exhausted();
+            if let StoreRuntimeError::Build(build) = &cause {
+                permit.record_product_graph_failure(evidence_build_failure_code(*build));
+            }
+            permit.finish_partial();
+            return Err(EvidenceBuildCallbackError::Runtime(cause));
+        }
         permit
             .complete()
             .map_err(EvidenceBuildCallbackError::Runtime)?;
@@ -406,7 +504,7 @@ where
     }
 
     fn poll(&mut self) -> Result<(), StoreRuntimeError> {
-        if let Some(cause) = self.sticky.clone() {
+        if let Some(cause) = self.sticky.as_ref().cloned() {
             return Err(cause);
         }
         let poll = self
@@ -416,7 +514,7 @@ where
             .poll()
             .map_err(StoreRuntimeError::Control);
         if let Err(cause) = &poll {
-            self.sticky = Some(cause.clone());
+            self.sticky.get_or_insert_with(|| cause.clone());
         }
         poll
     }
@@ -458,7 +556,7 @@ where
             }
             Err(RetainedFailureWorkConsumeError::Ledger(cause)) => {
                 let cause = StoreRuntimeError::Ledger(cause);
-                self.sticky = Some(cause.clone());
+                self.sticky.get_or_insert_with(|| cause.clone());
                 Err(cause)
             }
             Err(RetainedFailureWorkConsumeError::ExceedsAttempted) => Err(self.contract_failure()),
@@ -597,12 +695,12 @@ where
                 let accepted = inspect(row_index, &mut row);
                 (accepted, row.visited)
             };
+            if visited != expected {
+                return Err(self.contract_failure());
+            }
             if !accepted {
                 self.rejected = true;
                 return Ok(false);
-            }
-            if visited != expected {
-                return Err(self.contract_failure());
             }
         }
         self.complete_member(completion)?;
@@ -610,7 +708,7 @@ where
     }
 
     fn finish(mut self, accepted: bool) -> Result<bool, StoreRuntimeError> {
-        if let Some(cause) = self.sticky.take() {
+        if let Some(cause) = self.sticky.as_ref().cloned() {
             return Err(cause);
         }
         if self.permit.is_none() || self.completed_units == 0 {
@@ -621,9 +719,13 @@ where
             .permit
             .take()
             .expect("a finished validation retains its work permit");
-        permit.finish_validation(accepted).map_err(
+        let result = permit.finish_validation(accepted).map_err(
             |RetainedFailureWorkFinishError::Incomplete| failure_work_envelope_exhausted(),
-        )?;
+        );
+        if let Err(cause) = &result {
+            self.sticky.get_or_insert_with(|| cause.clone());
+        }
+        result?;
         Ok(accepted)
     }
 }
@@ -1200,28 +1302,6 @@ where
         preserve_first_fault(self.first_fault, finish_scoped_callback(build, result))
     }
 
-    pub fn commit(
-        &mut self,
-        dimension: StoreDimensionKey,
-        amount: u64,
-    ) -> Result<(), StoreRuntimeError> {
-        if let Some(cause) = preserved_fault(self.first_fault) {
-            note_later_contract(
-                self.first_fault,
-                validate_dimension_contract(self.domain, dimension),
-            );
-            return Err(cause);
-        }
-        let result = if !self.domain.owns_dimension(dimension) {
-            Err(StoreRuntimeError::ForeignDimensionDomain { dimension })
-        } else {
-            self.raw
-                .try_commit_outcome_evidence(dimension, amount)
-                .map_err(|cause| map_publication_error(&cause))
-        };
-        preserve_first_fault(self.first_fault, result)
-    }
-
     pub const fn complete<Kind, Tag>(
         &mut self,
         root: OutcomeEvidenceStoreRef<Kind, Tag>,
@@ -1267,6 +1347,7 @@ where
             failure,
             cause,
             failure_work,
+            outcome_evidence_destination_dimension,
         } = self;
         let cause = ManuallyDrop::new(cause);
         let evidence_root = failure.evidence_root();
@@ -1276,7 +1357,7 @@ where
                 let validation_work = match failure_work.planned_validation_work() {
                     Ok(work) => work,
                     Err(cause) => {
-                        controlled_failure = Some(cause);
+                        controlled_failure.get_or_insert(cause);
                         return false;
                     }
                 };
@@ -1294,14 +1375,14 @@ where
                                 failure_work_envelope_exhausted()
                             }
                         };
-                        controlled_failure = Some(cause);
+                        controlled_failure.get_or_insert(cause);
                         return false;
                     }
                 };
                 let mut session = FailureEvidenceValidationSession {
                     raw,
                     permit: Some(permit),
-                    sticky: None,
+                    sticky: &mut controlled_failure,
                     completed_units: 0,
                     rejected: false,
                 };
@@ -1316,7 +1397,7 @@ where
                 match session.finish(accepted) {
                     Ok(accepted) => accepted,
                     Err(cause) => {
-                        controlled_failure = Some(cause);
+                        controlled_failure.get_or_insert(cause);
                         false
                     }
                 }
@@ -1363,11 +1444,42 @@ where
             };
         }
         match validation {
-            StoreFailureValidation::Valid(validated) => {
-                Ok(RootedFailureValidation::Valid(ValidatedFailureEvidence {
-                    validated,
-                    cause: ManuallyDrop::into_inner(cause),
-                }))
+            StoreFailureValidation::Valid(mut validated) => {
+                match validated
+                    .try_stage_exact_outcome_evidence(outcome_evidence_destination_dimension)
+                {
+                    Ok(()) => Ok(RootedFailureValidation::Valid(ValidatedFailureEvidence {
+                        validated,
+                        cause: ManuallyDrop::into_inner(cause),
+                    })),
+                    Err(runtime_cause) => {
+                        if matches!(
+                            classify_activation_fault(&runtime_cause),
+                            ActivationFaultClassification::Contract
+                        ) {
+                            let _ = drop_scoped_value(ManuallyDrop::into_inner(cause));
+                            return Err(StoreActivationContainment {
+                                cause: validated.contain_activation_fault(),
+                            });
+                        }
+                        if drop_scoped_value(ManuallyDrop::into_inner(cause)).is_err() {
+                            return Err(StoreActivationContainment {
+                                cause: validated.contain_activation_fault(),
+                            });
+                        }
+                        match validated.prepare_minimal_fallback() {
+                            Ok(prepared) => {
+                                Ok(RootedFailureValidation::Fallback(VerifiedMinimalFallback {
+                                    prepared,
+                                    cause: runtime_cause,
+                                }))
+                            }
+                            Err(StorePrepareError::FinalizationContainment(cause)) => {
+                                Err(StoreActivationContainment { cause })
+                            }
+                        }
+                    }
+                }
             }
             StoreFailureValidation::Rejected(failure) => {
                 Ok(RootedFailureValidation::Rejected(RejectedFailureEvidence {
@@ -1399,6 +1511,7 @@ where
             failure,
             cause,
             failure_work: _,
+            outcome_evidence_destination_dimension: _,
         } = self;
         let cause = ManuallyDrop::new(cause);
         let prepared = failure.prepare_minimal_fallback();
@@ -1531,6 +1644,7 @@ where
             failure_code: _,
             cause,
             failure_work: _,
+            outcome_evidence_destination_dimension: _,
         } = self;
         let cause = ManuallyDrop::new(cause);
         match raw
@@ -1568,6 +1682,7 @@ where
             failure_code,
             cause,
             mut failure_work,
+            outcome_evidence_destination_dimension,
         } = self;
         let cause = ManuallyDrop::new(cause);
         let mut raw = raw;
@@ -1576,7 +1691,6 @@ where
         let decision = catch_unwind(AssertUnwindSafe(|| {
             let mut lane = FailureEvidenceLane {
                 raw: &mut raw,
-                domain: &domain,
                 first_fault: &mut first_fault,
                 failure_work: &mut failure_work,
             };
@@ -1658,6 +1772,7 @@ where
             },
             cause: ManuallyDrop::into_inner(cause),
             failure_work,
+            outcome_evidence_destination_dimension,
         }))
     }
 }

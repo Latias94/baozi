@@ -14,7 +14,11 @@ use crate::retained::{
     retained_publication_error_requires_containment,
 };
 #[cfg(feature = "_u4-activation")]
-use crate::retained::{RetainedEvidenceMemberVisit, RetainedPendingEvidenceMember};
+use crate::retained::{
+    RetainedCanonicalMemberVisit, RetainedEvidenceMemberVisit, RetainedOutcomeEvidenceMemberVisit,
+    RetainedPendingCanonicalMember, RetainedPendingEvidenceMember,
+    RetainedPendingOutcomeEvidenceMember,
+};
 
 pub(super) fn sequence_view<T: StoredScalar>(block: &StoredBlock) -> Option<SequenceView<'_, T>> {
     if !sequence_kind_matches::<T>(block) {
@@ -69,7 +73,212 @@ pub struct StoreValidationSession<'session, 'storage> {
     pub(super) raw: &'session mut RetainedClosureSession<'storage, StoredBlock, StoredBlock>,
 }
 
+#[cfg(feature = "_u4-activation")]
+pub(super) enum StoreCanonicalMemberVisit<'storage, View, Tag> {
+    Completed(View),
+    Pending {
+        view: View,
+        completion: StoreCanonicalMemberCompletion<'storage, Tag>,
+    },
+}
+
+#[cfg(feature = "_u4-activation")]
+pub(super) struct StoreCanonicalMemberCompletion<'storage, Tag> {
+    raw: RetainedPendingCanonicalMember<'storage, StoredBlock, Tag>,
+}
+
+#[cfg(feature = "_u4-activation")]
+pub(super) enum StoreOutcomeEvidenceMemberVisit<'storage, View, Tag> {
+    Completed(View),
+    Pending {
+        view: View,
+        completion: StoreOutcomeEvidenceMemberCompletion<'storage, Tag>,
+    },
+}
+
+#[cfg(feature = "_u4-activation")]
+pub(super) struct StoreOutcomeEvidenceMemberCompletion<'storage, Tag> {
+    raw: RetainedPendingOutcomeEvidenceMember<'storage, StoredBlock, Tag>,
+}
+
 impl<'storage> StoreValidationSession<'_, 'storage> {
+    #[cfg(feature = "_u4-activation")]
+    fn project_canonical_visit<View, Tag>(
+        &mut self,
+        visit: RetainedCanonicalMemberVisit<'storage, StoredBlock, Tag>,
+        project: impl FnOnce(&'storage StoredBlock) -> Option<View>,
+    ) -> Option<StoreCanonicalMemberVisit<'storage, View, Tag>> {
+        match visit {
+            RetainedCanonicalMemberVisit::Completed(block) => {
+                let Some(view) = project(block) else {
+                    self.raw.invalidate();
+                    return None;
+                };
+                Some(StoreCanonicalMemberVisit::Completed(view))
+            }
+            RetainedCanonicalMemberVisit::Pending(raw) => {
+                let Some(view) = project(raw.block()) else {
+                    self.raw.invalidate();
+                    return None;
+                };
+                Some(StoreCanonicalMemberVisit::Pending {
+                    view,
+                    completion: StoreCanonicalMemberCompletion { raw },
+                })
+            }
+        }
+    }
+
+    #[cfg(feature = "_u4-activation")]
+    fn project_outcome_evidence_visit<View, Tag>(
+        &mut self,
+        visit: RetainedOutcomeEvidenceMemberVisit<'storage, StoredBlock, Tag>,
+        project: impl FnOnce(&'storage StoredBlock) -> Option<View>,
+    ) -> Option<StoreOutcomeEvidenceMemberVisit<'storage, View, Tag>> {
+        match visit {
+            RetainedOutcomeEvidenceMemberVisit::Completed(block) => {
+                let Some(view) = project(block) else {
+                    self.raw.invalidate();
+                    return None;
+                };
+                Some(StoreOutcomeEvidenceMemberVisit::Completed(view))
+            }
+            RetainedOutcomeEvidenceMemberVisit::Pending(raw) => {
+                let Some(view) = project(raw.block()) else {
+                    self.raw.invalidate();
+                    return None;
+                };
+                Some(StoreOutcomeEvidenceMemberVisit::Pending {
+                    view,
+                    completion: StoreOutcomeEvidenceMemberCompletion { raw },
+                })
+            }
+        }
+    }
+
+    #[cfg(feature = "_u4-activation")]
+    pub(super) fn peek_canonical_sequence<T: StoredScalar, Tag>(
+        &mut self,
+        slot: CanonicalSequenceRef<T, Tag>,
+    ) -> Option<StoreCanonicalMemberVisit<'storage, SequenceView<'storage, T>, Tag>>
+    where
+        Tag: Copy + Send + Sync + 'static,
+    {
+        let visit = self.raw.peek_canonical(slot.raw)?;
+        self.project_canonical_visit(visit, sequence_view::<T>)
+    }
+
+    #[cfg(feature = "_u4-activation")]
+    pub(super) fn peek_canonical_bytes<Tag>(
+        &mut self,
+        slot: CanonicalBytesRef<Tag>,
+    ) -> Option<StoreCanonicalMemberVisit<'storage, &'storage [u8], Tag>>
+    where
+        Tag: Copy + Send + Sync + 'static,
+    {
+        let visit = self.raw.peek_canonical(slot.raw)?;
+        self.project_canonical_visit(visit, bytes_view)
+    }
+
+    #[cfg(feature = "_u4-activation")]
+    pub(super) fn peek_canonical_utf8<Tag>(
+        &mut self,
+        slot: CanonicalUtf8Ref<Tag>,
+    ) -> Option<StoreCanonicalMemberVisit<'storage, &'storage str, Tag>>
+    where
+        Tag: Copy + Send + Sync + 'static,
+    {
+        let visit = self.raw.peek_canonical(slot.raw)?;
+        self.project_canonical_visit(visit, utf8_view)
+    }
+
+    #[cfg(feature = "_u4-activation")]
+    pub(super) fn peek_canonical_records<Tag>(
+        &mut self,
+        slot: CanonicalRecordRef<Tag>,
+    ) -> Option<StoreCanonicalMemberVisit<'storage, CanonicalRecordView<'storage>, Tag>>
+    where
+        Tag: Copy + Send + Sync + 'static,
+    {
+        let visit = self.raw.peek_canonical(slot.raw)?;
+        self.project_canonical_visit(visit, canonical_record_view)
+    }
+
+    #[cfg(feature = "_u4-activation")]
+    pub(super) fn peek_outcome_evidence_sequence<T: StoredScalar, Tag>(
+        &mut self,
+        slot: OutcomeEvidenceSequenceRef<T, Tag>,
+    ) -> Option<StoreOutcomeEvidenceMemberVisit<'storage, SequenceView<'storage, T>, Tag>>
+    where
+        Tag: Copy + Send + Sync + 'static,
+    {
+        let visit = self.raw.peek_outcome_evidence(slot.raw)?;
+        self.project_outcome_evidence_visit(visit, sequence_view::<T>)
+    }
+
+    #[cfg(feature = "_u4-activation")]
+    pub(super) fn peek_outcome_evidence_bytes<Tag>(
+        &mut self,
+        slot: OutcomeEvidenceBytesRef<Tag>,
+    ) -> Option<StoreOutcomeEvidenceMemberVisit<'storage, &'storage [u8], Tag>>
+    where
+        Tag: Copy + Send + Sync + 'static,
+    {
+        let visit = self.raw.peek_outcome_evidence(slot.raw)?;
+        self.project_outcome_evidence_visit(visit, bytes_view)
+    }
+
+    #[cfg(feature = "_u4-activation")]
+    pub(super) fn peek_outcome_evidence_utf8<Tag>(
+        &mut self,
+        slot: OutcomeEvidenceUtf8Ref<Tag>,
+    ) -> Option<StoreOutcomeEvidenceMemberVisit<'storage, &'storage str, Tag>>
+    where
+        Tag: Copy + Send + Sync + 'static,
+    {
+        let visit = self.raw.peek_outcome_evidence(slot.raw)?;
+        self.project_outcome_evidence_visit(visit, utf8_view)
+    }
+
+    #[cfg(feature = "_u4-activation")]
+    pub(super) fn peek_outcome_evidence_records<Tag>(
+        &mut self,
+        slot: OutcomeEvidenceRecordRef<Tag>,
+    ) -> Option<StoreOutcomeEvidenceMemberVisit<'storage, OutcomeEvidenceRecordView<'storage>, Tag>>
+    where
+        Tag: Copy + Send + Sync + 'static,
+    {
+        let visit = self.raw.peek_outcome_evidence(slot.raw)?;
+        self.project_outcome_evidence_visit(visit, outcome_evidence_record_view)
+    }
+
+    #[cfg(feature = "_u4-activation")]
+    pub(super) fn complete_canonical_member<Tag>(
+        &mut self,
+        completion: StoreCanonicalMemberCompletion<'storage, Tag>,
+    ) -> bool
+    where
+        Tag: Copy + Send + Sync + 'static,
+    {
+        self.raw.complete_canonical(completion.raw)
+    }
+
+    #[cfg(feature = "_u4-activation")]
+    pub(super) fn complete_outcome_evidence_member<Tag>(
+        &mut self,
+        completion: StoreOutcomeEvidenceMemberCompletion<'storage, Tag>,
+    ) -> bool
+    where
+        Tag: Copy + Send + Sync + 'static,
+    {
+        self.raw.complete_outcome_evidence(completion.raw)
+    }
+
+    #[cfg(feature = "_u4-activation")]
+    pub(super) fn invalidate(&mut self) {
+        self.raw.invalidate();
+    }
+
     /// Visits one canonical scalar sequence.
     pub fn canonical_sequence<T: StoredScalar, Tag>(
         &mut self,
@@ -539,6 +748,8 @@ pub enum StoreRuntimeError {
     ChargeReleaseUnverified,
     /// A controlled callback rejected the success path while preserving evidence publication.
     SuccessOutcomeRejected,
+    /// Metered canonical validation could not prove the root-derived closure or visit protocol.
+    CanonicalValidationContractRejected,
     /// A callback returned a control or ledger cause that its current capability did not issue.
     UnverifiedControlledCause,
     FallbackOnly,
@@ -629,6 +840,9 @@ impl fmt::Display for StoreRuntimeError {
             Self::SuccessOutcomeRejected => {
                 formatter.write_str("retained store success outcome was already rejected")
             }
+            Self::CanonicalValidationContractRejected => formatter.write_str(
+                "retained store canonical validation contract was not satisfied",
+            ),
             Self::UnverifiedControlledCause => formatter.write_str(
                 "retained store callback returned an unverified control or ledger cause",
             ),

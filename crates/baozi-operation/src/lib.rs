@@ -83,19 +83,30 @@ pub use concrete_store::{
 /// Temporary canonical activation vocabulary.
 ///
 /// Raw output commitment scalars can no longer be submitted or replaced at the central-validation
-/// transition; they must be consumed as part of the earlier activation plan:
+/// transition; the host binds destination roles before sealing the keyless activation request:
 ///
 /// ```compile_fail,E0432
 /// use baozi_operation::__canonical_activation::CanonicalOutputIntent;
 /// ```
+///
+/// Validation work cannot be completed independently of inspecting stored units:
+///
+/// ```compile_fail,E0432
+/// use baozi_operation::__canonical_activation::CanonicalValidationWork;
+/// ```
 pub mod __canonical_activation {
     pub use crate::concrete_store::activation::{
-        CanonicalActivationOutcome, CanonicalActivationPlan, CanonicalCentralValidationOutcome,
-        CanonicalFailureTerminalWorkPlan, CanonicalMaterialization, CanonicalPreflightDecision,
-        CanonicalValidationDecision, FailureEvidenceDecision, FailureEvidenceMember,
-        FailureEvidenceOutcome, FailureEvidenceRecordRow, FailureEvidenceValidationSession,
-        NeverActivatedStoreSession, OutcomeEvidenceBuildControl, OutcomeEvidenceDecision,
-        RetainedStoreSessionOutcomeOwner, RootedFailureValidation, StoreActivationContainment,
+        CanonicalActivationOutcome, CanonicalActivationPolicy, CanonicalActivationRequestSealer,
+        CanonicalActivationRequirements, CanonicalBuildControl, CanonicalCandidateStoreSession,
+        CanonicalCentralValidationOutcome, CanonicalFailureTerminalWorkPlan,
+        CanonicalMaterialization, CanonicalPreflightDecision, CanonicalRecordBuildRow,
+        CanonicalTableShape, CanonicalValidationDecision, CanonicalValidationMember,
+        CanonicalValidationRecordRow, CanonicalValidationSession, FailureEvidenceDecision,
+        FailureEvidenceMember, FailureEvidenceOutcome, FailureEvidenceRecordRow,
+        FailureEvidenceValidationSession, NeverActivatedStoreSession, OutcomeEvidenceBuildControl,
+        OutcomeEvidenceDecision, OutcomeEvidenceValidationMember,
+        OutcomeEvidenceValidationRecordRow, RetainedStoreSessionOutcomeOwner,
+        RootedFailureValidation, SealedCanonicalActivationRequest, StoreActivationContainment,
         StoreCanonicalRejection, StoreNeverActivatedCause,
     };
 }

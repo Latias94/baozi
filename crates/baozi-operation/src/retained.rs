@@ -81,7 +81,11 @@ use block_table::{
     try_rewrite_canonical_block_controlled, try_share_retained_block,
 };
 #[cfg(feature = "_u4-activation")]
-pub(crate) use block_table::{RetainedEvidenceMemberVisit, RetainedPendingEvidenceMember};
+pub(crate) use block_table::{
+    RetainedCanonicalMemberVisit, RetainedEvidenceMemberVisit, RetainedOutcomeEvidenceMemberVisit,
+    RetainedPendingCanonicalMember, RetainedPendingEvidenceMember,
+    RetainedPendingOutcomeEvidenceMember,
+};
 pub(crate) use evidence::{
     FallbackHeaderSnapshot, PreparationFailureClass, PreparationFailureCode, TerminalEvidenceCause,
     TerminalEvidenceKey, TerminalEvidenceKeySeal,
@@ -110,7 +114,7 @@ use physical::{
 };
 use physical::{
     AccountLinearState, PendingAccountActionAdmission, PendingRetainedAdmission,
-    PublicationEligibility,
+    PublicationEligibility, RetainedShareAdmissionError,
 };
 pub use physical::{
     PhysicalStorageAccount, PhysicalStorageAccountCreateError, PhysicalStorageAccountFactory,
@@ -149,14 +153,14 @@ pub(crate) use terminal_output::{
 };
 use triomphe::{Arc, UniqueArc};
 
-pub(crate) use operation::{
-    RetainedControlCheckpoint, RetainedFailureWorkControl, RetainedOperation, RetainedWorkControl,
-};
 #[cfg(feature = "_u4-activation")]
 pub(crate) use operation::{
-    RetainedFailureWorkConsumeError, RetainedFailureWorkFinishError, RetainedFailureWorkPermit,
-    RetainedFailureWorkStartError, RetainedWorkConsumeError, RetainedWorkFinishError,
-    RetainedWorkPermit, RetainedWorkStartError,
+    BorrowedRetainedWorkPermit, RetainedFailureWorkConsumeError, RetainedFailureWorkFinishError,
+    RetainedFailureWorkPermit, RetainedFailureWorkStartError, RetainedWorkConsumeError,
+    RetainedWorkFinishError, RetainedWorkPermit, RetainedWorkStartError,
+};
+pub(crate) use operation::{
+    RetainedControlCheckpoint, RetainedFailureWorkControl, RetainedOperation, RetainedWorkControl,
 };
 #[cfg(test)]
 use operation_start::map_qualified_startup_batch_error;
@@ -166,7 +170,7 @@ pub(crate) use operation_start::{
     RetainedWriterPlan,
 };
 use operation_start::{
-    StartupRetainedPartGuard, StartupTerminalEvidenceBuildError,
+    RetainedShareWorkPermit, StartupRetainedPartGuard, StartupTerminalEvidenceBuildError,
     map_account_action_admission_error, map_batch_error, map_faulted_pending_rollback,
     map_pending_rollback_or, try_admit_retained_share_work,
     try_admit_retained_share_work_before_physical, try_open_publication_account,
@@ -187,7 +191,9 @@ use range::{CanonicalBatchPreflightContext, try_preflight_canonical_batch};
 pub(crate) use range::{
     CanonicalRetainBatchError, CanonicalRetainBatchSource, CanonicalRetainedRange,
 };
-pub(crate) use startup::{ReadyStartupGraphSplitAuthority, StartedLedger};
+pub(crate) use startup::{
+    AdmittedStartupLedgerGraph, ReadyStartupGraphSplitAuthority, StartedLedger,
+};
 use startup::{
     StartupCrossPlaneAdmissionFailure, StartupCrossPlanePlan, StartupPhysicalManifest,
     StartupPhysicalNoMutation,
@@ -1129,11 +1135,24 @@ where
                                 );
                             }
                         };
+                        let operation = self.operation.as_ref();
+                        let permit_outstanding = operation
+                            .is_none_or(|operation| operation.has_outstanding_work_permit());
+                        let work_partially_resolved = operation.is_some_and(|operation| {
+                            operation.has_partially_resolved_work_permit()
+                        });
+                        let terminal_cause_recorded = operation
+                            .and_then(|operation| operation.sticky_terminal_cause())
+                            .is_some();
                         let exact = accepted
                             && session.valid
                             && session.canonical_seen == canonical.member_count()
                             && session.evidence_seen == evidence.member_count();
-                        if exact {
+                        if permit_outstanding {
+                            Err(RetainedClosureValidationError::Poisoned)
+                        } else if work_partially_resolved || terminal_cause_recorded {
+                            Err(RetainedClosureValidationError::Rejected)
+                        } else if exact {
                             Ok(RetainedSuccessClosureProof {
                                 set_id: self.set_id,
                                 canonical_count: canonical.member_count(),
@@ -1157,11 +1176,13 @@ where
             }),
             Err(RetainedClosureValidationError::Rejected) => {
                 self.activate_failure_terminal_work();
+                let fallback_cause =
+                    self.terminal_cause_or(PreparationFailureCode::from_closure_validation(
+                        RetainedClosureValidationError::Rejected,
+                    ));
                 RetainedSuccessValidation::Rejected(RetainedFailureAssembly {
                     assembly: self,
-                    fallback_cause: PreparationFailureCode::from_closure_validation(
-                        RetainedClosureValidationError::Rejected,
-                    ),
+                    fallback_cause,
                 })
             }
             Err(cause) => RetainedSuccessValidation::FallbackOnly(
@@ -2766,6 +2787,16 @@ where
     EvidenceBlock: Send + Sync + 'static,
 {
     #[cfg(feature = "_u4-activation")]
+    pub(crate) const fn canonical_member_count(&self) -> usize {
+        self.proof.canonical_count
+    }
+
+    #[cfg(feature = "_u4-activation")]
+    pub(crate) const fn outcome_evidence_member_count(&self) -> usize {
+        self.proof.evidence_count
+    }
+
+    #[cfg(feature = "_u4-activation")]
     pub(crate) fn contain_activation_fault(self) -> FinalizationContainmentError {
         self.assembly.contain_activation_fault()
     }
@@ -2980,6 +3011,33 @@ where
     CanonicalBlock: Send + Sync + 'static,
     EvidenceBlock: Send + Sync + 'static,
 {
+    #[cfg(feature = "_u4-activation")]
+    pub(crate) const fn outcome_evidence_member_count(&self) -> usize {
+        self.proof.evidence_count
+    }
+
+    #[cfg(feature = "_u4-activation")]
+    pub(crate) fn try_stage_exact_outcome_evidence(
+        &mut self,
+        dimension: D,
+    ) -> Result<(), RetainedPublicationError<D>> {
+        if self.assembly.outcome_evidence_commitment_len() != 0 {
+            return Err(RetainedPublicationError::Poisoned);
+        }
+        let Some(amount) = u64::try_from(self.outcome_evidence_member_count())
+            .ok()
+            .and_then(NonZeroU64::new)
+        else {
+            return Err(RetainedPublicationError::Poisoned);
+        };
+        self.assembly
+            .try_commit_outcome_evidence(dimension, amount.get())?;
+        if self.assembly.outcome_evidence_commitment_len() != 1 {
+            return Err(RetainedPublicationError::Poisoned);
+        }
+        Ok(())
+    }
+
     #[cfg(feature = "_u4-activation")]
     pub(crate) fn contain_activation_fault(self) -> FinalizationContainmentError {
         self.assembly.contain_activation_fault()

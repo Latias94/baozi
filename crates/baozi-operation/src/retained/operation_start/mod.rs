@@ -20,7 +20,8 @@ pub(crate) use pair::{
     reset_startup_footprint_mismatches, reset_startup_payload_allocation_attempts,
     test_startup_payload_allocation_attempts,
 };
+pub(in crate::retained) use share::RetainedShareWorkPermit;
 pub(in crate::retained) use share::{
     try_admit_retained_share_work, try_admit_retained_share_work_before_physical,
-    try_open_publication_account,
+    try_admit_start_share_work, try_open_publication_account,
 };

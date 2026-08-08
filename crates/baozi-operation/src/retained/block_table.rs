@@ -14,9 +14,10 @@ use super::ownership::{
 };
 use super::{
     PendingAccountActionAdmission, PhysicalStorageAccount, RetainedBatchLimits,
-    RetainedHandleSharePlan, RetainedPublicationError, RetainedWorkControl, RetainedWriterError,
-    RetainedWriterPlan, map_account_action_admission_error, map_batch_error,
-    try_admit_retained_share_work, try_admit_retained_share_work_before_physical,
+    RetainedHandleSharePlan, RetainedPublicationError, RetainedShareAdmissionError,
+    RetainedWorkControl, RetainedWriterError, RetainedWriterPlan,
+    map_account_action_admission_error, map_batch_error, try_admit_retained_share_work,
+    try_admit_retained_share_work_before_physical,
 };
 use crate::control::{ControlCause, discard_untrusted_panic_payload};
 use crate::ledger::{
@@ -1708,11 +1709,10 @@ pub(crate) struct RetainedClosureSession<'a, CanonicalBlock, EvidenceBlock> {
 }
 
 impl<'a, CanonicalBlock, EvidenceBlock> RetainedClosureSession<'a, CanonicalBlock, EvidenceBlock> {
-    /// Visits one canonical slot, returning `None` and invalidating the session on mismatch.
-    pub fn canonical<Tag>(
+    fn canonical_member<Tag>(
         &mut self,
         slot: CanonicalRetainedSlot<CanonicalBlock, Tag>,
-    ) -> Option<&'a CanonicalBlock>
+    ) -> Option<&'a RetainedBlockMember<CanonicalBlock>>
     where
         Tag: Copy + Send + Sync + 'static,
     {
@@ -1728,6 +1728,40 @@ impl<'a, CanonicalBlock, EvidenceBlock> RetainedClosureSession<'a, CanonicalBloc
             self.valid = false;
             return None;
         }
+        Some(member)
+    }
+
+    fn outcome_evidence_member<Tag>(
+        &mut self,
+        slot: OutcomeEvidenceRetainedSlot<EvidenceBlock, Tag>,
+    ) -> Option<&'a RetainedBlockMember<EvidenceBlock>>
+    where
+        Tag: Copy + Send + Sync + 'static,
+    {
+        if slot.identity.set_id != self.set_id || slot.identity.tag != TypeId::of::<Tag>() {
+            self.valid = false;
+            return None;
+        }
+        let Some(member) = self.evidence.members.get(slot.identity.index) else {
+            self.valid = false;
+            return None;
+        };
+        if member.tag != slot.identity.tag {
+            self.valid = false;
+            return None;
+        }
+        Some(member)
+    }
+
+    /// Visits one canonical slot, returning `None` and invalidating the session on mismatch.
+    pub fn canonical<Tag>(
+        &mut self,
+        slot: CanonicalRetainedSlot<CanonicalBlock, Tag>,
+    ) -> Option<&'a CanonicalBlock>
+    where
+        Tag: Copy + Send + Sync + 'static,
+    {
+        let member = self.canonical_member(slot)?;
         if member.first_visit_in(self.epoch) {
             let Some(seen) = self.canonical_seen.checked_add(1) else {
                 self.valid = false;
@@ -1746,18 +1780,7 @@ impl<'a, CanonicalBlock, EvidenceBlock> RetainedClosureSession<'a, CanonicalBloc
     where
         Tag: Copy + Send + Sync + 'static,
     {
-        if slot.identity.set_id != self.set_id || slot.identity.tag != TypeId::of::<Tag>() {
-            self.valid = false;
-            return None;
-        }
-        let Some(member) = self.evidence.members.get(slot.identity.index) else {
-            self.valid = false;
-            return None;
-        };
-        if member.tag != slot.identity.tag {
-            self.valid = false;
-            return None;
-        }
+        let member = self.outcome_evidence_member(slot)?;
         if member.first_visit_in(self.epoch) {
             let Some(seen) = self.evidence_seen.checked_add(1) else {
                 self.valid = false;
@@ -1766,6 +1789,159 @@ impl<'a, CanonicalBlock, EvidenceBlock> RetainedClosureSession<'a, CanonicalBloc
             self.evidence_seen = seen;
         }
         Some(member.allocation.as_ref())
+    }
+
+    #[cfg(feature = "_u4-activation")]
+    pub(crate) fn peek_canonical<Tag>(
+        &mut self,
+        slot: CanonicalRetainedSlot<CanonicalBlock, Tag>,
+    ) -> Option<RetainedCanonicalMemberVisit<'a, CanonicalBlock, Tag>>
+    where
+        Tag: Copy + Send + Sync + 'static,
+    {
+        let member = self.canonical_member(slot)?;
+        if member.completed_in(self.epoch) {
+            Some(RetainedCanonicalMemberVisit::Completed(
+                member.allocation.as_ref(),
+            ))
+        } else {
+            Some(RetainedCanonicalMemberVisit::Pending(
+                RetainedPendingCanonicalMember {
+                    block: member.allocation.as_ref(),
+                    slot,
+                    epoch: self.epoch,
+                },
+            ))
+        }
+    }
+
+    #[cfg(feature = "_u4-activation")]
+    pub(crate) fn complete_canonical<Tag>(
+        &mut self,
+        pending: RetainedPendingCanonicalMember<'a, CanonicalBlock, Tag>,
+    ) -> bool
+    where
+        Tag: Copy + Send + Sync + 'static,
+    {
+        if pending.epoch != self.epoch {
+            self.valid = false;
+            return false;
+        }
+        let Some(member) = self.canonical_member(pending.slot) else {
+            return false;
+        };
+        if !std::ptr::eq(member.allocation.as_ref(), pending.block)
+            || !member.try_complete_in(self.epoch)
+        {
+            self.valid = false;
+            return false;
+        }
+        let Some(seen) = self.canonical_seen.checked_add(1) else {
+            self.valid = false;
+            return false;
+        };
+        self.canonical_seen = seen;
+        true
+    }
+
+    #[cfg(feature = "_u4-activation")]
+    pub(crate) fn peek_outcome_evidence<Tag>(
+        &mut self,
+        slot: OutcomeEvidenceRetainedSlot<EvidenceBlock, Tag>,
+    ) -> Option<RetainedOutcomeEvidenceMemberVisit<'a, EvidenceBlock, Tag>>
+    where
+        Tag: Copy + Send + Sync + 'static,
+    {
+        let member = self.outcome_evidence_member(slot)?;
+        if member.completed_in(self.epoch) {
+            Some(RetainedOutcomeEvidenceMemberVisit::Completed(
+                member.allocation.as_ref(),
+            ))
+        } else {
+            Some(RetainedOutcomeEvidenceMemberVisit::Pending(
+                RetainedPendingOutcomeEvidenceMember {
+                    block: member.allocation.as_ref(),
+                    slot,
+                    epoch: self.epoch,
+                },
+            ))
+        }
+    }
+
+    #[cfg(feature = "_u4-activation")]
+    pub(crate) fn complete_outcome_evidence<Tag>(
+        &mut self,
+        pending: RetainedPendingOutcomeEvidenceMember<'a, EvidenceBlock, Tag>,
+    ) -> bool
+    where
+        Tag: Copy + Send + Sync + 'static,
+    {
+        if pending.epoch != self.epoch {
+            self.valid = false;
+            return false;
+        }
+        let Some(member) = self.outcome_evidence_member(pending.slot) else {
+            return false;
+        };
+        if !std::ptr::eq(member.allocation.as_ref(), pending.block)
+            || !member.try_complete_in(self.epoch)
+        {
+            self.valid = false;
+            return false;
+        }
+        let Some(seen) = self.evidence_seen.checked_add(1) else {
+            self.valid = false;
+            return false;
+        };
+        self.evidence_seen = seen;
+        true
+    }
+
+    #[cfg(feature = "_u4-activation")]
+    pub(crate) fn invalidate(&mut self) {
+        self.valid = false;
+    }
+}
+
+#[cfg(feature = "_u4-activation")]
+pub(crate) enum RetainedCanonicalMemberVisit<'a, CanonicalBlock, Tag> {
+    Completed(&'a CanonicalBlock),
+    Pending(RetainedPendingCanonicalMember<'a, CanonicalBlock, Tag>),
+}
+
+#[cfg(feature = "_u4-activation")]
+#[must_use = "a pending canonical member must be completed or leave the closure incomplete"]
+pub(crate) struct RetainedPendingCanonicalMember<'a, CanonicalBlock, Tag> {
+    block: &'a CanonicalBlock,
+    slot: CanonicalRetainedSlot<CanonicalBlock, Tag>,
+    epoch: NonZeroU64,
+}
+
+#[cfg(feature = "_u4-activation")]
+impl<'a, CanonicalBlock, Tag> RetainedPendingCanonicalMember<'a, CanonicalBlock, Tag> {
+    pub(crate) const fn block(&self) -> &'a CanonicalBlock {
+        self.block
+    }
+}
+
+#[cfg(feature = "_u4-activation")]
+pub(crate) enum RetainedOutcomeEvidenceMemberVisit<'a, EvidenceBlock, Tag> {
+    Completed(&'a EvidenceBlock),
+    Pending(RetainedPendingOutcomeEvidenceMember<'a, EvidenceBlock, Tag>),
+}
+
+#[cfg(feature = "_u4-activation")]
+#[must_use = "a pending outcome-evidence member must be completed or leave the closure incomplete"]
+pub(crate) struct RetainedPendingOutcomeEvidenceMember<'a, EvidenceBlock, Tag> {
+    block: &'a EvidenceBlock,
+    slot: OutcomeEvidenceRetainedSlot<EvidenceBlock, Tag>,
+    epoch: NonZeroU64,
+}
+
+#[cfg(feature = "_u4-activation")]
+impl<'a, EvidenceBlock, Tag> RetainedPendingOutcomeEvidenceMember<'a, EvidenceBlock, Tag> {
+    pub(crate) const fn block(&self) -> &'a EvidenceBlock {
+        self.block
     }
 }
 
@@ -2338,9 +2514,13 @@ where
         admitted_share_work,
     ) {
         Ok(admission) => Some(admission),
-        Err(cause) => {
+        Err(RetainedShareAdmissionError::Physical(cause)) => {
             drop(attribution);
             return Err(RetainedWriterError::Physical(cause));
+        }
+        Err(RetainedShareAdmissionError::Ledger(cause)) => {
+            drop(attribution);
+            return Err(RetainedWriterError::Ledger(cause));
         }
     };
     let membership = RetainedMembership {
@@ -2576,10 +2756,16 @@ where
         admitted_share_work,
     ) {
         Ok(admission) => Some(admission),
-        Err(cause) => {
+        Err(RetainedShareAdmissionError::Physical(cause)) => {
             drop(attribution);
             return Err(RetainedPublicationError::Writer(
                 RetainedWriterError::Physical(cause),
+            ));
+        }
+        Err(RetainedShareAdmissionError::Ledger(cause)) => {
+            drop(attribution);
+            return Err(RetainedPublicationError::Writer(
+                RetainedWriterError::Ledger(cause),
             ));
         }
     };
@@ -3219,8 +3405,18 @@ where
     }
     let admitted_share_work = try_admit_retained_share_work(ledger, handle_share_work)
         .map_err(RetainedPublicationError::Writer)?;
-    let mut allocation =
-        share_admission.run(|_| admitted_share_work.consume_allocation(source_allocation));
+    let mut allocation = match share_admission
+        .run(|_| admitted_share_work.try_share_allocation(source_allocation))
+    {
+        Ok(allocation) => allocation,
+        Err(failure) => {
+            let (allocation, cause) = failure.into_parts();
+            drop(allocation);
+            return Err(RetainedPublicationError::Writer(
+                RetainedWriterError::Ledger(cause),
+            ));
+        }
+    };
     let membership = RetainedMembership {
         set_id,
         destination,

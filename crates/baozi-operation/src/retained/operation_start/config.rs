@@ -73,7 +73,10 @@ impl<P: Copy, D: Copy> RetainedWriterPlan<P, D> {
     }
 }
 
-/// Clone and retained-handle work charged before sharing an inherited owner.
+/// Clone and retained-handle work admitted before sharing a retained owner.
+///
+/// Admission records the complete attempted envelope. A linear share permit records each consumed
+/// unit only after the corresponding reference-count clone and typed handle actually exist.
 #[allow(
     dead_code,
     reason = "crate-private until the U4 canonical consumers switch atomically"
@@ -96,7 +99,7 @@ impl<D: Copy> RetainedHandleSharePlan<D> {
         }
     }
 
-    pub(in crate::retained) const fn charges(self) -> [(D, u64); 2] {
+    pub(crate) const fn charges(self) -> [(D, u64); 2] {
         [
             (self.clone_dimension, 1),
             (self.retained_handle_dimension, 1),

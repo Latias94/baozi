@@ -12,39 +12,49 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use super::{
     ByteBlock, BytesPlan, BytesWriter, CanonicalBytesRef, CanonicalRecordRef,
-    CanonicalRecordWriter, CanonicalSequenceRef, CanonicalStoreRef, CanonicalUtf8Ref,
-    FreshStoreLineage, OutcomeEvidenceBytesRef, OutcomeEvidenceRecordRef,
+    CanonicalRecordRowWriter, CanonicalRecordWriter, CanonicalSequenceRef, CanonicalStoreRef,
+    CanonicalUtf8Ref, FreshStoreLineage, OutcomeEvidenceBytesRef, OutcomeEvidenceRecordRef,
     OutcomeEvidenceRecordRowWriter, OutcomeEvidenceRecordView, OutcomeEvidenceRecordWriter,
     OutcomeEvidenceSequenceRef, OutcomeEvidenceStoreRef, OutcomeEvidenceUtf8Ref,
-    PreparedStoreFailureOutcome, PreparedStoreFallback, RawStoreFailureAssembly, RecordBlock,
-    RecordPlan, RetainedStoreBlockTablePlan, RetainedStoreControlCheckpoint,
+    PreparedStoreFailureOutcome, PreparedStoreFallback, RawStoreBorrowedWorkPermit,
+    RawStoreFailureAssembly, RecordBlock, RecordPlan, RetainedAllocationPlan,
+    RetainedBuildFailureCode, RetainedStoreBlockTablePlan, RetainedStoreControlCheckpoint,
     RetainedStoreFailureTerminalWorkPlan, RetainedStoreFailureTerminalWorkRequirement,
     RetainedStoreOperation, RetainedStorePublicationAssembly, RetainedStorePublicationPlan,
-    RetainedStoreReservation, RetainedStoreWorkControl, ScalarSequence, SequencePlan,
-    SequenceWriter, StoreBuildError, StoreControlledError, StoreControlledSuccessValidation,
-    StoreDimensionKey, StoreEvidenceValidationSession, StoreFailureAssembly,
-    StoreFailureValidation, StoreFallbackOnly, StoreKeyDomain, StorePhaseKey, StorePlanError,
-    StorePrepareError, StoreRuntimeError, StoreValidationSession, StoreWorkError, StoredBlock,
-    StoredScalar, Utf8Block, Utf8Plan, Utf8Writer, ValidatedStoreFailure, ValidatedStoreSuccess,
+    RetainedStoreReservation, RetainedStoreWorkControl, RetainedStoreWriterPlan, ScalarSequence,
+    SequencePlan, SequenceWriter, StoreActivationBrand, StoreBuildCallbackFailure, StoreBuildError,
+    StoreControlledError, StoreControlledSuccessValidation, StoreDimensionKey,
+    StoreEvidenceValidationSession, StoreFailureAssembly, StoreFailureValidation,
+    StoreFallbackOnly, StoreKeyDomain, StorePhaseKey, StorePlanError, StorePrepareError,
+    StoreRuntimeError, StoreValidationSession, StoreWorkError, StoredBlock, StoredScalar,
+    Utf8Block, Utf8Plan, Utf8Writer, ValidatedStoreFailure, ValidatedStoreSuccess,
     classify_prepared_fallback, map_publication_error, map_writer_error,
 };
 use crate::control::{ProgressPhase, ProgressUnit, discard_untrusted_panic_payload};
 use crate::coordinator::FinalProgress;
+use crate::ledger::STARTUP_ACCOUNT_SHARE_STEP_COUNT;
 use crate::owner::OperationOwner;
 use crate::retained::{
     FinalizationContainmentError, PreparationFailureCode, RetainedFailureWorkConsumeError,
     RetainedFailureWorkControl, RetainedFailureWorkFinishError, RetainedFailureWorkPermit,
-    RetainedFailureWorkStartError, RetainedPublicationOpenRecovery,
+    RetainedFailureWorkStartError, RetainedHandleSharePlan, RetainedPublicationOpenRecovery,
     RetainedPublicationPrepareError, RetainedWorkConsumeError, RetainedWorkControl,
     RetainedWorkFinishError, RetainedWorkPermit, RetainedWorkStartError,
 };
 
 mod canonical;
+mod canonical_validation;
 mod failure_evidence;
 mod fallback;
 mod preflight;
 
+pub use canonical_validation::{
+    CanonicalValidationMember, CanonicalValidationRecordRow, CanonicalValidationSession,
+    OutcomeEvidenceValidationMember, OutcomeEvidenceValidationRecordRow,
+};
+
 const ACTIVATION_PRODUCT_GRAPH_FAILURE_CODE: u32 = 0x4143_5047;
+const CANONICAL_VALIDATION_CONTRACT_FAILURE_CODE: u32 = 0x4356_4346;
 const FAILURE_WORK_ENVELOPE_EXHAUSTED_CODE: u32 = 0x4657_4545;
 const FAILURE_EVIDENCE_BUILD_CHUNK_UNITS: usize = 256;
 
@@ -129,6 +139,594 @@ type RawOutcomeEvidenceWorkControl<'a, O, PP, U> =
 type RawOutcomeEvidenceWorkPermit<'a, O, PP, U> =
     RetainedWorkPermit<'a, O, StorePhaseKey, PP, U, StoreDimensionKey>;
 
+/// Internal linear completion permit shared by plan-bound builders and validators.
+#[must_use = "completed work must be recorded before resolving the permit"]
+struct CanonicalWorkPermit<'borrow, 'operation, O, PP, U>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    raw: Option<RawStoreBorrowedWorkPermit<'borrow, 'operation, O, PP, U>>,
+    sticky: &'borrow mut Option<StoreWorkError>,
+}
+
+/// Plan-derived writer for one canonical block.
+///
+/// The raw writer and caller-selected work amounts never cross this boundary. Every mutating method
+/// polls the operation and advances the linear permit only after the corresponding write succeeds.
+pub struct CanonicalBuildControl<'writer, 'permit, 'operation, O, PP, U, W>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    writer: &'writer mut W,
+    permit: Option<CanonicalWorkPermit<'permit, 'operation, O, PP, U>>,
+    sticky: Option<StoreControlledError>,
+}
+
+/// Permit-bound row writer for one canonical fixed-width record.
+pub struct CanonicalRecordBuildRow<'row, 'storage, 'permit, 'operation, O, PP, U>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    writer: &'row mut CanonicalRecordRowWriter<'storage>,
+    permit: &'row mut CanonicalWorkPermit<'permit, 'operation, O, PP, U>,
+    sticky: &'row mut Option<StoreControlledError>,
+}
+
+fn try_begin_canonical_work<'borrow, 'operation, O, PP, U>(
+    raw: &'borrow mut RetainedStoreWorkControl<'operation, O, PP, U>,
+    amount: NonZeroU64,
+) -> Result<CanonicalWorkPermit<'borrow, 'operation, O, PP, U>, StoreWorkError>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    if let Some(cause) = raw.sticky.clone() {
+        return Err(cause);
+    }
+    let super::RetainedStoreWorkControl { raw, sticky } = raw;
+    match raw.try_begin_borrowed(amount) {
+        Ok(raw) => Ok(CanonicalWorkPermit {
+            raw: Some(raw),
+            sticky,
+        }),
+        Err(RetainedWorkStartError::Control(cause)) => {
+            let cause = StoreWorkError::control(cause);
+            sticky.get_or_insert_with(|| cause.clone());
+            Err(cause)
+        }
+        Err(RetainedWorkStartError::Ledger(cause)) => {
+            let cause = StoreWorkError::ledger(cause);
+            sticky.get_or_insert_with(|| cause.clone());
+            Err(cause)
+        }
+        Err(RetainedWorkStartError::Outstanding) => {
+            panic!("canonical work control cannot start a nested or abandoned permit")
+        }
+    }
+}
+
+impl<'writer, 'permit, 'operation, O, PP, U, W>
+    CanonicalBuildControl<'writer, 'permit, 'operation, O, PP, U, W>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    fn from_admitted(
+        writer: &'writer mut W,
+        permit: CanonicalWorkPermit<'permit, 'operation, O, PP, U>,
+    ) -> Self {
+        Self {
+            writer,
+            permit: Some(permit),
+            sticky: None,
+        }
+    }
+
+    fn preserve<T>(
+        &mut self,
+        result: Result<T, StoreControlledError>,
+    ) -> Result<T, StoreControlledError> {
+        if let Err(cause) = &result {
+            self.sticky.get_or_insert_with(|| cause.clone());
+        }
+        result
+    }
+
+    fn resolve_partial(&mut self) {
+        if let Some(mut permit) = self.permit.take() {
+            permit.resolve_partial();
+        }
+    }
+
+    fn perform<T>(
+        &mut self,
+        amount: u64,
+        action: impl FnOnce(&mut W) -> Result<T, StoreBuildError>,
+    ) -> Result<T, StoreControlledError> {
+        if let Some(cause) = self.sticky.clone() {
+            return Err(cause);
+        }
+        let poll = self
+            .permit
+            .as_mut()
+            .expect("a fault-free canonical builder retains its work permit")
+            .poll()
+            .map_err(StoreControlledError::from);
+        self.preserve(poll)?;
+        if amount == 0 {
+            let result = action(self.writer).map_err(StoreControlledError::from);
+            return self.preserve(result);
+        }
+        let remaining = self
+            .permit
+            .as_ref()
+            .expect("a fault-free canonical builder retains its work permit")
+            .remaining_units();
+        if amount > remaining {
+            let cause = StoreControlledError::from(StoreBuildError::incomplete_write());
+            self.sticky = Some(cause.clone());
+            self.resolve_partial();
+            return Err(cause);
+        }
+        let value = match action(self.writer) {
+            Ok(value) => value,
+            Err(cause) => {
+                let cause = StoreControlledError::from(cause);
+                self.sticky = Some(cause.clone());
+                self.resolve_partial();
+                return Err(cause);
+            }
+        };
+        let amount = NonZeroU64::new(amount).expect("zero work is handled before completion");
+        let completion = self
+            .permit
+            .as_mut()
+            .expect("a fault-free canonical builder retains its work permit")
+            .complete_units(amount)
+            .map_err(StoreControlledError::from);
+        self.preserve(completion)?;
+        Ok(value)
+    }
+
+    fn finish(
+        mut self,
+        callback: Result<(), StoreControlledError>,
+    ) -> Result<(), StoreControlledError> {
+        if let Some(cause) = self.sticky.take() {
+            self.resolve_partial();
+            return Err(cause);
+        }
+        if let Err(cause) = callback {
+            self.resolve_partial();
+            return Err(cause);
+        }
+        let remaining = self
+            .permit
+            .as_ref()
+            .expect("a successful canonical builder retains its work permit")
+            .remaining_units();
+        if remaining != 0 {
+            self.resolve_partial();
+            return Err(StoreBuildError::incomplete_write().into());
+        }
+        let exact = self
+            .permit
+            .take()
+            .expect("a successful canonical builder completes its permit")
+            .finish_exact();
+        if exact {
+            Ok(())
+        } else {
+            Err(StoreBuildError::incomplete_write().into())
+        }
+    }
+
+    /// Polls cancellation and deadline state without exposing the work dimension.
+    pub fn poll(&mut self) -> Result<(), StoreControlledError> {
+        if let Some(cause) = self.sticky.clone() {
+            return Err(cause);
+        }
+        let result = self
+            .permit
+            .as_mut()
+            .expect("a fault-free canonical builder retains its work permit")
+            .poll()
+            .map_err(StoreControlledError::from);
+        self.preserve(result)
+    }
+}
+
+fn finish_activation_writer_callback<O, PP, U, T>(
+    control: RetainedStoreWorkControl<'_, O, PP, U>,
+    callback: Result<T, StoreControlledError>,
+    callback_failure: &mut Option<StoreBuildCallbackFailure>,
+) -> Result<T, RetainedBuildFailureCode>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    match control.finish_build(callback) {
+        Ok(value) => Ok(value),
+        Err(cause) => {
+            *callback_failure = Some(cause);
+            Err(RetainedBuildFailureCode::new(super::BUILD_CODE_DOMAIN))
+        }
+    }
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the private activation helper keeps one admitted permit coupled to one writer factory"
+)]
+fn try_retain_activation_canonical_writer<O, PP, U, L, W, Kind, Tag>(
+    assembly: &mut RetainedStorePublicationAssembly<O, PP, U, L>,
+    allocation: RetainedAllocationPlan,
+    work_dimension: StoreDimensionKey,
+    work: NonZeroU64,
+    tag: Tag,
+    make_writer: impl FnOnce() -> Result<W, StoreBuildError>,
+    build: impl for<'writer, 'permit, 'operation> FnOnce(
+        &mut CanonicalBuildControl<'writer, 'permit, 'operation, O, PP, U, W>,
+    ) -> Result<(), StoreControlledError>,
+    finish_writer: impl FnOnce(W) -> Result<StoredBlock, StoreBuildError>,
+) -> Result<CanonicalStoreRef<Kind, Tag>, StoreRuntimeError>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+    Tag: Copy + Send + Sync + 'static,
+{
+    assembly.ensure_writable()?;
+    assembly.validate_dimension(work_dimension)?;
+    let mut callback_failure = None;
+    let result = assembly.raw.try_retain_canonical_controlled(
+        work_dimension,
+        allocation,
+        |emplacer, raw| {
+            let mut raw_control = RetainedStoreWorkControl { raw, sticky: None };
+            let mut permit = match try_begin_canonical_work(&mut raw_control, work) {
+                Ok(permit) => permit,
+                Err(cause) => {
+                    callback_failure = Some(StoreBuildCallbackFailure::VerifiedWork(cause));
+                    return Err(RetainedBuildFailureCode::new(super::BUILD_CODE_DOMAIN));
+                }
+            };
+            let mut writer = match make_writer() {
+                Ok(writer) => writer,
+                Err(cause) => {
+                    permit.resolve_partial();
+                    drop(permit);
+                    return finish_activation_writer_callback(
+                        raw_control,
+                        Err(cause.into()),
+                        &mut callback_failure,
+                    );
+                }
+            };
+            let mut control = CanonicalBuildControl::from_admitted(&mut writer, permit);
+            let callback = build(&mut control);
+            let callback = control
+                .finish(callback)
+                .and_then(|()| finish_writer(writer).map_err(StoreControlledError::from));
+            let block =
+                finish_activation_writer_callback(raw_control, callback, &mut callback_failure)?;
+            Ok(emplacer.place(block, tag))
+        },
+    );
+    assembly
+        .map_controlled_action(result, callback_failure)
+        .map(|raw| CanonicalStoreRef {
+            raw,
+            marker: PhantomData,
+        })
+}
+
+impl<O, PP, U, T> CanonicalBuildControl<'_, '_, '_, O, PP, U, SequenceWriter<T>>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+    T: StoredScalar,
+{
+    /// Appends one scalar and accounts for exactly one completed element.
+    pub fn push(&mut self, value: T) -> Result<(), StoreControlledError> {
+        self.perform(1, |writer| writer.push(value))
+    }
+
+    /// Appends a slice in bounded, cancellation-aware chunks.
+    pub fn extend_from_slice(&mut self, values: &[T]) -> Result<(), StoreControlledError> {
+        for chunk in values.chunks(FAILURE_EVIDENCE_BUILD_CHUNK_UNITS) {
+            let amount = u64::try_from(chunk.len())
+                .expect("the fixed canonical build chunk length fits in u64");
+            self.perform(amount, |writer| writer.extend_from_slice(chunk))?;
+        }
+        Ok(())
+    }
+
+    pub fn len(&self) -> usize {
+        self.writer.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.writer.is_empty()
+    }
+}
+
+impl<O, PP, U> CanonicalBuildControl<'_, '_, '_, O, PP, U, BytesWriter>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    /// Appends bytes in bounded, cancellation-aware chunks.
+    pub fn write_bytes(&mut self, bytes: &[u8]) -> Result<(), StoreControlledError> {
+        for chunk in bytes.chunks(FAILURE_EVIDENCE_BUILD_CHUNK_UNITS) {
+            let amount = u64::try_from(chunk.len())
+                .expect("the fixed canonical build chunk length fits in u64");
+            self.perform(amount, |writer| writer.write_bytes(chunk))?;
+        }
+        Ok(())
+    }
+
+    pub fn len(&self) -> usize {
+        self.writer.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.writer.is_empty()
+    }
+}
+
+impl<O, PP, U> CanonicalBuildControl<'_, '_, '_, O, PP, U, Utf8Writer>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    /// Appends UTF-8 in bounded chunks without splitting a scalar value.
+    pub fn write_str(&mut self, value: &str) -> Result<(), StoreControlledError> {
+        let mut start = 0;
+        while start < value.len() {
+            let mut end = start
+                .saturating_add(FAILURE_EVIDENCE_BUILD_CHUNK_UNITS)
+                .min(value.len());
+            while !value.is_char_boundary(end) {
+                end -= 1;
+            }
+            let chunk = &value[start..end];
+            let amount = u64::try_from(chunk.len())
+                .expect("the fixed canonical build chunk length fits in u64");
+            self.perform(amount, |writer| writer.write_str(chunk))?;
+            start = end;
+        }
+        Ok(())
+    }
+
+    pub fn bytes(&self) -> usize {
+        self.writer.bytes()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.writer.is_empty()
+    }
+}
+
+fn perform_canonical_record_field<O, PP, U>(
+    writer: &mut CanonicalRecordRowWriter<'_>,
+    permit: &mut CanonicalWorkPermit<'_, '_, O, PP, U>,
+    sticky: &mut Option<StoreControlledError>,
+    action: impl FnOnce(&mut CanonicalRecordRowWriter<'_>) -> Result<(), StoreBuildError>,
+) -> Result<(), StoreControlledError>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    if let Some(cause) = sticky.clone() {
+        return Err(cause);
+    }
+    if let Err(cause) = permit.poll() {
+        let cause = StoreControlledError::from(cause);
+        sticky.get_or_insert_with(|| cause.clone());
+        return Err(cause);
+    }
+    if permit.remaining_units() == 0 {
+        let cause = StoreControlledError::from(StoreBuildError::incomplete_write());
+        *sticky = Some(cause.clone());
+        return Err(cause);
+    }
+    if let Err(cause) = action(writer) {
+        let cause = StoreControlledError::from(cause);
+        *sticky = Some(cause.clone());
+        return Err(cause);
+    }
+    if let Err(cause) = permit.complete_units(NonZeroU64::MIN) {
+        let cause = StoreControlledError::from(cause);
+        *sticky = Some(cause.clone());
+        return Err(cause);
+    }
+    Ok(())
+}
+
+impl<O, PP, U> CanonicalRecordBuildRow<'_, '_, '_, '_, O, PP, U>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    pub fn write_scalar<T: StoredScalar>(&mut self, value: T) -> Result<(), StoreControlledError> {
+        perform_canonical_record_field(self.writer, self.permit, self.sticky, |writer| {
+            writer.write_scalar(value)
+        })
+    }
+
+    pub fn write_sequence_ref<T: StoredScalar, Tag>(
+        &mut self,
+        value: CanonicalSequenceRef<T, Tag>,
+    ) -> Result<(), StoreControlledError> {
+        perform_canonical_record_field(self.writer, self.permit, self.sticky, |writer| {
+            writer.write_sequence_ref(value)
+        })
+    }
+
+    pub fn write_bytes_ref<Tag>(
+        &mut self,
+        value: CanonicalBytesRef<Tag>,
+    ) -> Result<(), StoreControlledError> {
+        perform_canonical_record_field(self.writer, self.permit, self.sticky, |writer| {
+            writer.write_bytes_ref(value)
+        })
+    }
+
+    pub fn write_utf8_ref<Tag>(
+        &mut self,
+        value: CanonicalUtf8Ref<Tag>,
+    ) -> Result<(), StoreControlledError> {
+        perform_canonical_record_field(self.writer, self.permit, self.sticky, |writer| {
+            writer.write_utf8_ref(value)
+        })
+    }
+
+    pub fn write_record_ref<Tag>(
+        &mut self,
+        value: CanonicalRecordRef<Tag>,
+    ) -> Result<(), StoreControlledError> {
+        perform_canonical_record_field(self.writer, self.permit, self.sticky, |writer| {
+            writer.write_record_ref(value)
+        })
+    }
+}
+
+impl<O, PP, U> CanonicalBuildControl<'_, '_, '_, O, PP, U, CanonicalRecordWriter>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    /// Writes one exact-width row while accounting for every completed field.
+    pub fn write_row(
+        &mut self,
+        write: impl FnOnce(
+            &mut CanonicalRecordBuildRow<'_, '_, '_, '_, O, PP, U>,
+        ) -> Result<(), StoreControlledError>,
+    ) -> Result<(), StoreControlledError> {
+        if let Some(cause) = self.sticky.clone() {
+            return Err(cause);
+        }
+        let mut callback_error = None;
+        let result = self.writer.write_row(|writer| {
+            let permit = self
+                .permit
+                .as_mut()
+                .expect("a fault-free canonical record builder retains its work permit");
+            let mut row = CanonicalRecordBuildRow {
+                writer,
+                permit,
+                sticky: &mut self.sticky,
+            };
+            match write(&mut row) {
+                Ok(()) => Ok(()),
+                Err(cause) => {
+                    callback_error = Some(cause);
+                    Err(StoreBuildError::incomplete_write())
+                }
+            }
+        });
+        if let Some(cause) = callback_error {
+            self.sticky.get_or_insert_with(|| cause.clone());
+            self.resolve_partial();
+            return Err(cause);
+        }
+        if let Err(cause) = result {
+            let cause = StoreControlledError::from(cause);
+            self.sticky = Some(cause.clone());
+            self.resolve_partial();
+            return Err(cause);
+        }
+        Ok(())
+    }
+
+    pub fn rows(&self) -> usize {
+        self.writer.rows()
+    }
+}
+
+impl<O, PP, U> CanonicalWorkPermit<'_, '_, O, PP, U>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    fn record_product_graph_failure(&mut self, code: u32) {
+        if let Some(raw) = self.raw.as_mut() {
+            raw.record_product_graph_failure(code);
+        }
+    }
+
+    fn resolve_partial(&mut self) {
+        if let Some(raw) = self.raw.take() {
+            raw.finish_partial();
+        }
+    }
+
+    pub fn poll(&mut self) -> Result<(), StoreWorkError> {
+        let raw = self
+            .raw
+            .as_mut()
+            .expect("an unresolved canonical work permit retains its authority");
+        match raw.poll() {
+            Ok(()) => Ok(()),
+            Err(cause) => {
+                self.resolve_partial();
+                let cause = StoreWorkError::control(cause);
+                self.sticky.get_or_insert_with(|| cause.clone());
+                Err(cause)
+            }
+        }
+    }
+
+    fn remaining_units(&self) -> u64 {
+        self.raw
+            .as_ref()
+            .expect("an unresolved canonical work permit retains its authority")
+            .remaining_units()
+    }
+
+    fn complete_units(&mut self, amount: NonZeroU64) -> Result<(), StoreWorkError> {
+        let raw = self
+            .raw
+            .as_mut()
+            .expect("an unresolved canonical work permit retains its authority");
+        match raw.complete_units(amount) {
+            Ok(()) => Ok(()),
+            Err(RetainedWorkConsumeError::Ledger(cause)) => {
+                self.resolve_partial();
+                let cause = StoreWorkError::ledger(cause);
+                self.sticky.get_or_insert_with(|| cause.clone());
+                Err(cause)
+            }
+            Err(RetainedWorkConsumeError::ExceedsAttempted) => {
+                panic!("canonical work completion exceeded its admitted envelope")
+            }
+        }
+    }
+
+    fn finish_exact(mut self) -> bool {
+        self.raw
+            .take()
+            .is_some_and(|raw| matches!(raw.complete(), Ok(())))
+    }
+}
+
 enum OutcomeEvidenceWorkPermit<'a, O, PP, U>
 where
     O: OperationOwner,
@@ -178,7 +776,7 @@ where
 {
     raw: StoreEvidenceValidationSession<'session, 'storage>,
     permit: Option<RawFailureEvidenceWorkPermit<'control, O, PP, U>>,
-    sticky: Option<StoreRuntimeError>,
+    sticky: &'control mut Option<StoreRuntimeError>,
     completed_units: u64,
     rejected: bool,
 }
@@ -223,7 +821,7 @@ where
     U: ProgressUnit,
 {
     operation: Option<RetainedStoreOperation<O, PP, U, L>>,
-    outcome_evidence_plan: RetainedStoreBlockTablePlan,
+    roles: Option<BoundActivationRoles>,
     failure_work: FailureEvidenceWorkBudget,
 }
 
@@ -234,6 +832,7 @@ where
 fn finish_rejected<O, PP, U, T, E, CanonicalKind, CanonicalTag, L>(
     assembly: RetainedStorePublicationAssembly<O, PP, U, L>,
     failure_work: FailureEvidenceWorkBudget,
+    outcome_evidence_destination_dimension: StoreDimensionKey,
     cause: StoreCanonicalRejection<E>,
     failure_code: PreparationFailureCode,
 ) -> Result<
@@ -270,6 +869,7 @@ where
                         failure_code,
                         cause: ManuallyDrop::into_inner(cause),
                         failure_work,
+                        outcome_evidence_destination_dimension,
                     },
                 },
             ))
@@ -326,17 +926,6 @@ fn note_later_contract<T>(
 ) {
     if let Err(cause) = result {
         let _ = preserve_first_fault::<()>(first_fault, Err(cause));
-    }
-}
-
-fn validate_dimension_contract(
-    domain: &StoreKeyDomain,
-    dimension: StoreDimensionKey,
-) -> Result<(), StoreRuntimeError> {
-    if domain.owns_dimension(dimension) {
-        Ok(())
-    } else {
-        Err(StoreRuntimeError::ForeignDimensionDomain { dimension })
     }
 }
 
@@ -415,6 +1004,7 @@ fn classify_activation_fault(cause: &StoreRuntimeError) -> ActivationFaultClassi
         | StoreRuntimeError::OwnershipUnverified
         | StoreRuntimeError::ChargeReleaseUnverified
         | StoreRuntimeError::SuccessOutcomeRejected
+        | StoreRuntimeError::CanonicalValidationContractRejected
         | StoreRuntimeError::UnverifiedControlledCause
         | StoreRuntimeError::FallbackOnly
         | StoreRuntimeError::Poisoned => ActivationFaultClassification::Contract,
@@ -581,6 +1171,7 @@ where
     U: ProgressUnit,
 {
     operation: &'scope mut RetainedStoreOperation<O, PP, U, L>,
+    request: &'scope BoundActivationRequest,
     first_fault: &'scope mut Option<ActivationFirstFault>,
 }
 
@@ -596,7 +1187,7 @@ where
     activation: PhantomData<fn(&'activation ()) -> &'activation ()>,
 }
 
-/// Materialization checkpoint whose observed work is bound to the sealed activation plan.
+/// Materialization checkpoint for control polling and scoped scratch reservations.
 pub struct CanonicalMaterializationCheckpoint<'borrow, 'activation, O, PP, U>
 where
     O: OperationOwner,
@@ -604,7 +1195,6 @@ where
     U: ProgressUnit,
 {
     inner: CanonicalControlCheckpoint<'borrow, 'activation, O, PP, U>,
-    materialization_work_dimension: StoreDimensionKey,
 }
 
 /// Scoped live-storage reservation for canonical construction scratch.
@@ -634,68 +1224,201 @@ impl<E> CanonicalPreflightDecision<'_, E> {
     }
 }
 
-#[allow(
-    clippy::large_enum_variant,
-    reason = "the bounded single-use plan stays inline so preflight requires no authority-path allocation"
-)]
 enum CanonicalPreflightState<E> {
-    Activate {
-        canonical_plan: RetainedStoreBlockTablePlan,
-        intent: CanonicalActivationIntent,
-    },
+    Activate,
     Rejected(VerifiedRejection<E>),
 }
 
-/// Operation-neutral canonical requirements consumed by one preflight decision.
-///
-/// This value owns no dormant authority, table, publication join, or retry right. The domain owner
-/// supplies semantic dimensions and an exact logical commitment; `baozi-operation` validates only
-/// domain/ledger membership and the declared materialized-block shape before the owning session
-/// consumes the plan once.
-pub struct CanonicalActivationPlan {
-    canonical_plan: RetainedStoreBlockTablePlan,
-    intent: CanonicalActivationIntent,
+/// Operation-neutral retained table shape used by one canonical activation request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CanonicalTableShape {
+    total_blocks: usize,
+    max_new_blocks: usize,
 }
 
-impl CanonicalActivationPlan {
-    /// Binds an exact materialized shape and semantic accounting requirements to one table plan.
-    pub fn new(
-        canonical_plan: RetainedStoreBlockTablePlan,
-        expected_materialized_blocks: usize,
-        materialization_work_dimension: StoreDimensionKey,
-        validation_work_dimension: StoreDimensionKey,
-        canonical_commitment_dimension: StoreDimensionKey,
-        canonical_commitment_amount: NonZeroU64,
-    ) -> Result<Self, StorePlanError> {
-        if expected_materialized_blocks == 0
-            || expected_materialized_blocks > canonical_plan.activation_capacity()
+impl CanonicalTableShape {
+    pub fn new(total_blocks: usize, max_new_blocks: usize) -> Result<Self, StorePlanError> {
+        if total_blocks == 0
+            || max_new_blocks > total_blocks
+            || u64::try_from(total_blocks).is_err()
         {
             return Err(StorePlanError::InvalidBlockTable);
         }
         Ok(Self {
-            canonical_plan,
-            intent: CanonicalActivationIntent {
-                materialization_work_dimension,
-                validation_work_dimension,
-                commitment_dimension: canonical_commitment_dimension,
-                commitment_amount: canonical_commitment_amount.get(),
-                expected_materialized_blocks,
-            },
+            total_blocks,
+            max_new_blocks,
         })
     }
 
-    fn into_parts(self) -> (RetainedStoreBlockTablePlan, CanonicalActivationIntent) {
-        (self.canonical_plan, self.intent)
+    fn bind(
+        self,
+        writer: RetainedStoreWriterPlan,
+    ) -> Result<RetainedStoreBlockTablePlan, StorePlanError> {
+        RetainedStoreBlockTablePlan::new(writer, self.total_blocks, self.max_new_blocks)
     }
 }
 
-/// Single-use accounting and exact-shape intent stored inside the sealed preflight decision.
-struct CanonicalActivationIntent {
+/// Keyless requirements produced by canonical core preflight.
+///
+/// The request describes only exact physical shape and validation work. Ledger roles, writer keys,
+/// destination dimensions, publication authority, and commitment amounts remain operation-owned.
+#[must_use = "canonical requirements must be sealed by their operation-issued sealer"]
+pub struct CanonicalActivationRequirements {
+    canonical: CanonicalTableShape,
+    outcome_evidence: CanonicalTableShape,
+    expected_materialized_blocks: usize,
+    validation_work: NonZeroU64,
+    structural_work_requirement: u64,
+}
+
+impl CanonicalActivationRequirements {
+    pub fn new(
+        canonical: CanonicalTableShape,
+        outcome_evidence: CanonicalTableShape,
+        expected_materialized_blocks: usize,
+        validation_work: NonZeroU64,
+    ) -> Result<Self, StorePlanError> {
+        if expected_materialized_blocks == 0
+            || expected_materialized_blocks > canonical.max_new_blocks
+        {
+            return Err(StorePlanError::InvalidBlockTable);
+        }
+        let actions = STARTUP_ACCOUNT_SHARE_STEP_COUNT
+            .checked_add(1)
+            .and_then(|actions| actions.checked_add(2))
+            .and_then(|actions| actions.checked_add(canonical.total_blocks))
+            .and_then(|actions| actions.checked_add(outcome_evidence.total_blocks))
+            .ok_or(StorePlanError::SizeOverflow)?;
+        let work_per_action = RetainedHandleSharePlan::new((), ())
+            .charges()
+            .into_iter()
+            .try_fold(0_u64, |total, (_, amount)| {
+                total
+                    .checked_add(amount)
+                    .ok_or(StorePlanError::SizeOverflow)
+            })?;
+        let structural_work_requirement = u64::try_from(actions)
+            .ok()
+            .and_then(|actions| actions.checked_mul(work_per_action))
+            .ok_or(StorePlanError::SizeOverflow)?;
+        Ok(Self {
+            canonical,
+            outcome_evidence,
+            expected_materialized_blocks,
+            validation_work,
+            structural_work_requirement,
+        })
+    }
+
+    /// Returns the work bound derived from the exact table plans this shape owns.
+    pub const fn structural_work_requirement(&self) -> u64 {
+        self.structural_work_requirement
+    }
+}
+
+/// Host-owned role policy consumed before any canonical activation request is accepted.
+///
+/// Core and format code never receive this value. The session owner validates and seals all role
+/// keys before binding a keyless request to concrete retained-table plans.
+#[must_use = "the activation policy must be consumed by one retained-store operation"]
+pub struct CanonicalActivationPolicy {
+    canonical_writer: RetainedStoreWriterPlan,
+    outcome_evidence_writer: RetainedStoreWriterPlan,
     materialization_work_dimension: StoreDimensionKey,
     validation_work_dimension: StoreDimensionKey,
-    commitment_dimension: StoreDimensionKey,
-    commitment_amount: u64,
+    canonical_destination_dimension: StoreDimensionKey,
+    outcome_evidence_destination_dimension: StoreDimensionKey,
+}
+
+impl CanonicalActivationPolicy {
+    pub const fn new(
+        canonical_writer: RetainedStoreWriterPlan,
+        outcome_evidence_writer: RetainedStoreWriterPlan,
+        materialization_work_dimension: StoreDimensionKey,
+        validation_work_dimension: StoreDimensionKey,
+        canonical_destination_dimension: StoreDimensionKey,
+        outcome_evidence_destination_dimension: StoreDimensionKey,
+    ) -> Self {
+        Self {
+            canonical_writer,
+            outcome_evidence_writer,
+            materialization_work_dimension,
+            validation_work_dimension,
+            canonical_destination_dimension,
+            outcome_evidence_destination_dimension,
+        }
+    }
+}
+
+struct BoundActivationRoles {
+    policy: CanonicalActivationPolicy,
+    brand: StoreActivationBrand,
+}
+
+/// Linear sealer issued by the operation owner for one matching keyless request.
+#[must_use = "the activation sealer must seal exactly one canonical request"]
+pub struct CanonicalActivationRequestSealer {
+    brand: StoreActivationBrand,
+}
+
+impl CanonicalActivationRequestSealer {
+    pub fn seal(
+        self,
+        requirements: CanonicalActivationRequirements,
+    ) -> SealedCanonicalActivationRequest {
+        SealedCanonicalActivationRequest {
+            brand: self.brand,
+            requirements,
+        }
+    }
+}
+
+/// Single-use keyless request accepted only by the outcome owner that issued its sealer.
+#[must_use = "the sealed activation request must be consumed by its session outcome owner"]
+pub struct SealedCanonicalActivationRequest {
+    brand: StoreActivationBrand,
+    requirements: CanonicalActivationRequirements,
+}
+
+struct BoundActivationRequest {
+    canonical_plan: RetainedStoreBlockTablePlan,
+    outcome_evidence_plan: RetainedStoreBlockTablePlan,
+    materialization_work_dimension: StoreDimensionKey,
+    validation_work_dimension: StoreDimensionKey,
+    canonical_destination_dimension: StoreDimensionKey,
+    outcome_evidence_destination_dimension: StoreDimensionKey,
+    validation_work: NonZeroU64,
     expected_materialized_blocks: usize,
+}
+
+impl BoundActivationRoles {
+    fn bind(
+        self,
+        request: SealedCanonicalActivationRequest,
+    ) -> Result<BoundActivationRequest, StorePlanError> {
+        if request.brand != self.brand {
+            return Err(StorePlanError::InvalidBlockTable);
+        }
+        let CanonicalActivationRequirements {
+            canonical,
+            outcome_evidence,
+            expected_materialized_blocks,
+            validation_work,
+            structural_work_requirement: _,
+        } = request.requirements;
+        Ok(BoundActivationRequest {
+            canonical_plan: canonical.bind(self.policy.canonical_writer)?,
+            outcome_evidence_plan: outcome_evidence.bind(self.policy.outcome_evidence_writer)?,
+            materialization_work_dimension: self.policy.materialization_work_dimension,
+            validation_work_dimension: self.policy.validation_work_dimension,
+            canonical_destination_dimension: self.policy.canonical_destination_dimension,
+            outcome_evidence_destination_dimension: self
+                .policy
+                .outcome_evidence_destination_dimension,
+            validation_work,
+            expected_materialized_blocks,
+        })
+    }
 }
 
 struct VerifiedRejection<E> {
@@ -764,7 +1487,10 @@ pub struct ActivatedCanonicalStoreSession<
     canonical_root: CanonicalStoreRef<CanonicalKind, CanonicalTag>,
     output: T,
     failure_work: FailureEvidenceWorkBudget,
-    intent: CanonicalActivationIntent,
+    validation_work_dimension: StoreDimensionKey,
+    canonical_destination_dimension: StoreDimensionKey,
+    outcome_evidence_destination_dimension: StoreDimensionKey,
+    validation_work: NonZeroU64,
 }
 
 /// Typed semantic outcome returned by the central validator callback.
@@ -815,9 +1541,45 @@ pub struct CanonicalCandidateStoreSession<
 {
     _validated:
         ValidatedStoreSuccess<O, PP, U, CanonicalKind, CanonicalTag, EvidenceKind, EvidenceTag>,
+    destinations: ZeroCommitDestinationFacts,
     proof: Proof,
     output: T,
     _failure_work: FailureEvidenceWorkBudget,
+}
+
+/// Exact destination facts derived from a validated physical closure.
+///
+/// These facts contain no applied or staged ledger commitment. U4e consumes them only after the
+/// matching freeze contribution and final eligibility are ready.
+struct ZeroCommitDestinationFacts {
+    _canonical_dimension: StoreDimensionKey,
+    canonical_members: NonZeroU64,
+    _outcome_evidence_dimension: StoreDimensionKey,
+    outcome_evidence_members: NonZeroU64,
+}
+
+impl ZeroCommitDestinationFacts {
+    fn try_new(
+        canonical_dimension: StoreDimensionKey,
+        canonical_members: usize,
+        outcome_evidence_dimension: StoreDimensionKey,
+        outcome_evidence_members: usize,
+    ) -> Result<Self, StorePlanError> {
+        let canonical_members = u64::try_from(canonical_members)
+            .ok()
+            .and_then(NonZeroU64::new)
+            .ok_or(StorePlanError::InvalidBlockTable)?;
+        let outcome_evidence_members = u64::try_from(outcome_evidence_members)
+            .ok()
+            .and_then(NonZeroU64::new)
+            .ok_or(StorePlanError::InvalidBlockTable)?;
+        Ok(Self {
+            _canonical_dimension: canonical_dimension,
+            canonical_members,
+            _outcome_evidence_dimension: outcome_evidence_dimension,
+            outcome_evidence_members,
+        })
+    }
 }
 
 /// A centrally rejected canonical candidate with an eager-cleaned, rooted failure owner.
@@ -913,6 +1675,7 @@ where
     failure_code: PreparationFailureCode,
     cause: Cause,
     failure_work: FailureEvidenceWorkBudget,
+    outcome_evidence_destination_dimension: StoreDimensionKey,
 }
 
 /// Verified post-activation rejection after eager canonical cleanup.
@@ -938,7 +1701,6 @@ where
     U: ProgressUnit,
 {
     raw: &'lane mut RawStoreFailureAssembly<O, PP, U>,
-    domain: &'lane StoreKeyDomain,
     first_fault: &'lane mut Option<ActivationFirstFault>,
     failure_work: &'lane mut FailureEvidenceWorkBudget,
 }
@@ -954,6 +1716,7 @@ where
     failure: StoreFailureAssembly<O, PP, U, EvidenceKind, EvidenceTag>,
     cause: Cause,
     failure_work: FailureEvidenceWorkBudget,
+    outcome_evidence_destination_dimension: StoreDimensionKey,
 }
 
 /// Result of validating an already-rooted failure graph.
@@ -1047,6 +1810,7 @@ where
     failure_code: PreparationFailureCode,
     outcome_evidence_plan: RetainedStoreBlockTablePlan,
     failure_work: FailureEvidenceWorkBudget,
+    outcome_evidence_destination_dimension: StoreDimensionKey,
 }
 
 fn prepare_operation_minimal<O, PP, U, L, Cause>(

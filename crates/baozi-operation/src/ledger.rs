@@ -37,8 +37,9 @@ use snapshot::{
     reason = "preserve the crate-private ledger path across the startup module extraction"
 )]
 pub(crate) use startup::{
-    StartupAccountShareEnvelope, StartupAccountShareStep, StartupAttributionBatchPlans,
-    StartupAttributionGraph, StartupLedgerPlan, StartupLedgerPlanParts, StartupRetainedAttribution,
+    STARTUP_ACCOUNT_SHARE_STEP_COUNT, StartupAccountShareEnvelope, StartupAccountShareStep,
+    StartupAttributionBatchPlans, StartupAttributionGraph, StartupLedgerGraphSeal,
+    StartupLedgerPlan, StartupLedgerPlanParts, StartupRetainedAttribution,
 };
 
 #[cfg(test)]
@@ -551,6 +552,8 @@ pub enum LedgerCause<D> {
     OwnerMismatch,
     /// A consumed or otherwise inactive reservation was reused.
     InactiveReservation,
+    /// A linear work permit was completed, released, or otherwise resolved more than once.
+    InactiveLinearWorkPermit,
     /// A split requested more bytes than the reservation owns.
     SplitExceedsReservation { requested: u64, available: u64 },
     /// Another atomic publication transaction is already pending.
@@ -568,6 +571,8 @@ pub enum LedgerCause<D> {
     LiveReservationsRemain { bytes: u64 },
     /// Final evidence was requested while zero-byte reservation capabilities remained active.
     ActiveReservationsRemain { count: u64 },
+    /// Final evidence was requested while linear work still reserved consumed capacity.
+    OutstandingLinearWorkPermits { count: u64 },
     /// Final evidence was requested while a publication transaction remained pending.
     PendingPublicationsRemain,
     /// Internal evidence storage could not be admitted or allocated safely.
@@ -639,6 +644,9 @@ impl<D: fmt::Debug> fmt::Display for LedgerCause<D> {
             ),
             Self::OwnerMismatch => formatter.write_str("reservation belongs to another ledger"),
             Self::InactiveReservation => formatter.write_str("reservation is no longer active"),
+            Self::InactiveLinearWorkPermit => {
+                formatter.write_str("linear work permit is no longer active")
+            }
             Self::SplitExceedsReservation {
                 requested,
                 available,
@@ -670,6 +678,9 @@ impl<D: fmt::Debug> fmt::Display for LedgerCause<D> {
                     formatter,
                     "{count} live reservation capabilities remain active"
                 )
+            }
+            Self::OutstandingLinearWorkPermits { count } => {
+                write!(formatter, "{count} linear work permits remain active")
             }
             Self::PendingPublicationsRemain => {
                 formatter.write_str("publication transactions remain pending")
@@ -866,6 +877,7 @@ impl<D: Copy, Destination: PublicationDestination> OutputCommitment<D, Destinati
 struct DimensionState {
     attempted: u64,
     consumed: u64,
+    pending_consumed: u64,
     current_live_bytes: u64,
     peak_live_bytes: u64,
     pending_publication: u64,
@@ -903,6 +915,8 @@ struct LedgerState<P, D> {
     current_live_bytes: u64,
     peak_live_bytes: u64,
     active_reservations: u64,
+    active_linear_work_permits: u64,
+    linear_work_faulted: bool,
     evidence_byte_limit: u64,
     current_evidence_bytes: u64,
     peak_evidence_bytes: u64,
@@ -932,6 +946,141 @@ pub(crate) struct Ledger<O, P, D> {
     state: Arc<Mutex<LedgerState<P, D>>>,
     operation_live_byte_limit: u64,
     operation_owner: PhantomData<fn() -> O>,
+}
+
+/// Linear ownership of consumed-capacity reserved for one admitted work envelope.
+///
+/// Attempted evidence is recorded at admission. Each completed prefix moves the matching amount
+/// from private pending capacity into public consumed evidence. Dropping the permit releases only
+/// its unfinished pending suffix; forgetting it leaves an outstanding owner that prevents final
+/// preparation.
+#[must_use = "linear work must be completed or release its unfinished consumed reservation"]
+pub(crate) struct LinearWorkBatchPermit<O, P, D, const N: usize>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+{
+    state: Arc<Mutex<LedgerState<P, D>>>,
+    positions: [usize; N],
+    charges: [(D, u64); N],
+    remaining: [u64; N],
+    active: bool,
+    operation_owner: PhantomData<fn() -> O>,
+}
+
+impl<O, P, D, const N: usize> LinearWorkBatchPermit<O, P, D, N>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord + fmt::Debug,
+{
+    pub(crate) fn complete(&mut self, index: usize, amount: u64) -> Result<(), LedgerCause<D>> {
+        if !self.active || index >= N || amount > self.remaining[index] {
+            return Err(LedgerCause::InactiveLinearWorkPermit);
+        }
+        let mut state = lock(&self.state);
+        if let Err(cause) = Ledger::<O, P, D>::ensure_open(&state) {
+            state.linear_work_faulted = true;
+            return Err(cause);
+        }
+        let position = self.positions[index];
+        let (dimension, _) = self.charges[index];
+        let Some(entry) = state.dimensions.get(position) else {
+            state.linear_work_faulted = true;
+            return Err(LedgerCause::FinalSnapshotShapeMismatch);
+        };
+        if entry.dimension != dimension || entry.state.pending_consumed < amount {
+            state.linear_work_faulted = true;
+            return Err(LedgerCause::InactiveLinearWorkPermit);
+        }
+        let Some(consumed) = entry.state.consumed.checked_add(amount) else {
+            state.linear_work_faulted = true;
+            return Err(LedgerCause::ArithmeticOverflow {
+                class: CounterClass::Consumed,
+                dimension,
+            });
+        };
+        let pending_consumed = entry.state.pending_consumed - amount;
+        let Some(effective_consumed) = consumed.checked_add(pending_consumed) else {
+            state.linear_work_faulted = true;
+            return Err(LedgerCause::ArithmeticOverflow {
+                class: CounterClass::Consumed,
+                dimension,
+            });
+        };
+        if effective_consumed > entry.state.attempted {
+            let attempted = entry.state.attempted;
+            state.linear_work_faulted = true;
+            return Err(LedgerCause::ConsumedExceedsAttempted {
+                dimension,
+                consumed: effective_consumed,
+                attempted,
+            });
+        }
+        if effective_consumed > entry.policy.consumed_limit {
+            let limit = entry.policy.consumed_limit;
+            state.linear_work_faulted = true;
+            return Err(LedgerCause::LimitExceeded {
+                class: CounterClass::Consumed,
+                dimension,
+                value: effective_consumed,
+                limit,
+            });
+        }
+        let entry = &mut state.dimensions[position];
+        entry.state.pending_consumed = pending_consumed;
+        entry.state.consumed = consumed;
+        self.remaining[index] -= amount;
+        if self.remaining.iter().all(|remaining| *remaining == 0) {
+            let Some(active) = state.active_linear_work_permits.checked_sub(1) else {
+                state.linear_work_faulted = true;
+                return Err(LedgerCause::InactiveLinearWorkPermit);
+            };
+            state.active_linear_work_permits = active;
+            self.active = false;
+        }
+        Ok(())
+    }
+}
+
+impl<O, P, D, const N: usize> Drop for LinearWorkBatchPermit<O, P, D, N>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+{
+    fn drop(&mut self) {
+        if !self.active {
+            return;
+        }
+        let mut state = lock(&self.state);
+        for (index, amount) in self.remaining.iter().copied().enumerate() {
+            if amount == 0 {
+                continue;
+            }
+            let position = self.positions[index];
+            let Some(entry) = state.dimensions.get(position) else {
+                state.linear_work_faulted = true;
+                continue;
+            };
+            if entry.dimension != self.charges[index].0 {
+                state.linear_work_faulted = true;
+                continue;
+            }
+            let Some(pending_consumed) = entry.state.pending_consumed.checked_sub(amount) else {
+                state.linear_work_faulted = true;
+                continue;
+            };
+            state.dimensions[position].state.pending_consumed = pending_consumed;
+        }
+        let Some(active) = state.active_linear_work_permits.checked_sub(1) else {
+            state.linear_work_faulted = true;
+            return;
+        };
+        state.active_linear_work_permits = active;
+        self.active = false;
+    }
 }
 
 /// Test-only scalar observation of one ledger's live reservation state.
@@ -998,6 +1147,8 @@ where
             current_live_bytes: 0,
             peak_live_bytes: 0,
             active_reservations: 0,
+            active_linear_work_permits: 0,
+            linear_work_faulted: false,
             evidence_byte_limit,
             current_evidence_bytes,
             peak_evidence_bytes,
@@ -1087,48 +1238,151 @@ where
         Self::charge_consumed_open(&mut state, dimension, amount)
     }
 
-    /// Records one complete attempted-work envelope and preflights its future consumed prefix.
+    /// Records one complete attempted-work envelope and reserves its future consumed prefix.
     ///
     /// Attempted work is non-refundable and therefore remains visible when either its own limit or
-    /// the matching consumed-capacity preflight rejects the action. Consumed work is not changed;
-    /// the linear permit created by the caller records only chunks that actually complete.
-    #[cfg(feature = "_u4-activation")]
+    /// the matching consumed-capacity admission rejects the action. Consumed work is not changed;
+    /// the returned linear permit records only chunks that actually complete.
     pub(crate) fn try_admit_linear_work(
         &self,
         dimension: D,
         amount: u64,
-    ) -> Result<(), LedgerCause<D>> {
+    ) -> Result<LinearWorkBatchPermit<O, P, D, 1>, LedgerCause<D>> {
+        self.try_admit_linear_work_batch(&[(dimension, amount)])
+    }
+
+    /// Records one fixed linear-work envelope and atomically reserves its consumed suffix.
+    ///
+    /// Duplicate dimensions are aggregated before either counter is inspected. Unknown dimensions
+    /// and arithmetic overflow leave all evidence unchanged. Once the envelope is representable,
+    /// its complete attempted work is non-refundable even when an attempted or consumed limit
+    /// rejects admission. Reserved capacity is unavailable to every other consumed path until the
+    /// caller's linear capability completes or releases each physical action.
+    pub(crate) fn try_admit_linear_work_batch<const N: usize>(
+        &self,
+        charges: &[(D, u64); N],
+    ) -> Result<LinearWorkBatchPermit<O, P, D, N>, LedgerCause<D>> {
         let mut state = lock(&self.state);
         Self::ensure_open(&state)?;
-        Self::charge_attempted_open(&mut state, dimension, amount)?;
 
-        let entry = dimension_entry(&state.dimensions, dimension)
-            .ok_or(LedgerCause::UnknownDimension { dimension })?;
-        let value =
-            entry
+        let mut positions = [0_usize; N];
+        for (index, &(dimension, _)) in charges.iter().enumerate() {
+            positions[index] = state
+                .dimensions
+                .binary_search_by_key(&dimension, |entry| entry.dimension)
+                .map_err(|_| LedgerCause::UnknownDimension { dimension })?;
+        }
+
+        let mut aggregated = [0_u64; N];
+        for (index, &(dimension, amount)) in charges.iter().enumerate() {
+            let first = positions[..index]
+                .iter()
+                .position(|position| *position == positions[index])
+                .unwrap_or(index);
+            aggregated[first] =
+                aggregated[first]
+                    .checked_add(amount)
+                    .ok_or(LedgerCause::ArithmeticOverflow {
+                        class: CounterClass::Attempted,
+                        dimension,
+                    })?;
+        }
+
+        let mut attempted = [0_u64; N];
+        let mut consumed = [0_u64; N];
+        let mut pending_consumed = [0_u64; N];
+        let mut attempted_failure = None;
+        let mut consumed_failure = None;
+        for (index, &(dimension, _)) in charges.iter().enumerate() {
+            if aggregated[index] == 0 || positions[..index].contains(&positions[index]) {
+                continue;
+            }
+            let entry = &state.dimensions[positions[index]];
+            attempted[index] = entry.state.attempted.checked_add(aggregated[index]).ok_or(
+                LedgerCause::ArithmeticOverflow {
+                    class: CounterClass::Attempted,
+                    dimension,
+                },
+            )?;
+            pending_consumed[index] = entry
                 .state
-                .consumed
-                .checked_add(amount)
+                .pending_consumed
+                .checked_add(aggregated[index])
                 .ok_or(LedgerCause::ArithmeticOverflow {
                     class: CounterClass::Consumed,
                     dimension,
                 })?;
-        if value > entry.state.attempted {
-            return Err(LedgerCause::ConsumedExceedsAttempted {
-                dimension,
-                consumed: value,
-                attempted: entry.state.attempted,
-            });
+            consumed[index] = entry
+                .state
+                .consumed
+                .checked_add(pending_consumed[index])
+                .ok_or(LedgerCause::ArithmeticOverflow {
+                    class: CounterClass::Consumed,
+                    dimension,
+                })?;
+            if attempted_failure.is_none() && attempted[index] > entry.policy.attempted_limit {
+                attempted_failure = Some(LedgerCause::LimitExceeded {
+                    class: CounterClass::Attempted,
+                    dimension,
+                    value: attempted[index],
+                    limit: entry.policy.attempted_limit,
+                });
+            }
+            if consumed_failure.is_none() {
+                consumed_failure = if consumed[index] > attempted[index] {
+                    Some(LedgerCause::ConsumedExceedsAttempted {
+                        dimension,
+                        consumed: consumed[index],
+                        attempted: attempted[index],
+                    })
+                } else if consumed[index] > entry.policy.consumed_limit {
+                    Some(LedgerCause::LimitExceeded {
+                        class: CounterClass::Consumed,
+                        dimension,
+                        value: consumed[index],
+                        limit: entry.policy.consumed_limit,
+                    })
+                } else {
+                    None
+                };
+            }
         }
-        if value > entry.policy.consumed_limit {
-            return Err(LedgerCause::LimitExceeded {
-                class: CounterClass::Consumed,
-                dimension,
-                value,
-                limit: entry.policy.consumed_limit,
-            });
+
+        for (index, amount) in aggregated.into_iter().enumerate() {
+            if amount != 0 && !positions[..index].contains(&positions[index]) {
+                state.dimensions[positions[index]].state.attempted = attempted[index];
+            }
         }
-        Ok(())
+        if let Some(cause) = attempted_failure {
+            return Err(cause);
+        }
+        if let Some(cause) = consumed_failure {
+            return Err(cause);
+        }
+        let active = aggregated.iter().any(|amount| *amount != 0);
+        let active_linear_work_permits = if active {
+            state
+                .active_linear_work_permits
+                .checked_add(1)
+                .ok_or(LedgerCause::FinalSnapshotShapeMismatch)?
+        } else {
+            state.active_linear_work_permits
+        };
+        for (index, amount) in aggregated.into_iter().enumerate() {
+            if amount != 0 && !positions[..index].contains(&positions[index]) {
+                state.dimensions[positions[index]].state.pending_consumed = pending_consumed[index];
+            }
+        }
+        state.active_linear_work_permits = active_linear_work_permits;
+        drop(state);
+        Ok(LinearWorkBatchPermit {
+            state: Arc::clone(&self.state),
+            positions,
+            charges: *charges,
+            remaining: charges.map(|(_, amount)| amount),
+            active,
+            operation_owner: PhantomData,
+        })
     }
 
     fn charge_consumed_open(
@@ -1148,22 +1402,31 @@ where
                     class: CounterClass::Consumed,
                     dimension,
                 })?;
-        if value > entry.state.attempted {
+        let effective = value.checked_add(entry.state.pending_consumed).ok_or(
+            LedgerCause::ArithmeticOverflow {
+                class: CounterClass::Consumed,
+                dimension,
+            },
+        )?;
+        if effective > entry.state.attempted {
             return Err(LedgerCause::ConsumedExceedsAttempted {
                 dimension,
-                consumed: value,
+                consumed: effective,
                 attempted: entry.state.attempted,
             });
         }
-        entry.state.consumed = value;
-        if value > policy.consumed_limit {
+        if effective > policy.consumed_limit {
+            if entry.state.pending_consumed == 0 {
+                entry.state.consumed = value;
+            }
             return Err(LedgerCause::LimitExceeded {
                 class: CounterClass::Consumed,
                 dimension,
-                value,
+                value: effective,
                 limit: policy.consumed_limit,
             });
         }
+        entry.state.consumed = value;
         Ok(())
     }
 
@@ -1259,18 +1522,24 @@ where
                     dimension,
                 },
             )?;
-            if value > entry.state.attempted {
+            let effective = value.checked_add(entry.state.pending_consumed).ok_or(
+                LedgerCause::ArithmeticOverflow {
+                    class: CounterClass::Consumed,
+                    dimension,
+                },
+            )?;
+            if effective > entry.state.attempted {
                 return Err(LedgerCause::ConsumedExceedsAttempted {
                     dimension,
-                    consumed: value,
+                    consumed: effective,
                     attempted: entry.state.attempted,
                 });
             }
-            if value > entry.policy.consumed_limit {
+            if effective > entry.policy.consumed_limit {
                 return Err(LedgerCause::LimitExceeded {
                     class: CounterClass::Consumed,
                     dimension,
-                    value,
+                    value: effective,
                     limit: entry.policy.consumed_limit,
                 });
             }
@@ -1950,6 +2219,7 @@ where
                 return Err(LedgerCause::PublicationAlreadyCompleted);
             }
         }
+        validate_final_snapshot_shape(&state)?;
         if transaction_live_bytes != state.current_live_bytes {
             return Err(LedgerCause::PublicationLiveMismatch {
                 transaction_bytes: transaction_live_bytes,
@@ -4391,15 +4661,15 @@ where
                 limit: entry.policy.attempted_limit,
             });
         }
-        let consumed =
-            entry
-                .state
-                .consumed
-                .checked_add(amount)
-                .ok_or(LedgerCause::ArithmeticOverflow {
-                    class: CounterClass::Consumed,
-                    dimension,
-                })?;
+        let consumed = entry
+            .state
+            .consumed
+            .checked_add(entry.state.pending_consumed)
+            .and_then(|value| value.checked_add(amount))
+            .ok_or(LedgerCause::ArithmeticOverflow {
+                class: CounterClass::Consumed,
+                dimension,
+            })?;
         if consumed > attempted {
             return Err(LedgerCause::ConsumedExceedsAttempted {
                 dimension,
@@ -4424,6 +4694,19 @@ fn validate_dimension_state<D: Copy>(
     policy: DimensionPolicy,
     state: DimensionState,
 ) -> Result<(), LedgerCause<D>> {
+    let effective_consumed = state.consumed.checked_add(state.pending_consumed).ok_or(
+        LedgerCause::ArithmeticOverflow {
+            class: CounterClass::Consumed,
+            dimension,
+        },
+    )?;
+    if effective_consumed > state.attempted {
+        return Err(LedgerCause::ConsumedExceedsAttempted {
+            dimension,
+            consumed: effective_consumed,
+            attempted: state.attempted,
+        });
+    }
     for (class, value, limit) in [
         (
             CounterClass::Attempted,
@@ -4432,7 +4715,7 @@ fn validate_dimension_state<D: Copy>(
         ),
         (
             CounterClass::Consumed,
-            state.consumed,
+            effective_consumed,
             policy.consumed_limit,
         ),
     ] {

@@ -2,8 +2,8 @@ use super::*;
 
 #[cfg(feature = "_u4-activation")]
 use super::activation::{
-    CanonicalActivationOutcome, CanonicalMaterialization, FailureEvidenceDecision,
-    FailureEvidenceOutcome,
+    CanonicalActivationOutcome, CanonicalActivationPolicy, CanonicalActivationRequirements,
+    CanonicalMaterialization, CanonicalTableShape, FailureEvidenceDecision, FailureEvidenceOutcome,
 };
 
 use std::num::{NonZeroU32, NonZeroU64};
@@ -150,11 +150,26 @@ fn activation_rich_failure_open_recovery_upgrades_the_requested_cause() {
     let factory = test_factory();
     let account = test_account(&factory);
     let (operation, keys) = test_operation(&account, u64::MAX);
-    let evidence_plan = RetainedStoreBlockTablePlan::new(test_writer_plan(keys, 2, 2), 1, 1)
-        .expect("activation evidence plan");
-    let outcome = operation
-        .into_session_outcome_owner(evidence_plan)
+    let requirements = CanonicalActivationRequirements::new(
+        CanonicalTableShape::new(1, 1).expect("activation canonical shape"),
+        CanonicalTableShape::new(1, 1).expect("activation evidence shape"),
+        1,
+        NonZeroU64::MIN,
+    )
+    .expect("activation requirements");
+    let policy = CanonicalActivationPolicy::new(
+        test_writer_plan(keys, 2, 2),
+        test_writer_plan(keys, 2, 2),
+        keys.work_dimension,
+        keys.work_dimension,
+        keys.dimension,
+        keys.dimension,
+    );
+    let (outcome_owner, sealer) = operation.into_session_outcome_owner(policy);
+    let request = sealer.seal(requirements);
+    let outcome = outcome_owner
         .plan_and_activate(
+            request,
             |preflight| preflight.reject((), 77),
             |_lane| -> CanonicalMaterialization<'_, (), (), ScalarSequence<u8>, TestTag> {
                 unreachable!("preflight rejection cannot materialize canonical storage")

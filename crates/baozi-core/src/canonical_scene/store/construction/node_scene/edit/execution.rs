@@ -8,7 +8,8 @@ use crate::identity::{ReservedSceneGeneration, SceneGenerationError, SceneGenera
 
 use super::super::super::{
     SceneConstructionError, SceneConstructionLimits, SceneConstructionPhase,
-    SceneConstructionStartError, SceneConstructionUnit, try_plan_scene_operation,
+    SceneConstructionStartError, SceneConstructionUnit, SceneFailureEvidenceWork,
+    try_plan_scene_operation,
 };
 use super::super::publication::node_scene_failure_code;
 use super::super::scratch::NodeSceneValidationScratchOwner;
@@ -62,7 +63,12 @@ impl PendingNodeTransformEdit<'_> {
             .canonical_attribution_slots
             .as_usize()
             .max(self.counts.outcome_evidence_attribution_slots.as_usize());
-        let start = try_plan_scene_operation(limits, control, terminal_attribution_slots)?;
+        let start = try_plan_scene_operation(
+            limits,
+            control,
+            terminal_attribution_slots,
+            SceneFailureEvidenceWork::legacy(),
+        )?;
         let publication =
             edit_publication_plan(start.keys, &self).map_err(SceneConstructionError::from)?;
         let raw = SceneStoreOperation::try_start_derived(

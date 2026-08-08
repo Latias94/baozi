@@ -6,10 +6,14 @@
 use std::num::{NonZeroU32, NonZeroU64};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use baozi_operation::__canonical_activation::{
+    CanonicalFailureTerminalWorkPlan, StoreActivationContainment,
+};
 use baozi_operation::{
-    CanonicalInheritanceSource, DerivedRetainedStoreOperation, DimensionPolicy, FinalProgress,
-    FreshStoreLineage, LedgerLimits, LedgerLimitsError, OperationControl, OperationOwner,
-    OutcomeEvidenceRecordRef, PhysicalStorageAccount, PhysicalStorageAccountCreateError,
+    CanonicalInheritanceSource, CanonicalRecordWriter, DerivedRetainedStoreOperation,
+    DimensionPolicy, FinalProgress, FreshStoreLineage, LedgerLimits, LedgerLimitsError,
+    OperationControl, OperationOwner, OutcomeEvidenceRecordRef, OutcomeEvidenceRecordRowWriter,
+    OutcomeEvidenceRecordWriter, PhysicalStorageAccount, PhysicalStorageAccountCreateError,
     PhysicalStorageAccountFactory, PhysicalStorageAccountLimits, PreparedStoreFailureOutcome,
     PreparedStoreSuccessOutcome, ProgressPhase, ProgressUnit, PublishedCanonicalStore,
     PublishedOutcomeEvidenceStore, PublishedRichFailureStore, PublishedStoreFallbackOutput,
@@ -17,11 +21,11 @@ use baozi_operation::{
     RetainedStoreFailureTerminalWorkPlan, RetainedStoreFailureTerminalWorkRequirement,
     RetainedStoreOpenRecovery, RetainedStoreOperation, RetainedStorePublicationAssembly,
     RetainedStorePublicationPlan, RetainedStoreSharePlan, RetainedStoreStartError,
-    RetainedStoreStartPlan, RetainedStoreWriterPlan, SequencePlan, StoreDimensionKey,
-    StoreDimensionSemanticId, StoreFailureAssembly, StoreFailureValidation, StoreKeyDomain,
-    StoreKeyDomainCreateError, StoreLedgerEvidence, StoreLedgerPlan, StoreLedgerPlanError,
-    StorePhaseKey, StorePhaseSemanticId, StorePlanError, StorePrepareError, StoreRuntimeError,
-    StoreSemanticCatalogId, StoreSuccessValidation, ValidatedStoreSuccess,
+    RetainedStoreStartPlan, RetainedStoreWriterPlan, SequencePlan, SequenceWriter, StoreBuildError,
+    StoreDimensionKey, StoreDimensionSemanticId, StoreFailureAssembly, StoreFailureValidation,
+    StoreKeyDomain, StoreKeyDomainCreateError, StoreLedgerEvidence, StoreLedgerPlan,
+    StoreLedgerPlanError, StorePhaseKey, StorePhaseSemanticId, StorePlanError, StorePrepareError,
+    StoreRuntimeError, StoreSemanticCatalogId, StoreSuccessValidation, ValidatedStoreSuccess,
 };
 use thiserror::Error;
 
@@ -39,6 +43,7 @@ use super::schema::{
 };
 use super::validation::{validate_evidence_graph, validate_scene_graph};
 
+pub(in crate::canonical_scene::store) mod activation;
 pub(super) mod node_scene;
 
 #[cfg(test)]
@@ -251,6 +256,8 @@ pub(crate) enum SceneConstructionError {
     Store(#[from] StoreRuntimeError),
     #[error("canonical Scene terminal preparation failed closed")]
     Prepare(#[from] StorePrepareError),
+    #[error("canonical Scene activation failed closed")]
+    Activation(#[from] StoreActivationContainment),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -268,6 +275,7 @@ impl ConstructionBrand {
 }
 
 /// A draft is deliberately only an operation brand and a non-owning directory projection.
+#[derive(Clone, Copy)]
 pub(super) struct SceneDraft {
     pub(super) brand: ConstructionBrand,
     pub(super) directory: CanonicalBlockRef<DirectorySchema>,
@@ -821,6 +829,7 @@ impl SceneConstructionOperation {
             limits,
             OperationControl::default(),
             TERMINAL_ATTRIBUTION_SLOTS,
+            SceneFailureEvidenceWork::legacy(),
         )?;
         let raw = SceneStoreOperation::try_start_derived(
             start.control,
@@ -899,7 +908,12 @@ impl SceneConstructionOperation {
         control: OperationControl<SceneConstructionPhase, SceneConstructionUnit>,
         terminal_attribution_slots: usize,
     ) -> Result<Self, SceneConstructionStartError> {
-        let start = try_plan_scene_operation(limits, control, terminal_attribution_slots)?;
+        let start = try_plan_scene_operation(
+            limits,
+            control,
+            terminal_attribution_slots,
+            SceneFailureEvidenceWork::legacy(),
+        )?;
         let raw = SceneStoreOperation::try_start(
             start.control,
             start.ledger_plan,
@@ -1026,10 +1040,36 @@ struct SceneOperationStart {
     start_plan: RetainedStoreStartPlan,
 }
 
+#[derive(Clone, Copy)]
+struct SceneFailureEvidenceWork {
+    max_evidence_members: usize,
+    construction_work_limit: u64,
+    validation_work_limit: u64,
+}
+
+impl SceneFailureEvidenceWork {
+    const fn legacy() -> Self {
+        Self {
+            max_evidence_members: FAILURE_TERMINAL_EVIDENCE_MEMBERS,
+            construction_work_limit: 0,
+            validation_work_limit: 0,
+        }
+    }
+
+    const fn exact_single_record(fields: usize) -> Self {
+        Self {
+            max_evidence_members: 1,
+            construction_work_limit: fields as u64,
+            validation_work_limit: fields as u64,
+        }
+    }
+}
+
 fn try_plan_scene_operation(
     limits: SceneConstructionLimits,
     control: OperationControl<SceneConstructionPhase, SceneConstructionUnit>,
     terminal_attribution_slots: usize,
+    failure_evidence_work: SceneFailureEvidenceWork,
 ) -> Result<SceneOperationStart, SceneConstructionStartError> {
     let brand = ConstructionBrand::reserve()?;
     let domain = StoreKeyDomain::try_new(STORE_CATALOG)?;
@@ -1044,9 +1084,11 @@ fn try_plan_scene_operation(
             .try_admit_dimension(FAILURE_TERMINAL_WORK_DIMENSION)
             .ok_or(SceneConstructionStartError::KeyAdmissionInvariant)?,
     };
-    let failure_terminal_work = RetainedStoreFailureTerminalWorkPlan::new(
+    let failure_terminal_work = CanonicalFailureTerminalWorkPlan::new(
         keys.failure_terminal_work_dimension,
-        FAILURE_TERMINAL_EVIDENCE_MEMBERS,
+        failure_evidence_work.max_evidence_members,
+        failure_evidence_work.construction_work_limit,
+        failure_evidence_work.validation_work_limit,
         limits.attempted_work,
         limits.consumed_work,
     )
@@ -1086,7 +1128,7 @@ fn try_plan_scene_operation(
         1,
         keys.dimension,
         1,
-        failure_terminal_work,
+        failure_terminal_work.into_store_plan(),
     );
     Ok(SceneOperationStart {
         brand,
@@ -1387,12 +1429,21 @@ fn scene_publication_plan(
     inherited_matrix: bool,
     faults: SceneBuildFaults,
 ) -> Result<RetainedStorePublicationPlan, StorePlanError> {
+    let (canonical, evidence) = scene_block_table_plans(keys, inherited_matrix, faults)?;
+    Ok(RetainedStorePublicationPlan::success(canonical, evidence))
+}
+
+fn scene_block_table_plans(
+    keys: SceneStoreKeys,
+    inherited_matrix: bool,
+    faults: SceneBuildFaults,
+) -> Result<(RetainedStoreBlockTablePlan, RetainedStoreBlockTablePlan), StorePlanError> {
     let orphan = faults.orphan();
     let canonical_blocks = 4 + usize::from(orphan);
     let canonical_new_blocks = if inherited_matrix { 3 } else { 4 } + usize::from(orphan);
     let canonical_writer = scene_writer_plan(keys, canonical_new_blocks + 1, 4)?;
     let evidence_writer = scene_writer_plan(keys, 2, 4)?;
-    Ok(RetainedStorePublicationPlan::success(
+    Ok((
         RetainedStoreBlockTablePlan::new(canonical_writer, canonical_blocks, canonical_new_blocks)?,
         RetainedStoreBlockTablePlan::new(evidence_writer, 1, 1)?,
     ))
@@ -1417,15 +1468,21 @@ fn retain_outcome_evidence<L>(
     assembly.try_retain_outcome_evidence_records(
         RecordPlan::new(1, EVIDENCE_FIELD_COUNT).map_err(StoreRuntimeError::Plan)?,
         OutcomeEvidenceSchema,
-        |writer| {
-            writer.write_row(|row| {
-                row.write_scalar(SCHEMA_REVISION)?;
-                row.write_scalar(EVIDENCE_OUTCOME_CANDIDATE)?;
-                row.write_scalar(CANONICAL_BLOCK_COUNT)?;
-                row.write_scalar(NODE_COUNT as u32)
-            })
-        },
+        write_outcome_evidence,
     )
+}
+
+fn write_outcome_evidence(writer: &mut OutcomeEvidenceRecordWriter) -> Result<(), StoreBuildError> {
+    writer.write_row(write_outcome_evidence_row)
+}
+
+fn write_outcome_evidence_row(
+    row: &mut OutcomeEvidenceRecordRowWriter<'_>,
+) -> Result<(), StoreBuildError> {
+    row.write_scalar(SCHEMA_REVISION)?;
+    row.write_scalar(EVIDENCE_OUTCOME_CANDIDATE)?;
+    row.write_scalar(CANONICAL_BLOCK_COUNT)?;
+    row.write_scalar(NODE_COUNT as u32)
 }
 
 fn retain_authored_matrices<L>(
@@ -1436,9 +1493,16 @@ fn retain_authored_matrices<L>(
         .try_retain_canonical_sequence(
             SequencePlan::<f32>::new(MATRIX_SCALAR_COUNT).map_err(StoreRuntimeError::Plan)?,
             AuthoredMatrixSchema,
-            |writer| writer.extend_from_slice(values),
+            |writer| write_authored_matrices(writer, values),
         )
         .map(CanonicalBlockRef::from_store)
+}
+
+fn write_authored_matrices(
+    writer: &mut SequenceWriter<f32>,
+    values: &[f32; MATRIX_SCALAR_COUNT],
+) -> Result<(), StoreBuildError> {
+    writer.extend_from_slice(values)
 }
 
 fn retain_references<L>(
@@ -1451,15 +1515,20 @@ fn retain_references<L>(
             RecordPlan::new(REFERENCE_COUNT, REFERENCE_FIELD_COUNT)
                 .map_err(StoreRuntimeError::Plan)?,
             ReferenceTableSchema,
-            |writer| {
-                writer.write_row(|row| {
-                    row.write_scalar(0_u32)?;
-                    row.write_scalar(0_u32)?;
-                    row.write_scalar(u32::from(!wrong_reference))
-                })
-            },
+            |writer| write_references(writer, wrong_reference),
         )
         .map(CanonicalBlockRef::from_store)
+}
+
+fn write_references(
+    writer: &mut CanonicalRecordWriter,
+    wrong_reference: bool,
+) -> Result<(), StoreBuildError> {
+    writer.write_row(|row| {
+        row.write_scalar(0_u32)?;
+        row.write_scalar(0_u32)?;
+        row.write_scalar(u32::from(!wrong_reference))
+    })
 }
 
 fn retain_nodes<L>(
@@ -1472,32 +1541,38 @@ fn retain_nodes<L>(
         .try_retain_canonical_records(
             RecordPlan::new(NODE_COUNT, NODE_FIELD_COUNT).map_err(StoreRuntimeError::Plan)?,
             NodeTableSchema,
-            |writer| {
-                writer.write_row(|row| {
-                    row.write_scalar(0_u32)?;
-                    row.write_scalar(PRESENCE_ABSENT)?;
-                    row.write_scalar(0_u32)?;
-                    row.write_scalar(0_u32)?;
-                    row.write_scalar(0_u32)?;
-                    row.write_scalar(MATRIX_SCALARS_PER_NODE as u32)?;
-                    row.write_sequence_ref(matrices.into_store())
-                })?;
-                writer.write_row(|row| {
-                    row.write_scalar(1_u32)?;
-                    row.write_scalar(if wrong_parent {
-                        PRESENCE_ABSENT
-                    } else {
-                        PRESENCE_PRESENT
-                    })?;
-                    row.write_scalar(0_u32)?;
-                    row.write_scalar(u32::from(!wrong_parent))?;
-                    row.write_scalar(MATRIX_SCALARS_PER_NODE as u32)?;
-                    row.write_scalar(MATRIX_SCALARS_PER_NODE as u32)?;
-                    row.write_sequence_ref(matrices.into_store())
-                })
-            },
+            |writer| write_nodes(writer, matrices, wrong_parent),
         )
         .map(CanonicalBlockRef::from_store)
+}
+
+fn write_nodes(
+    writer: &mut CanonicalRecordWriter,
+    matrices: CanonicalBlockRef<AuthoredMatrixSchema>,
+    wrong_parent: bool,
+) -> Result<(), StoreBuildError> {
+    writer.write_row(|row| {
+        row.write_scalar(0_u32)?;
+        row.write_scalar(PRESENCE_ABSENT)?;
+        row.write_scalar(0_u32)?;
+        row.write_scalar(0_u32)?;
+        row.write_scalar(0_u32)?;
+        row.write_scalar(MATRIX_SCALARS_PER_NODE as u32)?;
+        row.write_sequence_ref(matrices.into_store())
+    })?;
+    writer.write_row(|row| {
+        row.write_scalar(1_u32)?;
+        row.write_scalar(if wrong_parent {
+            PRESENCE_ABSENT
+        } else {
+            PRESENCE_PRESENT
+        })?;
+        row.write_scalar(0_u32)?;
+        row.write_scalar(u32::from(!wrong_parent))?;
+        row.write_scalar(MATRIX_SCALARS_PER_NODE as u32)?;
+        row.write_scalar(MATRIX_SCALARS_PER_NODE as u32)?;
+        row.write_sequence_ref(matrices.into_store())
+    })
 }
 
 fn retain_directory<L>(
@@ -1514,25 +1589,43 @@ fn retain_directory<L>(
             RecordPlan::new(1, DIRECTORY_FIELD_COUNT).map_err(StoreRuntimeError::Plan)?,
             DirectorySchema,
             |writer| {
-                writer.write_row(|row| {
-                    row.write_scalar(SCHEMA_REVISION)?;
-                    row.write_scalar(u32::from(wrong_root))?;
-                    row.write_scalar(NODE_COUNT as u32 + u32::from(wrong_cardinality))?;
-                    row.write_record_ref(nodes.into_store())?;
-                    row.write_scalar(REFERENCE_COUNT as u32)?;
-                    row.write_record_ref(references.into_store())?;
-                    row.write_scalar(PRESENCE_PRESENT)?;
-                    row.write_scalar(1_u32)?;
-                    row.write_scalar(PRESENCE_PRESENT)?;
-                    row.write_scalar(0_u32)?;
-                    row.write_scalar(PRESENCE_ABSENT)?;
-                    row.write_scalar(0_u32)?;
-                    row.write_scalar(MATRIX_SCALAR_COUNT as u32)?;
-                    row.write_sequence_ref(matrices.into_store())
-                })
+                write_directory(
+                    writer,
+                    nodes,
+                    references,
+                    matrices,
+                    wrong_root,
+                    wrong_cardinality,
+                )
             },
         )
         .map(CanonicalBlockRef::from_store)
+}
+
+fn write_directory(
+    writer: &mut CanonicalRecordWriter,
+    nodes: CanonicalBlockRef<NodeTableSchema>,
+    references: CanonicalBlockRef<ReferenceTableSchema>,
+    matrices: CanonicalBlockRef<AuthoredMatrixSchema>,
+    wrong_root: bool,
+    wrong_cardinality: bool,
+) -> Result<(), StoreBuildError> {
+    writer.write_row(|row| {
+        row.write_scalar(SCHEMA_REVISION)?;
+        row.write_scalar(u32::from(wrong_root))?;
+        row.write_scalar(NODE_COUNT as u32 + u32::from(wrong_cardinality))?;
+        row.write_record_ref(nodes.into_store())?;
+        row.write_scalar(REFERENCE_COUNT as u32)?;
+        row.write_record_ref(references.into_store())?;
+        row.write_scalar(PRESENCE_PRESENT)?;
+        row.write_scalar(1_u32)?;
+        row.write_scalar(PRESENCE_PRESENT)?;
+        row.write_scalar(0_u32)?;
+        row.write_scalar(PRESENCE_ABSENT)?;
+        row.write_scalar(0_u32)?;
+        row.write_scalar(MATRIX_SCALAR_COUNT as u32)?;
+        row.write_sequence_ref(matrices.into_store())
+    })
 }
 
 fn prepare_scene_candidate<L>(

@@ -1,5 +1,12 @@
 use super::*;
 
+fn canonical_build_work(units: Option<usize>) -> Result<NonZeroU64, StoreRuntimeError> {
+    let units = units.ok_or(StoreRuntimeError::Plan(StorePlanError::SizeOverflow))?;
+    let units =
+        u64::try_from(units).map_err(|_| StoreRuntimeError::Plan(StorePlanError::SizeOverflow))?;
+    NonZeroU64::new(units).ok_or(StoreRuntimeError::Plan(StorePlanError::EmptyPayload))
+}
+
 impl<O, PP, U> RetainedStoreOperation<O, PP, U, FreshStoreLineage>
 where
     O: OperationOwner,
@@ -9,8 +16,12 @@ where
     /// Moves the operation into the session-owned dormant activation seam.
     pub fn into_session_outcome_owner(
         self,
-        outcome_evidence_plan: RetainedStoreBlockTablePlan,
-    ) -> RetainedStoreSessionOutcomeOwner<O, PP, U, FreshStoreLineage> {
+        policy: CanonicalActivationPolicy,
+    ) -> (
+        RetainedStoreSessionOutcomeOwner<O, PP, U, FreshStoreLineage>,
+        CanonicalActivationRequestSealer,
+    ) {
+        let brand = self.domain.activation_brand();
         let (max_evidence_members, construction_work_limit, validation_work_limit) = self
             .raw
             .failure_terminal_work_limits()
@@ -20,11 +31,14 @@ where
             construction_work_limit,
             validation_work_limit,
         };
-        RetainedStoreSessionOutcomeOwner {
-            operation: Some(self),
-            outcome_evidence_plan,
-            failure_work: FailureEvidenceWorkBudget::new(failure_work),
-        }
+        (
+            RetainedStoreSessionOutcomeOwner {
+                operation: Some(self),
+                roles: Some(BoundActivationRoles { policy, brand }),
+                failure_work: FailureEvidenceWorkBudget::new(failure_work),
+            },
+            CanonicalActivationRequestSealer { brand },
+        )
     }
 }
 
@@ -48,6 +62,7 @@ where
     )]
     pub fn plan_and_activate<T, E, CanonicalKind, CanonicalTag>(
         mut self,
+        request: SealedCanonicalActivationRequest,
         preflight: impl for<'scope> FnMut(
             CanonicalPreflight<'scope, O, PP, U, L>,
         ) -> CanonicalPreflightDecision<'scope, E>,
@@ -70,7 +85,18 @@ where
             .operation
             .take()
             .expect("the session outcome owner begins activation at most once");
-        let outcome_evidence_plan = self.outcome_evidence_plan;
+        let roles = self
+            .roles
+            .take()
+            .expect("the session outcome owner consumes its activation roles at most once");
+        let request = match roles.bind(request) {
+            Ok(request) => request,
+            Err(_) => {
+                let _ = drop_optional_callback(preflight);
+                let _ = drop_optional_callback(materialize);
+                return Err(contain_operation(operation));
+            }
+        };
         let failure_work = self.failure_work;
         let mut first_fault = None;
         let preflight_result = catch_unwind(AssertUnwindSafe(|| {
@@ -79,6 +105,7 @@ where
                 .expect("the preflight callback is executed at most once");
             preflight(CanonicalPreflight {
                 operation: &mut operation,
+                request: &request,
                 first_fault: &mut first_fault,
             })
             .into_state()
@@ -119,6 +146,7 @@ where
 
         match preflight {
             CanonicalPreflightState::Rejected(rejection) => {
+                let outcome_evidence_plan = request.outcome_evidence_plan;
                 if drop_optional_callback(materialize).is_err() {
                     let _ = drop_verified_rejection(rejection);
                     return Err(contain_operation(operation));
@@ -140,6 +168,7 @@ where
                             operation,
                             outcome_evidence_plan,
                             failure_work,
+                            request.outcome_evidence_destination_dimension,
                             fault.cause,
                             failure_code,
                             false,
@@ -151,14 +180,22 @@ where
                         operation,
                         outcome_evidence_plan,
                         failure_work,
+                        request.outcome_evidence_destination_dimension,
                         rejection,
                     ),
                 ))
             }
-            CanonicalPreflightState::Activate {
-                canonical_plan,
-                intent: activation_intent,
-            } => {
+            CanonicalPreflightState::Activate => {
+                let BoundActivationRequest {
+                    canonical_plan,
+                    outcome_evidence_plan,
+                    materialization_work_dimension,
+                    validation_work_dimension,
+                    canonical_destination_dimension,
+                    outcome_evidence_destination_dimension,
+                    validation_work,
+                    expected_materialized_blocks,
+                } = request;
                 if first_fault.is_some() {
                     let _ = drop_optional_callback(materialize);
                     return Err(contain_operation(operation));
@@ -181,6 +218,7 @@ where
                                 operation,
                                 outcome_evidence_plan,
                                 failure_work,
+                                outcome_evidence_destination_dimension,
                                 cause,
                                 failure_code,
                                 fallback_only,
@@ -198,8 +236,7 @@ where
                     let lane = CanonicalLane {
                         assembly: &mut assembly,
                         first_fault: &mut first_fault,
-                        materialization_work_dimension: activation_intent
-                            .materialization_work_dimension,
+                        materialization_work_dimension,
                     };
                     let materialize = materialize
                         .as_mut()
@@ -266,14 +303,13 @@ where
                         finish_rejected(
                             assembly,
                             failure_work,
+                            outcome_evidence_destination_dimension,
                             StoreCanonicalRejection::Runtime(fault.cause),
                             failure_code,
                         )
                     }
                     (None, CanonicalMaterializationState::Activated { root, output }) => {
-                        if assembly.canonical_len()
-                            != activation_intent.expected_materialized_blocks
-                        {
+                        if assembly.canonical_len() != expected_materialized_blocks {
                             let _ = drop_scoped_value(output);
                             return Err(StoreActivationContainment {
                                 cause: assembly.contain_activation_fault(),
@@ -285,13 +321,17 @@ where
                                 canonical_root: root,
                                 output,
                                 failure_work,
-                                intent: activation_intent,
+                                validation_work_dimension,
+                                canonical_destination_dimension,
+                                outcome_evidence_destination_dimension,
+                                validation_work,
                             },
                         ))
                     }
                     (None, CanonicalMaterializationState::Rejected(rejection)) => finish_rejected(
                         assembly,
                         failure_work,
+                        outcome_evidence_destination_dimension,
                         StoreCanonicalRejection::Requested(rejection.cause),
                         rejection.failure_code,
                     ),
@@ -331,30 +371,35 @@ where
         }
     }
 
-    /// Seals the mechanical table envelope after complete authority-free core preflight.
-    pub fn seal<E>(
-        self,
-        activation_plan: CanonicalActivationPlan,
-    ) -> CanonicalPreflightDecision<'activation, E> {
-        let (canonical_plan, intent) = activation_plan.into_parts();
+    /// Accepts the session-owned activation shape after complete authority-free core preflight.
+    pub fn seal<E>(self) -> CanonicalPreflightDecision<'activation, E> {
         if self.first_fault.is_none() {
-            let (phase, dimensions) = canonical_plan.keys_for_publication_validation();
+            let (phase, dimensions) = self
+                .request
+                .canonical_plan
+                .keys_for_publication_validation();
+            let result = self.operation.validate_writer_keys(phase, dimensions);
+            let _ = preserve_first_fault(self.first_fault, result);
+        }
+        if self.first_fault.is_none() {
+            let (phase, dimensions) = self
+                .request
+                .outcome_evidence_plan
+                .keys_for_publication_validation();
             let result = self.operation.validate_writer_keys(phase, dimensions);
             let _ = preserve_first_fault(self.first_fault, result);
         }
         if self.first_fault.is_none() {
             let result = self.operation.validate_activation_dimensions([
-                intent.materialization_work_dimension,
-                intent.validation_work_dimension,
-                intent.commitment_dimension,
+                self.request.materialization_work_dimension,
+                self.request.validation_work_dimension,
+                self.request.canonical_destination_dimension,
+                self.request.outcome_evidence_destination_dimension,
             ]);
             let _ = preserve_first_fault(self.first_fault, result);
         }
         CanonicalPreflightDecision {
-            state: CanonicalPreflightState::Activate {
-                canonical_plan,
-                intent,
-            },
+            state: CanonicalPreflightState::Activate,
             scope: PhantomData,
         }
     }
@@ -386,21 +431,6 @@ where
             return Err(cause);
         }
         preserve_first_fault(self.first_fault, self.raw.poll())
-    }
-
-    pub fn charge_observed(
-        &mut self,
-        dimension: StoreDimensionKey,
-        amount: u64,
-    ) -> Result<(), StoreRuntimeError> {
-        if let Some(cause) = preserved_fault(self.first_fault) {
-            note_later_contract(self.first_fault, self.raw.validate_dimension(dimension));
-            return Err(cause);
-        }
-        preserve_first_fault(
-            self.first_fault,
-            self.raw.charge_observed(dimension, amount),
-        )
     }
 
     pub fn reserve(
@@ -461,11 +491,6 @@ where
         self.inner.poll()
     }
 
-    pub fn charge_observed(&mut self, amount: u64) -> Result<(), StoreRuntimeError> {
-        self.inner
-            .charge_observed(self.materialization_work_dimension, amount)
-    }
-
     pub fn reserve(
         &mut self,
         phase: StorePhaseKey,
@@ -519,7 +544,6 @@ where
                     first_fault: self.first_fault,
                     activation: PhantomData,
                 },
-                materialization_work_dimension: self.materialization_work_dimension,
             }),
             Err(cause) => preserve_first_fault(self.first_fault, Err(cause)),
         }
@@ -530,8 +554,7 @@ where
         plan: SequencePlan<T>,
         tag: Tag,
         build: impl for<'control> FnMut(
-            &mut SequenceWriter<T>,
-            &mut RetainedStoreWorkControl<'control, O, PP, U>,
+            &mut CanonicalBuildControl<'_, '_, 'control, O, PP, U, SequenceWriter<T>>,
         ) -> Result<(), StoreControlledError>,
     ) -> Result<CanonicalSequenceRef<T, Tag>, StoreRuntimeError>
     where
@@ -551,17 +574,39 @@ where
                 finish_scoped_callback(build, Err(cause)),
             );
         }
-        let result = self.assembly.try_retain_canonical_sequence_controlled(
-            plan,
+        let work = match canonical_build_work(Some(plan.element_count())) {
+            Ok(work) => work,
+            Err(cause) => {
+                return preserve_first_fault(
+                    self.first_fault,
+                    finish_scoped_callback(build, Err(cause)),
+                );
+            }
+        };
+        let allocation = match plan.allocation_plan() {
+            Ok(allocation) => allocation,
+            Err(cause) => {
+                return preserve_first_fault(
+                    self.first_fault,
+                    finish_scoped_callback(build, Err(StoreRuntimeError::Plan(cause))),
+                );
+            }
+        };
+        let result = try_retain_activation_canonical_writer(
+            self.assembly,
+            allocation,
             self.materialization_work_dimension,
+            work,
             tag,
-            |writer, control| {
+            || <T as super::super::sealed::StoredScalar>::new_writer(plan.capacity, plan.len),
+            |control| {
                 build
                     .as_mut()
                     .expect("the canonical sequence builder is executed at most once")(
-                    writer, control,
+                    control
                 )
             },
+            SequenceWriter::finish,
         );
         preserve_first_fault(self.first_fault, finish_scoped_callback(build, result))
     }
@@ -571,8 +616,7 @@ where
         plan: BytesPlan,
         tag: Tag,
         build: impl for<'control> FnMut(
-            &mut BytesWriter,
-            &mut RetainedStoreWorkControl<'control, O, PP, U>,
+            &mut CanonicalBuildControl<'_, '_, 'control, O, PP, U, BytesWriter>,
         ) -> Result<(), StoreControlledError>,
     ) -> Result<CanonicalBytesRef<Tag>, StoreRuntimeError>
     where
@@ -591,17 +635,39 @@ where
                 finish_scoped_callback(build, Err(cause)),
             );
         }
-        let result = self.assembly.try_retain_canonical_bytes_controlled(
-            plan,
+        let work = match canonical_build_work(Some(plan.bytes())) {
+            Ok(work) => work,
+            Err(cause) => {
+                return preserve_first_fault(
+                    self.first_fault,
+                    finish_scoped_callback(build, Err(cause)),
+                );
+            }
+        };
+        let allocation = match plan.allocation_plan() {
+            Ok(allocation) => allocation,
+            Err(cause) => {
+                return preserve_first_fault(
+                    self.first_fault,
+                    finish_scoped_callback(build, Err(StoreRuntimeError::Plan(cause))),
+                );
+            }
+        };
+        let result = try_retain_activation_canonical_writer(
+            self.assembly,
+            allocation,
             self.materialization_work_dimension,
+            work,
             tag,
-            |writer, control| {
+            || BytesWriter::new(plan),
+            |control| {
                 build
                     .as_mut()
                     .expect("the canonical bytes builder is executed at most once")(
-                    writer, control
+                    control
                 )
             },
+            BytesWriter::finish,
         );
         preserve_first_fault(self.first_fault, finish_scoped_callback(build, result))
     }
@@ -611,8 +677,7 @@ where
         plan: Utf8Plan,
         tag: Tag,
         build: impl for<'control> FnMut(
-            &mut Utf8Writer,
-            &mut RetainedStoreWorkControl<'control, O, PP, U>,
+            &mut CanonicalBuildControl<'_, '_, 'control, O, PP, U, Utf8Writer>,
         ) -> Result<(), StoreControlledError>,
     ) -> Result<CanonicalUtf8Ref<Tag>, StoreRuntimeError>
     where
@@ -631,17 +696,39 @@ where
                 finish_scoped_callback(build, Err(cause)),
             );
         }
-        let result = self.assembly.try_retain_canonical_utf8_controlled(
-            plan,
+        let work = match canonical_build_work(Some(plan.bytes())) {
+            Ok(work) => work,
+            Err(cause) => {
+                return preserve_first_fault(
+                    self.first_fault,
+                    finish_scoped_callback(build, Err(cause)),
+                );
+            }
+        };
+        let allocation = match plan.allocation_plan() {
+            Ok(allocation) => allocation,
+            Err(cause) => {
+                return preserve_first_fault(
+                    self.first_fault,
+                    finish_scoped_callback(build, Err(StoreRuntimeError::Plan(cause))),
+                );
+            }
+        };
+        let result = try_retain_activation_canonical_writer(
+            self.assembly,
+            allocation,
             self.materialization_work_dimension,
+            work,
             tag,
-            |writer, control| {
+            || Utf8Writer::new(plan),
+            |control| {
                 build
                     .as_mut()
                     .expect("the canonical UTF-8 builder is executed at most once")(
-                    writer, control
+                    control
                 )
             },
+            Utf8Writer::finish,
         );
         preserve_first_fault(self.first_fault, finish_scoped_callback(build, result))
     }
@@ -651,8 +738,7 @@ where
         plan: RecordPlan,
         tag: Tag,
         build: impl for<'control> FnMut(
-            &mut CanonicalRecordWriter,
-            &mut RetainedStoreWorkControl<'control, O, PP, U>,
+            &mut CanonicalBuildControl<'_, '_, 'control, O, PP, U, CanonicalRecordWriter>,
         ) -> Result<(), StoreControlledError>,
     ) -> Result<CanonicalRecordRef<Tag>, StoreRuntimeError>
     where
@@ -671,17 +757,39 @@ where
                 finish_scoped_callback(build, Err(cause)),
             );
         }
-        let result = self.assembly.try_retain_canonical_records_controlled(
-            plan,
+        let work = match canonical_build_work(plan.rows().checked_mul(plan.fields())) {
+            Ok(work) => work,
+            Err(cause) => {
+                return preserve_first_fault(
+                    self.first_fault,
+                    finish_scoped_callback(build, Err(cause)),
+                );
+            }
+        };
+        let allocation = match plan.allocation_plan() {
+            Ok(allocation) => allocation,
+            Err(cause) => {
+                return preserve_first_fault(
+                    self.first_fault,
+                    finish_scoped_callback(build, Err(StoreRuntimeError::Plan(cause))),
+                );
+            }
+        };
+        let result = try_retain_activation_canonical_writer(
+            self.assembly,
+            allocation,
             self.materialization_work_dimension,
+            work,
             tag,
-            |writer, control| {
+            || CanonicalRecordWriter::new(plan),
+            |control| {
                 build
                     .as_mut()
                     .expect("the canonical record builder is executed at most once")(
-                    writer, control,
+                    control
                 )
             },
+            CanonicalRecordWriter::finish,
         );
         preserve_first_fault(self.first_fault, finish_scoped_callback(build, result))
     }

@@ -26,6 +26,8 @@ struct TestOwner;
 impl OperationOwner for TestOwner {}
 
 const TEST_TERMINAL_ATTRIBUTION_SLOTS: usize = 32;
+const TEST_FALLBACK_OUTCOME_EVIDENCE: u64 = 1;
+const TEST_SNAPSHOT_OUTCOME_EVIDENCE: u64 = 1;
 const TEST_MAX_FAILURE_EVIDENCE_MEMBERS: usize = 5;
 const TEST_FAILURE_EVIDENCE_WORK_PER_MEMBER: u64 = 64;
 const TEST_FAILURE_EVIDENCE_CONSTRUCTION_WORK_LIMIT: u64 =
@@ -463,9 +465,9 @@ fn operation_with_catalog_limits_and_failure_work(
         RetainedStoreSharePlan::new(keys.dimension, keys.dimension),
         StoreFallbackEnvelope::new(91),
         keys.dimension,
-        1,
+        TEST_FALLBACK_OUTCOME_EVIDENCE,
         keys.dimension,
-        1,
+        TEST_SNAPSHOT_OUTCOME_EVIDENCE,
         failure_terminal_work,
     );
     (

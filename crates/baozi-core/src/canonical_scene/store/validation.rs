@@ -1,8 +1,11 @@
 mod node_scene;
 
+use baozi_operation::__canonical_activation::{
+    CanonicalValidationMember, CanonicalValidationSession, OutcomeEvidenceValidationMember,
+};
 use baozi_operation::{
-    CanonicalRecordRef, OutcomeEvidenceRecordRef, StoreEvidenceValidationSession,
-    StoreValidationSession,
+    CanonicalRecordRef, OperationOwner, OutcomeEvidenceRecordRef, ProgressPhase, ProgressUnit,
+    RecordBlock, StoreEvidenceValidationSession, StoreValidationSession, StoreWorkError,
 };
 
 use super::schema::{
@@ -32,7 +35,18 @@ pub(super) fn validate_scene_graph(
     directory_ref: CanonicalRecordRef<DirectorySchema>,
     evidence_ref: OutcomeEvidenceRecordRef<OutcomeEvidenceSchema>,
 ) -> bool {
-    validate_scene_graph_inner(session, directory_ref, evidence_ref).is_some()
+    validate_scene_graph_with_work(session, directory_ref, evidence_ref, |_| Ok::<(), ()>(()))
+        .expect("the no-op Scene validation work meter cannot fail")
+}
+
+pub(super) fn validate_scene_graph_with_work<E>(
+    session: &mut StoreValidationSession<'_, '_>,
+    directory_ref: CanonicalRecordRef<DirectorySchema>,
+    evidence_ref: OutcomeEvidenceRecordRef<OutcomeEvidenceSchema>,
+    mut observe: impl FnMut(u64) -> Result<(), E>,
+) -> Result<bool, E> {
+    validate_scene_graph_inner_with_work(session, directory_ref, evidence_ref, &mut observe)
+        .map(|result| result.is_some())
 }
 
 pub(super) fn validate_evidence_graph(
@@ -51,136 +65,513 @@ pub(super) fn validate_evidence_graph(
         && evidence.scalar::<u32>(0, evidence_field::NODE_COUNT) == u32::try_from(NODE_COUNT).ok()
 }
 
-fn validate_scene_graph_inner(
-    session: &mut StoreValidationSession<'_, '_>,
-    directory_ref: CanonicalRecordRef<DirectorySchema>,
-    evidence_ref: OutcomeEvidenceRecordRef<OutcomeEvidenceSchema>,
-) -> Option<()> {
-    let directory = session.canonical_records(directory_ref)?;
-    if directory.rows() != 1 || directory.fields() != DIRECTORY_FIELD_COUNT {
-        return None;
-    }
-    require_scalar(
-        directory.scalar::<u32>(0, directory_field::SCHEMA_REVISION),
-        SCHEMA_REVISION,
-    )?;
-    require_scalar(directory.scalar::<u32>(0, directory_field::ROOT_NODE), 0)?;
-    require_scalar(
-        directory.scalar::<u32>(0, directory_field::NODE_COUNT),
-        u32::try_from(NODE_COUNT).ok()?,
-    )?;
-    require_scalar(
-        directory.scalar::<u32>(0, directory_field::REFERENCE_COUNT),
-        u32::try_from(REFERENCE_COUNT).ok()?,
-    )?;
-    require_scalar(
-        directory.scalar::<u32>(0, directory_field::MATRIX_SCALAR_COUNT),
-        u32::try_from(MATRIX_SCALAR_COUNT).ok()?,
-    )?;
-    require_optional_collection(
-        directory.scalar::<u8>(0, directory_field::ROOT_CHILDREN_PRESENCE),
-        directory.scalar::<u32>(0, directory_field::ROOT_CHILDREN_COUNT),
-        PRESENCE_PRESENT,
-        1,
-    )?;
-    require_optional_collection(
-        directory.scalar::<u8>(0, directory_field::CHILD_CHILDREN_PRESENCE),
-        directory.scalar::<u32>(0, directory_field::CHILD_CHILDREN_COUNT),
-        PRESENCE_PRESENT,
-        0,
-    )?;
-    require_optional_collection(
-        directory.scalar::<u8>(0, directory_field::METADATA_PRESENCE),
-        directory.scalar::<u32>(0, directory_field::METADATA_COUNT),
-        PRESENCE_ABSENT,
-        0,
-    )?;
+pub(super) fn scene_graph_validation_work() -> u64 {
+    table_work(DIRECTORY_FIELD_COUNT)
+        + table_work(NODE_COUNT * NODE_FIELD_COUNT)
+        + table_work(REFERENCE_COUNT * REFERENCE_FIELD_COUNT)
+        + work_units(MATRIX_SCALAR_COUNT)
+        + table_work(EVIDENCE_FIELD_COUNT)
+}
 
-    let nodes_ref = directory.record_ref::<NodeTableSchema>(0, directory_field::NODES)?;
-    let references_ref =
-        directory.record_ref::<ReferenceTableSchema>(0, directory_field::REFERENCES)?;
-    let directory_matrix =
-        directory.sequence_ref::<f32, AuthoredMatrixSchema>(0, directory_field::MATRICES)?;
-    let nodes = session.canonical_records(nodes_ref)?;
-    let references = session.canonical_records(references_ref)?;
-    if nodes.rows() != NODE_COUNT || nodes.fields() != NODE_FIELD_COUNT {
-        return None;
-    }
-    if references.rows() != REFERENCE_COUNT || references.fields() != REFERENCE_FIELD_COUNT {
-        return None;
-    }
-    require_scalar(nodes.scalar::<u32>(0, node_field::NODE), 0)?;
-    require_optional_collection(
-        nodes.scalar::<u8>(0, node_field::PARENT_PRESENCE),
-        nodes.scalar::<u32>(0, node_field::PARENT_REFERENCE_COUNT),
-        PRESENCE_ABSENT,
-        0,
-    )?;
-    require_scalar(
-        nodes.scalar::<u32>(0, node_field::PARENT_REFERENCE_OFFSET),
-        0,
-    )?;
-    require_scalar(nodes.scalar::<u32>(0, node_field::MATRIX_OFFSET), 0)?;
-    require_scalar(
-        nodes.scalar::<u32>(0, node_field::MATRIX_LENGTH),
-        u32::try_from(MATRIX_SCALARS_PER_NODE).ok()?,
-    )?;
-    require_scalar(nodes.scalar::<u32>(1, node_field::NODE), 1)?;
-    require_optional_collection(
-        nodes.scalar::<u8>(1, node_field::PARENT_PRESENCE),
-        nodes.scalar::<u32>(1, node_field::PARENT_REFERENCE_COUNT),
-        PRESENCE_PRESENT,
+pub(super) fn validate_scene_graph_metered<'session, 'storage, 'control, 'operation, O, PP, U>(
+    session: &mut CanonicalValidationSession<'session, 'storage, 'control, 'operation, O, PP, U>,
+    directory: CanonicalValidationMember<'session, RecordBlock, DirectorySchema>,
+    evidence: OutcomeEvidenceValidationMember<'session, RecordBlock, OutcomeEvidenceSchema>,
+) -> Result<bool, StoreWorkError>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    let mut schema_revision = None;
+    let mut root_node = None;
+    let mut node_count = None;
+    let mut nodes = None;
+    let mut reference_count = None;
+    let mut references = None;
+    let mut root_children_presence = None;
+    let mut root_children_count = None;
+    let mut child_children_presence = None;
+    let mut child_children_count = None;
+    let mut metadata_presence = None;
+    let mut metadata_count = None;
+    let mut matrix_scalar_count = None;
+    let mut directory_matrix = None;
+    let directory_complete = session.visit_canonical_records(
+        directory,
         1,
+        DIRECTORY_FIELD_COUNT,
+        |_row_index, row| {
+            schema_revision = row.scalar(directory_field::SCHEMA_REVISION, |value: u32| value)?;
+            root_node = row.scalar(directory_field::ROOT_NODE, |value: u32| value)?;
+            node_count = row.scalar(directory_field::NODE_COUNT, |value: u32| value)?;
+            nodes = row.record_ref::<NodeTableSchema, _>(directory_field::NODES, |value| value)?;
+            reference_count = row.scalar(directory_field::REFERENCE_COUNT, |value: u32| value)?;
+            references = row
+                .record_ref::<ReferenceTableSchema, _>(directory_field::REFERENCES, |value| {
+                    value
+                })?;
+            root_children_presence =
+                row.scalar(directory_field::ROOT_CHILDREN_PRESENCE, |value: u8| value)?;
+            root_children_count =
+                row.scalar(directory_field::ROOT_CHILDREN_COUNT, |value: u32| value)?;
+            child_children_presence =
+                row.scalar(directory_field::CHILD_CHILDREN_PRESENCE, |value: u8| value)?;
+            child_children_count =
+                row.scalar(directory_field::CHILD_CHILDREN_COUNT, |value: u32| value)?;
+            metadata_presence =
+                row.scalar(directory_field::METADATA_PRESENCE, |value: u8| value)?;
+            metadata_count = row.scalar(directory_field::METADATA_COUNT, |value: u32| value)?;
+            matrix_scalar_count =
+                row.scalar(directory_field::MATRIX_SCALAR_COUNT, |value: u32| value)?;
+            directory_matrix = row.sequence_ref::<f32, AuthoredMatrixSchema, _>(
+                directory_field::MATRICES,
+                |value| value,
+            )?;
+            Ok(true)
+        },
     )?;
-    require_scalar(
-        nodes.scalar::<u32>(1, node_field::PARENT_REFERENCE_OFFSET),
-        0,
-    )?;
-    require_scalar(
-        nodes.scalar::<u32>(1, node_field::MATRIX_OFFSET),
-        u32::try_from(MATRIX_SCALARS_PER_NODE).ok()?,
-    )?;
-    require_scalar(
-        nodes.scalar::<u32>(1, node_field::MATRIX_LENGTH),
-        u32::try_from(MATRIX_SCALARS_PER_NODE).ok()?,
-    )?;
-    let root_matrix = nodes.sequence_ref::<f32, AuthoredMatrixSchema>(0, node_field::MATRIX)?;
-    let child_matrix = nodes.sequence_ref::<f32, AuthoredMatrixSchema>(1, node_field::MATRIX)?;
-    if root_matrix != child_matrix || root_matrix != directory_matrix {
-        return None;
+    if !directory_complete
+        || require_scalar(schema_revision, SCHEMA_REVISION).is_none()
+        || require_scalar(root_node, 0).is_none()
+        || require_scalar(node_count, schema_u32(NODE_COUNT)).is_none()
+        || require_scalar(reference_count, schema_u32(REFERENCE_COUNT)).is_none()
+        || require_optional_collection(
+            root_children_presence,
+            root_children_count,
+            PRESENCE_PRESENT,
+            1,
+        )
+        .is_none()
+        || require_optional_collection(
+            child_children_presence,
+            child_children_count,
+            PRESENCE_PRESENT,
+            0,
+        )
+        .is_none()
+        || require_optional_collection(metadata_presence, metadata_count, PRESENCE_ABSENT, 0)
+            .is_none()
+        || require_scalar(matrix_scalar_count, schema_u32(MATRIX_SCALAR_COUNT)).is_none()
+    {
+        return Ok(false);
     }
-    let matrices = session.canonical_sequence(root_matrix)?.as_slice();
-    if matrices.len() != MATRIX_SCALAR_COUNT
+    let (Some(nodes), Some(references), Some(directory_matrix)) =
+        (nodes, references, directory_matrix)
+    else {
+        return Ok(false);
+    };
+
+    let mut root_id = None;
+    let mut root_parent_presence = None;
+    let mut root_parent_offset = None;
+    let mut root_parent_count = None;
+    let mut root_matrix_offset = None;
+    let mut root_matrix_length = None;
+    let mut root_matrix = None;
+    let mut child_id = None;
+    let mut child_parent_presence = None;
+    let mut child_parent_offset = None;
+    let mut child_parent_count = None;
+    let mut child_matrix_offset = None;
+    let mut child_matrix_length = None;
+    let mut child_matrix = None;
+    let nodes_complete = session.visit_canonical_records(
+        nodes,
+        NODE_COUNT,
+        NODE_FIELD_COUNT,
+        |row_index, row| {
+            if row_index == 0 {
+                root_id = row.scalar(node_field::NODE, |value: u32| value)?;
+                root_parent_presence =
+                    row.scalar(node_field::PARENT_PRESENCE, |value: u8| value)?;
+                root_parent_offset =
+                    row.scalar(node_field::PARENT_REFERENCE_OFFSET, |value: u32| value)?;
+                root_parent_count =
+                    row.scalar(node_field::PARENT_REFERENCE_COUNT, |value: u32| value)?;
+                root_matrix_offset = row.scalar(node_field::MATRIX_OFFSET, |value: u32| value)?;
+                root_matrix_length = row.scalar(node_field::MATRIX_LENGTH, |value: u32| value)?;
+                root_matrix = row
+                    .sequence_ref::<f32, AuthoredMatrixSchema, _>(node_field::MATRIX, |value| {
+                        value
+                    })?;
+            } else {
+                child_id = row.scalar(node_field::NODE, |value: u32| value)?;
+                child_parent_presence =
+                    row.scalar(node_field::PARENT_PRESENCE, |value: u8| value)?;
+                child_parent_offset =
+                    row.scalar(node_field::PARENT_REFERENCE_OFFSET, |value: u32| value)?;
+                child_parent_count =
+                    row.scalar(node_field::PARENT_REFERENCE_COUNT, |value: u32| value)?;
+                child_matrix_offset = row.scalar(node_field::MATRIX_OFFSET, |value: u32| value)?;
+                child_matrix_length = row.scalar(node_field::MATRIX_LENGTH, |value: u32| value)?;
+                child_matrix = row
+                    .sequence_ref::<f32, AuthoredMatrixSchema, _>(node_field::MATRIX, |value| {
+                        value
+                    })?;
+            }
+            Ok(true)
+        },
+    )?;
+    if !nodes_complete
+        || require_scalar(root_id, 0).is_none()
+        || require_optional_collection(root_parent_presence, root_parent_count, PRESENCE_ABSENT, 0)
+            .is_none()
+        || require_scalar(root_parent_offset, 0).is_none()
+        || require_scalar(root_matrix_offset, 0).is_none()
+        || require_scalar(root_matrix_length, schema_u32(MATRIX_SCALARS_PER_NODE)).is_none()
+        || require_scalar(child_id, 1).is_none()
+        || require_optional_collection(
+            child_parent_presence,
+            child_parent_count,
+            PRESENCE_PRESENT,
+            1,
+        )
+        .is_none()
+        || require_scalar(child_parent_offset, 0).is_none()
+        || require_scalar(child_matrix_offset, schema_u32(MATRIX_SCALARS_PER_NODE)).is_none()
+        || require_scalar(child_matrix_length, schema_u32(MATRIX_SCALARS_PER_NODE)).is_none()
+    {
+        return Ok(false);
+    }
+    let (Some(root_matrix), Some(child_matrix)) = (root_matrix, child_matrix) else {
+        return Ok(false);
+    };
+    if root_matrix != child_matrix || root_matrix != directory_matrix {
+        return Ok(false);
+    }
+
+    let mut reference_id = None;
+    let mut reference_parent = None;
+    let mut reference_child = None;
+    let references_complete = session.visit_canonical_records(
+        references,
+        REFERENCE_COUNT,
+        REFERENCE_FIELD_COUNT,
+        |_row_index, row| {
+            reference_id = row.scalar(reference_field::REFERENCE, |value: u32| value)?;
+            reference_parent = row.scalar(reference_field::PARENT, |value: u32| value)?;
+            reference_child = row.scalar(reference_field::CHILD, |value: u32| value)?;
+            Ok(true)
+        },
+    )?;
+    if !references_complete
+        || require_scalar(reference_id, 0).is_none()
+        || require_scalar(reference_parent, 0).is_none()
+        || require_scalar(reference_child, 1).is_none()
+    {
+        return Ok(false);
+    }
+
+    let mut matrices = [0.0_f32; MATRIX_SCALAR_COUNT];
+    let matrices_complete =
+        session.visit_canonical_sequence(root_matrix, MATRIX_SCALAR_COUNT, |index, value| {
+            matrices[index] = value;
+            true
+        })?;
+    if !matrices_complete
         || !authored_matrix_is_valid(&matrices[..MATRIX_SCALARS_PER_NODE])
         || !authored_matrix_is_valid(&matrices[MATRIX_SCALARS_PER_NODE..])
     {
-        return None;
+        return Ok(false);
     }
-    require_scalar(references.scalar::<u32>(0, reference_field::REFERENCE), 0)?;
-    require_scalar(references.scalar::<u32>(0, reference_field::PARENT), 0)?;
-    require_scalar(references.scalar::<u32>(0, reference_field::CHILD), 1)?;
 
-    let evidence = session.outcome_evidence_records(evidence_ref)?;
-    if evidence.rows() != 1 || evidence.fields() != EVIDENCE_FIELD_COUNT {
-        return None;
+    let mut evidence_schema = None;
+    let mut evidence_outcome = None;
+    let mut evidence_blocks = None;
+    let mut evidence_nodes = None;
+    let evidence_complete = session.visit_outcome_evidence_records(
+        evidence,
+        1,
+        EVIDENCE_FIELD_COUNT,
+        |_row_index, row| {
+            evidence_schema = row.scalar(evidence_field::SCHEMA_REVISION, |value: u32| value)?;
+            evidence_outcome = row.scalar(evidence_field::OUTCOME, |value: u32| value)?;
+            evidence_blocks =
+                row.scalar(evidence_field::CANONICAL_BLOCK_COUNT, |value: u32| value)?;
+            evidence_nodes = row.scalar(evidence_field::NODE_COUNT, |value: u32| value)?;
+            Ok(true)
+        },
+    )?;
+    Ok(evidence_complete
+        && require_scalar(evidence_schema, SCHEMA_REVISION).is_some()
+        && require_scalar(evidence_outcome, EVIDENCE_OUTCOME_CANDIDATE).is_some()
+        && require_scalar(evidence_blocks, CANONICAL_BLOCK_COUNT).is_some()
+        && require_scalar(evidence_nodes, schema_u32(NODE_COUNT)).is_some())
+}
+
+fn validate_scene_graph_inner_with_work<E>(
+    session: &mut StoreValidationSession<'_, '_>,
+    directory_ref: CanonicalRecordRef<DirectorySchema>,
+    evidence_ref: OutcomeEvidenceRecordRef<OutcomeEvidenceSchema>,
+    observe: &mut impl FnMut(u64) -> Result<(), E>,
+) -> Result<Option<()>, E> {
+    let Some(directory) = session.canonical_records(directory_ref) else {
+        return Ok(None);
+    };
+    if directory.rows() != 1 || directory.fields() != DIRECTORY_FIELD_COUNT {
+        return Ok(None);
     }
-    require_scalar(
+    let schema_revision = observed(
+        directory.scalar::<u32>(0, directory_field::SCHEMA_REVISION),
+        observe,
+    )?;
+    let root_node = observed(
+        directory.scalar::<u32>(0, directory_field::ROOT_NODE),
+        observe,
+    )?;
+    let node_count = observed(
+        directory.scalar::<u32>(0, directory_field::NODE_COUNT),
+        observe,
+    )?;
+    let nodes_ref = observed(
+        directory.record_ref::<NodeTableSchema>(0, directory_field::NODES),
+        observe,
+    )?;
+    let reference_count = observed(
+        directory.scalar::<u32>(0, directory_field::REFERENCE_COUNT),
+        observe,
+    )?;
+    let references_ref = observed(
+        directory.record_ref::<ReferenceTableSchema>(0, directory_field::REFERENCES),
+        observe,
+    )?;
+    let root_children_presence = observed(
+        directory.scalar::<u8>(0, directory_field::ROOT_CHILDREN_PRESENCE),
+        observe,
+    )?;
+    let root_children_count = observed(
+        directory.scalar::<u32>(0, directory_field::ROOT_CHILDREN_COUNT),
+        observe,
+    )?;
+    let child_children_presence = observed(
+        directory.scalar::<u8>(0, directory_field::CHILD_CHILDREN_PRESENCE),
+        observe,
+    )?;
+    let child_children_count = observed(
+        directory.scalar::<u32>(0, directory_field::CHILD_CHILDREN_COUNT),
+        observe,
+    )?;
+    let metadata_presence = observed(
+        directory.scalar::<u8>(0, directory_field::METADATA_PRESENCE),
+        observe,
+    )?;
+    let metadata_count = observed(
+        directory.scalar::<u32>(0, directory_field::METADATA_COUNT),
+        observe,
+    )?;
+    let matrix_scalar_count = observed(
+        directory.scalar::<u32>(0, directory_field::MATRIX_SCALAR_COUNT),
+        observe,
+    )?;
+    let directory_matrix = observed(
+        directory.sequence_ref::<f32, AuthoredMatrixSchema>(0, directory_field::MATRICES),
+        observe,
+    )?;
+    let directory_valid = require_scalar(schema_revision, SCHEMA_REVISION).is_some()
+        && require_scalar(root_node, 0).is_some()
+        && require_scalar(node_count, schema_u32(NODE_COUNT)).is_some()
+        && require_scalar(reference_count, schema_u32(REFERENCE_COUNT)).is_some()
+        && require_optional_collection(
+            root_children_presence,
+            root_children_count,
+            PRESENCE_PRESENT,
+            1,
+        )
+        .is_some()
+        && require_optional_collection(
+            child_children_presence,
+            child_children_count,
+            PRESENCE_PRESENT,
+            0,
+        )
+        .is_some()
+        && require_optional_collection(metadata_presence, metadata_count, PRESENCE_ABSENT, 0)
+            .is_some()
+        && require_scalar(matrix_scalar_count, schema_u32(MATRIX_SCALAR_COUNT)).is_some()
+        && nodes_ref.is_some()
+        && references_ref.is_some()
+        && directory_matrix.is_some();
+    if !directory_valid {
+        return Ok(None);
+    }
+    let nodes_ref = nodes_ref.expect("a valid directory contains its node table reference");
+    let references_ref =
+        references_ref.expect("a valid directory contains its reference table reference");
+    let directory_matrix =
+        directory_matrix.expect("a valid directory contains its authored matrix reference");
+
+    let Some(nodes) = session.canonical_records(nodes_ref) else {
+        return Ok(None);
+    };
+    if nodes.rows() != NODE_COUNT || nodes.fields() != NODE_FIELD_COUNT {
+        return Ok(None);
+    }
+    let root_id = observed(nodes.scalar::<u32>(0, node_field::NODE), observe)?;
+    let root_parent_presence =
+        observed(nodes.scalar::<u8>(0, node_field::PARENT_PRESENCE), observe)?;
+    let root_parent_offset = observed(
+        nodes.scalar::<u32>(0, node_field::PARENT_REFERENCE_OFFSET),
+        observe,
+    )?;
+    let root_parent_count = observed(
+        nodes.scalar::<u32>(0, node_field::PARENT_REFERENCE_COUNT),
+        observe,
+    )?;
+    let root_matrix_offset = observed(nodes.scalar::<u32>(0, node_field::MATRIX_OFFSET), observe)?;
+    let root_matrix_length = observed(nodes.scalar::<u32>(0, node_field::MATRIX_LENGTH), observe)?;
+    let root_matrix = observed(
+        nodes.sequence_ref::<f32, AuthoredMatrixSchema>(0, node_field::MATRIX),
+        observe,
+    )?;
+    let child_id = observed(nodes.scalar::<u32>(1, node_field::NODE), observe)?;
+    let child_parent_presence =
+        observed(nodes.scalar::<u8>(1, node_field::PARENT_PRESENCE), observe)?;
+    let child_parent_offset = observed(
+        nodes.scalar::<u32>(1, node_field::PARENT_REFERENCE_OFFSET),
+        observe,
+    )?;
+    let child_parent_count = observed(
+        nodes.scalar::<u32>(1, node_field::PARENT_REFERENCE_COUNT),
+        observe,
+    )?;
+    let child_matrix_offset = observed(nodes.scalar::<u32>(1, node_field::MATRIX_OFFSET), observe)?;
+    let child_matrix_length = observed(nodes.scalar::<u32>(1, node_field::MATRIX_LENGTH), observe)?;
+    let child_matrix = observed(
+        nodes.sequence_ref::<f32, AuthoredMatrixSchema>(1, node_field::MATRIX),
+        observe,
+    )?;
+    let nodes_valid = require_scalar(root_id, 0).is_some()
+        && require_optional_collection(root_parent_presence, root_parent_count, PRESENCE_ABSENT, 0)
+            .is_some()
+        && require_scalar(root_parent_offset, 0).is_some()
+        && require_scalar(root_matrix_offset, 0).is_some()
+        && require_scalar(root_matrix_length, schema_u32(MATRIX_SCALARS_PER_NODE)).is_some()
+        && require_scalar(child_id, 1).is_some()
+        && require_optional_collection(
+            child_parent_presence,
+            child_parent_count,
+            PRESENCE_PRESENT,
+            1,
+        )
+        .is_some()
+        && require_scalar(child_parent_offset, 0).is_some()
+        && require_scalar(child_matrix_offset, schema_u32(MATRIX_SCALARS_PER_NODE)).is_some()
+        && require_scalar(child_matrix_length, schema_u32(MATRIX_SCALARS_PER_NODE)).is_some()
+        && root_matrix.is_some()
+        && child_matrix.is_some();
+    if !nodes_valid {
+        return Ok(None);
+    }
+    let root_matrix =
+        root_matrix.expect("a valid root node contains its authored matrix reference");
+    let child_matrix =
+        child_matrix.expect("a valid child node contains its authored matrix reference");
+    if root_matrix != child_matrix || root_matrix != directory_matrix {
+        return Ok(None);
+    }
+
+    let Some(references) = session.canonical_records(references_ref) else {
+        return Ok(None);
+    };
+    if references.rows() != REFERENCE_COUNT || references.fields() != REFERENCE_FIELD_COUNT {
+        return Ok(None);
+    }
+    let reference_id = observed(
+        references.scalar::<u32>(0, reference_field::REFERENCE),
+        observe,
+    )?;
+    let reference_parent = observed(
+        references.scalar::<u32>(0, reference_field::PARENT),
+        observe,
+    )?;
+    let reference_child = observed(references.scalar::<u32>(0, reference_field::CHILD), observe)?;
+    let references_valid = require_scalar(reference_id, 0).is_some()
+        && require_scalar(reference_parent, 0).is_some()
+        && require_scalar(reference_child, 1).is_some();
+    if !references_valid {
+        return Ok(None);
+    }
+
+    let Some(matrices) = session
+        .canonical_sequence(root_matrix)
+        .map(|value| value.as_slice())
+    else {
+        return Ok(None);
+    };
+    if matrices.len() != MATRIX_SCALAR_COUNT {
+        return Ok(None);
+    }
+    if !authored_matrices_are_valid_complete(matrices, observe)? {
+        return Ok(None);
+    }
+
+    let Some(evidence) = session.outcome_evidence_records(evidence_ref) else {
+        return Ok(None);
+    };
+    if evidence.rows() != 1 || evidence.fields() != EVIDENCE_FIELD_COUNT {
+        return Ok(None);
+    }
+    let evidence_schema = observed(
         evidence.scalar::<u32>(0, evidence_field::SCHEMA_REVISION),
-        SCHEMA_REVISION,
+        observe,
     )?;
-    require_scalar(
-        evidence.scalar::<u32>(0, evidence_field::OUTCOME),
-        EVIDENCE_OUTCOME_CANDIDATE,
-    )?;
-    require_scalar(
+    let evidence_outcome = observed(evidence.scalar::<u32>(0, evidence_field::OUTCOME), observe)?;
+    let evidence_blocks = observed(
         evidence.scalar::<u32>(0, evidence_field::CANONICAL_BLOCK_COUNT),
-        CANONICAL_BLOCK_COUNT,
+        observe,
     )?;
-    require_scalar(
+    let evidence_nodes = observed(
         evidence.scalar::<u32>(0, evidence_field::NODE_COUNT),
-        u32::try_from(NODE_COUNT).ok()?,
+        observe,
     )?;
-    Some(())
+    let evidence_valid = require_scalar(evidence_schema, SCHEMA_REVISION).is_some()
+        && require_scalar(evidence_outcome, EVIDENCE_OUTCOME_CANDIDATE).is_some()
+        && require_scalar(evidence_blocks, CANONICAL_BLOCK_COUNT).is_some()
+        && require_scalar(evidence_nodes, schema_u32(NODE_COUNT)).is_some();
+    Ok(evidence_valid.then_some(()))
+}
+
+fn observed<T, E>(value: T, observe: &mut impl FnMut(u64) -> Result<(), E>) -> Result<T, E> {
+    observe(1)?;
+    Ok(value)
+}
+
+fn authored_matrices_are_valid_complete<E>(
+    values: &[f32],
+    observe: &mut impl FnMut(u64) -> Result<(), E>,
+) -> Result<bool, E> {
+    if values.len() != MATRIX_SCALAR_COUNT {
+        return Ok(false);
+    }
+    let mut finite = true;
+    for value in values {
+        finite = value.is_finite() && finite;
+        observe(1)?;
+    }
+    let root = &values[..MATRIX_SCALARS_PER_NODE];
+    let child = &values[MATRIX_SCALARS_PER_NODE..];
+    Ok(finite
+        && root[3] == 0.0
+        && root[7] == 0.0
+        && root[11] == 0.0
+        && root[15] == 1.0
+        && child[3] == 0.0
+        && child[7] == 0.0
+        && child[11] == 0.0
+        && child[15] == 1.0)
+}
+
+fn work_units(value: usize) -> u64 {
+    u64::try_from(value).expect("the canonical Scene validation shape fits in u64")
+}
+
+fn table_work(cells: usize) -> u64 {
+    work_units(cells)
+}
+
+fn schema_u32(value: usize) -> u32 {
+    u32::try_from(value).expect("the canonical Scene schema shape fits in u32")
 }
 
 fn require_scalar<T: Copy + Eq>(actual: Option<T>, expected: T) -> Option<()> {
