@@ -282,10 +282,10 @@ fn generic_retained_authority_remains_crate_private() {
             "obsolete terminal rail `{forbidden}` regained production authority"
         );
     }
-    for (qualified, eligible) in [
+    for (qualified, publication_ready) in [
         (
             "struct QualifiedSuccessGraph",
-            "struct EligibleSuccessGraph",
+            "struct PublicationReadySuccessGraph",
         ),
         ("struct QualifiedRichGraph", "struct EligibleRichGraph"),
         (
@@ -298,8 +298,8 @@ fn generic_retained_authority_remains_crate_private() {
             "missing owning state `{qualified}`"
         );
         assert!(
-            normalized.contains(eligible),
-            "missing owning state `{eligible}`"
+            normalized.contains(publication_ready),
+            "missing owning state `{publication_ready}`"
         );
     }
     for continuation in [

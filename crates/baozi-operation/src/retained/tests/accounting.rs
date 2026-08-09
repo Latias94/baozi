@@ -898,6 +898,74 @@ fn eligibility_first_capability_completes_preparation_after_later_account_poison
 }
 
 #[test]
+fn poison_before_final_eligibility_returns_containment_without_exact_publication() {
+    static DROP_COUNT: AtomicU64 = AtomicU64::new(0);
+
+    DROP_COUNT.store(0, Ordering::SeqCst);
+    let factory = account_factory(1);
+    let account = account(&factory, u64::MAX, 128);
+    let operation = test_operation_on_account_with_control(
+        &account,
+        64,
+        RetainedBatchLimits::new(2, 2),
+        OperationControl::default(),
+    );
+    let ledger = operation.coordinator.retained_ledger().test_probe();
+    let mut assembly: TestPublication<u64, u64> = operation
+        .try_publication_assembly(publication_plan(1, 1))
+        .unwrap_or_else(|_| panic!("poison-first publication must open"));
+    let (canonical, evidence) = retain_scalar_success(&mut assembly);
+    let validated =
+        match assembly.validate_success(canonical, evidence, |session, canonical, evidence| {
+            session.canonical(canonical) == Some(&11)
+                && session.outcome_evidence(evidence) == Some(&7)
+        }) {
+            RetainedSuccessValidation::Valid(validated) => validated,
+            _ => panic!("poison-first candidate must validate"),
+        };
+    let fallback_charge = account
+        .checked_retained_charge::<u32>(empty_plan())
+        .unwrap_or_else(|_| panic!("fallback charge must remain derivable"));
+    let poisoner = account
+        .try_retain_with(empty_plan(), || {
+            Ok::<_, RetainedBuildFailureCode>(PanickingDropProbe(&DROP_COUNT))
+        })
+        .unwrap_or_else(|_| panic!("poison-first probe must retain"));
+    drop(poisoner);
+    let before_prepare = account.snapshot();
+    let first_poison = before_prepare.first_poison_evidence();
+    assert!(before_prepare.poisoned());
+    assert!(!ledger.is_terminal_qualified());
+
+    let result = validated.try_prepare(final_progress());
+    let cause = match result {
+        Err(RetainedPublicationPrepareError::FinalizationContainment(cause)) => cause,
+        Ok(_) => panic!("poison-first eligibility must not produce an exact publication owner"),
+    };
+    let after_prepare = account.snapshot();
+
+    assert_eq!(
+        cause.reason(),
+        AccountPoisonReason::RetainedStorageReleaseUnverified
+    );
+    assert_eq!(cause.account_poisoned().snapshot(), after_prepare);
+    assert!(ledger.is_terminal_qualified());
+    assert_eq!(
+        after_prepare
+            .live_retained_bytes()
+            .checked_add(fallback_charge.bytes),
+        Some(before_prepare.live_retained_bytes())
+    );
+    assert_eq!(
+        after_prepare
+            .live_retained_allocations()
+            .checked_add(fallback_charge.allocations),
+        Some(before_prepare.live_retained_allocations())
+    );
+    assert_eq!(after_prepare.first_poison_evidence(), first_poison);
+}
+
+#[test]
 fn primary_eligibility_first_capability_completes_after_later_account_poison() {
     static DROP_COUNT: AtomicU64 = AtomicU64::new(0);
 
@@ -930,6 +998,7 @@ fn primary_eligibility_first_capability_completes_after_later_account_poison() {
     let fallback_charge = account
         .checked_retained_charge::<u32>(empty_plan())
         .unwrap_or_else(|_| panic!("fallback charge must remain derivable from its admitted plan"));
+    let before_prepare = account.snapshot();
     let eligibility_entered = StdArc::new(Barrier::new(2));
     let eligibility_resume = StdArc::new(Barrier::new(2));
     let worker_entered = StdArc::clone(&eligibility_entered);
@@ -940,6 +1009,22 @@ fn primary_eligibility_first_capability_completes_after_later_account_poison() {
     });
 
     eligibility_entered.wait();
+    let at_eligibility = account.snapshot();
+    assert!(!at_eligibility.poisoned());
+    assert_eq!(
+        at_eligibility
+            .live_retained_bytes()
+            .checked_add(fallback_charge.bytes),
+        Some(before_prepare.live_retained_bytes()),
+        "fallback storage must be discarded before final eligibility linearizes"
+    );
+    assert_eq!(
+        at_eligibility
+            .live_retained_allocations()
+            .checked_add(fallback_charge.allocations),
+        Some(before_prepare.live_retained_allocations()),
+        "fallback ownership must be acknowledged before final eligibility linearizes"
+    );
     drop(poisoner);
     let poisoned = account.snapshot();
     assert!(poisoned.poisoned());
@@ -951,16 +1036,12 @@ fn primary_eligibility_first_capability_completes_after_later_account_poison() {
         .unwrap_or_else(|_| panic!("primary eligibility preparation must complete"));
     let after_prepare = account.snapshot();
     assert_eq!(
-        after_prepare
-            .live_retained_bytes()
-            .checked_add(fallback_charge.bytes),
-        Some(poisoned.live_retained_bytes())
+        after_prepare.live_retained_bytes(),
+        poisoned.live_retained_bytes()
     );
     assert_eq!(
-        after_prepare
-            .live_retained_allocations()
-            .checked_add(fallback_charge.allocations),
-        Some(poisoned.live_retained_allocations())
+        after_prepare.live_retained_allocations(),
+        poisoned.live_retained_allocations()
     );
     assert_eq!(
         after_prepare.total_admitted_retained_bytes(),

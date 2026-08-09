@@ -2052,8 +2052,8 @@ fn terminal_evidence_qualification_error_contains_the_complete_success_graph() {
 fn success_guard_direct_drop_contains_physical_before_retaining_ledger_proof() {
     for stage in [
         SuccessGuardDropStage::Qualified,
-        SuccessGuardDropStage::Eligible,
         SuccessGuardDropStage::Verified,
+        SuccessGuardDropStage::PublicationReady,
         SuccessGuardDropStage::FreezeReady,
     ] {
         let factory = account_factory(1);
@@ -2103,7 +2103,7 @@ fn success_guard_direct_drop_contains_physical_before_retaining_ledger_proof() {
             "{stage:?} must poison the physical graph before retaining proof"
         );
         match stage {
-            SuccessGuardDropStage::Qualified | SuccessGuardDropStage::Eligible => {
+            SuccessGuardDropStage::Qualified => {
                 assert_eq!(
                     physical_after.live_retained_bytes(),
                     physical_before.live_retained_bytes()
@@ -2124,7 +2124,7 @@ fn success_guard_direct_drop_contains_physical_before_retaining_ledger_proof() {
                 );
                 assert_eq!(ledger_after, ledger_before);
             }
-            SuccessGuardDropStage::FreezeReady => {
+            SuccessGuardDropStage::PublicationReady | SuccessGuardDropStage::FreezeReady => {
                 assert!(
                     physical_after.live_retained_bytes() < physical_before.live_retained_bytes()
                 );

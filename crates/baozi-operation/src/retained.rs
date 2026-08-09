@@ -3181,8 +3181,8 @@ where
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SuccessGuardDropStage {
     Qualified,
-    Eligible,
     Verified,
+    PublicationReady,
     FreezeReady,
     VerifiedInProgress,
     LedgerPublished,

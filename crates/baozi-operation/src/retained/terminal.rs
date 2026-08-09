@@ -431,24 +431,23 @@ struct QualifiedSuccessPhysical<P, D, F, CanonicalBlock, EvidenceBlock> {
     evidence_root: RetainedSlotIdentity,
 }
 
-struct EligibleSuccessGraph<O, P, D, F, CanonicalBlock, EvidenceBlock>
+struct PublicationReadySuccessGraph<O, P, D, F, CanonicalBlock, EvidenceBlock>
 where
     O: OperationOwner,
     P: Copy + Ord,
     D: Copy + Ord,
 {
-    state: Option<EligibleSuccessState<O, P, D, F, CanonicalBlock, EvidenceBlock>>,
+    state: Option<PublicationReadySuccessState<O, P, D, F, CanonicalBlock, EvidenceBlock>>,
 }
 
-struct EligibleSuccessState<O, P, D, F, CanonicalBlock, EvidenceBlock>
+struct PublicationReadySuccessState<O, P, D, F, CanonicalBlock, EvidenceBlock>
 where
     O: OperationOwner,
     P: Copy + Ord,
     D: Copy + Ord,
 {
     physical: QualifiedSuccessPhysical<P, D, F, CanonicalBlock, EvidenceBlock>,
-    eligibility: PublicationEligibility,
-    proof: QualifiedEvidenceDiscardFreezeProof<O, P, D>,
+    proof: FreezeReadyTypedProof<O, P, D>,
     set_id: RetainedSetId,
 }
 
@@ -475,7 +474,6 @@ where
         acknowledgement: SuccessDiscardAcknowledgement,
         physical: QualifiedSuccessPhysical<P, D, F, CanonicalBlock, EvidenceBlock>,
         proof: QualifiedEvidenceDiscardFreezeProof<O, P, D>,
-        eligibility: PublicationEligibility,
         set_id: RetainedSetId,
         discarded_account: PhysicalStorageAccount,
     },
@@ -637,16 +635,40 @@ where
             .unwrap_or_else(|| unreachable_final_owner_state())
     }
 
-    fn contain_after_quarantine(
-        mut self,
-        quarantine: AccountPoisoned,
-    ) -> FinalizationContainmentError {
+    fn contain_new_fault(mut self, reason: AccountPoisonReason) -> FinalizationContainmentError {
         let QualifiedSuccessState { physical, proof } = self.take_state();
-        let cause = physical
-            .into_terminal()
-            .contain_after_quarantine(quarantine);
+        let cause = physical.into_terminal().contain_new_fault(reason);
         proof.retain_fail_closed();
         cause
+    }
+
+    fn contain_after_recorded(
+        mut self,
+        reason: AccountPoisonReason,
+    ) -> FinalizationContainmentError {
+        let QualifiedSuccessState { physical, proof } = self.take_state();
+        let cause = physical.into_terminal().contain_after_recorded(reason);
+        proof.retain_fail_closed();
+        cause
+    }
+
+    fn contain_cleanup(self, cleanup: RetainedPartCleanupError) -> FinalizationContainmentError {
+        match cleanup {
+            RetainedPartCleanupError::MissingFaultAnchor
+            | RetainedPartCleanupError::DeferredOwnershipFault => {
+                self.contain_new_fault(AccountPoisonReason::OwnershipGraphUnverified)
+            }
+            RetainedPartCleanupError::NewFaultAlreadyRecorded(_)
+            | RetainedPartCleanupError::StillSharedOwnershipFault(_) => {
+                self.contain_after_recorded(AccountPoisonReason::OwnershipGraphUnverified)
+            }
+            RetainedPartCleanupError::StorageReleaseUnverified(_) => {
+                self.contain_after_recorded(AccountPoisonReason::RetainedStorageReleaseUnverified)
+            }
+            RetainedPartCleanupError::ChargeReleaseUnverified(witness) => {
+                self.contain_after_recorded(witness.reason)
+            }
+        }
     }
 
     fn into_prepared(
@@ -656,29 +678,33 @@ where
         PreparedRetainedPublication<CanonicalBlock, EvidenceBlock, F, P, D>,
         FinalizationContainmentError,
     > {
-        let eligibility = match self
+        let discarded_account = match self
             .state
-            .as_ref()
+            .as_mut()
             .unwrap_or_else(|| unreachable_final_owner_state())
             .physical
-            .account
-            .try_publication_eligibility()
+            .fallback
+            .try_discard_allocation()
         {
-            Ok(eligibility) => eligibility,
-            Err(quarantine) => return Err(self.contain_after_quarantine(quarantine)),
+            Ok(account) => account,
+            Err(cleanup) => return Err(self.contain_cleanup(cleanup)),
         };
         let QualifiedSuccessState { physical, proof } = self.take_state();
-        let eligible = EligibleSuccessGraph {
-            state: Some(EligibleSuccessState {
-                physical,
-                eligibility,
-                proof,
-                set_id,
-            }),
-        };
+        let verified =
+            VerifiedSuccessPhysicalDiscard::new(physical, proof, set_id, discarded_account);
         #[cfg(test)]
-        let eligible = maybe_drop_success_guard(SuccessGuardDropStage::Eligible, eligible);
-        eligible.into_prepared()
+        let verified = maybe_drop_success_guard(SuccessGuardDropStage::Verified, verified);
+        let publication_ready = verified.acknowledge();
+        #[cfg(test)]
+        let publication_ready =
+            maybe_drop_success_guard(SuccessGuardDropStage::PublicationReady, publication_ready);
+        // Account eligibility is the final fallible transition. A successful result enters the
+        // existing freeze-ready suffix, which has no cleanup, qualification, or callback branch.
+        let freeze_ready = publication_ready.try_into_freeze_ready()?;
+        #[cfg(test)]
+        let freeze_ready =
+            maybe_drop_success_guard(SuccessGuardDropStage::FreezeReady, freeze_ready);
+        Ok(freeze_ready.freeze())
     }
 }
 
@@ -762,117 +788,72 @@ impl<P, D, F, CanonicalBlock, EvidenceBlock>
 }
 
 impl<O, P, D, F, CanonicalBlock, EvidenceBlock>
-    EligibleSuccessGraph<O, P, D, F, CanonicalBlock, EvidenceBlock>
+    PublicationReadySuccessGraph<O, P, D, F, CanonicalBlock, EvidenceBlock>
 where
     O: OperationOwner,
     P: TerminalEvidenceKey,
     D: TerminalEvidenceKey + fmt::Debug,
 {
-    fn take_state(&mut self) -> EligibleSuccessState<O, P, D, F, CanonicalBlock, EvidenceBlock> {
+    fn take_state(
+        &mut self,
+    ) -> PublicationReadySuccessState<O, P, D, F, CanonicalBlock, EvidenceBlock> {
         self.state
             .take()
             .unwrap_or_else(|| unreachable_final_owner_state())
     }
 
-    fn contain_new_fault(mut self, reason: AccountPoisonReason) -> FinalizationContainmentError {
-        let EligibleSuccessState {
-            physical,
-            eligibility,
-            proof,
-            set_id: _,
-        } = self.take_state();
-        let cause = physical.into_terminal().contain_new_fault(reason);
-        proof.retain_fail_closed();
-        drop(eligibility);
-        cause
-    }
-
-    fn contain_after_recorded(
+    fn contain_after_quarantine(
         mut self,
-        reason: AccountPoisonReason,
+        quarantine: AccountPoisoned,
     ) -> FinalizationContainmentError {
-        let EligibleSuccessState {
+        let PublicationReadySuccessState {
             physical,
-            eligibility,
             proof,
             set_id: _,
         } = self.take_state();
-        let cause = physical.into_terminal().contain_after_recorded(reason);
+        let cause = physical
+            .into_terminal()
+            .contain_after_quarantine(quarantine);
         proof.retain_fail_closed();
-        drop(eligibility);
         cause
     }
 
-    fn contain_cleanup(self, cleanup: RetainedPartCleanupError) -> FinalizationContainmentError {
-        match cleanup {
-            RetainedPartCleanupError::MissingFaultAnchor
-            | RetainedPartCleanupError::DeferredOwnershipFault => {
-                self.contain_new_fault(AccountPoisonReason::OwnershipGraphUnverified)
-            }
-            RetainedPartCleanupError::NewFaultAlreadyRecorded(_)
-            | RetainedPartCleanupError::StillSharedOwnershipFault(_) => {
-                self.contain_after_recorded(AccountPoisonReason::OwnershipGraphUnverified)
-            }
-            RetainedPartCleanupError::StorageReleaseUnverified(_) => {
-                self.contain_after_recorded(AccountPoisonReason::RetainedStorageReleaseUnverified)
-            }
-            RetainedPartCleanupError::ChargeReleaseUnverified(witness) => {
-                self.contain_after_recorded(witness.reason)
-            }
-        }
-    }
-
-    fn into_prepared(
+    fn try_into_freeze_ready(
         mut self,
     ) -> Result<
-        PreparedRetainedPublication<CanonicalBlock, EvidenceBlock, F, P, D>,
+        FreezeReadySuccessGraph<O, P, D, F, CanonicalBlock, EvidenceBlock>,
         FinalizationContainmentError,
     > {
-        let discarded_account = match self
+        let eligibility = match self
             .state
-            .as_mut()
+            .as_ref()
             .unwrap_or_else(|| unreachable_final_owner_state())
             .physical
-            .fallback
-            .try_discard_allocation()
+            .account
+            .try_publication_eligibility()
         {
-            Ok(account) => account,
-            Err(cleanup) => return Err(self.contain_cleanup(cleanup)),
+            Ok(eligibility) => eligibility,
+            Err(quarantine) => return Err(self.contain_after_quarantine(quarantine)),
         };
-        let EligibleSuccessState {
+        let PublicationReadySuccessState {
             physical,
-            eligibility,
             proof,
             set_id,
         } = self.take_state();
-        let verified = VerifiedSuccessPhysicalDiscard::new(
-            physical,
-            proof,
-            eligibility,
-            set_id,
-            discarded_account,
-        );
-        #[cfg(test)]
-        let verified = maybe_drop_success_guard(SuccessGuardDropStage::Verified, verified);
-        let freeze_ready = verified.acknowledge();
-        #[cfg(test)]
-        let freeze_ready =
-            maybe_drop_success_guard(SuccessGuardDropStage::FreezeReady, freeze_ready);
-        Ok(freeze_ready.freeze())
+        Ok(physical.into_freeze_ready(proof, eligibility, set_id))
     }
 }
 
 impl<O, P, D, F, CanonicalBlock, EvidenceBlock> Drop
-    for EligibleSuccessGraph<O, P, D, F, CanonicalBlock, EvidenceBlock>
+    for PublicationReadySuccessGraph<O, P, D, F, CanonicalBlock, EvidenceBlock>
 where
     O: OperationOwner,
     P: Copy + Ord,
     D: Copy + Ord,
 {
     fn drop(&mut self) {
-        if let Some(EligibleSuccessState {
+        if let Some(PublicationReadySuccessState {
             physical,
-            eligibility,
             proof,
             set_id: _,
         }) = self.state.take()
@@ -881,7 +862,6 @@ where
                 .into_terminal()
                 .contain_new_fault(AccountPoisonReason::OwnershipGraphUnverified);
             proof.retain_fail_closed();
-            drop(eligibility);
         }
     }
 }
@@ -896,7 +876,6 @@ where
     fn new(
         physical: QualifiedSuccessPhysical<P, D, F, CanonicalBlock, EvidenceBlock>,
         proof: QualifiedEvidenceDiscardFreezeProof<O, P, D>,
-        eligibility: PublicationEligibility,
         set_id: RetainedSetId,
         discarded_account: PhysicalStorageAccount,
     ) -> Self {
@@ -905,14 +884,15 @@ where
                 acknowledgement: SuccessDiscardAcknowledgement::NotStarted,
                 physical,
                 proof,
-                eligibility,
                 set_id,
                 discarded_account,
             },
         }
     }
 
-    fn acknowledge(mut self) -> FreezeReadySuccessGraph<O, P, D, F, CanonicalBlock, EvidenceBlock> {
+    fn acknowledge(
+        mut self,
+    ) -> PublicationReadySuccessGraph<O, P, D, F, CanonicalBlock, EvidenceBlock> {
         let freeze_ready = match &mut self.state {
             VerifiedSuccessPhysicalDiscardState::Pending {
                 acknowledgement,
@@ -935,12 +915,17 @@ where
                 acknowledgement: _,
                 physical,
                 proof: _,
-                eligibility,
                 set_id,
                 discarded_account,
             } => {
                 drop(discarded_account);
-                physical.into_freeze_ready(freeze_ready, eligibility, set_id)
+                PublicationReadySuccessGraph {
+                    state: Some(PublicationReadySuccessState {
+                        physical,
+                        proof: freeze_ready,
+                        set_id,
+                    }),
+                }
             }
             VerifiedSuccessPhysicalDiscardState::Acknowledged => unreachable_final_owner_state(),
         }
@@ -963,7 +948,6 @@ where
             acknowledgement: _,
             physical,
             proof,
-            eligibility,
             set_id: _,
             discarded_account,
         } = state
@@ -973,7 +957,6 @@ where
                 .contain_new_fault(AccountPoisonReason::OwnershipGraphUnverified);
             proof.retain_fail_closed();
             drop(discarded_account);
-            drop(eligibility);
         }
     }
 }
