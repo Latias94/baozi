@@ -1,5 +1,7 @@
 //! Bounded checks for the handwritten repository conformance inventories.
 
+mod evidence;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
@@ -23,8 +25,13 @@ pub struct ConformanceReport {
     pub contracts_checked: usize,
     /// Number of executable gate records parsed from the gate catalog.
     pub gates_checked: usize,
-    /// Number of records that declare `conforming` before external gate authentication.
+    /// Number of records that declare `conforming` before trusted receipt admission.
     pub declared_conforming_contracts: usize,
+    /// Number of declared conforming records matched by a self-attested evidence bundle.
+    ///
+    /// This measures only typed shape and exact binding consistency. It is never promotion
+    /// authority and must remain separate from any future trusted receipt decision.
+    pub self_attested_contract_bindings_matched: usize,
     /// Stable, human-readable contract violations.
     pub violations: Vec<String>,
 }
@@ -43,6 +50,63 @@ pub fn check_repository(repository_root: &Path) -> ConformanceReport {
     check_inventory_documents(repository_root, &contracts, &gates)
 }
 
+/// Checks one self-attested evidence bundle against the canonical inventory bytes.
+///
+/// A successful report proves only typed shape and exact binding consistency. It does not
+/// establish command execution or authorize a contract promotion.
+pub fn check_repository_evidence_bindings(
+    repository_root: &Path,
+    evidence_path: &Path,
+    repository_revision: &str,
+) -> ConformanceReport {
+    let contracts = match read_explicit_file(repository_root, CONTRACTS_PATH, "contract inventory")
+    {
+        Ok(contents) => contents,
+        Err(violation) => return failed_report(violation),
+    };
+    let gates = match read_explicit_file(repository_root, GATES_PATH, "gate catalog") {
+        Ok(contents) => contents,
+        Err(violation) => return failed_report(violation),
+    };
+    let Some(evidence_path) = evidence_path.to_str() else {
+        return failed_report(
+            "repository conformance: evidence bundle path must be valid UTF-8".to_owned(),
+        );
+    };
+    let evidence = match read_explicit_file(repository_root, evidence_path, "evidence bundle") {
+        Ok(contents) => contents,
+        Err(violation) => return failed_report(violation),
+    };
+    check_inventory_evidence_bindings(
+        repository_root,
+        &contracts,
+        &gates,
+        &evidence,
+        repository_revision,
+    )
+}
+
+/// Checks supplied inventories against one self-attested typed evidence bundle.
+///
+/// The checker compares every required result with the supplied repository revision and raw
+/// inventory bytes. The bundle is caller-controlled, no command or workflow is executed, and a
+/// successful result cannot authorize conformance promotion.
+pub fn check_inventory_evidence_bindings(
+    repository_root: &Path,
+    contracts_document: &str,
+    gates_document: &str,
+    evidence_document: &str,
+    repository_revision: &str,
+) -> ConformanceReport {
+    evidence::check_inventory_evidence_bindings(
+        repository_root,
+        contracts_document,
+        gates_document,
+        evidence_document,
+        repository_revision,
+    )
+}
+
 /// Checks supplied inventory documents against explicit paths below `repository_root`.
 ///
 /// This entry point exists so the dedicated conformance test target can exercise malformed
@@ -52,6 +116,34 @@ pub fn check_inventory_documents(
     contracts_document: &str,
     gates_document: &str,
 ) -> ConformanceReport {
+    let mut report =
+        check_inventory_document_structure(repository_root, contracts_document, gates_document);
+    if report.declared_conforming_contracts != 0 {
+        report.violations.push(
+            "repository conformance: declared conforming contracts require a future trusted receipt adapter; handwritten catalogs and self-attested evidence cannot authorize promotion"
+                .to_owned(),
+        );
+        report.violations.sort_unstable();
+        report.violations.dedup();
+    }
+    report
+}
+
+pub(super) fn check_inventory_document_structure(
+    repository_root: &Path,
+    contracts_document: &str,
+    gates_document: &str,
+) -> ConformanceReport {
+    if document_exceeds_limit(contracts_document) {
+        return failed_report(format!(
+            "repository conformance: {CONTRACTS_PATH} exceeds {MAX_INVENTORY_BYTES} bytes"
+        ));
+    }
+    if document_exceeds_limit(gates_document) {
+        return failed_report(format!(
+            "repository conformance: {GATES_PATH} exceeds {MAX_INVENTORY_BYTES} bytes"
+        ));
+    }
     let contracts = match toml::from_str::<ContractInventory>(contracts_document) {
         Ok(inventory) => inventory,
         Err(error) => {
@@ -72,6 +164,7 @@ pub fn check_inventory_documents(
                 contracts_checked: contracts.contracts.len(),
                 gates_checked: 0,
                 declared_conforming_contracts,
+                self_attested_contract_bindings_matched: 0,
                 violations: vec![format!(
                     "repository conformance: failed to parse {GATES_PATH}: {error}"
                 )],
@@ -87,8 +180,13 @@ pub fn check_inventory_documents(
         contracts_checked: contracts.contracts.len(),
         gates_checked: gates.gates.len(),
         declared_conforming_contracts,
+        self_attested_contract_bindings_matched: 0,
         violations,
     }
+}
+
+fn document_exceeds_limit(document: &str) -> bool {
+    u64::try_from(document.len()).map_or(true, |length| length > MAX_INVENTORY_BYTES)
 }
 
 fn failed_report(violation: String) -> ConformanceReport {
@@ -96,6 +194,7 @@ fn failed_report(violation: String) -> ConformanceReport {
         contracts_checked: 0,
         gates_checked: 0,
         declared_conforming_contracts: 0,
+        self_attested_contract_bindings_matched: 0,
         violations: vec![violation],
     }
 }
@@ -147,12 +246,22 @@ struct GateRecord {
     evidence_identity: String,
     evidence_paths: Vec<String>,
     applicable_contracts: Vec<String>,
+    #[serde(default)]
+    evidence_claims: Vec<EvidenceClaim>,
     program: Option<String>,
     #[serde(default)]
     args: Vec<String>,
     workflow_path: Option<String>,
     job_id: Option<String>,
     step_name: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(deny_unknown_fields)]
+struct EvidenceClaim {
+    contract_id: String,
+    evidence_subject: String,
+    evidence_revision: u32,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
@@ -278,16 +387,25 @@ fn validate_inventories(
             ]
             .into_iter()
             .all(|class| referenced_classes.contains(&class));
-            if !has_all_tracers || !has_all_gate_classes || !has_executable_gate {
+            let has_exact_evidence_claim = contract.gate_ids.iter().any(|gate_id| {
+                gates_by_id.get(gate_id.as_str()).is_some_and(|gate| {
+                    gate.evidence_claims.iter().any(|claim| {
+                        claim.contract_id == contract.contract_id
+                            && claim.evidence_subject == contract.evidence_subject
+                            && claim.evidence_revision == contract.evidence_revision
+                    })
+                })
+            });
+            if !has_all_tracers
+                || !has_all_gate_classes
+                || !has_executable_gate
+                || !has_exact_evidence_claim
+            {
                 violations.push(format!(
-                    "repository conformance: conforming contract {:?} lacks complete tracers, gate classes, or executable evidence",
+                    "repository conformance: conforming contract {:?} lacks complete tracers, gate classes, executable evidence, or an exact evidence claim",
                     contract.contract_id
                 ));
             }
-            violations.push(format!(
-                "repository conformance: contract {:?} declares conforming, but the focused checker cannot authenticate passing external gate evidence; retain partial or nonconforming until an admitted evidence verifier exists",
-                contract.contract_id
-            ));
         }
     }
 
@@ -314,6 +432,33 @@ fn validate_inventories(
                 violations.push(format!(
                     "repository conformance: gate {:?} declares contract {:?} applicable, but the contract does not reference the gate",
                     gate.gate_id, contract_id
+                ));
+            }
+        }
+        for claim in &gate.evidence_claims {
+            let Some(contract) = contracts_by_id.get(claim.contract_id.as_str()) else {
+                violations.push(format!(
+                    "repository conformance: gate {:?} claims evidence for unknown contract {:?}",
+                    gate.gate_id, claim.contract_id
+                ));
+                continue;
+            };
+            if !gate
+                .applicable_contracts
+                .iter()
+                .any(|candidate| candidate == &claim.contract_id)
+            {
+                violations.push(format!(
+                    "repository conformance: gate {:?} evidence claim for contract {:?} is not applicable",
+                    gate.gate_id, claim.contract_id
+                ));
+            }
+            if claim.evidence_subject != contract.evidence_subject
+                || claim.evidence_revision != contract.evidence_revision
+            {
+                violations.push(format!(
+                    "repository conformance: gate {:?} evidence claim for contract {:?} does not match the contract evidence identity",
+                    gate.gate_id, claim.contract_id
                 ));
             }
         }
@@ -399,6 +544,11 @@ fn validate_gate(repository_root: &Path, gate: &GateRecord, violations: &mut Vec
             gate.gate_id
         ));
     }
+    validate_evidence_claim_list(
+        &gate.evidence_claims,
+        &format!("gate {:?} evidence_claims", gate.gate_id),
+        violations,
+    );
 
     match gate.executor {
         GateExecutor::Command => {
@@ -455,6 +605,39 @@ fn validate_gate(repository_root: &Path, gate: &GateRecord, violations: &mut Vec
             "repository conformance: gate {:?} has invalid command arguments",
             gate.gate_id
         ));
+    }
+}
+
+fn validate_evidence_claim_list(
+    values: &[EvidenceClaim],
+    label: &str,
+    violations: &mut Vec<String>,
+) {
+    if values.len() > MAX_REFERENCES {
+        violations.push(format!(
+            "repository conformance: {label} exceeds {MAX_REFERENCES} entries"
+        ));
+    }
+    let mut unique = BTreeSet::new();
+    for value in values {
+        if !is_stable_id(&value.contract_id) {
+            violations.push(format!(
+                "repository conformance: {label} contains invalid contract ID {:?}",
+                value.contract_id
+            ));
+        }
+        if !unique.insert(value.contract_id.as_str()) {
+            violations.push(format!(
+                "repository conformance: {label} contains duplicate contract {:?}",
+                value.contract_id
+            ));
+        }
+        if !is_subject_id(&value.evidence_subject) || value.evidence_revision == 0 {
+            violations.push(format!(
+                "repository conformance: {label} contains an invalid evidence claim for contract {:?}",
+                value.contract_id
+            ));
+        }
     }
 }
 

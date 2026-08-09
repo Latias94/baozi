@@ -263,6 +263,7 @@ impl BuildPackageReference {
 #[derive(Debug)]
 pub(super) struct PreparedCargoArtifact {
     executable: PathBuf,
+    #[cfg(feature = "repository-input-candidate")]
     target_dir: PathBuf,
     build_script_records: BTreeMap<String, Vec<u8>>,
 }
@@ -306,12 +307,14 @@ impl<'a> PreparedArtifactExpectation<'a> {
     }
 }
 
+#[cfg(feature = "repository-input-candidate")]
 #[derive(Debug)]
 struct MergedBuildOutputs {
     target_dir: PathBuf,
     build_script_records: BTreeMap<String, Vec<u8>>,
 }
 
+#[cfg(feature = "repository-input-candidate")]
 impl MergedBuildOutputs {
     fn transcript_sha256(&self) -> String {
         transcript_sha256(self.build_script_records.values().map(Vec::as_slice))
@@ -486,11 +489,13 @@ pub(super) fn parse_prepared_artifact(
 
     Ok(PreparedCargoArtifact {
         executable,
+        #[cfg(feature = "repository-input-candidate")]
         target_dir: target_dir.to_path_buf(),
         build_script_records,
     })
 }
 
+#[cfg(feature = "repository-input-candidate")]
 fn merge_prepared_artifacts(
     prepared_artifacts: &[&PreparedCargoArtifact],
 ) -> Result<MergedBuildOutputs, String> {
@@ -1158,6 +1163,7 @@ fn build_output_tree_sha256(
     Ok(format!("{:x}", digest.finalize()))
 }
 
+#[cfg(feature = "repository-input-candidate")]
 fn relative_to_out_dir<'path>(path: &'path str, out_dir: &str) -> Option<&'path str> {
     if path == out_dir {
         return Some("");
@@ -1175,6 +1181,7 @@ fn verify_digest(label: &str, expected: &str, actual: &str) -> Result<(), String
     }
 }
 
+#[cfg(feature = "repository-input-candidate")]
 fn require_count(label: &str, expected: u64, actual: u64) -> Result<(), String> {
     if expected == actual {
         Ok(())

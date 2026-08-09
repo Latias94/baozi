@@ -225,10 +225,11 @@ from ADR status. Its minimum record contains:
 - separate tracked implementation, test, and CI tracers; and
 - one or more stable gate IDs resolved through the executable gate catalog.
 
-`conforming` requires every tracer class applicable to the contract plus at least one passing
-executable gate. Missing files, unknown gates, non-Accepted authority, or self-reported status without
-gate evidence fail closed. Format maturity and publication readiness remain in their own inventories
-and may reference the same stable contract IDs.
+`conforming` requires every tracer class applicable to the contract, complete passing executable
+gate receipts, and admission by a trusted receipt adapter. Missing files, unknown gates,
+non-Accepted authority, self-reported status, or evidence without a trusted receipt fail closed.
+Format maturity and publication readiness remain in their own inventories and may reference the same
+stable contract IDs.
 
 Until that inventory exists, plans and progress records may locate incomplete work but cannot claim
 repository-wide conformance, format maturity, or release readiness.
@@ -237,18 +238,46 @@ repository-wide conformance, format maturity, or release readiness.
 structured authorities for architecture conformance and executable gate identity. Each file carries
 an explicit schema revision. Contract records identify their evidence subject and revision; gate
 records identify their gate class, exact command or workflow/job identity, applicability, success
-condition, and evidence identity. This policy owns the schema semantics; `baozi-xtask` implements the
-bounded parser and checker but cannot infer or extend fields from source or ADR prose. A change that
-adds or removes a required gate updates both files atomically.
+condition, evidence identity, and any exact `evidence_claims` binding the gate may report. An
+evidence claim is a typed identifier tuple, not a signature, endorsement, or promotion authority.
+This policy owns the schema semantics; `baozi-xtask` implements the bounded parser and checker but
+cannot infer or extend fields from source or ADR prose. A change that adds or removes a required gate
+or evidence claim updates both files atomically.
 
 The focused repository checker reads only these two TOML files and repository-relative paths they
 explicitly reference. It must not scan ADR prose, the ADR index, source prose, Git history, or the
 repository tree to infer contracts or gates, and it must not recursively invoke Cargo. Human ADR
 review remains responsible for semantic authority, workflow identity, and directness; the checker
 validates the bounded structured inventory and its explicit references. The structural checker does
-not authenticate command execution or parse workflow contents. Until an admitted external result
-verifier supplies passing gate evidence, a structural invocation rejects every `conforming`
-declaration.
+not execute commands or parse workflow contents. Until a trusted receipt adapter exists, the ordinary
+`repository-conformance-check` command rejects every declared `conforming` record even when its
+handwritten shape is complete.
+
+The separate `repository-conformance-evidence-binding-check` command accepts only a
+`trust_model = "self-attested"` typed bundle. It checks that each required result has the exact gate
+executor, success condition, evidence identity, repository revision, raw inventory digests, and
+`claims` set declared by the catalog. Missing, failed, stale, mismatched, duplicate, or unknown
+required results fail closed. A known result not referenced by a currently declared-conforming
+contract does not participate in its binding result. Success means only that caller-provided records
+are internally shape- and binding-consistent; it does not prove that a command ran, that a workflow
+completed, or that the contract is conforming, and it never authorizes promotion.
+
+### Self-Attested Evidence Threat Model
+
+The self-attested checker is intended for diagnostics over a `trusted-static-worktree`: the caller
+must provide an immutable repository snapshot and prevent concurrent mutation for the duration of
+the read. Catalog hashes detect accidental or stale byte mismatches, but a local actor can rewrite the
+catalog, bundle, revision argument, and hashes together. Repository-relative path checks also have a
+metadata-to-read time-of-check/time-of-use window. Consequently, this checker is not a security
+boundary and its output must not be consumed as a release, publication, or architecture-promotion
+decision.
+
+A future promotion path must use a separate trusted receipt adapter. That adapter must bind an
+immutable repository revision to receipts produced by an admitted trusted runner and process,
+validate signed provenance or an equivalent OIDC-backed identity, verify the exact command or
+workflow/job outcome and artifacts, and make the promotion decision outside the mutable worktree.
+Adding that adapter requires an explicit governance amendment and dedicated adversarial tests; the
+self-attested bundle format cannot silently acquire trusted semantics.
 
 ## Human Review Responsibilities
 

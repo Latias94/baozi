@@ -5,6 +5,8 @@ use std::process::ExitCode;
 const USAGE: &str = concat!(
     "usage: cargo run -p baozi-xtask -- ",
     "<crate-graph-check|native-fs-check|repository-conformance-check|runtime-admission-check>\n",
+    "       cargo run -p baozi-xtask -- repository-conformance-evidence-binding-check ",
+    "--evidence <path> --repository-revision <sha>\n",
     "       cargo run -p baozi-xtask --features repository-input-candidate -- ",
     "u4c-metrics --spec <path>"
 );
@@ -21,6 +23,13 @@ fn main() -> ExitCode {
         [command] if command == "repository-conformance-check" => {
             run_repository_conformance_check()
         }
+        [command, evidence_flag, evidence, revision_flag, revision]
+            if command == "repository-conformance-evidence-binding-check"
+                && evidence_flag == "--evidence"
+                && revision_flag == "--repository-revision" =>
+        {
+            run_repository_conformance_evidence_binding_check(Path::new(evidence), revision)
+        }
         [command] if command == "runtime-admission-check" => run_runtime_admission_check(),
         [command, flag, specification] if command == "u4c-metrics" && flag == "--spec" => {
             run_u4c_metrics(Path::new(specification))
@@ -29,6 +38,47 @@ fn main() -> ExitCode {
             eprintln!("{USAGE}");
             ExitCode::from(2)
         }
+    }
+}
+
+fn run_repository_conformance_evidence_binding_check(
+    evidence_path: &Path,
+    repository_revision: &str,
+) -> ExitCode {
+    let current_directory = match env::current_dir() {
+        Ok(path) => path,
+        Err(error) => {
+            eprintln!("failed to read the current directory: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let Some(repository_root) = find_repository_root(&current_directory) else {
+        eprintln!("failed to find a Baozi repository root from {current_directory:?}");
+        return ExitCode::FAILURE;
+    };
+
+    let report = baozi_xtask::conformance::check_repository_evidence_bindings(
+        &repository_root,
+        evidence_path,
+        repository_revision,
+    );
+    if report.violations.is_empty() {
+        println!(
+            "Self-attested repository evidence is shape- and binding-consistent for {} declared-conforming contract records across a catalog of {} gates; this result does not authorize conformance promotion",
+            report.self_attested_contract_bindings_matched, report.gates_checked
+        );
+        ExitCode::SUCCESS
+    } else {
+        for violation in &report.violations {
+            eprintln!("{violation}");
+        }
+        eprintln!(
+            "Self-attested repository evidence binding check failed ({} violations across {} contracts and {} gates)",
+            report.violations.len(),
+            report.contracts_checked,
+            report.gates_checked
+        );
+        ExitCode::FAILURE
     }
 }
 

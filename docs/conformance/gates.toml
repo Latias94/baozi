@@ -1,5 +1,8 @@
 schema_version = 1
 
+# Optional `evidence_claims` describe self-attested subject/revision bindings only. They do not
+# establish execution and cannot authorize conformance promotion.
+
 [[gates]]
 gate_id = "u4c-lifecycle-v2"
 tracer_class = "implementation"
@@ -99,12 +102,16 @@ gate_id = "repository-conformance-tests"
 tracer_class = "test"
 executor = "command"
 success_condition = "process-exit-zero"
-evidence_identity = "baozi.repository-conformance-tests/v1"
+evidence_identity = "baozi.repository-conformance-tests/v2"
 evidence_paths = [
   "crates/baozi-xtask/src/conformance.rs",
+  "crates/baozi-xtask/src/conformance/evidence.rs",
+  "crates/baozi-xtask/src/main.rs",
   "crates/baozi-xtask/tests/conformance.rs",
+  "crates/baozi-xtask/tests/conformance_evidence.rs",
   "docs/conformance/contracts.toml",
   "docs/conformance/gates.toml",
+  "docs/contributing/adr-governance.md",
 ]
 applicable_contracts = ["repository-architecture-conformance"]
 program = "cargo"
@@ -116,6 +123,8 @@ args = [
   "baozi-xtask",
   "--test",
   "conformance",
+  "--test",
+  "conformance_evidence",
 ]
 
 [[gates]]

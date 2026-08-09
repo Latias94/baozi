@@ -60,6 +60,7 @@ fn checked_in_repository_inventory_is_structurally_valid() {
     assert_eq!(report.contracts_checked, 9);
     assert_eq!(report.gates_checked, 9);
     assert_eq!(report.declared_conforming_contracts, 0);
+    assert_eq!(report.self_attested_contract_bindings_matched, 0);
 }
 
 #[test]
@@ -88,6 +89,13 @@ fn malformed_gate_document_preserves_declared_conforming_count() {
         "{:#?}",
         report.violations
     );
+}
+
+#[test]
+fn in_memory_inventory_documents_keep_the_same_size_bound_as_repository_files() {
+    let oversized = "x".repeat((256 * 1024) + 1);
+    assert_rejected(&oversized, PARTIAL_GATES, "exceeds 262144 bytes");
+    assert_rejected(PARTIAL_CONTRACTS, &oversized, "exceeds 262144 bytes");
 }
 
 #[test]
@@ -178,7 +186,7 @@ fn conforming_status_requires_all_tracer_and_gate_classes() {
 }
 
 #[test]
-fn conforming_status_fails_closed_without_authenticated_gate_results() {
+fn conforming_status_requires_a_trusted_receipt_even_with_complete_declared_shape() {
     let contracts = PARTIAL_CONTRACTS
         .replace(
             "conformance_status = \"partial\"",
@@ -199,6 +207,7 @@ success_condition = "process-exit-zero"
 evidence_identity = "baozi.test.implementation/v1"
 evidence_paths = ["Cargo.toml"]
 applicable_contracts = ["test-contract"]
+evidence_claims = [{ contract_id = "test-contract", evidence_subject = "baozi.test.contract", evidence_revision = 1 }]
 program = "program-that-does-not-exist"
 args = ["check", "--locked"]
 
@@ -228,15 +237,21 @@ step_name = "Test"
 
     let report = check_inventory_documents(&repository_root(), &contracts, gates);
     assert_eq!(report.declared_conforming_contracts, 1);
+    assert_eq!(report.self_attested_contract_bindings_matched, 0);
     assert!(
         report
             .violations
             .iter()
-            .any(|violation| violation
-                .contains("cannot authenticate passing external gate evidence")),
+            .any(|violation| violation.contains("future trusted receipt adapter")),
         "{:#?}",
         report.violations
     );
+
+    let without_claim = gates.replace(
+        "evidence_claims = [{ contract_id = \"test-contract\", evidence_subject = \"baozi.test.contract\", evidence_revision = 1 }]\n",
+        "",
+    );
+    assert_rejected(&contracts, &without_claim, "exact evidence claim");
 }
 
 #[test]

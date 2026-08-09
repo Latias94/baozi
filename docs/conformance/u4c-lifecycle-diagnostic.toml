@@ -65,7 +65,7 @@ sha256 = "15c8514c3ea9263d8b8a98e28ee7b05647a7189db1c9abedfd62b8a73b1c7519"
 
 [[source_anchors]]
 path = "crates/baozi-operation/src/retained.rs"
-sha256 = "7bebf500419a5c6bb25930e67ec334da062ee3ddb33d719a20b641ffc93bf693"
+sha256 = "42794f978eb75f37b8a057db76d4311dc6aab8b317b8d261fe8e9773f029929e"
 
 [[source_anchors]]
 path = "crates/baozi-xtask/Cargo.toml"
@@ -73,7 +73,7 @@ sha256 = "f94be7889ebfd660d30e8d18667c9c4eeca863a76c165ee52855ee96cc433f56"
 
 [[source_anchors]]
 path = "crates/baozi-xtask/src/main.rs"
-sha256 = "404e8a2f3e8cfd30e8e5a3f1f649d883833c961c88fc53a891fcf136724438a6"
+sha256 = "8a089b94a7fb743c98c05b7a8123524ffd56f295e0cf174e66fe8c37ddc7b81d"
 
 [[source_anchors]]
 path = "crates/baozi-xtask/src/u4c_metrics.rs"

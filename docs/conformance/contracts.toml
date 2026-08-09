@@ -1,5 +1,8 @@
 schema_version = 1
 
+# A `conforming` value is only a declaration. Repository checks reject it until a separate trusted
+# receipt adapter admits immutable, externally produced gate receipts.
+
 [[contracts]]
 contract_id = "u4-canonical-scene-lifecycle"
 authority_adr = "docs/adr/0003-core-scene-ir-and-material-model.md"
@@ -94,9 +97,13 @@ evidence_subject = "baozi.repository.architecture-conformance"
 evidence_revision = 1
 implementation_tracers = [
   "crates/baozi-xtask/src/conformance.rs",
+  "crates/baozi-xtask/src/conformance/evidence.rs",
   "crates/baozi-xtask/src/main.rs",
 ]
-test_tracers = ["crates/baozi-xtask/tests/conformance.rs"]
+test_tracers = [
+  "crates/baozi-xtask/tests/conformance.rs",
+  "crates/baozi-xtask/tests/conformance_evidence.rs",
+]
 ci_tracers = [".github/workflows/ci.yml"]
 gate_ids = [
   "repository-conformance-tests",

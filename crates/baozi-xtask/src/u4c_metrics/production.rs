@@ -51,6 +51,7 @@ pub(super) const SPECIFICATION_PATH: &str = "docs/conformance/u4c-metrics.toml";
 const SPECIFICATION_SCHEMA_VERSION: u64 = 6;
 const PRODUCTION_SCOPE: &str = "u4c-production";
 const PRODUCTION_PROBE_PACKAGE: &str = "baozi-core";
+#[cfg(feature = "repository-input-candidate")]
 const PRODUCTION_PROBE_CARGO_TARGET: &str = "baozi_core";
 const PRODUCTION_PROBE_TARGET: &str =
     "canonical_scene::store::tests::production_probe::canonical_store_u4c_production_v2_probe";
@@ -65,7 +66,9 @@ const ORDINARY_DIMENSION_SEMANTIC_ID_HEX: &str =
     "0262616f7a692d636f72652d7363656e65000000010000000000000001";
 const FAILURE_TERMINAL_DIMENSION_SEMANTIC_ID_HEX: &str =
     "0262616f7a692d636f72652d7363656e65000000010000000000000002";
+#[cfg(feature = "repository-input-candidate")]
 const XTASK_PACKAGE: &str = "baozi-xtask";
+#[cfg(feature = "repository-input-candidate")]
 const XTASK_CARGO_TARGET: &str = "baozi-xtask";
 const COLLECTOR_PACKAGE: &str = "baozi-operation";
 const COLLECTOR_TEST_TARGET: &str = "u4c_collector";
