@@ -15,6 +15,7 @@ mod build_output;
 mod capability;
 mod gltf;
 mod obj;
+mod profile;
 
 use build_output::BuildOutputSpecification;
 #[cfg(feature = "repository-input-candidate")]
@@ -55,7 +56,7 @@ const PRODUCTION_PROBE_TARGET: &str =
     "canonical_scene::store::tests::production_probe::canonical_store_u4c_production_v2_probe";
 const PRODUCTION_REPORT_PREFIX: &str = "BAOZI_U4C_PRODUCTION_V2=";
 const PRODUCTION_REPORT_SCHEMA_VERSION: u64 = 2;
-const PRODUCTION_REPORT_REVISION: u64 = 1;
+const PRODUCTION_REPORT_REVISION: u64 = 2;
 const PRODUCTION_SCENARIO_SET_ID: &str = "canonical-store-production-v2";
 const MINIMAL_FALLBACK_SCENARIO_ID: &str = "canonical-node-minimal-fallback-v1";
 const PROTECTED_TERMINAL_ACTIVATION_SCENARIO_ID: &str =
@@ -75,6 +76,7 @@ const REQUIRED_FIXED_INPUTS: &[&str] = &["Cargo.lock", "Cargo.toml"];
 const REQUIRED_COVERAGE_ENTRY_POINTS: &[&str] = &[
     "canonical-obj-corner-smoothing",
     "backend-free-gltf-shape",
+    "canonical-profile-closure",
     "facade-equivalent-inspection",
     "bounded-snapshot",
     "unchanged-view",
@@ -130,6 +132,7 @@ struct ProductionSpecification {
     scenarios: Vec<ScaleScenarioSpecification>,
     obj_capability: obj::ObjCapabilitySpecification,
     gltf_capability: gltf::GltfCapabilitySpecification,
+    profile_closure: profile::ProfileClosureSpecification,
     measurement: MeasurementSpecification,
     coverage: CoverageSpecification,
     #[cfg(feature = "repository-input-candidate")]
@@ -732,6 +735,7 @@ impl ProductionSpecification {
         validate_scenarios(&self.scenarios)?;
         obj::validate_specification(&self.obj_capability)?;
         gltf::validate_specification(&self.gltf_capability, &self.ledger_contract)?;
+        profile::validate_specification(&self.profile_closure)?;
         if self.measurement.scale_completed_lookups != 7
             || self.measurement.scale_rejected_lookups != 1
             || self.measurement.scale_lookup_events != 50
@@ -748,7 +752,12 @@ impl ProductionSpecification {
                     .to_owned(),
             );
         }
-        validate_coverage(&self.coverage, &self.obj_capability, &self.gltf_capability)?;
+        validate_coverage(
+            &self.coverage,
+            &self.obj_capability,
+            &self.gltf_capability,
+            &self.profile_closure,
+        )?;
 
         Ok(())
     }
@@ -1097,6 +1106,7 @@ fn validate_coverage(
     coverage: &CoverageSpecification,
     obj_capability: &obj::ObjCapabilitySpecification,
     gltf_capability: &gltf::GltfCapabilitySpecification,
+    profile_closure: &profile::ProfileClosureSpecification,
 ) -> Result<(), String> {
     let required = coverage
         .required_entry_points
@@ -1108,8 +1118,12 @@ fn validate_coverage(
         &required,
         REQUIRED_COVERAGE_ENTRY_POINTS,
     )?;
-    let [obj_mapping, gltf_mapping, consumer_mappings @ ..] =
-        coverage.mapped_entry_points.as_slice()
+    let [
+        obj_mapping,
+        gltf_mapping,
+        profile_mapping,
+        consumer_mappings @ ..,
+    ] = coverage.mapped_entry_points.as_slice()
     else {
         return Err(
             "U4c production coverage must map the admitted producer capabilities".to_owned(),
@@ -1124,6 +1138,14 @@ fn validate_coverage(
     if !gltf_capability.matches_mapping(gltf_mapping) {
         return Err(
             "U4c production glTF coverage mapping must bind the backend-free five-domain scenario"
+                .to_owned(),
+        );
+    }
+    if profile_mapping.entry_point != profile_closure.entry_point
+        || profile_mapping.scenario_id != profile_closure.scenario_id
+    {
+        return Err(
+            "U4c production profile-closure coverage mapping must bind the canonical profile scenario"
                 .to_owned(),
         );
     }
@@ -2989,6 +3011,7 @@ struct ProductionReport {
     inherited_hot_leaf_scenario: InheritedHotLeafReport,
     obj_capability: obj::ObjCapabilityReport,
     gltf_capability: gltf::GltfCapabilityReport,
+    profile_closure: profile::ProfileClosureReport,
     validation_faults: Vec<ValidationFaultReport>,
     protected_terminal_activation: ProtectedTerminalActivationReport,
     minimal_fallback: MinimalFallbackReport,
@@ -3395,6 +3418,7 @@ fn validate_production_report(
     validate_inherited_hot_leaf(specification, &report.inherited_hot_leaf_scenario)?;
     obj::validate_report(specification, &report.obj_capability)?;
     gltf::validate_report(specification, &report.gltf_capability)?;
+    profile::validate_report(specification, &report.profile_closure)?;
     validate_validation_faults(specification, &report.validation_faults)?;
     validate_protected_terminal_activation(specification, &report.protected_terminal_activation)?;
     validate_minimal_fallback(specification, &report.minimal_fallback)?;
@@ -4342,7 +4366,7 @@ mod tests {
             ),
             managed.replace("BAOZI_U4C_PRODUCTION_V2=", "BAOZI_U4C_PRODUCTION_V1="),
             managed.replace("schema_version = 2", "schema_version = 1"),
-            managed.replace("report_revision = 1", "report_revision = 10"),
+            managed.replace("report_revision = 2", "report_revision = 10"),
             managed.replace(
                 "scenario_set_id = \"canonical-store-production-v2\"",
                 "scenario_set_id = \"canonical-store-production-v1\"",

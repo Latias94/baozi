@@ -11,10 +11,10 @@ test_threads = 1
 prefix = "BAOZI_U4C_PRODUCTION_V2="
 schema_id = "baozi.u4c.production-report"
 schema_version = 2
-report_revision = 1
+report_revision = 2
 scenario_set_id = "canonical-store-production-v2"
-payload_bytes = 82661
-sha256 = "6e4bb4849fb5ce06780efff944390457348053c28fa700713862d54660fc94c7"
+payload_bytes = 93861
+sha256 = "c6719b23e629075e1b55453c686745dad39abbf87c7da7bea9665a2c305a330b"
 
 [ledger_contract]
 ordinary_semantic_id_hex = "0262616f7a692d636f72652d7363656e65000000010000000000000001"
@@ -87,8 +87,8 @@ max_work = 262144
 
 [[closure.source_trees]]
 path = "crates"
-file_count = 393
-sha256 = "a0def60bc7900162406f81e1431f7ea138f40dfbe2f560fde7cd614bb08f3894"
+file_count = 395
+sha256 = "68fb836c47d711cff24b4bddf8248a3bdfb192e585e478d8f3a6ac3cd339dbb4"
 
 [[closure.fixed_inputs]]
 path = "Cargo.lock"
@@ -1111,6 +1111,247 @@ schema_id = "baozi.selected-gltf-shape-capability-source.v2"
 observed_bytes = 2065
 sha256 = "f7d057cadbc38c17a8fb8009829d7366ca84296aaa4b8c9f72d47578403959de"
 
+[profile_closure]
+entry_point = "canonical-profile-closure"
+scenario_id = "canonical-profile-closure-v1"
+generation_reservations = 1
+canonical_block_count = 28
+outcome_evidence_block_count = 1
+full_snapshot_digest_hex = "da2e341d463d4868fc94760b41f6b06ee31ed357f1d67e53173bb3fb7fbaed25"
+bounded_snapshot_digest_hex = "da2e341d463d4868fc94760b41f6b06ee31ed357f1d67e53173bb3fb7fbaed25"
+construction_semantic_cells = 670
+construction_references = 41
+construction_blocks = 29
+construction_producer_events = 798
+inspection_completed_lookups = 38
+inspection_lookup_events = 304
+inspection_member_probes = 38
+retained_bytes = 30565
+retained_allocations = 65
+
+[profile_closure.canonical_shape]
+node_count = 1
+root_count = 1
+camera_count = 1
+light_count = 1
+camera_attachment_count = 1
+light_attachment_count = 1
+unit_scale_to_meters = 0.01
+profile_resource_count = 1
+profile_source_count = 1
+profile_provenance_count = 1
+profile_owner_count = 5
+profile_attachment_count = 5
+profile_metadata_entry_count = 4
+
+[profile_closure.snapshot_totals]
+node_count = 1
+root_count = 1
+edge_count = 0
+camera_count = 1
+light_count = 1
+camera_attachment_count = 1
+light_attachment_count = 1
+image_count = 0
+sampler_count = 0
+texture_count = 0
+material_count = 0
+material_binding_count = 0
+image_payload_bytes = 0
+media_type_bytes = 0
+source_key_bytes = 0
+binding_semantic_scalar_count = 0
+material_factor_scalar_count = 0
+logical_mesh_count = 0
+primitive_count = 0
+attribute_count = 0
+mesh_instance_count = 0
+polygon_boundary_count = 0
+primitive_index_count = 0
+sparse_index_count = 0
+canonical_scalar_count = 0
+f32_scalar_count = 0
+u32_scalar_count = 0
+skin_count = 0
+logical_morph_count = 0
+morph_definition_count = 0
+primitive_deformation_count = 0
+morph_target_count = 0
+morph_delta_count = 0
+deformation_mesh_instance_count = 0
+skin_joint_count = 0
+inverse_bind_matrix_count = 0
+skin_correction_matrix_count = 0
+skin_name_bytes = 0
+morph_default_weight_count = 0
+morph_name_bytes = 0
+influence_row_count = 0
+influence_count = 0
+morph_value_vector_count = 0
+morph_sparse_index_count = 0
+instance_morph_weight_count = 0
+animation_clip_count = 0
+animation_channel_count = 0
+animation_time_scalar_count = 0
+animation_value_scalar_count = 0
+animation_in_tangent_scalar_count = 0
+animation_out_tangent_scalar_count = 0
+profile_resource_count = 1
+profile_source_count = 1
+profile_provenance_node_count = 1
+profile_operation_count = 0
+profile_evidence_count = 0
+profile_owner_count = 5
+profile_attachment_count = 5
+profile_metadata_entry_count = 4
+profile_parent_reference_count = 0
+profile_wide_value_count = 1
+profile_lineage_text_bytes = 42
+profile_lineage_digest_bytes = 0
+profile_metadata_text_bytes = 157
+profile_metadata_payload_bytes = 4
+profile_metadata_bool_scalar_count = 1
+profile_metadata_i64_scalar_count = 0
+profile_metadata_u64_scalar_count = 1
+profile_metadata_f64_scalar_count = 0
+profile_metadata_f32_scalar_count = 0
+transcript_bytes = 1758
+work_units = 170
+
+[profile_closure.bounded_preview]
+schema_id = "baozi.canonical-scene.bounded-preview.v1"
+bytes = 91
+sha256 = "25495cb5303e7a2a58d5e897f9819039c5151a9cf61c0a89683848b80998e75f"
+items_omitted_by_limit = 16
+bytes_truncated = true
+items_truncated = true
+
+[profile_closure.construction_budget]
+max_payload_copy_bytes = 15073
+
+[profile_closure.construction_budget.allocations]
+max_count_total = 109
+max_bytes_total = 37833
+max_count_peak = 91
+max_bytes_peak = 37257
+max_count_current = 65
+max_bytes_current = 21761
+
+[profile_closure.snapshot_budget]
+completed_lookups = 76
+lookup_events = 608
+member_probes = 76
+max_lookup_events = 8
+max_member_probes_per_lookup = 1
+
+[profile_closure.snapshot_budget.allocations]
+max_count_total = 2
+max_bytes_total = 16480
+max_count_peak = 2
+max_bytes_peak = 16480
+max_count_current = 2
+max_bytes_current = 16480
+
+[[profile_closure.mutations]]
+field_class = "metadata_u64_value"
+snapshot_digest_hex = "1474d1d801782a99e95d1a840693e4164f95dcbc60d32f5184a1156ccc1ecb96"
+
+[[profile_closure.negative_cases]]
+scenario_id = "canonical-profile-camera-reference-out-of-range-v1"
+preflight_disposition = "rejected"
+activation_eligibility_reached = false
+failure_class = "spatial-authoring"
+failure_kind = "camera-out-of-range"
+failure_code = 1396904199
+peak_retained_bytes_delta = 0
+peak_retained_allocations_delta = 0
+total_admitted_retained_bytes_delta = 0
+total_admitted_retained_allocations_delta = 0
+live_retained_bytes_delta = 0
+live_retained_allocations_delta = 0
+final_live_retained_bytes = 0
+final_live_retained_allocations = 0
+
+[[profile_closure.negative_cases]]
+scenario_id = "canonical-profile-light-reference-out-of-range-v1"
+preflight_disposition = "rejected"
+activation_eligibility_reached = false
+failure_class = "spatial-authoring"
+failure_kind = "light-out-of-range"
+failure_code = 1396904199
+peak_retained_bytes_delta = 0
+peak_retained_allocations_delta = 0
+total_admitted_retained_bytes_delta = 0
+total_admitted_retained_allocations_delta = 0
+live_retained_bytes_delta = 0
+live_retained_allocations_delta = 0
+final_live_retained_bytes = 0
+final_live_retained_allocations = 0
+
+[[profile_closure.negative_cases]]
+scenario_id = "canonical-profile-source-resource-reference-out-of-range-v1"
+preflight_disposition = "rejected"
+activation_eligibility_reached = false
+failure_class = "profile-authoring"
+failure_kind = "source-resource-out-of-range"
+failure_code = 1396904200
+peak_retained_bytes_delta = 0
+peak_retained_allocations_delta = 0
+total_admitted_retained_bytes_delta = 0
+total_admitted_retained_allocations_delta = 0
+live_retained_bytes_delta = 0
+live_retained_allocations_delta = 0
+final_live_retained_bytes = 0
+final_live_retained_allocations = 0
+
+[[profile_closure.negative_cases]]
+scenario_id = "canonical-profile-provenance-source-reference-out-of-range-v1"
+preflight_disposition = "rejected"
+activation_eligibility_reached = false
+failure_class = "profile-authoring"
+failure_kind = "provenance-source-out-of-range"
+failure_code = 1396904200
+peak_retained_bytes_delta = 0
+peak_retained_allocations_delta = 0
+total_admitted_retained_bytes_delta = 0
+total_admitted_retained_allocations_delta = 0
+live_retained_bytes_delta = 0
+live_retained_allocations_delta = 0
+final_live_retained_bytes = 0
+final_live_retained_allocations = 0
+
+[[profile_closure.negative_cases]]
+scenario_id = "canonical-profile-owner-provenance-reference-out-of-range-v1"
+preflight_disposition = "rejected"
+activation_eligibility_reached = false
+failure_class = "profile-authoring"
+failure_kind = "owner-provenance-out-of-range"
+failure_code = 1396904200
+peak_retained_bytes_delta = 0
+peak_retained_allocations_delta = 0
+total_admitted_retained_bytes_delta = 0
+total_admitted_retained_allocations_delta = 0
+live_retained_bytes_delta = 0
+live_retained_allocations_delta = 0
+final_live_retained_bytes = 0
+final_live_retained_allocations = 0
+
+[[profile_closure.negative_cases]]
+scenario_id = "canonical-profile-metadata-bytes-one-short-v1"
+preflight_disposition = "rejected"
+activation_eligibility_reached = false
+failure_class = "profile-authoring"
+failure_kind = "metadata-bytes-limit-exceeded"
+failure_code = 1396904200
+peak_retained_bytes_delta = 0
+peak_retained_allocations_delta = 0
+total_admitted_retained_bytes_delta = 0
+total_admitted_retained_allocations_delta = 0
+live_retained_bytes_delta = 0
+live_retained_allocations_delta = 0
+final_live_retained_bytes = 0
+final_live_retained_allocations = 0
+
 [measurement]
 scale_completed_lookups = 7
 scale_rejected_lookups = 1
@@ -1127,6 +1368,7 @@ hot_view_max_payload_backing_allocations = 0
 required_entry_points = [
     "canonical-obj-corner-smoothing",
     "backend-free-gltf-shape",
+    "canonical-profile-closure",
     "facade-equivalent-inspection",
     "bounded-snapshot",
     "unchanged-view",
@@ -1135,6 +1377,7 @@ required_entry_points = [
 mapped_entry_points = [
     { entry_point = "canonical-obj-corner-smoothing", scenario_id = "canonical-obj-corner-smoothing-v1" },
     { entry_point = "backend-free-gltf-shape", scenario_id = "backend-free-gltf-shape-v1" },
+    { entry_point = "canonical-profile-closure", scenario_id = "canonical-profile-closure-v1" },
     { entry_point = "facade-equivalent-inspection", scenario_id = "canonical-gltf-five-domain-inspection-v1" },
     { entry_point = "bounded-snapshot", scenario_id = "canonical-gltf-five-domain-snapshot-v1" },
     { entry_point = "unchanged-view", scenario_id = "canonical-gltf-five-domain-unchanged-view-v1" },

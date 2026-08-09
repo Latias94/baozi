@@ -19,13 +19,17 @@ use super::super::super::construction::node_scene::{
     GLTF_SOURCE_VECTOR_SCHEMA_ID, GltfCapabilityCanonicalShapeObservation,
     GltfCapabilitySourceShapeObservation, NodeSceneConstructionTerminal,
     OBJ_SOURCE_VECTOR_SCHEMA_ID, ObjCapabilityCanonicalShapeObservation,
-    ObjCapabilitySourceShapeObservation, build_evidence_publication_limit_terminal_for_probe,
-    build_gltf_capability_scene_for_probe, build_obj_capability_scene_for_probe,
+    ObjCapabilitySourceShapeObservation, ProfileClosureCanonicalShapeObservation,
+    ProfileClosureNegativeCaseObservation, ProfileClosurePreflightStorageObservation,
+    build_evidence_publication_limit_terminal_for_probe, build_gltf_capability_scene_for_probe,
+    build_obj_capability_scene_for_probe, build_profile_closure_scene_for_probe,
     build_protected_terminal_activation_for_probe, capture_gltf_capability_snapshots_for_probe,
-    capture_obj_capability_snapshots_for_probe, collect_gltf_capability_vectors_for_probe,
-    collect_obj_capability_vectors_for_probe, inspect_gltf_capability_semantics_for_probe,
+    capture_obj_capability_snapshots_for_probe, capture_profile_closure_snapshots_for_probe,
+    collect_gltf_capability_vectors_for_probe, collect_obj_capability_vectors_for_probe,
+    collect_profile_closure_digest_vectors_for_probe,
+    collect_profile_closure_negative_cases_for_probe, inspect_gltf_capability_semantics_for_probe,
     inspect_gltf_capability_semantics_with_first_transform_for_probe,
-    inspect_obj_capability_semantics_for_probe,
+    inspect_obj_capability_semantics_for_probe, inspect_profile_closure_semantics_for_probe,
 };
 use super::super::super::construction::{
     COMPLEX_SEMANTIC_TRANSCRIPT_SCHEMA_ID, ComplexFixtureFault, ComplexFixtureTerminal,
@@ -41,10 +45,11 @@ use super::report::{
     GltfCapabilityReport, GltfChangedSceneEditPhysicalReport, GltfChangedSceneEditReport,
     GltfSourceShapeReport, GltfUnchangedViewReport, HotLeafObservationReport,
     InheritedHotLeafReport, MinimalFallbackReport, ObjCanonicalShapeReport, ObjCapabilityReport,
-    ObjSourceShapeReport, ProtectedTerminalActivationReport, ReadOnlyPhysicalReport,
-    ScalePhysicalReport, ScaleScenarioReport, SemanticTranscriptReport, ShareGenerationReport,
-    SharePhysicalReport, ValidationFaultReport, evidence_report, handoff_report, hex_encode,
-    phase_report, release_report, sha256_hex,
+    ObjSourceShapeReport, ProfileClosureCanonicalShapeReport, ProfileClosureMutationReport,
+    ProfileClosureNegativeCaseReport, ProfileClosureReport, ProtectedTerminalActivationReport,
+    ReadOnlyPhysicalReport, ScalePhysicalReport, ScaleScenarioReport, SemanticTranscriptReport,
+    ShareGenerationReport, SharePhysicalReport, ValidationFaultReport, evidence_report,
+    handoff_report, hex_encode, phase_report, release_report, sha256_hex,
 };
 
 const COMPLEX_PREVIEW_LIMIT_BYTES: usize = 192;
@@ -386,6 +391,221 @@ fn canonical_shape_report(
         corner_normal_elements: shape.corner_normal_elements,
         corner_texcoord_elements: shape.corner_texcoord_elements,
         face_smoothing_group_elements: shape.face_smoothing_group_elements,
+    }
+}
+
+pub(super) fn collect_profile_closure() -> ProfileClosureReport {
+    const SCENARIO_ID: &str = "canonical-profile-closure-v1";
+    const CONSTRUCTION_ID: &str = "canonical-profile-closure-construction-v1";
+    const INSPECTION_ID: &str = "canonical-profile-closure-inspection-v1";
+    const SNAPSHOT_ID: &str = "canonical-profile-closure-snapshot-v1";
+    const RELEASE_ID: &str = "canonical-profile-closure-release-v1";
+
+    let digest_vectors = collect_profile_closure_digest_vectors_for_probe();
+    let negative_cases = collect_profile_closure_negative_cases_for_probe()
+        .into_iter()
+        .map(profile_closure_negative_case_report)
+        .collect();
+    let factory = test_factory(1);
+    let account = test_account_with_allocation_limit(&factory, 512);
+    let generation_source = AtomicU64::new(0);
+    let physical_baseline = account.snapshot();
+
+    let construction_session =
+        MeasurementSession::begin().expect("profile-closure construction measurement must start");
+    let mut parts = None;
+    let construction_allocations = allocation_counter::measure(|| {
+        parts = Some(build_profile_closure_scene_for_probe(
+            &account,
+            &generation_source,
+        ));
+    });
+    let construction_measurement = construction_session
+        .finish()
+        .expect("profile-closure construction measurement must finish");
+    let parts = parts.expect("profile-closure construction must publish a Scene");
+    let physical_retained = account.snapshot();
+    let canonical_block_count = parts.scene.canonical_block_count();
+    let outcome_evidence_block_count = parts.report.outcome_evidence_block_count();
+    let evidence = evidence_report(outcome_evidence_block_count, parts.report.ledger_evidence());
+
+    let inspection_session =
+        MeasurementSession::begin().expect("profile-closure inspection measurement must start");
+    let mut canonical_shape = None;
+    let inspection_allocations = allocation_counter::measure(|| {
+        canonical_shape = Some(inspect_profile_closure_semantics_for_probe(&parts.scene));
+    });
+    let inspection_measurement = inspection_session
+        .finish()
+        .expect("profile-closure inspection measurement must finish");
+    let physical_after_inspection = account.snapshot();
+    let canonical_shape =
+        canonical_shape.expect("profile-closure inspection must return its shape");
+
+    let snapshot_session =
+        MeasurementSession::begin().expect("profile-closure snapshot measurement must start");
+    let mut snapshots = None;
+    let snapshot_allocations = allocation_counter::measure(|| {
+        snapshots = Some(capture_profile_closure_snapshots_for_probe(&parts));
+    });
+    let snapshot_measurement = snapshot_session
+        .finish()
+        .expect("profile-closure snapshot measurement must finish");
+    let (full_snapshot, bounded_snapshot) =
+        snapshots.expect("profile-closure snapshot must return both snapshots");
+    let physical_after_snapshot = account.snapshot();
+
+    assert_eq!(bounded_snapshot.digest, full_snapshot.digest);
+    assert_eq!(digest_vectors.baseline, full_snapshot.digest);
+    assert_ne!(digest_vectors.metadata_u64_mutation, full_snapshot.digest);
+    assert_eq!(bounded_snapshot.totals, full_snapshot.totals);
+    assert!(!full_snapshot.preview.bytes_truncated);
+    assert!(!full_snapshot.preview.items_truncated);
+    assert!(bounded_snapshot.preview.text.len() <= 96);
+    assert!(bounded_snapshot.preview.items_truncated || bounded_snapshot.preview.bytes_truncated);
+
+    let full_snapshot_digest_hex = hex_encode(&full_snapshot.digest);
+    let bounded_snapshot_digest_hex = hex_encode(&bounded_snapshot.digest);
+    let snapshot_totals = CanonicalSnapshotTotalsReport::from(full_snapshot.totals);
+    let bounded_preview = CapabilityBoundedPreviewReport {
+        schema_id: "baozi.canonical-scene.bounded-preview.v1",
+        bytes: bounded_snapshot.preview.text.len(),
+        sha256: sha256_hex(bounded_snapshot.preview.text.as_bytes()),
+        items_omitted_by_limit: bounded_snapshot.preview.items_omitted_by_limit,
+        bytes_truncated: bounded_snapshot.preview.bytes_truncated,
+        items_truncated: bounded_snapshot.preview.items_truncated,
+    };
+    let mutations = vec![ProfileClosureMutationReport {
+        field_class: "metadata_u64_value",
+        snapshot_digest_hex: hex_encode(&digest_vectors.metadata_u64_mutation),
+    }];
+
+    let release_allocations = allocation_counter::measure(move || {
+        drop(full_snapshot);
+        drop(bounded_snapshot);
+        drop(parts);
+    });
+    assert_allocator_lifecycle_balanced(
+        "canonical profile closure",
+        &[
+            &construction_allocations,
+            &inspection_allocations,
+            &snapshot_allocations,
+            &release_allocations,
+        ],
+    );
+    let physical_after_release = account.snapshot();
+    drop(account);
+    let factory_after_account_release = factory.snapshot();
+
+    ProfileClosureReport {
+        entry_point: "canonical-profile-closure",
+        scenario_id: SCENARIO_ID,
+        canonical_shape: profile_closure_shape_report(canonical_shape),
+        mutations,
+        negative_cases,
+        generation_reservations: generation_source.load(Ordering::Relaxed),
+        canonical_block_count,
+        outcome_evidence_block_count,
+        full_snapshot_digest_hex,
+        bounded_snapshot_digest_hex,
+        snapshot_totals,
+        bounded_preview,
+        evidence,
+        construction: phase_report(
+            CONSTRUCTION_ID,
+            construction_measurement,
+            construction_allocations,
+        ),
+        inspection: phase_report(
+            INSPECTION_ID,
+            inspection_measurement,
+            inspection_allocations,
+        ),
+        snapshot: phase_report(SNAPSHOT_ID, snapshot_measurement, snapshot_allocations),
+        release: release_report(RELEASE_ID, release_allocations),
+        physical_account: CapabilityPhysicalReport {
+            baseline: physical_baseline.into(),
+            retained: physical_retained.into(),
+            after_inspection: physical_after_inspection.into(),
+            after_snapshot: physical_after_snapshot.into(),
+            after_release: physical_after_release.into(),
+        },
+        factory_after_account_release: factory_after_account_release.into(),
+    }
+}
+
+fn profile_closure_negative_case_report(
+    observation: ProfileClosureNegativeCaseObservation,
+) -> ProfileClosureNegativeCaseReport {
+    let preflight_storage = observation.preflight_storage;
+    ProfileClosureNegativeCaseReport {
+        scenario_id: observation.scenario_id,
+        preflight_disposition: observation.preflight_disposition,
+        activation_eligibility_reached: observation.activation_eligibility_reached,
+        failure_class: observation.failure_class,
+        failure_kind: observation.failure_kind,
+        failure_code: observation.failure_code,
+        peak_retained_bytes_delta: preflight_storage.peak_retained_bytes_delta,
+        peak_retained_allocations_delta: preflight_storage.peak_retained_allocations_delta,
+        total_admitted_retained_bytes_delta: preflight_storage.total_admitted_retained_bytes_delta,
+        total_admitted_retained_allocations_delta: preflight_storage
+            .total_admitted_retained_allocations_delta,
+        live_retained_bytes_delta: preflight_storage.live_retained_bytes_delta,
+        live_retained_allocations_delta: preflight_storage.live_retained_allocations_delta,
+        final_live_retained_bytes: preflight_storage.final_live_retained_bytes,
+        final_live_retained_allocations: preflight_storage.final_live_retained_allocations,
+    }
+}
+
+#[test]
+fn profile_negative_report_preserves_nonzero_preflight_storage_deltas() {
+    let report = profile_closure_negative_case_report(ProfileClosureNegativeCaseObservation {
+        scenario_id: "profile-negative-report-history-canary-v1",
+        preflight_disposition: "rejected",
+        activation_eligibility_reached: false,
+        failure_class: "profile-authoring",
+        failure_kind: "history-canary",
+        failure_code: 0x5343_1108,
+        preflight_storage: ProfileClosurePreflightStorageObservation {
+            peak_retained_bytes_delta: 11,
+            peak_retained_allocations_delta: 2,
+            total_admitted_retained_bytes_delta: 17,
+            total_admitted_retained_allocations_delta: 3,
+            live_retained_bytes_delta: 5,
+            live_retained_allocations_delta: 1,
+            final_live_retained_bytes: 5,
+            final_live_retained_allocations: 1,
+        },
+    });
+
+    assert_eq!(report.peak_retained_bytes_delta, 11);
+    assert_eq!(report.peak_retained_allocations_delta, 2);
+    assert_eq!(report.total_admitted_retained_bytes_delta, 17);
+    assert_eq!(report.total_admitted_retained_allocations_delta, 3);
+    assert_eq!(report.live_retained_bytes_delta, 5);
+    assert_eq!(report.live_retained_allocations_delta, 1);
+    assert_eq!(report.final_live_retained_bytes, 5);
+    assert_eq!(report.final_live_retained_allocations, 1);
+}
+
+fn profile_closure_shape_report(
+    shape: ProfileClosureCanonicalShapeObservation,
+) -> ProfileClosureCanonicalShapeReport {
+    ProfileClosureCanonicalShapeReport {
+        node_count: shape.node_count,
+        root_count: shape.root_count,
+        camera_count: shape.camera_count,
+        light_count: shape.light_count,
+        camera_attachment_count: shape.camera_attachment_count,
+        light_attachment_count: shape.light_attachment_count,
+        unit_scale_to_meters: shape.unit_scale_to_meters,
+        profile_resource_count: shape.profile_resource_count,
+        profile_source_count: shape.profile_source_count,
+        profile_provenance_count: shape.profile_provenance_count,
+        profile_owner_count: shape.profile_owner_count,
+        profile_attachment_count: shape.profile_attachment_count,
+        profile_metadata_entry_count: shape.profile_metadata_entry_count,
     }
 }
 

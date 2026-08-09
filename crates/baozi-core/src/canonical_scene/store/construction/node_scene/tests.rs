@@ -53,6 +53,7 @@ use super::{
 mod chunking;
 mod gltf_capability;
 mod obj_capability;
+mod profile_closure;
 
 fn exhaust_profile_for_test(profile: &mut NodeSceneProfileCursor<'_>) {
     while !matches!(
@@ -92,6 +93,13 @@ pub(in crate::canonical_scene::store) use obj_capability::{
     ObjCapabilitySourceShapeObservation, build_obj_capability_scene_for_probe,
     capture_obj_capability_snapshots_for_probe, collect_obj_capability_vectors_for_probe,
     inspect_obj_capability_semantics_for_probe,
+};
+
+pub(in crate::canonical_scene::store) use profile_closure::{
+    ProfileClosureCanonicalShapeObservation, ProfileClosureNegativeCaseObservation,
+    ProfileClosurePreflightStorageObservation, build_profile_closure_scene_for_probe,
+    capture_profile_closure_snapshots_for_probe, collect_profile_closure_digest_vectors_for_probe,
+    collect_profile_closure_negative_cases_for_probe, inspect_profile_closure_semantics_for_probe,
 };
 
 const SINGLE_TRS_DOMAIN_AUTHORING_VALIDATION_WORK: u64 = 43;

@@ -93,6 +93,8 @@ pub(super) use plan::profile::{
 };
 #[cfg(test)]
 pub(super) use plan::profile::{ProfileAuthoringLimit, ProfileAuthoringSemanticError};
+#[cfg(test)]
+pub(super) use plan::spatial::SpatialAuthoringSemanticError;
 pub(super) use plan::spatial::{
     SpatialAuthoringFailure, ValidatedSpatialBatch, validate_spatial_batch,
 };
