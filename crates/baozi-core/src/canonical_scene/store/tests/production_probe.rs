@@ -6,8 +6,8 @@ use report::{
 };
 use scenarios::{
     collect_gltf_capability, collect_inherited_hot_leaf_scenario, collect_minimal_fallback,
-    collect_obj_capability, collect_profile_closure, collect_protected_terminal_activation,
-    collect_scale_scenarios, collect_validation_faults,
+    collect_obj_capability, collect_pending_scene_activation, collect_profile_closure,
+    collect_protected_terminal_activation, collect_scale_scenarios, collect_validation_faults,
 };
 
 #[test]
@@ -20,6 +20,7 @@ fn canonical_store_u4c_production_v2_probe() {
         gltf_capability: collect_gltf_capability(),
         profile_closure: collect_profile_closure(),
         validation_faults: collect_validation_faults(),
+        pending_scene_activation: collect_pending_scene_activation(),
         protected_terminal_activation: collect_protected_terminal_activation(),
         minimal_fallback: collect_minimal_fallback(),
     });

@@ -10,6 +10,7 @@ use crate::math::{Quat, Vec3};
 use crate::provenance::OptionsDigest;
 use crate::remap::RemapChange;
 
+use super::super::super::construction::activation::SceneActivationTransition;
 use super::super::super::construction::node_scene::edit::{
     CanonicalRemapSet, NodeTransformEditStart, NodeTransformEditTerminal,
     try_begin_node_transform_edit,
@@ -36,6 +37,7 @@ use super::super::super::construction::{
     FAILURE_TERMINAL_WORK_DIMENSION, STORE_DIMENSION, SceneConstructionOperation,
     SceneConstructionTerminal,
 };
+use super::super::super::schema::CANONICAL_BLOCK_COUNT;
 use super::super::{
     authored_fixture, test_account, test_account_with_allocation_limit, test_factory, test_limits,
 };
@@ -45,7 +47,8 @@ use super::report::{
     GltfCapabilityReport, GltfChangedSceneEditPhysicalReport, GltfChangedSceneEditReport,
     GltfSourceShapeReport, GltfUnchangedViewReport, HotLeafObservationReport,
     InheritedHotLeafReport, MinimalFallbackReport, ObjCanonicalShapeReport, ObjCapabilityReport,
-    ObjSourceShapeReport, ProfileClosureCanonicalShapeReport, ProfileClosureMutationReport,
+    ObjSourceShapeReport, PendingSceneActivationPhysicalReport, PendingSceneActivationReport,
+    ProfileClosureCanonicalShapeReport, ProfileClosureMutationReport,
     ProfileClosureNegativeCaseReport, ProfileClosureReport, ProtectedTerminalActivationReport,
     ReadOnlyPhysicalReport, ScalePhysicalReport, ScaleScenarioReport, SemanticTranscriptReport,
     ShareGenerationReport, SharePhysicalReport, ValidationFaultReport, evidence_report,
@@ -1669,6 +1672,148 @@ pub(super) fn collect_minimal_fallback() -> MinimalFallbackReport {
             retained: physical_retained.into(),
             after_handoff: physical_after_handoff.into(),
             after_release: physical_after_release.into(),
+        },
+        factory_after_account_release: factory_after_account_release.into(),
+    }
+}
+
+pub(super) fn collect_pending_scene_activation() -> PendingSceneActivationReport {
+    const ENTRY_POINT: &str = "pending-scene-activation";
+    const SCENARIO_ID: &str = "canonical-node-pending-scene-activation-v1";
+    const CONSTRUCTION_ID: &str = "canonical-node-pending-scene-activation-construction-v1";
+    const CANDIDATE_RELEASE_ID: &str =
+        "canonical-node-pending-scene-activation-candidate-release-v1";
+    const EXPECTED_SEMANTIC_CELL_WRITES: u64 = 62;
+    const EXPECTED_REFERENCE_WRITES: u64 = 5;
+    const EXPECTED_PRODUCER_EVENTS: u64 = 82;
+
+    let factory = test_factory(1);
+    let account = test_account(&factory);
+    let physical_baseline = account.snapshot();
+    assert_eq!(physical_baseline.live_retained_bytes(), 0);
+    assert_eq!(physical_baseline.live_retained_allocations(), 0);
+    assert!(!physical_baseline.poisoned());
+
+    let construction_session =
+        MeasurementSession::begin().expect("pending activation measurement must start");
+    let mut transition = None;
+    let construction_allocations = allocation_counter::measure(|| {
+        transition = Some(
+            SceneConstructionOperation::with_account_for_activation(&account, test_limits())
+                .expect("pending activation operation must start")
+                .activate_fresh_two_node(authored_fixture())
+                .expect("pending activation must remain contained"),
+        );
+    });
+    let construction_measurement = construction_session
+        .finish()
+        .expect("pending activation measurement must finish");
+    let candidate = match transition.expect("pending activation closure must set a transition") {
+        SceneActivationTransition::Candidate(candidate) => candidate,
+        SceneActivationTransition::Terminal(prepared) => match prepared.handoff() {
+            SceneConstructionTerminal::Success(_) => {
+                panic!("pending activation must not publish before joint commit")
+            }
+            SceneConstructionTerminal::RichFailure(_) => {
+                panic!("valid pending activation unexpectedly reached rich failure")
+            }
+            SceneConstructionTerminal::MinimalFallback(fallback) => {
+                panic!(
+                    "valid pending activation unexpectedly reached minimal fallback: code={:#010x}, cause={:?}",
+                    fallback.fallback_code(),
+                    fallback.ledger_evidence().header().terminal_cause(),
+                )
+            }
+        },
+    };
+
+    let canonical_block_count = candidate.canonical_blocks();
+    let new_block_count = usize::try_from(construction_measurement.new_block_begins())
+        .expect("pending activation new-block count must fit usize");
+    let outcome_evidence_block_count = new_block_count
+        .checked_sub(canonical_block_count)
+        .expect("pending activation evidence blocks must follow canonical blocks");
+    let directory_identity_preserved = candidate.directory() == candidate.refs().directory;
+
+    assert_eq!(
+        canonical_block_count,
+        usize::try_from(CANONICAL_BLOCK_COUNT).expect("canonical block count must fit usize"),
+    );
+    assert_eq!(outcome_evidence_block_count, 1);
+    assert_eq!(construction_measurement.new_block_seals(), 5);
+    assert_eq!(construction_measurement.new_slot_publications(), 5);
+    assert_eq!(new_block_count, 5);
+    assert_eq!(construction_measurement.inherited_block_begins(), 0);
+    assert_eq!(construction_measurement.inherited_block_seals(), 0);
+    assert_eq!(construction_measurement.inherited_slot_publications(), 0);
+    assert_eq!(
+        construction_measurement.payload_backing_allocations(),
+        construction_measurement.new_block_begins(),
+    );
+    assert_eq!(
+        construction_measurement.semantic_cell_writes(),
+        EXPECTED_SEMANTIC_CELL_WRITES,
+    );
+    assert_eq!(
+        construction_measurement.reference_writes(),
+        EXPECTED_REFERENCE_WRITES,
+    );
+    assert_eq!(
+        construction_measurement.producer_events(),
+        EXPECTED_PRODUCER_EVENTS,
+    );
+    assert_eq!(construction_measurement.element_decodes(), 0);
+    assert_eq!(construction_measurement.completed_lookups(), 0);
+    assert_eq!(construction_measurement.rejected_lookups(), 0);
+    assert_eq!(construction_measurement.lookup_events(), 0);
+    assert_eq!(construction_measurement.max_lookup_events(), 0);
+    assert_eq!(construction_measurement.member_probes(), 0);
+    assert_eq!(construction_measurement.max_member_probes_per_lookup(), 0);
+    assert!(directory_identity_preserved);
+
+    let physical_candidate_retained = account.snapshot();
+    assert!(physical_candidate_retained.live_retained_bytes() > 0);
+    assert!(physical_candidate_retained.live_retained_allocations() > 0);
+    assert!(!physical_candidate_retained.poisoned());
+
+    let candidate_release_allocations = measure_release(candidate);
+    assert_allocator_lifecycle_balanced(
+        "pending scene activation",
+        &[&construction_allocations, &candidate_release_allocations],
+    );
+    let physical_after_candidate_release = account.snapshot();
+    assert_eq!(physical_after_candidate_release.live_retained_bytes(), 0);
+    assert_eq!(
+        physical_after_candidate_release.live_retained_allocations(),
+        0,
+    );
+    assert!(!physical_after_candidate_release.poisoned());
+
+    drop(account);
+    let factory_after_account_release = factory.snapshot();
+    assert_eq!(
+        factory_after_account_release.live_account_control_bytes(),
+        0,
+    );
+    assert_eq!(factory_after_account_release.live_accounts(), 0);
+
+    PendingSceneActivationReport {
+        entry_point: ENTRY_POINT,
+        scenario_id: SCENARIO_ID,
+        canonical_block_count,
+        outcome_evidence_block_count,
+        new_block_count,
+        directory_identity_preserved,
+        construction: phase_report(
+            CONSTRUCTION_ID,
+            construction_measurement,
+            construction_allocations,
+        ),
+        candidate_release: release_report(CANDIDATE_RELEASE_ID, candidate_release_allocations),
+        physical_account: PendingSceneActivationPhysicalReport {
+            baseline: physical_baseline.into(),
+            candidate_retained: physical_candidate_retained.into(),
+            after_candidate_release: physical_after_candidate_release.into(),
         },
         factory_after_account_release: factory_after_account_release.into(),
     }

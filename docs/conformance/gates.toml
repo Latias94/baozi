@@ -49,7 +49,7 @@ gate_id = "u4c-production-v2"
 tracer_class = "test"
 executor = "command"
 success_condition = "process-exit-zero"
-evidence_identity = "baozi.u4c.production-report/v2-revision-2"
+evidence_identity = "baozi.u4c.production-report/v2-revision-3"
 evidence_paths = ["docs/conformance/u4c-metrics.toml"]
 applicable_contracts = [
   "u4-canonical-scene-lifecycle",

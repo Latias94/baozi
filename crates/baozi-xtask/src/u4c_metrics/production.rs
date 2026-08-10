@@ -48,7 +48,7 @@ use std::process::{self, Command};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 pub(super) const SPECIFICATION_PATH: &str = "docs/conformance/u4c-metrics.toml";
-const SPECIFICATION_SCHEMA_VERSION: u64 = 6;
+const SPECIFICATION_SCHEMA_VERSION: u64 = 7;
 const PRODUCTION_SCOPE: &str = "u4c-production";
 const PRODUCTION_PROBE_PACKAGE: &str = "baozi-core";
 #[cfg(feature = "repository-input-candidate")]
@@ -57,9 +57,17 @@ const PRODUCTION_PROBE_TARGET: &str =
     "canonical_scene::store::tests::production_probe::canonical_store_u4c_production_v2_probe";
 const PRODUCTION_REPORT_PREFIX: &str = "BAOZI_U4C_PRODUCTION_V2=";
 const PRODUCTION_REPORT_SCHEMA_VERSION: u64 = 2;
-const PRODUCTION_REPORT_REVISION: u64 = 2;
+const PRODUCTION_REPORT_REVISION: u64 = 3;
 const PRODUCTION_SCENARIO_SET_ID: &str = "canonical-store-production-v2";
 const MINIMAL_FALLBACK_SCENARIO_ID: &str = "canonical-node-minimal-fallback-v1";
+const PENDING_SCENE_ACTIVATION_ENTRY_POINT: &str = "pending-scene-activation";
+const PENDING_SCENE_ACTIVATION_SCENARIO_ID: &str = "canonical-node-pending-scene-activation-v1";
+const PENDING_SCENE_ACTIVATION_CANONICAL_BLOCKS: u64 = 4;
+const PENDING_SCENE_ACTIVATION_OUTCOME_EVIDENCE_BLOCKS: u64 = 1;
+const PENDING_SCENE_ACTIVATION_NEW_BLOCKS: u64 = 5;
+const PENDING_SCENE_ACTIVATION_SEMANTIC_CELLS: u64 = 62;
+const PENDING_SCENE_ACTIVATION_REFERENCES: u64 = 5;
+const PENDING_SCENE_ACTIVATION_PRODUCER_EVENTS: u64 = 82;
 const PROTECTED_TERMINAL_ACTIVATION_SCENARIO_ID: &str =
     "canonical-node-protected-terminal-activation-v1";
 const ORDINARY_DIMENSION_SEMANTIC_ID_HEX: &str =
@@ -80,6 +88,7 @@ const REQUIRED_COVERAGE_ENTRY_POINTS: &[&str] = &[
     "canonical-obj-corner-smoothing",
     "backend-free-gltf-shape",
     "canonical-profile-closure",
+    "pending-scene-activation",
     "facade-equivalent-inspection",
     "bounded-snapshot",
     "unchanged-view",
@@ -125,6 +134,7 @@ struct ProductionSpecification {
     runner: RunnerSpecification,
     report_contract: ReportContractSpecification,
     ledger_contract: LedgerContractSpecification,
+    pending_scene_activation: PendingSceneActivationSpecification,
     protected_terminal_activation: ProtectedTerminalActivationSpecification,
     minimal_fallback: MinimalFallbackSpecification,
     identity: IdentitySpecification,
@@ -300,6 +310,20 @@ struct ProtectedTerminalActivationSpecification {
     terminal_failure_class: String,
     terminal_failure_code: u32,
     retained_evidence_blocks: u64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PendingSceneActivationSpecification {
+    entry_point: String,
+    scenario_id: String,
+    canonical_block_count: u64,
+    outcome_evidence_block_count: u64,
+    new_block_count: u64,
+    semantic_cells: u64,
+    references: u64,
+    producer_events: u64,
+    max_payload_copy_bytes: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -628,6 +652,7 @@ fn collect_canonical_specification(repository_root: &Path) -> Result<Value, Stri
             "scenario_set_id": report.scenario_set_id,
             "scale_scenarios": report.scale_scenarios.len(),
             "validation_faults": report.validation_faults.len(),
+            "pending_scene_activation": report.pending_scene_activation.scenario_id.as_str(),
             "protected_terminal_activation": report.protected_terminal_activation.scenario_id.as_str(),
             "minimal_fallback": report.minimal_fallback.scenario_id.as_str(),
         },
@@ -675,9 +700,13 @@ impl ProductionSpecification {
             || self.report_contract.payload_bytes == 0
             || !is_lowercase_sha256(&self.report_contract.sha256)
         {
-            return Err("U4c production report_contract is not the frozen V2 contract".to_owned());
+            return Err(
+                "U4c production report_contract is not the frozen production report contract"
+                    .to_owned(),
+            );
         }
         self.ledger_contract.validate()?;
+        self.pending_scene_activation.validate()?;
         self.protected_terminal_activation.validate()?;
         self.minimal_fallback.validate()?;
         if self.identity.rustc_release.is_empty()
@@ -760,6 +789,7 @@ impl ProductionSpecification {
             &self.obj_capability,
             &self.gltf_capability,
             &self.profile_closure,
+            &self.pending_scene_activation,
         )?;
 
         Ok(())
@@ -816,6 +846,31 @@ impl ProtectedTerminalActivationSpecification {
             );
         }
         Ok(())
+    }
+}
+
+impl PendingSceneActivationSpecification {
+    fn validate(&self) -> Result<(), String> {
+        if self.entry_point != PENDING_SCENE_ACTIVATION_ENTRY_POINT
+            || self.scenario_id != PENDING_SCENE_ACTIVATION_SCENARIO_ID
+            || self.canonical_block_count != PENDING_SCENE_ACTIVATION_CANONICAL_BLOCKS
+            || self.outcome_evidence_block_count != PENDING_SCENE_ACTIVATION_OUTCOME_EVIDENCE_BLOCKS
+            || self.new_block_count != PENDING_SCENE_ACTIVATION_NEW_BLOCKS
+            || self.semantic_cells != PENDING_SCENE_ACTIVATION_SEMANTIC_CELLS
+            || self.references != PENDING_SCENE_ACTIVATION_REFERENCES
+            || self.producer_events != PENDING_SCENE_ACTIVATION_PRODUCER_EVENTS
+            || self.max_payload_copy_bytes == 0
+        {
+            return Err(
+                "U4d pending_scene_activation must freeze the bounded private activation tracer"
+                    .to_owned(),
+            );
+        }
+        Ok(())
+    }
+
+    fn matches_mapping(&self, mapping: &CoverageMappingSpecification) -> bool {
+        mapping.entry_point == self.entry_point && mapping.scenario_id == self.scenario_id
     }
 }
 
@@ -1110,6 +1165,7 @@ fn validate_coverage(
     obj_capability: &obj::ObjCapabilitySpecification,
     gltf_capability: &gltf::GltfCapabilitySpecification,
     profile_closure: &profile::ProfileClosureSpecification,
+    pending_scene_activation: &PendingSceneActivationSpecification,
 ) -> Result<(), String> {
     let required = coverage
         .required_entry_points
@@ -1125,6 +1181,7 @@ fn validate_coverage(
         obj_mapping,
         gltf_mapping,
         profile_mapping,
+        pending_activation_mapping,
         consumer_mappings @ ..,
     ] = coverage.mapped_entry_points.as_slice()
     else {
@@ -1149,6 +1206,12 @@ fn validate_coverage(
     {
         return Err(
             "U4c production profile-closure coverage mapping must bind the canonical profile scenario"
+                .to_owned(),
+        );
+    }
+    if !pending_scene_activation.matches_mapping(pending_activation_mapping) {
+        return Err(
+            "U4d pending activation coverage mapping must bind the private canonical activation scenario"
                 .to_owned(),
         );
     }
@@ -3016,6 +3079,7 @@ struct ProductionReport {
     gltf_capability: gltf::GltfCapabilityReport,
     profile_closure: profile::ProfileClosureReport,
     validation_faults: Vec<ValidationFaultReport>,
+    pending_scene_activation: PendingSceneActivationReport,
     protected_terminal_activation: ProtectedTerminalActivationReport,
     minimal_fallback: MinimalFallbackReport,
 }
@@ -3104,6 +3168,22 @@ struct ProtectedTerminalActivationReport {
     handoff: HandoffReport,
     release: ReleaseReport,
     physical_account: FaultPhysicalReport,
+    factory_after_account_release: PhysicalFactoryReport,
+}
+
+#[cfg(feature = "repository-input-candidate")]
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PendingSceneActivationReport {
+    entry_point: String,
+    scenario_id: String,
+    canonical_block_count: u64,
+    outcome_evidence_block_count: u64,
+    new_block_count: u64,
+    directory_identity_preserved: bool,
+    construction: PhaseReport,
+    candidate_release: ReleaseReport,
+    physical_account: PendingSceneActivationPhysicalReport,
     factory_after_account_release: PhysicalFactoryReport,
 }
 
@@ -3329,6 +3409,15 @@ struct FaultPhysicalReport {
 }
 
 #[cfg(feature = "repository-input-candidate")]
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PendingSceneActivationPhysicalReport {
+    baseline: PhysicalAccountReport,
+    candidate_retained: PhysicalAccountReport,
+    after_candidate_release: PhysicalAccountReport,
+}
+
+#[cfg(feature = "repository-input-candidate")]
 #[derive(Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 struct PhysicalAccountReport {
@@ -3423,6 +3512,7 @@ fn validate_production_report(
     gltf::validate_report(specification, &report.gltf_capability)?;
     profile::validate_report(specification, &report.profile_closure)?;
     validate_validation_faults(specification, &report.validation_faults)?;
+    validate_pending_scene_activation(specification, &report.pending_scene_activation)?;
     validate_protected_terminal_activation(specification, &report.protected_terminal_activation)?;
     validate_minimal_fallback(specification, &report.minimal_fallback)?;
 
@@ -3731,6 +3821,104 @@ fn validate_validation_faults(
         )?;
     }
     Ok(())
+}
+
+#[cfg(feature = "repository-input-candidate")]
+fn validate_pending_scene_activation(
+    specification: &ProductionSpecification,
+    report: &PendingSceneActivationReport,
+) -> Result<(), String> {
+    let expected = &specification.pending_scene_activation;
+    if report.entry_point != expected.entry_point
+        || report.scenario_id != expected.scenario_id
+        || report.canonical_block_count != expected.canonical_block_count
+        || report.outcome_evidence_block_count != expected.outcome_evidence_block_count
+        || report.new_block_count != expected.new_block_count
+        || !report.directory_identity_preserved
+    {
+        return Err("U4d pending scene activation semantic evidence drifted".to_owned());
+    }
+
+    let taxonomy = &report.construction.taxonomy;
+    if taxonomy.semantic_cell_writes != expected.semantic_cells
+        || taxonomy.reference_writes != expected.references
+        || taxonomy.producer_events != expected.producer_events
+        || taxonomy.payload_copy_bytes == 0
+        || taxonomy.payload_copy_bytes > expected.max_payload_copy_bytes
+        || taxonomy.payload_backing_allocations != expected.new_block_count
+        || taxonomy.block_begins != expected.new_block_count
+        || taxonomy.block_seals != expected.new_block_count
+        || taxonomy.slot_publications != expected.new_block_count
+        || taxonomy.new_block_begins != expected.new_block_count
+        || taxonomy.new_block_seals != expected.new_block_count
+        || taxonomy.new_slot_publications != expected.new_block_count
+        || taxonomy.inherited_block_begins != 0
+        || taxonomy.inherited_block_seals != 0
+        || taxonomy.inherited_slot_publications != 0
+        || taxonomy.element_decodes != 0
+        || taxonomy.completed_lookups != 0
+        || taxonomy.rejected_lookups != 0
+        || taxonomy.lookup_events != 0
+        || taxonomy.max_lookup_events != 0
+        || taxonomy.member_probes != 0
+        || taxonomy.max_member_probes_per_lookup != 0
+    {
+        return Err("U4d pending scene activation construction transcript drifted".to_owned());
+    }
+    validate_producer_bound(
+        &report.construction,
+        "U4d pending scene activation construction",
+    )?;
+    validate_release(
+        &report.candidate_release,
+        "U4d pending scene activation candidate release",
+    )?;
+
+    let physical = &report.physical_account;
+    validate_released_account(&physical.baseline, "U4d pending scene activation baseline")?;
+    validate_healthy_account(
+        &physical.candidate_retained,
+        "U4d pending scene activation candidate",
+    )?;
+    if physical.baseline.peak_retained_bytes != 0
+        || physical.baseline.peak_retained_allocations != 0
+        || physical.baseline.total_admitted_retained_bytes != 0
+        || physical.baseline.total_admitted_retained_allocations != 0
+        || physical.candidate_retained.live_retained_bytes == 0
+        || physical.candidate_retained.live_retained_allocations == 0
+    {
+        return Err(
+            "U4d pending scene activation did not retain a fresh physical candidate".to_owned(),
+        );
+    }
+    validate_released_account(
+        &physical.after_candidate_release,
+        "U4d pending scene activation candidate release",
+    )?;
+    if physical.after_candidate_release.peak_retained_bytes
+        != physical.candidate_retained.peak_retained_bytes
+        || physical.after_candidate_release.peak_retained_allocations
+            != physical.candidate_retained.peak_retained_allocations
+        || physical
+            .after_candidate_release
+            .total_admitted_retained_bytes
+            != physical.candidate_retained.total_admitted_retained_bytes
+        || physical
+            .after_candidate_release
+            .total_admitted_retained_allocations
+            != physical
+                .candidate_retained
+                .total_admitted_retained_allocations
+    {
+        return Err(
+            "U4d pending scene activation physical history drifted during candidate release"
+                .to_owned(),
+        );
+    }
+    validate_released_factory(
+        &report.factory_after_account_release,
+        "U4d pending scene activation factory release",
+    )
 }
 
 #[cfg(feature = "repository-input-candidate")]
@@ -4362,14 +4550,14 @@ mod tests {
         .expect("managed U4c production specification must be UTF-8");
 
         for retired in [
-            managed.replace("schema_version = 6", "schema_version = 5"),
+            managed.replace("schema_version = 7", "schema_version = 6"),
             managed.replace(
                 "canonical_store_u4c_production_v2_probe",
                 "canonical_store_u4c_production_v1_probe",
             ),
             managed.replace("BAOZI_U4C_PRODUCTION_V2=", "BAOZI_U4C_PRODUCTION_V1="),
             managed.replace("schema_version = 2", "schema_version = 1"),
-            managed.replace("report_revision = 2", "report_revision = 10"),
+            managed.replace("report_revision = 3", "report_revision = 10"),
             managed.replace(
                 "scenario_set_id = \"canonical-store-production-v2\"",
                 "scenario_set_id = \"canonical-store-production-v1\"",
@@ -4486,6 +4674,34 @@ mod tests {
             assert!(
                 ProductionSpecification::parse(malformed.as_bytes()).is_err(),
                 "managed production evidence must reject protected-terminal activation drift"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_pending_scene_activation_contract_drift() {
+        let managed = std::str::from_utf8(include_bytes!(
+            "../../../../docs/conformance/u4c-metrics.toml"
+        ))
+        .expect("managed U4c production specification must be UTF-8");
+
+        for malformed in [
+            managed.replace(
+                "entry_point = \"pending-scene-activation\"",
+                "entry_point = \"retired-pending-activation\"",
+            ),
+            managed.replace(
+                "scenario_id = \"canonical-node-pending-scene-activation-v1\"",
+                "scenario_id = \"retired-pending-activation\"",
+            ),
+            managed.replace(
+                "max_payload_copy_bytes = 1528",
+                "max_payload_copy_bytes = 0",
+            ),
+        ] {
+            assert!(
+                ProductionSpecification::parse(malformed.as_bytes()).is_err(),
+                "managed production evidence must reject pending activation contract drift"
             );
         }
     }
@@ -4802,6 +5018,38 @@ mod tests {
         let error = ProductionSpecification::parse(mapped.as_bytes())
             .expect_err("synthetic glTF coverage mapping must be rejected");
         assert!(error.contains("glTF coverage mapping"), "{error}");
+    }
+
+    #[test]
+    fn rejects_coverage_mapping_to_the_wrong_pending_activation_scenario() {
+        let managed = std::str::from_utf8(include_bytes!(
+            "../../../../docs/conformance/u4c-metrics.toml"
+        ))
+        .expect("managed U4c production specification must be UTF-8");
+        let mapped = managed.replace(
+            "{ entry_point = \"pending-scene-activation\", scenario_id = \"canonical-node-pending-scene-activation-v1\" }",
+            "{ entry_point = \"pending-scene-activation\", scenario_id = \"wrong-pending-scenario-v1\" }",
+        );
+
+        let error = ProductionSpecification::parse(mapped.as_bytes())
+            .expect_err("synthetic pending activation coverage mapping must be rejected");
+        assert!(error.contains("pending activation coverage"), "{error}");
+    }
+
+    #[test]
+    fn rejects_missing_pending_activation_coverage_mapping() {
+        let managed = std::str::from_utf8(include_bytes!(
+            "../../../../docs/conformance/u4c-metrics.toml"
+        ))
+        .expect("managed U4c production specification must be UTF-8");
+        let unmapped = managed.replace(
+            "    { entry_point = \"pending-scene-activation\", scenario_id = \"canonical-node-pending-scene-activation-v1\" },\n",
+            "",
+        );
+
+        let error = ProductionSpecification::parse(unmapped.as_bytes())
+            .expect_err("pending activation must remain mapped");
+        assert!(error.contains("pending activation coverage"), "{error}");
     }
 
     #[test]

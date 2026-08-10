@@ -15,7 +15,7 @@ use super::super::super::construction::{FAILURE_TERMINAL_WORK_DIMENSION, STORE_D
 pub(super) const REPORT_PREFIX: &str = "BAOZI_U4C_PRODUCTION_V2=";
 const REPORT_SCHEMA_ID: &str = "baozi.u4c.production-report";
 const REPORT_SCHEMA_VERSION: u32 = 2;
-const REPORT_REVISION: u32 = 2;
+const REPORT_REVISION: u32 = 3;
 const SCENARIO_SET_ID: &str = "canonical-store-production-v2";
 
 #[derive(Serialize)]
@@ -30,6 +30,7 @@ pub(super) struct ProductionReport {
     gltf_capability: GltfCapabilityReport,
     profile_closure: ProfileClosureReport,
     validation_faults: Vec<ValidationFaultReport>,
+    pending_scene_activation: PendingSceneActivationReport,
     protected_terminal_activation: ProtectedTerminalActivationReport,
     minimal_fallback: MinimalFallbackReport,
 }
@@ -41,6 +42,7 @@ pub(super) struct ProductionReportScenarios {
     pub(super) gltf_capability: GltfCapabilityReport,
     pub(super) profile_closure: ProfileClosureReport,
     pub(super) validation_faults: Vec<ValidationFaultReport>,
+    pub(super) pending_scene_activation: PendingSceneActivationReport,
     pub(super) protected_terminal_activation: ProtectedTerminalActivationReport,
     pub(super) minimal_fallback: MinimalFallbackReport,
 }
@@ -54,6 +56,7 @@ impl ProductionReport {
             gltf_capability,
             profile_closure,
             validation_faults,
+            pending_scene_activation,
             protected_terminal_activation,
             minimal_fallback,
         } = scenarios;
@@ -68,6 +71,7 @@ impl ProductionReport {
             gltf_capability,
             profile_closure,
             validation_faults,
+            pending_scene_activation,
             protected_terminal_activation,
             minimal_fallback,
         }
@@ -667,6 +671,20 @@ pub(super) struct ProtectedTerminalActivationReport {
 }
 
 #[derive(Serialize)]
+pub(super) struct PendingSceneActivationReport {
+    pub(super) entry_point: &'static str,
+    pub(super) scenario_id: &'static str,
+    pub(super) canonical_block_count: usize,
+    pub(super) outcome_evidence_block_count: usize,
+    pub(super) new_block_count: usize,
+    pub(super) directory_identity_preserved: bool,
+    pub(super) construction: PhaseReport,
+    pub(super) candidate_release: ReleaseReport,
+    pub(super) physical_account: PendingSceneActivationPhysicalReport,
+    pub(super) factory_after_account_release: PhysicalFactoryReport,
+}
+
+#[derive(Serialize)]
 pub(super) struct PhaseReport {
     scenario_id: &'static str,
     taxonomy: MeasurementTaxonomy,
@@ -804,6 +822,13 @@ pub(super) struct FaultPhysicalReport {
     pub(super) retained: PhysicalAccountReport,
     pub(super) after_handoff: PhysicalAccountReport,
     pub(super) after_release: PhysicalAccountReport,
+}
+
+#[derive(Serialize)]
+pub(super) struct PendingSceneActivationPhysicalReport {
+    pub(super) baseline: PhysicalAccountReport,
+    pub(super) candidate_retained: PhysicalAccountReport,
+    pub(super) after_candidate_release: PhysicalAccountReport,
 }
 
 #[derive(Serialize)]
@@ -1069,9 +1094,9 @@ pub(super) fn render(report: &ProductionReport) -> String {
 }
 
 #[test]
-fn production_report_contract_is_v2() {
+fn production_report_contract_is_v2_revision_3() {
     assert_eq!(REPORT_SCHEMA_ID, "baozi.u4c.production-report");
     assert_eq!(REPORT_SCHEMA_VERSION, 2);
-    assert_eq!(REPORT_REVISION, 2);
+    assert_eq!(REPORT_REVISION, 3);
     assert_eq!(SCENARIO_SET_ID, "canonical-store-production-v2");
 }

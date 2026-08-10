@@ -68,11 +68,6 @@ impl PendingSceneActivation {
     pub(in crate::canonical_scene::store) fn refs(&self) -> SceneBlockRefs {
         self.candidate.output().refs
     }
-
-    pub(in crate::canonical_scene::store) fn has_validation_proof(&self) -> bool {
-        let _proof = self.candidate.proof();
-        true
-    }
 }
 
 #[must_use = "the activated candidate or prepared terminal outcome must be consumed"]

@@ -182,7 +182,6 @@ fn sealed_activation_request_reaches_a_core_owned_validated_candidate() {
         usize::try_from(super::schema::CANONICAL_BLOCK_COUNT).unwrap()
     );
     assert_eq!(candidate.directory(), candidate.refs().directory);
-    assert!(candidate.has_validation_proof());
     assert!(account.snapshot().live_retained_allocations() > 0);
 
     drop(candidate);
