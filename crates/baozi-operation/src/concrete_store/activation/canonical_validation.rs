@@ -10,7 +10,7 @@ use super::super::{
     OutcomeEvidenceStoreRef, RecordBlock, RetainedStoreWorkControl, ScalarSequence,
     StoreValidationSession, StoreWorkError, StoredScalar, Utf8Block,
 };
-use super::validation_batch::ValidationWorkBatch;
+use super::work_batch::CompletionPrefixBatch;
 use super::{
     CANONICAL_VALIDATION_CONTRACT_FAILURE_CODE, CanonicalWorkPermit, try_begin_canonical_work,
 };
@@ -77,7 +77,7 @@ where
     rejected: bool,
     first_fault: &'control mut Option<CanonicalValidationFirstFault>,
     contract_failed: bool,
-    work_batch: ValidationWorkBatch,
+    work_batch: CompletionPrefixBatch,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -172,7 +172,7 @@ where
             rejected: false,
             first_fault,
             contract_failed: false,
-            work_batch: ValidationWorkBatch::new(),
+            work_batch: CompletionPrefixBatch::new(),
         })
     }
 

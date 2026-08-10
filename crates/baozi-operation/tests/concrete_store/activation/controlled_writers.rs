@@ -62,7 +62,6 @@ fn operation_with_materialization_work_limit(
     )
 }
 
-#[cfg(target_pointer_width = "64")]
 fn publish_rejected_writer(
     outcome: CanonicalActivationOutcome<
         TestOwner,
@@ -84,6 +83,49 @@ fn publish_rejected_writer(
     };
     let (prepared, _cause) = rejected.prepare_minimal_fallback().unwrap().into_parts();
     prepared.handoff()
+}
+
+fn rejected_sequence_prefix_work(completed: usize) -> (u64, u64) {
+    let factory = factory(1);
+    let account = account(&factory);
+    let (operation, keys) = operation(&account);
+    let planned = completed.checked_add(1).expect("test plan remains bounded");
+
+    let outcome = plan_activation!(
+        operation,
+        activation_shape(keys, 1, 1),
+        |preflight| preflight.seal(),
+        |mut lane| {
+            let cause = lane
+                .try_retain_sequence(
+                    SequencePlan::<u8>::new(planned).unwrap(),
+                    SequenceTag,
+                    |writer| {
+                        for value in 0..completed {
+                            writer.push(u8::try_from(value % 251).unwrap())?;
+                        }
+                        Err(StoreBuildError::domain(73).unwrap().into())
+                    },
+                )
+                .unwrap_err();
+            assert!(matches!(cause, StoreRuntimeError::Build(_)));
+            lane.reject::<(), _, ScalarSequence<u8>, SequenceTag>(
+                MaterializationRejection::Semantic,
+                74,
+            )
+        },
+    )
+    .unwrap();
+
+    let published = publish_rejected_writer(outcome);
+    let dimension = published
+        .ledger_evidence
+        .dimension(keys.dimension)
+        .expect("canonical writer work remains queryable");
+    let work = (dimension.attempted(), dimension.consumed());
+    drop(published);
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
+    work
 }
 
 #[cfg(target_pointer_width = "64")]
@@ -316,6 +358,269 @@ fn canonical_sequence_underwrite_preserves_the_attempted_suffix() {
 fn canonical_sequence_overrun_cannot_escape_an_ignored_writer_error() {
     let (attempted, consumed) = rejected_sequence_work(ExactSequenceFault::Overrun);
     assert_eq!(attempted, consumed);
+}
+
+#[test]
+fn canonical_sequence_batches_255_256_and_257_completed_units_exactly() {
+    for completed in [255, 256, 257] {
+        let (attempted, consumed) = rejected_sequence_prefix_work(completed);
+        assert_eq!(
+            attempted.checked_sub(consumed),
+            Some(1),
+            "completed prefix {completed} must leave only the planned suffix attempted-only"
+        );
+    }
+}
+
+#[test]
+fn canonical_sequence_cancellation_is_observed_at_the_256_unit_boundary() {
+    let factory = factory(1);
+    let account = account(&factory);
+    let cancellation = CancellationToken::new();
+    let control = OperationControl::default().with_cancellation(cancellation.clone());
+    let (operation, keys) = operation_with_control(&account, control);
+    let completed = Cell::new(0_usize);
+
+    let outcome = plan_activation!(
+        operation,
+        activation_shape(keys, 1, 1),
+        |preflight| preflight.seal(),
+        |mut lane| {
+            let cause = lane
+                .try_retain_sequence(
+                    SequencePlan::<u8>::new(300).unwrap(),
+                    SequenceTag,
+                    |writer| loop {
+                        match writer.push(1) {
+                            Ok(()) => {
+                                let next = completed.get() + 1;
+                                completed.set(next);
+                                if next == 1 {
+                                    cancellation.cancel();
+                                }
+                            }
+                            Err(cause) => return Err(cause),
+                        }
+                    },
+                )
+                .unwrap_err();
+            assert!(matches!(cause, StoreRuntimeError::Control(_)));
+            lane.reject::<(), _, ScalarSequence<u8>, SequenceTag>(
+                MaterializationRejection::Semantic,
+                75,
+            )
+        },
+    )
+    .unwrap();
+
+    assert_eq!(completed.get(), 256);
+    let published = publish_rejected_writer(outcome);
+    let dimension = published
+        .ledger_evidence
+        .dimension(keys.dimension)
+        .expect("cancelled canonical writer work remains queryable");
+    assert_eq!(dimension.attempted() - dimension.consumed(), 44);
+    drop(published);
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
+}
+
+#[test]
+fn canonical_sequence_finish_polls_after_flushing_the_final_prefix() {
+    let factory = factory(1);
+    let account = account(&factory);
+    let cancellation = CancellationToken::new();
+    let control = OperationControl::default().with_cancellation(cancellation.clone());
+    let (operation, keys) = operation_with_control(&account, control);
+
+    let outcome = plan_activation!(
+        operation,
+        activation_shape(keys, 1, 1),
+        |preflight| preflight.seal(),
+        |mut lane| {
+            let cause = lane
+                .try_retain_sequence(SequencePlan::<u8>::new(1).unwrap(), SequenceTag, |writer| {
+                    writer.push(1)?;
+                    cancellation.cancel();
+                    Ok(())
+                })
+                .unwrap_err();
+            assert!(matches!(cause, StoreRuntimeError::Control(_)));
+            lane.reject::<(), _, ScalarSequence<u8>, SequenceTag>(
+                MaterializationRejection::Semantic,
+                76,
+            )
+        },
+    )
+    .unwrap();
+
+    let published = publish_rejected_writer(outcome);
+    let dimension = published
+        .ledger_evidence
+        .dimension(keys.dimension)
+        .expect("finish-time cancellation work remains queryable");
+    assert_eq!(dimension.attempted(), dimension.consumed());
+    drop(published);
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
+}
+
+#[test]
+fn canonical_sequence_and_bytes_split_writes_honor_the_shared_checkpoint() {
+    let factory = factory(1);
+    let account = account(&factory);
+    let (operation, keys) = operation(&account);
+    let sequence_tail = [2_u8; 256];
+    let bytes_tail = [4_u8; 256];
+
+    let outcome = plan_activation!(
+        operation,
+        activation_shape(keys, 2, 1),
+        |preflight| preflight.seal::<()>(),
+        |mut lane| {
+            let _sequence = lane
+                .try_retain_sequence(
+                    SequencePlan::<u8>::new(257).unwrap(),
+                    SequenceTag,
+                    |writer| {
+                        writer.push(1)?;
+                        writer.extend_from_slice(&sequence_tail)?;
+                        Ok(())
+                    },
+                )
+                .unwrap();
+            let bytes = lane
+                .try_retain_bytes(BytesPlan::new(257).unwrap(), BytesTag, |writer| {
+                    writer.write_bytes(&[3])?;
+                    writer.write_bytes(&bytes_tail)?;
+                    Ok(())
+                })
+                .unwrap();
+            lane.complete::<_, (), _, _>(bytes, ())
+        },
+    )
+    .unwrap();
+
+    assert!(matches!(outcome, CanonicalActivationOutcome::Activated(_)));
+    drop(outcome);
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
+}
+
+#[test]
+fn canonical_utf8_preserves_a_scalar_across_the_256_byte_boundary() {
+    let factory = factory(1);
+    let account = account(&factory);
+    let (operation, keys) = operation(&account);
+    let value = format!("{}é", "a".repeat(255));
+    assert_eq!(value.len(), 257);
+
+    let outcome = plan_activation!(
+        operation,
+        activation_shape(keys, 1, 1),
+        |preflight| preflight.seal::<()>(),
+        |mut lane| {
+            let root = lane
+                .try_retain_utf8(Utf8Plan::new(value.len()).unwrap(), TextTag, |writer| {
+                    writer.write_str(&value)?;
+                    Ok(())
+                })
+                .unwrap();
+            lane.complete::<_, (), _, _>(root, ())
+        },
+    )
+    .unwrap();
+
+    assert!(matches!(outcome, CanonicalActivationOutcome::Activated(_)));
+    drop(outcome);
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
+}
+
+#[test]
+fn canonical_record_batches_one_64_field_row_and_flushes_partial_rows() {
+    let factory = factory(1);
+    let account = account(&factory);
+    let (operation, keys) = operation(&account);
+
+    let outcome = plan_activation!(
+        operation,
+        activation_shape(keys, 1, 1),
+        |preflight| preflight.seal(),
+        |mut lane| {
+            let cause = lane
+                .try_retain_records(
+                    RecordPlan::new(1, 64).unwrap(),
+                    CanonicalRootTag,
+                    |writer| {
+                        writer.write_row(|row| {
+                            for value in 0_u8..63 {
+                                row.write_scalar(value)?;
+                            }
+                            Err(StoreBuildError::domain(76).unwrap().into())
+                        })?;
+                        Ok(())
+                    },
+                )
+                .unwrap_err();
+            assert!(matches!(cause, StoreRuntimeError::Build(_)));
+            lane.reject::<(), _, baozi_operation::RecordBlock, CanonicalRootTag>(
+                MaterializationRejection::Semantic,
+                77,
+            )
+        },
+    )
+    .unwrap();
+
+    let rejected = match outcome {
+        CanonicalActivationOutcome::Rejected(rejected) => rejected,
+        CanonicalActivationOutcome::Activated(_)
+        | CanonicalActivationOutcome::NeverActivated(_)
+        | CanonicalActivationOutcome::Fallback(_) => {
+            panic!("a partial canonical record row must not activate")
+        }
+    };
+    let (prepared, _cause) = rejected.prepare_minimal_fallback().unwrap().into_parts();
+    let published = prepared.handoff();
+    let dimension = published
+        .ledger_evidence
+        .dimension(keys.dimension)
+        .expect("canonical record work remains queryable");
+    assert_eq!(dimension.attempted() - dimension.consumed(), 1);
+    drop(published);
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
+}
+
+#[test]
+fn canonical_record_accepts_one_complete_64_field_row() {
+    let factory = factory(1);
+    let account = account(&factory);
+    let (operation, keys) = operation(&account);
+
+    let outcome = plan_activation!(
+        operation,
+        activation_shape(keys, 1, 1),
+        |preflight| preflight.seal::<()>(),
+        |mut lane| {
+            let root = lane
+                .try_retain_records(
+                    RecordPlan::new(1, 64).unwrap(),
+                    CanonicalRootTag,
+                    |writer| {
+                        writer.write_row(|row| {
+                            for value in 0_u8..64 {
+                                row.write_scalar(value)?;
+                            }
+                            Ok(())
+                        })?;
+                        Ok(())
+                    },
+                )
+                .unwrap();
+            lane.complete::<_, (), _, _>(root, ())
+        },
+    )
+    .unwrap();
+
+    assert!(matches!(outcome, CanonicalActivationOutcome::Activated(_)));
+    drop(outcome);
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
 }
 
 #[test]

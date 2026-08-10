@@ -371,7 +371,7 @@ fn dropped_borrowed_work_permit_preserves_prefix_and_latches_abandonment() {
 }
 
 #[cfg(feature = "_u4-activation")]
-fn assert_abandoned_validation_permit_cannot_validate_success(forget: bool) {
+fn assert_unresolved_validation_permit_cannot_validate_success(forget: bool) {
     let factory = account_factory(1);
     let account = account(&factory, u64::MAX, 128);
     let operation = ordinary_linear_work_operation(&account, 8, 8);
@@ -405,10 +405,27 @@ fn assert_abandoned_validation_permit_cannot_validate_success(forget: bool) {
             panic!("an abandoned validation permit must not produce a success proof")
         }
     };
+    let preparation = fallback.prepare_minimal_fallback();
+    if forget {
+        let containment = match preparation {
+            Ok(_) => panic!("a forgotten validation permit must not prepare any exact owner"),
+            Err(RetainedPublicationPrepareError::FinalizationContainment(containment)) => {
+                containment
+            }
+        };
+        assert_eq!(
+            containment.reason(),
+            AccountPoisonReason::OwnershipGraphUnverified
+        );
+        let snapshot = account.snapshot();
+        assert!(snapshot.poisoned());
+        assert!(snapshot.live_retained_allocations() > 0);
+        drop(account);
+        assert!(factory.snapshot().live_accounts() > 0);
+        return;
+    }
     let published = handoff_for_test(
-        fallback
-            .prepare_minimal_fallback()
-            .unwrap_or_else(|_| panic!("abandoned validation must prepare fallback")),
+        preparation.unwrap_or_else(|_| panic!("dropped validation must prepare fallback")),
     );
     let PublishedRetainedPublicationParts::MinimalFallback {
         ledger_evidence, ..
@@ -429,13 +446,13 @@ fn assert_abandoned_validation_permit_cannot_validate_success(forget: bool) {
 #[cfg(feature = "_u4-activation")]
 #[test]
 fn dropped_validation_permit_cannot_validate_success() {
-    assert_abandoned_validation_permit_cannot_validate_success(false);
+    assert_unresolved_validation_permit_cannot_validate_success(false);
 }
 
 #[cfg(feature = "_u4-activation")]
 #[test]
-fn forgotten_validation_permit_cannot_validate_success() {
-    assert_abandoned_validation_permit_cannot_validate_success(true);
+fn forgotten_validation_permit_forces_finalization_containment() {
+    assert_unresolved_validation_permit_cannot_validate_success(true);
 }
 
 #[cfg(feature = "_u4-activation")]
@@ -1783,7 +1800,7 @@ fn run_failure_guard_case(case: FailureGuardCase, fault: FailureFault) {
     );
 
     match fault {
-        FailureFault::Guard(FailureGuardDropStage::Qualified | FailureGuardDropStage::Eligible) => {
+        FailureFault::Guard(FailureGuardDropStage::Qualified) => {
             assert!(ledger.is_terminal_qualified());
             assert_eq!(physical_after_counts, physical_before);
             assert_eq!(ledger_after, ledger_before);
@@ -1819,9 +1836,11 @@ fn run_failure_guard_case(case: FailureGuardCase, fault: FailureFault) {
                 assert!(ledger_after.1 < ledger_before.1);
             }
         }
-        FailureFault::Guard(FailureGuardDropStage::LedgerPublished)
+        FailureFault::Guard(
+            FailureGuardDropStage::EligibilityReady | FailureGuardDropStage::LedgerDetached,
+        )
         | FailureFault::EvidenceWrite => {
-            assert!(!ledger.is_terminal_qualified());
+            assert!(!ledger.is_available());
             assert_eq!(ledger_after, (0, 0));
             assert!(physical_after_counts.0 > 0);
             assert!(physical_after_counts.1 > 0);
@@ -1842,7 +1861,7 @@ fn rich_and_minimal_owning_guards_contain_direct_drop_at_every_stable_state() {
     ] {
         for stage in [
             FailureGuardDropStage::Qualified,
-            FailureGuardDropStage::Eligible,
+            FailureGuardDropStage::EligibilityReady,
             FailureGuardDropStage::FreezeReady,
         ] {
             run_failure_guard_case(case, FailureFault::Guard(stage));
@@ -1876,14 +1895,14 @@ fn evidence_discard_continuation_owns_the_graph_after_physical_cleanup() {
 }
 
 #[test]
-fn failure_rails_contain_both_sides_of_the_ledger_published_evidence_write_window() {
+fn failure_rails_contain_both_sides_of_the_ledger_sealed_evidence_write_window() {
     for case in [
         FailureGuardCase::RichEvidence,
         FailureGuardCase::MinimalNone,
     ] {
         run_failure_guard_case(
             case,
-            FailureFault::Guard(FailureGuardDropStage::LedgerPublished),
+            FailureFault::Guard(FailureGuardDropStage::LedgerDetached),
         );
         run_failure_guard_case(case, FailureFault::EvidenceWrite);
     }
@@ -2054,7 +2073,7 @@ fn success_guard_direct_drop_contains_physical_before_retaining_ledger_proof() {
         SuccessGuardDropStage::Qualified,
         SuccessGuardDropStage::Verified,
         SuccessGuardDropStage::PublicationReady,
-        SuccessGuardDropStage::FreezeReady,
+        SuccessGuardDropStage::EligibilityReady,
     ] {
         let factory = account_factory(1);
         let account = account(&factory, u64::MAX, 128);
@@ -2094,7 +2113,6 @@ fn success_guard_direct_drop_contains_physical_before_retaining_ledger_proof() {
 
         let physical_after = account.snapshot();
         let ledger_after = (ledger.active_reservations(), ledger.current_live_bytes());
-        assert!(ledger.is_terminal_qualified());
         assert_eq!(
             physical_after
                 .first_poison_evidence()
@@ -2104,6 +2122,7 @@ fn success_guard_direct_drop_contains_physical_before_retaining_ledger_proof() {
         );
         match stage {
             SuccessGuardDropStage::Qualified => {
+                assert!(ledger.is_terminal_qualified());
                 assert_eq!(
                     physical_after.live_retained_bytes(),
                     physical_before.live_retained_bytes()
@@ -2115,6 +2134,7 @@ fn success_guard_direct_drop_contains_physical_before_retaining_ledger_proof() {
                 assert_eq!(ledger_after, ledger_before);
             }
             SuccessGuardDropStage::Verified => {
+                assert!(ledger.is_terminal_qualified());
                 assert!(
                     physical_after.live_retained_bytes() < physical_before.live_retained_bytes()
                 );
@@ -2124,7 +2144,8 @@ fn success_guard_direct_drop_contains_physical_before_retaining_ledger_proof() {
                 );
                 assert_eq!(ledger_after, ledger_before);
             }
-            SuccessGuardDropStage::PublicationReady | SuccessGuardDropStage::FreezeReady => {
+            SuccessGuardDropStage::PublicationReady => {
+                assert!(ledger.is_terminal_qualified());
                 assert!(
                     physical_after.live_retained_bytes() < physical_before.live_retained_bytes()
                 );
@@ -2135,7 +2156,18 @@ fn success_guard_direct_drop_contains_physical_before_retaining_ledger_proof() {
                 assert!(ledger_after.0 < ledger_before.0);
                 assert!(ledger_after.1 < ledger_before.1);
             }
-            SuccessGuardDropStage::VerifiedInProgress | SuccessGuardDropStage::LedgerPublished => {
+            SuccessGuardDropStage::EligibilityReady => {
+                assert!(!ledger.is_available());
+                assert!(
+                    physical_after.live_retained_bytes() < physical_before.live_retained_bytes()
+                );
+                assert!(
+                    physical_after.live_retained_allocations()
+                        < physical_before.live_retained_allocations()
+                );
+                assert_eq!(ledger_after, (0, 0));
+            }
+            SuccessGuardDropStage::VerifiedInProgress | SuccessGuardDropStage::LedgerDetached => {
                 unreachable!("mid-transition stages are covered by unwind probes")
             }
         }
@@ -2201,7 +2233,7 @@ fn success_acknowledgement_panic_does_not_retry_or_release_unacknowledged_ledger
 }
 
 #[test]
-fn success_ledger_freeze_panic_before_evidence_freeze_uses_scopeguard_containment() {
+fn success_ledger_detach_panic_before_evidence_freeze_uses_scopeguard_containment() {
     let factory = account_factory(1);
     let account = account(&factory, u64::MAX, 128);
     let operation = test_operation_on_account_with_control(
@@ -2213,7 +2245,7 @@ fn success_ledger_freeze_panic_before_evidence_freeze_uses_scopeguard_containmen
     let ledger = operation.coordinator.retained_ledger().test_probe();
     let mut assembly: TestPublication<u64, u64> = operation
         .try_publication_assembly(publication_plan(1, 1))
-        .unwrap_or_else(|_| panic!("ledger-published publication must open"));
+        .unwrap_or_else(|_| panic!("ledger-detached publication must open"));
     let (canonical_root, evidence_root) = retain_scalar_success(&mut assembly);
     let validated = match assembly.validate_success(
         canonical_root,
@@ -2224,17 +2256,17 @@ fn success_ledger_freeze_panic_before_evidence_freeze_uses_scopeguard_containmen
         },
     ) {
         RetainedSuccessValidation::Valid(validated) => validated,
-        _ => panic!("ledger-published graph must validate"),
+        _ => panic!("ledger-detached graph must validate"),
     };
 
-    drop_next_success_guard(SuccessGuardDropStage::LedgerPublished);
+    drop_next_success_guard(SuccessGuardDropStage::LedgerDetached);
     let unwind = catch_unwind(AssertUnwindSafe(|| {
         let _ = validated.try_prepare(final_progress());
     }));
     assert!(unwind.is_err());
 
     let physical_after = account.snapshot();
-    assert!(!ledger.is_terminal_qualified());
+    assert!(!ledger.is_available());
     assert_eq!(ledger.active_reservations(), 0);
     assert_eq!(ledger.current_live_bytes(), 0);
     assert_eq!(

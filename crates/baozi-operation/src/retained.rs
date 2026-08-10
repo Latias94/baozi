@@ -105,6 +105,7 @@ use ownership::{
 use ownership::{RetainedStorageDropSeverity, join_pre_attribution_cleanup_cause};
 #[cfg(test)]
 use physical::AccountControlInner;
+pub(crate) use physical::DetachedLedgerCommitPermit;
 #[cfg(test)]
 use physical::RetainedAdmissionPairPlan;
 #[cfg(test)]
@@ -113,8 +114,8 @@ use physical::{
     PendingStartRetainedAdmissions,
 };
 use physical::{
-    AccountLinearState, PendingAccountActionAdmission, PendingRetainedAdmission,
-    PublicationEligibility, RetainedShareAdmissionError,
+    AccountBoundJointCommit, AccountBoundPublicationManifest, AccountLinearState,
+    PendingAccountActionAdmission, PendingRetainedAdmission, RetainedShareAdmissionError,
 };
 pub use physical::{
     PhysicalStorageAccount, PhysicalStorageAccountCreateError, PhysicalStorageAccountFactory,
@@ -3183,9 +3184,9 @@ enum SuccessGuardDropStage {
     Qualified,
     Verified,
     PublicationReady,
-    FreezeReady,
+    EligibilityReady,
     VerifiedInProgress,
-    LedgerPublished,
+    LedgerDetached,
 }
 
 #[cfg(test)]
@@ -3199,11 +3200,11 @@ enum FailureTerminalRail {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FailureGuardDropStage {
     Qualified,
-    Eligible,
+    EligibilityReady,
     CanonicalAcknowledged,
     DiscardCleaned,
     FreezeReady,
-    LedgerPublished,
+    LedgerDetached,
 }
 
 #[cfg(test)]

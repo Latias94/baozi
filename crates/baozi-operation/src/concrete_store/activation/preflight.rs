@@ -605,6 +605,13 @@ where
         self.len() == 0
     }
 
+    #[cfg(test)]
+    pub(in crate::concrete_store) fn test_ledger_probe(
+        &self,
+    ) -> crate::ledger::LedgerTestProbe<StorePhaseKey, StoreDimensionKey> {
+        self.assembly.raw.test_ledger_probe()
+    }
+
     pub fn control_checkpoint<'borrow>(
         &'borrow mut self,
     ) -> Result<CanonicalMaterializationCheckpoint<'borrow, 'activation, O, PP, U>, StoreRuntimeError>

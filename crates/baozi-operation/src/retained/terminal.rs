@@ -224,7 +224,10 @@ impl<P, D, F, CanonicalBlock, EvidenceBlock>
         cause
     }
 
-    fn contain_after_quarantine(self, cause: AccountPoisoned) -> FinalizationContainmentError {
+    pub(super) fn contain_after_quarantine(
+        self,
+        cause: AccountPoisoned,
+    ) -> FinalizationContainmentError {
         let reason = cause.snapshot().first_poison_evidence().map_or(
             AccountPoisonReason::OwnershipGraphUnverified,
             AccountPoisonEvidence::reason,
@@ -451,6 +454,17 @@ where
     set_id: RetainedSetId,
 }
 
+struct DetachedReadySuccessState<O, P, D, F, CanonicalBlock, EvidenceBlock>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+{
+    physical: QualifiedSuccessPhysical<P, D, F, CanonicalBlock, EvidenceBlock>,
+    proof: crate::ledger::DetachedTypedFreezeProof<O, P, D>,
+    set_id: RetainedSetId,
+}
+
 struct VerifiedSuccessPhysicalDiscard<O, P, D, F, CanonicalBlock, EvidenceBlock>
 where
     O: OperationOwner,
@@ -491,27 +505,28 @@ pub(super) struct FreezeReadyDetachedTerminalEvidence<P, D> {
     qualification: TerminalEvidenceFreezeQualification,
 }
 
-struct FreezeReadySuccessGraph<O, P, D, F, CanonicalBlock, EvidenceBlock>
+type EligibilityReadySuccessJointCommit<O, P, D, F, CanonicalBlock, EvidenceBlock> =
+    AccountBoundJointCommit<
+        EligibilityReadySuccessPhysical<P, D, F, CanonicalBlock, EvidenceBlock>,
+        O,
+        P,
+        D,
+    >;
+
+struct EligibilityReadySuccessGraph<O, P, D, F, CanonicalBlock, EvidenceBlock>
 where
     O: OperationOwner,
     P: Copy + Ord,
     D: Copy + Ord,
 {
-    state: Option<FreezeReadySuccessState<O, P, D, F, CanonicalBlock, EvidenceBlock>>,
+    state: Option<EligibilityReadySuccessJointCommit<O, P, D, F, CanonicalBlock, EvidenceBlock>>,
 }
 
-struct FreezeReadySuccessState<O, P, D, F, CanonicalBlock, EvidenceBlock>
-where
-    O: OperationOwner,
-    P: Copy + Ord,
-    D: Copy + Ord,
-{
+struct EligibilityReadySuccessPhysical<P, D, F, CanonicalBlock, EvidenceBlock> {
     canonical_table: RetainedTableAllocation<CanonicalBlock>,
     evidence_table: RetainedTableAllocation<EvidenceBlock>,
     account: PhysicalStorageAccount,
-    evidence: FreezeReadyDetachedTerminalEvidence<P, D>,
-    eligibility: PublicationEligibility,
-    proof: FreezeReadyTypedProof<O, P, D>,
+    evidence: DetachedRetainedPart<TerminalLedgerEvidence<P, D>>,
     canonical_root: RetainedSlotIdentity,
     evidence_root: RetainedSlotIdentity,
     set_id: RetainedSetId,
@@ -698,13 +713,11 @@ where
         #[cfg(test)]
         let publication_ready =
             maybe_drop_success_guard(SuccessGuardDropStage::PublicationReady, publication_ready);
-        // Account eligibility is the final fallible transition. A successful result enters the
-        // existing freeze-ready suffix, which has no cleanup, qualification, or callback branch.
-        let freeze_ready = publication_ready.try_into_freeze_ready()?;
+        let eligibility_ready = publication_ready.try_detach_and_freeze()?;
         #[cfg(test)]
-        let freeze_ready =
-            maybe_drop_success_guard(SuccessGuardDropStage::FreezeReady, freeze_ready);
-        Ok(freeze_ready.freeze())
+        let eligibility_ready =
+            maybe_drop_success_guard(SuccessGuardDropStage::EligibilityReady, eligibility_ready);
+        eligibility_ready.try_into_prepared()
     }
 }
 
@@ -748,43 +761,6 @@ impl<P, D, F, CanonicalBlock, EvidenceBlock>
             Some(account),
         )
     }
-
-    fn into_freeze_ready<O>(
-        self,
-        proof: FreezeReadyTypedProof<O, P, D>,
-        eligibility: PublicationEligibility,
-        set_id: RetainedSetId,
-    ) -> FreezeReadySuccessGraph<O, P, D, F, CanonicalBlock, EvidenceBlock>
-    where
-        O: OperationOwner,
-        P: Copy + Ord,
-        D: Copy + Ord,
-    {
-        let Self {
-            fallback,
-            evidence,
-            canonical_table,
-            evidence_table,
-            account,
-            canonical_root,
-            evidence_root,
-        } = self;
-        drop(fallback);
-        FreezeReadySuccessGraph {
-            state: Some(FreezeReadySuccessState {
-                canonical_table,
-                evidence_table,
-                account,
-                evidence,
-                eligibility,
-                proof,
-                canonical_root,
-                evidence_root,
-                set_id,
-                fallback_type: PhantomData,
-            }),
-        }
-    }
 }
 
 impl<O, P, D, F, CanonicalBlock, EvidenceBlock>
@@ -802,46 +778,118 @@ where
             .unwrap_or_else(|| unreachable_final_owner_state())
     }
 
-    fn contain_after_quarantine(
-        mut self,
-        quarantine: AccountPoisoned,
-    ) -> FinalizationContainmentError {
-        let PublicationReadySuccessState {
-            physical,
-            proof,
-            set_id: _,
-        } = self.take_state();
-        let cause = physical
-            .into_terminal()
-            .contain_after_quarantine(quarantine);
-        proof.retain_fail_closed();
-        cause
-    }
-
-    fn try_into_freeze_ready(
+    fn try_detach_and_freeze(
         mut self,
     ) -> Result<
-        FreezeReadySuccessGraph<O, P, D, F, CanonicalBlock, EvidenceBlock>,
+        EligibilityReadySuccessGraph<O, P, D, F, CanonicalBlock, EvidenceBlock>,
         FinalizationContainmentError,
     > {
-        let eligibility = match self
-            .state
-            .as_ref()
-            .unwrap_or_else(|| unreachable_final_owner_state())
-            .physical
-            .account
-            .try_publication_eligibility()
-        {
-            Ok(eligibility) => eligibility,
-            Err(quarantine) => return Err(self.contain_after_quarantine(quarantine)),
-        };
         let PublicationReadySuccessState {
             physical,
             proof,
             set_id,
         } = self.take_state();
-        Ok(physical.into_freeze_ready(proof, eligibility, set_id))
+        let proof = match proof.try_into_detached() {
+            Ok(proof) => proof,
+            Err(error) => {
+                let cause = physical
+                    .into_terminal()
+                    .contain_new_fault(AccountPoisonReason::OwnershipGraphUnverified);
+                error.retain_fail_closed();
+                return Err(cause);
+            }
+        };
+        let state = DetachedReadySuccessState {
+            physical,
+            proof,
+            set_id,
+        };
+        let mut state = scopeguard::guard(
+            state,
+            contain_detached_ready_success_state::<O, P, D, F, CanonicalBlock, EvidenceBlock>,
+        );
+        #[cfg(test)]
+        maybe_panic_success_guard_stage(SuccessGuardDropStage::LedgerDetached);
+        let DetachedReadySuccessState {
+            physical,
+            proof,
+            set_id: _,
+        } = &mut *state;
+        physical
+            .evidence
+            .freeze_in_place(TerminalEvidenceCause::Success, proof.terminal_projection());
+        drop(std::mem::replace(
+            &mut state.physical.fallback,
+            DetachedRetainedPart::empty(),
+        ));
+        let state = scopeguard::ScopeGuard::into_inner(state);
+        let DetachedReadySuccessState {
+            physical,
+            proof,
+            set_id,
+        } = state;
+        let QualifiedSuccessPhysical {
+            fallback,
+            evidence,
+            canonical_table,
+            evidence_table,
+            account,
+            canonical_root,
+            evidence_root,
+        } = physical;
+        debug_assert!(fallback.is_empty());
+        Ok(EligibilityReadySuccessGraph {
+            state: Some(AccountBoundJointCommit::new(
+                EligibilityReadySuccessPhysical {
+                    canonical_table,
+                    evidence_table,
+                    account,
+                    evidence: evidence.into_frozen_owner(),
+                    canonical_root,
+                    evidence_root,
+                    set_id,
+                    fallback_type: PhantomData,
+                },
+                proof,
+            )),
+        })
     }
+}
+
+fn contain_detached_ready_success_state<O, P, D, F, CanonicalBlock, EvidenceBlock>(
+    state: DetachedReadySuccessState<O, P, D, F, CanonicalBlock, EvidenceBlock>,
+) where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+{
+    let DetachedReadySuccessState {
+        physical,
+        proof,
+        set_id: _,
+    } = state;
+    let _ = physical
+        .into_terminal()
+        .contain_new_fault(AccountPoisonReason::OwnershipGraphUnverified);
+    proof.retain_fail_closed();
+}
+
+fn contain_publication_ready_success_state<O, P, D, F, CanonicalBlock, EvidenceBlock>(
+    state: PublicationReadySuccessState<O, P, D, F, CanonicalBlock, EvidenceBlock>,
+) where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+{
+    let PublicationReadySuccessState {
+        physical,
+        proof,
+        set_id: _,
+    } = state;
+    let _ = physical
+        .into_terminal()
+        .contain_new_fault(AccountPoisonReason::OwnershipGraphUnverified);
+    proof.retain_fail_closed();
 }
 
 impl<O, P, D, F, CanonicalBlock, EvidenceBlock> Drop
@@ -852,16 +900,8 @@ where
     D: Copy + Ord,
 {
     fn drop(&mut self) {
-        if let Some(PublicationReadySuccessState {
-            physical,
-            proof,
-            set_id: _,
-        }) = self.state.take()
-        {
-            let _ = physical
-                .into_terminal()
-                .contain_new_fault(AccountPoisonReason::OwnershipGraphUnverified);
-            proof.retain_fail_closed();
+        if let Some(state) = self.state.take() {
+            contain_publication_ready_success_state(state);
         }
     }
 }
@@ -962,41 +1002,61 @@ where
 }
 
 impl<O, P, D, F, CanonicalBlock, EvidenceBlock>
-    FreezeReadySuccessGraph<O, P, D, F, CanonicalBlock, EvidenceBlock>
+    EligibilityReadySuccessGraph<O, P, D, F, CanonicalBlock, EvidenceBlock>
 where
     O: OperationOwner,
     P: TerminalEvidenceKey,
     D: TerminalEvidenceKey,
 {
-    fn freeze(mut self) -> PreparedRetainedPublication<CanonicalBlock, EvidenceBlock, F, P, D> {
+    fn try_into_prepared(
+        mut self,
+    ) -> Result<
+        PreparedRetainedPublication<CanonicalBlock, EvidenceBlock, F, P, D>,
+        FinalizationContainmentError,
+    > {
         let Some(state) = self.state.take() else {
             unreachable_final_owner_state()
         };
-        let mut state = scopeguard::guard(
-            state,
-            contain_freeze_ready_success_state::<O, P, D, F, CanonicalBlock, EvidenceBlock>,
-        );
-        let snapshot = state.proof.freeze_in_place();
-        #[cfg(test)]
-        maybe_panic_success_guard_stage(SuccessGuardDropStage::LedgerPublished);
-        state
-            .evidence
-            .freeze_in_place(TerminalEvidenceCause::Success, &snapshot);
-        let state = scopeguard::ScopeGuard::into_inner(state);
-        let FreezeReadySuccessState {
+        Ok(state.try_commit()?.into_prepared())
+    }
+}
+
+impl<P, D, F, CanonicalBlock, EvidenceBlock>
+    EligibilityReadySuccessPhysical<P, D, F, CanonicalBlock, EvidenceBlock>
+{
+    fn into_terminal(
+        self,
+    ) -> TerminalPhysicalOwnershipManifest<P, D, F, CanonicalBlock, EvidenceBlock> {
+        let Self {
             canonical_table,
             evidence_table,
             account,
             evidence,
-            eligibility: _eligibility,
-            proof,
+            canonical_root: _,
+            evidence_root: _,
+            set_id: _,
+            fallback_type: _,
+        } = self;
+        TerminalPhysicalOwnershipManifest::new(
+            DetachedRetainedPart::<F>::empty(),
+            evidence,
+            Some(canonical_table),
+            Some(evidence_table),
+            Some(account),
+        )
+    }
+
+    fn into_prepared(self) -> PreparedRetainedPublication<CanonicalBlock, EvidenceBlock, F, P, D> {
+        let Self {
+            canonical_table,
+            evidence_table,
+            account,
+            evidence,
             canonical_root,
             evidence_root,
             set_id,
             fallback_type: _,
-        } = state;
-        drop(proof);
-        let evidence = evidence.into_frozen_owner();
+        } = self;
         PreparedRetainedPublication {
             payload: RetainedPublicationPayload::Success {
                 canonical: PublishedCanonicalAggregate::from_table(canonical_table, set_id),
@@ -1013,39 +1073,24 @@ where
     }
 }
 
-fn contain_freeze_ready_success_state<O, P, D, F, CanonicalBlock, EvidenceBlock>(
-    state: FreezeReadySuccessState<O, P, D, F, CanonicalBlock, EvidenceBlock>,
-) where
-    O: OperationOwner,
-    P: Copy + Ord,
-    D: Copy + Ord,
+impl<P, D, F, CanonicalBlock, EvidenceBlock> AccountBoundPublicationManifest
+    for EligibilityReadySuccessPhysical<P, D, F, CanonicalBlock, EvidenceBlock>
 {
-    let FreezeReadySuccessState {
-        canonical_table,
-        evidence_table,
-        account,
-        evidence,
-        eligibility,
-        proof,
-        canonical_root: _,
-        evidence_root: _,
-        set_id: _,
-        fallback_type: _,
-    } = state;
-    let physical = TerminalPhysicalOwnershipManifest::new(
-        DetachedRetainedPart::<F>::empty(),
-        evidence.into_unfrozen_owner(),
-        Some(canonical_table),
-        Some(evidence_table),
-        Some(account),
-    );
-    let _ = physical.contain_new_fault(AccountPoisonReason::OwnershipGraphUnverified);
-    proof.retain_fail_closed();
-    drop(eligibility);
+    fn publication_account(&self) -> &PhysicalStorageAccount {
+        &self.account
+    }
+
+    fn contain_uncommitted(self, reason: AccountPoisonReason) -> FinalizationContainmentError {
+        self.into_terminal().contain_new_fault(reason)
+    }
+
+    fn contain_after_quarantine(self, quarantine: AccountPoisoned) -> FinalizationContainmentError {
+        self.into_terminal().contain_after_quarantine(quarantine)
+    }
 }
 
 impl<O, P, D, F, CanonicalBlock, EvidenceBlock> Drop
-    for FreezeReadySuccessGraph<O, P, D, F, CanonicalBlock, EvidenceBlock>
+    for EligibilityReadySuccessGraph<O, P, D, F, CanonicalBlock, EvidenceBlock>
 where
     O: OperationOwner,
     P: Copy + Ord,
@@ -1053,7 +1098,7 @@ where
 {
     fn drop(&mut self) {
         if let Some(state) = self.state.take() {
-            contain_freeze_ready_success_state(state);
+            drop(state);
         }
     }
 }

@@ -820,6 +820,38 @@ fn linear_completion_preserves_prefix_after_competing_observed_work() {
 }
 
 #[test]
+fn dropped_linear_permit_preserves_competing_observed_prefix_in_final_snapshot() {
+    let constrained = LedgerLimits::new(
+        16,
+        [(Dimension::Records, DimensionPolicy::counter(3, 2, 0))],
+    )
+    .expect("pending observed-work limits");
+    let ledger = test_ledger(constrained);
+    let permit = ledger
+        .try_admit_linear_work(Dimension::Records, 2)
+        .expect("the linear permit reserves the consumed envelope");
+
+    assert!(matches!(
+        ledger.charge_observed_batch(&[(Dimension::Records, 1)]),
+        Err(LedgerCause::LimitExceeded {
+            class: CounterClass::Consumed,
+            dimension: Dimension::Records,
+            value: 3,
+            limit: 2,
+        })
+    ));
+    drop(permit);
+
+    let snapshot = ledger
+        .finish()
+        .expect("dropping pending capacity cannot erase an observed completion prefix");
+    let records = snapshot
+        .dimension(Dimension::Records)
+        .expect("the final snapshot exposes the observed prefix");
+    assert_eq!((records.attempted(), records.consumed()), (3, 1));
+}
+
+#[test]
 fn forgotten_linear_work_permit_blocks_prepare_and_final_snapshot() {
     let ledger = test_ledger(limits());
     let permit = ledger
@@ -1886,7 +1918,18 @@ fn typed_primary_rejection_preserves_batches_for_evidence_only_retry() {
         Ok(_) => panic!("evidence-only retry must leave only canonical storage for discard"),
         Err(_) => panic!("bound evidence-only retry must qualify for terminal freeze"),
     };
-    let snapshot = discard.release_discard_after_physical_cleanup().freeze();
+    let detached = match discard
+        .release_discard_after_physical_cleanup()
+        .try_into_detached()
+    {
+        Ok(proof) => proof,
+        Err(error) => {
+            let kind = error.kind();
+            error.retain_fail_closed();
+            panic!("evidence-only terminal proof failed to detach: {kind:?}")
+        }
+    };
+    let snapshot = detached.terminal_projection();
     assert_eq!(snapshot.current_live_bytes(), 0);
     assert_eq!(snapshot.active_reservations(), 0);
     let dimension = snapshot
@@ -1895,7 +1938,12 @@ fn typed_primary_rejection_preserves_batches_for_evidence_only_retry() {
         .expect("bytes dimension");
     assert_eq!(dimension.committed_canonical_output(), 0);
     assert_eq!(dimension.published_outcome_evidence(), 5);
-    assert_eq!(probe_values(&probe), (0, 0));
+    assert!(!probe.is_available());
+    let terminal = detached.commit_account_bound_for_test();
+    assert_eq!(terminal.current_live_bytes, 0);
+    assert_eq!(terminal.active_reservations, 0);
+    assert_eq!(terminal.current_evidence_bytes, 0);
+    assert!(terminal.published);
 }
 
 static PANIC_ON_BOUND_ORD: AtomicBool = AtomicBool::new(false);
@@ -1974,13 +2022,20 @@ fn stateful_ledger(
     Ledger::try_new(limits, phases).expect("complete stateful phase catalog")
 }
 
-fn freeze_while_ord_panics(
+fn detach_while_ord_panics(
     proof: TypedFreezeProof<Owner, StatefulOrd, StatefulOrd>,
-) -> LedgerSnapshot<StatefulOrd, StatefulOrd> {
+) -> DetachedTypedFreezeProof<Owner, StatefulOrd, StatefulOrd> {
     PANIC_ON_BOUND_ORD.store(true, Ordering::SeqCst);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         match proof.try_into_qualified_discards() {
-            Ok(QualifiedTypedDiscardFreezeProof::None(proof)) => proof.freeze(),
+            Ok(QualifiedTypedDiscardFreezeProof::None(proof)) => match proof.try_into_detached() {
+                Ok(proof) => proof,
+                Err(error) => {
+                    let kind = error.kind();
+                    error.retain_fail_closed();
+                    panic!("bound typed proof failed to detach: {kind:?}")
+                }
+            },
             Ok(proof) => {
                 proof.retain_fail_closed();
                 panic!("test proof unexpectedly requires physical discard acknowledgement")
@@ -1989,7 +2044,7 @@ fn freeze_while_ord_panics(
         }
     }));
     PANIC_ON_BOUND_ORD.store(false, Ordering::SeqCst);
-    result.expect("bound typed freeze must not call owner-defined Ord")
+    result.expect("bound typed detach must not call owner-defined Ord")
 }
 
 #[test]
@@ -2243,10 +2298,201 @@ fn fallback_baseline_counts_zero_byte_attribution_capabilities() {
     drop(extra);
 }
 
+fn freeze_ready_primary_with_both_destinations() -> (
+    FreezeReadyTypedProof<Owner, Phase, Dimension>,
+    LedgerTestProbe<Phase, Dimension>,
+) {
+    let ledger = Ledger::<Owner, Phase, Dimension>::try_new(typed_limits(), &[Phase::Build])
+        .expect("typed frozen catalog");
+    let probe = ledger.test_probe();
+    ledger
+        .try_complete_phase(Phase::Build)
+        .expect("build completes before terminal qualification");
+    let canonical_assembly = ledger
+        .try_attribution_batch::<CanonicalOutput>(Phase::Build, Dimension::Bytes, 1, 1)
+        .expect("canonical assembly");
+    let evidence_assembly = ledger
+        .try_attribution_batch::<OutcomeEvidenceDestination>(Phase::Build, Dimension::Bytes, 1, 1)
+        .expect("evidence assembly");
+    let fallback = ledger
+        .try_attribution_batch::<OutcomeEvidenceDestination>(Phase::Build, Dimension::Bytes, 0, 0)
+        .expect("empty fallback batch");
+    let evidence = ledger
+        .try_attribution_batch::<OutcomeEvidenceDestination>(Phase::Build, Dimension::Bytes, 0, 0)
+        .expect("empty evidence batch");
+    let mut baseline = ledger
+        .try_fallback_baseline(canonical_assembly, evidence_assembly, fallback, evidence)
+        .unwrap_or_else(|_| panic!("exact primary baseline must bind"));
+    let mut canonical_source = ledger
+        .try_attribution_batch::<CanonicalOutput>(Phase::Build, Dimension::Bytes, 1, 1)
+        .expect("canonical source");
+    let canonical_attribution = ledger
+        .reserve_operation_attribution::<CanonicalOutput>(Phase::Build, Dimension::Bytes, 5)
+        .expect("canonical attribution");
+    assert!(
+        canonical_source
+            .try_push_attribution(canonical_attribution)
+            .is_ok()
+    );
+    assert!(
+        ledger
+            .try_push_commitment(
+                &mut canonical_source,
+                OutputCommitment::new(Dimension::Bytes, 3),
+            )
+            .is_ok()
+    );
+    let mut evidence_source = ledger
+        .try_attribution_batch::<OutcomeEvidenceDestination>(Phase::Build, Dimension::Bytes, 1, 1)
+        .expect("evidence source");
+    let evidence_attribution = ledger
+        .reserve_operation_attribution::<OutcomeEvidenceDestination>(
+            Phase::Build,
+            Dimension::Bytes,
+            4,
+        )
+        .expect("evidence attribution");
+    assert!(
+        evidence_source
+            .try_push_attribution(evidence_attribution)
+            .is_ok()
+    );
+    assert!(
+        ledger
+            .try_push_commitment(
+                &mut evidence_source,
+                OutputCommitment::new(Dimension::Bytes, 2),
+            )
+            .is_ok()
+    );
+    ledger
+        .try_bind_primary(
+            &mut baseline,
+            Some(&mut canonical_source),
+            Some(&mut evidence_source),
+            true,
+        )
+        .unwrap_or_else(|_| panic!("primary sources must bind"));
+    let proof = ledger.finish_bound_primary(
+        baseline,
+        Some(canonical_source),
+        Some(evidence_source),
+        true,
+    );
+    let ready = match proof.try_into_qualified_discards() {
+        Ok(QualifiedTypedDiscardFreezeProof::None(proof)) => proof,
+        Ok(proof) => {
+            proof.retain_fail_closed();
+            panic!("bound primary proof unexpectedly requires a discard")
+        }
+        Err(_) => panic!("bound primary proof must qualify"),
+    };
+    (ready, probe)
+}
+
+#[test]
+fn detached_terminal_projection_preserves_live_cover_until_eligibility_commit() {
+    let (ready, probe) = freeze_ready_primary_with_both_destinations();
+    let shared_live = probe.current_live_bytes();
+    let shared_active = probe.active_reservations();
+    assert!(shared_live > 0);
+    assert!(shared_active > 0);
+    assert_eq!(
+        probe
+            .dimension_evidence(Dimension::Bytes)
+            .expect("shared bytes dimension")
+            .committed_canonical_output(),
+        0
+    );
+    assert_eq!(
+        probe
+            .dimension_evidence(Dimension::Bytes)
+            .expect("shared bytes dimension")
+            .published_outcome_evidence(),
+        0
+    );
+
+    let detached = match ready.try_into_detached() {
+        Ok(proof) => proof,
+        Err(error) => {
+            let kind = error.kind();
+            error.retain_fail_closed();
+            panic!("exclusive terminal detach failed: {kind:?}")
+        }
+    };
+    assert!(!probe.is_available(), "weak probes must not prevent detach");
+    assert_eq!(detached.test_current_live_bytes(), shared_live);
+    assert_eq!(detached.test_active_reservations(), shared_active);
+    assert!(detached.test_current_evidence_bytes() > 0);
+    assert!(detached.test_cover_matches_state());
+    let detached_dimension = detached
+        .test_dimension_evidence(Dimension::Bytes)
+        .expect("detached bytes dimension");
+    assert_eq!(detached_dimension.committed_canonical_output(), 0);
+    assert_eq!(detached_dimension.published_outcome_evidence(), 0);
+    let projection = detached.terminal_projection();
+    assert_eq!(projection.current_live_bytes(), 0);
+    assert_eq!(projection.active_reservations(), 0);
+    let projected_dimension = projection
+        .dimension(Dimension::Bytes)
+        .expect("projected bytes dimension");
+    assert_eq!(projected_dimension.committed_canonical_output(), 3);
+    assert_eq!(projected_dimension.published_outcome_evidence(), 2);
+
+    test_reset_detached_cover_release_observation();
+    let terminal = detached.commit_account_bound_for_test();
+    assert_eq!(terminal.current_live_bytes, 0);
+    assert_eq!(terminal.active_reservations, 0);
+    assert_eq!(terminal.current_evidence_bytes, 0);
+    assert!(terminal.published);
+    let (cover_releases, storage_first) = test_detached_cover_release_observation();
+    assert!(cover_releases > 0);
+    assert!(storage_first);
+}
+
+#[test]
+fn extra_strong_ledger_owner_rejects_detach_and_retains_the_complete_cover() {
+    let (ready, probe) = freeze_ready_primary_with_both_destinations();
+    let extra_owner = Arc::clone(
+        &ready
+            .proof
+            .as_ref()
+            .expect("qualified proof")
+            .proof
+            .as_ref()
+            .expect("typed proof")
+            .ledger
+            .state,
+    );
+    let live_before = lock(&extra_owner).current_live_bytes;
+    let error = match ready.try_into_detached() {
+        Ok(proof) => {
+            proof.retain_fail_closed();
+            panic!("an extra strong ledger owner must reject exclusive detach")
+        }
+        Err(error) => error,
+    };
+    assert_eq!(error.kind(), TypedFreezeDetachErrorKind::SharedLedgerOwner);
+    assert_eq!(error.test_current_live_bytes(), live_before);
+    assert!(error.test_cover_matches_state());
+    assert!(probe.is_available());
+    assert_eq!(lock(&extra_owner).dimensions[0].state.committed, 0);
+    assert_eq!(
+        lock(&extra_owner).dimensions[0]
+            .state
+            .published_outcome_evidence,
+        0
+    );
+    error.retain_fail_closed();
+    assert_eq!(lock(&extra_owner).current_live_bytes, live_before);
+    drop(extra_owner);
+}
+
 #[test]
 fn included_zero_byte_attribution_freezes_to_zero_active_capabilities() {
     let ledger = Ledger::<Owner, Phase, Dimension>::try_new(typed_limits(), &[Phase::Build])
         .expect("typed frozen catalog");
+    let probe = ledger.test_probe();
     let racing_ledger = Ledger::<Owner, Phase, Dimension> {
         state: Arc::clone(&ledger.state),
         operation_live_byte_limit: ledger.operation_live_byte_limit,
@@ -2308,22 +2554,25 @@ fn included_zero_byte_attribution_freezes_to_zero_active_capabilities() {
         racing_mutation,
         Err(LedgerCause::PublicationAlreadyCompleted)
     );
-    let state = Arc::clone(
-        &qualified
-            .proof
-            .as_ref()
-            .expect("qualified proof")
-            .proof
-            .as_ref()
-            .expect("typed proof")
-            .ledger
-            .state,
-    );
-    let snapshot = qualified.freeze();
-    assert_eq!(lock(&state).publication, PublicationState::Published);
+    let detached = match qualified.try_into_detached() {
+        Ok(proof) => proof,
+        Err(error) => {
+            let kind = error.kind();
+            error.retain_fail_closed();
+            panic!("zero-byte terminal proof failed to detach: {kind:?}")
+        }
+    };
+    assert!(!probe.is_available());
+    assert!(detached.test_cover_matches_state());
+    let snapshot = detached.terminal_projection();
     assert_eq!(snapshot.current_live_bytes(), 0);
     assert_eq!(snapshot.active_reservations(), 0);
     assert_eq!(snapshot.last_completed_phase(), Some(Phase::Build));
+    let terminal = detached.commit_account_bound_for_test();
+    assert_eq!(terminal.current_live_bytes, 0);
+    assert_eq!(terminal.active_reservations, 0);
+    assert_eq!(terminal.current_evidence_bytes, 0);
+    assert!(terminal.published);
 }
 
 #[test]
@@ -2498,10 +2747,16 @@ fn fallback_freeze_uses_stable_positions_for_attribution_and_capacity_cover() {
         .expect("predeclared earlier phase");
     drop(earlier);
     let proof = baseline.into_fallback_proof(ledger, None, None);
-    let snapshot = freeze_while_ord_panics(proof);
+    let detached = detach_while_ord_panics(proof);
+    let snapshot = detached.terminal_projection();
 
     assert_eq!(snapshot.current_live_bytes(), 0);
     assert_eq!(snapshot.active_reservations(), 0);
+    let terminal = detached.commit_account_bound_for_test();
+    assert_eq!(terminal.current_live_bytes, 0);
+    assert_eq!(terminal.active_reservations, 0);
+    assert_eq!(terminal.current_evidence_bytes, 0);
+    assert!(terminal.published);
 }
 
 #[test]
@@ -2548,7 +2803,8 @@ fn primary_freeze_uses_bound_source_attribution_cover_and_commitment_positions()
         .try_bind_primary(&mut baseline, source.as_mut(), None, true)
         .unwrap_or_else(|_| panic!("exact primary publication must bind"));
     let proof = ledger.finish_bound_primary(baseline, source, None, true);
-    let snapshot = freeze_while_ord_panics(proof);
+    let detached = detach_while_ord_panics(proof);
+    let snapshot = detached.terminal_projection();
 
     assert_eq!(snapshot.current_live_bytes(), 0);
     assert_eq!(snapshot.active_reservations(), 0);
@@ -2561,6 +2817,11 @@ fn primary_freeze_uses_bound_source_attribution_cover_and_commitment_positions()
             .committed_canonical_output(),
         3
     );
+    let terminal = detached.commit_account_bound_for_test();
+    assert_eq!(terminal.current_live_bytes, 0);
+    assert_eq!(terminal.active_reservations, 0);
+    assert_eq!(terminal.current_evidence_bytes, 0);
+    assert!(terminal.published);
 }
 
 #[test]
@@ -2612,9 +2873,16 @@ fn terminal_freeze_keeps_commitments_on_bound_positions_after_ord_reverses() {
     let proof = ledger.finish_bound_primary(baseline, source, None, true);
 
     REVERSE_BOUND_ORD.store(true, Ordering::SeqCst);
-    let frozen = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+    let detached = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         match proof.try_into_qualified_discards() {
-            Ok(QualifiedTypedDiscardFreezeProof::None(proof)) => proof.freeze(),
+            Ok(QualifiedTypedDiscardFreezeProof::None(proof)) => match proof.try_into_detached() {
+                Ok(proof) => proof,
+                Err(error) => {
+                    let kind = error.kind();
+                    error.retain_fail_closed();
+                    panic!("bound primary proof failed to detach: {kind:?}")
+                }
+            },
             Ok(proof) => {
                 proof.retain_fail_closed();
                 panic!("primary publication unexpectedly requires a discard")
@@ -2623,18 +2891,25 @@ fn terminal_freeze_keeps_commitments_on_bound_positions_after_ord_reverses() {
         }
     }));
     REVERSE_BOUND_ORD.store(false, Ordering::SeqCst);
-    let snapshot = frozen.expect("terminal freeze must use bound numeric positions");
-
-    let mut dimensions = snapshot.dimensions();
-    let (first_key, first) = dimensions.next().expect("first dimension");
-    let (second_key, second) = dimensions.next().expect("second dimension");
-    assert_eq!(first_key, StatefulOrd(7));
-    assert_eq!(first.committed_canonical_output(), 0);
-    assert_eq!(second_key, StatefulOrd(9));
-    assert_eq!(second.committed_canonical_output(), 3);
-    assert!(dimensions.next().is_none());
-    assert_eq!(snapshot.current_live_bytes(), 0);
-    assert_eq!(snapshot.active_reservations(), 0);
+    let detached = detached.expect("terminal detach must use bound numeric positions");
+    {
+        let snapshot = detached.terminal_projection();
+        let mut dimensions = snapshot.dimensions();
+        let (first_key, first) = dimensions.next().expect("first dimension");
+        let (second_key, second) = dimensions.next().expect("second dimension");
+        assert_eq!(first_key, StatefulOrd(7));
+        assert_eq!(first.committed_canonical_output(), 0);
+        assert_eq!(second_key, StatefulOrd(9));
+        assert_eq!(second.committed_canonical_output(), 3);
+        assert!(dimensions.next().is_none());
+        assert_eq!(snapshot.current_live_bytes(), 0);
+        assert_eq!(snapshot.active_reservations(), 0);
+    }
+    let terminal = detached.commit_account_bound_for_test();
+    assert_eq!(terminal.current_live_bytes, 0);
+    assert_eq!(terminal.active_reservations, 0);
+    assert_eq!(terminal.current_evidence_bytes, 0);
+    assert!(terminal.published);
 }
 
 #[test]
@@ -3057,280 +3332,4 @@ fn legacy_publication_binds_commitment_positions_before_counter_mutation() {
     assert!(rollback.contains("get_mut(commitment.dimension_position)"));
     assert!(!rollback.contains("dimension_entry("));
     assert!(!rollback.contains("dimension_entry_mut("));
-}
-
-#[test]
-fn typed_freeze_proof_owns_exact_batches_and_has_no_post_mutation_fault_gate() {
-    let root = ledger_root_source();
-    let commitment = ledger_commitment_source();
-    let reservation_source = ledger_reservation_source();
-    let snapshot_source = ledger_snapshot_source();
-    let production = ledger_production_source();
-    let proof = root
-        .split("pub(crate) struct TypedFreezeProof")
-        .nth(1)
-        .expect("typed proof exists")
-        .split("impl<O, P, D> TypedFreezeProof")
-        .next()
-        .expect("typed proof fields exist");
-    assert!(proof.contains("canonical: AttributionReservationBatch"));
-    assert!(proof.contains("evidence: AttributionReservationBatch"));
-    assert!(proof.contains("ledger: Ledger"));
-    assert!(!proof.contains("PhantomData"));
-    assert!(
-        !reservation_source.contains("TypedFreezeProof"),
-        "reservation implementation must not own or construct terminal proofs"
-    );
-    assert!(!production.contains("struct TypedFreezeQualification"));
-    assert!(production.contains("struct QualifiedTypedFreezeProof"));
-    assert!(!production.contains("pub(crate) struct QualifiedTypedFreezeProof"));
-    assert!(production.contains("    fn qualify_terminal(self)"));
-    assert!(!production.contains("pub(crate) fn qualify_terminal"));
-    assert!(!production.contains("pub(crate) fn try_into_qualified("));
-    assert_eq!(
-        production.matches("pub(crate) fn freeze_in_place").count(),
-        1,
-        "only the freeze-ready typed wrapper may expose in-place publication"
-    );
-    assert_eq!(
-        production.matches("pub(crate) fn freeze(mut self)").count(),
-        1,
-        "only the freeze-ready typed wrapper may expose consuming publication"
-    );
-    let generic_qualified = root
-        .split("impl<O, P, D> QualifiedTypedFreezeProof")
-        .nth(1)
-        .expect("generic qualified proof implementation exists")
-        .split("impl<O, P, D> QualifiedEvidenceDiscardFreezeProof")
-        .next()
-        .expect("generic qualified proof implementation is bounded");
-    assert!(generic_qualified.contains("    fn freeze_in_place(&mut self)"));
-    assert!(generic_qualified.contains("    fn freeze(mut self)"));
-    assert!(!generic_qualified.contains("pub(crate) fn freeze"));
-
-    let qualification = root
-        .split("fn validate_terminal(")
-        .nth(1)
-        .expect("typed terminal qualification exists")
-        .split("pub(crate) fn retain_fail_closed")
-        .next()
-        .expect("typed terminal qualification boundary exists");
-    assert!(qualification.contains("typed_terminal_snapshot_positions_are_valid"));
-    assert_eq!(
-        qualification
-            .matches("bound_positions_are_in_bounds")
-            .count(),
-        5,
-        "published and deferred-storage batches must prove attribution, cover, and commitment positions"
-    );
-    assert_eq!(
-        qualification
-            .matches("discard_positions_are_in_bounds")
-            .count(),
-        2,
-        "canonical and evidence discards must prove only physically released attribution and cover positions"
-    );
-    assert_eq!(
-        qualification
-            .matches("positioned_commitment_amount")
-            .count(),
-        2,
-        "canonical and evidence commitments must be requalified under the final lock"
-    );
-    for required in [
-        "checked_add(canonical_increment)",
-        "entry.policy.committed_limit",
-        "committed_canonical_output > committed",
-        "checked_add(outcome_evidence_increment)",
-        "entry.policy.published_outcome_evidence_limit",
-        "state.publication = PublicationState::TerminalQualified",
-    ] {
-        assert!(
-            qualification.contains(required),
-            "terminal qualification lost final commitment/state gate `{required}`"
-        );
-    }
-    for forbidden in [
-        "validate_final_snapshot_shape",
-        "binary_search",
-        "PartialEq",
-    ] {
-        assert!(
-            !qualification.contains(forbidden),
-            "self-consuming qualification calls owner-defined key behavior through `{forbidden}`"
-        );
-    }
-    let bound_positions = reservation_source
-        .split("fn bound_positions_are_in_bounds")
-        .nth(1)
-        .expect("bound-position qualification exists")
-        .split("fn release_bound_attributions")
-        .next()
-        .expect("bound-position qualification boundary exists");
-    for required in [
-        "token.core.dimension_position < dimension_count",
-        "token.core.phase_position < phase_count",
-        "cover.core.dimension_position < dimension_count",
-        "cover.core.phase_position < phase_count",
-        "commitment.dimension_position < dimension_count",
-    ] {
-        assert!(
-            bound_positions.contains(required),
-            "terminal qualification lost bound-position gate `{required}`"
-        );
-    }
-    let discard_positions = reservation_source
-        .split("fn discard_positions_are_in_bounds")
-        .nth(1)
-        .expect("discard-position qualification exists")
-        .split("fn release_bound_attributions")
-        .next()
-        .expect("discard-position qualification boundary exists");
-    for required in [
-        "token.core.dimension_position < dimension_count",
-        "token.core.phase_position < phase_count",
-        "cover.core.dimension_position < dimension_count",
-        "cover.core.phase_position < phase_count",
-    ] {
-        assert!(
-            discard_positions.contains(required),
-            "discard qualification lost physical-accounting position gate `{required}`"
-        );
-    }
-    assert!(
-        !discard_positions.contains("commitments"),
-        "discard qualification must not apply a payload commitment that is being destroyed"
-    );
-
-    let freeze = root
-        .split("fn freeze_in_place(&mut self)")
-        .nth(1)
-        .expect("in-place typed freeze exists")
-        .split("    fn freeze(mut self)")
-        .next()
-        .expect("in-place typed freeze body exists");
-    let mutation_tail = freeze
-        .split("let snapshot = {")
-        .nth(1)
-        .expect("typed mutation tail exists");
-    for forbidden in [
-        "Result",
-        "?",
-        "assert",
-        "checked_",
-        "binary_search",
-        "saturating_",
-        "unwrap",
-        "expect",
-        "unreachable",
-    ] {
-        assert!(
-            !mutation_tail.contains(forbidden),
-            "freeze contains post-mutation fault gate `{forbidden}`"
-        );
-    }
-    assert_eq!(freeze.matches("lock(").count(), 1);
-    let release = freeze
-        .find("release_bound_attributions")
-        .expect("freeze releases bound attributions");
-    let discard_canonical = freeze
-        .find("drop(proof.discard_canonical.take())")
-        .expect("freeze drops discarded canonical batch");
-    let discard_evidence = freeze
-        .find("drop(proof.discard_evidence.take())")
-        .expect("freeze drops discarded evidence batch");
-    let commitments = freeze
-        .find("apply_typed_commitments")
-        .expect("freeze applies bound commitments");
-    let destroy_storage = freeze
-        .find("destroy_storage_then_release_bound_cover")
-        .expect("freeze destroys batch storage before releasing its cover");
-    let published = freeze
-        .find("PublicationState::Published")
-        .expect("freeze publishes atomically");
-    let final_snapshot = freeze
-        .find("take_typed_final_snapshot")
-        .expect("freeze moves preallocated final evidence");
-    assert!(discard_canonical < release);
-    assert!(discard_evidence < release);
-    assert!(release < commitments);
-    assert!(commitments < destroy_storage);
-    assert!(destroy_storage < published);
-    assert!(published < final_snapshot);
-    let after_snapshot = &freeze[final_snapshot + "take_typed_final_snapshot".len()..];
-    assert!(!after_snapshot.contains("lock("));
-    assert!(!after_snapshot.contains("release_bound_attributions"));
-    assert!(!after_snapshot.contains("destroy_storage_then_release_bound_cover"));
-    assert!(!after_snapshot.contains("apply_typed_commitments"));
-
-    let bound_release = reservation_source
-        .split("fn release_bound_locked")
-        .nth(1)
-        .expect("bound release helper exists")
-        .split("impl<O, P, D> Drop for ReservationCore")
-        .next()
-        .expect("bound release helper body exists");
-    let apply = commitment
-        .split("fn apply_typed_commitments")
-        .nth(1)
-        .expect("bound commitment helper exists")
-        .split_once("\n    }\n}\n")
-        .expect("bound commitment helper has a closed function body")
-        .0;
-    let batch_release = reservation_source
-        .split("fn release_bound_attributions")
-        .nth(1)
-        .expect("bound batch release helper exists")
-        .split("fn destroy_storage_then_release_bound_cover")
-        .next()
-        .expect("bound batch release helper body exists");
-    assert!(!batch_release.contains("capacity_cover.core.release_bound_locked"));
-    let storage_release = reservation_source
-        .split("fn destroy_storage_then_release_bound_cover")
-        .nth(1)
-        .expect("storage-before-cover helper exists");
-    let attribution_storage = storage_release
-        .find("take(&mut self.attributions)")
-        .expect("attribution vector storage is destroyed");
-    let commitment_storage = storage_release
-        .find("take(&mut self.commitments)")
-        .expect("commitment vector storage is destroyed");
-    let capacity_release = storage_release
-        .find("capacity_cover.core.release_bound_locked")
-        .expect("capacity cover is released under the ledger lock");
-    assert!(attribution_storage < capacity_release);
-    assert!(commitment_storage < capacity_release);
-    let snapshot = snapshot_source
-        .split("fn take_typed_final_snapshot")
-        .nth(1)
-        .expect("typed snapshot helper exists")
-        .split("const fn dimension_snapshot")
-        .next()
-        .expect("typed snapshot helper body exists");
-    for (name, helper) in [
-        ("bound release", bound_release),
-        ("bound batch release", batch_release),
-        ("commitment apply", apply),
-        ("typed snapshot", snapshot),
-    ] {
-        for forbidden in [
-            "Result",
-            "?",
-            "assert",
-            "checked_",
-            "binary_search",
-            "saturating_",
-            "unwrap",
-            "expect",
-            "unreachable",
-            "lock(",
-        ] {
-            assert!(
-                !helper.contains(forbidden),
-                "{name} contains post-binding fault gate `{forbidden}`"
-            );
-        }
-    }
-    assert!(!freeze.contains("canonical:"));
-    assert!(!freeze.contains("evidence:"));
 }

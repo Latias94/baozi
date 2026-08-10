@@ -47,7 +47,7 @@ mod canonical_validation;
 mod failure_evidence;
 mod fallback;
 mod preflight;
-mod validation_batch;
+mod work_batch;
 
 pub use canonical_validation::{
     CanonicalValidationMember, CanonicalValidationRecordRow, CanonicalValidationSession,
@@ -155,7 +155,9 @@ where
 /// Plan-derived writer for one canonical block.
 ///
 /// The raw writer and caller-selected work amounts never cross this boundary. Every mutating method
-/// polls the operation and advances the linear permit only after the corresponding write succeeds.
+/// advances a local completion prefix only after the corresponding write succeeds. The prefix is
+/// flushed and control is polled at bounded checkpoints, explicit polls, semantic boundaries, and
+/// final completion.
 pub struct CanonicalBuildControl<'writer, 'permit, 'operation, O, PP, U, W>
 where
     O: OperationOwner,
@@ -164,10 +166,14 @@ where
 {
     writer: &'writer mut W,
     permit: Option<CanonicalWorkPermit<'permit, 'operation, O, PP, U>>,
+    work_batch: work_batch::CompletionPrefixBatch,
     sticky: Option<StoreControlledError>,
 }
 
 /// Permit-bound row writer for one canonical fixed-width record.
+///
+/// A row is one bounded semantic batch: control is polled before the row and its completed field
+/// prefix is flushed when the row succeeds, rejects, unwinds, or is abandoned.
 pub struct CanonicalRecordBuildRow<'row, 'storage, 'permit, 'operation, O, PP, U>
 where
     O: OperationOwner,
@@ -176,6 +182,7 @@ where
 {
     writer: &'row mut CanonicalRecordRowWriter<'storage>,
     permit: &'row mut CanonicalWorkPermit<'permit, 'operation, O, PP, U>,
+    work_batch: &'row mut work_batch::CompletionPrefixBatch,
     sticky: &'row mut Option<StoreControlledError>,
 }
 
@@ -213,6 +220,89 @@ where
     }
 }
 
+fn preserve_canonical_controlled<T>(
+    sticky: &mut Option<StoreControlledError>,
+    result: Result<T, StoreControlledError>,
+) -> Result<T, StoreControlledError> {
+    if let Err(cause) = &result {
+        sticky.get_or_insert_with(|| cause.clone());
+    }
+    result
+}
+
+fn canonical_completion_contract_failure<O, PP, U>(
+    permit: &mut CanonicalWorkPermit<'_, '_, O, PP, U>,
+    sticky: &mut Option<StoreControlledError>,
+) -> StoreControlledError
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    permit.record_product_graph_failure(ACTIVATION_PRODUCT_GRAPH_FAILURE_CODE);
+    let cause = StoreControlledError::from(StoreBuildError::incomplete_write());
+    sticky.get_or_insert_with(|| cause.clone());
+    cause
+}
+
+fn flush_canonical_completed<O, PP, U>(
+    permit: &mut CanonicalWorkPermit<'_, '_, O, PP, U>,
+    work_batch: &mut work_batch::CompletionPrefixBatch,
+    sticky: &mut Option<StoreControlledError>,
+) -> Result<(), StoreControlledError>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    let pending = work_batch.unflushed_completed();
+    if pending == 0 {
+        return Ok(());
+    }
+    if pending > permit.remaining_units() {
+        let _ = work_batch.take_completed();
+        let cause = canonical_completion_contract_failure(permit, sticky);
+        permit.resolve_partial();
+        return Err(cause);
+    }
+    let completed = work_batch
+        .take_completed()
+        .expect("a nonzero canonical completion prefix remains flushable");
+    let completion = permit
+        .complete_units(completed)
+        .map_err(StoreControlledError::from);
+    preserve_canonical_controlled(sticky, completion)
+}
+
+fn record_canonical_completed<O, PP, U>(
+    permit: &mut CanonicalWorkPermit<'_, '_, O, PP, U>,
+    work_batch: &mut work_batch::CompletionPrefixBatch,
+    sticky: &mut Option<StoreControlledError>,
+    completed: NonZeroU64,
+) -> Result<(), StoreControlledError>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    if work_batch.note_completed(completed).is_ok() {
+        return Ok(());
+    }
+
+    // The action already completed. Preserve it even if an internal batching invariant drifted.
+    let cause = canonical_completion_contract_failure(permit, sticky);
+    if flush_canonical_completed(permit, work_batch, sticky).is_ok()
+        && completed.get() <= permit.remaining_units()
+    {
+        let completion = permit
+            .complete_units(completed)
+            .map_err(StoreControlledError::from);
+        let _ = preserve_canonical_controlled(sticky, completion);
+    }
+    permit.resolve_partial();
+    Err(cause)
+}
+
 impl<'writer, 'permit, 'operation, O, PP, U, W>
     CanonicalBuildControl<'writer, 'permit, 'operation, O, PP, U, W>
 where
@@ -227,24 +317,62 @@ where
         Self {
             writer,
             permit: Some(permit),
+            work_batch: work_batch::CompletionPrefixBatch::new(),
             sticky: None,
         }
     }
 
-    fn preserve<T>(
-        &mut self,
-        result: Result<T, StoreControlledError>,
-    ) -> Result<T, StoreControlledError> {
-        if let Err(cause) = &result {
-            self.sticky.get_or_insert_with(|| cause.clone());
-        }
-        result
-    }
-
     fn resolve_partial(&mut self) {
         if let Some(mut permit) = self.permit.take() {
+            let _ = flush_canonical_completed(&mut permit, &mut self.work_batch, &mut self.sticky);
             permit.resolve_partial();
         }
+    }
+
+    fn poll_now(&mut self) -> Result<(), StoreControlledError> {
+        let permit = self
+            .permit
+            .as_mut()
+            .expect("a fault-free canonical builder retains its work permit");
+        flush_canonical_completed(permit, &mut self.work_batch, &mut self.sticky)?;
+        let poll = permit.poll().map_err(StoreControlledError::from);
+        preserve_canonical_controlled(&mut self.sticky, poll)?;
+        self.work_batch.note_poll();
+        Ok(())
+    }
+
+    fn reject_incomplete(&mut self) -> StoreControlledError {
+        let permit = self
+            .permit
+            .as_mut()
+            .expect("a fault-free canonical builder retains its work permit");
+        let cause = canonical_completion_contract_failure(permit, &mut self.sticky);
+        self.resolve_partial();
+        cause
+    }
+
+    fn prepare_action(&mut self, amount: NonZeroU64) -> Result<(), StoreControlledError> {
+        if let Some(cause) = self.sticky.clone() {
+            return Err(cause);
+        }
+        if self.work_batch.poll_due() || amount.get() > self.work_batch.units_until_checkpoint() {
+            self.poll_now()?;
+        }
+        if amount.get() > self.work_batch.units_until_checkpoint() {
+            return Err(self.reject_incomplete());
+        }
+        let permit_remaining = self
+            .permit
+            .as_ref()
+            .expect("a fault-free canonical builder retains its work permit")
+            .remaining_units();
+        let Some(remaining) = self.work_batch.effective_remaining(permit_remaining) else {
+            return Err(self.reject_incomplete());
+        };
+        if amount.get() > remaining {
+            return Err(self.reject_incomplete());
+        }
+        Ok(())
     }
 
     fn perform<T>(
@@ -255,45 +383,26 @@ where
         if let Some(cause) = self.sticky.clone() {
             return Err(cause);
         }
-        let poll = self
-            .permit
-            .as_mut()
-            .expect("a fault-free canonical builder retains its work permit")
-            .poll()
-            .map_err(StoreControlledError::from);
-        self.preserve(poll)?;
         if amount == 0 {
             let result = action(self.writer).map_err(StoreControlledError::from);
-            return self.preserve(result);
+            return preserve_canonical_controlled(&mut self.sticky, result);
         }
-        let remaining = self
-            .permit
-            .as_ref()
-            .expect("a fault-free canonical builder retains its work permit")
-            .remaining_units();
-        if amount > remaining {
-            let cause = StoreControlledError::from(StoreBuildError::incomplete_write());
-            self.sticky = Some(cause.clone());
-            self.resolve_partial();
-            return Err(cause);
-        }
+        let amount = NonZeroU64::new(amount).expect("zero work is handled before completion");
+        self.prepare_action(amount)?;
         let value = match action(self.writer) {
             Ok(value) => value,
             Err(cause) => {
                 let cause = StoreControlledError::from(cause);
-                self.sticky = Some(cause.clone());
+                self.sticky.get_or_insert_with(|| cause.clone());
                 self.resolve_partial();
                 return Err(cause);
             }
         };
-        let amount = NonZeroU64::new(amount).expect("zero work is handled before completion");
-        let completion = self
+        let permit = self
             .permit
             .as_mut()
-            .expect("a fault-free canonical builder retains its work permit")
-            .complete_units(amount)
-            .map_err(StoreControlledError::from);
-        self.preserve(completion)?;
+            .expect("a fault-free canonical builder retains its work permit");
+        record_canonical_completed(permit, &mut self.work_batch, &mut self.sticky, amount)?;
         Ok(value)
     }
 
@@ -306,17 +415,26 @@ where
             return Err(cause);
         }
         if let Err(cause) = callback {
+            self.sticky.get_or_insert_with(|| cause.clone());
             self.resolve_partial();
             return Err(cause);
         }
+        self.poll_now()?;
         let remaining = self
             .permit
             .as_ref()
             .expect("a successful canonical builder retains its work permit")
             .remaining_units();
         if remaining != 0 {
+            let cause = {
+                let permit = self
+                    .permit
+                    .as_mut()
+                    .expect("an underwritten canonical builder retains its work permit");
+                canonical_completion_contract_failure(permit, &mut self.sticky)
+            };
             self.resolve_partial();
-            return Err(StoreBuildError::incomplete_write().into());
+            return Err(cause);
         }
         let exact = self
             .permit
@@ -335,13 +453,20 @@ where
         if let Some(cause) = self.sticky.clone() {
             return Err(cause);
         }
-        let result = self
-            .permit
-            .as_mut()
-            .expect("a fault-free canonical builder retains its work permit")
-            .poll()
-            .map_err(StoreControlledError::from);
-        self.preserve(result)
+        self.poll_now()
+    }
+}
+
+impl<O, PP, U, W> Drop for CanonicalBuildControl<'_, '_, '_, O, PP, U, W>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    fn drop(&mut self) {
+        if let Err(payload) = catch_unwind(AssertUnwindSafe(|| self.resolve_partial())) {
+            discard_untrusted_panic_payload(payload);
+        }
     }
 }
 
@@ -524,6 +649,7 @@ where
 fn perform_canonical_record_field<O, PP, U>(
     writer: &mut CanonicalRecordRowWriter<'_>,
     permit: &mut CanonicalWorkPermit<'_, '_, O, PP, U>,
+    work_batch: &mut work_batch::CompletionPrefixBatch,
     sticky: &mut Option<StoreControlledError>,
     action: impl FnOnce(&mut CanonicalRecordRowWriter<'_>) -> Result<(), StoreBuildError>,
 ) -> Result<(), StoreControlledError>
@@ -535,27 +661,20 @@ where
     if let Some(cause) = sticky.clone() {
         return Err(cause);
     }
-    if let Err(cause) = permit.poll() {
-        let cause = StoreControlledError::from(cause);
-        sticky.get_or_insert_with(|| cause.clone());
-        return Err(cause);
-    }
-    if permit.remaining_units() == 0 {
-        let cause = StoreControlledError::from(StoreBuildError::incomplete_write());
-        *sticky = Some(cause.clone());
+    let remaining = work_batch.effective_remaining(permit.remaining_units());
+    if remaining.is_none_or(|remaining| remaining == 0) || work_batch.units_until_checkpoint() == 0
+    {
+        let cause = canonical_completion_contract_failure(permit, sticky);
+        let _ = flush_canonical_completed(permit, work_batch, sticky);
+        permit.resolve_partial();
         return Err(cause);
     }
     if let Err(cause) = action(writer) {
         let cause = StoreControlledError::from(cause);
-        *sticky = Some(cause.clone());
+        sticky.get_or_insert_with(|| cause.clone());
         return Err(cause);
     }
-    if let Err(cause) = permit.complete_units(NonZeroU64::MIN) {
-        let cause = StoreControlledError::from(cause);
-        *sticky = Some(cause.clone());
-        return Err(cause);
-    }
-    Ok(())
+    record_canonical_completed(permit, work_batch, sticky, NonZeroU64::MIN)
 }
 
 impl<O, PP, U> CanonicalRecordBuildRow<'_, '_, '_, '_, O, PP, U>
@@ -565,45 +684,65 @@ where
     U: ProgressUnit,
 {
     pub fn write_scalar<T: StoredScalar>(&mut self, value: T) -> Result<(), StoreControlledError> {
-        perform_canonical_record_field(self.writer, self.permit, self.sticky, |writer| {
-            writer.write_scalar(value)
-        })
+        perform_canonical_record_field(
+            self.writer,
+            self.permit,
+            self.work_batch,
+            self.sticky,
+            |writer| writer.write_scalar(value),
+        )
     }
 
     pub fn write_sequence_ref<T: StoredScalar, Tag>(
         &mut self,
         value: CanonicalSequenceRef<T, Tag>,
     ) -> Result<(), StoreControlledError> {
-        perform_canonical_record_field(self.writer, self.permit, self.sticky, |writer| {
-            writer.write_sequence_ref(value)
-        })
+        perform_canonical_record_field(
+            self.writer,
+            self.permit,
+            self.work_batch,
+            self.sticky,
+            |writer| writer.write_sequence_ref(value),
+        )
     }
 
     pub fn write_bytes_ref<Tag>(
         &mut self,
         value: CanonicalBytesRef<Tag>,
     ) -> Result<(), StoreControlledError> {
-        perform_canonical_record_field(self.writer, self.permit, self.sticky, |writer| {
-            writer.write_bytes_ref(value)
-        })
+        perform_canonical_record_field(
+            self.writer,
+            self.permit,
+            self.work_batch,
+            self.sticky,
+            |writer| writer.write_bytes_ref(value),
+        )
     }
 
     pub fn write_utf8_ref<Tag>(
         &mut self,
         value: CanonicalUtf8Ref<Tag>,
     ) -> Result<(), StoreControlledError> {
-        perform_canonical_record_field(self.writer, self.permit, self.sticky, |writer| {
-            writer.write_utf8_ref(value)
-        })
+        perform_canonical_record_field(
+            self.writer,
+            self.permit,
+            self.work_batch,
+            self.sticky,
+            |writer| writer.write_utf8_ref(value),
+        )
     }
 
     pub fn write_record_ref<Tag>(
         &mut self,
         value: CanonicalRecordRef<Tag>,
     ) -> Result<(), StoreControlledError> {
-        perform_canonical_record_field(self.writer, self.permit, self.sticky, |writer| {
-            writer.write_record_ref(value)
-        })
+        perform_canonical_record_field(
+            self.writer,
+            self.permit,
+            self.work_batch,
+            self.sticky,
+            |writer| writer.write_record_ref(value),
+        )
     }
 }
 
@@ -623,6 +762,7 @@ where
         if let Some(cause) = self.sticky.clone() {
             return Err(cause);
         }
+        self.poll_now()?;
         let mut callback_error = None;
         let result = self.writer.write_row(|writer| {
             let permit = self
@@ -632,6 +772,7 @@ where
             let mut row = CanonicalRecordBuildRow {
                 writer,
                 permit,
+                work_batch: &mut self.work_batch,
                 sticky: &mut self.sticky,
             };
             match write(&mut row) {
@@ -649,11 +790,15 @@ where
         }
         if let Err(cause) = result {
             let cause = StoreControlledError::from(cause);
-            self.sticky = Some(cause.clone());
+            self.sticky.get_or_insert_with(|| cause.clone());
             self.resolve_partial();
             return Err(cause);
         }
-        Ok(())
+        let permit = self
+            .permit
+            .as_mut()
+            .expect("a successful canonical record row retains its work permit");
+        flush_canonical_completed(permit, &mut self.work_batch, &mut self.sticky)
     }
 
     pub fn rows(&self) -> usize {
@@ -780,7 +925,7 @@ where
     sticky: &'control mut Option<StoreRuntimeError>,
     completed_units: u64,
     rejected: bool,
-    work_batch: validation_batch::ValidationWorkBatch,
+    work_batch: work_batch::CompletionPrefixBatch,
 }
 
 /// Session-branded authority to validate one root-reachable failure-evidence member.

@@ -603,6 +603,8 @@ fn admission_first_direct_fallback_ends_in_finalization_containment() {
     let ledger = operation.coordinator.retained_ledger().test_probe();
     let active_before = ledger.active_reservations();
     let live_before = ledger.current_live_bytes();
+    assert!(active_before > 0);
+    assert!(live_before > 0);
 
     let result = operation.prepare_minimal_fallback::<u64, u64>(PreparationFailureCode::domain(91));
     let after_prepare = account.snapshot();
@@ -619,8 +621,9 @@ fn admission_first_direct_fallback_ends_in_finalization_containment() {
     assert!(after_prepare.poison_event_count_exact());
     assert!(after_prepare.poison_event_domain_valid());
     assert_eq!(after_prepare.first_poison_evidence(), first_evidence);
-    assert_eq!(ledger.active_reservations(), active_before);
-    assert_eq!(ledger.current_live_bytes(), live_before);
+    assert!(!ledger.is_available());
+    assert_eq!(ledger.active_reservations(), 0);
+    assert_eq!(ledger.current_live_bytes(), 0);
     assert_eq!(
         after_prepare.live_retained_bytes(),
         before_prepare.live_retained_bytes()
@@ -870,6 +873,7 @@ fn eligibility_first_capability_completes_preparation_after_later_account_poison
         RetainedBatchLimits::new(2, 2),
         OperationControl::default(),
     );
+    let ledger = operation.coordinator.retained_ledger().test_probe();
     let eligibility_entered = StdArc::new(Barrier::new(2));
     let eligibility_resume = StdArc::new(Barrier::new(2));
     let worker_entered = StdArc::clone(&eligibility_entered);
@@ -880,6 +884,9 @@ fn eligibility_first_capability_completes_preparation_after_later_account_poison
     });
 
     eligibility_entered.wait();
+    assert!(!ledger.is_available());
+    assert_eq!(ledger.active_reservations(), 0);
+    assert_eq!(ledger.current_live_bytes(), 0);
     drop(poisoner);
     let poisoned = account.snapshot();
     assert!(poisoned.poisoned());
@@ -898,14 +905,17 @@ fn eligibility_first_capability_completes_preparation_after_later_account_poison
 }
 
 #[test]
-fn poison_before_final_eligibility_returns_containment_without_exact_publication() {
+fn poisoned_joint_commit_account_cannot_be_substituted_with_healthy_foreign_account() {
     static DROP_COUNT: AtomicU64 = AtomicU64::new(0);
 
     DROP_COUNT.store(0, Ordering::SeqCst);
     let factory = account_factory(1);
-    let account = account(&factory, u64::MAX, 128);
+    let owned_account = account(&factory, u64::MAX, 128);
+    let foreign_factory = account_factory(1);
+    let foreign_account = account(&foreign_factory, u64::MAX, 128);
+    let foreign_before = foreign_account.snapshot();
     let operation = test_operation_on_account_with_control(
-        &account,
+        &owned_account,
         64,
         RetainedBatchLimits::new(2, 2),
         OperationControl::default(),
@@ -923,16 +933,16 @@ fn poison_before_final_eligibility_returns_containment_without_exact_publication
             RetainedSuccessValidation::Valid(validated) => validated,
             _ => panic!("poison-first candidate must validate"),
         };
-    let fallback_charge = account
+    let fallback_charge = owned_account
         .checked_retained_charge::<u32>(empty_plan())
         .unwrap_or_else(|_| panic!("fallback charge must remain derivable"));
-    let poisoner = account
+    let poisoner = owned_account
         .try_retain_with(empty_plan(), || {
             Ok::<_, RetainedBuildFailureCode>(PanickingDropProbe(&DROP_COUNT))
         })
         .unwrap_or_else(|_| panic!("poison-first probe must retain"));
     drop(poisoner);
-    let before_prepare = account.snapshot();
+    let before_prepare = owned_account.snapshot();
     let first_poison = before_prepare.first_poison_evidence();
     assert!(before_prepare.poisoned());
     assert!(!ledger.is_terminal_qualified());
@@ -942,14 +952,14 @@ fn poison_before_final_eligibility_returns_containment_without_exact_publication
         Err(RetainedPublicationPrepareError::FinalizationContainment(cause)) => cause,
         Ok(_) => panic!("poison-first eligibility must not produce an exact publication owner"),
     };
-    let after_prepare = account.snapshot();
+    let after_prepare = owned_account.snapshot();
 
     assert_eq!(
         cause.reason(),
         AccountPoisonReason::RetainedStorageReleaseUnverified
     );
     assert_eq!(cause.account_poisoned().snapshot(), after_prepare);
-    assert!(ledger.is_terminal_qualified());
+    assert!(!ledger.is_available());
     assert_eq!(
         after_prepare
             .live_retained_bytes()
@@ -963,6 +973,46 @@ fn poison_before_final_eligibility_returns_containment_without_exact_publication
         Some(before_prepare.live_retained_allocations())
     );
     assert_eq!(after_prepare.first_poison_evidence(), first_poison);
+    assert_eq!(foreign_account.snapshot(), foreign_before);
+}
+
+#[test]
+fn poisoned_foreign_account_cannot_replace_healthy_joint_commit_account() {
+    static DROP_COUNT: AtomicU64 = AtomicU64::new(0);
+
+    DROP_COUNT.store(0, Ordering::SeqCst);
+    let factory = account_factory(1);
+    let owned_account = account(&factory, u64::MAX, 128);
+    let foreign_factory = account_factory(1);
+    let foreign_account = account(&foreign_factory, u64::MAX, 128);
+    let foreign_poisoner = foreign_account
+        .try_retain_with(empty_plan(), || {
+            Ok::<_, RetainedBuildFailureCode>(PanickingDropProbe(&DROP_COUNT))
+        })
+        .unwrap_or_else(|_| panic!("foreign-account poison probe must retain"));
+    let operation = test_operation_on_account_with_control(
+        &owned_account,
+        64,
+        RetainedBatchLimits::new(2, 2),
+        OperationControl::default(),
+    );
+    drop(foreign_poisoner);
+    let foreign_poisoned = foreign_account.snapshot();
+    assert!(foreign_poisoned.poisoned());
+    assert!(!owned_account.snapshot().poisoned());
+
+    let prepared = operation
+        .prepare_minimal_fallback::<u64, u64>(PreparationFailureCode::domain(94))
+        .unwrap_or_else(|_| panic!("the healthy owned account must authorize joint commit"));
+    assert!(!owned_account.snapshot().poisoned());
+    assert_eq!(foreign_account.snapshot(), foreign_poisoned);
+
+    let published = handoff_for_test(prepared);
+    assert!(matches!(
+        published,
+        PublishedRetainedPublicationParts::MinimalFallback { .. }
+    ));
+    assert_eq!(foreign_account.snapshot(), foreign_poisoned);
 }
 
 #[test]
@@ -983,6 +1033,7 @@ fn primary_eligibility_first_capability_completes_after_later_account_poison() {
         RetainedBatchLimits::new(2, 2),
         OperationControl::default(),
     );
+    let ledger = operation.coordinator.retained_ledger().test_probe();
     let mut assembly: TestPublication<u64, u64> = operation
         .try_publication_assembly(publication_plan(1, 1))
         .unwrap_or_else(|_| panic!("primary eligibility publication must open"));
@@ -1009,6 +1060,9 @@ fn primary_eligibility_first_capability_completes_after_later_account_poison() {
     });
 
     eligibility_entered.wait();
+    assert!(!ledger.is_available());
+    assert_eq!(ledger.active_reservations(), 0);
+    assert_eq!(ledger.current_live_bytes(), 0);
     let at_eligibility = account.snapshot();
     assert!(!at_eligibility.poisoned());
     assert_eq!(

@@ -1,5 +1,5 @@
 use super::super::validation::{StoreEvidenceMemberCompletion, StoreEvidenceMemberVisit};
-use super::validation_batch::ValidationWorkBatch;
+use super::work_batch::CompletionPrefixBatch;
 use super::*;
 
 impl CanonicalFailureTerminalWorkPlan {
@@ -1447,7 +1447,7 @@ where
                     sticky: &mut controlled_failure,
                     completed_units: 0,
                     rejected: false,
-                    work_batch: ValidationWorkBatch::new(),
+                    work_batch: CompletionPrefixBatch::new(),
                 };
                 let validate = validate
                     .as_mut()

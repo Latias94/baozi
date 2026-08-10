@@ -209,6 +209,80 @@ fn activation_rich_failure_open_recovery_upgrades_the_requested_cause() {
     drop(published);
 }
 
+#[cfg(feature = "_u4-activation")]
+#[test]
+fn activation_builder_panic_preserves_the_exact_completed_work_prefix() {
+    const COMPLETED: usize = 257;
+
+    let factory = test_factory();
+    let account = test_account(&factory);
+    let (operation, keys) = test_operation(&account, u64::MAX);
+    let requirements = CanonicalActivationRequirements::new(
+        CanonicalTableShape::new(1, 1).expect("activation canonical shape"),
+        CanonicalTableShape::new(1, 1).expect("activation evidence shape"),
+        1,
+        0,
+        NonZeroU64::MIN,
+    )
+    .expect("activation requirements");
+    let policy = CanonicalActivationPolicy::new(
+        test_writer_plan(keys, 2, 2),
+        test_writer_plan(keys, 2, 2),
+        keys.work_dimension,
+        keys.work_dimension,
+        keys.dimension,
+        keys.dimension,
+    );
+    let (outcome_owner, sealer) = operation.into_session_outcome_owner(policy);
+    let request = sealer.seal(requirements);
+    let mut ledger = None;
+
+    let result = outcome_owner.plan_and_activate(
+        request,
+        |preflight| preflight.seal(),
+        |mut lane| {
+            ledger = Some(lane.test_ledger_probe());
+            let cause = lane
+                .try_retain_sequence(
+                    SequencePlan::<u8>::new(COMPLETED + 1).expect("sequence plan"),
+                    TestTag,
+                    |writer| {
+                        for value in 0..COMPLETED {
+                            writer.push(u8::try_from(value % 251).expect("bounded test scalar"))?;
+                        }
+                        panic!("contained canonical completion-prefix panic");
+                    },
+                )
+                .expect_err("builder panic must enter activation containment");
+            assert!(matches!(cause, StoreRuntimeError::BuilderPanicked));
+            lane.reject::<(), (), ScalarSequence<u8>, TestTag>((), 74)
+        },
+    );
+    let containment = match result {
+        Err(containment) => containment,
+        Ok(_) => panic!("builder panic must not produce an activation outcome"),
+    };
+    assert_eq!(
+        containment.cause().reason(),
+        AccountPoisonReason::RetainedBuilderPanicked
+    );
+
+    let ledger = ledger.expect("materialization captured the contained ledger");
+    let work = ledger
+        .dimension_evidence(keys.work_dimension)
+        .expect("materialization work remains observable inside containment");
+    assert_eq!(
+        (work.attempted(), work.consumed()),
+        (
+            u64::try_from(COMPLETED + 1).expect("planned work fits u64"),
+            u64::try_from(COMPLETED).expect("completed work fits u64"),
+        )
+    );
+    assert!(account.snapshot().poisoned());
+    drop(account);
+    assert_eq!(factory.snapshot().live_accounts(), 1);
+}
+
 fn test_writer_plan(
     keys: TestKeys,
     attributions: usize,
@@ -2207,7 +2281,7 @@ fn controlled_builders_and_validation_poll_and_charge_exact_work() {
         },
     );
     assert!(matches!(
-        validated,
+        &validated,
         StoreControlledSuccessValidation::Valid(_)
     ));
     let dimension = ledger
@@ -2285,27 +2359,25 @@ fn controlled_bytes_and_utf8_write_exact_payloads_and_charge_exact_work() {
         )
         .expect("evidence root");
 
-    assert!(matches!(
-        assembly.validate_success(
-            canonical_root,
-            evidence_root,
-            |session, canonical_root, evidence_root| {
-                let Some(root) = session.canonical_records(canonical_root) else {
-                    return false;
-                };
-                let Some(binary) = root.bytes_ref::<TestTag>(0, 0) else {
-                    return false;
-                };
-                let Some(text) = root.utf8_ref::<TestTag>(0, 1) else {
-                    return false;
-                };
-                session.canonical_bytes(binary) == Some(BINARY_PAYLOAD)
-                    && session.canonical_utf8(text) == Some(TEXT_PAYLOAD)
-                    && session.outcome_evidence_sequence(evidence_root).is_some()
-            },
-        ),
-        StoreSuccessValidation::Valid(_)
-    ));
+    let validated = assembly.validate_success(
+        canonical_root,
+        evidence_root,
+        |session, canonical_root, evidence_root| {
+            let Some(root) = session.canonical_records(canonical_root) else {
+                return false;
+            };
+            let Some(binary) = root.bytes_ref::<TestTag>(0, 0) else {
+                return false;
+            };
+            let Some(text) = root.utf8_ref::<TestTag>(0, 1) else {
+                return false;
+            };
+            session.canonical_bytes(binary) == Some(BINARY_PAYLOAD)
+                && session.canonical_utf8(text) == Some(TEXT_PAYLOAD)
+                && session.outcome_evidence_sequence(evidence_root).is_some()
+        },
+    );
+    assert!(matches!(&validated, StoreSuccessValidation::Valid(_)));
 
     let binary_charge = test_physical_delta(before_binary, after_binary);
     let text_charge = test_physical_delta(after_binary, after_text);

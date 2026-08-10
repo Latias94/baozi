@@ -58,26 +58,6 @@ where
     state: Option<QualifiedRichState<O, P, D, F, CanonicalBlock, EvidenceBlock>>,
 }
 
-struct EligibleRichState<O, P, D, F, CanonicalBlock, EvidenceBlock>
-where
-    O: OperationOwner,
-    P: Copy + Ord,
-    D: Copy + Ord,
-{
-    output: QualifiedRichOutput<P, D, F, EvidenceBlock>,
-    discard: QualifiedRichDiscard<O, P, D, F, CanonicalBlock>,
-    eligibility: PublicationEligibility,
-}
-
-struct EligibleRichGraph<O, P, D, F, CanonicalBlock, EvidenceBlock>
-where
-    O: OperationOwner,
-    P: Copy + Ord,
-    D: Copy + Ord,
-{
-    state: Option<EligibleRichState<O, P, D, F, CanonicalBlock, EvidenceBlock>>,
-}
-
 struct FreezeReadyRichState<O, P, D, F, EvidenceBlock>
 where
     O: OperationOwner,
@@ -86,7 +66,6 @@ where
 {
     output: QualifiedRichOutput<P, D, F, EvidenceBlock>,
     proof: FreezeReadyTypedProof<O, P, D>,
-    eligibility: PublicationEligibility,
 }
 
 struct FreezeReadyRichGraph<O, P, D, F, EvidenceBlock>
@@ -96,6 +75,37 @@ where
     D: Copy + Ord,
 {
     state: Option<FreezeReadyRichState<O, P, D, F, EvidenceBlock>>,
+}
+
+struct DetachedReadyRichState<O, P, D, F, EvidenceBlock>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+{
+    output: QualifiedRichOutput<P, D, F, EvidenceBlock>,
+    proof: crate::ledger::DetachedTypedFreezeProof<O, P, D>,
+}
+
+struct EligibilityReadyRichPhysical<P, D, F, EvidenceBlock> {
+    evidence: DetachedRetainedPart<TerminalLedgerEvidence<P, D>>,
+    evidence_table: RetainedTableAllocation<EvidenceBlock>,
+    account: PhysicalStorageAccount,
+    evidence_root: RetainedSlotIdentity,
+    set_id: RetainedSetId,
+    fallback_type: PhantomData<fn() -> F>,
+}
+
+type EligibilityReadyRichJointCommit<O, P, D, F, EvidenceBlock> =
+    AccountBoundJointCommit<EligibilityReadyRichPhysical<P, D, F, EvidenceBlock>, O, P, D>;
+
+struct EligibilityReadyRichGraph<O, P, D, F, EvidenceBlock>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+{
+    state: Option<EligibilityReadyRichJointCommit<O, P, D, F, EvidenceBlock>>,
 }
 
 #[allow(
@@ -345,30 +355,41 @@ where
             .state
             .take()
             .unwrap_or_else(|| unreachable_final_owner_state());
-        let eligibility = match state.output.account.try_publication_eligibility() {
-            Ok(eligibility) => eligibility,
-            Err(quarantine) => {
-                let reason = quarantine.snapshot().first_poison_evidence().map_or(
-                    AccountPoisonReason::OwnershipGraphUnverified,
-                    AccountPoisonEvidence::reason,
-                );
-                return Err(contain_qualified_rich_state(state, reason, true));
-            }
-        };
-        let eligible = EligibleRichGraph {
-            state: Some(EligibleRichState {
+        let continuation = match state.discard {
+            QualifiedRichDiscard::Evidence { fallback, proof } => RichDiscardContinuationState {
                 output: state.output,
-                discard: state.discard,
-                eligibility,
-            }),
+                canonical_table: None,
+                fallback,
+                proof: RichDiscardContinuationProof::Evidence(proof),
+                discarded_account: None,
+            },
+            QualifiedRichDiscard::Both {
+                canonical_table,
+                fallback,
+                proof,
+            } => RichDiscardContinuationState {
+                output: state.output,
+                canonical_table: Some(canonical_table),
+                fallback,
+                proof: RichDiscardContinuationProof::Both(proof),
+                discarded_account: None,
+            },
         };
+        let freeze_ready = finish_rich_discard(continuation)?;
         #[cfg(test)]
-        let eligible = maybe_drop_failure_guard(
+        let freeze_ready = maybe_drop_failure_guard(
             FailureTerminalRail::Rich,
-            FailureGuardDropStage::Eligible,
-            eligible,
+            FailureGuardDropStage::FreezeReady,
+            freeze_ready,
         );
-        eligible.into_prepared()
+        let eligibility_ready = freeze_ready.try_detach_and_freeze()?;
+        #[cfg(test)]
+        let eligibility_ready = maybe_drop_failure_guard(
+            FailureTerminalRail::Rich,
+            FailureGuardDropStage::EligibilityReady,
+            eligibility_ready,
+        );
+        eligibility_ready.try_into_prepared()
     }
 }
 
@@ -388,30 +409,6 @@ where
             );
         }
     }
-}
-
-fn contain_eligible_rich_state<O, P, D, F, CanonicalBlock, EvidenceBlock>(
-    state: EligibleRichState<O, P, D, F, CanonicalBlock, EvidenceBlock>,
-    reason: AccountPoisonReason,
-    already_recorded: bool,
-) -> FinalizationContainmentError
-where
-    O: OperationOwner,
-    P: Copy + Ord,
-    D: Copy + Ord,
-{
-    let EligibleRichState {
-        output,
-        discard,
-        eligibility,
-    } = state;
-    let cause = contain_qualified_rich_state(
-        QualifiedRichState { output, discard },
-        reason,
-        already_recorded,
-    );
-    drop(eligibility);
-    cause
 }
 
 enum RichDiscardContinuationProof<O, P, D>
@@ -448,7 +445,6 @@ where
     canonical_table: Option<RetainedTableAllocation<CanonicalBlock>>,
     fallback: DetachedRetainedPart<F>,
     proof: RichDiscardContinuationProof<O, P, D>,
-    eligibility: PublicationEligibility,
     discarded_account: Option<PhysicalStorageAccount>,
 }
 
@@ -467,7 +463,6 @@ where
         canonical_table,
         fallback,
         proof,
-        eligibility,
         discarded_account,
     } = state;
     let QualifiedRichOutput {
@@ -490,7 +485,6 @@ where
     };
     proof.retain_fail_closed();
     drop(discarded_account);
-    drop(eligibility);
     cause
 }
 
@@ -525,151 +519,86 @@ fn retained_part_cleanup_reason(cleanup: RetainedPartCleanupError) -> (AccountPo
     }
 }
 
-impl<O, P, D, F, CanonicalBlock, EvidenceBlock>
-    EligibleRichGraph<O, P, D, F, CanonicalBlock, EvidenceBlock>
+fn finish_rich_discard<O, P, D, F, CanonicalBlock, EvidenceBlock>(
+    state: RichDiscardContinuationState<O, P, D, F, CanonicalBlock, EvidenceBlock>,
+) -> Result<FreezeReadyRichGraph<O, P, D, F, EvidenceBlock>, FinalizationContainmentError>
 where
     O: OperationOwner,
     P: TerminalEvidenceKey,
     D: TerminalEvidenceKey + fmt::Debug,
 {
-    fn finish_discard(
-        state: RichDiscardContinuationState<O, P, D, F, CanonicalBlock, EvidenceBlock>,
-    ) -> Result<FreezeReadyRichGraph<O, P, D, F, EvidenceBlock>, FinalizationContainmentError> {
-        let mut state = scopeguard::guard(
-            state,
-            contain_rich_discard_continuation_on_drop::<O, P, D, F, CanonicalBlock, EvidenceBlock>,
-        );
-        if matches!(&state.proof, RichDiscardContinuationProof::Both(_)) {
-            let canonical_table = state
-                .canonical_table
-                .take()
-                .unwrap_or_else(|| unreachable_final_owner_state());
-            let outcome =
-                drop_retained_table_with_account_anchor(canonical_table, &state.output.account);
-            if let Some((reason, already_recorded)) = table_cleanup_reason(outcome) {
-                return Err(contain_rich_discard_continuation_state(
-                    scopeguard::ScopeGuard::into_inner(state),
-                    reason,
-                    already_recorded,
-                ));
-            }
-            let evidence_proof = match &mut state.proof {
-                RichDiscardContinuationProof::Both(proof) => {
-                    proof.release_canonical_after_physical_cleanup_in_place()
-                }
-                RichDiscardContinuationProof::Evidence(_) => unreachable_final_owner_state(),
-            };
-            state.proof = RichDiscardContinuationProof::Evidence(evidence_proof);
-            #[cfg(test)]
-            maybe_panic_failure_guard_stage(
-                FailureTerminalRail::Rich,
-                FailureGuardDropStage::CanonicalAcknowledged,
-            );
+    let mut state = scopeguard::guard(
+        state,
+        contain_rich_discard_continuation_on_drop::<O, P, D, F, CanonicalBlock, EvidenceBlock>,
+    );
+    if matches!(&state.proof, RichDiscardContinuationProof::Both(_)) {
+        let canonical_table = state
+            .canonical_table
+            .take()
+            .unwrap_or_else(|| unreachable_final_owner_state());
+        let outcome =
+            drop_retained_table_with_account_anchor(canonical_table, &state.output.account);
+        if let Some((reason, already_recorded)) = table_cleanup_reason(outcome) {
+            return Err(contain_rich_discard_continuation_state(
+                scopeguard::ScopeGuard::into_inner(state),
+                reason,
+                already_recorded,
+            ));
         }
-
-        let discarded_account = match state.fallback.try_discard_allocation() {
-            Ok(account) => account,
-            Err(cleanup) => {
-                let (reason, already_recorded) = retained_part_cleanup_reason(cleanup);
-                return Err(contain_rich_discard_continuation_state(
-                    scopeguard::ScopeGuard::into_inner(state),
-                    reason,
-                    already_recorded,
-                ));
+        let evidence_proof = match &mut state.proof {
+            RichDiscardContinuationProof::Both(proof) => {
+                proof.release_canonical_after_physical_cleanup_in_place()
             }
+            RichDiscardContinuationProof::Evidence(_) => unreachable_final_owner_state(),
         };
-        state.discarded_account = Some(discarded_account);
+        state.proof = RichDiscardContinuationProof::Evidence(evidence_proof);
         #[cfg(test)]
         maybe_panic_failure_guard_stage(
             FailureTerminalRail::Rich,
-            FailureGuardDropStage::DiscardCleaned,
+            FailureGuardDropStage::CanonicalAcknowledged,
         );
-        let freeze_ready = match &mut state.proof {
-            RichDiscardContinuationProof::Evidence(proof) => {
-                proof.release_discard_after_physical_cleanup_in_place()
-            }
-            RichDiscardContinuationProof::Both(_) => unreachable_final_owner_state(),
-        };
-        let state = scopeguard::ScopeGuard::into_inner(state);
-        let RichDiscardContinuationState {
-            output,
-            canonical_table,
-            fallback,
-            proof: _,
-            eligibility,
-            discarded_account,
-        } = state;
-        drop(canonical_table);
-        drop(fallback);
-        drop(discarded_account);
-        Ok(FreezeReadyRichGraph {
-            state: Some(FreezeReadyRichState {
-                output,
-                proof: freeze_ready,
-                eligibility,
-            }),
-        })
     }
 
-    fn into_prepared(
-        mut self,
-    ) -> Result<
-        PreparedRetainedPublication<CanonicalBlock, EvidenceBlock, F, P, D>,
-        FinalizationContainmentError,
-    > {
-        let state = self
-            .state
-            .take()
-            .unwrap_or_else(|| unreachable_final_owner_state());
-        let continuation = match state.discard {
-            QualifiedRichDiscard::Evidence { fallback, proof } => RichDiscardContinuationState {
-                output: state.output,
-                canonical_table: None,
-                fallback,
-                proof: RichDiscardContinuationProof::Evidence(proof),
-                eligibility: state.eligibility,
-                discarded_account: None,
-            },
-            QualifiedRichDiscard::Both {
-                canonical_table,
-                fallback,
-                proof,
-            } => RichDiscardContinuationState {
-                output: state.output,
-                canonical_table: Some(canonical_table),
-                fallback,
-                proof: RichDiscardContinuationProof::Both(proof),
-                eligibility: state.eligibility,
-                discarded_account: None,
-            },
-        };
-        let freeze_ready = Self::finish_discard(continuation)?;
-        #[cfg(test)]
-        let freeze_ready = maybe_drop_failure_guard(
-            FailureTerminalRail::Rich,
-            FailureGuardDropStage::FreezeReady,
-            freeze_ready,
-        );
-        Ok(freeze_ready.freeze())
-    }
-}
-
-impl<O, P, D, F, CanonicalBlock, EvidenceBlock> Drop
-    for EligibleRichGraph<O, P, D, F, CanonicalBlock, EvidenceBlock>
-where
-    O: OperationOwner,
-    P: Copy + Ord,
-    D: Copy + Ord,
-{
-    fn drop(&mut self) {
-        if let Some(state) = self.state.take() {
-            let _ = contain_eligible_rich_state(
-                state,
-                AccountPoisonReason::OwnershipGraphUnverified,
-                false,
-            );
+    let discarded_account = match state.fallback.try_discard_allocation() {
+        Ok(account) => account,
+        Err(cleanup) => {
+            let (reason, already_recorded) = retained_part_cleanup_reason(cleanup);
+            return Err(contain_rich_discard_continuation_state(
+                scopeguard::ScopeGuard::into_inner(state),
+                reason,
+                already_recorded,
+            ));
         }
-    }
+    };
+    state.discarded_account = Some(discarded_account);
+    #[cfg(test)]
+    maybe_panic_failure_guard_stage(
+        FailureTerminalRail::Rich,
+        FailureGuardDropStage::DiscardCleaned,
+    );
+    let freeze_ready = match &mut state.proof {
+        RichDiscardContinuationProof::Evidence(proof) => {
+            proof.release_discard_after_physical_cleanup_in_place()
+        }
+        RichDiscardContinuationProof::Both(_) => unreachable_final_owner_state(),
+    };
+    let state = scopeguard::ScopeGuard::into_inner(state);
+    let RichDiscardContinuationState {
+        output,
+        canonical_table,
+        fallback,
+        proof: _,
+        discarded_account,
+    } = state;
+    drop(canonical_table);
+    drop(fallback);
+    drop(discarded_account);
+    Ok(FreezeReadyRichGraph {
+        state: Some(FreezeReadyRichState {
+            output,
+            proof: freeze_ready,
+        }),
+    })
 }
 
 fn contain_freeze_ready_rich_state<O, P, D, F, EvidenceBlock>(
@@ -679,11 +608,7 @@ fn contain_freeze_ready_rich_state<O, P, D, F, EvidenceBlock>(
     P: Copy + Ord,
     D: Copy + Ord,
 {
-    let FreezeReadyRichState {
-        output,
-        proof,
-        eligibility,
-    } = state;
+    let FreezeReadyRichState { output, proof } = state;
     let QualifiedRichOutput {
         evidence,
         evidence_table,
@@ -699,7 +624,6 @@ fn contain_freeze_ready_rich_state<O, P, D, F, EvidenceBlock>(
     );
     let _ = physical.contain_new_fault(AccountPoisonReason::OwnershipGraphUnverified);
     proof.retain_fail_closed();
-    drop(eligibility);
 }
 
 impl<O, P, D, F, EvidenceBlock> FreezeReadyRichGraph<O, P, D, F, EvidenceBlock>
@@ -708,30 +632,51 @@ where
     P: TerminalEvidenceKey,
     D: TerminalEvidenceKey,
 {
-    fn freeze<CanonicalBlock>(
+    fn try_detach_and_freeze(
         mut self,
-    ) -> PreparedRetainedPublication<CanonicalBlock, EvidenceBlock, F, P, D> {
+    ) -> Result<EligibilityReadyRichGraph<O, P, D, F, EvidenceBlock>, FinalizationContainmentError>
+    {
         let state = self
             .state
             .take()
             .unwrap_or_else(|| unreachable_final_owner_state());
-        let mut state = scopeguard::guard(state, contain_freeze_ready_rich_state);
-        let snapshot = state.proof.freeze_in_place();
+        let FreezeReadyRichState { output, proof } = state;
+        let proof = match proof.try_into_detached() {
+            Ok(proof) => proof,
+            Err(error) => {
+                let QualifiedRichOutput {
+                    evidence,
+                    evidence_table,
+                    account,
+                    ..
+                } = output;
+                let physical = TerminalPhysicalOwnershipManifest::<P, D, F, (), EvidenceBlock>::new(
+                    DetachedRetainedPart::empty(),
+                    evidence.into_unfrozen_owner(),
+                    None,
+                    Some(evidence_table),
+                    Some(account),
+                );
+                let cause =
+                    physical.contain_new_fault(AccountPoisonReason::OwnershipGraphUnverified);
+                error.retain_fail_closed();
+                return Err(cause);
+            }
+        };
+        let state = DetachedReadyRichState { output, proof };
+        let mut state = scopeguard::guard(state, contain_detached_ready_rich_state);
         #[cfg(test)]
         maybe_panic_failure_guard_stage(
             FailureTerminalRail::Rich,
-            FailureGuardDropStage::LedgerPublished,
+            FailureGuardDropStage::LedgerDetached,
         );
         let terminal_cause = TerminalEvidenceCause::Failure(state.output.cause);
-        state
-            .evidence_mut()
-            .freeze_in_place(terminal_cause, &snapshot);
+        let DetachedReadyRichState { output, proof } = &mut *state;
+        output
+            .evidence
+            .freeze_in_place(terminal_cause, proof.terminal_projection());
         let state = scopeguard::ScopeGuard::into_inner(state);
-        let FreezeReadyRichState {
-            output,
-            proof: _,
-            eligibility: _,
-        } = state;
+        let DetachedReadyRichState { output, proof } = state;
         let QualifiedRichOutput {
             evidence,
             evidence_table,
@@ -741,6 +686,97 @@ where
             set_id,
             fallback_type: _,
         } = output;
+        Ok(EligibilityReadyRichGraph {
+            state: Some(AccountBoundJointCommit::new(
+                EligibilityReadyRichPhysical {
+                    evidence: evidence.into_frozen_owner(),
+                    evidence_table,
+                    account,
+                    evidence_root,
+                    set_id,
+                    fallback_type: PhantomData,
+                },
+                proof,
+            )),
+        })
+    }
+}
+
+fn contain_detached_ready_rich_state<O, P, D, F, EvidenceBlock>(
+    state: DetachedReadyRichState<O, P, D, F, EvidenceBlock>,
+) where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+{
+    let DetachedReadyRichState { output, proof } = state;
+    let QualifiedRichOutput {
+        evidence,
+        evidence_table,
+        account,
+        ..
+    } = output;
+    let physical = TerminalPhysicalOwnershipManifest::<P, D, F, (), EvidenceBlock>::new(
+        DetachedRetainedPart::empty(),
+        evidence.into_unfrozen_owner(),
+        None,
+        Some(evidence_table),
+        Some(account),
+    );
+    let _ = physical.contain_new_fault(AccountPoisonReason::OwnershipGraphUnverified);
+    proof.retain_fail_closed();
+}
+
+impl<O, P, D, F, EvidenceBlock> EligibilityReadyRichGraph<O, P, D, F, EvidenceBlock>
+where
+    O: OperationOwner,
+    P: TerminalEvidenceKey,
+    D: TerminalEvidenceKey,
+{
+    fn try_into_prepared<CanonicalBlock>(
+        mut self,
+    ) -> Result<
+        PreparedRetainedPublication<CanonicalBlock, EvidenceBlock, F, P, D>,
+        FinalizationContainmentError,
+    > {
+        let state = self
+            .state
+            .take()
+            .unwrap_or_else(|| unreachable_final_owner_state());
+        Ok(state.try_commit()?.into_prepared())
+    }
+}
+
+impl<P, D, F, EvidenceBlock> EligibilityReadyRichPhysical<P, D, F, EvidenceBlock> {
+    fn into_terminal(self) -> TerminalPhysicalOwnershipManifest<P, D, F, (), EvidenceBlock> {
+        let Self {
+            evidence,
+            evidence_table,
+            account,
+            evidence_root: _,
+            set_id: _,
+            fallback_type: _,
+        } = self;
+        TerminalPhysicalOwnershipManifest::new(
+            DetachedRetainedPart::empty(),
+            evidence,
+            None,
+            Some(evidence_table),
+            Some(account),
+        )
+    }
+
+    fn into_prepared<CanonicalBlock>(
+        self,
+    ) -> PreparedRetainedPublication<CanonicalBlock, EvidenceBlock, F, P, D> {
+        let Self {
+            evidence,
+            evidence_table,
+            account,
+            evidence_root,
+            set_id,
+            fallback_type: _,
+        } = self;
         PreparedRetainedPublication {
             payload: RetainedPublicationPayload::RichFailure {
                 outcome_evidence: PublishedOutcomeEvidenceAggregate::from_table(
@@ -750,8 +786,24 @@ where
                 outcome_evidence_root: evidence_root,
                 account,
             },
-            evidence: PublishedPart::from_exact_owner(evidence.into_frozen_owner()),
+            evidence: PublishedPart::from_exact_owner(evidence),
         }
+    }
+}
+
+impl<P, D, F, EvidenceBlock> AccountBoundPublicationManifest
+    for EligibilityReadyRichPhysical<P, D, F, EvidenceBlock>
+{
+    fn publication_account(&self) -> &PhysicalStorageAccount {
+        &self.account
+    }
+
+    fn contain_uncommitted(self, reason: AccountPoisonReason) -> FinalizationContainmentError {
+        self.into_terminal().contain_new_fault(reason)
+    }
+
+    fn contain_after_quarantine(self, quarantine: AccountPoisoned) -> FinalizationContainmentError {
+        self.into_terminal().contain_after_quarantine(quarantine)
     }
 }
 
@@ -775,6 +827,19 @@ where
     fn drop(&mut self) {
         if let Some(state) = self.state.take() {
             contain_freeze_ready_rich_state(state);
+        }
+    }
+}
+
+impl<O, P, D, F, EvidenceBlock> Drop for EligibilityReadyRichGraph<O, P, D, F, EvidenceBlock>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+{
+    fn drop(&mut self) {
+        if let Some(state) = self.state.take() {
+            drop(state);
         }
     }
 }
@@ -837,26 +902,6 @@ where
     state: Option<QualifiedMinimalState<O, P, D, F, CanonicalBlock, EvidenceBlock>>,
 }
 
-struct EligibleMinimalState<O, P, D, F, CanonicalBlock, EvidenceBlock>
-where
-    O: OperationOwner,
-    P: Copy + Ord,
-    D: Copy + Ord,
-{
-    output: QualifiedMinimalOutput<P, D, F>,
-    discard: QualifiedMinimalDiscard<O, P, D, CanonicalBlock, EvidenceBlock>,
-    eligibility: PublicationEligibility,
-}
-
-struct EligibleMinimalGraph<O, P, D, F, CanonicalBlock, EvidenceBlock>
-where
-    O: OperationOwner,
-    P: Copy + Ord,
-    D: Copy + Ord,
-{
-    state: Option<EligibleMinimalState<O, P, D, F, CanonicalBlock, EvidenceBlock>>,
-}
-
 struct FreezeReadyMinimalState<O, P, D, F>
 where
     O: OperationOwner,
@@ -865,7 +910,6 @@ where
 {
     output: QualifiedMinimalOutput<P, D, F>,
     proof: FreezeReadyTypedProof<O, P, D>,
-    eligibility: PublicationEligibility,
 }
 
 struct FreezeReadyMinimalGraph<O, P, D, F>
@@ -875,6 +919,33 @@ where
     D: Copy + Ord,
 {
     state: Option<FreezeReadyMinimalState<O, P, D, F>>,
+}
+
+struct DetachedReadyMinimalState<O, P, D, F>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+{
+    output: QualifiedMinimalOutput<P, D, F>,
+    proof: crate::ledger::DetachedTypedFreezeProof<O, P, D>,
+}
+
+struct EligibilityReadyMinimalPhysical<P, D, F> {
+    fallback: DetachedRetainedPart<F>,
+    evidence: DetachedRetainedPart<TerminalLedgerEvidence<P, D>>,
+}
+
+type EligibilityReadyMinimalJointCommit<O, P, D, F> =
+    AccountBoundJointCommit<EligibilityReadyMinimalPhysical<P, D, F>, O, P, D>;
+
+struct EligibilityReadyMinimalGraph<O, P, D, F>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+{
+    state: Option<EligibilityReadyMinimalJointCommit<O, P, D, F>>,
 }
 
 #[allow(
@@ -1144,35 +1215,51 @@ where
             .state
             .take()
             .unwrap_or_else(|| unreachable_final_owner_state());
-        let eligibility = match state
-            .output
-            .evidence
-            .account()
-            .try_publication_eligibility()
-        {
-            Ok(eligibility) => eligibility,
-            Err(quarantine) => {
-                let reason = quarantine.snapshot().first_poison_evidence().map_or(
-                    AccountPoisonReason::OwnershipGraphUnverified,
-                    AccountPoisonEvidence::reason,
-                );
-                return Err(contain_qualified_minimal_state(state, reason, true));
-            }
-        };
-        let eligible = EligibleMinimalGraph {
-            state: Some(EligibleMinimalState {
+        let freeze_ready = match state.discard {
+            QualifiedMinimalDiscard::None { proof } => FreezeReadyMinimalGraph {
+                state: Some(FreezeReadyMinimalState {
+                    output: state.output,
+                    proof,
+                }),
+            },
+            QualifiedMinimalDiscard::Evidence {
+                table,
+                account,
+                proof,
+            } => Self::finish_discard(MinimalDiscardContinuationState {
                 output: state.output,
-                discard: state.discard,
-                eligibility,
-            }),
+                canonical_table: None,
+                evidence_table: Some(table),
+                account,
+                proof: MinimalDiscardContinuationProof::Evidence(proof),
+            })?,
+            QualifiedMinimalDiscard::Both {
+                canonical_table,
+                evidence_table,
+                account,
+                proof,
+            } => Self::finish_discard(MinimalDiscardContinuationState {
+                output: state.output,
+                canonical_table: Some(canonical_table),
+                evidence_table: Some(evidence_table),
+                account,
+                proof: MinimalDiscardContinuationProof::Both(proof),
+            })?,
         };
         #[cfg(test)]
-        let eligible = maybe_drop_failure_guard(
+        let freeze_ready = maybe_drop_failure_guard(
             FailureTerminalRail::Minimal,
-            FailureGuardDropStage::Eligible,
-            eligible,
+            FailureGuardDropStage::FreezeReady,
+            freeze_ready,
         );
-        eligible.into_prepared()
+        let eligibility_ready = freeze_ready.try_detach_and_freeze()?;
+        #[cfg(test)]
+        let eligibility_ready = maybe_drop_failure_guard(
+            FailureTerminalRail::Minimal,
+            FailureGuardDropStage::EligibilityReady,
+            eligibility_ready,
+        );
+        eligibility_ready.try_into_prepared()
     }
 }
 
@@ -1192,30 +1279,6 @@ where
             );
         }
     }
-}
-
-fn contain_eligible_minimal_state<O, P, D, F, CanonicalBlock, EvidenceBlock>(
-    state: EligibleMinimalState<O, P, D, F, CanonicalBlock, EvidenceBlock>,
-    reason: AccountPoisonReason,
-    already_recorded: bool,
-) -> FinalizationContainmentError
-where
-    O: OperationOwner,
-    P: Copy + Ord,
-    D: Copy + Ord,
-{
-    let EligibleMinimalState {
-        output,
-        discard,
-        eligibility,
-    } = state;
-    let cause = contain_qualified_minimal_state(
-        QualifiedMinimalState { output, discard },
-        reason,
-        already_recorded,
-    );
-    drop(eligibility);
-    cause
 }
 
 enum MinimalDiscardContinuationProof<O, P, D>
@@ -1253,7 +1316,6 @@ where
     evidence_table: Option<RetainedTableAllocation<EvidenceBlock>>,
     account: PhysicalStorageAccount,
     proof: MinimalDiscardContinuationProof<O, P, D>,
-    eligibility: PublicationEligibility,
 }
 
 fn contain_minimal_discard_continuation_state<O, P, D, F, CanonicalBlock, EvidenceBlock>(
@@ -1272,7 +1334,6 @@ where
         evidence_table,
         account,
         proof,
-        eligibility,
     } = state;
     let QualifiedMinimalOutput {
         fallback,
@@ -1292,7 +1353,6 @@ where
         physical.contain_new_fault(reason)
     };
     proof.retain_fail_closed();
-    drop(eligibility);
     cause
 }
 
@@ -1328,7 +1388,7 @@ fn table_cleanup_reason(
 }
 
 impl<O, P, D, F, CanonicalBlock, EvidenceBlock>
-    EligibleMinimalGraph<O, P, D, F, CanonicalBlock, EvidenceBlock>
+    QualifiedMinimalGraph<O, P, D, F, CanonicalBlock, EvidenceBlock>
 where
     O: OperationOwner,
     P: TerminalEvidenceKey,
@@ -1398,7 +1458,6 @@ where
             evidence_table,
             account,
             proof: _,
-            eligibility,
         } = state;
         drop(canonical_table);
         drop(evidence_table);
@@ -1407,80 +1466,8 @@ where
             state: Some(FreezeReadyMinimalState {
                 output,
                 proof: freeze_ready,
-                eligibility,
             }),
         })
-    }
-
-    fn into_prepared(
-        mut self,
-    ) -> Result<
-        PreparedRetainedPublication<CanonicalBlock, EvidenceBlock, F, P, D>,
-        FinalizationContainmentError,
-    > {
-        let state = self
-            .state
-            .take()
-            .unwrap_or_else(|| unreachable_final_owner_state());
-        let freeze_ready = match state.discard {
-            QualifiedMinimalDiscard::None { proof } => FreezeReadyMinimalGraph {
-                state: Some(FreezeReadyMinimalState {
-                    output: state.output,
-                    proof,
-                    eligibility: state.eligibility,
-                }),
-            },
-            QualifiedMinimalDiscard::Evidence {
-                table,
-                account,
-                proof,
-            } => Self::finish_discard(MinimalDiscardContinuationState {
-                output: state.output,
-                canonical_table: None,
-                evidence_table: Some(table),
-                account,
-                proof: MinimalDiscardContinuationProof::Evidence(proof),
-                eligibility: state.eligibility,
-            })?,
-            QualifiedMinimalDiscard::Both {
-                canonical_table,
-                evidence_table,
-                account,
-                proof,
-            } => Self::finish_discard(MinimalDiscardContinuationState {
-                output: state.output,
-                canonical_table: Some(canonical_table),
-                evidence_table: Some(evidence_table),
-                account,
-                proof: MinimalDiscardContinuationProof::Both(proof),
-                eligibility: state.eligibility,
-            })?,
-        };
-        #[cfg(test)]
-        let freeze_ready = maybe_drop_failure_guard(
-            FailureTerminalRail::Minimal,
-            FailureGuardDropStage::FreezeReady,
-            freeze_ready,
-        );
-        Ok(freeze_ready.freeze())
-    }
-}
-
-impl<O, P, D, F, CanonicalBlock, EvidenceBlock> Drop
-    for EligibleMinimalGraph<O, P, D, F, CanonicalBlock, EvidenceBlock>
-where
-    O: OperationOwner,
-    P: Copy + Ord,
-    D: Copy + Ord,
-{
-    fn drop(&mut self) {
-        if let Some(state) = self.state.take() {
-            let _ = contain_eligible_minimal_state(
-                state,
-                AccountPoisonReason::OwnershipGraphUnverified,
-                false,
-            );
-        }
     }
 }
 
@@ -1490,11 +1477,7 @@ where
     P: Copy + Ord,
     D: Copy + Ord,
 {
-    let FreezeReadyMinimalState {
-        output,
-        proof,
-        eligibility,
-    } = state;
+    let FreezeReadyMinimalState { output, proof } = state;
     let QualifiedMinimalOutput {
         fallback,
         evidence,
@@ -1509,7 +1492,6 @@ where
     );
     let _ = physical.contain_new_fault(AccountPoisonReason::OwnershipGraphUnverified);
     proof.retain_fail_closed();
-    drop(eligibility);
 }
 
 impl<O, P, D, F> FreezeReadyMinimalGraph<O, P, D, F>
@@ -1518,42 +1500,139 @@ where
     P: TerminalEvidenceKey,
     D: TerminalEvidenceKey,
 {
-    fn freeze<CanonicalBlock, EvidenceBlock>(
+    fn try_detach_and_freeze(
         mut self,
-    ) -> PreparedRetainedPublication<CanonicalBlock, EvidenceBlock, F, P, D> {
+    ) -> Result<EligibilityReadyMinimalGraph<O, P, D, F>, FinalizationContainmentError> {
         let state = self
             .state
             .take()
             .unwrap_or_else(|| unreachable_final_owner_state());
-        let mut state = scopeguard::guard(state, contain_freeze_ready_minimal_state);
-        let snapshot = state.proof.freeze_in_place();
+        let FreezeReadyMinimalState { output, proof } = state;
+        let proof = match proof.try_into_detached() {
+            Ok(proof) => proof,
+            Err(error) => {
+                let QualifiedMinimalOutput {
+                    fallback,
+                    evidence,
+                    cause: _,
+                } = output;
+                let physical = TerminalPhysicalOwnershipManifest::<P, D, F, (), ()>::new(
+                    fallback,
+                    evidence.into_unfrozen_owner(),
+                    None,
+                    None,
+                    None,
+                );
+                let cause =
+                    physical.contain_new_fault(AccountPoisonReason::OwnershipGraphUnverified);
+                error.retain_fail_closed();
+                return Err(cause);
+            }
+        };
+        let state = DetachedReadyMinimalState { output, proof };
+        let mut state = scopeguard::guard(state, contain_detached_ready_minimal_state);
         #[cfg(test)]
         maybe_panic_failure_guard_stage(
             FailureTerminalRail::Minimal,
-            FailureGuardDropStage::LedgerPublished,
+            FailureGuardDropStage::LedgerDetached,
         );
         let terminal_cause = TerminalEvidenceCause::Failure(state.output.cause);
-        state
-            .output
+        let DetachedReadyMinimalState { output, proof } = &mut *state;
+        output
             .evidence
-            .freeze_in_place(terminal_cause, &snapshot);
+            .freeze_in_place(terminal_cause, proof.terminal_projection());
         let state = scopeguard::ScopeGuard::into_inner(state);
-        let FreezeReadyMinimalState {
-            output,
-            proof: _,
-            eligibility: _,
-        } = state;
+        let DetachedReadyMinimalState { output, proof } = state;
         let QualifiedMinimalOutput {
             fallback,
             evidence,
             cause: _,
         } = output;
+        Ok(EligibilityReadyMinimalGraph {
+            state: Some(AccountBoundJointCommit::new(
+                EligibilityReadyMinimalPhysical {
+                    fallback,
+                    evidence: evidence.into_frozen_owner(),
+                },
+                proof,
+            )),
+        })
+    }
+}
+
+fn contain_detached_ready_minimal_state<O, P, D, F>(state: DetachedReadyMinimalState<O, P, D, F>)
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+{
+    let DetachedReadyMinimalState { output, proof } = state;
+    let QualifiedMinimalOutput {
+        fallback,
+        evidence,
+        cause: _,
+    } = output;
+    let physical = TerminalPhysicalOwnershipManifest::<P, D, F, (), ()>::new(
+        fallback,
+        evidence.into_unfrozen_owner(),
+        None,
+        None,
+        None,
+    );
+    let _ = physical.contain_new_fault(AccountPoisonReason::OwnershipGraphUnverified);
+    proof.retain_fail_closed();
+}
+
+impl<O, P, D, F> EligibilityReadyMinimalGraph<O, P, D, F>
+where
+    O: OperationOwner,
+    P: TerminalEvidenceKey,
+    D: TerminalEvidenceKey,
+{
+    fn try_into_prepared<CanonicalBlock, EvidenceBlock>(
+        mut self,
+    ) -> Result<
+        PreparedRetainedPublication<CanonicalBlock, EvidenceBlock, F, P, D>,
+        FinalizationContainmentError,
+    > {
+        let state = self
+            .state
+            .take()
+            .unwrap_or_else(|| unreachable_final_owner_state());
+        Ok(state.try_commit()?.into_prepared())
+    }
+}
+
+impl<P, D, F> EligibilityReadyMinimalPhysical<P, D, F> {
+    fn into_terminal(self) -> TerminalPhysicalOwnershipManifest<P, D, F, (), ()> {
+        let Self { fallback, evidence } = self;
+        TerminalPhysicalOwnershipManifest::new(fallback, evidence, None, None, None)
+    }
+
+    fn into_prepared<CanonicalBlock, EvidenceBlock>(
+        self,
+    ) -> PreparedRetainedPublication<CanonicalBlock, EvidenceBlock, F, P, D> {
+        let Self { fallback, evidence } = self;
         PreparedRetainedPublication {
             payload: RetainedPublicationPayload::MinimalFallback {
                 part: PublishedPart::from_exact_owner(fallback),
             },
-            evidence: PublishedPart::from_exact_owner(evidence.into_frozen_owner()),
+            evidence: PublishedPart::from_exact_owner(evidence),
         }
+    }
+}
+
+impl<P, D, F> AccountBoundPublicationManifest for EligibilityReadyMinimalPhysical<P, D, F> {
+    fn publication_account(&self) -> &PhysicalStorageAccount {
+        self.evidence.account()
+    }
+
+    fn contain_uncommitted(self, reason: AccountPoisonReason) -> FinalizationContainmentError {
+        self.into_terminal().contain_new_fault(reason)
+    }
+
+    fn contain_after_quarantine(self, quarantine: AccountPoisoned) -> FinalizationContainmentError {
+        self.into_terminal().contain_after_quarantine(quarantine)
     }
 }
 
@@ -1566,6 +1645,19 @@ where
     fn drop(&mut self) {
         if let Some(state) = self.state.take() {
             contain_freeze_ready_minimal_state(state);
+        }
+    }
+}
+
+impl<O, P, D, F> Drop for EligibilityReadyMinimalGraph<O, P, D, F>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+{
+    fn drop(&mut self) {
+        if let Some(state) = self.state.take() {
+            drop(state);
         }
     }
 }

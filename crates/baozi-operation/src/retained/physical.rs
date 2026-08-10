@@ -379,14 +379,138 @@ pub(super) struct PendingAccountActionAdmission<'account> {
     pub(super) account: &'account PhysicalStorageAccount,
 }
 
-/// Single-use proof that final publication eligibility linearized before account poison.
+/// Single-use proof that final publication eligibility linearized on one exact account before
+/// account poison.
 ///
-/// The proof is minted only while holding the account's linear-state lock. A later poison event is
-/// therefore ordered after this capability and cannot invalidate the already admitted pure
-/// preparation tail.
-#[must_use = "publication eligibility must be consumed by the exact freeze handoff"]
-pub(super) struct PublicationEligibility {
-    pub(super) private: (),
+/// This proof never leaves the physical-account module. It is converted immediately into the
+/// account-branded permit consumed by the detached ledger commit, so no caller can retain or replace
+/// the eligibility result between the physical and ledger halves of the joint commit.
+struct PublicationEligibility<'account> {
+    account: &'account PhysicalStorageAccount,
+}
+
+/// Unforgeable bridge consumed by the detached ledger's no-fail commit.
+///
+/// The borrowed account keeps the exact account selected by the physical manifest alive and
+/// immovable until the ledger commit returns. Only `PublicationEligibility` can mint this permit.
+pub(crate) struct DetachedLedgerCommitPermit<'account> {
+    _account: &'account PhysicalStorageAccount,
+}
+
+/// Exact physical owner accepted by the final account-bound joint commit.
+///
+/// Implementations live beside the success, rich-failure, and minimal-failure terminal states. The
+/// trait is retained-private so no other crate subsystem can introduce an alternate account lookup
+/// or containment path.
+pub(super) trait AccountBoundPublicationManifest {
+    fn publication_account(&self) -> &PhysicalStorageAccount;
+
+    fn contain_uncommitted(self, reason: AccountPoisonReason) -> FinalizationContainmentError;
+
+    fn contain_after_quarantine(self, quarantine: AccountPoisoned) -> FinalizationContainmentError;
+}
+
+/// Single-use owner of one exact physical terminal graph and its detached ledger proof.
+///
+/// Final eligibility is read only from the physical graph's own account. Success immediately
+/// consumes the resulting account-branded permit in the detached ledger's unique no-fail commit.
+/// Every pre-commit drop or poison rejection contains physical storage before retaining the ledger
+/// proof.
+#[must_use = "the account-bound terminal graph must be jointly committed or contained"]
+pub(super) struct AccountBoundJointCommit<Physical, O, P, D>
+where
+    Physical: AccountBoundPublicationManifest,
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+{
+    physical: Option<Physical>,
+    proof: Option<crate::ledger::DetachedTypedFreezeProof<O, P, D>>,
+}
+
+impl<'account> PublicationEligibility<'account> {
+    fn into_ledger_commit_permit(self) -> DetachedLedgerCommitPermit<'account> {
+        DetachedLedgerCommitPermit {
+            _account: self.account,
+        }
+    }
+}
+
+impl<Physical, O, P, D> AccountBoundJointCommit<Physical, O, P, D>
+where
+    Physical: AccountBoundPublicationManifest,
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+{
+    pub(super) fn new(
+        physical: Physical,
+        proof: crate::ledger::DetachedTypedFreezeProof<O, P, D>,
+    ) -> Self {
+        Self {
+            physical: Some(physical),
+            proof: Some(proof),
+        }
+    }
+
+    pub(super) fn try_commit(mut self) -> Result<Physical, FinalizationContainmentError> {
+        let eligibility = self
+            .physical
+            .as_ref()
+            .unwrap_or_else(|| unreachable_final_owner_state())
+            .publication_account()
+            .try_publication_eligibility();
+        let eligibility = match eligibility {
+            Ok(eligibility) => eligibility,
+            Err(quarantine) => {
+                let cause = self.contain_after_quarantine(quarantine);
+                return Err(cause);
+            }
+        };
+        let proof = self
+            .proof
+            .take()
+            .unwrap_or_else(|| unreachable_final_owner_state());
+        proof.commit_account_bound(eligibility.into_ledger_commit_permit());
+        Ok(self
+            .physical
+            .take()
+            .unwrap_or_else(|| unreachable_final_owner_state()))
+    }
+
+    fn contain_after_quarantine(
+        &mut self,
+        quarantine: AccountPoisoned,
+    ) -> FinalizationContainmentError {
+        let physical = self
+            .physical
+            .take()
+            .unwrap_or_else(|| unreachable_final_owner_state());
+        let proof = self
+            .proof
+            .take()
+            .unwrap_or_else(|| unreachable_final_owner_state());
+        let cause = physical.contain_after_quarantine(quarantine);
+        proof.retain_fail_closed();
+        cause
+    }
+}
+
+impl<Physical, O, P, D> Drop for AccountBoundJointCommit<Physical, O, P, D>
+where
+    Physical: AccountBoundPublicationManifest,
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+{
+    fn drop(&mut self) {
+        if let Some(physical) = self.physical.take() {
+            let _ = physical.contain_uncommitted(AccountPoisonReason::OwnershipGraphUnverified);
+        }
+        if let Some(proof) = self.proof.take() {
+            proof.retain_fail_closed();
+        }
+    }
 }
 
 /// Holds the account linearization lock while a caller performs non-mutating table/source
@@ -1010,14 +1134,12 @@ impl PhysicalStorageAccount {
         Ok((PendingAccountActionAdmission { account: self }, set_id))
     }
 
-    pub(super) fn try_publication_eligibility(
-        &self,
-    ) -> Result<PublicationEligibility, AccountPoisoned> {
+    fn try_publication_eligibility(&self) -> Result<PublicationEligibility<'_>, AccountPoisoned> {
         let state = lock_recovering_poison(&self.inner.value().linear);
         if let Some(error) = state.poisoned_error() {
             return Err(error);
         }
-        let eligibility = PublicationEligibility { private: () };
+        let eligibility = PublicationEligibility { account: self };
         drop(state);
         #[cfg(test)]
         pause_after_publication_eligibility();

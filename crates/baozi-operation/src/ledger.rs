@@ -3,6 +3,8 @@ use std::fmt;
 use std::marker::PhantomData;
 use std::mem::size_of;
 use std::num::NonZeroU64;
+#[cfg(test)]
+use std::sync::Weak;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 mod commitment;
@@ -12,23 +14,22 @@ mod startup;
 
 use commitment::{
     AggregateCommitmentError, AggregatedCommitment, CommitmentAggregate, aggregate_commitments,
-    apply_typed_commitments, preflight_typed_discard_batch, preflight_typed_publication_batch,
-    validate_commitments, validate_typed_commitment_batches, validate_typed_commitment_pair,
-    validate_typed_commitments,
+    preflight_typed_discard_batch, preflight_typed_publication_batch, validate_commitments,
+    validate_typed_commitment_batches, validate_typed_commitment_pair, validate_typed_commitments,
 };
 
 pub use reservation::LiveReservation;
-use reservation::ReservationCore;
 pub(crate) use reservation::{
     AttributionBatchPlan, AttributionReservationBatch, FallbackBaselineRejection,
     FallbackBatchBaseline, OperationAttributionReservation, StorageCoveringReservation,
 };
+use reservation::{DetachedAttributionBatch, ReservationCore};
 
 pub(crate) use snapshot::DimensionSnapshotScalars;
 pub use snapshot::{DimensionSnapshot, LedgerSnapshot, PhaseSnapshot};
 use snapshot::{
     dimension_snapshot, phase_catalog_shape_is_valid, phase_snapshot, take_final_snapshot,
-    take_typed_final_snapshot, try_snapshot, typed_terminal_snapshot_positions_are_valid,
+    take_typed_terminal_projection, try_snapshot, typed_terminal_snapshot_positions_are_valid,
     validate_final_snapshot_shape,
 };
 
@@ -80,6 +81,12 @@ std::thread_local! {
     static PHASE_CATALOG_CONSTRUCTION_ENTRIES: std::cell::Cell<usize> = const {
         std::cell::Cell::new(0)
     };
+    static DETACHED_COVER_RELEASE_COUNT: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
+    static DETACHED_COVER_RELEASES_WERE_STORAGE_FIRST: std::cell::Cell<bool> = const {
+        std::cell::Cell::new(true)
+    };
 }
 
 #[cfg(test)]
@@ -115,6 +122,28 @@ pub(crate) fn test_attribution_batch_allocation_entries() -> usize {
 #[cfg(test)]
 pub(crate) fn test_phase_catalog_construction_entries() -> usize {
     PHASE_CATALOG_CONSTRUCTION_ENTRIES.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+fn test_reset_detached_cover_release_observation() {
+    DETACHED_COVER_RELEASE_COUNT.with(|count| count.set(0));
+    DETACHED_COVER_RELEASES_WERE_STORAGE_FIRST.with(|storage_first| storage_first.set(true));
+}
+
+#[cfg(test)]
+fn test_record_detached_cover_release(storage_first: bool) {
+    DETACHED_COVER_RELEASE_COUNT.with(|count| count.set(count.get().saturating_add(1)));
+    if !storage_first {
+        DETACHED_COVER_RELEASES_WERE_STORAGE_FIRST.with(|observed| observed.set(false));
+    }
+}
+
+#[cfg(test)]
+fn test_detached_cover_release_observation() -> (usize, bool) {
+    (
+        DETACHED_COVER_RELEASE_COUNT.with(std::cell::Cell::get),
+        DETACHED_COVER_RELEASES_WERE_STORAGE_FIRST.with(std::cell::Cell::get),
+    )
 }
 
 /// Default hard limit for ledger-owned evidence indexes and staging storage.
@@ -1145,29 +1174,40 @@ where
 /// Test-only scalar observation of one ledger's live reservation state.
 #[cfg(test)]
 pub(crate) struct LedgerTestProbe<P, D> {
-    state: Arc<Mutex<LedgerState<P, D>>>,
+    state: Weak<Mutex<LedgerState<P, D>>>,
 }
 
 #[cfg(test)]
 impl<P, D> LedgerTestProbe<P, D> {
+    pub(crate) fn is_available(&self) -> bool {
+        self.state.strong_count() != 0
+    }
+
     pub(crate) fn active_reservations(&self) -> u64 {
-        lock(&self.state).active_reservations
+        self.state
+            .upgrade()
+            .map_or(0, |state| lock(&state).active_reservations)
     }
 
     pub(crate) fn current_live_bytes(&self) -> u64 {
-        lock(&self.state).current_live_bytes
+        self.state
+            .upgrade()
+            .map_or(0, |state| lock(&state).current_live_bytes)
     }
 
     pub(crate) fn dimension_evidence(&self, dimension: D) -> Option<DimensionSnapshot>
     where
         D: Copy + Ord,
     {
-        let state = lock(&self.state);
+        let state = self.state.upgrade()?;
+        let state = lock(&state);
         dimension_entry(&state.dimensions, dimension).map(|entry| dimension_snapshot(entry.state))
     }
 
     pub(crate) fn is_terminal_qualified(&self) -> bool {
-        lock(&self.state).publication == PublicationState::TerminalQualified
+        self.state
+            .upgrade()
+            .is_some_and(|state| lock(&state).publication == PublicationState::TerminalQualified)
     }
 }
 
@@ -1227,7 +1267,7 @@ where
     #[cfg(test)]
     pub(crate) fn test_probe(&self) -> LedgerTestProbe<P, D> {
         LedgerTestProbe {
-            state: Arc::clone(&self.state),
+            state: Arc::downgrade(&self.state),
         }
     }
 
@@ -2241,9 +2281,15 @@ where
         drop(state);
 
         reservation.core.bytes -= bytes;
+        let owner = reservation
+            .core
+            .owner
+            .as_ref()
+            .cloned()
+            .ok_or(LedgerCause::OwnerMismatch)?;
         Ok(LiveReservation {
             core: ReservationCore::new(
-                Arc::clone(&reservation.core.owner),
+                owner,
                 reservation.core.phase,
                 reservation.core.phase_position,
                 reservation.core.dimension,
@@ -3290,6 +3336,110 @@ where
     proof: Option<QualifiedTypedFreezeProof<O, P, D>>,
 }
 
+/// Why a terminal-qualified ledger could not become an exclusively owned publication capsule.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TypedFreezeDetachErrorKind {
+    SharedLedgerOwner,
+    PoisonedLedger,
+    UnexpectedDiscardOwner,
+}
+
+struct DetachedTypedBatches<O, P, D>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+{
+    canonical: DetachedAttributionBatch<O, P, D, CanonicalOutput>,
+    evidence: DetachedAttributionBatch<O, P, D, OutcomeEvidenceDestination>,
+    deferred_canonical_storage: Option<DetachedAttributionBatch<O, P, D, CanonicalOutput>>,
+    deferred_evidence_storage_first:
+        Option<DetachedAttributionBatch<O, P, D, OutcomeEvidenceDestination>>,
+    deferred_evidence_storage_second:
+        Option<DetachedAttributionBatch<O, P, D, OutcomeEvidenceDestination>>,
+    discard_canonical: Option<DetachedAttributionBatch<O, P, D, CanonicalOutput>>,
+    discard_evidence: Option<DetachedAttributionBatch<O, P, D, OutcomeEvidenceDestination>>,
+}
+
+struct DetachedLiveLedgerCover<O, P, D>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+{
+    state: LedgerState<P, D>,
+    batches: DetachedTypedBatches<O, P, D>,
+}
+
+enum FailedDetachedLedgerState<P, D> {
+    Shared(Arc<Mutex<LedgerState<P, D>>>),
+    Owned(LedgerState<P, D>),
+}
+
+struct FailedDetachedLiveLedgerCover<O, P, D>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+{
+    state: FailedDetachedLedgerState<P, D>,
+    batches: DetachedTypedBatches<O, P, D>,
+}
+
+impl<O, P, D> FailedDetachedLiveLedgerCover<O, P, D>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+{
+    fn retain_fail_closed(self) {
+        let Self { state, batches } = self;
+        match state {
+            FailedDetachedLedgerState::Shared(state) => std::mem::forget(state),
+            FailedDetachedLedgerState::Owned(state) => std::mem::forget(state),
+        }
+        std::mem::forget(batches);
+    }
+}
+
+/// A terminal-qualified ledger whose physical accounting graph and mutable state are exclusively
+/// owned, but whose physical account has not yet crossed publication eligibility.
+///
+/// Dropping this capability is fail-closed: the complete live cover and terminal projection are
+/// retained. Accounting can retire only through the account-bound joint-commit permit.
+pub(crate) struct DetachedTypedFreezeProof<O, P, D>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+{
+    projection: Option<LedgerSnapshot<P, D>>,
+    cover: Option<DetachedLiveLedgerCover<O, P, D>>,
+}
+
+/// A consuming detach failure that still owns every ledger and reservation component.
+///
+/// This value cannot retry or refund. Dropping it deliberately retains the complete graph.
+pub(crate) struct TypedFreezeDetachError<O, P, D>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+{
+    kind: TypedFreezeDetachErrorKind,
+    projection: Option<LedgerSnapshot<P, D>>,
+    cover: Option<Box<FailedDetachedLiveLedgerCover<O, P, D>>>,
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct DetachedLedgerTerminalScalars {
+    pub(crate) current_live_bytes: u64,
+    pub(crate) active_reservations: u64,
+    pub(crate) current_evidence_bytes: u64,
+    pub(crate) published: bool,
+}
+
 #[allow(
     dead_code,
     reason = "crate-private until the U4 canonical consumers switch atomically"
@@ -3850,45 +4000,84 @@ where
         std::mem::forget(self);
     }
 
-    fn freeze_in_place(&mut self) -> LedgerSnapshot<P, D> {
+    fn try_into_detached(
+        mut self,
+    ) -> Result<DetachedTypedFreezeProof<O, P, D>, TypedFreezeDetachError<O, P, D>> {
         let last_completed_phase = self.last_completed_phase;
         let proof = self
             .proof
-            .as_mut()
+            .take()
             .unwrap_or_else(|| unreachable!("qualified proof disappeared"));
-        drop(proof.discard_canonical.take());
-        drop(proof.discard_evidence.take());
-        let deferred_canonical_storage = proof.deferred_canonical_storage.take();
-        let deferred_evidence_storage_first = proof.deferred_evidence_storage_first.take();
-        let deferred_evidence_storage_second = proof.deferred_evidence_storage_second.take();
-
-        let snapshot = {
+        let projection = {
             let mut state = lock(&proof.ledger.state);
-            release_deferred_typed_storage_locked(
-                deferred_canonical_storage,
-                deferred_evidence_storage_first,
-                deferred_evidence_storage_second,
+            take_typed_terminal_projection(
                 &mut state,
-            );
-            proof.canonical.release_bound_attributions(&mut state);
-            proof.evidence.release_bound_attributions(&mut state);
-            apply_typed_commitments(&mut state.dimensions, &proof.canonical);
-            apply_typed_commitments(&mut state.dimensions, &proof.evidence);
-            proof
-                .canonical
-                .destroy_storage_then_release_bound_cover(&mut state);
-            proof
-                .evidence
-                .destroy_storage_then_release_bound_cover(&mut state);
-            state.publication = PublicationState::Published;
-            take_typed_final_snapshot(&mut state, last_completed_phase)
+                last_completed_phase,
+                &proof.canonical,
+                &proof.evidence,
+            )
         };
-        drop(self.proof.take());
-        snapshot
-    }
-
-    fn freeze(mut self) -> LedgerSnapshot<P, D> {
-        self.freeze_in_place()
+        let TypedFreezeProof {
+            canonical,
+            evidence,
+            deferred_canonical_storage,
+            deferred_evidence_storage_first,
+            deferred_evidence_storage_second,
+            discard_canonical,
+            discard_evidence,
+            ledger,
+        } = proof;
+        let unexpected_discard = discard_canonical.is_some() || discard_evidence.is_some();
+        let Ledger {
+            state,
+            operation_live_byte_limit: _,
+            operation_owner: _,
+        } = ledger;
+        let batches = DetachedTypedBatches {
+            canonical: canonical.into_detached(&state),
+            evidence: evidence.into_detached(&state),
+            deferred_canonical_storage: deferred_canonical_storage
+                .map(|batch| batch.into_detached(&state)),
+            deferred_evidence_storage_first: deferred_evidence_storage_first
+                .map(|batch| batch.into_detached(&state)),
+            deferred_evidence_storage_second: deferred_evidence_storage_second
+                .map(|batch| batch.into_detached(&state)),
+            discard_canonical: discard_canonical.map(|batch| batch.into_detached(&state)),
+            discard_evidence: discard_evidence.map(|batch| batch.into_detached(&state)),
+        };
+        let state = match Arc::try_unwrap(state) {
+            Ok(state) => match state.into_inner() {
+                Ok(state) => state,
+                Err(poisoned) => {
+                    return Err(TypedFreezeDetachError::new(
+                        TypedFreezeDetachErrorKind::PoisonedLedger,
+                        projection,
+                        FailedDetachedLedgerState::Owned(poisoned.into_inner()),
+                        batches,
+                    ));
+                }
+            },
+            Err(state) => {
+                return Err(TypedFreezeDetachError::new(
+                    TypedFreezeDetachErrorKind::SharedLedgerOwner,
+                    projection,
+                    FailedDetachedLedgerState::Shared(state),
+                    batches,
+                ));
+            }
+        };
+        if unexpected_discard {
+            return Err(TypedFreezeDetachError::new(
+                TypedFreezeDetachErrorKind::UnexpectedDiscardOwner,
+                projection,
+                FailedDetachedLedgerState::Owned(state),
+                batches,
+            ));
+        }
+        Ok(DetachedTypedFreezeProof {
+            projection: Some(projection),
+            cover: Some(DetachedLiveLedgerCover { state, batches }),
+        })
     }
 }
 
@@ -4156,22 +4345,288 @@ where
             .and_then(QualifiedTypedFreezeProof::last_completed_phase)
     }
 
-    pub(crate) fn freeze_in_place(&mut self) -> LedgerSnapshot<P, D> {
-        let snapshot = self
+    pub(crate) fn try_into_detached(
+        mut self,
+    ) -> Result<DetachedTypedFreezeProof<O, P, D>, TypedFreezeDetachError<O, P, D>> {
+        let proof = self
             .proof
-            .as_mut()
-            .unwrap_or_else(|| unreachable!("freeze-ready proof disappeared"))
-            .freeze_in_place();
-        drop(self.proof.take());
-        snapshot
-    }
-
-    pub(crate) fn freeze(mut self) -> LedgerSnapshot<P, D> {
-        self.freeze_in_place()
+            .take()
+            .unwrap_or_else(|| unreachable!("freeze-ready proof disappeared"));
+        proof.try_into_detached()
     }
 
     pub(crate) fn retain_fail_closed(self) {
         std::mem::forget(self);
+    }
+}
+
+impl<O, P, D> DetachedTypedBatches<O, P, D>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+{
+    fn apply_commitments(&self, state: &mut LedgerState<P, D>) {
+        self.canonical.apply_commitments(&mut state.dimensions);
+        self.evidence.apply_commitments(&mut state.dimensions);
+    }
+
+    fn release_attributions(&mut self, state: &mut LedgerState<P, D>) {
+        self.canonical.release_attributions(state);
+        self.evidence.release_attributions(state);
+        if let Some(batch) = self.deferred_canonical_storage.as_mut() {
+            batch.release_attributions(state);
+        }
+        if let Some(batch) = self.deferred_evidence_storage_first.as_mut() {
+            batch.release_attributions(state);
+        }
+        if let Some(batch) = self.deferred_evidence_storage_second.as_mut() {
+            batch.release_attributions(state);
+        }
+        if let Some(batch) = self.discard_canonical.as_mut() {
+            batch.release_attributions(state);
+        }
+        if let Some(batch) = self.discard_evidence.as_mut() {
+            batch.release_attributions(state);
+        }
+    }
+
+    fn destroy_storage_then_release_covers(&mut self, state: &mut LedgerState<P, D>) {
+        self.canonical.destroy_storage_then_release_cover(state);
+        self.evidence.destroy_storage_then_release_cover(state);
+        if let Some(batch) = self.deferred_canonical_storage.as_mut() {
+            batch.destroy_storage_then_release_cover(state);
+        }
+        if let Some(batch) = self.deferred_evidence_storage_first.as_mut() {
+            batch.destroy_storage_then_release_cover(state);
+        }
+        if let Some(batch) = self.deferred_evidence_storage_second.as_mut() {
+            batch.destroy_storage_then_release_cover(state);
+        }
+        if let Some(batch) = self.discard_canonical.as_mut() {
+            batch.destroy_storage_then_release_cover(state);
+        }
+        if let Some(batch) = self.discard_evidence.as_mut() {
+            batch.destroy_storage_then_release_cover(state);
+        }
+    }
+
+    #[cfg(test)]
+    fn active_count(&self) -> u64 {
+        self.canonical.active_count()
+            + self.evidence.active_count()
+            + self
+                .deferred_canonical_storage
+                .as_ref()
+                .map_or(0, DetachedAttributionBatch::active_count)
+            + self
+                .deferred_evidence_storage_first
+                .as_ref()
+                .map_or(0, DetachedAttributionBatch::active_count)
+            + self
+                .deferred_evidence_storage_second
+                .as_ref()
+                .map_or(0, DetachedAttributionBatch::active_count)
+    }
+
+    #[cfg(test)]
+    fn live_bytes(&self) -> u64 {
+        self.canonical.live_bytes()
+            + self.evidence.live_bytes()
+            + self
+                .deferred_canonical_storage
+                .as_ref()
+                .map_or(0, DetachedAttributionBatch::live_bytes)
+            + self
+                .deferred_evidence_storage_first
+                .as_ref()
+                .map_or(0, DetachedAttributionBatch::live_bytes)
+            + self
+                .deferred_evidence_storage_second
+                .as_ref()
+                .map_or(0, DetachedAttributionBatch::live_bytes)
+    }
+}
+
+impl<O, P, D> DetachedLiveLedgerCover<O, P, D>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+{
+    fn commit_account_bound(&mut self) {
+        self.batches.apply_commitments(&mut self.state);
+        self.batches.release_attributions(&mut self.state);
+        self.batches
+            .destroy_storage_then_release_covers(&mut self.state);
+    }
+
+    fn retire_evidence(&mut self) {
+        drop(std::mem::take(&mut self.state.dimension_snapshot_staging));
+        drop(std::mem::take(&mut self.state.phase_snapshot_staging));
+        drop(std::mem::take(&mut self.state.dimensions));
+        drop(std::mem::take(&mut self.state.phases));
+        drop(std::mem::take(&mut self.state.phase_states));
+        self.state.current_evidence_bytes = 0;
+        self.state.publication = PublicationState::Published;
+    }
+}
+
+impl<O, P, D> DetachedTypedFreezeProof<O, P, D>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+{
+    pub(crate) fn terminal_projection(&self) -> &LedgerSnapshot<P, D> {
+        self.projection
+            .as_ref()
+            .unwrap_or_else(|| unreachable!("detached terminal projection disappeared"))
+    }
+
+    fn commit_inner(&mut self) -> (u64, u64, u64, bool) {
+        let mut cover = self
+            .cover
+            .take()
+            .unwrap_or_else(|| unreachable!("detached live ledger cover disappeared"));
+        cover.commit_account_bound();
+        drop(self.projection.take());
+        cover.retire_evidence();
+        let terminal = (
+            cover.state.current_live_bytes,
+            cover.state.active_reservations,
+            cover.state.current_evidence_bytes,
+            cover.state.publication == PublicationState::Published,
+        );
+        drop(cover);
+        terminal
+    }
+
+    pub(crate) fn commit_account_bound(
+        mut self,
+        _permit: crate::retained::DetachedLedgerCommitPermit<'_>,
+    ) {
+        let _ = self.commit_inner();
+    }
+
+    pub(crate) fn retain_fail_closed(self) {
+        drop(self);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_current_live_bytes(&self) -> u64 {
+        self.cover
+            .as_ref()
+            .map_or(0, |cover| cover.state.current_live_bytes)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_active_reservations(&self) -> u64 {
+        self.cover
+            .as_ref()
+            .map_or(0, |cover| cover.state.active_reservations)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_current_evidence_bytes(&self) -> u64 {
+        self.cover
+            .as_ref()
+            .map_or(0, |cover| cover.state.current_evidence_bytes)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_dimension_evidence(&self, dimension: D) -> Option<DimensionSnapshot> {
+        self.cover.as_ref().and_then(|cover| {
+            dimension_entry(&cover.state.dimensions, dimension)
+                .map(|entry| dimension_snapshot(entry.state))
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_cover_matches_state(&self) -> bool {
+        self.cover.as_ref().is_some_and(|cover| {
+            cover.batches.live_bytes() == cover.state.current_live_bytes
+                && cover.batches.active_count() == cover.state.active_reservations
+        })
+    }
+
+    #[cfg(test)]
+    fn commit_account_bound_for_test(mut self) -> DetachedLedgerTerminalScalars {
+        let (current_live_bytes, active_reservations, current_evidence_bytes, published) =
+            self.commit_inner();
+        DetachedLedgerTerminalScalars {
+            current_live_bytes,
+            active_reservations,
+            current_evidence_bytes,
+            published,
+        }
+    }
+}
+
+impl<O, P, D> TypedFreezeDetachError<O, P, D>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+{
+    fn new(
+        kind: TypedFreezeDetachErrorKind,
+        projection: LedgerSnapshot<P, D>,
+        state: FailedDetachedLedgerState<P, D>,
+        batches: DetachedTypedBatches<O, P, D>,
+    ) -> Self {
+        Self {
+            kind,
+            projection: Some(projection),
+            cover: Some(Box::new(FailedDetachedLiveLedgerCover { state, batches })),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn kind(&self) -> TypedFreezeDetachErrorKind {
+        self.kind
+    }
+
+    fn retain_parts_fail_closed(&mut self) {
+        let _ = self.kind;
+        if let Some(projection) = self.projection.take() {
+            std::mem::forget(projection);
+        }
+        if let Some(cover) = self.cover.take() {
+            (*cover).retain_fail_closed();
+        }
+    }
+
+    pub(crate) fn retain_fail_closed(mut self) {
+        self.retain_parts_fail_closed();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_current_live_bytes(&self) -> u64 {
+        let Some(cover) = self.cover.as_ref() else {
+            return 0;
+        };
+        match &cover.state {
+            FailedDetachedLedgerState::Shared(state) => lock(state).current_live_bytes,
+            FailedDetachedLedgerState::Owned(state) => state.current_live_bytes,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_cover_matches_state(&self) -> bool {
+        let Some(cover) = self.cover.as_ref() else {
+            return false;
+        };
+        let (live, active) = match &cover.state {
+            FailedDetachedLedgerState::Shared(state) => {
+                let state = lock(state);
+                (state.current_live_bytes, state.active_reservations)
+            }
+            FailedDetachedLedgerState::Owned(state) => {
+                (state.current_live_bytes, state.active_reservations)
+            }
+        };
+        cover.batches.live_bytes() == live && cover.batches.active_count() == active
     }
 }
 
@@ -4267,6 +4722,32 @@ where
         if let Some(proof) = self.proof.take() {
             proof.retain_fail_closed();
         }
+    }
+}
+
+impl<O, P, D> Drop for DetachedTypedFreezeProof<O, P, D>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+{
+    fn drop(&mut self) {
+        let projection = self.projection.take();
+        let cover = self.cover.take();
+        if projection.is_some() || cover.is_some() {
+            std::mem::forget((projection, cover));
+        }
+    }
+}
+
+impl<O, P, D> Drop for TypedFreezeDetachError<O, P, D>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+{
+    fn drop(&mut self) {
+        self.retain_parts_fail_closed();
     }
 }
 

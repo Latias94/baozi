@@ -1,7 +1,7 @@
 use super::{
-    AttributionBatchCreateError, CanonicalOutput, LedgerCause, LedgerState,
-    OutcomeEvidenceDestination, OutputCommitment, PublicationDestination, lock,
-    release_positioned_locked,
+    AttributionBatchCreateError, CanonicalOutput, DestinationKind, DestinationState,
+    DimensionEntry, LedgerCause, LedgerState, OutcomeEvidenceDestination, OutputCommitment,
+    PublicationDestination, lock, release_positioned_locked,
 };
 use crate::{CapacityPlan, OperationOwner};
 use std::fmt;
@@ -105,7 +105,7 @@ where
     P: Copy + Ord,
     D: Copy + Ord,
 {
-    pub(super) owner: Arc<Mutex<LedgerState<P, D>>>,
+    pub(super) owner: Option<Arc<Mutex<LedgerState<P, D>>>>,
     pub(super) phase: P,
     pub(super) phase_position: usize,
     pub(super) dimension: D,
@@ -130,7 +130,7 @@ where
         bytes: u64,
     ) -> Self {
         Self {
-            owner,
+            owner: Some(owner),
             phase,
             phase_position,
             dimension,
@@ -142,14 +142,19 @@ where
     }
 
     pub(super) fn is_owned_by(&self, owner: &Arc<Mutex<LedgerState<P, D>>>) -> bool {
-        Arc::ptr_eq(&self.owner, owner)
+        self.owner
+            .as_ref()
+            .is_some_and(|candidate| Arc::ptr_eq(candidate, owner))
     }
 
     fn release(&mut self) {
         if !self.active {
             return;
         }
-        let mut state = lock(&self.owner);
+        let Some(owner) = self.owner.as_ref() else {
+            return;
+        };
+        let mut state = lock(owner);
         release_positioned_locked(
             &mut state,
             self.phase_position,
@@ -157,6 +162,14 @@ where
             self.bytes,
         );
         self.active = false;
+    }
+
+    pub(super) fn detach_owner(&mut self, expected: &Arc<Mutex<LedgerState<P, D>>>) {
+        let Some(owner) = self.owner.take() else {
+            return;
+        };
+        debug_assert!(Arc::ptr_eq(&owner, expected));
+        drop(owner);
     }
 
     pub(super) fn release_locked(&mut self, state: &mut LedgerState<P, D>) {
@@ -359,6 +372,22 @@ where
     pub(super) owner: Arc<Mutex<LedgerState<P, D>>>,
 }
 
+/// One destination-qualified attribution batch after its shared ledger handles are consumed.
+///
+/// Field order is deliberate: both reservation vectors must release their backing storage before
+/// the capacity cover that accounts for those allocations is retired from the owned ledger.
+pub(super) struct DetachedAttributionBatch<O, P, D, Destination>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+    Destination: PublicationDestination,
+{
+    attributions: Vec<OperationAttributionReservation<O, P, D, Destination>>,
+    commitments: Vec<OutputCommitment<D, Destination>>,
+    capacity_cover: Option<StorageCoveringReservation<O, P, D>>,
+}
+
 #[allow(
     dead_code,
     reason = "crate-private until the U4 canonical consumers switch atomically"
@@ -489,7 +518,7 @@ where
             return Err(token);
         };
         if !self.has_attribution_slot()
-            || !Arc::ptr_eq(&self.owner, &cover.core.owner)
+            || !cover.core.is_owned_by(&self.owner)
             || !token.core.is_owned_by(&self.owner)
         {
             return Err(token);
@@ -675,6 +704,13 @@ where
             })
     }
 
+    pub(super) fn qualified_commitment_amount(&self, position: usize) -> u64 {
+        self.commitments
+            .iter()
+            .filter(|commitment| commitment.dimension_position == position)
+            .fold(0_u64, |total, commitment| total + commitment.amount)
+    }
+
     pub(super) fn bound_positions_are_in_bounds(
         &self,
         dimension_count: usize,
@@ -722,5 +758,83 @@ where
             capacity_cover.core.release_bound_locked(state);
             drop(capacity_cover);
         }
+    }
+
+    pub(super) fn into_detached(
+        mut self,
+        expected: &Arc<Mutex<LedgerState<P, D>>>,
+    ) -> DetachedAttributionBatch<O, P, D, Destination> {
+        debug_assert!(Arc::ptr_eq(&self.owner, expected));
+        for attribution in &mut self.attributions {
+            attribution.core.detach_owner(expected);
+        }
+        if let Some(capacity_cover) = self.capacity_cover.as_mut() {
+            capacity_cover.core.detach_owner(expected);
+        }
+        drop(self.owner);
+        DetachedAttributionBatch {
+            attributions: self.attributions,
+            commitments: self.commitments,
+            capacity_cover: self.capacity_cover,
+        }
+    }
+}
+
+impl<O, P, D, Destination> DetachedAttributionBatch<O, P, D, Destination>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+    Destination: DestinationState,
+{
+    pub(super) fn apply_commitments(&self, dimensions: &mut [DimensionEntry<D>]) {
+        for commitment in &self.commitments {
+            let entry = &mut dimensions[commitment.dimension_position];
+            match Destination::KIND {
+                DestinationKind::CanonicalOutput => {
+                    entry.state.committed += commitment.amount;
+                    entry.state.committed_canonical_output += commitment.amount;
+                }
+                DestinationKind::OutcomeEvidence => {
+                    entry.state.published_outcome_evidence += commitment.amount;
+                }
+            }
+        }
+    }
+
+    pub(super) fn release_attributions(&mut self, state: &mut LedgerState<P, D>) {
+        for attribution in &mut self.attributions {
+            attribution.core.release_bound_locked(state);
+        }
+    }
+
+    pub(super) fn destroy_storage_then_release_cover(&mut self, state: &mut LedgerState<P, D>) {
+        drop(std::mem::take(&mut self.attributions));
+        drop(std::mem::take(&mut self.commitments));
+        if let Some(mut capacity_cover) = self.capacity_cover.take() {
+            #[cfg(test)]
+            super::test_record_detached_cover_release(
+                self.attributions.capacity() == 0 && self.commitments.capacity() == 0,
+            );
+            capacity_cover.core.release_bound_locked(state);
+            drop(capacity_cover);
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn active_count(&self) -> u64 {
+        self.attributions.len() as u64 + u64::from(self.capacity_cover.is_some())
+    }
+
+    #[cfg(test)]
+    pub(super) fn live_bytes(&self) -> u64 {
+        self.attributions
+            .iter()
+            .map(|attribution| attribution.core.bytes)
+            .sum::<u64>()
+            + self
+                .capacity_cover
+                .as_ref()
+                .map_or(0, |cover| cover.core.bytes)
     }
 }

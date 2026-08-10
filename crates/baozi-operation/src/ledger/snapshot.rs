@@ -1,7 +1,9 @@
 use super::{
-    DimensionState, LedgerCause, LedgerEvidenceError, LedgerEvidencePurpose, LedgerState,
-    PhaseState, capacity_bytes, release_evidence, try_grow_evidence_vec,
+    AttributionReservationBatch, CanonicalOutput, DimensionState, LedgerCause, LedgerEvidenceError,
+    LedgerEvidencePurpose, LedgerState, OutcomeEvidenceDestination, PhaseState, capacity_bytes,
+    release_evidence, try_grow_evidence_vec,
 };
+use crate::OperationOwner;
 
 /// Immutable evidence for one accounting dimension.
 pub(crate) struct DimensionSnapshotScalars {
@@ -466,6 +468,66 @@ pub(super) fn take_typed_final_snapshot<P: Copy, D: Copy>(
         current_live_bytes: state.current_live_bytes,
         peak_live_bytes: state.peak_live_bytes,
         active_reservations: state.active_reservations,
+        current_evidence_bytes: 0,
+        peak_evidence_bytes: state.peak_evidence_bytes,
+    }
+}
+
+/// Moves the pre-admitted terminal staging into an immutable final projection without changing
+/// the still-live ledger counters that back physical publication eligibility.
+///
+/// Qualification has already proved every positioned sum and destination limit. The projection
+/// therefore performs no lookup, allocation, checked arithmetic, or owner-defined comparison.
+pub(super) fn take_typed_terminal_projection<O, P, D>(
+    state: &mut LedgerState<P, D>,
+    last_completed_phase: Option<P>,
+    canonical: &AttributionReservationBatch<O, P, D, CanonicalOutput>,
+    evidence: &AttributionReservationBatch<O, P, D, OutcomeEvidenceDestination>,
+) -> LedgerSnapshot<P, D>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+{
+    for (index, (entry, staging)) in state
+        .dimensions
+        .iter()
+        .zip(state.dimension_snapshot_staging.iter_mut())
+        .enumerate()
+    {
+        let canonical_increment = canonical.qualified_commitment_amount(index);
+        let evidence_increment = evidence.qualified_commitment_amount(index);
+        staging.0 = entry.dimension;
+        staging.1 = DimensionSnapshot::from_terminal_evidence(DimensionSnapshotScalars {
+            attempted: entry.state.attempted,
+            consumed: entry.state.consumed,
+            current_live_bytes: 0,
+            peak_live_bytes: entry.state.peak_live_bytes,
+            pending_publication: entry.state.pending_publication,
+            committed: entry.state.committed + canonical_increment,
+            committed_canonical_output: entry.state.committed_canonical_output
+                + canonical_increment,
+            published_outcome_evidence: entry.state.published_outcome_evidence + evidence_increment,
+        });
+    }
+    for (entry, staging) in state
+        .phases
+        .iter()
+        .zip(state.phase_snapshot_staging.iter_mut())
+    {
+        staging.0 = entry.phase;
+        staging.1 = PhaseSnapshot::from_terminal_evidence(
+            0,
+            state.phase_states[entry.state_position].peak_live_bytes,
+        );
+    }
+    LedgerSnapshot {
+        dimensions: std::mem::take(&mut state.dimension_snapshot_staging),
+        phases: std::mem::take(&mut state.phase_snapshot_staging),
+        last_completed_phase,
+        current_live_bytes: 0,
+        peak_live_bytes: state.peak_live_bytes,
+        active_reservations: 0,
         current_evidence_bytes: 0,
         peak_evidence_bytes: state.peak_evidence_bytes,
     }
