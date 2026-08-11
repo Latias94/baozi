@@ -4427,6 +4427,14 @@ where
                 .deferred_evidence_storage_second
                 .as_ref()
                 .map_or(0, DetachedAttributionBatch::active_count)
+            + self
+                .discard_canonical
+                .as_ref()
+                .map_or(0, DetachedAttributionBatch::active_count)
+            + self
+                .discard_evidence
+                .as_ref()
+                .map_or(0, DetachedAttributionBatch::active_count)
     }
 
     #[cfg(test)]
@@ -4443,6 +4451,14 @@ where
                 .map_or(0, DetachedAttributionBatch::live_bytes)
             + self
                 .deferred_evidence_storage_second
+                .as_ref()
+                .map_or(0, DetachedAttributionBatch::live_bytes)
+            + self
+                .discard_canonical
+                .as_ref()
+                .map_or(0, DetachedAttributionBatch::live_bytes)
+            + self
+                .discard_evidence
                 .as_ref()
                 .map_or(0, DetachedAttributionBatch::live_bytes)
     }
@@ -4610,6 +4626,24 @@ where
             FailedDetachedLedgerState::Shared(state) => lock(state).current_live_bytes,
             FailedDetachedLedgerState::Owned(state) => state.current_live_bytes,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_active_reservations(&self) -> u64 {
+        let Some(cover) = self.cover.as_ref() else {
+            return 0;
+        };
+        match &cover.state {
+            FailedDetachedLedgerState::Shared(state) => lock(state).active_reservations,
+            FailedDetachedLedgerState::Owned(state) => state.active_reservations,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_projected_live_bytes(&self) -> u64 {
+        self.projection
+            .as_ref()
+            .map_or(0, LedgerSnapshot::current_live_bytes)
     }
 
     #[cfg(test)]

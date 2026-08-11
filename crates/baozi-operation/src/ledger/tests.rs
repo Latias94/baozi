@@ -1755,6 +1755,106 @@ fn typed_terminal_qualification_rejects_a_foreign_discard_batch() {
     assert_eq!(probe_values(&foreign_probe), (0, 0));
 }
 
+fn fault_inject_unacknowledged_discard_ready(
+    proof: TypedFreezeProof<Owner, Phase, Dimension>,
+) -> FreezeReadyTypedProof<Owner, Phase, Dimension> {
+    let qualified = match proof.qualify_terminal() {
+        Ok(qualified) => qualified,
+        Err(proof) => {
+            drop(proof);
+            panic!("fault-injected discard proof must qualify");
+        }
+    };
+    FreezeReadyTypedProof {
+        proof: Some(qualified),
+    }
+}
+
+#[test]
+fn unacknowledged_discards_reject_detach_and_retain_the_complete_cover() {
+    let ledger = test_ledger(typed_limits());
+    let probe = ledger.test_probe();
+    let canonical = ledger
+        .try_attribution_batch::<CanonicalOutput>(Phase::Build, Dimension::Bytes, 1, 0)
+        .expect("canonical assembly");
+    let evidence_assembly = ledger
+        .try_attribution_batch::<OutcomeEvidenceDestination>(Phase::Build, Dimension::Bytes, 1, 0)
+        .expect("evidence assembly");
+    let fallback = ledger
+        .try_attribution_batch::<OutcomeEvidenceDestination>(Phase::Build, Dimension::Bytes, 0, 0)
+        .expect("empty fallback");
+    let evidence = ledger
+        .try_attribution_batch::<OutcomeEvidenceDestination>(Phase::Build, Dimension::Bytes, 0, 0)
+        .expect("empty evidence");
+    let baseline = ledger
+        .try_fallback_baseline(canonical, evidence_assembly, fallback, evidence)
+        .unwrap_or_else(|_| panic!("empty fallback baseline must bind"));
+
+    let mut discard_canonical = ledger
+        .try_attribution_batch::<CanonicalOutput>(Phase::Build, Dimension::Bytes, 1, 0)
+        .expect("canonical discard batch");
+    let canonical_token = ledger
+        .reserve_operation_attribution::<CanonicalOutput>(Phase::Build, Dimension::Bytes, 3)
+        .expect("canonical discard attribution");
+    assert!(
+        discard_canonical
+            .try_push_attribution(canonical_token)
+            .is_ok()
+    );
+
+    let mut discard_evidence = ledger
+        .try_attribution_batch::<OutcomeEvidenceDestination>(Phase::Build, Dimension::Bytes, 1, 0)
+        .expect("evidence discard batch");
+    let evidence_token = ledger
+        .reserve_operation_attribution::<OutcomeEvidenceDestination>(
+            Phase::Build,
+            Dimension::Bytes,
+            5,
+        )
+        .expect("evidence discard attribution");
+    assert!(
+        discard_evidence
+            .try_push_attribution(evidence_token)
+            .is_ok()
+    );
+
+    let before_live = probe.current_live_bytes();
+    let before_active = probe.active_reservations();
+    assert!(before_live > 0);
+    assert!(before_active > 0);
+    test_reset_detached_cover_release_observation();
+
+    let ready = fault_inject_unacknowledged_discard_ready(baseline.into_fallback_proof(
+        ledger,
+        Some(discard_canonical),
+        Some(discard_evidence),
+    ));
+    let error = match ready.try_into_detached() {
+        Ok(proof) => {
+            proof.retain_fail_closed();
+            panic!("unacknowledged discard owners must reject exclusive detach");
+        }
+        Err(error) => error,
+    };
+    assert_eq!(
+        error.kind(),
+        TypedFreezeDetachErrorKind::UnexpectedDiscardOwner
+    );
+    assert_eq!(error.test_current_live_bytes(), before_live);
+    assert_eq!(error.test_active_reservations(), before_active);
+    assert_eq!(error.test_projected_live_bytes(), 0);
+    assert!(error.test_cover_matches_state());
+    assert!(
+        !probe.is_available(),
+        "owned detach must consume the ledger state"
+    );
+
+    error.retain_fail_closed();
+    let (cover_releases, storage_first) = test_detached_cover_release_observation();
+    assert_eq!(cover_releases, 0);
+    assert!(storage_first);
+}
+
 #[test]
 fn typed_primary_rejection_preserves_batches_for_evidence_only_retry() {
     macro_rules! batch_state {
