@@ -7,6 +7,127 @@ fn canonical_build_work(units: Option<usize>) -> Result<NonZeroU64, StoreRuntime
     NonZeroU64::new(units).ok_or(StoreRuntimeError::Plan(StorePlanError::EmptyPayload))
 }
 
+/// Owns the semantic-preflight permit while completed units accumulate in bounded chunks.
+///
+/// The guard is deliberately local to preflight. It keeps the raw permit alive until the exact
+/// completion prefix has been flushed, including when an inspector unwinds or the caller drops
+/// the preflight callback. No producer-provided work amount crosses this boundary.
+struct SemanticWorkBatch<'borrow, 'operation, O, PP, U>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    permit: Option<CanonicalWorkPermit<'borrow, 'operation, O, PP, U>>,
+    work_batch: work_batch::CompletionPrefixBatch,
+}
+
+impl<'borrow, 'operation, O, PP, U> SemanticWorkBatch<'borrow, 'operation, O, PP, U>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    fn new(permit: CanonicalWorkPermit<'borrow, 'operation, O, PP, U>) -> Self {
+        Self {
+            permit: Some(permit),
+            work_batch: work_batch::CompletionPrefixBatch::new(),
+        }
+    }
+
+    fn fail(&mut self) -> StoreRuntimeError {
+        if let Some(permit) = self.permit.as_mut() {
+            permit.record_product_graph_failure(ACTIVATION_PRODUCT_GRAPH_FAILURE_CODE);
+        }
+        if let Some(mut permit) = self.permit.take() {
+            permit.resolve_partial();
+        }
+        StoreRuntimeError::ConstructionInvariantUnverified
+    }
+
+    fn flush(&mut self) -> Result<(), StoreRuntimeError> {
+        let pending = self.work_batch.unflushed_completed();
+        if pending == 0 {
+            return Ok(());
+        }
+        let remaining = self
+            .permit
+            .as_ref()
+            .expect("a live semantic batch retains its permit")
+            .remaining_units();
+        if pending > remaining {
+            let _ = self.work_batch.take_completed();
+            return Err(self.fail());
+        }
+        let completed = self
+            .work_batch
+            .take_completed()
+            .expect("a nonzero semantic completion prefix remains flushable");
+        self.permit
+            .as_mut()
+            .expect("a live semantic batch retains its permit")
+            .complete_units(completed)
+            .map_err(StoreWorkError::into_runtime)
+    }
+
+    fn poll_now(&mut self) -> Result<(), StoreRuntimeError> {
+        self.flush()?;
+        let permit = self
+            .permit
+            .as_mut()
+            .expect("a live semantic batch retains its permit");
+        permit.poll().map_err(StoreWorkError::into_runtime)?;
+        self.work_batch.note_poll();
+        Ok(())
+    }
+
+    fn complete_unit(&mut self) -> Result<(), StoreRuntimeError> {
+        self.work_batch
+            .note_completed_unit()
+            .map_err(|_| self.fail())
+    }
+
+    fn finish_exact(mut self) -> Result<(), StoreRuntimeError> {
+        self.poll_now()?;
+        let remaining = self
+            .permit
+            .as_ref()
+            .expect("a live semantic batch retains its permit")
+            .remaining_units();
+        if remaining != 0 {
+            return Err(self.fail());
+        }
+        let permit = self
+            .permit
+            .take()
+            .expect("a successful semantic batch retains its permit");
+        if permit.finish_exact() {
+            Ok(())
+        } else {
+            Err(StoreRuntimeError::ConstructionInvariantUnverified)
+        }
+    }
+}
+
+impl<O, PP, U> Drop for SemanticWorkBatch<'_, '_, O, PP, U>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    fn drop(&mut self) {
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            let _ = self.flush();
+            if let Some(mut permit) = self.permit.take() {
+                permit.resolve_partial();
+            }
+        }));
+        if let Err(payload) = result {
+            discard_untrusted_panic_payload(payload);
+        }
+    }
+}
+
 impl<O, PP, U> RetainedStoreOperation<O, PP, U, FreshStoreLineage>
 where
     O: OperationOwner,
@@ -393,8 +514,9 @@ where
     /// Runs every unit in the sealed semantic-preflight envelope exactly once.
     ///
     /// The full attempted envelope is admitted before the first inspector call. Each unit becomes
-    /// consumed only after its inspector returns normally, and control is polled before every unit.
-    /// Returning `false` rejects the semantics but does not short-circuit the remaining evidence.
+    /// consumed only after its inspector returns normally, and control is polled at bounded
+    /// completion checkpoints. Returning `false` rejects the semantics but does not short-circuit
+    /// the remaining evidence.
     pub fn inspect_semantic_work(
         &mut self,
         mut inspect: impl FnMut(u64) -> bool,
@@ -414,27 +536,27 @@ where
         let control = self.operation.activation_work_control(dimension);
         let mut control = preserve_first_fault(self.first_fault, control)?;
         let permit = try_begin_canonical_work(&mut control, amount);
-        let mut permit = match permit {
+        let permit = match permit {
             Ok(permit) => permit,
             Err(cause) => {
                 return preserve_first_fault(self.first_fault, Err(cause.into_runtime()));
             }
         };
+        let mut work = SemanticWorkBatch::new(permit);
         let mut accepted = true;
         for index in 0..amount.get() {
-            if let Err(cause) = permit.poll() {
-                return preserve_first_fault(self.first_fault, Err(cause.into_runtime()));
+            if work.work_batch.poll_due()
+                && let Err(cause) = work.poll_now()
+            {
+                return preserve_first_fault(self.first_fault, Err(cause));
             }
             accepted &= inspect(index);
-            if let Err(cause) = permit.complete_units(NonZeroU64::MIN) {
-                return preserve_first_fault(self.first_fault, Err(cause.into_runtime()));
+            if let Err(cause) = work.complete_unit() {
+                return preserve_first_fault(self.first_fault, Err(cause));
             }
         }
-        if !permit.finish_exact() {
-            return preserve_first_fault(
-                self.first_fault,
-                Err(StoreRuntimeError::ConstructionInvariantUnverified),
-            );
+        if let Err(cause) = work.finish_exact() {
+            return preserve_first_fault(self.first_fault, Err(cause));
         }
         *self.semantic_work_complete = true;
         Ok(accepted)

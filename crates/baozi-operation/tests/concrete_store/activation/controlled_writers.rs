@@ -534,7 +534,7 @@ fn canonical_utf8_preserves_a_scalar_across_the_256_byte_boundary() {
 }
 
 #[test]
-fn canonical_record_batches_one_64_field_row_and_flushes_partial_rows() {
+fn canonical_record_rollback_does_not_account_uncommitted_fields() {
     let factory = factory(1);
     let account = account(&factory);
     let (operation, keys) = operation(&account);
@@ -582,7 +582,7 @@ fn canonical_record_batches_one_64_field_row_and_flushes_partial_rows() {
         .ledger_evidence
         .dimension(keys.dimension)
         .expect("canonical record work remains queryable");
-    assert_eq!(dimension.attempted() - dimension.consumed(), 1);
+    assert_eq!(dimension.attempted() - dimension.consumed(), 64);
     drop(published);
     assert_eq!(account.snapshot().live_retained_allocations(), 0);
 }
@@ -620,6 +620,74 @@ fn canonical_record_accepts_one_complete_64_field_row() {
 
     assert!(matches!(outcome, CanonicalActivationOutcome::Activated(_)));
     drop(outcome);
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
+}
+
+#[test]
+fn canonical_record_cancellation_is_observed_at_the_256_field_boundary() {
+    const PLANNED_FIELDS: usize = 300;
+    const COMPLETED_PREFIX: usize = 256;
+
+    let factory = factory(1);
+    let account = account(&factory);
+    let cancellation = CancellationToken::new();
+    let control = OperationControl::default().with_cancellation(cancellation.clone());
+    let (operation, keys) = operation_with_control(&account, control);
+    let completed = Cell::new(0_usize);
+
+    let outcome = plan_activation!(
+        operation,
+        activation_shape(keys, 1, 1),
+        |preflight| preflight.seal(),
+        |mut lane| {
+            let cause = lane
+                .try_retain_records(
+                    RecordPlan::new(PLANNED_FIELDS, 1).unwrap(),
+                    CanonicalRootTag,
+                    |writer| {
+                        for value in 0..PLANNED_FIELDS {
+                            writer.write_row(|row| {
+                                row.write_scalar(u16::try_from(value).unwrap())?;
+                                completed.set(completed.get() + 1);
+                                if completed.get() == 2 {
+                                    cancellation.cancel();
+                                }
+                                Ok(())
+                            })?;
+                        }
+                        Ok(())
+                    },
+                )
+                .unwrap_err();
+            assert!(matches!(cause, StoreRuntimeError::Control(_)));
+            lane.reject::<(), _, baozi_operation::RecordBlock, CanonicalRootTag>(
+                MaterializationRejection::Semantic,
+                78,
+            )
+        },
+    )
+    .unwrap();
+
+    assert_eq!(completed.get(), COMPLETED_PREFIX);
+    let rejected = match outcome {
+        CanonicalActivationOutcome::Rejected(rejected) => rejected,
+        CanonicalActivationOutcome::Activated(_)
+        | CanonicalActivationOutcome::NeverActivated(_)
+        | CanonicalActivationOutcome::Fallback(_) => {
+            panic!("a cancelled canonical record writer must reject")
+        }
+    };
+    let (prepared, _cause) = rejected.prepare_minimal_fallback().unwrap().into_parts();
+    let published = prepared.handoff();
+    let dimension = published
+        .ledger_evidence
+        .dimension(keys.dimension)
+        .expect("cancelled canonical record work remains queryable");
+    assert_eq!(
+        dimension.attempted() - dimension.consumed(),
+        u64::try_from(PLANNED_FIELDS - COMPLETED_PREFIX).unwrap()
+    );
+    drop(published);
     assert_eq!(account.snapshot().live_retained_allocations(), 0);
 }
 

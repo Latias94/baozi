@@ -206,6 +206,77 @@ fn semantic_preflight_panic_preserves_only_the_completed_prefix() {
 }
 
 #[test]
+fn semantic_preflight_cancellation_is_observed_at_the_256_unit_boundary() {
+    const SEMANTIC_WORK: u64 = 300;
+    const COMPLETED_PREFIX: u64 = 256;
+
+    let factory = factory(1);
+    let account = account(&factory);
+    let cancellation = CancellationToken::new();
+    let control = OperationControl::default().with_cancellation(cancellation.clone());
+    let (operation, keys) = operation_with_control(&account, control);
+    let activation = activation_shape_with_semantic_preflight_work(keys, 1, 1, SEMANTIC_WORK);
+    let expected_attempted = activation
+        .requirements
+        .pre_activation_work_requirement()
+        .expect("the exact preflight envelope fits u64");
+    let structural_work = activation
+        .requirements
+        .pre_activation_structural_work_requirement();
+    let inspected = Cell::new(0_u64);
+
+    let outcome = plan_activation!(
+        operation,
+        activation,
+        |mut preflight| {
+            let cause = preflight
+                .inspect_semantic_work(|_| {
+                    inspected.set(inspected.get() + 1);
+                    if inspected.get() == 2 {
+                        cancellation.cancel();
+                    }
+                    true
+                })
+                .unwrap_err();
+            assert!(matches!(cause, StoreRuntimeError::Control(_)));
+            preflight.reject(PreflightRejection::Unsupported, 12)
+        },
+        |_lane| -> CanonicalMaterialization<
+            '_,
+            (),
+            PreflightRejection,
+            ScalarSequence<u8>,
+            SequenceTag,
+        > { unreachable!("interrupted semantic preflight cannot materialize") },
+    )
+    .unwrap();
+
+    let never_activated = match outcome {
+        CanonicalActivationOutcome::NeverActivated(state) => state,
+        CanonicalActivationOutcome::Activated(_)
+        | CanonicalActivationOutcome::Rejected(_)
+        | CanonicalActivationOutcome::Fallback(_) => {
+            panic!("semantic preflight interruption must remain NeverActivated")
+        }
+    };
+    assert_eq!(inspected.get(), COMPLETED_PREFIX);
+
+    let (prepared, _cause) = never_activated
+        .prepare_minimal_fallback()
+        .unwrap()
+        .into_parts();
+    let published = prepared.handoff();
+    let ordinary = published
+        .ledger_evidence
+        .dimension(keys.dimension)
+        .expect("interrupted semantic preflight work remains queryable");
+    assert_eq!(ordinary.attempted(), expected_attempted);
+    assert_eq!(ordinary.consumed(), structural_work + COMPLETED_PREFIX);
+    drop(published);
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
+}
+
+#[test]
 fn dropping_an_unconsumed_session_outcome_owner_fails_closed() {
     let factory = factory(1);
     let account = account(&factory);

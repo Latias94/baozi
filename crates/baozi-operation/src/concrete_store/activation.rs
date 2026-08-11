@@ -172,17 +172,12 @@ where
 
 /// Permit-bound row writer for one canonical fixed-width record.
 ///
-/// A row is one bounded semantic batch: control is polled before the row and its completed field
-/// prefix is flushed when the row succeeds, rejects, unwinds, or is abandoned.
-pub struct CanonicalRecordBuildRow<'row, 'storage, 'permit, 'operation, O, PP, U>
-where
-    O: OperationOwner,
-    PP: ProgressPhase,
-    U: ProgressUnit,
-{
+/// A row is one atomic semantic batch. Complete rows share the same bounded completion prefix as
+/// sequence and byte writers; a row's fields are never split across a checkpoint. The pending
+/// prefix is flushed when a checkpoint, explicit boundary, rejection, unwind, or abandonment is
+/// observed.
+pub struct CanonicalRecordBuildRow<'row, 'storage> {
     writer: &'row mut CanonicalRecordRowWriter<'storage>,
-    permit: &'row mut CanonicalWorkPermit<'permit, 'operation, O, PP, U>,
-    work_batch: &'row mut work_batch::CompletionPrefixBatch,
     sticky: &'row mut Option<StoreControlledError>,
 }
 
@@ -646,103 +641,59 @@ where
     }
 }
 
-fn perform_canonical_record_field<O, PP, U>(
+fn perform_canonical_record_field(
     writer: &mut CanonicalRecordRowWriter<'_>,
-    permit: &mut CanonicalWorkPermit<'_, '_, O, PP, U>,
-    work_batch: &mut work_batch::CompletionPrefixBatch,
     sticky: &mut Option<StoreControlledError>,
     action: impl FnOnce(&mut CanonicalRecordRowWriter<'_>) -> Result<(), StoreBuildError>,
-) -> Result<(), StoreControlledError>
-where
-    O: OperationOwner,
-    PP: ProgressPhase,
-    U: ProgressUnit,
-{
+) -> Result<(), StoreControlledError> {
     if let Some(cause) = sticky.clone() {
         return Err(cause);
     }
-    let remaining = work_batch.effective_remaining(permit.remaining_units());
-    if remaining.is_none_or(|remaining| remaining == 0) || work_batch.units_until_checkpoint() == 0
-    {
-        let cause = canonical_completion_contract_failure(permit, sticky);
-        let _ = flush_canonical_completed(permit, work_batch, sticky);
-        permit.resolve_partial();
-        return Err(cause);
-    }
-    if let Err(cause) = action(writer) {
-        let cause = StoreControlledError::from(cause);
-        sticky.get_or_insert_with(|| cause.clone());
-        return Err(cause);
-    }
-    record_canonical_completed(permit, work_batch, sticky, NonZeroU64::MIN)
+    let result = action(writer).map_err(StoreControlledError::from);
+    preserve_canonical_controlled(sticky, result)
 }
 
-impl<O, PP, U> CanonicalRecordBuildRow<'_, '_, '_, '_, O, PP, U>
-where
-    O: OperationOwner,
-    PP: ProgressPhase,
-    U: ProgressUnit,
-{
+impl CanonicalRecordBuildRow<'_, '_> {
     pub fn write_scalar<T: StoredScalar>(&mut self, value: T) -> Result<(), StoreControlledError> {
-        perform_canonical_record_field(
-            self.writer,
-            self.permit,
-            self.work_batch,
-            self.sticky,
-            |writer| writer.write_scalar(value),
-        )
+        perform_canonical_record_field(self.writer, self.sticky, |writer| {
+            writer.write_scalar(value)
+        })
     }
 
     pub fn write_sequence_ref<T: StoredScalar, Tag>(
         &mut self,
         value: CanonicalSequenceRef<T, Tag>,
     ) -> Result<(), StoreControlledError> {
-        perform_canonical_record_field(
-            self.writer,
-            self.permit,
-            self.work_batch,
-            self.sticky,
-            |writer| writer.write_sequence_ref(value),
-        )
+        perform_canonical_record_field(self.writer, self.sticky, |writer| {
+            writer.write_sequence_ref(value)
+        })
     }
 
     pub fn write_bytes_ref<Tag>(
         &mut self,
         value: CanonicalBytesRef<Tag>,
     ) -> Result<(), StoreControlledError> {
-        perform_canonical_record_field(
-            self.writer,
-            self.permit,
-            self.work_batch,
-            self.sticky,
-            |writer| writer.write_bytes_ref(value),
-        )
+        perform_canonical_record_field(self.writer, self.sticky, |writer| {
+            writer.write_bytes_ref(value)
+        })
     }
 
     pub fn write_utf8_ref<Tag>(
         &mut self,
         value: CanonicalUtf8Ref<Tag>,
     ) -> Result<(), StoreControlledError> {
-        perform_canonical_record_field(
-            self.writer,
-            self.permit,
-            self.work_batch,
-            self.sticky,
-            |writer| writer.write_utf8_ref(value),
-        )
+        perform_canonical_record_field(self.writer, self.sticky, |writer| {
+            writer.write_utf8_ref(value)
+        })
     }
 
     pub fn write_record_ref<Tag>(
         &mut self,
         value: CanonicalRecordRef<Tag>,
     ) -> Result<(), StoreControlledError> {
-        perform_canonical_record_field(
-            self.writer,
-            self.permit,
-            self.work_batch,
-            self.sticky,
-            |writer| writer.write_record_ref(value),
-        )
+        perform_canonical_record_field(self.writer, self.sticky, |writer| {
+            writer.write_record_ref(value)
+        })
     }
 }
 
@@ -752,27 +703,23 @@ where
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    /// Writes one exact-width row while accounting for every completed field.
+    /// Writes one exact-width row and accounts its fields only after the row commits physically.
     pub fn write_row(
         &mut self,
-        write: impl FnOnce(
-            &mut CanonicalRecordBuildRow<'_, '_, '_, '_, O, PP, U>,
-        ) -> Result<(), StoreControlledError>,
+        write: impl FnOnce(&mut CanonicalRecordBuildRow<'_, '_>) -> Result<(), StoreControlledError>,
     ) -> Result<(), StoreControlledError> {
         if let Some(cause) = self.sticky.clone() {
             return Err(cause);
         }
-        self.poll_now()?;
+        let row_fields = self.writer.core.storage.fields;
+        let row_work =
+            NonZeroU64::new(u64::try_from(row_fields).expect("record field count fits in u64"))
+                .expect("record rows always contain at least one field");
+        self.prepare_action(row_work)?;
         let mut callback_error = None;
         let result = self.writer.write_row(|writer| {
-            let permit = self
-                .permit
-                .as_mut()
-                .expect("a fault-free canonical record builder retains its work permit");
             let mut row = CanonicalRecordBuildRow {
                 writer,
-                permit,
-                work_batch: &mut self.work_batch,
                 sticky: &mut self.sticky,
             };
             match write(&mut row) {
@@ -794,11 +741,19 @@ where
             self.resolve_partial();
             return Err(cause);
         }
+        if let Some(cause) = self.sticky.clone() {
+            self.resolve_partial();
+            return Err(cause);
+        }
         let permit = self
             .permit
             .as_mut()
             .expect("a successful canonical record row retains its work permit");
-        flush_canonical_completed(permit, &mut self.work_batch, &mut self.sticky)
+        record_canonical_completed(permit, &mut self.work_batch, &mut self.sticky, row_work)?;
+        // Keep complete rows in the shared prefix. `prepare_action` polls and flushes before the
+        // next row when this row reaches the bounded checkpoint; `finish` handles the final
+        // partial prefix.
+        Ok(())
     }
 
     pub fn rows(&self) -> usize {
