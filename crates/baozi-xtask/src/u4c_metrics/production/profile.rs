@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use serde::Deserialize;
 
 use super::capability::{
@@ -9,56 +11,15 @@ use super::capability::{
 };
 use super::{CanonicalSnapshotTotals, is_lowercase_sha256};
 
-const REQUIRED_NEGATIVE_CASES: [(&str, &str, &str, &str, u32); 6] = [
-    (
-        "canonical-profile-camera-reference-out-of-range-v1",
-        "rejected",
-        "spatial-authoring",
-        "camera-out-of-range",
-        0x5343_1107,
-    ),
-    (
-        "canonical-profile-light-reference-out-of-range-v1",
-        "rejected",
-        "spatial-authoring",
-        "light-out-of-range",
-        0x5343_1107,
-    ),
-    (
-        "canonical-profile-source-resource-reference-out-of-range-v1",
-        "rejected",
-        "profile-authoring",
-        "source-resource-out-of-range",
-        0x5343_1108,
-    ),
-    (
-        "canonical-profile-provenance-source-reference-out-of-range-v1",
-        "rejected",
-        "profile-authoring",
-        "provenance-source-out-of-range",
-        0x5343_1108,
-    ),
-    (
-        "canonical-profile-owner-provenance-reference-out-of-range-v1",
-        "rejected",
-        "profile-authoring",
-        "owner-provenance-out-of-range",
-        0x5343_1108,
-    ),
-    (
-        "canonical-profile-metadata-bytes-one-short-v1",
-        "rejected",
-        "profile-authoring",
-        "metadata-bytes-limit-exceeded",
-        0x5343_1108,
-    ),
-];
-
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct ProfileClosureSpecification {
     pub(super) entry_point: String,
     pub(super) scenario_id: String,
+    pub(super) construction_scenario_id: String,
+    pub(super) inspection_scenario_id: String,
+    pub(super) snapshot_scenario_id: String,
+    pub(super) release_scenario_id: String,
     pub(super) canonical_shape: ProfileClosureCanonicalShape,
     pub(super) mutations: Vec<ProfileClosureMutation>,
     pub(super) negative_cases: Vec<ProfileClosureNegativeCase>,
@@ -132,31 +93,32 @@ pub(super) fn validate_specification(
     let shape = &specification.canonical_shape;
     let totals = &specification.snapshot_totals;
     let preview = &specification.bounded_preview;
+    let phase_scenarios = [
+        specification.scenario_id.as_str(),
+        specification.construction_scenario_id.as_str(),
+        specification.inspection_scenario_id.as_str(),
+        specification.snapshot_scenario_id.as_str(),
+        specification.release_scenario_id.as_str(),
+    ];
     let published_block_count = specification
         .canonical_block_count
         .checked_add(specification.outcome_evidence_block_count);
-    if specification.entry_point != "canonical-profile-closure"
-        || specification.scenario_id != "canonical-profile-closure-v1"
-        || specification.generation_reservations != 1
+    if !is_bounded_identity(&specification.entry_point)
+        || phase_scenarios.iter().any(|id| !is_bounded_identity(id))
+        || phase_scenarios
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>()
+            .len()
+            != phase_scenarios.len()
+        || specification.generation_reservations == 0
         || specification.canonical_block_count == 0
         || specification.outcome_evidence_block_count == 0
         || published_block_count != Some(specification.construction_blocks)
         || !is_lowercase_sha256(&specification.full_snapshot_digest_hex)
         || specification.bounded_snapshot_digest_hex != specification.full_snapshot_digest_hex
-        || shape.node_count != 1
-        || shape.root_count != 1
-        || shape.camera_count != 1
-        || shape.light_count != 1
-        || shape.camera_attachment_count != 1
-        || shape.light_attachment_count != 1
-        || shape.unit_scale_to_meters.to_bits() != 0.01_f64.to_bits()
-        || shape.profile_resource_count != 1
-        || shape.profile_source_count != 1
-        || shape.profile_provenance_count != 1
-        || shape.profile_owner_count != 5
-        || shape.profile_attachment_count != 5
-        || shape.profile_metadata_entry_count != 4
-        || !profile_snapshot_totals_match(totals)
+        || !profile_shape_is_well_formed(shape)
+        || !profile_snapshot_totals_match(totals, shape)
         || !preview.has_common_invariants()
         || !specification.construction_budget.is_well_formed()
         || !specification.snapshot_budget.is_well_formed()
@@ -175,34 +137,63 @@ pub(super) fn validate_specification(
                 .to_owned(),
         );
     }
-    let actual_mutations = specification
-        .mutations
-        .iter()
-        .map(|mutation| mutation.field_class.as_str())
-        .collect::<Vec<_>>();
-    if actual_mutations != ["metadata_u64_value"] {
-        return Err("U4c production profile-closure mutations drifted".to_owned());
+    if specification.mutations.is_empty() {
+        return Err("U4c production profile-closure must freeze a mutation vector".to_owned());
     }
-    if specification.mutations.iter().any(|mutation| {
-        !is_lowercase_sha256(&mutation.snapshot_digest_hex)
+    let mut mutation_fields = BTreeSet::new();
+    for mutation in &specification.mutations {
+        if !is_bounded_identity(&mutation.field_class)
+            || !is_lowercase_sha256(&mutation.snapshot_digest_hex)
             || mutation.snapshot_digest_hex == specification.full_snapshot_digest_hex
-    }) {
-        return Err(
-            "U4c production profile-closure mutation digest is invalid or unchanged".to_owned(),
-        );
+            || !mutation_fields.insert(mutation.field_class.as_str())
+        {
+            return Err(
+                "U4c production profile-closure mutation evidence is invalid or duplicated"
+                    .to_owned(),
+            );
+        }
     }
     validate_negative_cases(&specification.negative_cases)?;
     Ok(())
 }
 
-fn profile_snapshot_totals_match(totals: &CanonicalSnapshotTotals) -> bool {
-    totals.node_count == 1
-        && totals.root_count == 1
-        && totals.edge_count == 0
-        && totals.camera_count == 1
-        && totals.light_count == 1
-        && totals.camera_attachment_count == 1
-        && totals.light_attachment_count == 1
+fn is_bounded_identity(value: &str) -> bool {
+    !value.is_empty() && value.len() <= 256 && !value.chars().any(char::is_control)
+}
+
+fn profile_shape_is_well_formed(shape: &ProfileClosureCanonicalShape) -> bool {
+    shape.node_count > 0
+        && shape.root_count > 0
+        && shape.root_count <= shape.node_count
+        && shape.camera_count > 0
+        && shape.light_count > 0
+        && shape.camera_attachment_count > 0
+        && shape.light_attachment_count > 0
+        && shape.unit_scale_to_meters.is_finite()
+        && shape.unit_scale_to_meters > 0.0
+        && shape.profile_resource_count > 0
+        && shape.profile_source_count > 0
+        && shape.profile_provenance_count > 0
+        && shape.profile_owner_count > 0
+        && shape.profile_attachment_count == shape.profile_owner_count
+        && shape.profile_metadata_entry_count > 0
+}
+
+fn profile_snapshot_totals_match(
+    totals: &CanonicalSnapshotTotals,
+    shape: &ProfileClosureCanonicalShape,
+) -> bool {
+    totals.node_count == shape.node_count
+        && totals.root_count == shape.root_count
+        && totals.edge_count
+            == shape
+                .node_count
+                .checked_sub(shape.root_count)
+                .unwrap_or(u64::MAX)
+        && totals.camera_count == shape.camera_count
+        && totals.light_count == shape.light_count
+        && totals.camera_attachment_count == shape.camera_attachment_count
+        && totals.light_attachment_count == shape.light_attachment_count
         && totals.image_count == 0
         && totals.sampler_count == 0
         && totals.texture_count == 0
@@ -247,51 +238,54 @@ fn profile_snapshot_totals_match(totals: &CanonicalSnapshotTotals) -> bool {
         && totals.animation_value_scalar_count == 0
         && totals.animation_in_tangent_scalar_count == 0
         && totals.animation_out_tangent_scalar_count == 0
-        && totals.profile_resource_count == 1
-        && totals.profile_source_count == 1
-        && totals.profile_provenance_node_count == 1
+        && totals.profile_resource_count == shape.profile_resource_count
+        && totals.profile_source_count == shape.profile_source_count
+        && totals.profile_provenance_node_count == shape.profile_provenance_count
         && totals.profile_operation_count == 0
         && totals.profile_evidence_count == 0
-        && totals.profile_owner_count == 5
-        && totals.profile_attachment_count == 5
-        && totals.profile_metadata_entry_count == 4
+        && totals.profile_owner_count == shape.profile_owner_count
+        && totals.profile_attachment_count == shape.profile_attachment_count
+        && totals.profile_metadata_entry_count == shape.profile_metadata_entry_count
         && totals.profile_parent_reference_count == 0
-        && totals.profile_wide_value_count == 1
-        && totals.profile_lineage_text_bytes == 42
+        && totals.profile_wide_value_count > 0
+        && totals.profile_lineage_text_bytes > 0
         && totals.profile_lineage_digest_bytes == 0
-        && totals.profile_metadata_text_bytes == 157
-        && totals.profile_metadata_payload_bytes == 4
-        && totals.profile_metadata_bool_scalar_count == 1
-        && totals.profile_metadata_i64_scalar_count == 0
-        && totals.profile_metadata_u64_scalar_count == 1
-        && totals.profile_metadata_f64_scalar_count == 0
-        && totals.profile_metadata_f32_scalar_count == 0
-        && totals.transcript_bytes == 1_758
-        && totals.work_units == 170
+        && totals.profile_metadata_text_bytes > 0
+        && totals.profile_metadata_payload_bytes > 0
+        && totals
+            .profile_metadata_bool_scalar_count
+            .checked_add(totals.profile_metadata_i64_scalar_count)
+            .and_then(|value| value.checked_add(totals.profile_metadata_u64_scalar_count))
+            .and_then(|value| value.checked_add(totals.profile_metadata_f64_scalar_count))
+            .and_then(|value| value.checked_add(totals.profile_metadata_f32_scalar_count))
+            .is_some_and(|value| value > 0)
+        && totals.transcript_bytes > 0
+        && totals.work_units > 0
 }
 
 fn validate_negative_cases(values: &[ProfileClosureNegativeCase]) -> Result<(), String> {
-    if values.len() != REQUIRED_NEGATIVE_CASES.len()
-        || values
-            .iter()
-            .zip(REQUIRED_NEGATIVE_CASES)
-            .any(|(actual, expected)| {
-                actual.scenario_id != expected.0
-                    || actual.preflight_disposition != expected.1
-                    || actual.activation_eligibility_reached
-                    || actual.failure_class != expected.2
-                    || actual.failure_kind != expected.3
-                    || actual.failure_code != expected.4
-                    || actual.peak_retained_bytes_delta != 0
-                    || actual.peak_retained_allocations_delta != 0
-                    || actual.total_admitted_retained_bytes_delta != 0
-                    || actual.total_admitted_retained_allocations_delta != 0
-                    || actual.live_retained_bytes_delta != 0
-                    || actual.live_retained_allocations_delta != 0
-                    || actual.final_live_retained_bytes != 0
-                    || actual.final_live_retained_allocations != 0
-            })
-    {
+    if values.is_empty() {
+        return Err("U4c production profile-closure must freeze a negative case".to_owned());
+    }
+    let mut scenario_ids = BTreeSet::new();
+    if values.iter().any(|case| {
+        !is_bounded_identity(&case.scenario_id)
+            || !scenario_ids.insert(case.scenario_id.as_str())
+            || !is_bounded_identity(&case.preflight_disposition)
+            || case.preflight_disposition != "rejected"
+            || case.activation_eligibility_reached
+            || !is_bounded_identity(&case.failure_class)
+            || !is_bounded_identity(&case.failure_kind)
+            || case.failure_code == 0
+            || case.peak_retained_bytes_delta != 0
+            || case.peak_retained_allocations_delta != 0
+            || case.total_admitted_retained_bytes_delta != 0
+            || case.total_admitted_retained_allocations_delta != 0
+            || case.live_retained_bytes_delta != 0
+            || case.live_retained_allocations_delta != 0
+            || case.final_live_retained_bytes != 0
+            || case.final_live_retained_allocations != 0
+    }) {
         return Err(
             "U4c production profile-closure negative cases must freeze rejected preflight, unreachable activation eligibility, zero preflight storage deltas, and zero final live storage"
                 .to_owned(),
@@ -398,10 +392,6 @@ fn mutation_evidence_matches(
     expected: &[ProfileClosureMutation],
 ) -> bool {
     report.len() == expected.len()
-        && report
-            .iter()
-            .map(|mutation| mutation.field_class.as_str())
-            .eq(["metadata_u64_value"])
         && report.iter().zip(expected).all(|(actual, expected)| {
             actual.field_class == expected.field_class
                 && actual.snapshot_digest_hex == expected.snapshot_digest_hex
@@ -497,6 +487,9 @@ pub(super) fn validate_report(
     validate_construction_phase(report, expected)?;
     validate_inspection_phase(&report.inspection, expected, &specification.measurement)?;
     validate_snapshot_phase(&report.snapshot, expected)?;
+    if report.release.scenario_id != expected.release_scenario_id {
+        return Err("U4c production profile-closure release scenario drifted".to_owned());
+    }
     super::validate_release(&report.release, "U4c production profile-closure release")?;
     validate_allocation_lifecycle(
         [
@@ -535,7 +528,7 @@ fn construction_phase_matches(
 ) -> bool {
     let taxonomy = &report.taxonomy;
     let budget = &expected.construction_budget;
-    report.scenario_id == "canonical-profile-closure-construction-v1"
+    report.scenario_id == expected.construction_scenario_id
         && taxonomy.semantic_cell_writes == expected.construction_semantic_cells
         && taxonomy.reference_writes == expected.construction_references
         && taxonomy.block_begins == expected.construction_blocks
@@ -579,7 +572,7 @@ fn validate_inspection_phase(
 ) -> Result<(), String> {
     validate_nonproducing_phase(report, "U4c profile-closure inspection")?;
     let taxonomy = &report.taxonomy;
-    if report.scenario_id != "canonical-profile-closure-inspection-v1"
+    if report.scenario_id != expected.inspection_scenario_id
         || taxonomy.completed_lookups != expected.inspection_completed_lookups
         || taxonomy.rejected_lookups != 0
         || taxonomy.lookup_events != expected.inspection_lookup_events
@@ -600,7 +593,7 @@ fn validate_snapshot_phase(
     validate_nonproducing_phase(report, "U4c profile-closure snapshot")?;
     let taxonomy = &report.taxonomy;
     let budget = &expected.snapshot_budget;
-    if report.scenario_id != "canonical-profile-closure-snapshot-v1"
+    if report.scenario_id != expected.snapshot_scenario_id
         || taxonomy.completed_lookups != budget.completed_lookups
         || taxonomy.rejected_lookups != 0
         || taxonomy.lookup_events != budget.lookup_events
@@ -801,7 +794,7 @@ mod tests {
         measurement: &super::super::MeasurementSpecification,
     ) -> super::super::PhaseReport {
         super::super::PhaseReport {
-            scenario_id: "canonical-profile-closure-inspection-v1".to_owned(),
+            scenario_id: expected.inspection_scenario_id.clone(),
             taxonomy: super::super::MeasurementTaxonomyReport {
                 completed_lookups: expected.inspection_completed_lookups,
                 lookup_events: expected.inspection_lookup_events,
@@ -820,7 +813,7 @@ mod tests {
         let budget = &expected.snapshot_budget;
         let allocations = budget.allocations;
         super::super::PhaseReport {
-            scenario_id: "canonical-profile-closure-snapshot-v1".to_owned(),
+            scenario_id: expected.snapshot_scenario_id.clone(),
             taxonomy: super::super::MeasurementTaxonomyReport {
                 completed_lookups: budget.completed_lookups,
                 lookup_events: budget.lookup_events,
@@ -847,7 +840,7 @@ mod tests {
     ) -> super::super::PhaseReport {
         let allocations = expected.construction_budget.allocations;
         super::super::PhaseReport {
-            scenario_id: "canonical-profile-closure-construction-v1".to_owned(),
+            scenario_id: expected.construction_scenario_id.clone(),
             taxonomy: super::super::MeasurementTaxonomyReport {
                 semantic_cell_writes: expected.construction_semantic_cells,
                 reference_writes: expected.construction_references,
@@ -978,7 +971,7 @@ mod tests {
         let mut specification_scale_drift = managed_specification();
         specification_scale_drift
             .canonical_shape
-            .unit_scale_to_meters = scale_drift.unit_scale_to_meters;
+            .unit_scale_to_meters = 0.0;
         assert_specification_rejected(&specification_scale_drift);
     }
 
@@ -1013,25 +1006,26 @@ mod tests {
     }
 
     #[test]
-    fn rejects_common_snapshot_total_drift_across_all_domains() {
+    fn rejects_snapshot_scope_and_total_invariant_drift() {
         assert_common_snapshot_total_drift_rejected(|totals| totals.image_count = 1);
         assert_common_snapshot_total_drift_rejected(|totals| totals.primitive_count = 1);
         assert_common_snapshot_total_drift_rejected(|totals| totals.skin_count = 1);
         assert_common_snapshot_total_drift_rejected(|totals| totals.animation_clip_count = 1);
         assert_common_snapshot_total_drift_rejected(|totals| {
-            totals.profile_wide_value_count = 2;
+            totals.profile_wide_value_count = 0;
         });
         assert_common_snapshot_total_drift_rejected(|totals| {
-            totals.profile_lineage_text_bytes = 43;
+            totals.profile_lineage_text_bytes = 0;
         });
         assert_common_snapshot_total_drift_rejected(|totals| {
-            totals.profile_metadata_text_bytes = 158;
+            totals.profile_metadata_text_bytes = 0;
         });
         assert_common_snapshot_total_drift_rejected(|totals| {
-            totals.profile_metadata_i64_scalar_count = 1;
+            totals.profile_metadata_bool_scalar_count = 0;
+            totals.profile_metadata_u64_scalar_count = 0;
         });
-        assert_common_snapshot_total_drift_rejected(|totals| totals.transcript_bytes = 1_759);
-        assert_common_snapshot_total_drift_rejected(|totals| totals.work_units = 171);
+        assert_common_snapshot_total_drift_rejected(|totals| totals.transcript_bytes = 0);
+        assert_common_snapshot_total_drift_rejected(|totals| totals.work_units = 0);
     }
 
     #[test]

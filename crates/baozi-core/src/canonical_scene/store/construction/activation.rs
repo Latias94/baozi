@@ -51,12 +51,36 @@ type ActivatedSceneCandidate = CanonicalCandidateStoreSession<
 #[must_use = "the activated Scene candidate must enter joint commit or be deliberately dropped"]
 pub(in crate::canonical_scene::store) struct PendingSceneActivation {
     candidate: ActivatedSceneCandidate,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::canonical_scene::store) struct SceneActivationDestinationCounts {
     canonical_blocks: usize,
+    outcome_evidence_blocks: usize,
+}
+
+impl SceneActivationDestinationCounts {
+    pub(in crate::canonical_scene::store) const fn canonical_blocks(self) -> usize {
+        self.canonical_blocks
+    }
+
+    pub(in crate::canonical_scene::store) const fn outcome_evidence_blocks(self) -> usize {
+        self.outcome_evidence_blocks
+    }
 }
 
 impl PendingSceneActivation {
-    pub(in crate::canonical_scene::store) fn canonical_blocks(&self) -> usize {
-        self.canonical_blocks
+    pub(in crate::canonical_scene::store) fn destination_counts(
+        &self,
+    ) -> SceneActivationDestinationCounts {
+        SceneActivationDestinationCounts {
+            canonical_blocks: usize::try_from(self.candidate.canonical_member_count())
+                .expect("validated canonical destination count must fit usize"),
+            outcome_evidence_blocks: usize::try_from(
+                self.candidate.outcome_evidence_member_count(),
+            )
+            .expect("validated outcome-evidence destination count must fit usize"),
+        }
     }
 
     pub(in crate::canonical_scene::store) fn directory(
@@ -569,7 +593,6 @@ impl SceneConstructionOperation {
                 ));
             }
         };
-        let canonical_blocks = activated.canonical_len();
         let outcome = activated.validate_centrally(
             |lane, _output| {
                 let evidence =
@@ -599,10 +622,7 @@ impl SceneConstructionOperation {
         )?;
         match outcome {
             CanonicalCentralValidationOutcome::Candidate(candidate) => Ok(
-                SceneActivationTransition::Candidate(PendingSceneActivation {
-                    candidate,
-                    canonical_blocks,
-                }),
+                SceneActivationTransition::Candidate(PendingSceneActivation { candidate }),
             ),
             CanonicalCentralValidationOutcome::Rejected(rejected) => prepare_failure_validation(
                 rejected.validate_rich_failure(validate_failure_evidence)?,

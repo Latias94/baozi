@@ -46,6 +46,7 @@ const PROFILE_CLOSURE_METADATA_BYTES: u64 = 170;
 enum ProfileClosureInputVariant {
     Baseline,
     MetadataMutation,
+    SceneSpaceMutation,
     CameraOutOfRange,
     LightOutOfRange,
     SourceResourceOutOfRange,
@@ -223,12 +224,18 @@ fn extension_schema(name: &str, version: u32) -> ExtensionSchemaId {
     ExtensionSchemaId::new(name, version).expect("profile-closure extension schema")
 }
 
-fn profile_scene_space() -> SceneSpace {
+fn profile_scene_space(variant: ProfileClosureInputVariant) -> SceneSpace {
     SceneSpace {
         handedness: Handedness::Left,
         up_axis: Axis::NegativeY,
         front_axis: Axis::PositiveZ,
-        unit_scale_to_meters: Some(0.01),
+        unit_scale_to_meters: Some(
+            if matches!(variant, ProfileClosureInputVariant::SceneSpaceMutation) {
+                0.02
+            } else {
+                0.01
+            },
+        ),
         front_face_winding: FrontFaceWinding::Clockwise,
         uv_origin: UvOrigin::LowerLeft,
         transform_convention: TransformConvention::ColumnVectorLocalToParent,
@@ -274,7 +281,7 @@ fn with_profile_closure_input_variant<R>(
     let emission = LightEmission::try_from_scaled_linear_srgb(Color::WHITE, 4.0)
         .expect("profile-closure light emission");
     let lights = [LightAuthoring::new(light, emission)];
-    let scene_space = profile_scene_space();
+    let scene_space = profile_scene_space(variant);
     let spatial = SpatialAuthoringBatch::new(&scene_space, &cameras, &lights);
     let node_batch = NodeAuthoringBatch::new(Presence::Present(&roots), &nodes);
     let appearance = AppearanceAuthoringBatch::empty();
@@ -309,6 +316,7 @@ fn with_profile_closure_input_variant<R>(
         }
         ProfileClosureInputVariant::Baseline
         | ProfileClosureInputVariant::MetadataMutation
+        | ProfileClosureInputVariant::SceneSpaceMutation
         | ProfileClosureInputVariant::CameraOutOfRange
         | ProfileClosureInputVariant::LightOutOfRange => {}
     }
@@ -364,7 +372,20 @@ fn build_profile_closure_scene(
     generation_source: &AtomicU64,
     use_mutated_metadata: bool,
 ) -> NodeSceneSuccessParts {
-    with_profile_closure_input(use_mutated_metadata, |input| {
+    let variant = if use_mutated_metadata {
+        ProfileClosureInputVariant::MetadataMutation
+    } else {
+        ProfileClosureInputVariant::Baseline
+    };
+    build_profile_closure_scene_variant(account, generation_source, variant)
+}
+
+fn build_profile_closure_scene_variant(
+    account: &PhysicalStorageAccount,
+    generation_source: &AtomicU64,
+    variant: ProfileClosureInputVariant,
+) -> NodeSceneSuccessParts {
+    with_profile_closure_input_variant(variant, |input| {
         let prepared = SceneConstructionOperation::with_account_for_scene_input(
             account,
             test_limits(),
@@ -1067,12 +1088,17 @@ fn profile_closure_round_trips_spatial_lineage_and_metadata() {
 }
 
 #[test]
-fn profile_metadata_mutation_changes_the_snapshot_digest() {
+fn profile_and_scene_space_mutations_change_semantic_receipts() {
     let factory = super::test_factory();
     let account = super::test_account(&factory, 512);
     let generation_source = AtomicU64::new(0);
     let baseline = build_profile_closure_scene(&account, &generation_source, false);
     let mutation = build_profile_closure_scene(&account, &generation_source, true);
+    let scene_space_mutation = build_profile_closure_scene_variant(
+        &account,
+        &generation_source,
+        ProfileClosureInputVariant::SceneSpaceMutation,
+    );
     let baseline_snapshot = baseline
         .scene
         .capture_snapshot(
@@ -1089,7 +1115,29 @@ fn profile_metadata_mutation_changes_the_snapshot_digest() {
             None,
         )
         .expect("profile mutation digest");
+    let baseline_facade = super::project_gltf_facade_observation_v1_for_probe(&baseline.scene)
+        .expect("profile baseline facade observation");
+    let metadata_facade = super::project_gltf_facade_observation_v1_for_probe(&mutation.scene)
+        .expect("profile metadata facade observation");
+    let scene_space_facade =
+        super::project_gltf_facade_observation_v1_for_probe(&scene_space_mutation.scene)
+            .expect("profile SceneSpace facade observation");
     assert_ne!(baseline_snapshot.digest, mutation_snapshot.digest);
+    assert_eq!(baseline_facade.totals, metadata_facade.totals);
+    assert_eq!(baseline_facade.totals, scene_space_facade.totals);
+    assert_ne!(
+        baseline_facade.transcript_digest,
+        metadata_facade.transcript_digest
+    );
+    assert_ne!(
+        baseline_facade.transcript_digest,
+        scene_space_facade.transcript_digest
+    );
+    assert_ne!(
+        metadata_facade.transcript_digest,
+        scene_space_facade.transcript_digest
+    );
+    drop(scene_space_mutation);
     drop(mutation);
     drop(baseline);
     assert_eq!(account.snapshot().live_retained_bytes(), 0);

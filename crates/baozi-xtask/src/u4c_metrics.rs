@@ -30,6 +30,21 @@ const PROBE_ARGUMENTS: &[&str] = &[
     "--test-threads=1",
 ];
 
+/// The repository-local qualification level required from one U4 evidence collection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum U4cCollectionRequirement {
+    /// Validate the selected evidence scope without claiming a U4d stage exit.
+    EvidenceOnly,
+    /// Require the canonical production comparator to prove every declared local U4d receipt.
+    U4dLocalEvidence,
+}
+
+impl U4cCollectionRequirement {
+    fn requires_u4d_local_evidence(self) -> bool {
+        self == Self::U4dLocalEvidence
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct MetricsV2 {
@@ -265,8 +280,29 @@ pub fn collect_repository(
     repository_root: &Path,
     specification_path: &Path,
 ) -> Result<Value, String> {
-    if production::is_canonical_specification_path(repository_root, specification_path) {
-        return production::collect(repository_root, specification_path);
+    collect_repository_with_requirement(
+        repository_root,
+        specification_path,
+        U4cCollectionRequirement::EvidenceOnly,
+    )
+}
+
+/// Collects U4 evidence while enforcing the requested repository-local qualification level.
+pub fn collect_repository_with_requirement(
+    repository_root: &Path,
+    specification_path: &Path,
+    requirement: U4cCollectionRequirement,
+) -> Result<Value, String> {
+    let canonical_production =
+        production::is_canonical_specification_path(repository_root, specification_path);
+    if requirement.requires_u4d_local_evidence() && !canonical_production {
+        return Err(format!(
+            "U4d local evidence requires the canonical production specification {:?}",
+            production::SPECIFICATION_PATH
+        ));
+    }
+    if canonical_production {
+        return production::collect(repository_root, specification_path, requirement);
     }
 
     let evidence_scope = spec::read_evidence_scope(repository_root, specification_path)?;
@@ -396,6 +432,20 @@ mod tests {
             .expect_err("an unmanaged production specification must fail closed");
 
         assert!(error.contains("canonical"), "{error}");
+        assert!(error.contains("u4c-metrics.toml"), "{error}");
+    }
+
+    #[test]
+    fn u4d_local_requirement_rejects_nonproduction_routes_before_reading() {
+        let missing = Path::new("path-that-must-not-be-read");
+        let error = collect_repository_with_requirement(
+            missing,
+            missing,
+            U4cCollectionRequirement::U4dLocalEvidence,
+        )
+        .expect_err("U4d local qualification must reject a nonproduction route");
+
+        assert!(error.contains("U4d local evidence"), "{error}");
         assert!(error.contains("u4c-metrics.toml"), "{error}");
     }
 

@@ -1168,8 +1168,29 @@ fn fresh_segment_nonce_is_excluded_from_the_semantic_snapshot() {
     assert_eq!(account.snapshot().live_retained_allocations(), 0);
 }
 
-#[test]
-fn snapshot_semantics_are_independent_of_validated_profile_segment_partitioning() {
+pub(in crate::canonical_scene::store) struct SegmentPartitionSnapshotObservation {
+    pub(in crate::canonical_scene::store) domain: &'static str,
+    pub(in crate::canonical_scene::store) draft_schema_revision: u32,
+    pub(in crate::canonical_scene::store) algorithm: NodeSceneSnapshotAlgorithm,
+    pub(in crate::canonical_scene::store) direct: SegmentPartitionSnapshotReceipt,
+    pub(in crate::canonical_scene::store) edited: SegmentPartitionSnapshotReceipt,
+}
+
+pub(in crate::canonical_scene::store) struct SegmentPartitionSnapshotReceipt {
+    pub(in crate::canonical_scene::store) segment_count: usize,
+    pub(in crate::canonical_scene::store) digest: [u8; 32],
+    pub(in crate::canonical_scene::store) preview_text: String,
+    pub(in crate::canonical_scene::store) preview_items_omitted_by_limit: u64,
+    pub(in crate::canonical_scene::store) preview_bytes_truncated: bool,
+    pub(in crate::canonical_scene::store) preview_items_truncated: bool,
+    pub(in crate::canonical_scene::store) transcript: Vec<u8>,
+    pub(in crate::canonical_scene::store) normalized_semantic_totals:
+        super::NodeSceneSnapshotTotals,
+    pub(in crate::canonical_scene::store) work_units: u64,
+}
+
+pub(in crate::canonical_scene::store) fn collect_segment_partition_snapshot_observation_for_probe()
+-> SegmentPartitionSnapshotObservation {
     const SOURCE_PROVENANCE: [ProvenanceLocalId; 1] = [ProvenanceLocalId::new(0)];
     const OPERATION_PROVENANCE: [ProvenanceLocalId; 1] = [ProvenanceLocalId::new(1)];
 
@@ -1287,23 +1308,78 @@ fn snapshot_semantics_are_independent_of_validated_profile_segment_partitioning(
         edited_snapshot.schema_revision
     );
     assert_eq!(direct_snapshot.algorithm, edited_snapshot.algorithm);
-    assert_eq!(direct_snapshot.digest, edited_snapshot.digest);
-    assert_eq!(direct_snapshot.preview, edited_snapshot.preview);
-    assert_eq!(direct_transcript.bytes, edited_transcript.bytes);
     let direct_work = direct_snapshot.totals.work_units;
     let edited_work = edited_snapshot.totals.work_units;
     let mut direct_totals = direct_snapshot.totals;
     let mut edited_totals = edited_snapshot.totals;
     direct_totals.work_units = 0;
     edited_totals.work_units = 0;
-    assert_eq!(direct_totals, edited_totals);
-    assert!(edited_work > direct_work);
+
+    let observation = SegmentPartitionSnapshotObservation {
+        domain: direct_snapshot.domain,
+        draft_schema_revision: direct_snapshot.schema_revision,
+        algorithm: direct_snapshot.algorithm,
+        direct: SegmentPartitionSnapshotReceipt {
+            segment_count: direct.scene.proof.profile_segment_count(),
+            digest: direct_snapshot.digest,
+            preview_text: direct_snapshot.preview.text,
+            preview_items_omitted_by_limit: direct_snapshot.preview.items_omitted_by_limit,
+            preview_bytes_truncated: direct_snapshot.preview.bytes_truncated,
+            preview_items_truncated: direct_snapshot.preview.items_truncated,
+            transcript: direct_transcript.bytes,
+            normalized_semantic_totals: direct_totals,
+            work_units: direct_work,
+        },
+        edited: SegmentPartitionSnapshotReceipt {
+            segment_count: edited.scene.proof.profile_segment_count(),
+            digest: edited_snapshot.digest,
+            preview_text: edited_snapshot.preview.text,
+            preview_items_omitted_by_limit: edited_snapshot.preview.items_omitted_by_limit,
+            preview_bytes_truncated: edited_snapshot.preview.bytes_truncated,
+            preview_items_truncated: edited_snapshot.preview.items_truncated,
+            transcript: edited_transcript.bytes,
+            normalized_semantic_totals: edited_totals,
+            work_units: edited_work,
+        },
+    };
 
     drop(direct);
     drop(edited);
     drop(base);
     assert_eq!(account.snapshot().live_retained_bytes(), 0);
     assert_eq!(account.snapshot().live_retained_allocations(), 0);
+
+    observation
+}
+
+#[test]
+fn snapshot_semantics_are_independent_of_validated_profile_segment_partitioning() {
+    let observation = collect_segment_partition_snapshot_observation_for_probe();
+    assert_eq!(observation.direct.segment_count, 1);
+    assert_eq!(observation.edited.segment_count, 2);
+    assert_eq!(observation.direct.digest, observation.edited.digest);
+    assert_eq!(
+        observation.direct.preview_text,
+        observation.edited.preview_text
+    );
+    assert_eq!(
+        observation.direct.preview_items_omitted_by_limit,
+        observation.edited.preview_items_omitted_by_limit
+    );
+    assert_eq!(
+        observation.direct.preview_bytes_truncated,
+        observation.edited.preview_bytes_truncated
+    );
+    assert_eq!(
+        observation.direct.preview_items_truncated,
+        observation.edited.preview_items_truncated
+    );
+    assert_eq!(observation.direct.transcript, observation.edited.transcript);
+    assert_eq!(
+        observation.direct.normalized_semantic_totals,
+        observation.edited.normalized_semantic_totals
+    );
+    assert!(observation.edited.work_units > observation.direct.work_units);
 }
 
 #[test]

@@ -8,7 +8,7 @@ const USAGE: &str = concat!(
     "       cargo run -p baozi-xtask -- repository-conformance-evidence-binding-check ",
     "--evidence <path> --repository-revision <sha>\n",
     "       cargo run -p baozi-xtask --features repository-input-candidate -- ",
-    "u4c-metrics --spec <path>"
+    "u4c-metrics [--require-u4d-local-evidence] --spec <path>"
 );
 
 fn main() -> ExitCode {
@@ -32,7 +32,20 @@ fn main() -> ExitCode {
         }
         [command] if command == "runtime-admission-check" => run_runtime_admission_check(),
         [command, flag, specification] if command == "u4c-metrics" && flag == "--spec" => {
-            run_u4c_metrics(Path::new(specification))
+            run_u4c_metrics(
+                Path::new(specification),
+                baozi_xtask::u4c_metrics::U4cCollectionRequirement::EvidenceOnly,
+            )
+        }
+        [command, requirement, flag, specification]
+            if command == "u4c-metrics"
+                && requirement == "--require-u4d-local-evidence"
+                && flag == "--spec" =>
+        {
+            run_u4c_metrics(
+                Path::new(specification),
+                baozi_xtask::u4c_metrics::U4cCollectionRequirement::U4dLocalEvidence,
+            )
         }
         _ => {
             eprintln!("{USAGE}");
@@ -116,7 +129,10 @@ fn run_repository_conformance_check() -> ExitCode {
     }
 }
 
-fn run_u4c_metrics(specification_argument: &Path) -> ExitCode {
+fn run_u4c_metrics(
+    specification_argument: &Path,
+    requirement: baozi_xtask::u4c_metrics::U4cCollectionRequirement,
+) -> ExitCode {
     let current_directory = match env::current_dir() {
         Ok(path) => path,
         Err(error) => {
@@ -128,7 +144,11 @@ fn run_u4c_metrics(specification_argument: &Path) -> ExitCode {
         eprintln!("failed to find a Baozi repository root from {current_directory:?}");
         return ExitCode::FAILURE;
     };
-    match baozi_xtask::u4c_metrics::collect_repository(&repository_root, specification_argument) {
+    match baozi_xtask::u4c_metrics::collect_repository_with_requirement(
+        &repository_root,
+        specification_argument,
+        requirement,
+    ) {
         Ok(metrics) => {
             println!("{metrics}");
             ExitCode::SUCCESS

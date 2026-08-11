@@ -181,7 +181,7 @@ jobs:
         run: cargo nextest run --locked -p baozi-xtask --all-features
 
       - name: Verify U4c production evidence
-        run: cargo +1.95.0 run -j 1 --locked -p baozi-xtask --features repository-input-candidate --target x86_64-unknown-linux-gnu -- u4c-metrics --spec docs/conformance/u4c-metrics.toml
+        run: cargo +1.95.0 run -j 1 --locked -p baozi-xtask --features repository-input-candidate --target x86_64-unknown-linux-gnu -- u4c-metrics --require-u4d-local-evidence --spec docs/conformance/u4c-metrics.toml
 
       - name: Check focused conformance inventory
         run: cargo run --locked -p baozi-xtask -- repository-conformance-check
@@ -196,6 +196,22 @@ jobs:
         run: |
           cargo package --locked -p baozi-operation
           cargo package --locked -p baozi-io
+
+  u4d-stage-exit:
+    name: U4d local evidence stage exit (exact revision)
+    needs: [rust, u4c-lifecycle-diagnostic]
+    if: ${{ always() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require exact-revision U4d evidence stage
+        env:
+          RUST_RESULT: ${{ needs.rust.result }}
+          LIFECYCLE_RESULT: ${{ needs.u4c-lifecycle-diagnostic.result }}
+        run: |
+          test "$RUST_RESULT" = success
+          test "$LIFECYCLE_RESULT" = success
+          echo "U4d local evidence stage passed for ${GITHUB_SHA}"
 
   u4c-lifecycle-diagnostic:
     name: U4c lifecycle diagnostic (Windows Rust 1.97.1)

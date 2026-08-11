@@ -81,11 +81,12 @@ fn exhaust_profile_for_test(profile: &mut NodeSceneProfileCursor<'_>) {
 }
 
 pub(in crate::canonical_scene::store) use gltf_capability::{
-    GLTF_SOURCE_VECTOR_SCHEMA_ID, GltfCapabilityCanonicalShapeObservation,
-    GltfCapabilitySourceShapeObservation, build_gltf_capability_scene_for_probe,
-    capture_gltf_capability_snapshots_for_probe, collect_gltf_capability_vectors_for_probe,
-    inspect_gltf_capability_semantics_for_probe,
+    FACADE_OBSERVATION_SCHEMA_ID, FacadeObservationOutcomeV1, GLTF_SOURCE_VECTOR_SCHEMA_ID,
+    GltfCapabilityCanonicalShapeObservation, GltfCapabilitySourceShapeObservation,
+    build_gltf_capability_scene_for_probe, capture_gltf_capability_snapshots_for_probe,
+    collect_gltf_capability_vectors_for_probe, inspect_gltf_capability_semantics_for_probe,
     inspect_gltf_capability_semantics_with_first_transform_for_probe,
+    project_gltf_facade_observation_v1_for_probe,
 };
 
 pub(in crate::canonical_scene::store) use obj_capability::{

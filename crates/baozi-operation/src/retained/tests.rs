@@ -202,30 +202,6 @@ fn retained_exactness_production_path_uses_only_incremental_proofs() {
     }
 }
 
-fn retained_non_final_owner_production_source() -> String {
-    [
-        retained_root_production_source(),
-        include_str!("account.rs"),
-        include_str!("allocation.rs"),
-        include_str!("block_table.rs"),
-        include_str!("evidence.rs"),
-        include_str!("operation.rs"),
-        include_str!("operation_start/mod.rs"),
-        include_str!("operation_start/config.rs"),
-        include_str!("operation_start/share.rs"),
-        include_str!("operation_start/pair.rs"),
-        include_str!("ownership.rs"),
-        include_str!("physical.rs"),
-        include_str!("publication_contract.rs"),
-        include_str!("range.rs"),
-        include_str!("startup.rs"),
-        include_str!("terminal.rs"),
-        include_str!("terminal_failure.rs"),
-        include_str!("terminal_output.rs"),
-    ]
-    .join("\n")
-}
-
 #[test]
 fn retained_publication_has_one_terminal_ledger_evidence_rail() {
     let production = retained_production_source();

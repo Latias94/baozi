@@ -15,7 +15,7 @@ use super::super::super::construction::{FAILURE_TERMINAL_WORK_DIMENSION, STORE_D
 pub(super) const REPORT_PREFIX: &str = "BAOZI_U4C_PRODUCTION_V2=";
 const REPORT_SCHEMA_ID: &str = "baozi.u4c.production-report";
 const REPORT_SCHEMA_VERSION: u32 = 2;
-const REPORT_REVISION: u32 = 3;
+const REPORT_REVISION: u32 = 4;
 const SCENARIO_SET_ID: &str = "canonical-store-production-v2";
 
 #[derive(Serialize)]
@@ -29,6 +29,8 @@ pub(super) struct ProductionReport {
     obj_capability: ObjCapabilityReport,
     gltf_capability: GltfCapabilityReport,
     profile_closure: ProfileClosureReport,
+    draft_snapshot_vectors: DraftSnapshotVectorInventoryReport,
+    segment_partition_invariance: SegmentPartitionInvarianceReport,
     validation_faults: Vec<ValidationFaultReport>,
     pending_scene_activation: PendingSceneActivationReport,
     protected_terminal_activation: ProtectedTerminalActivationReport,
@@ -41,6 +43,7 @@ pub(super) struct ProductionReportScenarios {
     pub(super) obj_capability: ObjCapabilityReport,
     pub(super) gltf_capability: GltfCapabilityReport,
     pub(super) profile_closure: ProfileClosureReport,
+    pub(super) segment_partition_invariance: SegmentPartitionInvarianceReport,
     pub(super) validation_faults: Vec<ValidationFaultReport>,
     pub(super) pending_scene_activation: PendingSceneActivationReport,
     pub(super) protected_terminal_activation: ProtectedTerminalActivationReport,
@@ -55,11 +58,18 @@ impl ProductionReport {
             obj_capability,
             gltf_capability,
             profile_closure,
+            segment_partition_invariance,
             validation_faults,
             pending_scene_activation,
             protected_terminal_activation,
             minimal_fallback,
         } = scenarios;
+        let draft_snapshot_vectors = DraftSnapshotVectorInventoryReport::from_observed_scenarios(
+            &obj_capability,
+            &gltf_capability,
+            &profile_closure,
+            &segment_partition_invariance,
+        );
         Self {
             schema_id: REPORT_SCHEMA_ID,
             schema_version: REPORT_SCHEMA_VERSION,
@@ -70,12 +80,88 @@ impl ProductionReport {
             obj_capability,
             gltf_capability,
             profile_closure,
+            draft_snapshot_vectors,
+            segment_partition_invariance,
             validation_faults,
             pending_scene_activation,
             protected_terminal_activation,
             minimal_fallback,
         }
     }
+}
+
+#[derive(Serialize)]
+pub(super) struct DraftSnapshotVectorInventoryReport {
+    entry_point: &'static str,
+    inventory_id: &'static str,
+    compatibility_state: &'static str,
+    domain: &'static str,
+    draft_schema_revision: u32,
+    algorithm: &'static str,
+    vectors: Vec<DraftSnapshotVectorReport>,
+}
+
+impl DraftSnapshotVectorInventoryReport {
+    fn from_observed_scenarios(
+        obj: &ObjCapabilityReport,
+        gltf: &GltfCapabilityReport,
+        profile: &ProfileClosureReport,
+        partition: &SegmentPartitionInvarianceReport,
+    ) -> Self {
+        Self {
+            entry_point: "canonical-node-scene-snapshot",
+            inventory_id: "canonical-node-scene-draft-snapshot-v1",
+            compatibility_state: "draft",
+            domain: partition.domain,
+            draft_schema_revision: partition.draft_schema_revision,
+            algorithm: partition.algorithm,
+            vectors: vec![
+                DraftSnapshotVectorReport {
+                    vector_id: obj.scenario_id,
+                    digest_hex: obj.full_snapshot_digest_hex.clone(),
+                },
+                DraftSnapshotVectorReport {
+                    vector_id: gltf.scenario_id,
+                    digest_hex: gltf.full_snapshot_digest_hex.clone(),
+                },
+                DraftSnapshotVectorReport {
+                    vector_id: profile.scenario_id,
+                    digest_hex: profile.full_snapshot_digest_hex.clone(),
+                },
+                DraftSnapshotVectorReport {
+                    vector_id: partition.scenario_id,
+                    digest_hex: partition.direct.digest_hex.clone(),
+                },
+            ],
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct DraftSnapshotVectorReport {
+    vector_id: &'static str,
+    digest_hex: String,
+}
+
+#[derive(Serialize)]
+pub(super) struct SegmentPartitionInvarianceReport {
+    pub(super) entry_point: &'static str,
+    pub(super) scenario_id: &'static str,
+    pub(super) domain: &'static str,
+    pub(super) draft_schema_revision: u32,
+    pub(super) algorithm: &'static str,
+    pub(super) direct: SegmentPartitionReceiptReport,
+    pub(super) edited: SegmentPartitionReceiptReport,
+}
+
+#[derive(Serialize)]
+pub(super) struct SegmentPartitionReceiptReport {
+    pub(super) segment_count: usize,
+    pub(super) digest_hex: String,
+    pub(super) preview: CapabilityBoundedPreviewReport,
+    pub(super) transcript: FixedVectorReport,
+    pub(super) normalized_semantic_totals: CanonicalSnapshotTotalsReport,
+    pub(super) work_units: u64,
 }
 
 #[derive(Serialize)]
@@ -497,12 +583,53 @@ pub(super) struct GltfCapabilityReport {
     pub(super) evidence: EvidenceReport,
     pub(super) construction: PhaseReport,
     pub(super) inspection: PhaseReport,
+    pub(super) facade_equivalent: FacadeEquivalentInspectionReport,
     pub(super) snapshot: PhaseReport,
     pub(super) unchanged_view: GltfUnchangedViewReport,
     pub(super) changed_scene_edit: GltfChangedSceneEditReport,
     pub(super) release: ReleaseReport,
     pub(super) physical_account: CapabilityPhysicalReport,
     pub(super) factory_after_account_release: PhysicalFactoryReport,
+}
+
+#[derive(Serialize)]
+pub(super) struct FacadeEquivalentInspectionReport {
+    pub(super) entry_point: &'static str,
+    pub(super) scenario_id: &'static str,
+    pub(super) success: FacadeObservationSuccessReport,
+    pub(super) typed_error: FacadeObservationTypedErrorReport,
+    pub(super) success_generation_reservations_before: u64,
+    pub(super) success_generation_reservations_after: u64,
+    pub(super) success_canonical_block_count_before: usize,
+    pub(super) success_canonical_block_count_after: usize,
+    pub(super) typed_error_generation_reservations_before: u64,
+    pub(super) typed_error_generation_reservations_after: u64,
+    pub(super) typed_error_canonical_block_count_before: usize,
+    pub(super) typed_error_canonical_block_count_after: usize,
+    pub(super) success_phase: PhaseReport,
+    pub(super) typed_error_phase: PhaseReport,
+    pub(super) success_physical_account: ReadOnlyPhysicalReport,
+    pub(super) typed_error_physical_account: ReadOnlyPhysicalReport,
+}
+
+#[derive(Serialize)]
+pub(super) struct FacadeObservationSuccessReport {
+    pub(super) outcome: &'static str,
+    pub(super) schema_id: &'static str,
+    pub(super) transcript_bytes: u64,
+    pub(super) transcript_digest_hex: String,
+    pub(super) totals: GltfCanonicalShapeReport,
+    pub(super) reference_closure_verified: bool,
+    pub(super) cursor_exhausted: bool,
+}
+
+#[derive(Serialize)]
+pub(super) struct FacadeObservationTypedErrorReport {
+    pub(super) outcome: &'static str,
+    pub(super) schema_id: &'static str,
+    pub(super) error_class: &'static str,
+    pub(super) reason: &'static str,
+    pub(super) reason_bytes: usize,
 }
 
 #[derive(Serialize)]
@@ -1094,9 +1221,9 @@ pub(super) fn render(report: &ProductionReport) -> String {
 }
 
 #[test]
-fn production_report_contract_is_v2_revision_3() {
+fn production_report_contract_is_v2_revision_4() {
     assert_eq!(REPORT_SCHEMA_ID, "baozi.u4c.production-report");
     assert_eq!(REPORT_SCHEMA_VERSION, 2);
-    assert_eq!(REPORT_REVISION, 3);
+    assert_eq!(REPORT_REVISION, 4);
     assert_eq!(SCENARIO_SET_ID, "canonical-store-production-v2");
 }

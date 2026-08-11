@@ -1,10 +1,11 @@
+use std::collections::BTreeSet;
+
 use serde::Deserialize;
 
 use super::capability::{
     BoundedPreview as ObjBoundedPreview,
     ConstructionBudgetSpecification as ObjConstructionBudgetSpecification, FixedVector,
     SnapshotBudgetSpecification as ObjSnapshotBudgetSpecification,
-    validate_fixed_vector as validate_capability_fixed_vector,
 };
 #[cfg(feature = "repository-input-candidate")]
 use super::capability::{
@@ -13,17 +14,17 @@ use super::capability::{
     validate_fixed_vector_report as validate_capability_fixed_vector_report,
     validate_nonproducing_phase,
 };
-use super::{
-    CanonicalSnapshotTotals, CoverageMappingSpecification, is_lowercase_sha256, validate_exact_list,
-};
-
-const SOURCE_VECTOR_SCHEMA_ID: &str = "baozi.normalized-obj-capability-source.v1";
+use super::{CanonicalSnapshotTotals, CoverageMappingSpecification, is_lowercase_sha256};
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct ObjCapabilitySpecification {
     entry_point: String,
     scenario_id: String,
+    construction_scenario_id: String,
+    inspection_scenario_id: String,
+    snapshot_scenario_id: String,
+    release_scenario_id: String,
     source_shape: ObjSourceShape,
     canonical_shape: ObjCanonicalShape,
     source_vector: FixedVector,
@@ -47,8 +48,19 @@ pub(super) struct ObjCapabilitySpecification {
 }
 
 impl ObjCapabilitySpecification {
+    pub(super) fn full_snapshot_digest_hex(&self) -> &str {
+        &self.full_snapshot_digest_hex
+    }
+
     pub(super) fn matches_mapping(&self, mapping: &CoverageMappingSpecification) -> bool {
         mapping.entry_point == self.entry_point && mapping.scenario_id == self.scenario_id
+    }
+}
+
+#[cfg(feature = "repository-input-candidate")]
+impl ObjCapabilityReport {
+    pub(super) fn full_snapshot_digest_hex(&self) -> &str {
+        &self.full_snapshot_digest_hex
     }
 }
 
@@ -92,81 +104,27 @@ pub(super) fn validate_specification(
     let snapshot_budget = &specification.snapshot_budget;
     let source_shape = &specification.source_shape;
     let canonical_shape = &specification.canonical_shape;
-    if specification.entry_point != "canonical-obj-corner-smoothing"
-        || specification.scenario_id != "canonical-obj-corner-smoothing-v1"
-        || source_shape.position_count != 3
-        || source_shape.texcoord_count != 4
-        || source_shape.normal_count != 2
-        || source_shape.face_count != 2
-        || source_shape.corner_count != 6
-        || source_shape.face_count.checked_mul(3) != Some(source_shape.corner_count)
-        || canonical_shape.topology != "triangle_list"
-        || canonical_shape.vertex_count != 3
-        || canonical_shape.corner_count != 6
-        || canonical_shape.face_count != 2
-        || canonical_shape.vertex_position_elements != 3
-        || canonical_shape.corner_normal_elements != 6
-        || canonical_shape.corner_texcoord_elements != 6
-        || canonical_shape.face_smoothing_group_elements != 2
-        || specification.generation_reservations != 1
+    let scenario_ids = [
+        specification.scenario_id.as_str(),
+        specification.construction_scenario_id.as_str(),
+        specification.inspection_scenario_id.as_str(),
+        specification.snapshot_scenario_id.as_str(),
+        specification.release_scenario_id.as_str(),
+    ];
+    if !is_bounded_identity(&specification.entry_point)
+        || scenario_ids
+            .iter()
+            .any(|scenario_id| !is_bounded_identity(scenario_id))
+        || scenario_ids.iter().copied().collect::<BTreeSet<_>>().len() != scenario_ids.len()
+        || !source_shape_is_well_formed(source_shape)
+        || !canonical_shape_matches_source(source_shape, canonical_shape)
+        || specification.generation_reservations == 0
         || specification.canonical_block_count == 0
         || specification.outcome_evidence_block_count == 0
         || !is_lowercase_sha256(&specification.full_snapshot_digest_hex)
         || specification.equivalent_snapshot_digest_hex != specification.full_snapshot_digest_hex
-        || totals.node_count != 1
-        || totals.root_count != 1
-        || totals.edge_count != 0
-        || !totals.has_empty_spatial_domain()
-        || totals.image_count != 0
-        || totals.sampler_count != 0
-        || totals.texture_count != 0
-        || totals.material_count != 0
-        || totals.material_binding_count != 0
-        || totals.image_payload_bytes != 0
-        || totals.media_type_bytes != 0
-        || totals.source_key_bytes != 0
-        || totals.binding_semantic_scalar_count != 0
-        || totals.material_factor_scalar_count != 0
-        || totals.logical_mesh_count != 1
-        || totals.primitive_count != 1
-        || totals.attribute_count != 4
-        || totals.mesh_instance_count != 1
-        || totals.polygon_boundary_count != 0
-        || totals.primitive_index_count != 6
-        || totals.sparse_index_count != 0
-        || totals.canonical_scalar_count != 41
-        || totals.f32_scalar_count != 39
-        || totals.u32_scalar_count != 2
-        || totals.skin_count != 0
-        || totals.logical_morph_count != 1
-        || totals.morph_definition_count != 0
-        || totals.primitive_deformation_count != 1
-        || totals.morph_target_count != 0
-        || totals.morph_delta_count != 0
-        || totals.deformation_mesh_instance_count != 1
-        || totals.skin_joint_count != 0
-        || totals.inverse_bind_matrix_count != 0
-        || totals.skin_correction_matrix_count != 0
-        || totals.skin_name_bytes != 0
-        || totals.morph_default_weight_count != 0
-        || totals.morph_name_bytes != 0
-        || totals.influence_row_count != 0
-        || totals.influence_count != 0
-        || totals.morph_value_vector_count != 0
-        || totals.morph_sparse_index_count != 0
-        || totals.instance_morph_weight_count != 0
-        || totals.animation_clip_count != 0
-        || totals.animation_channel_count != 0
-        || totals.animation_time_scalar_count != 0
-        || totals.animation_value_scalar_count != 0
-        || totals.animation_in_tangent_scalar_count != 0
-        || totals.animation_out_tangent_scalar_count != 0
-        || !totals.has_fresh_profile(10)
-        || totals.transcript_bytes == 0
-        || totals.work_units == 0
+        || !snapshot_totals_match_shape(totals, canonical_shape)
         || !preview.has_common_invariants()
-        || !preview.bytes_truncated
-        || !preview.items_truncated
         || !construction_budget.is_well_formed()
         || !snapshot_budget.is_well_formed()
         || specification.construction_semantic_cells == 0
@@ -181,44 +139,37 @@ pub(super) fn validate_specification(
         || specification.retained_allocations == 0
     {
         return Err(
-            "U4c production OBJ capability specification is not the frozen canonical vector"
+            "U4c production OBJ capability specification violates a structural or cross-field invariant"
                 .to_owned(),
         );
     }
     validate_fixed_vector(&specification.source_vector)?;
     validate_fixed_vector(&specification.equivalent_source_vector)?;
-    if specification.source_vector.sha256 == specification.equivalent_source_vector.sha256 {
+    if specification.source_vector.schema_id != specification.equivalent_source_vector.schema_id
+        || specification.source_vector.sha256 == specification.equivalent_source_vector.sha256
+    {
         return Err(
             "U4c production equivalent OBJ source vector must differ before projection".to_owned(),
         );
     }
 
-    let expected_mutations = [
-        "position_index",
-        "texcoord_index",
-        "normal_index",
-        "smoothing_group",
-    ];
-    let actual_mutations = specification
-        .mutations
-        .iter()
-        .map(|mutation| mutation.field_class.as_str())
-        .collect::<Vec<_>>();
-    validate_exact_list(
-        "obj_capability.mutations",
-        &actual_mutations,
-        &expected_mutations,
-    )?;
-    for (index, mutation) in specification.mutations.iter().enumerate() {
+    if specification.mutations.is_empty() {
+        return Err("U4c production OBJ must freeze at least one mutation vector".to_owned());
+    }
+    let mut mutation_fields = BTreeSet::new();
+    let mut mutation_vectors = BTreeSet::new();
+    let mut mutation_snapshots = BTreeSet::new();
+    for mutation in &specification.mutations {
         validate_fixed_vector(&mutation.source_vector)?;
-        if !is_lowercase_sha256(&mutation.snapshot_digest_hex)
+        if !is_bounded_identity(&mutation.field_class)
+            || mutation.source_vector.schema_id != specification.source_vector.schema_id
+            || !is_lowercase_sha256(&mutation.snapshot_digest_hex)
             || mutation.snapshot_digest_hex == specification.full_snapshot_digest_hex
             || mutation.source_vector.sha256 == specification.source_vector.sha256
             || mutation.source_vector.sha256 == specification.equivalent_source_vector.sha256
-            || specification.mutations[..index].iter().any(|earlier| {
-                earlier.snapshot_digest_hex == mutation.snapshot_digest_hex
-                    || earlier.source_vector.sha256 == mutation.source_vector.sha256
-            })
+            || !mutation_fields.insert(mutation.field_class.as_str())
+            || !mutation_vectors.insert(mutation.source_vector.sha256.as_str())
+            || !mutation_snapshots.insert(mutation.snapshot_digest_hex.as_str())
         {
             return Err(format!(
                 "U4c production OBJ mutation {} is not independently frozen",
@@ -229,8 +180,89 @@ pub(super) fn validate_specification(
     Ok(())
 }
 
+fn is_bounded_identity(value: &str) -> bool {
+    !value.is_empty() && value.len() <= 256 && !value.chars().any(char::is_control)
+}
+
+fn source_shape_is_well_formed(source: &ObjSourceShape) -> bool {
+    source.position_count > 0
+        && source.texcoord_count > 0
+        && source.normal_count > 0
+        && source.face_count > 0
+        && source.face_count.checked_mul(3) == Some(source.corner_count)
+        && source.position_count <= source.corner_count
+        && source.texcoord_count <= source.corner_count
+        && source.normal_count <= source.corner_count
+}
+
+fn canonical_shape_matches_source(source: &ObjSourceShape, canonical: &ObjCanonicalShape) -> bool {
+    canonical.topology == "triangle_list"
+        && canonical.vertex_count == source.position_count
+        && canonical.corner_count == source.corner_count
+        && canonical.face_count == source.face_count
+        && canonical.vertex_position_elements == canonical.vertex_count
+        && canonical.corner_normal_elements == canonical.corner_count
+        && canonical.corner_texcoord_elements == canonical.corner_count
+        && canonical.face_smoothing_group_elements == canonical.face_count
+}
+
+fn snapshot_totals_match_shape(
+    totals: &CanonicalSnapshotTotals,
+    canonical: &ObjCanonicalShape,
+) -> bool {
+    let Some(position_scalars) = canonical.vertex_position_elements.checked_mul(3) else {
+        return false;
+    };
+    let Some(normal_scalars) = canonical.corner_normal_elements.checked_mul(3) else {
+        return false;
+    };
+    let Some(texcoord_scalars) = canonical.corner_texcoord_elements.checked_mul(2) else {
+        return false;
+    };
+    let Some(f32_scalars) = position_scalars
+        .checked_add(normal_scalars)
+        .and_then(|value| value.checked_add(texcoord_scalars))
+    else {
+        return false;
+    };
+    let u32_scalars = canonical.face_smoothing_group_elements;
+    let Some(canonical_scalars) = f32_scalars.checked_add(u32_scalars) else {
+        return false;
+    };
+    let expected_attributes = 1_u64
+        + u64::from(canonical.corner_normal_elements > 0)
+        + u64::from(canonical.corner_texcoord_elements > 0)
+        + u64::from(canonical.face_smoothing_group_elements > 0);
+
+    totals.node_count > 0
+        && totals.root_count > 0
+        && totals.root_count <= totals.node_count
+        && totals.node_count.checked_sub(totals.root_count) == Some(totals.edge_count)
+        && totals.has_empty_spatial_domain()
+        && totals.logical_mesh_count > 0
+        && totals.primitive_count > 0
+        && totals.attribute_count == expected_attributes
+        && totals.mesh_instance_count > 0
+        && totals.primitive_index_count == canonical.corner_count
+        && totals.canonical_scalar_count == canonical_scalars
+        && totals.f32_scalar_count == f32_scalars
+        && totals.u32_scalar_count == u32_scalars
+        && totals.primitive_deformation_count == totals.primitive_count
+        && totals.deformation_mesh_instance_count == totals.mesh_instance_count
+        && totals.profile_owner_count > 0
+        && totals.has_fresh_profile(totals.profile_owner_count)
+        && totals.transcript_bytes > 0
+        && totals.work_units > 0
+}
+
 fn validate_fixed_vector(vector: &FixedVector) -> Result<(), String> {
-    validate_capability_fixed_vector(vector, SOURCE_VECTOR_SCHEMA_ID, "U4c production OBJ")
+    if !is_bounded_identity(&vector.schema_id)
+        || vector.observed_bytes == 0
+        || !is_lowercase_sha256(&vector.sha256)
+    {
+        return Err("U4c production OBJ fixed vector is malformed".to_owned());
+    }
+    Ok(())
 }
 
 #[cfg(feature = "repository-input-candidate")]
@@ -329,7 +361,7 @@ pub(super) fn validate_report(
         "U4c production OBJ capability",
     )?;
     validate_construction_phase(&report.construction, expected)?;
-    if report.inspection.scenario_id != "canonical-obj-corner-smoothing-inspection-v1" {
+    if report.inspection.scenario_id != expected.inspection_scenario_id {
         return Err("U4c production OBJ inspection scenario identity drifted".to_owned());
     }
     validate_hot_view_phase(
@@ -339,7 +371,7 @@ pub(super) fn validate_report(
     )?;
     validate_nonproducing_phase(&report.inspection, "U4c production OBJ typed inspection")?;
     validate_snapshot_phase(&report.snapshot, expected)?;
-    if report.release.scenario_id != "canonical-obj-corner-smoothing-release-v1" {
+    if report.release.scenario_id != expected.release_scenario_id {
         return Err("U4c production OBJ release scenario identity drifted".to_owned());
     }
     validate_release(&report.release, "U4c production OBJ release")?;
@@ -400,7 +432,7 @@ fn validate_construction_phase(
     let taxonomy = &report.taxonomy;
     let allocations = &report.allocations;
     let budget = &expected.construction_budget;
-    if report.scenario_id != "canonical-obj-corner-smoothing-construction-v1"
+    if report.scenario_id != expected.construction_scenario_id
         || taxonomy.semantic_cell_writes != expected.construction_semantic_cells
         || taxonomy.reference_writes != expected.construction_references
         || taxonomy.block_begins != expected.construction_blocks
@@ -438,7 +470,7 @@ fn validate_snapshot_phase(
     let allocations = &report.allocations;
     let budget = &expected.snapshot_budget;
     validate_nonproducing_phase(report, "U4c production OBJ snapshot")?;
-    if report.scenario_id != "canonical-obj-corner-smoothing-snapshot-v1"
+    if report.scenario_id != expected.snapshot_scenario_id
         || taxonomy.completed_lookups != budget.completed_lookups
         || taxonomy.rejected_lookups != 0
         || taxonomy.lookup_events != budget.lookup_events

@@ -1,8 +1,10 @@
+use std::collections::BTreeSet;
+
 use serde::Deserialize;
 
 use super::capability::{
     BoundedPreview as GltfBoundedPreview, ConstructionBudgetSpecification, FixedVector,
-    SnapshotBudgetSpecification, validate_fixed_vector as validate_capability_fixed_vector,
+    SnapshotBudgetSpecification,
 };
 #[cfg(feature = "repository-input-candidate")]
 use super::capability::{
@@ -13,10 +15,8 @@ use super::capability::{
 };
 use super::{
     CanonicalSnapshotTotals, CoverageMappingSpecification, LedgerContractSpecification,
-    is_lowercase_sha256, validate_exact_list, validate_success_dimensions,
+    is_lowercase_sha256, validate_success_dimensions,
 };
-
-const SOURCE_VECTOR_SCHEMA_ID: &str = "baozi.selected-gltf-shape-capability-source.v2";
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -34,14 +34,38 @@ pub(super) struct GltfCapabilitySpecification {
     snapshot_totals: CanonicalSnapshotTotals,
     bounded_preview: GltfBoundedPreview,
     construction_budget: ConstructionBudgetSpecification,
+    construction_scenario_id: String,
+    inspection_scenario_id: String,
     snapshot_budget: SnapshotBudgetSpecification,
+    snapshot_entry_point: String,
+    snapshot_scenario_id: String,
+    unchanged_view_entry_point: String,
+    unchanged_view_scenario_id: String,
+    facade_equivalent: FacadeEquivalentSpecification,
     changed_scene_edit: ChangedSceneEditSpecification,
+    release_scenario_id: String,
     construction_semantic_cells: u64,
     construction_references: u64,
     construction_blocks: u64,
     construction_producer_events: u64,
     retained_bytes: u64,
     retained_allocations: u64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FacadeEquivalentSpecification {
+    entry_point: String,
+    scenario_id: String,
+    observation_schema_id: String,
+    success_outcome: String,
+    transcript_bytes: u64,
+    transcript_digest_hex: String,
+    typed_error_outcome: String,
+    typed_error_scenario_id: String,
+    typed_error_class: String,
+    typed_error_reason: String,
+    max_typed_error_reason_bytes: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -64,6 +88,10 @@ struct ChangedSceneEditSpecification {
     max_member_probes_per_lookup: u64,
     budget: ConstructionBudgetSpecification,
     snapshot_budget: SnapshotBudgetSpecification,
+    snapshot_scenario_id: String,
+    input_release_scenario_id: String,
+    output_report_release_scenario_id: String,
+    output_scene_release_scenario_id: String,
     ledger_dimensions: Vec<super::LedgerDimensionReport>,
     physical_account: ChangedSceneEditPhysicalSpecification,
 }
@@ -80,8 +108,45 @@ struct ChangedSceneEditPhysicalSpecification {
 }
 
 impl GltfCapabilitySpecification {
+    pub(super) fn full_snapshot_digest_hex(&self) -> &str {
+        &self.full_snapshot_digest_hex
+    }
+
     pub(super) fn matches_mapping(&self, mapping: &CoverageMappingSpecification) -> bool {
         mapping.entry_point == self.entry_point && mapping.scenario_id == self.scenario_id
+    }
+
+    pub(super) fn matches_facade_mapping(&self, mapping: &CoverageMappingSpecification) -> bool {
+        mapping.entry_point == self.facade_equivalent.entry_point
+            && mapping.scenario_id == self.facade_equivalent.scenario_id
+    }
+
+    pub(super) fn matches_snapshot_mapping(&self, mapping: &CoverageMappingSpecification) -> bool {
+        mapping.entry_point == self.snapshot_entry_point
+            && mapping.scenario_id == self.snapshot_scenario_id
+    }
+
+    pub(super) fn matches_unchanged_view_mapping(
+        &self,
+        mapping: &CoverageMappingSpecification,
+    ) -> bool {
+        mapping.entry_point == self.unchanged_view_entry_point
+            && mapping.scenario_id == self.unchanged_view_scenario_id
+    }
+
+    pub(super) fn matches_changed_scene_edit_mapping(
+        &self,
+        mapping: &CoverageMappingSpecification,
+    ) -> bool {
+        mapping.entry_point == self.changed_scene_edit.entry_point
+            && mapping.scenario_id == self.changed_scene_edit.scenario_id
+    }
+}
+
+#[cfg(feature = "repository-input-candidate")]
+impl GltfCapabilityReport {
+    pub(super) fn full_snapshot_digest_hex(&self) -> &str {
+        &self.full_snapshot_digest_hex
     }
 }
 
@@ -160,6 +225,7 @@ pub(super) fn validate_specification(
     let preview = &specification.bounded_preview;
     let construction_budget = &specification.construction_budget;
     let snapshot_budget = &specification.snapshot_budget;
+    let facade = &specification.facade_equivalent;
     let changed_edit = &specification.changed_scene_edit;
     let changed_edit_dimensions = validate_success_dimensions(
         ledger_contract,
@@ -188,115 +254,49 @@ pub(super) fn validate_specification(
     else {
         return Err("U4d changed SceneEdit published block count overflowed".to_owned());
     };
-    if specification.entry_point != "backend-free-gltf-shape"
-        || specification.scenario_id != "backend-free-gltf-shape-v1"
-        || source.node_count != 3
-        || source.root_count != 2
-        || source.image_count != 2
-        || source.image_payload_bytes != 20
-        || source.media_type_bytes != 19
-        || source.sampler_count != 2
-        || source.texture_count != 3
-        || source.material_count != 2
-        || source.material_binding_count != 3
-        || source.logical_mesh_count != 1
-        || source.primitive_count != 2
-        || source.attribute_count != 6
-        || source.mesh_instance_count != 1
-        || source.skin_count != 1
-        || source.skin_joint_count != 2
-        || source.morph_definition_count != 2
-        || source.morph_target_count != 4
-        || source.morph_delta_count != 4
-        || source.influence_row_count != 6
-        || source.influence_count != 11
-        || source.animation_clip_count != 1
-        || source.animation_channel_count != 3
-        || source.animation_key_count != 6
-        || canonical.node_count != source.node_count
-        || canonical.root_count != source.root_count
-        || canonical.edge_count != 1
-        || canonical.image_count != source.image_count
-        || canonical.sampler_count != source.sampler_count
-        || canonical.texture_count != source.texture_count
-        || canonical.material_count != source.material_count
-        || canonical.material_binding_count != source.material_binding_count
-        || canonical.logical_mesh_count != source.logical_mesh_count
-        || canonical.primitive_count != source.primitive_count
-        || canonical.attribute_count != source.attribute_count
-        || canonical.mesh_instance_count != source.mesh_instance_count
-        || canonical.skin_count != source.skin_count
-        || canonical.skin_joint_count != source.skin_joint_count
-        || canonical.logical_morph_count != 1
-        || canonical.morph_definition_count != source.morph_definition_count
-        || canonical.primitive_deformation_count != source.primitive_count
-        || canonical.morph_target_count != source.morph_target_count
-        || canonical.morph_delta_count != source.morph_delta_count
-        || canonical.influence_row_count != source.influence_row_count
-        || canonical.influence_count != source.influence_count
-        || canonical.animation_clip_count != source.animation_clip_count
-        || canonical.animation_channel_count != source.animation_channel_count
-        || canonical.animation_key_count != source.animation_key_count
-        || specification.source_generation_reservations != 1
+    let facade_reason_bytes = u64::try_from(facade.typed_error_reason.len())
+        .map_err(|_| "U4d facade typed-error reason length overflowed".to_owned())?;
+    if !is_bounded_identity(&specification.inspection_scenario_id)
+        || !is_bounded_identity(&specification.snapshot_scenario_id)
+        || !is_bounded_identity(&specification.unchanged_view_scenario_id)
+        || !is_bounded_identity(&specification.release_scenario_id)
+        || !is_bounded_identity(&changed_edit.snapshot_scenario_id)
+        || !is_bounded_identity(&changed_edit.input_release_scenario_id)
+        || !is_bounded_identity(&changed_edit.output_report_release_scenario_id)
+        || !is_bounded_identity(&changed_edit.output_scene_release_scenario_id)
+        || !is_bounded_identity(&facade.entry_point)
+        || !is_bounded_identity(&facade.scenario_id)
+        || !is_bounded_identity(&facade.observation_schema_id)
+        || !is_bounded_identity(&facade.success_outcome)
+        || facade.transcript_bytes == 0
+        || !is_lowercase_sha256(&facade.transcript_digest_hex)
+        || !is_bounded_identity(&facade.typed_error_outcome)
+        || !is_bounded_identity(&facade.typed_error_scenario_id)
+        || !is_bounded_identity(&facade.typed_error_class)
+        || facade.typed_error_reason.is_empty()
+        || facade.typed_error_reason.chars().any(char::is_control)
+        || facade.max_typed_error_reason_bytes == 0
+        || facade.max_typed_error_reason_bytes > 128
+        || facade_reason_bytes > facade.max_typed_error_reason_bytes
+        || facade.scenario_id == facade.typed_error_scenario_id
+        || facade.success_outcome == facade.typed_error_outcome
+    {
+        return Err(
+            "U4d facade-equivalent specification must declare bounded success and typed-error identities"
+                .to_owned(),
+        );
+    }
+    validate_unique_identities(specification)?;
+    if !source_shape_is_well_formed(source)
+        || !canonical_shape_matches_source(source, canonical)
+        || specification.source_generation_reservations == 0
         || specification.canonical_block_count == 0
         || specification.outcome_evidence_block_count == 0
         || !is_lowercase_sha256(&specification.full_snapshot_digest_hex)
-        || totals.node_count != canonical.node_count
-        || totals.root_count != canonical.root_count
-        || totals.edge_count != canonical.edge_count
-        || !totals.has_empty_spatial_domain()
-        || totals.image_count != canonical.image_count
-        || totals.sampler_count != canonical.sampler_count
-        || totals.texture_count != canonical.texture_count
-        || totals.material_count != canonical.material_count
-        || totals.material_binding_count != canonical.material_binding_count
-        || totals.image_payload_bytes != source.image_payload_bytes
-        || totals.media_type_bytes != source.media_type_bytes
-        || totals.source_key_bytes != 0
-        || totals.binding_semantic_scalar_count != 18
-        || totals.material_factor_scalar_count != 78
-        || totals.logical_mesh_count != canonical.logical_mesh_count
-        || totals.primitive_count != canonical.primitive_count
-        || totals.attribute_count != canonical.attribute_count
-        || totals.mesh_instance_count != canonical.mesh_instance_count
-        || totals.polygon_boundary_count != 0
-        || totals.primitive_index_count != 6
-        || totals.sparse_index_count != 0
-        || totals.canonical_scalar_count != 48
-        || totals.f32_scalar_count != 48
-        || totals.u32_scalar_count != 0
-        || totals.skin_count != canonical.skin_count
-        || totals.logical_morph_count != canonical.logical_morph_count
-        || totals.morph_definition_count != canonical.morph_definition_count
-        || totals.primitive_deformation_count != canonical.primitive_deformation_count
-        || totals.morph_target_count != canonical.morph_target_count
-        || totals.morph_delta_count != canonical.morph_delta_count
-        || totals.deformation_mesh_instance_count != 1
-        || totals.skin_joint_count != 2
-        || totals.inverse_bind_matrix_count != 2
-        || totals.skin_correction_matrix_count != 0
-        || totals.skin_name_bytes != 8
-        || totals.morph_default_weight_count != 2
-        || totals.morph_name_bytes != 10
-        || totals.influence_row_count != 6
-        || totals.influence_count != 11
-        || totals.morph_value_vector_count != 8
-        || totals.morph_sparse_index_count != 2
-        || totals.instance_morph_weight_count != 2
-        || totals.animation_clip_count != 1
-        || totals.animation_channel_count != 3
-        || totals.animation_time_scalar_count != 6
-        || totals.animation_value_scalar_count != 18
-        || totals.animation_in_tangent_scalar_count != 4
-        || totals.animation_out_tangent_scalar_count != 4
-        || !totals.has_fresh_profile(38)
-        || totals.transcript_bytes == 0
-        || totals.work_units == 0
+        || !snapshot_totals_match_shape(totals, source, canonical)
         || !preview.has_common_invariants()
         || !construction_budget.is_well_formed()
         || !snapshot_budget.is_well_formed()
-        || changed_edit.entry_point != "changed-scene-edit"
-        || changed_edit.scenario_id != "canonical-gltf-node-transform-edit-v1"
         || !is_lowercase_sha256(&changed_edit.output_snapshot_digest_hex)
         || changed_edit.output_snapshot_digest_hex == specification.full_snapshot_digest_hex
         || changed_edit.canonical_block_count_delta == 0
@@ -315,7 +315,7 @@ pub(super) fn validate_specification(
         || changed_edit.lookup_events != changed_edit_maximum_lookup_events
         || changed_edit.member_probes != changed_edit.completed_lookups
         || changed_edit.max_lookup_events == 0
-        || changed_edit.max_member_probes_per_lookup != 1
+        || changed_edit.max_member_probes_per_lookup == 0
         || !changed_edit.budget.is_well_formed()
         || !changed_edit.snapshot_budget.is_well_formed()
         || changed_edit_dimensions.ordinary.committed != changed_edit_canonical_block_count_after
@@ -362,41 +362,27 @@ pub(super) fn validate_specification(
         || specification.retained_allocations == 0
     {
         return Err(
-            "U4c production glTF capability specification is not the frozen five-domain vector"
+            "U4c production glTF capability specification violates a structural or cross-field invariant"
                 .to_owned(),
         );
     }
     validate_fixed_vector(&specification.source_vector)?;
-    let expected_mutations = [
-        "node_transform_float_bits",
-        "image_payload_bytes",
-        "material_binding_semantics",
-        "material_semantics",
-        "primitive_material_reference",
-        "skin_inverse_bind_float_bits",
-        "influence_weight_float_bits",
-        "morph_sparse_index",
-        "animation_value_float_bits",
-    ];
-    let actual_mutations = specification
-        .mutations
-        .iter()
-        .map(|mutation| mutation.field_class.as_str())
-        .collect::<Vec<_>>();
-    validate_exact_list(
-        "gltf_capability.mutations",
-        &actual_mutations,
-        &expected_mutations,
-    )?;
-    for (index, mutation) in specification.mutations.iter().enumerate() {
+    if specification.mutations.is_empty() {
+        return Err("U4c production glTF must freeze at least one mutation vector".to_owned());
+    }
+    let mut mutation_fields = BTreeSet::new();
+    let mut mutation_vectors = BTreeSet::new();
+    let mut mutation_snapshots = BTreeSet::new();
+    for mutation in &specification.mutations {
         validate_fixed_vector(&mutation.source_vector)?;
-        if !is_lowercase_sha256(&mutation.snapshot_digest_hex)
+        if !is_bounded_identity(&mutation.field_class)
+            || mutation.source_vector.schema_id != specification.source_vector.schema_id
+            || !is_lowercase_sha256(&mutation.snapshot_digest_hex)
             || mutation.snapshot_digest_hex == specification.full_snapshot_digest_hex
             || mutation.source_vector.sha256 == specification.source_vector.sha256
-            || specification.mutations[..index].iter().any(|earlier| {
-                earlier.snapshot_digest_hex == mutation.snapshot_digest_hex
-                    || earlier.source_vector.sha256 == mutation.source_vector.sha256
-            })
+            || !mutation_fields.insert(mutation.field_class.as_str())
+            || !mutation_vectors.insert(mutation.source_vector.sha256.as_str())
+            || !mutation_snapshots.insert(mutation.snapshot_digest_hex.as_str())
         {
             return Err(format!(
                 "U4c production glTF mutation {} is not independently frozen",
@@ -407,8 +393,173 @@ pub(super) fn validate_specification(
     Ok(())
 }
 
+fn is_bounded_identity(value: &str) -> bool {
+    !value.is_empty() && value.len() <= 256 && !value.chars().any(char::is_control)
+}
+
+fn validate_unique_identities(specification: &GltfCapabilitySpecification) -> Result<(), String> {
+    let facade = &specification.facade_equivalent;
+    let edit = &specification.changed_scene_edit;
+    let entry_points = [
+        specification.entry_point.as_str(),
+        facade.entry_point.as_str(),
+        specification.snapshot_entry_point.as_str(),
+        specification.unchanged_view_entry_point.as_str(),
+        edit.entry_point.as_str(),
+    ];
+    let scenario_ids = [
+        specification.scenario_id.as_str(),
+        specification.construction_scenario_id.as_str(),
+        specification.inspection_scenario_id.as_str(),
+        specification.snapshot_scenario_id.as_str(),
+        specification.unchanged_view_scenario_id.as_str(),
+        specification.release_scenario_id.as_str(),
+        facade.scenario_id.as_str(),
+        facade.typed_error_scenario_id.as_str(),
+        edit.scenario_id.as_str(),
+        edit.snapshot_scenario_id.as_str(),
+        edit.input_release_scenario_id.as_str(),
+        edit.output_report_release_scenario_id.as_str(),
+        edit.output_scene_release_scenario_id.as_str(),
+    ];
+    if entry_points.iter().any(|value| !is_bounded_identity(value))
+        || scenario_ids.iter().any(|value| !is_bounded_identity(value))
+        || entry_points.iter().copied().collect::<BTreeSet<_>>().len() != entry_points.len()
+        || scenario_ids.iter().copied().collect::<BTreeSet<_>>().len() != scenario_ids.len()
+    {
+        return Err(
+            "U4c production glTF entry-point and scenario identities must be bounded and unique"
+                .to_owned(),
+        );
+    }
+    Ok(())
+}
+
+fn source_shape_is_well_formed(source: &GltfSourceShape) -> bool {
+    source.node_count > 0
+        && source.root_count > 0
+        && source.root_count <= source.node_count
+        && source.image_count > 0
+        && source.image_payload_bytes > 0
+        && source.media_type_bytes > 0
+        && source.sampler_count > 0
+        && source.texture_count > 0
+        && source.material_count > 0
+        && source.material_binding_count > 0
+        && source.logical_mesh_count > 0
+        && source.primitive_count > 0
+        && source.attribute_count > 0
+        && source.mesh_instance_count > 0
+        && source.skin_count > 0
+        && source.skin_joint_count > 0
+        && source.morph_definition_count > 0
+        && source.morph_target_count > 0
+        && source.morph_delta_count > 0
+        && source.influence_row_count > 0
+        && source.influence_count > 0
+        && source.animation_clip_count > 0
+        && source.animation_channel_count > 0
+        && source.animation_key_count > 0
+}
+
+fn canonical_shape_matches_source(
+    source: &GltfSourceShape,
+    canonical: &GltfCanonicalShape,
+) -> bool {
+    canonical.node_count == source.node_count
+        && canonical.root_count == source.root_count
+        && source.node_count.checked_sub(source.root_count) == Some(canonical.edge_count)
+        && canonical.image_count == source.image_count
+        && canonical.sampler_count == source.sampler_count
+        && canonical.texture_count == source.texture_count
+        && canonical.material_count == source.material_count
+        && canonical.material_binding_count == source.material_binding_count
+        && canonical.logical_mesh_count == source.logical_mesh_count
+        && canonical.primitive_count == source.primitive_count
+        && canonical.attribute_count == source.attribute_count
+        && canonical.mesh_instance_count == source.mesh_instance_count
+        && canonical.skin_count == source.skin_count
+        && canonical.skin_joint_count == source.skin_joint_count
+        && canonical.logical_morph_count > 0
+        && canonical.logical_morph_count <= source.morph_definition_count
+        && canonical.morph_definition_count == source.morph_definition_count
+        && canonical.primitive_deformation_count == source.primitive_count
+        && canonical.morph_target_count == source.morph_target_count
+        && canonical.morph_delta_count == source.morph_delta_count
+        && canonical.influence_row_count == source.influence_row_count
+        && canonical.influence_count == source.influence_count
+        && canonical.animation_clip_count == source.animation_clip_count
+        && canonical.animation_channel_count == source.animation_channel_count
+        && canonical.animation_key_count == source.animation_key_count
+}
+
+fn snapshot_totals_match_shape(
+    totals: &CanonicalSnapshotTotals,
+    source: &GltfSourceShape,
+    canonical: &GltfCanonicalShape,
+) -> bool {
+    totals.node_count == canonical.node_count
+        && totals.root_count == canonical.root_count
+        && totals.edge_count == canonical.edge_count
+        && totals.has_empty_spatial_domain()
+        && totals.image_count == canonical.image_count
+        && totals.sampler_count == canonical.sampler_count
+        && totals.texture_count == canonical.texture_count
+        && totals.material_count == canonical.material_count
+        && totals.material_binding_count == canonical.material_binding_count
+        && totals.image_payload_bytes == source.image_payload_bytes
+        && totals.media_type_bytes == source.media_type_bytes
+        && totals.binding_semantic_scalar_count > 0
+        && totals.material_factor_scalar_count > 0
+        && totals.logical_mesh_count == canonical.logical_mesh_count
+        && totals.primitive_count == canonical.primitive_count
+        && totals.attribute_count == canonical.attribute_count
+        && totals.mesh_instance_count == canonical.mesh_instance_count
+        && totals.primitive_index_count > 0
+        && totals.canonical_scalar_count > 0
+        && totals.f32_scalar_count.checked_add(totals.u32_scalar_count)
+            == Some(totals.canonical_scalar_count)
+        && totals.skin_count == canonical.skin_count
+        && totals.logical_morph_count == canonical.logical_morph_count
+        && totals.morph_definition_count == canonical.morph_definition_count
+        && totals.primitive_deformation_count == canonical.primitive_deformation_count
+        && totals.morph_target_count == canonical.morph_target_count
+        && totals.morph_delta_count == canonical.morph_delta_count
+        && totals.deformation_mesh_instance_count == canonical.mesh_instance_count
+        && totals.skin_joint_count == canonical.skin_joint_count
+        && totals.inverse_bind_matrix_count == canonical.skin_joint_count
+        && totals.skin_name_bytes > 0
+        && totals.morph_default_weight_count > 0
+        && totals.morph_name_bytes > 0
+        && totals.influence_row_count == canonical.influence_row_count
+        && totals.influence_count == canonical.influence_count
+        && totals.morph_value_vector_count > 0
+        && totals.morph_sparse_index_count > 0
+        && totals.instance_morph_weight_count > 0
+        && totals.animation_clip_count == canonical.animation_clip_count
+        && totals.animation_channel_count == canonical.animation_channel_count
+        && totals.animation_time_scalar_count == canonical.animation_key_count
+        && totals.animation_value_scalar_count > 0
+        && totals.animation_in_tangent_scalar_count > 0
+        && totals.animation_out_tangent_scalar_count > 0
+        && totals.profile_resource_count > 0
+        && totals.profile_source_count > 0
+        && totals.profile_provenance_node_count > 0
+        && totals.profile_owner_count > 0
+        && totals.profile_attachment_count == totals.profile_owner_count
+        && totals.profile_wide_value_count > 0
+        && totals.transcript_bytes > 0
+        && totals.work_units > 0
+}
+
 fn validate_fixed_vector(vector: &FixedVector) -> Result<(), String> {
-    validate_capability_fixed_vector(vector, SOURCE_VECTOR_SCHEMA_ID, "U4c production glTF")
+    if !is_bounded_identity(&vector.schema_id)
+        || vector.observed_bytes == 0
+        || !is_lowercase_sha256(&vector.sha256)
+    {
+        return Err("U4c production glTF fixed vector is malformed".to_owned());
+    }
+    Ok(())
 }
 
 #[cfg(feature = "repository-input-candidate")]
@@ -431,12 +582,59 @@ pub(super) struct GltfCapabilityReport {
     evidence: super::EvidenceReport,
     construction: super::PhaseReport,
     inspection: super::PhaseReport,
+    facade_equivalent: FacadeEquivalentInspectionReport,
     snapshot: super::PhaseReport,
     unchanged_view: GltfUnchangedViewReport,
     changed_scene_edit: GltfChangedSceneEditReport,
     release: super::ReleaseReport,
     physical_account: GltfPhysicalReport,
     factory_after_account_release: super::PhysicalFactoryReport,
+}
+
+#[cfg(feature = "repository-input-candidate")]
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FacadeEquivalentInspectionReport {
+    entry_point: String,
+    scenario_id: String,
+    success: FacadeObservationSuccessReport,
+    typed_error: FacadeObservationTypedErrorReport,
+    success_generation_reservations_before: u64,
+    success_generation_reservations_after: u64,
+    success_canonical_block_count_before: u64,
+    success_canonical_block_count_after: u64,
+    typed_error_generation_reservations_before: u64,
+    typed_error_generation_reservations_after: u64,
+    typed_error_canonical_block_count_before: u64,
+    typed_error_canonical_block_count_after: u64,
+    success_phase: super::PhaseReport,
+    typed_error_phase: super::PhaseReport,
+    success_physical_account: GltfReadOnlyPhysicalReport,
+    typed_error_physical_account: GltfReadOnlyPhysicalReport,
+}
+
+#[cfg(feature = "repository-input-candidate")]
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FacadeObservationSuccessReport {
+    outcome: String,
+    schema_id: String,
+    transcript_bytes: u64,
+    transcript_digest_hex: String,
+    totals: GltfCanonicalShape,
+    reference_closure_verified: bool,
+    cursor_exhausted: bool,
+}
+
+#[cfg(feature = "repository-input-candidate")]
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FacadeObservationTypedErrorReport {
+    outcome: String,
+    schema_id: String,
+    error_class: String,
+    reason: String,
+    reason_bytes: u64,
 }
 
 #[cfg(feature = "repository-input-candidate")]
@@ -575,7 +773,7 @@ pub(super) fn validate_report(
         "U4c production glTF capability",
     )?;
     validate_construction_phase(&report.construction, expected)?;
-    if report.inspection.scenario_id != "canonical-gltf-five-domain-inspection-v1" {
+    if report.inspection.scenario_id != expected.inspection_scenario_id {
         return Err("U4c production glTF inspection scenario identity drifted".to_owned());
     }
     validate_hot_view_phase(
@@ -585,9 +783,10 @@ pub(super) fn validate_report(
     )?;
     validate_nonproducing_phase(&report.inspection, "U4c production glTF typed inspection")?;
     validate_snapshot_phase(&report.snapshot, expected)?;
+    validate_facade_equivalent(report, expected, &specification.measurement)?;
     validate_unchanged_view(report, expected, &specification.measurement)?;
     validate_changed_scene_edit(report, specification)?;
-    if report.release.scenario_id != "canonical-gltf-five-domain-release-v1" {
+    if report.release.scenario_id != expected.release_scenario_id {
         return Err("U4c production glTF release scenario identity drifted".to_owned());
     }
     validate_release(&report.release, "U4c production glTF release")?;
@@ -596,9 +795,11 @@ pub(super) fn validate_report(
             &report.construction.allocations,
             &report.inspection.allocations,
             &report.snapshot.allocations,
+            &report.facade_equivalent.success_phase.allocations,
             &report.unchanged_view.phase.allocations,
             &report.changed_scene_edit.phase.allocations,
             &report.changed_scene_edit.snapshot.allocations,
+            &report.facade_equivalent.typed_error_phase.allocations,
             &report.changed_scene_edit.input_release.allocations,
             &report.changed_scene_edit.output_report_release.allocations,
             &report.changed_scene_edit.output_scene_release.allocations,
@@ -627,6 +828,73 @@ pub(super) fn validate_report(
 }
 
 #[cfg(feature = "repository-input-candidate")]
+fn validate_facade_equivalent(
+    report: &GltfCapabilityReport,
+    expected: &GltfCapabilitySpecification,
+    measurement: &super::MeasurementSpecification,
+) -> Result<(), String> {
+    let facade = &report.facade_equivalent;
+    let expected_facade = &expected.facade_equivalent;
+    let typed_error_generation = expected
+        .source_generation_reservations
+        .checked_add(1)
+        .ok_or_else(|| "U4d facade typed-error generation count overflowed".to_owned())?;
+    let reason_bytes = u64::try_from(facade.typed_error.reason.len())
+        .map_err(|_| "U4d facade typed-error reason length overflowed".to_owned())?;
+    if facade.entry_point != expected_facade.entry_point
+        || facade.scenario_id != expected_facade.scenario_id
+        || facade.success.outcome != expected_facade.success_outcome
+        || facade.success.schema_id != expected_facade.observation_schema_id
+        || facade.success.transcript_bytes != expected_facade.transcript_bytes
+        || facade.success.transcript_digest_hex != expected_facade.transcript_digest_hex
+        || facade.success.totals != expected.canonical_shape
+        || !facade.success.reference_closure_verified
+        || !facade.success.cursor_exhausted
+        || facade.typed_error.outcome != expected_facade.typed_error_outcome
+        || facade.typed_error.schema_id != expected_facade.observation_schema_id
+        || facade.typed_error.error_class != expected_facade.typed_error_class
+        || facade.typed_error.reason != expected_facade.typed_error_reason
+        || facade.typed_error.reason_bytes != reason_bytes
+        || facade.typed_error.reason_bytes > expected_facade.max_typed_error_reason_bytes
+        || facade.success_generation_reservations_before != expected.source_generation_reservations
+        || facade.success_generation_reservations_after
+            != facade.success_generation_reservations_before
+        || facade.success_canonical_block_count_before != expected.canonical_block_count
+        || facade.success_canonical_block_count_after != facade.success_canonical_block_count_before
+        || facade.typed_error_generation_reservations_before != typed_error_generation
+        || facade.typed_error_generation_reservations_after
+            != facade.typed_error_generation_reservations_before
+        || facade.typed_error_canonical_block_count_before != expected.canonical_block_count
+        || facade.typed_error_canonical_block_count_after
+            != facade.typed_error_canonical_block_count_before
+        || facade.success_phase.scenario_id != expected_facade.scenario_id
+        || facade.typed_error_phase.scenario_id != expected_facade.typed_error_scenario_id
+        || facade.success_physical_account.before != report.physical_account.after_snapshot
+        || facade.success_physical_account.after != facade.success_physical_account.before
+        || facade.typed_error_physical_account.before
+            != report.changed_scene_edit.physical_account.with_output
+        || facade.typed_error_physical_account.after != facade.typed_error_physical_account.before
+    {
+        return Err("U4d facade-equivalent observation or typed-error receipt drifted".to_owned());
+    }
+    validate_hot_view_phase(
+        &facade.success_phase,
+        measurement,
+        "U4d facade-equivalent success",
+    )?;
+    validate_nonproducing_phase(&facade.success_phase, "U4d facade-equivalent success")?;
+    validate_hot_view_phase(
+        &facade.typed_error_phase,
+        measurement,
+        "U4d facade-equivalent typed error",
+    )?;
+    validate_nonproducing_phase(
+        &facade.typed_error_phase,
+        "U4d facade-equivalent typed error",
+    )
+}
+
+#[cfg(feature = "repository-input-candidate")]
 fn validate_unchanged_view(
     report: &GltfCapabilityReport,
     expected: &GltfCapabilitySpecification,
@@ -645,7 +913,7 @@ fn validate_unchanged_view(
     {
         return Err("U4c production glTF unchanged-view invariants drifted".to_owned());
     }
-    if unchanged.phase.scenario_id != "canonical-gltf-five-domain-unchanged-view-v1" {
+    if unchanged.phase.scenario_id != expected.unchanged_view_scenario_id {
         return Err("U4c production glTF unchanged-view identity drifted".to_owned());
     }
     validate_hot_view_phase(
@@ -770,7 +1038,7 @@ fn validate_changed_scene_edit(
     validate_producer_bound(&edit.phase, "U4c production glTF changed SceneEdit")?;
     let snapshot_taxonomy = &edit.snapshot.taxonomy;
     let snapshot_budget = &expected_edit.snapshot_budget;
-    if edit.snapshot.scenario_id != "canonical-gltf-node-transform-edit-snapshot-v1"
+    if edit.snapshot.scenario_id != expected_edit.snapshot_scenario_id
         || snapshot_taxonomy.completed_lookups != snapshot_budget.completed_lookups
         || snapshot_taxonomy.rejected_lookups != 0
         || snapshot_taxonomy.lookup_events != snapshot_budget.lookup_events
@@ -789,9 +1057,9 @@ fn validate_changed_scene_edit(
         "U4c production glTF changed SceneEdit snapshot",
     )?;
 
-    if edit.input_release.scenario_id != "canonical-gltf-edit-input-release-v1"
-        || edit.output_report_release.scenario_id != "canonical-gltf-edit-report-release-v1"
-        || edit.output_scene_release.scenario_id != "canonical-gltf-edit-output-release-v1"
+    if edit.input_release.scenario_id != expected_edit.input_release_scenario_id
+        || edit.output_report_release.scenario_id != expected_edit.output_report_release_scenario_id
+        || edit.output_scene_release.scenario_id != expected_edit.output_scene_release_scenario_id
     {
         return Err("U4c production glTF changed-scene-edit release identity drifted".to_owned());
     }
@@ -894,7 +1162,7 @@ fn validate_construction_phase(
     let taxonomy = &report.taxonomy;
     let allocations = &report.allocations;
     let budget = &expected.construction_budget;
-    if report.scenario_id != "canonical-gltf-five-domain-construction-v1"
+    if report.scenario_id != expected.construction_scenario_id
         || taxonomy.semantic_cell_writes != expected.construction_semantic_cells
         || taxonomy.reference_writes != expected.construction_references
         || taxonomy.block_begins != expected.construction_blocks
@@ -932,7 +1200,7 @@ fn validate_snapshot_phase(
     let allocations = &report.allocations;
     let budget = &expected.snapshot_budget;
     validate_nonproducing_phase(report, "U4c production glTF snapshot")?;
-    if report.scenario_id != "canonical-gltf-five-domain-snapshot-v1"
+    if report.scenario_id != expected.snapshot_scenario_id
         || taxonomy.completed_lookups != budget.completed_lookups
         || taxonomy.rejected_lookups != 0
         || taxonomy.lookup_events != budget.lookup_events
@@ -992,7 +1260,7 @@ mod tests {
         assert_rejected(&totals_drift);
 
         let mut profile_drift = managed_specification();
-        profile_drift.snapshot_totals.profile_owner_count -= 1;
+        profile_drift.snapshot_totals.profile_resource_count = 0;
         assert_rejected(&profile_drift);
 
         let mut spatial_drift = managed_specification();
@@ -1016,6 +1284,29 @@ mod tests {
         snapshot_drift.snapshot_budget.max_lookup_events =
             snapshot_drift.snapshot_budget.lookup_events + 1;
         assert_rejected(&snapshot_drift);
+    }
+
+    #[test]
+    fn rejects_facade_identity_and_error_contract_drift() {
+        let mut schema_drift = managed_specification();
+        schema_drift.facade_equivalent.observation_schema_id.clear();
+        assert_rejected(&schema_drift);
+
+        let mut outcome_drift = managed_specification();
+        outcome_drift.facade_equivalent.success_outcome =
+            outcome_drift.facade_equivalent.typed_error_outcome.clone();
+        assert_rejected(&outcome_drift);
+
+        let mut scenario_drift = managed_specification();
+        scenario_drift.facade_equivalent.typed_error_scenario_id =
+            scenario_drift.facade_equivalent.scenario_id.clone();
+        assert_rejected(&scenario_drift);
+
+        let mut reason_bound_drift = managed_specification();
+        reason_bound_drift
+            .facade_equivalent
+            .max_typed_error_reason_bytes = 129;
+        assert_rejected(&reason_bound_drift);
     }
 
     #[test]

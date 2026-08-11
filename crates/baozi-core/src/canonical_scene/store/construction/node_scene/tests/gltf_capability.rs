@@ -1,5 +1,7 @@
 use std::sync::atomic::AtomicU64;
 
+use sha2::{Digest, Sha256};
+
 use baozi_operation::{CancellationToken, PhysicalStorageAccount, StorePreparationFailureClass};
 
 use crate::SceneValidationLimits;
@@ -15,7 +17,8 @@ use crate::canonical_scene::store::construction::node_scene::semantic::{
     NodeSceneAnimationExtrapolation, NodeSceneAnimationInterpolation, NodeSceneAnimationTarget,
     NodeSceneAnimationTimeDomain, NodeSceneDeformationF32Cursor, NodeSceneDeformationMorphPayload,
     NodeSceneGeometryAttributePayload, NodeSceneGeometryAttributeSemantic,
-    NodeSceneGeometryF32Cursor, NodeSceneGeometryU32Cursor,
+    NodeSceneGeometryF32Cursor, NodeSceneGeometryU32Cursor, NodeSceneProfileStep,
+    NodeSceneSemanticResult,
 };
 use crate::canonical_scene::store::construction::node_scene::snapshot::{
     NodeSceneSnapshot, NodeSceneSnapshotLimits,
@@ -181,6 +184,72 @@ pub(in crate::canonical_scene::store) struct GltfCapabilityCanonicalShapeObserva
     pub(in crate::canonical_scene::store) animation_clip_count: usize,
     pub(in crate::canonical_scene::store) animation_channel_count: usize,
     pub(in crate::canonical_scene::store) animation_key_count: usize,
+}
+
+pub(in crate::canonical_scene::store) const FACADE_OBSERVATION_SCHEMA_ID: &str =
+    "baozi.facade-observation.v1";
+
+/// A fixed-size facade projection over the complete typed semantic traversal.
+///
+/// The digest and byte count commit the stable canonical semantic transcript. The shape and proof
+/// booleans are produced only after the facade-intended typed cursor has observed and exhausted all
+/// roots, nodes, appearance, geometry, deformation, animation, and profile values and references.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::canonical_scene::store) struct FacadeObservationV1 {
+    pub(in crate::canonical_scene::store) schema_id: &'static str,
+    pub(in crate::canonical_scene::store) transcript_digest: [u8; 32],
+    pub(in crate::canonical_scene::store) transcript_bytes: u64,
+    pub(in crate::canonical_scene::store) totals: GltfCapabilityCanonicalShapeObservation,
+    pub(in crate::canonical_scene::store) reference_closure_verified: bool,
+    pub(in crate::canonical_scene::store) cursor_exhausted: bool,
+}
+
+/// A bounded, inert projection of one typed facade-read failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::canonical_scene::store) struct FacadeObservationErrorV1 {
+    pub(in crate::canonical_scene::store) schema_id: &'static str,
+    pub(in crate::canonical_scene::store) error_class: &'static str,
+    pub(in crate::canonical_scene::store) reason: &'static str,
+}
+
+pub(in crate::canonical_scene::store) type FacadeObservationOutcomeV1 =
+    Result<FacadeObservationV1, FacadeObservationErrorV1>;
+
+struct FacadeTranscript {
+    digest: Sha256,
+    bytes: u64,
+}
+
+impl FacadeTranscript {
+    fn new() -> Self {
+        let mut transcript = Self {
+            digest: Sha256::new(),
+            bytes: 0,
+        };
+        transcript.debug("schema", &FACADE_OBSERVATION_SCHEMA_ID);
+        transcript
+    }
+
+    fn debug<T: std::fmt::Debug>(&mut self, tag: &'static str, value: &T) {
+        use std::fmt::Write as _;
+
+        writeln!(self, "{tag}:{value:?}").expect("facade transcript hashing is infallible");
+    }
+
+    fn finish(self) -> ([u8; 32], u64) {
+        (self.digest.finalize().into(), self.bytes)
+    }
+}
+
+impl std::fmt::Write for FacadeTranscript {
+    fn write_str(&mut self, value: &str) -> std::fmt::Result {
+        self.digest.update(value.as_bytes());
+        self.bytes = self
+            .bytes
+            .checked_add(u64::try_from(value.len()).map_err(|_| std::fmt::Error)?)
+            .ok_or(std::fmt::Error)?;
+        Ok(())
+    }
 }
 
 struct GltfSourceEncoder {
@@ -2502,6 +2571,658 @@ pub(in crate::canonical_scene::store) fn inspect_gltf_capability_semantics_with_
         animation_channel_count,
         animation_key_count,
     }
+}
+
+fn observe_facade_typed_view(
+    scene: &ValidatedNodeScene,
+) -> NodeSceneSemanticResult<(GltfCapabilityCanonicalShapeObservation, bool, [u8; 32], u64)> {
+    fn mark_index(valid: &mut bool, value: usize, upper: usize) {
+        *valid &= value < upper;
+    }
+
+    fn mark_optional_index(valid: &mut bool, value: Option<usize>, upper: usize) {
+        if let Some(value) = value {
+            mark_index(valid, value, upper);
+        }
+    }
+
+    fn mark_range(valid: &mut bool, offset: usize, count: usize, upper: usize) {
+        *valid &= offset.checked_add(count).is_some_and(|end| end <= upper);
+    }
+
+    fn drain_geometry_f32(
+        mut values: NodeSceneGeometryF32Cursor<'_>,
+        transcript: &mut FacadeTranscript,
+        label: &'static str,
+    ) -> NodeSceneSemanticResult<usize> {
+        let mut count: usize = 0;
+        while let Some(value) = values.next()? {
+            transcript.debug(label, &value);
+            count = count
+                .checked_add(1)
+                .expect("facade geometry F32 observation count must fit usize");
+        }
+        values.finish()?;
+        Ok(count)
+    }
+
+    fn drain_geometry_u32(
+        mut values: NodeSceneGeometryU32Cursor<'_>,
+        transcript: &mut FacadeTranscript,
+        label: &'static str,
+    ) -> NodeSceneSemanticResult<usize> {
+        let mut count: usize = 0;
+        while let Some(value) = values.next()? {
+            transcript.debug(label, &value);
+            count = count
+                .checked_add(1)
+                .expect("facade geometry U32 observation count must fit usize");
+        }
+        values.finish()?;
+        Ok(count)
+    }
+
+    fn drain_deformation_f32(
+        mut values: NodeSceneDeformationF32Cursor<'_>,
+        transcript: &mut FacadeTranscript,
+        label: &'static str,
+    ) -> NodeSceneSemanticResult<usize> {
+        let mut count: usize = 0;
+        while let Some(value) = values.next()? {
+            transcript.debug(label, &value);
+            count = count
+                .checked_add(1)
+                .expect("facade deformation F32 observation count must fit usize");
+        }
+        values.finish()?;
+        Ok(count)
+    }
+
+    fn drain_profile_steps<T: std::fmt::Debug>(
+        mut step: impl FnMut() -> NodeSceneSemanticResult<NodeSceneProfileStep<T>>,
+        transcript: &mut FacadeTranscript,
+        label: &'static str,
+    ) -> NodeSceneSemanticResult<()> {
+        loop {
+            match step()? {
+                NodeSceneProfileStep::Checkpoint => {}
+                NodeSceneProfileStep::Item(item) => transcript.debug(label, &item),
+                NodeSceneProfileStep::End => return Ok(()),
+            }
+        }
+    }
+
+    let view = scene.semantic_view()?;
+    let mut transcript = FacadeTranscript::new();
+    let node_count = view.node_count();
+    let root_count = view.root_count();
+    let edge_count = view.edge_count();
+    let image_count = view.image_count();
+    let sampler_count = view.sampler_count();
+    let texture_count = view.texture_count();
+    let material_count = view.material_count();
+    let material_binding_count = view.material_binding_count();
+    let logical_mesh_count = view.logical_mesh_count();
+    let primitive_count = view.primitive_count();
+    let attribute_count = view.attribute_count();
+    let mesh_instance_count = view.mesh_instance_count();
+    let skin_count = view.skin_count();
+    let logical_morph_count = view.logical_morph_count();
+    let morph_definition_count = view.morph_definition_count();
+    let primitive_deformation_count = view.primitive_deformation_count();
+    let morph_target_count = view.morph_target_count();
+    let morph_delta_count = view.morph_delta_count();
+    let animation_clip_count = view.animation_clip_count();
+    let animation_channel_count = view.animation_channel_count();
+    let mut reference_closure = true;
+    let mut structural_reference_count = 0usize;
+    let mut skin_joint_count = 0usize;
+    let mut influence_row_count = 0usize;
+    let mut influence_count = 0usize;
+    let mut animation_key_count = 0usize;
+
+    transcript.debug("scene-space", &view.scene_space()?);
+    transcript.debug("camera-count", &view.camera_count());
+    transcript.debug("light-count", &view.light_count());
+    for index in 0..view.camera_count() {
+        transcript.debug("camera", &view.camera_at(index)?);
+    }
+    for index in 0..view.light_count() {
+        transcript.debug("light", &view.light_at(index)?);
+    }
+    let mut placements = view.spatial_placements();
+    while let Some(placement) = placements.next()? {
+        transcript.debug("spatial-placement", &placement);
+    }
+    placements.finish()?;
+
+    let mut cursor = view.into_cursor()?;
+    let mut roots = cursor.take_roots()?;
+    while let Some(root) = roots.next()? {
+        transcript.debug("root", &root);
+        mark_index(&mut reference_closure, root, node_count);
+        structural_reference_count = structural_reference_count
+            .checked_add(1)
+            .expect("facade structural reference count must fit usize");
+    }
+    roots.finish()?;
+
+    while let Some(node) = cursor.next_node()? {
+        transcript.debug("node", &(node.source_index(), node.authored_transform()));
+        let mut children = node.into_children();
+        while let Some(child) = children.next()? {
+            transcript.debug("node-child", &child);
+            mark_index(&mut reference_closure, child, node_count);
+            structural_reference_count = structural_reference_count
+                .checked_add(1)
+                .expect("facade structural reference count must fit usize");
+        }
+        children.finish()?;
+    }
+
+    {
+        let appearance = cursor.appearance()?;
+        while let Some(image) = appearance.next_image()? {
+            transcript.debug(
+                "image",
+                &(
+                    image.source_index(),
+                    image.encoded_payload(),
+                    image.media_type(),
+                ),
+            );
+        }
+        while let Some(sampler) = appearance.next_sampler()? {
+            let state = sampler.state();
+            transcript.debug(
+                "sampler",
+                &(
+                    sampler.source_index(),
+                    state.minification(),
+                    state.magnification(),
+                    state.mipmap(),
+                    state.address_u(),
+                    state.address_v(),
+                    state.address_w(),
+                ),
+            );
+        }
+        while let Some(texture) = appearance.next_texture()? {
+            transcript.debug(
+                "texture",
+                &(texture.source_index(), texture.image(), texture.sampler()),
+            );
+            mark_index(&mut reference_closure, texture.image(), image_count);
+            mark_index(&mut reference_closure, texture.sampler(), sampler_count);
+        }
+        while let Some(material) = appearance.next_material()? {
+            transcript.debug(
+                "material",
+                &(
+                    material.source_index(),
+                    material.shading_model(),
+                    material.alpha_mode(),
+                    material.double_sided(),
+                    material.factors(),
+                    material.factor_values(),
+                    material.binding_offset(),
+                    material.binding_count(),
+                ),
+            );
+            mark_range(
+                &mut reference_closure,
+                material.binding_offset(),
+                material.binding_count(),
+                material_binding_count,
+            );
+        }
+        while let Some(binding) = appearance.next_binding()? {
+            transcript.debug(
+                "binding",
+                &(
+                    binding.source_index(),
+                    binding.texture(),
+                    binding.role_semantics(),
+                    binding.coordinate_source(),
+                    binding.channel_mapping(),
+                    binding.color_interpretation(),
+                    binding.transform(),
+                    binding.strength(),
+                    binding.blend(),
+                    binding.semantic_offset(),
+                    binding.semantic_values(),
+                    binding.source_key(),
+                ),
+            );
+            mark_index(&mut reference_closure, binding.texture(), texture_count);
+        }
+    }
+
+    {
+        let geometry = cursor.geometry()?;
+        while let Some(mesh) = geometry.next_logical_mesh()? {
+            transcript.debug(
+                "logical-mesh",
+                &(
+                    mesh.source_index(),
+                    mesh.primitive_offset(),
+                    mesh.primitive_count(),
+                ),
+            );
+            mark_range(
+                &mut reference_closure,
+                mesh.primitive_offset(),
+                mesh.primitive_count(),
+                primitive_count,
+            );
+        }
+        while let Some(mut primitive) = geometry.next_primitive()? {
+            transcript.debug(
+                "primitive",
+                &(
+                    primitive.source_index(),
+                    primitive.topology(),
+                    primitive.vertex_count(),
+                    primitive.corner_count(),
+                    primitive.face_count(),
+                    primitive.polygon_boundaries_present(),
+                    primitive.indices_present(),
+                    primitive.index_count(),
+                    primitive.material(),
+                    primitive.attribute_offset(),
+                    primitive.attribute_count(),
+                ),
+            );
+            if let Some(boundaries) = primitive.take_polygon_boundaries() {
+                let _ =
+                    drain_geometry_u32(boundaries, &mut transcript, "primitive-polygon-boundary")?;
+            }
+            if let Some(indices) = primitive.take_indices() {
+                let _ = drain_geometry_u32(indices, &mut transcript, "primitive-index")?;
+            }
+            mark_optional_index(&mut reference_closure, primitive.material(), material_count);
+            mark_range(
+                &mut reference_closure,
+                primitive.attribute_offset(),
+                primitive.attribute_count(),
+                attribute_count,
+            );
+        }
+        while let Some(attribute) = geometry.next_attribute()? {
+            transcript.debug(
+                "attribute",
+                &(
+                    attribute.source_index(),
+                    attribute.semantic(),
+                    attribute.domain(),
+                    attribute.scalar_kind(),
+                    attribute.lanes(),
+                    attribute.normalization(),
+                    attribute.payload_kind(),
+                    attribute.element_count(),
+                    attribute.explicit_element_count(),
+                    attribute.canonical_scalar_count(),
+                ),
+            );
+            match attribute.into_payload() {
+                NodeSceneGeometryAttributePayload::DenseF32 { values } => {
+                    let _ = drain_geometry_f32(values, &mut transcript, "attribute-value-f32")?;
+                }
+                NodeSceneGeometryAttributePayload::DenseU32 { values } => {
+                    let _ = drain_geometry_u32(values, &mut transcript, "attribute-value-u32")?;
+                }
+                NodeSceneGeometryAttributePayload::SparseF32 {
+                    values,
+                    indices,
+                    default,
+                } => {
+                    let _ = drain_geometry_f32(values, &mut transcript, "attribute-value-f32")?;
+                    let _ = drain_geometry_u32(indices, &mut transcript, "attribute-index")?;
+                    let _ = drain_geometry_f32(default, &mut transcript, "attribute-default-f32")?;
+                }
+                NodeSceneGeometryAttributePayload::SparseU32 {
+                    values,
+                    indices,
+                    default,
+                } => {
+                    let _ = drain_geometry_u32(values, &mut transcript, "attribute-value-u32")?;
+                    let _ = drain_geometry_u32(indices, &mut transcript, "attribute-index")?;
+                    let _ = drain_geometry_u32(default, &mut transcript, "attribute-default-u32")?;
+                }
+            }
+        }
+        while let Some(instance) = geometry.next_mesh_instance()? {
+            transcript.debug(
+                "mesh-instance",
+                &(
+                    instance.source_index(),
+                    instance.owner_node(),
+                    instance.logical_mesh(),
+                ),
+            );
+            mark_index(&mut reference_closure, instance.owner_node(), node_count);
+            mark_index(
+                &mut reference_closure,
+                instance.logical_mesh(),
+                logical_mesh_count,
+            );
+        }
+    }
+
+    {
+        let deformation = cursor.deformation()?;
+        while let Some(mut skin) = deformation.next_skin()? {
+            transcript.debug(
+                "skin",
+                &(
+                    skin.source_index(),
+                    skin.name(),
+                    skin.skeleton_root(),
+                    skin.matrix_spaces(),
+                ),
+            );
+            mark_optional_index(&mut reference_closure, skin.skeleton_root(), node_count);
+            if let Some(mut joints) = skin.take_joints() {
+                while let Some(joint) = joints.next()? {
+                    transcript.debug("skin-joint", &joint);
+                    mark_index(&mut reference_closure, joint, node_count);
+                    skin_joint_count = skin_joint_count
+                        .checked_add(1)
+                        .expect("facade skin-joint count must fit usize");
+                }
+                joints.finish()?;
+            }
+            if let Some(mut matrices) = skin.take_inverse_bind_matrices() {
+                while let Some(matrix) = matrices.next()? {
+                    transcript.debug("inverse-bind-matrix", &matrix);
+                }
+                matrices.finish()?;
+            }
+        }
+        while let Some(mut logical_morph) = deformation.next_logical_morph()? {
+            transcript.debug(
+                "logical-morph",
+                &(
+                    logical_morph.source_index(),
+                    logical_morph.definition_offset(),
+                    logical_morph.definition_count(),
+                ),
+            );
+            mark_range(
+                &mut reference_closure,
+                logical_morph.definition_offset(),
+                logical_morph.definition_count(),
+                morph_definition_count,
+            );
+            if let Some(values) = logical_morph.take_default_weights() {
+                let _ = drain_deformation_f32(values, &mut transcript, "morph-default-weight")?;
+            }
+        }
+        while let Some(definition) = deformation.next_morph_definition()? {
+            transcript.debug(
+                "morph-definition",
+                &(
+                    definition.source_index(),
+                    definition.logical_mesh(),
+                    definition.target_ordinal(),
+                    definition.stable_identity(),
+                    definition.name(),
+                ),
+            );
+            mark_index(
+                &mut reference_closure,
+                definition.logical_mesh(),
+                logical_mesh_count,
+            );
+        }
+        while let Some(mut primitive) = deformation.next_primitive()? {
+            transcript.debug(
+                "deformation-primitive",
+                &(
+                    primitive.source_index(),
+                    primitive.influences_present(),
+                    primitive.morph_target_offset(),
+                    primitive.morph_target_count(),
+                ),
+            );
+            mark_range(
+                &mut reference_closure,
+                primitive.morph_target_offset(),
+                primitive.morph_target_count(),
+                morph_target_count,
+            );
+            if let Some(mut rows) = primitive.take_influences() {
+                while let Some(row) = rows.next_row()? {
+                    transcript.debug("influence-row", &row.vertex());
+                    influence_row_count = influence_row_count
+                        .checked_add(1)
+                        .expect("facade influence-row count must fit usize");
+                    let mut influences = row.into_influences();
+                    while let Some(influence) = influences.next()? {
+                        transcript.debug(
+                            "influence",
+                            &(
+                                influence.palette_joint(),
+                                influence.weight(),
+                                influence.source_order(),
+                            ),
+                        );
+                        influence_count = influence_count
+                            .checked_add(1)
+                            .expect("facade influence count must fit usize");
+                    }
+                    influences.finish()?;
+                }
+                rows.finish()?;
+            }
+        }
+        while let Some(target) = deformation.next_morph_target()? {
+            transcript.debug(
+                "morph-target",
+                &(
+                    target.source_index(),
+                    target.primitive(),
+                    target.target_ordinal(),
+                    target.delta_offset(),
+                    target.delta_count(),
+                ),
+            );
+            mark_index(&mut reference_closure, target.primitive(), primitive_count);
+            mark_range(
+                &mut reference_closure,
+                target.delta_offset(),
+                target.delta_count(),
+                morph_delta_count,
+            );
+        }
+        while let Some(delta) = deformation.next_morph_delta()? {
+            transcript.debug(
+                "morph-delta",
+                &(delta.source_index(), delta.morph_target(), delta.semantic()),
+            );
+            mark_index(
+                &mut reference_closure,
+                delta.morph_target(),
+                morph_target_count,
+            );
+            match delta.into_payload() {
+                NodeSceneDeformationMorphPayload::Dense {
+                    logical_count,
+                    mut values,
+                } => {
+                    transcript.debug("morph-dense-logical-count", &logical_count);
+                    while let Some(value) = values.next()? {
+                        transcript.debug("morph-dense-value", &value);
+                    }
+                    values.finish()?;
+                }
+                NodeSceneDeformationMorphPayload::Sparse {
+                    logical_count,
+                    mut values,
+                } => {
+                    transcript.debug("morph-sparse-logical-count", &logical_count);
+                    while let Some(value) = values.next()? {
+                        transcript.debug("morph-sparse-value", &(value.index(), value.value()));
+                    }
+                    values.finish()?;
+                }
+            }
+        }
+        while let Some(mut instance) = deformation.next_mesh_instance()? {
+            transcript.debug(
+                "deformation-instance",
+                &(
+                    instance.source_index(),
+                    instance.skin(),
+                    instance.morph_weights_present(),
+                ),
+            );
+            mark_optional_index(&mut reference_closure, instance.skin(), skin_count);
+            if let Some(values) = instance.take_morph_weights() {
+                let _ = drain_deformation_f32(values, &mut transcript, "instance-morph-weight")?;
+            }
+        }
+    }
+
+    {
+        let animation = cursor.animation()?;
+        while let Some(clip) = animation.next_clip()? {
+            transcript.debug(
+                "animation-clip",
+                &(
+                    clip.source_index(),
+                    clip.duration(),
+                    clip.time_domain(),
+                    clip.channel_offset(),
+                    clip.channel_count(),
+                ),
+            );
+            mark_range(
+                &mut reference_closure,
+                clip.channel_offset(),
+                clip.channel_count(),
+                animation_channel_count,
+            );
+        }
+        while let Some(channel) = animation.next_channel()? {
+            transcript.debug(
+                "animation-channel",
+                &(
+                    channel.source_index(),
+                    channel.target(),
+                    channel.interpolation(),
+                    channel.pre_extrapolation(),
+                    channel.post_extrapolation(),
+                    channel.times(),
+                    channel.values(),
+                    channel.in_tangents(),
+                    channel.out_tangents(),
+                ),
+            );
+            animation_key_count = animation_key_count
+                .checked_add(channel.key_count())
+                .expect("facade animation-key count must fit usize");
+            match channel.target() {
+                NodeSceneAnimationTarget::NodeTranslation(node)
+                | NodeSceneAnimationTarget::NodeRotation(node)
+                | NodeSceneAnimationTarget::NodeScale(node) => {
+                    reference_closure &= node > 0 && node <= node_count;
+                }
+                NodeSceneAnimationTarget::MeshInstanceMorphWeights(instance) => {
+                    mark_index(&mut reference_closure, instance, mesh_instance_count);
+                }
+            }
+        }
+    }
+
+    {
+        let profile = cursor.profile()?;
+        drain_profile_steps(
+            || profile.step_resource(),
+            &mut transcript,
+            "profile-resource",
+        )?;
+        drain_profile_steps(|| profile.step_source(), &mut transcript, "profile-source")?;
+        drain_profile_steps(
+            || profile.step_provenance(),
+            &mut transcript,
+            "profile-provenance",
+        )?;
+        drain_profile_steps(
+            || profile.step_evidence(),
+            &mut transcript,
+            "profile-evidence",
+        )?;
+        while let Some(owner) = profile.next_owner()? {
+            transcript.debug("profile-owner", &owner);
+        }
+        while let Some(entry) = profile.next_metadata_entry()? {
+            transcript.debug("profile-metadata", &entry);
+        }
+    }
+
+    cursor.finish()?;
+    reference_closure &= structural_reference_count == node_count;
+    let (transcript_digest, transcript_bytes) = transcript.finish();
+    Ok((
+        GltfCapabilityCanonicalShapeObservation {
+            node_count,
+            root_count,
+            edge_count,
+            image_count,
+            sampler_count,
+            texture_count,
+            material_count,
+            material_binding_count,
+            logical_mesh_count,
+            primitive_count,
+            attribute_count,
+            mesh_instance_count,
+            skin_count,
+            skin_joint_count,
+            logical_morph_count,
+            morph_definition_count,
+            primitive_deformation_count,
+            morph_target_count,
+            morph_delta_count,
+            influence_row_count,
+            influence_count,
+            animation_clip_count,
+            animation_channel_count,
+            animation_key_count,
+        },
+        reference_closure,
+        transcript_digest,
+        transcript_bytes,
+    ))
+}
+
+pub(in crate::canonical_scene::store) fn project_gltf_facade_observation_v1_for_probe(
+    scene: &ValidatedNodeScene,
+) -> FacadeObservationOutcomeV1 {
+    let (totals, reference_closure_verified, transcript_digest, transcript_bytes) =
+        match observe_facade_typed_view(scene) {
+            Ok(observation) => observation,
+            Err(error) => {
+                return Err(FacadeObservationErrorV1 {
+                    schema_id: FACADE_OBSERVATION_SCHEMA_ID,
+                    error_class: "canonical-typed-view",
+                    reason: error.reason(),
+                });
+            }
+        };
+
+    // The observer consumes every facade-intended typed domain and every nested payload cursor.
+    // Its transcript is derived from those typed values; snapshot correlation is checked by the
+    // independent snapshot phase and is never supplied by the caller.
+    Ok(FacadeObservationV1 {
+        schema_id: FACADE_OBSERVATION_SCHEMA_ID,
+        transcript_digest,
+        transcript_bytes,
+        totals,
+        reference_closure_verified,
+        cursor_exhausted: true,
+    })
 }
 
 pub(in crate::canonical_scene::store) fn capture_gltf_capability_snapshots_for_probe(

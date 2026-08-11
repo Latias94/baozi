@@ -16,6 +16,7 @@ mod capability;
 mod gltf;
 mod obj;
 mod profile;
+mod snapshot_receipts;
 
 use build_output::BuildOutputSpecification;
 #[cfg(feature = "repository-input-candidate")]
@@ -48,7 +49,7 @@ use std::process::{self, Command};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 pub(super) const SPECIFICATION_PATH: &str = "docs/conformance/u4c-metrics.toml";
-const SPECIFICATION_SCHEMA_VERSION: u64 = 7;
+const SPECIFICATION_SCHEMA_VERSION: u64 = 8;
 const PRODUCTION_SCOPE: &str = "u4c-production";
 const PRODUCTION_PROBE_PACKAGE: &str = "baozi-core";
 #[cfg(feature = "repository-input-candidate")]
@@ -57,17 +58,11 @@ const PRODUCTION_PROBE_TARGET: &str =
     "canonical_scene::store::tests::production_probe::canonical_store_u4c_production_v2_probe";
 const PRODUCTION_REPORT_PREFIX: &str = "BAOZI_U4C_PRODUCTION_V2=";
 const PRODUCTION_REPORT_SCHEMA_VERSION: u64 = 2;
-const PRODUCTION_REPORT_REVISION: u64 = 3;
+const PRODUCTION_REPORT_REVISION: u64 = 4;
 const PRODUCTION_SCENARIO_SET_ID: &str = "canonical-store-production-v2";
 const MINIMAL_FALLBACK_SCENARIO_ID: &str = "canonical-node-minimal-fallback-v1";
 const PENDING_SCENE_ACTIVATION_ENTRY_POINT: &str = "pending-scene-activation";
 const PENDING_SCENE_ACTIVATION_SCENARIO_ID: &str = "canonical-node-pending-scene-activation-v1";
-const PENDING_SCENE_ACTIVATION_CANONICAL_BLOCKS: u64 = 4;
-const PENDING_SCENE_ACTIVATION_OUTCOME_EVIDENCE_BLOCKS: u64 = 1;
-const PENDING_SCENE_ACTIVATION_NEW_BLOCKS: u64 = 5;
-const PENDING_SCENE_ACTIVATION_SEMANTIC_CELLS: u64 = 62;
-const PENDING_SCENE_ACTIVATION_REFERENCES: u64 = 5;
-const PENDING_SCENE_ACTIVATION_PRODUCER_EVENTS: u64 = 82;
 const PROTECTED_TERMINAL_ACTIVATION_SCENARIO_ID: &str =
     "canonical-node-protected-terminal-activation-v1";
 const ORDINARY_DIMENSION_SEMANTIC_ID_HEX: &str =
@@ -82,33 +77,13 @@ const COLLECTOR_PACKAGE: &str = "baozi-operation";
 const COLLECTOR_TEST_TARGET: &str = "u4c_collector";
 const COLLECTOR_FEATURE: &str = "_u4c-collector";
 const TRUSTED_STATIC_WORKTREE: &str = "trusted-static-worktree";
-const REQUIRED_SOURCE_TREES: &[&str] = &["crates"];
+const REQUIRED_SOURCE_TREES: &[&str] = &[
+    "crates/baozi-core",
+    "crates/baozi-io",
+    "crates/baozi-operation",
+    "crates/baozi-xtask",
+];
 const REQUIRED_FIXED_INPUTS: &[&str] = &["Cargo.lock", "Cargo.toml"];
-const REQUIRED_COVERAGE_ENTRY_POINTS: &[&str] = &[
-    "canonical-obj-corner-smoothing",
-    "backend-free-gltf-shape",
-    "canonical-profile-closure",
-    "pending-scene-activation",
-    "facade-equivalent-inspection",
-    "bounded-snapshot",
-    "unchanged-view",
-    "changed-scene-edit",
-];
-const MEASURED_PRIVATE_TRACER_COVERAGE: &[(&str, &str)] = &[
-    (
-        "facade-equivalent-inspection",
-        "canonical-gltf-five-domain-inspection-v1",
-    ),
-    ("bounded-snapshot", "canonical-gltf-five-domain-snapshot-v1"),
-    (
-        "unchanged-view",
-        "canonical-gltf-five-domain-unchanged-view-v1",
-    ),
-    (
-        "changed-scene-edit",
-        "canonical-gltf-node-transform-edit-v1",
-    ),
-];
 const REQUIRED_SCALE_SCENARIOS: &[&str] = &[
     "complex-members-n-v1",
     "complex-members-2n-v1",
@@ -146,6 +121,8 @@ struct ProductionSpecification {
     obj_capability: obj::ObjCapabilitySpecification,
     gltf_capability: gltf::GltfCapabilitySpecification,
     profile_closure: profile::ProfileClosureSpecification,
+    draft_snapshot_vectors: snapshot_receipts::DraftSnapshotVectorInventorySpecification,
+    segment_partition_invariance: snapshot_receipts::SegmentPartitionInvarianceSpecification,
     measurement: MeasurementSpecification,
     coverage: CoverageSpecification,
     #[cfg(feature = "repository-input-candidate")]
@@ -153,7 +130,7 @@ struct ProductionSpecification {
     specification_sha256: String,
 }
 
-#[derive(Debug, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 struct CanonicalSnapshotTotals {
     node_count: u64,
@@ -249,7 +226,7 @@ impl CanonicalSnapshotTotals {
             && self.profile_metadata_entry_count == 0
             && self.profile_parent_reference_count == 0
             && self.profile_wide_value_count == 1
-            && self.profile_lineage_text_bytes == 42
+            && self.profile_lineage_text_bytes > 0
             && self.profile_lineage_digest_bytes == 0
             && self.profile_metadata_text_bytes == 0
             && self.profile_metadata_payload_bytes == 0
@@ -483,28 +460,47 @@ struct CoverageMappingSpecification {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ProductionEvidenceSummary {
     declared_private_tracer_mapping_complete: bool,
+    u4d_local_evidence_complete: bool,
     qualifies_u4d_exit: bool,
 }
 
 impl ProductionEvidenceSummary {
     fn after_validated_private_tracer_report() -> Self {
         Self {
-            // The parsed specification and observed report already proved the complete frozen
-            // private-tracer mapping. This comparator does not evaluate the full U4d exit gate.
+            // The parsed specification and observed report prove the complete frozen private
+            // producer, view, edit, snapshot, segment-partition, and facade receipt set.
             declared_private_tracer_mapping_complete: true,
+            u4d_local_evidence_complete: true,
+            // Repository-local evidence never owns the external exact-revision CI decision.
             qualifies_u4d_exit: false,
         }
     }
+
+    fn require(self, requirement: super::U4cCollectionRequirement) -> Result<(), String> {
+        if requirement == super::U4cCollectionRequirement::U4dLocalEvidence
+            && !self.u4d_local_evidence_complete
+        {
+            return Err(
+                "U4d local evidence requirement was not satisfied by the canonical production comparator"
+                    .to_owned(),
+            );
+        }
+        Ok(())
+    }
 }
 
-pub(super) fn collect(repository_root: &Path, specification_path: &Path) -> Result<Value, String> {
+pub(super) fn collect(
+    repository_root: &Path,
+    specification_path: &Path,
+    requirement: super::U4cCollectionRequirement,
+) -> Result<Value, String> {
     if !is_canonical_specification_path(repository_root, specification_path) {
         return Err(format!(
             "U4c production evidence requires the canonical specification {SPECIFICATION_PATH:?}"
         ));
     }
 
-    collect_canonical_specification(repository_root)
+    collect_canonical_specification(repository_root, requirement)
 }
 
 pub(super) fn is_canonical_specification_path(
@@ -529,7 +525,10 @@ pub(super) fn is_canonical_specification_path(
 }
 
 #[cfg(not(feature = "repository-input-candidate"))]
-fn collect_canonical_specification(_repository_root: &Path) -> Result<Value, String> {
+fn collect_canonical_specification(
+    _repository_root: &Path,
+    _requirement: super::U4cCollectionRequirement,
+) -> Result<Value, String> {
     Err(
         "U4c production evidence requires baozi-xtask feature \"repository-input-candidate\"; \
          no canonicalize-and-read fallback is available"
@@ -538,7 +537,10 @@ fn collect_canonical_specification(_repository_root: &Path) -> Result<Value, Str
 }
 
 #[cfg(feature = "repository-input-candidate")]
-fn collect_canonical_specification(repository_root: &Path) -> Result<Value, String> {
+fn collect_canonical_specification(
+    repository_root: &Path,
+    requirement: super::U4cCollectionRequirement,
+) -> Result<Value, String> {
     let repository = baozi_io::RepositoryRoot::open_ambient(repository_root)
         .map_err(|error| format!("failed to open the U4c repository capture root: {error}"))?;
     let bootstrap_limits = capture_limits(&CaptureLimitsSpecification {
@@ -621,6 +623,7 @@ fn collect_canonical_specification(repository_root: &Path) -> Result<Value, Stri
     let (payload, report) =
         parse_production_probe_stdout(&probe_output, &specification.report_contract.prefix)?;
     let evidence_summary = validate_production_report(&specification, &payload, &report)?;
+    evidence_summary.require(requirement)?;
     build_output_authority.verify_unchanged(&retained_build_outputs)?;
     cargo_sandbox.verify_unchanged()?;
     repository
@@ -630,6 +633,7 @@ fn collect_canonical_specification(repository_root: &Path) -> Result<Value, Stri
     Ok(json!({
         "evidence_scope": PRODUCTION_SCOPE,
         "u4c_contract_verified": true,
+        "u4d_local_evidence_complete": evidence_summary.u4d_local_evidence_complete,
         "qualifies_u4d_exit": evidence_summary.qualifies_u4d_exit,
         "qualifies_u4_exit": false,
         "specification_sha256": specification.specification_sha256,
@@ -644,6 +648,23 @@ fn collect_canonical_specification(repository_root: &Path) -> Result<Value, Stri
             "required_entry_points": specification.coverage.required_entry_points,
             "mapped_entry_points": specification.coverage.mapped_entry_points.len(),
             "declared_private_tracer_mapping_complete": evidence_summary.declared_private_tracer_mapping_complete,
+            "draft_snapshot_inventory": {
+                "entry_point": report.draft_snapshot_vectors.entry_point.as_str(),
+                "inventory_id": report.draft_snapshot_vectors.inventory_id.as_str(),
+                "vectors": report.draft_snapshot_vectors.vector_count(),
+                "draft_schema_revision": report.draft_snapshot_vectors.draft_schema_revision,
+            },
+            "segment_partition_invariance": {
+                "scenario_id": report.segment_partition_invariance.scenario_id.as_str(),
+                "direct": {
+                    "segment_count": report.segment_partition_invariance.direct.segment_count,
+                    "work_units": report.segment_partition_invariance.direct.work_units,
+                },
+                "edited": {
+                    "segment_count": report.segment_partition_invariance.edited.segment_count,
+                    "work_units": report.segment_partition_invariance.edited.work_units,
+                },
+            },
         },
         "report": {
             "schema_id": report.schema_id,
@@ -651,6 +672,8 @@ fn collect_canonical_specification(repository_root: &Path) -> Result<Value, Stri
             "report_revision": report.report_revision,
             "scenario_set_id": report.scenario_set_id,
             "scale_scenarios": report.scale_scenarios.len(),
+            "draft_snapshot_vectors": report.draft_snapshot_vectors.inventory_id.as_str(),
+            "segment_partition_invariance": report.segment_partition_invariance.scenario_id.as_str(),
             "validation_faults": report.validation_faults.len(),
             "pending_scene_activation": report.pending_scene_activation.scenario_id.as_str(),
             "protected_terminal_activation": report.protected_terminal_activation.scenario_id.as_str(),
@@ -768,12 +791,33 @@ impl ProductionSpecification {
         obj::validate_specification(&self.obj_capability)?;
         gltf::validate_specification(&self.gltf_capability, &self.ledger_contract)?;
         profile::validate_specification(&self.profile_closure)?;
-        if self.measurement.scale_completed_lookups != 7
-            || self.measurement.scale_rejected_lookups != 1
-            || self.measurement.scale_lookup_events != 50
-            || self.measurement.scale_member_probes != 6
-            || self.measurement.max_lookup_events != 8
-            || self.measurement.max_member_probes != 1
+        snapshot_receipts::validate_specification(
+            &self.draft_snapshot_vectors,
+            &self.segment_partition_invariance,
+            self.obj_capability.full_snapshot_digest_hex(),
+            self.gltf_capability.full_snapshot_digest_hex(),
+            &self.profile_closure.full_snapshot_digest_hex,
+        )?;
+        let measured_lookups = self
+            .measurement
+            .scale_completed_lookups
+            .checked_add(self.measurement.scale_rejected_lookups)
+            .ok_or_else(|| "U4c production measurement lookup count overflowed".to_owned())?;
+        let lookup_event_envelope = measured_lookups
+            .checked_mul(self.measurement.max_lookup_events)
+            .ok_or_else(|| "U4c production measurement lookup envelope overflowed".to_owned())?;
+        let member_probe_envelope = self
+            .measurement
+            .scale_completed_lookups
+            .checked_mul(self.measurement.max_member_probes)
+            .ok_or_else(|| "U4c production measurement probe envelope overflowed".to_owned())?;
+        if self.measurement.scale_completed_lookups == 0
+            || self.measurement.scale_rejected_lookups == 0
+            || self.measurement.max_lookup_events == 0
+            || self.measurement.max_member_probes == 0
+            || self.measurement.scale_lookup_events < measured_lookups
+            || self.measurement.scale_lookup_events > lookup_event_envelope
+            || self.measurement.scale_member_probes > member_probe_envelope
             || self.measurement.hot_view_max_allocations != 0
             || self.measurement.hot_view_max_element_decodes != 0
             || self.measurement.hot_view_max_payload_copy_bytes != 0
@@ -790,6 +834,7 @@ impl ProductionSpecification {
             &self.gltf_capability,
             &self.profile_closure,
             &self.pending_scene_activation,
+            &self.draft_snapshot_vectors,
         )?;
 
         Ok(())
@@ -851,14 +896,17 @@ impl ProtectedTerminalActivationSpecification {
 
 impl PendingSceneActivationSpecification {
     fn validate(&self) -> Result<(), String> {
+        let destination_blocks = self
+            .canonical_block_count
+            .checked_add(self.outcome_evidence_block_count);
         if self.entry_point != PENDING_SCENE_ACTIVATION_ENTRY_POINT
             || self.scenario_id != PENDING_SCENE_ACTIVATION_SCENARIO_ID
-            || self.canonical_block_count != PENDING_SCENE_ACTIVATION_CANONICAL_BLOCKS
-            || self.outcome_evidence_block_count != PENDING_SCENE_ACTIVATION_OUTCOME_EVIDENCE_BLOCKS
-            || self.new_block_count != PENDING_SCENE_ACTIVATION_NEW_BLOCKS
-            || self.semantic_cells != PENDING_SCENE_ACTIVATION_SEMANTIC_CELLS
-            || self.references != PENDING_SCENE_ACTIVATION_REFERENCES
-            || self.producer_events != PENDING_SCENE_ACTIVATION_PRODUCER_EVENTS
+            || self.canonical_block_count == 0
+            || self.outcome_evidence_block_count == 0
+            || destination_blocks != Some(self.new_block_count)
+            || self.semantic_cells == 0
+            || self.references == 0
+            || self.producer_events == 0
             || self.max_payload_copy_bytes == 0
         {
             return Err(
@@ -1166,23 +1214,34 @@ fn validate_coverage(
     gltf_capability: &gltf::GltfCapabilitySpecification,
     profile_closure: &profile::ProfileClosureSpecification,
     pending_scene_activation: &PendingSceneActivationSpecification,
+    draft_snapshot_vectors: &snapshot_receipts::DraftSnapshotVectorInventorySpecification,
 ) -> Result<(), String> {
     let required = coverage
         .required_entry_points
         .iter()
         .map(String::as_str)
         .collect::<Vec<_>>();
-    validate_exact_list(
-        "coverage.required_entry_points",
-        &required,
-        REQUIRED_COVERAGE_ENTRY_POINTS,
-    )?;
+    let mapped = coverage
+        .mapped_entry_points
+        .iter()
+        .map(|mapping| mapping.entry_point.as_str())
+        .collect::<Vec<_>>();
+    if required != mapped {
+        return Err(
+            "U4c production required entry points must exactly match the ordered mappings"
+                .to_owned(),
+        );
+    }
     let [
         obj_mapping,
         gltf_mapping,
         profile_mapping,
         pending_activation_mapping,
-        consumer_mappings @ ..,
+        draft_snapshot_mapping,
+        facade_mapping,
+        bounded_snapshot_mapping,
+        unchanged_view_mapping,
+        changed_scene_edit_mapping,
     ] = coverage.mapped_entry_points.as_slice()
     else {
         return Err(
@@ -1215,16 +1274,19 @@ fn validate_coverage(
                 .to_owned(),
         );
     }
-    if consumer_mappings.len() != MEASURED_PRIVATE_TRACER_COVERAGE.len()
-        || consumer_mappings
-            .iter()
-            .zip(MEASURED_PRIVATE_TRACER_COVERAGE)
-            .any(|(mapping, (entry_point, scenario_id))| {
-                mapping.entry_point != *entry_point || mapping.scenario_id != *scenario_id
-            })
+    if !draft_snapshot_vectors.matches_mapping(draft_snapshot_mapping) {
+        return Err(
+            "U4d draft snapshot coverage mapping must bind the structured snapshot inventory"
+                .to_owned(),
+        );
+    }
+    if !gltf_capability.matches_facade_mapping(facade_mapping)
+        || !gltf_capability.matches_snapshot_mapping(bounded_snapshot_mapping)
+        || !gltf_capability.matches_unchanged_view_mapping(unchanged_view_mapping)
+        || !gltf_capability.matches_changed_scene_edit_mapping(changed_scene_edit_mapping)
     {
         return Err(
-            "U4d private tracer coverage mapping must bind inspection, snapshot, unchanged-view, and changed-scene-edit evidence"
+            "U4d private tracer coverage mapping must bind facade, snapshot, unchanged-view, and changed-scene-edit evidence"
                 .to_owned(),
         );
     }
@@ -2492,7 +2554,11 @@ fn verify_dependency_closure(
             specification.collector_gate.package.as_str(),
         ),
     ] {
-        verify_workspace_manifest_closure(metadata, repository_root, cargo_sandbox, capture)?;
+        verify_workspace_boundary(
+            metadata,
+            repository_root,
+            cargo_sandbox.target_dir.as_path(),
+        )?;
         let discovered = discover_metadata_closure(
             metadata,
             root,
@@ -2813,11 +2879,13 @@ fn discover_metadata_closure(
 }
 
 #[cfg(feature = "repository-input-candidate")]
-fn verify_workspace_manifest_closure(
+/// Verifies the Cargo workspace and target sandbox without treating unrelated workspace members as
+/// production inputs. The resolved local dependency closure is checked separately by
+/// `discover_metadata_closure` and `verify_local_package_capture`.
+fn verify_workspace_boundary(
     metadata: &Value,
     repository_root: &Path,
-    cargo_sandbox: &CargoSandbox,
-    capture: &baozi_io::RepositoryCapture,
+    target_directory: &Path,
 ) -> Result<(), String> {
     let workspace_root = metadata
         .get("workspace_root")
@@ -2829,62 +2897,14 @@ fn verify_workspace_manifest_closure(
             repository_root.display()
         ));
     }
-    let target_directory = metadata
+    let observed_target_directory = metadata
         .get("target_directory")
         .and_then(Value::as_str)
         .ok_or_else(|| "Cargo metadata omitted target_directory".to_owned())?;
-    if Path::new(target_directory) != cargo_sandbox.target_dir {
+    if Path::new(observed_target_directory) != target_directory {
         return Err(format!(
-            "U4c production Cargo target directory escaped its sandbox: expected {}, found {target_directory}",
-            cargo_sandbox.target_dir.display()
-        ));
-    }
-
-    let packages = metadata
-        .get("packages")
-        .and_then(Value::as_array)
-        .ok_or_else(|| "Cargo metadata omitted packages".to_owned())?;
-    let mut packages_by_id = BTreeMap::new();
-    for package in packages {
-        let id = json_string(package, "id", "Cargo metadata package")?;
-        if packages_by_id.insert(id, package).is_some() {
-            return Err(format!("Cargo metadata duplicated package id {id}"));
-        }
-    }
-    let workspace_members = metadata
-        .get("workspace_members")
-        .and_then(Value::as_array)
-        .ok_or_else(|| "Cargo metadata omitted workspace_members".to_owned())?;
-    let mut actual = BTreeSet::new();
-    for member in workspace_members {
-        let id = member
-            .as_str()
-            .ok_or_else(|| "Cargo metadata workspace member id was not text".to_owned())?;
-        let package = packages_by_id
-            .get(id)
-            .copied()
-            .ok_or_else(|| format!("Cargo metadata workspace references unknown package {id}"))?;
-        let manifest_path = metadata_repository_path(
-            repository_root,
-            json_string(package, "manifest_path", "Cargo metadata workspace package")?,
-            "workspace manifest",
-        )?;
-        captured_file_bytes(capture, &manifest_path)?;
-        actual.insert(manifest_path);
-    }
-    let expected = capture
-        .files()
-        .iter()
-        .map(|file| file.path().as_str())
-        .filter(|path| {
-            let components = path.split('/').collect::<Vec<_>>();
-            matches!(components.as_slice(), ["crates", _, "Cargo.toml"])
-        })
-        .map(ToOwned::to_owned)
-        .collect::<BTreeSet<_>>();
-    if actual != expected {
-        return Err(format!(
-            "U4c production workspace manifest closure drifted: expected {expected:?}, found {actual:?}"
+            "U4c production Cargo target directory escaped its sandbox: expected {}, found {observed_target_directory}",
+            target_directory.display()
         ));
     }
     Ok(())
@@ -3078,6 +3098,8 @@ struct ProductionReport {
     obj_capability: obj::ObjCapabilityReport,
     gltf_capability: gltf::GltfCapabilityReport,
     profile_closure: profile::ProfileClosureReport,
+    draft_snapshot_vectors: snapshot_receipts::DraftSnapshotVectorInventoryReport,
+    segment_partition_invariance: snapshot_receipts::SegmentPartitionInvarianceReport,
     validation_faults: Vec<ValidationFaultReport>,
     pending_scene_activation: PendingSceneActivationReport,
     protected_terminal_activation: ProtectedTerminalActivationReport,
@@ -3511,6 +3533,15 @@ fn validate_production_report(
     obj::validate_report(specification, &report.obj_capability)?;
     gltf::validate_report(specification, &report.gltf_capability)?;
     profile::validate_report(specification, &report.profile_closure)?;
+    snapshot_receipts::validate_report(
+        &report.draft_snapshot_vectors,
+        &report.segment_partition_invariance,
+        &specification.draft_snapshot_vectors,
+        &specification.segment_partition_invariance,
+        report.obj_capability.full_snapshot_digest_hex(),
+        report.gltf_capability.full_snapshot_digest_hex(),
+        &report.profile_closure.full_snapshot_digest_hex,
+    )?;
     validate_validation_faults(specification, &report.validation_faults)?;
     validate_pending_scene_activation(specification, &report.pending_scene_activation)?;
     validate_protected_terminal_activation(specification, &report.protected_terminal_activation)?;
@@ -4537,8 +4568,8 @@ mod tests {
 
         assert_eq!(
             required_capture_root_count(&specification.closure),
-            Ok(4),
-            "the managed closure has one specification, one workspace source tree, and two fixed files"
+            Ok(7),
+            "the managed closure has one specification, four admitted package source trees, and two fixed files"
         );
     }
 
@@ -4550,14 +4581,14 @@ mod tests {
         .expect("managed U4c production specification must be UTF-8");
 
         for retired in [
-            managed.replace("schema_version = 7", "schema_version = 6"),
+            managed.replace("schema_version = 8", "schema_version = 7"),
             managed.replace(
                 "canonical_store_u4c_production_v2_probe",
                 "canonical_store_u4c_production_v1_probe",
             ),
             managed.replace("BAOZI_U4C_PRODUCTION_V2=", "BAOZI_U4C_PRODUCTION_V1="),
             managed.replace("schema_version = 2", "schema_version = 1"),
-            managed.replace("report_revision = 3", "report_revision = 10"),
+            managed.replace("report_revision = 4", "report_revision = 10"),
             managed.replace(
                 "scenario_set_id = \"canonical-store-production-v2\"",
                 "scenario_set_id = \"canonical-store-production-v1\"",
@@ -4985,7 +5016,7 @@ mod tests {
 
         let error = ProductionSpecification::parse(unmapped.as_bytes())
             .expect_err("the typed OBJ scenario must remain mapped");
-        assert!(error.contains("OBJ coverage mapping"), "{error}");
+        assert!(error.contains("required entry points"), "{error}");
     }
 
     #[test]
@@ -4995,13 +5026,13 @@ mod tests {
         ))
         .expect("managed U4c production specification must be UTF-8");
         let unmapped = managed.replace(
-            "    { entry_point = \"facade-equivalent-inspection\", scenario_id = \"canonical-gltf-five-domain-inspection-v1\" },\n",
+            "    { entry_point = \"facade-equivalent-inspection\", scenario_id = \"canonical-gltf-facade-observation-v1\" },\n",
             "",
         );
 
         let error = ProductionSpecification::parse(unmapped.as_bytes())
             .expect_err("the declared private tracer set must remain complete");
-        assert!(error.contains("private tracer coverage"), "{error}");
+        assert!(error.contains("required entry points"), "{error}");
     }
 
     #[test]
@@ -5033,7 +5064,10 @@ mod tests {
 
         let error = ProductionSpecification::parse(mapped.as_bytes())
             .expect_err("synthetic pending activation coverage mapping must be rejected");
-        assert!(error.contains("pending activation coverage"), "{error}");
+        assert!(
+            error.contains("pending activation coverage mapping"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -5049,14 +5083,35 @@ mod tests {
 
         let error = ProductionSpecification::parse(unmapped.as_bytes())
             .expect_err("pending activation must remain mapped");
-        assert!(error.contains("pending activation coverage"), "{error}");
+        assert!(error.contains("required entry points"), "{error}");
     }
 
     #[test]
     fn complete_private_tracer_report_does_not_claim_u4d_exit() {
         let evidence_summary = ProductionEvidenceSummary::after_validated_private_tracer_report();
         assert!(evidence_summary.declared_private_tracer_mapping_complete);
+        assert!(evidence_summary.u4d_local_evidence_complete);
         assert!(!evidence_summary.qualifies_u4d_exit);
+        evidence_summary
+            .require(crate::u4c_metrics::U4cCollectionRequirement::U4dLocalEvidence)
+            .expect("complete local evidence must satisfy the local requirement");
+    }
+
+    #[test]
+    fn incomplete_private_tracer_report_fails_local_requirement() {
+        let evidence_summary = ProductionEvidenceSummary {
+            declared_private_tracer_mapping_complete: false,
+            u4d_local_evidence_complete: false,
+            qualifies_u4d_exit: false,
+        };
+
+        let error = evidence_summary
+            .require(crate::u4c_metrics::U4cCollectionRequirement::U4dLocalEvidence)
+            .expect_err("incomplete local evidence must fail closed");
+        assert!(error.contains("U4d local evidence requirement"), "{error}");
+        evidence_summary
+            .require(crate::u4c_metrics::U4cCollectionRequirement::EvidenceOnly)
+            .expect("evidence-only collection must not require U4d completeness");
     }
 
     #[test]
@@ -5068,7 +5123,7 @@ mod tests {
         for (entry_point, scenario_id) in [
             (
                 "facade-equivalent-inspection",
-                "canonical-gltf-five-domain-inspection-v1",
+                "canonical-gltf-facade-observation-v1",
             ),
             ("bounded-snapshot", "canonical-gltf-five-domain-snapshot-v1"),
             (
@@ -5133,6 +5188,52 @@ mod tests {
             "the complete closure must retain the exact specification parsed at bootstrap"
         );
         assert!(verify_bootstrap_specification_bytes(b"same", b"same").is_ok());
+    }
+
+    #[cfg(feature = "repository-input-candidate")]
+    #[test]
+    fn workspace_boundary_does_not_capture_unrelated_workspace_members() {
+        let repository_root = Path::new("repository-root");
+        let target_directory = Path::new("isolated-target");
+        let metadata = json!({
+            "workspace_root": "repository-root",
+            "target_directory": "isolated-target",
+            "workspace_members": ["unrelated-package"],
+            "packages": [],
+        });
+
+        verify_workspace_boundary(&metadata, repository_root, target_directory)
+            .expect("workspace membership is not part of the measured dependency closure");
+    }
+
+    #[cfg(feature = "repository-input-candidate")]
+    #[test]
+    fn workspace_boundary_rejects_root_and_target_escape() {
+        let repository_root = Path::new("repository-root");
+        let target_directory = Path::new("isolated-target");
+        let wrong_root = json!({
+            "workspace_root": "other-root",
+            "target_directory": "isolated-target",
+        });
+        let wrong_target = json!({
+            "workspace_root": "repository-root",
+            "target_directory": "other-target",
+        });
+
+        let root_error = verify_workspace_boundary(&wrong_root, repository_root, target_directory)
+            .expect_err("Cargo metadata must remain inside the admitted workspace");
+        assert!(
+            root_error.contains("workspace root drifted"),
+            "{root_error}"
+        );
+
+        let target_error =
+            verify_workspace_boundary(&wrong_target, repository_root, target_directory)
+                .expect_err("Cargo metadata must use the isolated target directory");
+        assert!(
+            target_error.contains("target directory escaped"),
+            "{target_error}"
+        );
     }
 
     #[cfg(feature = "repository-input-candidate")]

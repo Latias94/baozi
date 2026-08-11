@@ -55,7 +55,10 @@ fn u4c_metrics_requires_an_explicit_specification_path() {
         stderr.contains("usage: cargo run -p baozi-xtask"),
         "{output:#?}"
     );
-    assert!(stderr.contains("u4c-metrics --spec <path>"), "{output:#?}");
+    assert!(
+        stderr.contains("u4c-metrics [--require-u4d-local-evidence] --spec <path>"),
+        "{output:#?}"
+    );
 }
 
 #[test]

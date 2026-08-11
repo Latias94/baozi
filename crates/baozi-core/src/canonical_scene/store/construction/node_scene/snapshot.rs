@@ -2168,3 +2168,6 @@ impl PreviewSink {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+pub(in crate::canonical_scene::store) use tests::collect_segment_partition_snapshot_observation_for_probe;

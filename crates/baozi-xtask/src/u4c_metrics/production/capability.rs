@@ -6,7 +6,7 @@ use super::{AllocationReport, PhaseReport, PhysicalAccountReport};
 
 pub(super) const BOUNDED_PREVIEW_SCHEMA_ID: &str = "baozi.canonical-scene.bounded-preview.v1";
 
-#[derive(Debug, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub(super) struct FixedVector {
     pub(super) schema_id: String,
@@ -14,7 +14,7 @@ pub(super) struct FixedVector {
     pub(super) sha256: String,
 }
 
-#[derive(Debug, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub(super) struct BoundedPreview {
     pub(super) schema_id: String,
@@ -140,20 +140,6 @@ pub(super) struct PhysicalLifecycleReport {
     pub(super) after_inspection: PhysicalAccountReport,
     pub(super) after_snapshot: PhysicalAccountReport,
     pub(super) after_release: PhysicalAccountReport,
-}
-
-pub(super) fn validate_fixed_vector(
-    vector: &FixedVector,
-    schema_id: &str,
-    label: &str,
-) -> Result<(), String> {
-    if vector.schema_id != schema_id
-        || vector.observed_bytes == 0
-        || !is_lowercase_sha256(&vector.sha256)
-    {
-        return Err(format!("{label} fixed vector is invalid"));
-    }
-    Ok(())
 }
 
 #[cfg(feature = "repository-input-candidate")]

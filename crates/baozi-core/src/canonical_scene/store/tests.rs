@@ -177,10 +177,12 @@ fn sealed_activation_request_reaches_a_core_owned_validated_candidate() {
         },
     };
 
+    let destination_counts = candidate.destination_counts();
     assert_eq!(
-        candidate.canonical_blocks(),
+        destination_counts.canonical_blocks(),
         usize::try_from(super::schema::CANONICAL_BLOCK_COUNT).unwrap()
     );
+    assert_eq!(destination_counts.outcome_evidence_blocks(), 1);
     assert_eq!(candidate.directory(), candidate.refs().directory);
     assert!(account.snapshot().live_retained_allocations() > 0);
 

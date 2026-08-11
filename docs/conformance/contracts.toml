@@ -34,7 +34,7 @@ contract_id = "u4-private-producer-consumer-proof"
 authority_adr = "docs/adr/0003-core-scene-ir-and-material-model.md"
 conformance_status = "partial"
 evidence_subject = "baozi.u4.private-producer-consumer-proof"
-evidence_revision = 3
+evidence_revision = 4
 implementation_tracers = [
   "crates/baozi-core/src/canonical_scene/store/api/continuation.rs",
   "crates/baozi-core/src/canonical_scene/store/construction/activation.rs",
@@ -42,17 +42,21 @@ implementation_tracers = [
 ]
 test_tracers = [
   "crates/baozi-core/src/canonical_scene/store/construction/node_scene/tests/profile_closure.rs",
+  "crates/baozi-core/src/canonical_scene/store/construction/node_scene/snapshot/tests.rs",
   "crates/baozi-core/src/canonical_scene/store/tests/production_probe.rs",
   "crates/baozi-core/src/canonical_scene/store/tests/production_probe/report.rs",
   "crates/baozi-core/src/canonical_scene/store/tests/production_probe/scenarios.rs",
   "crates/baozi-xtask/src/u4c_metrics/production.rs",
   "crates/baozi-xtask/src/u4c_metrics/production/profile.rs",
+  "crates/baozi-xtask/src/u4c_metrics/production/snapshot_receipts.rs",
   "docs/conformance/u4c-metrics.toml",
 ]
 ci_tracers = [".github/workflows/ci.yml"]
 gate_ids = [
   "u4c-production-v2",
   "u4c-production-ci",
+  "u4d-local-production-v1",
+  "u4d-stage-exit-ci",
 ]
 
 [[contracts]]
@@ -79,6 +83,52 @@ gate_ids = [
   "u4c-lifecycle-ci",
   "u4c-production-v2",
   "u4c-production-ci",
+]
+
+[[contracts]]
+contract_id = "import-lifecycle-outcome"
+authority_adr = "docs/adr/0020-import-lifecycle-and-report-contract.md"
+conformance_status = "partial"
+evidence_subject = "baozi.import.lifecycle-outcome"
+evidence_revision = 1
+implementation_tracers = [
+  "crates/baozi-import/src/format.rs",
+  "crates/baozi-import/src/session.rs",
+  "crates/baozi-core/src/canonical_scene/store/api/continuation.rs",
+  "crates/baozi-core/src/canonical_scene/store/construction/activation.rs",
+]
+test_tracers = [
+  "crates/baozi-import/tests/session_contract.rs",
+  "crates/baozi-import/tests/cancellation_stage_contract.rs",
+  "crates/baozi-import/tests/source_scope_outcome.rs",
+]
+ci_tracers = [".github/workflows/ci.yml"]
+gate_ids = ["workspace-tests-ci"]
+
+[[contracts]]
+contract_id = "resource-ledger-budget-accounting"
+authority_adr = "docs/adr/0022-per-import-resource-ledger-and-budget-accounting.md"
+conformance_status = "partial"
+evidence_subject = "baozi.resource-ledger.budget-accounting"
+evidence_revision = 1
+implementation_tracers = [
+  "crates/baozi-operation/src/ledger.rs",
+  "crates/baozi-operation/src/concrete_store/activation.rs",
+  "crates/baozi-operation/src/retained/operation.rs",
+  "crates/baozi-core/src/canonical_scene/store/construction/activation.rs",
+]
+test_tracers = [
+  "crates/baozi-operation/tests/ledger.rs",
+  "crates/baozi-operation/tests/concrete_store/activation/central_validation.rs",
+  "crates/baozi-core/src/canonical_scene/store/tests/production_probe/report.rs",
+  "crates/baozi-core/src/canonical_scene/store/tests/production_probe/scenarios.rs",
+  "docs/conformance/u4c-metrics.toml",
+]
+ci_tracers = [".github/workflows/ci.yml"]
+gate_ids = [
+  "u4c-production-v2",
+  "u4c-production-ci",
+  "workspace-tests-ci",
 ]
 
 [[contracts]]
