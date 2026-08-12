@@ -513,6 +513,17 @@ type EligibilityReadySuccessJointCommit<O, P, D, F, CanonicalBlock, EvidenceBloc
         D,
     >;
 
+/// Linear success owner after every fallible step except final account eligibility.
+#[must_use = "the success intent must be jointly committed or contained by dropping it"]
+pub(crate) struct RetainedSuccessJointCommitIntent<O, P, D, F, CanonicalBlock, EvidenceBlock>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+{
+    state: EligibilityReadySuccessGraph<O, P, D, F, CanonicalBlock, EvidenceBlock>,
+}
+
 struct EligibilityReadySuccessGraph<O, P, D, F, CanonicalBlock, EvidenceBlock>
 where
     O: OperationOwner,
@@ -520,6 +531,16 @@ where
     D: Copy + Ord,
 {
     state: Option<EligibilityReadySuccessJointCommit<O, P, D, F, CanonicalBlock, EvidenceBlock>>,
+    #[cfg(test)]
+    observation: SuccessJointCommitTestObservation<D>,
+}
+
+#[cfg(test)]
+struct SuccessJointCommitTestObservation<D> {
+    current_live_bytes: u64,
+    active_reservations: u64,
+    cover_matches_state: bool,
+    first_dimension: Option<(D, DimensionSnapshot)>,
 }
 
 struct EligibilityReadySuccessPhysical<P, D, F, CanonicalBlock, EvidenceBlock> {
@@ -562,11 +583,11 @@ where
         cause
     }
 
-    pub(super) fn into_prepared(
+    pub(super) fn try_form_joint_commit_intent(
         mut self,
         set_id: RetainedSetId,
     ) -> Result<
-        PreparedRetainedPublication<CanonicalBlock, EvidenceBlock, F, P, D>,
+        RetainedSuccessJointCommitIntent<O, P, D, F, CanonicalBlock, EvidenceBlock>,
         FinalizationContainmentError,
     > {
         let proof = self
@@ -633,7 +654,7 @@ where
         };
         #[cfg(test)]
         let qualified = maybe_drop_success_guard(SuccessGuardDropStage::Qualified, qualified);
-        qualified.into_prepared(set_id)
+        qualified.try_form_joint_commit_intent(set_id)
     }
 }
 
@@ -686,11 +707,11 @@ where
         }
     }
 
-    fn into_prepared(
+    fn try_form_joint_commit_intent(
         mut self,
         set_id: RetainedSetId,
     ) -> Result<
-        PreparedRetainedPublication<CanonicalBlock, EvidenceBlock, F, P, D>,
+        RetainedSuccessJointCommitIntent<O, P, D, F, CanonicalBlock, EvidenceBlock>,
         FinalizationContainmentError,
     > {
         let discarded_account = match self
@@ -717,7 +738,9 @@ where
         #[cfg(test)]
         let eligibility_ready =
             maybe_drop_success_guard(SuccessGuardDropStage::EligibilityReady, eligibility_ready);
-        eligibility_ready.try_into_prepared()
+        Ok(RetainedSuccessJointCommitIntent {
+            state: eligibility_ready,
+        })
     }
 }
 
@@ -838,6 +861,19 @@ where
             evidence_root,
         } = physical;
         debug_assert!(fallback.is_empty());
+        #[cfg(test)]
+        let observation = SuccessJointCommitTestObservation {
+            current_live_bytes: proof.test_current_live_bytes(),
+            active_reservations: proof.test_active_reservations(),
+            cover_matches_state: proof.test_cover_matches_state(),
+            first_dimension: proof.terminal_projection().dimensions().next().and_then(
+                |(dimension, _)| {
+                    proof
+                        .test_dimension_evidence(dimension)
+                        .map(|snapshot| (dimension, snapshot))
+                },
+            ),
+        };
         Ok(EligibilityReadySuccessGraph {
             state: Some(AccountBoundJointCommit::new(
                 EligibilityReadySuccessPhysical {
@@ -852,6 +888,8 @@ where
                 },
                 proof,
             )),
+            #[cfg(test)]
+            observation,
         })
     }
 }
@@ -998,6 +1036,47 @@ where
             proof.retain_fail_closed();
             drop(discarded_account);
         }
+    }
+}
+
+impl<O, P, D, F, CanonicalBlock, EvidenceBlock>
+    RetainedSuccessJointCommitIntent<O, P, D, F, CanonicalBlock, EvidenceBlock>
+where
+    O: OperationOwner,
+    P: TerminalEvidenceKey,
+    D: TerminalEvidenceKey,
+{
+    pub(crate) fn qualify_and_commit(
+        self,
+    ) -> Result<
+        PreparedRetainedPublication<CanonicalBlock, EvidenceBlock, F, P, D>,
+        FinalizationContainmentError,
+    > {
+        self.state.try_into_prepared()
+    }
+
+    #[cfg(test)]
+    pub(super) fn test_current_live_bytes(&self) -> u64 {
+        self.state.observation.current_live_bytes
+    }
+
+    #[cfg(test)]
+    pub(super) fn test_active_reservations(&self) -> u64 {
+        self.state.observation.active_reservations
+    }
+
+    #[cfg(test)]
+    pub(super) fn test_cover_matches_state(&self) -> bool {
+        self.state.observation.cover_matches_state
+    }
+
+    #[cfg(test)]
+    pub(super) fn test_dimension_evidence(&self, dimension: D) -> Option<DimensionSnapshot> {
+        self.state
+            .observation
+            .first_dimension
+            .filter(|(key, _)| *key == dimension)
+            .map(|(_, snapshot)| snapshot)
     }
 }
 

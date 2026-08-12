@@ -134,10 +134,10 @@ use std::sync::{Mutex, MutexGuard};
 pub(crate) use terminal::RetainedPublicationPrepareError;
 use terminal::{
     DetachedTerminalEvidenceQualification, FreezeReadyDetachedTerminalEvidence,
-    PrimaryPublicationBatches, QualifiedDetachedTerminalEvidence, TerminalFallbackAttribution,
-    TerminalFallbackGuard, TerminalPhysicalOwnershipManifest, TerminalPrimaryGuard,
-    TerminalPrimaryTransition, drop_retained_table_with_account_anchor, prepare_terminal_control,
-    terminal_evidence_catalog_is_qualified,
+    PrimaryPublicationBatches, QualifiedDetachedTerminalEvidence, RetainedSuccessJointCommitIntent,
+    TerminalFallbackAttribution, TerminalFallbackGuard, TerminalPhysicalOwnershipManifest,
+    TerminalPrimaryGuard, TerminalPrimaryTransition, drop_retained_table_with_account_anchor,
+    prepare_terminal_control, terminal_evidence_catalog_is_qualified,
 };
 use terminal_failure::{TerminalMinimalFreezeGuard, TerminalRichFreezeGuard};
 use terminal_output::RetainedPublicationPayload;
@@ -339,6 +339,36 @@ where
 {
     assembly: RetainedPublicationAssembly<O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>,
     proof: RetainedSuccessClosureProof<CanonicalBlock, EvidenceBlock>,
+}
+
+#[must_use = "joint-commit formation retains the exact success or failure owner"]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "both variants are the exact linear terminal owner; boxing would add allocation and split containment"
+)]
+pub(crate) enum RetainedSuccessJointCommitFormation<O, P, D, F, CanonicalBlock, EvidenceBlock>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+{
+    Intent(RetainedSuccessJointCommitIntent<O, P, D, F, CanonicalBlock, EvidenceBlock>),
+    PreparedFailure(PreparedRetainedPublication<CanonicalBlock, EvidenceBlock, F, P, D>),
+}
+
+#[must_use = "terminal preparation retains the exact success intent or prepared terminal owner"]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "the enum keeps terminal ownership linear without a fallible allocation at the final pivot"
+)]
+enum RetainedTerminalPreparation<O, P, D, F, CanonicalBlock, EvidenceBlock>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+{
+    SuccessIntent(RetainedSuccessJointCommitIntent<O, P, D, F, CanonicalBlock, EvidenceBlock>),
+    Prepared(PreparedRetainedPublication<CanonicalBlock, EvidenceBlock, F, P, D>),
 }
 
 /// Evidence-building state after a semantic rejection or before an explicit rich failure.
@@ -2374,10 +2404,25 @@ where
     }
 
     fn try_prepare_terminal(
-        mut self,
+        self,
         request: RetainedTerminalRequest<CanonicalBlock, EvidenceBlock, PP, U>,
     ) -> Result<
         PreparedRetainedPublication<CanonicalBlock, EvidenceBlock, F, P, D>,
+        RetainedPublicationPrepareError,
+    > {
+        match self.try_form_terminal_preparation(request)? {
+            RetainedTerminalPreparation::SuccessIntent(intent) => intent
+                .qualify_and_commit()
+                .map_err(RetainedPublicationPrepareError::FinalizationContainment),
+            RetainedTerminalPreparation::Prepared(prepared) => Ok(prepared),
+        }
+    }
+
+    fn try_form_terminal_preparation(
+        mut self,
+        request: RetainedTerminalRequest<CanonicalBlock, EvidenceBlock, PP, U>,
+    ) -> Result<
+        RetainedTerminalPreparation<O, P, D, F, CanonicalBlock, EvidenceBlock>,
         RetainedPublicationPrepareError,
     > {
         if self.containment != AssemblyContainmentProvenance::Healthy {
@@ -2573,7 +2618,9 @@ where
                 baseline_batches,
                 PrimaryPublicationBatches::new(canonical_batch, Some(evidence_batch)),
             );
-            return TerminalFallbackGuard::new(attribution, physical).try_prepare(cause);
+            return TerminalFallbackGuard::new(attribution, physical)
+                .try_prepare(cause)
+                .map(RetainedTerminalPreparation::Prepared);
         }
 
         let transition = TerminalPrimaryGuard::new(
@@ -2585,14 +2632,16 @@ where
         .try_advance(terminal)?;
         match transition {
             TerminalPrimaryTransition::Success(success) => success
-                .into_prepared(self.set_id)
+                .try_form_joint_commit_intent(self.set_id)
+                .map(RetainedTerminalPreparation::SuccessIntent)
                 .map_err(RetainedPublicationPrepareError::FinalizationContainment),
             TerminalPrimaryTransition::Rich(rich) => rich
                 .into_prepared(self.set_id)
+                .map(RetainedTerminalPreparation::Prepared)
                 .map_err(RetainedPublicationPrepareError::FinalizationContainment),
-            TerminalPrimaryTransition::Fallback(fallback_guard, cause) => {
-                fallback_guard.try_prepare(cause)
-            }
+            TerminalPrimaryTransition::Fallback(fallback_guard, cause) => fallback_guard
+                .try_prepare(cause)
+                .map(RetainedTerminalPreparation::Prepared),
         }
     }
 }
@@ -2827,11 +2876,34 @@ where
         PreparedRetainedPublication<CanonicalBlock, EvidenceBlock, F, P, D>,
         RetainedPublicationPrepareError,
     > {
-        self.assembly
-            .try_prepare_terminal(RetainedTerminalRequest::Success {
+        match self.try_form_joint_commit_intent(final_progress)? {
+            RetainedSuccessJointCommitFormation::Intent(intent) => intent
+                .qualify_and_commit()
+                .map_err(RetainedPublicationPrepareError::FinalizationContainment),
+            RetainedSuccessJointCommitFormation::PreparedFailure(prepared) => Ok(prepared),
+        }
+    }
+
+    pub(crate) fn try_form_joint_commit_intent(
+        self,
+        final_progress: FinalProgress<PP, U>,
+    ) -> Result<
+        RetainedSuccessJointCommitFormation<O, P, D, F, CanonicalBlock, EvidenceBlock>,
+        RetainedPublicationPrepareError,
+    > {
+        match self
+            .assembly
+            .try_form_terminal_preparation(RetainedTerminalRequest::Success {
                 proof: self.proof,
                 final_progress,
-            })
+            })? {
+            RetainedTerminalPreparation::SuccessIntent(intent) => {
+                Ok(RetainedSuccessJointCommitFormation::Intent(intent))
+            }
+            RetainedTerminalPreparation::Prepared(prepared) => Ok(
+                RetainedSuccessJointCommitFormation::PreparedFailure(prepared),
+            ),
+        }
     }
 
     pub fn prepare_minimal_fallback(

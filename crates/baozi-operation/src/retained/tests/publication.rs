@@ -2,6 +2,72 @@ use super::*;
 #[cfg(feature = "_u4-activation")]
 use std::num::NonZeroU64;
 
+type ValidatedScalarSuccess = ValidatedRetainedSuccess<
+    TestOwner,
+    TestPhase,
+    TestProgress,
+    TestUnit,
+    TestDimension,
+    u32,
+    u64,
+    u64,
+>;
+
+fn validated_scalar_success_on_account(account: &PhysicalStorageAccount) -> ValidatedScalarSuccess {
+    let operation = test_operation_on_account_with_control(
+        account,
+        64,
+        RetainedBatchLimits::new(2, 2),
+        OperationControl::default(),
+    );
+    operation
+        .try_complete_phase(TestPhase::Build)
+        .unwrap_or_else(|_| panic!("joint-commit build phase must complete"));
+    let mut assembly: TestPublication<u64, u64> = operation
+        .try_publication_assembly(publication_plan(1, 1))
+        .unwrap_or_else(|_| panic!("joint-commit publication must open"));
+    let (canonical, evidence) = retain_scalar_success(&mut assembly);
+    assembly
+        .try_commit_canonical(TestDimension::Bytes, 5)
+        .unwrap_or_else(|_| panic!("canonical commitment must fit"));
+    assembly
+        .try_commit_outcome_evidence(TestDimension::Bytes, 6)
+        .unwrap_or_else(|_| panic!("outcome-evidence commitment must fit"));
+    match assembly.validate_success(canonical, evidence, |session, canonical, evidence| {
+        session.canonical(canonical) == Some(&11) && session.outcome_evidence(evidence) == Some(&7)
+    }) {
+        RetainedSuccessValidation::Valid(validated) => validated,
+        _ => panic!("joint-commit publication must validate"),
+    }
+}
+
+fn scalar_success_signature(
+    prepared: PreparedRetainedPublication<u64, u64, u32, TestPhase, TestDimension>,
+) -> (
+    u64,
+    u64,
+    FallbackHeaderSnapshot<TestPhase>,
+    DimensionSnapshot,
+) {
+    match handoff_for_test(prepared) {
+        PublishedRetainedPublicationParts::Success {
+            canonical,
+            outcome_evidence,
+            ledger_evidence,
+        } => (
+            *canonical.root(),
+            *outcome_evidence.root(),
+            ledger_evidence
+                .header()
+                .expect("success terminal ledger header"),
+            ledger_evidence
+                .dimension(TestDimension::Bytes)
+                .expect("success dimension evidence"),
+        ),
+        _ => panic!("success preparation must not publish a failure owner"),
+    }
+}
+
 fn expect_retry_operation(
     error: RetainedPublicationOpenError<TestOperation, TestDimension>,
     context: &str,
@@ -2005,6 +2071,207 @@ fn block_table_success_freezes_dual_batches_and_splits_owners() {
         _ => panic!("success must not publish a failure owner"),
     }
     assert_eq!(factory.snapshot().live_accounts(), 0);
+}
+
+#[test]
+fn success_joint_commit_intent_keeps_publication_uncommitted_until_qualification() {
+    let factory = account_factory(1);
+    let account = account(&factory, u64::MAX, 128);
+    let validated = validated_scalar_success_on_account(&account);
+
+    let intent = match validated
+        .try_form_joint_commit_intent(final_progress())
+        .unwrap_or_else(|_| panic!("valid success must form a joint-commit intent"))
+    {
+        RetainedSuccessJointCommitFormation::Intent(intent) => intent,
+        RetainedSuccessJointCommitFormation::PreparedFailure(_) => {
+            panic!("healthy success must not downgrade during intent formation")
+        }
+    };
+    let dimension = intent
+        .test_dimension_evidence(TestDimension::Bytes)
+        .expect("intent must retain the detached dimension state");
+
+    assert_eq!(dimension.pending_publication(), 0);
+    assert_eq!(dimension.committed(), 0);
+    assert_eq!(dimension.committed_canonical_output(), 0);
+    assert_eq!(dimension.published_outcome_evidence(), 0);
+    assert!(dimension.current_live_bytes() > 0);
+    assert!(intent.test_current_live_bytes() > 0);
+    assert!(intent.test_active_reservations() > 0);
+    assert!(intent.test_cover_matches_state());
+
+    let prepared = intent
+        .qualify_and_commit()
+        .unwrap_or_else(|_| panic!("healthy intent must jointly commit"));
+    let (canonical, evidence, header, published) = scalar_success_signature(prepared);
+    assert_eq!(canonical, 11);
+    assert_eq!(evidence, 7);
+    assert_eq!(header.terminal_cause(), TerminalEvidenceCause::Success);
+    assert_eq!(header.last_completed_phase(), Some(TestPhase::Build));
+    assert_eq!(header.dimension_count(), 1);
+    assert_eq!(header.phase_count(), 1);
+    assert_eq!(published.pending_publication(), 0);
+    assert_eq!(published.committed(), 5);
+    assert_eq!(published.committed_canonical_output(), 5);
+    assert_eq!(published.published_outcome_evidence(), 7);
+    drop(account);
+    assert_eq!(factory.snapshot().live_accounts(), 0);
+}
+
+#[test]
+fn success_joint_commit_intent_matches_the_composed_prepare_result_exactly() {
+    let old_factory = account_factory(1);
+    let old_account = account(&old_factory, u64::MAX, 128);
+    let old = validated_scalar_success_on_account(&old_account)
+        .try_prepare(final_progress())
+        .unwrap_or_else(|_| panic!("legacy preparation must succeed"));
+    let old_signature = scalar_success_signature(old);
+
+    let intent_factory = account_factory(1);
+    let intent_account = account(&intent_factory, u64::MAX, 128);
+    let intent = match validated_scalar_success_on_account(&intent_account)
+        .try_form_joint_commit_intent(final_progress())
+        .unwrap_or_else(|_| panic!("success must form a joint-commit intent"))
+    {
+        RetainedSuccessJointCommitFormation::Intent(intent) => intent,
+        RetainedSuccessJointCommitFormation::PreparedFailure(_) => {
+            panic!("healthy success must not downgrade during intent formation")
+        }
+    };
+    let intent_signature = scalar_success_signature(
+        intent
+            .qualify_and_commit()
+            .unwrap_or_else(|_| panic!("joint-commit intent must qualify")),
+    );
+
+    assert_eq!(intent_signature, old_signature);
+    drop(old_account);
+    drop(intent_account);
+    assert_eq!(old_factory.snapshot().live_accounts(), 0);
+    assert_eq!(intent_factory.snapshot().live_accounts(), 0);
+}
+
+#[test]
+fn success_intent_formation_preserves_a_control_downgrade_as_prepared_failure() {
+    let factory = account_factory(1);
+    let account = account(&factory, u64::MAX, 128);
+    let control = OperationControl::default().with_progress_observer(
+        |_event: crate::ProgressEvent<TestProgress, TestUnit>| crate::ProgressDecision::Cancel,
+    );
+    let operation = test_operation_on_account_with_control(
+        &account,
+        64,
+        RetainedBatchLimits::new(2, 2),
+        control,
+    );
+    let mut assembly: TestPublication<u64, u64> = operation
+        .try_publication_assembly(publication_plan(1, 1))
+        .unwrap_or_else(|_| panic!("control-downgrade publication must open"));
+    let (canonical, evidence) = retain_scalar_success(&mut assembly);
+    let validated =
+        match assembly.validate_success(canonical, evidence, |session, canonical, evidence| {
+            session.canonical(canonical) == Some(&11)
+                && session.outcome_evidence(evidence) == Some(&7)
+        }) {
+            RetainedSuccessValidation::Valid(validated) => validated,
+            _ => panic!("control-downgrade publication must validate"),
+        };
+
+    let prepared = match validated
+        .try_form_joint_commit_intent(final_progress())
+        .unwrap_or_else(|_| panic!("control downgrade must retain a terminal owner"))
+    {
+        RetainedSuccessJointCommitFormation::PreparedFailure(prepared) => prepared,
+        RetainedSuccessJointCommitFormation::Intent(_) => {
+            panic!("cancelled final progress must not form a success intent")
+        }
+    };
+    match handoff_for_test(prepared) {
+        PublishedRetainedPublicationParts::RichFailure {
+            outcome_evidence,
+            ledger_evidence,
+        } => {
+            assert_eq!(
+                published_failure_cause(&ledger_evidence).class(),
+                PreparationFailureClass::Control
+            );
+            assert_eq!(*outcome_evidence.outcome_evidence().root(), 7);
+        }
+        _ => panic!("control downgrade must preserve the exact rich-failure owner"),
+    }
+    drop(account);
+    assert_eq!(factory.snapshot().live_accounts(), 0);
+}
+
+#[test]
+fn dropping_success_joint_commit_intent_fails_closed_before_eligibility() {
+    let factory = account_factory(1);
+    let account = account(&factory, u64::MAX, 128);
+    let intent = match validated_scalar_success_on_account(&account)
+        .try_form_joint_commit_intent(final_progress())
+        .unwrap_or_else(|_| panic!("success must form a joint-commit intent"))
+    {
+        RetainedSuccessJointCommitFormation::Intent(intent) => intent,
+        RetainedSuccessJointCommitFormation::PreparedFailure(_) => {
+            panic!("healthy success must not downgrade during intent formation")
+        }
+    };
+    let before = account.snapshot();
+    assert!(!before.poisoned());
+    assert!(before.live_retained_bytes() > 0);
+
+    drop(intent);
+
+    let after = account.snapshot();
+    assert!(after.poisoned());
+    assert_eq!(after.live_retained_bytes(), before.live_retained_bytes());
+    assert_eq!(
+        after.live_retained_allocations(),
+        before.live_retained_allocations()
+    );
+    assert_eq!(
+        after
+            .first_poison_evidence()
+            .map(AccountPoisonEvidence::reason),
+        Some(AccountPoisonReason::OwnershipGraphUnverified)
+    );
+    drop(account);
+    assert_eq!(factory.snapshot().live_accounts(), 1);
+}
+
+#[test]
+fn poisoned_account_rejects_success_joint_commit_intent_without_prepared_owner() {
+    let factory = account_factory(1);
+    let account = account(&factory, u64::MAX, 128);
+    let intent = match validated_scalar_success_on_account(&account)
+        .try_form_joint_commit_intent(final_progress())
+        .unwrap_or_else(|_| panic!("success must form a joint-commit intent"))
+    {
+        RetainedSuccessJointCommitFormation::Intent(intent) => intent,
+        RetainedSuccessJointCommitFormation::PreparedFailure(_) => {
+            panic!("healthy success must not downgrade during intent formation")
+        }
+    };
+    let first_poison = account.test_record_poison(AccountPoisonReason::OwnershipGraphUnverified);
+
+    let cause = match intent.qualify_and_commit() {
+        Err(cause) => cause,
+        Ok(_) => panic!("poisoned eligibility must not produce prepared success"),
+    };
+
+    assert_eq!(
+        cause.reason(),
+        AccountPoisonReason::OwnershipGraphUnverified
+    );
+    assert_eq!(
+        cause.account_poisoned().snapshot().first_poison_evidence(),
+        first_poison.snapshot().first_poison_evidence()
+    );
+    assert!(account.snapshot().live_retained_bytes() > 0);
+    assert!(account.snapshot().live_retained_allocations() > 0);
+    drop(account);
+    assert_eq!(factory.snapshot().live_accounts(), 1);
 }
 
 #[test]
