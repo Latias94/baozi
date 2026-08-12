@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-07-10
-updated: 2026-07-13
+updated: 2026-08-12
 authors:
   - Codex
 decision_type: architecture
@@ -25,10 +25,11 @@ tracers:
 
 ## Status and Authority
 
-This accepted ADR defines the target support contract. A release or user-facing document may repeat
-a target claim only after the required runner and matrix evidence exists, passes the profile's
-promotion conditions, and is linked from durable verification records. ADR 0007 owns feature
-inventory and CI wiring.
+This accepted ADR defines target support profiles and their qualification rules. A target listed in
+a profile is eligible to qualify for that profile; the listing is not by itself a current support
+claim. A release or user-facing document may repeat a target claim only after the required runner and
+matrix evidence exists, passes the profile's promotion conditions, and is linked from durable
+verification records. ADR 0007 owns feature inventory and CI wiring.
 
 ## Context
 
@@ -62,12 +63,24 @@ flowchart TD
 
 ## Baozi Support Profiles
 
-| Profile | Targets | Required evidence | Capability promise |
+The `Targets eligible for qualification` column defines the intended profile membership after all
+required evidence passes. It does not report the repository's current evidence state.
+
+| Profile | Targets eligible for qualification | Required evidence | Capability promise |
 | --- | --- | --- | --- |
 | Native Tested | `x86_64-unknown-linux-gnu`, `x86_64-pc-windows-msvc`, `aarch64-apple-darwin` | build, unit/facade/golden tests and docs | byte, memory, and custom IO; native filesystem remains an unregistered candidate |
 | Portable Byte | `wasm32-unknown-unknown`, `wasm32-wasip1` | no-default compile, per-format compile, representative runtime tests where runner support exists | byte and memory/custom IO; no Baozi ambient filesystem helper |
 | Build Monitored | `aarch64-unknown-linux-gnu`, `x86_64-apple-darwin` | scheduled or release compile and selected tests on real hosts | no release-blocking runtime promise until promoted |
 | Unlisted | all other Rust targets | best effort only | no compatibility, filesystem, or performance promise |
+
+### Current Qualification
+
+No target is currently release-qualified for a user-facing Baozi support claim. The repository has
+development evidence, including the full Linux workspace gates, Windows and macOS native-filesystem
+candidate facade tests, and byte-only WASM compile checks. Those checks do not yet supply the complete
+facade, golden, packaged-consumer, runtime, and release evidence required by the profiles above. U8
+and U9 establish the durable target-evidence inventory and release matrix; until then, CI success is
+development evidence rather than a support-profile promotion.
 
 The Native Tested baseline follows the upstream Rust target assumptions at the time of this decision:
 Windows MSVC requires Windows 10/Server 2016 or newer, and Apple ARM64 requires macOS 11 or newer.
@@ -141,8 +154,9 @@ adapter requires its own implementation tracer and tests before becoming support
 ## Promotion and Demotion
 
 A target moves to Native Tested or Portable Byte only when CI or a documented release runner executes
-its required matrix, including real tests rather than compile-only placeholders. Promotion requires
-two consecutive green release cycles or equivalent pre-release evidence.
+its required matrix, including real tests rather than compile-only placeholders, and the resulting
+qualification is recorded in the durable target-evidence inventory. Promotion requires two
+consecutive green release cycles or equivalent pre-release evidence.
 
 A target is demoted when its runner is unavailable for two releases, a security primitive cannot be
 verified, or a required dependency no longer supports it. Documentation changes in the same commit;
@@ -232,6 +246,23 @@ Negative:
 - Three native OS families and two WASM targets increase CI maintenance.
 - Unlisted targets receive no stability promise even when they happen to work.
 - WASI filesystem convenience is deferred until capability plumbing is implemented.
+
+## Amendment History
+
+### 2026-08-12: Separate profile membership from current qualification
+
+- Affected: `Status and Authority`, `Baozi Support Profiles`, and `Promotion and Demotion`.
+- Previous: profile rows listed target triples without explicitly separating intended profile
+  membership from the repository's current evidence state, allowing the table to be misread as a
+  current support claim.
+- New: target rows define eligibility for future qualification; current release-qualified membership
+  is explicitly empty until the complete durable target evidence required by U8 and U9 exists.
+- Impact: user-facing support claims are narrowed to evidence actually held by the repository; no
+  target, build path, or native-filesystem candidate is removed.
+- Review: 2026-08-12 target-qualification truthfulness review in the canonical-architecture refactor
+  session.
+- Rationale: this refines the existing evidence-gated support decision without moving target-profile
+  ownership or changing any profile's required capabilities.
 
 ## Sources
 

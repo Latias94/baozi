@@ -1,6 +1,7 @@
 ---
 status: proposed
 date: 2026-07-16
+updated: 2026-08-12
 authors:
   - Codex
 decision_type: architecture
@@ -17,8 +18,6 @@ depends_on:
 related:
   - docs/adr/0006-public-api-versioning-and-crate-stability-policy.md
   - docs/adr/0017-serialization-snapshot-and-cache-boundary.md
-promotion_requires:
-  - implementation_tracer
 ---
 
 # ADR 0043: Producer Attestation, Closed-Input Qualification, and Import Build Identity
@@ -153,6 +152,10 @@ flowchart LR
 ```
 
 ## Promotion Gates
+
+This proposal declares no `promotion_requires` frontmatter until its real implementation, test, and
+CI gates exist in the repository gate catalog. The conditions below define what those future stable
+gate IDs must prove; they are not themselves executable gate IDs.
 
 This proposal cannot become Accepted until one atomic reviewed change supplies:
 
