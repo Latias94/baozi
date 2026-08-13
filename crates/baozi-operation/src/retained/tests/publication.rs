@@ -41,6 +41,62 @@ fn validated_scalar_success_on_account(account: &PhysicalStorageAccount) -> Vali
     }
 }
 
+#[cfg(feature = "_u4-activation")]
+fn validated_freeze_success_with_limits(
+    account: &PhysicalStorageAccount,
+    committed_limit: u64,
+    evidence_limit: u64,
+    evidence_members: usize,
+) -> ValidatedScalarSuccess {
+    let policy = DimensionPolicy::reservable_bytes(u64::MAX, u64::MAX, committed_limit, u64::MAX)
+        .with_published_outcome_evidence_limit(evidence_limit);
+    let limits = LedgerLimits::new(u64::MAX, [(TestDimension::Bytes, policy)])
+        .unwrap_or_else(|_| panic!("freeze qualification limits must qualify"));
+    let plan = RetainedOperationStartPlan::new(
+        writer_plan(evidence_members + 1, 2),
+        share_work(),
+        empty_plan(),
+        OutputCommitment::new(TestDimension::Bytes, 1),
+        OutputCommitment::new(TestDimension::Bytes, 1),
+    );
+    let operation =
+        TestOperation::try_start(OperationControl::default(), limits, account, plan, || {
+            Ok(7_u32)
+        })
+        .unwrap_or_else(|_| panic!("freeze qualification operation must start"));
+    operation
+        .try_complete_phase(TestPhase::Build)
+        .unwrap_or_else(|_| panic!("freeze qualification build phase must complete"));
+    let mut assembly: TestPublication<u64, u64> = operation
+        .try_publication_assembly(publication_plan(1, evidence_members))
+        .unwrap_or_else(|_| panic!("freeze qualification publication must open"));
+    let canonical = assembly
+        .try_retain_canonical(empty_plan(), |emplacer| {
+            Ok(emplacer.place(11, CanonicalRootTag))
+        })
+        .unwrap_or_else(|_| panic!("freeze canonical root must retain"));
+    let evidence = assembly
+        .try_retain_outcome_evidence(empty_plan(), |emplacer| {
+            Ok(emplacer.place(7, EvidenceRootTag))
+        })
+        .unwrap_or_else(|_| panic!("freeze evidence root must retain"));
+    let detail = (evidence_members == 2).then(|| {
+        assembly
+            .try_retain_outcome_evidence(empty_plan(), |emplacer| {
+                Ok(emplacer.place(9, EvidenceDetailTag))
+            })
+            .unwrap_or_else(|_| panic!("freeze evidence detail must retain"))
+    });
+    match assembly.validate_success(canonical, evidence, |session, canonical, evidence| {
+        session.canonical(canonical) == Some(&11)
+            && session.outcome_evidence(evidence) == Some(&7)
+            && detail.is_none_or(|detail| session.outcome_evidence(detail) == Some(&9))
+    }) {
+        RetainedSuccessValidation::Valid(validated) => validated,
+        _ => panic!("freeze qualification publication must validate"),
+    }
+}
+
 fn scalar_success_signature(
     prepared: PreparedRetainedPublication<u64, u64, u32, TestPhase, TestDimension>,
 ) -> (
@@ -2115,6 +2171,148 @@ fn success_joint_commit_intent_keeps_publication_uncommitted_until_qualification
     assert_eq!(published.committed(), 5);
     assert_eq!(published.committed_canonical_output(), 5);
     assert_eq!(published.published_outcome_evidence(), 7);
+    drop(account);
+    assert_eq!(factory.snapshot().live_accounts(), 0);
+}
+
+#[cfg(feature = "_u4-activation")]
+fn assert_freeze_destination_rejected(
+    account: &PhysicalStorageAccount,
+    committed_limit: u64,
+    evidence_limit: u64,
+    evidence_members: usize,
+    expected_class: CounterClass,
+    expected_value: u64,
+    expected_limit: u64,
+) {
+    match validated_freeze_success_with_limits(
+        account,
+        committed_limit,
+        evidence_limit,
+        evidence_members,
+    )
+    .test_probe_freeze_permit_qualification(TestDimension::Bytes, TestDimension::Bytes)
+    {
+        FreezePermitQualificationProbe::Ready => {
+            panic!("destination-ineligible exact pair must not qualify")
+        }
+        FreezePermitQualificationProbe::Rejected {
+            cause:
+                CommitmentPairPushError::Ledger(LedgerCause::LimitExceeded {
+                    class,
+                    dimension,
+                    value,
+                    limit,
+                }),
+            canonical_commitments,
+            outcome_evidence_commitments,
+            dimension: snapshot,
+        } => {
+            assert_eq!(class, expected_class);
+            assert_eq!(dimension, TestDimension::Bytes);
+            assert_eq!(value, expected_value);
+            assert_eq!(limit, expected_limit);
+            assert_eq!(canonical_commitments, 0);
+            assert_eq!(outcome_evidence_commitments, 0);
+            assert_eq!(snapshot.pending_publication(), 0);
+            assert_eq!(snapshot.committed(), 0);
+            assert_eq!(snapshot.committed_canonical_output(), 0);
+            assert_eq!(snapshot.published_outcome_evidence(), 0);
+        }
+        FreezePermitQualificationProbe::Rejected { .. } => {
+            panic!("destination rejection must preserve its exact typed limit cause")
+        }
+    }
+
+    let issue = validated_freeze_success_with_limits(
+        account,
+        committed_limit,
+        evidence_limit,
+        evidence_members,
+    )
+    .try_issue_freeze_permit(TestDimension::Bytes, TestDimension::Bytes, final_progress())
+    .unwrap_or_else(|_| panic!("destination rejection must retain the ordinary failure owner"));
+    assert!(!account.snapshot().poisoned());
+    match issue {
+        RetainedSuccessFreezePermitIssue::DestinationRejected { failure, cause } => {
+            assert_eq!(cause.class(), PreparationFailureClass::Ledger);
+            assert!(failure.canonical_ownership_is_absent());
+            assert_eq!(failure.outcome_evidence_commitment_len(), 0);
+            drop(failure);
+        }
+        RetainedSuccessFreezePermitIssue::Ready(_) => {
+            panic!("destination-ineligible exact pair must not issue a ready permit")
+        }
+        RetainedSuccessFreezePermitIssue::RichFailure { .. } => {
+            panic!("zero-commit destination rejection must not masquerade as frozen failure")
+        }
+    }
+    assert!(!account.snapshot().poisoned());
+}
+
+#[test]
+#[cfg(feature = "_u4-activation")]
+fn freeze_pair_prequalification_rejects_zero_committed_limit_without_mutation() {
+    let factory = account_factory(1);
+    let account = account(&factory, u64::MAX, 128);
+    assert_freeze_destination_rejected(&account, 0, 64, 1, CounterClass::Committed, 1, 0);
+
+    drop(account);
+    assert_eq!(factory.snapshot().live_accounts(), 0);
+}
+
+#[test]
+#[cfg(feature = "_u4-activation")]
+fn freeze_pair_prequalification_rejects_insufficient_evidence_limit_without_mutation() {
+    let factory = account_factory(1);
+    let account = account(&factory, u64::MAX, 128);
+    assert_freeze_destination_rejected(
+        &account,
+        u64::MAX,
+        2,
+        2,
+        CounterClass::PublishedOutcomeEvidence,
+        3,
+        2,
+    );
+
+    drop(account);
+    assert_eq!(factory.snapshot().live_accounts(), 0);
+}
+
+#[test]
+#[cfg(feature = "_u4-activation")]
+fn freeze_permit_issues_ready_for_the_exact_qualified_pair() {
+    let factory = account_factory(1);
+    let account = account(&factory, u64::MAX, 128);
+    let validated = validated_freeze_success_with_limits(&account, 1, 2, 1);
+
+    let permit = match validated
+        .try_issue_freeze_permit(TestDimension::Bytes, TestDimension::Bytes, final_progress())
+        .unwrap_or_else(|_| panic!("qualified exact pair must retain the freeze owner"))
+    {
+        RetainedSuccessFreezePermitIssue::Ready(permit) => permit,
+        RetainedSuccessFreezePermitIssue::RichFailure { .. } => {
+            panic!("qualified exact pair must issue a ready freeze permit")
+        }
+        RetainedSuccessFreezePermitIssue::DestinationRejected { .. } => {
+            panic!("qualified exact pair must not reject its destinations")
+        }
+    };
+    let snapshot = permit
+        .terminal_observation(TestDimension::Bytes)
+        .unwrap_or_else(|| panic!("ready freeze permit must expose the ledger observation"));
+    assert_eq!(snapshot.pending_publication(), 0);
+    assert_eq!(snapshot.committed(), 0);
+    assert_eq!(snapshot.committed_canonical_output(), 0);
+    assert_eq!(snapshot.published_outcome_evidence(), 0);
+    assert_eq!(permit.validated.assembly.canonical_commitment_len(), 1);
+    assert_eq!(
+        permit.validated.assembly.outcome_evidence_commitment_len(),
+        1
+    );
+
+    drop(permit);
     drop(account);
     assert_eq!(factory.snapshot().live_accounts(), 0);
 }

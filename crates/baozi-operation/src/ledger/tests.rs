@@ -1628,6 +1628,116 @@ fn typed_commitment_resolves_its_dimension_before_entering_the_batch() {
 }
 
 #[test]
+#[cfg(feature = "_u4-activation")]
+fn exact_pair_prequalification_matches_the_complete_future_batch_overflow() {
+    let ledger = test_ledger(typed_limits());
+    let probe = ledger.test_probe();
+    let canonical_assembly = ledger
+        .try_attribution_batch::<CanonicalOutput>(Phase::Build, Dimension::Bytes, 0, 2)
+        .expect("canonical assembly");
+    let evidence_assembly = ledger
+        .try_attribution_batch::<OutcomeEvidenceDestination>(Phase::Build, Dimension::Bytes, 0, 1)
+        .expect("outcome-evidence assembly");
+    let fallback = ledger
+        .try_attribution_batch::<OutcomeEvidenceDestination>(Phase::Build, Dimension::Bytes, 0, 0)
+        .expect("fallback batch");
+    let evidence = ledger
+        .try_attribution_batch::<OutcomeEvidenceDestination>(Phase::Build, Dimension::Bytes, 0, 0)
+        .expect("evidence batch");
+    let mut baseline = ledger
+        .try_fallback_baseline(canonical_assembly, evidence_assembly, fallback, evidence)
+        .unwrap_or_else(|_| panic!("exact primary baseline must bind"));
+    let mut canonical = ledger
+        .try_attribution_batch::<CanonicalOutput>(Phase::Build, Dimension::Bytes, 0, 2)
+        .expect("canonical source");
+    ledger
+        .try_push_commitment(
+            &mut canonical,
+            OutputCommitment::new(Dimension::Bytes, u64::MAX),
+        )
+        .unwrap_or_else(|_| panic!("maximum commitment must enter under the original policy"));
+    let mut outcome_evidence = ledger
+        .try_attribution_batch::<OutcomeEvidenceDestination>(Phase::Build, Dimension::Bytes, 0, 1)
+        .expect("outcome-evidence source");
+    ledger
+        .tighten_dimension_policy(
+            Dimension::Bytes,
+            DimensionPolicy::reservable_bytes(u64::MAX, u64::MAX, 7, u64::MAX)
+                .with_published_outcome_evidence_limit(u64::MAX),
+        )
+        .expect("policy may tighten around an unbound commitment");
+
+    let snapshot_before = ledger.try_snapshot().expect("prequalification snapshot");
+    let probe_before = probe_values(&probe);
+    let canonical_len_before = canonical.commitment_len();
+    let evidence_len_before = outcome_evidence.commitment_len();
+    let cause = match ledger.try_qualify_and_push_exact_primary_commitment_pair(
+        &baseline,
+        &mut canonical,
+        OutputCommitment::new(Dimension::Bytes, 1),
+        &mut outcome_evidence,
+        OutputCommitment::new(Dimension::Bytes, 1),
+    ) {
+        Err(CommitmentPairPushError::Ledger(cause)) => cause,
+        Ok(()) => panic!("the complete future canonical batch must overflow"),
+        Err(_) => panic!("the exact pair returned a non-ledger rejection"),
+    };
+
+    assert_eq!(
+        cause,
+        LedgerCause::ArithmeticOverflow {
+            class: CounterClass::Committed,
+            dimension: Dimension::Bytes,
+        }
+    );
+    assert_eq!(canonical.commitment_len(), canonical_len_before);
+    assert_eq!(outcome_evidence.commitment_len(), evidence_len_before);
+    assert_eq!(
+        ledger.try_snapshot().expect("unchanged snapshot"),
+        snapshot_before
+    );
+    assert_eq!(probe_values(&probe), probe_before);
+
+    ledger
+        .try_push_commitment(&mut canonical, OutputCommitment::new(Dimension::Bytes, 1))
+        .unwrap_or_else(|_| panic!("future canonical commitment must be positionable"));
+    ledger
+        .try_push_commitment(
+            &mut outcome_evidence,
+            OutputCommitment::new(Dimension::Bytes, 1),
+        )
+        .unwrap_or_else(|_| panic!("future evidence commitment must be positionable"));
+    let complete_snapshot_before = ledger.try_snapshot().expect("complete-batch snapshot");
+    let complete_probe_before = probe_values(&probe);
+    let complete_canonical_len_before = canonical.commitment_len();
+    let complete_evidence_len_before = outcome_evidence.commitment_len();
+    let later_bind_cause = ledger
+        .try_bind_primary(
+            &mut baseline,
+            Some(&mut canonical),
+            Some(&mut outcome_evidence),
+            true,
+        )
+        .expect_err("the materialized future batch must reject identically");
+    assert_eq!(later_bind_cause, cause);
+    assert_eq!(canonical.commitment_len(), complete_canonical_len_before);
+    assert_eq!(
+        outcome_evidence.commitment_len(),
+        complete_evidence_len_before
+    );
+    assert_eq!(
+        ledger.try_snapshot().expect("unchanged complete snapshot"),
+        complete_snapshot_before
+    );
+    assert_eq!(probe_values(&probe), complete_probe_before);
+
+    drop(baseline);
+    drop(canonical);
+    drop(outcome_evidence);
+    assert_eq!(probe_values(&probe), (0, 0));
+}
+
+#[test]
 fn empty_typed_batch_still_rejects_a_foreign_ledger_owner() {
     let target = test_ledger(typed_limits());
     let foreign = test_ledger(typed_limits());
@@ -3076,7 +3186,7 @@ fn typed_terminal_binding_uses_prestored_numeric_positions_without_a_mutation_ta
         .split("pub(crate) fn try_push_commitment")
         .nth(1)
         .expect("ledger commitment insertion exists")
-        .split("/// Transfers live ownership")
+        .split("/// Atomically qualifies and positions")
         .next()
         .expect("ledger commitment insertion boundary exists");
     let search = push

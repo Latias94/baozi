@@ -405,6 +405,15 @@ where
     physical: Option<ExactPreDiscardSuccess<P, D, F, CanonicalBlock, EvidenceBlock>>,
 }
 
+pub(super) enum FrozenSuccessPrimaryTransition<O, P, D, F, CanonicalBlock, EvidenceBlock>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+{
+    Success(TerminalSuccessFreezeGuard<O, P, D, F, CanonicalBlock, EvidenceBlock>),
+}
+
 struct QualifiedSuccessGraph<O, P, D, F, CanonicalBlock, EvidenceBlock>
 where
     O: OperationOwner,
@@ -1055,6 +1064,16 @@ where
         self.state.try_into_prepared()
     }
 
+    #[cfg(feature = "_u4-activation")]
+    pub(crate) fn qualify_and_commit_frozen_exact(
+        self,
+    ) -> Result<
+        PreparedRetainedSuccess<CanonicalBlock, EvidenceBlock, P, D>,
+        FinalizationContainmentError,
+    > {
+        self.state.try_into_prepared_success()
+    }
+
     #[cfg(test)]
     pub(super) fn test_current_live_bytes(&self) -> u64 {
         self.state.observation.current_live_bytes
@@ -1097,6 +1116,19 @@ where
             unreachable_final_owner_state()
         };
         Ok(state.try_commit()?.into_prepared())
+    }
+
+    #[cfg(feature = "_u4-activation")]
+    fn try_into_prepared_success(
+        mut self,
+    ) -> Result<
+        PreparedRetainedSuccess<CanonicalBlock, EvidenceBlock, P, D>,
+        FinalizationContainmentError,
+    > {
+        let Some(state) = self.state.take() else {
+            unreachable_final_owner_state()
+        };
+        Ok(state.try_commit()?.into_prepared_success())
     }
 }
 
@@ -1147,6 +1179,28 @@ impl<P, D, F, CanonicalBlock, EvidenceBlock>
                 outcome_evidence_root: evidence_root,
                 account,
             },
+            evidence: PublishedPart::from_exact_owner(evidence),
+        }
+    }
+
+    #[cfg(feature = "_u4-activation")]
+    fn into_prepared_success(self) -> PreparedRetainedSuccess<CanonicalBlock, EvidenceBlock, P, D> {
+        let Self {
+            canonical_table,
+            evidence_table,
+            account,
+            evidence,
+            canonical_root,
+            evidence_root,
+            set_id,
+            fallback_type: _,
+        } = self;
+        PreparedRetainedSuccess {
+            canonical: PublishedCanonicalAggregate::from_table(canonical_table, set_id),
+            outcome_evidence: PublishedOutcomeEvidenceAggregate::from_table(evidence_table, set_id),
+            canonical_root,
+            outcome_evidence_root: evidence_root,
+            account,
             evidence: PublishedPart::from_exact_owner(evidence),
         }
     }
@@ -1443,6 +1497,55 @@ where
         let containment =
             self.contain_after_recorded(AccountPoisonReason::PrimaryPublicationBindingPanicked);
         RetainedPublicationPrepareError::FinalizationContainment(containment)
+    }
+
+    pub(super) fn try_advance_frozen_success(
+        mut self,
+        terminal: RetainedTerminalMode,
+    ) -> Result<
+        FrozenSuccessPrimaryTransition<O, P, D, F, CanonicalBlock, EvidenceBlock>,
+        RetainedPublicationPrepareError,
+    > {
+        let RetainedTerminalMode::Success {
+            canonical_root,
+            evidence_root,
+        } = terminal
+        else {
+            let containment = self.contain_new_fault(AccountPoisonReason::OwnershipGraphUnverified);
+            return Err(RetainedPublicationPrepareError::FinalizationContainment(
+                containment,
+            ));
+        };
+        match self.try_bind_once(true) {
+            Err(payload) => return Err(self.contain_primary_binding_panic(payload)),
+            Ok(Err(_cause)) => {
+                let containment =
+                    self.contain_new_fault(AccountPoisonReason::OwnershipGraphUnverified);
+                return Err(RetainedPublicationPrepareError::FinalizationContainment(
+                    containment,
+                ));
+            }
+            Ok(Ok(())) => {}
+        }
+        if !self.physical().qualifies_pre_discard_success() {
+            let containment = self.contain_new_fault(AccountPoisonReason::OwnershipGraphUnverified);
+            return Err(RetainedPublicationPrepareError::FinalizationContainment(
+                containment,
+            ));
+        }
+        let physical = self
+            .physical
+            .take()
+            .unwrap_or_else(|| unreachable_final_owner_state())
+            .finish_pre_discard_success(canonical_root, evidence_root);
+        let proof = self
+            .attribution
+            .take()
+            .unwrap_or_else(|| unreachable_final_owner_state())
+            .finish(true);
+        Ok(FrozenSuccessPrimaryTransition::Success(
+            TerminalSuccessFreezeGuard::new(proof, physical),
+        ))
     }
 
     pub(super) fn try_advance(

@@ -99,7 +99,7 @@ max_work = 262144
 [[closure.source_trees]]
 path = "crates/baozi-core"
 file_count = 148
-sha256 = "13bc6e303d4492455ef2ace476145c2474bf3451aca714da6e4ae4cc5c72385b"
+sha256 = "1f3f092e940f13bae3c5a614800df0e3b55235560d892989a4dd0c07f0487fa1"
 
 [[closure.source_trees]]
 path = "crates/baozi-io"
@@ -108,13 +108,13 @@ sha256 = "db080e6d9ea45128efa356f1ad7c268ccfbda168f9d7b14725f76e86b1e5550f"
 
 [[closure.source_trees]]
 path = "crates/baozi-operation"
-file_count = 83
-sha256 = "c1664303a87e313d41976962b676f7677a90053dda2cd44816c0f1c5ee5573f2"
+file_count = 84
+sha256 = "3f903e359b7c8f7c7ac5c1a32f4c144948c72a7a145db220cec34ca2f6e3eb7d"
 
 [[closure.source_trees]]
 path = "crates/baozi-xtask"
 file_count = 29
-sha256 = "0f539b53fa412fac28ac1d45d8826d317aff0415bac4e70aa21936a97580e065"
+sha256 = "4dd58ebd3c7c8a7e20d3ebdbd43894407dfcc5b56e635c2b2e53c4df8cdc7055"
 
 [[closure.fixed_inputs]]
 path = "Cargo.lock"

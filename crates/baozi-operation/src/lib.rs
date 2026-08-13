@@ -94,11 +94,173 @@ pub use concrete_store::{
 /// ```compile_fail,E0432
 /// use baozi_operation::__canonical_activation::CanonicalValidationWork;
 /// ```
+///
+/// The successful joint-commit binder accepts only destructor-free descriptors:
+///
+/// ```compile_fail
+/// use baozi_operation::__canonical_activation::CanonicalFreezePermit;
+/// use baozi_operation::{OperationOwner, ProgressPhase, ProgressUnit};
+///
+/// struct Owner;
+/// impl OperationOwner for Owner {}
+///
+/// #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+/// enum Phase { Final }
+/// impl ProgressPhase for Phase {
+///     fn order(self) -> u32 { 0 }
+///     fn stable_id(self) -> &'static str { "final" }
+/// }
+///
+/// #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+/// enum Unit { Item }
+/// impl ProgressUnit for Unit {
+///     fn stable_id(self) -> &'static str { "item" }
+/// }
+///
+/// type Permit = CanonicalFreezePermit<Owner, Phase, Unit, String, (), (), (), (), ()>;
+/// fn bind_non_copy_output(permit: Permit) {
+///     permit.bind_joint_commit(|_, _, _, _| ());
+/// }
+/// ```
+///
+/// ```compile_fail
+/// use baozi_operation::__canonical_activation::CanonicalFreezePermit;
+/// use baozi_operation::{OperationOwner, ProgressPhase, ProgressUnit};
+///
+/// struct Owner;
+/// impl OperationOwner for Owner {}
+///
+/// #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+/// enum Phase { Final }
+/// impl ProgressPhase for Phase {
+///     fn order(self) -> u32 { 0 }
+///     fn stable_id(self) -> &'static str { "final" }
+/// }
+///
+/// #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+/// enum Unit { Item }
+/// impl ProgressUnit for Unit {
+///     fn stable_id(self) -> &'static str { "item" }
+/// }
+///
+/// type Permit = CanonicalFreezePermit<Owner, Phase, Unit, (), String, (), (), (), ()>;
+/// fn bind_non_copy_proof(permit: Permit) {
+///     permit.bind_joint_commit(|_, _, _, _| ());
+/// }
+/// ```
+///
+/// Independent binder scopes cannot exchange their invariant seals:
+///
+/// ```compile_fail
+/// use baozi_operation::__canonical_activation::CanonicalFreezePermit;
+/// use baozi_operation::{OperationOwner, ProgressPhase, ProgressUnit};
+///
+/// struct Owner;
+/// impl OperationOwner for Owner {}
+///
+/// #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+/// enum Phase { Final }
+/// impl ProgressPhase for Phase {
+///     fn order(self) -> u32 { 0 }
+///     fn stable_id(self) -> &'static str { "final" }
+/// }
+///
+/// #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+/// enum Unit { Item }
+/// impl ProgressUnit for Unit {
+///     fn stable_id(self) -> &'static str { "item" }
+/// }
+///
+/// type Permit = CanonicalFreezePermit<Owner, Phase, Unit, (), (), (), (), (), ()>;
+/// fn cross_scopes(first: Permit, second: Permit) {
+///     first.bind_joint_commit(|_, _, first_joint, _| {
+///         second.bind_joint_commit(|_, _, _, second_seal| {
+///             let _ = first_joint.prepare(second_seal);
+///         });
+///     });
+/// }
+/// ```
+///
+/// Scoped joint capabilities are linear: a joint contribution cannot be copied or cloned.
+///
+/// ```compile_fail
+/// use baozi_operation::__canonical_activation::CanonicalJointCommit;
+/// use baozi_operation::{OperationOwner, ProgressPhase, ProgressUnit};
+///
+/// struct Owner;
+/// impl OperationOwner for Owner {}
+///
+/// #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+/// enum Phase { Final }
+/// impl ProgressPhase for Phase {
+///     fn order(self) -> u32 { 0 }
+///     fn stable_id(self) -> &'static str { "final" }
+/// }
+///
+/// #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+/// enum Unit { Item }
+/// impl ProgressUnit for Unit {
+///     fn stable_id(self) -> &'static str { "item" }
+/// }
+///
+/// type Joint<'a> = CanonicalJointCommit<'a, Owner, Phase, Unit, (), (), (), ()>;
+/// fn cannot_copy(joint: Joint<'_>) {
+///     let moved = joint;
+///     let _used_again = joint;
+///     let _ = moved;
+/// }
+/// ```
+///
+/// ```compile_fail
+/// use baozi_operation::__canonical_activation::CanonicalJointCommit;
+/// use baozi_operation::{OperationOwner, ProgressPhase, ProgressUnit};
+///
+/// struct Owner;
+/// impl OperationOwner for Owner {}
+///
+/// #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+/// enum Phase { Final }
+/// impl ProgressPhase for Phase {
+///     fn order(self) -> u32 { 0 }
+///     fn stable_id(self) -> &'static str { "final" }
+/// }
+///
+/// #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+/// enum Unit { Item }
+/// impl ProgressUnit for Unit {
+///     fn stable_id(self) -> &'static str { "item" }
+/// }
+///
+/// type Joint<'a> = CanonicalJointCommit<'a, Owner, Phase, Unit, (), (), (), ()>;
+/// fn cannot_clone(joint: Joint<'_>) {
+///     let _clone = joint.clone();
+/// }
+/// ```
+///
+/// ```compile_fail
+/// use baozi_operation::__canonical_activation::CanonicalJointSeal;
+///
+/// fn cannot_copy(seal: CanonicalJointSeal<'_>) {
+///     let moved = seal;
+///     let _used_again = seal;
+///     let _ = moved;
+/// }
+/// ```
+///
+/// ```compile_fail
+/// use baozi_operation::__canonical_activation::CanonicalJointSeal;
+///
+/// fn cannot_clone(seal: CanonicalJointSeal<'_>) {
+///     let _clone = seal.clone();
+/// }
+/// ```
 pub mod __canonical_activation {
     pub use crate::concrete_store::activation::{
         CanonicalActivationOutcome, CanonicalActivationPolicy, CanonicalActivationRequestSealer,
         CanonicalActivationRequirements, CanonicalBuildControl, CanonicalCandidateStoreSession,
         CanonicalCentralValidationOutcome, CanonicalFailureTerminalWorkPlan,
+        CanonicalFreezeInterruption, CanonicalFreezeInterruptionClass, CanonicalFreezePermit,
+        CanonicalFreezePermitIssue, CanonicalJointCommit, CanonicalJointSeal,
         CanonicalMaterialization, CanonicalPreflightDecision, CanonicalRecordBuildRow,
         CanonicalTableShape, CanonicalValidationDecision, CanonicalValidationMember,
         CanonicalValidationRecordRow, CanonicalValidationSession, FailureEvidenceDecision,

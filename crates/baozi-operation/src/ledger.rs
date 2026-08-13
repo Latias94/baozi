@@ -1972,6 +1972,66 @@ where
         Ok(())
     }
 
+    /// Atomically qualifies and positions one canonical and one outcome-evidence commitment.
+    ///
+    /// The startup baseline, both source batches, and both exact destinations are preflighted as
+    /// the future primary publication under one ledger lock before either preallocated vector
+    /// changes. This is the U4 freeze-permit seam: it stages no publication counters and returns
+    /// no detached positioned token.
+    #[cfg(feature = "_u4-activation")]
+    pub(crate) fn try_qualify_and_push_exact_primary_commitment_pair(
+        &self,
+        baseline: &FallbackBatchBaseline<O, P, D>,
+        canonical_batch: &mut AttributionReservationBatch<O, P, D, CanonicalOutput>,
+        mut canonical: OutputCommitment<D, CanonicalOutput>,
+        evidence_batch: &mut AttributionReservationBatch<O, P, D, OutcomeEvidenceDestination>,
+        mut evidence: OutputCommitment<D, OutcomeEvidenceDestination>,
+    ) -> Result<(), CommitmentPairPushError<D>> {
+        let state = lock(&self.state);
+        if !canonical_batch.validate_owner(&self.state)
+            || !evidence_batch.validate_owner(&self.state)
+        {
+            return Err(CommitmentPairPushError::Ledger(LedgerCause::OwnerMismatch));
+        }
+        if !canonical_batch.has_commitment_slot() {
+            return Err(CommitmentPairPushError::CanonicalBatchFull);
+        }
+        if !evidence_batch.has_commitment_slot() {
+            return Err(CommitmentPairPushError::OutcomeEvidenceBatchFull);
+        }
+
+        canonical.dimension_position = state
+            .dimensions
+            .binary_search_by_key(&canonical.dimension, |entry| entry.dimension)
+            .map_err(|_| {
+                CommitmentPairPushError::Ledger(LedgerCause::UnknownDimension {
+                    dimension: canonical.dimension,
+                })
+            })?;
+        evidence.dimension_position = state
+            .dimensions
+            .binary_search_by_key(&evidence.dimension, |entry| entry.dimension)
+            .map_err(|_| {
+                CommitmentPairPushError::Ledger(LedgerCause::UnknownDimension {
+                    dimension: evidence.dimension,
+                })
+            })?;
+        self.preflight_primary_publication_locked(
+            &state,
+            baseline,
+            Some(canonical_batch),
+            Some(evidence_batch),
+            true,
+            Some(&canonical),
+            Some(&evidence),
+        )
+        .map_err(CommitmentPairPushError::Ledger)?;
+
+        canonical_batch.push_positioned_commitment(canonical);
+        evidence_batch.push_positioned_commitment(evidence);
+        Ok(())
+    }
+
     /// Transfers live ownership to another owner-defined ledger phase without changing totals.
     pub fn transfer(
         &self,
@@ -2646,26 +2706,15 @@ where
         publish_canonical: bool,
     ) -> Result<(), LedgerCause<D>> {
         let state = lock(&self.state);
-        self.validate_primary_publication_locked(
+        self.preflight_primary_publication_locked(
             &state,
             baseline,
             canonical_source.as_deref(),
             evidence_source.as_deref(),
             publish_canonical,
+            None,
+            None,
         )?;
-        preflight_typed_publication_batch(&state, &baseline.canonical_assembly)?;
-        preflight_typed_publication_batch(&state, &baseline.evidence_assembly)?;
-        preflight_typed_publication_batch(&state, &baseline.evidence)?;
-        if let Some(batch) = canonical_source.as_deref() {
-            if publish_canonical {
-                preflight_typed_publication_batch(&state, batch)?;
-            } else {
-                preflight_typed_discard_batch(&state, batch)?;
-            }
-        }
-        if let Some(batch) = evidence_source.as_deref() {
-            preflight_typed_publication_batch(&state, batch)?;
-        }
         drop(state);
 
         if publish_canonical && let Some(source) = canonical_source {
@@ -2680,6 +2729,47 @@ where
             baseline
                 .evidence_assembly
                 .absorb_proven_retaining_source_storage(source);
+        }
+        Ok(())
+    }
+
+    #[allow(
+        dead_code,
+        clippy::too_many_arguments,
+        reason = "the private preflight keeps the exact primary graph and optional U4 pair explicit"
+    )]
+    fn preflight_primary_publication_locked(
+        &self,
+        state: &LedgerState<P, D>,
+        baseline: &FallbackBatchBaseline<O, P, D>,
+        canonical_source: Option<&AttributionReservationBatch<O, P, D, CanonicalOutput>>,
+        evidence_source: Option<&AttributionReservationBatch<O, P, D, OutcomeEvidenceDestination>>,
+        publish_canonical: bool,
+        canonical_extra: Option<&OutputCommitment<D, CanonicalOutput>>,
+        evidence_extra: Option<&OutputCommitment<D, OutcomeEvidenceDestination>>,
+    ) -> Result<(), LedgerCause<D>> {
+        self.validate_primary_publication_locked(
+            state,
+            baseline,
+            canonical_source,
+            evidence_source,
+            publish_canonical,
+            canonical_extra,
+            evidence_extra,
+        )?;
+        preflight_typed_publication_batch(state, &baseline.canonical_assembly)?;
+        preflight_typed_publication_batch(state, &baseline.evidence_assembly)?;
+        preflight_typed_publication_batch(state, &baseline.evidence)?;
+        preflight_typed_discard_batch(state, &baseline.fallback)?;
+        if let Some(batch) = canonical_source {
+            if publish_canonical {
+                preflight_typed_publication_batch(state, batch)?;
+            } else {
+                preflight_typed_discard_batch(state, batch)?;
+            }
+        }
+        if let Some(batch) = evidence_source {
+            preflight_typed_publication_batch(state, batch)?;
         }
         Ok(())
     }
@@ -2779,7 +2869,8 @@ where
 
     #[allow(
         dead_code,
-        reason = "crate-private until the U4 canonical consumers switch atomically"
+        clippy::too_many_arguments,
+        reason = "the private validation keeps the exact primary graph and optional U4 pair explicit"
     )]
     fn validate_primary_publication_locked(
         &self,
@@ -2788,6 +2879,8 @@ where
         canonical_source: Option<&AttributionReservationBatch<O, P, D, CanonicalOutput>>,
         evidence_source: Option<&AttributionReservationBatch<O, P, D, OutcomeEvidenceDestination>>,
         publish_canonical: bool,
+        canonical_extra: Option<&OutputCommitment<D, CanonicalOutput>>,
+        evidence_extra: Option<&OutputCommitment<D, OutcomeEvidenceDestination>>,
     ) -> Result<(), LedgerCause<D>> {
         if !baseline.canonical_assembly.validate_owner(&self.state)
             || !baseline.evidence_assembly.validate_owner(&self.state)
@@ -2799,12 +2892,16 @@ where
             return Err(LedgerCause::OwnerMismatch);
         }
         if (publish_canonical
-            && !baseline
-                .canonical_assembly
-                .can_absorb_sources([canonical_source]))
-            || !baseline
-                .evidence_assembly
-                .can_absorb_sources([Some(&baseline.evidence), evidence_source])
+            && !can_absorb_sources_with_additional_commitments(
+                &baseline.canonical_assembly,
+                [canonical_source],
+                usize::from(canonical_extra.is_some()),
+            ))
+            || !can_absorb_sources_with_additional_commitments(
+                &baseline.evidence_assembly,
+                [Some(&baseline.evidence), evidence_source],
+                usize::from(evidence_extra.is_some()),
+            )
         {
             return Err(LedgerCause::ActiveReservationsRemain { count: u64::MAX });
         }
@@ -2904,20 +3001,22 @@ where
                 ledger_bytes: live_after_transition,
             });
         }
-        validate_typed_commitment_batches(
+        validate_typed_commitment_batches_with_extra(
             &state.dimensions,
             [
                 Some(&baseline.canonical_assembly),
                 publish_canonical.then_some(canonical_source).flatten(),
             ],
+            publish_canonical.then_some(canonical_extra).flatten(),
         )?;
-        validate_typed_commitment_batches(
+        validate_typed_commitment_batches_with_extra(
             &state.dimensions,
             [
                 Some(&baseline.evidence_assembly),
                 Some(&baseline.evidence),
                 evidence_source,
             ],
+            evidence_extra,
         )
     }
 
@@ -3114,6 +3213,109 @@ pub(crate) enum CommitmentPushError<D, Destination> {
         commitment: OutputCommitment<D, Destination>,
         cause: LedgerCause<D>,
     },
+}
+
+#[cfg(feature = "_u4-activation")]
+pub(crate) enum CommitmentPairPushError<D> {
+    CanonicalBatchFull,
+    OutcomeEvidenceBatchFull,
+    Ledger(LedgerCause<D>),
+}
+
+fn can_absorb_sources_with_additional_commitments<O, P, D, Destination, const N: usize>(
+    target: &AttributionReservationBatch<O, P, D, Destination>,
+    sources: [Option<&AttributionReservationBatch<O, P, D, Destination>>; N],
+    additional_commitments: usize,
+) -> bool
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+    Destination: PublicationDestination,
+{
+    if !target.can_absorb_sources(sources) {
+        return false;
+    }
+    sources
+        .into_iter()
+        .flatten()
+        .try_fold(target.commitments.len(), |length, source| {
+            length.checked_add(source.commitments.len())
+        })
+        .and_then(|length| length.checked_add(additional_commitments))
+        .is_some_and(|length| {
+            length <= target.commitment_limit && length <= target.commitments.capacity()
+        })
+}
+
+fn validate_typed_commitment_batches_with_extra<O, P, D, Destination, const N: usize>(
+    dimensions: &[DimensionEntry<D>],
+    batches: [Option<&AttributionReservationBatch<O, P, D, Destination>>; N],
+    extra: Option<&OutputCommitment<D, Destination>>,
+) -> Result<(), LedgerCause<D>>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+    Destination: DestinationState,
+{
+    let class = match Destination::KIND {
+        DestinationKind::CanonicalOutput => CounterClass::Committed,
+        DestinationKind::OutcomeEvidence => CounterClass::PublishedOutcomeEvidence,
+    };
+    let all = || {
+        batches
+            .into_iter()
+            .flatten()
+            .flat_map(|batch| batch.commitments.iter())
+            .chain(extra)
+    };
+    for (index, commitment) in all().enumerate() {
+        if all()
+            .take(index)
+            .any(|prior| prior.dimension == commitment.dimension)
+        {
+            continue;
+        }
+        let amount = all()
+            .filter(|candidate| candidate.dimension == commitment.dimension)
+            .try_fold(0_u64, |total, candidate| {
+                total.checked_add(candidate.amount)
+            })
+            .ok_or(LedgerCause::ArithmeticOverflow {
+                class,
+                dimension: commitment.dimension,
+            })?;
+        let entry = dimension_entry(dimensions, commitment.dimension).ok_or(
+            LedgerCause::UnknownDimension {
+                dimension: commitment.dimension,
+            },
+        )?;
+        let (current, limit) = match Destination::KIND {
+            DestinationKind::CanonicalOutput => {
+                (entry.state.committed, entry.policy.committed_limit)
+            }
+            DestinationKind::OutcomeEvidence => (
+                entry.state.published_outcome_evidence,
+                entry.policy.published_outcome_evidence_limit,
+            ),
+        };
+        let value = current
+            .checked_add(amount)
+            .ok_or(LedgerCause::ArithmeticOverflow {
+                class,
+                dimension: commitment.dimension,
+            })?;
+        if value > limit {
+            return Err(LedgerCause::LimitExceeded {
+                class,
+                dimension: commitment.dimension,
+                value,
+                limit,
+            });
+        }
+    }
+    Ok(())
 }
 
 #[allow(

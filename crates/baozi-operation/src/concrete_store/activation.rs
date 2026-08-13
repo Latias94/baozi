@@ -16,18 +16,20 @@ use super::{
     CanonicalUtf8Ref, FreshStoreLineage, OutcomeEvidenceBytesRef, OutcomeEvidenceRecordRef,
     OutcomeEvidenceRecordRowWriter, OutcomeEvidenceRecordView, OutcomeEvidenceRecordWriter,
     OutcomeEvidenceSequenceRef, OutcomeEvidenceStoreRef, OutcomeEvidenceUtf8Ref,
-    PreparedStoreFailureOutcome, PreparedStoreFallback, RawStoreBorrowedWorkPermit,
-    RawStoreFailureAssembly, RecordBlock, RecordPlan, RetainedAllocationPlan,
-    RetainedBuildFailureCode, RetainedStoreBlockTablePlan, RetainedStoreControlCheckpoint,
-    RetainedStoreFailureTerminalWorkPlan, RetainedStoreFailureTerminalWorkRequirement,
-    RetainedStoreOperation, RetainedStorePublicationAssembly, RetainedStorePublicationPlan,
-    RetainedStoreReservation, RetainedStoreWorkControl, RetainedStoreWriterPlan, ScalarSequence,
-    SequencePlan, SequenceWriter, StoreActivationBrand, StoreBuildCallbackFailure, StoreBuildError,
+    PreparedStoreFailureOutcome, PreparedStoreFallback, PreparedStoreSuccessOutcome,
+    RawStoreBorrowedWorkPermit, RawStoreFailureAssembly, RecordBlock, RecordPlan,
+    RetainedAllocationPlan, RetainedBuildFailureCode, RetainedStoreBlockTablePlan,
+    RetainedStoreControlCheckpoint, RetainedStoreFailureTerminalWorkPlan,
+    RetainedStoreFailureTerminalWorkRequirement, RetainedStoreOperation,
+    RetainedStorePublicationAssembly, RetainedStorePublicationPlan, RetainedStoreReservation,
+    RetainedStoreWorkControl, RetainedStoreWriterPlan, ScalarSequence, SequencePlan,
+    SequenceWriter, StoreActivationBrand, StoreBuildCallbackFailure, StoreBuildError,
     StoreControlledError, StoreControlledSuccessValidation, StoreDimensionKey,
     StoreEvidenceValidationSession, StoreFailureAssembly, StoreFailureValidation,
     StoreFallbackOnly, StoreKeyDomain, StorePhaseKey, StorePlanError, StorePrepareError,
-    StoreRuntimeError, StoreValidationSession, StoreWorkError, StoredBlock, StoredScalar,
-    Utf8Block, Utf8Plan, Utf8Writer, ValidatedStoreFailure, ValidatedStoreSuccess,
+    StoreRuntimeError, StoreSuccessFreezeContribution, StoreSuccessFreezePermit,
+    StoreSuccessFreezePermitIssue, StoreValidationSession, StoreWorkError, StoredBlock,
+    StoredScalar, Utf8Block, Utf8Plan, Utf8Writer, ValidatedStoreFailure, ValidatedStoreSuccess,
     classify_prepared_fallback, map_publication_error, map_writer_error,
 };
 use crate::control::{ProgressPhase, ProgressUnit, discard_untrusted_panic_payload};
@@ -35,11 +37,11 @@ use crate::coordinator::FinalProgress;
 use crate::ledger::STARTUP_ACCOUNT_SHARE_STEP_COUNT;
 use crate::owner::OperationOwner;
 use crate::retained::{
-    FinalizationContainmentError, PreparationFailureCode, RetainedFailureWorkConsumeError,
-    RetainedFailureWorkControl, RetainedFailureWorkFinishError, RetainedFailureWorkPermit,
-    RetainedFailureWorkStartError, RetainedHandleSharePlan, RetainedPublicationOpenRecovery,
-    RetainedPublicationPrepareError, RetainedWorkConsumeError, RetainedWorkControl,
-    RetainedWorkFinishError, RetainedWorkPermit, RetainedWorkStartError,
+    FinalizationContainmentError, PreparationFailureClass, PreparationFailureCode,
+    RetainedFailureWorkConsumeError, RetainedFailureWorkControl, RetainedFailureWorkFinishError,
+    RetainedFailureWorkPermit, RetainedFailureWorkStartError, RetainedHandleSharePlan,
+    RetainedPublicationOpenRecovery, RetainedPublicationPrepareError, RetainedWorkConsumeError,
+    RetainedWorkControl, RetainedWorkFinishError, RetainedWorkPermit, RetainedWorkStartError,
 };
 
 mod canonical;
@@ -1194,10 +1196,11 @@ where
     U: ProgressUnit,
 {
     Recoverable {
-        operation: RetainedStoreOperation<O, PP, U, L>,
         cause: StoreRuntimeError,
         failure_code: PreparationFailureCode,
         fallback_only: bool,
+        // Keep the recoverable operation last so its physical baseline observes any unwind.
+        operation: RetainedStoreOperation<O, PP, U, L>,
     },
     Contained(FinalizationContainmentError),
 }
@@ -1651,7 +1654,7 @@ pub enum OutcomeEvidenceDecision<Kind, Tag> {
 ///
 /// This activation-only disposition deliberately has no prepare or handoff method. The later
 /// cross-crate joint-commit slice must combine an operation-issued freeze permit with the exact
-/// core-owned generation contribution before either side can prepare a success.
+/// core-owned generation admission before either side can prepare a success.
 #[must_use = "the validated candidate must enter the later joint-commit transition"]
 pub struct CanonicalCandidateStoreSession<
     O,
@@ -1677,10 +1680,152 @@ pub struct CanonicalCandidateStoreSession<
         ValidatedStoreSuccess<O, PP, U, CanonicalKind, CanonicalTag, EvidenceKind, EvidenceTag>,
 }
 
+/// Linear candidate whose final operation progress and exact destinations are frozen.
+///
+/// Payload and proof drop before the operation owner, so an unwind while dropping either
+/// value is still contained by the last-dropping physical owner.
+#[must_use = "the freeze permit must be rejected or bound to one scoped joint commit"]
+pub struct CanonicalFreezePermit<
+    O,
+    PP,
+    U,
+    T,
+    Proof,
+    CanonicalKind,
+    CanonicalTag,
+    EvidenceKind,
+    EvidenceTag,
+> where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    output: T,
+    proof: Proof,
+    failure_work: FailureEvidenceWorkBudget,
+    destinations: ZeroCommitDestinationFacts,
+    // This owner must drop last so payload panics remain physically contained.
+    store:
+        StoreSuccessFreezePermit<O, PP, U, CanonicalKind, CanonicalTag, EvidenceKind, EvidenceTag>,
+}
+
+/// Scoped operation contribution for one core-owned joint commit.
+///
+/// The invariant lifetime brand prevents this contribution from escaping its binder or being
+/// paired with a seal from another invocation. The physical owner remains last for fail-closed
+/// containment if the scoped aggregate is dropped before preparation.
+#[must_use = "the scoped joint commit must be prepared with its matching seal"]
+pub struct CanonicalJointCommit<
+    'joint,
+    O,
+    PP,
+    U,
+    CanonicalKind,
+    CanonicalTag,
+    EvidenceKind,
+    EvidenceTag,
+> where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    _failure_work: FailureEvidenceWorkBudget,
+    _destinations: ZeroCommitDestinationFacts,
+    joint: PhantomData<fn(&'joint mut ()) -> &'joint mut ()>,
+    // This owner must drop last so the complete success graph remains fail-closed.
+    store: StoreSuccessFreezeContribution<
+        O,
+        PP,
+        U,
+        CanonicalKind,
+        CanonicalTag,
+        EvidenceKind,
+        EvidenceTag,
+    >,
+}
+
+/// Single-use seal paired with one scoped joint-commit contribution.
+///
+/// This type is invariant and deliberately neither `Clone` nor `Copy`; only the matching scoped
+/// contribution can consume it.
+#[must_use = "the scoped seal must be consumed by its matching joint commit"]
+pub struct CanonicalJointSeal<'joint> {
+    joint: PhantomData<fn(&'joint mut ()) -> &'joint mut ()>,
+}
+
+/// Exact result of issuing the generation freeze permit.
+#[must_use = "every freeze-permit branch retains the exact terminal owner"]
+pub enum CanonicalFreezePermitIssue<
+    O,
+    PP,
+    U,
+    T,
+    Proof,
+    CanonicalKind,
+    CanonicalTag,
+    EvidenceKind,
+    EvidenceTag,
+> where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    Ready(
+        CanonicalFreezePermit<
+            O,
+            PP,
+            U,
+            T,
+            Proof,
+            CanonicalKind,
+            CanonicalTag,
+            EvidenceKind,
+            EvidenceTag,
+        >,
+    ),
+    Interrupted(
+        RootedFailureEvidence<
+            O,
+            PP,
+            U,
+            CanonicalFreezeInterruption,
+            EvidenceKind,
+            EvidenceTag,
+            FrozenFailureState,
+        >,
+    ),
+    DestinationRejected(
+        RootedFailureEvidence<
+            O,
+            PP,
+            U,
+            CanonicalFreezeInterruption,
+            EvidenceKind,
+            EvidenceTag,
+            OrdinaryFailureState,
+        >,
+    ),
+}
+
+/// Stable typed classification for a final-progress or already-latched runtime interruption.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CanonicalFreezeInterruption {
+    class: CanonicalFreezeInterruptionClass,
+    stable_code: u32,
+}
+
+/// Trusted terminal class retained across generation admission.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CanonicalFreezeInterruptionClass {
+    Control,
+    ProductGraph,
+    Ledger,
+}
+
 /// Exact destination facts derived from a validated physical closure.
 ///
 /// These facts contain no applied or staged ledger commitment. U4e consumes them only after the
-/// matching freeze contribution and final eligibility are ready.
+/// matching freeze permit and final eligibility are ready.
 struct ZeroCommitDestinationFacts {
     _canonical_dimension: StoreDimensionKey,
     canonical_members: NonZeroU64,
@@ -1714,18 +1859,40 @@ impl ZeroCommitDestinationFacts {
 
 /// A centrally rejected canonical candidate with an eager-cleaned, rooted failure owner.
 #[must_use = "the rejected candidate must validate rich evidence or prepare fallback"]
-pub struct CentrallyRejectedCanonicalStoreSession<O, PP, U, E, EvidenceKind, EvidenceTag>
-where
+pub struct CentrallyRejectedCanonicalStoreSession<
+    O,
+    PP,
+    U,
+    E,
+    EvidenceKind,
+    EvidenceTag,
+    State = OrdinaryFailureState,
+> where
     O: OperationOwner,
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    root: RootedFailureEvidence<O, PP, U, StoreCanonicalRejection<E>, EvidenceKind, EvidenceTag>,
+    root: RootedFailureEvidence<
+        O,
+        PP,
+        U,
+        StoreCanonicalRejection<E>,
+        EvidenceKind,
+        EvidenceTag,
+        State,
+    >,
 }
 
 /// Rich-failure validation result for a centrally rejected canonical candidate.
-pub type CanonicalRejectionFailureValidation<O, PP, U, E, EvidenceKind, EvidenceTag> =
-    RootedFailureValidation<O, PP, U, StoreCanonicalRejection<E>, EvidenceKind, EvidenceTag>;
+pub type CanonicalRejectionFailureValidation<
+    O,
+    PP,
+    U,
+    E,
+    EvidenceKind,
+    EvidenceTag,
+    State = OrdinaryFailureState,
+> = RootedFailureValidation<O, PP, U, StoreCanonicalRejection<E>, EvidenceKind, EvidenceTag, State>;
 
 /// A centrally interrupted candidate with a trusted control or ledger cause.
 #[must_use = "the interrupted candidate must validate evidence or prepare fallback"]
@@ -1800,12 +1967,13 @@ where
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    raw: RawStoreFailureAssembly<O, PP, U>,
+    cause: Cause,
     domain: StoreKeyDomain,
     failure_code: PreparationFailureCode,
-    cause: Cause,
     failure_work: FailureEvidenceWorkBudget,
     outcome_evidence_destination_dimension: StoreDimensionKey,
+    // The physical owner must drop last so an untrusted cause panic is observed fail-closed.
+    raw: RawStoreFailureAssembly<O, PP, U>,
 }
 
 /// Verified post-activation rejection after eager canonical cleanup.
@@ -1835,48 +2003,132 @@ where
     failure_work: &'lane mut FailureEvidenceWorkBudget,
 }
 
+/// Marker for failure evidence whose exact commitment and final progress are not frozen yet.
+#[doc(hidden)]
+pub struct OrdinaryFailureState {
+    _private: (),
+}
+
+/// Marker for failure evidence frozen by the success-permit transition.
+#[doc(hidden)]
+pub struct FrozenFailureState {
+    _private: (),
+}
+
+trait FailureLifecycleState {
+    fn validate_commitment<O, PP, U, EvidenceKind, EvidenceTag>(
+        validated: &mut ValidatedStoreFailure<O, PP, U, EvidenceKind, EvidenceTag>,
+        outcome_evidence_destination_dimension: StoreDimensionKey,
+    ) -> Result<(), StoreRuntimeError>
+    where
+        O: OperationOwner,
+        PP: ProgressPhase,
+        U: ProgressUnit;
+}
+
+impl FailureLifecycleState for OrdinaryFailureState {
+    fn validate_commitment<O, PP, U, EvidenceKind, EvidenceTag>(
+        validated: &mut ValidatedStoreFailure<O, PP, U, EvidenceKind, EvidenceTag>,
+        outcome_evidence_destination_dimension: StoreDimensionKey,
+    ) -> Result<(), StoreRuntimeError>
+    where
+        O: OperationOwner,
+        PP: ProgressPhase,
+        U: ProgressUnit,
+    {
+        if validated.outcome_evidence_commitment_len() != 0 {
+            return Err(StoreRuntimeError::InvalidPublicationPlan);
+        }
+        validated.try_stage_exact_outcome_evidence(outcome_evidence_destination_dimension)
+    }
+}
+
+impl FailureLifecycleState for FrozenFailureState {
+    fn validate_commitment<O, PP, U, EvidenceKind, EvidenceTag>(
+        validated: &mut ValidatedStoreFailure<O, PP, U, EvidenceKind, EvidenceTag>,
+        _outcome_evidence_destination_dimension: StoreDimensionKey,
+    ) -> Result<(), StoreRuntimeError>
+    where
+        O: OperationOwner,
+        PP: ProgressPhase,
+        U: ProgressUnit,
+    {
+        if validated.outcome_evidence_commitment_len() == 1 {
+            Ok(())
+        } else {
+            Err(StoreRuntimeError::InvalidPublicationPlan)
+        }
+    }
+}
+
 /// Rooted failure evidence. No mutation API is exposed after the one-shot lane completes.
 #[must_use = "rooted failure evidence must be validated or prepared"]
-pub struct RootedFailureEvidence<O, PP, U, Cause, EvidenceKind, EvidenceTag>
-where
+pub struct RootedFailureEvidence<
+    O,
+    PP,
+    U,
+    Cause,
+    EvidenceKind,
+    EvidenceTag,
+    State = OrdinaryFailureState,
+> where
     O: OperationOwner,
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    failure: StoreFailureAssembly<O, PP, U, EvidenceKind, EvidenceTag>,
     cause: Cause,
     failure_work: FailureEvidenceWorkBudget,
     outcome_evidence_destination_dimension: StoreDimensionKey,
+    _lifecycle: PhantomData<State>,
+    // The physical owner must drop last so an untrusted cause panic is observed fail-closed.
+    failure: StoreFailureAssembly<O, PP, U, EvidenceKind, EvidenceTag>,
 }
 
 /// Result of validating an already-rooted failure graph.
 #[must_use = "the validated or rejected failure owner must be consumed"]
-pub enum RootedFailureValidation<O, PP, U, Cause, EvidenceKind, EvidenceTag>
-where
+pub enum RootedFailureValidation<
+    O,
+    PP,
+    U,
+    Cause,
+    EvidenceKind,
+    EvidenceTag,
+    State = OrdinaryFailureState,
+> where
     O: OperationOwner,
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    Valid(ValidatedFailureEvidence<O, PP, U, Cause, EvidenceKind, EvidenceTag>),
+    Valid(ValidatedFailureEvidence<O, PP, U, Cause, EvidenceKind, EvidenceTag, State>),
     Rejected(RejectedFailureEvidence<O, PP, U, Cause, EvidenceKind, EvidenceTag>),
     Fallback(VerifiedMinimalFallback<StoreRuntimeError>),
 }
 
 #[must_use = "validated failure evidence must be prepared or downgraded"]
-pub struct ValidatedFailureEvidence<O, PP, U, Cause, EvidenceKind, EvidenceTag>
-where
+pub struct ValidatedFailureEvidence<
+    O,
+    PP,
+    U,
+    Cause,
+    EvidenceKind,
+    EvidenceTag,
+    State = OrdinaryFailureState,
+> where
     O: OperationOwner,
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    validated: ValidatedStoreFailure<O, PP, U, EvidenceKind, EvidenceTag>,
     cause: Cause,
+    _lifecycle: PhantomData<State>,
+    // The physical owner must drop last so an untrusted cause panic is observed fail-closed.
+    validated: ValidatedStoreFailure<O, PP, U, EvidenceKind, EvidenceTag>,
 }
 
 #[must_use = "prepared failure evidence must be handed to the terminal publisher"]
 pub struct PreparedFailureEvidence<Cause, EvidenceKind, EvidenceTag> {
-    prepared: PreparedStoreFailureOutcome<EvidenceKind, EvidenceTag>,
     cause: Cause,
+    // The physical owner must drop last so an untrusted cause panic is observed fail-closed.
+    prepared: PreparedStoreFailureOutcome<EvidenceKind, EvidenceTag>,
 }
 
 #[must_use = "rejected failure evidence must prepare the minimal fallback"]
@@ -1886,15 +2138,17 @@ where
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    failure: StoreFailureAssembly<O, PP, U, EvidenceKind, EvidenceTag>,
     cause: Cause,
+    // The physical owner must drop last so an untrusted cause panic is observed fail-closed.
+    failure: StoreFailureAssembly<O, PP, U, EvidenceKind, EvidenceTag>,
 }
 
 /// Minimal fallback whose typed source cause remains available without exposing physical state.
 #[must_use = "the verified minimal fallback must be handed to the terminal publisher"]
 pub struct VerifiedMinimalFallback<Cause> {
-    prepared: PreparedStoreFallback,
     cause: Cause,
+    // The physical owner must drop last so an untrusted cause panic is observed fail-closed.
+    prepared: PreparedStoreFallback,
 }
 
 // Both variants are linear terminal owners. Boxing the larger owner would bypass the store ledger.
@@ -1935,12 +2189,13 @@ where
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    authority: NeverActivatedAuthority<O, PP, U, L>,
     cause: StoreNeverActivatedCause<E>,
     failure_code: PreparationFailureCode,
     outcome_evidence_plan: RetainedStoreBlockTablePlan,
     failure_work: FailureEvidenceWorkBudget,
     outcome_evidence_destination_dimension: StoreDimensionKey,
+    // The physical owner must drop last so an untrusted requested cause is observed fail-closed.
+    authority: NeverActivatedAuthority<O, PP, U, L>,
 }
 
 fn prepare_operation_minimal<O, PP, U, L, Cause>(

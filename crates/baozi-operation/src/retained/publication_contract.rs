@@ -56,10 +56,17 @@ pub(super) enum RetainedTerminalRequest<CanonicalBlock, EvidenceBlock, PP, U> {
         proof: RetainedSuccessClosureProof<CanonicalBlock, EvidenceBlock>,
         final_progress: super::FinalProgress<PP, U>,
     },
+    FrozenSuccess {
+        proof: RetainedSuccessClosureProof<CanonicalBlock, EvidenceBlock>,
+    },
     RichFailure {
         proof: RetainedEvidenceClosureProof<EvidenceBlock>,
         requested_cause: super::PreparationFailureCode,
         final_progress: super::FinalProgress<PP, U>,
+    },
+    FrozenRichFailure {
+        proof: RetainedEvidenceClosureProof<EvidenceBlock>,
+        requested_cause: super::PreparationFailureCode,
     },
     MinimalFallback {
         requested_cause: super::PreparationFailureCode,

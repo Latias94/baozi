@@ -1,3 +1,4 @@
+use std::cell::Cell;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use baozi_operation::{
@@ -188,6 +189,283 @@ fn sealed_activation_request_reaches_a_core_owned_validated_candidate() {
 
     drop(candidate);
     assert_eq!(account.snapshot().live_retained_allocations(), 0);
+}
+
+#[test]
+fn sealed_activation_joint_commit_hands_off_one_exact_generation() {
+    let factory = test_factory(1);
+    let account = test_account(&factory);
+    let nonce = AtomicU64::new(0);
+    let expected_generation = Cell::new(None);
+    let expected = authored_fixture();
+    let transition =
+        SceneConstructionOperation::with_account_for_activation(&account, test_limits())
+            .expect("explicit-account activation operation")
+            .activate_fresh_two_node(expected)
+            .expect("sealed core activation");
+    let candidate = match transition {
+        SceneActivationTransition::Candidate(candidate) => candidate,
+        SceneActivationTransition::Terminal(_) => {
+            panic!("valid activation must reach joint commit")
+        }
+    };
+
+    let prepared = candidate
+        .prepare_with_generation_source(|| {
+            let generation = SceneGenerationId::reserve_from(&nonce)?;
+            expected_generation.set(Some(generation.id()));
+            Ok(generation)
+        })
+        .expect("scoped joint commit must prepare exact success");
+    assert_eq!(nonce.load(Ordering::Relaxed), 1);
+    assert!(matches!(&prepared, PreparedSceneConstruction::Success(_)));
+    let before_handoff = account.snapshot();
+    let parts = success_parts(prepared.handoff());
+    assert_eq!(account.snapshot(), before_handoff);
+    assert_eq!(
+        parts.scene.generation(),
+        expected_generation
+            .get()
+            .expect("the successful reservation records its exact generation")
+    );
+    assert_eq!(parts.scene.authored_matrix(0), Some(expected.root()));
+    assert_eq!(parts.scene.authored_matrix(1), Some(expected.child()));
+    assert_eq!(nonce.load(Ordering::Relaxed), 1);
+
+    drop(parts);
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
+}
+
+#[test]
+fn sealed_activation_destination_rejection_skips_generation_reservation() {
+    let factory = test_factory(1);
+    let account = test_account(&factory);
+    let nonce = AtomicU64::new(0);
+    let mut limits = test_limits();
+    limits.committed_output = 0;
+    let transition = SceneConstructionOperation::with_account_for_activation(&account, limits)
+        .expect("zero-destination activation operation")
+        .activate_fresh_two_node(authored_fixture())
+        .expect("destination rejection remains contained");
+    let candidate = match transition {
+        SceneActivationTransition::Candidate(candidate) => candidate,
+        SceneActivationTransition::Terminal(_) => {
+            panic!("destination qualification belongs to the freeze-permit boundary")
+        }
+    };
+
+    let prepared = candidate
+        .prepare_with_generation_source(|| SceneGenerationId::reserve_from(&nonce))
+        .expect("destination rejection must preserve a prepared terminal");
+    assert_eq!(nonce.load(Ordering::Relaxed), 0);
+    match prepared.handoff() {
+        SceneConstructionTerminal::RichFailure(failure) => {
+            let terminal = match failure.ledger_evidence().header().terminal_cause() {
+                StoreTerminalCause::Failure(cause) => cause,
+                StoreTerminalCause::Success => {
+                    panic!("destination rejection must not report a success terminal")
+                }
+                _ => panic!("destination rejection reported an unknown terminal cause"),
+            };
+            assert_eq!(terminal.class(), StorePreparationFailureClass::Ledger);
+            assert_eq!(terminal.code(), 1);
+            drop(failure);
+        }
+        SceneConstructionTerminal::Success(_) => panic!("rejected destinations must not publish"),
+        SceneConstructionTerminal::MinimalFallback(_) => {
+            panic!("qualified destination rejection must retain rich evidence")
+        }
+    }
+    assert_eq!(nonce.load(Ordering::Relaxed), 0);
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
+}
+
+#[test]
+fn sealed_activation_frozen_interruption_skips_generation_reservation() {
+    let factory = test_factory(1);
+    let account = test_account(&factory);
+    let nonce = AtomicU64::new(0);
+    let cancellation = CancellationToken::new();
+    let transition = SceneConstructionOperation::with_account_and_cancellation_for_activation(
+        &account,
+        test_limits(),
+        cancellation.clone(),
+    )
+    .expect("cancellable activation operation")
+    .activate_fresh_two_node(authored_fixture())
+    .expect("sealed core activation");
+    let candidate = match transition {
+        SceneActivationTransition::Candidate(candidate) => candidate,
+        SceneActivationTransition::Terminal(_) => panic!("valid input must reach the candidate"),
+    };
+    cancellation.cancel();
+
+    let prepared = candidate
+        .prepare_with_generation_source(|| SceneGenerationId::reserve_from(&nonce))
+        .expect("frozen control interruption must preserve a terminal");
+    assert_eq!(nonce.load(Ordering::Relaxed), 0);
+    match prepared.handoff() {
+        SceneConstructionTerminal::RichFailure(failure) => {
+            let terminal = match failure.ledger_evidence().header().terminal_cause() {
+                StoreTerminalCause::Failure(cause) => cause,
+                StoreTerminalCause::Success => {
+                    panic!("interrupted activation must not report a success terminal")
+                }
+                _ => panic!("interrupted activation reported an unknown terminal cause"),
+            };
+            assert_eq!(terminal.class(), StorePreparationFailureClass::Control);
+            assert_eq!(terminal.code(), 1);
+            drop(failure);
+        }
+        SceneConstructionTerminal::Success(_) => panic!("interrupted activation must not publish"),
+        SceneConstructionTerminal::MinimalFallback(_) => {
+            panic!("qualified control interruption must retain rich evidence")
+        }
+    }
+    assert_eq!(nonce.load(Ordering::Relaxed), 0);
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
+}
+
+#[test]
+fn dropping_prepared_activation_success_burns_one_invisible_gap() {
+    let factory = test_factory(1);
+    let account = test_account(&factory);
+    let nonce = AtomicU64::new(0);
+    let transition =
+        SceneConstructionOperation::with_account_for_activation(&account, test_limits())
+            .expect("activation operation")
+            .activate_fresh_two_node(authored_fixture())
+            .expect("sealed core activation");
+    let candidate = match transition {
+        SceneActivationTransition::Candidate(candidate) => candidate,
+        SceneActivationTransition::Terminal(_) => panic!("valid input must reach the candidate"),
+    };
+    let prepared = candidate
+        .prepare_with_generation_source(|| SceneGenerationId::reserve_from(&nonce))
+        .expect("joint commit must prepare success");
+    assert!(matches!(&prepared, PreparedSceneConstruction::Success(_)));
+    assert_eq!(nonce.load(Ordering::Relaxed), 1);
+    let before_drop = account.snapshot();
+    drop(prepared);
+    let after_drop = account.snapshot();
+    assert!(!after_drop.poisoned());
+    assert_eq!(after_drop.live_retained_bytes(), 0);
+    assert_eq!(after_drop.live_retained_allocations(), 0);
+    assert_eq!(
+        after_drop.total_admitted_retained_bytes(),
+        before_drop.total_admitted_retained_bytes()
+    );
+    assert_eq!(
+        after_drop.total_admitted_retained_allocations(),
+        before_drop.total_admitted_retained_allocations()
+    );
+    assert_eq!(
+        after_drop.poison_event_count(),
+        before_drop.poison_event_count()
+    );
+
+    let next = SceneConstructionOperation::with_account_for_activation(&account, test_limits())
+        .expect("next activation operation")
+        .activate_fresh_two_node(authored_fixture())
+        .expect("next sealed activation");
+    let candidate = match next {
+        SceneActivationTransition::Candidate(candidate) => candidate,
+        SceneActivationTransition::Terminal(_) => panic!("next input must reach the candidate"),
+    };
+    let prepared = candidate
+        .prepare_with_generation_source(|| SceneGenerationId::reserve_from(&nonce))
+        .expect("next joint commit must succeed");
+    assert_eq!(nonce.load(Ordering::Relaxed), 2);
+    drop(success_scene(prepared.handoff()));
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
+}
+
+#[test]
+fn sealed_activation_generation_exhaustion_never_publishes_or_consumes_nonce() {
+    let factory = test_factory(1);
+    let account = test_account(&factory);
+    let nonce = AtomicU64::new(u64::MAX);
+    let transition =
+        SceneConstructionOperation::with_account_for_activation(&account, test_limits())
+            .expect("explicit-account activation operation")
+            .activate_fresh_two_node(authored_fixture())
+            .expect("sealed core activation");
+    let candidate = match transition {
+        SceneActivationTransition::Candidate(candidate) => candidate,
+        SceneActivationTransition::Terminal(_) => {
+            panic!("valid activation must reach joint commit")
+        }
+    };
+
+    let prepared = candidate
+        .prepare_with_generation_source(|| SceneGenerationId::reserve_from(&nonce))
+        .expect("generation exhaustion must preserve a prepared terminal");
+    assert_eq!(nonce.load(Ordering::Relaxed), u64::MAX);
+    match prepared.handoff() {
+        SceneConstructionTerminal::RichFailure(failure) => {
+            let terminal = match failure.ledger_evidence().header().terminal_cause() {
+                StoreTerminalCause::Failure(cause) => cause,
+                StoreTerminalCause::Success => {
+                    panic!("generation exhaustion must not report a success terminal")
+                }
+                _ => panic!("generation exhaustion reported an unknown terminal cause"),
+            };
+            assert_eq!(terminal.class(), StorePreparationFailureClass::Requested);
+            assert_eq!(terminal.code(), 0x5343_0003);
+            drop(failure);
+        }
+        SceneConstructionTerminal::Success(_) => panic!("generation exhaustion must not publish"),
+        SceneConstructionTerminal::MinimalFallback(_) => {
+            panic!("qualified generation exhaustion must retain rich evidence")
+        }
+    }
+    assert_eq!(nonce.load(Ordering::Relaxed), u64::MAX);
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
+}
+
+#[test]
+fn generation_source_panic_after_reservation_burns_the_gap_and_fails_closed() {
+    let factory = test_factory(1);
+    let account = test_account(&factory);
+    let nonce = AtomicU64::new(0);
+    let transition =
+        SceneConstructionOperation::with_account_for_activation(&account, test_limits())
+            .expect("explicit-account activation operation")
+            .activate_fresh_two_node(authored_fixture())
+            .expect("sealed core activation");
+    let candidate = match transition {
+        SceneActivationTransition::Candidate(candidate) => candidate,
+        SceneActivationTransition::Terminal(_) => {
+            panic!("valid activation must reach the generation boundary")
+        }
+    };
+    let before = account.snapshot();
+
+    let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _ = candidate.prepare_with_generation_source(|| {
+            let _generation = SceneGenerationId::reserve_from(&nonce)
+                .expect("the injected generation reservation must succeed");
+            panic!("injected generation source panic after reservation")
+        });
+    }));
+
+    assert!(panic.is_err());
+    assert_eq!(nonce.load(Ordering::Relaxed), 1);
+    let after = account.snapshot();
+    assert!(after.poisoned());
+    assert_eq!(after.live_retained_bytes(), before.live_retained_bytes());
+    assert_eq!(
+        after.live_retained_allocations(),
+        before.live_retained_allocations()
+    );
+    assert_eq!(
+        after.total_admitted_retained_bytes(),
+        before.total_admitted_retained_bytes()
+    );
+    assert_eq!(
+        after.total_admitted_retained_allocations(),
+        before.total_admitted_retained_allocations()
+    );
 }
 
 #[test]

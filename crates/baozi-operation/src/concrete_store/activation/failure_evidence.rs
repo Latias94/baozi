@@ -1376,12 +1376,17 @@ where
     }
 }
 
-impl<O, PP, U, Cause, EvidenceKind, EvidenceTag>
-    RootedFailureEvidence<O, PP, U, Cause, EvidenceKind, EvidenceTag>
+#[allow(
+    private_bounds,
+    reason = "public failure typestates are sealed by the crate-private lifecycle contract"
+)]
+impl<O, PP, U, Cause, EvidenceKind, EvidenceTag, State>
+    RootedFailureEvidence<O, PP, U, Cause, EvidenceKind, EvidenceTag, State>
 where
     O: OperationOwner,
     PP: ProgressPhase,
     U: ProgressUnit,
+    State: FailureLifecycleState,
 {
     pub const fn cause(&self) -> &Cause {
         &self.cause
@@ -1391,6 +1396,10 @@ where
         self.failure.outcome_evidence_len()
     }
 
+    #[allow(
+        clippy::type_complexity,
+        reason = "The typestate result preserves the exact cause and failure lifecycle state."
+    )]
     pub fn validate_rich_failure(
         self,
         validate: impl for<'session, 'storage, 'control> FnMut(
@@ -1398,7 +1407,7 @@ where
             FailureEvidenceMember<'session, EvidenceKind, EvidenceTag>,
         ) -> bool,
     ) -> Result<
-        RootedFailureValidation<O, PP, U, Cause, EvidenceKind, EvidenceTag>,
+        RootedFailureValidation<O, PP, U, Cause, EvidenceKind, EvidenceTag, State>,
         StoreActivationContainment,
     >
     where
@@ -1410,6 +1419,7 @@ where
             cause,
             failure_work,
             outcome_evidence_destination_dimension,
+            _lifecycle: _,
         } = self;
         let cause = ManuallyDrop::new(cause);
         let evidence_root = failure.evidence_root();
@@ -1508,12 +1518,14 @@ where
         }
         match validation {
             StoreFailureValidation::Valid(mut validated) => {
-                match validated
-                    .try_stage_exact_outcome_evidence(outcome_evidence_destination_dimension)
-                {
+                match State::validate_commitment(
+                    &mut validated,
+                    outcome_evidence_destination_dimension,
+                ) {
                     Ok(()) => Ok(RootedFailureValidation::Valid(ValidatedFailureEvidence {
                         validated,
                         cause: ManuallyDrop::into_inner(cause),
+                        _lifecycle: PhantomData,
                     })),
                     Err(runtime_cause) => {
                         if matches!(
@@ -1575,6 +1587,7 @@ where
             cause,
             failure_work: _,
             outcome_evidence_destination_dimension: _,
+            _lifecycle: _,
         } = self;
         let cause = ManuallyDrop::new(cause);
         let prepared = failure.prepare_minimal_fallback();
@@ -1592,21 +1605,21 @@ where
 }
 
 impl<O, PP, U, Cause, EvidenceKind, EvidenceTag>
-    ValidatedFailureEvidence<O, PP, U, Cause, EvidenceKind, EvidenceTag>
+    ValidatedFailureEvidence<O, PP, U, Cause, EvidenceKind, EvidenceTag, OrdinaryFailureState>
 where
     O: OperationOwner,
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    pub const fn cause(&self) -> &Cause {
-        &self.cause
-    }
-
     pub fn try_prepare(
         self,
         final_progress: FinalProgress<PP, U>,
     ) -> Result<PreparedFailureEvidence<Cause, EvidenceKind, EvidenceTag>, StorePrepareError> {
-        let Self { validated, cause } = self;
+        let Self {
+            validated,
+            cause,
+            _lifecycle: _,
+        } = self;
         let cause = ManuallyDrop::new(cause);
         let prepared = validated.try_prepare(0, final_progress);
         match prepared {
@@ -1620,11 +1633,57 @@ where
             }
         }
     }
+}
+
+impl<O, PP, U, Cause, EvidenceKind, EvidenceTag>
+    ValidatedFailureEvidence<O, PP, U, Cause, EvidenceKind, EvidenceTag, FrozenFailureState>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    pub fn try_prepare_frozen(
+        self,
+    ) -> Result<PreparedFailureEvidence<Cause, EvidenceKind, EvidenceTag>, StorePrepareError> {
+        let Self {
+            validated,
+            cause,
+            _lifecycle: _,
+        } = self;
+        let cause = ManuallyDrop::new(cause);
+        let prepared = validated.try_prepare_frozen();
+        match prepared {
+            Ok(prepared) => Ok(PreparedFailureEvidence {
+                prepared,
+                cause: ManuallyDrop::into_inner(cause),
+            }),
+            Err(error) => {
+                let _ = drop_scoped_value(ManuallyDrop::into_inner(cause));
+                Err(error)
+            }
+        }
+    }
+}
+
+impl<O, PP, U, Cause, EvidenceKind, EvidenceTag, State>
+    ValidatedFailureEvidence<O, PP, U, Cause, EvidenceKind, EvidenceTag, State>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    pub const fn cause(&self) -> &Cause {
+        &self.cause
+    }
 
     pub fn prepare_minimal_fallback(
         self,
     ) -> Result<VerifiedMinimalFallback<Cause>, StorePrepareError> {
-        let Self { validated, cause } = self;
+        let Self {
+            validated,
+            cause,
+            _lifecycle: _,
+        } = self;
         let cause = ManuallyDrop::new(cause);
         let prepared = validated.prepare_minimal_fallback();
         match prepared {
@@ -1836,6 +1895,7 @@ where
             cause: ManuallyDrop::into_inner(cause),
             failure_work,
             outcome_evidence_destination_dimension,
+            _lifecycle: PhantomData::<OrdinaryFailureState>,
         }))
     }
 }

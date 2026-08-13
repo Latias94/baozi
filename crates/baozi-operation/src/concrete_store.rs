@@ -134,7 +134,11 @@ use crate::owner::OperationOwner;
 #[cfg(test)]
 use crate::retained::RetainedAllocationError;
 #[cfg(feature = "_u4-activation")]
-use crate::retained::{BlockEmplacer, BlockPlacement, BorrowedRetainedWorkPermit};
+use crate::retained::{
+    BlockEmplacer, BlockPlacement, BorrowedRetainedWorkPermit, RetainedSuccessFreezeContribution,
+    RetainedSuccessFreezePermit, RetainedSuccessFreezePermitIssue,
+    RetainedSuccessJointCommitFormation, RetainedSuccessJointCommitIntent,
+};
 use crate::retained::{
     CanonicalLeafInheritanceError, CanonicalRetainedLeafPolicy, CanonicalRetainedRewriteMap,
     CanonicalRetainedSlot, CanonicalSourceBindError, FinalizationContainmentError,
@@ -151,6 +155,8 @@ use crate::u4c_collector::{
     record_payload_copy_bytes, record_reference_write, record_semantic_cell_write,
     record_semantic_cell_writes,
 };
+#[cfg(feature = "_u4-activation")]
+use terminal_output::prepared_store_success_from_raw;
 use terminal_output::{
     classify_prepared_failure, classify_prepared_fallback, classify_prepared_success,
     read_canonical_source_bytes, read_canonical_source_records, read_canonical_source_sequence,
@@ -4315,6 +4321,74 @@ where
         self.raw.contain_activation_fault()
     }
 
+    #[cfg(feature = "_u4-activation")]
+    #[allow(
+        clippy::type_complexity,
+        reason = "the crate-private activation result preserves every linear owner across the exact branch set"
+    )]
+    pub(super) fn try_issue_freeze_permit(
+        self,
+        canonical_dimension: StoreDimensionKey,
+        outcome_evidence_dimension: StoreDimensionKey,
+        final_progress: FinalProgress<PP, U>,
+    ) -> Result<
+        StoreSuccessFreezePermitIssue<
+            O,
+            PP,
+            U,
+            CanonicalKind,
+            CanonicalTag,
+            EvidenceKind,
+            EvidenceTag,
+        >,
+        FinalizationContainmentError,
+    > {
+        let Self {
+            raw,
+            canonical_root,
+            evidence_root,
+            domain,
+        } = self;
+        match raw.try_issue_freeze_permit(
+            canonical_dimension,
+            outcome_evidence_dimension,
+            final_progress,
+        )? {
+            RetainedSuccessFreezePermitIssue::Ready(raw) => Ok(
+                StoreSuccessFreezePermitIssue::Ready(StoreSuccessFreezePermit {
+                    raw,
+                    canonical_root,
+                    evidence_root,
+                    domain,
+                }),
+            ),
+            RetainedSuccessFreezePermitIssue::RichFailure { failure, cause } => {
+                Ok(StoreSuccessFreezePermitIssue::RichFailure {
+                    failure: StoreFailureAssembly {
+                        raw: failure,
+                        fallback_only: false,
+                        forced_cause: Some(cause),
+                        evidence_root,
+                        domain,
+                    },
+                    cause,
+                })
+            }
+            RetainedSuccessFreezePermitIssue::DestinationRejected { failure, cause } => {
+                Ok(StoreSuccessFreezePermitIssue::DestinationRejected {
+                    failure: StoreFailureAssembly {
+                        raw: failure,
+                        fallback_only: false,
+                        forced_cause: Some(cause),
+                        evidence_root,
+                        domain,
+                    },
+                    cause,
+                })
+            }
+        }
+    }
+
     /// Consumes a validated success after a later domain admission rejects canonical publication.
     ///
     /// The evidence root is preserved for bounded detail appends and rich-failure revalidation.
@@ -4358,6 +4432,276 @@ where
             .prepare_minimal_fallback()
             .map(|raw| classify_prepared_fallback(raw, domain))
             .map_err(StorePrepareError::from_raw)
+    }
+}
+
+#[cfg(feature = "_u4-activation")]
+type RawStoreSuccessFreezePermit<O, PP, U> = RetainedSuccessFreezePermit<
+    O,
+    StorePhaseKey,
+    PP,
+    U,
+    StoreDimensionKey,
+    StoreFallbackEnvelope,
+    StoredBlock,
+    StoredBlock,
+>;
+
+#[cfg(feature = "_u4-activation")]
+type RawStoreSuccessFreezeContribution<O, PP, U> = RetainedSuccessFreezeContribution<
+    O,
+    StorePhaseKey,
+    PP,
+    U,
+    StoreDimensionKey,
+    StoreFallbackEnvelope,
+    StoredBlock,
+    StoredBlock,
+>;
+
+#[cfg(feature = "_u4-activation")]
+type RawStoreSuccessJointCommitIntent<O> = RetainedSuccessJointCommitIntent<
+    O,
+    StorePhaseKey,
+    StoreDimensionKey,
+    StoreFallbackEnvelope,
+    StoredBlock,
+    StoredBlock,
+>;
+
+#[cfg(feature = "_u4-activation")]
+pub(super) struct StoreSuccessFreezePermit<
+    O,
+    PP,
+    U,
+    CanonicalKind,
+    CanonicalTag,
+    EvidenceKind,
+    EvidenceTag,
+> where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    raw: RawStoreSuccessFreezePermit<O, PP, U>,
+    canonical_root: CanonicalStoreRef<CanonicalKind, CanonicalTag>,
+    evidence_root: OutcomeEvidenceStoreRef<EvidenceKind, EvidenceTag>,
+    domain: StoreKeyDomain,
+}
+
+#[cfg(feature = "_u4-activation")]
+pub(super) enum StoreSuccessFreezePermitIssue<
+    O,
+    PP,
+    U,
+    CanonicalKind,
+    CanonicalTag,
+    EvidenceKind,
+    EvidenceTag,
+> where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    Ready(
+        StoreSuccessFreezePermit<O, PP, U, CanonicalKind, CanonicalTag, EvidenceKind, EvidenceTag>,
+    ),
+    RichFailure {
+        failure: StoreFailureAssembly<O, PP, U, EvidenceKind, EvidenceTag>,
+        cause: PreparationFailureCode,
+    },
+    DestinationRejected {
+        failure: StoreFailureAssembly<O, PP, U, EvidenceKind, EvidenceTag>,
+        cause: PreparationFailureCode,
+    },
+}
+
+#[cfg(feature = "_u4-activation")]
+pub(super) struct StoreSuccessFreezeContribution<
+    O,
+    PP,
+    U,
+    CanonicalKind,
+    CanonicalTag,
+    EvidenceKind,
+    EvidenceTag,
+> where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    raw: RawStoreSuccessFreezeContribution<O, PP, U>,
+    canonical_root: CanonicalStoreRef<CanonicalKind, CanonicalTag>,
+    evidence_root: OutcomeEvidenceStoreRef<EvidenceKind, EvidenceTag>,
+    domain: StoreKeyDomain,
+}
+
+#[cfg(feature = "_u4-activation")]
+pub(super) struct StoreSuccessJointCommitIntent<
+    O,
+    CanonicalKind,
+    CanonicalTag,
+    EvidenceKind,
+    EvidenceTag,
+> where
+    O: OperationOwner,
+{
+    raw: RawStoreSuccessJointCommitIntent<O>,
+    canonical_root: CanonicalStoreRef<CanonicalKind, CanonicalTag>,
+    evidence_root: OutcomeEvidenceStoreRef<EvidenceKind, EvidenceTag>,
+    domain: StoreKeyDomain,
+}
+
+#[cfg(feature = "_u4-activation")]
+#[must_use = "joint-commit formation retains the exact success or prepared failure owner"]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "The intent owns the exact retained publication batches; boxing would add an allocation on the no-fail handoff path."
+)]
+pub(super) enum StoreSuccessJointCommitFormation<
+    O,
+    CanonicalKind,
+    CanonicalTag,
+    EvidenceKind,
+    EvidenceTag,
+> where
+    O: OperationOwner,
+{
+    Intent(
+        StoreSuccessJointCommitIntent<O, CanonicalKind, CanonicalTag, EvidenceKind, EvidenceTag>,
+    ),
+    PreparedFailure(PreparedStoreFailureOutcome<EvidenceKind, EvidenceTag>),
+}
+
+#[cfg(feature = "_u4-activation")]
+impl<O, PP, U, CanonicalKind, CanonicalTag, EvidenceKind, EvidenceTag>
+    StoreSuccessFreezePermit<O, PP, U, CanonicalKind, CanonicalTag, EvidenceKind, EvidenceTag>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    pub(super) fn contain_activation_fault(self) -> FinalizationContainmentError {
+        self.raw.contain_activation_fault()
+    }
+
+    pub(super) fn terminal_observation(
+        &self,
+        dimension: StoreDimensionKey,
+    ) -> Option<crate::ledger::DimensionSnapshot> {
+        self.raw.terminal_observation(dimension)
+    }
+
+    pub(super) fn reject_generation(
+        self,
+        stable_code: u32,
+    ) -> Result<
+        StoreFailureAssembly<O, PP, U, EvidenceKind, EvidenceTag>,
+        FinalizationContainmentError,
+    > {
+        let cause = PreparationFailureCode::domain(stable_code);
+        Ok(StoreFailureAssembly {
+            raw: self.raw.reject_generation(cause)?,
+            fallback_only: false,
+            forced_cause: Some(cause),
+            evidence_root: self.evidence_root,
+            domain: self.domain,
+        })
+    }
+
+    pub(super) fn into_contribution(
+        self,
+    ) -> StoreSuccessFreezeContribution<
+        O,
+        PP,
+        U,
+        CanonicalKind,
+        CanonicalTag,
+        EvidenceKind,
+        EvidenceTag,
+    > {
+        StoreSuccessFreezeContribution {
+            raw: self.raw.into_contribution(),
+            canonical_root: self.canonical_root,
+            evidence_root: self.evidence_root,
+            domain: self.domain,
+        }
+    }
+}
+
+#[cfg(feature = "_u4-activation")]
+impl<O, PP, U, CanonicalKind, CanonicalTag, EvidenceKind, EvidenceTag>
+    StoreSuccessFreezeContribution<O, PP, U, CanonicalKind, CanonicalTag, EvidenceKind, EvidenceTag>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    pub(super) fn prepare(
+        self,
+    ) -> Result<
+        PreparedStoreSuccessOutcome<CanonicalKind, CanonicalTag, EvidenceKind, EvidenceTag>,
+        FinalizationContainmentError,
+    > {
+        match self
+            .try_form_joint_commit_intent()
+            .map_err(|error| match error {
+                RetainedPublicationPrepareError::FinalizationContainment(cause) => cause,
+            })? {
+            StoreSuccessJointCommitFormation::Intent(intent) => intent
+                .qualify_and_commit()
+                .map(PreparedStoreSuccessOutcome::Success),
+            StoreSuccessJointCommitFormation::PreparedFailure(
+                PreparedStoreFailureOutcome::RichFailure(prepared),
+            ) => Ok(PreparedStoreSuccessOutcome::RichFailure(prepared)),
+            StoreSuccessJointCommitFormation::PreparedFailure(
+                PreparedStoreFailureOutcome::MinimalFallback(prepared),
+            ) => Ok(PreparedStoreSuccessOutcome::MinimalFallback(prepared)),
+        }
+    }
+
+    fn try_form_joint_commit_intent(
+        self,
+    ) -> Result<
+        StoreSuccessJointCommitFormation<O, CanonicalKind, CanonicalTag, EvidenceKind, EvidenceTag>,
+        RetainedPublicationPrepareError,
+    > {
+        match self.raw.try_form_joint_commit_intent()? {
+            RetainedSuccessJointCommitFormation::Intent(raw) => Ok(
+                StoreSuccessJointCommitFormation::Intent(StoreSuccessJointCommitIntent {
+                    raw,
+                    canonical_root: self.canonical_root,
+                    evidence_root: self.evidence_root,
+                    domain: self.domain,
+                }),
+            ),
+            RetainedSuccessJointCommitFormation::PreparedFailure(raw) => {
+                Ok(StoreSuccessJointCommitFormation::PreparedFailure(
+                    classify_prepared_failure(raw, self.evidence_root, self.domain),
+                ))
+            }
+        }
+    }
+}
+
+#[cfg(feature = "_u4-activation")]
+impl<O, CanonicalKind, CanonicalTag, EvidenceKind, EvidenceTag>
+    StoreSuccessJointCommitIntent<O, CanonicalKind, CanonicalTag, EvidenceKind, EvidenceTag>
+where
+    O: OperationOwner,
+{
+    fn qualify_and_commit(
+        self,
+    ) -> Result<
+        PreparedStoreSuccess<CanonicalKind, CanonicalTag, EvidenceKind, EvidenceTag>,
+        FinalizationContainmentError,
+    > {
+        Ok(prepared_store_success_from_raw(
+            self.raw.qualify_and_commit_frozen_exact()?,
+            self.canonical_root,
+            self.evidence_root,
+            self.domain,
+        ))
     }
 }
 
@@ -4784,6 +5128,11 @@ where
     U: ProgressUnit,
 {
     #[cfg(feature = "_u4-activation")]
+    pub(super) fn outcome_evidence_commitment_len(&self) -> usize {
+        self.raw.outcome_evidence_commitment_len()
+    }
+
+    #[cfg(feature = "_u4-activation")]
     pub(super) fn try_stage_exact_outcome_evidence(
         &mut self,
         dimension: StoreDimensionKey,
@@ -4838,6 +5187,21 @@ where
             None => raw.prepare_minimal_fallback(),
         };
         raw.map(|raw| classify_prepared_fallback(raw, domain))
+            .map_err(StorePrepareError::from_raw)
+    }
+
+    #[cfg(feature = "_u4-activation")]
+    pub(super) fn try_prepare_frozen(
+        self,
+    ) -> Result<PreparedStoreFailureOutcome<EvidenceKind, EvidenceTag>, StorePrepareError> {
+        let Self {
+            raw,
+            forced_cause,
+            evidence_root,
+            domain,
+        } = self;
+        raw.try_prepare_frozen(forced_cause.unwrap_or(PreparationFailureCode::domain(0)))
+            .map(|raw| classify_prepared_failure(raw, evidence_root, domain))
             .map_err(StorePrepareError::from_raw)
     }
 }

@@ -28,7 +28,7 @@ pub(super) type RawPreparedStore = PreparedRetainedPublication<
     StorePhaseKey,
     StoreDimensionKey,
 >;
-type RawPreparedStoreSuccess =
+pub(super) type RawPreparedStoreSuccess =
     PreparedRetainedSuccess<StoredBlock, StoredBlock, StorePhaseKey, StoreDimensionKey>;
 type RawPreparedStoreFailure =
     PreparedRetainedRichFailure<StoredBlock, StorePhaseKey, StoreDimensionKey>;
@@ -235,6 +235,26 @@ pub(super) fn classify_prepared_success<CanonicalKind, CanonicalTag, EvidenceKin
         PreparedRetainedPublicationOutcome::MinimalFallback(raw) => {
             PreparedStoreSuccessOutcome::MinimalFallback(PreparedStoreFallback { raw, domain })
         }
+    }
+}
+
+#[cfg(feature = "_u4-activation")]
+pub(super) fn prepared_store_success_from_raw<
+    CanonicalKind,
+    CanonicalTag,
+    EvidenceKind,
+    EvidenceTag,
+>(
+    raw: RawPreparedStoreSuccess,
+    canonical_root: CanonicalStoreRef<CanonicalKind, CanonicalTag>,
+    evidence_root: OutcomeEvidenceStoreRef<EvidenceKind, EvidenceTag>,
+    domain: StoreKeyDomain,
+) -> PreparedStoreSuccess<CanonicalKind, CanonicalTag, EvidenceKind, EvidenceTag> {
+    PreparedStoreSuccess {
+        raw,
+        canonical_root,
+        evidence_root,
+        domain,
     }
 }
 

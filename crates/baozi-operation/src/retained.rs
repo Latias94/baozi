@@ -25,6 +25,8 @@ mod terminal_output;
 use crate::OperationControl;
 use crate::control::discard_untrusted_panic_payload;
 use crate::coordinator::{FinalProgress, OperationCoordinator};
+#[cfg(feature = "_u4-activation")]
+use crate::ledger::CommitmentPairPushError;
 #[cfg(test)]
 use crate::ledger::{AttributionBatchCreateError, LedgerLimits};
 use crate::ledger::{
@@ -132,9 +134,10 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::sync::{Mutex, MutexGuard};
 pub(crate) use terminal::RetainedPublicationPrepareError;
+pub(crate) use terminal::RetainedSuccessJointCommitIntent;
 use terminal::{
     DetachedTerminalEvidenceQualification, FreezeReadyDetachedTerminalEvidence,
-    PrimaryPublicationBatches, QualifiedDetachedTerminalEvidence, RetainedSuccessJointCommitIntent,
+    FrozenSuccessPrimaryTransition, PrimaryPublicationBatches, QualifiedDetachedTerminalEvidence,
     TerminalFallbackAttribution, TerminalFallbackGuard, TerminalPhysicalOwnershipManifest,
     TerminalPrimaryGuard, TerminalPrimaryTransition, drop_retained_table_with_account_anchor,
     prepare_terminal_control, terminal_evidence_catalog_is_qualified,
@@ -339,6 +342,83 @@ where
 {
     assembly: RetainedPublicationAssembly<O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>,
     proof: RetainedSuccessClosureProof<CanonicalBlock, EvidenceBlock>,
+}
+
+/// Success closure after exact destinations and final progress are sealed for generation.
+#[cfg(feature = "_u4-activation")]
+#[must_use = "the freeze permit must be downgraded or converted into a joint-commit contribution"]
+pub(crate) struct RetainedSuccessFreezePermit<O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+    D: Copy + Ord + fmt::Debug + Send + Sync + 'static,
+    F: Send + Sync + 'static,
+    CanonicalBlock: Send + Sync + 'static,
+    EvidenceBlock: Send + Sync + 'static,
+{
+    validated: ValidatedRetainedSuccess<O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>,
+}
+
+/// Operation-only success owner released after the core accepts one generation identity.
+#[cfg(feature = "_u4-activation")]
+#[must_use = "the freeze contribution must form the exact joint-commit intent"]
+pub(crate) struct RetainedSuccessFreezeContribution<
+    O,
+    P,
+    PP,
+    U,
+    D,
+    F,
+    CanonicalBlock,
+    EvidenceBlock,
+> where
+    O: OperationOwner,
+    P: Copy + Ord,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+    D: Copy + Ord + fmt::Debug + Send + Sync + 'static,
+    F: Send + Sync + 'static,
+    CanonicalBlock: Send + Sync + 'static,
+    EvidenceBlock: Send + Sync + 'static,
+{
+    validated: ValidatedRetainedSuccess<O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>,
+}
+
+#[cfg(feature = "_u4-activation")]
+#[must_use = "every freeze-permit branch retains the exact publication owner"]
+pub(crate) enum RetainedSuccessFreezePermitIssue<O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+    D: Copy + Ord + fmt::Debug + Send + Sync + 'static,
+    F: Send + Sync + 'static,
+    CanonicalBlock: Send + Sync + 'static,
+    EvidenceBlock: Send + Sync + 'static,
+{
+    Ready(RetainedSuccessFreezePermit<O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>),
+    RichFailure {
+        failure: RetainedFailureAssembly<O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>,
+        cause: PreparationFailureCode,
+    },
+    DestinationRejected {
+        failure: RetainedFailureAssembly<O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>,
+        cause: PreparationFailureCode,
+    },
+}
+
+#[cfg(all(test, feature = "_u4-activation"))]
+enum FreezePermitQualificationProbe<D> {
+    Ready,
+    Rejected {
+        cause: CommitmentPairPushError<D>,
+        canonical_commitments: usize,
+        outcome_evidence_commitments: usize,
+        dimension: DimensionSnapshot,
+    },
 }
 
 #[must_use = "joint-commit formation retains the exact success or failure owner"]
@@ -705,7 +785,6 @@ where
         Ok(())
     }
 
-    #[cfg(feature = "_u4-activation")]
     fn canonical_ownership_is_absent(&self) -> bool {
         self.canonical_plan.is_none()
             && self.canonical_table.is_none()
@@ -2453,6 +2532,7 @@ where
             ));
         }
 
+        let frozen_success = matches!(&request, RetainedTerminalRequest::FrozenSuccess { .. });
         let terminal = match request {
             RetainedTerminalRequest::Success {
                 proof,
@@ -2509,6 +2589,41 @@ where
                     },
                 )
             }
+            RetainedTerminalRequest::FrozenSuccess { proof } => {
+                let proof_valid = self.mode == RetainedOutcomeMode::SuccessCapable
+                    && proof.set_id == self.set_id
+                    && self.canonical_commitment_len() == 1
+                    && self.outcome_evidence_commitment_len() == 1
+                    && self.canonical_table.as_ref().is_some_and(|table| {
+                        table.as_ref().member_count() == proof.canonical_count
+                            && table
+                                .as_ref()
+                                .member(proof.canonical_root, self.set_id)
+                                .is_some()
+                    })
+                    && self.evidence_table.as_ref().is_some_and(|table| {
+                        table.as_ref().member_count() == proof.evidence_count
+                            && table
+                                .as_ref()
+                                .member(proof.evidence_root, self.set_id)
+                                .is_some()
+                    });
+                let no_late_cause = self
+                    .operation
+                    .as_ref()
+                    .is_some_and(|operation| operation.sticky_terminal_cause().is_none());
+                if !proof_valid || !no_late_cause {
+                    let cause =
+                        self.poison_and_fail_closed(AccountPoisonReason::OwnershipGraphUnverified);
+                    return Err(RetainedPublicationPrepareError::FinalizationContainment(
+                        cause,
+                    ));
+                }
+                RetainedTerminalMode::Success {
+                    canonical_root: proof.canonical_root,
+                    evidence_root: proof.evidence_root,
+                }
+            }
             RetainedTerminalRequest::RichFailure {
                 proof,
                 requested_cause,
@@ -2549,6 +2664,38 @@ where
                 RetainedTerminalMode::RichFailure {
                     evidence_root: proof.evidence_root,
                     cause: terminal_cause.unwrap_or(requested_cause),
+                }
+            }
+            RetainedTerminalRequest::FrozenRichFailure {
+                proof,
+                requested_cause,
+            } => {
+                let proof_valid = self.mode == RetainedOutcomeMode::FailureOnly
+                    && proof.set_id == self.set_id
+                    && self.canonical_ownership_is_absent()
+                    && self.outcome_evidence_commitment_len() == 1
+                    && self.evidence_table.as_ref().is_some_and(|table| {
+                        table.as_ref().member_count() == proof.evidence_count
+                            && table
+                                .as_ref()
+                                .member(proof.evidence_root, self.set_id)
+                                .is_some()
+                    });
+                let terminal_cause = self
+                    .operation
+                    .as_ref()
+                    .and_then(|operation| operation.sticky_terminal_cause())
+                    .unwrap_or(requested_cause);
+                if !proof_valid {
+                    let cause =
+                        self.poison_and_fail_closed(AccountPoisonReason::OwnershipGraphUnverified);
+                    return Err(RetainedPublicationPrepareError::FinalizationContainment(
+                        cause,
+                    ));
+                }
+                RetainedTerminalMode::RichFailure {
+                    evidence_root: proof.evidence_root,
+                    cause: terminal_cause,
                 }
             }
             RetainedTerminalRequest::MinimalFallback { requested_cause } => {
@@ -2623,13 +2770,21 @@ where
                 .map(RetainedTerminalPreparation::Prepared);
         }
 
-        let transition = TerminalPrimaryGuard::new(
+        let primary = TerminalPrimaryGuard::new(
             ledger,
             baseline_batches,
             PrimaryPublicationBatches::new(canonical_batch, Some(evidence_batch)),
             physical,
-        )
-        .try_advance(terminal)?;
+        );
+        if frozen_success {
+            return match primary.try_advance_frozen_success(terminal)? {
+                FrozenSuccessPrimaryTransition::Success(success) => success
+                    .try_form_joint_commit_intent(self.set_id)
+                    .map(RetainedTerminalPreparation::SuccessIntent)
+                    .map_err(RetainedPublicationPrepareError::FinalizationContainment),
+            };
+        }
+        let transition = primary.try_advance(terminal)?;
         match transition {
             TerminalPrimaryTransition::Success(success) => success
                 .try_form_joint_commit_intent(self.set_id)
@@ -2836,6 +2991,68 @@ where
     CanonicalBlock: Send + Sync + 'static,
     EvidenceBlock: Send + Sync + 'static,
 {
+    #[cfg(all(test, feature = "_u4-activation"))]
+    fn test_probe_freeze_permit_qualification(
+        mut self,
+        canonical_dimension: D,
+        outcome_evidence_dimension: D,
+    ) -> FreezePermitQualificationProbe<D> {
+        let canonical_amount = u64::try_from(self.proof.canonical_count)
+            .ok()
+            .and_then(NonZeroU64::new)
+            .unwrap_or_else(|| panic!("test success must retain canonical members"));
+        let evidence_amount = u64::try_from(self.proof.evidence_count)
+            .ok()
+            .and_then(NonZeroU64::new)
+            .unwrap_or_else(|| panic!("test success must retain outcome-evidence members"));
+        let result = {
+            let operation = self
+                .assembly
+                .operation
+                .as_ref()
+                .unwrap_or_else(|| panic!("test success must retain its operation"));
+            let ledger = operation.coordinator.retained_ledger();
+            let canonical_batch = self
+                .assembly
+                .canonical_batch
+                .as_mut()
+                .unwrap_or_else(|| panic!("test success must retain its canonical batch"));
+            let evidence_batch = self
+                .assembly
+                .evidence_batch
+                .as_mut()
+                .unwrap_or_else(|| panic!("test success must retain its evidence batch"));
+            operation
+                .baseline
+                .with_batches(|baseline| {
+                    ledger.try_qualify_and_push_exact_primary_commitment_pair(
+                        baseline,
+                        canonical_batch,
+                        OutputCommitment::new(canonical_dimension, canonical_amount.get()),
+                        evidence_batch,
+                        OutputCommitment::new(outcome_evidence_dimension, evidence_amount.get()),
+                    )
+                })
+                .unwrap_or_else(|| panic!("test success must retain its startup baseline"))
+        };
+        match result {
+            Ok(()) => FreezePermitQualificationProbe::Ready,
+            Err(cause) => {
+                let dimension = self
+                    .assembly
+                    .test_ledger_probe()
+                    .dimension_evidence(canonical_dimension)
+                    .unwrap_or_else(|| panic!("test dimension must remain observable"));
+                FreezePermitQualificationProbe::Rejected {
+                    cause,
+                    canonical_commitments: self.assembly.canonical_commitment_len(),
+                    outcome_evidence_commitments: self.assembly.outcome_evidence_commitment_len(),
+                    dimension,
+                }
+            }
+        }
+    }
+
     #[cfg(feature = "_u4-activation")]
     pub(crate) const fn canonical_member_count(&self) -> usize {
         self.proof.canonical_count
@@ -2849,6 +3066,111 @@ where
     #[cfg(feature = "_u4-activation")]
     pub(crate) fn contain_activation_fault(self) -> FinalizationContainmentError {
         self.assembly.contain_activation_fault()
+    }
+
+    #[cfg(feature = "_u4-activation")]
+    #[allow(
+        clippy::type_complexity,
+        reason = "the private freeze-permit result keeps the full retained ownership graph in each linear branch"
+    )]
+    pub(crate) fn try_issue_freeze_permit(
+        mut self,
+        canonical_dimension: D,
+        outcome_evidence_dimension: D,
+        final_progress: FinalProgress<PP, U>,
+    ) -> Result<
+        RetainedSuccessFreezePermitIssue<O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>,
+        FinalizationContainmentError,
+    > {
+        if self.assembly.canonical_commitment_len() != 0
+            || self.assembly.outcome_evidence_commitment_len() != 0
+            || !self.assembly.contains_dimension(canonical_dimension)
+            || !self.assembly.contains_dimension(outcome_evidence_dimension)
+        {
+            return Err(self.contain_activation_fault());
+        }
+        let Some(canonical_amount) = u64::try_from(self.proof.canonical_count)
+            .ok()
+            .and_then(NonZeroU64::new)
+        else {
+            return Err(self.contain_activation_fault());
+        };
+        let Some(evidence_amount) = u64::try_from(self.proof.evidence_count)
+            .ok()
+            .and_then(NonZeroU64::new)
+        else {
+            return Err(self.contain_activation_fault());
+        };
+        let staged = {
+            let assembly = &mut self.assembly;
+            let Some(operation) = assembly.operation.as_ref() else {
+                return Err(self.contain_activation_fault());
+            };
+            let ledger = operation.coordinator.retained_ledger();
+            let (Some(canonical_batch), Some(evidence_batch)) = (
+                assembly.canonical_batch.as_mut(),
+                assembly.evidence_batch.as_mut(),
+            ) else {
+                return Err(self.contain_activation_fault());
+            };
+            operation.baseline.with_batches(|baseline| {
+                ledger.try_qualify_and_push_exact_primary_commitment_pair(
+                    baseline,
+                    canonical_batch,
+                    OutputCommitment::new(canonical_dimension, canonical_amount.get()),
+                    evidence_batch,
+                    OutputCommitment::new(outcome_evidence_dimension, evidence_amount.get()),
+                )
+            })
+        };
+        let Some(staged) = staged else {
+            return Err(self.contain_activation_fault());
+        };
+        if let Err(cause) = staged {
+            let publication_cause = match cause {
+                CommitmentPairPushError::CanonicalBatchFull
+                | CommitmentPairPushError::OutcomeEvidenceBatchFull => {
+                    RetainedPublicationError::Writer(RetainedWriterError::CommitmentBatchFull)
+                }
+                CommitmentPairPushError::Ledger(cause) => {
+                    RetainedPublicationError::Writer(RetainedWriterError::Ledger(cause))
+                }
+            };
+            self.assembly.observe_publication_error(&publication_cause);
+            let cause = PreparationFailureCode::ledger();
+            let ValidatedRetainedSuccess { assembly, proof: _ } = self;
+            return Ok(RetainedSuccessFreezePermitIssue::DestinationRejected {
+                failure: assembly.try_discard_canonical_for_rejection(cause)?,
+                cause,
+            });
+        }
+        if self.assembly.canonical_commitment_len() != 1
+            || self.assembly.outcome_evidence_commitment_len() != 1
+        {
+            return Err(self.contain_activation_fault());
+        }
+
+        let terminal_cause = match self.assembly.operation.as_mut() {
+            Some(operation) => {
+                let control_cause =
+                    prepare_terminal_control(&mut operation.coordinator, final_progress);
+                if let Some(cause) = control_cause {
+                    operation.record_terminal_cause(cause);
+                }
+                operation.sticky_terminal_cause()
+            }
+            None => return Err(self.contain_activation_fault()),
+        };
+        if let Some(cause) = terminal_cause {
+            let ValidatedRetainedSuccess { assembly, proof: _ } = self;
+            return Ok(RetainedSuccessFreezePermitIssue::RichFailure {
+                failure: assembly.try_discard_canonical_for_rejection(cause)?,
+                cause,
+            });
+        }
+        Ok(RetainedSuccessFreezePermitIssue::Ready(
+            RetainedSuccessFreezePermit { validated: self },
+        ))
     }
 
     /// Consumes a valid success proof after a later domain admission rejects the canonical result.
@@ -2916,6 +3238,95 @@ where
             .try_prepare_terminal(RetainedTerminalRequest::MinimalFallback {
                 requested_cause: PreparationFailureCode::requested(),
             })
+    }
+}
+
+#[cfg(feature = "_u4-activation")]
+impl<O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
+    RetainedSuccessFreezePermit<O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
+where
+    O: OperationOwner,
+    P: TerminalEvidenceKey,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+    D: TerminalEvidenceKey + fmt::Debug,
+    F: Send + Sync + 'static,
+    CanonicalBlock: Send + Sync + 'static,
+    EvidenceBlock: Send + Sync + 'static,
+{
+    pub(crate) fn contain_activation_fault(self) -> FinalizationContainmentError {
+        self.validated.contain_activation_fault()
+    }
+
+    pub(crate) fn terminal_observation(&self, dimension: D) -> Option<DimensionSnapshot> {
+        self.validated
+            .assembly
+            .operation
+            .as_ref()
+            .and_then(|operation| {
+                operation
+                    .coordinator
+                    .retained_ledger()
+                    .dimension_evidence(dimension)
+                    .ok()
+            })
+    }
+
+    #[allow(
+        clippy::type_complexity,
+        reason = "generation rejection returns the exact evidence-only retained owner without a detachable alias"
+    )]
+    pub(crate) fn reject_generation(
+        self,
+        cause: PreparationFailureCode,
+    ) -> Result<
+        RetainedFailureAssembly<O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>,
+        FinalizationContainmentError,
+    > {
+        let ValidatedRetainedSuccess { assembly, proof: _ } = self.validated;
+        assembly.try_discard_canonical_for_rejection(cause)
+    }
+
+    pub(crate) fn into_contribution(
+        self,
+    ) -> RetainedSuccessFreezeContribution<O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock> {
+        RetainedSuccessFreezeContribution {
+            validated: self.validated,
+        }
+    }
+}
+
+#[cfg(feature = "_u4-activation")]
+impl<O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
+    RetainedSuccessFreezeContribution<O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
+where
+    O: OperationOwner,
+    P: TerminalEvidenceKey,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+    D: TerminalEvidenceKey + fmt::Debug,
+    F: Send + Sync + 'static,
+    CanonicalBlock: Send + Sync + 'static,
+    EvidenceBlock: Send + Sync + 'static,
+{
+    pub(crate) fn try_form_joint_commit_intent(
+        self,
+    ) -> Result<
+        RetainedSuccessJointCommitFormation<O, P, D, F, CanonicalBlock, EvidenceBlock>,
+        RetainedPublicationPrepareError,
+    > {
+        let ValidatedRetainedSuccess { assembly, proof } = self.validated;
+        match assembly
+            .try_form_terminal_preparation(RetainedTerminalRequest::FrozenSuccess { proof })
+        {
+            Ok(RetainedTerminalPreparation::SuccessIntent(intent)) => {
+                Ok(RetainedSuccessJointCommitFormation::Intent(intent))
+            }
+            Ok(RetainedTerminalPreparation::Prepared(prepared)) => Ok(
+                RetainedSuccessJointCommitFormation::PreparedFailure(prepared),
+            ),
+            Err(cause) => Err(cause),
+        }
     }
 }
 
@@ -3090,6 +3501,11 @@ where
     }
 
     #[cfg(feature = "_u4-activation")]
+    pub(crate) fn outcome_evidence_commitment_len(&self) -> usize {
+        self.assembly.outcome_evidence_commitment_len()
+    }
+
+    #[cfg(feature = "_u4-activation")]
     pub(crate) fn try_stage_exact_outcome_evidence(
         &mut self,
         dimension: D,
@@ -3129,6 +3545,21 @@ where
                 proof: self.proof,
                 requested_cause: cause,
                 final_progress,
+            })
+    }
+
+    #[cfg(feature = "_u4-activation")]
+    pub(crate) fn try_prepare_frozen(
+        self,
+        cause: PreparationFailureCode,
+    ) -> Result<
+        PreparedRetainedPublication<CanonicalBlock, EvidenceBlock, F, P, D>,
+        RetainedPublicationPrepareError,
+    > {
+        self.assembly
+            .try_prepare_terminal(RetainedTerminalRequest::FrozenRichFailure {
+                proof: self.proof,
+                requested_cause: cause,
             })
     }
 

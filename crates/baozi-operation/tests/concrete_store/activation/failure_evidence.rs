@@ -1,5 +1,219 @@
 use super::*;
 
+struct FailureCausePanicOnDrop;
+
+impl Drop for FailureCausePanicOnDrop {
+    fn drop(&mut self) {
+        panic!("untrusted failure cause drop panic");
+    }
+}
+
+fn rejected_session_with_panicking_cause(
+    account: &PhysicalStorageAccount,
+) -> baozi_operation::__canonical_activation::NeverActivatedStoreSession<
+    TestOwner,
+    TestProgress,
+    TestUnit,
+    FailureCausePanicOnDrop,
+> {
+    let (operation, keys) = operation(account);
+    let outcome = plan_activation!(
+        operation,
+        activation_shape(keys, 1, 1),
+        |preflight| preflight.reject(FailureCausePanicOnDrop, 11),
+        |_lane| -> CanonicalMaterialization<
+            '_,
+            (),
+            FailureCausePanicOnDrop,
+            ScalarSequence<u8>,
+            SequenceTag,
+        > { unreachable!("preflight rejection cannot materialize") },
+    )
+    .unwrap();
+    match outcome {
+        CanonicalActivationOutcome::NeverActivated(state) => state,
+        CanonicalActivationOutcome::Activated(_)
+        | CanonicalActivationOutcome::Rejected(_)
+        | CanonicalActivationOutcome::Fallback(_) => {
+            panic!("preflight rejection must remain NeverActivated")
+        }
+    }
+}
+
+macro_rules! rooted_failure_with_panicking_cause {
+    ($account:expr) => {{
+        let state = rejected_session_with_panicking_cause($account);
+        let outcome = state
+            .build_failure_evidence(|lane| {
+                let root = lane
+                    .try_retain_sequence(
+                        SequencePlan::<u8>::new(1).unwrap(),
+                        EvidenceLeafTag,
+                        |writer| writer.push(7),
+                    )
+                    .unwrap();
+                lane.complete(root)
+            })
+            .unwrap();
+        match outcome {
+            FailureEvidenceOutcome::Rooted(rooted) => rooted,
+            FailureEvidenceOutcome::MinimalFallback(_) => {
+                panic!("valid evidence must retain a rooted failure owner")
+            }
+        }
+    }};
+}
+
+fn assert_panicking_cause_drop_fails_closed<T>(account: &PhysicalStorageAccount, owner: T) {
+    let before = account.snapshot();
+    assert!(!before.poisoned());
+    assert!(before.live_retained_allocations() > 0);
+    let dropped = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(owner)));
+    assert!(dropped.is_err());
+    let snapshot = account.snapshot();
+    assert!(snapshot.poisoned());
+    assert_eq!(
+        snapshot.live_retained_allocations(),
+        before.live_retained_allocations(),
+        "cause unwind must not release retained allocations before containment"
+    );
+    assert_eq!(
+        snapshot.live_retained_bytes(),
+        before.live_retained_bytes(),
+        "cause unwind must not release retained bytes before containment"
+    );
+}
+
+#[test]
+fn never_activated_cause_drop_panic_poison_contains_the_physical_owner() {
+    let factory = factory(1);
+    let account = account(&factory);
+    let state = rejected_session_with_panicking_cause(&account);
+
+    assert_panicking_cause_drop_fails_closed(&account, state);
+}
+
+#[test]
+fn rejected_canonical_cause_drop_panic_poison_contains_the_physical_owner() {
+    let factory = factory(1);
+    let account = account(&factory);
+    let (operation, keys) = operation(&account);
+    let outcome = plan_activation!(
+        operation,
+        activation_shape(keys, 1, 1),
+        |preflight| preflight.seal::<FailureCausePanicOnDrop>(),
+        |mut lane| {
+            let _ = lane
+                .try_retain_sequence(SequencePlan::<u8>::new(1).unwrap(), SequenceTag, |writer| {
+                    writer.push(7)?;
+                    Ok(())
+                })
+                .unwrap();
+            lane.reject::<(), FailureCausePanicOnDrop, ScalarSequence<u8>, SequenceTag>(
+                FailureCausePanicOnDrop,
+                11,
+            )
+        },
+    )
+    .unwrap();
+    let rejected = match outcome {
+        CanonicalActivationOutcome::Rejected(rejected) => rejected,
+        CanonicalActivationOutcome::Activated(_)
+        | CanonicalActivationOutcome::NeverActivated(_)
+        | CanonicalActivationOutcome::Fallback(_) => {
+            panic!("post-activation rejection must retain its physical owner")
+        }
+    };
+
+    assert_panicking_cause_drop_fails_closed(&account, rejected);
+}
+
+#[test]
+fn rooted_failure_cause_drop_panic_poison_contains_the_physical_owner() {
+    let factory = factory(1);
+    let account = account(&factory);
+    let rooted = rooted_failure_with_panicking_cause!(&account);
+
+    assert_panicking_cause_drop_fails_closed(&account, rooted);
+}
+
+#[test]
+fn validated_failure_cause_drop_panic_poison_contains_the_physical_owner() {
+    let factory = factory(1);
+    let account = account(&factory);
+    let rooted = rooted_failure_with_panicking_cause!(&account);
+    let validation = rooted
+        .validate_rich_failure(|session, root| {
+            session
+                .visit_sequence(root, |_index, value| value == 7)
+                .unwrap()
+        })
+        .unwrap();
+    let validated = match validation {
+        RootedFailureValidation::Valid(validated) => validated,
+        RootedFailureValidation::Rejected(_) | RootedFailureValidation::Fallback(_) => {
+            panic!("valid evidence must retain a validated failure owner")
+        }
+    };
+
+    assert_panicking_cause_drop_fails_closed(&account, validated);
+}
+
+#[test]
+fn rejected_failure_cause_drop_panic_poison_contains_the_physical_owner() {
+    let factory = factory(1);
+    let account = account(&factory);
+    let rooted = rooted_failure_with_panicking_cause!(&account);
+    let validation = rooted
+        .validate_rich_failure(|session, root| {
+            session
+                .visit_sequence(root, |_index, _value| false)
+                .unwrap()
+        })
+        .unwrap();
+    let rejected = match validation {
+        RootedFailureValidation::Rejected(rejected) => rejected,
+        RootedFailureValidation::Valid(_) | RootedFailureValidation::Fallback(_) => {
+            panic!("semantic rejection must retain the rejected failure owner")
+        }
+    };
+
+    assert_panicking_cause_drop_fails_closed(&account, rejected);
+}
+
+#[test]
+fn prepared_failure_cause_drop_panic_poison_contains_the_physical_owner() {
+    let factory = factory(1);
+    let account = account(&factory);
+    let rooted = rooted_failure_with_panicking_cause!(&account);
+    let validation = rooted
+        .validate_rich_failure(|session, root| {
+            session
+                .visit_sequence(root, |_index, value| value == 7)
+                .unwrap()
+        })
+        .unwrap();
+    let validated = match validation {
+        RootedFailureValidation::Valid(validated) => validated,
+        RootedFailureValidation::Rejected(_) | RootedFailureValidation::Fallback(_) => {
+            panic!("valid evidence must retain a validated failure owner")
+        }
+    };
+    let prepared = validated.try_prepare(final_progress()).unwrap();
+
+    assert_panicking_cause_drop_fails_closed(&account, prepared);
+}
+
+#[test]
+fn minimal_fallback_cause_drop_panic_poison_contains_the_physical_owner() {
+    let factory = factory(1);
+    let account = account(&factory);
+    let state = rejected_session_with_panicking_cause(&account);
+    let fallback = state.prepare_minimal_fallback().unwrap();
+
+    assert_panicking_cause_drop_fails_closed(&account, fallback);
+}
+
 fn one_unit_rooted_failure_protected_work() -> (u64, u64) {
     let factory = factory(1);
     let account = account(&factory);

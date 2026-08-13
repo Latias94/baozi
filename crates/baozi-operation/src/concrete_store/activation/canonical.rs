@@ -311,6 +311,7 @@ where
                         ),
                         failure_work,
                         outcome_evidence_destination_dimension,
+                        _lifecycle: PhantomData::<OrdinaryFailureState>,
                     };
                     return Ok(CanonicalCentralValidationOutcome::Rejected(
                         CentrallyRejectedCanonicalStoreSession { root },
@@ -333,6 +334,7 @@ where
                                     cause: StoreCanonicalRejection::Requested(cause),
                                     failure_work,
                                     outcome_evidence_destination_dimension,
+                                    _lifecycle: PhantomData::<OrdinaryFailureState>,
                                 };
                                 Ok(CanonicalCentralValidationOutcome::Rejected(
                                     CentrallyRejectedCanonicalStoreSession { root },
@@ -380,6 +382,7 @@ where
                         ),
                         failure_work,
                         outcome_evidence_destination_dimension,
+                        _lifecycle: PhantomData::<OrdinaryFailureState>,
                     };
                     return Ok(CanonicalCentralValidationOutcome::Rejected(
                         CentrallyRejectedCanonicalStoreSession { root },
@@ -405,6 +408,7 @@ where
                                     cause,
                                     failure_work,
                                     outcome_evidence_destination_dimension,
+                                    _lifecycle: PhantomData::<OrdinaryFailureState>,
                                 },
                             },
                         ))
@@ -477,14 +481,305 @@ where
     pub const fn outcome_evidence_member_count(&self) -> u64 {
         self.destinations.outcome_evidence_members.get()
     }
+
+    /// Seals exact destinations and final operation progress before core reserves a generation.
+    #[allow(clippy::type_complexity)]
+    pub fn try_issue_freeze_permit(
+        self,
+        final_progress: FinalProgress<PP, U>,
+    ) -> Result<
+        CanonicalFreezePermitIssue<
+            O,
+            PP,
+            U,
+            T,
+            Proof,
+            CanonicalKind,
+            CanonicalTag,
+            EvidenceKind,
+            EvidenceTag,
+        >,
+        StoreActivationContainment,
+    > {
+        let Self {
+            destinations,
+            proof,
+            output,
+            _failure_work: failure_work,
+            _validated: validated,
+        } = self;
+        let ZeroCommitDestinationFacts {
+            _canonical_dimension: canonical_dimension,
+            canonical_members,
+            _outcome_evidence_dimension: outcome_evidence_dimension,
+            outcome_evidence_members,
+        } = destinations;
+        match validated
+            .try_issue_freeze_permit(
+                canonical_dimension,
+                outcome_evidence_dimension,
+                final_progress,
+            )
+            .map_err(|cause| StoreActivationContainment { cause })?
+        {
+            StoreSuccessFreezePermitIssue::Ready(store) => {
+                Ok(CanonicalFreezePermitIssue::Ready(CanonicalFreezePermit {
+                    output,
+                    proof,
+                    failure_work,
+                    destinations: ZeroCommitDestinationFacts {
+                        _canonical_dimension: canonical_dimension,
+                        canonical_members,
+                        _outcome_evidence_dimension: outcome_evidence_dimension,
+                        outcome_evidence_members,
+                    },
+                    store,
+                }))
+            }
+            StoreSuccessFreezePermitIssue::RichFailure { failure, cause } => {
+                let proof_drop_failed = drop_scoped_value(proof).is_err();
+                let output_drop_failed = drop_scoped_value(output).is_err();
+                if proof_drop_failed || output_drop_failed {
+                    return Err(StoreActivationContainment {
+                        cause: failure.contain_activation_fault(),
+                    });
+                }
+                Ok(CanonicalFreezePermitIssue::Interrupted(
+                    RootedFailureEvidence {
+                        failure,
+                        cause: CanonicalFreezeInterruption::from_failure_code(cause),
+                        failure_work,
+                        outcome_evidence_destination_dimension: outcome_evidence_dimension,
+                        _lifecycle: PhantomData::<FrozenFailureState>,
+                    },
+                ))
+            }
+            StoreSuccessFreezePermitIssue::DestinationRejected { failure, cause } => {
+                let proof_drop_failed = drop_scoped_value(proof).is_err();
+                let output_drop_failed = drop_scoped_value(output).is_err();
+                if proof_drop_failed || output_drop_failed {
+                    return Err(StoreActivationContainment {
+                        cause: failure.contain_activation_fault(),
+                    });
+                }
+                Ok(CanonicalFreezePermitIssue::DestinationRejected(
+                    RootedFailureEvidence {
+                        failure,
+                        cause: CanonicalFreezeInterruption::from_failure_code(cause),
+                        failure_work,
+                        outcome_evidence_destination_dimension: outcome_evidence_dimension,
+                        _lifecycle: PhantomData::<OrdinaryFailureState>,
+                    },
+                ))
+            }
+        }
+    }
 }
 
-impl<O, PP, U, E, EvidenceKind, EvidenceTag>
-    CentrallyRejectedCanonicalStoreSession<O, PP, U, E, EvidenceKind, EvidenceTag>
+impl CanonicalFreezeInterruption {
+    fn from_failure_code(cause: PreparationFailureCode) -> Self {
+        let class = match cause.class() {
+            PreparationFailureClass::Control => CanonicalFreezeInterruptionClass::Control,
+            PreparationFailureClass::Ledger => CanonicalFreezeInterruptionClass::Ledger,
+            PreparationFailureClass::Requested | PreparationFailureClass::ProductGraph => {
+                CanonicalFreezeInterruptionClass::ProductGraph
+            }
+        };
+        Self {
+            class,
+            stable_code: cause.code(),
+        }
+    }
+
+    pub const fn class(self) -> CanonicalFreezeInterruptionClass {
+        self.class
+    }
+
+    pub const fn stable_code(self) -> u32 {
+        self.stable_code
+    }
+}
+
+impl<O, PP, U, T, Proof, CanonicalKind, CanonicalTag, EvidenceKind, EvidenceTag>
+    CanonicalFreezePermit<
+        O,
+        PP,
+        U,
+        T,
+        Proof,
+        CanonicalKind,
+        CanonicalTag,
+        EvidenceKind,
+        EvidenceTag,
+    >
 where
     O: OperationOwner,
     PP: ProgressPhase,
     U: ProgressUnit,
+{
+    pub fn destination_counters_are_zero(&self) -> bool {
+        let canonical = self
+            .store
+            .terminal_observation(self.destinations._canonical_dimension)
+            .expect("the sealed canonical destination remains registered");
+        let evidence = self
+            .store
+            .terminal_observation(self.destinations._outcome_evidence_dimension)
+            .expect("the sealed outcome-evidence destination remains registered");
+        [canonical, evidence].into_iter().all(|snapshot| {
+            snapshot.pending_publication() == 0
+                && snapshot.committed() == 0
+                && snapshot.committed_canonical_output() == 0
+                && snapshot.published_outcome_evidence() == 0
+        })
+    }
+
+    #[allow(
+        clippy::type_complexity,
+        reason = "The typestate result carries the frozen failure state and its exact cause brand."
+    )]
+    pub fn reject_generation<E>(
+        self,
+        cause: E,
+        stable_code: u32,
+    ) -> Result<
+        CentrallyRejectedCanonicalStoreSession<
+            O,
+            PP,
+            U,
+            E,
+            EvidenceKind,
+            EvidenceTag,
+            FrozenFailureState,
+        >,
+        StoreActivationContainment,
+    > {
+        let Self {
+            output,
+            proof,
+            failure_work,
+            destinations,
+            store,
+        } = self;
+        let cause = ManuallyDrop::new(cause);
+        let proof_drop_failed = drop_scoped_value(proof).is_err();
+        let output_drop_failed = drop_scoped_value(output).is_err();
+        if proof_drop_failed || output_drop_failed {
+            let _ = drop_scoped_value(ManuallyDrop::into_inner(cause));
+            return Err(StoreActivationContainment {
+                cause: store.contain_activation_fault(),
+            });
+        }
+        let failure = match store.reject_generation(stable_code) {
+            Ok(failure) => failure,
+            Err(containment) => {
+                let _ = drop_scoped_value(ManuallyDrop::into_inner(cause));
+                return Err(StoreActivationContainment { cause: containment });
+            }
+        };
+        let cause = ManuallyDrop::into_inner(cause);
+        Ok(CentrallyRejectedCanonicalStoreSession {
+            root: RootedFailureEvidence {
+                failure,
+                cause: StoreCanonicalRejection::Requested(cause),
+                failure_work,
+                outcome_evidence_destination_dimension: destinations._outcome_evidence_dimension,
+                _lifecycle: PhantomData::<FrozenFailureState>,
+            },
+        })
+    }
+
+    /// Opens one unforgeable joint-commit scope.
+    ///
+    /// The higher-ranked callback prevents either branded capability from escaping. Requiring the
+    /// descriptor and proof to be `Copy` keeps arbitrary drop behavior on the pre-bind candidate,
+    /// permit, and rejection paths while making the successful core handoff destructor-free.
+    #[allow(clippy::type_complexity)]
+    pub fn bind_joint_commit<R>(
+        self,
+        bind: impl for<'joint> FnOnce(
+            T,
+            Proof,
+            CanonicalJointCommit<
+                'joint,
+                O,
+                PP,
+                U,
+                CanonicalKind,
+                CanonicalTag,
+                EvidenceKind,
+                EvidenceTag,
+            >,
+            CanonicalJointSeal<'joint>,
+        ) -> R,
+    ) -> R
+    where
+        T: Copy,
+        Proof: Copy,
+    {
+        let Self {
+            output,
+            proof,
+            failure_work,
+            destinations,
+            store,
+        } = self;
+        bind(
+            output,
+            proof,
+            CanonicalJointCommit {
+                _failure_work: failure_work,
+                _destinations: destinations,
+                joint: PhantomData,
+                store: store.into_contribution(),
+            },
+            CanonicalJointSeal { joint: PhantomData },
+        )
+    }
+}
+
+impl<'joint, O, PP, U, CanonicalKind, CanonicalTag, EvidenceKind, EvidenceTag>
+    CanonicalJointCommit<'joint, O, PP, U, CanonicalKind, CanonicalTag, EvidenceKind, EvidenceTag>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    /// Consumes the operation contribution and the seal from the same binder scope.
+    ///
+    /// The exact operation preparation outcome is returned without attaching a generation token.
+    /// A defensive late prepared failure remains a first-class outcome.
+    pub fn prepare(
+        self,
+        seal: CanonicalJointSeal<'joint>,
+    ) -> Result<
+        PreparedStoreSuccessOutcome<CanonicalKind, CanonicalTag, EvidenceKind, EvidenceTag>,
+        StoreActivationContainment,
+    > {
+        let Self {
+            _failure_work: _,
+            _destinations: _,
+            joint: _,
+            store,
+        } = self;
+        let CanonicalJointSeal { joint: _ } = seal;
+        store
+            .prepare()
+            .map_err(|cause| StoreActivationContainment { cause })
+    }
+}
+
+#[allow(
+    private_bounds,
+    reason = "public failure typestates are sealed by the crate-private lifecycle contract"
+)]
+impl<O, PP, U, E, EvidenceKind, EvidenceTag, State>
+    CentrallyRejectedCanonicalStoreSession<O, PP, U, E, EvidenceKind, EvidenceTag, State>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+    State: FailureLifecycleState,
 {
     pub const fn cause(&self) -> &StoreCanonicalRejection<E> {
         self.root.cause()
@@ -494,6 +789,10 @@ where
         0
     }
 
+    #[allow(
+        clippy::type_complexity,
+        reason = "The typestate result preserves the rejection cause and lifecycle state."
+    )]
     pub fn validate_rich_failure(
         self,
         validate: impl for<'session, 'storage, 'control> FnMut(
@@ -501,7 +800,7 @@ where
             FailureEvidenceMember<'session, EvidenceKind, EvidenceTag>,
         ) -> bool,
     ) -> Result<
-        CanonicalRejectionFailureValidation<O, PP, U, E, EvidenceKind, EvidenceTag>,
+        CanonicalRejectionFailureValidation<O, PP, U, E, EvidenceKind, EvidenceTag, State>,
         StoreActivationContainment,
     >
     where

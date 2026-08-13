@@ -3,12 +3,13 @@ use std::num::NonZeroU64;
 use baozi_operation::__canonical_activation::{
     CanonicalActivationOutcome, CanonicalActivationPolicy, CanonicalActivationRequirements,
     CanonicalBuildControl, CanonicalCandidateStoreSession, CanonicalCentralValidationOutcome,
-    CanonicalTableShape, CanonicalValidationDecision, FailureEvidenceMember,
-    FailureEvidenceOutcome, FailureEvidenceValidationSession, RootedFailureValidation,
+    CanonicalFreezePermitIssue, CanonicalJointCommit, CanonicalJointSeal, CanonicalTableShape,
+    CanonicalValidationDecision, FailureEvidenceMember, FailureEvidenceOutcome,
+    FailureEvidenceValidationSession, RootedFailureValidation,
 };
 use baozi_operation::{
-    CanonicalRecordWriter, OperationControl, PhysicalStorageAccount, RecordBlock, RecordPlan,
-    SequencePlan, SequenceWriter, StoreControlledError,
+    CanonicalRecordWriter, OperationControl, PhysicalStorageAccount, PreparedStoreSuccessOutcome,
+    RecordBlock, RecordPlan, SequencePlan, SequenceWriter, StoreControlledError,
 };
 
 #[cfg(test)]
@@ -20,17 +21,20 @@ use super::super::validation::{
 use super::{
     AuthoredMatrixSchema, CANONICAL_BLOCK_COUNT, CanonicalBlockRef, ConstructionBrand,
     DIRECTORY_FIELD_COUNT, DirectorySchema, EVIDENCE_FIELD_COUNT, EVIDENCE_OUTCOME_CANDIDATE,
-    FALLBACK_CODE, MATRIX_SCALAR_COUNT, MATRIX_SCALARS_PER_NODE, NODE_COUNT, NODE_FIELD_COUNT,
-    NodeTableSchema, OutcomeEvidenceSchema, PRESENCE_ABSENT, PRESENCE_PRESENT,
-    PreparedSceneConstruction, PreparedTracerSceneFallback, REFERENCE_COUNT, REFERENCE_FIELD_COUNT,
-    ReferenceTableSchema, SCHEMA_REVISION, SEMANTIC_REJECTION_CODE, SceneBlockRefs,
-    SceneConstructionError, SceneConstructionLimits, SceneConstructionOperation,
+    FALLBACK_CODE, GENERATION_EXHAUSTED_CODE, MATRIX_SCALAR_COUNT, MATRIX_SCALARS_PER_NODE,
+    NODE_COUNT, NODE_FIELD_COUNT, NodeTableSchema, OutcomeEvidenceSchema, PRESENCE_ABSENT,
+    PRESENCE_PRESENT, PreparedSceneConstruction, PreparedTracerSceneFallback,
+    PreparedTracerSceneRichFailure, PreparedTracerSceneSuccess, REFERENCE_COUNT,
+    REFERENCE_FIELD_COUNT, ReferenceTableSchema, SCHEMA_REVISION, SEMANTIC_REJECTION_CODE,
+    SceneBlockRefs, SceneConstructionError, SceneConstructionLimits, SceneConstructionOperation,
     SceneConstructionOwner, SceneConstructionPhase, SceneConstructionStartError,
     SceneConstructionUnit, SceneDraft, SceneFailureEvidenceWork, SceneStoreKeys,
     SceneStoreOperation, TERMINAL_ATTRIBUTION_SLOTS, TracerSceneValidationProof,
-    TwoNodeAuthoredMatrices, final_progress, map_prepared_failure, scene_writer_plan,
-    try_plan_scene_operation, write_outcome_evidence_row,
+    TwoNodeAuthoredMatrices, burn_generation_reservation, final_progress, map_prepared_failure,
+    scene_writer_plan, try_plan_scene_operation, validate_scene_handoff_pairing,
+    write_outcome_evidence_row,
 };
+use crate::identity::{ReservedSceneGeneration, SceneGenerationError};
 
 type ActivatedSceneCandidate = CanonicalCandidateStoreSession<
     SceneConstructionOwner,
@@ -44,10 +48,71 @@ type ActivatedSceneCandidate = CanonicalCandidateStoreSession<
     OutcomeEvidenceSchema,
 >;
 
+type SceneCanonicalJointCommit<'joint> = CanonicalJointCommit<
+    'joint,
+    SceneConstructionOwner,
+    SceneConstructionPhase,
+    SceneConstructionUnit,
+    RecordBlock,
+    DirectorySchema,
+    RecordBlock,
+    OutcomeEvidenceSchema,
+>;
+
+struct PendingSceneHandoff<'joint> {
+    proof: TracerSceneValidationProof,
+    generation: ReservedSceneGeneration,
+    seal: CanonicalJointSeal<'joint>,
+}
+
+/// Core's exact success authority while the operation contribution remains scoped.
+///
+/// The operation-owned physical contribution is declared last so dropping this aggregate burns the
+/// generation reservation before releasing the contained canonical graph.
+#[must_use = "the scoped Scene joint commit must be prepared or deliberately dropped"]
+struct ScopedSceneJointCommit<'joint> {
+    output: SceneActivationOutput,
+    handoff: PendingSceneHandoff<'joint>,
+    joint: SceneCanonicalJointCommit<'joint>,
+}
+
+impl ScopedSceneJointCommit<'_> {
+    fn prepare(self) -> Result<PreparedSceneConstruction, SceneConstructionError> {
+        validate_scene_handoff_pairing(self.output.draft, self.output.refs, self.handoff.proof)?;
+        let Self {
+            output,
+            handoff:
+                PendingSceneHandoff {
+                    proof,
+                    generation,
+                    seal,
+                },
+            joint,
+        } = self;
+        match joint.prepare(seal)? {
+            PreparedStoreSuccessOutcome::Success(store) => Ok(PreparedSceneConstruction::Success(
+                PreparedTracerSceneSuccess::new(output.refs, proof, generation, store),
+            )),
+            PreparedStoreSuccessOutcome::RichFailure(store) => {
+                burn_generation_reservation(generation);
+                Ok(PreparedSceneConstruction::RichFailure(
+                    PreparedTracerSceneRichFailure { store },
+                ))
+            }
+            PreparedStoreSuccessOutcome::MinimalFallback(store) => {
+                burn_generation_reservation(generation);
+                Ok(PreparedSceneConstruction::MinimalFallback(
+                    PreparedTracerSceneFallback { store },
+                ))
+            }
+        }
+    }
+}
+
 /// Core-owned candidate produced by the operation activation seam.
 ///
-/// It deliberately has no generation or publication method yet. The next U4 slice must consume it
-/// through the freeze-permit/core-token joint commit instead of recovering the writable assembly.
+/// Its only success transition freezes exact destinations, reserves one generation in core, and
+/// enters the scoped operation joint-commit binder. The writable assembly cannot be recovered.
 #[must_use = "the activated Scene candidate must enter joint commit or be deliberately dropped"]
 pub(in crate::canonical_scene::store) struct PendingSceneActivation {
     candidate: ActivatedSceneCandidate,
@@ -92,6 +157,87 @@ impl PendingSceneActivation {
     pub(in crate::canonical_scene::store) fn refs(&self) -> SceneBlockRefs {
         self.candidate.output().refs
     }
+
+    /// Pairs the validated physical candidate with exactly one core-owned generation reservation.
+    ///
+    /// Destination qualification and final operation progress are frozen before the reservation
+    /// callback is invoked. Once reserved, every non-success path burns the generation as an
+    /// invisible gap; exact success alone transfers it into the prepared Scene handoff token.
+    pub(in crate::canonical_scene::store) fn prepare_with_generation_source(
+        self,
+        reserve_generation: impl FnOnce() -> Result<ReservedSceneGeneration, SceneGenerationError>,
+    ) -> Result<PreparedSceneConstruction, SceneConstructionError> {
+        match self.candidate.try_issue_freeze_permit(final_progress())? {
+            CanonicalFreezePermitIssue::Ready(permit) => {
+                let generation = match reserve_generation() {
+                    Ok(generation) => generation,
+                    Err(SceneGenerationError::Exhausted) => {
+                        let rejected = permit.reject_generation(
+                            SceneGenerationError::Exhausted,
+                            GENERATION_EXHAUSTED_CODE,
+                        )?;
+                        return match rejected.validate_rich_failure(validate_failure_evidence)? {
+                            RootedFailureValidation::Valid(validated) => {
+                                let (prepared, _cause) =
+                                    validated.try_prepare_frozen()?.into_parts();
+                                map_prepared_failure(prepared)
+                            }
+                            RootedFailureValidation::Rejected(rejected) => {
+                                let (store, _cause) =
+                                    rejected.prepare_minimal_fallback()?.into_parts();
+                                Ok(PreparedSceneConstruction::MinimalFallback(
+                                    PreparedTracerSceneFallback { store },
+                                ))
+                            }
+                            RootedFailureValidation::Fallback(fallback) => {
+                                let (store, _cause) = fallback.into_parts();
+                                Ok(PreparedSceneConstruction::MinimalFallback(
+                                    PreparedTracerSceneFallback { store },
+                                ))
+                            }
+                        };
+                    }
+                };
+                permit.bind_joint_commit(|output, proof, joint, seal| {
+                    ScopedSceneJointCommit {
+                        output,
+                        handoff: PendingSceneHandoff {
+                            proof,
+                            generation,
+                            seal,
+                        },
+                        joint,
+                    }
+                    .prepare()
+                })
+            }
+            CanonicalFreezePermitIssue::Interrupted(interrupted) => {
+                match interrupted.validate_rich_failure(validate_failure_evidence)? {
+                    RootedFailureValidation::Valid(validated) => {
+                        let (prepared, _cause) = validated.try_prepare_frozen()?.into_parts();
+                        map_prepared_failure(prepared)
+                    }
+                    RootedFailureValidation::Rejected(rejected) => {
+                        let (store, _cause) = rejected.prepare_minimal_fallback()?.into_parts();
+                        Ok(PreparedSceneConstruction::MinimalFallback(
+                            PreparedTracerSceneFallback { store },
+                        ))
+                    }
+                    RootedFailureValidation::Fallback(fallback) => {
+                        let (store, _cause) = fallback.into_parts();
+                        Ok(PreparedSceneConstruction::MinimalFallback(
+                            PreparedTracerSceneFallback { store },
+                        ))
+                    }
+                }
+            }
+            CanonicalFreezePermitIssue::DestinationRejected(rejected) => {
+                prepare_failure_validation(
+                    rejected.validate_rich_failure(validate_failure_evidence)?,
+                )
+            }
+        }
+    }
 }
 
 #[must_use = "the activated candidate or prepared terminal outcome must be consumed"]
@@ -128,6 +274,7 @@ struct SceneActivationMaterializationWork {
     directory: u64,
 }
 
+#[derive(Clone, Copy)]
 struct SceneActivationOutput {
     draft: SceneDraft,
     refs: SceneBlockRefs,
@@ -424,9 +571,30 @@ impl SceneConstructionOperation {
         account: &PhysicalStorageAccount,
         limits: SceneConstructionLimits,
     ) -> Result<Self, SceneConstructionStartError> {
+        Self::with_account_and_control_for_activation(account, limits, OperationControl::default())
+    }
+
+    #[cfg(test)]
+    pub(in crate::canonical_scene::store) fn with_account_and_cancellation_for_activation(
+        account: &PhysicalStorageAccount,
+        limits: SceneConstructionLimits,
+        cancellation: impl baozi_operation::CancellationSignal,
+    ) -> Result<Self, SceneConstructionStartError> {
+        Self::with_account_and_control_for_activation(
+            account,
+            limits,
+            OperationControl::default().with_cancellation(cancellation),
+        )
+    }
+
+    fn with_account_and_control_for_activation(
+        account: &PhysicalStorageAccount,
+        limits: SceneConstructionLimits,
+        control: OperationControl<SceneConstructionPhase, SceneConstructionUnit>,
+    ) -> Result<Self, SceneConstructionStartError> {
         let start = try_plan_scene_operation(
             limits,
-            OperationControl::default(),
+            control,
             TERMINAL_ATTRIBUTION_SLOTS,
             SceneFailureEvidenceWork::exact_single_record(EVIDENCE_FIELD_COUNT),
         )?;
@@ -443,11 +611,10 @@ impl SceneConstructionOperation {
         })
     }
 
-    /// Executes the first core-owned consumer of the sealed activation rail.
+    /// Executes the core-owned materialization and validation portion of the activation rail.
     ///
-    /// This private U4d path ends at an operation-owned validated candidate. It shares the existing
-    /// canonical builders and semantic validator, preserves rich/minimal terminal outcomes, and
-    /// intentionally cannot publish until the later joint-commit slice exists.
+    /// Exact success remains pending until `PendingSceneActivation` pairs the operation contribution
+    /// with a core-owned generation reservation through the scoped joint-commit binder.
     pub(in crate::canonical_scene::store) fn activate_fresh_two_node(
         self,
         authored: TwoNodeAuthoredMatrices,
@@ -614,7 +781,9 @@ impl SceneConstructionOperation {
                     false
                 };
                 Ok(if valid {
-                    CanonicalValidationDecision::accept(TracerSceneValidationProof)
+                    CanonicalValidationDecision::accept(TracerSceneValidationProof {
+                        brand: expected_brand,
+                    })
                 } else {
                     CanonicalValidationDecision::reject((), SEMANTIC_REJECTION_CODE)
                 })

@@ -258,6 +258,8 @@ pub(crate) enum SceneConstructionError {
     Prepare(#[from] StorePrepareError),
     #[error("canonical Scene activation failed closed")]
     Activation(#[from] StoreActivationContainment),
+    #[error("the canonical Scene validation proof does not match its output descriptor")]
+    JointCommitInvariant,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -296,7 +298,10 @@ pub(crate) struct ValidatedTracerScene {
     _proof: TracerSceneValidationProof,
 }
 
-struct TracerSceneValidationProof;
+#[derive(Clone, Copy)]
+struct TracerSceneValidationProof {
+    brand: ConstructionBrand,
+}
 
 #[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -438,11 +443,62 @@ impl ValidatedTracerScene {
     }
 }
 
-pub(crate) struct PreparedTracerSceneSuccess {
+struct SceneHandoffToken {
+    proof: TracerSceneValidationProof,
     generation: ReservedSceneGeneration,
+}
+
+impl SceneHandoffToken {
+    const fn new(proof: TracerSceneValidationProof, generation: ReservedSceneGeneration) -> Self {
+        Self { proof, generation }
+    }
+
+    fn into_scene(
+        self,
+        canonical: PublishedCanonicalStore<RecordBlock, DirectorySchema>,
+        refs: SceneBlockRefs,
+    ) -> ValidatedTracerScene {
+        ValidatedTracerScene {
+            generation: self.generation.into_id(),
+            canonical,
+            refs,
+            _proof: self.proof,
+        }
+    }
+}
+
+pub(crate) struct PreparedTracerSceneSuccess {
+    refs: SceneBlockRefs,
+    handoff: SceneHandoffToken,
+    // The physical publication owner must drop last if the prepared Scene is discarded.
     store: PreparedTracerStoreSuccess,
+}
+
+impl PreparedTracerSceneSuccess {
+    fn new(
+        refs: SceneBlockRefs,
+        proof: TracerSceneValidationProof,
+        generation: ReservedSceneGeneration,
+        store: PreparedTracerStoreSuccess,
+    ) -> Self {
+        Self {
+            refs,
+            handoff: SceneHandoffToken::new(proof, generation),
+            store,
+        }
+    }
+}
+
+fn validate_scene_handoff_pairing(
+    draft: SceneDraft,
     refs: SceneBlockRefs,
     proof: TracerSceneValidationProof,
+) -> Result<(), SceneConstructionError> {
+    if proof.brand == draft.brand && refs.directory == draft.directory {
+        Ok(())
+    } else {
+        Err(SceneConstructionError::JointCommitInvariant)
+    }
 }
 
 pub(crate) struct PreparedTracerSceneRichFailure {
@@ -537,15 +593,14 @@ impl PreparedSceneConstruction {
     pub(crate) fn handoff(self) -> SceneConstructionTerminal {
         match self {
             Self::Success(prepared) => {
-                let published = prepared.store.handoff();
-                let generation = prepared.generation.into_id();
+                let PreparedTracerSceneSuccess {
+                    refs,
+                    handoff,
+                    store,
+                } = prepared;
+                let published = store.handoff();
                 SceneConstructionTerminal::Success(TracerSceneSuccessParts {
-                    scene: ValidatedTracerScene {
-                        generation,
-                        canonical: published.canonical,
-                        refs: prepared.refs,
-                        _proof: prepared.proof,
-                    },
+                    scene: handoff.into_scene(published.canonical, refs),
                     report: TracerSceneSuccessReport {
                         outcome_evidence: published.outcome_evidence,
                         ledger_evidence: published.ledger_evidence,
@@ -638,6 +693,7 @@ struct PendingDestinationCommitments;
 /// Semantic/physical closure proof bound to the exact pending destination commitments it validated.
 struct ValidatedSceneCandidate {
     store: ValidatedTracerStoreSuccess,
+    draft: SceneDraft,
     refs: SceneBlockRefs,
     proof: TracerSceneValidationProof,
     pending_commitments: PendingDestinationCommitments,
@@ -1665,8 +1721,9 @@ fn prepare_scene_candidate<L>(
         StoreSuccessValidation::Valid(store) => prepare_validated_success(
             ValidatedSceneCandidate {
                 store,
+                draft,
                 refs,
-                proof: TracerSceneValidationProof,
+                proof: TracerSceneValidationProof { brand },
                 pending_commitments: commitments,
             },
             post_reservation,
@@ -1701,10 +1758,12 @@ fn prepare_validated_success(
 ) -> Result<PreparedSceneConstruction, SceneConstructionError> {
     let ValidatedSceneCandidate {
         store: validated,
+        draft,
         refs,
         proof,
         pending_commitments,
     } = candidate;
+    validate_scene_handoff_pairing(draft, refs, proof)?;
     let reservation = match reserve_generation() {
         Ok(reservation) => reservation,
         Err(SceneGenerationError::Exhausted) => {
@@ -1729,12 +1788,7 @@ fn prepare_validated_success(
     // This is the first operation transition that applies the registered destination commitments.
     match validated.try_prepare(final_progress())? {
         PreparedStoreSuccessOutcome::Success(store) => Ok(PreparedSceneConstruction::Success(
-            PreparedTracerSceneSuccess {
-                generation: reservation,
-                store,
-                refs,
-                proof,
-            },
+            PreparedTracerSceneSuccess::new(refs, proof, reservation, store),
         )),
         PreparedStoreSuccessOutcome::RichFailure(store) => {
             burn_generation_reservation(reservation);

@@ -2,12 +2,13 @@ use std::cell::Cell;
 
 use baozi_operation::__canonical_activation::{
     CanonicalActivationOutcome, CanonicalActivationPolicy, CanonicalActivationRequestSealer,
-    CanonicalActivationRequirements, CanonicalCentralValidationOutcome, CanonicalMaterialization,
-    CanonicalPreflightDecision, CanonicalTableShape, CanonicalValidationDecision,
-    CanonicalValidationMember, CanonicalValidationSession, FailureEvidenceDecision,
-    FailureEvidenceMember, FailureEvidenceOutcome, OutcomeEvidenceDecision,
-    OutcomeEvidenceValidationMember, RootedFailureValidation, SealedCanonicalActivationRequest,
-    StoreCanonicalRejection, StoreNeverActivatedCause,
+    CanonicalActivationRequirements, CanonicalCentralValidationOutcome, CanonicalFreezePermit,
+    CanonicalJointCommit, CanonicalJointSeal, CanonicalMaterialization, CanonicalPreflightDecision,
+    CanonicalTableShape, CanonicalValidationDecision, CanonicalValidationMember,
+    CanonicalValidationSession, FailureEvidenceDecision, FailureEvidenceMember,
+    FailureEvidenceOutcome, OutcomeEvidenceDecision, OutcomeEvidenceValidationMember,
+    RootedFailureValidation, SealedCanonicalActivationRequest, StoreCanonicalRejection,
+    StoreNeverActivatedCause,
 };
 use baozi_operation::{ScalarSequence, StoreDestination, StorePlanError, StoreWorkError};
 
@@ -39,6 +40,8 @@ mod central_validation;
 mod controlled_writers;
 #[path = "activation/failure_evidence.rs"]
 mod failure_evidence;
+#[path = "activation/joint_commit.rs"]
+mod joint_commit;
 #[path = "activation/preflight_materialization.rs"]
 mod preflight_materialization;
 
@@ -86,6 +89,35 @@ fn canonical_activation_authorities_remain_linear() {
     let _ = <CanonicalActivationRequestSealer as AmbiguousIfClone<_>>::assert_not_clone;
     let _ = <SealedCanonicalActivationRequest as AmbiguousIfCopy<_>>::assert_not_copy;
     let _ = <SealedCanonicalActivationRequest as AmbiguousIfClone<_>>::assert_not_clone;
+
+    type Permit = CanonicalFreezePermit<
+        TestOwner,
+        TestProgress,
+        TestUnit,
+        (),
+        (),
+        ScalarSequence<u8>,
+        SequenceTag,
+        ScalarSequence<u8>,
+        EvidenceLeafTag,
+    >;
+    type Joint = CanonicalJointCommit<
+        'static,
+        TestOwner,
+        TestProgress,
+        TestUnit,
+        ScalarSequence<u8>,
+        SequenceTag,
+        ScalarSequence<u8>,
+        EvidenceLeafTag,
+    >;
+    type Seal = CanonicalJointSeal<'static>;
+    let _ = <Permit as AmbiguousIfCopy<_>>::assert_not_copy;
+    let _ = <Permit as AmbiguousIfClone<_>>::assert_not_clone;
+    let _ = <Joint as AmbiguousIfCopy<_>>::assert_not_copy;
+    let _ = <Joint as AmbiguousIfClone<_>>::assert_not_clone;
+    let _ = <Seal as AmbiguousIfCopy<_>>::assert_not_copy;
+    let _ = <Seal as AmbiguousIfClone<_>>::assert_not_clone;
 }
 
 fn activation_shape_with_validation_work(

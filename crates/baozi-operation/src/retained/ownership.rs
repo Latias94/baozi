@@ -710,6 +710,14 @@ where
         }
     }
 
+    #[cfg(feature = "_u4-activation")]
+    pub(super) fn with_batches<R>(
+        &self,
+        inspect: impl FnOnce(&FallbackBatchBaseline<O, P, D>) -> R,
+    ) -> Option<R> {
+        self.batches.as_ref().map(inspect)
+    }
+
     pub(super) fn into_parts(
         mut self,
     ) -> (
