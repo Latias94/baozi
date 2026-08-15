@@ -110,10 +110,20 @@ where
     Control(#[source] E),
 }
 
-/// Operation-accounted spatial semantics ready for retained materialization.
+/// Operation-accounted spatial semantics paired with the exact authored inputs
+/// that produced them.
 #[must_use = "dropping the validated spatial batch releases its compiled-plan reservation"]
 pub(in crate::canonical_scene::store) struct ValidatedSpatialBatch<'input, R> {
-    input: SpatialAuthoringBatch<'input>,
+    compiled: SpatialValidationStorage<R>,
+    input: SpatialValidationInput<'input>,
+}
+
+struct SpatialValidationInput<'input> {
+    spatial: SpatialAuthoringBatch<'input>,
+    nodes: NodeAuthoringBatch<'input>,
+}
+
+struct SpatialValidationStorage<R> {
     camera_count: u32,
     light_count: u32,
     entity_count: u64,
@@ -129,78 +139,93 @@ pub(in crate::canonical_scene::store) struct ValidatedSpatialBatch<'input, R> {
     tangent_basis_schema_name_bytes: u32,
     tangent_encoding_schema_name_bytes: u32,
     // The zero-sized reservation keeps this proof coupled to its operation owner.
-    _reservation: R,
+    reservation: R,
 }
 
-impl<R> ValidatedSpatialBatch<'_, R> {
-    pub(in crate::canonical_scene::store) const fn input(&self) -> SpatialAuthoringBatch<'_> {
-        self.input
+impl<'input, R> ValidatedSpatialBatch<'input, R> {
+    const fn new(
+        spatial: SpatialAuthoringBatch<'input>,
+        nodes: NodeAuthoringBatch<'input>,
+        compiled: SpatialValidationStorage<R>,
+    ) -> Self {
+        Self {
+            compiled,
+            input: SpatialValidationInput { spatial, nodes },
+        }
+    }
+
+    pub(in crate::canonical_scene::store) const fn input(&self) -> SpatialAuthoringBatch<'input> {
+        self.input.spatial
+    }
+
+    pub(in crate::canonical_scene::store) const fn node_input(&self) -> NodeAuthoringBatch<'input> {
+        self.input.nodes
     }
 
     pub(in crate::canonical_scene::store) const fn scene_space(
         &self,
     ) -> &crate::scene_space::SceneSpace {
-        self.input.scene_space()
+        self.input.spatial.scene_space()
     }
 
     pub(in crate::canonical_scene::store) const fn camera_count(&self) -> u32 {
-        self.camera_count
+        self.compiled.camera_count
     }
 
     pub(in crate::canonical_scene::store) const fn light_count(&self) -> u32 {
-        self.light_count
+        self.compiled.light_count
     }
 
     pub(in crate::canonical_scene::store) const fn entity_count(&self) -> u64 {
-        self.entity_count
+        self.compiled.entity_count
     }
 
     pub(in crate::canonical_scene::store) const fn edge_count(&self) -> u64 {
-        self.edge_count
+        self.compiled.edge_count
     }
 
     pub(in crate::canonical_scene::store) const fn reference_count(&self) -> u64 {
-        self.reference_count
+        self.compiled.reference_count
     }
 
     pub(in crate::canonical_scene::store) const fn semantic_cell_count(&self) -> u64 {
-        self.semantic_cell_count
+        self.compiled.semantic_cell_count
     }
 
     pub(in crate::canonical_scene::store) const fn canonical_bytes(&self) -> u64 {
-        self.canonical_bytes
+        self.compiled.canonical_bytes
     }
 
     pub(in crate::canonical_scene::store) const fn validation_work(&self) -> u64 {
-        self.validation_work
+        self.compiled.validation_work
     }
 
     pub(in crate::canonical_scene::store) const fn scratch_bytes(&self) -> u64 {
-        self.retained_scratch_bytes
+        self.compiled.retained_scratch_bytes
     }
 
     /// Returns the independently admitted transient peak for conformance tests.
     #[cfg(test)]
     pub(in crate::canonical_scene::store) const fn peak_scratch_bytes(&self) -> u64 {
-        self.peak_scratch_bytes
+        self.compiled.peak_scratch_bytes
     }
 
     pub(in crate::canonical_scene::store) const fn tangent_basis_schema_name_bytes(&self) -> u32 {
-        self.tangent_basis_schema_name_bytes
+        self.compiled.tangent_basis_schema_name_bytes
     }
 
     pub(in crate::canonical_scene::store) const fn tangent_encoding_schema_name_bytes(
         &self,
     ) -> u32 {
-        self.tangent_encoding_schema_name_bytes
+        self.compiled.tangent_encoding_schema_name_bytes
     }
 
     pub(in crate::canonical_scene::store) const fn payload_block_count(&self) -> u32 {
         let mut count = 0;
-        if self.tangent_basis_schema_name_bytes != 0 {
+        if self.compiled.tangent_basis_schema_name_bytes != 0 {
             count += 1;
         }
-        if self.tangent_encoding_schema_name_bytes != 0 {
+        if self.compiled.tangent_encoding_schema_name_bytes != 0 {
             count += 1;
         }
         count
@@ -209,13 +234,34 @@ impl<R> ValidatedSpatialBatch<'_, R> {
     pub(in crate::canonical_scene::store) fn cameras(
         &self,
     ) -> impl ExactSizeIterator<Item = &CameraAuthoring> {
-        self.input.cameras().iter()
+        self.input.spatial.cameras().iter()
     }
 
     pub(in crate::canonical_scene::store) fn lights(
         &self,
     ) -> impl ExactSizeIterator<Item = &LightAuthoring> {
-        self.input.lights().iter()
+        self.input.spatial.lights().iter()
+    }
+
+    #[cfg(test)]
+    pub(in crate::canonical_scene::store::production) fn into_compiled_facts_for_test(
+        self,
+    ) -> (u32, u32, u64, u64, R) {
+        let SpatialValidationStorage {
+            camera_count,
+            light_count,
+            edge_count,
+            reference_count,
+            reservation,
+            ..
+        } = self.compiled;
+        (
+            camera_count,
+            light_count,
+            edge_count,
+            reference_count,
+            reservation,
+        )
     }
 }
 
@@ -223,17 +269,20 @@ impl<R> fmt::Debug for ValidatedSpatialBatch<'_, R> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("ValidatedSpatialBatch")
-            .field("input", &self.input)
-            .field("camera_count", &self.camera_count)
-            .field("light_count", &self.light_count)
-            .field("entity_count", &self.entity_count)
-            .field("edge_count", &self.edge_count)
-            .field("reference_count", &self.reference_count)
-            .field("semantic_cell_count", &self.semantic_cell_count)
-            .field("canonical_bytes", &self.canonical_bytes)
-            .field("validation_work", &self.validation_work)
-            .field("peak_scratch_bytes", &self.peak_scratch_bytes)
-            .field("retained_scratch_bytes", &self.retained_scratch_bytes)
+            .field("input", &self.input.spatial)
+            .field("camera_count", &self.compiled.camera_count)
+            .field("light_count", &self.compiled.light_count)
+            .field("entity_count", &self.compiled.entity_count)
+            .field("edge_count", &self.compiled.edge_count)
+            .field("reference_count", &self.compiled.reference_count)
+            .field("semantic_cell_count", &self.compiled.semantic_cell_count)
+            .field("canonical_bytes", &self.compiled.canonical_bytes)
+            .field("validation_work", &self.compiled.validation_work)
+            .field("peak_scratch_bytes", &self.compiled.peak_scratch_bytes)
+            .field(
+                "retained_scratch_bytes",
+                &self.compiled.retained_scratch_bytes,
+            )
             .field("reservation", &"<held>")
             .finish()
     }
@@ -812,8 +861,7 @@ where
 
     context.finish()?;
 
-    Ok(ValidatedSpatialBatch {
-        input,
+    let compiled = SpatialValidationStorage {
         camera_count,
         light_count,
         entity_count,
@@ -826,8 +874,9 @@ where
         retained_scratch_bytes,
         tangent_basis_schema_name_bytes,
         tangent_encoding_schema_name_bytes,
-        _reservation: reservation,
-    })
+        reservation,
+    };
+    Ok(ValidatedSpatialBatch::new(input, nodes, compiled))
 }
 
 fn collection_count(

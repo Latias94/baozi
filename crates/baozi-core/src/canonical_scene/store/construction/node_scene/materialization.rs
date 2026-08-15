@@ -271,7 +271,7 @@ impl SceneConstructionOperation {
         let validation = {
             let mut control =
                 OperationAuthoringControl::new(&mut self.raw, keys.phase, keys.dimension);
-            validate_node_batch(input.nodes(), node_limits, &mut control)
+            validate_node_batch(spatial.node_input(), node_limits, &mut control)
         };
         let nodes = match validation {
             Ok(nodes) => nodes,
@@ -328,7 +328,7 @@ impl SceneConstructionOperation {
                 OperationAuthoringControl::new(&mut self.raw, keys.phase, keys.dimension);
             validate_geometry_batch(
                 input.geometry(),
-                input.nodes().nodes().len(),
+                nodes.authored_node_count(),
                 appearance.material_count(),
                 geometry_limits,
                 &mut control,

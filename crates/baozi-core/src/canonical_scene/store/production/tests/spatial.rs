@@ -85,6 +85,37 @@ fn multiple_node_placements_are_preserved_for_each_spatial_object() {
 }
 
 #[test]
+fn compiled_spatial_facts_do_not_borrow_authored_storage() {
+    let mut control = TestControl::default();
+    let compiled = {
+        let roots = vec![NodeLocalId::new(0)];
+        let nodes = vec![node(
+            Presence::Absent,
+            Presence::Present(CameraLocalId::new(0)),
+            Presence::Absent,
+        )];
+        let cameras = vec![camera()];
+
+        validate_spatial_batch_with_control(
+            SpatialAuthoringBatch::new(&SceneSpace::UNKNOWN, &cameras, &[]),
+            NodeAuthoringBatch::new(Presence::Present(&roots), &nodes),
+            SceneValidationLimits::default(),
+            &mut control,
+        )
+        .expect("temporary authored storage must compile into owned spatial facts")
+        .into_compiled_facts_for_test()
+    };
+
+    assert_eq!(compiled.0, 1);
+    assert_eq!(compiled.1, 0);
+    assert_eq!(compiled.2, 1);
+    assert_eq!(compiled.3, 1);
+
+    drop(compiled);
+    assert_eq!(control.live.get(), 0);
+}
+
+#[test]
 fn transient_spatial_scratch_does_not_reduce_later_node_scratch() {
     let roots = [NodeLocalId::new(0)];
     let nodes = [node(
