@@ -228,7 +228,7 @@ where
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    /// Runs one higher-ranked planning transaction whose sealed plan owns all scoped scratch.
+    /// Runs one higher-ranked planning transaction whose core plan owns all scoped scratch.
     #[allow(
         clippy::result_large_err,
         clippy::type_complexity,
@@ -252,7 +252,7 @@ where
         } = self;
         let (operation, containment_anchor) = dormant.into_parts()?;
         let mut transaction = ManuallyDrop::new(Some(transaction));
-        let receipt_brand = ScopedReceiptBrand { _private: () };
+        let receipt_brand = ScopedReceiptBrand { _private: 0 };
         let mut driver = ScopedActivationDriver {
             state: ScopedActivationState::Planning(operation),
             containment_anchor,
@@ -798,10 +798,12 @@ where
     fn bind_success(
         &mut self,
         requirements: CanonicalSuccessRequirements,
+        completed_semantic_work: NonZeroU64,
     ) -> Result<BoundScopedSuccessRequest, ()> {
         self.poll_final_planning_control();
         let semantic_complete = matches!(self.semantic_state, ScopedSemanticState::Complete);
-        if !semantic_complete && self.first_fault.is_none() {
+        let semantic_work_matches = requirements.semantic_preflight_work == completed_semantic_work;
+        if !semantic_complete || !semantic_work_matches {
             let _ = preserve_first_fault::<()>(
                 &mut self.first_fault,
                 Err(StoreRuntimeError::ConstructionInvariantUnverified),
@@ -849,7 +851,7 @@ where
         ]);
         let _ = preserve_first_fault(&mut self.first_fault, writer);
         let _ = preserve_first_fault(&mut self.first_fault, activation_dimensions);
-        if !semantic_complete || self.first_fault.is_some() {
+        if !semantic_complete || !semantic_work_matches || self.first_fault.is_some() {
             Err(())
         } else {
             Ok(request)
@@ -918,8 +920,9 @@ where
     /// Admits one exact semantic-work envelope before any producer action executes.
     pub fn begin_semantic_work<'borrow>(
         &'borrow mut self,
-        attempted_units: u64,
+        attempted_units: NonZeroU64,
     ) -> Result<CanonicalSemanticWorkSession<'borrow, 'scope, O, PP, U>, StoreRuntimeError> {
+        let receipt_brand = self.receipt_brand;
         let ScopedActivationDriver {
             state,
             roles,
@@ -940,91 +943,73 @@ where
             );
         };
         let (phase, dimension) = roles.policy.authoring_keys();
-        let permit = if let Some(amount) = NonZeroU64::new(attempted_units) {
-            let operation = match state {
-                ScopedActivationState::Planning(operation) => operation,
-                _ => {
-                    return preserve_first_fault(
-                        first_fault,
-                        Err(StoreRuntimeError::ConstructionInvariantUnverified),
-                    );
-                }
-            };
-            let control = operation.activation_work_control(dimension);
-            let control = preserve_first_fault(first_fault, control)?;
-            let RetainedStoreWorkControl { raw, sticky: _ } = control;
-            match raw.try_begin(amount) {
-                Ok(permit) => Some(permit),
-                Err(RetainedWorkStartError::Control(cause)) => {
-                    return preserve_first_fault(
-                        first_fault,
-                        Err(StoreRuntimeError::Control(cause)),
-                    );
-                }
-                Err(RetainedWorkStartError::Ledger(cause)) => {
-                    return preserve_first_fault(
-                        first_fault,
-                        Err(StoreRuntimeError::Ledger(cause)),
-                    );
-                }
-                Err(RetainedWorkStartError::Outstanding) => {
-                    return preserve_first_fault(
-                        first_fault,
-                        Err(StoreRuntimeError::ConstructionInvariantUnverified),
-                    );
-                }
+        let amount = attempted_units;
+        let operation = match state {
+            ScopedActivationState::Planning(operation) => operation,
+            _ => {
+                return preserve_first_fault(
+                    first_fault,
+                    Err(StoreRuntimeError::ConstructionInvariantUnverified),
+                );
             }
-        } else {
-            None
+        };
+        let control = operation.activation_work_control(dimension);
+        let control = preserve_first_fault(first_fault, control)?;
+        let RetainedStoreWorkControl { raw, sticky: _ } = control;
+        let permit = match raw.try_begin(amount) {
+            Ok(permit) => permit,
+            Err(RetainedWorkStartError::Control(cause)) => {
+                return preserve_first_fault(first_fault, Err(StoreRuntimeError::Control(cause)));
+            }
+            Err(RetainedWorkStartError::Ledger(cause)) => {
+                return preserve_first_fault(first_fault, Err(StoreRuntimeError::Ledger(cause)));
+            }
+            Err(RetainedWorkStartError::Outstanding) => {
+                return preserve_first_fault(
+                    first_fault,
+                    Err(StoreRuntimeError::ConstructionInvariantUnverified),
+                );
+            }
         };
         *semantic_state = ScopedSemanticState::Active;
         Ok(CanonicalSemanticWorkSession {
-            permit,
+            permit: Some(permit),
             first_fault,
             phase,
             state: semantic_state,
+            receipt_brand,
+            admitted_units: amount,
             work_batch: work_batch::CompletionPrefixBatch::new(),
             resolved: false,
             scope: PhantomData,
         })
     }
 
-    /// Seals one complete plan only after its exact semantic work and role binding succeed.
-    pub fn seal_plan<P>(
+    /// Seals one payload-free activation permit after exact semantic work and role binding succeed.
+    pub fn seal_activation(
         self,
         requirements: CanonicalSuccessRequirements,
-        plan: P,
-    ) -> CanonicalPlanSeal<'scope, P, O, PP, U, T, E, CanonicalKind, CanonicalTag, L> {
-        match self.driver.bind_success(requirements) {
-            Ok(request) => CanonicalPlanSeal::Sealed(CanonicalSealedPlan {
-                plan: Some(plan),
+        completion: CanonicalSemanticCompletion<'scope>,
+    ) -> CanonicalActivationSeal<'scope, O, PP, U, T, E, CanonicalKind, CanonicalTag, L> {
+        if !std::ptr::eq(completion.receipt_brand, self.receipt_brand) {
+            let _ = preserve_first_fault::<()>(
+                &mut self.driver.first_fault,
+                Err(StoreRuntimeError::ConstructionInvariantUnverified),
+            );
+        }
+        match self
+            .driver
+            .bind_success(requirements, completion.completed_units)
+        {
+            Ok(request) => CanonicalActivationSeal::Sealed(CanonicalActivationPermit {
                 driver: Some(self.driver),
                 request: Some(request),
                 receipt_brand: self.receipt_brand,
             }),
-            Err(()) => {
-                if drop_scoped_value(plan).is_err() {
-                    let _ = self.driver.contain_current();
-                } else if let Some(fault) = self.driver.first_fault.take() {
-                    if fault.contract_seen || fault.recoverable_code().is_none() {
-                        let _ = self.driver.contain_current();
-                    } else {
-                        self.driver.install_never_activated_runtime(fault);
-                    }
-                } else {
-                    let _ = self.driver.contain_current();
-                }
-                CanonicalPlanSeal::Terminal(ScopedActivationDriver::<
-                    O,
-                    PP,
-                    U,
-                    T,
-                    E,
-                    CanonicalKind,
-                    CanonicalTag,
-                    L,
-                >::receipt(self.receipt_brand))
-            }
+            Err(()) => CanonicalActivationSeal::Unsealed(CanonicalActivationSealFailure {
+                driver: Some(self.driver),
+                receipt_brand: self.receipt_brand,
+            }),
         }
     }
 
@@ -1096,7 +1081,7 @@ impl<P, M> ScopedActivationInputs<P, M> {
     fn take_plan(&mut self) -> P {
         self.plan
             .take()
-            .expect("the sealed plan moves into materialization at most once")
+            .expect("the activation inputs move their core plan at most once")
     }
 
     fn take_materializer(&mut self) -> M {
@@ -1150,6 +1135,49 @@ where
 {
     driver: &'driver mut ScopedActivationDriver<O, PP, U, T, E, CanonicalKind, CanonicalTag, L>,
     owner: Option<ScopedTransitionOwner<O, PP, U, L>>,
+}
+
+impl<'scope, O, PP, U, T, E, CanonicalKind, CanonicalTag, L>
+    CanonicalActivationSealFailure<'scope, O, PP, U, T, E, CanonicalKind, CanonicalTag, L>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    /// Resolves the seal failure after the caller has released its complete core-owned plan.
+    pub fn finish_after_plan_drop(mut self) -> CanonicalScopedDisposition<'scope> {
+        let receipt_brand = self.receipt_brand;
+        let driver = self
+            .driver
+            .take()
+            .expect("an unsealed activation owns its scoped activation driver");
+        if let Some(fault) = driver.first_fault.take() {
+            if fault.contract_seen || fault.recoverable_code().is_none() {
+                let _ = driver.contain_current();
+            } else {
+                driver.install_never_activated_runtime(fault);
+            }
+        } else {
+            let _ = driver.contain_current();
+        }
+        ScopedActivationDriver::<O, PP, U, T, E, CanonicalKind, CanonicalTag, L>::receipt(
+            receipt_brand,
+        )
+    }
+}
+
+impl<O, PP, U, T, E, CanonicalKind, CanonicalTag, L> Drop
+    for CanonicalActivationSealFailure<'_, O, PP, U, T, E, CanonicalKind, CanonicalTag, L>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    fn drop(&mut self) {
+        // Releasing only the borrow leaves unresolved failure classification to the outer scoped
+        // transaction boundary, which contains the operation after caller-owned plans unwind.
+        self.driver.take();
+    }
 }
 
 impl<'driver, O, PP, U, T, E, CanonicalKind, CanonicalTag, L>
@@ -1279,21 +1307,22 @@ where
     }
 }
 
-impl<'scope, P, O, PP, U, T, E, CanonicalKind, CanonicalTag, L>
-    CanonicalSealedPlan<'scope, P, O, PP, U, T, E, CanonicalKind, CanonicalTag, L>
+impl<'scope, O, PP, U, T, E, CanonicalKind, CanonicalTag, L>
+    CanonicalActivationPermit<'scope, O, PP, U, T, E, CanonicalKind, CanonicalTag, L>
 where
     O: OperationOwner,
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    /// Consumes the complete plan and moves it directly into one nested canonical lane.
+    /// Moves one core-owned execution plan behind the owner-consuming activation transition.
     #[allow(
         clippy::result_large_err,
         clippy::type_complexity,
-        reason = "the sealed plan preserves the scoped scratch owner and exact terminal state"
+        reason = "the activation call preserves the scoped scratch owner and exact terminal state"
     )]
-    pub fn activate(
+    pub fn activate<P>(
         mut self,
+        plan: P,
         materialize: impl for<'lane> FnOnce(
             CanonicalLane<'lane, O, PP, U, L>,
             P,
@@ -1306,19 +1335,15 @@ where
         >,
     ) -> CanonicalScopedDisposition<'scope> {
         let receipt_brand = self.receipt_brand;
-        let plan = self
-            .plan
-            .take()
-            .expect("a sealed plan owns its complete preflight value");
         let inputs = ScopedActivationInputs::new(plan, materialize);
         let driver = self
             .driver
             .take()
-            .expect("a sealed plan owns its scoped activation driver");
+            .expect("an activation permit owns its scoped activation driver");
         let request = self
             .request
             .take()
-            .expect("a sealed plan owns its bound activation request");
+            .expect("an activation permit owns its bound activation request");
         let mut transition = ScopedOwnerTransition::begin(driver);
         // Rebinding immediately after the transition makes every later unwind drop the complete
         // plan, its reservations, and the materializer before final ownership-graph containment.
@@ -1603,22 +1628,18 @@ where
     }
 }
 
-impl<P, O, PP, U, T, E, CanonicalKind, CanonicalTag, L> Drop
-    for CanonicalSealedPlan<'_, P, O, PP, U, T, E, CanonicalKind, CanonicalTag, L>
+impl<O, PP, U, T, E, CanonicalKind, CanonicalTag, L> Drop
+    for CanonicalActivationPermit<'_, O, PP, U, T, E, CanonicalKind, CanonicalTag, L>
 where
     O: OperationOwner,
     PP: ProgressPhase,
     U: ProgressUnit,
 {
     fn drop(&mut self) {
-        if let Some(plan) = self.plan.take() {
-            let _ = drop_scoped_value(plan);
-        }
         self.request.take();
-        // The driver is owned by `plan_and_activate_scoped`, which is the single containment
-        // boundary for both normal abandonment and unwinding. Releasing only this exclusive
-        // borrow leaves the operation owner available to that boundary after the plan and all
-        // metered scratch have been destroyed.
+        // The permit contains no core payload. Releasing only this exclusive borrow lets the
+        // transaction callback destroy its private plan and metered scratch before the outer
+        // `plan_and_activate_scoped` boundary performs fail-closed containment.
         self.driver.take();
     }
 }
@@ -1956,7 +1977,11 @@ where
 
     /// Completes the exact admitted envelope; missing work is a contract only without an earlier
     /// trusted runtime fault.
-    pub fn finish_exact(mut self) -> Result<(), StoreRuntimeError> {
+    pub fn finish_exact(
+        mut self,
+    ) -> Result<CanonicalSemanticCompletion<'scope>, StoreRuntimeError> {
+        let receipt_brand = self.receipt_brand;
+        let completed_units = self.admitted_units;
         let result = self.poll_now();
         if let Err(cause) = result {
             if let Some(permit) = self.permit.take() {
@@ -1972,12 +1997,16 @@ where
                 permit.finish_partial();
                 false
             }
-            None => true,
+            None => false,
         };
         self.resolved = true;
         if complete {
             *self.state = ScopedSemanticState::Complete;
-            Ok(())
+            Ok(CanonicalSemanticCompletion {
+                receipt_brand,
+                completed_units,
+                invariant: PhantomData,
+            })
         } else {
             *self.state = ScopedSemanticState::Rejected;
             self.note_contract_if_untrusted();

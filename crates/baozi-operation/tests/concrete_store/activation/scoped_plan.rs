@@ -10,6 +10,10 @@ type ScopedOutcome<E> = CanonicalActivationOutcome<
     SequenceTag,
 >;
 
+fn semantic_units(units: u64) -> NonZeroU64 {
+    NonZeroU64::new(units).expect("semantic work fixtures are nonzero")
+}
+
 struct ScratchPlan<'scope> {
     values: Vec<u8>,
     scratch: CanonicalReservation<'scope, TestOwner>,
@@ -35,7 +39,7 @@ struct TrackedScratchPlan<'scope, 'probe> {
 }
 
 #[test]
-fn scoped_private_migration_plan_moves_its_payload_directly_into_materialization() {
+fn scoped_activation_permit_moves_the_core_plan_only_at_activation() {
     let factory = factory(1);
     let account = account(&factory);
     let (operation, keys) = operation(&account);
@@ -48,37 +52,39 @@ fn scoped_private_migration_plan_moves_its_payload_directly_into_materialization
         .into_scoped_session_outcome_owner(policy, failure)
         .unwrap();
 
-    // This proves only a linear move through the temporary generic seam. It does not prove that
-    // arbitrary `P` storage was allocated after reservation; the real core sealed plan must
-    // structurally own every metered collection before the U4e cutover.
+    // Operation verifies the semantic completion and physical shape without interpreting the
+    // core-owned execution plan. The plan moves behind the owner-consuming transition only here.
     let outcome = owner
         .plan_and_activate_scoped(|mut planning| {
-            let mut semantic = planning.begin_semantic_work(1).unwrap();
+            let mut semantic = planning.begin_semantic_work(NonZeroU64::MIN).unwrap();
             let mut scratch = semantic.reserve(4).unwrap();
             semantic.resize(&mut scratch, 8).unwrap();
             semantic.validate_live_owner(&scratch).unwrap();
             semantic.run_unit(|| ()).unwrap();
-            semantic.finish_exact().unwrap();
+            let completion = semantic.finish_exact().unwrap();
 
-            let sealed = match planning.seal_plan(
-                success,
+            let permit = match planning.seal_activation(success, completion) {
+                CanonicalActivationSeal::Sealed(permit) => permit,
+                CanonicalActivationSeal::Unsealed(failure) => {
+                    drop(scratch);
+                    return failure.finish_after_plan_drop();
+                }
+            };
+            permit.activate(
                 ScratchPlan {
                     values: vec![3, 5, 8],
                     scratch,
                 },
-            ) {
-                CanonicalPlanSeal::Sealed(sealed) => sealed,
-                CanonicalPlanSeal::Terminal(disposition) => return disposition,
-            };
-            sealed.activate(|lane, plan| {
-                assert_eq!(plan.values, [3, 5, 8]);
-                let ScratchPlan { values: _, scratch } = plan;
-                drop(scratch);
-                lane.reject::<(), _, ScalarSequence<u8>, SequenceTag>(
-                    MaterializationRejection::Semantic,
-                    21,
-                )
-            })
+                |lane, plan| {
+                    assert_eq!(plan.values, [3, 5, 8]);
+                    let ScratchPlan { values: _, scratch } = plan;
+                    drop(scratch);
+                    lane.reject::<(), _, ScalarSequence<u8>, SequenceTag>(
+                        MaterializationRejection::Semantic,
+                        21,
+                    )
+                },
+            )
         })
         .unwrap();
 
@@ -151,7 +157,7 @@ fn scoped_semantic_rejection_binds_only_failure_shape_and_never_allocates_canoni
 }
 
 #[test]
-fn scoped_sealed_plan_is_single_use_and_not_clone_or_copy() {
+fn scoped_activation_permit_and_semantic_completion_are_linear() {
     trait AmbiguousIfCopy<Marker> {
         fn assert_not_copy() {}
     }
@@ -166,12 +172,19 @@ fn scoped_sealed_plan_is_single_use_and_not_clone_or_copy() {
     struct CloneMarker;
     impl<T: Clone> AmbiguousIfClone<CloneMarker> for T {}
 
-    // Keep the payload itself Copy + Clone so this test cannot pass only because a conditional
-    // implementation inherits non-Copy/non-Clone behavior from the payload.
-    type Plan = ();
-    type Sealed = CanonicalSealedPlan<
+    type Permit = CanonicalActivationPermit<
         'static,
-        Plan,
+        TestOwner,
+        TestProgress,
+        TestUnit,
+        (),
+        (),
+        ScalarSequence<u8>,
+        SequenceTag,
+    >;
+    type Completion = CanonicalSemanticCompletion<'static>;
+    type SealFailure = CanonicalActivationSealFailure<
+        'static,
         TestOwner,
         TestProgress,
         TestUnit,
@@ -182,14 +195,18 @@ fn scoped_sealed_plan_is_single_use_and_not_clone_or_copy() {
     >;
     type Receipt = CanonicalScopedDisposition<'static>;
 
-    let _ = <Sealed as AmbiguousIfCopy<_>>::assert_not_copy;
-    let _ = <Sealed as AmbiguousIfClone<_>>::assert_not_clone;
+    let _ = <Permit as AmbiguousIfCopy<_>>::assert_not_copy;
+    let _ = <Permit as AmbiguousIfClone<_>>::assert_not_clone;
+    let _ = <Completion as AmbiguousIfCopy<_>>::assert_not_copy;
+    let _ = <Completion as AmbiguousIfClone<_>>::assert_not_clone;
+    let _ = <SealFailure as AmbiguousIfCopy<_>>::assert_not_copy;
+    let _ = <SealFailure as AmbiguousIfClone<_>>::assert_not_clone;
     let _ = <Receipt as AmbiguousIfCopy<_>>::assert_not_copy;
     let _ = <Receipt as AmbiguousIfClone<_>>::assert_not_clone;
 }
 
 #[test]
-fn dropping_a_scoped_sealed_plan_releases_scratch_before_containment() {
+fn abandoning_a_scoped_activation_releases_scratch_before_containment() {
     let factory = factory(1);
     let account = account(&factory);
     let (operation, keys) = operation(&account);
@@ -205,26 +222,27 @@ fn dropping_a_scoped_sealed_plan_releases_scratch_before_containment() {
     let poison_seen_while_dropping = Cell::new(false);
 
     let result: Result<ScopedOutcome<()>, _> = owner.plan_and_activate_scoped(|mut planning| {
-        let mut semantic = planning.begin_semantic_work(1).unwrap();
+        let mut semantic = planning.begin_semantic_work(NonZeroU64::MIN).unwrap();
         let scratch = semantic.reserve(1).unwrap();
         semantic.run_unit(|| ()).unwrap();
-        semantic.finish_exact().unwrap();
-        let sealed = match planning.seal_plan(
-            success,
-            TrackedScratchPlan {
-                _marker: DropMarker {
-                    dropped: &dropped,
-                    account: &account,
-                    poison_seen_while_dropping: &poison_seen_while_dropping,
-                },
-                _scratch: scratch,
+        let completion = semantic.finish_exact().unwrap();
+        let _plan = TrackedScratchPlan {
+            _marker: DropMarker {
+                dropped: &dropped,
+                account: &account,
+                poison_seen_while_dropping: &poison_seen_while_dropping,
             },
-        ) {
-            CanonicalPlanSeal::Sealed(sealed) => sealed,
-            CanonicalPlanSeal::Terminal(disposition) => return disposition,
+            _scratch: scratch,
         };
-        drop(sealed);
-        panic!("dropping a sealed plan cannot synthesize a publishable outcome")
+        let permit = match planning.seal_activation(success, completion) {
+            CanonicalActivationSeal::Sealed(permit) => permit,
+            CanonicalActivationSeal::Unsealed(failure) => {
+                drop(_plan);
+                return failure.finish_after_plan_drop();
+            }
+        };
+        drop(permit);
+        panic!("abandoning an activation permit cannot synthesize a publishable outcome")
     });
 
     assert!(result.is_err());
@@ -327,12 +345,12 @@ fn scoped_materialization_panic_drops_the_plan_before_account_containment() {
     let poison_seen_while_dropping = Cell::new(false);
 
     let result: Result<ScopedOutcome<()>, _> = owner.plan_and_activate_scoped(|mut planning| {
-        let mut semantic = planning.begin_semantic_work(1).unwrap();
+        let mut semantic = planning.begin_semantic_work(NonZeroU64::MIN).unwrap();
         let scratch = semantic.reserve(1).unwrap();
         semantic.run_unit(|| ()).unwrap();
-        semantic.finish_exact().unwrap();
-        match planning.seal_plan(
-                success,
+        let completion = semantic.finish_exact().unwrap();
+        match planning.seal_activation(success, completion) {
+            CanonicalActivationSeal::Sealed(permit) => permit.activate(
                 TrackedScratchPlan {
                     _marker: DropMarker {
                         dropped: &dropped,
@@ -341,8 +359,6 @@ fn scoped_materialization_panic_drops_the_plan_before_account_containment() {
                     },
                     _scratch: scratch,
                 },
-            ) {
-            CanonicalPlanSeal::Sealed(sealed) => sealed.activate(
                 |_lane, _plan| -> CanonicalMaterialization<
                     '_,
                     (),
@@ -351,7 +367,10 @@ fn scoped_materialization_panic_drops_the_plan_before_account_containment() {
                     SequenceTag,
                 > { panic!("contained scoped materialization panic") },
             ),
-            CanonicalPlanSeal::Terminal(disposition) => disposition,
+            CanonicalActivationSeal::Unsealed(failure) => {
+                drop(scratch);
+                failure.finish_after_plan_drop()
+            }
         }
     });
 
@@ -441,16 +460,16 @@ fn panic_after_pending_rejected_is_fail_closed() {
 
     let result: Result<ScopedOutcome<MaterializationRejection>, _> = owner
         .plan_and_activate_scoped(|mut planning| {
-            planning
-                .begin_semantic_work(0)
-                .unwrap()
-                .finish_exact()
-                .unwrap();
-            let sealed = match planning.seal_plan(success, ()) {
-                CanonicalPlanSeal::Sealed(sealed) => sealed,
-                CanonicalPlanSeal::Terminal(disposition) => return disposition,
+            let mut semantic = planning.begin_semantic_work(NonZeroU64::MIN).unwrap();
+            semantic.run_unit(|| ()).unwrap();
+            let completion = semantic.finish_exact().unwrap();
+            let permit = match planning.seal_activation(success, completion) {
+                CanonicalActivationSeal::Sealed(permit) => permit,
+                CanonicalActivationSeal::Unsealed(failure) => {
+                    return failure.finish_after_plan_drop();
+                }
             };
-            let _receipt = sealed.activate(|lane, ()| {
+            let _receipt = permit.activate((), |lane, ()| {
                 lane.reject::<(), _, ScalarSequence<u8>, SequenceTag>(
                     MaterializationRejection::Semantic,
                     32,
@@ -479,16 +498,16 @@ fn panic_after_pending_activated_is_fail_closed() {
 
     let result: Result<ScopedOutcome<MaterializationRejection>, _> = owner
         .plan_and_activate_scoped(|mut planning| {
-            planning
-                .begin_semantic_work(0)
-                .unwrap()
-                .finish_exact()
-                .unwrap();
-            let sealed = match planning.seal_plan(success, ()) {
-                CanonicalPlanSeal::Sealed(sealed) => sealed,
-                CanonicalPlanSeal::Terminal(disposition) => return disposition,
+            let mut semantic = planning.begin_semantic_work(NonZeroU64::MIN).unwrap();
+            semantic.run_unit(|| ()).unwrap();
+            let completion = semantic.finish_exact().unwrap();
+            let permit = match planning.seal_activation(success, completion) {
+                CanonicalActivationSeal::Sealed(permit) => permit,
+                CanonicalActivationSeal::Unsealed(failure) => {
+                    return failure.finish_after_plan_drop();
+                }
             };
-            let _receipt = sealed.activate(|mut lane, ()| {
+            let _receipt = permit.activate((), |mut lane, ()| {
                 let root = lane
                     .try_retain_sequence(
                         SequencePlan::<u8>::new(1).unwrap(),
@@ -527,7 +546,7 @@ fn control_interruption_then_reject_preserves_runtime_never_activated() {
 
     let outcome: ScopedOutcome<PreflightRejection> = owner
         .plan_and_activate_scoped(|mut planning| {
-            let cause = match planning.begin_semantic_work(1) {
+            let cause = match planning.begin_semantic_work(NonZeroU64::MIN) {
                 Ok(_) => panic!("pre-cancelled semantic admission must retain Control"),
                 Err(cause) => cause,
             };
@@ -572,7 +591,7 @@ fn ledger_interruption_then_reject_preserves_runtime_never_activated() {
 
     let outcome: ScopedOutcome<PreflightRejection> = owner
         .plan_and_activate_scoped(|mut planning| {
-            let mut semantic = planning.begin_semantic_work(1).unwrap();
+            let mut semantic = planning.begin_semantic_work(NonZeroU64::MIN).unwrap();
             let cause = match semantic.reserve(u64::MAX) {
                 Ok(reservation) => {
                     let cause = match semantic.reserve(1) {
@@ -611,7 +630,7 @@ fn ledger_interruption_then_reject_preserves_runtime_never_activated() {
 }
 
 #[test]
-fn runtime_fault_during_seal_returns_terminal_receipt_without_panicking() {
+fn runtime_fault_before_semantic_completion_resolves_without_activation() {
     let factory = factory(1);
     let account = account(&factory);
     let cancellation = CancellationToken::new();
@@ -620,7 +639,7 @@ fn runtime_fault_during_seal_returns_terminal_receipt_without_panicking() {
     let TestScopedActivation {
         policy,
         failure,
-        success,
+        success: _,
     } = scoped_activation_shape(keys, 1, 1);
     let owner = operation
         .into_scoped_session_outcome_owner(policy, failure)
@@ -630,15 +649,10 @@ fn runtime_fault_during_seal_returns_terminal_receipt_without_panicking() {
     let outcome: ScopedOutcome<()> = owner
         .plan_and_activate_scoped(|mut planning| {
             assert!(matches!(
-                planning.begin_semantic_work(1),
+                planning.begin_semantic_work(NonZeroU64::MIN),
                 Err(StoreRuntimeError::Control(_))
             ));
-            match planning.seal_plan(success, ()) {
-                CanonicalPlanSeal::Sealed(_) => {
-                    panic!("an interrupted semantic envelope cannot seal")
-                }
-                CanonicalPlanSeal::Terminal(disposition) => disposition,
-            }
+            planning.reject((), 42)
         })
         .unwrap();
 
@@ -678,7 +692,7 @@ fn forgetting_a_semantic_session_cannot_publish_a_requested_disposition() {
 
     let result: Result<ScopedOutcome<PreflightRejection>, _> =
         owner.plan_and_activate_scoped(|mut planning| {
-            let semantic = planning.begin_semantic_work(1).unwrap();
+            let semantic = planning.begin_semantic_work(NonZeroU64::MIN).unwrap();
             std::mem::forget(semantic);
             planning.reject(PreflightRejection::Unsupported, 43)
         });
@@ -708,16 +722,18 @@ fn assert_forgotten_reservation_is_contained(terminal: ForgottenReservationTermi
 
     let result: Result<ScopedOutcome<MaterializationRejection>, _> = owner
         .plan_and_activate_scoped(|mut planning| {
-            let mut semantic = planning.begin_semantic_work(1).unwrap();
+            let mut semantic = planning.begin_semantic_work(NonZeroU64::MIN).unwrap();
             let scratch = semantic.reserve(1).unwrap();
             semantic.run_unit(|| ()).unwrap();
-            semantic.finish_exact().unwrap();
+            let completion = semantic.finish_exact().unwrap();
             std::mem::forget(scratch);
-            let sealed = match planning.seal_plan(success, ()) {
-                CanonicalPlanSeal::Sealed(sealed) => sealed,
-                CanonicalPlanSeal::Terminal(disposition) => return disposition,
+            let permit = match planning.seal_activation(success, completion) {
+                CanonicalActivationSeal::Sealed(permit) => permit,
+                CanonicalActivationSeal::Unsealed(failure) => {
+                    return failure.finish_after_plan_drop();
+                }
             };
-            sealed.activate(|mut lane, ()| match terminal {
+            permit.activate((), |mut lane, ()| match terminal {
                 ForgottenReservationTerminal::Activated => {
                     let root = lane
                         .try_retain_sequence(
@@ -774,7 +790,9 @@ fn scoped_semantic_case(
 
     let outcome: ScopedOutcome<PreflightRejection> = owner
         .plan_and_activate_scoped(|mut planning| {
-            let mut semantic = planning.begin_semantic_work(attempted_units).unwrap();
+            let mut semantic = planning
+                .begin_semantic_work(semantic_units(attempted_units))
+                .unwrap();
             while executed.get() < execute_limit {
                 let result = semantic.run_unit(|| {
                     let completed = executed.get() + 1;
@@ -789,7 +807,7 @@ fn scoped_semantic_case(
                 }
             }
             if executed.get() == attempted_units && !interrupted.get() {
-                semantic.finish_exact().unwrap();
+                let _completion = semantic.finish_exact().unwrap();
             } else {
                 let finish = semantic.finish_rejected();
                 if interrupted.get() {
@@ -910,7 +928,7 @@ fn cancellation_in_the_last_semantic_action_precedes_requested_rejection() {
 
     let outcome: ScopedOutcome<PreflightRejection> = owner
         .plan_and_activate_scoped(|mut planning| {
-            let mut semantic = planning.begin_semantic_work(1).unwrap();
+            let mut semantic = planning.begin_semantic_work(NonZeroU64::MIN).unwrap();
             semantic.run_unit(|| cancellation.cancel()).unwrap();
             let cause = semantic.finish_rejected().unwrap_err();
             assert!(matches!(cause, StoreRuntimeError::Control(_)));
@@ -970,12 +988,10 @@ fn cancellation_before_direct_reject_precedes_the_requested_cause() {
 }
 
 #[test]
-fn cancellation_before_zero_work_rejection_is_observed_at_final_planning_poll() {
+fn incomplete_semantic_work_cannot_issue_a_completion() {
     let factory = factory(1);
     let account = account(&factory);
-    let cancellation = CancellationToken::new();
-    let control = OperationControl::default().with_cancellation(cancellation.clone());
-    let (operation, keys) = operation_with_control(&account, control);
+    let (operation, keys) = operation(&account);
     let TestScopedActivation {
         policy,
         failure,
@@ -984,17 +1000,71 @@ fn cancellation_before_zero_work_rejection_is_observed_at_final_planning_poll() 
     let owner = operation
         .into_scoped_session_outcome_owner(policy, failure)
         .unwrap();
+    let baseline_allocations = account.snapshot().live_retained_allocations();
 
-    let outcome: ScopedOutcome<PreflightRejection> = owner
-        .plan_and_activate_scoped(|mut planning| {
-            let semantic = planning.begin_semantic_work(0).unwrap();
-            cancellation.cancel();
-            semantic.finish_rejected().unwrap();
-            planning.reject(PreflightRejection::Unsupported, 54)
-        })
+    let result: Result<ScopedOutcome<PreflightRejection>, _> =
+        owner.plan_and_activate_scoped(|mut planning| {
+            let mut semantic = planning.begin_semantic_work(semantic_units(2)).unwrap();
+            semantic.run_unit(|| ()).unwrap();
+            assert!(matches!(
+                semantic.finish_exact(),
+                Err(StoreRuntimeError::ConstructionInvariantUnverified)
+            ));
+            planning.reject(PreflightRejection::Unsupported, 55)
+        });
+
+    assert!(result.is_err());
+    assert_eq!(
+        account.snapshot().live_retained_allocations(),
+        baseline_allocations
+    );
+    assert_fail_closed_containment(&account);
+}
+
+fn assert_semantic_completion_mismatch(completed_units: u64, required_units: u64) {
+    let factory = factory(1);
+    let account = account(&factory);
+    let (operation, keys) = operation(&account);
+    let TestScopedActivation {
+        policy,
+        failure,
+        success: _,
+    } = scoped_activation_shape(keys, 1, 1);
+    let success = CanonicalSuccessRequirements::new(
+        CanonicalTableShape::new(1, 1).unwrap(),
+        1,
+        NonZeroU64::new(required_units).unwrap(),
+        NonZeroU64::MIN,
+    )
+    .unwrap();
+    let owner = operation
+        .into_scoped_session_outcome_owner(policy, failure)
         .unwrap();
 
-    assert_control_never_activated(outcome, &account);
+    let result: Result<ScopedOutcome<()>, _> = owner.plan_and_activate_scoped(|mut planning| {
+        let mut semantic = planning
+            .begin_semantic_work(semantic_units(completed_units))
+            .unwrap();
+        for _ in 0..completed_units {
+            semantic.run_unit(|| ()).unwrap();
+        }
+        let completion = semantic.finish_exact().unwrap();
+        match planning.seal_activation(success, completion) {
+            CanonicalActivationSeal::Sealed(_) => {
+                panic!("a mismatched semantic completion cannot issue an activation permit")
+            }
+            CanonicalActivationSeal::Unsealed(failure) => failure.finish_after_plan_drop(),
+        }
+    });
+
+    assert!(result.is_err());
+    assert_fail_closed_containment(&account);
+}
+
+#[test]
+fn semantic_completion_must_match_the_sealed_success_envelope_exactly() {
+    assert_semantic_completion_mismatch(1, 2);
+    assert_semantic_completion_mismatch(2, 1);
 }
 
 #[test]
@@ -1015,20 +1085,111 @@ fn cancellation_after_finish_exact_prevents_success_from_sealing() {
 
     let outcome: ScopedOutcome<()> = owner
         .plan_and_activate_scoped(|mut planning| {
-            let mut semantic = planning.begin_semantic_work(1).unwrap();
+            let mut semantic = planning.begin_semantic_work(NonZeroU64::MIN).unwrap();
             semantic.run_unit(|| ()).unwrap();
-            semantic.finish_exact().unwrap();
+            let completion = semantic.finish_exact().unwrap();
             cancellation.cancel();
-            match planning.seal_plan(success, ()) {
-                CanonicalPlanSeal::Sealed(_) => {
+            match planning.seal_activation(success, completion) {
+                CanonicalActivationSeal::Sealed(_) => {
                     panic!("final planning control must prevent a cancelled plan from sealing")
                 }
-                CanonicalPlanSeal::Terminal(disposition) => disposition,
+                CanonicalActivationSeal::Unsealed(failure) => failure.finish_after_plan_drop(),
             }
         })
         .unwrap();
 
     assert_control_never_activated(outcome, &account);
+}
+
+#[test]
+fn cancelled_seal_releases_scoped_plan_before_never_activated() {
+    let factory = factory(1);
+    let account = account(&factory);
+    let cancellation = CancellationToken::new();
+    let control = OperationControl::default().with_cancellation(cancellation.clone());
+    let (operation, keys) = operation_with_control(&account, control);
+    let TestScopedActivation {
+        policy,
+        failure,
+        success,
+    } = scoped_activation_shape(keys, 1, 1);
+    let owner = operation
+        .into_scoped_session_outcome_owner(policy, failure)
+        .unwrap();
+    let dropped = Cell::new(false);
+    let poison_seen_while_dropping = Cell::new(false);
+
+    let outcome: ScopedOutcome<()> = owner
+        .plan_and_activate_scoped(|mut planning| {
+            let mut semantic = planning.begin_semantic_work(NonZeroU64::MIN).unwrap();
+            let scratch = semantic.reserve(1).unwrap();
+            semantic.validate_live_owner(&scratch).unwrap();
+            semantic.run_unit(|| ()).unwrap();
+            let completion = semantic.finish_exact().unwrap();
+            let plan = TrackedScratchPlan {
+                _marker: DropMarker {
+                    dropped: &dropped,
+                    account: &account,
+                    poison_seen_while_dropping: &poison_seen_while_dropping,
+                },
+                _scratch: scratch,
+            };
+            cancellation.cancel();
+            match planning.seal_activation(success, completion) {
+                CanonicalActivationSeal::Sealed(_) => {
+                    panic!("final cancellation must prevent activation from sealing")
+                }
+                CanonicalActivationSeal::Unsealed(failure) => {
+                    drop(plan);
+                    failure.finish_after_plan_drop()
+                }
+            }
+        })
+        .unwrap();
+
+    assert!(dropped.get());
+    assert!(!poison_seen_while_dropping.get());
+    assert_control_never_activated(outcome, &account);
+}
+
+#[test]
+fn cancellation_cannot_mask_a_semantic_completion_mismatch() {
+    let factory = factory(1);
+    let account = account(&factory);
+    let cancellation = CancellationToken::new();
+    let control = OperationControl::default().with_cancellation(cancellation.clone());
+    let (operation, keys) = operation_with_control(&account, control);
+    let TestScopedActivation {
+        policy,
+        failure,
+        success: _,
+    } = scoped_activation_shape(keys, 1, 1);
+    let mismatched_success = CanonicalSuccessRequirements::new(
+        CanonicalTableShape::new(1, 1).unwrap(),
+        1,
+        NonZeroU64::new(2).unwrap(),
+        NonZeroU64::MIN,
+    )
+    .unwrap();
+    let owner = operation
+        .into_scoped_session_outcome_owner(policy, failure)
+        .unwrap();
+
+    let result: Result<ScopedOutcome<()>, _> = owner.plan_and_activate_scoped(|mut planning| {
+        let mut semantic = planning.begin_semantic_work(NonZeroU64::MIN).unwrap();
+        semantic.run_unit(|| ()).unwrap();
+        let completion = semantic.finish_exact().unwrap();
+        cancellation.cancel();
+        match planning.seal_activation(mismatched_success, completion) {
+            CanonicalActivationSeal::Sealed(_) => {
+                panic!("a mismatched completion cannot issue an activation permit")
+            }
+            CanonicalActivationSeal::Unsealed(failure) => failure.finish_after_plan_drop(),
+        }
+    });
+
+    assert!(result.is_err());
+    assert_fail_closed_containment(&account);
 }
 
 #[test]
@@ -1049,7 +1210,7 @@ fn semantic_action_panics_are_contained_after_the_exact_completed_prefix() {
 
         let result: Result<ScopedOutcome<PreflightRejection>, _> =
             owner.plan_and_activate_scoped(|mut planning| {
-                let mut semantic = planning.begin_semantic_work(2).unwrap();
+                let mut semantic = planning.begin_semantic_work(semantic_units(2)).unwrap();
                 if completed_prefix == 1 {
                     semantic
                         .run_unit(|| completed.set(completed.get() + 1))

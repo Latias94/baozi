@@ -1481,7 +1481,7 @@ where
 
 /// One scoped canonical planning transaction owned by the import session.
 ///
-/// The scope exposes only role-bound control plus the terminal `seal_plan` and `reject`
+/// The scope exposes only role-bound control plus the terminal `seal_activation` and `reject`
 /// transitions. No ledger key, operation owner, publication authority, or generation identity can
 /// escape this interface.
 pub struct CanonicalPlanning<
@@ -1518,21 +1518,33 @@ where
     first_fault: &'borrow mut Option<ActivationFirstFault>,
     phase: StorePhaseKey,
     state: &'borrow mut ScopedSemanticState,
+    receipt_brand: &'scope ScopedReceiptBrand,
+    admitted_units: NonZeroU64,
     work_batch: work_batch::CompletionPrefixBatch,
     resolved: bool,
     scope: PhantomData<fn(&'scope ()) -> &'scope ()>,
 }
 
-/// A complete private migration plan moved directly into materialization.
+/// Linear proof that one scoped semantic-work envelope completed exactly.
 ///
-/// `P` may contain [`CanonicalReservation`] values branded by the planning scope, but this generic
-/// seam cannot prove that arbitrary producer storage was created only after reservation. The real
-/// core cutover must replace `P` with a sealed plan that structurally owns its metered collections;
-/// callers must not treat this temporary generic payload as that long-term proof.
-#[must_use = "the sealed plan must activate exactly once"]
-pub struct CanonicalSealedPlan<
+/// The private brand prevents completion from one planning transaction from sealing another. The
+/// token carries no Scene payload, retained owner, ledger key, or publication authority.
+#[must_use = "semantic completion must seal its matching activation exactly once"]
+pub struct CanonicalSemanticCompletion<'scope> {
+    receipt_brand: &'scope ScopedReceiptBrand,
+    completed_units: NonZeroU64,
+    invariant: PhantomData<fn(&'scope mut ()) -> &'scope mut ()>,
+}
+
+/// Payload-free permit for one scoped canonical activation.
+///
+/// Core retains ownership of its concrete execution plan until [`Self::activate`] atomically moves
+/// that plan and its materializer behind the owner-consuming open transition. Operation proves only
+/// the semantic completion receipt, transaction brand, physical shape, ledger roles, and retained
+/// publication authority; it never interprets the core plan.
+#[must_use = "the activation permit must activate exactly once"]
+pub struct CanonicalActivationPermit<
     'scope,
-    P,
     O,
     PP,
     U,
@@ -1546,10 +1558,9 @@ pub struct CanonicalSealedPlan<
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    plan: Option<P>,
     #[allow(
         clippy::type_complexity,
-        reason = "the temporary U4e sealed-plan seam borrows the complete inline linear driver without allocation and is deleted at core cutover"
+        reason = "the U4e permit borrows the complete inline linear driver without allocation"
     )]
     driver:
         Option<&'scope mut ScopedActivationDriver<O, PP, U, T, E, CanonicalKind, CanonicalTag, L>>,
@@ -1557,15 +1568,15 @@ pub struct CanonicalSealedPlan<
     receipt_brand: &'scope ScopedReceiptBrand,
 }
 
-/// Result of sealing a complete scoped plan without using panic as an ordinary failure channel.
-#[must_use = "consume the sealed plan or return its terminal disposition"]
-#[allow(
-    clippy::large_enum_variant,
-    reason = "the temporary U4e seal keeps its linear plan owner inline to avoid an unmetered allocation and is deleted at core cutover"
-)]
-pub enum CanonicalPlanSeal<
+/// Linear resolver for one activation that could not be sealed.
+///
+/// The caller must release its core-owned execution plan and every scoped reservation before
+/// consuming this resolver. Operation then verifies the restored planning baseline before it
+/// installs a recoverable `NeverActivated` outcome; an unresolved contract or ownership graph is
+/// contained fail closed.
+#[must_use = "release the core plan, then resolve the unsealed activation exactly once"]
+pub struct CanonicalActivationSealFailure<
     'scope,
-    P,
     O,
     PP,
     U,
@@ -1579,8 +1590,40 @@ pub enum CanonicalPlanSeal<
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    Sealed(CanonicalSealedPlan<'scope, P, O, PP, U, T, E, CanonicalKind, CanonicalTag, L>),
-    Terminal(CanonicalScopedDisposition<'scope>),
+    #[allow(
+        clippy::type_complexity,
+        reason = "the U4e resolver borrows the complete inline linear driver without allocation"
+    )]
+    driver:
+        Option<&'scope mut ScopedActivationDriver<O, PP, U, T, E, CanonicalKind, CanonicalTag, L>>,
+    receipt_brand: &'scope ScopedReceiptBrand,
+}
+
+/// Result of sealing one payload-free activation permit.
+#[must_use = "consume the activation permit or resolve the unsealed activation"]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "the linear activation permit remains inline so no unmetered allocation is introduced"
+)]
+pub enum CanonicalActivationSeal<
+    'scope,
+    O,
+    PP,
+    U,
+    T,
+    E,
+    CanonicalKind,
+    CanonicalTag,
+    L = FreshStoreLineage,
+> where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    Sealed(CanonicalActivationPermit<'scope, O, PP, U, T, E, CanonicalKind, CanonicalTag, L>),
+    Unsealed(
+        CanonicalActivationSealFailure<'scope, O, PP, U, T, E, CanonicalKind, CanonicalTag, L>,
+    ),
 }
 
 /// Zero-owner receipt proving that the matching scoped driver installed one terminal state.
@@ -1593,7 +1636,7 @@ pub struct CanonicalScopedDisposition<'scope> {
 }
 
 struct ScopedReceiptBrand {
-    _private: (),
+    _private: u8,
 }
 
 #[derive(Clone, Copy)]
@@ -1746,12 +1789,14 @@ impl CanonicalFailureRequirements {
 
 /// Success-only requirements sealed after complete semantic preflight.
 ///
-/// Failure evidence and semantic-work envelopes are intentionally absent: failure shape is already
-/// session-bound, while semantic work is admitted and completed by its linear scoped session.
-#[must_use = "success requirements must seal exactly one complete scoped plan"]
+/// Failure evidence remains session-bound. The exact nonzero semantic-work envelope must match the
+/// operation-issued completion token, while canonical shape and validation work remain derived from
+/// the same core execution plan that activation consumes.
+#[must_use = "success requirements must seal exactly one activation permit"]
 pub struct CanonicalSuccessRequirements {
     canonical: CanonicalTableShape,
     expected_materialized_blocks: usize,
+    semantic_preflight_work: NonZeroU64,
     validation_work: NonZeroU64,
 }
 
@@ -1759,6 +1804,7 @@ impl CanonicalSuccessRequirements {
     pub fn new(
         canonical: CanonicalTableShape,
         expected_materialized_blocks: usize,
+        semantic_preflight_work: NonZeroU64,
         validation_work: NonZeroU64,
     ) -> Result<Self, StorePlanError> {
         if expected_materialized_blocks == 0
@@ -1769,6 +1815,7 @@ impl CanonicalSuccessRequirements {
         Ok(Self {
             canonical,
             expected_materialized_blocks,
+            semantic_preflight_work,
             validation_work,
         })
     }
@@ -3007,6 +3054,7 @@ mod scoped_transition_tests {
                 CanonicalTableShape::new(1, 1).unwrap(),
                 1,
                 NonZeroU64::MIN,
+                NonZeroU64::MIN,
             )
             .unwrap(),
         )
@@ -3022,17 +3070,17 @@ mod scoped_transition_tests {
 
         let result: Result<TestOutcome, StoreActivationContainment> = owner
             .plan_and_activate_scoped(|mut planning| {
-                planning
-                    .begin_semantic_work(0)
-                    .unwrap()
-                    .finish_exact()
-                    .unwrap();
-                let sealed = match planning.seal_plan(success, ()) {
-                    CanonicalPlanSeal::Sealed(sealed) => sealed,
-                    CanonicalPlanSeal::Terminal(disposition) => return disposition,
+                let mut semantic = planning.begin_semantic_work(NonZeroU64::MIN).unwrap();
+                semantic.run_unit(|| ()).unwrap();
+                let completion = semantic.finish_exact().unwrap();
+                let permit = match planning.seal_activation(success, completion) {
+                    CanonicalActivationSeal::Sealed(permit) => permit,
+                    CanonicalActivationSeal::Unsealed(failure) => {
+                        return failure.finish_after_plan_drop();
+                    }
                 };
                 test_panic_scoped_transition_at(point);
-                sealed.activate(|lane, ()| match point {
+                permit.activate((), |lane, ()| match point {
                     ScopedTransitionPanicPoint::TryOpenActivation => {
                         panic!("try_open_activation fault must run before materialization")
                     }
@@ -3084,26 +3132,26 @@ mod scoped_transition_tests {
 
         let result: Result<TestOutcome, StoreActivationContainment> = owner
             .plan_and_activate_scoped(|mut planning| {
-                let mut semantic = planning.begin_semantic_work(1).unwrap();
+                let mut semantic = planning.begin_semantic_work(NonZeroU64::MIN).unwrap();
                 let scratch = semantic.reserve(1).unwrap();
                 semantic.validate_live_owner(&scratch).unwrap();
                 semantic.run_unit(|| ()).unwrap();
-                semantic.finish_exact().unwrap();
-                let sealed = match planning.seal_plan(
-                    success,
-                    PanickingTrackedPlan {
-                        scratch: Some(scratch),
-                        reservation_released: &reservation_released,
-                        marker: Some(TransitionDropMarker {
-                            dropped: &plan_marker_dropped,
-                            account: &account,
-                            poison_seen_while_dropping: &plan_poison_seen_while_dropping,
-                            poison_event_count_while_dropping: &plan_poison_events_while_dropping,
-                        }),
-                    },
-                ) {
-                    CanonicalPlanSeal::Sealed(sealed) => sealed,
-                    CanonicalPlanSeal::Terminal(disposition) => return disposition,
+                let completion = semantic.finish_exact().unwrap();
+                let permit = match planning.seal_activation(success, completion) {
+                    CanonicalActivationSeal::Sealed(permit) => permit,
+                    CanonicalActivationSeal::Unsealed(failure) => {
+                        return failure.finish_after_plan_drop();
+                    }
+                };
+                let plan = PanickingTrackedPlan {
+                    scratch: Some(scratch),
+                    reservation_released: &reservation_released,
+                    marker: Some(TransitionDropMarker {
+                        dropped: &plan_marker_dropped,
+                        account: &account,
+                        poison_seen_while_dropping: &plan_poison_seen_while_dropping,
+                        poison_event_count_while_dropping: &plan_poison_events_while_dropping,
+                    }),
                 };
                 let materializer_marker = TransitionDropMarker {
                     dropped: &materializer_dropped,
@@ -3112,7 +3160,8 @@ mod scoped_transition_tests {
                     poison_event_count_while_dropping: &materializer_poison_events_while_dropping,
                 };
                 test_panic_scoped_transition_at(ScopedTransitionPanicPoint::TryOpenActivation);
-                sealed.activate(
+                permit.activate(
+                    plan,
                     move |_lane,
                           _plan|
                           -> CanonicalMaterialization<
@@ -3177,26 +3226,26 @@ mod scoped_transition_tests {
 
         let result: Result<TestOutcome, StoreActivationContainment> = owner
             .plan_and_activate_scoped(|mut planning| {
-                let mut semantic = planning.begin_semantic_work(1).unwrap();
+                let mut semantic = planning.begin_semantic_work(NonZeroU64::MIN).unwrap();
                 let scratch = semantic.reserve(1).unwrap();
                 semantic.validate_live_owner(&scratch).unwrap();
                 semantic.run_unit(|| ()).unwrap();
-                semantic.finish_exact().unwrap();
-                let sealed = match planning.seal_plan(
-                    success,
-                    PanickingTrackedPlan {
-                        scratch: Some(scratch),
-                        reservation_released: &reservation_released,
-                        marker: Some(TransitionDropMarker {
-                            dropped: &plan_marker_dropped,
-                            account: &account,
-                            poison_seen_while_dropping: &plan_poison_seen_while_dropping,
-                            poison_event_count_while_dropping: &plan_poison_events_while_dropping,
-                        }),
-                    },
-                ) {
-                    CanonicalPlanSeal::Sealed(sealed) => sealed,
-                    CanonicalPlanSeal::Terminal(disposition) => return disposition,
+                let completion = semantic.finish_exact().unwrap();
+                let permit = match planning.seal_activation(success, completion) {
+                    CanonicalActivationSeal::Sealed(permit) => permit,
+                    CanonicalActivationSeal::Unsealed(failure) => {
+                        return failure.finish_after_plan_drop();
+                    }
+                };
+                let plan = PanickingTrackedPlan {
+                    scratch: Some(scratch),
+                    reservation_released: &reservation_released,
+                    marker: Some(TransitionDropMarker {
+                        dropped: &plan_marker_dropped,
+                        account: &account,
+                        poison_seen_while_dropping: &plan_poison_seen_while_dropping,
+                        poison_event_count_while_dropping: &plan_poison_events_while_dropping,
+                    }),
                 };
                 let materializer_marker = TransitionDropMarker {
                     dropped: &materializer_dropped,
@@ -3205,7 +3254,8 @@ mod scoped_transition_tests {
                     poison_event_count_while_dropping: &materializer_poison_events_while_dropping,
                 };
                 crate::retained::panic_next_publication_account_open();
-                sealed.activate(
+                permit.activate(
+                    plan,
                     move |_lane,
                           _plan|
                           -> CanonicalMaterialization<

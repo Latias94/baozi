@@ -271,14 +271,15 @@ pub use concrete_store::{
 /// ```
 pub mod __canonical_activation {
     pub use crate::concrete_store::activation::{
-        CanonicalActivationOutcome, CanonicalActivationPolicy, CanonicalActivationRequestSealer,
-        CanonicalActivationRequirements, CanonicalBuildControl, CanonicalCandidateStoreSession,
+        CanonicalActivationOutcome, CanonicalActivationPermit, CanonicalActivationPolicy,
+        CanonicalActivationRequestSealer, CanonicalActivationRequirements, CanonicalActivationSeal,
+        CanonicalActivationSealFailure, CanonicalBuildControl, CanonicalCandidateStoreSession,
         CanonicalCentralValidationOutcome, CanonicalFailureRequirements,
         CanonicalFailureTerminalWorkPlan, CanonicalFreezeInterruption,
         CanonicalFreezeInterruptionClass, CanonicalFreezePermit, CanonicalFreezePermitIssue,
         CanonicalJointCommit, CanonicalJointSeal, CanonicalLane, CanonicalMaterialization,
-        CanonicalPlanSeal, CanonicalPlanning, CanonicalPreflightDecision, CanonicalRecordBuildRow,
-        CanonicalReservation, CanonicalScopedDisposition, CanonicalSealedPlan,
+        CanonicalPlanning, CanonicalPreflightDecision, CanonicalRecordBuildRow,
+        CanonicalReservation, CanonicalScopedDisposition, CanonicalSemanticCompletion,
         CanonicalSemanticWorkSession, CanonicalSuccessRequirements, CanonicalTableShape,
         CanonicalValidationDecision, CanonicalValidationMember, CanonicalValidationRecordRow,
         CanonicalValidationSession, FailureEvidenceDecision, FailureEvidenceMember,
