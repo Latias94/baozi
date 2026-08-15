@@ -1,15 +1,24 @@
+use std::cell::{RefCell, RefMut};
 use std::fmt;
 use std::num::{NonZeroU32, NonZeroU64};
 
+use baozi_operation::__canonical_activation::{
+    RetainedStoreDimensionState, RetainedStoreObservedWork,
+};
 use baozi_operation::{
-    DimensionPolicy, LedgerLimits, LedgerLimitsError, RetainedStoreBatchLimits,
-    RetainedStoreFailureTerminalWorkPlan, RetainedStoreSharePlan, RetainedStoreStartPlan,
-    RetainedStoreWriterPlan, StoreDimensionKey, StoreDimensionSemanticId, StoreFallbackEnvelope,
-    StoreKeyDomain, StoreKeyDomainCreateError, StoreLedgerPlan, StoreLedgerPlanError,
-    StorePhaseKey, StorePhaseSemanticId, StorePlanError, StoreSemanticCatalogId,
+    DimensionPolicy, LedgerLimits, LedgerLimitsError, PhysicalStorageAccount,
+    RetainedStoreBatchLimits, RetainedStoreFailureTerminalWorkPlan, RetainedStoreOperation,
+    RetainedStoreReservation, RetainedStoreSharePlan, RetainedStoreStartError,
+    RetainedStoreStartPlan, RetainedStoreWriterPlan, StoreDimensionKey, StoreDimensionSemanticId,
+    StoreFallbackEnvelope, StoreKeyDomain, StoreKeyDomainCreateError, StoreLedgerPlan,
+    StoreLedgerPlanError, StorePhaseKey, StorePhaseSemanticId, StorePlanError, StoreRuntimeError,
+    StoreSemanticCatalogId,
 };
 
-use crate::ledger::{ImportDimension, ImportLedgerPhase, import_ledger_limits};
+use crate::ledger::{
+    ImportDimension, ImportLedgerPhase, ImportOperationControl, ImportOperationOwner,
+    ImportProgressPhase, ImportProgressUnit, import_ledger_limits,
+};
 use crate::limits::ResourceLimits;
 
 const IMPORT_STORE_CATALOG: StoreSemanticCatalogId =
@@ -19,6 +28,11 @@ const IMPORT_STORE_FALLBACK_CODE: u32 = 0x494d_0001;
 const MIN_CANONICAL_RETAINED_MEMBER_LIMIT: u64 = 1;
 const STARTUP_OUTCOME_EVIDENCE_AMOUNT: u64 = 1;
 const STARTUP_OUTCOME_EVIDENCE_TOTAL: u64 = STARTUP_OUTCOME_EVIDENCE_AMOUNT * 2;
+
+type ImportStoreOperation =
+    RetainedStoreOperation<ImportOperationOwner, ImportProgressPhase, ImportProgressUnit>;
+
+pub(crate) type ImportStoreReservation = RetainedStoreReservation<ImportOperationOwner>;
 
 const STARTUP_OUTCOME_EVIDENCE_SEMANTIC: StoreDimensionSemanticId = StoreDimensionSemanticId::new(
     IMPORT_STORE_CATALOG,
@@ -256,6 +270,258 @@ impl ImportStoreBootstrap {
     ) {
         (self.vocabulary, self.ledger_plan, self.start_plan)
     }
+}
+
+/// Sole retained-store owner for one import session before canonical activation begins.
+///
+/// Producer-facing code borrows [`ImportStoreHost`] rather than the raw operation, store keys, or
+/// physical account. Consuming this owner is the only path into the later scoped canonical
+/// outcome transaction.
+pub(crate) struct ImportStoreSessionOwner {
+    operation: RefCell<ImportStoreOperation>,
+    vocabulary: ImportStoreVocabulary,
+}
+
+#[allow(
+    clippy::result_large_err,
+    reason = "startup failures preserve the complete linear retained-store recovery owner"
+)]
+impl ImportStoreSessionOwner {
+    pub(crate) fn try_start(
+        control: ImportOperationControl,
+        account: &PhysicalStorageAccount,
+        bootstrap: ImportStoreBootstrap,
+    ) -> Result<Self, RetainedStoreStartError> {
+        let (vocabulary, ledger_plan, start_plan) = bootstrap.into_parts();
+        let operation = ImportStoreOperation::try_start(control, ledger_plan, account, start_plan)?;
+        Ok(Self {
+            operation: RefCell::new(operation),
+            vocabulary,
+        })
+    }
+
+    pub(crate) fn host(&self) -> ImportStoreHost<'_> {
+        ImportStoreHost {
+            operation: &self.operation,
+            vocabulary: &self.vocabulary,
+        }
+    }
+
+    pub(crate) fn into_operation(self) -> ImportStoreOperation {
+        self.operation.into_inner()
+    }
+}
+
+/// Borrowed import-semantic producer capability backed by the session's sole retained operation.
+///
+/// This adapter never exposes operation-native keys, publication authority, terminal dimensions,
+/// or the physical account. Observed-work permits remain inside one closure so they cannot escape
+/// the `RefCell` borrow that owns the operation.
+#[derive(Clone, Copy)]
+pub(crate) struct ImportStoreHost<'session> {
+    operation: &'session RefCell<ImportStoreOperation>,
+    vocabulary: &'session ImportStoreVocabulary,
+}
+
+#[allow(
+    clippy::result_large_err,
+    reason = "producer failures retain exact typed store causes without allocating on error paths"
+)]
+impl ImportStoreHost<'_> {
+    fn try_operation(&self) -> Result<RefMut<'_, ImportStoreOperation>, ImportStoreHostError> {
+        self.operation
+            .try_borrow_mut()
+            .map_err(|_| ImportStoreHostError::ReentrantBorrow)
+    }
+
+    pub(crate) fn poll(&self) -> Result<(), ImportStoreHostError> {
+        self.try_operation()?
+            .producer_host()
+            .poll()
+            .map_err(ImportStoreHostError::Runtime)
+    }
+
+    pub(crate) fn report_progress(
+        &self,
+        phase: ImportProgressPhase,
+        unit: ImportProgressUnit,
+        completed: u64,
+        total: Option<u64>,
+    ) -> Result<(), ImportStoreHostError> {
+        self.try_operation()?
+            .producer_host()
+            .report_progress(phase, unit, completed, total)
+            .map_err(ImportStoreHostError::Runtime)
+    }
+
+    pub(crate) fn dimension_state(
+        &self,
+        dimension: ImportDimension,
+    ) -> Result<RetainedStoreDimensionState, ImportStoreHostError> {
+        let key = self.vocabulary.dimension(dimension);
+        self.try_operation()?
+            .producer_host()
+            .dimension_state(key)
+            .map_err(ImportStoreHostError::Runtime)
+    }
+
+    pub(crate) fn reserve(
+        &self,
+        phase: ImportLedgerPhase,
+        dimension: ImportDimension,
+        bytes: u64,
+    ) -> Result<ImportStoreReservation, ImportStoreHostError> {
+        let phase = self.vocabulary.phase(phase);
+        let dimension = self.vocabulary.dimension(dimension);
+        self.try_operation()?
+            .control_checkpoint()
+            .reserve(phase, dimension, bytes)
+            .map_err(ImportStoreHostError::Runtime)
+    }
+
+    pub(crate) fn resize(
+        &self,
+        reservation: &mut ImportStoreReservation,
+        bytes: u64,
+    ) -> Result<(), ImportStoreHostError> {
+        self.try_operation()?
+            .control_checkpoint()
+            .resize(reservation, bytes)
+            .map_err(ImportStoreHostError::Runtime)
+    }
+
+    pub(crate) fn transition(
+        &self,
+        reservation: &mut ImportStoreReservation,
+        phase: ImportLedgerPhase,
+        dimension: ImportDimension,
+        bytes: u64,
+    ) -> Result<(), ImportStoreHostError> {
+        let phase = self.vocabulary.phase(phase);
+        let dimension = self.vocabulary.dimension(dimension);
+        self.try_operation()?
+            .control_checkpoint()
+            .transition(reservation, phase, dimension, bytes)
+            .map_err(ImportStoreHostError::Runtime)
+    }
+
+    pub(crate) fn complete_phase(
+        &self,
+        phase: ImportLedgerPhase,
+    ) -> Result<(), ImportStoreHostError> {
+        let operation = self
+            .operation
+            .try_borrow()
+            .map_err(|_| ImportStoreHostError::ReentrantBorrow)?;
+        operation
+            .try_complete_phase(self.vocabulary.phase(phase))
+            .map_err(ImportStoreHostError::Runtime)
+    }
+
+    pub(crate) fn with_observed_work<const N: usize, T, E>(
+        &self,
+        charges: [(ImportDimension, u64); N],
+        action: impl FnOnce(&mut ImportObservedWork<'_, N>) -> Result<T, E>,
+    ) -> Result<T, ImportObservedWorkFailure<E>> {
+        let charges =
+            charges.map(|(dimension, amount)| (self.vocabulary.dimension(dimension), amount));
+        let mut operation = self
+            .try_operation()
+            .map_err(ImportObservedWorkFailure::Store)?;
+        let mut producer = operation.producer_host();
+        let raw = producer.try_begin_observed_work(charges).map_err(|cause| {
+            ImportObservedWorkFailure::Store(ImportStoreHostError::Runtime(cause))
+        })?;
+        let mut work = ImportObservedWork { raw };
+        match action(&mut work) {
+            Ok(value) => {
+                work.finish().map_err(ImportObservedWorkFailure::Store)?;
+                Ok(value)
+            }
+            Err(cause) => {
+                work.finish_partial();
+                Err(ImportObservedWorkFailure::Action(cause))
+            }
+        }
+    }
+}
+
+pub(crate) struct ImportObservedWork<'operation, const N: usize> {
+    raw: RetainedStoreObservedWork<
+        'operation,
+        ImportOperationOwner,
+        ImportProgressPhase,
+        ImportProgressUnit,
+        N,
+    >,
+}
+
+#[allow(
+    clippy::result_large_err,
+    reason = "observed-work errors preserve exact ledger and control causes without boxing"
+)]
+impl<const N: usize> ImportObservedWork<'_, N> {
+    pub(crate) fn poll(&mut self) -> Result<(), StoreRuntimeError> {
+        self.raw.poll()
+    }
+
+    pub(crate) fn report_progress(
+        &mut self,
+        phase: ImportProgressPhase,
+        unit: ImportProgressUnit,
+        completed: u64,
+        total: Option<u64>,
+    ) -> Result<(), StoreRuntimeError> {
+        self.raw.report_progress(phase, unit, completed, total)
+    }
+
+    pub(crate) fn remaining(&self) -> [u64; N] {
+        self.raw.remaining()
+    }
+
+    pub(crate) fn complete(&mut self, amounts: [u64; N]) -> Result<(), StoreRuntimeError> {
+        self.raw.complete(amounts)
+    }
+
+    fn finish(self) -> Result<(), ImportStoreHostError> {
+        self.raw.finish().map_err(ImportStoreHostError::Runtime)
+    }
+
+    fn finish_partial(self) {
+        self.raw.finish_partial();
+    }
+}
+
+#[derive(Debug)]
+pub(crate) enum ImportStoreHostError {
+    ReentrantBorrow,
+    Runtime(StoreRuntimeError),
+}
+
+impl fmt::Display for ImportStoreHostError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ReentrantBorrow => {
+                formatter.write_str("the import retained-store host was borrowed reentrantly")
+            }
+            Self::Runtime(cause) => cause.fmt(formatter),
+        }
+    }
+}
+
+impl std::error::Error for ImportStoreHostError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::ReentrantBorrow => None,
+            Self::Runtime(cause) => Some(cause),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(crate) enum ImportObservedWorkFailure<E> {
+    Store(ImportStoreHostError),
+    Action(E),
 }
 
 pub(crate) fn try_import_store_bootstrap(
@@ -575,6 +841,31 @@ mod tests {
         requirements_for(&ResourceLimits::default())
     }
 
+    fn start_store_owner() -> ImportStoreSessionOwner {
+        let bootstrap = try_import_store_bootstrap(&ResourceLimits::default(), requirements())
+            .expect("default import store bootstrap must be valid");
+        let factory = PhysicalStorageAccountFactory::try_new(
+            PhysicalStorageAccountFactoryLimits::new(u64::MAX, 1)
+                .expect("test factory limits are valid"),
+        )
+        .expect("test account factory must allocate");
+        let account = factory
+            .try_create_account(
+                PhysicalStorageAccountLimits::new(u64::MAX, u64::MAX)
+                    .expect("test account limits are valid"),
+            )
+            .expect("test physical account must allocate");
+        let owner = ImportStoreSessionOwner::try_start(
+            ImportOperationControl::default(),
+            &account,
+            bootstrap,
+        )
+        .expect("the import store owner must start");
+        drop(account);
+        drop(factory);
+        owner
+    }
+
     #[test]
     fn bootstrap_maps_the_complete_import_vocabulary_into_one_store_domain() {
         let bootstrap = try_import_store_bootstrap(&ResourceLimits::default(), requirements())
@@ -641,6 +932,148 @@ mod tests {
             published.ledger_evidence.header().terminal_cause(),
             baozi_operation::StoreTerminalCause::Failure(cause)
                 if cause.code() == IMPORT_STORE_FALLBACK_CODE
+        ));
+    }
+
+    #[test]
+    fn session_owner_keeps_one_operation_alive_after_the_start_handle_is_released() {
+        let owner = start_store_owner();
+        let host = owner.host();
+
+        host.poll()
+            .expect("the retained operation remains live after the account handle is released");
+        host.report_progress(
+            ImportProgressPhase::AcquirePrimary,
+            ImportProgressUnit::Bytes,
+            0,
+            Some(1),
+        )
+        .expect("the sole retained coordinator accepts import progress");
+
+        let published = owner
+            .into_operation()
+            .prepare_minimal_fallback(IMPORT_STORE_FALLBACK_CODE)
+            .expect("the session owner must retain its pre-admitted terminal path")
+            .handoff();
+        assert_eq!(
+            published.fallback.value().code(),
+            IMPORT_STORE_FALLBACK_CODE
+        );
+    }
+
+    #[test]
+    fn grouped_observed_work_uses_import_dimensions_on_the_same_operation() {
+        let owner = start_store_owner();
+        let host = owner.host();
+
+        host.with_observed_work(
+            [
+                (ImportDimension::PrimaryBytes, 3),
+                (ImportDimension::TotalAssetBytes, 3),
+            ],
+            |work| {
+                assert_eq!(work.remaining(), [3, 3]);
+                work.complete([1, 1])
+                    .expect("the first physical prefix must complete atomically");
+                assert_eq!(work.remaining(), [2, 2]);
+                work.complete([2, 2])
+                    .expect("the admitted suffix must complete atomically");
+                Ok::<_, ()>(())
+            },
+        )
+        .expect("the exact observed-work envelope must finish");
+
+        for dimension in [
+            ImportDimension::PrimaryBytes,
+            ImportDimension::TotalAssetBytes,
+        ] {
+            let state = host
+                .dimension_state(dimension)
+                .expect("the import dimension must remain observable through the same host");
+            assert_eq!(state.attempted(), 3);
+            assert_eq!(state.consumed(), 3);
+        }
+    }
+
+    #[test]
+    fn action_failure_resolves_observed_work_with_the_exact_completed_prefix() {
+        let owner = start_store_owner();
+        let host = owner.host();
+
+        let result = host.with_observed_work(
+            [
+                (ImportDimension::PrimaryBytes, 3),
+                (ImportDimension::TotalAssetBytes, 3),
+            ],
+            |work| {
+                work.complete([1, 1])
+                    .expect("the completed physical prefix must be recorded");
+                Err::<(), _>("short-read")
+            },
+        );
+        assert!(matches!(
+            result,
+            Err(ImportObservedWorkFailure::Action("short-read"))
+        ));
+
+        for dimension in [
+            ImportDimension::PrimaryBytes,
+            ImportDimension::TotalAssetBytes,
+        ] {
+            let state = host
+                .dimension_state(dimension)
+                .expect("partial work remains observable on the sole operation");
+            assert_eq!(state.attempted(), 3);
+            assert_eq!(state.consumed(), 1);
+        }
+    }
+
+    #[test]
+    fn host_reservations_remain_bound_to_the_import_operation() {
+        let owner = start_store_owner();
+        let host = owner.host();
+        let mut reservation = host
+            .reserve(
+                ImportLedgerPhase::Detection,
+                ImportDimension::ScratchBytes,
+                8,
+            )
+            .expect("the host must reserve import scratch through the retained operation");
+
+        host.resize(&mut reservation, 16)
+            .expect("the same host must resize its reservation");
+        host.transition(
+            &mut reservation,
+            ImportLedgerPhase::DependencyAcquisition,
+            ImportDimension::DependencyBytes,
+            12,
+        )
+        .expect("the same host must transition its reservation");
+        assert_eq!(
+            host.dimension_state(ImportDimension::DependencyBytes)
+                .expect("the transitioned dimension must be observable")
+                .live_bytes(),
+            12
+        );
+
+        drop(reservation);
+        assert_eq!(
+            host.dimension_state(ImportDimension::DependencyBytes)
+                .expect("dropping the reservation must update the same operation")
+                .live_bytes(),
+            0
+        );
+    }
+
+    #[test]
+    fn host_rejects_reentrant_operation_borrows_without_panicking() {
+        let owner = start_store_owner();
+        let host = owner.host();
+        let _operation = owner.operation.borrow_mut();
+
+        assert!(matches!(
+            host.poll(),
+            Err(ImportStoreHostError::ReentrantBorrow)
         ));
     }
 
