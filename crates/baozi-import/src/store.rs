@@ -16,6 +16,7 @@ const IMPORT_STORE_CATALOG: StoreSemanticCatalogId =
     StoreSemanticCatalogId::new(*b"baozi-import-led", NonZeroU32::MIN);
 const IMPORT_DIMENSION_COUNT: usize = ImportDimension::DecompressedBytes as usize + 1;
 const IMPORT_STORE_FALLBACK_CODE: u32 = 0x494d_0001;
+const MIN_CANONICAL_RETAINED_MEMBER_LIMIT: u64 = 1;
 const STARTUP_OUTCOME_EVIDENCE_AMOUNT: u64 = 1;
 const STARTUP_OUTCOME_EVIDENCE_TOTAL: u64 = STARTUP_OUTCOME_EVIDENCE_AMOUNT * 2;
 
@@ -29,6 +30,11 @@ const FAILURE_TERMINAL_WORK_SEMANTIC: StoreDimensionSemanticId = StoreDimensionS
     NonZeroU64::new(IMPORT_DIMENSION_COUNT as u64 + 2)
         .expect("the failure-terminal semantic id is nonzero"),
 );
+const CANONICAL_RETAINED_MEMBERS_SEMANTIC: StoreDimensionSemanticId = StoreDimensionSemanticId::new(
+    IMPORT_STORE_CATALOG,
+    NonZeroU64::new(IMPORT_DIMENSION_COUNT as u64 + 3)
+        .expect("the canonical retained-members semantic id is nonzero"),
+);
 
 /// Exact retained-start ceilings supplied by the import host.
 ///
@@ -40,6 +46,7 @@ pub(crate) struct ImportStoreBootstrapRequirements {
     terminal_writer_limits: RetainedStoreBatchLimits,
     max_failure_evidence_members: usize,
     work: ImportStoreWorkBudget,
+    canonical_retained_member_limit: NonZeroU64,
     published_outcome_evidence_limit: u64,
 }
 
@@ -77,8 +84,16 @@ impl ImportStoreBootstrapRequirements {
         terminal_commitment_slots: usize,
         max_failure_evidence_members: usize,
         work: ImportStoreWorkBudget,
+        canonical_retained_member_limit: u64,
         published_outcome_evidence_limit: u64,
     ) -> Result<Self, ImportStoreBootstrapError> {
+        let canonical_retained_member_limit = NonZeroU64::new(canonical_retained_member_limit)
+            .ok_or(
+                ImportStoreBootstrapError::PublishedCanonicalRetainedMemberLimitTooSmall {
+                    limit: canonical_retained_member_limit,
+                    required: MIN_CANONICAL_RETAINED_MEMBER_LIMIT,
+                },
+            )?;
         if published_outcome_evidence_limit < STARTUP_OUTCOME_EVIDENCE_TOTAL {
             return Err(
                 ImportStoreBootstrapError::PublishedOutcomeEvidenceLimitTooSmall {
@@ -94,8 +109,13 @@ impl ImportStoreBootstrapRequirements {
             )?,
             max_failure_evidence_members,
             work,
+            canonical_retained_member_limit,
             published_outcome_evidence_limit,
         })
+    }
+
+    const fn canonical_retained_member_policy(&self) -> DimensionPolicy {
+        DimensionPolicy::counter(0, 0, self.canonical_retained_member_limit.get())
     }
 }
 
@@ -109,6 +129,7 @@ pub(crate) struct ImportStoreVocabulary {
     dimensions: [(ImportDimension, StoreDimensionKey); IMPORT_DIMENSION_COUNT],
     startup_outcome_evidence: StoreDimensionKey,
     failure_terminal_work: StoreDimensionKey,
+    canonical_retained_members: StoreDimensionKey,
 }
 
 impl ImportStoreVocabulary {
@@ -179,11 +200,15 @@ impl ImportStoreVocabulary {
         let failure_terminal_work = domain
             .try_admit_dimension(FAILURE_TERMINAL_WORK_SEMANTIC)
             .ok_or(ImportStoreBootstrapError::KeyAdmissionInvariant)?;
+        let canonical_retained_members = domain
+            .try_admit_dimension(CANONICAL_RETAINED_MEMBERS_SEMANTIC)
+            .ok_or(ImportStoreBootstrapError::KeyAdmissionInvariant)?;
         Ok(Self {
             phases,
             dimensions,
             startup_outcome_evidence,
             failure_terminal_work,
+            canonical_retained_members,
         })
     }
 
@@ -199,6 +224,10 @@ impl ImportStoreVocabulary {
 
     pub(crate) const fn outcome_evidence_dimension(&self) -> StoreDimensionKey {
         self.startup_outcome_evidence
+    }
+
+    pub(crate) const fn canonical_retained_member_dimension(&self) -> StoreDimensionKey {
+        self.canonical_retained_members
     }
 
     fn phase_keys(&self) -> [StorePhaseKey; ImportLedgerPhase::ALL.len()] {
@@ -238,6 +267,7 @@ pub(crate) fn try_import_store_bootstrap(
     let domain = StoreKeyDomain::try_new(IMPORT_STORE_CATALOG)
         .map_err(ImportStoreBootstrapError::KeyDomain)?;
     let vocabulary = ImportStoreVocabulary::try_admit(&domain)?;
+    let canonical_retained_member_policy = requirements.canonical_retained_member_policy();
     let startup_outcome_evidence_policy =
         DimensionPolicy::reservable_bytes(0, 0, 0, limits.max_live_bytes)
             .with_published_outcome_evidence_limit(requirements.published_outcome_evidence_limit);
@@ -297,6 +327,10 @@ pub(crate) fn try_import_store_bootstrap(
                     startup_outcome_evidence_policy,
                 ),
                 (vocabulary.failure_terminal_work, failure_terminal_policy),
+                (
+                    vocabulary.canonical_retained_member_dimension(),
+                    canonical_retained_member_policy,
+                ),
             ]),
     )
     .map_err(ImportStoreBootstrapError::StoreLedgerLimits)?;
@@ -403,6 +437,10 @@ pub(crate) enum ImportStoreBootstrapError {
         limit: u64,
         required: u64,
     },
+    PublishedCanonicalRetainedMemberLimitTooSmall {
+        limit: u64,
+        required: u64,
+    },
     StoreLedgerLimits(LedgerLimitsError<StoreDimensionKey>),
     LedgerPlan(StoreLedgerPlanError),
     StorePlan(StorePlanError),
@@ -443,6 +481,10 @@ impl fmt::Display for ImportStoreBootstrapError {
                 formatter,
                 "import outcome-evidence publication limit {limit} is below the startup requirement {required}"
             ),
+            Self::PublishedCanonicalRetainedMemberLimitTooSmall { limit, required } => write!(
+                formatter,
+                "import canonical retained-member publication limit {limit} is below the success requirement {required}"
+            ),
             Self::StoreLedgerLimits(cause) => {
                 write!(
                     formatter,
@@ -476,7 +518,8 @@ impl std::error::Error for ImportStoreBootstrapError {
             Self::KeyAdmissionInvariant
             | Self::MissingImportDimensionPolicy { .. }
             | Self::OrdinaryWorkPartitionMismatch { .. }
-            | Self::PublishedOutcomeEvidenceLimitTooSmall { .. } => None,
+            | Self::PublishedOutcomeEvidenceLimitTooSmall { .. }
+            | Self::PublishedCanonicalRetainedMemberLimitTooSmall { .. } => None,
         }
     }
 }
@@ -524,7 +567,7 @@ mod tests {
             1,
             1,
         );
-        ImportStoreBootstrapRequirements::new(2, 2, 1, work, STARTUP_OUTCOME_EVIDENCE_TOTAL)
+        ImportStoreBootstrapRequirements::new(2, 2, 1, work, 4, STARTUP_OUTCOME_EVIDENCE_TOTAL)
             .expect("test retained-store requirements are valid")
     }
 
@@ -539,7 +582,7 @@ mod tests {
         let (vocabulary, ledger_plan, _start_plan) = bootstrap.into_parts();
 
         assert_eq!(ledger_plan.phase_count(), ImportLedgerPhase::ALL.len());
-        assert_eq!(ledger_plan.dimension_count(), IMPORT_DIMENSION_COUNT + 2);
+        assert_eq!(ledger_plan.dimension_count(), IMPORT_DIMENSION_COUNT + 3);
         for (phase, key) in vocabulary.phases {
             assert_eq!(key.semantic_id(), import_phase_semantic_id(phase));
         }
@@ -549,6 +592,12 @@ mod tests {
         assert_eq!(
             vocabulary.outcome_evidence_dimension().semantic_id(),
             STARTUP_OUTCOME_EVIDENCE_SEMANTIC
+        );
+        assert_eq!(
+            vocabulary
+                .canonical_retained_member_dimension()
+                .semantic_id(),
+            CANONICAL_RETAINED_MEMBERS_SEMANTIC
         );
     }
 
@@ -608,6 +657,7 @@ mod tests {
             1,
             ImportStoreWorkBudget::new(u64::MAX, u64::MAX, 1, 1),
             4,
+            4,
         )
         .expect("the startup envelope is structurally valid");
 
@@ -632,7 +682,7 @@ mod tests {
             1,
             1,
         );
-        let requirements = ImportStoreBootstrapRequirements::new(2, 2, 1, work, 4)
+        let requirements = ImportStoreBootstrapRequirements::new(2, 2, 1, work, 4, 4)
             .expect("the writer and publication envelope is valid");
 
         assert!(matches!(
@@ -663,7 +713,7 @@ mod tests {
             1,
         );
         let requirements =
-            ImportStoreBootstrapRequirements::new(2, 2, 1, work, STARTUP_OUTCOME_EVIDENCE_TOTAL)
+            ImportStoreBootstrapRequirements::new(2, 2, 1, work, 4, STARTUP_OUTCOME_EVIDENCE_TOTAL)
                 .expect("the writer and publication envelope is valid");
 
         assert!(matches!(
@@ -690,6 +740,7 @@ mod tests {
                 2,
                 1,
                 work,
+                4,
                 STARTUP_OUTCOME_EVIDENCE_TOTAL - 1,
             ),
             Err(ImportStoreBootstrapError::PublishedOutcomeEvidenceLimitTooSmall {
@@ -701,18 +752,63 @@ mod tests {
     }
 
     #[test]
-    fn startup_outcome_evidence_is_reserved_outside_public_import_dimensions() {
+    fn canonical_retained_member_policy_preserves_the_exact_caller_limit() {
+        let requirements = ImportStoreBootstrapRequirements::new(
+            2,
+            2,
+            1,
+            ImportStoreWorkBudget::new(2, 2, 0, 0),
+            7,
+            STARTUP_OUTCOME_EVIDENCE_TOTAL,
+        )
+        .expect("a nonzero retained-member limit is valid");
+        let policy = requirements.canonical_retained_member_policy();
+
+        assert_eq!(policy.attempted_limit(), 0);
+        assert_eq!(policy.consumed_limit(), 0);
+        assert_eq!(policy.committed_limit(), 7);
+        assert_eq!(policy.published_outcome_evidence_limit(), 0);
+        assert_eq!(policy.live_byte_limit(), None);
+    }
+
+    #[test]
+    fn bootstrap_rejects_a_zero_canonical_retained_member_limit() {
+        assert!(matches!(
+            ImportStoreBootstrapRequirements::new(
+                2,
+                2,
+                1,
+                ImportStoreWorkBudget::new(2, 2, 0, 0),
+                MIN_CANONICAL_RETAINED_MEMBER_LIMIT - 1,
+                STARTUP_OUTCOME_EVIDENCE_TOTAL,
+            ),
+            Err(
+                ImportStoreBootstrapError::PublishedCanonicalRetainedMemberLimitTooSmall {
+                    limit,
+                    required,
+                }
+            ) if limit == 0 && required == MIN_CANONICAL_RETAINED_MEMBER_LIMIT
+        ));
+    }
+
+    #[test]
+    fn private_store_roles_are_reserved_outside_public_import_dimensions() {
         assert_eq!(STARTUP_OUTCOME_EVIDENCE_TOTAL, 2);
+        let private_roles = [
+            STARTUP_OUTCOME_EVIDENCE_SEMANTIC,
+            FAILURE_TERMINAL_WORK_SEMANTIC,
+            CANONICAL_RETAINED_MEMBERS_SEMANTIC,
+        ];
         for dimension in ImportDimension::AssetOpen as u8..=ImportDimension::DecompressedBytes as u8
         {
-            assert_ne!(
-                u64::from(dimension) + 1,
-                STARTUP_OUTCOME_EVIDENCE_SEMANTIC.local().get()
-            );
-            assert_ne!(
-                u64::from(dimension) + 1,
-                FAILURE_TERMINAL_WORK_SEMANTIC.local().get()
-            );
+            for role in private_roles {
+                assert_ne!(u64::from(dimension) + 1, role.local().get());
+            }
+        }
+        for (index, role) in private_roles.iter().enumerate() {
+            for other in &private_roles[index + 1..] {
+                assert_ne!(role, other);
+            }
         }
     }
 }
