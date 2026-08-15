@@ -1,9 +1,10 @@
 use std::num::NonZeroU64;
 
 use baozi_operation::__canonical_activation::{
-    CanonicalActivationOutcome, CanonicalActivationPolicy, CanonicalActivationRequirements,
-    CanonicalBuildControl, CanonicalCandidateStoreSession, CanonicalCentralValidationOutcome,
-    CanonicalFreezePermitIssue, CanonicalJointCommit, CanonicalJointSeal, CanonicalTableShape,
+    CanonicalActivationOutcome, CanonicalActivationPolicy, CanonicalBuildControl,
+    CanonicalCandidateStoreSession, CanonicalCentralValidationOutcome,
+    CanonicalFailureRequirements, CanonicalFreezePermitIssue, CanonicalJointCommit,
+    CanonicalJointSeal, CanonicalPlanSeal, CanonicalSuccessRequirements, CanonicalTableShape,
     CanonicalValidationDecision, FailureEvidenceMember, FailureEvidenceOutcome,
     FailureEvidenceValidationSession, RootedFailureValidation,
 };
@@ -251,12 +252,13 @@ pub(in crate::canonical_scene::store) enum SceneActivationTransition {
 }
 
 struct SceneActivationRequest {
-    requirements: CanonicalActivationRequirements,
-    materialization: SceneActivationMaterialization,
+    failure_requirements: CanonicalFailureRequirements,
+    success_requirements: CanonicalSuccessRequirements,
+    plan: SceneActivationPlan,
     evidence_plan: RecordPlan,
 }
 
-struct SceneActivationMaterialization {
+struct SceneActivationPlan {
     matrices_plan: SequencePlan<f32>,
     references_plan: RecordPlan,
     nodes_plan: RecordPlan,
@@ -305,15 +307,16 @@ impl SceneActivationRequest {
         brand: ConstructionBrand,
         authored: TwoNodeAuthoredMatrices,
     ) -> Result<Self, SceneConstructionError> {
-        let requirements = scene_activation_requirements()?;
+        let (failure_requirements, success_requirements) = scene_activation_requirements()?;
         let matrices_plan = SequencePlan::<f32>::new(MATRIX_SCALAR_COUNT)?;
         let references_plan = RecordPlan::new(REFERENCE_COUNT, REFERENCE_FIELD_COUNT)?;
         let nodes_plan = RecordPlan::new(NODE_COUNT, NODE_FIELD_COUNT)?;
         let directory_plan = RecordPlan::new(1, DIRECTORY_FIELD_COUNT)?;
         let evidence_plan = RecordPlan::new(1, EVIDENCE_FIELD_COUNT)?;
         Ok(Self {
-            requirements,
-            materialization: SceneActivationMaterialization {
+            failure_requirements,
+            success_requirements,
+            plan: SceneActivationPlan {
                 matrices_plan,
                 references_plan,
                 nodes_plan,
@@ -326,22 +329,25 @@ impl SceneActivationRequest {
     }
 }
 
-fn scene_activation_requirements() -> Result<CanonicalActivationRequirements, SceneConstructionError>
-{
-    let canonical_blocks = usize::try_from(CANONICAL_BLOCK_COUNT)
-        .expect("the canonical tracer block count fits usize");
-    Ok(CanonicalActivationRequirements::new(
-        CanonicalTableShape::new(canonical_blocks, canonical_blocks)?,
-        CanonicalTableShape::new(1, 1)?,
-        canonical_blocks,
-        scene_activation_preflight_work(),
-        NonZeroU64::new(scene_graph_validation_work())
-            .expect("the Scene validation work is non-zero"),
-    )?)
+impl SceneActivationPlan {
+    fn semantic_work_units(&self) -> u64 {
+        u64::try_from(self.authored.len()).expect("the fixed authored matrix width fits u64")
+    }
 }
 
-fn scene_activation_preflight_work() -> u64 {
-    u64::try_from(MATRIX_SCALAR_COUNT).expect("the fixed authored matrix width fits u64")
+fn scene_activation_requirements()
+-> Result<(CanonicalFailureRequirements, CanonicalSuccessRequirements), SceneConstructionError> {
+    let canonical_blocks = usize::try_from(CANONICAL_BLOCK_COUNT)
+        .expect("the canonical tracer block count fits usize");
+    Ok((
+        CanonicalFailureRequirements::new(CanonicalTableShape::new(1, 1)?),
+        CanonicalSuccessRequirements::new(
+            CanonicalTableShape::new(canonical_blocks, canonical_blocks)?,
+            canonical_blocks,
+            NonZeroU64::new(scene_graph_validation_work())
+                .expect("the Scene validation work is non-zero"),
+        )?,
+    ))
 }
 
 fn authored_activation_matrix_scalar_is_valid(
@@ -529,15 +535,20 @@ pub(in crate::canonical_scene::store) fn exact_scene_activation_work_limit() -> 
             .expect("the fixed activation work plan fits u64");
     let evidence_work = record_plan_work(evidence).expect("the fixed evidence work fits u64");
     let protected_failure_work = exact_scene_activation_protected_work_limit();
-    let requirements =
+    let (failure_requirements, success_requirements) =
         scene_activation_requirements().expect("the fixed activation requirements are valid");
-    let structural_work = requirements.structural_work_requirement();
+    let structural_work = success_requirements
+        .structural_work_requirement(&failure_requirements)
+        .expect("the fixed activation structural work fits u64");
 
     materialization
         .total()
         .and_then(|work| {
-            work.checked_add(scene_activation_preflight_work())
-                .ok_or(StorePlanError::SizeOverflow)
+            work.checked_add(
+                u64::try_from(MATRIX_SCALAR_COUNT)
+                    .expect("the fixed authored matrix width fits u64"),
+            )
+            .ok_or(StorePlanError::SizeOverflow)
         })
         .and_then(|work| {
             work.checked_add(evidence_work)
@@ -560,9 +571,17 @@ pub(in crate::canonical_scene::store) fn exact_scene_activation_work_limit() -> 
 
 #[cfg(test)]
 pub(in crate::canonical_scene::store) fn exact_scene_activation_preflight_ordinary_work() -> u64 {
-    scene_activation_requirements()
-        .expect("the fixed activation requirements are valid")
-        .pre_activation_work_requirement()
+    let (failure_requirements, _success_requirements) =
+        scene_activation_requirements().expect("the fixed activation requirements are valid");
+    failure_requirements
+        .pre_activation_structural_work_requirement()
+        .and_then(|work| {
+            work.checked_add(
+                u64::try_from(MATRIX_SCALAR_COUNT)
+                    .expect("the fixed authored matrix width fits u64"),
+            )
+            .ok_or(StorePlanError::SizeOverflow)
+        })
         .expect("the fixed activation preflight work fits u64")
 }
 
@@ -622,34 +641,52 @@ impl SceneConstructionOperation {
         let Self { raw, brand, keys } = self;
         let expected_brand = brand;
         let SceneActivationRequest {
-            requirements,
-            materialization,
+            failure_requirements,
+            success_requirements,
+            plan,
             evidence_plan,
         } = SceneActivationRequest::try_new(brand, authored)?;
         let policy = scene_activation_policy(keys)?;
-        let (owner, sealer) = raw.into_session_outcome_owner(policy);
-        let request = sealer.seal(requirements);
-        let authored_preflight = materialization.authored;
+        let owner = raw.into_scoped_session_outcome_owner(policy, failure_requirements)?;
 
-        let outcome = owner.plan_and_activate(
-            request,
-            move |mut preflight| {
-                let valid = preflight
-                    .inspect_semantic_work(|index| {
-                        authored_activation_matrix_scalar_is_valid(&authored_preflight, index)
-                    })
-                    .unwrap_or(false);
-                if valid {
-                    preflight.seal::<()>()
-                } else {
-                    preflight.reject((), SEMANTIC_REJECTION_CODE)
+        let outcome = owner.plan_and_activate_scoped(move |mut planning| {
+            let semantic_work_units = plan.semantic_work_units();
+            let mut semantic_valid = true;
+            let semantic_complete = match planning.begin_semantic_work(semantic_work_units) {
+                Ok(mut semantic) => {
+                    let mut runtime_interrupted = false;
+                    for index in 0..semantic_work_units {
+                        match semantic.run_unit(|| {
+                            authored_activation_matrix_scalar_is_valid(&plan.authored, index)
+                        }) {
+                            Ok(valid) => semantic_valid &= valid,
+                            Err(_) => {
+                                runtime_interrupted = true;
+                                break;
+                            }
+                        }
+                    }
+                    if runtime_interrupted {
+                        let _ = semantic.finish_rejected();
+                        false
+                    } else {
+                        semantic.finish_exact().is_ok()
+                    }
                 }
-            },
-            move |mut lane| {
+                Err(_) => false,
+            };
+            if !semantic_complete || !semantic_valid {
+                return planning.reject((), SEMANTIC_REJECTION_CODE);
+            }
+            let sealed = match planning.seal_plan(success_requirements, plan) {
+                CanonicalPlanSeal::Sealed(sealed) => sealed,
+                CanonicalPlanSeal::Terminal(disposition) => return disposition,
+            };
+            sealed.activate(move |mut lane, plan| {
                 let matrices = match lane.try_retain_sequence(
-                    materialization.matrices_plan,
+                    plan.matrices_plan,
                     AuthoredMatrixSchema,
-                    |control| write_activation_matrices(control, &materialization.authored),
+                    |control| write_activation_matrices(control, &plan.authored),
                 ) {
                     Ok(matrices) => CanonicalBlockRef::from_store(matrices),
                     Err(_) => {
@@ -661,7 +698,7 @@ impl SceneConstructionOperation {
                     }
                 };
                 let references = match lane.try_retain_records(
-                    materialization.references_plan,
+                    plan.references_plan,
                     ReferenceTableSchema,
                     write_activation_references,
                 ) {
@@ -674,34 +711,32 @@ impl SceneConstructionOperation {
                             );
                     }
                 };
-                let nodes = match lane.try_retain_records(
-                    materialization.nodes_plan,
-                    NodeTableSchema,
-                    |control| write_activation_nodes(control, matrices),
-                ) {
-                    Ok(nodes) => CanonicalBlockRef::from_store(nodes),
-                    Err(_) => {
-                        return lane
-                            .reject::<SceneActivationOutput, (), RecordBlock, DirectorySchema>(
-                                (),
-                                FALLBACK_CODE,
-                            );
-                    }
-                };
-                let directory = match lane.try_retain_records(
-                    materialization.directory_plan,
-                    DirectorySchema,
-                    |control| write_activation_directory(control, nodes, references, matrices),
-                ) {
-                    Ok(directory) => CanonicalBlockRef::from_store(directory),
-                    Err(_) => {
-                        return lane
-                            .reject::<SceneActivationOutput, (), RecordBlock, DirectorySchema>(
-                                (),
-                                FALLBACK_CODE,
-                            );
-                    }
-                };
+                let nodes =
+                    match lane.try_retain_records(plan.nodes_plan, NodeTableSchema, |control| {
+                        write_activation_nodes(control, matrices)
+                    }) {
+                        Ok(nodes) => CanonicalBlockRef::from_store(nodes),
+                        Err(_) => {
+                            return lane
+                                .reject::<SceneActivationOutput, (), RecordBlock, DirectorySchema>(
+                                    (),
+                                    FALLBACK_CODE,
+                                );
+                        }
+                    };
+                let directory =
+                    match lane.try_retain_records(plan.directory_plan, DirectorySchema, |control| {
+                        write_activation_directory(control, nodes, references, matrices)
+                    }) {
+                        Ok(directory) => CanonicalBlockRef::from_store(directory),
+                        Err(_) => {
+                            return lane
+                                .reject::<SceneActivationOutput, (), RecordBlock, DirectorySchema>(
+                                    (),
+                                    FALLBACK_CODE,
+                                );
+                        }
+                    };
                 let refs = SceneBlockRefs {
                     directory,
                     nodes,
@@ -712,14 +747,14 @@ impl SceneConstructionOperation {
                     directory.into_store(),
                     SceneActivationOutput {
                         draft: SceneDraft {
-                            brand: materialization.brand,
+                            brand: plan.brand,
                             directory,
                         },
                         refs,
                     },
                 )
-            },
-        )?;
+            })
+        })?;
 
         let activated = match outcome {
             CanonicalActivationOutcome::Activated(activated) => activated,
