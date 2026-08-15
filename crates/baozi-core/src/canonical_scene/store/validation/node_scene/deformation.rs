@@ -49,8 +49,8 @@ use super::super::require_scalar;
 const MATRIX_SCALAR_COUNT: u32 = 16;
 const MORPH_VECTOR_WIDTH: u32 = 3;
 
-struct FreshDeformationEquivalence<'fresh, 'nodes, 'deformation, R, NR> {
-    nodes: &'fresh ValidatedNodeBatch<'nodes, NR>,
+struct FreshDeformationEquivalence<'fresh, 'node, 'deformation, R, NR> {
+    nodes: &'fresh ValidatedNodeBatch<'node, NR>,
     deformation: &'fresh ValidatedDeformationBatch<'deformation, R>,
 }
 

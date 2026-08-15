@@ -133,9 +133,10 @@ fn validated_domains<'input>(
     control: &mut TestControl,
 ) -> ValidatedDomains<'input> {
     let limits = SceneValidationLimits::default();
+    let node_input = NodeAuthoringBatch::new(Presence::Present(roots), nodes);
     let spatial = validate_spatial_batch_with_control(
         SpatialAuthoringBatch::new(&SceneSpace::UNKNOWN, &[], &[]),
-        NodeAuthoringBatch::new(Presence::Present(roots), nodes),
+        node_input,
         limits,
         control,
     )

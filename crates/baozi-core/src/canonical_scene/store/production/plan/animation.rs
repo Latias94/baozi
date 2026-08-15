@@ -252,7 +252,7 @@ impl<'view, 'input, NR, DR> AnimationTargetCatalog<'view, 'input, NR, DR> {
     }
 
     pub(in crate::canonical_scene::store) fn authored_node_count(&self) -> usize {
-        self.nodes.input().nodes().len()
+        self.nodes.authored_node_count()
     }
 
     pub(in crate::canonical_scene::store) fn authored_node(

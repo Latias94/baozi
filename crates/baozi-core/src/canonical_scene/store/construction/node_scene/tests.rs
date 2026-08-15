@@ -128,7 +128,6 @@ const SINGLE_TRS_AUTHORING_VALIDATION_WORK: u64 =
     SINGLE_TRS_DOMAIN_AUTHORING_VALIDATION_WORK + SINGLE_TRS_PROFILE_AUTHORING_VALIDATION_WORK;
 // The sealed core plan owns only the seven-domain semantic validation envelope. Retained-store
 // startup and structural work remain operation-owned and are intentionally excluded.
-const SINGLE_TRS_SEALED_SEMANTIC_WORK: u64 = 62;
 const SINGLE_TRS_PROFILE_CONTENT_MATERIALIZATION_WORK: u64 = SINGLE_TRS_PROFILE_PROVENANCE_COUNT
     * 2
     + SINGLE_TRS_PROFILE_DIGEST_BYTES
@@ -599,7 +598,7 @@ fn exact_draft_pair_from_local_authoring_vecs(
 }
 
 #[test]
-fn validated_input_seals_exact_semantic_work_before_canonical_storage_opens() {
+fn validated_input_seals_owned_compiled_storage_before_canonical_storage_opens() {
     let factory = test_factory();
     let account = test_account(&factory, 256);
     let validated = SceneConstructionOperation::with_account(&account, test_limits())
@@ -607,10 +606,6 @@ fn validated_input_seals_exact_semantic_work_before_canonical_storage_opens() {
         .try_validate_node_batch(single_trs_batch(), SceneValidationLimits::default())
         .unwrap_or_else(|_| panic!("single-node input must seal a construction plan"));
 
-    assert_eq!(
-        validated.bound.semantic_work().get(),
-        SINGLE_TRS_SEALED_SEMANTIC_WORK
-    );
     assert!(account.snapshot().live_retained_allocations() > 0);
 
     drop(validated);

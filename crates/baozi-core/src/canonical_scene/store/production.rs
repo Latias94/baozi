@@ -12,6 +12,8 @@ mod tests;
 pub(super) use control::CanonicalAuthoringControl;
 pub(super) use control::{OperationAuthoringControl, OperationAuthoringControlError};
 #[cfg(test)]
+pub(super) use input::NodeAuthoringBatch;
+#[cfg(test)]
 pub(super) use input::ProfileAuthoringBatch;
 #[cfg(test)]
 pub(super) use input::animation::{
@@ -64,7 +66,7 @@ pub(super) use input::spatial::{
     CameraAuthoring, CameraLocalId, LightAuthoring, LightLocalId, SpatialAuthoringBatch,
 };
 #[cfg(test)]
-pub(super) use input::{NodeAuthoringBatch, NodeAuthoringNode, NodeLocalId, NodeParent};
+pub(super) use input::{NodeAuthoringNode, NodeLocalId, NodeParent};
 pub(super) use input::{Presence, SceneAuthoringBatch};
 #[cfg(test)]
 pub(super) use plan::animation::AnimationAuthoringSemanticError;

@@ -230,15 +230,25 @@ where
     Control(#[source] E),
 }
 
-/// Operation-accounted node semantics ready for canonical materialization.
+/// Operation-accounted node semantics paired with the exact authored view that
+/// produced them.
 ///
+/// The private constructor keeps source values and compiled facts from sibling
+/// validation runs structurally inseparable. Consumers that need both must use
+/// this paired value rather than accepting two independently supplied inputs.
+#[must_use = "dropping the validated batch releases its compiled-plan reservation"]
+pub(in crate::canonical_scene::store) struct ValidatedNodeBatch<'input, R> {
+    compiled: NodeValidationStorage<R>,
+    input: NodeAuthoringBatch<'input>,
+}
+
 /// Canonical index zero is the implicit synthetic root. `canonical_order`
 /// contains authored local indices only, and `canonical_index_by_local` maps
 /// each local index to a canonical index in `1..canonical_node_count`.
-#[must_use = "dropping the validated batch releases its compiled-plan reservation"]
-pub(in crate::canonical_scene::store) struct ValidatedNodeBatch<'a, R> {
-    input: NodeAuthoringBatch<'a>,
+#[must_use = "dropping the compiled plan releases its scratch reservation"]
+struct NodeValidationStorage<R> {
     canonical_node_count: u64,
+    source_root_count: u32,
     reference_count: u64,
     matrix_scalar_count: u64,
     trs_scalar_count: u64,
@@ -254,77 +264,112 @@ pub(in crate::canonical_scene::store) struct ValidatedNodeBatch<'a, R> {
     reservation: R,
 }
 
-impl<R> ValidatedNodeBatch<'_, R> {
-    pub(in crate::canonical_scene::store) const fn input(&self) -> NodeAuthoringBatch<'_> {
+impl<'input, R> ValidatedNodeBatch<'input, R> {
+    const fn new(input: NodeAuthoringBatch<'input>, compiled: NodeValidationStorage<R>) -> Self {
+        Self { compiled, input }
+    }
+
+    pub(in crate::canonical_scene::store) const fn input(&self) -> NodeAuthoringBatch<'input> {
         self.input
     }
 
     pub(in crate::canonical_scene::store) const fn canonical_node_count(&self) -> u64 {
-        self.canonical_node_count
+        self.compiled.canonical_node_count
+    }
+
+    pub(in crate::canonical_scene::store) fn authored_node_count(&self) -> usize {
+        self.compiled.canonical_index_by_local.len()
+    }
+
+    pub(in crate::canonical_scene::store) const fn source_root_count(&self) -> u32 {
+        self.compiled.source_root_count
     }
 
     pub(in crate::canonical_scene::store) const fn reference_count(&self) -> u64 {
-        self.reference_count
+        self.compiled.reference_count
     }
 
     pub(in crate::canonical_scene::store) const fn matrix_scalar_count(&self) -> u64 {
-        self.matrix_scalar_count
+        self.compiled.matrix_scalar_count
     }
 
     pub(in crate::canonical_scene::store) const fn trs_scalar_count(&self) -> u64 {
-        self.trs_scalar_count
+        self.compiled.trs_scalar_count
     }
 
     pub(in crate::canonical_scene::store) const fn canonical_bytes(&self) -> u64 {
-        self.canonical_bytes
+        self.compiled.canonical_bytes
     }
 
     pub(super) const fn canonical_non_geometry_bytes(&self) -> Option<u64> {
-        self.canonical_bytes
+        self.compiled
+            .canonical_bytes
             .checked_sub(EMPTY_GEOMETRY_DIRECTORY_BYTES)
     }
 
     pub(in crate::canonical_scene::store) const fn semantic_cell_count(&self) -> u64 {
-        self.matrix_scalar_count + self.trs_scalar_count
+        self.compiled.matrix_scalar_count + self.compiled.trs_scalar_count
     }
 
     pub(in crate::canonical_scene::store) const fn validation_work(&self) -> u64 {
-        self.validation_work
+        self.compiled.validation_work
     }
 
     pub(in crate::canonical_scene::store) const fn scratch_bytes(&self) -> u64 {
-        self.scratch_bytes
+        self.compiled.scratch_bytes
     }
 
     pub(in crate::canonical_scene::store) fn canonical_order(&self) -> &[usize] {
-        &self.canonical_order
+        &self.compiled.canonical_order
     }
 
     pub(in crate::canonical_scene::store) fn canonical_index_by_local(&self) -> &[u32] {
-        &self.canonical_index_by_local
+        &self.compiled.canonical_index_by_local
     }
 
     pub(in crate::canonical_scene::store) fn child_count_by_local(
         &self,
         local: usize,
     ) -> Option<u32> {
-        self.child_ranges_by_local
+        self.compiled
+            .child_ranges_by_local
             .get(local)
             .map(|range| range.count)
     }
 
     #[cfg(test)]
     pub(super) fn install_storage_drop_probe(&mut self, stage: std::rc::Rc<std::cell::Cell<u8>>) {
-        self.storage_drop_probe = Some(StorageDropProbe(stage));
+        self.compiled.storage_drop_probe = Some(StorageDropProbe(stage));
+    }
+
+    #[cfg(test)]
+    pub(super) fn into_compiled_facts_for_test(self) -> (usize, u32, Vec<usize>, Vec<u32>, R) {
+        let NodeValidationStorage {
+            canonical_index_by_local,
+            canonical_order,
+            child_ranges_by_local,
+            source_root_count,
+            reservation,
+            ..
+        } = self.compiled;
+        let authored_node_count = canonical_index_by_local.len();
+        drop(child_ranges_by_local);
+        (
+            authored_node_count,
+            source_root_count,
+            canonical_order,
+            canonical_index_by_local,
+            reservation,
+        )
     }
 }
 
-impl<R> fmt::Debug for ValidatedNodeBatch<'_, R> {
+impl<R> fmt::Debug for NodeValidationStorage<R> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
-            .debug_struct("ValidatedNodeBatch")
-            .field("input", &self.input)
+            .debug_struct("NodeValidationStorage")
             .field("canonical_node_count", &self.canonical_node_count)
+            .field("source_root_count", &self.source_root_count)
             .field("reference_count", &self.reference_count)
             .field("matrix_scalar_count", &self.matrix_scalar_count)
             .field("trs_scalar_count", &self.trs_scalar_count)
@@ -335,6 +380,16 @@ impl<R> fmt::Debug for ValidatedNodeBatch<'_, R> {
             .field("validation_work", &self.validation_work)
             .field("scratch_bytes", &self.scratch_bytes)
             .field("reservation", &"<held>")
+            .finish()
+    }
+}
+
+impl<R> fmt::Debug for ValidatedNodeBatch<'_, R> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ValidatedNodeBatch")
+            .field("input", &self.input)
+            .field("compiled", &self.compiled)
             .finish()
     }
 }
@@ -619,12 +674,12 @@ impl<'control, C: CanonicalAuthoringControl> ValidationContext<'control, C> {
     }
 }
 
-pub(in crate::canonical_scene::store) fn validate_node_batch<'a, O, PP, U>(
-    input: NodeAuthoringBatch<'a>,
+pub(in crate::canonical_scene::store) fn validate_node_batch<'input, O, PP, U>(
+    input: NodeAuthoringBatch<'input>,
     limits: SceneValidationLimits,
     control: &mut OperationAuthoringControl<'_, O, PP, U>,
 ) -> Result<
-    ValidatedNodeBatch<'a, RetainedStoreReservation<O>>,
+    ValidatedNodeBatch<'input, RetainedStoreReservation<O>>,
     NodeAuthoringFailure<OperationAuthoringControlError>,
 >
 where
@@ -636,22 +691,22 @@ where
 }
 
 #[cfg(test)]
-pub(super) fn validate_node_batch_with_control<'a, C>(
-    input: NodeAuthoringBatch<'a>,
+pub(super) fn validate_node_batch_with_control<'input, C>(
+    input: NodeAuthoringBatch<'input>,
     limits: SceneValidationLimits,
     control: &mut C,
-) -> Result<ValidatedNodeBatch<'a, C::Reservation>, NodeAuthoringFailure<C::Error>>
+) -> Result<ValidatedNodeBatch<'input, C::Reservation>, NodeAuthoringFailure<C::Error>>
 where
     C: CanonicalAuthoringControl,
 {
     validate_node_batch_inner(input, limits, control)
 }
 
-fn validate_node_batch_inner<'a, C>(
-    input: NodeAuthoringBatch<'a>,
+fn validate_node_batch_inner<'input, C>(
+    input: NodeAuthoringBatch<'input>,
     limits: SceneValidationLimits,
     control: &mut C,
-) -> Result<ValidatedNodeBatch<'a, C::Reservation>, NodeAuthoringFailure<C::Error>>
+) -> Result<ValidatedNodeBatch<'input, C::Reservation>, NodeAuthoringFailure<C::Error>>
 where
     C: CanonicalAuthoringControl,
 {
@@ -686,6 +741,7 @@ where
         check_limit(NodeAuthoringLimit::Depth, 1, maximum_depth)?;
         Ok(roots)
     })?;
+    let source_root_count = usize_to_u32(roots.len(), "source roots")?;
 
     let order_plan = context.scratch_plan::<usize>(nodes.len(), "canonical node order")?;
     let index_plan = context.scratch_plan::<u32>(nodes.len(), "canonical index by local node")?;
@@ -924,9 +980,9 @@ where
     drop(visit_state_by_local);
     drop(ordered_children);
 
-    let mut validated = ValidatedNodeBatch {
-        input,
+    let mut compiled = NodeValidationStorage {
         canonical_node_count,
+        source_root_count,
         reference_count: context.references,
         matrix_scalar_count: context.matrix_scalars,
         trs_scalar_count: context.trs_scalars,
@@ -940,9 +996,9 @@ where
         storage_drop_probe: None,
         reservation,
     };
-    context.resize_scratch(&mut validated.reservation, retained_bytes)?;
+    context.resize_scratch(&mut compiled.reservation, retained_bytes)?;
     context.finish()?;
-    Ok(validated)
+    Ok(ValidatedNodeBatch::new(input, compiled))
 }
 
 fn compile_canonical_breadth_first_order<C, R>(

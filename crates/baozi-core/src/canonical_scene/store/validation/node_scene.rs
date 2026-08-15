@@ -161,9 +161,8 @@ struct FreshNodeEquivalence<'batch, 'input, R> {
 impl<R> NodeEquivalence for FreshNodeEquivalence<'_, '_, R> {
     fn validate_counts(&mut self, node_count: usize, source_node_count: usize) -> Option<()> {
         if node_count != usize::try_from(self.expected.canonical_node_count()).ok()?
-            || source_node_count != self.expected.input().nodes().len()
+            || source_node_count != self.expected.authored_node_count()
             || source_node_count != self.expected.canonical_order().len()
-            || source_node_count != self.expected.canonical_index_by_local().len()
         {
             return None;
         }
@@ -186,10 +185,7 @@ impl<R> NodeEquivalence for FreshNodeEquivalence<'_, '_, R> {
     }
 
     fn source_root_count_hint(&mut self) -> Option<Option<u32>> {
-        let Presence::Present(roots) = self.expected.input().roots() else {
-            return None;
-        };
-        Some(Some(u32::try_from(roots.len()).ok()?))
+        Some(Some(self.expected.source_root_count()))
     }
 
     fn validate_node_identity(&mut self, row: usize) -> Option<()> {

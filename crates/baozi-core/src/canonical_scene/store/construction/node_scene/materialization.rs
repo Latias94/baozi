@@ -1,5 +1,3 @@
-use std::num::NonZeroU64;
-
 use baozi_operation::{
     CanonicalRecordRowWriter, OutcomeEvidenceRecordRef, RecordBlock, RecordPlan,
     RetainedStoreBatchLimits, RetainedStoreBlockTablePlan, RetainedStorePublicationPlan,
@@ -584,7 +582,6 @@ struct ValidatedNodeSceneBatches<'input, R> {
 pub(super) struct NodeSceneSealedPlan<'input, R> {
     batches: ValidatedNodeSceneBatches<'input, R>,
     materialization: NodeSceneMaterializationPlans,
-    semantic_work: NonZeroU64,
 }
 
 /// Legacy operation binding for one exact sealed plan.
@@ -624,11 +621,9 @@ struct NodeSceneMaterializationPlans {
 impl<'input, R> NodeSceneSealedPlan<'input, R> {
     fn try_new(batches: ValidatedNodeSceneBatches<'input, R>) -> Result<Self, StorePlanError> {
         let materialization = NodeSceneMaterializationPlans::new(&batches)?;
-        let semantic_work = validated_scene_semantic_work(&batches)?;
         Ok(Self {
             batches,
             materialization,
-            semantic_work,
         })
     }
 
@@ -637,14 +632,6 @@ impl<'input, R> NodeSceneSealedPlan<'input, R> {
         keys: SceneStoreKeys,
     ) -> Result<RetainedStorePublicationPlan, StorePlanError> {
         self.materialization.publication_plan(keys)
-    }
-
-    #[allow(
-        dead_code,
-        reason = "consumed by the import-bound activation slice in U4e"
-    )]
-    pub(super) const fn semantic_work(&self) -> NonZeroU64 {
-        self.semantic_work
     }
 
     fn into_parts(
@@ -675,10 +662,6 @@ impl<'input> BoundNodeScenePlan<'input> {
             publication,
             owner: FreshNodeSceneOwner { raw, brand, keys },
         })
-    }
-
-    pub(super) const fn semantic_work(&self) -> NonZeroU64 {
-        self.plan.semantic_work()
     }
 
     fn into_parts(
@@ -750,17 +733,10 @@ impl NodeSceneMaterializationPlans {
         let profile_batch = &batches.profile;
         let node_count = u32::try_from(nodes_batch.canonical_node_count())
             .map_err(|_| StorePlanError::SizeOverflow)?;
-        let source_node_count = node_count
-            .checked_sub(1)
-            .ok_or(StorePlanError::SizeOverflow)?;
-        let source_node_count_usize =
-            usize::try_from(source_node_count).map_err(|_| StorePlanError::SizeOverflow)?;
-        let source_root_count = match nodes_batch.input().roots() {
-            Presence::Present(roots) => {
-                u32::try_from(roots.len()).map_err(|_| StorePlanError::SizeOverflow)?
-            }
-            Presence::Absent => return Err(StorePlanError::InvalidBlockTable),
-        };
+        let source_node_count_usize = nodes_batch.authored_node_count();
+        let source_node_count =
+            u32::try_from(source_node_count_usize).map_err(|_| StorePlanError::SizeOverflow)?;
+        let source_root_count = nodes_batch.source_root_count();
         let transform_scalar_count_u64 = nodes_batch
             .matrix_scalar_count()
             .checked_add(nodes_batch.trs_scalar_count())
@@ -884,24 +860,6 @@ impl NodeSceneMaterializationPlans {
             evidence_table,
         ))
     }
-}
-
-fn validated_scene_semantic_work<R>(
-    batches: &ValidatedNodeSceneBatches<'_, R>,
-) -> Result<NonZeroU64, StorePlanError> {
-    let work = [
-        batches.spatial.validation_work(),
-        batches.nodes.validation_work(),
-        batches.appearance.validation_work(),
-        batches.geometry.validation_work(),
-        batches.deformation.validation_work(),
-        batches.animations.validation_work(),
-        batches.profile.validation_work(),
-    ]
-    .into_iter()
-    .try_fold(0_u64, u64::checked_add)
-    .ok_or(StorePlanError::SizeOverflow)?;
-    NonZeroU64::new(work).ok_or(StorePlanError::InvalidBlockTable)
 }
 
 fn node_scene_writer_plan(
@@ -1377,8 +1335,7 @@ fn retain_node_scene_transforms(
     work: &mut NodeSceneWorkMeter,
     faults: &mut NodeSceneBuildFaults,
 ) -> Result<CanonicalBlockRef<NodeSceneAuthoredTransformSchema>, StoreRuntimeError> {
-    let input = batch.input();
-    let nodes = input.nodes();
+    let nodes = batch.input().nodes();
     let failure = plans.build_invariant;
     assembly
         .try_retain_canonical_sequence_controlled(
@@ -1477,8 +1434,7 @@ fn retain_node_scene_nodes(
         transforms,
         spatial,
     } = payloads;
-    let input = batch.input();
-    let authored_nodes = input.nodes();
+    let authored_nodes = batch.input().nodes();
     let mapping = batch.canonical_index_by_local();
     let failure = plans.build_invariant;
     assembly

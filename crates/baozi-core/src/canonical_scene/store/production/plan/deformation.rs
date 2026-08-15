@@ -1442,7 +1442,7 @@ where
     };
     context.resize_scratch(&mut storage.reservation, scratch_actual)?;
 
-    let authored_node_count = nodes.input().nodes().len();
+    let authored_node_count = nodes.authored_node_count();
     let mut skin_cursors = SkinValidationCursors::default();
     validate_skins(
         input,

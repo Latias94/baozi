@@ -279,12 +279,12 @@ impl GeometryEquivalence for CanonicalGeometryEquivalence {
     }
 }
 
-struct FreshGeometryEquivalence<'batch, 'input, NR, GR> {
-    expected_nodes: &'batch ValidatedNodeBatch<'input, NR>,
+struct FreshGeometryEquivalence<'batch, 'node, 'input, NR, GR> {
+    expected_nodes: &'batch ValidatedNodeBatch<'node, NR>,
     expected: &'batch ValidatedGeometryBatch<'input, GR>,
 }
 
-impl<NR, GR> GeometryEquivalence for FreshGeometryEquivalence<'_, '_, NR, GR> {
+impl<NR, GR> GeometryEquivalence for FreshGeometryEquivalence<'_, '_, '_, NR, GR> {
     fn validate_directory(&mut self, directory: CanonicalRecordView<'_>) -> Option<()> {
         for (field, expected) in [
             (

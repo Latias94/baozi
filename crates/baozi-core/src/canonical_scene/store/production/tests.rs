@@ -390,6 +390,31 @@ fn single_trs_authoring_work_is_accounted_exactly() {
 }
 
 #[test]
+fn compiled_node_plan_does_not_borrow_authored_storage() {
+    let mut control = TestControl::default();
+    let compiled = {
+        let roots = vec![NodeLocalId::new(0)];
+        let nodes = vec![trs(Presence::Absent)];
+        validate(
+            Presence::Present(&roots),
+            &nodes,
+            SceneValidationLimits::default(),
+            &mut control,
+        )
+        .expect("temporary authored storage must compile into owned node facts")
+        .into_compiled_facts_for_test()
+    };
+
+    assert_eq!(compiled.0, 1);
+    assert_eq!(compiled.1, 1);
+    assert_eq!(compiled.2, [0]);
+    assert_eq!(compiled.3, [1]);
+
+    drop(compiled);
+    assert_eq!(control.live.get(), 0);
+}
+
+#[test]
 fn valid_forest_compiles_parent_before_child_order_and_counts() {
     let roots = [NodeLocalId::new(2), NodeLocalId::new(0)];
     let nodes = [
@@ -409,7 +434,8 @@ fn valid_forest_compiles_parent_before_child_order_and_counts() {
     )
     .expect("valid authored forest");
 
-    assert_eq!(batch.input().nodes().len(), 5);
+    assert_eq!(batch.authored_node_count(), 5);
+    assert_eq!(batch.source_root_count(), 2);
     assert_eq!(batch.canonical_node_count(), 6);
     assert_eq!(batch.reference_count(), 5);
     assert_eq!(batch.matrix_scalar_count(), 32);
@@ -445,11 +471,12 @@ fn child_ordinals_preserve_sibling_order_independently_of_local_ids() {
 #[test]
 fn local_node_array_reordering_preserves_the_canonical_tree() {
     fn canonical_shape<R>(batch: &ValidatedNodeBatch<'_, R>) -> Vec<(u32, AuthoredTransformKind)> {
+        let input = batch.input();
         batch
             .canonical_order()
             .iter()
             .map(|&local| {
-                let node = batch.input().nodes()[local];
+                let node = input.nodes()[local];
                 let parent = match node.parent() {
                     Presence::Absent => 0,
                     Presence::Present(parent) => {
