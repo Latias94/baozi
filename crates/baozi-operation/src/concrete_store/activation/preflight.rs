@@ -452,6 +452,10 @@ where
                     RetainedStorePublicationPlan::success(canonical_plan, outcome_evidence_plan);
                 let mut assembly = match try_open_activation(operation, publication_plan) {
                     Ok(assembly) => assembly,
+                    Err(ActivationOpenFailure::DeferredContainment { operation }) => {
+                        let _ = drop_optional_callback(materialize);
+                        return Err(contain_operation(operation));
+                    }
                     Err(ActivationOpenFailure::Recoverable {
                         operation,
                         cause,
@@ -472,10 +476,6 @@ where
                                 fallback_only,
                             ),
                         ));
-                    }
-                    Err(ActivationOpenFailure::Contained(cause)) => {
-                        let _ = drop_optional_callback(materialize);
-                        return Err(StoreActivationContainment { cause });
                     }
                 };
 
@@ -1080,6 +1080,54 @@ where
     }
 }
 
+struct ScopedActivationInputs<P, M> {
+    plan: Option<P>,
+    materialize: Option<M>,
+}
+
+impl<P, M> ScopedActivationInputs<P, M> {
+    fn new(plan: P, materialize: M) -> Self {
+        Self {
+            plan: Some(plan),
+            materialize: Some(materialize),
+        }
+    }
+
+    fn take_plan(&mut self) -> P {
+        self.plan
+            .take()
+            .expect("the sealed plan moves into materialization at most once")
+    }
+
+    fn take_materializer(&mut self) -> M {
+        self.materialize
+            .take()
+            .expect("the scoped materializer executes at most once")
+    }
+
+    fn drop_remaining(&mut self) -> Result<(), ()> {
+        let plan_drop_failed = self
+            .plan
+            .take()
+            .is_some_and(|plan| drop_scoped_value(plan).is_err());
+        let materializer_drop_failed = self
+            .materialize
+            .take()
+            .is_some_and(|materialize| drop_scoped_value(materialize).is_err());
+        if plan_drop_failed || materializer_drop_failed {
+            Err(())
+        } else {
+            Ok(())
+        }
+    }
+}
+
+impl<P, M> Drop for ScopedActivationInputs<P, M> {
+    fn drop(&mut self) {
+        let _ = self.drop_remaining();
+    }
+}
+
 #[allow(
     clippy::large_enum_variant,
     reason = "the temporary U4e transition keeps the operation or assembly owner inline to prevent ownerless unwind without allocation and is deleted at core cutover"
@@ -1262,6 +1310,7 @@ where
             .plan
             .take()
             .expect("a sealed plan owns its complete preflight value");
+        let inputs = ScopedActivationInputs::new(plan, materialize);
         let driver = self
             .driver
             .take()
@@ -1270,10 +1319,13 @@ where
             .request
             .take()
             .expect("a sealed plan owns its bound activation request");
-        let mut plan = ManuallyDrop::new(Some(plan));
-        let mut materialize = ManuallyDrop::new(Some(materialize));
-        let failure_work = driver.failure_work;
-        let failure = driver
+        let mut transition = ScopedOwnerTransition::begin(driver);
+        // Rebinding immediately after the transition makes every later unwind drop the complete
+        // plan, its reservations, and the materializer before final ownership-graph containment.
+        let mut inputs = inputs;
+        let failure_work = transition.driver.failure_work;
+        let failure = transition
+            .driver
             .failure
             .take()
             .expect("sealed activation consumes the failure shape once");
@@ -1288,10 +1340,8 @@ where
         let outcome_evidence_destination_dimension = failure.outcome_evidence_destination_dimension;
         let publication_plan =
             RetainedStorePublicationPlan::success(canonical_plan, failure.outcome_evidence_plan);
-        let mut transition = ScopedOwnerTransition::begin(driver);
         let Some(operation) = transition.take_operation() else {
-            let _ = drop_optional_callback(plan);
-            let _ = drop_optional_callback(materialize);
+            let _ = inputs.drop_remaining();
             return ScopedActivationDriver::<
                 O,
                 PP,
@@ -1303,8 +1353,24 @@ where
                 L,
             >::receipt(receipt_brand);
         };
-        let assembly = match try_open_activation(operation, publication_plan) {
+        let opened = super::try_open_activation(operation, publication_plan);
+        let assembly = match opened {
             Ok(assembly) => assembly,
+            Err(ActivationOpenFailure::DeferredContainment { operation }) => {
+                transition.put_operation(operation);
+                let _ = inputs.drop_remaining();
+                transition.contain();
+                return ScopedActivationDriver::<
+                    O,
+                    PP,
+                    U,
+                    T,
+                    E,
+                    CanonicalKind,
+                    CanonicalTag,
+                    L,
+                >::receipt(receipt_brand);
+            }
             Err(ActivationOpenFailure::Recoverable {
                 operation,
                 cause,
@@ -1312,12 +1378,7 @@ where
                 fallback_only,
             }) => {
                 transition.put_operation(operation);
-                let plan_drop_failed = drop_optional_callback(plan).is_err();
-                let materialize_drop_failed = drop_optional_callback(materialize).is_err();
-                if plan_drop_failed
-                    || materialize_drop_failed
-                    || !transition.operation_is_quiescent()
-                {
+                if inputs.drop_remaining().is_err() || !transition.operation_is_quiescent() {
                     transition.contain();
                 } else {
                     let operation = transition
@@ -1346,22 +1407,6 @@ where
                     L,
                 >::receipt(receipt_brand);
             }
-            Err(ActivationOpenFailure::Contained(cause)) => {
-                let _ = drop_optional_callback(plan);
-                let _ = drop_optional_callback(materialize);
-                transition.driver.state =
-                    ScopedActivationState::Contained(StoreActivationContainment { cause });
-                return ScopedActivationDriver::<
-                    O,
-                    PP,
-                    U,
-                    T,
-                    E,
-                    CanonicalKind,
-                    CanonicalTag,
-                    L,
-                >::receipt(receipt_brand);
-            }
         };
         transition.put_assembly(assembly);
 
@@ -1376,18 +1421,13 @@ where
                 first_fault: &mut driver.first_fault,
                 materialization_work_dimension,
             };
-            let plan = plan
-                .take()
-                .expect("the sealed plan moves into materialization at most once");
-            let materialize = materialize
-                .take()
-                .expect("the scoped materializer executes at most once");
+            let plan = inputs.take_plan();
+            let materialize = inputs.take_materializer();
             materialize(lane, plan).into_state()
         }));
-        let plan_drop_failed = drop_optional_callback(plan).is_err();
-        let materialize_drop_failed = drop_optional_callback(materialize).is_err();
+        let inputs_drop_failed = inputs.drop_remaining().is_err();
         let materialized = match materialized {
-            Ok(materialized) if !plan_drop_failed && !materialize_drop_failed => materialized,
+            Ok(materialized) if !inputs_drop_failed => materialized,
             Ok(materialized) => {
                 let _ = drop_materialization(materialized);
                 transition.contain();

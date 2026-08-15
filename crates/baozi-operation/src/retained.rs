@@ -157,6 +157,8 @@ pub(crate) use terminal_output::{
 };
 use triomphe::{Arc, UniqueArc};
 
+#[cfg(all(test, feature = "_u4-activation"))]
+pub(crate) use operation::panic_next_publication_account_open;
 #[cfg(feature = "_u4-activation")]
 pub(crate) use operation::{
     BorrowedRetainedWorkPermit, RetainedFailureWorkConsumeError, RetainedFailureWorkFinishError,
@@ -618,6 +620,14 @@ where
 }
 
 #[cfg(feature = "_u4-activation")]
+#[must_use = "activation open disposition owns the operation until it is handled"]
+pub(crate) enum RetainedActivationOpenDisposition<Operation> {
+    Retry(Operation),
+    FallbackOnly(Operation),
+    FailClosed(Operation),
+}
+
+#[cfg(feature = "_u4-activation")]
 impl<O, P, PP, U, D, F> RetainedPublicationOpenError<RetainedOperation<O, P, PP, U, D, F>, D>
 where
     O: OperationOwner,
@@ -627,27 +637,28 @@ where
     D: TerminalEvidenceKey + fmt::Debug,
     F: Send + Sync + 'static,
 {
-    /// Returns only rollback-proved recovery authority; fail-closed owners are quarantined here.
-    pub(crate) fn into_activation_recovery(
+    /// Returns the exact linear owner disposition without finalizing fail-closed containment.
+    ///
+    /// Activation callers must release every scoped semantic input before consuming a
+    /// [`RetainedActivationOpenDisposition::FailClosed`] owner. The physical account may already
+    /// be quarantined by the faulting retained action, but the operation graph remains owned until
+    /// the caller performs its final containment step.
+    pub(crate) fn into_activation_disposition(
         self,
-    ) -> RetainedActivationRecoveryResult<RetainedOperation<O, P, PP, U, D, F>> {
+    ) -> RetainedActivationOpenDisposition<RetainedOperation<O, P, PP, U, D, F>> {
         match self.disposition {
             RetainedPublicationOpenDisposition::Retry => {
-                Ok(RetainedPublicationOpenRecovery::Retry(self.operation))
+                RetainedActivationOpenDisposition::Retry(self.operation)
             }
-            RetainedPublicationOpenDisposition::FallbackOnly => Ok(
-                RetainedPublicationOpenRecovery::FallbackOnly(self.operation),
-            ),
+            RetainedPublicationOpenDisposition::FallbackOnly => {
+                RetainedActivationOpenDisposition::FallbackOnly(self.operation)
+            }
             RetainedPublicationOpenDisposition::FailClosed => {
-                Err(self.operation.contain_activation_fault())
+                RetainedActivationOpenDisposition::FailClosed(self.operation)
             }
         }
     }
 }
-
-#[cfg(feature = "_u4-activation")]
-type RetainedActivationRecoveryResult<T> =
-    Result<RetainedPublicationOpenRecovery<T>, FinalizationContainmentError>;
 
 #[cfg(feature = "_u4-activation")]
 type RetainedFailureAssemblyResult<O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock> = Result<

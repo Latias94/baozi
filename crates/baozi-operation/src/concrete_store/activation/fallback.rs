@@ -130,6 +130,11 @@ where
                                 .expect("the failure-evidence callback is transferred once"),
                         )
                     }
+                    Err(ActivationOpenFailure::DeferredContainment { operation }) => {
+                        let _ = drop_optional_callback(build);
+                        let _ = drop_scoped_value(cause);
+                        Err(contain_operation(operation))
+                    }
                     Err(ActivationOpenFailure::Recoverable {
                         operation,
                         cause: _,
@@ -142,11 +147,6 @@ where
                         }
                         prepare_operation_minimal(operation, failure_code, cause)
                             .map(FailureEvidenceOutcome::MinimalFallback)
-                    }
-                    Err(ActivationOpenFailure::Contained(containment)) => {
-                        let _ = drop_optional_callback(build);
-                        let _ = drop_scoped_value(cause);
-                        Err(StoreActivationContainment { cause: containment })
                     }
                 }
             }

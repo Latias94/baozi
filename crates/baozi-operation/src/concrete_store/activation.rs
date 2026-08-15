@@ -38,9 +38,9 @@ use crate::ledger::STARTUP_ACCOUNT_SHARE_STEP_COUNT;
 use crate::owner::OperationOwner;
 use crate::retained::{
     FinalizationContainmentError, PreparationFailureClass, PreparationFailureCode,
-    RetainedFailureWorkConsumeError, RetainedFailureWorkControl, RetainedFailureWorkFinishError,
-    RetainedFailureWorkPermit, RetainedFailureWorkStartError, RetainedHandleSharePlan,
-    RetainedPlanningBaseline, RetainedPlanningContainmentAnchor, RetainedPublicationOpenRecovery,
+    RetainedActivationOpenDisposition, RetainedFailureWorkConsumeError, RetainedFailureWorkControl,
+    RetainedFailureWorkFinishError, RetainedFailureWorkPermit, RetainedFailureWorkStartError,
+    RetainedHandleSharePlan, RetainedPlanningBaseline, RetainedPlanningContainmentAnchor,
     RetainedPublicationPrepareError, RetainedWorkConsumeError, RetainedWorkControl,
     RetainedWorkFinishError, RetainedWorkPermit, RetainedWorkStartError,
 };
@@ -1339,6 +1339,11 @@ where
     PP: ProgressPhase,
     U: ProgressUnit,
 {
+    // The account may already be quarantined by the faulting physical action. Keeping the
+    // operation here delays final ownership-graph containment until caller-owned inputs drop.
+    DeferredContainment {
+        operation: RetainedStoreOperation<O, PP, U, L>,
+    },
     Recoverable {
         cause: StoreRuntimeError,
         failure_code: PreparationFailureCode,
@@ -1346,7 +1351,6 @@ where
         // Keep the recoverable operation last so its physical baseline observes any unwind.
         operation: RetainedStoreOperation<O, PP, U, L>,
     },
-    Contained(FinalizationContainmentError),
 }
 
 #[allow(clippy::result_large_err, clippy::type_complexity)]
@@ -1359,13 +1363,20 @@ where
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    #[cfg(test)]
-    inject_scoped_transition_panic(ScopedTransitionPanicPoint::TryOpenActivation);
-
-    if operation.validate_publication_plan_keys(&plan).is_err() {
-        return Err(ActivationOpenFailure::Contained(
-            contain_operation(operation).cause,
-        ));
+    let pre_open = catch_unwind(AssertUnwindSafe(|| {
+        #[cfg(test)]
+        inject_scoped_transition_panic(ScopedTransitionPanicPoint::TryOpenActivation);
+        operation.validate_publication_plan_keys(&plan)
+    }));
+    match pre_open {
+        Err(payload) => {
+            discard_untrusted_panic_payload(payload);
+            return Err(ActivationOpenFailure::DeferredContainment { operation });
+        }
+        Ok(Err(_)) => {
+            return Err(ActivationOpenFailure::DeferredContainment { operation });
+        }
+        Ok(Ok(())) => {}
     }
     let RetainedStoreOperation {
         raw,
@@ -1383,33 +1394,37 @@ where
         Err(error) => {
             let cause = map_writer_error(error.cause());
             let classification = classify_activation_fault(&cause);
-            match error.into_activation_recovery() {
-                Ok(recovery) => {
-                    let (raw, fallback_only) = match recovery {
-                        RetainedPublicationOpenRecovery::Retry(raw) => (raw, false),
-                        RetainedPublicationOpenRecovery::FallbackOnly(raw) => (raw, true),
-                    };
-                    let mut operation = RetainedStoreOperation {
-                        raw,
-                        domain,
-                        lineage,
-                    };
-                    match classification {
-                        ActivationFaultClassification::Contract => Err(
-                            ActivationOpenFailure::Contained(contain_operation(operation).cause),
-                        ),
-                        ActivationFaultClassification::Recoverable(failure_code) => {
-                            operation.latch_activation_terminal_cause(failure_code);
-                            Err(ActivationOpenFailure::Recoverable {
-                                operation,
-                                cause,
-                                failure_code,
-                                fallback_only,
-                            })
-                        }
-                    }
+            let (raw, fallback_only) = match error.into_activation_disposition() {
+                RetainedActivationOpenDisposition::Retry(raw) => (raw, false),
+                RetainedActivationOpenDisposition::FallbackOnly(raw) => (raw, true),
+                RetainedActivationOpenDisposition::FailClosed(raw) => {
+                    return Err(ActivationOpenFailure::DeferredContainment {
+                        operation: RetainedStoreOperation {
+                            raw,
+                            domain,
+                            lineage,
+                        },
+                    });
                 }
-                Err(containment) => Err(ActivationOpenFailure::Contained(containment)),
+            };
+            let mut operation = RetainedStoreOperation {
+                raw,
+                domain,
+                lineage,
+            };
+            match classification {
+                ActivationFaultClassification::Contract => {
+                    Err(ActivationOpenFailure::DeferredContainment { operation })
+                }
+                ActivationFaultClassification::Recoverable(failure_code) => {
+                    operation.latch_activation_terminal_cause(failure_code);
+                    Err(ActivationOpenFailure::Recoverable {
+                        operation,
+                        cause,
+                        failure_code,
+                        fallback_only,
+                    })
+                }
             }
         }
     }
@@ -2771,6 +2786,7 @@ pub struct StoreActivationContainment {
 
 #[cfg(test)]
 mod scoped_transition_tests {
+    use std::cell::Cell;
     use std::num::{NonZeroU32, NonZeroU64};
 
     use super::*;
@@ -2822,6 +2838,46 @@ mod scoped_transition_tests {
     #[derive(Clone, Copy)]
     enum TestRejection {
         Requested,
+    }
+
+    struct TransitionDropMarker<'probe> {
+        dropped: &'probe Cell<bool>,
+        account: &'probe PhysicalStorageAccount,
+        poison_seen_while_dropping: &'probe Cell<bool>,
+        poison_event_count_while_dropping: &'probe Cell<u128>,
+    }
+
+    impl Drop for TransitionDropMarker<'_> {
+        fn drop(&mut self) {
+            let snapshot = self.account.snapshot();
+            self.poison_seen_while_dropping.set(snapshot.poisoned());
+            self.poison_event_count_while_dropping
+                .set(snapshot.poison_event_count());
+            self.dropped.set(true);
+        }
+    }
+
+    struct PanickingTrackedPlan<'scope, 'probe> {
+        scratch: Option<CanonicalReservation<'scope, TestOwner>>,
+        reservation_released: &'probe Cell<bool>,
+        marker: Option<TransitionDropMarker<'probe>>,
+    }
+
+    impl Drop for PanickingTrackedPlan<'_, '_> {
+        fn drop(&mut self) {
+            drop(
+                self.scratch
+                    .take()
+                    .expect("the tracked plan releases its reservation once"),
+            );
+            self.reservation_released.set(true);
+            drop(
+                self.marker
+                    .take()
+                    .expect("the tracked plan drops its marker once"),
+            );
+            panic!("injected tracked-plan drop panic");
+        }
     }
 
     type TestOperation = RetainedStoreOperation<TestOwner, TestProgress, TestUnit>;
@@ -3004,6 +3060,197 @@ mod scoped_transition_tests {
     fn panic_inside_try_open_activation_uses_the_transition_account_anchor() {
         assert_owner_consuming_transition_panic_is_contained(
             ScopedTransitionPanicPoint::TryOpenActivation,
+        );
+    }
+
+    #[test]
+    fn panic_inside_try_open_activation_drops_scoped_inputs_before_containment() {
+        let account = account();
+        let (operation, keys) = operation(&account);
+        let (policy, failure, success) = scoped_shape(keys);
+        let owner = operation
+            .into_scoped_session_outcome_owner(policy, failure)
+            .unwrap();
+        let physical_baseline = account.snapshot();
+        assert!(!physical_baseline.poisoned());
+        assert!(physical_baseline.live_retained_allocations() > 0);
+        let reservation_released = Cell::new(false);
+        let plan_marker_dropped = Cell::new(false);
+        let plan_poison_seen_while_dropping = Cell::new(false);
+        let plan_poison_events_while_dropping = Cell::new(u128::MAX);
+        let materializer_dropped = Cell::new(false);
+        let materializer_poison_seen_while_dropping = Cell::new(false);
+        let materializer_poison_events_while_dropping = Cell::new(u128::MAX);
+
+        let result: Result<TestOutcome, StoreActivationContainment> = owner
+            .plan_and_activate_scoped(|mut planning| {
+                let mut semantic = planning.begin_semantic_work(1).unwrap();
+                let scratch = semantic.reserve(1).unwrap();
+                semantic.validate_live_owner(&scratch).unwrap();
+                semantic.run_unit(|| ()).unwrap();
+                semantic.finish_exact().unwrap();
+                let sealed = match planning.seal_plan(
+                    success,
+                    PanickingTrackedPlan {
+                        scratch: Some(scratch),
+                        reservation_released: &reservation_released,
+                        marker: Some(TransitionDropMarker {
+                            dropped: &plan_marker_dropped,
+                            account: &account,
+                            poison_seen_while_dropping: &plan_poison_seen_while_dropping,
+                            poison_event_count_while_dropping: &plan_poison_events_while_dropping,
+                        }),
+                    },
+                ) {
+                    CanonicalPlanSeal::Sealed(sealed) => sealed,
+                    CanonicalPlanSeal::Terminal(disposition) => return disposition,
+                };
+                let materializer_marker = TransitionDropMarker {
+                    dropped: &materializer_dropped,
+                    account: &account,
+                    poison_seen_while_dropping: &materializer_poison_seen_while_dropping,
+                    poison_event_count_while_dropping: &materializer_poison_events_while_dropping,
+                };
+                test_panic_scoped_transition_at(ScopedTransitionPanicPoint::TryOpenActivation);
+                sealed.activate(
+                    move |_lane,
+                          _plan|
+                          -> CanonicalMaterialization<
+                        '_,
+                        (),
+                        TestRejection,
+                        ScalarSequence<u8>,
+                        CanonicalTag,
+                    > {
+                        let _ = &materializer_marker;
+                        panic!("try_open_activation fault must run before materialization")
+                    },
+                )
+            });
+
+        assert!(result.is_err());
+        assert!(!test_scoped_transition_panic_is_armed());
+        assert!(reservation_released.get());
+        assert!(plan_marker_dropped.get());
+        assert!(!plan_poison_seen_while_dropping.get());
+        assert_eq!(plan_poison_events_while_dropping.get(), 0);
+        assert!(materializer_dropped.get());
+        assert!(!materializer_poison_seen_while_dropping.get());
+        assert_eq!(materializer_poison_events_while_dropping.get(), 0);
+        let snapshot = account.snapshot();
+        assert!(snapshot.poisoned());
+        assert!(snapshot.poison_event_count() > 0);
+        assert!(snapshot.poison_event_count_exact());
+        assert!(snapshot.poison_event_domain_valid());
+        assert_eq!(
+            snapshot
+                .first_poison_evidence()
+                .map(|evidence| evidence.reason()),
+            Some(crate::AccountPoisonReason::OwnershipGraphUnverified)
+        );
+        assert_eq!(
+            snapshot.live_retained_bytes(),
+            physical_baseline.live_retained_bytes()
+        );
+        assert_eq!(
+            snapshot.live_retained_allocations(),
+            physical_baseline.live_retained_allocations()
+        );
+    }
+
+    #[test]
+    fn fail_closed_publication_open_releases_scoped_inputs_before_final_containment() {
+        let account = account();
+        let (operation, keys) = operation(&account);
+        let (policy, failure, success) = scoped_shape(keys);
+        let owner = operation
+            .into_scoped_session_outcome_owner(policy, failure)
+            .unwrap();
+        let physical_baseline = account.snapshot();
+        let reservation_released = Cell::new(false);
+        let plan_marker_dropped = Cell::new(false);
+        let plan_poison_seen_while_dropping = Cell::new(false);
+        let plan_poison_events_while_dropping = Cell::new(u128::MAX);
+        let materializer_dropped = Cell::new(false);
+        let materializer_poison_seen_while_dropping = Cell::new(false);
+        let materializer_poison_events_while_dropping = Cell::new(u128::MAX);
+
+        let result: Result<TestOutcome, StoreActivationContainment> = owner
+            .plan_and_activate_scoped(|mut planning| {
+                let mut semantic = planning.begin_semantic_work(1).unwrap();
+                let scratch = semantic.reserve(1).unwrap();
+                semantic.validate_live_owner(&scratch).unwrap();
+                semantic.run_unit(|| ()).unwrap();
+                semantic.finish_exact().unwrap();
+                let sealed = match planning.seal_plan(
+                    success,
+                    PanickingTrackedPlan {
+                        scratch: Some(scratch),
+                        reservation_released: &reservation_released,
+                        marker: Some(TransitionDropMarker {
+                            dropped: &plan_marker_dropped,
+                            account: &account,
+                            poison_seen_while_dropping: &plan_poison_seen_while_dropping,
+                            poison_event_count_while_dropping: &plan_poison_events_while_dropping,
+                        }),
+                    },
+                ) {
+                    CanonicalPlanSeal::Sealed(sealed) => sealed,
+                    CanonicalPlanSeal::Terminal(disposition) => return disposition,
+                };
+                let materializer_marker = TransitionDropMarker {
+                    dropped: &materializer_dropped,
+                    account: &account,
+                    poison_seen_while_dropping: &materializer_poison_seen_while_dropping,
+                    poison_event_count_while_dropping: &materializer_poison_events_while_dropping,
+                };
+                crate::retained::panic_next_publication_account_open();
+                sealed.activate(
+                    move |_lane,
+                          _plan|
+                          -> CanonicalMaterialization<
+                        '_,
+                        (),
+                        TestRejection,
+                        ScalarSequence<u8>,
+                        CanonicalTag,
+                    > {
+                        let _ = &materializer_marker;
+                        panic!("a fail-closed publication open must not enter materialization")
+                    },
+                )
+            });
+
+        assert!(result.is_err());
+        assert!(reservation_released.get());
+        assert!(plan_marker_dropped.get());
+        assert!(plan_poison_seen_while_dropping.get());
+        assert!(materializer_dropped.get());
+        assert!(materializer_poison_seen_while_dropping.get());
+        let poison_events_before_final_containment = plan_poison_events_while_dropping.get();
+        assert!(poison_events_before_final_containment > 0);
+        assert_eq!(
+            materializer_poison_events_while_dropping.get(),
+            poison_events_before_final_containment
+        );
+        let snapshot = account.snapshot();
+        assert!(snapshot.poisoned());
+        assert!(snapshot.poison_event_count() > poison_events_before_final_containment);
+        assert!(snapshot.poison_event_count_exact());
+        assert!(snapshot.poison_event_domain_valid());
+        assert_eq!(
+            snapshot
+                .first_poison_evidence()
+                .map(|evidence| evidence.reason()),
+            Some(crate::AccountPoisonReason::OwnershipGraphUnverified)
+        );
+        assert_eq!(
+            snapshot.live_retained_bytes(),
+            physical_baseline.live_retained_bytes()
+        );
+        assert_eq!(
+            snapshot.live_retained_allocations(),
+            physical_baseline.live_retained_allocations()
         );
     }
 

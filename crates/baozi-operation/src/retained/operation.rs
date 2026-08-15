@@ -50,6 +50,25 @@ const ORDINARY_WORK_PERMIT_ABANDONED_CODE: u32 = 0x4f57_5041;
 #[cfg(feature = "_u4-activation")]
 const ORDINARY_WORK_PERMIT_OVERRUN_CODE: u32 = 0x4f57_504f;
 
+#[cfg(all(test, feature = "_u4-activation"))]
+thread_local! {
+    static PANIC_NEXT_PUBLICATION_ACCOUNT_OPEN: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+}
+
+#[cfg(all(test, feature = "_u4-activation"))]
+pub(crate) fn panic_next_publication_account_open() {
+    PANIC_NEXT_PUBLICATION_ACCOUNT_OPEN.with(|injected| injected.set(true));
+}
+
+#[cfg(all(test, feature = "_u4-activation"))]
+fn inject_publication_account_open_panic() {
+    let panic = PANIC_NEXT_PUBLICATION_ACCOUNT_OPEN.with(|injected| injected.replace(false));
+    if panic {
+        panic!("injected retained publication-account open panic");
+    }
+}
+
 /// Linear owner for one coordinator, one physical account, and its pre-admitted fallback.
 #[allow(
     dead_code,
@@ -2041,6 +2060,8 @@ where
             )
         };
         let open_result = catch_unwind(AssertUnwindSafe(|| {
+            #[cfg(all(test, feature = "_u4-activation"))]
+            inject_publication_account_open_panic();
             try_open_publication_account(
                 self.coordinator.retained_ledger(),
                 self.account(),
